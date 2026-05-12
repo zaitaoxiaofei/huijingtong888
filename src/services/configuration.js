@@ -8,10 +8,6 @@ export {
   updatePerson,
   deletePerson,
   hardDeletePerson,
-  stockWarehouseRules,
-  createStockWarehouseRule,
-  updateStockWarehouseRule,
-  deleteStockWarehouseRule,
   suppliers,
   createSupplier,
   updateSupplier,
@@ -21,3 +17,10 @@ export {
   updateLogisticsRule,
   deleteLogisticsRule
 } from "../services.js";
+
+export {
+  stockWarehouseRules,
+  createStockWarehouseRule,
+  updateStockWarehouseRule,
+  deleteStockWarehouseRule
+} from "./inventory.js";

@@ -1,5 +1,6 @@
 import { db } from "../db.js";
 import { recalculateOrderCancelLossFlags } from "../services.js";
+import { stockAlerts } from "./inventory.js";
 
 function allLocal(sql, params = {}) {
   const stmt = db.prepare(sql);
@@ -221,7 +222,287 @@ export function orderDetail(id) {
   return { order, items, finance };
 }
 
+export function exceptionWorkbench() {
+  const tasks = [];
+  const orderRows = orders().filter((row) => orderMatchesBaseQuery(row, {
+    dateFrom: dateKeyDaysAgo(60),
+    dateTo: exceptionTodayDateKey()
+  }));
+  for (const row of orderRows) {
+    const work = orderTaskState(row);
+    const context = exceptionOrderContext(row);
+    const profitValue = Number(row.actual_profit || row.estimated_profit || 0);
+    if (["unbound", "stock_issue"].includes(work.key)) {
+      tasks.push(exceptionTask({
+        type: work.key === "stock_issue" ? "order_stock_shortage" : "order_binding",
+        level: work.key === "stock_issue" ? "danger" : "warning",
+        title: work.key === "stock_issue" ? "订单库存不足" : "订单待绑定库存",
+        subject: row.posting_number || row.order_number || `订单 ${row.id}`,
+        meta: `${row.shop_name || ""} / ${formatDateText(row.ordered_at)}`,
+        detail: work.key === "stock_issue" ? "已绑定库存但数量不足，需要采购或调整库存。" : "订单 SKU 还没有绑定实际库存，利润和出库都会不准。",
+        action: "order-unbound",
+        orderId: row.id,
+        ...context
+      }));
+    }
+    if (profitValue < 0 && !["cancelled", "unbound"].includes(work.key)) {
+      tasks.push(exceptionTask({
+        type: "profit",
+        level: "danger",
+        title: "订单利润为负",
+        subject: row.posting_number || row.order_number || `订单 ${row.id}`,
+        meta: `${row.shop_name || ""} / ¥${profitValue.toFixed(2)}`,
+        detail: "通常是库存绑定、克重、佣金或物流规则异常，需要核验并重算利润。",
+        action: "order-profit",
+        orderId: row.id,
+        ...context
+      }));
+    }
+    const deadlineInfo = orderExceptionDeadlineInfo(row);
+    if (deadlineInfo) {
+      tasks.push(exceptionTask({
+        type: "deadline",
+        level: "danger",
+        title: deadlineInfo.reason,
+        subject: row.posting_number || row.order_number || `订单 ${row.id}`,
+        meta: `${row.shop_name || ""} / ${deadlineInfo.meta}`,
+        detail: deadlineInfo.detail,
+        action: "order-overdue",
+        orderId: row.id,
+        deadline_reason: deadlineInfo.reason,
+        ...context
+      }));
+    }
+  }
+  for (const row of stockAlerts().rows || []) {
+    for (const warning of row.warnings || []) {
+      if (!["local", "fbp", "fbs", "mapping"].includes(warning.type)) continue;
+      tasks.push(exceptionTask({
+        type: `stock_${warning.type}`,
+        level: warning.level || "warning",
+        title: warning.text || "库存预警",
+        subject: row.product_name || row.inventory_id || `库存 ${row.product_id}`,
+        meta: `${row.inventory_id || ""} / 本地 ${row.local_stock ?? 0}`,
+        detail: row.suggestion || "需要人工核验库存和 SKU 绑定关系。",
+        action: `stock-${warning.type}`,
+        productId: row.product_id,
+        image_url: row.image_url || "",
+        product_name: row.product_name || row.inventory_id || "",
+        inventory_id: row.inventory_id || "",
+        sku_text: stockAlertSkuText(row)
+      }));
+    }
+  }
+  tasks.sort((a, b) => exceptionPriorityValue(b) - exceptionPriorityValue(a));
+  const stateMap = exceptionTaskStateMap(tasks.map((task) => task.id));
+  const visibleTasks = tasks.filter((task) => !["handled", "ignored"].includes(stateMap.get(task.id)?.status));
+  return {
+    rows: visibleTasks,
+    total: visibleTasks.length,
+    hidden_total: tasks.length - visibleTasks.length,
+    counts: {
+      danger: visibleTasks.filter((item) => item.level === "danger").length,
+      warning: visibleTasks.filter((item) => item.level === "warning").length,
+      info: visibleTasks.filter((item) => item.level === "info").length,
+      order: visibleTasks.filter((item) => item.type.startsWith("order") || ["print", "profit", "deadline"].includes(item.type)).length,
+      stock: visibleTasks.filter((item) => item.type.startsWith("stock")).length
+    },
+    generated_at: new Date().toISOString()
+  };
+}
+
+export function updateExceptionTaskState(body = {}, userId = null) {
+  const taskId = String(body.task_id || body.id || "").trim();
+  if (!taskId) throw new Error("缺少异常任务 ID");
+  const status = String(body.status || "handled").trim();
+  if (!["open", "handled", "ignored"].includes(status)) throw new Error("异常任务状态不正确");
+  if (status === "open") {
+    db.prepare("DELETE FROM exception_task_states WHERE task_id = ?").run(taskId);
+    return { ok: true, task_id: taskId, status };
+  }
+  db.prepare(`
+    INSERT INTO exception_task_states (task_id, status, note, updated_by_person_id)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(task_id) DO UPDATE SET
+      status = excluded.status,
+      note = excluded.note,
+      updated_by_person_id = excluded.updated_by_person_id,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(taskId, status, String(body.note || ""), userId || null);
+  return { ok: true, task_id: taskId, status };
+}
+
 let qualityPrefixCache = null;
+
+function exceptionTaskStateMap(taskIds = []) {
+  const ids = [...new Set(taskIds.map((id) => String(id || "").trim()).filter(Boolean))];
+  if (!ids.length) return new Map();
+  const rows = allLocal(`
+    SELECT task_id, status, note, updated_at
+    FROM exception_task_states
+    WHERE task_id IN (${ids.map(() => "?").join(",")})
+  `, ids);
+  return new Map(rows.map((row) => [row.task_id, row]));
+}
+
+function exceptionTask(values) {
+  return { id: randomTaskId(values), ...values };
+}
+
+function exceptionOrderContext(row) {
+  const productName = firstCsvValue(row.product_names) || firstMappedValue(row.sku_names) || row.posting_number || "";
+  const skuText = firstCsvValue(row.skus || row.unbound_skus);
+  const inventoryId = firstCsvValue(row.inventory_ids || row.product_codes);
+  const imageUrl = firstCsvValue(row.image_urls) || firstMappedValue(row.sku_images);
+  const weight = firstCsvValue(row.package_weights);
+  const dimensions = firstCsvValue(row.package_dimensions);
+  return {
+    image_url: imageUrl,
+    product_name: productName === "Unbound product" ? "待绑定库存商品" : productName,
+    sku_text: skuText,
+    inventory_id: inventoryId && inventoryId !== "UNBOUND" ? inventoryId : "",
+    dimensions_text: [weight ? `克重 ${weight}g` : "", dimensions && dimensions !== "0x0x0" ? `尺寸 ${dimensions}cm` : ""].filter(Boolean).join(" / "),
+    profit_context_text: profitExceptionContextText(row),
+    onlineProductId: Number(firstMappedId(row.sku_online_product_ids, skuText)) || undefined,
+    productId: Number(firstCsvValue(row.product_ids)) || undefined
+  };
+}
+
+function profitExceptionContextText(row) {
+  const revenue = Number(row.revenue || 0);
+  const profit = Number(row.actual_profit || row.estimated_profit || 0);
+  const margin = revenue ? profit / revenue * 100 : 0;
+  const shipping = shippingMethodText(row.product_shipping_methods);
+  const costs = [
+    ["采购", row.profit_purchase_cost],
+    ["国内", row.profit_domestic_shipping],
+    ["国际", row.profit_international_shipping],
+    ["佣金", row.profit_commission_fee],
+    ["Ozon服务估算", row.profit_ozon_service_fee],
+    ["退货", row.profit_return_loss]
+  ].map(([label, value]) => `${label}¥${roundMoney(value)}`).join(" / ");
+  return `销售¥${roundMoney(revenue)} / 利润¥${roundMoney(profit)} / 利润率${roundMoney(margin)}% / 运送方式${shipping || "未标明"} / ${costs}`;
+}
+
+function shippingMethodText(value) {
+  const labels = {
+    air: "空运",
+    air_land: "陆空",
+    land: "陆运"
+  };
+  const methods = [...new Set(String(value || "").split(",").map((item) => item.trim()).filter(Boolean))];
+  return methods.map((method) => labels[method] || method).join("+");
+}
+
+function firstCsvValue(value) {
+  return String(value || "").split(",").map((item) => item.trim()).filter(Boolean)[0] || "";
+}
+
+function firstMappedValue(value) {
+  const first = String(value || "").split("||").map((item) => item.trim()).filter(Boolean)[0] || "";
+  const index = first.indexOf(":");
+  return index >= 0 ? first.slice(index + 1).trim() : first;
+}
+
+function firstMappedId(value, preferredKey = "") {
+  const entries = String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const preferred = entries.find((item) => preferredKey && item.startsWith(`${preferredKey}:`));
+  const first = preferred || entries[0] || "";
+  const index = first.indexOf(":");
+  return index >= 0 ? first.slice(index + 1).trim() : first;
+}
+
+function stockAlertSkuText(row) {
+  const skus = Array.isArray(row.skus) ? row.skus : [];
+  return skus.slice(0, 3).map((item) => [item.shop_name, item.ozon_sku, item.name].filter(Boolean).join(" / ")).join("；");
+}
+
+function randomTaskId(values) {
+  return [values.type, values.orderId || values.productId || values.subject || "", values.title || ""].join(":");
+}
+
+function exceptionPriorityValue(task) {
+  const level = { danger: 3, warning: 2, info: 1 }[task.level] || 0;
+  const typeBoost = task.type === "order_binding" ? 0.4 : task.type === "profit" ? 0.3 : 0;
+  return level + typeBoost;
+}
+
+function orderMatchesBaseQuery(row, query) {
+  const shopId = String(query.shopId || query.shop_id || "all");
+  if (shopId !== "all" && String(row.shop_id) !== shopId) return false;
+  const value = String(row.ordered_at || row.created_at || "").slice(0, 10);
+  const from = String(query.dateFrom || query.date_from || "");
+  const to = String(query.dateTo || query.date_to || "");
+  if (from && (!value || value < from)) return false;
+  if (to && (!value || value > to)) return false;
+  return orderMatchesSearchQuery(row, query);
+}
+
+function orderMatchesSearchQuery(row, query) {
+  const text = String(query.searchQuery || query.search_query || "").trim().toLowerCase();
+  if (!text) return true;
+  const type = String(query.searchType || query.search_type || "order");
+  if (type === "sku") return `${row.skus || ""} ${row.product_codes || ""} ${row.product_names || ""}`.toLowerCase().includes(text);
+  if (type === "order") return `${row.posting_number || ""} ${row.order_number || ""}`.toLowerCase().includes(text);
+  if (type === "product") return `${row.product_ids || ""} ${row.inventory_ids || ""} ${row.product_codes || ""} ${row.product_names || ""}`.toLowerCase().includes(text);
+  if (type === "offer") return `${row.offer_ids || ""} ${row.product_codes || ""}`.toLowerCase().includes(text);
+  if (type === "tracking") return `${row.tracking_number || ""} ${row.logistics_channel || ""}`.toLowerCase().includes(text);
+  if (type === "purchaseTracking") return `${row.purchase_tracking_numbers || ""} ${row.purchase_order_numbers || ""}`.toLowerCase().includes(text);
+  return true;
+}
+
+function orderTaskState(row) {
+  if (orderMatchesStatusQuery(row, "cancelled")) return { key: "cancelled", label: "已取消/退货" };
+  if (orderMatchesStatusQuery(row, "dispute")) return { key: "dispute", label: "有争议" };
+  if (orderMatchesStatusQuery(row, "delivered")) return { key: "delivered", label: "已签收" };
+  if (orderHasUnboundStockQuery(row)) return { key: "unbound", label: "待绑定库存" };
+  if (orderHasStockIssue(row)) return { key: "stock_issue", label: "库存不足" };
+  if (orderMatchesStatusQuery(row, "delivering")) return { key: "delivering", label: "运输中" };
+  if (orderMatchesStatusQuery(row, "awaiting_deliver")) return { key: "awaiting_deliver", label: "等待发运" };
+  if (orderMatchesStatusQuery(row, "awaiting_packaging")) return { key: "awaiting_packaging", label: "等待备货" };
+  return { key: "awaiting_packaging", label: "等待备货" };
+}
+
+function orderExceptionDeadlineInfo(row) {
+  if (orderMatchesStatusQuery(row, "cancelled") || orderMatchesStatusQuery(row, "delivered")) return null;
+  const now = new Date();
+  const deadline = parseDate(row.shipment_deadline_at);
+  const shipped = orderMatchesStatusQuery(row, "delivering") || Boolean(row.tracking_number);
+  if (!shipped && deadline && deadline < now) {
+    return {
+      reason: "发货超时",
+      meta: `发货截止 ${formatDateText(row.shipment_deadline_at)}`,
+      detail: "订单超过备货/发货截止时间仍未进入发运状态，需要优先处理。"
+    };
+  }
+  if (!orderMatchesStatusQuery(row, "delivering")) return null;
+  const orderedAt = parseDate(row.ordered_at);
+  if (!orderedAt) return null;
+  const shipping = exceptionShippingMethodKey(row);
+  const threshold = shipping === "land" ? 20 : 15;
+  const days = Math.floor((now.getTime() - orderedAt.getTime()) / (24 * 60 * 60 * 1000));
+  if (days <= threshold) return null;
+  const methodLabel = shipping === "land" ? "陆运" : "陆空";
+  return {
+    reason: `签收超时-${methodLabel}`,
+    meta: `${methodLabel} ${days} 天 / 标准 ${threshold} 天`,
+    detail: `订单已进入运输但超过 ${methodLabel} 预计签收时长，需核验物流节点。`
+  };
+}
+
+function exceptionShippingMethodKey(row) {
+  const text = `${row.product_shipping_methods || ""} ${row.delivery_method_name || ""} ${row.logistics_channel || ""} ${row.warehouse_name || ""}`.toLowerCase();
+  if (text.includes("land") || text.includes("陆运")) return "land";
+  return "air_land";
+}
+
+function exceptionTodayDateKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function formatDateText(value) {
+  return value ? String(value).replace("T", " ").slice(0, 16) : "-";
+}
 
 function orderRowsByIds(ids) {
   const cleanIds = [...new Set((ids || []).map(Number).filter(Boolean))];
@@ -401,6 +682,41 @@ function orderStatusSql(status) {
   return "1 = 1";
 }
 
+function orderMatchesStatusQuery(row, status) {
+  if (status === "all") return true;
+  if (status === "unbound") return orderHasUnboundStockQuery(row);
+  const values = [row.status, row.tracking_stage].map((value) => String(value || "").toLowerCase());
+  if (status === "awaiting_packaging") return values.some((value) => ["awaiting_registration", "acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_awaiting_registration", "posting_acceptance_in_progress"].includes(value));
+  if (status === "awaiting_deliver") return values.some((value) => ["awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service"].includes(value));
+  if (status === "delivering") {
+    const text = [row.status, row.tracking_stage, row.logistics_status, row.delivery_method_name, row.logistics_channel].map((value) => String(value || "").toLowerCase()).join(" ");
+    if (text.includes("awaiting_packaging") || text.includes("awaiting_deliver") || text.includes("pending_stock")) return false;
+    return ["delivering", "transferring", "carriage", "pickup", "sorting", "customs", "shipped", "sent", "on_way", "posting_in_carriage", "posting_transferring", "发往", "已上网", "发走"].some((keyword) => text.includes(keyword));
+  }
+  if (status === "dispute") return values.some((value) => value.includes("arbitration") || value.includes("dispute"));
+  if (status === "delivered") return values.some((value) => value.includes("delivered")) && !orderMatchesStatusQuery(row, "cancelled");
+  if (status === "cancelled") return values.some((value) => value.includes("cancel") || value.includes("return") || value === "not_accepted" || value.includes("not_accepted"));
+  return false;
+}
+
+function orderHasUnboundStockQuery(row) {
+  if (Number(row.unbound_item_count || 0) > 0 || Number(row.unbound_quantity || 0) > 0) return true;
+  if (String(row.unbound_skus || "").trim()) return true;
+  return String(row.product_codes || "").toUpperCase().split(",").map((item) => item.trim()).includes("UNBOUND")
+    || String(row.product_names || "").toLowerCase().includes("unbound product")
+    || String(row.product_names || "").includes("未绑定");
+}
+
+function orderHasStockIssue(row) {
+  const totalQuantity = Number(row.total_quantity || 0);
+  const stockValues = String(row.available_stocks || row.current_stocks || row.stocks || "")
+    .split(",")
+    .map((item) => Number(item.trim()))
+    .filter((item) => Number.isFinite(item));
+  if (!totalQuantity || !stockValues.length) return false;
+  return stockValues.some((stock) => stock > 0 && stock < totalQuantity);
+}
+
 function orderSqlAnyExact(columns, values) {
   const terms = [];
   for (const column of columns) {
@@ -491,6 +807,10 @@ function parseJson(value) {
   }
 }
 
+function roundMoney(value) {
+  return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+}
+
 function fallbackShipDeadline(orderedAt) {
   const ordered = new Date(orderedAt);
   if (Number.isNaN(ordered.getTime())) return null;
@@ -503,11 +823,23 @@ function daysBetween(from, to) {
   return Math.ceil((to.getTime() - from.getTime()) / (1000 * 60 * 60 * 24));
 }
 
+function parseDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 function normalizeSyncDate(value) {
   if (!value) return "";
   const date = new Date(String(value).includes("T") ? value : `${value}T00:00:00.000Z`);
   if (Number.isNaN(date.getTime())) return "";
   return String(value).slice(0, 10);
+}
+
+function dateKeyDaysAgo(days) {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - Number(days || 0));
+  return date.toISOString().slice(0, 10);
 }
 
 function nullable(value) {

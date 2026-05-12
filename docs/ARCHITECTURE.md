@@ -1,98 +1,172 @@
-# 架构说明
+# Architecture
 
-## 本地部署形态
+## 1. 运行形态
 
-当前版本是一个单体应用，适合直接放在 NAS 共享目录或 NAS 的 Docker/虚拟机里运行。
-
-```text
-浏览器页面
-  ↓
-Node.js HTTP API
-  ↓
-SQLite 数据库
-  ↓
-后续可接真实 Ozon API / 物流查询 API / 财务对账数据
-```
-
-第一版没有使用 npm 依赖，目的是让 Windows 本机和 NAS 上更容易启动。
-
-后续产品方向不是飞书增强版，而是本地可部署、可逐步扩展的小型 ERP。完整目标蓝图见 `docs/erp-blueprint.md`。
-
-## 业务核心表
-
-- `shops`：多个 Ozon 店铺。
-- `people`：员工/负责人。
-- `products`：真实产品，一个真实产品可以映射多个店铺 SKU。
-- `sku_mappings`：店铺 SKU 到真实产品、负责人的映射。
-- `orders`：订单主表。
-- `order_items`：订单商品明细，冻结下单时的成本和佣金。
-- `inventory_movements`：库存流水，所有出入库、退货、盘点都写流水。
-- `procurement_requests`：采购申请，用真实产品 ID 自动合并。
-- `sync_logs`：同步日志。
-
-## 利润口径
-
-订单刚创建时：
+当前项目是一个本地部署的单体应用：
 
 ```text
-预估利润 = 销售额 - 采购成本 - 国内运费 - 国际运费 - 处理费 - 预估 Ozon 佣金
+Browser
+  -> public/index.html
+  -> public/app.js
+  -> src/server.js
+  -> src/services.js / src/services/*
+  -> SQLite
+  -> Ozon API / PDF / PowerShell backup-restore
 ```
 
-订单签收/完成时：
+不是前后端分离，不是微服务，也没有构建工具链。
 
-```text
-已到账利润 = 销售额 - 冻结成本 - Ozon 实际平台费用 - 售后损失
-```
+## 2. 分层
 
-当前演示版用预估佣金填充实际平台费用。接入 Ozon 财务流水后，应以 Ozon 实际扣费覆盖。
+### 前端层
 
-## 采购合并逻辑
+- [public/index.html](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/index.html)
+- [public/app.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/app.js)
+- [public/ui.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/ui.js)
+- [public/styles.css](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/styles.css)
+- [public/design-system.css](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/design-system.css)
 
-员工提交采购申请时只绑定真实产品，不以店铺 SKU 为采购单位。
+职责：
 
-例如：
+- 视图切换
+- 表格渲染
+- 弹窗与表单
+- 请求 `/api/*`
 
-```text
-A员工 SKU-A-BOX-01 申请 5 个
-B员工 SKU-B-BOX-77 申请 10 个
-C员工 SKU-C-BOX-22 申请 5 个
-```
+### HTTP 基础层
 
-因为三者都映射到 `P-1001 折叠收纳盒`，采购合并页面会显示：
+- [src/http/request.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/http/request.js)
+- [src/http/response.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/http/response.js)
+- [src/http/static.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/http/static.js)
 
-```text
-P-1001 折叠收纳盒，需要采购 20 个
-```
+职责：
 
-## 后续接真实 Ozon
+- 读取 JSON / form 请求
+- 统一 JSON / HTML 响应
+- 提供静态资源
 
-主要改这几个位置：
+### 服务器控制层
 
-- `src/ozonClient.js`：实现真实 Ozon 请求。
-- `src/services.js`：把 Ozon 返回字段映射到本地订单、订单商品、库存流水。
-- `src/profit.js`：如果佣金或物流规则变化，在这里调整预估逻辑。
+- [src/server.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/server.js)
+- [src/server/session.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/server/session.js)
+- [src/server/access.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/server/access.js)
+- [src/server/maintenance.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/server/maintenance.js)
+- [src/server/notifications.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/server/notifications.js)
 
-Ozon 官方 API 文档：
+职责：
 
-```text
-https://docs.ozon.com/global/zh-hans/api/intro/
-```
+- 鉴权
+- 站点门禁
+- API 分发
+- 会话清理
+- 备份恢复
+- 定时检查
 
-## 本地轻 ERP 演进方向
+### 业务服务层
 
-系统长期以实物 SKU 为成本和库存核心，以 Ozon SKU 为销售表现核心：
+- [src/services.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/services.js)
+- [src/services](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/services)
 
-- 店铺维度负责利润、分红和经营质量。
-- 负责人维度负责 SKU 贡献、动销质量和绩效分析。
-- 订单流水负责追溯。
-- 库存流水负责查账。
+职责：
 
-优先补齐这些能力：
+- 商品
+- 订单
+- 采购
+- 库存
+- 配置
+- 同步
+- 分析
 
-- 原始 Ozon 订单落库。
-- SKU 映射异常列表。
-- 当前库存汇总表。
-- 订单利润费用明细表。
-- 下单锁库存、发货扣库存、取消释放库存。
-- 店铺利润看板。
-- 负责人贡献看板。
+当前现实：
+
+- `src/services.js` 仍然是主实现中心
+- `src/services/*` 是逐步拆分过程中的结构化出口
+
+### 数据层
+
+- [src/db.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/db.js)
+- `data/ozon-profit-hub.sqlite`
+
+职责：
+
+- 表初始化
+- 会话存储
+- 业务数据持久化
+
+## 3. 当前数据库模型概要
+
+### 主数据
+
+- `shops`
+- `people`
+- `products`
+- `suppliers`
+- `online_products`
+- `sku_mappings`
+
+### 采购与库存
+
+- `procurement_requests`
+- `purchase_orders`
+- `purchase_order_items`
+- `inbound_records`
+- `outbound_records`
+- `inventory_movements`
+- `inventory_current`
+
+### 订单与利润
+
+- `orders`
+- `order_items`
+- `order_profit_items`
+- `order_exceptions`
+- `order_marks`
+- `order_label_prints`
+- `order_quality_rules`
+
+### 同步与规则
+
+- `ozon_orders_raw`
+- `ozon_finance_items`
+- `ozon_stock_snapshots`
+- `sync_logs`
+- `exchange_rates`
+- `logistics_fee_rules`
+- `stock_warehouse_rules`
+- `online_product_actions`
+
+### 安全与会话
+
+- `sessions`
+- `exception_task_states`
+
+## 4. 当前部署方式
+
+### 本地模式
+
+- `npm start`
+- 默认 SQLite
+- 默认静态前端 + Node 服务
+
+### 远程访问模式
+
+- Node 只监听 `127.0.0.1`
+- Cloudflare Tunnel 暴露外网入口
+- 应用层站点访问口令
+
+参考：
+
+- [remote-access-deployment.md](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/docs/remote-access-deployment.md)
+
+## 5. 当前结构问题
+
+- `public/app.js` 文件过大
+- `src/services.js` 文件过大
+- 业务实现尚未完全迁移到 `src/services/*`
+- 运行目录曾混入备份和临时文件，导致入口判断困难
+
+## 6. 当前建议
+
+- 所有新结构说明都以本文件和 `PROJECT_GUIDE.md` 为准
+- 不再从历史备份文件推断系统结构
+- 如果后续继续拆分前后端大文件，先改代码，再更新本文件

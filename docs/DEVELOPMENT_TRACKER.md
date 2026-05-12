@@ -1,6 +1,6 @@
 # ozon ERP Development Tracker
 
-Last updated: 2026-05-11
+Last updated: 2026-05-12
 
 This document is the single tracking entry for system-level work, cross-page UI rules, and feature backlog. When a feature is started or finished, update the status here first.
 
@@ -11,6 +11,15 @@ Status legend:
 - `Next`: approved direction, should be implemented soon.
 - `Backlog`: important but not the immediate development focus.
 - `Research`: needs API or business verification before implementation.
+
+## 0. Current Refactor Snapshot
+
+- `In progress`: backend entry layer has been split from the monolithic server entry into dedicated HTTP/session/maintenance modules.
+- `In progress`: order domain now has its own real service module for order list, paging, detail, marking, quality rules, and exception workbench logic.
+- `In progress`: inventory domain now has its own real service module for stock alerts, warehouse stock rules, and Ozon stock sync.
+- `In progress`: frontend shared layer has started extracting reusable UI infrastructure through `public/ui.js` and `public/ui-shared.css`.
+- `Next`: continue replacing duplicated pagination, table rendering, dialog, toast, and motion logic inside the runtime frontend entry with shared helpers, then split the runtime entry by major business views.
+- `Backlog`: after structural refactor stabilizes, start MySQL migration design and TypeORM evaluation as a separate phase.
 
 ## 1. System-Level Standards
 
@@ -24,6 +33,7 @@ Status legend:
 | Naming/branding | Done | Use `OZON ERP`; do not use `Ozone` for the product name. | Left nav brand updated. |
 | Data safety | Backlog | Add clearer backup/restore UX and safeguards. | Backup/restore buttons exist; still need progress, confirmation copy, and restore risk warning. |
 | Backend modularization | In progress | Continue lowering coupling in `server.js`, `services.js`, and the runtime frontend entry through phased module boundaries. | First backend entry split is done. Next step is moving real domain implementations out of the giant files. |
+| Frontend modularization | In progress | Break `public/app.repair.js` by large module boundaries first, then converge shared UI behaviors into reusable helpers and styles. | Priority is common pagination, table rendering, dialog/toast interaction, motion, and shared style tokens before fine-grained page refactors. |
 | Future database evolution | Backlog | Keep SQLite stable now, then design a later migration path to MySQL with TypeORM after code modularization is mature. | This is a post-optimization phase, not the current refactor phase. |
 
 ## 2. Current Priority Queue
@@ -35,7 +45,8 @@ Status legend:
 5. Configurable pricing/logistics fee rules.
 6. Cross-page Design System migration.
 7. Backend decoupling and phased service/domain split.
-8. After structural refactor is stable, start MySQL migration design and TypeORM evaluation.
+8. Frontend runtime entry split and shared UI layer extraction.
+9. After structural refactor is stable, start MySQL migration design and TypeORM evaluation.
 
 ## 3. Exception Task Center
 

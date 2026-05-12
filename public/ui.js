@@ -55,6 +55,10 @@
     return `<section class="${classNames("ds-card", className)}">${head}<div class="ds-card-body">${body}</div></section>`;
   }
 
+  function emptyState(message = "暂无数据", action = "") {
+    return `<div class="ds-empty"><span>${escapeHtml(message)}</span>${action ? `<div class="ds-empty-action">${action}</div>` : ""}</div>`;
+  }
+
   function table({ columns = [], rows = [], empty = "暂无数据", className = "" } = {}) {
     if (!rows.length) return emptyState(empty);
     const head = columns.map((column) => `<th>${escapeHtml(column.label || column.key || "")}</th>`).join("");
@@ -73,10 +77,6 @@
     }).join("")}</div>`;
   }
 
-  function emptyState(message = "暂无数据", action = "") {
-    return `<div class="ds-empty"><span>${escapeHtml(message)}</span>${action ? `<div class="ds-empty-action">${action}</div>` : ""}</div>`;
-  }
-
   function pageHeader({ title = "", subtitle = "", actions = "" } = {}) {
     return `<div class="ds-page-header"><div><h1>${escapeHtml(title)}</h1>${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ""}</div><div class="ds-page-actions">${actions}</div></div>`;
   }
@@ -89,22 +89,132 @@
     </div>`;
   }
 
+  function clampPage(page, totalPages) {
+    return Math.min(Math.max(1, Number(page || 1)), Math.max(Number(totalPages || 1), 1));
+  }
+
+  function totalPagesFor(rows, pageSize) {
+    return Math.max(1, Math.ceil((rows?.length || 0) / Math.max(Number(pageSize || 1), 1)));
+  }
+
+  function paginateRows(rows, page, pageSize) {
+    const size = Math.max(Number(pageSize || 1), 1);
+    const start = (clampPage(page, totalPagesFor(rows, size)) - 1) * size;
+    return (rows || []).slice(start, start + size);
+  }
+
+  function syncSimplePager(prefix, page, totalPages, total, pageSize = null) {
+    const info = document.querySelector(`#${prefix}PageInfo`);
+    const prev = document.querySelector(`#${prefix}PrevPage`);
+    const next = document.querySelector(`#${prefix}NextPage`);
+    const size = document.querySelector(`#${prefix}PageSize`);
+    if (info) info.textContent = `第 ${page} / ${totalPages} 页，共 ${total} 条`;
+    if (prev) prev.disabled = page <= 1;
+    if (next) next.disabled = page >= totalPages;
+    if (size && pageSize != null) size.value = String(pageSize);
+  }
+
+  function erpPagerHtml(prefix, page, pageSize, total, options = [10, 20, 50, 100]) {
+    const totalPages = Math.max(1, Math.ceil(Number(total || 0) / Math.max(Number(pageSize || 1), 1)));
+    const current = clampPage(page, totalPages);
+    const windowStart = Math.floor((current - 1) / 5) * 5 + 1;
+    const windowEnd = Math.min(totalPages, windowStart + 4);
+    const pageButtons = [];
+    for (let index = windowStart; index <= windowEnd; index += 1) {
+      pageButtons.push(`<button class="pager-number ${index === current ? "active" : ""}" data-pager-prefix="${prefix}" data-pager-action="page" data-page="${index}" type="button">${index}</button>`);
+    }
+    const disabledPrev = current <= 1 ? "disabled" : "";
+    const disabledNext = current >= totalPages ? "disabled" : "";
+    return `<div class="table-footer pager erp-pager">
+      <div class="erp-pager-meta">
+        <span>共 ${escapeHtml(total)} 条记录</span>
+        <label><select data-pager-size="${prefix}">
+          ${options.map((value) => `<option value="${value}" ${Number(value) === Number(pageSize) ? "selected" : ""}>${value}条/页</option>`).join("")}
+        </select></label>
+        <span>第 ${current} / ${totalPages} 页</span>
+      </div>
+      <div class="erp-pager-actions">
+        <button data-pager-prefix="${prefix}" data-pager-action="first" type="button" ${disabledPrev}>|&lt;</button>
+        <button data-pager-prefix="${prefix}" data-pager-action="prev" type="button" ${disabledPrev}>&lt;</button>
+        <button data-pager-prefix="${prefix}" data-pager-action="jump-prev" type="button" ${windowStart <= 1 ? "disabled" : ""}>&lt;&lt;</button>
+        ${pageButtons.join("")}
+        <button data-pager-prefix="${prefix}" data-pager-action="jump-next" type="button" ${windowEnd >= totalPages ? "disabled" : ""}>&gt;&gt;</button>
+        <button data-pager-prefix="${prefix}" data-pager-action="next" type="button" ${disabledNext}>&gt;</button>
+        <button data-pager-prefix="${prefix}" data-pager-action="last" type="button" ${disabledNext}>&gt;|</button>
+      </div>
+    </div>`;
+  }
+
+  function renderTable(target, rows, cols, options = {}) {
+    const mount = document.querySelector(`#${target}`);
+    if (!mount) return;
+    const emptyText = options.emptyText || "当前区域暂无数据";
+    const rowClassName = typeof options.rowClassName === "function" ? options.rowClassName : () => "";
+    const rowAttrs = typeof options.rowAttrs === "function" ? options.rowAttrs : () => "";
+    mount.innerHTML = !rows?.length
+      ? `<div class="empty">${escapeHtml(emptyText)}</div>`
+      : `<div class="table-wrap"><table class="table"><thead><tr>${cols.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr ${rowAttrs(row) || ""} class="${escapeHtml(rowClassName(row) || "")}">${cols.map(([, , getter]) => `<td>${getter(row) ?? ""}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+  }
+
+  function openInlineDialog(dialog, backdropClass, closeFn) {
+    if (!dialog) return;
+    if (dialog.open) dialog.close();
+    dialog.classList.add("visible");
+    if (!document.querySelector(`.${backdropClass}`)) {
+      const backdrop = document.createElement("div");
+      backdrop.className = `edit-dialog-backdrop ${backdropClass}`;
+      backdrop.addEventListener("click", closeFn);
+      document.body.appendChild(backdrop);
+    }
+    dialog.querySelector("input, select, button, textarea")?.focus();
+  }
+
+  function closeInlineDialog(dialogSelector, backdropSelector) {
+    const dialog = typeof dialogSelector === "string" ? document.querySelector(dialogSelector) : dialogSelector;
+    if (dialog?.open) dialog.close();
+    dialog?.classList.remove("visible");
+    if (typeof backdropSelector === "string") document.querySelector(backdropSelector)?.remove();
+  }
+
+  function showToast(message, type = "info", duration = 4000) {
+    const existing = document.querySelector(".proc-toast");
+    if (existing) existing.remove();
+    const toast = document.createElement("div");
+    toast.className = `proc-toast ${type}`;
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    window.setTimeout(() => {
+      toast.classList.add("fade-out");
+      window.setTimeout(() => toast.remove(), 300);
+    }, duration);
+  }
+
   const ozonUI = {
     attrs,
     badge,
     button,
     card,
     classNames,
+    clampPage,
+    closeInlineDialog,
     emptyState,
+    erpPagerHtml,
     escapeHtml,
     input,
     modalShell,
+    openInlineDialog,
+    paginateRows,
     pageHeader,
+    renderTable,
     select,
+    showToast,
+    syncSimplePager,
     table,
     tabs,
-    textarea
+    textarea,
+    totalPagesFor
   };
+
   window.OzonUI = ozonUI;
   window.OzoneUI = ozonUI;
 })();

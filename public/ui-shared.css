@@ -1,0 +1,126 @@
+:root {
+  --ui-motion-fast: 160ms ease;
+  --ui-motion-base: 240ms ease;
+  --ui-shadow-soft: 0 14px 36px rgba(15, 23, 42, 0.12);
+  --ui-shadow-strong: 0 20px 48px rgba(15, 23, 42, 0.18);
+}
+
+.erp-pager,
+.inline-pager,
+.table-footer.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.erp-pager-meta,
+.erp-pager-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.erp-pager button,
+.inline-pager button,
+.table-footer.pager button,
+.erp-pager select,
+.table-footer.pager select {
+  transition: transform var(--ui-motion-fast), box-shadow var(--ui-motion-fast), opacity var(--ui-motion-fast);
+}
+
+.erp-pager button:hover:not(:disabled),
+.inline-pager button:hover:not(:disabled),
+.table-footer.pager button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.erp-pager .pager-number.active {
+  box-shadow: var(--ui-shadow-soft);
+}
+
+.edit-dialog,
+.drawer,
+.app-dialog,
+.image-preview-box {
+  animation: ui-pop-in var(--ui-motion-base);
+  transform-origin: center;
+}
+
+.edit-dialog-backdrop,
+.app-dialog-overlay,
+.image-preview-backdrop {
+  animation: ui-fade-in var(--ui-motion-base);
+}
+
+.proc-toast {
+  animation: ui-toast-in var(--ui-motion-base);
+  box-shadow: var(--ui-shadow-strong);
+}
+
+.proc-toast.fade-out {
+  animation: ui-toast-out 220ms ease forwards;
+}
+
+.row-flash td {
+  animation: ui-row-flash 1.8s ease;
+}
+
+.stock-tabs .stock-tab,
+.status-tabs button,
+.exception-filter-tabs button,
+.config-tabs button {
+  transition: background-color var(--ui-motion-fast), color var(--ui-motion-fast), border-color var(--ui-motion-fast), transform var(--ui-motion-fast);
+}
+
+.stock-tabs .stock-tab:hover,
+.status-tabs button:hover,
+.exception-filter-tabs button:hover,
+.config-tabs button:hover {
+  transform: translateY(-1px);
+}
+
+@keyframes ui-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes ui-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes ui-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ui-toast-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+@keyframes ui-row-flash {
+  0% { background: rgba(251, 191, 36, 0.36); }
+  100% { background: transparent; }
+}

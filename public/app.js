@@ -1,5 +1,16 @@
-﻿const state = {
+﻿const initialOrderPageSize = (() => {
+  const migrated = localStorage.getItem("orderFilter:pageSizeDefault:v2");
+  const saved = Number(localStorage.getItem("orderFilter:pageSize") || 0);
+  if (!migrated) {
+    localStorage.setItem("orderFilter:pageSizeDefault:v2", "1");
+    if (!saved || saved === 30) localStorage.setItem("orderFilter:pageSize", "50");
+  }
+  return Number(localStorage.getItem("orderFilter:pageSize") || 50);
+})();
+
+const state = {
   currentView: "selection",
+  configTab: "formula",
   authToken: localStorage.getItem("authToken") || "",
   currentUserId: "1",
   products: [],
@@ -7,113 +18,293 @@
   people: [],
   shops: [],
   onlineProducts: [],
+  skuMappings: [],
   onlineFilters: {
     shopId: localStorage.getItem("onlineFilter:shopId") || "all",
+    status: localStorage.getItem("onlineFilter:status") || "all",
+    name: localStorage.getItem("onlineFilter:name") || "",
+    offer: localStorage.getItem("onlineFilter:offer") || "",
     pageSize: Number(localStorage.getItem("onlineFilter:pageSize") || 50),
     page: 1
   },
+  selectedOnlineIds: new Set(),
   orderFilters: {
     shopId: localStorage.getItem("orderFilter:shopId") || "all",
-    status: ["all", "unbound", "stock_issue", "overdue", "outbound_ready", "delivering", "cancelled", "delivered"].includes(localStorage.getItem("orderFilter:status")) ? localStorage.getItem("orderFilter:status") : "all",
-    pageSize: Number(localStorage.getItem("orderFilter:pageSize") || 30),
+    status: ["all", "overdue", "awaiting_packaging", "awaiting_deliver", "delivering", "dispute", "delivered", "cancelled", "unbound"].includes(localStorage.getItem("orderFilter:status")) ? localStorage.getItem("orderFilter:status") : "all",
+    pageSize: initialOrderPageSize,
     page: 1,
-    dateFrom: localStorage.getItem("orderFilter:dateFrom") || defaultDateFrom(30),
-    dateTo: localStorage.getItem("orderFilter:dateTo") || todayInputValue()
+    dateFrom: localStorage.getItem("orderFilter:dateFrom") || orderDefaultDateFrom(),
+    dateTo: localStorage.getItem("orderFilter:dateTo") || todayInputValue(),
+    searchType: localStorage.getItem("orderFilter:searchType:v2") || "order",
+    searchQuery: localStorage.getItem("orderFilter:searchQuery") || "",
+    printFilter: localStorage.getItem("orderFilter:printFilter") || "all",
+    markFilter: localStorage.getItem("orderFilter:markFilter") || "all",
+    printView: ["all", "inventory", "printed", "unprinted"].includes(localStorage.getItem("orderFilter:printView")) ? localStorage.getItem("orderFilter:printView") : "all",
+    sortMode: ["ordered", "inventory"].includes(localStorage.getItem("orderFilter:sortMode")) ? localStorage.getItem("orderFilter:sortMode") : "ordered"
   },
   bindTargetOnlineId: null,
   stockHighlightProductId: null,
   stockViewMode: "active",
   stockPageSize: 30,
   stockPage: 1,
+  stockAlerts: [],
+  stockAlertMeta: {},
+  stockWarehouseRules: [],
+  editingWarehouseRuleId: null,
+  stockAlertSyncing: false,
+  stockAlertAutoSynced: false,
+  fbpStockSort: { key: localStorage.getItem("fbpStockSort:key") || "", dir: localStorage.getItem("fbpStockSort:dir") || "desc" },
+  stockAlertFilter: (() => {
+    const saved = localStorage.getItem("stockAlertFilter:type") || "all";
+    return saved === "warning" ? "action" : saved;
+  })(),
+  stockFilters: {
+    query: localStorage.getItem("stockFilter:query") || "",
+    shopId: localStorage.getItem("stockFilter:shopId") || "all",
+    dateFrom: localStorage.getItem("stockFilter:dateFrom") || "",
+    dateTo: localStorage.getItem("stockFilter:dateTo") || ""
+  },
+  skuMappingPageSize: 30,
+  skuMappingPage: 1,
+  skuMappingProductFilterId: null,
+  selectionPageSize: Number(localStorage.getItem("selectionPageSize") || 50),
+  selectionPage: 1,
+  selectionImportRows: [],
   inboundRecords: [],
+  inboundPageSize: Number(localStorage.getItem("inboundPageSize") || 50),
+  inboundPage: 1,
   outboundRecords: [],
   outboundFilters: {
     pageSize: [30, 50, 100].includes(Number(localStorage.getItem("outboundFilter:pageSize"))) ? Number(localStorage.getItem("outboundFilter:pageSize")) : 30,
     page: 1,
-    dateFrom: localStorage.getItem("outboundFilter:dateFrom") || defaultDateFrom(30),
-    dateTo: localStorage.getItem("outboundFilter:dateTo") || todayInputValue()
+    dateFrom: localStorage.getItem("outboundFilter:dateFrom") || currentMonthStartInputValue(),
+    dateTo: localStorage.getItem("outboundFilter:dateTo") || todayInputValue(),
+    shopId: localStorage.getItem("outboundFilter:shopId") || "all",
+    search: ""
   },
-  procurementSummary: [],
   procurementRequests: [],
   purchaseOrders: [],
-  pendingInbound: [],
+  suppliers: [],
+  logisticsRules: [],
   selectedProcurementProductId: null,
-  procurementSelectedRequestIds: new Set(),
-  procurementTab: "orders",
+  editingProcurementRequestId: null,
   procurementFilters: { status: "pending", personId: "all", urgency: "all", query: "" },
+  procProductPageSize: 10,
+  procProductPage: 1,
+  procurementRequestPageSize: 20,
+  procurementRequestPage: 1,
+  purchaseListPage: 1,
+  purchaseListPageSize: 10,
+  purchaseHistoryPage: 1,
+  purchaseHistoryPageSize: 10,
   orders: [],
+  orderQualityRules: [],
+  orderMeta: { total: 0, counts: {}, mode: "paged" },
+  profitShopPageSize: Number(localStorage.getItem("profitShopPageSize") || 50),
+  profitShopPage: 1,
+  profitSkuPageSize: Number(localStorage.getItem("profitSkuPageSize") || 10),
+  profitSkuPage: 1,
+  profitProductPageSize: Number(localStorage.getItem("profitProductPageSize") || 10),
+  profitProductPage: 1,
+  profitFilters: {
+    summaryShopId: localStorage.getItem("profitFilter:summaryShopId") || "all",
+    skuShopId: localStorage.getItem("profitFilter:skuShopId") || "all",
+    productShopId: localStorage.getItem("profitFilter:productShopId") || "all"
+  },
+  profitSort: {
+    summary: {
+      field: localStorage.getItem("profitSort:summary:field") || "revenue",
+      direction: localStorage.getItem("profitSort:summary:direction") || "desc"
+    },
+    sku: {
+      field: localStorage.getItem("profitSort:sku:field") || "profit",
+      direction: localStorage.getItem("profitSort:sku:direction") || "desc"
+    },
+    product: {
+      field: localStorage.getItem("profitSort:product:field") || "profit",
+      direction: localStorage.getItem("profitSort:product:direction") || "desc"
+    }
+  },
   profitSummary: null,
+  financeSummary: null,
+  profitMode: "month",       // "month" | "custom"
+  profitTab: "summary",
+  profitMonth: "",           // "YYYY-MM" format
+  profitCache: {},           // { "YYYY-MM": data, "from~to": data }
+  profitLoading: false,
+  profitCustomFrom: "",
+  profitCustomTo: "",
+  orderSyncAbort: null,
+  orderSyncCancelReason: "",
   exchangeRate: null,
   exchangeRates: [],
-  systemInfo: null
+  systemInfo: null,
+  exceptionWorkbench: null,
+  exceptionWorkbenchLoading: false,
+  exceptionFilter: normalizeStoredExceptionFilter(localStorage.getItem("exceptionWorkbench:filter")),
+  exceptionSearch: localStorage.getItem("exceptionWorkbench:search") || "",
+  exceptionPage: 1,
+  exceptionPageSize: Number(localStorage.getItem("exceptionWorkbench:pageSize") || 50)
 };
 
+normalizeDefaultDateFilters();
+installAppDialogGlobals();
+window.addEventListener("message", (event) => {
+  if (event.origin !== window.location.origin) return;
+  if (event.data?.type === "ozon-labels-printed") refreshOrdersOnly().catch(console.error);
+});
+
+function installAppDialogGlobals() {
+  window.appAlert = showAppAlert;
+  window.appConfirm = showAppConfirm;
+  window.appPrompt = showAppPrompt;
+}
+
+function ensureAppDialog() {
+  let root = document.querySelector("#appDialogOverlay");
+  if (root) return root;
+  root = document.createElement("div");
+  root.id = "appDialogOverlay";
+  root.className = "app-dialog-overlay";
+  root.innerHTML = `
+    <div class="app-dialog" role="dialog" aria-modal="true">
+      <div class="app-dialog-head">
+        <strong id="appDialogTitle">提示</strong>
+        <button type="button" class="dialog-close app-dialog-x" title="关闭">×</button>
+      </div>
+      <div class="app-dialog-body">
+        <div id="appDialogMessage" class="app-dialog-message"></div>
+        <input id="appDialogInput" class="app-dialog-input" />
+      </div>
+      <div class="app-dialog-actions">
+        <button type="button" id="appDialogCancel">取消</button>
+        <button type="button" class="primary" id="appDialogOk">确认</button>
+      </div>
+    </div>`;
+  document.body.appendChild(root);
+  return root;
+}
+
+function openAppDialog({ title = "提示", message = "", mode = "alert", defaultValue = "" } = {}) {
+  const root = ensureAppDialog();
+  const titleEl = root.querySelector("#appDialogTitle");
+  const messageEl = root.querySelector("#appDialogMessage");
+  const input = root.querySelector("#appDialogInput");
+  const ok = root.querySelector("#appDialogOk");
+  const cancel = root.querySelector("#appDialogCancel");
+  const close = root.querySelector(".app-dialog-x");
+  titleEl.textContent = title;
+  messageEl.innerHTML = String(message || "").split("\n").map((line) => `<p>${escape(line)}</p>`).join("");
+  input.style.display = mode === "prompt" ? "" : "none";
+  input.value = defaultValue ?? "";
+  cancel.style.display = mode === "alert" ? "none" : "";
+  ok.textContent = mode === "alert" ? "知道了" : "确认";
+  root.classList.add("visible");
+  document.body.classList.add("dialog-open");
+  return new Promise((resolve) => {
+    let done = false;
+    const cleanup = (value) => {
+      if (done) return;
+      done = true;
+      root.classList.remove("visible");
+      document.body.classList.remove("dialog-open");
+      ok.onclick = null;
+      cancel.onclick = null;
+      close.onclick = null;
+      root.onclick = null;
+      document.removeEventListener("keydown", onKey);
+      resolve(value);
+    };
+    const onKey = (event) => {
+      if (event.key === "Escape") cleanup(mode === "alert" ? true : null);
+      if (event.key === "Enter" && mode === "prompt" && document.activeElement === input) cleanup(input.value);
+    };
+    ok.onclick = () => cleanup(mode === "prompt" ? input.value : true);
+    cancel.onclick = () => cleanup(mode === "confirm" ? false : null);
+    close.onclick = () => cleanup(mode === "alert" ? true : mode === "confirm" ? false : null);
+    root.onclick = (event) => {
+      if (event.target === root) cleanup(mode === "alert" ? true : mode === "confirm" ? false : null);
+    };
+    document.addEventListener("keydown", onKey);
+    window.setTimeout(() => (mode === "prompt" ? input : ok).focus(), 0);
+  });
+}
+
+function showAppAlert(message, title = "提示") {
+  return openAppDialog({ title, message, mode: "alert" });
+}
+
+function showAppConfirm(message, title = "请确认") {
+  return openAppDialog({ title, message, mode: "confirm" });
+}
+
+function showAppPrompt(message, defaultValue = "", title = "请输入") {
+  return openAppDialog({ title, message, mode: "prompt", defaultValue });
+}
+
 const titles = {
+  exceptions: ["异常任务中心", "集中处理待绑定、库存预警、利润异常和发货风险。"],
   selection: ["选品计价表", "先创建选品，Ozon SKU 上架后再从在线商品里绑定。"],
-  formula: ["计价公式", "按 CEL Ozon-rFBS 资费表，输入售价、重量和尺寸自动计算运费与利润。"],
-  online: ["在线商品", "从 Ozon 店铺同步来的 SKU 池，负责和实际产品绑定。"],
-  stock: ["产品库存表", "以实际产品为核心，展示库存、均价、采购投入和已绑定 SKU。"],
-  procurement: ["采购工作台", "需求提交、合并采购、到货入库和库存更新都在这里完成。"],
+  online: ["在线商品", "从 Ozon 店铺同步来的 SKU 池，负责和实际库存产品绑定。"],
+  stock: ["库存系统", "以实际产品为核心，展示库存、FBP 库存预警、均价、采购投入和已绑定 SKU。"],
+  procurement: ["创建采购请求", "提交采购请求，等待采购员生成清单并采购。"],
+  purchaseList: ["采购清单", "累计需采购清单，按产品合并显示。确认采购后进入入库表。"],
+  purchaseHistory: ["历史采购", "查看已完成的采购清单记录。"],
   inbound: ["入库表", "采购完成不等于入库，到货质检通过后才增加库存。"],
-  outbound: ["出库表", "订单同步后自动生成出库记录，未绑定产品会进入待处理。"],
-  config: ["配置", "集中维护人员配置和店铺配置。"],
-  orders: ["我的订单", "查看订单状态、SKU 绑定、库存处理和发货节点。"],
-  profit: ["利润汇总", "按店铺、SKU 和真实产品汇总销售额、预估利润和已确认利润。"]
+  outbound: ["出库流水", "订单同步后自动生成出库记录，未绑定产品会进入待处理。"],
+  config: ["系统设置", "维护计价公式、店铺配置、人员配置和汇率设置。"],
+  orders: ["订单系统", "查看订单状态、SKU 绑定、库存处理和发货节点。"],
+  profit: ["利润看板", "按店铺、SKU 和真实产品汇总销售额、预估利润和已确认利润。"]
 };
 
 const orderStatusTabs = [
   ["all", "所有订单"],
-  ["unbound", "待绑定 SKU"],
-  ["stock_issue", "库存不足"],
-  ["overdue", "超时发货"],
-  ["outbound_ready", "可出库/已处理"],
+  ["awaiting_packaging", "等待备货"],
+  ["awaiting_deliver", "等待发运"],
   ["delivering", "运输中"],
+  ["dispute", "有争议"],
   ["delivered", "已签收"],
-  ["cancelled", "已取消"]
+  ["cancelled", "已取消"],
+  ["unbound", "待绑定"]
 ];
 
 const columns = {
   selection: [
     ["selection_id", "选品ID", (r) => r.selection_id],
-    ["stock_code", "库存产品ID", (r) => r.inventory_id || r.code],
-    ["created", "创建信息", (r) => strong(r.creator_name || r.owner_name || "-", date(r.created_at))],
-    ["owner", "人员", (r) => r.owner_name],
     ["name", "商品名称", (r) => strong(r.name, r.supplier_note)],
     ["image", "图片", (r) => image(r.image_url)],
     ["source", "货源平台", (r) => sourceName(r.source_platform)],
-    ["shipping", "配送方式", (r) => tag(methodName(r.shipping_method), r.shipping_method === r.recommended_shipping_method ? "green" : "amber")],
-    ["recommended", "推荐", (r) => methodName(r.recommended_shipping_method)],
+    ["shipping", "运送方式", (r) => shippingMethodCell(r)],
     ["weight", "克重", (r) => `${num(r.package_weight_g, 0)}g`],
     ["size", "长宽高", (r) => `${num(r.length_cm, 1)} x ${num(r.width_cm, 1)} x ${num(r.height_cm, 1)}`],
     ["purchase_cost", "采购单价", (r) => money(r.purchase_cost)],
+    ["avg_cost", "均摊采购单价", (r) => money(r.pricing?.purchaseCost)],
     ["domestic", "国内运费", (r) => money(r.domestic_shipping)],
-    ["quantity", "采购数", (r) => r.purchase_quantity],
+    ["quantity", "推荐采购数", (r) => r.purchase_quantity],
     ["sale", "售价(RMB)", (r) => money(r.air_sale_price_rmb)],
     ["listing", "上架参考价(RMB)", (r) => money(listingRubToRmb(r.listing_price_rub, r.exchange_rate))],
-    ["suggested_air", "建议价-陆空(RMB)", (r) => suggestedCellRmb(r.pricing?.suggestedRub_air, r.exchange_rate, r.pricing?.targetMarginPct)],
-    ["suggested_air_x2", "x2参考-陆空(RMB)", (r) => suggestedX2CellRmb(r.pricing?.suggestedRub_air_x2, r.exchange_rate)],
-    ["suggested_land", "建议价-陆运(RMB)", (r) => suggestedCellRmb(r.pricing?.suggestedRub_land, r.exchange_rate, r.pricing?.targetMarginPct)],
-    ["suggested_land_x2", "x2参考-陆运(RMB)", (r) => suggestedX2CellRmb(r.pricing?.suggestedRub_land_x2, r.exchange_rate)],
-    ["avg_cost", "均摊采购成本", (r) => money(r.pricing?.purchaseCost)],
-    ["air_profit", "陆空净利", (r) => profitCell(r.pricing?.air)],
-    ["air_margin", "陆空净利率", (r) => marginCell(r.pricing?.air)],
-    ["land_profit", "陆运净利", (r) => profitCell(r.pricing?.land)],
+    ["suggested_air", "最低陆空售价", (r) => suggestedCellRmb(r.pricing?.suggestedRub_air, r.exchange_rate, r.pricing?.targetMarginPct)],
+    ["suggested_land", "最低陆运售价", (r) => suggestedCellRmb(r.pricing?.suggestedRub_land, r.exchange_rate, r.pricing?.targetMarginPct)],
+    ["air_profit", "陆空净利", (r) => profitCell(r.pricing?.air, r, "air")],
+    ["land_profit", "陆运净利", (r) => profitCell(r.pricing?.land, r, "land")],
+    ["created", "创建信息", (r) => strong(r.creator_name || r.owner_name || "-", dateDay(r.created_at))],
     ["link", "货源链接", (r) => link(r.purchase_url)],
     ["actions", "操作", (r) => `<span class="action-row"><button class="linklike edit-product-btn" data-id="${r.id}">编辑</button><button class="linklike danger delete-product-btn" data-id="${r.id}">删除</button></span>`]
   ],
   stock: [
     ["image", "图片", (r) => image(r.image_url)],
-    ["product", "产品名称", (r) => strong(r.name, r.supplier_note)],
+    ["product", "产品名称", (r) => stockProductNameCell(r)],
     ["stock", "库存", (r) => stockCell(r)],
     ["incoming", "即将入库", (r) => tag(r.incoming_stock || 0, Number(r.incoming_stock || 0) > 0 ? "blue" : "")],
     ["avg", "历史均价", (r) => money(r.avg_unit_cost || r.purchase_cost)],
     ["avg_sale", "历史平均售价", (r) => Number(r.avg_sale_price || 0) ? money(r.avg_sale_price) : tag("暂无有效订单", "amber")],
+    ["avg_profit", "历史平均利润", (r) => avgProfitCell(r)],
     ["purchase_amount", "总采购金额", (r) => money(r.total_purchase_amount)],
     ["purchase_qty", "总采购数量", (r) => r.total_purchase_quantity || 0],
     ["sales", "总销售额", (r) => salesCell(r)],
     ["profit", "订单总利润", (r) => stockProfitCell(r)],
     ["cancel", "总取消", (r) => cancelCell(r)],
-    ["skus", "已绑定 SKU", (r) => collapsedSkuList(r.mapped_skus)],
+    ["skus", "已绑定 SKU", (r) => collapsedSkuList(r.mapped_skus, r.id)],
     ["actions", "操作", (r) => `<span class="action-row"><button class="linklike edit-product-btn" data-id="${r.id}">编辑</button><button class="linklike danger delete-product-btn" data-id="${r.id}">删除</button></span>`]
   ]
 };
@@ -134,14 +325,20 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindCelFbsCalculator();
   bindEditDialog();
   bindSelectionCreatePanel();
+  bindSelectionImport();
+  bindImagePreview();
+  bindSelectionProfitDetails();
   bindOnlineControls();
+  bindPaginationControls();
   bindOrderControls();
   bindOutboundControls();
   bindBindDialog();
   bindProductCreateDialog();
   bindProcurementControls();
+  bindConfigControls();
   bindExchangeRateForm();
   bindAuthControls();
+  initDailyProcurementReminder();
   const isAuthenticated = await checkAuthSession();
   if (isAuthenticated) {
     await loadAll();
@@ -153,7 +350,9 @@ function bindNavigation() {
   document.querySelectorAll("nav button").forEach((button) => {
     button.addEventListener("click", () => showView(button.dataset.view));
   });
-  document.querySelector("#syncOzon")?.addEventListener("click", syncOzon);
+  document.querySelector("#backupDataBtn")?.addEventListener("click", () => runDataMaintenance("backup"));
+  document.querySelector("#restoreDataBtn")?.addEventListener("click", () => runDataMaintenance("restore"));
+  document.querySelector("#refreshExceptionWorkbench")?.addEventListener("click", () => refreshExceptionWorkbench());
   document.querySelector("#syncOrdersBtn")?.addEventListener("click", syncOzon);
   document.querySelector("#syncOnlineProducts")?.addEventListener("click", syncOnlineProducts);
   bindStockControls();
@@ -161,15 +360,19 @@ function bindNavigation() {
     state.orderFilters.shopId = event.target.value;
     state.orderFilters.page = 1;
     localStorage.setItem("orderFilter:shopId", state.orderFilters.shopId);
-    renderOrdersTable();
+    reloadOrdersPage();
   });
 }
 
 function showView(view) {
-  // 这里只切换界面状态，不在这里重新请求数据，避免 tab 切换触发全量刷新。
+  closePurchaseOrderDrawer();
+  if (view === "formula") {
+    view = "config";
+    state.configTab = "formula";
+  }
   state.currentView = view;
   sessionStorage.setItem("currentView", view);
-  document.body.classList.toggle("procurement-mode", view === "procurement");
+  document.body.classList.toggle("procurement-mode", view === "procurement" || view === "purchaseList" || view === "purchaseHistory" || view === "inbound");
   document.querySelectorAll("nav button").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   document.querySelectorAll(".nav-group").forEach((group) => {
     group.classList.toggle("open", group.querySelector(`[data-view="${view}"]`) != null);
@@ -177,6 +380,24 @@ function showView(view) {
   document.querySelectorAll(".view").forEach((item) => item.classList.toggle("active", item.id === view));
   document.querySelector("#pageTitle").textContent = titles[view][0];
   document.querySelector("#pageSubtitle").textContent = titles[view][1];
+  // 切到利润页时刷新当月数据
+  if (view === "profit" && state.profitMonth) {
+    const mk = state.profitMode === "month" ? state.profitMonth : currentMonthKey();
+    if (state.profitMode === "month") {
+      switchProfitMonth(mk);
+    }
+  }
+  // 切到采购清单时刷新
+  if (view === "purchaseList") {
+    renderPurchaseList();
+  }
+  // 切到历史采购时刷新
+  if (view === "purchaseHistory") {
+    renderPurchaseHistory();
+  }
+  if (view === "exceptions") {
+    refreshExceptionWorkbench();
+  }
 }
 
 function bindForms() {
@@ -188,9 +409,440 @@ function bindForms() {
   bindShopForm();
 }
 
+function bindConfigControls() {
+  ensureLogisticsConfigTab();
+  ensureAuthUiExtensions();
+  document.querySelector("#configTabs")?.addEventListener("click", (event) => {
+    const btn = event.target.closest("button[data-config-tab]");
+    if (!btn) return;
+    state.configTab = btn.dataset.configTab || "shops";
+    syncConfigTabs();
+  });
+  document.querySelector("#openShopCreate")?.addEventListener("click", () => {
+    resetShopForm();
+    openInlineDialog(document.querySelector("#createShopDialog"), "create-shop-backdrop", closeShopCreateDialog);
+  });
+  document.querySelector("#openPeopleCreate")?.addEventListener("click", () => {
+    resetPeopleForm();
+    openInlineDialog(document.querySelector("#createPeopleDialog"), "create-people-backdrop", closePeopleCreateDialog);
+  });
+  document.querySelector("#openExchangeRateCreate")?.addEventListener("click", () => {
+    renderExchangeRateConfig();
+    openInlineDialog(document.querySelector("#createExchangeRateDialog"), "create-rate-backdrop", closeExchangeRateCreateDialog);
+  });
+  document.querySelector("#createShopClose")?.addEventListener("click", closeShopCreateDialog);
+  document.querySelector("#createShopCancel")?.addEventListener("click", closeShopCreateDialog);
+  document.querySelector("#createPeopleClose")?.addEventListener("click", closePeopleCreateDialog);
+  document.querySelector("#createPeopleCancel")?.addEventListener("click", closePeopleCreateDialog);
+  document.querySelector("#createExchangeRateClose")?.addEventListener("click", closeExchangeRateCreateDialog);
+  document.querySelector("#createExchangeRateCancel")?.addEventListener("click", closeExchangeRateCreateDialog);
+  document.querySelector("#profitRulesMap")?.addEventListener("click", async (event) => {
+    const btn = event.target.closest("#syncOzonFinanceBtn");
+    if (!btn) return;
+    await syncOzonFinanceAction(btn);
+  });
+  document.querySelector("#logisticsRulesPanel")?.addEventListener("click", async (event) => {
+    const edit = event.target.closest(".edit-logistics-rule-btn");
+    if (edit) {
+      const row = state.logisticsRules.find((item) => String(item.id) === String(edit.dataset.id));
+      if (row) fillLogisticsRuleForm(row);
+      return;
+    }
+    const del = event.target.closest(".delete-logistics-rule-btn");
+    if (del && await showAppConfirm("确认停用这条物流规则吗？")) {
+      await api(`/api/logistics-rules/${del.dataset.id}`, { method: "DELETE" });
+      state.logisticsRules = await api("/api/logistics-rules");
+      renderLogisticsRules();
+    }
+  });
+  document.querySelector("#logisticsRuleForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const body = Object.fromEntries(new FormData(form));
+    const id = body.id;
+    delete body.id;
+    await api(id ? `/api/logistics-rules/${id}` : "/api/logistics-rules", {
+      method: id ? "PUT" : "POST",
+      body: JSON.stringify(body)
+    });
+    form.reset();
+    form.elements.id.value = "";
+    state.logisticsRules = await api("/api/logistics-rules");
+    renderLogisticsRules();
+  });
+  document.querySelector("#logisticsRuleReset")?.addEventListener("click", () => {
+    const form = document.querySelector("#logisticsRuleForm");
+    form?.reset();
+    if (form?.elements.id) form.elements.id.value = "";
+  });
+  syncConfigTabs();
+}
+
+function ensureLogisticsConfigTab() {
+  const tabs = document.querySelector("#configTabs");
+  if (tabs && !tabs.querySelector("[data-config-tab='logistics']")) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.configTab = "logistics";
+    btn.textContent = "物流规则";
+    const shops = tabs.querySelector("[data-config-tab='shops']");
+    tabs.insertBefore(btn, shops || null);
+  }
+  const configPanel = document.querySelector(".config-tabs-panel");
+  if (configPanel && !document.querySelector("[data-config-view='logistics']")) {
+    const section = document.createElement("section");
+    section.className = "config-tab-view";
+    section.dataset.configView = "logistics";
+    section.innerHTML = `
+      <div id="logisticsRulesPanel" class="logistics-rules-panel">
+        <div class="panel-head"><div><h2>物流运费规则</h2><span class="hint">先把 CEL、中国邮政、FBP 等运费规则配置好，后续再把计价公式逐步迁移到这里。</span></div></div>
+        <form id="logisticsRuleForm" class="form compact logistics-rule-form">
+          <input name="id" type="hidden" />
+          <label>规则名称<input name="name" required placeholder="例如：中国邮政 500g 以下" /></label>
+          <label>物流商<input name="carrier" value="CEL" /></label>
+          <label>渠道<input name="channel" value="standard" /></label>
+          <label>计费模式<select name="mode"><option value="per_gram">按克重</option><option value="fixed">固定费用</option></select></label>
+          <label>最小克重<input name="min_weight_g" type="number" step="1" value="0" /></label>
+          <label>最大克重<input name="max_weight_g" type="number" step="1" value="500" /></label>
+          <label>最低售价(RUB)<input name="min_price_rub" type="number" step="1" value="0" /></label>
+          <label>最高售价(RUB)<input name="max_price_rub" type="number" step="1" value="999999" /></label>
+          <label>基础费用(RMB)<input name="base_fee_cny" type="number" step="0.001" value="0" /></label>
+          <label>每克费用(RMB)<input name="per_gram_cny" type="number" step="0.0001" value="0.026" /></label>
+          <label>每票费用(RMB)<input name="per_ticket_cny" type="number" step="0.001" value="0" /></label>
+          <label>状态<select name="enabled"><option value="1">启用</option><option value="0">停用</option></select></label>
+          <label class="full">备注<input name="note" /></label>
+          <div class="edit-actions full"><button id="logisticsRuleReset" type="button">重置</button><button class="primary" type="submit">保存物流规则</button></div>
+        </form>
+        <div id="logisticsRulesTable"></div>
+      </div>`;
+    const shopsView = configPanel.querySelector("[data-config-view='shops']");
+    configPanel.insertBefore(section, shopsView || null);
+  }
+}
+
+function ensureAuthUiExtensions() {
+  const topAccount = document.querySelector(".top-account");
+  if (topAccount && !document.querySelector("#changePwdBtn")) {
+    const button = document.createElement("button");
+    button.id = "changePwdBtn";
+    button.type = "button";
+    button.className = "link-btn small";
+    button.textContent = "修改密码";
+    button.style.display = "none";
+    topAccount.appendChild(button);
+  }
+
+  const peopleView = document.querySelector("[data-config-view='people']");
+  if (peopleView && !document.querySelector("#configAccountCard")) {
+    const card = document.createElement("section");
+    card.id = "configAccountCard";
+    card.className = "panel config-account-card";
+    card.innerHTML = `
+      <div class="panel-head">
+        <h2>当前账号</h2>
+        <div class="panel-actions">
+          <button id="configChangePwdBtn" type="button" class="primary small">修改密码</button>
+        </div>
+      </div>
+      <div class="form compact">
+        <label>当前用户<input id="configUserName" type="text" value="-" readonly /></label>
+        <label>角色<input id="configUserRole" type="text" value="-" readonly /></label>
+      </div>
+    `;
+    peopleView.insertAdjacentElement("afterbegin", card);
+  }
+
+  if (!document.querySelector("#changePwdDialog")) {
+    const dialog = document.createElement("div");
+    dialog.id = "changePwdDialog";
+    dialog.className = "edit-dialog";
+    dialog.style.display = "none";
+    dialog.innerHTML = `
+      <div class="edit-dialog-header">
+        <h2>修改密码</h2>
+        <button id="changePwdCloseBtn" class="dialog-close" type="button" title="关闭">×</button>
+      </div>
+      <form id="changePwdForm" class="form edit-form">
+        <label class="full">原密码<input name="old_password" type="password" autocomplete="current-password" required /></label>
+        <label class="full">新密码<input id="changePwdNewPassword" name="new_password" type="password" autocomplete="new-password" required /></label>
+        <label class="full">确认新密码<input id="changePwdConfirmPassword" name="new_password_confirm" type="password" autocomplete="new-password" required /></label>
+        <div id="changePwdError" class="form-tip login-error" style="display:none"></div>
+        <div class="edit-actions full">
+          <button type="button" id="changePwdCancelBtn">取消</button>
+          <button class="primary" type="submit">保存密码</button>
+        </div>
+      </form>
+    `;
+    document.body.appendChild(dialog);
+  }
+}
+
+function syncConfigTabs() {
+  document.querySelectorAll("#configTabs button[data-config-tab]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.configTab === state.configTab);
+  });
+  document.querySelectorAll("[data-config-view]").forEach((view) => {
+    view.classList.toggle("active", view.dataset.configView === state.configTab);
+  });
+}
+
+function closeShopCreateDialog() {
+  closeInlineDialog("#createShopDialog", ".create-shop-backdrop");
+}
+
+function closePeopleCreateDialog() {
+  closeInlineDialog("#createPeopleDialog", ".create-people-backdrop");
+}
+
+function closeExchangeRateCreateDialog() {
+  closeInlineDialog("#createExchangeRateDialog", ".create-rate-backdrop");
+}
+
 function bindSelectionCreatePanel() {
   document.querySelector("#openSelectionCreate")?.addEventListener("click", openSelectionCreatePanel);
   document.querySelector("#closeSelectionCreate")?.addEventListener("click", closeSelectionCreatePanel);
+  // 配送方式手动修改标记
+  document.querySelector("#shippingMethod")?.addEventListener("change", function () {
+    this.dataset.userChanged = "1";
+  });
+}
+
+function bindSelectionImport() {
+  const dialog = document.querySelector("#selectionImportDialog");
+  const fileInput = document.querySelector("#selectionImportFile");
+  const preview = document.querySelector("#selectionImportPreview");
+  const commitBtn = document.querySelector("#selectionImportCommit");
+  document.querySelector("#openSelectionImport")?.addEventListener("click", () => {
+    state.selectionImportRows = [];
+    if (fileInput) fileInput.value = "";
+    if (preview) preview.innerHTML = `<div class="empty">请选择从飞书导出的 CSV 文件。</div>`;
+    if (commitBtn) commitBtn.disabled = true;
+    openSelectionImportDialog();
+  });
+  document.querySelector("#selectionImportClose")?.addEventListener("click", closeSelectionImportDialog);
+  document.querySelector("#selectionImportCancel")?.addEventListener("click", closeSelectionImportDialog);
+  fileInput?.addEventListener("change", async () => {
+    const file = fileInput.files?.[0];
+    if (!file || !preview) return;
+    preview.innerHTML = `<div class="empty">正在解析 CSV...</div>`;
+    try {
+      const csv = await file.text();
+      const result = await api("/api/products/import-preview", { method: "POST", body: JSON.stringify({ csv }) });
+      state.selectionImportRows = result.rows || [];
+      renderSelectionImportPreview(result);
+      if (commitBtn) commitBtn.disabled = !Number(result.valid || 0);
+    } catch (error) {
+      state.selectionImportRows = [];
+      preview.innerHTML = `<div class="empty">解析失败：${escape(error.message)}</div>`;
+      if (commitBtn) commitBtn.disabled = true;
+    }
+  });
+  commitBtn?.addEventListener("click", async () => {
+    const rows = state.selectionImportRows.filter((row) => row.ok).map((row) => row.data);
+    if (!rows.length) return;
+    commitBtn.disabled = true;
+    commitBtn.textContent = "导入中...";
+    try {
+      const result = await api("/api/products/import-commit", { method: "POST", body: JSON.stringify({ rows }) });
+      closeSelectionImportDialog();
+      await showAppAlert(`导入完成：成功 ${result.inserted || 0} 条，跳过 ${result.skipped || 0} 条`);
+      await loadAll();
+      showView("selection");
+    } catch (error) {
+      if (preview) preview.innerHTML = `<div class="empty">导入失败：${escape(error.message)}</div>`;
+    } finally {
+      commitBtn.textContent = "确认导入";
+      commitBtn.disabled = false;
+    }
+  });
+}
+
+function openSelectionImportDialog() {
+  const dialog = document.querySelector("#selectionImportDialog");
+  if (!dialog) return;
+  dialog.classList.add("visible");
+  if (!document.querySelector(".selection-import-backdrop")) {
+    const backdrop = document.createElement("div");
+    backdrop.className = "edit-dialog-backdrop selection-import-backdrop";
+    backdrop.addEventListener("click", closeSelectionImportDialog);
+    document.body.appendChild(backdrop);
+  }
+}
+
+function closeSelectionImportDialog() {
+  document.querySelector("#selectionImportDialog")?.classList.remove("visible");
+  document.querySelector(".selection-import-backdrop")?.remove();
+}
+
+function bindImagePreview() {
+  document.addEventListener("click", (event) => {
+    const img = event.target.closest?.(".previewable-image");
+    if (img?.dataset.previewSrc) {
+      openImagePreview(img.dataset.previewSrc);
+      return;
+    }
+    if (event.target.closest?.(".image-preview-backdrop") && !event.target.closest(".image-preview-box")) {
+      closeImagePreview();
+    }
+    if (event.target.closest?.(".image-preview-close")) closeImagePreview();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeImagePreview();
+  });
+}
+
+function openImagePreview(src) {
+  let overlay = document.querySelector("#imagePreviewOverlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "imagePreviewOverlay";
+    overlay.className = "image-preview-backdrop";
+    overlay.innerHTML = `<div class="image-preview-box"><button class="image-preview-close" type="button" title="关闭">×</button><img alt="产品大图"></div>`;
+    document.body.appendChild(overlay);
+  }
+  overlay.querySelector("img").src = src;
+  overlay.classList.add("show");
+}
+
+function closeImagePreview() {
+  const overlay = document.querySelector("#imagePreviewOverlay");
+  if (overlay) overlay.classList.remove("show");
+}
+
+function bindSelectionProfitDetails() {
+  document.addEventListener("click", (event) => {
+    const btn = event.target.closest?.(".profit-detail-btn");
+    if (!btn) return;
+    const product = state.products.find((item) => Number(item.id) === Number(btn.dataset.productId));
+    const quote = btn.dataset.channel === "land" ? product?.pricing?.land : product?.pricing?.air;
+    if (product && quote) openProfitDetailDialog(product, quote, btn.dataset.channel);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeProfitDetailDialog();
+  });
+}
+
+function openProfitDetailDialog(product, quote, channelKey) {
+  let dialog = document.querySelector("#profitDetailDialog");
+  if (!dialog) {
+    dialog = document.createElement("div");
+    dialog.id = "profitDetailDialog";
+    dialog.className = "edit-dialog profit-detail-dialog";
+    dialog.innerHTML = `
+      <div class="edit-dialog-header">
+        <h2>净利计算明细</h2>
+        <button class="dialog-close profit-detail-close" type="button" title="关闭">×</button>
+      </div>
+      <div class="profit-detail-body"></div>
+    `;
+    document.body.appendChild(dialog);
+    dialog.querySelector(".profit-detail-close").addEventListener("click", closeProfitDetailDialog);
+  }
+  const body = dialog.querySelector(".profit-detail-body");
+  body.innerHTML = renderProfitDetail(product, quote, channelKey);
+  openInlineDialog(dialog, "profit-detail-backdrop", closeProfitDetailDialog);
+}
+
+function closeProfitDetailDialog() {
+  closeInlineDialog("#profitDetailDialog", ".profit-detail-backdrop");
+}
+
+function renderProfitDetail(product, quote, channelKey) {
+  const sale = selectionSaleRmb(product);
+  const purchaseUnit = selectionPurchaseCostPerUnit(product);
+  const purchaseQty = Math.max(Number(product.purchase_quantity || 1), 1);
+  const domesticShare = Number(product.domestic_shipping || 0) / purchaseQty;
+  const commissionRate = sale ? Number(quote.commission || 0) / sale : 0;
+  const finalMile = Number(quote.finalMileBankFee ?? quote.paymentFee ?? 0);
+  const advertisingCost = Number(quote.advertisingCost || 0);
+  const totalCost =
+    purchaseUnit +
+    Number(quote.amount || 0) +
+    Number(quote.commission || 0) +
+    finalMile +
+    Number(quote.withdrawalFee || 0) +
+    advertisingCost +
+    Number(quote.expectedReturnLoss || 0);
+  const detailRows = [
+    ["售价", money(sale), "选品表售价 RMB"],
+    ["采购单价", money(product.purchase_cost), "库存产品录入的单件采购价"],
+    ["国内运费均摊", money(domesticShare), `${money(product.domestic_shipping)} / ${purchaseQty} 件`],
+    ["均摊采购成本", money(purchaseUnit), "采购单价 + 国内运费均摊 + 处理费"],
+    ["国际运费", money(quote.amount), shippingFormulaText(product.shipping_method || channelKey, product)],
+    ["Ozon佣金", money(quote.commission), `售价 x ${num(commissionRate * 100, 2)}%`],
+    ["末公里+银行", money(finalMile), "售价 x 1.4% + 阶梯末公里费"],
+    ["提现费", money(quote.withdrawalFee), "(售价 - 末公里+银行 - 运费 - 售价 x 20%) x 1.2%"],
+    ["广告预算", money(advertisingCost), "当前默认 0，后续可接真实广告预算率"],
+    ["退货损失", money(quote.expectedReturnLoss), `(均摊采购成本 + 运费) x ${num(Number(product.return_rate ?? 0.05) * 100, 2)}%`],
+    ["成本合计", money(totalCost), "除售价外所有扣减项合计"],
+    ["净利润", money(quote.profit), `售价 - 成本合计，净利率 ${num(quote.margin, 2)}%`]
+  ];
+  detailRows.splice(4, 0, ["运送方式", escape(methodName(product.shipping_method || channelKey) || "未标明"), shippingFormulaText(product.shipping_method || channelKey, product)]);
+  return `
+    <div class="profit-detail-title">
+      ${image(product.image_url)}
+      <div>
+        <strong>${escape(product.name || "-")}</strong>
+        <small>${escape(product.selection_id || product.code || "")} / ${escape(channelKey === "land" ? "陆运" : "陆空")}</small>
+      </div>
+    </div>
+    <div class="profit-detail-formula">
+      净利润 = 售价 - 均摊采购成本 - 国际运费 - 佣金 - 尾程+银行 - 提现费 - 广告预算 - 退货损失
+    </div>
+    <div class="table-wrap">
+      <table class="table profit-detail-table">
+        <thead><tr><th>项目</th><th>金额</th><th>计算说明</th></tr></thead>
+        <tbody>${detailRows.map(([label, value, note]) => `
+          <tr class="${label === "净利润" ? "profit-detail-total" : ""}">
+            <td>${escape(label)}</td>
+            <td>${value}</td>
+            <td><small>${escape(note)}</small></td>
+          </tr>
+        `).join("")}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function selectionSaleRmb(product) {
+  return Number(product.air_sale_price_rmb || 0) || listingRubToRmb(product.listing_price_rub, product.exchange_rate);
+}
+
+function selectionPurchaseCostPerUnit(product) {
+  const quantity = Math.max(Number(product.purchase_quantity || 1), 1);
+  return Number(product.purchase_cost || 0) + Number(product.domestic_shipping || 0) / quantity + Number(product.handling_fee || 0);
+}
+
+function renderSelectionImportPreview(result) {
+  const target = document.querySelector("#selectionImportPreview");
+  if (!target) return;
+  const rows = (result.rows || []).slice(0, 12);
+  target.innerHTML = `
+    <div class="import-summary">
+      <span>共 ${escape(result.total || 0)} 行</span>
+      <span class="tag green">可导入 ${escape(result.valid || 0)}</span>
+      <span class="tag ${result.invalid ? "red" : ""}">异常 ${escape(result.invalid || 0)}</span>
+    </div>
+    <div class="table-wrap import-preview-table">
+      <table class="table">
+        <thead><tr><th>行号</th><th>商品</th><th>人员</th><th>采购/售价</th><th>状态</th></tr></thead>
+        <tbody>${rows.map((row) => `
+          <tr>
+            <td>${escape(row.index)}</td>
+            <td>${strong(row.data?.name || "-", row.data?.supplier_note || "")}</td>
+            <td>${personName(row.data?.owner_person_id) || "-"}</td>
+            <td>${money(row.data?.purchase_cost)} / ${money(row.data?.air_sale_price_rmb)}</td>
+            <td>${row.ok ? tag("可导入", "green") : tag("异常", "red")}<small>${escape([...(row.errors || []), ...(row.warnings || [])].join("；"))}</small></td>
+          </tr>
+        `).join("")}</tbody>
+      </table>
+    </div>
+    ${(result.rows || []).length > rows.length ? `<div class="form-tip">只预览前 ${rows.length} 行，确认后会导入全部可用行。</div>` : ""}
+  `;
+}
+
+function personName(id) {
+  return state.people.find((person) => Number(person.id) === Number(id))?.name || "";
 }
 
 function openSelectionCreatePanel() {
@@ -201,6 +853,20 @@ function openSelectionCreatePanel() {
   setDefaults();
   updateRecommendation();
   panel.classList.add("visible");
+  // 随机提示
+  const badge = document.querySelector("#encourageBadge");
+  if (badge) {
+    const msgs = [
+      "认真核对商品信息",
+      "注意检查重量和尺寸",
+      "利润异常优先核查成本",
+      "运送方式会影响最终利润",
+      "绑定 SKU 后记得重算利润",
+      "采购成本以采购记录为准",
+      "上架前先确认库存信息"
+    ];
+    badge.textContent = msgs[Math.floor(Math.random() * msgs.length)];
+  }
   const backdrop = document.createElement("div");
   backdrop.className = "edit-dialog-backdrop selection-create-backdrop";
   backdrop.addEventListener("click", closeSelectionCreatePanel);
@@ -226,7 +892,7 @@ function resetSelectionCreateForm() {
   form.elements.exchange_rate.value = currentExchangeRate();
   form.elements.return_rate.value = "0.05";
   form.elements.desired_profit_mode.value = "margin";
-  form.elements.desired_profit_value.value = "20";
+  form.elements.desired_profit_value.value = "40";
   form.elements.air_sale_price_rmb.value = "";
   form.elements.online_product_id.value = "";
   form.elements.person_id.value = state.currentUserId;
@@ -236,6 +902,9 @@ function resetSelectionCreateForm() {
   document.querySelector("#imageData").value = "";
   const imageFile = document.querySelector("#imageFile");
   if (imageFile) imageFile.value = "";
+  // 重置配送方式手动修改标记
+  const shippingSelect = document.querySelector("#shippingMethod");
+  if (shippingSelect) delete shippingSelect.dataset.userChanged;
 }
 
 function openSelectionCreateFromOutbound(row) {
@@ -266,7 +935,7 @@ function fillSelectionCreateFromOnline(onlineId) {
   form.elements.name.value = online.name || "";
   form.elements.image_url.value = imageUrl || "";
   form.elements.source_platform.value = "supplier";
-  form.elements.supplier_note.value = `来自 Ozon SKU ${online.ozon_sku}${online.offer_id ? ` / Offer ${online.offer_id}` : ""}`;
+  form.elements.supplier_note.value = `鏉ヨ嚜 Ozon SKU ${online.ozon_sku}${online.offer_id ? ` / Offer ${online.offer_id}` : ""}`;
   form.elements.air_sale_price_rmb.value = Number(online.sale_price || 0);
   form.elements.package_weight_g.value = inferOnlineWeightGrams(attrs) || 30;
   form.elements.length_cm.value = attrs.length || attrs.depth || 15;
@@ -282,32 +951,34 @@ function bindPeopleForm() {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(form));
-    const id = body.id;
     delete body.id;
-    const url = id ? `/api/people/${id}` : "/api/people";
-    const method = id ? "PUT" : "POST";
-    await api(url, { method, body: JSON.stringify(body) });
-    resetPeopleForm();
-    await loadAll();
+    try {
+      await api("/api/people", { method: "POST", body: JSON.stringify(body) });
+      resetPeopleForm();
+      closePeopleCreateDialog();
+      await refreshPeopleConfig();
+    } catch (error) {
+      await showAppAlert(error.message || "新增人员失败");
+    }
   });
-  document.querySelector("#peopleCancelEdit")?.addEventListener("click", resetPeopleForm);
+  bindPersonEditDialog();
   document.addEventListener("click", async (event) => {
     const editBtn = event.target.closest(".edit-person-btn");
     if (editBtn) {
       const person = state.people.find((item) => item.id === Number(editBtn.dataset.id));
-      if (person) fillPeopleForm(person);
+      if (person) openPersonEditDialog(person);
       return;
     }
     const deleteBtn = event.target.closest(".delete-person-btn");
     if (deleteBtn) {
       const person = state.people.find((item) => item.id === Number(deleteBtn.dataset.id));
       if (!person) return;
-      if (!confirm(`确定停用人员「${person.name}」吗？历史记录会保留。`)) return;
+      if (!await showAppConfirm(`确定停用人员「${person.name}」吗？历史记录会保留。`)) return;
       try {
         await api(`/api/people/${person.id}`, { method: "DELETE" });
-        await loadAll();
+        await refreshPeopleConfig();
       } catch (error) {
-        alert(error.message || "鍋滅敤澶辫触");
+        await showAppAlert(error.message || "停用失败");
       }
       return;
     }
@@ -315,12 +986,12 @@ function bindPeopleForm() {
     if (hardDeleteBtn) {
       const person = state.people.find((item) => item.id === Number(hardDeleteBtn.dataset.id));
       if (!person) return;
-      if (!confirm(`确定永久删除人员「${person.name}」吗？历史记录会保留，但不再关联这个人员。`)) return;
+      if (!await showAppConfirm(`确定永久删除人员「${person.name}」吗？历史记录会保留，但不再关联这个人员。`)) return;
       try {
         await api(`/api/people/${person.id}?hard=1`, { method: "DELETE" });
-        await loadAll();
+        await refreshPeopleConfig();
       } catch (error) {
-        alert(error.message || "鍒犻櫎澶辫触");
+        await showAppAlert(error.message || "删除失败");
       }
     }
   });
@@ -332,31 +1003,136 @@ function bindShopForm() {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(form));
-    const id = body.id;
     delete body.id;
-    const url = id ? `/api/shops/${id}` : "/api/shops";
-    const method = id ? "PUT" : "POST";
-    await api(url, { method, body: JSON.stringify(body) });
-    resetShopForm();
-    await loadAll();
+    try {
+      await api("/api/shops", { method: "POST", body: JSON.stringify(body) });
+      resetShopForm();
+      closeShopCreateDialog();
+      await refreshShopsConfig();
+    } catch (error) {
+      await showAppAlert(error.message || "新增店铺失败");
+    }
   });
-  document.querySelector("#shopCancelEdit")?.addEventListener("click", resetShopForm);
+  bindShopEditDialog();
   document.addEventListener("click", async (event) => {
     const editBtn = event.target.closest(".edit-shop-btn");
     if (editBtn) {
       const shop = state.shops.find((item) => item.id === Number(editBtn.dataset.id));
-      if (shop) fillShopForm(shop);
+      if (shop) openShopEditDialog(shop);
       return;
     }
     const deleteBtn = event.target.closest(".delete-shop-btn");
     if (deleteBtn) {
       const shop = state.shops.find((item) => item.id === Number(deleteBtn.dataset.id));
       if (!shop) return;
-      if (!confirm(`确定删除店铺「${shop.name}」吗？删除后不会再参与同步。`)) return;
-      await api(`/api/shops/${shop.id}`, { method: "DELETE" });
-      await loadAll();
+      if (!await showAppConfirm(`确定删除店铺「${shop.name}」吗？删除后不会再参与同步。`)) return;
+      try {
+        await api(`/api/shops/${shop.id}`, { method: "DELETE" });
+        await refreshShopsConfig();
+      } catch (error) {
+        await showAppAlert(error.message || "删除店铺失败");
+      }
     }
   });
+}
+
+function bindPersonEditDialog() {
+  const dialog = document.querySelector("#editPersonDialog");
+  const form = document.querySelector("#editPersonForm");
+  if (!dialog || !form || form.dataset.bound === "1") return;
+  form.dataset.bound = "1";
+  document.querySelector("#editPersonClose")?.addEventListener("click", closePersonEditDialog);
+  document.querySelector("#editPersonCancel")?.addEventListener("click", closePersonEditDialog);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = Object.fromEntries(new FormData(form));
+    const id = body.id;
+    delete body.id;
+    try {
+      await api(`/api/people/${id}`, { method: "PUT", body: JSON.stringify(body) });
+      closePersonEditDialog();
+      await refreshPeopleConfig();
+    } catch (error) {
+      await showAppAlert(error.message || "保存人员失败");
+    }
+  });
+}
+
+function openPersonEditDialog(person) {
+  const dialog = document.querySelector("#editPersonDialog");
+  const form = document.querySelector("#editPersonForm");
+  if (!dialog || !form) return;
+  form.elements.id.value = person.id;
+  form.elements.name.value = person.name || "";
+  form.elements.username.value = person.username || "";
+  form.elements.password.value = "";
+  form.elements.role.value = person.role || "operator";
+  form.elements.active.value = String(person.active ?? 1);
+  openInlineDialog(dialog, "person-edit-backdrop", closePersonEditDialog);
+}
+
+function closePersonEditDialog() {
+  closeInlineDialog("#editPersonDialog", ".person-edit-backdrop");
+}
+
+function bindShopEditDialog() {
+  const dialog = document.querySelector("#editShopDialog");
+  const form = document.querySelector("#editShopForm");
+  if (!dialog || !form || form.dataset.bound === "1") return;
+  form.dataset.bound = "1";
+  document.querySelector("#editShopClose")?.addEventListener("click", closeShopEditDialog);
+  document.querySelector("#editShopCancel")?.addEventListener("click", closeShopEditDialog);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = Object.fromEntries(new FormData(form));
+    const id = body.id;
+    delete body.id;
+    try {
+      await api(`/api/shops/${id}`, { method: "PUT", body: JSON.stringify(body) });
+      closeShopEditDialog();
+      await refreshShopsConfig();
+    } catch (error) {
+      await showAppAlert(error.message || "保存店铺失败");
+    }
+  });
+}
+
+function openShopEditDialog(shop) {
+  const dialog = document.querySelector("#editShopDialog");
+  const form = document.querySelector("#editShopForm");
+  if (!dialog || !form) return;
+  form.elements.id.value = shop.id;
+  form.elements.name.value = shop.name || "";
+  form.elements.legal_entity.value = shop.legal_entity || "";
+  form.elements.ozon_client_id.value = shop.ozon_client_id || "";
+  form.elements.api_key_hint.value = "";
+  form.elements.status.value = shop.status || "active";
+  form.elements.payout_rate.value = shop.payout_rate ?? 0.33;
+  openInlineDialog(dialog, "shop-edit-backdrop", closeShopEditDialog);
+}
+
+function closeShopEditDialog() {
+  closeInlineDialog("#editShopDialog", ".shop-edit-backdrop");
+}
+
+function openInlineDialog(dialog, backdropClass, closeFn) {
+  if (!dialog) return;
+  if (dialog.open) dialog.close();
+  dialog.classList.add("visible");
+  if (!document.querySelector(`.${backdropClass}`)) {
+    const backdrop = document.createElement("div");
+    backdrop.className = `edit-dialog-backdrop ${backdropClass}`;
+    backdrop.addEventListener("click", closeFn);
+    document.body.appendChild(backdrop);
+  }
+  dialog.querySelector("input, select, button")?.focus();
+}
+
+function closeInlineDialog(dialogSelector, backdropSelector) {
+  const dialog = document.querySelector(dialogSelector);
+  if (dialog?.open) dialog.close();
+  dialog?.classList.remove("visible");
+  document.querySelector(backdropSelector)?.remove();
 }
 
 function bindOnlineControls() {
@@ -364,6 +1140,35 @@ function bindOnlineControls() {
     state.onlineFilters.shopId = event.target.value;
     state.onlineFilters.page = 1;
     localStorage.setItem("onlineFilter:shopId", state.onlineFilters.shopId);
+    renderOnlineTable();
+  });
+  document.querySelector("#onlineNameSearch")?.addEventListener("input", debounce((event) => {
+    state.onlineFilters.name = event.target.value;
+    state.onlineFilters.page = 1;
+    localStorage.setItem("onlineFilter:name", state.onlineFilters.name);
+    renderOnlineTable();
+  }, 250));
+  document.querySelector("#onlineOfferSearch")?.addEventListener("input", debounce((event) => {
+    state.onlineFilters.offer = event.target.value;
+    state.onlineFilters.page = 1;
+    localStorage.setItem("onlineFilter:offer", state.onlineFilters.offer);
+    renderOnlineTable();
+  }, 250));
+  document.querySelector("#onlineSearchBtn")?.addEventListener("click", () => {
+    state.onlineFilters.name = document.querySelector("#onlineNameSearch")?.value || "";
+    state.onlineFilters.offer = document.querySelector("#onlineOfferSearch")?.value || "";
+    state.onlineFilters.page = 1;
+    localStorage.setItem("onlineFilter:name", state.onlineFilters.name);
+    localStorage.setItem("onlineFilter:offer", state.onlineFilters.offer);
+    renderOnlineTable();
+  });
+  document.querySelector("#syncSelectedOnlineProducts")?.addEventListener("click", syncSelectedOnlineProducts);
+  document.querySelector("#onlineStatusTabs")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-online-status]");
+    if (!button) return;
+    state.onlineFilters.status = button.dataset.onlineStatus || "all";
+    state.onlineFilters.page = 1;
+    localStorage.setItem("onlineFilter:status", state.onlineFilters.status);
     renderOnlineTable();
   });
   document.querySelector("#onlinePageSize")?.addEventListener("change", (event) => {
@@ -393,12 +1198,38 @@ function bindBindDialog() {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(form));
-    if (!body.online_product_id) throw new Error("???????");
-    if (!body.product_id) throw new Error("????????????");
+    if (!body.online_product_id) throw new Error("请选择要绑定的在线商品");
+    if (!body.product_id) throw new Error("请选择要绑定的库存产品");
+    if (!(await confirmBindOnlineProduct(body))) return;
+    const returnToFbp = state.stockViewMode === "fbp" || document.querySelector("#fbpSkuMappingDialog.visible");
     await api("/api/online-products/bind", { method: "POST", body: JSON.stringify(body) });
     closeBindDialog();
-    await loadAll();
+    if (returnToFbp) {
+      await refreshFbpStockData();
+      openFbpSkuMappingDialog(Number(body.product_id));
+    } else {
+      await loadAllPreserveOrderPosition();
+    }
   });
+}
+
+async function confirmBindOnlineProduct(body) {
+  const online = (state.onlineProducts || []).find((item) => String(item.id) === String(body.online_product_id));
+  const product = (state.products || []).find((item) => String(item.id) === String(body.product_id));
+  const message = [
+    "请确认这次 SKU 绑定：",
+    "",
+    `在线 SKU：${online?.ozon_sku || "-"}`,
+    `SKU 标题：${online?.name || "-"}`,
+    `店铺：${online?.shop_name || "-"}`,
+    "",
+    `绑定到库存产品：${product?.name || "-"}`,
+    `库存 ID：${product?.inventory_id || product?.code || product?.id || "-"}`,
+    `当前库存：${product?.stock ?? 0} 件`,
+    "",
+    "确认后订单会按这个库存产品扣库存和计算利润。"
+  ].join("\n");
+  return await showAppConfirm(message);
 }
 
 function bindProductCreateDialog() {
@@ -424,15 +1255,19 @@ function bindProductCreateDialog() {
       if (result?.id) {
         const procProduct = document.querySelector("#procProduct");
         if (procProduct) procProduct.value = result.id;
+        if (result.reused) {
+          await showAppAlert("这个 Ozon SKU 已经绑定库存产品，本次只复用已有绑定，没有覆盖产品名称，也没有重复创建采购请求。");
+        }
       }
       closeProductCreateDialog();
-      await loadAll();
+      await loadAllPreserveOrderPosition();
+      renderProcurementRequests();
     } catch (err) {
       if (error) {
         error.textContent = err.message || "保存失败，请检查必填信息";
         error.style.display = "";
       } else {
-        alert(err.message || "保存失败，请检查必填信息");
+        await showAppAlert(err.message || "保存失败，请检查必填信息");
       }
     } finally {
       if (submit) {
@@ -466,60 +1301,108 @@ function bindOutboundControls() {
   document.querySelector("#outboundQueryBtn")?.addEventListener("click", () => {
     const dateFrom = document.querySelector("#outboundDateFrom");
     const dateTo = document.querySelector("#outboundDateTo");
+    const search = document.querySelector("#outboundSearch");
     state.outboundFilters.dateFrom = dateFrom ? dateFrom.value : "";
     state.outboundFilters.dateTo = dateTo ? dateTo.value : "";
+    state.outboundFilters.search = search ? search.value.trim() : "";
     state.outboundFilters.page = 1;
     localStorage.setItem("outboundFilter:dateFrom", state.outboundFilters.dateFrom);
     localStorage.setItem("outboundFilter:dateTo", state.outboundFilters.dateTo);
     renderOutboundTable();
   });
+  document.querySelector("#outboundSearch")?.addEventListener("input", (event) => {
+    state.outboundFilters.search = event.target.value.trim();
+    state.outboundFilters.page = 1;
+    renderOutboundTable();
+  });
+  document.querySelector("#outboundShopFilter")?.addEventListener("change", (event) => {
+    state.outboundFilters.shopId = event.target.value;
+    state.outboundFilters.page = 1;
+    localStorage.setItem("outboundFilter:shopId", state.outboundFilters.shopId);
+    renderOutboundTable();
+  });
 }
 
 function bindProcurementControls() {
-  document.querySelector("#procProductSearch")?.addEventListener("input", renderProcProductOptions);
-  document.querySelector("#procStatusFilter")?.addEventListener("change", (event) => { state.procurementFilters.status = event.target.value; renderProcurementRequests(); });
-  document.querySelector("#procPersonFilter")?.addEventListener("change", (event) => { state.procurementFilters.personId = event.target.value; renderProcurementRequests(); });
-  document.querySelector("#procUrgencyFilter")?.addEventListener("change", (event) => { state.procurementFilters.urgency = event.target.value; renderProcurementRequests(); });
-  document.querySelector("#procRequestSearch")?.addEventListener("input", (event) => { state.procurementFilters.query = event.target.value; renderProcurementRequests(); });
-  document.querySelector("#mergeProcurementBtn")?.addEventListener("click", mergeSelectedProcurementRequests);
-  document.querySelector("#clearProcurementSelectionBtn")?.addEventListener("click", () => {
-    state.procurementSelectedRequestIds.clear();
-    renderProcurementRequests();
-  });
-  document.querySelector("#procurementTabs")?.addEventListener("click", (event) => {
-    const button = event.target.closest("button[data-tab]");
-    if (!button) return;
-    state.procurementTab = button.dataset.tab;
-    renderProcurementWorkspace();
-  });
+  // 新建采购请求按钮
+  const createBtn = document.querySelector("#createProcurementBtn");
+  if (createBtn) {
+    createBtn.addEventListener("click", () => {
+      openProcurementDialog();
+    });
+  }
+
+  // 弹窗关闭
+  document.querySelector("#procurementDialogClose")?.addEventListener("click", closeProcurementDialog);
+  document.querySelector("#procurementDialogCancel")?.addEventListener("click", closeProcurementDialog);
+
+  // Drawer 关闭
   document.querySelector("#purchaseOrderDrawerClose")?.addEventListener("click", closePurchaseOrderDrawer);
+
+  // 产品搜索，带防抖
+  let procSearchTimer = null;
+  document.querySelector("#procProductSearch")?.addEventListener("input", () => {
+    state.procProductPage = 1;
+    if (procSearchTimer) clearTimeout(procSearchTimer);
+    procSearchTimer = setTimeout(() => renderProcProductOptions(), 300);
+  });
+  // 来源类型切换
+  document.querySelector("#procSourceType")?.addEventListener("change", (e) => {
+    updateProcurementSourceVisibility();
+  });
+
+  // 筛选器
+  document.querySelector("#procStatusFilter")?.addEventListener("change", (event) => { state.procurementFilters.status = event.target.value; state.procurementRequestPage = 1; renderProcurementRequests(); });
+  document.querySelector("#procPersonFilter")?.addEventListener("change", (event) => { state.procurementFilters.personId = event.target.value; state.procurementRequestPage = 1; renderProcurementRequests(); });
+  document.querySelector("#procUrgencyFilter")?.addEventListener("change", (event) => { state.procurementFilters.urgency = event.target.value; state.procurementRequestPage = 1; renderProcurementRequests(); });
+  document.querySelector("#procRequestSearch")?.addEventListener("input", (event) => { state.procurementFilters.query = event.target.value; state.procurementRequestPage = 1; renderProcurementRequests(); });
+
   document.addEventListener("click", async (event) => {
-    const requestCheck = event.target.closest(".proc-request-check");
-    if (requestCheck) {
-      const id = Number(requestCheck.dataset.id);
-      if (requestCheck.checked) state.procurementSelectedRequestIds.add(id);
-      else state.procurementSelectedRequestIds.delete(id);
+    // 编辑采购请求
+    const editReqBtn = event.target.closest(".edit-proc-request-btn");
+    if (editReqBtn) {
+      const row = state.procurementRequests.find((item) => Number(item.id) === Number(editReqBtn.dataset.id));
+      if (row) openProcurementDialog(row);
       return;
     }
+    const submitReqBtn = event.target.closest(".submit-proc-request-btn");
+    if (submitReqBtn) {
+      await submitProcurementRequestsAction([Number(submitReqBtn.dataset.id)]);
+      return;
+    }
+    // 删除采购请求
     const cancelReq = event.target.closest(".cancel-proc-request-btn");
     if (cancelReq) {
       const row = state.procurementRequests.find((item) => Number(item.id) === Number(cancelReq.dataset.id));
-      if (!row || !confirm("确认取消这条采购需求吗？")) return;
-      await api(`/api/procurement/requests/${row.id}`, { method: "PUT", body: JSON.stringify({ ...row, status: "cancelled" }) });
+      if (!row || !await showAppConfirm("确认删除这条采购请求吗？")) return;
+      await api(`/api/procurement/requests/${row.id}`, { method: "DELETE" });
       await loadAll();
       return;
     }
-    const detailBtn = event.target.closest(".po-detail-btn");
-    if (detailBtn) { await openPurchaseOrderDrawer(Number(detailBtn.dataset.id)); return; }
-    const confirmBtn = event.target.closest(".po-confirm-btn");
-    if (confirmBtn) { await confirmPurchaseOrderAction(Number(confirmBtn.dataset.id)); return; }
-    const cancelPoBtn = event.target.closest(".po-cancel-btn");
-    if (cancelPoBtn) {
-      if (!confirm("确认取消这张采购单吗？已合并需求会回到待合并。")) return;
-      await api(`/api/procurement/purchase-orders/${cancelPoBtn.dataset.id}/cancel`, { method: "POST", body: JSON.stringify({}) });
-      await loadAll();
+    // 编辑单个产品采购分组
+    const editPurchaseGroupBtn = event.target.closest(".edit-purchase-group-btn");
+    if (editPurchaseGroupBtn) {
+      openPurchaseRequestGroupDialog(Number(editPurchaseGroupBtn.dataset.productId));
       return;
     }
+    // 确认单个产品采购
+    const confirmPurchaseBtn = event.target.closest(".confirm-purchase-btn");
+    if (confirmPurchaseBtn) {
+      await confirmProductPurchase(Number(confirmPurchaseBtn.dataset.productId));
+      return;
+    }
+    // 一键确认全部采购
+    const confirmAllBtn = event.target.closest("#confirmAllPurchaseBtn");
+    if (confirmAllBtn) {
+      await confirmAllPurchase();
+      return;
+    }
+    const confirmSelectedPurchaseBtn = event.target.closest("#confirmSelectedPurchaseBtn");
+    if (confirmSelectedPurchaseBtn) {
+      await confirmSelectedPurchaseProducts();
+      return;
+    }
+    // 鍏ュ簱鐩稿叧
     const inboundBtn = event.target.closest(".confirm-inbound-btn");
     if (inboundBtn) { await confirmInboundRecordAction(Number(inboundBtn.dataset.id)); return; }
     const editInboundBtn = event.target.closest(".edit-inbound-record-btn");
@@ -529,20 +1412,614 @@ function bindProcurementControls() {
   });
 }
 
-function bindStockControls() {
-  document.querySelector("#stockHiddenToggle")?.addEventListener("click", () => {
-    state.stockViewMode = state.stockViewMode === "active" ? "hidden" : "active";
-    state.stockPage = 1;
-    renderStockTable();
+function openProcurementDialog(editRow = null) {
+  const dialog = document.querySelector("#procurementRequestDialog");
+  const form = document.querySelector("#procurementForm");
+  if (!dialog || !form) return;
+
+  const title = document.querySelector("#procurementDialogTitle");
+  const options = document.querySelector("#procProductOptions");
+  const preview = document.querySelector("#procSelectedProduct");
+  const searchInput = document.querySelector("#procProductSearch");
+  syncProcurementSourceControls(editRow);
+
+  // 先显示弹窗，再操作 DOM。当前弹窗样式依赖 visible 类。
+  if (!dialog.open) dialog.showModal();
+  dialog.classList.add("visible");
+
+  // 重置表单
+  form.reset();
+  state.selectedProcurementProductId = null;
+  state.editingProcurementRequestId = editRow?.id || null;
+
+  if (editRow) {
+    if (title) title.textContent = "编辑采购请求";
+    if (form.elements.request_id) form.elements.request_id.value = editRow.id;
+    if (form.elements.product_id) form.elements.product_id.value = editRow.product_id;
+    if (form.elements.quantity) form.elements.quantity.value = editRow.quantity;
+    if (form.elements.amount) form.elements.amount.value = editRow.amount;
+    if (form.elements.shipping_amount) form.elements.shipping_amount.value = editRow.shipping_amount || 0;
+    if (form.elements.urgency) form.elements.urgency.value = editRow.urgency || "normal";
+    if (form.elements.source_type) form.elements.source_type.value = editRow.source_type || "1688";
+    if (form.elements.supplier_id) form.elements.supplier_id.value = editRow.supplier_id || "";
+    if (form.elements.purchase_url) form.elements.purchase_url.value = editRow.purchase_url || editRow.product_purchase_url || "";
+    if (form.elements.note) form.elements.note.value = editRow.note || "";
+    updateProcurementSourceVisibility();
+    if (preview) {
+      preview.innerHTML = `
+        <div class="proc-product-info">
+          ${image(editRow.product_image_url)}
+          <div class="proc-product-text">
+            <strong>${escape(editRow.product_name || "")}</strong>
+            <small>${escape(editRow.product_code || "")}</small>
+          </div>
+        </div>
+      `;
+    }
+    state.selectedProcurementProductId = editRow.product_id;
+    if (searchInput) searchInput.value = "";
+    if (options) options.innerHTML = '<div class="empty small">当前为编辑模式，产品不可更改</div>';
+  } else {
+    if (title) title.textContent = "新建采购请求";
+    if (preview) preview.innerHTML = '<div class="empty small">请先左侧搜索并选择产品</div>';
+    if (searchInput) searchInput.value = "";
+    updateProcurementSourceVisibility();
+    renderProcProductOptions();
+  }
+}
+
+function closeProcurementDialog() {
+  const dialog = document.querySelector("#procurementRequestDialog");
+  if (!dialog) return;
+  dialog.classList.remove("visible");
+  if (dialog.open) dialog.close();
+}
+
+function openProductCreateFromProcurementSearch() {
+  const query = document.querySelector("#procProductSearch")?.value?.trim() || "";
+  closeProcurementDialog();
+  openProductCreateDialog(null, { createProcurementRequest: true, searchQuery: query });
+}
+
+function syncProcurementSourceControls(editRow = null) {
+  const supplier = document.querySelector("#procSupplierSelect");
+  if (supplier) {
+    supplier.innerHTML = `<option value="">涓嶆寚瀹氫緵搴斿晢</option>${(state.suppliers || []).map((item) => `<option value="${item.id}">${escape(item.name)}</option>`).join("")}`;
+    supplier.value = editRow?.supplier_id || "";
+  }
+}
+
+function updateProcurementSourceVisibility() {
+  const type = document.querySelector("#procSourceType")?.value || "1688";
+  const supplierLabel = document.querySelector("#procSupplierLabel");
+  const urlLabel = document.querySelector("#procUrlLabel");
+  if (supplierLabel) supplierLabel.style.display = ["supplier", "wechat"].includes(type) ? "" : "none";
+  if (urlLabel) urlLabel.style.display = type === "wechat" ? "none" : "";
+}
+
+function bindProcurementTableEvents() {
+  const selectAll = document.querySelector("#procSelectAll");
+  const checkboxes = document.querySelectorAll(".proc-row-checkbox:not([disabled])");
+  const batchBtn = document.querySelector("#procBatchMergeBtn");
+  const countSpan = document.querySelector("#procSelectedCount");
+
+  if (selectAll) {
+    selectAll.addEventListener("change", () => {
+      checkboxes.forEach((cb) => { cb.checked = selectAll.checked; });
+      updateProcBatchState();
+    });
+  }
+
+  checkboxes.forEach((cb) => {
+    cb.addEventListener("change", () => {
+      updateProcBatchState();
+      if (selectAll) {
+        const allChecked = Array.from(checkboxes).every((c) => c.checked);
+        selectAll.checked = allChecked;
+      }
+    });
   });
+
+  if (batchBtn) {
+    batchBtn.addEventListener("click", () => {
+      const ids = Array.from(document.querySelectorAll(".proc-row-checkbox:checked")).map((cb) => Number(cb.dataset.id));
+      if (!ids.length) return;
+      submitProcurementRequestsAction(ids);
+    });
+  }
+}
+
+function updateProcBatchState() {
+  const checked = document.querySelectorAll(".proc-row-checkbox:checked");
+  const batchBtn = document.querySelector("#procBatchMergeBtn");
+  const countSpan = document.querySelector("#procSelectedCount");
+  if (countSpan) countSpan.textContent = `已选 ${checked.length} 条`;
+  if (batchBtn) batchBtn.disabled = checked.length === 0;
+}
+
+async function submitProcurementRequestsAction(ids) {
+  const ok = await showAppConfirm(`确认提交选中的 ${ids.length} 条采购请求吗？\n提交后这些请求会进入采购清单。`);
+  if (!ok) return;
+  await api("/api/procurement/requests/submit", {
+    method: "POST",
+    body: JSON.stringify({ request_ids: ids, person_id: state.currentUserId })
+  });
+  await loadAll();
+  renderProcurementRequests();
+  renderPurchaseList();
+}
+
+function selectProcProduct(productId) {
+  const product = state.products.find(p => p.id === productId);
+  if (!product) return;
+
+  state.selectedProcurementProductId = productId;
+
+  const preview = document.querySelector("#procSelectedProduct");
+  const form = document.querySelector("#procurementForm");
+  const searchInput = document.querySelector("#procProductSearch");
+
+  if (form) {
+    form.elements.product_id.value = productId;
+    const defaultQty = Number(product.purchase_quantity || 1);
+    if (form.elements.quantity) form.elements.quantity.value = defaultQty;
+    form.elements.amount.value = Number(product.purchase_cost || 0) * defaultQty;
+    form.elements.shipping_amount.value = Number(product.domestic_shipping || 0);
+    if (form.elements.purchase_url && product.purchase_url) {
+      form.elements.purchase_url.value = product.purchase_url;
+    }
+    if (form.elements.source_type) form.elements.source_type.value = product.source_platform || "1688";
+    if (form.elements.supplier_id) form.elements.supplier_id.value = product.supplier_id || "";
+    updateProcurementSourceVisibility();
+  }
+
+  if (preview) {
+    preview.innerHTML = `
+      <div class="proc-product-info">
+          ${image(product.image_url)}
+          <div class="proc-product-text">
+            <strong>${escape(product.name)}</strong>
+          <small>${escape(product.inventory_id || product.code || product.selection_id || "")} / 当前库存：${product.stock || 0} 件 / 即将入库：${product.incoming_stock || 0} 件</small>
+          <small>默认采购价：${money(product.purchase_cost)} / 默认运费：${money(product.domestic_shipping)}</small>
+          ${product.mapped_skus ? `<small>SKU: ${escape(product.mapped_skus)}</small>` : ""}
+        </div>
+      </div>
+    `;
+  }
+
+  if (searchInput) searchInput.value = product.name || "";
+}
+
+async function confirmProductPurchase(productId) {
+  const pendingRequests = (state.procurementRequests || []).filter(r => r.status === "submitted" && r.product_id === productId);
+  if (!pendingRequests.length) return;
+  const ok = await showAppConfirm(`确认采购「${pendingRequests[0].product_name}」？\n共 ${pendingRequests.length} 条请求，总数量 ${pendingRequests.reduce((s, r) => s + Number(r.quantity), 0)} 件。`);
+  if (!ok) return;
+  await confirmPurchaseRequestIds(pendingRequests.map(r => r.id), "purchaseList");
+}
+
+async function confirmAllPurchase() {
+  const pendingRequests = (state.procurementRequests || []).filter(r => r.status === "submitted");
+  if (!pendingRequests.length) { await showAppAlert("暂无待处理的采购请求"); return; }
+  const ok = await showAppConfirm(`确认全部采购？\n共 ${pendingRequests.length} 条请求，涉及 ${new Set(pendingRequests.map(r => r.product_id)).size} 种产品。`);
+  if (!ok) return;
+  await confirmPurchaseRequestIds(pendingRequests.map(r => r.id), "purchaseList");
+}
+
+async function confirmPurchaseRequestIds(ids, targetView = "purchaseList") {
+  const result = await api("/api/procurement/purchase-orders", {
+    method: "POST",
+    body: JSON.stringify({ request_ids: ids, person_id: state.currentUserId })
+  });
+  if (result?.id) {
+    await api(`/api/procurement/purchase-orders/${result.id}/confirm-purchased`, {
+      method: "POST",
+      body: JSON.stringify({ person_id: state.currentUserId })
+    });
+  }
+  await loadAll();
+  showView("inbound");
+  renderPurchaseList();
+  renderPurchaseHistory();
+  renderInboundTable();
+  showToast("已确认采购，已生成待入库记录。请在入库表确认入库。", "info", 6000);
+}
+
+function bindPaginationControls() {
+  document.querySelector("#selectionPageSize")?.addEventListener("change", (event) => {
+    state.selectionPageSize = Number(event.target.value || 50);
+    state.selectionPage = 1;
+    localStorage.setItem("selectionPageSize", String(state.selectionPageSize));
+    renderSelectionTable();
+  });
+  document.querySelector("#selectionPrevPage")?.addEventListener("click", () => {
+    state.selectionPage = Math.max(1, state.selectionPage - 1);
+    renderSelectionTable();
+  });
+  document.querySelector("#selectionNextPage")?.addEventListener("click", () => {
+    state.selectionPage = Math.min(totalPagesFor(state.products, state.selectionPageSize), state.selectionPage + 1);
+    renderSelectionTable();
+  });
+  document.querySelector("#inboundPageSize")?.addEventListener("change", (event) => {
+    state.inboundPageSize = Number(event.target.value || 50);
+    state.inboundPage = 1;
+    localStorage.setItem("inboundPageSize", String(state.inboundPageSize));
+    renderInboundTable();
+  });
+  document.querySelector("#inboundPrevPage")?.addEventListener("click", () => {
+    state.inboundPage = Math.max(1, state.inboundPage - 1);
+    renderInboundTable();
+  });
+  document.querySelector("#inboundNextPage")?.addEventListener("click", () => {
+    state.inboundPage = Math.min(totalPagesFor(state.inboundRecords, state.inboundPageSize), state.inboundPage + 1);
+    renderInboundTable();
+  });
+  document.querySelector("#profitShopPageSize")?.addEventListener("change", (event) => {
+    state.profitShopPageSize = Number(event.target.value || 50);
+    state.profitShopPage = 1;
+    localStorage.setItem("profitShopPageSize", String(state.profitShopPageSize));
+    renderProfitSummary();
+  });
+  document.querySelector("#profitSkuPageSize")?.addEventListener("change", (event) => {
+    state.profitSkuPageSize = Number(event.target.value || 10);
+    state.profitSkuPage = 1;
+    localStorage.setItem("profitSkuPageSize", String(state.profitSkuPageSize));
+    renderProfitSummary();
+  });
+  document.querySelector("#profitProductPageSize")?.addEventListener("change", (event) => {
+    state.profitProductPageSize = Number(event.target.value || 10);
+    state.profitProductPage = 1;
+    localStorage.setItem("profitProductPageSize", String(state.profitProductPageSize));
+    renderProfitSummary();
+  });
+  document.querySelector("#profitSummaryShopFilter")?.addEventListener("change", (event) => {
+    state.profitFilters.summaryShopId = event.target.value || "all";
+    state.profitShopPage = 1;
+    localStorage.setItem("profitFilter:summaryShopId", state.profitFilters.summaryShopId);
+    renderProfitSummary();
+  });
+  document.querySelector("#profitSkuShopFilter")?.addEventListener("change", (event) => {
+    state.profitFilters.skuShopId = event.target.value || "all";
+    state.profitSkuPage = 1;
+    localStorage.setItem("profitFilter:skuShopId", state.profitFilters.skuShopId);
+    renderProfitSummary();
+  });
+  document.querySelector("#profitProductShopFilter")?.addEventListener("change", (event) => {
+    state.profitFilters.productShopId = event.target.value || "all";
+    state.profitProductPage = 1;
+    localStorage.setItem("profitFilter:productShopId", state.profitFilters.productShopId);
+    renderProfitSummary();
+  });
+  document.querySelector("#profitChartMetric")?.addEventListener("change", renderProfitSummary);
+  document.querySelector("#profitChartLimit")?.addEventListener("change", renderProfitSummary);
+  document.querySelector("#profitShopPrevPage")?.addEventListener("click", () => {
+    state.profitShopPage = Math.max(1, state.profitShopPage - 1);
+    renderProfitSummary();
+  });
+  document.querySelector("#profitShopNextPage")?.addEventListener("click", () => {
+    state.profitShopPage = Math.min(totalPagesFor(profitShopRows(), state.profitShopPageSize), state.profitShopPage + 1);
+    renderProfitSummary();
+  });
+  document.querySelector("#profitSkuPrevPage")?.addEventListener("click", () => {
+    state.profitSkuPage = Math.max(1, state.profitSkuPage - 1);
+    renderProfitSummary();
+  });
+  document.querySelector("#profitSkuNextPage")?.addEventListener("click", () => {
+    state.profitSkuPage = Math.min(totalPagesFor(profitSkuRows(), state.profitSkuPageSize), state.profitSkuPage + 1);
+    renderProfitSummary();
+  });
+  document.querySelector("#profitProductPrevPage")?.addEventListener("click", () => {
+    state.profitProductPage = Math.max(1, state.profitProductPage - 1);
+    renderProfitSummary();
+  });
+  document.querySelector("#profitProductNextPage")?.addEventListener("click", () => {
+    state.profitProductPage = Math.min(totalPagesFor(profitProductRows(), state.profitProductPageSize), state.profitProductPage + 1);
+    renderProfitSummary();
+  });
+  document.querySelector("#profitTabs")?.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-profit-tab]");
+    if (!tab) return;
+    state.profitTab = tab.dataset.profitTab || "summary";
+    syncProfitTabs();
+  });
+  document.querySelector("#profit")?.addEventListener("click", (event) => {
+    const sortBtn = event.target.closest("[data-profit-sort]");
+    if (sortBtn) {
+      setProfitSort(sortBtn.dataset.profitSort, sortBtn.dataset.profitField);
+      return;
+    }
+    const exportBtn = event.target.closest("[data-profit-export]");
+    if (exportBtn) exportProfitTable(exportBtn.dataset.profitExport);
+  });
+  // 利润汇总：上月
+  document.querySelector("#profitPrevMonth")?.addEventListener("click", () => {
+    state.profitMode = "month";
+    state.profitMonth = prevMonthKey(state.profitMonth);
+    switchProfitMonth(state.profitMonth);
+  });
+  // 利润汇总：自定义查询
+  document.querySelector("#profitQueryBtn")?.addEventListener("click", async () => {
+    const from = document.querySelector("#profitDateFrom")?.value;
+    const to = document.querySelector("#profitDateTo")?.value;
+    if (!from || !to) return;
+    if (from > to) {
+      await showAppAlert("开始日期不能晚于结束日期");
+      return;
+    }
+    state.profitMode = "custom";
+    state.profitCustomFrom = from;
+    state.profitCustomTo = to;
+    loadProfitCustom(from, to);
+  });
+  // 利润汇总：回到当月
+  document.querySelector("#profitResetBtn")?.addEventListener("click", () => {
+    state.profitMode = "month";
+    state.profitMonth = currentMonthKey();
+    switchProfitMonth(state.profitMonth);
+  });
+  document.addEventListener("change", (event) => {
+    const select = event.target.closest("[data-pager-size]");
+    if (!select) return;
+    setErpPagerSize(select.dataset.pagerSize, Number(select.value || 10));
+  });
+  document.addEventListener("click", (event) => {
+    const pagerBtn = event.target.closest("[data-pager-prefix]");
+    if (pagerBtn) {
+      setErpPagerPage(pagerBtn.dataset.pagerPrefix, pagerBtn.dataset.pagerAction, Number(pagerBtn.dataset.page || 0));
+      return;
+    }
+    const btn = event.target.closest("[data-page-action]");
+    if (!btn) return;
+    const action = btn.dataset.pageAction;
+    if (action === "proc-product-first") {
+      state.procProductPage = 1;
+      renderProcProductOptions();
+    } else if (action === "proc-product-prev") {
+      state.procProductPage = Math.max(1, state.procProductPage - 1);
+      renderProcProductOptions();
+    } else if (action === "proc-product-next") {
+      state.procProductPage = Math.min(totalPagesFor(filteredProcProductRows(), state.procProductPageSize), state.procProductPage + 1);
+      renderProcProductOptions();
+    } else if (action === "proc-product-last") {
+      state.procProductPage = totalPagesFor(filteredProcProductRows().slice(0, 100), state.procProductPageSize);
+      renderProcProductOptions();
+    } else if (action === "proc-request-first") {
+      state.procurementRequestPage = 1;
+      renderProcurementRequests();
+    } else if (action === "proc-request-prev") {
+      state.procurementRequestPage = Math.max(1, state.procurementRequestPage - 1);
+      renderProcurementRequests();
+    } else if (action === "proc-request-next") {
+      state.procurementRequestPage = Math.min(totalPagesFor(filteredProcurementRequests(), state.procurementRequestPageSize), state.procurementRequestPage + 1);
+      renderProcurementRequests();
+    } else if (action === "proc-request-last") {
+      state.procurementRequestPage = totalPagesFor(filteredProcurementRequests(), state.procurementRequestPageSize);
+      renderProcurementRequests();
+    } else if (action === "purchase-list-first") {
+      state.purchaseListPage = 1;
+      renderPurchaseList();
+    } else if (action === "purchase-list-prev") {
+      state.purchaseListPage = Math.max(1, state.purchaseListPage - 1);
+      renderPurchaseList();
+    } else if (action === "purchase-list-next") {
+      state.purchaseListPage++;
+      renderPurchaseList();
+    } else if (action === "purchase-list-last") {
+      const products = new Set((state.procurementRequests || []).filter(r => r.status === "submitted").map(r => r.product_id));
+      state.purchaseListPage = totalPagesFor([...products], state.purchaseListPageSize);
+      renderPurchaseList();
+    }
+  });
+}
+
+function setErpPagerSize(prefix, pageSize) {
+  const size = Number(pageSize || 10);
+  if (prefix === "proc-product") {
+    state.procProductPageSize = size;
+    state.procProductPage = 1;
+    renderProcProductOptions();
+  } else if (prefix === "proc-request") {
+    state.procurementRequestPageSize = size;
+    state.procurementRequestPage = 1;
+    renderProcurementRequests();
+  } else if (prefix === "purchase-list") {
+    state.purchaseListPageSize = size;
+    state.purchaseListPage = 1;
+    renderPurchaseList();
+  } else if (prefix === "purchase-history") {
+    state.purchaseHistoryPageSize = size;
+    state.purchaseHistoryPage = 1;
+    renderPurchaseHistory();
+  }
+}
+
+function openProcurementDialogForProduct(productId) {
+  openProcurementDialog();
+  window.setTimeout(() => selectProcProduct(productId), 0);
+}
+
+function setErpPagerPage(prefix, action, pageNumber = 0) {
+  const pager = getErpPagerState(prefix);
+  if (!pager) return;
+  const totalPages = totalPagesFor(pager.rows, pager.pageSize);
+  let page = pager.page;
+  if (action === "first") page = 1;
+  if (action === "prev") page -= 1;
+  if (action === "jump-prev") page -= 5;
+  if (action === "page") page = pageNumber || page;
+  if (action === "jump-next") page += 5;
+  if (action === "next") page += 1;
+  if (action === "last") page = totalPages;
+  setErpPagerValue(prefix, clampPage(page, totalPages));
+  pager.render();
+}
+
+function getErpPagerState(prefix) {
+  if (prefix === "proc-product") return { page: state.procProductPage, pageSize: state.procProductPageSize, rows: limitedProcProductRows(), render: renderProcProductOptions };
+  if (prefix === "proc-request") return { page: state.procurementRequestPage, pageSize: state.procurementRequestPageSize, rows: filteredProcurementRequests(), render: renderProcurementRequests };
+  if (prefix === "purchase-list") return { page: state.purchaseListPage, pageSize: state.purchaseListPageSize, rows: mergedPurchaseListRows(), render: renderPurchaseList };
+  if (prefix === "purchase-history") return { page: state.purchaseHistoryPage, pageSize: state.purchaseHistoryPageSize, rows: purchaseHistoryRows(), render: renderPurchaseHistory };
+  return null;
+}
+
+function setErpPagerValue(prefix, page) {
+  if (prefix === "proc-product") state.procProductPage = page;
+  if (prefix === "proc-request") state.procurementRequestPage = page;
+  if (prefix === "purchase-list") state.purchaseListPage = page;
+  if (prefix === "purchase-history") state.purchaseHistoryPage = page;
+}
+
+function ensureStockAlertPanel() {
+  if (!document.querySelector("#stockTabAlerts")) {
+    const tabs = document.querySelector(".stock-tabs");
+    tabs?.insertAdjacentHTML("afterbegin", `<button id="stockTabAlerts" class="stock-tab active" type="button">库存预警</button>`);
+  }
+  if (!document.querySelector("#stockTabFbp")) {
+    document.querySelector("#stockTabProducts")?.insertAdjacentHTML("afterend", `<button id="stockTabFbp" class="stock-tab" type="button">FBP 库存表</button>`);
+  }
+  if (!document.querySelector("#stockAlertsTable")) {
+    document.querySelector("#suppliersTable")?.insertAdjacentHTML("afterend", `
+      <div id="stockAlertsTable" class="stock-alert-panel" style="display:none;">
+        <div class="stock-alert-head">
+          <div class="stock-alert-status-tabs" id="stockAlertStatusTabs"></div>
+          <div class="stock-alert-actions">
+            <span id="stockAlertSyncStatus" class="hint"></span>
+            <button id="openWarehouseRulesBtn" class="small" type="button">仓库识别规则</button>
+            <button id="syncStockAlertsBtn" class="primary small" type="button">同步 Ozon 库存</button>
+          </div>
+        </div>
+        <div id="stockAlertsContent"></div>
+      </div>
+    `);
+  }
+  if (!document.querySelector("#warehouseRulesDialog")) {
+    document.body.insertAdjacentHTML("beforeend", `
+      <dialog id="warehouseRulesDialog" class="edit-dialog warehouse-rules-dialog">
+        <div class="edit-dialog-header"><h2>仓库识别规则</h2><button id="warehouseRulesClose" class="dialog-close" type="button" title="关闭">×</button></div>
+        <form id="warehouseRuleForm" class="form edit-form warehouse-rule-form">
+          <input name="id" type="hidden" />
+          <label>匹配关键词<input name="pattern" required placeholder="例如 CEL / FBS / Hunchun" /></label>
+          <label>库存类型<select name="stock_type"><option value="fbp_real">FBP 真实库存</option><option value="fbs_virtual">FBS 虚拟库存</option><option value="unknown">未知</option></select></label>
+          <label>优先级<input name="priority" type="number" step="1" value="100" /></label>
+          <label>启用<select name="enabled"><option value="1">启用</option><option value="0">停用</option></select></label>
+          <label class="full">备注<input name="note" placeholder="给团队看的规则说明" /></label>
+          <div class="edit-actions full"><button type="button" id="warehouseRuleReset">新建规则</button><button class="primary" type="submit">保存规则</button></div>
+        </form>
+        <div id="warehouseRulesTable"></div>
+      </dialog>
+    `);
+  }
+}
+
+function bindStockControls() {
+  ensureStockAlertPanel();
+  document.querySelector("#stockSearchInput")?.addEventListener("input", (event) => {
+    state.stockFilters.query = event.target.value.trim();
+    state.stockPage = 1;
+    localStorage.setItem("stockFilter:query", state.stockFilters.query);
+    renderCurrentStockMode();
+  });
+  document.querySelector("#stockShopFilter")?.addEventListener("change", (event) => {
+    state.stockFilters.shopId = event.target.value || "all";
+    state.stockPage = 1;
+    localStorage.setItem("stockFilter:shopId", state.stockFilters.shopId);
+    renderCurrentStockMode();
+  });
+  document.querySelector("#stockDateFrom")?.addEventListener("change", (event) => {
+    state.stockFilters.dateFrom = event.target.value;
+    state.stockPage = 1;
+    localStorage.setItem("stockFilter:dateFrom", state.stockFilters.dateFrom);
+    renderCurrentStockMode();
+  });
+  document.querySelector("#stockDateTo")?.addEventListener("change", (event) => {
+    state.stockFilters.dateTo = event.target.value;
+    state.stockPage = 1;
+    localStorage.setItem("stockFilter:dateTo", state.stockFilters.dateTo);
+    renderCurrentStockMode();
+  });
+  document.querySelector("#stockFilterReset")?.addEventListener("click", () => {
+    state.stockFilters = { query: "", shopId: "all", dateFrom: "", dateTo: "" };
+    for (const key of ["query", "shopId", "dateFrom", "dateTo"]) localStorage.removeItem(`stockFilter:${key}`);
+    state.stockPage = 1;
+    syncStockFilterInputs();
+    renderCurrentStockMode();
+  });
+  document.querySelector("#stockPageSize")?.addEventListener("change", (event) => {
+    state.stockPageSize = Number(event.target.value || 30);
+    state.stockPage = 1;
+    renderCurrentStockMode();
+  });
+  // 库存标签页切换
+  document.querySelector("#stockTabProducts")?.addEventListener("click", () => {
+    state.stockViewMode = "active";
+    state.stockPage = 1;
+    syncStockTabs();
+    syncStockControls((state.products || []).length);
+    renderCurrentStockMode();
+  });
+  document.querySelector("#stockTabFbp")?.addEventListener("click", () => {
+    state.stockViewMode = "fbp";
+    state.stockPage = 1;
+    syncStockTabs();
+    syncStockControls(filterFbpStockRows().length);
+    renderFbpStockStandalone();
+    maybeAutoSyncStockAlerts();
+  });
+  document.querySelector("#stockTabHidden")?.addEventListener("click", () => {
+    state.stockViewMode = "hidden";
+    state.stockPage = 1;
+    syncStockTabs();
+    syncStockControls((state.hiddenProducts || []).length);
+    renderCurrentStockMode();
+  });
+  document.querySelector("#stockTabSuppliers")?.addEventListener("click", () => {
+    state.stockViewMode = "suppliers";
+    syncStockTabs();
+    syncStockControls(0);
+    renderSuppliers();
+  });
+  document.querySelector("#stockTabSkuMappings")?.addEventListener("click", () => {
+    state.stockViewMode = "skuMappings";
+    state.skuMappingPage = 1;
+    state.skuMappingProductFilterId = null;
+    syncStockTabs();
+    syncStockControls((state.products || []).length);
+    renderSkuMappingsTable();
+  });
+  document.querySelector("#stockTabAlerts")?.addEventListener("click", () => {
+    state.stockViewMode = "alerts";
+    state.stockPage = 1;
+    syncStockTabs();
+    syncStockControls((state.stockAlerts || []).length);
+    renderStockAlerts();
+    maybeAutoSyncStockAlerts();
+  });
+  document.querySelector("#stockAlertStatusTabs")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-stock-alert-filter]");
+    if (!button) return;
+    state.stockAlertFilter = button.dataset.stockAlertFilter || "all";
+    localStorage.setItem("stockAlertFilter:type", state.stockAlertFilter);
+    state.stockPage = 1;
+    renderStockAlerts();
+  });
+  document.querySelector("#syncStockAlertsBtn")?.addEventListener("click", () => syncStockAlerts());
+  document.querySelector("#openWarehouseRulesBtn")?.addEventListener("click", openWarehouseRulesDialog);
+  document.querySelector("#warehouseRulesClose")?.addEventListener("click", closeWarehouseRulesDialog);
+  document.querySelector("#warehouseRuleReset")?.addEventListener("click", () => fillWarehouseRuleForm(null));
+  document.querySelector("#warehouseRuleForm")?.addEventListener("submit", saveWarehouseRule);
+  document.querySelector("#warehouseRulesTable")?.addEventListener("click", handleWarehouseRuleTableClick);
   document.querySelector("#stockPrevPage")?.addEventListener("click", () => {
     state.stockPage = Math.max(1, state.stockPage - 1);
-    renderStockTable();
+    renderCurrentStockMode();
   });
   document.querySelector("#stockNextPage")?.addEventListener("click", () => {
-    state.stockPage = Math.min(stockTotalPages(), state.stockPage + 1);
-    renderStockTable();
+    const totalPages = state.stockViewMode === "skuMappings" && state.skuMappingProductFilterId
+      ? stockSkuMappingEditorTotalPages()
+      : stockTotalPages();
+    state.stockPage = Math.min(totalPages, state.stockPage + 1);
+    renderCurrentStockMode();
   });
+  document.querySelector("#createSkuMappingBtn")?.addEventListener("click", () => openSkuMappingDialog());
 }
 
 function normalizeProcurementForm() {
@@ -558,7 +2035,7 @@ function normalizeProcurementForm() {
   if (quantityLabel) setLabelText(quantityLabel, "采购总数");
   if (linkLabel) linkLabel.classList.add("wide-field");
   if (noteLabel) noteLabel.classList.add("wide-field");
-  if (amountLabel && quantityLabel) quantityLabel.before(amountLabel);
+  if (amountLabel && quantityLabel && typeof quantityLabel.before === "function") quantityLabel.before(amountLabel);
   if (!form.elements.shipping_amount && urgencyLabel) {
     const shippingLabel = document.createElement("label");
     shippingLabel.innerHTML = `采购总运费<input name="shipping_amount" type="number" step="0.01" value="0" />`;
@@ -575,10 +2052,41 @@ function onSubmit(selector, url) {
     event.preventDefault();
     if (selector === "#productForm") syncListingReferencePrice();
     const body = Object.fromEntries(new FormData(event.target));
-    // 如果本次创建来源于在线商品，需要额外保留在线 SKU 的上下文关系。
+    
+    // 采购请求表单，支持编辑模式
+    if (selector === "#procurementForm") {
+      if (!body.product_id && !state.selectedProcurementProductId) {
+        await showAppAlert("请先选择产品");
+        return;
+      }
+      body.product_id = body.product_id || state.selectedProcurementProductId;
+      
+      const requestId = body.request_id;
+      if (requestId) {
+        // 编辑模式
+        const row = state.procurementRequests.find(r => Number(r.id) === Number(requestId));
+        if (row) {
+          await api(`/api/procurement/requests/${requestId}`, {
+            method: "PUT",
+            body: JSON.stringify({ ...row, ...body })
+          });
+        }
+      } else {
+        // 新建模式
+        body.person_id = state.currentUserId;
+        await api(url, { method: "POST", body: JSON.stringify(body) });
+      }
+      closeProcurementDialog();
+      await loadAll();
+      state.procurementFilters.status = "pending";
+      state.procurementRequestPage = 1;
+      syncProcurementFilters();
+      renderProcurementRequests();
+      return;
+    }
+    
     const finalUrl = selector === "#productForm" && body.online_product_id ? "/api/online-products/create-product" : url;
     await api(finalUrl, { method: "POST", body: JSON.stringify(body) });
-    if (selector === "#procurementForm") state.selectedProcurementProductId = Number(body.product_id);
     event.target.reset();
     setDefaults();
     if (selector === "#productForm") closeSelectionCreatePanel();
@@ -587,12 +2095,15 @@ function onSubmit(selector, url) {
 }
 
 function bindImageUpload() {
-  document.querySelector("#imageFile").addEventListener("change", (event) => {
+  const imageFile = document.querySelector("#imageFile");
+  const imageData = document.querySelector("#imageData");
+  if (!imageFile || !imageData) return;
+  imageFile.addEventListener("change", (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
-      document.querySelector("#imageData").value = reader.result;
+      imageData.value = reader.result;
     };
     reader.readAsDataURL(file);
   });
@@ -600,7 +2111,8 @@ function bindImageUpload() {
 
 function bindShippingRecommendation() {
   for (const id of ["weightInput", "lengthInput", "widthInput", "heightInput"]) {
-    document.querySelector(`#${id}`).addEventListener("input", updateRecommendation);
+    const el = document.querySelector(`#${id}`);
+    if (el) el.addEventListener("input", updateRecommendation);
   }
   for (const id of ["purchaseCostInput", "domesticShipInput", "purchaseQtyInput", "exchangeRateInput", "returnRateInput", "desiredModeInput", "desiredValueInput", "saleRmbInput"]) {
     const el = document.querySelector(`#${id}`);
@@ -650,7 +2162,9 @@ function renderCelFbsResult(result) {
       <td>${escape(channel.days)}</td>
       <td>${moneyText(channel.amount)}</td>
       <td>${moneyText(channel.commission)}</td>
-      <td>${moneyText(channel.paymentFee + channel.withdrawalFee)}</td>
+      <td>${moneyText(channel.paymentFee)}</td>
+      <td>${moneyText(channel.withdrawalFee)}</td>
+      <td>${moneyText(channel.advertisingCost)}</td>
       <td>${moneyText(channel.expectedReturnLoss)}</td>
       <td class="${channel.profit < 0 ? "loss" : ""}">${moneyText(channel.profit)}</td>
       <td>${num(channel.margin, 2)}%</td>
@@ -674,7 +2188,9 @@ function renderCelFbsResult(result) {
             <th>时效</th>
             <th>运费</th>
             <th>佣金</th>
-            <th>手续费</th>
+            <th>尾程+银行</th>
+            <th>提现费</th>
+            <th>广告</th>
             <th>退货损失</th>
             <th>净利润</th>
             <th>净利率</th>
@@ -700,11 +2216,36 @@ function updateRecommendation() {
   const l = Number(document.querySelector("#lengthInput").value || 15);
   const w = Number(document.querySelector("#widthInput").value || 10);
   const h = Number(document.querySelector("#heightInput").value || 5);
+  const saleRmb = Number(document.querySelector("#saleRmbInput")?.value || 0);
   const longest = Math.max(l, w, h);
   const sum = l + w + h;
-  const recommended = weight <= 500 && longest <= 60 && sum <= 90 ? "air_land" : weight <= 30000 && longest <= 150 && sum <= 310 ? "land" : "manual_review";
-  document.querySelector("#shippingMethod").value = recommended;
-  document.querySelector("#shippingHint").textContent = `推荐配送方式：${methodName(recommended)}，三边和 ${num(sum, 1)}cm，最长边 ${num(longest, 1)}cm`;
+
+  // 推荐配送方式逻辑：
+  // 1. 重量 > 500g，推荐陆运
+  // 2. 售价 < 120 RMB 且重量 > 300g，推荐陆运
+  // 3. 重量 <= 500g、三边和 < 120cm、单边 < 60cm、售价 < 120 RMB、重量 <= 300g，推荐陆空
+  // 4. 其他情况默认陆空
+  let recommended;
+  if (weight > 500) {
+    recommended = "land";
+  } else if (saleRmb > 0 && saleRmb < 120 && weight > 300) {
+    recommended = "land";
+  } else if (weight <= 500 && sum < 120 && longest < 60 && (saleRmb <= 0 || saleRmb >= 120 || weight <= 300)) {
+    recommended = "air_land";
+  } else {
+    recommended = "air_land";
+  }
+
+  // 只有用户没有手动改过配送方式时才自动同步
+  const shippingSelect = document.querySelector("#shippingMethod");
+  if (shippingSelect && !shippingSelect.dataset.userChanged) {
+    shippingSelect.value = recommended;
+  }
+
+  let hintReason = "";
+  if (weight > 500) hintReason = "（重量 > 500g）";
+  else if (saleRmb > 0 && saleRmb < 120 && weight > 300) hintReason = "（售价 < 120 RMB 且重量 > 300g）";
+  document.querySelector("#shippingHint").textContent = `推荐配送方式：${methodName(recommended)}${hintReason}，三边和 ${num(sum, 1)}cm，最长边 ${num(longest, 1)}cm`;
 
   // 反推建议上架价
   calcSuggestedPrice({
@@ -724,19 +2265,19 @@ function updateRecommendation() {
 function syncListingReferencePrice() {
   const saleRmb = Number(document.querySelector("#saleRmbInput")?.value || 0);
   const exchangeRate = Number(document.querySelector("#exchangeRateInput")?.value || currentExchangeRate());
-  const listingRmb = saleRmb ? saleRmb * 2 : 0;
+  const listingRmb = saleRmb ? Math.ceil(saleRmb * 2) : 0;
   const listingRmbInput = document.querySelector("#listingPriceRmbInput");
   const listingRubInput = document.querySelector("#listingPriceRubInput");
-  if (listingRmbInput) listingRmbInput.value = listingRmb ? listingRmb.toFixed(2) : "";
-  if (listingRubInput) listingRubInput.value = listingRmb && exchangeRate ? (listingRmb * exchangeRate).toFixed(2) : "";
+  if (listingRmbInput) listingRmbInput.value = listingRmb ? listingRmb : "";
+  if (listingRubInput) listingRubInput.value = listingRmb && exchangeRate ? Math.ceil(listingRmb * exchangeRate) : "";
 }
 
-// 鈹€鈹€鈹€ 寤鸿涓婃灦浠峰墠绔弽鎺?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-
 /**
- * 鍓嶇杞婚噺鐗堝弽鎺ㄥ缓璁笂鏋朵环锛堜笌鍚庣 celRates 閫昏緫涓€鑷达級
- * @param {object} p - 浜у搧鍙傛暟
- * @param {string} targetSelector - 鏄剧ず缁撴灉鐨勫厓绱犻€夋嫨鍣? */
+/**
+ * 基于简化物流和费率规则，给出目标净利率下的建议上架价。
+ * @param {object} p
+ * @param {string} targetSelector
+ */
 function calcSuggestedPrice(p, targetSelector) {
   const el = document.querySelector(targetSelector);
   if (!el) return;
@@ -752,8 +2293,8 @@ function calcSuggestedPrice(p, targetSelector) {
 
   const exchangeRate = p.exchangeRate || currentExchangeRate();
   const returnRate = p.returnRate || 0.05;
-  const paymentFeeRate = 0.013;
   const withdrawalFeeRate = 0.012;
+  const advertisingRate = 0;
 
   // 简化估算运费
   const weightKg = p.weightKg || 0;
@@ -761,15 +2302,21 @@ function calcSuggestedPrice(p, targetSelector) {
   const maxSide = Math.max(p.l || 15, p.w || 10, p.h || 5);
   const isSmall = weightKg <= 0.5 && maxSide <= 60 && sum <= 90;
 
-  // 使用典型运费估算
+  // 使用典型运费做简化估算
   let airFreightRmb = isSmall ? (weightKg * 1000 * 0.0364 + 3.12) : (weightKg * 1000 * 0.026 + 23.92);
   let landFreightRmb = isSmall ? (weightKg * 1000 * 0.026 + 3.12) : (weightKg * 1000 * 0.01768 + 23.92);
 
   function calcRub(freightRmb) {
     for (const commRate of [0.12, 0.17]) {
-      const denom = 1 - commRate - paymentFeeRate - withdrawalFeeRate - targetMargin;
-      if (denom <= 0) return null;
-      const saleRmb = (purchaseCostPerUnit + freightRmb) * (1 + returnRate) / denom;
+      let saleRmb = Math.max(1, (purchaseCostPerUnit + freightRmb) * 1.5);
+      for (let i = 0; i < 24; i += 1) {
+        const finalMile = saleRmb * 0.014 + (saleRmb < 50 ? 1 : saleRmb >= 750 ? 15 : saleRmb * 0.02);
+        const withdrawal = Math.max(0, saleRmb - finalMile - freightRmb - saleRmb * 0.2) * withdrawalFeeRate;
+        const fixed = purchaseCostPerUnit + freightRmb + (purchaseCostPerUnit + freightRmb) * returnRate + finalMile + withdrawal;
+        const next = fixed / Math.max(0.01, 1 - commRate - advertisingRate - targetMargin);
+        if (Math.abs(next - saleRmb) < 0.01) break;
+        saleRmb = Math.max(1, next);
+      }
       const rub = Math.round(saleRmb * exchangeRate);
       const correctComm = rub <= 1500 ? 0.12 : 0.17;
       if (correctComm === commRate) return rub;
@@ -793,12 +2340,10 @@ function calcSuggestedPrice(p, targetSelector) {
   el.textContent = lines.length ? `目标净利率 ${Math.round(targetMargin * 100)}%：${lines.join("；")}` : "";
 }
 
-// 鈹€鈹€鈹€ 閫夊搧缂栬緫寮圭獥 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-
 function closeEditDialog() {
   const dialog = document.querySelector("#editProductDialog");
   dialog.classList.remove("visible");
-  // 绉婚櫎閬僵
+  // 关闭自定义遮罩
   const backdrop = document.querySelector(".edit-dialog-backdrop");
   if (backdrop) backdrop.remove();
 }
@@ -806,13 +2351,14 @@ function closeEditDialog() {
 function bindEditDialog() {
   const dialog = document.querySelector("#editProductDialog");
   const form = document.querySelector("#editProductForm");
+  if (!dialog || !form) return;
 
-  // 鐐瑰嚮閬僵鍏抽棴
+  // 点击背景关闭
   dialog.addEventListener("click", (e) => {
     if (e.target === dialog || e.target.classList.contains("edit-dialog-backdrop")) closeEditDialog();
   });
 
-  // 绑定关闭按钮
+  // 缁戝畾鍏抽棴鎸夐挳
   const closeBtn = document.querySelector("#editCancelBtn");
   const closeBtn2 = document.querySelector("#editCancelBtn2");
   if (closeBtn) closeBtn.addEventListener("click", closeEditDialog);
@@ -820,23 +2366,28 @@ function bindEditDialog() {
   const cancelSubmit = form.querySelector(".cancel-btn");
   if (cancelSubmit) cancelSubmit.addEventListener("click", closeEditDialog);
 
-  // ESC 键关闭
+  // ESC 关闭
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && dialog.classList.contains("visible")) closeEditDialog();
   });
 
-  // 缂栬緫鍥剧墖涓婁紶
-  document.querySelector("#editImageFile").addEventListener("change", (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      document.querySelector("#editImageData").value = reader.result;
-      document.querySelector("#editImagePreview").src = reader.result;
-      document.querySelector("#editImagePreview").style.display = "block";
-    };
-    reader.readAsDataURL(file);
-  });
+  // 编辑图片上传
+  const editImageFile = document.querySelector("#editImageFile");
+  const editImageData = document.querySelector("#editImageData");
+  const editImagePreview = document.querySelector("#editImagePreview");
+  if (editImageFile && editImageData && editImagePreview) {
+    editImageFile.addEventListener("change", (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        editImageData.value = reader.result;
+        editImagePreview.src = reader.result;
+        editImagePreview.style.display = "block";
+      };
+      reader.readAsDataURL(file);
+    });
+  }
 
   // 编辑配送方式推荐和建议价
   for (const id of ["editWeight", "editLength", "editWidth", "editHeight", "editPurchaseCost", "editDomesticShip", "editPurchaseQty", "editExchangeRate", "editReturnRate", "editDesiredMode", "editDesiredValue", "editSaleRmbInput"]) {
@@ -844,12 +2395,14 @@ function bindEditDialog() {
     if (el) el.addEventListener("input", updateEditRecommendation);
   }
 
-  // 琛ㄥ崟鎻愪氦
+  // 绑定编辑表单提交
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const id = form.dataset.productId;
     const body = Object.fromEntries(new FormData(form));
-    // 濡傛灉娌℃湁鏂颁笂浼犲浘鐗囷紝淇濈暀鍘熸潵鐨?image_url
+    body.updated_at = form.dataset.updatedAt || "";
+    const shouldOfferProfitRecalc = productProfitFieldsChanged(form, body);
+    // 没有重新上传图片时，沿用原始 image_url
     if (!body.image_url) {
       body.image_url = form.dataset.originalImageUrl || "";
     }
@@ -860,14 +2413,19 @@ function bindEditDialog() {
       await api(`/api/products/${id}`, { method: "PUT", body: JSON.stringify(body) });
       closeEditDialog();
       await loadAll();
+      if (shouldOfferProfitRecalc && await showAppConfirm("影响利润的库存字段已变更，是否立即重算这个库存产品关联的订单利润？")) {
+        await recalculateProductProfits(null, Number(id));
+      }
+    } catch (err) {
+      await showAppAlert(err.message || "保存失败");
     } finally {
       btn.disabled = false;
       btn.textContent = "保存修改";
     }
   });
 
-  // 事件委托：编辑/删除按钮
-  document.addEventListener("click", (e) => {
+  // 事件委托：编辑 / 删除按钮
+  document.addEventListener("click", async (e) => {
     const btn = e.target.closest(".edit-product-btn");
     if (btn) {
       const product = state.products.find((p) => p.id === Number(btn.dataset.id));
@@ -878,7 +2436,7 @@ function bindEditDialog() {
     if (deleteBtn) {
       const product = state.products.find((p) => p.id === Number(deleteBtn.dataset.id));
       if (!product) return;
-      if (!confirm(`确定隐藏「${product.name}」吗？历史采购、入库、库存流水和订单会保留，可在“已隐藏产品”里恢复。`)) return;
+      if (!await showAppConfirm(`确定隐藏「${product.name}」吗？历史采购、入库、库存流水和订单会保留，可在已隐藏产品里恢复。`)) return;
       state.stockPage = 1;
       api(`/api/products/${product.id}`, { method: "DELETE" }).then(loadAll);
       return;
@@ -889,6 +2447,21 @@ function bindEditDialog() {
       if (!product) return;
       state.stockPage = 1;
       api(`/api/products/${product.id}/restore`, { method: "POST", body: JSON.stringify({}) }).then(loadAll);
+      return;
+    }
+    const skuDetailBtn = e.target.closest(".stock-sku-detail-btn");
+    if (skuDetailBtn) {
+      openStockSkuDetailDialog(Number(skuDetailBtn.dataset.productId));
+      return;
+    }
+    const orderProfitBtn = e.target.closest(".stock-order-profit-detail-btn");
+    if (orderProfitBtn) {
+      openStockOrderDetailDialog(Number(orderProfitBtn.dataset.productId), "profit");
+      return;
+    }
+    const cancelDetailBtn = e.target.closest(".stock-cancel-detail-btn");
+    if (cancelDetailBtn) {
+      openStockOrderDetailDialog(Number(cancelDetailBtn.dataset.productId), "cancel");
     }
   });
 }
@@ -914,7 +2487,7 @@ function updateEditRecommendation() {
     exchangeRate: Number(form?.querySelector("[name='exchange_rate']")?.value || currentExchangeRate()),
     returnRate: Number(form?.querySelector("[name='return_rate']")?.value || 0.05),
     mode: form?.querySelector("[name='desired_profit_mode']")?.value || "margin",
-    value: Number(form?.querySelector("[name='desired_profit_value']")?.value || 20),
+    value: Number(form?.querySelector("[name='desired_profit_value']")?.value || 40),
     weightKg: weight / 1000,
     l, w, h
   }, "#editSuggestedPriceHint");
@@ -923,22 +2496,23 @@ function updateEditRecommendation() {
 function syncEditListingReferencePrice() {
   const saleRmb = Number(document.querySelector("#editSaleRmbInput")?.value || 0);
   const exchangeRate = Number(document.querySelector("#editExchangeRate")?.value || currentExchangeRate());
-  const listingRmb = saleRmb ? saleRmb * 2 : 0;
+  const listingRmb = saleRmb ? Math.ceil(saleRmb * 2) : 0;
   const listingRmbInput = document.querySelector("#editListingPriceRmbInput");
   const listingRubInput = document.querySelector("#editListingPriceRubInput");
-  if (listingRmbInput) listingRmbInput.value = listingRmb ? listingRmb.toFixed(2) : "";
-  if (listingRubInput) listingRubInput.value = listingRmb && exchangeRate ? (listingRmb * exchangeRate).toFixed(2) : "";
+  if (listingRmbInput) listingRmbInput.value = listingRmb ? listingRmb : "";
+  if (listingRubInput) listingRubInput.value = listingRmb && exchangeRate ? Math.ceil(listingRmb * exchangeRate) : "";
 }
 
 function openEditDialog(product) {
   const dialog = document.querySelector("#editProductDialog");
-  // 闃叉閲嶅鎵撳紑
+  // 参数校验
   if (!product?.id) return;
   if (dialog.classList.contains("visible")) return;
 
   const form = document.querySelector("#editProductForm");
   form.dataset.productId = product.id;
   form.dataset.originalImageUrl = product.image_url || "";
+  form.dataset.updatedAt = product.updated_at || "";
 
   fillPeople("editOwnerPerson");
   fillPeople("editCreatorPerson");
@@ -951,7 +2525,7 @@ function openEditDialog(product) {
   setVal(form, "source_platform", product.source_platform || "1688");
   setVal(form, "shipping_method", product.shipping_method || "air_land");
   setVal(form, "desired_profit_mode", product.desired_profit_mode || "margin");
-  setVal(form, "desired_profit_value", product.desired_profit_value ?? 20);
+  setVal(form, "desired_profit_value", product.desired_profit_value ?? 40);
   setVal(form, "return_rate", product.return_rate ?? 0.05);
   setVal(form, "purchase_cost", product.purchase_cost ?? 0);
   setVal(form, "domestic_shipping", product.domestic_shipping ?? 0);
@@ -967,8 +2541,9 @@ function openEditDialog(product) {
   syncEditListingReferencePrice();
   setVal(form, "purchase_url", product.purchase_url || "");
   setVal(form, "supplier_note", product.supplier_note || "");
+  form.dataset.profitSnapshot = JSON.stringify(pickProductProfitFields(Object.fromEntries(new FormData(form))));
 
-  // 鍥剧墖棰勮
+  // 更新编辑图片预览
   const preview = document.querySelector("#editImagePreview");
   if (product.image_url) {
     preview.src = product.image_url;
@@ -981,23 +2556,21 @@ function openEditDialog(product) {
   document.querySelector("#editImageData").value = "";
   document.querySelector("#editImageFile").value = "";
 
-  // 鏇存柊鎺ㄨ崘鏂囧瓧
+  // 刷新编辑推荐
   updateEditRecommendation();
 
-  // 璁剧疆寮圭獥鏍囬
+  // 设置标题
   document.querySelector("#editDialogTitle").textContent = `编辑选品：${product.name}`;
 
-  // 鎵嬪姩鎺у埗鏄剧ず锛堟浛浠?showModal锛屽畬鍏ㄩ伩鍏嶆祻瑙堝櫒鍏煎闂锛?  // 鍏堢Щ闄ゆ棫閬僵
+  // 旧弹窗依赖自定义遮罩和 visible 类，这里保持现有展示方式。
   const oldBackdrop = document.querySelector(".edit-dialog-backdrop");
   if (oldBackdrop) oldBackdrop.remove();
-  // 鍒涘缓閬僵
+  if (!dialog.open) dialog.showModal();
   const backdrop = document.createElement("div");
   backdrop.className = "edit-dialog-backdrop";
   backdrop.addEventListener("click", closeEditDialog);
   document.body.appendChild(backdrop);
-  // 鏄剧ず寮圭獥
   dialog.classList.add("visible");
-  // 鑱氱劍鍒扮涓€涓緭鍏ユ
   dialog.querySelector("input, select")?.focus();
 }
 
@@ -1006,31 +2579,300 @@ function setVal(form, name, value) {
   if (el) el.value = value;
 }
 
-// 鈹€鈹€鈹€ 鏁版嵁鍔犺浇 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+const productProfitFieldNames = [
+  "shipping_method",
+  "purchase_cost",
+  "domestic_shipping",
+  "handling_fee",
+  "purchase_quantity",
+  "package_weight_g",
+  "length_cm",
+  "width_cm",
+  "height_cm",
+  "air_sale_price_rmb",
+  "listing_price_rub",
+  "exchange_rate",
+  "return_rate",
+  "desired_profit_mode",
+  "desired_profit_value"
+];
+
+function pickProductProfitFields(values = {}) {
+  const picked = {};
+  for (const name of productProfitFieldNames) {
+    const raw = values[name] ?? "";
+    picked[name] = name === "shipping_method" || name === "desired_profit_mode"
+      ? String(raw || "")
+      : String(Number(raw || 0));
+  }
+  return picked;
+}
+
+function productProfitFieldsChanged(form, body) {
+  try {
+    const before = JSON.parse(form.dataset.profitSnapshot || "{}");
+    const after = pickProductProfitFields(body);
+    return productProfitFieldNames.some((name) => before[name] !== after[name]);
+  } catch {
+    return false;
+  }
+}
+
+function currentMonthKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function prevMonthKey(monthKey) {
+  const [y, m] = monthKey.split("-").map(Number);
+  const pm = m === 1 ? 12 : m - 1;
+  const py = m === 1 ? y - 1 : y;
+  return `${py}-${String(pm).padStart(2, "0")}`;
+}
+
+function monthRange(monthKey) {
+  // 杩斿洖 [dateFrom, dateTo]锛屽 "2026-05" 鈫?["2026-05-01", "2026-05-31"]
+  const [y, m] = monthKey.split("-").map(Number);
+  const lastDay = new Date(y, m, 0).getDate();
+  return [`${monthKey}-01`, `${monthKey}-${String(lastDay).padStart(2, "0")}`];
+}
+
+function profitMonthRange(monthKey) {
+  const [from, to] = monthRange(monthKey);
+  return monthKey === currentMonthKey() ? [from, todayInputValue()] : [from, to];
+}
+
+async function switchProfitMonth(monthKey) {
+  // 浼樺厛浠庣紦瀛樺彇锛屾病鏈夊啀璇锋眰
+  if (state.profitCache[monthKey]) {
+    state.profitSummary = state.profitCache[monthKey];
+    state.profitShopPage = 1;
+    state.profitSkuPage = 1;
+    state.profitProductPage = 1;
+    renderProfitSummary();
+    return;
+  }
+  const [from, to] = profitMonthRange(monthKey);
+  state.profitLoading = true;
+  renderProfitSummary();
+  try {
+    const data = await api(`/api/profit-summary?from=${from}&to=${to}`);
+    state.profitCache[monthKey] = data;
+    state.profitSummary = data;
+  } catch (e) {
+    console.error("利润汇总加载失败", e);
+  }
+  state.profitLoading = false;
+  state.profitShopPage = 1;
+  state.profitSkuPage = 1;
+  state.profitProductPage = 1;
+  renderProfitSummary();
+}
+
+async function loadProfitCustom(from, to) {
+  const cacheKey = `${from}~${to}`;
+  if (state.profitCache[cacheKey]) {
+    state.profitSummary = state.profitCache[cacheKey];
+    state.profitShopPage = 1;
+    state.profitSkuPage = 1;
+    state.profitProductPage = 1;
+    renderProfitSummary();
+    return;
+  }
+  state.profitLoading = true;
+  renderProfitSummary();
+  try {
+    const data = await api(`/api/profit-summary?from=${from}&to=${to}`);
+    state.profitCache[cacheKey] = data;
+    state.profitSummary = data;
+  } catch (e) {
+    console.error("利润汇总加载失败", e);
+  }
+  state.profitLoading = false;
+  state.profitShopPage = 1;
+  state.profitSkuPage = 1;
+  state.profitProductPage = 1;
+  renderProfitSummary();
+}
 
 async function loadAll() {
-  // 首屏并行加载全局主数据，保证多个模块读到的是同一批状态快照。
-  const [systemInfo, exchangeRate, exchangeRates, products, hiddenProducts, people, shops, onlineProducts, inboundRecords, outboundRecords, procurementSummary, procurementRequests, purchaseOrders, pendingInbound, orders, profitSummary] = await Promise.all([
-    api("/api/system/info"),
-    api("/api/exchange-rate/current"),
-    api("/api/exchange-rates"),
-    api("/api/products"),
-    api("/api/products/hidden"),
-    api("/api/people"),
-    api("/api/shops"),
-    api("/api/online-products"),
-    api("/api/inbound-records"),
-    api("/api/outbound-records"),
-    api("/api/procurement/summary"),
-    api("/api/procurement/requests"),
-    api("/api/procurement/purchase-orders"),
-    api("/api/procurement/pending-inbound"),
-    api("/api/orders"),
-    api("/api/profit-summary")
-  ]);
-  Object.assign(state, { systemInfo, exchangeRate, exchangeRates, products, hiddenProducts, people, shops, onlineProducts, inboundRecords, outboundRecords, procurementSummary, procurementRequests, purchaseOrders, pendingInbound, orders, profitSummary });
+  // 初始化当前利润月份
+  state.profitMonth = currentMonthKey();
+  const cm = state.profitMonth;
+  const pm = prevMonthKey(cm);
+
+  const requests = [
+    ["systemInfo", "/api/system/info", null],
+    ["exchangeRate", "/api/exchange-rate/current", null],
+    ["exchangeRates", "/api/exchange-rates", []],
+    ["products", "/api/products", []],
+    ["hiddenProducts", "/api/products/hidden", []],
+    ["people", "/api/people", []],
+    ["shops", "/api/shops", []],
+    ["onlineProducts", "/api/online-products", []],
+    ["skuMappings", "/api/mappings", []],
+    ["stockAlertPayload", "/api/stock-alerts", { rows: [], meta: {} }],
+    ["stockWarehouseRules", "/api/stock-warehouse-rules", []],
+    ["inboundRecords", "/api/inbound-records", []],
+    ["outboundRecords", "/api/outbound-records", []],
+    ["procurementRequests", "/api/procurement/requests", []],
+    ["purchaseOrders", "/api/procurement/purchase-orders", []],
+    ["orderPayload", orderQueryUrl(), { rows: [], total: 0, counts: {}, mode: "paged" }],
+    ["suppliers", "/api/suppliers", []],
+    ["logisticsRules", "/api/logistics-rules", []],
+    ["orderQualityRules", "/api/order-quality-rules", []],
+    ["financeSummary", "/api/ozon-finance/summary", { summary: {}, recent: [] }],
+    ["profitCurrentMonth", `/api/profit-summary?from=${profitMonthRange(cm)[0]}&to=${profitMonthRange(cm)[1]}`, { summary: {}, byShop: [], bySku: [], byProduct: [] }],
+    ["profitPrevMonth", `/api/profit-summary?from=${monthRange(pm)[0]}&to=${monthRange(pm)[1]}`, { summary: {}, byShop: [], bySku: [], byProduct: [] }]
+  ];
+
+  const settled = await Promise.allSettled(requests.map(([, url]) => api(url)));
+  const payload = {};
+  const failures = [];
+  settled.forEach((result, index) => {
+    const [key, url, fallback] = requests[index];
+    if (result.status === "fulfilled") {
+      payload[key] = result.value;
+    } else {
+      payload[key] = fallback;
+      failures.push({ key, url, error: result.reason?.message || String(result.reason || "未知错误") });
+    }
+  });
+
+  if (failures.length) {
+    console.warn("[loadAll] 部分接口加载失败，已使用降级数据：", failures);
+  }
+
+  state.profitCache[cm] = payload.profitCurrentMonth;
+  state.profitCache[pm] = payload.profitPrevMonth;
+  state.profitSummary = payload.profitCurrentMonth;
+  applyOrderPayload(payload.orderPayload);
+  Object.assign(state, {
+    systemInfo: payload.systemInfo,
+    exchangeRate: payload.exchangeRate,
+    exchangeRates: payload.exchangeRates,
+    products: payload.products,
+    hiddenProducts: payload.hiddenProducts,
+    people: payload.people,
+    shops: payload.shops,
+    onlineProducts: payload.onlineProducts,
+    skuMappings: payload.skuMappings,
+    stockAlerts: payload.stockAlertPayload?.rows || [],
+    stockAlertMeta: payload.stockAlertPayload?.meta || {},
+    stockWarehouseRules: payload.stockWarehouseRules,
+    inboundRecords: payload.inboundRecords,
+    outboundRecords: payload.outboundRecords,
+    procurementRequests: payload.procurementRequests,
+    purchaseOrders: payload.purchaseOrders,
+    suppliers: payload.suppliers,
+    logisticsRules: payload.logisticsRules,
+    orderQualityRules: payload.orderQualityRules,
+    financeSummary: payload.financeSummary
+  });
+  syncCurrentUserFromPeople();
   renderAll();
   restoreCurrentView();
+}
+
+async function refreshAfterOrderSync() {
+  const [orderPayload, outboundRecords, products, profitSummary] = await Promise.all([
+    api(orderQueryUrl()),
+    api("/api/outbound-records"),
+    api("/api/products"),
+    api(`/api/profit-summary?from=${profitActiveDateFrom()}&to=${profitActiveDateTo()}`)
+  ]);
+  applyOrderPayload(orderPayload);
+  Object.assign(state, { outboundRecords, products, profitSummary });
+  state.profitCache = {};
+  state.profitCache[profitActiveCacheKey()] = profitSummary;
+  renderOrdersTable();
+  renderOutboundTable();
+  renderStockTable();
+  renderProfitSummary();
+}
+
+function orderQueryUrl() {
+  const params = new URLSearchParams({
+    paged: "1",
+    page: String(state.orderFilters.page || 1),
+    pageSize: String(state.orderFilters.pageSize || 30),
+    status: state.orderFilters.status || "all",
+    shopId: state.orderFilters.shopId || "all",
+    dateFrom: state.orderFilters.dateFrom || "",
+    dateTo: state.orderFilters.dateTo || "",
+    searchType: state.orderFilters.searchType || "order",
+    searchQuery: state.orderFilters.searchQuery || "",
+    markFilter: state.orderFilters.markFilter || "all",
+    printFilter: state.orderFilters.status === "awaiting_deliver" ? (state.orderFilters.printFilter || "all") : "all",
+    printView: state.orderFilters.printView || "all",
+    sortMode: state.orderFilters.sortMode || "ordered"
+  });
+  return `/api/orders?${params.toString()}`;
+}
+
+function applyOrderPayload(payload) {
+  if (Array.isArray(payload)) {
+    state.orders = payload;
+    state.orderMeta = { total: payload.length, counts: {}, mode: "legacy" };
+    return;
+  }
+  state.orders = payload?.rows || [];
+  state.orderMeta = {
+    total: Number(payload?.total || 0),
+    counts: payload?.counts || {},
+    mode: "paged"
+  };
+  const totalPages = Math.max(1, Math.ceil(state.orderMeta.total / state.orderFilters.pageSize));
+  if (state.orderFilters.page > totalPages) state.orderFilters.page = totalPages;
+}
+
+async function reloadOrdersPage() {
+  const requestedPage = state.orderFilters.page;
+  applyOrderPayload(await api(orderQueryUrl()));
+  if (state.orderFilters.page !== requestedPage) {
+    applyOrderPayload(await api(orderQueryUrl()));
+  }
+  renderOrdersTable();
+}
+
+async function loadAllPreserveOrderPosition() {
+  const snapshot = captureOrderTablePosition();
+  await loadAll();
+  restoreOrderTablePosition(snapshot);
+}
+
+function captureOrderTablePosition() {
+  if (state.currentView !== "orders") return null;
+  const wrap = document.querySelector("#ordersTable .table-wrap");
+  return {
+    page: state.orderFilters.page,
+    top: wrap?.scrollTop || 0
+  };
+}
+
+function restoreOrderTablePosition(snapshot) {
+  if (!snapshot || state.currentView !== "orders") return;
+  state.orderFilters.page = snapshot.page || state.orderFilters.page;
+  renderOrdersTable();
+  window.requestAnimationFrame(() => {
+    const wrap = document.querySelector("#ordersTable .table-wrap");
+    if (wrap) wrap.scrollTop = snapshot.top || 0;
+  });
+}
+
+function profitActiveDateFrom() {
+  if (state.profitMode === "custom") return state.profitCustomFrom || monthRange(state.profitMonth || currentMonthKey())[0];
+  return profitMonthRange(state.profitMonth || currentMonthKey())[0];
+}
+
+function profitActiveDateTo() {
+  if (state.profitMode === "custom") return state.profitCustomTo || monthRange(state.profitMonth || currentMonthKey())[1];
+  return profitMonthRange(state.profitMonth || currentMonthKey())[1];
+}
+
+function profitActiveCacheKey() {
+  if (state.profitMode === "custom") return `${profitActiveDateFrom()}~${profitActiveDateTo()}`;
+  return state.profitMonth || currentMonthKey();
 }
 
 function bindOrderControls() {
@@ -1038,84 +2880,729 @@ function bindOrderControls() {
     const button = event.target.closest("button[data-status]");
     if (!button) return;
     state.orderFilters.status = button.dataset.status;
+    resetOrderSubFilters();
     state.orderFilters.page = 1;
     localStorage.setItem("orderFilter:status", state.orderFilters.status);
-    renderOrdersTable();
+    reloadOrdersPage();
   });
   document.querySelector("#orderPageSize")?.addEventListener("change", (event) => {
     state.orderFilters.pageSize = Number(event.target.value || 30);
     state.orderFilters.page = 1;
     localStorage.setItem("orderFilter:pageSize", String(state.orderFilters.pageSize));
-    renderOrdersTable();
+    reloadOrdersPage();
   });
   document.querySelector("#orderPrevPage")?.addEventListener("click", () => {
     state.orderFilters.page = Math.max(1, state.orderFilters.page - 1);
-    renderOrdersTable();
+    reloadOrdersPage();
   });
   document.querySelector("#orderNextPage")?.addEventListener("click", () => {
     const totalPages = orderTotalPages();
     state.orderFilters.page = Math.min(totalPages, state.orderFilters.page + 1);
-    renderOrdersTable();
+    reloadOrdersPage();
   });
   document.querySelector("#orderDateFrom")?.addEventListener("change", (event) => {
     state.orderFilters.dateFrom = event.target.value;
     state.orderFilters.page = 1;
     localStorage.setItem("orderFilter:dateFrom", state.orderFilters.dateFrom);
-    renderOrdersTable();
+    reloadOrdersPage();
   });
   document.querySelector("#orderDateTo")?.addEventListener("change", (event) => {
     state.orderFilters.dateTo = event.target.value;
     state.orderFilters.page = 1;
     localStorage.setItem("orderFilter:dateTo", state.orderFilters.dateTo);
-    renderOrdersTable();
+    reloadOrdersPage();
   });
   document.querySelector("#orderDateReset")?.addEventListener("click", () => {
-    state.orderFilters.dateFrom = defaultDateFrom(30);
+    state.orderFilters.dateFrom = orderDefaultDateFrom();
     state.orderFilters.dateTo = todayInputValue();
     state.orderFilters.page = 1;
     localStorage.setItem("orderFilter:dateFrom", state.orderFilters.dateFrom);
     localStorage.setItem("orderFilter:dateTo", state.orderFilters.dateTo);
-    renderOrdersTable();
+    reloadOrdersPage();
   });
+  document.querySelector("#syncOrdersIncrementalBtn")?.addEventListener("click", syncOzonIncremental);
+  document.querySelector("#cancelOrderSyncBtn")?.addEventListener("click", cancelOrderSync);
+  document.querySelector("#orderMoreBtn")?.addEventListener("click", () => {
+    document.querySelector("#orderMoreMenu")?.classList.toggle("visible");
+  });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".order-more-wrap")) document.querySelector("#orderMoreMenu")?.classList.remove("visible");
+  });
+  document.querySelector("#orderMoreMenu")?.addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-order-bulk]");
+    if (!button) return;
+    document.querySelector("#orderMoreMenu")?.classList.remove("visible");
+    if (button.dataset.orderBulk === "print") {
+      const selected = selectedOrderIds();
+      await printOrderLabels(selected, { source: "bulk" });
+      return;
+    }
+    await showAppAlert(`${button.textContent.trim()} 功能入口已预留，后续接入真实批量处理。`);
+  });
+  document.querySelector("#openQualityRulesBtn")?.addEventListener("click", openQualityRulesDialog);
+  document.querySelector("#qualityRulesClose")?.addEventListener("click", closeQualityRulesDialog);
+  document.querySelector("#qualityRulesCancel")?.addEventListener("click", closeQualityRulesDialog);
+  document.querySelector("#qualityRulesForm")?.addEventListener("submit", saveQualityRules);
+  document.querySelectorAll("input[name='orderPrintFilter']").forEach((input) => {
+    input.checked = input.value === state.orderFilters.printFilter;
+    input.addEventListener("change", () => {
+      state.orderFilters.printFilter = input.value;
+      state.orderFilters.page = 1;
+      localStorage.setItem("orderFilter:printFilter", state.orderFilters.printFilter);
+      reloadOrdersPage();
+    });
+  });
+
+  // 订单搜索控件
+  const orderSearchType = document.querySelector("#orderSearchType");
+  const orderSearchInput = document.querySelector("#orderSearchInput");
+  const orderSearchBtn = document.querySelector("#orderSearchBtn");
+
+  if (orderSearchType) {
+    orderSearchType.value = state.orderFilters.searchType || "order";
+    orderSearchType.addEventListener("change", (event) => {
+      state.orderFilters.searchType = event.target.value;
+      localStorage.setItem("orderFilter:searchType:v2", state.orderFilters.searchType);
+    });
+  }
+
+  if (orderSearchInput) {
+    orderSearchInput.value = state.orderFilters.searchQuery || "";
+    orderSearchInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        state.orderFilters.searchQuery = orderSearchInput.value.trim();
+        state.orderFilters.page = 1;
+        localStorage.setItem("orderFilter:searchQuery", state.orderFilters.searchQuery);
+        reloadOrdersPage();
+      }
+    });
+  }
+
+  if (orderSearchBtn) {
+    orderSearchBtn.addEventListener("click", () => {
+      state.orderFilters.searchQuery = orderSearchInput?.value.trim() || "";
+      state.orderFilters.page = 1;
+      localStorage.setItem("orderFilter:searchQuery", state.orderFilters.searchQuery);
+      reloadOrdersPage();
+    });
+  }
+}
+
+function resetOrderSubFilters() {
+  state.orderFilters.markFilter = "all";
+  state.orderFilters.printView = "all";
+  state.orderFilters.printFilter = "all";
+  state.orderFilters.sortMode = "ordered";
+  localStorage.setItem("orderFilter:markFilter", state.orderFilters.markFilter);
+  localStorage.setItem("orderFilter:printView", state.orderFilters.printView);
+  localStorage.setItem("orderFilter:printFilter", state.orderFilters.printFilter);
+  localStorage.setItem("orderFilter:sortMode", state.orderFilters.sortMode);
 }
 
 function renderAll() {
-  renderSystemInfo();
+  const steps = [
+    ["renderSystemInfo", () => renderSystemInfo()],
+    ["fillSelects", () => fillSelects()],
+    ["syncConfigTabs", () => syncConfigTabs()],
+    ["renderExchangeRateConfig", () => renderExchangeRateConfig()],
+    ["renderProfitRulesMap", () => renderProfitRulesMap()],
+    ["renderLogisticsRules", () => renderLogisticsRules()],
+    ["renderSelectionTable", () => renderSelectionTable()],
+    ["renderStockTable", () => renderStockTable()],
+    ["renderOnlineTable", () => renderOnlineTable()],
+    ["syncProcurementFilters", () => syncProcurementFilters()],
+    ["renderProcProductOptions", () => renderProcProductOptions()],
+    ["updateProcProductPreview", () => updateProcProductPreview()],
+    ["renderProcurementRequests", () => renderProcurementRequests()],
+    ["renderInboundAlert", () => renderInboundAlert()],
+    ["renderInboundTable", () => renderInboundTable()],
+    ["renderOutboundTableBase", () => renderTable("outboundTable", state.outboundRecords, [
+      ["time", "出库时间", (r) => date(r.outbound_time || r.created_at)],
+      ["order", "订单", (r) => r.order_ref],
+      ["shop", "店铺", (r) => r.shop_name],
+      ["sku", "SKU", (r) => r.ozon_sku],
+      ["product", "产品", (r) => r.product_name],
+      ["qty", "数量", (r) => r.quantity],
+      ["reason", "原因", (r) => outboundReason(r.reason)],
+      ["status", "状态", (r) => tag(r.status, "green")]
+    ])],
+    ["renderOutboundTable", () => renderOutboundTable()],
+    ["renderPeopleTable", () => renderPeopleTable()],
+    ["renderShopsTable", () => renderShopsTable()],
+    ["renderOrdersTable", () => renderOrdersTable()],
+    ["renderProfitSummary", () => renderProfitSummary()],
+    ["renderExceptionWorkbench", () => renderExceptionWorkbench()]
+  ];
+  for (const [name, run] of steps) {
+    try {
+      run();
+    } catch (error) {
+      console.warn(`[renderAll] ${name} 失败`, error);
+    }
+  }
+}
+
+function buildExceptionTasks() {
+  const tasks = [];
+  const orders = state.orders || [];
+  for (const row of orders) {
+    const work = orderWorkbenchState(row);
+    const context = exceptionOrderContext(row);
+    const profitValue = Number(row.actual_profit || row.estimated_profit || 0);
+    const printed = Boolean(row.printed_at || row.label_printed_at || row.shipping_label_printed_at);
+    const canPrint = orderCanPrintLabel(row);
+    if (["unbound", "stock_issue"].includes(work.key)) {
+      tasks.push({
+        type: work.key === "stock_issue" ? "order_stock_shortage" : "order_binding",
+        level: work.key === "stock_issue" ? "danger" : "warning",
+        title: work.key === "stock_issue" ? "订单库存不足" : "订单待绑定库存",
+        subject: row.posting_number || row.order_number || `订单 ${row.id}`,
+        meta: `${row.shop_name || ""} / ${date(row.ordered_at) || ""}`,
+        detail: work.key === "stock_issue" ? "已绑定库存但数量不足，需要采购或调整库存。" : "订单 SKU 还没有绑定实际库存，利润和出库都会不准。",
+        action: "order-unbound",
+        orderId: row.id,
+        ...context
+      });
+    }
+    if (profitValue < 0 && !["cancelled", "unbound"].includes(work.key)) {
+      tasks.push({
+        type: "profit",
+        level: "danger",
+        title: "订单利润为负",
+        subject: row.posting_number || row.order_number || `订单 ${row.id}`,
+        meta: `${row.shop_name || ""} / ${exceptionMoneyText(profitValue)}`,
+        detail: "通常是库存绑定、克重、佣金或物流规则异常，需要核验并重算利润。",
+        action: "order-profit",
+        orderId: row.id,
+        ...context
+      });
+    }
+    const deadlineInfo = orderExceptionDeadlineInfo(row);
+    if (deadlineInfo) {
+      tasks.push({
+        type: "deadline",
+        level: "danger",
+        title: deadlineInfo.reason,
+        subject: row.posting_number || row.order_number || `订单 ${row.id}`,
+        meta: `${row.shop_name || ""} / ${deadlineInfo.meta}`,
+        detail: deadlineInfo.detail,
+        action: "order-overdue",
+        orderId: row.id,
+        deadline_reason: deadlineInfo.reason,
+        ...context
+      });
+    }
+  }
+  for (const row of state.stockAlerts || []) {
+    for (const warning of row.warnings || []) {
+      if (!["local", "fbp", "fbs", "mapping"].includes(warning.type)) continue;
+      tasks.push({
+        type: `stock_${warning.type}`,
+        level: warning.level || "warning",
+        title: warning.text || "库存预警",
+        subject: row.product_name || row.inventory_id || `库存 ${row.product_id}`,
+        meta: `${row.inventory_id || ""} / 本地 ${row.local_stock ?? 0}`,
+        detail: row.suggestion || "需要人工核验库存和 SKU 绑定关系。",
+        action: `stock-${warning.type}`,
+        productId: row.product_id,
+        image_url: row.image_url || "",
+        product_name: row.product_name || row.inventory_id || "",
+        inventory_id: row.inventory_id || "",
+        sku_text: stockAlertSkuText(row)
+      });
+    }
+  }
+  return tasks.sort((a, b) => exceptionPriority(b) - exceptionPriority(a));
+}
+
+function exceptionOrderContext(row) {
+  const productName = firstCsvValue(row.product_names) || firstMappedValue(row.sku_names) || row.posting_number || "";
+  const skuText = firstCsvValue(row.skus || row.unbound_skus);
+  const inventoryId = firstCsvValue(row.inventory_ids || row.product_codes);
+  const imageUrl = firstCsvValue(row.image_urls) || firstMappedValue(row.sku_images);
+  const weight = firstCsvValue(row.package_weights);
+  const dimensions = firstCsvValue(row.package_dimensions);
+  return {
+    image_url: imageUrl,
+    product_name: productName === "Unbound product" ? "待绑定库存商品" : productName,
+    sku_text: skuText,
+    inventory_id: inventoryId && inventoryId !== "UNBOUND" ? inventoryId : "",
+    dimensions_text: [weight ? `克重 ${weight}g` : "", dimensions && dimensions !== "0x0x0" ? `尺寸 ${dimensions}cm` : ""].filter(Boolean).join(" / "),
+    productId: Number(firstCsvValue(row.product_ids)) || undefined
+  };
+}
+
+function firstCsvValue(value) {
+  return String(value || "").split(",").map((item) => item.trim()).filter(Boolean)[0] || "";
+}
+
+function firstMappedValue(value) {
+  const first = String(value || "").split("||").map((item) => item.trim()).filter(Boolean)[0] || "";
+  const index = first.indexOf(":");
+  return index >= 0 ? first.slice(index + 1).trim() : first;
+}
+
+function stockAlertSkuText(row) {
+  const skus = Array.isArray(row.skus) ? row.skus : [];
+  return skus.slice(0, 3).map((item) => [item.shop_name, item.ozon_sku, item.name].filter(Boolean).join(" / ")).join("；");
+}
+
+function exceptionPriority(task) {
+  const level = { danger: 3, warning: 2, info: 1 }[task.level] || 0;
+  const typeBoost = task.type === "order_binding" ? 0.4 : task.type === "profit" ? 0.3 : 0;
+  return level + typeBoost;
+}
+
+function orderExceptionDeadlineInfo(row) {
+  const values = [row.status, row.tracking_stage].map((value) => String(value || "").toLowerCase());
+  if (orderMatchesCancelledValues(values) || orderMatchesDeliveredValues(values)) return null;
+  const now = new Date();
+  const deadline = row.shipment_deadline_at ? new Date(row.shipment_deadline_at) : null;
+  const isShipped = orderMatchesDeliveringValues(values) || orderIsShipped(row);
+  if (!isShipped && deadline && !Number.isNaN(deadline.getTime()) && deadline < now) {
+    return {
+      reason: "发货超时",
+      meta: `发货截止 ${date(row.shipment_deadline_at) || "-"}`,
+      detail: "订单超过备货/发货截止时间仍未进入发运状态，需要优先处理。"
+    };
+  }
+  if (!orderMatchesDeliveringValues(values)) return null;
+  const orderedAt = row.ordered_at ? new Date(row.ordered_at) : null;
+  if (!orderedAt || Number.isNaN(orderedAt.getTime())) return null;
+  const shipping = exceptionShippingMethodKey(row);
+  const threshold = shipping === "land" ? 20 : 15;
+  const days = Math.floor((now.getTime() - orderedAt.getTime()) / (24 * 60 * 60 * 1000));
+  if (days <= threshold) return null;
+  const methodLabel = shipping === "land" ? "陆运" : "陆空";
+  return {
+    reason: `签收超时-${methodLabel}`,
+    meta: `${methodLabel} ${days} 天 / 标准 ${threshold} 天`,
+    detail: `订单已进入运输但超过 ${methodLabel} 预计签收时长，需要核验物流节点。`
+  };
+}
+
+function exceptionShippingMethodKey(row) {
+  const text = `${row.product_shipping_methods || ""} ${row.delivery_method_name || ""} ${row.logistics_channel || ""} ${row.warehouse_name || ""}`.toLowerCase();
+  if (text.includes("land") || text.includes("陆运")) return "land";
+  return "air_land";
+}
+
+async function refreshExceptionWorkbench() {
+  if (state.exceptionWorkbenchLoading) return;
+  state.exceptionWorkbenchLoading = true;
+  renderExceptionWorkbench();
+  try {
+    state.exceptionWorkbench = await api("/api/exception-workbench");
+  } catch (error) {
+    console.warn("exception workbench fallback", error);
+    state.exceptionWorkbench = null;
+  } finally {
+    state.exceptionWorkbenchLoading = false;
+    renderExceptionWorkbench();
+  }
+}
+
+function renderExceptionWorkbench() {
+  const target = document.querySelector("#exceptionWorkbench");
+  if (!target) return;
+  const serverPayload = state.exceptionWorkbench;
+  const tasks = serverPayload?.rows || buildExceptionTasks();
+  const filteredTasks = filterExceptionTasks(tasks);
+  const pageSize = Number(state.exceptionPageSize || 50);
+  const totalPages = Math.max(1, Math.ceil(filteredTasks.length / pageSize));
+  state.exceptionPage = Math.min(Math.max(1, Number(state.exceptionPage || 1)), totalPages);
+  const pageStart = (state.exceptionPage - 1) * pageSize;
+  const pageTasks = filteredTasks.slice(pageStart, pageStart + pageSize);
+  const counters = exceptionFilterCounters(tasks);
+  target.innerHTML = `
+    <div class="exception-topbar ds-toolbar">
+      <div class="exception-filter-tabs">
+        ${renderExceptionFilterTab("profit", "利润为负", counters.profit)}
+        ${renderExceptionFilterTab("deadline", "订单超时", counters.deadline)}
+        ${renderExceptionFilterTab("stock", "库存不足", counters.stock)}
+        ${renderExceptionFilterTab("binding", "未绑定库存", counters.binding)}
+      </div>
+      <label class="field compact">
+        <span>搜索异常</span>
+        <input id="exceptionSearchInput" class="ds-input" placeholder="订单号 / SKU / 库存 / 商品名称" value="${escape(state.exceptionSearch || "")}" />
+      </label>
+    </div>
+    <div class="exception-workbench-body">
+      <section class="exception-lane">
+        <div class="exception-lane-head"><h3>${escape(exceptionFilterLabel(state.exceptionFilter))}</h3><span>${escape(filteredTasks.length)} 条</span></div>
+        <div class="exception-task-head">
+          <span>商品 / SKU / 库存</span>
+          <span>异常内容</span>
+          <span>处理</span>
+        </div>
+        ${state.exceptionWorkbenchLoading ? `<div class="empty">正在刷新全量异常任务...</div>` : filteredTasks.length ? `<div class="exception-task-list">${pageTasks.map(renderExceptionTask).join("")}</div>` : `<div class="empty">当前筛选下暂无异常任务。</div>`}
+      </section>
+    </div>
+    <div class="table-footer pager exception-pager">
+      <label class="pager-size">每页显示<select id="exceptionPageSize">
+        ${[50, 100, 200].map((size) => `<option value="${size}" ${pageSize === size ? "selected" : ""}>${size} 条</option>`).join("")}
+      </select></label>
+      <button type="button" id="exceptionFirstPage" ${state.exceptionPage <= 1 ? "disabled" : ""} title="首页">首页</button>
+      <button type="button" id="exceptionPrevPage" ${state.exceptionPage <= 1 ? "disabled" : ""} title="上一页">上一页</button>
+      <span id="exceptionPageInfo">第 ${escape(state.exceptionPage)} / ${escape(totalPages)} 页，共 ${escape(filteredTasks.length)} 条</span>
+      <button type="button" id="exceptionNextPage" ${state.exceptionPage >= totalPages ? "disabled" : ""} title="下一页">下一页</button>
+      <button type="button" id="exceptionLastPage" ${state.exceptionPage >= totalPages ? "disabled" : ""} title="末页">末页</button>
+    </div>
+  `;
+  bindExceptionWorkbenchActions(target);
+}
+
+function renderExceptionFilterTab(key, label, count) {
+  return `<button type="button" data-exception-filter="${escape(key)}" class="${state.exceptionFilter === key ? "active" : ""}">${escape(label)}<b>${escape(count)}</b></button>`;
+}
+
+function normalizeStoredExceptionFilter(value) {
+  return ["profit", "deadline", "stock", "binding"].includes(value) ? value : "profit";
+}
+
+function exceptionFilterCounters(tasks) {
+  return {
+    profit: tasks.filter((item) => item.type === "profit").length,
+    deadline: tasks.filter((item) => item.type === "deadline").length,
+    stock: tasks.filter((item) => isStockExceptionTask(item)).length,
+    binding: tasks.filter((item) => item.type === "order_binding").length
+  };
+}
+
+function filterExceptionTasks(tasks) {
+  const filter = normalizeStoredExceptionFilter(state.exceptionFilter);
+  let rows = tasks;
+  if (filter === "profit") rows = tasks.filter((item) => item.type === "profit");
+  else if (filter === "deadline") rows = tasks.filter((item) => item.type === "deadline");
+  else if (filter === "stock") rows = tasks.filter((item) => isStockExceptionTask(item));
+  else if (filter === "binding") rows = tasks.filter((item) => item.type === "order_binding");
+  const keyword = normalizeSearchText(state.exceptionSearch);
+  if (!keyword) return rows;
+  return rows.filter((item) => normalizeSearchText(exceptionTaskSearchText(item)).includes(keyword));
+}
+
+function exceptionTaskSearchText(task) {
+  return [
+    task.title,
+    task.subject,
+    task.meta,
+    task.detail,
+    task.product_name,
+    task.sku_text,
+    task.inventory_id,
+    task.dimensions_text
+  ].filter(Boolean).join(" ");
+}
+
+function normalizeSearchText(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isOrderExceptionTask(task) {
+  return task.type?.startsWith("order") || ["print", "profit", "deadline"].includes(task.type);
+}
+
+function isStockExceptionTask(task) {
+  return task.type === "order_stock_shortage" || task.type?.startsWith("stock");
+}
+
+function exceptionFilterLabel(filter) {
+  return {
+    profit: "利润为负",
+    deadline: "订单超时",
+    stock: "库存不足",
+    binding: "未绑定库存"
+  }[normalizeStoredExceptionFilter(filter)] || "利润为负";
+}
+
+function exceptionMetric(label, value, note) {
+  return `<article><span>${escape(label)}</span><strong>${escape(value)}</strong><small>${escape(note)}</small></article>`;
+}
+
+function renderExceptionTask(task) {
+  const productTitle = task.product_name || task.subject || "";
+  const subjectLine = task.product_name ? task.subject : "";
+  const skuLine = task.sku_text ? `SKU：${task.sku_text}` : "";
+  const inventoryLine = task.inventory_id ? `库存：${task.inventory_id}` : "";
+  const dimensionLine = task.dimensions_text || "";
+  const profitContextLine = task.profit_context_text || "";
+  const deadlineLine = task.deadline_reason ? `<small>超时原因：${escape(task.deadline_reason)}</small>` : "";
+  const imageHtml = task.image_url ? image(task.image_url, productTitle) : `<div class="exception-thumb-placeholder">SKU</div>`;
+  return `<article class="exception-task ${escape(task.level || "info")}">
+    <div class="exception-task-product">
+      ${imageHtml}
+      <div>
+        <strong>${escape(productTitle)}</strong>
+        ${subjectLine ? `<small>${escape(subjectLine)}</small>` : ""}
+        ${skuLine ? `<small>${escape(skuLine)}</small>` : ""}
+        ${inventoryLine ? `<small>${escape(inventoryLine)}</small>` : ""}
+        ${dimensionLine ? `<small>${escape(dimensionLine)}</small>` : ""}
+        ${profitContextLine ? `<small>${escape(profitContextLine)}</small>` : ""}
+      </div>
+    </div>
+    <div class="exception-task-content">
+      <span class="exception-task-type">${escape(task.title || "")}</span>
+      <small>${escape(task.meta || "")}</small>
+      ${deadlineLine}
+      <p>${escape(task.detail || "")}</p>
+    </div>
+    <div class="exception-task-actions">
+      <button type="button" class="small exception-action-btn" data-action="${escape(task.action)}" data-order-id="${escape(task.orderId || "")}" data-product-id="${escape(task.productId || "")}">去处理</button>
+      ${task.productId ? `<button type="button" class="small exception-action-btn" data-action="stock-edit-product" data-product-id="${escape(task.productId)}">编辑库存</button>` : ""}
+      ${task.productId ? `<button type="button" class="small exception-action-btn" data-action="stock-recalculate-profit" data-product-id="${escape(task.productId)}">重算关联利润</button>` : ""}
+      ${task.type === "profit" && task.onlineProductId ? `<button type="button" class="small online-product-action-btn" data-online-product-id="${escape(task.onlineProductId)}" data-action="zero_stock">库存清零</button>` : ""}
+      ${task.type === "profit" && task.onlineProductId ? `<button type="button" class="small online-product-action-btn danger-link" data-online-product-id="${escape(task.onlineProductId)}" data-action="archive">归档商品</button>` : ""}
+      ${task.type === "profit" && task.onlineProductId ? `<button type="button" class="small online-product-action-btn danger-link" data-online-product-id="${escape(task.onlineProductId)}" data-action="zero_and_archive">清零并归档</button>` : ""}
+      <button type="button" class="small exception-state-btn" data-task-id="${escape(task.id || "")}" data-status="handled">已处理</button>
+      <button type="button" class="small exception-state-btn danger-link" data-task-id="${escape(task.id || "")}" data-status="ignored">蹇界暐</button>
+    </div>
+  </article>`;
+}
+
+function bindExceptionWorkbenchActions(root) {
+  root.querySelectorAll("[data-exception-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.exceptionFilter = normalizeStoredExceptionFilter(button.dataset.exceptionFilter);
+      state.exceptionPage = 1;
+      localStorage.setItem("exceptionWorkbench:filter", state.exceptionFilter);
+      renderExceptionWorkbench();
+    });
+  });
+  root.querySelector("#exceptionSearchInput")?.addEventListener("input", (event) => {
+    state.exceptionSearch = event.target.value || "";
+    localStorage.setItem("exceptionWorkbench:search", state.exceptionSearch);
+    clearTimeout(state.exceptionSearchTimer);
+    state.exceptionSearchTimer = setTimeout(() => {
+      state.exceptionPage = 1;
+      renderExceptionWorkbench();
+    }, 220);
+  });
+  root.querySelector("#exceptionPageSize")?.addEventListener("change", (event) => {
+    state.exceptionPageSize = Number(event.target.value || 50);
+    state.exceptionPage = 1;
+    localStorage.setItem("exceptionWorkbench:pageSize", String(state.exceptionPageSize));
+    renderExceptionWorkbench();
+  });
+  root.querySelector("#exceptionPrevPage")?.addEventListener("click", () => {
+    state.exceptionPage = Math.max(1, Number(state.exceptionPage || 1) - 1);
+    renderExceptionWorkbench();
+  });
+  root.querySelector("#exceptionNextPage")?.addEventListener("click", () => {
+    state.exceptionPage = Number(state.exceptionPage || 1) + 1;
+    renderExceptionWorkbench();
+  });
+  root.querySelector("#exceptionFirstPage")?.addEventListener("click", () => {
+    state.exceptionPage = 1;
+    renderExceptionWorkbench();
+  });
+  root.querySelector("#exceptionLastPage")?.addEventListener("click", () => {
+    const tasks = filterExceptionTasks(state.exceptionWorkbench?.rows || buildExceptionTasks());
+    state.exceptionPage = Math.max(1, Math.ceil(tasks.length / Number(state.exceptionPageSize || 50)));
+    renderExceptionWorkbench();
+  });
+  root.querySelectorAll(".exception-action-btn").forEach((button) => {
+    button.addEventListener("click", () => handleExceptionAction(button));
+  });
+  root.querySelectorAll(".exception-state-btn").forEach((button) => {
+    button.addEventListener("click", () => markExceptionTaskState(button));
+  });
+  root.querySelectorAll(".online-product-action-btn").forEach((button) => {
+    button.addEventListener("click", () => runOnlineProductAction(button));
+  });
+}
+
+async function runOnlineProductAction(button) {
+  const onlineProductId = Number(button.dataset.onlineProductId || 0);
+  const action = button.dataset.action || "";
+  if (!onlineProductId || !action) return;
+  const labels = {
+    zero_stock: "库存清零",
+    archive: "归档商品",
+    zero_and_archive: "清零并归档"
+  };
+  const label = labels[action] || "操作在线商品";
+  if (!await showAppConfirm(`确认执行「${label}」？这会调用 Ozon API 修改真实在线商品。`)) return;
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "执行中...";
+  try {
+    const result = await api("/api/online-products/action", {
+      method: "POST",
+      body: JSON.stringify({ online_product_id: onlineProductId, action })
+    });
+    await loadAll();
+    await refreshExceptionWorkbench();
+    await showAppAlert(`Ozon 在线商品操作完成：${label}。执行步骤 ${result.steps?.length || 0} 个。`);
+  } catch (error) {
+    await showAppAlert(error.message || `${label}失败`);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+async function markExceptionTaskState(button) {
+  const taskId = button.dataset.taskId || "";
+  const status = button.dataset.status || "handled";
+  if (!taskId) return;
+  if (status === "ignored" && !await showAppConfirm("确认忽略这条异常？忽略后它不会出现在当前异常列表里。")) return;
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "处理中...";
+  try {
+    await api("/api/exception-workbench/tasks/state", {
+      method: "POST",
+      body: JSON.stringify({ task_id: taskId, status })
+    });
+    await refreshExceptionWorkbench();
+  } catch (error) {
+    await showAppAlert(error.message || "更新异常状态失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+function handleExceptionAction(button) {
+  const action = button.dataset.action || "";
+  const orderId = Number(button.dataset.orderId || 0);
+  const productId = Number(button.dataset.productId || 0);
+  if (action === "order-print") {
+    state.orderFilters.status = "awaiting_deliver";
+    state.orderFilters.printView = "unprinted";
+    state.orderFilters.page = 1;
+    localStorage.setItem("orderFilter:status", "awaiting_deliver");
+    localStorage.setItem("orderFilter:printView", "unprinted");
+    showView("orders");
+    renderOrdersTable();
+    scrollToOrderRow(orderId);
+    return;
+  }
+  if (action === "order-profit") {
+    showView("orders");
+    renderOrdersTable();
+    scrollToOrderRow(orderId);
+    if (orderId) openOrderProfitDetailDialog(orderId);
+    return;
+  }
+  if (action.startsWith("order")) {
+    if (action === "order-unbound") {
+      state.orderFilters.status = "unbound";
+      state.orderFilters.page = 1;
+      localStorage.setItem("orderFilter:status", "unbound");
+    }
+    showView("orders");
+    renderOrdersTable();
+    scrollToOrderRow(orderId);
+    return;
+  }
+  if (action.startsWith("stock")) {
+    if (action === "stock-recalculate-profit") {
+      recalculateProductProfits(button, productId);
+      return;
+    }
+    if (action === "stock-edit-product") {
+      const product = state.products.find((item) => String(item.id) === String(productId));
+      if (product) openEditDialog(product);
+      else showAppAlert("没有找到这条库存产品，请先刷新库存数据。");
+      return;
+    }
+    state.stockViewMode = action === "stock-fbp" ? "fbp" : "alerts";
+    state.stockAlertFilter = action.replace("stock-", "") || "all";
+    if (!["local", "fbp", "fbs", "mapping"].includes(state.stockAlertFilter)) state.stockAlertFilter = "action";
+    state.stockPage = 1;
+    localStorage.setItem("stockAlertFilter:type", state.stockAlertFilter);
+    showView("stock");
+    syncStockTabs();
+    renderCurrentStockMode();
+    scrollToStockAlertProduct(productId);
+  }
+}
+
+async function recalculateProductProfits(button, productId) {
+  if (!productId) return;
+  const original = button?.textContent || "重算关联利润";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "重算中...";
+  }
+  try {
+    const result = await api(`/api/products/${productId}/recalculate-profits`, { method: "POST" });
+    state.profitCache = {};
+    await Promise.all([
+      refreshOrdersOnly(),
+      refreshCurrentProfitSummary(),
+      refreshExceptionWorkbench()
+    ]);
+    await showAppAlert(`已重算 ${result.updated || 0} 条订单明细，关联 SKU 映射 ${result.mappings || 0} 个。`);
+  } catch (error) {
+    await showAppAlert(error.message || "重算关联利润失败");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = original;
+    }
+  }
+}
+
+async function refreshCurrentProfitSummary() {
+  if (state.profitMode === "custom" && state.profitCustomFrom && state.profitCustomTo) {
+    await loadProfitCustom(state.profitCustomFrom, state.profitCustomTo);
+    return;
+  }
+  await switchProfitMonth(state.profitMonth || currentMonthKey());
+}
+
+function scrollToOrderRow(orderId) {
+  window.setTimeout(() => {
+    const row = document.querySelector(`#ordersTable tr[data-row-id="${orderId}"], #ordersTable tr[data-order-id="${orderId}"], #ordersTable tr[data-id="${orderId}"]`);
+    if (!row) return;
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    row.classList.add("row-flash");
+    window.setTimeout(() => row.classList.remove("row-flash"), 1800);
+  }, 80);
+}
+
+function scrollToStockAlertProduct(productId) {
+  window.setTimeout(() => {
+    const row = document.querySelector(`#stockAlertsContent tr[data-product-id="${productId}"]`);
+    if (!row) return;
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    row.classList.add("row-flash");
+    window.setTimeout(() => row.classList.remove("row-flash"), 1800);
+  }, 80);
+}
+
+function exceptionMoneyText(value) {
+  return `楼${num(value, 2)}`;
+}
+
+async function refreshPeopleConfig() {
+  state.people = await api("/api/people");
+  syncCurrentUserFromPeople();
   fillSelects();
-  renderConfigAccountInfo(currentUser);
+  renderPeopleTable();
+}
+
+async function refreshShopsConfig() {
+  state.shops = await api("/api/shops");
+  renderShopsTable();
+  syncOrderControls();
+  syncOnlineControls();
+  syncOutboundFilterInputs();
+}
+
+async function refreshExchangeRateConfig() {
+  const [exchangeRate, exchangeRates] = await Promise.all([
+    api("/api/exchange-rate/current"),
+    api("/api/exchange-rates")
+  ]);
+  Object.assign(state, { exchangeRate, exchangeRates });
   renderExchangeRateConfig();
-  renderTable("selectionTable", state.products, visibleColumns("selection"));
-  renderStockTable();
-  renderOnlineTable();
-  syncProcurementFilters();
-  renderProcProductOptions();
-  updateProcProductPreview();
-  renderProcurementRequests();
-  renderProcurementWorkspace();
-  renderInboundAlert();
-  renderTable("inboundTable", state.inboundRecords, [
-    ["time", "时间", (r) => date(r.created_at)],
-    ["image", "图片", (r) => image(r.product_image_url)],
-    ["product", "产品名称", (r) => strong(r.product_name, r.product_code || "")],
-    ["person", "归属人", (r) => r.person_name],
-    ["qty", "数量", (r) => r.quantity],
-    ["amount", "货款/运费", (r) => `${money(r.amount)}<small>运费 ${money(r.shipping_amount)}</small>`],
-    ["unit", "单价", (r) => money(r.unit_cost)],
-    ["status", "状态", (r) => tag(inboundWaitDays(r) > 2 && r.status === "pending_arrival" ? "超 2 天待验收" : inboundStatus(r.status), r.status === "approved" ? "green" : inboundWaitDays(r) > 2 ? "red" : "amber")],
-    ["actions", "操作", (r) => `<span class="action-row">${r.status === "pending_arrival" ? `<button class="linklike approve-inbound-btn" data-id="${r.id}">验收通过</button>` : ""}<button class="linklike edit-inbound-record-btn" data-id="${r.id}">编辑</button><button class="linklike danger delete-inbound-record-btn" data-id="${r.id}">删除</button></span>`]
-  ]);
-  bindInboundActions();
-  renderTable("outboundTable", state.outboundRecords, [
-    ["time", "时间", (r) => date(r.created_at)],
-    ["order", "订单", (r) => r.order_ref],
-    ["shop", "店铺", (r) => r.shop_name],
-    ["sku", "SKU", (r) => r.ozon_sku],
-    ["product", "产品", (r) => r.product_name],
-    ["qty", "数量", (r) => r.quantity],
-    ["reason", "原因", (r) => outboundReason(r.reason)],
-    ["status", "状态", (r) => tag(r.status, "green")]
-  ]);
-  renderOutboundTable();
+}
+
+function renderPeopleTable() {
   renderTable("peopleTable", state.people, [
     ["name", "姓名", (r) => r.name],
     ["username", "登录名", (r) => r.username],
@@ -1123,6 +3610,9 @@ function renderAll() {
     ["active", "状态", (r) => tag(r.active ? "启用" : "停用", r.active ? "green" : "red")],
     ["actions", "操作", (r) => `<span class="action-row"><button class="linklike edit-person-btn" data-id="${r.id}">编辑</button><button class="linklike danger delete-person-btn" data-id="${r.id}">停用</button><button class="linklike danger hard-delete-person-btn" data-id="${r.id}">删除</button></span>`]
   ]);
+}
+
+function renderShopsTable() {
   renderTable("shopsTable", state.shops, [
     ["name", "店铺", (r) => r.name],
     ["legal", "主体", (r) => r.legal_entity],
@@ -1131,8 +3621,6 @@ function renderAll() {
     ["status", "状态", (r) => tag(r.status, r.status === "active" ? "green" : "amber")],
     ["actions", "操作", (r) => `<span class="action-row"><button class="linklike edit-shop-btn" data-id="${r.id}">编辑</button><button class="linklike danger delete-shop-btn" data-id="${r.id}">删除</button></span>`]
   ]);
-  renderOrdersTable();
-  renderProfitSummary();
 }
 
 function bindExchangeRateForm() {
@@ -1144,7 +3632,8 @@ function bindExchangeRateForm() {
     try {
       await api("/api/exchange-rate", { method: "POST", body: JSON.stringify(body) });
       if (status) status.textContent = "汇率已保存，新选品会使用最新汇率。";
-      await loadAll();
+      closeExchangeRateCreateDialog();
+      await refreshExchangeRateConfig();
     } catch (error) {
       if (status) status.textContent = `保存失败：${error.message}`;
     }
@@ -1173,53 +3662,535 @@ function renderExchangeRateConfig() {
   }
 }
 
+function renderProfitRulesMap() {
+  const target = document.querySelector("#profitRulesMap");
+  if (!target) return;
+  const onlineRows = state.onlineProducts || [];
+  const mappedRows = state.skuMappings || [];
+  const commissionRows = onlineRows
+    .map((row) => ({ row, commissions: parseJson(row.commissions_json) }))
+    .filter((item) => Array.isArray(item.commissions) && item.commissions.length);
+  const fbsRates = commissionRows
+    .map((item) => item.commissions.find((fee) => String(fee.sale_schema || fee.schema || "").toUpperCase() === "FBS") || item.commissions[0])
+    .map((fee) => Number(fee?.percent ?? fee?.commission ?? fee?.rate ?? 0))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .map((value) => value > 1 ? value : value * 100);
+  const avgCommission = fbsRates.length ? fbsRates.reduce((sum, value) => sum + value, 0) / fbsRates.length : 0;
+  const productsWithRule = mappedRows.filter((row) => Number(row.active) !== 0 && onlineRows.some((item) => String(item.id) === String(row.online_product_id) && item.commissions_json)).length;
+  const rate = Number(state.exchangeRate?.rate || currentExchangeRate());
+  const finance = state.financeSummary?.summary || {};
+  const recentFinance = state.financeSummary?.recent || [];
+  const steps = [
+    ["销售收入", "订单售价按同步时的售价冻结，RUB 通过订单汇率换算到 RMB。", "已接入"],
+    ["采购成本", "采购单价、国内均摊运费、包装/处理费来自库存产品。", "已接入"],
+    ["国际物流", "当前按库存产品运送方式和 CEL rFBS 本地规则匹配重量、尺寸、售价档位。", "本地规则"],
+    ["Ozon 佣金", "优先使用在线商品同步回来的 commissions_json；没有数据时回退到价格阈值规则。", "已升级"],
+    ["Ozon 服务费", "当前为估算：末公里/银行 + 提现/回款；后续接财务明细后用真实账单覆盖。", "估算"],
+    ["退货/取消", "区分取消订单、未认购、退货和质检单；需要损失的订单再计入损失。", "进行中"],
+    ["实际财务", "下一步接 Ozon finance 明细，保存每笔订单的佣金、配送、补偿、调整项。", "下一步"]
+  ];
+  target.innerHTML = `
+    <section class="profit-rule-hero">
+      <div>
+        <h2>利润公式和 Ozon 费用规则</h2>
+        <p>这里集中展示系统当前的利润算法、Ozon 官方费用来源，以及后续接入真实财务对账的路径。订单利润会先按预估规则计算，待 Ozon 财务明细同步后再用真实费用校准。</p>
+      </div>
+      <div class="profit-rule-badges">
+        <span>当前汇率 <b>${num(rate, 3)}</b> RUB/CNY</span>
+        <span>已同步佣金 SKU <b>${commissionRows.length}</b></span>
+        <span>绑定可用佣金 <b>${productsWithRule}</b></span>
+        <span>平均佣金 <b>${avgCommission ? `${num(avgCommission, 1)}%` : "--"}</b></span>
+      </div>
+    </section>
+    <section class="profit-rule-grid">
+      <div class="profit-rule-card">
+        <h3>当前预估利润公式</h3>
+        <div class="formula-strip">
+          <span>销售收入</span><i>-</i><span>采购成本</span><i>-</i><span>国内运费</span><i>-</i><span>国际物流</span><i>-</i><span>Ozon 佣金</span><i>-</i><span>尾程+银行</span><i>-</i><span>退货预损</span><i>=</i><b>预估利润</b>
+        </div>
+        <p>用于未完成订单、库存利润预估和选品定价。现在 Ozon 佣金已经优先读取官方同步字段，物流和尾程仍使用本地规则。</p>
+      </div>
+      <div class="profit-rule-card">
+        <h3>实际利润目标模型</h3>
+        <div class="formula-strip actual">
+          <span>订单收入</span><i>-</i><span>真实采购</span><i>-</i><span>真实 Ozon 费用</span><i>-</i><span>真实物流/退货</span><i>+</i><span>补偿调整</span><i>=</i><b>实际利润</b>
+        </div>
+        <p>用于已签收、已取消、已结算后的核账。下一阶段会新增财务明细表，做到预估、实际、差异三栏对比。</p>
+      </div>
+    </section>
+    <section class="profit-rule-flow">
+      ${steps.map(([title, text, status]) => `
+        <div class="profit-rule-step">
+          <span>${escape(status)}</span>
+          <strong>${escape(title)}</strong>
+          <p>${escape(text)}</p>
+        </div>
+      `).join("")}
+    </section>
+    <section class="profit-rule-grid">
+      <div class="profit-rule-card">
+        <h3>Ozon 费用分类</h3>
+        <ul class="fee-list">
+          <li><b>销售佣金</b><span>按销售模式、类目、售价、订单日期计算。</span></li>
+          <li><b>配送至买家</b><span>FBS/FBP、仓库、配送方式都会影响费用。</span></li>
+          <li><b>退货/取消/未认购</b><span>不是所有取消都算损失，质检单和未发货取消应单独剔除。</span></li>
+          <li><b>其他服务</b><span>推广、订阅、仓储、操作、补偿和调整项。</span></li>
+        </ul>
+      </div>
+      <div class="profit-rule-card">
+        <h3>后续优先级</h3>
+        <ol class="priority-list">
+          <li>把 Ozon 商品佣金同步结果作为订单佣金主来源。</li>
+          <li>新增 Ozon 财务明细表，保存订单真实扣费。</li>
+          <li>利润详情页显示预估、实际、差异。</li>
+          <li>把 CEL、中国邮政、FBP 等物流费做成可配置规则。</li>
+        </ol>
+      </div>
+    </section>
+    <section class="profit-rule-card">
+      <div class="profit-finance-head">
+        <div>
+          <h3>Ozon 真实财务明细</h3>
+          <p>同步后会按货件号保存交易、佣金、配送和服务费用，并回写已匹配订单的实际利润。</p>
+        </div>
+        <button id="syncOzonFinanceBtn" type="button" class="primary small">同步当前利润区间财务</button>
+      </div>
+      <div class="profit-rule-badges finance">
+        <span>交易数 <b>${escape(finance.operations || 0)}</b></span>
+        <span>明细行 <b>${escape(finance.rows || 0)}</b></span>
+        <span>匹配货件 <b>${escape(finance.postings || 0)}</b></span>
+        <span>已识别费用 <b>${moneyPlain(finance.fees || 0)}</b></span>
+      </div>
+      ${recentFinance.length ? `<div class="table-wrap"><table class="table compact-table"><thead><tr><th>货件编号</th><th>店铺</th><th>财务日期</th><th>费用</th><th>行数</th></tr></thead><tbody>${recentFinance.map((row) => `<tr><td>${escape(row.posting_number || "-")}</td><td>${escape(row.shop_name || "-")}</td><td>${escape(date(row.operation_date) || "-")}</td><td>${money(row.fee_amount || 0)}</td><td>${escape(row.rows || 0)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">还没有同步 Ozon 财务明细。</div>`}
+    </section>
+  `;
+}
+
+function renderLogisticsRules() {
+  ensureLogisticsConfigTab();
+  const rows = state.logisticsRules || [];
+  renderTable("logisticsRulesTable", rows, [
+    ["name", "规则", (r) => strong(r.name, `${r.carrier} / ${r.channel} / ${r.mode}`)],
+    ["range", "匹配范围", (r) => `<small>克重 ${num(r.min_weight_g, 0)}-${num(r.max_weight_g, 0)}g</small><small>售价 ${num(r.min_price_rub, 0)}-${num(r.max_price_rub, 0)} RUB</small>`],
+    ["fee", "费用", (r) => `<strong>${money(Number(r.base_fee_cny || 0) + Number(r.per_ticket_cny || 0))}</strong><small>每克 ${num(r.per_gram_cny, 4)} RMB</small>`],
+    ["status", "状态", (r) => tag(Number(r.enabled) ? "启用" : "停用", Number(r.enabled) ? "green" : "amber")],
+    ["note", "备注", (r) => escape(r.note || "")],
+    ["actions", "操作", (r) => `<span class="action-row"><button type="button" class="linklike edit-logistics-rule-btn" data-id="${escape(r.id)}">编辑</button><button type="button" class="linklike danger delete-logistics-rule-btn" data-id="${escape(r.id)}">停用</button></span>`]
+  ]);
+}
+
+function fillLogisticsRuleForm(row) {
+  const form = document.querySelector("#logisticsRuleForm");
+  if (!form) return;
+  for (const [key, value] of Object.entries(row)) {
+    if (form.elements[key]) form.elements[key].value = value ?? "";
+  }
+  form.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function syncOzonFinanceAction(button) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "正在同步...";
+  try {
+    const [from, to] = currentProfitRange();
+    const result = await api("/api/sync/ozon-finance", {
+      method: "POST",
+      body: JSON.stringify({ from, to, shop_id: "all" })
+    });
+    state.financeSummary = await api("/api/ozon-finance/summary");
+    state.profitCache = {};
+    state.profitSummary = await api(`/api/profit-summary?from=${profitActiveDateFrom()}&to=${profitActiveDateTo()}`);
+    renderProfitRulesMap();
+    renderProfitSummary();
+    await showAppAlert(`财务同步完成：拉取 ${result.fetched || 0} 条交易，落库 ${result.upserted || 0} 行，回写 ${result.applied?.items || 0} 条订单商品。`);
+  } catch (error) {
+    await showAppAlert(error.message || "Ozon 财务同步失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
 function renderProfitSummary() {
   const data = state.profitSummary || {};
   const summary = data.summary || {};
   const overview = document.querySelector("#profitOverview");
+  syncProfitDateInputs();
+  syncProfitControls();
+  const [from, to] = currentProfitRange();
+  const rangeText = `${from} ~ ${to}`;
   if (overview) {
     const revenue = Number(summary.revenue || 0);
     const estimated = Number(summary.estimated_profit || 0);
     const accrued = Number(summary.accrued_profit || 0);
     const pending = Number(summary.pending_profit || 0);
+    const returnOrders = Number(summary.return_orders || 0);
+    const returnQuantity = Number(summary.return_quantity || 0);
     overview.innerHTML = `
-      <article><span>有效订单</span><strong>${escape(summary.order_count || 0)}</strong><small>${escape(summary.item_quantity || 0)} 件商品</small></article>
-      <article><span>总销售额</span><strong>${moneyPlain(revenue)}</strong><small>不含已取消订单</small></article>
+      <article><span>总销售额</span><strong>${moneyPlain(revenue)}</strong><small>${escape(rangeText)}</small></article>
       <article><span>预估净利润</span><strong class="${estimated < 0 ? "loss" : ""}">${moneyPlain(estimated)}</strong><small>${profitPercent(estimated, revenue)}</small></article>
-      <article><span>已确认利润</span><strong class="${accrued < 0 ? "loss" : ""}">${moneyPlain(accrued)}</strong><small>已签收/已结算口径</small></article>
+      <article><span>已确认利润</span><strong class="${accrued < 0 ? "loss" : ""}">${moneyPlain(accrued)}</strong><small>已签收 / 已结算口径</small></article>
       <article><span>待确认利润</span><strong class="${pending < 0 ? "loss" : ""}">${moneyPlain(pending)}</strong><small>未签收订单预估</small></article>
+      <article><span>有效订单</span><strong>${escape(summary.order_count || 0)}</strong><small>${escape(summary.item_quantity || 0)} 件商品</small></article>
       <article><span>取消订单</span><strong>${escape(summary.cancelled_orders || 0)}</strong><small>${moneyPlain(summary.cancelled_revenue || 0)}</small></article>
+      <article><span>退货订单</span><strong>${escape(returnOrders)}</strong><small>${escape(returnQuantity)} 件 / ${moneyPlain(summary.return_revenue || 0)}</small></article>
     `;
   }
 
-  renderTable("profitShopTable", data.byShop || [], [
-    ["shop", "店铺", (r) => strong(r.shop_name, `${r.order_count || 0} 单 / ${r.item_quantity || 0} 件`)],
-    ["revenue", "销售额", (r) => money(r.revenue)],
-    ["profit", "利润", (r) => profitSummaryMoney(r.profit, r.revenue)],
-    ["cancel", "取消", (r) => `${escape(r.cancelled_orders || 0)} 单<small>${money(r.cancelled_revenue)}</small>`]
-  ]);
+  renderProfitShopChart();
+  renderProfitShopTable(data.byShop || []);
 
-  renderTable("profitSkuTable", data.bySku || [], [
-    ["sku", "SKU", (r) => strong(r.ozon_sku, r.shop_name)],
-    ["product", "绑定产品", (r) => strong(r.product_code, `${r.product_name || ""} / ${r.owner_name || ""}`)],
-    ["qty", "出单", (r) => `${escape(r.order_count || 0)} 单<small>${escape(r.item_quantity || 0)} 件</small>`],
-    ["revenue", "销售额", (r) => money(r.revenue)],
-    ["profit", "利润", (r) => profitSummaryMoney(r.profit, r.revenue)]
+  const skuRows = profitSkuRows();
+  const skuTotalPages = totalPagesFor(skuRows, state.profitSkuPageSize);
+  state.profitSkuPage = clampPage(state.profitSkuPage, skuTotalPages);
+  renderTable("profitSkuTable", paginateRows(skuRows, state.profitSkuPage, state.profitSkuPageSize), [
+    ["image", "图片", (r) => image(r.image_url)],
+    ["sku", "SKU", (r) => strong(r.ozon_sku, r.sku_name || r.product_name || "")],
+    ["shop", "搴楅摵", (r) => r.shop_name],
+    ["owner", "浜哄憳", (r) => r.owner_name],
+    ["shipping", "运送方式", (r) => shippingMethodsText(r.shipping_method) || tag("未标明", "red")],
+    ["qty", profitSortHeader("sku", "order_count", "出单"), (r) => `${escape(r.order_count || 0)} 单<small>${escape(r.item_quantity || 0)} 件</small>`],
+    ["revenue", profitSortHeader("sku", "revenue", "销售额"), (r) => money(r.revenue)],
+    ["profit", profitSortHeader("sku", "profit", "利润"), (r) => profitSummaryMoney(r.profit, r.revenue)],
+    ["margin", profitSortHeader("sku", "margin", "利润率"), (r) => profitPercent(Number(r.profit || 0), Number(r.revenue || 0))],
+    ["ad", profitSortHeader("sku", "advertising_cost", "广告"), (r) => money(r.advertising_cost || 0)],
+    ["return", profitSortHeader("sku", "return_quantity", "退货/取消"), (r) => profitReturnCell(r)]
   ]);
+  syncSimplePager("profitSku", state.profitSkuPage, skuTotalPages, skuRows.length, state.profitSkuPageSize);
 
-  renderTable("profitProductTable", data.byProduct || [], [
+  const productRows = profitProductRows();
+  const productTotalPages = totalPagesFor(productRows, state.profitProductPageSize);
+  state.profitProductPage = clampPage(state.profitProductPage, productTotalPages);
+  renderTable("profitProductTable", paginateRows(productRows, state.profitProductPage, state.profitProductPageSize), [
+    ["image", "图片", (r) => image(r.image_url)],
     ["product", "库存产品", (r) => strong(r.product_code, r.product_name)],
     ["owner", "负责人", (r) => r.owner_name],
-    ["sku", "SKU/库存", (r) => `${escape(r.sku_count || 0)} 个 SKU<small>可用库存 ${escape(r.available_stock || 0)}</small>`],
-    ["qty", "出单", (r) => `${escape(r.order_count || 0)} 单<small>${escape(r.item_quantity || 0)} 件</small>`],
-    ["revenue", "销售额", (r) => money(r.revenue)],
-    ["profit", "利润", (r) => profitSummaryMoney(r.profit, r.revenue)]
+    ["shop", "店铺出单", (r) => r.shop_breakdown || "-"],
+    ["shipping", "运送方式", (r) => shippingMethodsText(r.shipping_method) || tag("未标明", "red")],
+    ["sku", profitSortHeader("product", "sku_count", "SKU/库存"), (r) => `${escape(r.sku_count || 0)} 个SKU<small>可用库存 ${escape(r.available_stock || 0)}</small>`],
+    ["qty", profitSortHeader("product", "order_count", "出单"), (r) => `${escape(r.order_count || 0)} 单<small>${escape(r.item_quantity || 0)} 件</small>`],
+    ["revenue", profitSortHeader("product", "revenue", "销售额"), (r) => money(r.revenue)],
+    ["profit", profitSortHeader("product", "profit", "利润"), (r) => profitSummaryMoney(r.profit, r.revenue)],
+    ["margin", profitSortHeader("product", "margin", "利润率"), (r) => profitPercent(Number(r.profit || 0), Number(r.revenue || 0))],
+    ["ad", profitSortHeader("product", "advertising_cost", "广告"), (r) => money(r.advertising_cost || 0)],
+    ["return", profitSortHeader("product", "return_quantity", "退货/取消"), (r) => profitReturnCell(r)]
   ]);
+  syncSimplePager("profitProduct", state.profitProductPage, productTotalPages, productRows.length, state.profitProductPageSize);
+  syncProfitTabs();
+}
+
+function renderProfitShopTable(rows) {
+  const sorted = profitShopRows(rows);
+  const totalPages = totalPagesFor(sorted, state.profitShopPageSize);
+  state.profitShopPage = clampPage(state.profitShopPage, totalPages);
+  renderTable("profitShopTable", paginateRows(sorted, state.profitShopPage, state.profitShopPageSize), [
+    ["shop", "店铺", (r) => strong(r.shop_name || r.name || "-", `${escape(r.order_count || 0)} 单 / ${escape(r.item_quantity || 0)} 件`)],
+    ["orders", profitSortHeader("summary", "order_count", "有效订单"), (r) => `${escape(r.order_count || 0)} 单<small>${escape(r.item_quantity || 0)} 件商品</small>`],
+    ["cancel", profitSortHeader("summary", "cancelled_revenue", "取消订单"), (r) => `${escape(r.cancelled_orders || r.cancel_order_count || r.cancel_quantity || 0)} 单<small>${money(r.cancelled_revenue || r.cancel_amount || 0)}</small>`],
+    ["revenue", profitSortHeader("summary", "revenue", "销售额"), (r) => money(r.revenue)],
+    ["profit", profitSortHeader("summary", "profit", "利润"), (r) => profitSummaryMoney(r.profit, r.revenue)],
+    ["margin", profitSortHeader("summary", "margin", "利润率"), (r) => profitPercent(Number(r.profit || 0), Number(r.revenue || 0))],
+    ["confirmed", "确认/待确认", (r) => `${money(r.accrued_profit || r.confirmed_profit || 0)}<small>待确认 ${moneyPlain(r.pending_profit || 0)}</small>`],
+    ["return", profitSortHeader("summary", "return_rate", "退货"), (r) => {
+      const returnOrders = Number(r.return_order_count || r.return_orders || 0);
+      const returnQty = Number(r.return_quantity || 0);
+      const itemQty = Number(r.item_quantity || 0);
+      const rate = itemQty ? `${num(returnQty / itemQty * 100, 1)}%` : "0.0%";
+      return `${escape(returnOrders)} 单 / ${escape(returnQty)} 件<small>退货率 ${rate}</small>`;
+    }],
+    ["ad", profitSortHeader("summary", "advertising_cost", "广告"), (r) => money(r.advertising_cost || 0)]
+  ]);
+  syncSimplePager("profitShop", state.profitShopPage, totalPages, sorted.length, state.profitShopPageSize);
+}
+
+function profitShopRows(rows = state.profitSummary?.byShop || []) {
+  return sortProfitRows(filterProfitRows(rows || [], "summary"), "summary");
+}
+
+function currentProfitRange() {
+  if (state.profitMode === "custom" && state.profitCustomFrom && state.profitCustomTo) {
+    return [state.profitCustomFrom, state.profitCustomTo];
+  }
+  return profitMonthRange(state.profitMonth || currentMonthKey());
+}
+
+function syncProfitDateInputs() {
+  const [from, to] = currentProfitRange();
+  const fromInput = document.querySelector("#profitDateFrom");
+  const toInput = document.querySelector("#profitDateTo");
+  const resetBtn = document.querySelector("#profitResetBtn");
+  if (fromInput && fromInput.value !== from) fromInput.value = from;
+  if (toInput && toInput.value !== to) toInput.value = to;
+  resetBtn?.classList.toggle("active", state.profitMode === "month" && (state.profitMonth || currentMonthKey()) === currentMonthKey());
+}
+
+function syncProfitControls() {
+  fillProfitShopSelect("#profitSummaryShopFilter", state.profitFilters.summaryShopId);
+  fillProfitShopSelect("#profitSkuShopFilter", state.profitFilters.skuShopId);
+  fillProfitShopSelect("#profitProductShopFilter", state.profitFilters.productShopId);
+  syncSimplePager("profitSku", state.profitSkuPage, totalPagesFor(profitSkuRows(), state.profitSkuPageSize), profitSkuRows().length, state.profitSkuPageSize);
+  syncSimplePager("profitProduct", state.profitProductPage, totalPagesFor(profitProductRows(), state.profitProductPageSize), profitProductRows().length, state.profitProductPageSize);
+}
+
+function fillProfitShopSelect(selector, value) {
+  const el = document.querySelector(selector);
+  if (!el) return;
+  const rows = state.shops || [];
+  const options = [`<option value="all">鍏ㄩ儴搴楅摵</option>`].concat(rows.map((shop) => `<option value="${escape(shop.id)}">${escape(shop.name)}</option>`));
+  const html = options.join("");
+  if (el.innerHTML !== html) el.innerHTML = html;
+  el.value = rows.some((shop) => String(shop.id) === String(value)) ? String(value) : "all";
+}
+
+function syncProfitTabs() {
+  const active = state.profitTab || "summary";
+  const counts = {
+    summary: (state.profitSummary?.byShop || []).length,
+    sku: (state.profitSummary?.bySku || []).length,
+    product: (state.profitSummary?.byProduct || []).length
+  };
+  const labels = {
+    summary: "整体利润汇总",
+    sku: "SKU 利润排行",
+    product: "产品利润排行"
+  };
+  document.querySelectorAll("[data-profit-tab]").forEach((btn) => {
+    const key = btn.dataset.profitTab;
+    btn.innerHTML = `${escape(labels[key] || btn.textContent || "")}<b>${escape(counts[key] || 0)}</b>`;
+    btn.classList.toggle("active", btn.dataset.profitTab === active);
+  });
+  document.querySelectorAll("[data-profit-view]").forEach((view) => {
+    view.classList.toggle("active", view.dataset.profitView === active);
+  });
+}
+
+function profitSkuRows() {
+  return sortProfitRows(filterProfitRows(state.profitSummary?.bySku || [], "sku"), "sku");
+}
+
+function profitProductRows() {
+  return sortProfitRows(filterProfitRows(state.profitSummary?.byProduct || [], "product"), "product");
+}
+
+function filterProfitRows(rows, tab) {
+  const shopId = tab === "summary" ? state.profitFilters.summaryShopId : tab === "sku" ? state.profitFilters.skuShopId : state.profitFilters.productShopId;
+  if (!shopId || shopId === "all") return [...(rows || [])];
+  const shop = (state.shops || []).find((item) => String(item.id) === String(shopId));
+  const shopName = shop?.name || "";
+  if (tab === "summary") return (rows || []).filter((row) => String(row.shop_id || row.id || "") === String(shopId) || row.shop_name === shopName || row.name === shopName);
+  if (tab === "sku") return (rows || []).filter((row) => String(row.shop_id || "") === String(shopId) || row.shop_name === shopName);
+  return (rows || []).filter((row) => String(row.shop_id || "") === String(shopId) || String(row.shop_breakdown || "").includes(shopName));
+}
+
+function sortProfitRows(rows, tab) {
+  const sort = state.profitSort?.[tab] || {};
+  const direction = sort.direction === "asc" ? 1 : -1;
+  const field = sort.field || (tab === "summary" ? "revenue" : "profit");
+  return [...(rows || [])].sort((a, b) => {
+    const diff = profitSortValue(a, field) - profitSortValue(b, field);
+    if (diff !== 0) return diff * direction;
+    return Number(b.profit || 0) - Number(a.profit || 0) || Number(b.revenue || 0) - Number(a.revenue || 0);
+  });
+}
+
+function profitSortValue(row, field) {
+  if (field === "margin") {
+    const revenue = Number(row.revenue || 0);
+    return revenue ? Number(row.profit || 0) / revenue : 0;
+  }
+  if (field === "return_rate") {
+    const itemQty = Number(row.item_quantity || 0);
+    return itemQty ? Number(row.return_quantity || 0) / itemQty : 0;
+  }
+  if (field === "cancelled_revenue") return Number(row.cancelled_revenue || row.cancel_amount || 0);
+  return Number(row[field] || 0);
+}
+
+function setProfitSort(tab, field) {
+  if (!tab || !field || !state.profitSort[tab]) return;
+  const current = state.profitSort[tab];
+  const nextDirection = current.field === field && current.direction === "desc" ? "asc" : "desc";
+  state.profitSort[tab] = { field, direction: nextDirection };
+  localStorage.setItem(`profitSort:${tab}:field`, field);
+  localStorage.setItem(`profitSort:${tab}:direction`, nextDirection);
+  if (tab === "summary") state.profitShopPage = 1;
+  if (tab === "sku") state.profitSkuPage = 1;
+  if (tab === "product") state.profitProductPage = 1;
+  renderProfitSummary();
+}
+
+function profitSortHeader(tab, field, label) {
+  const current = state.profitSort?.[tab] || {};
+  const active = current.field === field;
+  const arrow = active ? (current.direction === "asc" ? " ↑" : " ↓") : "";
+  return `<button type="button" class="table-sort ${active ? "active" : ""}" data-profit-sort="${escape(tab)}" data-profit-field="${escape(field)}">${escape(label)}${arrow}</button>`;
+}
+
+function renderProfitShopChart() {
+  const target = document.querySelector("#profitShopChart");
+  if (!target) return;
+  const metric = document.querySelector("#profitChartMetric")?.value || "profit";
+  const limit = document.querySelector("#profitChartLimit")?.value || "10";
+  const rows = sortProfitRows(filterProfitRows(state.profitSummary?.byShop || [], "summary"), "summary")
+    .sort((a, b) => Math.abs(profitSortValue(b, metric)) - Math.abs(profitSortValue(a, metric)));
+  const chartRows = limit === "all" ? rows : rows.slice(0, Number(limit || 10));
+  if (!chartRows.length) {
+    target.innerHTML = `<div class="empty">暂无店铺利润图表数据</div>`;
+    return;
+  }
+  const maxValue = Math.max(...chartRows.map((row) => Math.abs(profitSortValue(row, metric))), 1);
+  target.innerHTML = chartRows.map((row) => {
+    const value = profitSortValue(row, metric);
+    const width = Math.max(4, Math.abs(value) / maxValue * 100);
+    const isLoss = metric === "profit" && Number(row.profit || 0) < 0;
+    return `
+      <div class="profit-shop-bar" title="${escape(profitChartTooltip(row))}">
+        <div class="profit-shop-name"><strong>${escape(row.shop_name || row.name || "-")}</strong><small>${escape(row.order_count || 0)} 单 / ${profitPercent(Number(row.profit || 0), Number(row.revenue || 0)).replace("利润率 ", "")}</small></div>
+        <div class="profit-shop-bars"><span class="bar ${isLoss ? "loss" : "profit"}" style="width:${width}%"><b>${escape(formatProfitChartValue(metric, value))}</b></span></div>
+      </div>
+    `;
+  }).join("");
+}
+
+function profitChartTooltip(row) {
+  return `销售额 ${moneyPlain(row.revenue || 0)} / 利润 ${moneyPlain(row.profit || 0)} / ${profitPercent(Number(row.profit || 0), Number(row.revenue || 0))} / 有效订单 ${row.order_count || 0}`;
+}
+
+function formatProfitChartValue(metric, value) {
+  if (metric === "order_count") return `${num(value, 0)} 单`;
+  if (metric === "return_rate") return `${num(value * 100, 1)}%`;
+  return moneyPlain(value);
+}
+
+function exportProfitTable(tab) {
+  const [from, to] = currentProfitRange();
+  if (tab === "summary") {
+    const summary = state.profitSummary?.summary || {};
+    const metricRows = [
+      ["指标", "数值"],
+      ["总销售额", moneyPlain(summary.revenue || 0)],
+      ["预估净利润", moneyPlain(summary.estimated_profit || 0)],
+      ["已确认利润", moneyPlain(summary.accrued_profit || 0)],
+      ["待确认利润", moneyPlain(summary.pending_profit || 0)],
+      ["有效订单", summary.order_count || 0],
+      ["商品件数", summary.item_quantity || 0],
+      ["取消订单", summary.cancelled_orders || 0],
+      ["取消金额", moneyPlain(summary.cancelled_revenue || 0)],
+      ["退货订单", summary.return_orders || 0],
+      ["退货件数", summary.return_quantity || 0],
+      ["退货金额", moneyPlain(summary.return_revenue || 0)],
+      [],
+      ["店铺", "有效订单", "商品件数", "取消订单", "取消金额", "销售额", "利润", "利润率", "退货订单", "退货件数", "退货率", "退货金额", "广告费"]
+    ];
+    const shopRows = profitShopRows().map((row) => [
+      row.shop_name || row.name || "",
+      row.order_count || 0,
+      row.item_quantity || 0,
+      row.cancelled_orders || row.cancel_order_count || row.cancel_quantity || 0,
+      moneyPlain(row.cancelled_revenue || row.cancel_amount || 0),
+      moneyPlain(row.revenue || 0),
+      moneyPlain(row.profit || 0),
+      profitRatePlain(row.profit, row.revenue),
+      row.return_order_count || row.return_orders || 0,
+      row.return_quantity || 0,
+      returnRatePlain(row),
+      moneyPlain(row.return_amount || row.return_revenue || 0),
+      moneyPlain(row.advertising_cost || 0)
+    ]);
+    downloadCsv(`利润汇总_${from}_${to}.csv`, metricRows.concat(shopRows));
+    return;
+  }
+  if (tab === "sku") {
+    const rows = [
+      ["图片", "SKU", "SKU 名称", "店铺", "人员", "物流方式", "出单量", "商品件数", "销售额", "利润", "利润率", "广告费", "退货订单", "退货数", "退货金额", "取消数", "取消金额"]
+    ].concat(profitSkuRows().map((row) => [
+      row.image_url || "",
+      row.ozon_sku || "",
+      row.sku_name || row.product_name || "",
+      row.shop_name || "",
+      row.owner_name || "",
+      shippingMethodsText(row.shipping_method),
+      row.order_count || 0,
+      row.item_quantity || 0,
+      moneyPlain(row.revenue || 0),
+      moneyPlain(row.profit || 0),
+      profitRatePlain(row.profit, row.revenue),
+      moneyPlain(row.advertising_cost || 0),
+      row.return_order_count || row.return_orders || 0,
+      row.return_quantity || 0,
+      moneyPlain(row.return_amount || row.return_revenue || 0),
+      row.cancel_quantity || 0,
+      moneyPlain(row.cancel_amount || 0)
+    ]));
+    downloadCsv(`SKU利润排行_${from}_${to}.csv`, rows);
+    return;
+  }
+  if (tab === "product") {
+    const rows = [
+      ["图片", "产品 ID", "产品名称", "负责人", "物流方式", "涉及店铺", "SKU 数", "出单量", "商品件数", "销售额", "利润", "利润率", "退货订单", "退货数", "退货金额", "取消数", "当前库存"]
+    ].concat(profitProductRows().map((row) => [
+      row.image_url || "",
+      row.product_code || row.product_id || "",
+      row.product_name || "",
+      row.owner_name || "",
+      shippingMethodsText(row.shipping_method),
+      row.shop_breakdown || "",
+      row.sku_count || 0,
+      row.order_count || 0,
+      row.item_quantity || 0,
+      moneyPlain(row.revenue || 0),
+      moneyPlain(row.profit || 0),
+      profitRatePlain(row.profit, row.revenue),
+      row.return_order_count || row.return_orders || 0,
+      row.return_quantity || 0,
+      moneyPlain(row.return_amount || row.return_revenue || 0),
+      row.cancel_quantity || 0,
+      row.available_stock || 0
+    ]));
+    downloadCsv(`产品利润排行_${from}_${to}.csv`, rows);
+  }
+}
+
+function profitRatePlain(profit, revenue) {
+  const rev = Number(revenue || 0);
+  return rev ? `${num(Number(profit || 0) / rev * 100, 2)}%` : "0.00%";
+}
+
+function returnRatePlain(row) {
+  const qty = Number(row.item_quantity || 0);
+  return qty ? `${num(Number(row.return_quantity || 0) / qty * 100, 2)}%` : "0.00%";
+}
+
+function downloadCsv(filename, rows) {
+  const csv = `\uFEFF${(rows || []).map((row) => (row || []).map(csvCell).join(",")).join("\r\n")}`;
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function csvCell(value) {
+  const text = String(value ?? "").replace(/"/g, '""');
+  return /[",\r\n]/.test(text) ? `"${text}"` : text;
 }
 
 function profitSummaryMoney(profit, revenue) {
   const value = Number(profit || 0);
   return `<span class="money ${value < 0 ? "loss" : ""}">${num(value, 2)}</span><small>${profitPercent(value, Number(revenue || 0))}</small>`;
+}
+
+function profitReturnCell(row) {
+  const cancelQty = Number(row.cancel_quantity || 0);
+  const returnQty = Number(row.return_quantity || 0);
+  const returnOrders = Number(row.return_order_count || row.return_orders || 0);
+  const cancelAmount = Number(row.cancel_amount || 0);
+  return `${escape(returnOrders)} 单 / ${escape(returnQty)} 退<small>${escape(cancelQty)} 取消 / ${moneyPlain(cancelAmount)}</small>`;
 }
 
 function profitPercent(profit, revenue) {
@@ -1232,13 +4203,55 @@ function moneyPlain(value) {
   return `${num(value, 2)}`;
 }
 
+function renderSelectionTable() {
+  const rows = [...(state.products || [])].sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+  const totalPages = totalPagesFor(rows, state.selectionPageSize);
+  state.selectionPage = clampPage(state.selectionPage, totalPages);
+  const pageRows = paginateRows(rows, state.selectionPage, state.selectionPageSize);
+  renderTable("selectionTable", pageRows, visibleColumns("selection"));
+  syncSimplePager("selection", state.selectionPage, totalPages, rows.length, state.selectionPageSize);
+}
+
+function renderInboundTable() {
+  const rows = [...(state.inboundRecords || [])].sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")) || Number(b.id || 0) - Number(a.id || 0));
+  const totalPages = totalPagesFor(rows, state.inboundPageSize);
+  state.inboundPage = clampPage(state.inboundPage, totalPages);
+  const pageRows = paginateRows(rows, state.inboundPage, state.inboundPageSize);
+  renderTable("inboundTable", pageRows, [
+    ["time", "时间", (r) => date(r.created_at)],
+    ["image", "图片", (r) => image(r.product_image_url)],
+    ["product", "产品名称", (r) => strong(r.product_name, r.product_code || "")],
+    ["person", "归属人", (r) => r.person_name],
+    ["qty", "数量", (r) => r.quantity],
+    ["amount", "货款/运费", (r) => `${money(r.amount)}<small>运费 ${money(r.shipping_amount)}</small>`],
+    ["unit", "单价", (r) => money(r.unit_cost)],
+    ["status", "状态", (r) => tag(inboundWaitDays(r) > 2 && r.status === "pending_arrival" ? "超 2 天待验收" : inboundStatus(r.status), r.status === "approved" ? "green" : inboundWaitDays(r) > 2 ? "red" : "amber")],
+    ["confirm", "入库确认", (r) => r.status === "pending_arrival" ? `<button class="primary small approve-inbound-btn inbound-confirm-btn" data-id="${r.id}">检查无误，确认入库</button>` : tag("已入库", "green")],
+    ["actions", "操作", (r) => `<span class="action-row"><button class="linklike edit-inbound-record-btn" data-id="${r.id}">编辑</button><button class="linklike danger delete-inbound-record-btn" data-id="${r.id}">删除</button></span>`]
+  ]);
+  syncSimplePager("inbound", state.inboundPage, totalPages, rows.length, state.inboundPageSize);
+  bindInboundActions();
+}
+
 function renderStockTable() {
   const target = document.querySelector("#stockTable");
   if (!target) return;
   const isHidden = state.stockViewMode === "hidden";
-  const rows = isHidden ? (state.hiddenProducts || []) : (state.products || []);
+  if (state.stockViewMode === "skuMappings") {
+    renderSkuMappingsTable();
+    return;
+  }
+  if (state.stockViewMode === "suppliers") {
+    renderSuppliers();
+    return;
+  }
+  if (state.stockViewMode === "alerts") {
+    renderStockAlerts();
+    return;
+  }
+  const rows = stockRows();
   const totalPages = stockTotalPages();
-  state.stockPage = Math.min(Math.max(1, state.stockPage), totalPages);
+  state.stockPage = clampPage(state.stockPage, totalPages);
   syncStockControls(rows.length);
   const pageRows = rows.slice((state.stockPage - 1) * state.stockPageSize, state.stockPage * state.stockPageSize);
   if (!isHidden) {
@@ -1246,7 +4259,7 @@ function renderStockTable() {
     return;
   }
   if (!rows.length) {
-    target.innerHTML = `<div class="empty">暂无隐藏产品</div>`;
+    target.innerHTML = `<div class="empty">暂无隐藏产品。当前筛选下没有已隐藏的库存产品。</div>`;
     return;
   }
   target.innerHTML = `<div class="table-wrap"><table class="table">
@@ -1263,28 +4276,1028 @@ function renderStockTable() {
 }
 
 function stockRows() {
-  return state.stockViewMode === "hidden" ? (state.hiddenProducts || []) : (state.products || []);
+  const mode = state.stockViewMode || "active";
+  if (mode === "suppliers") return [];
+  if (mode === "fbp") return filterFbpStockRows();
+  if (mode === "alerts") return filterStockAlertRows();
+  if (mode === "skuMappings") {
+    const products = filterStockRows(state.products || []);
+    return state.skuMappingProductFilterId
+      ? products.filter((row) => Number(row.id) === Number(state.skuMappingProductFilterId))
+      : products;
+  }
+  const rows = mode === "hidden" ? (state.hiddenProducts || []) : (state.products || []);
+  return filterStockRows(rows);
 }
 
 function stockTotalPages() {
   return Math.max(1, Math.ceil(stockRows().length / state.stockPageSize));
 }
 
+function stockSkuMappingEditorTotalPages() {
+  const productId = state.skuMappingProductFilterId;
+  if (!productId) return stockTotalPages();
+  const filter = state.stockFilters || {};
+  const query = normalizeSearch(filter.query);
+  const shopId = filter.shopId || "all";
+  const rows = (state.skuMappings || []).filter((row) => {
+    if (Number(row.product_id) !== Number(productId) || Number(row.active) === 0) return false;
+    const created = String(row.created_at || row.updated_at || "").slice(0, 10);
+    if (filter.dateFrom && (!created || created < filter.dateFrom)) return false;
+    if (filter.dateTo && (!created || created > filter.dateTo)) return false;
+    if (shopId !== "all" && String(row.shop_id) !== String(shopId)) return false;
+    if (!query) return true;
+    return normalizeSearch([
+      row.ozon_sku,
+      row.offer_id,
+      row.online_name,
+      row.display_name,
+      row.shop_name,
+      row.person_name,
+      row.product_name,
+      row.inventory_id
+    ].join(" ")).includes(query);
+  });
+  return Math.max(1, Math.ceil(rows.length / state.stockPageSize));
+}
+
+function renderCurrentStockMode() {
+  if (state.stockViewMode === "skuMappings") renderSkuMappingsTable();
+  else if (state.stockViewMode === "suppliers") renderSuppliers();
+  else if (state.stockViewMode === "fbp") renderFbpStockStandalone();
+  else if (state.stockViewMode === "alerts") renderStockAlerts();
+  else renderStockTable();
+}
+
+function filterStockRows(rows) {
+  const filter = state.stockFilters || {};
+  const query = normalizeSearch(filter.query);
+  const shopId = filter.shopId || "all";
+  return [...(rows || [])].filter((row) => {
+    const created = String(row.created_at || "").slice(0, 10);
+    if (filter.dateFrom && (!created || created < filter.dateFrom)) return false;
+    if (filter.dateTo && (!created || created > filter.dateTo)) return false;
+    if (shopId !== "all" && !productMatchesStockShop(row, shopId)) return false;
+    if (query) {
+      const haystack = normalizeSearch([
+        row.id,
+        row.name,
+        row.inventory_id,
+        row.code,
+        row.selection_id,
+        row.mapped_skus,
+        row.origin_skus,
+        row.owner_name,
+        row.creator_name
+      ].join(" "));
+      if (!haystack.includes(query)) return false;
+    }
+    return true;
+  });
+}
+
+function filterStockAlertRows() {
+  const filter = state.stockFilters || {};
+  const query = normalizeSearch(filter.query);
+  const shopId = filter.shopId || "all";
+  const type = state.stockAlertFilter || "all";
+  return (state.stockAlerts || []).filter((row) => {
+    if (filter.dateFrom && String(row.created_at || "").slice(0, 10) < filter.dateFrom) return false;
+    if (filter.dateTo && String(row.created_at || "").slice(0, 10) > filter.dateTo) return false;
+    if (shopId !== "all" && !(row.skus || []).some((sku) => String(sku.shop_id) === String(shopId))) return false;
+    if (type !== "all") {
+      if (type === "action" && row.alert_level === "ok") return false;
+      if (["local", "fbp", "fbs", "trend_up", "trend_down", "mapping"].includes(type) && !(row.warnings || []).some((item) => item.type === type)) return false;
+    }
+    if (!query) return true;
+    const skuText = (row.skus || []).map((sku) => `${sku.shop_name || ""} ${sku.ozon_sku || ""} ${sku.offer_id || ""} ${sku.name || ""}`).join(" ");
+    return normalizeSearch(`${row.inventory_id || ""} ${row.product_name || ""} ${skuText}`).includes(query);
+  });
+}
+
+function filterFbpStockRows() {
+  const filter = state.stockFilters || {};
+  const query = normalizeSearch(filter.query);
+  const shopId = filter.shopId || "all";
+  const rows = [];
+  for (const product of state.stockAlerts || []) {
+    if (filter.dateFrom && String(product.created_at || "").slice(0, 10) < filter.dateFrom) continue;
+    if (filter.dateTo && String(product.created_at || "").slice(0, 10) > filter.dateTo) continue;
+    for (const sku of product.skus || []) {
+      if (shopId !== "all" && String(sku.shop_id) !== String(shopId)) continue;
+      const fbpWarehouses = (sku.warehouses || []).filter((row) => row.stock_type === "fbp_real");
+      if (!fbpWarehouses.length) continue;
+      const row = {
+        ...sku,
+        product_id: product.product_id,
+        product_name: product.product_name,
+        inventory_id: product.inventory_id,
+        product_image_url: product.image_url,
+        local_stock: product.local_stock,
+        alert_stock: product.alert_stock,
+        all_time_qty: product.all_time_qty,
+        fbp_warehouses: fbpWarehouses,
+        fbp_total: fbpWarehouses.reduce((sum, item) => sum + Number(item.present || 0), 0),
+        fbp_available: fbpWarehouses.reduce((sum, item) => sum + Number(item.available || 0), 0)
+      };
+      if (query) {
+        const haystack = normalizeSearch(`${row.shop_name || ""} ${row.ozon_sku || ""} ${row.offer_id || ""} ${row.name || ""} ${row.product_name || ""} ${row.inventory_id || ""}`);
+        if (!haystack.includes(query)) continue;
+      }
+      rows.push(row);
+    }
+  }
+  const sort = state.fbpStockSort || {};
+  if (["fbp_available", "recent_30d_qty"].includes(sort.key)) {
+    const dir = sort.dir === "asc" ? 1 : -1;
+    return rows.sort((a, b) => (Number(a[sort.key] || 0) - Number(b[sort.key] || 0)) * dir
+      || String(a.shop_name || "").localeCompare(String(b.shop_name || ""))
+      || String(a.ozon_sku || "").localeCompare(String(b.ozon_sku || "")));
+  }
+  return rows.sort((a, b) => String(a.shop_name || "").localeCompare(String(b.shop_name || ""))
+    || (Number(b.fbp_available > 0) - Number(a.fbp_available > 0))
+    || String(a.ozon_sku || "").localeCompare(String(b.ozon_sku || "")));
+}
+
+function renderStockAlerts() {
+  ensureStockAlertPanel();
+  const target = document.querySelector("#stockAlertsContent");
+  if (!target) return;
+  const statusTabs = document.querySelector("#stockAlertStatusTabs");
+  if (statusTabs) statusTabs.style.display = "";
+  const rows = filterStockAlertRows();
+  const totalPages = stockTotalPages();
+  state.stockPage = clampPage(state.stockPage, totalPages);
+  syncStockControls(rows.length);
+  renderStockAlertTabs();
+  const status = document.querySelector("#stockAlertSyncStatus");
+  if (status) status.textContent = state.stockAlertSyncing
+    ? "正在同步 Ozon 库存..."
+    : `最后同步：${state.stockAlertMeta?.last_synced_at ? date(state.stockAlertMeta.last_synced_at) : "暂无"}`;
+  const pageRows = rows.slice((state.stockPage - 1) * state.stockPageSize, state.stockPage * state.stockPageSize);
+  if (!pageRows.length) {
+    target.innerHTML = `<div class="empty">暂无库存预警数据。可以先点击“同步 Ozon 库存”。</div>`;
+    return;
+  }
+  target.innerHTML = `<div class="table-wrap stock-alert-wrap"><table class="table stock-alert-table">
+    <thead><tr><th>库存产品</th><th>绑定 SKU / Ozon 库存</th><th>预警</th><th>销量趋势</th><th>建议</th><th>操作</th></tr></thead>
+    <tbody>${pageRows.map((row) => `<tr class="stock-alert-${escape(row.alert_level || "ok")}" data-product-id="${escape(row.product_id || "")}">
+      <td>${renderStockAlertProduct(row)}</td>
+      <td>${renderStockAlertSkuRows(row)}</td>
+      <td>${renderStockWarningBadges(row)}</td>
+      <td>${renderStockTrend(row)}</td>
+      <td><strong>${escape(row.suggestion || "")}</strong><small>FBP ${escape(row.fbp_total || 0)} / FBS ${escape(row.fbs_total || 0)} / 未识别 ${escape(row.unknown_total || 0)}</small></td>
+      <td><span class="action-row stock-alert-actions-cell">
+        <button class="linklike sync-one-stock-btn" data-product-id="${escape(row.product_id)}">同步此产品</button>
+        <button class="linklike edit-alert-sku-btn" data-product-id="${escape(row.product_id)}">编辑绑定</button>
+        <button class="linklike create-proc-from-alert-btn" data-product-id="${escape(row.product_id)}">创建采购请求</button>
+      </span></td>
+    </tr>`).join("")}</tbody>
+  </table></div>`;
+  target.querySelectorAll(".sync-one-stock-btn").forEach((button) => {
+    button.addEventListener("click", () => syncStockAlerts(Number(button.dataset.productId)));
+  });
+  target.querySelectorAll(".edit-alert-sku-btn").forEach((button) => {
+    button.addEventListener("click", () => openStockSkuDetailDialog(Number(button.dataset.productId)));
+  });
+  target.querySelectorAll(".create-proc-from-alert-btn").forEach((button) => {
+    button.addEventListener("click", () => openProcurementDialogForProduct(Number(button.dataset.productId)));
+  });
+}
+
+function renderStockAlertTabs() {
+  const target = document.querySelector("#stockAlertStatusTabs");
+  if (!target) return;
+  const rows = state.stockAlerts || [];
+  const count = (type) => {
+    if (type === "all") return rows.length;
+    if (type === "action") return rows.filter((row) => row.alert_level !== "ok").length;
+    return rows.filter((row) => (row.warnings || []).some((item) => item.type === type)).length;
+  };
+  const tabs = [
+    ["all", "全部产品"],
+    ["action", "需处理"],
+    ["local", "本地库存"],
+    ["fbp", "FBP 断货"],
+    ["fbs", "FBS 虚拟库存"],
+    ["trend_up", "出货加快"],
+    ["trend_down", "出货下降"],
+    ["mapping", "未绑定"]
+  ];
+  target.innerHTML = tabs.map(([key, label]) => `<button type="button" data-stock-alert-filter="${key}" class="${state.stockAlertFilter === key ? "active" : ""}">${label}<b>${count(key)}</b></button>`).join("");
+}
+
+function renderFbpStockStandalone() {
+  ensureStockAlertPanel();
+  const target = document.querySelector("#stockAlertsContent");
+  if (!target) return;
+  const statusTabs = document.querySelector("#stockAlertStatusTabs");
+  if (statusTabs) {
+    statusTabs.innerHTML = "";
+    statusTabs.style.display = "none";
+  }
+  const status = document.querySelector("#stockAlertSyncStatus");
+  if (status) status.textContent = state.stockAlertSyncing
+    ? "正在同步 Ozon FBP 库存..."
+    : `最后同步：${state.stockAlertMeta?.last_synced_at ? date(state.stockAlertMeta.last_synced_at) : "暂无"}`;
+  const rows = filterFbpStockRows();
+  const totalPages = stockTotalPages();
+  state.stockPage = clampPage(state.stockPage, totalPages);
+  syncStockControls(rows.length);
+  const pageRows = rows.slice((state.stockPage - 1) * state.stockPageSize, state.stockPage * state.stockPageSize);
+  if (!pageRows.length) {
+    target.innerHTML = `<div class="empty">暂无 FBP 库存记录。同步 Ozon 库存后，只要 SKU 曾经存在过 FBP 库存，这里会保留记录。</div>`;
+    return;
+  }
+  target.innerHTML = `<div class="table-wrap stock-alert-wrap"><table class="table stock-alert-table fbp-stock-table">
+    <thead><tr><th>店铺</th><th>SKU 信息</th><th>${renderFbpSortHeader("fbp_available", "FBP 可售库存")}</th><th>本地关联库存</th><th>${renderFbpSortHeader("recent_30d_qty", "近 30 天销量")}</th><th>近 7 天趋势</th><th>历史销量</th><th>备货建议</th><th>操作</th></tr></thead>
+    <tbody>${pageRows.map((row) => `<tr class="${Number(row.fbp_available || 0) <= 0 ? "stock-alert-danger" : ""}">
+      <td><strong>${escape(row.shop_name || "")}</strong></td>
+      <td><div class="stock-alert-sku-row fbp-sku-info">${image(row.image_url)}<div><strong>${escape(row.name || row.ozon_sku || "")}</strong><small>SKU ${escape(row.ozon_sku || "")}</small></div></div></td>
+      <td><strong class="fbp-available-number ${Number(row.fbp_available || 0) <= 0 ? "danger-text" : ""}">${escape(row.fbp_available || 0)}</strong></td>
+      <td><div class="stock-alert-product">${image(row.product_image_url)}<span><strong>${escape(row.product_name || "未绑定库存")}</strong><small>${escape(row.inventory_id || "")}</small><small>本地库存 ${escape(row.local_stock ?? 0)} / 预警线 ${escape(row.alert_stock ?? 0)}</small></span></div></td>
+      <td>${renderFbpSales30(row)}</td>
+      <td>${renderFbpTrend(row)}</td>
+      <td><strong>${escape(row.all_time_qty || 0)} 件</strong></td>
+      <td>${renderFbpReplenishAdvice(row)}</td>
+      <td><span class="action-row stock-alert-actions-cell"><button class="linklike sync-one-stock-btn" data-product-id="${escape(row.product_id)}">同步此产品</button><button class="linklike edit-alert-sku-btn" data-product-id="${escape(row.product_id)}">编辑绑定</button><button class="linklike create-proc-from-alert-btn" data-product-id="${escape(row.product_id)}">创建采购请求</button></span></td>
+    </tr>`).join("")}</tbody>
+  </table></div>`;
+  target.querySelectorAll(".fbp-sort-btn").forEach((button) => button.addEventListener("click", () => setFbpStockSort(button.dataset.sortKey)));
+  target.querySelectorAll(".sync-one-stock-btn").forEach((button) => button.addEventListener("click", () => syncStockAlerts(Number(button.dataset.productId))));
+  target.querySelectorAll(".edit-alert-sku-btn").forEach((button) => button.addEventListener("click", () => openFbpSkuMappingDialog(Number(button.dataset.productId))));
+  target.querySelectorAll(".create-proc-from-alert-btn").forEach((button) => button.addEventListener("click", () => openProcurementDialogForProduct(Number(button.dataset.productId))));
+}
+
+function renderFbpSortHeader(key, label) {
+  const sort = state.fbpStockSort || {};
+  const active = sort.key === key;
+  const arrow = active ? (sort.dir === "asc" ? "↑" : "↓") : "↕";
+  return `<button type="button" class="table-sort-btn fbp-sort-btn ${active ? "active" : ""}" data-sort-key="${escape(key)}">${escape(label)} <span>${arrow}</span></button>`;
+}
+
+function setFbpStockSort(key) {
+  const current = state.fbpStockSort || {};
+  const dir = current.key === key && current.dir === "desc" ? "asc" : "desc";
+  state.fbpStockSort = { key, dir };
+  localStorage.setItem("fbpStockSort:key", key);
+  localStorage.setItem("fbpStockSort:dir", dir);
+  state.stockPage = 1;
+  renderFbpStockStandalone();
+}
+
+function renderFbpSales30(row) {
+  const recent = Number(row.recent_7d_qty || 0);
+  const prev = Number(row.prev_7d_qty || 0);
+  const cls = recent > prev ? "trend-up" : recent < prev ? "trend-down" : "";
+  const arrow = recent > prev ? "↑" : recent < prev ? "↓" : "→";
+  return `<div class="fbp-sales-30 ${cls}"><span>${arrow}</span><strong>${escape(row.recent_30d_qty || 0)} 件</strong></div>`;
+}
+
+function renderFbpTrend(row) {
+  const recent = Number(row.recent_7d_qty || 0);
+  const prev = Number(row.prev_7d_qty || 0);
+  const delta = recent - prev;
+  const cls = delta > 0 ? "trend-up" : delta < 0 ? "trend-down" : "";
+  return `<div class="stock-trend fbp-trend ${cls}"><strong>7天 ${escape(recent)} 件</strong><small>前 7 天 ${escape(prev)} 件</small><small>变化 ${delta > 0 ? "+" : ""}${escape(delta)}</small></div>`;
+}
+
+function renderFbpReplenishAdvice(row) {
+  const available = Number(row.fbp_available || 0);
+  const d3 = Number(row.recent_3d_qty || 0);
+  const d7 = Number(row.recent_7d_qty || 0);
+  const d30 = Number(row.recent_30d_qty || 0);
+  if (d3 > 0 && available <= d3) return `<span class="stock-warning-badge danger">低于 3 天消耗</span><small>建议立即补 FBP</small>`;
+  if (d7 > 0 && available <= d7) return `<span class="stock-warning-badge danger">低于 7 天消耗</span><small>建议抓紧备货</small>`;
+  if (d30 > 0 && available <= d30) return `<span class="stock-warning-badge warning">低于 30 天消耗</span><small>建议评估补货</small>`;
+  return `<span class="stock-warning-badge info">库存相对充足</span>`;
+}
+
+function renderStockAlertProduct(row) {
+  const localWarn = Number(row.all_time_qty || 0) > 0 && Number(row.local_stock || 0) <= Number(row.alert_stock || 0);
+  return `<div class="stock-alert-product">${image(row.image_url)}<span><strong>${escape(row.product_name || "")}</strong><small>${escape(row.inventory_id || "")}</small><small>本地库存 <b class="${localWarn ? "danger-text" : ""}">${escape(row.local_stock || 0)}</b> / 预警线 ${escape(row.alert_stock || 0)} / 历史出单 ${escape(row.all_time_qty || 0)}</small></span></div>`;
+}
+
+function renderStockAlertSkuRows(row) {
+  if (!row.skus?.length) return `<div class="empty compact">未绑定 SKU</div>`;
+  return `<div class="stock-alert-sku-list">${row.skus.map((sku) => `
+    <div class="stock-alert-sku-row">
+      ${image(sku.image_url)}
+      <div><strong>${escape(sku.name || sku.ozon_sku || "")}</strong><small>${escape(sku.shop_name || "")} / SKU ${escape(sku.ozon_sku || "")}</small><small>FBP <b class="${Number(sku.fbp_present || 0) <= 0 ? "danger-text" : ""}">${escape(sku.fbp_present || 0)}</b> / FBS <b class="${isFbsVirtualStockLow(sku) ? "warning-text" : ""}">${escape(sku.fbs_present || 0)}</b>${isFbsVirtualStockLow(sku) ? ` <span class="stock-warning-badge warning">小于 ${escape(sku.fbs_low_threshold || 10)}</span>` : ""}${Number(sku.unknown_present || 0) ? ` / 未知 ${escape(sku.unknown_present)}` : ""}</small>${renderWarehouseMini(sku)}</div>
+    </div>`).join("")}</div>`;
+}
+
+function isFbsVirtualStockLow(sku) {
+  return Number(sku?.fbs_snapshot_count || 0) > 0 && Number(sku?.fbs_present || 0) < Number(sku?.fbs_low_threshold || 10);
+}
+
+function renderWarehouseMini(sku) {
+  const rows = (sku.warehouses || []).slice(0, 3);
+  if (!rows.length) return `<small>暂无仓库快照</small>`;
+  return `<small>${rows.map((row) => `${escape(stockTypeLabel(row.stock_type))} ${escape(row.name || "Ozon")} ${escape(row.present || 0)}`).join(" / ")}</small>`;
+}
+
+function renderStockWarningBadges(row) {
+  if (!row.warnings?.length) return tag("正常", "green");
+  return `<div class="stock-warning-list">${row.warnings.map((item) => `<span class="stock-warning-badge ${escape(item.level || "info")}">${escape(item.text || "")}</span>`).join("")}</div>`;
+}
+
+function renderStockTrend(row) {
+  const delta = Number(row.trend_delta || 0);
+  const cls = delta > 0 ? "trend-up" : delta < 0 ? "trend-down" : "";
+  return `<div class="stock-trend ${cls}"><strong>近 7 天 ${escape(row.recent_7d_qty || 0)} 件</strong><small>前 7 天 ${escape(row.prev_7d_qty || 0)} 件</small><small>变化 ${delta > 0 ? "+" : ""}${escape(delta)}</small></div>`;
+}
+
+function stockTypeLabel(type) {
+  if (type === "fbp_real") return "FBP";
+  if (type === "fbs_virtual") return "FBS";
+  return "未知";
+}
+
+async function maybeAutoSyncStockAlerts() {
+  if (state.stockAlertAutoSynced || state.stockAlertSyncing) return;
+  state.stockAlertAutoSynced = true;
+  await syncStockAlerts();
+}
+
+async function syncStockAlerts(productId = null) {
+  if (state.stockAlertSyncing) return;
+  state.stockAlertSyncing = true;
+  renderCurrentStockMode();
+  try {
+    const payload = await api("/api/sync/ozon-stocks", {
+      method: "POST",
+      body: JSON.stringify(productId ? { product_id: productId } : {})
+    });
+    state.stockAlerts = payload.alerts?.rows || [];
+    state.stockAlertMeta = payload.alerts?.meta || {};
+    await showToast(`库存同步完成：${payload.upserted || 0} 条快照`);
+  } catch (error) {
+    await showAppAlert(`库存同步失败：${error.message}`);
+  } finally {
+    state.stockAlertSyncing = false;
+    renderCurrentStockMode();
+  }
+}
+
+function openWarehouseRulesDialog() {
+  ensureStockAlertPanel();
+  fillWarehouseRuleForm(null);
+  renderWarehouseRulesTable();
+  document.querySelector("#warehouseRulesDialog")?.showModal();
+}
+
+function closeWarehouseRulesDialog() {
+  document.querySelector("#warehouseRulesDialog")?.close();
+}
+
+function fillWarehouseRuleForm(row) {
+  const form = document.querySelector("#warehouseRuleForm");
+  if (!form) return;
+  state.editingWarehouseRuleId = row?.id || null;
+  form.elements.id.value = row?.id || "";
+  form.elements.pattern.value = row?.pattern || "";
+  form.elements.stock_type.value = row?.stock_type || "fbp_real";
+  form.elements.priority.value = row?.priority ?? 100;
+  form.elements.enabled.value = String(row?.enabled ?? 1);
+  form.elements.note.value = row?.note || "";
+}
+
+function renderWarehouseRulesTable() {
+  const target = document.querySelector("#warehouseRulesTable");
+  if (!target) return;
+  const rows = state.stockWarehouseRules || [];
+  if (!rows.length) {
+    target.innerHTML = `<div class="empty">暂无仓库识别规则。</div>`;
+    return;
+  }
+  target.innerHTML = `<div class="table-wrap"><table class="table warehouse-rule-table">
+    <thead><tr><th>关键词</th><th>分类</th><th>优先级</th><th>状态</th><th>备注</th><th>操作</th></tr></thead>
+    <tbody>${rows.map((row) => `<tr>
+      <td><strong>${escape(row.pattern || "")}</strong></td>
+      <td>${tag(stockTypeLabel(row.stock_type), row.stock_type === "fbp_real" ? "blue" : row.stock_type === "fbs_virtual" ? "green" : "amber")}</td>
+      <td>${escape(row.priority ?? 100)}</td>
+      <td>${tag(Number(row.enabled) ? "启用" : "停用", Number(row.enabled) ? "green" : "amber")}</td>
+      <td>${escape(row.note || "")}</td>
+      <td><span class="action-row"><button class="linklike edit-warehouse-rule-btn" data-id="${escape(row.id)}">编辑</button><button class="linklike danger delete-warehouse-rule-btn" data-id="${escape(row.id)}">停用</button></span></td>
+    </tr>`).join("")}</tbody>
+  </table></div>`;
+}
+
+async function saveWarehouseRule(event) {
+  event.preventDefault();
+  const form = event.target;
+  const body = Object.fromEntries(new FormData(form));
+  const id = body.id || state.editingWarehouseRuleId;
+  const url = id ? `/api/stock-warehouse-rules/${id}` : "/api/stock-warehouse-rules";
+  const method = id ? "PUT" : "POST";
+  const payload = await api(url, { method, body: JSON.stringify(body) });
+  state.stockWarehouseRules = payload.rules || [];
+  state.stockAlerts = payload.alerts?.rows || state.stockAlerts;
+  state.stockAlertMeta = payload.alerts?.meta || state.stockAlertMeta;
+  fillWarehouseRuleForm(null);
+  renderWarehouseRulesTable();
+  renderStockAlerts();
+  showToast("仓库识别规则已保存");
+}
+
+async function handleWarehouseRuleTableClick(event) {
+  const editButton = event.target.closest(".edit-warehouse-rule-btn");
+  const deleteButton = event.target.closest(".delete-warehouse-rule-btn");
+  if (editButton) {
+    const row = (state.stockWarehouseRules || []).find((item) => Number(item.id) === Number(editButton.dataset.id));
+    fillWarehouseRuleForm(row);
+    return;
+  }
+  if (deleteButton) {
+    const ok = await showAppConfirm("确认停用这条仓库识别规则？已有库存快照会重新归类。");
+    if (!ok) return;
+    const payload = await api(`/api/stock-warehouse-rules/${deleteButton.dataset.id}`, { method: "DELETE" });
+    state.stockWarehouseRules = payload.rules || [];
+    state.stockAlerts = payload.alerts?.rows || state.stockAlerts;
+    state.stockAlertMeta = payload.alerts?.meta || state.stockAlertMeta;
+    renderWarehouseRulesTable();
+    renderStockAlerts();
+  }
+}
+
+function productMatchesStockShop(product, shopId) {
+  return (state.skuMappings || []).some((row) => (
+    Number(row.active) !== 0 &&
+    String(row.product_id) === String(product.id) &&
+    String(row.shop_id) === String(shopId)
+  ));
+}
+
+function renderSkuMappingsTable(productId = null) {
+  const target = document.querySelector("#skuMappingsTable");
+  if (!target) return;
+  if (productId !== null) state.skuMappingProductFilterId = productId;
+  const allProducts = filterStockRows(state.products || []);
+  const filterProductId = state.skuMappingProductFilterId;
+  if (filterProductId) {
+    renderSkuMappingEditor(target, filterProductId);
+    return;
+  }
+  const rows = filterProductId ? allProducts.filter((row) => Number(row.id) === Number(filterProductId)) : allProducts;
+  const totalPages = Math.max(1, Math.ceil(rows.length / state.stockPageSize));
+  state.stockPage = Math.min(Math.max(1, state.stockPage), totalPages);
+  syncStockControls(rows.length);
+  const pageRows = rows.slice((state.stockPage - 1) * state.stockPageSize, state.stockPage * state.stockPageSize);
+  if (!rows.length) {
+    target.innerHTML = `<div class="empty">暂无库存产品。先创建库存产品后，再绑定 Ozon SKU。</div>`;
+    return;
+  }
+  const productOptions = (state.products || []).map((product) => `<option value="${product.id}">${escape(product.inventory_id || product.code || product.id)} / ${escape(product.name || "")}</option>`).join("");
+  const personOptions = `<option value="">未分配</option>${(state.people || []).map((person) => `<option value="${person.id}">${escape(person.name || person.username || "")}</option>`).join("")}`;
+  const filterNotice = filterProductId ? `<div class="sku-map-filter-note">当前只看一个库存产品 <button class="linklike clear-sku-map-filter-btn" type="button">查看全部</button></div>` : "";
+  target.innerHTML = `<div class="sku-map-header"><div>${filterNotice}</div><button class="primary small sku-map-add-btn" type="button">新增绑定</button></div><div class="table-wrap"><table class="table sku-mapping-table">
+    <thead><tr><th>产品库存表</th><th>已绑定 SKU</th><th>操作</th></tr></thead>
+    <tbody>${pageRows.map((product) => {
+      const mappings = (state.skuMappings || []).filter((row) => Number(row.product_id) === Number(product.id) && Number(row.active) !== 0);
+      const skuHtml = mappings.length ? mappings.map((row) => skuMappingChildRow(row, productOptions, personOptions)).join("") : `<div class="sku-map-empty">${tag("未绑定", "amber")}<small>这个库存产品还没有绑定 Ozon SKU。</small></div>`;
+      const actionHtml = mappings.length ? mappings.map((row) => skuMappingActionRow(row)).join("") : "";
+      return `<tr data-row-id="${product.id}">
+        <td class="sku-map-product-cell">
+          <strong>${escape(product.name || "")}</strong>
+          <div class="sku-map-product-card">${image(product.image_url)}<span><small>库存 ID：${escape(product.inventory_id || product.code || product.id || "")}</small><small>当前库存：${escape(product.stock ?? 0)} 件</small></span></div>
+        </td>
+        <td class="sku-map-list-cell">${skuHtml}</td>
+        <td class="sku-map-actions-cell">${actionHtml}<button class="primary small add-sku-to-product-btn" type="button" data-product-id="${product.id}">添加 SKU</button></td>
+      </tr>`;
+    }).join("")}</tbody>
+  </table></div>`;
+  pageRows.flatMap((product) => (state.skuMappings || []).filter((row) => Number(row.product_id) === Number(product.id))).forEach((row) => {
+    const product = target.querySelector(`.sku-map-product[data-id="${row.id}"]`);
+    const person = target.querySelector(`.sku-map-person[data-id="${row.id}"]`);
+    if (product) product.value = String(row.product_id || "");
+    if (person) person.value = String(row.person_id || "");
+  });
+  bindSkuMappingTableActions();
+  target.querySelector(".sku-map-add-btn")?.addEventListener("click", () => openSkuMappingDialog());
+  target.querySelector(".clear-sku-map-filter-btn")?.addEventListener("click", () => {
+    state.skuMappingProductFilterId = null;
+    state.stockPage = 1;
+    renderSkuMappingsTable();
+  });
+}
+
+function renderSkuMappingEditor(target, productId) {
+  const product = (state.products || []).find((row) => Number(row.id) === Number(productId));
+  const filter = state.stockFilters || {};
+  const query = normalizeSearch(filter.query);
+  const shopId = filter.shopId || "all";
+  let mappings = (state.skuMappings || []).filter((row) => Number(row.product_id) === Number(productId) && Number(row.active) !== 0);
+  mappings = mappings.filter((row) => {
+    const created = String(row.created_at || row.updated_at || "").slice(0, 10);
+    if (filter.dateFrom && (!created || created < filter.dateFrom)) return false;
+    if (filter.dateTo && (!created || created > filter.dateTo)) return false;
+    if (shopId !== "all" && String(row.shop_id) !== String(shopId)) return false;
+    if (query) {
+      const haystack = normalizeSearch([
+        row.ozon_sku,
+        row.offer_id,
+        row.online_name,
+        row.display_name,
+        row.shop_name,
+        row.person_name,
+        row.product_name,
+        row.inventory_id
+      ].join(" "));
+      if (!haystack.includes(query)) return false;
+    }
+    return true;
+  });
+  const totalPages = Math.max(1, Math.ceil(mappings.length / state.stockPageSize));
+  state.stockPage = Math.min(Math.max(1, state.stockPage), totalPages);
+  syncStockControls(mappings.length);
+  const pageInfo = document.querySelector("#stockPageInfo");
+  const prevPage = document.querySelector("#stockPrevPage");
+  const nextPage = document.querySelector("#stockNextPage");
+  if (pageInfo) pageInfo.textContent = `第 ${state.stockPage} / ${totalPages} 页，共 ${mappings.length} 条`;
+  if (prevPage) prevPage.disabled = state.stockPage <= 1;
+  if (nextPage) nextPage.disabled = state.stockPage >= totalPages;
+  const pageRows = mappings.slice((state.stockPage - 1) * state.stockPageSize, state.stockPage * state.stockPageSize);
+  const personOptions = `<option value="">未分配</option>${(state.people || []).map((person) => `<option value="${person.id}">${escape(person.name || person.username || "")}</option>`).join("")}`;
+  const productLabel = product ? `${product.inventory_id || product.code || product.id} / ${product.name || ""}` : `ID ${productId}`;
+  target.innerHTML = `
+    <div class="sku-map-header">
+      <div class="sku-map-filter-note">正在编辑：${escape(productLabel)} <button class="linklike clear-sku-map-filter-btn" type="button">查看全部绑定</button></div>
+      <button class="primary small add-sku-to-product-btn" type="button" data-product-id="${escape(productId)}">添加 SKU</button>
+    </div>
+    <div class="table-wrap">
+      <table class="table sku-mapping-table sku-mapping-editor-table">
+        <thead><tr><th>店铺</th><th>SKU</th><th>图片</th><th>负责人</th><th>添加时间</th><th>操作</th></tr></thead>
+        <tbody>${pageRows.length ? pageRows.map((row) => `
+          <tr data-mapping-id="${escape(row.id)}">
+            <td>${escape(row.shop_name || "-")}</td>
+            <td>
+              <strong>${escape(row.ozon_sku || "-")}</strong>
+              <small>${escape(row.online_name || row.display_name || "")}</small>
+            </td>
+            <td>${image(row.online_primary_image || row.online_image_url)}</td>
+            <td>
+              <input type="hidden" class="sku-map-product" data-id="${escape(row.id)}" value="${escape(productId)}">
+              <select class="sku-map-person" data-id="${escape(row.id)}">${personOptions}</select>
+            </td>
+            <td>${escape(date(row.created_at || row.updated_at) || "-")}</td>
+            <td>
+              <span class="action-row">
+                <button class="primary small save-sku-map-btn" type="button" data-id="${escape(row.id)}">保存</button>
+                <button class="linklike danger delete-sku-map-btn" type="button" data-id="${escape(row.id)}">删除</button>
+              </span>
+            </td>
+          </tr>
+        `).join("") : `<tr><td colspan="6"><div class="empty">这个库存产品还没有匹配当前筛选条件的 SKU 绑定。</div></td></tr>`}</tbody>
+      </table>
+    </div>
+  `;
+  pageRows.forEach((row) => {
+    const person = target.querySelector(`.sku-map-person[data-id="${row.id}"]`);
+    if (person) person.value = String(row.person_id || "");
+  });
+  bindSkuMappingTableActions();
+  target.querySelector(".add-sku-to-product-btn")?.addEventListener("click", () => openSkuMappingDialog(Number(productId)));
+  target.querySelector(".clear-sku-map-filter-btn")?.addEventListener("click", () => {
+    state.skuMappingProductFilterId = null;
+    state.stockPage = 1;
+    renderSkuMappingsTable();
+  });
+}
+
+function skuMappingChildRow(row, productOptions, personOptions) {
+  return `<div class="sku-map-child" data-mapping-id="${row.id}">
+    <div class="sku-map-sku-main">
+      <strong>${escape(row.online_name || row.display_name || row.ozon_sku || "")}</strong>
+      <div class="sku-map-sku-card">${image(row.online_primary_image || row.online_image_url)}<span><small>SKU：${escape(row.ozon_sku || "-")}</small><small>店铺：${escape(row.shop_name || "-")}</small><small>绑定人：${escape(row.person_name || "未分配")}</small></span></div>
+    </div>
+    <div class="sku-map-inline-controls">
+      <select class="sku-map-product" data-id="${row.id}" title="修改绑定到其他库存产品">${productOptions}</select>
+      <select class="sku-map-person" data-id="${row.id}" title="修改绑定人">${personOptions}</select>
+    </div>
+  </div>`;
+}
+
+function skuMappingActionRow(row) {
+  return `<div class="sku-map-action-row" data-mapping-id="${row.id}">
+    <button class="primary small save-sku-map-btn" type="button" data-id="${row.id}">保存</button>
+    <button class="linklike danger delete-sku-map-btn" type="button" data-id="${row.id}">删除</button>
+  </div>`;
+}
+
+function bindSkuMappingTableActions() {
+  document.querySelectorAll(".save-sku-map-btn").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.id;
+      const product = document.querySelector(`.sku-map-product[data-id="${id}"]`);
+      const person = document.querySelector(`.sku-map-person[data-id="${id}"]`);
+      await api(`/api/mappings/${id}`, {
+        method: "PUT",
+        body: JSON.stringify({ product_id: product?.value, person_id: person?.value, active: 1 })
+      });
+      await loadAllPreserveOrderPosition();
+      state.stockViewMode = "skuMappings";
+      renderSkuMappingsTable();
+    });
+  });
+  document.querySelectorAll(".delete-sku-map-btn").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const row = (state.skuMappings || []).find((item) => String(item.id) === String(button.dataset.id));
+      if (!await showAppConfirm(`确定删除 SKU 绑定「${row?.shop_name || ""} / ${row?.ozon_sku || ""}」吗？删除后相关订单会回到待绑定库存。`)) return;
+      await api(`/api/mappings/${button.dataset.id}`, { method: "DELETE" });
+      await loadAllPreserveOrderPosition();
+      state.stockViewMode = "skuMappings";
+      renderSkuMappingsTable();
+    });
+  });
+  document.querySelectorAll(".add-sku-to-product-btn").forEach((button) => {
+    button.addEventListener("click", () => openSkuMappingDialog(Number(button.dataset.productId)));
+  });
+}
+
+async function openSkuMappingDialog(productId = null) {
+  const text = await showAppPrompt("输入要绑定的 Ozon SKU 或商品名称关键词");
+  if (!text) return;
+  const q = normalizeSearch(text);
+  const online = (state.onlineProducts || []).find((item) => normalizeSearch(`${item.ozon_sku || ""} ${item.offer_id || ""} ${item.name || ""} ${item.shop_name || ""}`).includes(q));
+  if (!online) {
+    await showAppAlert("没有找到匹配的在线 SKU。请先同步在线商品，或在在线商品列表里点击绑定。");
+    return;
+  }
+  openBindDialog(online.id, productId ? { productId } : {});
+}
+
+function openFbpSkuMappingDialog(productId) {
+  const product = (state.products || []).find((item) => Number(item.id) === Number(productId));
+  const mappings = (state.skuMappings || []).filter((row) => Number(row.product_id) === Number(productId) && Number(row.active) !== 0);
+  let dialog = document.querySelector("#fbpSkuMappingDialog");
+  if (!dialog) {
+    dialog = document.createElement("div");
+    dialog.id = "fbpSkuMappingDialog";
+    dialog.className = "edit-dialog fbp-sku-mapping-dialog";
+    dialog.innerHTML = `
+      <div class="edit-dialog-header">
+        <h2>编辑库存 SKU 绑定</h2>
+        <button class="dialog-close fbp-sku-mapping-close" type="button" title="关闭">x</button>
+      </div>
+      <div class="fbp-sku-mapping-body"></div>
+    `;
+    document.body.appendChild(dialog);
+    dialog.querySelector(".fbp-sku-mapping-close").addEventListener("click", closeFbpSkuMappingDialog);
+  }
+  dialog.querySelector(".fbp-sku-mapping-body").innerHTML = renderFbpSkuMappingBody(product, mappings);
+  bindFbpSkuMappingDialogActions(productId);
+  openInlineDialog(dialog, "fbp-sku-mapping-backdrop", closeFbpSkuMappingDialog);
+}
+
+function closeFbpSkuMappingDialog() {
+  closeInlineDialog("#fbpSkuMappingDialog", ".fbp-sku-mapping-backdrop");
+}
+
+function renderFbpSkuMappingBody(product, mappings) {
+  const productOptions = (state.products || []).map((item) => `<option value="${escape(item.id)}">${escape(item.inventory_id || item.code || item.id)} / ${escape(item.name || "")}</option>`).join("");
+  const personOptions = `<option value="">未分配</option>${(state.people || []).map((person) => `<option value="${escape(person.id)}">${escape(person.name || person.username || "")}</option>`).join("")}`;
+  return `
+    ${stockDetailHeader(product)}
+    <div class="sku-map-header">
+      <div class="sku-map-filter-note">在当前 FBP 库存表里直接维护绑定，保存后仍回到当前页面。</div>
+      <button class="primary small fbp-add-sku-map-btn" type="button" data-product-id="${escape(product?.id || "")}">添加 SKU</button>
+    </div>
+    <div class="table-wrap">
+      <table class="table sku-mapping-table sku-mapping-editor-table fbp-sku-mapping-table">
+        <thead><tr><th>店铺</th><th>SKU</th><th>图片</th><th>关联库存</th><th>负责人</th><th>添加时间</th><th>操作</th></tr></thead>
+        <tbody>${mappings.length ? mappings.map((row) => `
+          <tr data-mapping-id="${escape(row.id)}">
+            <td>${escape(row.shop_name || "-")}</td>
+            <td><strong>${escape(row.ozon_sku || "-")}</strong><small>${escape(row.online_name || row.display_name || "")}</small></td>
+            <td>${image(row.online_primary_image || row.online_image_url)}</td>
+            <td><select class="fbp-sku-map-product" data-id="${escape(row.id)}">${productOptions}</select></td>
+            <td><select class="fbp-sku-map-person" data-id="${escape(row.id)}">${personOptions}</select></td>
+            <td>${escape(date(row.created_at || row.updated_at) || "-")}</td>
+            <td><span class="action-row"><button class="primary small fbp-save-sku-map-btn" type="button" data-id="${escape(row.id)}">保存</button><button class="linklike danger fbp-delete-sku-map-btn" type="button" data-id="${escape(row.id)}">删除</button></span></td>
+          </tr>
+        `).join("") : `<tr><td colspan="7"><div class="empty">这个库存产品还没有绑定 SKU。</div></td></tr>`}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function bindFbpSkuMappingDialogActions(productId) {
+  const dialog = document.querySelector("#fbpSkuMappingDialog");
+  if (!dialog) return;
+  dialog.querySelectorAll(".fbp-sku-map-product").forEach((select) => {
+    const row = (state.skuMappings || []).find((item) => String(item.id) === String(select.dataset.id));
+    select.value = String(row?.product_id || productId || "");
+  });
+  dialog.querySelectorAll(".fbp-sku-map-person").forEach((select) => {
+    const row = (state.skuMappings || []).find((item) => String(item.id) === String(select.dataset.id));
+    select.value = String(row?.person_id || "");
+  });
+  dialog.querySelector(".fbp-add-sku-map-btn")?.addEventListener("click", () => openSkuMappingDialog(Number(productId)));
+  dialog.querySelectorAll(".fbp-save-sku-map-btn").forEach((button) => {
+    button.addEventListener("click", async () => saveFbpSkuMapping(button, productId));
+  });
+  dialog.querySelectorAll(".fbp-delete-sku-map-btn").forEach((button) => {
+    button.addEventListener("click", async () => deleteFbpSkuMapping(button, productId));
+  });
+}
+
+async function refreshFbpStockData() {
+  const [mappings, stockAlertPayload, products] = await Promise.all([
+    api("/api/mappings"),
+    api("/api/stock-alerts"),
+    api("/api/products")
+  ]);
+  Object.assign(state, {
+    skuMappings: mappings,
+    products,
+    stockAlerts: stockAlertPayload?.rows || [],
+    stockAlertMeta: stockAlertPayload?.meta || {}
+  });
+  state.stockViewMode = "fbp";
+  renderFbpStockStandalone();
+}
+
+async function saveFbpSkuMapping(button, productId) {
+  const id = button.dataset.id;
+  const product = document.querySelector(`#fbpSkuMappingDialog .fbp-sku-map-product[data-id="${id}"]`);
+  const person = document.querySelector(`#fbpSkuMappingDialog .fbp-sku-map-person[data-id="${id}"]`);
+  button.disabled = true;
+  button.textContent = "保存中...";
+  try {
+    await api(`/api/mappings/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ product_id: product?.value, person_id: person?.value, active: 1 })
+    });
+    await refreshFbpStockData();
+    openFbpSkuMappingDialog(productId);
+  } catch (error) {
+    await showAppAlert(error.message || "保存绑定失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = "保存";
+  }
+}
+
+async function deleteFbpSkuMapping(button, productId) {
+  const id = button.dataset.id;
+  const row = (state.skuMappings || []).find((item) => String(item.id) === String(id));
+  if (!await showAppConfirm(`确定删除 SKU 绑定「${row?.shop_name || ""} / ${row?.ozon_sku || ""}」吗？删除后相关订单会回到待绑定库存。`)) return;
+  button.disabled = true;
+  button.textContent = "删除中...";
+  try {
+    await api(`/api/mappings/${id}`, { method: "DELETE" });
+    await refreshFbpStockData();
+    openFbpSkuMappingDialog(productId);
+  } catch (error) {
+    await showAppAlert(error.message || "删除绑定失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = "删除";
+  }
+}
+
 function syncStockControls(total) {
-  const hidden = state.stockViewMode === "hidden";
+  const mode = state.stockViewMode || "active";
+  const isHidden = mode === "hidden";
+  const isSuppliers = mode === "suppliers";
+  const isSkuMappings = mode === "skuMappings";
+  const isAlerts = mode === "alerts";
+  const isFbp = mode === "fbp";
   const title = document.querySelector("#stockPanelTitle");
-  const toggle = document.querySelector("#stockHiddenToggle");
-  const add = document.querySelector("#openProductCreate");
+  const addBtn = document.querySelector("#openProductCreate");
+  const supplierBtn = document.querySelector("#createSupplierBtn");
+  const mappingBtn = document.querySelector("#createSkuMappingBtn");
   const info = document.querySelector("#stockPageInfo");
   const prev = document.querySelector("#stockPrevPage");
   const next = document.querySelector("#stockNextPage");
+  const size = document.querySelector("#stockPageSize");
+  const stockTable = document.querySelector("#stockTable");
+  const skuMappingsTable = document.querySelector("#skuMappingsTable");
+  const suppliersTable = document.querySelector("#suppliersTable");
+  const alertsTable = document.querySelector("#stockAlertsTable");
+  const filterBar = document.querySelector("#stockFilterBar");
+  const pager = document.querySelector(".stock-pager");
   const totalPages = stockTotalPages();
-  if (title) title.textContent = hidden ? "已隐藏产品" : "产品库存表";
-  if (toggle) toggle.textContent = hidden ? "返回库存表" : "已隐藏产品";
-  if (add) add.style.display = hidden ? "none" : "";
-  if (info) info.textContent = `第 ${state.stockPage} / ${totalPages} 页，共 ${total} 条`;
-  if (prev) prev.disabled = state.stockPage <= 1;
-  if (next) next.disabled = state.stockPage >= totalPages;
+  syncStockFilterInputs();
+  
+  // 更新标题
+  if (title) {
+    if (isAlerts) {
+      title.textContent = "库存预警";
+    } else if (isFbp) {
+      title.textContent = "FBP 库存表";
+    } else if (isSkuMappings) {
+      title.textContent = "库存-SKU 绑定配置";
+    } else if (isSuppliers) {
+      title.textContent = "供应商配置";
+    } else if (isHidden) {
+      title.textContent = "已隐藏产品";
+    } else {
+      title.textContent = "产品库存表";
+    }
+  }
+  
+  // 显示/隐藏按钮
+  if (addBtn) addBtn.style.display = (isHidden || isSuppliers || isSkuMappings || isAlerts || isFbp) ? "none" : "";
+  if (supplierBtn) supplierBtn.style.display = isSuppliers ? "" : "none";
+  if (mappingBtn) mappingBtn.style.display = "none";
+  
+  // 显示/隐藏表格
+  if (stockTable) stockTable.style.display = (isSuppliers || isSkuMappings || isAlerts || isFbp) ? "none" : "";
+  if (skuMappingsTable) skuMappingsTable.style.display = isSkuMappings ? "flex" : "none";
+  if (suppliersTable) suppliersTable.style.display = isSuppliers ? "" : "none";
+  if (alertsTable) alertsTable.style.display = (isAlerts || isFbp) ? "flex" : "none";
+  if (filterBar) filterBar.style.display = isSuppliers ? "none" : "";
+  
+  // 分页器只在库存相关页面显示。
+  if (pager) pager.style.display = isSuppliers ? "none" : "";
+  
+  if (!isSuppliers) {
+    if (info) info.textContent = `第 ${state.stockPage} / ${totalPages} 页，共 ${total} 条`;
+    if (prev) prev.disabled = state.stockPage <= 1;
+    if (next) next.disabled = state.stockPage >= totalPages;
+    if (size) size.value = String(state.stockPageSize);
+  }
+  
+  // 更新标签页激活状态。
+  syncStockTabs();
+}
+
+function syncStockFilterInputs() {
+  const filter = state.stockFilters || {};
+  const search = document.querySelector("#stockSearchInput");
+  const shop = document.querySelector("#stockShopFilter");
+  const from = document.querySelector("#stockDateFrom");
+  const to = document.querySelector("#stockDateTo");
+  if (search && search.value !== (filter.query || "")) search.value = filter.query || "";
+  if (shop) {
+    const value = filter.shopId || "all";
+    const options = [`<option value="all">鍏ㄩ儴搴楅摵</option>`, ...(state.shops || []).map((item) => `<option value="${item.id}">${escape(item.name || "")}</option>`)];
+    const html = options.join("");
+    if (shop.innerHTML !== html) shop.innerHTML = html;
+    shop.value = [...shop.options].some((option) => option.value === value) ? value : "all";
+  }
+  if (from && from.value !== (filter.dateFrom || "")) from.value = filter.dateFrom || "";
+  if (to && to.value !== (filter.dateTo || "")) to.value = filter.dateTo || "";
+}
+
+function syncStockTabs() {
+  const mappingTab = document.querySelector("#stockTabSkuMappings");
+  if (mappingTab) mappingTab.textContent = "库存-SKU 绑定配置";
+  ensureStockAlertPanel();
+  const mode = state.stockViewMode || "active";
+  document.querySelectorAll(".stock-tab").forEach((tab) => {
+    const isActive = (tab.id === "stockTabProducts" && mode === "active") ||
+                     (tab.id === "stockTabHidden" && mode === "hidden") ||
+                     (tab.id === "stockTabSkuMappings" && mode === "skuMappings") ||
+                     (tab.id === "stockTabSuppliers" && mode === "suppliers") ||
+                     (tab.id === "stockTabAlerts" && mode === "alerts") ||
+                     (tab.id === "stockTabFbp" && mode === "fbp");
+    tab.classList.toggle("active", isActive);
+  });
+}
+
+function openStockSkuDetailDialog(productId) {
+  closeStockDetailDialog();
+  state.stockViewMode = "skuMappings";
+  state.skuMappingProductFilterId = Number(productId);
+  state.stockPage = 1;
+  syncStockTabs();
+  renderSkuMappingsTable(productId);
+  document.querySelector("#stockSearchInput")?.focus();
+  return;
+  const product = (state.products || []).find((item) => Number(item.id) === Number(productId));
+  const mappings = (state.skuMappings || []).filter((row) => Number(row.product_id) === Number(productId) && Number(row.active) !== 0);
+  openStockDetailDialog({
+    title: "宸茬粦瀹?SKU",
+    product,
+    body: mappings.length ? `
+      <div class="table-wrap">
+        <table class="table stock-detail-table">
+          <thead><tr><th>店铺</th><th>SKU</th><th>Offer ID</th><th>负责人</th><th>状态</th></tr></thead>
+          <tbody>${mappings.map((row) => `<tr>
+            <td>${escape(row.shop_name || "")}</td>
+            <td>${escape(row.ozon_sku || "")}</td>
+            <td>${escape(row.offer_id || "")}</td>
+            <td>${escape(row.person_name || "")}</td>
+            <td>${tag(Number(row.active) === 0 ? "停用" : "启用", Number(row.active) === 0 ? "amber" : "green")}</td>
+          </tr>`).join("")}</tbody>
+        </table>
+      </div>
+      <div class="edit-actions"><button class="primary small stock-open-sku-config-btn" type="button" data-product-id="${escape(productId)}">去 SKU 配置编辑</button></div>
+    ` : `<div class="empty">这个库存产品还没有绑定 SKU。</div>`
+  });
+  document.querySelector(".stock-open-sku-config-btn")?.addEventListener("click", () => {
+    closeStockDetailDialog();
+    state.stockViewMode = "skuMappings";
+    state.stockPage = 1;
+    syncStockTabs();
+    syncStockControls(stockRows().length);
+    renderSkuMappingsTable(productId);
+  });
+}
+
+async function openStockOrderDetailDialog(productId, mode) {
+  const product = (state.products || []).find((item) => Number(item.id) === Number(productId));
+  const isCancel = mode === "cancel";
+  const title = isCancel ? "取消损失明细" : "订单利润明细";
+  openStockDetailDialog({ title, product, body: `<div class="empty">正在加载...</div>` });
+  try {
+    const rows = await api(`/api/products/${productId}/${isCancel ? "cancel-details" : "order-profit-details"}`);
+    const body = isCancel ? renderStockCancelDetailRows(rows) : renderStockProfitDetailRows(rows);
+    const dialogBody = document.querySelector("#stockDetailDialog .stock-detail-body");
+    if (dialogBody) dialogBody.innerHTML = stockDetailHeader(product) + body;
+  } catch (error) {
+    const dialogBody = document.querySelector("#stockDetailDialog .stock-detail-body");
+    const message = String(error.message || "");
+    const hint = message.toLowerCase().includes("not found")
+      ? "接口未找到。请重启一次本地 ozon ERP 服务后再试。"
+      : message;
+    if (dialogBody) dialogBody.innerHTML = `<div class="empty">${escape(title)}加载失败：${escape(hint)}</div>`;
+  }
+}
+
+function openStockDetailDialog({ title, product, body }) {
+  let dialog = document.querySelector("#stockDetailDialog");
+  if (!dialog) {
+    dialog = document.createElement("div");
+    dialog.id = "stockDetailDialog";
+    dialog.className = "edit-dialog stock-detail-dialog";
+    dialog.innerHTML = `
+      <div class="edit-dialog-header">
+        <h2></h2>
+        <button class="dialog-close stock-detail-close" type="button" title="关闭">x</button>
+      </div>
+      <div class="stock-detail-body"></div>
+    `;
+    document.body.appendChild(dialog);
+    dialog.querySelector(".stock-detail-close").addEventListener("click", closeStockDetailDialog);
+  }
+  dialog.querySelector("h2").textContent = title;
+  dialog.querySelector(".stock-detail-body").innerHTML = stockDetailHeader(product) + body;
+  openInlineDialog(dialog, "stock-detail-backdrop", closeStockDetailDialog);
+}
+
+function closeStockDetailDialog() {
+  closeInlineDialog("#stockDetailDialog", ".stock-detail-backdrop");
+}
+
+function stockDetailHeader(product) {
+  if (!product) return "";
+  return `<div class="profit-detail-title">
+    ${image(product.image_url)}
+    <div>
+      <strong>${escape(product.name || "-")}</strong>
+      <small>${escape(product.inventory_id || product.code || product.id || "")} / 创建 ${escape(dateDay(product.created_at) || "-")}</small>
+    </div>
+  </div>`;
+}
+
+function renderStockProfitDetailRows(rows) {
+  if (!rows?.length) return `<div class="empty">暂无有效订单利润明细。</div>`;
+  const totalProfit = rows.reduce((sum, row) => sum + Number(row.profit_value || 0), 0);
+  const storedProfit = rows.reduce((sum, row) => sum + Number(row.stored_profit_value || 0), 0);
+  const totalRevenue = rows.reduce((sum, row) => sum + Number(row.revenue || 0), 0);
+  return `
+    <div class="stock-detail-summary"><strong>重算总利润 ${money(totalProfit)}</strong><span>系统入账利润 ${money(storedProfit)}</span><span>销售额 ${money(totalRevenue)}</span><span>${escape(rows.length)} 条明细</span></div>
+    <div class="table-wrap">
+      <table class="table stock-detail-table">
+        <thead><tr><th>订单</th><th>店铺/SKU</th><th>数量/售价</th><th>成本拆分</th><th>平台费用</th><th>利润校验</th><th>时间/状态</th></tr></thead>
+        <tbody>${rows.map((row) => `<tr>
+          <td>${escape(row.posting_number || row.order_number || "")}</td>
+          <td><strong>${escape(row.shop_name || "")}</strong><small>${escape(row.ozon_sku || "")}</small><small>${escape(row.ozon_name || "")}</small><small>运输方式：${escape(shippingMethodsText(row.shipping_method) || "未标明")}</small><small>${escape(shippingFormulaText(row.shipping_method, row))}</small></td>
+          <td>${escape(row.quantity || 0)} 件<small>销售额 ${money(row.revenue)}</small><small>单价 ${money(row.sale_price)}</small></td>
+          <td><small>采购 ${money(row.purchase_cost_total)}</small><small>国内 ${money(row.domestic_shipping_total)}</small><small>国际 ${money(row.international_shipping_total)}</small><small>处理 ${money(row.handling_fee_total)}</small><small>${escape(row.cost_source || "")}</small></td>
+          <td><small>佣金 ${money(row.commission_total ?? row.estimated_commission)}</small><small>尾程+银行 ${money(row.final_mile_bank_fee)}</small><small>Ozon服务费估算 ${money(row.ozon_service_fee_total)}</small><small>退货预损 ${money(row.return_loss_total)}</small><small>广告/其他 ${money(Number(row.advertising_cost_total || 0) + Number(row.other_fee_total || 0))}</small></td>
+          <td><span class="money ${Number(row.profit_value || 0) < 0 ? "loss" : ""}">${num(row.profit_value, 2)}</span><small>系统 ${money(row.stored_profit_value)}</small><small>${escape(row.settlement_state || "")}</small></td>
+          <td><small>${escape(date(row.ordered_at || row.created_at))}</small><small>${escape(orderStatusName(row.tracking_stage || row.order_status))}</small></td>
+        </tr>`).join("")}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderStockCancelDetailRows(rows) {
+  if (!rows?.length) return `<div class="empty">暂无取消订单明细。</div>`;
+  const totalLoss = rows.reduce((sum, row) => sum + Number(row.cancel_loss || 0), 0);
+  const totalAmount = rows.reduce((sum, row) => sum + Number(row.revenue || 0), 0);
+  return `
+    <div class="stock-detail-summary"><strong>取消损失 ${money(totalLoss)}</strong><span>取消销售额 ${money(totalAmount)}</span><span>${escape(rows.length)} 条明细</span></div>
+    <div class="table-wrap">
+      <table class="table stock-detail-table">
+        <thead><tr><th>订单</th><th>店铺/SKU</th><th>数量/取消金额</th><th>损失构成</th><th>损失合计</th><th>时间/原因</th></tr></thead>
+        <tbody>${rows.map((row) => `<tr>
+          <td>${escape(row.posting_number || row.order_number || "")}</td>
+          <td><strong>${escape(row.shop_name || "")}</strong><small>${escape(row.ozon_sku || "")}</small><small>${escape(row.ozon_name || "")}</small></td>
+          <td>${escape(row.quantity || 0)} 件<small>取消销售额 ${money(row.revenue)}</small><small>单价 ${money(row.sale_price)}</small></td>
+          <td><small>采购 ${money(row.purchase_cost_total)}</small><small>国内 ${money(row.domestic_shipping_total)}</small><small>国际 ${money(row.international_shipping_total)}</small><small>尾程+银行 ${money(row.final_mile_bank_fee)}</small><small>${escape(row.cost_source || "")}</small></td>
+          <td><span class="money loss">${num(row.cancel_loss, 2)}</span></td>
+          <td><small>${escape(date(row.ordered_at || row.created_at))}</small><small>${escape(orderStatusName(row.tracking_stage || row.order_status))}</small></td>
+        </tr>`).join("")}</tbody>
+      </table>
+    </div>
+  `;
 }
 
 function renderSystemInfo() {
@@ -1316,16 +5329,21 @@ function renderConfigAccountInfo(user) {
   if (roleEl) roleEl.textContent = user ? roleName(user.role) : "-";
 }
 
-// 鈹€鈹€鈹€ 鍦ㄧ嚎鍟嗗搧椤垫覆鏌?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-
 function filteredOutboundRows() {
   const allRows = state.outboundRecords || [];
   const f = state.outboundFilters;
+  const kw = (f.search || "").trim().toLowerCase();
   return allRows.filter((row) => {
-    if (!row.created_at) return false;
-    const d = row.created_at.slice(0, 10);
+    const timeVal = row.outbound_time || row.created_at;
+    if (!timeVal) return false;
+    const d = timeVal.slice(0, 10);
     if (f.dateFrom && d < f.dateFrom) return false;
     if (f.dateTo && d > f.dateTo) return false;
+    if (f.shopId && f.shopId !== "all" && String(row.shop_id) !== String(f.shopId)) return false;
+    if (kw) {
+      const haystack = [row.order_ref, row.ozon_sku, row.product_name, row.product_code, row.order_number, row.shop_name].map((v) => String(v || "").toLowerCase()).join(" ");
+      if (!haystack.includes(kw)) return false;
+    }
     return true;
   });
 }
@@ -1350,11 +5368,11 @@ function renderOutboundTable() {
 
   const summary = outboundSummary(filtered);
   const cols = [
-    ["time", "时间", (r) => date(r.created_at)],
+    ["time", "出库时间", (r) => date(r.outbound_time || r.created_at)],
     ["order", "订单信息", (r) => outboundOrderCell(r)],
-    ["image", "商品图", (r) => outboundImageCell(r)],
+    ["detail", "订单详情", (r) => outboundDetailCell(r)],
+    ["amount", "订单金额", (r) => r.order_amount ? `¥${Number(r.order_amount).toFixed(2)}` : "-"],
     ["qty", "数量", (r) => tag(r.quantity || 0, Number(r.quantity || 0) > 1 ? "blue" : "")],
-    ["sku", "SKU", (r) => r.ozon_sku],
     ["product", "库存产品", (r) => outboundProductCell(r)],
     ["status", "状态", (r) => outboundStatusCell(r)],
     ["audit", "流水审计", (r) => outboundAuditCell(r)]
@@ -1373,6 +5391,14 @@ function syncOutboundFilterInputs() {
   if (dateFrom) dateFrom.value = state.outboundFilters.dateFrom || "";
   const dateTo = document.querySelector("#outboundDateTo");
   if (dateTo) dateTo.value = state.outboundFilters.dateTo || "";
+  const search = document.querySelector("#outboundSearch");
+  if (search && document.activeElement !== search) search.value = state.outboundFilters.search || "";
+  // 同步店铺下拉框
+  const shopSelect = document.querySelector("#outboundShopFilter");
+  if (shopSelect) {
+    shopSelect.innerHTML = `<option value="all">全部店铺</option>${(state.shops || []).map((shop) => `<option value="${shop.id}">${escape(shop.name)}</option>`).join("")}`;
+    shopSelect.value = [...shopSelect.options].some((option) => option.value === state.outboundFilters.shopId) ? state.outboundFilters.shopId : "all";
+  }
 }
 
 function updateOutboundPager(total) {
@@ -1392,31 +5418,37 @@ function renderOutboundInlineSummary(total, summary) {
   const rangeText = filter.dateFrom || filter.dateTo
     ? `${filter.dateFrom || "..."} ~ ${filter.dateTo || "今天"}`
     : "全部数据";
+  const totalAmountStr = summary.totalAmount ? `¥${Number(summary.totalAmount).toFixed(2)}` : "¥0.00";
   target.innerHTML = `
     <span>${escape(rangeText)}</span>
     <b>${escape(total)} 条明细</b>
     <b>${escape(summary.totalOrders)} 个订单</b>
     <b>${escape(summary.totalQty)} 件</b>
+    <b>订单总额 ${totalAmountStr}</b>
     ${summary.cancelledCount ? `<b class="danger-text">${escape(summary.cancelledCount)} 条已取消</b>` : `<b>真实流水</b>`}
   `;
 }
 
 function outboundSummary(rows) {
   const byShop = new Map();
+  let totalAmount = 0;
   for (const row of rows) {
     const shop = row.shop_name || "未记录店铺";
-    const current = byShop.get(shop) || { shop, qty: 0, orders: new Set() };
+    const current = byShop.get(shop) || { shop, qty: 0, orders: new Set(), amount: 0 };
     current.qty += Number(row.quantity || 0);
     if (row.order_ref) current.orders.add(row.order_ref);
+    current.amount += Number(row.order_amount || 0);
     byShop.set(shop, current);
+    totalAmount += Number(row.order_amount || 0);
   }
   const totalQty = rows.reduce((sum, row) => sum + Number(row.quantity || 0), 0);
   const totalOrders = new Set(rows.map((row) => row.order_ref).filter(Boolean)).size;
   return {
     totalQty,
     totalOrders,
+    totalAmount,
     cancelledCount: rows.filter((row) => row.status === "cancelled").length,
-    shopStats: [...byShop.values()].map((item) => ({ shop: item.shop, qty: item.qty, orders: item.orders.size }))
+    shopStats: [...byShop.values()].map((item) => ({ shop: item.shop, qty: item.qty, orders: item.orders.size, amount: item.amount }))
   };
 }
 
@@ -1434,24 +5466,40 @@ function outboundProductCell(row) {
   return `<div class="outbound-product">${image(row.product_image_url || row.image_urls)}<div>${strong(row.product_code || "", row.product_name || "")}</div></div>`;
 }
 
+function outboundDetailCell(row) {
+  // 订单详情：商品图 + SKU + 名称。
+  const imgSrc = String(row.image_urls || row.product_image_url || "").split(",").find(Boolean) || "";
+  const sku = row.ozon_sku || "";
+  const name = row.product_name || "";
+  return `<div class="outbound-detail">${image(imgSrc)}<div>${sku ? `<div class="outbound-detail-sku">${escape(sku)}</div>` : ""}${name ? `<div class="outbound-detail-name">${escape(name)}</div>` : ""}</div></div>`;
+}
+
 function outboundStatusCell(row) {
   if (row.status === "cancelled") return tag("已取消回退", "amber");
   return tag("已扣库存", "green");
 }
 
 function outboundAuditCell(row) {
-  const movement = row.order_item_id ? `明细 #${row.order_item_id}` : "无明细ID";
+  const movement = row.order_item_id ? `明细 #${row.order_item_id}` : "无明细 ID";
   const operator = row.person_name ? `负责人：${row.person_name}` : "负责人未记录";
-  const note = row.note || outboundReason(row.reason);
+  const noteRaw = row.note || outboundReason(row.reason);
+  // 英文 note 转中文。
+  const note = noteRaw
+    .replace(/Created by outbound sync/gi, "系统自动同步")
+    .replace(/Updated by outbound sync/gi, "系统自动更新")
+    .replace(/Restored by outbound sync/gi, "系统自动恢复")
+    .replace(/Order cancelled.*$/gi, "订单已取消")
+    .replace(/Cancelled order outbound/gi, "取消订单出库");
   return `<div class="outbound-audit">${strong(movement, operator)}<small>${escape(note || "")}</small></div>`;
 }
 
 function renderOnlineTable() {
   syncOnlineControls();
+  renderOnlineStatusTabs();
   const rows = filteredOnlineRows();
   const target = document.querySelector("#onlineTable");
   if (!rows?.length) {
-    target.innerHTML = `<div class="empty">暂无数据。可以切换店铺筛选，或点击“同步 Ozon 在线商品”从店铺拉取 SKU。</div>`;
+    target.innerHTML = `<div class="empty">当前筛选下暂无在线商品。可以切换店铺筛选，或点击“同步 Ozon 在线商品”从店铺拉取 SKU。</div>`;
     updateOnlinePager(0);
     return;
   }
@@ -1460,9 +5508,10 @@ function renderOnlineTable() {
   const start = (state.onlineFilters.page - 1) * state.onlineFilters.pageSize;
   const pageRows = rows.slice(start, start + state.onlineFilters.pageSize);
   const cols = [
+    ["check", `<input type="checkbox" data-online-select-all />`, (r) => `<input type="checkbox" data-online-select="${escape(r.id)}" ${state.selectedOnlineIds.has(Number(r.id)) ? "checked" : ""} />`],
     ["shop", "所属店铺 / 状态", (r) => onlineShopCell(r)],
     ["sku", "Ozon SKU ID", (r) => onlineSkuCell(r)],
-    ["image", "鍥剧墖", (r) => onlineImageCell(r)],
+    ["image", "图片", (r) => onlineImageCell(r)],
     ["product", "商品信息", (r) => onlineProductCell(r)],
     ["price", "售价", (r) => onlinePriceCell(r)],
     ["extra", "其他 Ozon 信息", (r) => onlineExtraCell(r)],
@@ -1470,6 +5519,7 @@ function renderOnlineTable() {
   ];
   target.innerHTML = `<div class="table-wrap"><table class="table online-table"><thead><tr>${cols.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${pageRows.map((row) => `<tr>${cols.map(([, , getter]) => `<td>${getter(row) ?? ""}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
   updateOnlinePager(rows.length);
+  bindOnlineSelectionControls(pageRows);
 
   // 快速绑定
   target.querySelectorAll(".quick-bind-btn").forEach((btn) => {
@@ -1491,13 +5541,97 @@ function syncOnlineControls() {
     shopSelect.value = [...shopSelect.options].some((option) => option.value === value) ? value : "all";
     state.onlineFilters.shopId = shopSelect.value;
   }
+  const nameInput = document.querySelector("#onlineNameSearch");
+  if (nameInput && nameInput.value !== state.onlineFilters.name) nameInput.value = state.onlineFilters.name || "";
+  const offerInput = document.querySelector("#onlineOfferSearch");
+  if (offerInput && offerInput.value !== state.onlineFilters.offer) offerInput.value = state.onlineFilters.offer || "";
   const pageSize = document.querySelector("#onlinePageSize");
   if (pageSize) pageSize.value = String(state.onlineFilters.pageSize);
+  const selectedBtn = document.querySelector("#syncSelectedOnlineProducts");
+  if (selectedBtn) {
+    selectedBtn.disabled = state.selectedOnlineIds.size === 0;
+    selectedBtn.textContent = state.selectedOnlineIds.size ? `同步所选商品 (${state.selectedOnlineIds.size})` : "同步所选商品";
+  }
 }
 
 function filteredOnlineRows() {
   const shopId = state.onlineFilters.shopId;
-  return state.onlineProducts.filter((row) => shopId === "all" || String(row.shop_id) === String(shopId));
+  const status = state.onlineFilters.status || "all";
+  const name = normalizeSearch(state.onlineFilters.name || "");
+  const offer = normalizeSearch(state.onlineFilters.offer || "");
+  return state.onlineProducts.filter((row) => {
+    const shopOk = shopId === "all" || String(row.shop_id) === String(shopId);
+    const statusOk = status === "all" || onlineStatusKey(row) === status;
+    const nameOk = !name || normalizeSearch(row.name || "").includes(name);
+    const offerOk = !offer || normalizeSearch(`${row.offer_id || ""} ${row.ozon_sku || ""}`).includes(offer);
+    return shopOk && statusOk && nameOk && offerOk;
+  });
+}
+
+function renderOnlineStatusTabs() {
+  const target = document.querySelector("#onlineStatusTabs");
+  if (!target) return;
+  target.innerHTML = onlineStatusFilterOptions().map(([key, label, count]) => `
+    <button type="button" data-online-status="${escape(key)}" class="${state.onlineFilters.status === key ? "active" : ""}">
+      ${escape(label)} <span>${escape(count)}</span>
+    </button>
+  `).join("");
+}
+
+function bindOnlineSelectionControls(pageRows) {
+  const target = document.querySelector("#onlineTable");
+  if (!target) return;
+  const ids = pageRows.map((row) => Number(row.id));
+  const allBox = target.querySelector("[data-online-select-all]");
+  if (allBox) {
+    allBox.checked = ids.length > 0 && ids.every((id) => state.selectedOnlineIds.has(id));
+    allBox.addEventListener("change", () => {
+      for (const id of ids) {
+        if (allBox.checked) state.selectedOnlineIds.add(id);
+        else state.selectedOnlineIds.delete(id);
+      }
+      renderOnlineTable();
+    });
+  }
+  target.querySelectorAll("[data-online-select]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const id = Number(input.dataset.onlineSelect);
+      if (input.checked) state.selectedOnlineIds.add(id);
+      else state.selectedOnlineIds.delete(id);
+      syncOnlineControls();
+    });
+  });
+}
+
+function onlineStatusFilterOptions() {
+  const labels = [
+    ["all", "全部状态"],
+    ["selling", "销售中"],
+    ["ready", "准备出售"],
+    ["error", "错误"],
+    ["moderation", "待修改"],
+    ["hidden", "已下架"],
+    ["archived", "已归档"],
+    ["other", "其他"]
+  ];
+  const counts = Object.fromEntries(labels.map(([key]) => [key, 0]));
+  for (const row of state.onlineProducts || []) {
+    counts.all += 1;
+    counts[onlineStatusKey(row)] = Number(counts[onlineStatusKey(row)] || 0) + 1;
+  }
+  return labels.map(([key, label]) => [key, label, counts[key] || 0]);
+}
+
+function onlineStatusKey(row) {
+  const status = String(row.status || "").toLowerCase();
+  const visibility = String(row.visibility || "").toLowerCase();
+  if (Number(row.archived || 0) || status.includes("archive")) return "archived";
+  if (status.includes("error") || status.includes("fail") || visibility.includes("failed") || visibility.includes("fail") || visibility.includes("banned") || visibility.includes("overpriced") || visibility.includes("empty_barcode")) return "error";
+  if (status.includes("moder") || status.includes("edit") || status.includes("revise") || status.includes("validation") || visibility.includes("not_moderated") || visibility.includes("pending") || visibility.includes("quarantine")) return "moderation";
+  if (status.includes("ready") || status.includes("created") || status.includes("pending") || visibility.includes("ready_to_supply") || visibility.includes("to_supply") || visibility.includes("empty_stock")) return "ready";
+  if (visibility.includes("hidden") || visibility.includes("invisible") || visibility.includes("blocked") || visibility.includes("removed_from_sale") || visibility.includes("disabled") || status.includes("hidden") || status.includes("offline")) return "hidden";
+  if (status.includes("online") || status.includes("active") || status.includes("sell") || visibility.includes("in_sale") || visibility.includes("visible") || visibility.includes("moderated")) return "selling";
+  return "other";
 }
 
 function onlineTotalPages() {
@@ -1514,66 +5648,74 @@ function updateOnlinePager(total) {
   if (next) next.disabled = state.onlineFilters.page >= totalPages;
 }
 
-function renderProcurementSummary() {
-  const target = document.querySelector("#procurementSummary");
-  if (!target) return;
-  const rows = state.procurementSummary || [];
-  if (!rows.length) {
-    target.innerHTML = `<div class="empty">暂无待采购请求</div>`;
-    state.selectedProcurementProductId = null;
-    return;
-  }
-  if (!state.selectedProcurementProductId || !rows.some((row) => Number(row.product_id) === Number(state.selectedProcurementProductId))) {
-    state.selectedProcurementProductId = Number(rows[0].product_id);
-  }
-  target.innerHTML = `<div class="procurement-summary-list">${rows.map((row) => {
-    const selected = Number(row.product_id) === Number(state.selectedProcurementProductId);
-    const requesterCount = String(row.requesters || "").split("||").filter(Boolean).length;
-    return `
-      <button class="procurement-summary-row ${selected ? "active" : ""} ${row.overdue ? "overdue" : ""}" type="button" data-product-id="${row.product_id}">
-        ${image(row.image_url)}
-        <span class="proc-summary-main">
-          <strong>${escape(row.code || "")}</strong>
-          <small>${escape(row.name || "")}</small>
-          <small>${requesterCount} 人提交 / 最早 ${date(row.earliest_created_at)}</small>
-        </span>
-        <span class="proc-summary-total">
-          <b>${escape(row.total_quantity)}</b>
-          <small>${money(row.total_amount)}</small>
-        </span>
-      </button>
-    `;
-  }).join("")}</div>`;
-}
-
 function renderProcurementRequests() {
   const target = document.querySelector("#procurementRequests");
   if (!target) return;
   const rows = filteredProcurementRequests();
+  const totalPages = totalPagesFor(rows, state.procurementRequestPageSize);
+  state.procurementRequestPage = clampPage(state.procurementRequestPage, totalPages);
+  const pageRows = paginateRows(rows, state.procurementRequestPage, state.procurementRequestPageSize);
   if (!rows.length) {
-    target.innerHTML = `<div class="empty">暂无待合并采购需求</div>`;
+    target.innerHTML = `<div class="table-wrap procurement-empty-wrap"><div class="empty procurement-empty">当前筛选下暂无采购请求。可以调整状态、申请人或搜索条件，或点击右上角“新建采购请求”开始。</div></div>
+      ${erpPagerHtml("proc-request", state.procurementRequestPage, state.procurementRequestPageSize, rows.length)}`;
     return;
   }
   target.innerHTML = `
-    <div class="table-wrap"><table class="table procurement-detail-table">
-      <thead><tr><th></th><th>产品</th><th>库存</th><th>申请人</th><th>数量</th><th>货款</th><th>运费</th><th>均摊</th><th>采购链接</th><th>备注</th><th>紧急</th><th>状态</th><th>提交时间</th><th>操作</th></tr></thead>
-      <tbody>${rows.map((r) => `<tr class="${r.overdue ? "row-overdue" : ""}">
-        <td><input class="proc-request-check" type="checkbox" data-id="${r.id}" ${state.procurementSelectedRequestIds.has(Number(r.id)) ? "checked" : ""} ${r.status === "pending" ? "" : "disabled"} /></td>
-        <td><div class="outbound-product">${image(r.product_image_url)}<span><strong>${escape(r.product_name || "")}</strong><small>${escape(r.product_code || "")} / ${escape(r.mapped_skus || "无 SKU")}</small></span></div></td>
-        <td>${stockWarningCell(r)}</td>
-        <td>${escape(r.person_name || "")}</td>
-        <td>${escape(r.quantity)}</td>
-        <td>${money(r.amount)}</td>
-        <td>${money(r.shipping_amount)}</td>
-        <td>${money(procurementAverageCost(r))}</td>
-        <td>${link(r.purchase_url || r.product_purchase_url)}</td>
-        <td>${escape(r.note || "")}</td>
-        <td>${tag(procUrgencyName(r.urgency), r.urgency === "urgent" ? "red" : "blue")}</td>
-        <td>${tag(procRequestStatusName(r.status), procRequestStatusColor(r.status))}</td>
-        <td>${date(r.created_at)}</td>
-        <td><button class="linklike cancel-proc-request-btn" data-id="${r.id}" ${r.status === "pending" ? "" : "disabled"}>取消需求</button></td>
-      </tr>`).join("")}</tbody></table></div>
+    <div class="table-wrap"><table class="table procurement-table">
+      <thead>
+        <tr>
+          <th style="width:40px"><input type="checkbox" id="procSelectAll" title="全选"></th>
+          <th>产品信息</th>
+          <th style="width:90px">申请人</th>
+          <th style="width:70px">数量</th>
+          <th style="width:90px">货款</th>
+          <th style="width:90px">运费</th>
+          <th style="width:90px">均摊单价</th>
+          <th style="width:80px">紧急度</th>
+          <th style="width:80px">状态</th>
+          <th style="width:120px">确认提交</th>
+          <th style="width:100px">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${pageRows.map((r) => `
+          <tr class="${r.status !== "pending" ? "disabled-row" : ""} ${r.urgency === "urgent" ? "urgent-row" : ""}" data-id="${r.id}">
+            <td><input type="checkbox" class="proc-row-checkbox" data-id="${r.id}" ${r.status !== "pending" ? "disabled" : ""}></td>
+            <td>
+              <div class="proc-product-cell">
+                ${image(r.product_image_url)}
+                <div class="proc-product-meta">
+                  <strong>${escape(r.product_name || "")}</strong>
+                  <small>${escape(r.product_code || "")}${r.mapped_skus ? ` / SKU: ${escape(r.mapped_skus)}` : ""}</small>
+                  ${r.note ? `<small class="proc-note">备注: ${escape(r.note)}</small>` : ""}
+                </div>
+              </div>
+            </td>
+            <td>${escape(r.person_name || "")}</td>
+            <td><strong>${escape(r.quantity)}</strong> 件</td>
+            <td>${money(r.amount)}</td>
+            <td>${money(r.shipping_amount)}</td>
+            <td>${money(procurementAverageCost(r))}</td>
+            <td>${tag(procUrgencyName(r.urgency), r.urgency === "urgent" ? "red" : "blue")}</td>
+            <td>${tag(procRequestStatusName(r.status), procRequestStatusColor(r.status))}</td>
+            <td>
+              ${r.status === "pending" ? `<button class="primary small submit-proc-request-btn proc-submit-main-btn" data-id="${r.id}">确认提交</button>` : `<button class="small" disabled>${procRequestStatusName(r.status)}</button>`}
+            </td>
+            <td>
+              <div class="proc-row-actions">
+                <button class="linklike edit-proc-request-btn" data-id="${r.id}" ${r.status !== "pending" ? "disabled" : ""}>编辑</button>
+                <button class="linklike danger cancel-proc-request-btn" data-id="${r.id}" ${!["pending", "cancelled"].includes(r.status) ? "disabled" : ""}>删除</button>
+              </div>
+            </td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table></div>
+    ${erpPagerHtml("proc-request", state.procurementRequestPage, state.procurementRequestPageSize, rows.length)}
   `;
+
+  // 绑定全选和批量操作事件
+  bindProcurementTableEvents();
 }
 
 function procurementAverageCost(row) {
@@ -1601,103 +5743,571 @@ function syncProcurementFilters() {
   }
 }
 
-function renderProcurementWorkspace() {
-  document.querySelectorAll("#procurementTabs button").forEach((button) => {
-    button.classList.toggle("active", button.dataset.tab === state.procurementTab);
-  });
-  const target = document.querySelector("#procurementWorkspace");
+function showProcurementNotice(id) {
+  const target = document.querySelector("#procurementRequests");
   if (!target) return;
-  if (state.procurementTab === "pendingInbound") return renderPendingInboundWorkspace(target);
-  if (state.procurementTab === "inboundRecords") return renderInboundRecordsWorkspace(target);
-  return renderPurchaseOrdersWorkspace(target);
+  const note = document.createElement("div");
+  note.className = "procurement-notice";
+  note.textContent = "采购请求已提交。";
+  target.prepend(note);
+  window.setTimeout(() => note.remove(), 2200);
 }
 
-function renderPurchaseOrdersWorkspace(target) {
-  const rows = state.purchaseOrders || [];
-  target.innerHTML = rows.length ? `<div class="table-wrap"><table class="table">
-    <thead><tr><th>采购单号</th><th>商品</th><th>创建时间</th><th>创建人</th><th>种类</th><th>总数量</th><th>总金额</th><th>状态</th><th>操作</th></tr></thead>
-    <tbody>${rows.map((row) => `<tr>
-      <td><strong>${escape(row.order_no)}</strong></td>
-      <td>${purchaseOrderGoodsCell(row)}</td>
-      <td>${date(row.created_at)}</td>
-      <td>${escape(row.creator_name || "")}</td>
-      <td>${escape(row.item_count || 0)}</td>
-      <td>${escape(row.total_quantity || 0)}</td>
-      <td>${money(row.total_amount)}</td>
-      <td>${tag(purchaseOrderStatusName(row.status), purchaseOrderStatusColor(row.status))}</td>
-      <td class="action-row"><button class="linklike po-detail-btn" data-id="${row.id}">查看详情</button><button class="linklike po-confirm-btn" data-id="${row.id}" ${row.status === "pending_purchase" ? "" : "disabled"}>确认已采购</button><button class="linklike danger po-cancel-btn" data-id="${row.id}" ${["inbound_done", "cancelled"].includes(row.status) ? "disabled" : ""}>取消采购单</button></td>
-    </tr>`).join("")}</tbody>
-  </table></div>` : `<div class="empty">暂无采购单，请先在需求池合并生成采购单</div>`;
+// 采购清单页面
+function renderPurchaseList() {
+  const pendingRequests = (state.procurementRequests || []).filter(r => r.status === "submitted");
+  const contentTarget = document.querySelector("#purchaseListContent");
+  
+  if (!contentTarget) return;
+  
+  if (!pendingRequests.length) {
+    contentTarget.innerHTML = `<div class="table-wrap procurement-empty-wrap"><div class="empty procurement-empty">暂无待采购请求。这里只显示已提交的采购请求，请先在“采购请求”页面提交。</div></div>
+      ${erpPagerHtml("purchase-list", state.purchaseListPage, state.purchaseListPageSize, 0)}`;
+    return;
+  }
+  
+  // 计算时间范围
+  const dates = pendingRequests.map(r => r.created_at).sort();
+  const earliest = dates[0];
+  const latest = dates[dates.length - 1];
+  
+  const mergedList = mergedPurchaseListRows();
+  
+  // 分页
+  const totalPages = totalPagesFor(mergedList, state.purchaseListPageSize);
+  state.purchaseListPage = clampPage(state.purchaseListPage, totalPages);
+  const pageList = paginateRows(mergedList, state.purchaseListPage, state.purchaseListPageSize);
+  
+  const totalProducts = mergedList.length;
+  const totalQuantity = mergedList.reduce((s, m) => s + m.total_quantity, 0);
+  const totalAmount = mergedList.reduce((s, m) => s + m.total_amount + m.total_shipping, 0);
+  
+  contentTarget.innerHTML = `
+    <div class="purchase-list-header">
+      <div class="purchase-list-stats">
+        <div class="purchase-stat-card">
+          <span class="stat-label">待采购产品</span>
+          <span class="stat-value">${totalProducts} 种</span>
+        </div>
+        <div class="purchase-stat-card">
+          <span class="stat-label">总数量</span>
+          <span class="stat-value">${totalQuantity} 件</span>
+        </div>
+        <div class="purchase-stat-card">
+          <span class="stat-label">总金额</span>
+          <span class="stat-value">${money(totalAmount)}</span>
+        </div>
+        <div class="purchase-stat-card">
+          <span class="stat-label">时间范围</span>
+          <span class="stat-value small">${dateDay(earliest)} ~ ${dateDay(latest)}</span>
+        </div>
+      </div>
+      <div class="purchase-list-actions">
+        <span id="purchaseSelectedCount">已选 0 种</span>
+        <button class="primary" id="confirmSelectedPurchaseBtn" disabled>确认采购所选</button>
+        <button class="small" id="confirmAllPurchaseBtn">全部确认采购</button>
+      </div>
+    </div>
+    <div class="table-wrap"><table class="table purchase-list-table">
+      <thead>
+        <tr>
+          <th style="width:40px"><input type="checkbox" id="purchaseSelectAll" title="全选"></th>
+          <th style="width:50%">产品信息</th>
+          <th style="width:80px">请求数</th>
+          <th style="width:80px">总数量</th>
+          <th style="width:100px">货款</th>
+          <th style="width:100px">运费</th>
+          <th style="width:100px">均摊单价</th>
+          <th style="width:220px">采购来源</th>
+          <th style="width:180px">操作</th>
+        </tr>
+      </thead>
+      <tbody>${pageList.map((m) => {
+        const avgCost = m.total_quantity ? (m.total_amount + m.total_shipping) / m.total_quantity : 0;
+        const requesters = [...new Set(m.requests.map(r => r.person_name).filter(Boolean))];
+        return `<tr>
+          <td><input type="checkbox" class="purchase-row-checkbox" data-product-id="${m.product_id}"></td>
+          <td>
+            <div class="purchase-product-cell">
+              ${image(m.product_image_url)}
+              <div class="purchase-product-meta">
+                <strong>${escape(m.product_name || "")}</strong>
+                <small>${escape(m.product_code || "")}${m.mapped_skus ? ` / SKU: ${escape(m.mapped_skus)}` : ""}</small>
+                <small class="purchase-requesters">申请人 ${escape(requesters.join(", "))}</small>
+              </div>
+            </div>
+          </td>
+          <td>${m.requests.length} 条</td>
+          <td><strong>${m.total_quantity}</strong></td>
+          <td>${money(m.total_amount)}</td>
+          <td>${money(m.total_shipping)}</td>
+          <td>${money(avgCost)}</td>
+          <td>${purchaseSourceCell(m)}</td>
+          <td>
+            <div class="proc-row-actions">
+              <button class="linklike edit-purchase-group-btn" data-product-id="${m.product_id}">编辑明细</button>
+              <button class="primary small confirm-purchase-btn" data-product-id="${m.product_id}">确认采购</button>
+            </div>
+          </td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table></div>
+    ${erpPagerHtml("purchase-list", state.purchaseListPage, state.purchaseListPageSize, mergedList.length)}
+  `;
+  bindPurchaseListEvents();
+}
+
+function mergedPurchaseListRows() {
+  const merged = {};
+  for (const r of (state.procurementRequests || []).filter((row) => row.status === "submitted")) {
+    const key = r.product_id;
+    if (!merged[key]) {
+      merged[key] = {
+        product_id: r.product_id,
+        product_name: r.product_name,
+        product_code: r.product_code,
+        product_image_url: r.product_image_url,
+        mapped_skus: r.mapped_skus,
+        purchase_url: r.purchase_url || r.product_purchase_url,
+        supplier_names: new Set(),
+        link_1688: "",
+        link_pdd: "",
+        other_source: "",
+        total_quantity: 0,
+        total_amount: 0,
+        total_shipping: 0,
+        requests: [],
+        earliest_date: r.created_at
+      };
+    }
+    merged[key].total_quantity += Number(r.quantity || 0);
+    merged[key].total_amount += Number(r.amount || 0);
+    merged[key].total_shipping += Number(r.shipping_amount || 0);
+    merged[key].requests.push(r);
+    mergePurchaseSource(merged[key], r);
+    if (r.created_at < merged[key].earliest_date) merged[key].earliest_date = r.created_at;
+    if (!merged[key].purchase_url && (r.purchase_url || r.product_purchase_url)) {
+      merged[key].purchase_url = r.purchase_url || r.product_purchase_url;
+    }
+  }
+  return Object.values(merged).sort((a, b) => String(a.earliest_date || "").localeCompare(String(b.earliest_date || "")));
+}
+
+function mergePurchaseSource(target, row) {
+  const source = String(row.source_type || row.product_source_platform || "1688").toLowerCase();
+  const url = row.purchase_url || row.product_purchase_url || "";
+  if (row.supplier_name) target.supplier_names.add(row.supplier_name);
+  if (source === "pdd" || source === "拼多多") {
+    if (!target.link_pdd && url) target.link_pdd = url;
+  } else if (source === "1688") {
+    if (!target.link_1688 && url) target.link_1688 = url;
+  } else if (source === "supplier" || source === "wechat") {
+    if (!row.supplier_name && !target.other_source) target.other_source = source === "wechat" ? "微信" : "供应商";
+  } else if (!target.other_source) {
+    target.other_source = row.source_type || row.product_source_platform || "其他";
+  }
+}
+
+function purchaseSourceCell(row) {
+  const suppliers = [...(row.supplier_names || [])].filter(Boolean);
+  return `<div class="purchase-source-cell">
+    <small><b>供应商</b>${suppliers.length ? escape(suppliers.join(", ")) : escape(row.other_source || "-")}</small>
+    <small><b>1688</b>${row.link_1688 ? link(row.link_1688) : "-"}</small>
+    <small><b>拼多多</b>${row.link_pdd ? link(row.link_pdd) : "-"}</small>
+  </div>`;
+}
+
+function bindPurchaseListEvents() {
+  const selectAll = document.querySelector("#purchaseSelectAll");
+  const checkboxes = Array.from(document.querySelectorAll(".purchase-row-checkbox"));
+  const batchBtn = document.querySelector("#confirmSelectedPurchaseBtn");
+  const count = document.querySelector("#purchaseSelectedCount");
+  const update = () => {
+    const checked = checkboxes.filter((item) => item.checked);
+    if (count) count.textContent = `已选 ${checked.length} 种`;
+    if (batchBtn) batchBtn.disabled = checked.length === 0;
+    if (selectAll) selectAll.checked = checkboxes.length > 0 && checked.length === checkboxes.length;
+  };
+  selectAll?.addEventListener("change", () => {
+    checkboxes.forEach((item) => { item.checked = selectAll.checked; });
+    update();
+  });
+  checkboxes.forEach((item) => item.addEventListener("change", update));
+}
+
+async function confirmSelectedPurchaseProducts() {
+  const productIds = Array.from(document.querySelectorAll(".purchase-row-checkbox:checked")).map((item) => Number(item.dataset.productId)).filter(Boolean);
+  if (!productIds.length) return;
+  const requests = (state.procurementRequests || []).filter((row) => row.status === "submitted" && productIds.includes(Number(row.product_id)));
+  if (!requests.length) return;
+  const ok = await showAppConfirm(`确认采购选中的 ${productIds.length} 种产品吗？\n共 ${requests.length} 条采购请求。`);
+  if (!ok) return;
+  await confirmPurchaseRequestIds(requests.map((row) => row.id), "purchaseList");
+}
+
+async function openPurchaseRequestGroupDialog(productId) {
+  const requests = (state.procurementRequests || []).filter((row) => row.status === "submitted" && Number(row.product_id) === Number(productId));
+  if (!requests.length) {
+    await showAppAlert("这个产品当前没有待采购请求。");
+    return;
+  }
+  let dialog = document.querySelector("#purchaseRequestGroupDialog");
+  if (!dialog) {
+    dialog = document.createElement("dialog");
+    dialog.id = "purchaseRequestGroupDialog";
+    dialog.className = "edit-dialog purchase-request-group-dialog";
+    document.body.appendChild(dialog);
+  }
+  const first = requests[0];
+  dialog.innerHTML = `
+    <div class="edit-dialog-header">
+      <h2>编辑采购明细</h2>
+      <button class="dialog-close" type="button" title="关闭" data-close-purchase-group>x</button>
+    </div>
+    <form id="purchaseRequestGroupForm" class="form edit-form">
+      <div class="proc-product-info full">
+        ${image(first.product_image_url)}
+        <div class="proc-product-text">
+          <strong>${escape(first.product_name || "")}</strong>
+          <small>${escape(first.product_code || "")}${first.mapped_skus ? ` / SKU: ${escape(first.mapped_skus)}` : ""}</small>
+        </div>
+      </div>
+      <div class="table-wrap full">
+        <table class="table procurement-table">
+          <thead><tr><th>申请人</th><th>数量</th><th>货款</th><th>运费</th><th>采购链接</th><th>备注</th><th>操作</th></tr></thead>
+          <tbody>${requests.map((row) => `
+            <tr data-request-id="${row.id}">
+              <td><select name="person_id_${row.id}">${state.people.map((person) => `<option value="${person.id}" ${Number(person.id) === Number(row.person_id) ? "selected" : ""}>${escape(person.name)}</option>`).join("")}</select></td>
+              <td><input name="quantity_${row.id}" type="number" min="1" value="${escape(row.quantity || 1)}" /></td>
+              <td><input name="amount_${row.id}" type="number" step="0.01" value="${escape(row.amount || 0)}" /></td>
+              <td><input name="shipping_amount_${row.id}" type="number" step="0.01" value="${escape(row.shipping_amount || 0)}" /></td>
+              <td><input name="purchase_url_${row.id}" value="${escape(row.purchase_url || row.product_purchase_url || "")}" /></td>
+              <td><input name="note_${row.id}" value="${escape(row.note || "")}" /></td>
+              <td><button type="button" class="linklike danger delete-purchase-source-btn" data-id="${row.id}">删除</button></td>
+            </tr>
+          `).join("")}</tbody>
+        </table>
+      </div>
+      <div class="edit-actions full">
+        <button type="button" data-close-purchase-group>取消</button>
+        <button class="primary" type="submit">保存明细</button>
+      </div>
+    </form>
+  `;
+  if (!dialog.open) dialog.showModal();
+  dialog.classList.add("visible");
+  dialog.querySelectorAll("[data-close-purchase-group]").forEach((button) => button.addEventListener("click", closePurchaseRequestGroupDialog));
+  dialog.querySelectorAll(".delete-purchase-source-btn").forEach((button) => button.addEventListener("click", async () => {
+    if (!await showAppConfirm("确认删除这条采购请求吗？")) return;
+    await api(`/api/procurement/requests/${button.dataset.id}`, { method: "DELETE" });
+    await loadAll();
+    closePurchaseRequestGroupDialog();
+    renderPurchaseList();
+    renderProcurementRequests();
+  }));
+  dialog.querySelector("#purchaseRequestGroupForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    for (const row of requests) {
+      await api(`/api/procurement/requests/${row.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          ...row,
+          person_id: form.elements[`person_id_${row.id}`]?.value || row.person_id,
+          quantity: Number(form.elements[`quantity_${row.id}`]?.value || row.quantity || 1),
+          amount: Number(form.elements[`amount_${row.id}`]?.value || 0),
+          shipping_amount: Number(form.elements[`shipping_amount_${row.id}`]?.value || 0),
+          purchase_url: form.elements[`purchase_url_${row.id}`]?.value || "",
+          note: form.elements[`note_${row.id}`]?.value || "",
+          status: "submitted",
+          approval_status: "submitted"
+        })
+      });
+    }
+    await loadAll();
+    closePurchaseRequestGroupDialog();
+    renderPurchaseList();
+    renderProcurementRequests();
+    showToast("采购明细已更新", "info");
+  });
+}
+
+function closePurchaseRequestGroupDialog() {
+  const dialog = document.querySelector("#purchaseRequestGroupDialog");
+  dialog?.classList.remove("visible");
+  if (dialog?.open) dialog.close();
+}
+
+function renderPurchaseHistory() {
+  const target = document.querySelector("#purchaseHistoryContent");
+  if (!target) return;
+
+  const historyOrders = purchaseHistoryRows();
+  const totalPages = totalPagesFor(historyOrders, state.purchaseHistoryPageSize);
+  state.purchaseHistoryPage = clampPage(state.purchaseHistoryPage, totalPages);
+  const pageOrders = paginateRows(historyOrders, state.purchaseHistoryPage, state.purchaseHistoryPageSize);
+
+  if (!historyOrders.length) {
+    target.innerHTML = `<div class="table-wrap procurement-empty-wrap"><div class="empty procurement-empty">暂无历史采购记录。这里只显示非 pending_purchase 状态的采购单。</div></div>
+      ${erpPagerHtml("purchase-history", state.purchaseHistoryPage, state.purchaseHistoryPageSize, 0)}`;
+    return;
+  }
+
+  // 统计
+  const totalCount = historyOrders.length;
+  const totalQty = historyOrders.reduce((s, o) => s + Number(o.total_quantity || 0), 0);
+  const totalAmount = historyOrders.reduce((s, o) => s + Number(o.total_amount || 0), 0);
+
+  target.innerHTML = `
+    <div class="purchase-history-header">
+      <div class="purchase-history-stats">
+        <span>共 <strong>${totalCount}</strong> 笔采购单</span>
+        <span>总数量 <strong>${totalQty}</strong> 件</span>
+        <span>总金额 <strong>${money(totalAmount)}</strong></span>
+      </div>
+      <div class="purchase-list-actions">
+        <span id="historySelectedCount">已选 0 笔</span>
+        <button class="danger-link small" id="deleteSelectedHistoryBtn" disabled>批量删除</button>
+      </div>
+    </div>
+    <div class="table-wrap"><table class="table purchase-history-table">
+      <thead>
+        <tr>
+          <th style="width:40px"><input type="checkbox" id="historySelectAll" title="全选"></th>
+          <th>采购单号</th>
+          <th>商品</th>
+          <th>创建时间</th>
+          <th>创建人</th>
+          <th>总数量</th>
+          <th>总金额</th>
+          <th>状态</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>${pageOrders.map((row) => `<tr>
+        <td><input type="checkbox" class="history-row-checkbox" data-id="${row.id}"></td>
+        <td><strong>${escape(row.order_no)}</strong></td>
+        <td>${purchaseOrderGoodsCell(row)}</td>
+        <td>${date(row.created_at)}</td>
+        <td>${escape(row.creator_name || "")}</td>
+        <td>${escape(row.total_quantity || 0)}</td>
+        <td>${money(row.total_amount)}</td>
+        <td>${tag(purchaseOrderStatusName(row.status), purchaseOrderStatusColor(row.status))}</td>
+        <td>
+          <div class="po-row-actions">
+            <button class="linklike view-po-btn" data-id="${row.id}">查看</button>
+            ${row.status !== "cancelled" ? `<button class="linklike edit-po-btn" data-id="${row.id}">编辑</button>` : ""}
+            <button class="linklike danger delete-po-btn" data-id="${row.id}">删除</button>
+          </div>
+        </td>
+      </tr>`).join("")}</tbody>
+    </table></div>
+    ${erpPagerHtml("purchase-history", state.purchaseHistoryPage, state.purchaseHistoryPageSize, historyOrders.length)}
+  `;
+
+  // 绑定事件
+  target.querySelectorAll(".view-po-btn").forEach((btn) => {
+    btn.addEventListener("click", () => openPurchaseOrderDrawer(Number(btn.dataset.id)));
+  });
+  target.querySelectorAll(".edit-po-btn").forEach((btn) => {
+    btn.addEventListener("click", () => openPurchaseOrderDrawer(Number(btn.dataset.id), true));
+  });
+  target.querySelectorAll(".cancel-po-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!await showAppConfirm("确认取消此采购单？取消后关联的采购请求将恢复为待处理状态。")) return;
+      await api(`/api/procurement/purchase-orders/${btn.dataset.id}/cancel`, { method: "POST" });
+      await loadAll();
+      renderPurchaseHistory();
+    });
+  });
+  target.querySelectorAll(".delete-po-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!await showAppConfirm("确认删除此采购单？删除后关联的库存记录将被回滚。")) return;
+      await api(`/api/procurement/purchase-orders/${btn.dataset.id}`, { method: "DELETE" });
+      await loadAll();
+      renderPurchaseHistory();
+    });
+  });
+  bindPurchaseHistorySelection();
+}
+
+function purchaseHistoryRows() {
+  return (state.purchaseOrders || [])
+    .filter((order) => order.status !== "pending_purchase")
+    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+}
+
+function bindPurchaseHistorySelection() {
+  const selectAll = document.querySelector("#historySelectAll");
+  const checkboxes = Array.from(document.querySelectorAll(".history-row-checkbox"));
+  const batchBtn = document.querySelector("#deleteSelectedHistoryBtn");
+  const count = document.querySelector("#historySelectedCount");
+  const update = () => {
+    const checked = checkboxes.filter((item) => item.checked);
+    if (count) count.textContent = `已选 ${checked.length} 笔`;
+    if (batchBtn) batchBtn.disabled = checked.length === 0;
+    if (selectAll) selectAll.checked = checkboxes.length > 0 && checked.length === checkboxes.length;
+  };
+  selectAll?.addEventListener("change", () => {
+    checkboxes.forEach((item) => { item.checked = selectAll.checked; });
+    update();
+  });
+  checkboxes.forEach((item) => item.addEventListener("change", update));
+  batchBtn?.addEventListener("click", async () => {
+    const ids = checkboxes.filter((item) => item.checked).map((item) => Number(item.dataset.id));
+    if (!ids.length) return;
+    if (!await showAppConfirm(`确认删除选中的 ${ids.length} 笔历史采购单吗？\n如果已有入库记录，系统会按现有删除逻辑回滚。`)) return;
+    for (const id of ids) {
+      await api(`/api/procurement/purchase-orders/${id}`, { method: "DELETE" });
+    }
+    await loadAll();
+    renderPurchaseHistory();
+  });
+}
+
+function initDailyProcurementReminder() {
+  // 每天 18:00 检查是否有待采购请求。
+  function checkAndRemind() {
+    const pending = (state.procurementRequests || []).filter(r => r.status === "submitted");
+    if (!pending.length) return;
+    const now = new Date();
+    const hour = now.getHours();
+    // 只在 18:00-20:00 之间提醒一次。
+    if (hour >= 18 && hour <= 20) {
+      const todayKey = `procReminder_${now.toISOString().slice(0, 10)}`;
+      if (localStorage.getItem(todayKey)) return;
+      localStorage.setItem(todayKey, "1");
+      const totalQty = pending.reduce((s, r) => s + Number(r.quantity || 0), 0);
+      const totalAmount = pending.reduce((s, r) => s + Number(r.amount || 0) + Number(r.shipping_amount || 0), 0);
+      const msg = `今日采购提醒：还有 ${pending.length} 条采购请求待处理，共 ${totalQty} 件，总金额 ${money(totalAmount)}。请及时前往“采购清单”页面处理。`;
+      console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
+      // 如果页面可见，显示轻量通知。
+      if (document.visibilityState === "visible") {
+        showToast(msg, "info", 8000);
+      }
+    }
+  }
+
+  // 每 30 分钟检查一次。
+  window.setInterval(checkAndRemind, 30 * 60 * 1000);
+  // 页面加载时也检查。
+  window.setTimeout(checkAndRemind, 5000);
+}
+
+function showToast(message, type = "info", duration = 4000) {
+  const existing = document.querySelector(".proc-toast");
+  if (existing) existing.remove();
+  const toast = document.createElement("div");
+  toast.className = `proc-toast ${type}`;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  window.setTimeout(() => {
+    toast.classList.add("fade-out");
+    window.setTimeout(() => toast.remove(), 300);
+  }, duration);
 }
 
 function purchaseOrderGoodsCell(row) {
   const names = String(row.product_names || "").split("||").filter(Boolean);
   const images = String(row.product_image_urls || "").split("||");
   if (!names.length) return tag("暂无商品", "amber");
-  const preview = names.slice(0, 3).map((name, index) => `<span class="po-goods-chip">${image(images[index])}<b>${escape(name)}</b></span>`).join("");
-  const more = names.length > 3 ? `<small>另 ${escape(names.length - 3)} 种商品</small>` : "";
+  const preview = names.slice(0, 2).map((name, index) => `<span class="po-goods-chip">${image(images[index])}<b>${escape(name)}</b></span>`).join("");
+  const more = names.length > 2 ? `<small>+${names.length - 2}</small>` : "";
   return `<div class="po-goods-list">${preview}${more}</div>`;
 }
 
-function renderPendingInboundWorkspace(target) {
-  const rows = state.pendingInbound || [];
-  target.innerHTML = rows.length ? `<div class="table-wrap"><table class="table">
-    <thead><tr><th>产品</th><th>采购单号</th><th>应到</th><th>已入库</th><th>剩余</th><th>质检</th><th>备注</th><th>操作</th></tr></thead>
-    <tbody>${rows.map((row) => `<tr>
-      <td><div class="outbound-product">${image(row.product_image_url)}<span><strong>${escape(row.product_name)}</strong><small>${escape(row.product_code)} / ${escape(row.mapped_skus || "无 SKU")}</small></span></div></td>
-      <td>${escape(row.order_no)}</td>
-      <td>${escape(row.actual_quantity || row.expected_quantity || 0)}</td>
-      <td>${escape(row.inbound_quantity || 0)}</td>
-      <td>${escape(row.remaining_quantity || row.expected_quantity || 0)}</td>
-      <td>${tag(qcStatusName(row.qc_status), row.qc_status === "exception" ? "red" : "amber")}</td>
-      <td>${escape(row.inbound_note || "")}</td>
-      <td><button class="linklike confirm-inbound-btn" data-id="${row.inbound_record_id}">确认入库</button></td>
-    </tr>`).join("")}</tbody>
-  </table></div>` : `<div class="empty">暂无待入库商品</div>`;
-}
-
-function renderInboundRecordsWorkspace(target) {
-  const rows = (state.inboundRecords || []).filter((row) => row.status === "approved");
-  target.innerHTML = rows.length ? `<div class="table-wrap"><table class="table">
-    <thead><tr><th>入库时间</th><th>产品</th><th>采购单号</th><th>数量</th><th>货款</th><th>运费</th><th>均摊</th><th>操作人</th><th>质检</th><th>备注</th><th>操作</th></tr></thead>
-    <tbody>${rows.map((row) => `<tr>
-      <td>${date(row.approved_at || row.created_at)}</td>
-      <td><div class="outbound-product">${image(row.product_image_url)}<span><strong>${escape(row.product_name)}</strong><small>${escape(row.product_code || "")}</small></span></div></td>
-      <td>${escape(row.purchase_order_no || "-")}</td>
-      <td>${escape(row.quantity)}</td>
-      <td>${money(row.amount)}</td>
-      <td>${money(row.shipping_amount)}</td>
-      <td>${money(row.unit_cost)}</td>
-      <td>${escape(row.person_name || "")}</td>
-      <td>${tag(qcStatusName(row.qc_status), row.qc_status === "exception" ? "red" : "green")}</td>
-      <td>${escape(row.note || "")}</td>
-      <td class="action-row"><button class="linklike edit-inbound-record-btn" data-id="${row.id}">编辑</button><button class="linklike danger delete-inbound-record-btn" data-id="${row.id}">删除</button></td>
-    </tr>`).join("")}</tbody>
-  </table></div>` : `<div class="empty">暂无入库记录</div>`;
-}
-
-async function mergeSelectedProcurementRequests() {
-  const ids = [...state.procurementSelectedRequestIds];
-  if (!ids.length) { alert("请先勾选采购需求"); return; }
+async function mergeAllPendingRequests() {
+  const pendingRequests = (state.procurementRequests || []).filter(r => r.status === "submitted");
+  if (!pendingRequests.length) { await showAppAlert("暂无待处理的采购请求"); return; }
+  const ids = pendingRequests.map(r => r.id);
+  const ok = await showAppConfirm(`确认生成当日采购清单？\n共 ${ids.length} 条请求待采购。`);
+  if (!ok) return;
   await api("/api/procurement/purchase-orders", {
     method: "POST",
     body: JSON.stringify({ request_ids: ids, person_id: state.currentUserId })
   });
-  state.procurementSelectedRequestIds.clear();
-  state.procurementTab = "orders";
   await loadAll();
+  showView("purchaseList");
 }
 
-async function openPurchaseOrderDrawer(id) {
+async function openPurchaseOrderDrawer(id, editMode = false) {
   const detail = await api(`/api/procurement/purchase-orders/${id}`);
   const drawer = document.querySelector("#purchaseOrderDrawer");
   const body = document.querySelector("#purchaseOrderDrawerBody");
   if (!drawer || !body) return;
-  body.innerHTML = `
-    <section class="drawer-section"><strong>${escape(detail.order.order_no)}</strong>${tag(purchaseOrderStatusName(detail.order.status), purchaseOrderStatusColor(detail.order.status))}<small>创建：${date(detail.order.created_at)} / 创建人：${escape(detail.order.creator_name || "")}</small><small>总数量 ${escape(detail.order.total_quantity)} / 总金额 ${money(detail.order.total_amount)}</small></section>
-    <section class="drawer-section"><h3>商品明细</h3>${detail.items.map((item) => `<div class="drawer-row">${image(item.product_image_url)}<span><strong>${escape(item.product_name)}</strong><small>${escape(item.product_code)} / ${escape(item.mapped_skus || "无 SKU")}</small><small>来源 ${escape(item.requested_quantity)} / 实采 ${escape(item.actual_quantity)} / 已入库 ${escape(item.inbound_quantity)}</small><small>货款 ${money(item.amount)} / 运费 ${money(item.shipping_amount)} / 均摊 ${money(item.unit_cost)} / ${link(item.purchase_url)}</small></span></div>`).join("")}</section>
-    <section class="drawer-section"><h3>来源需求</h3>${detail.requests.map((r) => `<p>${escape(r.person_name || "")} 申请 ${escape(r.quantity)} 件：货款 ${money(r.amount)} / 运费 ${money(r.shipping_amount)} ${escape(r.note || "")} <small>${date(r.created_at)}</small></p>`).join("")}</section>
-  `;
+
+  if (editMode && detail.order.status !== "cancelled") {
+    // 编辑模式
+    body.innerHTML = `
+      <section class="drawer-section">
+        <strong>${escape(detail.order.order_no)}</strong>
+        ${tag(purchaseOrderStatusName(detail.order.status), purchaseOrderStatusColor(detail.order.status))}
+        <small>创建：${date(detail.order.created_at)} / 创建人：${escape(detail.order.creator_name || "")}</small>
+      </section>
+      <section class="drawer-section">
+        <h3>编辑商品明细</h3>
+        <form id="poEditForm" data-id="${id}">
+          ${detail.items.map((item) => `
+            <div class="drawer-row po-edit-row" data-item-id="${item.id}">
+              ${image(item.product_image_url)}
+              <span class="po-edit-fields">
+                <strong>${escape(item.product_name)}</strong>
+                <div class="edit-grid">
+                  <label>实采数量<input type="number" name="actual_quantity_${item.id}" value="${item.actual_quantity}" min="0" /></label>
+                  <label>货款(RMB)<input type="number" name="amount_${item.id}" value="${item.amount}" step="0.01" /></label>
+                  <label>运费(RMB)<input type="number" name="shipping_amount_${item.id}" value="${item.shipping_amount}" step="0.01" /></label>
+                  <label class="full">采购链接<input type="text" name="purchase_url_${item.id}" value="${escape(item.purchase_url || "")}" /></label>
+                  <label class="full">备注<input type="text" name="note_${item.id}" value="${escape(item.note || "")}" /></label>
+                </div>
+              </span>
+            </div>
+          `).join("")}
+          <div class="edit-actions">
+            <button type="button" id="poEditCancel">取消</button>
+            <button type="submit" class="primary">保存修改</button>
+          </div>
+        </form>
+      </section>
+      <section class="drawer-section">
+        <h3>来源需求</h3>
+        ${detail.requests.map((r) => `<p>${escape(r.person_name || "")} 申请 ${escape(r.quantity)} 件：货款 ${money(r.amount)} / 运费 ${money(r.shipping_amount)} ${escape(r.note || "")} <small>${date(r.created_at)}</small></p>
+        `).join("")}
+      </section>
+    `;
+    // 绑定编辑表单
+    const form = body.querySelector("#poEditForm");
+    if (form) {
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const items = detail.items.map((item) => ({
+          id: item.id,
+          actual_quantity: Number(form.querySelector(`[name="actual_quantity_${item.id}"]`)?.value ?? item.actual_quantity),
+          amount: Number(form.querySelector(`[name="amount_${item.id}"]`)?.value ?? item.amount),
+          shipping_amount: Number(form.querySelector(`[name="shipping_amount_${item.id}"]`)?.value ?? item.shipping_amount),
+          purchase_url: form.querySelector(`[name="purchase_url_${item.id}"]`)?.value || item.purchase_url || "",
+          note: form.querySelector(`[name="note_${item.id}"]`)?.value || item.note || ""
+        }));
+        const totalAmount = items.reduce((s, item) => s + item.amount + item.shipping_amount, 0);
+        await api(`/api/procurement/purchase-orders/${id}`, {
+          method: "PUT",
+          body: JSON.stringify({ items, total_amount: totalAmount })
+        });
+        closePurchaseOrderDrawer();
+        await loadAll();
+        renderPurchaseHistory();
+        showToast("采购单已更新", "info");
+      });
+    }
+    const cancelBtn = body.querySelector("#poEditCancel");
+    if (cancelBtn) cancelBtn.addEventListener("click", closePurchaseOrderDrawer);
+  } else {
+    // 查看模式
+    body.innerHTML = `
+      <section class="drawer-section"><strong>${escape(detail.order.order_no)}</strong>${tag(purchaseOrderStatusName(detail.order.status), purchaseOrderStatusColor(detail.order.status))}<small>创建：${date(detail.order.created_at)} / 创建人：${escape(detail.order.creator_name || "")}</small><small>总数量 ${escape(detail.order.total_quantity)} / 总金额 ${money(detail.order.total_amount)}</small></section>
+      <section class="drawer-section"><h3>商品明细</h3>${detail.items.map((item) => `<div class="drawer-row">${image(item.product_image_url)}<span><strong>${escape(item.product_name)}</strong><small>${escape(item.product_code)} / ${escape(item.mapped_skus || "无 SKU")}</small><small>来源 ${escape(item.requested_quantity)} / 实采 ${escape(item.actual_quantity)} / 已入库 ${escape(item.inbound_quantity)}</small><small>货款 ${money(item.amount)} / 运费 ${money(item.shipping_amount)} / 均摊 ${money(item.unit_cost)} / ${link(item.purchase_url)}</small></span></div>`).join("")}</section>
+      <section class="drawer-section"><h3>来源需求</h3>${detail.requests.map((r) => `<p>${escape(r.person_name || "")} 申请 ${escape(r.quantity)} 件：货款 ${money(r.amount)} / 运费 ${money(r.shipping_amount)} ${escape(r.note || "")} <small>${date(r.created_at)}</small></p>`).join("")}</section>
+    `;
+  }
   drawer.style.display = "";
   drawer.classList.add("visible");
 }
@@ -1711,7 +6321,7 @@ function closePurchaseOrderDrawer() {
 
 async function confirmPurchaseOrderAction(id) {
   const detail = await api(`/api/procurement/purchase-orders/${id}`);
-  const ok = confirm(`确认已采购「${detail.order.order_no}」吗？\n系统会生成待入库记录，并增加产品即将入库数量。`);
+  const ok = await showAppConfirm(`确认已采购「${detail.order.order_no}」吗？\n系统会生成待入库记录，并增加产品即将入库数量。`);
   if (!ok) return;
   await api(`/api/procurement/purchase-orders/${id}/confirm-purchased`, {
     method: "POST",
@@ -1724,10 +6334,10 @@ async function confirmPurchaseOrderAction(id) {
 async function confirmInboundRecordAction(id) {
   const record = state.pendingInbound.find((item) => Number(item.inbound_record_id) === Number(id));
   if (!record) return;
-  const qty = Number(prompt(`本次入库数量（剩余 ${record.remaining_quantity || record.expected_quantity}）`, String(record.remaining_quantity || record.expected_quantity || 1)) || 0);
+  const qty = Number(await showAppPrompt(`本次入库数量（剩余 ${record.remaining_quantity || record.expected_quantity}）`, String(record.remaining_quantity || record.expected_quantity || 1)) || 0);
   if (!qty) return;
-  const qc = confirm("质检是否通过？点击“确定”为通过，点击“取消”为异常。") ? "passed" : "exception";
-  const note = prompt("入库备注", record.inbound_note || "") || "";
+  const qc = await showAppConfirm('质检是否通过？点击“确定”为通过，点击“取消”为异常。') ? "passed" : "exception";
+  const note = await showAppPrompt("入库备注", record.inbound_note || "") || "";
   const expectedQty = Number(record.expected_quantity || record.actual_quantity || qty || 1);
   const ratio = expectedQty ? qty / expectedQty : 1;
   const amount = Number(record.amount || 0) * ratio;
@@ -1752,14 +6362,14 @@ async function confirmInboundRecordAction(id) {
 async function editInboundRecordAction(id) {
   const record = state.inboundRecords.find((item) => Number(item.id) === Number(id));
   if (!record) return;
-  const quantity = promptNumber("入库数量", record.quantity);
+  const quantity = await promptNumber("入库数量", record.quantity);
   if (quantity == null) return;
-  const amount = promptNumber("采购总金额（不含运费）", record.amount);
+  const amount = await promptNumber("采购总金额（不含运费）", record.amount);
   if (amount == null) return;
-  const shippingAmount = promptNumber("采购总运费", record.shipping_amount || 0);
+  const shippingAmount = await promptNumber("采购总运费", record.shipping_amount || 0);
   if (shippingAmount == null) return;
-  const qc = prompt("质检状态：passed / exception / pending", record.qc_status || "passed") || record.qc_status || "passed";
-  const note = prompt("入库备注", record.note || "") ?? record.note ?? "";
+  const qc = await showAppPrompt("质检状态：passed / exception / pending", record.qc_status || "passed") || record.qc_status || "passed";
+  const note = await showAppPrompt("入库备注", record.note || "") ?? record.note ?? "";
   await api(`/api/inbound-records/${record.id}`, {
     method: "PUT",
     body: JSON.stringify({
@@ -1780,18 +6390,18 @@ async function editInboundRecordAction(id) {
 async function deleteInboundRecordAction(id) {
   const record = state.inboundRecords.find((item) => Number(item.id) === Number(id));
   if (!record) return;
-  const ok = confirm(`确认删除「${record.product_name || ""}」这条入库记录吗？\n如果已经入库，系统会同步撤销对应库存流水。`);
+  const ok = await showAppConfirm(`确认删除「${record.product_name || ""}」这条入库记录吗？\n如果已经入库，系统会同步撤销对应库存流水。`);
   if (!ok) return;
   await api(`/api/inbound-records/${record.id}`, { method: "DELETE" });
   await loadAll();
 }
 
-function promptNumber(label, value) {
-  const raw = prompt(label, String(value ?? 0));
+async function promptNumber(label, value) {
+  const raw = await showAppPrompt(label, String(value ?? 0));
   if (raw == null) return null;
   const number = Number(raw);
   if (!Number.isFinite(number) || number < 0) {
-    alert(`${label} 需要填写大于等于 0 的数字`);
+    await showAppAlert(`${label} 需要填写大于等于 0 的数字`);
     return null;
   }
   return number;
@@ -1802,7 +6412,7 @@ function bindInboundActions() {
     button.addEventListener("click", async () => {
       const record = state.inboundRecords.find((item) => Number(item.id) === Number(button.dataset.id));
       if (!record) return;
-      if (!confirm(`确认「${record.product_name}」到货验收通过并加入库存吗？`)) return;
+      if (!await showAppConfirm(`确认「${record.product_name}」到货验收通过并加入库存吗？`)) return;
       await api(`/api/inbound-records/${record.id}`, {
         method: "PUT",
         body: JSON.stringify({ ...record, status: "approved" })
@@ -1838,27 +6448,153 @@ function inboundWaitDays(record) {
 
 function renderOrdersTable() {
   syncOrderControls();
-  const rows = filteredOrderRows();
+  ensureOrderToolbarEnhancements();
+  const rows = state.orderMeta?.mode === "paged" ? state.orders : filteredOrderRows();
   const totalPages = orderTotalPages();
   state.orderFilters.page = Math.min(Math.max(1, state.orderFilters.page), totalPages);
-  const start = (state.orderFilters.page - 1) * state.orderFilters.pageSize;
-  const pageRows = rows.slice(start, start + state.orderFilters.pageSize);
-  renderTable("ordersTable", pageRows, [
-    ["posting", "订单信息", (r) => orderInfoCell(r)],
-    ["goods", "商品 / SKU", (r) => orderGoodsCell(r)],
-    ["stock", "库存处理", (r) => orderStockCell(r)],
-    ["amount", "金额/利润", (r) => orderProfitCell(r)],
-    ["logistics", "物流", (r) => orderLogisticsCell(r)],
-    ["time", "下单/备货", (r) => orderTimeCell(r)]
-  ]);
-  updateOrderPager(rows.length);
+  const start = state.orderMeta?.mode === "paged" ? 0 : (state.orderFilters.page - 1) * state.orderFilters.pageSize;
+  const pageRows = state.orderMeta?.mode === "paged" ? rows : rows.slice(start, start + state.orderFilters.pageSize);
+  renderOrderMarkFilters();
+  renderOrderWorkbenchTable(pageRows);
+  updateOrderPager(state.orderMeta?.mode === "paged" ? state.orderMeta.total : rows.length);
   bindOrderRowActions();
 }
 
+function ensureOrderToolbarEnhancements() {
+  const printPills = document.querySelector(".order-filter-pills");
+  if (printPills) renderOrderPrintControls(printPills);
+  const filterBar = document.querySelector(".order-print-mark-bar");
+  if (filterBar && state.orderFilters.status === "awaiting_deliver" && !document.querySelector("#orderBulkPrintBtn")) {
+    const button = document.createElement("button");
+    button.id = "orderBulkPrintBtn";
+    button.type = "button";
+    button.className = "success order-bulk-print-main";
+    button.textContent = "鎵归噺鎵撳嵃";
+    button.addEventListener("click", () => printOrderLabels(selectedOrderIds(), { source: "bulk" }));
+    filterBar.appendChild(button);
+  }
+  if (filterBar && state.orderFilters.status !== "awaiting_deliver") document.querySelector("#orderBulkPrintBtn")?.remove();
+  if (filterBar && state.orderFilters.status === "awaiting_packaging" && !document.querySelector("#orderBulkPrepareBtn")) {
+    const button = document.createElement("button");
+    button.id = "orderBulkPrepareBtn";
+    button.type = "button";
+    button.className = "primary order-bulk-prepare-main";
+    button.textContent = "批量备货";
+    button.addEventListener("click", () => prepareOrderShipments(selectedOrderIds(), { source: "bulk" }));
+    filterBar.appendChild(button);
+  }
+  if (filterBar && state.orderFilters.status !== "awaiting_packaging") document.querySelector("#orderBulkPrepareBtn")?.remove();
+  updateSelectedOrderPrintCount();
+}
+
+function renderOrderPrintControls(target) {
+  if (state.orderFilters.status !== "awaiting_deliver") {
+    target.innerHTML = "";
+    target.hidden = true;
+    state.orderFilters.printFilter = "all";
+    state.orderFilters.sortMode = "ordered";
+    return;
+  }
+  target.hidden = false;
+  const items = [
+    ["all", "全部订单"],
+    ["inventory", "按库存合并打印"],
+    ["unprinted", "未打印"],
+    ["printed", "已打印"]
+  ];
+  target.innerHTML = items.map(([value, label]) => `
+    <button type="button" data-order-print-view="${escape(value)}" class="${state.orderFilters.printView === value ? "active" : ""}">${escape(label)}</button>
+  `).join("");
+  target.querySelectorAll("[data-order-print-view]").forEach((button) => {
+    button.addEventListener("click", () => setOrderPrintView(button.dataset.orderPrintView));
+  });
+}
+
+function setOrderPrintView(view) {
+  state.orderFilters.printView = ["all", "inventory", "printed", "unprinted"].includes(view) ? view : "all";
+  state.orderFilters.markFilter = "all";
+  state.orderFilters.printFilter = state.orderFilters.printView === "printed"
+    ? "printed"
+    : state.orderFilters.printView === "unprinted" || state.orderFilters.printView === "inventory"
+      ? "unprinted"
+      : "all";
+  state.orderFilters.sortMode = state.orderFilters.printView === "inventory" ? "inventory" : "ordered";
+  state.orderFilters.page = 1;
+  localStorage.setItem("orderFilter:printView", state.orderFilters.printView);
+  localStorage.setItem("orderFilter:printFilter", state.orderFilters.printFilter);
+  localStorage.setItem("orderFilter:sortMode", state.orderFilters.sortMode);
+  localStorage.setItem("orderFilter:markFilter", state.orderFilters.markFilter);
+  reloadOrdersPage();
+}
+
+function renderOrderWorkbenchTable(rows) {
+  const target = document.querySelector("#ordersTable");
+  if (!target) return;
+  if (!rows.length) {
+    target.innerHTML = `<div class="empty">当前筛选下暂无订单。可以调整日期、店铺、状态或搜索条件后重试。</div>`;
+    return;
+  }
+  target.innerHTML = `<div class="table-wrap order-workbench-wrap">
+    <table class="table order-workbench-table">
+      <colgroup>
+        <col class="ow-check" />
+        <col class="ow-mark" />
+        <col class="ow-posting" />
+        <col class="ow-time" />
+        <col class="ow-shop" />
+        <col class="ow-status" />
+        <col class="ow-goods" />
+        <col class="ow-inventory" />
+        <col class="ow-quantity" />
+        <col class="ow-money" />
+        <col class="ow-delivery" />
+        <col class="ow-tracking" />
+        <col class="ow-cancel" />
+        <col class="ow-actions" />
+      </colgroup>
+      <thead><tr>
+        <th class="order-check-col"><input type="checkbox" data-order-select-all /></th>
+        <th>标记</th>
+        <th>货件编号</th>
+        <th>下单/更新时间</th>
+        <th>所属店铺</th>
+        <th>状态</th>
+        <th>商品信息</th>
+        <th>库存</th>
+        <th>数量</th>
+        <th>订单金额/费用/利润</th>
+        <th>配送方式</th>
+        <th>追踪号码</th>
+        <th>取消时间 / 取消原因</th>
+        <th class="sticky-action-col">操作</th>
+      </tr></thead>
+      <tbody>${rows.map((row, index) => `<tr data-row-id="${escape(row.id)}" class="${orderQualityRule(row) ? "quality-order-row" : ""}">
+        <td><input type="checkbox" data-order-select="${escape(row.id)}" /></td>
+        <td>${orderMarkCell(row, index)}</td>
+        <td>${orderNumberCell(row)}</td>
+        <td>${orderTimeCell(row)}</td>
+        <td class="order-shop-cell">${escape(row.shop_name || "-")}</td>
+        <td>${orderStatusCell(row)}</td>
+        <td>${orderGoodsCell(row)}</td>
+        <td>${orderInventoryCell(row)}</td>
+        <td>${orderQuantityCell(row)}</td>
+        <td>${orderProfitCell(row)}</td>
+        <td>${orderDeliveryCell(row)}</td>
+        <td>${orderTrackingCell(row)}</td>
+        <td>${orderCancelCell(row)}</td>
+        <td class="sticky-action-col">${orderActionCell(row)}</td>
+      </tr>`).join("")}</tbody>
+    </table>
+  </div>`;
+}
+
 function syncOrderControls() {
+  const syncBtn = document.querySelector("#syncOrdersBtn");
+  const pullBtn = document.querySelector("#syncOrdersIncrementalBtn");
+  if (syncBtn && pullBtn && syncBtn.nextElementSibling !== pullBtn) syncBtn.insertAdjacentElement("afterend", pullBtn);
   const shopSelect = document.querySelector("#orderShopFilter");
   if (shopSelect) {
-    shopSelect.innerHTML = `<option value="all">全部店铺</option>${state.shops.map((shop) => `<option value="${shop.id}">${escape(shop.name)}</option>`).join("")}`;
+    shopSelect.innerHTML = `<option value="all">鍏ㄩ儴搴楅摵</option>${state.shops.map((shop) => `<option value="${shop.id}">${escape(shop.name)}</option>`).join("")}`;
     shopSelect.value = [...shopSelect.options].some((option) => option.value === state.orderFilters.shopId) ? state.orderFilters.shopId : "all";
   }
   renderOrderStatusTabs();
@@ -1871,19 +6607,64 @@ function syncOrderControls() {
 }
 
 function filteredOrderRows() {
-  return state.orders.filter((row) => {
+  const rows = state.orders.filter((row) => {
     const shopOk = orderMatchesShop(row);
     const statusOk = orderMatchesStatus(row, state.orderFilters.status);
     const dateOk = orderMatchesDate(row);
-    return shopOk && statusOk && dateOk;
+    const searchOk = orderMatchesSearch(row);
+    const markOk = orderMatchesMark(row);
+    const printOk = orderMatchesPrint(row);
+    const printableOk = state.orderFilters.status === "awaiting_deliver" && state.orderFilters.printView === "inventory"
+      ? orderCanPrintLabel(row)
+      : true;
+    return shopOk && statusOk && dateOk && searchOk && markOk && printOk && printableOk;
   });
+  return sortOrderRows(rows);
+}
+
+function sortOrderRows(rows) {
+  const mode = state.orderFilters.sortMode || "ordered";
+  return [...rows].sort((a, b) => {
+    if (mode === "inventory") {
+      const key = orderInventorySortKey(a).localeCompare(orderInventorySortKey(b), "zh-Hans", { numeric: true });
+      if (key) return key;
+    } else if (mode === "sku") {
+      const key = orderSkuSortKey(a).localeCompare(orderSkuSortKey(b), "zh-Hans", { numeric: true });
+      if (key) return key;
+    } else if (state.orderFilters.status === "awaiting_packaging") {
+      const key = logisticsMode(a).key.localeCompare(logisticsMode(b).key);
+      if (key) return key;
+    }
+    return orderTimestampValue(b) - orderTimestampValue(a);
+  });
+}
+
+function orderInventorySortKey(row) {
+  const modePrefix = logisticsMode(row).key === "fbp" ? "z-fbp" : "a-fbs";
+  const items = orderSkuStockRows(row);
+  const keys = items.map((item) => {
+    if (!item.product) return `zz-unbound-${item.sku}`;
+    return item.product.inventory_id || item.product.code || item.product.selection_id || `id-${item.product.id}`;
+  }).filter(Boolean);
+  return `${modePrefix}-${keys.sort((a, b) => String(a).localeCompare(String(b), "zh-Hans", { numeric: true }))[0] || "zz-empty"}`;
+}
+
+function orderSkuSortKey(row) {
+  const skus = String(row.skus || "").split(",").map((item) => item.trim()).filter(Boolean);
+  return skus.sort((a, b) => a.localeCompare(b, "zh-Hans", { numeric: true }))[0] || "zz-empty";
+}
+
+function orderTimestampValue(row) {
+  const value = row.ordered_at || row.created_at || row.updated_at || "";
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? time : 0;
 }
 
 function renderOrderStatusTabs() {
   const target = document.querySelector("#orderStatusButtons");
   if (!target) return;
   const counts = orderStatusCounts();
-  target.innerHTML = `<span class="order-date-summary">${escape(orderDateRangeLabel())}</span>` + orderStatusTabs.map(([status, label]) => `
+  target.innerHTML = orderStatusTabs.map(([status, label]) => `
     <button type="button" data-status="${escape(status)}" class="${status === state.orderFilters.status ? "active" : ""}">
       <span>${escape(label)}</span>
       <b>${escape(counts[status] || 0)}</b>
@@ -1892,7 +6673,10 @@ function renderOrderStatusTabs() {
 }
 
 function orderStatusCounts() {
-  const shopRows = state.orders.filter((row) => orderMatchesShop(row) && orderMatchesDate(row));
+  if (state.orderMeta?.mode === "paged" && state.orderMeta.counts) {
+    return Object.fromEntries(orderStatusTabs.map(([status]) => [status, Number(state.orderMeta.counts[status] || 0)]));
+  }
+  const shopRows = state.orders.filter((row) => orderMatchesShop(row) && orderMatchesDate(row) && orderMatchesSearch(row));
   const counts = Object.fromEntries(orderStatusTabs.map(([status]) => [status, 0]));
   counts.all = shopRows.length;
   for (const row of shopRows) {
@@ -1901,6 +6685,58 @@ function orderStatusCounts() {
     }
   }
   return counts;
+}
+
+const orderMarkOptions = [
+  ["all", "全部标记", ""],
+  ["", "无标记", "none"],
+  ["quality", "质检单", "red"],
+  ["urgent", "紧急订单", "purple"],
+  ["follow", "待跟进", "orange"],
+  ["issue", "有问题", "yellow"],
+  ["solved", "已解决", "green"],
+  ["vip", "重要客户", "cyan"],
+  ["special", "特殊处理", "purple"],
+  ["other", "其他", "gray"]
+];
+
+function renderOrderMarkFilters() {
+  const target = document.querySelector("#orderMarkFilters");
+  if (!target) return;
+  target.innerHTML = orderMarkOptions.filter(([value]) => value && value !== "all").map(([value, label, color]) => `
+    <button type="button" class="mark-filter ${state.orderFilters.markFilter === value ? "active" : ""}" data-mark-filter="${escape(value)}">
+      <span class="mark-dot ${escape(color)}"></span>${escape(label)}
+    </button>
+  `).join("");
+  target.querySelectorAll("[data-mark-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.orderFilters.markFilter = state.orderFilters.markFilter === button.dataset.markFilter ? "all" : button.dataset.markFilter;
+      state.orderFilters.printView = "all";
+      state.orderFilters.printFilter = "all";
+      state.orderFilters.sortMode = "ordered";
+      state.orderFilters.page = 1;
+      localStorage.setItem("orderFilter:markFilter", state.orderFilters.markFilter);
+      localStorage.setItem("orderFilter:printView", state.orderFilters.printView);
+      localStorage.setItem("orderFilter:printFilter", state.orderFilters.printFilter);
+      localStorage.setItem("orderFilter:sortMode", state.orderFilters.sortMode);
+      reloadOrdersPage();
+    });
+  });
+}
+
+function orderMatchesMark(row) {
+  const filter = state.orderFilters.markFilter || "all";
+  if (filter === "all") return true;
+  if (filter === "quality") return String(row.mark_type || "") === "quality" || Boolean(orderQualityRule(row));
+  return String(row.mark_type || "") === filter;
+}
+
+function orderMatchesPrint(row) {
+  if (state.orderFilters.status !== "awaiting_deliver") return true;
+  const filter = state.orderFilters.printFilter || "all";
+  if (filter === "all") return true;
+  const printed = Boolean(row.printed_at || row.label_printed_at || row.shipping_label_printed_at);
+  return filter === "printed" ? printed : !printed;
 }
 
 function orderMatchesShop(row) {
@@ -1915,19 +6751,53 @@ function orderMatchesDate(row) {
   return true;
 }
 
+function orderMatchesSearch(row) {
+  const query = String(state.orderFilters.searchQuery || "").trim().toLowerCase();
+  if (!query) return true;
+  const type = state.orderFilters.searchType || "sku";
+  if (type === "sku") {
+    const skus = String(row.skus || "").toLowerCase();
+    const productCodes = String(row.product_codes || "").toLowerCase();
+    const productNames = String(row.product_names || "").toLowerCase();
+    return skus.includes(query) || productCodes.includes(query) || productNames.includes(query);
+  }
+  if (type === "order") {
+    const postingNumber = String(row.posting_number || "").toLowerCase();
+    const orderNumber = String(row.order_number || "").toLowerCase();
+    return postingNumber.includes(query) || orderNumber.includes(query);
+  }
+  if (type === "product") {
+    const productIds = String(row.product_ids || "").toLowerCase();
+    const inventoryIds = String(row.inventory_ids || "").toLowerCase();
+    const productCodes = String(row.product_codes || "").toLowerCase();
+    return productIds.includes(query) || inventoryIds.includes(query) || productCodes.includes(query);
+  }
+  if (type === "offer") return String(row.offer_ids || row.product_codes || "").toLowerCase().includes(query);
+  if (type === "tracking") return String(row.tracking_number || row.logistics_channel || "").toLowerCase().includes(query);
+  if (type === "purchaseTracking") return String(row.purchase_tracking_numbers || row.purchase_order_numbers || "").toLowerCase().includes(query);
+  return true;
+}
+
 function orderMatchesStatus(row, status) {
   if (status === "all") return true;
   const workbench = orderWorkbenchState(row);
-  if (["unbound", "stock_issue", "outbound_ready"].includes(status)) return workbench.key === status;
+  if (status === "unbound") return orderHasUnboundStock(row);
+  if (status === "stock_issue") return workbench.key === status;
   if (status === "overdue") return orderIsOverdue(row);
+  if (status === "exception") return String(row.sync_state || "") === "exception";
+  if (status === "archived") return String(row.sync_state || "") === "final";
   const values = [row.status, row.tracking_stage].map((value) => String(value || "").toLowerCase());
-  if (status === "cancelled") return values.some((value) => value.includes("cancel"));
-  if (status === "delivered") return values.some((value) => value === "delivered" || value === "posting_delivered" || value === "posting_received");
-  if (status === "delivering") return values.some((value) => value === "delivering" || value.includes("transferring") || value.includes("carriage") || value.includes("pickup") || value.includes("sorting") || value.includes("customs"));
-  return values.includes(status);
+  if (status === "awaiting_packaging") return orderMatchesAwaitingPackagingValues(values);
+  if (status === "awaiting_deliver") return orderMatchesAwaitingDeliverValues(values);
+  if (status === "delivering") return orderMatchesDeliveringValues(values);
+  if (status === "dispute") return orderMatchesDisputeValues(values);
+  if (status === "delivered") return orderMatchesDeliveredValues(values) && !orderMatchesCancelledValues(values);
+  if (status === "cancelled") return orderMatchesCancelledValues(values);
+  return false;
 }
 
 function orderTotalPages() {
+  if (state.orderMeta?.mode === "paged") return Math.max(1, Math.ceil(Number(state.orderMeta.total || 0) / state.orderFilters.pageSize));
   return Math.max(1, Math.ceil(filteredOrderRows().length / state.orderFilters.pageSize));
 }
 
@@ -1942,18 +6812,242 @@ function updateOrderPager(total) {
 }
 
 function orderGoodsCell(row) {
-  const imageUrl = String(row.image_urls || "").split(",").find(Boolean);
-  const name = cleanOrderProductName(row.product_names);
-  const code = cleanOrderProductCode(row.product_codes);
-  return `<div class="order-goods">${image(imageUrl)}<div>${strong(name, code)}${orderQuantitySummary(row)}</div></div>`;
+  const items = orderSkuDisplayRows(row);
+  if (!items.length) {
+    const imageUrl = String(row.image_urls || "").split(",").find(Boolean);
+    const name = cleanOrderProductName(row.product_names);
+    const code = cleanOrderProductCode(row.product_codes);
+    return `<div class="order-goods">${image(imageUrl)}<div>${strong(name, code)}</div></div>`;
+  }
+  return `<div class="order-goods-list">${items.map((item) => `
+    <div class="order-goods">
+      ${image(item.imageUrl)}
+      <div>
+        <strong>${escape(item.name || "Ozon SKU 未返回标题")}</strong>
+        <small>SKU：${escape(item.sku)}</small>
+        <small>货号：${escape(item.offerId || "-")}</small>
+      </div>
+    </div>
+  `).join("")}</div>`;
+}
+
+function orderMarkCell(row, index = null) {
+  const selected = String(row.mark_type || (orderQualityRule(row) ? "quality" : ""));
+  const option = orderMarkOptions.find(([value]) => value === selected) || orderMarkOptions[1];
+  const ordinal = index != null
+    ? `<span class="order-row-index">${escape((state.orderFilters.page - 1) * state.orderFilters.pageSize + index + 1)}</span>`
+    : "";
+  return `<div class="order-mark-cell">
+    ${ordinal}
+    <span class="mark-dot ${escape(option[2] || "none")}"></span>
+    <label class="order-mark-picker" title="选择标记">
+      <span class="order-mark-flag">⚑</span>
+      <select class="order-mark-select" data-order-id="${escape(row.id)}" aria-label="选择订单标记">
+      ${orderMarkOptions.filter(([value]) => value !== "all").map(([value, label]) => `<option value="${escape(value)}" ${value === selected ? "selected" : ""}>${escape(label)}</option>`).join("")}
+      </select>
+    </label>
+  </div>`;
+}
+
+function orderQuantityCell(row) {
+  const items = orderSkuStockRows(row);
+  if (!items.length) {
+    const qty = Number(row.total_quantity || row.item_count || 0);
+    return `<strong class="${qty > 1 ? "order-qty-hot" : ""}">${escape(qty)}</strong>`;
+  }
+  return `<div class="order-qty-cell">${items.map((item) => `<span class="order-qty-item ${Number(item.qty) > 1 ? "order-qty-hot" : ""}">${escape(item.qty)} 件</span>`).join("")}</div>`;
+}
+
+function orderNumberCell(row) {
+  const quality = orderQualityRule(row);
+  const printedAt = row.printed_at || row.label_printed_at || row.shipping_label_printed_at || "";
+  return `<div class="order-number-cell">
+    ${orderPostingLink(row)}
+    ${printedAt ? `<small class="order-print-state printed"><span>已打印</span><b>${escape(date(printedAt))}</b></small>` : ""}
+    ${quality ? `<span class="quality-warning">${escape(quality.label || "质检单")}</span><small>${escape(quality.note || "不要正常发货，按仓库要求拍照处理。")}</small>` : ""}
+  </div>`;
+}
+
+function orderStatusCell(row) {
+  const stateInfo = orderWorkbenchState(row);
+  return `<div class="order-status-cell">
+    ${tag(stateInfo.label, stateInfo.color)}
+  </div>`;
+}
+
+function orderShipmentDeadlineLine(row, stateInfo) {
+  const showDeadline = ["awaiting_packaging", "awaiting_deliver", "unbound", "stock_issue"].includes(stateInfo.key);
+  if (!showDeadline) return "";
+  const remaining = Number(row.ship_days_remaining);
+  const deadline = row.shipment_deadline_at ? date(row.shipment_deadline_at) : "";
+  if (!deadline) return `<small class="deadline unknown">发货截止：-</small>`;
+  if (!Number.isFinite(remaining)) return `<small class="deadline unknown">发货截止：${escape(deadline)}</small>`;
+  const text = remaining < 0 ? `已超时 ${Math.abs(remaining)} 天` : remaining === 0 ? "今天超时" : `剩余 ${remaining} 天`;
+  const level = remaining < 0 ? "overdue" : remaining <= 3 ? "urgent" : "normal";
+  return `<small class="deadline">发货截止：${escape(deadline)}</small><small class="deadline-left ${level}">${escape(text)}</small>`;
+}
+
+function orderPurchaseCell(row) {
+  const urls = splitList(row.purchase_urls).filter(Boolean);
+  const costs = splitList(row.purchase_costs).filter((item) => Number(item) > 0);
+  return `<div class="order-purchase-cell">
+    <small>货源价格：${costs[0] ? money(costs[0]) : "--"}</small>
+    <small>采购地址：${urls[0] ? link(urls[0]) : "--"}</small>
+    <small>订单备注：${escape(row.mark_note || "--")}</small>
+  </div>`;
+}
+
+function orderInventoryCell(row) {
+  const items = orderSkuStockRows(row);
+  const mode = logisticsMode(row);
+  if (!items.length) return tag("无 SKU 明细", "amber");
+  return `<div class="order-inventory-list">${items.map((item) => {
+    if (!item.product) return `<div class="order-inventory-item pending">
+      <b>${escape(item.sku)}</b>
+      <small>待绑定库存</small>
+      <span class="order-inventory-actions">
+        ${tag("等待绑定", "amber")}
+        <button type="button" class="mini-action blue order-bind-from-order-btn" data-order-id="${escape(row.id)}" data-sku="${escape(item.sku)}" ${item.online ? `data-online-id="${escape(item.online.id)}"` : ""}>去绑定库存</button>
+        ${item.online ? `<button type="button" class="mini-action green order-create-product-btn" data-online-id="${escape(item.online.id)}" data-order-id="${escape(row.id)}" data-sku="${escape(item.sku)}">创建库存</button>` : `<button type="button" class="mini-action green order-create-product-from-order-btn" data-order-id="${escape(row.id)}" data-sku="${escape(item.sku)}">创建库存</button>`}
+      </span>
+    </div>`;
+    const label = item.product.name || item.product.inventory_id || item.product.code || item.product.selection_id || `ID ${item.product.id}`;
+    const remaining = item.processed ? item.stock : item.stock - item.qty;
+    const statusTag = mode.key === "fbp"
+      ? tag("FBP 已出库", "purple")
+      : item.processed
+        ? tag("FBS 已出库", "green")
+        : remaining < 0
+          ? tag("库存不足", "red")
+          : tag("等待出库", "amber");
+    return `<div class="order-inventory-item ${remaining < 0 ? "danger" : ""}">
+      <b>${escape(label)}</b>
+      <small>库存 ${escape(item.stock)} / 剩余 ${escape(remaining)}</small>
+      <span class="order-inventory-actions">${statusTag}<button type="button" class="mini-action order-create-proc-btn" data-product-id="${escape(item.product.id)}">创建采购请求</button>${item.mappingId ? `<button type="button" class="mini-action danger order-unbind-sku-btn" data-order-id="${escape(row.id)}" data-mapping-id="${escape(item.mappingId)}" data-sku="${escape(item.sku)}">删除绑定</button>` : ""}</span>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+function orderDeliveryCell(row) {
+  return orderLogisticsCell(row);
+}
+
+function orderCanPrintLabel(row) {
+  return logisticsMode(row).key !== "fbp";
+}
+
+function orderTrackingCell(row) {
+  const stateInfo = orderWorkbenchState(row);
+  if (["awaiting_packaging", "awaiting_deliver", "unbound", "stock_issue"].includes(stateInfo.key)) return `<small class="muted">--</small>`;
+  if (stateInfo.key === "cancelled" && Number(row.cancel_loss_applies || 0) !== 1) return `<small class="muted">--</small>`;
+  const tracking = String(row.tracking_number || row.posting_number || row.order_number || "").trim();
+  if (!tracking) return `<small class="muted">--</small>`;
+  const href = ozonTrackingUrl(tracking);
+  return `<a class="order-tracking-cell" href="${escape(href)}" target="_blank" rel="noreferrer" title="查看 Ozon 物流轨迹：${escape(tracking)}">${formatTrackingNumber(tracking)}</a>`;
+}
+
+function ozonTrackingUrl(track) {
+  return `https://tracking.ozon.ru/?track=${encodeURIComponent(track)}&local=zh-Hans`;
+}
+
+function formatTrackingNumber(value) {
+  const text = String(value || "");
+  const match = text.match(/^([^-]+)(-.+)$/);
+  if (!match) return `<span>${escape(text)}</span>`;
+  return `<span>${escape(match[1])}</span><span>${escape(match[2])}</span>`;
+}
+
+function orderCancelCell(row) {
+  const reason = String(row.cancel_reason || "").trim();
+  const initiatorRaw = String(row.cancel_initiator || "").trim() || cancelTypeLabel(row.cancel_type);
+  const initiator = translateCancelInitiator(initiatorRaw);
+  const reasonCn = translateCancelReason(reason);
+  const isCancelled = orderMatchesStatus(row, "cancelled");
+  if (!isCancelled && !reason && !initiator) return `<small class="muted">--</small>`;
+  const loss = Number(row.cancel_loss_applies || 0) > 0;
+  const stateText = loss ? "退货" : "取消";
+  return `<div class="order-cancel-cell">
+    <span>取消方：${escape(initiator || "未知")}</span>
+    <small title="${escape(reason || "")}">${escape(reasonCn || reason || "未返回取消原因")}</small>
+    ${tag(stateText, loss ? "red" : "green")}
+  </div>`;
+}
+
+function cancelTypeLabel(value) {
+  const key = String(value || "").toLowerCase();
+  if (key === "client" || key === "buyer") return "买家";
+  if (key === "seller") return "卖家";
+  if (key === "ozon" || key === "system") return "平台";
+  if (key === "delivery") return "物流";
+  return "";
+}
+
+function translateCancelInitiator(value) {
+  const text = String(value || "").trim();
+  const lower = text.toLowerCase();
+  if (!text) return "";
+  if (lower === "client" || lower === "buyer" || lower.includes("泻谢懈械薪褌") || lower.includes("锌芯泻褍锌邪褌械谢")) return "买家";
+  if (lower === "seller" || lower.includes("锌褉芯写邪胁")) return "卖家";
+  if (lower === "delivery" || lower.includes("褋谢褍卸斜邪 写芯褋褌邪胁泻懈")) return "物流";
+  if (lower === "ozon" || lower === "system" || lower.includes("ozon") || lower.includes("褋懈褋褌械屑")) return "平台";
+  return text;
+}
+
+function translateCancelReason(value) {
+  const text = String(value || "").trim();
+  const lower = text.toLowerCase();
+  if (!text) return "";
+  const prefix = lower.includes("锌芯泻褍锌邪褌械谢") ? "买家取消" : lower.includes("锌褉芯写邪胁") ? "卖家取消" : "订单取消";
+  if (lower.includes("褋褉芯泻") || lower.includes("delivery")) return `${prefix}：不满意配送时间`;
+  if (lower.includes("写械褕械胁")) return `${prefix}：找到更便宜商品`;
+  if (lower.includes("芯褕懈斜")) return `${prefix}：下单信息填写错误`;
+  if (lower.includes("薪械褌") || lower.includes("stock")) return `${prefix}：商品缺货`;
+  if (lower.includes("薪械 蟹邪斜褉邪谢") || lower.includes("薪械 锌芯谢褍褔懈谢")) return `${prefix}：买家未取货`;
+  if (lower.includes("芯褌屑械薪懈谢 蟹邪泻邪蟹")) return prefix;
+  return text;
+}
+
+function orderActionCell(row) {
+  const stateInfo = orderWorkbenchState(row);
+  if (["cancelled", "delivered"].includes(stateInfo.key)) {
+    return `<div class="order-actions-cell"><small class="muted">--</small></div>`;
+  }
+  const hasUnbound = orderHasUnboundStock(row);
+  const actions = [];
+  if (["awaiting_packaging", "unbound", "stock_issue"].includes(stateInfo.key)) actions.push(`<button type="button" class="small primary order-prepare-btn order-action-icon-btn" data-order-id="${escape(row.id)}"><span class="btn-icon">▶</span>备货</button>`);
+  const printable = orderCanPrintLabel(row);
+  if (["awaiting_deliver", "delivering"].includes(stateInfo.key)) actions.push(`<button type="button" class="small success order-print-label-btn order-action-icon-btn" data-order-id="${escape(row.id)}" ${printable ? "" : "disabled"} title="${printable ? "打印面单" : "FBP 订单由仓库发货，不能在本地打印面单"}"><span class="btn-icon">▣</span>打印标签</button>`);
+  if (!hasUnbound) actions.push(`<button type="button" class="small order-recalc-profit-btn order-action-icon-btn order-action-recalc" data-order-id="${escape(row.id)}"><span class="btn-icon">↻</span>重算利润</button>`);
+  actions.push(`<button type="button" class="small danger order-placeholder-action order-action-icon-btn" data-action="cancel"><span class="btn-icon">!</span>取消订单</button>`);
+  if (!actions.length) actions.push(`<button type="button" class="small order-placeholder-action" data-action="detail">查看</button>`);
+  return `<div class="order-actions-cell">${actions.join("")}</div>`;
+}
+
+function splitList(value) {
+  return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function debounce(fn, wait = 200) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), wait);
+  };
+}
+
+function orderQualityRule(row) {
+  const posting = String(row.posting_number || row.order_number || "");
+  return (state.orderQualityRules || []).find((rule) => Number(rule.active) !== 0 && posting.startsWith(String(rule.prefix || "")));
 }
 
 function orderInfoCell(row) {
   const overdue = orderIsOverdue(row) ? tag("超时发货", "red") : "";
+  const cancelReason = orderCancelReason(row);
   return `<div class="order-info-cell">
     ${orderPostingLink(row)}
     <small>${escape(row.shop_name || "-")}</small>
-    <span class="order-state-line">${overdue}${tag(orderStatusLabel(row.tracking_stage || row.status), statusColor(row.status))}</span>
+    <span class="order-state-line">${overdue}${tag(orderLifecycleLabel(row), orderLifecycleColor(row))}</span>
+    ${cancelReason ? `<small>取消/退货原因：${escape(cancelReason)}</small>` : ""}
   </div>`;
 }
 
@@ -1989,6 +7083,37 @@ function orderSkuQuantities(row) {
   return result;
 }
 
+function orderSkuValueMap(value) {
+  const result = {};
+  String(value || "").split("||").forEach((entry) => {
+    const index = entry.indexOf(":");
+    if (index <= 0) return;
+    result[entry.slice(0, index).trim()] = entry.slice(index + 1).trim();
+  });
+  return result;
+}
+
+function orderSkuDisplayRows(row) {
+  const quantities = orderSkuQuantities(row);
+  const names = orderSkuValueMap(row.sku_names);
+  const images = orderSkuValueMap(row.sku_images);
+  const productIds = orderSkuProductIdMap(row);
+  const offerIds = String(row.offer_ids || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const skus = String(row.skus || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const fallbackProductCodes = String(row.product_codes || "").split(",").map((item) => cleanOrderProductCode(item)).filter(Boolean);
+  return skus.map((sku, index) => {
+    const product = productIds[sku] ? state.products.find((item) => String(item.id) === String(productIds[sku])) : null;
+    return {
+      sku,
+      qty: Math.max(1, Number(quantities[sku] || 1)),
+      name: names[sku] || product?.name || "",
+      imageUrl: images[sku] || product?.image_url || "",
+      offerId: offerIds[index] || "",
+      productCode: product?.inventory_id || product?.code || fallbackProductCodes[index] || ""
+    };
+  });
+}
+
 function findOnlineForOrderSku(row, sku) {
   return state.onlineProducts.find((item) => (
     String(item.shop_id) === String(row.shop_id) &&
@@ -1996,17 +7121,59 @@ function findOnlineForOrderSku(row, sku) {
   ));
 }
 
+function orderSkuProductIdMap(row) {
+  const result = {};
+  String(row.sku_product_ids || "").split(",").forEach((entry) => {
+    const index = entry.lastIndexOf(":");
+    if (index <= 0) return;
+    const sku = entry.slice(0, index).trim();
+    const productId = Number(entry.slice(index + 1));
+    if (sku && Number.isFinite(productId) && productId > 0) result[sku] = productId;
+  });
+  return result;
+}
+
+function orderSkuMappingIdMap(row) {
+  const result = {};
+  String(row.sku_mapping_ids || "").split(",").forEach((entry) => {
+    const index = entry.lastIndexOf(":");
+    if (index <= 0) return;
+    const sku = entry.slice(0, index).trim();
+    const mappingId = Number(entry.slice(index + 1));
+    if (sku && Number.isFinite(mappingId) && mappingId > 0) result[sku] = mappingId;
+  });
+  return result;
+}
+
+function orderUnboundSkuSet(row) {
+  return new Set(String(row.unbound_skus || "").split(",").map((item) => item.trim()).filter(Boolean));
+}
+
+function orderHasUnboundStock(row) {
+  if (Number(row.unbound_item_count || 0) > 0 || Number(row.unbound_quantity || 0) > 0) return true;
+  if (orderUnboundSkuSet(row).size > 0) return true;
+  const productCodes = String(row.product_codes || "").split(",").map((item) => item.trim().toUpperCase());
+  const productNames = String(row.product_names || "").toLowerCase();
+  return productCodes.includes("UNBOUND") || productNames.includes("unbound product") || productNames.includes("未绑定");
+}
+
 function orderSkuStockRows(row) {
   const quantities = orderSkuQuantities(row);
+  const productIdsBySku = orderSkuProductIdMap(row);
+  const mappingIdsBySku = orderSkuMappingIdMap(row);
+  const unboundSkus = orderUnboundSkuSet(row);
   const skus = String(row.skus || "").split(",").map((item) => item.trim()).filter(Boolean);
   return skus.map((sku) => {
     const qty = Math.max(1, Number(quantities[sku] || 1));
     const online = findOnlineForOrderSku(row, sku);
-    const product = online?.product_id ? state.products.find((item) => String(item.id) === String(online.product_id)) : null;
+    const mappedProductId = productIdsBySku[sku] || 0;
+    const product = unboundSkus.has(sku)
+      ? null
+      : state.products.find((item) => String(item.id) === String(mappedProductId || online?.product_id || ""));
     const stock = Number(product?.stock || 0);
     const processed = orderSkuProcessed(row, sku, product);
     const shortage = product && !processed ? Math.max(0, qty - stock) : 0;
-    return { sku, qty, online, product, stock, shortage, processed };
+    return { sku, qty, online, product, stock, shortage, processed, mappingId: mappingIdsBySku[sku] || 0 };
   });
 }
 
@@ -2023,18 +7190,22 @@ function orderSkuProcessed(row, sku, product) {
 
 function orderWorkbenchState(row) {
   const values = [row.status, row.tracking_stage].map((value) => String(value || "").toLowerCase());
-  if (values.some((value) => value.includes("cancel"))) return { key: "cancelled", label: "已取消", color: "red" };
+  if (orderMatchesCancelledValues(values)) return { key: "cancelled", label: "已取消/退货", color: "red" };
+  if (orderMatchesDisputeValues(values)) return { key: "dispute", label: "有争议", color: "amber" };
   if (orderMatchesDeliveredValues(values)) return { key: "delivered", label: "已签收", color: "green" };
-  if (orderMatchesDeliveringValues(values)) return { key: "delivering", label: "运输中", color: "blue" };
+  if (orderHasUnboundStock(row)) return { key: "unbound", label: "待绑定库存", color: "amber" };
   const items = orderSkuStockRows(row);
-  if (!items.length || items.some((item) => !item.product)) return { key: "unbound", label: "待绑定 SKU", color: "amber" };
+  if (!items.length || items.some((item) => !item.product)) return { key: "unbound", label: "待绑定库存", color: "amber" };
+  if (orderMatchesDeliveringValues(values)) return { key: "delivering", label: "运输中", color: "blue" };
+  if (orderMatchesAwaitingDeliverValues(values)) return { key: "awaiting_deliver", label: "等待发运", color: "blue" };
+  if (orderMatchesAwaitingPackagingValues(values)) return { key: "awaiting_packaging", label: "等待备货", color: "amber" };
   if (items.some((item) => item.shortage > 0)) return { key: "stock_issue", label: "库存不足", color: "red" };
-  return { key: "outbound_ready", label: "可出库/已处理", color: "green" };
+  return { key: "awaiting_packaging", label: "等待备货", color: "amber" };
 }
 
 function orderIsOverdue(row) {
   const values = [row.status, row.tracking_stage].map((value) => String(value || "").toLowerCase());
-  if (values.some((value) => value.includes("cancel")) || orderMatchesDeliveredValues(values) || orderMatchesDeliveringValues(values) || orderIsShipped(row)) return false;
+  if (orderMatchesCancelledValues(values) || orderMatchesDeliveredValues(values) || orderMatchesDeliveringValues(values) || orderMatchesAwaitingDeliverValues(values) || orderIsShipped(row)) return false;
   const days = Number(row.ship_days_remaining);
   if (Number.isFinite(days)) return days < 0;
   const deadline = String(row.shipment_deadline_at || "").slice(0, 10);
@@ -2047,8 +7218,8 @@ function orderStockCell(row) {
   return `<div class="order-stock-list">${items.map((item) => {
     if (!item.product) {
       const action = item.online
-        ? `<span class="order-stock-actions"><button class="mini-action blue order-bind-product-btn" data-online-id="${item.online.id}">去绑定</button><button class="mini-action green order-create-product-btn" data-online-id="${item.online.id}" data-order-id="${row.id}" data-sku="${escape(item.sku)}">创建库存</button></span>`
-        : tag("未同步在线 SKU", "amber");
+        ? `<span class="order-stock-actions"><button class="mini-action blue order-bind-product-btn" data-online-id="${item.online.id}">去绑定库存</button><button class="mini-action green order-create-product-btn" data-online-id="${item.online.id}" data-order-id="${row.id}" data-sku="${escape(item.sku)}">创建库存</button></span>`
+        : `<span class="order-stock-actions"><button class="mini-action blue order-bind-from-order-btn" data-order-id="${row.id}" data-sku="${escape(item.sku)}">去绑定库存</button><button class="mini-action green order-create-product-from-order-btn" data-order-id="${row.id}" data-sku="${escape(item.sku)}">创建库存</button></span>`;
       return `<div class="order-stock-item pending"><b>${escape(item.sku)}</b><small>订单 ${escape(item.qty)} 件</small>${action}</div>`;
     }
     const label = item.product.inventory_id || item.product.code || item.product.selection_id || `ID ${item.product.id}`;
@@ -2068,7 +7239,37 @@ function orderMatchesDeliveredValues(values) {
 }
 
 function orderMatchesDeliveringValues(values) {
-  return values.some((value) => value === "delivering" || value.includes("transferring") || value.includes("carriage") || value.includes("pickup") || value.includes("sorting") || value.includes("customs"));
+  return values.some((value) => value === "delivering" || value === "shipped" || value === "sent" || value === "driver_pickup" || value.includes("transferring") || value.includes("carriage") || value.includes("pickup") || value.includes("sorting") || value.includes("customs") || value.includes("on_way") || value.includes("courier") || value.includes("posting_in_carriage") || value.includes("posting_transferring"));
+}
+
+function orderMatchesAwaitingPackagingValues(values) {
+  return values.some((value) => [
+    "awaiting_registration",
+    "acceptance_in_progress",
+    "awaiting_approve",
+    "awaiting_packaging",
+    "posting_created",
+    "posting_awaiting_registration",
+    "posting_acceptance_in_progress"
+  ].includes(value));
+}
+
+function orderMatchesAwaitingDeliverValues(values) {
+  return values.some((value) => [
+    "awaiting_deliver",
+    "posting_registered",
+    "sent_by_seller",
+    "posting_ready_for_pickup",
+    "posting_transferred_to_courier_service"
+  ].includes(value));
+}
+
+function orderMatchesDisputeValues(values) {
+  return values.some((value) => value.includes("arbitration") || value.includes("dispute"));
+}
+
+function orderMatchesCancelledValues(values) {
+  return values.some((value) => value.includes("cancel") || value.includes("return") || value === "not_accepted" || value.includes("not_accepted"));
 }
 
 function bindOrderRowActions() {
@@ -2083,18 +7284,536 @@ function bindOrderRowActions() {
       openProductCreateDialog(Number(button.dataset.onlineId), { order, sku: button.dataset.sku });
     });
   });
+  target.querySelectorAll(".order-bind-from-order-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      const order = state.orders.find((item) => String(item.id) === String(button.dataset.orderId));
+      const sku = String(button.dataset.sku || "");
+      const online = state.onlineProducts.find((item) => String(item.shop_id) === String(order?.shop_id || "") && String(item.ozon_sku || "") === sku);
+      if (online) openBindDialog(Number(online.id));
+      else showAppAlert("这个 SKU 还没有同步到在线商品，先同步在线商品后再绑定。也可以先创建库存产品。");
+    });
+  });
+  target.querySelectorAll(".order-create-product-from-order-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      const order = state.orders.find((item) => String(item.id) === String(button.dataset.orderId));
+      openProductCreateDialogFromOrder(order);
+    });
+  });
   target.querySelectorAll(".stock-jump-btn").forEach((button) => {
     button.addEventListener("click", () => jumpToStockProduct(Number(button.dataset.productId)));
   });
+  target.querySelectorAll(".order-create-proc-btn").forEach((button) => {
+    button.addEventListener("click", () => openProcurementDialogForProduct(Number(button.dataset.productId)));
+  });
+  target.querySelectorAll(".order-unbind-sku-btn").forEach((button) => {
+    button.addEventListener("click", () => unbindOrderSkuMapping(button));
+  });
+  target.querySelectorAll(".order-mark-select").forEach((select) => {
+    select.addEventListener("change", () => saveOrderMark(select.dataset.orderId, select.value));
+  });
+  target.querySelectorAll(".order-bind-first-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      const order = state.orders.find((item) => String(item.id) === String(button.dataset.orderId));
+      const first = orderSkuStockRows(order).find((item) => !item.product && item.online);
+      if (first?.online) openBindDialog(Number(first.online.id));
+      else showAppAlert("这个订单的未绑定 SKU 还没有同步到在线商品，先同步在线商品后再绑定。");
+    });
+  });
+  target.querySelectorAll(".order-placeholder-action").forEach((button) => {
+    button.addEventListener("click", () => showAppAlert(`${button.textContent.trim()} 功能入口已预留，后续接入真实操作。`));
+  });
+  target.querySelectorAll(".order-print-label-btn").forEach((button) => {
+    button.addEventListener("click", () => printOrderLabels([Number(button.dataset.orderId)], { source: "row" }));
+  });
+  target.querySelectorAll(".order-prepare-btn").forEach((button) => {
+    button.addEventListener("click", () => prepareOrderShipments([Number(button.dataset.orderId)], { source: "row" }));
+  });
+  target.querySelectorAll(".order-profit-detail-btn").forEach((button) => {
+    button.addEventListener("click", () => openOrderProfitDetailDialog(Number(button.dataset.orderId)));
+  });
+  target.querySelectorAll(".order-recalc-profit-btn").forEach((button) => {
+    button.addEventListener("click", () => recalculateSingleOrderProfit(button));
+  });
+  target.querySelector("[data-order-select-all]")?.addEventListener("change", (event) => {
+    target.querySelectorAll("[data-order-select]").forEach((input) => {
+      input.checked = event.target.checked;
+    });
+    updateSelectedOrderPrintCount();
+  });
+  target.querySelectorAll("[data-order-select]").forEach((input) => {
+    input.addEventListener("change", updateSelectedOrderPrintCount);
+  });
+}
+
+async function printOrderLabels(orderIds, options = {}) {
+  const ids = (orderIds || []).map(Number).filter(Boolean);
+  if (!ids.length) {
+    await showAppAlert("请先选择需要打印面单的订单。");
+    return;
+  }
+  const selectedRows = ids.map((id) => state.orders.find((row) => Number(row.id) === id)).filter(Boolean);
+  const fbpRows = selectedRows.filter((row) => !orderCanPrintLabel(row));
+  if (fbpRows.length) {
+    await showAppAlert(`已选择的订单里有 ${fbpRows.length} 个 FBP 仓发订单，FBP 面单不能在本地打印。请取消这些订单后再打印。`);
+    return;
+  }
+  setOrderPrintLoading(true, ids, { includeBulk: options.source === "bulk" });
+  const printWindow = openPendingPrintWindow();
+  try {
+    const opened = await printOrderLabelBatch(ids, printWindow);
+    if (!opened) {
+      await showAppAlert("浏览器没有打开打印窗口，面单可能只被下载了。本次不会记录为已打印。");
+    }
+  } catch (error) {
+    try { printWindow?.close(); } catch {}
+    await showAppAlert(`面单打印失败：${error.message}`);
+  } finally {
+    setOrderPrintLoading(false, ids, { includeBulk: options.source === "bulk" });
+  }
+}
+
+async function prepareOrderShipments(orderIds, options = {}) {
+  const ids = (orderIds || []).map(Number).filter(Boolean);
+  if (!ids.length) {
+    await showAppAlert("请先选择需要备货的订单。");
+    return;
+  }
+  const rows = ids.map((id) => state.orders.find((row) => Number(row.id) === id)).filter(Boolean);
+  const blocked = rows.filter((row) => orderHasUnboundStock(row));
+  if (blocked.length) {
+    await showAppAlert(`已选择的订单里有 ${blocked.length} 个订单还没有绑定库存，请先绑定库存后再备货。`);
+    return;
+  }
+  const fbpRows = rows.filter((row) => logisticsMode(row).key === "fbp");
+  if (fbpRows.length) {
+    await showAppAlert(`已选择的订单里有 ${fbpRows.length} 个 FBP 仓发订单，FBP 订单不需要在本地备货。`);
+    return;
+  }
+  const buttons = scopedOrderButtons("#orderBulkPrepareBtn, .order-prepare-btn", ids, { includeBulk: options.source === "bulk" });
+  buttons.forEach((button) => {
+    button.dataset.originalText = button.textContent;
+    button.textContent = "备货中...";
+    button.disabled = true;
+  });
+  try {
+    await api("/api/orders/ship", {
+      method: "POST",
+      body: JSON.stringify({ order_ids: ids })
+    });
+    await refreshOrdersOnly();
+    await showAppAlert("备货完成，订单已进入等待发运。");
+  } catch (error) {
+    await showAppAlert(friendlyPrepareError(error));
+  } finally {
+    buttons.forEach((button) => {
+      button.textContent = button.dataset.originalText || "备货";
+      button.disabled = false;
+      delete button.dataset.originalText;
+    });
+  }
+}
+
+function friendlyPrepareError(error) {
+  const message = String(error?.message || error || "");
+  const lower = message.toLowerCase();
+  if (lower.includes("awaiting_deliver") || lower.includes("already") || lower.includes("not in process") || lower.includes("invalid status")) {
+    return "备货失败：这个订单可能已经备货过了，请先同步订单刷新状态。";
+  }
+  if (lower.includes("fbp") || lower.includes("warehouse")) {
+    return "备货失败：这个订单可能是 FBP 仓发订单，不需要在本地备货。";
+  }
+  return `备货失败：${message}`;
+}
+
+async function refreshOrdersOnly() {
+  applyOrderPayload(await api(orderQueryUrl()));
+  renderOrdersTable();
+}
+
+async function unbindOrderSkuMapping(button) {
+  const mappingId = Number(button?.dataset.mappingId || 0);
+  const sku = button?.dataset.sku || "";
+  if (!mappingId) return;
+  const ok = await showAppConfirm(`确定解除 SKU「${sku || mappingId}」和当前库存的绑定吗？解除后相关订单会回到待绑定，需要重新绑定正确库存。`);
+  if (!ok) return;
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = "解除中...";
+  try {
+    await api(`/api/mappings/${mappingId}`, { method: "DELETE" });
+    await loadAllPreserveOrderPosition();
+  } catch (error) {
+    await showAppAlert(error.message || "解除绑定失败");
+  } finally {
+    button.textContent = original;
+    button.disabled = false;
+  }
+}
+
+async function recalculateSingleOrderProfit(button) {
+  const orderId = Number(button?.dataset.orderId || 0);
+  if (!orderId) return;
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = "重算中...";
+  try {
+    const result = await api(`/api/orders/${orderId}/recalculate-profit`, { method: "POST" });
+    await refreshOrdersOnly();
+    await showAppAlert(`已重算当前订单：更新 ${result.updated || 0} 条商品${result.unbound ? `，仍有 ${result.unbound} 条未绑定` : ""}。`);
+  } catch (error) {
+    await showAppAlert(error.message || "重算利润失败");
+  } finally {
+    button.textContent = original;
+    button.disabled = false;
+  }
+}
+
+function setOrderPrintLoading(loading, ids = [], options = {}) {
+  scopedOrderButtons("#orderBulkPrintBtn, .order-print-label-btn", ids, options).forEach((button) => {
+    if (loading) {
+      button.dataset.originalText = button.dataset.originalText || button.textContent;
+      button.dataset.wasDisabled = button.disabled ? "1" : "0";
+      button.textContent = "拉取面单中...";
+      button.classList.add("loading");
+      button.disabled = true;
+    } else {
+      if (button.dataset.originalText) button.textContent = button.dataset.originalText;
+      button.classList.remove("loading");
+      button.disabled = button.dataset.wasDisabled === "1";
+      delete button.dataset.originalText;
+      delete button.dataset.wasDisabled;
+    }
+  });
+}
+
+function scopedOrderButtons(selector, ids = [], options = {}) {
+  const idSet = new Set((ids || []).map(Number).filter(Boolean));
+  return [...document.querySelectorAll(selector)].filter((button) => {
+    const orderId = Number(button.dataset.orderId || 0);
+    if (!orderId) return Boolean(options.includeBulk);
+    return !idSet.size || idSet.has(orderId);
+  });
+}
+
+async function printOrderLabelBatch(ids, printWindow = null) {
+  const headers = { "Content-Type": "application/json" };
+  if (state.authToken) headers.Authorization = `Bearer ${state.authToken}`;
+  const response = await fetch("/api/orders/package-label", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ order_ids: ids })
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    let message = text;
+    try {
+      message = JSON.parse(text).error || text;
+    } catch {}
+    throw new Error(message);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  return await openLabelPrintWindow(url, ids, printWindow);
+}
+
+function openPendingPrintWindow() {
+  const win = window.open("", "_blank");
+  if (!win) return null;
+  win.document.write(`<!doctype html><title>正在拉取面单</title><style>body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;display:grid;place-items:center;height:100vh;color:#111827;background:#f8fafc}.box{display:grid;gap:12px;text-align:center}.spinner{width:28px;height:28px;margin:auto;border:3px solid #dbeafe;border-top-color:#2563eb;border-radius:50%;animation:s .8s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style><div class="box"><div class="spinner"></div><strong>正在拉取面单...</strong><small>请等待所有店铺面单加载完成。</small></div>`);
+  win.document.close();
+  return win;
+}
+
+function openLabelPrintWindow(url, ids, existingWindow = null) {
+  return new Promise((resolve) => {
+    const win = existingWindow || window.open("", "_blank");
+    const count = ids.length;
+    if (!win) {
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `ozon-labels-${count}.pdf`;
+      link.click();
+      resolve(false);
+      return;
+    }
+    win.document.open();
+    const token = state.authToken || "";
+    win.document.write(`<!doctype html>
+      <title>标签打印预览</title>
+      <style>
+        html,body{margin:0;width:100%;height:100%;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#202124;color:#111827}
+        .bar{height:54px;background:#fff;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;gap:10px;padding:0 16px;box-sizing:border-box}
+        .bar strong{margin-right:auto;font-size:16px}
+        button,a{height:32px;padding:0 14px;border:1px solid #d1d5db;border-radius:8px;background:#fff;color:#111827;font-weight:700;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+        .primary{background:#635bff;color:#fff;border-color:#635bff}
+        .success{background:#16a34a;color:#fff;border-color:#16a34a}
+        iframe{width:100%;height:calc(100% - 54px);border:0;display:block}
+      </style>
+      <div class="bar">
+        <button id="closeBtn" type="button">关闭</button>
+        <strong>标签打印预览 · ${count} 个面单</strong>
+        <a href="${url}" download="ozon-labels-${count}.pdf">下载标签</a>
+        <button id="printBtn" class="primary" type="button">打印</button>
+        <button id="doneBtn" class="success" type="button">完成</button>
+      </div>
+      <iframe id="labelFrame" src="${url}"></iframe>
+      <script>
+        const ids = ${JSON.stringify(ids)};
+        const token = ${JSON.stringify(token)};
+        document.getElementById("closeBtn").onclick = () => window.close();
+        document.getElementById("printBtn").onclick = () => {
+          const frame = document.getElementById("labelFrame");
+          try { frame.contentWindow.focus(); frame.contentWindow.print(); } catch { window.print(); }
+        };
+        document.getElementById("doneBtn").onclick = async () => {
+          try {
+            await fetch("/api/orders/package-label-printed", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) },
+              body: JSON.stringify({ order_ids: ids })
+            });
+            if (window.opener) window.opener.postMessage({ type: "ozon-labels-printed", ids }, window.location.origin);
+            window.close();
+          } catch (error) {
+            alert("记录已打印状态失败：" + error.message);
+          }
+        };
+      <\/script>`);
+    win.document.close();
+    window.setTimeout(() => resolve(true), 300);
+  });
+}
+
+async function markOrderLabelsPrinted(ids) {
+  await api("/api/orders/package-label-printed", {
+    method: "POST",
+    body: JSON.stringify({ order_ids: ids })
+  });
+}
+
+function selectedOrderIds() {
+  return [...document.querySelectorAll("#ordersTable tbody [data-order-select]:checked")]
+    .map((input) => Number(input.dataset.orderSelect))
+    .filter(Boolean)
+    .filter((value, index, array) => array.indexOf(value) === index);
+}
+
+function updateSelectedOrderPrintCount() {
+  const button = document.querySelector("#orderBulkPrintBtn");
+  if (!button || button.classList.contains("loading")) return;
+  const count = selectedOrderIds().length;
+  button.textContent = count ? `批量打印(${count})` : "批量打印";
+}
+
+async function openOrderProfitDetailDialogLegacy(orderId) {
+  openStockDetailDialog({ title: "订单利润明细", product: null, body: `<div class="empty">正在加载...</div>` });
+  try {
+    const detail = await api(`/api/orders/${orderId}`);
+    const rows = detail.items || [];
+    const totalRevenue = rows.reduce((sum, row) => sum + Number(row.sale_amount_cny || (Number(row.sale_price || 0) * Number(row.quantity || 0))), 0);
+    const totalProfit = rows.reduce((sum, row) => sum + Number(row.net_profit_cny || row.actual_profit || row.estimated_profit || 0), 0);
+    const totalMargin = totalRevenue ? totalProfit / totalRevenue * 100 : 0;
+    const body = `
+      <div class="profit-detail-title">
+        <div>
+          <strong>${escape(detail.order?.posting_number || "")}</strong>
+          <small>${escape(detail.order?.shop_name || "")} / ${escape(date(detail.order?.ordered_at) || "")}</small>
+        </div>
+      </div>
+      <div class="profit-detail-formula">订单利润 = 销售额 - 采购成本 - 国内运费 - 国际运费 - 包装/处理费 - Ozon佣金 - Ozon服务费估算 - 退货预损 - 其他费用</div>
+      <div class="stock-detail-summary"><strong>利润 ${money(totalProfit)}</strong><span>销售额 ${money(totalRevenue)}</span><span>利润率 ${escape(num(totalMargin, 2))}%</span><span>${escape(rows.length)} 条明细</span></div>
+      ${rows.map((row) => {
+            const revenue = Number(row.sale_amount_cny || (Number(row.sale_price || 0) * Number(row.quantity || 0)));
+            const purchase = Number(row.purchase_cost_cny || 0);
+            const domestic = Number(row.domestic_shipping_cny || 0);
+            const international = Number(row.international_shipping_cny || 0);
+            const packaging = Number(row.packaging_cost_cny || 0);
+            const commission = Number(row.commission_fee_cny || row.estimated_commission || 0);
+            const service = Number(row.ozon_service_fee_cny || row.platform_fee_actual || 0);
+            const returnLoss = Number(row.return_loss_cny || 0);
+            const other = Number(row.other_fee_cny || row.aftersale_loss || 0);
+            const profit = Number(row.net_profit_cny || row.actual_profit || row.estimated_profit || 0);
+            const costTotal = purchase + domestic + international + packaging + commission + service + returnLoss + other;
+            const margin = revenue ? profit / revenue * 100 : 0;
+            const detailRows = [
+              ["销售额", money(revenue), `单价 ${money(row.sale_price)} x ${escape(row.quantity || 0)} 件`],
+              ["采购成本", money(purchase), "库存绑定产品的采购成本"],
+              ["国内运费", money(domestic), "采购国内运费分摊"],
+              ["国际运费", money(international), "订单对应物流成本"],
+              ["包装/处理费", money(packaging), "包装、处理或尾程前置成本"],
+              ["Ozon佣金", money(commission), "平台佣金扣费"],
+              ["Ozon服务费估算", money(service), "平台服务、支付或提现相关费用"],
+              ["退货预损", money(returnLoss), "按退货风险预估的损失"],
+              ["其他费用", money(other), "其他售后或调整费用"],
+              ["成本合计", money(costTotal), "除销售额外所有扣减项合计"],
+              ["净利润", money(profit), `销售额 - 成本合计，利润率 ${num(margin, 2)}%`]
+            ];
+            return `<section class="order-profit-breakdown">
+              <div class="profit-detail-title compact">
+                <div>
+                  <strong>${escape(row.product_name || row.ozon_name || row.ozon_sku || "未绑定库存")}</strong>
+                  <small>SKU：${escape(row.ozon_sku || "-")} / ${escape(row.product_code || "未绑定库存")}</small>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="table profit-detail-table">
+                  <thead><tr><th>项目</th><th>金额</th><th>计算说明</th></tr></thead>
+                  <tbody>${detailRows.map(([label, value, note]) => `
+                    <tr class="${label === "净利润" ? "profit-detail-total" : ""}">
+                      <td>${escape(label)}</td>
+                      <td>${value}</td>
+                      <td><small>${escape(note)}</small></td>
+                    </tr>
+                  `).join("")}</tbody>
+                </table>
+              </div>
+            </section>`;
+          }).join("")}
+    `;
+    const dialogBody = document.querySelector("#stockDetailDialog .stock-detail-body");
+    if (dialogBody) dialogBody.innerHTML = body;
+  } catch (error) {
+    const dialogBody = document.querySelector("#stockDetailDialog .stock-detail-body");
+    if (dialogBody) dialogBody.innerHTML = `<div class="empty">订单利润明细加载失败：${escape(error.message)}</div>`;
+  }
+}
+
+async function openOrderProfitDetailDialog(orderId) {
+  openStockDetailDialog({ title: "订单利润明细", product: null, body: `<div class="empty">正在加载...</div>` });
+  try {
+    const detail = await api(`/api/orders/${orderId}`);
+    const rows = detail.items || [];
+    const financeRows = detail.finance || [];
+    const totalRevenue = rows.reduce((sum, row) => sum + Number(row.sale_amount_cny || (Number(row.sale_price || 0) * Number(row.quantity || 0))), 0);
+    const totalEstimated = rows.reduce((sum, row) => sum + Number(row.estimated_profit || 0), 0);
+    const totalActual = rows.reduce((sum, row) => sum + actualProfitValue(row), 0);
+    const totalDiff = totalActual - totalEstimated;
+    const totalMargin = totalRevenue ? totalActual / totalRevenue * 100 : 0;
+    const body = `
+      <div class="profit-detail-title">
+        <div>
+          <strong>${escape(detail.order?.posting_number || "")}</strong>
+          <small>${escape(detail.order?.shop_name || "")} / ${escape(date(detail.order?.ordered_at) || "")}</small>
+        </div>
+      </div>
+      <div class="profit-detail-formula">实际利润 = 销售额 - 真实采购成本 - Ozon 财务费用 - 退货/售后损失；没有财务明细时显示预估值。</div>
+      <div class="stock-detail-summary">
+        <strong>实际利润 ${money(totalActual)}</strong>
+        <span>预估利润 ${money(totalEstimated)}</span>
+        <span class="${totalDiff < 0 ? "loss" : ""}">差异 ${money(totalDiff)}</span>
+        <span>销售额 ${money(totalRevenue)}</span>
+        <span>利润率 ${escape(num(totalMargin, 2))}%</span>
+      </div>
+      ${renderOrderFinanceRows(financeRows)}
+      ${rows.map((row) => renderOrderProfitBreakdown(row)).join("")}
+    `;
+    const dialogBody = document.querySelector("#stockDetailDialog .stock-detail-body");
+    if (dialogBody) dialogBody.innerHTML = body;
+  } catch (error) {
+    const dialogBody = document.querySelector("#stockDetailDialog .stock-detail-body");
+    if (dialogBody) dialogBody.innerHTML = `<div class="empty">订单利润明细加载失败：${escape(error.message)}</div>`;
+  }
+}
+
+function renderOrderProfitBreakdown(row) {
+  const revenue = Number(row.sale_amount_cny || (Number(row.sale_price || 0) * Number(row.quantity || 0)));
+  const purchase = Number(row.purchase_cost_cny || 0);
+  const domestic = Number(row.domestic_shipping_cny || 0);
+  const international = Number(row.international_shipping_cny || 0);
+  const packaging = Number(row.packaging_cost_cny || 0);
+  const commission = Number(row.commission_fee_cny || row.estimated_commission || 0);
+  const service = Number(row.ozon_service_fee_cny || row.platform_fee_actual || 0);
+  const returnLoss = Number(row.return_loss_cny || 0);
+  const other = Number(row.other_fee_cny || row.aftersale_loss || 0);
+  const estimatedProfit = Number(row.estimated_profit || 0);
+  const actualProfit = actualProfitValue(row);
+  const diff = actualProfit - estimatedProfit;
+  const costTotal = purchase + domestic + international + packaging + commission + service + returnLoss + other;
+  const margin = revenue ? actualProfit / revenue * 100 : 0;
+  const shipping = shippingMethodsText(row.shipping_method);
+  const freightFormula = shippingFormulaText(row.shipping_method, row);
+  const detailRows = [
+    ["销售额", money(revenue), `单价 ${money(row.sale_price)} x ${escape(row.quantity || 0)} 件`],
+    ["采购成本", money(purchase), "库存绑定产品的采购成本"],
+    ["国内运费", money(domestic), "采购国内运费分摊"],
+    ["国际运费", money(international), "订单对应物流成本"],
+    ["包装/处理费", money(packaging), "包装、处理或尾程前置成本"],
+    ["Ozon佣金", money(commission), "优先取 Ozon 财务/佣金字段，否则使用预估"],
+    ["Ozon服务费", money(service), "平台服务、配送、支付或提现相关费用"],
+    ["退货预损", money(returnLoss), "按退货风险预估或财务同步后的损失"],
+    ["其他费用", money(other), "其他售后或调整费用"],
+    ["成本合计", money(costTotal), "除销售额外所有扣减项合计"],
+    ["预估利润", money(estimatedProfit), "本地规则计算结果"],
+    ["实际利润", money(actualProfit), `财务同步后回写；利润率 ${num(margin, 2)}%`],
+    ["差异", money(diff), "实际利润 - 预估利润"]
+  ];
+  detailRows.splice(3, 0, ["运输方式", shipping ? escape(shipping) : tag("未标明", "red"), freightFormula]);
+  detailRows.splice(4, 1, ["国际运费", money(international), freightFormula]);
+  detailRows.splice(7, 1, ["Ozon服务费估算", money(service), "当前为本地估算：末公里/银行类费用 + 提现/回款类费用；财务同步后应按 Ozon 明细拆分校验"]);
+  return `<section class="order-profit-breakdown">
+    <div class="profit-detail-title compact">
+      <div>
+        <strong>${escape(row.product_name || row.ozon_name || row.ozon_sku || "未绑定库存")}</strong>
+        <small>SKU：${escape(row.ozon_sku || "-")} / ${escape(row.product_code || "未绑定库存")} / ${escape(row.profit_status || "estimated")}</small>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="table profit-detail-table actual-profit-table">
+        <thead><tr><th>项目</th><th>金额</th><th>计算说明</th></tr></thead>
+        <tbody>${detailRows.map(([label, value, note]) => `
+          <tr class="${["实际利润", "差异"].includes(label) ? "profit-detail-total" : ""}">
+            <td>${escape(label)}</td>
+            <td>${value}</td>
+            <td><small>${escape(note)}</small></td>
+          </tr>
+        `).join("")}</tbody>
+      </table>
+    </div>
+  </section>`;
+}
+
+function actualProfitValue(row) {
+  if (String(row.profit_status || "") === "accrued") return Number(row.net_profit_cny || row.actual_profit || 0);
+  return Number(row.actual_profit || row.net_profit_cny || row.estimated_profit || 0);
+}
+
+function renderOrderFinanceRows(rows = []) {
+  if (!rows.length) return `<div class="empty">还没有匹配到 Ozon 真实财务明细。同步财务后，这里会显示佣金、配送费和服务费。</div>`;
+  return `<section class="order-profit-breakdown finance-breakdown">
+    <div class="profit-detail-title compact"><div><strong>Ozon 财务明细</strong><small>按货件号匹配到本地订单</small></div></div>
+    <div class="table-wrap"><table class="table profit-detail-table">
+      <thead><tr><th>费用类型</th><th>费用</th><th>日期 / 行数</th></tr></thead>
+      <tbody>${rows.map((row) => `<tr>
+        <td>${escape(row.service_name || row.service_type || "-")}</td>
+        <td>${money(row.fee_amount || Math.abs(Number(row.amount || 0)))}</td>
+        <td><small>${escape(date(row.operation_date) || "-")} / ${escape(row.rows || 0)} 行</small></td>
+      </tr>`).join("")}</tbody>
+    </table></div>
+  </section>`;
+}
+
+async function saveOrderMark(orderId, markType) {
+  await api(`/api/orders/${orderId}/mark`, {
+    method: "PUT",
+    body: JSON.stringify({ mark_type: markType })
+  });
+  const row = state.orders.find((item) => String(item.id) === String(orderId));
+  if (row) row.mark_type = markType;
+  reloadOrdersPage();
 }
 
 function jumpToStockProduct(productId) {
   state.stockHighlightProductId = productId;
+  state.stockViewMode = "active";
+  const rows = stockRows();
+  const index = rows.findIndex((row) => String(row.id) === String(productId));
+  if (index >= 0) state.stockPage = Math.floor(index / state.stockPageSize) + 1;
   showView("stock");
+  renderStockTable();
   window.setTimeout(() => {
     const row = document.querySelector(`#stockTable tr[data-row-id="${productId}"]`);
     if (!row) return;
-    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    row.scrollIntoView({ behavior: "smooth", block: "nearest" });
     row.classList.add("row-flash");
     window.setTimeout(() => row.classList.remove("row-flash"), 1800);
   }, 50);
@@ -2116,20 +7835,25 @@ function formatPostingNumber(value) {
   const tail = first.slice(-4);
   return `
     <span class="posting-main">${escape(head)}<strong class="posting-hot">${escape(tail)}</strong></span>
-    <span>${escape(match[2])}</span>
-    <span>${escape(match[3])}</span>
+    <span>${escape(`${match[2]}${match[3]}`)}</span>
   `;
 }
 
 function orderLogisticsCell(row) {
   const warehouse = compactWarehouse(row.warehouse_name);
-  const channel = row.logistics_channel || row.delivery_method_name || row.tracking_number || "-";
+  const channel = cleanLogisticsChannel(row);
   const mode = logisticsMode(row);
-  return `<div class="order-logistics">
-    <span class="logistics-tags">${tag(mode.label, mode.color)}${tag(row.delivery_schema || "FBS 自发货", "blue")}</span>
-    <small>${escape(warehouse || "未返回仓库")}</small>
+  return `<div class="order-logistics ${mode.key === "fbp" ? "fbp" : "fbs"}">
+    <span class="logistics-tags">${tag(mode.label, mode.color)}</span>
+    <small>${escape(mode.key === "fbs" ? "FBS self 自发货" : (warehouse || "FBP 仓发"))}</small>
     <small>${escape(channel)}</small>
   </div>`;
+}
+
+function cleanLogisticsChannel(row) {
+  const mode = logisticsMode(row);
+  if (mode.key === "fbs") return "FBS 自发货";
+  return row.logistics_channel || row.delivery_method_name || row.tracking_number || row.warehouse_name || "FBP 仓发";
 }
 
 function orderTimeCell(row) {
@@ -2151,13 +7875,13 @@ function logisticsMode(row) {
   const warehouse = String(row.warehouse_name || "").toLowerCase();
   const method = String(row.delivery_method_name || "").toLowerCase();
   const combined = `${warehouse} ${method}`;
-  if (combined.includes("风船") || combined.includes("風船") || combined.includes("fbp")) {
-    return { label: "FBP", color: "purple" };
+  if (combined.includes("hun chun") || combined.includes("hunchun") || combined.includes("混春") || combined.includes("混川") || combined.includes("珲春") || combined.includes("风船") || combined.includes("頭船") || combined.includes("風船") || combined.includes("fbp")) {
+    return { key: "fbp", label: "FBP 仓发", color: "blue" };
   }
   if (combined.includes("cl")) {
-    return { label: "FBS", color: "green" };
+    return { key: "fbs", label: "FBS 自发货", color: "green" };
   }
-  return { label: "FBS", color: "blue" };
+  return { key: "fbs", label: "FBS 自发货", color: "blue" };
 }
 
 function orderIsShipped(row) {
@@ -2179,10 +7903,19 @@ function orderProfitCell(row) {
   const unmapped = String(row.product_codes || "").includes("未绑定");
   const profit = Number(row.estimated_profit || 0);
   const actual = Number(row.actual_profit || 0);
+  const profitValue = actual || profit;
+  const revenue = Number(row.revenue || 0);
+  const margin = revenue ? (profitValue / revenue) * 100 : 0;
+  const shipping = shippingMethodsText(row.product_shipping_methods || row.shipping_method);
   const profitLabel = actual ? `实际利润：${num(actual, 2)}` : `预估利润：${num(profit, 2)}`;
   const hint = unmapped ? "SKU 未绑定产品，暂不能按成本估算" : profitLabel;
-  const profitClass = (actual || profit) < 0 ? "loss" : "";
-  return `${money(row.revenue)}<small>${escape(hint)}</small>${!unmapped ? `<span class="money ${profitClass}">${num(actual || profit, 2)}</span>` : ""}`;
+  const profitClass = profitValue < 0 ? " loss" : "";
+  return `<div class="order-money-cell">
+    <strong>${money(row.revenue)}</strong>
+    ${shipping ? `<small>运输方式：${escape(shipping)}</small>` : `<small class="loss">运输方式：未标明</small>`}
+    <small class="${profitClass.trim()}">${escape(hint)}</small>
+    ${!unmapped ? `<small class="${profitClass.trim()}">利润率：${escape(num(margin, 2))}%</small><button type="button" class="linklike order-profit-detail-btn" data-order-id="${escape(row.id)}">查看详情</button>` : ""}
+  </div>`;
 }
 
 function statusColor(value) {
@@ -2191,13 +7924,59 @@ function statusColor(value) {
   return "amber";
 }
 
+function orderLifecycleLabel(row) {
+  const workbench = orderWorkbenchState(row);
+  if (workbench.key === "cancelled") return "已取消/退货";
+  if (workbench.key === "dispute") return "有争议";
+  if (workbench.key === "delivered") return "已签收";
+  if (workbench.key === "delivering") return "运输中";
+  if (workbench.key === "awaiting_deliver") return "等待发运";
+  if (workbench.key === "awaiting_packaging") return "等待备货";
+  return workbench.label || orderStatusLabel(row.tracking_stage || row.status);
+}
+
+function orderLifecycleColor(row) {
+  const key = orderWorkbenchState(row).key;
+  return {
+    cancelled: "red",
+    dispute: "amber",
+    delivered: "green",
+    delivering: "blue",
+    awaiting_deliver: "blue",
+    awaiting_packaging: "amber",
+    stock_issue: "red",
+    unbound: "amber"
+  }[key] || statusColor(row.status);
+}
+
+function orderCancelReason(row) {
+  const values = [row.status, row.tracking_stage].map((value) => String(value || "").toLowerCase());
+  if (!orderMatchesCancelledValues(values)) return "";
+  const rawText = String(row.raw_json || "").toLowerCase();
+  const reasonMap = [
+    ["posting_canceled_by_customer", "买家取消"],
+    ["posting_canceled_by_seller", "卖家取消"],
+    ["posting_returned_to_seller", "退回卖家"],
+    ["posting_return_in_transit", "退货运输中"],
+    ["not_accepted", "分拣/承运未接收"],
+    ["cancelled", "订单取消"],
+    ["canceled", "订单取消"],
+    ["return", "退货"],
+    ["refund", "退款"]
+  ];
+  for (const [key, label] of reasonMap) {
+    if (values.includes(key) || values.some((value) => value.includes(key)) || rawText.includes(key)) return label;
+  }
+  return "原因未知";
+}
+
 function orderStatusLabel(value) {
   const map = {
     awaiting_registration: "等待注册",
     acceptance_in_progress: "验收中",
     awaiting_approve: "等待确认",
     awaiting_packaging: "等待打包",
-    awaiting_deliver: "等待备货/发货",
+    awaiting_deliver: "等待发运",
     arbitration: "争议处理中",
     client_arbitration: "买家争议处理中",
     delivering: "运输中",
@@ -2257,9 +8036,10 @@ function onlineProductCell(row) {
 }
 
 function onlineShopCell(row) {
-  const statusColor = row.status === "online" ? "green" : row.status === "archived" || row.archived ? "red" : "amber";
+  const key = onlineStatusKey(row);
+  const statusColor = key === "selling" ? "green" : key === "archived" || key === "hidden" || key === "error" ? "red" : "amber";
   const visibility = row.visibility ? `<small>可见性：${escape(row.visibility)}</small>` : "";
-  return `<strong>${escape(row.shop_name || "")}</strong><small>${escape(statusLabel(row.status))}</small>${visibility}${tag(row.product_id ? "已映射" : "待映射", row.product_id ? "green" : "amber")}`;
+  return `<strong>${escape(row.shop_name || "")}</strong>${tag(statusLabel(row.status), statusColor)}${visibility}${tag(row.product_id ? "已映射" : "待映射", row.product_id ? "green" : "amber")}`;
 }
 
 function onlinePriceCell(row) {
@@ -2288,13 +8068,13 @@ function onlineExtraCell(row) {
   return `<div class="online-extra">${pieces.map((item) => `<span>${escape(item)}</span>`).join("")}</div>${size ? `<small>${escape(size)}</small>` : ""}<small>同步：${escape(date(row.synced_at) || "-")}</small>`;
 }
 
-function openBindDialog(onlineId) {
+function openBindDialog(onlineId, options = {}) {
   const online = state.onlineProducts.find((item) => item.id === Number(onlineId));
   const dialog = document.querySelector("#bindOnlineDialog");
   if (!online || !dialog) return;
   state.bindTargetOnlineId = online.id;
   document.querySelector("#bindDialogOnlineId").value = online.id;
-  document.querySelector("#bindDialogProductId").value = "";
+  document.querySelector("#bindDialogProductId").value = options.productId || "";
   document.querySelector("#bindSelectedOnline").innerHTML = `
     ${onlineImageCell(online)}
     <div>
@@ -2303,7 +8083,8 @@ function openBindDialog(onlineId) {
       <span>${escape(online.name || "")}</span>
     </div>
   `;
-  document.querySelector("#bindProductSearch").value = "";
+  const fixedProduct = options.productId ? state.products.find((item) => Number(item.id) === Number(options.productId)) : null;
+  document.querySelector("#bindProductSearch").value = fixedProduct ? (fixedProduct.name || fixedProduct.inventory_id || "") : "";
   fillPeople("bindDialogPerson");
   const person = document.querySelector("#bindDialogPerson");
   if (person && [...person.options].some((item) => item.value === String(state.currentUserId))) person.value = state.currentUserId;
@@ -2335,11 +8116,10 @@ function renderBindProductOptions() {
   target.innerHTML = rows.length ? rows.map((product) => `
     <button class="product-pick ${String(input.value) === String(product.id) ? "active" : ""}" type="button" data-id="${product.id}">
       ${image(product.image_url)}
-      <span>
-        <strong>${escape(product.inventory_id || product.code || product.selection_id || "")}</strong>
-        <small>内部ID：${escape(product.id)} / 创建：${escape(date(product.created_at) || "-")}</small>
-        <b>${escape(product.name || "")}</b>
-        <small>库存 ${escape(product.stock ?? 0)} / 已绑定 SKU ${escape(product.sku_count ?? 0)} 个</small>
+      <span class="product-pick-info">
+        <b class="product-pick-name">${escape(product.name || "（无名称）")}</b>
+        <small class="product-pick-meta">库存号：${escape(product.inventory_id || product.code || product.selection_id || "-")} &nbsp;/&nbsp; 创建：${escape(date(product.created_at) || "-")}</small>
+        <small class="product-pick-stock">库存 <strong>${escape(product.stock ?? 0)}</strong> 件&nbsp;/&nbsp; 已绑 SKU <strong>${escape(product.sku_count ?? 0)}</strong> 个</small>
       </span>
     </button>
   `).join("") : `<div class="empty">没有匹配的产品</div>`;
@@ -2356,29 +8136,58 @@ function renderProcProductOptions() {
   const target = document.querySelector("#procProductOptions");
   const input = document.querySelector("#procProduct");
   if (!target || !input) return;
-  const query = normalizeSearch(document.querySelector("#procProductSearch")?.value || "");
-  const rows = state.products.filter((product) => {
-    if (!query) return true;
-    return normalizeSearch(productProcurementSearchText(product)).includes(query);
-  }).slice(0, 80);
-  if (rows.length && !input.value) input.value = rows[0].id;
-  target.innerHTML = rows.length ? rows.map((product) => `
-    <button class="proc-product-option ${String(input.value) === String(product.id) ? "active" : ""}" type="button" data-id="${product.id}">
-      ${image(product.image_url)}
-      <span>
-        <strong>${escape(product.name || "")}</strong>
-        <small>${escape(product.inventory_id || product.code || product.selection_id || "")} / 库存 ${escape(product.stock ?? 0)} / 即将入库 ${escape(product.incoming_stock ?? 0)}</small>
-        ${skuList(product.mapped_skus)}
-      </span>
-    </button>
-  `).join("") : `<div class="empty">没有匹配的产品</div>`;
-  target.querySelectorAll(".proc-product-option").forEach((button) => {
-    button.addEventListener("click", () => {
-      input.value = button.dataset.id;
+
+  const rows = filteredProcProductRows();
+  const limitedRows = limitedProcProductRows();
+
+  const totalPages = totalPagesFor(limitedRows, state.procProductPageSize);
+  state.procProductPage = clampPage(state.procProductPage, totalPages);
+  const pageRows = paginateRows(limitedRows, state.procProductPage, state.procProductPageSize);
+
+  if (pageRows.length && !input.value) input.value = pageRows[0].id;
+
+  target.innerHTML = pageRows.length ? `
+    <div class="proc-product-options-list table-wrap">
+      <table class="table proc-product-option-table">
+        <thead><tr><th>图片</th><th>库存产品ID</th><th>SKU</th><th>产品名称</th><th>当前库存</th><th>即将入库</th><th>采购信息</th></tr></thead>
+        <tbody>${pageRows.map((product) => `
+          <tr class="proc-product-option-row ${String(input.value) === String(product.id) ? "active" : ""}" data-id="${product.id}">
+            <td>${image(product.image_url)}</td>
+            <td><strong>${escape(product.inventory_id || product.code || product.selection_id || product.id || "")}</strong><small>内部ID ${escape(product.id)}</small></td>
+            <td>${skuList(product.mapped_skus) || "<small>-</small>"}</td>
+            <td><strong>${escape(product.name || "")}</strong><small>${escape(product.supplier_note || "")}</small></td>
+            <td>${escape(product.stock ?? 0)}</td>
+            <td>${escape(product.incoming_stock ?? 0)}</td>
+            <td><small>${money(product.purchase_cost)} / 运费 ${money(product.domestic_shipping)}</small>${product.purchase_url ? `<small>${link(product.purchase_url)}</small>` : ""}</td>
+          </tr>
+        `).join("")}</tbody>
+      </table>
+    </div>
+    ${erpPagerHtml("proc-product", state.procProductPage, state.procProductPageSize, limitedRows.length)}
+    ${rows.length > 100 ? `<div class="form-tip">结果过多，当前仅显示前 100 条，请继续输入关键词缩小范围。</div>` : ""}` : `
+    <div class="empty small proc-product-empty">
+      <p>没有匹配的库存产品。</p>
+      <button type="button" class="primary small proc-create-stock-from-request-btn">创建库存并生成采购请求</button>
+    </div>`;
+
+  target.querySelectorAll(".proc-product-option-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      selectProcProduct(Number(row.dataset.id));
       renderProcProductOptions();
-      updateProcProductPreview();
     });
   });
+  target.querySelector(".proc-create-stock-from-request-btn")?.addEventListener("click", openProductCreateFromProcurementSearch);
+}
+
+function filteredProcProductRows() {
+  const query = normalizeSearch(document.querySelector("#procProductSearch")?.value || "");
+  return [...(state.products || [])]
+    .sort((a, b) => Number(b.id || 0) - Number(a.id || 0))
+    .filter((product) => !query || normalizeSearch(productProcurementSearchText(product)).includes(query));
+}
+
+function limitedProcProductRows() {
+  return filteredProcProductRows().slice(0, 100);
 }
 
 function updateProcProductPreview() {
@@ -2395,14 +8204,15 @@ function openProductCreateDialog(onlineId = null, context = {}) {
   const form = document.querySelector("#productCreateForm");
   if (!dialog || !form) return;
   form.reset();
-  form.dataset.createProcurementRequest = "0";
+  form.dataset.createProcurementRequest = context.createProcurementRequest ? "1" : "0";
   normalizeCreateStockPurchaseFields(form);
+  setupCreateStockSourceFields(form);
   form.elements.owner_person_id.value = state.currentUserId;
   form.elements.person_id.value = state.currentUserId;
   form.elements.source_platform.value = "1688";
   form.elements.shipping_method.value = "air_land";
   form.elements.exchange_rate.value = currentExchangeRate();
-  form.elements.desired_profit_value.value = "20";
+  form.elements.desired_profit_value.value = "40";
   form.elements.return_rate.value = "0.05";
   form.elements.purchase_quantity.value = "1";
   form.elements.length_cm.value = "30";
@@ -2416,16 +8226,21 @@ function openProductCreateDialog(onlineId = null, context = {}) {
   const summary = document.querySelector("#createStockSummary");
   if (summary) summary.innerHTML = createStockSummary();
   bindCreateStockSummaryInputs();
+  syncCreateStockSourceFields(form);
   const error = document.querySelector("#productCreateError");
   if (error) error.style.display = "none";
   document.querySelector("#productCreateTitle").textContent = "添加库存产品";
+  if (context.searchQuery && form.elements.name) form.elements.name.value = context.searchQuery;
   if (onlineId) fillCreateDialogFromOnline(onlineId, context);
   syncCreateListingPrice();
+  if (!dialog.open) dialog.showModal();
   dialog.classList.add("visible");
-  const backdrop = document.createElement("div");
-  backdrop.className = "edit-dialog-backdrop create-product-backdrop";
-  backdrop.addEventListener("click", closeProductCreateDialog);
-  document.body.appendChild(backdrop);
+  if (!document.querySelector(".create-product-backdrop")) {
+    const backdrop = document.createElement("div");
+    backdrop.className = "edit-dialog-backdrop create-product-backdrop";
+    backdrop.addEventListener("click", closeProductCreateDialog);
+    document.body.appendChild(backdrop);
+  }
   form.elements.name.focus();
 }
 
@@ -2442,20 +8257,21 @@ function fillCreateDialogFromOnline(onlineId, context = {}) {
   form.elements.image_url.value = imageUrl || "";
   form.elements.source_platform.value = "1688";
   form.elements.shipping_method.value = inferShippingMethodFromOnline(online);
-  form.elements.supplier_note.value = `来自 Ozon SKU ${online.ozon_sku}${online.offer_id ? ` / Offer ${online.offer_id}` : ""}`;
+  form.elements.supplier_note.value = buildOnlineSupplierNote(online, attrs);
   const orderPrice = orderSkuPrice(context.order, context.sku);
   const saleRmb = Number(orderPrice || 0) || Number(online.sale_price || 0);
   form.elements.air_sale_price_rmb.value = saleRmb.toFixed(2);
   form.elements.package_weight_g.value = inferOnlineWeightGrams(attrs);
-  form.elements.length_cm.value = attrs.length || attrs.depth || 30;
-  form.elements.width_cm.value = attrs.width || 20;
-  form.elements.height_cm.value = attrs.height || 10;
+  form.elements.length_cm.value = onlineAttrNumber(attrs, ["length", "depth", "写谢懈薪邪", "谐谢褍斜懈薪邪", "长"]) || 30;
+  form.elements.width_cm.value = onlineAttrNumber(attrs, ["width", "褕懈褉懈薪邪", "宽"]) || 20;
+  form.elements.height_cm.value = onlineAttrNumber(attrs, ["height", "胁褘褋芯褌邪", "高"]) || 10;
   const summary = document.querySelector("#createStockSummary");
   if (summary) summary.innerHTML = createStockSummary(online, attrs, { ...context, saleRmb });
   bindCreateStockSummaryInputs();
+  syncCreateStockSourceFields(form);
   const source = document.querySelector("#createOnlineSource");
   source.style.display = "";
-  source.innerHTML = `${onlineImageCell(online)}<div><strong>${escape(online.ozon_sku)}</strong><small>${escape(online.shop_name)} / ${escape(online.offer_id || "-")}</small><span>${escape(online.name || "")}</span></div>`;
+  source.innerHTML = `${onlineImageCell(online)}<div><strong>${escape(online.name || "-")}</strong><small>店铺：${escape(online.shop_name || "-")}</small><small>SKU：${escape(online.ozon_sku || online.offer_id || "-")}</small></div>`;
 }
 
 function productProcurementSearchText(product) {
@@ -2473,16 +8289,129 @@ function normalizeCreateStockPurchaseFields(form) {
   if (quantityLabel) setLabelText(quantityLabel, "采购数量");
   if (amountLabel) setLabelText(amountLabel, "商品总货款(RMB)");
   if (freightLabel) setLabelText(freightLabel, "国内总运费(RMB)");
-  if (quantityLabel && amountLabel) amountLabel.before(quantityLabel);
-  if (freightLabel && amountLabel) amountLabel.after(freightLabel);
+  let row = form.querySelector(".create-purchase-cost-row");
+  if (!row && quantityLabel && amountLabel && freightLabel) {
+    row = document.createElement("div");
+    row.className = "create-purchase-cost-row full";
+    quantityLabel.before(row);
+    row.append(quantityLabel, amountLabel, freightLabel);
+  }
   if (form.elements.purchase_quantity) form.elements.purchase_quantity.value = form.elements.purchase_quantity.value || "1";
   if (form.elements.purchase_cost) form.elements.purchase_cost.placeholder = "商品货款总额";
   if (form.elements.domestic_shipping) form.elements.domestic_shipping.placeholder = "可填 0";
 }
 
+function setupCreateStockSourceFields(form) {
+  if (!form) return;
+  const purchaseLabel = form.elements.purchase_url?.closest("label");
+  const supplierLabel = form.elements.supplier_id?.closest("label");
+  const noteLabel = form.elements.supplier_note?.closest("label");
+  if (!purchaseLabel || !supplierLabel) return;
+  setLabelText(purchaseLabel, "閲囪喘閾炬帴");
+  setLabelText(supplierLabel, "閲囪喘鏉ユ簮");
+  populateCreateProductSuppliers();
+  let sourceTypeLabel = form.querySelector(".create-source-type-label");
+  if (!sourceTypeLabel) {
+    sourceTypeLabel = document.createElement("label");
+    sourceTypeLabel.className = "create-source-type-label";
+    sourceTypeLabel.innerHTML = `鏉ユ簮绫诲瀷<select id="createProductSourceType"><option value="1688">1688</option><option value="pdd">鎷煎澶?/option><option value="supplier">渚涘簲鍟?/option></select>`;
+  }
+  let row = form.querySelector(".create-source-row");
+  if (!row) {
+    row = document.createElement("div");
+    row.className = "create-source-row full";
+    (noteLabel || purchaseLabel).before(row);
+  }
+  row.append(sourceTypeLabel, purchaseLabel, supplierLabel);
+  const sourceType = sourceTypeLabel.querySelector("select");
+  sourceType.value = form.elements.source_platform?.value || "1688";
+  sourceType.onchange = () => {
+    if (form.elements.source_platform) form.elements.source_platform.value = sourceType.value;
+    syncCreateStockSourceFields(form);
+  };
+  if (form.elements.supplier_id) form.elements.supplier_id.onchange = () => {
+    if (form.elements.supplier_id.value && form.elements.source_platform) {
+      form.elements.source_platform.value = "supplier";
+      sourceType.value = "supplier";
+      syncCreateStockSourceFields(form);
+    }
+  };
+}
+
+function populateCreateProductSuppliers() {
+  const select = document.querySelector("#createProductSupplier");
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML = `<option value="">-- 选择供应商 --</option>${(state.suppliers || []).map((item) => `<option value="${item.id}">${escape(item.name)}</option>`).join("")}`;
+  select.value = current || "";
+}
+
+function syncCreateStockSourceFields(form) {
+  if (!form) return;
+  const sourceType = document.querySelector("#createProductSourceType");
+  const sourceValue = form.elements.source_platform?.value || sourceType?.value || "1688";
+  if (sourceType) sourceType.value = sourceValue;
+  if (form.elements.source_platform) form.elements.source_platform.value = sourceValue;
+  const purchaseLabel = form.elements.purchase_url?.closest("label");
+  const supplierLabel = form.elements.supplier_id?.closest("label");
+  if (purchaseLabel) purchaseLabel.style.display = sourceValue === "supplier" ? "none" : "";
+  if (supplierLabel) supplierLabel.style.display = sourceValue === "supplier" ? "" : "none";
+}
+
 function setLabelText(label, text) {
-  const node = [...label.childNodes].find((item) => item.nodeType === Node.TEXT_NODE);
-  if (node) node.textContent = text;
+  if (!label) return;
+  if (typeof Node !== "undefined" && label.childNodes?.length) {
+    const node = [...label.childNodes].find((item) => item.nodeType === Node.TEXT_NODE);
+    if (node) {
+      node.textContent = text;
+      return;
+    }
+  }
+  if (!label.querySelector?.("input,select,textarea")) {
+    label.textContent = text;
+  }
+}
+
+function buildOnlineSupplierNote(online, attrs = {}) {
+  const details = onlineAttributeSummary(attrs);
+  const parts = [`来自 Ozon SKU ${online?.ozon_sku || "-"}`];
+  if (details) parts.push(`属性：${details}`);
+  return parts.join("；");
+}
+
+function onlineAttributeSummary(attrs = {}) {
+  const interesting = ["颜色", "褑胁械褌", "color", "colour", "规格", "褉邪蟹屑械褉", "size", "尺寸", "材质", "屑邪褌械褉懈邪谢", "material"];
+  const rows = flattenOnlineAttributes(attrs)
+    .filter((item) => interesting.some((key) => String(item.name).toLowerCase().includes(key.toLowerCase())))
+    .slice(0, 6)
+    .map((item) => `${translateOnlineAttributeName(item.name)}:${item.value}`);
+  return [...new Set(rows)].join(" / ");
+}
+
+function flattenOnlineAttributes(attrs = {}) {
+  if (Array.isArray(attrs)) {
+    return attrs.flatMap((item) => {
+      const name = item.name || item.attribute_name || item.attribute || item.id || item.attribute_id || "";
+      const values = Array.isArray(item.values) ? item.values : [item.value ?? item.values ?? ""];
+      return values.map((value) => ({
+        name,
+        value: typeof value === "object" ? value.value || value.name || JSON.stringify(value) : value
+      })).filter((item) => item.name && item.value);
+    });
+  }
+  return Object.entries(attrs || {}).map(([name, value]) => ({
+    name,
+    value: Array.isArray(value) ? value.join("/") : value
+  })).filter((item) => item.name && item.value !== undefined && item.value !== null && item.value !== "");
+}
+
+function translateOnlineAttributeName(name) {
+  const text = String(name || "");
+  const lower = text.toLowerCase();
+  if (lower.includes("褑胁械褌") || lower.includes("color") || lower.includes("colour")) return "棰滆壊";
+  if (lower.includes("褉邪蟹屑械褉") || lower.includes("size")) return "灏哄";
+  if (lower.includes("屑邪褌械褉懈邪谢") || lower.includes("material")) return "材质";
+  return text;
 }
 
 function openProductCreateDialogFromOrder(order) {
@@ -2497,10 +8426,13 @@ function openProductCreateDialogFromOrder(order) {
   form.elements.source_platform.value = "supplier";
   form.elements.supplier_note.value = `来自订单 ${order.posting_number || order.order_number || ""}${skus[0] ? ` / SKU ${skus[0]}` : ""}`;
   document.querySelector("#productCreateTitle").textContent = "从订单创建库存产品";
+  syncCreateStockSourceFields(form);
 }
 
 function closeProductCreateDialog() {
-  document.querySelector("#productCreateDialog")?.classList.remove("visible");
+  const dialog = document.querySelector("#productCreateDialog");
+  dialog?.classList.remove("visible");
+  if (dialog?.open) dialog.close();
   document.querySelector(".create-product-backdrop")?.remove();
 }
 
@@ -2516,12 +8448,11 @@ function createStockSummary(online = null, attrs = {}, context = {}) {
   const form = document.querySelector("#productCreateForm");
   const saleRmb = Number(context.saleRmb || 0) || Number(online?.sale_price || 0);
   const weight = online ? num(inferOnlineWeightGrams(attrs), 0) : Number(form?.elements.package_weight_g.value || 0);
-  const length = online ? Number(attrs.length || attrs.depth || 30) : Number(form?.elements.length_cm.value || 30);
-  const width = online ? Number(attrs.width || 20) : Number(form?.elements.width_cm.value || 20);
-  const height = online ? Number(attrs.height || 10) : Number(form?.elements.height_cm.value || 10);
+  const length = online ? Number(onlineAttrNumber(attrs, ["length", "depth", "写谢懈薪邪", "谐谢褍斜懈薪邪", "长"]) || 30) : Number(form?.elements.length_cm.value || 30);
+  const width = online ? Number(onlineAttrNumber(attrs, ["width", "褕懈褉懈薪邪", "宽"]) || 20) : Number(form?.elements.width_cm.value || 20);
+  const height = online ? Number(onlineAttrNumber(attrs, ["height", "胁褘褋芯褌邪", "高"]) || 10) : Number(form?.elements.height_cm.value || 10);
   const shipping = online ? inferShippingMethodFromOnline(online) : "air_land";
   return `
-    <label><b>供货平台</b><select id="createSummarySource"><option value="1688">1688</option><option value="pdd">拼多多</option><option value="supplier">供应商</option></select></label>
     <label><b>配送方式</b><select id="createSummaryShipping"><option value="air_land">陆空</option><option value="land">陆运</option><option value="air">空运</option><option value="manual_review">人工判断</option></select></label>
     <label><b>订单售价(RMB)</b><input id="createSummarySale" type="number" step="0.01" value="${escape(num(saleRmb, 2))}" /></label>
     <label><b>重量(g)</b><input id="createSummaryWeight" type="number" step="1" value="${escape(weight)}" /></label>
@@ -2533,7 +8464,6 @@ function bindCreateStockSummaryInputs() {
   const form = document.querySelector("#productCreateForm");
   if (!form) return;
   const pairs = [
-    ["#createSummarySource", "source_platform"],
     ["#createSummaryShipping", "shipping_method"],
     ["#createSummarySale", "air_sale_price_rmb"],
     ["#createSummaryWeight", "package_weight_g"],
@@ -2581,13 +8511,40 @@ function inferShippingMethodFromOnline(online) {
 }
 
 function inferOnlineWeightGrams(attrs) {
-  const weight = Number(attrs.weight || 0);
-  if (weight > 0) return String(attrs.weight_unit || "").toLowerCase().includes("kg") ? weight * 1000 : weight;
-  return Number(attrs.volume_weight || 0) ? Number(attrs.volume_weight || 0) * 1000 : 0;
+  const weight = onlineAttrNumber(attrs, ["weight", "胁械褋", "重量", "package_weight_g"]);
+  const unit = String(onlineAttrValue(attrs, ["weight_unit", "械写懈薪懈褑邪 胁械褋邪", "unit"]) || "").toLowerCase();
+  if (weight > 0) return unit.includes("kg") || unit.includes("泻谐") ? weight * 1000 : weight;
+  const volumeWeight = onlineAttrNumber(attrs, ["volume_weight", "芯斜褗械屑薪褘泄 胁械褋", "体积重"]);
+  return volumeWeight ? volumeWeight * 1000 : 0;
+}
+
+function onlineAttrValue(attrs = {}, names = []) {
+  const wanted = names.map((item) => String(item).toLowerCase());
+  const row = flattenOnlineAttributes(attrs).find((item) => {
+    const name = String(item.name || "").toLowerCase();
+    return wanted.some((key) => name === key || name.includes(key));
+  });
+  return row?.value ?? "";
+}
+
+function onlineAttrNumber(attrs = {}, names = []) {
+  const raw = onlineAttrValue(attrs, names);
+  const match = String(raw ?? "").replace(",", ".").match(/-?\d+(\.\d+)?/);
+  return match ? Number(match[0]) : 0;
 }
 
 function statusLabel(value) {
-  return { online: "在线", hidden: "隐藏", archived: "已归档" }[value] || value || "";
+  return {
+    online: "销售中",
+    active: "销售中",
+    selling: "销售中",
+    ready: "准备出售",
+    hidden: "已下架",
+    archived: "已归档",
+    error: "错误",
+    failed: "错误",
+    moderation: "待修改"
+  }[String(value || "").toLowerCase()] || value || "";
 }
 
 function firstJsonItem(value) {
@@ -2629,20 +8586,17 @@ function dimensionSummary(attrs) {
   return "";
 }
 
-// 鈹€鈹€鈹€ 杈呭姪 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// 閳光偓閳光偓閳光偓 鏉堝懎濮?閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
 
 function fillSelects() {
   const nameEl = document.querySelector("#currentUserName");
   const logoutBtn = document.querySelector("#logoutBtn");
-  const changePwdBtn = document.querySelector("#changePwdBtn");
   if (state.authToken && state.currentUser) {
     if (nameEl) nameEl.textContent = state.currentUser.name || state.currentUser.username || "已登录";
     if (logoutBtn) logoutBtn.style.display = "";
-    if (changePwdBtn) changePwdBtn.style.display = "";
   } else {
     if (nameEl) nameEl.textContent = "未登录";
     if (logoutBtn) logoutBtn.style.display = "none";
-    if (changePwdBtn) changePwdBtn.style.display = "none";
   }
 
   fillPeople("productOwner");
@@ -2658,6 +8612,21 @@ function fillSelects() {
   updateProcProductPreview();
 }
 
+function syncCurrentUserFromPeople() {
+  if (!state.currentUserId || !Array.isArray(state.people)) return;
+  const fresh = state.people.find((person) => String(person.id) === String(state.currentUserId));
+  if (!fresh) return;
+  state.currentUser = {
+    id: fresh.id,
+    name: fresh.name,
+    username: fresh.username,
+    role: fresh.role
+  };
+  currentUser = state.currentUser;
+  if (state.currentUser.username) localStorage.setItem("loginUsername", state.currentUser.username);
+  updateAuthUI(state.currentUser);
+}
+
 function setDefaults() {
   for (const id of ["productOwner", "procPerson", "inPerson", "bindPerson"]) {
     const el = document.querySelector(`#${id}`);
@@ -2668,9 +8637,6 @@ function setDefaults() {
       el.value = state.currentUserId;
     }
   }
-  const owner = state.people.find((person) => String(person.id) === String(state.currentUserId));
-  const ownerName = document.querySelector("#productOwnerName");
-  if (ownerName) ownerName.textContent = owner?.name || "-";
   syncListingReferencePrice();
   updateRecommendation();
 }
@@ -2701,13 +8667,234 @@ function visibleColumns(key) {
 
 async function syncOzon() {
   const status = document.querySelector("#orderSyncStatus") || document.querySelector("#syncStatus");
-  if (status) status.textContent = "正在同步订单...";
-  const body = {};
-  // 当前若已筛选店铺，则只同步该店铺，方便局部排查问题。
+  const rangeError = validateOrderSyncRange();
+  if (rangeError) {
+    if (status) status.textContent = rangeError;
+    await showAppAlert(rangeError);
+    return;
+  }
+  const syncBtn = document.querySelector("#syncOrdersBtn");
+  const incrementalBtn = document.querySelector("#syncOrdersIncrementalBtn");
+  const originalText = syncBtn?.textContent || "拉取当前范围";
+  const rangeDays = daysBetweenInputDates(state.orderFilters.dateFrom, state.orderFilters.dateTo);
+  let elapsedTimer = null;
+  let timeoutTimer = null;
+  setOrderSyncBusy(true, syncBtn, incrementalBtn, "正在拉取...");
+  if (status) {
+    status.textContent = `正在从 Ozon 拉取 ${orderDateRangeLabel()} 的订单，请勿重复点击...${rangeDays > 45 ? " 时间范围较长，可能需要几分钟。" : ""}`;
+    const startedAt = Date.now();
+    elapsedTimer = window.setInterval(() => {
+      const seconds = Math.floor((Date.now() - startedAt) / 1000);
+      const hint = seconds >= 60 ? ' 如果一直没有结束，可以点“取消拉取”，再缩短时间范围重试。' : "";
+      status.textContent = `正在从 Ozon 拉取 ${orderDateRangeLabel()} 的订单，已等待 ${seconds} 秒，请勿重复点击...${rangeDays > 45 ? " 时间范围较长，可能需要几分钟。" : ""}${hint}`;
+    }, 5000);
+  }
+  const body = {
+    from: state.orderFilters.dateFrom || "",
+    to: state.orderFilters.dateTo || ""
+  };
   if (state.orderFilters.shopId && state.orderFilters.shopId !== "all") body.shop_id = state.orderFilters.shopId;
-  const result = await api("/api/sync/ozon", { method: "POST", body: JSON.stringify(body) });
-  if (status) status.textContent = `同步完成：新增 ${result.inserted} 条明细`;
-  await loadAll();
+  try {
+    state.orderSyncAbort = new AbortController();
+    state.orderSyncCancelReason = "";
+    timeoutTimer = window.setTimeout(() => {
+      state.orderSyncCancelReason = "timeout";
+      state.orderSyncAbort?.abort();
+    }, 5 * 60 * 1000);
+    const result = await api("/api/sync/ozon", { method: "POST", body: JSON.stringify(body), signal: state.orderSyncAbort.signal });
+    const failed = result.errors?.length ? `；失败 ${result.errors.length} 个店铺` : "";
+    const doneText = `同步完成：拉取 ${result.fetched || 0} 单，新增 ${result.inserted || 0} 条明细，更新 ${result.updated || 0} 单，请求 ${result.requests || 0} 次${failed}`;
+    state.orderSyncAbort = null;
+    if (elapsedTimer) window.clearInterval(elapsedTimer);
+    if (timeoutTimer) window.clearTimeout(timeoutTimer);
+    elapsedTimer = null;
+    timeoutTimer = null;
+    setOrderSyncRefreshing(syncBtn, incrementalBtn, "正在刷新列表...");
+    if (status) status.textContent = `${doneText}；正在刷新订单列表...`;
+    await refreshAfterOrderSync();
+    if (status) status.textContent = doneText;
+  } catch (error) {
+    if (status) {
+      if (error.name === "AbortError") {
+        status.textContent = state.orderSyncCancelReason === "timeout"
+          ? "本次拉取超过 5 分钟已自动停止。建议缩短时间范围，比如一次拉 15 天到 30 天。"
+          : "已取消本次拉取，并已通知服务器停止当前 Ozon 请求。";
+      } else {
+        status.textContent = `同步失败：${error.message}`;
+      }
+    }
+  } finally {
+    state.orderSyncAbort = null;
+    state.orderSyncCancelReason = "";
+    if (elapsedTimer) window.clearInterval(elapsedTimer);
+    if (timeoutTimer) window.clearTimeout(timeoutTimer);
+    setOrderSyncBusy(false, syncBtn, incrementalBtn, originalText);
+  }
+}
+
+async function runDataMaintenance(action) {
+  const isRestore = action === "restore";
+  const button = document.querySelector(isRestore ? "#restoreDataBtn" : "#backupDataBtn");
+  const status = document.querySelector("#maintenanceStatus");
+  if (isRestore) {
+    const ok = await showAppConfirm("确定恢复最新备份吗？恢复会短暂关闭并重启本地服务，请确认当前没有正在同步或录入的数据。", "恢复数据");
+    if (!ok) return;
+  }
+  const originalText = button?.textContent || (isRestore ? "恢复数据" : "备份数据");
+  if (button) {
+    button.disabled = true;
+    button.textContent = isRestore ? "恢复中..." : "备份中...";
+  }
+  if (status) status.textContent = isRestore ? "正在恢复最新备份，服务会短暂断开..." : "正在备份数据，请稍等...";
+  try {
+    const result = await api(`/api/system/${isRestore ? "restore" : "backup"}`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    if (status) status.textContent = result.message || (isRestore ? "恢复任务已启动。" : "备份完成。");
+    if (!isRestore) await showAppAlert(result.message || "备份完成。", "备份数据");
+  } catch (error) {
+    if (status) status.textContent = error.message || "操作失败";
+    await showAppAlert(error.message || "操作失败");
+  } finally {
+    if (button && !isRestore) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
+async function syncOzonIncremental() {
+  const status = document.querySelector("#orderSyncStatus") || document.querySelector("#syncStatus");
+  const syncBtn = document.querySelector("#syncOrdersBtn");
+  const incrementalBtn = document.querySelector("#syncOrdersIncrementalBtn");
+  const originalText = incrementalBtn?.textContent || "同步最近7天";
+  let timeoutTimer = null;
+  setOrderSyncBusy(true, incrementalBtn, syncBtn, "正在同步...");
+  if (status) status.textContent = "正在从 Ozon 同步最近 7 天新订单，请勿重复点击...";
+  const body = { recent_days: 7 };
+  if (state.orderFilters.shopId && state.orderFilters.shopId !== "all") body.shop_id = state.orderFilters.shopId;
+  try {
+    state.orderSyncAbort = new AbortController();
+    state.orderSyncCancelReason = "";
+    timeoutTimer = window.setTimeout(() => {
+      state.orderSyncCancelReason = "timeout";
+      state.orderSyncAbort?.abort();
+    }, 5 * 60 * 1000);
+    const result = await api("/api/sync/ozon/incremental", { method: "POST", body: JSON.stringify(body), signal: state.orderSyncAbort.signal });
+    const failed = result.errors?.length ? `；失败 ${result.errors.length} 段` : "";
+    const doneText = `最近 7 天拉取完成：拉取 ${result.fetched || 0} 单，新增 ${result.inserted || 0} 条明细，更新 ${result.updated || 0} 单，请求 ${result.requests || 0} 次${failed}`;
+    state.orderSyncAbort = null;
+    if (timeoutTimer) window.clearTimeout(timeoutTimer);
+    timeoutTimer = null;
+    setOrderSyncRefreshing(incrementalBtn, syncBtn, "正在刷新列表...");
+    if (status) status.textContent = `${doneText}；正在刷新订单列表...`;
+    await refreshAfterOrderSync();
+    if (status) status.textContent = doneText;
+  } catch (error) {
+    if (status) {
+      if (error.name === "AbortError") {
+        status.textContent = state.orderSyncCancelReason === "timeout"
+          ? "本次同步超过 5 分钟已自动停止。建议稍后再试，或先只拉取当前范围。"
+          : "已取消本次同步，并已通知服务端停止当前 Ozon 请求。";
+      } else {
+        status.textContent = `增量同步失败：${error.message}`;
+      }
+    }
+  } finally {
+    state.orderSyncAbort = null;
+    state.orderSyncCancelReason = "";
+    if (timeoutTimer) window.clearTimeout(timeoutTimer);
+    setOrderSyncBusy(false, incrementalBtn, syncBtn, originalText);
+  }
+}
+
+function cancelOrderSync() {
+  if (!state.orderSyncAbort) return;
+  state.orderSyncCancelReason = "user";
+  const status = document.querySelector("#orderSyncStatus") || document.querySelector("#syncStatus");
+  if (status) status.textContent = "正在取消本次拉取，请稍等...";
+  const cancelBtn = document.querySelector("#cancelOrderSyncBtn");
+  if (cancelBtn) {
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = "正在取消...";
+  }
+  state.orderSyncAbort.abort();
+}
+
+function openQualityRulesDialog() {
+  const dialog = document.querySelector("#qualityRulesDialog");
+  if (!dialog) return;
+  const activeRules = (state.orderQualityRules || []).filter((rule) => Number(rule.active) !== 0);
+  document.querySelector("#qualityRulePrefixes").value = activeRules.map((rule) => rule.prefix).join(", ") || "0213, 0249";
+  document.querySelector("#qualityRuleNote").value = activeRules.find((rule) => rule.note)?.note || "疑似 Ozon 仓库质检扣单：不要正常发货，按仓库要求拍照处理。";
+  if (!dialog.open) dialog.showModal();
+  dialog.classList.add("visible");
+}
+
+function closeQualityRulesDialog() {
+  const dialog = document.querySelector("#qualityRulesDialog");
+  if (!dialog) return;
+  dialog.classList.remove("visible");
+  if (dialog.open) dialog.close();
+}
+
+async function saveQualityRules(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const result = await api("/api/order-quality-rules", {
+    method: "PUT",
+    body: JSON.stringify({ prefixes: form.elements.prefixes.value, note: form.elements.note.value })
+  });
+  state.orderQualityRules = result.rules || [];
+  closeQualityRulesDialog();
+  renderOrdersTable();
+}
+
+function setOrderSyncBusy(isBusy, primaryBtn, secondaryBtn, primaryText) {
+  const cancelBtn = document.querySelector("#cancelOrderSyncBtn");
+  if (primaryBtn) {
+    primaryBtn.disabled = isBusy;
+    primaryBtn.textContent = primaryText;
+    primaryBtn.classList.toggle("loading", isBusy);
+  }
+  if (secondaryBtn) secondaryBtn.disabled = isBusy;
+  if (cancelBtn) {
+    cancelBtn.style.display = isBusy ? "" : "none";
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = "取消拉取";
+  }
+}
+
+function setOrderSyncRefreshing(primaryBtn, secondaryBtn, primaryText) {
+  const cancelBtn = document.querySelector("#cancelOrderSyncBtn");
+  if (primaryBtn) {
+    primaryBtn.disabled = true;
+    primaryBtn.textContent = primaryText;
+    primaryBtn.classList.add("loading");
+  }
+  if (secondaryBtn) secondaryBtn.disabled = true;
+  if (cancelBtn) {
+    cancelBtn.style.display = "none";
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = "取消拉取";
+  }
+}
+
+function daysBetweenInputDates(from, to) {
+  if (!from || !to) return 0;
+  const start = new Date(`${from}T00:00:00`);
+  const end = new Date(`${to}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
+  return Math.max(0, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
+}
+
+function validateOrderSyncRange() {
+  const from = state.orderFilters.dateFrom;
+  const to = state.orderFilters.dateTo;
+  if (!from || !to) return "请选择开始日期和结束日期后再拉取。";
+  if (from > to) return "结束日期不能早于开始日期，请重新选择时间范围。";
+  return "";
 }
 
 async function syncOnlineProducts() {
@@ -2722,55 +8909,115 @@ async function syncOnlineProducts() {
   }
 }
 
-function fillShopForm(shop) {
-  const form = document.querySelector("#shopForm");
-  form.elements.id.value = shop.id;
-  form.elements.name.value = shop.name || "";
-  form.elements.legal_entity.value = shop.legal_entity || "";
-  form.elements.ozon_client_id.value = shop.ozon_client_id || "";
-  form.elements.api_key_hint.value = "";
-  form.elements.status.value = shop.status || "active";
-  form.elements.payout_rate.value = shop.payout_rate ?? 0.33;
-  document.querySelector("#shopFormTitle").textContent = `编辑店铺：${shop.name}`;
-  document.querySelector("#shopSaveBtn").textContent = "淇濆瓨淇敼";
-  document.querySelector("#shopCancelEdit").style.display = "";
-  form.scrollIntoView({ behavior: "smooth", block: "start" });
+async function syncSelectedOnlineProducts() {
+  const status = document.querySelector("#syncOnlineStatus");
+  const ids = [...state.selectedOnlineIds].filter(Boolean);
+  if (!ids.length) {
+    if (status) status.textContent = "请先勾选需要同步的在线商品。";
+    return;
+  }
+  if (status) status.textContent = `正在同步所选 ${ids.length} 个商品...`;
+  try {
+    const result = await api("/api/sync/online-products", { method: "POST", body: JSON.stringify({ online_product_ids: ids }) });
+    if (status) status.textContent = `所选商品同步完成：拉取 ${result.fetched} 条，更新 ${result.upserted} 条${result.errors?.length ? `；部分失败 ${result.errors.length} 个店铺` : ""}`;
+    state.selectedOnlineIds.clear();
+    await loadAll();
+  } catch (error) {
+    if (status) status.textContent = `所选商品同步失败：${error.message}`;
+  }
 }
 
 function resetShopForm() {
   const form = document.querySelector("#shopForm");
+  if (!form) return;
   form.reset();
   form.elements.id.value = "";
   form.elements.status.value = "active";
   form.elements.payout_rate.value = "0.33";
-  document.querySelector("#shopFormTitle").textContent = "新增店铺";
-  document.querySelector("#shopSaveBtn").textContent = "保存店铺";
-  document.querySelector("#shopCancelEdit").style.display = "none";
-}
-
-function fillPeopleForm(person) {
-  const form = document.querySelector("#peopleForm");
-  form.elements.id.value = person.id;
-  form.elements.name.value = person.name || "";
-  form.elements.username.value = person.username || "";
-  form.elements.role.value = person.role || "operator";
-  form.elements.active.value = String(person.active ?? 1);
-  document.querySelector("#peopleCancelEdit").style.display = "";
-  form.scrollIntoView({ behavior: "smooth", block: "start" });
+  const saveBtn = document.querySelector("#shopSaveBtn");
+  if (saveBtn) saveBtn.textContent = "新增店铺";
 }
 
 function resetPeopleForm() {
   const form = document.querySelector("#peopleForm");
+  if (!form) return;
   form.reset();
   form.elements.id.value = "";
   form.elements.active.value = "1";
-  document.querySelector("#peopleCancelEdit").style.display = "none";
 }
 
 function renderTable(target, rows, cols) {
-  document.querySelector(`#${target}`).innerHTML = !rows?.length
-    ? `<div class="empty">鏆傛棤鏁版嵁</div>`
+  const mount = document.querySelector(`#${target}`);
+  if (!mount) return;
+  mount.innerHTML = !rows?.length
+    ? `<div class="empty">当前区域暂无数据</div>`
     : `<div class="table-wrap"><table class="table"><thead><tr>${cols.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr ${row?.id != null ? `data-row-id="${escape(row.id)}"` : ""} class="${target === "stockTable" && String(row.id) === String(state.stockHighlightProductId) ? "row-flash" : ""}">${cols.map(([, , getter]) => `<td>${getter(row) ?? ""}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+}
+
+function totalPagesFor(rows, pageSize) {
+  return Math.max(1, Math.ceil((rows?.length || 0) / Math.max(Number(pageSize || 1), 1)));
+}
+
+function clampPage(page, totalPages) {
+  return Math.min(Math.max(1, Number(page || 1)), Math.max(Number(totalPages || 1), 1));
+}
+
+function paginateRows(rows, page, pageSize) {
+  const size = Math.max(Number(pageSize || 1), 1);
+  const start = (clampPage(page, totalPagesFor(rows, size)) - 1) * size;
+  return (rows || []).slice(start, start + size);
+}
+
+function syncSimplePager(prefix, page, totalPages, total, pageSize = null) {
+  const info = document.querySelector(`#${prefix}PageInfo`);
+  const prev = document.querySelector(`#${prefix}PrevPage`);
+  const next = document.querySelector(`#${prefix}NextPage`);
+  const size = document.querySelector(`#${prefix}PageSize`);
+  if (info) info.textContent = `第 ${page} / ${totalPages} 页，共 ${total} 条`;
+  if (prev) prev.disabled = page <= 1;
+  if (next) next.disabled = page >= totalPages;
+  if (size && pageSize != null) size.value = String(pageSize);
+}
+
+function inlinePagerHtml(actionPrefix, page, totalPages, total) {
+  return `<div class="table-footer pager inline-pager">
+    <button data-page-action="${actionPrefix}-first" type="button" ${page <= 1 ? "disabled" : ""}>首页</button>
+    <button data-page-action="${actionPrefix}-prev" type="button" ${page <= 1 ? "disabled" : ""}>上一页</button>
+    <span>第 ${page} / ${totalPages} 页，共 ${total} 条</span>
+    <button data-page-action="${actionPrefix}-next" type="button" ${page >= totalPages ? "disabled" : ""}>下一页</button>
+    <button data-page-action="${actionPrefix}-last" type="button" ${page >= totalPages ? "disabled" : ""}>末页</button>
+  </div>`;
+}
+
+function erpPagerHtml(prefix, page, pageSize, total, options = [10, 20, 50, 100]) {
+  const totalPages = Math.max(1, Math.ceil(Number(total || 0) / Math.max(Number(pageSize || 1), 1)));
+  const current = clampPage(page, totalPages);
+  const windowStart = Math.floor((current - 1) / 5) * 5 + 1;
+  const windowEnd = Math.min(totalPages, windowStart + 4);
+  const pageButtons = [];
+  for (let index = windowStart; index <= windowEnd; index += 1) {
+    pageButtons.push(`<button class="pager-number ${index === current ? "active" : ""}" data-pager-prefix="${prefix}" data-pager-action="page" data-page="${index}" type="button">${index}</button>`);
+  }
+  const disabledPrev = current <= 1 ? "disabled" : "";
+  const disabledNext = current >= totalPages ? "disabled" : "";
+  return `<div class="table-footer pager erp-pager">
+    <div class="erp-pager-meta">
+      <span>共 ${escape(total)} 条记录</span>
+      <label><select data-pager-size="${prefix}">
+        ${options.map((value) => `<option value="${value}" ${Number(value) === Number(pageSize) ? "selected" : ""}>${value}条/页</option>`).join("")}
+      </select></label>
+      <span>第 ${current} / ${totalPages} 页</span>
+    </div>
+    <div class="erp-pager-actions">
+      <button data-pager-prefix="${prefix}" data-pager-action="first" type="button" ${disabledPrev}>|&lt;</button>
+      <button data-pager-prefix="${prefix}" data-pager-action="prev" type="button" ${disabledPrev}>&lt;</button>
+      <button data-pager-prefix="${prefix}" data-pager-action="jump-prev" type="button" ${windowStart <= 1 ? "disabled" : ""}>&lt;&lt;</button>
+      ${pageButtons.join("")}
+      <button data-pager-prefix="${prefix}" data-pager-action="jump-next" type="button" ${windowEnd >= totalPages ? "disabled" : ""}>&gt;&gt;</button>
+      <button data-pager-prefix="${prefix}" data-pager-action="next" type="button" ${disabledNext}>&gt;</button>
+      <button data-pager-prefix="${prefix}" data-pager-action="last" type="button" ${disabledNext}>&gt;|</button>
+    </div>
+  </div>`;
 }
 
 async function api(url, options = {}) {
@@ -2794,10 +9041,8 @@ async function api(url, options = {}) {
   return response.json();
 }
 
-// 鈹€鈹€鈹€ 娓叉煋宸ュ叿鍑芥暟 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-
 function image(src) {
-  return src ? `<img class="thumb" src="${escape(src)}" alt="">` : `<div class="thumb placeholder"></div>`;
+  return src ? `<img class="thumb previewable-image" src="${escape(src)}" data-preview-src="${escape(src)}" alt="">` : `<div class="thumb placeholder"></div>`;
 }
 
 function link(url) {
@@ -2823,10 +9068,25 @@ function skuList(value) {
   return `<div class="sku-list">${items.map((item) => `<span>${escape(item)}</span>`).join("")}</div>`;
 }
 
-function collapsedSkuList(value) {
+function collapsedSkuList(value, productId = null) {
   const items = String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
   if (!items.length) return `<span class="tag amber">未绑定</span>`;
-  return `<div class="sku-grid">${items.map((item) => `<span>${escape(item)}</span>`).join("")}</div>`;
+  const visible = items.slice(0, 3);
+  const more = items.length > visible.length ? `<span class="sku-ellipsis">...</span>` : "";
+  const edit = productId ? `<button class="mini-action blue stock-sku-detail-btn" type="button" data-product-id="${escape(productId || "")}">去编辑</button>` : "";
+  return `<div class="sku-grid compact-sku-grid">${visible.map((item) => `<span>${escape(item)}</span>`).join("")}${more}${edit}</div>`;
+}
+
+function stockProductNameCell(row) {
+  const origin = String(row.origin_skus || "").split("||").filter(Boolean).slice(0, 2).join("；");
+  return `<strong>${escape(row.name || "")}</strong>${origin ? `<small>来自 ${escape(origin)}</small>` : row.supplier_note ? `<small>${escape(row.supplier_note)}</small>` : ""}`;
+}
+
+function avgProfitCell(row) {
+  const avg = Number(row.avg_profit || 0);
+  const rate = Number(row.profit_rate || 0);
+  if (!avg && !rate) return tag("暂无有效订单", "amber");
+  return `<span class="money ${avg < 0 ? "loss" : ""}">${num(avg, 2)}</span><small>利润率 ${num(rate * 100, 2)}%</small>`;
 }
 
 function stockCell(row) {
@@ -2844,9 +9104,14 @@ function salesCell(row) {
 
 function stockProfitCell(row) {
   const profit = Number(row.estimated_profit_total || 0);
-  if (profit) return `<span class="money ${profit < 0 ? "loss" : ""}">${num(profit, 2)}</span><small>本地有效订单汇总</small>`;
+  const orders = Number(row.order_count || 0);
+  const qty = Number(row.total_sales_quantity || 0);
+  if (profit || orders || qty) {
+    const avg = qty ? profit / qty : 0;
+    return `<div class="profit-cell"><span class="money ${profit < 0 ? "loss" : ""}">${num(profit, 2)}</span><small>${escape(orders)} 单 / ${escape(qty)} 件 / 均利 ${num(avg, 2)}</small><button class="linklike stock-order-profit-detail-btn" type="button" data-product-id="${escape(row.id)}">查看明细</button></div>`;
+  }
   const quote = row.pricing?.air || row.pricing?.land;
-  if (quote) return profitCell(quote);
+  if (quote) return profitCell(quote, row, row.pricing?.air ? "air" : "land");
   return tag("暂无签收", "amber");
 }
 
@@ -2854,13 +9119,21 @@ function cancelCell(row) {
   const qty = Number(row.cancel_quantity || 0);
   const amount = Number(row.cancel_amount || 0);
   const orders = Number(row.cancel_order_count || 0);
+  const loss = Number(row.cancel_loss_total || 0);
   if (!qty && !amount && !orders) return tag("0", "green");
-  return `<strong class="danger-text">${escape(qty)} 件取消</strong><small>${escape(orders)} 单取消 / ${money(amount)}</small>`;
+  return `<div class="profit-cell"><strong class="danger-text">${money(loss)}</strong><small>${escape(qty)} 件 / ${escape(orders)} 单 / 取消额 ${money(amount)}</small><button class="linklike stock-cancel-detail-btn" type="button" data-product-id="${escape(row.id)}">查看明细</button></div>`;
 }
 
-function profitCell(quote) {
+function profitCell(quote, product, channelKey) {
   if (!quote) return tag("未匹配", "red");
-  return `<span class="money ${quote.profit < 0 ? "loss" : ""}">${num(quote.profit, 2)}</span><small>${escape(quote.channel || "")} ${escape(quote.days || "")}</small>`;
+  return `
+    <div class="profit-cell">
+      <span class="money ${quote.profit < 0 ? "loss" : ""}">${num(quote.profit, 2)}</span>
+      <small>净利率 ${num(quote.margin, 2)}%</small>
+      <small>${escape(quote.channel || "")} ${escape(quote.days || "")}</small>
+      ${product?.id ? `<button class="linklike profit-detail-btn" type="button" data-product-id="${escape(product.id)}" data-channel="${escape(channelKey || "")}">查看详情</button>` : ""}
+    </div>
+  `;
 }
 
 function marginCell(quote) {
@@ -2868,10 +9141,22 @@ function marginCell(quote) {
   return tag(`${num(quote.margin, 2)}%`, quote.margin < 0 ? "red" : "green");
 }
 
+function shippingMethodCell(row) {
+  const selected = methodName(row.shipping_method);
+  const recommended = methodName(row.recommended_shipping_method);
+  const same = row.shipping_method === row.recommended_shipping_method;
+  return `
+    <div class="shipping-method-cell">
+      ${tag(selected, same ? "green" : "amber")}
+      <small>${same ? "推荐一致" : `推荐：${escape(recommended || "-")}`}</small>
+    </div>
+  `;
+}
+
 function suggestedCell(rub, targetMarginPct) {
   if (!rub) return `<span class="tag amber">无数据</span>`;
-  const pct = targetMarginPct != null ? `<small>目标 ${num(targetMarginPct, 0)}%</small>` : "";
-  return `<strong class="money">${Math.round(rub)}</strong>${pct}`;
+  const pct = targetMarginPct != null ? targetMarginPct : 20;
+  return `<div class="suggested-cell"><strong class="money">${num(rub, 2)}</strong><small>最低利润率 ${num(pct, 0)}%</small></div>`;
 }
 
 function suggestedX2Cell(rub) {
@@ -2922,12 +9207,29 @@ function num(value, digits = 2) {
   return Number(value || 0).toFixed(digits);
 }
 
+function shippingMethodsText(value) {
+  const methods = String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+  return [...new Set(methods)].map((method) => methodName(method) || method).filter(Boolean).join("+");
+}
+
+function shippingFormulaText(method, row = {}) {
+  const name = methodName(method) || "未标明";
+  const weight = Number(row.package_weight_g || 0);
+  const size = [row.length_cm, row.width_cm, row.height_cm].map((item) => Number(item || 0)).filter(Boolean);
+  const spec = [weight ? `克重 ${num(weight, 0)}g` : "", size.length === 3 ? `尺寸 ${size.join("x")}cm` : ""].filter(Boolean).join(" / ");
+  return `${name}运费 = 按库存商品运输方式匹配物流规则计算${spec ? `（${spec}）` : ""}`;
+}
+
 function normalizeSearch(value) {
   return String(value || "").trim().toLowerCase();
 }
 
 function date(value) {
-  return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "";
+  return value ? new Date(value).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" }) : "";
+}
+
+function dateDay(value) {
+  return value ? new Date(value).toLocaleDateString("zh-CN", { timeZone: "Asia/Shanghai" }) : "";
 }
 
 function dateInputValue(value) {
@@ -2941,6 +9243,30 @@ function dateInputValue(value) {
 
 function todayInputValue() {
   return dateInputValue(new Date());
+}
+
+function currentMonthStartInputValue() {
+  const dateValue = new Date();
+  dateValue.setDate(1);
+  return dateInputValue(dateValue);
+}
+
+function orderDefaultDateFrom() {
+  return defaultDateFrom(30);
+}
+
+function normalizeDefaultDateFilters() {
+  const version = `20260506-order-month-date-defaults-${todayInputValue()}`;
+  if (localStorage.getItem("dateDefaultVersion") === version) return;
+  state.orderFilters.dateFrom = orderDefaultDateFrom();
+  state.orderFilters.dateTo = todayInputValue();
+  state.outboundFilters.dateFrom = currentMonthStartInputValue();
+  state.outboundFilters.dateTo = todayInputValue();
+  localStorage.setItem("orderFilter:dateFrom", state.orderFilters.dateFrom);
+  localStorage.setItem("orderFilter:dateTo", state.orderFilters.dateTo);
+  localStorage.setItem("outboundFilter:dateFrom", state.outboundFilters.dateFrom);
+  localStorage.setItem("outboundFilter:dateTo", state.outboundFilters.dateTo);
+  localStorage.setItem("dateDefaultVersion", version);
 }
 
 function defaultDateFrom(days) {
@@ -2964,15 +9290,15 @@ function sourceName(value) {
 }
 
 function statusName(value) {
-  return { pending: "待合并", merged: "已合并", done: "已完成", cancelled: "已取消" }[value] || value || "";
+  return { pending: "等待确认提交", submitted: "已提交待采购", merged: "已生成采购单", purchased: "已采购", done: "已完成", cancelled: "已取消" }[value] || value || "";
 }
 
 function procRequestStatusName(value) {
-  return { pending: "待合并", merged: "已合并", done: "已完成", cancelled: "已取消" }[value] || value || "";
+  return { pending: "等待确认提交", submitted: "已提交待采购", merged: "已生成采购单", purchased: "已采购", done: "已完成", cancelled: "已取消" }[value] || value || "";
 }
 
 function procRequestStatusColor(value) {
-  return { pending: "amber", merged: "blue", done: "green", cancelled: "red" }[value] || "";
+  return { pending: "amber", submitted: "blue", merged: "blue", purchased: "green", done: "green", cancelled: "red" }[value] || "";
 }
 
 function procUrgencyName(value) {
@@ -2986,6 +9312,22 @@ function purchaseOrderStatusName(value) {
     partial_inbound: "部分入库",
     inbound_done: "已入库",
     cancelled: "已取消"
+  }[value] || value || "";
+}
+
+function orderStatusName(value) {
+  return {
+    awaiting_packaging: "待打包",
+    awaiting_deliver: "待发货",
+    delivering: "配送中",
+    delivered: "已签收",
+    cancelled: "已取消",
+    cancellation: "取消中",
+    pending_stock: "待处理",
+    shipped: "已发货",
+    posting_transferring_to_delivery: "转交配送",
+    posting_in_carriage: "运输中",
+    posting_delivered: "已送达"
   }[value] || value || "";
 }
 
@@ -3015,7 +9357,13 @@ function inboundStatus(value) {
 }
 
 function outboundReason(value) {
-  return { order: "订单出库", unmapped_order: "待绑定出库", cancel_return: "取消回补", reject_loss: "拒收损失", return_loss: "退货损失" }[value] || value || "";
+  return {
+    order: "订单出库",
+    unmapped_order: "待绑定出库",
+    cancel_return: "取消回补",
+    reject_loss: "拒收损失",
+    return_loss: "退货损失"
+  }[value] || value || "";
 }
 
 function roleName(value) {
@@ -3031,7 +9379,7 @@ function escape(value) {
     .replaceAll("'", "&#039;");
 }
 
-// ── 登录 / 认证 ──────────────────────────────
+// 登录 / 认证
 let currentUser = null;
 let loginBackdrop = null;
 
@@ -3058,11 +9406,13 @@ function removeBackdrop() {
 
 function openLoginDialog() {
   const dialog = document.querySelector("#loginDialog");
-  document.querySelector("#loginError").style.display = "none";
+  const errorEl = document.querySelector("#loginError");
+  if (!dialog || !errorEl) return;
+  errorEl.style.display = "none";
   dialog.style.display = "";
   dialog.classList.add("visible");
   createBackdrop();
-  // 自动填入保存的用户名
+  // 自动填入保存过的用户名
   const savedUser = localStorage.getItem("loginUsername") || "";
   const savedUserBox = dialog.querySelector("#loginSavedUser");
   if (savedUserBox) {
@@ -3079,6 +9429,7 @@ function openLoginDialog() {
 
 function closeLoginDialog() {
   const dialog = document.querySelector("#loginDialog");
+  if (!dialog) return;
   dialog.classList.remove("visible");
   // 延迟隐藏，让动画完成
   setTimeout(() => { dialog.style.display = "none"; }, 200);
@@ -3106,7 +9457,7 @@ async function handleLoginSubmit(event) {
       console.error("[登录] 异常响应:", result);
       throw new Error("服务器响应异常，请检查控制台");
     }
-    // ── 登录成功：保存状态 ──
+    // 登录成功：保存状态
     state.authToken = result.token;
     localStorage.setItem("loginUsername", form.elements.username.value);
     if (document.querySelector("#loginRemember")?.checked) {
@@ -3119,7 +9470,7 @@ async function handleLoginSubmit(event) {
     state.currentUserId = String(result.user.id);
     updateAuthUI(result.user);
     closeLoginDialog();
-    // ── 后续数据加载（独立错误处理）──
+    // 后续数据加载，分开兜底
     try { fillSelects(); } catch (e) { console.warn("[登录后] fillSelects异常:", e); }
     try { await loadAll(); } catch (e) { console.warn("[登录后] loadAll异常:", e); }
     try { restoreCurrentView(); } catch (e) { console.warn("[登录后] restoreCurrentView异常:", e); }
@@ -3143,7 +9494,7 @@ function handleAuthRequired() {
   openLoginDialog();
 }
 
-// 更新认证相关UI（侧边栏用户名、按钮显示/隐藏、配置页账户信息）
+// 更新认证相关 UI
 function updateAuthUI(user) {
   const nameEl = document.querySelector("#currentUserName");
   const logoutBtn = document.querySelector("#logoutBtn");
@@ -3157,12 +9508,10 @@ function updateAuthUI(user) {
     if (logoutBtn) logoutBtn.style.display = "";
     if (changePwdBtn) changePwdBtn.style.display = "";
   }
-  // 填充配置页账户信息
   renderConfigAccountInfo(user);
 }
 
 async function checkAuthSession() {
-  // 启动时先确认登录态，未登录时不继续加载业务数据。
   if (!state.authToken) { openLoginDialog(); return false; }
   try {
     const user = await api("/api/auth/me");
@@ -3184,11 +9533,14 @@ async function doLogout() {
   location.reload();
 }
 
-// 修改密码
+// 淇敼瀵嗙爜
 function openChangePwdDialog() {
   const dialog = document.querySelector("#changePwdDialog");
-  document.querySelector("#changePwdError").style.display = "none";
-  document.querySelector("#changePwdForm").reset();
+  const errorEl = document.querySelector("#changePwdError");
+  const form = document.querySelector("#changePwdForm");
+  if (!dialog || !errorEl || !form) return;
+  errorEl.style.display = "none";
+  form.reset();
   dialog.style.display = "";
   dialog.classList.add("visible");
   createBackdrop();
@@ -3196,6 +9548,7 @@ function openChangePwdDialog() {
 
 function closeChangePwdDialog() {
   const dialog = document.querySelector("#changePwdDialog");
+  if (!dialog) return;
   dialog.classList.remove("visible");
   setTimeout(() => { dialog.style.display = "none"; }, 200);
   removeBackdrop();
@@ -3219,7 +9572,7 @@ async function handleChangePwdSubmit(event) {
       })
     });
     closeChangePwdDialog();
-    alert("密码修改成功");
+    await showAppAlert("密码修改成功");
   } catch (error) {
     errorEl.textContent = error.message;
     errorEl.style.display = "";
@@ -3231,17 +9584,17 @@ function bindAuthControls() {
   document.querySelector("#loginForm")?.addEventListener("submit", handleLoginSubmit);
   // 退出按钮
   document.querySelector("#logoutBtn")?.addEventListener("click", doLogout);
-  // 修改密码按钮（侧边栏 + 配置页）
+  // 修改密码按钮
   document.querySelector("#changePwdBtn")?.addEventListener("click", openChangePwdDialog);
   document.querySelector("#configChangePwdBtn")?.addEventListener("click", openChangePwdDialog);
-  // 显示/隐藏密码切换（登录弹窗）
+  // 登录弹窗显示/隐藏密码
   document.querySelector("#loginTogglePwd")?.addEventListener("click", () => {
     const pwdInput = document.querySelector("#loginPasswordInput");
     const btn = document.querySelector("#loginTogglePwd");
     if (pwdInput.type === "password") { pwdInput.type = "text"; btn.textContent = "隐藏"; }
     else { pwdInput.type = "password"; btn.textContent = "显示"; }
   });
-  // 显示/隐藏密码切换（修改密码弹窗 - 3个密码框共用委托）
+  // 修改密码弹窗显示/隐藏密码
   document.querySelectorAll(".pwd-toggle").forEach((btn) => {
     btn.addEventListener("click", () => {
       const targetId = btn.dataset.target;
@@ -3256,3 +9609,4 @@ function bindAuthControls() {
   document.querySelector("#changePwdCancelBtn")?.addEventListener("click", closeChangePwdDialog);
   document.querySelector("#changePwdForm")?.addEventListener("submit", handleChangePwdSubmit);
 }
+
