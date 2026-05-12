@@ -1,0 +1,20 @@
+{
+  "name": "ozon-profit-hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check:health": "node scripts/health-check.mjs",
+    "check:ui": "node scripts/check-ui-design-system.mjs",
+    "backup:data": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/backup-data.ps1",
+    "restore:data": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/restore-data.ps1"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "pdf-lib": "^1.17.1"
+  }
+}

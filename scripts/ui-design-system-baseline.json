@@ -1,0 +1,4 @@
+{
+  "maxWarnings": 384,
+  "note": "Legacy hardcoded styles existing before Design System migration. New UI work should not increase this count."
+}

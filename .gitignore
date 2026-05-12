@@ -1,0 +1,21 @@
+# Local runtime logs
+.workbuddy/
+node_modules/
+*.log
+
+# Local database files
+*.db
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+src/data/*.sqlite
+src/data/*.sqlite-shm
+src/data/*.sqlite-wal
+
+# Generated data backups
+backups/
+backups-test/
+.restore-temp-*/
+
+# Local environment secrets
+.env
