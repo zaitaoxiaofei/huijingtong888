@@ -1,5 +1,8 @@
 # Ozon Profit Hub — 代码审查报告
 
+> 说明：本文件是历史审查记录，里面提到的 `app.js`、行号、结构判断可能对应当时版本，不一定等于当前运行入口。
+> 当前实现请先核对代码和 `docs/PROJECT_GUIDE.md`。
+
 > 审查时间：2026-05-01  
 > 审查范围：全系统（server.js / services.js / celRates.js / profit.js / app.js / index.html / styles.css）
 

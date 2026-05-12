@@ -5,6 +5,7 @@ import { estimateItemProfit, actualItemProfit } from "./profit.js";
 import { calculateFinalMileBankFee } from "./pricingFormula.js";
 import { archiveOzonProducts, fetchOzonFinanceTransactions, fetchOzonPackageLabel, fetchOzonPostings, fetchOzonProducts, fetchOzonProductStocks, shipOzonPosting, updateOzonProductStocks } from "./ozonClient.js";
 
+// 低于该阈值的 Ozon 虚拟库存会被视为需要关注的风险信号。
 const FBS_VIRTUAL_STOCK_WARNING_THRESHOLD = 10;
 
 export function all(sql, params = {}) {
@@ -18,6 +19,7 @@ export function get(sql, params = {}) {
 }
 
 export function dashboard() {
+  // 仪表盘接口提供聚合视图，减少前端首屏拆分多个统计请求。
   const summary = get(`
     SELECT COUNT(DISTINCT o.id) AS order_count,
       COALESCE(SUM(oi.sale_price * oi.quantity), 0) AS revenue,
@@ -76,7 +78,7 @@ export function dashboard() {
 }
 
 export function profitSummary(dateFrom, dateTo) {
-  // 时间范围过滤条件（基于 o.ordered_at —— Ozon 平台下单时间，即实际出库时间）
+  // 利润按下单时间统计，体现经营发生口径，而不是单纯财务到账口径。
   const whereDate = dateFrom || dateTo
     ? `AND o.ordered_at >= '${dateFrom || "2000-01-01"}' AND o.ordered_at <= '${dateTo ? dateTo + "T23:59:59.999" : "9999-12-31"}'`
     : "";
@@ -102,7 +104,7 @@ export function profitSummary(dateFrom, dateTo) {
       WHERE 1=1 ${whereDate}
     )
   `;
-  // product_shop 子查询也需要时间范围
+  // 复用同一批 item_profit，保证店铺/SKU/产品三个维度统计口径一致。
   const productProfitBase = `
     WITH item_profit AS (
       SELECT oi.*, o.shop_id, o.id AS order_id, o.status AS order_status, o.tracking_stage,
@@ -235,6 +237,7 @@ export function profitSummary(dateFrom, dateTo) {
 }
 
 export function currentExchangeRate() {
+  // 汇率未维护时提供兜底值，避免计价和利润页面直接不可用。
   return get(`
     SELECT *
     FROM exchange_rates

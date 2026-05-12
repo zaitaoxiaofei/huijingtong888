@@ -166,6 +166,7 @@ function bindNavigation() {
 }
 
 function showView(view) {
+  // 这里只切换界面状态，不在这里重新请求数据，避免 tab 切换触发全量刷新。
   state.currentView = view;
   sessionStorage.setItem("currentView", view);
   document.body.classList.toggle("procurement-mode", view === "procurement");
@@ -574,6 +575,7 @@ function onSubmit(selector, url) {
     event.preventDefault();
     if (selector === "#productForm") syncListingReferencePrice();
     const body = Object.fromEntries(new FormData(event.target));
+    // 如果本次创建来源于在线商品，需要额外保留在线 SKU 的上下文关系。
     const finalUrl = selector === "#productForm" && body.online_product_id ? "/api/online-products/create-product" : url;
     await api(finalUrl, { method: "POST", body: JSON.stringify(body) });
     if (selector === "#procurementForm") state.selectedProcurementProductId = Number(body.product_id);
@@ -1007,6 +1009,7 @@ function setVal(form, name, value) {
 // 鈹€鈹€鈹€ 鏁版嵁鍔犺浇 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 async function loadAll() {
+  // 首屏并行加载全局主数据，保证多个模块读到的是同一批状态快照。
   const [systemInfo, exchangeRate, exchangeRates, products, hiddenProducts, people, shops, onlineProducts, inboundRecords, outboundRecords, procurementSummary, procurementRequests, purchaseOrders, pendingInbound, orders, profitSummary] = await Promise.all([
     api("/api/system/info"),
     api("/api/exchange-rate/current"),
@@ -2700,6 +2703,7 @@ async function syncOzon() {
   const status = document.querySelector("#orderSyncStatus") || document.querySelector("#syncStatus");
   if (status) status.textContent = "正在同步订单...";
   const body = {};
+  // 当前若已筛选店铺，则只同步该店铺，方便局部排查问题。
   if (state.orderFilters.shopId && state.orderFilters.shopId !== "all") body.shop_id = state.orderFilters.shopId;
   const result = await api("/api/sync/ozon", { method: "POST", body: JSON.stringify(body) });
   if (status) status.textContent = `同步完成：新增 ${result.inserted} 条明细`;
@@ -3158,6 +3162,7 @@ function updateAuthUI(user) {
 }
 
 async function checkAuthSession() {
+  // 启动时先确认登录态，未登录时不继续加载业务数据。
   if (!state.authToken) { openLoginDialog(); return false; }
   try {
     const user = await api("/api/auth/me");

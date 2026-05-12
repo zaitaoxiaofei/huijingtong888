@@ -1,5 +1,8 @@
 # Ozon Profit Hub 团队技术提升指导方案
 
+> 说明：本文件主要描述优化方向和目标架构，不代表当前实际实现。
+> 当前实际运行入口、前端主文件、接口行为和表结构，请以代码与 `docs/PROJECT_GUIDE.md` 为准。
+
 > 基于对现有代码库的全面审查，从架构、安全、代码质量、前端工程化四个维度给出可执行的改进路线
 
 ---
@@ -166,12 +169,12 @@ export function deleteProduct(id) { ... }
 不引入打包工具，用原生 ES Module 拆分：
 
 ```html
-<!-- index.html -->
+<!-- 这里是未来目标结构示例，不是当前实际入口 -->
 <script type="module" src="/app.js"></script>
 ```
 
 ```javascript
-// app.js — 入口，只做初始化和路由
+// app.js — 未来拆分后的目标入口，只做初始化和路由
 import { state } from "./state.js";
 import { bindNavigation, showView } from "./navigation.js";
 import { loadAll } from "./api.js";

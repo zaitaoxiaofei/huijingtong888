@@ -23,6 +23,8 @@ Status legend:
 | Inventory action placement | Done | Inventory actions in order rows belong in the inventory column, not the order operation column. | `去绑定库存`, `创建库存`, `删除绑定`, `创建采购请求` are inventory-column actions. |
 | Naming/branding | Done | Use `OZON ERP`; do not use `Ozone` for the product name. | Left nav brand updated. |
 | Data safety | Backlog | Add clearer backup/restore UX and safeguards. | Backup/restore buttons exist; still need progress, confirmation copy, and restore risk warning. |
+| Backend modularization | In progress | Continue lowering coupling in `server.js`, `services.js`, and the runtime frontend entry through phased module boundaries. | First backend entry split is done. Next step is moving real domain implementations out of the giant files. |
+| Future database evolution | Backlog | Keep SQLite stable now, then design a later migration path to MySQL with TypeORM after code modularization is mature. | This is a post-optimization phase, not the current refactor phase. |
 
 ## 2. Current Priority Queue
 
@@ -32,6 +34,8 @@ Status legend:
 4. Inventory/FBP/FBS stock warning improvements.
 5. Configurable pricing/logistics fee rules.
 6. Cross-page Design System migration.
+7. Backend decoupling and phased service/domain split.
+8. After structural refactor is stable, start MySQL migration design and TypeORM evaluation.
 
 ## 3. Exception Task Center
 

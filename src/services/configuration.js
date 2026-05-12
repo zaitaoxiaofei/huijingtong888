@@ -1,0 +1,23 @@
+export {
+  shops,
+  people,
+  createShop,
+  updateShop,
+  deleteShop,
+  createPerson,
+  updatePerson,
+  deletePerson,
+  hardDeletePerson,
+  stockWarehouseRules,
+  createStockWarehouseRule,
+  updateStockWarehouseRule,
+  deleteStockWarehouseRule,
+  suppliers,
+  createSupplier,
+  updateSupplier,
+  deleteSupplier,
+  logisticsRules,
+  createLogisticsRule,
+  updateLogisticsRule,
+  deleteLogisticsRule
+} from "../services.js";

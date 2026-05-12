@@ -11,6 +11,8 @@ db.exec("PRAGMA journal_mode = WAL;");
 db.exec("PRAGMA foreign_keys = ON;");
 
 export function initDb() {
+  // 数据模型按“真实产品 -> 在线 SKU -> 订单/库存/利润”展开：
+  // products 表示内部真实货品，online_products 表示 Ozon SKU，sku_mappings 负责绑定关系。
   db.exec(`
     CREATE TABLE IF NOT EXISTS shops (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,6 +167,7 @@ export function initDb() {
     );
 
     CREATE TABLE IF NOT EXISTS inventory_movements (
+      -- 库存使用流水账模式，当前库存由流水汇总得出，便于审计和重算。
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       product_id INTEGER NOT NULL REFERENCES products(id),
       shop_id INTEGER REFERENCES shops(id),
@@ -205,6 +208,7 @@ export function initDb() {
     );
 
     CREATE TABLE IF NOT EXISTS order_items (
+      -- 订单项冻结下单时的成本快照，避免产品成本变更后污染历史利润。
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
       sku_mapping_id INTEGER REFERENCES sku_mappings(id),
@@ -238,6 +242,7 @@ export function initDb() {
     );
 
     CREATE TABLE IF NOT EXISTS order_profit_items (
+      -- 利润拆解单独建表，便于后续补充广告费、售后损失、财务修正等维度。
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       order_item_id INTEGER NOT NULL UNIQUE REFERENCES order_items(id) ON DELETE CASCADE,
       sale_amount_cny REAL NOT NULL DEFAULT 0,
