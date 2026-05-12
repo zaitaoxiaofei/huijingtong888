@@ -33,7 +33,7 @@ Status legend:
 | Naming/branding | Done | Use `OZON ERP`; do not use `Ozone` for the product name. | Left nav brand updated. |
 | Data safety | Backlog | Add clearer backup/restore UX and safeguards. | Backup/restore buttons exist; still need progress, confirmation copy, and restore risk warning. |
 | Backend modularization | In progress | Continue lowering coupling in `server.js`, `services.js`, and the runtime frontend entry through phased module boundaries. | First backend entry split is done. Next step is moving real domain implementations out of the giant files. |
-| Frontend modularization | In progress | Break `public/app.repair.js` by large module boundaries first, then converge shared UI behaviors into reusable helpers and styles. | Priority is common pagination, table rendering, dialog/toast interaction, motion, and shared style tokens before fine-grained page refactors. |
+| Frontend modularization | In progress | Break `public/app.js` by large module boundaries first, then converge shared UI behaviors into reusable helpers and styles. | Priority is common pagination, table rendering, dialog/toast interaction, motion, and shared style tokens before fine-grained page refactors. |
 | Future database evolution | Backlog | Keep SQLite stable now, then design a later migration path to MySQL with TypeORM after code modularization is mature. | This is a post-optimization phase, not the current refactor phase. |
 
 ## 2. Current Priority Queue
@@ -148,7 +148,7 @@ Status legend:
 | Background sync | Backlog | Add backend scheduled tasks: orders, online products, stock warning. | User mentioned 30s/1min/10min future intervals. |
 | Stock auto sync | Backlog | Opening stock alert should sync Ozon stock; later support timed refresh. | First priority was display; automation later. |
 | Alert push | Backlog | Later push alerts to desktop popup, WeChat, or phone. | Requires notification channel design. |
-| Fixed LAN IP | Backlog | Make local service easier for 3 users to access. | User’s current address was `http://192.168.71.66:8787`; should document router/static DHCP or Windows IP reservation steps if needed. |
+| Remote access maintenance | Backlog | Keep current Cloudflare Tunnel + site access password deployment stable and easy to recover. | Prefer documenting domain, tunnel, startup, and password-rotation steps instead of old LAN-only access guidance. |
 
 ## 10. Data and Backup
 

@@ -8,10 +8,11 @@ Product and engineering progress is tracked in `docs/DEVELOPMENT_TRACKER.md`. UI
 - Main files:
   - `public/index.html`: page structure, dialogs, top-level views, navigation.
   - `public/ui.js`: vanilla reusable UI render helpers.
-  - `public/app.repair.js`: current runtime frontend entry, rendering, state, API calls, table/dialog interactions.
-  - `public/app.js`: historical frontend file, not the current runtime entry.
+  - `public/app.js`: current runtime frontend entry, rendering, state, API calls, table/dialog interactions.
+  - `public/supplier.js`: supplier-page interaction supplement loaded by `index.html`.
   - `public/styles.css`: legacy global styles and page-specific styles.
   - `public/design-system.css`: canonical UI tokens and shared component styles.
+  - `public/ui-shared.css`: current shared layout/control styles extracted from page code.
 - No React, no Tailwind, no component build pipeline. Reusable UI must be CSS classes plus small vanilla JS render helpers.
 
 Reality rule:

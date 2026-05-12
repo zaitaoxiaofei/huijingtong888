@@ -10,8 +10,9 @@
 
 说明：
 
-- `public/app.js` 现在是当前运行入口。
-- `public/app.repair.js` 只是修复阶段遗留文件，不再作为正式入口。
+- `public/index.html` 当前会加载 `styles.css`、`design-system.css`、`ui-shared.css`、`ui.js`、`app.js`、`supplier.js`。
+- `public/app.js` 是当前主运行入口。
+- `public/app.repair.js` 已移除，不再作为正式入口。
 - 文档以当前代码为准，不以旧方案稿、旧审查记录为准。
 
 ## 技术栈
@@ -102,6 +103,12 @@ npm run dev
 
 - [public/ui.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/ui.js)
   - 复用 UI 帮助函数
+
+- [public/supplier.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/supplier.js)
+  - 供应商页面相关交互
+
+- [public/ui-shared.css](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/ui-shared.css)
+  - 新抽离的共享 UI 样式
 
 - [public/design-system.css](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/design-system.css)
   - 设计系统令牌与组件样式

@@ -7,7 +7,9 @@
 ```text
 Browser
   -> public/index.html
+  -> public/ui.js + public/supplier.js
   -> public/app.js
+  -> public/styles.css + public/design-system.css + public/ui-shared.css
   -> src/server.js
   -> src/services.js / src/services/*
   -> SQLite
@@ -23,8 +25,10 @@ Browser
 - [public/index.html](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/index.html)
 - [public/app.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/app.js)
 - [public/ui.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/ui.js)
+- [public/supplier.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/supplier.js)
 - [public/styles.css](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/styles.css)
 - [public/design-system.css](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/design-system.css)
+- [public/ui-shared.css](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/ui-shared.css)
 
 职责：
 

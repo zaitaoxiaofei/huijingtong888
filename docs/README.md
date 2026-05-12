@@ -30,12 +30,15 @@
 - [data-backup-migration.md](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/docs/data-backup-migration.md)
   - 数据迁移与备份说明
 
-- [erp-blueprint.md](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/docs/erp-blueprint.md)
-  - 长期产品方向
+- [order-sync-strategy.md](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/docs/order-sync-strategy.md)
+  - 当前订单同步策略说明
+
+- [procurement-module-maintenance.md](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/docs/procurement-module-maintenance.md)
+  - 采购模块当前业务约束
 
 ## 使用原则
 
 - 代码与文档冲突时，以代码为准。
 - `README.md` 和 `PROJECT_GUIDE.md` 负责解释当前现状。
-- 规划稿不再当作当前实现说明使用。
+- 历史规划稿和设计草稿不再当作当前实现说明使用。
 - 如果真实入口、模块边界、表结构发生变化，要先更新这几份核心文档。

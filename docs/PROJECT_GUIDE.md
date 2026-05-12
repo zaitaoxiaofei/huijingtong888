@@ -36,9 +36,9 @@
 
 说明：
 
-- `public/index.html` 当前加载的是 `public/app.js`
+- `public/index.html` 当前加载 `ui.js`、`app.js`、`supplier.js`
 - `public/app.js` 是当前正式运行入口
-- `public/app.repair.js` 只是历史修复阶段遗留副本，不再作为正式入口
+- `public/app.repair.js` 已移除，不再作为正式入口
 
 ## 3. 当前后端结构
 
@@ -99,8 +99,14 @@
 - [public/ui.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/ui.js)
   - UI 帮助函数
 
+- [public/supplier.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/supplier.js)
+  - 供应商页交互补充逻辑
+
 - [public/styles.css](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/styles.css)
   - 历史页面样式
+
+- [public/ui-shared.css](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/ui-shared.css)
+  - 当前共享 UI 样式层
 
 - [public/design-system.css](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/public/design-system.css)
   - 设计系统令牌和通用组件样式

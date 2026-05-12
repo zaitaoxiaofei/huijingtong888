@@ -1,296 +1,146 @@
-# 本地远程访问部署方案
+# Ozon ERP Remote Access Deployment
 
-这份说明针对当前项目的实际结构，不是假设一个全新的云原生项目。
+这份文档只描述当前项目已经采用的远程访问形态，不再保留旧的局域网开放方案或 Cloudflare Access 方案。
 
-当前项目特点：
+## 1. 当前生产形态
 
-- 后端是原生 Node.js HTTP 服务：[src/server.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/server.js)
-- 数据库是本地 SQLite 文件：`data/ozon-profit-hub.sqlite`
-- 备份/恢复接口直接调用 PowerShell 脚本
-- 适合先跑在一台长期在线的 Windows 主机上，再通过隧道安全暴露出去
+- 运行主机：Windows
+- 应用进程：`node src/server.js`
+- 服务监听：`127.0.0.1:8787`
+- 外部域名：[https://erp.hjt888.xyz](https://erp.hjt888.xyz)
+- 对外暴露方式：Cloudflare Tunnel
+- 外层访问控制：应用内站点访问口令
+- 内层访问控制：系统账号登录
 
-## 推荐方案
+当前代码里的关键配置与实现：
 
-最低成本、最适合当前项目的方案：
+- 环境变量：[.env.example](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/.env.example)
+- 配置读取：[src/config.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/config.js)
+- 站点访问门禁：[src/server/access.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/server/access.js)
+- HTTP 服务入口：[src/server.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/server.js)
+- Tunnel 示例配置：[deploy/cloudflared/config.example.yml](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/deploy/cloudflared/config.example.yml)
 
-1. 继续在你自己的 Windows 电脑上运行这个项目
-2. 把项目服务监听到 `127.0.0.1:8787`
-3. 用 Cloudflare Tunnel 把 `https://erp.你的域名` 转发到本机 `http://127.0.0.1:8787`
-4. 用 Cloudflare Access 给这个网址再加一层登录/白名单
+## 2. 当前访问链路
 
-推荐原因：
+```text
+Browser
+  -> https://erp.hjt888.xyz
+  -> Cloudflare Tunnel
+  -> http://127.0.0.1:8787
+  -> Node server
+  -> site access password gate
+  -> system login
+  -> business pages and APIs
+```
 
-- 不需要公网 IP
-- 不需要路由器端口映射
-- 不需要私域网
-- 自带 HTTPS
-- 可以按邮箱、谷歌账号、微软账号控制谁能访问
-- 对现在这套 SQLite + Windows PowerShell 备份脚本最友好
+要点：
 
-## 为什么不建议一开始就上 Docker
+- Node 只监听本机，不直接暴露到局域网或公网。
+- 远程用户先经过 Tunnel，再进入应用自己的站点访问口令页。
+- 口令通过后，仍然需要正常系统账号登录。
+- 本机直接访问时，站点访问口令会按代码逻辑放行。
 
-Docker 不是不能做，但不是当前最低成本方案。
+## 3. 必要环境变量
 
-当前项目里，备份/恢复是这样实现的：
-
-- [src/server.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/server.js)
-  `runDataBackup()` 和 `startDataRestore()` 直接调用 `powershell.exe`
-- [scripts/backup-data.ps1](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/scripts/backup-data.ps1)
-- [scripts/restore-data.ps1](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/scripts/restore-data.ps1)
-
-如果你把应用塞进 Linux 容器：
-
-- 这些 PowerShell 备份/恢复逻辑会直接失效
-- SQLite 挂载卷和 `WAL` 文件也要额外验证
-- 本地维护复杂度会明显上升
-
-结论：
-
-- 先不要为了“看起来标准”而先上 Docker
-- 先把“本地长期运行 + 远程安全访问”跑通
-- 后面如果你要迁移到云主机，再做 Docker 化更合理
-
-## 推荐软件组合
-
-最小闭环：
-
-- Node.js 22+
-- Cloudflare Tunnel (`cloudflared`)
-- 你自己的域名
-- Cloudflare Zero Trust Access
-
-可选增强：
-
-- Windows 任务计划程序：开机自动启动 Node 服务
-- `cloudflared` Windows 服务：开机自动启动隧道
-- GitHub：只管代码版本，不参与运行链路
-
-## 阶段 1：先跑通
-
-目标：
-
-- 先让别人能通过域名访问
-- 先不追求“重启后自动恢复”
-
-### 1. 准备 `.env`
-
-在项目根目录创建 `.env`，建议内容：
+当前部署至少需要这些变量：
 
 ```env
 HOST=127.0.0.1
 PORT=8787
 DATABASE_PATH=./data/ozon-profit-hub.sqlite
 APP_BASE_URL=https://erp.hjt888.xyz
+SITE_ACCESS_PASSWORD=replace-with-a-long-random-password
+SITE_ACCESS_COOKIE_NAME=erp_site_access
+SITE_ACCESS_SESSION_HOURS=12
+APP_SESSION_TTL_HOURS=72
 ```
 
 说明：
 
-- `HOST=127.0.0.1`：只允许本机访问，避免局域网直接扫到
-- `APP_BASE_URL`：改成你的正式访问域名
+- `HOST=127.0.0.1`：限制 Node 只接受本机入口。
+- `APP_BASE_URL`：决定站点口令页回跳地址和安全 Cookie 行为。
+- `SITE_ACCESS_PASSWORD`：外层访问口令；为空时，站点门禁会关闭。
+- `SITE_ACCESS_COOKIE_NAME`、`SITE_ACCESS_SESSION_HOURS`：控制口令通过后的 Cookie 名称和时长。
 
-### 2. 本机启动项目
+## 4. 本机启动
+
+推荐启动方式：
+
+```powershell
+npm start
+```
+
+或：
 
 ```powershell
 node src/server.js
 ```
 
-看到类似日志即可：
+项目根目录的 [start.bat](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/start.bat) 也可以作为手工启动入口。
 
-```text
-ozon ERP running at https://erp.hjt888.xyz (bind 127.0.0.1:8787)
-```
+## 5. Cloudflare Tunnel
 
-### 3. 安装 Cloudflare Tunnel
-
-参考 Cloudflare 官方文档安装 `cloudflared`。
-
-### 4. 登录 Cloudflare
-
-```powershell
-cloudflared tunnel login
-```
-
-### 5. 创建 Tunnel
-
-```powershell
-cloudflared tunnel create ozon-erp
-```
-
-### 6. 配置域名路由
-
-先把你的域名托管到 Cloudflare，然后执行：
-
-```powershell
-cloudflared tunnel route dns ozon-erp erp.hjt888.xyz
-```
-
-### 7. 配置 `cloudflared`
-
-参考模板文件：
-
-- [deploy/cloudflared/config.example.yml](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/deploy/cloudflared/config.example.yml)
-
-你自己的配置核心就两行：
+当前目标是把域名转发到本机：
 
 - `hostname: erp.hjt888.xyz`
 - `service: http://127.0.0.1:8787`
 
-### 8. 运行 Tunnel
+示例配置见：
+
+- [deploy/cloudflared/config.example.yml](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/deploy/cloudflared/config.example.yml)
+
+如果需要重新运行隧道，核心命令仍然是：
 
 ```powershell
 cloudflared tunnel run ozon-erp
 ```
 
-这时外部用户就能访问：
+## 6. 当前安全边界
 
-```text
-https://erp.hjt888.xyz
-```
+当前方案的安全边界是：
 
-## 阶段 2：加访问控制
+1. Node 不开放公网监听，只绑定 `127.0.0.1`。
+2. Cloudflare Tunnel 只负责安全转发和 HTTPS。
+3. 应用内的 `SITE_ACCESS_PASSWORD` 提供外层口令门禁。
+4. 系统账号密码提供业务层登录控制。
+5. 登录和口令都带有限时会话。
 
-不要把这个系统裸露到公网。
+当前不依赖：
 
-建议在 Cloudflare Zero Trust 里增加一个 Access 应用，保护 `erp.hjt888.xyz`。
+- Cloudflare Access
+- 公网 IP
+- 路由器端口映射
+- 局域网固定 IP 对外开放
 
-建议策略：
+## 7. 运维建议
 
-- 只允许你自己的邮箱登录
-- 或只允许指定几个同事邮箱登录
-- 每 12 小时或 24 小时重新验证一次
+建议保留这些固定操作：
 
-这样实际会有两层保护：
+- 修改外网地址时，同时更新 `.env` 里的 `APP_BASE_URL`
+- 轮换口令时，同时更新 `SITE_ACCESS_PASSWORD`
+- 备份数据前确认服务状态，使用 `npm run backup:data`
+- 恢复数据前关闭当前服务，使用 `npm run restore:data`
+- 把 Tunnel 配置文件和 `.env` 分开保管，不要提交真实密钥
 
-1. Cloudflare Access 外层身份验证
-2. 你项目内部自己的账号密码
+## 8. 开机自启
 
-## 阶段 3：做成长期运行
+当前最小成本方案仍然是：
 
-目标：
+- Node 服务：Windows 任务计划程序或常驻方式启动
+- Tunnel：`cloudflared` 自身服务方式启动
 
-- 电脑重启后能自动恢复
-- 不需要你每次手动开两个终端
+先决条件：
 
-### 方案 A：最省事
+- 手工运行 `node src/server.js` 正常
+- 手工运行 `cloudflared tunnel run ozon-erp` 正常
 
-- Node 服务用 Windows 任务计划程序开机启动
-- Cloudflare Tunnel 用 `cloudflared service install` 注册成系统服务
+确认手工链路正常后，再做开机启动，避免把错误配置固化到系统服务里。
 
-推荐顺序：
+## 9. 不再采用的旧方案
 
-1. 先确认手工运行完全正常
-2. 再把 `cloudflared` 安装为服务
-3. 最后把 Node 项目做成开机任务
+以下内容不再作为当前主方案：
 
-### Node 开机任务建议
-
-动作可以写成：
-
-```text
-Program/script:
-node
-
-Add arguments:
-src/server.js
-
-Start in:
-C:\Users\DIZAI\OneDrive\文档\ozon-erp\ozon-system
-```
-
-如果你想让它完全无窗口长期运行，后面再考虑：
-
-- NSSM
-- WinSW
-
-但第一步没必要先引入。
-
-## 备份建议
-
-因为你现在是本地 SQLite：
-
-- `data/` 目录必须定期备份
-- `backups/` 目录建议保留到另一块盘或同步盘
-- 最好每天至少自动备份一次
-
-当前项目已经有：
-
-- [backup-data.bat](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/backup-data.bat)
-- [restore-data.bat](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/restore-data.bat)
-- [scripts/backup-data.ps1](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/scripts/backup-data.ps1)
-- [scripts/restore-data.ps1](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/scripts/restore-data.ps1)
-
-建议额外做一个 Windows 定时任务，每天执行：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\backup-data.ps1
-```
-
-## 什么时候再上 Docker
-
-只有在下面这些目标明确出现时，再做 Docker：
-
-- 你要迁移到云服务器
-- 你要让另一台机器无脑拉起同一套运行环境
-- 你愿意重构备份/恢复逻辑，不再依赖 Windows PowerShell
-
-届时再做这些事更合理：
-
-1. 先把备份/恢复改成跨平台 Node 脚本
-2. 再做 Dockerfile
-3. 再做 `docker-compose.yml`
-4. 最后让 Cloudflare Tunnel 走 sidecar 或宿主机模式
-
-## 备选方案
-
-### 备选 1：Tailscale Funnel
-
-优点：
-
-- 非常快
-- 不需要自己域名也能先试
-
-缺点：
-
-- 更适合临时分享或轻量使用
-- 官方文档当前仍标注为 beta
-- 域名体系是 `*.ts.net`，不如自有域名稳定
-
-适合：
-
-- 今天就想快速给 1 到 2 个人临时看
-
-不适合：
-
-- 当正式内部系统入口
-
-### 备选 2：直接路由器端口映射
-
-不建议。
-
-原因：
-
-- 暴露面太大
-- 没有 Zero Trust 外层保护
-- 家宽公网和动态 IP 都很折腾
-
-## 你现在最应该做的顺序
-
-1. 先把 `.env` 改成 `HOST=127.0.0.1`
-2. 准备一个 Cloudflare 托管的域名
-3. 安装 `cloudflared`
-4. 先手工跑通 `node src/server.js` + `cloudflared tunnel run`
-5. 在 Cloudflare Access 里加邮箱白名单
-6. 最后再做开机自启
-
-## 我建议的最终形态
-
-对你当前项目，最合理的第一版生产形态是：
-
-- Windows 主机长期在线
-- Node 直接跑宿主机
-- SQLite 继续保留本地
-- Cloudflare Tunnel 对外暴露
-- Cloudflare Access 控制访问
-- Windows 定时任务做备份
-
-这个形态比 “Docker + Tunnel + 域名” 更符合你当前项目的成熟度，也更容易维护。
+- 直接开放局域网访问
+- 用固定局域网 IP 让外部用户直连
+- 在当前这套 Windows + SQLite + PowerShell 备份链路上优先做 Docker 化
+- 把 Cloudflare Access 当作必需前置条件
