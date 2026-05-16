@@ -54,6 +54,15 @@ export function html(res, markup, status = 200) {
   res.end(markup);
 }
 
+export function text(res, content, status = 200, contentType = "text/plain; charset=utf-8") {
+  writeHead(res, status, {
+    "Content-Type": contentType,
+    "Content-Length": Buffer.byteLength(content),
+    "Cache-Control": "no-store"
+  });
+  res.end(content);
+}
+
 export function notFound(res) {
   json(res, { error: "Not found" }, 404);
 }

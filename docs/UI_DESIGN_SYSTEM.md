@@ -1,155 +1,71 @@
-﻿# ozon ERP UI Design System
+# Ozon ERP UI Design System
 
-Product and engineering progress is tracked in `docs/DEVELOPMENT_TRACKER.md`. UI rules in this document are mandatory for every item in that tracker.
+产品和开发进度统一记录在 `docs/DEVELOPMENT_TRACKER.md`。本文件定义当前 Vue 管理端必须遵守的 UI 规范。
 
-## 1. Current Frontend Stack
+## 1. 当前前端栈
 
-- App type: server-rendered static frontend with vanilla JavaScript.
-- Main files:
-  - `public/index.html`: page structure, dialogs, top-level views, navigation.
-  - `public/ui.js`: vanilla reusable UI render helpers.
-  - `public/app.js`: current runtime frontend entry, rendering, state, API calls, table/dialog interactions.
-  - `public/supplier.js`: supplier-page interaction supplement loaded by `index.html`.
-  - `public/styles.css`: legacy global styles and page-specific styles.
-  - `public/design-system.css`: canonical UI tokens and shared component styles.
-  - `public/ui-shared.css`: current shared layout/control styles extracted from page code.
-- No React, no Tailwind, no component build pipeline. Reusable UI must be CSS classes plus small vanilla JS render helpers.
+- 框架: Vue 3
+- 组件库: Element Plus
+- 构建工具: Vite
+- 宿主页: `public/admin.html`
+- 源码目录: `frontend/admin`
+- 运行时产物目录: `public/vue-apps`
 
-Reality rule:
+说明:
 
-- UI decisions in this document apply to future changes.
-- Runtime entry and current implementation details must still be verified against code before making changes.
+- 新系统不再维护旧版静态页面体系
+- 新页面必须直接落在 Vue 管理端
+- 公共布局、分页、表格、搜索区优先复用现有管理端组件和样式
 
-## 2. Current UI Inconsistencies
+## 2. 目标风格
 
-- Buttons: multiple ad hoc variants exist (`primary`, `danger`, `danger-primary`, `linklike`, `small`) with inconsistent height, radius, color, and loading behavior.
-- Forms: inputs, selects, textareas, filters, and dialog forms use mixed heights and spacing.
-- Layout: some pages scroll the whole page, some scroll table areas; top toolbars and table headers are not uniformly sticky.
-- Tables: table density, header background, sticky headers, cell padding, and wrap behavior vary by page.
-- Modals: dialogs share some structure but widths, body scroll, header behavior, and internal table behavior are inconsistent.
-- Colors: legacy random colors exist across pages, especially purple/blue accents, warning shades, and status labels.
-- Radius/shadows: cards and popups use inconsistent 4/6/8/10/12px radius and several unrelated shadows.
-- Typography: most text is 13px, but page-specific overrides and `!important` usage make hierarchy unclear.
+- ERP 优先: 紧凑、稳定、可连续操作
+- 统一优先: 相同类型页面使用相同的搜索区、表格区、分页区结构
+- 粘性优先: 搜索区和关键工具条置顶，不因滚动丢失
+- 数据优先: 不使用夸张总览卡、装饰型 hero、大面积无业务价值模块
 
-## 3. Design Principles
+## 3. 布局规则
 
-- ERP first: dense but readable, optimized for scanning and repeated operations.
-- Calm visual system: neutral surfaces, restrained blue primary action, semantic green/amber/red status.
-- No page-specific invention: new pages must reuse tokens and shared component classes.
-- Sticky by default: page toolbars, table headers, modal headers, and modal table headers should remain visible.
-- Data over decoration: no decorative gradients, large hero layouts, or unnecessary cards.
+- 页面主体使用卡片化分区，但避免层级过深
+- 搜索区固定在页面顶部，和内容区分离
+- 表格区单独滚动，不让分页被内容无限向下撑开
+- 分页固定在表格区底部，样式与订单中心分页保持一致
+- 弹窗头部固定，弹窗内容区滚动
 
-## 4. Tokens
+## 4. 采购模块规则
 
-Use CSS variables from `public/design-system.css`.
+- 采购中心页只承担“创建采购请求”和“请求列表管理”
+- 不再保留采购总览页
+- 采购页面顶部不展示采购汇总、待入库等概览块
+- 非必要的旧采购表单字段不在采购请求页渲染
+- 采购清单页面才承担汇总视角
 
-### Colors
+## 5. 组件优先级
 
-- Background: `--ds-bg`
-- Surface: `--ds-surface`, `--ds-surface-muted`
-- Text: `--ds-text`, `--ds-text-muted`, `--ds-text-subtle`
-- Border: `--ds-border`, `--ds-border-strong`
-- Primary: `--ds-primary`, `--ds-primary-hover`, `--ds-primary-soft`
-- Success: `--ds-success`, `--ds-success-soft`
-- Warning: `--ds-warning`, `--ds-warning-soft`
-- Danger: `--ds-danger`, `--ds-danger-soft`
+- 优先使用 Element Plus 原生组件
+- 公共分页统一使用 [frontend/admin/components/PageFooterPagination.vue](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/frontend/admin/components/PageFooterPagination.vue)
+- 共享布局和全局色板统一来自 [frontend/admin/styles/index.css](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/frontend/admin/styles/index.css)
+- 页面级结构优先对齐订单中心、库存、采购当前实现
 
-### Typography
+## 6. 视觉规则
 
-- Page title: `--ds-font-title`
-- Section title: `--ds-font-section`
-- Body/table: `--ds-font-body`
-- Helper/meta: `--ds-font-meta`
-- Line height: `--ds-line-normal`
+- 主色使用当前管理端蓝色体系
+- 背景保持浅色、低噪音
+- 卡片圆角、边框、阴影使用统一系统值
+- 不新增随机色、不引入旧页面残留配色
+- 危险和警告只标记在标签、文字、边框上，不整块高饱和铺底
 
-### Spacing
+## 7. 开发规则
 
-- Use `--ds-space-1` through `--ds-space-8`.
-- Common page gaps: `--ds-space-4`.
-- Table cell padding: `--ds-table-cell-y`, `--ds-table-cell-x`.
+- 新页面放在 `frontend/admin/views`
+- 共享组件放在 `frontend/admin/components`
+- 不新增旧静态页面入口
+- 不重新引入 iframe 挂载旧业务页
+- 如果已有新页面能承接业务，不再保留旧页面并行实现
 
-### Radius
+## 8. 验收重点
 
-- Small controls: `--ds-radius-sm`
-- Buttons/inputs/cards: `--ds-radius-md`
-- Modals: `--ds-radius-lg`
-
-### Shadow
-
-- Cards: `--ds-shadow-card`
-- Popovers/modals: `--ds-shadow-popover`, `--ds-shadow-modal`
-
-## 5. Component Classes
-
-Use these classes for new UI. Existing legacy classes are mapped where practical.
-
-- Button: `.ds-btn`, `.ds-btn-primary`, `.ds-btn-secondary`, `.ds-btn-danger`, `.ds-btn-ghost`, `.ds-btn-small`
-- Inputs: `.ds-input`, `.ds-select`, `.ds-textarea`
-- Card: `.ds-card`
-- Page: `.ds-page`, `.ds-page-header`, `.ds-toolbar`, `.ds-filter-bar`
-- Table: `.ds-table-wrap`, `.ds-table`
-- Modal: `.ds-modal`, `.ds-modal-header`, `.ds-modal-body`
-- Tabs: `.ds-tabs`, `.ds-tab`
-- Badge: `.ds-badge`, `.ds-badge-success`, `.ds-badge-warning`, `.ds-badge-danger`, `.ds-badge-info`
-- Empty state: `.ds-empty`
-
-## 6. Vanilla UI Helpers
-
-Use `window.OzonUI` from `public/ui.js` for new rendering code:
-
-- `OzonUI.button({ text, variant, size, attrs })`
-- `OzonUI.input({ label, name, value, placeholder, type })`
-- `OzonUI.select({ label, name, value, options })`
-- `OzonUI.textarea({ label, name, value, placeholder })`
-- `OzonUI.card({ title, actions, body })`
-- `OzonUI.table({ columns, rows, empty })`
-- `OzonUI.tabs({ tabs, active })`
-- `OzonUI.badge(text, tone)`
-- `OzonUI.emptyState(message, action)`
-- `OzonUI.pageHeader({ title, subtitle, actions })`
-- `OzonUI.modalShell({ id, title, body, actions })`
-
-Do not create a new ad hoc renderer for these primitives in page code.
-
-## 7. Sticky Rules
-
-- Page header/toolbars: sticky top, white/muted surface, bottom border.
-- Table header: sticky top inside its scroll container.
-- Modal header: sticky top inside dialog.
-- Modal table header: sticky below modal header if table is inside modal body.
-
-## 8. Development Rules
-
-- Do not write random colors, radii, or shadows in page code.
-- Do not create new button/input/card/table/modal styles directly inside page sections.
-- Use tokens first. If a new token is needed, add it to `design-system.css` and document it here.
-- New UI should use DS classes. Existing pages can be migrated gradually without changing business logic.
-- All tables must use a scroll container and sticky headers unless there is a specific reason not to.
-- Dialogs must have fixed headers and scrollable bodies.
-- Loading/disabled/focus/hover states must come from the shared classes.
-- Exception/workbench pages must use mutually exclusive business tabs, not overlapping filters. Search, page size, and pagination stay at the same toolbar/table-control level as tabs.
-- Warning and danger states must not paint entire rows with saturated red/orange. Keep row backgrounds neutral; use semantic color only on the specific badge, label, border, or value that explains the exception.
-- Inventory-related actions in order tables belong inside the inventory column. The operation column is reserved for order operations such as stocking, printing, cancelling, and recalculating order profit.
-
-## 9. Migration Plan
-
-1. Establish tokens and shared CSS primitives. Done in `public/design-system.css`.
-2. Map legacy base elements (`button`, `input`, `.panel`, `.table`, `.edit-dialog`) to DS behavior without changing markup.
-3. Convert high-traffic pages first: orders, stock/FBP, procurement, profit.
-4. Extract repeated JS render snippets into reusable vanilla helpers where safe.
-5. Keep business logic and API calls unchanged during UI migration.
-
-## 10. Codex Instruction
-
-When asking Codex to build or change UI, use:
-
-`按 ozon ERP Design System 处理这个页面。`
-
-This means:
-
-- Use `public/design-system.css` tokens.
-- Use `window.OzonUI` helpers for new primitives.
-- Keep sticky page headers/toolbars/table headers/modal headers.
-- Do not invent random colors, radii, shadows, or page-only button styles.
-- Do not change APIs or business logic unless explicitly requested.
-
+- 页面滚动时搜索区保持可见
+- 分页始终位于可预期的底部区域
+- 同类页面的筛选器、按钮、间距、分页交互一致
+- 旧版利润页、异常页、采购旧页不在新系统出现

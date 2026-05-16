@@ -118,8 +118,17 @@ export function getSiteAccessPassword() {
 }
 
 export function normalizeNextPath(input) {
-  const next = String(input || "/");
-  return next.startsWith("/") ? next : "/";
+  const next = String(input || "/").trim();
+  if (!next) return "/";
+  try {
+    const url = new URL(next, "http://local.invalid");
+    const path = url.pathname || "/";
+    const hash = url.hash || "";
+    const safePath = `${path}${hash}`.replace(/\/{2,}/g, "/");
+    return safePath.startsWith("/") ? safePath : "/";
+  } catch {
+    return next.startsWith("/") ? next.split("?")[0] : "/";
+  }
 }
 
 export function escapeHtml(value) {
@@ -133,8 +142,8 @@ export function escapeHtml(value) {
 
 export function renderSiteAccessPage(errorMessage = "", nextPath = "/") {
   const message = errorMessage
-    ? `<p class="access-error">${escapeHtml(errorMessage)}</p>`
-    : `<p class="access-hint">请输入内部访问口令后再进入系统。</p>`;
+    ? `<div class="access-banner access-error">${escapeHtml(errorMessage)}</div>`
+    : `<div class="access-banner access-hint">请输入内部访问口令后继续进入系统。</div>`;
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -143,33 +152,40 @@ export function renderSiteAccessPage(errorMessage = "", nextPath = "/") {
   <title>内部访问验证</title>
   <style>
     :root { color-scheme: light; }
-    body { margin: 0; font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: linear-gradient(135deg, #f3f6fb 0%, #eef7f2 100%); color: #102038; }
+    body { margin: 0; font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background:
+      radial-gradient(circle at top left, rgba(37,99,235,.18), transparent 30%),
+      radial-gradient(circle at bottom right, rgba(15,23,42,.12), transparent 24%),
+      linear-gradient(180deg, #f6f9fd 0%, #edf2f8 100%);
+      color: #102038; }
     .wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
-    .card { width: min(420px, 100%); background: #fff; border: 1px solid #d6dfeb; border-radius: 18px; box-shadow: 0 24px 60px rgba(16, 32, 56, 0.12); padding: 28px; }
-    h1 { margin: 0 0 12px; font-size: 28px; }
-    p { margin: 0 0 16px; line-height: 1.6; color: #4a5a72; }
+    .card { width: min(480px, 100%); background: rgba(255,255,255,.96); border: 1px solid #d6dfeb; border-radius: 20px; box-shadow: 0 28px 70px rgba(16, 32, 56, 0.12); padding: 32px; backdrop-filter: blur(10px); }
+    .brand { display:flex; align-items:center; gap:14px; margin-bottom: 18px; }
+    .badge { width:52px; height:52px; border-radius:16px; display:grid; place-items:center; background:linear-gradient(135deg,#0f172a,#2563eb); color:#fff; font-weight:800; font-size:20px; }
+    h1 { margin: 0; font-size: 26px; }
+    p { margin: 0; line-height: 1.6; color: #4a5a72; }
     label { display: block; margin-bottom: 8px; font-weight: 600; color: #22324a; }
-    input { width: 100%; box-sizing: border-box; border: 1px solid #bfd0e2; border-radius: 12px; padding: 14px 16px; font-size: 16px; }
+    input { width: 100%; box-sizing: border-box; border: 1px solid #bfd0e2; border-radius: 12px; padding: 14px 16px; font-size: 16px; background:#fff; }
     input:focus { outline: none; border-color: #2877ff; box-shadow: 0 0 0 4px rgba(40,119,255,.12); }
-    button { width: 100%; margin-top: 16px; border: 0; border-radius: 12px; background: #0d6efd; color: #fff; font-size: 16px; font-weight: 700; padding: 14px 18px; cursor: pointer; }
-    button:hover { background: #0b5ed7; }
-    .access-error { color: #b42318; background: #fff1f0; border: 1px solid #f5c2c0; padding: 12px 14px; border-radius: 12px; }
+    button { width: 100%; margin-top: 16px; border: 0; border-radius: 12px; background: linear-gradient(135deg, #0d6efd, #2563eb); color: #fff; font-size: 16px; font-weight: 700; padding: 14px 18px; cursor: pointer; }
+    button:hover { filter: brightness(1.02); }
+    .access-banner { margin: 0 0 16px; padding: 12px 14px; border-radius: 12px; line-height: 1.5; }
+    .access-error { color: #b42318; background: #fff1f0; border: 1px solid #f5c2c0; }
+    .access-hint { color: #48607d; background: #eef5ff; border: 1px solid #dbe8ff; }
     .access-meta { margin-top: 14px; font-size: 13px; color: #70819a; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <form class="card" method="post" action="${SITE_ACCESS_LOGIN_PATH}">
-      <h1>内部访问验证</h1>
+      <div class="brand"><div class="badge">OZ</div><div><h1>内部访问验证</h1><p>先完成访问门禁，再进入 ERP 系统。</p></div></div>
       ${message}
       <label for="password">访问口令</label>
       <input id="password" name="password" type="password" autocomplete="current-password" required>
       <input type="hidden" name="next" value="${escapeHtml(nextPath)}">
       <button type="submit">进入系统</button>
-      <p class="access-meta">通过验证后，仍然需要使用系统账号密码登录。</p>
+      <p class="access-meta">通过后仍需使用系统账号登录。</p>
     </form>
   </div>
 </body>
 </html>`;
 }
-

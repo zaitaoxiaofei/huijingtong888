@@ -33,7 +33,10 @@ const endpoints = [
   ["/api/procurement/requests", "procurement_requests"],
   ["/api/procurement/purchase-orders", "purchase_orders"],
   ["/api/orders?paged=1&page=1&pageSize=10&status=all&shopId=all&dateFrom=&dateTo=&searchType=order&searchQuery=&markFilter=all&printFilter=all&printView=all&sortMode=ordered", "orders_paged"],
-  ["/api/profit-summary?from=2026-05-01&to=2026-05-31", "profit_summary"]
+  ["/api/profit-summary?from=2026-05-01&to=2026-05-31", "profit_summary"],
+  ["/api/profit-dashboard", "profit_dashboard"],
+  ["/api/profit-ranking?dimension=sku&page=1&pageSize=10", "profit_ranking_sku"],
+  ["/api/profit-ranking?dimension=shop&page=1&pageSize=10", "profit_ranking_shop"]
 ];
 
 function summarizePayload(payload) {
@@ -45,6 +48,22 @@ function summarizePayload(payload) {
       kind: "profit_summary",
       order_count: Number(payload.summary.order_count || 0),
       revenue: Number(payload.summary.revenue || 0)
+    };
+  }
+  if (payload.ranges && Array.isArray(payload.dailyTrend14)) {
+    return {
+      kind: "profit_dashboard",
+      today_orders: Number(payload.ranges?.today?.summary?.order_count || 0),
+      month_revenue: Number(payload.ranges?.currentMonth?.summary?.revenue || 0),
+      daily_trend_rows: payload.dailyTrend14.length
+    };
+  }
+  if (typeof payload.dimension === "string" && Array.isArray(payload.rows)) {
+    return {
+      kind: "profit_ranking",
+      dimension: payload.dimension,
+      rows: payload.rows.length,
+      total: Number(payload.total || 0)
     };
   }
   if (Array.isArray(payload.rows) && payload.meta) return { kind: "rows_meta", rows: payload.rows.length };

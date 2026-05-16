@@ -1,0 +1,149 @@
+.vue-config-tabs-card,
+.vue-config-table-card,
+.vue-config-account-card,
+.vue-config-profit-card,
+.vue-config-profit-finance,
+.vue-config-profit-review,
+.vue-config-logistics-grid .ds-card {
+  border: 1px solid var(--ds-border);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: none;
+}
+
+.vue-config-tabs-card {
+  padding: 12px 14px;
+}
+
+.vue-config-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.vue-config-tab {
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid var(--ds-border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ds-text);
+  font: inherit;
+  font-weight: 600;
+}
+
+.vue-config-tab.active {
+  border-color: #3c6dd8;
+  background: #eef4ff;
+  color: #1f4fbf;
+}
+
+.vue-config-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.vue-config-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.vue-config-table {
+  min-width: 760px;
+}
+
+.vue-config-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.vue-config-empty {
+  padding: 24px;
+}
+
+.vue-config-account-body {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.vue-config-cell-meta {
+  margin-top: 4px;
+  color: var(--ds-text-subtle);
+  font-size: 12px;
+}
+
+.vue-config-formula-grid,
+.vue-config-profit-grid,
+.vue-config-logistics-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.vue-config-formula-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.vue-config-profit-cards,
+.vue-config-profit-steps {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.vue-config-logistics-forms {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.vue-config-logistics-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.vue-config-logistics-fields .full {
+  grid-column: 1 / -1;
+}
+
+.vue-config-tester-result {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--ds-border);
+  border-radius: 8px;
+  background: #f8fafc;
+  line-height: 1.7;
+}
+
+.vue-config-review-order {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.vue-config-review-order img {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--ds-border);
+}
+
+@media (max-width: 960px) {
+  .vue-config-account-body {
+    grid-template-columns: 1fr;
+  }
+
+  .vue-config-formula-fields,
+  .vue-config-profit-cards,
+  .vue-config-profit-steps,
+  .vue-config-logistics-forms,
+  .vue-config-logistics-fields {
+    grid-template-columns: 1fr;
+  }
+}

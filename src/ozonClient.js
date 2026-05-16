@@ -72,6 +72,23 @@ export async function fetchOzonProducts(shop) {
   return products;
 }
 
+export async function fetchOzonProductsByIds(shop, productIds = []) {
+  const ids = [...new Set((productIds || []).map((item) => Number(item)).filter(Boolean))];
+  if (!ids.length) return [];
+  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+    return demoOnlineProducts(shop).filter((item) => ids.includes(Number(item.ozon_product_id || 0)));
+  }
+
+  const products = [];
+  for (let index = 0; index < ids.length; index += 1000) {
+    const chunk = ids.slice(index, index + 1000);
+    const data = await ozonRequest(shop, "/v3/product/info/list", { product_id: chunk });
+    const items = data.result?.items || data.items || [];
+    for (const item of items) products.push(normalizeOzonProduct(item));
+  }
+  return products;
+}
+
 export async function fetchOzonProductStocks(shop, options = {}) {
   if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
     return demoStockRows(shop);
@@ -501,6 +518,7 @@ function productImages(item) {
 
 function normalizeOzonPosting(item) {
   const products = Array.isArray(item.products) ? item.products : [];
+  const financialProducts = Array.isArray(item.financial_data?.products) ? item.financial_data.products : [];
   const cancellation = item.cancellation || item.cancel_reason || {};
   return {
     posting_number: String(item.posting_number || ""),
@@ -521,14 +539,29 @@ function normalizeOzonPosting(item) {
     cancel_type: cancellation.cancellation_type || item.cancellation_type || "",
     cancelled_after_ship: cancellation.cancelled_after_ship ? 1 : 0,
     raw: item,
-    items: products.map((product) => ({
-      ozon_sku: String(product.sku || product.offer_id || ""),
-      offer_id: String(product.offer_id || ""),
-      name: product.name || "",
-      quantity: Number(product.quantity || 1),
-      sale_price: numberFromOzon(product.price || product.financial_data?.price || 0),
-      image_url: product.image_url || product.picture || ""
-    }))
+    items: products.map((product, index) => {
+      const financialProduct = financialProducts[index] || {};
+      const images = productImages(product);
+      const primaryImage = imageUrl(
+        product.image_url
+        || product.picture
+        || product.image
+        || product.main_image
+        || product.primary_image
+        || product.primary_image_url
+        || images[0]
+        || ""
+      );
+      return {
+        ozon_sku: String(product.sku || product.offer_id || ""),
+        ozon_product_id: String(product.product_id || product.id || financialProduct.product_id || financialProduct.id || ""),
+        offer_id: String(product.offer_id || ""),
+        name: product.name || "",
+        quantity: Number(product.quantity || 1),
+        sale_price: numberFromOzon(product.price || product.financial_data?.price || 0),
+        image_url: primaryImage
+      };
+    })
   };
 }
 

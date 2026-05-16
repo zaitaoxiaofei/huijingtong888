@@ -15,7 +15,11 @@ export {
   logisticsRules,
   createLogisticsRule,
   updateLogisticsRule,
-  deleteLogisticsRule
+  deleteLogisticsRule,
+  orderCancellationRules,
+  createOrderCancellationRule,
+  updateOrderCancellationRule,
+  deleteOrderCancellationRule
 } from "../services.js";
 
 export {

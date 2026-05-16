@@ -2,8 +2,17 @@
 import { PDFDocument } from "pdf-lib";
 import { calculateSelectionPricing } from "./celRates.js";
 import { estimateItemProfit, actualItemProfit } from "./profit.js";
+import { invalidateExceptionWorkbenchCache } from "./services/orders.js";
+import { describeCancellation, invalidateOrderCancellationRuleCache, testCancellationRule } from "./services/order-cancellation.js";
+import { buildOrderOutcomeSql, classifyOrderOutcome, estimateOutcomeReturnLoss, resolveOrderLossProfile } from "./services/order-outcome.js";
+import { configureHistoricalProfitReviewRuntime } from "./services/historical-profit-review-entry.js";
+import { configureOnlineProductsRuntime } from "./services/online-products-entry.js";
+import {
+  recalculateOrderProfitsForProduct as recalculateOrderProfitsForProductService,
+  syncOutboundForOpenOrders as syncOutboundForOpenOrdersService
+} from "./services/profit-maintenance.js";
 import { calculateFinalMileBankFee } from "./pricingFormula.js";
-import { archiveOzonProducts, fetchOzonFinanceTransactions, fetchOzonPackageLabel, fetchOzonPostings, fetchOzonProducts, fetchOzonProductStocks, shipOzonPosting, updateOzonProductStocks } from "./ozonClient.js";
+import { archiveOzonProducts, fetchOzonFinanceTransactions, fetchOzonPackageLabel, fetchOzonPostings, fetchOzonProducts, fetchOzonProductsByIds, fetchOzonProductStocks, shipOzonPosting, updateOzonProductStocks } from "./ozonClient.js";
 
 // 低于该阈值的 Ozon 虚拟库存会被视为需要关注的风险信号。
 const FBS_VIRTUAL_STOCK_WARNING_THRESHOLD = 10;
@@ -18,69 +27,11 @@ export function get(sql, params = {}) {
   return Array.isArray(params) ? stmt.get(...params) : stmt.get(params);
 }
 
-export function dashboard() {
-  // 仪表盘接口提供聚合视图，减少前端首屏拆分多个统计请求。
-  const summary = get(`
-    SELECT COUNT(DISTINCT o.id) AS order_count,
-      COALESCE(SUM(oi.sale_price * oi.quantity), 0) AS revenue,
-      COALESCE(SUM(oi.estimated_profit), 0) AS estimated_profit,
-      COALESCE(SUM(CASE WHEN oi.settlement_state = 'accrued' THEN oi.actual_profit ELSE 0 END), 0) AS accrued_profit,
-      COALESCE(SUM(CASE WHEN oi.settlement_state != 'accrued' THEN oi.estimated_profit ELSE 0 END), 0) AS pending_profit
-    FROM orders o
-    JOIN order_items oi ON oi.order_id = o.id
-  `);
-  return {
-    summary,
-    byShop: all(`
-      SELECT s.name, COUNT(DISTINCT o.id) AS orders,
-        COALESCE(SUM(oi.sale_price * oi.quantity), 0) AS revenue,
-        COALESCE(SUM(oi.estimated_profit), 0) AS estimated_profit,
-        COALESCE(SUM(CASE WHEN oi.settlement_state = 'accrued' THEN oi.actual_profit ELSE 0 END), 0) AS accrued_profit
-      FROM shops s
-      LEFT JOIN orders o ON o.shop_id = s.id
-      LEFT JOIN order_items oi ON oi.order_id = o.id
-      GROUP BY s.id
-    `),
-    byPerson: all(`
-      SELECT p.name, COUNT(oi.id) AS items,
-        COALESCE(SUM(oi.sale_price * oi.quantity), 0) AS revenue,
-        COALESCE(SUM(oi.estimated_profit), 0) AS estimated_profit
-      FROM people p
-      LEFT JOIN sku_mappings sm ON sm.person_id = p.id
-      LEFT JOIN order_items oi ON oi.sku_mapping_id = sm.id
-      GROUP BY p.id
-    `),
-    lowStock: all(`
-      SELECT p.id, p.code, p.name, p.alert_stock, COALESCE(SUM(im.quantity_delta), 0) AS stock
-      FROM products p
-      LEFT JOIN inventory_movements im ON im.product_id = p.id AND im.status = 'posted'
-      GROUP BY p.id
-      HAVING stock <= p.alert_stock
-    `),
-    exceptions: all(`
-      SELECT exception_type AS name, COUNT(*) AS count
-      FROM order_exceptions
-      WHERE status = 'open'
-      GROUP BY exception_type
-    `),
-    orderStages: all("SELECT tracking_stage AS name, COUNT(*) AS count FROM orders GROUP BY tracking_stage"),
-    stockByOwner: all(`
-      SELECT p.name AS product_name, pe.name AS owner_name, COALESCE(SUM(im.quantity_delta), 0) AS stock
-      FROM inventory_movements im
-      JOIN products p ON p.id = im.product_id
-      LEFT JOIN people pe ON pe.id = im.owner_person_id
-      WHERE im.status = 'posted'
-      GROUP BY p.id, im.owner_person_id
-      HAVING stock != 0
-      LIMIT 20
-    `)
-  };
-}
 
 export function profitSummary(dateFrom, dateTo) {
   // 利润按下单时间统计，体现经营发生口径，而不是单纯财务到账口径。
   const whereDate = dateFrom || dateTo
-    ? `AND o.ordered_at >= '${dateFrom || "2000-01-01"}' AND o.ordered_at <= '${dateTo ? dateTo + "T23:59:59.999" : "9999-12-31"}'`
+    ? `AND ${chinaDateSql("o.ordered_at")} >= '${dateFrom || "2000-01-01"}' AND ${chinaDateSql("o.ordered_at")} <= '${dateTo || "9999-12-31"}'`
     : "";
   const base = `
     WITH item_profit AS (
@@ -254,6 +205,25 @@ export function currentExchangeRate() {
   };
 }
 
+function exchangeRateForDate(dateText = "") {
+  const day = String(dateText || "").slice(0, 10);
+  return get(`
+    SELECT *
+    FROM exchange_rates
+    WHERE currency_from = 'CNY' AND currency_to = 'RUB'
+      AND (? = '' OR effective_date <= ?)
+    ORDER BY effective_date DESC, id DESC
+    LIMIT 1
+  `, [day, day]) || currentExchangeRate();
+}
+
+function rubToCny(value, rate) {
+  const amount = Number(value || 0);
+  const resolvedRate = Number(rate || 0);
+  if (!Number.isFinite(amount) || !Number.isFinite(resolvedRate) || resolvedRate <= 0) return 0;
+  return Math.round((amount / resolvedRate) * 100) / 100;
+}
+
 export function exchangeRates() {
   return all(`
     SELECT *
@@ -378,6 +348,71 @@ export function products() {
     ...(orderStats.get(Number(row.id)) || {}),
     pricing: calculateSelectionPricing(row)
   }));
+}
+
+export function selectionProducts() {
+  const rows = all(`
+    SELECT p.id, p.selection_id, p.code,
+      CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE 'P-' || strftime('%Y%m%d-%H%M%S', p.created_at) || '-' || printf('%03d', p.id) END AS inventory_id,
+      p.name, p.image_url, p.purchase_url, p.supplier_note, p.source_platform, p.supplier_id, p.shipping_method,
+      p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
+      p.package_weight_g, p.length_cm, p.width_cm, p.height_cm,
+      p.listing_price_rub, p.air_sale_price_rmb, p.exchange_rate,
+      p.target_margin, p.desired_profit_mode, p.desired_profit_value, p.return_rate,
+      p.owner_person_id, p.created_by_person_id, p.created_at, p.updated_at,
+      pe.name AS owner_name, creator.name AS creator_name
+    FROM products p
+    LEFT JOIN people pe ON pe.id = p.owner_person_id
+    LEFT JOIN people creator ON creator.id = p.created_by_person_id
+    WHERE p.active = 1
+    ORDER BY p.id DESC
+  `);
+  return rows.map((row) => ({
+    ...withProductImageEndpoint(row),
+    pricing: calculateSelectionPricing(row)
+  }));
+}
+
+export function selectionProduct(id) {
+  const row = get(`
+    SELECT p.id, p.selection_id, p.code,
+      CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE 'P-' || strftime('%Y%m%d-%H%M%S', p.created_at) || '-' || printf('%03d', p.id) END AS inventory_id,
+      p.name, p.image_url, p.purchase_url, p.supplier_note, p.source_platform, p.supplier_id, p.shipping_method,
+      p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
+      p.package_weight_g, p.length_cm, p.width_cm, p.height_cm,
+      p.listing_price_rub, p.air_sale_price_rmb, p.exchange_rate,
+      p.target_margin, p.desired_profit_mode, p.desired_profit_value, p.return_rate,
+      p.owner_person_id, p.created_by_person_id, p.created_at, p.updated_at,
+      pe.name AS owner_name, creator.name AS creator_name
+    FROM products p
+    LEFT JOIN people pe ON pe.id = p.owner_person_id
+    LEFT JOIN people creator ON creator.id = p.created_by_person_id
+    WHERE p.active = 1 AND p.id = ?
+  `, [Number(id)]);
+  return row ? { ...withProductImageEndpoint(row), pricing: calculateSelectionPricing(row) } : null;
+}
+
+export function productImage(id) {
+  const row = get("SELECT image_url FROM products WHERE id = ? AND active = 1", [Number(id)]);
+  const image = String(row?.image_url || "").trim();
+  if (/^\/api\/products\/\d+\/image$/i.test(image)) return "";
+  return image;
+}
+
+function withProductImageEndpoint(row) {
+  if (!row) return row;
+  const image = String(row.image_url || "");
+  if (!image.startsWith("data:image/")) return row;
+  return {
+    ...row,
+    image_url: `/api/products/${row.id}/image`
+  };
+}
+
+function normalizeProductImageUrl(value) {
+  const image = String(value || "").trim();
+  if (/^\/api\/products\/\d+\/image$/i.test(image)) return "";
+  return image;
 }
 
 function productOrderStats() {
@@ -624,9 +659,7 @@ function withComputedOrderDetail(row) {
   const internationalShipping = positiveNumber(row.international_shipping_cny) && quantity
     ? Number(row.international_shipping_cny) / quantity
     : (frozenInternationalShipping || positiveNumber(estimated.freight) || product.international_shipping);
-  const handlingFee = positiveNumber(row.packaging_cost_cny) && quantity
-    ? Number(row.packaging_cost_cny) / quantity
-    : (frozenHandlingFee || product.handling_fee);
+  const handlingFee = quantity ? packagingFeeForSaleAmount(salePrice * quantity) / quantity : 0;
   const commission = positiveNumber(row.commission_fee_cny) || positiveNumber(row.estimated_commission) || positiveNumber(estimated.commission);
   const finalMileBankFee = calculateFinalMileBankFee(salePrice) * quantity;
   const ozonServiceFee = positiveNumber(row.ozon_service_fee_cny) || positiveNumber(row.platform_fee_actual) || roundMoney(finalMileBankFee + positiveNumber(estimated.withdrawalFee));
@@ -671,6 +704,92 @@ function withComputedOrderDetail(row) {
 
 function roundMoney(value) {
   return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function profitItemIsLocked(row = {}) {
+  return Number(row.is_locked || 0) === 1 || String(row.profit_status || "") === "accrued";
+}
+
+function lockProfitItem(orderItemId, reason = "finance_accrued") {
+  db.prepare(`
+    UPDATE order_profit_items
+    SET is_locked = 1,
+      locked_at = COALESCE(locked_at, CURRENT_TIMESTAMP),
+      lock_reason = COALESCE(lock_reason, ?),
+      updated_at = CURRENT_TIMESTAMP
+    WHERE order_item_id = ?
+  `).run(reason, orderItemId);
+}
+
+function packagingFeeForSaleAmount(saleAmountCny) {
+  // Temporary logistics rule. Later this should read from system settings.
+  return roundMoney(Number(saleAmountCny || 0) > 50 ? 1 : 0.5);
+}
+
+function estimateOrderItemReturnLoss({ order, item, product, estimated, quantity, salePrice }) {
+  const orderContext = {
+    ...order,
+    ...item,
+    status: order?.status || item?.order_status,
+    tracking_stage: order?.tracking_stage || item?.tracking_stage,
+    logistics_status: order?.logistics_status || item?.logistics_status,
+    delivered_at: order?.delivered_at,
+    accrued_at: order?.accrued_at,
+    cancelled_after_ship: order?.cancelled_after_ship
+  };
+  const outcome = classifyOrderOutcome(orderContext);
+  const cancellation = describeCancellation({ ...orderContext, outcome_type: outcome });
+  const qty = Number(quantity || item?.quantity || 1);
+  const saleAmount = Number(salePrice || item?.sale_price || 0) * qty;
+  const packagingCost = packagingFeeForSaleAmount(saleAmount);
+  const collectingFee = roundMoney(Number(estimated?.paymentFee || 0));
+  const serviceFee = roundMoney(Number(estimated?.withdrawalFee || 0));
+  const commissionFee = roundMoney(Number(estimated?.commission || 0));
+  return estimateOutcomeReturnLoss({
+    outcome,
+    lossProfileCode: cancellation.loss_profile_code,
+    quantity: qty,
+    purchaseCostPerUnit: Number(product?.purchase_cost || item?.frozen_purchase_cost || 0),
+    domesticShippingPerUnit: Number(product?.domestic_shipping || item?.frozen_domestic_shipping || 0),
+    internationalShippingPerUnit: Number(estimated?.freight ?? product?.international_shipping ?? item?.frozen_international_shipping ?? 0),
+    packagingCostTotal: packagingCost,
+    commissionFeeTotal: commissionFee,
+    collectingFeeTotal: collectingFee,
+    finalMileFeeTotal: 0,
+    serviceFeeTotal: serviceFee,
+    returnRateLossTotal: Number(estimated?.expectedReturnLoss || 0)
+  });
+}
+
+function orderIsSignedOrDelivered(row = {}) {
+  const values = [
+    row.status,
+    row.order_status,
+    row.tracking_stage,
+    row.logistics_status,
+    row.settlement_state,
+    row.profit_status
+  ].map((value) => String(value || "").toLowerCase());
+  return Boolean(row.delivered_at || row.accrued_at) || values.some((value) => (
+    value === "accrued" ||
+    value === "delivered" ||
+    value === "posting_delivered" ||
+    value.includes("delivered") ||
+    value.includes("accrued")
+  ));
+}
+
+function ozonFinanceCategory(row = {}) {
+  const raw = String(row.service_name || row.operation_type_name || row.service_type || row.operation_type || "").trim();
+  const normalized = raw.toLowerCase();
+  if (normalized.includes("sale_commission") || raw === "Ozon 销售佣金") return "commission";
+  if (normalized.includes("marketplaceredistributionofacquiringoperation")) return "collecting_fee";
+  if (normalized.includes("return_delivery_charge") || normalized.includes("returnflowlogistic") || normalized.includes("returnnotdelivtocustomer")) return "aftersale_loss";
+  if (normalized.includes("delivery_charge")) return "platform_delivery";
+  if (raw === "Перевыставление услуг доставки" || raw.includes("достав")) return "platform_delivery";
+  if (raw.includes("международ") || raw.includes("транспортно-экспедиционных")) return "international_transport";
+  if (raw.includes("Частичная компенсация покупателю") || raw.includes("возврат") || raw.includes("недовлож")) return "aftersale_loss";
+  return "other";
 }
 
 function positiveNumber(value) {
@@ -719,7 +838,7 @@ export function onlineProducts() {
     SELECT
       op.id, op.shop_id, op.ozon_sku, op.offer_id, op.ozon_product_id, op.name, op.image_url, op.primary_image,
       op.sale_price, op.currency_code, op.marketing_price, op.old_price, op.status, op.visibility, op.archived,
-      op.is_discounted, op.images_json, op.barcodes_json, op.stocks_json, op.commissions_json, op.attributes_json,
+      op.is_discounted, op.images_json, op.barcodes_json, op.stocks_json, op.commissions_json, op.attributes_json, op.raw_json,
       CASE WHEN op.raw_json IS NOT NULL AND op.raw_json != '' THEN 1 ELSE 0 END AS has_raw_json,
       op.ozon_updated_at, op.product_id, op.synced_at, op.updated_at,
       s.name AS shop_name,
@@ -729,7 +848,14 @@ export function onlineProducts() {
     JOIN shops s ON s.id = op.shop_id
     LEFT JOIN products p ON p.id = op.product_id
     ORDER BY op.synced_at DESC, op.id DESC
-  `);
+  `).map((row) => {
+    const fallback = onlineImageFallback(row.primary_image, row.image_url, row.images_json, row.raw_json);
+    return {
+      ...row,
+      primary_image: fallback,
+      image_url: fallback
+    };
+  });
 }
 
 export function stockAlerts() {
@@ -778,7 +904,7 @@ export function stockAlerts() {
       SELECT o.shop_id, oi.ozon_sku, SUM(oi.quantity) AS qty
       FROM order_items oi
       JOIN orders o ON o.id = oi.order_id
-      WHERE substr(o.ordered_at, 1, 10) >= ?
+      WHERE ${chinaDateSql("o.ordered_at")} >= ?
         AND LOWER(o.status) NOT LIKE '%cancel%'
         AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%'
       GROUP BY o.shop_id, oi.ozon_sku
@@ -787,7 +913,7 @@ export function stockAlerts() {
       SELECT o.shop_id, oi.ozon_sku, SUM(oi.quantity) AS qty
       FROM order_items oi
       JOIN orders o ON o.id = oi.order_id
-      WHERE substr(o.ordered_at, 1, 10) >= ?
+      WHERE ${chinaDateSql("o.ordered_at")} >= ?
         AND LOWER(o.status) NOT LIKE '%cancel%'
         AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%'
       GROUP BY o.shop_id, oi.ozon_sku
@@ -796,7 +922,7 @@ export function stockAlerts() {
       SELECT o.shop_id, oi.ozon_sku, SUM(oi.quantity) AS qty
       FROM order_items oi
       JOIN orders o ON o.id = oi.order_id
-      WHERE substr(o.ordered_at, 1, 10) >= ?
+      WHERE ${chinaDateSql("o.ordered_at")} >= ?
         AND LOWER(o.status) NOT LIKE '%cancel%'
         AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%'
       GROUP BY o.shop_id, oi.ozon_sku
@@ -805,8 +931,8 @@ export function stockAlerts() {
       SELECT o.shop_id, oi.ozon_sku, SUM(oi.quantity) AS qty
       FROM order_items oi
       JOIN orders o ON o.id = oi.order_id
-      WHERE substr(o.ordered_at, 1, 10) >= ?
-        AND substr(o.ordered_at, 1, 10) < ?
+      WHERE ${chinaDateSql("o.ordered_at")} >= ?
+        AND ${chinaDateSql("o.ordered_at")} < ?
         AND LOWER(o.status) NOT LIKE '%cancel%'
         AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%'
       GROUP BY o.shop_id, oi.ozon_sku
@@ -1018,7 +1144,7 @@ export function mappings() {
     JOIN products p ON p.id = sm.product_id
     LEFT JOIN people pe ON pe.id = sm.person_id
     LEFT JOIN online_products op ON op.id = sm.online_product_id
-    ORDER BY sm.id DESC
+    ORDER BY p.id DESC, sm.shop_id ASC, sm.ozon_sku ASC, sm.id DESC
   `);
 }
 
@@ -1048,7 +1174,9 @@ export function updateSkuMapping(id, body) {
   } else {
     db.prepare("UPDATE order_items SET sku_mapping_id = NULL WHERE sku_mapping_id = ?").run(mappingId);
   }
-  syncOutboundForOpenOrders();
+  syncOutboundForOpenOrdersService(profitMaintenanceDeps());
+  refreshProfitAnalyticsSnapshots({});
+  invalidateExceptionWorkbenchCache();
   return { ok: true, id: mappingId };
 }
 
@@ -1075,6 +1203,7 @@ export function orders() {
       GROUP_CONCAT(oi.ozon_sku || ':' || oi.sale_price || ':' || oi.quantity, '||') AS sku_prices,
       GROUP_CONCAT(oi.ozon_sku || ':' || COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), ''), '||') AS sku_names,
       GROUP_CONCAT(oi.ozon_sku || ':' || COALESCE(NULLIF(oi.ozon_image_url, ''), NULLIF(op.primary_image, ''), NULLIF(op.image_url, ''), ''), '||') AS sku_images,
+      GROUP_CONCAT(DISTINCT CASE WHEN op.ozon_product_id IS NOT NULL AND op.ozon_product_id != '' THEN oi.ozon_sku || ':' || op.ozon_product_id END) AS sku_ozon_product_ids,
       GROUP_CONCAT(DISTINCT CASE WHEN p.id IS NOT NULL THEN oi.ozon_sku || ':' || p.id END) AS sku_product_ids,
       GROUP_CONCAT(DISTINCT CASE WHEN op.id IS NOT NULL THEN oi.ozon_sku || ':' || op.id END) AS sku_online_product_ids,
       GROUP_CONCAT(DISTINCT CASE WHEN sm.id IS NOT NULL THEN oi.ozon_sku || ':' || sm.id END) AS sku_mapping_ids,
@@ -1410,10 +1539,19 @@ function orderExceptionDeadlineInfo(row) {
   };
 }
 
+function detectExceptionShippingMethodKey(value) {
+  const text = String(value || "").toLowerCase().replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.includes("air_land") || text.includes("air land") || text.includes("陆+空") || text.includes("陆空")) return "air_land";
+  if (text.includes("陆运") || text.includes("economy") || text.includes("budget") || text.includes("邮政") || /(^|[^a-z])land([^a-z]|$)/.test(text)) return "land";
+  if (text.includes("standard") && (text.includes("extra small") || text.includes("fbp") || text.includes("pudo") || text.includes("courier"))) return "air_land";
+  if (text.includes("空运") || /(^|[^a-z])air([^a-z]|$)/.test(text)) return "air";
+  return "";
+}
+
 function exceptionShippingMethodKey(row) {
-  const text = `${row.product_shipping_methods || ""} ${row.delivery_method_name || ""} ${row.logistics_channel || ""} ${row.warehouse_name || ""}`.toLowerCase();
-  if (text.includes("land") || text.includes("陆运")) return "land";
-  return "air_land";
+  const key = detectExceptionShippingMethodKey(`${row.product_shipping_methods || ""} ${row.delivery_method_name || ""} ${row.logistics_channel || ""} ${row.warehouse_name || ""}`);
+  return key === "land" ? "land" : "air_land";
 }
 
 function exceptionTodayDateKey() {
@@ -1445,6 +1583,7 @@ function orderRowsByIds(ids) {
       GROUP_CONCAT(oi.ozon_sku || ':' || oi.sale_price || ':' || oi.quantity, '||') AS sku_prices,
       GROUP_CONCAT(oi.ozon_sku || ':' || COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), ''), '||') AS sku_names,
       GROUP_CONCAT(oi.ozon_sku || ':' || COALESCE(NULLIF(oi.ozon_image_url, ''), NULLIF(op.primary_image, ''), NULLIF(op.image_url, ''), ''), '||') AS sku_images,
+      GROUP_CONCAT(DISTINCT CASE WHEN op.ozon_product_id IS NOT NULL AND op.ozon_product_id != '' THEN oi.ozon_sku || ':' || op.ozon_product_id END) AS sku_ozon_product_ids,
       GROUP_CONCAT(DISTINCT CASE WHEN p.id IS NOT NULL THEN oi.ozon_sku || ':' || p.id END) AS sku_product_ids,
       GROUP_CONCAT(DISTINCT CASE WHEN op.id IS NOT NULL THEN oi.ozon_sku || ':' || op.id END) AS sku_online_product_ids,
       GROUP_CONCAT(DISTINCT CASE WHEN sm.id IS NOT NULL THEN oi.ozon_sku || ':' || sm.id END) AS sku_mapping_ids,
@@ -1482,7 +1621,14 @@ function orderRowsByIds(ids) {
     LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
     WHERE o.id IN (${cleanIds.map(() => "?").join(",")})
     GROUP BY o.id
-  `, cleanIds).map(enrichOrderLogistics);
+  `, cleanIds).map((row) => {
+    const enriched = enrichOrderLogistics(row);
+    return {
+      ...enriched,
+      workbenchState: orderWorkbenchState(enriched),
+      availableActions: orderAvailableActions(enriched)
+    };
+  });
   const order = new Map(cleanIds.map((id, index) => [String(id), index]));
   return rows.sort((a, b) => (order.get(String(a.id)) ?? 0) - (order.get(String(b.id)) ?? 0));
 }
@@ -1498,12 +1644,12 @@ function orderBaseSql(query = {}) {
   const from = normalizeSyncDate(query.dateFrom || query.date_from);
   const to = normalizeSyncDate(query.dateTo || query.date_to);
   if (from) {
-    where.push("o.ordered_at >= ?");
-    params.push(`${from}T00:00:00.000`);
+    where.push(`${chinaDateSql("o.ordered_at")} >= ?`);
+    params.push(from);
   }
   if (to) {
-    where.push("o.ordered_at <= ?");
-    params.push(`${to}T23:59:59.999`);
+    where.push(`${chinaDateSql("o.ordered_at")} <= ?`);
+    params.push(to);
   }
   addOrderSearchSql(where, params, query);
   return { where: where.join(" AND "), params };
@@ -1620,7 +1766,7 @@ function orderSqlSort(query) {
 function orderMatchesBaseQuery(row, query) {
   const shopId = String(query.shopId || query.shop_id || "all");
   if (shopId !== "all" && String(row.shop_id) !== shopId) return false;
-  const value = String(row.ordered_at || row.created_at || "").slice(0, 10);
+  const value = chinaDateKey(row.ordered_at || row.created_at || "");
   const from = String(query.dateFrom || query.date_from || "");
   const to = String(query.dateTo || query.date_to || "");
   if (from && (!value || value < from)) return false;
@@ -1722,6 +1868,37 @@ function logisticsModeKey(row) {
 function orderTimestampPagedValue(row) {
   const time = new Date(row.ordered_at || row.created_at || row.updated_at || "").getTime();
   return Number.isFinite(time) ? time : 0;
+}
+
+function orderWorkbenchState(row) {
+  const status = String(row.status || "").toLowerCase();
+  const stage = String(row.tracking_stage || "").toLowerCase();
+  const text = `${status} ${stage} ${String(row.logistics_status || "").toLowerCase()}`;
+  if (orderHasUnboundStockQuery(row)) return { key: "unbound", label: "待绑定库存", color: "amber" };
+  if (text.includes("cancel")) return { key: "cancelled", label: "已取消/退货", color: "red" };
+  if (text.includes("dispute") || text.includes("arbitration")) return { key: "dispute", label: "有争议", color: "amber" };
+  if (text.includes("delivered")) return { key: "delivered", label: "已签收", color: "green" };
+  if (["awaiting_registration", "acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_awaiting_registration", "posting_acceptance_in_progress"].some((value) => text.includes(value))) {
+    return { key: "awaiting_packaging", label: "待备货", color: "blue" };
+  }
+  if (["awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service"].some((value) => text.includes(value))) {
+    return { key: "awaiting_deliver", label: "待发货", color: "blue" };
+  }
+  if (["delivering", "transferring", "carriage", "pickup", "sorting", "customs", "shipped", "sent", "on_way", "posting_in_carriage", "posting_transferring", "发往", "已上网", "发走"].some((keyword) => text.includes(keyword))) {
+    return { key: "delivering", label: "运输中", color: "amber" };
+  }
+  return { key: "all", label: "全部订单", color: "slate" };
+}
+
+function orderAvailableActions(row) {
+  const state = orderWorkbenchState(row).key;
+  return {
+    print: ["awaiting_deliver", "delivering", "delivered"].includes(state) || Boolean(row.printed_at),
+    prepare: ["awaiting_packaging", "unbound"].includes(state) || Number(row.unbound_item_count || 0) > 0,
+    bind: ["unbound", "awaiting_packaging"].includes(state),
+    create: ["unbound", "awaiting_packaging"].includes(state),
+    profit: true
+  };
 }
 
 export function updateOrderMark(orderId, body = {}, userId = null) {
@@ -1841,7 +2018,8 @@ export async function shipOrders(body = {}, userId = null) {
   const ids = Array.isArray(body.order_ids) ? body.order_ids.map(Number).filter(Boolean) : [];
   if (!ids.length) throw new Error("请选择需要备货的订单");
   const ordersToShip = all(`
-    SELECT o.id, o.shop_id, o.posting_number, s.name AS shop_name, s.ozon_client_id, s.api_key_hint
+    SELECT o.id, o.shop_id, o.posting_number, o.status, o.tracking_stage,
+      s.name AS shop_name, s.ozon_client_id, s.api_key_hint
     FROM orders o
     JOIN shops s ON s.id = o.shop_id
     WHERE o.id IN (${ids.map(() => "?").join(",")})
@@ -1853,18 +2031,52 @@ export async function shipOrders(body = {}, userId = null) {
     if (statusText.includes("awaiting_deliver") || statusText.includes("delivering") || statusText.includes("delivered")) {
       throw new Error("这个订单可能已经备货过了，请刷新订单列表后再操作");
     }
+    const rawPosting = get(`
+      SELECT raw_json
+      FROM ozon_orders_raw
+      WHERE store_id = ? AND posting_number = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `, [order.shop_id, order.posting_number]);
+    const rawProductItems = shippingProductItemsFromRawPayload(rawPosting?.raw_json);
     const items = all(`
-      SELECT oi.ozon_sku, oi.quantity
+      SELECT oi.id, oi.ozon_sku, oi.quantity, oi.ozon_product_id AS order_product_id,
+        op.ozon_product_id AS online_product_id
       FROM order_items oi
+      LEFT JOIN sku_mappings sm ON (
+        sm.id = oi.sku_mapping_id
+        OR (sm.shop_id = ? AND sm.ozon_sku = oi.ozon_sku AND sm.active = 1)
+      )
+      LEFT JOIN online_products op ON (
+        op.id = sm.online_product_id
+        OR (op.shop_id = ? AND op.ozon_sku = oi.ozon_sku)
+      )
       WHERE oi.order_id = ?
-    `, [order.id]);
+    `, [order.shop_id, order.shop_id, order.id]).map((item, index) => ({
+      ...item,
+      product_id: resolveShippingProductId(item, index, rawProductItems)
+    }));
+    if (!items.length) throw new Error(`订单 ${order.posting_number} 没有可备货商品`);
+    const missingProductId = items.find((item) => !Number(item.product_id || 0));
+    if (missingProductId) {
+      throw new Error(`订单 ${order.posting_number} 的 SKU ${missingProductId.ozon_sku} 缺少 Ozon 商品 ID，无法提交备货`);
+    }
     const shop = {
       id: order.shop_id,
       name: order.shop_name,
       ozon_client_id: order.ozon_client_id,
       api_key_hint: order.api_key_hint
     };
-    await shipOzonPosting(shop, order.posting_number, items);
+    try {
+      await shipOzonPosting(shop, order.posting_number, items);
+    } catch (error) {
+      const rawMessage = String(error?.message || error || "");
+      if (rawMessage.includes("UNKNOWN_PRODUCT_DEFINED")) {
+        const submittedProducts = items.map((item) => `${item.ozon_sku}:${item.product_id}`).join(", ");
+        throw new Error(`订单 ${order.posting_number} 备货失败：Ozon 未识别这单里的商品 ID。当前提交的是 ${submittedProducts}，请先同步在线商品并检查 SKU 绑定是否对应当前店铺的正确 Ozon 商品。原始错误：${rawMessage}`);
+      }
+      throw error;
+    }
     db.prepare(`
       UPDATE orders
       SET status = 'awaiting_deliver',
@@ -1875,6 +2087,39 @@ export async function shipOrders(body = {}, userId = null) {
     shipped.push(order.id);
   }
   return { ok: true, count: shipped.length, order_ids: shipped };
+}
+
+function shippingProductItemsFromRawPayload(rawJson) {
+  const payload = parseJson(rawJson) || {};
+  const payloadItems = Array.isArray(payload.items) ? payload.items : [];
+  const raw = payload.raw || payload;
+  const rawProducts = Array.isArray(raw.products) ? raw.products : [];
+  const financialProducts = Array.isArray(raw.financial_data?.products) ? raw.financial_data.products : [];
+  const items = rawProducts.map((product, index) => {
+    const financialProduct = financialProducts[index] || {};
+    return {
+      ozon_sku: String(product.sku || product.offer_id || ""),
+      offer_id: String(product.offer_id || ""),
+      ozon_product_id: String(product.product_id || product.id || financialProduct.product_id || financialProduct.id || "")
+    };
+  });
+  if (items.some((item) => Number(item.ozon_product_id || 0))) return items;
+  return payloadItems.map((item) => ({
+    ozon_sku: String(item.ozon_sku || item.sku || item.offer_id || ""),
+    offer_id: String(item.offer_id || ""),
+    ozon_product_id: String(item.ozon_product_id || item.product_id || item.id || "")
+  }));
+}
+
+function resolveShippingProductId(item, index, rawItems = []) {
+  const orderProductId = Number(item.order_product_id || 0);
+  if (orderProductId > 0) return orderProductId;
+  const rawBySku = rawItems.find((rawItem) => String(rawItem.ozon_sku || "") === String(item.ozon_sku || ""));
+  const rawByIndex = rawItems[index];
+  const rawProductId = Number(rawBySku?.ozon_product_id || rawByIndex?.ozon_product_id || 0);
+  if (rawProductId > 0) return rawProductId;
+  const onlineProductId = Number(item.online_product_id || 0);
+  return onlineProductId > 0 ? onlineProductId : 0;
 }
 
 export function saveOrderQualityRules(body = {}) {
@@ -1933,6 +2178,8 @@ export function orderDetail(id) {
       p.width_cm,
       p.height_cm,
       p.return_rate,
+      op.id AS online_product_id,
+      op.ozon_product_id,
       opi.sale_amount_cny,
       opi.purchase_cost_cny,
       opi.domestic_shipping_cny,
@@ -1950,19 +2197,24 @@ export function orderDetail(id) {
     LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id
     LEFT JOIN products p ON p.id = sm.product_id
     LEFT JOIN people pe ON pe.id = sm.person_id
+    LEFT JOIN online_products op ON op.shop_id = order.shop_id AND op.ozon_sku = oi.ozon_sku
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
     WHERE oi.order_id = ?
   `, [id]);
   const finance = all(`
     SELECT service_type, service_name,
       COALESCE(SUM(amount), 0) AS amount,
+      COALESCE(SUM(amount_cny), 0) AS amount_cny,
       COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS fee_amount,
+      COALESCE(SUM(CASE WHEN amount_cny < 0 THEN -amount_cny ELSE 0 END), 0) AS fee_amount_cny,
+      COALESCE(MAX(exchange_rate), 0) AS exchange_rate,
+      COALESCE(MAX(currency_code), 'RUB') AS currency_code,
       COUNT(*) AS rows,
       MAX(operation_date) AS operation_date
     FROM ozon_finance_items
     WHERE shop_id = ? AND posting_number = ?
     GROUP BY service_type, service_name
-    ORDER BY fee_amount DESC, ABS(amount) DESC
+    ORDER BY fee_amount_cny DESC, ABS(amount_cny) DESC, fee_amount DESC, ABS(amount) DESC
   `, [order.shop_id, order.posting_number]);
   return { order, items, finance };
 }
@@ -2242,7 +2494,7 @@ export function createProduct(body) {
     selectionId,
     code,
     name,
-    body.image_url || "",
+    normalizeProductImageUrl(body.image_url),
     body.purchase_url || "",
     body.supplier_note || "",
     body.source_platform || "1688",
@@ -2325,7 +2577,7 @@ export function updateProduct(id, body) {
     WHERE id = ?
   `).run(
     body.name,
-    body.image_url || "",
+    normalizeProductImageUrl(body.image_url),
     body.purchase_url || "",
     body.supplier_note || "",
     body.source_platform || "1688",
@@ -2351,6 +2603,8 @@ export function updateProduct(id, body) {
     body.product_type || "main",
     productId
   );
+  recalculateOrderProfitsForProduct(productId);
+  invalidateExceptionWorkbenchCache();
 }
 
 export function deleteProduct(id) {
@@ -2468,7 +2722,7 @@ export async function performOnlineProductAction(body = {}, userId = null) {
   const onlineProductId = Number(body.online_product_id || body.id || 0);
   const action = String(body.action || "").trim();
   if (!onlineProductId) throw new Error("缺少在线商品 ID");
-  if (!["zero_stock", "archive", "zero_and_archive"].includes(action)) throw new Error("在线商品操作类型不正确");
+  if (!["archive", "zero_stock", "zero_then_archive"].includes(action)) throw new Error("当前动作不受支持");
   const online = get("SELECT * FROM online_products WHERE id = ?", [onlineProductId]);
   if (!online) throw new Error("在线商品不存在");
   const shop = get("SELECT * FROM shops WHERE id = ?", [online.shop_id]);
@@ -2476,18 +2730,17 @@ export async function performOnlineProductAction(body = {}, userId = null) {
   const actionId = recordOnlineProductAction({ online, action, status: "pending", request: body, userId });
   const result = { ok: true, action, online_product_id: onlineProductId, steps: [] };
   try {
-    if (action === "zero_stock" || action === "zero_and_archive") {
-      const zeroPayload = [{
-        offer_id: online.offer_id || "",
-        product_id: Number(online.ozon_product_id || 0),
-        stock: 0,
-        warehouse_id: Number(body.warehouse_id || 0)
-      }];
-      const zeroResult = await updateOzonProductStocks(shop, zeroPayload);
-      db.prepare("UPDATE online_products SET status = 'zero_stock', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(onlineProductId);
-      result.steps.push({ action: "zero_stock", ok: true, result: zeroResult });
+    if (action === "zero_stock" || action === "zero_then_archive") {
+      const stockTargets = resolveOnlineProductZeroStockTargets(online, body);
+      const stockResult = await updateOzonProductStocks(shop, stockTargets);
+      result.steps.push({ action: "zero_stock", ok: true, result: stockResult, targets: stockTargets });
     }
-    if (action === "archive" || action === "zero_and_archive") {
+    if (action === "archive") {
+      const archiveResult = await archiveOzonProducts(shop, [Number(online.ozon_product_id || 0)]);
+      db.prepare("UPDATE online_products SET archived = 1, status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(onlineProductId);
+      result.steps.push({ action: "archive", ok: true, result: archiveResult });
+    }
+    if (action === "zero_then_archive") {
       const archiveResult = await archiveOzonProducts(shop, [Number(online.ozon_product_id || 0)]);
       db.prepare("UPDATE online_products SET archived = 1, status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(onlineProductId);
       result.steps.push({ action: "archive", ok: true, result: archiveResult });
@@ -2500,6 +2753,28 @@ export async function performOnlineProductAction(body = {}, userId = null) {
     finishOnlineProductAction(actionId, "failed", result, result.error);
     throw error;
   }
+}
+
+function resolveOnlineProductZeroStockTargets(online = {}, body = {}) {
+  const explicitWarehouseId = String(body.warehouse_id || "").trim();
+  const snapshotRows = online.shop_id && online.ozon_sku
+    ? all(`
+      SELECT DISTINCT warehouse_id
+      FROM ozon_stock_snapshots
+      WHERE shop_id = ? AND ozon_sku = ?
+      ORDER BY warehouse_id ASC
+    `, [Number(online.shop_id), String(online.ozon_sku || "")])
+    : [];
+  const warehouseIds = explicitWarehouseId
+    ? [explicitWarehouseId]
+    : snapshotRows.map((row) => String(row.warehouse_id || "").trim()).filter(Boolean);
+  const normalized = warehouseIds.length ? warehouseIds : [""];
+  return normalized.map((warehouseId) => ({
+    offer_id: String(online.offer_id || ""),
+    product_id: Number(online.ozon_product_id || 0),
+    stock: 0,
+    warehouse_id: warehouseId
+  }));
 }
 
 function recordOnlineProductAction({ online, action, status, request, userId }) {
@@ -2541,7 +2816,9 @@ export function bindOnlineProduct(body) {
 
   const mapping = get("SELECT * FROM sku_mappings WHERE shop_id = ? AND ozon_sku = ?", [online.shop_id, online.ozon_sku]);
   if (mapping) recalculateOrderItemsForMapping(mapping.id);
-  syncOutboundForOpenOrders();
+  syncOutboundForOpenOrdersService(profitMaintenanceDeps());
+  refreshProfitAnalyticsSnapshots({});
+  invalidateExceptionWorkbenchCache();
   return { ok: true, mapping_id: mapping?.id || null, product_id: productId };
 }
 
@@ -2557,7 +2834,7 @@ export function createProductFromOnlineProduct(body) {
   if (existingMapping) {
     db.prepare("UPDATE online_products SET product_id = ? WHERE id = ?").run(existingMapping.product_id, online.id);
     recalculateOrderItemsForMapping(existingMapping.id);
-    syncOutboundForOpenOrders();
+    syncOutboundForOpenOrdersService(profitMaintenanceDeps());
     return {
       id: existingMapping.product_id,
       code: existingMapping.code,
@@ -2585,7 +2862,7 @@ export function createProductFromOnlineProduct(body) {
     }
   }
 
-  const attrs = parseJson(online.attributes_json) || {};
+  const spec = onlineProductSpec(online);
   const exchangeRate = Number(body.exchange_rate || currentExchangeRate().rate || 11.32);
   const salePriceRmb = Number(body.air_sale_price_rmb || 0) ||
     (exchangeRate ? Number(online.sale_price || 0) / exchangeRate : Number(online.sale_price || 0));
@@ -2601,10 +2878,10 @@ export function createProductFromOnlineProduct(body) {
     domestic_shipping: purchasePlan.unitDomesticShipping,
     handling_fee: 0,
     purchase_quantity: body.purchase_quantity || 1,
-    package_weight_g: body.package_weight_g || inferWeightGrams(attrs),
-    length_cm: body.length_cm || attrs.length || attrs.depth || 30,
-    width_cm: body.width_cm || attrs.width || 20,
-    height_cm: body.height_cm || attrs.height || 10,
+    package_weight_g: body.package_weight_g || spec.weight_g,
+    length_cm: body.length_cm || spec.length_cm || 30,
+    width_cm: body.width_cm || spec.width_cm || 20,
+    height_cm: body.height_cm || spec.height_cm || 10,
     air_sale_price_rmb: salePriceRmb,
     listing_price_rub: Number(body.listing_price_rub || online.sale_price || 0),
     exchange_rate: exchangeRate,
@@ -3127,6 +3404,7 @@ export async function syncDemoOrders(body = {}, options = {}) {
       inserted += shopStats.inserted_items;
       updated += shopStats.updated;
       shopResults.push(shopStats);
+      invalidateExceptionWorkbenchCache();
     } catch (error) {
       const message = `${shop.name}: ${error.message}`;
       errors.push(message);
@@ -3136,7 +3414,9 @@ export async function syncDemoOrders(body = {}, options = {}) {
   const status = errors.length ? "partial_error" : "ok";
   const message = `Range ${from || "last_30_days"}~${to || "now"}; fetched ${fetched}, inserted item(s) ${inserted}, updated order(s) ${updated}, requests ${requests}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
   db.prepare("INSERT INTO sync_logs (job, status, message) VALUES ('ozon_orders', ?, ?)").run(status, message);
-  syncOutboundForOpenOrders();
+  syncOutboundForOpenOrdersService(profitMaintenanceDeps());
+  refreshProfitAnalyticsSnapshots({ from: from || "", to: to || "" });
+  invalidateExceptionWorkbenchCache();
   if (errors.length && fetched === 0) throw new Error(errors.join(" | "));
   return { inserted, updated, fetched, requests, from: from || "", to: to || "", shops: shopResults, errors };
 }
@@ -3171,6 +3451,7 @@ export async function syncOzonIncrementalOrders(body = {}, options = {}) {
   const status = aggregate.errors.length ? "partial_error" : "ok";
   const message = `Incremental sync; fetched ${aggregate.fetched}, inserted item(s) ${aggregate.inserted}, updated order(s) ${aggregate.updated}, requests ${aggregate.requests}${aggregate.errors.length ? `; ${aggregate.errors.join(" | ")}` : ""}`;
   db.prepare("INSERT INTO sync_logs (job, status, message) VALUES ('ozon_orders_incremental', ?, ?)").run(status, message);
+  invalidateExceptionWorkbenchCache();
   if (aggregate.errors.length && aggregate.fetched === 0) throw new Error(aggregate.errors.join(" | "));
   return aggregate;
 }
@@ -3221,6 +3502,45 @@ export async function syncOzonOnlineProducts(body = {}) {
   return { fetched, upserted, errors };
 }
 
+export async function refreshOnlineProductImages(body = {}) {
+  const selectedIds = Array.isArray(body.online_product_ids) ? body.online_product_ids.map(Number).filter(Boolean) : [];
+  if (!selectedIds.length) return { fetched: 0, upserted: 0, errors: [] };
+
+  const rows = all(`
+    SELECT id, shop_id, ozon_product_id
+    FROM online_products
+    WHERE id IN (${selectedIds.map(() => "?").join(",")})
+  `, selectedIds);
+  const grouped = new Map();
+  for (const row of rows) {
+    const shopId = Number(row.shop_id || 0);
+    const productId = Number(row.ozon_product_id || 0);
+    if (!shopId || !productId) continue;
+    const list = grouped.get(shopId) || [];
+    list.push(productId);
+    grouped.set(shopId, list);
+  }
+
+  let fetched = 0;
+  let upserted = 0;
+  const errors = [];
+  for (const [shopId, productIds] of grouped.entries()) {
+    const shop = get("SELECT * FROM shops WHERE id = ? AND status = 'active'", [shopId]);
+    if (!shop) continue;
+    try {
+      const items = await fetchOzonProductsByIds(shop, productIds);
+      fetched += items.length;
+      for (const item of items) {
+        upsertOnlineProduct(shop, item);
+        upserted += 1;
+      }
+    } catch (error) {
+      errors.push(`${shop.name}: ${error.message}`);
+    }
+  }
+  return { fetched, upserted, errors };
+}
+
 export async function syncOzonFinance(body = {}, options = {}) {
   const targetShopId = nullable(body.shop_id);
   const activeShops = shops().filter((shop) => shop.status === "active" && (!targetShopId || Number(shop.id) === targetShopId));
@@ -3246,40 +3566,22 @@ export async function syncOzonFinance(body = {}, options = {}) {
   return { fetched, upserted, applied, errors };
 }
 
-export function ozonFinanceSummary() {
-  const summary = get(`
-    SELECT COUNT(DISTINCT operation_id) AS operations,
-      COUNT(*) AS rows,
-      COUNT(DISTINCT posting_number) AS postings,
-      COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS fees,
-      MAX(synced_at) AS last_synced_at
-    FROM ozon_finance_items
-  `);
-  const recent = all(`
-    SELECT ofi.posting_number, s.name AS shop_name,
-      COUNT(*) AS rows,
-      COALESCE(SUM(ofi.amount), 0) AS amount,
-      COALESCE(SUM(CASE WHEN ofi.amount < 0 THEN -ofi.amount ELSE 0 END), 0) AS fee_amount,
-      MAX(ofi.operation_date) AS operation_date
-    FROM ozon_finance_items ofi
-    JOIN shops s ON s.id = ofi.shop_id
-    GROUP BY ofi.shop_id, ofi.posting_number
-    ORDER BY operation_date DESC
-    LIMIT 12
-  `);
-  return { summary, recent };
-}
-
 function upsertFinanceOperation(shopId, operation) {
   const rows = financeRowsForOperation(operation);
+  const rate = Number(exchangeRateForDate(operation.operation_date).rate || currentExchangeRate().rate || 11.32);
   let count = 0;
   for (const row of rows) {
+    const amountRub = Number(row.amount || 0);
+    const accrualsRub = Number(operation.accruals_for_sale || 0);
+    const saleCommissionRub = Number(operation.sale_commission || 0);
+    const deliveryChargeRub = Number(operation.delivery_charge || 0);
+    const returnDeliveryChargeRub = Number(operation.return_delivery_charge || 0);
     db.prepare(`
       INSERT INTO ozon_finance_items
       (shop_id, operation_id, posting_number, order_number, operation_type, operation_type_name, operation_date,
        service_type, service_name, amount, accruals_for_sale, sale_commission, delivery_charge, return_delivery_charge,
-       currency_code, raw_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       currency_code, raw_json, amount_cny, accruals_for_sale_cny, sale_commission_cny, delivery_charge_cny, return_delivery_charge_cny, exchange_rate)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(shop_id, operation_id, service_type) DO UPDATE SET
         posting_number = excluded.posting_number,
         order_number = excluded.order_number,
@@ -3293,6 +3595,12 @@ function upsertFinanceOperation(shopId, operation) {
         delivery_charge = excluded.delivery_charge,
         return_delivery_charge = excluded.return_delivery_charge,
         currency_code = excluded.currency_code,
+        amount_cny = excluded.amount_cny,
+        accruals_for_sale_cny = excluded.accruals_for_sale_cny,
+        sale_commission_cny = excluded.sale_commission_cny,
+        delivery_charge_cny = excluded.delivery_charge_cny,
+        return_delivery_charge_cny = excluded.return_delivery_charge_cny,
+        exchange_rate = excluded.exchange_rate,
         raw_json = excluded.raw_json,
         synced_at = CURRENT_TIMESTAMP
     `).run(
@@ -3305,13 +3613,19 @@ function upsertFinanceOperation(shopId, operation) {
       operation.operation_date || "",
       row.service_type,
       row.service_name,
-      row.amount,
-      operation.accruals_for_sale || 0,
-      operation.sale_commission || 0,
-      operation.delivery_charge || 0,
-      operation.return_delivery_charge || 0,
+      amountRub,
+      accrualsRub,
+      saleCommissionRub,
+      deliveryChargeRub,
+      returnDeliveryChargeRub,
       operation.currency_code || "",
-      operation.raw_json || ""
+      operation.raw_json || "",
+      rubToCny(amountRub, rate),
+      rubToCny(accrualsRub, rate),
+      rubToCny(saleCommissionRub, rate),
+      rubToCny(deliveryChargeRub, rate),
+      rubToCny(returnDeliveryChargeRub, rate),
+      rate
     );
     count += 1;
   }
@@ -3333,9 +3647,21 @@ function financeRowsForOperation(operation) {
 function applyOzonFinanceToOrders({ from = "", to = "" } = {}) {
   const rows = all(`
     SELECT o.id AS order_id,
-      COALESCE(SUM(CASE WHEN ofi.amount < 0 THEN -ofi.amount ELSE 0 END), 0) AS fee_amount,
-      COALESCE(SUM(CASE WHEN ofi.service_type = 'sale_commission' THEN ABS(ofi.amount) ELSE 0 END), 0) AS commission_fee,
-      COALESCE(SUM(CASE WHEN ofi.service_type != 'sale_commission' AND ofi.amount < 0 THEN -ofi.amount ELSE 0 END), 0) AS service_fee
+      MAX(o.status) AS order_status,
+      MAX(o.tracking_stage) AS tracking_stage,
+      MAX(o.logistics_status) AS logistics_status,
+      MAX(o.delivered_at) AS delivered_at,
+      MAX(o.accrued_at) AS accrued_at,
+      MAX(o.cancel_reason) AS cancel_reason,
+      MAX(o.cancel_reason_id) AS cancel_reason_id,
+      MAX(o.cancel_initiator) AS cancel_initiator,
+      MAX(o.cancel_type) AS cancel_type,
+      MAX(o.cancelled_after_ship) AS cancelled_after_ship,
+      COALESCE(SUM(CASE WHEN ofi.amount_cny < 0 THEN -ofi.amount_cny ELSE 0 END), 0) AS fee_amount_cny,
+      COALESCE(SUM(CASE WHEN ofi.service_type = 'sale_commission' THEN ABS(ofi.amount_cny) ELSE 0 END), 0) AS commission_fee_cny,
+      COALESCE(SUM(CASE WHEN ofi.service_type = 'sale_commission' THEN ABS(ofi.amount) ELSE 0 END), 0) AS commission_fee_rub,
+      COALESCE(SUM(CASE WHEN ofi.service_type = 'sale_commission' THEN ABS(COALESCE(ofi.accruals_for_sale, 0)) ELSE 0 END), 0) AS commission_sale_rub,
+      COALESCE(SUM(CASE WHEN ofi.service_type != 'sale_commission' AND ofi.amount_cny < 0 THEN -ofi.amount_cny ELSE 0 END), 0) AS service_fee_cny
     FROM orders o
     JOIN ozon_finance_items ofi ON ofi.shop_id = o.shop_id AND ofi.posting_number = o.posting_number
     WHERE (? = '' OR substr(ofi.operation_date, 1, 10) >= ?)
@@ -3344,24 +3670,220 @@ function applyOzonFinanceToOrders({ from = "", to = "" } = {}) {
   `, [from, from, to, to]);
   let updated = 0;
   for (const row of rows) {
-    const items = all("SELECT * FROM order_items WHERE order_id = ?", [row.order_id]);
-    const totalSale = items.reduce((sum, item) => sum + Number(item.sale_price || 0) * Number(item.quantity || 1), 0);
+    const financeRows = all(`
+      SELECT service_type, service_name,
+        COALESCE(SUM(amount_cny), 0) AS amount_cny,
+        COALESCE(SUM(CASE WHEN amount_cny < 0 THEN -amount_cny ELSE 0 END), 0) AS fee_amount_cny
+      FROM ozon_finance_items
+      WHERE shop_id = (SELECT shop_id FROM orders WHERE id = ?)
+        AND posting_number = (SELECT posting_number FROM orders WHERE id = ?)
+        AND (? = '' OR substr(operation_date, 1, 10) >= ?)
+        AND (? = '' OR substr(operation_date, 1, 10) <= ?)
+      GROUP BY service_type, service_name
+    `, [row.order_id, row.order_id, from, from, to, to]);
+    const categoryTotals = financeRows.reduce((acc, item) => {
+      const key = ozonFinanceCategory(item);
+      acc[key] = roundMoney(Number(acc[key] || 0) + Number(item.fee_amount_cny || Math.abs(Number(item.amount_cny || 0)) || 0));
+      return acc;
+    }, {});
+    const items = all(`
+      SELECT oi.*, opi.sale_amount_cny, opi.purchase_cost_cny, opi.domestic_shipping_cny, opi.international_shipping_cny,
+        opi.packaging_cost_cny, opi.return_loss_cny, opi.advertising_cost_cny, opi.other_fee_cny
+      FROM order_items oi
+      LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
+      WHERE oi.order_id = ?
+    `, [row.order_id]);
+    const totalSale = items.reduce((sum, item) => sum + Number(item.sale_amount_cny || (Number(item.sale_price || 0) * Number(item.quantity || 1))), 0);
+    const commissionRate = Number(row.commission_sale_rub || 0) > 0
+      ? Number(row.commission_fee_rub || 0) / Number(row.commission_sale_rub || 0)
+      : 0;
+    const orderOutcome = classifyOrderOutcome({
+      status: row.order_status,
+      tracking_stage: row.tracking_stage,
+      logistics_status: row.logistics_status,
+      delivered_at: row.delivered_at,
+      accrued_at: row.accrued_at,
+      cancel_reason: row.cancel_reason,
+      cancel_reason_id: row.cancel_reason_id,
+      cancel_initiator: row.cancel_initiator,
+      cancel_type: row.cancel_type,
+      cancelled_after_ship: row.cancelled_after_ship
+    });
+    const orderLossProfile = resolveOrderLossProfile({
+      status: row.order_status,
+      tracking_stage: row.tracking_stage,
+      logistics_status: row.logistics_status,
+      delivered_at: row.delivered_at,
+      accrued_at: row.accrued_at,
+      cancel_reason: row.cancel_reason,
+      cancel_reason_id: row.cancel_reason_id,
+      cancel_initiator: row.cancel_initiator,
+      cancel_type: row.cancel_type,
+      cancelled_after_ship: row.cancelled_after_ship,
+      outcome_type: orderOutcome,
+      ...describeCancellation({
+        status: row.order_status,
+        tracking_stage: row.tracking_stage,
+        logistics_status: row.logistics_status,
+        delivered_at: row.delivered_at,
+        accrued_at: row.accrued_at,
+        cancel_reason: row.cancel_reason,
+        cancel_reason_id: row.cancel_reason_id,
+        cancel_initiator: row.cancel_initiator,
+        cancel_type: row.cancel_type,
+        cancelled_after_ship: row.cancelled_after_ship,
+        outcome_type: orderOutcome
+      })
+    });
     for (const item of items) {
-      const itemSale = Number(item.sale_price || 0) * Number(item.quantity || 1);
+      const itemSale = Number(item.sale_amount_cny || (Number(item.sale_price || 0) * Number(item.quantity || 1)));
       const share = totalSale > 0 ? itemSale / totalSale : (items.length ? 1 / items.length : 0);
-      const platformFee = Number(row.fee_amount || 0) * share;
-      const cost = (Number(item.frozen_purchase_cost || 0) + Number(item.frozen_domestic_shipping || 0) + Number(item.frozen_international_shipping || 0) + Number(item.frozen_handling_fee || 0)) * Number(item.quantity || 1);
-      const actualProfit = itemSale - cost - platformFee - Number(item.aftersale_loss || 0);
-      db.prepare("UPDATE order_items SET platform_fee_actual = ?, actual_profit = ?, settlement_state = 'accrued' WHERE id = ?").run(platformFee, actualProfit, item.id);
+      const commissionFeeCny = commissionRate > 0
+        ? roundMoney(itemSale * commissionRate)
+        : roundMoney(Number(row.commission_fee_cny || 0) * share);
+      const serviceFeeCny = roundMoney(Number(categoryTotals.other || 0) * share);
+      const collectingFee = roundMoney(Number(categoryTotals.collecting_fee || 0) * share);
+      const totalFinanceFeeCny = roundMoney(Number(row.fee_amount_cny || 0) * share);
+      const purchaseCost = Number(item.purchase_cost_cny || (Number(item.frozen_purchase_cost || 0) * Number(item.quantity || 1)));
+      const domesticShipping = Number(item.domestic_shipping_cny || (Number(item.frozen_domestic_shipping || 0) * Number(item.quantity || 1)));
+      const internationalShipping = Number(item.international_shipping_cny || (Number(item.frozen_international_shipping || 0) * Number(item.quantity || 1)));
+      const actualInternationalShipping = roundMoney(Number(categoryTotals.platform_delivery || 0) * share + Number(categoryTotals.international_transport || 0) * share) || internationalShipping;
+      const packagingCost = packagingFeeForSaleAmount(itemSale);
+      const returnLoss = estimateOutcomeReturnLoss({
+        outcome: orderOutcome,
+        lossProfileCode: orderLossProfile.code,
+        quantity: Number(item.quantity || 1),
+        purchaseCostPerUnit: Number(item.purchase_cost_cny || item.frozen_purchase_cost || 0) / Math.max(Number(item.quantity || 1), 1),
+        domesticShippingPerUnit: Number(item.domestic_shipping_cny || item.frozen_domestic_shipping || 0) / Math.max(Number(item.quantity || 1), 1),
+        internationalShippingPerUnit: actualInternationalShipping / Math.max(Number(item.quantity || 1), 1),
+        packagingCostTotal: packagingCost,
+        commissionFeeTotal: commissionFeeCny,
+        collectingFeeTotal: collectingFee,
+        finalMileFeeTotal: 0,
+        serviceFeeTotal: serviceFeeCny,
+        returnRateLossTotal: roundMoney(Number(categoryTotals.aftersale_loss || 0) * share) || Number(item.return_loss_cny || item.aftersale_loss || 0)
+      });
+      const advertisingCost = Number(item.advertising_cost_cny || 0);
+      const otherFee = Number(item.other_fee_cny || 0);
+      const actualProfit = roundMoney(itemSale - purchaseCost - domesticShipping - actualInternationalShipping - packagingCost - commissionFeeCny - serviceFeeCny - collectingFee - returnLoss - advertisingCost - otherFee);
+      db.prepare("UPDATE order_items SET platform_fee_actual = ?, actual_profit = ?, settlement_state = 'accrued' WHERE id = ?").run(totalFinanceFeeCny, actualProfit, item.id);
       db.prepare(`
         UPDATE order_profit_items
-        SET commission_fee_cny = ?, ozon_service_fee_cny = ?, net_profit_cny = ?, profit_status = 'accrued', updated_at = CURRENT_TIMESTAMP
+        SET international_shipping_cny = ?, packaging_cost_cny = ?, commission_fee_cny = ?, commission_rate = ?, ozon_service_fee_cny = ?, return_loss_cny = ?, other_fee_cny = ?, net_profit_cny = ?, profit_status = 'accrued', updated_at = CURRENT_TIMESTAMP
         WHERE order_item_id = ?
-      `).run(Number(row.commission_fee || 0) * share, Number(row.service_fee || 0) * share, actualProfit, item.id);
+      `).run(actualInternationalShipping, packagingCost, commissionFeeCny, commissionRate, serviceFeeCny, returnLoss, otherFee, actualProfit, item.id);
+      lockProfitItem(item.id, "finance_accrued");
       updated += 1;
     }
   }
+  refreshProfitAnalyticsSnapshots({ from, to });
   return { orders: rows.length, items: updated };
+}
+
+export function reapplySyncedOzonFinance({ from = "", to = "" } = {}) {
+  return applyOzonFinanceToOrders({ from, to });
+}
+
+export function refreshProfitAnalyticsSnapshots({ from = "", to = "" } = {}) {
+  const rangeFrom = from || "2000-01-01";
+  const rangeTo = to || "9999-12-31";
+  const outcome = buildOrderOutcomeSql("o");
+  db.prepare("DELETE FROM analytics_shop_daily WHERE date_key >= ? AND date_key <= ?").run(rangeFrom, rangeTo);
+  db.prepare("DELETE FROM analytics_product_profit_daily WHERE date_key >= ? AND date_key <= ?").run(rangeFrom, rangeTo);
+  db.prepare("DELETE FROM analytics_sku_profit_daily WHERE date_key >= ? AND date_key <= ?").run(rangeFrom, rangeTo);
+
+  db.prepare(`
+    INSERT INTO analytics_shop_daily (
+      date_key, shop_id, order_count, item_quantity, revenue, estimated_profit, confirmed_profit, current_profit,
+      cancelled_orders, cancelled_revenue, return_orders, return_quantity, return_revenue, refreshed_at
+    )
+    SELECT
+      ${chinaDateSql("o.ordered_at")} AS date_key,
+      o.shop_id,
+      COUNT(DISTINCT CASE WHEN ${outcome.effectiveSale} THEN o.id END) AS order_count,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN oi.quantity ELSE 0 END), 0) AS item_quantity,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS revenue,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) ELSE 0 END), 0) AS estimated_profit,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE 0 END), 0) AS confirmed_profit,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN CASE WHEN COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) END ELSE 0 END), 0) AS current_profit,
+      COUNT(DISTINCT CASE WHEN ${outcome.cancelledPreFulfillment} THEN o.id END) AS cancelled_orders,
+      COALESCE(SUM(CASE WHEN ${outcome.cancelledPreFulfillment} THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS cancelled_revenue,
+      COUNT(DISTINCT CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN o.id END) AS return_orders,
+      COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN oi.quantity ELSE 0 END), 0) AS return_quantity,
+      COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS return_revenue,
+      CURRENT_TIMESTAMP
+    FROM orders o
+    JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
+    WHERE ${chinaDateSql("o.ordered_at")} >= ?
+      AND ${chinaDateSql("o.ordered_at")} <= ?
+    GROUP BY ${chinaDateSql("o.ordered_at")}, o.shop_id
+  `).run(rangeFrom, rangeTo);
+
+  db.prepare(`
+    INSERT INTO analytics_product_profit_daily (
+      date_key, product_id, shop_id, order_count, item_quantity, revenue, estimated_profit, confirmed_profit, current_profit, refreshed_at
+    )
+    SELECT
+      ${chinaDateSql("o.ordered_at")} AS date_key,
+      sm.product_id,
+      o.shop_id,
+      COUNT(DISTINCT CASE WHEN ${outcome.effectiveSale} THEN o.id END) AS order_count,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN oi.quantity ELSE 0 END), 0) AS item_quantity,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS revenue,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) ELSE 0 END), 0) AS estimated_profit,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE 0 END), 0) AS confirmed_profit,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN CASE WHEN COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) END ELSE 0 END), 0) AS current_profit,
+      CURRENT_TIMESTAMP
+    FROM orders o
+    JOIN order_items oi ON oi.order_id = o.id
+    JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id AND sm.active = 1
+    LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
+    WHERE ${chinaDateSql("o.ordered_at")} >= ?
+      AND ${chinaDateSql("o.ordered_at")} <= ?
+    GROUP BY ${chinaDateSql("o.ordered_at")}, sm.product_id, o.shop_id
+  `).run(rangeFrom, rangeTo);
+
+  db.prepare(`
+    INSERT INTO analytics_sku_profit_daily (
+      date_key, shop_id, ozon_sku, product_id, order_count, item_quantity, revenue, estimated_profit, confirmed_profit, current_profit,
+      cancelled_orders, cancelled_quantity, cancelled_revenue, return_orders, return_quantity, return_revenue, refreshed_at
+    )
+    SELECT
+      ${chinaDateSql("o.ordered_at")} AS date_key,
+      o.shop_id,
+      oi.ozon_sku,
+      sm.product_id,
+      COUNT(DISTINCT CASE WHEN ${outcome.effectiveSale} THEN o.id END) AS order_count,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN oi.quantity ELSE 0 END), 0) AS item_quantity,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS revenue,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) ELSE 0 END), 0) AS estimated_profit,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE 0 END), 0) AS confirmed_profit,
+      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN CASE WHEN COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) END ELSE 0 END), 0) AS current_profit,
+      COUNT(DISTINCT CASE WHEN ${outcome.cancelledPreFulfillment} THEN o.id END) AS cancelled_orders,
+      COALESCE(SUM(CASE WHEN ${outcome.cancelledPreFulfillment} THEN oi.quantity ELSE 0 END), 0) AS cancelled_quantity,
+      COALESCE(SUM(CASE WHEN ${outcome.cancelledPreFulfillment} THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS cancelled_revenue,
+      COUNT(DISTINCT CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN o.id END) AS return_orders,
+      COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN oi.quantity ELSE 0 END), 0) AS return_quantity,
+      COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS return_revenue,
+      CURRENT_TIMESTAMP
+    FROM orders o
+    JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id AND sm.active = 1
+    LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
+    WHERE ${chinaDateSql("o.ordered_at")} >= ?
+      AND ${chinaDateSql("o.ordered_at")} <= ?
+    GROUP BY ${chinaDateSql("o.ordered_at")}, o.shop_id, oi.ozon_sku
+  `).run(rangeFrom, rangeTo);
+
+  return {
+    ok: true,
+    from: rangeFrom,
+    to: rangeTo,
+    shop_rows: get("SELECT COUNT(*) AS count FROM analytics_shop_daily WHERE date_key >= ? AND date_key <= ?", [rangeFrom, rangeTo])?.count || 0,
+    product_rows: get("SELECT COUNT(*) AS count FROM analytics_product_profit_daily WHERE date_key >= ? AND date_key <= ?", [rangeFrom, rangeTo])?.count || 0,
+    sku_rows: get("SELECT COUNT(*) AS count FROM analytics_sku_profit_daily WHERE date_key >= ? AND date_key <= ?", [rangeFrom, rangeTo])?.count || 0
+  };
 }
 
 function upsertOnlineProduct(shop, item) {
@@ -3427,23 +3949,25 @@ function upsertOnlineProductFromOrderItem(shop, item) {
     db.prepare(`
       UPDATE online_products
       SET offer_id = COALESCE(NULLIF(?, ''), offer_id),
+        ozon_product_id = COALESCE(NULLIF(?, ''), ozon_product_id),
         name = CASE WHEN name = '' OR name LIKE 'Ozon product %' THEN COALESCE(NULLIF(?, ''), name) ELSE name END,
         image_url = COALESCE(NULLIF(?, ''), image_url),
         primary_image = COALESCE(NULLIF(?, ''), primary_image),
         sale_price = CASE WHEN sale_price = 0 THEN ? ELSE sale_price END,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(item.offer_id || "", item.name || "", item.image_url || "", item.image_url || "", Number(item.sale_price || 0), existing.id);
+    `).run(item.offer_id || "", item.ozon_product_id || "", item.name || "", item.image_url || "", item.image_url || "", Number(item.sale_price || 0), existing.id);
     return existing;
   }
   const result = db.prepare(`
     INSERT INTO online_products
-    (shop_id, ozon_sku, offer_id, name, image_url, primary_image, sale_price, currency_code, status, visibility, raw_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'RUB', 'historical', 'order_snapshot', ?)
+    (shop_id, ozon_sku, offer_id, ozon_product_id, name, image_url, primary_image, sale_price, currency_code, status, visibility, raw_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RUB', 'historical', 'order_snapshot', ?)
   `).run(
     shop.id,
     item.ozon_sku,
     item.offer_id || "",
+    item.ozon_product_id || "",
     item.name || `Ozon SKU ${item.ozon_sku}`,
     item.image_url || "",
     item.image_url || "",
@@ -3539,9 +4063,10 @@ function upsertPosting(shop, posting) {
       db.prepare(`
         UPDATE order_items
         SET ozon_name = COALESCE(NULLIF(?, ''), ozon_name),
-          ozon_image_url = COALESCE(NULLIF(?, ''), ozon_image_url)
+          ozon_image_url = COALESCE(NULLIF(?, ''), ozon_image_url),
+          ozon_product_id = COALESCE(NULLIF(?, ''), ozon_product_id)
         WHERE id = ?
-      `).run(item.name || "", item.image_url || "", existingItem.id);
+      `).run(item.name || "", item.image_url || "", item.ozon_product_id || "", existingItem.id);
       continue;
     }
     const mapping = get(`
@@ -3553,32 +4078,48 @@ function upsertPosting(shop, posting) {
     const product = mapping ? get("SELECT * FROM products WHERE id = ?", [mapping.product_id]) : null;
     const estimated = product && mapping ? estimateItemProfit({ salePrice: item.sale_price, quantity: item.quantity, product, mapping }) : { commission: 0, profit: 0 };
     const settlement = posting.status === "delivered" ? "accrued" : "pending";
+    const returnLossEstimate = product && mapping
+      ? estimateOrderItemReturnLoss({ order: posting, item, product, estimated, quantity: item.quantity, salePrice: item.sale_price })
+      : 0;
+    const estimatedProfitValue = product && mapping
+      ? roundMoney(
+          Number(item.sale_price || 0) * Number(item.quantity || 1)
+          - (Number(product.purchase_cost || 0) + Number(product.domestic_shipping || 0) + Number(estimated.freight || product.international_shipping || 0)) * Number(item.quantity || 1)
+          - packagingFeeForSaleAmount(Number(item.sale_price || 0) * Number(item.quantity || 1))
+          - Number(estimated.commission || 0)
+          - Number(estimated.paymentFee || 0)
+          - Number(estimated.withdrawalFee || 0)
+          - returnLossEstimate
+          - Number(estimated.advertisingCost || 0)
+        )
+      : 0;
 
     const insertedItem = db.prepare(`
       INSERT INTO order_items
-      (order_id, sku_mapping_id, ozon_sku, ozon_name, ozon_image_url, quantity, sale_price, frozen_purchase_cost, frozen_domestic_shipping,
+      (order_id, sku_mapping_id, ozon_sku, ozon_name, ozon_image_url, ozon_product_id, quantity, sale_price, frozen_purchase_cost, frozen_domestic_shipping,
        frozen_international_shipping, frozen_handling_fee, estimated_commission, platform_fee_actual, aftersale_loss,
-       estimated_profit, actual_profit, settlement_state)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        estimated_profit, actual_profit, settlement_state)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       orderId,
       mapping?.id || null,
       item.ozon_sku,
       item.name || "",
       item.image_url || "",
+      item.ozon_product_id || "",
       item.quantity,
       item.sale_price,
       product?.purchase_cost || 0,
       product?.domestic_shipping || 0,
       estimated.freight || product?.international_shipping || 0,
       product?.handling_fee || 0,
-      estimated.commission,
-      settlement === "accrued" ? estimated.commission + (estimated.paymentFee || 0) + (estimated.withdrawalFee || 0) + (estimated.expectedReturnLoss || 0) : 0,
-      0,
-      estimated.profit,
-      settlement === "accrued" ? estimated.profit : 0,
-      settlement
-    );
+       estimated.commission,
+       settlement === "accrued" ? estimated.commission + (estimated.paymentFee || 0) + (estimated.withdrawalFee || 0) + returnLossEstimate : 0,
+       0,
+       estimatedProfitValue,
+       settlement === "accrued" ? estimatedProfitValue : 0,
+       settlement
+     );
     const orderItemId = Number(insertedItem.lastInsertRowid);
 
     if (!mapping) {
@@ -3599,8 +4140,11 @@ function upsertPosting(shop, posting) {
         estimated,
         quantity: item.quantity,
         salePrice: item.sale_price,
-        settlement
+        settlement,
+        order: posting,
+        item
       });
+      syncOrderItemProfitFromBreakdown(orderItemId, settlement);
     }
 
     if (product && mapping) {
@@ -3649,29 +4193,11 @@ function orderLifecycle(posting) {
 }
 
 function orderCancelLossApplies(posting) {
-  const statusText = `${posting.status || ""} ${posting.substatus || ""} ${posting.tracking_stage || ""}`.toLowerCase();
-  const reasonText = `${posting.cancel_reason || ""} ${posting.cancel_reason_id || ""} ${posting.cancel_initiator || ""} ${posting.cancel_type || ""}`.toLowerCase();
-  if (!statusText.includes("cancel") && !statusText.includes("return") && !statusText.includes("not_accepted")) return false;
   if (isQualityPosting(posting)) return false;
-  if (reasonText.includes("质检") || reasonText.includes("quality inspection") || reasonText.includes("inspection") || reasonText.includes("проверка товара") || reasonText.includes("соответствие описанию")) return false;
-  if (reasonText.includes("срок доставки")) return false;
-  if ((reasonText.includes("平台") || reasonText.includes("platform") || reasonText.includes("system") || reasonText.includes("ozon")) && !statusText.includes("return") && !statusText.includes("delivered")) return false;
-  if (Number(posting.cancelled_after_ship || 0) > 0) return true;
-  return [
-    "delivering",
-    "transferring",
-    "carriage",
-    "pickup",
-    "sorting",
-    "customs",
-    "shipped",
-    "sent",
-    "on_way",
-    "posting_in_carriage",
-    "posting_transferring",
-    "delivered",
-    "return"
-  ].some((keyword) => statusText.includes(keyword));
+  const outcome = classifyOrderOutcome(posting);
+  const cancellation = describeCancellation({ ...posting, outcome_type: outcome });
+  const profile = resolveOrderLossProfile({ ...posting, outcome_type: outcome, ...cancellation });
+  return profile.code !== "none";
 }
 
 function isQualityPosting(posting) {
@@ -3695,12 +4221,12 @@ function mergeSyncAggregate(target, result, reason) {
 
 function openOrderSyncRanges(shopId, recentFrom, lookbackDays) {
   const rows = all(`
-    SELECT DISTINCT substr(ordered_at, 1, 10) AS date_key
+    SELECT DISTINCT ${chinaDateSql("ordered_at")} AS date_key
     FROM orders
     WHERE shop_id = ?
       AND COALESCE(sync_state, 'open') != 'final'
-      AND substr(ordered_at, 1, 10) < ?
-      AND substr(ordered_at, 1, 10) >= ?
+      AND ${chinaDateSql("ordered_at")} < ?
+      AND ${chinaDateSql("ordered_at")} >= ?
     ORDER BY date_key
   `, [Number(shopId), recentFrom, dateKeyDaysAgo(lookbackDays)]);
   const dates = rows.map((row) => row.date_key).filter(Boolean);
@@ -3736,11 +4262,23 @@ export function recalculateOrderItemsForMapping(mappingId) {
     FROM order_items oi
     JOIN orders o ON o.id = oi.order_id
     WHERE o.shop_id = ? AND oi.ozon_sku = ?
+      AND COALESCE(o.sync_state, 'open') != 'final'
   `, [mapping.shop_id, mapping.ozon_sku]);
   let updated = 0;
   for (const item of rows) {
     const estimated = estimateItemProfit({ salePrice: item.sale_price, quantity: item.quantity, product, mapping });
     const settlement = item.order_status === "delivered" ? "accrued" : "pending";
+    const returnLossEstimate = estimateOrderItemReturnLoss({ order: null, item, product, estimated, quantity: item.quantity, salePrice: item.sale_price });
+    const estimatedProfitValue = roundMoney(
+      Number(item.sale_price || 0) * Number(item.quantity || 1)
+      - (Number(product.purchase_cost || 0) + Number(product.domestic_shipping || 0) + Number(estimated.freight || product.international_shipping || 0)) * Number(item.quantity || 1)
+      - packagingFeeForSaleAmount(Number(item.sale_price || 0) * Number(item.quantity || 1))
+      - Number(estimated.commission || 0)
+      - Number(estimated.paymentFee || 0)
+      - Number(estimated.withdrawalFee || 0)
+      - returnLossEstimate
+      - Number(estimated.advertisingCost || 0)
+    );
     db.prepare(`
       UPDATE order_items SET
         sku_mapping_id = ?,
@@ -3749,9 +4287,10 @@ export function recalculateOrderItemsForMapping(mappingId) {
         frozen_international_shipping = ?,
         frozen_handling_fee = ?,
         estimated_commission = ?,
-        platform_fee_actual = CASE WHEN ? = 'accrued' THEN ? ELSE platform_fee_actual END,
+        platform_fee_actual = CASE WHEN ? = 'accrued' AND COALESCE(actual_profit, 0) = 0 THEN ? ELSE platform_fee_actual END,
+        aftersale_loss = ?,
         estimated_profit = ?,
-        actual_profit = CASE WHEN ? = 'accrued' THEN ? ELSE actual_profit END,
+        actual_profit = CASE WHEN ? = 'accrued' AND COALESCE(actual_profit, 0) = 0 THEN ? ELSE actual_profit END,
         settlement_state = ?
       WHERE id = ?
     `).run(
@@ -3762,10 +4301,11 @@ export function recalculateOrderItemsForMapping(mappingId) {
       product.handling_fee || 0,
       estimated.commission || 0,
       settlement,
-      (estimated.commission || 0) + (estimated.paymentFee || 0) + (estimated.withdrawalFee || 0) + (estimated.expectedReturnLoss || 0),
-      estimated.profit || 0,
+      (estimated.commission || 0) + (estimated.paymentFee || 0) + (estimated.withdrawalFee || 0) + returnLossEstimate,
+      returnLossEstimate,
+      estimatedProfitValue,
       settlement,
-      estimated.profit || 0,
+      estimatedProfitValue,
       settlement,
       item.id
     );
@@ -3775,8 +4315,10 @@ export function recalculateOrderItemsForMapping(mappingId) {
       estimated,
       quantity: item.quantity,
       salePrice: item.sale_price,
-      settlement
+      settlement,
+      item
     });
+    syncOrderItemProfitFromBreakdown(item.id, settlement);
     updated += 1;
   }
   return { updated };
@@ -3815,6 +4357,17 @@ export function recalculateOrderProfit(orderId) {
     }
     const estimated = estimateItemProfit({ salePrice: item.sale_price, quantity: item.quantity, product, mapping });
     const settlement = item.order_status === "delivered" ? "accrued" : "pending";
+    const returnLossEstimate = estimateOrderItemReturnLoss({ order, item, product, estimated, quantity: item.quantity, salePrice: item.sale_price });
+    const estimatedProfitValue = roundMoney(
+      Number(item.sale_price || 0) * Number(item.quantity || 1)
+      - (Number(product.purchase_cost || 0) + Number(product.domestic_shipping || 0) + Number(estimated.freight || product.international_shipping || 0)) * Number(item.quantity || 1)
+      - packagingFeeForSaleAmount(Number(item.sale_price || 0) * Number(item.quantity || 1))
+      - Number(estimated.commission || 0)
+      - Number(estimated.paymentFee || 0)
+      - Number(estimated.withdrawalFee || 0)
+      - returnLossEstimate
+      - Number(estimated.advertisingCost || 0)
+    );
     db.prepare(`
       UPDATE order_items SET
         sku_mapping_id = ?,
@@ -3823,9 +4376,10 @@ export function recalculateOrderProfit(orderId) {
         frozen_international_shipping = ?,
         frozen_handling_fee = ?,
         estimated_commission = ?,
-        platform_fee_actual = CASE WHEN ? = 'accrued' THEN ? ELSE platform_fee_actual END,
+        platform_fee_actual = CASE WHEN ? = 'accrued' AND COALESCE(actual_profit, 0) = 0 THEN ? ELSE platform_fee_actual END,
+        aftersale_loss = ?,
         estimated_profit = ?,
-        actual_profit = CASE WHEN ? = 'accrued' THEN ? ELSE actual_profit END,
+        actual_profit = CASE WHEN ? = 'accrued' AND COALESCE(actual_profit, 0) = 0 THEN ? ELSE actual_profit END,
         settlement_state = ?
       WHERE id = ?
     `).run(
@@ -3836,10 +4390,11 @@ export function recalculateOrderProfit(orderId) {
       product.handling_fee || 0,
       estimated.commission || 0,
       settlement,
-      (estimated.commission || 0) + (estimated.paymentFee || 0) + (estimated.withdrawalFee || 0) + (estimated.expectedReturnLoss || 0),
-      estimated.profit || 0,
+      (estimated.commission || 0) + (estimated.paymentFee || 0) + (estimated.withdrawalFee || 0) + returnLossEstimate,
+      returnLossEstimate,
+      estimatedProfitValue,
       settlement,
-      estimated.profit || 0,
+      estimatedProfitValue,
       settlement,
       item.id
     );
@@ -3849,11 +4404,16 @@ export function recalculateOrderProfit(orderId) {
       estimated,
       quantity: item.quantity,
       salePrice: item.sale_price,
-      settlement
+      settlement,
+      order,
+      item
     });
+    syncOrderItemProfitFromBreakdown(item.id, settlement);
     updated += 1;
   }
-  syncOutboundForOpenOrders();
+  syncOutboundForOpenOrdersService(profitMaintenanceDeps());
+  const orderedDateKey = chinaDateKey(order.ordered_at);
+  if (orderedDateKey) refreshProfitAnalyticsSnapshots({ from: orderedDateKey, to: orderedDateKey });
   return { ok: true, updated, unbound };
 }
 
@@ -3863,26 +4423,147 @@ export function recalculateAllMappedOrderProfits() {
   for (const mapping of mappings) {
     updated += recalculateOrderItemsForMapping(mapping.id).updated;
   }
-  return { updated, mappings: mappings.length };
+  const eligible = get(`
+    SELECT COUNT(*) AS count
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    WHERE COALESCE(o.sync_state, 'open') != 'final'
+  `)?.count || 0;
+  return { updated, mappings: mappings.length, scope: "open_orders_only", eligible_items: eligible };
+}
+
+export function recalculateHistoricalOrderProfits(body = {}) {
+  const from = String(body.from || "").trim();
+  const to = String(body.to || "").trim();
+  const onlyFinal = Number(body.only_final ?? 1) !== 0;
+  const onlyWithFinance = Number(body.only_with_finance ?? 1) !== 0;
+  const filters = [];
+  const params = [];
+
+  if (from) {
+    filters.push(`${chinaDateSql("o.ordered_at")} >= ?`);
+    params.push(from);
+  }
+  if (to) {
+    filters.push(`${chinaDateSql("o.ordered_at")} <= ?`);
+    params.push(to);
+  }
+  if (onlyFinal) filters.push("COALESCE(o.sync_state, 'open') = 'final'");
+  if (onlyWithFinance) {
+    filters.push(`EXISTS (
+      SELECT 1
+      FROM ozon_finance_items ofi
+      WHERE ofi.shop_id = o.shop_id
+        AND ofi.posting_number = o.posting_number
+    )`);
+  }
+
+  const whereSql = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const orders = all(`
+    SELECT o.id, ${chinaDateSql("o.ordered_at")} AS order_date
+    FROM orders o
+    ${whereSql}
+    ORDER BY ${chinaDateSql("o.ordered_at")} ASC, o.id ASC
+  `, params);
+
+  let updatedOrders = 0;
+  let updatedItems = 0;
+  let unbound = 0;
+  const dateKeys = new Set();
+  for (const order of orders) {
+    const result = recalculateOrderProfit(order.id);
+    updatedOrders += 1;
+    updatedItems += Number(result.updated || 0);
+    unbound += Number(result.unbound || 0);
+    if (order.order_date) dateKeys.add(order.order_date);
+  }
+
+  const applied = reapplySyncedOzonFinance({ from, to });
+  if (dateKeys.size) {
+    const sortedDates = [...dateKeys].sort();
+    refreshProfitAnalyticsSnapshots({
+      from: from || sortedDates[0],
+      to: to || sortedDates[sortedDates.length - 1]
+    });
+  } else if (from || to) {
+    refreshProfitAnalyticsSnapshots({ from, to });
+  }
+  invalidateExceptionWorkbenchCache();
+  return {
+    ok: true,
+    scope: onlyFinal ? "final_orders" : "all_orders",
+    only_with_finance: onlyWithFinance,
+    from,
+    to,
+    orders: orders.length,
+    updated_orders: updatedOrders,
+    updated_items: updatedItems,
+    unbound,
+    finance_reapplied: applied
+  };
+}
+
+function profitMaintenanceDeps() {
+  return {
+    all,
+    db,
+    get,
+    invalidateExceptionWorkbenchCache,
+    postInventory,
+    recalculateOrderItemsForMapping,
+    rebuildInventoryCurrentForProduct,
+    recordOrderException,
+    refreshProfitAnalyticsSnapshots
+  };
 }
 
 export function recalculateOrderProfitsForProduct(productId) {
-  const product = get("SELECT id FROM products WHERE id = ? AND active = 1", [Number(productId)]);
-  if (!product) throw new Error("库存产品不存在或已隐藏");
-  const mappings = all("SELECT id FROM sku_mappings WHERE product_id = ? AND active = 1", [Number(productId)]);
-  let updated = 0;
-  for (const mapping of mappings) {
-    updated += recalculateOrderItemsForMapping(mapping.id).updated;
-  }
-  syncOutboundForOpenOrders();
-  return { ok: true, product_id: Number(productId), updated, mappings: mappings.length };
+  return recalculateOrderProfitsForProductService(profitMaintenanceDeps(), productId);
 }
+
+configureHistoricalProfitReviewRuntime({
+  reapplySyncedOzonFinance,
+  recalculateOrderProfit,
+  refreshProfitAnalyticsSnapshots
+});
+
+configureOnlineProductsRuntime({
+  archiveOzonProducts,
+  createProduct,
+  currentExchangeRate,
+  fetchOzonProducts,
+  fetchOzonProductsByIds,
+  firstActivePersonId,
+  firstJsonItem,
+  invalidateExceptionWorkbenchCache,
+  maybeCreateProcurementForProduct,
+  normalizePurchasePlan,
+  nullable,
+  onlineImageFallback,
+  onlineProductSpec,
+  profitMaintenanceDeps,
+  recalculateOrderItemsForMapping,
+  refreshProfitAnalyticsSnapshots,
+  shops,
+  updateOzonProductStocks,
+  upsertOnlineProduct
+});
 
 function accrueDeliveredItems(orderId) {
   const order = get("SELECT * FROM orders WHERE id = ?", [orderId]);
   if (!order || order.status !== "delivered") return;
   const items = all("SELECT * FROM order_items WHERE order_id = ?", [orderId]);
   for (const item of items) {
+    const profitItem = get("SELECT commission_fee_cny, ozon_service_fee_cny, return_loss_cny, advertising_cost_cny, other_fee_cny, purchase_cost_cny, domestic_shipping_cny, international_shipping_cny, packaging_cost_cny, net_profit_cny, profit_status FROM order_profit_items WHERE order_item_id = ?", [item.id]);
+    if (profitItem && (Number(profitItem.commission_fee_cny || 0) > 0 || Number(profitItem.ozon_service_fee_cny || 0) > 0 || String(profitItem.profit_status || "") === "accrued")) {
+      db.prepare("UPDATE order_items SET actual_profit = ?, settlement_state = 'accrued' WHERE id = ?").run(Number(profitItem.net_profit_cny || 0), item.id);
+      db.prepare(`
+        UPDATE order_profit_items
+        SET profit_status = 'accrued', updated_at = CURRENT_TIMESTAMP
+        WHERE order_item_id = ?
+      `).run(item.id);
+      continue;
+    }
     const actualProfit = actualItemProfit(item);
     db.prepare("UPDATE order_items SET actual_profit = ?, settlement_state = 'accrued' WHERE id = ?").run(actualProfit, item.id);
     db.prepare(`
@@ -3891,133 +4572,6 @@ function accrueDeliveredItems(orderId) {
       WHERE order_item_id = ?
     `).run(actualProfit, item.id);
   }
-}
-
-function syncOutboundForOpenOrders() {
-  const cancelledRows = all(`
-    SELECT oi.id AS order_item_id, o.posting_number, sm.product_id
-    FROM order_items oi
-    JOIN orders o ON o.id = oi.order_id
-    LEFT JOIN sku_mappings sm ON (
-      (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
-      AND sm.active = 1
-    )
-    WHERE LOWER(o.status) LIKE '%cancel%'
-       OR LOWER(COALESCE(o.tracking_stage, '')) LIKE '%cancel%'
-  `);
-  for (const row of cancelledRows) {
-    db.prepare(`
-      UPDATE outbound_records
-      SET status = 'cancelled', reason = 'cancelled_order', note = 'Order cancelled, outbound no longer active'
-      WHERE order_ref = ? AND (? IS NULL OR product_id = ?)
-    `).run(row.posting_number, row.product_id || null, row.product_id || null);
-    db.prepare(`
-      UPDATE inventory_movements
-      SET status = 'cancelled', note = 'Cancelled order outbound'
-      WHERE related_order_item_id = ? AND source_type = 'order_outbound'
-    `).run(row.order_item_id);
-    rebuildInventoryCurrentForProduct(row.product_id);
-  }
-
-  const rows = all(`
-    SELECT oi.*, o.shop_id, o.posting_number, o.status AS order_status, o.tracking_stage,
-      sm.id AS mapping_id, sm.product_id, sm.person_id, sm.online_product_id,
-      p.purchase_cost
-    FROM order_items oi
-    JOIN orders o ON o.id = oi.order_id
-    LEFT JOIN sku_mappings sm ON (
-      (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
-      AND sm.active = 1
-    )
-    LEFT JOIN products p ON p.id = sm.product_id
-    WHERE LOWER(o.status) NOT LIKE '%cancel%'
-      AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%'
-  `);
-  let deducted = 0;
-  let pending = 0;
-  for (const row of rows) {
-    if (!row.mapping_id || !row.product_id) {
-      recordOrderException({
-        store_id: row.shop_id,
-        order_item_id: row.id,
-        posting_number: row.posting_number,
-        ozon_sku: row.ozon_sku,
-        exception_type: "OUTBOUND_UNBOUND_SKU",
-        message: `Order is waiting for outbound, but Ozon SKU ${row.ozon_sku} is not bound to an inventory product`
-      });
-      pending += 1;
-      continue;
-    }
-    if (Number(row.sku_mapping_id || 0) !== Number(row.mapping_id)) {
-      db.prepare("UPDATE order_items SET sku_mapping_id = ? WHERE id = ?").run(row.mapping_id, row.id);
-    }
-    const existed = get(`
-      SELECT id, status, product_id FROM inventory_movements
-      WHERE related_order_item_id = ? AND source_type = 'order_outbound'
-      LIMIT 1
-    `, [row.id]);
-    if (existed) {
-      if (existed.status !== "posted" || Number(existed.product_id) !== Number(row.product_id)) {
-        db.prepare(`
-          UPDATE inventory_movements
-          SET product_id = ?, shop_id = ?, sku_mapping_id = ?, owner_person_id = ?,
-            quantity_delta = ?, unit_cost = ?, amount = ?, status = 'posted', note = 'Restored by outbound sync'
-          WHERE id = ?
-        `).run(
-          row.product_id,
-          row.shop_id,
-          row.mapping_id,
-          row.person_id,
-          -Math.abs(Number(row.quantity || 1)),
-          row.purchase_cost || row.frozen_purchase_cost || 0,
-          Math.abs(Number(row.quantity || 1)) * Number(row.purchase_cost || row.frozen_purchase_cost || 0),
-          existed.id
-        );
-        rebuildInventoryCurrentForProduct(existed.product_id);
-        rebuildInventoryCurrentForProduct(row.product_id);
-      }
-      continue;
-    }
-    const qty = -Math.abs(Number(row.quantity || 1));
-    postInventory({
-      product_id: row.product_id,
-      shop_id: row.shop_id,
-      sku_mapping_id: row.mapping_id,
-      owner_person_id: row.person_id,
-      source_type: "order_outbound",
-      source_ref: row.posting_number,
-      quantity_delta: qty,
-      unit_cost: row.purchase_cost || row.frozen_purchase_cost || 0,
-      amount: Math.abs(qty) * Number(row.purchase_cost || row.frozen_purchase_cost || 0),
-      related_posting_number: row.posting_number,
-      related_order_item_id: row.id,
-      note: "Created by outbound sync"
-    });
-    const outboundExists = get(`
-      SELECT id FROM outbound_records
-      WHERE (order_item_id = ? OR (order_item_id IS NULL AND order_ref = ? AND product_id = ? AND (COALESCE(ozon_sku, '') = '' OR ozon_sku = ?)))
-        AND status != 'cancelled'
-      LIMIT 1
-    `, [row.id, row.posting_number, row.product_id, row.ozon_sku || ""]);
-    if (outboundExists) {
-      db.prepare(`
-        UPDATE outbound_records
-        SET shop_id = ?, online_product_id = ?, order_item_id = ?, ozon_sku = ?, person_id = ?, quantity = ?, reason = 'order', status = 'deducted', note = 'Updated by outbound sync'
-        WHERE id = ?
-      `).run(row.shop_id, row.online_product_id, row.id, row.ozon_sku, row.person_id, Math.abs(Number(row.quantity || 1)), outboundExists.id);
-    } else {
-      db.prepare(`
-        INSERT INTO outbound_records (product_id, shop_id, online_product_id, order_ref, order_item_id, ozon_sku, person_id, quantity, reason, status, note)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'order', 'deducted', ?)
-      `).run(row.product_id, row.shop_id, row.online_product_id, row.posting_number, row.id, row.ozon_sku, row.person_id, Math.abs(Number(row.quantity || 1)), "Created by outbound sync");
-    }
-    db.prepare(`
-      UPDATE order_exceptions SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP
-      WHERE store_id = ? AND posting_number = ? AND ozon_sku = ? AND exception_type IN ('UNMAPPED_SKU', 'OUTBOUND_UNBOUND_SKU')
-    `).run(row.shop_id, row.posting_number, row.ozon_sku);
-    deducted += 1;
-  }
-  return { deducted, pending };
 }
 
 function saveRawPosting(shop, posting) {
@@ -4040,19 +4594,21 @@ function saveRawPosting(shop, posting) {
   );
 }
 
-function saveProfitItem({ orderItemId, product, estimated, quantity, salePrice, settlement }) {
+function saveProfitItem({ orderItemId, product, estimated, quantity, salePrice, settlement, order = null, item = null }) {
+  const existing = get("SELECT is_locked, profit_status FROM order_profit_items WHERE order_item_id = ?", [orderItemId]);
+  if (existing && profitItemIsLocked(existing) && settlement !== "accrued") return;
   const qty = Number(quantity || 1);
   const saleAmount = Number(salePrice || 0) * qty;
   const purchaseCost = Number(product.purchase_cost || 0) * qty;
   const domesticShipping = Number(product.domestic_shipping || 0) * qty;
   const internationalShipping = Number(estimated.freight ?? product.international_shipping ?? 0) * qty;
-  const packagingCost = Number(product.handling_fee || 0) * qty;
+  const packagingCost = packagingFeeForSaleAmount(saleAmount);
   const commission = Number(estimated.commission || 0);
   const ozonServiceFee = Number(estimated.paymentFee || 0) + Number(estimated.withdrawalFee || 0);
-  const returnLoss = Number(estimated.expectedReturnLoss || 0);
+  const returnLoss = estimateOrderItemReturnLoss({ order, item, product, estimated, quantity: qty, salePrice });
   const advertisingCost = Number(estimated.advertisingCost || 0);
   const grossProfit = saleAmount - purchaseCost - domesticShipping - internationalShipping - packagingCost - commission;
-  const netProfit = Number(estimated.profit || 0);
+  const netProfit = roundMoney(saleAmount - purchaseCost - domesticShipping - internationalShipping - packagingCost - commission - ozonServiceFee - returnLoss - advertisingCost);
   const commissionRate = saleAmount ? commission / saleAmount : 0;
 
   db.prepare(`
@@ -4092,6 +4648,18 @@ function saveProfitItem({ orderItemId, product, estimated, quantity, salePrice, 
     netProfit,
     settlement === "accrued" ? "accrued" : "estimated"
   );
+}
+
+function syncOrderItemProfitFromBreakdown(orderItemId, settlement) {
+  const row = get("SELECT net_profit_cny, is_locked, profit_status FROM order_profit_items WHERE order_item_id = ?", [orderItemId]);
+  if (!row) return;
+  if (profitItemIsLocked(row) && settlement !== "accrued") return;
+  const profit = roundMoney(row.net_profit_cny || 0);
+  if (settlement === "accrued") {
+    db.prepare("UPDATE order_items SET estimated_profit = ?, actual_profit = ?, settlement_state = 'accrued' WHERE id = ?").run(profit, profit, orderItemId);
+  } else {
+    db.prepare("UPDATE order_items SET estimated_profit = ?, actual_profit = 0, settlement_state = ? WHERE id = ?").run(profit, settlement || "pending", orderItemId);
+  }
 }
 
 function recordOrderException(body) {
@@ -4453,6 +5021,28 @@ function parseJson(value) {
   }
 }
 
+function onlineImageFallback(primaryImage, imageUrl, imagesJson, rawJson) {
+  const direct = String(primaryImage || imageUrl || "").trim();
+  if (direct) return direct;
+  const images = parseJson(imagesJson);
+  if (Array.isArray(images)) {
+    const candidate = images.map((item) => String(item || "").trim()).find(Boolean);
+    if (candidate) return candidate;
+  }
+  const raw = parseJson(rawJson) || {};
+  return [
+    raw.primary_image,
+    raw.primary_image_url,
+    raw.image_url,
+    raw.image,
+    raw.picture,
+    raw.main_image,
+    ...(Array.isArray(raw.images) ? raw.images : []),
+    ...(Array.isArray(raw.images360) ? raw.images360 : []),
+    ...(Array.isArray(raw.image_urls) ? raw.image_urls : [])
+  ].map((item) => String(item || "").trim()).find(Boolean) || "";
+}
+
 function stockSyncFilters(shopId, productId) {
   if (!productId) return {};
   const rows = all(`
@@ -4661,10 +5251,77 @@ function firstJsonItem(value) {
   return Array.isArray(parsed) ? parsed[0] || "" : "";
 }
 
+function onlineProductSpec(online = {}) {
+  const attrs = parseJson(online.attributes_json) || {};
+  const raw = parseJson(online.raw_json) || {};
+  const merged = { ...raw, ...attrs };
+  const weight = onlineAttrNumber(merged, ["package_weight_g", "weight", "вес", "重量"]);
+  const weightUnit = String(onlineAttrValue(merged, ["weight_unit", "unit", "единица веса"]) || "").toLowerCase();
+  const volumeWeight = onlineAttrNumber(merged, ["volume_weight", "объемный вес", "体积重"]);
+  const length = onlineAttrNumber(merged, ["length", "depth", "длина", "глубина", "长"]);
+  const width = onlineAttrNumber(merged, ["width", "ширина", "宽"]);
+  const height = onlineAttrNumber(merged, ["height", "высота", "高"]);
+  const dimensionUnit = String(onlineAttrValue(merged, ["dimension_unit", "единица измерения", "unit"]) || "").toLowerCase();
+  return {
+    weight_g: weight > 0 ? normalizeWeightGrams(weight, weightUnit) : (volumeWeight > 0 ? volumeWeight * 1000 : 0),
+    length_cm: normalizeDimensionCm(length, dimensionUnit),
+    width_cm: normalizeDimensionCm(width, dimensionUnit),
+    height_cm: normalizeDimensionCm(height, dimensionUnit),
+    volume_weight: volumeWeight
+  };
+}
+
 function inferWeightGrams(attrs) {
   const weight = Number(attrs.weight || 0);
   if (weight > 0) return String(attrs.weight_unit || "").toLowerCase().includes("kg") ? weight * 1000 : weight;
   return Number(attrs.volume_weight || 0) ? Number(attrs.volume_weight || 0) * 1000 : 0;
+}
+
+function onlineAttrValue(attrs = {}, names = []) {
+  const wanted = names.map((item) => String(item).toLowerCase());
+  const row = flattenOnlineAttributes(attrs).find((item) => {
+    const name = String(item.name || "").toLowerCase();
+    return wanted.some((key) => name === key || name.includes(key));
+  });
+  return row?.value ?? "";
+}
+
+function onlineAttrNumber(attrs = {}, names = []) {
+  const raw = onlineAttrValue(attrs, names);
+  const match = String(raw ?? "").replace(",", ".").match(/-?\d+(\.\d+)?/);
+  return match ? Number(match[0]) : 0;
+}
+
+function flattenOnlineAttributes(attrs = {}) {
+  if (Array.isArray(attrs)) {
+    return attrs.flatMap((item) => {
+      const name = item.name || item.attribute_name || item.attribute || item.id || item.attribute_id || "";
+      const values = Array.isArray(item.values) ? item.values : [item.value ?? item.values ?? ""];
+      return values.map((value) => ({
+        name,
+        value: typeof value === "object" ? value.value || value.name || JSON.stringify(value) : value
+      })).filter((entry) => entry.name && entry.value);
+    });
+  }
+  return Object.entries(attrs || {}).map(([name, value]) => ({
+    name,
+    value: Array.isArray(value) ? value.join("/") : value
+  })).filter((entry) => entry.name && entry.value !== undefined && entry.value !== null && entry.value !== "");
+}
+
+function normalizeWeightGrams(value, unit = "") {
+  const number = Number(value || 0);
+  if (!number) return 0;
+  if (unit.includes("kg") || unit.includes("кг")) return number * 1000;
+  return number;
+}
+
+function normalizeDimensionCm(value, unit = "") {
+  const number = Number(value || 0);
+  if (!number) return 0;
+  if (unit.includes("mm") || unit.includes("мм")) return number / 10;
+  if (unit.includes("m") && !unit.includes("cm") && !unit.includes("см")) return number * 100;
+  return number;
 }
 
 function parseDate(value) {
@@ -4680,14 +5337,39 @@ function normalizeSyncDate(value) {
   return String(value).slice(0, 10);
 }
 
+function chinaDateKey(value) {
+  const date = parseDate(value);
+  if (!date) return "";
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
+}
+
+function chinaDateSql(expr) {
+  return `substr(datetime(${expr}, '+8 hours'), 1, 10)`;
+}
+
 function todayDateKey() {
-  return new Date().toISOString().slice(0, 10);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
 }
 
 function dateKeyDaysAgo(days) {
   const date = new Date();
   date.setUTCDate(date.getUTCDate() - Number(days || 0));
-  return date.toISOString().slice(0, 10);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
 }
 
 function nextDateKey(value) {
@@ -4816,6 +5498,69 @@ export function updateLogisticsRule(id, body) {
 export function deleteLogisticsRule(id) {
   db.prepare("UPDATE logistics_fee_rules SET enabled = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(Number(id));
   return { ok: true };
+}
+
+export function orderCancellationRules() {
+  return all("SELECT * FROM order_cancellation_rules ORDER BY enabled DESC, priority ASC, id ASC");
+}
+
+export function createOrderCancellationRule(body) {
+  const result = db.prepare(`
+    INSERT INTO order_cancellation_rules
+    (name, match_text, match_mode, initiator_label, reason_label, reason_code, reason_group_label, accounting_hint, priority, enabled, note)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    requiredText(body.name, "规则名称不能为空"),
+    requiredText(body.match_text, "匹配文本不能为空"),
+    body.match_mode || "contains",
+    body.initiator_label || "",
+    body.reason_label || "",
+    body.reason_code || "other",
+    body.reason_group_label || "其他取消/退货原因",
+    body.accounting_hint || "",
+    Number(body.priority ?? 100),
+    Number(body.enabled ?? 1),
+    body.note || ""
+  );
+  invalidateOrderCancellationRuleCache();
+  return { id: Number(result.lastInsertRowid) };
+}
+
+export function updateOrderCancellationRule(id, body) {
+  const existing = get("SELECT * FROM order_cancellation_rules WHERE id = ?", [Number(id)]);
+  if (!existing) throw new Error("取消/退货规则不存在");
+  db.prepare(`
+    UPDATE order_cancellation_rules
+    SET name = ?, match_text = ?, match_mode = ?, initiator_label = ?, reason_label = ?,
+      reason_code = ?, reason_group_label = ?, accounting_hint = ?, priority = ?, enabled = ?, note = ?,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(
+    requiredText(body.name ?? existing.name, "规则名称不能为空"),
+    requiredText(body.match_text ?? existing.match_text, "匹配文本不能为空"),
+    body.match_mode ?? existing.match_mode,
+    body.initiator_label ?? existing.initiator_label,
+    body.reason_label ?? existing.reason_label,
+    body.reason_code ?? existing.reason_code,
+    body.reason_group_label ?? existing.reason_group_label,
+    body.accounting_hint ?? existing.accounting_hint,
+    Number(body.priority ?? existing.priority),
+    Number(body.enabled ?? existing.enabled),
+    body.note ?? existing.note,
+    Number(id)
+  );
+  invalidateOrderCancellationRuleCache();
+  return { ok: true };
+}
+
+export function deleteOrderCancellationRule(id) {
+  db.prepare("UPDATE order_cancellation_rules SET enabled = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(Number(id));
+  invalidateOrderCancellationRuleCache();
+  return { ok: true };
+}
+
+export function testOrderCancellationRule(body = {}) {
+  return testCancellationRule(body);
 }
 
 function requiredText(value, message) {

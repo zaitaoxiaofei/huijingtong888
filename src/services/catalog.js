@@ -1,5 +1,8 @@
 export {
   products,
+  selectionProducts,
+  selectionProduct,
+  productImage,
   hiddenProducts,
   restoreProduct,
   createProduct,

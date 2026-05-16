@@ -259,6 +259,9 @@ export function initDb() {
       gross_profit_cny REAL NOT NULL DEFAULT 0,
       net_profit_cny REAL NOT NULL DEFAULT 0,
       profit_status TEXT NOT NULL DEFAULT 'estimated',
+      is_locked INTEGER NOT NULL DEFAULT 0,
+      locked_at TEXT,
+      lock_reason TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -283,6 +286,67 @@ export function initDb() {
       raw_json TEXT,
       synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(shop_id, operation_id, service_type)
+    );
+
+    CREATE TABLE IF NOT EXISTS analytics_shop_daily (
+      date_key TEXT NOT NULL,
+      shop_id INTEGER NOT NULL REFERENCES shops(id),
+      order_count INTEGER NOT NULL DEFAULT 0,
+      item_quantity INTEGER NOT NULL DEFAULT 0,
+      revenue REAL NOT NULL DEFAULT 0,
+      estimated_profit REAL NOT NULL DEFAULT 0,
+      confirmed_profit REAL NOT NULL DEFAULT 0,
+      current_profit REAL NOT NULL DEFAULT 0,
+      cancelled_orders INTEGER NOT NULL DEFAULT 0,
+      cancelled_revenue REAL NOT NULL DEFAULT 0,
+      return_orders INTEGER NOT NULL DEFAULT 0,
+      return_quantity INTEGER NOT NULL DEFAULT 0,
+      return_revenue REAL NOT NULL DEFAULT 0,
+      refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (date_key, shop_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS analytics_product_profit_daily (
+      date_key TEXT NOT NULL,
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      shop_id INTEGER NOT NULL REFERENCES shops(id),
+      order_count INTEGER NOT NULL DEFAULT 0,
+      item_quantity INTEGER NOT NULL DEFAULT 0,
+      revenue REAL NOT NULL DEFAULT 0,
+      estimated_profit REAL NOT NULL DEFAULT 0,
+      confirmed_profit REAL NOT NULL DEFAULT 0,
+      current_profit REAL NOT NULL DEFAULT 0,
+      refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (date_key, product_id, shop_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS analytics_sku_profit_daily (
+      date_key TEXT NOT NULL,
+      shop_id INTEGER NOT NULL REFERENCES shops(id),
+      ozon_sku TEXT NOT NULL,
+      product_id INTEGER REFERENCES products(id),
+      order_count INTEGER NOT NULL DEFAULT 0,
+      item_quantity INTEGER NOT NULL DEFAULT 0,
+      revenue REAL NOT NULL DEFAULT 0,
+      estimated_profit REAL NOT NULL DEFAULT 0,
+      confirmed_profit REAL NOT NULL DEFAULT 0,
+      current_profit REAL NOT NULL DEFAULT 0,
+      cancelled_orders INTEGER NOT NULL DEFAULT 0,
+      cancelled_quantity INTEGER NOT NULL DEFAULT 0,
+      cancelled_revenue REAL NOT NULL DEFAULT 0,
+      return_orders INTEGER NOT NULL DEFAULT 0,
+      return_quantity INTEGER NOT NULL DEFAULT 0,
+      return_revenue REAL NOT NULL DEFAULT 0,
+      refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (date_key, shop_id, ozon_sku)
+    );
+
+    CREATE TABLE IF NOT EXISTS analytics_cache (
+      cache_type TEXT NOT NULL,
+      cache_key TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (cache_type, cache_key)
     );
 
     CREATE TABLE IF NOT EXISTS inventory_current (
@@ -311,6 +375,15 @@ export function initDb() {
     CREATE TABLE IF NOT EXISTS exception_task_states (
       task_id TEXT PRIMARY KEY,
       status TEXT NOT NULL DEFAULT 'open',
+      note TEXT,
+      updated_by_person_id INTEGER REFERENCES people(id),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS historical_profit_reviews (
+      order_item_id INTEGER PRIMARY KEY REFERENCES order_items(id) ON DELETE CASCADE,
+      review_status TEXT NOT NULL DEFAULT 'pending',
       note TEXT,
       updated_by_person_id INTEGER REFERENCES people(id),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -475,6 +548,23 @@ export function initDb() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS order_cancellation_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      match_text TEXT NOT NULL,
+      match_mode TEXT NOT NULL DEFAULT 'contains',
+      initiator_label TEXT NOT NULL DEFAULT '',
+      reason_label TEXT NOT NULL DEFAULT '',
+      reason_code TEXT NOT NULL DEFAULT 'other',
+      reason_group_label TEXT NOT NULL DEFAULT '其他取消/退货原因',
+      accounting_hint TEXT NOT NULL DEFAULT '',
+      priority INTEGER NOT NULL DEFAULT 100,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   migrateDb();
@@ -588,6 +678,12 @@ function migrateDb() {
   addColumn("online_products", "raw_json", "TEXT");
   addColumn("online_products", "ozon_updated_at", "TEXT");
   addColumn("online_products", "updated_at", "TEXT");
+  addColumn("ozon_finance_items", "amount_cny", "REAL NOT NULL DEFAULT 0");
+  addColumn("ozon_finance_items", "accruals_for_sale_cny", "REAL NOT NULL DEFAULT 0");
+  addColumn("ozon_finance_items", "sale_commission_cny", "REAL NOT NULL DEFAULT 0");
+  addColumn("ozon_finance_items", "delivery_charge_cny", "REAL NOT NULL DEFAULT 0");
+  addColumn("ozon_finance_items", "return_delivery_charge_cny", "REAL NOT NULL DEFAULT 0");
+  addColumn("ozon_finance_items", "exchange_rate", "REAL NOT NULL DEFAULT 11.32");
   addColumn("orders", "tracking_stage", "TEXT NOT NULL DEFAULT 'pending_stock'");
   addColumn("orders", "external_tracking_url", "TEXT");
   addColumn("orders", "sync_state", "TEXT NOT NULL DEFAULT 'open'");
@@ -603,6 +699,10 @@ function migrateDb() {
   addColumn("orders", "cancel_loss_applies", "INTEGER NOT NULL DEFAULT 0");
   addColumn("order_items", "ozon_name", "TEXT");
   addColumn("order_items", "ozon_image_url", "TEXT");
+  addColumn("order_items", "ozon_product_id", "TEXT");
+  addColumn("order_profit_items", "is_locked", "INTEGER NOT NULL DEFAULT 0");
+  addColumn("order_profit_items", "locked_at", "TEXT");
+  addColumn("order_profit_items", "lock_reason", "TEXT");
   addColumn("inbound_records", "purchase_order_id", "INTEGER REFERENCES purchase_orders(id)");
   addColumn("inbound_records", "purchase_order_item_id", "INTEGER REFERENCES purchase_order_items(id)");
   addColumn("inbound_records", "qc_status", "TEXT NOT NULL DEFAULT 'pending'");
@@ -661,13 +761,43 @@ function migrateDb() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS order_cancellation_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      match_text TEXT NOT NULL,
+      match_mode TEXT NOT NULL DEFAULT 'contains',
+      initiator_label TEXT NOT NULL DEFAULT '',
+      reason_label TEXT NOT NULL DEFAULT '',
+      reason_code TEXT NOT NULL DEFAULT 'other',
+      reason_group_label TEXT NOT NULL DEFAULT '其他取消/退货原因',
+      accounting_hint TEXT NOT NULL DEFAULT '',
+      priority INTEGER NOT NULL DEFAULT 100,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS analytics_cache (
+      cache_type TEXT NOT NULL,
+      cache_key TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (cache_type, cache_key)
+    );
   `);
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_raw_orders_store_posting ON ozon_orders_raw(store_id, posting_number);
     CREATE INDEX IF NOT EXISTS idx_profit_order_item ON order_profit_items(order_item_id);
+    CREATE INDEX IF NOT EXISTS idx_profit_status_locked ON order_profit_items(profit_status, is_locked, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_finance_posting ON ozon_finance_items(shop_id, posting_number);
     CREATE INDEX IF NOT EXISTS idx_finance_operation_date ON ozon_finance_items(operation_date DESC);
+    CREATE INDEX IF NOT EXISTS idx_analytics_shop_daily_date_shop ON analytics_shop_daily(date_key DESC, shop_id);
+    CREATE INDEX IF NOT EXISTS idx_analytics_product_daily_date_shop ON analytics_product_profit_daily(date_key DESC, shop_id, product_id);
+    CREATE INDEX IF NOT EXISTS idx_analytics_sku_daily_date_shop ON analytics_sku_profit_daily(date_key DESC, shop_id, ozon_sku);
+    CREATE INDEX IF NOT EXISTS idx_analytics_cache_type_key ON analytics_cache(cache_type, cache_key);
     CREATE INDEX IF NOT EXISTS idx_exceptions_status ON order_exceptions(status, exception_type);
     CREATE INDEX IF NOT EXISTS idx_exception_task_states_status ON exception_task_states(status, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_online_product_actions_product ON online_product_actions(online_product_id, created_at DESC);
@@ -676,22 +806,31 @@ function migrateDb() {
     CREATE INDEX IF NOT EXISTS idx_outbound_order_item ON outbound_records(order_item_id);
     CREATE INDEX IF NOT EXISTS idx_outbound_order_sku ON outbound_records(order_ref, product_id, ozon_sku);
     CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
+    CREATE INDEX IF NOT EXISTS idx_order_items_order_sku ON order_items(order_id, ozon_sku);
     CREATE INDEX IF NOT EXISTS idx_order_items_mapping ON order_items(sku_mapping_id);
+    CREATE INDEX IF NOT EXISTS idx_order_items_order_mapping ON order_items(order_id, sku_mapping_id);
     CREATE INDEX IF NOT EXISTS idx_order_items_sku ON order_items(ozon_sku);
     CREATE INDEX IF NOT EXISTS idx_sku_mappings_product_shop ON sku_mappings(product_id, shop_id);
     CREATE INDEX IF NOT EXISTS idx_sku_mappings_shop_sku_active ON sku_mappings(shop_id, ozon_sku, active);
+    CREATE INDEX IF NOT EXISTS idx_sku_mappings_shop_offer_active ON sku_mappings(shop_id, offer_id, active);
     CREATE INDEX IF NOT EXISTS idx_orders_shop_stage ON orders(shop_id, tracking_stage);
     CREATE INDEX IF NOT EXISTS idx_orders_sync_state ON orders(sync_state, ordered_at);
     CREATE INDEX IF NOT EXISTS idx_orders_ordered_at ON orders(ordered_at DESC);
     CREATE INDEX IF NOT EXISTS idx_orders_shop_ordered_at ON orders(shop_id, ordered_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_status_ordered_at ON orders(status, ordered_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_shop_status_ordered_at ON orders(shop_id, status, ordered_at DESC);
     CREATE INDEX IF NOT EXISTS idx_orders_posting ON orders(posting_number);
     CREATE INDEX IF NOT EXISTS idx_online_products_shop_status ON online_products(shop_id, status);
     CREATE INDEX IF NOT EXISTS idx_online_products_shop_sku ON online_products(shop_id, ozon_sku);
+    CREATE INDEX IF NOT EXISTS idx_online_products_shop_offer ON online_products(shop_id, offer_id);
     CREATE INDEX IF NOT EXISTS idx_online_products_synced ON online_products(synced_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_order_marks_type_order ON order_marks(mark_type, order_id);
+    CREATE INDEX IF NOT EXISTS idx_order_label_prints_order ON order_label_prints(order_id, printed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_logistics_rules_match ON logistics_fee_rules(enabled, carrier, channel, min_weight_g, max_weight_g);
     CREATE INDEX IF NOT EXISTS idx_ozon_stock_sku ON ozon_stock_snapshots(shop_id, ozon_sku, stock_type);
     CREATE INDEX IF NOT EXISTS idx_ozon_stock_product ON ozon_stock_snapshots(product_id, synced_at DESC);
     CREATE INDEX IF NOT EXISTS idx_stock_warehouse_rules ON stock_warehouse_rules(enabled, priority);
+    CREATE INDEX IF NOT EXISTS idx_order_cancellation_rules_enabled ON order_cancellation_rules(enabled, priority);
     CREATE INDEX IF NOT EXISTS idx_procurement_status ON procurement_requests(status, purchase_order_id);
     CREATE INDEX IF NOT EXISTS idx_procurement_status_created ON procurement_requests(status, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_procurement_product_status ON procurement_requests(product_id, status);
@@ -708,11 +847,16 @@ function migrateDb() {
     CREATE INDEX IF NOT EXISTS idx_inventory_source_ref ON inventory_movements(source_type, source_ref);
     CREATE INDEX IF NOT EXISTS idx_inventory_related_posting ON inventory_movements(related_posting_number, product_id, source_type, status);
     CREATE INDEX IF NOT EXISTS idx_exchange_rates_pair_date ON exchange_rates(currency_from, currency_to, effective_date DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_historical_profit_reviews_status ON historical_profit_reviews(review_status, updated_at DESC);
   `);
 
   seedExchangeRate();
   seedLogisticsRules();
+  backfillLogisticsRules();
   seedStockWarehouseRules();
+  seedOrderCancellationRules();
+  upgradeOrderCancellationRules();
+  repairCorruptedOrderCancellationRules();
   backfillOutboundAuditFields();
   rebuildInventoryCurrent();
 }
@@ -733,17 +877,80 @@ function seedExchangeRate() {
   `).run();
 }
 
+function defaultLogisticsRules() {
+  return [
+    { name: "CEL 陆空特快 Extra Small", carrier: "CEL", channel: "express", mode: "per_gram", min_weight_g: 1, max_weight_g: 500, min_price_rub: 1, max_price_rub: 1500, base_fee_cny: 0, per_gram_cny: 0.0468, per_ticket_cny: 3.12, note: "CEL 轻小件 Extra Small 档，陆空特快渠道。" },
+    { name: "CEL 陆空标准 Extra Small", carrier: "CEL", channel: "standard", mode: "per_gram", min_weight_g: 1, max_weight_g: 500, min_price_rub: 1, max_price_rub: 1500, base_fee_cny: 0, per_gram_cny: 0.0364, per_ticket_cny: 3.12, note: "CEL 轻小件 Extra Small 档，陆空标准渠道。" },
+    { name: "CEL 陆运经济 Extra Small", carrier: "CEL", channel: "economy", mode: "per_gram", min_weight_g: 1, max_weight_g: 500, min_price_rub: 1, max_price_rub: 1500, base_fee_cny: 0, per_gram_cny: 0.026, per_ticket_cny: 3.12, note: "CEL 轻小件 Extra Small 档，陆运经济渠道。" },
+    { name: "CEL 陆空特快 Budget", carrier: "CEL", channel: "express", mode: "per_gram", min_weight_g: 501, max_weight_g: 30000, min_price_rub: 1, max_price_rub: 1500, base_fee_cny: 0, per_gram_cny: 0.03432, per_ticket_cny: 23.92, note: "CEL 低客单 Budget 档，陆空特快渠道。" },
+    { name: "CEL 陆空标准 Budget", carrier: "CEL", channel: "standard", mode: "per_gram", min_weight_g: 501, max_weight_g: 30000, min_price_rub: 1, max_price_rub: 1500, base_fee_cny: 0, per_gram_cny: 0.026, per_ticket_cny: 23.92, note: "CEL 低客单 Budget 档，陆空标准渠道。" },
+    { name: "CEL 陆运经济 Budget", carrier: "CEL", channel: "economy", mode: "per_gram", min_weight_g: 501, max_weight_g: 30000, min_price_rub: 1, max_price_rub: 1500, base_fee_cny: 0, per_gram_cny: 0.01768, per_ticket_cny: 23.92, note: "CEL 低客单 Budget 档，陆运经济渠道。" },
+    { name: "CEL 陆空特快 Small", carrier: "CEL", channel: "express", mode: "per_gram", min_weight_g: 1, max_weight_g: 2000, min_price_rub: 1501, max_price_rub: 7000, base_fee_cny: 0, per_gram_cny: 0.0468, per_ticket_cny: 16.64, note: "CEL 小件 Small 档，陆空特快渠道。" },
+    { name: "CEL 陆空标准 Small", carrier: "CEL", channel: "standard", mode: "per_gram", min_weight_g: 1, max_weight_g: 2000, min_price_rub: 1501, max_price_rub: 7000, base_fee_cny: 0, per_gram_cny: 0.0364, per_ticket_cny: 16.64, note: "CEL 小件 Small 档，陆空标准渠道。" },
+    { name: "CEL 陆运经济 Small", carrier: "CEL", channel: "economy", mode: "per_gram", min_weight_g: 1, max_weight_g: 2000, min_price_rub: 1501, max_price_rub: 7000, base_fee_cny: 0, per_gram_cny: 0.026, per_ticket_cny: 16.64, note: "CEL 小件 Small 档，陆运经济渠道。" },
+    { name: "CEL 陆空标准 Big", carrier: "CEL", channel: "standard", mode: "per_gram", min_weight_g: 2001, max_weight_g: 30000, min_price_rub: 1501, max_price_rub: 7000, base_fee_cny: 0, per_gram_cny: 0.026, per_ticket_cny: 37.44, note: "CEL 大件 Big 档，陆空标准渠道。" },
+    { name: "CEL 陆运经济 Big", carrier: "CEL", channel: "economy", mode: "per_gram", min_weight_g: 2001, max_weight_g: 30000, min_price_rub: 1501, max_price_rub: 7000, base_fee_cny: 0, per_gram_cny: 0.01768, per_ticket_cny: 37.44, note: "CEL 大件 Big 档，陆运经济渠道。" },
+    { name: "CEL 陆空特快 Premium Small", carrier: "CEL", channel: "express", mode: "per_gram", min_weight_g: 1, max_weight_g: 5000, min_price_rub: 7001, max_price_rub: 250000, base_fee_cny: 0, per_gram_cny: 0.0468, per_ticket_cny: 22.88, note: "CEL 高客单 Premium Small 档，陆空特快渠道。" },
+    { name: "CEL 陆空标准 Premium Small", carrier: "CEL", channel: "standard", mode: "per_gram", min_weight_g: 1, max_weight_g: 5000, min_price_rub: 7001, max_price_rub: 250000, base_fee_cny: 0, per_gram_cny: 0.0364, per_ticket_cny: 22.88, note: "CEL 高客单 Premium Small 档，陆空标准渠道。" },
+    { name: "CEL 陆运经济 Premium Small", carrier: "CEL", channel: "economy", mode: "per_gram", min_weight_g: 1, max_weight_g: 5000, min_price_rub: 7001, max_price_rub: 250000, base_fee_cny: 0, per_gram_cny: 0.026, per_ticket_cny: 22.88, note: "CEL 高客单 Premium Small 档，陆运经济渠道。" },
+    { name: "CEL 陆空标准 Premium Big", carrier: "CEL", channel: "standard", mode: "per_gram", min_weight_g: 5001, max_weight_g: 30000, min_price_rub: 7001, max_price_rub: 250000, base_fee_cny: 0, per_gram_cny: 0.02912, per_ticket_cny: 64.48, note: "CEL 高客单 Premium Big 档，陆空标准渠道。" },
+    { name: "CEL 陆运经济 Premium Big", carrier: "CEL", channel: "economy", mode: "per_gram", min_weight_g: 5001, max_weight_g: 30000, min_price_rub: 7001, max_price_rub: 250000, base_fee_cny: 0, per_gram_cny: 0.02392, per_ticket_cny: 64.48, note: "CEL 高客单 Premium Big 档，陆运经济渠道。" },
+    { name: "CEL 香港空运 HK", carrier: "CEL", channel: "hk_express", mode: "per_gram", min_weight_g: 1, max_weight_g: 25000, min_price_rub: 1, max_price_rub: 500000, base_fee_cny: 0, per_gram_cny: 0.096, per_ticket_cny: 19, note: "CEL 香港渠道 HK 档，香港空运渠道。" },
+    { name: "中国邮政 500g 以下", carrier: "China Post", channel: "economy", mode: "per_gram", min_weight_g: 1, max_weight_g: 500, min_price_rub: 0, max_price_rub: 999999, base_fee_cny: 0, per_gram_cny: 0.026, per_ticket_cny: 1.9, note: "中国邮政轻小件示例规则：首票 1.9，每克 0.026。" }
+  ];
+}
+
 function seedLogisticsRules() {
   const count = db.prepare("SELECT COUNT(*) AS count FROM logistics_fee_rules").get().count;
   if (count) return;
   const stmt = db.prepare(`
     INSERT INTO logistics_fee_rules
-    (name, carrier, channel, mode, min_weight_g, max_weight_g, min_price_rub, max_price_rub, per_gram_cny, per_ticket_cny, note)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (name, carrier, channel, mode, min_weight_g, max_weight_g, min_price_rub, max_price_rub, base_fee_cny, per_gram_cny, per_ticket_cny, note)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  stmt.run("CEL 陆空标准 Extra Small", "CEL", "standard", "per_gram", 1, 500, 1, 1500, 0.0364, 3.12, "当前硬编码公式中的轻小件陆空标准档，后续会由规则表驱动。");
-  stmt.run("CEL 陆运经济 Extra Small", "CEL", "economy", "per_gram", 1, 500, 1, 1500, 0.026, 3.12, "当前硬编码公式中的轻小件陆运经济档。");
-  stmt.run("中国邮政 500g 以下", "China Post", "economy", "per_gram", 1, 500, 0, 999999, 0.026, 1.9, "按你提供的轻小件示例预置：首票 1.9，每克 0.026。");
+  for (const rule of defaultLogisticsRules()) {
+    stmt.run(
+      rule.name,
+      rule.carrier,
+      rule.channel,
+      rule.mode,
+      rule.min_weight_g,
+      rule.max_weight_g,
+      rule.min_price_rub,
+      rule.max_price_rub,
+      rule.base_fee_cny,
+      rule.per_gram_cny,
+      rule.per_ticket_cny,
+      rule.note
+    );
+  }
+}
+
+function backfillLogisticsRules() {
+  const exists = db.prepare("SELECT id FROM logistics_fee_rules WHERE name = ? LIMIT 1");
+  const insert = db.prepare(`
+    INSERT INTO logistics_fee_rules
+    (name, carrier, channel, mode, min_weight_g, max_weight_g, min_price_rub, max_price_rub, base_fee_cny, per_gram_cny, per_ticket_cny, enabled, note)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (const rule of defaultLogisticsRules()) {
+    if (exists.get(rule.name)) continue;
+    insert.run(
+      rule.name,
+      rule.carrier,
+      rule.channel,
+      rule.mode,
+      rule.min_weight_g,
+      rule.max_weight_g,
+      rule.min_price_rub,
+      rule.max_price_rub,
+      rule.base_fee_cny,
+      rule.per_gram_cny,
+      rule.per_ticket_cny,
+      1,
+      rule.note
+    );
+  }
 }
 
 function seedStockWarehouseRules() {
@@ -766,6 +973,75 @@ function seedStockWarehouseRules() {
   stmt.run("хуньчун", "fbp_real", 18, "珲春仓俄文拼写。");
   stmt.run("混春", "fbp_real", 19, "仓库名常见错字兜底。");
   stmt.run("混川", "fbp_real", 20, "仓库名常见错字兜底。");
+}
+
+function seedOrderCancellationRules() {
+  const count = db.prepare("SELECT COUNT(*) AS count FROM order_cancellation_rules").get().count;
+  if (count) return;
+  const stmt = db.prepare(`
+    INSERT INTO order_cancellation_rules
+    (name, match_text, match_mode, initiator_label, reason_label, reason_code, reason_group_label, accounting_hint, priority, note)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  stmt.run("买家未取货", "не забрал", "contains", "买家", "买家未取货", "unclaimed_or_rejected", "拒收/未取", "通常不计入有效销售，真实损失按拒收/未取模型处理。", 10, "俄语未取货关键词");
+  stmt.run("拒收/未签收", "not accepted", "contains", "买家", "拒收/未签收", "unclaimed_or_rejected", "拒收/未取", "通常不计入有效销售，真实损失按拒收/未取模型处理。", 11, "英文拒收关键词");
+  stmt.run("退货/退款", "возврат", "contains", "", "退货/退款", "return_or_refund", "退货/退款", "通常不计入有效销售，真实损失按退货模型处理。", 20, "俄语退货关键词");
+  stmt.run("配送时效问题", "срок доставки", "contains", "", "不满意配送时间", "delivery_delay", "配送时效问题", "需结合结果类型判断；若只是履约前取消，通常不计真实亏损。", 30, "配送时效问题");
+  stmt.run("商品缺货", "stock", "contains", "卖家", "商品缺货", "out_of_stock", "缺货", "通常属于履约前取消，不计入真实销售和真实亏损。", 40, "缺货类原因");
+  stmt.run("信息填写错误", "ошиб", "contains", "买家", "下单信息填写错误", "input_error", "信息错误", "通常属于履约前取消，不计入真实销售和真实亏损。", 50, "填写错误类原因");
+  stmt.run("找到更便宜商品", "дешев", "contains", "买家", "找到更便宜商品", "price_change", "价格原因取消", "通常属于履约前取消，不计入真实销售和真实亏损。", 60, "价格因素");
+  stmt.run("质检/平台核验", "проверка товара", "contains", "平台", "质检/平台核验", "quality_inspection", "质检/平台核验", "通常不作为正常销售，也不应直接按用户退货损失处理。", 70, "质检核验类订单");
+}
+
+function upgradeOrderCancellationRules() {
+  const defaults = [
+    ["买家拒收不合适", "товар не подошел", "contains", "买家", "买家拒收：商品不合适", "unclaimed_or_rejected", "拒收/未取", "通常不计入有效销售，真实损失按拒收/未取模型处理。", 12, "真实高频：买家签收点/派送时拒收，商品不合适"],
+    ["买家拒收质量问题", "недоволен качеством товара", "contains", "买家", "买家拒收：质量问题", "aftersale_quality_issue", "签收后/拒收质量问题", "通常不计入有效销售，需要重点核对是否按质量问题退货模型处理。", 13, "真实高频：对商品质量不满意"],
+    ["买家拒收发错货", "в заказе не тот товар", "contains", "卖家", "买家拒收：发错货", "wrong_item", "发错货/错配", "通常不计入有效销售，需要重点核对是否按售后责任损失处理。", 14, "真实高频：订单内商品不符"],
+    ["买家未提供护照", "паспортные данные", "contains", "买家", "买家未提供护照信息", "missing_passport", "证件信息缺失", "通常属于已发货后无法清关/妥投场景，不计入有效销售，需按拒收/退回模型核对。", 15, "真实样本：未提供护照数据"],
+    ["平台无法妥投", "не удалось доставить заказ", "contains", "平台", "平台未能完成配送", "delivery_failed", "配送失败", "通常不计入有效销售，需要结合是否已发货确认损失口径。", 16, "真实高频：平台配送失败"],
+    ["平台未能登记发运", "не удалось зарегистрировать отправление", "contains", "平台", "平台未能登记发运", "shipment_registration_failed", "发运登记失败", "通常需要结合是否实际发出判断；若未实际履约，可按履约前取消处理。", 17, "真实样本：配送服务登记失败"],
+    ["平台清关失败", "таможенное оформление", "contains", "平台", "清关失败", "customs_failed", "清关失败", "通常属于已发货后异常退回，不计入有效销售，需核对真实损失。", 18, "真实样本：未通过海关"],
+    ["卖家主动取消", "вы отменили заказ", "contains", "卖家", "卖家主动取消", "seller_cancelled", "卖家取消", "通常不计入有效销售；若已发货后取消，需要结合实际履约判断损失。", 19, "真实样本：卖家取消"],
+    ["买家要求卖家取消", "попросил вас отменить заказ", "contains", "买家", "买家要求卖家取消", "buyer_requested_cancel", "买家请求取消", "通常属于履约前取消，不计入真实销售和真实亏损。", 21, "真实样本：买家发起取消请求"],
+    ["库存售罄", "товар закончился на складе", "contains", "卖家", "库存售罄", "out_of_stock", "缺货", "通常属于履约前取消，不计入真实销售和真实亏损。", 22, "真实样本：库存用尽"],
+    ["商品损坏", "товар поврежден", "contains", "物流", "商品损坏", "damaged_in_delivery", "物流破损", "通常属于已履约异常，需要核对平台责任和真实损失归属。", 23, "真实样本：配送过程损坏"],
+    ["平台描述核验", "соответствие описанию", "contains", "平台", "平台描述核验", "quality_inspection", "质检/平台核验", "通常不作为正常销售，也不应直接按用户退货损失处理。", 24, "真实高频：平台描述核验"]
+  ];
+  const exists = db.prepare("SELECT id FROM order_cancellation_rules WHERE name = ? LIMIT 1");
+  const insert = db.prepare(`
+    INSERT INTO order_cancellation_rules
+    (name, match_text, match_mode, initiator_label, reason_label, reason_code, reason_group_label, accounting_hint, priority, enabled, note)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+  `);
+  for (const rule of defaults) {
+    if (exists.get(rule[0])) continue;
+    insert.run(...rule);
+  }
+}
+
+function repairCorruptedOrderCancellationRules() {
+  const updates = [
+    [21, "商品不合适", "товар не подошел", "", "商品不合适", "商品不适配"],
+    [22, "发错货/货不对版", "в заказе не тот товар", "卖家", "发错货", "发错货/错配"],
+    [23, "平台配送失败", "не удалось доставить заказ", "平台", "配送失败", "配送失败/妥投失败"],
+    [24, "卖家取消订单", "вы отменили заказ", "卖家", "卖家取消", "卖家取消"]
+  ];
+  const stmt = db.prepare(`
+    UPDATE order_cancellation_rules
+    SET name = ?, match_text = ?, initiator_label = ?, reason_label = ?, reason_group_label = ?
+    WHERE id = ?
+      AND (
+        name GLOB '*?*'
+        OR match_text GLOB '*?*'
+        OR reason_label GLOB '*?*'
+        OR reason_group_label GLOB '*?*'
+        OR initiator_label GLOB '*?*'
+      )
+  `);
+  for (const [id, name, matchText, initiatorLabel, reasonLabel, reasonGroupLabel] of updates) {
+    stmt.run(name, matchText, initiatorLabel, reasonLabel, reasonGroupLabel, id);
+  }
 }
 
 function backfillOutboundAuditFields() {
@@ -808,6 +1084,14 @@ function rebuildInventoryCurrent() {
     ON CONFLICT(real_product_id) DO UPDATE SET
       available_stock = excluded.available_stock,
       last_updated_at = CURRENT_TIMESTAMP;
+  `);
+}
+
+function cleanupRecursiveProductImageUrls() {
+  db.exec(`
+    UPDATE products
+    SET image_url = ''
+    WHERE image_url GLOB '/api/products/*/image';
   `);
 }
 
@@ -926,6 +1210,8 @@ export function verifyPassword(input, storedHash) {
 export function isLegacyHash(storedHash) {
   return storedHash && !storedHash.startsWith("scrypt:");
 }
+
+cleanupRecursiveProductImageUrls();
 
 if (tableExists("people") && db.prepare("SELECT COUNT(*) AS count FROM people").get().count === 0) {
   const stmt = db.prepare("INSERT INTO people (name, username, role, password_hash) VALUES (?, ?, ?, ?)");

@@ -1,6 +1,11 @@
 import { db } from "../db.js";
 import { recalculateOrderCancelLossFlags } from "../services.js";
 import { stockAlerts } from "./inventory.js";
+import { describeCancellation } from "./order-cancellation.js";
+import { buildOrderOutcomeSql, classifyOrderOutcome } from "./order-outcome.js";
+
+const EXCEPTION_WORKBENCH_CACHE_MS = 30000;
+let exceptionWorkbenchCache = null;
 
 function allLocal(sql, params = {}) {
   const stmt = db.prepare(sql);
@@ -12,13 +17,38 @@ function getLocal(sql, params = {}) {
   return Array.isArray(params) ? stmt.get(...params) : stmt.get(params);
 }
 
+function orderOutcomeLabel(outcome = "") {
+  return {
+    active: "进行中",
+    cancelled_pre_fulfillment: "已取消",
+    rejected_unclaimed: "已拒收/未取",
+    after_delivery_return: "签收后退货",
+    delivered_signed: "已签收"
+  }[String(outcome || "").toLowerCase()] || "进行中";
+}
+
+function orderOutcomeHint(outcome = "") {
+  switch (String(outcome || "").toLowerCase()) {
+    case "cancelled_pre_fulfillment":
+      return "订单在实质履约损失发生前取消，真实售后损失按 0 处理。";
+    case "rejected_unclaimed":
+      return "当前按拒收/未取模型处理，售后损失通常包含货值和收单等拒收损失。";
+    case "after_delivery_return":
+      return "当前按签收后退货模型处理，售后损失通常包含货值、国内/国际运费、包装和平台费用。";
+    case "delivered_signed":
+      return "订单已正常签收，真实售后损失按 0 处理。";
+    default:
+      return "订单仍在进行中，售后损失继续按预估模型展示。";
+  }
+}
+
 export function orders() {
   const rows = allLocal(`
     SELECT o.*, s.name AS shop_name, COUNT(oi.id) AS item_count,
       COALESCE(SUM(oi.quantity), 0) AS total_quantity,
       SUM(oi.sale_price * oi.quantity) AS revenue,
-      SUM(oi.estimated_profit) AS estimated_profit,
-      SUM(oi.actual_profit) AS actual_profit,
+      COALESCE(SUM(CASE WHEN opi.profit_status = 'accrued' OR oi.settlement_state = 'accrued' THEN 0 ELSE COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) END), 0) AS estimated_profit,
+      COALESCE(SUM(CASE WHEN opi.profit_status = 'accrued' OR oi.settlement_state = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE 0 END), 0) AS actual_profit,
       COALESCE(SUM(opi.purchase_cost_cny), 0) AS profit_purchase_cost,
       COALESCE(SUM(opi.domestic_shipping_cny), 0) AS profit_domestic_shipping,
       COALESCE(SUM(opi.international_shipping_cny), 0) AS profit_international_shipping,
@@ -26,14 +56,19 @@ export function orders() {
       COALESCE(SUM(opi.commission_fee_cny), 0) AS profit_commission_fee,
       COALESCE(SUM(opi.ozon_service_fee_cny), 0) AS profit_ozon_service_fee,
       COALESCE(SUM(opi.return_loss_cny), 0) AS profit_return_loss,
+      GROUP_CONCAT(DISTINCT oi.settlement_state) AS settlement_states,
+      GROUP_CONCAT(DISTINCT opi.profit_status) AS profit_statuses,
       GROUP_CONCAT(DISTINCT oi.ozon_sku) AS skus,
       GROUP_CONCAT(oi.ozon_sku || ':' || oi.quantity, '||') AS sku_quantities,
       GROUP_CONCAT(oi.ozon_sku || ':' || oi.sale_price || ':' || oi.quantity, '||') AS sku_prices,
       GROUP_CONCAT(oi.ozon_sku || ':' || COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), ''), '||') AS sku_names,
       GROUP_CONCAT(oi.ozon_sku || ':' || COALESCE(NULLIF(oi.ozon_image_url, ''), NULLIF(op.primary_image, ''), NULLIF(op.image_url, ''), ''), '||') AS sku_images,
+      GROUP_CONCAT(DISTINCT COALESCE(NULLIF(oi.ozon_image_url, ''), NULLIF(op.primary_image, ''), NULLIF(op.image_url, ''), '')) AS order_image_urls,
+      GROUP_CONCAT(DISTINCT CASE WHEN p.id IS NOT NULL THEN COALESCE(p.image_url, '') END) AS inventory_image_urls,
       GROUP_CONCAT(DISTINCT CASE WHEN p.id IS NOT NULL THEN oi.ozon_sku || ':' || p.id END) AS sku_product_ids,
       GROUP_CONCAT(DISTINCT CASE WHEN op.id IS NOT NULL THEN oi.ozon_sku || ':' || op.id END) AS sku_online_product_ids,
       GROUP_CONCAT(DISTINCT CASE WHEN sm.id IS NOT NULL THEN oi.ozon_sku || ':' || sm.id END) AS sku_mapping_ids,
+      GROUP_CONCAT(DISTINCT oi.ozon_sku || ':' || COALESCE(stock.fbs_present, 0) || ':' || COALESCE(stock.fbp_present, 0)) AS sku_stock_summaries,
       GROUP_CONCAT(DISTINCT p.id) AS product_ids,
       GROUP_CONCAT(DISTINCT sm.offer_id) AS offer_ids,
       COUNT(CASE WHEN oi.id IS NOT NULL AND p.id IS NULL THEN 1 END) AS unbound_item_count,
@@ -62,6 +97,13 @@ export function orders() {
     )
     LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1
     LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku
+    LEFT JOIN (
+      SELECT shop_id, ozon_sku,
+        SUM(CASE WHEN stock_type = 'fbs_virtual' THEN present ELSE 0 END) AS fbs_present,
+        SUM(CASE WHEN stock_type = 'fbp_real' THEN present ELSE 0 END) AS fbp_present
+      FROM ozon_stock_snapshots
+      GROUP BY shop_id, ozon_sku
+    ) stock ON stock.shop_id = o.shop_id AND stock.ozon_sku = oi.ozon_sku
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
     LEFT JOIN order_marks om ON om.order_id = o.id
     LEFT JOIN order_label_prints olp ON olp.order_id = o.id
@@ -208,38 +250,255 @@ export function orderDetail(id) {
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
     WHERE oi.order_id = ?
   `, [id]);
-  const finance = allLocal(`
+  const finance = orderDetailFinance(order, items);
+  const outcomeType = classifyOrderOutcome(order);
+  const cancellation = describeCancellation(order);
+  order.outcome_type = outcomeType;
+  order.outcome_label = orderOutcomeLabel(outcomeType);
+  order.outcome_hint = orderOutcomeHint(outcomeType);
+  order.cancel_initiator_label = cancellation.initiator_label;
+  order.cancel_reason_label = cancellation.reason_label;
+  order.cancel_reason_code = cancellation.reason_code;
+  order.cancel_reason_group_label = cancellation.reason_group_label;
+  order.cancel_accounting_hint = cancellation.accounting_hint;
+  order.loss_profile_code = cancellation.loss_profile_code;
+  order.loss_profile_label = cancellation.loss_profile_label;
+  order.loss_formula_text = cancellation.loss_formula_text;
+  return { order, items, finance };
+}
+
+function orderDetailFinance(order, items = []) {
+  const directRows = allLocal(`
     SELECT service_type, service_name,
       COALESCE(SUM(amount), 0) AS amount,
+      COALESCE(SUM(amount_cny), 0) AS amount_cny,
       COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS fee_amount,
+      COALESCE(SUM(CASE WHEN amount_cny < 0 THEN -amount_cny ELSE 0 END), 0) AS fee_amount_cny,
+      COALESCE(MAX(exchange_rate), 0) AS exchange_rate,
+      COALESCE(MAX(currency_code), 'RUB') AS currency_code,
       COUNT(*) AS rows,
       MAX(operation_date) AS operation_date
     FROM ozon_finance_items
     WHERE shop_id = ? AND posting_number = ?
     GROUP BY service_type, service_name
-    ORDER BY fee_amount DESC, ABS(amount) DESC
   `, [order.shop_id, order.posting_number]);
-  return { order, items, finance };
+
+  const parentPosting = trimOrderPostingSuffix(order.posting_number);
+  const extraRows = parentPosting && parentPosting !== order.posting_number
+    ? allLocal(`
+      SELECT service_type, service_name,
+        COALESCE(SUM(amount), 0) AS amount,
+        COALESCE(SUM(amount_cny), 0) AS amount_cny,
+        COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS fee_amount,
+        COALESCE(SUM(CASE WHEN amount_cny < 0 THEN -amount_cny ELSE 0 END), 0) AS fee_amount_cny,
+        COALESCE(MAX(exchange_rate), 0) AS exchange_rate,
+        COALESCE(MAX(currency_code), 'RUB') AS currency_code,
+        COUNT(*) AS rows,
+        MAX(operation_date) AS operation_date
+      FROM ozon_finance_items
+      WHERE shop_id = ?
+        AND posting_number = ?
+        AND LOWER(COALESCE(service_name, '')) LIKE '%marketplaceredistributionofacquiringoperation%'
+      GROUP BY service_type, service_name
+    `, [order.shop_id, parentPosting])
+    : [];
+
+  const exactRows = new Set((directRows || []).map((row) => `${row.service_type}||${row.service_name}`));
+  const totalSale = (items || []).reduce((sum, item) => sum + Number(item.sale_amount_cny || (Number(item.sale_price || 0) * Number(item.quantity || 0))), 0);
+  const orderSale = totalSale || (items?.length ? 1 : 0);
+  const siblingRows = parentPosting && parentPosting !== order.posting_number
+    ? allLocal(`
+      SELECT o.id, o.posting_number,
+        COALESCE(SUM(opi.sale_amount_cny), SUM(oi.sale_price * oi.quantity), 0) AS sale_amount_cny
+      FROM orders o
+      LEFT JOIN order_items oi ON oi.order_id = o.id
+      LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
+      WHERE o.shop_id = ? AND o.posting_number LIKE ?
+      GROUP BY o.id, o.posting_number
+    `, [order.shop_id, `${parentPosting}-%`])
+    : [];
+  const siblingTotalSale = siblingRows.reduce((sum, row) => sum + Number(row.sale_amount_cny || 0), 0);
+  const share = siblingTotalSale > 0
+    ? orderSale / siblingTotalSale
+    : siblingRows.length > 0 ? 1 / siblingRows.length : 1;
+
+  const financeMap = new Map();
+  for (const row of directRows || []) {
+    const key = `${row.service_type}||${row.service_name}`;
+    financeMap.set(key, { ...row });
+  }
+  for (const row of extraRows || []) {
+    const key = `${row.service_type}||${row.service_name}`;
+    if (exactRows.has(key)) continue;
+    financeMap.set(key, scaleFinanceRow(row, share));
+  }
+  return [...financeMap.values()].sort((a, b) => {
+    const feeDiff = Number(b.fee_amount_cny || 0) - Number(a.fee_amount_cny || 0);
+    if (feeDiff) return feeDiff;
+    const amountDiff = Math.abs(Number(b.amount_cny || 0)) - Math.abs(Number(a.amount_cny || 0));
+    if (amountDiff) return amountDiff;
+    return String(a.service_name || "").localeCompare(String(b.service_name || ""));
+  });
 }
 
-export function exceptionWorkbench() {
+function scaleFinanceRow(row = {}, share = 1) {
+  const ratio = Number.isFinite(Number(share)) ? Number(share) : 1;
+  return {
+    ...row,
+    amount: roundFinanceAmount(Number(row.amount || 0) * ratio),
+    amount_cny: roundFinanceAmount(Number(row.amount_cny || 0) * ratio),
+    fee_amount: roundFinanceAmount(Number(row.fee_amount || 0) * ratio),
+    fee_amount_cny: roundFinanceAmount(Number(row.fee_amount_cny || 0) * ratio),
+    rows: Number(row.rows || 0),
+    derived_from_parent_posting: 1
+  };
+}
+
+function trimOrderPostingSuffix(value = "") {
+  const text = String(value || "").trim();
+  const matched = text.match(/^(.*)-\d+$/);
+  return matched?.[1] || text;
+}
+
+function roundFinanceAmount(value) {
+  return Math.round(Number(value || 0) * 100) / 100;
+}
+
+export function exceptionWorkbench(query = {}) {
+  if (query.refresh || query.forceRefresh || query.force_refresh) invalidateExceptionWorkbenchCache();
+  const view = normalizeExceptionWorkbenchView(query.view || query.exceptionView || query.exception_view);
+  const search = String(query.search || query.searchQuery || query.search_query || "").trim();
+  const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 50), 1), 200);
+  const requestedPage = Math.max(Number(query.page || 1), 1);
+  const sortField = normalizeExceptionWorkbenchSortField(query.sortField || query.sort_field);
+  const sortDirection = normalizeExceptionWorkbenchSortDirection(query.sortDirection || query.sort_direction);
+  const dateFrom = normalizeSyncDate(query.dateFrom || query.date_from) || dateKeyDaysAgo(90);
+  const dateTo = normalizeSyncDate(query.dateTo || query.date_to) || exceptionTodayDateKey();
+  const workbench = exceptionWorkbenchBase();
+  const { openTasks, resolvedTasks, counts, generatedAt } = workbench;
+  const scopedOpenTasks = filterExceptionTasksByDate(openTasks, dateFrom, dateTo);
+  const scopedResolvedTasks = filterExceptionTasksByDate(resolvedTasks, dateFrom, dateTo);
+  const scopedCounts = exceptionWorkbenchCounts(scopedOpenTasks);
+  const viewTasks = exceptionTasksForView({ view, openTasks: scopedOpenTasks, resolvedTasks: scopedResolvedTasks });
+  const filteredTasks = filterExceptionWorkbenchTasks(viewTasks, search);
+  const sortedTasks = sortExceptionWorkbenchTasks(filteredTasks, sortField, sortDirection);
+  const total = sortedTasks.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(requestedPage, totalPages);
+  const rows = sortedTasks.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize);
+  return {
+    rows,
+    resolved_rows: scopedResolvedTasks,
+    total,
+    resolved_total: scopedResolvedTasks.length,
+    page,
+    pageSize,
+    view,
+    search,
+    sort_field: sortField,
+    sort_direction: sortDirection,
+    counts: scopedCounts,
+    date_from: dateFrom,
+    date_to: dateTo,
+    generated_at: generatedAt
+  };
+}
+
+export function invalidateExceptionWorkbenchCache() {
+  exceptionWorkbenchCache = null;
+}
+
+function filterExceptionTasksByDate(tasks = [], dateFrom = "", dateTo = "") {
+  return tasks.filter((task) => {
+    const dateKey = chinaDateKey(task.ordered_at || task.created_at || "");
+    if (!dateKey) return true;
+    if (dateFrom && dateKey < dateFrom) return false;
+    if (dateTo && dateKey > dateTo) return false;
+    return true;
+  });
+}
+
+function exceptionWorkbenchCounts(openTasks = []) {
+  return {
+    danger: openTasks.filter((item) => item.level === "danger").length,
+    warning: openTasks.filter((item) => item.level === "warning").length,
+    info: openTasks.filter((item) => item.level === "info").length,
+    order: openTasks.filter((item) => item.type.startsWith("order") || ["print", "profit", "deadline"].includes(item.type)).length,
+    stock: openTasks.filter((item) => item.type === "order_stock_shortage" || item.type.startsWith("stock")).length,
+    profit: openTasks.filter((item) => item.type === "profit").length,
+    deadline: openTasks.filter((item) => item.type === "deadline").length,
+    delivery_timeout: openTasks.filter((item) => item.type === "deadline" && ["delivery", "fulfillment"].includes(item.deadline_kind) && item.level === "danger").length,
+    delivery_warning: openTasks.filter((item) => item.type === "deadline" && ["delivery", "fulfillment"].includes(item.deadline_kind) && item.level !== "danger").length,
+    pickup_timeout: openTasks.filter((item) => item.type === "deadline" && item.deadline_kind === "pickup").length,
+    receipt_timeout: openTasks.filter((item) => item.type === "deadline" && item.deadline_kind === "receipt").length,
+    payment_timeout: openTasks.filter((item) => item.type === "deadline" && item.deadline_kind === "payment").length,
+    cancelled: openTasks.filter((item) => item.type === "cancelled_order").length,
+    binding: openTasks.filter((item) => item.type === "order_binding").length
+  };
+}
+
+export function exceptionWorkbenchSyncWindow() {
+  const workbench = exceptionWorkbenchBase();
+  const orderTimes = (workbench.openTasks || [])
+    .map((task) => parseDate(task.ordered_at))
+    .filter(Boolean)
+    .sort((left, right) => left.getTime() - right.getTime());
+  const from = orderTimes[0] ? orderTimes[0].toISOString().slice(0, 10) : dateKeyDaysAgo(30);
+  return {
+    from,
+    to: exceptionTodayDateKey(),
+    task_count: workbench.openTasks?.length || 0
+  };
+}
+
+function exceptionWorkbenchBase() {
+  const now = Date.now();
+  if (exceptionWorkbenchCache && now - exceptionWorkbenchCache.createdAt < EXCEPTION_WORKBENCH_CACHE_MS) {
+    return exceptionWorkbenchCache.payload;
+  }
   const tasks = [];
   const orderRows = orders().filter((row) => orderMatchesBaseQuery(row, {
-    dateFrom: dateKeyDaysAgo(60),
+    dateFrom: dateKeyDaysAgo(180),
     dateTo: exceptionTodayDateKey()
   }));
   for (const row of orderRows) {
     const work = orderTaskState(row);
     const context = exceptionOrderContext(row);
     const profitValue = Number(row.actual_profit || row.estimated_profit || 0);
-    if (["unbound", "stock_issue"].includes(work.key)) {
+    if (orderIsCancelledForDeadlineV2(row)) {
       tasks.push(exceptionTask({
-        type: work.key === "stock_issue" ? "order_stock_shortage" : "order_binding",
-        level: work.key === "stock_issue" ? "danger" : "warning",
-        title: work.key === "stock_issue" ? "订单库存不足" : "订单待绑定库存",
+        type: "cancelled_order",
+        level: "info",
+        title: "订单已取消/拒收",
         subject: row.posting_number || row.order_number || `订单 ${row.id}`,
         meta: `${row.shop_name || ""} / ${formatDateText(row.ordered_at)}`,
-        detail: work.key === "stock_issue" ? "已绑定库存但数量不足，需要采购或调整库存。" : "订单 SKU 还没有绑定实际库存，利润和出库都会不准。",
+        detail: "订单当前状态为取消、拒收或退回，不应继续按运输/签收超时处理。",
+        action: "order-overdue",
+        orderId: row.id,
+        ...context
+      }));
+      continue;
+    }
+    if (orderHasUnboundStockQuery(row)) {
+      tasks.push(exceptionTask({
+        type: "order_binding",
+        level: "warning",
+        title: "订单待绑定库存",
+        subject: row.posting_number || row.order_number || `订单 ${row.id}`,
+        meta: `${row.shop_name || ""} / ${formatDateText(row.ordered_at)}`,
+        detail: "订单 SKU 还没有绑定实际库存，利润和出库都会不准。",
+        action: "order-unbound",
+        orderId: row.id,
+        ...context
+      }));
+    } else if (work.key === "stock_issue") {
+      tasks.push(exceptionTask({
+        type: "order_stock_shortage",
+        level: "danger",
+        title: "订单库存不足",
+        subject: row.posting_number || row.order_number || `订单 ${row.id}`,
+        meta: `${row.shop_name || ""} / ${formatDateText(row.ordered_at)}`,
+        detail: "已绑定库存但数量不足，需要采购或调整库存。",
         action: "order-unbound",
         orderId: row.id,
         ...context
@@ -258,11 +517,11 @@ export function exceptionWorkbench() {
         ...context
       }));
     }
-    const deadlineInfo = orderExceptionDeadlineInfo(row);
+    const deadlineInfo = orderExceptionDeadlineInfoV4(row);
     if (deadlineInfo) {
       tasks.push(exceptionTask({
         type: "deadline",
-        level: "danger",
+        level: deadlineInfo.level || "danger",
         title: deadlineInfo.reason,
         subject: row.posting_number || row.order_number || `订单 ${row.id}`,
         meta: `${row.shop_name || ""} / ${deadlineInfo.meta}`,
@@ -270,6 +529,19 @@ export function exceptionWorkbench() {
         action: "order-overdue",
         orderId: row.id,
         deadline_reason: deadlineInfo.reason,
+        deadline_kind: deadlineInfo.kind,
+        deadline_level: deadlineInfo.level,
+        deadline_stage: deadlineInfo.stage,
+        deadline_start_at: deadlineInfo.startAt,
+        deadline_due_at: deadlineInfo.dueAt,
+        deadline_elapsed_days: deadlineInfo.elapsedDays,
+        deadline_standard_days: deadlineInfo.standardDays,
+        deadline_overdue_days: deadlineInfo.overdueDays,
+        deadline_warning_days: deadlineInfo.warningDays,
+        deadline_danger_days: deadlineInfo.dangerDays,
+        deadline_shipping_method: deadlineInfo.shippingMethod,
+        deadline_shipping_method_key: deadlineInfo.shippingMethodKey,
+        deadline_basis: deadlineInfo.basis,
         ...context
       }));
     }
@@ -295,20 +567,22 @@ export function exceptionWorkbench() {
   }
   tasks.sort((a, b) => exceptionPriorityValue(b) - exceptionPriorityValue(a));
   const stateMap = exceptionTaskStateMap(tasks.map((task) => task.id));
-  const visibleTasks = tasks.filter((task) => !["handled", "ignored"].includes(stateMap.get(task.id)?.status));
-  return {
-    rows: visibleTasks,
-    total: visibleTasks.length,
-    hidden_total: tasks.length - visibleTasks.length,
-    counts: {
-      danger: visibleTasks.filter((item) => item.level === "danger").length,
-      warning: visibleTasks.filter((item) => item.level === "warning").length,
-      info: visibleTasks.filter((item) => item.level === "info").length,
-      order: visibleTasks.filter((item) => item.type.startsWith("order") || ["print", "profit", "deadline"].includes(item.type)).length,
-      stock: visibleTasks.filter((item) => item.type.startsWith("stock")).length
-    },
-    generated_at: new Date().toISOString()
+  const openTasks = [];
+  const resolvedTasks = [];
+  for (const task of tasks) {
+    const state = stateMap.get(task.id);
+    const decoratedTask = decorateExceptionTaskState(task, state);
+    if (["handled", "ignored"].includes(state?.status)) resolvedTasks.push(decoratedTask);
+    else openTasks.push(decoratedTask);
+  }
+  const payload = {
+    openTasks,
+    resolvedTasks,
+    counts: exceptionWorkbenchCounts(openTasks),
+    generatedAt: new Date().toISOString()
   };
+  exceptionWorkbenchCache = { createdAt: now, payload };
+  return payload;
 }
 
 export function updateExceptionTaskState(body = {}, userId = null) {
@@ -349,30 +623,95 @@ function exceptionTask(values) {
   return { id: randomTaskId(values), ...values };
 }
 
+function decorateExceptionTaskState(task, state) {
+  if (!state?.status) return { ...task, task_state: "open", task_state_label: "" };
+  const labels = {
+    handled: "已处理",
+    ignored: "已忽略"
+  };
+  return {
+    ...task,
+    task_state: state.status,
+    task_state_label: labels[state.status] || state.status,
+    task_state_updated_at: state.updated_at || ""
+  };
+}
+
 function exceptionOrderContext(row) {
   const productName = firstCsvValue(row.product_names) || firstMappedValue(row.sku_names) || row.posting_number || "";
   const skuText = firstCsvValue(row.skus || row.unbound_skus);
   const inventoryId = firstCsvValue(row.inventory_ids || row.product_codes);
-  const imageUrl = firstCsvValue(row.image_urls) || firstMappedValue(row.sku_images);
+  const orderImageUrl = firstCsvValue(row.order_image_urls) || firstMappedValue(row.sku_images);
+  const inventoryImageUrl = firstCsvValue(row.inventory_image_urls);
+  const imageUrl = orderImageUrl || inventoryImageUrl || firstCsvValue(row.image_urls);
   const weight = firstCsvValue(row.package_weights);
   const dimensions = firstCsvValue(row.package_dimensions);
+  const skuStock = firstSkuStockSummary(row.sku_stock_summaries, skuText);
+  const revenue = Number(row.revenue || 0);
+  const profit = displayOrderProfitValue(row);
+  const margin = revenue ? profit / revenue * 100 : 0;
+  const realShipping = resolvedExceptionShippingMethodLabel(row);
+  const inventoryShipping = shippingMethodText(row.product_shipping_methods);
+  const shippingDiff = realShipping && inventoryShipping && realShipping !== inventoryShipping;
+  const shippingBadge = shippingDiff ? `真实 ${realShipping} / 库存 ${inventoryShipping}` : (realShipping || inventoryShipping || "未标明");
+  const costLines = [
+    ["采购成本", row.profit_purchase_cost],
+    ["国内运费", row.profit_domestic_shipping],
+    ["国际运费", row.profit_international_shipping],
+    ["佣金", row.profit_commission_fee],
+    ["Ozon服务费", row.profit_ozon_service_fee],
+    ["退货损失", row.profit_return_loss]
+  ].map(([label, value]) => `${label} ${moneyTextCompact(value)}`);
   return {
     image_url: imageUrl,
+    order_image_url: orderImageUrl || imageUrl,
+    inventory_image_url: inventoryImageUrl,
     product_name: productName === "Unbound product" ? "待绑定库存商品" : productName,
     sku_text: skuText,
     inventory_id: inventoryId && inventoryId !== "UNBOUND" ? inventoryId : "",
     dimensions_text: [weight ? `克重 ${weight}g` : "", dimensions && dimensions !== "0x0x0" ? `尺寸 ${dimensions}cm` : ""].filter(Boolean).join(" / "),
     profit_context_text: profitExceptionContextText(row),
+    shop_name: row.shop_name || "",
+    order_ref: row.posting_number || row.order_number || "",
+    tracking_number: row.tracking_number || "",
+    external_tracking_url: row.external_tracking_url || "",
+    ordered_at: row.ordered_at || row.created_at || "",
+    delivered_at: row.delivered_at || "",
+    accrued_at: row.accrued_at || "",
+    delivery_date_begin: row.delivery_date_begin || "",
+    delivery_date_end: row.delivery_date_end || "",
+    delivery_type: row.delivery_type || "",
+    delivery_city: row.delivery_city || "",
+    order_status_text: orderExceptionStatusText(row),
+    current_order_shipping_text: realShipping || inventoryShipping || "",
+    delivery_method_name: row.delivery_method_name || "",
+    logistics_channel: row.logistics_channel || "",
+    warehouse_name: row.warehouse_name || "",
+    weight_text: weight ? `${weight}g` : "",
+    size_text: dimensions && dimensions !== "0x0x0" ? `${dimensions}cm` : "",
+    shipping_method_text: shippingBadge,
+    shipping_method_real_text: realShipping,
+    shipping_method_inventory_text: inventoryShipping,
+    shipping_method_mismatch: shippingDiff,
+    profit_formula_lines: [
+      `售价 ${moneyTextCompact(revenue)}`,
+      `利润 ${moneyTextCompact(profit)}`,
+      `利润率 ${numText(margin, 2)}%`
+    ],
+    profit_cost_lines: costLines,
+    mappingId: Number(firstMappedId(row.sku_mapping_ids, skuText)) || undefined,
     onlineProductId: Number(firstMappedId(row.sku_online_product_ids, skuText)) || undefined,
+    sku_stock_fbs: skuStock.fbs,
+    sku_stock_fbp: skuStock.fbp,
     productId: Number(firstCsvValue(row.product_ids)) || undefined
   };
 }
 
 function profitExceptionContextText(row) {
   const revenue = Number(row.revenue || 0);
-  const profit = Number(row.actual_profit || row.estimated_profit || 0);
+  const profit = displayOrderProfitValue(row);
   const margin = revenue ? profit / revenue * 100 : 0;
-  const shipping = shippingMethodText(row.product_shipping_methods);
+  const shipping = resolvedExceptionShippingMethodLabel(row) || shippingMethodText(row.product_shipping_methods);
   const costs = [
     ["采购", row.profit_purchase_cost],
     ["国内", row.profit_domestic_shipping],
@@ -384,6 +723,10 @@ function profitExceptionContextText(row) {
   return `销售¥${roundMoney(revenue)} / 利润¥${roundMoney(profit)} / 利润率${roundMoney(margin)}% / 运送方式${shipping || "未标明"} / ${costs}`;
 }
 
+function displayOrderProfitValue(row = {}) {
+  return Number(row.actual_profit || row.estimated_profit || 0);
+}
+
 function shippingMethodText(value) {
   const labels = {
     air: "空运",
@@ -392,6 +735,40 @@ function shippingMethodText(value) {
   };
   const methods = [...new Set(String(value || "").split(",").map((item) => item.trim()).filter(Boolean))];
   return methods.map((method) => labels[method] || method).join("+");
+}
+
+function exceptionShippingMethodLabel(row) {
+  const text = `${row.delivery_method_name || ""} ${row.logistics_channel || ""} ${row.warehouse_name || ""}`.toLowerCase();
+  if (text.includes("land") || text.includes("陆运")) return "陆运";
+  if (text.includes("air land") || text.includes("air_land") || text.includes("陆空")) return "陆空";
+  if (text.includes("air") || text.includes("空运")) return "空运";
+  return "";
+}
+
+function detectExceptionShippingMethodKey(value) {
+  const text = String(value || "").toLowerCase().replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.includes("air_land") || text.includes("air land") || text.includes("\u9646+\u7a7a") || text.includes("\u9646\u7a7a")) return "air_land";
+  if (text.includes("\u9646\u8fd0") || text.includes("economy") || text.includes("budget") || text.includes("\u90ae\u653f") || /(^|[^a-z])land([^a-z]|$)/.test(text)) return "land";
+  if (text.includes("standard") && (text.includes("extra small") || text.includes("fbp") || text.includes("pudo") || text.includes("courier"))) return "air_land";
+  if (text.includes("\u7a7a\u8fd0") || /(^|[^a-z])air([^a-z]|$)/.test(text)) return "air";
+  return "";
+}
+
+function resolvedExceptionShippingMethodLabel(row) {
+  const key = detectExceptionShippingMethodKey(`${row.delivery_method_name || ""} ${row.logistics_channel || ""} ${row.warehouse_name || ""}`);
+  if (key === "land") return "\u9646\u8fd0";
+  if (key === "air_land") return "\u9646\u7a7a";
+  if (key === "air") return "\u7a7a\u8fd0";
+  return "";
+}
+
+function moneyTextCompact(value) {
+  return `¥${roundMoney(value)}`;
+}
+
+function numText(value, digits = 2) {
+  return Number(value || 0).toFixed(digits);
 }
 
 function firstCsvValue(value) {
@@ -412,6 +789,17 @@ function firstMappedId(value, preferredKey = "") {
   return index >= 0 ? first.slice(index + 1).trim() : first;
 }
 
+function firstSkuStockSummary(value, preferredKey = "") {
+  const entries = String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const preferred = entries.find((item) => preferredKey && item.startsWith(`${preferredKey}:`));
+  const first = preferred || entries[0] || "";
+  const parts = first.split(":");
+  return {
+    fbs: Number(parts[1] || 0),
+    fbp: Number(parts[2] || 0)
+  };
+}
+
 function stockAlertSkuText(row) {
   const skus = Array.isArray(row.skus) ? row.skus : [];
   return skus.slice(0, 3).map((item) => [item.shop_name, item.ozon_sku, item.name].filter(Boolean).join(" / ")).join("；");
@@ -421,16 +809,107 @@ function randomTaskId(values) {
   return [values.type, values.orderId || values.productId || values.subject || "", values.title || ""].join(":");
 }
 
+function normalizeExceptionWorkbenchView(value) {
+  return ["handled", "profit", "deadline", "deadline_warning", "pickup", "receipt", "payment", "cancelled", "stock", "binding"].includes(String(value || "")) ? String(value || "") : "profit";
+}
+
+function normalizeExceptionWorkbenchSortField(value) {
+  if (String(value || "") === "elapsed") return "elapsed";
+  return String(value || "") === "ordered_at" ? "ordered_at" : "priority";
+}
+
+function normalizeExceptionWorkbenchSortDirection(value) {
+  return String(value || "").toLowerCase() === "asc" ? "asc" : "desc";
+}
+
+function exceptionTasksForView({ view = "profit", openTasks = [], resolvedTasks = [] } = {}) {
+  if (view === "handled") return resolvedTasks;
+  if (view === "profit") return openTasks.filter((item) => item.type === "profit");
+  if (view === "deadline") return openTasks.filter((item) => item.type === "deadline" && ["delivery", "fulfillment"].includes(item.deadline_kind) && item.level === "danger");
+  if (view === "deadline_warning") return openTasks.filter((item) => item.type === "deadline" && ["delivery", "fulfillment"].includes(item.deadline_kind) && item.level !== "danger");
+  if (view === "pickup") return openTasks.filter((item) => item.type === "deadline" && item.deadline_kind === "pickup");
+  if (view === "receipt") return openTasks.filter((item) => item.type === "deadline" && item.deadline_kind === "receipt");
+  if (view === "payment") return openTasks.filter((item) => item.type === "deadline" && item.deadline_kind === "payment");
+  if (view === "cancelled") return openTasks.filter((item) => item.type === "cancelled_order");
+  if (view === "stock") return openTasks.filter((item) => item.type === "order_stock_shortage" || item.type?.startsWith("stock"));
+  if (view === "binding") return openTasks.filter((item) => item.type === "order_binding");
+  return openTasks.filter((item) => item.type === "profit");
+}
+
+function filterExceptionWorkbenchTasks(tasks = [], search = "") {
+  const keyword = String(search || "").trim().toLowerCase();
+  if (!keyword) return tasks;
+  return tasks.filter((task) => exceptionWorkbenchSearchText(task).includes(keyword));
+}
+
+function exceptionWorkbenchSearchText(task = {}) {
+  return [
+    task.title,
+    task.subject,
+    task.meta,
+    task.detail,
+    task.product_name,
+    task.sku_text,
+    task.inventory_id,
+    task.order_ref,
+    task.shop_name,
+    task.order_status_text,
+    task.current_order_shipping_text,
+    task.shipping_method_text
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function sortExceptionWorkbenchTasks(tasks = [], sortField = "priority", sortDirection = "desc") {
+  const factor = sortDirection === "asc" ? 1 : -1;
+  return [...tasks].sort((left, right) => {
+    if (sortField === "ordered_at") {
+      const orderedDiff = compareExceptionWorkbenchTimes(left.ordered_at, right.ordered_at);
+      if (orderedDiff) return orderedDiff * factor;
+      const priorityDiff = exceptionPriorityValue(right) - exceptionPriorityValue(left);
+      if (priorityDiff) return priorityDiff;
+      return compareExceptionWorkbenchTimes(right.task_state_updated_at, left.task_state_updated_at);
+    }
+    if (sortField === "elapsed") {
+      const elapsedDiff = Number(left.deadline_elapsed_days || 0) - Number(right.deadline_elapsed_days || 0);
+      if (elapsedDiff) return elapsedDiff * factor;
+      const overdueDiff = Number(left.deadline_overdue_days || 0) - Number(right.deadline_overdue_days || 0);
+      if (overdueDiff) return overdueDiff * factor;
+      const priorityDiff = exceptionPriorityValue(right) - exceptionPriorityValue(left);
+      if (priorityDiff) return priorityDiff;
+      return compareExceptionWorkbenchTimes(right.ordered_at, left.ordered_at);
+    }
+    const priorityDiff = exceptionPriorityValue(right) - exceptionPriorityValue(left);
+    if (priorityDiff) return priorityDiff;
+    return compareExceptionWorkbenchTimes(right.ordered_at, left.ordered_at);
+  });
+}
+
+function compareExceptionWorkbenchTimes(leftValue, rightValue) {
+  const left = parseDate(leftValue)?.getTime() || 0;
+  const right = parseDate(rightValue)?.getTime() || 0;
+  return left - right;
+}
+
 function exceptionPriorityValue(task) {
   const level = { danger: 3, warning: 2, info: 1 }[task.level] || 0;
-  const typeBoost = task.type === "order_binding" ? 0.4 : task.type === "profit" ? 0.3 : 0;
+  const typeBoost = task.type === "deadline" && task.deadline_kind === "fulfillment"
+    ? 1.2
+    : task.type === "deadline" && task.deadline_kind === "receipt"
+      ? 1
+    : task.type === "deadline" && task.deadline_kind === "payment"
+      ? 0.9
+    : task.type === "deadline" && task.deadline_kind === "pickup"
+      ? 0.8
+    : task.type === "deadline" && task.deadline_kind === "delivery"
+      ? 0.6
+      : task.type === "order_binding" ? 0.4 : task.type === "profit" ? 0.3 : 0;
   return level + typeBoost;
 }
 
 function orderMatchesBaseQuery(row, query) {
   const shopId = String(query.shopId || query.shop_id || "all");
   if (shopId !== "all" && String(row.shop_id) !== shopId) return false;
-  const value = String(row.ordered_at || row.created_at || "").slice(0, 10);
+  const value = chinaDateKey(row.ordered_at || row.created_at || "");
   const from = String(query.dateFrom || query.date_from || "");
   const to = String(query.dateTo || query.date_to || "");
   if (from && (!value || value < from)) return false;
@@ -452,6 +931,11 @@ function orderMatchesSearchQuery(row, query) {
 }
 
 function orderTaskState(row) {
+  const outcome = classifyOrderOutcome(row);
+  if (outcome === "cancelled_pre_fulfillment") return { key: "cancelled", label: "已取消" };
+  if (outcome === "rejected_unclaimed") return { key: "cancelled", label: "已拒收/未取" };
+  if (outcome === "after_delivery_return") return { key: "cancelled", label: "签收后退货" };
+  if (outcome === "delivered_signed") return { key: "delivered", label: "已签收" };
   if (orderMatchesStatusQuery(row, "cancelled")) return { key: "cancelled", label: "已取消/退货" };
   if (orderMatchesStatusQuery(row, "dispute")) return { key: "dispute", label: "有争议" };
   if (orderMatchesStatusQuery(row, "delivered")) return { key: "delivered", label: "已签收" };
@@ -478,7 +962,7 @@ function orderExceptionDeadlineInfo(row) {
   if (!orderMatchesStatusQuery(row, "delivering")) return null;
   const orderedAt = parseDate(row.ordered_at);
   if (!orderedAt) return null;
-  const shipping = exceptionShippingMethodKey(row);
+  const shipping = resolvedExceptionShippingMethodKey(row);
   const threshold = shipping === "land" ? 20 : 15;
   const days = Math.floor((now.getTime() - orderedAt.getTime()) / (24 * 60 * 60 * 1000));
   if (days <= threshold) return null;
@@ -490,6 +974,392 @@ function orderExceptionDeadlineInfo(row) {
   };
 }
 
+function orderExceptionDeadlineInfoV2(row) {
+  if (orderMatchesStatusQuery(row, "cancelled") || orderIsDeliveredForDeadline(row)) return null;
+  const now = new Date();
+  const shipped = orderMatchesStatusQuery(row, "delivering") || Boolean(row.tracking_number);
+  const fbp = logisticsModeKey(row) === "fbp";
+  if (!shipped) {
+    const orderedAt = parseDate(row.ordered_at || row.created_at);
+    if (!orderedAt) return null;
+    const standardDays = fbp ? 2 : 6;
+    const dueAt = addDays(orderedAt, standardDays);
+    const elapsedDays = elapsedCalendarDays(dueAt, now);
+    if (elapsedDays <= 0) return null;
+    return {
+      kind: "fulfillment",
+      stage: fbp ? "FBP备货超时" : "FBS备货超时",
+      level: "danger",
+      reason: fbp ? "FBP备货超时" : "FBS备货超时",
+      meta: `${fbp ? "FBP" : "FBS"} 已用 ${elapsedDays} 天 / 标准 ${standardDays} 天`,
+      detail: `订单还没有发走，${fbp ? "FBP" : "FBS"} 标准备货时长 ${standardDays} 天，当前已用 ${elapsedDays} 天，超出 ${elapsedDays - standardDays} 天。`,
+      startAt: dueAt.toISOString(),
+      dueAt: dueAt.toISOString(),
+      elapsedDays,
+      standardDays,
+      overdueDays: elapsedDays,
+      warningDays: standardDays,
+      dangerDays: standardDays + 1,
+      shippingMethod: fbp ? "FBP" : "FBS",
+      shippingMethodKey: fbp ? "fbp" : "fbs",
+      basis: "fulfillment_due_at"
+    };
+  }
+  if (!orderMatchesStatusQuery(row, "delivering")) return null;
+  const shippedAt = deliveryStartDate(row);
+  if (!shippedAt) return null;
+  const shipping = resolvedExceptionShippingMethodKey(row);
+  const warningDays = shipping === "land" ? 20 : 15;
+  const dangerDays = shipping === "land" ? 25 : 20;
+  const elapsedDays = elapsedCalendarDays(shippedAt, now);
+  if (elapsedDays <= warningDays) return null;
+  const level = elapsedDays > dangerDays ? "danger" : "warning";
+  const methodLabel = shipping === "land" ? "陆运" : "陆空";
+  return {
+    kind: "delivery",
+    stage: level === "danger" ? "签收严重超时" : "签收预警",
+    level,
+    reason: level === "danger" ? `签收严重超时-${methodLabel}` : `签收预警-${methodLabel}`,
+    meta: `${methodLabel} 已配送 ${elapsedDays} 天 / 预警 ${warningDays} 天 / 严重 ${dangerDays} 天`,
+    detail: `订单已发走但未签收，${methodLabel} 默认配送时效 ${warningDays} 天，超过 ${dangerDays} 天按严重超时处理。当前已配送 ${elapsedDays} 天。`,
+    startAt: shippedAt.toISOString(),
+    dueAt: addDays(shippedAt, warningDays).toISOString(),
+    elapsedDays,
+    standardDays: warningDays,
+    overdueDays: elapsedDays - warningDays,
+    warningDays,
+    dangerDays,
+    shippingMethod: methodLabel,
+    shippingMethodKey: shipping,
+    basis: "shipping_elapsed"
+  };
+}
+
+function deliveryStartDate(row) {
+  return parseDate(row.shipped_at)
+    || parseDate(row.delivering_date)
+    || parseDate(row.in_process_at)
+    || parseDate(row.shipment_deadline_at)
+    || parseDate(row.ordered_at || row.created_at);
+}
+
+function orderExceptionDeadlineInfoV4(row) {
+  if (orderIsCancelledForDeadlineV2(row)) return null;
+  if (orderProfitAccrued(row)) return null;
+  const now = new Date();
+  const stageKey = orderLogisticsStageKey(row);
+  if (stageKey === "received") return orderPaymentTimeoutInfo(row, now);
+  const shipped = orderMatchesStatusQuery(row, "delivering") || Boolean(row.tracking_number);
+  const fbp = logisticsModeKey(row) === "fbp";
+  if (!shipped) return orderFulfillmentTimeoutInfo(row, now, fbp);
+  if (!orderMatchesStatusQuery(row, "delivering")) return null;
+  if (stageKey === "pickup_point") return orderPickupOrReceiptTimeoutInfo(row, now);
+  return orderDeliveryTimeoutInfo(row, now);
+}
+
+function orderFulfillmentTimeoutInfo(row, now, fbp) {
+  const orderedAt = parseDate(row.ordered_at || row.created_at);
+  if (!orderedAt) return null;
+  const standardDays = fbp ? 2 : 6;
+  const dueAt = addDays(orderedAt, standardDays);
+  const elapsedDays = elapsedCalendarDays(dueAt, now);
+  if (elapsedDays <= 0) return null;
+  const modeLabel = fbp ? "FBP" : "FBS";
+  return {
+    kind: "fulfillment",
+    stage: `${modeLabel}备货超时`,
+    level: "danger",
+    reason: `${modeLabel}备货超时`,
+    meta: `${modeLabel} 已超时 ${elapsedDays} 天 / 标准 ${standardDays} 天`,
+    detail: `订单还没有发走，${modeLabel} 标准备货时长 ${standardDays} 天，已经超过应发截止 ${elapsedDays} 天。`,
+    startAt: dueAt.toISOString(),
+    dueAt: dueAt.toISOString(),
+    elapsedDays,
+    standardDays,
+    overdueDays: elapsedDays,
+    warningDays: standardDays,
+    dangerDays: standardDays + 1,
+    shippingMethod: modeLabel,
+    shippingMethodKey: fbp ? "fbp" : "fbs",
+    basis: "fulfillment_due_at"
+  };
+}
+
+function orderDeliveryTimeoutInfo(row, now) {
+  const shippedAt = deliveryStartDate(row);
+  if (!shippedAt) return null;
+  const shipping = resolvedExceptionShippingMethodKey(row);
+  const warningDays = shipping === "land" ? 20 : 15;
+  const dangerDays = shipping === "land" ? 25 : 20;
+  const elapsedDays = elapsedCalendarDays(shippedAt, now);
+  if (elapsedDays <= warningDays) return null;
+  const level = elapsedDays > dangerDays ? "danger" : "warning";
+  const methodLabel = shipping === "land" ? "陆运" : "陆空";
+  const deliveryDueAt = parseDate(row.delivery_date_end) || parseDate(row.delivery_date_begin);
+  const dueNote = deliveryDueAt ? `Ozon预计送达：${formatDateText(deliveryDueAt.toISOString())}` : "Ozon预计送达未标明";
+  return {
+    kind: "delivery",
+    stage: level === "danger" ? "运输严重超时" : "运输超时预警",
+    level,
+    reason: level === "danger" ? `运输严重超时-${methodLabel}` : `运输超时预警-${methodLabel}`,
+    meta: `${methodLabel} 已运输 ${elapsedDays} 天 / 预警 ${warningDays} 天 / 红线 ${dangerDays} 天`,
+    detail: `订单已发货且仍在运输中，尚未到达取货点。${methodLabel} 超过 ${warningDays} 天进入运输超时预警，超过 ${dangerDays} 天按运输严重超时处理。${dueNote}。`,
+    startAt: shippedAt.toISOString(),
+    dueAt: addDays(shippedAt, warningDays).toISOString(),
+    elapsedDays,
+    standardDays: warningDays,
+    overdueDays: elapsedDays - warningDays,
+    warningDays,
+    dangerDays,
+    shippingMethod: methodLabel,
+    shippingMethodKey: shipping,
+    basis: "shipping_elapsed"
+  };
+}
+
+function orderPickupOrReceiptTimeoutInfo(row, now) {
+  const pickupAt = pickupPointStartDate(row);
+  if (!pickupAt) return null;
+  const standardDays = 3;
+  const dangerDays = 5;
+  const elapsedDays = elapsedCalendarDays(pickupAt, now);
+  if (elapsedDays <= standardDays) return null;
+  const level = elapsedDays > dangerDays ? "danger" : "warning";
+  return {
+    kind: level === "danger" ? "receipt" : "pickup",
+    stage: level === "danger" ? "待取超时>5天" : "待取超时≤5天",
+    level,
+    reason: level === "danger" ? "待取超时>5天" : "待取超时≤5天",
+    meta: `到达取货点 ${elapsedDays} 天 / 待取 ${standardDays} 天 / 红线 ${dangerDays} 天`,
+    detail: "物流已到达取货点，客户仍未取货。超过 3 天归为待取超时，超过 5 天归为签收超时。",
+    startAt: pickupAt.toISOString(),
+    dueAt: addDays(pickupAt, standardDays).toISOString(),
+    elapsedDays,
+    standardDays,
+    overdueDays: elapsedDays - standardDays,
+    warningDays: standardDays,
+    dangerDays,
+    shippingMethod: resolvedExceptionShippingMethodLabel(row) || "未标明",
+    shippingMethodKey: resolvedExceptionShippingMethodKey(row),
+    basis: "pickup_point_elapsed"
+  };
+}
+
+function orderPaymentTimeoutInfo(row, now) {
+  const receivedAt = receivedStartDate(row);
+  if (!receivedAt || orderProfitAccrued(row)) return null;
+  const standardDays = 5;
+  const dangerDays = 10;
+  const elapsedDays = elapsedCalendarDays(receivedAt, now);
+  if (elapsedDays <= standardDays) return null;
+  return {
+    kind: "payment",
+    stage: "付款超时",
+    level: elapsedDays > dangerDays ? "danger" : "warning",
+    reason: "付款超时",
+    meta: `已签收 ${elapsedDays} 天 / 标准 ${standardDays} 天`,
+    detail: "订单已签收，但利润或结算状态还没有进入已结算，需要检查 Ozon 回款或结算数据。",
+    startAt: receivedAt.toISOString(),
+    dueAt: addDays(receivedAt, standardDays).toISOString(),
+    elapsedDays,
+    standardDays,
+    overdueDays: elapsedDays - standardDays,
+    warningDays: standardDays,
+    dangerDays,
+    shippingMethod: resolvedExceptionShippingMethodLabel(row) || "未标明",
+    shippingMethodKey: resolvedExceptionShippingMethodKey(row),
+    basis: "payment_after_received"
+  };
+}
+
+function orderLogisticsStageKey(row) {
+  if (orderProfitAccrued(row)) return "received";
+  const text = deadlineStatusTextV4(row);
+  if (text.includes("posting_received") || text.includes("delivered") || text.includes("received") || text.includes("pickup_code_verified")) return "received";
+  if (text.includes("posting_in_pickup_point") || text.includes("pickup_point")) return "pickup_point";
+  if (text.includes("customs")) return "customs";
+  if (text.includes("posting_on_way_to_city") || text.includes("on_way_to_city")) return "on_way_to_city";
+  if (text.includes("posting_registered") || text.includes("awaiting_deliver")) return "registered";
+  return "unknown";
+}
+
+function deadlineStatusTextV4(row) {
+  return [
+    row.status,
+    row.tracking_stage,
+    row.logistics_status,
+    row.raw_status,
+    row.raw_substatus,
+    row.raw_tracking_stage,
+    row.raw_cancellation_reason,
+    row.pickup_code_verified_at,
+    row.settlement_states,
+    row.profit_statuses
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+}
+
+function pickupPointStartDate(row) {
+  return parseDate(row.delivery_date_begin)
+    || parseDate(row.delivery_date_end)
+    || parseDate(row.delivering_date)
+    || deliveryStartDate(row);
+}
+
+function receivedStartDate(row) {
+  return parseDate(row.delivered_at)
+    || parseDate(row.pickup_code_verified_at)
+    || parseDate(row.delivery_date_end)
+    || parseDate(row.delivery_date_begin)
+    || deliveryStartDate(row);
+}
+
+function orderProfitAccrued(row) {
+  const text = `${row.settlement_states || ""} ${row.profit_statuses || ""}`.toLowerCase();
+  return text.includes("accrued") && !text.includes("pending") && !text.includes("estimated");
+}
+
+function orderIsTerminalForDeadlineV2(row) {
+  return orderIsCancelledForDeadlineV2(row) || orderIsDeliveredForDeadlineV2(row);
+}
+
+function orderIsCancelledForDeadlineV2(row) {
+  const outcome = classifyOrderOutcome(row);
+  if (["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(outcome)) return true;
+  const text = deadlineStatusText(row);
+  return text.includes("cancel")
+    || text.includes("canceled")
+    || text.includes("cancelled")
+    || text.includes("posting_canceled")
+    || text.includes("not_accepted")
+    || text.includes("return")
+    || text.includes("returned")
+    || text.includes("refund")
+    || text.includes("rejected")
+    || text.includes("отмен")
+    || text.includes("возврат")
+    || text.includes("не удалось")
+    || text.includes("отказ")
+    || text.includes("не забрал")
+    || text.includes("取消")
+    || text.includes("退货");
+}
+
+function orderIsDeliveredForDeadlineV2(row) {
+  const outcome = classifyOrderOutcome(row);
+  if (outcome === "delivered_signed") return true;
+  if (orderIsCancelledForDeadlineV2(row)) return false;
+  const text = deadlineStatusText(row);
+  return text.includes("delivered")
+    || text.includes("posting_received")
+    || text.includes("received")
+    || text.includes("signed")
+    || text.includes("pickup_code_verified")
+    || text.includes("签收")
+    || text.includes("已签收")
+    || text.includes("已领取")
+    || text.includes("已送达");
+}
+
+function deadlineStatusText(row) {
+  return [
+    row.status,
+    row.tracking_stage,
+    row.logistics_status,
+    row.raw_status,
+    row.raw_substatus,
+    row.raw_cancellation_reason,
+    row.pickup_code_verified_at
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+}
+
+function orderExceptionDeadlineInfoV3(row) {
+  if (orderIsTerminalForDeadlineV2(row)) return null;
+  const now = new Date();
+  const shipped = orderMatchesStatusQuery(row, "delivering") || Boolean(row.tracking_number);
+  const fbp = logisticsModeKey(row) === "fbp";
+  if (!shipped) {
+    const orderedAt = parseDate(row.ordered_at || row.created_at);
+    if (!orderedAt) return null;
+    const standardDays = fbp ? 2 : 6;
+    const dueAt = addDays(orderedAt, standardDays);
+    const elapsedDays = elapsedCalendarDays(dueAt, now);
+    if (elapsedDays <= 0) return null;
+    const modeLabel = fbp ? "FBP" : "FBS";
+    return {
+      kind: "fulfillment",
+      stage: `${modeLabel}备货超时`,
+      level: "danger",
+      reason: `${modeLabel}备货超时`,
+      meta: `${modeLabel} 已超时 ${elapsedDays} 天 / 标准 ${standardDays} 天`,
+      detail: `订单还没有发走，${modeLabel} 标准备货时长 ${standardDays} 天，已经超过应发截止 ${elapsedDays} 天。`,
+      startAt: dueAt.toISOString(),
+      dueAt: dueAt.toISOString(),
+      elapsedDays,
+      standardDays,
+      overdueDays: elapsedDays,
+      warningDays: standardDays,
+      dangerDays: standardDays + 1,
+      shippingMethod: modeLabel,
+      shippingMethodKey: fbp ? "fbp" : "fbs",
+      basis: "fulfillment_due_at"
+    };
+  }
+  if (!orderMatchesStatusQuery(row, "delivering")) return null;
+  const shippedAt = deliveryStartDate(row);
+  if (!shippedAt) return null;
+  const shipping = resolvedExceptionShippingMethodKey(row);
+  const warningDays = shipping === "land" ? 20 : 15;
+  const dangerDays = shipping === "land" ? 25 : 20;
+  const elapsedDays = elapsedCalendarDays(shippedAt, now);
+  if (elapsedDays <= warningDays) return null;
+  const level = elapsedDays > dangerDays ? "danger" : "warning";
+  const methodLabel = shipping === "land" ? "陆运" : "陆空";
+  return {
+    kind: "delivery",
+    stage: level === "danger" ? "签收严重超时" : "签收预警",
+    level,
+    reason: level === "danger" ? `签收严重超时-${methodLabel}` : `签收预警-${methodLabel}`,
+    meta: `${methodLabel} 已配送 ${elapsedDays} 天 / 预警 ${warningDays} 天 / 严重 ${dangerDays} 天`,
+    detail: `订单已发走但未签收，${methodLabel} 默认配送时效 ${warningDays} 天，超过 ${dangerDays} 天按严重超时处理。当前已配送 ${elapsedDays} 天。`,
+    startAt: shippedAt.toISOString(),
+    dueAt: addDays(shippedAt, warningDays).toISOString(),
+    elapsedDays,
+    standardDays: warningDays,
+    overdueDays: elapsedDays - warningDays,
+    warningDays,
+    dangerDays,
+    shippingMethod: methodLabel,
+    shippingMethodKey: shipping,
+    basis: "shipping_elapsed"
+  };
+}
+
+function orderIsDeliveredForDeadline(row) {
+  const text = [
+    row.status,
+    row.tracking_stage,
+    row.logistics_status
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+  if (orderMatchesStatusQuery(row, "cancelled")) return false;
+  return text.includes("delivered")
+    || text.includes("signed")
+    || text.includes("received")
+    || text.includes("签收")
+    || text.includes("已签收")
+    || text.includes("已领取")
+    || text.includes("已送达");
+}
+
+function elapsedCalendarDays(from, to) {
+  return Math.max(0, Math.floor((to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000)));
+}
+
+function addDays(value, days) {
+  const date = new Date(value.getTime());
+  date.setDate(date.getDate() + Number(days || 0));
+  return date;
+}
+
 function exceptionShippingMethodKey(row) {
   const text = `${row.product_shipping_methods || ""} ${row.delivery_method_name || ""} ${row.logistics_channel || ""} ${row.warehouse_name || ""}`.toLowerCase();
   if (text.includes("land") || text.includes("陆运")) return "land";
@@ -497,7 +1367,12 @@ function exceptionShippingMethodKey(row) {
 }
 
 function exceptionTodayDateKey() {
-  return new Date().toISOString().slice(0, 10);
+  return chinaDateKey();
+}
+
+function resolvedExceptionShippingMethodKey(row) {
+  const key = detectExceptionShippingMethodKey(`${row.product_shipping_methods || ""} ${row.delivery_method_name || ""} ${row.logistics_channel || ""} ${row.warehouse_name || ""}`);
+  return key === "land" ? "land" : "air_land";
 }
 
 function formatDateText(value) {
@@ -511,8 +1386,8 @@ function orderRowsByIds(ids) {
     SELECT o.*, s.name AS shop_name, COUNT(oi.id) AS item_count,
       COALESCE(SUM(oi.quantity), 0) AS total_quantity,
       SUM(oi.sale_price * oi.quantity) AS revenue,
-      SUM(oi.estimated_profit) AS estimated_profit,
-      SUM(oi.actual_profit) AS actual_profit,
+      COALESCE(SUM(CASE WHEN opi.profit_status = 'accrued' OR oi.settlement_state = 'accrued' THEN 0 ELSE COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) END), 0) AS estimated_profit,
+      COALESCE(SUM(CASE WHEN opi.profit_status = 'accrued' OR oi.settlement_state = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE 0 END), 0) AS actual_profit,
       COALESCE(SUM(opi.purchase_cost_cny), 0) AS profit_purchase_cost,
       COALESCE(SUM(opi.domestic_shipping_cny), 0) AS profit_domestic_shipping,
       COALESCE(SUM(opi.international_shipping_cny), 0) AS profit_international_shipping,
@@ -520,6 +1395,8 @@ function orderRowsByIds(ids) {
       COALESCE(SUM(opi.commission_fee_cny), 0) AS profit_commission_fee,
       COALESCE(SUM(opi.ozon_service_fee_cny), 0) AS profit_ozon_service_fee,
       COALESCE(SUM(opi.return_loss_cny), 0) AS profit_return_loss,
+      GROUP_CONCAT(DISTINCT oi.settlement_state) AS settlement_states,
+      GROUP_CONCAT(DISTINCT opi.profit_status) AS profit_statuses,
       GROUP_CONCAT(DISTINCT oi.ozon_sku) AS skus,
       GROUP_CONCAT(oi.ozon_sku || ':' || oi.quantity, '||') AS sku_quantities,
       GROUP_CONCAT(oi.ozon_sku || ':' || oi.sale_price || ':' || oi.quantity, '||') AS sku_prices,
@@ -578,12 +1455,12 @@ function orderBaseSql(query = {}) {
   const from = normalizeSyncDate(query.dateFrom || query.date_from);
   const to = normalizeSyncDate(query.dateTo || query.date_to);
   if (from) {
-    where.push("o.ordered_at >= ?");
-    params.push(`${from}T00:00:00.000`);
+    where.push(`${chinaDateSql("o.ordered_at")} >= ?`);
+    params.push(from);
   }
   if (to) {
-    where.push("o.ordered_at <= ?");
-    params.push(`${to}T23:59:59.999`);
+    where.push(`${chinaDateSql("o.ordered_at")} <= ?`);
+    params.push(to);
   }
   addOrderSearchSql(where, params, query);
   return { where: where.join(" AND "), params };
@@ -667,12 +1544,15 @@ function orderStatusSql(status) {
     LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1
     WHERE oi.order_id = o.id AND p.id IS NULL
   )`;
+  const outcome = buildOrderOutcomeSql("o");
   const state = "LOWER(COALESCE(o.status, ''))";
   const stage = "LOWER(COALESCE(o.tracking_stage, ''))";
   const value = `(${state} || ' ' || ${stage} || ' ' || LOWER(COALESCE(o.logistics_status, '')) || ' ' || LOWER(COALESCE(o.tracking_number, '')))`; 
   if (status === "awaiting_packaging") return orderSqlAnyExact([state, stage], ["awaiting_registration", "acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_awaiting_registration", "posting_acceptance_in_progress"]);
-  if (status === "awaiting_deliver") return orderSqlAnyExact([state, stage], ["awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service"]);
+  if (status === "awaiting_deliver") return `(${orderSqlAnyExact([state, stage], ["awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service"])} AND NOT (${orderSqlFbpLogistics()}))`;
   if (status === "dispute") return `(${value} LIKE '%arbitration%' OR ${value} LIKE '%dispute%')`;
+  if (status === "cancelled") return `(${outcome.cancelledPreFulfillment} OR ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn})`;
+  if (status === "delivered") return `(${outcome.deliveredSigned})`;
   if (status === "cancelled") return `(${value} LIKE '%cancel%' OR ${value} LIKE '%return%' OR ${value} LIKE '%not_accepted%')`;
   if (status === "delivered") return `(${value} LIKE '%delivered%' AND NOT (${orderStatusSql("cancelled")}))`;
   if (status === "delivering") return `(
@@ -682,12 +1562,31 @@ function orderStatusSql(status) {
   return "1 = 1";
 }
 
+function orderSqlFbpLogistics() {
+  return `EXISTS (
+    SELECT 1 FROM ozon_orders_raw raw
+    WHERE raw.store_id = o.shop_id
+      AND raw.posting_number = o.posting_number
+      AND (
+        LOWER(raw.raw_json) LIKE '%fbp%'
+        OR LOWER(raw.raw_json) LIKE '%hunchun%'
+        OR LOWER(raw.raw_json) LIKE '%hun chun%'
+        OR raw.raw_json LIKE '%珲春%'
+        OR raw.raw_json LIKE '%混春%'
+        OR raw.raw_json LIKE '%混川%'
+      )
+  )`;
+}
+
 function orderMatchesStatusQuery(row, status) {
   if (status === "all") return true;
   if (status === "unbound") return orderHasUnboundStockQuery(row);
+  const outcome = classifyOrderOutcome(row);
+  if (status === "cancelled") return ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(outcome);
+  if (status === "delivered") return outcome === "delivered_signed";
   const values = [row.status, row.tracking_stage].map((value) => String(value || "").toLowerCase());
   if (status === "awaiting_packaging") return values.some((value) => ["awaiting_registration", "acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_awaiting_registration", "posting_acceptance_in_progress"].includes(value));
-  if (status === "awaiting_deliver") return values.some((value) => ["awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service"].includes(value));
+  if (status === "awaiting_deliver") return logisticsModeKey(row) !== "fbp" && values.some((value) => ["awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service"].includes(value));
   if (status === "delivering") {
     const text = [row.status, row.tracking_stage, row.logistics_status, row.delivery_method_name, row.logistics_channel].map((value) => String(value || "").toLowerCase()).join(" ");
     if (text.includes("awaiting_packaging") || text.includes("awaiting_deliver") || text.includes("pending_stock")) return false;
@@ -697,6 +1596,27 @@ function orderMatchesStatusQuery(row, status) {
   if (status === "delivered") return values.some((value) => value.includes("delivered")) && !orderMatchesStatusQuery(row, "cancelled");
   if (status === "cancelled") return values.some((value) => value.includes("cancel") || value.includes("return") || value === "not_accepted" || value.includes("not_accepted"));
   return false;
+}
+
+function orderExceptionStatusText(row) {
+  const outcome = classifyOrderOutcome(row);
+  if (outcome === "cancelled_pre_fulfillment") return "已取消";
+  if (outcome === "rejected_unclaimed") return "已拒收/未取";
+  if (outcome === "after_delivery_return") return "签收后退货";
+  if (outcome === "delivered_signed") return "已签收";
+  const stageKey = orderLogisticsStageKey(row);
+  if (stageKey === "received") return orderProfitAccrued(row) ? "已签收/已结算" : "已签收/待结算";
+  if (stageKey === "pickup_point") return "到达取货点/待客户取件";
+  if (stageKey === "customs") return "清关中";
+  if (stageKey === "on_way_to_city") return "运往目的城市";
+  if (stageKey === "registered") return "已登记/等待发运";
+  if (orderMatchesStatusQuery(row, "cancelled")) return "已取消/退货";
+  if (orderMatchesStatusQuery(row, "delivered")) return "已签收";
+  if (orderMatchesStatusQuery(row, "delivering")) return "配送中";
+  if (orderMatchesStatusQuery(row, "awaiting_deliver")) return "等待发运";
+  if (orderMatchesStatusQuery(row, "awaiting_packaging")) return "等待备货";
+  if (orderMatchesStatusQuery(row, "dispute")) return "争议中";
+  return row.tracking_stage || row.status || row.logistics_status || "待处理";
 }
 
 function orderHasUnboundStockQuery(row) {
@@ -785,9 +1705,32 @@ function enrichOrderLogistics(row) {
   const deadline = raw.shipment_date_without_delay || raw.shipment_date || fallbackShipDeadline(row.ordered_at);
   const remaining = deadline ? daysBetween(new Date(), new Date(deadline)) : null;
   const finished = ["delivered", "cancelled", "canceled"].includes(String(row.status || "").toLowerCase());
+  const cancellation = describeCancellation({
+    ...row,
+    raw_cancellation_reason: raw.cancellation?.cancel_reason || raw.cancellation?.cancellation_type || ""
+  });
   return {
     ...row,
     raw_json: undefined,
+    raw_status: raw.status || "",
+    raw_substatus: raw.substatus || "",
+    raw_tracking_stage: raw.tracking_stage || "",
+    raw_cancellation_reason: raw.cancellation?.cancel_reason || raw.cancellation?.cancellation_type || "",
+    cancel_initiator_label: cancellation.initiator_label,
+    cancel_reason_label: cancellation.reason_label,
+    cancel_reason_code: cancellation.reason_code,
+    cancel_reason_group_label: cancellation.reason_group_label,
+    cancel_accounting_hint: cancellation.accounting_hint,
+    loss_profile_code: cancellation.loss_profile_code,
+    loss_profile_label: cancellation.loss_profile_label,
+    loss_formula_text: cancellation.loss_formula_text,
+    pickup_code_verified_at: raw.pickup_code_verified_at || "",
+    delivering_date: raw.delivering_date || "",
+    in_process_at: raw.in_process_at || "",
+    delivery_date_begin: analytics.delivery_date_begin || "",
+    delivery_date_end: analytics.delivery_date_end || "",
+    delivery_type: analytics.delivery_type || "",
+    delivery_city: analytics.city || "",
     delivery_schema: "FBS self-ship",
     warehouse_name: deliveryMethod.warehouse || analytics.warehouse || "",
     delivery_method_name: deliveryMethod.name || "",
@@ -836,10 +1779,30 @@ function normalizeSyncDate(value) {
   return String(value).slice(0, 10);
 }
 
+function chinaDateKey(value) {
+  const date = parseDate(value);
+  if (!date) return "";
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
+}
+
+function chinaDateSql(expr) {
+  return `substr(datetime(${expr}, '+8 hours'), 1, 10)`;
+}
+
 function dateKeyDaysAgo(days) {
   const date = new Date();
   date.setUTCDate(date.getUTCDate() - Number(days || 0));
-  return date.toISOString().slice(0, 10);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
 }
 
 function nullable(value) {

@@ -7,6 +7,10 @@ const SESSION_TTL_HOURS = Math.max(1, Number(config.appSessionTtlHours || 72));
 const AUTH_RATE_LIMIT_WINDOW_MS = Math.max(1, Number(config.authRateLimitWindowMinutes || 15)) * 60 * 1000;
 const AUTH_RATE_LIMIT_MAX_ATTEMPTS = Math.max(1, Number(config.authRateLimitMaxAttempts || 8));
 
+/**
+ * Create a new in-database session and return the bearer token that the client
+ * must send through the Authorization header.
+ */
 export function createSession(personId, name, role, username) {
   const token = randomUUID();
   const expiresAt = new Date(Date.now() + SESSION_TTL_HOURS * 3600 * 1000).toISOString();
@@ -46,6 +50,10 @@ export function extractToken(req) {
   return req.headers.authorization?.replace(/^Bearer\s+/, "") || "";
 }
 
+/**
+ * Build the auth route handler factory so auth endpoints stay grouped in one
+ * module instead of being embedded in the top-level server router.
+ */
 export function createAuthHandler(readJson) {
   return function handleAuth(req, url) {
     const key = `${req.method} ${url.pathname}`;
