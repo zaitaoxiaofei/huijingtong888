@@ -1,55 +1,43 @@
-import { DatabaseSync } from "node:sqlite";
 import { config } from "../src/config.js";
 
-const db = new DatabaseSync(config.databasePath);
-
-const session = db.prepare(`
-  SELECT token, person_id, name, username, role, expires_at
-  FROM sessions
-  WHERE expires_at > CURRENT_TIMESTAMP
-  ORDER BY created_at DESC
-  LIMIT 1
-`).get();
-
-if (!session?.token) {
-  console.error("health-check: 未找到有效登录 session，无法检查受保护接口。");
-  process.exit(1);
-}
-
-const headers = {
-  Authorization: `Bearer ${session.token}`
-};
+const username = process.env.HEALTH_CHECK_USERNAME || "jiang";
+const password = process.env.HEALTH_CHECK_PASSWORD || "123456";
+const requestTimeoutMs = Number(process.env.HEALTH_CHECK_TIMEOUT_MS || 15000);
+const shanghaiDateTimeFormatter = new Intl.DateTimeFormat("sv-SE", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false
+});
 
 const endpoints = [
   ["/api/auth/me", "auth"],
   ["/api/shops", "shops"],
   ["/api/people", "people"],
-  ["/api/products", "products"],
-  ["/api/online-products", "online_products"],
-  ["/api/mappings", "sku_mappings"],
-  ["/api/stock-alerts", "stock_alerts"],
-  ["/api/inbound-records", "inbound_records"],
-  ["/api/outbound-records", "outbound_records"],
-  ["/api/procurement/requests", "procurement_requests"],
-  ["/api/procurement/purchase-orders", "purchase_orders"],
-  ["/api/orders?paged=1&page=1&pageSize=10&status=all&shopId=all&dateFrom=&dateTo=&searchType=order&searchQuery=&markFilter=all&printFilter=all&printView=all&sortMode=ordered", "orders_paged"],
-  ["/api/profit-summary?from=2026-05-01&to=2026-05-31", "profit_summary"],
+  ["/api/products?paged=1&page=1&pageSize=10", "products_paged"],
+  ["/api/online-products?paged=1&page=1&pageSize=10", "online_products_paged"],
+  ["/api/mappings?paged=1&page=1&pageSize=10", "sku_mappings_paged"],
+  ["/api/stock-alerts?paged=1&page=1&pageSize=30", "stock_alerts_paged"],
+  ["/api/stock-alerts?mode=fbp&paged=1&page=1&pageSize=30", "stock_fbp_paged"],
+  ["/api/inbound-records?paged=1&page=1&pageSize=30", "inbound_records_paged"],
+  ["/api/outbound-records?paged=1&page=1&pageSize=30&dateFrom=&dateTo=&shopId=all&status=all&query=", "outbound_records_paged"],
+  ["/api/procurement/requests?grouped=1&paged=1&page=1&pageSize=30", "procurement_grouped_paged"],
+  ["/api/procurement/purchase-orders?paged=1&page=1&pageSize=30", "purchase_orders_paged"],
+  ["/api/orders?paged=1&page=1&pageSize=30&status=all&shopId=all&dateFrom=&dateTo=&searchType=order&searchQuery=&markFilter=all&printFilter=all&printView=all&sortMode=ordered", "orders_paged"],
   ["/api/profit-dashboard", "profit_dashboard"],
   ["/api/profit-ranking?dimension=sku&page=1&pageSize=10", "profit_ranking_sku"],
-  ["/api/profit-ranking?dimension=shop&page=1&pageSize=10", "profit_ranking_shop"]
+  ["/api/profit-ranking?dimension=shop&page=1&pageSize=10", "profit_ranking_shop"],
+  ["/api/profits/historical-review?limit=10", "historical_profit_review"]
 ];
 
 function summarizePayload(payload) {
   if (Array.isArray(payload)) return { kind: "array", count: payload.length };
   if (!payload || typeof payload !== "object") return { kind: typeof payload };
   if (Array.isArray(payload.rows)) return { kind: "paged", rows: payload.rows.length, total: Number(payload.total || 0) };
-  if (payload.summary && (payload.byShop || payload.bySku || payload.byProduct)) {
-    return {
-      kind: "profit_summary",
-      order_count: Number(payload.summary.order_count || 0),
-      revenue: Number(payload.summary.revenue || 0)
-    };
-  }
   if (payload.ranges && Array.isArray(payload.dailyTrend14)) {
     return {
       kind: "profit_dashboard",
@@ -66,34 +54,71 @@ function summarizePayload(payload) {
       total: Number(payload.total || 0)
     };
   }
-  if (Array.isArray(payload.rows) && payload.meta) return { kind: "rows_meta", rows: payload.rows.length };
-  if (Array.isArray(payload.rows)) return { kind: "rows", rows: payload.rows.length };
   return { kind: "object", keys: Object.keys(payload).slice(0, 8) };
 }
 
-async function checkEndpoint(path, label) {
-  const response = await fetch(`${config.appBaseUrl}${path}`, { headers });
-  const text = await response.text();
-  let payload = null;
+async function fetchJson(path, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
   try {
-    payload = JSON.parse(text);
-  } catch {
-    payload = text;
+    const response = await fetch(`${config.appBaseUrl}${path}`, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      }
+    });
+    const text = await response.text();
+    let payload = null;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = text;
+    }
+    return { response, payload };
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+async function login() {
+  const { response, payload } = await fetchJson("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ username, password })
+  });
+  if (!response.ok || !payload?.token) {
+    throw new Error(`health-check login failed: HTTP ${response.status} ${JSON.stringify(payload)}`);
+  }
+  return payload;
+}
+
+async function checkEndpoint(path, label, token) {
+  const startedAt = performance.now();
+  const { response, payload } = await fetchJson(path, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  const durationMs = Math.round(performance.now() - startedAt);
+  const summary = summarizePayload(payload);
+  const expectsPaged = label.endsWith("_paged") || path.includes("paged=1");
+  const contractOk = !expectsPaged || summary.kind === "paged" || summary.kind === "profit_ranking";
+
   return {
     label,
     path,
     status: response.status,
-    ok: response.ok,
-    summary: summarizePayload(payload),
-    error: payload?.error || null
+    ok: response.ok && contractOk,
+    durationMs,
+    summary,
+    error: payload?.error || (contractOk ? null : "Expected paged response contract")
   };
 }
 
+const loginPayload = await login();
 const results = [];
 for (const [path, label] of endpoints) {
   try {
-    results.push(await checkEndpoint(path, label));
+    results.push(await checkEndpoint(path, label, loginPayload.token));
   } catch (error) {
     results.push({
       label,
@@ -109,14 +134,11 @@ const failed = results.filter((item) => !item.ok);
 
 console.log(JSON.stringify({
   appBaseUrl: config.appBaseUrl,
-  databasePath: config.databasePath,
-  sessionUser: {
-    person_id: session.person_id,
-    name: session.name,
-    username: session.username,
-    role: session.role
-  },
-  checkedAt: new Date().toISOString(),
+  dbClient: config.dbClient,
+  db: { host: config.dbHost, port: config.dbPort, name: config.dbName, user: config.dbUser },
+  loginUser: loginPayload.user,
+  checkedAt: shanghaiDateTimeFormatter.format(new Date()),
+  timeZone: "Asia/Shanghai",
   failedCount: failed.length,
   results
 }, null, 2));

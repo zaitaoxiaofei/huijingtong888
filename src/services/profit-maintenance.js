@@ -14,60 +14,72 @@ export function syncOutboundForOpenOrders(deps) {
        OR LOWER(COALESCE(o.tracking_stage, '')) LIKE '%cancel%'
   `);
   for (const row of cancelledRows) {
-    const quantity = Math.abs(Number(row.quantity || 1));
-    const unitCost = Number(row.purchase_cost || 0);
+    const outboundMovement = deps.get(`
+      SELECT id, product_id, shop_id, sku_mapping_id, owner_person_id, quantity_delta, unit_cost, status
+      FROM inventory_movements
+      WHERE related_order_item_id = ? AND source_type = 'order_outbound'
+      LIMIT 1
+    `, [row.order_item_id]);
+    if (!outboundMovement) {
+      continue;
+    }
+    const restoreProductId = outboundMovement.product_id || row.product_id;
+    const restoreShopId = outboundMovement.shop_id || row.shop_id;
+    const restoreMappingId = outboundMovement.sku_mapping_id || row.mapping_id;
+    const restorePersonId = outboundMovement.owner_person_id || row.person_id;
+    const restoreUnitCost = Number(outboundMovement.unit_cost || row.purchase_cost || 0);
+    const restoreQuantity = Math.abs(Number(outboundMovement.quantity_delta || row.quantity || 1));
+    if (!restoreProductId) continue;
     deps.db.prepare(`
       UPDATE outbound_records
       SET status = 'cancelled', reason = 'cancelled_order', note = 'Order cancelled, inventory restored'
-      WHERE order_ref = ? AND (? IS NULL OR product_id = ?)
-    `).run(row.posting_number, row.product_id || null, row.product_id || null);
+      WHERE order_item_id = ? OR (order_item_id IS NULL AND order_ref = ? AND product_id = ?)
+    `).run(row.order_item_id, row.posting_number, restoreProductId);
     deps.db.prepare(`
       UPDATE inventory_movements
-      SET status = 'cancelled', note = 'Cancelled order outbound'
+      SET status = 'posted', note = 'Cancelled order outbound, restored by return movement'
       WHERE related_order_item_id = ? AND source_type = 'order_outbound'
     `).run(row.order_item_id);
-    if (row.product_id) {
-      const returnSourceRef = `cancel_${row.order_item_id}`;
-      const existingReturn = deps.get(`
-        SELECT id, product_id
-        FROM inventory_movements
-        WHERE source_type = 'return_in' AND source_ref = ?
-        LIMIT 1
-      `, [returnSourceRef]);
-      if (existingReturn) {
-        deps.db.prepare(`
-          UPDATE inventory_movements
-          SET product_id = ?, shop_id = ?, sku_mapping_id = ?, owner_person_id = ?,
-            quantity_delta = ?, unit_cost = ?, amount = ?, status = 'posted', note = 'Order cancelled, inventory restored'
-          WHERE id = ?
-        `).run(
-          row.product_id,
-          row.shop_id,
-          row.mapping_id,
-          row.person_id,
-          quantity,
-          unitCost,
-          quantity * unitCost,
-          existingReturn.id
-        );
-        deps.rebuildInventoryCurrentForProduct(existingReturn.product_id);
-      } else {
-        deps.postInventory({
-          product_id: row.product_id,
-          shop_id: row.shop_id,
-          sku_mapping_id: row.mapping_id,
-          owner_person_id: row.person_id,
-          source_type: "return_in",
-          source_ref: returnSourceRef,
-          quantity_delta: quantity,
-          unit_cost: unitCost,
-          amount: quantity * unitCost,
-          related_order_item_id: row.order_item_id,
-          note: "Order cancelled, inventory restored"
-        });
-      }
-      deps.rebuildInventoryCurrentForProduct(row.product_id);
+    const returnSourceRef = `cancel_${row.order_item_id}`;
+    const existingReturn = deps.get(`
+      SELECT id, product_id
+      FROM inventory_movements
+      WHERE source_type = 'return_in' AND source_ref = ?
+      LIMIT 1
+    `, [returnSourceRef]);
+    if (existingReturn) {
+      deps.db.prepare(`
+        UPDATE inventory_movements
+        SET product_id = ?, shop_id = ?, sku_mapping_id = ?, owner_person_id = ?,
+          quantity_delta = ?, unit_cost = ?, amount = ?, status = 'posted', note = 'Order cancelled, inventory restored'
+        WHERE id = ?
+      `).run(
+        restoreProductId,
+        restoreShopId,
+        restoreMappingId,
+        restorePersonId,
+        restoreQuantity,
+        restoreUnitCost,
+        restoreQuantity * restoreUnitCost,
+        existingReturn.id
+      );
+      deps.rebuildInventoryCurrentForProduct(existingReturn.product_id);
+    } else {
+      deps.postInventory({
+        product_id: restoreProductId,
+        shop_id: restoreShopId,
+        sku_mapping_id: restoreMappingId,
+        owner_person_id: restorePersonId,
+        source_type: "return_in",
+        source_ref: returnSourceRef,
+        quantity_delta: restoreQuantity,
+        unit_cost: restoreUnitCost,
+        amount: restoreQuantity * restoreUnitCost,
+        related_order_item_id: row.order_item_id,
+        note: "Order cancelled, inventory restored"
+      });
     }
+    deps.rebuildInventoryCurrentForProduct(restoreProductId);
   }
 
   const rows = deps.all(`

@@ -2,14 +2,19 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
+import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import ProductImagePreview from "../../components/ProductImagePreview.vue";
 
 const loading = ref(false);
 const detailVisible = ref(false);
 const cancelling = ref(false);
+const listRequestGate = createLatestRequestGate();
 
 const state = reactive({
   rows: [],
+  total: 0,
   filters: {
     query: "",
     page: 1,
@@ -23,27 +28,7 @@ const detail = reactive({
   requests: []
 });
 
-const filteredRows = computed(() => {
-  const query = String(state.filters.query || "").trim().toLowerCase();
-  if (!query) return state.rows;
-
-  return state.rows.filter((row) => {
-    const haystack = [
-      row.order_no,
-      row.creator_name,
-      row.product_names,
-      row.note
-    ].map((item) => String(item || "").toLowerCase()).join(" ");
-    return haystack.includes(query);
-  });
-});
-
-const pagedRows = computed(() => {
-  const start = (state.filters.page - 1) * state.filters.pageSize;
-  return filteredRows.value.slice(start, start + state.filters.pageSize);
-});
-
-const total = computed(() => filteredRows.value.length);
+const total = computed(() => state.total);
 
 function money(value) {
   return Number(value || 0).toFixed(2);
@@ -54,8 +39,33 @@ function numberText(value) {
 }
 
 function dateText(value) {
-  if (!value) return "-";
-  return new Date(value).toLocaleString("zh-CN", { hour12: false });
+  return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
+}
+
+function splitTextList(value) {
+  return String(value || "").split("||").map((item) => item.trim()).filter(Boolean);
+}
+
+function productRows(row) {
+  const names = splitTextList(row.product_names);
+  const codes = splitTextList(row.product_codes);
+  const images = String(row.product_image_urls || "").split("||").map((item) => item.trim());
+  const skus = String(row.mapped_skus || "").split("||").map((item) => item.trim());
+  const length = Math.max(names.length, codes.length, images.length, skus.length, 1);
+  return Array.from({ length }, (_, index) => ({
+    name: names[index] || "-",
+    code: codes[index] || "-",
+    image: images[index] || "",
+    skus: skus[index] || ""
+  }));
+}
+
+function primaryProduct(row) {
+  return productRows(row)[0] || { name: "-", code: "-", image: "", skus: "" };
+}
+
+function extraProductCount(row) {
+  return Math.max(0, productRows(row).length - 1);
 }
 
 function statusTagType(status) {
@@ -78,31 +88,49 @@ function statusText(status) {
 
 function handleSearch() {
   state.filters.page = 1;
+  loadPageData();
 }
 
 function handleReset() {
   state.filters.query = "";
   state.filters.page = 1;
+  loadPageData();
 }
 
 function handlePageChange(page) {
   state.filters.page = page;
+  loadPageData();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
+  loadPageData();
+}
+
+function purchaseOrdersQueryString() {
+  const params = new URLSearchParams({
+    paged: "1",
+    page: String(state.filters.page),
+    pageSize: String(state.filters.pageSize),
+    query: String(state.filters.query || "").trim()
+  });
+  return params.toString();
 }
 
 async function loadPageData() {
+  const requestToken = listRequestGate.next();
   loading.value = true;
   try {
-    const rows = await apiClient.get("/api/procurement/purchase-orders");
-    state.rows = Array.isArray(rows) ? rows : [];
+    const result = await apiClient.get(`/api/procurement/purchase-orders?${purchaseOrdersQueryString()}`);
+    if (!listRequestGate.isLatest(requestToken)) return;
+    state.rows = Array.isArray(result?.rows) ? result.rows : [];
+    state.total = Number(result?.total || 0);
   } catch (error) {
+    if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "加载采购历史失败");
   } finally {
-    loading.value = false;
+    if (listRequestGate.isLatest(requestToken)) loading.value = false;
   }
 }
 
@@ -134,7 +162,7 @@ async function cancelOrder() {
     await ElMessageBox.confirm(
       `确认取消采购单“${detail.order.order_no || detail.order.id}”吗？`,
       "取消采购单",
-      { type: "warning", confirmButtonText: "确认取消", cancelButtonText: "取消" }
+      { type: "warning", confirmButtonText: "确认取消", cancelButtonText: "关闭" }
     );
     cancelling.value = true;
     await apiClient.post(`/api/procurement/purchase-orders/${detail.order.id}/cancel`, {});
@@ -184,8 +212,24 @@ onMounted(loadPageData);
       </div>
 
       <div class="list-wrap">
-        <el-table v-loading="loading" :data="pagedRows" height="100%" stripe border class="erp-data-table procurement-history-table">
-          <el-table-column prop="order_no" label="采购单号" width="180" fixed="left" />
+        <el-table v-loading="loading" :data="state.rows" height="100%" stripe border class="erp-data-table procurement-history-table">
+          <el-table-column label="产品信息" min-width="420" fixed="left">
+            <template #default="{ row }">
+              <div class="product-cell">
+                <ProductImagePreview
+                  :src="primaryProduct(row).image"
+                  :preview-list="productRows(row).map((item) => item.image).filter(Boolean)"
+                />
+                <div class="product-cell-meta">
+                  <strong>{{ primaryProduct(row).name }}</strong>
+                  <span>编码：{{ primaryProduct(row).code }}</span>
+                  <span>SKU：{{ primaryProduct(row).skus || "未绑定 SKU" }}</span>
+                  <span>采购单号：{{ row.order_no || "-" }}</span>
+                  <el-tag v-if="extraProductCount(row)" size="small" type="info">另有 {{ extraProductCount(row) }} 个产品</el-tag>
+                </div>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="creator_name" label="创建人" width="120" />
           <el-table-column label="商品数" width="100" align="center">
             <template #default="{ row }">{{ numberText(row.item_count) }}</template>
@@ -195,11 +239,6 @@ onMounted(loadPageData);
           </el-table-column>
           <el-table-column label="总金额" width="130" align="right">
             <template #default="{ row }">¥{{ money(row.total_amount) }}</template>
-          </el-table-column>
-          <el-table-column prop="product_names" label="商品汇总" min-width="280">
-            <template #default="{ row }">
-              <span class="history-product-summary">{{ row.product_names || "-" }}</span>
-            </template>
           </el-table-column>
           <el-table-column prop="status" label="状态" width="120" align="center">
             <template #default="{ row }">
@@ -335,14 +374,32 @@ onMounted(loadPageData);
   min-width: 1320px;
 }
 
-.history-product-summary {
-  color: var(--erp-text-secondary);
-  line-height: 1.6;
-  word-break: break-all;
-}
-
 .procurement-footer {
   margin-top: auto;
+}
+
+.product-cell {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.product-cell-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.product-cell-meta strong {
+  line-height: 1.35;
+}
+
+.product-cell-meta span {
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-all;
 }
 
 .detail-summary {
@@ -372,16 +429,6 @@ onMounted(loadPageData);
   gap: 10px;
 }
 
-.sub-panel-head {
-  display: grid;
-  gap: 4px;
-}
-
-.sub-panel-head strong {
-  font-size: 15px;
-}
-
-.sub-panel-head span,
 .muted-text {
   color: var(--erp-text-secondary);
   font-size: 12px;

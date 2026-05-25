@@ -4,6 +4,13 @@ defineProps({
 });
 
 const emit = defineEmits(["create", "edit", "delete"]);
+
+function watermarkUrl(row) {
+  if (!row?.id || !row?.watermark_path) return "";
+  const token = localStorage.getItem("authToken") || "";
+  const base = `/api/tools/image-cropper/shop-watermark/${encodeURIComponent(row.id)}/file`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
 </script>
 
 <template>
@@ -25,6 +32,7 @@ const emit = defineEmits(["create", "edit", "delete"]);
             <th>主体</th>
             <th>Client ID</th>
             <th>API Key</th>
+            <th>水印</th>
             <th>状态</th>
             <th>操作</th>
           </tr>
@@ -35,6 +43,12 @@ const emit = defineEmits(["create", "edit", "delete"]);
             <td>{{ row.legal_entity || "-" }}</td>
             <td>{{ row.ozon_client_id || "-" }}</td>
             <td>{{ row.api_key_hint || "-" }}</td>
+            <td>
+              <div class="vue-config-watermark-cell">
+                <img v-if="watermarkUrl(row)" :src="watermarkUrl(row)" :alt="`${row.name || '店铺'}水印`" />
+                <span>{{ row.watermark_name || (row.watermark_path ? "已配置" : "未配置") }}</span>
+              </div>
+            </td>
             <td>
               <span class="ds-badge" :class="row.status === 'active' ? 'ds-badge-success' : 'ds-badge-warning'">
                 {{ row.status === "active" ? "启用" : row.status || "停用" }}

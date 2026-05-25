@@ -1,5 +1,7 @@
 const OZON_API_BASE = "https://api-seller.ozon.ru";
 const DAY_MS = 24 * 60 * 60 * 1000;
+const OZON_REQUEST_TIMEOUT_MS = 45000;
+const OZON_REQUEST_RETRIES = 2;
 
 export async function fetchOzonPostings(shop, options = {}) {
   const legacySince = typeof options === "string" ? options : "";
@@ -50,6 +52,27 @@ export async function fetchOzonPostings(shop, options = {}) {
 
   const postings = [...postingsByNumber.values()];
   return { postings, fetched: postings.length, requests, ranges };
+}
+
+export async function fetchOzonPostingByNumber(shop, postingNumber, options = {}) {
+  const posting = String(postingNumber || "").trim();
+  if (!posting) throw new Error("Missing Ozon posting number");
+  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+    const demoMatch = demoPostings(shop, options.since || options.from).find((item) => String(item.posting_number || "") === posting);
+    return demoMatch || null;
+  }
+  const data = await ozonRequest(shop, "/v3/posting/fbs/get", {
+    posting_number: posting,
+    with: {
+      analytics_data: true,
+      barcodes: true,
+      financial_data: true,
+      translit: true
+    }
+  }, options);
+  const rawPosting = data.result?.posting || data.result || data.posting || data;
+  const normalized = normalizeOzonPosting(rawPosting);
+  return normalized?.posting_number ? normalized : null;
 }
 
 export async function fetchOzonProducts(shop) {
@@ -139,6 +162,217 @@ export async function archiveOzonProducts(shop, productIds = [], options = {}) {
     return { result: true, product_id, demo: true };
   }
   return ozonRequest(shop, "/v1/product/archive", { product_id }, options);
+}
+
+export async function createOzonProductBySku(shop, item, options = {}) {
+  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+    return {
+      result: {
+        task_id: Math.floor(Date.now() / 1000),
+        unmatched_sku_list: []
+      },
+      demo: true
+    };
+  }
+  return ozonRequest(shop, "/v1/product/import-by-sku", {
+    items: [{
+      sku: Number(item.sku),
+      name: String(item.name || `Copy ${item.sku}`),
+      offer_id: String(item.offer_id || ""),
+      currency_code: String(item.currency_code || "RUB"),
+      old_price: String(item.old_price || item.price || "0"),
+      price: String(item.price || "0"),
+      vat: String(item.vat || "0")
+    }]
+  }, options);
+}
+
+export async function fetchOzonProductImportInfo(shop, taskId, options = {}) {
+  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+    return {
+      result: {
+        task_id: Number(taskId),
+        status: "imported",
+        items: [{
+          offer_id: `DEMO-${taskId}`,
+          product_id: Number(taskId),
+          status: "imported"
+        }]
+      },
+      demo: true
+    };
+  }
+  return ozonRequest(shop, "/v1/product/import/info", { task_id: Number(taskId) }, options);
+}
+
+export async function importOzonProducts(shop, payload = {}, options = {}) {
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  if (!items.length) throw new Error("Ozon product/import 缺少 items");
+  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+    return {
+      result: {
+        task_id: Math.floor(Date.now() / 1000),
+        total_items: items.length
+      },
+      demo: true
+    };
+  }
+  return ozonRequest(shop, "/v3/product/import", { items }, options);
+}
+
+export async function fetchOzonProductInfoAttributes(shop, options = {}) {
+  const productIds = [...new Set((options.productIds || options.product_id || []).map(Number).filter(Boolean))];
+  const offerIds = [...new Set((options.offerIds || options.offer_id || []).map((item) => String(item || "").trim()).filter(Boolean))];
+  if (!productIds.length && !offerIds.length) return [];
+  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+    const productId = productIds[0] || Number(String(offerIds[0] || "").replace(/\D/g, "")) || Date.now();
+    return [{
+      id: productId,
+      product_id: productId,
+      offer_id: offerIds[0] || `DEMO-${productId}`,
+      name: "Чехол брелка автосигнализации, 1 шт.",
+      category_id: 971082,
+      category_name: "汽车用品 / 汽车配件 / 汽车防盗器遥控器套",
+      weight: 100,
+      depth: 110,
+      width: 41,
+      height: 151,
+      images: [],
+      attributes: [
+        { id: 85, name: "品牌", values: [{ value: "无品牌" }] },
+        { id: 9048, name: "型号名称", values: [{ value: "KDS#35%-50%-0325-4" }] },
+        { id: 10096, name: "主图标签", values: [{ value: "#tenet_t4" }, { value: "#tenet" }] }
+      ]
+    }];
+  }
+
+  const filter = {};
+  if (productIds.length) filter.product_id = productIds;
+  if (offerIds.length) filter.offer_id = offerIds;
+  const payload = {
+    filter,
+    limit: Math.min(Math.max(Number(options.limit || 100), 1), 1000),
+    sort_dir: "ASC"
+  };
+  let data;
+  try {
+    data = await ozonRequest(shop, "/v4/product/info/attributes", payload, options);
+  } catch (error) {
+    if (!String(error?.message || "").includes("/v4/product/info/attributes")) throw error;
+    data = await ozonRequest(shop, "/v3/products/info/attributes", payload, options);
+  }
+  return data.result?.items || data.items || data.result || [];
+}
+
+export async function fetchOzonCategoryAttributes(shop, options = {}) {
+  const descriptionCategoryId = Number(options.descriptionCategoryId || options.description_category_id || 0);
+  const typeId = Number(options.typeId || options.type_id || 0);
+  const categoryId = Number(options.categoryId || options.category_id || 0);
+  if (!descriptionCategoryId && !typeId && !categoryId) return [];
+  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+    return [
+      { id: 85, name: "品牌", is_required: true, type: "String", dictionary_id: 971082, is_collection: false },
+      { id: 9048, name: "型号名称", is_required: true, type: "String", dictionary_id: 0, is_collection: false },
+      { id: 10096, name: "主图标签", is_required: false, type: "String", dictionary_id: 0, is_collection: true },
+      { id: 8229, name: "颜色", is_required: false, type: "String", dictionary_id: 0, is_collection: false }
+    ];
+  }
+
+  if (descriptionCategoryId && typeId) {
+    const data = await ozonRequest(shop, "/v1/description-category/attribute", {
+      description_category_id: descriptionCategoryId,
+      type_id: typeId,
+      language: options.language || "DEFAULT"
+    }, options);
+    return normalizeOzonCategoryAttributeResponse(data);
+  }
+
+  const data = await ozonRequest(shop, "/v3/category/attribute", {
+    attribute_type: "ALL",
+    category_id: [categoryId],
+    language: options.language || "DEFAULT"
+  }, options);
+  return normalizeOzonCategoryAttributeResponse(data);
+}
+
+export async function fetchOzonCategoryAttributeValues(shop, options = {}) {
+  const descriptionCategoryId = Number(options.descriptionCategoryId || options.description_category_id || 0);
+  const typeId = Number(options.typeId || options.type_id || 0);
+  const attributeId = Number(options.attributeId || options.attribute_id || 0);
+  if (!descriptionCategoryId || !typeId || !attributeId) return [];
+  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+    return [
+      { id: 971082, dictionary_value_id: 971082, value: "无品牌" },
+      { id: 1, dictionary_value_id: 1, value: "黑色" },
+      { id: 2, dictionary_value_id: 2, value: "银色" }
+    ];
+  }
+
+  const values = [];
+  let lastValueId = Number(options.lastValueId || options.last_value_id || 0);
+  const limit = Math.min(Math.max(Number(options.limit || 1000), 1), 5000);
+  while (true) {
+    const data = await ozonRequest(shop, "/v1/description-category/attribute/values", {
+      attribute_id: attributeId,
+      description_category_id: descriptionCategoryId,
+      type_id: typeId,
+      limit,
+      last_value_id: lastValueId,
+      language: options.language || "ZH_HANS"
+    }, options);
+    const batch = normalizeOzonAttributeValuesResponse(data);
+    values.push(...batch);
+    const nextLastValueId = Number(data?.result?.last_value_id || data?.last_value_id || 0);
+    if (!nextLastValueId || nextLastValueId === lastValueId || batch.length < limit) break;
+    lastValueId = nextLastValueId;
+  }
+  return values;
+}
+
+export async function searchOzonCategoryAttributeValues(shop, options = {}) {
+  const descriptionCategoryId = Number(options.descriptionCategoryId || options.description_category_id || 0);
+  const typeId = Number(options.typeId || options.type_id || 0);
+  const attributeId = Number(options.attributeId || options.attribute_id || 0);
+  const value = String(options.value || options.keyword || "").trim();
+  if (!descriptionCategoryId || !typeId || !attributeId || !value) return [];
+  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+    return (await fetchOzonCategoryAttributeValues(shop, options)).filter((item) => String(item.value || "").includes(value));
+  }
+  const data = await ozonRequest(shop, "/v1/description-category/attribute/values/search", {
+    attribute_id: attributeId,
+    description_category_id: descriptionCategoryId,
+    type_id: typeId,
+    value,
+    limit: Math.min(Math.max(Number(options.limit || 50), 1), 1000),
+    language: options.language || "ZH_HANS"
+  }, options);
+  return normalizeOzonAttributeValuesResponse(data);
+}
+
+export async function fetchOzonDescriptionCategoryTree(shop, options = {}) {
+  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+    throw new Error("当前店铺没有真实 Ozon API 凭证，无法同步真实类目");
+  }
+  const data = await ozonRequest(shop, "/v1/description-category/tree", {
+    language: options.language || "DEFAULT"
+  }, options);
+  return data.result || data.items || data;
+}
+
+function normalizeOzonCategoryAttributeResponse(data = {}) {
+  const result = data.result || data.items || data;
+  if (Array.isArray(result)) return result.flatMap((item) => Array.isArray(item?.attributes) ? item.attributes : [item]);
+  if (Array.isArray(result.attributes)) return result.attributes;
+  if (Array.isArray(result.items)) return result.items.flatMap((item) => Array.isArray(item?.attributes) ? item.attributes : [item]);
+  return [];
+}
+
+function normalizeOzonAttributeValuesResponse(data = {}) {
+  const result = data.result || data.items || data;
+  if (Array.isArray(result)) return result;
+  if (Array.isArray(result.items)) return result.items;
+  if (Array.isArray(result.values)) return result.values;
+  return [];
 }
 
 export async function fetchOzonPackageLabel(shop, postingNumbers = [], options = {}) {
@@ -266,18 +500,33 @@ async function fetchOzonProductIdsByVisibility(shop, visibility) {
 }
 
 async function ozonRequest(shop, path, payload, options = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= OZON_REQUEST_RETRIES; attempt += 1) {
+    try {
+      return await ozonRequestOnce(shop, path, payload, options);
+    } catch (error) {
+      if (options.signal?.aborted) throwIfAborted(options.signal);
+      lastError = error;
+      if (!isRetryableOzonError(error) || attempt >= OZON_REQUEST_RETRIES) break;
+      await sleep(400 * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
+async function ozonRequestOnce(shop, path, payload, options = {}) {
   const controller = new AbortController();
   const abortFromParent = () => controller.abort(options.signal.reason || new Error("本次拉取已取消"));
   if (options.signal?.aborted) abortFromParent();
   else options.signal?.addEventListener("abort", abortFromParent, { once: true });
-  const timeout = setTimeout(() => controller.abort(), 45000);
+  const timeout = setTimeout(() => controller.abort(), OZON_REQUEST_TIMEOUT_MS);
   let response;
   try {
     response = await fetch(`${OZON_API_BASE}${path}`, {
       method: "POST",
       headers: {
         "Client-Id": String(shop.ozon_client_id),
-        "Api-Key": String(shop.api_key_hint),
+        "Api-Key": ozonApiKey(shop),
         "Content-Type": "application/json"
       },
       body: JSON.stringify(payload),
@@ -285,8 +534,8 @@ async function ozonRequest(shop, path, payload, options = {}) {
     });
   } catch (error) {
     if (options.signal?.aborted) throwIfAborted(options.signal);
-    if (error.name === "AbortError") throw new Error(`Ozon ${path} timeout after 45s`);
-    throw error;
+    if (error.name === "AbortError") throw new Error(`Ozon ${path} timeout after ${Math.round(OZON_REQUEST_TIMEOUT_MS / 1000)}s`);
+    throw new Error(`Ozon ${path} request failed for ${shop.name || shop.id}: ${networkErrorMessage(error)}`, { cause: error });
   } finally {
     clearTimeout(timeout);
     options.signal?.removeEventListener("abort", abortFromParent);
@@ -305,6 +554,37 @@ async function ozonRequest(shop, path, payload, options = {}) {
   return data;
 }
 
+function isRetryableOzonError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    error?.name === "TypeError" ||
+    message.includes("fetch failed") ||
+    message.includes("timeout") ||
+    message.includes("econnreset") ||
+    message.includes("etimedout") ||
+    message.includes("socket") ||
+    message.includes("network")
+  );
+}
+
+function networkErrorMessage(error) {
+  const cause = error?.cause;
+  const parts = [
+    error?.message,
+    cause?.code,
+    cause?.message
+  ].filter(Boolean);
+  return parts.join("; ") || String(error);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function ozonApiKey(shop = {}) {
+  return String(shop.ozon_api_key || shop.api_key || shop.api_key_hint || "").trim();
+}
+
 async function ozonBinaryRequest(shop, path, payload, options = {}) {
   const controller = new AbortController();
   const abortFromParent = () => controller.abort(options.signal.reason || new Error("本次请求已取消"));
@@ -317,7 +597,7 @@ async function ozonBinaryRequest(shop, path, payload, options = {}) {
       method: "POST",
       headers: {
         "Client-Id": String(shop.ozon_client_id),
-        "Api-Key": String(shop.api_key_hint),
+        "Api-Key": ozonApiKey(shop),
         "Content-Type": "application/json"
       },
       body: JSON.stringify(payload),
@@ -531,8 +811,8 @@ function normalizeOzonPosting(item) {
     ordered_at: item.in_process_at || item.created_at || item.shipment_date || new Date().toISOString(),
     delivered_at: item.delivered_at || null,
     buyer_region: item.analytics_data?.region || item.analytics_data?.city || "",
-    tracking_number: item.tracking_number || item.tpl_integration_type || "",
-    external_tracking_url: item.tracking_number ? "" : "",
+    tracking_number: item.tracking_number || "",
+    external_tracking_url: item.external_tracking_url || "",
     cancel_reason_id: nullableNumber(cancellation.cancel_reason_id || item.cancel_reason_id),
     cancel_reason: cancellation.cancel_reason || cancellation.reason || item.cancel_reason || "",
     cancel_initiator: cancellation.cancellation_initiator || cancellation.initiator || item.cancellation_initiator || "",

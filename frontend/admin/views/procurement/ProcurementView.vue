@@ -1,13 +1,18 @@
-<script setup>
+﻿<script setup>
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
+import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProcurementRequestCreateDialog from "../../components/procurement/ProcurementRequestCreateDialog.vue";
 
 const route = useRoute();
 const router = useRouter();
+const listRequestGate = createLatestRequestGate();
+let dictionaryLoaded = false;
 
 const loading = ref(false);
 const dialogVisible = ref(false);
@@ -16,6 +21,7 @@ const editDialogSubmitting = ref(false);
 
 const state = reactive({
   requests: [],
+  total: 0,
   products: [],
   people: [],
   suppliers: [],
@@ -63,8 +69,7 @@ function numberText(value) {
 }
 
 function dateText(value) {
-  if (!value) return "-";
-  return new Date(value).toLocaleString("zh-CN", { hour12: false });
+  return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
 }
 
 function statusTagType(status) {
@@ -105,32 +110,8 @@ function supplierName(id) {
   return state.suppliers.find((supplier) => Number(supplier.id) === Number(id))?.name || "";
 }
 
-const filteredRequests = computed(() => {
-  const query = String(state.filters.query || "").trim().toLowerCase();
-  return state.requests.filter((row) => {
-    if (state.filters.status !== "all" && row.status !== state.filters.status) return false;
-    if (state.filters.urgency !== "all" && row.urgency !== state.filters.urgency) return false;
-    if (state.filters.personId !== "all" && String(row.person_id || "") !== String(state.filters.personId)) return false;
-    if (!query) return true;
-    const haystack = [
-      row.product_name,
-      row.product_code,
-      row.person_name,
-      row.supplier_name,
-      row.purchase_url,
-      row.note,
-      row.mapped_skus
-    ].map((item) => String(item || "").toLowerCase()).join(" ");
-    return haystack.includes(query);
-  });
-});
-
-const pagedRequests = computed(() => {
-  const start = (state.filters.page - 1) * state.filters.pageSize;
-  return filteredRequests.value.slice(start, start + state.filters.pageSize);
-});
-
-const totalRequests = computed(() => filteredRequests.value.length);
+const pagedRequests = computed(() => state.requests);
+const totalRequests = computed(() => state.total);
 const selectedRequestRows = computed(() => state.requests.filter((row) => state.selectedRequestIds.includes(Number(row.id))));
 const canBatchSubmit = computed(() => selectedRequestRows.value.length > 0 && selectedRequestRows.value.every((row) => row.status === "pending"));
 
@@ -163,6 +144,7 @@ function handleSelectionChange(rows) {
 
 function handleSearch() {
   state.filters.page = 1;
+  loadPageData();
 }
 
 function handleReset() {
@@ -172,15 +154,18 @@ function handleReset() {
   state.filters.personId = "all";
   state.filters.page = 1;
   state.filters.pageSize = 20;
+  loadPageData();
 }
 
 function handlePageChange(page) {
   state.filters.page = page;
+  loadPageData();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
+  loadPageData();
 }
 
 function openCreateDialog() {
@@ -197,7 +182,15 @@ function handleCreateDialogClosed(visible) {
   }
 }
 
-function openEditRequestDialog(row) {
+async function ensureProductOptions(query = "") {
+  if (state.products.length) return;
+  const params = new URLSearchParams({ paged: "1", page: "1", pageSize: "100" });
+  if (query) params.set("query", query);
+  const products = await apiClient.get(`/api/products?${params.toString()}`);
+  state.products = Array.isArray(products?.rows) ? products.rows : [];
+}
+
+async function openEditRequestDialog(row) {
   editDialog.form = {
     product_id: row.product_id || null,
     person_id: row.person_id || null,
@@ -212,6 +205,7 @@ function openEditRequestDialog(row) {
   };
   editDialog.requestId = row.id;
   editDialog.productQuery = row.product_name || row.product_code || "";
+  await ensureProductOptions(editDialog.productQuery);
   editDialogVisible.value = true;
 }
 
@@ -257,7 +251,7 @@ async function submitEditDialog() {
       supplier_id: editDialog.form.supplier_id || null
     });
     const recalculatedCount = await recalculateProductProfits([originalRequest?.product_id, editDialog.form.product_id]);
-    ElMessage.success(recalculatedCount ? "采购请求已更新，并已重算关联产品利润" : "采购请求已更新");
+    ElMessage.success(recalculatedCount ? "采购请求已更新，并已重算关联商品利润" : "采购请求已更新");
     editDialogVisible.value = false;
     closeEditDialog();
     await loadPageData();
@@ -270,7 +264,7 @@ async function submitEditDialog() {
 
 async function deleteRequest(row) {
   try {
-    await ElMessageBox.confirm(`确认删除采购请求“${row.product_name || row.product_code || row.id}”吗？`, "删除采购请求", {
+    await ElMessageBox.confirm(`确认删除采购请求「${row.product_name || row.product_code || row.id}」吗？`, "删除采购请求", {
       type: "warning",
       confirmButtonText: "确认删除",
       cancelButtonText: "取消"
@@ -308,22 +302,35 @@ async function submitSelectedRequests() {
 }
 
 async function loadPageData() {
+  const requestToken = listRequestGate.next();
   loading.value = true;
   try {
-    const [requests, products, people, suppliers] = await Promise.all([
-      apiClient.get("/api/procurement/requests"),
-      apiClient.get("/api/products"),
-      apiClient.get("/api/people"),
-      apiClient.get("/api/suppliers")
-    ]);
-    state.requests = Array.isArray(requests) ? requests : [];
-    state.products = Array.isArray(products) ? products : [];
-    state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
-    state.suppliers = Array.isArray(suppliers) ? suppliers : [];
+    const params = new URLSearchParams({
+      paged: "1",
+      page: String(state.filters.page),
+      pageSize: String(state.filters.pageSize),
+      status: String(state.filters.status || "all"),
+      urgency: String(state.filters.urgency || "all"),
+      personId: String(state.filters.personId || "all")
+    });
+    const query = String(state.filters.query || "").trim();
+    if (query) params.set("query", query);
+    const loaders = [apiClient.get(`/api/procurement/requests?${params.toString()}`)];
+    if (!dictionaryLoaded) loaders.push(apiClient.get("/api/people"), apiClient.get("/api/suppliers?paged=1&page=1&pageSize=100"));
+    const [requests, people, suppliers] = await Promise.all(loaders);
+    if (!listRequestGate.isLatest(requestToken)) return;
+    state.requests = Array.isArray(requests?.rows) ? requests.rows : [];
+    state.total = Number(requests?.total || 0);
+    if (!dictionaryLoaded) {
+      state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
+      state.suppliers = Array.isArray(suppliers?.rows) ? suppliers.rows : [];
+      dictionaryLoaded = true;
+    }
   } catch (error) {
+    if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "加载采购请求失败");
   } finally {
-    loading.value = false;
+    if (listRequestGate.isLatest(requestToken)) loading.value = false;
   }
 }
 
@@ -407,15 +414,7 @@ onMounted(loadPageData);
           <el-table-column label="商品" min-width="340" fixed="left">
             <template #default="{ row }">
               <div class="product-cell">
-                <el-image
-                  v-if="productImage(row)"
-                  :src="productImage(row)"
-                  fit="cover"
-                  class="product-thumb"
-                  :preview-src-list="[productImage(row)]"
-                  preview-teleported
-                />
-                <div v-else class="product-thumb product-thumb-fallback">无图</div>
+                <ProductImagePreview :src="productImage(row)" />
                 <div class="product-cell-meta">
                   <strong>{{ row.product_name || "-" }}</strong>
                   <span>编码：{{ productCode(row) }}</span>
@@ -519,15 +518,7 @@ onMounted(loadPageData);
               :class="{ active: Number(editDialog.form.product_id) === Number(product.id) }"
               @click="selectEditProduct(product)"
             >
-              <el-image
-                v-if="productImage(product)"
-                :src="productImage(product)"
-                fit="cover"
-                class="picker-thumb"
-                :preview-src-list="[productImage(product)]"
-                preview-teleported
-              />
-              <div v-else class="picker-thumb picker-thumb-fallback">无图</div>
+              <ProductImagePreview :src="productImage(product)" size="square" />
               <div class="picker-item-meta">
                 <strong>{{ product.name || "-" }}</strong>
                 <span>编码：{{ productCode(product) }}</span>
@@ -543,15 +534,7 @@ onMounted(loadPageData);
           <div class="selected-product-card">
             <template v-if="selectedEditProduct">
               <div class="selected-product-main">
-                <el-image
-                  v-if="productImage(selectedEditProduct)"
-                  :src="productImage(selectedEditProduct)"
-                  fit="cover"
-                  class="selected-product-thumb"
-                  :preview-src-list="[productImage(selectedEditProduct)]"
-                  preview-teleported
-                />
-                <div v-else class="selected-product-thumb product-thumb-fallback">无图</div>
+                <ProductImagePreview :src="productImage(selectedEditProduct)" size="square" />
                 <div class="selected-product-meta">
                   <strong>{{ selectedEditProduct.name }}</strong>
                   <span>编码：{{ productCode(selectedEditProduct) }}</span>
@@ -912,3 +895,5 @@ onMounted(loadPageData);
   }
 }
 </style>
+
+

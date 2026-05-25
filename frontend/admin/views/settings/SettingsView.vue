@@ -1,14 +1,19 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { uploadShopWatermark, withImageToken } from "../../api/tools/imageCropper";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText, shanghaiDateTimeText } from "../../utils/shanghai-date";
 
 const loading = ref(false);
 const activeSection = ref("shops");
 
 const shopDialogVisible = ref(false);
 const shopDialogSubmitting = ref(false);
+const shopWatermarkUploading = ref(false);
+const shopWatermarkDrag = ref(null);
+const shopWatermarkPreviewVersion = ref(0);
 const shopFormRef = ref();
 
 const personDialogVisible = ref(false);
@@ -26,6 +31,16 @@ const logisticsFormRef = ref();
 const cancellationDialogVisible = ref(false);
 const cancellationDialogSubmitting = ref(false);
 const cancellationFormRef = ref();
+const packagingRuleSubmitting = ref(false);
+const historicalRecalcSubmitting = ref(false);
+const loadedSections = reactive({
+  shops: false,
+  people: false,
+  rates: false,
+  profit: false,
+  logistics: false,
+  cancel: false
+});
 
 const state = reactive({
   shops: [],
@@ -33,6 +48,10 @@ const state = reactive({
   rates: [],
   logisticsRules: [],
   cancellationRules: [],
+  packagingFeeRule: createDefaultPackagingFeeRule(),
+  packagingFeeRuleChanges: [],
+  packagingFeeRecalc: createDefaultPackagingFeeRecalc(),
+  packagingFeeRecalcResult: null,
   filters: {
     shopQuery: "",
     shopStatus: "all",
@@ -60,6 +79,7 @@ const sectionOptions = [
   { key: "shops", label: "店铺管理", description: "维护店铺主体、Client ID、API Key 标识和结算比例。" },
   { key: "people", label: "人员管理", description: "维护账号、角色、启停状态和密码。" },
   { key: "rates", label: "汇率设置", description: "维护汇率历史记录，新增后即时生效。" },
+  { key: "profit", label: "利润规则", description: "维护利润测算中的包装费阈值和收费规则。" },
   { key: "logistics", label: "物流设置", description: "维护物流规则，支持新增、编辑、停用。" },
   { key: "cancel", label: "取消规则设置", description: "维护取消/退货识别规则，支持新增、编辑、停用。" }
 ];
@@ -76,6 +96,10 @@ const sectionMetaMap = {
   rates: {
     title: "汇率设置",
     description: "汇率只在汇率页面内新增，避免顶部新增按钮误导到汇率。"
+  },
+  profit: {
+    title: "利润规则",
+    description: "这里维护利润测算中的包装费规则，修改后新测算会按新规则执行。"
   },
   logistics: {
     title: "物流设置",
@@ -122,6 +146,18 @@ function createDefaultShopForm() {
     legal_entity: "",
     ozon_client_id: "",
     api_key_hint: "",
+    ozon_api_key: "",
+    performance_client_id: "",
+    performance_client_secret: "",
+    performance_client_secret_hint: "",
+    performance_client_secret_configured: false,
+    watermark_path: "",
+    watermark_name: "",
+    watermark_position: "bottom-right",
+    watermark_x_percent: 75,
+    watermark_y_percent: 75,
+    watermark_scale_percent: 22,
+    watermark_opacity_percent: 82,
     payout_rate: 0.33,
     status: "active"
   };
@@ -141,7 +177,7 @@ function createDefaultPersonForm() {
 function createDefaultRateForm() {
   return {
     rate: 11.32,
-    effective_date: new Date().toISOString().slice(0, 10),
+    effective_date: shanghaiDateKey(),
     source: "manual",
     note: ""
   };
@@ -162,7 +198,27 @@ function createDefaultLogisticsForm() {
     per_gram_cny: 0.026,
     per_ticket_cny: 0,
     enabled: 1,
+    filter_keywords: "",
     note: ""
+  };
+}
+
+function createDefaultPackagingFeeRule() {
+  return {
+    low_sale_threshold_cny: 50,
+    low_fee_cny: 0.5,
+    high_fee_cny: 1
+  };
+}
+
+function createDefaultPackagingFeeRecalc() {
+  const today = shanghaiDateKey();
+  const last30 = shanghaiDateDaysAgo(29);
+  return {
+    from: last30,
+    to: today,
+    only_final: 1,
+    only_with_finance: 1
   };
 }
 
@@ -259,6 +315,43 @@ const personDialogTitle = computed(() => (personDialog.mode === "create" ? "新�
 const rateDialogTitle = computed(() => "新增汇率");
 const logisticsDialogTitle = computed(() => (logisticsDialog.mode === "create" ? "新增物流规则" : "编辑物流规则"));
 const cancellationDialogTitle = computed(() => (cancellationDialog.mode === "create" ? "新增取消规则" : "编辑取消规则"));
+const shopWatermarkPreviewUrl = computed(() => {
+  if (!shopDialog.form.id || !shopDialog.form.watermark_path) return "";
+  const base = `/api/tools/image-cropper/shop-watermark/${encodeURIComponent(shopDialog.form.id)}/file?v=${shopWatermarkPreviewVersion.value}`;
+  return withImageToken(base);
+});
+const shopWatermarkSampleImage = computed(() => (
+  "/preview-assets/shop-watermark-background.png"
+));
+const shopWatermarkOverlayStyle = computed(() => {
+  const form = shopDialog.form;
+  const base = {
+    width: `${clampPercent(Number(form.watermark_scale_percent || 22), 8, 45)}%`,
+    opacity: clampPercent(Number(form.watermark_opacity_percent || 82), 10, 100) / 100,
+    cursor: "grab"
+  };
+  const position = String(form.watermark_position || "bottom-right");
+  if (position === "custom") {
+    return {
+      ...base,
+      left: `${clampPercent(Number(form.watermark_x_percent ?? 75), 0, 100)}%`,
+      top: `${clampPercent(Number(form.watermark_y_percent ?? 75), 0, 100)}%`
+    };
+  }
+  if (position === "top-left") return { ...base, top: "3.5%", left: "3.5%" };
+  if (position === "top-right") return { ...base, top: "3.5%", right: "3.5%" };
+  if (position === "bottom-left") return { ...base, bottom: "3.5%", left: "3.5%" };
+  if (position === "center") return { ...base, top: "50%", left: "50%", transform: "translate(-50%, -50%)" };
+  return { ...base, right: "3.5%", bottom: "3.5%" };
+});
+
+const shopWatermarkPositionOptions = [
+  { label: "左上", value: "top-left" },
+  { label: "右上", value: "top-right" },
+  { label: "居中", value: "center" },
+  { label: "左下", value: "bottom-left" },
+  { label: "右下", value: "bottom-right" }
+];
 
 function paginate(rows, page, pageSize) {
   const start = (page - 1) * pageSize;
@@ -266,8 +359,11 @@ function paginate(rows, page, pageSize) {
 }
 
 function formatDate(value) {
-  if (!value) return "-";
-  return new Date(value).toLocaleDateString("zh-CN");
+  return shanghaiDateText(value, { assumeUtcWhenNaive: true });
+}
+
+function formatDateTime(value) {
+  return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
 }
 
 function resetShopFilters() {
@@ -303,19 +399,28 @@ function goSection(key) {
   activeSection.value = key;
 }
 
-async function loadSettingsData() {
+async function loadSettingsData(force = false) {
   loading.value = true;
   try {
-    const [shops, people, rates, logisticsRules, cancellationRules] = await Promise.all([
+    await loadSectionData(activeSection.value, force);
+    return;
+    const [shops, people, rates, packagingFeeRule, packagingFeeRuleChanges, logisticsRules, cancellationRules] = await Promise.all([
       apiClient.get("/api/shops"),
       apiClient.get("/api/people"),
       apiClient.get("/api/exchange-rates"),
+      apiClient.get("/api/settings/packaging-fee-rule"),
+      apiClient.get("/api/settings/packaging-fee-rule/changes?limit=10"),
       apiClient.get("/api/logistics-rules"),
       apiClient.get("/api/order-cancellation-rules")
     ]);
     state.shops = Array.isArray(shops) ? shops : [];
     state.people = Array.isArray(people) ? people : [];
     state.rates = Array.isArray(rates) ? rates : [];
+    state.packagingFeeRule = {
+      ...createDefaultPackagingFeeRule(),
+      ...(packagingFeeRule || {})
+    };
+    state.packagingFeeRuleChanges = Array.isArray(packagingFeeRuleChanges) ? packagingFeeRuleChanges : [];
     state.logisticsRules = Array.isArray(logisticsRules) ? logisticsRules : [];
     state.cancellationRules = Array.isArray(cancellationRules) ? cancellationRules : [];
   } catch (error) {
@@ -323,6 +428,41 @@ async function loadSettingsData() {
   } finally {
     loading.value = false;
   }
+}
+
+async function loadSectionData(section, force = false) {
+  if (!force && loadedSections[section]) return;
+  if (section === "shops") {
+    const shops = await apiClient.get("/api/shops");
+    state.shops = Array.isArray(shops) ? shops : [];
+  } else if (section === "people") {
+    const people = await apiClient.get("/api/people");
+    state.people = Array.isArray(people) ? people : [];
+  } else if (section === "rates") {
+    const rates = await apiClient.get("/api/exchange-rates");
+    state.rates = Array.isArray(rates) ? rates : [];
+  } else if (section === "profit") {
+    const [packagingFeeRule, packagingFeeRuleChanges] = await Promise.all([
+      apiClient.get("/api/settings/packaging-fee-rule"),
+      apiClient.get("/api/settings/packaging-fee-rule/changes?limit=10")
+    ]);
+    state.packagingFeeRule = {
+      ...createDefaultPackagingFeeRule(),
+      ...(packagingFeeRule || {})
+    };
+    state.packagingFeeRuleChanges = Array.isArray(packagingFeeRuleChanges) ? packagingFeeRuleChanges : [];
+  } else if (section === "logistics") {
+    const logisticsRules = await apiClient.get("/api/logistics-rules");
+    state.logisticsRules = Array.isArray(logisticsRules) ? logisticsRules : [];
+  } else if (section === "cancel") {
+    const cancellationRules = await apiClient.get("/api/order-cancellation-rules");
+    state.cancellationRules = Array.isArray(cancellationRules) ? cancellationRules : [];
+  }
+  loadedSections[section] = true;
+}
+
+async function refreshSettingsData() {
+  return loadSettingsData(true);
 }
 
 function openCreateShopDialog() {
@@ -333,12 +473,25 @@ function openCreateShopDialog() {
 
 function openEditShopDialog(row) {
   shopDialog.mode = "edit";
+  shopWatermarkPreviewVersion.value += 1;
   shopDialog.form = {
     id: row.id,
     name: row.name || "",
     legal_entity: row.legal_entity || "",
     ozon_client_id: row.ozon_client_id || "",
     api_key_hint: row.api_key_hint || "",
+    ozon_api_key: row.ozon_api_key || "",
+    performance_client_id: row.performance_client_id || "",
+    performance_client_secret: "",
+    performance_client_secret_hint: row.performance_client_secret_hint || "",
+    performance_client_secret_configured: Boolean(row.performance_client_secret_configured),
+    watermark_path: row.watermark_path || "",
+    watermark_name: row.watermark_name || "",
+    watermark_position: normalizeWatermarkPosition(row.watermark_position),
+    watermark_x_percent: clampPercent(Number(row.watermark_x_percent ?? 75), 0, 100),
+    watermark_y_percent: clampPercent(Number(row.watermark_y_percent ?? 75), 0, 100),
+    watermark_scale_percent: clampPercent(Number(row.watermark_scale_percent ?? 22), 8, 45),
+    watermark_opacity_percent: clampPercent(Number(row.watermark_opacity_percent ?? 82), 10, 100),
     payout_rate: Number(row.payout_rate || 0.33),
     status: row.status || "active"
   };
@@ -426,8 +579,45 @@ function closeCancellationDialog() {
 }
 
 function clearShopForm() {
+  stopShopWatermarkDrag();
   shopDialog.form = createDefaultShopForm();
+  shopWatermarkUploading.value = false;
   shopFormRef.value?.clearValidate?.();
+}
+
+function validateShopWatermarkFile(file) {
+  if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+    ElMessage.error("水印仅支持 JPG、PNG、WEBP 图片");
+    return false;
+  }
+  if (file.size > 25 * 1024 * 1024) {
+    ElMessage.error("水印图片不能超过 25MB");
+    return false;
+  }
+  return true;
+}
+
+async function uploadShopWatermarkRequest(options) {
+  if (!shopDialog.form.id || !validateShopWatermarkFile(options.file)) return;
+  shopWatermarkUploading.value = true;
+  try {
+    const result = await uploadShopWatermark(shopDialog.form.id, options.file);
+    shopDialog.form.watermark_name = result.watermark_name || options.file.name;
+    shopDialog.form.watermark_path = result.watermark_path || shopDialog.form.watermark_path || "uploaded";
+    shopWatermarkPreviewVersion.value += 1;
+    const row = state.shops.find((item) => Number(item.id) === Number(shopDialog.form.id));
+    if (row) {
+      row.watermark_name = shopDialog.form.watermark_name;
+      row.watermark_path = shopDialog.form.watermark_path;
+    }
+    options.onSuccess?.(result);
+    ElMessage.success("店铺水印已上传");
+  } catch (error) {
+    options.onError?.(error);
+    ElMessage.error(error.message || "店铺水印上传失败");
+  } finally {
+    shopWatermarkUploading.value = false;
+  }
 }
 
 function clearPersonForm() {
@@ -454,7 +644,15 @@ async function submitShopDialog() {
   await shopFormRef.value?.validate();
   shopDialogSubmitting.value = true;
   try {
-    const payload = { ...shopDialog.form, payout_rate: Number(shopDialog.form.payout_rate || 0) };
+    const payload = {
+      ...shopDialog.form,
+      watermark_position: normalizeWatermarkPosition(shopDialog.form.watermark_position),
+      watermark_x_percent: clampPercent(Number(shopDialog.form.watermark_x_percent ?? 75), 0, 100),
+      watermark_y_percent: clampPercent(Number(shopDialog.form.watermark_y_percent ?? 75), 0, 100),
+      watermark_scale_percent: clampPercent(Number(shopDialog.form.watermark_scale_percent ?? 22), 8, 45),
+      watermark_opacity_percent: clampPercent(Number(shopDialog.form.watermark_opacity_percent ?? 82), 10, 100),
+      payout_rate: Number(shopDialog.form.payout_rate || 0)
+    };
     if (shopDialog.mode === "create") {
       await apiClient.post("/api/shops", payload);
       ElMessage.success("店铺已新增");
@@ -463,7 +661,7 @@ async function submitShopDialog() {
       ElMessage.success("店铺已更新");
     }
     shopDialogVisible.value = false;
-    await loadSettingsData();
+    await refreshSettingsData();
   } catch (error) {
     ElMessage.error(error.message || "店铺保存失败");
   } finally {
@@ -484,7 +682,7 @@ async function submitPersonDialog() {
       ElMessage.success("人员已更新");
     }
     personDialogVisible.value = false;
-    await loadSettingsData();
+    await refreshSettingsData();
   } catch (error) {
     ElMessage.error(error.message || "人员保存失败");
   } finally {
@@ -504,7 +702,7 @@ async function submitRateDialog() {
     });
     ElMessage.success("汇率已新增");
     rateDialogVisible.value = false;
-    await loadSettingsData();
+    await refreshSettingsData();
   } catch (error) {
     ElMessage.error(error.message || "汇率保存失败");
   } finally {
@@ -535,7 +733,7 @@ async function submitLogisticsDialog() {
       ElMessage.success("物流规则已更新");
     }
     logisticsDialogVisible.value = false;
-    await loadSettingsData();
+    await refreshSettingsData();
   } catch (error) {
     ElMessage.error(error.message || "物流规则保存失败");
   } finally {
@@ -560,11 +758,52 @@ async function submitCancellationDialog() {
       ElMessage.success("取消规则已更新");
     }
     cancellationDialogVisible.value = false;
-    await loadSettingsData();
+    await refreshSettingsData();
   } catch (error) {
     ElMessage.error(error.message || "取消规则保存失败");
   } finally {
     cancellationDialogSubmitting.value = false;
+  }
+}
+
+async function submitPackagingFeeRule() {
+  packagingRuleSubmitting.value = true;
+  try {
+    const payload = {
+      low_sale_threshold_cny: Number(state.packagingFeeRule.low_sale_threshold_cny || 0),
+      low_fee_cny: Number(state.packagingFeeRule.low_fee_cny || 0),
+      high_fee_cny: Number(state.packagingFeeRule.high_fee_cny || 0)
+    };
+    const saved = await apiClient.post("/api/settings/packaging-fee-rule", payload);
+    state.packagingFeeRule = {
+      ...createDefaultPackagingFeeRule(),
+      ...(saved || {})
+    };
+    ElMessage.success("包装费规则已更新");
+    await refreshSettingsData();
+  } catch (error) {
+    ElMessage.error(error.message || "包装费规则保存失败");
+  } finally {
+    packagingRuleSubmitting.value = false;
+  }
+}
+
+async function submitHistoricalProfitRecalc() {
+  historicalRecalcSubmitting.value = true;
+  try {
+    const payload = {
+      from: state.packagingFeeRecalc.from,
+      to: state.packagingFeeRecalc.to,
+      only_final: Number(state.packagingFeeRecalc.only_final ?? 1),
+      only_with_finance: Number(state.packagingFeeRecalc.only_with_finance ?? 1)
+    };
+    const result = await apiClient.post("/api/profits/recalculate-historical", payload);
+    state.packagingFeeRecalcResult = result || null;
+    ElMessage.success(`历史利润重算完成：${Number(result.updated_orders || 0)} 单 / ${Number(result.updated_items || 0)} 行`);
+  } catch (error) {
+    ElMessage.error(error.message || "历史利润重算失败");
+  } finally {
+    historicalRecalcSubmitting.value = false;
   }
 }
 
@@ -577,7 +816,7 @@ async function handleDeleteShop(row) {
     });
     await apiClient.delete(`/api/shops/${row.id}`);
     ElMessage.success("店铺已删除");
-    await loadSettingsData();
+    await refreshSettingsData();
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
     ElMessage.error(error.message || "删除失败");
@@ -593,46 +832,135 @@ async function handleDeletePerson(row) {
     });
     await apiClient.delete(`/api/people/${row.id}`);
     ElMessage.success("人员已停用");
-    await loadSettingsData();
+    await refreshSettingsData();
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
     ElMessage.error(error.message || "停用失败");
   }
 }
 
-async function handleDeleteLogisticsRule(row) {
+async function toggleLogisticsRule(row) {
+  const nextEnabled = Number(row.enabled) === 0 ? 1 : 0;
+  const actionText = nextEnabled === 0 ? "停用" : "启用";
   try {
-    await ElMessageBox.confirm(`确认停用物流规则「${row.name || row.id}」吗？`, "停用确认", {
+    await ElMessageBox.confirm(`确认${actionText}物流规则「${row.name || row.id}」吗？`, `${actionText}确认`, {
       type: "warning",
-      confirmButtonText: "确认停用",
+      confirmButtonText: `确认${actionText}`,
       cancelButtonText: "取消"
     });
-    await apiClient.delete(`/api/logistics-rules/${row.id}`);
-    ElMessage.success("物流规则已停用");
-    await loadSettingsData();
+    await apiClient.put(`/api/logistics-rules/${row.id}`, {
+      ...row,
+      enabled: nextEnabled
+    });
+    ElMessage.success(`物流规则已${actionText}`);
+    await refreshSettingsData();
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
-    ElMessage.error(error.message || "停用失败");
+    ElMessage.error(error.message || `${actionText}失败`);
   }
 }
 
-async function handleDeleteCancellationRule(row) {
+async function toggleCancellationRule(row) {
+  const nextEnabled = Number(row.enabled) === 0 ? 1 : 0;
+  const actionText = nextEnabled === 0 ? "停用" : "启用";
   try {
-    await ElMessageBox.confirm(`确认停用取消规则「${row.name || row.id}」吗？`, "停用确认", {
+    await ElMessageBox.confirm(`确认${actionText}取消规则「${row.name || row.id}」吗？`, `${actionText}确认`, {
       type: "warning",
-      confirmButtonText: "确认停用",
+      confirmButtonText: `确认${actionText}`,
       cancelButtonText: "取消"
     });
-    await apiClient.delete(`/api/order-cancellation-rules/${row.id}`);
-    ElMessage.success("取消规则已停用");
-    await loadSettingsData();
+    await apiClient.put(`/api/order-cancellation-rules/${row.id}`, {
+      ...row,
+      enabled: nextEnabled
+    });
+    ElMessage.success(`取消规则已${actionText}`);
+    await refreshSettingsData();
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
-    ElMessage.error(error.message || "停用失败");
+    ElMessage.error(error.message || `${actionText}失败`);
   }
 }
 
-onMounted(loadSettingsData);
+function normalizeWatermarkPosition(value) {
+  const position = String(value || "bottom-right");
+  return ["top-left", "top-right", "bottom-left", "bottom-right", "center", "custom"].includes(position)
+    ? position
+    : "bottom-right";
+}
+
+function clampPercent(value, minimum = 0, maximum = 100) {
+  if (!Number.isFinite(value)) return minimum;
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function resetShopWatermarkOptions() {
+  Object.assign(shopDialog.form, {
+    watermark_position: "bottom-right",
+    watermark_x_percent: 75,
+    watermark_y_percent: 75,
+    watermark_scale_percent: 22,
+    watermark_opacity_percent: 82
+  });
+}
+
+function startShopWatermarkDrag(event) {
+  if (!shopWatermarkPreviewUrl.value) return;
+  const overlay = event.currentTarget;
+  const stage = overlay.closest(".shop-watermark-preview-stage");
+  if (!stage) return;
+  event.preventDefault();
+  overlay.setPointerCapture?.(event.pointerId);
+  const overlayRect = overlay.getBoundingClientRect();
+  shopWatermarkDrag.value = {
+    pointerId: event.pointerId,
+    stage,
+    overlay,
+    offsetX: event.clientX - overlayRect.left,
+    offsetY: event.clientY - overlayRect.top
+  };
+  moveShopWatermarkDrag(event);
+  window.addEventListener("pointermove", moveShopWatermarkDrag);
+  window.addEventListener("pointerup", stopShopWatermarkDrag);
+  window.addEventListener("pointercancel", stopShopWatermarkDrag);
+}
+
+function moveShopWatermarkDrag(event) {
+  const drag = shopWatermarkDrag.value;
+  if (!drag) return;
+  const stageRect = drag.stage.getBoundingClientRect();
+  const overlayRect = drag.overlay.getBoundingClientRect();
+  if (!stageRect.width || !stageRect.height) return;
+  const maxX = Math.max(0, ((stageRect.width - overlayRect.width) / stageRect.width) * 100);
+  const maxY = Math.max(0, ((stageRect.height - overlayRect.height) / stageRect.height) * 100);
+  Object.assign(shopDialog.form, {
+    watermark_position: "custom",
+    watermark_x_percent: clampPercent(((event.clientX - stageRect.left - drag.offsetX) / stageRect.width) * 100, 0, maxX),
+    watermark_y_percent: clampPercent(((event.clientY - stageRect.top - drag.offsetY) / stageRect.height) * 100, 0, maxY)
+  });
+}
+
+function stopShopWatermarkDrag(event) {
+  const drag = shopWatermarkDrag.value;
+  if (drag?.overlay && event?.pointerId === drag.pointerId) {
+    drag.overlay.releasePointerCapture?.(event.pointerId);
+  }
+  shopWatermarkDrag.value = null;
+  window.removeEventListener("pointermove", moveShopWatermarkDrag);
+  window.removeEventListener("pointerup", stopShopWatermarkDrag);
+  window.removeEventListener("pointercancel", stopShopWatermarkDrag);
+}
+
+watch(activeSection, (section) => {
+  loadSectionData(section, false);
+});
+
+onMounted(() => {
+  loadSettingsData(false);
+});
+
+onBeforeUnmount(() => {
+  stopShopWatermarkDrag();
+});
 </script>
 
 <template>
@@ -645,7 +973,7 @@ onMounted(loadSettingsData);
           <p>旧版配置页不再作为新系统的配置入口。现在按左侧分类进入对应页面，每个页面只处理自己的新增、编辑、删除和刷新。</p>
         </div>
         <div class="page-card-actions">
-          <el-button @click="loadSettingsData">刷新数据</el-button>
+          <el-button @click="refreshSettingsData">刷新数据</el-button>
         </div>
       </div>
     </el-card>
@@ -686,7 +1014,7 @@ onMounted(loadSettingsData);
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="loadSettingsData">刷新</el-button>
+                <el-button @click="refreshSettingsData">刷新</el-button>
                 <el-button type="primary" @click="openCreateShopDialog">新增店铺</el-button>
               </div>
             </div>
@@ -726,11 +1054,28 @@ onMounted(loadSettingsData);
                   <div class="settings-cell-stack">
                     <span>Client ID：{{ row.ozon_client_id || "-" }}</span>
                     <span class="muted-text">Key 标识：{{ row.api_key_hint || "-" }}</span>
+                    <span>广告 Client：{{ row.performance_client_id || "-" }}</span>
+                    <span class="muted-text">广告 Secret：{{ row.performance_client_secret_configured ? (row.performance_client_secret_hint || "已配置") : "未配置" }}</span>
                   </div>
                 </template>
               </el-table-column>
               <el-table-column label="结算比例" width="120" align="right">
                 <template #default="{ row }">{{ Number(row.payout_rate || 0).toFixed(2) }}</template>
+              </el-table-column>
+              <el-table-column label="水印" min-width="190">
+                <template #default="{ row }">
+                  <div class="shop-watermark-table-cell">
+                    <img
+                      v-if="row.watermark_path"
+                      :src="withImageToken(`/api/tools/image-cropper/shop-watermark/${encodeURIComponent(row.id)}/file`)"
+                      :alt="`${row.name || '店铺'}水印`"
+                    />
+                    <div class="settings-cell-stack">
+                      <strong>{{ row.watermark_path ? "已配置" : "未配置" }}</strong>
+                      <span class="muted-text">{{ row.watermark_name || "编辑店铺后上传水印" }}</span>
+                    </div>
+                  </div>
+                </template>
               </el-table-column>
               <el-table-column label="状态" width="100" align="center">
                 <template #default="{ row }">
@@ -769,7 +1114,7 @@ onMounted(loadSettingsData);
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="loadSettingsData">刷新</el-button>
+                <el-button @click="refreshSettingsData">刷新</el-button>
                 <el-button type="primary" @click="openCreatePersonDialog">新增人员</el-button>
               </div>
             </div>
@@ -842,7 +1187,7 @@ onMounted(loadSettingsData);
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="loadSettingsData">刷新</el-button>
+                <el-button @click="refreshSettingsData">刷新</el-button>
                 <el-button type="primary" @click="openCreateRateDialog">新增汇率</el-button>
               </div>
             </div>
@@ -881,6 +1226,147 @@ onMounted(loadSettingsData);
           />
         </el-card>
 
+        <el-card v-else-if="activeSection === 'profit'" shadow="never" class="page-card settings-list-card">
+          <template #header>
+            <div class="page-card-header">
+              <div>
+                <strong>{{ currentSectionMeta.title }}</strong>
+                <span>{{ currentSectionMeta.description }}</span>
+              </div>
+              <div class="settings-header-actions">
+                <el-button @click="refreshSettingsData">刷新</el-button>
+                <el-button type="primary" :loading="packagingRuleSubmitting" @click="submitPackagingFeeRule">保存规则</el-button>
+                <el-button :loading="historicalRecalcSubmitting" @click="submitHistoricalProfitRecalc">重算历史利润</el-button>
+              </div>
+            </div>
+          </template>
+
+          <div class="settings-table-wrap">
+            <div class="page-stack" style="padding: 4px 0">
+              <el-card shadow="never">
+                <template #header>
+                  <div class="page-card-header">
+                    <div>
+                      <strong>包装费规则</strong>
+                      <span>按销售额阈值切换低档和高档包装费，影响利润估算和利润拆解。</span>
+                    </div>
+                  </div>
+                </template>
+                <el-form label-width="180px" style="max-width: 720px">
+                  <el-form-item label="低档销售额阈值 CNY">
+                    <el-input-number v-model="state.packagingFeeRule.low_sale_threshold_cny" :min="0" :precision="2" :step="1" controls-position="right" />
+                  </el-form-item>
+                  <el-form-item label="低档包装费 CNY">
+                    <el-input-number v-model="state.packagingFeeRule.low_fee_cny" :min="0" :precision="2" :step="0.1" controls-position="right" />
+                  </el-form-item>
+                  <el-form-item label="高档包装费 CNY">
+                    <el-input-number v-model="state.packagingFeeRule.high_fee_cny" :min="0" :precision="2" :step="0.1" controls-position="right" />
+                  </el-form-item>
+                  <el-form-item label="当前口径说明">
+                    <div class="settings-cell-stack">
+                      <span>销售额小于等于 {{ Number(state.packagingFeeRule.low_sale_threshold_cny || 0).toFixed(2) }} 时，包装费按 CNY {{ Number(state.packagingFeeRule.low_fee_cny || 0).toFixed(2) }} 计算。</span>
+                      <span class="muted-text">销售额高于该阈值时，包装费按 CNY {{ Number(state.packagingFeeRule.high_fee_cny || 0).toFixed(2) }} 计算。</span>
+                    </div>
+                  </el-form-item>
+                  <el-form-item label="风险提示">
+                    <div class="settings-cell-stack">
+                      <span>该规则只影响后续的新测算、重算和未锁定利润明细。</span>
+                      <span class="muted-text">已经锁定或已入账的历史利润不会因这里的修改被自动回刷。</span>
+                    </div>
+                  </el-form-item>
+                </el-form>
+              </el-card>
+
+              <el-card shadow="never">
+                <template #header>
+                  <div class="page-card-header">
+                    <div>
+                      <strong>最近变更</strong>
+                      <span>记录最近 10 次包装费规则调整，便于追溯是谁改了什么。</span>
+                    </div>
+                  </div>
+                </template>
+                <el-table :data="state.packagingFeeRuleChanges" stripe border class="erp-data-table">
+                  <el-table-column label="变更时间" min-width="180">
+                    <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
+                  </el-table-column>
+                  <el-table-column label="操作人" min-width="140">
+                    <template #default="{ row }">{{ row.updated_by_name || "系统" }}</template>
+                  </el-table-column>
+                  <el-table-column label="变更前" min-width="260">
+                    <template #default="{ row }">
+                      <div class="settings-cell-stack">
+                        <span>阈值 {{ Number(row.old_value?.low_sale_threshold_cny || 0).toFixed(2) }}</span>
+                        <span class="muted-text">低档 {{ Number(row.old_value?.low_fee_cny || 0).toFixed(2) }} / 高档 {{ Number(row.old_value?.high_fee_cny || 0).toFixed(2) }}</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="变更后" min-width="260">
+                    <template #default="{ row }">
+                      <div class="settings-cell-stack">
+                        <span>阈值 {{ Number(row.new_value?.low_sale_threshold_cny || 0).toFixed(2) }}</span>
+                        <span class="muted-text">低档 {{ Number(row.new_value?.low_fee_cny || 0).toFixed(2) }} / 高档 {{ Number(row.new_value?.high_fee_cny || 0).toFixed(2) }}</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </el-card>
+
+              <el-card shadow="never">
+                <template #header>
+                  <div class="page-card-header">
+                    <div>
+                      <strong>历史利润辅助重算</strong>
+                      <span>用于在修改利润规则后，批量重算指定范围内的未锁定历史利润。</span>
+                    </div>
+                  </div>
+                </template>
+                <el-form label-width="180px" style="max-width: 720px">
+                  <el-form-item label="开始日期">
+                    <el-date-picker v-model="state.packagingFeeRecalc.from" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" />
+                  </el-form-item>
+                  <el-form-item label="结束日期">
+                    <el-date-picker v-model="state.packagingFeeRecalc.to" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" />
+                  </el-form-item>
+                  <el-form-item label="只重算最终订单">
+                    <el-switch v-model="state.packagingFeeRecalc.only_final" :active-value="1" :inactive-value="0" />
+                  </el-form-item>
+                  <el-form-item label="只重算已有财务订单">
+                    <el-switch v-model="state.packagingFeeRecalc.only_with_finance" :active-value="1" :inactive-value="0" />
+                  </el-form-item>
+                  <el-form-item label="执行说明">
+                    <div class="settings-cell-stack">
+                      <span>默认只处理最终订单且已有财务数据的区间，风险最低，适合规则变更后的历史修正。</span>
+                      <span class="muted-text">已锁定或已入账的利润明细不会被未授权地回刷；系统会优先复用已同步的财务结果。</span>
+                    </div>
+                  </el-form-item>
+                </el-form>
+              </el-card>
+
+              <el-card v-if="state.packagingFeeRecalcResult" shadow="never">
+                <template #header>
+                  <div class="page-card-header">
+                    <div>
+                      <strong>最近一次重算结果</strong>
+                      <span>展示当前页面最近一次手动执行历史利润重算的返回摘要。</span>
+                    </div>
+                  </div>
+                </template>
+                <el-descriptions :column="2" border>
+                  <el-descriptions-item label="重算范围">{{ state.packagingFeeRecalcResult.from || "-" }} 至 {{ state.packagingFeeRecalcResult.to || "-" }}</el-descriptions-item>
+                  <el-descriptions-item label="范围口径">{{ state.packagingFeeRecalcResult.scope === "final_orders" ? "最终订单" : "全部订单" }}</el-descriptions-item>
+                  <el-descriptions-item label="订单数">{{ Number(state.packagingFeeRecalcResult.orders || 0) }}</el-descriptions-item>
+                  <el-descriptions-item label="更新订单">{{ Number(state.packagingFeeRecalcResult.updated_orders || 0) }}</el-descriptions-item>
+                  <el-descriptions-item label="更新明细">{{ Number(state.packagingFeeRecalcResult.updated_items || 0) }}</el-descriptions-item>
+                  <el-descriptions-item label="未绑定项">{{ Number(state.packagingFeeRecalcResult.unbound || 0) }}</el-descriptions-item>
+                  <el-descriptions-item label="仅财务订单">{{ Number(state.packagingFeeRecalcResult.only_with_finance || 0) !== 0 ? "是" : "否" }}</el-descriptions-item>
+                  <el-descriptions-item label="财务重放">{{ Number(state.packagingFeeRecalcResult.finance_reapplied || 0) }}</el-descriptions-item>
+                </el-descriptions>
+              </el-card>
+            </div>
+          </div>
+        </el-card>
+
         <el-card v-else-if="activeSection === 'logistics'" shadow="never" class="page-card settings-list-card">
           <template #header>
             <div class="page-card-header">
@@ -889,7 +1375,7 @@ onMounted(loadSettingsData);
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="loadSettingsData">刷新</el-button>
+                <el-button @click="refreshSettingsData">刷新</el-button>
                 <el-button type="primary" @click="openCreateLogisticsDialog">新增物流规则</el-button>
               </div>
             </div>
@@ -949,7 +1435,7 @@ onMounted(loadSettingsData);
                 <template #default="{ row }">
                   <div class="table-actions">
                     <el-button link type="primary" @click="openEditLogisticsDialog(row)">编辑</el-button>
-                    <el-button link type="danger" @click="handleDeleteLogisticsRule(row)">停用</el-button>
+                    <el-button link :type="Number(row.enabled) !== 0 ? 'danger' : 'success'" @click="toggleLogisticsRule(row)">{{ Number(row.enabled) !== 0 ? "停用" : "启用" }}</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -974,7 +1460,7 @@ onMounted(loadSettingsData);
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="loadSettingsData">刷新</el-button>
+                <el-button @click="refreshSettingsData">刷新</el-button>
                 <el-button type="primary" @click="openCreateCancellationDialog">新增取消规则</el-button>
               </div>
             </div>
@@ -1035,7 +1521,7 @@ onMounted(loadSettingsData);
                 <template #default="{ row }">
                   <div class="table-actions">
                     <el-button link type="primary" @click="openEditCancellationDialog(row)">编辑</el-button>
-                    <el-button link type="danger" @click="handleDeleteCancellationRule(row)">停用</el-button>
+                    <el-button link :type="Number(row.enabled) !== 0 ? 'danger' : 'success'" @click="toggleCancellationRule(row)">{{ Number(row.enabled) !== 0 ? "停用" : "启用" }}</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -1054,15 +1540,87 @@ onMounted(loadSettingsData);
       </el-col>
     </el-row>
 
-    <el-dialog v-model="shopDialogVisible" :title="shopDialogTitle" width="720px" align-center class="erp-centered-dialog" destroy-on-close @closed="clearShopForm">
+    <el-dialog v-model="shopDialogVisible" :title="shopDialogTitle" width="980px" align-center class="erp-centered-dialog" destroy-on-close @closed="clearShopForm">
       <el-form ref="shopFormRef" :model="shopDialog.form" :rules="shopFormRules" label-width="110px">
         <el-row :gutter="18">
           <el-col :span="12"><el-form-item label="店铺名称" prop="name"><el-input v-model="shopDialog.form.name" placeholder="请输入店铺名称" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="主体名称"><el-input v-model="shopDialog.form.legal_entity" placeholder="请输入主体名称" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="Client ID"><el-input v-model="shopDialog.form.ozon_client_id" placeholder="请输入 Ozon Client ID" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item label="API Key 标识"><el-input v-model="shopDialog.form.api_key_hint" placeholder="只保存标识，不保存明文密钥" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="API Key"><el-input v-model="shopDialog.form.ozon_api_key" type="password" show-password placeholder="Ozon Seller API Key，用于真实同步和上架" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="Key 标识"><el-input v-model="shopDialog.form.api_key_hint" placeholder="备注标识；未填 API Key 时兼容旧密钥字段" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="广告 Client ID"><el-input v-model="shopDialog.form.performance_client_id" placeholder="Ozon Performance Client ID" /></el-form-item></el-col>
+          <el-col :span="12">
+            <el-form-item label="广告 Secret">
+              <el-input
+                v-model="shopDialog.form.performance_client_secret"
+                type="password"
+                show-password
+                :placeholder="shopDialog.form.performance_client_secret_configured ? `已配置 ${shopDialog.form.performance_client_secret_hint || ''}，留空不修改` : 'Ozon Performance Client Secret'"
+              />
+            </el-form-item>
+          </el-col>
           <el-col :span="12"><el-form-item label="结算比例"><el-input-number v-model="shopDialog.form.payout_rate" :min="0" :max="1" :precision="2" :step="0.01" controls-position="right" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="状态"><el-select v-model="shopDialog.form.status"><el-option label="启用" value="active" /><el-option label="停用" value="inactive" /></el-select></el-form-item></el-col>
+          <el-col :span="24">
+            <el-form-item label="店铺水印">
+              <div class="shop-watermark-row">
+                <el-upload
+                  v-if="shopDialog.mode === 'edit'"
+                  action="#"
+                  :show-file-list="false"
+                  :http-request="uploadShopWatermarkRequest"
+                  :before-upload="validateShopWatermarkFile"
+                  accept=".jpg,.jpeg,.png,.webp"
+                >
+                  <el-button :loading="shopWatermarkUploading">{{ shopDialog.form.watermark_name ? "替换水印" : "上传水印" }}</el-button>
+                </el-upload>
+                <span class="muted-text">
+                  {{ shopDialog.mode === "edit" ? (shopDialog.form.watermark_name || "建议上传透明底 PNG 店铺水印") : "先保存店铺，再进入编辑上传水印" }}
+                </span>
+              </div>
+            </el-form-item>
+          </el-col>
+          <el-col :span="24">
+            <div class="shop-watermark-config">
+              <section class="shop-watermark-preview-card">
+                <div class="shop-watermark-preview-head">
+                  <strong>效果预览</strong>
+                  <span>可直接拖动水印调整位置</span>
+                </div>
+                <div class="shop-watermark-preview-box">
+                  <div class="shop-watermark-preview-stage">
+                    <img :src="shopWatermarkSampleImage" alt="水印预览样例图" class="shop-watermark-sample-image" />
+                    <img
+                      v-if="shopWatermarkPreviewUrl"
+                      :src="shopWatermarkPreviewUrl"
+                      alt="店铺水印预览"
+                      class="shop-watermark-overlay-image"
+                      :style="shopWatermarkOverlayStyle"
+                      @pointerdown="startShopWatermarkDrag"
+                    />
+                    <span v-else class="shop-watermark-preview-empty">上传后可预览水印效果</span>
+                  </div>
+                </div>
+              </section>
+              <section class="shop-watermark-controls">
+                <el-form-item label="水印位置" label-width="80px">
+                  <el-radio-group v-model="shopDialog.form.watermark_position" class="shop-watermark-position-group">
+                    <el-radio-button v-for="item in shopWatermarkPositionOptions" :key="item.value" :label="item.value">{{ item.label }}</el-radio-button>
+                  </el-radio-group>
+                </el-form-item>
+                <el-form-item :label="`大小 ${Math.round(shopDialog.form.watermark_scale_percent || 22)}%`" label-width="80px">
+                  <el-slider v-model="shopDialog.form.watermark_scale_percent" :min="8" :max="45" :step="1" />
+                </el-form-item>
+                <el-form-item :label="`透明 ${Math.round(shopDialog.form.watermark_opacity_percent || 82)}%`" label-width="80px">
+                  <el-slider v-model="shopDialog.form.watermark_opacity_percent" :min="10" :max="100" :step="1" />
+                </el-form-item>
+                <div class="shop-watermark-control-actions">
+                  <el-button @click="resetShopWatermarkOptions">恢复默认</el-button>
+                  <span class="muted-text">保存后会作为该店铺图片生成的默认水印参数。</span>
+                </div>
+              </section>
+            </div>
+          </el-col>
         </el-row>
       </el-form>
       <template #footer>
@@ -1123,6 +1681,7 @@ onMounted(loadSettingsData);
           <el-col :span="12"><el-form-item label="每克费用(RMB)"><el-input-number v-model="logisticsDialog.form.per_gram_cny" :min="0" :precision="4" :step="0.0001" controls-position="right" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="每票费用(RMB)"><el-input-number v-model="logisticsDialog.form.per_ticket_cny" :min="0" :precision="3" :step="0.001" controls-position="right" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="状态"><el-select v-model="logisticsDialog.form.enabled"><el-option label="启用" :value="1" /><el-option label="停用" :value="0" /></el-select></el-form-item></el-col>
+          <el-col :span="24"><el-form-item label="筛选关键词"><el-input v-model="logisticsDialog.form.filter_keywords" type="textarea" :rows="3" placeholder="一行一个，保存后用于订单列表物流筛选匹配" /></el-form-item></el-col>
           <el-col :span="24"><el-form-item label="备注"><el-input v-model="logisticsDialog.form.note" type="textarea" :rows="3" placeholder="可选" /></el-form-item></el-col>
         </el-row>
       </el-form>
@@ -1179,9 +1738,34 @@ onMounted(loadSettingsData);
 .dialog-footer { justify-content: flex-end; }
 .settings-cell-stack { flex-direction: column; gap: 4px; }
 .table-actions { align-items: center; flex-wrap: wrap; gap: 2px 10px; }
+.shop-watermark-row { min-height: 32px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.shop-watermark-table-cell { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.shop-watermark-table-cell img { width: 52px; height: 32px; object-fit: contain; border: 1px solid var(--erp-border); border-radius: 6px; background:
+  linear-gradient(45deg, rgba(148, 163, 184, 0.16) 25%, transparent 25%, transparent 75%, rgba(148, 163, 184, 0.16) 75%),
+  linear-gradient(45deg, rgba(148, 163, 184, 0.16) 25%, transparent 25%, transparent 75%, rgba(148, 163, 184, 0.16) 75%),
+  #fff;
+  background-position: 0 0, 8px 8px;
+  background-size: 16px 16px;
+}
+.shop-watermark-config { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, 0.85fr); gap: 18px; padding: 16px; border: 1px solid var(--erp-border); border-radius: 12px; background: var(--erp-surface-alt); }
+.shop-watermark-preview-card, .shop-watermark-controls { min-width: 0; }
+.shop-watermark-preview-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.shop-watermark-preview-head span { color: var(--erp-text-secondary); font-size: 12px; }
+.shop-watermark-preview-box { height: 360px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--erp-border); border-radius: 10px; background: #eef3fa; }
+.shop-watermark-preview-stage { position: relative; width: min(270px, 100%); aspect-ratio: 3 / 4; max-height: 100%; }
+.shop-watermark-sample-image { display: block; width: 100%; height: 100%; object-fit: contain; }
+.shop-watermark-overlay-image { position: absolute; display: block; height: auto; max-height: 36%; object-fit: contain; touch-action: none; user-select: none; }
+.shop-watermark-overlay-image:active { cursor: grabbing !important; }
+.shop-watermark-preview-empty { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 6px 10px; border-radius: 999px; color: var(--erp-text-secondary); background: rgba(255, 255, 255, 0.88); font-size: 12px; }
+.shop-watermark-controls { display: flex; flex-direction: column; justify-content: center; }
+.shop-watermark-position-group { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; }
+.shop-watermark-position-group :deep(.el-radio-button), .shop-watermark-position-group :deep(.el-radio-button__inner) { width: 100%; }
+.shop-watermark-control-actions { display: flex; align-items: center; gap: 10px; padding-left: 80px; }
 .muted-text { color: var(--erp-text-secondary); font-size: 12px; line-height: 1.5; }
 @media (max-width: 960px) {
   .settings-hero { flex-direction: column; align-items: flex-start; }
   .settings-list-card { height: auto; min-height: 0; }
+  .shop-watermark-config { grid-template-columns: 1fr; }
+  .shop-watermark-control-actions { padding-left: 0; }
 }
 </style>

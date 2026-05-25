@@ -5,6 +5,7 @@ import { ArrowDown, Calendar, Refresh, Search } from "@element-plus/icons-vue";
 const props = defineProps({
   filters: { type: Object, default: () => ({}) },
   shops: { type: Array, default: () => [] },
+  logisticsMethodOptions: { type: Array, default: () => [] },
   searchTypeOptions: { type: Array, default: () => [] },
   syncStatus: { type: String, default: "" },
   syncRunning: { type: Boolean, default: false },
@@ -43,6 +44,16 @@ function patchFilters(patch) {
   });
 }
 
+function changeLogisticsMethod(value) {
+  const nextFilters = {
+    ...props.filters,
+    logisticsMethod: value,
+    page: 1
+  };
+  emit("update:filters", nextFilters);
+  emit("submit", nextFilters);
+}
+
 function handleCommand(command) {
   emit("more-action", command);
 }
@@ -60,6 +71,19 @@ function handleCommand(command) {
           >
             <el-option label="全部店铺" value="all" />
             <el-option v-for="shop in shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
+          </el-select>
+
+          <el-select
+            :model-value="filters.logisticsMethod"
+            class="orders-toolbar-select orders-toolbar-logistics-select"
+            @change="changeLogisticsMethod"
+          >
+            <el-option
+              v-for="option in logisticsMethodOptions"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
           </el-select>
 
           <div class="orders-toolbar-search-group">
@@ -95,25 +119,35 @@ function handleCommand(command) {
           <div class="orders-toolbar-actions-main">
             <el-button type="primary" :icon="Search" @click="emit('submit')">查询</el-button>
             <el-button :icon="Calendar" :disabled="syncRunning" @click="emit('reset-dates')">近 90 天</el-button>
-            <el-button
-              class="orders-toolbar-action-accent"
-              :icon="Refresh"
-              :loading="syncRunning"
-              :disabled="syncRunning"
-              @click="emit('sync-incremental')"
-            >
-              拉取新订单
-            </el-button>
-            <el-button
-              type="primary"
-              plain
-              :icon="Refresh"
-              :loading="syncRunning"
-              :disabled="syncRunning"
-              @click="emit('sync-full')"
-            >
-              同步订单
-            </el-button>
+
+            <div class="orders-toolbar-sync-group" aria-label="订单同步操作">
+              <el-tooltip content="从本地最新订单之后拉取，自动重叠 15 分钟防漏单" placement="top">
+                <el-button
+                  class="orders-toolbar-action-accent"
+                  :icon="Refresh"
+                  :loading="syncRunning"
+                  :disabled="syncRunning"
+                  @click="emit('sync-incremental')"
+                >
+                  拉取新单
+                </el-button>
+              </el-tooltip>
+              <el-tooltip content="按当前店铺和日期范围重新拉取，用于补历史或校正状态" placement="top">
+                <el-button
+                  type="primary"
+                  plain
+                  :icon="Refresh"
+                  :loading="syncRunning"
+                  :disabled="syncRunning"
+                  @click="emit('sync-full')"
+                >
+                  同步当前范围
+                </el-button>
+              </el-tooltip>
+              <el-tooltip content="后台会按配置周期滚动刷新近 90 天订单状态" placement="top">
+                <el-tag class="orders-toolbar-background-tag" effect="plain" round>后台状态刷新</el-tag>
+              </el-tooltip>
+            </div>
 
             <el-dropdown trigger="click" :disabled="syncRunning" @command="handleCommand">
               <el-button :icon="ArrowDown">更多操作</el-button>
@@ -135,6 +169,8 @@ function handleCommand(command) {
         </div>
       </div>
     </el-form>
+
+    <slot />
 
     <div v-if="syncStatus" class="orders-toolbar-status">{{ syncStatus }}</div>
   </el-card>

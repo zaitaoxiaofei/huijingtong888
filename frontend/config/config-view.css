@@ -134,6 +134,27 @@
   border: 1px solid var(--ds-border);
 }
 
+.vue-config-watermark-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 150px;
+}
+
+.vue-config-watermark-cell img {
+  width: 48px;
+  height: 30px;
+  object-fit: contain;
+  border: 1px solid var(--ds-border);
+  border-radius: 6px;
+  background:
+    linear-gradient(45deg, rgba(148, 163, 184, 0.16) 25%, transparent 25%, transparent 75%, rgba(148, 163, 184, 0.16) 75%),
+    linear-gradient(45deg, rgba(148, 163, 184, 0.16) 25%, transparent 25%, transparent 75%, rgba(148, 163, 184, 0.16) 75%),
+    #fff;
+  background-position: 0 0, 8px 8px;
+  background-size: 16px 16px;
+}
+
 @media (max-width: 960px) {
   .vue-config-account-body {
     grid-template-columns: 1fr;

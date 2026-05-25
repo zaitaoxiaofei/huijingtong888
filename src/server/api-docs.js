@@ -70,8 +70,13 @@ const schemas = {
 
   SystemInfo: objectOf("Runtime information about the current ERP instance.", [
     field("appVersion", scalar("string", "Application version or release marker.")),
-    field("databasePath", scalar("string", "Resolved SQLite database path.")),
-    field("backupPath", scalar("string", "Resolved backup directory path.")),
+    field("dbClient", scalar("string", "Active database client.")),
+    field("database", objectOf("Active MySQL database connection summary.", [
+      field("host", scalar("string", "MySQL host.")),
+      field("port", scalar("number", "MySQL port.")),
+      field("name", scalar("string", "MySQL database name.")),
+      field("user", scalar("string", "MySQL user."))
+    ])),
     field("host", scalar("string", "Server bind host.")),
     field("port", scalar("number", "Server bind port.")),
     field("appBaseUrl", scalar("string", "Browser-facing base URL."))
@@ -733,14 +738,6 @@ const endpoints = [
     endpoint("GET", "/api/system/info", "Return current runtime and deployment information.", {
       auth: "authenticated",
       responses: [response(200, "application/json", ref("SystemInfo"))]
-    }),
-    endpoint("POST", "/api/system/backup", "Start a database backup task.", {
-      auth: "authenticated",
-      responses: [response(200, "application/json", ref("MutationOk"))]
-    }),
-    endpoint("POST", "/api/system/restore", "Start a database restore task.", {
-      auth: "authenticated",
-      responses: [response(200, "application/json", ref("MutationOk"))]
     })
   ]),
   section("Auth", [

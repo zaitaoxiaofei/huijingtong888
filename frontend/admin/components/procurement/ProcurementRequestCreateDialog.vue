@@ -1,6 +1,7 @@
-<script setup>
+﻿<script setup>
 import { computed, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
+import ProductImagePreview from "../ProductImagePreview.vue";
 import { apiClient } from "../../utils/api.js";
 import { useAuthStore } from "../../stores/auth.js";
 
@@ -25,22 +26,7 @@ const state = reactive({
 
 const form = reactive(createDefaultForm());
 
-const candidateProducts = computed(() => {
-  const query = String(productQuery.value || "").trim().toLowerCase();
-  const rows = state.products.filter((row) => Number(row.active ?? 1) !== 0);
-  if (!query) return rows.slice(0, 12);
-  return rows.filter((row) => {
-    const haystack = [
-      row.name,
-      row.inventory_id,
-      row.code,
-      row.selection_id,
-      row.mapped_skus,
-      row.owner_name
-    ].map((item) => String(item || "").toLowerCase()).join(" ");
-    return haystack.includes(query);
-  }).slice(0, 12);
-});
+const candidateProducts = computed(() => state.products.slice(0, 12));
 
 const selectedProduct = computed(() => state.products.find((row) => Number(row.id) === Number(form.product_id)) || null);
 const currentUserPersonId = computed(() => Number(authStore.user?.id || 0) || null);
@@ -113,17 +99,37 @@ async function ensureOptionsLoaded() {
   loading.value = true;
   try {
     const [products, people, suppliers] = await Promise.all([
-      apiClient.get("/api/products"),
+      apiClient.get(productsQueryString()),
       apiClient.get("/api/people"),
-      apiClient.get("/api/suppliers")
+      apiClient.get("/api/suppliers?paged=1&page=1&pageSize=100")
     ]);
-    state.products = Array.isArray(products) ? products : [];
+    state.products = Array.isArray(products?.rows) ? products.rows : [];
     state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
-    state.suppliers = Array.isArray(suppliers) ? suppliers : [];
+    state.suppliers = Array.isArray(suppliers?.rows) ? suppliers.rows : [];
     form.person_id = preferredPersonId();
     syncInitialProduct();
   } catch (error) {
     ElMessage.error(error.message || "初始化采购表单失败");
+  } finally {
+    loading.value = false;
+  }
+}
+
+function productsQueryString() {
+  const params = new URLSearchParams({ paged: "1", page: "1", pageSize: "30" });
+  const query = String(productQuery.value || props.initialProductId || "").trim();
+  if (query) params.set("query", query);
+  return `/api/products?${params.toString()}`;
+}
+
+async function searchProducts() {
+  loading.value = true;
+  try {
+    const products = await apiClient.get(productsQueryString());
+    state.products = Array.isArray(products?.rows) ? products.rows : [];
+    syncInitialProduct();
+  } catch (error) {
+    ElMessage.error(error.message || "搜索商品失败");
   } finally {
     loading.value = false;
   }
@@ -190,7 +196,7 @@ watch(currentUserPersonId, () => {
           <strong>搜索商品</strong>
           <span>图片、编码和 SKU 一起展示，减少误选。</span>
         </div>
-        <el-input v-model="productQuery" placeholder="搜索商品名称、库存 ID 或 SKU" clearable />
+        <el-input v-model="productQuery" placeholder="搜索商品名称、库存 ID 或 SKU" clearable @keyup.enter="searchProducts" @clear="searchProducts" />
         <div class="product-picker-list">
           <button
             v-for="product in candidateProducts"
@@ -200,15 +206,7 @@ watch(currentUserPersonId, () => {
             :class="{ active: Number(form.product_id) === Number(product.id) }"
             @click="applyProductToForm(product)"
           >
-            <el-image
-              v-if="productImage(product)"
-              :src="productImage(product)"
-              fit="cover"
-              class="picker-thumb"
-              :preview-src-list="[productImage(product)]"
-              preview-teleported
-            />
-            <div v-else class="picker-thumb picker-thumb-fallback">无图</div>
+            <ProductImagePreview :src="productImage(product)" size="square" />
             <div class="picker-item-meta">
               <strong>{{ product.name || "-" }}</strong>
               <span>编码：{{ productCode(product) }}</span>
@@ -224,15 +222,7 @@ watch(currentUserPersonId, () => {
         <div class="selected-product-card">
           <template v-if="selectedProduct">
             <div class="selected-product-main">
-              <el-image
-                v-if="productImage(selectedProduct)"
-                :src="productImage(selectedProduct)"
-                fit="cover"
-                class="selected-product-thumb"
-                :preview-src-list="[productImage(selectedProduct)]"
-                preview-teleported
-              />
-              <div v-else class="selected-product-thumb picker-thumb-fallback">无图</div>
+              <ProductImagePreview :src="productImage(selectedProduct)" size="square" />
               <div class="selected-product-meta">
                 <strong>{{ selectedProduct.name }}</strong>
                 <span>库存编码：{{ productCode(selectedProduct) }}</span>
@@ -505,3 +495,5 @@ watch(currentUserPersonId, () => {
   }
 }
 </style>
+
+

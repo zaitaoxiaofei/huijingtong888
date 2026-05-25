@@ -45,8 +45,36 @@ function historicalReviewOrderItemIds(body = {}) {
   return [...new Set(list.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0))];
 }
 
+function executeStatement(deps, sql, params = []) {
+  if (typeof deps.execute === "function") {
+    return deps.execute(sql, params);
+  }
+  return deps.db.prepare(sql).run(...params);
+}
+
+function executeBatchStatements(deps, statements = []) {
+  for (const statement of statements) {
+    executeStatement(deps, statement.sql, statement.params || []);
+  }
+}
+
+function runInTransaction(deps, callback) {
+  if (typeof deps.runInTransaction === "function") {
+    return deps.runInTransaction(callback);
+  }
+  deps.db.exec("BEGIN");
+  try {
+    const result = callback();
+    deps.db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    deps.db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 function upsertHistoricalProfitReview(deps, orderItemId, reviewStatus, note = "", userId = null) {
-  deps.db.prepare(`
+  executeStatement(deps, `
     INSERT INTO historical_profit_reviews (order_item_id, review_status, note, updated_by_person_id, created_at, updated_at)
     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     ON CONFLICT(order_item_id) DO UPDATE SET
@@ -54,7 +82,7 @@ function upsertHistoricalProfitReview(deps, orderItemId, reviewStatus, note = ""
       note = excluded.note,
       updated_by_person_id = excluded.updated_by_person_id,
       updated_at = CURRENT_TIMESTAMP
-  `).run(Number(orderItemId), reviewStatus, String(note || "").trim(), deps.nullable(userId));
+  `, [Number(orderItemId), reviewStatus, String(note || "").trim(), deps.nullable(userId)]);
 }
 
 function recalculateNetProfitWithoutReturnLoss(deps, row = {}) {
@@ -286,53 +314,56 @@ export function cleanupHistoricalDeliveredReturnLoss(deps, body = {}) {
     return { ok: true, from, to, only_final: onlyFinal, updated_items: 0, updated_orders: 0, cleared_return_loss_cny: 0 };
   }
 
-  const updateProfitItem = deps.db.prepare(`
-    UPDATE order_profit_items
-    SET return_loss_cny = 0,
-      net_profit_cny = ?,
-      updated_at = CURRENT_TIMESTAMP
-    WHERE order_item_id = ?
-  `);
-  const updateOrderItemAccrued = deps.db.prepare(`
-    UPDATE order_items
-    SET estimated_profit = ?,
-      actual_profit = ?,
-      aftersale_loss = 0,
-      settlement_state = 'accrued'
-    WHERE id = ?
-  `);
-  const updateOrderItemEstimated = deps.db.prepare(`
-    UPDATE order_items
-    SET estimated_profit = ?,
-      actual_profit = 0,
-      aftersale_loss = 0,
-      settlement_state = ?
-    WHERE id = ?
-  `);
-
   let updatedItems = 0;
   let clearedReturnLoss = 0;
   const updatedOrders = new Set();
   const dateKeys = new Set();
 
-  deps.db.exec("BEGIN");
-  try {
+  runInTransaction(deps, () => {
     for (const row of rows) {
       const nextProfit = recalculateNetProfitWithoutReturnLoss(deps, row);
-      updateProfitItem.run(nextProfit, row.order_item_id);
-      if (String(row.settlement_state || "") === "accrued") updateOrderItemAccrued.run(nextProfit, nextProfit, row.order_item_id);
-      else updateOrderItemEstimated.run(nextProfit, row.settlement_state || "estimated", row.order_item_id);
+      executeBatchStatements(deps, [
+        {
+          sql: `
+            UPDATE order_profit_items
+            SET return_loss_cny = 0,
+              net_profit_cny = ?,
+              updated_at = CURRENT_TIMESTAMP
+            WHERE order_item_id = ?
+          `,
+          params: [nextProfit, row.order_item_id]
+        },
+        String(row.settlement_state || "") === "accrued"
+          ? {
+            sql: `
+              UPDATE order_items
+              SET estimated_profit = ?,
+                actual_profit = ?,
+                aftersale_loss = 0,
+                settlement_state = 'accrued'
+              WHERE id = ?
+            `,
+            params: [nextProfit, nextProfit, row.order_item_id]
+          }
+          : {
+            sql: `
+              UPDATE order_items
+              SET estimated_profit = ?,
+                actual_profit = 0,
+                aftersale_loss = 0,
+                settlement_state = ?
+              WHERE id = ?
+            `,
+            params: [nextProfit, row.settlement_state || "estimated", row.order_item_id]
+          }
+      ]);
       upsertHistoricalProfitReview(deps, row.order_item_id, "cleared", "system_cleanup", null);
       updatedItems += 1;
       clearedReturnLoss += Number(row.return_loss_cny || 0);
       updatedOrders.add(Number(row.order_id));
       if (row.order_date) dateKeys.add(row.order_date);
     }
-    deps.db.exec("COMMIT");
-  } catch (error) {
-    deps.db.exec("ROLLBACK");
-    throw error;
-  }
+  });
 
   refreshHistoricalReviewArtifacts(deps, [...dateKeys], { from, to });
   return {
@@ -382,53 +413,57 @@ export function applyHistoricalProfitReviewAction(deps, body = {}, userId = null
   }
 
   if (action === "reset") {
-    deps.db.prepare(`DELETE FROM historical_profit_reviews WHERE order_item_id IN (${placeholders})`).run(...orderItemIds);
+    executeStatement(deps, `DELETE FROM historical_profit_reviews WHERE order_item_id IN (${placeholders})`, orderItemIds);
     deps.invalidateExceptionWorkbenchCache();
     return { ok: true, action, updated_items: rows.length };
   }
 
   if (action === "clear") {
-    const updateProfitItem = deps.db.prepare(`
-      UPDATE order_profit_items
-      SET return_loss_cny = 0,
-        net_profit_cny = ?,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE order_item_id = ?
-    `);
-    const updateOrderItemAccrued = deps.db.prepare(`
-      UPDATE order_items
-      SET estimated_profit = ?,
-        actual_profit = ?,
-        aftersale_loss = 0,
-        settlement_state = 'accrued'
-      WHERE id = ?
-    `);
-    const updateOrderItemEstimated = deps.db.prepare(`
-      UPDATE order_items
-      SET estimated_profit = ?,
-        actual_profit = 0,
-        aftersale_loss = 0,
-        settlement_state = ?
-      WHERE id = ?
-    `);
     let clearedReturnLoss = 0;
     const dateKeys = [];
-    deps.db.exec("BEGIN");
-    try {
+    runInTransaction(deps, () => {
       for (const row of rows) {
         const nextProfit = recalculateNetProfitWithoutReturnLoss(deps, row);
-        updateProfitItem.run(nextProfit, row.order_item_id);
-        if (String(row.settlement_state || "") === "accrued") updateOrderItemAccrued.run(nextProfit, nextProfit, row.order_item_id);
-        else updateOrderItemEstimated.run(nextProfit, row.settlement_state || "estimated", row.order_item_id);
+        executeBatchStatements(deps, [
+          {
+            sql: `
+              UPDATE order_profit_items
+              SET return_loss_cny = 0,
+                net_profit_cny = ?,
+                updated_at = CURRENT_TIMESTAMP
+              WHERE order_item_id = ?
+            `,
+            params: [nextProfit, row.order_item_id]
+          },
+          String(row.settlement_state || "") === "accrued"
+            ? {
+              sql: `
+                UPDATE order_items
+                SET estimated_profit = ?,
+                  actual_profit = ?,
+                  aftersale_loss = 0,
+                  settlement_state = 'accrued'
+                WHERE id = ?
+              `,
+              params: [nextProfit, nextProfit, row.order_item_id]
+            }
+            : {
+              sql: `
+                UPDATE order_items
+                SET estimated_profit = ?,
+                  actual_profit = 0,
+                  aftersale_loss = 0,
+                  settlement_state = ?
+                WHERE id = ?
+              `,
+              params: [nextProfit, row.settlement_state || "estimated", row.order_item_id]
+            }
+        ]);
         upsertHistoricalProfitReview(deps, row.order_item_id, "cleared", "manual_clear", userId);
         clearedReturnLoss += Number(row.return_loss_cny || 0);
         if (row.order_date) dateKeys.push(row.order_date);
       }
-      deps.db.exec("COMMIT");
-    } catch (error) {
-      deps.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
     refreshHistoricalReviewArtifacts(deps, dateKeys, {});
     return {
       ok: true,

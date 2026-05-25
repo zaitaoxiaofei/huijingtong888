@@ -1,0 +1,1 @@
+function e(){let e=0;return{next(){return e+=1,e},isLatest(t){return t===e}}}export{e as t};

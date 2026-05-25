@@ -3,18 +3,23 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
-import { applyFilterQuery, buildFilterQuery, dateText, integer, isWithinDateRange, normalizeSearch, paginate } from "./inventory-utils.js";
+import { applyFilterQuery, buildFilterQuery, dateText, integer } from "./inventory-utils.js";
 
 const route = useRoute();
 const router = useRouter();
 let syncingRoute = false;
+const listRequestGate = createLatestRequestGate();
+let shopsLoaded = false;
 
 const loading = ref(false);
 const syncLoading = ref(false);
 const state = reactive({
-  sourceRows: [],
+  rows: [],
+  total: 0,
   shops: [],
   filters: {
     query: "",
@@ -39,52 +44,7 @@ const filterDefaults = {
   pageSize: 30
 };
 
-const flattenedRows = computed(() => {
-  const result = [];
-  for (const product of state.sourceRows) {
-    const skus = Array.isArray(product.skus) ? product.skus : [];
-    skus.forEach((sku) => {
-      if (Number(sku.fbp_snapshot_count || 0) <= 0 && Number(sku.fbp_present || 0) <= 0 && Number(sku.fbp_available || 0) <= 0) return;
-      result.push({
-        product_id: product.product_id,
-        product_name: product.product_name,
-        product_image_url: product.image_url,
-        inventory_id: product.inventory_id,
-        alert_stock: product.alert_stock,
-        local_stock: product.local_stock,
-        created_at: product.created_at,
-        recent_3d_qty: sku.recent_3d_qty,
-        recent_7d_qty: sku.recent_7d_qty,
-        recent_30d_qty: sku.recent_30d_qty,
-        prev_7d_qty: sku.prev_7d_qty,
-        all_time_qty: sku.all_time_qty,
-        ...sku
-      });
-    });
-  }
-  return result;
-});
-
-const filteredRows = computed(() => {
-  const query = normalizeSearch(state.filters.query);
-  const shopId = String(state.filters.shopId || "all");
-  const rows = flattenedRows.value.filter((row) => {
-    if (shopId !== "all" && String(row.shop_id || "") !== shopId) return false;
-    if (!isWithinDateRange(row.created_at, state.filters.dateFrom, state.filters.dateTo)) return false;
-    if (!query) return true;
-    const haystack = [row.shop_name, row.name, row.ozon_sku, row.offer_id, row.product_name, row.inventory_id].map(normalizeSearch).join(" ");
-    return haystack.includes(query);
-  });
-  const factor = state.filters.sortDir === "desc" ? -1 : 1;
-  return [...rows].sort((left, right) => {
-    const a = Number(left[state.filters.sortKey] || 0);
-    const b = Number(right[state.filters.sortKey] || 0);
-    if (a === b) return Number(left.product_id || 0) - Number(right.product_id || 0);
-    return (a - b) * factor;
-  });
-});
-
-const pagedRows = computed(() => paginate(filteredRows.value, state.filters.page, state.filters.pageSize));
+const pagedRows = computed(() => state.rows);
 
 function coverageText(row) {
   const recent7d = Number(row.recent_7d_qty || 0);
@@ -112,6 +72,7 @@ function setSort(sortKey) {
     state.filters.sortDir = "asc";
   }
   state.filters.page = 1;
+  loadPageData();
 }
 
 function applyRouteState() {
@@ -132,10 +93,23 @@ function syncRouteQuery() {
 
 function handleSearch() {
   state.filters.page = 1;
+  loadPageData();
 }
 
 function handleReset() {
   Object.assign(state.filters, filterDefaults);
+  loadPageData();
+}
+
+function handlePageChange(page) {
+  state.filters.page = page;
+  loadPageData();
+}
+
+function handlePageSizeChange(size) {
+  state.filters.pageSize = size;
+  state.filters.page = 1;
+  loadPageData();
 }
 
 function openMappings() {
@@ -173,18 +147,37 @@ async function syncSingleProduct(row) {
 }
 
 async function loadPageData() {
+  const requestToken = listRequestGate.next();
   loading.value = true;
   try {
-    const [payload, shops] = await Promise.all([
-      apiClient.get("/api/stock-alerts"),
-      apiClient.get("/api/shops")
-    ]);
-    state.sourceRows = Array.isArray(payload?.rows) ? payload.rows : [];
-    state.shops = Array.isArray(shops) ? shops : [];
+    const params = new URLSearchParams({
+      mode: "fbp",
+      paged: "1",
+      page: String(state.filters.page),
+      pageSize: String(state.filters.pageSize),
+      shopId: String(state.filters.shopId || "all"),
+      dateFrom: String(state.filters.dateFrom || ""),
+      dateTo: String(state.filters.dateTo || ""),
+      sortKey: String(state.filters.sortKey || "fbp_available"),
+      sortDir: String(state.filters.sortDir || "asc")
+    });
+    const query = String(state.filters.query || "").trim();
+    if (query) params.set("query", query);
+    const requests = [apiClient.get(`/api/stock-alerts?${params.toString()}`)];
+    if (!shopsLoaded) requests.push(apiClient.get("/api/shops"));
+    const [payload, shops] = await Promise.all(requests);
+    if (!listRequestGate.isLatest(requestToken)) return;
+    state.rows = Array.isArray(payload?.rows) ? payload.rows : [];
+    state.total = Number(payload?.total || 0);
+    if (!shopsLoaded) {
+      state.shops = Array.isArray(shops) ? shops : [];
+      shopsLoaded = true;
+    }
   } catch (error) {
+    if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "FBP 库存表加载失败");
   } finally {
-    loading.value = false;
+    if (listRequestGate.isLatest(requestToken)) loading.value = false;
   }
 }
 
@@ -220,7 +213,7 @@ onMounted(async () => {
         <el-table-column label="SKU信息" min-width="320">
           <template #default="{ row }">
             <div class="product-cell">
-              <el-image v-if="row.image_url" :src="row.image_url" fit="cover" class="product-thumb" />
+              <ProductImagePreview :src="row.image_url" />
               <div class="cell-stack">
                 <strong>{{ row.name || row.ozon_sku || "-" }}</strong>
                 <span class="muted-text">SKU {{ row.ozon_sku || "-" }}</span>
@@ -293,12 +286,12 @@ onMounted(async () => {
     </div>
 
     <PageFooterPagination
-      :total="filteredRows.length"
+      :total="state.total"
       :page="state.filters.page"
       :page-size="state.filters.pageSize"
       :page-sizes="[30, 50, 100]"
-      @update:page="state.filters.page = $event"
-      @update:pageSize="state.filters.pageSize = $event; state.filters.page = 1"
+      @update:page="handlePageChange"
+      @update:pageSize="handlePageSizeChange"
     />
   </div>
 </template>

@@ -5,7 +5,7 @@ const props = defineProps({
   showShop: { type: Boolean, default: true },
   showDateRange: { type: Boolean, default: true },
   queryLabel: { type: String, default: "关键词" },
-  queryPlaceholder: { type: String, default: "产品名称 / SKU / 库存ID" }
+  queryPlaceholder: { type: String, default: "产品名称 / SKU / 库存编码" }
 });
 
 defineEmits(["search", "reset"]);

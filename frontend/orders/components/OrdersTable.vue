@@ -1,13 +1,10 @@
 ﻿<script setup>
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { ElMessage } from "element-plus";
 
 const props = defineProps({
   rows: { type: Array, default: () => [] },
   markOptions: { type: Array, default: () => [] },
-  statusLabelFn: { type: Function, default: null },
-  statusColorFn: { type: Function, default: null },
-  availableActionsFn: { type: Function, default: null },
   selectedIds: { type: Object, default: () => new Set() },
   allSelected: { type: Boolean, default: false },
   someSelected: { type: Boolean, default: false },
@@ -19,15 +16,12 @@ const props = defineProps({
 const emit = defineEmits([
   "toggle-all",
   "toggle-row",
-  "open-detail",
   "open-profit",
   "prepare-order",
   "print-order",
-  "recalculate-profit",
   "save-mark",
   "open-bind-product-from-order",
   "open-create-product-from-order",
-  "jump-stock-product",
   "open-procurement"
 ]);
 
@@ -35,8 +29,59 @@ const markChoices = computed(() => (
   (props.markOptions || []).filter((item) => item && item.value !== undefined)
 ));
 
-function formatDateTime(value) {
-  return value ? String(value).slice(0, 19).replace("T", " ") : "-";
+const selectableMarkChoices = computed(() => (
+  markChoices.value.filter((item) => item.value)
+));
+
+const markLabelMap = computed(() => (
+  new Map(markChoices.value.map((item) => [String(item.value || ""), item.label || ""]))
+));
+
+const markMenu = ref({
+  visible: false,
+  rowId: null,
+  top: 0,
+  left: 0
+});
+
+function parseDateValue(value, assumeUtcWhenNaive = false) {
+  if (!value) return "-";
+  if (value instanceof Date) return value;
+  const text = String(value).trim();
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text);
+  const normalized = assumeUtcWhenNaive && !hasTimezone
+    ? `${text.replace(" ", "T")}Z`
+    : text;
+  return new Date(normalized);
+}
+
+function formatDateTime(value, options = {}) {
+  if (!value) return "-";
+  const date = parseDateValue(value, Boolean(options.assumeUtcWhenNaive));
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 19).replace("T", " ");
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).formatToParts(date);
+  const valueOf = (type) => parts.find((part) => part.type === type)?.value || "";
+  return `${valueOf("year")}-${valueOf("month")}-${valueOf("day")} ${valueOf("hour")}:${valueOf("minute")}:${valueOf("second")}`;
+}
+
+function formatPrintDateTime(value) {
+  return formatDateTime(value, { assumeUtcWhenNaive: true });
+}
+
+function formatPrintDateParts(value) {
+  const text = formatPrintDateTime(value);
+  if (text === "-") return { date: "-", time: "" };
+  const [date, time] = text.split(" ");
+  return { date: date || text, time: time || "" };
 }
 
 function formatMoney(value) {
@@ -56,24 +101,65 @@ function copyText(value) {
   ElMessage.warning("当前浏览器不支持复制");
 }
 
-function orderTitle(row) {
-  return row.posting_number || row.order_number || `Order #${row.id}`;
+function openExternalLink(url) {
+  const target = String(url || "").trim();
+  if (!target) return;
+  window.open(target, "_blank", "noopener,noreferrer");
 }
 
-function orderTrackingLink(row) {
-  const orderNo = String(row?.posting_number || row?.order_number || "").trim();
-  if (!orderNo) return "";
-  const params = new URLSearchParams({ track: orderNo, local: "zh-Hans" });
-  return `https://tracking.ozon.ru/?${params.toString()}`;
+function resolveOzonLink(item) {
+  const direct = String(item?.productLink || "").trim();
+  if (direct) return direct;
+  const productId = String(item?.ozonProductId || "").trim();
+  return productId ? `https://www.ozon.ru/product/${encodeURIComponent(productId)}/` : "";
 }
 
-function statusLabel(row) {
-  if (typeof props.statusLabelFn === "function") return props.statusLabelFn(row);
-  return row.status || row.tracking_stage || "-";
+function resolveOzonPostingLink(row) {
+  const postingNumber = String(row?.posting_number || row?.order_number || "").trim();
+  if (!postingNumber) return "";
+  const query = new URLSearchParams({
+    tab: "all",
+    postingNumber,
+    postingDetails: postingNumber
+  });
+  return `https://seller.ozon.ru/app/postings/crossborder/fbs?${query.toString()}`;
 }
 
-function statusTagType(row) {
-  const color = typeof props.statusColorFn === "function" ? props.statusColorFn(row) : "slate";
+function closeMarkMenu() {
+  markMenu.value = {
+    visible: false,
+    rowId: null,
+    top: 0,
+    left: 0
+  };
+}
+
+function openMarkMenu(orderId, event) {
+  const trigger = event?.currentTarget;
+  if (!trigger?.getBoundingClientRect) return;
+  const rect = trigger.getBoundingClientRect();
+  const panelWidth = 190;
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const preferredLeft = rect.right + 12;
+  const maxLeft = Math.max(12, viewportWidth - panelWidth - 12);
+  const left = Math.max(12, Math.min(preferredLeft, maxLeft));
+  const top = Math.max(12, Math.min(rect.top, viewportHeight - 260));
+  markMenu.value = {
+    visible: true,
+    rowId: Number(orderId),
+    top,
+    left
+  };
+}
+
+function applyMark(markType) {
+  if (!markMenu.value.rowId) return;
+  emit("save-mark", markMenu.value.rowId, markType);
+  closeMarkMenu();
+}
+
+function statusTagType(color) {
   if (color === "amber") return "warning";
   if (color === "blue") return "primary";
   if (color === "red") return "danger";
@@ -81,35 +167,8 @@ function statusTagType(row) {
   return "info";
 }
 
-function availableActions(row) {
-  if (typeof props.availableActionsFn === "function") return props.availableActionsFn(row) || {};
-  return row.availableActions || {};
-}
-
 function rowSelected(row) {
   return props.selectedIds instanceof Set ? props.selectedIds.has(Number(row.id)) : false;
-}
-
-function quantitySummary(row) {
-  return Number(row.total_quantity || row.quantity_total || row.quantity || row.item_count || 1);
-}
-
-function stockSummary(row) {
-  const items = productDisplayRows(row);
-  return items.reduce((summary, item) => ({
-    fbs: summary.fbs + Number(item.stock?.fbs || 0),
-    fbp: summary.fbp + Number(item.stock?.fbp || 0)
-  }), { fbs: 0, fbp: 0 });
-}
-
-function shippingMethodLabel(value) {
-  const text = String(value || "").trim().toLowerCase();
-  if (!text) return "--";
-  if (text.includes("fbp")) return "平台仓发货";
-  if (text.includes("fbs")) return "自发货";
-  if (text.includes("air")) return "空运";
-  if (text.includes("sea")) return "海运";
-  return String(value || "").trim();
 }
 
 function markValue(row) {
@@ -130,173 +189,11 @@ function markTone(value) {
 }
 
 function markLabel(value) {
-  return markChoices.value.find((item) => String(item.value || "") === String(value || ""))?.label || "无标记";
+  return markLabelMap.value.get(String(value || "")) || "无标记";
 }
 
-function firstCsvValue(value) {
-  return String(value || "").split(",").map((item) => item.trim()).find(Boolean) || "";
-}
-
-function parseMappedPairs(value) {
-  return String(value || "")
-    .split("||")
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .map((item) => {
-      const [key, ...rest] = item.split(":");
-      return { key: String(key || "").trim(), value: rest.join(":").trim() };
-    })
-    .filter((item) => item.key);
-}
-
-function splitCsv(value) {
-  return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
-}
-
-function parseSkuImages(row) {
-  const map = new Map();
-  for (const item of parseMappedPairs(row.sku_images)) {
-    if (!map.has(item.key) && item.value) map.set(item.key, item.value);
-  }
-  return map;
-}
-
-function parseSkuNames(row) {
-  const map = new Map();
-  for (const item of parseMappedPairs(row.sku_names)) {
-    if (!map.has(item.key) && item.value) map.set(item.key, item.value);
-  }
-  return map;
-}
-
-function parseSkuQuantities(row) {
-  const map = new Map();
-  for (const item of parseMappedPairs(row.sku_quantities)) {
-    map.set(item.key, Number(item.value || 0));
-  }
-  return map;
-}
-
-function parseSkuProductIds(row) {
-  const map = new Map();
-  for (const item of parseMappedPairs(row.sku_product_ids)) {
-    map.set(item.key, Number(item.value || 0));
-  }
-  return map;
-}
-
-function parseSkuOnlineIds(row) {
-  const map = new Map();
-  for (const item of parseMappedPairs(row.sku_online_product_ids)) {
-    map.set(item.key, Number(item.value || 0));
-  }
-  return map;
-}
-
-function parseSkuStockSummaries(row) {
-  const map = new Map();
-  for (const item of parseMappedPairs(row.sku_stock_summaries)) {
-    const parts = String(item.value || "").split(":");
-    map.set(item.key, { fbs: Number(parts[0] || 0), fbp: Number(parts[1] || 0) });
-  }
-  return map;
-}
-
-function productDisplayRows(row) {
-  const skuImages = parseSkuImages(row);
-  const skuNames = parseSkuNames(row);
-  const skuQuantities = parseSkuQuantities(row);
-  const productIds = parseSkuProductIds(row);
-  const onlineIds = parseSkuOnlineIds(row);
-  const stockMap = parseSkuStockSummaries(row);
-  const skus = splitCsv(row.skus);
-  const fallbackName = firstCsvValue(row.product_names) || "待绑定商品";
-  const fallbackImage = firstCsvValue(row.order_image_urls) || firstCsvValue(row.image_urls);
-
-  if (!skus.length) {
-    return [{
-      sku: row.ozon_sku || "-",
-      name: fallbackName,
-      quantity: quantitySummary(row),
-      imageUrl: fallbackImage,
-      stock: { fbs: 0, fbp: 0 },
-      productId: 0,
-      onlineId: 0,
-      unbound: true
-    }];
-  }
-
-  return skus.map((sku) => ({
-    sku,
-    name: skuNames.get(sku) || fallbackName,
-    quantity: skuQuantities.get(sku) || 0,
-    imageUrl: skuImages.get(sku) || fallbackImage,
-    stock: stockMap.get(sku) || { fbs: 0, fbp: 0 },
-    productId: productIds.get(sku) || 0,
-    onlineId: onlineIds.get(sku) || 0,
-    unbound: splitCsv(row.unbound_skus).includes(sku)
-  }));
-}
-
-function inventorySummaries(row) {
-  const productIds = splitCsv(row.product_ids).map((item) => Number(item)).filter(Boolean);
-  const productNames = splitCsv(row.product_names);
-
-  return productIds.map((productId, index) => ({
-    productId,
-    sku: splitCsv(row.skus)[index] || "",
-    productName: productNames[index] || productNames[0] || "库存商品",
-    amountText: `CNY ${formatMoney(profitSummary(row).revenue)}`
-  }));
-}
-
-function printedState(row) {
-  return Boolean(row.printed_at);
-}
-
-function profitSummary(row) {
-  const estimated = Number(row.estimated_profit || 0);
-  const actual = Number(row.actual_profit || 0);
-  const hasActual = Math.abs(actual) > 0.000001 || String(row.status || "").toLowerCase() === "delivered";
-  return { revenue: Number(row.revenue || 0), estimated, actual, hasActual };
-}
-
-function logisticsSummary(row) {
-  return {
-    tracking: row.tracking_number || "",
-    deliveryMethod: row.delivery_method_name || row.delivery_method || row.shipping_method || "",
-    warehouse: row.warehouse_name || "",
-    channel: row.logistics_channel || "",
-    deadline: row.shipment_deadline_at || "",
-    overdue: Boolean(row.is_overdue)
-  };
-}
-
-function productLink(item) {
-  return item.onlineId ? `#/online-products?onlineProductId=${item.onlineId}` : "";
-}
-
-function cancelReasonText(row) {
-  const status = String(row?.status || "").toLowerCase();
-  if (status !== "cancelled") return "--";
-  return row?.cancel_reason_label || "--";
-}
-
-function amountText(row) {
-  return `CNY ${formatMoney(profitSummary(row).revenue)}`;
-}
-
-function statusDeadlineHint(row) {
-  const status = String(row?.status || "").toLowerCase();
-  if (!["awaiting_packaging", "awaiting_deliver"].includes(status)) return "";
-  const deadline = logisticsSummary(row).deadline;
-  if (!deadline) return "";
-  const time = new Date(deadline).getTime();
-  if (!Number.isFinite(time)) return "";
-  const diffDays = Math.ceil((time - Date.now()) / (24 * 60 * 60 * 1000));
-  if (diffDays < 0) return `超时 ${Math.abs(diffDays)} 天`;
-  if (diffDays === 0) return "今天到期";
-  return `剩余 ${diffDays} 天`;
+function orderTitleParts(row) {
+  return Array.isArray(row?.orderTitleParts) ? row.orderTitleParts : [];
 }
 </script>
 
@@ -330,37 +227,18 @@ function statusDeadlineHint(row) {
       <el-table-column label="标记" width="78" fixed="left" align="center">
         <template #default="{ row }">
           <div class="orders-mark-cell">
-            <el-popover placement="right" :width="190" trigger="click" popper-class="orders-mark-popover">
-              <template #reference>
-                <button type="button" class="orders-mark-pill" :title="markLabel(markValue(row))">
-                  <span v-if="markValue(row)" class="orders-mark-dot" :class="`is-${markTone(markValue(row))}`" />
-                  <span v-else class="orders-mark-pencil-ring">
-                    <span class="orders-mark-pencil-icon" />
-                  </span>
-                </button>
-              </template>
-              <div class="orders-mark-menu">
-                <div class="orders-mark-menu-title">选择颜色标记</div>
-                <button type="button" class="orders-mark-menu-item" @click="emit('save-mark', row.id, '')">
-                  <span class="orders-mark-dot-ring">
-                    <span class="orders-mark-pencil-icon is-small" />
-                  </span>
-                  <span>无标记</span>
-                </button>
-                <button
-                  v-for="option in markChoices.filter((item) => item.value)"
-                  :key="option.value"
-                  type="button"
-                  class="orders-mark-menu-item"
-                  @click="emit('save-mark', row.id, option.value)"
-                >
-                  <span class="orders-mark-dot" :class="`is-${markTone(option.value)}`" />
-                  <span>{{ option.label }}</span>
-                </button>
-              </div>
-            </el-popover>
-            <div v-if="printedState(row)" class="orders-print-state orders-print-state-mark">
+            <button type="button" class="orders-mark-pill" :title="markLabel(markValue(row))" @click="openMarkMenu(row.id, $event)">
+              <span v-if="markValue(row)" class="orders-mark-dot" :class="`is-${markTone(markValue(row))}`" />
+              <span v-else class="orders-mark-pencil-ring">
+                <span class="orders-mark-pencil-icon" />
+              </span>
+            </button>
+            <div v-if="row.printedState" class="orders-print-state orders-print-state-mark">
               <b>已打印</b>
+              <span v-if="row.printed_at" class="orders-print-time">
+                <span class="orders-print-time-date">{{ formatPrintDateParts(row.printed_at).date }}</span>
+                <span class="orders-print-time-clock">{{ formatPrintDateParts(row.printed_at).time }}</span>
+              </span>
             </div>
           </div>
         </template>
@@ -369,26 +247,44 @@ function statusDeadlineHint(row) {
       <el-table-column label="订单信息" min-width="180" fixed="left">
         <template #default="{ row }">
           <div class="orders-cell-stack">
-            <a
-              v-if="orderTrackingLink(row)"
-              class="orders-posting-link orders-posting-emphasis"
-              :href="orderTrackingLink(row)"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              {{ orderTitle(row) }}
-            </a>
-            <div v-else class="orders-cell-title orders-posting-emphasis">{{ orderTitle(row) }}</div>
-            <div class="orders-order-quantity" :class="{ 'is-multi': quantitySummary(row) > 1 }">
-              数量: {{ quantitySummary(row) }}
+            <div class="orders-cell-title orders-posting-emphasis orders-order-title">
+              <a
+                v-if="resolveOzonPostingLink(row)"
+                class="orders-posting-link"
+                :href="resolveOzonPostingLink(row)"
+                target="_blank"
+                rel="noopener noreferrer"
+                :title="`打开 Ozon 订单 ${row.posting_number || row.order_number || ''}`"
+                @click.prevent.stop="openExternalLink(resolveOzonPostingLink(row))"
+              >
+                <span
+                  v-for="(part, index) in orderTitleParts(row)"
+                  :key="`${row.id}-title-${index}`"
+                  :class="{ 'is-strong': part.strong }"
+                >
+                  {{ part.text }}
+                </span>
+              </a>
+              <template v-else>
+                <span
+                  v-for="(part, index) in orderTitleParts(row)"
+                  :key="`${row.id}-title-${index}`"
+                  :class="{ 'is-strong': part.strong }"
+                >
+                  {{ part.text }}
+                </span>
+              </template>
+            </div>
+            <div class="orders-order-quantity" :class="{ 'is-multi': row.quantitySummary > 1 }">
+              数量: {{ row.quantitySummary }}
             </div>
             <div class="orders-order-quantity">
-              金额: {{ amountText(row) }}
+              金额: {{ row.amountText }}
             </div>
             <div class="orders-order-stock-line">
-              <span>FBS: {{ stockSummary(row).fbs }}</span>
+              <span>FBS: {{ row.stockSummary?.fbs || 0 }}</span>
               <span>/</span>
-              <span>FBP: {{ stockSummary(row).fbp }}</span>
+              <span>FBP: {{ row.stockSummary?.fbp || 0 }}</span>
             </div>
           </div>
         </template>
@@ -405,13 +301,13 @@ function statusDeadlineHint(row) {
       <el-table-column label="状态" width="124" align="center">
         <template #default="{ row }">
           <div class="orders-cell-stack orders-cell-center orders-status-cell">
-            <el-tag effect="light" :type="statusTagType(row)">{{ statusLabel(row) }}</el-tag>
+            <el-tag effect="light" :type="statusTagType(row.statusColor)">{{ row.statusLabel }}</el-tag>
             <div
-              v-if="statusDeadlineHint(row)"
+              v-if="row.statusDeadlineHint"
               class="orders-status-deadline"
-              :class="{ 'is-danger': statusDeadlineHint(row).startsWith('超时') }"
+              :class="{ 'is-danger': row.statusDeadlineHint.startsWith('超时') }"
             >
-              {{ statusDeadlineHint(row) }}
+              {{ row.statusDeadlineHint }}
             </div>
           </div>
         </template>
@@ -419,22 +315,33 @@ function statusDeadlineHint(row) {
 
       <el-table-column label="商品信息" min-width="300">
         <template #default="{ row }">
-            <div class="orders-goods-list">
-              <div v-for="item in productDisplayRows(row)" :key="`${row.id}-${item.sku}`" class="orders-goods-item">
-                <div class="orders-thumb-wrap">
-                  <div class="orders-thumb">
-                    <el-image
-                      v-if="item.imageUrl"
-                      :src="item.imageUrl"
-                      :preview-src-list="[item.imageUrl]"
-                      preview-teleported
-                      fit="cover"
-                    />
-                    <div v-else class="orders-thumb-empty">无图</div>
-                  </div>
+          <div class="orders-goods-list">
+            <div v-for="item in row.productDisplayRows" :key="`${row.id}-${item.sku}`" class="orders-goods-item">
+              <div class="orders-thumb-wrap">
+                <div class="orders-thumb">
+                  <el-image
+                    v-if="item.imageUrl"
+                    :src="item.imageUrl"
+                    :preview-src-list="[item.imageUrl]"
+                    preview-teleported
+                    fit="contain"
+                    class="orders-thumb-image"
+                  />
+                  <div v-else class="orders-thumb-empty">无图</div>
                 </div>
-                <div class="orders-product-copy">
-                <a v-if="productLink(item)" class="orders-product-link orders-product-name" :href="productLink(item)">{{ item.name }}</a>
+              </div>
+              <div class="orders-product-copy">
+                <a
+                  v-if="resolveOzonLink(item)"
+                  class="orders-product-link orders-product-name"
+                  :href="resolveOzonLink(item)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  :title="item.name"
+                  @click.prevent.stop="openExternalLink(resolveOzonLink(item))"
+                >
+                  {{ item.name }}
+                </a>
                 <div v-else class="orders-cell-title orders-product-name">{{ item.name }}</div>
                 <div class="orders-sku-row">
                   <span class="orders-cell-meta-line">SKU: {{ item.sku }}</span>
@@ -449,10 +356,10 @@ function statusDeadlineHint(row) {
       <el-table-column label="利润" min-width="188" align="left">
         <template #default="{ row }">
           <div class="orders-cell-stack orders-money-cell">
-            <div class="orders-cell-meta-line">预计: CNY {{ formatMoney(profitSummary(row).estimated) }}</div>
+            <div class="orders-cell-meta-line">预计: CNY {{ formatMoney(row.profitSummary.estimated) }}</div>
             <div class="orders-cell-meta-line">
               真实:
-              <span v-if="profitSummary(row).hasActual">CNY {{ formatMoney(profitSummary(row).actual) }}</span>
+              <span v-if="row.profitSummary.hasActual">CNY {{ formatMoney(row.profitSummary.actual) }}</span>
               <span v-else>--</span>
             </div>
             <el-button class="orders-inline-accent-button orders-inline-accent-button-blue orders-profit-detail-button" size="small" @click="emit('open-profit', row.id)">详情</el-button>
@@ -465,8 +372,8 @@ function statusDeadlineHint(row) {
           <div class="orders-cell-stack">
             <div class="orders-cell-meta-line orders-time-line">下单: {{ formatDateTime(row.ordered_at) }}</div>
             <div class="orders-cell-meta-line orders-time-line">更新: {{ formatDateTime(row.updated_at) }}</div>
-            <div class="orders-cell-meta-line orders-time-line" :class="{ 'orders-text-danger': logisticsSummary(row).overdue }">
-              截止: {{ formatDateTime(logisticsSummary(row).deadline) }}
+            <div class="orders-cell-meta-line orders-time-line" :class="{ 'orders-text-danger': row.logisticsSummary.overdue }">
+              截止: {{ formatDateTime(row.logisticsSummary.deadline) }}
             </div>
           </div>
         </template>
@@ -475,16 +382,25 @@ function statusDeadlineHint(row) {
       <el-table-column label="物流信息" min-width="168">
         <template #default="{ row }">
           <div class="orders-cell-stack">
-            <div class="orders-delivery-main orders-delivery-main-compact">{{ logisticsSummary(row).deliveryMethod || "--" }}</div>
-            <div class="orders-cell-meta-line orders-logistics-warehouse">{{ logisticsSummary(row).warehouse || "--" }}</div>
-          </div>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="取消原因" min-width="148">
-        <template #default="{ row }">
-          <div class="orders-cancel-cell">
-            <small>{{ cancelReasonText(row) }}</small>
+            <div class="orders-delivery-main orders-delivery-main-compact">{{ row.logisticsSummary.deliveryMethodLabel || "FBS" }}</div>
+            <div class="orders-cell-meta-line orders-logistics-warehouse">{{ row.logisticsSummary.resolvedRuleName || "--" }}</div>
+            <div v-if="row.logisticsSummary.shipmentNumber" class="orders-logistics-id-row">
+              <span>货件: {{ row.logisticsSummary.shipmentNumber }}</span>
+              <button type="button" class="orders-copy-chip" @click="copyText(row.logisticsSummary.shipmentNumber)">复制</button>
+            </div>
+            <div v-if="row.logisticsSummary.trackingNumber" class="orders-logistics-id-row">
+              <a
+                v-if="row.logisticsSummary.trackingLink"
+                class="orders-tracking-link"
+                :href="row.logisticsSummary.trackingLink"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                追踪: {{ row.logisticsSummary.trackingNumber }}
+              </a>
+              <span v-else>追踪: {{ row.logisticsSummary.trackingNumber }}</span>
+              <button type="button" class="orders-copy-chip" @click="copyText(row.logisticsSummary.trackingNumber)">复制</button>
+            </div>
           </div>
         </template>
       </el-table-column>
@@ -493,7 +409,7 @@ function statusDeadlineHint(row) {
         <template #default="{ row }">
           <div class="orders-stock-list">
             <div
-              v-for="product in inventorySummaries(row)"
+              v-for="product in row.inventorySummaries"
               :key="`${row.id}-inventory-${product.productId}`"
               class="orders-inventory-item bound"
             >
@@ -519,7 +435,7 @@ function statusDeadlineHint(row) {
               </div>
             </div>
             <div
-              v-for="item in productDisplayRows(row).filter((entry) => entry.unbound)"
+              v-for="item in row.unboundItems"
               :key="`${row.id}-unbound-${item.sku}`"
               class="orders-inventory-item pending"
             >
@@ -546,28 +462,67 @@ function statusDeadlineHint(row) {
         </template>
       </el-table-column>
 
+      <el-table-column label="取消原因" min-width="148">
+        <template #default="{ row }">
+          <div class="orders-cancel-cell">
+            <small>{{ row.cancelReasonText }}</small>
+          </div>
+        </template>
+      </el-table-column>
+
       <el-table-column label="操作" min-width="210" fixed="right">
         <template #default="{ row }">
           <div class="orders-actions-cell orders-actions-cell-vertical">
-              <el-button
-                v-if="availableActions(row).prepare !== false"
-                size="small"
-                class="orders-inline-accent-button orders-inline-accent-button-green"
-                @click="emit('prepare-order', row.id)"
-              >
-                备货
+            <el-button
+              size="small"
+              class="orders-inline-accent-button orders-inline-accent-button-green"
+              :disabled="row.availableActions.prepare === false"
+              @click="emit('prepare-order', row.id)"
+            >
+              备货
             </el-button>
-              <el-button
-                v-if="availableActions(row).print !== false"
-                size="small"
-                class="orders-inline-accent-button orders-inline-accent-button-amber"
-                @click="emit('print-order', row.id)"
-              >
-                打印标签
+            <el-button
+              size="small"
+              class="orders-inline-accent-button orders-inline-accent-button-amber"
+              :disabled="row.availableActions.print === false"
+              @click="emit('print-order', row.id)"
+            >
+              打印标签
             </el-button>
           </div>
         </template>
       </el-table-column>
     </el-table>
+
+    <Teleport to="body">
+      <template v-if="markMenu.visible">
+        <button type="button" class="orders-mark-overlay" aria-label="关闭标记菜单" @click="closeMarkMenu" />
+        <div
+          class="orders-mark-floating-panel"
+          :style="{ top: `${markMenu.top}px`, left: `${markMenu.left}px` }"
+        >
+          <div class="orders-mark-menu">
+            <div class="orders-mark-menu-title">选择颜色标记</div>
+            <button type="button" class="orders-mark-menu-item" @click="applyMark('')">
+              <span class="orders-mark-dot-ring">
+                <span class="orders-mark-pencil-icon is-small" />
+              </span>
+              <span>无标记</span>
+            </button>
+            <button
+              v-for="option in selectableMarkChoices"
+              :key="option.value"
+              type="button"
+              class="orders-mark-menu-item"
+              @click="applyMark(option.value)"
+            >
+              <span class="orders-mark-dot" :class="`is-${markTone(option.value)}`" />
+              <span>{{ option.label }}</span>
+            </button>
+          </div>
+        </div>
+      </template>
+    </Teleport>
+
   </el-card>
 </template>

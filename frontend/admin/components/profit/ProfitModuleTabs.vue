@@ -7,8 +7,7 @@ const router = useRouter();
 
 const tabs = [
   { key: "dashboard", label: "利润看板", route: "/profit" },
-  { key: "sku", label: "SKU 排行榜", route: "/profit/sku-ranking" },
-  { key: "shop", label: "店铺排行榜", route: "/profit/shop-ranking" }
+  { key: "aftersales", label: "售后损失", route: "/profit/aftersales" }
 ];
 
 const activeRoute = computed(() => {
@@ -27,7 +26,7 @@ function handleChange(target) {
   <el-card shadow="never" class="page-card profit-module-tabs-card">
     <div class="profit-module-tabs-card__head">
       <strong>利润模块</strong>
-      <span>看板、SKU 排行榜、店铺排行榜互相可达，保持同一业务上下文。</span>
+      <span>看板和售后损失独立切换。</span>
     </div>
     <el-segmented
       :model-value="activeRoute"

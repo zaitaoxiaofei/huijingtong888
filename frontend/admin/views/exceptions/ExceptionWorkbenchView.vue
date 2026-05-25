@@ -1,9 +1,10 @@
-<script setup>
+﻿<script setup>
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ExceptionModuleTabs from "../../components/exceptions/ExceptionModuleTabs.vue";
 import { formatInteger } from "../profit/profit-utils.js";
 
@@ -49,7 +50,7 @@ const summaryCards = computed(() => {
   return [
     { label: pageConfig.value.label, value: Number(counts[pageConfig.value.countKey] || payload.total || 0) },
     { label: "待处理", value: Number(payload.total || 0) },
-    { label: "高优先级", value: Number(counts.danger || 0) },
+    { label: "楂樹紭鍏堢骇", value: Number(counts.danger || 0) },
     { label: "已处理", value: Number(payload.resolvedTotal || 0) }
   ];
 });
@@ -87,15 +88,15 @@ function typeLabel(row = {}) {
     stock_mapping: "SKU 映射异常",
     cancelled_order: "已取消订单"
   };
-  return map[row.type] || row.title || "异常";
+  return map[row.type] || row.title || "寮傚父";
 }
 
 function metaLines(row = {}) {
   return [
-    row.shop_name ? `店铺 ${row.shop_name}` : "",
-    row.order_ref ? `订单 ${row.order_ref}` : "",
+    row.shop_name ? `搴楅摵 ${row.shop_name}` : "",
+    row.order_ref ? `璁㈠崟 ${row.order_ref}` : "",
     row.sku_text ? `SKU ${row.sku_text}` : "",
-    row.inventory_id ? `库存 ${row.inventory_id}` : ""
+    row.inventory_id ? `搴撳瓨 ${row.inventory_id}` : ""
   ].filter(Boolean);
 }
 
@@ -161,12 +162,12 @@ async function loadRows(refresh = false) {
 }
 
 async function saveStates(ids, status) {
-  if (!ids.length) return ElMessage.warning("请先选择异常明细");
+  if (!ids.length) return ElMessage.warning("璇峰厛閫夋嫨寮傚父鏄庣粏");
   const label = status === "ignored" ? "忽略" : status === "open" ? "待处理" : "已处理";
   const confirmed = await ElMessageBox.confirm(`确认将 ${ids.length} 条异常标记为${label}？`, "异常处理", {
     type: "warning",
-    confirmButtonText: "确认",
-    cancelButtonText: "取消"
+    confirmButtonText: "纭",
+    cancelButtonText: "鍙栨秷"
   }).catch(() => false);
   if (!confirmed) return;
 
@@ -175,7 +176,7 @@ async function saveStates(ids, status) {
     for (const id of ids) {
       await apiClient.post("/api/exception-workbench/tasks/state", { task_id: id, status });
     }
-    ElMessage.success("状态已更新");
+    ElMessage.success("鐘舵€佸凡鏇存柊");
     await loadRows(true);
   } catch (error) {
     ElMessage.error(error.message || "状态更新失败");
@@ -186,10 +187,10 @@ async function saveStates(ids, status) {
 
 async function runOnlineAction(row, action, confirmText) {
   if (!row.onlineProductId) return ElMessage.warning("当前异常未关联在线商品");
-  const confirmed = await ElMessageBox.confirm(confirmText, "在线商品处理", {
+  const confirmed = await ElMessageBox.confirm(confirmText, "鍦ㄧ嚎鍟嗗搧澶勭悊", {
     type: "warning",
-    confirmButtonText: "确认",
-    cancelButtonText: "取消"
+    confirmButtonText: "纭",
+    cancelButtonText: "鍙栨秷"
   }).catch(() => false);
   if (!confirmed) return;
 
@@ -199,10 +200,10 @@ async function runOnlineAction(row, action, confirmText) {
       online_product_id: Number(row.onlineProductId),
       action
     });
-    ElMessage.success("操作完成");
+    ElMessage.success("鎿嶄綔瀹屾垚");
     await loadRows(true);
   } catch (error) {
-    ElMessage.error(error.message || "在线商品操作失败");
+    ElMessage.error(error.message || "鍦ㄧ嚎鍟嗗搧鎿嶄綔澶辫触");
   } finally {
     rowActionKey.value = "";
   }
@@ -216,7 +217,7 @@ async function recalculateOrder(row) {
     ElMessage.success("已重算订单利润");
     await loadRows(true);
   } catch (error) {
-    ElMessage.error(error.message || "重算利润失败");
+    ElMessage.error(error.message || "閲嶇畻鍒╂鼎澶辫触");
   } finally {
     rowActionKey.value = "";
   }
@@ -238,7 +239,7 @@ function onSelect(rows) {
 
 async function search() {
   state.filters.page = 1;
-  await loadRows(true);
+  await loadRows();
 }
 
 async function reset() {
@@ -249,7 +250,7 @@ async function reset() {
   state.filters.pageSize = 50;
   state.filters.sortField = "priority";
   state.filters.sortDirection = "desc";
-  await loadRows(true);
+  await loadRows();
 }
 
 function pageChange(page) {
@@ -263,7 +264,7 @@ function sizeChange(size) {
   loadRows();
 }
 
-watch(() => props.view, () => loadRows(true));
+watch(() => props.view, () => loadRows());
 onMounted(() => loadRows());
 </script>
 
@@ -272,7 +273,7 @@ onMounted(() => loadRows());
     <el-card shadow="never" class="page-card exception-overview-card">
       <div class="exception-overview">
         <div class="exception-overview__main">
-          <el-tag effect="light" :type="pageConfig.tag">异常中心</el-tag>
+          <el-tag effect="light" :type="pageConfig.tag">寮傚父涓績</el-tag>
           <h2>{{ pageConfig.label }}</h2>
           <p>{{ pageConfig.description }}</p>
           <div class="exception-summary-inline">
@@ -287,9 +288,9 @@ onMounted(() => loadRows());
           <ExceptionModuleTabs compact class="exception-module-tabs" />
           <div class="exception-toolbar__summary">
             <span v-for="item in toolbarSummary" :key="item">{{ item }}</span>
-            <small v-if="payload.generatedAt">生成时间 {{ dt(payload.generatedAt) }}</small>
+            <small v-if="payload.generatedAt">鐢熸垚鏃堕棿 {{ dt(payload.generatedAt) }}</small>
           </div>
-          <el-button size="small" :loading="loading" @click="loadRows(true)">刷新数据</el-button>
+          <el-button size="small" :loading="loading" @click="loadRows(true)">鍒锋柊鏁版嵁</el-button>
         </div>
       </div>
     </el-card>
@@ -299,25 +300,25 @@ onMounted(() => loadRows());
         <div class="page-card-header">
           <div>
             <strong>{{ pageConfig.label }}</strong>
-            <span>处理后会从待处理列表中移出。</span>
+            <span>处理后会从待处理列表中移除。</span>
           </div>
           <div class="page-card-actions">
             <div class="exception-filter-inline">
               <el-date-picker v-model="state.filters.from" value-format="YYYY-MM-DD" type="date" placeholder="开始日期" size="small" />
-              <el-date-picker v-model="state.filters.to" value-format="YYYY-MM-DD" type="date" placeholder="结束日期" size="small" />
+              <el-date-picker v-model="state.filters.to" value-format="YYYY-MM-DD" type="date" placeholder="缁撴潫鏃ユ湡" size="small" />
               <el-input
                 v-model="state.filters.keyword"
-                placeholder="订单号 / SKU / 库存编号 / 店铺"
+                placeholder="璁㈠崟鍙?/ SKU / 搴撳瓨缂栧彿 / 搴楅摵"
                 clearable
                 size="small"
                 style="width: 240px"
                 @keyup.enter="search"
               />
-              <el-button type="primary" size="small" :loading="loading" @click="search">查询</el-button>
-              <el-button size="small" @click="reset">重置</el-button>
+              <el-button type="primary" size="small" :loading="loading" @click="search">鏌ヨ</el-button>
+              <el-button size="small" @click="reset">閲嶇疆</el-button>
             </div>
             <el-button :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'handled')">批量已处理</el-button>
-            <el-button type="warning" plain :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'ignored')">批量忽略</el-button>
+            <el-button type="warning" plain :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'ignored')">鎵归噺蹇界暐</el-button>
             <el-button plain :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'open')">恢复待处理</el-button>
           </div>
         </div>
@@ -334,17 +335,10 @@ onMounted(() => loadRows());
       >
         <el-table-column type="selection" width="48" />
 
-        <el-table-column label="异常对象" min-width="330">
+        <el-table-column label="寮傚父瀵硅薄" min-width="330">
           <template #default="{ row }">
             <div class="exception-object-cell">
-              <el-image
-                v-if="row.image_url"
-                :src="row.image_url"
-                fit="cover"
-                class="exception-thumb"
-                :preview-src-list="[row.image_url]"
-                preview-teleported
-              />
+              <ProductImagePreview :src="row.image_url" size="square" />
               <div class="exception-object-copy">
                 <div class="exception-object-copy__top">
                   <el-tag size="small" effect="light" :type="levelType(row.level)">{{ typeLabel(row) }}</el-tag>
@@ -374,16 +368,16 @@ onMounted(() => loadRows());
           <template #default="{ row }">
             <div class="exception-time-cell">
               <p v-for="line in timeLines(row)" :key="line">{{ line }}</p>
-              <p v-if="!timeLines(row).length">暂无时间信息</p>
+              <p v-if="!timeLines(row).length">鏆傛棤鏃堕棿淇℃伅</p>
             </div>
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="280" fixed="right">
+        <el-table-column label="鎿嶄綔" width="280" fixed="right">
           <template #default="{ row }">
             <div class="exception-actions-cell">
               <el-button link type="primary" @click="saveStates([row.id], 'handled')">已处理</el-button>
-              <el-button link type="warning" @click="saveStates([row.id], 'ignored')">忽略</el-button>
+              <el-button link type="warning" @click="saveStates([row.id], 'ignored')">蹇界暐</el-button>
 
               <el-button
                 v-if="props.view === 'profit' && row.orderId"
@@ -391,10 +385,10 @@ onMounted(() => loadRows());
                 :loading="rowActionKey === actionKey(row.id, 'recalculate')"
                 @click="recalculateOrder(row)"
               >
-                重算利润
+                閲嶇畻鍒╂鼎
               </el-button>
 
-              <el-button v-if="props.view === 'profit' && row.productId" link @click="openInventory(row)">查看库存</el-button>
+              <el-button v-if="props.view === 'profit' && row.productId" link @click="openInventory(row)">鏌ョ湅搴撳瓨</el-button>
               <el-button v-if="props.view === 'binding'" link type="primary" @click="openBinding(row)">去绑定</el-button>
 
               <el-button
@@ -403,7 +397,7 @@ onMounted(() => loadRows());
                 :loading="rowActionKey === actionKey(row.id, 'zero_stock')"
                 @click="runOnlineAction(row, 'zero_stock', `确认将「${row.product_name || row.subject || '当前商品'}」在线库存归零吗？`)"
               >
-                库存归零
+                搴撳瓨褰掗浂
               </el-button>
 
               <el-button
@@ -413,7 +407,7 @@ onMounted(() => loadRows());
                 :loading="rowActionKey === actionKey(row.id, 'archive')"
                 @click="runOnlineAction(row, 'archive', `确认归档「${row.product_name || row.subject || '当前商品'}」吗？`)"
               >
-                归档商品
+                褰掓。鍟嗗搧
               </el-button>
 
               <el-button
@@ -476,3 +470,4 @@ onMounted(() => loadRows());
   .exception-filter-inline { justify-content: flex-start; }
 }
 </style>
+

@@ -18,7 +18,7 @@ for /f "tokens=2 delims=." %%b in ('node -p "process.versions.node"') do set NOD
 if %NODE_MAJOR% LSS 22 (
   echo Current Node.js version is too old:
   node --version
-  echo This project requires Node.js 22.5.0 or newer because it uses native SQLite.
+  echo This project requires Node.js 22.5.0 or newer.
   echo Download: https://nodejs.org/
   pause
   exit /b 1
@@ -27,7 +27,7 @@ if %NODE_MAJOR% LSS 22 (
 if %NODE_MAJOR% EQU 22 if %NODE_MINOR% LSS 5 (
   echo Current Node.js version is too old:
   node --version
-  echo This project requires Node.js 22.5.0 or newer because it uses native SQLite.
+  echo This project requires Node.js 22.5.0 or newer.
   echo Download: https://nodejs.org/
   pause
   exit /b 1
@@ -35,5 +35,7 @@ if %NODE_MAJOR% EQU 22 if %NODE_MINOR% LSS 5 (
 echo Node.js version:
 node --version
 echo.
-node src/server.js
+echo Building frontend and starting server...
+echo.
+node scripts/start-with-build.mjs
 pause

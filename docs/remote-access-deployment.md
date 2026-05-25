@@ -47,6 +47,7 @@ Browser
 ```env
 HOST=127.0.0.1
 PORT=8787
+DB_CLIENT=sqlite
 DATABASE_PATH=./data/ozon-profit-hub.sqlite
 APP_BASE_URL=https://erp.hjt888.xyz
 SITE_ACCESS_PASSWORD=replace-with-a-long-random-password
@@ -70,6 +71,11 @@ APP_SESSION_TTL_HOURS=72
 npm start
 ```
 
+说明：
+
+- `npm start` 现在会先构建前端，再启动服务。
+- 如果希望本地与线上看到完全一致的页面，应从同一份构建产物启动。
+
 或：
 
 ```powershell
@@ -77,6 +83,20 @@ node src/server.js
 ```
 
 项目根目录的 [start.bat](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/start.bat) 也可以作为手工启动入口。
+
+推荐先生成部署产物：
+
+```powershell
+npm run package:deploy
+```
+
+部署规则：
+
+- 该命令会重新构建前端并生成 `dist/deploy`
+- 线上只上传并运行 `dist/deploy`
+- 不要直接把整个源码工作区当作线上运行目录
+- 不要单独更新 `src` 却漏掉 `public/vue-apps`
+- `dist/deploy` 内的 `npm start` 只启动服务，不再重复构建前端
 
 ## 5. Cloudflare Tunnel
 

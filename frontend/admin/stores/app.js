@@ -2,6 +2,7 @@ import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 
 const THEME_STORAGE_KEY = "ozon-admin-theme";
+const DEFAULT_THEME = "light";
 
 export const useAppStore = defineStore("app", () => {
   const sidebarCollapsed = ref(false);
@@ -17,12 +18,11 @@ export const useAppStore = defineStore("app", () => {
     theme.value = nextTheme === "dark" ? "dark" : "light";
     document.documentElement.dataset.theme = theme.value;
     document.body.dataset.theme = theme.value;
-    localStorage.setItem(THEME_STORAGE_KEY, theme.value);
   }
 
   function initTheme() {
-    const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
-    applyTheme(savedTheme || "light");
+    localStorage.removeItem(THEME_STORAGE_KEY);
+    applyTheme(DEFAULT_THEME);
   }
 
   function toggleTheme() {

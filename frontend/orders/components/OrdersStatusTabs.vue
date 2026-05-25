@@ -23,14 +23,12 @@ const visibleMarkFilters = computed(() => (
   (props.markOptions || []).filter((item) => item && item.filterable !== false && item.value)
 ));
 
-const isAwaitingPack = computed(() => props.activeStatus === "awaiting_packaging");
-const isAwaitingDeliver = computed(() => props.activeStatus === "awaiting_deliver");
 const deliveryPrintViews = computed(() => (
   (props.printViews || []).filter((item) => item && item.value !== "all")
 ));
 
 function actionLabel(base, count) {
-  return count > 0 ? `${base}（${count}）` : base;
+  return count > 0 ? `${base} ${count}` : base;
 }
 
 function tabTone(value) {
@@ -49,7 +47,7 @@ function tabTone(value) {
 </script>
 
 <template>
-  <el-card shadow="never" class="orders-status-card">
+  <div class="orders-status-card">
     <div class="orders-status-strip">
       <div class="orders-status-topline">
         <div class="orders-status-grid">
@@ -67,33 +65,18 @@ function tabTone(value) {
           </button>
         </div>
 
-        <div v-if="isAwaitingDeliver || isAwaitingPack" class="orders-status-actions">
-          <div v-if="isAwaitingDeliver" class="orders-print-actions-group">
-            <div class="orders-chip-row orders-chip-row-single orders-chip-row-print">
-              <button
-                v-for="item in deliveryPrintViews"
-                :key="`print-${item.value}`"
-                type="button"
-                class="orders-chip-button orders-chip-button-print-slot"
-                :class="{ active: activePrintView === item.value }"
-                @click="emit('change-print-view', item.value)"
-              >
-                {{ item.label }}
-              </button>
-              <button
-                type="button"
-                class="orders-chip-button orders-chip-button-print-slot orders-chip-button-print-main"
-                :disabled="selectedCount <= 0"
-                @click="emit('bulk-print')"
-              >
-                {{ actionLabel("批量打印", selectedCount) }}
-              </button>
-            </div>
-          </div>
-
+        <div class="orders-status-actions">
+          <span class="orders-selected-count" :class="{ active: selectedCount > 0 }">已选 {{ selectedCount }}</span>
+          <button
+            type="button"
+            class="orders-chip-button orders-status-action-button orders-status-action-print"
+            :disabled="selectedCount <= 0"
+            @click="emit('bulk-print')"
+          >
+            {{ actionLabel("批量打印", selectedCount) }}
+          </button>
           <el-button
-            v-if="isAwaitingPack"
-            class="orders-status-action-slot"
+            class="orders-status-action-slot orders-status-action-prepare"
             type="primary"
             :disabled="selectedCount <= 0"
             @click="emit('bulk-prepare')"
@@ -103,8 +86,20 @@ function tabTone(value) {
         </div>
       </div>
 
-      <div v-if="visibleMarkFilters.length" class="orders-status-subgrid">
-        <div class="orders-chip-row orders-chip-row-single orders-chip-row-marks">
+      <div v-if="visibleMarkFilters.length || deliveryPrintViews.length" class="orders-status-subgrid">
+        <div v-if="deliveryPrintViews.length" class="orders-chip-row orders-chip-row-single orders-chip-row-print">
+          <button
+            v-for="item in deliveryPrintViews"
+            :key="`print-${item.value}`"
+            type="button"
+            class="orders-chip-button orders-chip-button-print-slot"
+            :class="{ active: activePrintView === item.value }"
+            @click="emit('change-print-view', item.value)"
+          >
+            {{ item.label }}
+          </button>
+        </div>
+        <div v-if="visibleMarkFilters.length" class="orders-chip-row orders-chip-row-single orders-chip-row-marks">
           <button
             v-for="item in visibleMarkFilters"
             :key="`mark-${item.value}`"
@@ -119,5 +114,5 @@ function tabTone(value) {
         </div>
       </div>
     </div>
-  </el-card>
+  </div>
 </template>

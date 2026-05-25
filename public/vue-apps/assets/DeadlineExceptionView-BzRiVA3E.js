@@ -1,1 +1,0 @@
-import{U as e,y as t}from"./runtime-dom.esm-bundler-C4Epdm9U.js";import{t as n}from"./ExceptionWorkbenchView-BliDNnrE.js";var r={__name:`DeadlineExceptionView`,setup(r){return(r,i)=>(e(),t(n,{view:`deadline`}))}};export{r as default};

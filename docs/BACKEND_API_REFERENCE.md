@@ -140,8 +140,8 @@ Runtime information about the current ERP instance.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `appVersion` | `string` | No | Application version or release marker. |
-| `databasePath` | `string` | No | Resolved SQLite database path. |
-| `backupPath` | `string` | No | Resolved backup directory path. |
+| `dbClient` | `string` | No | Active database client. |
+| `database` | `object` | No | Active MySQL database connection summary. |
 | `host` | `string` | No | Server bind host. |
 | `port` | `number` | No | Server bind port. |
 | `appBaseUrl` | `string` | No | Browser-facing base URL. |
@@ -1118,22 +1118,6 @@ Return current runtime and deployment information.
 - Auth: `authenticated`
 - Responses:
   - `200` `application/json` -> `SystemInfo`
-
-#### `POST /api/system/backup`
-
-Start a database backup task.
-
-- Auth: `authenticated`
-- Responses:
-  - `200` `application/json` -> `MutationOk`
-
-#### `POST /api/system/restore`
-
-Start a database restore task.
-
-- Auth: `authenticated`
-- Responses:
-  - `200` `application/json` -> `MutationOk`
 
 ### Auth
 

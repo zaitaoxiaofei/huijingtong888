@@ -3,19 +3,22 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
-import { applyFilterQuery, buildFilterQuery, dateText, isWithinDateRange, normalizeSearch, paginate } from "./inventory-utils.js";
+import { applyFilterQuery, buildFilterQuery, dateText } from "./inventory-utils.js";
 
 const route = useRoute();
 const router = useRouter();
 let syncingRoute = false;
+const listRequestGate = createLatestRequestGate();
 
 const loading = ref(false);
 const dialogVisible = ref(false);
 const dialogSubmitting = ref(false);
 const state = reactive({
   rows: [],
+  total: 0,
   filters: {
     query: "",
     dateFrom: "",
@@ -42,17 +45,7 @@ const filterDefaults = {
   pageSize: 30
 };
 
-const filteredRows = computed(() => {
-  const query = normalizeSearch(state.filters.query);
-  return state.rows.filter((row) => {
-    if (!isWithinDateRange(row.created_at || row.updated_at, state.filters.dateFrom, state.filters.dateTo)) return false;
-    if (!query) return true;
-    const haystack = [row.name, row.contact_person, row.contact_phone, row.wechat_id, row.business_note].map(normalizeSearch).join(" ");
-    return haystack.includes(query);
-  });
-});
-
-const pagedRows = computed(() => paginate(filteredRows.value, state.filters.page, state.filters.pageSize));
+const pagedRows = computed(() => state.rows);
 
 function applyRouteState() {
   syncingRoute = true;
@@ -72,10 +65,23 @@ function syncRouteQuery() {
 
 function handleSearch() {
   state.filters.page = 1;
+  loadPageData();
 }
 
 function handleReset() {
   Object.assign(state.filters, filterDefaults);
+  loadPageData();
+}
+
+function handlePageChange(page) {
+  state.filters.page = page;
+  loadPageData();
+}
+
+function handlePageSizeChange(size) {
+  state.filters.pageSize = size;
+  state.filters.page = 1;
+  loadPageData();
 }
 
 function openCreateDialog() {
@@ -142,14 +148,27 @@ async function deleteSupplier(row) {
 }
 
 async function loadPageData() {
+  const requestToken = listRequestGate.next();
   loading.value = true;
   try {
-    const rows = await apiClient.get("/api/suppliers");
-    state.rows = Array.isArray(rows) ? rows : [];
+    const params = new URLSearchParams({
+      paged: "1",
+      page: String(state.filters.page),
+      pageSize: String(state.filters.pageSize),
+      dateFrom: String(state.filters.dateFrom || ""),
+      dateTo: String(state.filters.dateTo || "")
+    });
+    const query = String(state.filters.query || "").trim();
+    if (query) params.set("query", query);
+    const rows = await apiClient.get(`/api/suppliers?${params.toString()}`);
+    if (!listRequestGate.isLatest(requestToken)) return;
+    state.rows = Array.isArray(rows?.rows) ? rows.rows : [];
+    state.total = Number(rows?.total || 0);
   } catch (error) {
+    if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "供应商配置加载失败");
   } finally {
-    loading.value = false;
+    if (listRequestGate.isLatest(requestToken)) loading.value = false;
   }
 }
 
@@ -200,12 +219,12 @@ onMounted(async () => {
     </div>
 
     <PageFooterPagination
-      :total="filteredRows.length"
+      :total="state.total"
       :page="state.filters.page"
       :page-size="state.filters.pageSize"
       :page-sizes="[30, 50, 100]"
-      @update:page="state.filters.page = $event"
-      @update:pageSize="state.filters.pageSize = $event; state.filters.page = 1"
+      @update:page="handlePageChange"
+      @update:pageSize="handlePageSizeChange"
     />
 
     <el-dialog v-model="dialogVisible" :title="dialog.id ? '编辑供应商' : '新增供应商'" width="760px" align-center class="erp-centered-dialog">

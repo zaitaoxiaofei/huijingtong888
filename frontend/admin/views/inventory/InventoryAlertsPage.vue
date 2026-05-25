@@ -3,18 +3,23 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
-import { applyFilterQuery, buildFilterQuery, dateText, integer, isWithinDateRange, normalizeSearch, paginate, stockStatusText, stockStatusType } from "./inventory-utils.js";
+import { applyFilterQuery, buildFilterQuery, dateText, integer, stockStatusText, stockStatusType } from "./inventory-utils.js";
 
 const route = useRoute();
 const router = useRouter();
 let syncingRoute = false;
+const listRequestGate = createLatestRequestGate();
+let shopsLoaded = false;
 
 const loading = ref(false);
 const syncLoading = ref(false);
 const state = reactive({
   rows: [],
+  total: 0,
   shops: [],
   filters: {
     query: "",
@@ -35,23 +40,7 @@ const filterDefaults = {
   pageSize: 30
 };
 
-const filteredRows = computed(() => {
-  const query = normalizeSearch(state.filters.query);
-  const shopId = String(state.filters.shopId || "all");
-  return state.rows.filter((row) => {
-    if (shopId !== "all") {
-      const matched = Array.isArray(row.skus) && row.skus.some((sku) => String(sku.shop_id || "") === shopId);
-      if (!matched) return false;
-    }
-    if (!isWithinDateRange(row.created_at, state.filters.dateFrom, state.filters.dateTo)) return false;
-    if (!query) return true;
-    const skuText = Array.isArray(row.skus) ? row.skus.map((sku) => `${sku.shop_name || ""} ${sku.ozon_sku || ""} ${sku.offer_id || ""}`).join(" ") : "";
-    const haystack = [row.product_name, row.inventory_id, row.suggestion, skuText].map(normalizeSearch).join(" ");
-    return haystack.includes(query);
-  });
-});
-
-const pagedRows = computed(() => paginate(filteredRows.value, state.filters.page, state.filters.pageSize));
+const pagedRows = computed(() => state.rows);
 
 function alertSkuSummary(row) {
   const skus = Array.isArray(row.skus) ? row.skus : [];
@@ -84,10 +73,23 @@ function syncRouteQuery() {
 
 function handleSearch() {
   state.filters.page = 1;
+  loadPageData();
 }
 
 function handleReset() {
   Object.assign(state.filters, filterDefaults);
+  loadPageData();
+}
+
+function handlePageChange(page) {
+  state.filters.page = page;
+  loadPageData();
+}
+
+function handlePageSizeChange(size) {
+  state.filters.pageSize = size;
+  state.filters.page = 1;
+  loadPageData();
 }
 
 function openProcurement(row) {
@@ -112,18 +114,34 @@ async function syncSingleProduct(row) {
 }
 
 async function loadPageData() {
+  const requestToken = listRequestGate.next();
   loading.value = true;
   try {
-    const [payload, shops] = await Promise.all([
-      apiClient.get("/api/stock-alerts"),
-      apiClient.get("/api/shops")
-    ]);
+    const params = new URLSearchParams({
+      paged: "1",
+      page: String(state.filters.page),
+      pageSize: String(state.filters.pageSize),
+      shopId: String(state.filters.shopId || "all"),
+      dateFrom: String(state.filters.dateFrom || ""),
+      dateTo: String(state.filters.dateTo || "")
+    });
+    const query = String(state.filters.query || "").trim();
+    if (query) params.set("query", query);
+    const requests = [apiClient.get(`/api/stock-alerts?${params.toString()}`)];
+    if (!shopsLoaded) requests.push(apiClient.get("/api/shops"));
+    const [payload, shops] = await Promise.all(requests);
+    if (!listRequestGate.isLatest(requestToken)) return;
     state.rows = Array.isArray(payload?.rows) ? payload.rows : [];
-    state.shops = Array.isArray(shops) ? shops : [];
+    state.total = Number(payload?.total || payload?.meta?.total || 0);
+    if (!shopsLoaded) {
+      state.shops = Array.isArray(shops) ? shops : [];
+      shopsLoaded = true;
+    }
   } catch (error) {
+    if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "库存预警加载失败");
   } finally {
-    loading.value = false;
+    if (listRequestGate.isLatest(requestToken)) loading.value = false;
   }
 }
 
@@ -152,7 +170,7 @@ onMounted(async () => {
         <el-table-column label="库存产品" min-width="280" fixed="left">
           <template #default="{ row }">
             <div class="product-cell">
-              <el-image v-if="row.image_url" :src="row.image_url" fit="cover" class="product-thumb" />
+              <ProductImagePreview :src="row.image_url" />
               <div class="cell-stack">
                 <strong>{{ row.product_name }}</strong>
                 <span class="muted-text">{{ row.inventory_id }}</span>
@@ -225,12 +243,12 @@ onMounted(async () => {
     </div>
 
     <PageFooterPagination
-      :total="filteredRows.length"
+      :total="state.total"
       :page="state.filters.page"
       :page-size="state.filters.pageSize"
       :page-sizes="[30, 50, 100]"
-      @update:page="state.filters.page = $event"
-      @update:pageSize="state.filters.pageSize = $event; state.filters.page = 1"
+      @update:page="handlePageChange"
+      @update:pageSize="handlePageSizeChange"
     />
   </div>
 </template>

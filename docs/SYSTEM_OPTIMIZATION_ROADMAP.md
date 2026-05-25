@@ -1,6 +1,6 @@
 # Ozon ERP System Optimization Roadmap
 
-Last updated: 2026-05-16
+Last updated: 2026-05-17
 
 ## 1. Document Goal
 
@@ -320,7 +320,21 @@ Do this only after:
 1. Define stable domain aggregates.
 2. Separate transactional tables from reporting tables.
 3. Mark immutable/frozen facts versus recalculable fields.
-4. Draft MySQL schema mapping after Phase 1-4 are materially complete.
+4. Standardize runtime database config and validation.
+5. Introduce a database adapter so new code no longer depends directly on SQLite APIs.
+6. Split schema, migration, bootstrap, and repair responsibilities out of `src/db.js`.
+7. Audit and replace SQLite-specific SQL patterns.
+8. Draft MySQL schema mapping after Phase 1-4 are materially complete.
+
+### Current execution note
+
+The current preparation stream has already completed the dual-database config contract and started real extraction work:
+
+- `src/config.js` now carries the dual-db config contract while SQLite remains the default runtime.
+- `src/database-adapter.js` is in use for session, configuration, and selected orders/inventory write paths.
+- `src/database-client.js`, `src/db-bootstrap.js`, and `src/db-repairs.js` have started taking over runtime client, bootstrap, and safe repair responsibilities from `src/db.js`.
+
+The next concrete step in this roadmap phase is schema and migration extraction, not MySQL driver cutover.
 
 ### Recommended Domain Categories
 
@@ -355,12 +369,22 @@ Reporting/snapshot tables:
 
 - MySQL migration design draft
 - Table ownership map
+- Database adapter boundary
+- SQL compatibility checklist
 - ORM evaluation notes
 
 ### Acceptance Criteria
 
 - MySQL migration scope is explicit and phased.
+- SQLite remains the stable default runtime while preparation work is in progress.
+- The backend has a defined path away from `node:sqlite` lock-in.
 - No direct "big bang" rewrite is required.
+
+### Implementation Note
+
+Execution details for this phase are maintained in:
+
+- `docs/MYSQL_PREPARATION_PLAN.md`
 
 ## 6. Suggested Execution Order
 

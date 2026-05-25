@@ -2,15 +2,20 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
+import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 
 const loading = ref(false);
 const dialogVisible = ref(false);
 const dialogSubmitting = ref(false);
+const listRequestGate = createLatestRequestGate();
+let peopleLoaded = false;
 
 const state = reactive({
   rows: [],
   people: [],
+  total: 0,
   filters: {
     query: "",
     status: "all",
@@ -23,30 +28,7 @@ const dialog = reactive({
   form: createDefaultForm()
 });
 
-const filteredRows = computed(() => {
-  const query = String(state.filters.query || "").trim().toLowerCase();
-  return state.rows.filter((row) => {
-    if (state.filters.status !== "all" && row.status !== state.filters.status) return false;
-    if (!query) return true;
-
-    const haystack = [
-      row.purchase_order_no,
-      row.product_name,
-      row.person_name,
-      row.note,
-      row.purchase_url
-    ].map((item) => String(item || "").toLowerCase()).join(" ");
-
-    return haystack.includes(query);
-  });
-});
-
-const pagedRows = computed(() => {
-  const start = (state.filters.page - 1) * state.filters.pageSize;
-  return filteredRows.value.slice(start, start + state.filters.pageSize);
-});
-
-const total = computed(() => filteredRows.value.length);
+const total = computed(() => state.total);
 
 function createDefaultForm() {
   return {
@@ -72,8 +54,7 @@ function numberText(value) {
 }
 
 function dateText(value) {
-  if (!value) return "-";
-  return new Date(value).toLocaleString("zh-CN", { hour12: false });
+  return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
 }
 
 function statusTagType(status) {
@@ -90,21 +71,25 @@ function statusText(status) {
 
 function handleSearch() {
   state.filters.page = 1;
+  loadInboundRecords();
 }
 
 function handleReset() {
   state.filters.query = "";
   state.filters.status = "all";
   state.filters.page = 1;
+  loadInboundRecords();
 }
 
 function handlePageChange(page) {
   state.filters.page = page;
+  loadInboundRecords();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
+  loadInboundRecords();
 }
 
 function openCreateDialog() {
@@ -182,18 +167,54 @@ async function deleteRow(row) {
 }
 
 async function loadPageData() {
+  const requestToken = listRequestGate.next();
   loading.value = true;
   try {
-    const [rows, people] = await Promise.all([
-      apiClient.get("/api/inbound-records"),
-      apiClient.get("/api/people")
-    ]);
-    state.rows = Array.isArray(rows) ? rows : [];
-    state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
+    const requests = [apiClient.get(`/api/inbound-records?${inboundQueryString()}`)];
+    if (!peopleLoaded) requests.push(apiClient.get("/api/people"));
+    const [result, people] = await Promise.all(requests);
+    if (!listRequestGate.isLatest(requestToken)) return;
+    applyInboundResult(result);
+    if (!peopleLoaded) {
+      state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
+      peopleLoaded = true;
+    }
   } catch (error) {
+    if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "加载入库流水失败");
   } finally {
-    loading.value = false;
+    if (listRequestGate.isLatest(requestToken)) loading.value = false;
+  }
+}
+
+function inboundQueryString() {
+  const params = new URLSearchParams({
+    paged: "1",
+    page: String(state.filters.page),
+    pageSize: String(state.filters.pageSize),
+    status: state.filters.status || "all",
+    query: String(state.filters.query || "").trim()
+  });
+  return params.toString();
+}
+
+function applyInboundResult(result) {
+  state.rows = Array.isArray(result?.rows) ? result.rows : [];
+  state.total = Number(result?.total || 0);
+}
+
+async function loadInboundRecords() {
+  const requestToken = listRequestGate.next();
+  loading.value = true;
+  try {
+    const result = await apiClient.get(`/api/inbound-records?${inboundQueryString()}`);
+    if (!listRequestGate.isLatest(requestToken)) return;
+    applyInboundResult(result);
+  } catch (error) {
+    if (!listRequestGate.isLatest(requestToken)) return;
+    ElMessage.error(error.message || "加载入库流水失败");
+  } finally {
+    if (listRequestGate.isLatest(requestToken)) loading.value = false;
   }
 }
 
@@ -239,7 +260,7 @@ onMounted(loadPageData);
       </div>
 
       <div class="list-wrap">
-        <el-table v-loading="loading" :data="pagedRows" height="100%" stripe border class="erp-data-table inbound-table">
+        <el-table v-loading="loading" :data="state.rows" height="100%" stripe border class="erp-data-table inbound-table">
           <el-table-column prop="purchase_order_no" label="采购单号" width="160" fixed="left" />
           <el-table-column prop="product_name" label="商品名称" min-width="240" />
           <el-table-column prop="person_name" label="申请人" width="120" />

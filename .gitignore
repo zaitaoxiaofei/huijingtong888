@@ -1,7 +1,10 @@
 # Local runtime logs
 .workbuddy/
 node_modules/
+dist/
 *.log
+__pycache__/
+*.pyc
 
 # Local database files
 *.db
@@ -16,6 +19,13 @@ src/data/*.sqlite-wal
 backups/
 backups-test/
 .restore-temp-*/
+uploads/
+public/uploads/
+public/vue-apps/.vite/
+*.bak-*
+uploads/ai-generated/
+uploads/ai-cropped/
+uploads/temp/
 
 # Local environment secrets
 .env

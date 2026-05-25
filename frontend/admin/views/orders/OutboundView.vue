@@ -3,16 +3,26 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { apiClient } from "../../utils/api";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import { shanghaiDateKey, shanghaiMonthStart } from "../../utils/shanghai-date";
 
 const loading = ref(false);
 
 const state = reactive({
   rows: [],
   shops: [],
+  total: 0,
+  summary: {
+    totalRows: 0,
+    totalOrders: 0,
+    totalQuantity: 0,
+    totalAmount: 0,
+    cancelledCount: 0
+  },
   filters: {
     dateFrom: monthStartText(),
     dateTo: todayText(),
     shopId: "all",
+    status: "all",
     query: "",
     page: 1,
     pageSize: 30
@@ -27,6 +37,7 @@ const filteredRows = computed(() => {
     if (state.filters.dateFrom && dateValue < state.filters.dateFrom) return false;
     if (state.filters.dateTo && dateValue > state.filters.dateTo) return false;
     if (state.filters.shopId !== "all" && String(row.shop_id || "") !== String(state.filters.shopId)) return false;
+    if (state.filters.status !== "all" && String(row.status || "") !== state.filters.status) return false;
     if (!query) return true;
     const haystack = [
       row.order_ref,
@@ -46,12 +57,14 @@ const pagedRows = computed(() => {
   return filteredRows.value.slice(start, start + state.filters.pageSize);
 });
 
-const total = computed(() => filteredRows.value.length);
+const serverPagedMode = computed(() => state.total > 0 || state.summary.totalRows > 0);
+const tableRows = computed(() => state.rows);
+const total = computed(() => serverPagedMode.value ? state.total : filteredRows.value.length);
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / Math.max(1, state.filters.pageSize))));
-const totalOrders = computed(() => new Set(filteredRows.value.map((row) => row.order_ref).filter(Boolean)).size);
-const cancelledCount = computed(() => filteredRows.value.filter((row) => row.status === "cancelled").length);
-const totalQty = computed(() => filteredRows.value.reduce((sum, row) => sum + Number(row.quantity || 0), 0));
-const totalAmount = computed(() => filteredRows.value.reduce((sum, row) => sum + Number(row.order_amount || 0), 0));
+const totalOrders = computed(() => state.summary.totalOrders || new Set(filteredRows.value.map((row) => row.order_ref).filter(Boolean)).size);
+const cancelledCount = computed(() => state.summary.cancelledCount || filteredRows.value.filter((row) => row.status === "cancelled").length);
+const totalQty = computed(() => state.summary.totalQuantity || filteredRows.value.reduce((sum, row) => sum + Number(row.quantity || 0), 0));
+const totalAmount = computed(() => state.summary.totalAmount || filteredRows.value.reduce((sum, row) => sum + Number(row.order_amount || 0), 0));
 
 const summaryCards = computed(() => ([
   { label: "出库明细", value: total.value, suffix: "当前筛选结果" },
@@ -71,6 +84,11 @@ const filterSummary = computed(() => {
   } else {
     parts.push("全部店铺");
   }
+  if (state.filters.status !== "all") {
+    parts.push(statusText(state.filters.status));
+  } else {
+    parts.push("全部状态");
+  }
   if (state.filters.query.trim()) {
     parts.push(`关键词：${state.filters.query.trim()}`);
   }
@@ -82,13 +100,11 @@ function normalizeSearch(value) {
 }
 
 function todayText() {
-  return new Date().toISOString().slice(0, 10);
+  return shanghaiDateKey();
 }
 
 function monthStartText() {
-  const date = new Date();
-  date.setDate(1);
-  return date.toISOString().slice(0, 10);
+  return shanghaiMonthStart();
 }
 
 function money(value) {
@@ -142,34 +158,81 @@ function imageSource(row) {
 
 function handleSearch() {
   state.filters.page = 1;
+  loadOutboundRecords();
 }
 
 function handleReset() {
   state.filters.dateFrom = monthStartText();
   state.filters.dateTo = todayText();
   state.filters.shopId = "all";
+  state.filters.status = "all";
   state.filters.query = "";
   state.filters.page = 1;
   state.filters.pageSize = 30;
+  loadOutboundRecords();
 }
 
 function handlePageChange(page) {
   state.filters.page = page;
+  loadOutboundRecords();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
+  loadOutboundRecords();
+}
+
+function outboundQueryString() {
+  const params = new URLSearchParams({
+    paged: "1",
+    page: String(state.filters.page),
+    pageSize: String(state.filters.pageSize),
+    dateFrom: state.filters.dateFrom || "",
+    dateTo: state.filters.dateTo || "",
+    shopId: state.filters.shopId || "all",
+    status: state.filters.status || "all",
+    query: state.filters.query.trim()
+  });
+  return params.toString();
+}
+
+function applyOutboundResult(result) {
+  const legacyRows = Array.isArray(result) ? result : null;
+  const legacyStart = (state.filters.page - 1) * state.filters.pageSize;
+  const rows = legacyRows
+    ? result.slice(legacyStart, legacyStart + state.filters.pageSize)
+    : (Array.isArray(result?.rows) ? result.rows : []);
+  state.rows = rows;
+  state.total = legacyRows ? result.length : Number(result?.total || 0);
+  state.summary = {
+    totalRows: legacyRows ? result.length : Number(result?.summary?.totalRows || 0),
+    totalOrders: legacyRows ? 0 : Number(result?.summary?.totalOrders || 0),
+    totalQuantity: legacyRows ? 0 : Number(result?.summary?.totalQuantity || 0),
+    totalAmount: legacyRows ? 0 : Number(result?.summary?.totalAmount || 0),
+    cancelledCount: legacyRows ? 0 : Number(result?.summary?.cancelledCount || 0)
+  };
+}
+
+async function loadOutboundRecords() {
+  loading.value = true;
+  try {
+    applyOutboundResult(await apiClient.get(`/api/outbound-records?${outboundQueryString()}`));
+  } catch (error) {
+    ElMessage.error(error.message || "鍑哄簱娴佹按鍔犺浇澶辫触");
+  } finally {
+    loading.value = false;
+  }
 }
 
 async function loadPageData() {
   loading.value = true;
   try {
-    const [rows, shops] = await Promise.all([
-      apiClient.get("/api/outbound-records"),
+    const [result, shops] = await Promise.all([
+      apiClient.get(`/api/outbound-records?${outboundQueryString()}`),
       apiClient.get("/api/shops")
     ]);
-    state.rows = Array.isArray(rows) ? rows : [];
+    applyOutboundResult(result);
     state.shops = Array.isArray(shops) ? shops : [];
   } catch (error) {
     ElMessage.error(error.message || "出库流水加载失败");
@@ -183,7 +246,7 @@ onMounted(loadPageData);
 
 <template>
   <div class="page-stack outbound-page">
-    <section class="page-hero outbound-hero">
+    <section v-if="false" class="page-hero outbound-hero">
       <div>
         <h2>出库流水</h2>
       </div>
@@ -192,9 +255,9 @@ onMounted(loadPageData);
       </div>
     </section>
 
-    <div class="outbound-layout">
+    <div class="outbound-table-section">
       <el-card shadow="never" class="page-card outbound-card">
-        <template #header>
+        <template #header v-if="false">
           <div class="page-card-header">
             <div>
               <strong>出库流水</strong>
@@ -229,6 +292,13 @@ onMounted(loadPageData);
                 <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
               </el-select>
             </el-form-item>
+            <el-form-item label="状态">
+              <el-select v-model="state.filters.status" style="width: 160px" @change="handleSearch">
+                <el-option label="全部状态" value="all" />
+                <el-option label="已扣库存" value="deducted" />
+                <el-option label="已回退库存" value="cancelled" />
+              </el-select>
+            </el-form-item>
             <el-form-item label="关键词">
               <el-input
                 v-model="state.filters.query"
@@ -246,7 +316,7 @@ onMounted(loadPageData);
         </div>
 
         <div class="list-wrap">
-          <el-table v-loading="loading" :data="pagedRows" stripe border class="erp-data-table">
+          <el-table v-loading="loading" :data="tableRows" height="100%" stripe border class="erp-data-table">
             <el-table-column label="出库时间" width="170" fixed="left">
               <template #default="{ row }">{{ dateTimeText(row.outbound_time || row.created_at) }}</template>
             </el-table-column>
@@ -262,16 +332,21 @@ onMounted(loadPageData);
 
             <el-table-column label="订单详情" min-width="280">
               <template #default="{ row }">
-                <div class="outbound-detail-cell">
-                  <el-image
-                    v-if="imageSource(row)"
-                    :src="imageSource(row)"
-                    fit="cover"
-                    class="outbound-thumb"
-                    preview-teleported
-                    :preview-src-list="[imageSource(row)]"
-                  />
-                  <div class="outbound-info-block">
+                <div class="erp-product-media-cell">
+                  <div class="erp-product-thumb-wrap">
+                    <div class="erp-product-thumb" style="width: 48px; min-width: 48px; max-width: 48px; height: 64px; min-height: 64px; max-height: 64px;">
+                      <img
+                        v-if="imageSource(row)"
+                        :src="imageSource(row)"
+                        class="erp-product-thumb-image"
+                        style="width: 48px; min-width: 48px; max-width: 48px; height: 64px; min-height: 64px; max-height: 64px; object-fit: contain; object-position: center center; display: block; flex: 0 0 48px;"
+                        alt=""
+                        loading="lazy"
+                      />
+                      <div v-else class="erp-product-thumb-empty">无图</div>
+                    </div>
+                  </div>
+                  <div class="erp-product-copy outbound-info-block">
                     <strong>{{ row.ozon_sku || "-" }}</strong>
                     <span>{{ row.product_name || "-" }}</span>
                   </div>
@@ -291,16 +366,21 @@ onMounted(loadPageData);
 
             <el-table-column label="库存产品" min-width="280">
               <template #default="{ row }">
-                <div class="outbound-detail-cell">
-                  <el-image
-                    v-if="row.product_image_url"
-                    :src="row.product_image_url"
-                    fit="cover"
-                    class="outbound-thumb"
-                    preview-teleported
-                    :preview-src-list="[row.product_image_url]"
-                  />
-                  <div class="outbound-info-block">
+                <div class="erp-product-media-cell">
+                  <div class="erp-product-thumb-wrap">
+                    <div class="erp-product-thumb" style="width: 48px; min-width: 48px; max-width: 48px; height: 64px; min-height: 64px; max-height: 64px;">
+                      <img
+                        v-if="row.product_image_url"
+                        :src="row.product_image_url"
+                        class="erp-product-thumb-image"
+                        style="width: 48px; min-width: 48px; max-width: 48px; height: 64px; min-height: 64px; max-height: 64px; object-fit: contain; object-position: center center; display: block; flex: 0 0 48px;"
+                        alt=""
+                        loading="lazy"
+                      />
+                      <div v-else class="erp-product-thumb-empty">无图</div>
+                    </div>
+                  </div>
+                  <div class="erp-product-copy outbound-info-block">
                     <strong>{{ row.product_code || "-" }}</strong>
                     <span>{{ row.product_name || "-" }}</span>
                   </div>
@@ -331,9 +411,9 @@ onMounted(loadPageData);
         </div>
       </el-card>
 
-      <aside class="outbound-side-panel">
+      <aside v-if="false" class="outbound-side-panel">
         <el-card shadow="never" class="outbound-summary-card">
-          <template #header>
+          <template #header v-if="false">
             <div class="page-card-header">
               <div>
                 <strong>统计信息</strong>
@@ -351,19 +431,18 @@ onMounted(loadPageData);
           </div>
         </el-card>
       </aside>
-    </div>
-
-    <div class="outbound-page-footer">
-      <PageFooterPagination
-        class="outbound-footer"
-        :total="total"
-        :page="state.filters.page"
-        :page-size="state.filters.pageSize"
-        :total-pages="totalPages"
-        :page-sizes="[30, 100, 1000, 10000]"
-        @update:page="handlePageChange"
-        @update:pageSize="handlePageSizeChange"
-      />
+      <div class="outbound-page-footer">
+        <PageFooterPagination
+          class="outbound-footer"
+          :total="total"
+          :page="state.filters.page"
+          :page-size="state.filters.pageSize"
+          :total-pages="totalPages"
+          :page-sizes="[30, 50, 100]"
+          @update:page="handlePageChange"
+          @update:pageSize="handlePageSizeChange"
+        />
+      </div>
     </div>
   </div>
 </template>
@@ -372,12 +451,20 @@ onMounted(loadPageData);
 .outbound-page {
   min-height: 100%;
   height: 100%;
+  max-width: 100%;
   overflow: hidden;
+  gap: 8px;
+}
+
+.outbound-hero,
+.outbound-card :deep(.el-card__header),
+.outbound-summary-card :deep(.el-card__header) {
+  display: none;
 }
 
 .outbound-page-footer {
   flex: none;
-  margin-top: 8px;
+  margin-top: 0;
 }
 
 .outbound-hero {
@@ -388,12 +475,13 @@ onMounted(loadPageData);
   margin-bottom: 0;
 }
 
-.outbound-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
-  gap: 12px;
+.outbound-table-section {
+  display: flex;
+  flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
+  overflow: hidden;
+  gap: 2px;
 }
 
 .outbound-card {
@@ -401,6 +489,8 @@ onMounted(loadPageData);
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  flex: 1 1 auto;
+  padding: 0;
 }
 
 .outbound-card :deep(.el-card__body) {
@@ -409,6 +499,7 @@ onMounted(loadPageData);
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  padding: 0;
 }
 
 .outbound-filter-panel {
@@ -417,7 +508,7 @@ onMounted(loadPageData);
 }
 
 .outbound-side-panel {
-  min-height: 0;
+  display: none;
 }
 
 .outbound-summary-card {
@@ -452,34 +543,78 @@ onMounted(loadPageData);
 }
 
 .outbound-footer {
-  border: 1px solid rgba(203, 213, 225, 0.8);
-  border-radius: 12px;
-  background: #fff;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
   box-shadow: none;
-  padding: 10px 14px;
+  padding: 0;
+  min-height: 28px;
+}
+
+.outbound-footer :deep(.erp-footer-pagination__meta) {
+  color: #46556c;
+  font-size: 11px;
+  line-height: 24px;
+}
+
+.outbound-footer :deep(.erp-footer-pagination__actions) {
+  gap: 6px;
+}
+
+.outbound-footer :deep(.el-pagination) {
+  --el-pagination-bg-color: transparent;
+  --el-pagination-button-bg-color: #f8fafc;
+  --el-pagination-button-disabled-bg-color: #f1f5f9;
+  --el-pagination-hover-color: #2563eb;
+  --el-pagination-button-color: #334155;
+  --el-pagination-button-width: 26px;
+  --el-pagination-button-height: 26px;
+  font-weight: 500;
+  font-size: 11px;
+}
+
+.outbound-footer :deep(.el-pagination button),
+.outbound-footer :deep(.el-pagination .el-pager li) {
+  min-width: 26px;
+  height: 26px;
+  border: 1px solid rgba(203, 213, 225, 0.85);
+  border-radius: 6px;
+  background: #f8fafc;
+  box-shadow: none;
+}
+
+.outbound-footer :deep(.el-pagination .el-pager li.is-active) {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #fff;
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.22);
+}
+
+.outbound-footer :deep(.erp-page-size) {
+  gap: 4px;
+  font-size: 11px;
+}
+
+.outbound-footer :deep(.erp-page-size__select) {
+  width: 84px;
+}
+
+.outbound-footer :deep(.erp-page-size__select .el-select__wrapper) {
+  min-height: 26px;
 }
 
 .list-wrap {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.9);
 }
 
-.outbound-detail-cell {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-
-.outbound-thumb {
-  width: 52px;
-  height: 52px;
-  flex: none;
-  border-radius: 10px;
-  border: 1px solid var(--erp-border);
-  background: #f8fafc;
-  overflow: hidden;
+.list-wrap :deep(.el-table),
+.list-wrap :deep(.el-table__inner-wrapper),
+.list-wrap :deep(.el-table__body-wrapper) {
+  height: 100%;
 }
 
 .outbound-info-block {
@@ -506,7 +641,7 @@ onMounted(loadPageData);
 }
 
 @media (max-width: 1320px) {
-  .outbound-layout {
+  .outbound-table-section {
     grid-template-columns: 1fr;
   }
 

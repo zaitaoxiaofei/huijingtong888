@@ -2,9 +2,22 @@ import http from "node:http";
 import { Buffer } from "node:buffer";
 import path from "node:path";
 import { config } from "./config.js";
-import { initDb } from "./db.js";
 import { calculateCelFbsPricing } from "./celRates.js";
-import * as services from "./services/index.js";
+import { mysqlRuntimeServices } from "./services/mysql-runtime-services.js";
+import {
+  currentExchangeRateMysql,
+  exchangeRatesMysql,
+  rawOzonOrdersMysql,
+  inboundRecordsMysql,
+  inventoryMysql,
+  inventoryCurrentMysql,
+  outboundRecordsMysql,
+  orderExceptionsMysql,
+  profitItemsMysql,
+  stockAlertsMysql,
+  stockWarehouseRulesMysql,
+  updateExchangeRateMysql
+} from "./services/mysql-cutover.js";
 import { readForm, readJson, isRequestCancelledError } from "./http/request.js";
 import { clearCookie, html, json, notFound, setCookie, text, writeHead } from "./http/response.js";
 import { createStaticHandler } from "./http/static.js";
@@ -14,7 +27,14 @@ import { createCatalogRoutes, handleCatalogRestRoute } from "./server/routes/cat
 import { createOrderRoutes, handleOrderRestRoute } from "./server/routes/orders.js";
 import { createOperationsRoutes, handleOperationsRestRoute } from "./server/routes/operations.js";
 import { createProfitRoutes } from "./server/routes/profit.js";
+import { createAdvertisingRoutes } from "./server/routes/advertising.js";
 import { createSyncRoutes } from "./server/routes/sync.js";
+import { createListingAutomationRoutes, handleListingAutomationRestRoute } from "./server/routes/listingAutomation.js";
+import { createMultiShopPublishRoutes, handleMultiShopPublishRestRoute } from "./server/routes/multiShopPublish.js";
+import { createAssetVariantEngineRoutes, handleAssetVariantEngineRestRoute } from "./server/routes/assetVariantEngine.js";
+import { createAiImageRoutes, handleAiImageRestRoute } from "./server/routes/aiImageRoutes.js";
+import { createAiImageGeneratorRoutes, handleAiImageGeneratorRestRoute } from "./server/routes/tools/aiImageGenerator.js";
+import { createImageCropperRoutes, handleImageCropperRestRoute } from "./server/routes/tools/imageCropper.js";
 import {
   SITE_ACCESS_LOGIN_PATH,
   SITE_ACCESS_LOGOUT_PATH,
@@ -26,15 +46,21 @@ import {
   getSiteAccessCookieMaxAgeSeconds,
   getSiteAccessCookieName,
   getSiteAccessPassword,
+  isDirectLocalRequest,
   isSiteAccessAuthorized,
   normalizeNextPath,
   renderSiteAccessPage,
   siteAccessUsesSecureCookie
 } from "./server/access.js";
-import { runDataBackup, startDataRestore, systemInfo } from "./server/maintenance.js";
+import { systemInfo } from "./server/maintenance.js";
 import { checkDailyPurchaseNotification } from "./server/notifications.js";
+import { shanghaiDateKey } from "./shanghai-time.js";
 
-initDb();
+const services = mysqlRuntimeServices;
+
+if (!process.env.OPENAI_API_KEY) {
+  console.warn("OpenAI API Key 未配置：AI套图生成中心将显示未配置状态，生成接口不可用。");
+}
 
 const publicDir = path.resolve("public");
 const serveStatic = createStaticHandler(publicDir);
@@ -44,8 +70,15 @@ const routeModules = {
   ...createCatalogRoutes({ services, readJson }),
   ...createOperationsRoutes({ services, readJson }),
   ...createProfitRoutes({ services, readJson }),
+  ...createAdvertisingRoutes({ services, readJson }),
   ...createOrderRoutes({ services, readJson, notFound, writeHead, json }),
-  ...createSyncRoutes({ services, readJson, syncExceptionWorkbenchOrders })
+  ...createSyncRoutes({ services, readJson, syncExceptionWorkbenchOrders }),
+  ...createListingAutomationRoutes({ services, readJson }),
+  ...createMultiShopPublishRoutes({ services, readJson }),
+  ...createAssetVariantEngineRoutes({ services, readJson }),
+  ...createAiImageRoutes({ readJson }),
+  ...createAiImageGeneratorRoutes({ readJson }),
+  ...createImageCropperRoutes({ readJson })
 };
 
 // 保持现有 API 不变，但把“简单直连型接口”集中成一个表；
@@ -55,25 +88,38 @@ const routeModules = {
 const routes = {
   ...routeModules,
   "GET /api/system/info": () => systemInfo(),
-  "POST /api/system/backup": () => runDataBackup(),
-  "POST /api/system/restore": () => startDataRestore(),
+  "GET /api/ai-provider/config": () => services.aiProviderConfig(),
+  "GET /api/ai-provider/presets": () => services.aiProviderPresets(),
+  "POST /api/ai-provider/config": async (req) => services.updateAiProviderConfig(await readJson(req), req._session?.person_id),
+  "POST /api/ai-provider/test": async (req) => services.testAiProviderConfig(await readJson(req)),
+  "POST /api/ai-provider/chat": async (req) => services.chatWithAiProvider(await readJson(req)),
   "GET /api/dashboard": () => services.dashboard(),
-  "GET /api/exchange-rate/current": () => services.currentExchangeRate(),
-  "GET /api/exchange-rates": () => services.exchangeRates(),
-  "GET /api/inventory": () => services.inventory(),
-  "GET /api/stock-alerts": () => services.stockAlerts(),
-  "GET /api/stock-warehouse-rules": () => services.stockWarehouseRules(),
-  "GET /api/erp/inventory-current": () => services.inventoryCurrent(),
-  "GET /api/erp/raw-orders": () => services.rawOzonOrders(),
-  "GET /api/erp/profit-items": () => services.profitItems(),
-  "GET /api/erp/order-exceptions": () => services.orderExceptions(),
-  "POST /api/exchange-rate": async (req) => services.updateExchangeRate(await readJson(req)),
+  "GET /api/exchange-rate/current": () => currentExchangeRateMysql(),
+  "GET /api/exchange-rates": () => exchangeRatesMysql(),
+  "GET /api/inventory": () => inventoryMysql(),
+  "GET /api/stock-alerts": (req) => stockAlertsMysql(req.query || {}),
+  "GET /api/stock-warehouse-rules": () => stockWarehouseRulesMysql(),
+  "GET /api/erp/inventory-current": () => inventoryCurrentMysql(),
+  "GET /api/erp/raw-orders": () => rawOzonOrdersMysql(),
+  "GET /api/erp/profit-items": () => profitItemsMysql(),
+  "GET /api/erp/order-exceptions": () => orderExceptionsMysql(),
+  "POST /api/exchange-rate": async (req) => updateExchangeRateMysql(await readJson(req)),
   "POST /api/pricing/cel-fbs": async (req) => calculateCelFbsPricing(await readJson(req)),
 };
 
 cleanExpiredSessions();
 setInterval(cleanExpiredSessions, 3600 * 1000);
 let backgroundOrderSyncRunning = false;
+let backgroundAnalyticsRefreshRunning = false;
+let backgroundAdvertisingSyncRunning = false;
+const BACKGROUND_ORDER_SYNC_INTERVAL_MS = Math.max(1, Number(config.backgroundOrderSyncIntervalMinutes || 30)) * 60 * 1000;
+const BACKGROUND_ORDER_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundOrderSyncInitialDelaySeconds || 180)) * 1000;
+const BACKGROUND_ORDER_SYNC_DAYS = Math.max(1, Number(config.backgroundOrderSyncDays || 90));
+const BACKGROUND_ANALYTICS_REFRESH_INTERVAL_MS = Math.max(1, Number(config.backgroundAnalyticsRefreshIntervalMinutes || 60)) * 60 * 1000;
+const BACKGROUND_ANALYTICS_REFRESH_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAnalyticsRefreshInitialDelaySeconds || 30)) * 1000;
+const BACKGROUND_ADVERTISING_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundAdvertisingSyncIntervalMinutes || 60)) * 60 * 1000;
+const BACKGROUND_ADVERTISING_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAdvertisingSyncInitialDelaySeconds || 300)) * 1000;
+const BACKGROUND_ADVERTISING_SYNC_DAYS = Math.max(1, Number(config.backgroundAdvertisingSyncDays || 14));
 
 async function handleSiteAccess(req, res, url) {
   const nextPath = normalizeNextPath(url.searchParams.get("next") || "/");
@@ -174,11 +220,140 @@ async function handleRestRoute(req, res, url, parts) {
     return operationsRestHandled;
   }
 
+  const listingAutomationRestHandled = await handleListingAutomationRestRoute({
+    req,
+    res,
+    parts,
+    services,
+    readJson,
+    json
+  });
+  if (listingAutomationRestHandled !== false) {
+    return listingAutomationRestHandled;
+  }
+
+  const multiShopPublishRestHandled = await handleMultiShopPublishRestRoute({
+    req,
+    res,
+    parts,
+    services,
+    readJson,
+    json,
+    notFound,
+    writeHead
+  });
+  if (multiShopPublishRestHandled !== false) {
+    return multiShopPublishRestHandled;
+  }
+
+  const assetVariantHandled = await handleAssetVariantEngineRestRoute({
+    req,
+    res,
+    parts,
+    services,
+    json,
+    notFound,
+    writeHead
+  });
+  if (assetVariantHandled !== false) {
+    return assetVariantHandled;
+  }
+
+  const imageCropperRestHandled = await handleImageCropperRestRoute({
+    req,
+    res,
+    parts,
+    json,
+    notFound,
+    writeHead
+  });
+  if (imageCropperRestHandled !== false) {
+    return imageCropperRestHandled;
+  }
+
+  const aiImageRestHandled = await handleAiImageRestRoute({
+    req,
+    res,
+    parts,
+    json,
+    notFound,
+    writeHead
+  });
+  if (aiImageRestHandled !== false) {
+    return aiImageRestHandled;
+  }
+
+  const aiImageGeneratorRestHandled = await handleAiImageGeneratorRestRoute({
+    req,
+    res,
+    parts,
+    json,
+    notFound,
+    writeHead
+  });
+  if (aiImageGeneratorRestHandled !== false) {
+    return aiImageGeneratorRestHandled;
+  }
+
   return false;
 }
 
-function sendProductImage(res, productId) {
-  const image = services.productImage(productId);
+function localPluginCorsHeaders(req) {
+  const origin = String(req.headers.origin || "*");
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type,x-tenant-id,Authorization",
+    "Access-Control-Max-Age": "86400",
+    "Vary": "Origin"
+  };
+}
+
+function localPluginJson(req, res, payload, status = 200) {
+  const body = JSON.stringify(payload);
+  writeHead(res, status, {
+    ...localPluginCorsHeaders(req),
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Cache-Control": "no-store"
+  });
+  res.end(body);
+}
+
+async function handleLocalPluginRoute(req, res, parts) {
+  if (parts[0] !== "api" || parts[1] !== "local-plugin") return false;
+
+  if (req.method === "OPTIONS") {
+    writeHead(res, 204, localPluginCorsHeaders(req));
+    res.end();
+    return true;
+  }
+
+  if (!isDirectLocalRequest(req)) {
+    return localPluginJson(req, res, { success: false, error: "local plugin endpoint only accepts direct localhost requests" }, 403);
+  }
+
+  if (parts[2] === "collected-product-details" && req.method === "POST") {
+    const body = await readJson(req);
+    const detail = await services.saveListingCollectedProductDetail({
+      ...body,
+      tenant_id: req.headers["x-tenant-id"] || body?.tenant_id || "admin"
+    }, null);
+    return localPluginJson(req, res, { success: true, data: detail, id: detail?.id, detail });
+  }
+
+  if (parts[2] === "collected-product-details" && parts[3] && req.method === "GET") {
+    const tenantId = String(req.headers["x-tenant-id"] || "admin");
+    const detail = await services.getListingCollectedProductDetail(parts[3], tenantId);
+    if (!detail) return localPluginJson(req, res, { success: false, error: "Collected product detail not found" }, 404);
+    return localPluginJson(req, res, { success: true, data: detail, id: detail.id, detail });
+  }
+
+  return false;
+}
+
+async function sendProductImage(res, productId, imageLoader = null) {
+  const image = imageLoader ? await imageLoader(productId) : await services.productImage(productId);
   if (!image) return notFound(res);
   const match = String(image).match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
   if (!match) return json(res, { error: "Unsupported image" }, 415);
@@ -196,7 +371,9 @@ async function sendRemoteImage(req, res, url) {
   if (!/^https?:\/\//i.test(target)) return json(res, { error: "Invalid image url" }, 400);
 
   const controller = new AbortController();
-  const onClose = () => controller.abort(new Error("client disconnected"));
+  const onClose = () => {
+    if (!res.writableEnded && !controller.signal.aborted) controller.abort();
+  };
   req.on("aborted", onClose);
   res.on("close", onClose);
 
@@ -218,6 +395,9 @@ async function sendRemoteImage(req, res, url) {
       "Cache-Control": "private, max-age=3600"
     });
     return res.end(buffer);
+  } catch (error) {
+    if (controller.signal.aborted || error?.name === "AbortError") return;
+    throw error;
   } finally {
     req.off("aborted", onClose);
     res.off("close", onClose);
@@ -237,6 +417,13 @@ const server = http.createServer(async (req, res) => {
 
     const url = new URL(req.url, `http://${req.headers.host}`);
     const parts = url.pathname.split("/").filter(Boolean);
+
+    const localPluginHandled = await handleLocalPluginRoute(req, res, parts);
+    if (localPluginHandled !== false) return;
+
+    if ((req.method === "GET" || req.method === "HEAD") && isPublicListingMediaPath(parts)) {
+      return serveStatic(url.pathname, req, res);
+    }
 
     if (url.pathname === SITE_ACCESS_SESSION_PATH || url.pathname === SITE_ACCESS_LOGIN_PATH || url.pathname === SITE_ACCESS_LOGOUT_PATH) {
       if (await handleSiteAccess(req, res, url)) return;
@@ -271,9 +458,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (parts[0] === "api") {
-      const session = getSession(extractToken(req));
+      const session = await getSession(extractToken(req) || url.searchParams.get("token"));
       if (!session) return json(res, { error: "未登录，请先登录" }, 401);
       req._session = session;
+      req.query = Object.fromEntries(url.searchParams.entries());
     }
 
     const restHandled = await handleRestRoute(req, res, url, parts);
@@ -281,12 +469,13 @@ const server = http.createServer(async (req, res) => {
 
     const key = `${req.method} ${url.pathname}`;
     if (routes[key]) return json(res, await routes[key](req, url));
+    if (parts[0] === "api") return notFound(res);
 
     return serveStatic(url.pathname, req, res);
   } catch (error) {
     if (!isRequestCancelledError(error)) console.error(error);
     if (res.writableEnded || res.destroyed) return;
-    json(res, { error: error.message }, 500);
+    json(res, { error: error.message, validation: error.validation }, error.status || 500);
   }
 });
 
@@ -294,19 +483,54 @@ server.listen(config.port, config.host || undefined, () => {
   const bindHost = config.host || "0.0.0.0";
   console.log(`ozon ERP running at ${config.appBaseUrl} (bind ${bindHost}:${config.port})`);
   setInterval(() => checkDailyPurchaseNotification(services.all), 60000);
-  setInterval(runBackgroundOrderStatusSync, 60 * 60 * 1000);
+  setInterval(runBackgroundOrderStatusSync, BACKGROUND_ORDER_SYNC_INTERVAL_MS);
+  setInterval(runBackgroundAnalyticsRefresh, BACKGROUND_ANALYTICS_REFRESH_INTERVAL_MS);
+  setInterval(runBackgroundAdvertisingSync, BACKGROUND_ADVERTISING_SYNC_INTERVAL_MS);
+  setTimeout(runBackgroundOrderStatusSync, BACKGROUND_ORDER_SYNC_INITIAL_DELAY_MS);
+  setTimeout(runBackgroundAnalyticsRefresh, BACKGROUND_ANALYTICS_REFRESH_INITIAL_DELAY_MS);
+  setTimeout(runBackgroundAdvertisingSync, BACKGROUND_ADVERTISING_SYNC_INITIAL_DELAY_MS);
 });
 
 async function runBackgroundOrderStatusSync() {
   if (backgroundOrderSyncRunning) return;
   backgroundOrderSyncRunning = true;
   try {
-    const { window, result } = await syncExceptionWorkbenchOrders();
-    console.log(`background order status sync ok: ${window.from}~${window.to}, tasks ${window.task_count || 0}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
+    const { window, result } = await syncRollingOrderStatusWindow();
+    console.log(`background order status sync ok: ${window.from}~${window.to}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
   } catch (error) {
     console.error("background order status sync failed", error);
   } finally {
     backgroundOrderSyncRunning = false;
+  }
+}
+
+async function runBackgroundAnalyticsRefresh() {
+  if (backgroundAnalyticsRefreshRunning) return;
+  backgroundAnalyticsRefreshRunning = true;
+  try {
+    const result = await services.refreshProfitAnalyticsSnapshots({});
+    console.log(`background analytics refresh ok: product rows ${result.product_rows || 0}, sku rows ${result.sku_rows || 0}`);
+  } catch (error) {
+    console.error("background analytics refresh failed", error);
+  } finally {
+    backgroundAnalyticsRefreshRunning = false;
+  }
+}
+
+async function runBackgroundAdvertisingSync() {
+  if (backgroundAdvertisingSyncRunning) return;
+  backgroundAdvertisingSyncRunning = true;
+  try {
+    const window = rollingOrderSyncWindow(BACKGROUND_ADVERTISING_SYNC_DAYS);
+    const result = await services.syncAdvertisingDailyFromOzon({ from: window.from, to: window.to });
+    const okShops = (result.results || []).filter((item) => item.status === "ok").length;
+    const skippedShops = (result.results || []).filter((item) => item.status !== "ok").length;
+    console.log(`background advertising sync ok: ${window.from}~${window.to}, imported ${result.imported || 0}, ok shops ${okShops}, skipped/error shops ${skippedShops}`);
+    if (result.errors?.length) console.warn(`background advertising sync warnings: ${result.errors.join("; ")}`);
+  } catch (error) {
+    console.error("background advertising sync failed", error);
+  } finally {
+    backgroundAdvertisingSyncRunning = false;
   }
 }
 
@@ -316,4 +540,27 @@ async function syncExceptionWorkbenchOrders(req = null) {
   const window = services.exceptionWorkbenchSyncWindow();
   const result = await services.syncDemoOrders({ from: window.from, to: window.to }, { signal: req?._abortSignal });
   return { window, result };
+}
+
+async function syncRollingOrderStatusWindow(req = null) {
+  const window = rollingOrderSyncWindow(BACKGROUND_ORDER_SYNC_DAYS);
+  const result = await services.syncDemoOrders({ from: window.from, to: window.to }, { signal: req?._abortSignal });
+  return { window, result };
+}
+
+function rollingOrderSyncWindow(days = 90) {
+  const now = new Date();
+  const from = new Date(now.getTime() - Number(days || 0) * 24 * 60 * 60 * 1000);
+  return {
+    from: formatShanghaiDate(from),
+    to: formatShanghaiDate(now)
+  };
+}
+
+function formatShanghaiDate(date) {
+  return shanghaiDateKey(date);
+}
+
+function isPublicListingMediaPath(parts = []) {
+  return parts[0] === "uploads" && parts[1] === "listing-media" && Boolean(parts[2]);
 }

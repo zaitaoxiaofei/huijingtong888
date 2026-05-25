@@ -85,7 +85,7 @@ export function ozonCommissionRate(mapping) {
   const raw = mapping?.commissions_json || mapping?.ozon_commissions_json || mapping?.commission_json;
   const list = parseCommissionList(raw);
   if (!list.length) return null;
-  const preferred = list.find((item) => String(item.sale_schema || item.schema || "").toUpperCase() === "FBS") || list[0];
+  const preferred = selectCommissionEntry(list, mapping) || list[0];
   const value = [
     preferred.percent,
     preferred.commission,
@@ -94,6 +94,27 @@ export function ozonCommissionRate(mapping) {
   ].map(toNumberOrNull).find((item) => item !== null && item > 0);
   if (value === undefined || value === null) return null;
   return value > 1 ? value / 100 : value;
+}
+
+function selectCommissionEntry(list, mapping) {
+  const schemaHints = [
+    mapping?.sale_schema,
+    mapping?.schema,
+    mapping?.delivery_schema,
+    mapping?.stock_type,
+    mapping?.shipping_method
+  ].map(normalizeSchemaHint).filter(Boolean);
+  for (const hint of schemaHints) {
+    const exact = list.find((item) => normalizeSchemaHint(item.sale_schema || item.schema || item.delivery_schema || item.type) === hint);
+    if (exact) return exact;
+  }
+  if (schemaHints.some((hint) => hint.includes("fbo") || hint.includes("fbp"))) {
+    return list.find((item) => {
+      const normalized = normalizeSchemaHint(item.sale_schema || item.schema || item.delivery_schema || item.type);
+      return normalized.includes("fbo") || normalized.includes("fbp");
+    });
+  }
+  return list.find((item) => normalizeSchemaHint(item.sale_schema || item.schema || item.delivery_schema || item.type).includes("fbs"));
 }
 
 function parseCommissionList(raw) {
@@ -107,6 +128,16 @@ function parseCommissionList(raw) {
   } catch {
     return [];
   }
+}
+
+function normalizeSchemaHint(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "";
+  if (text.includes("rfbs")) return "rfbs";
+  if (text.includes("fbs")) return "fbs";
+  if (text.includes("fbo")) return "fbo";
+  if (text.includes("fbp")) return "fbp";
+  return text;
 }
 
 function toNumberOrNull(value) {
@@ -123,7 +154,7 @@ function selectQuoteChannel(channels = [], shippingMethod = "") {
   return channels.find((item) => item.key === preferred) || channels.find((item) => item.key === "standard") || channels.find((item) => item.key === "economy") || channels[0] || {};
 }
 
-export function actualItemProfit(item) {
+export function actualItemProfit(item, breakdown = null) {
   const revenue = toNumber(item.sale_price) * toNumber(item.quantity);
   const costs =
     (toNumber(item.frozen_purchase_cost) +
@@ -131,8 +162,19 @@ export function actualItemProfit(item) {
       toNumber(item.frozen_international_shipping) +
       toNumber(item.frozen_handling_fee)) *
     toNumber(item.quantity);
+  const packagingCost = breakdown ? toNumber(breakdown.packaging_cost_cny) : 0;
+  const advertisingCost = breakdown ? toNumber(breakdown.advertising_cost_cny) : 0;
+  const otherFee = breakdown ? toNumber(breakdown.other_fee_cny) : 0;
   const platformFees = toNumber(item.platform_fee_actual || item.estimated_commission);
-  return roundMoney(revenue - costs - platformFees - toNumber(item.aftersale_loss));
+  return roundMoney(
+    revenue
+    - costs
+    - packagingCost
+    - platformFees
+    - toNumber(item.aftersale_loss)
+    - advertisingCost
+    - otherFee
+  );
 }
 
 export function roundMoney(value) {

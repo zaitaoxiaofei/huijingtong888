@@ -114,6 +114,11 @@
 npm start
 ```
 
+说明:
+
+- `npm start` 会先构建前端，再启动后端。
+- 这样本地运行链路与部署链路保持一致。
+
 开发模式:
 
 ```powershell
@@ -125,6 +130,19 @@ npm run dev
 ```powershell
 npm run build:frontend
 ```
+
+部署产物:
+
+```powershell
+npm run package:deploy
+```
+
+说明:
+
+- 该命令输出 `dist/deploy`
+- 线上服务器应只使用 `dist/deploy` 目录运行
+- 不要只同步后端源码而漏掉 `public/vue-apps`
+- `dist/deploy` 目录中的 `npm start` 会直接启动服务，不重复执行前端构建
 
 ## 7. 维护原则
 

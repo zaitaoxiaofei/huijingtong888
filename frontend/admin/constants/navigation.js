@@ -1,4 +1,4 @@
-import { DataAnalysis, Document, Goods, House, Setting, ShoppingCart, WarningFilled } from "@element-plus/icons-vue";
+import { DataAnalysis, Document, Goods, House, Setting, ShoppingCart, Tools, WarningFilled } from "@element-plus/icons-vue";
 
 export const navigationMenus = [
   { key: "dashboard", label: "首页看板", route: "/dashboard", icon: House },
@@ -8,8 +8,21 @@ export const navigationMenus = [
     icon: DataAnalysis,
     children: [
       { key: "profit-dashboard", label: "利润看板", route: "/profit" },
-      { key: "profit-sku-ranking", label: "SKU 排行榜", route: "/profit/sku-ranking" },
-      { key: "profit-shop-ranking", label: "店铺排行榜", route: "/profit/shop-ranking" }
+      { key: "advertising-daily", label: "广告系统", route: "/advertising/daily" },
+      { key: "profit-aftersales", label: "售后损失", route: "/profit/aftersales" }
+    ]
+  },
+  {
+    key: "tools",
+    label: "工具中心",
+    icon: Tools,
+    children: [
+      { key: "selection", label: "选品计价表", route: "/selection" },
+      { key: "asset-variant-center", label: "素材裂变中心", route: "/asset-variant-center" },
+      { key: "listing-automation", label: "多店铺上架自动化", route: "/listing-automation" },
+      { key: "tools-image-cropper", label: "电商套图拆分器", route: "/tools/ecommerce-image-splitter" },
+      { key: "tools-product-video-generator", label: "一键生成视频", route: "/tools/product-video-generator" },
+      { key: "tools-ai-image-generator", label: "AI 套图生成中心", route: "/tools/ai-image-generator" }
     ]
   },
   {
@@ -29,7 +42,7 @@ export const navigationMenus = [
       { key: "inventory-products", label: "产品库存表", route: "/inventory/products" },
       { key: "inventory-fbp", label: "FBP 库存表", route: "/inventory/fbp" },
       { key: "inventory-hidden", label: "已隐藏产品", route: "/inventory/hidden" },
-      { key: "inventory-mappings", label: "SKU 绑定配置", route: "/inventory/mappings" },
+      { key: "inventory-mappings", label: "库存-SKU映射表", route: "/inventory/mappings" },
       { key: "inventory-suppliers", label: "供应商配置", route: "/inventory/suppliers" },
       { key: "inventory-alerts", label: "库存预警", route: "/inventory/alerts" }
     ]
@@ -41,8 +54,7 @@ export const navigationMenus = [
     children: [
       { key: "procurement", label: "采购请求", route: "/procurement" },
       { key: "purchase-list", label: "采购清单", route: "/purchase-list" },
-      { key: "purchase-history", label: "采购历史", route: "/purchase-history" },
-      { key: "inbound", label: "入库管理", route: "/inbound" }
+      { key: "purchase-history", label: "采购历史", route: "/purchase-history" }
     ]
   },
   {
@@ -50,7 +62,7 @@ export const navigationMenus = [
     label: "商品管理",
     icon: Goods,
     children: [
-      { key: "selection", label: "选品中心", route: "/selection" },
+      { key: "multi-shop-publish", label: "多店铺商品发布中台", route: "/multi-shop-publish" },
       { key: "online-products", label: "在线商品", route: "/online-products" }
     ]
   },
@@ -63,7 +75,7 @@ export const navigationMenus = [
       { key: "exceptions-deadline", label: "订单超时异常", route: "/exceptions/deadline" },
       { key: "exceptions-deadline-warning", label: "超时预警", route: "/exceptions/deadline-warning" },
       { key: "exceptions-stock", label: "库存异常", route: "/exceptions/stock" },
-      { key: "exceptions-binding", label: "未绑定库存", route: "/exceptions/binding" }
+      { key: "exceptions-binding", label: "未绑定仓库", route: "/exceptions/binding" }
     ]
   },
   {
@@ -71,7 +83,8 @@ export const navigationMenus = [
     label: "系统设置",
     icon: Setting,
     children: [
-      { key: "settings", label: "配置中心", route: "/settings" }
+      { key: "settings", label: "配置中心", route: "/settings" },
+      { key: "settings-ai", label: "AI 配置", route: "/settings/ai" }
     ]
   }
 ];

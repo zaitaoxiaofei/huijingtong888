@@ -18,7 +18,7 @@
 ## 技术栈
 
 - Node.js
-- SQLite
+- MySQL
 - Vue 3
 - Element Plus
 - Vite
@@ -28,6 +28,12 @@
 ```powershell
 npm start
 ```
+
+说明:
+
+- `npm start` 会先执行前端构建，再启动后端服务。
+- 本地运行应以构建后的 `public/vue-apps` 为准，而不是把 `frontend/admin` 源码视为最终运行结果。
+- `dist/deploy` 内的 `npm start` 只启动服务，不会重复构建前端。
 
 开发模式:
 
@@ -40,6 +46,18 @@ npm run dev
 ```powershell
 npm run build:frontend
 ```
+
+部署产物:
+
+```powershell
+npm run package:deploy
+```
+
+说明:
+
+- 该命令会先重新构建前端，再输出 `dist/deploy`。
+- 线上应只部署 `dist/deploy` 目录，不再直接从源码工作区启动。
+- 部署目录内执行 `npm start` 时会直接运行 `node src/server.js`。
 
 ## 主要业务模块
 

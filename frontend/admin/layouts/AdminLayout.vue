@@ -1,7 +1,7 @@
 <script setup>
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { Bell, Expand, Fold, MoonNight, Search, Sunny } from "@element-plus/icons-vue";
+import { Bell, Expand, Fold, MoonNight, Sunny } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { navigationMenus } from "../constants/navigation.js";
 import { useAuthStore } from "../stores/auth";
@@ -14,7 +14,6 @@ const appStore = useAppStore();
 
 const activeMenu = computed(() => route.path);
 const breadcrumbs = computed(() => route.meta.breadcrumb || ["ERP 后台"]);
-const currentPageTitle = computed(() => route.meta.title || "ERP 后台");
 const themeIcon = computed(() => (appStore.theme === "dark" ? Sunny : MoonNight));
 const themeTitle = computed(() => (appStore.theme === "dark" ? "切换为亮色主题" : "切换为暗色主题"));
 
@@ -40,7 +39,7 @@ function openDashboard() {
 
 <template>
   <el-container class="erp-shell">
-    <el-aside :width="appStore.sidebarCollapsed ? '72px' : '248px'" class="erp-sidebar">
+    <el-aside :width="appStore.sidebarCollapsed ? '56px' : '190px'" class="erp-sidebar">
       <div class="erp-sidebar-inner">
         <button type="button" class="erp-logo" @click="openDashboard">
           <div class="erp-logo-mark">OZON</div>
@@ -84,15 +83,10 @@ function openDashboard() {
             <el-breadcrumb separator="/">
               <el-breadcrumb-item v-for="item in breadcrumbs" :key="item">{{ item }}</el-breadcrumb-item>
             </el-breadcrumb>
-            <strong>{{ currentPageTitle }}</strong>
           </div>
         </div>
 
         <div class="erp-header-right">
-          <div class="erp-header-search">
-            <el-icon><Search /></el-icon>
-            <span>Global Search</span>
-          </div>
           <el-badge :value="0" class="erp-header-badge">
             <el-button circle>
               <el-icon><Bell /></el-icon>
@@ -104,7 +98,6 @@ function openDashboard() {
           <div class="erp-user-card">
             <div class="erp-user-meta">
               <strong>{{ authStore.user?.name || authStore.user?.username || "Unknown" }}</strong>
-              <span>{{ authStore.user?.role || "operator" }}</span>
             </div>
             <el-button link type="primary" @click="handleLogout">Logout</el-button>
           </div>
@@ -116,10 +109,6 @@ function openDashboard() {
           <router-view :key="route.fullPath" />
         </div>
       </el-main>
-
-      <footer class="erp-footer">
-        <span>Ozon ERP</span>
-      </footer>
     </el-container>
   </el-container>
 </template>

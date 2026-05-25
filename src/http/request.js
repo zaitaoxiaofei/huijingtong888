@@ -16,5 +16,10 @@ export async function readForm(req) {
 
 export function isRequestCancelledError(error) {
   const message = String(error?.message || "");
-  return message.includes("客户端已取消") || message.includes("客户端连接已关闭") || message.includes("本次拉取已取消");
+  return error?.name === "AbortError"
+    || message.includes("client disconnected")
+    || message.includes("request cancelled")
+    || message.includes("client closed")
+    || message.includes("客户端已取消")
+    || message.includes("客户端连接已关闭");
 }

@@ -1,5 +1,29 @@
 const AUTH_TOKEN_KEY = "authToken";
+const GET_CACHE_TTL_MS = 30000;
+const cachedGetPrefixes = [
+  "/api/shops",
+  "/api/people",
+  "/api/suppliers"
+];
 let authRedirecting = false;
+const getCache = new Map();
+
+function isCacheableGet(url, options = {}) {
+  if (options.signal || options.noCache || options.cache === "no-store") return false;
+  const path = String(url || "").split("?")[0];
+  return cachedGetPrefixes.some((prefix) => path === prefix);
+}
+
+function clearGetCacheForMutation(url = "") {
+  if (!getCache.size) return;
+  const path = String(url || "").split("?")[0];
+  for (const prefix of cachedGetPrefixes) {
+    if (path === prefix || path.startsWith(`${prefix}/`)) {
+      getCache.clear();
+      return;
+    }
+  }
+}
 
 function buildHeaders(customHeaders = {}) {
   const headers = {
@@ -57,11 +81,64 @@ async function request(url, options = {}) {
   return data;
 }
 
+async function blobRequest(url, options = {}) {
+  let response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      headers: buildHeaders(options.headers)
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    throw error;
+  }
+
+  if (!response.ok) {
+    const contentType = String(response.headers.get("content-type") || "");
+    const data = contentType.includes("application/json")
+      ? await response.json().catch(() => ({}))
+      : await response.text().catch(() => "");
+    const error = new Error(data?.error || data || `Request failed with status ${response.status}`);
+    error.status = response.status;
+    error.payload = data;
+    if (response.status === 401) {
+      clearAuthToken();
+      if (!authRedirecting) {
+        authRedirecting = true;
+        window.dispatchEvent(new CustomEvent("app:auth-expired", {
+          detail: { message: data?.error || "登录已失效，请重新登录" }
+        }));
+        window.setTimeout(() => {
+          authRedirecting = false;
+          if (!String(window.location.hash || "").startsWith("#/login")) {
+            window.location.hash = "#/login";
+          }
+        }, 0);
+      }
+    }
+    throw error;
+  }
+
+  return {
+    blob: await response.blob(),
+    headers: response.headers,
+    status: response.status
+  };
+}
+
 export const apiClient = {
   get(url, options = {}) {
-    return request(url, { method: "GET", ...options });
+    if (!isCacheableGet(url, options)) return request(url, { method: "GET", ...options });
+    const key = String(url);
+    const cached = getCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.data);
+    return request(url, { method: "GET", ...options }).then((data) => {
+      getCache.set(key, { data, expiresAt: Date.now() + GET_CACHE_TTL_MS });
+      return data;
+    });
   },
   post(url, body, options = {}) {
+    clearGetCacheForMutation(url);
     return request(url, {
       method: "POST",
       body: body == null ? undefined : JSON.stringify(body),
@@ -69,6 +146,7 @@ export const apiClient = {
     });
   },
   put(url, body, options = {}) {
+    clearGetCacheForMutation(url);
     return request(url, {
       method: "PUT",
       body: body == null ? undefined : JSON.stringify(body),
@@ -76,10 +154,17 @@ export const apiClient = {
     });
   },
   delete(url, options = {}) {
+    clearGetCacheForMutation(url);
     return request(url, {
       method: "DELETE",
       ...options
     });
+  },
+  blob(url, options = {}) {
+    return blobRequest(url, options).then((result) => result.blob);
+  },
+  blobResponse(url, options = {}) {
+    return blobRequest(url, options);
   }
 };
 

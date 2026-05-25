@@ -1,22 +1,28 @@
-<script setup>
+﻿<script setup>
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
-import { applyFilterQuery, buildFilterQuery, dateText, isWithinDateRange, normalizeSearch, paginate } from "./inventory-utils.js";
+import { applyFilterQuery, buildFilterQuery, dateText } from "./inventory-utils.js";
 
 const route = useRoute();
 const router = useRouter();
 let syncingRoute = false;
+const listRequestGate = createLatestRequestGate();
+let dictionaryLoaded = false;
 
 const loading = ref(false);
 const dialogVisible = ref(false);
 const dialogSubmitting = ref(false);
+const productOptionsLoading = ref(false);
 
 const state = reactive({
   rows: [],
+  total: 0,
   shops: [],
   people: [],
   products: [],
@@ -50,38 +56,7 @@ const focusedProduct = computed(() => state.products.find((item) => Number(item.
 const returnTo = computed(() => String(route.query.returnTo || ""));
 const cameFromProducts = computed(() => String(route.query.from || "") === "inventory-products");
 
-const filteredRows = computed(() => {
-  const query = normalizeSearch(state.filters.query);
-  const shopId = String(state.filters.shopId || "all");
-  const rows = state.rows.filter((row) => {
-    if (focusProductId.value && Number(row.product_id) !== Number(focusProductId.value)) return false;
-    if (shopId !== "all" && String(row.shop_id || "") !== shopId) return false;
-    if (!isWithinDateRange(row.created_at || row.updated_at, state.filters.dateFrom, state.filters.dateTo)) return false;
-    if (!query) return true;
-    const haystack = [
-      row.product_name,
-      row.product_code,
-      row.inventory_id,
-      row.shop_name,
-      row.ozon_sku,
-      row.offer_id,
-      row.online_name,
-      row.person_name
-    ].map(normalizeSearch).join(" ");
-    return haystack.includes(query);
-  });
-  return rows.slice().sort((left, right) => {
-    const productOrder = Number(right.product_id || 0) - Number(left.product_id || 0);
-    if (productOrder !== 0) return productOrder;
-    const shopOrder = String(left.shop_name || "").localeCompare(String(right.shop_name || ""), "zh-CN");
-    if (shopOrder !== 0) return shopOrder;
-    const skuOrder = String(left.ozon_sku || "").localeCompare(String(right.ozon_sku || ""), "en");
-    if (skuOrder !== 0) return skuOrder;
-    return Number(right.id || 0) - Number(left.id || 0);
-  });
-});
-
-const pagedRows = computed(() => paginate(filteredRows.value, state.filters.page, state.filters.pageSize));
+const pagedRows = computed(() => state.rows);
 const productOptions = computed(() => state.products.map((item) => ({ label: `${item.name} / ${item.inventory_id || item.code || item.id}`, value: item.id })));
 const pagedProductSpans = computed(() => {
   const spans = [];
@@ -111,10 +86,6 @@ function applyRouteState() {
   syncingRoute = true;
   try {
     applyFilterQuery(route, state.filters, filterDefaults);
-    if (route.query.productId && !state.filters.query) {
-      const product = state.products.find((item) => Number(item.id) === Number(route.query.productId));
-      state.filters.query = product?.name || String(route.query.productId);
-    }
   } finally {
     syncingRoute = false;
   }
@@ -129,10 +100,23 @@ function syncRouteQuery() {
 
 function handleSearch() {
   state.filters.page = 1;
+  loadPageData();
 }
 
 function handleReset() {
   Object.assign(state.filters, filterDefaults);
+  loadPageData();
+}
+
+function handlePageChange(page) {
+  state.filters.page = page;
+  loadPageData();
+}
+
+function handlePageSizeChange(size) {
+  state.filters.pageSize = size;
+  state.filters.page = 1;
+  loadPageData();
 }
 
 function mappingSpanMethod({ rowIndex, columnIndex }) {
@@ -145,10 +129,27 @@ function productBindingCount(row) {
   return Number(pagedProductCounts.value.get(Number(row?.product_id || 0)) || 0);
 }
 
-function openEditDialog(row) {
+async function ensureProductOptions(row = null) {
+  if (state.products.length) return;
+  productOptionsLoading.value = true;
+  try {
+    const query = row?.product_name || row?.product_code || row?.inventory_id || "";
+    const params = new URLSearchParams({ paged: "1", page: "1", pageSize: "100" });
+    if (query) params.set("query", query);
+    const result = await apiClient.get(`/api/products?${params.toString()}`);
+    state.products = Array.isArray(result?.rows) ? result.rows : [];
+  } catch (error) {
+    ElMessage.error(error.message || "加载商品候选失败");
+  } finally {
+    productOptionsLoading.value = false;
+  }
+}
+
+async function openEditDialog(row) {
   dialog.id = row.id;
   dialog.product_id = row.product_id;
   dialog.person_id = row.person_id || "";
+  await ensureProductOptions(row);
   dialogVisible.value = true;
 }
 
@@ -205,23 +206,37 @@ async function deleteMapping(row) {
 }
 
 async function loadPageData() {
+  const requestToken = listRequestGate.next();
   loading.value = true;
   try {
-    const [rows, shops, people, products] = await Promise.all([
-      apiClient.get("/api/mappings"),
-      apiClient.get("/api/shops"),
-      apiClient.get("/api/people"),
-      apiClient.get("/api/products")
-    ]);
-    state.rows = Array.isArray(rows) ? rows.filter((item) => Number(item.active ?? 1) !== 0) : [];
-    state.shops = Array.isArray(shops) ? shops : [];
-    state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
-    state.products = Array.isArray(products) ? products : [];
+    const params = new URLSearchParams({
+      paged: "1",
+      page: String(state.filters.page),
+      pageSize: String(state.filters.pageSize),
+      shopId: String(state.filters.shopId || "all"),
+      dateFrom: String(state.filters.dateFrom || ""),
+      dateTo: String(state.filters.dateTo || "")
+    });
+    const query = String(state.filters.query || "").trim();
+    if (query) params.set("query", query);
+    if (focusProductId.value) params.set("productId", String(focusProductId.value));
+    const requests = [apiClient.get(`/api/mappings?${params.toString()}`)];
+    if (!dictionaryLoaded) requests.push(apiClient.get("/api/shops"), apiClient.get("/api/people"));
+    const [rows, shops, people] = await Promise.all(requests);
+    if (!listRequestGate.isLatest(requestToken)) return;
+    state.rows = Array.isArray(rows?.rows) ? rows.rows : [];
+    state.total = Number(rows?.total || 0);
+    if (!dictionaryLoaded) {
+      state.shops = Array.isArray(shops) ? shops : [];
+      state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
+      dictionaryLoaded = true;
+    }
     applyRouteState();
   } catch (error) {
-    ElMessage.error(error.message || "SKU 绑定配置加载失败");
+    if (!listRequestGate.isLatest(requestToken)) return;
+    ElMessage.error(error.message || "库存-SKU映射表加载失败");
   } finally {
-    loading.value = false;
+    if (listRequestGate.isLatest(requestToken)) loading.value = false;
   }
 }
 
@@ -254,7 +269,7 @@ onMounted(async () => {
     <InventoryPageToolbar
       :filters="state.filters"
       :shops="state.shops"
-      query-label="绑定搜索"
+      query-label="映射搜索"
       query-placeholder="库存产品 / SKU / 库存ID / 店铺"
       @search="handleSearch"
       @reset="handleReset"
@@ -269,8 +284,7 @@ onMounted(async () => {
         <el-table-column label="库存产品" min-width="280" fixed="left">
           <template #default="{ row }">
             <div class="product-cell">
-              <el-image v-if="row.product_image_url" :src="row.product_image_url" fit="cover" class="product-thumb" />
-              <div v-else class="product-thumb product-thumb-fallback">无图</div>
+              <ProductImagePreview :src="row.product_image_url" />
               <div class="cell-stack">
                 <strong>{{ row.product_name || "-" }}</strong>
                 <span class="muted-text">{{ row.inventory_id || row.product_code || "-" }}</span>
@@ -279,7 +293,7 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="绑定SKU" min-width="220">
+        <el-table-column label="映射SKU" min-width="220">
           <template #default="{ row }">
             <div class="cell-stack">
               <strong>{{ row.ozon_sku || "-" }}</strong>
@@ -311,18 +325,18 @@ onMounted(async () => {
     </div>
 
     <PageFooterPagination
-      :total="filteredRows.length"
+      :total="state.total"
       :page="state.filters.page"
       :page-size="state.filters.pageSize"
       :page-sizes="[30, 50, 100]"
-      @update:page="state.filters.page = $event"
-      @update:pageSize="state.filters.pageSize = $event; state.filters.page = 1"
+      @update:page="handlePageChange"
+      @update:pageSize="handlePageSizeChange"
     />
 
     <el-dialog v-model="dialogVisible" title="编辑 SKU 绑定" width="760px" align-center class="erp-centered-dialog">
       <el-form label-width="100px">
         <el-form-item label="库存产品">
-          <el-select v-model="dialog.product_id" filterable style="width: 100%">
+          <el-select v-model="dialog.product_id" filterable :loading="productOptionsLoading" style="width: 100%">
             <el-option v-for="item in productOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
         </el-form-item>
@@ -391,3 +405,4 @@ onMounted(async () => {
   }
 }
 </style>
+

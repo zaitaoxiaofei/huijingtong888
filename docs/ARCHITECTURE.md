@@ -6,7 +6,6 @@
 Browser
   -> public/admin.html
   -> public/vue-apps/assets/*
-  -> frontend/admin/*
   -> src/server.js
   -> src/services.js / src/services/*
   -> SQLite
@@ -22,6 +21,12 @@ Browser
 - `public/admin.html`
 - `frontend/admin`
 - `public/vue-apps`
+
+说明:
+
+- `frontend/admin` 是前端源码目录。
+- 运行时真正被后端托管的是 `public/admin.html` 与 `public/vue-apps/*`。
+- 本地与线上都应使用同一次构建生成的静态资源。
 
 ### HTTP
 
@@ -51,8 +56,11 @@ Current route groups already being pulled out:
 - `src/services.js`
 - `src/services/*`
 - `src/services/dashboard.js`
+- `src/services/finance-sync.js`
 - `src/services/historical-profit-review-entry.js`
 - `src/services/online-products-entry.js`
+- `src/services/order-sync.js`
+- `src/services/order-profit-recalculation.js`
 - `src/services/profit-maintenance.js`
 
 ### Data
@@ -72,6 +80,14 @@ Current route groups already being pulled out:
 - 本地: `npm start`
 - 开发: `npm run dev`
 - 前端构建: `npm run build:frontend`
+- 部署产物: `npm run package:deploy`
+
+部署规则:
+
+- `npm start` 会先构建前端再启动服务。
+- `npm run package:deploy` 会生成 `dist/deploy`。
+- 线上只应部署 `dist/deploy`，不要直接把源码目录作为运行目录。
+- `dist/deploy/package.json` 内的 `npm start` 只负责启动服务，不再重复构建前端。
 
 ## 5. Current Concern
 

@@ -1,3 +1,5 @@
+import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
+
 export function normalizeSearch(value) {
   return String(value || "").trim().toLowerCase();
 }
@@ -15,8 +17,7 @@ export function percent(value) {
 }
 
 export function dateText(value) {
-  if (!value) return "-";
-  return new Date(value).toLocaleString("zh-CN", { hour12: false });
+  return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
 }
 
 export function stockStatusType(stock, alertStock) {

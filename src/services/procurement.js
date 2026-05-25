@@ -13,4 +13,4 @@ export {
   cancelPurchaseOrder,
   updatePurchaseOrder,
   deletePurchaseOrder
-} from "../services.js";
+} from "./procurement-entry.js";

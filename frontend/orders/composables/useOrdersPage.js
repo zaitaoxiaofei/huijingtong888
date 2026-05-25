@@ -1,6 +1,7 @@
 import { computed, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { apiClient } from "../../admin/utils/api.js";
+import { shanghaiDateDaysAgo, shanghaiDateKey } from "../../admin/utils/shanghai-date.js";
 import {
   bulkPrepareOrders,
   bulkPrintOrders,
@@ -19,7 +20,6 @@ import {
   openOrderProfit,
   openProcurement,
   prevOrderPage,
-  printSingleOrder,
   recalculateOrderProfit,
   resetRecentDates,
   saveOrderMark,
@@ -27,6 +27,12 @@ import {
   submitOrderFilters,
   nextOrderPage
 } from "../services/orders-service.js";
+
+const SHOPS_CACHE_TTL_MS = 5 * 60 * 1000;
+let shopsCache = {
+  rows: [],
+  timestamp: 0
+};
 
 const STATUS_TABS = [
   { value: "all", label: "全部订单" },
@@ -64,12 +70,31 @@ const MORE_ACTIONS = [
   { value: "prepare-selected", label: "备货所选" }
 ];
 
+const DEFAULT_LOGISTICS_METHOD_OPTIONS = [
+  { value: "all", label: "全部物流" },
+  { value: "cel_air_land_1_500g", label: "CEL 陆空 1-500g" },
+  { value: "cel_land_1_500g", label: "CEL 陆运 1-500g" },
+  { value: "postal_1_500g", label: "邮政 1-500g" },
+  { value: "hunchun_2", label: "hunchun 2" },
+  { value: "cel_land_500_25000g", label: "CEL 陆运 500-25000g" },
+  { value: "cel_land_2_30kg", label: "CEL 陆运 2-30kg" },
+  { value: "cel_land_0_5_30kg", label: "CEL 陆运 0.5-30kg" },
+  { value: "cel_land_1_2000g", label: "CEL 陆运 1-2000g" },
+  { value: "guoo_light_land", label: "GUOO 超级轻小件" }
+];
+
+const DEFAULT_PAGE_SIZE = 20;
+const AWAITING_PACKAGING_STATES = ["awaiting_registration", "acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_awaiting_registration", "posting_acceptance_in_progress"];
+const AWAITING_DELIVER_STATES = ["awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service", "posting_transferring", "posting_in_carriage", "posting_transferring_to_delivery"];
+const DELIVERING_KEYWORDS = ["delivering", "transferring", "carriage", "pickup", "sorting", "customs", "shipped", "sent", "on_way", "posting_in_carriage", "posting_transferring", "发往", "已上网", "发走"];
+
 function createDefaultFilters(defaultFrom, defaultTo) {
   return {
     page: 1,
-    pageSize: 30,
+    pageSize: DEFAULT_PAGE_SIZE,
     status: "all",
     shopId: "all",
+    logisticsMethod: "all",
     dateFrom: defaultFrom,
     dateTo: defaultTo,
     searchType: "order",
@@ -85,7 +110,7 @@ function normalizePrintState(filters = {}) {
   const printView = String(filters.printView || "all");
   const printFilter = printView === "printed"
     ? "printed"
-    : printView === "unprinted" || printView === "inventory"
+    : printView === "unprinted"
       ? "unprinted"
       : "all";
   const sortMode = printView === "inventory" ? "inventory" : "ordered";
@@ -95,8 +120,8 @@ function normalizePrintState(filters = {}) {
 function friendlyPrepareError(error) {
   const message = String(error?.message || error || "");
   const lower = message.toLowerCase();
-  if (lower.includes("awaiting_deliver") || lower.includes("already") || lower.includes("not in process") || lower.includes("invalid status")) {
-    return "备货失败：这个订单可能已经备货过了，请先同步订单刷新状态。";
+  if (lower.includes("awaiting_deliver") || lower.includes("already") || lower.includes("not in process") || lower.includes("invalid status") || lower.includes("has_incorrect_status")) {
+    return "备货失败：这个订单状态已经变化，请刷新订单列表后重试。";
   }
   if (lower.includes("fbp") || lower.includes("warehouse")) {
     return "备货失败：这个订单可能是 FBP 仓发订单，不需要在本地备货。";
@@ -104,24 +129,75 @@ function friendlyPrepareError(error) {
   return `备货失败：${message || "未知错误"}`;
 }
 
+function orderTabKey(row = {}) {
+  const values = [row.status, row.tracking_stage].map((value) => String(value || "").toLowerCase());
+  if (values.some((value) => AWAITING_PACKAGING_STATES.includes(value))) return "awaiting_packaging";
+  if (values.some((value) => AWAITING_DELIVER_STATES.includes(value))) return "awaiting_deliver";
+  const text = [row.status, row.tracking_stage, row.logistics_status].map((value) => String(value || "").toLowerCase()).join(" ");
+  if (DELIVERING_KEYWORDS.some((keyword) => text.includes(keyword))) return "delivering";
+  return "all";
+}
+
+async function fetchShopsCached(force = false) {
+  if (!force && shopsCache.rows.length && Date.now() - shopsCache.timestamp < SHOPS_CACHE_TTL_MS) {
+    return shopsCache.rows;
+  }
+  const shops = await apiClient.get("/api/shops");
+  shopsCache = {
+    rows: Array.isArray(shops) ? shops : [],
+    timestamp: Date.now()
+  };
+  return shopsCache.rows;
+}
+
 export function useOrdersPage() {
   const loading = ref(false);
   const selectedOrderIds = ref(new Set());
   const orderSyncAbort = ref(null);
   const orderSyncCancelReason = ref("");
-  const today = new Date();
-  const defaultTo = today.toISOString().slice(0, 10);
-  const defaultFrom = new Date(today.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const ordersListAbort = ref(null);
+  const ordersMetaAbort = ref(null);
+  const ordersLoadToken = ref(0);
+  const defaultTo = shanghaiDateKey();
+  const defaultFrom = shanghaiDateDaysAgo(90);
+
+  function buildStatusTabs(counts = {}, total = 0) {
+    return STATUS_TABS.map((item) => ({
+      ...item,
+      count: Number(counts?.[item.value] || (item.value === "all" ? total || 0 : 0))
+    }));
+  }
+
+  function buildOrdersParams(filters = {}, extra = {}) {
+    return new URLSearchParams({
+      paged: "1",
+      page: String(filters.page || 1),
+      pageSize: String(filters.pageSize || DEFAULT_PAGE_SIZE),
+      status: filters.status || "all",
+      shopId: filters.shopId || "all",
+      logisticsMethod: filters.logisticsMethod || "all",
+      dateFrom: filters.dateFrom || "",
+      dateTo: filters.dateTo || "",
+      searchType: filters.searchType || "order",
+      searchQuery: filters.searchQuery || "",
+      markFilter: filters.markFilter || "all",
+      printView: filters.printView || "all",
+      printFilter: filters.printFilter || "all",
+      sortMode: filters.sortMode || "ordered",
+      ...extra
+    });
+  }
 
   const vm = reactive({
     title: "我的订单",
     subtitle: "订单管理工作台",
     rows: [],
     shops: [],
-    statusTabs: [],
-    markOptions: [],
-    printViews: [],
-    moreActions: [],
+    statusTabs: buildStatusTabs({}, 0),
+    markOptions: MARK_OPTIONS,
+    printViews: PRINT_VIEWS,
+    logisticsMethodOptions: DEFAULT_LOGISTICS_METHOD_OPTIONS,
+    moreActions: MORE_ACTIONS,
     syncStatus: "",
     syncRunning: false,
     filters: createDefaultFilters(defaultFrom, defaultTo),
@@ -131,95 +207,140 @@ export function useOrdersPage() {
     }
   });
 
-  const totalPages = computed(() => Math.max(1, Math.ceil((vm.meta.total || 0) / (vm.filters.pageSize || 30))));
+  const totalPages = computed(() => Math.max(1, Math.ceil((vm.meta.total || 0) / (vm.filters.pageSize || DEFAULT_PAGE_SIZE))));
   const totalLabel = computed(() => `${vm.meta.total || 0} 条订单`);
   const activeStatusLabel = computed(() => vm.statusTabs.find((item) => item.value === vm.filters.status)?.label || "全部订单");
 
   function patch(payload = {}) {
-    const filters = {
-      ...createDefaultFilters(defaultFrom, defaultTo),
-      ...(payload.filters || {})
-    };
-    const normalizedPrint = normalizePrintState(filters);
+    const hasOwn = (key) => Object.prototype.hasOwnProperty.call(payload, key);
 
-    vm.title = String(payload.title || vm.title);
-    vm.subtitle = String(payload.subtitle || vm.subtitle);
-    vm.rows = Array.isArray(payload.rows) ? payload.rows : [];
-    vm.shops = Array.isArray(payload.shops) ? payload.shops : [];
-    vm.statusTabs = Array.isArray(payload.statusTabs) ? payload.statusTabs : [];
-    vm.markOptions = Array.isArray(payload.markOptions) ? payload.markOptions : [];
-    vm.printViews = Array.isArray(payload.printViews) ? payload.printViews : [];
-    vm.moreActions = Array.isArray(payload.moreActions) ? payload.moreActions : [];
-    vm.syncStatus = String(payload.syncStatus || "");
-    vm.syncRunning = Boolean(payload.syncRunning);
-    vm.filters = {
-      page: Number(filters.page || 1),
-      pageSize: Number(filters.pageSize || 30),
-      status: String(filters.status || "all"),
-      shopId: String(filters.shopId || "all"),
-      dateFrom: String(filters.dateFrom || defaultFrom),
-      dateTo: String(filters.dateTo || defaultTo),
-      searchType: String(filters.searchType || "order"),
-      searchQuery: String(filters.searchQuery || ""),
-      markFilter: String(filters.markFilter || "all"),
-      printView: normalizedPrint.printView,
-      printFilter: normalizedPrint.printFilter,
-      sortMode: normalizedPrint.sortMode
-    };
-    vm.meta = {
-      total: Number(payload.meta?.total || vm.rows.length || 0),
-      counts: payload.meta?.counts || {}
-    };
+    if (hasOwn("title")) vm.title = String(payload.title || vm.title);
+    if (hasOwn("subtitle")) vm.subtitle = String(payload.subtitle || vm.subtitle);
+    if (hasOwn("rows")) vm.rows = Array.isArray(payload.rows) ? payload.rows : [];
+    if (hasOwn("shops")) vm.shops = Array.isArray(payload.shops) ? payload.shops : [];
+    if (hasOwn("statusTabs")) vm.statusTabs = Array.isArray(payload.statusTabs) ? payload.statusTabs : [];
+    if (hasOwn("markOptions")) vm.markOptions = Array.isArray(payload.markOptions) ? payload.markOptions : [];
+    if (hasOwn("printViews")) vm.printViews = Array.isArray(payload.printViews) ? payload.printViews : [];
+    if (hasOwn("logisticsMethodOptions")) vm.logisticsMethodOptions = Array.isArray(payload.logisticsMethodOptions) ? payload.logisticsMethodOptions : [];
+    if (hasOwn("moreActions")) vm.moreActions = Array.isArray(payload.moreActions) ? payload.moreActions : [];
+    if (hasOwn("syncStatus")) vm.syncStatus = String(payload.syncStatus || "");
+    if (hasOwn("syncRunning")) vm.syncRunning = Boolean(payload.syncRunning);
+
+    if (hasOwn("filters")) {
+      const filters = {
+        ...createDefaultFilters(defaultFrom, defaultTo),
+        ...(payload.filters || {})
+      };
+      const normalizedPrint = normalizePrintState(filters);
+      vm.filters = {
+        page: Number(filters.page || 1),
+        pageSize: Number(filters.pageSize || DEFAULT_PAGE_SIZE),
+        status: String(filters.status || "all"),
+        shopId: String(filters.shopId || "all"),
+        logisticsMethod: String(filters.logisticsMethod || "all"),
+        dateFrom: String(filters.dateFrom || defaultFrom),
+        dateTo: String(filters.dateTo || defaultTo),
+        searchType: String(filters.searchType || "order"),
+        searchQuery: String(filters.searchQuery || ""),
+        markFilter: String(filters.markFilter || "all"),
+        printView: normalizedPrint.printView,
+        printFilter: normalizedPrint.printFilter,
+        sortMode: normalizedPrint.sortMode
+      };
+    }
+
+    if (hasOwn("meta")) {
+      const nextTotalSource = payload.meta?.total ?? vm.meta.total ?? vm.rows.length;
+      vm.meta = {
+        total: Number(nextTotalSource || 0),
+        counts: payload.meta?.counts || {}
+      };
+    }
+  }
+
+  async function loadOrdersMeta(filtersSnapshot, requestToken) {
+    ordersMetaAbort.value?.abort();
+    const controller = new AbortController();
+    ordersMetaAbort.value = controller;
+    try {
+      const metaParams = buildOrdersParams(filtersSnapshot, {
+        includeRows: "0",
+        includeCounts: "1",
+        includeLogisticsOptions: "1"
+      });
+      const result = await apiClient.get(`/api/orders?${metaParams.toString()}`, { signal: controller.signal });
+      if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
+      const counts = result?.counts || {};
+      const total = Number((result?.total ?? vm.meta.total) || 0);
+      patch({
+        statusTabs: buildStatusTabs(counts, total),
+        logisticsMethodOptions: Array.isArray(result?.logisticsMethodOptions) && result.logisticsMethodOptions.length > 1
+          ? result.logisticsMethodOptions
+          : DEFAULT_LOGISTICS_METHOD_OPTIONS,
+        meta: {
+          total,
+          counts
+        }
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      console.warn("loadOrdersMeta failed", error);
+    } finally {
+      if (ordersMetaAbort.value === controller) {
+        ordersMetaAbort.value = null;
+      }
+    }
   }
 
   async function loadOrders() {
+    ordersListAbort.value?.abort();
+    ordersMetaAbort.value?.abort();
+    const controller = new AbortController();
+    ordersListAbort.value = controller;
+    const requestToken = ordersLoadToken.value + 1;
+    ordersLoadToken.value = requestToken;
     loading.value = true;
     try {
-      const params = new URLSearchParams({
-        paged: "1",
-        page: String(vm.filters.page || 1),
-        pageSize: String(vm.filters.pageSize || 30),
-        status: vm.filters.status || "all",
-        shopId: vm.filters.shopId || "all",
-        dateFrom: vm.filters.dateFrom || "",
-        dateTo: vm.filters.dateTo || "",
-        searchType: vm.filters.searchType || "order",
-        searchQuery: vm.filters.searchQuery || "",
-        markFilter: vm.filters.markFilter || "all",
-        printView: vm.filters.printView || "all",
-        printFilter: vm.filters.printFilter || "all",
-        sortMode: vm.filters.sortMode || "ordered"
+      const filtersSnapshot = { ...vm.filters };
+      const params = buildOrdersParams(filtersSnapshot, {
+        includeCounts: "0",
+        includeLogisticsOptions: "0"
       });
       const [result, shops] = await Promise.all([
-        apiClient.get(`/api/orders?${params.toString()}`),
-        apiClient.get("/api/shops")
+        apiClient.get(`/api/orders?${params.toString()}`, { signal: controller.signal }),
+        fetchShopsCached()
       ]);
+      if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
+
+      const total = Number(result.total || 0);
 
       patch({
         rows: Array.isArray(result.rows) ? result.rows : [],
         shops: Array.isArray(shops) ? shops : [],
-        statusTabs: STATUS_TABS.map((item) => ({
-          ...item,
-          count: Number(result.counts?.[item.value] || (item.value === "all" ? result.total || 0 : 0))
-        })),
         markOptions: MARK_OPTIONS,
         printViews: PRINT_VIEWS,
         moreActions: MORE_ACTIONS,
         syncStatus: "",
         syncRunning: false,
         filters: {
-          ...vm.filters,
-          page: Number(result.page || vm.filters.page || 1),
-          pageSize: Number(result.pageSize || vm.filters.pageSize || 30)
+          ...filtersSnapshot,
+          page: Number(result.page || filtersSnapshot.page || 1),
+          pageSize: Number(result.pageSize || filtersSnapshot.pageSize || DEFAULT_PAGE_SIZE)
         },
-        meta: { total: Number(result.total || 0), counts: result.counts || {} }
+        statusTabs: buildStatusTabs(vm.meta.counts, total),
+        meta: { total, counts: vm.meta.counts || {} }
       });
+      void loadOrdersMeta(filtersSnapshot, requestToken);
     } catch (error) {
+      if (error?.name === "AbortError") return;
       if (error?.status === 401) ElMessage.error("登录已失效，请重新登录");
       else ElMessage.error(error?.message || "加载订单失败");
       throw error;
     } finally {
-      loading.value = false;
+      if (ordersListAbort.value === controller) {
+        ordersListAbort.value = null;
+        loading.value = false;
+      }
     }
   }
 
@@ -227,6 +348,84 @@ export function useOrdersPage() {
     orderSyncAbort.value = null;
     orderSyncCancelReason.value = "";
     vm.syncRunning = false;
+  }
+
+  function applyPreparedOrdersLocally(orderIds = [], result = {}) {
+    const updatedOrders = Array.isArray(result?.updated_orders) && result.updated_orders.length
+      ? result.updated_orders
+      : (Array.isArray(result?.order_ids) ? result.order_ids : orderIds).map((id) => ({
+          id,
+          status: "awaiting_deliver",
+          tracking_stage: "awaiting_deliver",
+          logistics_status: "awaiting_deliver",
+          tracking_number: ""
+        }));
+    const successfulIds = updatedOrders.map((item) => Number(item?.id || 0)).filter(Boolean);
+    if (!successfulIds.length) return;
+
+    const successfulIdSet = new Set(successfulIds);
+    const updatedOrderMap = new Map(updatedOrders.map((item) => [Number(item?.id || 0), item]));
+    const isAwaitingPackagingView = vm.filters.status === "awaiting_packaging";
+    let removedCount = 0;
+    let updatedVisibleCount = 0;
+    const countAdjustments = {};
+
+    const nextRows = (Array.isArray(vm.rows) ? vm.rows : []).reduce((rows, row) => {
+      const rowId = Number(row?.id || 0);
+      if (!successfulIdSet.has(rowId)) {
+        rows.push(row);
+        return rows;
+      }
+
+      updatedVisibleCount += 1;
+      const incoming = updatedOrderMap.get(rowId) || {};
+      const previousTabKey = orderTabKey(row);
+      const updatedRow = {
+        ...row,
+        status: incoming.status || "awaiting_deliver",
+        tracking_stage: incoming.tracking_stage || incoming.status || "awaiting_deliver",
+        logistics_status: incoming.logistics_status || incoming.tracking_stage || incoming.status || "awaiting_deliver",
+        tracking_number: incoming.tracking_number || row?.tracking_number || row?.posting_number || row?.order_number || ""
+      };
+      const nextTabKey = orderTabKey(updatedRow);
+      if (previousTabKey !== nextTabKey) {
+        countAdjustments[previousTabKey] = Number(countAdjustments[previousTabKey] || 0) - 1;
+        countAdjustments[nextTabKey] = Number(countAdjustments[nextTabKey] || 0) + 1;
+      }
+
+      if (isAwaitingPackagingView) {
+        removedCount += 1;
+        return rows;
+      }
+
+      rows.push(updatedRow);
+      return rows;
+    }, []);
+
+    if (!removedCount && !updatedVisibleCount) return;
+
+    for (const id of successfulIdSet) {
+      selectedOrderIds.value.delete(id);
+    }
+
+    const currentCounts = vm.meta?.counts || {};
+    const nextCounts = { ...currentCounts };
+    for (const [key, delta] of Object.entries(countAdjustments)) {
+      if (!Object.prototype.hasOwnProperty.call(nextCounts, key)) continue;
+      nextCounts[key] = Math.max(0, Number(nextCounts[key] || 0) + Number(delta || 0));
+    }
+    const nextTotal = isAwaitingPackagingView
+      ? Math.max(0, Number(vm.meta?.total || 0) - removedCount)
+      : Number(vm.meta?.total || 0);
+
+    patch({
+      rows: nextRows,
+      statusTabs: buildStatusTabs(nextCounts, nextTotal),
+      meta: {
+        total: nextTotal,
+        counts: nextCounts
+      }
+    });
   }
 
   async function runOrderSync(url, body, messages) {
@@ -275,11 +474,53 @@ export function useOrdersPage() {
     }
     try {
       const result = await bulkPrepareOrders(ids);
-      await loadOrders();
-      ElMessage.success(ids.length > 1 ? `已提交 ${ids.length} 个订单备货` : "备货完成，订单已进入等待发货");
+      applyPreparedOrdersLocally(ids, result);
+      void loadOrders().catch(() => {});
+      const alreadyShippedCount = Number(result?.already_shipped_count || 0);
+      if (alreadyShippedCount > 0) {
+        const normalCount = Math.max(0, ids.length - alreadyShippedCount);
+        if (normalCount > 0) {
+          ElMessage.success(`已处理 ${ids.length} 个订单，其中 ${alreadyShippedCount} 个订单已在其他系统备货，状态已刷新`);
+        } else {
+          ElMessage.success(alreadyShippedCount > 1 ? `已有 ${alreadyShippedCount} 个订单在其他系统完成备货，状态已刷新` : "订单已在其他系统完成备货，状态已刷新");
+        }
+      } else {
+        ElMessage.success(ids.length > 1 ? `已提交 ${ids.length} 个订单备货` : "备货完成，订单已进入等待发货");
+      }
       return result;
     } catch (error) {
       ElMessage.error(friendlyPrepareError(error));
+      throw error;
+    }
+  }
+
+  async function runPrintOrders(orderIds = []) {
+    const ids = Array.isArray(orderIds) ? orderIds.map(Number).filter(Boolean) : [];
+    if (!ids.length) {
+      ElMessage.warning("请选择需要打印的订单");
+      return null;
+    }
+    try {
+      const result = await bulkPrintOrders(ids);
+      await loadOrders();
+      if (result?.cancelled) {
+        ElMessage.info("已取消确认，订单未标记为已打印");
+        return result;
+      }
+      const failures = Array.isArray(result?.failures) ? result.failures : [];
+      if (failures.length) {
+        const failedText = failures
+          .map((item) => item.posting_number || item.id)
+          .filter(Boolean)
+          .slice(0, 3)
+          .join("、");
+        ElMessage.warning(`已生成 ${result?.count || 0} 个面单，${failures.length} 个失败：${failedText}${failures.length > 3 ? "..." : ""}`);
+      } else {
+        ElMessage.success(ids.length > 1 ? `已生成 ${ids.length} 个订单面单` : "面单已生成");
+      }
+      return result;
+    } catch (error) {
+      ElMessage.error(`打印失败：${error?.message || "未知错误"}`);
       throw error;
     }
   }
@@ -293,7 +534,13 @@ export function useOrdersPage() {
     activeStatusLabel,
     patch,
     loadOrders,
-    submitFilters: async () => {
+    submitFilters: async (nextFilters = null) => {
+      if (nextFilters && typeof nextFilters === "object") {
+        vm.filters = {
+          ...vm.filters,
+          ...nextFilters
+        };
+      }
       await submitOrderFilters(vm.filters);
       await loadOrders();
     },
@@ -353,15 +600,17 @@ export function useOrdersPage() {
       await nextOrderPage();
       await loadOrders();
     },
-    syncRecent: async () => (
-      runOrderSync("/api/sync/ozon/incremental", { recent_days: 7 }, {
-        running: "正在从 Ozon 拉取最近 7 天的新订单，请勿重复点击。",
+    syncRecent: async () => {
+      const body = { from_latest: true, fallback_days: 7, overlap_minutes: 15 };
+      if (vm.filters.shopId && vm.filters.shopId !== "all") body.shop_id = vm.filters.shopId;
+      return runOrderSync("/api/sync/ozon/incremental", body, {
+        running: "正在从 Ozon 拉取本地最新订单之后的新订单，请勿重复点击。",
         refreshing: "拉取完成，正在刷新订单列表...",
-        success: (result) => `最近 7 天订单同步完成：拉取 ${result?.fetched || 0} 单，新增 ${result?.inserted || 0} 单，更新 ${result?.updated || 0} 单。`,
-        successToast: (result) => `已同步 ${result?.fetched || 0} 单订单`,
+        success: (result) => `新订单拉取完成：拉取 ${result?.fetched || 0} 单，新增 ${result?.inserted || 0} 单，更新 ${result?.updated || 0} 单。`,
+        successToast: (result) => `已拉取 ${result?.fetched || 0} 单新订单`,
         failurePrefix: "拉取新订单失败："
-      })
-    ),
+      });
+    },
     syncAll: async () => {
       const body = {
         from: vm.filters.dateFrom || "",
@@ -371,9 +620,9 @@ export function useOrdersPage() {
       return runOrderSync("/api/sync/ozon", body, {
         running: `正在同步 ${vm.filters.dateFrom || "开始日期"} 到 ${vm.filters.dateTo || "结束日期"} 的订单，请勿重复点击。`,
         refreshing: "同步完成，正在刷新订单列表...",
-        success: (result) => `订单同步完成：拉取 ${result?.fetched || 0} 单，新增 ${result?.inserted || 0} 单，更新 ${result?.updated || 0} 单。`,
+        success: (result) => `当前范围同步完成：拉取 ${result?.fetched || 0} 单，新增 ${result?.inserted || 0} 单，更新 ${result?.updated || 0} 单。`,
         successToast: (result) => `已同步 ${result?.fetched || 0} 单订单`,
-        failurePrefix: "同步订单失败："
+        failurePrefix: "同步当前范围失败："
       });
     },
     cancelSync: () => {
@@ -386,21 +635,21 @@ export function useOrdersPage() {
       orderSyncAbort.value.abort();
       return null;
     },
-    bulkPrint: (orderIds = []) => bulkPrintOrders(orderIds),
+    bulkPrint: (orderIds = []) => runPrintOrders(orderIds),
     bulkPrepare: (orderIds = []) => runPrepareOrders(orderIds),
     openQualityRules: () => openQualityRules(),
     saveQualityRules: (payload) => saveQualityRules(payload),
     resetRecentDates: () => resetRecentDates(),
     handleMoreAction: async (action) => {
       if (action === "recalculate-profit") return apiClient.post("/api/orders/recalculate-profits", {});
-      if (action === "print-selected") return bulkPrintOrders([...selectedOrderIds.value]);
+      if (action === "print-selected") return runPrintOrders([...selectedOrderIds.value]);
       if (action === "prepare-selected") return runPrepareOrders([...selectedOrderIds.value]);
       return handleMoreOrderAction(action);
     },
     fetchOrderDetail: (orderId) => fetchOrderDetail(orderId),
     openOrderProfit: (orderId) => openOrderProfit(orderId),
     prepareSingleOrder: (orderId) => runPrepareOrders([orderId]),
-    printSingleOrder: (orderId) => printSingleOrder(orderId),
+    printSingleOrder: (orderId) => runPrintOrders([orderId]),
     recalculateOrderProfit: (orderId) => recalculateOrderProfit(orderId),
     saveOrderMark: (orderId, markType) => saveOrderMark(orderId, markType),
     openBindProduct: (onlineId) => openBindProduct(onlineId),

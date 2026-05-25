@@ -1,23 +1,28 @@
 export {
-  products,
-  selectionProducts,
-  selectionProduct,
-  productImage,
   hiddenProducts,
-  restoreProduct,
-  createProduct,
-  updateProduct,
-  deleteProduct,
-  previewProductCsvImport,
-  commitProductCsvImport,
-  onlineProducts,
-  createOnlineProduct,
-  updateOnlineProduct,
-  bindOnlineProduct,
-  createProductFromOnlineProduct,
-  productOrderProfitDetails,
   productCancelDetails,
+  productImage,
+  productOrderProfitDetails,
+  products,
+  restoreProduct,
+  selectionProduct,
+  selectionProducts
+} from "./catalog-products-entry.js";
+
+export {
+  commitProductCsvImport,
+  createProduct,
+  deleteProduct,
+  mergeProducts,
+  productMergeHistory,
+  previewMergeProducts,
+  previewProductCsvImport,
+  undoMergeProductHistory,
+  updateProduct
+} from "./catalog-product-write-entry.js";
+
+export {
+  deleteSkuMapping,
   mappings,
-  updateSkuMapping,
-  deleteSkuMapping
-} from "../services.js";
+  updateSkuMapping
+} from "./catalog-mappings-entry.js";

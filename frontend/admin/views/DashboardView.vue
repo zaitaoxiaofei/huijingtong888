@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { apiClient } from "../utils/api";
+import { shanghaiDateTimeText } from "../utils/shanghai-date.js";
 import PageFooterPagination from "../components/PageFooterPagination.vue";
 
 const TABLE_HEIGHT = 360;
@@ -64,8 +65,7 @@ function imageUrl(row) {
 }
 
 function dateText(value) {
-  if (!value) return "-";
-  return new Date(value).toLocaleString("zh-CN", { hour12: false });
+  return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
 }
 
 function tagType(level) {
