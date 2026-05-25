@@ -9,13 +9,13 @@ const loading = ref(false);
 const syncing = ref(false);
 const detailLoading = ref(false);
 const detailVisible = ref(false);
+const profitDetailVisible = ref(false);
 const activeTab = ref("dashboard");
 const shops = ref([]);
 const summary = ref({});
 const detailRows = ref([]);
 const trendRows = ref([]);
 const currentRow = ref(null);
-
 const state = reactive({
   rows: [],
   total: 0,
@@ -25,18 +25,15 @@ const state = reactive({
   sortOrder: "descending",
   filters: {
     shopId: "",
-    from: dateDaysAgo(13),
+    from: dateDaysAgo(6),
     to: todayKey(),
     keyword: "",
-    adStatus: "all",
+    adStatus: "active",
     adStage: "all",
     adType: "all"
   }
 });
 const tableFilters = reactive({
-  shopId: "",
-  campaignStatus: "",
-  stage: "",
   diagnosis: "",
   sortProp: "",
   sortOrder: ""
@@ -44,6 +41,7 @@ const tableFilters = reactive({
 
 const enrichedRows = computed(() => state.rows.map((row) => ({ ...row, evaluation: evaluateAdSku(row) })));
 const filteredRows = computed(() => enrichedRows.value.filter(matchesFilters));
+const filteredSummary = computed(() => summarizeRows(filteredRows.value));
 const dashboard = computed(() => summarizeAdDashboard(filteredRows.value));
 const tasks = computed(() => buildAdTasks(filteredRows.value));
 const prioritizedTasks = computed(() => [...tasks.value]
@@ -77,13 +75,6 @@ const pagedRows = computed(() => {
   const sorted = tableSortedRows.value;
   const start = (state.page - 1) * state.pageSize;
   return sorted.slice(start, start + state.pageSize);
-});
-const tableShopOptions = computed(() => {
-  const map = new Map();
-  for (const row of filteredRows.value) {
-    if (row.shop_id || row.shop_name) map.set(String(row.shop_id || row.shop_name), row.shop_name || "未知店铺");
-  }
-  return [...map.entries()].map(([value, label]) => ({ value, label }));
 });
 const diagnosisOptions = computed(() => {
   const values = [...new Set(filteredRows.value.map((row) => primaryTag(row).label).filter(Boolean))];
@@ -124,12 +115,18 @@ const storeSpendRank = computed(() => {
 const highSpendSkuRank = computed(() => [...filteredRows.value]
   .sort((a, b) => b.evaluation.metrics.spend - a.evaluation.metrics.spend)
   .slice(0, 8));
-const maxStoreSpend = computed(() => Math.max(1, ...storeSpendRank.value.map((item) => item.spend)));
-const maxSkuSpend = computed(() => Math.max(1, ...highSpendSkuRank.value.map((row) => row.evaluation.metrics.spend)));
+const maxStoreCompare = computed(() => Math.max(1, ...storeSpendRank.value.flatMap((item) => [item.spend, item.revenue])));
+const maxSkuCompare = computed(() => Math.max(1, ...highSpendSkuRank.value.flatMap((row) => [
+  row.evaluation.metrics.spend,
+  row.evaluation.metrics.revenue
+])));
 const ctrTopRows = computed(() => [...filteredRows.value].sort((a, b) => b.evaluation.metrics.ctr - a.evaluation.metrics.ctr).slice(0, 5));
 const trendSeries = computed(() => {
   const map = new Map();
-  for (const row of trendRows.value) {
+  const scopedTrendRows = trendRows.value
+    .map((row) => ({ ...row, evaluation: evaluateAdSku(row) }))
+    .filter(matchesFilters);
+  for (const row of scopedTrendRows) {
     const date = String(row.date_key || "").slice(0, 10);
     if (!date) continue;
     const current = map.get(date) || { date, spend: 0, revenue: 0, clicks: 0, impressions: 0, orders: 0 };
@@ -192,7 +189,7 @@ const todoItems = computed(() => {
 
 const countMainImageTasks = computed(() => filteredRows.value.filter((row) => row.evaluation.tags.some((tag) => tag.label.includes("主图"))).length);
 const countDetailTasks = computed(() => filteredRows.value.filter((row) => row.evaluation.tags.some((tag) => tag.label.includes("转化"))).length);
-const averageCpc = computed(() => Number(summary.value.clicks || 0) ? Number(summary.value.spend_rub || 0) / Number(summary.value.clicks || 1) : 0);
+const averageCpc = computed(() => Number(filteredSummary.value.clicks || 0) ? Number(filteredSummary.value.spend_rub || 0) / Number(filteredSummary.value.clicks || 1) : 0);
 const riskSkuCount = computed(() => filteredRows.value.filter((row) => ["pause", "optimize"].includes(row.evaluation.status.key)).length);
 const storeHealth = computed(() => ({
   score: dashboard.value.averageScore,
@@ -202,7 +199,7 @@ const storeHealth = computed(() => ({
 
 const aiConclusion = computed(() => {
   if (!filteredRows.value.length) return "当前筛选范围内还没有广告数据，请先同步 Ozon 广告。";
-  return `今日广告整体表现：${storeHealth.value.label}。ROAS ${decimal(summary.value.roas)}，CTR ${percent(summary.value.ctr)}，CR ${percent(summary.value.conversion_rate)}。当前有 ${dashboard.value.scale.length} 个 SKU 可加预算，${dashboard.value.pause.length} 个 SKU 建议暂停。`;
+  return `今日广告整体表现：${storeHealth.value.label}。ROAS ${decimal(filteredSummary.value.roas)}，CTR ${percent(filteredSummary.value.ctr)}，CR ${percent(filteredSummary.value.conversion_rate)}。当前有 ${dashboard.value.scale.length} 个 SKU 可加预算，${dashboard.value.pause.length} 个 SKU 建议暂停。`;
 });
 
 function todayKey() {
@@ -219,6 +216,10 @@ function money(value) {
   return `RUB ${Number(value || 0).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function rub(value) {
+  return Number(value || 0).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 function integer(value) {
   return Number(value || 0).toLocaleString("zh-CN");
 }
@@ -229,6 +230,26 @@ function percent(value) {
 
 function decimal(value) {
   return Number(value || 0).toFixed(2);
+}
+
+function summarizeRows(rows = []) {
+  const total = rows.reduce((acc, row) => {
+    const metrics = row.evaluation?.metrics || evaluateAdSku(row).metrics;
+    acc.spend_rub += Number(metrics.spend || row.spend_rub || 0);
+    acc.revenue_rub += Number(metrics.revenue || row.revenue_rub || 0);
+    acc.impressions += Number(metrics.impressions || row.impressions || 0);
+    acc.clicks += Number(metrics.clicks || row.clicks || 0);
+    acc.orders += Number(metrics.orders || row.orders || 0);
+    acc.units += Number(row.units || 0);
+    return acc;
+  }, { spend_rub: 0, revenue_rub: 0, impressions: 0, clicks: 0, orders: 0, units: 0 });
+  return {
+    ...total,
+    ctr: total.impressions ? total.clicks / total.impressions : 0,
+    conversion_rate: total.clicks ? total.orders / total.clicks : 0,
+    acos: total.revenue_rub ? total.spend_rub / total.revenue_rub : 0,
+    roas: total.spend_rub ? total.revenue_rub / total.spend_rub : 0
+  };
 }
 
 function taskPriorityScore(task) {
@@ -282,12 +303,14 @@ function scoreTone(score) {
   return "danger";
 }
 
-function matchesFilters(row) {
+function matchesFilters(row, options = {}) {
+  if (!options.ignoreShop && state.filters.shopId && String(row.shop_id || row.shop_name) !== state.filters.shopId) return false;
   const keyword = String(state.filters.keyword || "").trim().toLowerCase();
   if (keyword) {
     const haystack = [row.ozon_sku, row.product_name, row.offer_id, row.shop_name, row.ad_types].join(" ").toLowerCase();
     if (!haystack.includes(keyword)) return false;
   }
+  if (state.filters.adStatus === "active") return campaignStatus(row).key === "active";
   if (state.filters.adStatus === "closed") return campaignStatus(row).key === "closed";
   if (state.filters.adStatus !== "all" && row.evaluation.status.key !== state.filters.adStatus) return false;
   if (state.filters.adStage !== "all" && row.evaluation.stage.key !== state.filters.adStage) return false;
@@ -296,9 +319,6 @@ function matchesFilters(row) {
 }
 
 function matchesTableFilters(row) {
-  if (tableFilters.shopId && String(row.shop_id || row.shop_name) !== tableFilters.shopId) return false;
-  if (tableFilters.campaignStatus && campaignStatus(row).key !== tableFilters.campaignStatus) return false;
-  if (tableFilters.stage && row.evaluation.stage.key !== tableFilters.stage) return false;
   if (tableFilters.diagnosis && primaryTag(row).label !== tableFilters.diagnosis) return false;
   return true;
 }
@@ -318,12 +338,13 @@ function resetTablePage() {
 }
 
 function campaignStatus(row) {
-  const states = String(row.campaign_states || row.campaign_state || "").toLowerCase();
+  const states = String(row.latest_campaign_states || row.campaign_states || row.campaign_state || "").toLowerCase();
   if (!states) return { key: "unknown", label: "状态未知", tone: "info" };
-  const activeWords = ["running", "active", "enabled", "started", "moderation"];
   const closedWords = ["stopped", "stop", "archived", "archive", "deleted", "finished", "inactive", "disabled", "ended"];
-  if (activeWords.some((word) => states.includes(word))) return { key: "active", label: "投放中", tone: "success" };
-  if (closedWords.some((word) => states.includes(word))) return { key: "closed", label: "已关闭", tone: "info" };
+  const activeWords = ["running", "active", "enabled", "started", "moderation"];
+  const tokens = states.split(/[^a-z0-9]+/).filter(Boolean);
+  if (activeWords.some((word) => tokens.includes(word))) return { key: "active", label: "投放中", tone: "success" };
+  if (closedWords.some((word) => tokens.includes(word))) return { key: "closed", label: "已关闭", tone: "info" };
   return { key: "unknown", label: states.slice(0, 24), tone: "info" };
 }
 
@@ -375,6 +396,76 @@ function progressWidth(value, max) {
   return `${Math.max(3, Math.min(100, (Number(value || 0) / Math.max(1, Number(max || 1))) * 100))}%`;
 }
 
+function budgetRemaining(row) {
+  return Math.max(0, Number(row.campaign_budget_rub || 0) - Number(row.evaluation?.metrics?.spend || row.spend_rub || 0));
+}
+
+function budgetText(row) {
+  const budget = Number(row.campaign_budget_rub || 0);
+  if (budget <= 0) return "预算待同步";
+  return `预算 ${rub(budget)} / 剩余 ${rub(budgetRemaining(row))}`;
+}
+
+function readableCampaignStatus(row) {
+  const status = campaignStatus(row);
+  if (status.key !== "unknown") return status;
+  const raw = String(row.latest_campaign_states || row.campaign_states || row.campaign_state || "").toLowerCase();
+  const labels = {
+    campaign_state_inactive: "已关闭",
+    inactive: "已关闭",
+    stopped: "已关闭",
+    archived: "已归档",
+    finished: "已结束",
+    active: "投放中",
+    running: "投放中",
+    enabled: "投放中",
+    moderation: "审核中"
+  };
+  const match = Object.entries(labels).find(([key]) => raw.includes(key));
+  return match ? { key: status.key, label: match[1], tone: status.tone } : { ...status, label: raw ? "状态未知" : status.label };
+}
+
+function compactPercentOrPending(value) {
+  return value == null || value === "" ? "待接入" : percent(value);
+}
+
+function moneyCny(value) {
+  return `CNY ${rub(value)}`;
+}
+
+function grossProfitCny(row = {}) {
+  return Number(row.model_profit_cny ?? 0);
+}
+
+function adSpendCny(row = {}) {
+  return Number(row.ad_spend_cny ?? 0);
+}
+
+function profitDetailValue(value) {
+  return value == null || value === "" ? "待接入" : moneyCny(value);
+}
+
+function profitModelStatusText(row = {}) {
+  const status = row.profit_model_status || "";
+  if (status === "estimated_without_ad_cost") return "已接入利润预估模型";
+  if (status === "missing_inventory_binding") return "未绑定库存产品，暂无法套用预估模型";
+  if (status === "missing_sale_price") return "缺少广告销售额/本地售价，暂无法套用预估模型";
+  return "待接入";
+}
+
+function adProfitStatusText(row = {}) {
+  const status = row.ad_profit_status || "";
+  if (status === "current_range_ad_orders") return "当前筛选时间内广告订单";
+  if (status === "no_ad_orders") return "当前筛选时间内无广告订单";
+  if (status === "missing_profit_model") return "有广告订单，但利润模型待接入";
+  return "待接入";
+}
+
+function openProfitDetails(row) {
+  currentRow.value = row;
+  profitDetailVisible.value = true;
+}
+
 function metricTrendText() {
   return "较7日均值";
 }
@@ -392,14 +483,14 @@ async function bootstrap() {
   }
 }
 
-function buildParams() {
+function buildParams(options = {}) {
   const params = new URLSearchParams({
     page: "1",
-    pageSize: "200",
+    pageSize: "1000",
     sortBy: state.sortBy,
     sortOrder: state.sortOrder === "ascending" ? "asc" : "desc"
   });
-  if (state.filters.shopId) params.set("shopId", state.filters.shopId);
+  if (options.includeShop !== false && state.filters.shopId) params.set("shopId", state.filters.shopId);
   if (state.filters.from) params.set("from", state.filters.from);
   if (state.filters.to) params.set("to", state.filters.to);
   return params;
@@ -456,17 +547,15 @@ function handleSearch() {
 function handleReset() {
   state.page = 1;
   Object.assign(state.filters, {
-    from: dateDaysAgo(13),
+    shopId: "",
+    from: dateDaysAgo(6),
     to: todayKey(),
     keyword: "",
-    adStatus: "all",
+    adStatus: "active",
     adStage: "all",
     adType: "all"
   });
   Object.assign(tableFilters, {
-    shopId: "",
-    campaignStatus: "",
-    stage: "",
     diagnosis: "",
     sortProp: "",
     sortOrder: ""
@@ -515,7 +604,7 @@ onMounted(bootstrap);
       </div>
       <div class="hero-actions">
         <el-button type="success" :loading="syncing" @click="syncFromOzon">同步 Ozon 广告</el-button>
-        <el-button type="primary" :icon="Refresh" :loading="loading" @click="loadRows">刷新</el-button>
+        <el-button type="primary" :icon="Refresh" :loading="syncing" @click="syncFromOzon">刷新</el-button>
       </div>
     </section>
 
@@ -533,6 +622,7 @@ onMounted(bootstrap);
         <el-form-item label="广告状态">
           <el-select v-model="state.filters.adStatus" style="width: 130px">
             <el-option label="全部" value="all" />
+            <el-option label="投放中" value="active" />
             <el-option label="正常" value="normal" />
             <el-option label="需观察" value="watch" />
             <el-option label="建议优化" value="optimize" />
@@ -580,32 +670,32 @@ onMounted(bootstrap);
           <span>分</span>
         </div>
         <div class="health-metrics">
-          <div><span>ROAS</span><strong>{{ decimal(summary.roas) }}</strong></div>
-          <div><span>CTR</span><strong>{{ percent(summary.ctr) }}</strong></div>
-          <div><span>CR</span><strong>{{ percent(summary.conversion_rate) }}</strong></div>
-          <div><span>ACOS</span><strong>{{ percent(summary.acos) }}</strong></div>
+          <div><span>ROAS</span><strong>{{ decimal(filteredSummary.roas) }}</strong></div>
+          <div><span>CTR</span><strong>{{ percent(filteredSummary.ctr) }}</strong></div>
+          <div><span>CR</span><strong>{{ percent(filteredSummary.conversion_rate) }}</strong></div>
+          <div><span>ACOS</span><strong>{{ percent(filteredSummary.acos) }}</strong></div>
         </div>
         <p>{{ aiConclusion }}</p>
       </div>
       <div class="compact-metrics">
         <div class="mini-card">
           <span>广告花费</span>
-          <strong>{{ money(summary.spend_rub) }}</strong>
+          <strong>{{ money(filteredSummary.spend_rub) }}</strong>
           <small>↗ {{ metricTrendText() }}</small>
         </div>
         <div class="mini-card">
           <span>广告销售额</span>
-          <strong>{{ money(summary.revenue_rub) }}</strong>
+          <strong>{{ money(filteredSummary.revenue_rub) }}</strong>
           <small>↗ {{ metricTrendText() }}</small>
         </div>
         <div class="mini-card">
           <span>点击 / 展示</span>
-          <strong>{{ integer(summary.clicks) }} / {{ integer(summary.impressions) }}</strong>
+          <strong>{{ integer(filteredSummary.clicks) }} / {{ integer(filteredSummary.impressions) }}</strong>
           <small>曝光承接能力</small>
         </div>
         <div class="mini-card">
           <span>订单</span>
-          <strong>{{ integer(summary.orders) }}</strong>
+          <strong>{{ integer(filteredSummary.orders) }}</strong>
           <small>广告归因订单</small>
         </div>
         <div class="mini-card">
@@ -672,18 +762,25 @@ onMounted(bootstrap);
         <el-table-column type="expand" width="44">
           <template #default="{ row }">
             <div class="expand-grid">
+              <div><span>店铺</span><strong>{{ row.shop_name || "未知店铺" }}</strong></div>
+              <div><span>状态</span><strong>{{ readableCampaignStatus(row).label }}</strong></div>
+              <div><span>阶段</span><strong>{{ row.evaluation.stage.label }}</strong></div>
               <div><span>CPC 点击成本</span><strong>{{ money(row.evaluation.metrics.cpc) }}</strong></div>
               <div><span>展示</span><strong>{{ integer(row.evaluation.metrics.impressions) }}</strong></div>
               <div><span>点击</span><strong>{{ integer(row.evaluation.metrics.clicks) }}</strong></div>
               <div><span>订单</span><strong>{{ integer(row.evaluation.metrics.orders) }}</strong></div>
               <div><span>广告销售额</span><strong>{{ money(row.evaluation.metrics.revenue) }}</strong></div>
-              <div><span>毛利率</span><strong>{{ row.evaluation.metrics.grossMarginRate == null ? "待接入" : percent(row.evaluation.metrics.grossMarginRate) }}</strong></div>
-              <div><span>广告净利润</span><strong>{{ row.evaluation.metrics.adNetProfit == null ? "待接入" : money(row.evaluation.metrics.adNetProfit) }}</strong></div>
-              <div><span>附加标签</span><strong>{{ row.evaluation.tags.map((tag) => tag.label).join(" / ") }}</strong></div>
+              <div class="profit-card">
+                <span>毛利率</span>
+                <strong>{{ compactPercentOrPending(row.gross_margin_rate) }}</strong>
+                <el-button link type="primary" size="small" @click.stop="openProfitDetails(row)">查看详情</el-button>
+              </div>
+              <div><span>广告净利润率</span><strong>{{ compactPercentOrPending(row.ad_net_profit_rate) }}</strong></div>
+              <div><span>广告净利润</span><strong>{{ row.ad_net_profit_cny == null ? "待接入" : `CNY ${rub(row.ad_net_profit_cny)}` }}</strong></div>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="SKU / 商品" min-width="310" fixed="left">
+        <el-table-column label="SKU / 商品" min-width="245" fixed="left">
           <template #default="{ row }">
             <div class="product-cell">
               <div class="thumb">
@@ -704,71 +801,53 @@ onMounted(bootstrap);
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="shop_name" label="店铺" width="150">
-          <template #header>
-            <el-select v-model="tableFilters.shopId" clearable filterable size="small" placeholder="店铺" class="table-filter-select" @change="resetTablePage">
-              <el-option v-for="shop in tableShopOptions" :key="shop.value" :label="shop.label" :value="shop.value" />
-            </el-select>
-          </template>
-        </el-table-column>
-        <el-table-column label="真实状态" width="120">
-          <template #header>
-            <el-select v-model="tableFilters.campaignStatus" clearable size="small" placeholder="状态" class="table-filter-select" @change="resetTablePage">
-              <el-option label="投放中" value="active" />
-              <el-option label="已关闭" value="closed" />
-              <el-option label="状态未知" value="unknown" />
-            </el-select>
-          </template>
+        <el-table-column prop="spend_rub" label="花费（RUB）" width="165" sortable="custom" align="right">
           <template #default="{ row }">
-            <el-tag :type="campaignStatus(row).tone" effect="light">{{ campaignStatus(row).label }}</el-tag>
+            <div class="spend-metric-cell">
+              <strong>{{ rub(row.evaluation.metrics.spend) }}</strong>
+              <span>{{ budgetText(row) }}</span>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="阶段" width="120">
-          <template #header>
-            <el-select v-model="tableFilters.stage" clearable size="small" placeholder="阶段" class="table-filter-select" @change="resetTablePage">
-              <el-option label="测款" value="testing" />
-              <el-option label="放量" value="scale" />
-              <el-option label="稳定" value="stable" />
-              <el-option label="止损" value="stop_loss" />
-              <el-option label="观察" value="observe" />
-            </el-select>
-          </template>
-          <template #default="{ row }"><el-tag :type="toneType(row.evaluation.stage.tone)" effect="light">{{ row.evaluation.stage.label }}</el-tag></template>
-        </el-table-column>
-        <el-table-column prop="spend_rub" label="花费" width="125" sortable="custom" align="right">
-          <template #default="{ row }">{{ money(row.evaluation.metrics.spend) }}</template>
-        </el-table-column>
-        <el-table-column prop="roas" label="ROAS" width="90" align="right" sortable="custom">
+        <el-table-column prop="roas" label="ROAS" width="120" align="right" sortable="custom">
           <template #header>
             <el-tooltip placement="top" effect="dark" content="ROAS（投产比）：广告销售额 / 广告花费。数值越高越好，例如 4.70 表示花 1 RUB 广告费带来 4.70 RUB 销售额。">
               <span class="metric-header">ROAS</span>
             </el-tooltip>
           </template>
-          <template #default="{ row }">{{ decimal(row.evaluation.metrics.roas) }}</template>
+          <template #default="{ row }">
+            <div class="formula-metric"><strong>{{ decimal(row.evaluation.metrics.roas) }}</strong><span>{{ rub(row.evaluation.metrics.revenue) }} / {{ rub(row.evaluation.metrics.spend) }}</span></div>
+          </template>
         </el-table-column>
-        <el-table-column prop="ctr" label="CTR" width="95" align="right" sortable="custom">
+        <el-table-column prop="ctr" label="CTR" width="120" align="right" sortable="custom">
           <template #header>
             <el-tooltip placement="top" effect="dark" content="CTR（点击率）：点击数 / 展示数。主要看主图、标题、价格是否吸引人。">
               <span class="metric-header">CTR</span>
             </el-tooltip>
           </template>
-          <template #default="{ row }">{{ percent(row.evaluation.metrics.ctr) }}</template>
+          <template #default="{ row }">
+            <div class="formula-metric"><strong>{{ percent(row.evaluation.metrics.ctr) }}</strong><span>{{ integer(row.evaluation.metrics.clicks) }} / {{ integer(row.evaluation.metrics.impressions) }}</span></div>
+          </template>
         </el-table-column>
-        <el-table-column prop="cr" label="CR" width="95" align="right" sortable="custom">
+        <el-table-column prop="cr" label="CR" width="120" align="right" sortable="custom">
           <template #header>
             <el-tooltip placement="top" effect="dark" content="CR（转化率）：订单数 / 点击数。主要看详情页、价格、评价、物流和 SKU 是否匹配。">
               <span class="metric-header">CR</span>
             </el-tooltip>
           </template>
-          <template #default="{ row }">{{ percent(row.evaluation.metrics.cr) }}</template>
+          <template #default="{ row }">
+            <div class="formula-metric"><strong>{{ percent(row.evaluation.metrics.cr) }}</strong><span>{{ integer(row.evaluation.metrics.orders) }} / {{ integer(row.evaluation.metrics.clicks) }}</span></div>
+          </template>
         </el-table-column>
-        <el-table-column prop="acos" label="ACOS" width="100" align="right" sortable="custom">
+        <el-table-column prop="acos" label="ACOS" width="120" align="right" sortable="custom">
           <template #header>
             <el-tooltip placement="top" effect="dark" content="ACOS（广告成本销售比）：广告花费 / 广告销售额。数值越低越好，表示广告费占销售额的比例。">
               <span class="metric-header">ACOS</span>
             </el-tooltip>
           </template>
-          <template #default="{ row }">{{ percent(row.evaluation.metrics.acos) }}</template>
+          <template #default="{ row }">
+            <div class="formula-metric"><strong>{{ percent(row.evaluation.metrics.acos) }}</strong><span>{{ rub(row.evaluation.metrics.spend) }} / {{ rub(row.evaluation.metrics.revenue) }}</span></div>
+          </template>
         </el-table-column>
         <el-table-column prop="healthScore" label="健康分" width="95" align="center" sortable="custom">
           <template #default="{ row }"><strong :class="`score-${scoreTone(row.evaluation.healthScore)}`">{{ row.evaluation.healthScore }}</strong></template>
@@ -824,8 +903,21 @@ onMounted(bootstrap);
               <strong>{{ shop.shop_name }}</strong>
               <span>{{ shop.skuTotal }} 个SKU / ROAS {{ decimal(shop.roas) }} / CTR {{ percent(shop.ctr) }}</span>
             </div>
-            <i><b :style="{ width: progressWidth(shop.spend, maxStoreSpend) }"></b></i>
-            <em>{{ money(shop.spend) }}</em>
+            <div class="spend-bars">
+              <div class="spend-bar-line cost">
+                <span>花费</span>
+                <i><b :style="{ width: progressWidth(shop.spend, maxStoreCompare) }"></b></i>
+                <em>{{ money(shop.spend) }}</em>
+              </div>
+              <div class="spend-bar-line revenue">
+                <span>收益</span>
+                <i><b :style="{ width: progressWidth(shop.revenue, maxStoreCompare) }"></b></i>
+                <em>{{ money(shop.revenue) }}</em>
+              </div>
+            </div>
+            <em class="compare-delta" :class="{ positive: shop.revenue >= shop.spend, negative: shop.revenue < shop.spend }">
+              差额 {{ shop.revenue >= shop.spend ? "+" : "-" }}{{ money(Math.abs(shop.revenue - shop.spend)).replace("RUB ", "") }}
+            </em>
           </div>
         </div>
         <div class="spend-card">
@@ -853,8 +945,21 @@ onMounted(bootstrap);
                 <small>{{ row.shop_name }} / ROAS {{ decimal(row.evaluation.metrics.roas) }} / 订单 {{ integer(row.evaluation.metrics.orders) }}</small>
               </div>
             </div>
-            <i><b :style="{ width: progressWidth(row.evaluation.metrics.spend, maxSkuSpend) }"></b></i>
-            <em>{{ money(row.evaluation.metrics.spend) }}</em>
+            <div class="spend-bars">
+              <div class="spend-bar-line cost">
+                <span>花费</span>
+                <i><b :style="{ width: progressWidth(row.evaluation.metrics.spend, maxSkuCompare) }"></b></i>
+                <em>{{ money(row.evaluation.metrics.spend) }}</em>
+              </div>
+              <div class="spend-bar-line revenue">
+                <span>收益</span>
+                <i><b :style="{ width: progressWidth(row.evaluation.metrics.revenue, maxSkuCompare) }"></b></i>
+                <em>{{ money(row.evaluation.metrics.revenue) }}</em>
+              </div>
+            </div>
+            <em class="compare-delta" :class="{ positive: row.evaluation.metrics.revenue >= row.evaluation.metrics.spend, negative: row.evaluation.metrics.revenue < row.evaluation.metrics.spend }">
+              差额 {{ row.evaluation.metrics.revenue >= row.evaluation.metrics.spend ? "+" : "-" }}{{ money(Math.abs(row.evaluation.metrics.revenue - row.evaluation.metrics.spend)).replace("RUB ", "") }}
+            </em>
           </div>
         </div>
       </div>
@@ -965,7 +1070,7 @@ onMounted(bootstrap);
             v-model:current-page="taskPages[column.key]"
             :page-size="taskPages.pageSize"
             :total="column.rows.length"
-            small
+            size="small"
             layout="prev, pager, next"
           />
         </div>
@@ -993,7 +1098,7 @@ onMounted(bootstrap);
           <div>
             <strong>{{ currentRow.ozon_sku }}</strong>
             <span>{{ currentRow.product_name || currentRow.offer_id || "未同步商品信息" }}</span>
-            <small>{{ currentRow.shop_name }} / {{ currentRow.evaluation.stage.label }} / {{ campaignStatus(currentRow).label }}</small>
+            <small>{{ currentRow.shop_name }} / {{ currentRow.evaluation.stage.label }} / {{ readableCampaignStatus(currentRow).label }}</small>
           </div>
         </section>
         <section class="drawer-metrics">
@@ -1036,6 +1141,46 @@ onMounted(bootstrap);
         </el-table>
       </div>
     </el-drawer>
+
+    <el-dialog v-model="profitDetailVisible" title="毛利率详情" width="620px">
+      <div v-if="currentRow" class="profit-detail-dialog">
+        <section class="drawer-product">
+          <div class="thumb compact">
+            <el-image v-if="currentRow.image_url" :src="currentRow.image_url" fit="cover" />
+            <span v-else>无图</span>
+          </div>
+          <div>
+            <strong>{{ currentRow.ozon_sku }}</strong>
+            <span>{{ currentRow.product_name || currentRow.offer_id || "未同步商品信息" }}</span>
+            <small>{{ currentRow.shop_name || "未知店铺" }}</small>
+          </div>
+        </section>
+        <section class="profit-detail-grid">
+          <div><span>模型状态</span><strong>{{ profitModelStatusText(currentRow) }}</strong></div>
+          <div><span>广告利润口径</span><strong>{{ adProfitStatusText(currentRow) }}</strong></div>
+          <div><span>计算数量</span><strong>{{ integer(currentRow.model_quantity || currentRow.units || currentRow.orders || 0) }}</strong></div>
+          <div><span>广告订单数量</span><strong>{{ integer(currentRow.ad_order_quantity || 0) }}</strong></div>
+          <div><span>预估单价</span><strong>{{ profitDetailValue(currentRow.model_sale_price_cny) }}</strong></div>
+          <div><span>预估销售额</span><strong>{{ profitDetailValue(currentRow.model_revenue_cny) }}</strong></div>
+          <div><span>广告销售额</span><strong>{{ profitDetailValue(currentRow.ad_revenue_cny) }}</strong></div>
+          <div><span>采购成本/件</span><strong>{{ profitDetailValue(currentRow.model_purchase_cost_cny) }}</strong></div>
+          <div><span>国内运费/件</span><strong>{{ profitDetailValue(currentRow.model_domestic_shipping_cny) }}</strong></div>
+          <div><span>国际运费/件</span><strong>{{ profitDetailValue(currentRow.model_international_shipping_cny) }}</strong></div>
+          <div><span>佣金/件</span><strong>{{ profitDetailValue(currentRow.model_commission_cny) }}</strong></div>
+          <div><span>支付手续费/件</span><strong>{{ profitDetailValue(currentRow.model_payment_fee_cny) }}</strong></div>
+          <div><span>提现服务费/件</span><strong>{{ profitDetailValue(currentRow.model_withdrawal_fee_cny) }}</strong></div>
+          <div><span>退货损耗/件</span><strong>{{ profitDetailValue(currentRow.model_return_loss_cny) }}</strong></div>
+          <div><span>包装费/件</span><strong>{{ profitDetailValue(currentRow.model_packaging_cost_cny) }}</strong></div>
+          <div><span>预估净利润（不含广告）</span><strong>{{ profitDetailValue(currentRow.model_profit_cny) }}</strong></div>
+          <div><span>毛利率（不含广告）</span><strong>{{ compactPercentOrPending(currentRow.gross_margin_rate) }}</strong></div>
+          <div><span>广告订单预估利润</span><strong>{{ profitDetailValue(currentRow.ad_model_profit_cny) }}</strong></div>
+          <div><span>广告花费折算</span><strong>{{ moneyCny(adSpendCny(currentRow)) }}</strong></div>
+          <div><span>广告净利润</span><strong>{{ currentRow.ad_net_profit_cny == null ? "待接入" : moneyCny(currentRow.ad_net_profit_cny) }}</strong></div>
+          <div><span>广告净利润率</span><strong>{{ compactPercentOrPending(currentRow.ad_net_profit_rate) }}</strong></div>
+        </section>
+        <p class="profit-formula">口径：毛利率复用库存产品利润预估模型，广告费率按 0 计算，包含采购、国内运费、国际运费、佣金、支付/提现费用、退货损耗和包装费。广告净利润 = 当前筛选时间内广告订单预估利润 - 当前筛选时间内广告花费；广告净利润率 = 广告净利润 / 当前筛选时间内广告销售额。没有广告销售额时净利润率不计算。</p>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -1095,11 +1240,14 @@ onMounted(bootstrap);
 }
 
 .filter-card {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
   gap: 14px;
-  padding: 14px 16px 0;
+  padding: 14px 16px 8px;
 }
 
 .ad-tabs {
@@ -1322,7 +1470,7 @@ onMounted(bootstrap);
 .drawer-product {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 9px;
   min-width: 0;
 }
 
@@ -1349,6 +1497,11 @@ onMounted(bootstrap);
   width: 42px;
   height: 56px;
   border-radius: 7px;
+}
+
+.product-cell .thumb {
+  width: 42px;
+  height: 56px;
 }
 
 .thumb.mini {
@@ -1389,6 +1542,34 @@ onMounted(bootstrap);
   font-weight: 700;
 }
 
+.spend-metric-cell,
+.formula-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.25;
+}
+
+.spend-metric-cell strong,
+.formula-metric strong {
+  color: #111827;
+  font-size: 13px;
+}
+
+.spend-metric-cell strong {
+  font-size: 14px;
+}
+
+.spend-metric-cell span,
+.formula-metric span {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.spend-metric-cell span {
+  white-space: nowrap;
+}
+
 .table-filter-select {
   width: 100%;
 }
@@ -1398,7 +1579,7 @@ onMounted(bootstrap);
 }
 
 .ad-table :deep(.el-table__row) {
-  height: 68px;
+  height: 72px;
 }
 
 .ad-table :deep(.ad-row-danger) {
@@ -1420,6 +1601,66 @@ onMounted(bootstrap);
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
   padding: 12px;
+}
+
+.expand-grid {
+  grid-template-columns: repeat(8, minmax(118px, 1fr));
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.expand-grid div {
+  min-height: 50px;
+  padding: 8px 10px;
+}
+
+.expand-grid strong {
+  font-size: 13px;
+}
+
+.profit-card :deep(.el-button) {
+  margin-top: 2px;
+  padding: 0;
+  height: 18px;
+  font-size: 11px;
+}
+
+.profit-detail-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.profit-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.profit-detail-grid div {
+  background: #f9fafb;
+  border: 1px solid #edf2f7;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.profit-detail-grid span {
+  display: block;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.profit-detail-grid strong {
+  display: block;
+  margin-top: 4px;
+  color: #111827;
+}
+
+.profit-formula {
+  margin: 0;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.7;
 }
 
 .score-success { color: #16a34a; }
@@ -1465,10 +1706,10 @@ onMounted(bootstrap);
 
 .spend-row {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) minmax(120px, 0.8fr) 128px;
+  grid-template-columns: minmax(230px, 0.9fr) minmax(260px, 1.4fr) 118px;
   gap: 12px;
   align-items: center;
-  min-height: 58px;
+  min-height: 74px;
   padding: 9px 0;
   border-bottom: 1px solid #e5e7eb;
 }
@@ -1496,6 +1737,26 @@ onMounted(bootstrap);
 .spend-row small {
   margin-top: 2px;
   color: #94a3b8;
+  font-size: 12px;
+}
+
+.spend-bars {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.spend-bar-line {
+  display: grid;
+  grid-template-columns: 36px minmax(88px, 1fr) 108px;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.spend-bar-line span {
+  margin: 0;
+  color: #64748b;
   font-size: 12px;
 }
 
@@ -1540,11 +1801,42 @@ onMounted(bootstrap);
   background: #f97316;
 }
 
+.spend-bar-line.cost b,
+.spend-row.sku .spend-bar-line.cost b {
+  background: #2563eb;
+}
+
+.spend-bar-line.revenue b,
+.spend-row.sku .spend-bar-line.revenue b {
+  background: #16a34a;
+}
+
+.spend-bar-line em {
+  font-size: 12px;
+  font-weight: 650;
+}
+
 .spend-row em {
   color: #111827;
   font-style: normal;
   font-weight: 700;
   text-align: right;
+}
+
+.compare-delta {
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.compare-delta.positive {
+  color: #047857;
+  background: #d1fae5;
+}
+
+.compare-delta.negative {
+  color: #b91c1c;
+  background: #fee2e2;
 }
 
 .rank-grid {
@@ -1763,9 +2055,12 @@ onMounted(bootstrap);
 
   .compact-metrics,
   .rank-grid,
-  .spend-overview-grid,
   .task-columns {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .spend-overview-grid {
+    grid-template-columns: 1fr;
   }
 
   .ai-content {

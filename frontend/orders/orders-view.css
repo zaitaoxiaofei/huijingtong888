@@ -560,6 +560,143 @@
   padding-top: 16px;
 }
 
+.order-procurement-preview {
+  display: grid;
+  gap: 14px;
+  min-height: 220px;
+}
+
+.order-procurement-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.order-procurement-products {
+  display: grid;
+  gap: 12px;
+}
+
+.order-procurement-product {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.1fr) minmax(320px, 1fr) minmax(260px, 0.8fr);
+  gap: 14px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid rgba(203, 213, 225, 0.86);
+  border-radius: 8px;
+  background: rgba(248, 250, 252, 0.88);
+}
+
+.order-procurement-product-main,
+.order-procurement-order-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.order-procurement-image,
+.order-procurement-order-thumb {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 64px;
+  height: 64px;
+  overflow: hidden;
+  border: 1px solid rgba(203, 213, 225, 0.86);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+}
+
+.order-procurement-order-thumb {
+  width: 52px;
+  height: 52px;
+}
+
+.order-procurement-product-copy,
+.order-procurement-order-cell div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.order-procurement-product-copy span,
+.order-procurement-order-cell span {
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.order-procurement-stock-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.order-procurement-stock-grid div {
+  display: grid;
+  gap: 4px;
+  min-height: 58px;
+  padding: 10px;
+  border: 1px solid rgba(226, 232, 240, 0.92);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.order-procurement-stock-grid span {
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+}
+
+.order-procurement-stock-grid strong {
+  font-size: 16px;
+}
+
+.order-procurement-stock-grid .is-shortage strong {
+  color: #b45309;
+}
+
+.order-procurement-purchase-form {
+  display: grid;
+  gap: 8px;
+}
+
+.order-procurement-purchase-form .el-form-item {
+  margin-bottom: 0;
+}
+
+.order-procurement-missing {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: 8px;
+  background: rgba(255, 251, 235, 0.88);
+}
+
+.order-procurement-missing span {
+  min-width: 0;
+  color: var(--erp-text-secondary);
+  text-align: right;
+  word-break: break-all;
+}
+
+.orders-procurement-done {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+}
+
+.orders-procurement-done small {
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+}
+
 .orders-detail-head {
   display: flex;
   align-items: flex-start;

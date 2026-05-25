@@ -26,7 +26,7 @@ test("procurement requests support grouped paged list contract", async () => {
     assert.ok(Array.isArray(row.requester_names));
     assert.ok(Array.isArray(row.supplier_names));
     assert.ok(Array.isArray(row.purchase_links));
-    assert.equal(row.requests.every((item) => item.status === "submitted"), true);
+    assert.equal(row.requests.every((item) => ["pending", "submitted"].includes(item.status)), true);
   }
 });
 

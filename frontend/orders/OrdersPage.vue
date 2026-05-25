@@ -9,35 +9,21 @@ import PageFooterPagination from "../admin/components/PageFooterPagination.vue";
 import { apiClient } from "../admin/utils/api.js";
 import { shanghaiDateTimeText } from "../admin/utils/shanghai-date.js";
 import { useOrdersPage } from "./composables/useOrdersPage.js";
+import {
+  INVENTORY_LIST_PAGE_SIZE,
+  ORDER_DETAIL_CACHE_TTL_MS,
+  SEARCH_TYPE_OPTIONS,
+  STATE_META
+} from "./constants/orders-ui.js";
+import { buildProductDisplayRows, firstCsvValue, splitCsv } from "./utils/order-display.js";
+import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order-profit-detail.js";
 import "./orders-view.css";
 
 const ProcurementRequestCreateDialog = defineAsyncComponent(() => import("../admin/components/procurement/ProcurementRequestCreateDialog.vue"));
 const route = useRoute();
 const router = useRouter();
 
-const SEARCH_TYPE_OPTIONS = [
-  { value: "order", label: "订单号" },
-  { value: "sku", label: "SKU" },
-  { value: "offer", label: "货号" },
-  { value: "tracking", label: "跟踪号" },
-  { value: "purchaseTracking", label: "采购快递单号" },
-  { value: "product", label: "库存产品" }
-];
-
-const ORDER_DETAIL_CACHE_TTL_MS = 60 * 1000;
 const orderDetailCache = new Map();
-
-const STATE_META = {
-  all: { label: "全部订单", color: "slate" },
-  awaiting_packaging: { label: "等待备货", color: "amber" },
-  awaiting_deliver: { label: "等待发货", color: "blue" },
-  delivering: { label: "运输中", color: "green" },
-  dispute: { label: "有争议", color: "red" },
-  delivered: { label: "已签收", color: "green" },
-  cancelled: { label: "已取消", color: "slate" },
-  unbound: { label: "待绑定库存", color: "amber" },
-  stock_issue: { label: "库存异常", color: "red" }
-};
 
 const {
   vm,
@@ -62,6 +48,8 @@ const {
   handleMoreAction,
   fetchOrderDetail,
   prepareSingleOrder,
+  previewOrderProcurement,
+  createOrderProcurementRequests,
   printSingleOrder,
   recalculateOrderProfit,
   saveOrderMark,
@@ -97,6 +85,15 @@ const qualityDialog = reactive({
 const procurementDialog = reactive({
   visible: false,
   productId: null
+});
+
+const orderProcurementDialog = reactive({
+  visible: false,
+  loading: false,
+  submitting: false,
+  orderId: null,
+  preview: null,
+  selectedItemIds: []
 });
 
 const inventoryDialog = reactive({
@@ -158,7 +155,6 @@ const createForm = reactive({
 const bindProductQuery = ref("");
 const inventoryListPage = ref(1);
 const inventoryProductSearchTimer = ref(null);
-const INVENTORY_LIST_PAGE_SIZE = 10;
 const orderRouteBootstrapDone = ref(false);
 
 const detailOrder = computed(() => detailDialog.data?.order || {});
@@ -167,7 +163,13 @@ const detailFinance = computed(() => detailDialog.data?.finance || []);
 const detailProfitSnapshot = computed(() => detailDialog.data?.profit_detail_snapshot || null);
 const detailPrimaryItem = computed(() => detailItems.value[0] || {});
 const detailPrimaryImageUrl = computed(() => detailItemImageUrl(detailPrimaryItem.value));
-const detailProfit = computed(() => buildOrderProfitDetail(detailOrder.value, detailItems.value, detailFinance.value, detailProfitSnapshot.value));
+const detailProfit = computed(() => buildOrderProfitDetail(
+  detailOrder.value,
+  detailItems.value,
+  detailFinance.value,
+  detailProfitSnapshot.value,
+  { formatMoney, formatSignedMoney, formatPercent }
+));
 const selectedInventoryProduct = computed(() => (
   inventoryOptions.products.find((row) => Number(row.id) === Number(bindForm.productId)) || null
 ));
@@ -209,6 +211,23 @@ const createSelectedLogisticsRule = computed(() => (
 const createShippingMethodLabel = computed(() => (
   createSelectedLogisticsRule.value ? formatLogisticsRuleLabel(createSelectedLogisticsRule.value) : (createForm.shippingMethod || "-")
 ));
+const orderProcurementProducts = computed(() => (
+  Array.isArray(orderProcurementDialog.preview?.products) ? orderProcurementDialog.preview.products : []
+));
+const orderProcurementItems = computed(() => (
+  orderProcurementProducts.value.flatMap((product) => (
+    Array.isArray(product.items)
+      ? product.items.map((item) => ({ ...item, product }))
+      : []
+  ))
+));
+const orderProcurementSelectedCount = computed(() => orderProcurementDialog.selectedItemIds.length);
+const orderProcurementSelectedQuantity = computed(() => {
+  const selected = new Set(orderProcurementDialog.selectedItemIds.map(Number));
+  return orderProcurementItems.value
+    .filter((item) => selected.has(Number(item.order_item_id)))
+    .reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+});
 
 function formatDateTime(value) {
   return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
@@ -236,37 +255,6 @@ function moneyValueClass(value) {
   if (amount < -0.005) return "is-negative";
   if (amount > 0.005) return "is-positive";
   return "";
-}
-
-function numberOrNull(value) {
-  const amount = Number(value);
-  return Number.isFinite(amount) ? amount : null;
-}
-
-function positiveAmount(value) {
-  const amount = Number(value || 0);
-  return Number.isFinite(amount) && amount > 0 ? amount : 0;
-}
-
-function roundMoneyValue(value) {
-  const amount = Number(value || 0);
-  return Number.isFinite(amount) ? Math.round((amount + Number.EPSILON) * 100) / 100 : 0;
-}
-
-function parseMappedPairs(value, separator = "||") {
-  return String(value || "")
-    .split(separator)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .map((item) => {
-      const [key, ...rest] = item.split(":");
-      return { key: String(key || "").trim(), value: rest.join(":").trim() };
-    })
-    .filter((item) => item.key);
-}
-
-function splitCsv(value) {
-  return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
 }
 
 function inventoryProductLabel(row) {
@@ -421,9 +409,13 @@ function rowAvailableActions(row) {
     || logisticsText.includes("娣峰窛");
   const isAwaitingPackaging = ["awaiting_packaging", "unbound", "stock_issue"].includes(displayStateKey);
   const beforeTransit = !isCancelled && !isDelivered && !isDispute && !isDelivering;
+  const procurementTotal = Number(row?.procurement_total_item_count || 0);
+  const procurementHandledCount = Number(row?.procurement_handled_item_count || 0);
+  const procurementHandled = procurementTotal > 0 && procurementHandledCount >= procurementTotal;
   const localActions = {
     print: beforeTransit && !isFbp && (printed || isAwaitingDeliver),
     prepare: displayStateKey !== "awaiting_deliver" && beforeTransit && isAwaitingPackaging,
+    purchase: beforeTransit && isAwaitingDeliver && !procurementHandled,
     profit: true
   };
   const apiActions = row?.availableActions && typeof row.availableActions === "object" ? row.availableActions : {};
@@ -431,12 +423,9 @@ function rowAvailableActions(row) {
     ...apiActions,
     print: beforeTransit && !isFbp && (Boolean(apiActions.print) || localActions.print),
     prepare: beforeTransit && !isAwaitingDeliver && (Boolean(apiActions.prepare) || localActions.prepare),
+    purchase: beforeTransit && isAwaitingDeliver && !procurementHandled && (apiActions.purchase !== false),
     profit: apiActions.profit !== false
   };
-}
-
-function firstCsvValue(value) {
-  return String(value || "").split(",").map((item) => item.trim()).find(Boolean) || "";
 }
 
 function trackingLinkFor(value) {
@@ -444,16 +433,6 @@ function trackingLinkFor(value) {
   return track
     ? `https://tracking.ozon.ru/?${new URLSearchParams({ track, local: "zh-Hans" }).toString()}`
     : "";
-}
-
-function ozonBuyerProductLinkFor(value) {
-  const productId = String(value || "").trim();
-  return productId ? `https://www.ozon.ru/product/${encodeURIComponent(productId)}/` : "";
-}
-
-function fallbackOzonProductId(value) {
-  const text = String(value || "").trim();
-  return /^\d{6,}$/.test(text) ? text : "";
 }
 
 function formatOrderTitleParts(value) {
@@ -482,379 +461,6 @@ function detailItemImageUrl(item = {}) {
     || firstCsvValue(detailOrder.value.order_image_urls)
     || firstCsvValue(detailOrder.value.image_urls)
     || "";
-}
-
-function parseSkuMap(row, fieldName, transform = (value) => value) {
-  const map = new Map();
-  const separator = [
-    "sku_ozon_product_ids",
-    "sku_product_ids",
-    "sku_online_product_ids",
-    "sku_mapping_ids",
-    "sku_stock_summaries"
-  ].includes(fieldName) ? "," : "||";
-  for (const item of parseMappedPairs(row?.[fieldName], separator)) {
-    if (!map.has(item.key)) map.set(item.key, transform(item.value));
-  }
-  return map;
-}
-
-function shippingMethodLabel(value) {
-  const text = String(value || "").trim().toLowerCase();
-  if (!text) return "--";
-  if (text === "cel_air_land") return "CEL 陆空";
-  if (text === "cel_land") return "CEL 陆运";
-  if (text === "cel_large_land") return "CEL 大件陆运";
-  if (text === "postal_packet") return "邮政小包";
-  if (text === "hunchun_2") return "珲春 2";
-  if (text === "manual_review") return "人工核验";
-  if (text.includes("fbp")) return "平台仓发货";
-  if (text.includes("fbs")) return "自发货";
-  if (text.includes("air")) return "空运";
-  if (text.includes("sea")) return "海运";
-  return String(value || "").trim();
-}
-
-function financeCategory(row = {}) {
-  const raw = String(row.service_name || row.operation_type_name || row.service_type || row.operation_type || "").trim();
-  const normalized = raw.toLowerCase();
-  if (normalized.includes("sale_commission") || raw === "Ozon 销售佣金") return "commission";
-  if (normalized.includes("marketplaceredistributionofacquiringoperation")) return "collecting_fee";
-  if (normalized.includes("return_delivery_charge") || normalized.includes("returnflowlogistic") || normalized.includes("returnnotdelivtocustomer")) return "aftersale_loss";
-  if (normalized.includes("delivery_charge")) return "platform_delivery";
-  if (raw === "袩械褉械胁褘褋褌邪胁谢械薪懈械 褍褋谢褍谐 写芯褋褌邪胁泻懈" || raw.includes("写芯褋褌邪胁")) return "platform_delivery";
-  if (raw.includes("屑械卸写褍薪邪褉芯写") || raw.includes("褌褉邪薪褋锌芯褉褌薪芯-褝泻褋锌械写懈褑懈芯薪薪褘褏")) return "international_transport";
-  if (raw.includes("效邪褋褌懈褔薪邪褟 泻芯屑锌械薪褋邪褑懈褟 锌芯泻褍锌邪褌械谢褞") || raw.includes("胁芯蟹胁褉邪褌") || raw.includes("薪械写芯胁谢芯卸")) return "aftersale_loss";
-  return "other";
-}
-
-function sumRows(rows = [], getter = () => 0) {
-  return roundMoneyValue(rows.reduce((sum, row) => sum + Number(getter(row) || 0), 0));
-}
-
-function itemSaleAmount(item) {
-  return positiveAmount(item.sale_amount_cny) || Number(item.sale_price || 0) * Number(item.quantity || 1);
-}
-
-function itemQuantity(item) {
-  return Math.max(Number(item.quantity || 1), 1);
-}
-
-function itemEstimatedPurchaseCost(item) {
-  return positiveAmount(item.frozen_purchase_cost) * itemQuantity(item) || positiveAmount(item.purchase_cost_cny);
-}
-
-function itemEstimatedDomesticShipping(item) {
-  return positiveAmount(item.frozen_domestic_shipping) * itemQuantity(item) || positiveAmount(item.domestic_shipping_cny);
-}
-
-function itemEstimatedInternationalShipping(item) {
-  return positiveAmount(item.frozen_international_shipping) * itemQuantity(item) || positiveAmount(item.international_shipping_cny);
-}
-
-function itemActualPurchaseCost(item) {
-  return positiveAmount(item.purchase_cost_cny) || itemEstimatedPurchaseCost(item);
-}
-
-function itemActualDomesticShipping(item) {
-  return positiveAmount(item.domestic_shipping_cny) || itemEstimatedDomesticShipping(item);
-}
-
-function itemHasFinanceActualProfit(item = {}) {
-  const statusText = [item.settlement_state, item.profit_status].map((value) => String(value || "").toLowerCase()).join(" ");
-  const lockReason = String(item.lock_reason || "").toLowerCase();
-  return statusText.includes("accrued") && lockReason.includes("finance");
-}
-
-function hasFinanceSaleAccrual(finance = []) {
-  return (finance || []).some((row) => Math.abs(Number(row.accruals_for_sale_cny || row.accruals_for_sale || 0)) > 0.005);
-}
-
-function isFinalProfitOutcome(order = {}) {
-  const text = [
-    order.outcome_type,
-    order.status,
-    order.tracking_stage,
-    order.logistics_status,
-    order.accrued_at
-  ].map((value) => String(value || "").toLowerCase()).join(" ");
-  return text.includes("delivered")
-    || text.includes("signed")
-    || text.includes("cancel")
-    || text.includes("return")
-    || text.includes("reject")
-    || text.includes("accrued");
-}
-
-function financeCategoryTotal(finance = [], categories = []) {
-  const keys = new Set(Array.isArray(categories) ? categories : [categories]);
-  let matched = false;
-  const total = (finance || []).reduce((sum, row) => {
-    if (!keys.has(financeCategory(row))) return sum;
-    matched = true;
-    const feeAmount = numberOrNull(row.fee_amount_cny);
-    const rawAmount = Number(row.amount_cny || 0);
-    const amount = feeAmount !== null ? feeAmount : rawAmount < 0 ? Math.abs(rawAmount) : 0;
-    return sum + amount;
-  }, 0);
-  return matched ? roundMoneyValue(total) : null;
-}
-
-function valueDiff(actual, estimated) {
-  if (actual === null || actual === undefined) return null;
-  return roundMoneyValue(Number(actual || 0) - Number(estimated || 0));
-}
-
-function snapshotDetailNote(key) {
-  return {
-    sale: "订单全部商品销售收入。",
-    purchase: "本地库存商品采购成本。",
-    domestic: "本地采购到仓或集货的国内运费。",
-    international: "真实金额来自 Ozon 财务里的平台配送或国际运输费用；未出现前显示 --。",
-    packaging: "本地包装处理费规则或已保存利润项。",
-    commission: "真实金额来自 Ozon 销售佣金账单；FBP 减免以账单为准。",
-    collecting: "真实值来自 Ozon 收单手续费账单。",
-    service: "真实值来自非佣金、非物流、非售后类 Ozon 财务费用。",
-    aftersale: "真实值来自退货、拒收、补偿等售后财务费用。",
-    other: "广告费、手工调整或额外费用。",
-    costTotal: "真实成本未结算完整时不汇总，避免误导。",
-    profit: "订单未结算完整前不计算真实利润。"
-  }[key] || "";
-}
-
-function buildDetailMetricCards(summary) {
-  return [
-    {
-      label: "订单金额",
-      value: formatMoney(summary.saleAmount),
-      sub: "订单全部商品销售收入",
-      tone: "strong"
-    },
-    {
-      label: "利润",
-      lines: [
-        {
-          label: "实际利润",
-          value: summary.actualProfitReady ? formatMoney(summary.actualProfit) : "--"
-        },
-        {
-          label: "预估利润",
-          value: formatMoney(summary.estimatedProfit)
-        }
-      ],
-      sub: summary.actualProfitReady ? `差异 ${formatSignedMoney(summary.profitDiff)}` : "真实利润待 Ozon 财务结算后计算",
-      tone: summary.actualProfit < 0 ? "danger" : "default"
-    },
-    {
-      label: "实际利润率",
-      value: summary.actualProfitReady ? formatPercent(summary.actualMargin) : "--",
-      sub: "实际利润 / 销售额",
-      tone: summary.actualMargin < 0 ? "danger" : "strong"
-    },
-    {
-      label: "财务匹配状态",
-      value: summary.actualProfitReady ? "已结算" : summary.financeRows ? "已匹配" : "未匹配",
-      sub: summary.financeRows
-        ? `已识别 ${summary.financeRows} 类 Ozon 真实费用${summary.actualProfitReady ? "" : "，利润待结算"}`
-        : "未匹配到 Ozon 真实费用",
-      tone: summary.actualProfitReady || summary.financeRows ? "success" : "warning"
-    }
-  ];
-}
-
-function buildOrderProfitDetail(order = {}, items = [], finance = [], snapshot = null) {
-  if (snapshot?.summary && Array.isArray(snapshot?.rows)) {
-    const summary = {
-      saleAmount: Number(snapshot.summary.saleAmount || snapshot.sale_amount_cny || 0),
-      estimatedProfit: Number(snapshot.summary.estimatedProfit || snapshot.estimated_profit_cny || 0),
-      actualProfit: snapshot.summary.actualProfit ?? snapshot.actual_profit_cny,
-      profitDiff: snapshot.summary.actualProfit !== null && snapshot.summary.actualProfit !== undefined
-        ? roundMoneyValue(Number(snapshot.summary.actualProfit || 0) - Number(snapshot.summary.estimatedProfit || 0))
-        : null,
-      actualMargin: snapshot.summary.actualProfitRate ?? snapshot.actual_profit_rate,
-      hasActual: Number(snapshot.finance_rows || snapshot.summary.financeRows || 0) > 0,
-      actualProfitReady: Boolean(snapshot.summary.actualProfitReady || snapshot.actual_profit_ready),
-      financeRows: Number(snapshot.finance_rows || snapshot.summary.financeRows || 0),
-      estimatedCostTotal: Number(snapshot.summary.estimatedCostTotal || snapshot.estimated_cost_total_cny || 0),
-      actualCostTotal: snapshot.summary.actualCostTotal ?? snapshot.actual_cost_total_cny
-    };
-    return {
-      summary,
-      cards: buildDetailMetricCards(summary),
-      rows: snapshot.rows.map((row) => ({
-        ...row,
-        note: row.note || snapshotDetailNote(row.key),
-        strong: Boolean(row.strong)
-      })),
-      fromSnapshot: true
-    };
-  }
-  const rows = Array.isArray(items) ? items : [];
-  const financeRows = Array.isArray(finance) ? finance : [];
-  const hasFinalFinanceBasis = financeRows.length > 0 && (hasFinanceSaleAccrual(financeRows) || isFinalProfitOutcome(order));
-  const actualProfitReady = hasFinalFinanceBasis && rows.length > 0 && rows.every((item) => itemHasFinanceActualProfit(item));
-  const saleAmount = sumRows(rows, itemSaleAmount);
-  const estimated = {
-    sale: saleAmount,
-    purchase: sumRows(rows, itemEstimatedPurchaseCost),
-    domestic: sumRows(rows, itemEstimatedDomesticShipping),
-    international: sumRows(rows, itemEstimatedInternationalShipping),
-    packaging: sumRows(rows, (item) => positiveAmount(item.packaging_cost_cny)),
-    commission: sumRows(rows, (item) => positiveAmount(item.estimated_commission) || positiveAmount(item.commission_fee_cny)),
-    collecting: 0,
-    service: sumRows(rows, (item) => positiveAmount(item.ozon_service_fee_cny)),
-    aftersale: sumRows(rows, (item) => positiveAmount(item.aftersale_loss) || positiveAmount(item.return_loss_cny)),
-    other: sumRows(rows, (item) => positiveAmount(item.advertising_cost_cny) + positiveAmount(item.other_fee_cny)),
-    profit: sumRows(rows, (item) => numberOrNull(item.estimated_profit) ?? numberOrNull(item.net_profit_cny) ?? 0)
-  };
-  const financeInternational = financeCategoryTotal(financeRows, ["platform_delivery", "international_transport"]);
-  const financeCommission = financeCategoryTotal(financeRows, "commission");
-  const financeCollecting = financeCategoryTotal(financeRows, "collecting_fee");
-  const financeService = financeCategoryTotal(financeRows, "other");
-  const financeAftersale = financeCategoryTotal(financeRows, "aftersale_loss");
-  const actual = {
-    sale: saleAmount,
-    purchase: sumRows(rows, itemActualPurchaseCost),
-    domestic: sumRows(rows, itemActualDomesticShipping),
-    international: financeInternational ?? (actualProfitReady ? 0 : null),
-    packaging: sumRows(rows, (item) => positiveAmount(item.packaging_cost_cny)),
-    commission: financeCommission ?? (actualProfitReady ? 0 : null),
-    collecting: financeCollecting ?? (actualProfitReady ? 0 : null),
-    service: financeService ?? (actualProfitReady ? 0 : null),
-    aftersale: financeAftersale ?? (actualProfitReady ? 0 : null),
-    other: actualProfitReady ? sumRows(rows, (item) => positiveAmount(item.advertising_cost_cny) + positiveAmount(item.other_fee_cny)) : null,
-    profit: null
-  };
-  const estimatedCostTotal = roundMoneyValue(estimated.purchase + estimated.domestic + estimated.international + estimated.packaging + estimated.commission + estimated.collecting + estimated.service + estimated.aftersale + estimated.other);
-  const actualCostTotal = actualProfitReady
-    ? roundMoneyValue(actual.purchase + actual.domestic + (actual.international || 0) + actual.packaging + (actual.commission || 0) + (actual.collecting || 0) + (actual.service || 0) + (actual.aftersale || 0) + (actual.other || 0))
-    : null;
-  const estimatedProfit = estimated.profit || roundMoneyValue(saleAmount - estimatedCostTotal);
-  const actualProfit = actualProfitReady ? roundMoneyValue(saleAmount - actualCostTotal) : null;
-  const actualMargin = actualProfitReady && saleAmount ? actualProfit / saleAmount * 100 : null;
-
-  const moneyRow = (key, label, note) => ({
-    key,
-    label,
-    estimated: roundMoneyValue(estimated[key] || 0),
-    actual: actual[key],
-    diff: valueDiff(actual[key], estimated[key] || 0),
-    note
-  });
-
-  const detailRows = [
-    {
-      key: "shipping",
-      label: "运输方式",
-      estimatedText: shippingMethodLabel(rows[0]?.shipping_method || order.delivery_method || order.shipping_method),
-      actualText: financeRows.length || actualProfitReady ? shippingMethodLabel(order.delivery_method || order.shipping_method || rows[0]?.shipping_method) : "--",
-      diffText: "",
-      note: "预计按库存商品物流模型；真实列仅展示已匹配到订单维度的财务口径。"
-    },
-    moneyRow("sale", "订单金额", "订单全部商品销售收入。"),
-    moneyRow("purchase", "采购成本", "本地库存商品的采购成本，通常不会随 Ozon 结算变化。"),
-    moneyRow("domestic", "国内运费", "本地采购到仓或集货的国内运费。"),
-    moneyRow("international", "国际运费", "真实金额优先取 Ozon 财务里的平台配送或国际运输费用；未出现前不拿预估值冒充。"),
-    moneyRow("packaging", "包装处理费", "本地包装处理费规则或已保存利润项。"),
-    moneyRow("commission", "Ozon佣金", "真实金额来自 Ozon 销售佣金账单；FBP 减免以账单或结算后的 0 值为准。"),
-    moneyRow("collecting", "收单费", "真实值来自 Ozon 收单手续费账单。"),
-    moneyRow("service", "Ozon服务费", "真实值来自非佣金、非物流、非售后类 Ozon 财务费用。"),
-    moneyRow("aftersale", "售后损失", "真实值来自退货、拒收、补偿等售后财务费用。"),
-    moneyRow("other", "其他费用", "广告费、手工调整或额外费用。"),
-    {
-      key: "costTotal",
-      label: "总成本",
-      estimated: estimatedCostTotal,
-      actual: actualCostTotal,
-      diff: valueDiff(actualCostTotal, estimatedCostTotal),
-      note: actualProfitReady ? "实际成本合计已按结算后的真实值汇总。" : "真实成本未结算完整时不汇总，避免误导。",
-      strong: true
-    },
-    {
-      key: "profit",
-      label: "利润",
-      estimated: estimatedProfit,
-      actual: actualProfit,
-      diff: valueDiff(actualProfit, estimatedProfit),
-      note: actualProfitReady ? `实际利润率 ${formatPercent(actualMargin)}` : "订单未结算完整前不计算真实利润。",
-      strong: true
-    }
-  ];
-
-  const summary = {
-    saleAmount,
-    estimatedProfit,
-    actualProfit,
-    profitDiff: actualProfitReady ? roundMoneyValue(actualProfit - estimatedProfit) : null,
-    actualMargin,
-    hasActual: financeRows.length > 0 || actualProfitReady,
-    actualProfitReady,
-    financeRows: financeRows.length,
-    estimatedCostTotal,
-    actualCostTotal
-  };
-
-  return {
-    summary,
-    cards: buildDetailMetricCards(summary),
-    rows: detailRows
-  };
-}
-
-function profitDetailCellClassName({ columnIndex }) {
-  if (columnIndex === 2) return "orders-profit-actual-column";
-  return "";
-}
-
-function buildProductDisplayRows(row) {
-  const skuImages = parseSkuMap(row, "sku_images");
-  const skuNames = parseSkuMap(row, "sku_names");
-  const skuQuantities = parseSkuMap(row, "sku_quantities", (value) => Number(value || 0));
-  const ozonProductIds = parseSkuMap(row, "sku_ozon_product_ids");
-  const productIds = parseSkuMap(row, "sku_product_ids", (value) => Number(value || 0));
-  const onlineIds = parseSkuMap(row, "sku_online_product_ids", (value) => Number(value || 0));
-  const inventoryImages = splitCsv(row.inventory_image_urls);
-  const stockMap = parseSkuMap(row, "sku_stock_summaries", (value) => {
-    const parts = String(value || "").split(":");
-    return { fbs: Number(parts[0] || 0), fbp: Number(parts[1] || 0) };
-  });
-  const skus = splitCsv(row.skus);
-  const unboundSkus = new Set(splitCsv(row.unbound_skus));
-  const rawFallbackName = firstCsvValue(row.product_names);
-  const fallbackName = rawFallbackName && rawFallbackName !== "Unbound product" ? rawFallbackName : "";
-  const fallbackImage = firstCsvValue(row.order_image_urls) || firstCsvValue(row.image_urls) || inventoryImages[0] || "";
-
-  if (!skus.length) {
-    return [{
-      sku: row.ozon_sku || "-",
-      name: skuNames.get(row.ozon_sku) || fallbackName || row.ozon_sku || "待创建库存商品",
-      quantity: Number(row.total_quantity || row.quantity_total || row.quantity || row.item_count || 1),
-      imageUrl: fallbackImage,
-      stock: { fbs: 0, fbp: 0 },
-      productId: 0,
-      onlineId: 0,
-      ozonProductId: String(row.ozon_product_id || row.ozon_sku || ""),
-      unbound: true,
-      productLink: ozonBuyerProductLinkFor(row.ozon_product_id || row.ozon_sku)
-    }];
-  }
-
-  return skus.map((sku) => {
-    const ozonProductId = ozonProductIds.get(sku) || fallbackOzonProductId(sku) || "";
-    const onlineId = onlineIds.get(sku) || 0;
-    return {
-      sku,
-      name: skuNames.get(sku) || fallbackName || sku || "待创建库存商品",
-      quantity: skuQuantities.get(sku) || 0,
-      imageUrl: skuImages.get(sku) || fallbackImage || inventoryImages[0] || "",
-      stock: stockMap.get(sku) || { fbs: 0, fbp: 0 },
-      productId: productIds.get(sku) || 0,
-      onlineId,
-      ozonProductId,
-      unbound: unboundSkus.has(sku),
-      productLink: ozonBuyerProductLinkFor(ozonProductId)
-    };
-  });
 }
 
 function buildProfitSummary(row) {
@@ -899,6 +505,26 @@ function buildStatusDeadlineHint(displayStateKey, logisticsSummary) {
   return `剩余 ${diffDays} 天`;
 }
 
+function buildProcurementState(row = {}) {
+  const total = Number(row.procurement_total_item_count || 0);
+  const handled = Number(row.procurement_handled_item_count || 0);
+  if (!total || !handled) return { handled: false, label: "", detail: "" };
+  const types = splitCsv(row.procurement_handling_types);
+  const stockCount = types.includes("stock_available");
+  const requestCount = types.includes("procurement_request");
+  const detail = stockCount && requestCount
+    ? "库存可满足/已提交采购"
+    : stockCount
+      ? "库存可满足"
+      : "已提交采购";
+  return {
+    handled: handled >= total,
+    partial: handled > 0 && handled < total,
+    label: handled >= total ? "采购已处理" : "部分处理",
+    detail
+  };
+}
+
 function buildTableRow(row) {
   const productDisplayRows = buildProductDisplayRows(row);
   const profitSummary = buildProfitSummary(row);
@@ -923,7 +549,7 @@ function buildTableRow(row) {
       return {
         productId,
         sku: item.sku || "",
-        productName: fallbackIndex >= 0 ? (productNames[fallbackIndex] || item.name) : (item.name || productNames[0] || "搴撳瓨鍟嗗搧"),
+        productName: fallbackIndex >= 0 ? (productNames[fallbackIndex] || item.name) : (item.name || productNames[0] || "库存商品"),
         amountText: `CNY ${formatMoney(profitSummary.revenue)}`
       };
     })
@@ -957,6 +583,7 @@ function buildTableRow(row) {
     statusLabel: rowStateLabel(row),
     statusColor: rowStateColor(row),
     statusDeadlineHint: buildStatusDeadlineHint(displayStateKey, logisticsSummary),
+    procurementState: buildProcurementState(row),
     availableActions: rowAvailableActions(row)
   };
 }
@@ -1016,7 +643,7 @@ async function ensureInventoryOptionsLoaded() {
       }
     }
   } catch (error) {
-    ElMessage.error(error.message || "???????????????");
+    ElMessage.error(error.message || "初始化库存选项失败");
     throw error;
   } finally {
     inventoryOptionsLoading.value = false;
@@ -1041,7 +668,7 @@ async function loadInventoryProductOptions() {
     inventoryOptions.products = normalizePagedRows(result).filter((item) => Number(item.active ?? 1) !== 0);
     inventoryOptions.productTotal = Array.isArray(result) ? inventoryOptions.products.length : Number(result?.total || 0);
   } catch (error) {
-    ElMessage.error(error.message || "閸旂姾娴囨惔鎾崇摠閸熷棗鎼ф径杈Е");
+    ElMessage.error(error.message || "加载库存商品失败");
     throw error;
   } finally {
     inventoryOptionsLoading.value = false;
@@ -1267,6 +894,128 @@ function handleOpenProcurement(productId) {
   procurementDialog.visible = Boolean(procurementDialog.productId);
 }
 
+async function handleOpenOrderProcurement(orderId) {
+  orderProcurementDialog.orderId = Number(orderId || 0) || null;
+  if (!orderProcurementDialog.orderId) return;
+  orderProcurementDialog.visible = true;
+  orderProcurementDialog.loading = true;
+  orderProcurementDialog.preview = null;
+  orderProcurementDialog.selectedItemIds = [];
+  try {
+    orderProcurementDialog.preview = await previewOrderProcurement(orderProcurementDialog.orderId);
+    initializeProcurementPurchaseInputs();
+    orderProcurementDialog.selectedItemIds = orderProcurementItems.value.map((item) => Number(item.order_item_id)).filter(Boolean);
+  } catch (error) {
+    ElMessage.error(error.message || "采购预览加载失败");
+    orderProcurementDialog.visible = false;
+  } finally {
+    orderProcurementDialog.loading = false;
+  }
+}
+
+function initializeProcurementPurchaseInputs() {
+  for (const product of orderProcurementProducts.value) {
+    const shortage = Math.max(0, Number(product.shortage_quantity || 0));
+    const totalQuantity = Math.max(1, Number(product.total_quantity || 1));
+    const unitAmount = Number(product.estimated_amount || 0) / totalQuantity;
+    const unitShipping = Number(product.estimated_shipping || 0) / totalQuantity;
+    product.purchase_quantity = shortage;
+    product.purchase_amount = Number((unitAmount * shortage).toFixed(2));
+    product.purchase_shipping = Number((unitShipping * shortage).toFixed(2));
+  }
+}
+
+function selectedProcurementProductIds() {
+  const selected = new Set(orderProcurementDialog.selectedItemIds.map(Number));
+  return new Set(orderProcurementItems.value
+    .filter((item) => selected.has(Number(item.order_item_id)))
+    .map((item) => Number(item.product?.product_id || 0))
+    .filter(Boolean));
+}
+
+function procurementPurchasePayload() {
+  const selectedProducts = selectedProcurementProductIds();
+  return orderProcurementProducts.value
+    .filter((product) => selectedProducts.has(Number(product.product_id)))
+    .map((product) => ({
+      product_id: Number(product.product_id),
+      quantity: Number(product.purchase_quantity || 0),
+      amount: Number(product.purchase_amount || 0),
+      shipping_amount: Number(product.purchase_shipping || 0)
+    }));
+}
+
+function validateProcurementPurchaseInputs() {
+  return true;
+}
+
+function handleProcurementQuantityChange(product) {
+  if (!product || Number(product.purchase_quantity || 0) !== 0) return;
+  product.purchase_amount = 0;
+  product.purchase_shipping = 0;
+}
+
+async function submitOrderProcurement() {
+  if (!orderProcurementDialog.orderId) return;
+  if (!orderProcurementDialog.selectedItemIds.length) {
+    ElMessage.warning("请至少选择一条关联订单");
+    return;
+  }
+  if (!validateProcurementPurchaseInputs()) return;
+  orderProcurementDialog.submitting = true;
+  try {
+    const result = await createOrderProcurementRequests(orderProcurementDialog.orderId, {
+      order_item_ids: orderProcurementDialog.selectedItemIds,
+      product_purchases: procurementPurchasePayload()
+    });
+    const createdCount = Number(result?.created_count || 0);
+    const stockCount = Number(result?.stock_satisfied_count || 0);
+    const markedCount = Number(result?.marked_count || 0);
+    if (markedCount > 0) {
+      ElMessage.success(`采购已处理：${stockCount} 条库存可满足，${createdCount} 条已创建采购请求`);
+    } else {
+      ElMessage.info("当前没有新的待采购订单明细");
+    }
+    orderProcurementDialog.visible = false;
+    await loadOrders();
+  } catch (error) {
+    ElMessage.error(error.message || "创建采购请求失败");
+  } finally {
+    orderProcurementDialog.submitting = false;
+  }
+}
+
+function procurementItemSelected(item) {
+  return orderProcurementDialog.selectedItemIds.map(Number).includes(Number(item?.order_item_id));
+}
+
+function setProcurementItemSelected(item, selected) {
+  const id = Number(item?.order_item_id || 0);
+  if (!id) return;
+  const ids = new Set(orderProcurementDialog.selectedItemIds.map(Number));
+  if (selected) ids.add(id);
+  else ids.delete(id);
+  orderProcurementDialog.selectedItemIds = [...ids];
+}
+
+function firstProcurementMissingItem() {
+  return orderProcurementDialog.preview?.missing_items?.[0] || null;
+}
+
+async function bindFirstProcurementMissingItem() {
+  const item = firstProcurementMissingItem();
+  if (!item) return;
+  orderProcurementDialog.visible = false;
+  await handleOpenBindProductFromOrder(item.order_id || orderProcurementDialog.orderId, item.ozon_sku);
+}
+
+async function createInventoryForFirstProcurementMissingItem() {
+  const item = firstProcurementMissingItem();
+  if (!item) return;
+  orderProcurementDialog.visible = false;
+  await handleOpenCreateProductFromOrder(item.order_id || orderProcurementDialog.orderId, item.ozon_sku);
+}
+
 async function handleProcurementCreated() {
   procurementDialog.visible = false;
   procurementDialog.productId = null;
@@ -1345,24 +1094,24 @@ async function handleOpenCreateProductFromOrder(orderId, sku) {
 
 async function submitInventoryDialog() {
   if (!inventoryDialog.onlineProductId) {
-    ElMessage.warning("????????? ID");
+    ElMessage.warning("当前订单缺少在线商品 ID");
     return;
   }
   if (inventoryDialog.mode === "bind" && !bindForm.productId) {
-    ElMessage.warning("???????????");
+    ElMessage.warning("请先选择库存商品");
     return;
   }
   if (inventoryDialog.mode !== "bind") {
     if (!String(createForm.name || "").trim()) {
-      ElMessage.warning("??????????????");
+      ElMessage.warning("请先填写库存商品名称");
       return;
     }
     if (!createForm.personId) {
-      ElMessage.warning("??????????");
+      ElMessage.warning("请先选择负责人");
       return;
     }
     if (!createForm.logisticsRuleId) {
-      ElMessage.warning("???????????");
+      ElMessage.warning("请先选择物流规则");
       return;
     }
   }
@@ -1374,7 +1123,7 @@ async function submitInventoryDialog() {
         product_id: Number(bindForm.productId),
         person_id: bindForm.personId ? Number(bindForm.personId) : null
       });
-      ElMessage.success("???????????");
+      ElMessage.success("库存绑定已更新");
     } else {
       await apiClient.post("/api/online-products/create-product", {
         online_product_id: inventoryDialog.onlineProductId,
@@ -1399,12 +1148,12 @@ async function submitInventoryDialog() {
         needed_by: createForm.neededBy || null,
         create_procurement_request: createForm.createProcurementRequest ? "1" : ""
       });
-      ElMessage.success(createForm.createProcurementRequest ? "??????????????????????????" : "??????????????????");
+      ElMessage.success(createForm.createProcurementRequest ? "库存商品已创建，并已同步提交采购请求" : "库存商品已创建");
     }
     resetInventoryDialog();
     await loadOrders();
   } catch (error) {
-    ElMessage.error(error.message || (inventoryDialog.mode === "bind" ? "?????????" : "?????????"));
+    ElMessage.error(error.message || (inventoryDialog.mode === "bind" ? "库存绑定失败" : "创建库存失败"));
   } finally {
     inventoryDialog.submitting = false;
   }
@@ -1479,6 +1228,7 @@ onMounted(async () => {
         @open-bind-product-from-order="handleOpenBindProductFromOrder"
         @open-create-product-from-order="handleOpenCreateProductFromOrder"
         @open-procurement="handleOpenProcurement"
+        @open-order-procurement="handleOpenOrderProcurement"
       />
 
       <div class="orders-page-footer">
@@ -1995,6 +1745,196 @@ onMounted(async () => {
         <el-button @click="resetInventoryDialog">取消</el-button>
         <el-button type="primary" :loading="inventoryDialog.submitting" @click="submitInventoryDialog">
           {{ inventoryDialog.mode === "bind" ? "确认绑定" : (createForm.createProcurementRequest ? "创建库存并提交采购" : "仅创建库存") }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="orderProcurementDialog.visible"
+      title="采购处理确认"
+      width="1120px"
+      align-center
+      class="erp-centered-dialog"
+      destroy-on-close
+    >
+      <div v-loading="orderProcurementDialog.loading" class="order-procurement-preview">
+        <el-alert
+          v-if="orderProcurementDialog.preview?.missing_count"
+          type="warning"
+          :closable="false"
+          show-icon
+          title="当前订单里有 SKU 还没有绑定库存，无法一起处理。"
+        />
+
+        <div v-if="orderProcurementProducts.length" class="order-procurement-summary">
+          <div class="create-summary-item">
+            <span>已选择明细</span>
+            <strong>{{ orderProcurementSelectedCount }}</strong>
+          </div>
+          <div class="create-summary-item">
+            <span>已选择数量</span>
+            <strong>{{ orderProcurementSelectedQuantity }}</strong>
+          </div>
+          <div class="create-summary-item">
+            <span>库存商品</span>
+            <strong>{{ orderProcurementDialog.preview.product_count }}</strong>
+          </div>
+        </div>
+
+        <div v-if="orderProcurementProducts.length" class="order-procurement-products">
+          <section
+            v-for="product in orderProcurementProducts"
+            :key="product.product_id"
+            class="order-procurement-product"
+          >
+            <div class="order-procurement-product-main">
+              <div class="order-procurement-image">
+                <el-image
+                  v-if="product.items?.[0]?.image_url"
+                  :src="product.items[0].image_url"
+                  fit="contain"
+                />
+                <span v-else>无图</span>
+              </div>
+              <div class="order-procurement-product-copy">
+                <strong>{{ product.product_name || "-" }}</strong>
+                <span>库存编码：{{ product.product_code || "-" }}</span>
+                <span>SKU：{{ (product.skus || []).join(", ") || "-" }}</span>
+              </div>
+            </div>
+            <div class="order-procurement-stock-grid">
+              <div>
+                <span>库存中</span>
+                <strong>{{ product.current_stock }}</strong>
+              </div>
+              <div>
+                <span>采购在途</span>
+                <strong>{{ product.incoming_stock }}</strong>
+              </div>
+              <div>
+                <span>本次需求</span>
+                <strong>{{ product.total_quantity }}</strong>
+              </div>
+              <div :class="{ 'is-shortage': Number(product.shortage_quantity || 0) > 0 }">
+                <span>缺口</span>
+                <strong>{{ product.shortage_quantity }}</strong>
+              </div>
+            </div>
+            <div class="order-procurement-purchase-form">
+              <el-form-item label="采购数量">
+                <el-input-number
+                  v-model="product.purchase_quantity"
+                  :min="0"
+                  :precision="0"
+                  :step="1"
+                  controls-position="right"
+                  @change="handleProcurementQuantityChange(product)"
+                />
+              </el-form-item>
+              <el-form-item label="货款">
+                <el-input-number
+                  v-model="product.purchase_amount"
+                  :min="0"
+                  :precision="2"
+                  :step="1"
+                  controls-position="right"
+                />
+              </el-form-item>
+              <el-form-item label="运费">
+                <el-input-number
+                  v-model="product.purchase_shipping"
+                  :min="0"
+                  :precision="2"
+                  :step="1"
+                  controls-position="right"
+                />
+              </el-form-item>
+            </div>
+          </section>
+
+          <el-table
+            :data="orderProcurementItems"
+            border
+            stripe
+            max-height="360"
+            class="order-procurement-orders-table"
+          >
+            <el-table-column label="一起处理" width="96" align="center">
+              <template #default="{ row }">
+                <el-checkbox
+                  :model-value="procurementItemSelected(row)"
+                  @change="setProcurementItemSelected(row, $event)"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="订单商品" min-width="320">
+              <template #default="{ row }">
+                <div class="order-procurement-order-cell">
+                  <div class="order-procurement-order-thumb">
+                    <el-image v-if="row.image_url" :src="row.image_url" fit="contain" />
+                    <span v-else>无图</span>
+                  </div>
+                  <div>
+                    <strong>{{ row.ozon_name || row.product?.product_name || "-" }}</strong>
+                    <span>SKU：{{ row.ozon_sku || "-" }}</span>
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="订单号" min-width="180">
+              <template #default="{ row }">{{ row.posting_number || "-" }}</template>
+            </el-table-column>
+            <el-table-column prop="quantity" label="数量" width="80" align="center" />
+            <el-table-column label="订单金额" width="110" align="right">
+              <template #default="{ row }">¥{{ formatMoney(row.sale_amount) }}</template>
+            </el-table-column>
+            <el-table-column label="处理建议" width="150">
+              <template #default="{ row }">
+                <el-tag :type="Number(row.product?.current_stock || 0) >= Number(row.product?.total_quantity || 0) ? 'success' : 'warning'" effect="light">
+                  {{ Number(row.product?.current_stock || 0) >= Number(row.product?.total_quantity || 0) ? "库存可满足" : "创建采购请求" }}
+                </el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+
+        <el-empty
+          v-else-if="!orderProcurementDialog.loading"
+          description="当前没有新的待采购明细"
+        />
+
+        <div v-if="orderProcurementDialog.preview?.missing_items?.length" class="order-procurement-missing">
+          <strong>未绑定库存</strong>
+          <span>
+            {{ orderProcurementDialog.preview.missing_items[0].ozon_name || orderProcurementDialog.preview.missing_items[0].ozon_sku }}
+            <template v-if="orderProcurementDialog.preview.missing_items.length > 1">
+              等 {{ orderProcurementDialog.preview.missing_items.length }} 个 SKU
+            </template>
+          </span>
+        </div>
+      </div>
+
+      <template #footer>
+        <el-button @click="orderProcurementDialog.visible = false">取消</el-button>
+        <el-button
+          v-if="orderProcurementDialog.preview?.missing_items?.length"
+          @click="bindFirstProcurementMissingItem"
+        >
+          绑定库存
+        </el-button>
+        <el-button
+          v-if="orderProcurementDialog.preview?.missing_items?.length"
+          @click="createInventoryForFirstProcurementMissingItem"
+        >
+          创建库存
+        </el-button>
+        <el-button
+          type="primary"
+          :disabled="!orderProcurementSelectedCount"
+          :loading="orderProcurementDialog.submitting"
+          @click="submitOrderProcurement"
+        >
+          确认处理
         </el-button>
       </template>
     </el-dialog>

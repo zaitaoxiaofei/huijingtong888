@@ -1,6 +1,3 @@
-import { config } from "../../config.js";
-import { refreshOrderProfitDetailSnapshotsMysql } from "../../services/mysql-cutover.js";
-
 export function createProfitRoutes({ services, readJson }) {
   return {
     "GET /api/profit-summary": (req, url) => services.profitSummary(
@@ -23,9 +20,7 @@ export function createProfitRoutes({ services, readJson }) {
     "GET /api/profit-aftersales/details": (req, url) => services.profitAftersalesDetails(Object.fromEntries(url.searchParams.entries())),
     "GET /api/profits/historical-review": (req, url) => services.historicalProfitReview(Object.fromEntries(url.searchParams.entries())),
     "POST /api/profit-snapshots/refresh": async (req) => services.refreshProfitAnalyticsSnapshots(await readJson(req)),
-    "POST /api/order-profit-detail-snapshots/refresh": async (req) => config.dbClient === "mysql"
-      ? refreshOrderProfitDetailSnapshotsMysql(await readJson(req))
-      : services.refreshOrderProfitDetailSnapshots(await readJson(req)),
+    "POST /api/order-profit-detail-snapshots/refresh": async (req) => services.refreshOrderProfitDetailSnapshots(await readJson(req)),
     "POST /api/profits/recalculate-historical": async (req) => services.recalculateHistoricalOrderProfits(await readJson(req)),
     "POST /api/profits/cleanup-delivered-return-loss": async (req) => services.cleanupHistoricalDeliveredReturnLoss(await readJson(req)),
     "POST /api/profits/historical-review/actions": async (req) => services.applyHistoricalProfitReviewAction(await readJson(req), req._session?.personId),

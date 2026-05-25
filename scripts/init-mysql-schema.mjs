@@ -190,13 +190,18 @@ CREATE TABLE IF NOT EXISTS procurement_requests (
   needed_by VARCHAR(64) NULL,
   note TEXT NULL,
   purchase_order_id BIGINT UNSIGNED NULL,
+  source_order_id BIGINT UNSIGNED NULL,
+  source_order_item_id BIGINT UNSIGNED NULL,
+  source_ozon_sku VARCHAR(128) NULL,
   merged_at DATETIME NULL,
   cancelled_at DATETIME NULL,
   urgency VARCHAR(32) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_procurement_status (status, purchase_order_id),
   KEY idx_procurement_status_created (status, created_at),
-  KEY idx_procurement_product_status (product_id, status)
+  KEY idx_procurement_product_status (product_id, status),
+  KEY idx_procurement_source_order_item (source_order_item_id),
+  KEY idx_procurement_source_order (source_order_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS purchase_orders (
@@ -227,6 +232,22 @@ CREATE TABLE IF NOT EXISTS purchase_order_items (
   status VARCHAR(32) NOT NULL DEFAULT 'pending_purchase',
   note TEXT NULL,
   KEY idx_purchase_order_items_order (purchase_order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS order_item_procurement_marks (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  order_item_id BIGINT UNSIGNED NOT NULL,
+  order_id BIGINT UNSIGNED NOT NULL,
+  product_id BIGINT UNSIGNED NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'handled',
+  handling_type VARCHAR(32) NOT NULL DEFAULT 'procurement_request',
+  note TEXT NULL,
+  created_by_person_id BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_order_item_procurement_marks_item (order_item_id),
+  KEY idx_order_item_procurement_marks_order (order_id),
+  KEY idx_order_item_procurement_marks_product (product_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS inbound_records (

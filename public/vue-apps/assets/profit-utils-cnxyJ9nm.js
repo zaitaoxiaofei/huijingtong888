@@ -1,1 +1,0 @@
-function e(e){return Number(e||0).toFixed(2)}function t(e){return Number(e||0).toLocaleString(`zh-CN`)}function n(e){return String(e||``).slice(5,10)}function r(e){return String(e||``).slice(0,7)}export{n as i,e as n,r,t};

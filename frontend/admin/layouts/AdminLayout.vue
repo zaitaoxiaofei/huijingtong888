@@ -11,13 +11,20 @@ const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
 const appStore = useAppStore();
+const DYNAMIC_IMPORT_INTENDED_ROUTE = "ozon-admin-dynamic-import-intended-route";
 
 const activeMenu = computed(() => route.path);
 const breadcrumbs = computed(() => route.meta.breadcrumb || ["ERP 后台"]);
 const themeIcon = computed(() => (appStore.theme === "dark" ? Sunny : MoonNight));
 const themeTitle = computed(() => (appStore.theme === "dark" ? "切换为亮色主题" : "切换为暗色主题"));
 
+function rememberIntendedRoute(target) {
+  const routeTarget = String(target || "").trim();
+  if (routeTarget.startsWith("/")) sessionStorage.setItem(DYNAMIC_IMPORT_INTENDED_ROUTE, routeTarget);
+}
+
 function handleMenuSelect(index) {
+  rememberIntendedRoute(index);
   router.push(index);
 }
 
@@ -33,6 +40,7 @@ async function handleLogout() {
 }
 
 function openDashboard() {
+  rememberIntendedRoute("/dashboard");
   router.push("/dashboard");
 }
 </script>

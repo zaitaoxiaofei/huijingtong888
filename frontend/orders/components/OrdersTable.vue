@@ -22,7 +22,8 @@ const emit = defineEmits([
   "save-mark",
   "open-bind-product-from-order",
   "open-create-product-from-order",
-  "open-procurement"
+  "open-procurement",
+  "open-order-procurement"
 ]);
 
 const markChoices = computed(() => (
@@ -474,6 +475,19 @@ function orderTitleParts(row) {
         <template #default="{ row }">
           <div class="orders-actions-cell orders-actions-cell-vertical">
             <el-button
+              v-if="row.availableActions.purchase"
+              size="small"
+              class="orders-inline-accent-button orders-inline-accent-button-purple"
+              @click="emit('open-order-procurement', row.id)"
+            >
+              去采购
+            </el-button>
+            <div v-else-if="row.procurementState?.handled" class="orders-procurement-done">
+              <el-tag type="success" effect="light">{{ row.procurementState.label }}</el-tag>
+              <small>{{ row.procurementState.detail }}</small>
+            </div>
+            <el-button
+              v-else
               size="small"
               class="orders-inline-accent-button orders-inline-accent-button-green"
               :disabled="row.availableActions.prepare === false"
