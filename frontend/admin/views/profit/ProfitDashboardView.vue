@@ -343,6 +343,14 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="page-stack profit-dashboard-page">
+    <div class="profit-view-switch-bar">
+      <el-segmented
+        :model-value="activeViewRoute"
+        :options="viewTabs"
+        @change="handleViewChange"
+      />
+    </div>
+
     <el-card shadow="never" class="page-card profit-dashboard-hero-card">
       <div class="page-hero profit-dashboard-hero">
         <div>
@@ -350,11 +358,6 @@ onBeforeUnmount(() => {
           <p>重点看利润、营业额和上月同期变化，首屏信息尽量浓缩。</p>
         </div>
         <div class="page-card-actions">
-          <el-segmented
-            :model-value="activeViewRoute"
-            :options="viewTabs"
-            @change="handleViewChange"
-          />
           <el-button v-if="isDashboardView" :loading="loading" @click="loadDashboard">刷新数据</el-button>
           <el-button v-if="isDashboardView" type="warning" plain @click="openAftersalesPage">售后损失</el-button>
         </div>
@@ -617,6 +620,12 @@ onBeforeUnmount(() => {
 <style scoped>
 .profit-dashboard-hero { align-items: center; gap: 12px; }
 .profit-dashboard-hero-card { padding-bottom: 8px; }
+.profit-view-switch-bar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  min-height: 32px;
+}
 .profit-matrix-col { order: 1; }
 .profit-trend-col { order: 2; }
 .profit-dashboard-section-error {
