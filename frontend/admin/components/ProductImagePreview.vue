@@ -6,7 +6,9 @@ const props = defineProps({
   previewList: { type: Array, default: null },
   alt: { type: String, default: "商品图" },
   fit: { type: String, default: "contain" },
-  size: { type: String, default: "default" }
+  size: { type: String, default: "default" },
+  preview: { type: Boolean, default: true },
+  lazy: { type: Boolean, default: false }
 });
 
 function normalizeImageSrc(src) {
@@ -31,7 +33,8 @@ const previewSrcList = computed(() => {
       :src="displaySrc"
       :alt="props.alt"
       :fit="props.fit"
-      :preview-src-list="previewSrcList"
+      :lazy="props.lazy"
+      :preview-src-list="props.preview ? previewSrcList : undefined"
       preview-teleported
       class="erp-image-preview__image"
     />

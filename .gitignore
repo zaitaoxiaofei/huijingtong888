@@ -22,6 +22,7 @@ backups-test/
 uploads/
 public/uploads/
 public/vue-apps/.vite/
+public/vue-apps/assets/
 *.bak-*
 uploads/ai-generated/
 uploads/ai-cropped/

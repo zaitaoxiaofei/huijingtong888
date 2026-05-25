@@ -4,20 +4,6 @@ import path from "node:path";
 import { config } from "./config.js";
 import { calculateCelFbsPricing } from "./celRates.js";
 import { mysqlRuntimeServices } from "./services/mysql-runtime-services.js";
-import {
-  currentExchangeRateMysql,
-  exchangeRatesMysql,
-  rawOzonOrdersMysql,
-  inboundRecordsMysql,
-  inventoryMysql,
-  inventoryCurrentMysql,
-  outboundRecordsMysql,
-  orderExceptionsMysql,
-  profitItemsMysql,
-  stockAlertsMysql,
-  stockWarehouseRulesMysql,
-  updateExchangeRateMysql
-} from "./services/mysql-cutover.js";
 import { readForm, readJson, isRequestCancelledError } from "./http/request.js";
 import { clearCookie, html, json, notFound, setCookie, text, writeHead } from "./http/response.js";
 import { createStaticHandler } from "./http/static.js";
@@ -94,16 +80,16 @@ const routes = {
   "POST /api/ai-provider/test": async (req) => services.testAiProviderConfig(await readJson(req)),
   "POST /api/ai-provider/chat": async (req) => services.chatWithAiProvider(await readJson(req)),
   "GET /api/dashboard": () => services.dashboard(),
-  "GET /api/exchange-rate/current": () => currentExchangeRateMysql(),
-  "GET /api/exchange-rates": () => exchangeRatesMysql(),
-  "GET /api/inventory": () => inventoryMysql(),
-  "GET /api/stock-alerts": (req) => stockAlertsMysql(req.query || {}),
-  "GET /api/stock-warehouse-rules": () => stockWarehouseRulesMysql(),
-  "GET /api/erp/inventory-current": () => inventoryCurrentMysql(),
-  "GET /api/erp/raw-orders": () => rawOzonOrdersMysql(),
-  "GET /api/erp/profit-items": () => profitItemsMysql(),
-  "GET /api/erp/order-exceptions": () => orderExceptionsMysql(),
-  "POST /api/exchange-rate": async (req) => updateExchangeRateMysql(await readJson(req)),
+  "GET /api/exchange-rate/current": () => services.currentExchangeRate(),
+  "GET /api/exchange-rates": () => services.exchangeRates(),
+  "GET /api/inventory": () => services.inventory(),
+  "GET /api/stock-alerts": (req) => services.stockAlerts(req.query || {}),
+  "GET /api/stock-warehouse-rules": () => services.stockWarehouseRules(),
+  "GET /api/erp/inventory-current": () => services.inventoryCurrent(),
+  "GET /api/erp/raw-orders": () => services.rawOzonOrders(),
+  "GET /api/erp/profit-items": () => services.profitItems(),
+  "GET /api/erp/order-exceptions": () => services.orderExceptions(),
+  "POST /api/exchange-rate": async (req) => services.updateExchangeRate(await readJson(req)),
   "POST /api/pricing/cel-fbs": async (req) => calculateCelFbsPricing(await readJson(req)),
 };
 
@@ -366,6 +352,17 @@ async function sendProductImage(res, productId, imageLoader = null) {
   return res.end(buffer);
 }
 
+function sendImagePlaceholder(res) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160"><rect width="160" height="160" rx="12" fill="#f4f7fb"/><path d="M42 104l25-28 18 20 12-14 21 22H42z" fill="#c9d3e3"/><circle cx="106" cy="55" r="11" fill="#c9d3e3"/><text x="80" y="132" text-anchor="middle" font-family="Arial,sans-serif" font-size="14" fill="#7b8798">NO IMG</text></svg>`;
+  const buffer = Buffer.from(svg);
+  writeHead(res, 200, {
+    "Content-Type": "image/svg+xml; charset=utf-8",
+    "Content-Length": buffer.length,
+    "Cache-Control": "private, max-age=600"
+  });
+  return res.end(buffer);
+}
+
 async function sendRemoteImage(req, res, url) {
   const target = String(url.searchParams.get("url") || "").trim();
   if (!/^https?:\/\//i.test(target)) return json(res, { error: "Invalid image url" }, 400);
@@ -385,9 +382,9 @@ async function sendRemoteImage(req, res, url) {
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
       }
     });
-    if (!upstream.ok) return json(res, { error: `Upstream image fetch failed: ${upstream.status}` }, 502);
+    if (!upstream.ok) return sendImagePlaceholder(res);
     const contentType = String(upstream.headers.get("content-type") || "").toLowerCase();
-    if (!contentType.startsWith("image/")) return json(res, { error: "Upstream did not return an image" }, 415);
+    if (!contentType.startsWith("image/")) return sendImagePlaceholder(res);
     const buffer = Buffer.from(await upstream.arrayBuffer());
     writeHead(res, 200, {
       "Content-Type": contentType,
@@ -397,7 +394,7 @@ async function sendRemoteImage(req, res, url) {
     return res.end(buffer);
   } catch (error) {
     if (controller.signal.aborted || error?.name === "AbortError") return;
-    throw error;
+    return sendImagePlaceholder(res);
   } finally {
     req.off("aborted", onClose);
     res.off("close", onClose);

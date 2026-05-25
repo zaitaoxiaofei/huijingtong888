@@ -28,7 +28,8 @@ const state = reactive({
     page: 1,
     pageSize: 20
   },
-  selectedProductIds: []
+  selectedProductIds: [],
+  selectedInboundIds: []
 });
 
 const detailDialog = reactive({
@@ -53,6 +54,7 @@ const tableRows = computed(() => [
   ...state.rows.map((row) => ({ ...row, row_type: "purchase", row_key: `purchase-${row.product_id}` }))
 ]);
 const selectedRows = computed(() => tableRows.value.filter((row) => row.row_type === "purchase" && state.selectedProductIds.includes(Number(row.product_id))));
+const selectedInboundRows = computed(() => tableRows.value.filter((row) => row.row_type === "inbound" && state.selectedInboundIds.includes(Number(row.inbound_record_id))));
 const totalRows = computed(() => Number(state.total || 0) + state.inboundRows.length);
 
 function money(value) {
@@ -126,6 +128,7 @@ async function loadPageData() {
     state.inboundRows = Array.isArray(inboundRows) ? inboundRows : [];
     state.total = Number(result?.total || 0);
     state.selectedProductIds = state.selectedProductIds.filter((id) => state.rows.some((row) => Number(row.product_id) === id));
+    state.selectedInboundIds = state.selectedInboundIds.filter((id) => state.inboundRows.some((row) => Number(row.inbound_record_id) === id));
   } catch (error) {
     if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "采购清单加载失败");
@@ -183,10 +186,11 @@ function syncRouteQuery() {
 
 function handleSelectionChange(rows) {
   state.selectedProductIds = rows.filter((row) => row.row_type === "purchase").map((row) => Number(row.product_id));
+  state.selectedInboundIds = rows.filter((row) => row.row_type === "inbound").map((row) => Number(row.inbound_record_id));
 }
 
 function canSelectRow(row) {
-  return row.row_type === "purchase";
+  return row.row_type === "purchase" || row.row_type === "inbound";
 }
 
 function rowStatusText(row) {
@@ -309,13 +313,16 @@ async function confirmRequests(requestIds, label) {
     });
 
     confirming.value = true;
-    const result = await apiClient.post("/api/procurement/purchase-orders", { request_ids: requestIds });
-    if (result?.id) {
-      await apiClient.post(`/api/procurement/purchase-orders/${result.id}/confirm-purchased`, {});
-    }
-    ElMessage.success("已确认采购，并生成待入库记录");
+    await apiClient.post("/api/procurement/purchase-orders/confirm-from-requests-async", { request_ids: requestIds });
+    const targetIds = new Set(requestIds.map(Number).filter(Boolean));
+    const beforeCount = state.rows.length;
+    state.rows = state.rows.filter((row) => !(row.requests || []).some((item) => targetIds.has(Number(item.id))));
+    state.total = Math.max(0, Number(state.total || 0) - (beforeCount - state.rows.length));
+    ElMessage.success("已提交采购处理，后台正在生成采购单和待入库记录");
     state.selectedProductIds = [];
-    await loadPageData();
+    window.setTimeout(() => {
+      loadPageData();
+    }, 1500);
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
     ElMessage.error(error.message || "确认采购失败");
@@ -362,11 +369,19 @@ async function confirmInboundRows(rows, label) {
       { type: "warning", confirmButtonText: "确认入库", cancelButtonText: "取消" }
     );
     confirmingInbound.value = true;
-    for (const row of targetRows) {
-      await apiClient.put(`/api/inbound-records/${row.inbound_record_id}`, inboundPayload(row));
-    }
-    ElMessage.success(targetRows.length > 1 ? `已确认 ${targetRows.length} 条入库，库存已更新，并进入采购历史` : "已确认入库，库存已更新，并进入采购历史");
-    await loadPageData();
+    await apiClient.post("/api/inbound-records/batch-update-async", {
+      records: targetRows.map((row) => ({
+        id: row.inbound_record_id,
+        payload: inboundPayload(row)
+      }))
+    });
+    const targetIds = new Set(targetRows.map((row) => Number(row.inbound_record_id)).filter(Boolean));
+    state.inboundRows = state.inboundRows.filter((row) => !targetIds.has(Number(row.inbound_record_id)));
+    state.selectedInboundIds = state.selectedInboundIds.filter((id) => !targetIds.has(Number(id)));
+    ElMessage.success(targetRows.length > 1 ? `已提交 ${targetRows.length} 条入库处理，后台正在更新库存` : "已提交入库处理，后台正在更新库存");
+    window.setTimeout(() => {
+      loadPageData();
+    }, 1500);
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
     ElMessage.error(error.message || "确认入库失败");
@@ -377,6 +392,10 @@ async function confirmInboundRows(rows, label) {
 
 async function confirmInbound(row) {
   await confirmInboundRows([row], `产品“${row.product_name || row.product_code || row.product_id}”`);
+}
+
+async function confirmSelectedInbound() {
+  await confirmInboundRows(selectedInboundRows.value, `选中的 ${selectedInboundRows.value.length} 个待入库产品`);
 }
 
 async function confirmAllInbound() {
@@ -404,8 +423,11 @@ onMounted(async () => {
         <el-button type="primary" :disabled="!selectedRows.length" :loading="confirming" @click="confirmSelected">
           确认采购所选
         </el-button>
+        <el-button type="success" :disabled="!selectedInboundRows.length" :loading="confirmingInbound" @click="confirmSelectedInbound">
+          确认已入库所选
+        </el-button>
         <el-button type="success" :disabled="!pendingInboundRows.length" :loading="confirmingInbound" @click="confirmAllInbound">
-          确认入库全部
+          确认已入库全部
         </el-button>
       </div>
     </section>
@@ -418,8 +440,15 @@ onMounted(async () => {
             <span class="muted-text">共 {{ totalRows }} 种，含待入库 {{ state.inboundRows.length }} 种</span>
           </div>
           <div class="page-card-actions">
-            <el-tag type="info">已选 {{ selectedRows.length }} 种</el-tag>
+            <el-tag type="info">已选采购 {{ selectedRows.length }} 种</el-tag>
+            <el-tag type="success">已选入库 {{ selectedInboundRows.length }} 种</el-tag>
             <el-tag v-if="pendingInboundRows.length" type="warning">待入库已置顶</el-tag>
+            <el-button type="success" :disabled="!selectedInboundRows.length" :loading="confirmingInbound" @click="confirmSelectedInbound">
+              确认已入库所选
+            </el-button>
+            <el-button type="success" :disabled="!pendingInboundRows.length" :loading="confirmingInbound" @click="confirmAllInbound">
+              确认已入库全部
+            </el-button>
             <el-button :disabled="!state.rows.length" :loading="confirming" @click="confirmAll">确认采购当前页</el-button>
           </div>
         </div>
@@ -527,7 +556,7 @@ onMounted(async () => {
               <div class="row-actions">
                 <el-button link type="primary" :disabled="actionDisabled(row, 'edit')" @click="handleEditAction(row)">编辑明细</el-button>
                 <el-button link type="success" :disabled="actionDisabled(row, 'purchase')" :loading="confirming && row.row_type === 'purchase'" @click="handlePurchaseAction(row)">确认采购</el-button>
-                <el-button link type="success" :disabled="actionDisabled(row, 'inbound')" :loading="confirmingInbound && row.row_type === 'inbound'" @click="handleInboundAction(row)">确认入库</el-button>
+                <el-button link type="success" :disabled="actionDisabled(row, 'inbound')" :loading="confirmingInbound && row.row_type === 'inbound'" @click="handleInboundAction(row)">确认已入库</el-button>
               </div>
             </template>
           </el-table-column>
@@ -557,7 +586,7 @@ onMounted(async () => {
       <div class="page-stack">
         <div class="detail-header">
           <strong>{{ detailDialog.productName || "-" }}</strong>
-          <span class="muted-text">这里修改的是当前产品下已提交的采购请求。</span>
+          <span class="muted-text">这里修改的是当前产品下等待采购的采购请求。</span>
         </div>
 
         <el-alert type="info" :closable="false" class="profit-sync-alert" title="保存后会同步重算当前产品关联订单利润。" />

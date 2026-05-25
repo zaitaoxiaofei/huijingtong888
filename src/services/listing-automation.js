@@ -550,6 +550,7 @@ export async function syncListingOzonCategoryAttributes(body = {}, session = nul
     language: body.language || "ZH_HANS"
   });
   let saved = 0;
+  let valuesSaved = 0;
   for (const [index, item] of attributes.entries()) {
     const attributeId = Number(item.id || item.attribute_id || item.attributeId || 0);
     if (!attributeId) continue;
@@ -590,7 +591,7 @@ export async function syncListingOzonCategoryAttributes(body = {}, session = nul
     saved += 1;
     const dictionaryId = Number(item.dictionary_id || item.dictionaryId || 0);
     if (dictionaryId && (item.is_required || item.required || body.sync_values)) {
-      await syncListingOzonAttributeValues({
+      const valueResult = await syncListingOzonAttributeValues({
         shop_id: shop.id,
         description_category_id: descriptionCategoryId,
         type_id: typeId,
@@ -598,6 +599,7 @@ export async function syncListingOzonCategoryAttributes(body = {}, session = nul
         language: body.language || "ZH_HANS",
         limit: body.value_limit || 200
       }, session).catch(() => null);
+      valuesSaved += Number(valueResult?.saved || 0);
     }
   }
   return {
@@ -607,6 +609,7 @@ export async function syncListingOzonCategoryAttributes(body = {}, session = nul
     descriptionCategoryId,
     typeId,
     saved,
+    values_saved: valuesSaved,
     attributes: await listingOzonCategoryAttributes({ description_category_id: descriptionCategoryId, type_id: typeId }, session)
   };
 }
@@ -633,6 +636,72 @@ export async function listingOzonAttributeValues(query = {}, session = null) {
     LIMIT ?
   `, params);
   return rows.map(normalizeOzonAttributeValueRow);
+}
+
+export async function listingOzonCategorySyncJobs(query = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+  const rows = await all(`
+    SELECT j.*, s.name AS shop_name
+    FROM ozon_category_sync_jobs j
+    LEFT JOIN shops s ON s.id = j.shop_id
+    ORDER BY j.started_at DESC, j.id DESC
+    LIMIT ?
+  `, [limit]);
+  return rows.map(normalizeOzonCategorySyncJobRow);
+}
+
+export async function refreshOzonCategoryCache(body = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const mode = String(body.mode || "scheduled").trim();
+  const shop = await resolveOzonApiShop(body.shop_id || body.shopId);
+  const jobId = await startOzonCategorySyncJob({
+    jobType: mode,
+    shopId: shop.id,
+    payload: body,
+    session
+  });
+  const stats = {
+    categories: 0,
+    categoriesFailed: 0,
+    attributes: 0,
+    attributesFailed: 0,
+    values: 0,
+    valuesFailed: 0,
+    usedCategoryCount: 0
+  };
+  try {
+    const categoryResult = await syncListingOzonCategories({ shop_id: shop.id, language: body.language || "ZH_HANS" }, session);
+    stats.categories = Number(categoryResult.saved || 0);
+
+    const usedCategories = await usedOzonCategoriesForSync(body);
+    stats.usedCategoryCount = usedCategories.length;
+    for (const category of usedCategories) {
+      try {
+        const attrResult = await syncListingOzonCategoryAttributes({
+          shop_id: shop.id,
+          description_category_id: category.descriptionCategoryId,
+          type_id: category.typeId,
+          language: body.language || "ZH_HANS",
+          sync_values: true,
+          value_limit: body.value_limit || 200
+        }, session);
+        stats.attributes += Number(attrResult.saved || 0);
+        stats.values += Number(attrResult.values_saved || 0);
+      } catch (error) {
+        stats.attributesFailed += 1;
+        await appendOzonCategorySyncJobWarning(jobId, {
+          category,
+          message: error.message
+        });
+      }
+    }
+    await finishOzonCategorySyncJob(jobId, "success", stats);
+    return { ok: true, jobId, shopId: Number(shop.id), shopName: shop.name, ...stats };
+  } catch (error) {
+    await finishOzonCategorySyncJob(jobId, "failed", stats, error);
+    throw error;
+  }
 }
 
 export async function syncListingOzonAttributeValues(body = {}, session = null) {

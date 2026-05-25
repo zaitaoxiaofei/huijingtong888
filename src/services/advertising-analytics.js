@@ -1,4 +1,5 @@
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
+import { estimateItemProfit } from "../profit.js";
 
 const AD_DAILY_SCHEMA = `
 CREATE TABLE IF NOT EXISTS ozon_ad_sku_daily (
@@ -8,6 +9,7 @@ CREATE TABLE IF NOT EXISTS ozon_ad_sku_daily (
   campaign_id VARCHAR(128) NOT NULL DEFAULT '',
   campaign_name VARCHAR(255) NULL,
   campaign_state VARCHAR(64) NULL,
+  campaign_budget_rub DECIMAL(18,4) NOT NULL DEFAULT 0,
   ad_type VARCHAR(64) NOT NULL DEFAULT 'unknown',
   product_id BIGINT UNSIGNED NULL,
   offer_id VARCHAR(255) NULL,
@@ -34,11 +36,18 @@ CREATE TABLE IF NOT EXISTS ozon_ad_sku_daily (
 let schemaReady = false;
 const PERFORMANCE_API_BASE = "https://api-performance.ozon.ru";
 const PERFORMANCE_TIMEOUT_MS = 60000;
+const RUB_CNY_RATE = 11.3;
+const DEFAULT_PACKAGING_FEE_RULE = {
+  low_sale_threshold_cny: 50,
+  low_fee_cny: 0.5,
+  high_fee_cny: 1
+};
 
 async function ensureAdDailySchema() {
   if (schemaReady) return;
   await mysqlExecute(AD_DAILY_SCHEMA);
   await mysqlExecute("ALTER TABLE ozon_ad_sku_daily ADD COLUMN campaign_state VARCHAR(64) NULL AFTER campaign_name").catch(ignoreDuplicateColumn);
+  await mysqlExecute("ALTER TABLE ozon_ad_sku_daily ADD COLUMN campaign_budget_rub DECIMAL(18,4) NOT NULL DEFAULT 0 AFTER campaign_state").catch(ignoreDuplicateColumn);
   schemaReady = true;
 }
 
@@ -68,19 +77,157 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function roundMoney(value) {
+  return Math.round((toNumber(value) + Number.EPSILON) * 100) / 100;
+}
+
+async function packagingFeeRuleMysql() {
+  const rows = await mysqlQuery("SELECT value_json FROM system_settings WHERE `key` = ?", ["profit.packaging_fee_rule"]);
+  const raw = rows?.[0]?.value_json;
+  if (!raw) return DEFAULT_PACKAGING_FEE_RULE;
+  try {
+    return { ...DEFAULT_PACKAGING_FEE_RULE, ...JSON.parse(raw) };
+  } catch {
+    return DEFAULT_PACKAGING_FEE_RULE;
+  }
+}
+
+async function packagingFeeForSaleAmountMysql(saleAmountCny) {
+  const rule = await packagingFeeRuleMysql();
+  const threshold = toNumber(rule.low_sale_threshold_cny);
+  const lowFee = toNumber(rule.low_fee_cny);
+  const highFee = toNumber(rule.high_fee_cny);
+  return roundMoney(toNumber(saleAmountCny) > threshold ? highFee : lowFee);
+}
+
+function buildProfitProduct(row = {}) {
+  const productId = toNumber(row.product_id);
+  if (!productId) return null;
+  return {
+    id: productId,
+    purchase_cost: toNumber(row.product_purchase_cost),
+    domestic_shipping: toNumber(row.product_domestic_shipping),
+    international_shipping: toNumber(row.product_international_shipping),
+    handling_fee: toNumber(row.product_handling_fee),
+    purchase_quantity: toNumber(row.product_purchase_quantity, 1),
+    package_weight_g: toNumber(row.product_package_weight_g),
+    length_cm: toNumber(row.product_length_cm),
+    width_cm: toNumber(row.product_width_cm),
+    height_cm: toNumber(row.product_height_cm),
+    return_rate: row.product_return_rate == null ? 0.05 : toNumber(row.product_return_rate),
+    withdrawal_fee_rate: row.product_withdrawal_fee_rate == null ? 0.012 : toNumber(row.product_withdrawal_fee_rate),
+    shipping_method: row.product_shipping_method || "air_land",
+    exchange_rate: RUB_CNY_RATE,
+    advertising_rate: 0
+  };
+}
+
+function buildProfitMapping(row = {}) {
+  return {
+    commission_low: row.mapping_commission_low,
+    commission_high: row.mapping_commission_high,
+    commissions_json: row.mapping_commissions_json
+  };
+}
+
+function resolveModelQuantity(row = {}) {
+  return Math.max(1, toNumber(row.units) || toNumber(row.orders) || toNumber(row.local_units) || 1);
+}
+
+function resolveAdQuantity(row = {}) {
+  return toNumber(row.units) || toNumber(row.orders) || 0;
+}
+
+function resolveAdRevenueCny(row = {}) {
+  return toNumber(row.revenue_cny) || (toNumber(row.revenue_rub) ? toNumber(row.revenue_rub) / RUB_CNY_RATE : 0);
+}
+
+function resolveModelSalePriceCny(row = {}, quantity) {
+  const adRevenueCny = resolveAdRevenueCny(row);
+  if (adRevenueCny > 0) return adRevenueCny / Math.max(1, quantity);
+  const localRevenue = toNumber(row.local_revenue_cny);
+  const localUnits = Math.max(1, toNumber(row.local_units));
+  if (localRevenue > 0) return localRevenue / localUnits;
+  const ozonSaleRub = toNumber(row.ozon_sale_price_rub);
+  return ozonSaleRub > 0 ? ozonSaleRub / RUB_CNY_RATE : 0;
+}
+
+async function applyAdvertisingProfitModel(row = {}) {
+  const quantity = resolveModelQuantity(row);
+  const adQuantity = resolveAdQuantity(row);
+  const adRevenueCny = roundMoney(resolveAdRevenueCny(row));
+  const salePrice = resolveModelSalePriceCny(row, quantity);
+  const product = buildProfitProduct(row);
+  const adSpendCny = roundMoney(toNumber(row.spend_rub) / RUB_CNY_RATE);
+  if (!product || salePrice <= 0) {
+    return {
+      ...row,
+      gross_margin_rate: null,
+      ad_order_quantity: adQuantity,
+      ad_revenue_cny: adRevenueCny,
+      ad_spend_cny: adSpendCny,
+      ad_net_profit_rate: null,
+      ad_net_profit_cny: adSpendCny > 0 ? -adSpendCny : null,
+      profit_model_status: product ? "missing_sale_price" : "missing_inventory_binding",
+      ad_profit_status: adQuantity > 0 && adRevenueCny > 0 ? "missing_profit_model" : "no_ad_orders"
+    };
+  }
+
+  const estimated = estimateItemProfit({
+    salePrice,
+    quantity: 1,
+    product,
+    mapping: buildProfitMapping(row)
+  });
+  const packagingCost = await packagingFeeForSaleAmountMysql(salePrice);
+  const modelProfitPerUnit = roundMoney(toNumber(estimated.profit) - packagingCost);
+  const modelRevenueCny = roundMoney(salePrice * quantity);
+  const modelProfitTotal = roundMoney(modelProfitPerUnit * quantity);
+  const hasAdOrders = adQuantity > 0 && adRevenueCny > 0;
+  const adModelProfitCny = hasAdOrders ? roundMoney(modelProfitPerUnit * adQuantity) : 0;
+  const adNetProfitCny = hasAdOrders ? roundMoney(adModelProfitCny - adSpendCny) : (adSpendCny > 0 ? -adSpendCny : null);
+
+  return {
+    ...row,
+    model_quantity: quantity,
+    ad_order_quantity: adQuantity,
+    ad_revenue_cny: adRevenueCny,
+    model_sale_price_cny: roundMoney(salePrice),
+    model_revenue_cny: modelRevenueCny,
+    model_purchase_cost_cny: roundMoney(product.purchase_cost),
+    model_domestic_shipping_cny: roundMoney(product.domestic_shipping),
+    model_international_shipping_cny: roundMoney(toNumber(estimated.freight ?? product.international_shipping)),
+    model_handling_fee_cny: roundMoney(product.handling_fee),
+    model_commission_cny: roundMoney(toNumber(estimated.commission)),
+    model_payment_fee_cny: roundMoney(toNumber(estimated.paymentFee)),
+    model_withdrawal_fee_cny: roundMoney(toNumber(estimated.withdrawalFee)),
+    model_return_loss_cny: roundMoney(toNumber(estimated.expectedReturnLoss)),
+    model_packaging_cost_cny: packagingCost,
+    model_profit_per_unit_cny: modelProfitPerUnit,
+    model_profit_cny: modelProfitTotal,
+    gross_margin_rate: salePrice > 0 ? modelProfitPerUnit / salePrice : null,
+    ad_spend_cny: adSpendCny,
+    ad_model_profit_cny: hasAdOrders ? adModelProfitCny : null,
+    ad_net_profit_cny: adNetProfitCny,
+    ad_net_profit_rate: hasAdOrders && adRevenueCny > 0 ? adNetProfitCny / adRevenueCny : null,
+    profit_model_status: "estimated_without_ad_cost",
+    ad_profit_status: hasAdOrders ? "current_range_ad_orders" : "no_ad_orders"
+  };
+}
+
 function normalizeSortOrder(value) {
   return String(value || "").toLowerCase() === "asc" ? "ASC" : "DESC";
 }
 
 function pagination(query = {}) {
   const page = Math.max(1, Number(query.page || 1));
-  const pageSize = Math.min(200, Math.max(1, Number(query.pageSize || query.page_size || 30)));
+  const pageSize = Math.min(1000, Math.max(1, Number(query.pageSize || query.page_size || 30)));
   return { page, pageSize, offset: (page - 1) * pageSize };
 }
 
 function buildDateRange(query = {}) {
   return {
-    from: String(query.from || dateDaysAgo(13)).slice(0, 10),
+    from: String(query.from || dateDaysAgo(6)).slice(0, 10),
     to: String(query.to || todayKey()).slice(0, 10)
   };
 }
@@ -196,7 +343,29 @@ export async function advertisingDailyMysql(query = {}) {
       COUNT(DISTINCT ad.date_key) AS active_days,
       COUNT(DISTINCT NULLIF(ad.campaign_id, '')) AS campaign_count,
       GROUP_CONCAT(DISTINCT NULLIF(ad.campaign_state, '') ORDER BY ad.campaign_state SEPARATOR ', ') AS campaign_states,
+      GROUP_CONCAT(DISTINCT NULLIF(latest_ad.campaign_state, '') ORDER BY latest_ad.campaign_state SEPARATOR ', ') AS latest_campaign_states,
       GROUP_CONCAT(DISTINCT NULLIF(ad.ad_type, '') ORDER BY ad.ad_type SEPARATOR ', ') AS ad_types,
+      COALESCE(MAX(ad.campaign_budget_rub), 0) AS campaign_budget_rub,
+      COALESCE(MAX(profit.local_revenue_cny), 0) AS local_revenue_cny,
+      COALESCE(MAX(profit.local_purchase_cost_cny), 0) AS local_purchase_cost_cny,
+      COALESCE(MAX(profit.local_profit_cny), 0) AS local_profit_cny,
+      COALESCE(MAX(profit.local_units), 0) AS local_units,
+      MAX(op.sale_price) AS ozon_sale_price_rub,
+      MAX(sm.commission_low) AS mapping_commission_low,
+      MAX(sm.commission_high) AS mapping_commission_high,
+      MAX(op.commissions_json) AS mapping_commissions_json,
+      MAX(p.purchase_cost) AS product_purchase_cost,
+      MAX(p.domestic_shipping) AS product_domestic_shipping,
+      0 AS product_international_shipping,
+      MAX(p.handling_fee) AS product_handling_fee,
+      MAX(p.purchase_quantity) AS product_purchase_quantity,
+      MAX(p.package_weight_g) AS product_package_weight_g,
+      MAX(p.length_cm) AS product_length_cm,
+      MAX(p.width_cm) AS product_width_cm,
+      MAX(p.height_cm) AS product_height_cm,
+      MAX(p.return_rate) AS product_return_rate,
+      MAX(p.withdrawal_fee_rate) AS product_withdrawal_fee_rate,
+      MAX(p.shipping_method) AS product_shipping_method,
       COALESCE(SUM(ad.spend_rub), 0) AS spend_rub,
       COALESCE(SUM(ad.spend_cny), 0) AS spend_cny,
       COALESCE(SUM(ad.impressions), 0) AS impressions,
@@ -214,6 +383,35 @@ export async function advertisingDailyMysql(query = {}) {
     LEFT JOIN online_products op_offer ON op_offer.shop_id = ad.shop_id AND op_offer.offer_id = COALESCE(NULLIF(ad.offer_id, ''), sm.offer_id)
     LEFT JOIN products p ON p.id = COALESCE(ad.product_id, sm.product_id, op.product_id)
     LEFT JOIN (
+      SELECT base.shop_id, base.ozon_sku, base.campaign_id, base.campaign_state
+      FROM ozon_ad_sku_daily base
+      JOIN (
+        SELECT shop_id, ozon_sku, campaign_id, MAX(date_key) AS date_key
+        FROM ozon_ad_sku_daily
+        GROUP BY shop_id, ozon_sku, campaign_id
+      ) last_row ON last_row.shop_id = base.shop_id
+        AND last_row.ozon_sku = base.ozon_sku
+        AND last_row.campaign_id = base.campaign_id
+        AND last_row.date_key = base.date_key
+    ) latest_ad ON latest_ad.shop_id = ad.shop_id
+      AND latest_ad.ozon_sku = ad.ozon_sku
+      AND latest_ad.campaign_id = ad.campaign_id
+    LEFT JOIN (
+      SELECT
+        o.shop_id,
+        oi.ozon_sku,
+        COALESCE(SUM(COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0)), 0) AS local_revenue_cny,
+        COALESCE(SUM(COALESCE(opi.purchase_cost_cny, oi.frozen_purchase_cost * oi.quantity, 0)), 0) AS local_purchase_cost_cny,
+        COALESCE(SUM(COALESCE(opi.net_profit_cny, NULLIF(oi.actual_profit, 0), oi.estimated_profit, 0)), 0) AS local_profit_cny,
+        COALESCE(SUM(oi.quantity), 0) AS local_units
+      FROM orders o
+      JOIN order_items oi ON oi.order_id = o.id
+      LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
+      WHERE COALESCE(oi.ozon_sku, '') != ''
+        AND LOWER(COALESCE(o.status, '')) NOT LIKE '%cancel%'
+      GROUP BY o.shop_id, oi.ozon_sku
+    ) profit ON profit.shop_id = ad.shop_id AND profit.ozon_sku = ad.ozon_sku
+    LEFT JOIN (
       SELECT o.shop_id, oi.ozon_sku, MAX(NULLIF(oi.ozon_image_url, '')) AS image_url
       FROM order_items oi
       JOIN orders o ON o.id = oi.order_id
@@ -226,8 +424,10 @@ export async function advertisingDailyMysql(query = {}) {
     LIMIT ? OFFSET ?
   `, [...params, pageSize, offset]);
 
+  const modelRows = await Promise.all(rows.map(applyAdvertisingProfitModel));
+
   return {
-    rows: rows.map((row, index) => ({ rank: offset + index + 1, ...rowMetrics(row) })),
+    rows: modelRows.map((row, index) => ({ rank: offset + index + 1, ...rowMetrics(row) })),
     total,
     page,
     pageSize,
@@ -320,13 +520,14 @@ export async function upsertAdvertisingDailyRowsMysql(body = {}) {
 
     const result = await mysqlExecute(`
       INSERT INTO ozon_ad_sku_daily (
-        date_key, shop_id, ozon_sku, campaign_id, campaign_name, campaign_state, ad_type,
+        date_key, shop_id, ozon_sku, campaign_id, campaign_name, campaign_state, campaign_budget_rub, ad_type,
         product_id, offer_id, product_name, spend_rub, spend_cny, impressions,
         clicks, orders, units, revenue_rub, revenue_cny, source, raw_json, synced_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
       ON DUPLICATE KEY UPDATE
         campaign_name = VALUES(campaign_name),
         campaign_state = VALUES(campaign_state),
+        campaign_budget_rub = VALUES(campaign_budget_rub),
         product_id = VALUES(product_id),
         offer_id = VALUES(offer_id),
         product_name = VALUES(product_name),
@@ -349,6 +550,7 @@ export async function upsertAdvertisingDailyRowsMysql(body = {}) {
       String(row.campaign_id || row.campaignId || ""),
       row.campaign_name || row.campaignName || null,
       row.campaign_state || row.campaignState || null,
+      toNumber(row.campaign_budget_rub || row.campaignBudgetRub || row.budget_rub || row.budgetRub),
       String(row.ad_type || row.adType || "unknown"),
       row.product_id || row.productId || null,
       row.offer_id || row.offerId || null,
@@ -426,6 +628,7 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
       const token = await fetchPerformanceToken({ clientId, clientSecret }, options);
       const campaigns = await fetchPerformanceCampaigns(token, options);
       const selectedCampaigns = filterCampaigns(campaigns, body);
+      await refreshCampaignMetadataRows(shop.id, selectedCampaigns, { from, to });
       if (!selectedCampaigns.length) {
         results.push({ shop_id: shop.id, shop_name: shop.name, fetched: 0, imported: 0, status: "no_campaigns" });
         continue;
@@ -473,6 +676,31 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
   };
 }
 
+async function refreshCampaignMetadataRows(shopId, campaigns = [], range = {}) {
+  const rows = campaigns.filter((campaign) => campaign.id);
+  for (const campaign of rows) {
+    await mysqlExecute(`
+      UPDATE ozon_ad_sku_daily
+      SET campaign_name = COALESCE(NULLIF(?, ''), campaign_name),
+          campaign_state = COALESCE(NULLIF(?, ''), campaign_state),
+          campaign_budget_rub = COALESCE(NULLIF(?, 0), campaign_budget_rub),
+          updated_at = NOW()
+      WHERE shop_id = ?
+        AND campaign_id = ?
+        AND date_key >= ?
+        AND date_key <= ?
+    `, [
+      campaign.title || "",
+      campaign.state || "",
+      toNumber(campaign.budgetRub),
+      Number(shopId),
+      String(campaign.id),
+      range.from,
+      range.to
+    ]);
+  }
+}
+
 async function fetchPerformanceToken(credentials, options = {}) {
   const data = await performanceRequest("/api/client/token", {
     client_id: credentials.clientId,
@@ -513,6 +741,7 @@ function normalizeCampaignResponse(data = {}) {
     id: String(item.id || item.campaign_id || item.campaignId || ""),
     title: String(item.title || item.name || item.campaign_name || item.campaignName || ""),
     state: String(item.state || item.status || ""),
+    budgetRub: firstNumber(item.dailyBudget, item.daily_budget, item.budget, item.budgetRub, item.budget_rub, item.limit, item.expenseLimit),
     advObjectType: String(item.advObjectType || item.adv_object_type || item.type || "")
   })).filter((item) => item.id);
 }
@@ -737,6 +966,7 @@ function normalizePerformanceAdRow(row = {}, shop = {}, campaigns = []) {
     campaign_id: campaignId || String(campaign.id || ""),
     campaign_name: row.campaign_name || row.campaignName || campaign.title || "",
     campaign_state: row.campaign_state || row.campaignState || campaign.state || "",
+    campaign_budget_rub: firstNumber(row.campaign_budget_rub, row.campaignBudgetRub, row.budget_rub, row.budgetRub, campaign.budgetRub),
     ad_type: row.ad_type || row.adType || campaign.advObjectType || "performance",
     offer_id: row.offer_id || row.offerId || "",
     product_name: row.product_name || row.productName || row.title || row.name || "",

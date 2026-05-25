@@ -46,13 +46,13 @@ const bindForm = reactive({
 
 const statusLabels = [
   ["all", "全部状态"],
-  ["selling", "閿€鍞腑"],
+  ["selling", "销售中"],
   ["ready", "待上架"],
-  ["error", "寮傚父"],
+  ["error", "异常"],
   ["moderation", "审核中"],
   ["hidden", "已下架"],
   ["archived", "已归档"],
-  ["other", "鍏朵粬"]
+  ["other", "其他"]
 ];
 
 const statusOptions = computed(() => statusLabels.map(([value, label]) => ({
@@ -94,7 +94,7 @@ function onlineStatusType(row) {
 }
 
 function onlineStatusLabel(row) {
-  return statusOptions.value.find((item) => item.value === onlineStatusKey(row))?.label || "鍏朵粬";
+  return statusOptions.value.find((item) => item.value === onlineStatusKey(row))?.label || "其他";
 }
 
 function asPositiveInt(value, fallback) {
@@ -135,7 +135,7 @@ async function loadPageData() {
     }
   } catch (error) {
     if (!listRequestGate.isLatest(requestToken)) return;
-    ElMessage.error(error.message || "鍦ㄧ嚎鍟嗗搧鍔犺浇澶辫触");
+    ElMessage.error(error.message || "在线商品加载失败");
   } finally {
     if (listRequestGate.isLatest(requestToken)) loading.value = false;
   }
@@ -231,7 +231,7 @@ function syncRouteQuery() {
 
 async function submitBind() {
   if (!bindForm.online_product_id || !bindForm.product_id) {
-    ElMessage.warning("璇烽€夋嫨瑕佺粦瀹氱殑搴撳瓨鍟嗗搧");
+    ElMessage.warning("请选择要绑定的库存商品");
     return;
   }
   bindSubmitting.value = true;
@@ -245,7 +245,7 @@ async function submitBind() {
     bindDialogVisible.value = false;
     await loadPageData();
   } catch (error) {
-    ElMessage.error(error.message || "缁戝畾搴撳瓨澶辫触");
+    ElMessage.error(error.message || "绑定库存失败");
   } finally {
     bindSubmitting.value = false;
   }
@@ -260,7 +260,7 @@ async function createProductFromOnline(row) {
     ElMessage.success("已根据在线商品创建库存产品");
     await loadPageData();
   } catch (error) {
-    ElMessage.error(error.message || "鍒涘缓搴撳瓨浜у搧澶辫触");
+    ElMessage.error(error.message || "创建库存产品失败");
   }
 }
 
@@ -268,8 +268,8 @@ async function archiveOnlineProduct(row) {
   try {
     await ElMessageBox.confirm(`确认归档在线商品「${row.name || row.ozon_sku}」吗？`, "归档确认", {
       type: "warning",
-      confirmButtonText: "纭褰掓。",
-      cancelButtonText: "鍙栨秷"
+      confirmButtonText: "确认归档",
+      cancelButtonText: "取消"
     });
     await apiClient.post("/api/online-products/action", {
       online_product_id: row.id,
@@ -279,7 +279,7 @@ async function archiveOnlineProduct(row) {
     await loadPageData();
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
-    ElMessage.error(error.message || "褰掓。鍦ㄧ嚎鍟嗗搧澶辫触");
+    ElMessage.error(error.message || "归档在线商品失败");
   }
 }
 
@@ -292,7 +292,7 @@ async function syncOnlineProducts(selectedOnly = false) {
     ElMessage.success(`已同步${scope}，更新 ${result?.upserted || 0} 条`);
     await loadPageData();
   } catch (error) {
-    ElMessage.error(error.message || "鍚屾鍦ㄧ嚎鍟嗗搧澶辫触");
+    ElMessage.error(error.message || "同步在线商品失败");
   } finally {
     syncLoading.value = false;
   }
@@ -321,27 +321,27 @@ onMounted(async () => {
     <el-card shadow="never" class="page-card online-products-card">
       <div class="online-toolbar online-toolbar-sticky">
         <el-form inline>
-          <el-form-item label="搴楅摵">
+          <el-form-item label="店铺">
             <el-select v-model="state.filters.shopId" style="width: 180px">
-              <el-option label="鍏ㄩ儴搴楅摵" value="all" />
+              <el-option label="全部店铺" value="all" />
               <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
             </el-select>
           </el-form-item>
-          <el-form-item label="鍟嗗搧鍚嶇О">
-            <el-input v-model="state.filters.name" placeholder="鍟嗗搧鍚嶇О" clearable style="width: 220px" @keyup.enter="handleSearch" />
+          <el-form-item label="商品名称">
+            <el-input v-model="state.filters.name" placeholder="商品名称" clearable style="width: 220px" @keyup.enter="handleSearch" />
           </el-form-item>
-          <el-form-item label="璐у彿 / SKU">
-            <el-input v-model="state.filters.offer" placeholder="璐у彿 / SKU" clearable style="width: 220px" @keyup.enter="handleSearch" />
+          <el-form-item label="货号 / SKU">
+            <el-input v-model="state.filters.offer" placeholder="货号 / SKU" clearable style="width: 220px" @keyup.enter="handleSearch" />
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="handleSearch">鏌ヨ</el-button>
-            <el-button @click="handleReset">閲嶇疆</el-button>
+            <el-button type="primary" @click="handleSearch">查询</el-button>
+            <el-button @click="handleReset">重置</el-button>
           </el-form-item>
           <el-form-item>
             <el-button :loading="syncLoading" :disabled="!state.selectedIds.length" @click="syncOnlineProducts(true)">
               同步所选商品
             </el-button>
-            <el-button type="primary" :loading="syncLoading" @click="syncOnlineProducts(false)">鍚屾鍏ㄩ儴鍦ㄧ嚎鍟嗗搧</el-button>
+            <el-button type="primary" :loading="syncLoading" @click="syncOnlineProducts(false)">同步全部在线商品</el-button>
           </el-form-item>
         </el-form>
 
@@ -378,22 +378,22 @@ onMounted(async () => {
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="鍟嗗搧淇℃伅" min-width="320">
+          <el-table-column label="商品信息" min-width="320">
             <template #default="{ row }">
               <div class="product-cell">
                 <ProductImagePreview :src="row.primary_image || row.image_url" />
                 <div class="cell-stack">
                   <strong>{{ row.name || "-" }}</strong>
-                  <span class="muted-text">鍦ㄧ嚎鍟嗗搧 ID: {{ row.id }}</span>
+                  <span class="muted-text">在线商品 ID: {{ row.id }}</span>
                   <span class="muted-text">Ozon Product ID: {{ row.ozon_product_id || "-" }}</span>
                 </div>
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="鍞环" width="120" align="right">
+          <el-table-column label="售价" width="120" align="right">
             <template #default="{ row }">{{ money(row.sale_price) }}</template>
           </el-table-column>
-          <el-table-column label="缁戝畾搴撳瓨" min-width="220">
+          <el-table-column label="绑定库存" min-width="220">
             <template #default="{ row }">
               <div v-if="row.product_id" class="cell-stack">
                 <strong>{{ row.product_name || "-" }}</strong>
@@ -402,15 +402,15 @@ onMounted(async () => {
               <span v-else class="muted-text">未绑定库存产品</span>
             </template>
           </el-table-column>
-          <el-table-column label="鍚屾鏃堕棿" min-width="160">
+          <el-table-column label="同步时间" min-width="160">
             <template #default="{ row }">{{ dateText(row.synced_at || row.updated_at) }}</template>
           </el-table-column>
-          <el-table-column label="鎿嶄綔" width="260" fixed="right">
+          <el-table-column label="操作" width="260" fixed="right">
             <template #default="{ row }">
               <el-space wrap>
                 <el-button link type="primary" @click="openBindDialog(row)">去绑定</el-button>
-                <el-button link @click="createProductFromOnline(row)">鍒涘缓搴撳瓨</el-button>
-                <el-button link type="danger" @click="archiveOnlineProduct(row)">褰掓。鍟嗗搧</el-button>
+                <el-button link @click="createProductFromOnline(row)">创建库存</el-button>
+                <el-button link type="danger" @click="archiveOnlineProduct(row)">归档商品</el-button>
               </el-space>
             </template>
           </el-table-column>
@@ -430,8 +430,8 @@ onMounted(async () => {
 
     <el-dialog v-model="bindDialogVisible" title="绑定 SKU 到库存产品" width="680px" align-center class="erp-centered-dialog" destroy-on-close>
       <el-form label-width="110px">
-        <el-form-item label="搴撳瓨鍟嗗搧">
-          <el-select v-model="bindForm.product_id" filterable :loading="productOptionsLoading" placeholder="閫夋嫨搴撳瓨鍟嗗搧" style="width: 100%">
+        <el-form-item label="库存商品">
+          <el-select v-model="bindForm.product_id" filterable :loading="productOptionsLoading" placeholder="选择库存商品" style="width: 100%">
             <el-option
               v-for="product in state.products"
               :key="product.id"
@@ -449,8 +449,8 @@ onMounted(async () => {
 
       <template #footer>
         <div class="dialog-footer">
-          <el-button @click="bindDialogVisible = false">鍙栨秷</el-button>
-          <el-button type="primary" :loading="bindSubmitting" @click="submitBind">纭缁戝畾</el-button>
+          <el-button @click="bindDialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="bindSubmitting" @click="submitBind">确认绑定</el-button>
         </div>
       </template>
     </el-dialog>

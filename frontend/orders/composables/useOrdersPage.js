@@ -9,6 +9,7 @@ import {
   changeOrderPageSize,
   changeOrderPrintView,
   changeOrderStatus,
+  createOrderProcurementRequests,
   fetchOrderDetail,
   handleMoreOrderAction,
   jumpToStockProduct,
@@ -19,6 +20,7 @@ import {
   openQualityRules,
   openOrderProfit,
   openProcurement,
+  previewOrderProcurement,
   prevOrderPage,
   recalculateOrderProfit,
   resetRecentDates,
@@ -266,7 +268,7 @@ export function useOrdersPage() {
       const metaParams = buildOrdersParams(filtersSnapshot, {
         includeRows: "0",
         includeCounts: "1",
-        includeLogisticsOptions: "1"
+        includeLogisticsOptions: "0"
       });
       const result = await apiClient.get(`/api/orders?${metaParams.toString()}`, { signal: controller.signal });
       if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
@@ -281,6 +283,18 @@ export function useOrdersPage() {
           total,
           counts
         }
+      });
+      const logisticsParams = buildOrdersParams(filtersSnapshot, {
+        includeRows: "0",
+        includeCounts: "0",
+        includeLogisticsOptions: "1"
+      });
+      const logisticsResult = await apiClient.get(`/api/orders?${logisticsParams.toString()}`, { signal: controller.signal });
+      if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
+      patch({
+        logisticsMethodOptions: Array.isArray(logisticsResult?.logisticsMethodOptions) && logisticsResult.logisticsMethodOptions.length > 1
+          ? logisticsResult.logisticsMethodOptions
+          : vm.logisticsMethodOptions
       });
     } catch (error) {
       if (error?.name === "AbortError") return;
@@ -649,6 +663,8 @@ export function useOrdersPage() {
     fetchOrderDetail: (orderId) => fetchOrderDetail(orderId),
     openOrderProfit: (orderId) => openOrderProfit(orderId),
     prepareSingleOrder: (orderId) => runPrepareOrders([orderId]),
+    previewOrderProcurement: (orderId) => previewOrderProcurement(orderId),
+    createOrderProcurementRequests: (orderId, payload = {}) => createOrderProcurementRequests(orderId, payload),
     printSingleOrder: (orderId) => runPrintOrders([orderId]),
     recalculateOrderProfit: (orderId) => recalculateOrderProfit(orderId),
     saveOrderMark: (orderId, markType) => saveOrderMark(orderId, markType),

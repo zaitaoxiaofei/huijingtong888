@@ -439,6 +439,14 @@ export async function prepareSingleOrder(orderId) {
   return bulkPrepareOrders([orderId]);
 }
 
+export async function previewOrderProcurement(orderId) {
+  return apiClient.get(`/api/orders/${orderId}/procurement-preview`);
+}
+
+export async function createOrderProcurementRequests(orderId, payload = {}) {
+  return apiClient.post(`/api/orders/${orderId}/procurement-requests`, payload);
+}
+
 export async function printSingleOrder(orderId) {
   return bulkPrintOrders([orderId]);
 }

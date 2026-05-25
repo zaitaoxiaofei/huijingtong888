@@ -28,7 +28,7 @@ const state = reactive({
   selectedRequestIds: [],
   filters: {
     query: "",
-    status: "all",
+    status: "waiting_purchase",
     urgency: "all",
     personId: "all",
     page: 1,
@@ -72,26 +72,22 @@ function dateText(value) {
   return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
 }
 
-function statusTagType(status) {
-  const value = String(status || "");
-  if (value.includes("cancel")) return "danger";
-  if (value.includes("done") || value.includes("purchased")) return "success";
-  if (value.includes("pending") || value.includes("submitted")) return "warning";
-  return "info";
+function isRequestCompleted(row) {
+  const status = String(row?.status || "");
+  const orderStatus = String(row?.purchase_order_status || "");
+  return ["purchased", "done"].includes(status) || ["purchased", "partial_inbound", "inbound_done"].includes(orderStatus);
+}
+
+function statusTagType(row) {
+  return isRequestCompleted(row) ? "success" : "warning";
 }
 
 function urgencyTagType(urgency) {
   return urgency === "urgent" ? "danger" : "info";
 }
 
-function requestStatusText(status) {
-  const value = String(status || "");
-  if (value === "pending") return "待提交";
-  if (value === "submitted") return "已提交";
-  if (value === "merged") return "已合并";
-  if (value === "purchased") return "已采购";
-  if (value === "cancelled") return "已取消";
-  return value || "-";
+function requestStatusText(row) {
+  return isRequestCompleted(row) ? "完成采购" : "等待采购";
 }
 
 function productImage(row) {
@@ -113,7 +109,6 @@ function supplierName(id) {
 const pagedRequests = computed(() => state.requests);
 const totalRequests = computed(() => state.total);
 const selectedRequestRows = computed(() => state.requests.filter((row) => state.selectedRequestIds.includes(Number(row.id))));
-const canBatchSubmit = computed(() => selectedRequestRows.value.length > 0 && selectedRequestRows.value.every((row) => row.status === "pending"));
 
 const editCandidateProducts = computed(() => {
   const query = String(editDialog.productQuery || "").trim().toLowerCase();
@@ -149,7 +144,7 @@ function handleSearch() {
 
 function handleReset() {
   state.filters.query = "";
-  state.filters.status = "all";
+  state.filters.status = "waiting_purchase";
   state.filters.urgency = "all";
   state.filters.personId = "all";
   state.filters.page = 1;
@@ -278,29 +273,6 @@ async function deleteRequest(row) {
   }
 }
 
-async function submitSelectedRequests() {
-  if (!canBatchSubmit.value) {
-    ElMessage.warning("只能提交待提交状态的采购请求");
-    return;
-  }
-  try {
-    await ElMessageBox.confirm(`确认提交已选中的 ${selectedRequestRows.value.length} 条采购请求吗？`, "提交采购请求", {
-      type: "warning",
-      confirmButtonText: "确认提交",
-      cancelButtonText: "取消"
-    });
-    await apiClient.post("/api/procurement/requests/submit", {
-      request_ids: selectedRequestRows.value.map((row) => Number(row.id))
-    });
-    ElMessage.success("采购请求已提交");
-    state.selectedRequestIds = [];
-    await loadPageData();
-  } catch (error) {
-    if (error === "cancel" || error === "close" || error?.message === "cancel") return;
-    ElMessage.error(error.message || "提交采购请求失败");
-  }
-}
-
 async function loadPageData() {
   const requestToken = listRequestGate.next();
   loading.value = true;
@@ -351,8 +323,8 @@ onMounted(loadPageData);
       <template #header>
         <div class="page-card-header procurement-header-row">
           <div class="page-card-actions">
-            <el-tag type="info">已选 {{ selectedRequestRows.length }} 条</el-tag>
-            <el-button type="primary" :disabled="!canBatchSubmit" @click="submitSelectedRequests">提交所选</el-button>
+            <strong>采购请求</strong>
+            <el-tag type="info">共 {{ totalRequests }} 条</el-tag>
           </div>
           <div class="page-card-actions">
             <el-button @click="loadPageData">刷新数据</el-button>
@@ -374,10 +346,8 @@ onMounted(loadPageData);
           </el-form-item>
           <el-form-item label="状态">
             <el-select v-model="state.filters.status" style="width: 160px">
-              <el-option label="全部" value="all" />
-              <el-option label="待提交" value="pending" />
-              <el-option label="已提交" value="submitted" />
-              <el-option label="已合并" value="merged" />
+              <el-option label="等待采购" value="waiting_purchase" />
+              <el-option label="完成采购" value="completed_purchase" />
             </el-select>
           </el-form-item>
           <el-form-item label="紧急程度">
@@ -408,9 +378,7 @@ onMounted(loadPageData);
           stripe
           border
           class="erp-data-table procurement-table"
-          @selection-change="handleSelectionChange"
         >
-          <el-table-column type="selection" width="56" :selectable="isRequestSelectable" />
           <el-table-column label="商品" min-width="340" fixed="left">
             <template #default="{ row }">
               <div class="product-cell">
@@ -441,7 +409,7 @@ onMounted(loadPageData);
           <el-table-column prop="supplier_name" label="供应商" min-width="160" />
           <el-table-column prop="status" label="状态" width="120" align="center">
             <template #default="{ row }">
-              <el-tag :type="statusTagType(row.status)">{{ requestStatusText(row.status) }}</el-tag>
+              <el-tag :type="statusTagType(row)">{{ requestStatusText(row) }}</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="采购链接" min-width="220">

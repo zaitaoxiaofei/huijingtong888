@@ -3,6 +3,7 @@ import { config } from "../src/config.js";
 const username = process.env.HEALTH_CHECK_USERNAME || "jiang";
 const password = process.env.HEALTH_CHECK_PASSWORD || "123456";
 const requestTimeoutMs = Number(process.env.HEALTH_CHECK_TIMEOUT_MS || 15000);
+const baseUrl = process.env.HEALTH_CHECK_BASE_URL || `http://localhost:${config.port}`;
 const shanghaiDateTimeFormatter = new Intl.DateTimeFormat("sv-SE", {
   timeZone: "Asia/Shanghai",
   year: "numeric",
@@ -61,7 +62,7 @@ async function fetchJson(path, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
   try {
-    const response = await fetch(`${config.appBaseUrl}${path}`, {
+    const response = await fetch(`${baseUrl}${path}`, {
       ...options,
       signal: controller.signal,
       headers: {
@@ -133,7 +134,7 @@ for (const [path, label] of endpoints) {
 const failed = results.filter((item) => !item.ok);
 
 console.log(JSON.stringify({
-  appBaseUrl: config.appBaseUrl,
+  appBaseUrl: baseUrl,
   dbClient: config.dbClient,
   db: { host: config.dbHost, port: config.dbPort, name: config.dbName, user: config.dbUser },
   loginUser: loginPayload.user,

@@ -5,6 +5,8 @@ import { ElementPlusResolver } from "unplugin-vue-components/resolvers";
 import ElementPlus from "unplugin-element-plus/vite";
 import path from "node:path";
 
+const buildStamp = process.env.OZON_BUILD_STAMP || String(Date.now());
+
 export default defineConfig({
   base: "/vue-apps/",
   plugins: [
@@ -37,8 +39,8 @@ export default defineConfig({
           return "vendor";
         },
         entryFileNames: "assets/[name]-view.js",
-        chunkFileNames: "assets/[name]-[hash].js",
-        assetFileNames: "assets/[name]-[hash][extname]"
+        chunkFileNames: `assets/[name]-[hash]-${buildStamp}.js`,
+        assetFileNames: `assets/[name]-[hash]-${buildStamp}[extname]`
       }
     }
   }

@@ -678,7 +678,7 @@ function normalizeOzonProduct(item, listVisibility = "") {
     sources: item.sources || []
   };
   return {
-    ozon_product_id: String(item.id || item.product_id || ""),
+    ozon_product_id: String(item.product_id || item.id || ""),
     ozon_sku: String(sku || ""),
     offer_id: String(item.offer_id || ""),
     name: item.name || item.name_ru || item.offer_id || `Ozon product ${item.id || item.product_id || ""}`,
