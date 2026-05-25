@@ -1,1 +1,0 @@
-import{Nt as e,in as t}from"./vendor-BhxCKsXS.js";import{t as n}from"./ExceptionWorkbenchView-B6ua1oMl.js";var r={__name:`ProfitExceptionView`,setup(r){return(r,i)=>(t(),e(n,{view:`profit`}))}};export{r as default};
