@@ -45,6 +45,7 @@ import {
   assetVariantBootstrap,
   assetTailTemplates,
   createAssetTailTemplate,
+  deleteAssetVariantMediaGroup,
   generateAssetVariantTitlePreview,
   generateAssetVariants,
   importAssetVariantToListingAutomation,
@@ -68,6 +69,13 @@ import {
   syncAdvertisingDailyFromOzonMysql,
   upsertAdvertisingDailyRowsMysql
 } from "./advertising-analytics.js";
+import {
+  replyOzonReviewMysql,
+  reviewCenterMysql,
+  reviewCommentsMysql,
+  reviewReplyTemplatesMysql,
+  syncOzonReviewsMysql
+} from "./reviews.js";
 import {
   allMysql,
   addSelectionToInventoryMysql,
@@ -177,6 +185,7 @@ import {
   submitProcurementRequestsMysql,
   suppliersMysql,
   syncDemoOrdersMysql,
+  syncKnownOzonPostingDetailsMysql,
   syncOzonIncrementalOrdersMysql,
   syncOzonFinanceMysql,
   syncOzonOnlineProductsMysql,
@@ -203,6 +212,18 @@ import {
   shipOrdersMysql
 } from "./mysql-cutover.js";
 import { hashPassword } from "../auth-password.js";
+import {
+  addOzonActionProductsMysql,
+  archiveOzonSellerActionMysql,
+  getOzonActionCleanupConfigMysql,
+  listOzonActionCandidatesMysql,
+  listOzonActionProductsMysql,
+  listOzonActionsMysql,
+  removeOzonActionProductsMysql,
+  runEnabledOzonActionCleanupMysql,
+  saveOzonActionCleanupConfigMysql,
+  toggleOzonSellerActionMysql
+} from "./ozon-actions.js";
 
 function notMigrated(name) {
   return () => {
@@ -217,9 +238,12 @@ export const mysqlRuntimeServices = {
   advertisingPilotShop: advertisingPilotShopMysql,
   syncAdvertisingDailyFromOzon: syncAdvertisingDailyFromOzonMysql,
   addSelectionToInventory: addSelectionToInventoryMysql,
+  addOzonActionProducts: addOzonActionProductsMysql,
+  archiveOzonSellerAction: archiveOzonSellerActionMysql,
   assetVariantBootstrap,
   assetTailTemplates,
   createAssetTailTemplate,
+  deleteAssetVariantMediaGroup,
   generateAssetVariantTitlePreview,
   aiProviderConfig,
   aiProviderPresets,
@@ -266,6 +290,7 @@ export const mysqlRuntimeServices = {
   generateMultiShopVersions,
   generateAssetVariants,
   generatePreviewImages,
+  getOzonActionCleanupConfig: getOzonActionCleanupConfigMysql,
   hardDeletePerson: hardDeletePersonMysql,
   hiddenProducts: hiddenProductsMysql,
   inboundRecords: inboundRecordsMysql,
@@ -287,6 +312,9 @@ export const mysqlRuntimeServices = {
   listingOzonCategorySyncJobs,
   listingPublishRecords,
   listingShopCopies,
+  listOzonActionCandidates: listOzonActionCandidatesMysql,
+  listOzonActionProducts: listOzonActionProductsMysql,
+  listOzonActions: listOzonActionsMysql,
   publishListingTemplateToOzon,
   getListingCollectedProductDetail,
   mappings: mappingsMysql,
@@ -321,20 +349,27 @@ export const mysqlRuntimeServices = {
   purchaseOrders: purchaseOrdersMysql,
   rawOzonOrders: rawOzonOrdersMysql,
   refreshOrderProfitDetailSnapshots: refreshOrderProfitDetailSnapshotsMysql,
+  replyOzonReview: replyOzonReviewMysql,
   restoreProduct: restoreProductMysql,
   removeProductFromInventory: removeProductFromInventoryMysql,
+  removeOzonActionProducts: removeOzonActionProductsMysql,
+  runEnabledOzonActionCleanup: runEnabledOzonActionCleanupMysql,
   importAssetVariantToListingAutomation,
   regenerateMultiShopVersion,
   resolveGeneratedImageFile,
   resolveAssetVariantFile,
   resolveAssetTailTemplateFile,
   retryMultiShopPublishItem,
+  reviewCenter: reviewCenterMysql,
+  reviewComments: reviewCommentsMysql,
+  reviewReplyTemplates: reviewReplyTemplatesMysql,
   saveShopVariantRule,
   syncAssetOzonCategories,
   syncListingOzonAttributeValues,
   syncListingOzonCategories,
   syncListingOzonCategoryAttributes,
   saveListingCollectedProductDetail,
+  saveOzonActionCleanupConfig: saveOzonActionCleanupConfigMysql,
   uploadListingMedia,
   validateListingTemplatePublish,
   saveOrderQualityRules: saveOrderQualityRulesMysql,
@@ -348,8 +383,11 @@ export const mysqlRuntimeServices = {
   submitProcurementRequests: submitProcurementRequestsMysql,
   suppliers: suppliersMysql,
   syncOzonFinance: syncOzonFinanceMysql,
+  syncKnownOzonPostingDetails: syncKnownOzonPostingDetailsMysql,
   syncOzonOnlineProducts: syncOzonOnlineProductsMysql,
+  toggleOzonSellerAction: toggleOzonSellerActionMysql,
   syncOzonPostingsByNumber: syncOzonPostingsByNumberMysql,
+  syncOzonReviews: syncOzonReviewsMysql,
   updateExceptionTaskState: updateExceptionTaskStateMysql,
   updateExchangeRate: updateExchangeRateMysql,
   updateInboundRecord: updateInboundRecordMysql,

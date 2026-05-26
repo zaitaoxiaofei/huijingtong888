@@ -15,9 +15,12 @@ export async function uploadCropperImage(file) {
   return data;
 }
 
-export async function uploadListingMedia(file) {
+export async function uploadListingMedia(file, metadata = {}) {
   const formData = new FormData();
   formData.append("file", file);
+  for (const [key, value] of Object.entries(metadata || {})) {
+    if (value !== undefined && value !== null && value !== "") formData.append(key, String(value));
+  }
   const response = await fetch("/api/listing/media/upload", {
     method: "POST",
     body: formData,

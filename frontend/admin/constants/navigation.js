@@ -1,4 +1,4 @@
-import { DataAnalysis, Document, Goods, House, Setting, ShoppingCart, Tools, WarningFilled } from "@element-plus/icons-vue";
+import { ChatDotRound, DataAnalysis, Document, Goods, House, Setting, ShoppingCart, Tools, WarningFilled } from "@element-plus/icons-vue";
 
 export const navigationMenus = [
   { key: "dashboard", label: "首页看板", route: "/dashboard", icon: House },
@@ -9,6 +9,7 @@ export const navigationMenus = [
     children: [
       { key: "profit-dashboard", label: "利润看板", route: "/profit" },
       { key: "advertising-daily", label: "广告系统", route: "/advertising/daily" },
+      { key: "reviews", label: "评价中心", route: "/reviews", icon: ChatDotRound },
       { key: "profit-aftersales", label: "售后损失", route: "/profit/aftersales" }
     ]
   },
@@ -19,7 +20,7 @@ export const navigationMenus = [
     children: [
       { key: "selection", label: "选品计价表", route: "/selection" },
       { key: "asset-variant-center", label: "素材裂变中心", route: "/asset-variant-center" },
-      { key: "listing-automation", label: "多店铺上架自动化", route: "/listing-automation" },
+      { key: "listing-automation", label: "编辑上架", route: "/listing-automation" },
       { key: "tools-image-cropper", label: "电商套图拆分器", route: "/tools/ecommerce-image-splitter" },
       { key: "tools-product-video-generator", label: "一键生成视频", route: "/tools/product-video-generator" },
       { key: "tools-ai-image-generator", label: "AI 套图生成中心", route: "/tools/ai-image-generator" }
@@ -63,6 +64,7 @@ export const navigationMenus = [
     icon: Goods,
     children: [
       { key: "multi-shop-publish", label: "多店铺商品发布中台", route: "/multi-shop-publish" },
+      { key: "ozon-actions", label: "活动管理", route: "/ozon-actions" },
       { key: "online-products", label: "在线商品", route: "/online-products" }
     ]
   },

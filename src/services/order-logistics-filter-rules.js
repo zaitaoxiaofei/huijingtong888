@@ -86,7 +86,7 @@ function resolveOrderLogisticsValueByText(text = "") {
   ) {
     return "hunchun_2";
   }
-  if (normalized.includes("china post") || normalized.includes("postal")) {
+  if (normalized.includes("china post") || normalized.includes("postal") || normalized.includes("邮政")) {
     return "postal_1_500g";
   }
   if (normalized.includes("0.5-30kg")) {
@@ -95,11 +95,13 @@ function resolveOrderLogisticsValueByText(text = "") {
   if (normalized.includes("500-25000g") || normalized.includes("budget")) {
     return "cel_land_500_25000g";
   }
-  if (normalized.includes("2-30kg") || normalized.includes(" economy big") || normalized.endsWith(" big")) {
+  if (normalized.includes("2-30kg") || normalized.includes(" economy big") || normalized.includes(" big") || normalized.endsWith(" big")) {
     return "cel_land_2_30kg";
   }
   if (
-    normalized.includes("standard extra small")
+    normalized.includes("陆空")
+    || normalized.includes("陆运经济 extra small")
+    || normalized.includes("standard extra small")
     || normalized.includes("extra small standard")
     || normalized.includes("economy extra small")
     || normalized.includes("extra small economy")

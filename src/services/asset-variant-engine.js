@@ -12,8 +12,16 @@ import { ensureListingAutomationSchema, registerListingMediaAssetFromFile } from
 const ROOT_DIR = process.cwd();
 const VARIANT_ROOT = path.resolve(ROOT_DIR, "uploads", "shop-variants");
 const TAIL_TEMPLATE_ROOT = path.resolve(ROOT_DIR, "uploads", "asset-tail-templates");
+const LISTING_MEDIA_ROOT = path.resolve(ROOT_DIR, "public", "uploads", "listing-media");
 const ASSET_VARIANT_CONCURRENCY = 4;
 const TITLE_STYLES = ["traffic", "material", "scenario", "value", "premium"];
+const TAG_STYLES = ["traffic", "vehicle", "material", "compact"];
+const TAG_STYLE_LABELS = {
+  traffic: "流量词型",
+  vehicle: "精准车型型",
+  material: "材质卖点型",
+  compact: "简洁防跟卖型"
+};
 const TITLE_STYLE_LABELS = {
   traffic: "搜索流量型",
   material: "材质卖点型",
@@ -81,9 +89,9 @@ function vehicleSeed(brand, brandRu, model, modelRu, labelZh, labelRu, yearFrom,
 export async function assetVariantBootstrap() {
   await ensureAssetVariantSchema();
   const shops = await mysqlQuery(`
-    SELECT s.id, s.name, s.status, s.watermark_path,
+    SELECT s.id, s.name, s.status, s.legal_entity, s.watermark_path,
       s.watermark_position, s.watermark_x_percent, s.watermark_y_percent, s.watermark_scale_percent, s.watermark_opacity_percent,
-      r.title_style, r.watermark_template_id, r.tail_image_url, r.main_image_plan,
+      r.title_style, r.tag_style, r.price_index, r.watermark_template_id, r.tail_image_url, r.main_image_plan,
       r.tail_category, r.vehicle_model, r.tail_template_id
     FROM shops s
     LEFT JOIN shop_variant_rules r ON r.shop_id = s.id
@@ -123,6 +131,7 @@ export async function assetVariantBootstrap() {
       }))
     ],
     titleStyles: TITLE_STYLES.map((value) => ({ value, label: TITLE_STYLE_LABELS[value] })),
+    tagStyles: TAG_STYLES.map((value) => ({ value, label: TAG_STYLE_LABELS[value] || value })),
     mainImagePlans: MAIN_IMAGE_PLANS,
     tailCategories: uniqueValues([
       ...ozonCategories.filter((item) => item.isAuto).map((item) => item.nameZh || item.nameRu || item.pathZh),
@@ -144,11 +153,13 @@ export async function saveShopVariantRule(body = {}, session = null) {
   if (!shopId) throw new Error("请选择店铺");
   await mysqlExecute(`
     INSERT INTO shop_variant_rules
-    (shop_id, title_style, watermark_template_id, tail_image_url, main_image_plan,
+    (shop_id, title_style, tag_style, price_index, watermark_template_id, tail_image_url, main_image_plan,
      tail_category, vehicle_model, tail_template_id, updated_by_person_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       title_style = VALUES(title_style),
+      tag_style = VALUES(tag_style),
+      price_index = VALUES(price_index),
       watermark_template_id = VALUES(watermark_template_id),
       tail_image_url = VALUES(tail_image_url),
       main_image_plan = VALUES(main_image_plan),
@@ -160,6 +171,8 @@ export async function saveShopVariantRule(body = {}, session = null) {
   `, [
     shopId,
     normalizeTitleStyle(body.titleStyle || body.title_style),
+    normalizeTagStyle(body.tagStyle || body.tag_style),
+    normalizePriceIndex(body.priceIndex || body.price_index),
     String(body.watermarkTemplateId || body.watermark_template_id || ""),
     String(body.tailImageUrl || body.tail_image_url || ""),
     String(body.mainImagePlan || body.main_image_plan || "watermarked"),
@@ -197,6 +210,11 @@ export async function generateAssetVariants(body = {}, session = null) {
     const selectedTitle = titleCandidates[mergedRule.titleStyle] || fallbackTitle(material, mergedRule.titleStyle, shop);
     const title = selectedTitle.ru;
     const titleZh = selectedTitle.zh;
+    const priceIndex = normalizePriceIndex(mergedRule.priceIndex || mergedRule.price_index);
+    const internalPrice = roundMoney(material.basePriceRmb * priceIndex);
+    const ozonPrice = roundMoney(internalPrice * 2);
+    const ozonOldPrice = roundMoney(internalPrice * 4);
+    const shopTags = generateShopTags(material, shop, mergedRule, title);
     const shopSlug = sanitizeFilename(`shop-${shop.id}-${shop.name}`);
     const shopDir = path.join(batchDir, shopSlug);
     const infoDir = path.join(shopDir, "product-info");
@@ -211,34 +229,42 @@ export async function generateAssetVariants(body = {}, session = null) {
       tailImageUrl: tailTemplate?.imagePath || mergedRule.tailImageUrl,
       mainImagePlan: mergedRule.mainImagePlan,
       batchId,
-      shopId: shop.id
+      shopId: shop.id,
+      sourceTitle: material.title,
+      variantTitle: title
     });
 
-    const productInfo = buildProductInfo({ shop, title, titleZh, material, images: generatedImages, rule: mergedRule, tailTemplate });
+    const productInfo = buildProductInfo({ shop, title, titleZh, material: { ...material, tags: shopTags }, images: generatedImages, rule: { ...mergedRule, priceIndex, internalPrice, ozonPrice, ozonOldPrice }, tailTemplate });
     await writeText(path.join(infoDir, "title.txt"), title);
-    await writeText(path.join(infoDir, "tags.txt"), material.tags.join(","));
+    await writeText(path.join(infoDir, "tags.txt"), shopTags.join(" "));
     await writeText(path.join(infoDir, "description.txt"), material.description);
     await writeText(path.join(infoDir, "product-info.json"), JSON.stringify(productInfo, null, 2));
     await fs.writeFile(path.join(infoDir, "product-info.xlsx"), buildProductInfoWorkbook(productInfo));
-    await fs.writeFile(path.join(shopDir, "listing.xlsx"), buildListingWorkbook({ shop, title, titleZh, material, images: generatedImages, rule: mergedRule, tailTemplate }));
-    await writeText(path.join(shopDir, "listing.json"), JSON.stringify(buildListingJson({ shop, title, titleZh, material, images: generatedImages, rule: mergedRule, tailTemplate }), null, 2));
+    await fs.writeFile(path.join(shopDir, "listing.xlsx"), buildListingWorkbook({ shop, title, titleZh, material: { ...material, tags: shopTags }, images: generatedImages, rule: { ...mergedRule, priceIndex, internalPrice, ozonPrice, ozonOldPrice }, tailTemplate }));
+    await writeText(path.join(shopDir, "listing.json"), JSON.stringify(buildListingJson({ shop, title, titleZh, material: { ...material, tags: shopTags }, images: generatedImages, rule: { ...mergedRule, priceIndex, internalPrice, ozonPrice, ozonOldPrice }, tailTemplate }), null, 2));
 
     const outputDir = path.relative(ROOT_DIR, shopDir).replace(/\\/g, "/");
     const localOutputDir = shopDir;
     const insertResult = await mysqlExecute(`
       INSERT INTO asset_variants
-      (batch_id, shop_id, source_title, variant_title, title_style, tags_json, description_text, images_json,
+      (batch_id, shop_id, source_title, variant_title, variant_title_zh, title_style, tag_style, price_index, internal_price, ozon_price, ozon_old_price, tags_json, description_text, images_json,
        source_product_id, ozon_category_id, ozon_description_category_id, ozon_type_id, ozon_category_name,
        length_cm, width_cm, height_cm, weight_g, color, material_text, quantity_text,
        output_dir, status, created_by_person_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generated', ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generated', ?)
     `, [
       batchId,
       shop.id,
       material.title,
       title,
+      titleZh,
       mergedRule.titleStyle,
-      JSON.stringify(material.tags),
+      mergedRule.tagStyle,
+      priceIndex,
+      internalPrice,
+      ozonPrice,
+      ozonOldPrice,
+      JSON.stringify(shopTags),
       material.description,
       JSON.stringify(generatedImages),
       Number(material.sourceProductId || material.source_product_id || 0) || null,
@@ -265,9 +291,15 @@ export async function generateAssetVariants(body = {}, session = null) {
       shopId: shop.id,
       shopName: shop.name,
       title,
+      titleZh,
       titleStyle: mergedRule.titleStyle,
+      tagStyle: mergedRule.tagStyle,
+      priceIndex,
+      internalPrice,
+      ozonPrice,
+      ozonOldPrice,
       titleCandidates,
-      tags: material.tags,
+      tags: shopTags,
       description: material.description,
       productInfo,
       images: generatedImages,
@@ -286,9 +318,95 @@ export async function generateAssetVariants(body = {}, session = null) {
   return {
     ok: true,
     batchId,
+    createdAt: new Date().toISOString(),
     outputDir: path.relative(ROOT_DIR, batchDir).replace(/\\/g, "/"),
     localOutputDir: batchDir,
     variants
+  };
+}
+
+export async function deleteAssetVariantMediaGroup(body = {}, session = null) {
+  await ensureAssetVariantSchema();
+  await ensureListingAutomationSchema();
+  const batchId = String(body.batchId || body.batch_id || "").trim();
+  const shopId = Number(body.shopId || body.shop_id || 0) || null;
+  const assetIds = uniqueNumbers(body.assetIds || body.asset_ids);
+  if (!batchId && !assetIds.length) throw new Error("请选择要删除的素材");
+
+  let mediaAssets = [];
+  let variants = [];
+  let deleteMediaSql = "";
+  let deleteMediaParams = [];
+  let deleteVariantSql = "";
+  let deleteVariantParams = [];
+  if (batchId) {
+    const params = [batchId];
+    let shopWhere = "";
+    if (shopId) {
+      shopWhere = " AND shop_id = ?";
+      params.push(shopId);
+    }
+    mediaAssets = await mysqlQuery(`
+      SELECT id, local_path, source_path
+      FROM listing_media_assets
+      WHERE status <> 'deleted' AND batch_id = ?${shopWhere}
+    `, params);
+    variants = await mysqlQuery(`
+      SELECT id, output_dir
+      FROM asset_variants
+      WHERE batch_id = ?${shopWhere}
+    `, params);
+    deleteMediaSql = `DELETE FROM listing_media_assets WHERE batch_id = ?${shopWhere}`;
+    deleteMediaParams = params;
+    deleteVariantSql = `DELETE FROM asset_variants WHERE batch_id = ?${shopWhere}`;
+    deleteVariantParams = params;
+  } else {
+    const placeholders = assetIds.map(() => "?").join(",");
+    mediaAssets = await mysqlQuery(`
+      SELECT id, local_path, source_path
+      FROM listing_media_assets
+      WHERE status <> 'deleted' AND id IN (${placeholders})
+    `, assetIds);
+    deleteMediaSql = `DELETE FROM listing_media_assets WHERE id IN (${placeholders})`;
+    deleteMediaParams = assetIds;
+  }
+
+  const files = new Set();
+  const dirs = new Set();
+  for (const asset of mediaAssets) {
+    if (asset.local_path) files.add(asset.local_path);
+    if (asset.source_path) files.add(asset.source_path);
+  }
+  for (const variant of variants) {
+    if (variant.output_dir) dirs.add(variant.output_dir);
+  }
+  if (batchId && !shopId) dirs.add(path.relative(ROOT_DIR, path.join(VARIANT_ROOT, sanitizeFilename(batchId))).replace(/\\/g, "/"));
+
+  let deletedFiles = 0;
+  let deletedDirs = 0;
+  for (const filePath of files) {
+    if (await removeLocalAssetPath(filePath, { recursive: false })) deletedFiles += 1;
+  }
+  for (const dirPath of dirs) {
+    if (await removeLocalAssetPath(dirPath, { recursive: true })) deletedDirs += 1;
+  }
+
+  if (variants.length) {
+    const placeholders = variants.map(() => "?").join(",");
+    await mysqlExecute(`DELETE FROM generated_titles WHERE asset_variant_id IN (${placeholders})`, variants.map((row) => Number(row.id)));
+  }
+  if (deleteMediaSql) await mysqlExecute(deleteMediaSql, deleteMediaParams);
+  if (deleteVariantSql) await mysqlExecute(deleteVariantSql, deleteVariantParams);
+
+  return {
+    ok: true,
+    batchId,
+    shopId,
+    assetIds,
+    deletedMediaAssets: mediaAssets.length,
+    deletedVariants: variants.length,
+    deletedFiles,
+    deletedDirs
   };
 }
 
@@ -515,6 +633,8 @@ async function ensureAssetVariantSchema() {
   await ensureMysqlColumn("shop_variant_rules", "tail_category", "VARCHAR(128) NOT NULL DEFAULT ''");
   await ensureMysqlColumn("shop_variant_rules", "vehicle_model", "VARCHAR(128) NOT NULL DEFAULT ''");
   await ensureMysqlColumn("shop_variant_rules", "tail_template_id", "BIGINT NULL");
+  await ensureMysqlColumn("shop_variant_rules", "tag_style", "VARCHAR(32) NOT NULL DEFAULT 'traffic'");
+  await ensureMysqlColumn("shop_variant_rules", "price_index", "DECIMAL(10,4) NOT NULL DEFAULT 1.0000");
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS asset_tail_templates (
       id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -541,6 +661,7 @@ async function ensureAssetVariantSchema() {
       shop_id BIGINT NOT NULL,
       source_title VARCHAR(500) NOT NULL DEFAULT '',
       variant_title VARCHAR(500) NOT NULL DEFAULT '',
+      variant_title_zh VARCHAR(500) NOT NULL DEFAULT '',
       title_style VARCHAR(32) NOT NULL DEFAULT 'functional',
       tags_json LONGTEXT NULL,
       description_text LONGTEXT NULL,
@@ -568,6 +689,7 @@ async function ensureAssetVariantSchema() {
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
   await ensureMysqlColumn("asset_variants", "source_product_id", "BIGINT NULL");
+  await ensureMysqlColumn("asset_variants", "variant_title_zh", "VARCHAR(500) NOT NULL DEFAULT ''");
   await ensureMysqlColumn("asset_variants", "ozon_category_id", "VARCHAR(128) NOT NULL DEFAULT ''");
   await ensureMysqlColumn("asset_variants", "ozon_description_category_id", "BIGINT NOT NULL DEFAULT 0");
   await ensureMysqlColumn("asset_variants", "ozon_type_id", "BIGINT NOT NULL DEFAULT 0");
@@ -579,6 +701,11 @@ async function ensureAssetVariantSchema() {
   await ensureMysqlColumn("asset_variants", "color", "VARCHAR(128) NOT NULL DEFAULT ''");
   await ensureMysqlColumn("asset_variants", "material_text", "VARCHAR(128) NOT NULL DEFAULT ''");
   await ensureMysqlColumn("asset_variants", "quantity_text", "VARCHAR(64) NOT NULL DEFAULT ''");
+  await ensureMysqlColumn("asset_variants", "tag_style", "VARCHAR(32) NOT NULL DEFAULT 'traffic'");
+  await ensureMysqlColumn("asset_variants", "price_index", "DECIMAL(10,4) NOT NULL DEFAULT 1.0000");
+  await ensureMysqlColumn("asset_variants", "internal_price", "DECIMAL(10,2) NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "ozon_price", "DECIMAL(10,2) NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "ozon_old_price", "DECIMAL(10,2) NOT NULL DEFAULT 0");
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS generated_titles (
       id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -734,7 +861,7 @@ async function ensureVehicleSeedData() {
   }
 }
 
-async function generateVariantImages({ material, shopDir, watermark, tailImageUrl, mainImagePlan, batchId, shopId }) {
+async function generateVariantImages({ material, shopDir, watermark, tailImageUrl, mainImagePlan, batchId, shopId, sourceTitle = "", variantTitle = "" }) {
   const images = [];
   const mainDir = path.join(shopDir, "images", "main");
   const detailDir = path.join(shopDir, "images", "details");
@@ -751,9 +878,9 @@ async function generateVariantImages({ material, shopDir, watermark, tailImageUr
     const mainImage = await applyWatermark(mainBuffer, watermark);
     await mainImage.jpeg({ quality: 92 }).toFile(mainOutput);
   }
-  images.push(await imageResult(mainOutput, "main", 1, { batchId, shopId }));
+  images.push(await imageResult(mainOutput, "main", 1, { batchId, shopId, sourceTitle, variantTitle }));
 
-  const detailSources = [...material.detailImages];
+  const detailSources = material.detailImages.length ? [...material.detailImages] : [material.mainImage].filter(Boolean);
 
   for (let index = 0; index < detailSources.length; index += 1) {
     const source = detailSources[index];
@@ -761,7 +888,7 @@ async function generateVariantImages({ material, shopDir, watermark, tailImageUr
     const buffer = await readImageBuffer(source);
     const detailImage = await applyWatermark(buffer, watermark);
     await detailImage.jpeg({ quality: 92 }).toFile(output);
-    images.push(await imageResult(output, "detail", index + 1, { batchId, shopId }));
+    images.push(await imageResult(output, "detail", index + 1, { batchId, shopId, sourceTitle, variantTitle }));
   }
 
   if (tailImageUrl) {
@@ -769,7 +896,7 @@ async function generateVariantImages({ material, shopDir, watermark, tailImageUr
     const buffer = await readImageBuffer(tailImageUrl);
     const tailImage = await applyWatermark(buffer, watermark);
     await tailImage.jpeg({ quality: 92 }).toFile(output);
-    images.push(await imageResult(output, "tail", 1, { batchId, shopId }));
+    images.push(await imageResult(output, "tail", 1, { batchId, shopId, sourceTitle, variantTitle }));
   }
   return images;
 }
@@ -927,10 +1054,13 @@ async function ensureAssetVariantListingTemplate(connection, variant, session) {
     ozon_category_id: ozonCategoryId,
     description_category_id: descriptionCategoryId || "",
     type_id: typeId || "",
+    price: Number(variant.internal_price || 0),
+    old_price: Number(variant.ozon_old_price || 0),
     images: [],
     attributes: [
       { name: "素材来源", value: "asset-variant-engine", required: false },
-      { name: "标题风格", value: variant.title_style || "", required: false }
+      { name: "标题风格", value: variant.title_style || "", required: false },
+      { name: "产品标签", value: parseJson(variant.tags_json, []).join(" "), required: false }
     ]
   };
   const [result] = await connection.execute(`
@@ -966,6 +1096,11 @@ async function insertListingDraft(connection, templateId, variant, images, sessi
     asset_variant_id: Number(variant.id),
     batch_id: variant.batch_id,
     title_style: variant.title_style,
+    tag_style: variant.tag_style,
+    price_index: Number(variant.price_index || 1),
+    internal_price: Number(variant.internal_price || 0),
+    ozon_price: Number(variant.ozon_price || 0),
+    ozon_old_price: Number(variant.ozon_old_price || 0),
     tags: parseJson(variant.tags_json, []),
     ozon_category_id: variant.ozon_category_id || "",
     description_category_id: Number(variant.ozon_description_category_id || 0) || "",
@@ -979,12 +1114,13 @@ async function insertListingDraft(connection, templateId, variant, images, sessi
     (template_id, product_name, internal_code, source_urls_json, source_images_json, cost_price, sale_price,
      length_cm, width_cm, height_cm, weight_g, color, spec, quantity, manual_facts_json, ai_payload_json,
      created_by_person_id, updated_at)
-    VALUES (?, ?, ?, '[]', ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, '[]', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `, [
     templateId,
     variant.variant_title || variant.source_title || `素材裂变 ${variant.id}`,
     `AV-${variant.id}`,
     JSON.stringify(images),
+    Number(variant.internal_price || 0),
     Number(variant.length_cm || 0),
     Number(variant.width_cm || 0),
     Number(variant.height_cm || 0),
@@ -1001,17 +1137,18 @@ async function insertListingDraft(connection, templateId, variant, images, sessi
 
 async function insertListingShopCopy(connection, draftId, variant, images, session) {
   const mappedImages = images.map((url, index) => ({ url, sort_order: index + 1 }));
-  const validation = { blocked: false, level: "yellow", errors: [], warnings: ["素材已导入，请补充价格、库存、尺寸、重量后再发布"] };
+  const validation = { blocked: false, level: "green", errors: [], warnings: [] };
   await connection.execute(`
     INSERT INTO listing_shop_copies
     (draft_id, shop_id, offer_id, title, price, stock_quantity, watermark_path, images_json, validation_json,
      status, created_by_person_id, updated_at)
-    VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, 'prepared', ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 'prepared', ?, CURRENT_TIMESTAMP)
   `, [
     draftId,
     Number(variant.shop_id),
     `AV-${variant.id}-${Date.now().toString(36)}`,
     variant.variant_title || variant.source_title || "",
+    Number(variant.ozon_price || variant.internal_price || 0),
     variant.watermark_path || "",
     JSON.stringify(mappedImages),
     JSON.stringify(validation),
@@ -1029,6 +1166,8 @@ function normalizeMaterialPayload(raw = {}) {
     ozonDescriptionCategoryId: Number(raw.ozonDescriptionCategoryId || raw.ozon_description_category_id || 0) || 0,
     ozonTypeId: Number(raw.ozonTypeId || raw.ozon_type_id || 0) || 0,
     ozonCategoryName: cleanText(raw.ozonCategoryName || raw.ozon_category_name || "", 500),
+    vehicleModel: cleanText(raw.vehicleModel || raw.vehicle_model || raw.carModel || raw.car_model || "", 128),
+    basePriceRmb: numberValue(raw.basePriceRmb || raw.base_price_rmb || raw.salePriceRmb || raw.sale_price_rmb || raw.airSalePriceRmb || raw.air_sale_price_rmb),
     quantity: cleanText(raw.quantity || raw.quantityText || raw.quantity_text || "", 64),
     color: cleanText(raw.color || "", 128),
     material: cleanText(raw.material || raw.materialText || raw.material_text || "", 128),
@@ -1046,6 +1185,7 @@ function normalizeShopRuleRow(row, index = 0) {
     id: Number(row.id),
     name: row.name,
     status: row.status,
+    legalEntity: row.legal_entity || "",
     watermark_path: normalizeUrl(row.watermark_path || ""),
     watermarkPath: normalizeUrl(row.watermark_path || ""),
     watermark_position: row.watermark_position || "bottom-right",
@@ -1055,6 +1195,8 @@ function normalizeShopRuleRow(row, index = 0) {
     watermark_opacity_percent: Number(row.watermark_opacity_percent ?? 82),
     rule: normalizeRule({
       titleStyle: row.title_style || defaultTitleStyle(index),
+      tagStyle: row.tag_style,
+      priceIndex: row.price_index,
       watermarkTemplateId: row.watermark_template_id || (row.watermark_path ? `shop-${row.id}` : ""),
       tailImageUrl: row.tail_image_url,
       tailCategory: row.tail_category,
@@ -1068,6 +1210,8 @@ function normalizeShopRuleRow(row, index = 0) {
 function normalizeRule(rule = {}) {
   return {
     titleStyle: normalizeTitleStyle(rule.titleStyle || rule.title_style),
+    tagStyle: normalizeTagStyle(rule.tagStyle || rule.tag_style),
+    priceIndex: normalizePriceIndex(rule.priceIndex || rule.price_index),
     watermarkTemplateId: String(rule.watermarkTemplateId || rule.watermark_template_id || ""),
     tailImageUrl: String(rule.tailImageUrl || rule.tail_image_url || ""),
     tailCategory: cleanText(rule.tailCategory || rule.tail_category || DEFAULT_TAIL_CATEGORY, 128),
@@ -1175,6 +1319,22 @@ function normalizeTitleStyle(value) {
   return TITLE_STYLES.includes(normalized) ? normalized : "traffic";
 }
 
+function normalizeTagStyle(value) {
+  const style = String(value || "traffic").trim();
+  return TAG_STYLES.includes(style) ? style : "traffic";
+}
+
+function normalizePriceIndex(value) {
+  const parsed = Number(value || 1);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 1;
+  return Math.min(Math.max(parsed, 0.1), 9.9999);
+}
+
+function roundMoney(value) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) ? Math.round(parsed * 100) / 100 : 0;
+}
+
 function defaultTitleStyle(index = 0) {
   return TITLE_STYLES[Math.abs(Number(index || 0)) % TITLE_STYLES.length];
 }
@@ -1253,7 +1413,9 @@ async function imageResult(filePath, type, sortOrder = 1, context = {}) {
     sort_order: sortOrder,
     metadata: {
       sourceOutputPath: relative,
-      assetVariantBatchId: context.batchId || batchId || ""
+      assetVariantBatchId: context.batchId || batchId || "",
+      productTitle: context.sourceTitle || "",
+      variantTitle: context.variantTitle || ""
     }
   });
   return {
@@ -1272,6 +1434,24 @@ async function imageResult(filePath, type, sortOrder = 1, context = {}) {
 
 function fileUrl(batchId, filename) {
   return `/api/asset-variant-engine/files/${encodeURIComponent(batchId)}/${filename.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+async function removeLocalAssetPath(value, { recursive = false } = {}) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  const absolute = path.resolve(ROOT_DIR, text);
+  const allowedRoots = [VARIANT_ROOT, LISTING_MEDIA_ROOT];
+  const allowed = allowedRoots.some((root) => {
+    const resolvedRoot = path.resolve(root);
+    return absolute !== resolvedRoot && absolute.startsWith(`${resolvedRoot}${path.sep}`);
+  });
+  if (!allowed) return false;
+  try {
+    await fs.rm(absolute, { recursive, force: true });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function mediaPublishValue(image = {}) {
@@ -1459,6 +1639,60 @@ function fallbackTitle(material, style, shop) {
     ru: cleanText(base.ru.replace(/\s+/g, ' '), 500),
     zh: cleanText(base.zh, 500)
   };
+}
+
+function generateShopTags(material, shop, rule = {}, title = "") {
+  const model = extractLikelyCarModel(`${material.vehicleModel || ""} ${material.title || ""} ${title || ""}`) || "универсальный";
+  const materialText = russianTagWord(material.material || "материал");
+  const colorText = russianTagWord(material.color || "");
+  const shopTag = tagToken(shop.name || shop.legalEntity || "shop");
+  const modelParts = model.split(/\s+/).filter(Boolean);
+  const modelTags = [
+    model,
+    `${model} аксессуары`,
+    `${model} ключ`,
+    `${model} чехол`,
+    modelParts.slice(0, 2).join(" ")
+  ];
+  const materialTags = [
+    materialText,
+    `${materialText} чехол`,
+    "защита ключа",
+    colorText ? `${colorText} чехол` : ""
+  ];
+  const trafficTags = ["автоаксессуары", "чехол для ключа", "брелок авто", "подарок водителю", "защита от царапин", "аксессуар в авто"];
+  const compactTags = ["без логотипа", "аккуратная посадка", "ежедневное использование", "универсальный стиль"];
+  const style = normalizeTagStyle(rule.tagStyle || rule.tag_style);
+  const ordered = style === "vehicle"
+    ? [...modelTags, ...modelTags, ...materialTags, ...trafficTags]
+    : style === "material"
+      ? [...materialTags, ...modelTags, ...trafficTags]
+      : style === "compact"
+        ? [...modelTags.slice(0, 3), ...materialTags, ...compactTags]
+        : [...trafficTags, ...modelTags, ...materialTags];
+  return uniqueValues([shopTag, ...ordered].map(tagToken)).slice(0, 20);
+}
+
+function tagToken(value) {
+  const text = String(value || "")
+    .toLowerCase()
+    .replace(/ruvibe\s*mart/gi, "ruvibemart")
+    .replace(/[^a-zа-яё0-9]+/gi, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 20);
+  return text ? `#${text}` : "";
+}
+
+function russianTagWord(value) {
+  const text = String(value || "").toLowerCase();
+  if (text.includes("tpu")) return "тпу";
+  if (text.includes("abs")) return "abs";
+  if (text.includes("皮") || text.includes("leather")) return "кожа";
+  if (text.includes("金") || text.includes("metal")) return "металл";
+  if (text.includes("黑") || text.includes("black")) return "черный";
+  if (text.includes("银") || text.includes("silver")) return "серебро";
+  if (text.includes("白") || text.includes("white")) return "белый";
+  return text || "материал";
 }
 
 function detectProductType(title, description) {

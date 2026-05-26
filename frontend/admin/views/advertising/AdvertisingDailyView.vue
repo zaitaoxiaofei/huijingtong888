@@ -90,6 +90,7 @@ const storeSpendRank = computed(() => {
       spend: 0,
       revenue: 0,
       clicks: 0,
+      addToCart: 0,
       impressions: 0,
       orders: 0,
       skuCount: new Set()
@@ -97,6 +98,7 @@ const storeSpendRank = computed(() => {
     current.spend += Number(row.evaluation.metrics.spend || 0);
     current.revenue += Number(row.evaluation.metrics.revenue || 0);
     current.clicks += Number(row.evaluation.metrics.clicks || 0);
+    current.addToCart += Number(row.evaluation.metrics.addToCart || 0);
     current.impressions += Number(row.evaluation.metrics.impressions || 0);
     current.orders += Number(row.evaluation.metrics.orders || 0);
     current.skuCount.add(String(row.ozon_sku || ""));
@@ -129,10 +131,11 @@ const trendSeries = computed(() => {
   for (const row of scopedTrendRows) {
     const date = String(row.date_key || "").slice(0, 10);
     if (!date) continue;
-    const current = map.get(date) || { date, spend: 0, revenue: 0, clicks: 0, impressions: 0, orders: 0 };
+    const current = map.get(date) || { date, spend: 0, revenue: 0, clicks: 0, addToCart: 0, impressions: 0, orders: 0 };
     current.spend += Number(row.spend_rub || 0);
     current.revenue += Number(row.revenue_rub || 0);
     current.clicks += Number(row.clicks || 0);
+    current.addToCart += Number(row.add_to_cart || 0);
     current.impressions += Number(row.impressions || 0);
     current.orders += Number(row.orders || 0);
     map.set(date, current);
@@ -232,6 +235,72 @@ function decimal(value) {
   return Number(value || 0).toFixed(2);
 }
 
+function plainPercent(value) {
+  return `${(Number(value || 0) * 100).toFixed(1)}%`;
+}
+
+function compactMoney(value) {
+  return Number(value || 0).toLocaleString("zh-CN", { maximumFractionDigits: 0 });
+}
+
+function campaignStrategyText(row = {}) {
+  const strategy = String(row.campaign_strategies || row.campaign_strategy || "").trim();
+  const bid = Number(row.campaign_bid_rub || 0);
+  const targetCir = Number(row.campaign_target_cir || 0);
+  if (strategy.includes("TARGET_CIR")) return `目标广告费用份额${targetCir > 0 ? ` ${targetCir}%` : ""}`;
+  if (strategy.includes("TARGET_BIDS")) return `按点击出价${bid > 0 ? ` ${rub(bid)} RUB` : ""}`;
+  if (strategy.includes("TOP_PROMOTION")) return `登上顶端${bid > 0 ? ` ${rub(bid)} RUB` : ""}`;
+  if (strategy) return strategy;
+  const payment = String(row.campaign_payment_types || row.campaign_payment_type || "").trim();
+  if (payment.includes("CPC")) return `按点击付费${bid > 0 ? ` ${rub(bid)} RUB` : ""}`;
+  return "\u5f85\u540c\u6b65";
+}
+
+function campaignPlacementText(row = {}) {
+  const raw = String(row.campaign_placements || row.campaign_placement || "").trim();
+  if (!raw) return "\u6295\u653e\u4f4d\u7f6e\u5f85\u540c\u6b65";
+  return raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => {
+      if (item === "PLACEMENT_SEARCH_AND_CATEGORY") return "搜索与推荐";
+      if (item === "PLACEMENT_TOP_PROMOTION") return "登上顶端";
+      if (item === "PLACEMENT_SEARCH") return "搜索";
+      if (item === "PLACEMENT_CATEGORY") return "类目";
+      return item;
+    })
+    .join(" / ");
+}
+
+function budgetCompactText(row = {}) {
+  const budget = Number(row.campaign_budget_rub || 0);
+  if (budget <= 0) return "\u5f85\u540c\u6b65";
+  return `${compactMoney(budget)} RUB`;
+}
+
+function adFeeShareText(row = {}) {
+  const spend = Number(row.evaluation?.metrics?.spend || row.spend_rub || 0);
+  const revenue = Number(row.evaluation?.metrics?.revenue || row.revenue_rub || 0);
+  if (revenue <= 0) return spend > 0 ? "\u65e0\u9500\u552e\u989d" : "0.0%";
+  return plainPercent(spend / revenue);
+}
+
+function funnelText(row = {}) {
+  const impressions = Number(row.evaluation?.metrics?.impressions || row.impressions || 0);
+  const clicks = Number(row.evaluation?.metrics?.clicks || row.clicks || 0);
+  const addToCart = Number(row.evaluation?.metrics?.addToCart || row.add_to_cart || 0);
+  const addToCartAvailable = Boolean(row.evaluation?.metrics?.addToCartAvailable || Number(row.add_to_cart_available || 0) > 0);
+  const orders = Number(row.evaluation?.metrics?.orders || row.orders || 0);
+  return `${integer(impressions)} / ${integer(clicks)} / ${addToCartAvailable ? integer(addToCart) : "未返回"} / ${integer(orders)}`;
+}
+
+function salesCompactText(row = {}) {
+  const units = Number(row.units || row.evaluation?.metrics?.orders || 0);
+  const revenue = Number(row.evaluation?.metrics?.revenue || row.revenue_rub || 0);
+  return `${integer(units)} \u4ef6 / ${compactMoney(revenue)} RUB`;
+}
+
 function summarizeRows(rows = []) {
   const total = rows.reduce((acc, row) => {
     const metrics = row.evaluation?.metrics || evaluateAdSku(row).metrics;
@@ -239,10 +308,12 @@ function summarizeRows(rows = []) {
     acc.revenue_rub += Number(metrics.revenue || row.revenue_rub || 0);
     acc.impressions += Number(metrics.impressions || row.impressions || 0);
     acc.clicks += Number(metrics.clicks || row.clicks || 0);
+    acc.add_to_cart += Number(metrics.addToCart || row.add_to_cart || 0);
+    acc.add_to_cart_available = acc.add_to_cart_available || Number(metrics.addToCartAvailable || row.add_to_cart_available || 0);
     acc.orders += Number(metrics.orders || row.orders || 0);
     acc.units += Number(row.units || 0);
     return acc;
-  }, { spend_rub: 0, revenue_rub: 0, impressions: 0, clicks: 0, orders: 0, units: 0 });
+  }, { spend_rub: 0, revenue_rub: 0, impressions: 0, clicks: 0, add_to_cart: 0, add_to_cart_available: 0, orders: 0, units: 0 });
   return {
     ...total,
     ctr: total.impressions ? total.clicks / total.impressions : 0,
@@ -327,9 +398,14 @@ function tableSortValue(row, prop) {
   if (prop === "roas") return Number(row.evaluation.metrics.roas || 0);
   if (prop === "ctr") return Number(row.evaluation.metrics.ctr || 0);
   if (prop === "cr") return Number(row.evaluation.metrics.cr || 0);
+  if (prop === "cpc") return Number(row.evaluation.metrics.cpc || 0);
+  if (prop === "feeShare") return Number(row.evaluation.metrics.acos || 0);
+  if (prop === "add_to_cart") return Number(row.evaluation.metrics.addToCart || 0);
   if (prop === "acos") return Number(row.evaluation.metrics.acos || 0);
   if (prop === "healthScore") return Number(row.evaluation.healthScore || 0);
   if (prop === "spend_rub") return Number(row.evaluation.metrics.spend || 0);
+  if (prop === "campaign_budget_rub") return Number(row.campaign_budget_rub || 0);
+  if (prop === "units") return Number(row.units || 0);
   return Number(row[prop] || 0);
 }
 
@@ -614,7 +690,7 @@ onMounted(bootstrap);
       </div>
       <div class="hero-actions">
         <el-button type="success" :loading="syncing" @click="syncFromOzon">同步 Ozon 广告</el-button>
-        <el-button type="primary" :icon="Refresh" :loading="syncing" @click="syncFromOzon">刷新</el-button>
+        <el-button type="primary" :icon="Refresh" :loading="loading" @click="loadRows">刷新</el-button>
       </div>
     </section>
 
@@ -776,8 +852,11 @@ onMounted(bootstrap);
               <div><span>状态</span><strong>{{ readableCampaignStatus(row).label }}</strong></div>
               <div><span>阶段</span><strong>{{ row.evaluation.stage.label }}</strong></div>
               <div><span>CPC 点击成本</span><strong>{{ money(row.evaluation.metrics.cpc) }}</strong></div>
+              <div><span>ROAS</span><strong>{{ decimal(row.evaluation.metrics.roas) }}</strong></div>
+              <div><span>ACOS</span><strong>{{ percent(row.evaluation.metrics.acos) }}</strong></div>
               <div><span>展示</span><strong>{{ integer(row.evaluation.metrics.impressions) }}</strong></div>
               <div><span>点击</span><strong>{{ integer(row.evaluation.metrics.clicks) }}</strong></div>
+              <div><span>加购</span><strong>{{ integer(row.evaluation.metrics.addToCart) }}</strong></div>
               <div><span>订单</span><strong>{{ integer(row.evaluation.metrics.orders) }}</strong></div>
               <div><span>广告销售额</span><strong>{{ money(row.evaluation.metrics.revenue) }}</strong></div>
               <div class="profit-card">
@@ -819,52 +898,69 @@ onMounted(bootstrap);
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="spend_rub" label="花费（RUB）" width="165" sortable="custom" align="right">
+        <el-table-column label="状态" width="92" align="center">
           <template #default="{ row }">
-            <div class="spend-metric-cell">
-              <strong>{{ rub(row.evaluation.metrics.spend) }}</strong>
-              <span>{{ budgetText(row) }}</span>
+            <el-tag :type="toneType(readableCampaignStatus(row).tone)" effect="light" round size="small">{{ readableCampaignStatus(row).label }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="策略" width="110">
+          <template #default="{ row }">
+            <span class="strategy-cell">{{ campaignStrategyText(row) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="投放位置" width="118">
+          <template #default="{ row }">
+            <span class="strategy-cell">{{ campaignPlacementText(row) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="campaign_budget_rub" label="预算" width="110" sortable="custom" align="right">
+          <template #default="{ row }">
+            <div class="compact-metric-cell">
+              <strong>{{ budgetCompactText(row) }}</strong>
+              <span>{{ budgetRemaining(row) ? `剩 ${compactMoney(budgetRemaining(row))}` : "" }}</span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="roas" label="ROAS" width="120" align="right" sortable="custom">
-          <template #header>
-            <el-tooltip placement="top" effect="dark" content="ROAS（投产比）：广告销售额 / 广告花费。数值越高越好，例如 4.70 表示花 1 RUB 广告费带来 4.70 RUB 销售额。">
-              <span class="metric-header">ROAS</span>
-            </el-tooltip>
-          </template>
+        <el-table-column prop="feeShare" label="费用份额" width="110" align="right" sortable="custom">
           <template #default="{ row }">
-            <div class="formula-metric"><strong>{{ decimal(row.evaluation.metrics.roas) }}</strong><span>{{ rub(row.evaluation.metrics.revenue) }} / {{ rub(row.evaluation.metrics.spend) }}</span></div>
+            <div class="compact-metric-cell">
+              <strong>{{ adFeeShareText(row) }}</strong>
+              <span>{{ compactMoney(row.evaluation.metrics.spend) }} RUB</span>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column prop="ctr" label="CTR" width="120" align="right" sortable="custom">
-          <template #header>
-            <el-tooltip placement="top" effect="dark" content="CTR（点击率）：点击数 / 展示数。主要看主图、标题、价格是否吸引人。">
-              <span class="metric-header">CTR</span>
-            </el-tooltip>
-          </template>
+        <el-table-column prop="cpc" label="平均点击费" width="118" align="right" sortable="custom">
           <template #default="{ row }">
-            <div class="formula-metric"><strong>{{ percent(row.evaluation.metrics.ctr) }}</strong><span>{{ integer(row.evaluation.metrics.clicks) }} / {{ integer(row.evaluation.metrics.impressions) }}</span></div>
+            <div class="compact-metric-cell">
+              <strong>{{ money(row.evaluation.metrics.cpc) }}</strong>
+              <span>{{ integer(row.evaluation.metrics.clicks) }} 次点击</span>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column prop="cr" label="CR" width="120" align="right" sortable="custom">
-          <template #header>
-            <el-tooltip placement="top" effect="dark" content="CR（转化率）：订单数 / 点击数。主要看详情页、价格、评价、物流和 SKU 是否匹配。">
-              <span class="metric-header">CR</span>
-            </el-tooltip>
-          </template>
+        <el-table-column prop="units" label="销量 / 销售额" width="150" align="right" sortable="custom">
           <template #default="{ row }">
-            <div class="formula-metric"><strong>{{ percent(row.evaluation.metrics.cr) }}</strong><span>{{ integer(row.evaluation.metrics.orders) }} / {{ integer(row.evaluation.metrics.clicks) }}</span></div>
+            <div class="compact-metric-cell">
+              <strong>{{ salesCompactText(row) }}</strong>
+              <span>广告归因</span>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column prop="acos" label="ACOS" width="120" align="right" sortable="custom">
-          <template #header>
-            <el-tooltip placement="top" effect="dark" content="ACOS（广告成本销售比）：广告花费 / 广告销售额。数值越低越好，表示广告费占销售额的比例。">
-              <span class="metric-header">ACOS</span>
-            </el-tooltip>
-          </template>
+        <el-table-column prop="spend_rub" label="费用" width="112" sortable="custom" align="right">
           <template #default="{ row }">
-            <div class="formula-metric"><strong>{{ percent(row.evaluation.metrics.acos) }}</strong><span>{{ rub(row.evaluation.metrics.spend) }} / {{ rub(row.evaluation.metrics.revenue) }}</span></div>
+            <strong class="number-cell">{{ compactMoney(row.evaluation.metrics.spend) }} RUB</strong>
+          </template>
+        </el-table-column>
+        <el-table-column label="转化漏斗" width="185" align="right">
+          <template #default="{ row }">
+            <div class="compact-metric-cell">
+              <strong>{{ funnelText(row) }}</strong>
+              <span>展示 / 点击 / 加购 / 订单</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column prop="ctr" label="点击率" width="95" align="right" sortable="custom">
+          <template #default="{ row }">
+            <strong class="number-cell">{{ percent(row.evaluation.metrics.ctr) }}</strong>
           </template>
         </el-table-column>
         <el-table-column prop="healthScore" label="健康分" width="95" align="center" sortable="custom">
@@ -1126,6 +1222,7 @@ onMounted(bootstrap);
           <div><span>ACOS</span><strong>{{ percent(currentRow.evaluation.metrics.acos) }}</strong></div>
           <div><span>CPC</span><strong>{{ money(currentRow.evaluation.metrics.cpc) }}</strong></div>
           <div><span>花费</span><strong>{{ money(currentRow.evaluation.metrics.spend) }}</strong></div>
+          <div><span>加购</span><strong>{{ integer(currentRow.evaluation.metrics.addToCart) }}</strong></div>
           <div><span>订单</span><strong>{{ integer(currentRow.evaluation.metrics.orders) }}</strong></div>
         </section>
         <section class="drawer-ai">
@@ -1153,6 +1250,7 @@ onMounted(bootstrap);
           <el-table-column label="花费" width="120" align="right"><template #default="{ row }">{{ money(row.spend_rub) }}</template></el-table-column>
           <el-table-column prop="impressions" label="展示" width="100" align="right" />
           <el-table-column prop="clicks" label="点击" width="90" align="right" />
+          <el-table-column prop="add_to_cart" label="加购" width="90" align="right" />
           <el-table-column label="CTR" width="90" align="right"><template #default="{ row }">{{ percent(row.ctr) }}</template></el-table-column>
           <el-table-column prop="orders" label="订单" width="80" align="right" />
           <el-table-column label="ROAS" width="90" align="right"><template #default="{ row }">{{ decimal(row.roas) }}</template></el-table-column>
@@ -1208,7 +1306,8 @@ onMounted(bootstrap);
 
 <style scoped>
 .ad-dashboard-page {
-  max-width: 1760px;
+  width: 100%;
+  max-width: none;
   margin: 0 auto;
   padding-bottom: 24px;
   display: flex;
@@ -1565,7 +1664,8 @@ onMounted(bootstrap);
 }
 
 .spend-metric-cell,
-.formula-metric {
+.formula-metric,
+.compact-metric-cell {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1573,9 +1673,12 @@ onMounted(bootstrap);
 }
 
 .spend-metric-cell strong,
-.formula-metric strong {
+.formula-metric strong,
+.compact-metric-cell strong,
+.number-cell {
   color: #111827;
   font-size: 13px;
+  font-weight: 700;
 }
 
 .spend-metric-cell strong {
@@ -1583,12 +1686,23 @@ onMounted(bootstrap);
 }
 
 .spend-metric-cell span,
-.formula-metric span {
+.formula-metric span,
+.compact-metric-cell span {
   color: #64748b;
   font-size: 11px;
 }
 
 .spend-metric-cell span {
+  white-space: nowrap;
+}
+
+.strategy-cell {
+  display: block;
+  color: #111827;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -1601,7 +1715,22 @@ onMounted(bootstrap);
 }
 
 .ad-table :deep(.el-table__row) {
-  height: 72px;
+  height: 58px;
+}
+
+.ad-table :deep(.el-table__cell) {
+  padding: 6px 0;
+}
+
+.ad-table :deep(.cell) {
+  padding: 0 8px;
+  line-height: 1.35;
+}
+
+.ad-table :deep(.el-table__header .cell) {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .ad-table :deep(.ad-row-danger) {

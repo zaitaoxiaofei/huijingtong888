@@ -73,6 +73,11 @@ function describeCancellation(row = {}) {
 
 function invalidateOrderCancellationRuleCache() {}
 
+function invalidateOrderLogisticsRuleCachesMysql() {
+  logisticsRuleFilterCacheMysql = null;
+  invalidateMasterDataCachePrefix("orders:logistics-");
+}
+
 function ensureMysqlCutoverEnabled() {
   if (!isMysqlPrimaryEnabled()) {
     throw new Error("MySQL cutover routes are not enabled");
@@ -246,6 +251,7 @@ async function ensureSelectionCreativeSchemaMysql() {
     "ALTER TABLE products ADD COLUMN detail_image_urls LONGTEXT NULL",
     "ALTER TABLE products ADD COLUMN material VARCHAR(255) NULL",
     "ALTER TABLE products ADD COLUMN color VARCHAR(255) NULL",
+    "ALTER TABLE products ADD COLUMN vehicle_model VARCHAR(255) NULL",
     "ALTER TABLE products ADD COLUMN selling_points TEXT NULL",
     "ALTER TABLE products ADD COLUMN ozon_category_id VARCHAR(128) NOT NULL DEFAULT ''",
     "ALTER TABLE products ADD COLUMN ozon_description_category_id BIGINT NOT NULL DEFAULT 0",
@@ -1355,7 +1361,7 @@ export async function createLogisticsRuleMysql(body = {}) {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(Number(result.insertId), ...payload);
 
-  logisticsRuleFilterCacheMysql = null;
+  invalidateOrderLogisticsRuleCachesMysql();
   invalidateMasterDataCache();
   return { id: Number(result.insertId) };
 }
@@ -1400,7 +1406,7 @@ export async function updateLogisticsRuleMysql(id, body = {}) {
     WHERE id = ?
   `).run(...payload);
 
-  logisticsRuleFilterCacheMysql = null;
+  invalidateOrderLogisticsRuleCachesMysql();
   invalidateMasterDataCache();
   return { ok: true };
 }
@@ -1409,7 +1415,7 @@ export async function deleteLogisticsRuleMysql(id) {
   ensureMysqlCutoverEnabled();
   await mysqlExecute("UPDATE logistics_fee_rules SET enabled = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [Number(id)]);
   db.prepare("UPDATE logistics_fee_rules SET enabled = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(Number(id));
-  logisticsRuleFilterCacheMysql = null;
+  invalidateOrderLogisticsRuleCachesMysql();
   invalidateMasterDataCache();
   return { ok: true };
 }
@@ -1432,6 +1438,7 @@ export async function incrementLogisticsRuleUsageMysql(id) {
       updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(ruleId);
+  invalidateOrderLogisticsRuleCachesMysql();
   invalidateMasterDataCache();
   return { ok: true };
 }
@@ -1440,12 +1447,15 @@ async function activeOrderLogisticsFilterMethodsMysql() {
   ensureMysqlCutoverEnabled();
   if (logisticsRuleFilterCacheMysql) return logisticsRuleFilterCacheMysql;
   await ensureLogisticsRuleFilterSchemaMysql();
-  const rows = await mysqlQuery(`
-    SELECT id, name, filter_keywords, carrier, channel, min_weight_g, usage_count
-    FROM logistics_fee_rules
-    WHERE enabled != 0
-    ORDER BY usage_count DESC, carrier ASC, channel ASC, min_weight_g ASC, id ASC
-  `);
+  const [configuredRow, rows] = await Promise.all([
+    mysqlQueryOne("SELECT COUNT(*) AS count FROM logistics_fee_rules"),
+    mysqlQuery(`
+      SELECT id, name, filter_keywords, carrier, channel, min_weight_g, usage_count
+      FROM logistics_fee_rules
+      WHERE enabled != 0
+      ORDER BY usage_count DESC, carrier ASC, channel ASC, min_weight_g ASC, id ASC
+    `)
+  ]);
   const rules = rows
     .map((row) => {
       const keywords = String(row.filter_keywords || "")
@@ -1470,9 +1480,11 @@ async function activeOrderLogisticsFilterMethodsMysql() {
       };
     })
     .filter((rule) => rule.label);
-  const mergedByValue = new Map(
-    FALLBACK_ORDER_LOGISTICS_METHODS_MYSQL.map((rule) => [String(rule.value || "").trim(), { ...rule }])
-  );
+  if (!rules.length) {
+    logisticsRuleFilterCacheMysql = Number(configuredRow?.count || 0) > 0 ? [] : FALLBACK_ORDER_LOGISTICS_METHODS_MYSQL;
+    return logisticsRuleFilterCacheMysql;
+  }
+  const mergedByValue = new Map();
   for (const rule of rules) {
     const key = String(rule.value || "").trim();
     if (!key) continue;
@@ -1487,7 +1499,7 @@ async function activeOrderLogisticsFilterMethodsMysql() {
       warehousePatterns: [...new Set([...(current.warehousePatterns || []), ...(rule.warehousePatterns || [])])]
     });
   }
-  logisticsRuleFilterCacheMysql = mergedByValue.size ? [...mergedByValue.values()] : FALLBACK_ORDER_LOGISTICS_METHODS_MYSQL;
+  logisticsRuleFilterCacheMysql = [...mergedByValue.values()];
   return logisticsRuleFilterCacheMysql;
 }
 
@@ -4822,7 +4834,7 @@ export async function selectionProductsMysql(query = {}) {
         ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
       END AS inventory_id,
       p.name, p.ozon_category_id, p.ozon_description_category_id, p.ozon_type_id, p.ozon_category_name,
-      p.image_url, p.detail_image_urls, p.material, p.color, p.selling_points,
+      p.image_url, p.detail_image_urls, p.material, p.color, p.vehicle_model, p.selling_points,
       p.purchase_url, p.supplier_note, p.source_platform, p.supplier_id, p.shipping_method,
       p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
       p.package_weight_g, p.length_cm, p.width_cm, p.height_cm,
@@ -4875,7 +4887,7 @@ export async function selectionProductMysql(id) {
         ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
       END AS inventory_id,
       p.name, p.ozon_category_id, p.ozon_description_category_id, p.ozon_type_id, p.ozon_category_name,
-      p.image_url, p.detail_image_urls, p.material, p.color, p.selling_points,
+      p.image_url, p.detail_image_urls, p.material, p.color, p.vehicle_model, p.selling_points,
       p.purchase_url, p.supplier_note, p.source_platform, p.supplier_id, p.shipping_method,
       p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
       p.package_weight_g, p.length_cm, p.width_cm, p.height_cm,
@@ -5150,12 +5162,12 @@ export async function createProductMysql(body = {}) {
     const [result] = await connection.execute(`
       INSERT INTO products
       (selection_id, code, name, ozon_category_id, ozon_description_category_id, ozon_type_id, ozon_category_name,
-       image_url, detail_image_urls, material, color, selling_points,
+       image_url, detail_image_urls, material, color, vehicle_model, selling_points,
        purchase_url, supplier_note, source_platform, supplier_id, shipping_method,
        logistics_rule_id, recommended_shipping_method, purchase_cost, domestic_shipping, handling_fee, purchase_quantity,
        package_weight_g, length_cm, width_cm, height_cm, listing_price_rub, air_sale_price_rmb, exchange_rate,
        target_margin, desired_profit_mode, desired_profit_value, return_rate, owner_person_id, created_by_person_id, product_type, selection_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       selectionId,
       code,
@@ -5168,6 +5180,7 @@ export async function createProductMysql(body = {}) {
       normalizeProductDetailImagesMysql(body.detail_image_urls),
       body.material || "",
       body.color || "",
+      body.vehicle_model || body.vehicleModel || "",
       body.selling_points || "",
       body.purchase_url || "",
       body.supplier_note || "",
@@ -5401,6 +5414,7 @@ export async function updateProductMysql(id, body = {}) {
       detail_image_urls = COALESCE(?, detail_image_urls),
       material = COALESCE(?, material),
       color = COALESCE(?, color),
+      vehicle_model = COALESCE(?, vehicle_model),
       selling_points = COALESCE(?, selling_points),
       purchase_url = ?, supplier_note = ?, source_platform = ?, supplier_id = ?, shipping_method = ?,
       purchase_cost = ?, domestic_shipping = ?, handling_fee = ?, purchase_quantity = ?,
@@ -5419,6 +5433,7 @@ export async function updateProductMysql(id, body = {}) {
     body.detail_image_urls === undefined ? null : normalizeProductDetailImagesMysql(body.detail_image_urls),
     body.material === undefined ? null : body.material || "",
     body.color === undefined ? null : body.color || "",
+    body.vehicle_model === undefined && body.vehicleModel === undefined ? null : body.vehicle_model || body.vehicleModel || "",
     body.selling_points === undefined ? null : body.selling_points || "",
     body.purchase_url || "",
     body.supplier_note || "",
@@ -7614,6 +7629,92 @@ export async function syncOzonPostingsByNumberMysql(body = {}, options = {}) {
     rows,
     errors
   };
+}
+
+export async function syncKnownOzonPostingDetailsMysql(body = {}, options = {}) {
+  ensureMysqlCutoverEnabled();
+  const days = Math.min(Math.max(Number(body.days || body.recent_days || 30), 1), 365);
+  const limit = Math.min(Math.max(Number(body.limit || 200), 1), 5000);
+  const concurrency = Math.min(Math.max(Number(body.concurrency || 2), 1), 5);
+  const targetShopId = nullableInteger(body.shop_id);
+  const from = dateKeyDaysAgoMysql(days);
+  const to = todayDateKeyMysql();
+  const activeShops = (await shopsMysql()).filter((shop) => shop.status === "active" && (!targetShopId || Number(shop.id) === targetShopId));
+  const shopById = new Map(activeShops.map((shop) => [Number(shop.id), shop]));
+  const params = [from];
+  const filters = [
+    `${chinaDateSqlMysql("o.ordered_at")} >= ?`,
+    "COALESCE(o.posting_number, '') != ''"
+  ];
+  if (targetShopId) {
+    filters.push("o.shop_id = ?");
+    params.push(targetShopId);
+  }
+  const rows = await mysqlQuery(`
+    SELECT o.id, o.shop_id, o.posting_number, o.status, o.tracking_stage, o.ordered_at, o.last_synced_at
+    FROM orders o
+    JOIN shops s ON s.id = o.shop_id AND s.status = 'active'
+    WHERE ${filters.join(" AND ")}
+    ORDER BY
+      CASE
+        WHEN LOWER(CONCAT_WS(' ', COALESCE(o.status, ''), COALESCE(o.tracking_stage, ''), COALESCE(o.logistics_status, ''))) LIKE '%cancel%' THEN 2
+        WHEN LOWER(CONCAT_WS(' ', COALESCE(o.status, ''), COALESCE(o.tracking_stage, ''), COALESCE(o.logistics_status, ''))) LIKE '%deliver%' THEN 3
+        ELSE 1
+      END ASC,
+      COALESCE(o.last_synced_at, '1970-01-01') ASC,
+      o.ordered_at DESC
+    LIMIT ?
+  `, [...params, limit]);
+  const result = {
+    mode: body.mode || "known_posting_details",
+    from,
+    to,
+    candidate_orders: rows.length,
+    fetched: 0,
+    inserted: 0,
+    updated: 0,
+    inserted_items: 0,
+    errors: [],
+    rows: []
+  };
+  await mapWithConcurrencyMysql(rows, concurrency, async (row) => {
+    throwIfAbortedMysql(options.signal);
+    const shop = shopById.get(Number(row.shop_id));
+    if (!shop) return;
+    try {
+      const posting = await fetchOzonPostingByNumber(shop, row.posting_number, { signal: options.signal });
+      if (!posting?.posting_number) {
+        result.rows.push({ order_id: row.id, shop_id: row.shop_id, posting_number: row.posting_number, found: false });
+        return;
+      }
+      const stats = await upsertPostingMysql(shop, posting);
+      result.fetched += 1;
+      result.inserted += Number(stats.inserted || 0);
+      result.updated += Number(stats.updated || 0);
+      result.inserted_items += Number(stats.insertedItems || 0);
+      result.rows.push({
+        order_id: row.id,
+        shop_id: row.shop_id,
+        posting_number: row.posting_number,
+        status: posting.status,
+        tracking_stage: posting.tracking_stage || posting.substatus || "",
+        inserted: stats.inserted,
+        updated: stats.updated,
+        inserted_items: stats.insertedItems
+      });
+    } catch (error) {
+      const message = `${shop.name || row.shop_id} ${row.posting_number}: ${error.message}`;
+      result.errors.push(message);
+      result.rows.push({ order_id: row.id, shop_id: row.shop_id, posting_number: row.posting_number, error: error.message });
+    }
+  });
+  await syncOutboundForOpenOrdersMysql();
+  await refreshProfitAnalyticsSnapshotsMysql({ from, to });
+  const status = result.errors.length ? "partial_error" : "ok";
+  const message = `Known posting detail sync ${from}~${to}; candidates ${result.candidate_orders}, fetched ${result.fetched}, inserted item(s) ${result.inserted_items}, updated order(s) ${result.updated}${result.errors.length ? `; ${result.errors.slice(0, 10).join(" | ")}` : ""}`;
+  await mysqlExecute("INSERT INTO sync_logs (job, status, message) VALUES ('ozon_posting_details', ?, ?)", [status, message]);
+  if (result.errors.length && result.fetched === 0 && rows.length) throw new Error(result.errors.join(" | "));
+  return result;
 }
 
 export function exceptionWorkbenchSyncWindowMysql() {

@@ -425,9 +425,13 @@ export async function uploadListingMedia(req) {
   const url = `/uploads/listing-media/${storedName}`;
   const publishUrl = buildListingMediaPublishUrl(url);
   const asset = await registerListingMediaAsset({
-    source_module: "listing_upload",
+    source_module: file.fields?.source_module || file.fields?.sourceModule || "listing_upload",
+    source_id: file.fields?.source_id || file.fields?.sourceId || "",
+    batch_id: file.fields?.batch_id || file.fields?.batchId || "",
+    shop_id: nullableNumber(file.fields?.shop_id ?? file.fields?.shopId),
+    variant_id: nullableNumber(file.fields?.variant_id ?? file.fields?.variantId),
     media_type: expectedContentType.startsWith("video/") ? "video" : "image",
-    role: expectedContentType.startsWith("video/") ? "video" : "image",
+    role: file.fields?.role || (expectedContentType.startsWith("video/") ? "video" : "image"),
     local_path: path.relative(process.cwd(), filePath).replace(/\\/g, "/"),
     preview_url: url,
     publish_url: publishUrl || "",
@@ -437,7 +441,12 @@ export async function uploadListingMedia(req) {
     file_size: file.buffer.length,
     hash_sha256: crypto.createHash("sha256").update(file.buffer).digest("hex"),
     status: publishUrl ? "public_ready" : "local_only",
-    metadata: { upload: "listing_media" }
+    metadata: {
+      upload: "listing_media",
+      assetVariantTitle: file.fields?.asset_variant_title || "",
+      assetVariantSourceTitle: file.fields?.asset_variant_source_title || "",
+      assetVariantOutputDir: file.fields?.asset_variant_output_dir || ""
+    }
   });
   return {
     ok: true,
@@ -457,20 +466,50 @@ export async function uploadListingMedia(req) {
 export async function listingMediaAssets(query = {}, session = null) {
   await ensureListingAutomationSchema();
   const limit = Math.min(Math.max(Number(query.limit || 100), 1), 500);
-  const rows = await all(`
-    SELECT *
-    FROM listing_media_assets
-    WHERE status <> 'deleted'
-    ORDER BY updated_at DESC, id DESC
-    LIMIT ?
-  `, [limit]);
+  let rows;
+  try {
+    rows = await all(`
+      SELECT m.*,
+             v.source_title AS asset_variant_source_title,
+             v.variant_title AS asset_variant_title,
+             v.variant_title_zh AS asset_variant_title_zh,
+             v.tags_json AS asset_variant_tags_json,
+             v.tag_style AS asset_variant_tag_style,
+             v.price_index AS asset_variant_price_index,
+             v.internal_price AS asset_variant_internal_price,
+             v.ozon_price AS asset_variant_ozon_price,
+             v.ozon_old_price AS asset_variant_ozon_old_price,
+             v.ozon_category_name AS asset_variant_ozon_category_name,
+             v.ozon_category_id AS asset_variant_ozon_category_id,
+             v.color AS asset_variant_color,
+             v.material_text AS asset_variant_material,
+             v.quantity_text AS asset_variant_quantity,
+             v.output_dir AS asset_variant_output_dir,
+             v.created_at AS asset_variant_created_at
+      FROM listing_media_assets m
+      LEFT JOIN asset_variants v
+        ON v.batch_id = m.batch_id
+       AND (v.shop_id = m.shop_id OR m.shop_id IS NULL)
+      WHERE m.status <> 'deleted'
+      ORDER BY m.updated_at DESC, m.id DESC
+      LIMIT ?
+    `, [limit]);
+  } catch (error) {
+    rows = await all(`
+      SELECT *
+      FROM listing_media_assets
+      WHERE status <> 'deleted'
+      ORDER BY updated_at DESC, id DESC
+      LIMIT ?
+    `, [limit]);
+  }
   return rows.map(normalizeListingMediaAssetRow);
 }
 
 export async function listingOzonCategories(query = {}, session = null) {
   await ensureListingAutomationSchema();
   const keyword = String(query.keyword || query.q || "").trim();
-  const limit = Math.min(Math.max(Number(query.limit || 80), 1), 300);
+  const limit = Math.min(Math.max(Number(query.limit || 80), 1), 10000);
   const params = [];
   let where = "WHERE status = 'active'";
   if (keyword) {
@@ -500,13 +539,29 @@ export async function syncListingOzonCategories(body = {}, session = null) {
   const tree = await fetchOzonDescriptionCategoryTree(shop, { language: body.language || "ZH_HANS" });
   const rows = flattenOzonCategoryTree(tree);
   let saved = 0;
-  for (const item of rows) {
-    if (!item.descriptionCategoryId || !item.typeId) continue;
+  const validRows = rows.filter((item) => item.descriptionCategoryId && item.typeId);
+  for (const chunk of chunkArray(validRows, 300)) {
+    const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, 'ozon_api', ?, 'active', CURRENT_TIMESTAMP)").join(",");
+    const params = [];
+    for (const item of chunk) {
+      params.push(
+        item.descriptionCategoryId,
+        item.typeId,
+        item.nameRu,
+        item.nameZh,
+        item.pathRu,
+        item.pathZh,
+        item.parentDescriptionCategoryId,
+        item.isAuto ? 1 : 0,
+        shop.id,
+        JSON.stringify(item.raw || {})
+      );
+    }
     await run(`
       INSERT INTO ozon_category_mappings
       (description_category_id, type_id, name_ru, name_zh, path_ru, path_zh, parent_description_category_id,
        is_auto, source_shop_id, source, raw_json, status, synced_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ozon_api', ?, 'active', CURRENT_TIMESTAMP)
+      VALUES ${placeholders}
       ON DUPLICATE KEY UPDATE
         name_ru = VALUES(name_ru),
         name_zh = VALUES(name_zh),
@@ -519,21 +574,66 @@ export async function syncListingOzonCategories(body = {}, session = null) {
         status = 'active',
         synced_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
-    `, [
-      item.descriptionCategoryId,
-      item.typeId,
-      item.nameRu,
-      item.nameZh,
-      item.pathRu,
-      item.pathZh,
-      item.parentDescriptionCategoryId,
-      item.isAuto ? 1 : 0,
-      shop.id,
-      JSON.stringify(item.raw || {})
-    ]);
-    saved += 1;
+    `, params);
+    saved += chunk.length;
   }
   return { ok: true, shopId: Number(shop.id), shopName: shop.name, saved };
+}
+
+export async function resolveOzonCategoryFromSku(body = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const sku = String(body.sku || body.ozon_sku || body.ozonSku || body.offer_id || body.offerId || "").trim();
+  if (!sku) throw new Error("请输入 Ozon SKU 或 offer_id");
+  const shop = await resolveOzonApiShop(body.shop_id || body.shopId);
+  const localProduct = await row(`
+    SELECT *
+    FROM online_products
+    WHERE shop_id = ?
+      AND (ozon_sku = ? OR ozon_product_id = ? OR offer_id = ?)
+    ORDER BY synced_at DESC, updated_at DESC
+    LIMIT 1
+  `, [shop.id, sku, sku, sku]);
+  if (!localProduct) throw new Error("本地在线商品缓存里没有找到这个 SKU，请先同步在线商品或换 offer_id 试一下");
+
+  const productId = Number(localProduct.ozon_product_id || 0);
+  const details = productId
+    ? await fetchOzonProductInfoAttributes(shop, { productIds: [productId], limit: 1 }).catch(() => [])
+    : [];
+  const detail = details[0] || {};
+  const localAttributes = parseJson(localProduct.attributes_json, {});
+  const descriptionCategoryId = Number(detail.description_category_id || detail.descriptionCategoryId || localAttributes.description_category_id || 0);
+  const typeId = Number(detail.type_id || detail.typeId || localAttributes.type_id || 0);
+  if (!descriptionCategoryId || !typeId) throw new Error("找到了商品，但没有读到 description_category_id/type_id");
+
+  const cached = await row(`
+    SELECT *
+    FROM ozon_category_mappings
+    WHERE description_category_id = ? AND type_id = ? AND status = 'active'
+    LIMIT 1
+  `, [descriptionCategoryId, typeId]);
+  const fallbackName = detail.category_name || localProduct.name || `${descriptionCategoryId}:${typeId}`;
+  const category = cached ? normalizeOzonCategoryRow(cached) : normalizeOzonCategoryRow({
+    description_category_id: descriptionCategoryId,
+    type_id: typeId,
+    name_zh: `待翻译类目 ${descriptionCategoryId}:${typeId}`,
+    name_ru: fallbackName,
+    path_zh: `待翻译类目 ${descriptionCategoryId}:${typeId}`,
+    path_ru: fallbackName,
+    raw_json: JSON.stringify(detail || {})
+  });
+  return {
+    ok: true,
+    shopId: Number(shop.id),
+    shopName: shop.name,
+    sku,
+    product: {
+      ozon_product_id: String(localProduct.ozon_product_id || ""),
+      ozon_sku: String(localProduct.ozon_sku || ""),
+      offer_id: String(localProduct.offer_id || ""),
+      name: localProduct.name || ""
+    },
+    category
+  };
 }
 
 export async function listingOzonCategoryAttributes(query = {}, session = null) {
@@ -615,6 +715,19 @@ export async function syncListingOzonCategoryAttributes(body = {}, session = nul
       }, session).catch(() => null);
       valuesSaved += Number(valueResult?.saved || 0);
     }
+    addPlainOzonAttribute(byId, 4383, item.weight);
+    addPlainOzonAttribute(byId, 4497, item.weight);
+    addPlainOzonAttribute(byId, 8415, mmToCm(item.depth));
+    addPlainOzonAttribute(byId, 8416, mmToCm(item.width));
+    addPlainOzonAttribute(byId, 4191, item.description);
+    addPlainOzonAttribute(byId, 23171, normalizeTagList(item.tags).join(" "));
+
+    await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 7202, [item.quantity, "1"], null);
+    await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 7199, [item.material, "TPU", "ТПУ"], null);
+    await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 4389, ["China", "Китай"], null);
+    const vehicle = extractVehicleFacts(item);
+    await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 7204, [item.vehicle_brand, vehicle.brand], null);
+    await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 7212, [item.vehicle_model, vehicle.model, vehicle.full], null);
   }
   return {
     ok: true,
@@ -849,6 +962,13 @@ export async function validateListingTemplatePublish(body = {}, session = null) 
   const variants = normalizeArray(editable.variants || template.variants || []).map(normalizeVariantMediaForPublish);
   const facts = {
     title: String(template.title || editable.title || template.template_name || "").trim(),
+    description: String(template.description || editable.description || "").trim(),
+    tags: splitTagValue(attributeValueByNames(attributes, ["tag", "hashtag"], [23171]) || template.tags || editable.tags || ""),
+    color: attributeValueByNames(attributes, ["color"], [10096]) || editable.color || template.color || "",
+    material: attributeValueByNames(attributes, ["material"], [7199]) || editable.material || template.material || "",
+    quantity: attributeValueByNames(attributes, ["quantity"], [7202]) || editable.quantity || template.quantity || "",
+    vehicleBrand: attributeValueByNames(attributes, ["vehicle brand", "car brand"], [7204]) || editable.vehicle_brand || template.vehicle_brand || "",
+    vehicleModel: attributeValueByNames(attributes, ["vehicle model", "car model"], [7212]) || editable.vehicle_model || template.vehicle_model || "",
     categoryId: String(template.ozon_category_id || editable.category_id || "").trim(),
     descriptionCategoryId: String(editable.description_category_id || template.description_category_id || "").trim(),
     typeId: String(editable.type_id || template.type_id || "").trim(),
@@ -1284,7 +1404,7 @@ function parseOzonProductDetail(detail = {}, current = {}) {
   const brandValue = attributeValueByNames(attributes, ["品牌", "Бренд"], [85]);
   const colorValue = attributeValueByNames(attributes, ["颜色", "Цвет"], [8229]);
   const modelValue = attributeValueByNames(attributes, ["型号", "Модель"], [9048]);
-  const tagsValue = attributeValueByNames(attributes, ["主图标签", "ключевые слова", "тег"], [10096]);
+  const tagsValue = attributeValueByNames(attributes, ["产品标签", "主图标签", "ключевые слова", "тег"], [10096]);
   const descriptionText = extractOzonDescriptionText(source, attributes, current);
   const richContent = extractOzonRichContent(source, attributes);
   const enrichedAttributes = enrichTemplateAttributes(attributes, {
@@ -2005,6 +2125,13 @@ function buildOzonImportPreviewPayload(facts = {}, template = {}) {
         weight_unit: "g",
         primary_image: primaryImage,
         images: finalImages.filter((url) => url !== primaryImage),
+        description: String(variant.description || facts.description || "").trim(),
+        tags: normalizeArray(variant.tags || facts.tags),
+        color: String(variant.color || facts.color || "").trim(),
+        material: String(variant.material || facts.material || "").trim(),
+        quantity: String(variant.quantity || facts.quantity || "").trim(),
+        vehicle_brand: String(variant.vehicle_brand || facts.vehicleBrand || "").trim(),
+        vehicle_model: String(variant.vehicle_model || facts.vehicleModel || "").trim(),
         attributes: attrs,
         complex_attributes: buildOzonComplexAttributesPreview(variant, facts)
       };
@@ -2016,11 +2143,170 @@ async function applyShopPublishDefaults(payload = {}, shop = {}) {
   const currencyCode = await resolveShopCurrencyCode(shop.id);
   return {
     ...payload,
-    items: normalizeArray(payload.items).map((item) => applyOzonPriceStrategy({
+    items: await Promise.all(normalizeArray(payload.items).map(async (item) => applyOzonPriceStrategy({
       ...item,
-      currency_code: item.currency_code || currencyCode || "CNY"
-    }))
+      currency_code: item.currency_code || currencyCode || "CNY",
+      attributes: await normalizeOzonDictionaryAttributes(item, shop)
+    })))
   };
+}
+
+async function normalizeOzonDictionaryAttributes(item = {}, shop = {}) {
+  const descriptionCategoryId = Number(item.description_category_id || 0);
+  const typeId = Number(item.type_id || 0);
+  const attributes = normalizeArray(item.attributes)
+    .filter((attr) => Number(attr.id || attr.attribute_id || 0) !== 10096 || !looksLikeProductTags(attr));
+  const byId = new Map(attributes.map((attr) => [Number(attr.id || attr.attribute_id || 0), attr]));
+
+  if (descriptionCategoryId && typeId) {
+    if (byId.has(85)) {
+      byId.set(85, await withDictionaryValue(byId.get(85), shop, descriptionCategoryId, typeId, 85, ["Нет бренда", "No brand"], {
+        dictionary_value_id: 126745801,
+        value: "Нет бренда"
+      }));
+    }
+    if (!byId.has(8229)) {
+      byId.set(8229, {
+        id: 8229,
+        values: [{ dictionary_value_id: typeId, value: "Чехол брелка автосигнализации" }]
+      });
+    } else {
+      byId.set(8229, await withDictionaryValue(byId.get(8229), shop, descriptionCategoryId, typeId, 8229, ["Чехол брелка автосигнализации", "Чехол"], {
+        dictionary_value_id: typeId,
+        value: "Чехол брелка автосигнализации"
+      }));
+    }
+    const colorText = extractVariantColor(item);
+    if (colorText) {
+      byId.set(10096, await withDictionaryValue({ id: 10096, values: [{ value: colorText }] }, shop, descriptionCategoryId, typeId, 10096, [colorText, "black", "черный"], {
+        dictionary_value_id: 61574,
+        value: "black"
+      }));
+    }
+    addPlainOzonAttribute(byId, 4383, item.weight);
+    addPlainOzonAttribute(byId, 4497, item.weight);
+    addPlainOzonAttribute(byId, 8415, mmToCm(item.depth));
+    addPlainOzonAttribute(byId, 8416, mmToCm(item.width));
+    addPlainOzonAttribute(byId, 4191, item.description);
+    addPlainOzonAttribute(byId, 23171, normalizeTagList(item.tags).join(" "));
+
+    await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 7202, [item.quantity, "1"], null);
+    await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 7199, [item.material, "TPU", "ТПУ"], null);
+    await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 4389, ["China", "Китай"], null);
+    const vehicle = extractVehicleFacts(item);
+    await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 7204, [item.vehicle_brand, vehicle.brand], null);
+    await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 7212, [item.vehicle_model, vehicle.model, vehicle.full], null);
+  }
+
+  return [...byId.values()].filter((attr) => Number(attr.id || attr.attribute_id || 0) && normalizeArray(attr.values).length);
+}
+
+function looksLikeProductTags(attr = {}) {
+  const text = normalizeArray(attr.values).map((value) => value?.value ?? value).join(" ");
+  return /(^|\s)#/.test(text);
+}
+
+function extractVariantColor(item = {}) {
+  const text = String(item.color || item.colour || item.color_name || "").trim();
+  if (/黑|black|черн/i.test(text)) return "black";
+  if (/亮银|银|silver|сереб/i.test(text)) return "silver";
+  if (/白|white|бел/i.test(text)) return "white";
+  if (/黑|black|черн/i.test(text)) return "black";
+  if (/银|silver|сереб/i.test(text)) return "silver";
+  if (/白|white|бел/i.test(text)) return "white";
+  return text;
+}
+
+function addPlainOzonAttribute(byId, id, value) {
+  const text = normalizePlainOzonValue(value);
+  if (!text || byId.has(Number(id))) return;
+  byId.set(Number(id), { id: Number(id), values: [{ value: text }] });
+}
+
+async function addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, id, queries = [], fallback = null) {
+  const cleanQueries = normalizeArray(queries).map((value) => String(value || "").trim()).filter(Boolean);
+  if (!cleanQueries.length && !fallback) return;
+  const attr = await withDictionaryValue({ id, values: cleanQueries.map((value) => ({ value })) }, shop, descriptionCategoryId, typeId, id, cleanQueries, fallback);
+  if (!normalizeArray(attr.values).some((value) => Number(value?.dictionary_value_id || value?.id || 0))) return;
+  if (!byId.has(Number(id))) byId.set(Number(id), attr);
+}
+
+function normalizePlainOzonValue(value) {
+  if (Array.isArray(value)) return value.map(normalizePlainOzonValue).filter(Boolean).join(" ");
+  if (value && typeof value === "object") return normalizePlainOzonValue(value.value || value.name || value.text || "");
+  return String(value ?? "").trim();
+}
+
+function mmToCm(value) {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "";
+  return String(Math.round((numeric / 10) * 100) / 100);
+}
+
+function extractVehicleFacts(item = {}) {
+  const haystack = [
+    item.name,
+    item.title,
+    item.description,
+    item.vehicle_brand,
+    item.vehicle_model
+  ].map((value) => String(value || "")).join(" ");
+  const brandMatch = haystack.match(/\b(Belgee|Tenet|Chery|Geely|Haval|Lada|Toyota|Kia|Hyundai|Volkswagen|Renault|Skoda|Nissan)\b/i);
+  const modelMatch = haystack.match(/\b([A-ZА-Я]{1,4}\d{1,3}|X50|X70|T4|T7|T8)\b/i);
+  const brand = brandMatch?.[1] || "";
+  const model = modelMatch?.[1] || "";
+  return {
+    brand,
+    model,
+    full: [brand, model].filter(Boolean).join(" ")
+  };
+}
+
+async function withDictionaryValue(attr = {}, shop, descriptionCategoryId, typeId, attributeId, queries = [], fallback = null) {
+  const existing = normalizeArray(attr.values).find((value) => Number(value?.dictionary_value_id || value?.id || 0));
+  if (existing) {
+    return {
+      id: Number(attr.id || attr.attribute_id || attributeId),
+      values: [{ dictionary_value_id: Number(existing.dictionary_value_id || existing.id), value: String(existing.value || "") }]
+    };
+  }
+  for (const query of expandDictionaryQueries(queries)) {
+    const values = await searchOzonCategoryAttributeValues(shop, {
+      descriptionCategoryId,
+      typeId,
+      attributeId,
+      value: query,
+      language: "DEFAULT",
+      limit: 50
+    }).catch(() => []);
+    const exact = values.find((item) => String(item.value || "").toLowerCase() === query.toLowerCase()) || values[0];
+    if (exact?.id || exact?.dictionary_value_id) {
+      return {
+        id: Number(attr.id || attr.attribute_id || attributeId),
+        values: [{ dictionary_value_id: Number(exact.id || exact.dictionary_value_id), value: String(exact.value || query) }]
+      };
+    }
+  }
+  return {
+    id: Number(attr.id || attr.attribute_id || attributeId),
+    values: fallback ? [fallback] : normalizeAttributeValuesForOzon(attr)
+  };
+}
+
+function expandDictionaryQueries(queries = []) {
+  const seed = normalizeArray(queries).map((item) => String(item || "").trim()).filter(Boolean);
+  const expanded = [];
+  for (const query of seed) {
+    expanded.push(query);
+    const lower = query.toLowerCase();
+    if (/黑|black|черн/.test(lower)) expanded.push("black", "черный", "черная");
+    if (/亮银|银|silver|сереб/.test(lower)) expanded.push("silver", "серебристый", "серый");
+    if (/白|white|бел/.test(lower)) expanded.push("white", "белый", "белая");
+    if (/tpu|тпу/i.test(query)) expanded.push("TPU", "ТПУ", "полиуретан");
+    if (/china|китай|中国/i.test(query)) expanded.push("China", "Китай");
+    if (/belgee|белджи|белги/i.test(query)) expanded.push("Belgee", "Белджи");
+  }
+  return [...new Set(expanded.map((item) => String(item || "").trim()).filter(Boolean))];
 }
 
 function applyOzonPriceStrategy(item = {}) {
@@ -2058,13 +2344,23 @@ function roundOzonMoney(value) {
 }
 
 function normalizeAttributeValuesForOzon(item = {}) {
-  const values = Array.isArray(item.value) ? item.value : String(item.value || "").split(/[,;\n]+/);
+  const sourceValues = Array.isArray(item.values) && item.values.length ? item.values : item.value;
+  const values = Array.isArray(sourceValues) ? sourceValues : [sourceValues];
   return values.map((value) => {
+    if (value && typeof value === "object") {
+      const dictionaryValueId = Number(value.dictionary_value_id || value.id || 0);
+      const text = String(value.value || value.name || "").trim();
+      if (dictionaryValueId) return { dictionary_value_id: dictionaryValueId, value: text };
+      if (text.includes(",") || text.includes(";") || text.includes("\n")) {
+        return String(text).split(/[,;\n]+/).map((part) => ({ value: part.trim() })).filter((part) => part.value);
+      }
+      return { value: text };
+    }
     const text = String(value || "").trim();
     const option = normalizeArray(item.values).find((candidate) => String(candidate.value || candidate.name || "") === text);
-    if (option?.id) return { dictionary_value_id: Number(option.id), value: text };
+    if (option?.id || option?.dictionary_value_id) return { dictionary_value_id: Number(option.id || option.dictionary_value_id), value: text };
     return { value: text };
-  }).filter((value) => value.value || value.dictionary_value_id);
+  }).flat().filter((value) => value.value || value.dictionary_value_id);
 }
 
 function buildOzonComplexAttributesPreview(variant = {}, facts = {}) {
@@ -2238,6 +2534,22 @@ function normalizeListingMediaAssetRow(row = {}) {
     sortOrder: Number(row.sort_order || row.sortOrder || 0),
     status: row.status || "",
     metadata,
+    assetVariantSourceTitle: row.asset_variant_source_title || row.assetVariantSourceTitle || metadata.assetVariantSourceTitle || metadata.sourceTitle || metadata.productTitle || "",
+    assetVariantTitle: row.asset_variant_title || row.assetVariantTitle || metadata.assetVariantTitle || "",
+    assetVariantTitleZh: row.asset_variant_title_zh || row.assetVariantTitleZh || metadata.assetVariantTitleZh || "",
+    assetVariantTags: parseJson(row.asset_variant_tags_json || row.assetVariantTagsJson, []),
+    assetVariantTagStyle: row.asset_variant_tag_style || row.assetVariantTagStyle || "",
+    assetVariantPriceIndex: Number(row.asset_variant_price_index || row.assetVariantPriceIndex || 0),
+    assetVariantInternalPrice: Number(row.asset_variant_internal_price || row.assetVariantInternalPrice || 0),
+    assetVariantOzonPrice: Number(row.asset_variant_ozon_price || row.assetVariantOzonPrice || 0),
+    assetVariantOzonOldPrice: Number(row.asset_variant_ozon_old_price || row.assetVariantOzonOldPrice || 0),
+    assetVariantOzonCategoryName: row.asset_variant_ozon_category_name || row.assetVariantOzonCategoryName || "",
+    assetVariantOzonCategoryId: row.asset_variant_ozon_category_id || row.assetVariantOzonCategoryId || "",
+    assetVariantColor: row.asset_variant_color || row.assetVariantColor || "",
+    assetVariantMaterial: row.asset_variant_material || row.assetVariantMaterial || "",
+    assetVariantQuantity: row.asset_variant_quantity || row.assetVariantQuantity || "",
+    assetVariantOutputDir: row.asset_variant_output_dir || row.assetVariantOutputDir || metadata.assetVariantOutputDir || "",
+    assetVariantCreatedAt: row.asset_variant_created_at || row.assetVariantCreatedAt || "",
     created_at: row.created_at || row.createdAt || "",
     updated_at: row.updated_at || row.updatedAt || ""
   };
@@ -2336,10 +2648,14 @@ function normalizeTemplateRow(row) {
 function normalizeOzonCategoryRow(row = {}) {
   const descriptionCategoryId = Number(row.description_category_id || row.descriptionCategoryId || 0);
   const typeId = Number(row.type_id || row.typeId || 0);
-  const nameZh = row.name_zh || row.nameZh || "";
+  const rawNameZh = row.name_zh || row.nameZh || "";
   const nameRu = row.name_ru || row.nameRu || "";
-  const pathZh = row.path_zh || row.pathZh || "";
+  const rawPathZh = row.path_zh || row.pathZh || "";
   const pathRu = row.path_ru || row.pathRu || "";
+  const fallbackZh = descriptionCategoryId && typeId ? `待翻译类目 ${descriptionCategoryId}:${typeId}` : "";
+  const nameZh = rawNameZh && !hasCyrillicText(rawNameZh) ? rawNameZh : "";
+  const pathZh = rawPathZh && !hasCyrillicText(rawPathZh) ? rawPathZh : "";
+  const displayZh = pathZh || nameZh || fallbackZh;
   return {
     id: Number(row.id || 0),
     description_category_id: descriptionCategoryId,
@@ -2351,15 +2667,19 @@ function normalizeOzonCategoryRow(row = {}) {
     name_ru: nameRu,
     path_zh: pathZh,
     path_ru: pathRu,
-    label: pathZh || nameZh || pathRu || nameRu || `${descriptionCategoryId}:${typeId}`,
-    name: nameZh || nameRu,
-    subLabel: [nameRu, descriptionCategoryId && typeId ? `${descriptionCategoryId}:${typeId}` : ""].filter(Boolean).join(" · "),
+    label: displayZh || `${descriptionCategoryId}:${typeId}`,
+    name: nameZh || displayZh || nameRu,
+    subLabel: [pathRu || nameRu, descriptionCategoryId && typeId ? `${descriptionCategoryId}:${typeId}` : ""].filter(Boolean).join(" / "),
     parent_description_category_id: Number(row.parent_description_category_id || 0),
     is_auto: Boolean(row.is_auto),
     source_shop_id: row.source_shop_id ? Number(row.source_shop_id) : null,
     synced_at: row.synced_at || null,
     raw: parseJson(row.raw_json, row.raw || {})
   };
+}
+
+function hasCyrillicText(value) {
+  return /[\u0400-\u04ff]/.test(String(value || ""));
 }
 
 function normalizeOzonCategoryAttributeRow(row = {}) {
@@ -2395,6 +2715,12 @@ function normalizeOzonAttributeValueRow(row = {}) {
     info: row.info || raw.info || raw.description || "",
     raw
   };
+}
+
+function chunkArray(items = [], size = 300) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
+  return chunks;
 }
 
 function normalizePublishRecordRow(row = {}) {
@@ -2597,9 +2923,10 @@ function flattenOzonCategoryTree(tree) {
   const walk = (node, parents = []) => {
     if (!node || typeof node !== "object") return;
     const rawName = String(node.category_name || node.name || node.title || node.type_name || "").trim();
-    const descriptionCategoryId = Number(node.description_category_id || node.descriptionCategoryId || node.category_id || 0);
+    const ownDescriptionCategoryId = Number(node.description_category_id || node.descriptionCategoryId || node.category_id || 0);
+    const descriptionCategoryId = ownDescriptionCategoryId || Number(parents.at(-1)?.descriptionCategoryId || 0);
     const typeId = Number(node.type_id || node.typeId || 0);
-    const path = [...parents, rawName].filter(Boolean);
+    const path = [...parents.map((item) => item.name).filter(Boolean), rawName].filter(Boolean);
     if (descriptionCategoryId && typeId) {
       rows.push({
         descriptionCategoryId,
@@ -2608,13 +2935,13 @@ function flattenOzonCategoryTree(tree) {
         nameZh: rawName,
         pathRu: path.join(" / "),
         pathZh: path.join(" / "),
-        parentDescriptionCategoryId: Number(node.parent_description_category_id || node.parent_id || 0),
+        parentDescriptionCategoryId: Number(node.parent_description_category_id || node.parent_id || ownDescriptionCategoryId || parents.at(-1)?.descriptionCategoryId || 0),
         isAuto: node.is_auto !== undefined ? Boolean(node.is_auto) : true,
         raw: node
       });
     }
     for (const child of normalizeArray(node.children || node.childs || node.items || node.types)) {
-      walk(child, path);
+      walk(child, [...parents, { name: rawName, descriptionCategoryId: ownDescriptionCategoryId || descriptionCategoryId }]);
     }
   };
   for (const root of roots) walk(root, []);
@@ -2767,7 +3094,7 @@ function enrichTemplateAttributes(attributes = [], facts = {}) {
   add(["标题", "Название"], facts.title, { name: "标题", required: true });
   add(["品牌", "Бренд"], facts.brand, { name: "品牌", required: true, attributeIds: [85], attribute_id: 85 });
   add(["型号", "Модель"], facts.model, { name: "型号名称", required: true, attributeIds: [9048], attribute_id: 9048 });
-  add(["主图标签", "ключевые слова", "тег"], facts.tags, { name: "主图标签", attributeIds: [10096], attribute_id: 10096, type: "multiselect" });
+  add(["产品标签", "主图标签", "ключевые слова", "тег"], facts.tags, { name: "产品标签", type: "multiselect" });
   add(["简介", "Аннотация", "Описание"], facts.description, { name: "简介", attributeIds: [4191], attribute_id: 4191, type: "textarea" });
   add(["JSON富内容", "Rich", "rich"], facts.richJson, { name: "JSON富内容", attributeIds: [11254], attribute_id: 11254, type: "rich_json" });
   return result;
@@ -3012,17 +3339,25 @@ async function readListingMediaMultipart(req) {
   }
   const body = await readRequestBuffer(req, LISTING_MEDIA_MAX_BYTES + 1024 * 1024);
   const boundary = Buffer.from(`--${match[1] || match[2]}`);
+  const fields = {};
+  let file = null;
   for (const part of splitMultipartBuffer(body, boundary)) {
     const separator = part.indexOf("\r\n\r\n");
     if (separator < 0) continue;
     const headerText = part.subarray(0, separator).toString("utf8");
-    if (!/name="file"/i.test(headerText)) continue;
-    return {
-      filename: headerText.match(/filename="([^"]*)"/i)?.[1] || "upload",
-      contentType: headerText.match(/content-type:\s*([^\r\n]+)/i)?.[1]?.trim() || "",
-      buffer: part.subarray(separator + 4)
-    };
+    const name = headerText.match(/name="([^"]*)"/i)?.[1] || "";
+    if (!name) continue;
+    if (name === "file") {
+      file = {
+        filename: headerText.match(/filename="([^"]*)"/i)?.[1] || "upload",
+        contentType: headerText.match(/content-type:\s*([^\r\n]+)/i)?.[1]?.trim() || "",
+        buffer: part.subarray(separator + 4)
+      };
+    } else {
+      fields[name] = part.subarray(separator + 4).toString("utf8").trim();
+    }
   }
+  if (file) return { ...file, fields };
   const error = new Error("未找到上传字段 file");
   error.status = 400;
   throw error;

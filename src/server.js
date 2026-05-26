@@ -14,7 +14,9 @@ import { createOrderRoutes, handleOrderRestRoute } from "./server/routes/orders.
 import { createOperationsRoutes, handleOperationsRestRoute } from "./server/routes/operations.js";
 import { createProfitRoutes } from "./server/routes/profit.js";
 import { createAdvertisingRoutes } from "./server/routes/advertising.js";
+import { createOzonActionRoutes } from "./server/routes/ozonActions.js";
 import { createSyncRoutes } from "./server/routes/sync.js";
+import { createReviewRoutes, handleReviewRestRoute } from "./server/routes/reviews.js";
 import { createListingAutomationRoutes, handleListingAutomationRestRoute } from "./server/routes/listingAutomation.js";
 import { createMultiShopPublishRoutes, handleMultiShopPublishRestRoute } from "./server/routes/multiShopPublish.js";
 import { createAssetVariantEngineRoutes, handleAssetVariantEngineRestRoute } from "./server/routes/assetVariantEngine.js";
@@ -57,6 +59,8 @@ const routeModules = {
   ...createOperationsRoutes({ services, readJson }),
   ...createProfitRoutes({ services, readJson }),
   ...createAdvertisingRoutes({ services, readJson }),
+  ...createOzonActionRoutes({ services, readJson }),
+  ...createReviewRoutes({ services, readJson }),
   ...createOrderRoutes({ services, readJson, notFound, writeHead, json }),
   ...createSyncRoutes({ services, readJson, syncExceptionWorkbenchOrders }),
   ...createListingAutomationRoutes({ services, readJson }),
@@ -96,20 +100,34 @@ const routes = {
 cleanExpiredSessions();
 setInterval(cleanExpiredSessions, 3600 * 1000);
 let backgroundOrderSyncRunning = false;
+let backgroundCancelledOrderSyncRunning = false;
+let backgroundPostingDetailSyncRunning = false;
 let backgroundAnalyticsRefreshRunning = false;
 let backgroundAdvertisingSyncRunning = false;
 let backgroundOzonCategorySyncRunning = false;
 let backgroundHeavyTaskRunning = "";
 let lastBackgroundOzonCategorySyncDate = "";
+let lastBackgroundPostingDetailDeepSyncDate = "";
 const BACKGROUND_ORDER_SYNC_INTERVAL_MS = Math.max(1, Number(config.backgroundOrderSyncIntervalMinutes || 30)) * 60 * 1000;
 const BACKGROUND_ORDER_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundOrderSyncInitialDelaySeconds || 180)) * 1000;
 const BACKGROUND_ORDER_SYNC_DAYS = Math.max(1, Number(config.backgroundOrderSyncDays || 90));
+const BACKGROUND_CANCELLED_ORDER_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundCancelledOrderSyncIntervalMinutes || 60)) * 60 * 1000;
+const BACKGROUND_CANCELLED_ORDER_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundCancelledOrderSyncInitialDelaySeconds || 360)) * 1000;
+const BACKGROUND_CANCELLED_ORDER_SYNC_DAYS = Math.max(1, Number(config.backgroundCancelledOrderSyncDays || 30));
+const BACKGROUND_POSTING_DETAIL_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundPostingDetailSyncIntervalMinutes || 60)) * 60 * 1000;
+const BACKGROUND_POSTING_DETAIL_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundPostingDetailSyncInitialDelaySeconds || 600)) * 1000;
+const BACKGROUND_POSTING_DETAIL_SYNC_DAYS = Math.max(1, Number(config.backgroundPostingDetailSyncDays || 30));
+const BACKGROUND_POSTING_DETAIL_SYNC_LIMIT = Math.max(1, Number(config.backgroundPostingDetailSyncLimit || 200));
+const BACKGROUND_POSTING_DETAIL_SYNC_CONCURRENCY = Math.min(Math.max(Number(config.backgroundPostingDetailSyncConcurrency || 2), 1), 5);
+const BACKGROUND_POSTING_DETAIL_DEEP_SYNC_DAYS = Math.max(1, Number(config.backgroundPostingDetailDeepSyncDays || 90));
+const BACKGROUND_POSTING_DETAIL_DEEP_SYNC_LIMIT = Math.max(1, Number(config.backgroundPostingDetailDeepSyncLimit || 1000));
 const BACKGROUND_ANALYTICS_REFRESH_INTERVAL_MS = Math.max(1, Number(config.backgroundAnalyticsRefreshIntervalMinutes || 60)) * 60 * 1000;
 const BACKGROUND_ANALYTICS_REFRESH_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAnalyticsRefreshInitialDelaySeconds || 240)) * 1000;
 const BACKGROUND_ADVERTISING_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundAdvertisingSyncIntervalMinutes || 60)) * 60 * 1000;
 const BACKGROUND_ADVERTISING_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAdvertisingSyncInitialDelaySeconds || 420)) * 1000;
 const BACKGROUND_ADVERTISING_SYNC_DAYS = Math.max(1, Number(config.backgroundAdvertisingSyncDays || 14));
 const BACKGROUND_OZON_CATEGORY_SYNC_CHECK_MS = Math.max(1, Number(config.backgroundOzonCategorySyncCheckMinutes || 10)) * 60 * 1000;
+const OZON_ACTION_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
 
 async function handleSiteAccess(req, res, url) {
   const nextPath = normalizeNextPath(url.searchParams.get("next") || "/");
@@ -208,6 +226,19 @@ async function handleRestRoute(req, res, url, parts) {
   });
   if (operationsRestHandled !== false) {
     return operationsRestHandled;
+  }
+
+  const reviewRestHandled = await handleReviewRestRoute({
+    req,
+    res,
+    parts,
+    services,
+    readJson,
+    json,
+    notFound
+  });
+  if (reviewRestHandled !== false) {
+    return reviewRestHandled;
   }
 
   const listingAutomationRestHandled = await handleListingAutomationRestRoute({
@@ -485,14 +516,22 @@ server.listen(config.port, config.host || undefined, () => {
   console.log(`ozon ERP running at ${config.appBaseUrl} (bind ${bindHost}:${config.port})`);
   setInterval(() => checkDailyPurchaseNotification(services.all), 60000);
   setInterval(runBackgroundOrderStatusSync, BACKGROUND_ORDER_SYNC_INTERVAL_MS);
+  setInterval(runBackgroundCancelledOrderSync, BACKGROUND_CANCELLED_ORDER_SYNC_INTERVAL_MS);
+  setInterval(runBackgroundPostingDetailSync, BACKGROUND_POSTING_DETAIL_SYNC_INTERVAL_MS);
+  setInterval(runBackgroundPostingDetailDeepSyncIfDue, 10 * 60 * 1000);
   setInterval(runBackgroundAnalyticsRefresh, BACKGROUND_ANALYTICS_REFRESH_INTERVAL_MS);
   setInterval(runBackgroundAdvertisingSync, BACKGROUND_ADVERTISING_SYNC_INTERVAL_MS);
+  setInterval(runOzonActionCleanupSweep, OZON_ACTION_CLEANUP_INTERVAL_MS);
   if (config.backgroundOzonCategorySyncEnabled) {
     setInterval(runBackgroundOzonCategorySyncIfDue, BACKGROUND_OZON_CATEGORY_SYNC_CHECK_MS);
   }
   setTimeout(runBackgroundOrderStatusSync, BACKGROUND_ORDER_SYNC_INITIAL_DELAY_MS);
+  setTimeout(runBackgroundCancelledOrderSync, BACKGROUND_CANCELLED_ORDER_SYNC_INITIAL_DELAY_MS);
+  setTimeout(runBackgroundPostingDetailSync, BACKGROUND_POSTING_DETAIL_SYNC_INITIAL_DELAY_MS);
+  setTimeout(runBackgroundPostingDetailDeepSyncIfDue, 12 * 60 * 1000);
   setTimeout(runBackgroundAnalyticsRefresh, BACKGROUND_ANALYTICS_REFRESH_INITIAL_DELAY_MS);
   setTimeout(runBackgroundAdvertisingSync, BACKGROUND_ADVERTISING_SYNC_INITIAL_DELAY_MS);
+  setTimeout(runOzonActionCleanupSweep, 5000);
   if (config.backgroundOzonCategorySyncEnabled) {
     setTimeout(runBackgroundOzonCategorySyncIfDue, 10 * 60 * 1000);
   }
@@ -507,13 +546,94 @@ async function runBackgroundOrderStatusSync() {
   backgroundOrderSyncRunning = true;
   backgroundHeavyTaskRunning = "order_status_sync";
   try {
-    const { window, result } = await syncRollingOrderStatusWindow();
-    console.log(`background order status sync ok: ${window.from}~${window.to}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
+    const result = await services.syncOzonIncrementalOrders({
+      mode: "new",
+      fallback_days: BACKGROUND_ORDER_SYNC_DAYS,
+      overlap_minutes: 60
+    });
+    console.log(`background order status sync ok: fetched ${result.fetched || 0}, updated ${result.updated || 0}, requests ${result.requests || 0}`);
   } catch (error) {
     console.error("background order status sync failed", error);
   } finally {
     backgroundOrderSyncRunning = false;
     if (backgroundHeavyTaskRunning === "order_status_sync") backgroundHeavyTaskRunning = "";
+  }
+}
+
+async function runBackgroundCancelledOrderSync() {
+  if (backgroundCancelledOrderSyncRunning) return;
+  if (backgroundHeavyTaskRunning) {
+    console.log(`background cancelled order sync skipped: ${backgroundHeavyTaskRunning} is running`);
+    return;
+  }
+  backgroundCancelledOrderSyncRunning = true;
+  backgroundHeavyTaskRunning = "cancelled_order_sync";
+  try {
+    const window = rollingOrderSyncWindow(BACKGROUND_CANCELLED_ORDER_SYNC_DAYS);
+    const result = await services.syncDemoOrders({ from: window.from, to: window.to, statuses: ["cancelled"] });
+    console.log(`background cancelled order sync ok: ${window.from}~${window.to}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
+  } catch (error) {
+    console.error("background cancelled order sync failed", error);
+  } finally {
+    backgroundCancelledOrderSyncRunning = false;
+    if (backgroundHeavyTaskRunning === "cancelled_order_sync") backgroundHeavyTaskRunning = "";
+  }
+}
+
+async function runBackgroundPostingDetailSync() {
+  if (backgroundPostingDetailSyncRunning) return;
+  if (backgroundHeavyTaskRunning) {
+    console.log(`background posting detail sync skipped: ${backgroundHeavyTaskRunning} is running`);
+    return;
+  }
+  backgroundPostingDetailSyncRunning = true;
+  backgroundHeavyTaskRunning = "posting_detail_sync";
+  try {
+    const result = await services.syncKnownOzonPostingDetails({
+      mode: "scheduled_hourly",
+      days: BACKGROUND_POSTING_DETAIL_SYNC_DAYS,
+      limit: BACKGROUND_POSTING_DETAIL_SYNC_LIMIT,
+      concurrency: BACKGROUND_POSTING_DETAIL_SYNC_CONCURRENCY
+    });
+    console.log(`background posting detail sync ok: candidates ${result.candidate_orders || 0}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
+  } catch (error) {
+    console.error("background posting detail sync failed", error);
+  } finally {
+    backgroundPostingDetailSyncRunning = false;
+    if (backgroundHeavyTaskRunning === "posting_detail_sync") backgroundHeavyTaskRunning = "";
+  }
+}
+
+async function runBackgroundPostingDetailDeepSyncIfDue() {
+  if (backgroundPostingDetailSyncRunning) return;
+  if (backgroundHeavyTaskRunning) {
+    console.log(`background posting detail deep sync skipped: ${backgroundHeavyTaskRunning} is running`);
+    return;
+  }
+  const now = new Date();
+  const dateKey = shanghaiDateKey(now);
+  const shanghaiTime = shanghaiHourMinute(now);
+  const targetHour = Math.min(Math.max(Number(config.backgroundPostingDetailDeepSyncHour || 2), 0), 23);
+  const targetMinute = Math.min(Math.max(Number(config.backgroundPostingDetailDeepSyncMinute || 30), 0), 59);
+  if (lastBackgroundPostingDetailDeepSyncDate === dateKey) return;
+  if (shanghaiTime.hour < targetHour || (shanghaiTime.hour === targetHour && shanghaiTime.minute < targetMinute)) return;
+
+  backgroundPostingDetailSyncRunning = true;
+  backgroundHeavyTaskRunning = "posting_detail_deep_sync";
+  try {
+    const result = await services.syncKnownOzonPostingDetails({
+      mode: "scheduled_nightly",
+      days: BACKGROUND_POSTING_DETAIL_DEEP_SYNC_DAYS,
+      limit: BACKGROUND_POSTING_DETAIL_DEEP_SYNC_LIMIT,
+      concurrency: BACKGROUND_POSTING_DETAIL_SYNC_CONCURRENCY
+    });
+    lastBackgroundPostingDetailDeepSyncDate = dateKey;
+    console.log(`background posting detail deep sync ok: candidates ${result.candidate_orders || 0}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
+  } catch (error) {
+    console.error("background posting detail deep sync failed", error);
+  } finally {
+    backgroundPostingDetailSyncRunning = false;
+    if (backgroundHeavyTaskRunning === "posting_detail_deep_sync") backgroundHeavyTaskRunning = "";
   }
 }
 
@@ -589,6 +709,18 @@ async function runBackgroundOzonCategorySyncIfDue() {
   } finally {
     backgroundOzonCategorySyncRunning = false;
     if (backgroundHeavyTaskRunning === "ozon_category_sync") backgroundHeavyTaskRunning = "";
+  }
+}
+
+async function runOzonActionCleanupSweep() {
+  try {
+    const results = await services.runEnabledOzonActionCleanup();
+    if (!results.length) return;
+    const removed = results.reduce((sum, item) => sum + Number(item?.count || 0), 0);
+    const failed = results.filter((item) => item?.success === false).length;
+    console.log(`ozon action cleanup sweep ok: stores ${results.length}, removed ${removed}, failed ${failed}`);
+  } catch (error) {
+    console.error("ozon action cleanup sweep failed", error);
   }
 }
 

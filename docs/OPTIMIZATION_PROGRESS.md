@@ -12,6 +12,7 @@ This tracker follows the 80-point principle: prefer small, verified changes that
 | P0 | Build artifact git noise | Done | Keep generated `public/vue-apps/assets/*` ignored and untracked | `git status --short` no longer shows recurring modified asset hashes |
 | P1 | `mysql-cutover.js` size and coupling | In progress | Continue splitting low-risk domains such as stock warehouse rules or supplier master data | Targeted tests plus `npm test` |
 | P2 | Orders paged performance | Done | Keep profiling `orders rows` and `orders meta` separately when changing order queries | `node scripts/profile-mysql-pages.mjs` |
+| P2 | Order logistics filter rules | Done | Keep order/listing filters on the enabled system logistics-rule set | `node --test --test-concurrency=1 test/orders-mysql-list.test.js` |
 | P2 | Exception workbench performance | Done | Keep exception tabs in the profiler and avoid sending non-profit tabs through profit-heavy SQL | `node scripts/profile-mysql-pages.mjs`, `npm test` |
 | P3 | Large Vue pages | In progress | Continue extracting low-risk helper/dialog blocks from large pages | `npm run build:frontend` |
 | P4 | Route dependency entry points | Pending | Move route modules away from direct `mysql-cutover.js` imports | `npm test` |
@@ -50,6 +51,8 @@ This tracker follows the 80-point principle: prefer small, verified changes that
 - Added a global heavy-background-task gate and staggered default startup delays for analytics, advertising, and Ozon category sync.
 - Reduced Element Plus frontend bundle cost by replacing full `app.use(ElementPlus)` with `ElLoading` directive registration in admin/orders entry points; build gzip for `vendor-element-plus` dropped from about 238KB to about 143KB.
 - Moved order page formatting helpers into `frontend/orders/utils/order-format.js`.
+- Made order logistics filter options use only enabled system logistics rules once rules are configured; disabled rules no longer leak into order filters, and logistics rule changes now clear order logistics option caches.
+- Extended logistics rule value parsing so configured Chinese/English CEL and postal rules resolve to the same stable values used by listing and order filtering.
 
 ## Notes
 

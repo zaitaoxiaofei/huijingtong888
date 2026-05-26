@@ -1,7 +1,7 @@
 ﻿<script setup>
 import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import {
   Delete,
   Download,
@@ -24,6 +24,7 @@ const videoGenerating = ref(false);
 const importing = ref(false);
 const syncingCategories = ref(false);
 const mediaAssetLoading = ref(false);
+const mediaAssetDeleting = ref(false);
 const route = useRoute();
 const router = useRouter();
 const detailDragIndex = ref(null);
@@ -58,6 +59,7 @@ const state = reactive({
   ozonCategories: [],
   tailTemplates: [],
   titleStyles: [],
+  tagStyles: [],
   mainImagePlans: [],
   selectedShopIds: [],
   selectedShopId: "",
@@ -65,6 +67,7 @@ const state = reactive({
   titlePreviews: {},
   variants: [],
   batchId: "",
+  currentBatchCreatedAt: "",
   outputDir: "",
   localOutputDir: "",
   importedSets: [],
@@ -88,6 +91,8 @@ const material = reactive({
   widthCm: "",
   heightCm: "",
   weightG: "",
+  vehicleModel: "",
+  basePriceRmb: "",
   mainImage: null,
   detailImages: []
 });
@@ -109,6 +114,7 @@ async function loadBootstrap() {
       id: Number(shop.id),
       name: shop.name,
       status: shop.status,
+      legalEntity: shop.legalEntity || shop.legal_entity || "",
       watermarkPath: shop.watermark_path || shop.watermarkPath,
       rule: shop.rule || {}
     }));
@@ -128,6 +134,12 @@ async function loadBootstrap() {
       { value: "value", label: "性价比型" },
       { value: "premium", label: "高端质感型" }
     ];
+    state.tagStyles = data.tagStyles?.length ? data.tagStyles : [
+      { value: "traffic", label: "流量词型" },
+      { value: "vehicle", label: "精准车型型" },
+      { value: "material", label: "材质卖点型" },
+      { value: "compact", label: "简洁防跟卖型" }
+    ];
     state.mainImagePlans = data.mainImagePlans || [];
     state.selectedShopIds = state.shops.filter((shop) => shop.status !== "deleted").map((shop) => shop.id);
     if (!state.selectedShopId && state.selectedShopIds.length) state.selectedShopId = state.selectedShopIds[0];
@@ -136,6 +148,8 @@ async function loadBootstrap() {
       const defaultStyle = state.titleStyles[index % state.titleStyles.length]?.value || "traffic";
       initialRules[shop.id] = {
         titleStyle: shop.rule?.titleStyle || defaultStyle,
+        tagStyle: shop.rule?.tagStyle || state.tagStyles[index % state.tagStyles.length]?.value || "traffic",
+        priceIndex: shop.rule?.priceIndex || defaultPriceIndexForShop(shop),
         watermarkTemplateId: shop.rule?.watermarkTemplateId || (shop.watermarkPath ? `shop-${shop.id}` : ""),
         tailCategory: shop.rule?.tailCategory || state.tailCategories[0] || "通用汽车用品",
         vehicleModel: shop.rule?.vehicleModel || state.vehicleModels[0] || "通用车型",
@@ -164,7 +178,7 @@ async function loadBootstrap() {
 async function loadMediaAssets() {
   mediaAssetLoading.value = true;
   try {
-    state.mediaAssets = await apiClient.get("/api/listing/media/assets?limit=120", { noCache: true });
+    state.mediaAssets = await apiClient.get("/api/listing/media/assets?limit=500", { noCache: true });
   } catch (error) {
     console.warn("listing media assets load failed", error);
   } finally {
@@ -214,6 +228,21 @@ function cleanMetricValue(value) {
   const number = Number(text);
   if (!Number.isFinite(number)) return text;
   return String(Math.round(number));
+}
+
+function defaultPriceIndexForShop(shop) {
+  const ownerName = String(state.sourceProduct?.ownerName || state.sourceProduct?.owner_name || "").trim();
+  const legalEntity = String(shop?.legalEntity || shop?.legal_entity || "").trim();
+  if (ownerName && legalEntity && ownerName === legalEntity) return 1;
+  if (/ruvibe\s*mart$/i.test(String(shop?.name || "").trim())) return 1.05;
+  return 1.1;
+}
+
+function refreshDefaultPriceIndexes() {
+  for (const shop of state.shops) {
+    if (!state.rules[shop.id]) continue;
+    state.rules[shop.id].priceIndex = defaultPriceIndexForShop(shop);
+  }
 }
 
 function normalizeSourceImageList(value) {
@@ -406,6 +435,8 @@ async function applySelectionProduct(product) {
   material.color = displayJoin(product.color) || material.color;
   material.material = displayJoin(product.material) || material.material;
   material.quantity = product.purchase_quantity ? `${product.purchase_quantity} 件` : material.quantity;
+  material.vehicleModel = product.vehicle_model || product.vehicleModel || material.vehicleModel;
+  material.basePriceRmb = cleanMetricValue(product.air_sale_price_rmb ?? product.sale_price_rmb ?? material.basePriceRmb);
   material.lengthCm = cleanMetricValue(product.length_cm ?? product.lengthCm ?? material.lengthCm);
   material.widthCm = cleanMetricValue(product.width_cm ?? product.widthCm ?? material.widthCm);
   material.heightCm = cleanMetricValue(product.height_cm ?? product.heightCm ?? material.heightCm);
@@ -426,9 +457,11 @@ async function applySelectionProduct(product) {
     code: product.code,
     selectionId: product.selection_id,
     name: product.name || product.product_name || "",
+    ownerName: product.owner_name || product.ownerName || "",
     ozonCategoryId: product.ozon_category_id || "",
     ozonCategoryName: product.ozon_category_name || ""
   };
+  refreshDefaultPriceIndexes();
 }
 
 async function loadSelectionSourceFromRoute() {
@@ -464,6 +497,8 @@ function buildGeneratePayload(shopIds = state.selectedShopIds) {
       ozonDescriptionCategoryId: material.ozonDescriptionCategoryId,
       ozonTypeId: material.ozonTypeId,
       ozonCategoryName: material.ozonCategoryName,
+      vehicleModel: material.vehicleModel,
+      basePriceRmb: material.basePriceRmb,
       quantity: material.quantity,
       color: material.color,
       material: material.material,
@@ -498,6 +533,7 @@ async function generateVariants(shopIds = state.selectedShopIds) {
       ...nextVariants
     ];
     state.batchId = result.batchId || state.batchId;
+    state.currentBatchCreatedAt = result.createdAt || new Date().toISOString();
     state.outputDir = result.outputDir || state.outputDir;
     state.localOutputDir = result.localOutputDir || state.localOutputDir;
     await loadMediaAssets();
@@ -676,6 +712,43 @@ async function generateVideoForSelectedShop() {
   }
 }
 
+async function generateVideoForAssetRow(row) {
+  if (!row?.main?.length) {
+    ElMessage.warning("请先准备主图");
+    return;
+  }
+  videoGenerating.value = true;
+  videoStatus.done = 0;
+  videoStatus.total = 1;
+  videoStatus.current = row.shopName || "";
+  try {
+    const variant = {
+      id: row.variantId || row.shopId,
+      batchId: row.batchId,
+      shopId: row.shopId,
+      shopName: row.shopName,
+      title: row.title,
+      titleRu: row.title,
+      titleZh: row.titleZh,
+      localOutputDir: row.localOutputDir,
+      images: row.main.map((asset, index) => ({
+        type: "main",
+        previewUrl: mediaAssetPreviewUrl(asset),
+        url: mediaAssetPreviewUrl(asset),
+        outputPath: asset.storageName || asset.originalName || `main-${index + 1}`
+      }))
+    };
+    await generateVideoForVariant(variant);
+    videoStatus.done = 1;
+    await loadMediaAssets();
+    ElMessage.success(`${row.shopName || "店铺"} 视频已生成`);
+  } catch (error) {
+    ElMessage.error(error.message || "视频生成失败");
+  } finally {
+    videoGenerating.value = false;
+  }
+}
+
 async function generateVideoForVariant(variant) {
   const shop = state.shops.find((item) => Number(item.id) === Number(variant.shopId));
   const imageUrl = imagesByType(variant, "main")[0]?.previewUrl || material.mainImage?.url;
@@ -700,7 +773,17 @@ async function generateVideoForVariant(variant) {
   }];
   try {
     const file = new File([blob], name, { type: blob.type || "video/webm" });
-    const uploaded = await uploadListingMedia(file);
+    const uploaded = await uploadListingMedia(file, {
+      source_module: "asset_variant",
+      source_id: `${variant.batchId || state.batchId}:${variant.shopId}:video:1`,
+      batch_id: variant.batchId || state.batchId,
+      shop_id: variant.shopId,
+      variant_id: variant.id,
+      role: "video",
+      asset_variant_title: variant.titleRu || variant.title || "",
+      asset_variant_source_title: material.title || state.sourceProduct?.name || "",
+      asset_variant_output_dir: variant.localOutputDir || variant.outputDir || ""
+    });
     variant.videos[0] = {
       ...variant.videos[0],
       url: withImageToken(uploaded.previewUrl || uploaded.localUrl || uploaded.url || objectUrl),
@@ -1167,13 +1250,30 @@ const assetProductGroups = computed(() => {
     const productName = material.title || state.sourceProduct?.name || "当前商品素材包";
     return [{
       key: state.batchId || "current",
+      batchId: state.batchId,
       productName,
-      sourceLabel: state.sourceProduct ? "选品计价表" : "素材裂变中心",
-      batchLabel: state.batchId || "-",
+      sourceLabel: "自动生成",
+      batchLabel: formatAssetTime(state.currentBatchCreatedAt || new Date()),
+      createdAt: state.currentBatchCreatedAt,
       rows: state.variants.map((variant) => ({
         key: variant.id || `${variant.batchId}-${variant.shopId}`,
+        variantId: variant.id,
+        batchId: variant.batchId || state.batchId,
+        shopId: variant.shopId,
         shopName: variant.shopName || shopNameById(variant.shopId),
         title: variant.titleRu || variant.title || "",
+        titleZh: variant.titleZh || "",
+        tags: variant.tags || [],
+        tagStyle: variant.tagStyle || "",
+        priceIndex: Number(variant.priceIndex || 0),
+        internalPrice: Number(variant.internalPrice || 0),
+        ozonPrice: Number(variant.ozonPrice || 0),
+        ozonOldPrice: Number(variant.ozonOldPrice || 0),
+        categoryName: variant.productInfo?.category || material.ozonCategoryName || "",
+        categoryId: material.ozonCategoryId || "",
+        color: variant.productInfo?.color || material.color || "",
+        materialText: variant.productInfo?.material || material.material || "",
+        quantityText: variant.productInfo?.quantity || material.quantity || "",
         main: imagesByType(variant, "main"),
         details: imagesByType(variant, "detail"),
         tail: imagesByType(variant, "tail"),
@@ -1187,21 +1287,42 @@ const assetProductGroups = computed(() => {
   for (const asset of state.mediaAssets) {
     const batchKey = asset.batchId || asset.batch_id || asset.sourceId || asset.source_id || "manual";
     if (!byBatch.has(batchKey)) {
+      const createdAt = asset.assetVariantCreatedAt || asset.created_at || asset.updated_at || "";
       byBatch.set(batchKey, {
         key: batchKey,
+        batchId: asset.batchId || asset.batch_id || "",
+        assetIds: [],
+        variantId: asset.variantId || asset.variant_id || null,
         productName: assetProductNameFromAsset(asset, batchKey),
         sourceLabel: sourceModuleLabel(asset.sourceModule || asset.source_module),
-        batchLabel: batchKey,
+        batchLabel: formatAssetTime(createdAt),
+        createdAt,
         rowsByShop: new Map()
       });
     }
     const group = byBatch.get(batchKey);
+    if (asset.id) group.assetIds.push(Number(asset.id));
     const shopKey = asset.shopId || asset.shop_id || 0;
     if (!group.rowsByShop.has(shopKey)) {
       group.rowsByShop.set(shopKey, {
         key: `${batchKey}-${shopKey}`,
+        batchId: asset.batchId || asset.batch_id || "",
+        assetIds: [],
+        shopId: shopKey,
         shopName: shopNameById(shopKey) || (shopKey ? `店铺 ${shopKey}` : "未绑定店铺"),
-        title: "",
+        title: asset.assetVariantTitle || "",
+        titleZh: asset.assetVariantTitleZh || "",
+        tags: [],
+        tagStyle: "",
+        priceIndex: 0,
+        internalPrice: 0,
+        ozonPrice: 0,
+        ozonOldPrice: 0,
+        categoryName: "",
+        categoryId: "",
+        color: "",
+        materialText: "",
+        quantityText: "",
         main: [],
         details: [],
         tail: [],
@@ -1210,6 +1331,12 @@ const assetProductGroups = computed(() => {
       });
     }
     const row = group.rowsByShop.get(shopKey);
+    if (asset.id) row.assetIds.push(Number(asset.id));
+    row.variantId = row.variantId || asset.variantId || asset.variant_id || null;
+    row.title = row.title || asset.assetVariantTitle || "";
+    row.titleZh = row.titleZh || asset.assetVariantTitleZh || "";
+    row.localOutputDir = row.localOutputDir || asset.assetVariantOutputDir || "";
+    mergeAssetVariantFacts(row, asset);
     const role = String(asset.role || "").toLowerCase();
     if (mediaAssetType(asset) === "video" || role === "video") row.videos.push(asset);
     else if (role === "main") row.main.push(asset);
@@ -1219,8 +1346,31 @@ const assetProductGroups = computed(() => {
   return Array.from(byBatch.values()).map((group) => ({
     ...group,
     rows: Array.from(group.rowsByShop.values())
-  }));
+}));
 });
+
+function mergeAssetVariantFacts(row, asset) {
+  row.tags = row.tags?.length ? row.tags : (asset.assetVariantTags || []);
+  row.tagStyle = row.tagStyle || asset.assetVariantTagStyle || "";
+  row.priceIndex = row.priceIndex || Number(asset.assetVariantPriceIndex || 0);
+  row.internalPrice = row.internalPrice || Number(asset.assetVariantInternalPrice || 0);
+  row.ozonPrice = row.ozonPrice || Number(asset.assetVariantOzonPrice || 0);
+  row.ozonOldPrice = row.ozonOldPrice || Number(asset.assetVariantOzonOldPrice || 0);
+  row.categoryName = row.categoryName || asset.assetVariantOzonCategoryName || "";
+  row.categoryId = row.categoryId || asset.assetVariantOzonCategoryId || "";
+  row.color = row.color || asset.assetVariantColor || "";
+  row.materialText = row.materialText || asset.assetVariantMaterial || "";
+  row.quantityText = row.quantityText || asset.assetVariantQuantity || "";
+}
+
+function formatMoney(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) && number ? number.toFixed(2) : "-";
+}
+
+function compactTags(tags = []) {
+  return (Array.isArray(tags) ? tags : String(tags || "").split(/\s+/)).filter(Boolean).slice(0, 8);
+}
 
 function shopNameById(shopId) {
   return state.shops.find((shop) => Number(shop.id) === Number(shopId))?.name || "";
@@ -1228,16 +1378,78 @@ function shopNameById(shopId) {
 
 function sourceModuleLabel(value) {
   const key = String(value || "").toLowerCase();
-  if (key === "asset_variant") return "素材裂变中心";
+  if (key === "asset_variant") return "自动生成";
   if (key === "listing_upload") return "手动上传";
-  if (key === "selection") return "选品计价表";
-  if (key === "manual") return "手动录入";
-  return value || "未知来源";
+  return "手动上传";
 }
 
 function assetProductNameFromAsset(asset, fallback) {
-  const name = asset.originalName || asset.original_name || asset.storageName || asset.storage_name || "";
-  return material.title || state.sourceProduct?.name || String(name || fallback || "素材包").replace(/\.(jpg|jpeg|png|webp|mp4|mov|webm)$/i, "");
+  const metadata = asset.metadata || {};
+  const name = asset.assetVariantSourceTitle || metadata.productTitle || metadata.sourceTitle || "";
+  if (name) return name;
+  const filename = asset.originalName || asset.original_name || asset.storageName || asset.storage_name || "";
+  return String(filename || fallback || "素材包").replace(/\.(jpg|jpeg|png|webp|mp4|mov|webm)$/i, "");
+}
+
+function formatAssetTime(value) {
+  const date = value instanceof Date ? value : new Date(String(value || ""));
+  if (Number.isNaN(date.getTime())) return "-";
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+async function deleteAssetGroup(group) {
+  if (!group?.batchId && !group?.assetIds?.length) {
+    ElMessage.warning("这个素材组缺少文件记录，不能自动定位本地文件");
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定要彻底删除「${group.productName}」这一批素材吗？本地生成文件和素材库记录都会删除。`,
+      "彻底删除素材批次",
+      { type: "warning", confirmButtonText: "彻底删除", cancelButtonText: "取消" }
+    );
+  } catch {
+    return;
+  }
+  await deleteAssetMediaGroup(group.batchId ? { batchId: group.batchId } : { assetIds: group.assetIds });
+}
+
+async function deleteAssetShopRow(row) {
+  if (!row?.batchId && !row?.assetIds?.length) {
+    ElMessage.warning("这个店铺素材缺少文件记录，不能自动定位本地文件");
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定要彻底删除「${row.shopName}」这一行素材吗？对应本地文件也会删除。`,
+      "彻底删除店铺素材",
+      { type: "warning", confirmButtonText: "彻底删除", cancelButtonText: "取消" }
+    );
+  } catch {
+    return;
+  }
+  await deleteAssetMediaGroup(row.batchId ? { batchId: row.batchId, shopId: row.shopId } : { assetIds: row.assetIds });
+}
+
+async function deleteAssetMediaGroup(payload) {
+  mediaAssetDeleting.value = true;
+  try {
+    const result = await apiClient.post("/api/asset-variant-engine/delete-media-group", payload);
+    if (!payload.shopId && payload.batchId === state.batchId) {
+      state.variants = [];
+      state.batchId = "";
+      state.currentBatchCreatedAt = "";
+      state.outputDir = "";
+      state.localOutputDir = "";
+    } else if (payload.shopId) {
+      state.variants = state.variants.filter((variant) => Number(variant.shopId) !== Number(payload.shopId));
+    }
+    await loadMediaAssets();
+    ElMessage.success(`已删除 ${result.deletedMediaAssets || 0} 个素材文件记录`);
+  } finally {
+    mediaAssetDeleting.value = false;
+  }
 }
 
 function openAssetLikePreview(asset, title = "素材预览") {
@@ -1368,7 +1580,7 @@ onMounted(async () => {
         <el-button :icon="Download" :disabled="!state.variants.length" @click="exportPackages">导出素材包</el-button>
         <el-button type="primary" :loading="generating" :disabled="!canGenerate || !selectedShop" @click="generateCurrentShop">一键生成当前版本</el-button>
         <el-button type="primary" :loading="generating" :disabled="!canGenerate" @click="generateAllShops">批量生成全部店铺版本</el-button>
-        <el-button type="success" :loading="importing" :disabled="!state.variants.length" @click="goToListingAutomation">&#21435;&#19978;&#26550;</el-button>
+        <el-button type="success" :loading="importing" :disabled="!state.variants.length" @click="goToListingAutomation">编辑上架</el-button>
       </div>
       <input ref="folderInputRef" class="hidden-input" type="file" webkitdirectory directory multiple @change="onFolderImport">
       <input ref="detailReplaceInputRef" class="hidden-input" type="file" accept="image/*" @change="onDetailReplaceInput">
@@ -1486,6 +1698,16 @@ onMounted(async () => {
                   <span>数量</span>
                   <el-input v-model="material.quantity" placeholder="1 件 / 2 件套" />
                 </label>
+                <label class="form-field">
+                  <span>车型</span>
+                  <el-input v-model="material.vehicleModel" placeholder="Belgee X50 / TENET T7" />
+                </label>
+                <label class="form-field">
+                  <span>内部基础售价</span>
+                  <el-input v-model="material.basePriceRmb" placeholder="50">
+                    <template #suffix>CNY</template>
+                  </el-input>
+                </label>
                 <div class="size-row">
                   <span>尺寸与重量</span>
                   <div>
@@ -1529,7 +1751,7 @@ onMounted(async () => {
             <span class="step-index">2</span>
             <div>
               <h2>选择店铺与裂变规则</h2>
-              <p>每个店铺一行配置水印、标题风格、类目、车型、尾图模板和主图方案。</p>
+              <p>每个店铺一行配置水印、标题风格、标签风格、价格指数、尾图模板和主图方案。</p>
             </div>
             <div class="step-actions">
               <el-button size="small" :loading="syncingCategories" @click="syncOzonCategories">同步 Ozon 真实类目</el-button>
@@ -1570,36 +1792,14 @@ onMounted(async () => {
                 </el-select>
               </div>
               <div class="rule-field">
-                <label>类目</label>
-                <el-select v-model="state.rules[shop.id].tailCategory" filterable allow-create default-first-option @change="onTailScopeChange(shop)" @click.stop>
-                  <el-option
-                    v-for="item in categoryOptions()"
-                    :key="item.value"
-                    :label="item.label"
-                    :value="item.value"
-                  >
-                    <div class="option-two-line">
-                      <strong>{{ item.label }}</strong>
-                      <span>{{ item.subLabel }}</span>
-                    </div>
-                  </el-option>
+                <label>标签风格</label>
+                <el-select v-model="state.rules[shop.id].tagStyle" @click.stop>
+                  <el-option v-for="item in state.tagStyles" :key="item.value" :label="item.label" :value="item.value" />
                 </el-select>
               </div>
-              <div class="rule-field">
-                <label>车型</label>
-                <el-select v-model="state.rules[shop.id].vehicleModel" filterable allow-create default-first-option @change="onTailScopeChange(shop)" @click.stop>
-                  <el-option
-                    v-for="item in vehicleOptions()"
-                    :key="item.value"
-                    :label="item.label"
-                    :value="item.value"
-                  >
-                    <div class="option-two-line">
-                      <strong>{{ item.label }}</strong>
-                      <span>{{ item.subLabel }}</span>
-                    </div>
-                  </el-option>
-                </el-select>
+              <div class="rule-field price-index-field">
+                <label>价格指数</label>
+                <el-input-number v-model="state.rules[shop.id].priceIndex" :min="0.1" :max="9.9999" :step="0.001" :precision="4" controls-position="right" @click.stop />
               </div>
               <div class="rule-field tail-field">
                 <label>尾图模板</label>
@@ -1709,6 +1909,9 @@ onMounted(async () => {
                   <span>批次</span>
                   <strong>{{ group.batchLabel }}</strong>
                 </div>
+                <div class="asset-package-actions">
+                  <el-button size="small" type="danger" :icon="Delete" :loading="mediaAssetDeleting" @click="deleteAssetGroup(group)">彻底删除</el-button>
+                </div>
               </header>
               <div class="asset-shop-list">
                 <section v-for="row in group.rows" :key="row.key" class="asset-shop-row">
@@ -1719,6 +1922,23 @@ onMounted(async () => {
                   <div class="asset-row-title">
                     <span>标题</span>
                     <strong>{{ row.title || "未生成标题" }}</strong>
+                    <em v-if="row.titleZh">{{ row.titleZh }}</em>
+                  </div>
+                  <div class="asset-row-meta">
+                    <span>上架价格</span>
+                    <strong>{{ formatMoney(row.ozonPrice) }} / {{ formatMoney(row.ozonOldPrice) }} CNY</strong>
+                    <em>内部 {{ formatMoney(row.internalPrice) }} × {{ row.priceIndex || "-" }}</em>
+                  </div>
+                  <div class="asset-row-tags">
+                    <span>产品标签 {{ compactTags(row.tags).length }}</span>
+                    <div>
+                      <el-tag v-for="tag in compactTags(row.tags)" :key="tag" size="small" effect="plain">{{ tag }}</el-tag>
+                    </div>
+                  </div>
+                  <div class="asset-row-meta compact">
+                    <span>类目 / 属性</span>
+                    <strong>{{ row.categoryName || row.categoryId || "未绑定类目" }}</strong>
+                    <em>{{ [row.color, row.materialText, row.quantityText].filter(Boolean).join(" / ") || "-" }}</em>
                   </div>
                   <div class="asset-bucket">
                     <span>主图 {{ row.main.length }}</span>
@@ -1751,6 +1971,10 @@ onMounted(async () => {
                         <span class="asset-video-thumb"><el-icon><VideoCamera /></el-icon><em>Video</em></span>
                       </button>
                     </div>
+                  </div>
+                  <div class="asset-row-actions">
+                    <el-button v-if="!row.videos.length && row.main.length" size="small" type="primary" link :icon="VideoCamera" :loading="videoGenerating" @click="generateVideoForAssetRow(row)">生成视频</el-button>
+                    <el-button size="small" type="danger" link :icon="Delete" :loading="mediaAssetDeleting" @click="deleteAssetShopRow(row)">删除</el-button>
                   </div>
                 </section>
               </div>
@@ -2052,19 +2276,27 @@ onMounted(async () => {
 .media-assets-panel { overflow: hidden; }
 .asset-package-list { display: flex; flex-direction: column; gap: 14px; }
 .asset-package-card { border: 1px solid #e5eaf3; border-radius: 8px; background: #fff; overflow: hidden; }
-.asset-package-header { display: grid; grid-template-columns: minmax(260px, 1fr) 150px minmax(180px, .8fr); gap: 12px; padding: 12px 14px; background: #f8fafc; border-bottom: 1px solid #edf1f7; }
+.asset-package-header { display: grid; grid-template-columns: minmax(260px, 1fr) 120px minmax(160px, .7fr) 110px; gap: 12px; padding: 12px 14px; background: #f8fafc; border-bottom: 1px solid #edf1f7; }
 .asset-package-header div,
 .asset-shop-name,
 .asset-row-title,
+.asset-row-meta,
+.asset-row-tags,
 .asset-bucket { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.asset-package-actions { align-items: flex-end; justify-content: center; }
 .asset-package-header span,
 .asset-shop-row span { color: #697386; font-size: 12px; }
 .asset-package-header strong,
 .asset-shop-row strong { overflow-wrap: anywhere; }
 .asset-shop-list { display: flex; flex-direction: column; }
-.asset-shop-row { display: grid; grid-template-columns: 140px minmax(220px, 1fr) 110px minmax(220px, 1.3fr) 100px 100px; gap: 12px; align-items: start; padding: 12px 14px; border-bottom: 1px solid #edf1f7; }
+.asset-shop-row { display: grid; grid-template-columns: 120px minmax(220px, 1fr) 150px minmax(180px, .9fr) minmax(150px, .8fr) 90px 90px 90px 80px 70px; gap: 12px; align-items: start; padding: 12px 14px; border-bottom: 1px solid #edf1f7; overflow-x: auto; }
 .asset-shop-row:last-child { border-bottom: 0; }
 .asset-row-title strong { font-size: 13px; line-height: 1.45; color: #334155; }
+.asset-row-title em { margin-top: 4px; display: block; font-style: normal; color: #697386; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.asset-row-meta strong { font-size: 13px; line-height: 1.4; color: #0f172a; }
+.asset-row-meta em { font-style: normal; color: #697386; font-size: 12px; overflow-wrap: anywhere; }
+.asset-row-tags > div { display: flex; gap: 5px; flex-wrap: wrap; align-content: flex-start; max-height: 74px; overflow: hidden; }
+.asset-row-actions { display: flex; flex-direction: column; justify-content: flex-start; align-items: flex-end; gap: 6px; min-width: 0; }
 .asset-bucket > div { display: flex; gap: 6px; flex-wrap: wrap; min-height: 70px; align-content: flex-start; }
 .asset-thumb-button { width: 52px; aspect-ratio: 3 / 4; border: 1px solid #d7e3f4; border-radius: 6px; padding: 0; background: #f8fafc; overflow: hidden; cursor: zoom-in; display: inline-grid; place-items: stretch; }
 .asset-thumb-button:hover { border-color: #1677ff; box-shadow: 0 0 0 2px rgba(22, 119, 255, .12); }

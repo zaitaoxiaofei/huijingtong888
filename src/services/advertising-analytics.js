@@ -10,6 +10,11 @@ CREATE TABLE IF NOT EXISTS ozon_ad_sku_daily (
   campaign_name VARCHAR(255) NULL,
   campaign_state VARCHAR(64) NULL,
   campaign_budget_rub DECIMAL(18,4) NOT NULL DEFAULT 0,
+  campaign_strategy VARCHAR(128) NULL,
+  campaign_payment_type VARCHAR(64) NULL,
+  campaign_placement VARCHAR(255) NULL,
+  campaign_bid_rub DECIMAL(18,4) NOT NULL DEFAULT 0,
+  campaign_target_cir DECIMAL(10,4) NOT NULL DEFAULT 0,
   ad_type VARCHAR(64) NOT NULL DEFAULT 'unknown',
   product_id BIGINT UNSIGNED NULL,
   offer_id VARCHAR(255) NULL,
@@ -18,6 +23,8 @@ CREATE TABLE IF NOT EXISTS ozon_ad_sku_daily (
   spend_cny DECIMAL(18,4) NOT NULL DEFAULT 0,
   impressions INT NOT NULL DEFAULT 0,
   clicks INT NOT NULL DEFAULT 0,
+  add_to_cart INT NOT NULL DEFAULT 0,
+  add_to_cart_available TINYINT(1) NOT NULL DEFAULT 0,
   orders INT NOT NULL DEFAULT 0,
   units INT NOT NULL DEFAULT 0,
   revenue_rub DECIMAL(18,4) NOT NULL DEFAULT 0,
@@ -48,6 +55,13 @@ async function ensureAdDailySchema() {
   await mysqlExecute(AD_DAILY_SCHEMA);
   await mysqlExecute("ALTER TABLE ozon_ad_sku_daily ADD COLUMN campaign_state VARCHAR(64) NULL AFTER campaign_name").catch(ignoreDuplicateColumn);
   await mysqlExecute("ALTER TABLE ozon_ad_sku_daily ADD COLUMN campaign_budget_rub DECIMAL(18,4) NOT NULL DEFAULT 0 AFTER campaign_state").catch(ignoreDuplicateColumn);
+  await mysqlExecute("ALTER TABLE ozon_ad_sku_daily ADD COLUMN campaign_strategy VARCHAR(128) NULL AFTER campaign_budget_rub").catch(ignoreDuplicateColumn);
+  await mysqlExecute("ALTER TABLE ozon_ad_sku_daily ADD COLUMN campaign_payment_type VARCHAR(64) NULL AFTER campaign_strategy").catch(ignoreDuplicateColumn);
+  await mysqlExecute("ALTER TABLE ozon_ad_sku_daily ADD COLUMN campaign_placement VARCHAR(255) NULL AFTER campaign_payment_type").catch(ignoreDuplicateColumn);
+  await mysqlExecute("ALTER TABLE ozon_ad_sku_daily ADD COLUMN campaign_bid_rub DECIMAL(18,4) NOT NULL DEFAULT 0 AFTER campaign_placement").catch(ignoreDuplicateColumn);
+  await mysqlExecute("ALTER TABLE ozon_ad_sku_daily ADD COLUMN campaign_target_cir DECIMAL(10,4) NOT NULL DEFAULT 0 AFTER campaign_bid_rub").catch(ignoreDuplicateColumn);
+  await mysqlExecute("ALTER TABLE ozon_ad_sku_daily ADD COLUMN add_to_cart INT NOT NULL DEFAULT 0 AFTER clicks").catch(ignoreDuplicateColumn);
+  await mysqlExecute("ALTER TABLE ozon_ad_sku_daily ADD COLUMN add_to_cart_available TINYINT(1) NOT NULL DEFAULT 0 AFTER add_to_cart").catch(ignoreDuplicateColumn);
   schemaReady = true;
 }
 
@@ -273,6 +287,8 @@ function rowMetrics(row = {}) {
   const spendRub = toNumber(row.spend_rub);
   const spendCny = toNumber(row.spend_cny);
   const clicks = toNumber(row.clicks);
+  const addToCart = toNumber(row.add_to_cart);
+  const addToCartAvailable = toNumber(row.add_to_cart_available) || (addToCart > 0 ? 1 : 0);
   const impressions = toNumber(row.impressions);
   const orders = toNumber(row.orders);
   const revenueRub = toNumber(row.revenue_rub);
@@ -284,6 +300,8 @@ function rowMetrics(row = {}) {
     spend_cny: spendCny,
     impressions,
     clicks,
+    add_to_cart: addToCart,
+    add_to_cart_available: addToCartAvailable,
     orders,
     units: toNumber(row.units),
     revenue_rub: revenueRub,
@@ -308,6 +326,7 @@ export async function advertisingDailyMysql(query = {}) {
     ["spend_cny", "spend_cny"],
     ["impressions", "impressions"],
     ["clicks", "clicks"],
+    ["add_to_cart", "add_to_cart"],
     ["orders", "orders"],
     ["revenue_rub", "revenue_rub"],
     ["revenue_cny", "revenue_cny"],
@@ -346,6 +365,11 @@ export async function advertisingDailyMysql(query = {}) {
       GROUP_CONCAT(DISTINCT NULLIF(latest_ad.campaign_state, '') ORDER BY latest_ad.campaign_state SEPARATOR ', ') AS latest_campaign_states,
       GROUP_CONCAT(DISTINCT NULLIF(ad.ad_type, '') ORDER BY ad.ad_type SEPARATOR ', ') AS ad_types,
       COALESCE(MAX(ad.campaign_budget_rub), 0) AS campaign_budget_rub,
+      GROUP_CONCAT(DISTINCT NULLIF(ad.campaign_strategy, '') ORDER BY ad.campaign_strategy SEPARATOR ', ') AS campaign_strategies,
+      GROUP_CONCAT(DISTINCT NULLIF(ad.campaign_payment_type, '') ORDER BY ad.campaign_payment_type SEPARATOR ', ') AS campaign_payment_types,
+      GROUP_CONCAT(DISTINCT NULLIF(ad.campaign_placement, '') ORDER BY ad.campaign_placement SEPARATOR ', ') AS campaign_placements,
+      COALESCE(MAX(ad.campaign_bid_rub), 0) AS campaign_bid_rub,
+      COALESCE(MAX(ad.campaign_target_cir), 0) AS campaign_target_cir,
       COALESCE(MAX(profit.local_revenue_cny), 0) AS local_revenue_cny,
       COALESCE(MAX(profit.local_purchase_cost_cny), 0) AS local_purchase_cost_cny,
       COALESCE(MAX(profit.local_profit_cny), 0) AS local_profit_cny,
@@ -370,6 +394,8 @@ export async function advertisingDailyMysql(query = {}) {
       COALESCE(SUM(ad.spend_cny), 0) AS spend_cny,
       COALESCE(SUM(ad.impressions), 0) AS impressions,
       COALESCE(SUM(ad.clicks), 0) AS clicks,
+      COALESCE(SUM(ad.add_to_cart), 0) AS add_to_cart,
+      COALESCE(MAX(ad.add_to_cart_available), 0) AS add_to_cart_available,
       COALESCE(SUM(ad.orders), 0) AS orders,
       COALESCE(SUM(ad.units), 0) AS units,
       COALESCE(SUM(ad.revenue_rub), 0) AS revenue_rub,
@@ -449,6 +475,8 @@ export async function advertisingDailySummaryMysql(query = {}) {
       COALESCE(SUM(ad.spend_cny), 0) AS spend_cny,
       COALESCE(SUM(ad.impressions), 0) AS impressions,
       COALESCE(SUM(ad.clicks), 0) AS clicks,
+      COALESCE(SUM(ad.add_to_cart), 0) AS add_to_cart,
+      COALESCE(MAX(ad.add_to_cart_available), 0) AS add_to_cart_available,
       COALESCE(SUM(ad.orders), 0) AS orders,
       COALESCE(SUM(ad.units), 0) AS units,
       COALESCE(SUM(ad.revenue_rub), 0) AS revenue_rub,
@@ -520,14 +548,20 @@ export async function upsertAdvertisingDailyRowsMysql(body = {}) {
 
     const result = await mysqlExecute(`
       INSERT INTO ozon_ad_sku_daily (
-        date_key, shop_id, ozon_sku, campaign_id, campaign_name, campaign_state, campaign_budget_rub, ad_type,
+        date_key, shop_id, ozon_sku, campaign_id, campaign_name, campaign_state, campaign_budget_rub,
+        campaign_strategy, campaign_payment_type, campaign_placement, campaign_bid_rub, campaign_target_cir, ad_type,
         product_id, offer_id, product_name, spend_rub, spend_cny, impressions,
-        clicks, orders, units, revenue_rub, revenue_cny, source, raw_json, synced_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+        clicks, add_to_cart, add_to_cart_available, orders, units, revenue_rub, revenue_cny, source, raw_json, synced_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
       ON DUPLICATE KEY UPDATE
         campaign_name = VALUES(campaign_name),
         campaign_state = VALUES(campaign_state),
         campaign_budget_rub = VALUES(campaign_budget_rub),
+        campaign_strategy = VALUES(campaign_strategy),
+        campaign_payment_type = VALUES(campaign_payment_type),
+        campaign_placement = VALUES(campaign_placement),
+        campaign_bid_rub = VALUES(campaign_bid_rub),
+        campaign_target_cir = VALUES(campaign_target_cir),
         product_id = VALUES(product_id),
         offer_id = VALUES(offer_id),
         product_name = VALUES(product_name),
@@ -535,6 +569,8 @@ export async function upsertAdvertisingDailyRowsMysql(body = {}) {
         spend_cny = VALUES(spend_cny),
         impressions = VALUES(impressions),
         clicks = VALUES(clicks),
+        add_to_cart = VALUES(add_to_cart),
+        add_to_cart_available = VALUES(add_to_cart_available),
         orders = VALUES(orders),
         units = VALUES(units),
         revenue_rub = VALUES(revenue_rub),
@@ -551,6 +587,11 @@ export async function upsertAdvertisingDailyRowsMysql(body = {}) {
       row.campaign_name || row.campaignName || null,
       row.campaign_state || row.campaignState || null,
       toNumber(row.campaign_budget_rub || row.campaignBudgetRub || row.budget_rub || row.budgetRub),
+      row.campaign_strategy || row.campaignStrategy || null,
+      row.campaign_payment_type || row.campaignPaymentType || null,
+      row.campaign_placement || row.campaignPlacement || null,
+      toNumber(row.campaign_bid_rub || row.campaignBidRub || row.bidRub),
+      toNumber(row.campaign_target_cir || row.campaignTargetCir || row.targetCir),
       String(row.ad_type || row.adType || "unknown"),
       row.product_id || row.productId || null,
       row.offer_id || row.offerId || null,
@@ -559,6 +600,8 @@ export async function upsertAdvertisingDailyRowsMysql(body = {}) {
       toNumber(row.spend_cny || row.spendCny),
       Math.round(toNumber(row.impressions)),
       Math.round(toNumber(row.clicks)),
+      Math.round(toNumber(row.add_to_cart || row.addToCart || row.to_cart || row.toCart)),
+      Math.round(toNumber(row.add_to_cart_available || row.addToCartAvailable)),
       Math.round(toNumber(row.orders)),
       Math.round(toNumber(row.units)),
       toNumber(row.revenue_rub || row.revenueRub),
@@ -628,7 +671,21 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
       const token = await fetchPerformanceToken({ clientId, clientSecret }, options);
       const campaigns = await fetchPerformanceCampaigns(token, options);
       const selectedCampaigns = filterCampaigns(campaigns, body);
+      await hydrateCampaignProductSettings(token, selectedCampaigns, options);
       await refreshCampaignMetadataRows(shop.id, selectedCampaigns, { from, to });
+      await refreshCampaignProductSettingsRows(shop.id, selectedCampaigns, { from, to });
+      if (body.metadata_only || body.metadataOnly) {
+        results.push({
+          shop_id: shop.id,
+          shop_name: shop.name,
+          campaigns: selectedCampaigns.length,
+          budget_campaigns: selectedCampaigns.filter((campaign) => Number(campaign.budgetRub || 0) > 0).length,
+          fetched: 0,
+          imported: 0,
+          status: "metadata_ok"
+        });
+        continue;
+      }
       if (!selectedCampaigns.length) {
         results.push({ shop_id: shop.id, shop_name: shop.name, fetched: 0, imported: 0, status: "no_campaigns" });
         continue;
@@ -684,6 +741,9 @@ async function refreshCampaignMetadataRows(shopId, campaigns = [], range = {}) {
       SET campaign_name = COALESCE(NULLIF(?, ''), campaign_name),
           campaign_state = COALESCE(NULLIF(?, ''), campaign_state),
           campaign_budget_rub = COALESCE(NULLIF(?, 0), campaign_budget_rub),
+          campaign_strategy = COALESCE(NULLIF(?, ''), campaign_strategy),
+          campaign_payment_type = COALESCE(NULLIF(?, ''), campaign_payment_type),
+          campaign_placement = COALESCE(NULLIF(?, ''), campaign_placement),
           updated_at = NOW()
       WHERE shop_id = ?
         AND campaign_id = ?
@@ -693,11 +753,41 @@ async function refreshCampaignMetadataRows(shopId, campaigns = [], range = {}) {
       campaign.title || "",
       campaign.state || "",
       toNumber(campaign.budgetRub),
+      campaign.strategy || "",
+      campaign.paymentType || "",
+      campaign.placement || "",
       Number(shopId),
       String(campaign.id),
       range.from,
       range.to
     ]);
+  }
+}
+
+async function refreshCampaignProductSettingsRows(shopId, campaigns = [], range = {}) {
+  for (const campaign of campaigns) {
+    const settings = campaign.productSettings || [];
+    for (const product of settings) {
+      await mysqlExecute(`
+        UPDATE ozon_ad_sku_daily
+        SET campaign_bid_rub = COALESCE(NULLIF(?, 0), campaign_bid_rub),
+            campaign_target_cir = COALESCE(NULLIF(?, 0), campaign_target_cir),
+            updated_at = NOW()
+        WHERE shop_id = ?
+          AND campaign_id = ?
+          AND ozon_sku = ?
+          AND date_key >= ?
+          AND date_key <= ?
+      `, [
+        toNumber(product.bidRub),
+        toNumber(product.targetCir),
+        Number(shopId),
+        String(campaign.id),
+        String(product.sku),
+        range.from,
+        range.to
+      ]);
+    }
   }
 }
 
@@ -741,9 +831,57 @@ function normalizeCampaignResponse(data = {}) {
     id: String(item.id || item.campaign_id || item.campaignId || ""),
     title: String(item.title || item.name || item.campaign_name || item.campaignName || ""),
     state: String(item.state || item.status || ""),
-    budgetRub: firstNumber(item.dailyBudget, item.daily_budget, item.budget, item.budgetRub, item.budget_rub, item.limit, item.expenseLimit),
-    advObjectType: String(item.advObjectType || item.adv_object_type || item.type || "")
+    budgetRub: campaignBudgetRub(item),
+    advObjectType: String(item.advObjectType || item.adv_object_type || item.type || ""),
+    strategy: String(item.productAutopilotStrategy || item.autopilotStrategy || item.strategy || ""),
+    paymentType: String(item.PaymentType || item.paymentType || item.payment_type || ""),
+    placement: normalizeCampaignPlacement(item.placement || item.ProductAdvPlacements || item.productAdvPlacements)
   })).filter((item) => item.id);
+}
+
+function normalizeCampaignPlacement(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean).join(", ");
+  return String(value || "");
+}
+
+async function hydrateCampaignProductSettings(token, campaigns = [], options = {}) {
+  for (const campaign of campaigns) {
+    try {
+      const data = await performanceRequest(`/api/client/campaign/${campaign.id}/v2/products`, null, { ...options, token, method: "GET" });
+      const rows = Array.isArray(data.products) ? data.products : Array.isArray(data.list) ? data.list : [];
+      campaign.productSettings = rows.map((row) => ({
+        sku: String(row.sku || row.ozon_sku || row.product_sku || "").trim(),
+        bidRub: normalizePerformanceMoney(firstNumber(row.bid, row.bidRub, row.bid_rub, row.cpc, row.price)),
+        targetCir: firstNumber(row.targetCir, row.target_cir, row.targetDRR, row.target_drr, row.drr)
+      })).filter((row) => row.sku);
+      campaign.productsBySku = new Map(campaign.productSettings.map((row) => [row.sku, row]));
+    } catch {
+      campaign.productSettings = [];
+      campaign.productsBySku = new Map();
+    }
+  }
+  return campaigns;
+}
+
+function campaignBudgetRub(item = {}) {
+  const rawBudget = firstPositiveNumber(
+    item.dailyBudget, item.daily_budget, item.budgetRub, item.budget_rub, item.budget,
+    item.limit, item.dailyLimit, item.daily_limit, item.expenseLimit, item.expense_limit,
+    item.limits?.dailyBudget, item.limits?.daily_budget, item.limits?.daily, item.limits?.budget,
+    item.settings?.dailyBudget, item.settings?.daily_budget, item.settings?.budget,
+    item.money?.dailyBudget, item.money?.daily_budget, item.money?.budget,
+    item.weeklyBudget, item.weekly_budget, item.weeklyLimit, item.weekly_limit,
+    item.limits?.weeklyBudget, item.limits?.weekly_budget, item.limits?.weekly,
+    item.settings?.weeklyBudget, item.settings?.weekly_budget
+  );
+  return normalizePerformanceMoney(rawBudget);
+}
+
+function normalizePerformanceMoney(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return 0;
+  if (Math.abs(number) >= 1000000) return number / 1000000;
+  return number;
 }
 
 function filterCampaigns(campaigns = [], body = {}) {
@@ -959,6 +1097,8 @@ function normalizePerformanceAdRow(row = {}, shop = {}, campaigns = []) {
   const campaign = row.campaign || campaigns.find((item) => String(item.id) === campaignId) || {};
   const dateKey = normalizePerformanceDate(row.date || row.date_key || row.day || row.period || row.period_from || row.createdAt);
   const sku = String(row.sku || row.ozon_sku || row.product_sku || row.productSku || row.ad_sku || row.id_sku || "").trim();
+  const addToCart = adAddToCartMetric(row);
+  const productSetting = campaign.productsBySku?.get(sku) || {};
   return {
     date_key: dateKey,
     shop_id: Number(shop.id),
@@ -967,18 +1107,51 @@ function normalizePerformanceAdRow(row = {}, shop = {}, campaigns = []) {
     campaign_name: row.campaign_name || row.campaignName || campaign.title || "",
     campaign_state: row.campaign_state || row.campaignState || campaign.state || "",
     campaign_budget_rub: firstNumber(row.campaign_budget_rub, row.campaignBudgetRub, row.budget_rub, row.budgetRub, campaign.budgetRub),
+    campaign_strategy: row.campaign_strategy || row.campaignStrategy || campaign.strategy || "",
+    campaign_payment_type: row.campaign_payment_type || row.campaignPaymentType || campaign.paymentType || "",
+    campaign_placement: row.campaign_placement || row.campaignPlacement || campaign.placement || "",
+    campaign_bid_rub: firstNumber(row.campaign_bid_rub, row.campaignBidRub, row.bidRub, productSetting.bidRub),
+    campaign_target_cir: firstNumber(row.campaign_target_cir, row.campaignTargetCir, row.targetCir, productSetting.targetCir),
     ad_type: row.ad_type || row.adType || campaign.advObjectType || "performance",
     offer_id: row.offer_id || row.offerId || "",
     product_name: row.product_name || row.productName || row.title || row.name || "",
     spend_rub: firstNumber(row.moneySpent, row.expense, row.spend, row.spend_rub, row.cost, row.consumption),
     impressions: Math.round(firstNumber(row.views, row.impressions, row.shows, row.show)),
     clicks: Math.round(firstNumber(row.clicks, row.click)),
+    add_to_cart: Math.round(addToCart.value),
+    add_to_cart_available: addToCart.available ? 1 : 0,
     orders: Math.round(firstNumber(row.orders, row.orders_count, row.ordersCount)),
     units: Math.round(firstNumber(row.units, row.quantity, row.qty)),
     revenue_rub: firstNumber(row.ordersMoney, row.modelsMoney, row.product_gmv, row.revenue, row.sales, row.attributedRevenue, row.money_income, row.orderRevenue),
     source: "ozon_performance_api",
     raw_json: row
   };
+}
+
+function adAddToCartMetric(row = {}) {
+  const keys = [
+    "add_to_cart",
+    "addToCart",
+    "to_cart",
+    "toCart",
+    "cart",
+    "carts",
+    "basket",
+    "baskets",
+    "addedToCart",
+    "added_to_cart",
+    "addedToBasket",
+    "added_to_basket",
+    "cartCount",
+    "cart_count",
+    "basketCount",
+    "basket_count"
+  ];
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(row, key)) continue;
+    return { available: true, value: firstNumber(row[key]) };
+  }
+  return { available: false, value: 0 };
 }
 
 function normalizePerformanceDate(value) {
@@ -991,11 +1164,48 @@ function normalizePerformanceDate(value) {
 
 function firstNumber(...values) {
   for (const value of values) {
-    if (value === undefined || value === null || value === "") continue;
-    const number = Number(String(value).replace(",", ".").replace(/[^\d.-]/g, ""));
-    if (Number.isFinite(number)) return number;
+    for (const candidate of numericCandidates(value)) {
+      if (candidate === undefined || candidate === null || candidate === "") continue;
+      const number = Number(String(candidate).replace(",", ".").replace(/[^\d.-]/g, ""));
+      if (Number.isFinite(number)) return number;
+    }
   }
   return 0;
+}
+
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    for (const candidate of numericCandidates(value)) {
+      if (candidate === undefined || candidate === null || candidate === "") continue;
+      const number = Number(String(candidate).replace(",", ".").replace(/[^\d.-]/g, ""));
+      if (Number.isFinite(number) && number > 0) return number;
+    }
+  }
+  return 0;
+}
+
+function numericCandidates(value, depth = 0) {
+  if (value === undefined || value === null || value === "" || depth > 2) return [];
+  if (typeof value !== "object") return [value];
+  if (Array.isArray(value)) return value.flatMap((item) => numericCandidates(item, depth + 1));
+  const keys = [
+    "amount",
+    "value",
+    "sum",
+    "total",
+    "daily",
+    "limit",
+    "budget",
+    "budgetRub",
+    "budget_rub",
+    "dailyBudget",
+    "daily_budget",
+    "dailyLimit",
+    "daily_limit",
+    "expenseLimit",
+    "expense_limit"
+  ];
+  return keys.flatMap((key) => numericCandidates(value[key], depth + 1));
 }
 
 async function performanceRequest(path, payload, options = {}) {

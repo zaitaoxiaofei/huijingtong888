@@ -195,7 +195,7 @@ async function loadAll() {
 
 function handleListingApiMissing(error) {
   if (error?.status === 404) {
-    ElMessage.error("上架自动化后端接口未生效，请重启/重新部署服务端进程");
+    ElMessage.error("编辑上架后端接口未生效，请重启/重新部署服务端进程");
     return [];
   }
   throw error;
@@ -243,7 +243,7 @@ async function addCopiedProduct() {
       price: copyForm.price
     }).catch((error) => {
       if (error?.status === 404) {
-        throw new Error("上架自动化后端接口未生效，请重启/重新部署服务端进程");
+        throw new Error("编辑上架后端接口未生效，请重启/重新部署服务端进程");
       }
       throw error;
     });
@@ -427,7 +427,7 @@ function newBlankTemplate() {
     attributes: normalizeEditorAttributes([
       { name: "品牌", value: "无品牌", required: true, source: "fixed_form" },
       { name: "型号名称", value: "", required: true, source: "fixed_form" },
-      { name: "主图标签", value: "", required: false, source: "fixed_form" },
+      { name: "产品标签", value: "", required: false, source: "fixed_form" },
       { name: "简介", value: "", required: false, source: "fixed_form" },
       { name: "JSON富内容", value: "", required: false, source: "fixed_form" }
     ]),
@@ -513,14 +513,14 @@ function applyTemplateAttributeFallbacks(editable = {}, logistics = {}) {
   const richJson = editable.rich_content_json || getAttributeByNames(["JSON富内容", "Rich", "rich"], "");
   const brand = logistics.brand || getAttributeByNames(["品牌", "Бренд"], "");
   const model = logistics.spec || getAttributeByNames(["型号", "Модель"], "");
-  const tags = logistics.tags?.length ? logistics.tags : splitTagValue(getAttributeByNames(["主图标签", "ключевые слова", "тег"], ""));
+  const tags = logistics.tags?.length ? logistics.tags : splitTagValue(getAttributeByNames(["产品标签", "主图标签", "ключевые слова", "тег"], ""));
   if (summary && !templateEditor.description) templateEditor.description = summary;
   if (brand) setAttributeByNames(["品牌", "Бренд"], brand, { name: "品牌", required: true });
   if (model) {
     templateEditor.spec = templateEditor.spec || model;
     setAttributeByNames(["型号", "Модель"], model, { name: "型号名称", required: true });
   }
-  if (tags.length) setAttributeByNames(["主图标签", "ключевые слова", "тег"], tags.join(","), { name: "主图标签" });
+  if (tags.length) setAttributeByNames(["产品标签", "主图标签", "ключевые слова", "тег"], tags.join(","), { name: "产品标签" });
   if (summary) setAttributeByNames(["简介", "Аннотация", "Описание"], summary, { name: "简介" });
   if (richJson) setAttributeByNames(["JSON富内容", "Rich", "rich"], richJson, { name: "JSON富内容" });
 }
@@ -544,7 +544,7 @@ function normalizeEditorAttributes(attributes) {
 }
 
 function fixedAttributeNames() {
-  return ["标题", "品牌", "包装重量", "包装尺寸", "重量", "尺寸", "型号", "主图标签", "简介", "JSON富内容", "颜色"];
+  return ["标题", "品牌", "包装重量", "包装尺寸", "重量", "尺寸", "型号", "产品标签", "主图标签", "简介", "JSON富内容", "颜色"];
 }
 
 function getAttributeByNames(names, fallback = "") {
@@ -575,7 +575,7 @@ const fixedForm = computed({
     return {
       brand: getAttributeByNames(["品牌", "Бренд"], "无品牌"),
       model: getAttributeByNames(["型号", "Модель"], ""),
-      tags: splitTagValue(getAttributeByNames(["主图标签", "ключевые слова", "тег"], "")),
+      tags: splitTagValue(getAttributeByNames(["产品标签", "主图标签", "ключевые слова", "тег"], "")),
       summary: getAttributeByNames(["简介", "Аннотация", "Описание"], ""),
       richJson: getAttributeByNames(["JSON富内容", "Rich", "rich"], "")
     };
@@ -583,7 +583,7 @@ const fixedForm = computed({
   set(value) {
     setAttributeByNames(["品牌", "Бренд"], value.brand, { name: "品牌", required: true });
     setAttributeByNames(["型号", "Модель"], value.model, { name: "型号名称", required: true });
-    setAttributeByNames(["主图标签", "ключевые слова", "тег"], (value.tags || []).join(","), { name: "主图标签" });
+    setAttributeByNames(["产品标签", "主图标签", "ключевые слова", "тег"], (value.tags || []).join(","), { name: "产品标签" });
     setAttributeByNames(["简介", "Аннотация", "Описание"], value.summary, { name: "简介" });
     setAttributeByNames(["JSON富内容", "Rich", "rich"], value.richJson, { name: "JSON富内容" });
   }
@@ -1252,7 +1252,7 @@ onMounted(loadAll);
   <div class="copy-page" v-loading="loading">
     <section class="copy-header">
       <div>
-        <h1>商品上架</h1>
+        <h1>编辑上架</h1>
       </div>
       <div class="header-actions">
         <el-button type="primary" @click="loadAll">刷新</el-button>
@@ -1460,14 +1460,14 @@ onMounted(loadAll);
                     <el-button circle :icon="InfoFilled" @click="openAttributeDetail({ name: '型号名称', value: fixedForm.model, type: 'text', required: true, source: 'fixed_form' })" />
                   </div>
                 </el-form-item>
-                <el-form-item label="主图标签">
+                <el-form-item label="产品标签">
                   <div class="field-with-tools">
                     <el-select :model-value="fixedForm.tags" multiple filterable allow-create default-first-option @update:model-value="updateFixedField('tags', $event)">
                       <el-option v-for="tag in fixedForm.tags" :key="tag" :label="tag" :value="tag" />
                     </el-select>
                     <el-button circle :type="variantFieldMode.tags ? 'primary' : 'default'" @click="enableVariantField('tags')">+</el-button>
-                    <el-button circle @click="runFieldAi({ name: '主图标签' })">AI</el-button>
-                    <el-button circle :icon="InfoFilled" @click="openAttributeDetail({ name: '主图标签', value: fixedForm.tags, type: 'multiselect', required: false, source: 'fixed_form' })" />
+                    <el-button circle @click="runFieldAi({ name: '产品标签' })">AI</el-button>
+                    <el-button circle :icon="InfoFilled" @click="openAttributeDetail({ name: '产品标签', value: fixedForm.tags, type: 'multiselect', required: false, source: 'fixed_form' })" />
                   </div>
                 </el-form-item>
                 <el-form-item label="简介">
@@ -1654,7 +1654,7 @@ onMounted(loadAll);
                 <el-table-column v-if="variantFieldMode.tags" width="190">
                   <template #header>
                     <div class="variant-col-header">
-                      <span>#主图标签</span>
+                      <span>#产品标签</span>
                       <el-button link size="small" @click="applyFirstVariantField('main_tags')">同首行</el-button>
                     </div>
                   </template>

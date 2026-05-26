@@ -87,6 +87,7 @@ function createDefaultForm() {
     detail_image_urls: [],
     material: "TPU",
     color: ["黑色"],
+    vehicle_model: "",
     selling_points: "",
     purchase_url: "",
     source_platform: "1688",
@@ -882,7 +883,20 @@ function handleSelectionOzonCategorySelected(category) {
   dialog.form.ozon_category_id = category.ozon_category_id || (descriptionCategoryId && typeId ? `${descriptionCategoryId}:${typeId}` : "");
   dialog.form.ozon_description_category_id = descriptionCategoryId;
   dialog.form.ozon_type_id = typeId;
-  dialog.form.ozon_category_name = category.label || category.name_zh || category.name || category.name_ru || "";
+  dialog.form.ozon_category_name = displayOzonCategoryZh(category);
+}
+
+function displayOzonCategoryZh(category = {}) {
+  const value = category.path_zh || category.pathZh || category.name_zh || category.nameZh || category.label || category.name || "";
+  const text = String(value || "").replace(/\s*>\s*/g, " / ").trim();
+  if (text && !/[\u0400-\u04ff]/.test(text)) return text;
+  return dialog.form.ozon_category_id ? `待翻译类目 ${dialog.form.ozon_category_id}` : "";
+}
+
+function normalizeStoredOzonCategoryName(value, categoryId) {
+  const text = String(value || "").trim();
+  if (text && !/[\u0400-\u04ff]/.test(text)) return text;
+  return categoryId ? `待翻译类目 ${categoryId}` : "";
 }
 
 async function openEditDialog(row) {
@@ -899,11 +913,12 @@ async function openEditDialog(row) {
       ozon_category_id: detail.ozon_category_id || "",
       ozon_description_category_id: detail.ozon_description_category_id || "",
       ozon_type_id: detail.ozon_type_id || "",
-      ozon_category_name: detail.ozon_category_name || "",
+      ozon_category_name: normalizeStoredOzonCategoryName(detail.ozon_category_name, detail.ozon_category_id),
       image_url: detail.image_url || "",
       detail_image_urls: normalizeDetailImages(detail.detail_image_urls),
       material: detail.material || "TPU",
       color: normalizeColorTags(detail.color),
+      vehicle_model: detail.vehicle_model || "",
       selling_points: detail.selling_points || "",
       purchase_url: detail.purchase_url || "",
       source_platform: detail.source_platform || "1688",
@@ -960,6 +975,7 @@ async function submitDialog() {
       detail_image_urls: normalizeDetailImages(dialog.form.detail_image_urls),
       material: normalizeTagValue(dialog.form.material),
       color: normalizeTagValue(dialog.form.color),
+      vehicle_model: dialog.form.vehicle_model || "",
       supplier_id: dialog.form.supplier_id || null,
       owner_person_id: Number(dialog.form.owner_person_id || 0) || null,
       logistics_rule_id: Number(dialog.form.logistics_rule_id || 0) || null,
@@ -1281,7 +1297,7 @@ onMounted(loadPageData);
             <template #default="{ row }">
               <div class="table-actions">
                 <el-button link type="success" :disabled="row.selection_status === 'listed'" @click="addToInventory(row)">加入库存</el-button>
-                <el-button link type="warning" @click="goToListing(row)">去上架</el-button>
+                <el-button link type="warning" @click="goToListing(row)">编辑上架</el-button>
                 <el-button link type="primary" @click="openEditDialog(row)">编辑</el-button>
                 <el-button link type="danger" @click="handleDelete(row)">删除</el-button>
               </div>
@@ -1333,6 +1349,7 @@ onMounted(loadPageData);
                     <OzonCategorySelect
                       v-model="dialog.form.ozon_category_id"
                       :full-refresh="false"
+                      show-sku-lookup
                       placeholder="搜索并绑定本地 Ozon 类目"
                       @select="handleSelectionOzonCategorySelected"
                     />
@@ -1341,7 +1358,12 @@ onMounted(loadPageData);
                     </div>
                   </el-form-item>
                 </el-col>
-                <el-col :span="8">
+                <el-col :span="6">
+                  <el-form-item label="车型">
+                    <el-input v-model="dialog.form.vehicle_model" placeholder="例如 Belgee X50 / TENET T7" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="6">
                   <el-form-item label="材质">
                     <el-select
                       v-model="dialog.form.material"
@@ -1354,12 +1376,12 @@ onMounted(loadPageData);
                     </el-select>
                   </el-form-item>
                 </el-col>
-                <el-col :span="8">
+                <el-col :span="6">
                   <el-form-item label="数量" prop="purchase_quantity">
                     <el-input-number v-model="dialog.form.purchase_quantity" :min="1" :precision="0" :step="1" controls-position="right" @focus="selectNumericInput" />
                   </el-form-item>
                 </el-col>
-                <el-col :span="8">
+                <el-col :span="6">
                   <el-form-item label="颜色">
                     <el-select
                       v-model="dialog.form.color"

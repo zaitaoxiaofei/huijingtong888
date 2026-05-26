@@ -7,6 +7,7 @@ export function createAssetVariantEngineRoutes({ services, readJson }) {
     "POST /api/asset-variant-engine/title-preview": async (req) => services.generateAssetVariantTitlePreview(await readJson(req), req._session),
     "POST /api/asset-variant-engine/sync-ozon-categories": async (req) => services.syncAssetOzonCategories(await readJson(req), req._session),
     "POST /api/asset-variant-engine/rules": async (req) => services.saveShopVariantRule(await readJson(req), req._session),
+    "POST /api/asset-variant-engine/delete-media-group": async (req) => services.deleteAssetVariantMediaGroup(await readJson(req), req._session),
     "POST /api/asset-variant-engine/import-listing-automation": async (req) => services.importAssetVariantToListingAutomation(await readJson(req), req._session)
   };
 }

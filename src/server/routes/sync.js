@@ -4,6 +4,7 @@ export function createSyncRoutes({ services, readJson, syncExceptionWorkbenchOrd
     "POST /api/exception-workbench/sync": async (req) => syncExceptionWorkbenchOrders(req),
     "POST /api/exception-workbench/tasks/state": async (req) => services.updateExceptionTaskState(await readJson(req), req._session?.personId),
     "POST /api/sync/ozon": async (req) => services.syncDemoOrders(await readJson(req), { signal: req._abortSignal }),
+    "POST /api/sync/ozon/details": async (req) => services.syncKnownOzonPostingDetails(await readJson(req), { signal: req._abortSignal }),
     "POST /api/sync/ozon/incremental": async (req) => services.syncOzonIncrementalOrders(await readJson(req), { signal: req._abortSignal }),
     "POST /api/sync/ozon/postings": async (req) => services.syncOzonPostingsByNumber(await readJson(req), { signal: req._abortSignal }),
     "POST /api/sync/online-products": async (req) => services.syncOzonOnlineProducts(await readJson(req)),
