@@ -24,6 +24,7 @@ const SelectionView = () => import("../views/selection/SelectionView.vue");
 const ProfitDashboardView = () => import("../views/profit/ProfitDashboardView.vue");
 const ProfitAftersalesView = () => import("../views/profit/ProfitAftersalesView.vue");
 const AdvertisingDailyView = () => import("../views/advertising/AdvertisingDailyView.vue");
+const OzonActionsView = () => import("../views/marketing/OzonActionsView.vue");
 const OrdersView = () => import("../views/orders/OrdersView.vue");
 const OutboundView = () => import("../views/orders/OutboundView.vue");
 const ProcurementView = () => import("../views/procurement/ProcurementView.vue");
@@ -82,6 +83,7 @@ export const router = createRouter({
         { path: "profit/sku-ranking", name: "profit-sku-ranking", component: ProfitDashboardView, meta: { title: "SKU 排行榜", breadcrumb: ["经营分析", "利润看板", "SKU 排行榜"] } },
         { path: "profit/shop-ranking", name: "profit-shop-ranking", component: ProfitDashboardView, meta: { title: "店铺排行榜", breadcrumb: ["经营分析", "利润看板", "店铺排行榜"] } },
         { path: "advertising/daily", name: "advertising-daily", component: AdvertisingDailyView, meta: { title: "广告系统", breadcrumb: ["经营分析", "广告系统"] } },
+        { path: "ozon-actions", name: "ozon-actions", component: OzonActionsView, meta: { title: "活动管理", breadcrumb: ["商品管理", "活动管理"] } },
         { path: "orders", name: "orders", component: OrdersView, meta: { title: "订单中心", breadcrumb: ["订单中心", "订单列表"] } },
         { path: "outbound", name: "outbound", component: OutboundView, meta: { title: "出库记录", breadcrumb: ["订单中心", "出库记录"] } },
         { path: "procurement", name: "procurement", component: ProcurementView, meta: { title: "采购请求", breadcrumb: ["采购管理", "采购请求"] } },
@@ -118,4 +120,3 @@ router.beforeEach(async (to) => {
 
   return true;
 });
-

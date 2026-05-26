@@ -6,7 +6,7 @@ const OZON_REQUEST_RETRIES = 2;
 export async function fetchOzonPostings(shop, options = {}) {
   const legacySince = typeof options === "string" ? options : "";
   const params = typeof options === "string" ? { since: legacySince } : options || {};
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     const postings = demoPostings(shop, params.since || params.from);
     return { postings, fetched: postings.length, requests: 0, ranges: 1 };
   }
@@ -57,7 +57,7 @@ export async function fetchOzonPostings(shop, options = {}) {
 export async function fetchOzonPostingByNumber(shop, postingNumber, options = {}) {
   const posting = String(postingNumber || "").trim();
   if (!posting) throw new Error("Missing Ozon posting number");
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     const demoMatch = demoPostings(shop, options.since || options.from).find((item) => String(item.posting_number || "") === posting);
     return demoMatch || null;
   }
@@ -76,7 +76,7 @@ export async function fetchOzonPostingByNumber(shop, postingNumber, options = {}
 }
 
 export async function fetchOzonProducts(shop) {
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     return demoOnlineProducts(shop);
   }
 
@@ -98,7 +98,7 @@ export async function fetchOzonProducts(shop) {
 export async function fetchOzonProductsByIds(shop, productIds = []) {
   const ids = [...new Set((productIds || []).map((item) => Number(item)).filter(Boolean))];
   if (!ids.length) return [];
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     return demoOnlineProducts(shop).filter((item) => ids.includes(Number(item.ozon_product_id || 0)));
   }
 
@@ -113,7 +113,7 @@ export async function fetchOzonProductsByIds(shop, productIds = []) {
 }
 
 export async function fetchOzonProductStocks(shop, options = {}) {
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     return demoStockRows(shop);
   }
 
@@ -149,7 +149,7 @@ export async function updateOzonProductStocks(shop, stocks = [], options = {}) {
     warehouse_id: Number(item.warehouse_id || 0)
   })).filter((item) => item.offer_id || item.product_id);
   if (!payloadStocks.length) throw new Error("缺少需要更新库存的 Ozon 商品");
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     return { result: payloadStocks.map((item) => ({ ...item, updated: true })), demo: true };
   }
   return ozonRequest(shop, "/v2/products/stocks", { stocks: payloadStocks }, options);
@@ -158,14 +158,14 @@ export async function updateOzonProductStocks(shop, stocks = [], options = {}) {
 export async function archiveOzonProducts(shop, productIds = [], options = {}) {
   const product_id = [...new Set((productIds || []).map(Number).filter(Boolean))];
   if (!product_id.length) throw new Error("缺少需要归档的 Ozon 商品 ID");
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     return { result: true, product_id, demo: true };
   }
   return ozonRequest(shop, "/v1/product/archive", { product_id }, options);
 }
 
 export async function createOzonProductBySku(shop, item, options = {}) {
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     return {
       result: {
         task_id: Math.floor(Date.now() / 1000),
@@ -188,7 +188,7 @@ export async function createOzonProductBySku(shop, item, options = {}) {
 }
 
 export async function fetchOzonProductImportInfo(shop, taskId, options = {}) {
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     return {
       result: {
         task_id: Number(taskId),
@@ -208,7 +208,7 @@ export async function fetchOzonProductImportInfo(shop, taskId, options = {}) {
 export async function importOzonProducts(shop, payload = {}, options = {}) {
   const items = Array.isArray(payload.items) ? payload.items : [];
   if (!items.length) throw new Error("Ozon product/import 缺少 items");
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     return {
       result: {
         task_id: Math.floor(Date.now() / 1000),
@@ -224,7 +224,7 @@ export async function fetchOzonProductInfoAttributes(shop, options = {}) {
   const productIds = [...new Set((options.productIds || options.product_id || []).map(Number).filter(Boolean))];
   const offerIds = [...new Set((options.offerIds || options.offer_id || []).map((item) => String(item || "").trim()).filter(Boolean))];
   if (!productIds.length && !offerIds.length) return [];
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     const productId = productIds[0] || Number(String(offerIds[0] || "").replace(/\D/g, "")) || Date.now();
     return [{
       id: productId,
@@ -269,7 +269,7 @@ export async function fetchOzonCategoryAttributes(shop, options = {}) {
   const typeId = Number(options.typeId || options.type_id || 0);
   const categoryId = Number(options.categoryId || options.category_id || 0);
   if (!descriptionCategoryId && !typeId && !categoryId) return [];
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     return [
       { id: 85, name: "品牌", is_required: true, type: "String", dictionary_id: 971082, is_collection: false },
       { id: 9048, name: "型号名称", is_required: true, type: "String", dictionary_id: 0, is_collection: false },
@@ -300,7 +300,7 @@ export async function fetchOzonCategoryAttributeValues(shop, options = {}) {
   const typeId = Number(options.typeId || options.type_id || 0);
   const attributeId = Number(options.attributeId || options.attribute_id || 0);
   if (!descriptionCategoryId || !typeId || !attributeId) return [];
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     return [
       { id: 971082, dictionary_value_id: 971082, value: "无品牌" },
       { id: 1, dictionary_value_id: 1, value: "黑色" },
@@ -335,7 +335,7 @@ export async function searchOzonCategoryAttributeValues(shop, options = {}) {
   const attributeId = Number(options.attributeId || options.attribute_id || 0);
   const value = String(options.value || options.keyword || "").trim();
   if (!descriptionCategoryId || !typeId || !attributeId || !value) return [];
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     return (await fetchOzonCategoryAttributeValues(shop, options)).filter((item) => String(item.value || "").includes(value));
   }
   const data = await ozonRequest(shop, "/v1/description-category/attribute/values/search", {
@@ -350,7 +350,7 @@ export async function searchOzonCategoryAttributeValues(shop, options = {}) {
 }
 
 export async function fetchOzonDescriptionCategoryTree(shop, options = {}) {
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     throw new Error("当前店铺没有真实 Ozon API 凭证，无法同步真实类目");
   }
   const data = await ozonRequest(shop, "/v1/description-category/tree", {
@@ -379,14 +379,14 @@ export async function fetchOzonPackageLabel(shop, postingNumbers = [], options =
   const postings = [...new Set((postingNumbers || []).map((item) => String(item || "").trim()).filter(Boolean))];
   if (!postings.length) throw new Error("请选择需要打印面单的订单");
   if (postings.length > 20) throw new Error("Ozon 单次最多生成 20 个货件面单，请分批打印");
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     return demoPdf(`Demo Ozon labels\\n${postings.join("\\n")}`);
   }
   return ozonBinaryRequest(shop, "/v2/posting/fbs/package-label", { posting_number: postings }, options);
 }
 
 export async function fetchOzonFinanceTransactions(shop, options = {}) {
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     return { operations: [], fetched: 0, requests: 0 };
   }
   const from = normalizeIsoStart(options.from, 30);
@@ -428,7 +428,7 @@ export async function shipOzonPosting(shop, postingNumber, products = [], option
     }))
     .filter((item) => Number.isFinite(item.product_id) && item.product_id > 0 && item.quantity > 0);
   if (!packageProducts.length) throw new Error(`${posting} 缺少可提交备货的 Ozon 商品 ID`);
-  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+  if (!hasRealOzonCredentials(shop)) {
     return { result: true, demo: true };
   }
   return ozonRequest(shop, "/v4/posting/fbs/ship", {
@@ -583,6 +583,11 @@ function sleep(ms) {
 
 function ozonApiKey(shop = {}) {
   return String(shop.ozon_api_key || shop.api_key || shop.api_key_hint || "").trim();
+}
+
+function hasRealOzonCredentials(shop = {}) {
+  const apiKey = ozonApiKey(shop);
+  return Boolean(shop.ozon_client_id && apiKey && !apiKey.startsWith("demo"));
 }
 
 async function ozonBinaryRequest(shop, path, payload, options = {}) {

@@ -63,6 +63,7 @@ export const navigationMenus = [
     icon: Goods,
     children: [
       { key: "multi-shop-publish", label: "多店铺商品发布中台", route: "/multi-shop-publish" },
+      { key: "ozon-actions", label: "活动管理", route: "/ozon-actions" },
       { key: "online-products", label: "在线商品", route: "/online-products" }
     ]
   },

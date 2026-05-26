@@ -14,6 +14,7 @@ import { createOrderRoutes, handleOrderRestRoute } from "./server/routes/orders.
 import { createOperationsRoutes, handleOperationsRestRoute } from "./server/routes/operations.js";
 import { createProfitRoutes } from "./server/routes/profit.js";
 import { createAdvertisingRoutes } from "./server/routes/advertising.js";
+import { createOzonActionRoutes } from "./server/routes/ozonActions.js";
 import { createSyncRoutes } from "./server/routes/sync.js";
 import { createListingAutomationRoutes, handleListingAutomationRestRoute } from "./server/routes/listingAutomation.js";
 import { createMultiShopPublishRoutes, handleMultiShopPublishRestRoute } from "./server/routes/multiShopPublish.js";
@@ -57,6 +58,7 @@ const routeModules = {
   ...createOperationsRoutes({ services, readJson }),
   ...createProfitRoutes({ services, readJson }),
   ...createAdvertisingRoutes({ services, readJson }),
+  ...createOzonActionRoutes({ services, readJson }),
   ...createOrderRoutes({ services, readJson, notFound, writeHead, json }),
   ...createSyncRoutes({ services, readJson, syncExceptionWorkbenchOrders }),
   ...createListingAutomationRoutes({ services, readJson }),
@@ -106,6 +108,7 @@ const BACKGROUND_ANALYTICS_REFRESH_INITIAL_DELAY_MS = Math.max(0, Number(config.
 const BACKGROUND_ADVERTISING_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundAdvertisingSyncIntervalMinutes || 60)) * 60 * 1000;
 const BACKGROUND_ADVERTISING_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAdvertisingSyncInitialDelaySeconds || 300)) * 1000;
 const BACKGROUND_ADVERTISING_SYNC_DAYS = Math.max(1, Number(config.backgroundAdvertisingSyncDays || 14));
+const OZON_ACTION_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
 
 async function handleSiteAccess(req, res, url) {
   const nextPath = normalizeNextPath(url.searchParams.get("next") || "/");
@@ -483,9 +486,11 @@ server.listen(config.port, config.host || undefined, () => {
   setInterval(runBackgroundOrderStatusSync, BACKGROUND_ORDER_SYNC_INTERVAL_MS);
   setInterval(runBackgroundAnalyticsRefresh, BACKGROUND_ANALYTICS_REFRESH_INTERVAL_MS);
   setInterval(runBackgroundAdvertisingSync, BACKGROUND_ADVERTISING_SYNC_INTERVAL_MS);
+  setInterval(runOzonActionCleanupSweep, OZON_ACTION_CLEANUP_INTERVAL_MS);
   setTimeout(runBackgroundOrderStatusSync, BACKGROUND_ORDER_SYNC_INITIAL_DELAY_MS);
   setTimeout(runBackgroundAnalyticsRefresh, BACKGROUND_ANALYTICS_REFRESH_INITIAL_DELAY_MS);
   setTimeout(runBackgroundAdvertisingSync, BACKGROUND_ADVERTISING_SYNC_INITIAL_DELAY_MS);
+  setTimeout(runOzonActionCleanupSweep, 5000);
 });
 
 async function runBackgroundOrderStatusSync() {
@@ -528,6 +533,18 @@ async function runBackgroundAdvertisingSync() {
     console.error("background advertising sync failed", error);
   } finally {
     backgroundAdvertisingSyncRunning = false;
+  }
+}
+
+async function runOzonActionCleanupSweep() {
+  try {
+    const results = await services.runEnabledOzonActionCleanup();
+    if (!results.length) return;
+    const removed = results.reduce((sum, item) => sum + Number(item?.count || 0), 0);
+    const failed = results.filter((item) => item?.success === false).length;
+    console.log(`ozon action cleanup sweep ok: stores ${results.length}, removed ${removed}, failed ${failed}`);
+  } catch (error) {
+    console.error("ozon action cleanup sweep failed", error);
   }
 }
 

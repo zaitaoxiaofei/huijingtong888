@@ -200,6 +200,18 @@ import {
   shipOrdersMysql
 } from "./mysql-cutover.js";
 import { hashPassword } from "../auth-password.js";
+import {
+  addOzonActionProductsMysql,
+  archiveOzonSellerActionMysql,
+  getOzonActionCleanupConfigMysql,
+  listOzonActionCandidatesMysql,
+  listOzonActionProductsMysql,
+  listOzonActionsMysql,
+  removeOzonActionProductsMysql,
+  runEnabledOzonActionCleanupMysql,
+  saveOzonActionCleanupConfigMysql,
+  toggleOzonSellerActionMysql
+} from "./ozon-actions.js";
 
 function notMigrated(name) {
   return () => {
@@ -214,6 +226,8 @@ export const mysqlRuntimeServices = {
   advertisingPilotShop: advertisingPilotShopMysql,
   syncAdvertisingDailyFromOzon: syncAdvertisingDailyFromOzonMysql,
   addSelectionToInventory: addSelectionToInventoryMysql,
+  addOzonActionProducts: addOzonActionProductsMysql,
+  archiveOzonSellerAction: archiveOzonSellerActionMysql,
   assetVariantBootstrap,
   assetTailTemplates,
   createAssetTailTemplate,
@@ -263,6 +277,7 @@ export const mysqlRuntimeServices = {
   generateMultiShopVersions,
   generateAssetVariants,
   generatePreviewImages,
+  getOzonActionCleanupConfig: getOzonActionCleanupConfigMysql,
   hardDeletePerson: hardDeletePersonMysql,
   hiddenProducts: hiddenProductsMysql,
   inboundRecords: inboundRecordsMysql,
@@ -283,6 +298,9 @@ export const mysqlRuntimeServices = {
   listingOzonCategoryAttributes,
   listingPublishRecords,
   listingShopCopies,
+  listOzonActionCandidates: listOzonActionCandidatesMysql,
+  listOzonActionProducts: listOzonActionProductsMysql,
+  listOzonActions: listOzonActionsMysql,
   publishListingTemplateToOzon,
   getListingCollectedProductDetail,
   mappings: mappingsMysql,
@@ -319,6 +337,8 @@ export const mysqlRuntimeServices = {
   refreshOrderProfitDetailSnapshots: refreshOrderProfitDetailSnapshotsMysql,
   restoreProduct: restoreProductMysql,
   removeProductFromInventory: removeProductFromInventoryMysql,
+  removeOzonActionProducts: removeOzonActionProductsMysql,
+  runEnabledOzonActionCleanup: runEnabledOzonActionCleanupMysql,
   importAssetVariantToListingAutomation,
   regenerateMultiShopVersion,
   resolveGeneratedImageFile,
@@ -331,6 +351,7 @@ export const mysqlRuntimeServices = {
   syncListingOzonCategories,
   syncListingOzonCategoryAttributes,
   saveListingCollectedProductDetail,
+  saveOzonActionCleanupConfig: saveOzonActionCleanupConfigMysql,
   uploadListingMedia,
   validateListingTemplatePublish,
   saveOrderQualityRules: saveOrderQualityRulesMysql,
@@ -345,6 +366,7 @@ export const mysqlRuntimeServices = {
   suppliers: suppliersMysql,
   syncOzonFinance: syncOzonFinanceMysql,
   syncOzonOnlineProducts: syncOzonOnlineProductsMysql,
+  toggleOzonSellerAction: toggleOzonSellerActionMysql,
   updateExceptionTaskState: updateExceptionTaskStateMysql,
   updateExchangeRate: updateExchangeRateMysql,
   updateInboundRecord: updateInboundRecordMysql,
