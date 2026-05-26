@@ -26,6 +26,8 @@ const LISTING_MEDIA_TYPES = new Map([
   [".mov", "video/quicktime"],
   [".webm", "video/webm"]
 ]);
+const OZON_PUBLISH_PRICE_MULTIPLIER = 2;
+const OZON_PUBLISH_OLD_PRICE_MULTIPLIER = 2;
 
 export async function listingCategoryTemplates(session) {
   await ensureListingAutomationSchema();
@@ -255,6 +257,12 @@ export async function createListingCategoryTemplate(body, session) {
     JSON.stringify(payload.images),
     personId(session)
   ]);
+  await recordOzonCategoryUsage({
+    sourceModule: "listing_template",
+    sourceId: String(id),
+    ozonCategoryId: payload.ozon_category_id,
+    categoryName: payload.category_name
+  });
   return listingCategoryTemplate(id, session);
 }
 
@@ -313,6 +321,12 @@ export async function createListingTemplateFromCollectedProduct(body, session) {
     JSON.stringify(payload.images),
     personId(session)
   ]);
+  await recordOzonCategoryUsage({
+    sourceModule: "listing_template",
+    sourceId: String(id),
+    ozonCategoryId: payload.ozon_category_id,
+    categoryName: payload.category_name
+  });
 
   return {
     ok: true,
@@ -905,17 +919,18 @@ export async function publishListingTemplateToOzon(body = {}, session = null) {
   for (const shop of shops) {
     let recordId = null;
     try {
+      const shopPayload = await applyShopPublishDefaults(validation.payload, shop);
       recordId = await insert(`
         INSERT INTO listing_publish_records
         (draft_id, shop_id, offer_id, status, request_json, created_by_person_id, updated_at)
         VALUES (0, ?, ?, 'submitted', ?, ?, CURRENT_TIMESTAMP)
       `, [
         shop.id,
-        firstOfferId(validation.payload),
-        JSON.stringify(validation.payload),
+        firstOfferId(shopPayload),
+        JSON.stringify(shopPayload),
         personId(session)
       ]);
-      const response = await importOzonProducts(shop, validation.payload);
+      const response = await importOzonProducts(shop, shopPayload);
       const taskId = response?.result?.task_id || response?.task_id || response?.result?.taskId || "";
       let importInfo = null;
       if (taskId) {
@@ -1031,6 +1046,12 @@ export async function updateListingCategoryTemplate(id, body, session) {
     JSON.stringify(payload.source_raw),
     Number(id)
   ]);
+  await recordOzonCategoryUsage({
+    sourceModule: "listing_template",
+    sourceId: String(id),
+    ozonCategoryId: payload.ozon_category_id,
+    categoryName: payload.category_name
+  });
 
   return listingCategoryTemplate(id, session);
 }
@@ -1506,6 +1527,40 @@ export async function ensureListingAutomationSchema() {
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
     await mysqlExecute(`
+      CREATE TABLE IF NOT EXISTS ozon_category_sync_jobs (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        job_type VARCHAR(64) NOT NULL DEFAULT 'scheduled',
+        shop_id BIGINT NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'running',
+        payload_json LONGTEXT NULL,
+        result_json LONGTEXT NULL,
+        warning_json LONGTEXT NULL,
+        error_message TEXT NULL,
+        started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        finished_at TIMESTAMP NULL,
+        created_by_person_id BIGINT NULL,
+        INDEX idx_ozon_category_sync_jobs_status (job_type, status, started_at),
+        INDEX idx_ozon_category_sync_jobs_shop (shop_id, started_at)
+      ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+    `);
+    await mysqlExecute(`
+      CREATE TABLE IF NOT EXISTS ozon_category_usage (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        source_module VARCHAR(64) NOT NULL,
+        source_id VARCHAR(128) NOT NULL DEFAULT '',
+        description_category_id BIGINT NOT NULL,
+        type_id BIGINT NOT NULL,
+        category_name VARCHAR(500) NOT NULL DEFAULT '',
+        usage_count INT NOT NULL DEFAULT 1,
+        last_used_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_ozon_category_usage (source_module, source_id, description_category_id, type_id),
+        INDEX idx_ozon_category_usage_category (description_category_id, type_id, last_used_at),
+        INDEX idx_ozon_category_usage_module (source_module, last_used_at)
+      ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+    `);
+    await mysqlExecute(`
       CREATE TABLE IF NOT EXISTS listing_drafts (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
         template_id BIGINT NULL,
@@ -1938,13 +1993,13 @@ function buildOzonImportPreviewPayload(facts = {}, template = {}) {
         name: String(variant.title || variant.name || facts.title || "").trim(),
         price: String(numberFromOzonValue(variant.price || facts.price.value || 0)),
         old_price: String(numberFromOzonValue(variant.old_price || facts.price.old_price || facts.price.value || 0)),
-        currency_code: facts.price.currency_code || "RUB",
+        ...(facts.price.currency_code ? { currency_code: facts.price.currency_code } : {}),
         vat: String(facts.price.vat || "0"),
         description_category_id: Number(facts.descriptionCategoryId || 0) || undefined,
         type_id: Number(facts.typeId || 0) || undefined,
-        depth: Number(variant.length_mm || facts.dimensions.length_cm || 0),
-        width: Number(variant.width_mm || facts.dimensions.width_cm || 0),
-        height: Number(variant.height_mm || facts.dimensions.height_cm || 0),
+        depth: Number(variant.length_mm || cmToMm(facts.dimensions.length_cm) || 0),
+        width: Number(variant.width_mm || cmToMm(facts.dimensions.width_cm) || 0),
+        height: Number(variant.height_mm || cmToMm(facts.dimensions.height_cm) || 0),
         dimension_unit: "mm",
         weight: Number(variant.weight_g || facts.dimensions.weight_g || 0),
         weight_unit: "g",
@@ -1955,6 +2010,51 @@ function buildOzonImportPreviewPayload(facts = {}, template = {}) {
       };
     })
   };
+}
+
+async function applyShopPublishDefaults(payload = {}, shop = {}) {
+  const currencyCode = await resolveShopCurrencyCode(shop.id);
+  return {
+    ...payload,
+    items: normalizeArray(payload.items).map((item) => applyOzonPriceStrategy({
+      ...item,
+      currency_code: item.currency_code || currencyCode || "CNY"
+    }))
+  };
+}
+
+function applyOzonPriceStrategy(item = {}) {
+  const internalPrice = numberFromOzonValue(item.price);
+  if (!internalPrice) return item;
+  const publishPrice = roundOzonMoney(internalPrice * OZON_PUBLISH_PRICE_MULTIPLIER);
+  return {
+    ...item,
+    price: String(publishPrice),
+    old_price: String(roundOzonMoney(publishPrice * OZON_PUBLISH_OLD_PRICE_MULTIPLIER))
+  };
+}
+
+async function resolveShopCurrencyCode(shopId) {
+  const row = await mysqlQuery(`
+    SELECT currency_code
+    FROM online_products
+    WHERE shop_id = ? AND COALESCE(currency_code, '') <> ''
+    GROUP BY currency_code
+    ORDER BY COUNT(*) DESC
+    LIMIT 1
+  `, [Number(shopId)]).then((rows) => rows[0]).catch(() => null);
+  return String(row?.currency_code || "").trim().toUpperCase();
+}
+
+function cmToMm(value) {
+  const numeric = numberFromOzonValue(value);
+  return numeric ? Math.round(numeric * 10) : 0;
+}
+
+function roundOzonMoney(value) {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.round(numeric * 100) / 100;
 }
 
 function normalizeAttributeValuesForOzon(item = {}) {
@@ -2332,6 +2432,121 @@ async function updatePublishRecordAfterSubmit(recordId, { taskId = "", response 
     status || "submitted",
     Number(recordId)
   ]);
+}
+
+function normalizeOzonCategorySyncJobRow(row = {}) {
+  return {
+    ...row,
+    id: Number(row.id || 0),
+    shop_id: row.shop_id ? Number(row.shop_id) : null,
+    payload: parseJson(row.payload_json, {}),
+    result: parseJson(row.result_json, {}),
+    warnings: parseJson(row.warning_json, []),
+    ok: row.status === "success"
+  };
+}
+
+async function startOzonCategorySyncJob({ jobType = "scheduled", shopId = null, payload = {}, session = null } = {}) {
+  return insert(`
+    INSERT INTO ozon_category_sync_jobs
+    (job_type, shop_id, status, payload_json, created_by_person_id)
+    VALUES (?, ?, 'running', ?, ?)
+  `, [
+    String(jobType || "scheduled").slice(0, 64),
+    shopId ? Number(shopId) : null,
+    JSON.stringify(payload || {}),
+    personId(session)
+  ]);
+}
+
+async function finishOzonCategorySyncJob(jobId, status, result = {}, error = null) {
+  await run(`
+    UPDATE ozon_category_sync_jobs
+    SET status = ?, result_json = ?, error_message = ?, finished_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [
+    status,
+    JSON.stringify(result || {}),
+    error ? String(error.message || error).slice(0, 1000) : null,
+    Number(jobId)
+  ]);
+}
+
+async function appendOzonCategorySyncJobWarning(jobId, warning = {}) {
+  const current = await row("SELECT warning_json FROM ozon_category_sync_jobs WHERE id = ?", [Number(jobId)]);
+  const warnings = parseJson(current?.warning_json, []);
+  warnings.push(warning);
+  await run("UPDATE ozon_category_sync_jobs SET warning_json = ? WHERE id = ?", [JSON.stringify(warnings.slice(-200)), Number(jobId)]);
+}
+
+async function recordOzonCategoryUsage({ sourceModule = "unknown", sourceId = "", ozonCategoryId = "", categoryName = "" } = {}) {
+  const parsed = parseOzonCategoryKey(ozonCategoryId);
+  if (!parsed.descriptionCategoryId || !parsed.typeId) return;
+  await run(`
+    INSERT INTO ozon_category_usage
+    (source_module, source_id, description_category_id, type_id, category_name, usage_count, last_used_at)
+    VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+    ON DUPLICATE KEY UPDATE
+      category_name = VALUES(category_name),
+      usage_count = usage_count + 1,
+      last_used_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP
+  `, [
+    String(sourceModule || "unknown").slice(0, 64),
+    String(sourceId || "").slice(0, 128),
+    parsed.descriptionCategoryId,
+    parsed.typeId,
+    String(categoryName || "").slice(0, 500)
+  ]);
+}
+
+function parseOzonCategoryKey(value = "") {
+  const [descriptionCategoryId, typeId] = String(value || "").split(":").map((item) => Number(item || 0));
+  return {
+    descriptionCategoryId: Number.isFinite(descriptionCategoryId) ? descriptionCategoryId : 0,
+    typeId: Number.isFinite(typeId) ? typeId : 0
+  };
+}
+
+async function usedOzonCategoriesForSync(options = {}) {
+  const limit = Math.min(Math.max(Number(options.category_limit || options.categoryLimit || 80), 1), 500);
+  const rows = await all(`
+    SELECT description_category_id, type_id, MAX(category_name) AS category_name, MAX(last_used_at) AS last_used_at, SUM(usage_count) AS usage_count
+    FROM (
+      SELECT
+        CAST(SUBSTRING_INDEX(ozon_category_id, ':', 1) AS UNSIGNED) AS description_category_id,
+        CAST(SUBSTRING_INDEX(ozon_category_id, ':', -1) AS UNSIGNED) AS type_id,
+        category_name,
+        updated_at AS last_used_at,
+        1 AS usage_count
+      FROM listing_category_templates
+      WHERE status <> 'deleted' AND ozon_category_id LIKE '%:%'
+      UNION ALL
+      SELECT description_category_id, type_id, category_name, last_used_at, usage_count
+      FROM ozon_category_usage
+    ) used_categories
+    WHERE description_category_id > 0 AND type_id > 0
+    GROUP BY description_category_id, type_id
+    ORDER BY SUM(usage_count) DESC, MAX(last_used_at) DESC
+    LIMIT ?
+  `, [limit]);
+  if (rows.length) return rows.map((item) => ({
+    descriptionCategoryId: Number(item.description_category_id || 0),
+    typeId: Number(item.type_id || 0),
+    categoryName: item.category_name || ""
+  }));
+  const fallbackRows = await all(`
+    SELECT description_category_id, type_id, name_zh AS category_name
+    FROM ozon_category_mappings
+    WHERE status = 'active'
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `, [Math.min(limit, 20)]);
+  return fallbackRows.map((item) => ({
+    descriptionCategoryId: Number(item.description_category_id || 0),
+    typeId: Number(item.type_id || 0),
+    categoryName: item.category_name || ""
+  }));
 }
 
 function importInfoStatus(info = {}) {

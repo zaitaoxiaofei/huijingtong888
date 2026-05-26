@@ -76,6 +76,11 @@ const material = reactive({
   title: "",
   tags: "",
   description: "",
+  sourceProductId: "",
+  ozonCategoryId: "",
+  ozonDescriptionCategoryId: "",
+  ozonTypeId: "",
+  ozonCategoryName: "",
   quantity: "",
   color: "",
   material: "",
@@ -393,6 +398,11 @@ async function applySelectionProduct(product) {
   const detailImages = normalizeSourceImageList(product.detail_image_urls || product.detailImageUrls);
 
   material.title = product.name || product.product_name || material.title;
+  material.sourceProductId = String(product.id || "");
+  material.ozonCategoryId = product.ozon_category_id || "";
+  material.ozonDescriptionCategoryId = product.ozon_description_category_id || "";
+  material.ozonTypeId = product.ozon_type_id || "";
+  material.ozonCategoryName = product.ozon_category_name || "";
   material.color = displayJoin(product.color) || material.color;
   material.material = displayJoin(product.material) || material.material;
   material.quantity = product.purchase_quantity ? `${product.purchase_quantity} 件` : material.quantity;
@@ -415,7 +425,9 @@ async function applySelectionProduct(product) {
     id: product.id,
     code: product.code,
     selectionId: product.selection_id,
-    name: product.name || product.product_name || ""
+    name: product.name || product.product_name || "",
+    ozonCategoryId: product.ozon_category_id || "",
+    ozonCategoryName: product.ozon_category_name || ""
   };
 }
 
@@ -447,6 +459,11 @@ function buildGeneratePayload(shopIds = state.selectedShopIds) {
       title: material.title,
       tags: material.tags,
       description: material.description,
+      sourceProductId: material.sourceProductId,
+      ozonCategoryId: material.ozonCategoryId,
+      ozonDescriptionCategoryId: material.ozonDescriptionCategoryId,
+      ozonTypeId: material.ozonTypeId,
+      ozonCategoryName: material.ozonCategoryName,
       quantity: material.quantity,
       color: material.color,
       material: material.material,

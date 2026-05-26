@@ -98,14 +98,18 @@ setInterval(cleanExpiredSessions, 3600 * 1000);
 let backgroundOrderSyncRunning = false;
 let backgroundAnalyticsRefreshRunning = false;
 let backgroundAdvertisingSyncRunning = false;
+let backgroundOzonCategorySyncRunning = false;
+let backgroundHeavyTaskRunning = "";
+let lastBackgroundOzonCategorySyncDate = "";
 const BACKGROUND_ORDER_SYNC_INTERVAL_MS = Math.max(1, Number(config.backgroundOrderSyncIntervalMinutes || 30)) * 60 * 1000;
 const BACKGROUND_ORDER_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundOrderSyncInitialDelaySeconds || 180)) * 1000;
 const BACKGROUND_ORDER_SYNC_DAYS = Math.max(1, Number(config.backgroundOrderSyncDays || 90));
 const BACKGROUND_ANALYTICS_REFRESH_INTERVAL_MS = Math.max(1, Number(config.backgroundAnalyticsRefreshIntervalMinutes || 60)) * 60 * 1000;
-const BACKGROUND_ANALYTICS_REFRESH_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAnalyticsRefreshInitialDelaySeconds || 30)) * 1000;
+const BACKGROUND_ANALYTICS_REFRESH_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAnalyticsRefreshInitialDelaySeconds || 240)) * 1000;
 const BACKGROUND_ADVERTISING_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundAdvertisingSyncIntervalMinutes || 60)) * 60 * 1000;
-const BACKGROUND_ADVERTISING_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAdvertisingSyncInitialDelaySeconds || 300)) * 1000;
+const BACKGROUND_ADVERTISING_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAdvertisingSyncInitialDelaySeconds || 420)) * 1000;
 const BACKGROUND_ADVERTISING_SYNC_DAYS = Math.max(1, Number(config.backgroundAdvertisingSyncDays || 14));
+const BACKGROUND_OZON_CATEGORY_SYNC_CHECK_MS = Math.max(1, Number(config.backgroundOzonCategorySyncCheckMinutes || 10)) * 60 * 1000;
 
 async function handleSiteAccess(req, res, url) {
   const nextPath = normalizeNextPath(url.searchParams.get("next") || "/");
@@ -483,14 +487,25 @@ server.listen(config.port, config.host || undefined, () => {
   setInterval(runBackgroundOrderStatusSync, BACKGROUND_ORDER_SYNC_INTERVAL_MS);
   setInterval(runBackgroundAnalyticsRefresh, BACKGROUND_ANALYTICS_REFRESH_INTERVAL_MS);
   setInterval(runBackgroundAdvertisingSync, BACKGROUND_ADVERTISING_SYNC_INTERVAL_MS);
+  if (config.backgroundOzonCategorySyncEnabled) {
+    setInterval(runBackgroundOzonCategorySyncIfDue, BACKGROUND_OZON_CATEGORY_SYNC_CHECK_MS);
+  }
   setTimeout(runBackgroundOrderStatusSync, BACKGROUND_ORDER_SYNC_INITIAL_DELAY_MS);
   setTimeout(runBackgroundAnalyticsRefresh, BACKGROUND_ANALYTICS_REFRESH_INITIAL_DELAY_MS);
   setTimeout(runBackgroundAdvertisingSync, BACKGROUND_ADVERTISING_SYNC_INITIAL_DELAY_MS);
+  if (config.backgroundOzonCategorySyncEnabled) {
+    setTimeout(runBackgroundOzonCategorySyncIfDue, 10 * 60 * 1000);
+  }
 });
 
 async function runBackgroundOrderStatusSync() {
   if (backgroundOrderSyncRunning) return;
+  if (backgroundHeavyTaskRunning) {
+    console.log(`background order status sync skipped: ${backgroundHeavyTaskRunning} is running`);
+    return;
+  }
   backgroundOrderSyncRunning = true;
+  backgroundHeavyTaskRunning = "order_status_sync";
   try {
     const { window, result } = await syncRollingOrderStatusWindow();
     console.log(`background order status sync ok: ${window.from}~${window.to}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
@@ -498,12 +513,18 @@ async function runBackgroundOrderStatusSync() {
     console.error("background order status sync failed", error);
   } finally {
     backgroundOrderSyncRunning = false;
+    if (backgroundHeavyTaskRunning === "order_status_sync") backgroundHeavyTaskRunning = "";
   }
 }
 
 async function runBackgroundAnalyticsRefresh() {
   if (backgroundAnalyticsRefreshRunning) return;
+  if (backgroundHeavyTaskRunning) {
+    console.log(`background analytics refresh skipped: ${backgroundHeavyTaskRunning} is running`);
+    return;
+  }
   backgroundAnalyticsRefreshRunning = true;
+  backgroundHeavyTaskRunning = "analytics_refresh";
   try {
     const result = await services.refreshProfitAnalyticsSnapshots({});
     console.log(`background analytics refresh ok: product rows ${result.product_rows || 0}, sku rows ${result.sku_rows || 0}`);
@@ -511,12 +532,18 @@ async function runBackgroundAnalyticsRefresh() {
     console.error("background analytics refresh failed", error);
   } finally {
     backgroundAnalyticsRefreshRunning = false;
+    if (backgroundHeavyTaskRunning === "analytics_refresh") backgroundHeavyTaskRunning = "";
   }
 }
 
 async function runBackgroundAdvertisingSync() {
   if (backgroundAdvertisingSyncRunning) return;
+  if (backgroundHeavyTaskRunning) {
+    console.log(`background advertising sync skipped: ${backgroundHeavyTaskRunning} is running`);
+    return;
+  }
   backgroundAdvertisingSyncRunning = true;
+  backgroundHeavyTaskRunning = "advertising_sync";
   try {
     const window = rollingOrderSyncWindow(BACKGROUND_ADVERTISING_SYNC_DAYS);
     const result = await services.syncAdvertisingDailyFromOzon({ from: window.from, to: window.to });
@@ -528,6 +555,40 @@ async function runBackgroundAdvertisingSync() {
     console.error("background advertising sync failed", error);
   } finally {
     backgroundAdvertisingSyncRunning = false;
+    if (backgroundHeavyTaskRunning === "advertising_sync") backgroundHeavyTaskRunning = "";
+  }
+}
+
+async function runBackgroundOzonCategorySyncIfDue() {
+  if (backgroundOzonCategorySyncRunning) return;
+  if (backgroundHeavyTaskRunning) {
+    console.log(`background Ozon category sync skipped: ${backgroundHeavyTaskRunning} is running`);
+    return;
+  }
+  const now = new Date();
+  const dateKey = shanghaiDateKey(now);
+  const shanghaiTime = shanghaiHourMinute(now);
+  const targetHour = Math.min(Math.max(Number(config.backgroundOzonCategorySyncHour || 1), 0), 23);
+  const targetMinute = Math.min(Math.max(Number(config.backgroundOzonCategorySyncMinute || 10), 0), 59);
+  if (lastBackgroundOzonCategorySyncDate === dateKey) return;
+  if (shanghaiTime.hour < targetHour || (shanghaiTime.hour === targetHour && shanghaiTime.minute < targetMinute)) return;
+
+  backgroundOzonCategorySyncRunning = true;
+  backgroundHeavyTaskRunning = "ozon_category_sync";
+  try {
+    const result = await services.refreshOzonCategoryCache({
+      mode: "scheduled_nightly",
+      category_limit: config.backgroundOzonCategorySyncCategoryLimit,
+      value_limit: config.backgroundOzonCategorySyncValueLimit,
+      language: "ZH_HANS"
+    });
+    lastBackgroundOzonCategorySyncDate = dateKey;
+    console.log(`background Ozon category sync ok: categories ${result.categories || 0}, attributes ${result.attributes || 0}, values ${result.values || 0}, used categories ${result.usedCategoryCount || 0}`);
+  } catch (error) {
+    console.error("background Ozon category sync failed", error);
+  } finally {
+    backgroundOzonCategorySyncRunning = false;
+    if (backgroundHeavyTaskRunning === "ozon_category_sync") backgroundHeavyTaskRunning = "";
   }
 }
 
@@ -556,6 +617,19 @@ function rollingOrderSyncWindow(days = 90) {
 
 function formatShanghaiDate(date) {
   return shanghaiDateKey(date);
+}
+
+function shanghaiHourMinute(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(date);
+  return {
+    hour: Number(parts.find((item) => item.type === "hour")?.value || 0),
+    minute: Number(parts.find((item) => item.type === "minute")?.value || 0)
+  };
 }
 
 function isPublicListingMediaPath(parts = []) {

@@ -285,9 +285,15 @@ export function isTerminalOutcome(row = {}) {
   return classifyOrderOutcome(row) !== "active";
 }
 
-export function buildOrderOutcomeSql(alias = "o") {
-  const statusText = `LOWER(TRIM(COALESCE(${alias}.status, '') || ' ' || COALESCE(${alias}.tracking_stage, '') || ' ' || COALESCE(${alias}.logistics_status, '')))`;
-  const reasonText = `LOWER(TRIM(COALESCE(${alias}.cancel_reason, '') || ' ' || COALESCE(${alias}.cancel_type, '') || ' ' || COALESCE(${alias}.cancel_initiator, '')))`;
+export function buildOrderOutcomeSql(alias = "o", dialect = "sqlite") {
+  const concatText = (...parts) => {
+    if (String(dialect || "").toLowerCase() === "mysql") {
+      return `CONCAT_WS(' ', ${parts.map((part) => `COALESCE(${part}, '')`).join(", ")})`;
+    }
+    return parts.map((part) => `COALESCE(${part}, '')`).join(" || ' ' || ");
+  };
+  const statusText = `LOWER(TRIM(${concatText(`${alias}.status`, `${alias}.tracking_stage`, `${alias}.logistics_status`)}))`;
+  const reasonText = `LOWER(TRIM(${concatText(`${alias}.cancel_reason`, `${alias}.cancel_type`, `${alias}.cancel_initiator`)}))`;
   const delivered = `(COALESCE(${alias}.delivered_at, '') != '' OR COALESCE(${alias}.accrued_at, '') != '' OR ${sqlLikeAny(statusText, DELIVERED_STATUS_KEYWORDS)})`;
   const returnLike = `(${sqlLikeAny(statusText, RETURN_STATUS_KEYWORDS)} OR ${sqlLikeAny(reasonText, RETURN_STATUS_KEYWORDS)})`;
   const cancelLike = `(${sqlLikeAny(statusText, CANCEL_STATUS_KEYWORDS)} OR (NOT ${delivered} AND ${reasonText} != ''))`;

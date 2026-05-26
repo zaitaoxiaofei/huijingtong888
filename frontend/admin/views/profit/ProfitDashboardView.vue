@@ -11,6 +11,7 @@ import { shanghaiDateKey, shanghaiMonthStart } from "../../utils/shanghai-date";
 const route = useRoute();
 const router = useRouter();
 const loading = ref(false);
+const syncLoading = ref(false);
 const shops = ref([]);
 const sectionLoading = ref({
   summary: false,
@@ -150,10 +151,22 @@ const summaryRows = computed(() => {
       values: Object.fromEntries(summaryColumns.map((column) => [column.key, getSummary(column.key).cancelled_revenue]))
     },
     {
+      label: "取消订单",
+      formatter: formatInteger,
+      suffix: "单",
+      values: Object.fromEntries(summaryColumns.map((column) => [column.key, getSummary(column.key).cancelled_orders]))
+    },
+    {
       label: "退货金额",
       formatter: formatMoney,
       suffix: "CNY",
       values: Object.fromEntries(summaryColumns.map((column) => [column.key, getSummary(column.key).return_revenue]))
+    },
+    {
+      label: "退货订单",
+      formatter: formatInteger,
+      suffix: "单",
+      values: Object.fromEntries(summaryColumns.map((column) => [column.key, getSummary(column.key).return_orders]))
     },
     {
       label: "退货损失",
@@ -197,12 +210,19 @@ function formatDayWithWeekday(value) {
   return `${formatShortDate(text)}\n${weekday}`;
 }
 
+function sectionStateKey(section) {
+  return {
+    "daily-trend": "dailyTrend",
+    "monthly-trend": "monthlyTrend"
+  }[section] || section;
+}
+
 function setSectionLoading(section, value) {
-  sectionLoading.value = { ...sectionLoading.value, [section]: value };
+  sectionLoading.value = { ...sectionLoading.value, [sectionStateKey(section)]: value };
 }
 
 function setSectionError(section, value) {
-  sectionErrors.value = { ...sectionErrors.value, [section]: value };
+  sectionErrors.value = { ...sectionErrors.value, [sectionStateKey(section)]: value };
 }
 
 function assignSectionPayload(section, payload) {
@@ -234,13 +254,20 @@ function assignSectionPayload(section, payload) {
   }
 }
 
-function aftersalesQueryString() {
+function withRefreshParams(params, forceRefresh = false) {
+  if (!forceRefresh) return params;
+  params.set("refresh", "1");
+  params.set("_ts", `${Date.now()}`);
+  return params;
+}
+
+function aftersalesQueryString(forceRefresh = false) {
   const params = new URLSearchParams({
     from: aftersalesFilters.from || "",
     to: aftersalesFilters.to || "",
     shopId: aftersalesFilters.shopId || "all"
   });
-  return params.toString();
+  return withRefreshParams(params, forceRefresh).toString();
 }
 
 function validateAftersalesFilters() {
@@ -257,13 +284,14 @@ async function loadShops() {
   shops.value = Array.isArray(payload?.rows) ? payload.rows : Array.isArray(payload) ? payload : [];
 }
 
-async function loadDashboardSection(section, signal) {
+async function loadDashboardSection(section, signal, options = {}) {
   setSectionLoading(section, true);
   setSectionError(section, "");
   try {
+    const forceRefresh = Boolean(options.forceRefresh);
     const payload = section === "aftersales"
-      ? await apiClient.get(`/api/profit-aftersales?${aftersalesQueryString()}`, { signal })
-      : await apiClient.get(`/api/profit-dashboard?section=${encodeURIComponent(section)}`, { signal });
+      ? await apiClient.get(`/api/profit-aftersales?${aftersalesQueryString(forceRefresh)}`, { signal, noCache: forceRefresh, cache: forceRefresh ? "no-store" : undefined })
+      : await apiClient.get(`/api/profit-dashboard?${withRefreshParams(new URLSearchParams({ section }), forceRefresh).toString()}`, { signal, noCache: forceRefresh, cache: forceRefresh ? "no-store" : undefined });
     if (signal.aborted) return;
     assignSectionPayload(section, payload);
   } catch (error) {
@@ -275,14 +303,14 @@ async function loadDashboardSection(section, signal) {
   }
 }
 
-async function loadAftersalesCard() {
+async function loadAftersalesCard(forceRefresh = false) {
   if (!validateAftersalesFilters()) return;
   aftersalesAbortController?.abort();
   aftersalesAbortController = new AbortController();
-  await loadDashboardSection("aftersales", aftersalesAbortController.signal);
+  await loadDashboardSection("aftersales", aftersalesAbortController.signal, { forceRefresh });
 }
 
-async function loadDashboard() {
+async function loadDashboard(forceRefresh = false) {
   if (!validateAftersalesFilters()) return;
   aftersalesAbortController?.abort();
   dashboardAbortController?.abort();
@@ -290,10 +318,10 @@ async function loadDashboard() {
   const { signal } = dashboardAbortController;
   loading.value = true;
   const jobs = [
-    loadDashboardSection("summary", signal),
-    loadDashboardSection("daily-trend", signal),
-    loadDashboardSection("monthly-trend", signal),
-    loadDashboardSection("aftersales", signal)
+    loadDashboardSection("summary", signal, { forceRefresh }),
+    loadDashboardSection("daily-trend", signal, { forceRefresh }),
+    loadDashboardSection("monthly-trend", signal, { forceRefresh }),
+    loadDashboardSection("aftersales", signal, { forceRefresh })
   ];
   const results = await Promise.allSettled(jobs);
   if (signal.aborted) return;
@@ -304,13 +332,41 @@ async function loadDashboard() {
   loading.value = false;
 }
 
+async function refreshTodayAnalytics() {
+  const today = todayText();
+  await apiClient.post("/api/profit-snapshots/refresh", { from: today, to: today });
+}
+
+async function refreshDashboardData() {
+  if (syncLoading.value || loading.value) return;
+  syncLoading.value = true;
+  try {
+    const today = todayText();
+    const yearStart = `${today.slice(0, 4)}-01-01`;
+    const [syncResult, cancelledSyncResult] = await Promise.all([
+      apiClient.post("/api/sync/ozon", { from: today, to: today }),
+      apiClient.post("/api/sync/ozon", { from: yearStart, to: today, statuses: ["cancelled"] })
+    ]);
+    await refreshTodayAnalytics();
+    await loadDashboard(true);
+    const fetched = Number(syncResult?.fetched || 0) + Number(cancelledSyncResult?.fetched || 0);
+    const inserted = Number(syncResult?.inserted || 0) + Number(cancelledSyncResult?.inserted || 0);
+    const updated = Number(syncResult?.updated || 0) + Number(cancelledSyncResult?.updated || 0);
+    ElMessage.success(`刷新完成：拉取 ${fetched} 单，新增 ${inserted} 项，更新 ${updated} 单`);
+  } catch (error) {
+    ElMessage.error(error?.message || "刷新利润看板失败");
+  } finally {
+    syncLoading.value = false;
+  }
+}
+
 function handleViewChange(target) {
   if (target && target !== route.path) router.push(target);
 }
 
 function resetAftersalesFilters() {
   Object.assign(aftersalesFilters, createAftersalesFilters());
-  loadAftersalesCard();
+  loadAftersalesCard(true);
 }
 
 function openAftersalesPage() {
@@ -344,6 +400,14 @@ onBeforeUnmount(() => {
 <template>
   <div class="page-stack profit-dashboard-page">
     <div class="profit-view-switch-bar">
+      <el-button
+        v-if="isDashboardView"
+        type="primary"
+        :loading="loading || syncLoading"
+        @click="refreshDashboardData"
+      >
+        刷新数据
+      </el-button>
       <el-segmented
         :model-value="activeViewRoute"
         :options="viewTabs"
@@ -358,7 +422,6 @@ onBeforeUnmount(() => {
           <p>重点看利润、营业额和上月同期变化，首屏信息尽量浓缩。</p>
         </div>
         <div class="page-card-actions">
-          <el-button v-if="isDashboardView" :loading="loading" @click="loadDashboard">刷新数据</el-button>
           <el-button v-if="isDashboardView" type="warning" plain @click="openAftersalesPage">售后损失</el-button>
         </div>
       </div>
@@ -624,6 +687,7 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: flex-end;
   align-items: center;
+  gap: 8px;
   min-height: 32px;
 }
 .profit-matrix-col { order: 1; }

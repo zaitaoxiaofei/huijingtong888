@@ -9,6 +9,8 @@ export function createListingAutomationRoutes({ services, readJson }) {
     "GET /api/listing/media/assets": (req) => services.listingMediaAssets(req.query || {}, req._session),
     "GET /api/listing/ozon-categories": (req) => services.listingOzonCategories(req.query || {}, req._session),
     "POST /api/listing/ozon-categories/sync": async (req) => services.syncListingOzonCategories(await readJson(req), req._session),
+    "GET /api/listing/ozon-category-sync-jobs": (req) => services.listingOzonCategorySyncJobs(req.query || {}, req._session),
+    "POST /api/listing/ozon-category-cache/refresh": async (req) => services.refreshOzonCategoryCache(await readJson(req), req._session),
     "GET /api/listing/ozon-category-attributes": (req) => services.listingOzonCategoryAttributes(req.query || {}, req._session),
     "POST /api/listing/ozon-category-attributes/sync": async (req) => services.syncListingOzonCategoryAttributes(await readJson(req), req._session),
     "GET /api/listing/ozon-attribute-values": (req) => services.listingOzonAttributeValues(req.query || {}, req._session),

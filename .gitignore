@@ -27,6 +27,7 @@ public/vue-apps/assets/
 uploads/ai-generated/
 uploads/ai-cropped/
 uploads/temp/
+tmp/
 
 # Local environment secrets
 .env

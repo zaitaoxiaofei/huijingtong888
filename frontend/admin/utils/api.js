@@ -7,6 +7,18 @@ const cachedGetPrefixes = [
 ];
 let authRedirecting = false;
 const getCache = new Map();
+const routeScopedControllers = new Set();
+const routeAbortedSignals = new WeakSet();
+
+function abortRouteScopedRequests() {
+  for (const controller of routeScopedControllers) {
+    routeAbortedSignals.add(controller.signal);
+    controller.abort();
+  }
+  routeScopedControllers.clear();
+}
+
+window.addEventListener("admin:route-changing", abortRouteScopedRequests);
 
 function isCacheableGet(url, options = {}) {
   if (options.signal || options.noCache || options.cache === "no-store") return false;
@@ -45,6 +57,9 @@ async function request(url, options = {}) {
       headers: buildHeaders(options.headers)
     });
   } catch (error) {
+    if (error?.name === "AbortError" && routeAbortedSignals.has(options.signal)) {
+      return new Promise(() => {});
+    }
     if (error?.name === "AbortError") throw error;
     throw error;
   }
@@ -128,11 +143,11 @@ async function blobRequest(url, options = {}) {
 
 export const apiClient = {
   get(url, options = {}) {
-    if (!isCacheableGet(url, options)) return request(url, { method: "GET", ...options });
+    if (!isCacheableGet(url, options)) return routeScopedGet(url, options);
     const key = String(url);
     const cached = getCache.get(key);
     if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.data);
-    return request(url, { method: "GET", ...options }).then((data) => {
+    return routeScopedGet(url, options).then((data) => {
       getCache.set(key, { data, expiresAt: Date.now() + GET_CACHE_TTL_MS });
       return data;
     });
@@ -167,6 +182,22 @@ export const apiClient = {
     return blobRequest(url, options);
   }
 };
+
+function routeScopedGet(url, options = {}) {
+  if (options.signal || options.routeScoped === false) {
+    const { routeScoped, ...requestOptions } = options;
+    return request(url, { method: "GET", ...requestOptions });
+  }
+  const controller = new AbortController();
+  routeScopedControllers.add(controller);
+  return request(url, {
+    method: "GET",
+    ...options,
+    signal: controller.signal
+  }).finally(() => {
+    routeScopedControllers.delete(controller);
+  });
+}
 
 export function getAuthToken() {
   return localStorage.getItem(AUTH_TOKEN_KEY) || "";

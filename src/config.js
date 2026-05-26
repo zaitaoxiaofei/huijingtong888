@@ -97,5 +97,11 @@ export const config = {
   backgroundAnalyticsRefreshInitialDelaySeconds: readNumberEnv("BACKGROUND_ANALYTICS_REFRESH_INITIAL_DELAY_SECONDS", 30),
   backgroundAdvertisingSyncIntervalMinutes: readNumberEnv("BACKGROUND_ADVERTISING_SYNC_INTERVAL_MINUTES", 60),
   backgroundAdvertisingSyncInitialDelaySeconds: readNumberEnv("BACKGROUND_ADVERTISING_SYNC_INITIAL_DELAY_SECONDS", 300),
-  backgroundAdvertisingSyncDays: readNumberEnv("BACKGROUND_ADVERTISING_SYNC_DAYS", 14)
+  backgroundAdvertisingSyncDays: readNumberEnv("BACKGROUND_ADVERTISING_SYNC_DAYS", 14),
+  backgroundOzonCategorySyncEnabled: String(process.env.BACKGROUND_OZON_CATEGORY_SYNC_ENABLED || "true").toLowerCase() !== "false",
+  backgroundOzonCategorySyncHour: readNumberEnv("BACKGROUND_OZON_CATEGORY_SYNC_HOUR", 1),
+  backgroundOzonCategorySyncMinute: readNumberEnv("BACKGROUND_OZON_CATEGORY_SYNC_MINUTE", 10),
+  backgroundOzonCategorySyncCheckMinutes: readNumberEnv("BACKGROUND_OZON_CATEGORY_SYNC_CHECK_MINUTES", 10),
+  backgroundOzonCategorySyncCategoryLimit: readNumberEnv("BACKGROUND_OZON_CATEGORY_SYNC_CATEGORY_LIMIT", 120),
+  backgroundOzonCategorySyncValueLimit: readNumberEnv("BACKGROUND_OZON_CATEGORY_SYNC_VALUE_LIMIT", 200)
 };

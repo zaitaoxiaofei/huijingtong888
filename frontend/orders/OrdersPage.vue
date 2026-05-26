@@ -7,7 +7,6 @@ import OrdersTable from "./components/OrdersTable.vue";
 import OrdersToolbar from "./components/OrdersToolbar.vue";
 import PageFooterPagination from "../admin/components/PageFooterPagination.vue";
 import { apiClient } from "../admin/utils/api.js";
-import { shanghaiDateTimeText } from "../admin/utils/shanghai-date.js";
 import { useOrdersPage } from "./composables/useOrdersPage.js";
 import {
   INVENTORY_LIST_PAGE_SIZE,
@@ -16,6 +15,7 @@ import {
   STATE_META
 } from "./constants/orders-ui.js";
 import { buildProductDisplayRows, firstCsvValue, splitCsv } from "./utils/order-display.js";
+import { formatDateTime, formatLogisticsRuleLabel, formatMoney, formatPercent, formatSignedMoney, moneyValueClass } from "./utils/order-format.js";
 import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order-profit-detail.js";
 import "./orders-view.css";
 
@@ -229,34 +229,6 @@ const orderProcurementSelectedQuantity = computed(() => {
     .reduce((sum, item) => sum + Number(item.quantity || 0), 0);
 });
 
-function formatDateTime(value) {
-  return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
-}
-
-function formatMoney(value) {
-  const amount = Number(value || 0);
-  return Number.isFinite(amount) ? amount.toFixed(2) : "0.00";
-}
-
-function formatSignedMoney(value) {
-  const amount = Number(value || 0);
-  if (!Number.isFinite(amount)) return "0.00";
-  if (Math.abs(amount) < 0.005) return "0.00";
-  return `${amount > 0 ? "+" : ""}${amount.toFixed(2)}`;
-}
-
-function formatPercent(value) {
-  const amount = Number(value || 0);
-  return Number.isFinite(amount) ? `${amount.toFixed(2)}%` : "0.00%";
-}
-
-function moneyValueClass(value) {
-  const amount = Number(value || 0);
-  if (amount < -0.005) return "is-negative";
-  if (amount > 0.005) return "is-positive";
-  return "";
-}
-
 function inventoryProductLabel(row) {
   if (!row) return "";
   return row.name || row.inventory_id || row.code || `#${row.id}`;
@@ -276,11 +248,6 @@ function inventoryProductOwner(row) {
 
 function supplierName(id) {
   return inventoryOptions.suppliers.find((supplier) => Number(supplier.id) === Number(id))?.name || "";
-}
-
-function formatLogisticsRuleLabel(rule) {
-  if (!rule) return "-";
-  return `${rule.name} (${Number(rule.min_weight_g || 0)}-${Number(rule.max_weight_g || 0)}g)`;
 }
 
 function defaultLogisticsRule() {

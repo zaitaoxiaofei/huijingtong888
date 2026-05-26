@@ -1,5 +1,5 @@
 import { createApp } from "vue";
-import ElementPlus from "element-plus";
+import { ElLoading } from "element-plus";
 import "element-plus/dist/index.css";
 import OrdersPage from "./OrdersPage.vue";
 
@@ -10,7 +10,7 @@ function ensureMounted(selector) {
   if (!target) return null;
   if (!apps.has(selector)) {
     const app = createApp(OrdersPage);
-    app.use(ElementPlus);
+    app.use(ElLoading);
     const root = app.mount(target);
     apps.set(selector, { app, root });
   }

@@ -445,6 +445,16 @@ function profitDetailValue(value) {
   return value == null || value === "" ? "待接入" : moneyCny(value);
 }
 
+function adNetProfitFormulaText(row = {}) {
+  if (row.ad_net_profit_cny == null) return "广告净利润：待接入利润模型，暂时无法计算。";
+  return `广告净利润 = 广告订单预估利润 ${moneyCny(row.ad_model_profit_cny || 0)} - 广告花费折算 ${moneyCny(adSpendCny(row))} = ${moneyCny(row.ad_net_profit_cny)}`;
+}
+
+function adNetProfitRateFormulaText(row = {}) {
+  if (row.ad_net_profit_rate == null) return "广告净利润率：没有广告销售额时不计算。";
+  return `广告净利润率 = 广告净利润 ${moneyCny(row.ad_net_profit_cny || 0)} / 广告销售额 ${moneyCny(row.ad_revenue_cny || 0)} = ${percent(row.ad_net_profit_rate)}`;
+}
+
 function profitModelStatusText(row = {}) {
   const status = row.profit_model_status || "";
   if (status === "estimated_without_ad_cost") return "已接入利润预估模型";
@@ -775,8 +785,16 @@ onMounted(bootstrap);
                 <strong>{{ compactPercentOrPending(row.gross_margin_rate) }}</strong>
                 <el-button link type="primary" size="small" @click.stop="openProfitDetails(row)">查看详情</el-button>
               </div>
-              <div><span>广告净利润率</span><strong>{{ compactPercentOrPending(row.ad_net_profit_rate) }}</strong></div>
-              <div><span>广告净利润</span><strong>{{ row.ad_net_profit_cny == null ? "待接入" : `CNY ${rub(row.ad_net_profit_cny)}` }}</strong></div>
+              <div class="profit-card">
+                <span>广告净利润率</span>
+                <strong>{{ compactPercentOrPending(row.ad_net_profit_rate) }}</strong>
+                <el-button link type="primary" size="small" @click.stop="openProfitDetails(row)">查看详情</el-button>
+              </div>
+              <div class="profit-card">
+                <span>广告净利润</span>
+                <strong>{{ row.ad_net_profit_cny == null ? "待接入" : `CNY ${rub(row.ad_net_profit_cny)}` }}</strong>
+                <el-button link type="primary" size="small" @click.stop="openProfitDetails(row)">查看详情</el-button>
+              </div>
             </div>
           </template>
         </el-table-column>
@@ -1142,7 +1160,7 @@ onMounted(bootstrap);
       </div>
     </el-drawer>
 
-    <el-dialog v-model="profitDetailVisible" title="毛利率详情" width="620px">
+    <el-dialog v-model="profitDetailVisible" title="利润计算详情" width="620px">
       <div v-if="currentRow" class="profit-detail-dialog">
         <section class="drawer-product">
           <div class="thumb compact">
@@ -1177,6 +1195,10 @@ onMounted(bootstrap);
           <div><span>广告花费折算</span><strong>{{ moneyCny(adSpendCny(currentRow)) }}</strong></div>
           <div><span>广告净利润</span><strong>{{ currentRow.ad_net_profit_cny == null ? "待接入" : moneyCny(currentRow.ad_net_profit_cny) }}</strong></div>
           <div><span>广告净利润率</span><strong>{{ compactPercentOrPending(currentRow.ad_net_profit_rate) }}</strong></div>
+        </section>
+        <section class="profit-detail-formulas">
+          <p>{{ adNetProfitFormulaText(currentRow) }}</p>
+          <p>{{ adNetProfitRateFormulaText(currentRow) }}</p>
         </section>
         <p class="profit-formula">口径：毛利率复用库存产品利润预估模型，广告费率按 0 计算，包含采购、国内运费、国际运费、佣金、支付/提现费用、退货损耗和包装费。广告净利润 = 当前筛选时间内广告订单预估利润 - 当前筛选时间内广告花费；广告净利润率 = 广告净利润 / 当前筛选时间内广告销售额。没有广告销售额时净利润率不计算。</p>
       </div>
@@ -1654,6 +1676,21 @@ onMounted(bootstrap);
   display: block;
   margin-top: 4px;
   color: #111827;
+}
+
+.profit-detail-formulas {
+  display: grid;
+  gap: 8px;
+}
+
+.profit-detail-formulas p {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #eef6ff;
+  color: #1e3a8a;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .profit-formula {

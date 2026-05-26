@@ -6,6 +6,7 @@ import { apiClient } from "../../utils/api";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import OzonCategorySelect from "../../components/listing/OzonCategorySelect.vue";
 
 const loading = ref(false);
 const dialogVisible = ref(false);
@@ -78,6 +79,10 @@ function createDefaultForm() {
     id: null,
     updated_at: "",
     name: "",
+    ozon_category_id: "",
+    ozon_description_category_id: "",
+    ozon_type_id: "",
+    ozon_category_name: "",
     image_url: "",
     detail_image_urls: [],
     material: "TPU",
@@ -118,6 +123,13 @@ const summary = computed(() => state.summary);
 const dialogTitle = computed(() => (dialog.mode === "create" ? "新增选品" : "编辑选品"));
 const importPreviewRows = computed(() => importState.rows.slice(0, 12));
 const importCommitRows = computed(() => importState.rows.filter((row) => row.ok).map((row) => row.data));
+
+watch(() => dialog.form.ozon_category_id, (value) => {
+  if (value) return;
+  dialog.form.ozon_description_category_id = "";
+  dialog.form.ozon_type_id = "";
+  dialog.form.ozon_category_name = "";
+});
 const profitDetailRows = computed(() => buildProfitDetailRows(
   profitDialog.row,
   profitDialog.quote,
@@ -863,6 +875,16 @@ function openCreateDialog() {
   dialogVisible.value = true;
 }
 
+function handleSelectionOzonCategorySelected(category) {
+  if (!category) return;
+  const descriptionCategoryId = category.description_category_id || category.descriptionCategoryId || "";
+  const typeId = category.type_id || category.typeId || "";
+  dialog.form.ozon_category_id = category.ozon_category_id || (descriptionCategoryId && typeId ? `${descriptionCategoryId}:${typeId}` : "");
+  dialog.form.ozon_description_category_id = descriptionCategoryId;
+  dialog.form.ozon_type_id = typeId;
+  dialog.form.ozon_category_name = category.label || category.name_zh || category.name || category.name_ru || "";
+}
+
 async function openEditDialog(row) {
   loading.value = true;
   try {
@@ -874,6 +896,10 @@ async function openEditDialog(row) {
       id: detail.id,
       updated_at: detail.updated_at || "",
       name: detail.name || "",
+      ozon_category_id: detail.ozon_category_id || "",
+      ozon_description_category_id: detail.ozon_description_category_id || "",
+      ozon_type_id: detail.ozon_type_id || "",
+      ozon_category_name: detail.ozon_category_name || "",
       image_url: detail.image_url || "",
       detail_image_urls: normalizeDetailImages(detail.detail_image_urls),
       material: detail.material || "TPU",
@@ -927,6 +953,10 @@ async function submitDialog() {
   try {
     const payload = {
       ...dialog.form,
+      ozon_category_id: dialog.form.ozon_category_id || "",
+      ozon_description_category_id: Number(dialog.form.ozon_description_category_id || 0) || null,
+      ozon_type_id: Number(dialog.form.ozon_type_id || 0) || null,
+      ozon_category_name: dialog.form.ozon_category_name || "",
       detail_image_urls: normalizeDetailImages(dialog.form.detail_image_urls),
       material: normalizeTagValue(dialog.form.material),
       color: normalizeTagValue(dialog.form.color),
@@ -1155,6 +1185,9 @@ onMounted(loadPageData);
                   <strong class="product-name">{{ row.name || "-" }}</strong>
                   <span class="muted-text">库存编码：{{ row.inventory_id || row.code || "-" }}</span>
                   <span class="muted-text">选品 ID：{{ row.selection_id || "-" }}</span>
+                  <span v-if="row.ozon_category_name || row.ozon_category_id" class="muted-text">
+                    Ozon 类目：{{ row.ozon_category_name || row.ozon_category_id }}
+                  </span>
                 </div>
               </div>
             </template>
@@ -1293,6 +1326,19 @@ onMounted(loadPageData);
                     <el-select v-model="dialog.form.owner_person_id" placeholder="请选择负责人">
                       <el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="person.id" />
                     </el-select>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="24">
+                  <el-form-item label="Ozon 类目">
+                    <OzonCategorySelect
+                      v-model="dialog.form.ozon_category_id"
+                      :full-refresh="false"
+                      placeholder="搜索并绑定本地 Ozon 类目"
+                      @select="handleSelectionOzonCategorySelected"
+                    />
+                    <div v-if="dialog.form.ozon_category_name" class="field-hint">
+                      已绑定：{{ dialog.form.ozon_category_name }}
+                    </div>
                   </el-form-item>
                 </el-col>
                 <el-col :span="8">
@@ -1758,6 +1804,13 @@ onMounted(loadPageData);
 }
 
 .muted-text {
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.field-hint {
+  margin-top: 6px;
   color: var(--erp-text-secondary);
   font-size: 12px;
   line-height: 1.5;

@@ -364,6 +364,9 @@ export async function syncDemoOrders(deps, body = {}, options = {}) {
   const rawTo = body.to || body.date_to || body.dateTo;
   const rawFromDateTime = body.from_datetime || body.fromDateTime || "";
   const rawToDateTime = body.to_datetime || body.toDateTime || "";
+  const statuses = Array.isArray(body.statuses)
+    ? body.statuses.map((item) => String(item || "").trim()).filter(Boolean)
+    : String(body.status || "").split(",").map((item) => item.trim()).filter(Boolean);
   const from = deps.normalizeSyncDate(rawFromDateTime || rawFrom);
   const to = deps.normalizeSyncDate(rawToDateTime || rawTo);
   const fetchFrom = normalizeSyncDateTime(rawFromDateTime) || from;
@@ -379,7 +382,7 @@ export async function syncDemoOrders(deps, body = {}, options = {}) {
   for (const shop of activeShops) {
     try {
       throwIfAborted(options.signal);
-      const result = await deps.fetchOzonPostings(shop, { from: fetchFrom, to: fetchTo, chunkDays: 14, signal: options.signal });
+      const result = await deps.fetchOzonPostings(shop, { from: fetchFrom, to: fetchTo, statuses, chunkDays: 14, signal: options.signal });
       throwIfAborted(options.signal);
       const postings = Array.isArray(result) ? result : result.postings || [];
       const shopStats = {

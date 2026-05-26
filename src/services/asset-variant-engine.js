@@ -228,8 +228,10 @@ export async function generateAssetVariants(body = {}, session = null) {
     const insertResult = await mysqlExecute(`
       INSERT INTO asset_variants
       (batch_id, shop_id, source_title, variant_title, title_style, tags_json, description_text, images_json,
+       source_product_id, ozon_category_id, ozon_description_category_id, ozon_type_id, ozon_category_name,
+       length_cm, width_cm, height_cm, weight_g, color, material_text, quantity_text,
        output_dir, status, created_by_person_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'generated', ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generated', ?)
     `, [
       batchId,
       shop.id,
@@ -239,6 +241,18 @@ export async function generateAssetVariants(body = {}, session = null) {
       JSON.stringify(material.tags),
       material.description,
       JSON.stringify(generatedImages),
+      Number(material.sourceProductId || material.source_product_id || 0) || null,
+      material.ozonCategoryId || material.ozon_category_id || "",
+      Number(material.ozonDescriptionCategoryId || material.ozon_description_category_id || 0) || 0,
+      Number(material.ozonTypeId || material.ozon_type_id || 0) || 0,
+      material.ozonCategoryName || material.ozon_category_name || "",
+      Number(material.lengthCm || 0),
+      Number(material.widthCm || 0),
+      Number(material.heightCm || 0),
+      Number(material.weightG || 0),
+      material.color || "",
+      material.material || "",
+      material.quantity || "",
       outputDir,
       personId(session)
     ]);
@@ -530,6 +544,18 @@ async function ensureAssetVariantSchema() {
       title_style VARCHAR(32) NOT NULL DEFAULT 'functional',
       tags_json LONGTEXT NULL,
       description_text LONGTEXT NULL,
+      source_product_id BIGINT NULL,
+      ozon_category_id VARCHAR(128) NOT NULL DEFAULT '',
+      ozon_description_category_id BIGINT NOT NULL DEFAULT 0,
+      ozon_type_id BIGINT NOT NULL DEFAULT 0,
+      ozon_category_name VARCHAR(500) NOT NULL DEFAULT '',
+      length_cm DECIMAL(10,2) NOT NULL DEFAULT 0,
+      width_cm DECIMAL(10,2) NOT NULL DEFAULT 0,
+      height_cm DECIMAL(10,2) NOT NULL DEFAULT 0,
+      weight_g DECIMAL(10,2) NOT NULL DEFAULT 0,
+      color VARCHAR(128) NOT NULL DEFAULT '',
+      material_text VARCHAR(128) NOT NULL DEFAULT '',
+      quantity_text VARCHAR(64) NOT NULL DEFAULT '',
       images_json LONGTEXT NULL,
       output_dir TEXT NULL,
       status VARCHAR(32) NOT NULL DEFAULT 'draft',
@@ -541,6 +567,18 @@ async function ensureAssetVariantSchema() {
       INDEX idx_asset_variants_shop (shop_id, created_at)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
+  await ensureMysqlColumn("asset_variants", "source_product_id", "BIGINT NULL");
+  await ensureMysqlColumn("asset_variants", "ozon_category_id", "VARCHAR(128) NOT NULL DEFAULT ''");
+  await ensureMysqlColumn("asset_variants", "ozon_description_category_id", "BIGINT NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "ozon_type_id", "BIGINT NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "ozon_category_name", "VARCHAR(500) NOT NULL DEFAULT ''");
+  await ensureMysqlColumn("asset_variants", "length_cm", "DECIMAL(10,2) NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "width_cm", "DECIMAL(10,2) NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "height_cm", "DECIMAL(10,2) NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "weight_g", "DECIMAL(10,2) NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "color", "VARCHAR(128) NOT NULL DEFAULT ''");
+  await ensureMysqlColumn("asset_variants", "material_text", "VARCHAR(128) NOT NULL DEFAULT ''");
+  await ensureMysqlColumn("asset_variants", "quantity_text", "VARCHAR(64) NOT NULL DEFAULT ''");
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS generated_titles (
       id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -870,18 +908,25 @@ function watermarkRect(baseWidth, baseHeight, width, height, position, margin, x
 }
 
 async function ensureAssetVariantListingTemplate(connection, variant, session) {
-  const name = "素材裂变导入模板";
+  const ozonCategoryId = cleanText(variant.ozon_category_id || "", 128) || "asset-variant";
+  const ozonCategoryName = cleanText(variant.ozon_category_name || "", 500) || "素材裂变";
+  const descriptionCategoryId = Number(variant.ozon_description_category_id || 0) || 0;
+  const typeId = Number(variant.ozon_type_id || 0) || 0;
+  const name = ozonCategoryId === "asset-variant" ? "素材裂变导入模板" : `素材裂变导入模板-${ozonCategoryName || ozonCategoryId}`;
   const [rows] = await connection.execute(`
     SELECT id
     FROM listing_category_templates
-    WHERE source_type = 'asset_variant_engine' AND template_name = ? AND status <> 'deleted'
+    WHERE source_type = 'asset_variant_engine' AND template_name = ? AND ozon_category_id = ? AND status <> 'deleted'
     ORDER BY id ASC
     LIMIT 1
-  `, [name]);
+  `, [name, ozonCategoryId]);
   if (rows[0]?.id) return Number(rows[0].id);
   const editablePayload = {
     title: variant.variant_title || variant.source_title || "",
     description: variant.description_text || "",
+    ozon_category_id: ozonCategoryId,
+    description_category_id: descriptionCategoryId || "",
+    type_id: typeId || "",
     images: [],
     attributes: [
       { name: "素材来源", value: "asset-variant-engine", required: false },
@@ -893,10 +938,19 @@ async function ensureAssetVariantListingTemplate(connection, variant, session) {
     (ozon_category_id, category_name, template_name, required_attributes_json, ai_rules_json, title_prompt,
      description_prompt, image_rules_json, source_type, source_raw_json, editable_payload_json, title, description,
      attributes_json, images_json, created_by_person_id, updated_at)
-    VALUES ('asset-variant', '素材裂变', ?, '[]', '{}', '', '', '{}', 'asset_variant_engine', ?, ?, ?, ?, ?, '[]', ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, '[]', '{}', '', '', '{}', 'asset_variant_engine', ?, ?, ?, ?, ?, '[]', ?, CURRENT_TIMESTAMP)
   `, [
+    ozonCategoryId,
+    ozonCategoryName,
     name,
-    JSON.stringify({ asset_variant_id: variant.id, batch_id: variant.batch_id }),
+    JSON.stringify({
+      asset_variant_id: variant.id,
+      batch_id: variant.batch_id,
+      ozon_category_id: ozonCategoryId,
+      description_category_id: descriptionCategoryId || "",
+      type_id: typeId || "",
+      category_name: ozonCategoryName
+    }),
     JSON.stringify(editablePayload),
     editablePayload.title,
     editablePayload.description,
@@ -913,6 +967,10 @@ async function insertListingDraft(connection, templateId, variant, images, sessi
     batch_id: variant.batch_id,
     title_style: variant.title_style,
     tags: parseJson(variant.tags_json, []),
+    ozon_category_id: variant.ozon_category_id || "",
+    description_category_id: Number(variant.ozon_description_category_id || 0) || "",
+    type_id: Number(variant.ozon_type_id || 0) || "",
+    category_name: variant.ozon_category_name || "",
     shop_id: Number(variant.shop_id),
     shop_name: variant.shop_name || ""
   };
@@ -921,12 +979,19 @@ async function insertListingDraft(connection, templateId, variant, images, sessi
     (template_id, product_name, internal_code, source_urls_json, source_images_json, cost_price, sale_price,
      length_cm, width_cm, height_cm, weight_g, color, spec, quantity, manual_facts_json, ai_payload_json,
      created_by_person_id, updated_at)
-    VALUES (?, ?, ?, '[]', ?, 0, 0, 0, 0, 0, 0, '', '', 0, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, '[]', ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `, [
     templateId,
     variant.variant_title || variant.source_title || `素材裂变 ${variant.id}`,
     `AV-${variant.id}`,
     JSON.stringify(images),
+    Number(variant.length_cm || 0),
+    Number(variant.width_cm || 0),
+    Number(variant.height_cm || 0),
+    Number(variant.weight_g || 0),
+    variant.color || "",
+    variant.material_text || "",
+    Number(String(variant.quantity_text || "").match(/\d+/)?.[0] || 1),
     JSON.stringify(manualFacts),
     JSON.stringify({ title: variant.variant_title, description: variant.description_text }),
     personId(session)
@@ -959,6 +1024,11 @@ function normalizeMaterialPayload(raw = {}) {
     title: cleanText(raw.title, 500),
     tags: normalizeTags(raw.tags),
     description: String(raw.description || "").trim(),
+    sourceProductId: Number(raw.sourceProductId || raw.source_product_id || 0) || null,
+    ozonCategoryId: cleanText(raw.ozonCategoryId || raw.ozon_category_id || "", 128),
+    ozonDescriptionCategoryId: Number(raw.ozonDescriptionCategoryId || raw.ozon_description_category_id || 0) || 0,
+    ozonTypeId: Number(raw.ozonTypeId || raw.ozon_type_id || 0) || 0,
+    ozonCategoryName: cleanText(raw.ozonCategoryName || raw.ozon_category_name || "", 500),
     quantity: cleanText(raw.quantity || raw.quantityText || raw.quantity_text || "", 64),
     color: cleanText(raw.color || "", 128),
     material: cleanText(raw.material || raw.materialText || raw.material_text || "", 128),
@@ -1245,6 +1315,12 @@ function buildProductInfo({ shop, title, titleZh, material, images, rule, tailTe
   return {
     shop: { id: shop.id, name: shop.name },
     category: rule?.tailCategory || "",
+    ozonCategory: {
+      id: material.ozonCategoryId || "",
+      descriptionCategoryId: material.ozonDescriptionCategoryId || 0,
+      typeId: material.ozonTypeId || 0,
+      name: material.ozonCategoryName || ""
+    },
     vehicleModel: rule?.vehicleModel || "",
     title,
     titleRu: title,
@@ -1283,6 +1359,7 @@ function buildProductInfoWorkbook(productInfo) {
     ["字段", "值"],
     ["店铺", productInfo.shop.name],
     ["类目", productInfo.category],
+    ["Ozon类目", productInfo.ozonCategory?.name || productInfo.ozonCategory?.id || ""],
     ["车型", productInfo.vehicleModel],
     ["俄语标题", productInfo.titleRu || productInfo.title],
     ["中文标题释义", productInfo.titleZh || ""],
@@ -1309,6 +1386,12 @@ function buildListingJson({ shop, title, titleZh, material, images, rule, tailTe
       name: shop.name
     },
     category: rule?.tailCategory || "",
+    ozonCategory: {
+      id: material.ozonCategoryId || "",
+      descriptionCategoryId: material.ozonDescriptionCategoryId || 0,
+      typeId: material.ozonTypeId || 0,
+      name: material.ozonCategoryName || ""
+    },
     vehicleModel: rule?.vehicleModel || "",
     title,
     titleRu: title,

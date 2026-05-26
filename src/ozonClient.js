@@ -15,38 +15,43 @@ export async function fetchOzonPostings(shop, options = {}) {
   const to = normalizeIsoEnd(params.to, new Date());
   const limit = Math.min(Math.max(Number(params.limit || 1000), 1), 1000);
   const chunkDays = Math.min(Math.max(Number(params.chunkDays || 31), 1), 366);
+  const statuses = normalizeStatusList(params.statuses || params.status);
   const postingsByNumber = new Map();
   let requests = 0;
   let ranges = 0;
 
-  for (const [rangeSince, rangeTo] of splitDateRange(since, to, chunkDays)) {
-    throwIfAborted(params.signal);
-    ranges += 1;
-    let offset = 0;
-    while (true) {
+  for (const status of statuses.length ? statuses : [""]) {
+    for (const [rangeSince, rangeTo] of splitDateRange(since, to, chunkDays)) {
       throwIfAborted(params.signal);
-      const data = await ozonRequest(shop, "/v3/posting/fbs/list", {
-        dir: "DESC",
-        filter: { since: rangeSince, to: rangeTo },
-        limit,
-        offset,
-        with: {
-          analytics_data: true,
-          barcodes: true,
-          financial_data: true,
-          translit: true
+      ranges += 1;
+      let offset = 0;
+      while (true) {
+        throwIfAborted(params.signal);
+        const filter = { since: rangeSince, to: rangeTo };
+        if (status) filter.status = status;
+        const data = await ozonRequest(shop, "/v3/posting/fbs/list", {
+          dir: "DESC",
+          filter,
+          limit,
+          offset,
+          with: {
+            analytics_data: true,
+            barcodes: true,
+            financial_data: true,
+            translit: true
+          }
+        }, { signal: params.signal });
+        requests += 1;
+        const result = data.result || {};
+        const items = result.postings || [];
+        for (const item of items) {
+          const normalized = normalizeOzonPosting(item);
+          if (normalized.posting_number) postingsByNumber.set(normalized.posting_number, normalized);
         }
-      }, { signal: params.signal });
-      requests += 1;
-      const result = data.result || {};
-      const items = result.postings || [];
-      for (const item of items) {
-        const normalized = normalizeOzonPosting(item);
-        if (normalized.posting_number) postingsByNumber.set(normalized.posting_number, normalized);
+        if (!result.has_next || items.length < limit) break;
+        if (!items.length) break;
+        offset += limit;
       }
-      if (!result.has_next || items.length < limit) break;
-      if (!items.length) break;
-      offset += limit;
     }
   }
 
@@ -876,6 +881,11 @@ function normalizeIsoEnd(value, fallbackDate) {
     if (!Number.isNaN(date.getTime())) return date.toISOString();
   }
   return fallbackDate.toISOString();
+}
+
+function normalizeStatusList(value) {
+  const list = Array.isArray(value) ? value : String(value || "").split(",");
+  return [...new Set(list.map((item) => String(item || "").trim()).filter(Boolean))];
 }
 
 function splitDateRange(sinceIso, toIso, chunkDays) {

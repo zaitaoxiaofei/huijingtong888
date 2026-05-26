@@ -7,6 +7,7 @@ import { apiClient } from "../../utils/api";
 const props = defineProps({
   modelValue: { type: String, default: "" },
   shopId: { type: [String, Number], default: "" },
+  fullRefresh: { type: Boolean, default: true },
   placeholder: { type: String, default: "搜索 Ozon 真实类目 / 中文名 / 俄文名 / ID" }
 });
 
@@ -46,13 +47,21 @@ async function remoteSearch(query) {
 async function syncCategories() {
   syncing.value = true;
   try {
-    const result = await apiClient.post("/api/listing/ozon-categories/sync", {
-      shop_id: props.shopId || undefined,
-      language: "ZH_HANS"
-    });
+    const result = props.fullRefresh
+      ? await apiClient.post("/api/listing/ozon-category-cache/refresh", {
+        shop_id: props.shopId || undefined,
+        mode: "manual_ui",
+        language: "ZH_HANS"
+      })
+      : await apiClient.post("/api/listing/ozon-categories/sync", {
+        shop_id: props.shopId || undefined,
+        language: "ZH_HANS"
+      });
     await loadCategories(keyword.value);
     emit("sync", result);
-    ElMessage.success(`已同步 ${result.saved || 0} 个 Ozon 类目`);
+    ElMessage.success(props.fullRefresh
+      ? `类目缓存已刷新：类目 ${result.categories || 0}，属性 ${result.attributes || 0}`
+      : `已同步 ${result.saved || 0} 个 Ozon 类目`);
   } finally {
     syncing.value = false;
   }
@@ -93,7 +102,7 @@ function onChange(value) {
         </div>
       </el-option>
     </el-select>
-    <el-button :icon="Refresh" :loading="syncing" @click="syncCategories">同步类目</el-button>
+    <el-button :icon="Refresh" :loading="syncing" @click="syncCategories">{{ fullRefresh ? "刷新缓存" : "同步类目" }}</el-button>
   </div>
 </template>
 

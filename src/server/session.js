@@ -9,7 +9,7 @@ import {
   findPersonForLoginMysql,
   getSessionMysql,
   updatePersonPasswordMysql
-} from "../services/mysql-cutover.js";
+} from "../services/mysql-auth-session.js";
 import { clearRateLimit, consumeRateLimit, getClientIp } from "./access.js";
 
 const SESSION_TTL_HOURS = Math.max(1, Number(config.appSessionTtlHours || 72));
