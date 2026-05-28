@@ -25,7 +25,7 @@ const state = reactive({
     status: "all",
     query: "",
     page: 1,
-    pageSize: 30
+    pageSize: 20
   }
 });
 
@@ -168,7 +168,7 @@ function handleReset() {
   state.filters.status = "all";
   state.filters.query = "";
   state.filters.page = 1;
-  state.filters.pageSize = 30;
+  state.filters.pageSize = 20;
   loadOutboundRecords();
 }
 
@@ -438,7 +438,6 @@ onMounted(loadPageData);
           :page="state.filters.page"
           :page-size="state.filters.pageSize"
           :total-pages="totalPages"
-          :page-sizes="[30, 50, 100]"
           @update:page="handlePageChange"
           @update:pageSize="handlePageSizeChange"
         />

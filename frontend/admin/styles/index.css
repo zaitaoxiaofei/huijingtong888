@@ -429,6 +429,42 @@ body {
   min-height: 100%;
 }
 
+.erp-paged-page {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.erp-paged-card {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.erp-paged-card > .el-card__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
+.erp-table-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.erp-table-scroll > .erp-data-table,
+.erp-table-scroll > .el-table {
+  height: 100%;
+}
+
 .page-hero {
   display: flex;
   align-items: flex-start;
@@ -930,7 +966,20 @@ body {
 }
 
 .erp-page-size__select {
-  width: 108px;
+  width: 96px;
+  flex: 0 0 96px;
+}
+
+.erp-page-size__select .el-select__wrapper {
+  min-width: 96px;
+}
+
+.erp-page-status {
+  min-width: 58px;
+  color: var(--erp-text-secondary);
+  font-size: 13px;
+  white-space: nowrap;
+  text-align: center;
 }
 
 .erp-footer-pagination .el-pagination {
@@ -1733,6 +1782,22 @@ body {
   color: var(--erp-text-secondary);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.inventory-product-link {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.45;
+  text-decoration: none;
+}
+
+.inventory-product-link:hover {
+  text-decoration: underline;
 }
 
 .danger-text {

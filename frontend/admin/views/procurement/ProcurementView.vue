@@ -75,11 +75,19 @@ function dateText(value) {
 function isRequestCompleted(row) {
   const status = String(row?.status || "");
   const orderStatus = String(row?.purchase_order_status || "");
-  return ["purchased", "done"].includes(status) || ["purchased", "partial_inbound", "inbound_done"].includes(orderStatus);
+  return status === "done" || orderStatus === "inbound_done";
+}
+
+function isRequestPurchased(row) {
+  const status = String(row?.status || "");
+  const orderStatus = String(row?.purchase_order_status || "");
+  return status === "purchased" || ["purchased", "partial_inbound"].includes(orderStatus);
 }
 
 function statusTagType(row) {
-  return isRequestCompleted(row) ? "success" : "warning";
+  if (isRequestCompleted(row)) return "success";
+  if (isRequestPurchased(row)) return "info";
+  return "warning";
 }
 
 function urgencyTagType(urgency) {
@@ -87,7 +95,9 @@ function urgencyTagType(urgency) {
 }
 
 function requestStatusText(row) {
-  return isRequestCompleted(row) ? "完成采购" : "等待采购";
+  if (isRequestCompleted(row)) return "已入库";
+  if (isRequestPurchased(row)) return "待入库";
+  return "等待采购";
 }
 
 function productImage(row) {
@@ -347,7 +357,7 @@ onMounted(loadPageData);
           <el-form-item label="状态">
             <el-select v-model="state.filters.status" style="width: 160px">
               <el-option label="等待采购" value="waiting_purchase" />
-              <el-option label="完成采购" value="completed_purchase" />
+              <el-option label="已采购/已入库" value="completed_purchase" />
             </el-select>
           </el-form-item>
           <el-form-item label="紧急程度">

@@ -1,5 +1,6 @@
 import {
   createAiTaskZip,
+  generateCommerceCopy,
   generateImages,
   generateWorkflow,
   getAiStatus,
@@ -22,6 +23,10 @@ export async function generateImagesAction(req, readJson) {
 
 export async function generateWorkflowAction(req, readJson) {
   return generateWorkflow(await readJson(req));
+}
+
+export async function generateCommerceCopyAction(req, readJson) {
+  return generateCommerceCopy(await readJson(req));
 }
 
 export async function sendAiTaskImage({ res, writeHead, taskId, scope, filename }) {

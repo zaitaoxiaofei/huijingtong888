@@ -17,11 +17,12 @@ import { createAdvertisingRoutes } from "./server/routes/advertising.js";
 import { createOzonActionRoutes } from "./server/routes/ozonActions.js";
 import { createSyncRoutes } from "./server/routes/sync.js";
 import { createReviewRoutes, handleReviewRestRoute } from "./server/routes/reviews.js";
-import { createListingAutomationRoutes, handleListingAutomationRestRoute } from "./server/routes/listingAutomation.js";
+import { createListingAutomationRoutes, handleListingAutomationRestRoute, handleMaterialPackageRestRoute } from "./server/routes/listingAutomation.js";
 import { createMultiShopPublishRoutes, handleMultiShopPublishRestRoute } from "./server/routes/multiShopPublish.js";
 import { createAssetVariantEngineRoutes, handleAssetVariantEngineRestRoute } from "./server/routes/assetVariantEngine.js";
+import { createAiPromptTemplateRoutes, handleAiPromptTemplateRestRoute } from "./server/routes/aiPromptTemplates.js";
+import { createMaterialAssetRoutes, handleMaterialAssetRestRoute } from "./server/routes/materialAssets.js";
 import { createAiImageRoutes, handleAiImageRestRoute } from "./server/routes/aiImageRoutes.js";
-import { createAiImageGeneratorRoutes, handleAiImageGeneratorRestRoute } from "./server/routes/tools/aiImageGenerator.js";
 import { createImageCropperRoutes, handleImageCropperRestRoute } from "./server/routes/tools/imageCropper.js";
 import {
   SITE_ACCESS_LOGIN_PATH,
@@ -46,10 +47,6 @@ import { shanghaiDateKey } from "./shanghai-time.js";
 
 const services = mysqlRuntimeServices;
 
-if (!process.env.OPENAI_API_KEY) {
-  console.warn("OpenAI API Key 未配置：AI套图生成中心将显示未配置状态，生成接口不可用。");
-}
-
 const publicDir = path.resolve("public");
 const serveStatic = createStaticHandler(publicDir);
 const handleAuth = createAuthHandler(readJson);
@@ -66,8 +63,9 @@ const routeModules = {
   ...createListingAutomationRoutes({ services, readJson }),
   ...createMultiShopPublishRoutes({ services, readJson }),
   ...createAssetVariantEngineRoutes({ services, readJson }),
+  ...createAiPromptTemplateRoutes({ services, readJson }),
+  ...createMaterialAssetRoutes({ services, readJson }),
   ...createAiImageRoutes({ readJson }),
-  ...createAiImageGeneratorRoutes({ readJson }),
   ...createImageCropperRoutes({ readJson })
 };
 
@@ -104,6 +102,7 @@ let backgroundCancelledOrderSyncRunning = false;
 let backgroundPostingDetailSyncRunning = false;
 let backgroundAnalyticsRefreshRunning = false;
 let backgroundAdvertisingSyncRunning = false;
+let backgroundOzonStockSyncRunning = false;
 let backgroundOzonCategorySyncRunning = false;
 let backgroundHeavyTaskRunning = "";
 let lastBackgroundOzonCategorySyncDate = "";
@@ -126,6 +125,8 @@ const BACKGROUND_ANALYTICS_REFRESH_INITIAL_DELAY_MS = Math.max(0, Number(config.
 const BACKGROUND_ADVERTISING_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundAdvertisingSyncIntervalMinutes || 60)) * 60 * 1000;
 const BACKGROUND_ADVERTISING_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAdvertisingSyncInitialDelaySeconds || 420)) * 1000;
 const BACKGROUND_ADVERTISING_SYNC_DAYS = Math.max(1, Number(config.backgroundAdvertisingSyncDays || 14));
+const BACKGROUND_OZON_STOCK_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundOzonStockSyncIntervalMinutes || 30)) * 60 * 1000;
+const BACKGROUND_OZON_STOCK_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundOzonStockSyncInitialDelaySeconds || 480)) * 1000;
 const BACKGROUND_OZON_CATEGORY_SYNC_CHECK_MS = Math.max(1, Number(config.backgroundOzonCategorySyncCheckMinutes || 10)) * 60 * 1000;
 const OZON_ACTION_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
 
@@ -228,6 +229,17 @@ async function handleRestRoute(req, res, url, parts) {
     return operationsRestHandled;
   }
 
+  const materialPackageRestHandled = await handleMaterialPackageRestRoute({
+    req,
+    res,
+    parts,
+    services,
+    json
+  });
+  if (materialPackageRestHandled !== false) {
+    return materialPackageRestHandled;
+  }
+
   const reviewRestHandled = await handleReviewRestRoute({
     req,
     res,
@@ -304,16 +316,30 @@ async function handleRestRoute(req, res, url, parts) {
     return aiImageRestHandled;
   }
 
-  const aiImageGeneratorRestHandled = await handleAiImageGeneratorRestRoute({
+  const aiPromptTemplateRestHandled = await handleAiPromptTemplateRestRoute({
     req,
     res,
     parts,
+    services,
+    readJson,
     json,
-    notFound,
-    writeHead
+    notFound
   });
-  if (aiImageGeneratorRestHandled !== false) {
-    return aiImageGeneratorRestHandled;
+  if (aiPromptTemplateRestHandled !== false) {
+    return aiPromptTemplateRestHandled;
+  }
+
+  const materialAssetRestHandled = await handleMaterialAssetRestRoute({
+    req,
+    res,
+    parts,
+    services,
+    readJson,
+    json,
+    notFound
+  });
+  if (materialAssetRestHandled !== false) {
+    return materialAssetRestHandled;
   }
 
   return false;
@@ -370,6 +396,21 @@ async function handleLocalPluginRoute(req, res, parts) {
     return localPluginJson(req, res, { success: true, data: detail, id: detail.id, detail });
   }
 
+  if (parts[2] === "cancelled-postings" && parts[3] === "sync" && req.method === "POST") {
+    const body = await readJson(req);
+    const postingNumbers = Array.isArray(body.posting_numbers || body.postingNumbers)
+      ? (body.posting_numbers || body.postingNumbers).map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    if (!postingNumbers.length) {
+      return localPluginJson(req, res, { success: false, error: "No posting numbers supplied" }, 400);
+    }
+    const result = await services.syncOzonPostingsByNumber({
+      ...body,
+      posting_numbers: postingNumbers
+    }, { signal: req._abortSignal });
+    return localPluginJson(req, res, { success: result.ok !== false, data: result, ...result });
+  }
+
   return false;
 }
 
@@ -382,7 +423,8 @@ async function sendProductImage(res, productId, imageLoader = null) {
   writeHead(res, 200, {
     "Content-Type": match[1],
     "Content-Length": buffer.length,
-    "Cache-Control": "private, max-age=86400"
+    "Cache-Control": "no-store, must-revalidate",
+    "Pragma": "no-cache"
   });
   return res.end(buffer);
 }
@@ -485,6 +527,17 @@ const server = http.createServer(async (req, res) => {
       return sendRemoteImage(req, res, url);
     }
 
+    if (req.method === "GET" && parts[0] === "api" && parts[1] === "asset-variant-engine" && parts[2] === "tail-template-files" && parts[3]) {
+      const file = await services.resolveAssetTailTemplateFile(decodeURIComponent(parts[3]));
+      if (!file) return notFound(res);
+      writeHead(res, 200, {
+        "Content-Type": file.mime,
+        "Content-Length": file.buffer.length,
+        "Cache-Control": "private, max-age=3600"
+      });
+      return res.end(file.buffer);
+    }
+
     if (req.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
       return serveStatic("/admin.html", req, res);
     }
@@ -521,6 +574,9 @@ server.listen(config.port, config.host || undefined, () => {
   setInterval(runBackgroundPostingDetailDeepSyncIfDue, 10 * 60 * 1000);
   setInterval(runBackgroundAnalyticsRefresh, BACKGROUND_ANALYTICS_REFRESH_INTERVAL_MS);
   setInterval(runBackgroundAdvertisingSync, BACKGROUND_ADVERTISING_SYNC_INTERVAL_MS);
+  if (config.backgroundOzonStockSyncEnabled) {
+    setInterval(runBackgroundOzonStockSync, BACKGROUND_OZON_STOCK_SYNC_INTERVAL_MS);
+  }
   setInterval(runOzonActionCleanupSweep, OZON_ACTION_CLEANUP_INTERVAL_MS);
   if (config.backgroundOzonCategorySyncEnabled) {
     setInterval(runBackgroundOzonCategorySyncIfDue, BACKGROUND_OZON_CATEGORY_SYNC_CHECK_MS);
@@ -531,11 +587,24 @@ server.listen(config.port, config.host || undefined, () => {
   setTimeout(runBackgroundPostingDetailDeepSyncIfDue, 12 * 60 * 1000);
   setTimeout(runBackgroundAnalyticsRefresh, BACKGROUND_ANALYTICS_REFRESH_INITIAL_DELAY_MS);
   setTimeout(runBackgroundAdvertisingSync, BACKGROUND_ADVERTISING_SYNC_INITIAL_DELAY_MS);
+  if (config.backgroundOzonStockSyncEnabled) {
+    setTimeout(runBackgroundOzonStockSync, BACKGROUND_OZON_STOCK_SYNC_INITIAL_DELAY_MS);
+  }
   setTimeout(runOzonActionCleanupSweep, 5000);
   if (config.backgroundOzonCategorySyncEnabled) {
     setTimeout(runBackgroundOzonCategorySyncIfDue, 10 * 60 * 1000);
   }
+  setTimeout(recoverAssetVariantJobs, 3000);
 });
+
+async function recoverAssetVariantJobs() {
+  try {
+    const result = await services.recoverAssetVariantJobsOnStartup?.();
+    if (result?.queued) console.log(`asset variant job recovery queued ${result.queued} job(s)`);
+  } catch (error) {
+    console.error("asset variant job recovery failed", error);
+  }
+}
 
 async function runBackgroundOrderStatusSync() {
   if (backgroundOrderSyncRunning) return;
@@ -676,6 +745,26 @@ async function runBackgroundAdvertisingSync() {
   } finally {
     backgroundAdvertisingSyncRunning = false;
     if (backgroundHeavyTaskRunning === "advertising_sync") backgroundHeavyTaskRunning = "";
+  }
+}
+
+async function runBackgroundOzonStockSync() {
+  if (backgroundOzonStockSyncRunning) return;
+  if (backgroundHeavyTaskRunning) {
+    console.log(`background Ozon stock sync skipped: ${backgroundHeavyTaskRunning} is running`);
+    return;
+  }
+  backgroundOzonStockSyncRunning = true;
+  backgroundHeavyTaskRunning = "ozon_stock_sync";
+  try {
+    const result = await services.syncOzonStocks({ mode: "scheduled_fbp" });
+    console.log(`background Ozon stock sync ok: fetched ${result.fetched || 0}, upserted ${result.upserted || 0}, status ${result.status || "ok"}`);
+    if (result.errors?.length) console.warn(`background Ozon stock sync warnings: ${result.errors.join("; ")}`);
+  } catch (error) {
+    console.error("background Ozon stock sync failed", error);
+  } finally {
+    backgroundOzonStockSyncRunning = false;
+    if (backgroundHeavyTaskRunning === "ozon_stock_sync") backgroundHeavyTaskRunning = "";
   }
 }
 

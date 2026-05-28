@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { closeMysqlPool } from "../src/mysql-pool.js";
+import { closeMysqlPool, mysqlQuery } from "../src/mysql-pool.js";
 import { selectionProductsMysql } from "../src/services/mysql-cutover.js";
 
 test.after(async () => {
@@ -25,7 +25,8 @@ test("selection products support paged list contract", async () => {
     assert.ok(row.id);
     assert.notEqual(row.name, undefined);
     assert.notEqual(row.inventory_id, undefined);
-    assert.equal(row.selection_status, "draft");
+    assert.equal(row.product_type, "selection");
+    assert.ok(["draft", "listed", "merged"].includes(row.selection_status || "draft"));
     assert.equal(typeof row.pricing, "object");
   }
 
@@ -48,4 +49,18 @@ test("selection products support search and quote status filters", async () => {
 
   const missing = await selectionProductList({ paged: "1", page: 1, pageSize: 20, quoteStatus: "missing" });
   assert.ok(missing.rows.every((row) => !row.pricing?.air && !row.pricing?.land));
+});
+
+test("selection products include legacy main draft rows", async () => {
+  const expectedRows = await mysqlQuery(`
+    SELECT COUNT(*) AS total
+    FROM products p
+    WHERE p.active = 1
+      AND (COALESCE(p.product_type, 'main') = 'selection' OR COALESCE(p.selection_status, 'draft') = 'draft')
+  `);
+  const expected = expectedRows[0] || { total: 0 };
+  const result = await selectionProductList({ paged: "1", page: 1, pageSize: 5 });
+
+  assert.equal(result.total, Number(expected.total || 0));
+  assert.ok(result.rows.every((row) => row.product_type === "selection"));
 });

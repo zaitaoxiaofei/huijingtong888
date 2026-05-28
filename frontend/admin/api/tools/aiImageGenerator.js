@@ -12,6 +12,10 @@ export function generateAiWorkflow(payload) {
   return apiClient.post("/api/ai/generate-workflow", payload);
 }
 
+export function generateAiCommerceCopy(payload) {
+  return apiClient.post("/api/ai/generate-commerce-copy", payload);
+}
+
 export function optimizeAiPrompt(payload) {
   return apiClient.post("/api/ai/optimize-prompt", payload);
 }

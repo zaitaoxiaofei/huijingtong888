@@ -1,26 +1,34 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from "vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { Refresh, Search } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
 import { buildAdTasks, evaluateAdSku, summarizeAdDashboard, toneType } from "./ad-rules";
+import PageFooterPagination from "../../components/PageFooterPagination.vue";
 
 const loading = ref(false);
 const syncing = ref(false);
 const detailLoading = ref(false);
 const detailVisible = ref(false);
 const profitDetailVisible = ref(false);
+const strategyDialogVisible = ref(false);
+const strategySubmitting = ref(false);
 const activeTab = ref("dashboard");
 const shops = ref([]);
 const summary = ref({});
 const detailRows = ref([]);
 const trendRows = ref([]);
 const currentRow = ref(null);
+const strategyForm = reactive({
+  mode: "bid",
+  bidRub: 0,
+  targetCir: 0
+});
 const state = reactive({
   rows: [],
   total: 0,
   page: 1,
-  pageSize: 30,
+  pageSize: 20,
   sortBy: "spend_rub",
   sortOrder: "descending",
   filters: {
@@ -256,6 +264,15 @@ function campaignStrategyText(row = {}) {
   return "\u5f85\u540c\u6b65";
 }
 
+function campaignStrategyMode(row = {}) {
+  const strategy = String(row.campaign_strategies || row.campaign_strategy || "").trim();
+  if (strategy.includes("TARGET_CIR")) return "targetCir";
+  if (strategy.includes("TARGET_BIDS") || strategy.includes("TOP_PROMOTION")) return "bid";
+  const payment = String(row.campaign_payment_types || row.campaign_payment_type || "").trim();
+  if (payment.includes("CPC")) return "bid";
+  return Number(row.campaign_target_cir || 0) > 0 ? "targetCir" : "bid";
+}
+
 function campaignPlacementText(row = {}) {
   const raw = String(row.campaign_placements || row.campaign_placement || "").trim();
   if (!raw) return "\u6295\u653e\u4f4d\u7f6e\u5f85\u540c\u6b65";
@@ -456,7 +473,7 @@ function primaryTag(row) {
 function primaryAction(row) {
   if (campaignStatus(row).key === "closed") return { label: "已关闭", type: "info", action: () => openDetails(row) };
   const labels = row.evaluation.tags.map((tag) => tag.label).join(" ");
-  if (row.evaluation.status.key === "pause") return { label: "暂停广告", type: "danger", action: () => previewOnly("暂停广告需要人工确认，当前版本不会自动操作 Ozon。") };
+  if (row.evaluation.status.key === "pause") return { label: "暂停广告", type: "danger", action: () => openStrategyDialog(row) };
   if (row.evaluation.status.key === "scale") return { label: "加预算", type: "primary", action: () => previewOnly("加预算需要人工确认，当前版本不会自动操作 Ozon。") };
   if (labels.includes("主图")) return { label: "优化主图", type: "warning", action: () => goMaterialCenter(row) };
   if (labels.includes("转化")) return { label: "优化详情页", type: "warning", action: () => goMaterialCenter(row) };
@@ -550,6 +567,68 @@ function adProfitStatusText(row = {}) {
 function openProfitDetails(row) {
   currentRow.value = row;
   profitDetailVisible.value = true;
+}
+
+function openStrategyDialog(row) {
+  currentRow.value = row;
+  strategyForm.mode = campaignStrategyMode(row);
+  strategyForm.bidRub = Number(row.campaign_bid_rub || 0);
+  strategyForm.targetCir = Number(row.campaign_target_cir || 0);
+  strategyDialogVisible.value = true;
+}
+
+async function saveStrategySetting() {
+  const row = currentRow.value;
+  if (!row) return;
+  const payload = {
+    shop_id: row.shop_id,
+    campaign_id: row.campaign_id,
+    ozon_sku: row.ozon_sku,
+    mode: strategyForm.mode,
+    bid_rub: Number(strategyForm.bidRub || 0),
+    target_cir: Number(strategyForm.targetCir || 0),
+    from: state.filters.from,
+    to: state.filters.to
+  };
+  if (!payload.campaign_id) return ElMessage.warning("当前 SKU 缺少广告活动 ID，请先同步 Ozon 广告");
+  if (payload.mode === "bid" && payload.bid_rub <= 0) return ElMessage.warning("请输入有效点击出价");
+  if (payload.mode === "targetCir" && payload.target_cir <= 0) return ElMessage.warning("请输入有效目标广告费用份额");
+  strategySubmitting.value = true;
+  try {
+    await apiClient.post("/api/advertising/campaign/product-setting", payload);
+    ElMessage.success("广告策略参数已提交到 Ozon");
+    strategyDialogVisible.value = false;
+    await loadRows();
+  } catch (error) {
+    ElMessage.error(error.message || "广告策略参数更新失败");
+  } finally {
+    strategySubmitting.value = false;
+  }
+}
+
+async function stopCampaign(row) {
+  if (!row.campaign_id) return ElMessage.warning("当前 SKU 缺少广告活动 ID，请先同步 Ozon 广告");
+  await ElMessageBox.confirm(`确认停投广告「${row.campaign_name || row.campaign_id}」吗？`, "停投广告", {
+    type: "warning",
+    confirmButtonText: "确认停投",
+    cancelButtonText: "取消"
+  });
+  strategySubmitting.value = true;
+  try {
+    await apiClient.post("/api/advertising/campaign/stop", {
+      shop_id: row.shop_id,
+      campaign_id: row.campaign_id,
+      from: state.filters.from,
+      to: state.filters.to
+    });
+    ElMessage.success("停投请求已提交到 Ozon");
+    strategyDialogVisible.value = false;
+    await loadRows();
+  } catch (error) {
+    ElMessage.error(error.message || "停投广告失败");
+  } finally {
+    strategySubmitting.value = false;
+  }
 }
 
 function metricTrendText() {
@@ -848,16 +927,7 @@ onMounted(bootstrap);
         <el-table-column type="expand" width="44">
           <template #default="{ row }">
             <div class="expand-grid">
-              <div><span>店铺</span><strong>{{ row.shop_name || "未知店铺" }}</strong></div>
               <div><span>状态</span><strong>{{ readableCampaignStatus(row).label }}</strong></div>
-              <div><span>阶段</span><strong>{{ row.evaluation.stage.label }}</strong></div>
-              <div><span>CPC 点击成本</span><strong>{{ money(row.evaluation.metrics.cpc) }}</strong></div>
-              <div><span>ROAS</span><strong>{{ decimal(row.evaluation.metrics.roas) }}</strong></div>
-              <div><span>ACOS</span><strong>{{ percent(row.evaluation.metrics.acos) }}</strong></div>
-              <div><span>展示</span><strong>{{ integer(row.evaluation.metrics.impressions) }}</strong></div>
-              <div><span>点击</span><strong>{{ integer(row.evaluation.metrics.clicks) }}</strong></div>
-              <div><span>加购</span><strong>{{ integer(row.evaluation.metrics.addToCart) }}</strong></div>
-              <div><span>订单</span><strong>{{ integer(row.evaluation.metrics.orders) }}</strong></div>
               <div><span>广告销售额</span><strong>{{ money(row.evaluation.metrics.revenue) }}</strong></div>
               <div class="profit-card">
                 <span>毛利率</span>
@@ -874,6 +944,9 @@ onMounted(bootstrap);
                 <strong>{{ row.ad_net_profit_cny == null ? "待接入" : `CNY ${rub(row.ad_net_profit_cny)}` }}</strong>
                 <el-button link type="primary" size="small" @click.stop="openProfitDetails(row)">查看详情</el-button>
               </div>
+              <div><span>点击成本</span><strong>{{ money(row.evaluation.metrics.cpc) }}</strong></div>
+              <div><span>ROAS</span><strong>{{ decimal(row.evaluation.metrics.roas) }}</strong></div>
+              <div><span>ACOS</span><strong>{{ percent(row.evaluation.metrics.acos) }}</strong></div>
             </div>
           </template>
         </el-table-column>
@@ -981,18 +1054,26 @@ onMounted(bootstrap);
         <el-table-column label="AI建议" min-width="230">
           <template #default="{ row }"><span class="short-advice">{{ row.evaluation.suggestions[0] }}</span></template>
         </el-table-column>
-        <el-table-column label="操作" width="190" fixed="right">
+        <el-table-column label="操作" width="210" fixed="right">
           <template #default="{ row }">
             <div class="row-actions">
               <el-button link :type="primaryAction(row).type" @click="primaryAction(row).action">{{ primaryAction(row).label }}</el-button>
+              <el-button link type="warning" @click="openStrategyDialog(row)">调价/停投</el-button>
               <el-button link type="primary" @click="openDetails(row)">详情</el-button>
             </div>
           </template>
         </el-table-column>
       </el-table>
-      <div class="table-footer">
+      <div class="ad-table-footer">
         <span>共 {{ tableFilteredRows.length }} 个 SKU</span>
-        <el-pagination v-model:current-page="state.page" v-model:page-size="state.pageSize" :page-sizes="[20, 30, 50, 100]" :total="tableFilteredRows.length" layout="sizes, prev, pager, next" />
+        <PageFooterPagination
+          :total="tableFilteredRows.length"
+          :page="state.page"
+          :page-size="state.pageSize"
+          compact
+          @update:page="state.page = $event"
+          @update:pageSize="state.pageSize = $event; resetTablePage()"
+        />
       </div>
     </section>
 
@@ -1257,6 +1338,40 @@ onMounted(bootstrap);
         </el-table>
       </div>
     </el-drawer>
+
+    <el-dialog v-model="strategyDialogVisible" title="广告策略参数" width="520px">
+      <div v-if="currentRow" class="strategy-dialog">
+        <section class="drawer-product">
+          <div class="thumb compact">
+            <el-image v-if="currentRow.image_url" :src="currentRow.image_url" fit="cover" />
+            <span v-else>无图</span>
+          </div>
+          <div>
+            <strong>{{ currentRow.ozon_sku }}</strong>
+            <span>{{ currentRow.product_name || currentRow.offer_id || "未同步商品信息" }}</span>
+            <small>{{ campaignStrategyText(currentRow) }} / {{ campaignPlacementText(currentRow) }}</small>
+          </div>
+        </section>
+        <el-form label-width="132px" class="strategy-form">
+          <el-form-item label="调整类型">
+            <el-segmented v-model="strategyForm.mode" :options="[{ label: '点击出价', value: 'bid' }, { label: '广告费用份额', value: 'targetCir' }]" />
+          </el-form-item>
+          <el-form-item v-if="strategyForm.mode === 'bid'" label="当前点击出价">
+            <el-input-number v-model="strategyForm.bidRub" :min="0" :precision="2" :step="0.1" controls-position="right" />
+            <span class="form-suffix">RUB</span>
+          </el-form-item>
+          <el-form-item v-else label="目标费用份额">
+            <el-input-number v-model="strategyForm.targetCir" :min="0" :precision="1" :step="1" controls-position="right" />
+            <span class="form-suffix">%</span>
+          </el-form-item>
+        </el-form>
+      </div>
+      <template #footer>
+        <el-button @click="strategyDialogVisible = false">取消</el-button>
+        <el-button v-if="currentRow" type="danger" plain :loading="strategySubmitting" @click="stopCampaign(currentRow)">停投广告</el-button>
+        <el-button type="primary" :loading="strategySubmitting" @click="saveStrategySetting">保存到 Ozon</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="profitDetailVisible" title="利润计算详情" width="620px">
       <div v-if="currentRow" class="profit-detail-dialog">
@@ -1774,6 +1889,22 @@ onMounted(bootstrap);
   padding: 0;
   height: 18px;
   font-size: 11px;
+}
+
+.strategy-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.strategy-form :deep(.el-input-number) {
+  width: 180px;
+}
+
+.form-suffix {
+  margin-left: 8px;
+  color: #64748b;
+  font-size: 12px;
 }
 
 .profit-detail-dialog {

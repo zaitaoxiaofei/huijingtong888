@@ -34,7 +34,7 @@ const state = reactive({
     name: "",
     offer: "",
     page: 1,
-    pageSize: 30
+    pageSize: 20
   }
 });
 
@@ -69,6 +69,17 @@ function money(value) {
 
 function dateText(value) {
   return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
+}
+
+function openExternalLink(url) {
+  const target = String(url || "").trim();
+  if (!target) return;
+  window.open(target, "_blank", "noopener,noreferrer");
+}
+
+function ozonBuyerProductLinkFor(row) {
+  const productId = String(row?.ozon_product_id || "").trim();
+  return productId ? `https://www.ozon.ru/product/${encodeURIComponent(productId)}/` : "";
 }
 
 function onlineStatusKey(row) {
@@ -208,7 +219,7 @@ function applyRouteState() {
     state.filters.name = String(route.query.name || "");
     state.filters.offer = String(route.query.offer || "");
     state.filters.page = asPositiveInt(route.query.page, 1);
-    state.filters.pageSize = asPositiveInt(route.query.pageSize, 30);
+    state.filters.pageSize = asPositiveInt(route.query.pageSize, 20);
   } finally {
     syncingRoute = false;
   }
@@ -222,7 +233,7 @@ function syncRouteQuery() {
     name: state.filters.name || undefined,
     offer: state.filters.offer || undefined,
     page: state.filters.page > 1 ? String(state.filters.page) : undefined,
-    pageSize: state.filters.pageSize !== 30 ? String(state.filters.pageSize) : undefined
+    pageSize: state.filters.pageSize !== 20 ? String(state.filters.pageSize) : undefined
   };
   const normalized = Object.fromEntries(Object.entries(nextQuery).filter(([, value]) => value != null && value !== ""));
   if (JSON.stringify(route.query || {}) === JSON.stringify(normalized)) return;
@@ -317,8 +328,8 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="page-stack online-products-page">
-    <el-card shadow="never" class="page-card online-products-card">
+  <div class="page-stack online-products-page erp-paged-page">
+    <el-card shadow="never" class="page-card online-products-card erp-paged-card">
       <div class="online-toolbar online-toolbar-sticky">
         <el-form inline>
           <el-form-item label="店铺">
@@ -359,7 +370,7 @@ onMounted(async () => {
         </div>
       </div>
 
-      <div class="online-table-wrap">
+      <div class="online-table-wrap erp-table-scroll">
         <el-table v-loading="loading" :data="pagedRows" stripe border class="erp-data-table" @selection-change="selectionChanged">
           <el-table-column type="selection" width="48" fixed="left" />
           <el-table-column label="店铺 / 状态" min-width="160" fixed="left">
@@ -383,7 +394,18 @@ onMounted(async () => {
               <div class="product-cell">
                 <ProductImagePreview :src="row.primary_image || row.image_url" />
                 <div class="cell-stack">
-                  <strong>{{ row.name || "-" }}</strong>
+                  <a
+                    v-if="ozonBuyerProductLinkFor(row)"
+                    class="online-product-link"
+                    :href="ozonBuyerProductLinkFor(row)"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    :title="`打开 Ozon 前台商品 ${row.name || row.ozon_sku || ''}`"
+                    @click.prevent.stop="openExternalLink(ozonBuyerProductLinkFor(row))"
+                  >
+                    {{ row.name || row.ozon_sku || "-" }}
+                  </a>
+                  <strong v-else>{{ row.name || "-" }}</strong>
                   <span class="muted-text">在线商品 ID: {{ row.id }}</span>
                   <span class="muted-text">Ozon Product ID: {{ row.ozon_product_id || "-" }}</span>
                 </div>
@@ -422,7 +444,6 @@ onMounted(async () => {
         :total="state.total"
         :page="state.filters.page"
         :page-size="state.filters.pageSize"
-        :page-sizes="[30, 50, 100]"
         @update:page="handlePageChange"
         @update:pageSize="handlePageSizeChange"
       />
@@ -458,7 +479,7 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.online-products-page { min-height: 100%; }
+.online-products-page { min-height: 0; }
 .online-products-card :deep(.el-card__body) { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .online-toolbar { display: grid; gap: 12px; padding: 8px 0 14px; }
 .online-toolbar-sticky { position: sticky; top: 0; z-index: 3; background: var(--erp-surface); }
@@ -471,5 +492,13 @@ onMounted(async () => {
 .muted-text { color: var(--erp-text-secondary); font-size: 12px; line-height: 1.5; }
 .product-cell { display: flex; align-items: flex-start; gap: 12px; }
 .product-thumb { width: 52px; height: 52px; border-radius: 10px; border: 1px solid var(--erp-border); background: #fff; flex-shrink: 0; overflow: hidden; }
+.online-product-link {
+  color: var(--el-color-primary);
+  font-weight: 600;
+  line-height: 1.35;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.online-product-link:hover { text-decoration: underline; }
 </style>
 

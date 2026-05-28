@@ -35,6 +35,7 @@ test("stock alerts support FBP flattened paged list contract", async () => {
   for (const row of result.rows) {
     assert.ok(row.product_id);
     assert.notEqual(row.ozon_sku, undefined);
+    assert.notEqual(row.ozon_product_id, undefined);
     assert.notEqual(row.fbp_available, undefined);
   }
 });

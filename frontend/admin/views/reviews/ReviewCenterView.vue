@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { ChatDotRound, Refresh, Search } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
+import PageFooterPagination from "../../components/PageFooterPagination.vue";
 
 const loading = ref(false);
 const syncing = ref(false);
@@ -17,7 +18,7 @@ const state = reactive({
   rows: [],
   total: 0,
   page: 1,
-  pageSize: 30,
+  pageSize: 20,
   filters: {
     shopId: "all",
     replyStatus: "pending",
@@ -172,7 +173,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="review-center">
+  <div class="review-center erp-paged-page">
     <section class="page-head">
       <div>
         <h1>评价中心</h1>
@@ -203,60 +204,58 @@ onMounted(async () => {
       <el-button @click="handleReset">重置</el-button>
     </section>
 
-    <el-table v-loading="loading" :data="state.rows" row-key="id" class="review-table" border>
-      <el-table-column label="店铺 / 商品" min-width="260">
-        <template #default="{ row }">
-          <div class="product-cell">
-            <el-image v-if="row.product_image" :src="row.product_image" fit="cover" class="product-image" />
-            <div>
-              <div class="shop-name">{{ row.shop_name }}</div>
-              <div class="product-name">{{ row.product_name || row.offer_id || row.ozon_sku }}</div>
-              <div class="muted">SKU {{ row.ozon_sku || "-" }} · Offer {{ row.offer_id || "-" }}</div>
+    <div class="review-table-wrap erp-table-scroll">
+      <el-table v-loading="loading" :data="state.rows" row-key="id" class="review-table erp-data-table" border>
+        <el-table-column label="店铺 / 商品" min-width="260">
+          <template #default="{ row }">
+            <div class="product-cell">
+              <el-image v-if="row.product_image" :src="row.product_image" fit="cover" class="product-image" />
+              <div>
+                <div class="shop-name">{{ row.shop_name }}</div>
+                <div class="product-name">{{ row.product_name || row.offer_id || row.ozon_sku }}</div>
+                <div class="muted">SKU {{ row.ozon_sku || "-" }} · Offer {{ row.offer_id || "-" }}</div>
+              </div>
             </div>
-          </div>
-        </template>
-      </el-table-column>
-      <el-table-column label="评分" width="120" align="center">
-        <template #default="{ row }">
-          <el-rate :model-value="Number(row.rating || 0)" disabled />
-        </template>
-      </el-table-column>
-      <el-table-column label="评价内容" min-width="340">
-        <template #default="{ row }">
-          <div class="review-text">{{ row.review_text || "无文字评价" }}</div>
-          <div v-if="row.advantages" class="muted">优点：{{ row.advantages }}</div>
-          <div v-if="row.disadvantages" class="muted">缺点：{{ row.disadvantages }}</div>
-          <div v-if="row.reply_text" class="reply-preview">回复：{{ row.reply_text }}</div>
-        </template>
-      </el-table-column>
-      <el-table-column label="状态" width="110">
-        <template #default="{ row }">
-          <el-tag :type="statusType(row.reply_status)">{{ statusLabel(row.reply_status) }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="评价时间" width="170">
-        <template #default="{ row }">{{ dateText(row.published_at || row.synced_at) }}</template>
-      </el-table-column>
-      <el-table-column label="操作" width="130" fixed="right">
-        <template #default="{ row }">
-          <el-button :icon="ChatDotRound" type="primary" link @click="openReply(row)">
-            {{ row.reply_status === "replied" ? "查看回复" : "回复" }}
-          </el-button>
-        </template>
-      </el-table-column>
-    </el-table>
-
-    <div class="pagination">
-      <el-pagination
-        v-model:current-page="state.page"
-        v-model:page-size="state.pageSize"
-        :page-sizes="[20, 30, 50, 100]"
-        :total="state.total"
-        layout="total, sizes, prev, pager, next"
-        @current-change="loadReviews"
-        @size-change="handleSearch"
-      />
+          </template>
+        </el-table-column>
+        <el-table-column label="评分" width="120" align="center">
+          <template #default="{ row }">
+            <el-rate :model-value="Number(row.rating || 0)" disabled />
+          </template>
+        </el-table-column>
+        <el-table-column label="评价内容" min-width="340">
+          <template #default="{ row }">
+            <div class="review-text">{{ row.review_text || "无文字评价" }}</div>
+            <div v-if="row.advantages" class="muted">优点：{{ row.advantages }}</div>
+            <div v-if="row.disadvantages" class="muted">缺点：{{ row.disadvantages }}</div>
+            <div v-if="row.reply_text" class="reply-preview">回复：{{ row.reply_text }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="110">
+          <template #default="{ row }">
+            <el-tag :type="statusType(row.reply_status)">{{ statusLabel(row.reply_status) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="评价时间" width="170">
+          <template #default="{ row }">{{ dateText(row.published_at || row.synced_at) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="130" fixed="right">
+          <template #default="{ row }">
+            <el-button :icon="ChatDotRound" type="primary" link @click="openReply(row)">
+              {{ row.reply_status === "replied" ? "查看回复" : "回复" }}
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
     </div>
+
+    <PageFooterPagination
+      :total="state.total"
+      :page="state.page"
+      :page-size="state.pageSize"
+      @update:page="state.page = $event; loadReviews()"
+      @update:pageSize="state.pageSize = $event; handleSearch()"
+    />
 
     <el-dialog v-model="replyDialogVisible" title="回复评价" width="720px">
       <div v-if="currentReview" class="dialog-review">
@@ -290,6 +289,11 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-height: 0;
+}
+
+.review-table-wrap {
+  flex: 1 1 auto;
 }
 
 .page-head {
@@ -370,11 +374,6 @@ onMounted(async () => {
 .reply-preview {
   margin-top: 6px;
   color: var(--el-color-success);
-}
-
-.pagination {
-  display: flex;
-  justify-content: flex-end;
 }
 
 .dialog-review {

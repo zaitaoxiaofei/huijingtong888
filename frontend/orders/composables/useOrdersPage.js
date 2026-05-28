@@ -539,6 +539,17 @@ export function useOrdersPage() {
     }
   }
 
+  function selectedIdsInCurrentRowOrder() {
+    const selected = selectedOrderIds.value instanceof Set ? selectedOrderIds.value : new Set();
+    const selectedIds = new Set([...selected].map(Number).filter(Boolean));
+    const ordered = (vm.rows || [])
+      .map((row) => Number(row.id))
+      .filter((id) => id && selectedIds.has(id));
+    const visible = new Set(ordered);
+    const hidden = [...selectedIds].filter((id) => !visible.has(id));
+    return [...ordered, ...hidden];
+  }
+
   return {
     vm,
     loading,
@@ -656,8 +667,8 @@ export function useOrdersPage() {
     resetRecentDates: () => resetRecentDates(),
     handleMoreAction: async (action) => {
       if (action === "recalculate-profit") return apiClient.post("/api/orders/recalculate-profits", {});
-      if (action === "print-selected") return runPrintOrders([...selectedOrderIds.value]);
-      if (action === "prepare-selected") return runPrepareOrders([...selectedOrderIds.value]);
+      if (action === "print-selected") return runPrintOrders(selectedIdsInCurrentRowOrder());
+      if (action === "prepare-selected") return runPrepareOrders(selectedIdsInCurrentRowOrder());
       return handleMoreOrderAction(action);
     },
     fetchOrderDetail: (orderId) => fetchOrderDetail(orderId),

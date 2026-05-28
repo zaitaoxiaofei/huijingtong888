@@ -18,8 +18,10 @@ const InventorySuppliersPage = () => import("../views/inventory/InventorySupplie
 const InventoryAlertsPage = () => import("../views/inventory/InventoryAlertsPage.vue");
 const OnlineProductsView = () => import("../views/inventory/OnlineProductsView.vue");
 const ListingAutomationView = () => import("../views/listing/ListingAutomationView.vue");
+const ListingPublishRecordsView = () => import("../views/listing/ListingPublishRecordsView.vue");
 const MultiShopPublishView = () => import("../views/listing/MultiShopPublish.vue");
-const AssetVariantCenterView = () => import("../views/listing/AssetVariantCenter.vue");
+const AssetVariantCenterView = () => import("../views/settings/PromptLibraryView.vue");
+const ShopAssetVariantCenterView = () => import("../views/listing/ShopAssetVariantCenter.vue");
 const SelectionView = () => import("../views/selection/SelectionView.vue");
 const ProfitDashboardView = () => import("../views/profit/ProfitDashboardView.vue");
 const ProfitAftersalesView = () => import("../views/profit/ProfitAftersalesView.vue");
@@ -33,7 +35,7 @@ const PurchaseListView = () => import("../views/procurement/PurchaseListView.vue
 const PurchaseHistoryView = () => import("../views/procurement/PurchaseHistoryView.vue");
 const SettingsView = () => import("../views/settings/SettingsView.vue");
 const AiProviderSettingsView = () => import("../views/settings/AiProviderSettingsView.vue");
-const AiImageGeneratorView = () => import("../views/tools/AiImageGenerator.vue");
+const MaterialCenterView = () => import("../views/settings/MaterialCenterView.vue");
 const ImageCropperView = () => import("../views/tools/ImageCropper.vue");
 const EcommerceImageSplitterView = () => import("../views/tools/EcommerceImageSplitterV3.vue");
 const ProductVideoGeneratorView = () => import("../views/tools/ProductVideoGenerator.vue");
@@ -41,12 +43,7 @@ const ProductVideoGeneratorView = () => import("../views/tools/ProductVideoGener
 export const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    {
-      path: "/login",
-      name: "login",
-      component: LoginView,
-      meta: { public: true, title: "登录" }
-    },
+    { path: "/login", name: "login", component: LoginView, meta: { public: true, title: "登录" } },
     {
       path: "/",
       component: AdminLayout,
@@ -66,38 +63,41 @@ export const router = createRouter({
           meta: { title: "库存管理", breadcrumb: ["库存管理"] },
           children: [
             { path: "", redirect: "/inventory/products" },
-            { path: "products", name: "inventory-products", component: InventoryProductsPage, meta: { title: "产品库存表", breadcrumb: ["库存管理", "产品库存表"] } },
-            { path: "fbp", name: "inventory-fbp", component: InventoryFbpPage, meta: { title: "FBP 库存表", breadcrumb: ["库存管理", "FBP 库存表"] } },
-            { path: "hidden", name: "inventory-hidden", component: InventoryHiddenPage, meta: { title: "已隐藏产品", breadcrumb: ["库存管理", "已隐藏产品"] } },
-            { path: "mappings", name: "inventory-mappings", component: InventoryMappingsPage, meta: { title: "库存-SKU映射表", breadcrumb: ["库存管理", "库存-SKU映射表"] } },
-            { path: "suppliers", name: "inventory-suppliers", component: InventorySuppliersPage, meta: { title: "供应商配置", breadcrumb: ["库存管理", "供应商配置"] } },
+            { path: "products", name: "inventory-products", component: InventoryProductsPage, meta: { title: "本地库存", breadcrumb: ["库存管理", "本地库存"] } },
+            { path: "fbp", name: "inventory-fbp", component: InventoryFbpPage, meta: { title: "Ozon FBP库存", breadcrumb: ["库存管理", "Ozon FBP库存"] } },
+            { path: "hidden", name: "inventory-hidden", component: InventoryHiddenPage, meta: { title: "隐藏商品", breadcrumb: ["库存管理", "隐藏商品"] } },
+            { path: "mappings", name: "inventory-mappings", component: InventoryMappingsPage, meta: { title: "SKU库存映射", breadcrumb: ["库存管理", "SKU库存映射"] } },
+            { path: "suppliers", name: "inventory-suppliers", component: InventorySuppliersPage, meta: { title: "供应商", breadcrumb: ["库存管理", "供应商"] } },
             { path: "alerts", name: "inventory-alerts", component: InventoryAlertsPage, meta: { title: "库存预警", breadcrumb: ["库存管理", "库存预警"] } }
           ]
         },
-        { path: "online-products", name: "online-products", component: OnlineProductsView, meta: { title: "在线商品", breadcrumb: ["商品管理", "在线商品"] } },
-        { path: "asset-variant-center", name: "asset-variant-center", component: AssetVariantCenterView, meta: { title: "素材裂变中心", breadcrumb: ["工具中心", "素材裂变中心"] } },
-        { path: "listing-automation", name: "listing-automation", component: ListingAutomationView, meta: { title: "编辑上架", breadcrumb: ["工具中心", "编辑上架"] } },
-        { path: "multi-shop-publish", name: "multi-shop-publish", component: MultiShopPublishView, meta: { title: "多店铺商品发布中台", breadcrumb: ["商品管理", "多店铺商品发布中台"] } },
-        { path: "ozon-actions", name: "ozon-actions", component: OzonActionsView, meta: { title: "活动管理", breadcrumb: ["商品管理", "活动管理"] } },
-        { path: "selection", name: "selection", component: SelectionView, meta: { title: "选品计价表", breadcrumb: ["工具中心", "选品计价表"] } },
+        { path: "online-products", name: "online-products", component: OnlineProductsView, meta: { title: "在线商品", breadcrumb: ["商品中心", "在线商品"] } },
+        { path: "asset-variant-center", name: "asset-variant-center", component: ShopAssetVariantCenterView, meta: { title: "店铺矩阵列表", breadcrumb: ["商品中心", "店铺矩阵列表"] } },
+        { path: "asset-variant-center/create", name: "asset-variant-center-create", component: AssetVariantCenterView, meta: { title: "AI内容优化", breadcrumb: ["商品中心", "AI内容优化"] } },
+        { path: "listing-automation", name: "listing-automation", component: ListingAutomationView, meta: { title: "编辑上架", breadcrumb: ["商品中心", "编辑上架"] } },
+        { path: "listing-records", name: "listing-records", component: ListingPublishRecordsView, meta: { title: "上架记录", breadcrumb: ["商品中心", "上架记录"] } },
+        { path: "multi-shop-publish", name: "multi-shop-publish", component: MultiShopPublishView, meta: { title: "多店铺发布", breadcrumb: ["商品中心", "多店铺发布"] } },
+        { path: "ozon-actions", name: "ozon-actions", component: OzonActionsView, meta: { title: "活动管理", breadcrumb: ["商品中心", "活动管理"] } },
+        { path: "selection", name: "selection", component: SelectionView, meta: { title: "选品上架", breadcrumb: ["商品中心", "选品上架"] } },
         { path: "profit", name: "profit", component: ProfitDashboardView, meta: { title: "利润看板", breadcrumb: ["经营分析", "利润看板"] } },
-        { path: "profit/aftersales", name: "profit-aftersales", component: ProfitAftersalesView, meta: { title: "售后损失", breadcrumb: ["经营分析", "利润看板", "售后损失"] } },
+        { path: "profit/aftersales", name: "profit-aftersales", component: ProfitAftersalesView, meta: { title: "售后损益", breadcrumb: ["经营分析", "利润看板", "售后损益"] } },
         { path: "profit/sku-ranking", name: "profit-sku-ranking", component: ProfitDashboardView, meta: { title: "SKU 排行榜", breadcrumb: ["经营分析", "利润看板", "SKU 排行榜"] } },
         { path: "profit/shop-ranking", name: "profit-shop-ranking", component: ProfitDashboardView, meta: { title: "店铺排行榜", breadcrumb: ["经营分析", "利润看板", "店铺排行榜"] } },
-        { path: "advertising/daily", name: "advertising-daily", component: AdvertisingDailyView, meta: { title: "广告系统", breadcrumb: ["经营分析", "广告系统"] } },
+        { path: "advertising/daily", name: "advertising-daily", component: AdvertisingDailyView, meta: { title: "广告数据", breadcrumb: ["经营分析", "广告数据"] } },
         { path: "reviews", name: "reviews", component: ReviewCenterView, meta: { title: "评价中心", breadcrumb: ["经营分析", "评价中心"] } },
-        { path: "orders", name: "orders", component: OrdersView, meta: { title: "订单中心", breadcrumb: ["订单中心", "订单列表"] } },
+        { path: "orders", name: "orders", component: OrdersView, meta: { title: "Ozon订单", breadcrumb: ["订单中心", "Ozon订单"] } },
         { path: "outbound", name: "outbound", component: OutboundView, meta: { title: "出库记录", breadcrumb: ["订单中心", "出库记录"] } },
-        { path: "procurement", name: "procurement", component: ProcurementView, meta: { title: "采购请求", breadcrumb: ["采购管理", "采购请求"] } },
+        { path: "procurement", name: "procurement", component: ProcurementView, meta: { title: "采购需求", breadcrumb: ["采购管理", "采购需求"] } },
         { path: "purchase-list", name: "purchase-list", component: PurchaseListView, meta: { title: "采购清单", breadcrumb: ["采购管理", "采购清单"] } },
         { path: "purchase-history", name: "purchase-history", component: PurchaseHistoryView, meta: { title: "采购历史", breadcrumb: ["采购管理", "采购历史"] } },
         { path: "inbound", redirect: "/purchase-list" },
         { path: "settings", name: "settings", component: SettingsView, meta: { title: "系统设置", breadcrumb: ["系统设置", "配置中心"] } },
         { path: "settings/ai", name: "settings-ai", component: AiProviderSettingsView, meta: { title: "AI 配置", breadcrumb: ["系统设置", "AI 配置"] } },
-        { path: "tools/ai-image-generator", name: "tools-ai-image-generator", component: AiImageGeneratorView, meta: { title: "AI 套图生成中心", breadcrumb: ["工具中心", "AI 套图生成中心"] } },
-        { path: "tools/product-video-generator", name: "tools-product-video-generator", component: ProductVideoGeneratorView, meta: { title: "一键生成视频", breadcrumb: ["工具中心", "一键生成视频"] } },
+        { path: "settings/materials", name: "settings-materials", component: MaterialCenterView, meta: { title: "素材中心", breadcrumb: ["系统设置", "素材中心"] } },
+        { path: "tools/product-video-generator", name: "tools-product-video-generator", component: ProductVideoGeneratorView, meta: { title: "视频生成", breadcrumb: ["工具中心", "视频生成"] } },
         { path: "tools/image-cropper", name: "tools-image-cropper", component: EcommerceImageSplitterView, meta: { title: "图片自动裁切工具", breadcrumb: ["工具中心", "图片自动裁切工具"] } },
-        { path: "tools/ecommerce-image-splitter", name: "tools-ecommerce-image-splitter", component: EcommerceImageSplitterView, meta: { title: "电商套图拆分器", breadcrumb: ["工具中心", "电商套图拆分器"] } },
+        { path: "tools/ecommerce-image-splitter", name: "tools-ecommerce-image-splitter", component: EcommerceImageSplitterView, meta: { title: "套图拆分", breadcrumb: ["工具中心", "套图拆分"] } },
+        { path: "settings/prompts", redirect: "/asset-variant-center/create" },
         { path: ":pathMatch(.*)*", redirect: "/dashboard" }
       ]
     }
@@ -105,21 +105,11 @@ export const router = createRouter({
 });
 
 router.beforeEach(async (to) => {
-  const authStore = useAuthStore();
-
-  if (!authStore.bootstrapped) {
-    await authStore.bootstrap();
+  document.title = to.meta?.title ? `${to.meta.title} - Ozon ERP` : "Ozon ERP";
+  const auth = useAuthStore();
+  if (!to.meta?.public) {
+    await auth.bootstrap();
+    if (!auth.isAuthenticated) return { name: "login", query: { redirect: to.fullPath } };
   }
-
-  if (to.meta.public) {
-    if (authStore.isAuthenticated && to.path === "/login") return "/dashboard";
-    return true;
-  }
-
-  if (!authStore.isAuthenticated) {
-    return `/login?redirect=${encodeURIComponent(to.fullPath)}`;
-  }
-
   return true;
 });
-

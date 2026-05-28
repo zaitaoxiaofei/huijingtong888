@@ -17,7 +17,15 @@ export function createStaticHandler(publicDir) {
       ".html": "text/html; charset=utf-8",
       ".css": "text/css; charset=utf-8",
       ".js": "text/javascript; charset=utf-8",
-      ".svg": "image/svg+xml"
+      ".svg": "image/svg+xml",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".png": "image/png",
+      ".webp": "image/webp",
+      ".gif": "image/gif",
+      ".mp4": "video/mp4",
+      ".mov": "video/quicktime",
+      ".webm": "video/webm"
     };
     const headers = { "Content-Type": types[ext] || "application/octet-stream" };
     const isVersionedAsset = /\/vue-apps\/assets\/.+\.[a-z0-9_-]+\.(css|js)$/i.test(cleanPath)
@@ -34,6 +42,24 @@ export function createStaticHandler(publicDir) {
     }
     const shouldCompress = [".html", ".css", ".js", ".json", ".svg", ".txt", ".md"].includes(ext);
     const encoding = shouldCompress ? preferredEncoding(req) : "";
+    const stat = fs.statSync(filePath);
+    if (!encoding && String(req.headers.range || "").startsWith("bytes=")) {
+      const match = String(req.headers.range).match(/bytes=(\d*)-(\d*)/);
+      const start = Number(match?.[1] || 0);
+      const end = match?.[2] ? Number(match[2]) : stat.size - 1;
+      if (Number.isFinite(start) && Number.isFinite(end) && start <= end && start < stat.size) {
+        const safeEnd = Math.min(end, stat.size - 1);
+        headers["Accept-Ranges"] = "bytes";
+        headers["Content-Range"] = `bytes ${start}-${safeEnd}/${stat.size}`;
+        headers["Content-Length"] = safeEnd - start + 1;
+        writeHead(res, 206, headers);
+        return fs.createReadStream(filePath, { start, end: safeEnd }).pipe(res);
+      }
+    }
+    if (!encoding) {
+      headers["Accept-Ranges"] = "bytes";
+      headers["Content-Length"] = stat.size;
+    }
     if (encoding) {
       headers["Content-Encoding"] = encoding;
       headers["Vary"] = "Accept-Encoding";

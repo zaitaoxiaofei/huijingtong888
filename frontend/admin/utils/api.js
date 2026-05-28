@@ -3,7 +3,8 @@ const GET_CACHE_TTL_MS = 30000;
 const cachedGetPrefixes = [
   "/api/shops",
   "/api/people",
-  "/api/suppliers"
+  "/api/suppliers",
+  "/api/logistics-rules"
 ];
 let authRedirecting = false;
 const getCache = new Map();

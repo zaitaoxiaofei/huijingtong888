@@ -8,22 +8,24 @@ export const navigationMenus = [
     icon: DataAnalysis,
     children: [
       { key: "profit-dashboard", label: "利润看板", route: "/profit" },
-      { key: "advertising-daily", label: "广告系统", route: "/advertising/daily" },
+      { key: "advertising-daily", label: "广告数据", route: "/advertising/daily" },
       { key: "reviews", label: "评价中心", route: "/reviews", icon: ChatDotRound },
-      { key: "profit-aftersales", label: "售后损失", route: "/profit/aftersales" }
+      { key: "profit-aftersales", label: "售后损益", route: "/profit/aftersales" }
     ]
   },
   {
-    key: "tools",
-    label: "工具中心",
-    icon: Tools,
+    key: "products",
+    label: "商品中心",
+    icon: Goods,
     children: [
-      { key: "selection", label: "选品计价表", route: "/selection" },
-      { key: "asset-variant-center", label: "素材裂变中心", route: "/asset-variant-center" },
+      { key: "selection", label: "选品上架", route: "/selection" },
       { key: "listing-automation", label: "编辑上架", route: "/listing-automation" },
-      { key: "tools-image-cropper", label: "电商套图拆分器", route: "/tools/ecommerce-image-splitter" },
-      { key: "tools-product-video-generator", label: "一键生成视频", route: "/tools/product-video-generator" },
-      { key: "tools-ai-image-generator", label: "AI 套图生成中心", route: "/tools/ai-image-generator" }
+      { key: "listing-records", label: "上架记录", route: "/listing-records" },
+      { key: "online-products", label: "在线商品", route: "/online-products" },
+      { key: "multi-shop-publish", label: "多店铺发布", route: "/multi-shop-publish" },
+      { key: "asset-variant-center", label: "店铺矩阵列表", route: "/asset-variant-center" },
+      { key: "main-image-vehicle-variant", label: "AI内容优化", route: "/asset-variant-center/create" },
+      { key: "ozon-actions", label: "活动管理", route: "/ozon-actions" }
     ]
   },
   {
@@ -31,7 +33,7 @@ export const navigationMenus = [
     label: "订单中心",
     icon: Document,
     children: [
-      { key: "orders", label: "订单列表", route: "/orders" },
+      { key: "orders", label: "Ozon订单", route: "/orders" },
       { key: "outbound", label: "出库记录", route: "/outbound" }
     ]
   },
@@ -40,12 +42,12 @@ export const navigationMenus = [
     label: "库存管理",
     icon: Goods,
     children: [
-      { key: "inventory-products", label: "产品库存表", route: "/inventory/products" },
-      { key: "inventory-fbp", label: "FBP 库存表", route: "/inventory/fbp" },
-      { key: "inventory-hidden", label: "已隐藏产品", route: "/inventory/hidden" },
-      { key: "inventory-mappings", label: "库存-SKU映射表", route: "/inventory/mappings" },
-      { key: "inventory-suppliers", label: "供应商配置", route: "/inventory/suppliers" },
-      { key: "inventory-alerts", label: "库存预警", route: "/inventory/alerts" }
+      { key: "inventory-products", label: "本地库存", route: "/inventory/products" },
+      { key: "inventory-fbp", label: "Ozon FBP库存", route: "/inventory/fbp" },
+      { key: "inventory-mappings", label: "SKU库存映射", route: "/inventory/mappings" },
+      { key: "inventory-alerts", label: "库存预警", route: "/inventory/alerts" },
+      { key: "inventory-hidden", label: "隐藏商品", route: "/inventory/hidden" },
+      { key: "inventory-suppliers", label: "供应商", route: "/inventory/suppliers" }
     ]
   },
   {
@@ -53,19 +55,9 @@ export const navigationMenus = [
     label: "采购管理",
     icon: ShoppingCart,
     children: [
-      { key: "procurement", label: "采购请求", route: "/procurement" },
+      { key: "procurement", label: "采购需求", route: "/procurement" },
       { key: "purchase-list", label: "采购清单", route: "/purchase-list" },
       { key: "purchase-history", label: "采购历史", route: "/purchase-history" }
-    ]
-  },
-  {
-    key: "products",
-    label: "商品管理",
-    icon: Goods,
-    children: [
-      { key: "multi-shop-publish", label: "多店铺商品发布中台", route: "/multi-shop-publish" },
-      { key: "ozon-actions", label: "活动管理", route: "/ozon-actions" },
-      { key: "online-products", label: "在线商品", route: "/online-products" }
     ]
   },
   {
@@ -81,12 +73,22 @@ export const navigationMenus = [
     ]
   },
   {
+    key: "tools",
+    label: "工具中心",
+    icon: Tools,
+    children: [
+      { key: "tools-image-cropper", label: "套图拆分", route: "/tools/ecommerce-image-splitter" },
+      { key: "tools-product-video-generator", label: "视频生成", route: "/tools/product-video-generator" }
+    ]
+  },
+  {
     key: "settings",
     label: "系统设置",
     icon: Setting,
     children: [
       { key: "settings", label: "配置中心", route: "/settings" },
-      { key: "settings-ai", label: "AI 配置", route: "/settings/ai" }
+      { key: "settings-ai", label: "AI 配置", route: "/settings/ai" },
+      { key: "settings-materials", label: "素材中心", route: "/settings/materials" }
     ]
   }
 ];

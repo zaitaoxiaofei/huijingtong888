@@ -353,6 +353,8 @@ export async function advertisingDailyMysql(query = {}) {
       ad.shop_id,
       MAX(s.name) AS shop_name,
       ad.ozon_sku,
+      SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(ad.campaign_id, '') ORDER BY ad.spend_rub DESC, ad.date_key DESC SEPARATOR ','), ',', 1) AS campaign_id,
+      SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(ad.campaign_name, '') ORDER BY ad.spend_rub DESC, ad.date_key DESC SEPARATOR ','), ',', 1) AS campaign_name,
       MAX(COALESCE(ad.offer_id, sm.offer_id, op.offer_id, '')) AS offer_id,
       MAX(COALESCE(ad.product_name, sm.display_name, op.name, p.name, '')) AS product_name,
       MAX(COALESCE(oi_img.image_url, op.image_url, op.primary_image, op_offer.image_url, op_offer.primary_image, p.image_url, '')) AS image_url,
@@ -731,6 +733,83 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
     results,
     errors
   };
+}
+
+export async function updateAdvertisingCampaignProductSettingMysql(body = {}, options = {}) {
+  await ensureAdDailySchema();
+  const shop = await resolvePerformanceShop(body);
+  const campaignId = String(body.campaign_id || body.campaignId || "").trim();
+  const sku = String(body.ozon_sku || body.sku || "").trim();
+  const mode = String(body.mode || "").trim();
+  if (!campaignId || !sku) throw new Error("campaign_id 和 ozon_sku 不能为空");
+  if (!["bid", "targetCir"].includes(mode)) throw new Error("mode 只能是 bid 或 targetCir");
+
+  const token = await fetchPerformanceToken({
+    clientId: String(shop.performance_client_id || "").trim(),
+    clientSecret: String(shop.performance_client_secret || "").trim()
+  }, options);
+  const value = mode === "bid" ? toNumber(body.bid_rub || body.bidRub) : toNumber(body.target_cir || body.targetCir);
+  if (value <= 0) throw new Error(mode === "bid" ? "点击出价必须大于 0" : "目标广告费用份额必须大于 0");
+
+  const product = mode === "bid"
+    ? { sku, bid: String(Math.round(value * 1000000)) }
+    : { sku, targetCir: value };
+  const payload = { products: [product] };
+  const result = await performanceRequest(`/api/client/campaign/${campaignId}/v2/products`, payload, { ...options, token, method: "PUT" });
+
+  const { from, to } = buildDateRange(body);
+  if (mode === "bid") {
+    await mysqlExecute(`
+      UPDATE ozon_ad_sku_daily
+      SET campaign_bid_rub = ?, synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE shop_id = ? AND campaign_id = ? AND ozon_sku = ? AND date_key BETWEEN ? AND ?
+    `, [value, Number(shop.id), campaignId, sku, from, to]);
+  } else {
+    await mysqlExecute(`
+      UPDATE ozon_ad_sku_daily
+      SET campaign_target_cir = ?, synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE shop_id = ? AND campaign_id = ? AND ozon_sku = ? AND date_key BETWEEN ? AND ?
+    `, [value, Number(shop.id), campaignId, sku, from, to]);
+  }
+
+  return { ok: true, shop_id: shop.id, campaign_id: campaignId, ozon_sku: sku, mode, value, result };
+}
+
+export async function stopAdvertisingCampaignMysql(body = {}, options = {}) {
+  await ensureAdDailySchema();
+  const shop = await resolvePerformanceShop(body);
+  const campaignId = String(body.campaign_id || body.campaignId || "").trim();
+  if (!campaignId) throw new Error("campaign_id 不能为空");
+  const token = await fetchPerformanceToken({
+    clientId: String(shop.performance_client_id || "").trim(),
+    clientSecret: String(shop.performance_client_secret || "").trim()
+  }, options);
+  const result = await performanceRequest(`/api/client/campaign/${campaignId}/deactivate`, null, { ...options, token, method: "POST" });
+  const { from, to } = buildDateRange(body);
+  await mysqlExecute(`
+    UPDATE ozon_ad_sku_daily
+    SET campaign_state = 'stopped', synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE shop_id = ? AND campaign_id = ? AND date_key BETWEEN ? AND ?
+  `, [Number(shop.id), campaignId, from, to]);
+  return { ok: true, shop_id: shop.id, campaign_id: campaignId, result };
+}
+
+async function resolvePerformanceShop(body = {}) {
+  await ensurePerformanceCredentialSchema();
+  const shopId = Number(body.shop_id || body.shopId || 0);
+  if (!shopId) throw new Error("shop_id 不能为空");
+  const rows = await mysqlQuery(`
+    SELECT *
+    FROM shops
+    WHERE id = ? AND status = 'active'
+    LIMIT 1
+  `, [shopId]);
+  const shop = rows?.[0];
+  if (!shop) throw new Error("未找到可用店铺");
+  if (!String(shop.performance_client_id || "").trim() || !String(shop.performance_client_secret || "").trim()) {
+    throw new Error("当前店铺缺少 Ozon Performance API Client ID / Secret");
+  }
+  return shop;
 }
 
 async function refreshCampaignMetadataRows(shopId, campaigns = [], range = {}) {

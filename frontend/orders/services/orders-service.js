@@ -384,7 +384,7 @@ export async function bulkPrintOrders(orderIds = []) {
   try {
     const response = await apiClient.blobResponse("/api/orders/package-label", {
       method: "POST",
-      body: JSON.stringify({ order_ids: ids })
+      body: JSON.stringify({ order_ids: ids, require_all: true })
     });
     const blob = response.blob;
     const url = URL.createObjectURL(blob);

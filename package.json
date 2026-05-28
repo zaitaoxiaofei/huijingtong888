@@ -30,6 +30,7 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "element-plus": "^2.11.5",
     "jimp": "^1.6.1",
     "lucide-vue-next": "^1.0.0",

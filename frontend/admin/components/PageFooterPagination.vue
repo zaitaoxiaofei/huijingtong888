@@ -4,9 +4,9 @@ import { computed } from "vue";
 const props = defineProps({
   total: { type: Number, default: 0 },
   page: { type: Number, default: 1 },
-  pageSize: { type: Number, default: 30 },
+  pageSize: { type: Number, default: 20 },
   totalPages: { type: Number, default: 0 },
-  pageSizes: { type: Array, default: () => [30, 50, 100] },
+  pageSizes: { type: Array, default: () => [20, 50, 100] },
   compact: { type: Boolean, default: false },
   summary: { type: String, default: "" },
   pageSizeLabel: { type: String, default: "每页" }
@@ -24,6 +24,8 @@ const resolvedTotalPages = computed(() => {
 const summaryText = computed(() => (
   String(props.summary || "").trim() || `第 ${Number(props.page || 1)} / ${resolvedTotalPages.value} 页，共 ${Number(props.total || 0)} 条记录`
 ));
+
+const pageStatusText = computed(() => `${Number(props.page || 1)} / ${resolvedTotalPages.value} 页`);
 </script>
 
 <template>
@@ -41,6 +43,7 @@ const summaryText = computed(() => (
           <el-option v-for="size in pageSizes" :key="size" :label="`${size} 条`" :value="size" />
         </el-select>
       </div>
+      <span class="erp-page-status">{{ pageStatusText }}</span>
       <el-pagination
         background
         size="small"

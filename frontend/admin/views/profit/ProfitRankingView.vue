@@ -187,7 +187,7 @@ function handlePageChange(page) {
 
 function handlePageSizeChange(size) {
   state.page = 1;
-  state.pageSize = Number(size || 30);
+  state.pageSize = Number(size || 20);
   loadRows();
 }
 

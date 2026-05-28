@@ -269,6 +269,28 @@ export async function fetchOzonProductInfoAttributes(shop, options = {}) {
   return data.result?.items || data.items || data.result || [];
 }
 
+export async function fetchOzonProductContentRating(shop, options = {}) {
+  const skus = [...new Set((options.skus || options.sku || [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean))];
+  if (!skus.length) return [];
+  if (!hasRealOzonCredentials(shop)) {
+    return skus.map((sku) => ({
+      sku,
+      rating: 92,
+      groups: [
+        { name: "media", rating: 30, max_rating: 30 },
+        { name: "characteristics", rating: 35, max_rating: 35 },
+        { name: "description", rating: 27, max_rating: 35 }
+      ],
+      demo: true
+    }));
+  }
+  const data = await ozonRequest(shop, "/v1/product/rating-by-sku", { skus }, options);
+  const result = data.result || data;
+  return normalizeArray(result.products || result.items || result.ratings || result);
+}
+
 export async function fetchOzonCategoryAttributes(shop, options = {}) {
   const descriptionCategoryId = Number(options.descriptionCategoryId || options.description_category_id || 0);
   const typeId = Number(options.typeId || options.type_id || 0);

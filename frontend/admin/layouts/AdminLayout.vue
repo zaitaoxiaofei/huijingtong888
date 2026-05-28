@@ -24,8 +24,11 @@ function rememberIntendedRoute(target) {
 }
 
 function handleMenuSelect(index) {
-  rememberIntendedRoute(index);
-  router.push(index);
+  const target = String(index || "").trim();
+  if (!target.startsWith("/")) return;
+  rememberIntendedRoute(target);
+  if (target === route.path && !Object.keys(route.query || {}).length) return;
+  router.push({ path: target }).catch(() => {});
 }
 
 async function handleLogout() {
@@ -57,7 +60,6 @@ function openDashboard() {
           <el-menu
             :default-active="activeMenu"
             :collapse="appStore.sidebarCollapsed"
-            unique-opened
             class="erp-menu"
             @select="handleMenuSelect"
           >

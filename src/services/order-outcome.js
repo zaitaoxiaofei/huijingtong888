@@ -143,6 +143,32 @@ const PASSPORT_REASON_KEYWORDS = [
   "护照"
 ];
 
+const QUALITY_ORDER_REASON_CODES = new Set([
+  "quality_inspection",
+  "missing_passport",
+  "shipment_registration_failed",
+  "992",
+  "994"
+]);
+
+const QUALITY_ORDER_REASON_KEYWORDS = [
+  "quality inspection",
+  "inspection",
+  "description check",
+  "description verification",
+  "\u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 \u0442\u043e\u0432\u0430\u0440\u0430",
+  "\u0441\u043e\u043e\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0435 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u044e",
+  "质检",
+  "描述核验",
+  "描述检查"
+];
+
+const AFTERSALE_BUCKET_PRE_FULFILLMENT = "pre_fulfillment_cancel";
+const AFTERSALE_BUCKET_REJECTED = "rejected_unclaimed";
+const AFTERSALE_BUCKET_UNSUITABLE = "unsuitable_wrong_damaged";
+const AFTERSALE_BUCKET_QUALITY = "quality_issue";
+const AFTERSALE_BUCKET_PLATFORM = "platform_document_issue";
+
 function normalizeText(...values) {
   return values
     .map((value) => String(value || "").trim().toLowerCase())
@@ -191,6 +217,10 @@ function normalizedReasonCode(row = {}) {
   return String(row.reason_code || row.cancel_reason_code || "").trim().toLowerCase();
 }
 
+function normalizedPostingNumber(row = {}) {
+  return String(row.posting_number || row.order_number || row.postingNumber || row.orderNumber || "").trim();
+}
+
 function normalizedReasonText(row = {}) {
   return normalizeText(
     row.cancel_reason,
@@ -201,6 +231,26 @@ function normalizedReasonText(row = {}) {
     row.reason_label,
     row.reason_group_label
   );
+}
+
+export function isQualityCheckOrder(row = {}, options = {}) {
+  const markType = String(row.mark_type || row.order_mark_type || row.mark || "").trim().toLowerCase();
+  if (markType === "quality") return true;
+
+  const postingNumber = normalizedPostingNumber(row);
+  const prefixes = Array.isArray(options.qualityPrefixes) ? options.qualityPrefixes : [];
+  if (postingNumber && prefixes.some((prefix) => {
+    const normalizedPrefix = String(prefix || "").trim();
+    return normalizedPrefix && postingNumber.startsWith(normalizedPrefix);
+  })) {
+    return true;
+  }
+
+  const reasonCode = normalizedReasonCode(row) || String(row.cancel_reason_id || "").trim().toLowerCase();
+  if (QUALITY_ORDER_REASON_CODES.has(reasonCode)) return true;
+
+  const reasonText = normalizedReasonText(row);
+  return includesAny(reasonText, QUALITY_ORDER_REASON_KEYWORDS) || includesAny(reasonText, PASSPORT_REASON_KEYWORDS);
 }
 
 function sqlLikeAny(expr, keywords) {
@@ -266,6 +316,57 @@ export function resolveOrderLossProfile(row = {}) {
     return lossProfileMeta(LOSS_PROFILE_PURCHASE_COLLECTING);
   }
   return lossProfileMeta(LOSS_PROFILE_NONE);
+}
+
+export function classifyAftersaleBucket(row = {}, options = {}) {
+  const outcome = String(row.outcome || row.outcome_type || classifyOrderOutcome(row)).trim().toLowerCase();
+  const profile = String(row.loss_profile_code || resolveOrderLossProfile({ ...row, outcome_type: outcome }).code || "").trim().toLowerCase();
+  const reasonCode = normalizedReasonCode(row) || String(row.cancel_reason_id || "").trim().toLowerCase();
+  const reasonText = normalizedReasonText(row);
+
+  if (isQualityCheckOrder(row, options)) return AFTERSALE_BUCKET_PLATFORM;
+  if (outcome === "cancelled_pre_fulfillment") return AFTERSALE_BUCKET_PRE_FULFILLMENT;
+  if (QUALITY_ORDER_REASON_CODES.has(reasonCode) || includesAny(reasonText, QUALITY_ORDER_REASON_KEYWORDS) || includesAny(reasonText, PASSPORT_REASON_KEYWORDS)) {
+    return AFTERSALE_BUCKET_PLATFORM;
+  }
+  if (reasonCode === "aftersale_quality_issue" || profile === LOSS_PROFILE_COMMISSION_PURCHASE_COLLECTING_INTERNATIONAL || includesAny(reasonText, QUALITY_ISSUE_REASON_KEYWORDS)) {
+    return AFTERSALE_BUCKET_QUALITY;
+  }
+  if (
+    PURCHASE_COLLECTING_INTERNATIONAL_REASON_CODES.has(reasonCode)
+    || profile === LOSS_PROFILE_PURCHASE_COLLECTING_INTERNATIONAL
+    || includesAny(reasonText, UNSUITABLE_REASON_KEYWORDS)
+    || includesAny(reasonText, WRONG_ITEM_REASON_KEYWORDS)
+    || includesAny(reasonText, DAMAGED_REASON_KEYWORDS)
+  ) {
+    return AFTERSALE_BUCKET_UNSUITABLE;
+  }
+  if (outcome === "rejected_unclaimed" || outcome === "after_delivery_return") return AFTERSALE_BUCKET_REJECTED;
+  return AFTERSALE_BUCKET_PRE_FULFILLMENT;
+}
+
+export function classifyOrderAccounting(row = {}, options = {}) {
+  const outcomeType = classifyOrderOutcome(row);
+  const qualityCheck = isQualityCheckOrder(row, options);
+  const lossProfile = qualityCheck
+    ? lossProfileMeta(LOSS_PROFILE_NONE)
+    : resolveOrderLossProfile({ ...row, outcome_type: outcomeType });
+  const bucket = classifyAftersaleBucket({
+    ...row,
+    outcome_type: outcomeType,
+    loss_profile_code: lossProfile.code
+  }, options);
+
+  return {
+    order_nature: qualityCheck ? "quality_check" : "normal_sale",
+    is_quality_order: qualityCheck,
+    outcome_type: outcomeType,
+    loss_profile_code: lossProfile.code,
+    loss_profile_label: lossProfile.label,
+    loss_formula_text: lossProfile.formulaText || lossProfile.formula_text || "",
+    aftersale_bucket: bucket,
+    should_include_aftersale_loss: !qualityCheck && ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(outcomeType)
+  };
 }
 
 export function isCancelledOutcome(row = {}) {

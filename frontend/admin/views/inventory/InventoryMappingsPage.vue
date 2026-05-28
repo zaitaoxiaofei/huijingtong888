@@ -32,7 +32,7 @@ const state = reactive({
     dateFrom: "",
     dateTo: "",
     page: 1,
-    pageSize: 30
+    pageSize: 20
   }
 });
 
@@ -48,7 +48,7 @@ const filterDefaults = {
   dateFrom: "",
   dateTo: "",
   page: 1,
-  pageSize: 30
+  pageSize: 20
 };
 
 const focusProductId = computed(() => Number(route.query.productId || 0) || null);
@@ -328,7 +328,7 @@ onMounted(async () => {
       :total="state.total"
       :page="state.filters.page"
       :page-size="state.filters.pageSize"
-      :page-sizes="[30, 50, 100]"
+      
       @update:page="handlePageChange"
       @update:pageSize="handlePageSizeChange"
     />
@@ -405,4 +405,5 @@ onMounted(async () => {
   }
 }
 </style>
+
 

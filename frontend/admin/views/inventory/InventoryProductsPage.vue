@@ -1,4 +1,4 @@
-<script setup>
+﻿<script setup>
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -71,7 +71,7 @@ const state = reactive({
     dateFrom: "",
     dateTo: "",
     page: 1,
-    pageSize: 30
+    pageSize: 20
   }
 });
 
@@ -81,7 +81,7 @@ const filterDefaults = {
   dateFrom: "",
   dateTo: "",
   page: 1,
-  pageSize: 30
+  pageSize: 20
 };
 
 const mergeFieldLabelMap = {
@@ -932,7 +932,7 @@ onMounted(async () => {
       :total="state.total"
       :page="state.filters.page"
       :page-size="state.filters.pageSize"
-      :page-sizes="[30, 50, 100]"
+      
       @update:page="handlePageChange"
       @update:pageSize="handlePageSizeChange"
     />
@@ -1587,3 +1587,4 @@ onMounted(async () => {
   }
 }
 </style>
+

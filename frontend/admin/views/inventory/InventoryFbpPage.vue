@@ -1,4 +1,4 @@
-<script setup>
+﻿<script setup>
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
@@ -29,7 +29,7 @@ const state = reactive({
     sortKey: "fbp_available",
     sortDir: "asc",
     page: 1,
-    pageSize: 30
+    pageSize: 20
   }
 });
 
@@ -41,7 +41,7 @@ const filterDefaults = {
   sortKey: "fbp_available",
   sortDir: "asc",
   page: 1,
-  pageSize: 30
+  pageSize: 20
 };
 
 const pagedRows = computed(() => state.rows);
@@ -118,6 +118,17 @@ function openMappings() {
 
 function openProcurement(row) {
   router.push({ path: "/procurement", query: { productId: String(row.product_id), from: "inventory-fbp" } });
+}
+
+function openExternalLink(url) {
+  const target = String(url || "").trim();
+  if (!target) return;
+  window.open(target, "_blank", "noopener,noreferrer");
+}
+
+function ozonBuyerProductLinkFor(row) {
+  const productId = String(row?.ozon_product_id || "").trim();
+  return productId ? `https://www.ozon.ru/product/${encodeURIComponent(productId)}/` : "";
 }
 
 async function refreshStocks() {
@@ -215,7 +226,18 @@ onMounted(async () => {
             <div class="product-cell">
               <ProductImagePreview :src="row.image_url" />
               <div class="cell-stack">
-                <strong>{{ row.name || row.ozon_sku || "-" }}</strong>
+                <a
+                  v-if="ozonBuyerProductLinkFor(row)"
+                  class="inventory-product-link"
+                  :href="ozonBuyerProductLinkFor(row)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  :title="`打开 Ozon 前台商品 ${row.name || row.ozon_sku || ''}`"
+                  @click.prevent.stop="openExternalLink(ozonBuyerProductLinkFor(row))"
+                >
+                  {{ row.name || row.ozon_sku || "-" }}
+                </a>
+                <strong v-else>{{ row.name || row.ozon_sku || "-" }}</strong>
                 <span class="muted-text">SKU {{ row.ozon_sku || "-" }}</span>
                 <span class="muted-text">Offer {{ row.offer_id || "-" }}</span>
               </div>
@@ -289,9 +311,10 @@ onMounted(async () => {
       :total="state.total"
       :page="state.filters.page"
       :page-size="state.filters.pageSize"
-      :page-sizes="[30, 50, 100]"
+      
       @update:page="handlePageChange"
       @update:pageSize="handlePageSizeChange"
     />
   </div>
 </template>
+
