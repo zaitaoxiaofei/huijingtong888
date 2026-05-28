@@ -19,7 +19,6 @@ const InventoryAlertsPage = () => import("../views/inventory/InventoryAlertsPage
 const OnlineProductsView = () => import("../views/inventory/OnlineProductsView.vue");
 const ListingAutomationView = () => import("../views/listing/ListingAutomationView.vue");
 const ListingPublishRecordsView = () => import("../views/listing/ListingPublishRecordsView.vue");
-const MultiShopPublishView = () => import("../views/listing/MultiShopPublish.vue");
 const AssetVariantCenterView = () => import("../views/settings/PromptLibraryView.vue");
 const ShopAssetVariantCenterView = () => import("../views/listing/ShopAssetVariantCenter.vue");
 const SelectionView = () => import("../views/selection/SelectionView.vue");
@@ -76,7 +75,6 @@ export const router = createRouter({
         { path: "asset-variant-center/create", name: "asset-variant-center-create", component: AssetVariantCenterView, meta: { title: "AI内容优化", breadcrumb: ["商品中心", "AI内容优化"] } },
         { path: "listing-automation", name: "listing-automation", component: ListingAutomationView, meta: { title: "编辑上架", breadcrumb: ["商品中心", "编辑上架"] } },
         { path: "listing-records", name: "listing-records", component: ListingPublishRecordsView, meta: { title: "上架记录", breadcrumb: ["商品中心", "上架记录"] } },
-        { path: "multi-shop-publish", name: "multi-shop-publish", component: MultiShopPublishView, meta: { title: "多店铺发布", breadcrumb: ["商品中心", "多店铺发布"] } },
         { path: "ozon-actions", name: "ozon-actions", component: OzonActionsView, meta: { title: "活动管理", breadcrumb: ["商品中心", "活动管理"] } },
         { path: "selection", name: "selection", component: SelectionView, meta: { title: "选品上架", breadcrumb: ["商品中心", "选品上架"] } },
         { path: "profit", name: "profit", component: ProfitDashboardView, meta: { title: "利润看板", breadcrumb: ["经营分析", "利润看板"] } },

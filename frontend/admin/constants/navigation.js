@@ -22,7 +22,6 @@ export const navigationMenus = [
       { key: "listing-automation", label: "编辑上架", route: "/listing-automation" },
       { key: "listing-records", label: "上架记录", route: "/listing-records" },
       { key: "online-products", label: "在线商品", route: "/online-products" },
-      { key: "multi-shop-publish", label: "多店铺发布", route: "/multi-shop-publish" },
       { key: "asset-variant-center", label: "店铺矩阵列表", route: "/asset-variant-center" },
       { key: "main-image-vehicle-variant", label: "AI内容优化", route: "/asset-variant-center/create" },
       { key: "ozon-actions", label: "活动管理", route: "/ozon-actions" }

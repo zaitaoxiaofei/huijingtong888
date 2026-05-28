@@ -18,7 +18,6 @@ import { createOzonActionRoutes } from "./server/routes/ozonActions.js";
 import { createSyncRoutes } from "./server/routes/sync.js";
 import { createReviewRoutes, handleReviewRestRoute } from "./server/routes/reviews.js";
 import { createListingAutomationRoutes, handleListingAutomationRestRoute, handleMaterialPackageRestRoute } from "./server/routes/listingAutomation.js";
-import { createMultiShopPublishRoutes, handleMultiShopPublishRestRoute } from "./server/routes/multiShopPublish.js";
 import { createAssetVariantEngineRoutes, handleAssetVariantEngineRestRoute } from "./server/routes/assetVariantEngine.js";
 import { createAiPromptTemplateRoutes, handleAiPromptTemplateRestRoute } from "./server/routes/aiPromptTemplates.js";
 import { createMaterialAssetRoutes, handleMaterialAssetRestRoute } from "./server/routes/materialAssets.js";
@@ -61,7 +60,6 @@ const routeModules = {
   ...createOrderRoutes({ services, readJson, notFound, writeHead, json }),
   ...createSyncRoutes({ services, readJson, syncExceptionWorkbenchOrders }),
   ...createListingAutomationRoutes({ services, readJson }),
-  ...createMultiShopPublishRoutes({ services, readJson }),
   ...createAssetVariantEngineRoutes({ services, readJson }),
   ...createAiPromptTemplateRoutes({ services, readJson }),
   ...createMaterialAssetRoutes({ services, readJson }),
@@ -263,20 +261,6 @@ async function handleRestRoute(req, res, url, parts) {
   });
   if (listingAutomationRestHandled !== false) {
     return listingAutomationRestHandled;
-  }
-
-  const multiShopPublishRestHandled = await handleMultiShopPublishRestRoute({
-    req,
-    res,
-    parts,
-    services,
-    readJson,
-    json,
-    notFound,
-    writeHead
-  });
-  if (multiShopPublishRestHandled !== false) {
-    return multiShopPublishRestHandled;
   }
 
   const assetVariantHandled = await handleAssetVariantEngineRestRoute({
