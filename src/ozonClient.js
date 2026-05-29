@@ -146,6 +146,87 @@ export async function fetchOzonProductStocks(shop, options = {}) {
   return rows;
 }
 
+export async function fetchOzonStockTurnover(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) return [];
+  const skus = [...new Set((options.skus || []).map((item) => Number(item)).filter(Boolean))];
+  const rows = [];
+  for (let index = 0; index < Math.max(skus.length, 1); index += 1000) {
+    const chunk = skus.length ? skus.slice(index, index + 1000) : [];
+    let offset = 0;
+    while (true) {
+      throwIfAborted(options.signal);
+      const payload = {
+        limit: Math.min(Math.max(Number(options.limit || 1000), 1), 1000),
+        offset
+      };
+      if (chunk.length) payload.sku = chunk;
+      const data = await ozonRequest(shop, "/v1/analytics/turnover/stocks", payload, { signal: options.signal });
+      const result = data.result || data;
+      const items = result.items || result.products || result.rows || [];
+      rows.push(...items.map(normalizeOzonStockTurnoverItem).filter((item) => item.ozon_sku));
+      if (chunk.length || items.length < payload.limit) break;
+      offset += payload.limit;
+    }
+    if (!skus.length) break;
+  }
+  return rows;
+}
+
+export async function fetchOzonManagedStocks(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) return [];
+  const skus = [...new Set((options.skus || []).map((item) => Number(item)).filter(Boolean))];
+  const rows = [];
+  for (let index = 0; index < Math.max(skus.length, 1); index += 1000) {
+    const chunk = skus.length ? skus.slice(index, index + 1000) : [];
+    let offset = 0;
+    while (true) {
+      throwIfAborted(options.signal);
+      const payload = {
+        filter: {},
+        limit: Math.min(Math.max(Number(options.limit || 1000), 1), 1000),
+        offset
+      };
+      if (chunk.length) payload.filter.sku = chunk;
+      const data = await ozonRequest(shop, "/v1/analytics/manage/stocks", payload, { signal: options.signal });
+      const result = data.result || data;
+      const items = result.items || result.products || result.rows || [];
+      rows.push(...items.map(normalizeOzonManagedStockItem).filter((item) => item.ozon_sku));
+      if (chunk.length || items.length < payload.limit) break;
+      offset += payload.limit;
+    }
+    if (!skus.length) break;
+  }
+  return rows;
+}
+
+function normalizeOzonStockTurnoverItem(item = {}) {
+  const sku = String(item.sku || item.ozon_sku || "");
+  return {
+    ozon_sku: sku,
+    average_daily_sales: numberFromOzon(item.ads ?? item.average_daily_sales ?? item.avg_daily_sales),
+    turnover_current_stock: stockNumber(item.current_stock ?? item.stock ?? item.stock_count),
+    stock_days: numberFromOzon(item.idc ?? item.days_on_stock ?? item.stock_days ?? item.turnover_days),
+    stock_level: String(item.idc_grade || item.stock_level || item.grade || ""),
+    raw_json: stringify(item)
+  };
+}
+
+function normalizeOzonManagedStockItem(item = {}) {
+  const sku = String(item.sku || item.ozon_sku || "");
+  return {
+    ozon_sku: sku,
+    offer_id: String(item.offer_id || ""),
+    warehouse_name: String(item.warehouse_name || ""),
+    valid_stock_count: stockNumber(item.valid_stock_count ?? item.valid_count ?? item.free_stock_count),
+    expiring_stock_count: stockNumber(item.expiring_stock_count ?? item.expiring_count ?? item.waiting_payment_stock_count),
+    waitingdocs_stock_count: stockNumber(item.waitingdocs_stock_count ?? item.waiting_docs_stock_count),
+    paid_stock_count: stockNumber(item.paid_stock_count ?? item.charged_stock_count ?? item.tariff_stock_count),
+    free_stock_count: stockNumber(item.free_stock_count ?? item.valid_stock_count),
+    paid_storage_start_at: String(item.paid_storage_start_at || item.paid_storage_start_date || item.storage_tariff_start_date || item.tariff_start_date || ""),
+    raw_json: stringify(item)
+  };
+}
+
 export async function updateOzonProductStocks(shop, stocks = [], options = {}) {
   const payloadStocks = (stocks || []).map((item) => ({
     offer_id: String(item.offer_id || ""),

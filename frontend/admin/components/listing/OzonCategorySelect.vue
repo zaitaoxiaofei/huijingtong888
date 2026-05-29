@@ -25,6 +25,7 @@ const skuKeyword = ref("");
 const selectedValue = ref(props.modelValue || "");
 const searchPanelVisible = ref(false);
 const selectRootRef = ref();
+const categoryPopoverRef = ref();
 const browsePath = ref([]);
 const searchMode = ref(false);
 const BROWSE_CATEGORY_LIMIT = 300;
@@ -101,6 +102,7 @@ async function loadCategories(query = "", options = {}) {
     }
   } finally {
     if (seq === requestSeq) loading.value = false;
+    nextTick(() => categoryPopoverRef.value?.popperRef?.updatePopper?.());
   }
 }
 
@@ -108,7 +110,7 @@ function scheduleSearch(query) {
   if (searchTimer) window.clearTimeout(searchTimer);
   searchTimer = window.setTimeout(() => {
     loadCategories(query, { limit: SEARCH_CATEGORY_LIMIT, autoExpandQuery: true });
-  }, 260);
+  }, 180);
 }
 
 async function syncCategories() {
@@ -136,7 +138,14 @@ async function syncCategories() {
 
 function openSearchPanel() {
   searchPanelVisible.value = true;
-  if (!categories.value.length) loadCategories("", { limit: BROWSE_CATEGORY_LIMIT });
+  const cleanValue = String(keyword.value || "").trim();
+  if (cleanValue) {
+    searchMode.value = true;
+    if (!categories.value.length) loadCategories(cleanValue, { limit: SEARCH_CATEGORY_LIMIT, autoExpandQuery: true });
+  } else if (!categories.value.length) {
+    loadCategories("", { limit: BROWSE_CATEGORY_LIMIT });
+  }
+  nextTick(() => categoryPopoverRef.value?.popperRef?.updatePopper?.());
 }
 
 function handleDocumentMouseDown(event) {
@@ -162,6 +171,7 @@ function handleKeywordInput(value) {
   browsePath.value = [];
   categories.value = [];
   scheduleSearch(cleanValue);
+  nextTick(() => categoryPopoverRef.value?.popperRef?.updatePopper?.());
 }
 
 function clearSelection() {
@@ -372,6 +382,7 @@ function normalizeSearchText(value) {
   <div ref="selectRootRef" class="ozon-category-select">
     <div class="category-main-row" :class="{ 'is-clean': !showSync && !showSkuLookup }">
       <el-popover
+        ref="categoryPopoverRef"
         v-model:visible="searchPanelVisible"
         trigger="manual"
         placement="bottom-start"
@@ -408,22 +419,7 @@ function normalizeSearchText(value) {
             没有找到匹配类目，可以换一个关键词或同步类目缓存。
           </div>
 
-          <div v-if="isSearchMode && categories.length" class="category-result-list">
-            <button
-              v-for="category in categories"
-              :key="category.ozon_category_id"
-              type="button"
-              class="category-result-item"
-              :class="{ active: selectedValue === category.ozon_category_id }"
-              @mousedown.prevent="selectCategory(category)"
-            >
-              <span class="category-leaf">{{ displayLeafName(category) }}</span>
-              <span class="category-path">{{ displayCategoryPath(category) }}</span>
-              <span v-if="displayCategorySubLabel(category)" class="category-sub">{{ displayCategorySubLabel(category) }}</span>
-            </button>
-          </div>
-
-          <div v-else-if="categories.length" class="category-cascader-panel">
+          <div v-if="categories.length" class="category-cascader-panel">
             <div v-for="(column, columnIndex) in browseColumns" :key="columnIndex" class="category-cascader-column">
               <button
                 v-for="node in column"
@@ -559,7 +555,7 @@ function normalizeSearchText(value) {
 }
 
 .category-cascader-column:last-child {
-  flex-basis: 320px;
+  flex-basis: 360px;
   border-right: 0;
 }
 

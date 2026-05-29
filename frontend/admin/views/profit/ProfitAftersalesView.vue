@@ -92,7 +92,19 @@ function detailOrderStatus(row = {}) {
 }
 
 function detailItemImageUrl(row = {}) {
-  return row.image_url || row.ozon_image_url || row.online_image_url || row.primary_image || row.product_image_url || "";
+  const value = row.image_url || row.ozon_image_url || row.online_image_url || row.primary_image || row.product_image_url || "";
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (text.startsWith("[") || text.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return String(parsed[0] || "").trim();
+      return String(parsed.url || parsed.image_url || parsed.src || "").trim();
+    } catch {
+      return text;
+    }
+  }
+  return text.split("||").map((item) => item.trim()).find(Boolean) || "";
 }
 
 function hasMissingCost(row = {}) {

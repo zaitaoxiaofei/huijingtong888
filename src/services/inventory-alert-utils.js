@@ -1,6 +1,9 @@
 import { shanghaiDateDaysAgo } from "../shanghai-time.js";
 
 const FBS_VIRTUAL_STOCK_WARNING_THRESHOLD = 10;
+const FBP_COVERAGE_DAYS_SHORTAGE = 30;
+const FBP_COVERAGE_DAYS_URGENT = 7;
+const FBP_COVERAGE_DAYS_SLOW = 60;
 
 export function applyStockAlertQuery(rows, query = {}) {
   const mode = String(query.mode || "alerts");
@@ -11,11 +14,17 @@ export function applyStockAlertQuery(rows, query = {}) {
   const searchText = String(query.query || query.search || "").trim().toLowerCase();
   const dateFrom = String(query.dateFrom || query.date_from || "").slice(0, 10);
   const dateTo = String(query.dateTo || query.date_to || "").slice(0, 10);
+  const alertType = String(query.alertType || query.alert_type || "all");
 
-  const sourceRows = mode === "fbp" ? flattenFbpRows(rows) : rows;
+  const fbpAlertMode = mode === "fbp-alerts";
+  const sourceRows = mode === "fbp" || fbpAlertMode ? flattenFbpRows(rows) : rows;
   const filtered = sourceRows.filter((row) => {
+    if (fbpAlertMode && row.alert_level === "ok") return false;
+    if (mode === "fbp" || fbpAlertMode) {
+      if (!matchesFbpAlertType(row, alertType)) return false;
+    }
     if (shopId !== "all") {
-      if (mode === "fbp") {
+      if (mode === "fbp" || fbpAlertMode) {
         if (String(row.shop_id || "") !== shopId) return false;
       } else {
         const matched = Array.isArray(row.skus) && row.skus.some((sku) => String(sku.shop_id || "") === shopId);
@@ -26,14 +35,14 @@ export function applyStockAlertQuery(rows, query = {}) {
     if (dateFrom && (!dateKey || dateKey < dateFrom)) return false;
     if (dateTo && (!dateKey || dateKey > dateTo)) return false;
     if (!searchText) return true;
-    const skuText = mode === "fbp"
+    const skuText = mode === "fbp" || fbpAlertMode
       ? [row.shop_name, row.name, row.ozon_sku, row.offer_id].join(" ")
       : (Array.isArray(row.skus) ? row.skus.map((sku) => `${sku.shop_name || ""} ${sku.ozon_sku || ""} ${sku.offer_id || ""}`).join(" ") : "");
     const haystack = [row.product_name, row.inventory_id, row.suggestion, skuText].map((item) => String(item || "").toLowerCase()).join(" ");
     return haystack.includes(searchText);
   });
 
-  if (mode === "fbp") sortFbpRows(filtered, query);
+  if (mode === "fbp" || fbpAlertMode) sortFbpRows(filtered, query, fbpAlertMode);
   const pageRows = paged ? filtered.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize) : filtered;
   return {
     rows: pageRows,
@@ -43,7 +52,8 @@ export function applyStockAlertQuery(rows, query = {}) {
     mode,
     meta: {
       total: rows.length,
-      warning_count: rows.filter((row) => row.alert_level !== "ok").length,
+      warning_count: fbpAlertMode ? filtered.length : rows.filter((row) => row.alert_level !== "ok").length,
+      urgent_count: filtered.filter((row) => row.alert_level === "danger").length,
       last_synced_at: rows.reduce((latest, row) => maxTextDate(latest, row.last_synced_at), "")
     }
   };
@@ -55,7 +65,7 @@ function flattenFbpRows(rows) {
     const skus = Array.isArray(product.skus) ? product.skus : [];
     for (const sku of skus) {
       if (Number(sku.fbp_snapshot_count || 0) <= 0 && Number(sku.fbp_present || 0) <= 0 && Number(sku.fbp_available || 0) <= 0) continue;
-      result.push({
+      result.push(withFbpAlertStatus({
         product_id: product.product_id,
         product_name: product.product_name,
         product_image_url: product.image_url,
@@ -68,22 +78,54 @@ function flattenFbpRows(rows) {
         recent_30d_qty: sku.recent_30d_qty,
         prev_7d_qty: sku.prev_7d_qty,
         all_time_qty: sku.all_time_qty,
+        free_stock_count: sku.free_stock_count,
+        paid_stock_count: sku.paid_stock_count,
+        expiring_stock_count: sku.expiring_stock_count,
+        waitingdocs_stock_count: sku.waitingdocs_stock_count,
+        paid_storage_start_at: sku.paid_storage_start_at,
+        stock_days: sku.stock_days,
+        average_daily_sales: sku.average_daily_sales,
+        stock_level: sku.stock_level,
         ...sku
-      });
+      }));
     }
   }
   return result;
 }
 
-function sortFbpRows(rows, query = {}) {
+function matchesFbpAlertType(row = {}, alertType = "all") {
+  if (!alertType || alertType === "all") return true;
+  if (alertType === "out_of_stock") return row.alert_type === "out_of_stock";
+  if (alertType === "within_7_days") return row.alert_type === "within_7_days";
+  if (alertType === "within_30_days") return row.alert_type === "within_30_days";
+  if (alertType === "slow") return ["over_60_days", "no_sales"].includes(row.alert_type);
+  return row.alert_type === alertType;
+}
+
+function sortFbpRows(rows, query = {}, alertMode = false) {
   const sortKey = String(query.sortKey || query.sort_key || "fbp_available");
   const factor = String(query.sortDir || query.sort_dir || "asc") === "desc" ? -1 : 1;
   rows.sort((left, right) => {
+    if (alertMode) {
+      const priority = fbpAlertPriority(left) - fbpAlertPriority(right);
+      if (priority) return priority;
+    }
     const a = Number(left[sortKey] || 0);
     const b = Number(right[sortKey] || 0);
     if (a === b) return Number(left.product_id || 0) - Number(right.product_id || 0);
     return (a - b) * factor;
   });
+}
+
+function fbpAlertPriority(row = {}) {
+  const order = {
+    out_of_stock: 0,
+    within_7_days: 1,
+    within_30_days: 2,
+    no_sales: 3,
+    over_60_days: 4
+  };
+  return order[row.alert_type] ?? 99;
 }
 
 export function parseWarehouseBreakdown(value) {
@@ -122,6 +164,59 @@ export function withStockAlertStatus(product) {
     warnings,
     suggestion: stockSuggestion(warnings)
   };
+}
+
+function withFbpAlertStatus(row) {
+  const available = Number(row.fbp_available || 0);
+  const recent30d = Number(row.recent_30d_qty || 0);
+  const dailySales = recent30d > 0 ? recent30d / 30 : 0;
+  const coverageDays = dailySales > 0 ? available / dailySales : null;
+  const warnings = [];
+  let alertType = "";
+  let alertLevel = "ok";
+  let alertText = "FBP库存正常";
+
+  if (available <= 0) {
+    alertType = "out_of_stock";
+    alertLevel = "danger";
+    alertText = "FBP已断货";
+  } else if (coverageDays !== null && coverageDays <= FBP_COVERAGE_DAYS_URGENT) {
+    alertType = "within_7_days";
+    alertLevel = "danger";
+    alertText = `预计${coverageDays.toFixed(1)}天内断货`;
+  } else if (coverageDays !== null && coverageDays <= FBP_COVERAGE_DAYS_SHORTAGE) {
+    alertType = "within_30_days";
+    alertLevel = "warning";
+    alertText = `预计${coverageDays.toFixed(1)}天内断货`;
+  } else if (coverageDays !== null && coverageDays >= FBP_COVERAGE_DAYS_SLOW) {
+    alertType = "over_60_days";
+    alertLevel = "warning";
+    alertText = `预计库存${coverageDays.toFixed(1)}天`;
+  } else if (!recent30d && available > 0) {
+    alertType = "no_sales";
+    alertLevel = "warning";
+    alertText = "30天无销量但有FBP库存";
+  }
+
+  if (alertType) warnings.push({ type: alertType, level: alertLevel, text: alertText });
+  return {
+    ...row,
+    daily_sales_30d: dailySales,
+    coverage_days: coverageDays,
+    alert_type: alertType || "ok",
+    alert_level: alertLevel,
+    warnings,
+    suggestion: fbpAlertSuggestion(alertType, coverageDays)
+  };
+}
+
+function fbpAlertSuggestion(alertType, coverageDays) {
+  if (alertType === "out_of_stock") return "FBP已断货，优先补仓或调整库存策略。";
+  if (alertType === "within_7_days") return "预计7天内断货，建议立即补仓。";
+  if (alertType === "within_30_days") return "预计30天内断货，建议排入补货计划。";
+  if (alertType === "over_60_days") return `预计库存${Number(coverageDays || 0).toFixed(1)}天，关注资金占用和滞缓风险。`;
+  if (alertType === "no_sales") return "30天无销量但有FBP库存，检查是否需要促销或减少补仓。";
+  return "FBP库存状态正常。";
 }
 
 function stockSuggestion(warnings) {

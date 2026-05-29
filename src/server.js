@@ -1,5 +1,6 @@
 import http from "node:http";
 import { Buffer } from "node:buffer";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { config } from "./config.js";
 import { calculateCelFbsPricing } from "./celRates.js";
@@ -20,8 +21,10 @@ import { createReviewRoutes, handleReviewRestRoute } from "./server/routes/revie
 import { createListingAutomationRoutes, handleListingAutomationRestRoute, handleMaterialPackageRestRoute } from "./server/routes/listingAutomation.js";
 import { createAssetVariantEngineRoutes, handleAssetVariantEngineRestRoute } from "./server/routes/assetVariantEngine.js";
 import { createAiPromptTemplateRoutes, handleAiPromptTemplateRestRoute } from "./server/routes/aiPromptTemplates.js";
+import { createAiStrategyRoutes, handleAiStrategyRestRoute } from "./server/routes/aiStrategies.js";
 import { createMaterialAssetRoutes, handleMaterialAssetRestRoute } from "./server/routes/materialAssets.js";
 import { createAiImageRoutes, handleAiImageRestRoute } from "./server/routes/aiImageRoutes.js";
+import { getAiTaskFile } from "./server/services/ai/aiWorkflowService.js";
 import { createImageCropperRoutes, handleImageCropperRestRoute } from "./server/routes/tools/imageCropper.js";
 import {
   SITE_ACCESS_LOGIN_PATH,
@@ -62,6 +65,7 @@ const routeModules = {
   ...createListingAutomationRoutes({ services, readJson }),
   ...createAssetVariantEngineRoutes({ services, readJson }),
   ...createAiPromptTemplateRoutes({ services, readJson }),
+  ...createAiStrategyRoutes({ services, readJson }),
   ...createMaterialAssetRoutes({ services, readJson }),
   ...createAiImageRoutes({ readJson }),
   ...createImageCropperRoutes({ readJson })
@@ -313,6 +317,19 @@ async function handleRestRoute(req, res, url, parts) {
     return aiPromptTemplateRestHandled;
   }
 
+  const aiStrategyRestHandled = await handleAiStrategyRestRoute({
+    req,
+    res,
+    parts,
+    services,
+    readJson,
+    json,
+    notFound
+  });
+  if (aiStrategyRestHandled !== false) {
+    return aiStrategyRestHandled;
+  }
+
   const materialAssetRestHandled = await handleMaterialAssetRestRoute({
     req,
     res,
@@ -401,6 +418,17 @@ async function handleLocalPluginRoute(req, res, parts) {
 async function sendProductImage(res, productId, imageLoader = null) {
   const image = imageLoader ? await imageLoader(productId) : await services.productImage(productId);
   if (!image) return notFound(res);
+  const aiFile = await resolveAiImageFile(String(image));
+  if (aiFile) {
+    const buffer = await fs.readFile(aiFile.filePath);
+    writeHead(res, 200, {
+      "Content-Type": aiFile.contentType,
+      "Content-Length": buffer.length,
+      "Cache-Control": "no-store, must-revalidate",
+      "Pragma": "no-cache"
+    });
+    return res.end(buffer);
+  }
   const match = String(image).match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
   if (!match) return json(res, { error: "Unsupported image" }, 415);
   const buffer = Buffer.from(match[2], "base64");
@@ -411,6 +439,16 @@ async function sendProductImage(res, productId, imageLoader = null) {
     "Pragma": "no-cache"
   });
   return res.end(buffer);
+}
+
+async function resolveAiImageFile(imageUrl) {
+  const match = String(imageUrl || "").match(/^\/api\/ai\/file\/([^/]+)\/([^/]+)\/(.+)$/);
+  if (!match) return null;
+  return getAiTaskFile(
+    decodeURIComponent(match[1]),
+    decodeURIComponent(match[2]),
+    match[3].split("/").map(decodeURIComponent).join("/")
+  );
 }
 
 function sendImagePlaceholder(res) {
@@ -505,6 +543,18 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "image") {
       return sendProductImage(res, Number(parts[2]));
+    }
+
+    if (req.method === "GET" && parts[0] === "api" && parts[1] === "ai" && parts[2] === "file") {
+      const aiImageRestHandled = await handleAiImageRestRoute({
+        req,
+        res,
+        parts,
+        json,
+        notFound,
+        writeHead
+      });
+      if (aiImageRestHandled !== false) return aiImageRestHandled;
     }
 
     if (req.method === "GET" && parts[0] === "api" && parts[1] === "image-proxy") {

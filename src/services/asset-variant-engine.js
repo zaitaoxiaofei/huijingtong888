@@ -714,6 +714,7 @@ export async function publishSelectionProductToOzon(body = {}, session = null, c
   const productRows = await mysqlQuery("SELECT * FROM products WHERE id = ? AND active = 1 LIMIT 1", [productId]);
   const product = productRows[0];
   if (!product) throw new Error("Product not found");
+  if (!Number(product.package_weight_g || product.weight_g || 0)) throw new Error("请先填写包装克重后再一键上架");
   const publisherName = await personNameForSession(session);
 
   await context.markStage?.("bootstrap", { productId });

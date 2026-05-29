@@ -1,12 +1,23 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Download, MagicStick, Picture, Refresh, Setting, UploadFilled, View } from "@element-plus/icons-vue";
 import { downloadUrl, generateAiCommerceCopy, generateAiImages, withImageToken } from "../../api/tools/aiImageGenerator";
 import { createMaterialAsset, listMaterialAssets, updateMaterialAsset } from "../../api/materialAssets";
 import { apiClient } from "../../utils/api";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
+import {
+  createAiTaskSnapshot,
+  resolveAiStrategyPlan as resolveLocalAiStrategyPlan
+} from "../../config/aiStrategyLibrary";
+import {
+  createAiStrategy,
+  deleteAiStrategy,
+  listAiStrategies,
+  resolveAiStrategyPlan as resolveRemoteAiStrategyPlan,
+  updateAiStrategy
+} from "../../api/settings/aiStrategies";
 import {
   createAiPromptTemplate,
   deleteAiPromptTemplate,
@@ -18,6 +29,7 @@ import {
 } from "../../api/settings/aiPromptTemplates";
 
 const router = useRouter();
+const route = useRoute();
 
 const sceneOptions = [
   { label: "平台规则模板", value: "platform_rule" },
@@ -45,13 +57,13 @@ const variantModes = [
 ];
 
 const styleOptions = [
+  { key: "high_click", title: "高点击基础图风", prompt: "high click-through ecommerce main image, clean base product layout, stronger product contrast, clear selling point visual hierarchy" },
   { key: "premium", title: "高端原厂风", prompt: "premium OEM style, refined studio lighting, realistic material texture" },
   { key: "minimal", title: "极简高级风", prompt: "minimal premium ecommerce layout, restrained clean background, refined lighting, clear product silhouette" },
   { key: "white", title: "白底清晰风", prompt: "clean white background, sharp product edges, natural shadow" },
   { key: "scene", title: "安装场景风", prompt: "realistic installation scene, practical usage environment" },
   { key: "ozon", title: "Ozon爆款风", prompt: "Ozon marketplace high-click main image, strong product focus" },
   { key: "ins", title: "INS生活方式风", prompt: "lifestyle inspired composition, clean social-commerce visual, modern soft light, tasteful scene" },
-  { key: "high_click", title: "高点击主图风", prompt: "high click-through ecommerce main image, stronger product contrast, clear selling point visual hierarchy" },
   { key: "custom", title: "自定义Prompt", prompt: "" }
 ];
 
@@ -94,11 +106,11 @@ const optimizationGroups = [
 
 const strategyGroups = {
   image: [
+    { key: "high_click", title: "高点击基础图风", text: "强化主体和基础主图转化" },
     { key: "premium", title: "高端原厂风", text: "质感、材质、品牌感更强" },
     { key: "white", title: "白底清晰风", text: "适合白底图和标准主图" },
     { key: "scene", title: "安装场景风", text: "突出安装和使用场景" },
     { key: "ozon", title: "Ozon爆款风", text: "平台点击导向" },
-    { key: "high_click", title: "高点击主图风", text: "强化主体和卖点层级" },
     { key: "custom", title: "自定义 Prompt", text: "使用自定义风格要求" }
   ],
   title: [
@@ -304,12 +316,16 @@ const categoryStrategyRules = [
 
 const outputOptions = assetGroups.flatMap((group) => group.items);
 const ratioOptions = ["3:4", "1:1", "4:5"];
+const IMAGE_GENERATION_CONCURRENCY = 3;
+const COPY_GENERATION_CONCURRENCY = 5;
 
 const loading = ref(false);
 const generating = ref(false);
 const templates = ref([]);
 const selectedTemplateId = ref(null);
 const activeImage = ref("");
+const previewPositivePrompt = ref("");
+const previewNegativePrompt = ref("");
 
 const strategyDrawer = ref(false);
 const diagnosisDrawer = ref(false);
@@ -317,18 +333,28 @@ const productInfoDrawer = ref(false);
 const activeCommerceMode = ref("optimization");
 const activeConfigTab = ref("output");
 const templateCenterVisible = ref(false);
+const strategyLibraryVisible = ref(false);
 const sourceDialogVisible = ref(false);
 const sourceSelections = ref([]);
 const sourceAssets = ref([]);
 const sourceTab = ref("assets");
 const sourceLoading = ref(false);
+const remoteStrategyPlan = ref(null);
+const strategyPlanLoading = ref(false);
 const sourceImportingId = ref("");
+const routeSelectionImporting = ref(false);
+const importedRouteSelectionId = ref("");
 const sourceSelectionsLoaded = ref(false);
 const sourceAssetsLoaded = ref(false);
 const referenceUploadInputRef = ref(null);
 const templateSearch = ref("");
 const templateCategory = ref("");
 const savingTemplate = ref(false);
+const strategyLibrarySearch = ref("");
+const strategyLibraryGoal = ref("");
+const strategyLibraryRows = ref([]);
+const strategyLibraryLoading = ref(false);
+const savingStrategy = ref(false);
 const taskStatus = ref("待生成");
 const activeResultTab = ref("images");
 const logs = ref([]);
@@ -416,14 +442,14 @@ const task = reactive({
   sourcePackageId: "",
   sourceLabel: "演示案例：钥匙壳样例，请导入真实素材后再生成",
   optimizationTarget: "low_ctr",
-  strategyKey: "premium",
+  strategyKey: "high_click",
   selectedStrategies: [],
   variantMode: "main_image_variant",
   targetInput: "",
-  targets: ["TENET T7"],
-  style: "premium",
+  targets: [],
+  style: "high_click",
   customPrompt: "",
-  outputs: ["主图", "标题", "标签"],
+  outputs: ["主图"],
   detailImageTypes: ["安装图", "材质细节图", "尺寸说明图"],
   ratio: "3:4",
   imageCount: 1,
@@ -445,6 +471,7 @@ const task = reactive({
 });
 
 const templateForm = reactive(createBlankTemplate());
+const strategyForm = reactive(createBlankStrategy());
 
 const selectedStyle = computed(() => styleOptions.find((item) => item.key === task.style) || styleOptions[0]);
 const selectedVariantMode = computed(() => variantModes.find((item) => item.key === task.variantMode) || variantModes[0]);
@@ -459,6 +486,7 @@ const currentStrategyType = computed(() => {
 });
 const currentStrategyOptions = computed(() => strategyGroups[currentStrategyType.value] || strategyGroups.image);
 const selectedStrategy = computed(() => currentStrategyOptions.value.find((item) => item.key === task.strategyKey) || currentStrategyOptions.value[0]);
+const isVariantWorkflow = computed(() => strategyBusinessMode.value === "product_variant");
 const activeTemplate = computed(() => templates.value.find((item) => item.id === selectedTemplateId.value));
 const enabledTemplates = computed(() => templates.value.filter((item) => item.enabled));
 const filteredTemplates = computed(() => {
@@ -469,26 +497,103 @@ const filteredTemplates = computed(() => {
     return [item.name, item.description, item.scene, item.mode].some((value) => String(value || "").toLowerCase().includes(keyword));
   });
 });
-const finalPrompt = computed(() => task.advancedPositivePrompt || [
-  task.promptModules.platformRule,
-  task.promptModules.productRule,
-  task.promptModules.brandRule,
-  `Category strategy: ${categoryStrategyRule.value.category}. ${categoryStrategyRule.value.summary || ""}`,
-  `Business goal: ${selectedOptimizationTarget.value?.title || ""}. Recommended execution strategies: ${(task.selectedStrategies.length ? task.selectedStrategies : selectedGoalStrategies.value).join(", ")}.`,
-  task.outputs.includes("详情图") ? `Detail image modules to generate: ${task.detailImageTypes.join(", ")}.` : "",
-  selectedStyle.value.prompt || task.customPrompt,
-  task.promptModules.styleRule,
-  task.promptModules.compositionRule,
-  task.promptModules.userExtraPrompt,
-  task.customPrompt
-].filter(Boolean).join("\n"));
-const finalNegativePrompt = computed(() => task.advancedNegativePrompt || task.promptModules.negativePrompt);
+const strategyGoalOptions = computed(() => flatOptimizationTargets.value.map((item) => ({ label: item.title, value: item.key })));
+const strategyAssetOptions = [
+  { label: "主图", value: "main_image" },
+  { label: "标题", value: "title" },
+  { label: "标签", value: "tags" },
+  { label: "详情图", value: "detail_image" },
+  { label: "描述", value: "description" }
+];
+const strategyBusinessModeOptions = [
+  { label: "商品优化AI", value: "product_optimization" },
+  { label: "商品裂变AI", value: "product_variant" }
+];
+const filteredStrategyRows = computed(() => {
+  const keyword = strategyLibrarySearch.value.trim().toLowerCase();
+  return strategyLibraryRows.value.filter((item) => {
+    if (strategyLibraryGoal.value && !(item.applicable_goals || []).includes(strategyLibraryGoal.value)) return false;
+    if (!keyword) return true;
+    return [
+      item.title,
+      item.strategy_key,
+      ...(item.aliases || []),
+      ...(item.positive_modules || []),
+      ...(item.negative_modules || [])
+    ].some((value) => String(value || "").toLowerCase().includes(keyword));
+  });
+});
+const strategyBusinessMode = computed(() => task.optimizationTarget?.startsWith("multi_") ? "product_variant" : "product_optimization");
+const strategyCategoryText = computed(() => [
+  task.platform,
+  task.categoryName,
+  task.productType,
+  task.productName,
+  task.title,
+  task.sellingPoints
+].filter(Boolean).join(" "));
+const localAiStrategyPlan = computed(() => resolveLocalAiStrategyPlan({
+  businessMode: strategyBusinessMode.value,
+  goalKey: task.optimizationTarget,
+  selectedTitles: task.selectedStrategies,
+  fallbackTitles: selectedGoalStrategies.value,
+  categoryText: strategyCategoryText.value
+}));
+const aiStrategyPlan = computed(() => remoteStrategyPlan.value || localAiStrategyPlan.value);
+function resolveStrategyPlanForTitles(strategyTitles = []) {
+  return resolveLocalAiStrategyPlan({
+    businessMode: strategyBusinessMode.value,
+    goalKey: task.optimizationTarget,
+    selectedTitles: strategyTitles,
+    fallbackTitles: strategyTitles.length ? [] : selectedGoalStrategies.value.slice(0, 1),
+    categoryText: strategyCategoryText.value
+  });
+}
+function buildPositivePrompt(strategyTitles = selectedStrategyTitles.value, job = {}) {
+  const strategyPlan = resolveStrategyPlanForTitles(strategyTitles);
+  const outputInstruction = job.type === "主图"
+    ? "Asset output: generate one Ozon main image. Focus on click-through, clear product subject, vehicle fitment, and marketplace-safe composition."
+    : job.type === "详情图"
+      ? `Asset output: generate one Ozon detail image module: ${job.detailType || "详情图"}. Keep the product consistent with the source product while explaining this single module only.`
+      : "Asset output: generate commerce copy only. Do not request or describe image generation.";
+  return task.advancedPositivePrompt || [
+    task.promptModules.platformRule,
+    task.promptModules.productRule,
+    task.promptModules.brandRule,
+    `Category strategy: ${categoryStrategyRule.value.category}. ${categoryStrategyRule.value.summary || ""}`,
+    `Business goal: ${selectedOptimizationTarget.value?.title || ""}. Single execution strategy for this asset: ${strategyTitles.join(", ") || selectedGoalStrategies.value[0] || ""}.`,
+    outputInstruction,
+    strategyPlan.positiveModules.length ? `Strategy execution modules:\n${strategyPlan.positiveModules.map((item) => `- ${item}`).join("\n")}` : "",
+    isVariantWorkflow.value ? [
+      "Variant rule: keep product structure, composition, visual style, background, material, and lighting consistent across the batch.",
+      "Only change the declared variant variable such as target model, color, scene, ratio, or style."
+    ].join("\n") : "",
+    selectedStyle.value.prompt || task.customPrompt,
+    task.promptModules.styleRule,
+    task.promptModules.compositionRule,
+    task.promptModules.userExtraPrompt,
+    task.customPrompt
+  ].filter(Boolean).join("\n");
+}
+function buildNegativePrompt(strategyTitles = selectedStrategyTitles.value) {
+  const strategyPlan = resolveStrategyPlanForTitles(strategyTitles);
+  return task.advancedNegativePrompt || [
+    task.promptModules.negativePrompt,
+    ...strategyPlan.negativeModules
+  ].filter(Boolean).join("\n");
+}
+const finalPrompt = computed(() => buildPositivePrompt());
+const finalNegativePrompt = computed(() => buildNegativePrompt());
 const displayResults = computed(() => results.value.filter((item) => item.status !== "deleted"));
 const imageResults = computed(() => displayResults.value.filter((item) => item.imageUrl || item.assetKind === "image"));
 const titleResults = computed(() => displayResults.value.filter((item) => item.generatedTitles?.length));
 const tagResults = computed(() => displayResults.value.filter((item) => item.generatedTags?.length));
 const descriptionResults = computed(() => displayResults.value.filter((item) => item.generatedDescription));
 const writebackResults = computed(() => displayResults.value.filter((item) => item.writeBackStatus === "已回写" || item.assetId));
+const selectionTemplateReady = computed(() => task.sourceType === "selection" && Boolean(task.sourceSelectionId));
+const writeBackGateText = computed(() => selectionTemplateReady.value
+  ? "将以选品估价表原记录为模板，创建新的选品记录"
+  : "请先从选品估价表导入商品，才能创建新选品记录");
 const copyResultSectionVisible = computed(() => (
   ["标题", "标签", "描述"].some((item) => task.outputs.includes(item))
   || titleResults.value.length
@@ -641,23 +746,23 @@ const goalStrategyCards = computed(() => [
   }))
 ]);
 const pendingGenerationTasks = computed(() => {
-  const strategies = task.selectedStrategies.length ? task.selectedStrategies : selectedGoalStrategies.value;
-  const first = strategies[0] || "高端原厂风";
-  const second = strategies[1] || "车型强化";
-  const titleStrategy = task.optimizationTarget === "low_exposure" ? "Ozon高搜索标题" : "高点击标题";
-  return [
-    { type: "主图", title: `主图方案 A：${first}`, desc: "生成后展示真实图片卡片，可预览、编辑和回写。" },
-    { type: "主图", title: `主图方案 B：${second}`, desc: "适合作为 A/B 测试或多车型素材。" },
-    { type: "标题", title: `标题方案：${titleStrategy}`, desc: "围绕品牌、车型、材质和功能词生成。" },
-    { type: "标签", title: "标签方案：车型词 + 材质词 + 功能词", desc: "生成可复制、可回写的搜索标签。" },
-    { type: "详情图", title: `详情图方案：${task.detailImageTypes.slice(0, 4).join(" / ") || "类目推荐模块"}`, desc: "勾选详情图后，按类目策略生成一组详情素材。" }
-  ].filter((item) => {
-    if (item.type === "主图") return task.outputs.includes("主图");
-    if (item.type === "标题") return task.outputs.includes("标题");
-    if (item.type === "标签") return task.outputs.includes("标签");
-    if (item.type === "详情图") return task.outputs.includes("详情图");
-    return true;
-  });
+  const jobs = buildGenerationJobs();
+  if (jobs.length) {
+    return jobs.map((job, index) => ({
+      type: job.type,
+      title: job.targetModel
+        ? `${job.strategyTitle}${job.detailType ? ` / ${job.detailType}` : ""}：${job.targetModel}`
+        : `${job.strategyTitle || selectedOptimizationTarget.value?.title || "默认策略"}${job.detailType ? ` / ${job.detailType}` : ""} 方案 ${index + 1}`,
+      desc: isVariantWorkflow.value
+        ? "裂变任务会锁定参考图风格和产品结构，只替换当前变量。"
+        : "独立策略任务会单独生成一张方案，不与其他策略混合。"
+    }));
+  }
+  return [{
+    type: task.outputs.includes("主图") ? "主图" : task.outputs.includes("详情图") ? "详情图" : "文案",
+    title: "请选择一个策略",
+    desc: isVariantWorkflow.value ? "裂变模式下选择一个策略，再添加车型变量。" : "商品优化模式下，每选一个策略就生成一张独立方案。"
+  }];
 });
 const aiIssueHints = computed(() => [
   task.sourceImageUrl ? "当前主图可作为 image2 参考图，建议保持产品结构一致。" : "当前缺少参考主图，建议先导入或粘贴主图 URL。",
@@ -685,9 +790,19 @@ const strategySummary = computed(() => ({
   platform: task.platform,
   category: categoryStrategyRule.value.category,
   target: selectedOptimizationTarget.value?.title || "提升点击率",
-  recommendation: (task.selectedStrategies.length ? task.selectedStrategies : selectedGoalStrategies.value.slice(0, 3)).join(" + "),
+  recommendation: selectedStrategyTitles.value.join(isVariantWorkflow.value ? "" : " / "),
   outputs: selectedWriteBackAssets.value.slice(0, 4).join(" / ")
 }));
+const selectedStrategyTitles = computed(() => {
+  const fallback = selectedGoalStrategies.value.slice(0, 1);
+  return task.selectedStrategies.length ? task.selectedStrategies : fallback;
+});
+const selectedStrategyCountText = computed(() => {
+  if (!selectedStrategyTitles.value.length) return "未选择策略";
+  return isVariantWorkflow.value
+    ? `已选 1 个裂变策略`
+    : `已选 ${selectedStrategyTitles.value.length} 个独立策略`;
+});
 const sourceFieldOptions = computed(() => [
   { key: "productName", label: "商品名称", hint: "选品表商品名，AI 识别产品主体", value: task.productName, model: "productName", placeholder: "例如：TENET 通用不锈钢门槛条", span: 2 },
   { key: "categoryName", label: "产品类目", hint: "Ozon 类目或内部产品类型", value: task.categoryName || task.productType, model: "categoryName", placeholder: "例如：汽车用品 / 门槛条", span: 2 },
@@ -713,12 +828,28 @@ const visibleSourceFields = computed(() => sourceFieldOptions.value.filter((item
 onMounted(() => {
   loadSourceFieldPreferences();
   loadTemplates();
+  refreshRemoteStrategyPlan();
+  importSelectionFromRoute();
+});
+
+watch(() => route.query.baseSelectionId, () => {
+  importSelectionFromRoute();
 });
 
 watch(sourceTab, (tab) => {
   if (!sourceDialogVisible.value) return;
   if (tab === "assets") loadSourceAssets();
   else loadSourceSelections();
+});
+
+watch([
+  () => task.optimizationTarget,
+  () => task.selectedStrategies.join("|"),
+  () => selectedGoalStrategies.value.join("|"),
+  () => strategyCategoryText.value,
+  () => strategyBusinessMode.value
+], () => {
+  refreshRemoteStrategyPlan();
 });
 
 async function loadTemplates() {
@@ -732,6 +863,23 @@ async function loadTemplates() {
     ElMessage.error(error.message || "提示词库加载失败");
   } finally {
     loading.value = false;
+  }
+}
+
+async function refreshRemoteStrategyPlan() {
+  strategyPlanLoading.value = true;
+  try {
+    remoteStrategyPlan.value = await resolveRemoteAiStrategyPlan({
+      businessMode: strategyBusinessMode.value,
+      goalKey: task.optimizationTarget,
+      selectedTitles: task.selectedStrategies,
+      fallbackTitles: selectedGoalStrategies.value,
+      categoryText: strategyCategoryText.value
+    });
+  } catch {
+    remoteStrategyPlan.value = null;
+  } finally {
+    strategyPlanLoading.value = false;
   }
 }
 
@@ -917,7 +1065,6 @@ function applySelectionSource(row = {}) {
   task.sourceSelectionId = row.id || null;
   task.sourcePackageId = "";
   task.sourceLabel = `选品估价表 #${row.selection_id || row.id || ""}`;
-  if (row.vehicle_model && !task.targets.includes(row.vehicle_model)) task.targets.unshift(row.vehicle_model);
   refreshRecommendedStrategiesFromCategory();
 }
 
@@ -932,6 +1079,24 @@ async function importSelectionSource(row = {}) {
     apiClient.get(`/api/products/${row.id}`, { noCache: true })
       .then((detail) => applySelectionSource({ ...row, ...(detail?.data || detail || {}) }))
       .catch(() => null);
+  }
+}
+
+async function importSelectionFromRoute() {
+  const selectionId = String(route.query.baseSelectionId || "").trim();
+  if (!selectionId || importedRouteSelectionId.value === selectionId || routeSelectionImporting.value) return;
+  routeSelectionImporting.value = true;
+  try {
+    const detail = await apiClient.get(`/api/products/${encodeURIComponent(selectionId)}`, { noCache: true });
+    const row = detail?.data || detail || {};
+    if (!row?.id) return;
+    applySelectionSource(row);
+    importedRouteSelectionId.value = selectionId;
+    ElMessage.success(`已导入选品 ${row.selection_id || row.id} 到 AI 内容优化`);
+  } catch (error) {
+    ElMessage.error(error.message || "导入选品到 AI 内容优化失败");
+  } finally {
+    routeSelectionImporting.value = false;
   }
 }
 
@@ -970,14 +1135,13 @@ function importAssetSource(asset = {}) {
   task.sourceSelectionId = asset.source_selection_id || null;
   task.sourcePackageId = asset.source_package_id || asset.source_id || "";
   task.sourceLabel = `统一素材资产 #${asset.id || ""}`;
-  if (asset.target_model && !task.targets.includes(asset.target_model)) task.targets.unshift(asset.target_model);
   refreshRecommendedStrategiesFromCategory();
   sourceDialogVisible.value = false;
   ElMessage.success("已导入统一素材资产");
 }
 
 function refreshRecommendedStrategiesFromCategory() {
-  task.selectedStrategies = selectedGoalStrategies.value.slice(0, 5);
+  task.selectedStrategies = selectedGoalStrategies.value.slice(0, 1);
   applyCategoryStrategyDefaults();
 }
 
@@ -1066,7 +1230,7 @@ function selectOptimizationTarget(item) {
   if (item.variantMode === "title_generation") task.outputs = Array.from(new Set([...task.outputs, "标题", "标签"]));
   if (["main_image_variant", "multi_model_variant", "logo_text_replace"].includes(item.variantMode)) task.outputs = Array.from(new Set([...task.outputs, "主图"]));
   syncImageStyleFromStrategy();
-  task.selectedStrategies = selectedGoalStrategies.value.slice(0, 5);
+  task.selectedStrategies = selectedGoalStrategies.value.slice(0, 1);
   applyCategoryStrategyDefaults();
 }
 
@@ -1076,6 +1240,10 @@ function selectStrategy(item) {
 }
 
 function toggleRecommendedStrategy(title) {
+  if (isVariantWorkflow.value) {
+    task.selectedStrategies = [title];
+    return;
+  }
   const index = task.selectedStrategies.indexOf(title);
   if (index >= 0) task.selectedStrategies.splice(index, 1);
   else task.selectedStrategies.push(title);
@@ -1095,7 +1263,7 @@ function applyCategoryStrategyDefaults() {
       if (["安装图", "场景图", "白底图", "对比图", "尺寸图", "材质图"].includes(item)) return "详情图";
       if (item === "卖点") return "描述";
       return item;
-    }).filter((item) => ["主图", "详情图", "标题", "标签", "描述"].includes(item));
+    }).filter((item) => ["主图", "详情图"].includes(item));
     task.outputs = Array.from(new Set([...task.outputs, ...outputAssets]));
     const detailTypes = rule.recommendedAssets.filter((item) => ["安装图", "场景图", "白底图", "对比图", "尺寸图", "材质图"].includes(item));
     if (detailTypes.length) {
@@ -1110,7 +1278,8 @@ function applyCategoryStrategyDefaults() {
       task.detailImageTypes = Array.from(new Set([...task.detailImageTypes, ...normalized]));
     }
   }
-  const preferredStyle = rule.imageStyles?.find((key) => styleOptions.some((item) => item.key === key));
+  const preferredStyle = (rule.imageStyles?.includes("high_click") ? "high_click" : null)
+    || rule.imageStyles?.find((key) => styleOptions.some((item) => item.key === key));
   if (preferredStyle && currentStrategyType.value !== "title" && currentStrategyType.value !== "tags") {
     task.style = preferredStyle;
     task.strategyKey = preferredStyle;
@@ -1154,19 +1323,21 @@ function buildVariables(targetModel = "") {
   };
 }
 
-async function renderPromptForTarget(targetModel = task.targets[0] || "") {
+async function renderPromptForTarget(targetModel = task.targets[0] || "", strategyTitles = selectedStrategyTitles.value, job = {}) {
   const template = activeTemplate.value;
+  const positivePrompt = buildPositivePrompt(strategyTitles, job);
+  const negativePrompt = buildNegativePrompt(strategyTitles);
   if (!template) {
     return {
-      finalPositivePrompt: renderText(finalPrompt.value, buildVariables(targetModel)),
-      finalNegativePrompt: renderText(finalNegativePrompt.value, buildVariables(targetModel)),
+      finalPositivePrompt: renderText(positivePrompt, buildVariables(targetModel)),
+      finalNegativePrompt: renderText(negativePrompt, buildVariables(targetModel)),
       missingVariables: []
     };
   }
   return renderAiPromptTemplate({
     templateId: template.id,
-    positivePrompt: finalPrompt.value,
-    negativePrompt: finalNegativePrompt.value,
+    positivePrompt,
+    negativePrompt,
     variables: buildVariables(targetModel)
   });
 }
@@ -1174,18 +1345,18 @@ async function renderPromptForTarget(targetModel = task.targets[0] || "") {
 async function previewPrompt() {
   strategyDrawer.value = true;
   try {
-    const result = await renderPromptForTarget();
-    task.advancedPositivePrompt = result.finalPositivePrompt;
-    task.advancedNegativePrompt = result.finalNegativePrompt;
-    task.variablesJson = JSON.stringify(buildVariables(task.targets[0] || ""), null, 2);
+    const firstJob = buildGenerationJobs()[0];
+    const result = await renderPromptForTarget(firstJob?.targetModel || "", firstJob?.strategyTitles || selectedStrategyTitles.value.slice(0, 1));
+    previewPositivePrompt.value = result.finalPositivePrompt;
+    previewNegativePrompt.value = result.finalNegativePrompt;
+    task.variablesJson = JSON.stringify(buildVariables(firstJob?.targetModel || task.targets[0] || ""), null, 2);
   } catch (error) {
     ElMessage.error(error.message || "Prompt 预览失败");
   }
 }
 
 async function startGenerate() {
-  const targetPool = task.targets.length ? task.targets : [task.vehicleModel || task.brand || "通用款"];
-  if (!targetPool.length) {
+  if (isVariantWorkflow.value && task.variantMode === "multi_model_variant" && !task.targets.length) {
     ElMessage.warning("请先添加目标车型");
     return;
   }
@@ -1193,19 +1364,24 @@ async function startGenerate() {
     ElMessage.warning("请先选择要生成的图片或文案资产");
     return;
   }
+  const jobs = buildGenerationJobs();
+  if (!jobs.length) {
+    ElMessage.warning(isVariantWorkflow.value ? "请先选择裂变策略并添加变量" : "请先选择至少一个独立策略");
+    return;
+  }
   results.value = [];
   generating.value = true;
   taskStatus.value = "生成中";
-  const targets = task.variantMode === "main_image_variant" && task.optimizationTarget !== "high_ad_cost" ? [targetPool[0]] : targetPool;
   activeResultTab.value = currentStrategyType.value === "tags" ? "tags" : currentStrategyType.value === "title" ? "titles" : "images";
   try {
-    for (const target of targets) {
-      const job = createResultShell(target);
-      results.value.unshift(job);
-      await generateOne(job);
-    }
-    taskStatus.value = "已完成";
-    ElMessage.success("图片生成完成");
+    const resultJobs = jobs.map((queueItem) => createResultShell(queueItem));
+    results.value = [...resultJobs].reverse();
+    const concurrency = jobs.some(isImageJob) ? IMAGE_GENERATION_CONCURRENCY : COPY_GENERATION_CONCURRENCY;
+    const settled = await runGenerationQueue(resultJobs, concurrency);
+    const failedCount = settled.filter((item) => item.status === "rejected").length;
+    taskStatus.value = failedCount ? "部分失败" : "已完成";
+    if (failedCount) ElMessage.warning(`生成完成，${failedCount} 个任务失败`);
+    else ElMessage.success("图片生成完成");
   } catch (error) {
     taskStatus.value = "失败";
     ElMessage.error(error.message || "生成失败");
@@ -1214,18 +1390,76 @@ async function startGenerate() {
   }
 }
 
+async function runGenerationQueue(jobs = [], concurrency = 2) {
+  const settled = new Array(jobs.length);
+  let cursor = 0;
+  const workerCount = Math.min(Math.max(Number(concurrency || 1), 1), jobs.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (cursor < jobs.length) {
+      const index = cursor;
+      cursor += 1;
+      try {
+        await generateOne(jobs[index]);
+        settled[index] = { status: "fulfilled" };
+      } catch (error) {
+        settled[index] = { status: "rejected", reason: error };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return settled;
+}
+
+function buildGenerationJobs() {
+  const strategies = selectedStrategyTitles.value.filter(Boolean);
+  const copyOutputs = ["标题", "标签", "描述"].filter((item) => task.outputs.includes(item));
+  const imageOutputs = [];
+  if (task.outputs.includes("主图")) imageOutputs.push({ type: "主图", assetKind: "image" });
+  if (task.outputs.includes("详情图")) {
+    const detailTypes = task.detailImageTypes.length ? task.detailImageTypes : ["详情图"];
+    detailTypes.forEach((detailType) => imageOutputs.push({ type: "详情图", detailType, assetKind: "image" }));
+  }
+  const buildForUnit = ({ targetModel = "", strategyTitle = "" }) => {
+    const groupKey = [targetModel || "base", strategyTitle || "default"].join("::");
+    return [
+      ...imageOutputs.map((output) => ({
+        targetModel,
+        strategyTitle,
+        strategyTitles: [strategyTitle].filter(Boolean),
+        writeBackGroupKey: groupKey,
+        ...output
+      })),
+      ...(copyOutputs.length ? [{
+        targetModel,
+        strategyTitle,
+        strategyTitles: [strategyTitle].filter(Boolean),
+        writeBackGroupKey: groupKey,
+        type: "文案",
+        assetKind: "copy",
+        copyOutputs
+      }] : [])
+    ];
+  };
+  if (isVariantWorkflow.value) {
+    const strategyTitle = strategies[0] || selectedGoalStrategies.value[0] || selectedOptimizationTarget.value?.title || "裂变策略";
+    const variables = task.variantMode === "multi_model_variant"
+      ? task.targets
+      : (task.targets.length ? task.targets : [selectedOptimizationTarget.value?.title || "裂变变量"]);
+    return variables.filter(Boolean).flatMap((targetModel) => buildForUnit({ targetModel, strategyTitle }));
+  }
+  return strategies.flatMap((strategyTitle) => buildForUnit({ targetModel: task.targets[0] || "", strategyTitle }));
+}
+
 async function generateOne(job) {
   job.status = "生成中";
   job.progress = 30;
-  const prompt = await renderPromptForTarget(job.targetModel);
+  const prompt = await renderPromptForTarget(job.targetModel, job.strategyTitles, job);
+  const strategyPlan = resolveStrategyPlanForTitles(job.strategyTitles);
+  job.strategyPlan = strategyPlan;
   job.finalPositivePrompt = prompt.finalPositivePrompt;
   job.finalNegativePrompt = prompt.finalNegativePrompt;
-  if (hasCopyOutput()) {
+  if (isCopyJob(job)) {
     await fillCopyResults(job);
-  }
-  job.progress = 58;
-  const shouldGenerateImage = hasImageOutput();
-  if (!shouldGenerateImage) {
     await persistCopyAsset(job);
     job.status = "已完成";
     job.progress = 100;
@@ -1237,6 +1471,7 @@ async function generateOne(job) {
     });
     return;
   }
+  job.progress = 58;
   const startedAt = new Date();
   try {
     const sourceImageUrl = shouldUseReferenceImage() ? task.sourceImageUrl : "";
@@ -1248,7 +1483,7 @@ async function generateOne(job) {
       result = await generateAiImages({
         finalPrompt: [prompt.finalPositivePrompt, prompt.finalNegativePrompt ? `Negative: ${prompt.finalNegativePrompt}` : ""].filter(Boolean).join("\n\n"),
         ratio: task.ratio,
-        imageCount: task.imageCount,
+        imageCount: 1,
         autoCrop: false,
         sourceImageUrl: sourceImageForRequest,
         mode: sourceImageForRequest ? "image_to_image" : "text_to_image"
@@ -1268,7 +1503,7 @@ async function generateOne(job) {
           prompt.finalNegativePrompt ? `Negative: ${prompt.finalNegativePrompt}` : ""
         ].filter(Boolean).join("\n\n"),
         ratio: task.ratio,
-        imageCount: task.imageCount,
+        imageCount: 1,
         autoCrop: false,
         mode: "text_to_image"
       });
@@ -1277,10 +1512,23 @@ async function generateOne(job) {
     job.imageUrl = image?.url || "";
     job.downloadUrl = image?.url || "";
     if (job.imageUrl) {
+      const taskSnapshot = createAiTaskSnapshot({
+        task: { ...task, selectedTemplateId: selectedTemplateId.value },
+        job,
+        strategyPlan,
+        prompt,
+        targetModel: job.targetModel,
+        result: {
+          imageUrl: job.imageUrl,
+          generationMode: result.generationMode || (sourceImageForRequest ? "image_to_image" : "text_to_image"),
+          provider: "cctq-image2",
+          model: "gpt-image-2"
+        }
+      });
       const asset = await createMaterialAsset({
         asset_type: "image",
-        role: "main_image",
-        title: `${task.productName} ${job.targetModel} ${selectedStyle.value.title}`,
+        role: job.type === "详情图" ? "detail_image" : "main_image",
+        title: `${task.productName} ${job.targetModel || job.strategyTitle} ${job.detailType || selectedStyle.value.title}`,
         url: job.imageUrl,
         thumbnail_url: job.imageUrl,
         source_type: "ai_generated",
@@ -1292,7 +1540,7 @@ async function generateOne(job) {
         target_brand: task.brand,
         target_model: job.targetModel,
         product_name: task.productName,
-        style: selectedStyle.value.title,
+        style: `${selectedStyle.value.title} / ${job.strategyTitle || ""}`.trim(),
         ratio: task.ratio,
         prompt_template_id: selectedTemplateId.value,
         final_prompt: job.finalPositivePrompt,
@@ -1301,9 +1549,19 @@ async function generateOne(job) {
         model: "gpt-image-2",
         status: "pending_review",
         metadata: {
+          taskSnapshot,
+          strategyLibraryVersion: strategyPlan.version,
+          businessMode: strategyPlan.businessMode,
+          strategyIds: strategyPlan.strategyIds,
+          strategyTitles: strategyPlan.strategyTitles,
+          strategyLayers: strategyPlan.layers,
+          promptModules: strategyPlan.positiveModules,
+          negativePromptModules: strategyPlan.negativeModules,
           sourceType: task.sourceType,
           sourceLabel: task.sourceLabel,
           outputs: task.outputs,
+          outputType: job.type,
+          detailType: job.detailType || "",
           sourceImageUrl,
           generationMode: result.generationMode || (sourceImageForRequest ? "image_to_image" : "text_to_image"),
           generatedTitles: job.generatedTitles,
@@ -1336,10 +1594,28 @@ async function generateOne(job) {
 }
 
 async function persistCopyAsset(job) {
+  const strategyPlan = job.strategyPlan || aiStrategyPlan.value;
+  const taskSnapshot = createAiTaskSnapshot({
+    task: { ...task, selectedTemplateId: selectedTemplateId.value },
+    job,
+    strategyPlan,
+    prompt: {
+      finalPositivePrompt: job.finalPositivePrompt,
+      finalNegativePrompt: job.finalNegativePrompt
+    },
+    targetModel: job.targetModel,
+    result: {
+      generatedTitles: job.generatedTitles,
+      generatedTags: job.generatedTags,
+      generatedDescription: job.generatedDescription,
+      provider: "cctq-text",
+      model: "mock-copy-generator"
+    }
+  });
   const asset = await createMaterialAsset({
     asset_type: "copy",
     role: "commerce_copy",
-    title: `${task.productName} ${job.targetModel} 文案素材`,
+    title: `${task.productName} ${job.targetModel || job.strategyTitle} 文案素材`,
     content_text: JSON.stringify({
       titles: job.generatedTitles,
       tags: job.generatedTags,
@@ -1354,7 +1630,7 @@ async function persistCopyAsset(job) {
     target_brand: task.brand,
     target_model: job.targetModel,
     product_name: task.productName,
-    style: selectedStrategy.value?.title || "",
+    style: job.strategyTitle || selectedStrategy.value?.title || "",
     prompt_template_id: selectedTemplateId.value,
     final_prompt: job.finalPositivePrompt,
     negative_prompt: job.finalNegativePrompt,
@@ -1362,6 +1638,14 @@ async function persistCopyAsset(job) {
     model: "mock-copy-generator",
     status: "pending_review",
     metadata: {
+      taskSnapshot,
+      strategyLibraryVersion: strategyPlan.version,
+      businessMode: strategyPlan.businessMode,
+      strategyIds: strategyPlan.strategyIds,
+      strategyTitles: strategyPlan.strategyTitles,
+      strategyLayers: strategyPlan.layers,
+      promptModules: strategyPlan.positiveModules,
+      negativePromptModules: strategyPlan.negativeModules,
       sourceType: task.sourceType,
       sourceLabel: task.sourceLabel,
       outputs: task.outputs,
@@ -1386,10 +1670,25 @@ function hasCopyOutput() {
   return ["标题", "标签", "描述"].some((item) => task.outputs.includes(item));
 }
 
+function isCopyJob(job = {}) {
+  return job.assetKind === "copy" || job.type === "文案";
+}
+
+function isImageJob(job = {}) {
+  return job.assetKind === "image" || ["主图", "详情图"].includes(job.type);
+}
+
+function jobCopyOutputs(job = {}) {
+  return Array.isArray(job.copyOutputs) && job.copyOutputs.length
+    ? job.copyOutputs
+    : ["标题", "标签", "描述"].filter((item) => task.outputs.includes(item));
+}
+
 function normalizeCopyOutputs(job) {
-  if (!task.outputs.includes("标题")) job.generatedTitles = [];
-  if (!task.outputs.includes("标签")) job.generatedTags = [];
-  if (!task.outputs.includes("描述")) job.generatedDescription = "";
+  const outputs = jobCopyOutputs(job);
+  if (!outputs.includes("标题")) job.generatedTitles = [];
+  if (!outputs.includes("标签")) job.generatedTags = [];
+  if (!outputs.includes("描述")) job.generatedDescription = "";
 }
 
 function ruCopy(value) {
@@ -1473,7 +1772,7 @@ function productTypeRu(value) {
 }
 
 async function fillCopyResults(job) {
-  if (!hasCopyOutput()) {
+  if (!isCopyJob(job) || !jobCopyOutputs(job).length) {
     normalizeCopyOutputs(job);
     return;
   }
@@ -1489,7 +1788,7 @@ async function fillCopyResults(job) {
       sellingPoints: task.sellingPoints,
       tags: task.productTags,
       optimizationTarget: selectedOptimizationTarget.value?.title,
-      strategies: task.selectedStrategies
+      strategies: (job.strategyPlan || aiStrategyPlan.value).strategyTitles
     });
     job.generatedTitles = Array.isArray(result.titles) ? result.titles.slice(0, 4) : [];
     job.generatedTags = Array.isArray(result.tags) ? result.tags.slice(0, 14) : [];
@@ -1541,69 +1840,162 @@ function setAsMain(item) {
 }
 
 async function writeBack(item) {
+  if (!selectionTemplateReady.value) {
+    ElMessage.warning("请先从选品估价表导入商品，再创建新的选品记录");
+    return;
+  }
   if (item.writeBackStatus === "已回写") {
-    ElMessage.warning("该裂变结果已回写到选品表");
+    ElMessage.warning("该结果已创建过选品记录");
     return;
   }
   item.writeBackStatus = "回写中";
-  if (item.assetId) {
-    await updateMaterialAsset(item.assetId, {
-      status: "used",
-      usage_count: Number(item.usageCount || 0) + 1,
-      metadata: {
-        writeBackTarget: task.sourceSelectionId ? "selection" : "material_asset_pool",
-        sourceSelectionId: task.sourceSelectionId,
-        imageUrl: item.imageUrl,
-        title: normalizeCopyForWrite(item.generatedTitles?.[0]),
-        tags: (item.generatedTags || []).map(normalizeCopyForWrite).filter(Boolean),
-        description: normalizeCopyForWrite(item.generatedDescription)
-      }
-    }).catch(() => null);
-    item.assetStatus = "used";
+  try {
+    const bundle = buildWriteBackBundle(item);
+    const created = await createDerivedSelectionRecord(bundle);
+    item.createdSelectionId = created?.id || created?.product?.id || null;
+    item.createdSelectionCode = created?.product?.selection_id || created?.selection_id || "";
+    if (item.assetId) {
+      await updateMaterialAsset(item.assetId, {
+        status: "used",
+        usage_count: Number(item.usageCount || 0) + 1,
+        metadata: {
+          writeBackTarget: "selection",
+          sourceSelectionId: task.sourceSelectionId,
+          createdSelectionId: item.createdSelectionId,
+          createdSelectionCode: item.createdSelectionCode,
+          sourceResultIds: bundle.sourceResultIds,
+          mainImageUrl: bundle.mainImageUrl,
+          detailImageUrls: bundle.detailImageUrls,
+          title: normalizeCopyForWrite(bundle.generatedTitles?.[0]),
+          tags: (bundle.generatedTags || []).map(normalizeCopyForWrite).filter(Boolean),
+          description: normalizeCopyForWrite(bundle.generatedDescription)
+        }
+      }).catch(() => null);
+      item.assetStatus = "used";
+    }
+    ElMessage.success(`已创建新选品记录 ${item.createdSelectionCode || item.createdSelectionId || ""}`);
+    markWriteBackGroupDone(item, created || {});
+  } catch (error) {
+    item.writeBackStatus = "待回写";
+    ElMessage.error(error.message || "创建选品记录失败");
+    throw error;
   }
-
-  if (task.sourceSelectionId) {
-    await writeBackSelectionRecord(item);
-    item.createdSelectionId = task.sourceSelectionId;
-    ElMessage.success("已回写到选品估价表");
-  } else {
-    ElMessage.success("已保存到素材资产池，未绑定选品记录");
-  }
-  item.writeBackStatus = "已回写";
 }
 
-async function writeBackSelectionRecord(item) {
+async function loadSelectionTemplateRecord() {
   const detail = await apiClient.get(`/api/products/${encodeURIComponent(task.sourceSelectionId)}`, { noCache: true }).catch(() => ({}));
-  const current = detail?.data || detail || {};
+  return detail?.data || detail || {};
+}
+
+async function createDerivedSelectionRecord(item) {
+  const current = await loadSelectionTemplateRecord();
+  const payload = buildDerivedSelectionPayload(current, item);
+  return await apiClient.post("/api/products", payload);
+}
+
+function buildDerivedSelectionPayload(current = {}, item = {}) {
+  const generatedTitle = item.generatedTitles?.[0] ? normalizeCopyForWrite(item.generatedTitles[0]) : "";
+  const generatedTags = (item.generatedTags || []).map(normalizeCopyForWrite).filter(Boolean);
+  const generatedDescription = item.generatedDescription ? normalizeCopyForWrite(item.generatedDescription) : "";
+  const sourceNotes = [
+    current.supplier_note,
+    `AI派生自选品 ${current.selection_id || task.sourceSelectionId}`,
+    item.strategyTitle ? `AI策略：${item.strategyTitle}` : "",
+    item.targetModel ? `裂变变量：${item.targetModel}` : "",
+    generatedTags.length && shouldWriteAsset("标签") ? `AI标签：${generatedTags.join(" / ")}` : "",
+    generatedDescription && shouldWriteAsset("描述") ? `AI描述：${generatedDescription}` : ""
+  ].filter(Boolean).join("；");
   const payload = {
     ...current,
-    material_asset_status: "generated"
+    id: undefined,
+    selection_id: undefined,
+    code: undefined,
+    active: undefined,
+    product_type: "selection",
+    selection_status: "draft",
+    source_selection_id: Number(task.sourceSelectionId),
+    variant_task_id: task.sourceId || item.id,
+    variant_result_id: item.id,
+    variant_type: task.optimizationTarget || task.variantMode,
+    is_variant_generated: 1,
+    material_asset_status: "generated",
+    supplier_note: sourceNotes
   };
 
-  if (item.imageUrl && shouldWriteAsset("主图")) {
-    payload.image_url = item.imageUrl;
+  if (item.mainImageUrl && shouldWriteAsset("主图")) {
+    payload.image_url = item.mainImageUrl;
   }
-  if (item.imageUrl && shouldWriteAsset("详情图")) {
-    payload.detail_image_urls = appendUnique(normalizeImageList(current.detail_image_urls), item.imageUrl);
+  if (item.detailImageUrls?.length && shouldWriteAsset("详情图")) {
+    payload.detail_image_urls = item.detailImageUrls.reduce(
+      (list, url) => appendUnique(list, url),
+      normalizeImageList(current.detail_image_urls)
+    );
   }
-  if (item.generatedTitles?.[0] && shouldWriteAsset("标题")) {
-    payload.title = normalizeCopyForWrite(item.generatedTitles[0]);
+  if (generatedTitle && shouldWriteAsset("标题")) {
+    payload.name = generatedTitle;
+    payload.title = generatedTitle;
+    payload.generated_title = generatedTitle;
   }
-  if (item.generatedTags?.length && shouldWriteAsset("标签")) {
-    const tags = item.generatedTags.map(normalizeCopyForWrite).filter(Boolean);
-    payload.tags = tags.join(", ");
-    payload.product_tags = tags.join(", ");
+  if (generatedTags.length && shouldWriteAsset("标签")) {
+    payload.tags = generatedTags.join(", ");
+    payload.product_tags = generatedTags.join(", ");
+    payload.generated_tags = generatedTags;
   }
-  if (item.generatedDescription && shouldWriteAsset("描述")) {
-    payload.summary = normalizeCopyForWrite(item.generatedDescription);
-    payload.description = normalizeCopyForWrite(item.generatedDescription);
+  if (generatedDescription && shouldWriteAsset("描述")) {
+    payload.selling_points = generatedDescription;
+    payload.summary = generatedDescription;
+    payload.description = generatedDescription;
+    payload.generated_description = generatedDescription;
   }
+  if (item.targetModel) payload.vehicle_model = item.targetModel;
 
-  await apiClient.put(`/api/products/${encodeURIComponent(task.sourceSelectionId)}`, payload);
+  return payload;
 }
 
 function shouldWriteAsset(label) {
   return task.outputs.includes(label);
+}
+
+function resultHasWritableContent(item = {}) {
+  return Boolean(
+    (item.type === "主图" && item.imageUrl)
+    || (item.type === "详情图" && item.imageUrl)
+    || item.generatedTitles?.length
+    || item.generatedTags?.length
+    || item.generatedDescription
+  );
+}
+
+function buildWriteBackBundle(seed = {}) {
+  const groupKey = seed.writeBackGroupKey || seed.id;
+  const siblings = displayResults.value.filter((item) => (
+    item.writeBackGroupKey === groupKey
+    && item.status === "已完成"
+    && resultHasWritableContent(item)
+  ));
+  const bundle = {
+    ...seed,
+    id: groupKey,
+    sourceResultIds: siblings.map((item) => item.id),
+    mainImageUrl: "",
+    detailImageUrls: [],
+    generatedTitles: [],
+    generatedTags: [],
+    generatedDescription: ""
+  };
+  siblings.forEach((item) => {
+    if (item.type === "主图" && item.imageUrl && !bundle.mainImageUrl) bundle.mainImageUrl = item.imageUrl;
+    if (item.type === "详情图" && item.imageUrl) bundle.detailImageUrls = appendUnique(bundle.detailImageUrls, item.imageUrl);
+    if (!bundle.generatedTitles.length && item.generatedTitles?.length) bundle.generatedTitles = item.generatedTitles;
+    if (!bundle.generatedTags.length && item.generatedTags?.length) bundle.generatedTags = item.generatedTags;
+    if (!bundle.generatedDescription && item.generatedDescription) bundle.generatedDescription = item.generatedDescription;
+  });
+  if (!bundle.mainImageUrl && seed.type === "主图" && seed.imageUrl) bundle.mainImageUrl = seed.imageUrl;
+  if (!bundle.detailImageUrls.length && seed.type === "详情图" && seed.imageUrl) bundle.detailImageUrls = [seed.imageUrl];
+  if (!bundle.generatedTitles.length && seed.generatedTitles?.length) bundle.generatedTitles = seed.generatedTitles;
+  if (!bundle.generatedTags.length && seed.generatedTags?.length) bundle.generatedTags = seed.generatedTags;
+  if (!bundle.generatedDescription && seed.generatedDescription) bundle.generatedDescription = seed.generatedDescription;
+  return bundle;
 }
 
 function normalizeImageList(value) {
@@ -1627,16 +2019,39 @@ function appendUnique(list, value) {
   return list.includes(value) ? list : [...list, value];
 }
 
+function markWriteBackGroupDone(item = {}, created = {}) {
+  const groupKey = item.writeBackGroupKey || item.id;
+  displayResults.value.forEach((row) => {
+    if ((row.writeBackGroupKey || row.id) !== groupKey) return;
+    row.writeBackStatus = "已回写";
+    row.createdSelectionId = created.id || created.product?.id || null;
+    row.createdSelectionCode = created.product?.selection_id || created.selection_id || "";
+  });
+}
+
 async function batchWriteBack() {
-  const writable = displayResults.value.filter((item) => item.status === "已完成" && item.writeBackStatus !== "已回写");
+  if (!selectionTemplateReady.value) {
+    ElMessage.warning("批量创建已封锁：请先从选品估价表导入商品作为模板");
+    return;
+  }
+  const writable = Array.from(
+    new Map(displayResults.value
+      .filter((item) => item.status === "已完成" && item.writeBackStatus !== "已回写" && resultHasWritableContent(item))
+      .map((item) => [item.writeBackGroupKey || item.id, item])).values()
+  );
   if (!writable.length) {
     ElMessage.warning("没有可回写的新结果");
     return;
   }
+  await ElMessageBox.confirm(
+    `将以「${task.sourceLabel}」为模板创建 ${writable.length} 条新的选品计价表记录。未生成或未勾选的字段会保留模板原值，不会覆盖原记录。`,
+    "创建新选品记录",
+    { type: "warning", confirmButtonText: "创建新记录", cancelButtonText: "取消" }
+  );
   for (const item of writable) {
     await writeBack(item);
   }
-  ElMessage.success(`已回写 ${writable.length} 个结果`);
+  ElMessage.success(`已创建 ${writable.length} 条新选品记录`);
 }
 
 function saveDraft() {
@@ -1644,15 +2059,23 @@ function saveDraft() {
   ElMessage.success("草稿已保存");
 }
 
-function createResultShell(targetModel) {
-  const imageRequested = hasImageOutput();
+function createResultShell(queueItem = {}) {
+  const targetModel = typeof queueItem === "string" ? queueItem : queueItem.targetModel || "";
+  const strategyTitle = typeof queueItem === "string"
+    ? selectedStrategyTitles.value[0] || selectedStyle.value.title
+    : queueItem.strategyTitle || selectedStrategyTitles.value[0] || selectedStyle.value.title;
+  const type = queueItem.type || (task.outputs.includes("主图") ? "主图" : task.outputs.includes("详情图") ? "详情图" : "文案");
   return {
     id: `result-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     targetModel,
-    type: task.outputs.includes("主图") ? "主图" : task.outputs.includes("详情图") ? "详情图" : "文案",
-    assetKind: imageRequested ? "image" : "copy",
+    type,
+    detailType: queueItem.detailType || "",
+    assetKind: queueItem.assetKind || (["主图", "详情图"].includes(type) ? "image" : "copy"),
+    copyOutputs: queueItem.copyOutputs || [],
+    writeBackGroupKey: queueItem.writeBackGroupKey || [targetModel || "base", strategyTitle || "default"].join("::"),
     optimizationTitle: selectedOptimizationTarget.value?.title || "",
-    strategyTitle: selectedStrategy.value?.title || selectedStyle.value.title,
+    strategyTitle,
+    strategyTitles: [strategyTitle].filter(Boolean),
     ratio: task.ratio,
     status: "待生成",
     progress: 0,
@@ -1675,6 +2098,89 @@ function createResultShell(targetModel) {
 function openTemplateCenter() {
   templateCenterVisible.value = true;
   if (!templateForm.id && templates.value[0]) selectTemplateForEdit(templates.value[0]);
+}
+
+async function openStrategyLibrary() {
+  strategyLibraryVisible.value = true;
+  await loadStrategyLibrary();
+  if (!strategyForm.id && strategyLibraryRows.value[0]) selectStrategyForEdit(strategyLibraryRows.value[0]);
+}
+
+async function loadStrategyLibrary() {
+  strategyLibraryLoading.value = true;
+  try {
+    strategyLibraryRows.value = await listAiStrategies({ enabled: "" });
+  } catch (error) {
+    ElMessage.error(error.message || "策略库加载失败");
+  } finally {
+    strategyLibraryLoading.value = false;
+  }
+}
+
+function selectStrategyForEdit(item = {}) {
+  Object.assign(strategyForm, {
+    id: item.id || null,
+    strategy_key: item.strategy_key || item.strategyKey || "",
+    title: item.title || "",
+    business_modes: [...(item.business_modes || item.businessModes || ["product_optimization", "product_variant"])],
+    applicable_goals: [...(item.applicable_goals || item.applicableGoals || [])],
+    applicable_assets: [...(item.applicable_assets || item.applicableAssets || [])],
+    aliases_text: arrayToLines(item.aliases),
+    positive_modules_text: arrayToLines(item.positive_modules || item.positiveModules),
+    negative_modules_text: arrayToLines(item.negative_modules || item.negativeModules),
+    conflict_strategy_keys: [...(item.conflict_strategy_keys || item.conflictStrategyKeys || [])],
+    priority: Number(item.priority || 0),
+    enabled: Boolean(item.enabled),
+    version: Number(item.version || 1),
+    metadata_json: JSON.stringify(item.metadata || {}, null, 2)
+  });
+}
+
+function newStrategy() {
+  Object.assign(strategyForm, createBlankStrategy());
+}
+
+async function saveStrategy() {
+  savingStrategy.value = true;
+  try {
+    const payload = {
+      strategy_key: strategyForm.strategy_key,
+      title: strategyForm.title,
+      business_modes: strategyForm.business_modes,
+      applicable_goals: strategyForm.applicable_goals,
+      applicable_assets: strategyForm.applicable_assets,
+      aliases: linesToArray(strategyForm.aliases_text),
+      positive_modules: linesToArray(strategyForm.positive_modules_text),
+      negative_modules: linesToArray(strategyForm.negative_modules_text),
+      conflict_strategy_keys: strategyForm.conflict_strategy_keys,
+      priority: strategyForm.priority,
+      enabled: strategyForm.enabled ? 1 : 0,
+      version: strategyForm.version,
+      metadata: parseJsonSafe(strategyForm.metadata_json, {})
+    };
+    const saved = strategyForm.id
+      ? await updateAiStrategy(strategyForm.id, payload)
+      : await createAiStrategy(payload);
+    await loadStrategyLibrary();
+    selectStrategyForEdit(saved);
+    remoteStrategyPlan.value = null;
+    await refreshRemoteStrategyPlan();
+    ElMessage.success("策略已保存");
+  } catch (error) {
+    ElMessage.error(error.message || "策略保存失败");
+  } finally {
+    savingStrategy.value = false;
+  }
+}
+
+async function removeStrategy(item) {
+  await ElMessageBox.confirm(`确定停用「${item.title}」吗？`, "停用策略", { type: "warning" });
+  await deleteAiStrategy(item.id);
+  await loadStrategyLibrary();
+  newStrategy();
+  remoteStrategyPlan.value = null;
+  await refreshRemoteStrategyPlan();
+  ElMessage.success("策略已停用");
 }
 
 function selectTemplateForEdit(item) {
@@ -1783,6 +2289,41 @@ function createBlankTemplate() {
   };
 }
 
+function createBlankStrategy() {
+  return {
+    id: null,
+    strategy_key: "",
+    title: "",
+    business_modes: ["product_optimization"],
+    applicable_goals: ["low_ctr"],
+    applicable_assets: ["main_image"],
+    aliases_text: "",
+    positive_modules_text: "",
+    negative_modules_text: "",
+    conflict_strategy_keys: [],
+    priority: 50,
+    enabled: true,
+    version: 1,
+    metadata_json: "{}"
+  };
+}
+
+function arrayToLines(value = []) {
+  return (Array.isArray(value) ? value : []).join("\n");
+}
+
+function linesToArray(value = "") {
+  return String(value || "").split(/\r?\n|，|,/).map((item) => item.trim()).filter(Boolean);
+}
+
+function parseJsonSafe(value, fallback = {}) {
+  try {
+    return JSON.parse(value || "");
+  } catch {
+    return fallback;
+  }
+}
+
 function renderText(template, variables) {
   return String(template || "").replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, key) => variables[key] || "");
 }
@@ -1799,11 +2340,16 @@ function renderText(template, variables) {
       <div class="topbar-actions">
         <el-button @click="openDiagnosis">数据诊断</el-button>
         <el-button :icon="Setting" @click="strategyDrawer = true">AI策略</el-button>
+        <el-button @click="openStrategyLibrary">策略库</el-button>
         <el-button @click="openTemplateCenter">模板中心</el-button>
         <el-button :icon="View" @click="openMaterialCenter">查看素材</el-button>
         <el-button @click="saveDraft">保存草稿</el-button>
         <el-button type="primary" :icon="MagicStick" :loading="generating" @click="startGenerate">开始AI优化</el-button>
-        <el-button type="success" plain @click="batchWriteBack">批量回写</el-button>
+        <el-tooltip :content="writeBackGateText" placement="top">
+          <span>
+            <el-button type="success" plain :disabled="!displayResults.length || !selectionTemplateReady" @click="batchWriteBack">创建选品记录</el-button>
+          </span>
+        </el-tooltip>
       </div>
     </header>
 
@@ -1975,8 +2521,9 @@ function renderText(template, variables) {
               <strong>当前选择目标：{{ selectedOptimizationTarget.title }}</strong>
             </div>
             <div class="ai-plan-pills">
+              <el-tag type="info" effect="plain">{{ selectedStrategyCountText }}</el-tag>
               <el-tag
-                v-for="item in (task.selectedStrategies.length ? task.selectedStrategies : selectedGoalStrategies).slice(0, 4)"
+                v-for="item in selectedStrategyTitles"
                 :key="item"
                 type="primary"
                 effect="light"
@@ -2068,10 +2615,10 @@ function renderText(template, variables) {
 
           <section class="ai-flow-card recommendation-card">
             <div class="flow-step-head">
-              <span>AI</span>
+              <span>{{ isVariantWorkflow ? "VAR" : "PLAN" }}</span>
               <div>
-                <strong>AI推荐策略</strong>
-                <em>策略引擎会自动决定视觉、文案和回写方向。</em>
+                <strong>{{ isVariantWorkflow ? "选择一个裂变策略" : "选择独立生成策略" }}</strong>
+                <em>{{ isVariantWorkflow ? "裂变模式下策略互斥，按车型等变量批量展开。" : "每个策略生成一张独立方案，多选会拆成多张图。" }}</em>
               </div>
             </div>
             <div class="recommendation-list">
@@ -2082,7 +2629,7 @@ function renderText(template, variables) {
                 @click="toggleRecommendedStrategy(item.title)"
               >
                 <strong>{{ task.selectedStrategies.includes(item.title) ? "✓" : "+" }} {{ item.title }}</strong>
-                <span>{{ item.recommended ? item.group : "可选增强" }}</span>
+                <span>{{ isVariantWorkflow ? "单一裂变策略" : (item.recommended ? "独立方案" : "可选方案") }}</span>
               </button>
             </div>
             <div class="strategy-summary-card">
@@ -2107,7 +2654,19 @@ function renderText(template, variables) {
           <div class="canvas-status-actions">
             <el-button size="small" :disabled="!displayResults.length" @click="saveDraft">保存草稿</el-button>
             <el-button size="small" type="primary" :loading="generating" @click="startGenerate">重新生成</el-button>
-            <el-button size="small" type="success" plain :disabled="!displayResults.length" @click="batchWriteBack">批量回写</el-button>
+            <el-tooltip :content="writeBackGateText" placement="top">
+              <span>
+                <el-button
+                  size="small"
+                  type="success"
+                  plain
+                  :disabled="!displayResults.length || !selectionTemplateReady"
+                  @click="batchWriteBack"
+                >
+                  创建选品记录
+                </el-button>
+              </span>
+            </el-tooltip>
           </div>
         </section>
 
@@ -2131,7 +2690,7 @@ function renderText(template, variables) {
               <div class="inline-output-layout">
                 <div class="inline-targets">
                   <div class="target-tab-head">
-                    <strong>车型变量</strong>
+                    <strong>{{ isVariantWorkflow ? "裂变变量" : "车型变量（可选）" }}</strong>
                     <el-button link type="danger" :disabled="!task.targets.length" @click="clearTargets">清空</el-button>
                   </div>
                   <div class="target-tags">
@@ -2144,7 +2703,7 @@ function renderText(template, variables) {
                       type="textarea"
                       :rows="1"
                       resize="none"
-                      placeholder="输入或粘贴车型，回车添加；多行/逗号可批量"
+                      :placeholder="isVariantWorkflow ? '输入或粘贴车型，每个车型生成一张独立主图' : '可选：输入参考车型，用于优化文案或主图'"
                       @keyup.enter.exact.prevent="addTargetFromInput"
                       @keyup.ctrl.enter="addTargetFromInput"
                     />
@@ -2168,7 +2727,9 @@ function renderText(template, variables) {
                     <div v-if="task.outputs.includes('详情图')" class="detail-type-picker">
                       <em>详情图模块</em>
                       <el-checkbox-group v-model="task.detailImageTypes">
-                        <el-checkbox v-for="item in detailImageTypeOptions" :key="item" :value="item" />
+                        <el-checkbox v-for="item in detailImageTypeOptions" :key="item" :value="item">
+                          {{ item }}
+                        </el-checkbox>
                       </el-checkbox-group>
                     </div>
                   </div>
@@ -2198,8 +2759,8 @@ function renderText(template, variables) {
           <div v-if="!displayResults.length && !generating" class="ai-suggestion-panel">
             <div class="result-task-summary">
               <p><span>本次任务</span><strong>{{ selectedOptimizationTarget.title }}</strong></p>
-              <p><span>优化目标</span><strong>{{ selectedOptimizationTarget.text }}</strong></p>
-              <p><span>推荐策略</span><strong>{{ (task.selectedStrategies.length ? task.selectedStrategies : selectedGoalStrategies).slice(0, 3).join(" / ") }}</strong></p>
+              <p><span>{{ isVariantWorkflow ? "裂变方式" : "优化目标" }}</span><strong>{{ selectedOptimizationTarget.text }}</strong></p>
+              <p><span>{{ isVariantWorkflow ? "裂变策略" : "独立策略" }}</span><strong>{{ selectedStrategyCountText }}：{{ selectedStrategyTitles.join(" / ") }}</strong></p>
               <p><span>输出内容</span><strong>{{ selectedWriteBackAssets.slice(0, 5).join(" + ") }}</strong></p>
             </div>
             <div class="pending-task-list">
@@ -2240,8 +2801,8 @@ function renderText(template, variables) {
                     <el-tag class="asset-status" :type="item.status === '已完成' ? 'success' : item.status === '失败' ? 'danger' : 'warning'">{{ item.status }}</el-tag>
                   </div>
                   <div class="asset-meta">
-                    <strong>{{ item.targetModel }}</strong>
-                    <span>{{ item.type }} · {{ item.ratio }} · {{ item.createdAt }}</span>
+                    <strong>{{ item.targetModel || item.strategyTitle }}</strong>
+                    <span>{{ item.type }}{{ item.detailType ? ` / ${item.detailType}` : "" }} · {{ item.strategyTitle }} · {{ item.ratio }} · {{ item.createdAt }}</span>
                     <span v-if="item.assetId">素材资产 #{{ item.assetId }} · {{ item.assetStatus }}</span>
                   </div>
                   <div v-if="item.status === '失败'" class="asset-error">{{ item.errorMessage }}</div>
@@ -2250,7 +2811,11 @@ function renderText(template, variables) {
                     <el-button size="small" @click="editPromptForItem(item)">编辑Prompt</el-button>
                     <el-button size="small" :icon="Download" tag="a" :href="item.downloadUrl ? downloadUrl(item.downloadUrl) : undefined" :disabled="!item.downloadUrl">下载</el-button>
                     <el-button size="small" @click="setAsMain(item)">设为主图</el-button>
-                    <el-button size="small" type="primary" plain @click="writeBack(item)">回写</el-button>
+                    <el-tooltip :content="writeBackGateText" placement="top">
+                      <span>
+                        <el-button size="small" type="primary" plain :disabled="!selectionTemplateReady" @click="writeBack(item)">创建选品</el-button>
+                      </span>
+                    </el-tooltip>
                   </div>
                 </article>
               </div>
@@ -2301,12 +2866,18 @@ function renderText(template, variables) {
                   <strong>回写记录</strong>
                   <span>已生成素材会自动沉淀为资产，回写状态在这里统一跟踪。</span>
                 </div>
-                <el-button size="small" type="primary" plain :disabled="!displayResults.length" @click="batchWriteBack">批量回写</el-button>
+                <el-tooltip :content="writeBackGateText" placement="top">
+                  <span>
+                    <el-button size="small" type="primary" plain :disabled="!displayResults.length || !selectionTemplateReady" @click="batchWriteBack">创建选品记录</el-button>
+                  </span>
+                </el-tooltip>
               </div>
               <div v-if="writebackResults.length" class="writeback-list">
                 <article v-for="item in writebackResults" :key="`wb-${item.id}`">
-                  <strong>{{ item.targetModel }} · {{ item.writeBackStatus }}</strong>
-                  <span>{{ item.assetId ? `素材资产 #${item.assetId}` : "文案素材" }}，{{ item.status }}，{{ item.createdAt }}</span>
+                  <strong>{{ item.targetModel || item.strategyTitle }}{{ item.detailType ? ` / ${item.detailType}` : "" }} · {{ item.writeBackStatus }}</strong>
+                  <span>
+                    {{ item.createdSelectionId ? `新选品记录 #${item.createdSelectionId}` : (item.assetId ? `素材资产 #${item.assetId}` : "文案素材") }}，{{ item.status }}，{{ item.createdAt }}
+                  </span>
                 </article>
               </div>
               <el-empty v-else class="compact-result-empty" description="暂无回写记录" />
@@ -2478,12 +3049,12 @@ function renderText(template, variables) {
               </el-select>
             </div>
             <div class="drawer-section-head">
-              <h3>最终拼接Prompt</h3>
+              <h3>最终拼接Prompt（队列首个任务）</h3>
               <el-button size="small" @click="previewPrompt">重新拼接</el-button>
             </div>
-            <pre>{{ finalPrompt }}</pre>
+            <pre>{{ previewPositivePrompt || finalPrompt }}</pre>
             <h4>负向规则</h4>
-            <pre>{{ finalNegativePrompt }}</pre>
+            <pre>{{ previewNegativePrompt || finalNegativePrompt }}</pre>
           </section>
         </el-collapse-item>
         <el-collapse-item title="高级编辑" name="advanced">
@@ -2504,6 +3075,98 @@ function renderText(template, variables) {
           <el-empty v-if="!logs.length" description="暂无生成日志" />
         </el-collapse-item>
       </el-collapse>
+    </el-drawer>
+
+    <el-drawer v-model="strategyLibraryVisible" title="AI策略库" size="980px">
+      <section class="template-center strategy-library">
+        <aside class="template-browser">
+          <div class="template-search">
+            <el-input v-model="strategyLibrarySearch" placeholder="搜索策略 / Prompt模块" clearable />
+            <el-select v-model="strategyLibraryGoal" placeholder="适用目标" clearable>
+              <el-option v-for="item in strategyGoalOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </div>
+          <button
+            v-for="item in filteredStrategyRows"
+            :key="item.id"
+            :class="{ active: strategyForm.id === item.id }"
+            @click="selectStrategyForEdit(item)"
+          >
+            <strong>{{ item.title }}</strong>
+            <span>{{ item.strategy_key }} · P{{ item.priority }} · v{{ item.version }}</span>
+            <em>{{ item.enabled ? "启用" : "停用" }}</em>
+          </button>
+          <el-empty v-if="!filteredStrategyRows.length" description="暂无策略" />
+        </aside>
+
+        <main v-loading="strategyLibraryLoading" class="template-editor">
+          <div class="editor-head">
+            <strong>{{ strategyForm.id ? "编辑策略" : "新增策略" }}</strong>
+            <div>
+              <el-button @click="newStrategy">新增</el-button>
+              <el-button :disabled="!strategyForm.id" type="danger" plain @click="removeStrategy(strategyForm)">停用</el-button>
+              <el-button type="primary" :loading="savingStrategy" @click="saveStrategy">保存</el-button>
+            </div>
+          </div>
+          <el-form label-position="top">
+            <div class="two-col">
+              <el-form-item label="策略Key">
+                <el-input v-model="strategyForm.strategy_key" placeholder="main-subject-70" />
+              </el-form-item>
+              <el-form-item label="策略名称">
+                <el-input v-model="strategyForm.title" placeholder="主体占比70%" />
+              </el-form-item>
+            </div>
+            <div class="two-col">
+              <el-form-item label="业务模式">
+                <el-select v-model="strategyForm.business_modes" multiple>
+                  <el-option v-for="item in strategyBusinessModeOptions" :key="item.value" :label="item.label" :value="item.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="适用目标">
+                <el-select v-model="strategyForm.applicable_goals" multiple filterable>
+                  <el-option v-for="item in strategyGoalOptions" :key="item.value" :label="item.label" :value="item.value" />
+                </el-select>
+              </el-form-item>
+            </div>
+            <div class="two-col">
+              <el-form-item label="适用资产">
+                <el-select v-model="strategyForm.applicable_assets" multiple>
+                  <el-option v-for="item in strategyAssetOptions" :key="item.value" :label="item.label" :value="item.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="冲突策略">
+                <el-select v-model="strategyForm.conflict_strategy_keys" multiple filterable allow-create default-first-option>
+                  <el-option v-for="item in strategyLibraryRows" :key="item.strategy_key" :label="item.title" :value="item.strategy_key" />
+                </el-select>
+              </el-form-item>
+            </div>
+            <div class="two-col">
+              <el-form-item label="优先级">
+                <el-input-number v-model="strategyForm.priority" :min="-999" :max="999" />
+              </el-form-item>
+              <el-form-item label="版本号">
+                <el-input-number v-model="strategyForm.version" :min="1" :max="999" />
+              </el-form-item>
+            </div>
+            <el-form-item label="别名 / 兼容旧策略名">
+              <el-input v-model="strategyForm.aliases_text" type="textarea" :rows="3" placeholder="一行一个，也支持逗号分隔" />
+            </el-form-item>
+            <el-form-item label="正向Prompt模块">
+              <el-input v-model="strategyForm.positive_modules_text" type="textarea" :rows="7" placeholder="一行一个执行指令，会合并进最终Prompt" />
+            </el-form-item>
+            <el-form-item label="负向Prompt模块">
+              <el-input v-model="strategyForm.negative_modules_text" type="textarea" :rows="4" placeholder="一行一个禁止项，会合并进负向Prompt" />
+            </el-form-item>
+            <el-form-item label="元数据JSON">
+              <el-input v-model="strategyForm.metadata_json" type="textarea" :rows="3" />
+            </el-form-item>
+            <div class="template-switches">
+              <el-switch v-model="strategyForm.enabled" active-text="启用" inactive-text="停用" />
+            </div>
+          </el-form>
+        </main>
+      </section>
     </el-drawer>
 
     <el-drawer v-model="templateCenterVisible" title="模板中心" size="860px">

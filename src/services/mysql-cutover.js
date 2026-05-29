@@ -1,6 +1,6 @@
 ﻿import { PDFDocument } from "pdf-lib";
 import { actualItemProfit, estimateItemProfit } from "../profit.js";
-import { archiveOzonProducts, fetchOzonPackageLabel, fetchOzonPostingByNumber, fetchOzonPostings, fetchOzonFinanceTransactions, fetchOzonProducts, fetchOzonProductStocks, shipOzonPosting, updateOzonProductStocks } from "../ozonClient.js";
+import { archiveOzonProducts, fetchOzonManagedStocks, fetchOzonPackageLabel, fetchOzonPostingByNumber, fetchOzonPostings, fetchOzonFinanceTransactions, fetchOzonProducts, fetchOzonProductStocks, fetchOzonStockTurnover, shipOzonPosting, updateOzonProductStocks } from "../ozonClient.js";
 import { buildOrderOutcomeSql, classifyOrderAccounting, classifyOrderOutcome, estimateOutcomeReturnLoss, resolveOrderLossProfile } from "./order-outcome.js";
 import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { buildOrderProfitDetailSnapshotPayload } from "./order-profit-detail-snapshots.js";
@@ -97,6 +97,21 @@ async function ensureMysqlColumns(table, statements = []) {
   }
 }
 
+async function ensureOzonStockStorageSchemaMysql() {
+  if (ozonStockStorageSchemaReady) return;
+  await ensureMysqlColumns("ozon_stock_snapshots", [
+    "ALTER TABLE ozon_stock_snapshots ADD COLUMN free_stock_count DECIMAL(18,4) NOT NULL DEFAULT 0",
+    "ALTER TABLE ozon_stock_snapshots ADD COLUMN paid_stock_count DECIMAL(18,4) NOT NULL DEFAULT 0",
+    "ALTER TABLE ozon_stock_snapshots ADD COLUMN expiring_stock_count DECIMAL(18,4) NOT NULL DEFAULT 0",
+    "ALTER TABLE ozon_stock_snapshots ADD COLUMN waitingdocs_stock_count DECIMAL(18,4) NOT NULL DEFAULT 0",
+    "ALTER TABLE ozon_stock_snapshots ADD COLUMN paid_storage_start_at DATE NULL",
+    "ALTER TABLE ozon_stock_snapshots ADD COLUMN stock_days DECIMAL(18,4) NULL",
+    "ALTER TABLE ozon_stock_snapshots ADD COLUMN average_daily_sales DECIMAL(18,4) NULL",
+    "ALTER TABLE ozon_stock_snapshots ADD COLUMN stock_level VARCHAR(64) NOT NULL DEFAULT ''"
+  ]);
+  ozonStockStorageSchemaReady = true;
+}
+
 const STOCK_ALERT_BASE_CACHE_TTL_MS = 60_000;
 const EXCEPTION_WORKBENCH_CACHE_TTL_MS = 45_000;
 const ORDER_COUNTS_CACHE_TTL_MS = 180_000;
@@ -107,6 +122,7 @@ const ORDER_LABEL_PREFETCH_MAX_ATTEMPTS = 3;
 const pendingOrderLabelPrefetchTimers = new Map();
 let orderLabelPrintSchemaReady = false;
 let orderPackageLabelCacheSchemaReady = false;
+let ozonStockStorageSchemaReady = false;
 let logisticsRuleFilterCacheMysql = null;
 let shopWatermarkSchemaReadyMysql = false;
 let shopAdvertisingCredentialSchemaReadyMysql = false;
@@ -456,7 +472,7 @@ async function mysqlInsertAndGetId(sql, params = []) {
 function withProductImageEndpointMysql(row) {
   if (!row) return row;
   const image = String(row.image_url || "");
-  if (!image.startsWith("data:image/")) return row;
+  if (!shouldServeProductImageThroughEndpointMysql(image)) return row;
   return {
     ...row,
     image_url: productImageEndpointMysql(row)
@@ -477,7 +493,7 @@ function compactProductListRowMysql(row) {
     code: row.code,
     inventory_id: row.inventory_id,
     name: row.name,
-    image_url: imageUrl.startsWith("data:image/") ? productImageEndpointMysql(row) : imageUrl,
+    image_url: shouldServeProductImageThroughEndpointMysql(imageUrl) ? productImageEndpointMysql(row) : imageUrl,
     owner_person_id: row.owner_person_id,
     owner_name: row.owner_name || "",
     created_by_person_id: row.created_by_person_id,
@@ -561,6 +577,11 @@ function normalizeProductImageUrlMysql(value) {
   const image = String(value || "").trim();
   if (/^\/api\/products\/\d+\/image(?:[?#].*)?$/i.test(image)) return "";
   return image;
+}
+
+function shouldServeProductImageThroughEndpointMysql(image) {
+  return String(image || "").startsWith("data:image/")
+    || /^\/api\/ai\/file\/[^/]+\/[^/]+\/.+/i.test(String(image || ""));
 }
 
 function isProductImageEndpointMysql(value, productId) {
@@ -742,6 +763,11 @@ function normalizeSyncDateMysql(value) {
   const date = new Date(String(value).includes("T") ? value : `${value}T00:00:00.000Z`);
   if (Number.isNaN(date.getTime())) return "";
   return String(value).slice(0, 10);
+}
+
+function normalizeMysqlNullableDate(value) {
+  const text = normalizeSyncDateMysql(value);
+  return text || null;
 }
 
 function normalizeMysqlNullableDateTime(value) {
@@ -1875,6 +1901,11 @@ export async function stockAlertsMysql(query = {}) {
       COALESCE(stock.fbs_present, 0) AS fbs_present,
       COALESCE(stock.fbs_available, 0) AS fbs_available,
       COALESCE(stock.unknown_present, 0) AS unknown_present,
+      COALESCE(stock.free_stock_count, 0) AS free_stock_count,
+      COALESCE(stock.paid_stock_count, 0) AS paid_stock_count,
+      COALESCE(stock.expiring_stock_count, 0) AS expiring_stock_count,
+      COALESCE(stock.waitingdocs_stock_count, 0) AS waitingdocs_stock_count,
+      stock.paid_storage_start_at, stock.stock_days, stock.average_daily_sales, stock.stock_level,
       COALESCE(stock.fbp_snapshot_count, 0) AS fbp_snapshot_count,
       COALESCE(stock.fbs_snapshot_count, 0) AS fbs_snapshot_count,
       stock.last_synced_at,
@@ -1897,6 +1928,14 @@ export async function stockAlertsMysql(query = {}) {
         SUM(CASE WHEN stock_type = 'fbs_virtual' THEN present ELSE 0 END) AS fbs_present,
         SUM(CASE WHEN stock_type = 'fbs_virtual' THEN available ELSE 0 END) AS fbs_available,
         SUM(CASE WHEN stock_type = 'unknown' THEN present ELSE 0 END) AS unknown_present,
+        SUM(CASE WHEN stock_type = 'fbp_real' THEN free_stock_count ELSE 0 END) AS free_stock_count,
+        SUM(CASE WHEN stock_type = 'fbp_real' THEN paid_stock_count ELSE 0 END) AS paid_stock_count,
+        SUM(CASE WHEN stock_type = 'fbp_real' THEN expiring_stock_count ELSE 0 END) AS expiring_stock_count,
+        SUM(CASE WHEN stock_type = 'fbp_real' THEN waitingdocs_stock_count ELSE 0 END) AS waitingdocs_stock_count,
+        MIN(CASE WHEN stock_type = 'fbp_real' THEN paid_storage_start_at ELSE NULL END) AS paid_storage_start_at,
+        MAX(CASE WHEN stock_type = 'fbp_real' THEN stock_days ELSE NULL END) AS stock_days,
+        MAX(CASE WHEN stock_type = 'fbp_real' THEN average_daily_sales ELSE NULL END) AS average_daily_sales,
+        MAX(CASE WHEN stock_type = 'fbp_real' THEN stock_level ELSE '' END) AS stock_level,
         SUM(CASE WHEN stock_type = 'fbp_real' THEN 1 ELSE 0 END) AS fbp_snapshot_count,
         SUM(CASE WHEN stock_type = 'fbs_virtual' THEN 1 ELSE 0 END) AS fbs_snapshot_count,
         MAX(synced_at) AS last_synced_at,
@@ -1937,6 +1976,14 @@ export async function stockAlertsMysql(query = {}) {
           fbp_total: 0,
           fbs_total: 0,
           unknown_total: 0,
+          free_stock_count: 0,
+          paid_stock_count: 0,
+          expiring_stock_count: 0,
+          waitingdocs_stock_count: 0,
+          paid_storage_start_at: "",
+          stock_days: null,
+          average_daily_sales: null,
+          stock_level: "",
           recent_7d_qty: 0,
           recent_3d_qty: 0,
           recent_30d_qty: 0,
@@ -1968,6 +2015,14 @@ export async function stockAlertsMysql(query = {}) {
         fbs_available: Number(row.fbs_available || 0),
         fbs_low_threshold: 10,
         unknown_present: Number(row.unknown_present || 0),
+        free_stock_count: Number(row.free_stock_count || 0),
+        paid_stock_count: Number(row.paid_stock_count || 0),
+        expiring_stock_count: Number(row.expiring_stock_count || 0),
+        waitingdocs_stock_count: Number(row.waitingdocs_stock_count || 0),
+        paid_storage_start_at: row.paid_storage_start_at || "",
+        stock_days: row.stock_days == null ? null : Number(row.stock_days),
+        average_daily_sales: row.average_daily_sales == null ? null : Number(row.average_daily_sales),
+        stock_level: row.stock_level || "",
         fbp_snapshot_count: Number(row.fbp_snapshot_count || 0),
         fbs_snapshot_count: Number(row.fbs_snapshot_count || 0),
         recent_3d_qty: Number(row.recent_3d_qty || 0),
@@ -1982,6 +2037,14 @@ export async function stockAlertsMysql(query = {}) {
       product.fbp_total += sku.fbp_present;
       product.fbs_total += sku.fbs_present;
       product.unknown_total += sku.unknown_present;
+      product.free_stock_count += sku.free_stock_count;
+      product.paid_stock_count += sku.paid_stock_count;
+      product.expiring_stock_count += sku.expiring_stock_count;
+      product.waitingdocs_stock_count += sku.waitingdocs_stock_count;
+      product.paid_storage_start_at = maxTextDate(product.paid_storage_start_at, sku.paid_storage_start_at);
+      if (sku.stock_days != null) product.stock_days = Math.max(Number(product.stock_days || 0), sku.stock_days);
+      if (sku.average_daily_sales != null) product.average_daily_sales = Math.max(Number(product.average_daily_sales || 0), sku.average_daily_sales);
+      if (sku.stock_level && !product.stock_level) product.stock_level = sku.stock_level;
       product.recent_3d_qty += sku.recent_3d_qty;
       product.recent_7d_qty += sku.recent_7d_qty;
       product.recent_30d_qty += sku.recent_30d_qty;
@@ -2294,6 +2357,7 @@ async function fallbackStockRowsFromOnlineProductsMysql(shopId, productId = null
 }
 
 async function upsertStockSnapshotMysql(shopId, row) {
+  await ensureOzonStockStorageSchemaMysql();
   const online = await mysqlQueryOne(`
     SELECT op.id AS online_product_id, sm.product_id
     FROM online_products op
@@ -2317,8 +2381,10 @@ async function upsertStockSnapshotMysql(shopId, row) {
   `, [Number(shopId), normalizedSku, warehouseId, stockType]);
   await mysqlExecute(`
     INSERT INTO ozon_stock_snapshots
-    (shop_id, online_product_id, product_id, ozon_product_id, ozon_sku, offer_id, warehouse_id, warehouse_name, stock_type, present, reserved, available, raw_json, synced_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    (shop_id, online_product_id, product_id, ozon_product_id, ozon_sku, offer_id, warehouse_id, warehouse_name, stock_type,
+     present, reserved, available, free_stock_count, paid_stock_count, expiring_stock_count, waitingdocs_stock_count,
+     paid_storage_start_at, stock_days, average_daily_sales, stock_level, raw_json, synced_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     ON DUPLICATE KEY UPDATE
       online_product_id = VALUES(online_product_id),
       product_id = VALUES(product_id),
@@ -2328,6 +2394,14 @@ async function upsertStockSnapshotMysql(shopId, row) {
       present = VALUES(present),
       reserved = VALUES(reserved),
       available = VALUES(available),
+      free_stock_count = VALUES(free_stock_count),
+      paid_stock_count = VALUES(paid_stock_count),
+      expiring_stock_count = VALUES(expiring_stock_count),
+      waitingdocs_stock_count = VALUES(waitingdocs_stock_count),
+      paid_storage_start_at = VALUES(paid_storage_start_at),
+      stock_days = VALUES(stock_days),
+      average_daily_sales = VALUES(average_daily_sales),
+      stock_level = VALUES(stock_level),
       raw_json = VALUES(raw_json),
       synced_at = CURRENT_TIMESTAMP
   `, [
@@ -2343,6 +2417,14 @@ async function upsertStockSnapshotMysql(shopId, row) {
     snapshotStockNumberMysql(row.present),
     snapshotStockNumberMysql(row.reserved),
     snapshotStockNumberMysql(row.available ?? row.present),
+    snapshotStockNumberMysql(row.free_stock_count),
+    snapshotStockNumberMysql(row.paid_stock_count),
+    snapshotStockNumberMysql(row.expiring_stock_count),
+    snapshotStockNumberMysql(row.waitingdocs_stock_count),
+    normalizeMysqlNullableDate(row.paid_storage_start_at),
+    nullableNumber(row.stock_days),
+    nullableNumber(row.average_daily_sales),
+    String(row.stock_level || ""),
     row.raw_json || JSON.stringify(row)
   ]);
 }
@@ -2383,8 +2465,57 @@ async function reclassifyStockSnapshotsMysql() {
   }
 }
 
+function mergeOzonStockAnalyticsRowsMysql(stockRows = [], analyticsRows = []) {
+  const analyticsBySku = new Map();
+  for (const item of analyticsRows) {
+    const sku = String(item.ozon_sku || "").trim();
+    if (!sku) continue;
+    analyticsBySku.set(sku, { ...(analyticsBySku.get(sku) || {}), ...item });
+  }
+  return stockRows.map((row) => {
+    const analytics = analyticsBySku.get(String(row.ozon_sku || "").trim());
+    if (!analytics) return row;
+    const raw = {
+      stock: parseJsonOrNull(row.raw_json) || row,
+      analytics
+    };
+    return {
+      ...row,
+      free_stock_count: analytics.free_stock_count ?? row.free_stock_count,
+      paid_stock_count: analytics.paid_stock_count ?? row.paid_stock_count,
+      expiring_stock_count: analytics.expiring_stock_count ?? row.expiring_stock_count,
+      waitingdocs_stock_count: analytics.waitingdocs_stock_count ?? row.waitingdocs_stock_count,
+      paid_storage_start_at: analytics.paid_storage_start_at ?? row.paid_storage_start_at,
+      stock_days: analytics.stock_days ?? row.stock_days,
+      average_daily_sales: analytics.average_daily_sales ?? row.average_daily_sales,
+      stock_level: analytics.stock_level ?? row.stock_level,
+      raw_json: JSON.stringify(raw)
+    };
+  });
+}
+
+async function fetchOzonStockAnalyticsSafeMysql(shop, rows = [], options = {}) {
+  const skus = [...new Set(rows.map((row) => Number(row.ozon_sku || 0)).filter(Boolean))];
+  if (!skus.length) return { rows: [], errors: [] };
+  const [turnoverResult, managedResult] = await Promise.allSettled([
+    fetchOzonStockTurnover(shop, { skus, signal: options.signal }),
+    fetchOzonManagedStocks(shop, { skus, signal: options.signal })
+  ]);
+  const errors = [];
+  if (turnoverResult.status === "rejected") errors.push(`turnover: ${turnoverResult.reason?.message || turnoverResult.reason}`);
+  if (managedResult.status === "rejected") errors.push(`managed: ${managedResult.reason?.message || managedResult.reason}`);
+  return {
+    rows: [
+      ...(turnoverResult.status === "fulfilled" ? turnoverResult.value : []),
+      ...(managedResult.status === "fulfilled" ? managedResult.value : [])
+    ],
+    errors
+  };
+}
+
 export async function syncOzonStocksMysql(body = {}, options = {}) {
   ensureMysqlCutoverEnabled();
+  await ensureOzonStockStorageSchemaMysql();
   const targetShopId = nullableNumber(body.shop_id);
   const productId = nullableNumber(body.product_id);
   const activeShops = (await shopsMysql()).filter((shop) => shop.status === "active" && (!targetShopId || Number(shop.id) === targetShopId));
@@ -2395,6 +2526,9 @@ export async function syncOzonStocksMysql(body = {}, options = {}) {
     try {
       const filters = await stockSyncFiltersMysql(shop.id, productId);
       let rows = await fetchOzonProductStocks(shop, { ...filters, signal: options.signal });
+      const analytics = await fetchOzonStockAnalyticsSafeMysql(shop, rows, options);
+      rows = mergeOzonStockAnalyticsRowsMysql(rows, analytics.rows);
+      if (analytics.errors.length) errors.push(`${shop.name}: stock analytics unavailable (${analytics.errors.join("; ")})`);
       await clearStockSnapshotsForSyncMysql(shop.id, { productId, filters });
       if (!rows.length) rows = await fallbackStockRowsFromOnlineProductsMysql(shop.id, productId);
       fetched += rows.length;
@@ -4002,13 +4136,14 @@ export async function onlineProductsMysql(query = {}) {
   `;
   if (paged) {
     const allIds = await mysqlQuery(`
-      SELECT op.id, op.status, op.visibility, op.archived
+      SELECT op.id, op.status, op.visibility, op.archived, op.synced_at, op.updated_at
       FROM online_products op
       JOIN shops s ON s.id = op.shop_id
       LEFT JOIN products p ON p.id = op.product_id
       ${whereSql}
       ORDER BY op.synced_at DESC, op.id DESC
     `, params);
+    allIds.sort(sortOnlineProductsByDisplayPriorityMysql);
     const statusCounts = onlineStatusCountsMysql(allIds);
     const filteredIds = status === "all" ? allIds : allIds.filter((row) => onlineStatusKeyMysql(row) === status);
     const pageIds = filteredIds.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize).map((row) => Number(row.id));
@@ -4049,7 +4184,27 @@ export async function onlineProductsMysql(query = {}) {
       image_url: fallbackImage
     };
   });
+  mappedRows.sort(sortOnlineProductsByDisplayPriorityMysql);
   return mappedRows;
+}
+
+function onlineStatusDisplayRankMysql(row) {
+  const key = onlineStatusKeyMysql(row);
+  if (key === "selling") return 0;
+  if (key === "ready") return 1;
+  if (key === "moderation") return 2;
+  if (key === "error") return 3;
+  if (key === "hidden") return 4;
+  if (key === "archived") return 5;
+  return 6;
+}
+
+function sortOnlineProductsByDisplayPriorityMysql(a, b) {
+  const rankDiff = onlineStatusDisplayRankMysql(a) - onlineStatusDisplayRankMysql(b);
+  if (rankDiff) return rankDiff;
+  const syncedDiff = new Date(b.synced_at || b.updated_at || 0).getTime() - new Date(a.synced_at || a.updated_at || 0).getTime();
+  if (Number.isFinite(syncedDiff) && syncedDiff) return syncedDiff;
+  return Number(b.id || 0) - Number(a.id || 0);
 }
 
 function onlineStatusKeyMysql(row) {
@@ -9842,6 +9997,7 @@ function normalizeProfitSummaryMysql(row = {}) {
     pending_order_count: Number(row.pending_order_count || 0),
     cancelled_revenue: roundMoneyMysql(row.cancelled_revenue || 0),
     cancelled_orders: Number(row.cancelled_orders || 0),
+    cancelled_quantity: Number(row.cancelled_quantity || row.cancelled_orders || 0),
     return_orders: Number(row.return_orders || 0),
     return_quantity: Number(row.return_quantity || 0),
     return_revenue: roundMoneyMysql(returnRevenue),
@@ -9881,6 +10037,7 @@ async function buildProfitSummaryOverviewFromOrdersMysql(from = "", to = "") {
       COUNT(DISTINCT CASE WHEN ${outcome.effectiveSale} AND COALESCE(oi.settlement_state, '') != 'accrued' THEN o.id END) AS pending_order_count,
       COALESCE(SUM(CASE WHEN ${outcome.cancelledPreFulfillment} THEN oi.sale_price * oi.quantity ELSE 0 END), 0) AS cancelled_revenue,
       COUNT(DISTINCT CASE WHEN ${outcome.cancelledPreFulfillment} THEN o.id END) AS cancelled_orders,
+      COALESCE(SUM(CASE WHEN ${outcome.cancelledPreFulfillment} THEN oi.quantity ELSE 0 END), 0) AS cancelled_quantity,
       COUNT(DISTINCT CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN o.id END) AS return_orders,
       COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN oi.quantity ELSE 0 END), 0) AS return_quantity,
       COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN oi.sale_price * oi.quantity ELSE 0 END), 0) AS return_revenue,
@@ -10077,8 +10234,16 @@ async function aftersaleBaseRowsMysql(query = {}) {
       oi.id AS order_item_id,
       oi.ozon_sku,
       oi.quantity,
-      COALESCE(oi.ozon_name, op.name, p.name, oi.ozon_sku) AS item_name,
-      COALESCE(oi.ozon_image_url, op.primary_image, op.image_url, p.image_url, '') AS image_url,
+      COALESCE(oi.ozon_name, op.name, op_by_product.name, p.name, oi.ozon_sku) AS item_name,
+      COALESCE(
+        NULLIF(oi.ozon_image_url, ''),
+        NULLIF(op.primary_image, ''),
+        NULLIF(op.image_url, ''),
+        NULLIF(op_by_product.primary_image, ''),
+        NULLIF(op_by_product.image_url, ''),
+        NULLIF(p.image_url, ''),
+        ''
+      ) AS image_url,
       COALESCE(p.id, 0) AS product_id,
       COALESCE(p.code, p.selection_id, '') AS product_code,
       COALESCE(p.name, '') AS product_name,
@@ -10097,6 +10262,7 @@ async function aftersaleBaseRowsMysql(query = {}) {
     LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id
     LEFT JOIN products p ON p.id = sm.product_id
     LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku
+    LEFT JOIN online_products op_by_product ON op_by_product.shop_id = o.shop_id AND op_by_product.ozon_product_id = oi.ozon_product_id
     WHERE ${where.join(" AND ")}
   `, params);
   return { rows, from, to, shopId };
@@ -10523,54 +10689,282 @@ export async function ozonFinanceSummaryMysql() {
   return { summary, recent };
 }
 
-async function dashboardAdSummaryMysql(dateKey) {
+function emptyDashboardAdSummaryMysql(dateKey = "", reason = "no_data") {
+  return {
+    date_key: dateKey,
+    data_available: false,
+    reason,
+    shop_count: 0,
+    sku_count: 0,
+    campaign_count: 0,
+    abnormal_sku_count: 0,
+    impressions: null,
+    clicks: null,
+    add_to_cart: null,
+    orders: null,
+    units: null,
+    spend_cny: null,
+    revenue_cny: null,
+    roi: null,
+    roas: null,
+    acos: null,
+    ctr: null,
+    conversion_rate: null
+  };
+}
+
+async function latestDashboardAdDateMysql(maxDateKey) {
   try {
     const row = await mysqlQueryOne(`
-      SELECT
-        COALESCE(SUM(impressions), 0) AS impressions,
-        COALESCE(SUM(clicks), 0) AS clicks,
-        COALESCE(SUM(add_to_cart), 0) AS add_to_cart,
-        COALESCE(SUM(orders), 0) AS orders,
-        COALESCE(SUM(spend_cny), 0) AS spend_cny,
-        COALESCE(SUM(revenue_cny), 0) AS revenue_cny
+      SELECT MAX(date_key) AS date_key
       FROM ozon_ad_sku_daily
-      WHERE date_key = ?
+      WHERE date_key <= ?
+    `, [maxDateKey]);
+    return row?.date_key ? String(row.date_key).slice(0, 10) : "";
+  } catch (error) {
+    console.warn("[dashboard] latest ad date unavailable:", error.message);
+    return "";
+  }
+}
+
+async function dashboardAdSummaryMysql(dateKey) {
+  try {
+    const rows = await mysqlQuery(`
+      SELECT
+        s.name AS shop_name,
+        ad.shop_id,
+        COUNT(*) AS row_count,
+        COUNT(DISTINCT ad.ozon_sku) AS sku_count,
+        COUNT(DISTINCT NULLIF(ad.campaign_id, '')) AS campaign_count,
+        COALESCE(SUM(ad.impressions), 0) AS impressions,
+        COALESCE(SUM(ad.clicks), 0) AS clicks,
+        COALESCE(SUM(ad.add_to_cart), 0) AS add_to_cart,
+        COALESCE(SUM(ad.orders), 0) AS orders,
+        COALESCE(SUM(ad.units), 0) AS units,
+        COALESCE(SUM(ad.spend_rub), 0) AS spend_rub,
+        COALESCE(SUM(ad.spend_cny), 0) AS spend_cny,
+        COALESCE(SUM(ad.revenue_rub), 0) AS revenue_rub,
+        COALESCE(SUM(ad.revenue_cny), 0) AS revenue_cny,
+        SUM(CASE WHEN ad.spend_cny > 0 AND (ad.revenue_cny IS NULL OR ad.revenue_cny <= 0 OR ad.revenue_cny / ad.spend_cny < 1) THEN 1 ELSE 0 END) AS abnormal_sku_count
+      FROM ozon_ad_sku_daily ad
+      LEFT JOIN shops s ON s.id = ad.shop_id
+      WHERE ad.date_key = ?
+      GROUP BY ad.shop_id, s.name
+      ORDER BY spend_cny DESC
     `, [dateKey]);
-    const spend = Number(row?.spend_cny || 0);
-    const revenue = Number(row?.revenue_cny || 0);
+    const row = rows.reduce((acc, item) => ({
+      row_count: Number(acc.row_count || 0) + Number(item.row_count || 0),
+      shop_count: Number(acc.shop_count || 0) + 1,
+      sku_count: Number(acc.sku_count || 0) + Number(item.sku_count || 0),
+      campaign_count: Number(acc.campaign_count || 0) + Number(item.campaign_count || 0),
+      abnormal_sku_count: Number(acc.abnormal_sku_count || 0) + Number(item.abnormal_sku_count || 0),
+      impressions: Number(acc.impressions || 0) + Number(item.impressions || 0),
+      clicks: Number(acc.clicks || 0) + Number(item.clicks || 0),
+      add_to_cart: Number(acc.add_to_cart || 0) + Number(item.add_to_cart || 0),
+      orders: Number(acc.orders || 0) + Number(item.orders || 0),
+      units: Number(acc.units || 0) + Number(item.units || 0),
+      spend_rub: Number(acc.spend_rub || 0) + Number(item.spend_rub || 0),
+      spend_cny: Number(acc.spend_cny || 0) + Number(item.spend_cny || 0),
+      revenue_rub: Number(acc.revenue_rub || 0) + Number(item.revenue_rub || 0),
+      revenue_cny: Number(acc.revenue_cny || 0) + Number(item.revenue_cny || 0)
+    }), {});
+    if (!Number(row?.row_count || 0)) return emptyDashboardAdSummaryMysql(dateKey);
+    const exchangeRate = await currentExchangeRateValueMysql();
+    const spendRub = Number(row?.spend_rub || 0);
+    const revenueRub = Number(row?.revenue_rub || 0);
+    const spend = Number(row?.spend_cny || 0) || rubToCnyMysql(spendRub, exchangeRate);
+    const revenue = Number(row?.revenue_cny || 0) || rubToCnyMysql(revenueRub, exchangeRate);
+    const roi = spend ? revenue / spend : null;
+    const acos = revenue ? spend / revenue : null;
     return {
+      date_key: dateKey,
+      data_available: true,
+      shop_count: Number(row?.shop_count || 0),
+      sku_count: Number(row?.sku_count || 0),
+      campaign_count: Number(row?.campaign_count || 0),
+      abnormal_sku_count: Number(row?.abnormal_sku_count || 0),
       impressions: Number(row?.impressions || 0),
       clicks: Number(row?.clicks || 0),
       add_to_cart: Number(row?.add_to_cart || 0),
       orders: Number(row?.orders || 0),
+      units: Number(row?.units || 0),
       spend_cny: roundMoneyMysql(spend),
       revenue_cny: roundMoneyMysql(revenue),
-      roi: spend ? revenue / spend : 0,
+      spend_rub: roundMoneyMysql(spendRub),
+      revenue_rub: roundMoneyMysql(revenueRub),
+      exchange_rate: exchangeRate,
+      cny_estimated_from_rub: !Number(row?.spend_cny || 0) && spendRub > 0,
+      roi,
+      roas: roi,
+      acos: acos ?? (revenueRub ? spendRub / revenueRub : null),
       ctr: Number(row?.impressions || 0) ? Number(row?.clicks || 0) / Number(row?.impressions || 0) : 0,
-      conversion_rate: Number(row?.clicks || 0) ? Number(row?.orders || 0) / Number(row?.clicks || 0) : 0
+      conversion_rate: Number(row?.clicks || 0) ? Number(row?.orders || 0) / Number(row?.clicks || 0) : 0,
+      shops: rows.map((item) => {
+        const shopSpendRub = Number(item.spend_rub || 0);
+        const shopRevenueRub = Number(item.revenue_rub || 0);
+        const shopSpend = Number(item.spend_cny || 0) || rubToCnyMysql(shopSpendRub, exchangeRate);
+        const shopRevenue = Number(item.revenue_cny || 0) || rubToCnyMysql(shopRevenueRub, exchangeRate);
+        return {
+          shop_id: item.shop_id,
+          shop_name: item.shop_name || `店铺 ${item.shop_id}`,
+          spend_cny: roundMoneyMysql(shopSpend),
+          revenue_cny: roundMoneyMysql(shopRevenue),
+          spend_rub: roundMoneyMysql(shopSpendRub),
+          revenue_rub: roundMoneyMysql(shopRevenueRub),
+          roi: shopSpend ? shopRevenue / shopSpend : null,
+          clicks: Number(item.clicks || 0),
+          conversion_rate: Number(item.clicks || 0) ? Number(item.orders || 0) / Number(item.clicks || 0) : 0,
+          orders: Number(item.orders || 0),
+          sku_count: Number(item.sku_count || 0)
+        };
+      })
     };
   } catch (error) {
     console.warn("[dashboard] ad summary unavailable:", error.message);
-    return { impressions: 0, clicks: 0, add_to_cart: 0, orders: 0, spend_cny: 0, revenue_cny: 0, roi: 0, ctr: 0, conversion_rate: 0 };
+    return emptyDashboardAdSummaryMysql(dateKey, "unavailable");
   }
+}
+
+async function dashboardShopCommerceBreakdownMysql(dateKey) {
+  try {
+    const dateFilter = profitDateWhereMysql("o", dateKey, dateKey);
+    const outcome = buildOrderOutcomeSql("o", "mysql");
+    const rows = await mysqlQuery(`
+      SELECT
+        o.shop_id,
+        COALESCE(s.name, CONCAT('店铺 ', o.shop_id)) AS shop_name,
+        COUNT(DISTINCT o.id) AS order_count,
+        COUNT(DISTINCT CASE WHEN ${outcome.effectiveSale} THEN o.id END) AS effective_orders,
+        COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN oi.quantity ELSE 0 END), 0) AS item_quantity,
+        COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN oi.sale_price * oi.quantity ELSE 0 END), 0) AS revenue,
+        COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} AND COALESCE(oi.settlement_state, '') != 'accrued' THEN COALESCE(oi.estimated_profit, 0) ELSE 0 END), 0) AS pending_profit,
+        COUNT(DISTINCT CASE WHEN ${outcome.cancelledPreFulfillment} THEN o.id END) AS cancelled_orders,
+        COALESCE(SUM(CASE WHEN ${outcome.cancelledPreFulfillment} THEN oi.quantity ELSE 0 END), 0) AS cancelled_quantity,
+        COUNT(DISTINCT CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN o.id END) AS return_orders,
+        COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN oi.quantity ELSE 0 END), 0) AS return_quantity
+      FROM orders o
+      JOIN order_items oi ON oi.order_id = o.id
+      LEFT JOIN shops s ON s.id = o.shop_id
+      WHERE 1=1 ${dateFilter.whereSql}
+      GROUP BY o.shop_id, s.name
+      ORDER BY revenue DESC, order_count DESC
+    `, dateFilter.params);
+    return rows.map((row) => ({
+      shop_id: row.shop_id,
+      shop_name: row.shop_name || `店铺 ${row.shop_id}`,
+      order_count: Number(row.order_count || 0),
+      effective_orders: Number(row.effective_orders || 0),
+      item_quantity: Number(row.item_quantity || 0),
+      revenue: roundMoneyMysql(row.revenue || 0),
+      pending_profit: roundMoneyMysql(row.pending_profit || 0),
+      cancelled_orders: Number(row.cancelled_orders || 0),
+      cancelled_quantity: Number(row.cancelled_quantity || 0),
+      return_orders: Number(row.return_orders || 0),
+      return_quantity: Number(row.return_quantity || 0)
+    }));
+  } catch (error) {
+    console.warn("[dashboard] commerce shop breakdown unavailable:", error.message);
+    return [];
+  }
+}
+
+async function dashboardFbpInventoryValueMysql() {
+  try {
+    const row = await mysqlQueryOne(`
+      SELECT
+        COALESCE(SUM(GREATEST(COALESCE(oss.present, 0), 0) * COALESCE(p.purchase_cost, 0)), 0) AS inventory_value,
+        COALESCE(SUM(GREATEST(COALESCE(oss.present, 0), 0)), 0) AS inventory_quantity
+      FROM ozon_stock_snapshots oss
+      LEFT JOIN sku_mappings sm ON sm.shop_id = oss.shop_id AND sm.ozon_sku = oss.ozon_sku AND sm.active = 1
+      LEFT JOIN products p ON p.id = COALESCE(oss.product_id, sm.product_id)
+      WHERE oss.stock_type = 'fbp_real'
+    `);
+    return {
+      value: roundMoneyMysql(row?.inventory_value || 0),
+      quantity: Number(row?.inventory_quantity || 0)
+    };
+  } catch (error) {
+    console.warn("[dashboard] FBP inventory value unavailable:", error.message);
+    return { value: null, quantity: null };
+  }
+}
+
+async function dashboardProfitTrendSummaryMysql(today) {
+  const sevenDayFrom = dateKeyDaysAgoMysql(6);
+  const monthFrom = String(today || todayDateKeyMysql()).slice(0, 7) + "-01";
+  const [sevenDaySummary, monthSummary] = await Promise.all([
+    profitSummaryOverviewMysql(sevenDayFrom, today),
+    profitSummaryOverviewMysql(monthFrom, today)
+  ]);
+  const sevenDayCount = inclusiveDateSpanDaysMysql(sevenDayFrom, today);
+  const monthDayCount = inclusiveDateSpanDaysMysql(monthFrom, today);
+  return {
+    seven_day_average_profit: roundMoneyMysql(Number(sevenDaySummary?.profit || 0) / Math.max(sevenDayCount, 1)),
+    month_average_profit: roundMoneyMysql(Number(monthSummary?.profit || 0) / Math.max(monthDayCount, 1)),
+    seven_day_total_profit: roundMoneyMysql(sevenDaySummary?.profit || 0),
+    month_total_profit: roundMoneyMysql(monthSummary?.profit || 0),
+    seven_day_days: sevenDayCount,
+    month_days: monthDayCount
+  };
+}
+
+async function dashboardAftersalesLossSummaryMysql(today) {
+  const to = today || todayDateKeyMysql();
+  const from = `${String(to).slice(0, 7)}-01`;
+  try {
+    const payload = await profitAftersalesMysql({ from, to, shopId: "all", bucket: "all" });
+    const bucketMap = new Map((payload.buckets || []).map((item) => [item.key, item]));
+    const amount = (key) => roundMoneyMysql(bucketMap.get(key)?.estimated_loss_cny || 0);
+    return {
+      from,
+      to,
+      total_estimated_loss_cny: roundMoneyMysql(payload.totals?.estimated_loss_cny || 0),
+      rejected_unclaimed_loss_cny: amount("rejected_unclaimed"),
+      unsuitable_wrong_damaged_loss_cny: amount("unsuitable_wrong_damaged"),
+      quality_issue_loss_cny: amount("quality_issue")
+    };
+  } catch (error) {
+    console.warn("[dashboard] aftersales loss summary unavailable:", error.message);
+    return {
+      from,
+      to,
+      total_estimated_loss_cny: null,
+      rejected_unclaimed_loss_cny: null,
+      unsuitable_wrong_damaged_loss_cny: null,
+      quality_issue_loss_cny: null
+    };
+  }
+}
+
+function inclusiveDateSpanDaysMysql(from, to) {
+  const start = new Date(`${String(from || "").slice(0, 10)}T00:00:00+08:00`);
+  const end = new Date(`${String(to || "").slice(0, 10)}T00:00:00+08:00`);
+  const diff = Math.floor((end.getTime() - start.getTime()) / 86400000) + 1;
+  return Number.isFinite(diff) && diff > 0 ? diff : 1;
 }
 
 export async function dashboardMysql() {
   ensureMysqlCutoverEnabled();
   const today = todayDateKeyMysql();
-  const yesterday = dateKeyDaysAgoMysql(1);
-  const [stock, procurement, todayProfit, yesterdayProfit, adToday, adYesterday] = await Promise.all([
-    stockAlertsMysql({ paged: "1", page: 1, pageSize: 8 }),
+  const adLatestDate = await latestDashboardAdDateMysql(today);
+  const adCurrentDate = adLatestDate || today;
+  const adPreviousDate = adLatestDate ? dateKeyMysql(addDaysMysql(new Date(`${adLatestDate}T00:00:00+08:00`), -1)) : dateKeyDaysAgoMysql(1);
+  const [stock, procurement, todayProfit, yesterdayProfit, profitTrend, shopBreakdown, adToday, adYesterday, fbpInventoryValue, aftersalesLoss] = await Promise.all([
+    stockAlertsMysql({ mode: "fbp-alerts", paged: "1", page: 1, pageSize: 100 }),
     procurementRequestsMysql({ grouped: "1", paged: "1", page: 1, pageSize: 8 }),
     profitSummaryOverviewMysql(today, today),
-    profitSummaryOverviewMysql(yesterday, yesterday),
-    dashboardAdSummaryMysql(today),
-    dashboardAdSummaryMysql(yesterday)
+    profitSummaryOverviewMysql(dateKeyDaysAgoMysql(1), dateKeyDaysAgoMysql(1)),
+    dashboardProfitTrendSummaryMysql(today),
+    dashboardShopCommerceBreakdownMysql(today),
+    dashboardAdSummaryMysql(adCurrentDate),
+    dashboardAdSummaryMysql(adPreviousDate),
+    dashboardFbpInventoryValueMysql(),
+    dashboardAftersalesLossSummaryMysql(today)
   ]);
   const stockRows = stock.rows || [];
   const procurementRows = procurement.rows || [];
-  const urgentCount = stockRows.filter((item) => item.alert_level === "danger").length;
-  const warningCount = stockRows.filter((item) => item.alert_level !== "ok").length;
+  const urgentCount = Number(stock.meta?.urgent_count || stockRows.filter((item) => item.alert_level === "danger").length);
+  const warningCount = Number(stock.meta?.warning_count || stockRows.filter((item) => item.alert_level !== "ok").length);
   const procurementAmount = procurementRows.reduce((sum, item) => sum + Number(item.total_amount || 0), 0);
   return {
     summary: {
@@ -10579,13 +10973,21 @@ export async function dashboardMysql() {
       fbp_count: Number(stock.meta?.warning_count || 0),
       fbs_count: 0,
       procurement_count: Number(procurement.total || 0),
-      procurement_amount: roundMoneyMysql(procurementAmount)
+      procurement_amount: roundMoneyMysql(procurementAmount),
+      fbp_inventory_value: fbpInventoryValue.value,
+      fbp_inventory_quantity: fbpInventoryValue.quantity,
+      aftersales_loss: aftersalesLoss
     },
     commerce: {
       date_key: today,
       today: todayProfit,
       yesterday: yesterdayProfit,
+      profit_trend: profitTrend,
+      shops: shopBreakdown,
       advertising: {
+        date_key: adCurrentDate,
+        latest_date_key: adLatestDate || "",
+        is_latest_today: adLatestDate === today,
         today: adToday,
         yesterday: adYesterday
       }

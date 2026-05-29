@@ -174,6 +174,8 @@ watch(
     if (dialogVisible.value) loadCatalogDictionariesForCurrentCategory();
   }
 );
+const catalogDictionaryCache = new Map();
+let catalogDictionaryRequestSeq = 0;
 const profitDetailRows = computed(() => buildProfitDetailRows(
   profitDialog.row,
   profitDialog.quote,
@@ -746,6 +748,10 @@ function removeDetailImage(index) {
 async function goToListing(row, shopIds = []) {
   const id = Number(row?.id || 0);
   if (!id || oneClickPublishingRows.value.has(id) || isListingJobActive(row)) return;
+  if (!Number(row?.package_weight_g || 0)) {
+    ElMessage.warning("请先填写包装克重后再一键上架");
+    return;
+  }
   if (String(row?.selection_status || "") === "listed") {
     try {
       await ElMessageBox.confirm(
@@ -934,7 +940,7 @@ async function retryListingJobFailures(row) {
 
 function handleListingAction(row) {
   if (isListingJobActive(row)) return cancelListingJob(row);
-  if (listingJobStatus(row) === "failed") return retryListingJobFailures(row);
+  if (listingJobStatus(row) === "failed" && Number(row?.listing_job_success_count || 0) > 0) return retryListingJobFailures(row);
   return openListingShopDialog(row);
 }
 
@@ -943,14 +949,15 @@ function startVariant(row) {
     name: "asset-variant-center-create",
     query: {
       baseSelectionId: String(row.id),
-      source: "selection"
+      source: "selection",
+      autoImport: "1"
     }
   });
 }
 
 function startBatchVariant() {
   if (!selectedRows.value.length) {
-    ElMessage.warning("请先选择需要发起裂变的选品");
+    ElMessage.warning("请先选择需要 AI 内容优化的选品");
     return;
   }
   const first = selectedRows.value[0];
@@ -959,7 +966,8 @@ function startBatchVariant() {
     query: {
       baseSelectionId: String(first.id),
       batchSelectionIds: selectedRows.value.map((row) => row.id).join(","),
-      source: "selection"
+      source: "selection",
+      autoImport: "1"
     }
   });
 }
@@ -1312,10 +1320,10 @@ function handleSelectionOzonCategorySelected(category) {
   dialog.form.ozon_description_category_id = descriptionCategoryId;
   dialog.form.ozon_type_id = typeId;
   dialog.form.ozon_category_name = displayOzonCategoryZh(category);
-  loadCatalogDictionariesForCurrentCategory();
 }
 
 async function loadCatalogDictionariesForCurrentCategory() {
+  const seq = ++catalogDictionaryRequestSeq;
   const descriptionCategoryId = Number(dialog.form.ozon_description_category_id || 0);
   const typeId = Number(dialog.form.ozon_type_id || 0);
   if (!descriptionCategoryId || !typeId) {
@@ -1325,10 +1333,17 @@ async function loadCatalogDictionariesForCurrentCategory() {
     vehicleOptions.value = [];
     return;
   }
+  const cacheKey = `${descriptionCategoryId}:${typeId}`;
+  const cached = catalogDictionaryCache.get(cacheKey);
+  if (cached) {
+    applyCatalogDictionaries(cached);
+    return;
+  }
   materialOptionsLoading.value = true;
   catalogDictionaryLoading.value = true;
   try {
     let dictionaries = await loadCatalogDictionaries(descriptionCategoryId, typeId);
+    if (seq !== catalogDictionaryRequestSeq) return;
     if (!dictionaries.material.length && !dictionaries.color.length && !dictionaries.vehicleBrand.length && !dictionaries.vehicle.length) {
       await apiClient.post("/api/listing/ozon-category-attributes/sync", {
         description_category_id: descriptionCategoryId,
@@ -1338,15 +1353,10 @@ async function loadCatalogDictionariesForCurrentCategory() {
         language: "ZH_HANS"
       }).catch(() => null);
       dictionaries = await loadCatalogDictionaries(descriptionCategoryId, typeId);
+      if (seq !== catalogDictionaryRequestSeq) return;
     }
-    materialOptions.value = dictionaries.material.length ? sortPreferredCatalogOptions(dictionaries.material, ["热塑性弹性体", "塑料", "高分子材料", "聚氯乙烯", "泡沫聚氨酯", "锌合金", "生态皮革", "不锈钢"]) : [...fallbackMaterialOptions];
-    colorOptions.value = dictionaries.color.length ? dictionaries.color : [...fallbackColorOptions];
-    vehicleBrandOptions.value = dictionaries.vehicleBrand;
-    vehicleOptions.value = dictionaries.vehicle;
-    const preferredTpu = materialOptions.value.find((item) => catalogOptionLabel(item).includes("热塑性弹性体") || /^tpu$/i.test(catalogOptionValue(item)));
-    if (/^tpu$/i.test(String(dialog.form.material || "").trim()) && preferredTpu) {
-      dialog.form.material = catalogOptionValue(preferredTpu);
-    }
+    catalogDictionaryCache.set(cacheKey, dictionaries);
+    applyCatalogDictionaries(dictionaries);
   } catch {
     materialOptions.value = [...fallbackMaterialOptions];
     colorOptions.value = [...fallbackColorOptions];
@@ -1355,6 +1365,17 @@ async function loadCatalogDictionariesForCurrentCategory() {
   } finally {
     materialOptionsLoading.value = false;
     catalogDictionaryLoading.value = false;
+  }
+}
+
+function applyCatalogDictionaries(dictionaries = {}) {
+  materialOptions.value = dictionaries.material?.length ? sortPreferredCatalogOptions(dictionaries.material, ["热塑性弹性体", "塑料", "高分子材料", "聚氯乙烯", "泡沫聚氨酯", "锌合金", "生态皮革", "不锈钢"]) : [...fallbackMaterialOptions];
+  colorOptions.value = dictionaries.color?.length ? dictionaries.color : [...fallbackColorOptions];
+  vehicleBrandOptions.value = dictionaries.vehicleBrand || [];
+  vehicleOptions.value = dictionaries.vehicle || [];
+  const preferredTpu = materialOptions.value.find((item) => catalogOptionLabel(item).includes("热塑性弹性体") || /^tpu$/i.test(catalogOptionValue(item)));
+  if (/^tpu$/i.test(String(dialog.form.material || "").trim()) && preferredTpu) {
+    dialog.form.material = catalogOptionValue(preferredTpu);
   }
 }
 
@@ -1742,7 +1763,7 @@ onBeforeUnmount(() => {
             <el-button type="primary" @click="openCreateDialog">新增选品</el-button>
             <el-button @click="openImportDialog">批量导入</el-button>
             <el-button :disabled="!selectedRows.length" @click="startBatchVariant">
-              批量发起裂变
+              批量AI内容优化
             </el-button>
             <el-button :disabled="!selectedRows.length" @click="handleBatchAction">
               批量操作
@@ -1917,7 +1938,7 @@ onBeforeUnmount(() => {
                 >
                   {{ isListingJobActive(row) ? "中断上架" : "一键上架" }}
                 </el-button>
-                <el-button link type="primary" @click="startVariant(row)">发起裂变</el-button>
+                <el-button link type="primary" @click="startVariant(row)">AI内容优化</el-button>
                 <el-button link type="success" :disabled="row.selection_status === 'listed'" @click="addToInventory(row)">加入库存</el-button>
               </div>
             </template>

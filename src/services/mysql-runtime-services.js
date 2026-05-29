@@ -74,6 +74,15 @@ import {
   updateAiPromptTemplate
 } from "./ai-prompt-templates.js";
 import {
+  aiStrategies,
+  aiStrategyDetail,
+  aiStrategyLayerRules,
+  createAiStrategy,
+  deleteAiStrategy,
+  resolveAiStrategyPlan,
+  updateAiStrategy
+} from "./ai-strategies.js";
+import {
   archiveMaterialAsset,
   createMaterialAsset,
   materialAssetDetail,
@@ -273,6 +282,9 @@ export const mysqlRuntimeServices = {
   aiProviderPresets,
   aiPromptTemplateDetail,
   aiPromptTemplates,
+  aiStrategies,
+  aiStrategyDetail,
+  aiStrategyLayerRules,
   bindOnlineProduct: bindOnlineProductMysql,
   batchUpdateInboundRecords: batchUpdateInboundRecordsMysql,
   cancelPurchaseOrder: cancelPurchaseOrderMysql,
@@ -293,6 +305,7 @@ export const mysqlRuntimeServices = {
   createProcurementRequest: createProcurementRequestMysql,
   createProduct: createProductMysql,
   createAiPromptTemplate,
+  createAiStrategy,
   createMaterialAsset,
   createProductFromOnlineProduct: createProductFromOnlineProductMysql,
   createShop: createShopMysql,
@@ -306,6 +319,7 @@ export const mysqlRuntimeServices = {
   deleteProcurementRequest: deleteProcurementRequestMysql,
   deleteProduct: deleteProductMysql,
   deleteAiPromptTemplate,
+  deleteAiStrategy,
   deletePurchaseOrder: deletePurchaseOrderMysql,
   deleteShop: deleteShopMysql,
   deleteSkuMapping: deleteSkuMappingMysql,
@@ -386,6 +400,7 @@ export const mysqlRuntimeServices = {
   rawOzonOrders: rawOzonOrdersMysql,
   refreshOrderProfitDetailSnapshots: refreshOrderProfitDetailSnapshotsMysql,
   replyOzonReview: replyOzonReviewMysql,
+  resolveAiStrategyPlan,
   restoreProduct: restoreProductMysql,
   removeProductFromInventory: removeProductFromInventoryMysql,
   removeOzonActionProducts: removeOzonActionProductsMysql,
@@ -428,6 +443,7 @@ export const mysqlRuntimeServices = {
   updateLogisticsRule: updateLogisticsRuleMysql,
   updateOnlineProduct: updateOnlineProductMysql,
   updateOrderCancellationRule: updateOrderCancellationRuleMysql,
+  updateAiStrategy,
   updateOrderMark: updateOrderMarkMysql,
   updatePackagingFeeRule: updatePackagingFeeRuleMysql,
   updatePerson: (id, body) => updatePersonMysql(id, body, hashPassword),
