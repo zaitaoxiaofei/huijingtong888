@@ -257,7 +257,8 @@ function displayModelValueLabel(value = selectedValue.value) {
   const id = String(value || "").trim();
   const label = cleanCategoryText(props.displayLabel || "");
   if (!id) return label;
-  if (!label) return id;
+  if (!label) return "已选择 Ozon 类目，点击搜索中文类目";
+  if (/^Ozon\s*类目\s*\d+\s*:\s*\d+$/i.test(label)) return "已选择 Ozon 类目，点击搜索中文类目";
   return label;
 }
 

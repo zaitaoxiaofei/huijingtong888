@@ -1204,23 +1204,59 @@ function offerIdPrefix() {
   return { brand, productType };
 }
 
-async function generateVariantOfferId(row) {
-  if (!row) return;
-  const { brand, productType } = offerIdPrefix();
-  const existingIds = templateEditor.variants.map((item) => item.offer_id).filter(Boolean);
-  const result = await apiClient.post("/api/listing/generate-offer-id", { brand, productType, existingIds });
-  row.offer_id = result.offerId || result.offer_id || "";
+function cleanOfferIdPart(value = "", fallback = "OZON") {
+  const normalized = String(value || "")
+    .normalize("NFKD")
+    .replace(/[^\w\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/_+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toUpperCase();
+  return (normalized || fallback).slice(0, 24);
 }
 
-async function generateMissingVariantOfferIds() {
+function productTypeAbbr(value = "") {
+  const words = String(value || "").match(/[A-Za-z0-9]+/g) || [];
+  if (!words.length) return "SKU";
+  if (words.length === 1) return words[0].slice(0, 5).toUpperCase();
+  return words.slice(0, 4).map((word) => word[0]).join("").toUpperCase();
+}
+
+function generateLocalOfferId(existingIds = new Set(), index = 0) {
+  const { brand, productType } = offerIdPrefix();
+  const prefix = `${cleanOfferIdPart(brand)}-${cleanOfferIdPart(productTypeAbbr(productType), "SKU")}`;
+  for (let offset = 0; offset < 1000; offset += 1) {
+    const suffix = String(index + offset + 1).padStart(3, "0");
+    const id = `${prefix}-${suffix}`;
+    if (!existingIds.has(id)) {
+      existingIds.add(id);
+      return id;
+    }
+  }
+  const fallback = `${prefix}-${Date.now().toString(36).toUpperCase().slice(-6)}`;
+  existingIds.add(fallback);
+  return fallback;
+}
+
+function generateVariantOfferId(row) {
+  if (!row) return;
+  const existingIds = new Set(templateEditor.variants.map((item) => String(item.offer_id || "").trim()).filter(Boolean));
+  existingIds.delete(String(row.offer_id || "").trim());
+  row.offer_id = generateLocalOfferId(existingIds, templateEditor.variants.indexOf(row));
+}
+
+function generateMissingVariantOfferIds() {
   const rows = templateEditor.variants.filter((item) => !String(item.offer_id || "").trim());
   if (!rows.length) {
     ElMessage.success("所有变体都有货号 / offer_id");
     return;
   }
-  for (const row of rows) {
-    await generateVariantOfferId(row);
-  }
+  const existingIds = new Set(templateEditor.variants.map((item) => String(item.offer_id || "").trim()).filter(Boolean));
+  rows.forEach((row, index) => {
+    row.offer_id = generateLocalOfferId(existingIds, templateEditor.variants.indexOf(row) + index);
+  });
   ElMessage.success(`已生成 ${rows.length} 个货号 / offer_id`);
 }
 
@@ -2698,22 +2734,26 @@ onMounted(loadAll);
                     </div>
                   </template>
                   <template #default="{ row }">
-                    <div class="variant-images">
-                      <ProductImagePreview
-                        v-for="(image, imageIndex) in variantPreviewImages(row)"
-                        :key="`${image.url}-${imageIndex}`"
-                        :src="image.previewUrl || image.url"
-                        :preview-list="variantPreviewList(row)"
-                        :alt="image.name || row.name"
-                        size="square"
-                        fit="cover"
-                        lazy
-                      />
-                      <span v-if="variantImageOverflow(row)" class="variant-image-more">+{{ variantImageOverflow(row) }}</span>
-                      <el-button size="small" @click="openVariantImageEditor(row)">管理</el-button>
-                      <el-upload multiple :show-file-list="false" accept="image/jpeg,image/png,image/webp" :http-request="uploadVariantImagesRequest(row)">
-                        <el-button size="small" :loading="uploadingImage">上传</el-button>
-                      </el-upload>
+                    <div class="variant-media-cell" @click="openVariantImageEditor(row)">
+                      <div v-if="variantPreviewImages(row).length" class="variant-thumb-stack">
+                        <button
+                          v-for="(image, imageIndex) in variantPreviewImages(row)"
+                          :key="`${image.url}-${imageIndex}`"
+                          type="button"
+                          class="variant-thumb-button"
+                          @click.stop="openVariantImageEditor(row)"
+                        >
+                          <img :src="withImageToken(image.previewUrl || image.url)" :alt="image.name || row.name" loading="lazy" />
+                        </button>
+                        <span v-if="variantImageOverflow(row)" class="variant-image-more">+{{ variantImageOverflow(row) }}</span>
+                      </div>
+                      <button v-else type="button" class="variant-media-empty" @click.stop="openVariantImageEditor(row)">图片</button>
+                      <div class="variant-media-actions">
+                        <el-button link size="small" @click.stop="openVariantImageEditor(row)">编辑</el-button>
+                        <el-upload multiple :show-file-list="false" accept="image/jpeg,image/png,image/webp" :http-request="uploadVariantImagesRequest(row)">
+                          <el-button link size="small" :loading="uploadingImage" @click.stop>上传</el-button>
+                        </el-upload>
+                      </div>
                     </div>
                   </template>
                 </el-table-column>
@@ -2725,20 +2765,24 @@ onMounted(loadAll);
                     </div>
                   </template>
                   <template #default="{ row }">
-                    <div class="variant-videos">
-                      <video
-                        v-for="(url, videoIndex) in variantPreviewVideos(row, 'video_cover_urls')"
-                        :key="`${url}-${videoIndex}`"
-                        :src="withImageToken(url)"
-                        muted
-                        preload="metadata"
-                        @click="openVariantVideoEditor(row, 'video_cover_urls', '视频封面管理')"
-                      />
-                      <span v-if="variantVideoOverflow(row, 'video_cover_urls')" class="variant-image-more">+{{ variantVideoOverflow(row, 'video_cover_urls') }}</span>
-                      <el-button size="small" @click="openVariantVideoEditor(row, 'video_cover_urls', '视频封面管理')">管理</el-button>
-                      <el-upload class="inline-upload" :show-file-list="false" accept="video/mp4,video/quicktime,video/webm" :http-request="uploadVariantVideoRequest(row, 'video_cover_urls', 'video')">
-                        <el-button size="small" :loading="uploadingImage">上传视频</el-button>
-                      </el-upload>
+                    <div class="variant-media-cell" @click="openVariantVideoEditor(row, 'video_cover_urls', '视频封面编辑')">
+                      <div v-if="variantPreviewVideos(row, 'video_cover_urls').length" class="variant-video-strip">
+                        <video
+                          v-for="(url, videoIndex) in variantPreviewVideos(row, 'video_cover_urls')"
+                          :key="`${url}-${videoIndex}`"
+                          :src="withImageToken(url)"
+                          muted
+                          preload="metadata"
+                        />
+                        <span v-if="variantVideoOverflow(row, 'video_cover_urls')" class="variant-image-more">+{{ variantVideoOverflow(row, 'video_cover_urls') }}</span>
+                      </div>
+                      <button v-else type="button" class="variant-video-empty-chip" @click.stop="openVariantVideoEditor(row, 'video_cover_urls', '视频封面编辑')">封面</button>
+                      <div class="variant-media-actions">
+                        <el-button link size="small" @click.stop="openVariantVideoEditor(row, 'video_cover_urls', '视频封面编辑')">编辑</el-button>
+                        <el-upload class="inline-upload" :show-file-list="false" accept="video/mp4,video/quicktime,video/webm" :http-request="uploadVariantVideoRequest(row, 'video_cover_urls', 'video')">
+                          <el-button link size="small" :loading="uploadingImage" @click.stop>上传</el-button>
+                        </el-upload>
+                      </div>
                     </div>
                   </template>
                 </el-table-column>
@@ -2750,20 +2794,24 @@ onMounted(loadAll);
                     </div>
                   </template>
                   <template #default="{ row }">
-                    <div class="variant-videos">
-                      <video
-                        v-for="(url, videoIndex) in variantPreviewVideos(row, 'video_urls')"
-                        :key="`${url}-${videoIndex}`"
-                        :src="withImageToken(url)"
-                        muted
-                        preload="metadata"
-                        @click="openVariantVideoEditor(row, 'video_urls', '视频管理')"
-                      />
-                      <span v-if="variantVideoOverflow(row, 'video_urls')" class="variant-image-more">+{{ variantVideoOverflow(row, 'video_urls') }}</span>
-                      <el-button size="small" @click="openVariantVideoEditor(row, 'video_urls', '视频管理')">管理</el-button>
-                      <el-upload class="inline-upload" :show-file-list="false" accept="video/mp4,video/quicktime,video/webm" :http-request="uploadVariantVideoRequest(row, 'video_urls', 'video')">
-                        <el-button size="small" :loading="uploadingImage">上传视频</el-button>
-                      </el-upload>
+                    <div class="variant-media-cell" @click="openVariantVideoEditor(row, 'video_urls', 'SKU视频编辑')">
+                      <div v-if="variantPreviewVideos(row, 'video_urls').length" class="variant-video-strip">
+                        <video
+                          v-for="(url, videoIndex) in variantPreviewVideos(row, 'video_urls')"
+                          :key="`${url}-${videoIndex}`"
+                          :src="withImageToken(url)"
+                          muted
+                          preload="metadata"
+                        />
+                        <span v-if="variantVideoOverflow(row, 'video_urls')" class="variant-image-more">+{{ variantVideoOverflow(row, 'video_urls') }}</span>
+                      </div>
+                      <button v-else type="button" class="variant-video-empty-chip" @click.stop="openVariantVideoEditor(row, 'video_urls', 'SKU视频编辑')">视频</button>
+                      <div class="variant-media-actions">
+                        <el-button link size="small" @click.stop="openVariantVideoEditor(row, 'video_urls', 'SKU视频编辑')">编辑</el-button>
+                        <el-upload class="inline-upload" :show-file-list="false" accept="video/mp4,video/quicktime,video/webm" :http-request="uploadVariantVideoRequest(row, 'video_urls', 'video')">
+                          <el-button link size="small" :loading="uploadingImage" @click.stop>上传</el-button>
+                        </el-upload>
+                      </div>
                     </div>
                   </template>
                 </el-table-column>
@@ -3010,13 +3058,18 @@ onMounted(loadAll);
       </template>
     </el-dialog>
 
-    <el-drawer v-model="variantVideoEditor.visible" :title="variantVideoEditor.title" size="760px">
+    <el-dialog v-model="variantVideoEditor.visible" :title="variantVideoEditor.title" width="680px" class="variant-video-dialog" destroy-on-close>
       <div v-if="variantVideoEditor.row" class="variant-image-editor">
+        <div class="variant-video-rules">
+          <p>格式：MP4、MOV</p>
+          <p>大小不能超过 20 MB</p>
+          <p>不超过30秒</p>
+        </div>
         <div class="drawer-actions">
-          <el-button @click="addVariantVideoLink">新增视频链接</el-button>
           <el-upload :show-file-list="false" accept="video/mp4,video/quicktime,video/webm" :http-request="uploadVariantVideoRequest(variantVideoEditor.row, variantVideoEditor.field, 'video')">
             <el-button type="primary" :loading="uploadingImage">上传视频</el-button>
           </el-upload>
+          <el-button @click="addVariantVideoLink">输入视频 URL</el-button>
         </div>
         <div class="variant-video-list">
           <div v-for="(url, videoIndex) in ensureVariantLinks(variantVideoEditor.row, variantVideoEditor.field)" :key="`${url}-${videoIndex}`" class="variant-video-card">
@@ -3031,7 +3084,11 @@ onMounted(loadAll);
           </div>
         </div>
       </div>
-    </el-drawer>
+      <template #footer>
+        <el-button @click="variantVideoEditor.visible = false">取消</el-button>
+        <el-button type="primary" @click="variantVideoEditor.visible = false">确认</el-button>
+      </template>
+    </el-dialog>
 
     <el-drawer v-model="collectedImport.visible" title="导入 Ozon 前台采集数据" size="720px">
       <div class="collected-import">
@@ -3277,9 +3334,15 @@ onMounted(loadAll);
 .variant-name-cell > .el-input:nth-of-type(2) { display: none; }
 .variant-name-cell strong { display: block; color: var(--el-text-color-primary); font-size: 12px; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .offer-id-cell { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
-.variant-images { display: flex; align-items: center; gap: 4px; min-height: 46px; flex-wrap: wrap; }
-.variant-images :deep(.erp-image-preview--square) { width: 42px; min-width: 42px; max-width: 42px; height: 42px; min-height: 42px; max-height: 42px; flex-basis: 42px; border-radius: 4px; }
+.variant-media-cell { display: grid; gap: 6px; min-height: 70px; align-content: center; cursor: pointer; }
+.variant-thumb-stack, .variant-video-strip { display: flex; align-items: center; gap: 4px; min-height: 44px; }
+.variant-thumb-button { width: 44px; height: 44px; padding: 0; border: 1px solid var(--el-border-color-lighter); border-radius: 4px; overflow: hidden; background: var(--el-fill-color-light); cursor: pointer; }
+.variant-thumb-button img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .variant-image-more { width: 28px; height: 28px; border-radius: 999px; display: grid; place-items: center; background: rgba(31, 41, 55, 0.38); color: #fff; font-size: 12px; font-weight: 800; }
+.variant-media-empty, .variant-video-empty-chip { width: 76px; height: 44px; border: 1px dashed var(--el-border-color); border-radius: 6px; background: var(--el-fill-color-extra-light); color: var(--el-text-color-secondary); cursor: pointer; }
+.variant-video-empty-chip { font-size: 13px; }
+.variant-media-actions { display: flex; align-items: center; gap: 10px; }
+.variant-media-actions :deep(.el-upload) { display: inline-flex; }
 .variant-image-editor { display: flex; flex-direction: column; gap: 12px; }
 .variant-editor-thumb { width: 58px; height: 58px; border-radius: 6px; border: 1px solid var(--el-border-color-light); background: var(--el-fill-color-light); }
 .variant-image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
@@ -3302,12 +3365,14 @@ onMounted(loadAll);
 .library-image-card span { padding: 0 10px 10px; font-size: 12px; color: var(--el-text-color-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .library-image-card.selected { border-color: #6c5ce7; box-shadow: 0 0 0 2px rgba(108, 92, 231, 0.15); }
 .library-image-card.selected::after { content: "✓"; position: absolute; right: 8px; bottom: 8px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; color: #fff; background: #6c5ce7; font-weight: 800; }
-.variant-videos { display: flex; align-items: center; gap: 6px; min-height: 46px; flex-wrap: wrap; }
-.variant-videos video { width: 58px; height: 42px; border-radius: 4px; object-fit: cover; border: 1px solid var(--el-border-color-light); background: #101828; cursor: pointer; }
+.variant-video-strip video { width: 58px; height: 42px; border-radius: 4px; object-fit: cover; border: 1px solid var(--el-border-color-light); background: #101828; }
 .variant-video-list { display: grid; gap: 12px; }
 .variant-video-card { display: grid; grid-template-columns: 180px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-fill-color-extra-light); }
 .variant-editor-video { width: 180px; max-height: 110px; border-radius: 6px; background: #101828; }
 .variant-video-empty { display: grid; place-items: center; width: 180px; height: 96px; border: 1px dashed var(--el-border-color); border-radius: 6px; color: var(--el-text-color-secondary); background: var(--el-bg-color); }
+.variant-video-dialog :deep(.el-dialog__body) { padding-top: 22px; }
+.variant-video-rules { display: grid; gap: 8px; margin-bottom: 22px; color: #697386; line-height: 1.5; }
+.variant-video-rules p { margin: 0; }
 .inline-upload { margin-top: 6px; }
 .variant-sub-input { margin-top: 6px; }
 .variant-row-actions { display: flex; justify-content: center; gap: 8px; }
