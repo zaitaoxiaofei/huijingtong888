@@ -117,13 +117,13 @@ function handleCommand(command) {
           />
 
           <div class="orders-toolbar-actions-main">
-            <el-button type="primary" :icon="Search" @click="emit('submit')">查询</el-button>
-            <el-button :icon="Calendar" :disabled="syncRunning" @click="emit('reset-dates')">近 90 天</el-button>
+            <el-button class="orders-toolbar-btn orders-toolbar-btn-primary" type="primary" :icon="Search" @click="emit('submit')">查询</el-button>
+            <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="Calendar" :disabled="syncRunning" @click="emit('reset-dates')">近 90 天</el-button>
 
             <div class="orders-toolbar-sync-group" aria-label="订单同步操作">
               <el-tooltip content="从本地最新订单之后拉取，自动重叠 15 分钟防漏单" placement="top">
                 <el-button
-                  class="orders-toolbar-action-accent"
+                  class="orders-toolbar-btn orders-toolbar-btn-primary orders-toolbar-action-accent"
                   :icon="Refresh"
                   :loading="syncRunning"
                   :disabled="syncRunning"
@@ -134,6 +134,7 @@ function handleCommand(command) {
               </el-tooltip>
               <el-tooltip content="按当前店铺和日期范围重新拉取，用于补历史或校正状态" placement="top">
                 <el-button
+                  class="orders-toolbar-btn orders-toolbar-btn-secondary"
                   type="primary"
                   plain
                   :icon="Refresh"
@@ -150,7 +151,7 @@ function handleCommand(command) {
             </div>
 
             <el-dropdown trigger="click" :disabled="syncRunning" @command="handleCommand">
-              <el-button :icon="ArrowDown">更多操作</el-button>
+              <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="ArrowDown">更多操作</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item v-for="action in moreActions" :key="action.value" :command="action.value">
@@ -160,12 +161,12 @@ function handleCommand(command) {
               </template>
             </el-dropdown>
 
-            <el-button v-if="syncRunning" type="danger" plain @click="emit('cancel-sync')">取消同步</el-button>
+            <el-button v-if="syncRunning" class="orders-toolbar-btn orders-toolbar-btn-danger" type="danger" plain @click="emit('cancel-sync')">取消同步</el-button>
           </div>
         </div>
 
         <div class="orders-toolbar-actions-side">
-          <el-button :disabled="syncRunning" @click="emit('open-quality-rules')">质检规则</el-button>
+          <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :disabled="syncRunning" @click="emit('open-quality-rules')">质检规则</el-button>
         </div>
       </div>
     </el-form>

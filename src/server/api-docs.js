@@ -82,6 +82,59 @@ const schemas = {
     field("appBaseUrl", scalar("string", "Browser-facing base URL."))
   ]),
 
+  ScheduledJob: objectOf("Persisted background task schedule and latest execution state.", [
+    field("id", scalar("number", "Scheduled job identifier.")),
+    field("key", scalar("string", "Stable job key such as order_status_sync.")),
+    field("name", scalar("string", "Human-readable job name.")),
+    field("category", scalar("string", "Job category such as orders, advertising, inventory, listing, analytics, or maintenance.")),
+    field("priority", scalar("string", "Execution priority such as critical, high, normal, or low.")),
+    field("scheduleType", scalar("string", "Schedule type: interval or daily.")),
+    field("intervalMinutes", scalar("number", "Interval in minutes for interval jobs.")),
+    field("dailyTime", scalar("string", "Shanghai wall-clock time for daily jobs, HH:mm.")),
+    field("enabled", scalar("boolean", "Whether the scheduler may run this job.")),
+    field("catchupEnabled", scalar("boolean", "Whether missed runs may be recovered after downtime.")),
+    field("config", scalar("object", "Optional task-specific runtime config such as timeout minutes or sync scope.")),
+    field("lastSuccessAt", scalar("string", "Last successful run timestamp.", { format: "date-time" })),
+    field("lastAttemptAt", scalar("string", "Last attempted run timestamp.", { format: "date-time" })),
+    field("nextRunAt", scalar("string", "Next planned run timestamp.", { format: "date-time" })),
+    field("failCount", scalar("number", "Consecutive failure count.")),
+    field("lastStatus", scalar("string", "Latest run status.")),
+    field("lastError", scalar("string", "Latest error message, if any.")),
+    field("recentRuns", arrayOf(ref("ScheduledJobRun"), "Most recent run rows for this job."))
+  ]),
+
+  ScheduledJobRun: objectOf("One background task execution record.", [
+    field("id", scalar("number", "Run identifier.")),
+    field("jobKey", scalar("string", "Scheduled job key.")),
+    field("plannedFor", scalar("string", "Planned execution timestamp.", { format: "date-time" })),
+    field("startedAt", scalar("string", "Run start timestamp.", { format: "date-time" })),
+    field("finishedAt", scalar("string", "Run finish timestamp.", { format: "date-time" })),
+    field("status", scalar("string", "Run status: running, success, partial, failed, or skipped.")),
+    field("mode", scalar("string", "Run source such as scheduled, manual, or catchup.")),
+    field("payload", scalar("object", "Schedule payload captured when the run started.")),
+    field("result", scalar("object", "Handler result payload for successful or skipped runs.")),
+    field("errorMessage", scalar("string", "Failure message, if any."))
+  ]),
+
+  ScheduledJobRunRequest: objectOf("Manual scheduled-job run request.", [
+    field("job_key", scalar("string", "Scheduled job key to run immediately."), true)
+  ], { additionalProperties: false }),
+
+  ScheduledJobStateRequest: objectOf("Scheduled-job enable or disable request.", [
+    field("job_key", scalar("string", "Scheduled job key to update."), true),
+    field("enabled", scalar("boolean", "Whether the job should be enabled."), true)
+  ], { additionalProperties: false }),
+
+  ScheduledJobConfigRequest: objectOf("Scheduled-job runtime configuration update request.", [
+    field("job_key", scalar("string", "Scheduled job key to update."), true),
+    field("scheduleType", scalar("string", "Schedule type: interval or daily.")),
+    field("intervalMinutes", scalar("number", "Interval in minutes for interval jobs.")),
+    field("dailyTime", scalar("string", "Shanghai wall-clock time for daily jobs, HH:mm.")),
+    field("catchupEnabled", scalar("boolean", "Whether missed runs may be recovered after downtime.")),
+    field("maxCatchupRuns", scalar("number", "Maximum backfill runs allowed when recovering.")),
+    field("config", scalar("object", "Task-specific config patch such as timeout minutes, scope, or days."))
+  ], { additionalProperties: false }),
+
   ExchangeRate: objectOf("CNY to RUB exchange-rate row.", [
     field("id", scalar("number", "Rate record identifier.")),
     field("currency_from", scalar("string", "Base currency code.")),
@@ -412,6 +465,8 @@ const schemas = {
 
   DashboardResponse: objectOf("Dashboard overview for first-page business monitoring.", [
     field("summary", scalar("object", "Global revenue and profit counters."), true),
+    field("commerce", scalar("object", "Dashboard commerce overview blocks.")),
+    field("alerts", scalar("object", "Dashboard alert collections including procurement, FBP, and scheduled jobs.")),
     field("byShop", arrayOf(scalar("object", "Per-shop KPI row."), "Grouped by shop."), true),
     field("byPerson", arrayOf(scalar("object", "Per-person KPI row."), "Grouped by owner."), true),
     field("lowStock", arrayOf(scalar("object", "Low-stock product row."), "Low local stock products."), true),
@@ -738,6 +793,36 @@ const endpoints = [
     endpoint("GET", "/api/system/info", "Return current runtime and deployment information.", {
       auth: "authenticated",
       responses: [response(200, "application/json", ref("SystemInfo"))]
+    }),
+    endpoint("GET", "/api/scheduled-jobs", "Return persisted background task schedules with recent run status.", {
+      auth: "authenticated",
+      query: [
+        param("run_limit", scalar("number", "Number of recent runs to include per job."), false)
+      ],
+      responses: [response(200, "application/json", arrayOf(ref("ScheduledJob"), "Scheduled background jobs."))]
+    }),
+    endpoint("GET", "/api/scheduled-job-runs", "Return background task execution history.", {
+      auth: "authenticated",
+      query: [
+        param("job_key", scalar("string", "Optional scheduled job key filter."), false),
+        param("limit", scalar("number", "Maximum number of run rows to return."), false)
+      ],
+      responses: [response(200, "application/json", arrayOf(ref("ScheduledJobRun"), "Scheduled job run history."))]
+    }),
+    endpoint("POST", "/api/scheduled-jobs/run", "Run one scheduled background task immediately and record the manual run.", {
+      auth: "authenticated",
+      requestBody: body(ref("ScheduledJobRunRequest")),
+      responses: [response(200, "application/json", ref("ScheduledJob"))]
+    }),
+    endpoint("POST", "/api/scheduled-jobs/state", "Enable or disable a scheduled background task.", {
+      auth: "authenticated",
+      requestBody: body(ref("ScheduledJobStateRequest")),
+      responses: [response(200, "application/json", ref("ScheduledJob"))]
+    }),
+    endpoint("POST", "/api/scheduled-jobs/config", "Update a scheduled background task runtime configuration.", {
+      auth: "authenticated",
+      requestBody: body(ref("ScheduledJobConfigRequest")),
+      responses: [response(200, "application/json", ref("ScheduledJob"))]
     })
   ]),
   section("Auth", [

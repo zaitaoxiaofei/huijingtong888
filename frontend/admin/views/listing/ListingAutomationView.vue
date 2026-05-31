@@ -1,11 +1,12 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { InfoFilled, Plus, Search, UploadFilled } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
 import { uploadCropperImage, uploadListingMedia, withImageToken } from "../../api/tools/imageCropper";
 import OzonCategorySelect from "../../components/listing/OzonCategorySelect.vue";
+import ProductImagePreview from "../../components/ProductImagePreview.vue";
 
 const loading = ref(false);
 const searchingSku = ref(false);
@@ -19,9 +20,11 @@ const refreshingCopy = ref(false);
 const aiGenerating = ref(false);
 const validatingPublish = ref(false);
 const publishingToOzon = ref(false);
+const collectorTemplateApplied = ref(false);
 const showMoreAttributes = ref(false);
 const optionalAttributeVisibleLimit = ref(24);
 const showApiDebug = ref(false);
+const sourceRawOmitted = ref(false);
 const ATTRIBUTE_OPTION_RENDER_LIMIT = 60;
 const attributeValueLoading = reactive({});
 const recordDraftApplied = ref(false);
@@ -32,6 +35,7 @@ const materialSearching = ref(false);
 const materialReferencing = ref(false);
 const referencedMaterialPackage = ref(null);
 const route = useRoute();
+const router = useRouter();
 const materialSearch = reactive({
   keyword: "",
   name: "",
@@ -43,7 +47,9 @@ const materialSearch = reactive({
 });
 const variantImageEditor = reactive({
   visible: false,
-  row: null
+  row: null,
+  selectedUrls: [],
+  activeTab: "sku"
 });
 const variantVideoEditor = reactive({
   visible: false,
@@ -148,6 +154,7 @@ const publishSubmit = reactive({
 });
 
 const selectedTemplate = computed(() => state.templates.find((item) => Number(item.id) === Number(draftForm.template_id)) || null);
+const collectorSourceSku = computed(() => String(route.query.collectorSku || "").trim());
 const selectedDraft = computed(() => state.drafts.find((item) => Number(item.id) === Number(state.selectedDraftId)) || null);
 const readyCopyCount = computed(() => state.copies.filter((item) => item.validation?.level === "green").length);
 const blockedCopyCount = computed(() => state.copies.filter((item) => item.validation?.level === "red").length);
@@ -160,13 +167,7 @@ const optionalSchemaAttributeFields = computed(() => hiddenAttributeFields.value
 const recommendedOptionalAttributeFields = computed(() => optionalSchemaAttributeFields.value.filter(isRecommendedAttributeField));
 const mainAttributeFields = computed(() => {
   if (showMoreAttributes.value) return optionalSchemaAttributeFields.value.slice(0, optionalAttributeVisibleLimit.value);
-  const recommended = recommendedOptionalAttributeFields.value.slice(0, 8);
-  if (recommended.length >= 6) return recommended;
-  const used = new Set(recommended.map(attributeFieldKey));
-  return [
-    ...recommended,
-    ...optionalSchemaAttributeFields.value.filter((item) => !used.has(attributeFieldKey(item))).slice(0, 8 - recommended.length)
-  ];
+  return [];
 });
 const hiddenAttributeCount = computed(() => Math.max(optionalSchemaAttributeFields.value.length - mainAttributeFields.value.length, 0));
 const missingRequiredAttributes = computed(() => templateEditor.attributes.filter((item) => item.required && !hasAttributeValue(item)));
@@ -248,25 +249,78 @@ const filteredTemplates = computed(() => {
   }).slice(0, 12);
 });
 
+function hasListingBootstrapParams() {
+  return Boolean(
+    Number(route.query.templateId || 0)
+    || String(route.query.recordDraft || "").trim()
+    || String(route.query.recordId || "").trim()
+    || String(route.query.collectorSku || "").trim()
+  );
+}
+
 async function loadAll() {
+  if (!hasListingBootstrapParams()) {
+    newBlankTemplate();
+    state.templates = [];
+    state.drafts = [];
+    state.copyJobs = [];
+    state.copies = [];
+    state.selectedCopyJobId = null;
+    state.selectedDraftId = null;
+    state.searchedProduct = null;
+    state.step = "edit";
+    return;
+  }
   loading.value = true;
   try {
-    const [shops, templates, drafts, copyJobs] = await Promise.all([
-      apiClient.get("/api/shops", { noCache: true }),
-      apiClient.get("/api/listing/templates", { noCache: true }).catch(handleListingApiMissing),
-      apiClient.get("/api/listing/drafts", { noCache: true }).catch(handleListingApiMissing),
-      apiClient.get("/api/listing/copy-jobs", { noCache: true }).catch(handleListingApiMissing)
+    const templateId = Number(route.query.templateId || 0);
+    const routeTemplateRequest = templateId
+      ? apiClient.get(`/api/listing/templates/${templateId}?mode=editor`, { noCache: true }).catch(handleListingApiMissing)
+      : Promise.resolve(null);
+    const templatesRequest = templateId
+      ? Promise.resolve([])
+      : apiClient.get("/api/listing/templates", { noCache: true }).catch(handleListingApiMissing);
+    const draftsRequest = templateId
+      ? Promise.resolve([])
+      : apiClient.get("/api/listing/drafts", { noCache: true }).catch(handleListingApiMissing);
+    const copyJobsRequest = templateId
+      ? Promise.resolve([])
+      : apiClient.get("/api/listing/copy-jobs", { noCache: true }).catch(handleListingApiMissing);
+    const [shops, templates, drafts, copyJobs, routeTemplate] = await Promise.all([
+      apiClient.get("/api/shops"),
+      templatesRequest,
+      draftsRequest,
+      copyJobsRequest,
+      routeTemplateRequest
     ]);
     state.shops = Array.isArray(shops) ? shops.filter((shop) => shop.status !== "deleted") : [];
-    state.templates = Array.isArray(templates) ? templates : [];
+    state.templates = routeTemplate?.id
+      ? [routeTemplate, ...(Array.isArray(templates) ? templates : []).filter((item) => Number(item.id) !== Number(routeTemplate.id))]
+      : (Array.isArray(templates) ? templates : []);
     state.drafts = Array.isArray(drafts) ? drafts : [];
     state.copyJobs = Array.isArray(copyJobs) ? copyJobs : [];
     if (!copyForm.shop_id && state.shops[0]) copyForm.shop_id = state.shops[0].id;
     if (!state.selectedCopyJobId && state.copyJobs[0]) state.selectedCopyJobId = state.copyJobs[0].id;
+    await applyTemplateFromRoute(routeTemplate);
     applyRecordDraftFromRoute();
   } finally {
     loading.value = false;
   }
+}
+
+async function applyTemplateFromRoute(routeTemplate = null) {
+  if (collectorTemplateApplied.value) return;
+  const templateId = Number(route.query.templateId || 0);
+  if (!templateId || templateEditor.id) return;
+  const template = routeTemplate?.id ? routeTemplate : state.templates.find((item) => Number(item.id) === templateId);
+  if (!template) return;
+  collectorTemplateApplied.value = true;
+  fillTemplateEditor(template);
+  draftForm.template_id = template.id;
+  state.step = "edit";
+  showMoreAttributes.value = false;
+  optionalAttributeVisibleLimit.value = 40;
+  ElMessage.success("已载入采集箱数据，请在商品上架页继续编辑");
 }
 
 async function applyRecordDraftFromRoute() {
@@ -280,7 +334,7 @@ async function applyRecordDraftFromRoute() {
     fillTemplateEditor(draft.template);
     const shopId = draft.shop_id || draft.template?.source_raw?.shop_id || "";
     draftForm.shop_ids = shopId ? [shopId] : [];
-    showMoreAttributes.value = true;
+    showMoreAttributes.value = false;
     if (templateEditor.description_category_id && templateEditor.type_id) await hydrateRecordDraftCategory();
     ElMessage.success("已从上架记录载入可编辑草稿");
   } catch {
@@ -549,7 +603,7 @@ async function referenceMaterialPackage(item) {
     referencedMaterialPackage.value = detail;
     state.templates = [template, ...state.templates.filter((row) => Number(row.id) !== Number(template.id))];
     await selectTemplate(template);
-    showMoreAttributes.value = Boolean((detail.missingFields || []).length);
+    showMoreAttributes.value = false;
     ElMessage.success("素材包已引用到当前上架");
   } catch (error) {
     ElMessage.error(error.message || "素材包引用失败");
@@ -569,9 +623,10 @@ function mergeOzonCategoryAttributes(schemaAttrs = []) {
   const currentByName = new Map(templateEditor.attributes.map((item) => [String(item.name || "").trim(), item]).filter(([key]) => key));
   const merged = normalizeEditorAttributes(schemaAttrs).map((schema) => {
     const existing = currentById.get(String(schema.attribute_id || "")) || currentByName.get(String(schema.name || "").trim());
+    const existingHasValue = existing && hasAttributeValue(existing);
     return {
       ...schema,
-      value: existing?.value ?? "",
+      value: existingHasValue ? existing.value : schema.value,
       values: existing?.values?.length ? existing.values : schema.values,
       source: existing?.source && existing.source !== "manual" ? existing.source : schema.source
     };
@@ -589,7 +644,7 @@ async function selectTemplate(template) {
   if (!template?.id) return;
   loadingTemplate.value = true;
   try {
-    const detail = await apiClient.get(`/api/listing/templates/${template.id}`, { noCache: true });
+    const detail = await apiClient.get(`/api/listing/templates/${template.id}?mode=editor`, { noCache: true });
     fillTemplateEditor(detail);
     draftForm.template_id = detail.id;
   } finally {
@@ -598,6 +653,7 @@ async function selectTemplate(template) {
 }
 
 function newBlankTemplate() {
+  sourceRawOmitted.value = false;
   Object.assign(templateEditor, {
     id: "",
     ozon_category_id: "",
@@ -680,7 +736,11 @@ function fillTemplateEditor(template) {
   const price = editable.price || {};
   const dimensions = editable.dimensions || {};
   const logistics = editable.logistics || {};
-  const attrs = normalizeEditorAttributes(template.attributes || editable.attributes || []);
+  const attrs = normalizeEditorAttributes(firstNonEmptyArray(
+    template.attributes,
+    editable.attributes,
+    template.category_attributes
+  ));
   templateEditor.id = template.id || "";
   templateEditor.ozon_category_id = template.ozon_category_id || "";
   templateEditor.description_category_id = editable.description_category_id || "";
@@ -709,20 +769,25 @@ function fillTemplateEditor(template) {
   templateEditor.images = normalizeEditorImages(template.images || editable.images || []);
   templateEditor.variants = normalizeEditorVariants(editable.variants || template.variants || []);
   if (!templateEditor.variants.length && (templateEditor.title || templateEditor.images.length)) addVariantRow();
-  templateEditor.rawJson = JSON.stringify(template.source_raw || editable.source_raw || editable.raw_request || {}, null, 2);
+  sourceRawOmitted.value = Boolean(template.source_raw_omitted);
+  templateEditor.rawJson = sourceRawOmitted.value ? "" : JSON.stringify(template.source_raw || editable.source_raw || editable.raw_request || {}, null, 2);
+}
+
+function firstNonEmptyArray(...values) {
+  return values.find((value) => Array.isArray(value) && value.length) || [];
 }
 
 function applyTemplateAttributeFallbacks(editable = {}, logistics = {}) {
   const summary = getAttributeByNames(["简介", "Аннотация", "Описание"], templateEditor.description || editable.description || "");
   const richJson = editable.rich_content_json || getAttributeByNames(["JSON富内容", "Rich", "rich"], "");
   const brand = logistics.brand || getAttributeByNames(["品牌", "Бренд"], "");
-  const model = logistics.spec || getAttributeByNames(["型号", "Модель"], "");
+  const model = normalizeModelNameValue(getAttributeByIdsOrNames([9048], ["型号名称", "Модель"], "") || logistics.model || logistics.modelName || "") || buildParentModelName();
   const tags = logistics.tags?.length ? logistics.tags : splitTagValue(getAttributeByNames(["产品标签", "主题标签", "主图标签", "ключевые слова", "тег"], ""));
   if (summary && !templateEditor.description) templateEditor.description = summary;
   if (brand) setAttributeByNames(["品牌", "Бренд"], brand, { name: "品牌", required: true });
   if (model) {
     templateEditor.spec = templateEditor.spec || model;
-    setAttributeByNames(["型号", "Модель"], model, { name: "型号名称", required: true });
+    setAttributeByIdsOrNames([9048], ["型号名称", "Модель"], model, { name: "型号名称", required: true, attribute_id: 9048 });
   }
   if (tags.length) setAttributeByNames(["产品标签", "主题标签", "主图标签", "ключевые слова", "тег"], tags.join(","), { name: "产品标签" });
   if (summary) setAttributeByNames(["简介", "Аннотация", "Описание"], summary, { name: "简介" });
@@ -749,10 +814,8 @@ function normalizeEditorAttributes(attributes) {
 
 function normalizeIncomingAttributeValue(item = {}) {
   if (item?.value !== undefined && item?.value !== null && item.value !== "") return item.value;
-  const values = Array.isArray(item?.values) ? item.values : [];
-  if (!values.length) return "";
-  const normalized = values.map((value) => value?.value || value?.name || value?.text || value).filter(Boolean);
-  return item?.is_collection ? normalized : normalized[0] || "";
+  if (item?.is_collection || String(item?.type || "").toLowerCase() === "multiselect") return [];
+  return "";
 }
 
 function fixedAttributeNames() {
@@ -767,13 +830,13 @@ function applyCleanRecordAttributeFallbacks(editable = {}, logistics = {}) {
   const summary = getAttributeByNames(["简介", "Аннотация", "Описание"], templateEditor.description || editable.description || "");
   const richJson = editable.rich_content_json || getAttributeByNames(["JSON富内容", "Rich", "rich"], "");
   const brand = logistics.brand || getAttributeByNames(["品牌", "Бренд"], "");
-  const model = normalizeModelNameValue(logistics.model || logistics.modelName || getAttributeByNames(["型号名称", "型号", "Модель"], ""));
+  const model = normalizeModelNameValue(getAttributeByIdsOrNames([9048], ["型号名称", "Модель"], "") || logistics.model || logistics.modelName || "") || buildParentModelName();
   const tags = logistics.tags?.length ? logistics.tags : splitTagValue(getAttributeByNames(["产品标签", "主题标签", "主图标签", "ключевые слова", "тег"], ""));
   if (summary && !templateEditor.description) templateEditor.description = summary;
   if (brand) setAttributeByNames(["品牌", "Бренд"], brand, { name: "品牌", required: true });
   if (model) {
     templateEditor.spec = templateEditor.spec || model;
-    setAttributeByNames(["型号名称", "型号", "Модель"], model, { name: "型号名称", required: true });
+    setAttributeByIdsOrNames([9048], ["型号名称", "Модель"], model, { name: "型号名称", required: true, attribute_id: 9048 });
   }
   if (tags.length) setAttributeByNames(["产品标签", "主题标签", "主图标签", "ключевые слова", "тег"], tags.join(","), { name: "产品标签" });
   if (summary) setAttributeByNames(["简介", "Аннотация", "Описание"], summary, { name: "简介" });
@@ -786,6 +849,21 @@ function normalizeModelNameValue(value = "") {
   if (/^(tpu|abs|pvc|pp|pc|pet)$/i.test(text)) return "";
   if (/热塑|弹性体|塑料|材料|材质|кожа|пластик|материал|термо/i.test(text)) return "";
   return text;
+}
+
+function buildParentModelName() {
+  const raw = [templateEditor.source_ozon_sku, templateEditor.id, draftForm.internal_code, templateEditor.title]
+    .map((value) => String(value || "").trim())
+    .find(Boolean);
+  if (!raw) return `MODEL-${Date.now().toString(36).toUpperCase()}`;
+  const compact = raw.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 36);
+  return `MODEL-${compact || stableStringHash(raw)}`;
+}
+
+function stableStringHash(value = "") {
+  let hash = 0;
+  for (const char of String(value || "")) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
+  return Math.abs(hash).toString(36).toUpperCase();
 }
 
 function renderedAttributeOptions(field = {}) {
@@ -849,6 +927,13 @@ function getAttributeByNames(names, fallback = "") {
   return templateEditor.attributes.find((item) => list.some((name) => String(item.name || "").includes(name)))?.value || fallback;
 }
 
+function getAttributeByIdsOrNames(ids = [], names = [], fallback = "") {
+  const idSet = new Set((Array.isArray(ids) ? ids : [ids]).map((id) => String(id || "")).filter(Boolean));
+  const byId = templateEditor.attributes.find((item) => idSet.has(String(item.attribute_id || item.id || "")));
+  if (byId?.value !== undefined && byId.value !== null && byId.value !== "") return byId.value;
+  return getAttributeByNames(names, fallback);
+}
+
 function setAttributeByNames(names, value, defaults = {}) {
   const list = expandAttributeNameAliases(Array.isArray(names) ? names : [names]);
   const existing = templateEditor.attributes.find((item) => list.some((name) => String(item.name || "").includes(name)));
@@ -873,10 +958,22 @@ function setAttributeByNames(names, value, defaults = {}) {
   });
 }
 
+function setAttributeByIdsOrNames(ids = [], names = [], value, defaults = {}) {
+  const idSet = new Set((Array.isArray(ids) ? ids : [ids]).map((id) => String(id || "")).filter(Boolean));
+  const existingById = templateEditor.attributes.find((item) => idSet.has(String(item.attribute_id || item.id || "")));
+  if (existingById) {
+    existingById.value = value;
+    if (defaults.required) existingById.required = true;
+    if (defaults.source && !existingById.source) existingById.source = defaults.source;
+    return;
+  }
+  setAttributeByNames(names, value, defaults);
+}
+
 function syncFixedFormAttributes() {
   const brand = String(fixedForm.value.brand || "").trim() || "无品牌";
   setAttributeByNames(["品牌", "Бренд"], brand, { name: "品牌", required: true, attribute_id: 85, source: "fixed_form" });
-  if (fixedForm.value.model) setAttributeByNames(["型号名称", "型号", "Модель"], fixedForm.value.model, { name: "型号名称", required: true, source: "fixed_form" });
+  if (fixedForm.value.model) setAttributeByIdsOrNames([9048], ["型号名称", "Модель"], fixedForm.value.model, { name: "型号名称", required: true, attribute_id: 9048, source: "fixed_form" });
   if (fixedForm.value.tags?.length) setAttributeByNames(["产品标签", "主题标签", "主图标签", "ключевые слова", "тег"], fixedForm.value.tags.join(","), { name: "产品标签", attribute_id: 23171, source: "fixed_form" });
   if (fixedForm.value.summary) setAttributeByNames(["简介", "Аннотация", "Описание"], fixedForm.value.summary, { name: "简介", source: "fixed_form" });
   if (fixedForm.value.richJson) setAttributeByNames(["JSON富内容", "Rich", "rich"], fixedForm.value.richJson, { name: "JSON富内容", source: "fixed_form" });
@@ -886,7 +983,7 @@ const fixedForm = computed({
   get() {
     return {
       brand: getAttributeByNames(["品牌", "Бренд"], "无品牌"),
-      model: getAttributeByNames(["型号名称", "型号", "Модель"], ""),
+      model: getAttributeByIdsOrNames([9048], ["型号名称", "Модель"], ""),
       tags: splitTagValue(getAttributeByNames(["产品标签", "主题标签", "主图标签", "ключевые слова", "тег"], "")),
       summary: getAttributeByNames(["简介", "Аннотация", "Описание"], ""),
       richJson: getAttributeByNames(["JSON富内容", "Rich", "rich"], "")
@@ -894,7 +991,7 @@ const fixedForm = computed({
   },
   set(value) {
     setAttributeByNames(["品牌", "Бренд"], value.brand, { name: "品牌", required: true });
-    setAttributeByNames(["型号名称", "型号", "Модель"], value.model, { name: "型号名称", required: true });
+    setAttributeByIdsOrNames([9048], ["型号名称", "Модель"], value.model, { name: "型号名称", required: true, attribute_id: 9048 });
     setAttributeByNames(["产品标签", "主题标签", "主图标签", "ключевые слова", "тег"], (value.tags || []).join(","), { name: "产品标签" });
     setAttributeByNames(["简介", "Аннотация", "Описание"], value.summary, { name: "简介" });
     setAttributeByNames(["JSON富内容", "Rich", "rich"], value.richJson, { name: "JSON富内容" });
@@ -920,7 +1017,7 @@ function updateFixedField(key, value) {
 function normalizeAttributeType(item) {
   if (item?.is_collection) return "multiselect";
   const type = String(item?.type || "").toLowerCase();
-  if (["select", "multiselect", "textarea", "number", "boolean"].includes(type)) return type;
+  if (["select", "multiselect", "textarea", "number", "boolean", "rich_json"].includes(type)) return type;
   if (Array.isArray(item?.values) && item.values.length) return "select";
   return "text";
 }
@@ -953,13 +1050,19 @@ function normalizeEditorVariants(variants) {
     spec: item?.spec || "",
     main_tags: splitTagValue(item?.main_tags || item?.hashtags || item?.tags || ""),
     weight_g: Number(item?.weight_g || templateEditor.weight_g || 0),
-    length_mm: Number(item?.length_mm || item?.depth || item?.length_cm || templateEditor.length_cm || 0),
-    width_mm: Number(item?.width_mm || item?.width || item?.width_cm || templateEditor.width_cm || 0),
-    height_mm: Number(item?.height_mm || item?.height || item?.height_cm || templateEditor.height_cm || 0),
+    length_mm: normalizeVariantDimensionMm(item?.length_mm, item?.depth, item?.length_cm, templateEditor.length_cm),
+    width_mm: normalizeVariantDimensionMm(item?.width_mm, item?.width, item?.width_cm, templateEditor.width_cm),
+    height_mm: normalizeVariantDimensionMm(item?.height_mm, item?.height, item?.height_cm, templateEditor.height_cm),
     stock: Number(item?.stock || 0),
     dynamic_attributes: item?.dynamic_attributes || {},
     sort_order: Number(item?.sort_order || index + 1)
   }));
+}
+
+function normalizeVariantDimensionMm(mmValue, legacyMmValue, cmValue, fallbackCmValue) {
+  const mm = Number(mmValue || legacyMmValue || 0);
+  if (Number.isFinite(mm) && mm > 0) return mm;
+  return cmToMm(cmValue || fallbackCmValue || 0);
 }
 
 function normalizeVariantLinks(value) {
@@ -1282,28 +1385,72 @@ function cloneVariantValue(value) {
 }
 
 function variantPreviewImages(row) {
-  const images = Array.isArray(row?.images) && row.images.length ? row.images : templateEditor.images;
+  const images = Array.isArray(row?.images) && row.images.length ? row.images : templateEditor.images.slice(0, 1);
   const filtered = images.filter((item) => item?.url);
   if (filtered.length <= 3) return filtered;
   return [filtered[0], filtered[1], filtered[filtered.length - 1]];
 }
 
 function variantImageOverflow(row) {
-  const images = Array.isArray(row?.images) && row.images.length ? row.images : templateEditor.images;
+  const images = Array.isArray(row?.images) && row.images.length ? row.images : templateEditor.images.slice(0, 1);
   return Math.max(images.filter((item) => item?.url).length - 3, 0);
+}
+
+function variantPreviewList(row) {
+  const images = Array.isArray(row?.images) && row.images.length ? row.images : templateEditor.images.slice(0, 1);
+  return images.filter((item) => item?.url).map((item) => item.previewUrl || item.url);
 }
 
 function ensureVariantOwnImages(row) {
   if (!row) return [];
   if (!Array.isArray(row.images)) row.images = [];
-  if (!row.images.length && templateEditor.images.length) row.images = templateEditor.images.map((item, index) => ({ ...item, sort_order: index + 1 }));
   return row.images;
 }
 
 function openVariantImageEditor(row) {
   ensureVariantOwnImages(row);
   variantImageEditor.row = row;
+  variantImageEditor.selectedUrls = ensureVariantOwnImages(row).map((item) => item.url).filter(Boolean);
+  variantImageEditor.activeTab = "sku";
   variantImageEditor.visible = true;
+}
+
+function variantImageUrl(image) {
+  return String(image?.previewUrl || image?.url || image || "").trim();
+}
+
+function isVariantImageSelected(image) {
+  const url = variantImageUrl(image);
+  return url && variantImageEditor.selectedUrls.includes(url);
+}
+
+function toggleVariantImageSelection(image) {
+  const url = variantImageUrl(image);
+  if (!url) return;
+  const index = variantImageEditor.selectedUrls.indexOf(url);
+  if (index >= 0) variantImageEditor.selectedUrls.splice(index, 1);
+  else variantImageEditor.selectedUrls.push(url);
+}
+
+function variantImageLibrary() {
+  const sources = [
+    ...ensureVariantOwnImages(variantImageEditor.row),
+    ...templateEditor.images,
+    ...templateEditor.variants.flatMap((row) => Array.isArray(row.images) ? row.images : [])
+  ];
+  return dedupeImages(sources).filter((item) => item.url).map((item, index) => ({ ...item, sort_order: item.sort_order || index + 1 }));
+}
+
+function confirmVariantImageEditor() {
+  if (!variantImageEditor.row) return;
+  const byUrl = new Map(variantImageLibrary().map((item) => [variantImageUrl(item), item]));
+  variantImageEditor.row.images = variantImageEditor.selectedUrls.map((url, index) => ({
+    ...(byUrl.get(url) || {}),
+    url,
+    sort_order: index + 1
+  }));
+  variantImageEditor.visible = false;
+  ElMessage.success("已更新 SKU 图片");
 }
 
 function addVariantImageLink() {
@@ -1319,6 +1466,7 @@ function removeVariantImage(index) {
 function useTemplateImagesForVariant() {
   if (!variantImageEditor.row) return;
   variantImageEditor.row.images = templateEditor.images.filter((item) => item.url).map((item, index) => ({ ...item, sort_order: index + 1 }));
+  variantImageEditor.selectedUrls = variantImageEditor.row.images.map((item) => item.url).filter(Boolean);
   ElMessage.success("已使用模板图片");
 }
 
@@ -2076,7 +2224,7 @@ function buildTemplatePayload() {
       height_mm: variantFieldMode.dimensions ? item.height_mm : cmToMm(templateEditor.height_cm),
       main_tags: variantFieldMode.tags ? item.main_tags : fixedForm.value.tags
     }));
-  return {
+  const payload = {
     ozon_category_id: templateEditor.ozon_category_id,
     category_name: templateEditor.category_name,
     shop_ids: draftForm.shop_ids,
@@ -2085,7 +2233,6 @@ function buildTemplatePayload() {
     description: templateEditor.description,
     attributes,
     images,
-    source_raw: sourceRaw,
     editable_payload: {
       sku: templateEditor.source_ozon_sku,
       title: templateEditor.title,
@@ -2114,10 +2261,14 @@ function buildTemplatePayload() {
       },
       attributes,
       images,
-      variants,
-      source_raw: sourceRaw
+      variants
     }
   };
+  if (!sourceRawOmitted.value) {
+    payload.source_raw = sourceRaw;
+    payload.editable_payload.source_raw = sourceRaw;
+  }
+  return payload;
 }
 
 function applyTemplateToDraft() {
@@ -2244,6 +2395,10 @@ function validationLabel(row) {
   return "未检查";
 }
 
+function backToCollectorBox() {
+  router.push({ path: "/collector-box" });
+}
+
 function copyIssues(row) {
   return [...(row.validation?.errors || []), ...(row.validation?.warnings || [])].join("；") || "-";
 }
@@ -2258,6 +2413,13 @@ onMounted(loadAll);
 <template>
   <div class="copy-page" v-loading="loading">
     <section class="copy-header">
+      <div v-if="collectorSourceSku" class="collector-source-bar">
+        <div>
+          <span>采集箱来源</span>
+          <strong>SKU {{ collectorSourceSku }}</strong>
+        </div>
+        <el-button size="small" @click="backToCollectorBox">返回采集箱</el-button>
+      </div>
       <div class="header-actions">
         <el-button @click="loadAll">刷新</el-button>
         <el-button type="success" :loading="aiGenerating" @click="runFieldAi({ name: 'all', type: 'attributeFill' })">AI 一键生成文案</el-button>
@@ -2439,6 +2601,38 @@ onMounted(loadAll);
                     </div>
                   </el-form-item>
                 </div>
+                <div v-if="mainAttributeFields.length" class="schema-required-panel schema-optional-panel">
+                  <div class="subsection-title">
+                    <h3>Ozon 类目属性</h3>
+                    <el-button v-if="hiddenAttributeCount > 0" size="small" @click="optionalAttributeVisibleLimit += 24">继续显示 {{ Math.min(24, hiddenAttributeCount) }} 项</el-button>
+                  </div>
+                  <el-form-item v-for="(field, index) in mainAttributeFields" :key="`${field.attribute_id || field.name}-optional-${index}`" :required="field.required" :label="field.name || '未命名属性'">
+                    <div class="field-with-tools">
+                      <el-select v-if="field.type === 'select'" v-model="field.value" filterable clearable :loading="attributeValueLoading[attributeFieldKey(field)]" @visible-change="ensureAttributeValuesLoaded(field, $event)">
+                        <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="option.value" :value="option.value" />
+                        <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
+                      </el-select>
+                      <el-select v-else-if="field.type === 'multiselect'" v-model="field.value" multiple filterable allow-create default-first-option :loading="attributeValueLoading[attributeFieldKey(field)]" @visible-change="ensureAttributeValuesLoaded(field, $event)">
+                        <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="option.value" :value="option.value" />
+                        <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
+                      </el-select>
+                      <el-input-number v-else-if="field.type === 'number'" v-model="field.value" :controls="false" />
+                      <el-switch v-else-if="field.type === 'boolean'" v-model="field.value" />
+                      <el-input v-else-if="field.type === 'textarea'" v-model="field.value" type="textarea" :rows="3" />
+                      <el-input v-else v-model="field.value" />
+                      <el-tag :type="attributeStatusType(field)" effect="plain">{{ attributeStatusText(field) }}</el-tag>
+                      <el-button circle @click="runFieldAi({ ...field, type: 'attributeFill', attributeField: field })">AI</el-button>
+                      <el-button circle :icon="InfoFilled" @click="openAttributeDetail(field)" />
+                    </div>
+                  </el-form-item>
+                </div>
+                <div v-else-if="showMoreAttributes" class="schema-required-panel schema-optional-panel empty-schema-panel">
+                  <div class="subsection-title">
+                    <h3>Ozon 类目属性</h3>
+                    <el-button size="small" :loading="loadingTemplate" @click="syncFullCategorySchema">同步类目属性</el-button>
+                  </div>
+                  <el-empty description="当前模板没有可展开的隐藏属性，请先同步当前 Ozon 类目的属性模板。" />
+                </div>
               </div>
             </section>
 
@@ -2450,7 +2644,18 @@ onMounted(loadAll);
                 <div class="section-actions variant-actions">
                   <el-button type="primary" :icon="Plus" @click="addVariantRow">添加变体</el-button>
                   <el-button :disabled="!missingVariantOfferIds.length" @click="generateMissingVariantOfferIds">一键生成货号</el-button>
-                  <el-button :disabled="!selectedVariantRows.length" @click="removeSelectedVariants">批量删除变体</el-button>
+                  <el-dropdown trigger="click">
+                    <el-button>批量操作</el-button>
+                    <template #dropdown>
+                      <el-dropdown-menu>
+                        <el-dropdown-item @click="applyFirstVariantField('images')">图片同首行</el-dropdown-item>
+                        <el-dropdown-item @click="applyFirstVariantField('price')">售价同首行</el-dropdown-item>
+                        <el-dropdown-item @click="applyFirstVariantField('old_price')">划线价同首行</el-dropdown-item>
+                        <el-dropdown-item @click="applyFirstVariantField('main_tags')">标签同首行</el-dropdown-item>
+                        <el-dropdown-item divided :disabled="!selectedVariantRows.length" @click="removeSelectedVariants">删除选中变体</el-dropdown-item>
+                      </el-dropdown-menu>
+                    </template>
+                  </el-dropdown>
                 </div>
               </div>
               <el-table
@@ -2458,7 +2663,6 @@ onMounted(loadAll);
                 border
                 class="variant-table dense-variant-table"
                 row-key="id"
-                max-height="520"
                 :scrollbar-always-on="true"
                 @selection-change="handleVariantSelectionChange"
               >
@@ -2495,7 +2699,16 @@ onMounted(loadAll);
                   </template>
                   <template #default="{ row }">
                     <div class="variant-images">
-                      <img v-for="(image, imageIndex) in variantPreviewImages(row)" :key="`${image.url}-${imageIndex}`" :src="withImageToken(image.previewUrl || image.url)" :alt="image.name || row.name" @click="openVariantImageEditor(row)" />
+                      <ProductImagePreview
+                        v-for="(image, imageIndex) in variantPreviewImages(row)"
+                        :key="`${image.url}-${imageIndex}`"
+                        :src="image.previewUrl || image.url"
+                        :preview-list="variantPreviewList(row)"
+                        :alt="image.name || row.name"
+                        size="square"
+                        fit="cover"
+                        lazy
+                      />
                       <span v-if="variantImageOverflow(row)" class="variant-image-more">+{{ variantImageOverflow(row) }}</span>
                       <el-button size="small" @click="openVariantImageEditor(row)">管理</el-button>
                       <el-upload multiple :show-file-list="false" accept="image/jpeg,image/png,image/webp" :http-request="uploadVariantImagesRequest(row)">
@@ -2735,27 +2948,67 @@ onMounted(loadAll);
       </div>
     </el-drawer>
 
-    <el-drawer v-model="variantImageEditor.visible" title="变体图片管理" size="860px">
-      <div v-if="variantImageEditor.row" class="variant-image-editor">
-        <div class="drawer-actions">
-          <el-button @click="useTemplateImagesForVariant">使用模板图片</el-button>
-          <el-button @click="addVariantImageLink">新增图片链接</el-button>
-          <el-upload multiple :show-file-list="false" accept="image/jpeg,image/png,image/webp" :http-request="uploadVariantImagesRequest(variantImageEditor.row)">
-            <el-button type="primary" :loading="uploadingImage">上传图片</el-button>
-          </el-upload>
-        </div>
-        <div class="variant-image-grid">
-          <div v-for="(image, imageIndex) in ensureVariantOwnImages(variantImageEditor.row)" :key="`${image.url}-${imageIndex}`" class="variant-image-card">
-            <el-image v-if="image.url" :src="withImageToken(image.previewUrl || image.url)" :preview-src-list="ensureVariantOwnImages(variantImageEditor.row).filter((item) => item.url).map((item) => withImageToken(item.previewUrl || item.url))" fit="cover" />
-            <div v-else class="variant-image-empty">图片链接</div>
-            <el-tag size="small" effect="plain">{{ image.name || variantMediaRoleLabel(imageIndex, ensureVariantOwnImages(variantImageEditor.row).length) }}</el-tag>
-            <el-input v-model="image.url" size="small" placeholder="https://..." />
-            <el-input v-model="image.name" size="small" placeholder="主图/详情图/尾图" />
-            <el-button link type="danger" @click="removeVariantImage(imageIndex)">删除</el-button>
+    <el-dialog v-model="variantImageEditor.visible" title="SKU图片编辑" width="92vw" class="variant-image-dialog" destroy-on-close>
+      <div v-if="variantImageEditor.row" class="variant-image-workbench">
+        <aside class="variant-image-panel">
+          <div class="variant-image-tools">
+            <el-upload multiple :show-file-list="false" accept="image/jpeg,image/png,image/webp" :http-request="uploadVariantImagesRequest(variantImageEditor.row)">
+              <el-button type="primary" :loading="uploadingImage">上传图片</el-button>
+            </el-upload>
+            <el-button @click="useTemplateImagesForVariant">使用模板图片</el-button>
+            <el-button @click="addVariantImageLink">新增链接</el-button>
           </div>
-        </div>
+          <div class="variant-image-grid selected-grid">
+            <div v-for="(image, imageIndex) in ensureVariantOwnImages(variantImageEditor.row)" :key="`${image.url}-${imageIndex}`" class="variant-image-card selected-card">
+              <ProductImagePreview v-if="image.url" :src="image.previewUrl || image.url" :preview-list="variantPreviewList(variantImageEditor.row)" size="square" fit="cover" />
+              <div v-else class="variant-image-empty">图片链接</div>
+              <el-input v-model="image.url" size="small" placeholder="https://..." />
+              <div class="variant-card-footer">
+                <el-tag size="small" effect="plain">{{ image.name || variantMediaRoleLabel(imageIndex, ensureVariantOwnImages(variantImageEditor.row).length) }}</el-tag>
+                <el-button link type="danger" @click="removeVariantImage(imageIndex)">删除</el-button>
+              </div>
+            </div>
+          </div>
+        </aside>
+        <section class="variant-image-library">
+          <div class="library-tabs">
+            <el-tabs v-model="variantImageEditor.activeTab">
+              <el-tab-pane label="采集SKU图片" name="sku" />
+              <el-tab-pane label="采集详情图片" name="detail" />
+              <el-tab-pane label="网络图片" name="network" />
+              <el-tab-pane label="AI生图记录" name="ai" />
+            </el-tabs>
+            <el-dropdown trigger="click">
+              <el-button>批量操作</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item @click="variantImageEditor.selectedUrls = variantImageLibrary().map((item) => item.url)">全选图库</el-dropdown-item>
+                  <el-dropdown-item @click="variantImageEditor.selectedUrls = []">清空选择</el-dropdown-item>
+                  <el-dropdown-item @click="useTemplateImagesForVariant">模板图覆盖</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
+          <div class="library-grid">
+            <button
+              v-for="(image, imageIndex) in variantImageLibrary()"
+              :key="`${image.url}-${imageIndex}`"
+              type="button"
+              class="library-image-card"
+              :class="{ selected: isVariantImageSelected(image) }"
+              @click="toggleVariantImageSelection(image)"
+            >
+              <img :src="withImageToken(image.previewUrl || image.url)" :alt="image.name || 'SKU image'" />
+              <span>{{ image.name || `${imageIndex + 1}` }}</span>
+            </button>
+          </div>
+        </section>
       </div>
-    </el-drawer>
+      <template #footer>
+        <el-button @click="variantImageEditor.visible = false">取消</el-button>
+        <el-button type="primary" @click="confirmVariantImageEditor">确认</el-button>
+      </template>
+    </el-dialog>
 
     <el-drawer v-model="variantVideoEditor.visible" :title="variantVideoEditor.title" size="760px">
       <div v-if="variantVideoEditor.row" class="variant-image-editor">
@@ -2894,10 +3147,14 @@ onMounted(loadAll);
 </template>
 
 <style scoped>
-.copy-page { display: flex; flex-direction: column; gap: 0; background: #fff; }
+.copy-page { display: flex; flex-direction: column; gap: 0; height: 100%; min-height: 0; overflow-y: auto; overflow-x: hidden; background: #fff; }
 .copy-header { position: sticky; top: 0; z-index: 20; display: flex; justify-content: flex-end; align-items: center; gap: 12px; padding: 10px 24px; margin: -16px -16px 0; background: rgba(255, 255, 255, 0.98); border-bottom: 1px solid #eef0f5; backdrop-filter: blur(8px); }
 .copy-header h1, .section-heading h2 { margin: 0; }
 .copy-header p, .section-heading p { margin: 6px 0 0; color: var(--el-text-color-secondary); }
+.collector-source-bar { margin-right: auto; display: flex; align-items: center; gap: 12px; padding: 8px 12px; border: 1px solid var(--el-color-primary-light-7); border-radius: 8px; background: var(--el-color-primary-light-9); min-width: 0; }
+.collector-source-bar div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.collector-source-bar span { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.2; }
+.collector-source-bar strong { color: var(--el-text-color-primary); font-size: 13px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
 .header-actions, .search-row, .shop-row, .stat-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; width: 100%; }
 .header-actions .el-button { margin-left: 0; height: 32px; border-radius: 6px; }
 .progress-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; background: var(--el-fill-color-light); padding: 12px; border-radius: 8px; }
@@ -3021,14 +3278,30 @@ onMounted(loadAll);
 .variant-name-cell strong { display: block; color: var(--el-text-color-primary); font-size: 12px; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .offer-id-cell { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
 .variant-images { display: flex; align-items: center; gap: 4px; min-height: 46px; flex-wrap: wrap; }
-.variant-images img { width: 42px; height: 42px; border-radius: 4px; object-fit: cover; border: 1px solid var(--el-border-color-light); background: var(--el-fill-color-light); cursor: zoom-in; }
+.variant-images :deep(.erp-image-preview--square) { width: 42px; min-width: 42px; max-width: 42px; height: 42px; min-height: 42px; max-height: 42px; flex-basis: 42px; border-radius: 4px; }
 .variant-image-more { width: 28px; height: 28px; border-radius: 999px; display: grid; place-items: center; background: rgba(31, 41, 55, 0.38); color: #fff; font-size: 12px; font-weight: 800; }
 .variant-image-editor { display: flex; flex-direction: column; gap: 12px; }
 .variant-editor-thumb { width: 58px; height: 58px; border-radius: 6px; border: 1px solid var(--el-border-color-light); background: var(--el-fill-color-light); }
 .variant-image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
 .variant-image-card { display: grid; gap: 8px; align-content: start; padding: 10px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-fill-color-extra-light); }
-.variant-image-card :deep(.el-image) { width: 100%; aspect-ratio: 1; border-radius: 6px; border: 1px solid var(--el-border-color-light); background: var(--el-fill-color-light); overflow: hidden; }
+.variant-image-card :deep(.erp-image-preview--square) { width: 100%; min-width: 100%; max-width: 100%; height: auto; min-height: 0; max-height: none; aspect-ratio: 1; flex-basis: auto; border-radius: 6px; }
 .variant-image-empty { display: grid; place-items: center; width: 100%; aspect-ratio: 1; border: 1px dashed var(--el-border-color); border-radius: 6px; color: var(--el-text-color-secondary); background: var(--el-bg-color); }
+.variant-image-dialog :deep(.el-dialog__body) { padding: 0; }
+.variant-image-workbench { display: grid; grid-template-columns: minmax(360px, 46%) minmax(420px, 1fr); min-height: 680px; max-height: calc(100vh - 180px); border-top: 1px solid var(--el-border-color-lighter); border-bottom: 1px solid var(--el-border-color-lighter); overflow: hidden; }
+.variant-image-panel { padding: 24px; overflow: auto; border-right: 1px solid var(--el-border-color-lighter); background: #fff; }
+.variant-image-tools { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+.selected-grid { grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); }
+.selected-card { border-color: #ded8ff; background: #fbfaff; }
+.variant-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.variant-image-library { padding: 24px; overflow: auto; background: #fff; }
+.library-tabs { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--el-border-color-lighter); margin-bottom: 18px; }
+.library-tabs :deep(.el-tabs__header) { margin: 0; }
+.library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(172px, 1fr)); gap: 18px; }
+.library-image-card { position: relative; display: grid; gap: 6px; padding: 0; border: 1px solid #dfe3ee; border-radius: 8px; background: #fff; overflow: hidden; cursor: pointer; text-align: left; color: var(--el-text-color-regular); }
+.library-image-card img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; background: var(--el-fill-color-light); }
+.library-image-card span { padding: 0 10px 10px; font-size: 12px; color: var(--el-text-color-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.library-image-card.selected { border-color: #6c5ce7; box-shadow: 0 0 0 2px rgba(108, 92, 231, 0.15); }
+.library-image-card.selected::after { content: "✓"; position: absolute; right: 8px; bottom: 8px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; color: #fff; background: #6c5ce7; font-weight: 800; }
 .variant-videos { display: flex; align-items: center; gap: 6px; min-height: 46px; flex-wrap: wrap; }
 .variant-videos video { width: 58px; height: 42px; border-radius: 4px; object-fit: cover; border: 1px solid var(--el-border-color-light); background: #101828; cursor: pointer; }
 .variant-video-list { display: grid; gap: 12px; }
@@ -3092,4 +3365,5 @@ onMounted(loadAll);
   .template-name-box { grid-column: 1 / -1; min-width: 0; }
 }
 </style>
+
 

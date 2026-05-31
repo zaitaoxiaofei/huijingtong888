@@ -7,6 +7,8 @@ import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
+import ProductTitleLink from "../../components/ProductTitleLink.vue";
+import { ozonBuyerProductLinkFromRow } from "../../utils/product-links";
 import { applyFilterQuery, buildFilterQuery, dateText, integer } from "./inventory-utils.js";
 
 const route = useRoute();
@@ -155,15 +157,8 @@ function openProcurement(row) {
   router.push({ path: "/procurement", query: { productId: String(row.product_id), from: "inventory-fbp" } });
 }
 
-function openExternalLink(url) {
-  const target = String(url || "").trim();
-  if (!target) return;
-  window.open(target, "_blank", "noopener,noreferrer");
-}
-
 function ozonBuyerProductLinkFor(row) {
-  const productId = String(row?.ozon_product_id || "").trim();
-  return productId ? `https://www.ozon.ru/product/${encodeURIComponent(productId)}/` : "";
+  return ozonBuyerProductLinkFromRow(row);
 }
 
 async function refreshStocks() {
@@ -248,7 +243,7 @@ onMounted(async () => {
       @reset="handleReset"
     >
       <template #actions>
-        <el-button :loading="syncLoading" @click="refreshStocks">刷新同步</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :loading="syncLoading" @click="refreshStocks">刷新同步</el-button>
       </template>
     </InventoryPageToolbar>
 
@@ -262,18 +257,7 @@ onMounted(async () => {
             <div class="product-cell">
               <ProductImagePreview :src="row.image_url" />
               <div class="cell-stack">
-                <a
-                  v-if="ozonBuyerProductLinkFor(row)"
-                  class="inventory-product-link"
-                  :href="ozonBuyerProductLinkFor(row)"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  :title="`打开 Ozon 前台商品 ${row.name || row.ozon_sku || ''}`"
-                  @click.prevent.stop="openExternalLink(ozonBuyerProductLinkFor(row))"
-                >
-                  {{ row.name || row.ozon_sku || "-" }}
-                </a>
-                <strong v-else>{{ row.name || row.ozon_sku || "-" }}</strong>
+                <ProductTitleLink :title="row.name || row.ozon_sku || '-'" :href="ozonBuyerProductLinkFor(row)" :lines="2" />
                 <span class="muted-text">SKU {{ row.ozon_sku || "-" }}</span>
                 <span class="muted-text">Offer {{ row.offer_id || "-" }}</span>
               </div>
@@ -353,9 +337,9 @@ onMounted(async () => {
         <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
             <el-space wrap>
-              <el-button link type="primary" @click="syncSingleProduct(row)">同步库存</el-button>
-              <el-button link @click="openMappings()">编辑绑定</el-button>
-              <el-button link @click="openProcurement(row)">创建采购</el-button>
+              <el-button class="erp-btn-link" link type="primary" @click="syncSingleProduct(row)">同步库存</el-button>
+              <el-button class="erp-btn-link" link @click="openMappings()">编辑绑定</el-button>
+              <el-button class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
             </el-space>
           </template>
         </el-table-column>

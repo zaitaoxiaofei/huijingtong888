@@ -361,8 +361,8 @@ onMounted(async () => {
           <p>独立查看取消、拒收、错发破损、质量问题和平台/证件问题的数量、销售额和损失。</p>
         </div>
         <div class="page-card-actions">
-          <el-button @click="backToDashboard">返回利润看板</el-button>
-          <el-button type="primary" plain @click="loadAftersales">刷新</el-button>
+          <el-button class="erp-btn erp-btn-secondary" @click="backToDashboard">返回利润看板</el-button>
+          <el-button class="erp-btn erp-btn-secondary" type="primary" plain @click="loadAftersales">刷新</el-button>
         </div>
       </div>
 
@@ -386,8 +386,8 @@ onMounted(async () => {
             </el-select>
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" :loading="loading" @click="handleQuery">查询</el-button>
-            <el-button @click="resetFilters">重置</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" :loading="loading" @click="handleQuery">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="resetFilters">重置</el-button>
           </el-form-item>
         </el-form>
       </div>
@@ -474,7 +474,7 @@ onMounted(async () => {
           </el-table-column>
           <el-table-column label="操作" width="90" fixed="right">
             <template #default="{ row }">
-              <el-button link type="primary" @click="openDetail(row)">明细</el-button>
+              <el-button class="erp-btn-link" link type="primary" @click="openDetail(row)">明细</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -491,8 +491,8 @@ onMounted(async () => {
           <div class="aftersales-detail-meta">
             <span>{{ currentShopName }}</span>
             <span>{{ formatDate(state.filters.from) }} - {{ formatDate(state.filters.to) }}</span>
-            <el-button size="small" :loading="detailActionLoading" @click="batchRecalculateDetailRows">批量重算</el-button>
-            <el-button size="small" @click="refreshDetail">刷新</el-button>
+            <el-button class="erp-btn erp-btn-secondary" size="small" :loading="detailActionLoading" @click="batchRecalculateDetailRows">批量重算</el-button>
+            <el-button class="erp-btn erp-btn-secondary" size="small" @click="refreshDetail">刷新</el-button>
           </div>
         </div>
 
@@ -576,9 +576,9 @@ onMounted(async () => {
             <el-table-column label="处理" width="250" fixed="right">
               <template #default="{ row }">
                 <div class="aftersales-actions-cell">
-                  <el-button link type="primary" @click="openOrder(row)">查看订单</el-button>
-                  <el-button v-if="row.product_id" link @click="openInventory(row)">打开库存</el-button>
-                  <el-button v-if="row.online_product_id" link type="warning" @click="openBinding(row)">去绑定</el-button>
+                  <el-button class="erp-btn-link" link type="primary" @click="openOrder(row)">查看订单</el-button>
+                  <el-button class="erp-btn-link" v-if="row.product_id" link @click="openInventory(row)">打开库存</el-button>
+                  <el-button class="erp-btn-link" v-if="row.online_product_id" link type="warning" @click="openBinding(row)">去绑定</el-button>
                   <el-button
                     v-if="row.order_id"
                     link

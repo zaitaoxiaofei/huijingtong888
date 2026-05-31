@@ -7,6 +7,8 @@ import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
+import ProductTitleLink from "../../components/ProductTitleLink.vue";
+import { ozonBuyerProductLinkFromRow } from "../../utils/product-links";
 
 const route = useRoute();
 const router = useRouter();
@@ -71,15 +73,8 @@ function dateText(value) {
   return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
 }
 
-function openExternalLink(url) {
-  const target = String(url || "").trim();
-  if (!target) return;
-  window.open(target, "_blank", "noopener,noreferrer");
-}
-
 function ozonBuyerProductLinkFor(row) {
-  const productId = String(row?.ozon_product_id || "").trim();
-  return productId ? `https://www.ozon.ru/product/${encodeURIComponent(productId)}/` : "";
+  return ozonBuyerProductLinkFromRow(row);
 }
 
 function onlineStatusKey(row) {
@@ -345,14 +340,14 @@ onMounted(async () => {
             <el-input v-model="state.filters.offer" placeholder="货号 / SKU" clearable style="width: 220px" @keyup.enter="handleSearch" />
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="handleSearch">查询</el-button>
-            <el-button @click="handleReset">重置</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
           </el-form-item>
           <el-form-item>
-            <el-button :loading="syncLoading" :disabled="!state.selectedIds.length" @click="syncOnlineProducts(true)">
+            <el-button class="erp-btn erp-btn-secondary" :loading="syncLoading" :disabled="!state.selectedIds.length" @click="syncOnlineProducts(true)">
               同步所选商品
             </el-button>
-            <el-button type="primary" :loading="syncLoading" @click="syncOnlineProducts(false)">同步全部在线商品</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" :loading="syncLoading" @click="syncOnlineProducts(false)">同步全部在线商品</el-button>
           </el-form-item>
         </el-form>
 
@@ -394,18 +389,7 @@ onMounted(async () => {
               <div class="product-cell">
                 <ProductImagePreview :src="row.primary_image || row.image_url" />
                 <div class="cell-stack">
-                  <a
-                    v-if="ozonBuyerProductLinkFor(row)"
-                    class="online-product-link"
-                    :href="ozonBuyerProductLinkFor(row)"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    :title="`打开 Ozon 前台商品 ${row.name || row.ozon_sku || ''}`"
-                    @click.prevent.stop="openExternalLink(ozonBuyerProductLinkFor(row))"
-                  >
-                    {{ row.name || row.ozon_sku || "-" }}
-                  </a>
-                  <strong v-else>{{ row.name || "-" }}</strong>
+                  <ProductTitleLink :title="row.name || row.ozon_sku || '-'" :href="ozonBuyerProductLinkFor(row)" :lines="2" />
                   <span class="muted-text">在线商品 ID: {{ row.id }}</span>
                   <span class="muted-text">Ozon Product ID: {{ row.ozon_product_id || "-" }}</span>
                 </div>
@@ -429,11 +413,11 @@ onMounted(async () => {
           </el-table-column>
           <el-table-column label="操作" width="260" fixed="right">
             <template #default="{ row }">
-              <el-space wrap>
-                <el-button link type="primary" @click="openBindDialog(row)">去绑定</el-button>
-                <el-button link @click="createProductFromOnline(row)">创建库存</el-button>
-                <el-button link type="danger" @click="archiveOnlineProduct(row)">归档商品</el-button>
-              </el-space>
+              <div class="erp-inline-actions">
+                <el-button class="erp-btn-link" link type="primary" @click="openBindDialog(row)">去绑定</el-button>
+                <el-button class="erp-btn-link" link @click="createProductFromOnline(row)">创建库存</el-button>
+                <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="archiveOnlineProduct(row)">归档商品</el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -469,9 +453,9 @@ onMounted(async () => {
       </el-form>
 
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="bindDialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="bindSubmitting" @click="submitBind">确认绑定</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="bindDialogVisible = false">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="bindSubmitting" @click="submitBind">确认绑定</el-button>
         </div>
       </template>
     </el-dialog>
@@ -487,18 +471,9 @@ onMounted(async () => {
 .status-tab-tag { cursor: pointer; user-select: none; }
 .online-table-wrap { flex: 1; min-height: 0; overflow: auto; }
 .online-footer { margin-top: auto; }
-.dialog-footer { display: flex; justify-content: flex-end; gap: 12px; }
 .cell-stack { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .muted-text { color: var(--erp-text-secondary); font-size: 12px; line-height: 1.5; }
 .product-cell { display: flex; align-items: flex-start; gap: 12px; }
 .product-thumb { width: 52px; height: 52px; border-radius: 10px; border: 1px solid var(--erp-border); background: #fff; flex-shrink: 0; overflow: hidden; }
-.online-product-link {
-  color: var(--el-color-primary);
-  font-weight: 600;
-  line-height: 1.35;
-  text-decoration: none;
-  overflow-wrap: anywhere;
-}
-.online-product-link:hover { text-decoration: underline; }
 </style>
 

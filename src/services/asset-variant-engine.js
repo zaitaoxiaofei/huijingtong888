@@ -3514,7 +3514,7 @@ function cleanRussianTitle(value, max = 500) {
 }
 
 function personId(session) {
-  return Number(session?.person_id || session?.personId || 0) || null;
+  return Number(session?.personId || 0) || null;
 }
 
 function uniqueNumbers(value) {

@@ -2,7 +2,7 @@ export function createAiStrategyRoutes({ services, readJson }) {
   return {
     "GET /api/ai-strategies": (req) => services.aiStrategies(req.query || {}),
     "GET /api/ai-strategy-layer-rules": (req) => services.aiStrategyLayerRules(req.query || {}),
-    "POST /api/ai-strategies": async (req) => services.createAiStrategy(await readJson(req), req._session?.person_id),
+    "POST /api/ai-strategies": async (req) => services.createAiStrategy(await readJson(req), req._session?.personId),
     "POST /api/ai-strategies/resolve": async (req) => services.resolveAiStrategyPlan(await readJson(req))
   };
 }

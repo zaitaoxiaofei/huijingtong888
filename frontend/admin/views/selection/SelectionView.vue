@@ -7,6 +7,7 @@ import { apiClient } from "../../utils/api";
 import { useAuthStore } from "../../stores/auth.js";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
+import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import OzonCategorySelect from "../../components/listing/OzonCategorySelect.vue";
 
@@ -40,7 +41,8 @@ const state = reactive({
     products: 0,
     quotedRows: 0,
     missingQuoteRows: 0,
-    avgPurchaseCost: 0
+    avgPurchaseCost: 0,
+    status_counts: {}
   },
   people: [],
   suppliers: [],
@@ -49,6 +51,7 @@ const state = reactive({
     query: "",
     ownerPersonId: "all",
     quoteStatus: "all",
+    businessStatus: "all",
     page: 1,
     pageSize: 20
   }
@@ -254,6 +257,7 @@ function buildSelectionQuery() {
     page: String(state.filters.page),
     pageSize: String(state.filters.pageSize),
     quoteStatus: String(state.filters.quoteStatus || "all"),
+    businessStatus: String(state.filters.businessStatus || "all"),
     ownerPersonId: String(state.filters.ownerPersonId || "all")
   });
   const searchText = String(state.filters.query || "").trim();
@@ -996,6 +1000,120 @@ function selectionStatusTagType(row = {}) {
   return "info";
 }
 
+const businessStatusOptions = [
+  { label: "全部状态", value: "all" },
+  { label: "待完善", value: "needs_work" },
+  { label: "可上架", value: "ready_to_publish" },
+  { label: "上架中", value: "publishing" },
+  { label: "上架失败", value: "publish_failed" },
+  { label: "已上架", value: "published" },
+  { label: "已入库", value: "in_inventory" },
+  { label: "已中断", value: "publish_cancelled" }
+];
+
+function hasSelectionMainImage(row = {}) {
+  return Boolean(String(row.image_url || "").trim());
+}
+
+function hasSelectionSellingPoints(row = {}) {
+  return Boolean(String(row.selling_points || "").trim());
+}
+
+function hasSelectionPrice(row = {}) {
+  return Number(row.listing_price_rub || 0) > 0 || Number(row.air_sale_price_rmb || 0) > 0;
+}
+
+function hasSelectionWeight(row = {}) {
+  return Number(row.package_weight_g || 0) > 0;
+}
+
+function hasSelectionDetailImages(row = {}) {
+  const raw = row.detail_image_urls;
+  if (Array.isArray(raw)) return raw.filter(Boolean).length > 0;
+  const text = String(raw || "").trim();
+  return Boolean(text && text !== "[]");
+}
+
+function hasSelectionCategory(row = {}) {
+  return Boolean(String(row.ozon_category_id || "").trim())
+    && Number(row.ozon_description_category_id || 0) > 0
+    && Number(row.ozon_type_id || 0) > 0;
+}
+
+function hasSelectionPurchaseCost(row = {}) {
+  return Number(row.purchase_cost || 0) > 0;
+}
+
+function hasSelectionDimensions(row = {}) {
+  return Number(row.length_cm || 0) > 0 && Number(row.width_cm || 0) > 0 && Number(row.height_cm || 0) > 0;
+}
+
+function hasSelectionOwner(row = {}) {
+  return Number(row.owner_person_id || 0) > 0;
+}
+
+function hasSelectionLogisticsRule(row = {}) {
+  return Number(row.logistics_rule_id || 0) > 0;
+}
+
+function selectionReadinessMissingItems(row = {}) {
+  const missing = [];
+  if (!hasSelectionMainImage(row)) missing.push("主图");
+  if (!hasSelectionDetailImages(row)) missing.push("详情图");
+  if (!hasSelectionSellingPoints(row)) missing.push("卖点");
+  if (!hasSelectionCategory(row)) missing.push("Ozon类目/类型");
+  if (!hasSelectionPrice(row)) missing.push("价格");
+  if (!hasSelectionPurchaseCost(row)) missing.push("采购成本");
+  if (!hasSelectionWeight(row)) missing.push("重量");
+  if (!hasSelectionDimensions(row)) missing.push("尺寸");
+  if (!hasSelectionOwner(row)) missing.push("负责人");
+  if (!hasSelectionLogisticsRule(row)) missing.push("物流规则");
+  return missing;
+}
+
+function selectionBusinessStatus(row = {}) {
+  const backendStatus = String(row.business_status || "").trim();
+  if (backendStatus) return backendStatus;
+  const selectionStatus = String(row.selection_status || "draft");
+  const jobStatus = listingJobStatus(row);
+  if (selectionStatus === "listed") return "in_inventory";
+  if (jobStatus === "queued" || jobStatus === "running") return "publishing";
+  if (jobStatus === "failed") return "publish_failed";
+  if (jobStatus === "success") return "published";
+  if (jobStatus === "cancelled") return "publish_cancelled";
+  return selectionReadinessMissingItems(row).length ? "needs_work" : "ready_to_publish";
+}
+
+function selectionBusinessStatusOption(row = {}) {
+  const status = selectionBusinessStatus(row);
+  return businessStatusOptions.find((item) => item.value === status) || { label: status || "未知", value: status || "unknown" };
+}
+
+function selectionBusinessStatusText(row = {}) {
+  return selectionBusinessStatusOption(row).label;
+}
+
+function selectionBusinessStatusTagType(row = {}) {
+  const status = selectionBusinessStatus(row);
+  if (status === "in_inventory" || status === "published") return "success";
+  if (status === "ready_to_publish") return "primary";
+  if (status === "publishing") return "warning";
+  if (status === "publish_failed") return "danger";
+  return "info";
+}
+
+function selectionReadinessMissingText(row = {}) {
+  if (selectionBusinessStatus(row) !== "needs_work") return "";
+  const readinessMissing = selectionReadinessMissingItems(row);
+  return readinessMissing.length ? `缺：${readinessMissing.join("、")}` : "";
+  const missing = [];
+  if (!hasSelectionMainImage(row)) missing.push("主图");
+  if (!hasSelectionSellingPoints(row)) missing.push("卖点");
+  if (!hasSelectionPrice(row)) missing.push("价格");
+  if (!hasSelectionWeight(row)) missing.push("重量");
+  return missing.length ? `缺：${missing.join("、")}` : "";
+}
+
 function listingJobStatus(row = {}) {
   return String(row.listing_job_status || "").trim();
 }
@@ -1229,14 +1347,15 @@ function closeProfitDialog() {
 async function loadPageData(options = {}) {
   const silent = Boolean(options.silent);
   if (!silent) loading.value = true;
+  let productsLoaded = false;
   try {
     const shouldLoadMeta = !silent || !state.people.length || !state.suppliers.length || !state.logisticsRules.length;
-    const [products, people, suppliers, logisticsRules] = await Promise.all([
-      apiClient.get(`/api/products/selection?${buildSelectionQuery()}`),
+    const metaPromise = Promise.all([
       shouldLoadMeta ? apiClient.get("/api/people") : Promise.resolve(state.people),
       shouldLoadMeta ? apiClient.get("/api/suppliers?paged=1&page=1&pageSize=100") : Promise.resolve(state.suppliers),
       shouldLoadMeta ? apiClient.get("/api/logistics-rules") : Promise.resolve(state.logisticsRules)
-    ]);
+    ]).then((values) => ({ values }), (error) => ({ error }));
+    const products = await apiClient.get(`/api/products/selection?${buildSelectionQuery()}`);
     state.rows = normalizePagedRows(products);
     state.total = normalizePagedTotal(products, state.rows);
     state.summary = products?.summary || {
@@ -1247,12 +1366,20 @@ async function loadPageData(options = {}) {
         ? state.rows.reduce((sum, row) => sum + Number(row.purchase_cost || 0), 0) / state.rows.length
         : 0
     };
+    productsLoaded = true;
+    if (!silent) selectedRows.value = [];
+    if (!silent) loading.value = false;
     if (shouldLoadMeta) {
+      const metaResult = await metaPromise;
+      if (metaResult.error) {
+        if (!silent) ElMessage.warning("基础资料加载失败，表格数据已先显示");
+        return;
+      }
+      const [people, suppliers, logisticsRules] = metaResult.values;
       state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
       state.suppliers = normalizePagedRows(suppliers);
       state.logisticsRules = Array.isArray(logisticsRules) ? logisticsRules.filter((item) => Number(item.enabled) !== 0) : [];
     }
-    if (!silent) selectedRows.value = [];
   } catch (error) {
     if (!silent) ElMessage.error(error.message || "选品计价表加载失败");
   } finally {
@@ -1269,6 +1396,7 @@ async function handleReset() {
   state.filters.query = "";
   state.filters.ownerPersonId = "all";
   state.filters.quoteStatus = "all";
+  state.filters.businessStatus = "all";
   state.filters.page = 1;
   await loadPageData();
 }
@@ -1727,18 +1855,12 @@ onBeforeUnmount(() => {
         <h2>选品计价表</h2>
       </div>
       <div class="page-card-actions">
-        <el-button @click="openImportDialog">批量导入</el-button>
-        <el-button type="primary" @click="openCreateDialog">新增选品</el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="openImportDialog">批量导入</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新增选品</el-button>
       </div>
     </section>
 
     <el-card shadow="never" class="page-card selection-table-card erp-paged-card">
-      <template #header>
-        <div class="page-card-header">
-          <strong>选品列表</strong>
-        </div>
-      </template>
-
       <div class="filter-panel selection-filter-panel">
         <el-form inline>
           <el-form-item label="关键词">
@@ -1757,26 +1879,33 @@ onBeforeUnmount(() => {
               <el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="String(person.id)" />
             </el-select>
           </el-form-item>
+          <el-form-item label="业务状态">
+            <el-select v-model="state.filters.businessStatus" style="width: 150px" @change="handleSearch">
+              <el-option
+                v-for="item in businessStatusOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="handleSearch">查询</el-button>
-            <el-button @click="handleReset">重置</el-button>
-            <el-button type="primary" @click="openCreateDialog">新增选品</el-button>
-            <el-button @click="openImportDialog">批量导入</el-button>
-            <el-button :disabled="!selectedRows.length" @click="startBatchVariant">
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新增选品</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="openImportDialog">批量导入</el-button>
+            <el-button class="erp-btn erp-btn-secondary" :disabled="!selectedRows.length" @click="startBatchVariant">
               批量AI内容优化
             </el-button>
-            <el-button :disabled="!selectedRows.length" @click="handleBatchAction">
+            <el-button class="erp-btn erp-btn-secondary" :disabled="!selectedRows.length" @click="handleBatchAction">
               批量操作
             </el-button>
           </el-form-item>
+          <el-form-item class="selection-filter-refresh">
+            <span class="muted-text">&#24050;&#36873; {{ selectedRows.length }} &#39033;</span>
+            <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">&#21047;&#26032;</el-button>
+          </el-form-item>
         </el-form>
-      </div>
-
-      <div class="toolbar-panel selection-toolbar-panel">
-        <div class="toolbar-right">
-          <span>已选 {{ selectedRows.length }} 项</span>
-          <el-button @click="loadPageData">刷新</el-button>
-        </div>
       </div>
 
       <div class="selection-table-wrap erp-table-scroll">
@@ -1800,7 +1929,7 @@ onBeforeUnmount(() => {
                   fit="cover"
                 />
                 <div class="cell-stack gap-sm">
-                  <strong class="product-name">{{ row.name || "-" }}</strong>
+                  <ProductTitleLink :title="row.name || '-'" :lines="2" />
                   <span class="muted-text">库存编码：{{ row.inventory_id || row.code || "-" }}</span>
                   <span class="muted-text">选品 ID：{{ row.selection_id || "-" }}</span>
                   <span class="muted-text">创建：{{ dateText(row.created_at) }}</span>
@@ -1815,12 +1944,19 @@ onBeforeUnmount(() => {
             </template>
           </el-table-column>
 
-          <el-table-column label="状态" min-width="120" align="center">
+          <el-table-column label="业务状态" min-width="150" align="center">
             <template #default="{ row }">
               <div class="cell-stack gap-xs align-center">
-                <el-tag :type="selectionStatusTagType(row)" effect="plain">
-                  {{ selectionStatusText(row) }}
-                </el-tag>
+                <el-tooltip
+                  :disabled="!selectionReadinessMissingText(row)"
+                  :content="selectionReadinessMissingText(row)"
+                  placement="top"
+                >
+                  <el-tag :type="selectionBusinessStatusTagType(row)" effect="plain">
+                    {{ selectionBusinessStatusText(row) }}
+                  </el-tag>
+                </el-tooltip>
+                <span class="muted-text">{{ selectionStatusText(row) }}</span>
                 <span v-if="listedTimeText(row)" class="muted-text">上架：{{ listedTimeText(row) }}</span>
               </div>
             </template>
@@ -1907,7 +2043,7 @@ onBeforeUnmount(() => {
                     <span>利润 ¥{{ money(getCurrentQuote(row, getLogisticsRuleForRow(row)).profit) }}</span>
                     <span>运费 ¥{{ money(getCurrentQuote(row, getLogisticsRuleForRow(row)).amount) }}</span>
                     <span>建议 {{ getCurrentSuggestedRub(row, getLogisticsRuleForRow(row)) ? `${money(getCurrentSuggestedRub(row, getLogisticsRuleForRow(row)))} RUB` : "-" }}</span>
-                    <el-button link type="primary" @click="openProfitDialog(row, getActiveChannelKey(row, getLogisticsRuleForRow(row)))">明细</el-button>
+                    <el-button class="erp-btn-link" link type="primary" @click="openProfitDialog(row, getActiveChannelKey(row, getLogisticsRuleForRow(row)))">明细</el-button>
                   </template>
                   <span v-else class="muted-text">未命中当前物流规则</span>
                 </div>
@@ -1938,8 +2074,8 @@ onBeforeUnmount(() => {
                 >
                   {{ isListingJobActive(row) ? "中断上架" : "一键上架" }}
                 </el-button>
-                <el-button link type="primary" @click="startVariant(row)">AI内容优化</el-button>
-                <el-button link type="success" :disabled="row.selection_status === 'listed'" @click="addToInventory(row)">加入库存</el-button>
+                <el-button class="erp-btn-link" link type="primary" @click="startVariant(row)">AI内容优化</el-button>
+                <el-button class="erp-btn-link" link type="success" :disabled="row.selection_status === 'listed'" @click="addToInventory(row)">加入库存</el-button>
               </div>
             </template>
           </el-table-column>
@@ -1947,8 +2083,8 @@ onBeforeUnmount(() => {
           <el-table-column label="维护操作" width="72" fixed="right" align="center">
             <template #default="{ row }">
               <div class="table-actions is-vertical">
-                <el-button link type="primary" @click="openEditDialog(row)">编辑</el-button>
-                <el-button link type="danger" @click="handleDelete(row)">删除</el-button>
+                <el-button class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
+                <el-button class="erp-btn-link-danger" link type="danger" @click="handleDelete(row)">删除</el-button>
               </div>
             </template>
           </el-table-column>
@@ -1990,10 +2126,10 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="listing-shop-tools">
-          <el-button size="small" plain @click="selectAllListingShops">全选</el-button>
-          <el-button size="small" plain @click="clearListingShops">清空</el-button>
-          <el-button size="small" plain @click="selectOwnerListingShops">负责人店铺</el-button>
-          <el-button size="small" plain @click="selectRuvibeListingShops">RuVibe Mart</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="selectAllListingShops">全选</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="clearListingShops">清空</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="selectOwnerListingShops">负责人店铺</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="selectRuvibeListingShops">RuVibe Mart</el-button>
         </div>
         <el-empty v-if="!listingShopDialog.loading && !listingShopDialog.shops.length" description="暂无可上架店铺" />
         <div v-else class="listing-shop-grid">
@@ -2021,8 +2157,8 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="closeListingShopDialog">取消</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="closeListingShopDialog">取消</el-button>
           <el-button
             type="primary"
             :loading="listingShopDialog.submitting"
@@ -2401,9 +2537,9 @@ onBeforeUnmount(() => {
       </el-form>
 
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="dialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="dialogSubmitting" @click="submitDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="dialogVisible = false">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="dialogSubmitting" @click="submitDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>
@@ -2517,9 +2653,9 @@ onBeforeUnmount(() => {
       </div>
 
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="importDialogVisible = false">取消</el-button>
-          <el-button type="primary" :disabled="!importCommitRows.length" :loading="importSubmitting" @click="commitImport">
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="importDialogVisible = false">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :disabled="!importCommitRows.length" :loading="importSubmitting" @click="commitImport">
             确认导入
           </el-button>
         </div>
@@ -2545,11 +2681,23 @@ onBeforeUnmount(() => {
   margin-bottom: 12px;
 }
 
-.selection-toolbar-panel {
-  display: flex;
+.selection-filter-panel :deep(.el-form) {
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  display: flex;
+  gap: 0;
+  width: 100%;
+}
+
+.selection-filter-refresh {
+  margin-left: auto;
+  margin-right: 0;
+}
+
+.selection-filter-refresh :deep(.el-form-item__content) {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
 }
 
 .toolbar-left,
@@ -3247,11 +3395,6 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 960px) {
-  .selection-toolbar-panel {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
   .profit-summary-cards {
     grid-template-columns: 1fr;
     min-width: 0;

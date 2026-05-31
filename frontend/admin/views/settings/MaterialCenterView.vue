@@ -281,8 +281,8 @@ onMounted(loadAssets);
         <p>统一查看主图裂变和店铺矩阵沉淀的素材资产，按数据库表方式检索、预览和管理。</p>
       </div>
       <div class="header-actions">
-        <el-button v-if="returnTo" :icon="ArrowLeft" @click="goBackToSource">{{ returnLabel }}</el-button>
-        <el-button :icon="Refresh" @click="loadAssets">刷新</el-button>
+        <el-button class="erp-btn erp-btn-secondary" v-if="returnTo" :icon="ArrowLeft" @click="goBackToSource">{{ returnLabel }}</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" @click="loadAssets">刷新</el-button>
       </div>
     </header>
 
@@ -306,8 +306,8 @@ onMounted(loadAssets);
       <el-select v-model="filters.status" clearable placeholder="素材状态" @change="searchAssets">
         <el-option v-for="item in statusOptions" :key="item.value" :label="item.label" :value="item.value" />
       </el-select>
-      <el-button type="primary" :icon="Search" @click="searchAssets">查询</el-button>
-      <el-button @click="clearFilters">清空</el-button>
+      <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Search" @click="searchAssets">查询</el-button>
+      <el-button class="erp-btn erp-btn-secondary" @click="clearFilters">清空</el-button>
     </section>
 
     <el-tabs v-model="activeTab" class="material-tabs">
@@ -353,8 +353,8 @@ onMounted(loadAssets);
               </el-table-column>
               <el-table-column label="操作" width="210" fixed="right">
                 <template #default="{ row }">
-                  <el-button size="small" link type="warning" :icon="MagicStick" @click="regenerateShopAsset(row)">重新生成</el-button>
-                  <el-button size="small" link type="danger" :icon="Delete" :loading="deleting" @click="deleteShopAsset(row)">删除</el-button>
+                  <el-button class="erp-btn-link" size="small" link type="warning" :icon="MagicStick" @click="regenerateShopAsset(row)">重新生成</el-button>
+                  <el-button class="erp-btn-link-danger" size="small" link type="danger" :icon="Delete" :loading="deleting" @click="deleteShopAsset(row)">删除</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -409,8 +409,8 @@ onMounted(loadAssets);
           </el-table-column>
           <el-table-column label="操作" width="150" fixed="right">
             <template #default="{ row }">
-              <el-button size="small" link type="primary" :icon="View" @click="openPreview(row)">预览</el-button>
-              <el-button size="small" link type="danger" :icon="Delete" :loading="archiving" :disabled="row.status === 'archived'" @click="archiveAsset(row)">归档</el-button>
+              <el-button class="erp-btn-link" size="small" link type="primary" :icon="View" @click="openPreview(row)">预览</el-button>
+              <el-button class="erp-btn-link-danger" size="small" link type="danger" :icon="Delete" :loading="archiving" :disabled="row.status === 'archived'" @click="archiveAsset(row)">归档</el-button>
             </template>
           </el-table-column>
         </el-table>

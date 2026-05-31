@@ -273,8 +273,8 @@ function formatApiKeyHint(value) {
           <span>{{ routeReadyCount }}/4</span>
           <small>全局模型就绪</small>
         </div>
-        <el-button :icon="Refresh" @click="loadConfig">刷新</el-button>
-        <el-button type="primary" :icon="CircleCheck" :loading="saving" @click="saveConfig">保存配置</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" @click="loadConfig">刷新</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" :icon="CircleCheck" :loading="saving" @click="saveConfig">保存配置</el-button>
       </div>
     </header>
 
@@ -343,8 +343,9 @@ function formatApiKeyHint(value) {
           </div>
 
           <div class="panel-actions">
-            <el-button :icon="Connection" :loading="testing" @click="testConnection">测试连接</el-button>
+            <el-button class="erp-btn erp-btn-secondary" :icon="Connection" :loading="testing" @click="testConnection">测试连接</el-button>
             <el-button
+              class="erp-btn erp-btn-secondary"
               v-if="!form.enabled"
               type="success"
               plain
@@ -356,6 +357,7 @@ function formatApiKeyHint(value) {
               启用并保存
             </el-button>
             <el-button
+              class="erp-btn erp-btn-secondary"
               v-else
               type="warning"
               plain
@@ -376,7 +378,7 @@ function formatApiKeyHint(value) {
               <span>Routing</span>
               <h2>全局模型路由</h2>
             </div>
-            <el-button type="primary" :icon="MagicStick" :loading="saving" @click="saveConfig">保存路由</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" :icon="MagicStick" :loading="saving" @click="saveConfig">保存路由</el-button>
           </div>
 
           <div class="route-grid">

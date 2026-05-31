@@ -11,6 +11,23 @@ const getCache = new Map();
 const routeScopedControllers = new Set();
 const routeAbortedSignals = new WeakSet();
 
+function notifyAuthExpired(message) {
+  if (authRedirecting) return;
+  authRedirecting = true;
+  clearAuthToken();
+  window.dispatchEvent(new CustomEvent("app:auth-expired", {
+    detail: {
+      message: message || "登录已失效，请重新登录"
+    }
+  }));
+  window.setTimeout(() => {
+    if (!String(window.location.hash || "").startsWith("#/login")) {
+      window.location.hash = "#/login";
+    }
+    authRedirecting = false;
+  }, 0);
+}
+
 function abortRouteScopedRequests() {
   for (const controller of routeScopedControllers) {
     routeAbortedSignals.add(controller.signal);
@@ -74,23 +91,7 @@ async function request(url, options = {}) {
     const error = new Error(data?.error || `Request failed with status ${response.status}`);
     error.status = response.status;
     error.payload = data;
-    if (response.status === 401) {
-      clearAuthToken();
-      if (!authRedirecting) {
-        authRedirecting = true;
-        window.dispatchEvent(new CustomEvent("app:auth-expired", {
-          detail: {
-            message: data?.error || "登录已失效，请重新登录"
-          }
-        }));
-        window.setTimeout(() => {
-          authRedirecting = false;
-          if (!String(window.location.hash || "").startsWith("#/login")) {
-            window.location.hash = "#/login";
-          }
-        }, 0);
-      }
-    }
+    if (response.status === 401) notifyAuthExpired(data?.error);
     throw error;
   }
 
@@ -117,21 +118,7 @@ async function blobRequest(url, options = {}) {
     const error = new Error(data?.error || data || `Request failed with status ${response.status}`);
     error.status = response.status;
     error.payload = data;
-    if (response.status === 401) {
-      clearAuthToken();
-      if (!authRedirecting) {
-        authRedirecting = true;
-        window.dispatchEvent(new CustomEvent("app:auth-expired", {
-          detail: { message: data?.error || "登录已失效，请重新登录" }
-        }));
-        window.setTimeout(() => {
-          authRedirecting = false;
-          if (!String(window.location.hash || "").startsWith("#/login")) {
-            window.location.hash = "#/login";
-          }
-        }, 0);
-      }
-    }
+    if (response.status === 401) notifyAuthExpired(data?.error);
     throw error;
   }
 
@@ -201,13 +188,25 @@ function routeScopedGet(url, options = {}) {
 }
 
 export function getAuthToken() {
-  return localStorage.getItem(AUTH_TOKEN_KEY) || "";
+  try {
+    return window.localStorage?.getItem(AUTH_TOKEN_KEY) || "";
+  } catch {
+    return "";
+  }
 }
 
 export function setAuthToken(token) {
-  localStorage.setItem(AUTH_TOKEN_KEY, token);
+  try {
+    window.localStorage?.setItem(AUTH_TOKEN_KEY, token);
+  } catch {
+    // Ignore storage failures; the next authenticated request will surface auth state.
+  }
 }
 
 export function clearAuthToken() {
-  localStorage.removeItem(AUTH_TOKEN_KEY);
+  try {
+    window.localStorage?.removeItem(AUTH_TOKEN_KEY);
+  } catch {
+    // Ignore storage failures; auth state is also enforced by the server.
+  }
 }

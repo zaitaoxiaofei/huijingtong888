@@ -6,9 +6,12 @@ import { Delete, Edit, Refresh, Search, VideoCamera, View } from "@element-plus/
 import { apiClient } from "../../utils/api";
 import { withImageToken } from "../../api/tools/imageCropper";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import ProductTitleLink from "../../components/ProductTitleLink.vue";
+import { ozonBuyerProductLinkFromRow } from "../../utils/product-links";
 
 const loading = ref(false);
 const refreshingId = ref(null);
+const detailLoadingId = ref(null);
 const retrying = ref(false);
 const deletingId = ref(null);
 const batchRefreshing = ref(false);
@@ -73,7 +76,8 @@ async function loadRecords() {
       page: String(state.page),
       pageSize: String(state.pageSize),
       status: state.status,
-      quality: state.quality
+      quality: state.quality,
+      includePayload: "0"
     });
     if (state.query.trim()) params.set("query", state.query.trim());
     if (state.nameQuery.trim()) params.set("nameQuery", state.nameQuery.trim());
@@ -146,6 +150,14 @@ function isSuccessStatus(status) {
   return ["imported", "published", "success"].includes(status);
 }
 
+function publishRecordProductTitle(row) {
+  return row?.product_name || row?.offer_id || "-";
+}
+
+function publishRecordBuyerLink(row) {
+  return ozonBuyerProductLinkFromRow(row);
+}
+
 function qualityType(score) {
   const value = Number(score || 0);
   if (value >= 90) return "success";
@@ -164,14 +176,28 @@ function qualitySourceText(source) {
   return value || "未返回";
 }
 
-function editInListingAutomation(row) {
-  const key = `listing-record-draft-${row.id}-${Date.now()}`;
+async function loadPublishRecordDetail(row) {
+  if (row?.request?.items) return row;
+  detailLoadingId.value = row.id;
+  try {
+    const detail = await apiClient.get(`/api/listing/publish-records/${row.id}`, { noCache: true });
+    const index = state.rows.findIndex((item) => Number(item.id) === Number(detail.id));
+    if (index >= 0) state.rows[index] = { ...state.rows[index], ...detail };
+    return index >= 0 ? state.rows[index] : detail;
+  } finally {
+    detailLoadingId.value = null;
+  }
+}
+
+async function editInListingAutomation(row) {
+  const detail = await loadPublishRecordDetail(row);
+  const key = `listing-record-draft-${detail.id}-${Date.now()}`;
   sessionStorage.setItem(key, JSON.stringify({
-    record_id: row.id,
-    shop_id: row.shop_id,
-    template: buildTemplateFromRecord(row)
+    record_id: detail.id,
+    shop_id: detail.shop_id,
+    template: buildTemplateFromRecord(detail)
   }));
-  router.push({ name: "listing-automation", query: { recordDraft: key, recordId: row.id } });
+  router.push({ name: "listing-automation", query: { recordDraft: key, recordId: detail.id } });
 }
 
 function buildTemplateFromRecord(row) {
@@ -284,10 +310,11 @@ function extractRichContentJson(item = {}) {
   return "";
 }
 
-function openDrawer(row) {
-  const payload = plainClone(row.request, { items: [] });
+async function openDrawer(row) {
+  const detail = await loadPublishRecordDetail(row);
+  const payload = plainClone(detail.request, { items: [] });
   const item = payload.items?.[0] || {};
-  drawer.row = row;
+  drawer.row = detail;
   drawer.form = {
     name: item.name || "",
     offer_id: item.offer_id || "",
@@ -527,11 +554,11 @@ onMounted(loadRecords);
       </div>
       <div class="toolbar-actions">
         <span class="selection-count">已选 {{ selectedRows.length }} / 当前 {{ filteredRows.length }}</span>
-        <el-button type="primary" :icon="Search" @click="searchRecords">查询</el-button>
-        <el-button :icon="Refresh" :loading="loading" @click="loadRecords">刷新</el-button>
-        <el-button :icon="Refresh" :loading="batchRefreshing" :disabled="!selectedRows.length" @click="batchRefreshRecords">批量刷新</el-button>
-        <el-button type="danger" plain :icon="Delete" :loading="batchDeleting" :disabled="!selectedRows.length" @click="batchDeleteRecords">批量删除</el-button>
-        <el-button @click="resetFilters">重置</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Search" @click="searchRecords">查询</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="loading" @click="loadRecords">刷新</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="batchRefreshing" :disabled="!selectedRows.length" @click="batchRefreshRecords">批量刷新</el-button>
+        <el-button class="erp-btn erp-btn-danger" type="danger" plain :icon="Delete" :loading="batchDeleting" :disabled="!selectedRows.length" @click="batchDeleteRecords">批量删除</el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="resetFilters">重置</el-button>
       </div>
     </section>
 
@@ -557,7 +584,7 @@ onMounted(loadRecords);
               @error="handleRecordImageError($event, row)"
             />
             <div>
-              <strong>{{ row.product_name || row.offer_id }}</strong>
+              <ProductTitleLink :title="publishRecordProductTitle(row)" :href="publishRecordBuyerLink(row)" :lines="2" />
               <span>{{ row.offer_id }}</span>
               <em>{{ row.image_count || 0 }} 图 / {{ row.video_urls?.length || 0 }} 视频</em>
             </div>
@@ -600,10 +627,10 @@ onMounted(loadRecords);
       <el-table-column label="操作" width="132" fixed="right" class-name="record-actions-column">
         <template #default="{ row }">
           <div class="row-actions">
-            <el-button size="small" type="primary" plain :icon="Edit" @click="editInListingAutomation(row)">编辑</el-button>
-            <el-button size="small" plain :icon="View" @click="openDrawer(row)">档案</el-button>
-            <el-button size="small" type="success" plain :icon="Refresh" :loading="refreshingId === row.id" @click="refreshRecord(row)">刷新</el-button>
-            <el-button size="small" type="danger" plain :icon="Delete" :loading="deletingId === row.id" @click="deleteRecord(row)">删除</el-button>
+            <el-button class="erp-btn erp-btn-secondary" size="small" type="primary" plain :icon="Edit" :loading="detailLoadingId === row.id" @click="editInListingAutomation(row)">编辑</el-button>
+            <el-button class="erp-btn erp-btn-secondary" size="small" plain :icon="View" :loading="detailLoadingId === row.id" @click="openDrawer(row)">档案</el-button>
+            <el-button class="erp-btn erp-btn-secondary" size="small" type="success" plain :icon="Refresh" :loading="refreshingId === row.id" @click="refreshRecord(row)">刷新</el-button>
+            <el-button class="erp-btn erp-btn-danger" size="small" type="danger" plain :icon="Delete" :loading="deletingId === row.id" @click="deleteRecord(row)">删除</el-button>
           </div>
         </template>
       </el-table-column>
@@ -667,8 +694,8 @@ onMounted(loadRecords);
         </el-collapse>
 
         <div class="drawer-actions">
-          <el-button :icon="VideoCamera" @click="applyFormToPayload">同步到技术 JSON</el-button>
-          <el-button type="danger" :icon="Edit" :loading="retrying" @click="retryRecord">保存并重新提交</el-button>
+          <el-button class="erp-btn erp-btn-secondary" :icon="VideoCamera" @click="applyFormToPayload">同步到技术 JSON</el-button>
+          <el-button class="erp-btn erp-btn-danger" type="danger" :icon="Edit" :loading="retrying" @click="retryRecord">保存并重新提交</el-button>
         </div>
       </div>
     </el-drawer>

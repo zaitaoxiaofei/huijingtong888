@@ -37,8 +37,8 @@ function writeBackText(value) {
         <strong>已生成商品池</strong>
       </div>
       <div>
-        <el-button :icon="ShoppingCart" @click="$emit('enter-listing')">批量进入上架</el-button>
-        <el-button type="success" :icon="Upload" @click="$emit('write-back-all')">批量回写</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="ShoppingCart" @click="$emit('enter-listing')">批量进入上架</el-button>
+        <el-button class="erp-btn erp-btn-secondary" type="success" :icon="Upload" @click="$emit('write-back-all')">批量回写</el-button>
       </div>
     </div>
 
@@ -59,9 +59,9 @@ function writeBackText(value) {
             <span>视频：{{ item.videoStatus }}</span>
           </div>
           <div class="pool-actions">
-            <el-button size="small" type="success" :icon="Upload" :disabled="item.writeBackStatus === 'written_back'" @click="$emit('write-back', item)">回写到选品表</el-button>
-            <el-button size="small" :icon="Refresh" @click="$emit('regenerate', item.targetId)">重新生成</el-button>
-            <el-button size="small" type="danger" :icon="Delete" @click="$emit('delete', item.id)">删除</el-button>
+            <el-button class="erp-btn erp-btn-secondary" size="small" type="success" :icon="Upload" :disabled="item.writeBackStatus === 'written_back'" @click="$emit('write-back', item)">回写到选品表</el-button>
+            <el-button class="erp-btn erp-btn-secondary" size="small" :icon="Refresh" @click="$emit('regenerate', item.targetId)">重新生成</el-button>
+            <el-button class="erp-btn erp-btn-danger" size="small" type="danger" :icon="Delete" @click="$emit('delete', item.id)">删除</el-button>
           </div>
         </div>
       </article>

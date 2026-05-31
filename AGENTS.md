@@ -66,9 +66,23 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 **Use the existing app port. Do not start random preview ports.**
 
 - The Ozon ERP app runs on port `8787`.
-- After frontend or backend updates, rebuild and restart the service on `8787`.
-- Do not start separate Vite/dev preview ports such as `5173`, `5174`, etc. unless the user explicitly asks for a temporary dev server.
+- All local verification must use the unified `8787` entrypoint, especially `http://localhost:8787/admin.html#/...` for the admin app.
+- Local code and the official website deployment may be updated at different times, but the local verification port must not change. This prevents checking an old page after code changes.
+- After frontend or backend updates, rebuild and restart the current project on `8787`.
+- Do not start separate Vite/dev preview ports such as `5173`, `5174`, or ad-hoc ports such as `8790` unless the user explicitly asks for a temporary isolated server.
 - If `8787` is already running, stop the process that owns `8787`, then start the current project there again so the browser URL stays the same.
+- When reporting a local verification URL, prefer the canonical admin URL format: `http://localhost:8787/admin.html#/[route]`.
+
+## 6. Product Image Display
+
+**Images must be inspectable, consistent, and previewable.**
+
+- Product/listing images in data tables should use a consistent portrait thumbnail, normally around `64x84px` for product rows. Do not shrink product images to icon size when the user needs to compare products visually.
+- Table rows that contain product images should have enough height for the thumbnail to be useful, normally `84-92px` row height.
+- Use `object-fit: cover`/Element Plus `fit="cover"` for thumbnails and keep a stable aspect ratio so rows do not jump while images load.
+- Use the existing `el-image` preview pattern with `preview-src-list`, `initial-index`, and `preview-teleported` for clickable product images unless a page has a stronger established local pattern.
+- Empty image states should keep the same thumbnail box size and show a short neutral label such as `无图`.
+- Compact thumbnails are acceptable only in dense side lists, rankings, task cards, or secondary panels where the image is not the main inspection target.
 
 ---
 

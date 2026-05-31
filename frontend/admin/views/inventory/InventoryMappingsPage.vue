@@ -6,6 +6,7 @@ import { apiClient } from "../../utils/api";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
+import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
 import { applyFilterQuery, buildFilterQuery, dateText } from "./inventory-utils.js";
 
@@ -261,8 +262,8 @@ onMounted(async () => {
         <span>当前只显示这个产品对应的 SKU 绑定。</span>
       </div>
       <div class="mapping-focus-actions">
-        <el-button v-if="cameFromProducts" @click="goBackToProducts">返回产品库存表</el-button>
-        <el-button type="primary" plain @click="openOnlineProducts">去在线商品页新增绑定</el-button>
+        <el-button class="erp-btn erp-btn-secondary" v-if="cameFromProducts" @click="goBackToProducts">返回产品库存表</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" plain @click="openOnlineProducts">去在线商品页新增绑定</el-button>
       </div>
     </div>
 
@@ -275,7 +276,7 @@ onMounted(async () => {
       @reset="handleReset"
     >
       <template #actions>
-        <el-button v-if="!focusProductId" @click="openOnlineProducts">去在线商品页新增绑定</el-button>
+        <el-button class="erp-btn erp-btn-secondary" v-if="!focusProductId" @click="openOnlineProducts">去在线商品页新增绑定</el-button>
       </template>
     </InventoryPageToolbar>
 
@@ -286,7 +287,7 @@ onMounted(async () => {
             <div class="product-cell">
               <ProductImagePreview :src="row.product_image_url" />
               <div class="cell-stack">
-                <strong>{{ row.product_name || "-" }}</strong>
+                <ProductTitleLink :title="row.product_name || '-'" :lines="2" />
                 <span class="muted-text">{{ row.inventory_id || row.product_code || "-" }}</span>
                 <span class="muted-text">已绑定 {{ productBindingCount(row) }} 个 SKU</span>
               </div>
@@ -298,7 +299,7 @@ onMounted(async () => {
             <div class="cell-stack">
               <strong>{{ row.ozon_sku || "-" }}</strong>
               <span class="muted-text">Offer {{ row.offer_id || "-" }}</span>
-              <span class="muted-text">{{ row.online_name || "-" }}</span>
+              <ProductTitleLink :title="row.online_name || '-'" :lines="2" />
             </div>
           </template>
         </el-table-column>
@@ -315,10 +316,10 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
-            <el-space wrap>
-              <el-button link type="primary" @click="openEditDialog(row)">编辑</el-button>
-              <el-button link type="danger" @click="deleteMapping(row)">停用</el-button>
-            </el-space>
+            <div class="erp-inline-actions">
+              <el-button class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
+              <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="deleteMapping(row)">停用</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -347,9 +348,9 @@ onMounted(async () => {
         </el-form-item>
       </el-form>
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="dialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="dialogSubmitting" @click="submitDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="dialogVisible = false">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="dialogSubmitting" @click="submitDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>

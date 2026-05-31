@@ -7,7 +7,7 @@ export function createCatalogRoutes({ services, readJson }) {
     "GET /api/mappings": (req, url) => services.mappings(Object.fromEntries(url.searchParams.entries())),
     "POST /api/products": async (req) => {
       const body = await readJson(req);
-      const sessionPersonId = req._session?.personId || req._session?.person_id || null;
+      const sessionPersonId = req._session?.personId || null;
       const created = await services.createProduct({
         ...body,
         owner_person_id: body.owner_person_id || sessionPersonId,

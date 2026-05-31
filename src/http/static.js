@@ -3,6 +3,35 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { notFound, writeHead } from "./response.js";
 
+const CONTENT_TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+  ".webm": "video/webm"
+};
+
+function sendStaticNotFound(res, cleanPath) {
+  const ext = path.extname(cleanPath);
+  const contentType = CONTENT_TYPES[ext] || "text/plain; charset=utf-8";
+  const body = ext === ".js"
+    ? "throw new Error(\"Failed to fetch dynamically imported module: static asset not found. Refresh the ERP page to load the latest build.\");\n"
+    : "Static asset not found. Refresh the ERP page to load the latest build.\n";
+  writeHead(res, 404, {
+    "Content-Type": contentType,
+    "Content-Length": Buffer.byteLength(body),
+    "Cache-Control": "no-store, must-revalidate"
+  });
+  res.end(body);
+}
+
 export function createStaticHandler(publicDir) {
   function preferredEncoding(req) {
     const acceptEncoding = String(req.headers["accept-encoding"] || "").toLowerCase();
@@ -13,25 +42,14 @@ export function createStaticHandler(publicDir) {
 
   function sendFile(filePath, cleanPath, req, res) {
     const ext = path.extname(filePath);
-    const types = {
-      ".html": "text/html; charset=utf-8",
-      ".css": "text/css; charset=utf-8",
-      ".js": "text/javascript; charset=utf-8",
-      ".svg": "image/svg+xml",
-      ".jpg": "image/jpeg",
-      ".jpeg": "image/jpeg",
-      ".png": "image/png",
-      ".webp": "image/webp",
-      ".gif": "image/gif",
-      ".mp4": "video/mp4",
-      ".mov": "video/quicktime",
-      ".webm": "video/webm"
-    };
-    const headers = { "Content-Type": types[ext] || "application/octet-stream" };
+    const headers = { "Content-Type": CONTENT_TYPES[ext] || "application/octet-stream" };
+    const isVueAppAsset = /\/vue-apps\/assets\/.+\.(css|js)$/i.test(cleanPath);
     const isVersionedAsset = /\/vue-apps\/assets\/.+\.[a-z0-9_-]+\.(css|js)$/i.test(cleanPath)
       || /[?&]v=\d+/i.test(cleanPath);
     const isMutableEntryAsset = /\/vue-apps\/assets\/(admin-view|config-view|admin|config)\.(js|css)$/i.test(cleanPath);
     if (cleanPath === "/admin.html" || ext === ".html") {
+      headers["Cache-Control"] = "no-store, must-revalidate";
+    } else if (isVueAppAsset) {
       headers["Cache-Control"] = "no-store, must-revalidate";
     } else if (isMutableEntryAsset) {
       headers["Cache-Control"] = "no-store, must-revalidate";
@@ -43,6 +61,20 @@ export function createStaticHandler(publicDir) {
     const shouldCompress = [".html", ".css", ".js", ".json", ".svg", ".txt", ".md"].includes(ext);
     const encoding = shouldCompress ? preferredEncoding(req) : "";
     const stat = fs.statSync(filePath);
+    const encodedPath = encoding ? `${filePath}.${encoding}` : "";
+    const hasPrecompressedFile = Boolean(encodedPath && fs.existsSync(encodedPath));
+    const responsePath = hasPrecompressedFile ? encodedPath : filePath;
+    const responseStat = hasPrecompressedFile ? fs.statSync(encodedPath) : stat;
+    const lastModified = stat.mtime.toUTCString();
+    const etag = `W/"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
+    headers["ETag"] = etag;
+    headers["Last-Modified"] = lastModified;
+    const ifNoneMatch = String(req.headers["if-none-match"] || "");
+    const ifModifiedSince = String(req.headers["if-modified-since"] || "");
+    if (ifNoneMatch === etag || (ifModifiedSince && new Date(ifModifiedSince).getTime() >= Math.floor(stat.mtimeMs))) {
+      writeHead(res, 304, headers);
+      return res.end();
+    }
     if (!encoding && String(req.headers.range || "").startsWith("bytes=")) {
       const match = String(req.headers.range).match(/bytes=(\d*)-(\d*)/);
       const start = Number(match?.[1] || 0);
@@ -63,9 +95,11 @@ export function createStaticHandler(publicDir) {
     if (encoding) {
       headers["Content-Encoding"] = encoding;
       headers["Vary"] = "Accept-Encoding";
+      if (hasPrecompressedFile) headers["Content-Length"] = responseStat.size;
     }
     writeHead(res, 200, headers);
-    const stream = fs.createReadStream(filePath);
+    const stream = fs.createReadStream(responsePath);
+    if (hasPrecompressedFile) return stream.pipe(res);
     if (encoding === "br") return stream.pipe(zlib.createBrotliCompress()).pipe(res);
     if (encoding === "gzip") return stream.pipe(zlib.createGzip()).pipe(res);
     return stream.pipe(res);
@@ -91,6 +125,7 @@ export function createStaticHandler(publicDir) {
       }
     }
 
+    if (isFileRequest) return sendStaticNotFound(res, cleanPath);
     return notFound(res);
   };
 }

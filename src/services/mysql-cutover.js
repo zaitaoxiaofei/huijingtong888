@@ -1,4 +1,5 @@
 ﻿import { PDFDocument } from "pdf-lib";
+import { createHash } from "node:crypto";
 import { actualItemProfit, estimateItemProfit } from "../profit.js";
 import { archiveOzonProducts, fetchOzonManagedStocks, fetchOzonPackageLabel, fetchOzonPostingByNumber, fetchOzonPostings, fetchOzonFinanceTransactions, fetchOzonProducts, fetchOzonProductStocks, fetchOzonStockTurnover, shipOzonPosting, updateOzonProductStocks } from "../ozonClient.js";
 import { buildOrderOutcomeSql, classifyOrderAccounting, classifyOrderOutcome, estimateOutcomeReturnLoss, resolveOrderLossProfile } from "./order-outcome.js";
@@ -19,7 +20,10 @@ import {
   invalidateMasterDataCache,
   invalidateMasterDataCachePrefix
 } from "./mysql-master-data-cache.js";
+import { scheduledJobSummary } from "./scheduled-jobs.js";
+import { destroySessionsByPersonIdMysql } from "./mysql-auth-session.js";
 import { stockWarehouseRulesMysql } from "./mysql-stock-warehouse-rules.js";
+import { ensureProductBarcodeLabelCacheReadyMysql } from "./product-barcode-labels.js";
 export {
   cleanExpiredSessionsMysql,
   createSessionMysql,
@@ -77,6 +81,7 @@ function invalidateOrderCancellationRuleCache() {}
 
 function invalidateOrderLogisticsRuleCachesMysql() {
   logisticsRuleFilterCacheMysql = null;
+  orderLogisticsRuleMatchCacheMysql.clear();
   invalidateMasterDataCachePrefix("orders:logistics-");
 }
 
@@ -112,10 +117,26 @@ async function ensureOzonStockStorageSchemaMysql() {
   ozonStockStorageSchemaReady = true;
 }
 
-const STOCK_ALERT_BASE_CACHE_TTL_MS = 60_000;
+async function ensureProfitAnalyticsSchemaMysql() {
+  if (profitAnalyticsSchemaReadyMysql) return;
+  await ensureMysqlColumns("analytics_shop_daily", [
+    "ALTER TABLE analytics_shop_daily ADD COLUMN total_revenue DECIMAL(18,4) NOT NULL DEFAULT 0 AFTER item_quantity",
+    "ALTER TABLE analytics_shop_daily ADD COLUMN effective_orders INT NOT NULL DEFAULT 0 AFTER order_count",
+    "ALTER TABLE analytics_shop_daily ADD COLUMN accrued_profit DECIMAL(18,4) NOT NULL DEFAULT 0 AFTER current_profit",
+    "ALTER TABLE analytics_shop_daily ADD COLUMN accrued_order_count INT NOT NULL DEFAULT 0 AFTER accrued_profit",
+    "ALTER TABLE analytics_shop_daily ADD COLUMN pending_profit DECIMAL(18,4) NOT NULL DEFAULT 0 AFTER accrued_order_count",
+    "ALTER TABLE analytics_shop_daily ADD COLUMN pending_order_count INT NOT NULL DEFAULT 0 AFTER pending_profit",
+    "ALTER TABLE analytics_shop_daily ADD COLUMN cancelled_quantity INT NOT NULL DEFAULT 0 AFTER cancelled_orders",
+    "ALTER TABLE analytics_shop_daily ADD COLUMN return_loss DECIMAL(18,4) NOT NULL DEFAULT 0 AFTER return_revenue"
+  ]);
+  profitAnalyticsSchemaReadyMysql = true;
+}
+
+const STOCK_ALERT_BASE_CACHE_TTL_MS = 5 * 60_000;
 const EXCEPTION_WORKBENCH_CACHE_TTL_MS = 45_000;
 const ORDER_COUNTS_CACHE_TTL_MS = 180_000;
-const PROFIT_DASHBOARD_CACHE_TTL_MS = 60_000;
+const ORDER_LOGISTICS_ROW_CACHE_TTL_MS = 10 * 60_000;
+const PROFIT_DASHBOARD_CACHE_TTL_MS = 5 * 60_000;
 const ORDER_LABEL_PREFETCH_INITIAL_DELAY_MS = 5 * 60 * 1000;
 const ORDER_LABEL_PREFETCH_RETRY_DELAY_MS = 10 * 60 * 1000;
 const ORDER_LABEL_PREFETCH_MAX_ATTEMPTS = 3;
@@ -123,10 +144,14 @@ const pendingOrderLabelPrefetchTimers = new Map();
 let orderLabelPrintSchemaReady = false;
 let orderPackageLabelCacheSchemaReady = false;
 let ozonStockStorageSchemaReady = false;
+let dashboardSnapshotSchemaReady = false;
+let profitAnalyticsSchemaReadyMysql = false;
 let logisticsRuleFilterCacheMysql = null;
+const orderLogisticsRuleMatchCacheMysql = new Map();
 let shopWatermarkSchemaReadyMysql = false;
 let shopAdvertisingCredentialSchemaReadyMysql = false;
 let procurementOrderSourceSchemaReadyMysql = false;
+const dashboardSnapshotRefreshJobsMysql = new Map();
 
 const FALLBACK_ORDER_LOGISTICS_METHODS_MYSQL = DEFAULT_ORDER_LOGISTICS_FILTER_RULES.map((item) => ({
   value: item.value,
@@ -200,6 +225,24 @@ async function ensureOrderPackageLabelCacheSchemaMysql() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   `);
   orderPackageLabelCacheSchemaReady = true;
+}
+
+async function ensureDashboardSnapshotSchemaMysql() {
+  if (dashboardSnapshotSchemaReady) return;
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS dashboard_snapshots (
+      snapshot_key VARCHAR(64) NOT NULL PRIMARY KEY,
+      date_key DATE NOT NULL,
+      payload_json JSON NOT NULL,
+      source_updated_at DATETIME NULL,
+      refreshed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      KEY idx_dashboard_snapshots_date (date_key),
+      KEY idx_dashboard_snapshots_refreshed (refreshed_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `);
+  dashboardSnapshotSchemaReady = true;
 }
 
 async function ensureProcurementOrderSourceSchemaMysql() {
@@ -390,6 +433,16 @@ async function ensureProductMergeSchemaMysql() {
       INDEX idx_product_merge_history_refs_source (source_product_id, table_key)
     )
   `);
+  await mysqlExecute(`
+    UPDATE products p
+    JOIN product_merge_history h ON h.target_product_id = p.id AND h.status = 'merged'
+    SET p.product_type = 'main',
+        p.selection_status = 'listed',
+        p.updated_at = CURRENT_TIMESTAMP
+    WHERE p.active = 1
+      AND COALESCE(p.product_type, 'main') = 'selection'
+      AND COALESCE(p.parent_product_id, 0) = 0
+  `);
   productMergeSchemaReadyMysql = true;
 }
 
@@ -479,6 +532,15 @@ function withProductImageEndpointMysql(row) {
   };
 }
 
+function compactProductImageUrlForListMysql(row = {}) {
+  const image = String(row.image_url || "");
+  if (!shouldServeProductImageThroughEndpointMysql(image)) return image;
+  return productImageEndpointMysql({
+    id: row.id || row.product_id,
+    updated_at: row.updated_at || row.image_updated_at || row.created_at
+  });
+}
+
 function productImageEndpointMysql(row = {}) {
   const versionSource = row.updated_at || row.image_updated_at || "";
   const version = versionSource ? `?v=${encodeURIComponent(String(versionSource))}` : "";
@@ -552,7 +614,8 @@ function selectionSummaryMysql(rows) {
     products: rows.length,
     quotedRows,
     missingQuoteRows: rows.length - quotedRows,
-    avgPurchaseCost
+    avgPurchaseCost,
+    status_counts: selectionBusinessStatusCountsMysql(rows)
   };
 }
 
@@ -704,9 +767,7 @@ const PRODUCT_MERGE_FIELD_DEFS_MYSQL = [
   { key: "advertising_rate", label: "广告费率", type: "number" },
   { key: "return_rate", label: "退货率", type: "number" },
   { key: "owner_person_id", label: "负责人", type: "person" },
-  { key: "created_by_person_id", label: "创建人", type: "person" },
-  { key: "product_type", label: "产品类型", type: "text" },
-  { key: "selection_status", label: "库存状态", type: "text" }
+  { key: "created_by_person_id", label: "创建人", type: "person" }
 ];
 const PRODUCT_MERGE_REFERENCE_TABLES_MYSQL = [
   { key: "child_products", table: "products", column: "parent_product_id", idColumn: "id", label: "子产品" },
@@ -1715,6 +1776,41 @@ function matchOrderLogisticsRuleFromTextMysql(text, methods = []) {
   return null;
 }
 
+function orderLogisticsMatchCacheKeyMysql(row = {}, methods = []) {
+  const methodSignature = methods
+    .map((method) => `${method.value || ""}:${method.label || ""}:${(method.warehousePatterns || []).join("|")}`)
+    .join(";");
+  const text = `${row.tracking_number || ""} ${row.raw_json || ""}`;
+  return createHash("sha1")
+    .update(methodSignature)
+    .update("\n")
+    .update(text)
+    .digest("hex");
+}
+
+function cachedOrderLogisticsRuleFromRowMysql(row = {}, methods = []) {
+  const key = orderLogisticsMatchCacheKeyMysql(row, methods);
+  const cached = orderLogisticsRuleMatchCacheMysql.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  const value = normalizeResolvedLogisticsRuleMysql(
+    matchOrderLogisticsRuleFromTextMysql(`${row.tracking_number || ""} ${row.raw_json || ""}`, methods)
+  );
+  orderLogisticsRuleMatchCacheMysql.set(key, {
+    value,
+    expiresAt: Date.now() + ORDER_LOGISTICS_ROW_CACHE_TTL_MS
+  });
+  if (orderLogisticsRuleMatchCacheMysql.size > 20_000) {
+    const now = Date.now();
+    for (const [cacheKey, item] of orderLogisticsRuleMatchCacheMysql) {
+      if (item.expiresAt <= now || orderLogisticsRuleMatchCacheMysql.size > 12_000) {
+        orderLogisticsRuleMatchCacheMysql.delete(cacheKey);
+      }
+      if (orderLogisticsRuleMatchCacheMysql.size <= 12_000) break;
+    }
+  }
+  return value;
+}
+
 function normalizeResolvedLogisticsRuleMysql(rule = null) {
   if (!rule) return null;
   const stableValue = resolveOrderLogisticsRuleValue({
@@ -1883,7 +1979,8 @@ export async function peopleMysql() {
 
 export async function stockAlertsMysql(query = {}) {
   ensureMysqlCutoverEnabled();
-  const products = await getCachedMasterData("stock-alerts:base", async () => {
+  await ensureOzonStockStorageSchemaMysql();
+  const products = await getCachedMasterData("stock-alerts:base:v2", async () => {
     const rows = await mysqlQuery(`
     SELECT p.id AS product_id,
       CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id,
@@ -1968,7 +2065,11 @@ export async function stockAlertsMysql(query = {}) {
           product_id: productId,
           inventory_id: row.inventory_id,
           product_name: row.product_name,
-          image_url: row.image_url,
+          image_url: compactProductImageUrlForListMysql({
+            id: productId,
+            image_url: row.image_url,
+            created_at: row.created_at
+          }),
           alert_stock: Number(row.alert_stock || 0),
           local_stock: Number(row.local_stock || 0),
           created_at: row.created_at,
@@ -2008,7 +2109,9 @@ export async function stockAlertsMysql(query = {}) {
         online_product_id: row.online_product_id,
         offer_id: row.offer_id,
         name: row.online_name || row.display_name || row.ozon_sku,
-        image_url: row.online_image || row.online_image_url || "",
+        image_url: String(row.online_image || row.online_image_url || "").startsWith("data:image/")
+          ? compactProductImageUrlForListMysql({ id: productId, image_url: row.image_url, created_at: row.created_at })
+          : (row.online_image || row.online_image_url || ""),
         fbp_present: Number(row.fbp_present || 0),
         fbp_available: Number(row.fbp_available || 0),
         fbs_present: Number(row.fbs_present || 0),
@@ -2067,14 +2170,271 @@ export async function stockAlertsMysql(query = {}) {
   return applyStockAlertQuery(products, query);
 }
 
-export async function createPersonMysql(body = {}, hashPassword) {
+function fbpOpportunityPriority(score) {
+  if (score >= 80) return "high";
+  if (score >= 55) return "medium";
+  return "watch";
+}
+
+function fbpOpportunityPriorityText(priority) {
+  if (priority === "high") return "高优先级";
+  if (priority === "medium") return "中优先级";
+  return "观察";
+}
+
+function fbpOpportunityTrendText(row) {
+  const week1 = Number(row.week1_qty || 0);
+  const week2 = Number(row.week2_qty || 0);
+  const week3 = Number(row.week3_qty || 0);
+  if (week1 > week2 && week2 > week3) return "连续三周增长";
+  if (week1 > week2) return "最近一周增长";
+  if (week1 === week2 && week2 === week3) return "三周持平";
+  return "波动";
+}
+
+function normalizeFbpOpportunityRow(row) {
+  const recent30d = Number(row.recent_30d_qty || 0);
+  const recent7d = Number(row.recent_7d_qty || 0);
+  const week1 = Number(row.week1_qty || 0);
+  const week2 = Number(row.week2_qty || 0);
+  const week3 = Number(row.week3_qty || 0);
+  const fbpAvailable = Number(row.fbp_available || 0);
+  const fbsAvailable = Number(row.fbs_available || 0);
+  const localStock = Number(row.local_stock || 0);
+  const pendingProcurementQty = Number(row.pending_procurement_qty || 0);
+  const dailySales = recent30d > 0 ? recent30d / 30 : 0;
+  const coverageDays = dailySales > 0 ? fbpAvailable / dailySales : null;
+  const weeklyIncreasing = week1 > week2 && week2 > week3 && week1 > 0;
+  const recentAcceleration = recent30d > 0 && recent7d / recent30d >= 0.35;
+  const fbsOpportunity = fbsAvailable > fbpAvailable && recent30d >= 5;
+  const activeWeeks = [week1, week2, week3].filter((value) => Number(value || 0) > 0).length;
+  const sustainedDemand = recent30d > 0 && (activeWeeks >= 2 || recent7d > 0 || weeklyIncreasing);
+  const oneMonthEstimate = Math.ceil(recent30d);
+  const targetCoverageDays = 45;
+  const targetStock = dailySales > 0 ? Math.ceil(dailySales * targetCoverageDays) : 0;
+
+  let score = 0;
+  if (recent30d > 10) score += 32;
+  if (recent30d >= 30) score += 12;
+  if (weeklyIncreasing) score += 24;
+  if (recentAcceleration) score += 16;
+  if (fbpAvailable <= 0) score += 18;
+  else if (coverageDays !== null && coverageDays < 7) score += 14;
+  else if (coverageDays !== null && coverageDays < 14) score += 10;
+  if (fbsOpportunity) score += 8;
+  if (localStock > 0) score += 5;
+  score = Math.min(100, score);
+
+  const priority = fbpOpportunityPriority(score);
+  let suggestedBaseQty = 0;
+  let targetDays = 0;
+  if (score >= 50 && fbpAvailable <= 0 && sustainedDemand) {
+    targetDays = 30;
+    suggestedBaseQty = oneMonthEstimate;
+  } else if (score >= 50 && fbpAvailable > 0 && coverageDays !== null && coverageDays < targetCoverageDays) {
+    targetDays = targetCoverageDays;
+    suggestedBaseQty = targetStock - fbpAvailable;
+  }
+  const suggestedQty = suggestedBaseQty > 0 ? Math.max(5, Math.ceil(suggestedBaseQty)) : 0;
+  const reasons = [];
+  if (recent30d > 10) reasons.push(`30天销量 ${recent30d} 件`);
+  if (weeklyIncreasing) reasons.push(`三周 ${week3}/${week2}/${week1} 件递增`);
+  else if (recentAcceleration) reasons.push(`近7天占30天 ${Math.round((recent7d / Math.max(1, recent30d)) * 100)}%`);
+  if (fbpAvailable <= 0) reasons.push(`FBP可售为0，按约1个月销量建议`);
+  else if (coverageDays !== null && coverageDays < targetCoverageDays) reasons.push(`FBP约覆盖 ${coverageDays.toFixed(1)} 天，低于45天目标`);
+  if (fbsOpportunity) reasons.push(`FBS可售 ${fbsAvailable} 件`);
+  if (pendingProcurementQty > 0) reasons.push(`已有采购 ${pendingProcurementQty} 件`);
+
+  return {
+    shop_id: row.shop_id,
+    shop_name: row.shop_name || "",
+    product_id: row.product_id,
+    inventory_id: row.inventory_id || "",
+    product_name: row.product_name || row.online_name || row.display_name || row.ozon_sku || "",
+    online_product_id: row.online_product_id,
+    ozon_product_id: row.ozon_product_id || "",
+    mapping_id: row.mapping_id,
+    ozon_sku: row.ozon_sku || "",
+    offer_id: row.offer_id || "",
+    name: row.online_name || row.display_name || row.product_name || row.ozon_sku || "",
+    image_url: row.online_image || row.online_image_url || row.product_image_url || "",
+    recent_7d_qty: recent7d,
+    recent_30d_qty: recent30d,
+    week1_qty: week1,
+    week2_qty: week2,
+    week3_qty: week3,
+    trend_text: fbpOpportunityTrendText(row),
+    fbp_present: Number(row.fbp_present || 0),
+    fbp_available: fbpAvailable,
+    fbs_present: Number(row.fbs_present || 0),
+    fbs_available: fbsAvailable,
+    local_stock: localStock,
+    pending_procurement_qty: pendingProcurementQty,
+    daily_sales: Number(dailySales.toFixed(2)),
+    coverage_days: coverageDays === null ? null : Number(coverageDays.toFixed(1)),
+    target_days: targetDays,
+    target_stock: targetDays === 30 ? oneMonthEstimate : targetStock,
+    suggested_qty: suggestedQty,
+    score,
+    priority,
+    priority_text: fbpOpportunityPriorityText(priority),
+    reason: reasons.length ? reasons.join("，") : "销量或库存信号不足，暂不建议备货",
+    barcode_cached_at: row.barcode_cached_at || "",
+    barcode_cached: Boolean(row.barcode_cached_at),
+    cached_barcode_value: row.cached_barcode_value || "",
+    barcode_cache_source: row.barcode_cache_source || "",
+    warehouses: parseWarehouseBreakdown(row.warehouse_breakdown),
+    last_synced_at: row.last_synced_at || ""
+  };
+}
+
+function applyFbpOpportunityQuery(rows, query = {}) {
+  const page = Math.max(1, Number(query.page || 1));
+  const pageSize = Math.min(200, Math.max(1, Number(query.pageSize || 20)));
+  const text = String(query.query || "").trim().toLowerCase();
+  const shopId = String(query.shopId || query.shop_id || "all");
+  const priority = String(query.priority || "all");
+  const signal = String(query.signal || "all");
+  const minSales = Number(query.minSales || 0);
+  const sortKey = String(query.sortKey || "score");
+  const sortDir = String(query.sortDir || "desc").toLowerCase() === "asc" ? "asc" : "desc";
+  const sortable = new Set(["score", "suggested_qty", "recent_30d_qty", "recent_7d_qty", "coverage_days", "fbp_available"]);
+
+  let filtered = rows.filter((row) => row.score >= 50 && row.suggested_qty > 0);
+  if (text) {
+    filtered = filtered.filter((row) => [
+      row.shop_name,
+      row.ozon_sku,
+      row.offer_id,
+      row.name,
+      row.product_name,
+      row.inventory_id
+    ].some((value) => String(value || "").toLowerCase().includes(text)));
+  }
+  if (shopId !== "all") filtered = filtered.filter((row) => String(row.shop_id || "") === shopId);
+  if (priority !== "all") filtered = filtered.filter((row) => row.priority === priority);
+  if (minSales > 0) filtered = filtered.filter((row) => Number(row.recent_30d_qty || 0) >= minSales);
+  if (signal === "growth") filtered = filtered.filter((row) => row.week1_qty > row.week2_qty && row.week2_qty > row.week3_qty);
+  if (signal === "low_stock") filtered = filtered.filter((row) => Number(row.fbp_available || 0) <= 0 || (row.coverage_days !== null && Number(row.coverage_days) < 14));
+  if (signal === "fbs_to_fbp") filtered = filtered.filter((row) => Number(row.fbs_available || 0) > Number(row.fbp_available || 0));
+
+  const key = sortable.has(sortKey) ? sortKey : "score";
+  filtered.sort((a, b) => {
+    const av = a[key] === null || a[key] === undefined ? (sortDir === "asc" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY) : Number(a[key] || 0);
+    const bv = b[key] === null || b[key] === undefined ? (sortDir === "asc" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY) : Number(b[key] || 0);
+    const delta = av - bv;
+    if (delta !== 0) return sortDir === "asc" ? delta : -delta;
+    return String(a.ozon_sku || "").localeCompare(String(b.ozon_sku || ""));
+  });
+
+  const total = filtered.length;
+  const rowsPage = filtered.slice((page - 1) * pageSize, page * pageSize);
+  const summarySource = rows.filter((row) => row.score >= 50 && row.suggested_qty > 0);
+  const rowsWithCoverage = summarySource.filter((row) => row.coverage_days !== null && row.coverage_days !== undefined);
+  const summary = {
+    total: summarySource.length,
+    high_count: summarySource.filter((row) => row.priority === "high").length,
+    medium_count: summarySource.filter((row) => row.priority === "medium").length,
+    watch_count: summarySource.filter((row) => row.priority === "watch").length,
+    suggested_total_qty: summarySource.reduce((sum, row) => sum + Number(row.suggested_qty || 0), 0),
+    avg_coverage_days: Number((rowsWithCoverage.reduce((sum, row) => sum + Number(row.coverage_days || 0), 0) / Math.max(1, rowsWithCoverage.length)).toFixed(1))
+  };
+  return { rows: rowsPage, total, page, pageSize, summary };
+}
+
+export async function fbpOpportunitiesMysql(query = {}) {
   ensureMysqlCutoverEnabled();
+  await ensureOzonStockStorageSchemaMysql();
+  await ensureProductBarcodeLabelCacheReadyMysql();
+  const rows = await mysqlQuery(`
+    SELECT
+      sm.id AS mapping_id, sm.shop_id, sm.ozon_sku, sm.offer_id, sm.display_name,
+      s.name AS shop_name,
+      p.id AS product_id,
+      CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id,
+      p.name AS product_name, p.image_url AS product_image_url,
+      COALESCE(ic.available_stock, 0) AS local_stock,
+      COALESCE(op_by_id.id, op_by_sku.id) AS online_product_id,
+      COALESCE(op_by_id.ozon_product_id, op_by_sku.ozon_product_id) AS ozon_product_id,
+      COALESCE(op_by_id.name, op_by_sku.name) AS online_name,
+      COALESCE(op_by_id.primary_image, op_by_sku.primary_image) AS online_image,
+      COALESCE(op_by_id.image_url, op_by_sku.image_url) AS online_image_url,
+      cache.fetched_at AS barcode_cached_at,
+      cache.barcode_value AS cached_barcode_value,
+      cache.fetch_source AS barcode_cache_source,
+      COALESCE(stock.fbp_present, 0) AS fbp_present,
+      COALESCE(stock.fbp_available, 0) AS fbp_available,
+      COALESCE(stock.fbs_present, 0) AS fbs_present,
+      COALESCE(stock.fbs_available, 0) AS fbs_available,
+      stock.last_synced_at,
+      stock.warehouse_breakdown,
+      COALESCE(sales.recent_7d_qty, 0) AS recent_7d_qty,
+      COALESCE(sales.recent_30d_qty, 0) AS recent_30d_qty,
+      COALESCE(sales.week1_qty, 0) AS week1_qty,
+      COALESCE(sales.week2_qty, 0) AS week2_qty,
+      COALESCE(sales.week3_qty, 0) AS week3_qty,
+      COALESCE(procurement.pending_procurement_qty, 0) AS pending_procurement_qty
+    FROM sku_mappings sm
+    JOIN shops s ON s.id = sm.shop_id
+    LEFT JOIN products p ON p.id = sm.product_id
+    LEFT JOIN inventory_current ic ON ic.real_product_id = p.id
+    LEFT JOIN online_products op_by_id ON op_by_id.id = sm.online_product_id
+    LEFT JOIN online_products op_by_sku ON op_by_sku.shop_id = sm.shop_id AND op_by_sku.ozon_sku = sm.ozon_sku
+    LEFT JOIN product_barcode_label_cache cache ON cache.online_product_id = COALESCE(op_by_id.id, op_by_sku.id)
+    LEFT JOIN (
+      SELECT shop_id, ozon_sku,
+        SUM(CASE WHEN stock_type = 'fbp_real' THEN present ELSE 0 END) AS fbp_present,
+        SUM(CASE WHEN stock_type = 'fbp_real' THEN available ELSE 0 END) AS fbp_available,
+        SUM(CASE WHEN stock_type = 'fbs_virtual' THEN present ELSE 0 END) AS fbs_present,
+        SUM(CASE WHEN stock_type = 'fbs_virtual' THEN available ELSE 0 END) AS fbs_available,
+        MAX(synced_at) AS last_synced_at,
+        GROUP_CONCAT(CONCAT(warehouse_name, ':', present, '/', available, ':', stock_type) SEPARATOR '||') AS warehouse_breakdown
+      FROM ozon_stock_snapshots
+      GROUP BY shop_id, ozon_sku
+    ) stock ON stock.shop_id = sm.shop_id AND stock.ozon_sku = sm.ozon_sku
+    LEFT JOIN (
+      SELECT o.shop_id, oi.ozon_sku,
+        SUM(CASE WHEN LOWER(o.status) NOT LIKE '%cancel%' AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%' AND ${chinaDateSqlMysql("o.ordered_at")} >= ? THEN oi.quantity ELSE 0 END) AS recent_7d_qty,
+        SUM(CASE WHEN LOWER(o.status) NOT LIKE '%cancel%' AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%' AND ${chinaDateSqlMysql("o.ordered_at")} >= ? THEN oi.quantity ELSE 0 END) AS recent_30d_qty,
+        SUM(CASE WHEN LOWER(o.status) NOT LIKE '%cancel%' AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%' AND ${chinaDateSqlMysql("o.ordered_at")} >= ? THEN oi.quantity ELSE 0 END) AS week1_qty,
+        SUM(CASE WHEN LOWER(o.status) NOT LIKE '%cancel%' AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%' AND ${chinaDateSqlMysql("o.ordered_at")} >= ? AND ${chinaDateSqlMysql("o.ordered_at")} < ? THEN oi.quantity ELSE 0 END) AS week2_qty,
+        SUM(CASE WHEN LOWER(o.status) NOT LIKE '%cancel%' AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%' AND ${chinaDateSqlMysql("o.ordered_at")} >= ? AND ${chinaDateSqlMysql("o.ordered_at")} < ? THEN oi.quantity ELSE 0 END) AS week3_qty
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      GROUP BY o.shop_id, oi.ozon_sku
+    ) sales ON sales.shop_id = sm.shop_id AND sales.ozon_sku = sm.ozon_sku
+    LEFT JOIN (
+      SELECT product_id, SUM(quantity) AS pending_procurement_qty
+      FROM procurement_requests
+      WHERE status NOT IN ('cancelled', 'purchased')
+      GROUP BY product_id
+    ) procurement ON procurement.product_id = sm.product_id
+    WHERE sm.active = 1
+      AND COALESCE(sm.ozon_sku, '') != ''
+      AND (sm.product_id IS NULL OR p.active = 1)
+  `, [
+    dateKeyDaysAgoMysql(6),
+    dateKeyDaysAgoMysql(29),
+    dateKeyDaysAgoMysql(6),
+    dateKeyDaysAgoMysql(13),
+    dateKeyDaysAgoMysql(6),
+    dateKeyDaysAgoMysql(20),
+    dateKeyDaysAgoMysql(13)
+  ]);
+
+  const normalizedRows = rows.map(normalizeFbpOpportunityRow);
+  return applyFbpOpportunityQuery(normalizedRows, query);
+}
+
+export async function createPersonMysql(body = {}, hashPassword, validatePasswordStrength) {
+  ensureMysqlCutoverEnabled();
+  validatePasswordStrength?.(body.password, body);
   const payload = [
     body.name,
     body.username || null,
     body.role || "operator",
     Number(body.active ?? 1),
-    hashPassword(body.password || "123456")
+    hashPassword(body.password)
   ];
 
   const result = await mysqlExecute(
@@ -2091,7 +2451,7 @@ export async function createPersonMysql(body = {}, hashPassword) {
   return { ok: true, id: Number(result.insertId) };
 }
 
-export async function updatePersonMysql(id, body = {}, hashPassword) {
+export async function updatePersonMysql(id, body = {}, hashPassword, validatePasswordStrength) {
   ensureMysqlCutoverEnabled();
   const personId = Number(id);
   const payload = [
@@ -2106,9 +2466,13 @@ export async function updatePersonMysql(id, body = {}, hashPassword) {
   db.prepare("UPDATE people SET name = ?, username = ?, role = ?, active = ? WHERE id = ?").run(...payload);
 
   if (String(body.password || "").trim()) {
+    validatePasswordStrength?.(body.password, body);
     const passwordHash = hashPassword(String(body.password));
     await mysqlExecute("UPDATE people SET password_hash = ? WHERE id = ?", [passwordHash, personId]);
     db.prepare("UPDATE people SET password_hash = ? WHERE id = ?").run(passwordHash, personId);
+    await destroySessionsByPersonIdMysql(personId);
+  } else if (Number(body.active ?? 1) === 0) {
+    await destroySessionsByPersonIdMysql(personId);
   }
 
   invalidateMasterDataCache("people");
@@ -2120,6 +2484,7 @@ export async function deletePersonMysql(id) {
   const personId = Number(id);
   await mysqlExecute("UPDATE people SET active = 0 WHERE id = ?", [personId]);
   db.prepare("UPDATE people SET active = 0 WHERE id = ?").run(personId);
+  await destroySessionsByPersonIdMysql(personId);
   invalidateMasterDataCache("people");
   return { ok: true };
 }
@@ -2139,6 +2504,7 @@ export async function hardDeletePersonMysql(id) {
       ["UPDATE inbound_records SET person_id = NULL WHERE person_id = ?", [personId]],
       ["UPDATE outbound_records SET person_id = NULL WHERE person_id = ?", [personId]],
       ["UPDATE inventory_movements SET owner_person_id = NULL WHERE owner_person_id = ?", [personId]],
+      ["DELETE FROM sessions WHERE person_id = ?", [personId]],
       ["DELETE FROM people WHERE id = ?", [personId]]
     ];
 
@@ -2552,6 +2918,7 @@ export async function syncOzonStocksMysql(body = {}, options = {}) {
   }
   await reclassifyStockSnapshotsMysql();
   invalidateMasterDataCache("stock-alerts:base");
+  invalidateMasterDataCache("stock-alerts:base:v2");
   const status = errors.length ? "partial_error" : "ok";
   const message = `Fetched ${fetched}, upserted ${upserted}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
   return { status, fetched, upserted, errors, message, alerts: await stockAlertsMysql() };
@@ -3325,11 +3692,62 @@ function selectionProductPredicateMysql(alias = "p") {
 }
 
 function selectionProductTypeExprMysql(alias = "p") {
-  const prefix = alias ? `${alias}.` : "";
   return `CASE
         WHEN ${selectionProductPredicateMysql(alias)} THEN 'selection'
-        ELSE COALESCE(${prefix}product_type, 'main')
+        ELSE 'main'
       END`;
+}
+
+function selectionBusinessStatusMysql(row = {}) {
+  const selectionStatus = String(row.selection_status || "draft");
+  const listingStatus = String(row.listing_job_status || "").trim();
+  if (selectionStatus === "listed") return "in_inventory";
+  if (listingStatus === "queued" || listingStatus === "running") return "publishing";
+  if (listingStatus === "failed") return "publish_failed";
+  if (listingStatus === "success") return "published";
+  if (listingStatus === "cancelled") return "publish_cancelled";
+  return selectionReadinessMissingMysql(row).length ? "needs_work" : "ready_to_publish";
+}
+
+function selectionReadinessMissingMysql(row = {}) {
+  const missing = [];
+  if (!String(row.image_url || "").trim()) missing.push("主图");
+  if (!String(row.detail_image_urls || "").trim() || String(row.detail_image_urls || "").trim() === "[]") missing.push("详情图");
+  if (!String(row.selling_points || "").trim()) missing.push("卖点");
+  if (!String(row.ozon_category_id || "").trim()) missing.push("Ozon类目");
+  if (!Number(row.ozon_description_category_id || 0)) missing.push("Ozon描述类目");
+  if (!Number(row.ozon_type_id || 0)) missing.push("Ozon类型");
+  if (!(Number(row.listing_price_rub || 0) > 0 || Number(row.air_sale_price_rmb || 0) > 0)) missing.push("价格");
+  if (!(Number(row.purchase_cost || 0) > 0)) missing.push("采购成本");
+  if (!(Number(row.package_weight_g || 0) > 0)) missing.push("重量");
+  if (!(Number(row.length_cm || 0) > 0 && Number(row.width_cm || 0) > 0 && Number(row.height_cm || 0) > 0)) missing.push("尺寸");
+  if (!Number(row.owner_person_id || 0)) missing.push("负责人");
+  if (!Number(row.logistics_rule_id || 0)) missing.push("物流规则");
+  return missing;
+}
+
+function applySelectionBusinessStatusFilterMysql(rows = [], status = "all") {
+  const key = String(status || "all");
+  if (key === "all") return rows;
+  return rows.filter((row) => row.business_status === key);
+}
+
+function selectionBusinessStatusCountsMysql(rows = []) {
+  const counts = {
+    all: rows.length,
+    needs_work: 0,
+    ready_to_publish: 0,
+    publishing: 0,
+    publish_failed: 0,
+    published: 0,
+    in_inventory: 0,
+    publish_cancelled: 0
+  };
+  for (const row of rows) {
+    const status = row.business_status || selectionBusinessStatusMysql(row);
+    counts[status] = Number(counts[status] || 0) + 1;
+  }
+  return counts;
 }
 
 function stockAlertSkuTextMysql(row = {}) {
@@ -5076,6 +5494,7 @@ export async function hiddenProductsMysql(query = {}) {
 export async function selectionProductsMysql(query = {}) {
   ensureMysqlCutoverEnabled();
   await ensureSelectionCreativeSchemaMysql();
+  await ensureProductMergeSchemaMysql();
   await ensureAssetVariantJobsTableMysql();
   const paged = String(query.paged || "") === "1";
   const includeDetails = String(query.includeDetails || query.include_details || query.full || "") === "1";
@@ -5084,6 +5503,7 @@ export async function selectionProductsMysql(query = {}) {
   const searchText = String(query.query || query.search || "").trim().toLowerCase();
   const ownerPersonId = String(query.ownerPersonId || query.owner_person_id || "all");
   const quoteStatus = String(query.quoteStatus || query.quote_status || "all");
+  const businessStatus = String(query.businessStatus || query.business_status || "all");
   const where = [
     "p.active = 1",
     selectionProductPredicateMysql("p")
@@ -5178,10 +5598,16 @@ export async function selectionProductsMysql(query = {}) {
   `;
   const enrichSelectionRows = (rows) => rows.map((row) => ({
     ...withProductImageEndpointMysql(row),
-    pricing: calculateSelectionPricing(row)
+    pricing: calculateSelectionPricing(row),
+    business_status: selectionBusinessStatusMysql(row)
   }));
+  const summaryFromEnrichedRows = (rows) => selectionSummaryMysql(rows.map((row) => ({
+    ...row,
+    pricing: row.pricing || calculateSelectionPricing(row),
+    business_status: row.business_status || selectionBusinessStatusMysql(row)
+  })));
 
-  if (paged && quoteStatus === "all") {
+  if (paged && quoteStatus === "all" && businessStatus === "all") {
     const offset = (page - 1) * pageSize;
     const pricingSummarySql = `
       SELECT p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
@@ -5200,14 +5626,19 @@ export async function selectionProductsMysql(query = {}) {
       `, [...params, pageSize, offset]),
       mysqlQuery(pricingSummarySql, params)
     ]);
+    const total = Number(totalRow?.total || 0);
 
     return {
       rows: enrichSelectionRows(pageRows),
-      total: Number(totalRow?.total || 0),
+      total,
       page,
       pageSize,
       mode: "paged",
-      summary: selectionSummaryFromPricingRowsMysql(summaryRows)
+      summary: {
+        ...selectionSummaryFromPricingRowsMysql(summaryRows),
+        products: total,
+        status_counts: { all: total }
+      }
     };
   }
 
@@ -5222,17 +5653,18 @@ export async function selectionProductsMysql(query = {}) {
       const hasQuote = Boolean(row.pricing?.air || row.pricing?.land);
       return quoteStatus === "quoted" ? hasQuote : !hasQuote;
     });
+  const businessFiltered = applySelectionBusinessStatusFilterMysql(filtered, businessStatus);
 
-  if (!paged) return filtered;
+  if (!paged) return businessFiltered;
 
   const start = (page - 1) * pageSize;
   return {
-    rows: filtered.slice(start, start + pageSize),
-    total: filtered.length,
+    rows: businessFiltered.slice(start, start + pageSize),
+    total: businessFiltered.length,
     page,
     pageSize,
     mode: "paged",
-    summary: selectionSummaryMysql(filtered)
+    summary: summaryFromEnrichedRows(businessFiltered)
   };
 }
 
@@ -6451,8 +6883,8 @@ export async function mergeProductsMysql(body = {}) {
       Number(mergedValues.return_rate || 0),
       nullableInteger(mergedValues.owner_person_id),
       nullableInteger(mergedValues.created_by_person_id),
-      mergedValues.product_type || "main",
-      mergedValues.selection_status || "listed",
+      "main",
+      "listed",
       targetProductId
     ]);
     const refParams = [targetProductId, ...sourceProductIds];
@@ -8197,40 +8629,51 @@ export function exceptionWorkbenchSyncWindowMysql() {
 
 export async function refreshProfitAnalyticsSnapshotsMysql(body = {}) {
   ensureMysqlCutoverEnabled();
+  await ensureProfitAnalyticsSchemaMysql();
   const rangeFrom = String(body.from || "2000-01-01").trim() || "2000-01-01";
   const rangeTo = String(body.to || "9999-12-31").trim() || "9999-12-31";
   const outcome = buildOrderOutcomeSql("o", "mysql");
+  const effectiveBusinessSale = `(${outcome.effectiveSale} AND NOT ${outcome.afterDeliveryReturn})`;
+  const orderedAtFilter = profitOrderedAtUtcRangeMysql("o", rangeFrom, rangeTo);
   await mysqlExecute("DELETE FROM analytics_shop_daily WHERE date_key >= ? AND date_key <= ?", [rangeFrom, rangeTo]);
   await mysqlExecute("DELETE FROM analytics_product_profit_daily WHERE date_key >= ? AND date_key <= ?", [rangeFrom, rangeTo]);
   await mysqlExecute("DELETE FROM analytics_sku_profit_daily WHERE date_key >= ? AND date_key <= ?", [rangeFrom, rangeTo]);
 
   await mysqlExecute(`
     INSERT INTO analytics_shop_daily (
-      date_key, shop_id, order_count, item_quantity, revenue, estimated_profit, confirmed_profit, current_profit,
-      cancelled_orders, cancelled_revenue, return_orders, return_quantity, return_revenue, refreshed_at
+      date_key, shop_id, order_count, effective_orders, item_quantity, total_revenue, revenue,
+      estimated_profit, confirmed_profit, current_profit, accrued_profit, accrued_order_count, pending_profit, pending_order_count,
+      cancelled_orders, cancelled_quantity, cancelled_revenue, return_orders, return_quantity, return_revenue, return_loss, refreshed_at
     )
     SELECT
       ${chinaDateSqlMysql("o.ordered_at")} AS date_key,
       o.shop_id,
-      COUNT(DISTINCT CASE WHEN ${outcome.effectiveSale} THEN o.id END) AS order_count,
-      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN oi.quantity ELSE 0 END), 0) AS item_quantity,
-      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS revenue,
-      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) ELSE 0 END), 0) AS estimated_profit,
-      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE 0 END), 0) AS confirmed_profit,
-      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN CASE WHEN COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) END ELSE 0 END), 0) AS current_profit,
+      COUNT(DISTINCT o.id) AS order_count,
+      COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} THEN o.id END) AS effective_orders,
+      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN oi.quantity ELSE 0 END), 0) AS item_quantity,
+      COALESCE(SUM(COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0)), 0) AS total_revenue,
+      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS revenue,
+      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) ELSE 0 END), 0) AS estimated_profit,
+      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE 0 END), 0) AS confirmed_profit,
+      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN CASE WHEN COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) END ELSE 0 END), 0) AS current_profit,
+      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE 0 END), 0) AS accrued_profit,
+      COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN o.id END) AS accrued_order_count,
+      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') != 'accrued' THEN COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) ELSE 0 END), 0) AS pending_profit,
+      COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') != 'accrued' THEN o.id END) AS pending_order_count,
       COUNT(DISTINCT CASE WHEN ${outcome.cancelledPreFulfillment} THEN o.id END) AS cancelled_orders,
+      COALESCE(SUM(CASE WHEN ${outcome.cancelledPreFulfillment} THEN oi.quantity ELSE 0 END), 0) AS cancelled_quantity,
       COALESCE(SUM(CASE WHEN ${outcome.cancelledPreFulfillment} THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS cancelled_revenue,
       COUNT(DISTINCT CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN o.id END) AS return_orders,
       COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN oi.quantity ELSE 0 END), 0) AS return_quantity,
       COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS return_revenue,
+      COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN COALESCE(opi.return_loss_cny, oi.aftersale_loss, 0) ELSE 0 END), 0) AS return_loss,
       CURRENT_TIMESTAMP
     FROM orders o
     JOIN order_items oi ON oi.order_id = o.id
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
-    WHERE ${chinaDateSqlMysql("o.ordered_at")} >= ?
-      AND ${chinaDateSqlMysql("o.ordered_at")} <= ?
+    WHERE 1=1 ${orderedAtFilter.whereSql}
     GROUP BY ${chinaDateSqlMysql("o.ordered_at")}, o.shop_id
-  `, [rangeFrom, rangeTo]);
+  `, orderedAtFilter.params);
 
   await mysqlExecute(`
     INSERT INTO analytics_product_profit_daily (
@@ -8251,10 +8694,9 @@ export async function refreshProfitAnalyticsSnapshotsMysql(body = {}) {
     JOIN order_items oi ON oi.order_id = o.id
     JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id AND sm.active = 1
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
-    WHERE ${chinaDateSqlMysql("o.ordered_at")} >= ?
-      AND ${chinaDateSqlMysql("o.ordered_at")} <= ?
+    WHERE 1=1 ${orderedAtFilter.whereSql}
     GROUP BY ${chinaDateSqlMysql("o.ordered_at")}, sm.product_id, o.shop_id
-  `, [rangeFrom, rangeTo]);
+  `, orderedAtFilter.params);
 
   await mysqlExecute(`
     INSERT INTO analytics_sku_profit_daily (
@@ -8283,10 +8725,9 @@ export async function refreshProfitAnalyticsSnapshotsMysql(body = {}) {
     JOIN order_items oi ON oi.order_id = o.id
     LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id AND sm.active = 1
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
-    WHERE ${chinaDateSqlMysql("o.ordered_at")} >= ?
-      AND ${chinaDateSqlMysql("o.ordered_at")} <= ?
+    WHERE 1=1 ${orderedAtFilter.whereSql}
     GROUP BY ${chinaDateSqlMysql("o.ordered_at")}, o.shop_id, oi.ozon_sku
-  `, [rangeFrom, rangeTo]);
+  `, orderedAtFilter.params);
 
   const [shopRows, productRows, skuRows] = await Promise.all([
     mysqlQueryOne("SELECT COUNT(*) AS count FROM analytics_shop_daily WHERE date_key >= ? AND date_key <= ?", [rangeFrom, rangeTo]),
@@ -9964,6 +10405,34 @@ function profitDateWhereMysql(alias = "o", from = "", to = "") {
   return profitDateExpressionWhereMysql(chinaDateSqlMysql(`${alias}.ordered_at`), from, to);
 }
 
+function shanghaiDateKeyToUtcDateTimeMysql(dateKey = "", addDays = 0) {
+  const text = String(dateKey || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return "";
+  const date = new Date(`${text}T00:00:00+08:00`);
+  if (Number.isNaN(date.getTime())) return "";
+  date.setUTCDate(date.getUTCDate() + Number(addDays || 0));
+  return normalizeMysqlDateTime(date);
+}
+
+function profitOrderedAtUtcRangeMysql(alias = "o", from = "", to = "") {
+  const where = [];
+  const params = [];
+  const fromUtc = shanghaiDateKeyToUtcDateTimeMysql(from, 0);
+  const toUtcExclusive = shanghaiDateKeyToUtcDateTimeMysql(to, 1);
+  if (fromUtc) {
+    where.push(`${alias}.ordered_at >= ?`);
+    params.push(fromUtc);
+  }
+  if (toUtcExclusive) {
+    where.push(`${alias}.ordered_at < ?`);
+    params.push(toUtcExclusive);
+  }
+  return {
+    whereSql: where.length ? `AND ${where.join(" AND ")}` : "",
+    params
+  };
+}
+
 function profitDateExpressionWhereMysql(dateExpression, from = "", to = "") {
   const where = [];
   const params = [];
@@ -9982,13 +10451,16 @@ function profitDateExpressionWhereMysql(dateExpression, from = "", to = "") {
 }
 
 function normalizeProfitSummaryMysql(row = {}) {
-  const revenue = Number(row.revenue || 0);
+  const effectiveRevenue = Number(row.effective_revenue ?? row.revenue ?? 0);
+  const totalRevenue = Number(row.total_revenue ?? effectiveRevenue);
   const profit = Number(row.profit || 0);
   const returnRevenue = Number(row.return_revenue || 0);
   return {
     order_count: Number(row.order_count || 0),
     item_quantity: Number(row.item_quantity || 0),
-    revenue: roundMoneyMysql(revenue),
+    revenue: roundMoneyMysql(effectiveRevenue),
+    total_revenue: roundMoneyMysql(totalRevenue),
+    effective_revenue: roundMoneyMysql(effectiveRevenue),
     profit: roundMoneyMysql(profit),
     estimated_profit: roundMoneyMysql(row.estimated_profit || profit),
     accrued_profit: roundMoneyMysql(row.accrued_profit || 0),
@@ -10005,9 +10477,8 @@ function normalizeProfitSummaryMysql(row = {}) {
     event_cancelled_orders: Number(row.event_cancelled_orders || row.cancelled_orders || 0),
     event_return_orders: Number(row.event_return_orders || row.return_orders || 0),
     event_return_revenue: roundMoneyMysql(returnRevenue),
-    effective_revenue: roundMoneyMysql(revenue - returnRevenue),
     effective_orders: Number(row.effective_orders ?? (Number(row.order_count || 0) - Number(row.cancelled_orders || 0))),
-    profit_margin: revenue ? profit / revenue : 0
+    profit_margin: effectiveRevenue ? profit / effectiveRevenue : 0
   };
 }
 
@@ -10017,24 +10488,74 @@ async function profitSummaryOverviewMysql(from = "", to = "") {
 }
 
 async function buildProfitSummaryOverviewMysql(from = "", to = "") {
+  const analyticsSummary = await buildProfitSummaryOverviewFromAnalyticsMysql(from, to);
+  if (analyticsSummary) return analyticsSummary;
   return buildProfitSummaryOverviewFromOrdersMysql(from, to);
 }
 
+async function buildProfitSummaryOverviewFromAnalyticsMysql(from = "", to = "") {
+  await ensureProfitAnalyticsSchemaMysql();
+  const dateFilter = profitDateExpressionWhereMysql("date_key", from, to);
+  const row = await mysqlQueryOne(`
+    SELECT
+      COUNT(*) AS snapshot_rows,
+      COUNT(DISTINCT date_key) AS snapshot_days,
+      COALESCE(SUM(order_count), 0) AS order_count,
+      COALESCE(SUM(effective_orders), 0) AS effective_orders,
+      COALESCE(SUM(item_quantity), 0) AS item_quantity,
+      COALESCE(SUM(total_revenue), 0) AS total_revenue,
+      COALESCE(SUM(revenue), 0) AS effective_revenue,
+      COALESCE(SUM(current_profit), 0) AS profit,
+      COALESCE(SUM(estimated_profit), 0) AS estimated_profit,
+      COALESCE(SUM(accrued_profit), 0) AS accrued_profit,
+      COALESCE(SUM(accrued_order_count), 0) AS accrued_order_count,
+      COALESCE(SUM(pending_profit), 0) AS pending_profit,
+      COALESCE(SUM(pending_order_count), 0) AS pending_order_count,
+      COALESCE(SUM(cancelled_revenue), 0) AS cancelled_revenue,
+      COALESCE(SUM(cancelled_orders), 0) AS cancelled_orders,
+      COALESCE(SUM(cancelled_quantity), 0) AS cancelled_quantity,
+      COALESCE(SUM(return_orders), 0) AS return_orders,
+      COALESCE(SUM(return_quantity), 0) AS return_quantity,
+      COALESCE(SUM(return_revenue), 0) AS return_revenue,
+      COALESCE(SUM(return_loss), 0) AS return_loss,
+      MAX(refreshed_at) AS refreshed_at
+    FROM analytics_shop_daily
+    WHERE 1=1 ${dateFilter.whereSql}
+  `, dateFilter.params);
+  if (!Number(row?.snapshot_rows || 0)) return null;
+  const orderDateFilter = profitOrderedAtUtcRangeMysql("o", from, to);
+  const coverage = await mysqlQueryOne(`
+    SELECT COUNT(DISTINCT ${chinaDateSqlMysql("o.ordered_at")}) AS order_days
+    FROM orders o
+    JOIN order_items oi ON oi.order_id = o.id
+    WHERE 1=1 ${orderDateFilter.whereSql}
+  `, orderDateFilter.params);
+  if (Number(coverage?.order_days || 0) > Number(row?.snapshot_days || 0)) return null;
+  return {
+    ...normalizeProfitSummaryMysql(row || {}),
+    source: "analytics_shop_daily",
+    snapshot_days: Number(row?.snapshot_days || 0),
+    refreshed_at: row?.refreshed_at ? new Date(row.refreshed_at).toISOString() : ""
+  };
+}
+
 async function buildProfitSummaryOverviewFromOrdersMysql(from = "", to = "") {
-  const dateFilter = profitDateWhereMysql("o", from, to);
+  const dateFilter = profitOrderedAtUtcRangeMysql("o", from, to);
   const outcome = buildOrderOutcomeSql("o", "mysql");
+  const effectiveBusinessSale = `(${outcome.effectiveSale} AND NOT ${outcome.afterDeliveryReturn})`;
   const row = await mysqlQueryOne(`
     SELECT
       COUNT(DISTINCT o.id) AS order_count,
-      COUNT(DISTINCT CASE WHEN ${outcome.effectiveSale} THEN o.id END) AS effective_orders,
-      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN oi.quantity ELSE 0 END), 0) AS item_quantity,
-      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN oi.sale_price * oi.quantity ELSE 0 END), 0) AS revenue,
-      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN COALESCE(NULLIF(oi.actual_profit, 0), oi.estimated_profit, 0) ELSE 0 END), 0) AS profit,
-      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN COALESCE(oi.estimated_profit, 0) ELSE 0 END), 0) AS estimated_profit,
-      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} AND oi.settlement_state = 'accrued' THEN COALESCE(NULLIF(oi.actual_profit, 0), oi.estimated_profit, 0) ELSE 0 END), 0) AS accrued_profit,
-      COUNT(DISTINCT CASE WHEN ${outcome.effectiveSale} AND oi.settlement_state = 'accrued' THEN o.id END) AS accrued_order_count,
-      COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} AND COALESCE(oi.settlement_state, '') != 'accrued' THEN COALESCE(oi.estimated_profit, 0) ELSE 0 END), 0) AS pending_profit,
-      COUNT(DISTINCT CASE WHEN ${outcome.effectiveSale} AND COALESCE(oi.settlement_state, '') != 'accrued' THEN o.id END) AS pending_order_count,
+      COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} THEN o.id END) AS effective_orders,
+      COALESCE(SUM(oi.sale_price * oi.quantity), 0) AS total_revenue,
+      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN oi.quantity ELSE 0 END), 0) AS item_quantity,
+      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN oi.sale_price * oi.quantity ELSE 0 END), 0) AS effective_revenue,
+      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN COALESCE(NULLIF(oi.actual_profit, 0), oi.estimated_profit, 0) ELSE 0 END), 0) AS profit,
+      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN COALESCE(oi.estimated_profit, 0) ELSE 0 END), 0) AS estimated_profit,
+      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} AND oi.settlement_state = 'accrued' THEN COALESCE(NULLIF(oi.actual_profit, 0), oi.estimated_profit, 0) ELSE 0 END), 0) AS accrued_profit,
+      COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} AND oi.settlement_state = 'accrued' THEN o.id END) AS accrued_order_count,
+      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} AND COALESCE(oi.settlement_state, '') != 'accrued' THEN COALESCE(oi.estimated_profit, 0) ELSE 0 END), 0) AS pending_profit,
+      COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} AND COALESCE(oi.settlement_state, '') != 'accrued' THEN o.id END) AS pending_order_count,
       COALESCE(SUM(CASE WHEN ${outcome.cancelledPreFulfillment} THEN oi.sale_price * oi.quantity ELSE 0 END), 0) AS cancelled_revenue,
       COUNT(DISTINCT CASE WHEN ${outcome.cancelledPreFulfillment} THEN o.id END) AS cancelled_orders,
       COALESCE(SUM(CASE WHEN ${outcome.cancelledPreFulfillment} THEN oi.quantity ELSE 0 END), 0) AS cancelled_quantity,
@@ -10056,7 +10577,7 @@ async function profitTrendRowsMysql(from, to, groupExpr, labelAlias = "date") {
 }
 
 async function buildProfitTrendRowsMysql(from, to, groupExpr, labelAlias = "date") {
-  const dateFilter = profitDateWhereMysql("o", from, to);
+  const dateFilter = profitOrderedAtUtcRangeMysql("o", from, to);
   const outcome = buildOrderOutcomeSql("o", "mysql");
   return await mysqlQuery(`
     SELECT ${groupExpr} AS ${labelAlias},
@@ -10727,6 +11248,14 @@ async function latestDashboardAdDateMysql(maxDateKey) {
   }
 }
 
+function latestIsoDateTimeMysql(rows = [], key) {
+  const latest = rows.reduce((max, item) => {
+    const time = item?.[key] ? new Date(item[key]).getTime() : 0;
+    return Number.isFinite(time) && time > max ? time : max;
+  }, 0);
+  return latest ? new Date(latest).toISOString() : "";
+}
+
 async function dashboardAdSummaryMysql(dateKey) {
   try {
     const rows = await mysqlQuery(`
@@ -10745,6 +11274,8 @@ async function dashboardAdSummaryMysql(dateKey) {
         COALESCE(SUM(ad.spend_cny), 0) AS spend_cny,
         COALESCE(SUM(ad.revenue_rub), 0) AS revenue_rub,
         COALESCE(SUM(ad.revenue_cny), 0) AS revenue_cny,
+        MAX(ad.synced_at) AS last_synced_at,
+        MAX(ad.updated_at) AS last_updated_at,
         SUM(CASE WHEN ad.spend_cny > 0 AND (ad.revenue_cny IS NULL OR ad.revenue_cny <= 0 OR ad.revenue_cny / ad.spend_cny < 1) THEN 1 ELSE 0 END) AS abnormal_sku_count
       FROM ozon_ad_sku_daily ad
       LEFT JOIN shops s ON s.id = ad.shop_id
@@ -10776,6 +11307,8 @@ async function dashboardAdSummaryMysql(dateKey) {
     const revenue = Number(row?.revenue_cny || 0) || rubToCnyMysql(revenueRub, exchangeRate);
     const roi = spend ? revenue / spend : null;
     const acos = revenue ? spend / revenue : null;
+    const lastSyncedAt = latestIsoDateTimeMysql(rows, "last_synced_at");
+    const lastUpdatedAt = latestIsoDateTimeMysql(rows, "last_updated_at");
     return {
       date_key: dateKey,
       data_available: true,
@@ -10792,6 +11325,8 @@ async function dashboardAdSummaryMysql(dateKey) {
       revenue_cny: roundMoneyMysql(revenue),
       spend_rub: roundMoneyMysql(spendRub),
       revenue_rub: roundMoneyMysql(revenueRub),
+      last_synced_at: lastSyncedAt,
+      last_updated_at: lastUpdatedAt,
       exchange_rate: exchangeRate,
       cny_estimated_from_rub: !Number(row?.spend_cny || 0) && spendRub > 0,
       roi,
@@ -10811,6 +11346,8 @@ async function dashboardAdSummaryMysql(dateKey) {
           revenue_cny: roundMoneyMysql(shopRevenue),
           spend_rub: roundMoneyMysql(shopSpendRub),
           revenue_rub: roundMoneyMysql(shopRevenueRub),
+          last_synced_at: item.last_synced_at ? new Date(item.last_synced_at).toISOString() : "",
+          last_updated_at: item.last_updated_at ? new Date(item.last_updated_at).toISOString() : "",
           roi: shopSpend ? shopRevenue / shopSpend : null,
           clicks: Number(item.clicks || 0),
           conversion_rate: Number(item.clicks || 0) ? Number(item.orders || 0) / Number(item.clicks || 0) : 0,
@@ -10827,27 +11364,31 @@ async function dashboardAdSummaryMysql(dateKey) {
 
 async function dashboardShopCommerceBreakdownMysql(dateKey) {
   try {
-    const dateFilter = profitDateWhereMysql("o", dateKey, dateKey);
+    const dateFilter = profitOrderedAtUtcRangeMysql("o", dateKey, dateKey);
     const outcome = buildOrderOutcomeSql("o", "mysql");
+    const effectiveBusinessSale = `(${outcome.effectiveSale} AND NOT ${outcome.afterDeliveryReturn})`;
     const rows = await mysqlQuery(`
       SELECT
         o.shop_id,
         COALESCE(s.name, CONCAT('店铺 ', o.shop_id)) AS shop_name,
         COUNT(DISTINCT o.id) AS order_count,
-        COUNT(DISTINCT CASE WHEN ${outcome.effectiveSale} THEN o.id END) AS effective_orders,
-        COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN oi.quantity ELSE 0 END), 0) AS item_quantity,
-        COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN oi.sale_price * oi.quantity ELSE 0 END), 0) AS revenue,
-        COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} AND COALESCE(oi.settlement_state, '') != 'accrued' THEN COALESCE(oi.estimated_profit, 0) ELSE 0 END), 0) AS pending_profit,
+        COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} THEN o.id END) AS effective_orders,
+        COALESCE(SUM(oi.sale_price * oi.quantity), 0) AS total_revenue,
+        COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN oi.quantity ELSE 0 END), 0) AS item_quantity,
+        COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN oi.sale_price * oi.quantity ELSE 0 END), 0) AS effective_revenue,
+        COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} AND COALESCE(oi.settlement_state, '') != 'accrued' THEN COALESCE(oi.estimated_profit, 0) ELSE 0 END), 0) AS pending_profit,
         COUNT(DISTINCT CASE WHEN ${outcome.cancelledPreFulfillment} THEN o.id END) AS cancelled_orders,
         COALESCE(SUM(CASE WHEN ${outcome.cancelledPreFulfillment} THEN oi.quantity ELSE 0 END), 0) AS cancelled_quantity,
+        COALESCE(SUM(CASE WHEN ${outcome.cancelledPreFulfillment} THEN oi.sale_price * oi.quantity ELSE 0 END), 0) AS cancelled_revenue,
         COUNT(DISTINCT CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN o.id END) AS return_orders,
-        COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN oi.quantity ELSE 0 END), 0) AS return_quantity
+        COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN oi.quantity ELSE 0 END), 0) AS return_quantity,
+        COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN oi.sale_price * oi.quantity ELSE 0 END), 0) AS return_revenue
       FROM orders o
       JOIN order_items oi ON oi.order_id = o.id
       LEFT JOIN shops s ON s.id = o.shop_id
       WHERE 1=1 ${dateFilter.whereSql}
       GROUP BY o.shop_id, s.name
-      ORDER BY revenue DESC, order_count DESC
+      ORDER BY effective_revenue DESC, order_count DESC
     `, dateFilter.params);
     return rows.map((row) => ({
       shop_id: row.shop_id,
@@ -10855,12 +11396,16 @@ async function dashboardShopCommerceBreakdownMysql(dateKey) {
       order_count: Number(row.order_count || 0),
       effective_orders: Number(row.effective_orders || 0),
       item_quantity: Number(row.item_quantity || 0),
-      revenue: roundMoneyMysql(row.revenue || 0),
+      total_revenue: roundMoneyMysql(row.total_revenue || 0),
+      revenue: roundMoneyMysql(row.effective_revenue || 0),
+      effective_revenue: roundMoneyMysql(row.effective_revenue || 0),
       pending_profit: roundMoneyMysql(row.pending_profit || 0),
       cancelled_orders: Number(row.cancelled_orders || 0),
       cancelled_quantity: Number(row.cancelled_quantity || 0),
+      cancelled_revenue: roundMoneyMysql(row.cancelled_revenue || 0),
       return_orders: Number(row.return_orders || 0),
-      return_quantity: Number(row.return_quantity || 0)
+      return_quantity: Number(row.return_quantity || 0),
+      return_revenue: roundMoneyMysql(row.return_revenue || 0)
     }));
   } catch (error) {
     console.warn("[dashboard] commerce shop breakdown unavailable:", error.message);
@@ -10892,19 +11437,36 @@ async function dashboardFbpInventoryValueMysql() {
 async function dashboardProfitTrendSummaryMysql(today) {
   const sevenDayFrom = dateKeyDaysAgoMysql(6);
   const monthFrom = String(today || todayDateKeyMysql()).slice(0, 7) + "-01";
-  const [sevenDaySummary, monthSummary] = await Promise.all([
+  const current = new Date(`${today}T00:00:00+08:00`);
+  const previousMonthStartDate = new Date(current.getFullYear(), current.getMonth() - 1, 1);
+  const previousMonthEndDate = new Date(current.getFullYear(), current.getMonth(), 0);
+  const quarterStartMonth = Math.floor(current.getMonth() / 3) * 3;
+  const quarterFrom = dateKeyMysql(new Date(current.getFullYear(), quarterStartMonth, 1));
+  const previousMonthFrom = dateKeyMysql(previousMonthStartDate);
+  const previousMonthTo = dateKeyMysql(previousMonthEndDate);
+  const [sevenDaySummary, monthSummary, previousMonthSummary, quarterSummary] = await Promise.all([
     profitSummaryOverviewMysql(sevenDayFrom, today),
-    profitSummaryOverviewMysql(monthFrom, today)
+    profitSummaryOverviewMysql(monthFrom, today),
+    profitSummaryOverviewMysql(previousMonthFrom, previousMonthTo),
+    profitSummaryOverviewMysql(quarterFrom, today)
   ]);
   const sevenDayCount = inclusiveDateSpanDaysMysql(sevenDayFrom, today);
   const monthDayCount = inclusiveDateSpanDaysMysql(monthFrom, today);
+  const previousMonthDayCount = inclusiveDateSpanDaysMysql(previousMonthFrom, previousMonthTo);
+  const quarterDayCount = inclusiveDateSpanDaysMysql(quarterFrom, today);
   return {
     seven_day_average_profit: roundMoneyMysql(Number(sevenDaySummary?.profit || 0) / Math.max(sevenDayCount, 1)),
     month_average_profit: roundMoneyMysql(Number(monthSummary?.profit || 0) / Math.max(monthDayCount, 1)),
+    previous_month_average_profit: roundMoneyMysql(Number(previousMonthSummary?.profit || 0) / Math.max(previousMonthDayCount, 1)),
+    quarter_average_profit: roundMoneyMysql(Number(quarterSummary?.profit || 0) / Math.max(quarterDayCount, 1)),
     seven_day_total_profit: roundMoneyMysql(sevenDaySummary?.profit || 0),
     month_total_profit: roundMoneyMysql(monthSummary?.profit || 0),
+    previous_month_total_profit: roundMoneyMysql(previousMonthSummary?.profit || 0),
+    quarter_total_profit: roundMoneyMysql(quarterSummary?.profit || 0),
     seven_day_days: sevenDayCount,
-    month_days: monthDayCount
+    month_days: monthDayCount,
+    previous_month_days: previousMonthDayCount,
+    quarter_days: quarterDayCount
   };
 }
 
@@ -10943,13 +11505,84 @@ function inclusiveDateSpanDaysMysql(from, to) {
   return Number.isFinite(diff) && diff > 0 ? diff : 1;
 }
 
-export async function dashboardMysql() {
-  ensureMysqlCutoverEnabled();
+function shouldRefreshDashboardMysql(query = {}) {
+  return ["1", "true", "yes", "force"].includes(String(query.refresh || query.forceRefresh || "").toLowerCase());
+}
+
+function invalidateDashboardCachesMysql() {
+  invalidateMasterDataCachePrefix("profit-dashboard:");
+  invalidateMasterDataCache("stock-alerts:base");
+  invalidateMasterDataCache("stock-alerts:base:v2");
+}
+
+function dashboardSnapshotKeyMysql(dateKey = todayDateKeyMysql()) {
+  return `dashboard:${String(dateKey || todayDateKeyMysql()).slice(0, 10)}`;
+}
+
+function parseDashboardSnapshotPayloadMysql(value) {
+  if (!value) return null;
+  if (typeof value === "object") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function withDashboardSnapshotMetaMysql(payload = {}, row = {}, status = "snapshot") {
+  return {
+    ...payload,
+    snapshot: {
+      ...(payload.snapshot || {}),
+      status,
+      date_key: String(row.date_key || payload?.commerce?.date_key || todayDateKeyMysql()).slice(0, 10),
+      refreshed_at: row.refreshed_at ? new Date(row.refreshed_at).toISOString() : (payload.snapshot?.refreshed_at || ""),
+      source_updated_at: row.source_updated_at ? new Date(row.source_updated_at).toISOString() : (payload.snapshot?.source_updated_at || "")
+    }
+  };
+}
+
+async function loadDashboardSnapshotMysql(dateKey = todayDateKeyMysql()) {
+  await ensureDashboardSnapshotSchemaMysql();
+  const row = await mysqlQueryOne(`
+    SELECT snapshot_key, date_key, payload_json, source_updated_at, refreshed_at
+    FROM dashboard_snapshots
+    WHERE snapshot_key = ?
+    LIMIT 1
+  `, [dashboardSnapshotKeyMysql(dateKey)]);
+  if (!row) return null;
+  const payload = parseDashboardSnapshotPayloadMysql(row.payload_json);
+  if (!payload) return null;
+  return withDashboardSnapshotMetaMysql(payload, row, "snapshot");
+}
+
+async function saveDashboardSnapshotMysql(dateKey, payload = {}) {
+  await ensureDashboardSnapshotSchemaMysql();
+  const snapshotKey = dashboardSnapshotKeyMysql(dateKey);
+  const savedAt = new Date().toISOString();
+  const nextPayload = withDashboardSnapshotMetaMysql(payload, {
+    date_key: dateKey,
+    refreshed_at: savedAt,
+    source_updated_at: savedAt
+  }, "fresh");
+  await mysqlExecute(`
+    INSERT INTO dashboard_snapshots (snapshot_key, date_key, payload_json, source_updated_at, refreshed_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ON DUPLICATE KEY UPDATE
+      payload_json = VALUES(payload_json),
+      source_updated_at = VALUES(source_updated_at),
+      refreshed_at = VALUES(refreshed_at)
+  `, [snapshotKey, dateKey, JSON.stringify(nextPayload)]);
+  return nextPayload;
+}
+
+async function buildDashboardPayloadMysql({ forceRefresh = false } = {}) {
+  if (forceRefresh) invalidateDashboardCachesMysql();
   const today = todayDateKeyMysql();
   const adLatestDate = await latestDashboardAdDateMysql(today);
   const adCurrentDate = adLatestDate || today;
   const adPreviousDate = adLatestDate ? dateKeyMysql(addDaysMysql(new Date(`${adLatestDate}T00:00:00+08:00`), -1)) : dateKeyDaysAgoMysql(1);
-  const [stock, procurement, todayProfit, yesterdayProfit, profitTrend, shopBreakdown, adToday, adYesterday, fbpInventoryValue, aftersalesLoss] = await Promise.all([
+  const [stock, procurement, todayProfit, yesterdayProfit, profitTrend, shopBreakdown, adToday, adYesterday, fbpInventoryValue, fbpOpportunities, aftersalesLoss, scheduledJobs] = await Promise.all([
     stockAlertsMysql({ mode: "fbp-alerts", paged: "1", page: 1, pageSize: 100 }),
     procurementRequestsMysql({ grouped: "1", paged: "1", page: 1, pageSize: 8 }),
     profitSummaryOverviewMysql(today, today),
@@ -10959,7 +11592,9 @@ export async function dashboardMysql() {
     dashboardAdSummaryMysql(adCurrentDate),
     dashboardAdSummaryMysql(adPreviousDate),
     dashboardFbpInventoryValueMysql(),
-    dashboardAftersalesLossSummaryMysql(today)
+    fbpOpportunitiesMysql({ page: 1, pageSize: 8 }),
+    dashboardAftersalesLossSummaryMysql(today),
+    scheduledJobSummary()
   ]);
   const stockRows = stock.rows || [];
   const procurementRows = procurement.rows || [];
@@ -10976,7 +11611,9 @@ export async function dashboardMysql() {
       procurement_amount: roundMoneyMysql(procurementAmount),
       fbp_inventory_value: fbpInventoryValue.value,
       fbp_inventory_quantity: fbpInventoryValue.quantity,
-      aftersales_loss: aftersalesLoss
+      fbp_opportunities: fbpOpportunities.summary || {},
+      aftersales_loss: aftersalesLoss,
+      scheduled_jobs: scheduledJobs
     },
     commerce: {
       date_key: today,
@@ -10994,10 +11631,58 @@ export async function dashboardMysql() {
     },
     alerts: {
       fbp: stockRows,
+      fbpOpportunities: fbpOpportunities.rows || [],
       fbs: [],
-      procurement: procurementRows
+      procurement: procurementRows,
+      scheduledJobs: scheduledJobs
     }
   };
+}
+
+async function rebuildDashboardSnapshotMysql(options = {}) {
+  ensureMysqlCutoverEnabled();
+  const dateKey = todayDateKeyMysql();
+  const payload = await buildDashboardPayloadMysql({ forceRefresh: options.forceRefresh === true });
+  return saveDashboardSnapshotMysql(dateKey, payload);
+}
+
+export async function refreshDashboardSnapshotMysql(options = {}) {
+  return rebuildDashboardSnapshotMysql({
+    forceRefresh: options.forceRefresh === true || options.refresh === true
+  });
+}
+
+function queueDashboardSnapshotRefreshMysql(options = {}) {
+  const dateKey = todayDateKeyMysql();
+  const snapshotKey = dashboardSnapshotKeyMysql(dateKey);
+  if (dashboardSnapshotRefreshJobsMysql.has(snapshotKey)) return;
+  const job = rebuildDashboardSnapshotMysql(options)
+    .catch((error) => {
+      console.warn("[dashboard] snapshot refresh failed:", error.message);
+    })
+    .finally(() => {
+      dashboardSnapshotRefreshJobsMysql.delete(snapshotKey);
+    });
+  dashboardSnapshotRefreshJobsMysql.set(snapshotKey, job);
+}
+
+export async function dashboardMysql(query = {}) {
+  ensureMysqlCutoverEnabled();
+  const forceRefresh = shouldRefreshDashboardMysql(query);
+  const snapshotOnly = ["1", "true", "yes"].includes(String(query.snapshotOnly || query.snapshot_only || "").toLowerCase());
+  const today = todayDateKeyMysql();
+
+  if (forceRefresh) {
+    return rebuildDashboardSnapshotMysql({ forceRefresh: true });
+  }
+
+  const snapshot = await loadDashboardSnapshotMysql(today);
+  if (snapshot) {
+    if (!snapshotOnly) queueDashboardSnapshotRefreshMysql({ forceRefresh: false });
+    return snapshot;
+  }
+
+  return rebuildDashboardSnapshotMysql({ forceRefresh: false });
 }
 
 export async function inventoryMysql() {
@@ -11514,9 +12199,7 @@ async function loadOrderLogisticsSummaryForBaseMysql(base) {
     `, base.params);
     const resolvedRows = [];
     for (const row of rows) {
-      const rule = normalizeResolvedLogisticsRuleMysql(
-        matchOrderLogisticsRuleFromTextMysql(`${row.tracking_number || ""} ${row.raw_json || ""}`, methods)
-      );
+      const rule = cachedOrderLogisticsRuleFromRowMysql(row, methods);
       if (!rule?.value || !rule?.label) continue;
       resolvedRows.push({
         id: Number(row.id),

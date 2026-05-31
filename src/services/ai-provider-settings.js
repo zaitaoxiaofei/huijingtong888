@@ -172,35 +172,54 @@ export async function generateSelectionSellingPoints(payload = {}) {
   const runtimeConfig = await resolveRuntimeConfig({}, { requireEnabled: true, route: "text" });
   const context = buildSelectionSellingPointContext(payload);
   if (!context.hasUsefulInfo) {
-    throw statusError("请先填写商品名称、适配车型、材质或简短卖点后再生成", 400);
+    throw statusError("????????????????????????????", 400);
   }
 
-  const result = await callOpenAiCompatibleChat(runtimeConfig, {
-    messages: [
-      {
-        role: "system",
-        content: [
-          "你是跨境电商 Ozon 选品文案助手。",
-          "任务是根据商品资料生成中文产品卖点，供后续素材裂变、上架标题和详情页文案参考。",
-          "要求：真实克制，不编造认证、品牌、尺寸、车型、销量、质保或实验数据；信息不足时使用通用但合理的表述。",
-          "输出一段中文卖点文案，120-260 字，语气专业清晰，不要 Markdown，不要编号，不要解释生成过程。"
-        ].join("\n")
-      },
-      {
-        role: "user",
-        content: context.prompt
-      }
-    ],
-    temperature: 0.45,
-    maxTokens: 420
-  });
+  try {
+    const result = await Promise.race([
+      callOpenAiCompatibleChat(runtimeConfig, {
+        messages: [
+          {
+            role: "system",
+            content: [
+              "?? Ozon ?????????",
+              "????????????????????????",
+              "??????????????????? Markdown??????",
+              "????????????????????????????????????????????",
+              "??????????"
+            ].join("\n")
+          },
+          {
+            role: "user",
+            content: context.prompt
+          }
+        ],
+        temperature: 0.2,
+        maxTokens: 220,
+        timeoutMs: 8_000
+      }),
+      new Promise((resolve) => setTimeout(() => resolve({ provider: runtimeConfig.provider, model: runtimeConfig.textModel, content: fallbackSelectionSellingPoints(payload), usage: null, fallback: true }), 8000))
+    ]);
 
-  return {
-    provider: runtimeConfig.provider,
-    model: runtimeConfig.textModel,
-    selling_points: normalizeGeneratedSellingPoints(result.content),
-    usage: result.usage || null
-  };
+    const sellingPoints = normalizeGeneratedSellingPoints(result.content);
+    const useFallback = Boolean(result.fallback) || !isUsableSelectionSellingPoints(sellingPoints);
+    return {
+      provider: result.provider,
+      model: result.model,
+      selling_points: useFallback ? fallbackSelectionSellingPoints(payload) : sellingPoints,
+      usage: result.usage || null,
+      fallback: useFallback
+    };
+  } catch (error) {
+    console.error("Selection selling points AI fallback", error);
+    return {
+      provider: runtimeConfig.provider,
+      model: runtimeConfig.textModel,
+      selling_points: fallbackSelectionSellingPoints(payload),
+      usage: null,
+      fallback: true
+    };
+  }
 }
 
 export async function aiImageRuntimeConfig() {
@@ -244,6 +263,7 @@ async function resolveRuntimeConfig(override = {}, options = {}) {
   const requireEnabled = options.requireEnabled !== false;
   if (!requireEnabled && apiKey && !override.apiKey) override.apiKey = apiKey;
   const routeModel = cleanText(override.textModel || override.model || override.imageModel || modelFromRoute || fallbackModelFromRoute);
+  const hasStoredEncryptedKey = Boolean(String(providerConfig.apiKeyEncrypted || "").trim());
   const runtimeConfig = {
     ...providerConfig,
     provider: providerKey,
@@ -271,7 +291,8 @@ async function callOpenAiCompatibleChat(runtimeConfig, options = {}) {
   if (options.maxTokens) body.max_tokens = options.maxTokens;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60_000);
+  const timeoutMs = Math.max(1000, Number(options.timeoutMs || 60_000));
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(endpoint, {
       method: "POST",
@@ -284,17 +305,49 @@ async function callOpenAiCompatibleChat(runtimeConfig, options = {}) {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw statusError(data?.error?.message || data?.message || `AI 接口请求失败：${response.status}`, response.status);
+      throw statusError(data?.error?.message || data?.message || `AI ???????${response.status}`, response.status);
     }
-    const content = data?.choices?.[0]?.message?.content;
-    if (!content) throw statusError("AI 接口没有返回文本内容", 502);
+    const content = extractAiTextContent(data);
+    if (!content) throw statusError("AI ??????????", 502);
     return { content, usage: data.usage, raw: data };
   } catch (error) {
-    if (error?.name === "AbortError") throw statusError("AI 接口请求超时", 504);
+    if (error?.name === "AbortError") throw statusError("AI ??????", 504);
     throw error;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function extractAiTextContent(data = {}) {
+  const choice = data?.choices?.[0] || data?.data?.[0] || null;
+  const message = choice?.message || choice?.delta || data?.message || null;
+  const directContent = normalizeAiContentValue(message?.content);
+  if (directContent) return directContent;
+
+  const outputText = normalizeAiContentValue(choice?.text || data?.text || data?.output_text || data?.response);
+  if (outputText) return outputText;
+
+  const reasoningText = normalizeAiContentValue(message?.reasoning_content || choice?.reasoning_content || data?.reasoning_content);
+  if (reasoningText) return reasoningText;
+
+  return "";
+}
+
+function normalizeAiContentValue(value) {
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (typeof item?.text === "string") return item.text;
+        if (typeof item?.content === "string") return item.content;
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+  }
+  return "";
 }
 
 async function testOpenAiCompatibleModels(runtimeConfig) {
@@ -519,7 +572,7 @@ async function ensureSettingsTables() {
 
 function encryptSecret(secret) {
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", encryptionKey(), iv);
+  const cipher = crypto.createCipheriv("aes-256-gcm", primaryEncryptionKey(), iv);
   const encrypted = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
   return `v1:${iv.toString("base64")}:${tag.toString("base64")}:${encrypted.toString("base64")}`;
@@ -530,21 +583,44 @@ function decryptSecret(value) {
   if (!text) return "";
   const [version, iv, tag, encrypted] = text.split(":");
   if (version !== "v1" || !iv || !tag || !encrypted) return "";
-  try {
-    const decipher = crypto.createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(iv, "base64"));
-    decipher.setAuthTag(Buffer.from(tag, "base64"));
-    return Buffer.concat([
-      decipher.update(Buffer.from(encrypted, "base64")),
-      decipher.final()
-    ]).toString("utf8");
-  } catch {
-    return "";
+  for (const key of candidateEncryptionKeys()) {
+    try {
+      const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64"));
+      decipher.setAuthTag(Buffer.from(tag, "base64"));
+      return Buffer.concat([
+        decipher.update(Buffer.from(encrypted, "base64")),
+        decipher.final()
+      ]).toString("utf8");
+    } catch {
+      continue;
+    }
   }
+  return "";
 }
 
-function encryptionKey() {
-  const seed = process.env.AI_CONFIG_SECRET || config.siteAccessPassword || "ozon-erp-local-ai-config";
-  return crypto.createHash("sha256").update(seed).digest();
+function primaryEncryptionKey() {
+  return encryptionKeyFromSeed(process.env.AI_CONFIG_SECRET || config.siteAccessPassword || "ozon-erp-local-ai-config");
+}
+
+function candidateEncryptionKeys() {
+  const seeds = [
+    process.env.AI_CONFIG_SECRET,
+    config.siteAccessPassword,
+    process.env.SITE_ACCESS_PASSWORD,
+    "ozon-erp-local-ai-config",
+    "ozon-erp-ai-config",
+    "erp.hjt888.xyz",
+    process.env.APP_BASE_URL,
+    process.env.LISTING_MEDIA_PUBLIC_BASE_URL
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  return Array.from(new Set(seeds)).map(encryptionKeyFromSeed);
+}
+
+function encryptionKeyFromSeed(seed) {
+  return crypto.createHash("sha256").update(String(seed || "")).digest();
 }
 
 function maskSecret(secret) {
@@ -580,14 +656,14 @@ function finiteNumber(value, fallback) {
 
 function buildSelectionSellingPointContext(payload = {}) {
   const fields = [
-    ["商品名称", payload.name],
-    ["Ozon 类目", payload.ozon_category_name || payload.categoryName],
-    ["适配车型", payload.vehicle_model || payload.vehicleModel],
-    ["材质", payload.material],
-    ["颜色", Array.isArray(payload.color) ? payload.color.join("、") : payload.color],
-    ["现有卖点参考", payload.existing_selling_points || payload.selling_points || payload.sellingPoints],
-    ["供应商备注", payload.supplier_note || payload.supplierNote],
-    ["采购平台", payload.source_platform || payload.sourcePlatform]
+    ["????", payload.name],
+    ["Ozon ??", payload.ozon_category_name || payload.categoryName],
+    ["????", payload.vehicle_model || payload.vehicleModel],
+    ["??", payload.material],
+    ["??", Array.isArray(payload.color) ? payload.color.join("?") : payload.color],
+    ["??????", payload.existing_selling_points || payload.selling_points || payload.sellingPoints],
+    ["?????", payload.supplier_note || payload.supplierNote],
+    ["????", payload.source_platform || payload.sourcePlatform]
   ]
     .map(([label, value]) => [label, cleanText(value)])
     .filter(([, value]) => value);
@@ -595,13 +671,45 @@ function buildSelectionSellingPointContext(payload = {}) {
   return {
     hasUsefulInfo: fields.length > 0,
     prompt: [
-      "请基于下面资料生成产品卖点。",
-      "如果已有卖点参考，请在保留原意的基础上扩写和整理；如果没有，请根据名称、车型、材质、颜色和类目信息联想合理卖点。",
-      "重点覆盖：适配范围、材质或触感、保护性、安装或使用场景、日常维护便利性。",
+      "??????????????",
+      "??????????????????????????????????????????????????????????",
+      "????????????????????????????????????",
       "",
-      ...fields.map(([label, value]) => `${label}：${value}`)
+      ...fields.map(([label, value]) => label + '?' + value)
     ].join("\n")
   };
+}
+
+function isUsableSelectionSellingPoints(value) {
+  const text = cleanText(value);
+  if (!text) return false;
+  if (text.length < 24) return false;
+  const lower = text.toLowerCase();
+  if (lower.startsWith("? ?????????")) return false;
+  if (lower.includes("?? ???? ????????")) return false;
+  if (lower.includes("?????") || lower.includes("??????")) return false;
+  const chineseChars = (text.match(/[一-鿿]/g) || []).length;
+  return chineseChars >= 12;
+}
+
+function fallbackSelectionSellingPoints(payload = {}) {
+  const name = cleanText(payload.name || payload.productName || "????");
+  const category = cleanText(payload.ozon_category_name || payload.categoryName || "");
+  const vehicleModel = cleanText(payload.vehicle_model || payload.vehicleModel || payload.vehicle_brand || payload.vehicleBrand || "");
+  const material = cleanText(payload.material || "");
+  const color = cleanText(Array.isArray(payload.color) ? payload.color.join("?") : payload.color || "");
+  const existing = cleanText(payload.existing_selling_points || payload.selling_points || payload.sellingPoints || "");
+  const sourcePlatform = cleanText(payload.source_platform || payload.sourcePlatform || "");
+  const parts = [
+    name,
+    vehicleModel ? ('??' + vehicleModel + '??????') : '???????????????',
+    material ? ('??' + material + '???????????') : '??????????????',
+    color ? (color + '????????????') : '?????????????',
+    category ? ('???' + category + '?????????') : '????????????',
+    sourcePlatform ? ('????' + sourcePlatform + '?????????????') : '????????????'
+  ].filter(Boolean);
+  if (existing) parts.unshift(existing);
+  return parts.join('?') + '?';
 }
 
 function normalizeGeneratedSellingPoints(value) {

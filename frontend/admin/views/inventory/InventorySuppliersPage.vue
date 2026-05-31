@@ -192,7 +192,7 @@ onMounted(async () => {
       @reset="handleReset"
     >
       <template #actions>
-        <el-button type="primary" @click="openCreateDialog">新增供应商</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新增供应商</el-button>
       </template>
     </InventoryPageToolbar>
 
@@ -209,10 +209,10 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
-            <el-space wrap>
-              <el-button link type="primary" @click="openEditDialog(row)">编辑</el-button>
-              <el-button link type="danger" @click="deleteSupplier(row)">删除</el-button>
-            </el-space>
+            <div class="erp-inline-actions">
+              <el-button class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
+              <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="deleteSupplier(row)">删除</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -246,9 +246,9 @@ onMounted(async () => {
         </el-form-item>
       </el-form>
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="dialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="dialogSubmitting" @click="submitDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="dialogVisible = false">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="dialogSubmitting" @click="submitDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>

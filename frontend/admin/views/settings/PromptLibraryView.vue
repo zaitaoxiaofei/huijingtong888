@@ -2338,16 +2338,16 @@ function renderText(template, variables) {
         <p>当前商品 → AI优化目标 → 推荐策略 → 生成内容 → 回写素材与上架数据。</p>
       </div>
       <div class="topbar-actions">
-        <el-button @click="openDiagnosis">数据诊断</el-button>
-        <el-button :icon="Setting" @click="strategyDrawer = true">AI策略</el-button>
-        <el-button @click="openStrategyLibrary">策略库</el-button>
-        <el-button @click="openTemplateCenter">模板中心</el-button>
-        <el-button :icon="View" @click="openMaterialCenter">查看素材</el-button>
-        <el-button @click="saveDraft">保存草稿</el-button>
-        <el-button type="primary" :icon="MagicStick" :loading="generating" @click="startGenerate">开始AI优化</el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="openDiagnosis">数据诊断</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="Setting" @click="strategyDrawer = true">AI策略</el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="openStrategyLibrary">策略库</el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="openTemplateCenter">模板中心</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="View" @click="openMaterialCenter">查看素材</el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="saveDraft">保存草稿</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" :icon="MagicStick" :loading="generating" @click="startGenerate">开始AI优化</el-button>
         <el-tooltip :content="writeBackGateText" placement="top">
           <span>
-            <el-button type="success" plain :disabled="!displayResults.length || !selectionTemplateReady" @click="batchWriteBack">创建选品记录</el-button>
+            <el-button class="erp-btn erp-btn-secondary" type="success" plain :disabled="!displayResults.length || !selectionTemplateReady" @click="batchWriteBack">创建选品记录</el-button>
           </span>
         </el-tooltip>
       </div>
@@ -2375,9 +2375,9 @@ function renderText(template, variables) {
               </div>
             </div>
             <div class="context-actions">
-              <el-button size="small" type="primary" plain @click="openSourceDialog">导入素材</el-button>
-              <el-button size="small" plain @click="triggerReferenceUpload">上传参考图</el-button>
-              <el-button size="small" text type="primary" @click="productInfoDrawer = true">查看完整商品信息</el-button>
+              <el-button class="erp-btn erp-btn-secondary" size="small" type="primary" plain @click="openSourceDialog">导入素材</el-button>
+              <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="triggerReferenceUpload">上传参考图</el-button>
+              <el-button class="erp-btn-link" size="small" text type="primary" @click="productInfoDrawer = true">查看完整商品信息</el-button>
             </div>
             <div class="context-status-bar">
               <span>详情图：{{ task.detailImageCount || 0 }}张</span>
@@ -2396,12 +2396,12 @@ function renderText(template, variables) {
             <div class="card-actions">
               <el-popover placement="bottom-end" width="260" trigger="click">
                 <template #reference>
-                  <el-button link>显示字段</el-button>
+                  <el-button class="erp-btn-link" link>显示字段</el-button>
                 </template>
                 <div class="field-preferences">
                   <div class="field-preferences-head">
                     <strong>我的字段显示</strong>
-                    <el-button link type="primary" @click="resetSourceFieldPreferences">恢复默认</el-button>
+                    <el-button class="erp-btn-link" link type="primary" @click="resetSourceFieldPreferences">恢复默认</el-button>
                   </div>
                   <el-checkbox-group v-model="visibleSourceFieldKeys" @change="saveSourceFieldPreferences">
                     <el-checkbox v-for="field in sourceFieldOptions" :key="field.key" :value="field.key">
@@ -2410,8 +2410,8 @@ function renderText(template, variables) {
                   </el-checkbox-group>
                 </div>
               </el-popover>
-              <el-button link type="primary" @click="productInfoDrawer = true">查看完整商品信息</el-button>
-              <el-button link type="primary" :icon="UploadFilled" @click="openSourceDialog">导入素材</el-button>
+              <el-button class="erp-btn-link" link type="primary" @click="productInfoDrawer = true">查看完整商品信息</el-button>
+              <el-button class="erp-btn-link" link type="primary" :icon="UploadFilled" @click="openSourceDialog">导入素材</el-button>
             </div>
           </div>
           <el-alert v-if="task.sourceLabel" type="success" :closable="false" :title="`当前来源：${task.sourceLabel}`" />
@@ -2488,7 +2488,7 @@ function renderText(template, variables) {
                 <strong>当前素材</strong>
                 <span>识别当前已有素材，决定是否作为 image2 参考图或回写对象。</span>
               </div>
-              <el-button size="small" plain @click="openSourceDialog">替换</el-button>
+              <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="openSourceDialog">替换</el-button>
             </div>
             <div class="current-assets-body featured-assets-body">
               <div class="current-thumb">
@@ -2507,12 +2507,12 @@ function renderText(template, variables) {
               </div>
             </div>
             <div class="current-asset-actions">
-              <el-button size="small" type="primary" plain @click="openSourceDialog">导入素材</el-button>
-              <el-button size="small" plain @click="openSourceDialog">上传参考图</el-button>
-              <el-button size="small" text type="primary" @click="task.useSourceImageAsReference = !task.useSourceImageAsReference">
+              <el-button class="erp-btn erp-btn-secondary" size="small" type="primary" plain @click="openSourceDialog">导入素材</el-button>
+              <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="openSourceDialog">上传参考图</el-button>
+              <el-button class="erp-btn-link" size="small" text type="primary" @click="task.useSourceImageAsReference = !task.useSourceImageAsReference">
                 {{ task.useSourceImageAsReference ? "已作为 image2 参考图" : "选择为 image2 参考图" }}
               </el-button>
-              <el-button size="small" text type="primary" @click="previewPrompt">查看</el-button>
+              <el-button class="erp-btn-link" size="small" text type="primary" @click="previewPrompt">查看</el-button>
             </div>
           </section>
           <section class="ai-plan-card">
@@ -2652,11 +2652,12 @@ function renderText(template, variables) {
             <em>{{ displayResults.length }} 个结果</em>
           </div>
           <div class="canvas-status-actions">
-            <el-button size="small" :disabled="!displayResults.length" @click="saveDraft">保存草稿</el-button>
-            <el-button size="small" type="primary" :loading="generating" @click="startGenerate">重新生成</el-button>
+            <el-button class="erp-btn erp-btn-secondary" size="small" :disabled="!displayResults.length" @click="saveDraft">保存草稿</el-button>
+            <el-button class="erp-btn erp-btn-primary" size="small" type="primary" :loading="generating" @click="startGenerate">重新生成</el-button>
             <el-tooltip :content="writeBackGateText" placement="top">
               <span>
                 <el-button
+                  class="erp-btn erp-btn-secondary"
                   size="small"
                   type="success"
                   plain
@@ -2682,7 +2683,7 @@ function renderText(template, variables) {
               <el-select v-model="task.style" placeholder="图片风格" style="width: 180px">
                 <el-option v-for="item in styleOptions" :key="item.key" :label="item.title" :value="item.key" @click="selectStrategy(item)" />
               </el-select>
-              <el-button :icon="View" @click="previewPrompt">预览Prompt</el-button>
+              <el-button class="erp-btn erp-btn-secondary" :icon="View" @click="previewPrompt">预览Prompt</el-button>
             </div>
           </div>
           <el-tabs v-model="activeConfigTab" class="config-tabs inline-config-tabs">
@@ -2691,7 +2692,7 @@ function renderText(template, variables) {
                 <div class="inline-targets">
                   <div class="target-tab-head">
                     <strong>{{ isVariantWorkflow ? "裂变变量" : "车型变量（可选）" }}</strong>
-                    <el-button link type="danger" :disabled="!task.targets.length" @click="clearTargets">清空</el-button>
+                     <el-button class="erp-btn-link-danger" link type="danger" :disabled="!task.targets.length" @click="clearTargets">清空</el-button>
                   </div>
                   <div class="target-tags">
                     <el-tag v-for="(item, index) in task.targets" :key="item" closable @close="removeTarget(index)">{{ item }}</el-tag>
@@ -2707,14 +2708,14 @@ function renderText(template, variables) {
                       @keyup.enter.exact.prevent="addTargetFromInput"
                       @keyup.ctrl.enter="addTargetFromInput"
                     />
-                    <el-button type="primary" @click="addTargetFromInput">添加</el-button>
+                    <el-button class="erp-btn erp-btn-primary" type="primary" @click="addTargetFromInput">添加</el-button>
                   </div>
                   <div class="quick-row">
-                    <el-button size="small" @click="quickTargets(['TENET T4', 'TENET T7', 'TENET T8'])">TENET</el-button>
-                    <el-button size="small" @click="quickTargets(['BELGEE X50', 'BELGEE X70'])">BELGEE</el-button>
-                    <el-button size="small" @click="quickTargets(['HAVAL Jolion', 'HAVAL F7', 'HAVAL Dargo'])">HAVAL</el-button>
-                    <el-button size="small" @click="quickTargets(['CHERY TIGGO 4', 'CHERY TIGGO 7', 'CHERY TIGGO 8'])">CHERY</el-button>
-                    <el-button size="small" @click="quickTargets(['JAECOO J7', 'JAECOO J8'])">JAECOO</el-button>
+                    <el-button class="erp-btn erp-btn-secondary" size="small" @click="quickTargets(['TENET T4', 'TENET T7', 'TENET T8'])">TENET</el-button>
+                    <el-button class="erp-btn erp-btn-secondary" size="small" @click="quickTargets(['BELGEE X50', 'BELGEE X70'])">BELGEE</el-button>
+                    <el-button class="erp-btn erp-btn-secondary" size="small" @click="quickTargets(['HAVAL Jolion', 'HAVAL F7', 'HAVAL Dargo'])">HAVAL</el-button>
+                    <el-button class="erp-btn erp-btn-secondary" size="small" @click="quickTargets(['CHERY TIGGO 4', 'CHERY TIGGO 7', 'CHERY TIGGO 8'])">CHERY</el-button>
+                    <el-button class="erp-btn erp-btn-secondary" size="small" @click="quickTargets(['JAECOO J7', 'JAECOO J8'])">JAECOO</el-button>
                   </div>
                 </div>
                 <div class="asset-check-groups inline-asset-groups">
@@ -2807,13 +2808,13 @@ function renderText(template, variables) {
                   </div>
                   <div v-if="item.status === '失败'" class="asset-error">{{ item.errorMessage }}</div>
                   <div class="asset-actions">
-                    <el-button size="small" :icon="Refresh" @click="regenerateResult(item)">重新生成</el-button>
-                    <el-button size="small" @click="editPromptForItem(item)">编辑Prompt</el-button>
-                    <el-button size="small" :icon="Download" tag="a" :href="item.downloadUrl ? downloadUrl(item.downloadUrl) : undefined" :disabled="!item.downloadUrl">下载</el-button>
-                    <el-button size="small" @click="setAsMain(item)">设为主图</el-button>
+                    <el-button class="erp-btn erp-btn-secondary" size="small" :icon="Refresh" @click="regenerateResult(item)">重新生成</el-button>
+                    <el-button class="erp-btn erp-btn-secondary" size="small" @click="editPromptForItem(item)">编辑Prompt</el-button>
+                    <el-button class="erp-btn erp-btn-secondary" size="small" :icon="Download" tag="a" :href="item.downloadUrl ? downloadUrl(item.downloadUrl) : undefined" :disabled="!item.downloadUrl">下载</el-button>
+                    <el-button class="erp-btn erp-btn-secondary" size="small" @click="setAsMain(item)">设为主图</el-button>
                     <el-tooltip :content="writeBackGateText" placement="top">
                       <span>
-                        <el-button size="small" type="primary" plain :disabled="!selectionTemplateReady" @click="writeBack(item)">创建选品</el-button>
+                        <el-button class="erp-btn erp-btn-secondary" size="small" type="primary" plain :disabled="!selectionTemplateReady" @click="writeBack(item)">创建选品</el-button>
                       </span>
                     </el-tooltip>
                   </div>
@@ -2837,7 +2838,7 @@ function renderText(template, variables) {
                     <span>{{ ["高点击版本", "高搜索版本", "精准车型版本", "通用款版本"][index] || "标题方案" }}</span>
                     <p>{{ ruCopy(title) }}</p>
                     <em v-if="zhCopy(title)" class="copy-translation">{{ zhCopy(title) }}</em>
-                    <el-button size="small" text @click="task.title = normalizeCopyForWrite(title)">设为最终标题</el-button>
+                     <el-button class="erp-btn-link" size="small" text @click="task.title = normalizeCopyForWrite(title)">设为最终标题</el-button>
                   </div>
                 </article>
                 <article v-for="item in tagResults" :key="`tag-${item.id}`" class="copy-result-card">
@@ -2848,13 +2849,13 @@ function renderText(template, variables) {
                     </el-tooltip>
                   </div>
                   <p class="tag-tip">共 {{ item.generatedTags.length }} 个标签，已自动去重。建议单个标签不超过 30 个字符。</p>
-                  <el-button size="small" type="primary" plain @click="task.productTags = item.generatedTags.map(normalizeCopyForWrite).filter(Boolean).join(', ')">一键回写标签</el-button>
+                  <el-button class="erp-btn erp-btn-secondary" size="small" type="primary" plain @click="task.productTags = item.generatedTags.map(normalizeCopyForWrite).filter(Boolean).join(', ')">一键回写标签</el-button>
                 </article>
                 <article v-for="item in descriptionResults" :key="`desc-${item.id}`" class="copy-result-card">
                   <strong>{{ item.targetModel }} 描述方案</strong>
                   <p>{{ ruCopy(item.generatedDescription) }}</p>
                   <em v-if="zhCopy(item.generatedDescription)" class="copy-translation">{{ zhCopy(item.generatedDescription) }}</em>
-                  <el-button size="small" type="primary" plain @click="task.summary = normalizeCopyForWrite(item.generatedDescription)">回写简介</el-button>
+                  <el-button class="erp-btn erp-btn-secondary" size="small" type="primary" plain @click="task.summary = normalizeCopyForWrite(item.generatedDescription)">回写简介</el-button>
                 </article>
               </div>
               <el-empty v-else class="compact-result-empty" description="本次还没有生成文案素材" />
@@ -2868,7 +2869,7 @@ function renderText(template, variables) {
                 </div>
                 <el-tooltip :content="writeBackGateText" placement="top">
                   <span>
-                    <el-button size="small" type="primary" plain :disabled="!displayResults.length || !selectionTemplateReady" @click="batchWriteBack">创建选品记录</el-button>
+                    <el-button class="erp-btn erp-btn-secondary" size="small" type="primary" plain :disabled="!displayResults.length || !selectionTemplateReady" @click="batchWriteBack">创建选品记录</el-button>
                   </span>
                 </el-tooltip>
               </div>
@@ -3024,7 +3025,7 @@ function renderText(template, variables) {
       <section class="drawer-strategy-list">
         <div class="drawer-section-head">
           <h3>本次采用的AI策略</h3>
-          <el-button size="small" type="primary" plain @click="strategyDrawer = false">返回工作台调整</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" type="primary" plain @click="strategyDrawer = false">返回工作台调整</el-button>
         </div>
         <div class="drawer-strategy-grid">
           <article
@@ -3050,7 +3051,7 @@ function renderText(template, variables) {
             </div>
             <div class="drawer-section-head">
               <h3>最终拼接Prompt（队列首个任务）</h3>
-              <el-button size="small" @click="previewPrompt">重新拼接</el-button>
+              <el-button class="erp-btn erp-btn-secondary" size="small" @click="previewPrompt">重新拼接</el-button>
             </div>
             <pre>{{ previewPositivePrompt || finalPrompt }}</pre>
             <h4>负向规则</h4>
@@ -3062,8 +3063,8 @@ function renderText(template, variables) {
           <el-input v-model="task.advancedNegativePrompt" class="mt-10" type="textarea" :rows="5" placeholder="负向Prompt，留空则使用负向规则" />
           <el-input v-model="task.variablesJson" class="mt-10" type="textarea" :rows="5" placeholder="变量JSON" />
           <div class="advanced-actions">
-            <el-button @click="task.advancedPositivePrompt = ''; task.advancedNegativePrompt = ''">恢复模块化Prompt</el-button>
-            <el-button type="primary" @click="saveCurrentAsTemplate">保存为模板</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="task.advancedPositivePrompt = ''; task.advancedNegativePrompt = ''">恢复模块化Prompt</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="saveCurrentAsTemplate">保存为模板</el-button>
           </div>
         </el-collapse-item>
         <el-collapse-item title="AI生成日志" name="logs">
@@ -3103,9 +3104,9 @@ function renderText(template, variables) {
           <div class="editor-head">
             <strong>{{ strategyForm.id ? "编辑策略" : "新增策略" }}</strong>
             <div>
-              <el-button @click="newStrategy">新增</el-button>
-              <el-button :disabled="!strategyForm.id" type="danger" plain @click="removeStrategy(strategyForm)">停用</el-button>
-              <el-button type="primary" :loading="savingStrategy" @click="saveStrategy">保存</el-button>
+              <el-button class="erp-btn erp-btn-secondary" @click="newStrategy">新增</el-button>
+              <el-button class="erp-btn erp-btn-danger" :disabled="!strategyForm.id" type="danger" plain @click="removeStrategy(strategyForm)">停用</el-button>
+              <el-button class="erp-btn erp-btn-primary" type="primary" :loading="savingStrategy" @click="saveStrategy">保存</el-button>
             </div>
           </div>
           <el-form label-position="top">
@@ -3190,11 +3191,11 @@ function renderText(template, variables) {
           <div class="editor-head">
             <strong>{{ templateForm.id ? "编辑模板" : "新增模板" }}</strong>
             <div>
-              <el-button @click="newTemplate">新增</el-button>
-              <el-button :disabled="!templateForm.id" @click="copyTemplate(templateForm)">复制</el-button>
-              <el-button :disabled="!templateForm.id" @click="makeDefault(templateForm)">默认</el-button>
-              <el-button :disabled="!templateForm.id" type="danger" plain @click="removeTemplate(templateForm)">删除</el-button>
-              <el-button type="primary" :loading="savingTemplate" @click="saveTemplate">保存</el-button>
+              <el-button class="erp-btn erp-btn-secondary" @click="newTemplate">新增</el-button>
+              <el-button class="erp-btn erp-btn-secondary" :disabled="!templateForm.id" @click="copyTemplate(templateForm)">复制</el-button>
+              <el-button class="erp-btn erp-btn-secondary" :disabled="!templateForm.id" @click="makeDefault(templateForm)">默认</el-button>
+              <el-button class="erp-btn erp-btn-danger" :disabled="!templateForm.id" type="danger" plain @click="removeTemplate(templateForm)">删除</el-button>
+              <el-button class="erp-btn erp-btn-primary" type="primary" :loading="savingTemplate" @click="saveTemplate">保存</el-button>
             </div>
           </div>
           <el-form label-position="top">

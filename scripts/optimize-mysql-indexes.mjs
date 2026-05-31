@@ -64,7 +64,14 @@ const indexDefinitions = [
   ["ozon_stock_snapshots", "idx_ozon_stock_sku_synced", "CREATE INDEX idx_ozon_stock_sku_synced ON ozon_stock_snapshots (shop_id, ozon_sku, stock_type, synced_at DESC)"],
   ["inbound_records", "idx_inbound_product_purchase", "CREATE INDEX idx_inbound_product_purchase ON inbound_records (product_id, purchase_order_id)"],
   ["exchange_rates", "idx_exchange_rates_pair_date", "CREATE INDEX idx_exchange_rates_pair_date ON exchange_rates (currency_from, currency_to, effective_date DESC, id DESC)"],
-  ["historical_profit_reviews", "idx_historical_profit_reviews_status", "CREATE INDEX idx_historical_profit_reviews_status ON historical_profit_reviews (review_status, updated_at DESC)"]
+  ["historical_profit_reviews", "idx_historical_profit_reviews_status", "CREATE INDEX idx_historical_profit_reviews_status ON historical_profit_reviews (review_status, updated_at DESC)"],
+  ["products", "idx_products_selection_list", "CREATE INDEX idx_products_selection_list ON products (active, product_type, selection_status, updated_at DESC, id DESC)"],
+  ["products", "idx_products_selection_owner", "CREATE INDEX idx_products_selection_owner ON products (owner_person_id, active, product_type, selection_status)"],
+  ["asset_variant_jobs", "idx_asset_variant_jobs_product_type_id", "CREATE INDEX idx_asset_variant_jobs_product_type_id ON asset_variant_jobs (product_id, job_type, id)"],
+  ["ozon_stock_snapshots", "idx_ozon_stock_sku_synced_desc", "CREATE INDEX idx_ozon_stock_sku_synced_desc ON ozon_stock_snapshots (shop_id, ozon_sku, stock_type, synced_at DESC)"],
+  ["order_items", "idx_order_items_sku_order_qty", "CREATE INDEX idx_order_items_sku_order_qty ON order_items (ozon_sku, order_id, quantity)"],
+  ["orders", "idx_orders_status_stage_shop_ordered", "CREATE INDEX idx_orders_status_stage_shop_ordered ON orders (status, tracking_stage, shop_id, ordered_at)"],
+  ["ozon_orders_raw", "idx_raw_orders_store_posting_id", "CREATE INDEX idx_raw_orders_store_posting_id ON ozon_orders_raw (store_id, posting_number, id)"]
 ];
 
 async function indexExists(tableName, indexName) {

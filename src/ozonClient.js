@@ -250,6 +250,21 @@ export async function archiveOzonProducts(shop, productIds = [], options = {}) {
   return ozonRequest(shop, "/v1/product/archive", { product_id }, options);
 }
 
+export async function generateOzonBarcodes(shop, productIds = [], options = {}) {
+  const product_ids = [...new Set((productIds || []).map(Number).filter(Boolean))];
+  if (!product_ids.length) throw new Error("Missing Ozon product ids for barcode generation");
+  if (!hasRealOzonCredentials(shop)) {
+    return {
+      result: product_ids.map((id) => ({
+        product_id: id,
+        barcode: `OZN${String(id).padStart(10, "0").slice(-10)}`
+      })),
+      demo: true
+    };
+  }
+  return ozonRequest(shop, "/v1/barcode/generate", { product_ids }, options);
+}
+
 export async function createOzonProductBySku(shop, item, options = {}) {
   if (!hasRealOzonCredentials(shop)) {
     return {

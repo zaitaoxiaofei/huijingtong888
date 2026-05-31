@@ -181,7 +181,7 @@ onMounted(async () => {
       </div>
       <div class="head-actions">
         <el-statistic title="当前列表待回复" :value="pendingCount" />
-        <el-button :icon="Refresh" :loading="syncing" type="primary" @click="syncReviews">同步评价</el-button>
+        <el-button class="erp-btn erp-btn-primary" :icon="Refresh" :loading="syncing" type="primary" @click="syncReviews">同步评价</el-button>
       </div>
     </section>
 
@@ -200,8 +200,8 @@ onMounted(async () => {
         <el-option v-for="rating in [5, 4, 3, 2, 1]" :key="rating" :label="`${rating} 星`" :value="String(rating)" />
       </el-select>
       <el-input v-model="state.filters.keyword" class="keyword" clearable placeholder="商品、SKU、评价内容" @keyup.enter="handleSearch" />
-      <el-button :icon="Search" @click="handleSearch">搜索</el-button>
-      <el-button @click="handleReset">重置</el-button>
+      <el-button class="erp-btn erp-btn-primary" :icon="Search" @click="handleSearch">搜索</el-button>
+      <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
     </section>
 
     <div class="review-table-wrap erp-table-scroll">
@@ -241,7 +241,7 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="操作" width="130" fixed="right">
           <template #default="{ row }">
-            <el-button :icon="ChatDotRound" type="primary" link @click="openReply(row)">
+            <el-button class="erp-btn-link" :icon="ChatDotRound" type="primary" link @click="openReply(row)">
               {{ row.reply_status === "replied" ? "查看回复" : "回复" }}
             </el-button>
           </template>
@@ -264,7 +264,7 @@ onMounted(async () => {
         <p>{{ currentReview.review_text || "无文字评价" }}</p>
       </div>
       <div class="template-row">
-        <el-button v-for="template in templates" :key="template.id" size="small" @click="applyTemplate(template)">
+        <el-button class="erp-btn erp-btn-secondary" v-for="template in templates" :key="template.id" size="small" @click="applyTemplate(template)">
           {{ template.title }}
         </el-button>
       </div>
@@ -277,8 +277,8 @@ onMounted(async () => {
         placeholder="输入俄语回复内容"
       />
       <template #footer>
-        <el-button @click="replyDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="replying" @click="submitReply">发送到 Ozon</el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="replyDialogVisible = false">取消</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" :loading="replying" @click="submitReply">发送到 Ozon</el-button>
       </template>
     </el-dialog>
   </div>

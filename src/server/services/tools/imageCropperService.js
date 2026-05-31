@@ -13,6 +13,10 @@ const PYTHON_ENHANCER_SCRIPT = path.resolve(ROOT_DIR, "src", "server", "python",
 const PYTHON_RATIO_CANVAS_SCRIPT = path.resolve(ROOT_DIR, "src", "server", "python", "image_ratio_canvas.py");
 const PYTHON_WATERMARK_SCRIPT = path.resolve(ROOT_DIR, "src", "server", "python", "image_watermarker.py");
 const SHOP_WATERMARK_ROOT = path.resolve(ROOT_DIR, "uploads", "shop-watermarks");
+const SHOP_WATERMARK_ROOTS = Array.from(new Set([
+  SHOP_WATERMARK_ROOT,
+  path.resolve(ROOT_DIR, "..", "..", "uploads", "shop-watermarks")
+]));
 const ALLOWED_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -643,8 +647,22 @@ function toWatermarkReference(filename) {
 function resolveShopWatermarkPath(reference) {
   const clean = String(reference || "").replace(/\\/g, "/");
   if (!clean.startsWith("shop-watermarks/")) return "";
-  const absolutePath = path.resolve(path.resolve(ROOT_DIR, "uploads"), clean);
-  return absolutePath.startsWith(SHOP_WATERMARK_ROOT) ? absolutePath : "";
+  return resolveShopWatermarkPaths(reference)[0] || "";
+}
+
+function resolveShopWatermarkPaths(reference) {
+  const clean = String(reference || "").replace(/\\/g, "/");
+  if (!clean.startsWith("shop-watermarks/")) return [];
+  const filename = path.basename(clean);
+  if (!filename || filename !== clean.slice("shop-watermarks/".length)) return [];
+  return SHOP_WATERMARK_ROOTS
+    .map((root) => path.resolve(root, filename))
+    .filter((absolutePath, index, list) => isPathInside(absolutePath, SHOP_WATERMARK_ROOTS[index]) && list.indexOf(absolutePath) === index);
+}
+
+function isPathInside(targetPath, rootPath) {
+  const relative = path.relative(rootPath, targetPath);
+  return relative && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 async function getWatermarkFileForShop(shop) {
@@ -653,14 +671,23 @@ async function getWatermarkFileForShop(shop) {
     error.status = 404;
     throw error;
   }
-  const filePath = resolveShopWatermarkPath(shop.watermark_path);
-  if (!filePath) {
+  const candidates = resolveShopWatermarkPaths(shop.watermark_path);
+  if (!candidates.length) {
     const error = new Error("该店铺还没有配置水印");
     error.status = 400;
     throw error;
   }
-  const stat = await fs.stat(filePath).catch(() => null);
-  if (!stat?.isFile()) {
+  let filePath = "";
+  let stat = null;
+  for (const candidate of candidates) {
+    const candidateStat = await fs.stat(candidate).catch(() => null);
+    if (candidateStat?.isFile()) {
+      filePath = candidate;
+      stat = candidateStat;
+      break;
+    }
+  }
+  if (!filePath || !stat) {
     const error = new Error("店铺水印素材不存在，请重新上传");
     error.status = 404;
     throw error;

@@ -31,7 +31,7 @@ function updateField(key, value) {
         <h3>提示词模板</h3>
         <p>从系统提示词库复用模板，生成前可预览和临时编辑最终 Prompt。</p>
       </div>
-      <el-button link type="primary" @click="$emit('open-library')">管理模板</el-button>
+      <el-button class="erp-btn-link" link type="primary" @click="$emit('open-library')">管理模板</el-button>
     </div>
 
     <el-select
@@ -78,7 +78,7 @@ function updateField(key, value) {
     />
 
     <div class="prompt-actions">
-      <el-button @click="$emit('preview')">预览 / 编辑 Prompt</el-button>
+      <el-button class="erp-btn erp-btn-secondary" @click="$emit('preview')">预览 / 编辑 Prompt</el-button>
     </div>
   </section>
 </template>

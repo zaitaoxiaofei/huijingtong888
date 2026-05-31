@@ -422,7 +422,7 @@ onBeforeUnmount(() => {
           <p>重点看利润、营业额和上月同期变化，首屏信息尽量浓缩。</p>
         </div>
         <div class="page-card-actions">
-          <el-button v-if="isDashboardView" type="warning" plain @click="openAftersalesPage">售后损失</el-button>
+          <el-button class="erp-btn erp-btn-secondary" v-if="isDashboardView" type="warning" plain @click="openAftersalesPage">售后损失</el-button>
         </div>
       </div>
 
@@ -540,8 +540,8 @@ onBeforeUnmount(() => {
             </el-select>
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" :loading="sectionLoading.aftersales" @click="loadAftersalesCard">查询</el-button>
-            <el-button @click="resetAftersalesFilters">重置</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" :loading="sectionLoading.aftersales" @click="loadAftersalesCard">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="resetAftersalesFilters">重置</el-button>
           </el-form-item>
         </el-form>
         <div class="profit-aftersales-summary">

@@ -146,6 +146,85 @@ Runtime information about the current ERP instance.
 | `port` | `number` | No | Server bind port. |
 | `appBaseUrl` | `string` | No | Browser-facing base URL. |
 
+### ScheduledJob
+
+Persisted background task schedule and latest execution state.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | `number` | No | Scheduled job identifier. |
+| `key` | `string` | No | Stable job key such as order_status_sync. |
+| `name` | `string` | No | Human-readable job name. |
+| `category` | `string` | No | Job category such as orders, advertising, inventory, listing, analytics, or maintenance. |
+| `priority` | `string` | No | Execution priority such as critical, high, normal, or low. |
+| `scheduleType` | `string` | No | Schedule type: interval or daily. |
+| `intervalMinutes` | `number` | No | Interval in minutes for interval jobs. |
+| `dailyTime` | `string` | No | Shanghai wall-clock time for daily jobs, HH:mm. |
+| `enabled` | `boolean` | No | Whether the scheduler may run this job. |
+| `catchupEnabled` | `boolean` | No | Whether missed runs may be recovered after downtime. |
+| `config` | `object` | No | Optional task-specific runtime config such as timeout minutes or sync scope. |
+| `lastSuccessAt` | `string` | No | Last successful run timestamp. |
+| `lastAttemptAt` | `string` | No | Last attempted run timestamp. |
+| `nextRunAt` | `string` | No | Next planned run timestamp. |
+| `failCount` | `number` | No | Consecutive failure count. |
+| `lastStatus` | `string` | No | Latest run status. |
+| `lastError` | `string` | No | Latest error message, if any. |
+| `recentRuns` | `array<ScheduledJobRun>` | No | Most recent run rows for this job. |
+
+### ScheduledJobRun
+
+One background task execution record.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | `number` | No | Run identifier. |
+| `jobKey` | `string` | No | Scheduled job key. |
+| `plannedFor` | `string` | No | Planned execution timestamp. |
+| `startedAt` | `string` | No | Run start timestamp. |
+| `finishedAt` | `string` | No | Run finish timestamp. |
+| `status` | `string` | No | Run status: running, success, failed, or skipped. |
+| `mode` | `string` | No | Run source such as scheduled, manual, or catchup. |
+| `payload` | `object` | No | Schedule payload captured when the run started. |
+| `result` | `object` | No | Handler result payload for successful or skipped runs. |
+| `errorMessage` | `string` | No | Failure message, if any. |
+
+### ScheduledJobRunRequest
+
+Manual scheduled-job run request.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `job_key` | `string` | Yes | Scheduled job key to run immediately. |
+
+### ScheduledJobStateRequest
+
+Scheduled-job enable or disable request.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `job_key` | `string` | Yes | Scheduled job key to update. |
+| `enabled` | `boolean` | Yes | Whether the job should be enabled. |
+
+### ScheduledJobConfigRequest
+
+Scheduled-job runtime configuration update request.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `job_key` | `string` | Yes | Scheduled job key to update. |
+| `scheduleType` | `string` | No | Schedule type: interval or daily. |
+| `intervalMinutes` | `number` | No | Interval in minutes for interval jobs. |
+| `dailyTime` | `string` | No | Shanghai wall-clock time for daily jobs, HH:mm. |
+| `catchupEnabled` | `boolean` | No | Whether missed runs may be recovered after downtime. |
+| `maxCatchupRuns` | `number` | No | Maximum backfill runs allowed when recovering. |
+| `config` | `object` | No | Task-specific config patch such as timeout minutes, scope, or days. |
+
 ### ExchangeRate
 
 CNY to RUB exchange-rate row.
@@ -641,6 +720,8 @@ Dashboard overview for first-page business monitoring.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `summary` | `object` | Yes | Global revenue and profit counters. |
+| `commerce` | `object` | No | Dashboard commerce overview blocks. |
+| `alerts` | `object` | No | Dashboard alert collections including procurement, FBP, and scheduled jobs. |
 | `byShop` | `array<object>` | Yes | Grouped by shop. |
 | `byPerson` | `array<object>` | Yes | Grouped by owner. |
 | `lowStock` | `array<object>` | Yes | Low local stock products. |
@@ -1118,6 +1199,57 @@ Return current runtime and deployment information.
 - Auth: `authenticated`
 - Responses:
   - `200` `application/json` -> `SystemInfo`
+
+#### `GET /api/scheduled-jobs`
+
+Return persisted background task schedules with recent run status.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `run_limit` (`number`, optional): Number of recent runs to include per job.
+- Responses:
+  - `200` `application/json` -> `array<ScheduledJob>`
+
+#### `GET /api/scheduled-job-runs`
+
+Return background task execution history.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `job_key` (`string`, optional): Optional scheduled job key filter.
+  - `limit` (`number`, optional): Maximum number of run rows to return.
+- Responses:
+  - `200` `application/json` -> `array<ScheduledJobRun>`
+
+#### `POST /api/scheduled-jobs/run`
+
+Run one scheduled background task immediately and record the manual run.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `ScheduledJobRunRequest`
+- Responses:
+  - `200` `application/json` -> `ScheduledJob`
+
+#### `POST /api/scheduled-jobs/state`
+
+Enable or disable a scheduled background task.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `ScheduledJobStateRequest`
+- Responses:
+  - `200` `application/json` -> `ScheduledJob`
+
+#### `POST /api/scheduled-jobs/config`
+
+Update a scheduled background task runtime configuration.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `ScheduledJobConfigRequest`
+- Responses:
+  - `200` `application/json` -> `ScheduledJob`
 
 ### Auth
 

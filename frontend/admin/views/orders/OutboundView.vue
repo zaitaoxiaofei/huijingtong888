@@ -251,7 +251,7 @@ onMounted(loadPageData);
         <h2>出库流水</h2>
       </div>
       <div class="page-card-actions">
-        <el-button @click="loadPageData">刷新数据</el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
       </div>
     </section>
 
@@ -309,8 +309,8 @@ onMounted(loadPageData);
               />
             </el-form-item>
             <el-form-item>
-              <el-button type="primary" @click="handleSearch">查询</el-button>
-              <el-button @click="handleReset">重置</el-button>
+              <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
+              <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
             </el-form-item>
           </el-form>
         </div>

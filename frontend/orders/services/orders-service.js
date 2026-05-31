@@ -372,49 +372,16 @@ function printedIdsFromHeader(headers) {
   }
 }
 
-export async function bulkPrintOrders(orderIds = []) {
+export async function bulkPrintOrders(orderIds = [], options = {}) {
   const ids = Array.isArray(orderIds) ? orderIds.map(Number).filter(Boolean) : [];
   if (!ids.length) return null;
-  const printWindow = window.open("about:blank", "_blank");
-  if (!printWindow) {
-    throw new Error("浏览器拦截了打印窗口，请允许弹窗后重试");
-  }
-  printWindow.opener = null;
-  writePrintLoadingPage(printWindow, ids.length);
-  try {
-    const response = await apiClient.blobResponse("/api/orders/package-label", {
-      method: "POST",
-      body: JSON.stringify({ order_ids: ids, require_all: true })
-    });
-    const blob = response.blob;
-    const url = URL.createObjectURL(blob);
-    const failures = failedLabelsFromHeader(response.headers);
-    const pdfOrderIds = printedIdsFromHeader(response.headers);
-    const failedIds = new Set(failures.map((item) => Number(item.id)).filter(Boolean));
-    const printedIds = pdfOrderIds.length
-      ? pdfOrderIds.filter((id) => !failedIds.has(Number(id)))
-      : ids.filter((id) => !failedIds.has(Number(id)));
-    const confirmed = await waitForPrintConfirmation(printWindow, { url, count: printedIds.length || ids.length });
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-    if (!confirmed) {
-      return { ok: false, count: 0, requested: ids.length, failures, cancelled: true };
-    }
-    if (printedIds.length) {
-      await apiClient.post("/api/orders/package-label-printed", { order_ids: printedIds });
-    }
-    try {
-      const confirmButton = printWindow.document?.getElementById?.("confirmPrinted");
-      if (confirmButton) confirmButton.textContent = "已确认";
-      const hint = printWindow.document?.querySelector?.(".title p");
-      if (hint) hint.textContent = "已记录为已打印，可以关闭此窗口。";
-    } catch {
-      // The print window may already be closed.
-    }
-    return { ok: true, count: printedIds.length, requested: ids.length, failures };
-  } catch (error) {
-    printWindow.close();
-    throw error;
-  }
+  return apiClient.post("/api/print/order-labels", {
+    order_ids: ids,
+    printer: options.printer || "label",
+    print_settings: options.printSettings || options.print_settings || "fit",
+    copies: options.copies || 1,
+    require_all: true
+  });
 }
 
 export async function bulkPrepareOrders(orderIds = []) {

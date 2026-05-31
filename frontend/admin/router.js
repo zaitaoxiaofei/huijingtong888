@@ -1,1 +1,1 @@
-export { router } from "./router/index.js";
+export { prefetchRouteComponent, router } from "./router/index.js";

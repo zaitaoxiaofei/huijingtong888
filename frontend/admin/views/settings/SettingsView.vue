@@ -2,7 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
-import { uploadShopWatermark, withImageToken } from "../../api/tools/imageCropper";
+import { uploadShopWatermark } from "../../api/tools/imageCropper";
+import AuthenticatedImage from "../../components/AuthenticatedImage.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText, shanghaiDateTimeText } from "../../utils/shanghai-date";
 
@@ -317,8 +318,7 @@ const logisticsDialogTitle = computed(() => (logisticsDialog.mode === "create" ?
 const cancellationDialogTitle = computed(() => (cancellationDialog.mode === "create" ? "新增取消规则" : "编辑取消规则"));
 const shopWatermarkPreviewUrl = computed(() => {
   if (!shopDialog.form.id || !shopDialog.form.watermark_path) return "";
-  const base = `/api/tools/image-cropper/shop-watermark/${encodeURIComponent(shopDialog.form.id)}/file?v=${shopWatermarkPreviewVersion.value}`;
-  return withImageToken(base);
+  return `/api/tools/image-cropper/shop-watermark/${encodeURIComponent(shopDialog.form.id)}/file?v=${shopWatermarkPreviewVersion.value}`;
 });
 const shopWatermarkSampleImage = computed(() => (
   "/preview-assets/shop-watermark-background.png"
@@ -985,7 +985,7 @@ onBeforeUnmount(() => {
           <p>旧版配置页不再作为新系统的配置入口。现在按左侧分类进入对应页面，每个页面只处理自己的新增、编辑、删除和刷新。</p>
         </div>
         <div class="page-card-actions">
-          <el-button @click="refreshSettingsData">刷新数据</el-button>
+          <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新数据</el-button>
         </div>
       </div>
     </el-card>
@@ -1040,8 +1040,8 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div class="settings-header-actions">
-              <el-button @click="refreshSettingsData">刷新</el-button>
-              <el-button type="primary" @click="openCreateShopDialog">新增店铺</el-button>
+              <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新</el-button>
+              <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateShopDialog">新增店铺</el-button>
             </div>
           </header>
 
@@ -1065,8 +1065,8 @@ onBeforeUnmount(() => {
                   </el-select>
                 </el-form-item>
                 <el-form-item class="shop-filter-actions">
-                  <el-button type="primary" @click="state.filters.shopPage = 1">查询</el-button>
-                  <el-button @click="resetShopFilters">重置</el-button>
+                  <el-button class="erp-btn erp-btn-primary" type="primary" @click="state.filters.shopPage = 1">查询</el-button>
+                  <el-button class="erp-btn erp-btn-secondary" @click="resetShopFilters">重置</el-button>
                 </el-form-item>
               </el-form>
             </div>
@@ -1102,9 +1102,9 @@ onBeforeUnmount(() => {
               <el-table-column label="水印" min-width="190">
                 <template #default="{ row }">
                   <div class="shop-watermark-table-cell">
-                    <img
+                    <AuthenticatedImage
                       v-if="row.watermark_path"
-                      :src="withImageToken(`/api/tools/image-cropper/shop-watermark/${encodeURIComponent(row.id)}/file`)"
+                      :src="`/api/tools/image-cropper/shop-watermark/${encodeURIComponent(row.id)}/file`"
                       :alt="`${row.name || '店铺'}水印`"
                     />
                     <div class="settings-cell-stack">
@@ -1125,8 +1125,8 @@ onBeforeUnmount(() => {
               <el-table-column label="操作" width="180" fixed="right">
                 <template #default="{ row }">
                   <div class="table-actions">
-                    <el-button link type="primary" @click="openEditShopDialog(row)">编辑</el-button>
-                    <el-button link type="danger" @click="handleDeleteShop(row)">删除</el-button>
+                    <el-button class="erp-btn-link" link type="primary" @click="openEditShopDialog(row)">编辑</el-button>
+                    <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="handleDeleteShop(row)">删除</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -1153,8 +1153,8 @@ onBeforeUnmount(() => {
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="refreshSettingsData">刷新</el-button>
-                <el-button type="primary" @click="openCreatePersonDialog">新增人员</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreatePersonDialog">新增人员</el-button>
               </div>
             </div>
           </template>
@@ -1172,8 +1172,8 @@ onBeforeUnmount(() => {
                 </el-select>
               </el-form-item>
               <el-form-item>
-                <el-button type="primary" @click="state.filters.personPage = 1">查询</el-button>
-                <el-button @click="resetPersonFilters">重置</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="state.filters.personPage = 1">查询</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="resetPersonFilters">重置</el-button>
               </el-form-item>
             </el-form>
           </div>
@@ -1200,8 +1200,8 @@ onBeforeUnmount(() => {
               <el-table-column label="操作" width="180" fixed="right">
                 <template #default="{ row }">
                   <div class="table-actions">
-                    <el-button link type="primary" @click="openEditPersonDialog(row)">编辑</el-button>
-                    <el-button link type="danger" @click="handleDeletePerson(row)">停用</el-button>
+                    <el-button class="erp-btn-link" link type="primary" @click="openEditPersonDialog(row)">编辑</el-button>
+                    <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="handleDeletePerson(row)">停用</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -1226,8 +1226,8 @@ onBeforeUnmount(() => {
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="refreshSettingsData">刷新</el-button>
-                <el-button type="primary" @click="openCreateRateDialog">新增汇率</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateRateDialog">新增汇率</el-button>
               </div>
             </div>
           </template>
@@ -1238,8 +1238,8 @@ onBeforeUnmount(() => {
                 <el-input v-model="state.filters.rateQuery" clearable placeholder="汇率 / 来源 / 备注 / 日期" style="width: 320px" @keyup.enter="state.filters.ratePage = 1" />
               </el-form-item>
               <el-form-item>
-                <el-button type="primary" @click="state.filters.ratePage = 1">查询</el-button>
-                <el-button @click="resetRateFilters">重置</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="state.filters.ratePage = 1">查询</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="resetRateFilters">重置</el-button>
               </el-form-item>
             </el-form>
           </div>
@@ -1273,9 +1273,9 @@ onBeforeUnmount(() => {
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="refreshSettingsData">刷新</el-button>
-                <el-button type="primary" :loading="packagingRuleSubmitting" @click="submitPackagingFeeRule">保存规则</el-button>
-                <el-button :loading="historicalRecalcSubmitting" @click="submitHistoricalProfitRecalc">重算历史利润</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" :loading="packagingRuleSubmitting" @click="submitPackagingFeeRule">保存规则</el-button>
+                <el-button class="erp-btn erp-btn-secondary" :loading="historicalRecalcSubmitting" @click="submitHistoricalProfitRecalc">重算历史利润</el-button>
               </div>
             </div>
           </template>
@@ -1414,8 +1414,8 @@ onBeforeUnmount(() => {
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="refreshSettingsData">刷新</el-button>
-                <el-button type="primary" @click="openCreateLogisticsDialog">新增物流规则</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateLogisticsDialog">新增物流规则</el-button>
               </div>
             </div>
           </template>
@@ -1433,8 +1433,8 @@ onBeforeUnmount(() => {
                 </el-select>
               </el-form-item>
               <el-form-item>
-                <el-button type="primary" @click="state.filters.logisticsPage = 1">查询</el-button>
-                <el-button @click="resetLogisticsFilters">重置</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="state.filters.logisticsPage = 1">查询</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="resetLogisticsFilters">重置</el-button>
               </el-form-item>
             </el-form>
           </div>
@@ -1473,8 +1473,8 @@ onBeforeUnmount(() => {
               <el-table-column label="操作" width="180" fixed="right">
                 <template #default="{ row }">
                   <div class="table-actions">
-                    <el-button link type="primary" @click="openEditLogisticsDialog(row)">编辑</el-button>
-                    <el-button link :type="Number(row.enabled) !== 0 ? 'danger' : 'success'" @click="toggleLogisticsRule(row)">{{ Number(row.enabled) !== 0 ? "停用" : "启用" }}</el-button>
+                    <el-button class="erp-btn-link" link type="primary" @click="openEditLogisticsDialog(row)">编辑</el-button>
+                    <el-button class="erp-btn-link" link :type="Number(row.enabled) !== 0 ? 'danger' : 'success'" @click="toggleLogisticsRule(row)">{{ Number(row.enabled) !== 0 ? "停用" : "启用" }}</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -1499,8 +1499,8 @@ onBeforeUnmount(() => {
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="refreshSettingsData">刷新</el-button>
-                <el-button type="primary" @click="openCreateCancellationDialog">新增取消规则</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateCancellationDialog">新增取消规则</el-button>
               </div>
             </div>
           </template>
@@ -1518,8 +1518,8 @@ onBeforeUnmount(() => {
                 </el-select>
               </el-form-item>
               <el-form-item>
-                <el-button type="primary" @click="state.filters.cancellationPage = 1">查询</el-button>
-                <el-button @click="resetCancellationFilters">重置</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="state.filters.cancellationPage = 1">查询</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="resetCancellationFilters">重置</el-button>
               </el-form-item>
             </el-form>
           </div>
@@ -1559,8 +1559,8 @@ onBeforeUnmount(() => {
               <el-table-column label="操作" width="180" fixed="right">
                 <template #default="{ row }">
                   <div class="table-actions">
-                    <el-button link type="primary" @click="openEditCancellationDialog(row)">编辑</el-button>
-                    <el-button link :type="Number(row.enabled) !== 0 ? 'danger' : 'success'" @click="toggleCancellationRule(row)">{{ Number(row.enabled) !== 0 ? "停用" : "启用" }}</el-button>
+                    <el-button class="erp-btn-link" link type="primary" @click="openEditCancellationDialog(row)">编辑</el-button>
+                    <el-button class="erp-btn-link" link :type="Number(row.enabled) !== 0 ? 'danger' : 'success'" @click="toggleCancellationRule(row)">{{ Number(row.enabled) !== 0 ? "停用" : "启用" }}</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -1629,7 +1629,7 @@ onBeforeUnmount(() => {
                 <div class="shop-watermark-preview-box">
                   <div class="shop-watermark-preview-stage">
                     <img :src="shopWatermarkSampleImage" alt="水印预览样例图" class="shop-watermark-sample-image" />
-                    <img
+                    <AuthenticatedImage
                       v-if="shopWatermarkPreviewUrl"
                       :src="shopWatermarkPreviewUrl"
                       alt="店铺水印预览"
@@ -1654,7 +1654,7 @@ onBeforeUnmount(() => {
                   <el-slider v-model="shopDialog.form.watermark_opacity_percent" :min="10" :max="100" :step="1" />
                 </el-form-item>
                 <div class="shop-watermark-control-actions">
-                  <el-button @click="resetShopWatermarkOptions">恢复默认</el-button>
+                  <el-button class="erp-btn erp-btn-secondary" @click="resetShopWatermarkOptions">恢复默认</el-button>
                   <span class="muted-text">保存后会作为该店铺图片生成的默认水印参数。</span>
                 </div>
               </section>
@@ -1663,9 +1663,9 @@ onBeforeUnmount(() => {
         </el-row>
       </el-form>
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="closeShopDialog">取消</el-button>
-          <el-button type="primary" :loading="shopDialogSubmitting" @click="submitShopDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="closeShopDialog">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="shopDialogSubmitting" @click="submitShopDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>
@@ -1681,9 +1681,9 @@ onBeforeUnmount(() => {
         </el-row>
       </el-form>
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="closePersonDialog">取消</el-button>
-          <el-button type="primary" :loading="personDialogSubmitting" @click="submitPersonDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="closePersonDialog">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="personDialogSubmitting" @click="submitPersonDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>
@@ -1698,9 +1698,9 @@ onBeforeUnmount(() => {
         </el-row>
       </el-form>
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="closeRateDialog">取消</el-button>
-          <el-button type="primary" :loading="rateDialogSubmitting" @click="submitRateDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="closeRateDialog">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="rateDialogSubmitting" @click="submitRateDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>
@@ -1725,9 +1725,9 @@ onBeforeUnmount(() => {
         </el-row>
       </el-form>
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="closeLogisticsDialog">取消</el-button>
-          <el-button type="primary" :loading="logisticsDialogSubmitting" @click="submitLogisticsDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="closeLogisticsDialog">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="logisticsDialogSubmitting" @click="submitLogisticsDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>
@@ -1749,9 +1749,9 @@ onBeforeUnmount(() => {
         </el-row>
       </el-form>
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="closeCancellationDialog">取消</el-button>
-          <el-button type="primary" :loading="cancellationDialogSubmitting" @click="submitCancellationDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="closeCancellationDialog">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="cancellationDialogSubmitting" @click="submitCancellationDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>

@@ -300,7 +300,7 @@ onMounted(() => loadRows());
             <span v-for="item in toolbarSummary" :key="item">{{ item }}</span>
             <small v-if="payload.generatedAt">生成时间 {{ dt(payload.generatedAt) }}</small>
           </div>
-          <el-button size="small" :loading="loading" @click="loadRows(true)">刷新数据</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" :loading="loading" @click="loadRows(true)">刷新数据</el-button>
         </div>
       </div>
     </el-card>
@@ -324,12 +324,12 @@ onMounted(() => loadRows());
                 style="width: 240px"
                 @keyup.enter="search"
               />
-              <el-button type="primary" size="small" :loading="loading" @click="search">查询</el-button>
-              <el-button size="small" @click="reset">重置</el-button>
+              <el-button class="erp-btn erp-btn-primary" type="primary" size="small" :loading="loading" @click="search">查询</el-button>
+              <el-button class="erp-btn erp-btn-secondary" size="small" @click="reset">重置</el-button>
             </div>
-            <el-button :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'handled')">批量已处理</el-button>
-            <el-button type="warning" plain :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'ignored')">批量忽略</el-button>
-            <el-button plain :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'open')">恢复待处理</el-button>
+            <el-button class="erp-btn erp-btn-primary" :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'handled')">批量已处理</el-button>
+            <el-button class="erp-btn erp-btn-secondary" type="warning" plain :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'ignored')">批量忽略</el-button>
+            <el-button class="erp-btn erp-btn-secondary" plain :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'open')">恢复待处理</el-button>
           </div>
         </div>
       </template>
@@ -387,12 +387,12 @@ onMounted(() => loadRows());
         <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
             <div class="exception-actions-cell">
-              <el-button class="exception-action-button" size="small" plain @click="saveStates([row.id], 'handled')">已处理</el-button>
-              <el-button class="exception-action-button" size="small" plain type="warning" @click="saveStates([row.id], 'ignored')">忽略</el-button>
+              <el-button class="exception-action-button erp-btn-link" size="small" plain @click="saveStates([row.id], 'handled')">已处理</el-button>
+              <el-button class="exception-action-button erp-btn-link" size="small" plain type="warning" @click="saveStates([row.id], 'ignored')">忽略</el-button>
 
               <el-button
                 v-if="props.view === 'profit' && row.orderId"
-                class="exception-action-button"
+                class="exception-action-button erp-btn-link"
                 size="small"
                 plain
                 :loading="rowActionKey === actionKey(row.id, 'recalculate')"
@@ -401,12 +401,12 @@ onMounted(() => loadRows());
                 重算利润
               </el-button>
 
-              <el-button v-if="props.view === 'profit' && row.productId" class="exception-action-button" size="small" plain @click="openInventory(row)">查看库存</el-button>
-              <el-button v-if="props.view === 'binding'" class="exception-action-button" size="small" plain type="primary" @click="openBinding(row)">去绑定</el-button>
+              <el-button v-if="props.view === 'profit' && row.productId" class="exception-action-button erp-btn-link" size="small" plain @click="openInventory(row)">查看库存</el-button>
+              <el-button v-if="props.view === 'binding'" class="exception-action-button erp-btn-link" size="small" plain type="primary" @click="openBinding(row)">去绑定</el-button>
 
               <el-button
                 v-if="props.view === 'profit' && row.onlineProductId"
-                class="exception-action-button"
+                class="exception-action-button erp-btn-link erp-btn-link-danger"
                 size="small"
                 plain
                 type="danger"

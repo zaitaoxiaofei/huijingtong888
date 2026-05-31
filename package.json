@@ -1,6 +1,8 @@
 {
   "name": "ozon-profit-hub",
   "version": "0.1.0",
+  "description": "爆单ERP desktop shell for the hosted ERP service.",
+  "author": "HJT888",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -8,22 +10,29 @@
     "start": "node scripts/start-with-build.mjs",
     "start:all": "node scripts/start-all.mjs",
     "electron": "electron .",
+    "electron:local": "cross-env ELECTRON_REMOTE_URL=http://localhost:8787 electron .",
+    "electron:cloud": "cross-env ELECTRON_REMOTE_URL=https://erp.hjt888.xyz electron .",
     "start:mysql": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/start-local-mysql.ps1 -StartTunnel -StartApp",
     "start:server": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test": "node --test --test-concurrency=1 \"test/**/*.test.js\"",
     "dev:frontend": "vite",
-    "build:frontend": "vite build && node scripts/generate-admin-shell.mjs",
+    "build:frontend": "node scripts/clean-frontend-build.mjs && vite build && node scripts/generate-admin-shell.mjs && node scripts/check-frontend-safety.mjs && node scripts/precompress-static-assets.mjs",
     "package:deploy": "node scripts/package-deploy.mjs",
+    "package:plugin": "node ../scripts/package-baodan-plugin.mjs",
     "docs:api": "node scripts/generate-api-docs.mjs",
     "docs:api:check": "node scripts/check-api-docs.mjs",
     "check:health": "node scripts/health-check.mjs",
+    "check:deploy-preflight": "node scripts/check-deploy-preflight.mjs",
     "profile:http-pages": "node scripts/profile-mysql-pages.mjs",
     "check:ui": "node scripts/check-ui-design-system.mjs",
+    "check:frontend-safety": "node scripts/check-frontend-safety.mjs",
     "db:init:mysql": "node scripts/init-mysql-schema.mjs",
     "db:optimize:mysql": "node scripts/optimize-mysql-indexes.mjs",
     "db:backfill:order-history": "node scripts/backfill-order-status-history.mjs",
-    "print-helper": "node scripts/local-print-helper.mjs"
+    "print-helper": "node scripts/local-print-helper.mjs",
+    "build:desktop": "electron-builder --win nsis -c.electronDist=node_modules/electron/dist --publish never",
+    "build:desktop:portable": "electron-builder --win portable -c.electronDist=node_modules/electron/dist --publish never"
   },
   "engines": {
     "node": ">=22.5.0"
@@ -31,6 +40,9 @@
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@pdf-lib/fontkit": "^1.1.1",
+    "@zxing/library": "^0.23.0",
+    "bwip-js": "^4.11.1",
     "element-plus": "^2.11.5",
     "jimp": "^1.6.1",
     "lucide-vue-next": "^1.0.0",
@@ -42,11 +54,58 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.7",
+    "cross-env": "^10.1.0",
     "electron": "^42.2.0",
+    "electron-builder": "^26.0.12",
     "unplugin-element-plus": "^0.11.2",
     "unplugin-vue-components": "^32.0.0",
     "vite": "^8.0.13",
     "vue": "^3.5.34",
     "vue-router": "^4.6.3"
+  },
+  "build": {
+    "appId": "com.hjt888.ozonerp",
+    "productName": "爆单ERP",
+    "directories": {
+      "output": "dist/desktop"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.cjs"
+    },
+    "win": {
+      "artifactName": "Baodan-ERP-Setup-${version}.${ext}",
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "portable": {
+      "artifactName": "Baodan-ERP-Portable-${version}.${ext}"
+    },
+    "publish": {
+      "provider": "generic",
+      "url": "https://erp.hjt888.xyz/desktop-updates"
+    }
   }
 }

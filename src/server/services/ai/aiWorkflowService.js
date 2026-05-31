@@ -72,7 +72,14 @@ export async function generateImages(payload = {}) {
   } catch (error) {
     console.error("AI image generation failed", error);
     const detail = error?.message ? `：${error.message}` : "";
-    const publicError = new Error(error.status === 503 ? error.message : `图片生成失败，请检查提示词、参考图或 image2 配置${detail}`);
+    const isSourceImageError = String(error?.message || "").includes("参考图");
+    const publicError = new Error(
+      error.status === 503
+        ? error.message
+        : isSourceImageError
+          ? `图片生成失败，请检查参考图是否可访问、格式是否为 PNG/JPG/WEBP${detail}`
+          : `图片生成失败，请检查提示词、图生图服务配置或服务商返回结果${detail}`
+    );
     publicError.status = error.status || 502;
     throw publicError;
   }
@@ -111,7 +118,7 @@ async function resolveSourceImage(payload = {}) {
   if (source.startsWith("data:")) return parseDataImageUrl(source);
   if (/^https?:\/\//i.test(source) || source.startsWith("/")) return fetchSourceImage(source);
 
-  const error = new Error("参考图仅支持 data URL、http(s) URL 或本系统相对 URL");
+  const error = new Error("参考图仅支持 data URL、http(s) URL 或本站相对 URL");
   error.status = 400;
   throw error;
 }
@@ -136,7 +143,7 @@ async function fetchSourceImage(source) {
   const url = normalizeFetchableSourceUrl(source);
   const response = await fetch(url);
   if (!response.ok) {
-    const error = new Error(`参考图读取失败：${response.status}`);
+    const error = new Error(`参考图读取失败，HTTP ${response.status}`);
     error.status = response.status >= 400 && response.status < 500 ? 400 : 502;
     throw error;
   }
@@ -240,7 +247,7 @@ export async function generateCommerceCopy(payload = {}) {
         role: "user",
         content: JSON.stringify({
           outputShape: {
-            titles: ["4个中文标题方案，每个不超过80字"],
+            titles: ["4个中文标题方案，每个不超过30字"],
             tags: ["8-14个中文或英文搜索标签"],
             description: "120-220字中文商品描述"
           },
@@ -405,7 +412,7 @@ function normalizeCopyList(value, limit) {
   if (Array.isArray(value)) return value.map(cleanCommerceText).filter(Boolean).slice(0, limit);
   const text = cleanCommerceText(value);
   if (!text) return [];
-  return text.split(/[\n,，;；]+/).map(cleanCommerceText).filter(Boolean).slice(0, limit);
+  return text.split(/[\n,，、]+/).map(cleanCommerceText).filter(Boolean).slice(0, limit);
 }
 
 function fallbackCommerceTitles(context) {

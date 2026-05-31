@@ -79,10 +79,10 @@ function statusText(status) {
         </template>
 
         <div class="preview-actions">
-          <el-button size="small" :icon="Refresh" @click="$emit('regenerate', item.targetId)">重新生成主图</el-button>
-          <el-button size="small" :icon="Edit">编辑标题</el-button>
-          <el-button size="small" :icon="Edit">编辑标签</el-button>
-          <el-button size="small" :icon="View">查看详情</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" :icon="Refresh" @click="$emit('regenerate', item.targetId)">重新生成主图</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" :icon="Edit">编辑标题</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" :icon="Edit">编辑标签</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" :icon="View">查看详情</el-button>
         </div>
       </article>
 

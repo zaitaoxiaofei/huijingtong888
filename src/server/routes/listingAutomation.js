@@ -1,6 +1,8 @@
 export function createListingAutomationRoutes({ services, readJson }) {
   return {
     "GET /api/listing/templates": (req) => services.listingCategoryTemplates(req._session),
+    "GET /api/listing/collector-box": (req) => services.collectorBoxProducts(req.query || {}, req._session),
+    "DELETE /api/listing/collector-box": async (req) => services.deleteCollectorBoxProducts(await readJson(req), req._session),
     "POST /api/listing/templates": async (req) => services.createListingCategoryTemplate(await readJson(req), req._session),
     "POST /api/listing/templates/from-collected": async (req) => services.createListingTemplateFromCollectedProduct(await readJson(req), req._session),
     "POST /api/listing/templates/validate-publish": async (req) => services.validateListingTemplatePublish(await readJson(req), req._session),
@@ -32,10 +34,29 @@ export async function handleListingAutomationRestRoute({ req, res, parts, servic
 
   if (parts[2] === "templates" && parts[3]) {
     if (req.method === "GET") {
-      return json(res, await services.listingCategoryTemplateDetail(Number(parts[3]), req._session));
+      return json(res, await services.listingCategoryTemplateDetail(Number(parts[3]), req._session, req.query || {}));
     }
     if (req.method === "PUT") {
       return json(res, await services.updateListingCategoryTemplate(Number(parts[3]), await readJson(req), req._session));
+    }
+  }
+
+  if (parts[2] === "collector-box" && parts[3]) {
+    const sku = decodeURIComponent(parts[3]);
+    if (req.method === "GET") {
+      return json(res, await services.collectorBoxProductDetail(sku, req._session));
+    }
+    if (req.method === "POST" && parts[4] === "create-selection") {
+      return json(res, await services.createSelectionFromCollectorBox(sku, await readJson(req), req._session));
+    }
+    if (req.method === "PUT" && parts[4] === "edit") {
+      return json(res, await services.saveCollectorBoxEdit(sku, await readJson(req), req._session));
+    }
+    if (req.method === "POST" && parts[4] === "create-listing-template") {
+      return json(res, await services.createListingTemplateFromCollectorBox(sku, await readJson(req), req._session));
+    }
+    if (req.method === "DELETE") {
+      return json(res, await services.deleteCollectorBoxProducts({ sku }, req._session));
     }
   }
 
@@ -53,6 +74,10 @@ export async function handleListingAutomationRestRoute({ req, res, parts, servic
 
   if (req.method === "POST" && parts[2] === "publish-records" && parts[3] && parts[4] === "refresh") {
     return json(res, await services.refreshListingPublishRecord(Number(parts[3]), req._session));
+  }
+
+  if (req.method === "GET" && parts[2] === "publish-records" && parts[3]) {
+    return json(res, await services.listingPublishRecordDetail(Number(parts[3]), req._session));
   }
 
   if (req.method === "POST" && parts[2] === "publish-records" && parts[3] && parts[4] === "retry") {

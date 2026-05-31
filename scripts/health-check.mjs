@@ -1,7 +1,37 @@
 import { config } from "../src/config.js";
 
-const username = process.env.HEALTH_CHECK_USERNAME || "jiang";
-const password = process.env.HEALTH_CHECK_PASSWORD || "123456";
+function parseEnvFile(text = "") {
+  const result = {};
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const separatorIndex = line.indexOf("=");
+    if (separatorIndex <= 0) continue;
+    const key = line.slice(0, separatorIndex).trim();
+    let value = line.slice(separatorIndex + 1).trim();
+    if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    result[key] = value;
+  }
+  return result;
+}
+
+async function loadHealthCheckEnvFile() {
+  const envFile = String(process.env.HEALTH_CHECK_ENV_FILE || "").trim();
+  if (!envFile) return {};
+  const fs = await import("node:fs/promises");
+  try {
+    const text = await fs.readFile(envFile, "utf8");
+    return parseEnvFile(text);
+  } catch (error) {
+    throw new Error(`Failed to read HEALTH_CHECK_ENV_FILE ${envFile}: ${error.message || error}`);
+  }
+}
+
+const envFileValues = await loadHealthCheckEnvFile();
+const username = process.env.HEALTH_CHECK_USERNAME || envFileValues.HEALTH_CHECK_USERNAME || "";
+const password = process.env.HEALTH_CHECK_PASSWORD || envFileValues.HEALTH_CHECK_PASSWORD || "";
 const requestTimeoutMs = Number(process.env.HEALTH_CHECK_TIMEOUT_MS || 15000);
 const baseUrl = process.env.HEALTH_CHECK_BASE_URL || `http://localhost:${config.port}`;
 const shanghaiDateTimeFormatter = new Intl.DateTimeFormat("sv-SE", {
@@ -14,6 +44,10 @@ const shanghaiDateTimeFormatter = new Intl.DateTimeFormat("sv-SE", {
   second: "2-digit",
   hour12: false
 });
+
+if (!username || !password) {
+  throw new Error("Missing health check credentials. Set HEALTH_CHECK_USERNAME and HEALTH_CHECK_PASSWORD directly or via HEALTH_CHECK_ENV_FILE.");
+}
 
 const endpoints = [
   ["/api/auth/me", "auth"],

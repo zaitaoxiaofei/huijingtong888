@@ -228,8 +228,8 @@ onMounted(loadPageData);
         <h2>入库流水</h2>
       </div>
       <div class="page-card-actions">
-        <el-button @click="loadPageData">刷新数据</el-button>
-        <el-button type="primary" @click="openCreateDialog">新建入库记录</el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新建入库记录</el-button>
       </div>
     </section>
 
@@ -253,8 +253,8 @@ onMounted(loadPageData);
             </el-select>
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="handleSearch">查询</el-button>
-            <el-button @click="handleReset">重置</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
           </el-form-item>
         </el-form>
       </div>
@@ -283,8 +283,8 @@ onMounted(loadPageData);
           </el-table-column>
           <el-table-column label="操作" width="160" align="center">
             <template #default="{ row }">
-              <el-button link type="primary" @click="openEditDialog(row)">编辑</el-button>
-              <el-button link type="danger" @click="deleteRow(row)">删除</el-button>
+              <el-button class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
+              <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="deleteRow(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -361,9 +361,9 @@ onMounted(loadPageData);
       </el-form>
 
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="dialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="dialogSubmitting" @click="submitDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="dialogVisible = false">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="dialogSubmitting" @click="submitDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>

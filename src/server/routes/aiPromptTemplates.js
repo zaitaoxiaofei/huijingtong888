@@ -1,7 +1,7 @@
 export function createAiPromptTemplateRoutes({ services, readJson }) {
   return {
     "GET /api/ai-prompt-templates": (req) => services.aiPromptTemplates(req.query || {}),
-    "POST /api/ai-prompt-templates": async (req) => services.createAiPromptTemplate(await readJson(req), req._session?.person_id),
+    "POST /api/ai-prompt-templates": async (req) => services.createAiPromptTemplate(await readJson(req), req._session?.personId),
     "POST /api/ai-prompt-templates/render": async (req) => services.renderAiPromptTemplate(await readJson(req))
   };
 }
@@ -22,7 +22,7 @@ export async function handleAiPromptTemplateRestRoute({ req, res, parts, service
       return json(res, await services.deleteAiPromptTemplate(id));
     }
     if (req.method === "POST" && parts[3] === "duplicate") {
-      return json(res, await services.duplicateAiPromptTemplate(id, req._session?.person_id));
+      return json(res, await services.duplicateAiPromptTemplate(id, req._session?.personId));
     }
     if (req.method === "POST" && parts[3] === "set-default") {
       return json(res, await services.setDefaultAiPromptTemplate(id));

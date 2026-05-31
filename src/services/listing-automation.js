@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
+import { shanghaiDateKey } from "../shanghai-time.js";
 import {
   createOzonProductBySku,
   fetchOzonCategoryAttributeValues,
@@ -16,6 +17,15 @@ import {
   searchOzonCategoryAttributeValues
 } from "../ozonClient.js";
 import { chatWithAiProvider } from "./ai-provider-settings.js";
+import {
+  createProductMysql,
+  selectionProductMysql
+} from "./mysql-cutover.js";
+import {
+  listingDraftToTemplatePayload,
+  prepareListingDraftFromCollectedSource
+} from "./listing-draft-preparer.js";
+import { normalizeCollectedListingDraft } from "./listing-collected-normalizer.js";
 
 let mysqlSchemaReady = false;
 const LISTING_MEDIA_ROOT = path.resolve(process.cwd(), "public", "uploads", "listing-media");
@@ -43,10 +53,11 @@ export async function listingCategoryTemplates(session) {
   `).then((rows) => rows.map(normalizeTemplateRow));
 }
 
-export async function listingCategoryTemplateDetail(id, session) {
+export async function listingCategoryTemplateDetail(id, session, query = {}) {
   await ensureListingAutomationSchema();
   const template = await listingCategoryTemplate(id, session);
   if (!template) throw new Error("类目模板不存在");
+  if (query?.mode === "editor" || query?.editor === "1" || query?.compact === "1") return compactTemplateForEditor(template);
   return template;
 }
 
@@ -338,6 +349,301 @@ export async function createListingTemplateFromCollectedProduct(body, session) {
   };
 }
 
+function firstCollectedValue(source = {}, keys = []) {
+  for (const key of keys) {
+    const value = source?.[key];
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return "";
+}
+
+function collectedNumber(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const text = String(value).replace(/\s+/g, "").replace(",", ".");
+  const match = text.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function collectedDate(value) {
+  const parsed = value ? new Date(value) : new Date();
+  if (Number.isNaN(parsed.getTime())) return shanghaiDateKey();
+  return shanghaiDateKey(parsed);
+}
+
+function collectedDateKey(value) {
+  if (!value) return "";
+  if (typeof value === "string") {
+    const match = value.match(/^\d{4}-\d{2}-\d{2}/);
+    if (match) return match[0];
+  }
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value || "").slice(0, 10);
+  return shanghaiDateKey(parsed);
+}
+
+function normalizePluginCollectedProduct(product = {}, tenantId = "admin") {
+  const sku = String(firstCollectedValue(product, ["sku", "product_id", "productId", "id"]) || "").trim();
+  const image = firstCollectedValue(product, ["productImage", "mainImage", "primary_image", "photo", "image_url", "imageUrl"]) ||
+    (Array.isArray(product.images) ? product.images.find(Boolean) : "");
+  const collectedAt = String(product.collectedAt || product.collected_at || new Date().toISOString());
+  const viewCount = collectedNumber(firstCollectedValue(product, ["qtyViewPdp", "views", "hitsView", "hits_view", "sessionCount"]));
+  const soldCount = collectedNumber(firstCollectedValue(product, ["soldCount", "orders", "orderCount", "avgOrdersOnAccDays"]));
+  const clickRate = collectedNumber(firstCollectedValue(product, ["custom_click_rate", "clickRate", "click_rate"]));
+  const conversionRate = collectedNumber(firstCollectedValue(product, ["convViewToOrder", "conversionRate", "conversion_rate"]));
+
+  return {
+    tenant_id: String(tenantId || "admin").trim() || "admin",
+    sku,
+    product_id: String(firstCollectedValue(product, ["product_id", "productId", "id"]) || sku).trim(),
+    title: String(firstCollectedValue(product, ["productTitle", "name", "title", "displayName", "display_name"]) || "").trim(),
+    product_url: String(firstCollectedValue(product, ["productUrl", "productLink", "link"]) || "").trim(),
+    image_url: String(image || "").trim(),
+    category_name: String(firstCollectedValue(product, ["category", "categoryName", "category_name"]) || "").trim(),
+    price: collectedNumber(firstCollectedValue(product, ["price", "productPrice", "sell_price", "cardPrice", "webPrice"])),
+    currency: String(firstCollectedValue(product, ["currency", "priceCurrency"]) || "RUB").trim(),
+    sold_count: soldCount,
+    view_count: viewCount,
+    click_rate: clickRate,
+    conversion_rate: conversionRate,
+    stock_count: collectedNumber(firstCollectedValue(product, ["stock", "fbsStock", "fboStock", "availableStock", "totalStock", "sumItemsInStock"])),
+    commission_rate: collectedNumber(firstCollectedValue(product, ["commission_rate", "commissionRate", "commission_percent", "commissionPercent", "commission"])),
+    collect_date: collectedDate(collectedAt),
+    collected_at: collectedAt
+  };
+}
+
+function parseCollectedPayloadJson(value) {
+  if (!value) return {};
+  if (typeof value === "object") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
+}
+
+function buildPluginCollectedProductPayload(row = {}) {
+  const raw = parseCollectedPayloadJson(row.payload_json);
+  return {
+    ...raw,
+    id: row.sku || raw.id || raw.sku,
+    sku: row.sku || raw.sku || "",
+    product_id: row.product_id || raw.product_id || raw.productId || "",
+    productTitle: row.title || raw.productTitle || raw.name || raw.title || "",
+    name: row.title || raw.name || raw.productTitle || raw.title || "",
+    productUrl: row.product_url || raw.productUrl || raw.productLink || "",
+    productImage: row.image_url || raw.productImage || raw.mainImage || "",
+    category: row.category_name || raw.category || raw.categoryName || "",
+    price: row.price ?? raw.price ?? raw.productPrice ?? "",
+    currency: row.currency || raw.currency || "RUB",
+    soldCount: row.sold_count ?? raw.soldCount ?? "",
+    qtyViewPdp: row.view_count ?? raw.qtyViewPdp ?? "",
+    custom_click_rate: row.click_rate ?? raw.custom_click_rate ?? "",
+    convViewToOrder: row.conversion_rate ?? raw.convViewToOrder ?? "",
+    stock: row.stock_count ?? raw.stock ?? "",
+    commission_rate: row.commission_rate ?? raw.commission_rate ?? raw.commissionRate ?? "",
+    collectDate: collectedDateKey(row.collect_date),
+    collectedAt: row.collected_at || raw.collectedAt || raw.collected_at || ""
+  };
+}
+
+function buildCollectorBoxRow(row = {}) {
+  return {
+    tenant_id: row.tenant_id || "admin",
+    sku: String(row.sku || ""),
+    product_id: String(row.product_id || ""),
+    title: String(row.title || ""),
+    product_url: String(row.product_url || ""),
+    image_url: String(row.image_url || ""),
+    category_name: String(row.category_name || ""),
+    price: row.price === null || row.price === undefined ? null : Number(row.price),
+    currency: String(row.currency || "RUB"),
+    sold_count: row.sold_count === null || row.sold_count === undefined ? null : Number(row.sold_count),
+    view_count: row.view_count === null || row.view_count === undefined ? null : Number(row.view_count),
+    click_rate: row.click_rate === null || row.click_rate === undefined ? null : Number(row.click_rate),
+    conversion_rate: row.conversion_rate === null || row.conversion_rate === undefined ? null : Number(row.conversion_rate),
+    stock_count: row.stock_count === null || row.stock_count === undefined ? null : Number(row.stock_count),
+    commission_rate: row.commission_rate === null || row.commission_rate === undefined ? null : Number(row.commission_rate),
+    collect_date: collectedDateKey(row.collect_date),
+    collected_at: row.collected_at || "",
+    status: row.status || "collected",
+    selection_product_id: row.selection_product_id || null,
+    listing_template_id: row.listing_template_id || null,
+    editPayload: parseCollectedPayloadJson(row.edit_payload_json),
+    edited_at: row.edited_at || "",
+    created_at: row.created_at || "",
+    updated_at: row.updated_at || ""
+  };
+}
+
+function normalizeCollectorBoxSummary(row = {}) {
+  return {
+    total: Number(row.total || 0),
+    todayCount: Number(row.today_count || 0),
+    titledCount: Number(row.titled_count || 0)
+  };
+}
+
+function percentToNumber(value) {
+  if (value === undefined || value === null || value === "") return 0;
+  if (typeof value === "number") return Number.isFinite(value) ? (value > 1 ? value / 100 : value) : 0;
+  const text = String(value).trim();
+  const number = Number(text.replace("%", "").replace(",", "."));
+  if (!Number.isFinite(number)) return 0;
+  return text.includes("%") || number > 1 ? number / 100 : number;
+}
+
+function buildCollectorSelectionNote(detail = {}) {
+  const parts = [
+    `来源：Ozon插件采集箱`,
+    detail.sku ? `SKU：${detail.sku}` : "",
+    detail.product_url ? `链接：${detail.product_url}` : "",
+    detail.collect_date ? `采集日期：${detail.collect_date}` : ""
+  ].filter(Boolean);
+  return parts.join("\n");
+}
+
+function normalizeCollectorBoxEditPayload(input = {}, detail = {}) {
+  const raw = detail.rawPayload || {};
+  const payload = detail.payload || {};
+  const dims = normalizeCollectedDimensions(input, payload, raw);
+  const images = normalizeImages(input.images || raw.images || payload.images || [detail.image_url]);
+  return {
+    title: String(input.title || input.productTitle || detail.title || payload.productTitle || `Ozon ${detail.sku || ""}`).trim(),
+    template_name: String(input.template_name || input.templateName || input.title || detail.title || `Ozon ${detail.sku || ""} 上架模板`).trim(),
+    category_name: String(input.category_name || input.categoryName || detail.category_name || raw.category_name || raw.category || "").trim(),
+    ozon_category_id: String(input.ozon_category_id || input.ozonCategoryId || raw.ozon_category_id || raw.category_id || "").trim(),
+    description_category_id: String(input.description_category_id || input.descriptionCategoryId || raw.description_category_id || raw.descriptionCategoryId || "").trim(),
+    type_id: String(input.type_id || input.typeId || raw.type_id || raw.typeId || "").trim(),
+    brand: String(input.brand || raw.brand || "").trim(),
+    model: String(input.model || input.spec || raw.model || "").trim(),
+    color: String(input.color || raw.color || "").trim(),
+    tags: normalizeStringList(input.tags || input.hashtags || raw.hashtags || []),
+    description: String(input.description || input.summary || raw.description || "").trim(),
+    operation_note: String(input.operation_note || input.operationNote || "").trim(),
+    price: numberFromOzonValue(input.price || detail.price || raw.price || 0),
+    old_price: numberFromOzonValue(input.old_price || input.oldPrice || raw.old_price || raw.originalPrice || 0),
+    currency: String(input.currency || detail.currency || raw.currency || "RUB").trim() || "RUB",
+    length_cm: Number(dims.length_cm || input.length_cm || 0),
+    width_cm: Number(dims.width_cm || input.width_cm || 0),
+    height_cm: Number(dims.height_cm || input.height_cm || 0),
+    weight_g: Number(dims.weight_g || input.weight_g || 0),
+    images,
+    source_sku: String(detail.sku || input.sku || raw.sku || "").trim(),
+    product_url: String(detail.product_url || input.product_url || raw.productUrl || "").trim(),
+    updated_by_person_id: detail.updated_by_person_id || null
+  };
+}
+
+function buildCollectorBoxEditAttributes(editPayload = {}, raw = {}) {
+  const attributes = normalizeAttributes([
+    ...normalizeArray(raw.attributes || raw.attribute_values || raw.characteristics || []),
+    ...normalizeArray(raw.ozonProductIntelligence?.attributes || raw.ozonProductIntelligence?.attribute_values || []),
+    ...normalizeArray(raw.ozonErpDetail?.attributes || raw.ozonErpDetail?.attribute_values || []),
+    ...normalizeArray(editPayload.attributes || [])
+  ]);
+  const upsert = (name, value, defaults = {}) => {
+    if (value === undefined || value === null || value === "") return;
+    const matched = attributes.find((item) => {
+      if (defaults.attribute_id && String(item.attribute_id || item.id || "") === String(defaults.attribute_id)) return true;
+      return String(item.name || "").trim() === name;
+    });
+    if (matched) {
+      matched.value = value;
+      if (defaults.attribute_id && !matched.attribute_id) matched.attribute_id = defaults.attribute_id;
+      if (defaults.type && !matched.type) matched.type = defaults.type;
+    } else {
+      attributes.push({ name, value, type: defaults.type || "text", attribute_id: defaults.attribute_id || "", source: "collector_edit" });
+    }
+  };
+  const richContent = editPayload.rich_content_json || editPayload.richContentJson || editPayload.rich_content || editPayload.richContent || raw.rich_content_json || raw.richContentJson || raw.rich_content || raw.richContent || raw.json_content || raw.jsonContent;
+  upsert("品牌", editPayload.brand || raw.brand || "无品牌", { attribute_id: 85 });
+  upsert("型号名称", editPayload.model, { attribute_id: 9048 });
+  upsert("颜色", editPayload.color);
+  upsert("产品标签", normalizeStringList(editPayload.tags).join(","), { attribute_id: 23171, type: "multiselect" });
+  upsert("简介", editPayload.description, { attribute_id: 4191, type: "textarea" });
+  upsert("JSON富内容", typeof richContent === "string" ? richContent : (richContent ? JSON.stringify(richContent, null, 2) : ""), { attribute_id: 11254, type: "rich_json" });
+  return attributes;
+}
+
+function collectedCategoryCandidates(raw = {}, detail = {}, body = {}) {
+  const candidates = [];
+  const push = (descriptionCategoryId, typeId, source = "unknown") => {
+    const descriptionId = Number(descriptionCategoryId || 0);
+    const productTypeId = Number(typeId || 0);
+    if (!descriptionId || !productTypeId) return;
+    if (candidates.some((item) => item.descriptionCategoryId === descriptionId && item.typeId === productTypeId)) return;
+    candidates.push({ descriptionCategoryId: descriptionId, typeId: productTypeId, source });
+  };
+
+  push(body.description_category_id || body.descriptionCategoryId, body.type_id || body.typeId, "request");
+  push(raw.description_category_id || raw.descriptionCategoryId, raw.type_id || raw.typeId, "raw_direct");
+
+  const rawIds = Array.isArray(raw.category_ids) ? raw.category_ids : [];
+  if (raw.category2Id && raw.category3Id) push(raw.category2Id, raw.category3Id, "category2_3");
+  if (rawIds.length >= 3) push(rawIds[rawIds.length - 2], rawIds[rawIds.length - 1], "category_ids_tail");
+  if (rawIds.length >= 2) push(rawIds[0], rawIds[rawIds.length - 1], "category_ids_root_leaf");
+
+  const categoryText = String(detail.category_name || raw.category || raw.category_name || raw.categoryName || "").trim();
+  const leafName = String(raw.category3 || raw.categoryName || "").trim();
+  return { candidates, categoryText, leafName };
+}
+
+async function resolveCollectorBoxListingCategory(detail = {}, body = {}) {
+  const raw = detail.rawPayload || {};
+  const { candidates, categoryText, leafName } = collectedCategoryCandidates(raw, detail, body);
+  for (const candidate of candidates) {
+    const cached = await row(`
+      SELECT *
+      FROM ozon_category_mappings
+      WHERE description_category_id = ? AND type_id = ? AND status = 'active'
+      LIMIT 1
+    `, [candidate.descriptionCategoryId, candidate.typeId]);
+    return cached ? normalizeOzonCategoryRow(cached) : {
+      description_category_id: String(candidate.descriptionCategoryId),
+      descriptionCategoryId: String(candidate.descriptionCategoryId),
+      type_id: String(candidate.typeId),
+      typeId: String(candidate.typeId),
+      ozon_category_id: `${candidate.descriptionCategoryId}:${candidate.typeId}`,
+      category_name: categoryText || leafName || ""
+    };
+  }
+
+  if (categoryText || leafName) {
+    const like = `%${leafName || categoryText.split("/").pop().trim()}%`;
+    const cached = await row(`
+      SELECT *
+      FROM ozon_category_mappings
+      WHERE status = 'active'
+        AND (
+          name_zh = ? OR path_zh = ? OR name_ru = ? OR path_ru = ?
+          OR name_zh LIKE ? OR path_zh LIKE ?
+        )
+      ORDER BY
+        CASE
+          WHEN name_zh = ? THEN 1
+          WHEN path_zh = ? THEN 2
+          WHEN path_zh LIKE ? THEN 3
+          ELSE 9
+        END,
+        updated_at DESC
+      LIMIT 1
+    `, [leafName, categoryText, leafName, categoryText, like, like, leafName, categoryText, like]);
+    if (cached) return normalizeOzonCategoryRow(cached);
+  }
+
+  const sku = String(detail.sku || raw.sku || "").trim();
+  if (!sku) return null;
+  const resolved = await resolveOzonCategoryFromSku({
+    sku,
+    shop_id: body.shop_id || body.shopId
+  }, null).catch(() => null);
+  return resolved?.category || null;
+}
+
 export async function saveListingCollectedProductDetail(body = {}, session = null) {
   await ensureListingAutomationSchema();
   const collectionId = String(body.id || body.collectionId || body.collection_id || `ozon_collect_${Date.now()}`).trim();
@@ -373,6 +679,365 @@ export async function saveListingCollectedProductDetail(body = {}, session = nul
     result.error || ""
   ]);
   return getListingCollectedProductDetail(collectionId, tenantId);
+}
+
+export async function syncCollectedProductsFromPlugin(products = [], tenantId = "admin") {
+  await ensureListingAutomationSchema();
+  const items = Array.isArray(products) ? products : [];
+  const normalizedTenantId = String(tenantId || "admin").trim() || "admin";
+  const results = [];
+
+  for (const product of items) {
+    const item = normalizePluginCollectedProduct(product, normalizedTenantId);
+    if (!item.sku) {
+      results.push({ success: false, error: "SKU_REQUIRED", product });
+      continue;
+    }
+    await mysqlExecute(`
+      INSERT INTO ozon_plugin_collected_products
+      (
+        tenant_id, sku, product_id, title, product_url, image_url, category_name,
+        price, currency, sold_count, view_count, click_rate, conversion_rate,
+        stock_count, commission_rate, collect_date, collected_at, payload_json, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON DUPLICATE KEY UPDATE
+        product_id = VALUES(product_id),
+        title = VALUES(title),
+        product_url = VALUES(product_url),
+        image_url = VALUES(image_url),
+        category_name = VALUES(category_name),
+        price = VALUES(price),
+        currency = VALUES(currency),
+        sold_count = VALUES(sold_count),
+        view_count = VALUES(view_count),
+        click_rate = VALUES(click_rate),
+        conversion_rate = VALUES(conversion_rate),
+        stock_count = VALUES(stock_count),
+        commission_rate = VALUES(commission_rate),
+        collect_date = VALUES(collect_date),
+        collected_at = VALUES(collected_at),
+        payload_json = VALUES(payload_json),
+        updated_at = CURRENT_TIMESTAMP
+    `, [
+      item.tenant_id,
+      item.sku,
+      item.product_id,
+      item.title,
+      item.product_url,
+      item.image_url,
+      item.category_name,
+      item.price,
+      item.currency,
+      item.sold_count,
+      item.view_count,
+      item.click_rate,
+      item.conversion_rate,
+      item.stock_count,
+      item.commission_rate,
+      item.collect_date,
+      item.collected_at,
+      JSON.stringify(product || {})
+    ]);
+    results.push({
+      success: true,
+      sku: item.sku,
+      collectDate: item.collect_date,
+      product: buildPluginCollectedProductPayload(item)
+    });
+  }
+
+  return {
+    importedCount: results.filter((item) => item.success).length,
+    failedCount: results.filter((item) => !item.success).length,
+    results
+  };
+}
+
+export async function lookupCollectedProductFromPlugin(sku, tenantId = "admin") {
+  await ensureListingAutomationSchema();
+  const normalizedSku = String(sku || "").trim();
+  if (!normalizedSku) return { found: false, needsRefresh: true, error: "SKU_REQUIRED" };
+  const detail = await row(`
+    SELECT *
+    FROM ozon_plugin_collected_products
+    WHERE tenant_id = ? AND sku = ?
+    ORDER BY collected_at DESC, updated_at DESC
+    LIMIT 1
+  `, [String(tenantId || "admin"), normalizedSku]);
+  if (!detail) return { found: false, needsRefresh: true, collectDate: "", product: null };
+  const collectDate = collectedDateKey(detail.collect_date);
+  return {
+    found: true,
+    needsRefresh: collectDate !== shanghaiDateKey(),
+    collectDate,
+    collectedAt: detail.collected_at,
+    status: detail.status || "collected",
+    selectionProductId: detail.selection_product_id || null,
+    listingTemplateId: detail.listing_template_id || null,
+    product: buildPluginCollectedProductPayload(detail)
+  };
+}
+
+export async function collectorBoxProducts(query = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const page = Math.max(1, Number(query.page || 1));
+  const pageSize = Math.min(Math.max(1, Number(query.pageSize || 20)), 100);
+  const offset = (page - 1) * pageSize;
+  const search = String(query.query || query.search || "").trim().toLowerCase();
+  const status = String(query.status || "all").trim();
+  const tenantId = String(query.tenantId || query.tenant_id || "admin").trim() || "admin";
+  const where = ["tenant_id = ?", "status <> 'deleted'"];
+  const params = [tenantId];
+  if (search) {
+    where.push("(LOWER(sku) LIKE ? OR LOWER(product_id) LIKE ? OR LOWER(title) LIKE ? OR LOWER(category_name) LIKE ?)");
+    const like = `%${search}%`;
+    params.push(like, like, like, like);
+  }
+  if (status === "today") {
+    where.push("collect_date = ?");
+    params.push(shanghaiDateKey());
+  } else if (status && status !== "all") {
+    where.push("status = ?");
+    params.push(status);
+  }
+  const whereSql = where.join(" AND ");
+  const rows = await all(`
+    SELECT *
+    FROM ozon_plugin_collected_products
+    WHERE ${whereSql}
+    ORDER BY updated_at DESC, collected_at DESC
+    LIMIT ? OFFSET ?
+  `, [...params, pageSize, offset]);
+  const totalRow = await row(`
+    SELECT COUNT(*) AS total
+    FROM ozon_plugin_collected_products
+    WHERE ${whereSql}
+  `, params);
+  const summaryRows = await all(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN collect_date = ? THEN 1 ELSE 0 END) AS today_count,
+      SUM(CASE WHEN COALESCE(title, '') <> '' THEN 1 ELSE 0 END) AS titled_count
+    FROM ozon_plugin_collected_products
+    WHERE tenant_id = ? AND status <> 'deleted'
+  `, [shanghaiDateKey(), tenantId]);
+  return {
+    rows: rows.map((item) => buildCollectorBoxRow(item)),
+    total: Number(totalRow?.total || 0),
+    page,
+    pageSize,
+    summary: normalizeCollectorBoxSummary(summaryRows[0] || {})
+  };
+}
+
+export async function collectorBoxProductDetail(sku, session = null, tenantId = "admin") {
+  await ensureListingAutomationSchema();
+  const normalizedTenantId = String(tenantId || "admin").trim() || "admin";
+  const detail = await row(`
+    SELECT *
+    FROM ozon_plugin_collected_products
+    WHERE tenant_id = ? AND sku = ?
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `, [normalizedTenantId, String(sku || "").trim()]);
+  if (!detail) return null;
+  return {
+    ...buildCollectorBoxRow(detail),
+    payload: buildPluginCollectedProductPayload(detail),
+    rawPayload: parseCollectedPayloadJson(detail.payload_json),
+    editPayload: parseCollectedPayloadJson(detail.edit_payload_json)
+  };
+}
+
+export async function deleteCollectorBoxProducts(body = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const tenantId = String(body.tenantId || body.tenant_id || "admin").trim() || "admin";
+  const skus = normalizeArray(body.skus || body.sku)
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  const uniqueSkus = [...new Set(skus)];
+  if (!uniqueSkus.length) throw new Error("请选择要删除的采集商品");
+  const placeholders = uniqueSkus.map(() => "?").join(", ");
+  await mysqlExecute(`
+    UPDATE ozon_plugin_collected_products
+    SET status = 'deleted', updated_at = CURRENT_TIMESTAMP
+    WHERE tenant_id = ? AND sku IN (${placeholders})
+  `, [tenantId, ...uniqueSkus]);
+  return {
+    ok: true,
+    deletedCount: uniqueSkus.length,
+    skus: uniqueSkus
+  };
+}
+
+export async function saveCollectorBoxEdit(sku, body = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const detail = await collectorBoxProductDetail(sku, session);
+  if (!detail) throw new Error("采集箱商品不存在");
+  const editPayload = normalizeCollectorBoxEditPayload(body.editPayload || body.edit_payload || body || {}, detail);
+  await mysqlExecute(`
+    UPDATE ozon_plugin_collected_products
+    SET edit_payload_json = ?, status = CASE WHEN status = 'selection_created' THEN status ELSE 'edited' END,
+        edited_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE tenant_id = ? AND sku = ?
+  `, [JSON.stringify(editPayload), detail.tenant_id || "admin", detail.sku]);
+  return collectorBoxProductDetail(detail.sku, session);
+}
+
+export async function createListingTemplateFromCollectorBox(sku, body = {}, session = null) {
+  const detail = await collectorBoxProductDetail(sku, session, body?.tenant_id || body?.tenantId || "admin");
+  if (!detail) throw new Error("采集箱商品不存在");
+  const forceRebuild = Boolean(body?.force || body?.force_rebuild || body?.forceRebuild || body?.refresh || body?.rebuild);
+  if (detail.listing_template_id && !forceRebuild) {
+    const existingTemplate = await listingCategoryTemplate(detail.listing_template_id, session);
+    if (existingTemplate) {
+      return {
+        ok: true,
+        reused: true,
+        template: body?.compact ? compactListingTemplateReference(existingTemplate) : existingTemplate,
+        collectorProduct: body?.compact ? undefined : detail
+      };
+    }
+  }
+
+  const normalized = await normalizeCollectedListingDraft({ detail, body }, {
+    sourceType: "collector_box",
+    normalizeEditPayload: normalizeCollectorBoxEditPayload,
+    resolveCategory: (currentDetail, currentBody) => resolveCollectorBoxListingCategory(currentDetail, currentBody).catch(() => null),
+    buildAttributes: buildCollectorBoxEditAttributes,
+    mergeAttributeDefinitions: mergeCachedCategoryAttributeDefinitions,
+    collectVariantRows: collectCollectedVariantRows,
+    normalizeVariant: normalizeCollectedVariant,
+    variantImages: collectedVariantImages,
+    normalizeImages,
+    normalizeDimensions: (editPayload) => ({
+      length_cm: Number(editPayload.length_cm || 0),
+      width_cm: Number(editPayload.width_cm || 0),
+      height_cm: Number(editPayload.height_cm || 0),
+      weight_g: Number(editPayload.weight_g || 0)
+    })
+  });
+  const editPayload = normalized.editPayload;
+  const result = await createListingTemplateFromCollectedProduct(normalized.templatePayload, session);
+  const templateId = result.template?.id || null;
+  await mysqlExecute(`
+    UPDATE ozon_plugin_collected_products
+    SET edit_payload_json = ?, listing_template_id = ?, status = CASE WHEN status = 'selection_created' THEN status ELSE 'listing_template_created' END,
+        edited_at = COALESCE(edited_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+    WHERE tenant_id = ? AND sku = ?
+  `, [JSON.stringify(editPayload), templateId, detail.tenant_id || "admin", detail.sku]);
+  if (body?.compact) {
+    return {
+      ok: true,
+      reused: Boolean(result.reused),
+      template: compactListingTemplateReference(result.template),
+      normalization: normalized.diagnostics
+    };
+  }
+  return {
+    ...result,
+    normalization: normalized.diagnostics,
+    collectorProduct: await collectorBoxProductDetail(detail.sku, session, detail.tenant_id || body?.tenant_id || body?.tenantId || "admin")
+  };
+}
+
+function compactListingTemplateReference(template = null) {
+  if (!template) return null;
+  return {
+    id: template.id,
+    template_name: template.template_name || "",
+    title: template.title || "",
+    source_ozon_sku: template.source_ozon_sku || ""
+  };
+}
+
+function compactTemplateForEditor(template = null) {
+  if (!template) return null;
+  const editable = { ...(template.editable_payload || {}) };
+  delete editable.source_raw;
+  delete editable.raw_request;
+  const compact = {
+    ...template,
+    editable_payload: editable,
+    source_raw: undefined,
+    source_raw_omitted: true
+  };
+  delete compact.source_raw_json;
+  delete compact.editable_payload_json;
+  delete compact.attributes_json;
+  delete compact.images_json;
+  delete compact.category_attributes_json;
+  delete compact.required_attributes_json;
+  delete compact.ai_rules_json;
+  delete compact.image_rules_json;
+  return compact;
+}
+export async function createSelectionFromCollectorBox(sku, body = {}, session = null) {
+  const detail = await collectorBoxProductDetail(sku, session, body?.tenant_id || body?.tenantId || "admin");
+  if (!detail) throw new Error("采集箱商品不存在");
+  const payload = detail.payload || {};
+  const raw = detail.rawPayload || {};
+  const dims = normalizeCollectedDimensions(payload, raw);
+  const imageUrls = normalizeImages(raw.images || payload.images || [detail.image_url])
+    .map((item) => String(item?.url || item || "").trim())
+    .filter(Boolean);
+  if (detail.selection_product_id) {
+    let existingProduct = await selectionProductMysql(detail.selection_product_id);
+    if (existingProduct) {
+      if (imageUrls[0] && /\[object Object\]/i.test(`${existingProduct.image_url || ""} ${existingProduct.detail_image_urls || ""}`)) {
+        await mysqlExecute(`
+          UPDATE products
+          SET image_url = ?, detail_image_urls = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `, [imageUrls[0], JSON.stringify(imageUrls.slice(1)), detail.selection_product_id]);
+        existingProduct = await selectionProductMysql(detail.selection_product_id);
+      }
+      return {
+        ok: true,
+        reused: true,
+        id: detail.selection_product_id,
+        product: existingProduct,
+        collectorProduct: detail
+      };
+    }
+  }
+  const title = String(body.name || payload.productTitle || detail.title || `Ozon ${detail.sku}`).trim();
+  const productBody = {
+    name: title,
+    image_url: imageUrls[0] || detail.image_url || "",
+    detail_image_urls: imageUrls.slice(1),
+    purchase_url: detail.product_url || payload.productUrl || "",
+    source_platform: "Ozon",
+    supplier_note: buildCollectorSelectionNote(detail),
+    ozon_category_id: raw.ozon_category_id || raw.category_id || "",
+    ozon_description_category_id: raw.description_category_id || raw.descriptionCategoryId || "",
+    ozon_type_id: raw.type_id || raw.typeId || "",
+    ozon_category_name: detail.category_name || raw.category_name || raw.category || "",
+    package_weight_g: Number(dims.weight_g || raw.weight_g || raw.custom_weight || 0),
+    length_cm: Number(dims.length_cm || 30),
+    width_cm: Number(dims.width_cm || 20),
+    height_cm: Number(dims.height_cm || 10),
+    listing_price_rub: Number(detail.price || raw.price || raw.productPrice || 0),
+    air_sale_price_rmb: Number(raw.priceCny || raw.soldSumCny || 0),
+    advertising_rate: percentToNumber(raw.drr || raw.advertising_rate || 0),
+    return_rate: percentToNumber(raw.nullableRedemptionRate || raw.return_rate || 0.05),
+    product_type: "selection",
+    selection_status: "draft",
+    created_by_person_id: session?.personId || null,
+    owner_person_id: body.owner_person_id || session?.personId || null
+  };
+  const result = await createProductMysql(productBody);
+  await mysqlExecute(`
+    UPDATE ozon_plugin_collected_products
+    SET status = 'selection_created', selection_product_id = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE tenant_id = ? AND sku = ?
+  `, [result.id, detail.tenant_id || "admin", detail.sku]);
+  return {
+    ...result,
+    product: await selectionProductMysql(result.id),
+    collectorProduct: await collectorBoxProductDetail(detail.sku, session, detail.tenant_id || body?.tenant_id || body?.tenantId || "admin")
+  };
 }
 
 export async function getListingCollectedProductDetail(id, tenantId = "admin") {
@@ -839,6 +1504,26 @@ export async function listingOzonCategoryAttributes(query = {}, session = null) 
     WHERE description_category_id = ? AND type_id = ? AND status = 'active'
     ORDER BY is_required DESC, sort_order ASC, attribute_id ASC
   `, [descriptionCategoryId, typeId]);
+  if (!rows.length && query.auto_sync !== false && query.autoSync !== false) {
+    await syncListingOzonCategoryAttributes({
+      description_category_id: descriptionCategoryId,
+      type_id: typeId,
+      shop_id: query.shop_id || query.shopId,
+      language: query.language || "ZH_HANS",
+      sync_values: Boolean(query.sync_values || query.syncValues),
+      value_limit: query.value_limit || query.valueLimit || 120,
+      return_value_limit: query.value_limit || query.valueLimit || 120
+    }, session).catch(() => null);
+    const syncedRows = await all(`
+      SELECT *
+      FROM ozon_category_attributes
+      WHERE description_category_id = ? AND type_id = ? AND status = 'active'
+      ORDER BY is_required DESC, sort_order ASC, attribute_id ASC
+    `, [descriptionCategoryId, typeId]);
+    const syncedAttributes = syncedRows.map(normalizeOzonCategoryAttributeRow);
+    await attachCachedAttributeValues(syncedAttributes, descriptionCategoryId, typeId, Number(query.value_limit || query.valueLimit || 120));
+    return syncedAttributes;
+  }
   const attributes = rows.map(normalizeOzonCategoryAttributeRow);
   await attachCachedAttributeValues(attributes, descriptionCategoryId, typeId, Number(query.value_limit || query.valueLimit || 120));
   return attributes;
@@ -1331,6 +2016,9 @@ async function preparePublishRecordForSubmit({ sourceRecordId = 0, shop, shopPay
 export async function listingPublishRecords(query = {}, session = null) {
   await ensureListingAutomationSchema();
   const paged = String(query.paged || "") === "1" || String(query.paged || "").toLowerCase() === "true";
+  const includePayload = String(query.includePayload || query.include_payload || "").toLowerCase() === "1"
+    || String(query.includePayload || query.include_payload || "").toLowerCase() === "true"
+    || (!paged && query.includePayload === undefined && query.include_payload === undefined);
   const limit = Math.min(Math.max(Number(query.limit || 80), 1), 300);
   const page = Math.max(Number(query.page || 1), 1);
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 100);
@@ -1404,7 +2092,7 @@ export async function listingPublishRecords(query = {}, session = null) {
       LIMIT ? OFFSET ?
     `, [...params, pageSize, (page - 1) * pageSize]);
     return {
-      rows: rows.map(normalizePublishRecordRow),
+      rows: rows.map((item) => normalizePublishRecordRow(item, { includePayload })),
       total,
       page,
       pageSize,
@@ -1433,7 +2121,32 @@ export async function listingPublishRecords(query = {}, session = null) {
     ORDER BY r.updated_at DESC, r.id DESC
     LIMIT ?
   `, [limit]);
-  return rows.map(normalizePublishRecordRow);
+  return rows.map((item) => normalizePublishRecordRow(item, { includePayload }));
+}
+
+export async function listingPublishRecordDetail(id, session = null) {
+  await ensureListingAutomationSchema();
+  const record = await row(`
+    SELECT r.*, s.name AS shop_name,
+      COALESCE(NULLIF(op.primary_image, ''), NULLIF(op.image_url, '')) AS online_primary_image,
+      COALESCE(NULLIF(m.path_zh, ''), NULLIF(m.name_zh, ''), NULLIF(m.path_ru, ''), NULLIF(m.name_ru, '')) AS category_name
+    FROM listing_publish_records r
+    LEFT JOIN shops s ON s.id = r.shop_id
+    LEFT JOIN online_products op
+      ON op.shop_id = r.shop_id
+     AND (
+       (r.offer_id IS NOT NULL AND r.offer_id <> '' AND CONVERT(op.offer_id USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.offer_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+       OR (r.ozon_product_id IS NOT NULL AND r.ozon_product_id <> '' AND CONVERT(op.ozon_product_id USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.ozon_product_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+       OR (r.ozon_sku IS NOT NULL AND r.ozon_sku <> '' AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+     )
+    LEFT JOIN ozon_category_mappings m
+      ON m.description_category_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].description_category_id')), ''), ':', 1), '') AS UNSIGNED)
+     AND m.type_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].type_id')), ''), ':', 1), '') AS UNSIGNED)
+     AND m.status = 'active'
+    WHERE r.id = ? AND r.status <> 'deleted'
+  `, [Number(id)]);
+  if (!record) throw new Error("上架记录不存在");
+  return normalizePublishRecordRow(record, { includePayload: true });
 }
 
 export async function refreshListingPublishRecord(id, session = null) {
@@ -2194,6 +2907,46 @@ export async function ensureListingAutomationSchema() {
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
     await mysqlExecute(`
+      CREATE TABLE IF NOT EXISTS ozon_plugin_collected_products (
+        tenant_id VARCHAR(80) NOT NULL DEFAULT 'admin',
+        sku VARCHAR(128) NOT NULL,
+        product_id VARCHAR(128) NOT NULL DEFAULT '',
+        title VARCHAR(500) NOT NULL DEFAULT '',
+        product_url TEXT NULL,
+        image_url TEXT NULL,
+        category_name VARCHAR(500) NOT NULL DEFAULT '',
+        price DECIMAL(14,2) NULL,
+        currency VARCHAR(16) NOT NULL DEFAULT 'RUB',
+        sold_count DECIMAL(14,4) NULL,
+        view_count DECIMAL(14,4) NULL,
+        click_rate DECIMAL(14,6) NULL,
+        conversion_rate DECIMAL(14,6) NULL,
+        stock_count DECIMAL(14,4) NULL,
+        commission_rate DECIMAL(14,6) NULL,
+        collect_date DATE NOT NULL,
+        collected_at VARCHAR(64) NOT NULL DEFAULT '',
+        payload_json LONGTEXT NOT NULL,
+        status VARCHAR(64) NOT NULL DEFAULT 'collected',
+        selection_product_id BIGINT NULL,
+        listing_template_id BIGINT NULL,
+        edit_payload_json LONGTEXT NULL,
+        edited_at TIMESTAMP NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (tenant_id, sku),
+        INDEX idx_ozon_plugin_status (status, updated_at),
+        INDEX idx_ozon_plugin_selection (selection_product_id),
+        INDEX idx_ozon_plugin_listing_template (listing_template_id),
+        INDEX idx_ozon_plugin_collect_date (collect_date),
+        INDEX idx_ozon_plugin_collected_at (collected_at)
+      ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+    `);
+    await ensureMysqlColumn("ozon_plugin_collected_products", "status", "VARCHAR(64) NOT NULL DEFAULT 'collected'");
+    await ensureMysqlColumn("ozon_plugin_collected_products", "selection_product_id", "BIGINT NULL");
+    await ensureMysqlColumn("ozon_plugin_collected_products", "listing_template_id", "BIGINT NULL");
+    await ensureMysqlColumn("ozon_plugin_collected_products", "edit_payload_json", "LONGTEXT NULL");
+    await ensureMysqlColumn("ozon_plugin_collected_products", "edited_at", "TIMESTAMP NULL");
+    await mysqlExecute(`
       CREATE TABLE IF NOT EXISTS listing_media_assets (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
         source_module VARCHAR(64) NOT NULL DEFAULT '',
@@ -2258,10 +3011,43 @@ function normalizeTemplatePayload(body = {}) {
 }
 
 function buildTemplatePayloadFromCollectedProduct(body = {}) {
+  if (body?.editable_payload || body?.editablePayload) {
+    const editablePayload = normalizeEditablePayload(body.editable_payload || body.editablePayload || {});
+    const images = normalizeImages(body.images || editablePayload.images);
+    const attributes = normalizeAttributes(body.attributes || editablePayload.attributes);
+    const sourceRaw = body.source_raw || body.sourceRaw || editablePayload.source_raw || {
+      source_type: "ozon_frontend_collect",
+      collected_product: body
+    };
+    return {
+      ozon_category_id: String(body.ozon_category_id || body.ozonCategoryId || editablePayload.category_id || "").trim(),
+      category_name: String(body.category_name || body.categoryName || editablePayload.category_name || "Ozon 前台采集模板").trim(),
+      template_name: String(body.template_name || body.templateName || body.local_template_name || body.localTemplateName || editablePayload.title || body.title || "Ozon 采集模板").trim(),
+      source_ozon_sku: String(body.source_ozon_sku || body.sourceOzonSku || editablePayload.sku || body.sku || "").trim(),
+      source_raw: sourceRaw,
+      required_attributes: splitLines(body.required_attributes || body.requiredAttributes),
+      ai_rules: objectValue(body.ai_rules || body.aiRules),
+      image_rules: objectValue(body.image_rules || body.imageRules),
+      title: String(body.title || editablePayload.title || "").trim(),
+      description: String(body.description || editablePayload.description || "").trim(),
+      attributes,
+      images,
+      editable_payload: {
+        ...editablePayload,
+        attributes,
+        images
+      }
+    };
+  }
+  const draft = prepareListingDraftFromCollectedSource(body, { sourceType: "ozon_frontend_collect" });
+  return listingDraftToTemplatePayload(draft, body);
+}
+
+function buildTemplatePayloadFromCollectedProductLegacy(body = {}) {
   const source = unwrapCollectedPayload(body);
   const editPayload = objectValue(source.editPayload || source.edit_payload || source.editable_payload || {});
   const followPayload = objectValue(source.followEditPayload || source.follow_edit_payload || editPayload.followEditPayload || {});
-  const rows = normalizeArray(source.rows || editPayload.rows || followPayload.rows || source.editorVariants || source.variants);
+  const rows = collectCollectedVariantRows(source, editPayload, followPayload);
   const attributes = normalizeAttributes(source.attributes || editPayload.attributes || followPayload.attributes || []);
   const hashtags = normalizeTagList(source.hashtags || editPayload.hashtags || followPayload.hashtags);
   const images = normalizeImages(
@@ -2274,7 +3060,10 @@ function buildTemplatePayloadFromCollectedProduct(body = {}) {
   const jsonContent = source.jsonContent ?? source.json_content ?? editPayload.jsonContent ?? editPayload.json_content ?? followPayload.json_content ?? "";
   const richText = typeof jsonContent === "string" ? jsonContent : (jsonContent ? JSON.stringify(jsonContent, null, 2) : "");
   const dimensions = normalizeCollectedDimensions(source, editPayload, rows[0]);
-  const variants = rows.length ? rows.map((item, index) => normalizeCollectedVariant(item, source, dimensions, hashtags, index)) : [
+  const variants = rows.length ? rows.map((item, index) => normalizeCollectedVariant({
+    ...item,
+    images: collectedVariantImages(item, images, rows.length > 1)
+  }, source, dimensions, hashtags, index)) : [
     normalizeCollectedVariant({
       sku: source.sku || source.productId || "",
       title,
@@ -2285,18 +3074,19 @@ function buildTemplatePayloadFromCollectedProduct(body = {}) {
     }, source, dimensions, hashtags, 0)
   ];
   const sku = String(source.sku || source.productId || editPayload.sku || variants[0]?.source_sku || "").trim();
+  const rawCategoryIds = Array.isArray(source.category_ids) ? source.category_ids : [];
+  const inferredDescriptionCategoryId = source.category2Id || (rawCategoryIds.length >= 3 ? rawCategoryIds[rawCategoryIds.length - 2] : "");
+  const inferredTypeId = source.category3Id || (rawCategoryIds.length >= 3 ? rawCategoryIds[rawCategoryIds.length - 1] : "");
   const descriptionCategoryId = String(
-    body.ozon_category_id ||
-    body.ozonCategoryId ||
     body.description_category_id ||
     body.descriptionCategoryId ||
-    source.description_category_id ||
-    source.descriptionCategoryId ||
     editPayload.description_category_id ||
     editPayload.descriptionCategoryId ||
+    (body.type_id || body.typeId || source.type_id || source.typeId || editPayload.type_id || editPayload.typeId ? (source.description_category_id || source.descriptionCategoryId) : "") ||
+    inferredDescriptionCategoryId ||
     ""
   ).trim();
-  const typeId = String(body.type_id || body.typeId || source.type_id || source.typeId || editPayload.type_id || editPayload.typeId || "").trim();
+  const typeId = String(body.type_id || body.typeId || source.type_id || source.typeId || editPayload.type_id || editPayload.typeId || inferredTypeId || "").trim();
   const legacyCategoryId = String(source.ozon_category_id || source.category_id || editPayload.category_id || "").trim();
   const fallbackCategoryId = buildOzonCategoryKey({
     description_category_id: descriptionCategoryId,
@@ -2383,10 +3173,17 @@ function normalizeCollectedDimensions(...sources) {
   const rawDims = firstValue("dimensions", "real_dimensions", "custom_volume");
   const dims = objectValue(rawDims);
   const parsedDims = parseCollectedDimensionText(rawDims);
+  const dimensionUnit = String(dims.unit || firstValue("dimension_unit", "dimensions_unit", "unit") || "").toLowerCase();
+  const cmValue = (cm, mmFallback) => {
+    const directCm = numberFromOzonValue(cm);
+    if (directCm) return directCm;
+    const mm = normalizeDimensionToMm(mmFallback, dimensionUnit);
+    return mm ? Number((mm / 10).toFixed(2)) : 0;
+  };
   return {
-    length_cm: numberFromOzonValue(firstValue("length_mm", "depth", "length") || dims.depth || dims.length || parsedDims.length || 0),
-    width_cm: numberFromOzonValue(firstValue("width_mm", "width") || dims.width || parsedDims.width || 0),
-    height_cm: numberFromOzonValue(firstValue("height_mm", "height") || dims.height || parsedDims.height || 0),
+    length_cm: cmValue(firstValue("length_cm") || dims.length_cm, firstValue("length_mm", "depth", "length") || dims.depth || dims.length || parsedDims.length || 0),
+    width_cm: cmValue(firstValue("width_cm") || dims.width_cm, firstValue("width_mm", "width") || dims.width || parsedDims.width || 0),
+    height_cm: cmValue(firstValue("height_cm") || dims.height_cm, firstValue("height_mm", "height") || dims.height || parsedDims.height || 0),
     weight_g: numberFromOzonValue(firstValue("weight_g", "weight", "custom_weight") || 0)
   };
 }
@@ -2405,10 +3202,18 @@ function parseCollectedDimensionText(value) {
 
 function normalizeCollectedVariant(item = {}, source = {}, dimensions = {}, tags = [], index = 0) {
   const rowDimensions = normalizeCollectedDimensions(item, dimensions);
-  const imageValues = normalizeImages([
+  const rowAttributes = normalizeAttributes(item.attributes || item.attribute_values || item.characteristics || []);
+  const dynamicAttributes = mergeCollectedDynamicAttributes(
+    collectedAttributesToDynamicAttributes(rowAttributes),
+    item.dynamic_attributes,
+    item.dynamicAttributes
+  );
+  const imageValues = dedupeImagesByUrl(normalizeImages([
     item.cover_image || item.coverImage || item.primary_image || item.mainImage || "",
     ...(normalizeArray(item.images || item.image_urls || item.imageUrls))
-  ]);
+  ]));
+  const fallbackImages = dedupeImagesByUrl(normalizeImages(source.images || source.image_urls || source.imageUrls || source.productImage || source.mainImage || []));
+  const images = imageValues.length ? imageValues : fallbackImages;
   const sku = String(item.sku || item.source_sku || "").trim();
   return {
     sku,
@@ -2417,7 +3222,7 @@ function normalizeCollectedVariant(item = {}, source = {}, dimensions = {}, tags
     offer_id: "",
     name: String(item.name || item.title || source.title || "").trim(),
     title: String(item.title || item.name || source.title || "").trim(),
-    images: imageValues,
+    images,
     video_cover_urls: normalizeStringList(item.video_cover_urls || item.cover_video_urls || item.cover_video || item.video_cover),
     video_urls: normalizeStringList(item.video_urls || item.videos || item.videoUrls || item.video_url),
     barcode: String(item.barcode || normalizeArray(item.barcodes)[0] || "").trim(),
@@ -2427,13 +3232,112 @@ function normalizeCollectedVariant(item = {}, source = {}, dimensions = {}, tags
     color: String(item.color || "").trim(),
     spec: String(item.spec || item.searchable_text || "").trim(),
     main_tags: normalizeTagList(item.hashtags || item.main_tags || tags),
+    attributes: rowAttributes,
+    dynamic_attributes: dynamicAttributes,
     weight_g: rowDimensions.weight_g || dimensions.weight_g || 0,
-    length_mm: rowDimensions.length_cm || dimensions.length_cm || 0,
-    width_mm: rowDimensions.width_cm || dimensions.width_cm || 0,
-    height_mm: rowDimensions.height_cm || dimensions.height_cm || 0,
+    length_cm: rowDimensions.length_cm || dimensions.length_cm || 0,
+    width_cm: rowDimensions.width_cm || dimensions.width_cm || 0,
+    height_cm: rowDimensions.height_cm || dimensions.height_cm || 0,
+    length_mm: Math.round(Number(rowDimensions.length_cm || dimensions.length_cm || 0) * 10),
+    width_mm: Math.round(Number(rowDimensions.width_cm || dimensions.width_cm || 0) * 10),
+    height_mm: Math.round(Number(rowDimensions.height_cm || dimensions.height_cm || 0) * 10),
     stock: Number(item.stock || item.quantity || 0),
     sort_order: Number(item.sort_order || index + 1)
   };
+}
+
+function collectedAttributesToDynamicAttributes(attributes = []) {
+  const result = {};
+  for (const item of normalizeAttributes(attributes)) {
+    const key = String(item.attribute_id || item.name || "").trim();
+    if (!key || item.value === undefined || item.value === null || item.value === "") continue;
+    result[key] = {
+      attribute_id: item.attribute_id || "",
+      name: item.name || "",
+      value: item.value,
+      values: item.values || [],
+      dictionary_id: item.dictionary_id || "",
+      type: item.type || "text",
+      source: item.source || "variant_attribute"
+    };
+  }
+  return result;
+}
+
+function mergeCollectedDynamicAttributes(...sources) {
+  return Object.assign({}, ...sources.map((source) => {
+    if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+    return source;
+  }));
+}
+
+function collectedVariantImages(item = {}, productImages = [], multiVariant = false) {
+  const ownImages = dedupeImagesByUrl(normalizeImages([
+    item.cover_image || item.coverImage || item.primary_image || item.primaryImage || item.main_image || item.mainImage || "",
+    ...(normalizeArray(item.images || item.image_urls || item.imageUrls))
+  ]));
+  if (ownImages.length) return ownImages;
+  const normalizedProductImages = dedupeImagesByUrl(normalizeImages(productImages || []));
+  if (!multiVariant) return normalizedProductImages;
+  return normalizedProductImages.slice(0, 1);
+}
+
+function dedupeImagesByUrl(images = []) {
+  const seen = new Set();
+  return normalizeArray(images).filter((image) => {
+    const url = String(image?.url || image || "").trim();
+    if (!url || seen.has(url)) return false;
+    seen.add(url);
+    return true;
+  });
+}
+
+function collectCollectedVariantRows(source = {}, editPayload = {}, followPayload = {}) {
+  const payload = objectValue(source.payload || source.rawPayload || {});
+  const normalized = objectValue(source.normalized || {});
+  const nestedFollow = objectValue(source.followEditPayload || source.follow_edit_payload || editPayload.followEditPayload || editPayload.follow_edit_payload || payload.followEditPayload || payload.follow_edit_payload || normalized.followEditPayload || {});
+  const rows = [
+    ...normalizeArray(source.editorVariants || source.editor_variants || editPayload.editorVariants || editPayload.editor_variants || payload.editorVariants || normalized.editorVariants),
+    ...normalizeArray(source.rows || editPayload.rows || followPayload.rows || nestedFollow.rows || payload.rows || normalized.rows),
+    ...normalizeArray(source.variants || source.variantRows || source.productVariants || source.skuVariants || source.offerVariants || editPayload.variants || payload.variants || normalized.variants),
+    ...normalizeArray(source.offers || source.children || source.products || payload.offers || payload.products),
+    ...normalizeArray(source.skus).map((item) => typeof item === "string" ? { sku: item } : item)
+  ];
+  const byKey = new Map();
+  for (const row of rows) {
+    const key = String(row?.sku || row?.source_sku || row?.offer_id || row?.variantId || row?.variant_id || row?.id || "").trim();
+    if (!key) continue;
+    const normalizedRow = { ...row, sku: row.sku || row.source_sku || key };
+    const previous = byKey.get(key);
+    byKey.set(key, previous ? mergeCollectedVariantRow(previous, normalizedRow) : normalizedRow);
+  }
+  return [...byKey.values()];
+}
+
+function mergeCollectedVariantRow(previous = {}, next = {}) {
+  const merged = { ...previous, ...next };
+  for (const key of ["images", "image_urls", "imageUrls", "video_urls", "videos", "attributes", "attribute_values", "characteristics", "hashtags"]) {
+    const previousList = normalizeArray(previous[key]);
+    const nextList = normalizeArray(next[key]);
+    if (previousList.length || nextList.length) merged[key] = dedupeLooseList([...previousList, ...nextList]);
+  }
+  merged.dynamic_attributes = mergeCollectedDynamicAttributes(previous.dynamic_attributes, previous.dynamicAttributes, next.dynamic_attributes, next.dynamicAttributes);
+  for (const key of ["title", "name", "cover_image", "coverImage", "primary_image", "primaryImage", "main_image", "mainImage", "searchable_text", "searchableText"]) {
+    merged[key] = next[key] || previous[key] || "";
+  }
+  return merged;
+}
+
+function dedupeLooseList(values = []) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const key = typeof value === "object" ? JSON.stringify(value) : String(value || "");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
 }
 
 function normalizeTagList(value) {
@@ -3652,10 +4556,11 @@ async function refreshPublishRecordQuality(recordId) {
   return quality;
 }
 
-function normalizePublishRecordRow(row = {}) {
+function normalizePublishRecordRow(row = {}, options = {}) {
+  const includePayload = options.includePayload !== false;
   const request = parseJson(row.request_json, {});
-  const response = parseJson(row.response_json, {});
-  const error = parseJson(row.error_json, null);
+  const response = includePayload ? parseJson(row.response_json, {}) : {};
+  const error = includePayload ? parseJson(row.error_json, null) : null;
   const quality = parseJson(row.quality_json, null) || (Number(row.quality_score || 0) ? {
     score: Number(row.quality_score || 0),
     source: row.quality_source || ""
@@ -3680,14 +4585,18 @@ function normalizePublishRecordRow(row = {}) {
   const qualitySource = row.quality_source || quality?.source || "";
   const hasRealQuality = String(qualitySource || "").includes("ozon_rating_by_sku");
   const realQualityScore = realOzonQualityScore(qualitySource, row.quality_score || quality?.score);
-  return {
-    ...row,
+  const {
+    request_json: _requestJson,
+    response_json: _responseJson,
+    error_json: _errorJson,
+    quality_json: _qualityJson,
+    ...baseRow
+  } = row;
+  const normalized = {
+    ...baseRow,
     id: Number(row.id || 0),
     draft_id: Number(row.draft_id || 0),
     shop_id: Number(row.shop_id || 0),
-    response,
-    request,
-    error,
     product_name: firstItem.name || row.offer_id || "",
     primary_image: localListingPreviewUrl(firstItem.primary_image) || images[0] || onlinePrimaryImage || "",
     fallback_image: onlinePrimaryImage,
@@ -3704,8 +4613,8 @@ function normalizePublishRecordRow(row = {}) {
     height: firstItem.height || "",
     description_category_id: firstItem.description_category_id || "",
     type_id: firstItem.type_id || "",
-    quality: hasRealQuality ? quality : {
-      score: 0,
+    quality: includePayload && hasRealQuality ? quality : {
+      score: includePayload ? 0 : realQualityScore,
       source: qualitySource || "ozon_rating_pending",
       issues: qualitySource ? normalizeArray(quality?.issues).slice(0, 8) : ["Ozon 暂未返回真实内容评分"]
     },
@@ -3713,8 +4622,14 @@ function normalizePublishRecordRow(row = {}) {
     quality_source: hasRealQuality ? qualitySource : (qualitySource || "ozon_rating_pending"),
     quality_checked_at: row.quality_checked_at || "",
     quality_ok: realQualityScore >= 90,
-    quality_issues: hasRealQuality ? normalizeArray(quality?.issues).slice(0, 8) : []
+    quality_issues: hasRealQuality ? normalizeArray(quality?.issues).slice(0, includePayload ? 8 : 2) : []
   };
+  if (includePayload) {
+    normalized.response = response;
+    normalized.request = request;
+    normalized.error = error;
+  }
+  return normalized;
 }
 
 function localListingPreviewUrl(url = "") {
@@ -4029,21 +4944,24 @@ function normalizeAttributes(value) {
     if (typeof item === "string") {
       return { name: item, value: "", type: "text", required: false, values: [], sort_order: index + 1 };
     }
+    const values = Array.isArray(item?.values) ? item.values.map((option) => ({
+      id: option?.dictionary_value_id ?? option?.id ?? option?.value_id ?? "",
+      value: String(option?.value ?? option?.name ?? option?.text ?? option ?? "").trim()
+    })).filter((option) => option.value) : [];
+    const attributeId = item?.attribute_id || item?.id || "";
+    const isCollection = Boolean(item?.is_collection || item?.collection || String(item?.type || "").toLowerCase() === "multiselect");
     return {
-      name: String(item?.name || item?.attribute_name || "").trim(),
-      value: normalizeAttributeValue(item?.value ?? item?.attribute_value ?? ""),
+      name: String(item?.name || item?.attribute_name || item?.title || (attributeId ? `属性 ${attributeId}` : "")).trim(),
+      value: normalizeAttributeFormValue(item?.value ?? item?.attribute_value ?? (values.length ? values : ""), isCollection),
       required: Boolean(item?.required),
-      attribute_id: item?.attribute_id || item?.id || "",
+      attribute_id: attributeId,
       type: String(item?.type || item?.value_type || (item?.dictionary_id ? "select" : "text")).trim(),
       dictionary_id: item?.dictionary_id || "",
       is_collection: Boolean(item?.is_collection || item?.collection),
       group: String(item?.group || item?.group_name || "").trim(),
       hint: String(item?.hint || item?.description || "").trim(),
       source: String(item?.source || "ozon_copy").trim(),
-      values: Array.isArray(item?.values) ? item.values.map((option) => ({
-        id: option?.id ?? option?.value_id ?? "",
-        value: String(option?.value ?? option?.name ?? option ?? "").trim()
-      })).filter((option) => option.value) : [],
+      values,
       raw: item?.raw || item,
       sort_order: Number(item?.sort_order || index + 1)
     };
@@ -4156,7 +5074,7 @@ function mergeCategoryAttributeDefinitions(valueAttributes = [], definitions = [
     if (definitionName) valuesByName.delete(definitionName);
     merged.push({
       name: String(definition.name || definition.attribute_name || value?.name || (id ? `属性 ${id}` : "")).trim(),
-      value: value?.value || "",
+      value: normalizeMergedCategoryAttributeValue(value, definition),
       required: Boolean(definition.is_required || definition.required || value?.required),
       attribute_id: id || value?.attribute_id || "",
       type: categoryAttributeType(definition, value),
@@ -4165,7 +5083,7 @@ function mergeCategoryAttributeDefinitions(valueAttributes = [], definitions = [
       group: String(definition.group_name || definition.group || value?.group || "").trim(),
       hint: String(definition.description || definition.hint || value?.hint || "").trim(),
       source: value ? "ozon_product_detail+category_definition" : "ozon_category_definition",
-      values: value?.values || [],
+      values: value?.values?.length ? value.values : (definition.values || []),
       raw: { definition, value: value?.raw || value || null },
       sort_order: Number(definition.sort_order || value?.sort_order || merged.length + 1)
     });
@@ -4177,6 +5095,95 @@ function mergeCategoryAttributeDefinitions(valueAttributes = [], definitions = [
     }
   }
   return merged.filter((item) => item.name || item.value || item.attribute_id);
+}
+
+function normalizeAttributeFormValue(value, isCollection = false) {
+  if (!isCollection) return normalizeAttributeValue(value);
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      if (item && typeof item === "object") return item.value ?? item.name ?? item.text ?? "";
+      return item;
+    }).map((item) => String(item || "").trim()).filter(Boolean);
+  }
+  if (value && typeof value === "object") {
+    return normalizeStringList(value.value || value.name || value.text || "");
+  }
+  return normalizeStringList(value);
+}
+
+function normalizeMergedCategoryAttributeValue(value = null, definition = {}) {
+  if (!value) return "";
+  const isCollection = Boolean(definition.is_collection || definition.collection || value.is_collection || value.type === "multiselect");
+  if (isCollection) {
+    if (Array.isArray(value.value)) return value.value.map((item) => String(item || "").trim()).filter(Boolean);
+    if (Array.isArray(value.values) && value.values.length) {
+      return value.values.map((item) => String(item?.value || item?.name || item?.text || item || "").trim()).filter(Boolean);
+    }
+    return normalizeStringList(value.value || "");
+  }
+  if (Array.isArray(value.value)) return value.value.map((item) => String(item || "").trim()).filter(Boolean).join(", ");
+  return value.value || "";
+}
+
+async function mergeCachedCategoryAttributeDefinitions(valueAttributes = [], descriptionCategoryId, typeId) {
+  const definitions = await listingOzonCategoryAttributes({
+    description_category_id: descriptionCategoryId,
+    type_id: typeId,
+    value_limit: 80,
+    sync_values: true
+  }).catch(() => []);
+  const merged = mergeCategoryAttributeDefinitions(valueAttributes, definitions);
+  return hydrateAttributeNamesFromAnyCategory(inferCollectedAttributeValues(merged));
+}
+
+function inferCollectedAttributeValues(attributes = []) {
+  return normalizeArray(attributes).map((item) => {
+    if (item.value !== undefined && item.value !== null && item.value !== "" && (!Array.isArray(item.value) || item.value.length)) return item;
+    const inferred = inferCollectedAttributeValue(item);
+    return inferred === undefined ? item : { ...item, value: inferred, source: `${item.source || "ozon_category_definition"}+inferred` };
+  });
+}
+
+function inferCollectedAttributeValue(attribute = {}) {
+  const id = Number(attribute.attribute_id || attribute.id || 0);
+  const values = normalizeArray(attribute.values);
+  const byText = (...patterns) => {
+    const matched = values.find((option) => patterns.some((pattern) => new RegExp(pattern, "i").test(String(option.value || option.label || option.name || ""))));
+    return matched?.value || matched?.label || "";
+  };
+  if (id === 85) return byText("无品牌", "нет бренда", "no brand") || "无品牌";
+  if (id === 9782) return byText("не опас", "безопас", "低", "нет") || "";
+  if (id === 8229) return byText("средство", "спрей", "аэрозоль", "гель", "杀虫", "喷") || "";
+  return undefined;
+}
+
+async function hydrateAttributeNamesFromAnyCategory(attributes = []) {
+  const needIds = normalizeArray(attributes)
+    .filter((item) => item.attribute_id && /^属性\s+\d+$/i.test(String(item.name || "")))
+    .map((item) => Number(item.attribute_id || 0))
+    .filter(Boolean);
+  const ids = [...new Set(needIds)];
+  if (!ids.length) return attributes;
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = await all(`
+    SELECT attribute_id, MAX(NULLIF(name, '')) AS name, MAX(NULLIF(attribute_type, '')) AS attribute_type,
+           MAX(dictionary_id) AS dictionary_id, MAX(is_collection) AS is_collection
+    FROM ozon_category_attributes
+    WHERE attribute_id IN (${placeholders}) AND status = 'active'
+    GROUP BY attribute_id
+  `, ids).catch(() => []);
+  const byId = new Map(rows.map((item) => [String(item.attribute_id), item]));
+  return attributes.map((item) => {
+    const cached = byId.get(String(item.attribute_id || ""));
+    if (!cached?.name) return item;
+    return {
+      ...item,
+      name: cached.name,
+      type: item.type && item.type !== "text" ? item.type : categoryAttributeType(cached, item),
+      dictionary_id: item.dictionary_id || cached.dictionary_id || "",
+      is_collection: Boolean(item.is_collection || cached.is_collection)
+    };
+  });
 }
 
 function normalizeAttributeNameKey(value) {
@@ -4455,3 +5462,5 @@ async function insert(sql, params = []) {
 async function run(sql, params = []) {
   return mysqlExecute(sql, params);
 }
+
+

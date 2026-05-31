@@ -9,7 +9,7 @@ const props = defineProps({
   fit: { type: String, default: "contain" },
   size: { type: String, default: "default" },
   preview: { type: Boolean, default: true },
-  lazy: { type: Boolean, default: false }
+  lazy: { type: Boolean, default: true }
 });
 
 function normalizeImageSrc(src) {

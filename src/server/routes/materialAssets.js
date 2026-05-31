@@ -1,7 +1,7 @@
 export function createMaterialAssetRoutes({ services, readJson }) {
   return {
     "GET /api/material-assets": (req) => services.materialAssets(req.query || {}),
-    "POST /api/material-assets": async (req) => services.createMaterialAsset(await readJson(req), req._session?.person_id)
+    "POST /api/material-assets": async (req) => services.createMaterialAsset(await readJson(req), req._session?.personId)
   };
 }
 

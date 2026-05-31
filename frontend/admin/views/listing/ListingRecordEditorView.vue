@@ -53,9 +53,8 @@ async function loadDraft() {
       if (raw) draft = JSON.parse(raw);
     }
     if (!draft && recordId) {
-      const rows = await apiClient.get("/api/listing/publish-records?limit=300", { noCache: true });
-      const row = rows.find((item) => Number(item.id) === recordId);
-      if (row) draft = buildDraftFromRow(row);
+      const row = await apiClient.get(`/api/listing/publish-records/${recordId}`, { noCache: true });
+      if (row?.id) draft = buildDraftFromRow(row);
     }
     if (!draft) {
       ElMessage.warning("没有找到这条上架记录，请从上架记录列表重新打开");
@@ -228,9 +227,9 @@ function splitLines(value) {
         <p>从上架记录带入原始请求，修改标题、价格、图片、视频或技术参数后重新提交。</p>
       </div>
       <div class="header-actions">
-        <el-button :icon="ArrowLeft" @click="router.push({ name: 'listing-records' })">返回记录</el-button>
-        <el-button type="danger" plain :icon="Delete" :loading="deleting" @click="deleteRecord">删除记录</el-button>
-        <el-button type="primary" :icon="Check" :loading="submitting" @click="submitRecord">重新提交 Ozon</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="ArrowLeft" @click="router.push({ name: 'listing-records' })">返回记录</el-button>
+        <el-button class="erp-btn erp-btn-danger" type="danger" plain :icon="Delete" :loading="deleting" @click="deleteRecord">删除记录</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Check" :loading="submitting" @click="submitRecord">重新提交 Ozon</el-button>
       </div>
     </section>
 
@@ -276,7 +275,7 @@ function splitLines(value) {
     <section class="editor-panel">
       <div class="panel-title">
         <h2>技术 JSON</h2>
-        <el-button :icon="Refresh" @click="applyFormToPayload">同步表单到 JSON</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" @click="applyFormToPayload">同步表单到 JSON</el-button>
       </div>
       <el-input v-model="state.payloadText" type="textarea" :rows="16" />
     </section>

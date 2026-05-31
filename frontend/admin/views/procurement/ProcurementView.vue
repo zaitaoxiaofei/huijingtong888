@@ -337,8 +337,8 @@ onMounted(loadPageData);
             <el-tag type="info">共 {{ totalRequests }} 条</el-tag>
           </div>
           <div class="page-card-actions">
-            <el-button @click="loadPageData">刷新数据</el-button>
-            <el-button type="primary" @click="openCreateDialog">新建采购请求</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新建采购请求</el-button>
           </div>
         </div>
       </template>
@@ -374,8 +374,8 @@ onMounted(loadPageData);
             </el-select>
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="handleSearch">查询</el-button>
-            <el-button @click="handleReset">重置</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
           </el-form-item>
         </el-form>
       </div>
@@ -443,10 +443,10 @@ onMounted(loadPageData);
           </el-table-column>
           <el-table-column label="操作" width="180" fixed="right" align="center">
             <template #default="{ row }">
-              <el-space wrap>
-                <el-button link type="primary" @click="openEditRequestDialog(row)">编辑</el-button>
-                <el-button link type="danger" @click="deleteRequest(row)">删除</el-button>
-              </el-space>
+              <div class="erp-inline-actions">
+                <el-button class="erp-btn-link" link type="primary" @click="openEditRequestDialog(row)">编辑</el-button>
+                <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="deleteRequest(row)">删除</el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -611,9 +611,9 @@ onMounted(loadPageData);
       </div>
 
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="editDialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="editDialogSubmitting" @click="submitEditDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="editDialogVisible = false">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="editDialogSubmitting" @click="submitEditDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>

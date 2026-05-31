@@ -1,4 +1,5 @@
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
+import { logScheduledJobEvent } from "./scheduled-jobs.js";
 import { estimateItemProfit } from "../profit.js";
 
 const AD_DAILY_SCHEMA = `
@@ -43,6 +44,7 @@ CREATE TABLE IF NOT EXISTS ozon_ad_sku_daily (
 let schemaReady = false;
 const PERFORMANCE_API_BASE = "https://api-performance.ozon.ru";
 const PERFORMANCE_TIMEOUT_MS = 60000;
+const FORBIDDEN_CAMPAIGN_RETRY_HOURS = 12;
 const RUB_CNY_RATE = 11.3;
 const DEFAULT_PACKAGING_FEE_RULE = {
   low_sale_threshold_cny: 50,
@@ -69,6 +71,17 @@ async function ensurePerformanceCredentialSchema() {
   await mysqlExecute("ALTER TABLE shops ADD COLUMN performance_client_id VARCHAR(128) NULL").catch(ignoreDuplicateColumn);
   await mysqlExecute("ALTER TABLE shops ADD COLUMN performance_client_secret TEXT NULL").catch(ignoreDuplicateColumn);
   await mysqlExecute("ALTER TABLE shops ADD COLUMN performance_client_secret_hint VARCHAR(255) NULL").catch(ignoreDuplicateColumn);
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS ozon_ad_forbidden_campaigns (
+      shop_id BIGINT UNSIGNED NOT NULL,
+      campaign_id VARCHAR(128) NOT NULL,
+      reason VARCHAR(255) NOT NULL DEFAULT '',
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (shop_id, campaign_id),
+      KEY idx_ozon_ad_forbidden_campaigns_updated (updated_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `).catch(() => {});
 }
 
 function ignoreDuplicateColumn(error) {
@@ -159,11 +172,17 @@ function resolveAdRevenueCny(row = {}) {
 function resolveModelSalePriceCny(row = {}, quantity) {
   const adRevenueCny = resolveAdRevenueCny(row);
   if (adRevenueCny > 0) return adRevenueCny / Math.max(1, quantity);
+  const onlineSalePrice = toNumber(row.online_sale_price);
+  if (onlineSalePrice > 0) {
+    const currency = String(row.online_sale_currency_code || row.online_currency_code || "").trim().toUpperCase();
+    if (currency === "CNY" || currency === "RMB" || currency === "CHY") return onlineSalePrice;
+    if (currency === "RUB" || currency === "RUR" || !currency) return onlineSalePrice / RUB_CNY_RATE;
+    return onlineSalePrice;
+  }
   const localRevenue = toNumber(row.local_revenue_cny);
   const localUnits = Math.max(1, toNumber(row.local_units));
   if (localRevenue > 0) return localRevenue / localUnits;
-  const ozonSaleRub = toNumber(row.ozon_sale_price_rub);
-  return ozonSaleRub > 0 ? ozonSaleRub / RUB_CNY_RATE : 0;
+  return 0;
 }
 
 async function applyAdvertisingProfitModel(row = {}) {
@@ -293,9 +312,29 @@ function rowMetrics(row = {}) {
   const orders = toNumber(row.orders);
   const revenueRub = toNumber(row.revenue_rub);
   const revenueCny = toNumber(row.revenue_cny);
+  const source = String(row.source || "");
+  let rawJson = row.raw_json || null;
+  if (typeof rawJson === "string" && rawJson.trim()) {
+    try {
+      rawJson = JSON.parse(rawJson);
+    } catch {
+      rawJson = null;
+    }
+  }
+  const pendingRows = Number(row.pending_rows || 0);
+  const dataPending = Boolean(
+    row.data_pending
+    || pendingRows > 0
+    || source === "ozon_performance_pending"
+    || rawJson?.pending
+  );
 
   return {
     ...row,
+    source,
+    pending_rows: pendingRows,
+    data_pending: dataPending,
+    data_pending_reason: row.data_pending_reason || (dataPending ? (rawJson?.reason || "ozon_report_not_ready") : ""),
     spend_rub: spendRub,
     spend_cny: spendCny,
     impressions,
@@ -376,7 +415,8 @@ export async function advertisingDailyMysql(query = {}) {
       COALESCE(MAX(profit.local_purchase_cost_cny), 0) AS local_purchase_cost_cny,
       COALESCE(MAX(profit.local_profit_cny), 0) AS local_profit_cny,
       COALESCE(MAX(profit.local_units), 0) AS local_units,
-      MAX(op.sale_price) AS ozon_sale_price_rub,
+      MAX(op.sale_price) AS online_sale_price,
+      MAX(op.currency_code) AS online_sale_currency_code,
       MAX(sm.commission_low) AS mapping_commission_low,
       MAX(sm.commission_high) AS mapping_commission_high,
       MAX(op.commissions_json) AS mapping_commissions_json,
@@ -402,6 +442,9 @@ export async function advertisingDailyMysql(query = {}) {
       COALESCE(SUM(ad.units), 0) AS units,
       COALESCE(SUM(ad.revenue_rub), 0) AS revenue_rub,
       COALESCE(SUM(ad.revenue_cny), 0) AS revenue_cny,
+      SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) AS pending_rows,
+      CASE WHEN SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) > 0 THEN 1 ELSE 0 END AS data_pending,
+      CASE WHEN SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) > 0 THEN 'ozon_report_not_ready' ELSE '' END AS data_pending_reason,
       CASE WHEN COALESCE(SUM(ad.revenue_rub), 0) > 0 THEN COALESCE(SUM(ad.spend_rub), 0) / COALESCE(SUM(ad.revenue_rub), 0) ELSE 0 END AS acos,
       CASE WHEN COALESCE(SUM(ad.spend_rub), 0) > 0 THEN COALESCE(SUM(ad.revenue_rub), 0) / COALESCE(SUM(ad.spend_rub), 0) ELSE 0 END AS roas
     FROM ozon_ad_sku_daily ad
@@ -482,12 +525,306 @@ export async function advertisingDailySummaryMysql(query = {}) {
       COALESCE(SUM(ad.orders), 0) AS orders,
       COALESCE(SUM(ad.units), 0) AS units,
       COALESCE(SUM(ad.revenue_rub), 0) AS revenue_rub,
-      COALESCE(SUM(ad.revenue_cny), 0) AS revenue_cny
+      COALESCE(SUM(ad.revenue_cny), 0) AS revenue_cny,
+      SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) AS pending_rows,
+      CASE WHEN SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) > 0 THEN 1 ELSE 0 END AS data_pending,
+      CASE WHEN SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) > 0 THEN 'ozon_report_not_ready' ELSE '' END AS data_pending_reason
     FROM ozon_ad_sku_daily ad
     JOIN shops s ON s.id = ad.shop_id
     ${sql}
   `, params);
-  return { ...rowMetrics(rows?.[0] || {}), from, to };
+  return {
+    ...rowMetrics(rows?.[0] || {}),
+    from,
+    to,
+    metricBasis: advertisingMetricBasis()
+  };
+}
+
+function advertisingMetricBasis() {
+  return {
+    revenueRub: "Ozon Performance attributed revenue, ordersMoney + modelsMoney when available.",
+    orders: "Ozon Performance attributed orders. Used for conversion rate.",
+    units: "Ozon Performance attributed units, orders + models when available.",
+    roas: "attributed revenue / advertising spend.",
+    acos: "advertising spend / attributed revenue.",
+    cny: "RUB values converted by the system RUB_CNY_RATE for profit estimates."
+  };
+}
+
+export async function advertisingDailyQualityMysql(query = {}) {
+  await ensureAdDailySchema();
+  await ensurePerformanceCredentialSchema();
+  const { from, to } = buildDateRange(query);
+  const shopId = query.shopId || query.shop_id;
+  const scopedShopFilter = shopId && String(shopId) !== "all";
+  const shopParams = scopedShopFilter ? [Number(shopId)] : [];
+  const shopWhere = scopedShopFilter ? "AND s.id = ?" : "";
+
+  const shops = await mysqlQuery(`
+    SELECT
+      s.id,
+      s.name,
+      CASE WHEN COALESCE(s.performance_client_id, '') <> '' AND COALESCE(s.performance_client_secret, '') <> '' THEN 1 ELSE 0 END AS has_performance_credentials,
+      COALESCE(ad.rows_count, 0) AS rows_count,
+      ad.min_date,
+      ad.max_date,
+      ad.last_synced_at,
+      COALESCE(ad.spend_rub, 0) AS spend_rub,
+      COALESCE(ad.revenue_rub, 0) AS revenue_rub,
+      COALESCE(ad.orders, 0) AS orders,
+      COALESCE(ad.units, 0) AS units,
+      COALESCE(ad.pending_rows, 0) AS pending_rows
+    FROM shops s
+    LEFT JOIN (
+      SELECT
+        shop_id,
+        COUNT(*) AS rows_count,
+        MIN(date_key) AS min_date,
+        MAX(date_key) AS max_date,
+        MAX(synced_at) AS last_synced_at,
+        SUM(spend_rub) AS spend_rub,
+        SUM(revenue_rub) AS revenue_rub,
+        SUM(orders) AS orders,
+        SUM(units) AS units,
+        SUM(CASE WHEN source = 'ozon_performance_pending' THEN 1 ELSE 0 END) AS pending_rows
+      FROM ozon_ad_sku_daily
+      WHERE date_key >= ? AND date_key <= ?
+      GROUP BY shop_id
+    ) ad ON ad.shop_id = s.id
+    WHERE s.status = 'active'
+      AND COALESCE(s.performance_client_id, '') <> ''
+      AND COALESCE(s.performance_client_secret, '') <> ''
+      ${shopWhere}
+    ORDER BY s.id
+  `, [from, to, ...shopParams]);
+
+  const checks = await mysqlQuery(`
+    SELECT
+      COUNT(*) AS row_count,
+      COUNT(DISTINCT ad.shop_id) AS covered_shop_count,
+      COUNT(DISTINCT ad.ozon_sku) AS sku_count,
+      COALESCE(SUM(ad.spend_rub), 0) AS spend_rub,
+      COALESCE(SUM(ad.revenue_rub), 0) AS revenue_rub,
+      SUM(CASE WHEN ad.clicks > ad.impressions THEN 1 ELSE 0 END) AS impossible_click_rows,
+      SUM(CASE WHEN ad.revenue_rub > 0 AND ad.units = 0 THEN 1 ELSE 0 END) AS revenue_without_units_rows,
+      SUM(CASE WHEN ad.spend_rub > 0 AND ad.revenue_rub = 0 THEN 1 ELSE 0 END) AS spend_without_revenue_rows,
+      COALESCE(SUM(CASE WHEN ad.spend_rub > 0 AND ad.revenue_rub = 0 THEN ad.spend_rub ELSE 0 END), 0) AS spend_without_revenue_rub,
+      SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) AS pending_rows,
+      COUNT(DISTINCT CASE WHEN ad.source = 'ozon_performance_pending' THEN ad.shop_id END) AS pending_shop_count,
+      COUNT(DISTINCT CASE WHEN ad.source = 'ozon_performance_pending' THEN ad.ozon_sku END) AS pending_sku_count
+    FROM ozon_ad_sku_daily ad
+    WHERE ad.date_key >= ? AND ad.date_key <= ?
+      ${scopedShopFilter ? "AND ad.shop_id = ?" : ""}
+  `, scopedShopFilter ? [from, to, Number(shopId)] : [from, to]);
+
+  const multiCampaignRows = await mysqlQuery(`
+    SELECT COUNT(*) AS count
+    FROM (
+      SELECT date_key, shop_id, ozon_sku
+      FROM ozon_ad_sku_daily
+      WHERE date_key >= ? AND date_key <= ?
+        ${scopedShopFilter ? "AND shop_id = ?" : ""}
+      GROUP BY date_key, shop_id, ozon_sku
+      HAVING COUNT(DISTINCT campaign_id) > 1
+    ) t
+  `, scopedShopFilter ? [from, to, Number(shopId)] : [from, to]);
+
+  const missingBindingRows = await mysqlQuery(`
+    SELECT COUNT(*) AS count, COALESCE(SUM(ad.spend_rub), 0) AS spend_rub
+    FROM ozon_ad_sku_daily ad
+    LEFT JOIN sku_mappings sm ON sm.shop_id = ad.shop_id AND sm.ozon_sku = ad.ozon_sku AND sm.active = 1
+    LEFT JOIN online_products op ON op.shop_id = ad.shop_id AND op.ozon_sku = ad.ozon_sku
+    WHERE ad.date_key >= ? AND ad.date_key <= ?
+      ${scopedShopFilter ? "AND ad.shop_id = ?" : ""}
+      AND COALESCE(ad.product_id, sm.product_id, op.product_id) IS NULL
+  `, scopedShopFilter ? [from, to, Number(shopId)] : [from, to]);
+
+  const syncRuns = await mysqlQuery(`
+    SELECT job_key, status, COUNT(*) AS count, MAX(started_at) AS latest_started_at, MAX(finished_at) AS latest_finished_at
+    FROM scheduled_job_runs
+    WHERE job_key IN ('advertising_sync', 'advertising_today_sync')
+      AND started_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 2 DAY)
+    GROUP BY job_key, status
+    ORDER BY job_key, status
+  `);
+
+  const jobRows = await mysqlQuery(`
+    SELECT job_key, last_status, fail_count, last_success_at, last_attempt_at, next_run_at, last_error
+    FROM scheduled_jobs
+    WHERE job_key IN ('advertising_sync', 'advertising_today_sync')
+    ORDER BY job_key
+  `);
+
+  const forbiddenCampaignRows = await mysqlQuery(`
+    SELECT f.shop_id, s.name AS shop_name, COUNT(*) AS count, MAX(f.updated_at) AS latest_updated_at
+    FROM ozon_ad_forbidden_campaigns f
+    LEFT JOIN shops s ON s.id = f.shop_id
+    WHERE f.updated_at >= ?
+      ${scopedShopFilter ? "AND f.shop_id = ?" : ""}
+    GROUP BY f.shop_id, s.name
+    ORDER BY f.shop_id
+  `, scopedShopFilter ? [forbiddenCampaignCutoff(), Number(shopId)] : [forbiddenCampaignCutoff()]);
+
+  const check = checks?.[0] || {};
+  const expectedShopCount = shops.length;
+  const coveredShopCount = Number(check.covered_shop_count || 0);
+  const missingShops = shops.filter((shop) => Number(shop.rows_count || 0) === 0);
+  const impossibleRows = Number(check.impossible_click_rows || 0) + Number(check.revenue_without_units_rows || 0);
+  const missingBindingCount = Number(missingBindingRows?.[0]?.count || 0);
+  const pendingRows = Number(check.pending_rows || 0);
+  const pendingShopCount = Number(check.pending_shop_count || 0);
+  const pendingSkuCount = Number(check.pending_sku_count || 0);
+  const rowCount = Number(check.row_count || 0);
+  const settledRows = Math.max(0, rowCount - pendingRows);
+  const pendingRatio = rowCount > 0 ? pendingRows / rowCount : 0;
+  const forbiddenCampaignCount = forbiddenCampaignRows.reduce((sum, row) => sum + Number(row.count || 0), 0);
+  const recentFailedRuns = syncRuns
+    .filter((row) => row.status === "failed")
+    .reduce((sum, row) => sum + Number(row.count || 0), 0);
+
+  const issues = [];
+  if (missingShops.length) {
+    issues.push({
+      key: "missing_shop_coverage",
+      severity: "danger",
+      message: `${missingShops.length} 个店铺在当前日期范围没有广告明细`,
+      detail: missingShops.map((shop) => shop.name).join(", ")
+    });
+  }
+  if (impossibleRows > 0) {
+    issues.push({
+      key: "metric_anomaly",
+      severity: "danger",
+      message: `${impossibleRows} 行广告指标存在明显异常`,
+      detail: "包含点击大于曝光，或有销售额但件数为 0"
+    });
+  }
+  if (missingBindingCount > 0) {
+    issues.push({
+      key: "missing_product_binding",
+      severity: "warning",
+      message: `${missingBindingCount} 行广告数据未绑定库存商品`,
+      detail: `影响广告净利润判断，相关花费 ${roundMoney(Number(missingBindingRows?.[0]?.spend_rub || 0))} RUB`
+    });
+  }
+  if (Number(multiCampaignRows?.[0]?.count || 0) > 0) {
+    issues.push({
+      key: "multi_campaign_sku",
+      severity: "info",
+      message: `${Number(multiCampaignRows[0].count)} 个 SKU 日期存在多个广告活动`,
+      detail: "SKU 汇总指标可看，调价/停投应进入明细确认具体活动"
+    });
+  }
+  if (recentFailedRuns > 0) {
+    issues.push({
+      key: "recent_sync_failures",
+      severity: "warning",
+      message: `最近 48 小时有 ${recentFailedRuns} 次广告同步失败记录`,
+      detail: "如最新状态已成功，可作为历史风险观察"
+    });
+  }
+  if (pendingRows > 0) {
+    issues.push({
+      key: "ozon_report_pending",
+      severity: "warning",
+      message: `${pendingSkuCount} 个 SKU 的 Ozon 当日报表还未返回`,
+      detail: `${pendingShopCount} 个店铺、${pendingRows} 行为占位数据；任务已跑通，但这些 0 不是最终广告指标`
+    });
+  }
+
+  const freshnessDates = shops.map((shop) => shop.last_synced_at).filter(Boolean);
+  const latestSyncedAt = freshnessDates.length
+    ? freshnessDates.sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0]
+    : null;
+  const todayIncluded = to >= todayKey();
+  if (todayIncluded) {
+    issues.push({
+      key: "today_attribution_delay",
+      severity: "info",
+      message: "当前范围包含今天，当天广告归因可能延迟",
+      detail: "今天适合看趋势和异常，最终复盘建议看昨日及以前"
+    });
+  }
+
+  if (forbiddenCampaignCount > 0) {
+    issues.push({
+      key: "campaign_report_unavailable",
+      severity: missingShops.length ? "warning" : "info",
+      message: `${forbiddenCampaignCount} 个广告活动的 Ozon 报表暂不可用`,
+      detail: forbiddenCampaignRows.map((row) => `${row.shop_name || row.shop_id}: ${row.count}`).join(", ")
+    });
+  }
+
+  const severityRank = { danger: 3, warning: 2, info: 1 };
+  const maxSeverity = issues.reduce((max, issue) => Math.max(max, severityRank[issue.severity] || 0), 0);
+  const score = Math.max(0, 100
+    - missingShops.length * 25
+    - impossibleRows * 20
+    - Math.min(25, missingBindingCount * 2)
+    - Math.min(15, recentFailedRuns));
+  const status = maxSeverity >= 3 ? "danger" : maxSeverity === 2 ? "warning" : "success";
+
+  return {
+    from,
+    to,
+    status,
+    score,
+    expectedShopCount,
+    coveredShopCount,
+    latestSyncedAt,
+    todayIncluded,
+    summary: {
+      rowCount,
+      settledRows,
+      pendingRatio,
+      skuCount: Number(check.sku_count || 0),
+      spendRub: Number(check.spend_rub || 0),
+      revenueRub: Number(check.revenue_rub || 0),
+      spendWithoutRevenueRows: Number(check.spend_without_revenue_rows || 0),
+      spendWithoutRevenueRub: Number(check.spend_without_revenue_rub || 0),
+      pendingRows,
+      pendingShopCount,
+      pendingSkuCount,
+      multiCampaignSkuDays: Number(multiCampaignRows?.[0]?.count || 0),
+      skippedCampaigns: forbiddenCampaignCount,
+      missingProductBindingRows: missingBindingCount,
+      missingProductBindingSpendRub: Number(missingBindingRows?.[0]?.spend_rub || 0)
+    },
+    shops: shops.map((shop) => ({
+      id: Number(shop.id),
+      name: shop.name || "",
+      hasPerformanceCredentials: Boolean(shop.has_performance_credentials),
+      rows: Number(shop.rows_count || 0),
+      minDate: shop.min_date || null,
+      maxDate: shop.max_date || null,
+      lastSyncedAt: shop.last_synced_at || null,
+      spendRub: Number(shop.spend_rub || 0),
+      revenueRub: Number(shop.revenue_rub || 0),
+      orders: Number(shop.orders || 0),
+      units: Number(shop.units || 0),
+      pendingRows: Number(shop.pending_rows || 0),
+      dataPending: Number(shop.pending_rows || 0) > 0,
+      covered: Number(shop.rows_count || 0) > 0
+    })),
+    jobs: jobRows.map((job) => ({
+      key: job.job_key,
+      lastStatus: job.last_status || "",
+      failCount: Number(job.fail_count || 0),
+      lastSuccessAt: job.last_success_at || null,
+      lastAttemptAt: job.last_attempt_at || null,
+      nextRunAt: job.next_run_at || null,
+      lastError: job.last_error || ""
+    })),
+    recentRuns: syncRuns.map((row) => ({
+      jobKey: row.job_key,
+      status: row.status,
+      count: Number(row.count || 0),
+      latestStartedAt: row.latest_started_at || null,
+      latestFinishedAt: row.latest_finished_at || null
+    })),
+    issues
+  };
 }
 
 export async function advertisingDailyDetailsMysql(query = {}) {
@@ -647,13 +984,17 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
   await ensurePerformanceCredentialSchema();
   const { from, to } = buildDateRange(body);
   const shopId = Number(body.shop_id || body.shopId || 0);
+  const shopIds = Array.isArray(body.shop_ids || body.shopIds)
+    ? (body.shop_ids || body.shopIds).map((item) => Number(item || 0)).filter((item) => item > 0)
+    : [];
   const shops = await mysqlQuery(`
     SELECT *
     FROM shops
     WHERE status = 'active'
       AND (? = 0 OR id = ?)
+      AND (${shopIds.length ? `id IN (${shopIds.map(() => "?").join(", ")})` : "1=1"})
     ORDER BY id
-  `, [shopId, shopId]);
+  `, [shopId, shopId, ...shopIds]);
 
   let totalRows = 0;
   let imported = 0;
@@ -663,16 +1004,38 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
   for (const shop of shops) {
     const clientId = String(shop.performance_client_id || "").trim();
     const clientSecret = String(shop.performance_client_secret || "").trim();
+    await logAdvertisingSyncEvent(body, {
+      stepKey: "shop_start",
+      status: "info",
+      shopId: shop.id,
+      shopName: shop.name,
+      message: "Starting shop advertising sync"
+    });
     if (!clientId || !clientSecret) {
       errors.push(`${shop.name || shop.id}: 缺少 Ozon Performance API Client ID / Secret`);
       results.push({ shop_id: shop.id, shop_name: shop.name, fetched: 0, imported: 0, status: "missing_credentials" });
+      await logAdvertisingSyncEvent(body, {
+        stepKey: "shop_skip",
+        status: "warning",
+        shopId: shop.id,
+        shopName: shop.name,
+        message: "Missing performance credentials"
+      });
       continue;
     }
 
     try {
+      await logAdvertisingSyncEvent(body, {
+        stepKey: "fetch_token",
+        status: "info",
+        shopId: shop.id,
+        shopName: shop.name,
+        message: "Fetching performance token"
+      });
       const token = await fetchPerformanceToken({ clientId, clientSecret }, options);
       const campaigns = await fetchPerformanceCampaigns(token, options);
-      const selectedCampaigns = filterCampaigns(campaigns, body);
+      const forbiddenCampaigns = await forbiddenCampaignIdsMysql(shop.id);
+      const selectedCampaigns = filterCampaigns(campaigns, body).filter((campaign) => !forbiddenCampaigns.has(String(campaign.id || "")));
       await hydrateCampaignProductSettings(token, selectedCampaigns, options);
       await refreshCampaignMetadataRows(shop.id, selectedCampaigns, { from, to });
       await refreshCampaignProductSettingsRows(shop.id, selectedCampaigns, { from, to });
@@ -689,7 +1052,21 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
         continue;
       }
       if (!selectedCampaigns.length) {
-        results.push({ shop_id: shop.id, shop_name: shop.name, fetched: 0, imported: 0, status: "no_campaigns" });
+        results.push({
+          shop_id: shop.id,
+          shop_name: shop.name,
+          fetched: 0,
+          imported: 0,
+          status: "no_campaigns",
+          error_code: "no_syncable_campaigns"
+        });
+        await logAdvertisingSyncEvent(body, {
+          stepKey: "shop_finish",
+          status: "warning",
+          shopId: shop.id,
+          shopName: shop.name,
+          message: "No syncable campaigns for current run"
+        });
         continue;
       }
 
@@ -697,39 +1074,94 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
         from,
         to,
         campaigns: selectedCampaigns,
+        shop_id: shop.id,
+        shop_name: shop.name,
+        campaign_chunk_size: body.campaign_chunk_size || body.campaignChunkSize,
+        report_retry_delay_ms: body.report_retry_delay_ms || body.reportRetryDelayMs,
+        report_poll_delay_ms: body.report_poll_delay_ms || body.reportPollDelayMs,
+        report_initial_delay_ms: body.report_initial_delay_ms || body.reportInitialDelayMs,
+        report_missing_retry_delay_ms: body.report_missing_retry_delay_ms || body.reportMissingRetryDelayMs,
+        report_create_attempts: body.report_create_attempts || body.reportCreateAttempts,
+        report_poll_attempts: body.report_poll_attempts || body.reportPollAttempts,
+        run_id: body.run_id || body.runId || 0,
+        job_key: body.job_key || body.jobKey || "",
+        report_stats: {},
         signal: options.signal
       });
+      const reportStats = reportRows.reportStats || {};
       const normalized = reportRows
         .map((row) => normalizePerformanceAdRow(row, shop, selectedCampaigns))
         .filter((row) => row.date_key && row.shop_id && row.ozon_sku && row.ozon_sku !== "0");
+      const placeholders = reportStats.retryLaterCampaigns > 0
+        ? await buildPendingAdvertisingRowsMysql(shop, selectedCampaigns, { from, to, normalized })
+        : [];
+      const rowsToUpsert = [...normalized, ...placeholders];
 
       totalRows += reportRows.length;
-      if (normalized.length) {
+      if (rowsToUpsert.length) {
         const result = await upsertAdvertisingDailyRowsMysql({
           source: "ozon_performance_api",
-          rows: normalized
+          rows: rowsToUpsert
         });
-        imported += Number(result.total || normalized.length);
+        imported += Number(result.total || rowsToUpsert.length);
       }
+      const shopStatus = reportStats.retryLaterCampaigns > 0 ? "report_pending" : "ok";
       results.push({
         shop_id: shop.id,
         shop_name: shop.name,
         campaigns: selectedCampaigns.length,
         fetched: reportRows.length,
-        imported: normalized.length,
-        status: "ok"
+        imported: rowsToUpsert.length,
+        placeholder_rows: placeholders.length,
+        retry_later_campaigns: reportStats.retryLaterCampaigns || 0,
+        status: shopStatus,
+        warning: shopStatus === "report_pending" ? "Ozon report is not ready; placeholder rows were written" : ""
+      });
+      await logAdvertisingSyncEvent(body, {
+        stepKey: "shop_finish",
+        status: shopStatus === "ok" ? "success" : "warning",
+        shopId: shop.id,
+        shopName: shop.name,
+        message: shopStatus === "ok" ? "Shop advertising sync finished" : "Shop advertising report pending",
+        detail: {
+          campaigns: selectedCampaigns.length,
+          fetched: reportRows.length,
+          imported: rowsToUpsert.length,
+          placeholderRows: placeholders.length,
+          retryLaterCampaigns: reportStats.retryLaterCampaigns || 0
+        }
       });
     } catch (error) {
-      errors.push(`${shop.name || shop.id}: ${error.message}`);
-      results.push({ shop_id: shop.id, shop_name: shop.name, fetched: 0, imported: 0, status: "error", error: error.message });
+      const classified = classifyAdvertisingSyncError(error);
+      errors.push(`${shop.name || shop.id}: ${classified.message}`);
+      results.push({
+        shop_id: shop.id,
+        shop_name: shop.name,
+        fetched: 0,
+        imported: 0,
+        status: "error",
+        error: classified.message,
+        error_code: classified.code
+      });
+      await logAdvertisingSyncEvent(body, {
+        stepKey: "shop_error",
+        status: "error",
+        shopId: shop.id,
+        shopName: shop.name,
+        message: classified.message,
+        detail: { error_code: classified.code }
+      });
     }
   }
 
   return {
     from,
     to,
+    shop_ids: shops.map((shop) => Number(shop.id)),
     total_rows: totalRows,
     imported,
+    retry_later_campaigns: results.reduce((sum, item) => sum + Number(item.retry_later_campaigns || 0), 0),
+    placeholder_rows: results.reduce((sum, item) => sum + Number(item.placeholder_rows || 0), 0),
     results,
     errors
   };
@@ -755,7 +1187,26 @@ export async function updateAdvertisingCampaignProductSettingMysql(body = {}, op
     ? { sku, bid: String(Math.round(value * 1000000)) }
     : { sku, targetCir: value };
   const payload = { products: [product] };
-  const result = await performanceRequest(`/api/client/campaign/${campaignId}/v2/products`, payload, { ...options, token, method: "PUT" });
+  let result;
+  try {
+    result = await performanceRequest(`/api/client/campaign/${campaignId}/v2/products`, payload, { ...options, token, method: "PUT" });
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (!message.includes("HTTP 405")) throw error;
+    try {
+      result = await performanceRequest(`/api/client/campaign/${campaignId}/v2/products`, payload, { ...options, token, method: "POST" });
+    } catch (fallbackError) {
+      const fallbackMessage = String(fallbackError?.message || "");
+      if (fallbackMessage.includes("HTTP 405")) {
+        throw new Error(
+          mode === "targetCir"
+            ? "Ozon 当前不允许通过 API 修改这个广告活动的目标广告费用份额，请先到 Ozon 后台手动调整。"
+            : "Ozon 当前不允许通过 API 修改这个广告活动的点击出价，请先到 Ozon 后台手动调整。"
+        );
+      }
+      throw fallbackError;
+    }
+  }
 
   const { from, to } = buildDateRange(body);
   if (mode === "bid") {
@@ -773,6 +1224,35 @@ export async function updateAdvertisingCampaignProductSettingMysql(body = {}, op
   }
 
   return { ok: true, shop_id: shop.id, campaign_id: campaignId, ozon_sku: sku, mode, value, result };
+}
+
+export async function applyAdvertisingCampaignProductSettingMysql(body = {}) {
+  await ensureAdDailySchema();
+  const shop = await resolvePerformanceShop(body);
+  const campaignId = String(body.campaign_id || body.campaignId || "").trim();
+  const sku = String(body.ozon_sku || body.sku || "").trim();
+  const mode = String(body.mode || "").trim();
+  if (!campaignId || !sku) throw new Error("campaign_id and ozon_sku are required");
+  if (!["bid", "targetCir"].includes(mode)) throw new Error("mode must be bid or targetCir");
+  const value = mode === "bid" ? toNumber(body.bid_rub || body.bidRub) : toNumber(body.target_cir || body.targetCir);
+  if (value <= 0) throw new Error(mode === "bid" ? "点击出价必须大于 0" : "目标广告费用份额必须大于 0");
+
+  const { from, to } = buildDateRange(body);
+  if (mode === "bid") {
+    await mysqlExecute(`
+      UPDATE ozon_ad_sku_daily
+      SET campaign_bid_rub = ?, synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE shop_id = ? AND campaign_id = ? AND ozon_sku = ? AND date_key BETWEEN ? AND ?
+    `, [value, Number(shop.id), campaignId, sku, from, to]);
+  } else {
+    await mysqlExecute(`
+      UPDATE ozon_ad_sku_daily
+      SET campaign_target_cir = ?, synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE shop_id = ? AND campaign_id = ? AND ozon_sku = ? AND date_key BETWEEN ? AND ?
+    `, [value, Number(shop.id), campaignId, sku, from, to]);
+  }
+
+  return { ok: true, shop_id: shop.id, campaign_id: campaignId, ozon_sku: sku, mode, value };
 }
 
 export async function stopAdvertisingCampaignMysql(body = {}, options = {}) {
@@ -870,6 +1350,131 @@ async function refreshCampaignProductSettingsRows(shopId, campaigns = [], range 
   }
 }
 
+async function buildPendingAdvertisingRowsMysql(shop = {}, campaigns = [], context = {}) {
+  const normalizedKeys = new Set((context.normalized || []).map((row) => [
+    row.date_key,
+    row.shop_id,
+    row.ozon_sku,
+    row.campaign_id,
+    row.ad_type
+  ].join("|")));
+  const dates = dateKeysBetween(context.from, context.to);
+  const rows = [];
+  for (const campaign of campaigns) {
+    const productSettings = await pendingCampaignProductsMysql(shop, campaign);
+    for (const product of productSettings) {
+      const sku = String(product.sku || "").trim();
+      if (!sku) continue;
+      for (const dateKey of dates) {
+        const row = {
+          date_key: dateKey,
+          shop_id: Number(shop.id),
+          ozon_sku: sku,
+          campaign_id: String(campaign.id || ""),
+          campaign_name: campaign.title || "",
+          campaign_state: campaign.state || "",
+          campaign_budget_rub: campaign.budgetRub || 0,
+          campaign_strategy: campaign.strategy || "",
+          campaign_payment_type: campaign.paymentType || "",
+          campaign_placement: campaign.placement || "",
+          campaign_bid_rub: product.bidRub || 0,
+          campaign_target_cir: product.targetCir || 0,
+          ad_type: campaign.advObjectType || "performance_pending",
+          spend_rub: 0,
+          spend_cny: 0,
+          impressions: 0,
+          clicks: 0,
+          add_to_cart: 0,
+          add_to_cart_available: 0,
+          orders: 0,
+          units: 0,
+          revenue_rub: 0,
+          revenue_cny: 0,
+          source: "ozon_performance_pending",
+          raw_json: {
+            pending: true,
+            reason: "ozon_report_not_ready",
+            campaign_id: String(campaign.id || ""),
+            sku
+          }
+        };
+        const key = [row.date_key, row.shop_id, row.ozon_sku, row.campaign_id, row.ad_type].join("|");
+        if (!normalizedKeys.has(key)) rows.push(row);
+      }
+    }
+  }
+  if (!rows.length) return [];
+  const skus = Array.from(new Set(rows.map((row) => row.ozon_sku)));
+  const existingRows = await mysqlQuery(`
+    SELECT date_key, shop_id, ozon_sku, campaign_id, ad_type, source
+    FROM ozon_ad_sku_daily
+    WHERE shop_id = ?
+      AND date_key IN (${dates.map(() => "?").join(", ")})
+      AND ozon_sku IN (${skus.map(() => "?").join(", ")})
+  `, [Number(shop.id), ...dates, ...skus]);
+  const existingRealKeys = new Set(existingRows
+    .filter((row) => String(row.source || "") !== "ozon_performance_pending")
+    .map((row) => [row.date_key, row.shop_id, row.ozon_sku, row.campaign_id, row.ad_type].join("|")));
+  const productRows = await mysqlQuery(`
+    SELECT shop_id, ozon_sku, ozon_product_id, offer_id, name
+    FROM online_products
+    WHERE shop_id = ?
+      AND ozon_sku IN (${skus.map(() => "?").join(", ")})
+  `, [Number(shop.id), ...skus]);
+  const productsBySku = new Map(productRows.map((row) => [String(row.ozon_sku), row]));
+  return rows.filter((row) => !existingRealKeys.has([
+    row.date_key,
+    row.shop_id,
+    row.ozon_sku,
+    row.campaign_id,
+    row.ad_type
+  ].join("|"))).map((row) => {
+    const product = productsBySku.get(String(row.ozon_sku)) || {};
+    return {
+      ...row,
+      product_id: product.ozon_product_id || null,
+      offer_id: product.offer_id || "",
+      product_name: product.name || ""
+    };
+  });
+}
+
+async function pendingCampaignProductsMysql(shop = {}, campaign = {}) {
+  const settings = Array.isArray(campaign.productSettings) ? campaign.productSettings : [];
+  const productsBySku = new Map(settings.map((product) => [String(product.sku || "").trim(), product]).filter(([sku]) => sku));
+  const historicalRows = await mysqlQuery(`
+    SELECT ozon_sku, MAX(campaign_bid_rub) AS bid_rub, MAX(campaign_target_cir) AS target_cir
+    FROM ozon_ad_sku_daily
+    WHERE shop_id = ?
+      AND campaign_id = ?
+      AND ozon_sku <> ''
+    GROUP BY ozon_sku
+    ORDER BY MAX(updated_at) DESC
+    LIMIT 500
+  `, [Number(shop.id), String(campaign.id || "")]);
+  for (const row of historicalRows) {
+    const sku = String(row.ozon_sku || "").trim();
+    if (!sku || productsBySku.has(sku)) continue;
+    productsBySku.set(sku, {
+      sku,
+      bidRub: toNumber(row.bid_rub),
+      targetCir: toNumber(row.target_cir)
+    });
+  }
+  return Array.from(productsBySku.values());
+}
+
+function dateKeysBetween(from, to) {
+  const start = new Date(`${String(from || to || todayKey()).slice(0, 10)}T00:00:00Z`);
+  const end = new Date(`${String(to || from || todayKey()).slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return [todayKey()];
+  const dates = [];
+  for (const date = new Date(start); date <= end && dates.length < 90; date.setUTCDate(date.getUTCDate() + 1)) {
+    dates.push(date.toISOString().slice(0, 10));
+  }
+  return dates.length ? dates : [String(to || from || todayKey()).slice(0, 10)];
+}
+
 async function fetchPerformanceToken(credentials, options = {}) {
   const data = await performanceRequest("/api/client/token", {
     client_id: credentials.clientId,
@@ -901,6 +1506,35 @@ async function fetchPerformanceCampaigns(token, options = {}) {
   const unique = new Map(campaigns.map((campaign) => [String(campaign.id), campaign]));
   if (!unique.size && lastError) throw lastError;
   return [...unique.values()];
+}
+
+async function forbiddenCampaignIdsMysql(shopId) {
+  if (!shopId) return new Set();
+  const rows = await mysqlQuery(`
+    SELECT campaign_id
+    FROM ozon_ad_forbidden_campaigns
+    WHERE shop_id = ?
+      AND updated_at >= ?
+  `, [Number(shopId), forbiddenCampaignCutoff()]);
+  return new Set(rows.map((row) => String(row.campaign_id || "").trim()).filter(Boolean));
+}
+
+function forbiddenCampaignCutoff() {
+  return new Date(Date.now() - FORBIDDEN_CAMPAIGN_RETRY_HOURS * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 19)
+    .replace("T", " ");
+}
+
+async function markForbiddenCampaignMysql(shopId, campaignId, reason = "") {
+  if (!shopId || !campaignId) return;
+  await mysqlExecute(`
+    INSERT INTO ozon_ad_forbidden_campaigns (shop_id, campaign_id, reason)
+    VALUES (?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      reason = VALUES(reason),
+      updated_at = CURRENT_TIMESTAMP
+  `, [Number(shopId), String(campaignId), String(reason || "").slice(0, 255)]);
 }
 
 function normalizeCampaignResponse(data = {}) {
@@ -972,20 +1606,68 @@ function filterCampaigns(campaigns = [], body = {}) {
     return campaigns.filter((campaign) => allowed.has(String(campaign.id)));
   }
   const includeInactive = body.include_inactive ?? body.includeInactive;
-  if (includeInactive !== false) return campaigns;
-  return campaigns.filter((campaign) => {
+  const filtered = includeInactive !== false ? campaigns : campaigns.filter((campaign) => {
     const state = String(campaign.state || "").toLowerCase();
     return !["archived", "stopped", "deleted"].some((value) => state.includes(value));
   });
+  const maxCampaignsPerShop = Math.max(0, Number(body.max_campaigns_per_shop || body.maxCampaignsPerShop || 0));
+  if (!maxCampaignsPerShop) return filtered;
+  const start = Math.max(0, Number(body.campaign_cursor || body.campaignCursor || 0));
+  const selected = [];
+  for (let index = 0; index < Math.min(maxCampaignsPerShop, filtered.length); index += 1) {
+    selected.push(filtered[(start + index) % filtered.length]);
+  }
+  return selected;
+}
+
+export async function countSyncableAdvertisingCampaignsForShopsMysql(body = {}, options = {}) {
+  await ensurePerformanceCredentialSchema();
+  const shopIds = Array.isArray(body.shop_ids || body.shopIds)
+    ? (body.shop_ids || body.shopIds).map((item) => Number(item || 0)).filter((item) => item > 0)
+    : [];
+  if (!shopIds.length) return { count: 0, byShop: [] };
+  const shops = await mysqlQuery(`
+    SELECT *
+    FROM shops
+    WHERE status = 'active'
+      AND id IN (${shopIds.map(() => "?").join(", ")})
+    ORDER BY id
+  `, shopIds);
+  const byShop = [];
+  let count = 0;
+  for (const shop of shops) {
+    const clientId = String(shop.performance_client_id || "").trim();
+    const clientSecret = String(shop.performance_client_secret || "").trim();
+    if (!clientId || !clientSecret) {
+      byShop.push({ shop_id: Number(shop.id), shop_name: shop.name || "", count: 0, status: "missing_credentials" });
+      continue;
+    }
+    try {
+      const token = await fetchPerformanceToken({ clientId, clientSecret }, options);
+      const campaigns = await fetchPerformanceCampaigns(token, options);
+      const forbiddenCampaigns = await forbiddenCampaignIdsMysql(shop.id);
+      const syncable = filterCampaigns(campaigns, { ...body, max_campaigns_per_shop: 0 })
+        .filter((campaign) => !forbiddenCampaigns.has(String(campaign.id || "")));
+      count += syncable.length;
+      byShop.push({ shop_id: Number(shop.id), shop_name: shop.name || "", count: syncable.length, status: "ok" });
+    } catch (error) {
+      byShop.push({ shop_id: Number(shop.id), shop_name: shop.name || "", count: 0, status: "error", error: error?.message || String(error) });
+    }
+  }
+  return { count, byShop };
 }
 
 async function fetchPerformanceSkuStats(token, options = {}) {
   const campaigns = options.campaigns || [];
+  const campaignChunkSize = Math.max(1, Math.min(3, Number(options.campaign_chunk_size || options.campaignChunkSize || 1)));
   const rows = [];
+  const reportStats = options.report_stats || {};
+  reportStats.retryLaterCampaigns = Number(reportStats.retryLaterCampaigns || 0);
+  reportStats.skippedCampaigns = Number(reportStats.skippedCampaigns || 0);
   const windows = splitDateRange(options.from, options.to, 62);
   for (const window of windows) {
-    for (let index = 0; index < campaigns.length; index += 10) {
-      const chunk = campaigns.slice(index, index + 10);
+    for (let index = 0; index < campaigns.length; index += campaignChunkSize) {
+      const chunk = campaigns.slice(index, index + campaignChunkSize);
       try {
         const report = await createAndFetchPerformanceReport(token, {
           campaigns: chunk.map((campaign) => String(campaign.id)),
@@ -995,7 +1677,36 @@ async function fetchPerformanceSkuStats(token, options = {}) {
         }, options);
         rows.push(...flattenPerformanceReportRows(report, chunk));
       } catch (error) {
-        if (!isMissingReportError(error) || chunk.length <= 1) throw error;
+        if (chunk.length <= 1) {
+          const campaign = chunk[0];
+          if (isMissingReportError(error) || isReportEndpointUnavailableError(error)) {
+            reportStats.retryLaterCampaigns += 1;
+            await logAdvertisingSyncEvent(options, {
+              stepKey: "campaign_retry_later",
+              status: "warning",
+              shopId: options.shop_id,
+              shopName: options.shop_name,
+              message: `Campaign report not ready ${campaign?.id || ""}`.trim(),
+              detail: { campaign_id: campaign?.id || "", reason: error.message || "report_not_ready" }
+            });
+            continue;
+          }
+          if (campaign && isCampaignReportUnavailableError(error)) {
+            reportStats.skippedCampaigns += 1;
+            await markForbiddenCampaignMysql(options.shop_id, campaign.id, error.message || "campaign_report_unavailable");
+            await logAdvertisingSyncEvent(options, {
+              stepKey: "campaign_skip",
+              status: "warning",
+              shopId: options.shop_id,
+              shopName: options.shop_name,
+              message: `Skipping unavailable campaign ${campaign.id}`,
+              detail: { campaign_id: campaign.id, reason: error.message || "campaign_report_unavailable" }
+            });
+            continue;
+          }
+          throw error;
+        }
+        if ((!isMissingReportError(error) && !isCampaignReportUnavailableError(error)) || chunk.length <= 1) throw error;
         for (const campaign of chunk) {
           try {
             const report = await createAndFetchPerformanceReport(token, {
@@ -1006,16 +1717,48 @@ async function fetchPerformanceSkuStats(token, options = {}) {
             }, options);
             rows.push(...flattenPerformanceReportRows(report, [campaign]));
           } catch (singleError) {
-            if (!isMissingReportError(singleError)) throw singleError;
+            if (isMissingReportError(singleError) || isReportEndpointUnavailableError(singleError)) {
+              reportStats.retryLaterCampaigns += 1;
+              await logAdvertisingSyncEvent(options, {
+                stepKey: "campaign_retry_later",
+                status: "warning",
+                shopId: options.shop_id,
+                shopName: options.shop_name,
+                message: `Campaign report not ready ${campaign.id}`,
+                detail: { campaign_id: campaign.id, reason: singleError.message || "report_not_ready" }
+              });
+              continue;
+            }
+            if (isCampaignReportUnavailableError(singleError)) {
+              reportStats.skippedCampaigns += 1;
+              await markForbiddenCampaignMysql(options.shop_id, campaign.id, singleError.message || "campaign_report_unavailable");
+              await logAdvertisingSyncEvent(options, {
+                stepKey: "campaign_skip",
+                status: "warning",
+                shopId: options.shop_id,
+                shopName: options.shop_name,
+                message: `Skipping unavailable campaign ${campaign.id}`,
+                detail: { campaign_id: campaign.id, reason: singleError.message || "campaign_report_unavailable" }
+              });
+              continue;
+            }
+            throw singleError;
           }
         }
       }
     }
   }
+  rows.reportStats = reportStats;
   return rows;
 }
 
 async function createAndFetchPerformanceReport(token, payload, options = {}) {
+  const reportRetryDelayMs = Math.max(5000, Number(options.report_retry_delay_ms || options.reportRetryDelayMs || 15000));
+  const reportPollDelayMs = Math.max(3000, Number(options.report_poll_delay_ms || options.reportPollDelayMs || 5000));
+  const reportInitialDelayMs = Math.max(2000, Number(options.report_initial_delay_ms || options.reportInitialDelayMs || 8000));
+  const reportMissingRetryDelayMs = Math.max(reportPollDelayMs, Number(options.report_missing_retry_delay_ms || options.reportMissingRetryDelayMs || 10000));
+  const reportCreateAttempts = Math.max(1, Math.min(3, Number(options.report_create_attempts || options.reportCreateAttempts || 2)));
+  const reportPollAttempts = Math.max(6, Math.min(24, Number(options.report_poll_attempts || options.reportPollAttempts || 12)));
   const createPayload = {
     campaigns: payload.campaigns,
     dateFrom: payload.dateFrom,
@@ -1023,41 +1766,93 @@ async function createAndFetchPerformanceReport(token, payload, options = {}) {
     groupBy: payload.groupBy
   };
   const createCandidates = [
-    "/api/client/statistics/products/json",
-    "/api/client/statistics/json"
+    "/api/client/statistics/json",
+    "/api/client/statistics/products/json"
   ];
   let lastError = null;
   for (const path of createCandidates) {
-    let createData = null;
-    for (let attempt = 0; attempt < 6; attempt += 1) {
-      try {
-        createData = await performanceRequest(path, createPayload, { ...options, token });
-        break;
-      } catch (error) {
-        lastError = error;
-        if (!isActiveReportLimitError(error)) break;
-        await sleep(10000 + attempt * 5000);
-      }
-    }
-
-    if (!createData) continue;
-    const uuid = createData.UUID || createData.uuid || createData.report_id || createData.result?.UUID || createData.result?.uuid;
-    if (!uuid) return createData;
-
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      const pathCandidates = [
-        `/api/client/statistics/report?UUID=${encodeURIComponent(uuid)}`,
-        `/api/client/statistics/${encodeURIComponent(uuid)}`
-      ];
-      for (const reportPath of pathCandidates) {
+    for (let createAttempt = 0; createAttempt < reportCreateAttempts; createAttempt += 1) {
+      let createData = null;
+      await logAdvertisingSyncEvent(options, {
+        stepKey: "create_report",
+        status: "info",
+        shopId: options.shop_id,
+        shopName: options.shop_name,
+        attempt: createAttempt + 1,
+        message: `Creating performance report via ${path}`,
+        detail: {
+          campaigns: Array.isArray(payload.campaigns) ? payload.campaigns.slice(0, 10) : [],
+          from: payload.dateFrom,
+          to: payload.dateTo
+        }
+      });
+      for (let attempt = 0; attempt < 6; attempt += 1) {
         try {
-          const data = await performanceRequest(reportPath, null, { ...options, token, method: "GET" });
-          if (isReportReady(data)) return data;
+          createData = await performanceRequest(path, createPayload, { ...options, token });
+          break;
         } catch (error) {
           lastError = error;
+          if (!isActiveReportLimitError(error)) break;
+          await sleep(reportRetryDelayMs + attempt * 5000);
         }
       }
-      await sleep(5000);
+
+      if (!createData) continue;
+      const uuid = createData.UUID || createData.uuid || createData.report_id || createData.result?.UUID || createData.result?.uuid;
+      if (!uuid) return createData;
+      await logAdvertisingSyncEvent(options, {
+        stepKey: "report_uuid",
+        status: "info",
+        shopId: options.shop_id,
+        shopName: options.shop_name,
+        attempt: createAttempt + 1,
+        message: `Created performance report ${uuid}`,
+        detail: { uuid }
+      });
+      if (reportInitialDelayMs > 0) await sleep(reportInitialDelayMs);
+
+      let sawMissingReport = false;
+      for (let attempt = 0; attempt < reportPollAttempts; attempt += 1) {
+        let missingReportAttempt = false;
+        const pathCandidates = [
+          `/api/client/statistics/report?UUID=${encodeURIComponent(uuid)}`,
+          `/api/client/statistics/${encodeURIComponent(uuid)}`
+        ];
+        for (const reportPath of pathCandidates) {
+          try {
+            await logAdvertisingSyncEvent(options, {
+              stepKey: "poll_report",
+              status: "info",
+              shopId: options.shop_id,
+              shopName: options.shop_name,
+              attempt: attempt + 1,
+              message: `Polling performance report ${uuid}`,
+              detail: { uuid, reportPath }
+            });
+            const data = await performanceRequest(reportPath, null, { ...options, token, method: "GET" });
+            if (isReportReady(data)) return data;
+            missingReportAttempt = false;
+          } catch (error) {
+            lastError = error;
+            if (isMissingReportError(error)) {
+              sawMissingReport = true;
+              missingReportAttempt = true;
+              continue;
+            }
+          }
+        }
+        if (missingReportAttempt) {
+          await sleep(reportMissingRetryDelayMs);
+          continue;
+        }
+        await sleep(reportPollDelayMs);
+      }
+
+      if (sawMissingReport) {
+        lastError = new Error(`Performance API report ${uuid} failed: report not found after ${reportPollAttempts} poll attempts`);
+        continue;
+      }
+      break;
     }
   }
 
@@ -1099,6 +1894,51 @@ function isActiveReportLimitError(error) {
 
 function isMissingReportError(error) {
   return String(error?.message || "").toLowerCase().includes("report not found");
+}
+
+function isForbiddenReportError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return message.includes("generation of this type of report is forbidden")
+    || message.includes("forbidden for the transferred list of campaigns");
+}
+
+function isReportEndpointUnavailableError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return message.includes("404 page not found")
+    || message.includes("http 404");
+}
+
+function isCampaignReportUnavailableError(error) {
+  return isForbiddenReportError(error) || isReportEndpointUnavailableError(error);
+}
+
+function classifyAdvertisingSyncError(error) {
+  const message = String(error?.message || error || "Advertising sync failed").trim();
+  const lower = message.toLowerCase();
+  if (lower.includes("report not found")) return { code: "report_not_found", message };
+  if (isReportEndpointUnavailableError(error)) return { code: "report_endpoint_unavailable", message };
+  if (lower.includes("timed out") || lower.includes("超时")) return { code: "timeout", message };
+  if (lower.includes("access_token") || lower.includes("token")) return { code: "token_error", message };
+  if (lower.includes("active request") || lower.includes("active statistics")) return { code: "active_report_limit", message };
+  if (lower.includes("client id / secret") || lower.includes("missing_credentials")) return { code: "missing_credentials", message };
+  return { code: "unknown", message };
+}
+
+async function logAdvertisingSyncEvent(source = {}, event = {}) {
+  const runId = Number(source?.run_id || source?.runId || 0);
+  const jobKey = String(source?.job_key || source?.jobKey || "");
+  if (!runId || !jobKey) return;
+  await logScheduledJobEvent({
+    runId,
+    jobKey,
+    stepKey: event.stepKey || "info",
+    status: event.status || "info",
+    shopId: event.shopId || null,
+    shopName: event.shopName || "",
+    attempt: event.attempt || 0,
+    message: event.message || "",
+    detail: event.detail
+  }).catch(() => {});
 }
 
 function isReportReady(data = {}) {
@@ -1177,6 +2017,8 @@ function normalizePerformanceAdRow(row = {}, shop = {}, campaigns = []) {
   const dateKey = normalizePerformanceDate(row.date || row.date_key || row.day || row.period || row.period_from || row.createdAt);
   const sku = String(row.sku || row.ozon_sku || row.product_sku || row.productSku || row.ad_sku || row.id_sku || "").trim();
   const addToCart = adAddToCartMetric(row);
+  const revenueRub = performanceAttributedRevenueRub(row);
+  const units = performanceAttributedUnits(row);
   const productSetting = campaign.productsBySku?.get(sku) || {};
   return {
     date_key: dateKey,
@@ -1195,16 +2037,42 @@ function normalizePerformanceAdRow(row = {}, shop = {}, campaigns = []) {
     offer_id: row.offer_id || row.offerId || "",
     product_name: row.product_name || row.productName || row.title || row.name || "",
     spend_rub: firstNumber(row.moneySpent, row.expense, row.spend, row.spend_rub, row.cost, row.consumption),
+    spend_cny: firstNumber(row.spend_cny, row.spendCny) || roundMoney(firstNumber(row.moneySpent, row.expense, row.spend, row.spend_rub, row.cost, row.consumption) / RUB_CNY_RATE),
     impressions: Math.round(firstNumber(row.views, row.impressions, row.shows, row.show)),
     clicks: Math.round(firstNumber(row.clicks, row.click)),
     add_to_cart: Math.round(addToCart.value),
     add_to_cart_available: addToCart.available ? 1 : 0,
     orders: Math.round(firstNumber(row.orders, row.orders_count, row.ordersCount)),
-    units: Math.round(firstNumber(row.units, row.quantity, row.qty)),
-    revenue_rub: firstNumber(row.ordersMoney, row.modelsMoney, row.product_gmv, row.revenue, row.sales, row.attributedRevenue, row.money_income, row.orderRevenue),
+    units,
+    revenue_rub: revenueRub,
+    revenue_cny: firstNumber(row.revenue_cny, row.revenueCny) || roundMoney(revenueRub / RUB_CNY_RATE),
     source: "ozon_performance_api",
     raw_json: row
   };
+}
+
+function performanceAttributedRevenueRub(row = {}) {
+  const hasPerformanceRevenueFields = [
+    "ordersMoney",
+    "orders_money",
+    "orderMoney",
+    "order_money",
+    "modelsMoney",
+    "models_money",
+    "modelMoney",
+    "model_money"
+  ].some((key) => Object.prototype.hasOwnProperty.call(row, key));
+  const direct = firstNumber(row.ordersMoney, row.orders_money, row.orderMoney, row.order_money);
+  const assisted = firstNumber(row.modelsMoney, row.models_money, row.modelMoney, row.model_money);
+  if (hasPerformanceRevenueFields) return direct + assisted;
+  return firstNumber(row.revenue, row.sales, row.attributedRevenue, row.money_income, row.orderRevenue);
+}
+
+function performanceAttributedUnits(row = {}) {
+  const direct = firstNumber(row.orders, row.orders_count, row.ordersCount);
+  const assisted = firstNumber(row.models, row.models_count, row.modelsCount);
+  const explicit = firstNumber(row.units, row.quantity, row.qty);
+  return Math.round(explicit || direct + assisted || direct);
 }
 
 function adAddToCartMetric(row = {}) {

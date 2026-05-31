@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import {
@@ -22,6 +22,9 @@ import { apiClient } from "../utils/api";
 
 const router = useRouter();
 const loading = ref(false);
+const refreshing = ref(false);
+const hasDashboardLoaded = ref(false);
+let dashboardSnapshotRefreshTimer = null;
 const dashboard = ref({
   summary: {},
   commerce: {
@@ -44,6 +47,7 @@ const adToday = computed(() => commerce.value.advertising?.today || {});
 const adYesterday = computed(() => commerce.value.advertising?.yesterday || {});
 const profitTrend = computed(() => commerce.value.profit_trend || {});
 const aftersalesLoss = computed(() => summary.value.aftersales_loss || {});
+const fbpOpportunitySummary = computed(() => summary.value.fbp_opportunities || {});
 const commerceShops = computed(() => Array.isArray(commerce.value.shops) ? commerce.value.shops : []);
 const adShops = computed(() => Array.isArray(adToday.value.shops) ? adToday.value.shops : []);
 const fbpAlerts = computed(() => Array.isArray(dashboard.value.alerts?.fbp) ? dashboard.value.alerts.fbp : []);
@@ -53,6 +57,8 @@ const fbpOutOfStockCount = computed(() => fbpAlerts.value.filter((item) => item.
 const fbpWithin7Count = computed(() => fbpAlerts.value.filter((item) => item.alert_type === "within_7_days").length);
 const fbpWithin30Count = computed(() => fbpAlerts.value.filter((item) => item.alert_type === "within_30_days").length);
 const procurementRows = computed(() => Array.isArray(dashboard.value.alerts?.procurement) ? dashboard.value.alerts.procurement : []);
+const initialDashboardLoading = computed(() => loading.value && !hasDashboardLoaded.value);
+const dashboardUpdating = computed(() => refreshing.value && hasDashboardLoaded.value);
 
 const urgentCount = computed(() => Number(summary.value.urgent_count || 0));
 const stockWarningCount = computed(() => Number(summary.value.warning_count || 0));
@@ -90,6 +96,24 @@ function percentText(value) {
   return hasValue(value) ? `${(Number(value || 0) * 100).toFixed(1)}%` : "待接入";
 }
 
+function shortTimeText(value) {
+  if (!hasValue(value)) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+function hoursSince(value) {
+  if (!hasValue(value)) return null;
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) return null;
+  return Math.max(0, (Date.now() - time) / 3600000);
+}
+
 function delta(current, previous) {
   const now = Number(current || 0);
   const before = Number(previous || 0);
@@ -99,6 +123,25 @@ function delta(current, previous) {
   return {
     text: `${rate >= 0 ? "+" : ""}${(rate * 100).toFixed(1)}%`,
     direction: rate >= 0 ? "up" : "down"
+  };
+}
+
+function profitTrendDelta(value, baseline = today.value.profit, label = "较今日") {
+  if (!hasValue(value) || !hasValue(baseline)) return { text: `${label}待接入`, direction: "flat" };
+  const result = delta(value, baseline);
+  const rateText = result.text.replace(/^\+/, "");
+  return {
+    text: result.direction === "flat" ? `${label} 0.0%` : `${label} ${result.direction === "up" ? "↑" : "↓"}${rateText}`,
+    direction: result.direction
+  };
+}
+
+function profitTrendRow(label, value, comparison = profitTrendDelta(value)) {
+  return {
+    label,
+    value: metricMoney(value),
+    delta: comparison.text,
+    direction: comparison.direction
   };
 }
 
@@ -131,7 +174,13 @@ function fbpRiskRows() {
     { label: "严重断货", value: metricNumber(fbpOutOfStockCount.value, "个"), alertType: "out_of_stock" },
     { label: "即将断货", value: metricNumber(fbpWithin7Count.value, "个"), alertType: "within_7_days" },
     { label: "断货风险", value: metricNumber(fbpWithin30Count.value, "个"), alertType: "within_30_days" },
-    { label: "库存滞缓", value: metricNumber(fbpSlowCount.value, "个"), alertType: "slow" }
+    { label: "库存滞缓", value: metricNumber(fbpSlowCount.value, "个"), alertType: "slow" },
+    {
+      label: "推荐备货FBP",
+      value: metricNumber(fbpOpportunitySummary.value.total, "个"),
+      route: "/inventory/fbp-opportunities",
+      query: {}
+    }
   ];
 }
 
@@ -144,6 +193,17 @@ function aftersalesQuery(bucket = "all", openDetail = false) {
   };
   if (openDetail && bucket !== "all") query.detailBucket = bucket;
   return query;
+}
+
+function todayAftersalesQuery(bucket) {
+  const dateKey = commerce.value.date_key || "";
+  return {
+    from: dateKey,
+    to: dateKey,
+    shopId: "all",
+    bucket,
+    detailBucket: bucket
+  };
 }
 
 function aftersalesLossRows() {
@@ -185,6 +245,30 @@ function shopBreakdown(source, valueKey, formatter, suffixLabel = "") {
   return rows;
 }
 
+function todaySalesBreakdown() {
+  return [
+    { shop_name: "总销售额", text: metricMoney(today.value.total_revenue ?? today.value.revenue) },
+    { shop_name: "有效销售额", text: metricMoney(today.value.effective_revenue ?? today.value.revenue) },
+    { shop_name: "取消销售额", text: metricMoney(today.value.cancelled_revenue) },
+    { shop_name: "退货/拒收销售额", text: metricMoney(today.value.return_revenue) }
+  ];
+}
+
+function todayOrdersBreakdown() {
+  const total = Number(today.value.order_count || 0);
+  const effective = Number(today.value.effective_orders || 0);
+  const cancelled = Number(today.value.cancelled_orders || 0);
+  const returned = Number(today.value.return_orders || 0);
+  const other = Math.max(0, total - effective - cancelled - returned);
+  return [
+    { shop_name: "总订单数", text: metricNumber(total, " 单") },
+    { shop_name: "有效订单数", text: metricNumber(effective, " 单") },
+    { shop_name: "取消订单数", text: metricNumber(cancelled, " 单") },
+    { shop_name: "退货/拒收订单数", text: metricNumber(returned, " 单") },
+    { shop_name: "其他/进行中", text: metricNumber(other, " 单") }
+  ];
+}
+
 function adMetricRow(label, source) {
   return {
     label,
@@ -198,7 +282,7 @@ function adMetricRow(label, source) {
 }
 
 const adBreakdownTableRows = computed(() => {
-  const rows = [adMetricRow("所有店铺", adToday.value)];
+  const rows = [adMetricRow("全部店铺", adToday.value)];
   adShops.value.forEach((shop) => {
     rows.push(adMetricRow(shop.shop_name || `店铺 ${shop.shop_id || ""}`.trim(), shop));
   });
@@ -214,11 +298,33 @@ const adTooltipPopperOptions = {
 
 const profitDelta = computed(() => delta(today.value.profit, yesterday.value.profit));
 const roiDelta = computed(() => delta(adToday.value.roi, adYesterday.value.roi));
-const salesDelta = computed(() => delta(today.value.revenue, yesterday.value.revenue));
+const salesDelta = computed(() => delta(today.value.effective_revenue ?? today.value.revenue, yesterday.value.effective_revenue ?? yesterday.value.revenue));
+const effectiveOrderDelta = computed(() => delta(today.value.effective_orders, yesterday.value.effective_orders));
 const adCostJump = computed(() => Number(adToday.value.spend_cny || 0) > Number(adYesterday.value.spend_cny || 0) * 1.3);
+const adDataFreshness = computed(() => {
+  const syncedAt = adToday.value.last_synced_at || adToday.value.last_updated_at || "";
+  const hours = hoursSince(syncedAt);
+  const isTodayData = !commerce.value.advertising?.latest_date_key || commerce.value.advertising?.is_latest_today !== false;
+  if (!hasValue(adToday.value.roi) && !hasValue(adToday.value.spend_cny)) {
+    return { text: "广告数据待接入", direction: "down", tone: "danger", stale: true };
+  }
+  if (!isTodayData) {
+    return { text: `非今日数据 ${adToday.value.date_key || commerce.value.advertising?.latest_date_key || ""}`.trim(), direction: "down", tone: "danger", stale: true };
+  }
+  if (hours === null) return { text: "同步时间未知", direction: "down", tone: "warning", stale: true };
+  const timeText = shortTimeText(syncedAt);
+  if (hours >= 3) return { text: `${timeText} 同步，数据延迟`, direction: "down", tone: "danger", stale: true };
+  if (hours >= 1.5) return { text: `${timeText} 同步，可能延迟`, direction: "flat", tone: "warning", stale: true };
+  return { text: `${timeText} 已同步`, direction: "up", tone: "success", stale: false };
+});
 const fbpInventoryQuantityText = computed(() => {
   if (!hasValue(summary.value.fbp_inventory_quantity)) return "FBP货值";
   return `FBP ${numberText(summary.value.fbp_inventory_quantity)}件`;
+});
+const fbpOpportunityText = computed(() => {
+  const total = Number(fbpOpportunitySummary.value.total || 0);
+  const qty = Number(fbpOpportunitySummary.value.suggested_total_qty || 0);
+  return total ? `${numberText(total)} 个SKU / ${numberText(qty)}件` : "暂无推荐";
 });
 
 const profitState = computed(() => {
@@ -256,44 +362,46 @@ const operationReminder = computed(() => {
 
 const secondaryMetrics = computed(() => [
   {
-    label: "今日销售额",
-    value: metricMoney(today.value.revenue),
+    label: "今日有效销售额",
+    value: metricMoney(today.value.effective_revenue ?? today.value.revenue),
     note: `较昨日 ${salesDelta.value.text}`,
     direction: salesDelta.value.direction,
     icon: CircleDollarSign,
     path: "/profit",
-    breakdownTitle: "各店铺今日销售额",
-    breakdown: shopBreakdown(commerceShops.value, "revenue", metricMoney)
+    breakdownTitle: "今日销售额构成",
+    breakdown: todaySalesBreakdown()
   },
   {
-    label: "今日订单数",
-    value: metricNumber(today.value.order_count, " 单"),
-    note: `较昨日 ${delta(today.value.order_count, yesterday.value.order_count).text}`,
-    direction: delta(today.value.order_count, yesterday.value.order_count).direction,
+    label: "今日有效订单",
+    value: metricNumber(today.value.effective_orders, " 单"),
+    note: `总计 ${metricNumber(today.value.order_count, " 单")}`,
+    direction: effectiveOrderDelta.value.direction,
     icon: ClipboardList,
     path: "/orders",
-    breakdownTitle: "各店铺今日订单",
-    breakdown: shopBreakdown(commerceShops.value, "order_count", (value) => metricNumber(value, " 单"))
+    breakdownTitle: "今日订单构成",
+    breakdown: todayOrdersBreakdown()
   },
   {
     label: "今日取消",
     value: metricNumber(today.value.cancelled_quantity, " 件"),
-    note: `${metricNumber(today.value.cancelled_orders, " 单")}取消订单`,
+    note: `${metricNumber(today.value.cancelled_orders, " 单")} / ${metricMoney(today.value.cancelled_revenue)}`,
     direction: Number(today.value.cancelled_quantity || 0) > 0 ? "down" : "flat",
     icon: RefreshCw,
     path: "/profit/aftersales",
+    query: todayAftersalesQuery("pre_fulfillment_cancel"),
     breakdownTitle: "各店铺今日取消",
-    breakdown: shopBreakdown(commerceShops.value, "cancelled_quantity", (value) => metricNumber(value, " 件"))
+    breakdown: shopBreakdown(commerceShops.value, "cancelled_revenue", metricMoney)
   },
   {
     label: "退货件数",
     value: metricNumber(today.value.return_quantity, " 件"),
-    note: `${metricNumber(today.value.return_orders, " 单")}退货订单`,
+    note: `${metricNumber(today.value.return_orders, " 单")} / ${metricMoney(today.value.return_revenue)}`,
     direction: Number(today.value.return_quantity || 0) > 0 ? "down" : "flat",
     icon: AlertTriangle,
     path: "/profit/aftersales",
+    query: todayAftersalesQuery("rejected_unclaimed"),
     breakdownTitle: "各店铺今日退货",
-    breakdown: shopBreakdown(commerceShops.value, "return_quantity", (value) => metricNumber(value, " 件"))
+    breakdown: shopBreakdown(commerceShops.value, "return_revenue", metricMoney)
   },
   {
     label: "待回款",
@@ -308,8 +416,8 @@ const secondaryMetrics = computed(() => [
   {
     label: "广告消耗",
     value: metricMoney(adToday.value.spend_cny),
-    note: adToday.value.date_key ? `广告日期 ${adToday.value.date_key}` : (adCostJump.value ? "较昨日消耗偏高" : "消耗正常"),
-    direction: adCostJump.value ? "down" : "flat",
+    note: adDataFreshness.value.text,
+    direction: adDataFreshness.value.direction,
     icon: Target,
     path: "/advertising/daily",
     breakdownTitle: "各店铺广告消耗",
@@ -376,8 +484,8 @@ const anomalyCards = computed(() => [
 
 const opportunityCards = computed(() => [
   {
-    product: firstStockAlert.value.display_name || firstStockAlert.value.product_name || "TENET 门槛条",
-    reason: Number(adToday.value.roi || 0) >= 2 ? `ROI ${decimalText(adToday.value.roi)}，具备放量基础` : "CTR高于平均，但曝光不足",
+    product: firstStockAlert.value.display_name || firstStockAlert.value.product_name || "高潜力商品",
+    reason: Number(adToday.value.roi || 0) >= 2 ? `ROI ${decimalText(adToday.value.roi)}，具备放量基础` : "CTR 高于平均，但曝光不足",
     advice: "增加广告预算",
     icon: Flame,
     primary: "去放量",
@@ -398,7 +506,7 @@ const opportunityCards = computed(() => [
   {
     product: firstProcurement.value.product_name || "高利润可放量商品",
     reason: `${procurementCount.value} 个待采购商品`,
-    advice: "优先补有销量SKU",
+    advice: "优先补有销量 SKU",
     icon: PackageCheck,
     primary: "去采购",
     secondary: "看库存",
@@ -432,9 +540,12 @@ const healthCards = computed(() => [
     route: "/profit",
     icon: CircleDollarSign,
     items: [
-      ["昨日利润", metricMoney(yesterday.value.profit)],
-      ["近7天平均", metricMoney(profitTrend.value.seven_day_average_profit)],
-      ["本月平均", metricMoney(profitTrend.value.month_average_profit)]
+      profitTrendRow("昨日利润", yesterday.value.profit),
+      profitTrendRow("近7天平均", profitTrend.value.seven_day_average_profit),
+      profitTrendRow("本月平均", profitTrend.value.month_average_profit),
+      profitTrendRow("当月利润", profitTrend.value.month_total_profit, profitTrendDelta(profitTrend.value.month_total_profit, profitTrend.value.previous_month_total_profit, "较上月")),
+      profitTrendRow("上月利润", profitTrend.value.previous_month_total_profit, { text: "", direction: "flat" }),
+      profitTrendRow("季度平均", profitTrend.value.quarter_average_profit)
     ]
   },
   {
@@ -442,11 +553,11 @@ const healthCards = computed(() => [
     route: "/inventory/alerts",
     icon: Boxes,
     items: fbpRiskRows()
-  }
+  },
 ]);
 
 const dashboardInsightCards = computed(() => [
-  ...["利润趋势", "FBP库存风险", "售后损失"]
+  ...["利润趋势", "广告健康", "售后损失", "FBP库存风险"]
     .map((title) => healthCards.value.find((card) => card.title === title))
     .filter(Boolean),
   {
@@ -473,10 +584,22 @@ const dashboardInsightCards = computed(() => [
   }
 ]);
 
-async function loadDashboard() {
-  loading.value = true;
+async function loadDashboard(options = {}) {
+  const forceRefresh = options === true || options?.refresh === true;
+  const snapshotOnly = options?.snapshotOnly === true;
+  const showInitialLoading = !hasDashboardLoaded.value;
+  if (showInitialLoading) {
+    loading.value = true;
+  } else {
+    refreshing.value = true;
+  }
   try {
-    const res = await apiClient.get("/api/dashboard");
+    const url = forceRefresh
+      ? `/api/dashboard?refresh=1&_=${Date.now()}`
+      : snapshotOnly
+        ? `/api/dashboard?snapshotOnly=1&_=${Date.now()}`
+        : "/api/dashboard";
+    const res = await apiClient.get(url, forceRefresh ? { noCache: true, cache: "no-store" } : {});
     dashboard.value = {
       ...dashboard.value,
       ...(res || {}),
@@ -493,19 +616,42 @@ async function loadDashboard() {
         ...(res?.alerts || {})
       }
     };
+    hasDashboardLoaded.value = true;
+    if (!forceRefresh && !snapshotOnly) scheduleDashboardSnapshotReload();
   } catch (error) {
     console.error(error);
+    if (!showInitialLoading && !forceRefresh) return;
     ElMessage.error("首页摘要加载失败");
   } finally {
-    loading.value = false;
+    if (showInitialLoading) {
+      loading.value = false;
+    } else {
+      refreshing.value = false;
+    }
   }
 }
 
+function scheduleDashboardSnapshotReload() {
+  if (dashboardSnapshotRefreshTimer) window.clearTimeout(dashboardSnapshotRefreshTimer);
+  dashboardSnapshotRefreshTimer = window.setTimeout(() => {
+    dashboardSnapshotRefreshTimer = null;
+    loadDashboard({ snapshotOnly: true });
+  }, 2500);
+}
+
+function refreshDashboard() {
+  loadDashboard({ refresh: true });
+}
+
 onMounted(loadDashboard);
+
+onBeforeUnmount(() => {
+  if (dashboardSnapshotRefreshTimer) window.clearTimeout(dashboardSnapshotRefreshTimer);
+});
 </script>
 
 <template>
-  <section v-loading="loading" class="commerce-dashboard">
+  <section v-loading="initialDashboardLoading" class="commerce-dashboard" :class="{ 'is-updating': dashboardUpdating }">
     <div class="hero-grid">
       <div class="operating-card" :class="`is-${businessTone}`">
         <div class="operating-card__top">
@@ -515,9 +661,13 @@ onMounted(loadDashboard);
               Ozon经营驾驶舱
             </div>
             <h1>今日经营总览</h1>
-            <p>利润与广告ROI优先，AI只提示关键经营信号。</p>
+            <p>利润与广告 ROI 优先，AI 只提示关键经营信号。</p>
           </div>
-          <el-button class="ghost-button" size="small" :loading="loading" @click="loadDashboard">
+          <span v-if="dashboardUpdating" class="refresh-status">
+            <RefreshCw :size="13" />
+            更新中
+          </span>
+          <el-button class="ghost-button" size="small" :loading="loading || refreshing" @click="refreshDashboard">
             <RefreshCw :size="14" />
             刷新
           </el-button>
@@ -579,6 +729,7 @@ onMounted(loadDashboard);
                   较昨日 {{ roiDelta.text }}
                 </span>
                 <em>{{ roiState }}</em>
+                <small :class="`freshness is-${adDataFreshness.tone}`">{{ adDataFreshness.text }}</small>
               </div>
             </article>
           </el-tooltip>
@@ -594,7 +745,6 @@ onMounted(loadDashboard);
               <em>FBP货值</em>
             </div>
           </article>
-
         </div>
 
         <div class="secondary-metric-grid">
@@ -608,7 +758,7 @@ onMounted(loadDashboard);
                 </div>
               </div>
             </template>
-            <button type="button" @click="open(item.path)">
+            <button type="button" @click="open(item.path, item.query || {})">
               <component :is="item.icon" :size="16" />
               <span>{{ item.label }}</span>
               <strong>{{ item.value }}</strong>
@@ -629,12 +779,21 @@ onMounted(loadDashboard);
               <h2>经营健康摘要</h2>
             </div>
             <div class="health-grid">
-              <button v-for="card in dashboardInsightCards" :key="card.title" type="button" class="health-card" @click="open(card.route, card.query || {})">
+              <article
+                v-for="card in dashboardInsightCards"
+                :key="card.title"
+                role="button"
+                tabindex="0"
+                class="health-card"
+                @click="open(card.route, card.query || {})"
+                @keydown.enter.prevent="open(card.route, card.query || {})"
+                @keydown.space.prevent="open(card.route, card.query || {})"
+              >
                 <div>
                   <component :is="card.icon" :size="18" />
                   <strong>{{ card.title }}</strong>
                 </div>
-                <dl>
+                <div class="health-card-list">
                   <template v-for="row in card.items" :key="row.alertType || row.label || row[0]">
                     <button
                       v-if="row.alertType || row.route"
@@ -642,22 +801,27 @@ onMounted(loadDashboard);
                       class="health-card-row"
                       @click.stop="open(row.route || '/inventory/alerts', row.query || { alertType: row.alertType })"
                     >
-                      <dt>{{ row.label || row[0] }}</dt>
-                      <dd>{{ row.value || row[1] }}</dd>
+                      <span class="health-card-label">{{ row.label || row[0] }}</span>
+                      <span class="health-card-value">
+                        <span>{{ row.value || row[1] }}</span>
+                        <small v-if="row.delta" :class="`is-${row.direction || 'flat'}`">{{ row.delta }}</small>
+                      </span>
                     </button>
-                    <template v-else>
-                      <dt>{{ row[0] }}</dt>
-                      <dd>{{ row[1] }}</dd>
-                    </template>
+                    <div v-else class="health-card-row is-static">
+                      <span class="health-card-label">{{ row.label || row[0] }}</span>
+                      <span class="health-card-value">
+                        <span>{{ row.value || row[1] }}</span>
+                        <small v-if="row.delta" :class="`is-${row.direction || 'flat'}`">{{ row.delta }}</small>
+                      </span>
+                    </div>
                   </template>
-                </dl>
-              </button>
+                </div>
+              </article>
             </div>
           </section>
         </div>
       </div>
     </div>
-
   </section>
 </template>
 
@@ -665,11 +829,9 @@ onMounted(loadDashboard);
 .commerce-dashboard {
   position: relative;
   min-height: 100%;
-  padding: 20px;
-  background:
-    radial-gradient(circle at 20% 0%, rgba(59, 130, 246, 0.08), transparent 28%),
-    linear-gradient(180deg, #f5f7fb 0%, #eef2f7 100%);
-  color: #0f172a;
+  padding: 12px;
+  background: #f5f7fb;
+  color: #1f2937;
 }
 
 button {
@@ -707,45 +869,32 @@ button {
 .hero-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 16px;
+  gap: 10px;
   align-items: stretch;
 }
 
 .operating-card {
   position: relative;
   overflow: hidden;
-  min-height: 430px;
-  padding: 22px;
-  border-radius: 14px;
-  color: #f8fafc;
-  background:
-    linear-gradient(145deg, rgba(12, 17, 29, 0.95), rgba(9, 20, 39, 0.96) 55%, rgba(12, 29, 55, 0.98)),
-    #101827;
-  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.28);
+  min-height: 0;
+  padding: 14px;
+  border: 1px solid #eef1f6;
+  border-radius: 12px;
+  color: #1f2937;
+  background: #ffffff;
+  box-shadow: 0 4px 14px rgba(31, 41, 55, 0.04);
 }
 
 .operating-card.is-danger {
-  background:
-    linear-gradient(145deg, rgba(26, 16, 17, 0.96), rgba(9, 20, 39, 0.97) 46%, rgba(15, 31, 54, 0.98)),
-    #101827;
+  background: #ffffff;
 }
 
 .operating-card.is-warning {
-  background:
-    linear-gradient(145deg, rgba(30, 22, 12, 0.96), rgba(9, 20, 39, 0.97) 48%, rgba(16, 33, 58, 0.98)),
-    #101827;
+  background: #ffffff;
 }
 
 .operating-card::before {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  content: "";
-  background:
-    linear-gradient(90deg, rgba(255, 255, 255, 0.08) 1px, transparent 1px),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
-  background-size: 88px 88px;
-  opacity: 0.08;
+  display: none;
 }
 
 .operating-card__top,
@@ -761,8 +910,8 @@ button {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 18px;
+  gap: 10px;
+  margin-bottom: 12px;
 }
 
 .brand-pill {
@@ -770,117 +919,167 @@ button {
   align-items: center;
   gap: 6px;
   width: fit-content;
-  margin-bottom: 10px;
-  padding: 5px 9px;
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  margin-bottom: 8px;
+  padding: 4px 10px;
+  border: 1px solid #dedbff;
   border-radius: 999px;
-  color: #93c5fd;
-  background: rgba(15, 23, 42, 0.52);
+  color: #6258f6;
+  background: #f0efff;
   font-size: 12px;
   font-weight: 700;
 }
 
 .operating-card h1 {
   margin: 0;
-  font-size: 28px;
-  line-height: 1.12;
+  color: #1f2937;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.18;
   letter-spacing: 0;
 }
 
 .operating-card p {
-  margin: 8px 0 0;
-  color: #b6c3d8;
+  margin: 6px 0 0;
+  color: #7b8497;
   font-size: 13px;
 }
 
+.refresh-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  margin-left: auto;
+  padding: 3px 9px;
+  border-radius: 999px;
+  color: #4b5563;
+  background: #f3f5f9;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.refresh-status svg {
+  animation: dashboard-refresh-spin 0.9s linear infinite;
+}
+
+@keyframes dashboard-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .ghost-button {
-  --el-button-bg-color: rgba(15, 23, 42, 0.42);
-  --el-button-border-color: rgba(148, 163, 184, 0.35);
-  --el-button-text-color: #dbeafe;
-  --el-button-hover-bg-color: rgba(37, 99, 235, 0.28);
-  --el-button-hover-border-color: rgba(147, 197, 253, 0.52);
+  height: 32px;
+  border-radius: 8px;
+  --el-button-bg-color: #ffffff;
+  --el-button-border-color: #e7eaf3;
+  --el-button-text-color: #4b5563;
+  --el-button-hover-bg-color: #f0efff;
+  --el-button-hover-border-color: #6258f6;
+  --el-button-hover-text-color: #6258f6;
 }
 
 .hero-core-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(220px, 1fr));
-  gap: 12px;
-  margin-bottom: 14px;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 
 .primary-metric,
 .ai-signal-panel,
 .secondary-metric-grid button {
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 12px;
-  background: rgba(15, 23, 42, 0.62);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  border: 1px solid #eef1f6;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: none;
 }
 
 .primary-metric {
-  min-height: 142px;
-  padding: 18px;
+  min-height: 124px;
+  padding: 16px;
   cursor: pointer;
 }
 
 .profit-card {
-  background:
-    linear-gradient(145deg, rgba(251, 146, 60, 0.12), transparent 54%),
-    rgba(15, 23, 42, 0.7);
+  background: #ffffff;
 }
 
 .roi-card {
-  background:
-    linear-gradient(145deg, rgba(59, 130, 246, 0.14), transparent 54%),
-    rgba(15, 23, 42, 0.68);
+  background: #ffffff;
 }
 
 .inventory-value-card {
-  background:
-    linear-gradient(145deg, rgba(45, 212, 191, 0.13), transparent 54%),
-    rgba(15, 23, 42, 0.68);
+  background: #ffffff;
 }
 
 .metric-label {
   display: flex;
   align-items: center;
   gap: 7px;
-  color: #b6c3d8;
+  color: #7b8497;
   font-size: 13px;
   font-weight: 700;
 }
 
 .primary-metric strong {
   display: block;
-  margin-top: 14px;
-  color: #fb923c;
-  font-size: 42px;
+  margin-top: 12px;
+  color: #f97316;
+  font-size: 36px;
   line-height: 1;
 }
 
 .roi-card strong {
-  color: #93c5fd;
+  color: #60a5fa;
 }
 
 .inventory-value-card strong {
-  color: #5eead4;
+  color: #14b8a6;
 }
 
 .metric-footer {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 9px;
-  margin-top: 15px;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .metric-footer em {
-  padding: 4px 8px;
+  padding: 3px 8px;
   border-radius: 999px;
-  color: #dbeafe;
-  background: rgba(148, 163, 184, 0.14);
+  color: #7b8497;
+  background: #f3f5f9;
   font-size: 12px;
   font-style: normal;
+}
+
+.metric-footer .freshness {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #f3f5f9;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.metric-footer .freshness.is-success {
+  color: #15803d;
+  background: #ecfdf3;
+}
+
+.metric-footer .freshness.is-warning {
+  color: #b45309;
+  background: #fff7e6;
+}
+
+.metric-footer .freshness.is-danger {
+  color: #ef4444;
+  background: #fff1f1;
 }
 
 .delta {
@@ -893,17 +1092,17 @@ button {
 
 .delta.is-up,
 .secondary-metric-grid small.is-up {
-  color: #5eead4;
+  color: #22c55e;
 }
 
 .delta.is-down,
 .secondary-metric-grid small.is-down {
-  color: #fb7185;
+  color: #ef4444;
 }
 
 .delta.is-flat,
 .secondary-metric-grid small.is-flat {
-  color: #a8b5c7;
+  color: #7b8497;
 }
 
 .ai-signal-panel {
@@ -970,26 +1169,26 @@ button {
 .secondary-metric-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
 }
 
 .secondary-metric-grid button {
-  min-height: 94px;
-  padding: 14px;
-  color: #f8fafc;
+  min-height: 86px;
+  padding: 12px;
+  color: #1f2937;
   text-align: left;
   cursor: pointer;
 }
 
 .secondary-metric-grid button svg {
-  color: #fb923c;
+  color: #6258f6;
 }
 
 .secondary-metric-grid span,
 .pressure-card span {
   display: block;
-  margin-top: 9px;
-  color: #9fb0c7;
+  margin-top: 8px;
+  color: #7b8497;
   font-size: 12px;
 }
 
@@ -1087,14 +1286,16 @@ button {
 
 .secondary-metric-grid strong {
   display: block;
-  margin-top: 9px;
-  color: #fff7ed;
+  margin-top: 8px;
+  color: #1f2937;
   font-size: 22px;
+  font-weight: 700;
 }
 
 .secondary-metric-grid small {
   display: block;
-  margin-top: 8px;
+  margin-top: 6px;
+  color: #7b8497;
   font-size: 12px;
 }
 
@@ -1102,29 +1303,31 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 12px;
-  padding: 11px 12px;
-  border-radius: 10px;
-  color: #fde68a;
-  background: rgba(251, 191, 36, 0.12);
+  height: 32px;
+  margin-top: 10px;
+  padding: 0 12px;
+  border: 1px solid #ffe6a6;
+  border-radius: 8px;
+  color: #b45309;
+  background: #fff7e6;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 600;
 }
+
 
 .hero-insight-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 10px;
-  margin-top: 12px;
+  margin-top: 10px;
 }
 
 .hero-health-panel {
-  min-height: 190px;
   padding: 14px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  border: 1px solid #eef1f6;
   border-radius: 12px;
-  background: rgba(15, 23, 42, 0.38);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  background: #ffffff;
+  box-shadow: none;
 }
 
 .hero-health-panel {
@@ -1136,12 +1339,13 @@ button {
 }
 
 .hero-health-panel .section-heading h2 {
-  color: #f8fafc;
-  font-size: 15px;
+  color: #6258f6;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .hero-health-panel .section-heading span {
-  color: #93c5fd;
+  color: #7b8497;
 }
 
 .hero-insight-grid .health-grid {
@@ -1150,33 +1354,33 @@ button {
 }
 
 .hero-insight-grid .health-card {
-  border: 0;
-  border-radius: 8px;
-  background: rgba(248, 250, 252, 0.34);
+  border: 1px solid #eef1f6;
+  border-radius: 10px;
+  background: #ffffff;
   box-shadow: none;
 }
 
 .hero-insight-grid .health-card {
   min-height: 118px;
-  padding: 10px;
+  padding: 12px;
 }
 
 .hero-insight-grid .health-card svg {
-  color: #0f172a;
-  opacity: 0.78;
+  color: #6258f6;
+  opacity: 1;
 }
 
 .hero-insight-grid .health-card strong {
-  color: #f8fafc;
+  color: #1f2937;
   font-size: 13px;
 }
 
 .hero-insight-grid .health-card dt {
-  color: #d7dee8;
+  color: #7b8497;
 }
 
 .hero-insight-grid .health-card dd {
-  color: #f8fafc;
+  color: #4b5563;
 }
 
 .hero-rail {
@@ -1195,31 +1399,46 @@ button {
 }
 
 .hero-insight-grid .hero-health-panel {
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(15, 23, 42, 0.44);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  border: 1px solid #eef1f6;
+  background: #ffffff;
+  box-shadow: none;
 }
 
 .hero-insight-grid .health-card {
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid #eef1f6;
+  background: #ffffff;
 }
 
 .hero-insight-grid .health-card svg {
-  color: #93c5fd;
+  color: #6258f6;
   opacity: 1;
 }
 
+.hero-insight-grid .health-card > div {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  margin-bottom: 12px;
+}
+
+.hero-insight-grid .health-card > div svg {
+  width: 28px;
+  height: 28px;
+  padding: 5px;
+  border-radius: 8px;
+  background: #f0efff;
+}
+
 .hero-insight-grid .health-card strong {
-  color: #f8fafc;
+  color: #1f2937;
 }
 
 .hero-insight-grid .health-card dt {
-  color: #9fb0c7;
+  color: #7b8497;
 }
 
 .hero-insight-grid .health-card dd {
-  color: #f8fafc;
+  color: #4b5563;
 }
 
 .rail-panel {
@@ -1445,10 +1664,16 @@ button {
 }
 
 .health-card {
-  padding: 14px;
-  border: 0;
-  border-radius: 12px;
-  background: #f8fafc;
+  align-content: start;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: 12px;
+  border: 1px solid #eef1f6;
+  border-radius: 10px;
+  background: #ffffff;
   text-align: left;
   cursor: pointer;
 }
@@ -1458,22 +1683,22 @@ button {
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
-  color: #0f172a;
+  color: #1f2937;
 }
 
-.health-card dl {
+.health-card-list {
   display: grid;
   gap: 8px;
   margin: 0;
 }
 
-.health-card dt,
-.health-card dd {
+.health-card-label,
+.health-card-value {
   margin: 0;
   font-size: 12px;
 }
 
-.health-card dl {
+.health-card-list {
   grid-template-columns: 1fr auto;
 }
 
@@ -1481,6 +1706,7 @@ button {
   display: grid;
   grid-column: 1 / -1;
   grid-template-columns: 1fr auto;
+  align-items: baseline;
   gap: 8px;
   width: 100%;
   padding: 0;
@@ -1491,18 +1717,45 @@ button {
   cursor: pointer;
 }
 
-.health-card-row:hover dt,
-.health-card-row:hover dd {
-  color: #93c5fd;
+.health-card-row:hover .health-card-label,
+.health-card-row:hover .health-card-value {
+  color: #6258f6;
 }
 
-.health-card dt {
-  color: #64748b;
+.health-card-label {
+  color: #7b8497;
 }
 
-.health-card dd {
-  color: #0f172a;
-  font-weight: 800;
+.health-card-value {
+  color: #4b5563;
+  font-weight: 600;
+}
+
+.health-card-value {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.health-card-value small {
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.health-card-value small.is-up {
+  color: #22c55e;
+}
+
+.health-card-value small.is-down {
+  color: #ef4444;
+}
+
+.health-card-value small.is-flat {
+  color: #7b8497;
 }
 
 .drawer-intro {

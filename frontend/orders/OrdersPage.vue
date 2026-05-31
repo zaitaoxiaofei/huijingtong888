@@ -2,6 +2,7 @@
 import { computed, defineAsyncComponent, defineExpose, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
+import zhCn from "element-plus/es/locale/lang/zh-cn";
 import OrdersStatusTabs from "./components/OrdersStatusTabs.vue";
 import OrdersTable from "./components/OrdersTable.vue";
 import OrdersToolbar from "./components/OrdersToolbar.vue";
@@ -18,10 +19,12 @@ import { buildProductDisplayRows, firstCsvValue, splitCsv } from "./utils/order-
 import { formatDateTime, formatLogisticsRuleLabel, formatMoney, formatPercent, formatSignedMoney, moneyValueClass } from "./utils/order-format.js";
 import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order-profit-detail.js";
 import "./orders-view.css";
+import "../admin/styles/erp-theme.css";
 
 const ProcurementRequestCreateDialog = defineAsyncComponent(() => import("../admin/components/procurement/ProcurementRequestCreateDialog.vue"));
 const route = useRoute();
 const router = useRouter();
+const elementLocale = zhCn;
 
 const orderDetailCache = new Map();
 
@@ -95,6 +98,79 @@ const orderProcurementDialog = reactive({
   preview: null,
   selectedItemIds: []
 });
+
+const printDialog = reactive({
+  visible: false,
+  submitting: false,
+  previewing: false,
+  orderIds: [],
+  preset: "order_label_76x130",
+  copies: 1,
+  scale: "fit",
+  orientation: "portrait",
+  color: "monochrome"
+});
+
+const printPresetOptions = [
+  {
+    label: "订单面单 76mm x 130mm",
+    value: "order_label_76x130",
+    printer: "label",
+    paper: "76mm x 130mm",
+    scale: "fit",
+    orientation: "portrait",
+    color: "monochrome"
+  },
+  {
+    label: "FBP 面单 72mm x 130mm",
+    value: "fbp_label_72x130",
+    printer: "label",
+    paper: "72mm x 130mm",
+    scale: "fit",
+    orientation: "portrait",
+    color: "monochrome"
+  },
+  {
+    label: "条形码 70mm x 30mm",
+    value: "barcode_70x30",
+    printer: "label",
+    paper: "70mm x 30mm",
+    scale: "fit",
+    orientation: "portrait",
+    color: "monochrome"
+  },
+  {
+    label: "A4 PDF / FBP 申请文件",
+    value: "a4_document",
+    printer: "document",
+    paper: "A4",
+    scale: "fit",
+    orientation: "portrait",
+    color: ""
+  }
+];
+
+const scaleOptions = [
+  { label: "适应页面", value: "fit" },
+  { label: "只缩小过大内容", value: "shrink" },
+  { label: "原始大小", value: "noscale" }
+];
+
+const orientationOptions = [
+  { label: "自动/默认", value: "" },
+  { label: "纵向", value: "portrait" },
+  { label: "横向", value: "landscape" }
+];
+
+const colorOptions = [
+  { label: "打印机默认", value: "" },
+  { label: "彩色", value: "color" },
+  { label: "黑白", value: "monochrome" }
+];
+
+const selectedPrintPreset = computed(() => (
+  printPresetOptions.find((item) => item.value === printDialog.preset) || printPresetOptions[0]
+));
 
 const inventoryDialog = reactive({
   visible: false,
@@ -713,13 +789,78 @@ async function syncAllOrdersAction() {
   await syncAll();
 }
 
+function openPrintDialog(orderIds = []) {
+  const ids = Array.isArray(orderIds) ? orderIds.map(Number).filter(Boolean) : [];
+  if (!ids.length) return ElMessage.warning("请选择需要打印的订单");
+  printDialog.orderIds = ids;
+  printDialog.preset = "order_label_76x130";
+  printDialog.copies = 1;
+  printDialog.scale = "fit";
+  printDialog.orientation = "portrait";
+  printDialog.color = "monochrome";
+  printDialog.visible = true;
+}
+
+function buildPrintSettings() {
+  const preset = selectedPrintPreset.value;
+  return [
+    printDialog.scale,
+    printDialog.orientation,
+    printDialog.color,
+    preset.paper ? `paper=${preset.paper}` : ""
+  ].filter(Boolean).join(",");
+}
+
+function applyPrintPreset() {
+  const preset = selectedPrintPreset.value;
+  printDialog.scale = preset.scale || "fit";
+  printDialog.orientation = preset.orientation || "";
+  printDialog.color = preset.color || "";
+}
+
+async function previewPrintLabels() {
+  const ids = printDialog.orderIds.map(Number).filter(Boolean);
+  if (!ids.length) return;
+  printDialog.previewing = true;
+  try {
+    const response = await apiClient.blobResponse("/api/orders/package-label", {
+      method: "POST",
+      body: JSON.stringify({ order_ids: ids, require_all: true })
+    });
+    const url = URL.createObjectURL(response.blob);
+    window.open(url, "_blank", "noopener");
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  } catch (error) {
+    ElMessage.error(`预览失败：${error?.message || "未知错误"}`);
+  } finally {
+    printDialog.previewing = false;
+  }
+}
+
+async function submitPrintDialog() {
+  const ids = printDialog.orderIds.map(Number).filter(Boolean);
+  if (!ids.length) return;
+  printDialog.submitting = true;
+  try {
+    await bulkPrint(ids, {
+      printer: selectedPrintPreset.value.printer,
+      printSettings: buildPrintSettings(),
+      copies: printDialog.copies
+    });
+    printDialog.visible = false;
+    orderDetailCache.clear();
+  } finally {
+    printDialog.submitting = false;
+  }
+}
+
 function bulkPrintSelected() {
   if (!selectedOrderIds.value.size) return ElMessage.warning("请先选择订单");
   const ids = selectedActionOrderIds("print");
   if (!ids.length) return ElMessage.warning("已选订单里没有可打印面单的订单");
   const skipped = selectedOrderIds.value.size - ids.length;
   if (skipped > 0) ElMessage.warning(`已跳过 ${skipped} 个不可打印订单`);
-  return bulkPrint(ids);
+  return openPrintDialog(ids);
 }
 
 function bulkPrepareSelected() {
@@ -808,9 +949,7 @@ async function handlePrepareOrder(orderId) {
 }
 
 async function handlePrintOrder(orderId) {
-  await printSingleOrder(orderId);
-  orderDetailCache.delete(Number(orderId));
-  await loadOrders();
+  openPrintDialog([orderId]);
 }
 
 async function showQualityRules() {
@@ -1140,7 +1279,8 @@ onMounted(async () => {
 </script>
 
 <template>
-  <section v-loading="loading" class="vue-orders-shell">
+  <el-config-provider :locale="elementLocale">
+    <section v-loading="loading" class="vue-orders-shell">
     <div v-if="hasAftersalesReturnContext()" class="orders-return-strip">
       <el-button @click="backToAftersales">返回售后补损</el-button>
     </div>
@@ -1209,6 +1349,60 @@ onMounted(async () => {
         />
       </div>
     </div>
+
+    <el-dialog
+      v-model="printDialog.visible"
+      title="面单打印设置"
+      width="560px"
+      align-center
+      class="erp-centered-dialog"
+      destroy-on-close
+    >
+      <el-form label-position="top" class="orders-print-settings-form">
+        <el-form-item label="打印用途 / 尺寸">
+          <el-select v-model="printDialog.preset" class="w-full" @change="applyPrintPreset">
+            <el-option v-for="item in printPresetOptions" :key="item.value" :label="item.label" :value="item.value" />
+          </el-select>
+        </el-form-item>
+        <div class="orders-print-target-line">
+          <span>打印机</span>
+          <strong>{{ selectedPrintPreset.printer === "document" ? "Canon MG2500 series Printer" : "Gprinter GP-1324D" }}</strong>
+        </div>
+        <div class="orders-print-settings-grid">
+          <el-form-item label="纸张尺寸">
+            <el-input :model-value="selectedPrintPreset.paper" disabled />
+          </el-form-item>
+          <el-form-item label="份数 / 张数">
+            <el-input-number v-model="printDialog.copies" :min="1" :max="999" :step="1" controls-position="right" />
+          </el-form-item>
+          <el-form-item label="缩放">
+            <el-select v-model="printDialog.scale">
+              <el-option v-for="item in scaleOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="方向">
+            <el-select v-model="printDialog.orientation">
+              <el-option v-for="item in orientationOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="颜色">
+            <el-select v-model="printDialog.color">
+              <el-option v-for="item in colorOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </el-form-item>
+        </div>
+      </el-form>
+      <template #footer>
+        <div class="orders-print-dialog-footer">
+          <span>{{ printDialog.orderIds.length }} 个面单 × {{ printDialog.copies }} 份</span>
+          <div>
+            <el-button @click="printDialog.visible = false">取消</el-button>
+            <el-button :loading="printDialog.previewing" @click="previewPrintLabels">预览 PDF</el-button>
+            <el-button type="primary" :loading="printDialog.submitting" @click="submitPrintDialog">确认打印</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="detailDialog.visible"
@@ -1912,5 +2106,6 @@ onMounted(async () => {
       lock-product
       @created="handleProcurementCreated"
     />
-  </section>
+    </section>
+  </el-config-provider>
 </template>

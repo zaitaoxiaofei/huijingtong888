@@ -77,11 +77,11 @@ function inferBrand(text) {
     </div>
 
     <div class="task-actions">
-      <el-button :icon="DocumentChecked" @click="$emit('save-draft')">保存草稿</el-button>
-      <el-button type="primary" :icon="MagicStick" :loading="generating" @click="$emit('start-generate')">开始生成</el-button>
-      <el-button :icon="VideoPause" :disabled="!generating" @click="$emit('pause-task')">暂停任务</el-button>
-      <el-button type="success" :icon="Upload" :loading="writingBack" @click="$emit('write-back-all')">批量回写</el-button>
-      <el-button :icon="ArrowLeft" @click="$emit('back')">返回选品表</el-button>
+      <el-button class="erp-btn erp-btn-secondary" :icon="DocumentChecked" @click="$emit('save-draft')">保存草稿</el-button>
+      <el-button class="erp-btn erp-btn-primary" type="primary" :icon="MagicStick" :loading="generating" @click="$emit('start-generate')">开始生成</el-button>
+      <el-button class="erp-btn erp-btn-secondary" :icon="VideoPause" :disabled="!generating" @click="$emit('pause-task')">暂停任务</el-button>
+      <el-button class="erp-btn erp-btn-secondary" type="success" :icon="Upload" :loading="writingBack" @click="$emit('write-back-all')">批量回写</el-button>
+      <el-button class="erp-btn erp-btn-secondary" :icon="ArrowLeft" @click="$emit('back')">返回选品表</el-button>
     </div>
   </header>
 </template>
