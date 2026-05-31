@@ -2,15 +2,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { PDFDocument } from "pdf-lib";
+import { degrees, PDFDocument } from "pdf-lib";
 
 const PRINT_JOB_RETENTION = 100;
 const DEFAULT_LABEL_PRINTER = process.env.OZON_LABEL_PRINTER || "Gprinter GP-1324D";
 const DEFAULT_DOCUMENT_PRINTER = process.env.OZON_DOCUMENT_PRINTER || "Canon MG2500 series Printer";
 const MM_TO_PT = 72 / 25.4;
 const LABEL_PAPER_SIZES = [
-  { value: "order_label_76x130", widthMm: 76, heightMm: 130, paperName: "76mm x 130mm", aliases: ["76mm x 130mm", "76x130", "76*130"] },
-  { value: "fbp_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", aliases: ["72mm x 130mm", "72x130", "72*130"] },
+  { value: "order_label_76x130", widthMm: 76, heightMm: 130, paperName: "76mm x 130mm", rotateLandscape: true, aliases: ["76mm x 130mm", "76x130", "76*130"] },
+  { value: "fbp_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, aliases: ["72mm x 130mm", "72x130", "72*130"] },
   { value: "barcode_70x30", widthMm: 70, heightMm: 30, paperName: "70mm*30mm", aliases: ["70mm x 30mm", "70mm*30mm", "70x30", "70*30"] }
 ];
 
@@ -255,16 +255,32 @@ async function resizePdfToPaper(pdfBuffer, paperSpec) {
     const { width: sourceWidth, height: sourceHeight } = sourcePage.getSize();
     const targetPage = output.addPage([targetWidth, targetHeight]);
     const embedded = await output.embedPage(sourcePage);
-    const stretchToPaper = paperSpec.value !== "a4_document";
-    const scale = stretchToPaper ? 1 : Math.min(targetWidth / sourceWidth, targetHeight / sourceHeight);
-    const drawWidth = stretchToPaper ? targetWidth : sourceWidth * scale;
-    const drawHeight = stretchToPaper ? targetHeight : sourceHeight * scale;
-    targetPage.drawPage(embedded, {
-      x: (targetWidth - drawWidth) / 2,
-      y: (targetHeight - drawHeight) / 2,
-      width: drawWidth,
-      height: drawHeight
-    });
+    const shouldRotate = Boolean(paperSpec.rotateLandscape && sourceWidth > sourceHeight && targetHeight > targetWidth);
+    const sourceBoxWidth = shouldRotate ? sourceHeight : sourceWidth;
+    const sourceBoxHeight = shouldRotate ? sourceWidth : sourceHeight;
+    const scale = Math.min(targetWidth / sourceBoxWidth, targetHeight / sourceBoxHeight);
+    const drawWidth = sourceWidth * scale;
+    const drawHeight = sourceHeight * scale;
+    const visualWidth = sourceBoxWidth * scale;
+    const visualHeight = sourceBoxHeight * scale;
+    const visualX = (targetWidth - visualWidth) / 2;
+    const visualY = (targetHeight - visualHeight) / 2;
+    if (shouldRotate) {
+      targetPage.drawPage(embedded, {
+        x: visualX + drawHeight,
+        y: visualY,
+        width: drawWidth,
+        height: drawHeight,
+        rotate: degrees(90)
+      });
+    } else {
+      targetPage.drawPage(embedded, {
+        x: visualX,
+        y: visualY,
+        width: drawWidth,
+        height: drawHeight
+      });
+    }
   }
   return Buffer.from(await output.save());
 }
