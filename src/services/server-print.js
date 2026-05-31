@@ -255,9 +255,10 @@ async function resizePdfToPaper(pdfBuffer, paperSpec) {
     const { width: sourceWidth, height: sourceHeight } = sourcePage.getSize();
     const targetPage = output.addPage([targetWidth, targetHeight]);
     const embedded = await output.embedPage(sourcePage);
-    const scale = Math.min(targetWidth / sourceWidth, targetHeight / sourceHeight);
-    const drawWidth = sourceWidth * scale;
-    const drawHeight = sourceHeight * scale;
+    const stretchToPaper = paperSpec.value !== "a4_document";
+    const scale = stretchToPaper ? 1 : Math.min(targetWidth / sourceWidth, targetHeight / sourceHeight);
+    const drawWidth = stretchToPaper ? targetWidth : sourceWidth * scale;
+    const drawHeight = stretchToPaper ? targetHeight : sourceHeight * scale;
     targetPage.drawPage(embedded, {
       x: (targetWidth - drawWidth) / 2,
       y: (targetHeight - drawHeight) / 2,
