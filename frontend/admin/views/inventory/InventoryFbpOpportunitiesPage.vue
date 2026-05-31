@@ -26,6 +26,9 @@ const barcodePrintPresets = [
   { label: "FBP 面单 72mm x 130mm", value: "fbp_label_72x130", printer: "label", printSettings: "fit,portrait,monochrome,paper=72mm x 130mm" },
   { label: "订单面单 76mm x 130mm", value: "order_label_76x130", printer: "label", printSettings: "fit,portrait,monochrome,paper=76mm x 130mm" }
 ];
+barcodePrintPresets[0].printSettings = "noscale,portrait,monochrome,paper=70mm*30mm";
+barcodePrintPresets[1].printSettings = "noscale,portrait,monochrome,paper=72mm x 130mm";
+barcodePrintPresets[2].printSettings = "noscale,portrait,monochrome,paper=76mm x 130mm";
 const barcodePreview = reactive({
   visible: false,
   loading: false,
@@ -427,6 +430,8 @@ async function directPrintBarcodePreview() {
       filename: barcodePreview.filename || "ozon-barcodes.pdf",
       printer: preset.printer,
       print_settings: preset.printSettings,
+      preset: preset.value,
+      paper_size: preset.value,
       source: "fbp-barcode-preview"
     });
     barcodePreview.helperStatus = "已发送到打印机";

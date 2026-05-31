@@ -379,6 +379,8 @@ export async function bulkPrintOrders(orderIds = [], options = {}) {
     order_ids: ids,
     printer: options.printer || "label",
     print_settings: options.printSettings || options.print_settings || "fit",
+    preset: options.preset || options.paperSize || options.paper_size || "",
+    paper_size: options.paperSize || options.paper_size || options.preset || "",
     copies: options.copies || 1,
     require_all: true
   });

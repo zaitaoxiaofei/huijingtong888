@@ -10,10 +10,10 @@ import {
 import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 
 const MM_TO_PT = 72 / 25.4;
-const LABEL_LAYOUT_TYPE = "ozon_compact_vector_v1";
+const LABEL_LAYOUT_TYPE = "ozon_70x30_vector_v2";
 const THERMAL_LABEL = {
-  width: 121.88,
-  height: 70.86
+  width: 70 * MM_TO_PT,
+  height: 30 * MM_TO_PT
 };
 
 let productBarcodeLabelCacheReady = false;

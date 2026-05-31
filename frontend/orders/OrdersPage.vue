@@ -117,7 +117,7 @@ const printPresetOptions = [
     value: "order_label_76x130",
     printer: "label",
     paper: "76mm x 130mm",
-    scale: "fit",
+    scale: "noscale",
     orientation: "portrait",
     color: "monochrome"
   },
@@ -126,7 +126,7 @@ const printPresetOptions = [
     value: "fbp_label_72x130",
     printer: "label",
     paper: "72mm x 130mm",
-    scale: "fit",
+    scale: "noscale",
     orientation: "portrait",
     color: "monochrome"
   },
@@ -134,8 +134,8 @@ const printPresetOptions = [
     label: "条形码 70mm x 30mm",
     value: "barcode_70x30",
     printer: "label",
-    paper: "70mm x 30mm",
-    scale: "fit",
+    paper: "70mm*30mm",
+    scale: "noscale",
     orientation: "portrait",
     color: "monochrome"
   },
@@ -795,7 +795,7 @@ function openPrintDialog(orderIds = []) {
   printDialog.orderIds = ids;
   printDialog.preset = "order_label_76x130";
   printDialog.copies = 1;
-  printDialog.scale = "fit";
+  printDialog.scale = "noscale";
   printDialog.orientation = "portrait";
   printDialog.color = "monochrome";
   printDialog.visible = true;
@@ -845,6 +845,8 @@ async function submitPrintDialog() {
     await bulkPrint(ids, {
       printer: selectedPrintPreset.value.printer,
       printSettings: buildPrintSettings(),
+      preset: selectedPrintPreset.value.value,
+      paperSize: selectedPrintPreset.value.value,
       copies: printDialog.copies
     });
     printDialog.visible = false;
