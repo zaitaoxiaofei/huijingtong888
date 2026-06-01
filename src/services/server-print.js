@@ -11,7 +11,7 @@ const MM_TO_PT = 72 / 25.4;
 const LABEL_PAPER_SIZES = [
   { value: "order_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, fillPaper: true, aliases: ["72mm x 130mm", "72x130", "72*130", "order_label_76x130", "76mm x 130mm", "76x130", "76*130"] },
   { value: "fbp_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, fillPaper: true, aliases: ["72mm x 130mm", "72x130", "72*130"] },
-  { value: "barcode_70x30", widthMm: 70, heightMm: 30, paperName: "70mm*30mm", aliases: ["70mm x 30mm", "70mm*30mm", "70x30", "70*30"] }
+  { value: "barcode_70x30", widthMm: 70, heightMm: 30, paperName: "70mm*30mm", fillPaper: true, aliases: ["70mm x 30mm", "70mm*30mm", "70x30", "70*30", "30x70", "30*70"] }
 ];
 
 const jobs = [];
@@ -131,6 +131,13 @@ function normalizeLabelPrintSettings(printSettings = "", paperSpec = null) {
     .map((item) => item.trim())
     .filter((item) => item && !["portrait", "landscape"].includes(item.toLowerCase()))
     .join(",") || "noscale";
+}
+
+function printSettingsForPaper(printSettings = "", paperSpec = null) {
+  const base = normalizeLabelPrintSettings(printSettings, paperSpec).split(",").filter(Boolean);
+  const withoutPaper = base.filter((item) => !/^paper=/i.test(item));
+  if (paperSpec?.paperName) withoutPaper.push(`paper=${paperSpec.paperName}`);
+  return normalizePrintSettings(withoutPaper.join(",")) || "noscale";
 }
 
 function resolveJobPaperSpec({ paperSize = "", printSettings = "", meta = {} } = {}) {
@@ -261,11 +268,14 @@ async function resizePdfToPaper(pdfBuffer, paperSpec) {
   const output = await PDFDocument.create();
   const targetWidth = paperSpec.widthMm * MM_TO_PT;
   const targetHeight = paperSpec.heightMm * MM_TO_PT;
+  const debugPages = [];
   for (const sourcePage of source.getPages()) {
     const { width: sourceWidth, height: sourceHeight } = sourcePage.getSize();
     const targetPage = output.addPage([targetWidth, targetHeight]);
     const shouldRotate = Boolean(paperSpec.rotateLandscape && sourceWidth > sourceHeight && targetHeight > targetWidth);
-    const cropBox = paperSpec.fillPaper
+    const sourceWidthMm = sourceWidth / MM_TO_PT;
+    const shouldFillPaper = Boolean(paperSpec.fillPaper && (paperSpec.value === "barcode_70x30" || sourceWidthMm >= 100));
+    const cropBox = shouldFillPaper
       ? coverCropBox(sourceWidth, sourceHeight, shouldRotate ? targetHeight / targetWidth : targetWidth / targetHeight)
       : { left: 0, bottom: 0, right: sourceWidth, top: sourceHeight };
     const cropWidth = cropBox.right - cropBox.left;
@@ -280,6 +290,14 @@ async function resizePdfToPaper(pdfBuffer, paperSpec) {
     const visualHeight = sourceBoxHeight * scale;
     const visualX = (targetWidth - visualWidth) / 2;
     const visualY = (targetHeight - visualHeight) / 2;
+    debugPages.push({
+      source_mm: [roundMm(sourceWidth), roundMm(sourceHeight)],
+      crop_mm: [roundMm(cropWidth), roundMm(cropHeight)],
+      output_mm: [paperSpec.widthMm, paperSpec.heightMm],
+      visual_mm: [roundMm(visualWidth), roundMm(visualHeight)],
+      rotated: shouldRotate,
+      fill: shouldFillPaper
+    });
     if (shouldRotate) {
       targetPage.drawPage(embedded, {
         x: visualX + drawHeight,
@@ -297,7 +315,28 @@ async function resizePdfToPaper(pdfBuffer, paperSpec) {
       });
     }
   }
+  console.log(`[server-print] transform ${paperSpec.value} ${JSON.stringify(debugPages)}`);
   return Buffer.from(await output.save());
+}
+
+async function effectivePaperSpecForPdf(pdfBuffer, requestedPaperSpec = null) {
+  if (!requestedPaperSpec || !["order_label_72x130", "fbp_label_72x130"].includes(requestedPaperSpec.value)) {
+    return requestedPaperSpec;
+  }
+  const source = await PDFDocument.load(pdfBuffer);
+  const sizes = source.getPages().map((page) => {
+    const { width, height } = page.getSize();
+    return { widthMm: width / MM_TO_PT, heightMm: height / MM_TO_PT };
+  });
+  const isSmallLabel = sizes.length > 0 && sizes.every((item) => item.widthMm <= 80 && item.heightMm <= 60);
+  if (!isSmallLabel) return requestedPaperSpec;
+  const smallSpec = paperSpecByValue("barcode_70x30") || requestedPaperSpec;
+  console.log(`[server-print] auto paper ${requestedPaperSpec.value}->${smallSpec.value} ${JSON.stringify(sizes.map((item) => [Math.round(item.widthMm * 100) / 100, Math.round(item.heightMm * 100) / 100]))}`);
+  return smallSpec;
+}
+
+function roundMm(points) {
+  return Math.round((points / MM_TO_PT) * 100) / 100;
 }
 
 function coverCropBox(sourceWidth, sourceHeight, targetAspect) {
@@ -317,14 +356,16 @@ function coverCropBox(sourceWidth, sourceHeight, targetAspect) {
 
 async function executePdfJob(job, pdfBuffer) {
   assertPrintablePdf(pdfBuffer, job.printer);
-  const paperSpec = paperSpecByValue(job.meta?.paper_size);
+  const requestedPaperSpec = paperSpecByValue(job.meta?.paper_size);
+  const paperSpec = await effectivePaperSpecForPdf(pdfBuffer, requestedPaperSpec);
+  const printSettings = printSettingsForPaper(job.print_settings, paperSpec);
   const printableBuffer = paperSpec ? await resizePdfToPaper(pdfBuffer, paperSpec) : pdfBuffer;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ozon-print-"));
   const pdfPath = path.join(dir, job.filename);
   fs.writeFileSync(pdfPath, printableBuffer);
   try {
     for (let index = 0; index < job.copies; index += 1) {
-      await printPdfFileWindows(pdfPath, job.printer, job.print_settings);
+      await printPdfFileWindows(pdfPath, job.printer, printSettings);
     }
   } finally {
     const cleanupTimer = setTimeout(() => fs.rm(dir, { recursive: true, force: true }, () => {}), 5 * 60_000);
