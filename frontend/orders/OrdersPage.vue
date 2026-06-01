@@ -131,7 +131,7 @@ const printPresetOptions = [
     color: "monochrome"
   },
   {
-    label: "条形码 70mm x 30mm",
+    label: "小面单 / 小标签 70mm x 30mm",
     value: "barcode_70x30",
     printer: "label",
     paper: "70mm*30mm",

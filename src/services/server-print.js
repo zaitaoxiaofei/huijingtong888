@@ -196,7 +196,7 @@ function normalizeCopies(value = 1) {
   return Math.min(999, Math.max(1, Number.isFinite(copies) ? copies : 1));
 }
 
-function createJob({ source = "manual", printer = "label", printSettings = "fit", copies = 1, filename = "print-job.pdf", userId = null, meta = {}, paperSize = "" }) {
+function createJob({ source = "manual", printer = "label", printSettings = "fit", copies = 1, filename = "print-job.pdf", userId = null, meta = {}, paperSize = "", autoPaper = false }) {
   const normalizedSettings = normalizePaperSetting(printSettings);
   const paperSpec = resolveJobPaperSpec({ paperSize, printSettings: normalizedSettings, meta });
   return rememberJob({
@@ -210,7 +210,8 @@ function createJob({ source = "manual", printer = "label", printSettings = "fit"
     user_id: userId,
     meta: {
       ...meta,
-      paper_size: paperSpec?.value || meta?.paper_size || meta?.paperSize || ""
+      paper_size: paperSpec?.value || meta?.paper_size || meta?.paperSize || "",
+      auto_paper: Boolean(autoPaper || meta?.auto_paper || meta?.autoPaper)
     },
     status: "queued",
     error: "",
@@ -333,8 +334,8 @@ async function resizePdfToPaper(pdfBuffer, paperSpec) {
   return Buffer.from(await output.save());
 }
 
-async function effectivePaperSpecForPdf(pdfBuffer, requestedPaperSpec = null) {
-  if (!requestedPaperSpec || !["order_label_72x130", "fbp_label_72x130"].includes(requestedPaperSpec.value)) {
+async function effectivePaperSpecForPdf(pdfBuffer, requestedPaperSpec = null, autoPaper = false) {
+  if (!autoPaper || !requestedPaperSpec || !["order_label_72x130", "fbp_label_72x130"].includes(requestedPaperSpec.value)) {
     return requestedPaperSpec;
   }
   const source = await PDFDocument.load(pdfBuffer);
@@ -431,7 +432,7 @@ function coverCropBox(sourceWidth, sourceHeight, targetAspect) {
 async function executePdfJob(job, pdfBuffer) {
   assertPrintablePdf(pdfBuffer, job.printer);
   const requestedPaperSpec = paperSpecByValue(job.meta?.paper_size);
-  const paperSpec = await effectivePaperSpecForPdf(pdfBuffer, requestedPaperSpec);
+  const paperSpec = await effectivePaperSpecForPdf(pdfBuffer, requestedPaperSpec, job.meta?.auto_paper);
   const printSettings = printSettingsForPaper(job.print_settings, paperSpec);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ozon-print-"));
   const pdfPath = path.join(dir, job.filename);
@@ -485,7 +486,8 @@ export async function serverPrintPdf(body = {}, userId = null) {
       ...(body.meta || {}),
       paper_size: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || body.meta?.paper_size || ""
     },
-    paperSize: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || ""
+    paperSize: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || "",
+    autoPaper: body.auto_paper === true || body.autoPaper === true
   });
   const pdfBuffer = Buffer.from(pdfBase64, "base64");
   return enqueue(job, (activeJob) => executePdfJob(activeJob, pdfBuffer));
@@ -512,7 +514,8 @@ export async function serverPrintOrderLabels(body = {}, userId = null, services)
       count: label.count,
       paper_size: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || ""
     },
-    paperSize: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || ""
+    paperSize: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || "",
+    autoPaper: body.auto_paper === true || body.autoPaper === true
   });
   const printedJob = await enqueue(job, (activeJob) => executePdfJob(activeJob, label.buffer));
   if (label.printed_ids?.length) {

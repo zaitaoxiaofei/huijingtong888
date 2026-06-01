@@ -6,7 +6,6 @@ import { InfoFilled, Plus, Search, UploadFilled } from "@element-plus/icons-vue"
 import { apiClient } from "../../utils/api";
 import { uploadCropperImage, uploadListingMedia, withImageToken } from "../../api/tools/imageCropper";
 import OzonCategorySelect from "../../components/listing/OzonCategorySelect.vue";
-import ProductImagePreview from "../../components/ProductImagePreview.vue";
 
 const loading = ref(false);
 const searchingSku = ref(false);
@@ -951,6 +950,126 @@ function variantDictionaryOptions(field = {}) {
     .filter(Boolean);
 }
 
+const SPEC_TRANSLATIONS = [
+  ["универсальный", "通用"],
+  ["универсальная", "通用"],
+  ["универсальное", "通用"],
+  ["комплект", "套装"],
+  ["набор", "套装"],
+  ["левый", "左"],
+  ["левая", "左"],
+  ["правый", "右"],
+  ["правая", "右"],
+  ["передний", "前"],
+  ["передняя", "前"],
+  ["задний", "后"],
+  ["задняя", "后"]
+];
+
+function translateSpecValue(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  let translated = text;
+  SPEC_TRANSLATIONS.forEach(([source, target]) => {
+    translated = translated.replace(new RegExp(source, "gi"), target);
+  });
+  return translated;
+}
+
+function variantSpecOptions(row = {}) {
+  const values = [row.spec, ...variantDictionaryOptions(variantSpecAttribute.value || {})]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return Array.from(new Set(values)).map((value) => ({
+    value,
+    label: translateSpecValue(value) || value
+  }));
+}
+
+const COLOR_TRANSLATIONS = [
+  ["черно-серый", "黑灰"],
+  ["черно-белый", "黑白"],
+  ["бело-черный", "白黑"],
+  ["серебристый", "银色"],
+  ["золотистый", "金色"],
+  ["прозрачный", "透明"],
+  ["разноцветный", "多色"],
+  ["черный", "黑色"],
+  ["чёрный", "黑色"],
+  ["белый", "白色"],
+  ["серый", "灰色"],
+  ["красный", "红色"],
+  ["синий", "蓝色"],
+  ["голубой", "浅蓝色"],
+  ["зеленый", "绿色"],
+  ["зелёный", "绿色"],
+  ["желтый", "黄色"],
+  ["жёлтый", "黄色"],
+  ["оранжевый", "橙色"],
+  ["розовый", "粉色"],
+  ["фиолетовый", "紫色"],
+  ["коричневый", "棕色"],
+  ["бежевый", "米色"],
+  ["бордовый", "酒红色"],
+  ["black", "黑色"],
+  ["white", "白色"],
+  ["gray", "灰色"],
+  ["grey", "灰色"],
+  ["red", "红色"],
+  ["blue", "蓝色"],
+  ["green", "绿色"],
+  ["yellow", "黄色"],
+  ["orange", "橙色"],
+  ["pink", "粉色"],
+  ["purple", "紫色"],
+  ["brown", "棕色"],
+  ["beige", "米色"]
+];
+
+function translateColorToken(token = "") {
+  const text = String(token || "").trim();
+  if (!text) return "";
+  const normalized = text.toLowerCase();
+  const exact = COLOR_TRANSLATIONS.find(([source]) => normalized === source);
+  if (exact) return exact[1];
+  const found = COLOR_TRANSLATIONS.find(([source]) => normalized.includes(source));
+  return found ? found[1] : text;
+}
+
+function translateColorValue(value = "") {
+  const parts = normalizeColorValues(value);
+  if (!parts.length) return "";
+  const translated = parts.map(translateColorToken).filter(Boolean);
+  return Array.from(new Set(translated)).join(" / ");
+}
+
+function normalizeColorValues(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+  return String(value || "")
+    .split(/\s*[,，;；]\s*/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeColorForPayload(row = {}) {
+  const values = normalizeColorValues(row.color_values?.length ? row.color_values : row.color);
+  return values.join(", ");
+}
+
+function variantColorOptions(row = {}) {
+  const values = [...normalizeColorValues(row.color), ...normalizeColorValues(row.color_values), ...variantDictionaryOptions(variantColorAttribute.value || {})];
+  return Array.from(new Set(values.filter(Boolean))).map((value) => ({
+    value,
+    label: translateColorValue(value) || value
+  }));
+}
+
+function syncVariantColor(row) {
+  if (!row) return;
+  row.color_values = normalizeColorValues(row.color_values);
+  row.color = normalizeColorForPayload(row);
+}
+
 function ensureVariantDictionaryOptions(field = {}, visible = true) {
   if (!field) return;
   ensureAttributeValuesLoaded(field, visible);
@@ -1149,10 +1268,23 @@ function normalizeEditorImages(images) {
   }));
 }
 
+function normalizeVariantVideoFields(item = {}) {
+  const coverLinks = normalizeVariantLinks(item?.video_cover_urls || item?.cover_video_urls || item?.cover_video || "");
+  const skuLinks = normalizeVariantLinks(item?.video_urls || item?.videos || item?.video_url || "");
+  const cover = coverLinks[0] || (skuLinks.length > 1 ? skuLinks[0] : "");
+  const video = skuLinks.find((url) => url && url !== cover) || (!coverLinks.length ? skuLinks[0] : "");
+  return {
+    video_cover_urls: cover ? [cover] : [],
+    video_urls: video ? [video] : []
+  };
+}
+
 function normalizeEditorVariants(variants) {
   const colorAttribute = findVariantDictionaryAttribute("color");
   const specAttribute = findVariantDictionaryAttribute("spec", { excludeIds: [colorAttribute?.attribute_id] });
-  return (Array.isArray(variants) ? variants : []).map((item, index) => ({
+  return (Array.isArray(variants) ? variants : []).map((item, index) => {
+    const videoFields = normalizeVariantVideoFields(item);
+    return ({
     id: item?.id || `variant-${Date.now().toString(36)}-${index}`,
     sku: item?.sku || item?.source_sku || "",
     source_sku: item?.source_sku || item?.sku || "",
@@ -1161,13 +1293,14 @@ function normalizeEditorVariants(variants) {
     name: item?.name || item?.title || templateEditor.title || "",
     title: item?.title || item?.name || templateEditor.title || "",
     images: normalizeEditorImages(item?.images || (item?.primary_image ? [item.primary_image].concat(item?.images || []) : [])),
-    video_cover_urls: normalizeVariantLinks(item?.video_cover_urls || item?.cover_video_urls || item?.cover_video || ""),
-    video_urls: normalizeVariantLinks(item?.video_urls || item?.videos || item?.video_url || ""),
+    video_cover_urls: videoFields.video_cover_urls,
+    video_urls: videoFields.video_urls,
     barcode: item?.barcode || "",
     cost_price: Number(item?.cost_price || 0),
     price: Number(item?.price || 0),
     old_price: Number(item?.old_price || 0),
     color: item?.color || extractVariantDynamicAttribute(item, colorAttribute, "color") || "",
+    color_values: normalizeColorValues(item?.color_values || item?.colors || item?.color || extractVariantDynamicAttribute(item, colorAttribute, "color") || ""),
     spec: item?.spec || extractVariantDynamicAttribute(item, specAttribute, "spec") || "",
     main_tags: splitTagValue(item?.main_tags || item?.hashtags || item?.tags || ""),
     weight_g: Number(item?.weight_g || templateEditor.weight_g || 0),
@@ -1177,7 +1310,8 @@ function normalizeEditorVariants(variants) {
     stock: Number(item?.stock || 0),
     dynamic_attributes: item?.dynamic_attributes || {},
     sort_order: Number(item?.sort_order || index + 1)
-  }));
+  });
+  });
 }
 
 function normalizeVariantDimensionMm(mmValue, legacyMmValue, cmValue, fallbackCmValue) {
@@ -1212,24 +1346,31 @@ async function uploadTemplateImagesRequest(options) {
 }
 
 function uploadVariantImagesRequest(row) {
-  return (options) => uploadMediaIntoList(options, row.images, "image");
+  return (options) => uploadMediaIntoList(options, ensureVariantOwnImages(row), "image", (image) => {
+    const url = variantImageUrl(image);
+    if (variantImageEditor.visible && url && !variantImageEditor.selectedUrls.includes(url)) {
+      variantImageEditor.selectedUrls.push(url);
+    }
+  });
 }
 
 function uploadVariantVideoRequest(row, field, expectedType = "video") {
-  return (options) => uploadMediaIntoLinks(options, row[field], expectedType);
+  return (options) => uploadMediaIntoLinks(options, ensureVariantLinks(row, field), expectedType);
 }
 
-async function uploadMediaIntoList(options, targetList, expectedType) {
+async function uploadMediaIntoList(options, targetList, expectedType, onAdded) {
   try {
     uploadingImage.value = true;
     const result = await uploadListingMedia(options.file);
     if (expectedType && result.mediaType !== expectedType) throw new Error(expectedType === "image" ? "请上传图片文件" : "请上传视频文件");
-    targetList.push({
+    const image = {
       url: result.publishUrl || result.url || result.previewUrl,
       previewUrl: result.previewUrl || result.url,
       name: result.name || options.file?.name || "",
       sort_order: targetList.length + 1
-    });
+    };
+    targetList.push(image);
+    onAdded?.(image);
     options.onSuccess?.(result);
     ElMessage.success("素材已上传");
   } catch (error) {
@@ -1245,7 +1386,7 @@ async function uploadMediaIntoLinks(options, targetList, expectedType) {
     uploadingImage.value = true;
     const result = await uploadListingMedia(options.file);
     if (expectedType && result.mediaType !== expectedType) throw new Error(expectedType === "image" ? "请上传图片文件" : "请上传视频文件");
-    targetList.push(result.publishUrl || result.url || result.previewUrl);
+    targetList.splice(0, targetList.length, result.publishUrl || result.url || result.previewUrl);
     options.onSuccess?.(result);
     ElMessage.success("素材已上传");
   } catch (error) {
@@ -1285,6 +1426,7 @@ function addVariantRow() {
     price: Number(templateEditor.price_value || 0),
     old_price: Number(templateEditor.old_price || 0),
     color: templateEditor.color || "",
+    color_values: normalizeColorValues(templateEditor.color || ""),
     spec: templateEditor.spec || "",
     main_tags: fixedForm.value.tags || [],
     weight_g: Number(templateEditor.weight_g || 0),
@@ -1313,7 +1455,8 @@ function duplicateVariantRow(row) {
     images: Array.isArray(row.images) ? row.images.map((item) => ({ ...item })) : [],
     video_cover_urls: Array.isArray(row.video_cover_urls) ? row.video_cover_urls.slice() : [],
     video_urls: Array.isArray(row.video_urls) ? row.video_urls.slice() : [],
-    main_tags: Array.isArray(row.main_tags) ? row.main_tags.slice() : []
+    main_tags: Array.isArray(row.main_tags) ? row.main_tags.slice() : [],
+    color_values: normalizeColorValues(row.color_values?.length ? row.color_values : row.color)
   };
   if (index >= 0) templateEditor.variants.splice(index + 1, 0, copy);
   else templateEditor.variants.push(copy);
@@ -1399,11 +1542,28 @@ function applyFirstVariantField(field) {
   const first = templateEditor.variants[0];
   if (!first) return;
   const value = cloneVariantValue(first[field]);
+  const firstColorValues = field === "color" ? cloneVariantValue(first.color_values || normalizeColorValues(first.color)) : null;
   templateEditor.variants.forEach((row, index) => {
     if (index === 0) return;
     row[field] = cloneVariantValue(value);
+    if (field === "color") {
+      row.color_values = cloneVariantValue(firstColorValues);
+      syncVariantColor(row);
+    }
   });
   ElMessage.success("已同步首行内容");
+}
+
+function doubleVariantPriceField(field) {
+  let changed = 0;
+  templateEditor.variants.forEach((row) => {
+    const base = field === "old_price" ? Number(row.price || 0) : Number(row[field] || 0);
+    if (!Number.isFinite(base) || base <= 0) return;
+    row[field] = Number((base * 2).toFixed(2));
+    changed += 1;
+  });
+  if (changed) ElMessage.success(`已处理 ${changed} 行`);
+  else ElMessage.warning("没有可处理的价格");
 }
 
 async function runVariantColumnAi(field) {
@@ -1451,6 +1611,10 @@ function applyVariantColumnAiResult(field, result = {}) {
       const value = item[field] ?? item.value ?? item.title ?? item.name ?? item.color ?? item.spec ?? item.tags ?? item.main_tags;
       if (value !== undefined && value !== null && value !== "") {
         row[field] = field === "main_tags" ? normalizeAiTags(value) : value;
+        if (field === "color") {
+          row.color_values = normalizeColorValues(value);
+          syncVariantColor(row);
+        }
         changed += 1;
       }
     });
@@ -1461,6 +1625,10 @@ function applyVariantColumnAiResult(field, result = {}) {
   templateEditor.variants.forEach((row, index) => {
     const value = lines[index] || lines[0];
     row[field] = field === "main_tags" ? normalizeAiTags(value) : value;
+    if (field === "color") {
+      row.color_values = normalizeColorValues(value);
+      syncVariantColor(row);
+    }
     changed += 1;
   });
   return changed;
@@ -1601,7 +1769,9 @@ function variantImageLibrary() {
 function confirmVariantImageEditor() {
   if (!variantImageEditor.row) return;
   const byUrl = new Map(variantImageLibrary().map((item) => [variantImageUrl(item), item]));
-  variantImageEditor.row.images = variantImageEditor.selectedUrls.map((url, index) => ({
+  const ownUrls = ensureVariantOwnImages(variantImageEditor.row).map((item) => variantImageUrl(item)).filter(Boolean);
+  const finalUrls = Array.from(new Set([...ownUrls, ...variantImageEditor.selectedUrls]));
+  variantImageEditor.row.images = finalUrls.map((url, index) => ({
     ...(byUrl.get(url) || {}),
     url,
     sort_order: index + 1
@@ -1615,9 +1785,17 @@ function addVariantImageLink() {
   images.push({ url: "", name: "", sort_order: images.length + 1 });
 }
 
+function syncVariantImageLink(image) {
+  const url = variantImageUrl(image);
+  if (url && !variantImageEditor.selectedUrls.includes(url)) variantImageEditor.selectedUrls.push(url);
+}
+
 function removeVariantImage(index) {
   const images = ensureVariantOwnImages(variantImageEditor.row);
-  images.splice(index, 1);
+  const [removed] = images.splice(index, 1);
+  const url = variantImageUrl(removed);
+  const selectedIndex = variantImageEditor.selectedUrls.indexOf(url);
+  if (selectedIndex >= 0) variantImageEditor.selectedUrls.splice(selectedIndex, 1);
 }
 
 function useTemplateImagesForVariant() {
@@ -1636,15 +1814,16 @@ function variantMediaRoleLabel(index, total) {
 function ensureVariantLinks(row, field) {
   if (!row) return [];
   if (!Array.isArray(row[field])) row[field] = normalizeVariantLinks(row[field] || "");
+  if ((field === "video_cover_urls" || field === "video_urls") && row[field].length > 1) row[field].splice(1);
   return row[field];
 }
 
 function variantPreviewVideos(row, field) {
-  return ensureVariantLinks(row, field).filter(Boolean).slice(0, 2);
+  return ensureVariantLinks(row, field).filter(Boolean).slice(0, 1);
 }
 
 function variantVideoOverflow(row, field) {
-  return Math.max(ensureVariantLinks(row, field).filter(Boolean).length - 2, 0);
+  return Math.max(ensureVariantLinks(row, field).filter(Boolean).length - 1, 0);
 }
 
 function openVariantVideoEditor(row, field, title) {
@@ -1656,13 +1835,13 @@ function openVariantVideoEditor(row, field, title) {
 }
 
 function addVariantVideoLink() {
-  ensureVariantLinks(variantVideoEditor.row, variantVideoEditor.field).push("");
+  const links = ensureVariantLinks(variantVideoEditor.row, variantVideoEditor.field);
+  if (!links.length) links.push("");
 }
 
 function setPrimaryVariantVideo(value) {
   const links = ensureVariantLinks(variantVideoEditor.row, variantVideoEditor.field);
-  if (links.length) links[0] = value;
-  else links.push(value);
+  links.splice(0, links.length, value);
 }
 
 function clearVariantVideos() {
@@ -1671,7 +1850,7 @@ function clearVariantVideos() {
 }
 
 function removeVariantVideoLink(index) {
-  ensureVariantLinks(variantVideoEditor.row, variantVideoEditor.field).splice(index, 1);
+  ensureVariantLinks(variantVideoEditor.row, variantVideoEditor.field).splice(0, 1);
 }
 
 function richContentImageUrl() {
@@ -2385,6 +2564,7 @@ function buildTemplatePayload() {
     .filter((item) => item.sku || item.name)
     .map((item) => ({
       ...item,
+      color: normalizeColorForPayload(item),
       title: variantFieldMode.title ? item.title : templateEditor.title,
       weight_g: variantFieldMode.weight ? item.weight_g : Number(templateEditor.weight_g || 0),
       length_mm: variantFieldMode.dimensions ? item.length_mm : cmToMm(templateEditor.length_cm),
@@ -2470,6 +2650,33 @@ function dedupeImages(images = []) {
   });
 }
 
+function ensureDraftFormFromTemplate() {
+  const firstVariant = templateEditor.variants.find((item) => item.name || item.title || item.sku) || {};
+  draftForm.template_id = draftForm.template_id || templateEditor.id || "";
+  draftForm.product_name = String(
+    draftForm.product_name
+    || templateEditor.title
+    || templateEditor.template_name
+    || firstVariant.title
+    || firstVariant.name
+    || firstVariant.sku
+    || ""
+  ).trim();
+  draftForm.sale_price = Number(draftForm.sale_price || templateEditor.price_value || firstVariant.price || 0);
+  draftForm.length_cm = Number(draftForm.length_cm || templateEditor.length_cm || 0);
+  draftForm.width_cm = Number(draftForm.width_cm || templateEditor.width_cm || 0);
+  draftForm.height_cm = Number(draftForm.height_cm || templateEditor.height_cm || 0);
+  draftForm.weight_g = Number(draftForm.weight_g || templateEditor.weight_g || 0);
+  draftForm.color = draftForm.color || templateEditor.color || normalizeColorForPayload(firstVariant);
+  draftForm.spec = draftForm.spec || templateEditor.spec || firstVariant.spec || "";
+  draftForm.quantity = Number(draftForm.quantity || templateEditor.quantity || firstVariant.stock || 0);
+  if (!draftForm.source_images.length) {
+    const variantImages = templateEditor.variants.flatMap((variant) => Array.isArray(variant.images) ? variant.images : []);
+    const images = templateEditor.images.length ? templateEditor.images : variantImages;
+    draftForm.source_images = dedupeImages(images).map((item) => ({ name: item.name || item.url, url: item.url }));
+  }
+}
+
 async function uploadImageRequest(options) {
   uploadingImage.value = true;
   try {
@@ -2490,9 +2697,14 @@ async function uploadImageRequest(options) {
 }
 
 async function createDraft() {
+  ensureDraftFormFromTemplate();
   if (!draftForm.template_id) {
     ElMessage.warning("请先添加 SKU 模板");
     state.step = "copy";
+    return;
+  }
+  if (!draftForm.product_name) {
+    ElMessage.warning("请先填写标题或 SKU 名称，再保存草稿");
     return;
   }
   creatingDraft.value = true;
@@ -2514,6 +2726,8 @@ async function createDraft() {
     }
     state.step = "shops";
     ElMessage.success("上架资料已保存");
+  } catch (error) {
+    ElMessage.error(error.message || "保存草稿失败");
   } finally {
     creatingDraft.value = false;
   }
@@ -2593,7 +2807,7 @@ onMounted(loadAll);
         <el-button type="success" :loading="aiGenerating" @click="runFieldAi({ name: 'all', type: 'attributeFill' })">AI 一键生成文案</el-button>
         <el-button @click="validatePublishPayload">检查上架</el-button>
         <el-button @click="saveTemplateEditor">创建模板</el-button>
-        <el-button @click="createDraft">保存草稿</el-button>
+        <el-button :loading="creatingDraft" @click="createDraft">保存草稿</el-button>
         <el-button type="primary" @click="validatePublishPayload">准备发布</el-button>
         <el-button type="danger" :loading="publishingToOzon" @click="publishTemplateToOzon">提交 Ozon</el-button>
       </div>
@@ -2836,7 +3050,13 @@ onMounted(loadAll);
               >
                 <el-table-column type="selection" width="46" fixed="left" />
                 <el-table-column type="index" label="序号" width="64" fixed="left" align="center" />
-                <el-table-column label="SKU 名称" width="230" fixed="left">
+                <el-table-column width="230" fixed="left">
+                  <template #header>
+                    <div class="variant-col-header">
+                      <span>SKU 名称</span>
+                      <el-button link size="small" @click="applyFirstVariantField('name')">同首行</el-button>
+                    </div>
+                  </template>
                   <template #default="{ row }">
                     <div class="variant-name-cell">
                       <strong>{{ row.source_sku ? `[SKU:${row.source_sku}]` : row.sku || "新变体" }}</strong>
@@ -2880,12 +3100,6 @@ onMounted(loadAll);
                         <span v-if="variantImageOverflow(row)" class="variant-image-more">+{{ variantImageOverflow(row) }}</span>
                       </div>
                       <button v-else type="button" class="variant-media-empty" @click.stop="openVariantImageEditor(row)">图片</button>
-                      <div class="variant-media-actions">
-                        <el-button link size="small" @click.stop="openVariantImageEditor(row)">编辑</el-button>
-                        <el-upload multiple :show-file-list="false" accept="image/jpeg,image/png,image/webp" :http-request="uploadVariantImagesRequest(row)">
-                          <el-button link size="small" :loading="uploadingImage" @click.stop>上传</el-button>
-                        </el-upload>
-                      </div>
                     </div>
                   </template>
                 </el-table-column>
@@ -2909,12 +3123,6 @@ onMounted(loadAll);
                         <span v-if="variantVideoOverflow(row, 'video_cover_urls')" class="variant-image-more">+{{ variantVideoOverflow(row, 'video_cover_urls') }}</span>
                       </div>
                       <button v-else type="button" class="variant-video-empty-chip" @click.stop="openVariantVideoEditor(row, 'video_cover_urls', '视频封面编辑')">封面</button>
-                      <div class="variant-media-actions">
-                        <el-button link size="small" @click.stop="openVariantVideoEditor(row, 'video_cover_urls', '视频封面编辑')">编辑</el-button>
-                        <el-upload class="inline-upload" :show-file-list="false" accept="video/mp4,video/quicktime,video/webm" :http-request="uploadVariantVideoRequest(row, 'video_cover_urls', 'video')">
-                          <el-button link size="small" :loading="uploadingImage" @click.stop>上传</el-button>
-                        </el-upload>
-                      </div>
                     </div>
                   </template>
                 </el-table-column>
@@ -2938,12 +3146,6 @@ onMounted(loadAll);
                         <span v-if="variantVideoOverflow(row, 'video_urls')" class="variant-image-more">+{{ variantVideoOverflow(row, 'video_urls') }}</span>
                       </div>
                       <button v-else type="button" class="variant-video-empty-chip" @click.stop="openVariantVideoEditor(row, 'video_urls', 'SKU视频编辑')">视频</button>
-                      <div class="variant-media-actions">
-                        <el-button link size="small" @click.stop="openVariantVideoEditor(row, 'video_urls', 'SKU视频编辑')">编辑</el-button>
-                        <el-upload class="inline-upload" :show-file-list="false" accept="video/mp4,video/quicktime,video/webm" :http-request="uploadVariantVideoRequest(row, 'video_urls', 'video')">
-                          <el-button link size="small" :loading="uploadingImage" @click.stop>上传</el-button>
-                        </el-upload>
-                      </div>
                     </div>
                   </template>
                 </el-table-column>
@@ -3023,16 +3225,20 @@ onMounted(loadAll);
                   </template>
                   <template #default="{ row }">
                     <el-select
-                      v-model="row.color"
+                      v-model="row.color_values"
                       size="small"
+                      multiple
                       filterable
                       allow-create
                       clearable
                       default-first-option
+                      collapse-tags
+                      collapse-tags-tooltip
                       :loading="attributeValueLoading[attributeFieldKey(variantColorAttribute || {})]"
                       @visible-change="ensureVariantDictionaryOptions(variantColorAttribute, $event)"
+                      @change="syncVariantColor(row)"
                     >
-                      <el-option v-for="option in variantDictionaryOptions(variantColorAttribute || {})" :key="option" :label="option" :value="option" />
+                      <el-option v-for="option in variantColorOptions(row)" :key="option.value" :label="option.label" :value="option.value" />
                     </el-select>
                   </template>
                 </el-table-column>
@@ -3055,7 +3261,7 @@ onMounted(loadAll);
                       :loading="attributeValueLoading[attributeFieldKey(variantSpecAttribute || {})]"
                       @visible-change="ensureVariantDictionaryOptions(variantSpecAttribute, $event)"
                     >
-                      <el-option v-for="option in variantDictionaryOptions(variantSpecAttribute || {})" :key="option" :label="option" :value="option" />
+                      <el-option v-for="option in variantSpecOptions(row)" :key="option.value" :label="option.label" :value="option.value" />
                     </el-select>
                   </template>
                 </el-table-column>
@@ -3064,6 +3270,7 @@ onMounted(loadAll);
                     <div class="variant-col-header">
                       <span>售价</span>
                       <el-button link size="small" @click="applyFirstVariantField('price')">同首行</el-button>
+                      <el-button link size="small" @click="doubleVariantPriceField('price')">*2</el-button>
                     </div>
                   </template>
                   <template #default="{ row }">
@@ -3078,6 +3285,7 @@ onMounted(loadAll);
                     <div class="variant-col-header">
                       <span>划线价</span>
                       <el-button link size="small" @click="applyFirstVariantField('old_price')">同首行</el-button>
+                      <el-button link size="small" @click="doubleVariantPriceField('old_price')">*2</el-button>
                     </div>
                   </template>
                   <template #default="{ row }">
@@ -3176,9 +3384,11 @@ onMounted(loadAll);
           </div>
           <div class="variant-image-grid selected-grid">
             <div v-for="(image, imageIndex) in ensureVariantOwnImages(variantImageEditor.row)" :key="`${image.url}-${imageIndex}`" class="variant-image-card selected-card">
-              <ProductImagePreview v-if="image.url" :src="image.previewUrl || image.url" :preview-list="variantPreviewList(variantImageEditor.row)" size="square" fit="cover" />
+              <button v-if="image.url" type="button" class="variant-selected-image" @click="toggleVariantImageSelection(image)">
+                <img :src="withImageToken(image.previewUrl || image.url)" :alt="image.name || 'SKU image'" loading="lazy" />
+              </button>
               <div v-else class="variant-image-empty">图片链接</div>
-              <el-input v-model="image.url" size="small" placeholder="https://..." />
+              <el-input v-model="image.url" size="small" placeholder="https://..." @change="syncVariantImageLink(image)" />
               <div class="variant-card-footer">
                 <el-tag size="small" effect="plain">{{ image.name || variantMediaRoleLabel(imageIndex, ensureVariantOwnImages(variantImageEditor.row).length) }}</el-tag>
                 <el-button link type="danger" @click="removeVariantImage(imageIndex)">删除</el-button>
@@ -3533,17 +3743,23 @@ onMounted(loadAll);
 .variant-image-editor { display: flex; flex-direction: column; gap: 12px; }
 .variant-editor-thumb { width: 58px; height: 58px; border-radius: 6px; border: 1px solid var(--el-border-color-light); background: var(--el-fill-color-light); }
 .variant-image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
-.variant-image-card { display: grid; gap: 8px; align-content: start; padding: 10px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-fill-color-extra-light); }
+.variant-image-card { display: grid; grid-template-rows: 1fr 32px 26px; gap: 8px; align-content: start; min-height: 0; padding: 10px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-fill-color-extra-light); overflow: hidden; }
 .variant-image-card :deep(.erp-image-preview--square) { width: 100%; min-width: 100%; max-width: 100%; height: auto; min-height: 0; max-height: none; aspect-ratio: 1; flex-basis: auto; border-radius: 6px; }
+.variant-selected-image { width: 100%; min-width: 0; aspect-ratio: 1; padding: 0; border: 1px solid var(--el-border-color-lighter); border-radius: 6px; overflow: hidden; background: var(--el-fill-color-light); cursor: pointer; }
+.variant-selected-image img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .variant-image-empty { display: grid; place-items: center; width: 100%; aspect-ratio: 1; border: 1px dashed var(--el-border-color); border-radius: 6px; color: var(--el-text-color-secondary); background: var(--el-bg-color); }
+.variant-image-card :deep(.el-input__wrapper) { min-height: 32px; }
+.variant-image-card :deep(.el-input__inner) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .variant-image-dialog :deep(.el-dialog) { max-width: calc(100vw - 96px); }
 .variant-image-dialog :deep(.el-dialog__body) { padding: 0; }
 .variant-image-workbench { display: grid; grid-template-columns: minmax(310px, 40%) minmax(420px, 1fr); min-height: 500px; max-height: calc(100vh - 240px); border-top: 1px solid var(--el-border-color-lighter); border-bottom: 1px solid var(--el-border-color-lighter); overflow: hidden; }
 .variant-image-panel { padding: 16px; overflow: auto; border-right: 1px solid var(--el-border-color-lighter); background: #fff; }
 .variant-image-tools { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
-.selected-grid { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); }
+.selected-grid { grid-template-columns: repeat(auto-fill, minmax(128px, 128px)); align-items: start; }
 .selected-card { border-color: #ded8ff; background: #fbfaff; }
-.variant-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.variant-card-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; }
+.variant-card-footer .el-tag { max-width: 100%; min-width: 0; overflow: hidden; }
+.variant-card-footer :deep(.el-tag__content) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .variant-image-library { padding: 16px; overflow: auto; background: #fff; }
 .library-tabs { display: flex; align-items: center; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--el-border-color-lighter); margin-bottom: 14px; }
 .library-tabs :deep(.el-tabs__header) { margin: 0; }
