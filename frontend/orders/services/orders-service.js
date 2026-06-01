@@ -381,6 +381,7 @@ export async function bulkPrintOrders(orderIds = [], options = {}) {
     print_settings: options.printSettings || options.print_settings || "fit",
     preset: options.preset || options.paperSize || options.paper_size || "",
     paper_size: options.paperSize || options.paper_size || options.preset || "",
+    orientation: options.orientation || "auto",
     auto_paper: options.autoPaper === true || options.auto_paper === true,
     copies: options.copies || 1,
     require_all: true

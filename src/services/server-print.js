@@ -146,6 +146,13 @@ function normalizeLabelPrintSettings(printSettings = "", paperSpec = null) {
     .join(",") || "noscale";
 }
 
+function orientationFromPrintSettings(printSettings = "") {
+  const parts = String(printSettings || "").split(",").map((item) => item.trim().toLowerCase());
+  if (parts.includes("landscape")) return "landscape";
+  if (parts.includes("portrait")) return "portrait";
+  return "auto";
+}
+
 function printSettingsForPaper(printSettings = "", paperSpec = null) {
   const base = normalizeLabelPrintSettings(printSettings, paperSpec).split(",").filter(Boolean);
   const withoutPaper = base.filter((item) => !/^paper=/i.test(item));
@@ -211,6 +218,7 @@ function createJob({ source = "manual", printer = "label", printSettings = "fit"
     meta: {
       ...meta,
       paper_size: paperSpec?.value || meta?.paper_size || meta?.paperSize || "",
+      orientation: meta?.orientation || orientationFromPrintSettings(normalizedSettings),
       auto_paper: Boolean(autoPaper || meta?.auto_paper || meta?.autoPaper)
     },
     status: "queued",
@@ -362,7 +370,16 @@ function thermalFitForPaper(paperSpec) {
   return paperSpec?.rasterFit || "contain";
 }
 
-async function rasterizePdfToThermalPdf(pdfBuffer, paperSpec, tempDir) {
+function shouldRotateRasterPage(paperSpec, metadata, targetWidthPx, targetHeightPx, orientation = "auto") {
+  const sourceLandscape = Number(metadata.width || 0) > Number(metadata.height || 0);
+  const targetPortrait = targetHeightPx > targetWidthPx;
+  const targetLandscape = targetWidthPx > targetHeightPx;
+  if (orientation === "portrait") return sourceLandscape && targetPortrait;
+  if (orientation === "landscape") return !sourceLandscape && targetLandscape;
+  return Boolean(paperSpec.rotateLandscape && sourceLandscape && targetPortrait);
+}
+
+async function rasterizePdfToThermalPdf(pdfBuffer, paperSpec, tempDir, options = {}) {
   const mutool = findMutool();
   if (!mutool) return null;
   const inputPdf = path.join(tempDir, "source.pdf");
@@ -386,7 +403,7 @@ async function rasterizePdfToThermalPdf(pdfBuffer, paperSpec, tempDir) {
   for (const file of files) {
     const metadata = await sharp(file).metadata();
     let image = sharp(file).flatten({ background: "#ffffff" });
-    const shouldRotate = Boolean(paperSpec.rotateLandscape && Number(metadata.width || 0) > Number(metadata.height || 0) && targetHeightPx > targetWidthPx);
+    const shouldRotate = shouldRotateRasterPage(paperSpec, metadata, targetWidthPx, targetHeightPx, options.orientation || "auto");
     if (shouldRotate) image = image.rotate(90);
     const fit = thermalFitForPaper(paperSpec);
     const resized = await image
@@ -407,6 +424,7 @@ async function rasterizePdfToThermalPdf(pdfBuffer, paperSpec, tempDir) {
       output_px: [targetWidthPx, targetHeightPx],
       paper_mm: [paperSpec.widthMm, paperSpec.heightMm],
       rotated: shouldRotate,
+      orientation: options.orientation || "auto",
       fit
     });
   }
@@ -437,7 +455,7 @@ async function executePdfJob(job, pdfBuffer) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ozon-print-"));
   const pdfPath = path.join(dir, job.filename);
   try {
-    const rasterBuffer = paperSpec ? await rasterizePdfToThermalPdf(pdfBuffer, paperSpec, dir) : null;
+    const rasterBuffer = paperSpec ? await rasterizePdfToThermalPdf(pdfBuffer, paperSpec, dir, { orientation: job.meta?.orientation || "auto" }) : null;
     const printableBuffer = rasterBuffer || (paperSpec ? await resizePdfToPaper(pdfBuffer, paperSpec) : pdfBuffer);
     fs.writeFileSync(pdfPath, printableBuffer);
     for (let index = 0; index < job.copies; index += 1) {
@@ -484,7 +502,8 @@ export async function serverPrintPdf(body = {}, userId = null) {
     userId,
     meta: {
       ...(body.meta || {}),
-      paper_size: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || body.meta?.paper_size || ""
+      paper_size: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || body.meta?.paper_size || "",
+      orientation: body.orientation || body.meta?.orientation || ""
     },
     paperSize: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || "",
     autoPaper: body.auto_paper === true || body.autoPaper === true
@@ -512,7 +531,8 @@ export async function serverPrintOrderLabels(body = {}, userId = null, services)
       order_ids: label.printed_ids || [],
       requested: label.requested,
       count: label.count,
-      paper_size: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || ""
+      paper_size: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || "",
+      orientation: body.orientation || body.meta?.orientation || ""
     },
     paperSize: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || "",
     autoPaper: body.auto_paper === true || body.autoPaper === true

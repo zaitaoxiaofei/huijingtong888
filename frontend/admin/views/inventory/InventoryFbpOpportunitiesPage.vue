@@ -26,7 +26,7 @@ const barcodePrintPresets = [
   { label: "FBP 面单 72mm x 130mm", value: "fbp_label_72x130", printer: "label", printSettings: "fit,portrait,monochrome,paper=72mm x 130mm" },
   { label: "订单面单 72mm x 130mm", value: "order_label_72x130", printer: "label", printSettings: "fit,portrait,monochrome,paper=72mm x 130mm" }
 ];
-barcodePrintPresets[0].label = "小面单 / 小标签 70mm x 30mm";
+barcodePrintPresets[0].label = "标签面单 30mm x 70mm";
 barcodePrintPresets[0].printSettings = "noscale,portrait,monochrome,paper=70mm*30mm";
 barcodePrintPresets[1].printSettings = "noscale,portrait,monochrome,paper=72mm x 130mm";
 barcodePrintPresets[2].printSettings = "noscale,portrait,monochrome,paper=72mm x 130mm";

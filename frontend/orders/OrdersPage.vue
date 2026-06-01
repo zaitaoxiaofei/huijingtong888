@@ -106,8 +106,8 @@ const printDialog = reactive({
   orderIds: [],
   preset: "order_label_72x130",
   copies: 1,
-  scale: "fit",
-  orientation: "portrait",
+  scale: "noscale",
+  orientation: "auto",
   color: "monochrome"
 });
 
@@ -118,7 +118,7 @@ const printPresetOptions = [
     printer: "label",
     paper: "72mm x 130mm",
     scale: "noscale",
-    orientation: "portrait",
+    orientation: "auto",
     color: "monochrome"
   },
   {
@@ -127,16 +127,16 @@ const printPresetOptions = [
     printer: "label",
     paper: "72mm x 130mm",
     scale: "noscale",
-    orientation: "portrait",
+    orientation: "auto",
     color: "monochrome"
   },
   {
-    label: "小面单 / 小标签 70mm x 30mm",
+    label: "标签面单 30mm x 70mm",
     value: "barcode_70x30",
     printer: "label",
     paper: "70mm*30mm",
     scale: "noscale",
-    orientation: "portrait",
+    orientation: "auto",
     color: "monochrome"
   },
   {
@@ -150,14 +150,8 @@ const printPresetOptions = [
   }
 ];
 
-const scaleOptions = [
-  { label: "适应页面", value: "fit" },
-  { label: "只缩小过大内容", value: "shrink" },
-  { label: "原始大小", value: "noscale" }
-];
-
 const orientationOptions = [
-  { label: "自动/默认", value: "" },
+  { label: "自动", value: "auto" },
   { label: "纵向", value: "portrait" },
   { label: "横向", value: "landscape" }
 ];
@@ -796,7 +790,7 @@ function openPrintDialog(orderIds = []) {
   printDialog.preset = "order_label_72x130";
   printDialog.copies = 1;
   printDialog.scale = "noscale";
-  printDialog.orientation = "portrait";
+  printDialog.orientation = "auto";
   printDialog.color = "monochrome";
   printDialog.visible = true;
 }
@@ -805,7 +799,7 @@ function buildPrintSettings() {
   const preset = selectedPrintPreset.value;
   return [
     printDialog.scale,
-    printDialog.orientation,
+    printDialog.orientation === "auto" ? "" : printDialog.orientation,
     printDialog.color,
     preset.paper ? `paper=${preset.paper}` : ""
   ].filter(Boolean).join(",");
@@ -814,7 +808,7 @@ function buildPrintSettings() {
 function applyPrintPreset() {
   const preset = selectedPrintPreset.value;
   printDialog.scale = preset.scale || "fit";
-  printDialog.orientation = preset.orientation || "";
+  printDialog.orientation = preset.orientation || "auto";
   printDialog.color = preset.color || "";
 }
 
@@ -847,6 +841,7 @@ async function submitPrintDialog() {
       printSettings: buildPrintSettings(),
       preset: selectedPrintPreset.value.value,
       paperSize: selectedPrintPreset.value.value,
+      orientation: printDialog.orientation,
       copies: printDialog.copies
     });
     printDialog.visible = false;
@@ -1376,11 +1371,6 @@ onMounted(async () => {
           </el-form-item>
           <el-form-item label="份数 / 张数">
             <el-input-number v-model="printDialog.copies" :min="1" :max="999" :step="1" controls-position="right" />
-          </el-form-item>
-          <el-form-item label="缩放">
-            <el-select v-model="printDialog.scale">
-              <el-option v-for="item in scaleOptions" :key="item.value" :label="item.label" :value="item.value" />
-            </el-select>
           </el-form-item>
           <el-form-item label="方向">
             <el-select v-model="printDialog.orientation">
