@@ -3,7 +3,7 @@ import path from "node:path";
 
 const runtimeDir = path.resolve("data");
 const statusFile = path.join(runtimeDir, "global-update-status.json");
-const defaultPluginVersion = process.env.COLLECTOR_PLUGIN_VERSION || "1.3.8";
+const defaultPluginVersion = process.env.COLLECTOR_PLUGIN_VERSION || "1.3.9";
 const defaultPluginPackageName = `ozon-baodan-erp-plugin-${defaultPluginVersion}.rar`;
 const updateSubscribers = new Set();
 const defaultStatus = {

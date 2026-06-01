@@ -92,7 +92,7 @@ async function checkPluginUpdateStatus() {
   }, 12000);
   const json = await response.json().catch(() => ({}));
   if (!response.ok || json?.success === false) {
-    throw new Error(json?.error || `闂備礁婀辩划顖滄暜婵犲倵鏋庨柕蹇嬪€曢崡鎶芥倵濞戞鎴︽偂閳ь剟姊虹紒姗嗙劸闁糕晜鐗犻崺鈧い鎴ｆ硶閸斿秵銇勯妷銉﹀殗鐎殿喖顭锋俊鐑藉Ψ閿濆嫭婢€闂佽崵濮甸崝鎴﹀磿閼姐倖顫曢柣褍寮P ${response.status}`);
+    throw new Error(json?.error || `Plugin update check failed: HTTP ${response.status}`);
   }
   const plugin = json?.data?.plugin || json?.plugin || null;
   await chrome.storage.local.set({
@@ -1963,36 +1963,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-async function injectExistingOzonTabs(reason) {
-  try {
-    const tabs = await chrome.tabs.query({ url: ['*://*.ozon.ru/*', '*://*.ozon.kz/*', '*://*.ozon.by/*'] });
-    await Promise.all((tabs || []).map((tab) => injectOzonFrontContent(tab.id, tab.url, reason)));
-  } catch (error) {
-  }
-}
-
-chrome.runtime.onInstalled.addListener(() => {
-  injectExistingOzonTabs('installed-fallback').catch(() => {});
-});
-
-chrome.runtime.onStartup.addListener(() => {
-  injectExistingOzonTabs('startup-fallback').catch(() => {});
-});
-
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo?.status !== 'complete') return;
-  injectOzonFrontContent(tabId, tab?.url, 'tab-complete').catch(() => {});
-});
-
-chrome.tabs.onActivated.addListener((activeInfo) => {
-  if (!activeInfo?.tabId) return;
-  chrome.tabs.get(activeInfo.tabId)
-    .then((tab) => injectOzonFrontContent(tab.id, tab.url, 'tab-activated'))
-    .catch(() => {});
-});
-
 chrome.tabs.onRemoved.addListener((tabId) => {
   ozonInjectionAttemptAtByTabId.delete(tabId);
+  ozonInjectionBlockedByTabId.delete(tabId);
 });
 
 chrome.runtime.onInstalled.addListener(() => {
