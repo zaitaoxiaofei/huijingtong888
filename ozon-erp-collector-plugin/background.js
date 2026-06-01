@@ -178,6 +178,26 @@ function isOzonFrontUrl(url) {
   }
 }
 
+function originPatternForUrl(url) {
+  try {
+    const target = new URL(String(url || ''));
+    return `${target.protocol}//${target.hostname}/*`;
+  } catch (error) {
+    return '';
+  }
+}
+
+async function hasOzonFrontPermission(url) {
+  if (!chrome?.permissions?.contains) return true;
+  const origin = originPatternForUrl(url);
+  if (!origin) return false;
+  try {
+    return await chrome.permissions.contains({ origins: [origin] });
+  } catch (error) {
+    return true;
+  }
+}
+
 async function hasOzonContentScript(tabId) {
   if (!tabId || !chrome?.scripting?.executeScript) return false;
   try {
@@ -193,6 +213,7 @@ async function hasOzonContentScript(tabId) {
 
 async function injectOzonFrontContent(tabId, url, reason = 'auto') {
   if (!tabId || !isOzonFrontUrl(url) || !chrome?.scripting?.executeScript) return false;
+  if (!(await hasOzonFrontPermission(url))) return false;
   const now = Date.now();
   const lastAttemptAt = Number(ozonInjectionAttemptAtByTabId.get(tabId) || 0);
   if (now - lastAttemptAt < OZON_INJECTION_DEBOUNCE_MS) return false;

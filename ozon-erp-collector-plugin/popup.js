@@ -8,7 +8,8 @@ const fields = {
   pluginUpdateCard: document.getElementById('plugin-update-card'),
   pluginUpdateTitle: document.getElementById('plugin-update-title'),
   pluginUpdateMessage: document.getElementById('plugin-update-message'),
-  pluginUpdateDownload: document.getElementById('plugin-update-download')
+  pluginUpdateDownload: document.getElementById('plugin-update-download'),
+  grantOzonAccess: document.getElementById('grant-ozon-access')
 };
 
 const erpConfig = window.OzonErpCollectorConfig || {};
@@ -19,6 +20,20 @@ const DEFAULT_ERP_BASE_URL = erpConfig.DEFAULT_ERP_BASE_URL || 'https://erp.hjt8
 const SEND_MESSAGE_TIMEOUT_MS = 8000;
 const MANUAL_PROGRESS_STORAGE_KEY = 'ozon-erp-manual-progress';
 const PLUGIN_UPDATE_STATUS_STORAGE_KEY = 'ozon-erp-plugin-update-status';
+const OZON_PERMISSION_ORIGINS = [
+  'https://ozon.ru/*',
+  'https://www.ozon.ru/*',
+  'https://m.ozon.ru/*',
+  'https://ozon.kz/*',
+  'https://www.ozon.kz/*',
+  'https://m.ozon.kz/*',
+  'https://ozon.by/*',
+  'https://www.ozon.by/*',
+  'https://m.ozon.by/*',
+  'https://*.ozon.ru/*',
+  'https://*.ozon.kz/*',
+  'https://*.ozon.by/*'
+];
 const manualProgressState = {
   active: false,
   summary: '',
@@ -136,6 +151,35 @@ function isOzonFrontPage(url) {
   }
 }
 
+async function hasOzonAccess() {
+  if (!chrome?.permissions?.contains) return true;
+  return await chrome.permissions.contains({ origins: OZON_PERMISSION_ORIGINS }).catch(() => false);
+}
+
+async function refreshOzonAccessButton() {
+  const granted = await hasOzonAccess();
+  fields.grantOzonAccess.textContent = granted ? 'Ozon 页面已授权' : '授权 Ozon 页面访问';
+  fields.grantOzonAccess.disabled = granted;
+}
+
+async function grantOzonAccess() {
+  if (!chrome?.permissions?.request) {
+    setStatus('当前浏览器不支持插件主动申请站点权限，请在扩展详情里把站点访问权限设为所有站点。');
+    return;
+  }
+  const granted = await chrome.permissions.request({ origins: OZON_PERMISSION_ORIGINS }).catch(() => false);
+  await refreshOzonAccessButton();
+  if (!granted) {
+    setStatus('Edge 没有授予 Ozon 页面访问权限，请在扩展详情里把站点访问权限设为所有站点。');
+    return;
+  }
+  setStatus('Ozon 页面访问权限已授权，正在刷新当前 Ozon 页面...');
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab?.id && isOzonFrontPage(tab.url)) {
+    await chrome.tabs.reload(tab.id).catch(() => {});
+  }
+}
+
 async function load() {
   const stored = await chrome.storage.local.get([
     ERP_BASE_URL_STORAGE_KEY,
@@ -154,6 +198,7 @@ async function load() {
   fields.manualSkus.value = stored['ozon-erp-manual-skus'] || '';
   await restoreManualProgress();
   await loadPluginUpdateStatus();
+  await refreshOzonAccessButton();
 }
 
 async function save() {
@@ -237,6 +282,7 @@ async function syncManualSkus() {
 
 document.getElementById('save').addEventListener('click', save);
 document.getElementById('collect').addEventListener('click', collectActiveTab);
+fields.grantOzonAccess.addEventListener('click', grantOzonAccess);
 document.getElementById('manual-sync').addEventListener('click', syncManualSkus);
 fields.localPluginToken.addEventListener('input', renderTokenWarning);
 fields.pluginUpdateDownload.addEventListener('click', () => {

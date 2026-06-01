@@ -299,6 +299,16 @@
         height: 38px;
       }
 
+      #grant-ozon-access {
+        border-color: #16a34a;
+        background: #16a34a;
+      }
+
+      #grant-ozon-access:hover {
+        border-color: #15803d;
+        background: #15803d;
+      }
+
       #status {
         min-height: 18px;
         color: var(--muted);
@@ -427,6 +437,9 @@
         <div class="actions">
           <button id="save">保存配置</button>
           <button id="collect" class="secondary">采集当前页</button>
+        </div>
+        <div class="actions single">
+          <button id="grant-ozon-access" type="button">授权 Ozon 页面访问</button>
         </div>
         <div class="actions single">
           <button id="manual-sync">采集指定 SKU</button>
