@@ -1,0 +1,52 @@
+{
+  "name": "pivotTable",
+  "version": "1.0.0",
+  "manifest_version": 3,
+  "permissions": ["storage", "webRequest", "scripting"],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*",
+    "https://seller.ozon.ru/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Ozon ERP 采集",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://seller.ozon.ru/*"
+      ],
+      "js": [
+        "content/ozon.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://seller.ozon.ru/*"
+      ],
+      "js": [
+        "content/erp-relay-page.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://seller.ozon.ru/*"
+      ],
+      "js": [
+        "content/erp-relay-bridge.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}

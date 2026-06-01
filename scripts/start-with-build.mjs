@@ -2,9 +2,11 @@ import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import net from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
+import { openStartupPage } from "./open-startup-page.mjs";
 
 const rootDir = process.cwd();
 const port = Number(process.env.PORT || 8787);
+const appBaseUrl = process.env.APP_BASE_URL || `http://localhost:${port}`;
 
 function run(command, args, label) {
   return new Promise((resolve, reject) => {
@@ -30,6 +32,25 @@ function runNpmScript(scriptName, label) {
     return run("cmd.exe", ["/d", "/s", "/c", `npm run ${scriptName}`], label);
   }
   return run("npm", ["run", scriptName], label);
+}
+
+function startManaged(command, args, label) {
+  const child = spawn(command, args, {
+    cwd: rootDir,
+    stdio: "inherit",
+    env: process.env
+  });
+
+  child.on("error", (error) => {
+    console.error(`[start] ${label} failed: ${error.message}`);
+  });
+  return child;
+}
+
+function waitForExit(child) {
+  return new Promise((resolve) => {
+    child.on("exit", (code, signal) => resolve({ code, signal }));
+  });
 }
 
 function execFileText(command, args) {
@@ -108,6 +129,30 @@ async function freePort(targetPort) {
   throw new Error(`Port ${targetPort} is still in use after stopping ${pids.join(", ")}.`);
 }
 
+async function waitForPort(targetPort, timeoutMs = 30000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await isPortOpen(targetPort)) return;
+    await delay(300);
+  }
+  throw new Error(`Server did not listen on port ${targetPort} within ${timeoutMs}ms.`);
+}
+
 await runNpmScript("build:frontend", "Frontend build");
 await freePort(port);
-await run(process.execPath, ["src/server.js"], "Server startup");
+const server = startManaged(process.execPath, ["src/server.js"], "Server startup");
+const serverExit = waitForExit(server);
+await Promise.race([
+  waitForPort(port),
+  serverExit.then(({ code, signal }) => {
+    throw new Error(`Server startup failed${signal ? ` (${signal})` : ` with code ${code}`}`);
+  })
+]);
+console.log(`[start] ERP server is ready: ${appBaseUrl}`);
+const openedPageUrl = openStartupPage(appBaseUrl);
+if (openedPageUrl) console.log(`[start] Opened startup page: ${openedPageUrl}`);
+
+const { code, signal } = await serverExit;
+if (code !== 0) {
+  throw new Error(`Server exited${signal ? ` (${signal})` : ` with code ${code}`}`);
+}

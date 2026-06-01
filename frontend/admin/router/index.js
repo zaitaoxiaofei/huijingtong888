@@ -26,6 +26,7 @@ const ShopAssetVariantCenterView = () => import("../views/listing/ShopAssetVaria
 const SelectionView = () => import("../views/selection/SelectionView.vue");
 const ProfitDashboardView = () => import("../views/profit/ProfitDashboardView.vue");
 const ProfitAftersalesView = () => import("../views/profit/ProfitAftersalesView.vue");
+const SellerAnalyticsView = () => import("../views/analytics/SellerAnalyticsView.vue");
 const AdvertisingDailyView = () => import("../views/advertising/AdvertisingDailyView.vue");
 const ReviewCenterView = () => import("../views/reviews/ReviewCenterView.vue");
 const OzonActionsView = () => import("../views/marketing/OzonActionsView.vue");
@@ -83,6 +84,7 @@ export const router = createRouter({
         { path: "ozon-actions", name: "ozon-actions", component: OzonActionsView, meta: { title: "Ozon 活动", breadcrumb: ["数据看板", "Ozon 活动"] } },
         { path: "selection", name: "selection", component: SelectionView, meta: { title: "选品池", breadcrumb: ["商品运营", "选品池"] } },
         { path: "profit", name: "profit", component: ProfitDashboardView, meta: { title: "利润分析", breadcrumb: ["数据看板", "利润分析"] } },
+        { path: "seller-analytics", name: "seller-analytics", component: SellerAnalyticsView, meta: { title: "数据分析", breadcrumb: ["数据看板", "数据分析"] } },
         { path: "profit/aftersales", name: "profit-aftersales", component: ProfitAftersalesView, meta: { title: "售后损益", breadcrumb: ["数据看板", "利润分析", "售后损益"] } },
         { path: "profit/sku-ranking", name: "profit-sku-ranking", component: ProfitDashboardView, meta: { title: "SKU 排行榜", breadcrumb: ["数据看板", "利润分析", "SKU 排行榜"] } },
         { path: "profit/shop-ranking", name: "profit-shop-ranking", component: ProfitDashboardView, meta: { title: "店铺排行榜", breadcrumb: ["数据看板", "利润分析", "店铺排行榜"] } },

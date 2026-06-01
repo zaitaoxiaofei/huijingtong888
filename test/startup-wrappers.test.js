@@ -24,3 +24,13 @@ test("Windows MySQL helper keeps its dedicated local MySQL flow", () => {
   assert.match(mysqlStart, /-StartTunnel/i);
   assert.match(mysqlStart, /-StartApp/i);
 });
+
+test("start:all skips Electron unless explicitly enabled", () => {
+  const startAll = fs.readFileSync("scripts/start-all.mjs", "utf8");
+  const windowsStart = fs.readFileSync("start.bat", "utf8");
+
+  assert.match(startAll, /process\.env\.OZON_START_ELECTRON\s*===\s*"1"/);
+  assert.match(startAll, /Electron startup skipped/);
+  assert.match(startAll, /npmBin,\s*\["exec",\s*"electron",\s*"--",\s*"\."\]/);
+  assert.doesNotMatch(windowsStart, /Electron/i);
+});

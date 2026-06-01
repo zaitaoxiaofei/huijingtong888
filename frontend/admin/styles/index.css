@@ -1403,6 +1403,26 @@ body {
   flex-basis: 72px;
 }
 
+.erp-image-preview--portrait {
+  width: 64px;
+  min-width: 64px;
+  max-width: 64px;
+  height: 84px;
+  min-height: 84px;
+  max-height: 84px;
+  flex-basis: 64px;
+}
+
+.erp-image-preview--small {
+  width: 42px;
+  min-width: 42px;
+  max-width: 42px;
+  height: 54px;
+  min-height: 54px;
+  max-height: 54px;
+  flex-basis: 42px;
+}
+
 .erp-image-preview__image {
   width: 100% !important;
   height: 100% !important;

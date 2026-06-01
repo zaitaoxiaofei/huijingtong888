@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ozon ERP 采集</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="panel">
+      <header class="header">
+        <div>
+          <h1>ERP 采集</h1>
+          <p id="statusText">读取状态中</p>
+        </div>
+        <button id="refreshBtn" class="icon-btn" type="button" title="刷新">↻</button>
+      </header>
+
+      <section class="section">
+        <label>
+          <span>ERP 地址</span>
+          <input id="erpBaseUrl" type="text" autocomplete="off">
+        </label>
+        <label>
+          <span>租户</span>
+          <input id="tenantId" type="text" autocomplete="off">
+        </label>
+        <div class="actions">
+          <button id="saveBtn" type="button">保存</button>
+          <button id="pollBtn" type="button" class="primary">立即采集</button>
+          <button id="startPollingBtn" type="button" class="button-start">启动轮询</button>
+          <button id="stopPollingBtn" type="button" class="button-stop">暂停轮询</button>
+        </div>
+      </section>
+
+      <section class="stats">
+        <div><span>领取</span><strong id="claimedCount">0</strong></div>
+        <div><span>成功</span><strong id="completedCount">0</strong></div>
+        <div><span>失败</span><strong id="failedCount">0</strong></div>
+        <div><span>执行中</span><strong id="activeCount">0</strong></div>
+      </section>
+
+      <section class="section status-line">
+        <span>轮询状态</span>
+        <strong id="pollingStatus">未启动</strong>
+      </section>
+
+      <section class="section">
+        <div class="section-title">seller 页面</div>
+        <div id="sellerTab" class="muted">未找到</div>
+      </section>
+
+      <section class="section">
+        <div class="section-title">当前队列</div>
+        <div id="queueList" class="list empty">暂无任务</div>
+      </section>
+
+      <section class="section">
+        <div class="section-title">最近日志</div>
+        <div id="logList" class="list empty">暂无日志</div>
+      </section>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

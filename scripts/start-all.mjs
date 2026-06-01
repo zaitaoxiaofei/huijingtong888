@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import net from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
+import { openStartupPage } from "./open-startup-page.mjs";
 
 const rootDir = process.cwd();
 const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
@@ -9,6 +10,7 @@ const printHelperPort = Number(process.env.OZON_PRINT_HELPER_PORT || 17878);
 const appBaseUrl = process.env.APP_BASE_URL || `http://localhost:${port}`;
 const electronRemoteUrl = process.env.ELECTRON_REMOTE_URL || appBaseUrl;
 const shouldStartPrintHelper = process.env.OZON_START_PRINT_HELPER !== "0";
+const shouldStartElectron = process.env.OZON_START_ELECTRON === "1";
 const managedChildren = [];
 
 function run(command, args, label, env = {}) {
@@ -173,23 +175,31 @@ try {
     })
   ]);
   console.log(`[start-all] ERP server is ready: ${appBaseUrl}`);
+  const openedPageUrl = openStartupPage(appBaseUrl);
+  if (openedPageUrl) console.log(`[start-all] Opened startup page: ${openedPageUrl}`);
 
   if (shouldStartPrintHelper) {
     await restartPort(printHelperPort);
     startManaged(process.execPath, ["scripts/local-print-helper.mjs"], "Starting print helper");
   }
 
-  const electron = startManaged(npmBin, ["exec", "electron", "--", "."], "Starting Electron", {
-    ELECTRON_REMOTE_URL: electronRemoteUrl
-  });
-  const result = await Promise.race([
-    waitForExit(electron).then((exit) => ({ kind: "electron", ...exit })),
-    serverExit.then((exit) => ({ kind: "server", ...exit }))
-  ]);
-  if (result.kind === "server") {
-    throw new Error(`ERP server exited while Electron was running${result.signal ? ` (${result.signal})` : ` with code ${result.code}`}.`);
+  if (!shouldStartElectron) {
+    console.log("[start-all] Electron startup skipped. Set OZON_START_ELECTRON=1 to launch it.");
+    const { code, signal } = await serverExit;
+    process.exitCode = code ?? (signal ? 1 : 0);
+  } else {
+    const electron = startManaged(npmBin, ["exec", "electron", "--", "."], "Starting Electron", {
+      ELECTRON_REMOTE_URL: electronRemoteUrl
+    });
+    const result = await Promise.race([
+      waitForExit(electron).then((exit) => ({ kind: "electron", ...exit })),
+      serverExit.then((exit) => ({ kind: "server", ...exit }))
+    ]);
+    if (result.kind === "server") {
+      throw new Error(`ERP server exited while Electron was running${result.signal ? ` (${result.signal})` : ` with code ${result.code}`}.`);
+    }
+    process.exitCode = result.code ?? (result.signal ? 1 : 0);
   }
-  process.exitCode = result.code ?? (result.signal ? 1 : 0);
 } catch (error) {
   console.error(`[start-all] ${error.message || error}`);
   process.exitCode = 1;

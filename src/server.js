@@ -19,6 +19,7 @@ import { createPrintRoutes } from "./server/routes/print.js";
 import { createOperationsRoutes, handleOperationsRestRoute } from "./server/routes/operations.js";
 import { createProfitRoutes } from "./server/routes/profit.js";
 import { createAdvertisingRoutes } from "./server/routes/advertising.js";
+import { createSellerAnalyticsRoutes, handleSellerAnalyticsRestRoute } from "./server/routes/sellerAnalytics.js";
 import { createOzonActionRoutes } from "./server/routes/ozonActions.js";
 import { createSyncRoutes } from "./server/routes/sync.js";
 import { createReviewRoutes, handleReviewRestRoute } from "./server/routes/reviews.js";
@@ -81,6 +82,7 @@ const routeModules = {
   ...createOperationsRoutes({ services, readJson }),
   ...createProfitRoutes({ services, readJson }),
   ...createAdvertisingRoutes({ services, readJson }),
+  ...createSellerAnalyticsRoutes({ services, readJson }),
   ...createOzonActionRoutes({ services, readJson }),
   ...createReviewRoutes({ services, readJson }),
   ...createOrderRoutes({ services, readJson, notFound, writeHead, json }),
@@ -515,6 +517,18 @@ async function handleRestRoute(req, res, url, parts) {
     return reviewRestHandled;
   }
 
+  const sellerAnalyticsRestHandled = await handleSellerAnalyticsRestRoute({
+    req,
+    res,
+    parts,
+    services,
+    readJson,
+    json
+  });
+  if (sellerAnalyticsRestHandled !== false) {
+    return sellerAnalyticsRestHandled;
+  }
+
   const listingAutomationRestHandled = await handleListingAutomationRestRoute({
     req,
     res,
@@ -780,6 +794,36 @@ async function handleLocalPluginRoute(req, res, parts) {
       posting_numbers: postingNumbers
     }, { signal: req._abortSignal });
     return localPluginJson(req, res, { success: result.ok !== false, data: result, ...result });
+  }
+
+  if (parts[2] === "seller-analytics" && parts[3] === "snapshots" && req.method === "POST") {
+    const body = await readJson(req);
+    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
+    const result = await services.sellerAnalyticsSaveSnapshot(body || {}, tenantId);
+    return localPluginJson(req, res, { success: true, data: result, ...result });
+  }
+
+  if (parts[2] === "seller-analytics" && parts[3] === "collect-runs" && parts[4] === "next" && req.method === "GET") {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim() || "admin";
+    const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || 6), 20));
+    const requests = await services.sellerAnalyticsNextCollectRequests(tenantId, limit);
+    return localPluginJson(req, res, { success: true, data: requests, requests });
+  }
+
+  if (
+    parts[2] === "seller-analytics" &&
+    parts[3] === "collect-runs" &&
+    parts[4] &&
+    parts[5] === "requests" &&
+    parts[6] &&
+    parts[7] === "result" &&
+    req.method === "POST"
+  ) {
+    const body = await readJson(req);
+    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
+    const result = await services.sellerAnalyticsFinishCollectRequest(decodeURIComponent(parts[4]), decodeURIComponent(parts[6]), body || {}, tenantId);
+    return localPluginJson(req, res, { success: true, data: result, ...result });
   }
 
   return false;

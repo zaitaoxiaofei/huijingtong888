@@ -8,6 +8,7 @@ export const navigationMenus = [
     icon: DataAnalysis,
     children: [
       { key: "profit-dashboard", label: "利润分析", route: "/profit" },
+      { key: "seller-analytics", label: "数据分析", route: "/seller-analytics" },
       { key: "advertising-daily", label: "广告分析", route: "/advertising/daily" },
       { key: "ozon-actions", label: "Ozon 活动", route: "/ozon-actions" },
       { key: "reviews", label: "买家评价", route: "/reviews", icon: ChatDotRound },
