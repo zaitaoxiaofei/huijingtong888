@@ -17,6 +17,17 @@ const MANUAL_PROGRESS_STORAGE_KEY = 'ozon-erp-manual-progress';
 const PLUGIN_UPDATE_STATUS_STORAGE_KEY = 'ozon-erp-plugin-update-status';
 const PLUGIN_UPDATE_ALARM_NAME = 'ozon-erp-plugin-update-check';
 const PLUGIN_VERSION = chrome.runtime.getManifest?.().version || '0.0.0';
+const OZON_FRONT_SCRIPT_FILES = [
+  'erp-config.js',
+  'collector.js',
+  'content-core.js',
+  'field-registry.js',
+  'data-aggregator.js',
+  'content.js'
+];
+const OZON_FRONT_STYLE_FILES = ['content.css'];
+const OZON_INJECTION_DEBOUNCE_MS = 1200;
+const ozonInjectionAttemptAtByTabId = new Map();
 
 function normalizeErpBaseUrl(value) {
   if (typeof erpConfig.normalizeErpBaseUrl === 'function') {
@@ -163,6 +174,45 @@ function isOzonFrontUrl(url) {
     const hostname = new URL(String(url || '')).hostname.toLowerCase();
     return /(^|\.)ozon\.(ru|kz|by)$/i.test(hostname) && !hostname.startsWith('seller.ozon.');
   } catch (error) {
+    return false;
+  }
+}
+
+async function hasOzonContentScript(tabId) {
+  if (!tabId || !chrome?.scripting?.executeScript) return false;
+  try {
+    const result = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => Boolean(window.__ozonErpCollectorContentLoaded)
+    });
+    return Boolean(result?.[0]?.result);
+  } catch (error) {
+    return false;
+  }
+}
+
+async function injectOzonFrontContent(tabId, url, reason = 'auto') {
+  if (!tabId || !isOzonFrontUrl(url) || !chrome?.scripting?.executeScript) return false;
+  const now = Date.now();
+  const lastAttemptAt = Number(ozonInjectionAttemptAtByTabId.get(tabId) || 0);
+  if (now - lastAttemptAt < OZON_INJECTION_DEBOUNCE_MS) return false;
+  ozonInjectionAttemptAtByTabId.set(tabId, now);
+  if (await hasOzonContentScript(tabId)) return true;
+  try {
+    if (chrome?.scripting?.insertCSS) {
+      await chrome.scripting.insertCSS({
+        target: { tabId },
+        files: OZON_FRONT_STYLE_FILES
+      }).catch(() => {});
+    }
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: OZON_FRONT_SCRIPT_FILES
+    });
+    console.info('[爆单ERP] 已主动注入 Ozon 前台脚本', { tabId, reason });
+    return true;
+  } catch (error) {
+    console.warn('[爆单ERP] Ozon 前台脚本主动注入失败', { tabId, reason, error: error?.message || String(error) });
     return false;
   }
 }
@@ -1866,6 +1916,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   return false;
+});
+
+async function injectExistingOzonTabs(reason) {
+  try {
+    const tabs = await chrome.tabs.query({ url: ['*://*.ozon.ru/*', '*://*.ozon.kz/*', '*://*.ozon.by/*'] });
+    await Promise.all((tabs || []).map((tab) => injectOzonFrontContent(tab.id, tab.url, reason)));
+  } catch (error) {
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  injectExistingOzonTabs('installed-fallback').catch(() => {});
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  injectExistingOzonTabs('startup-fallback').catch(() => {});
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo?.status !== 'complete') return;
+  injectOzonFrontContent(tabId, tab?.url, 'tab-complete').catch(() => {});
+});
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  if (!activeInfo?.tabId) return;
+  chrome.tabs.get(activeInfo.tabId)
+    .then((tab) => injectOzonFrontContent(tab.id, tab.url, 'tab-activated'))
+    .catch(() => {});
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  ozonInjectionAttemptAtByTabId.delete(tabId);
 });
 
 chrome.runtime.onInstalled.addListener(() => {
