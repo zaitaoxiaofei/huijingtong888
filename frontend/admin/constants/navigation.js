@@ -4,7 +4,7 @@ export const navigationMenus = [
   { key: "dashboard", label: "首页", route: "/dashboard", icon: House },
   {
     key: "analytics",
-    label: "看板",
+    label: "数据分析",
     icon: DataAnalysis,
     children: [
       { key: "profit-dashboard", label: "利润分析", route: "/profit" },

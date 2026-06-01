@@ -136,16 +136,45 @@ ${styleTags}
           var reason = event && (event.reason || event.error || event.message || event);
           return String(reason && (reason.message || reason) || "");
         }
-        function isChunkLoadError(event) {
-          var message = errorMessage(event);
+        function errorSource(event) {
           var target = event && event.target;
-          var source = String(target && (target.src || target.href) || "");
+          var reason = event && (event.reason || event.error);
+          return String(
+            (target && (target.src || target.href))
+              || (event && event.filename)
+              || (reason && (reason.fileName || reason.sourceURL))
+              || ""
+          );
+        }
+        function isExtensionError(event) {
+          var source = errorSource(event);
+          var message = errorMessage(event);
+          return source.indexOf("chrome-extension://") === 0
+            || source.indexOf("moz-extension://") === 0
+            || source.indexOf("content_main.js") >= 0
+            || message.indexOf("Immersive Translate") >= 0
+            || message.indexOf("dynamic-i18n") >= 0;
+        }
+        function isAppAssetError(event) {
+          var source = errorSource(event);
+          var message = errorMessage(event);
           return source.indexOf("/vue-apps/assets/") >= 0
+            || message.indexOf("/vue-apps/assets/") >= 0
             || message.indexOf("Failed to fetch dynamically imported module") >= 0
             || message.indexOf("Importing a module script failed") >= 0
             || message.indexOf("Unable to preload CSS") >= 0
             || message.indexOf("dynamically imported module") >= 0
             || message.indexOf("static asset not found") >= 0;
+        }
+        function isChunkLoadError(event) {
+          return isAppAssetError(event);
+        }
+        function shouldShowFatalError(event) {
+          if (!shouldShowFallback()) return false;
+          if (isExtensionError(event)) return false;
+          var source = errorSource(event);
+          if (source && !isAppAssetError(event)) return false;
+          return true;
         }
         function reloadForChunkError(event) {
           if (!isChunkLoadError(event)) return false;
@@ -191,11 +220,13 @@ ${styleTags}
         fallbackTimer = window.setTimeout(showFallback, 1200);
         window.addEventListener("error", function (event) {
           if (reloadForChunkError(event)) return;
+          if (!shouldShowFatalError(event)) return;
           window.clearTimeout(fallbackTimer);
           showFallback(true, true);
         }, true);
         window.addEventListener("unhandledrejection", function (event) {
           if (reloadForChunkError(event)) return;
+          if (!shouldShowFatalError(event)) return;
           window.clearTimeout(fallbackTimer);
           showFallback(true, true);
         });
