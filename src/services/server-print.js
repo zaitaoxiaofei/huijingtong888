@@ -9,8 +9,8 @@ const DEFAULT_LABEL_PRINTER = process.env.OZON_LABEL_PRINTER || "Gprinter GP-132
 const DEFAULT_DOCUMENT_PRINTER = process.env.OZON_DOCUMENT_PRINTER || "Canon MG2500 series Printer";
 const MM_TO_PT = 72 / 25.4;
 const LABEL_PAPER_SIZES = [
-  { value: "order_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, aliases: ["72mm x 130mm", "72x130", "72*130", "order_label_76x130", "76mm x 130mm", "76x130", "76*130"] },
-  { value: "fbp_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, aliases: ["72mm x 130mm", "72x130", "72*130"] },
+  { value: "order_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, fillPaper: true, aliases: ["72mm x 130mm", "72x130", "72*130", "order_label_76x130", "76mm x 130mm", "76x130", "76*130"] },
+  { value: "fbp_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, fillPaper: true, aliases: ["72mm x 130mm", "72x130", "72*130"] },
   { value: "barcode_70x30", widthMm: 70, heightMm: 30, paperName: "70mm*30mm", aliases: ["70mm x 30mm", "70mm*30mm", "70x30", "70*30"] }
 ];
 
@@ -264,13 +264,18 @@ async function resizePdfToPaper(pdfBuffer, paperSpec) {
   for (const sourcePage of source.getPages()) {
     const { width: sourceWidth, height: sourceHeight } = sourcePage.getSize();
     const targetPage = output.addPage([targetWidth, targetHeight]);
-    const embedded = await output.embedPage(sourcePage);
     const shouldRotate = Boolean(paperSpec.rotateLandscape && sourceWidth > sourceHeight && targetHeight > targetWidth);
-    const sourceBoxWidth = shouldRotate ? sourceHeight : sourceWidth;
-    const sourceBoxHeight = shouldRotate ? sourceWidth : sourceHeight;
+    const cropBox = paperSpec.fillPaper
+      ? coverCropBox(sourceWidth, sourceHeight, shouldRotate ? targetHeight / targetWidth : targetWidth / targetHeight)
+      : { left: 0, bottom: 0, right: sourceWidth, top: sourceHeight };
+    const cropWidth = cropBox.right - cropBox.left;
+    const cropHeight = cropBox.top - cropBox.bottom;
+    const embedded = await output.embedPage(sourcePage, cropBox);
+    const sourceBoxWidth = shouldRotate ? cropHeight : cropWidth;
+    const sourceBoxHeight = shouldRotate ? cropWidth : cropHeight;
     const scale = Math.min(targetWidth / sourceBoxWidth, targetHeight / sourceBoxHeight);
-    const drawWidth = sourceWidth * scale;
-    const drawHeight = sourceHeight * scale;
+    const drawWidth = cropWidth * scale;
+    const drawHeight = cropHeight * scale;
     const visualWidth = sourceBoxWidth * scale;
     const visualHeight = sourceBoxHeight * scale;
     const visualX = (targetWidth - visualWidth) / 2;
@@ -293,6 +298,21 @@ async function resizePdfToPaper(pdfBuffer, paperSpec) {
     }
   }
   return Buffer.from(await output.save());
+}
+
+function coverCropBox(sourceWidth, sourceHeight, targetAspect) {
+  const sourceAspect = sourceWidth / sourceHeight;
+  if (!Number.isFinite(targetAspect) || targetAspect <= 0) {
+    return { left: 0, bottom: 0, right: sourceWidth, top: sourceHeight };
+  }
+  if (sourceAspect > targetAspect) {
+    const nextWidth = sourceHeight * targetAspect;
+    const inset = (sourceWidth - nextWidth) / 2;
+    return { left: inset, bottom: 0, right: sourceWidth - inset, top: sourceHeight };
+  }
+  const nextHeight = sourceWidth / targetAspect;
+  const inset = (sourceHeight - nextHeight) / 2;
+  return { left: 0, bottom: inset, right: sourceWidth, top: sourceHeight - inset };
 }
 
 async function executePdfJob(job, pdfBuffer) {
