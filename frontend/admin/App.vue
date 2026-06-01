@@ -124,7 +124,7 @@ function promptAppUpdate(update) {
     message: h("div", { class: "erp-update-toast__body" }, [
       h("span", update.message || "系统后台已经发布新版本，空闲时刷新页面即可加载最新功能。"),
       h("div", { class: "erp-update-toast__actions" }, [
-        h("button", { type: "button", class: "erp-update-toast__link", onClick: handleDismiss }, "蹇界暐"),
+        h("button", { type: "button", class: "erp-update-toast__link", onClick: handleDismiss }, "忽略"),
         h("button", { type: "button", class: "erp-update-toast__primary", onClick: handleReload }, "去更新")
       ])
     ]),
