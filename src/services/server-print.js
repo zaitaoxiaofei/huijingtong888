@@ -155,9 +155,13 @@ function orientationFromPrintSettings(printSettings = "") {
 
 function printSettingsForPaper(printSettings = "", paperSpec = null) {
   const base = normalizeLabelPrintSettings(printSettings, paperSpec).split(",").filter(Boolean);
-  const withoutPaper = base.filter((item) => !/^paper=/i.test(item));
+  const withoutPaper = base.filter((item) => {
+    const normalized = item.trim().toLowerCase();
+    return !/^paper=/i.test(item) && !["noscale", "shrink", "fit"].includes(normalized);
+  });
+  if (paperSpec) withoutPaper.unshift("fit");
   if (paperSpec?.paperName) withoutPaper.push(`paper=${paperSpec.paperName}`);
-  return normalizePrintSettings(withoutPaper.join(",")) || "noscale";
+  return normalizePrintSettings(withoutPaper.join(",")) || (paperSpec ? "fit" : "noscale");
 }
 
 function resolveJobPaperSpec({ paperSize = "", printSettings = "", meta = {} } = {}) {
@@ -496,7 +500,8 @@ async function executePdfJob(job, pdfBuffer) {
       console.log(`[server-print] job-paper ${paperSpec.value} ${JSON.stringify({
         source_mm: sourceSizes.map((item) => [Math.round(item.widthMm * 100) / 100, Math.round(item.heightMm * 100) / 100]),
         already_paper_sized: alreadyPaperSized,
-        transformed: Boolean(rasterBuffer)
+        transformed: Boolean(rasterBuffer),
+        effective_print_settings: printSettings
       })}`);
     }
     fs.writeFileSync(pdfPath, printableBuffer);
