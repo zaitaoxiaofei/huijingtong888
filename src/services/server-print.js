@@ -467,6 +467,31 @@ async function executePdfJob(job, pdfBuffer) {
   }
 }
 
+export async function serverTransformPdfForPaper(pdfBuffer, body = {}) {
+  if (!Buffer.isBuffer(pdfBuffer) || !pdfBuffer.length) return pdfBuffer;
+  if (printerForRole(body.printer || body.printerName || body.target) === DEFAULT_DOCUMENT_PRINTER) return pdfBuffer;
+  const requestedPaperSpec = resolveJobPaperSpec({
+    paperSize: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || "",
+    printSettings: body.print_settings || body.printSettings || "",
+    meta: body.meta || {}
+  });
+  if (!requestedPaperSpec) return pdfBuffer;
+  const paperSpec = await effectivePaperSpecForPdf(
+    pdfBuffer,
+    requestedPaperSpec,
+    body.auto_paper === true || body.autoPaper === true
+  );
+  if (!paperSpec) return pdfBuffer;
+  const orientation = body.orientation || body.meta?.orientation || orientationFromPrintSettings(body.print_settings || body.printSettings || "");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ozon-print-preview-"));
+  try {
+    const rasterBuffer = await rasterizePdfToThermalPdf(pdfBuffer, paperSpec, dir, { orientation: orientation || "auto" });
+    return rasterBuffer || await resizePdfToPaper(pdfBuffer, paperSpec);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function enqueue(job, task) {
   const runJob = async () => {
     job.status = "printing";

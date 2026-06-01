@@ -819,7 +819,15 @@ async function previewPrintLabels() {
   try {
     const response = await apiClient.blobResponse("/api/orders/package-label", {
       method: "POST",
-      body: JSON.stringify({ order_ids: ids, require_all: true })
+      body: JSON.stringify({
+        order_ids: ids,
+        require_all: true,
+        printer: selectedPrintPreset.value.printer,
+        print_settings: buildPrintSettings(),
+        preset: selectedPrintPreset.value.value,
+        paper_size: selectedPrintPreset.value.value,
+        orientation: printDialog.orientation
+      })
     });
     const url = URL.createObjectURL(response.blob);
     window.open(url, "_blank", "noopener");
