@@ -10,6 +10,7 @@ const DEFAULT_LABEL_PRINTER = process.env.OZON_LABEL_PRINTER || "Gprinter GP-132
 const DEFAULT_DOCUMENT_PRINTER = process.env.OZON_DOCUMENT_PRINTER || "Canon MG2500 series Printer";
 const MM_TO_PT = 72 / 25.4;
 const THERMAL_DPI = 203;
+const TSPL_GAP_MM = 2;
 const LABEL_PAPER_SIZES = [
   { value: "order_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, rotateDegrees: 90, rasterFit: "contain", safeMarginMm: 2, aliases: ["72mm x 130mm", "72x130", "72*130", "order_label_76x130", "76mm x 130mm", "76x130", "76*130"] },
   { value: "fbp_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, rotateDegrees: 90, rasterFit: "contain", safeMarginMm: 2, aliases: ["72mm x 130mm", "72x130", "72*130"] },
@@ -289,6 +290,67 @@ async function printPdfFileWindows(pdfPath, printerName, printSettings = "fit") 
   await run(sumatra, args, { timeoutMs: 30_000 });
 }
 
+async function printRawFileWindows(rawPath, printerName, documentName = "ozon-label") {
+  const script = `
+$ErrorActionPreference = "Stop"
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class RawPrinter {
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  public class DOCINFO {
+    [MarshalAs(UnmanagedType.LPWStr)] public string pDocName;
+    [MarshalAs(UnmanagedType.LPWStr)] public string pOutputFile;
+    [MarshalAs(UnmanagedType.LPWStr)] public string pDataType;
+  }
+  [DllImport("winspool.drv", SetLastError=true, CharSet=CharSet.Unicode)]
+  public static extern bool OpenPrinter(string pPrinterName, out IntPtr phPrinter, IntPtr pDefault);
+  [DllImport("winspool.drv", SetLastError=true)]
+  public static extern bool ClosePrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", SetLastError=true, CharSet=CharSet.Unicode)]
+  public static extern bool StartDocPrinter(IntPtr hPrinter, int level, [In] DOCINFO di);
+  [DllImport("winspool.drv", SetLastError=true)]
+  public static extern bool EndDocPrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", SetLastError=true)]
+  public static extern bool StartPagePrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", SetLastError=true)]
+  public static extern bool EndPagePrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", SetLastError=true)]
+  public static extern bool WritePrinter(IntPtr hPrinter, byte[] pBytes, int dwCount, out int dwWritten);
+}
+"@
+$printer = ${psQuote(printerName)}
+$path = ${psQuote(rawPath)}
+$docName = ${psQuote(documentName)}
+$bytes = [System.IO.File]::ReadAllBytes($path)
+$handle = [IntPtr]::Zero
+if (-not [RawPrinter]::OpenPrinter($printer, [ref]$handle, [IntPtr]::Zero)) {
+  throw "OpenPrinter failed: $printer"
+}
+try {
+  $doc = New-Object RawPrinter+DOCINFO
+  $doc.pDocName = $docName
+  $doc.pDataType = "RAW"
+  if (-not [RawPrinter]::StartDocPrinter($handle, 1, $doc)) { throw "StartDocPrinter failed" }
+  try {
+    if (-not [RawPrinter]::StartPagePrinter($handle)) { throw "StartPagePrinter failed" }
+    try {
+      $written = 0
+      if (-not [RawPrinter]::WritePrinter($handle, $bytes, $bytes.Length, [ref]$written)) { throw "WritePrinter failed" }
+      if ($written -ne $bytes.Length) { throw "WritePrinter wrote $written of $($bytes.Length) bytes" }
+    } finally {
+      [RawPrinter]::EndPagePrinter($handle) | Out-Null
+    }
+  } finally {
+    [RawPrinter]::EndDocPrinter($handle) | Out-Null
+  }
+} finally {
+  [RawPrinter]::ClosePrinter($handle) | Out-Null
+}
+`;
+  await run("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], { timeoutMs: 30_000 });
+}
+
 async function resizePdfToPaper(pdfBuffer, paperSpec) {
   if (!paperSpec) return pdfBuffer;
   const source = await PDFDocument.load(pdfBuffer);
@@ -399,6 +461,102 @@ function shouldRotateRasterPage(paperSpec, metadata, targetWidthPx, targetHeight
   return Boolean(paperSpec.rotateLandscape && sourceLandscape && targetPortrait);
 }
 
+function tsplHeader(paperSpec) {
+  return [
+    `SIZE ${paperSpec.widthMm} mm,${paperSpec.heightMm} mm`,
+    `GAP ${TSPL_GAP_MM} mm,0 mm`,
+    "SPEED 4",
+    "DENSITY 8",
+    "DIRECTION 0",
+    "REFERENCE 0,0",
+    "CLS"
+  ].join("\r\n") + "\r\n";
+}
+
+function packBitmapBits(rawPixels, widthPx, heightPx) {
+  const bytesPerRow = Math.ceil(widthPx / 8);
+  const packed = Buffer.alloc(bytesPerRow * heightPx, 0);
+  for (let y = 0; y < heightPx; y += 1) {
+    for (let x = 0; x < widthPx; x += 1) {
+      const value = rawPixels[(y * widthPx) + x];
+      if (value < 128) {
+        const index = (y * bytesPerRow) + Math.floor(x / 8);
+        packed[index] |= 0x80 >> (x % 8);
+      }
+    }
+  }
+  return { packed, bytesPerRow };
+}
+
+async function rasterizePdfToTspl(pdfBuffer, paperSpec, tempDir, options = {}) {
+  const mutool = findMutool();
+  if (!mutool) throw new Error("服务器缺少 mutool，无法生成热敏打印位图。");
+  const inputPdf = path.join(tempDir, "source.pdf");
+  const pagePattern = path.join(tempDir, "tspl-page-%03d.png");
+  fs.writeFileSync(inputPdf, pdfBuffer);
+  await run(mutool, ["draw", "-q", "-r", String(THERMAL_DPI), "-o", pagePattern, inputPdf], { timeoutMs: 30_000 });
+
+  const files = fs.readdirSync(tempDir)
+    .filter((file) => /^tspl-page-\d+\.png$/i.test(file))
+    .sort()
+    .map((file) => path.join(tempDir, file));
+  if (!files.length) throw new Error("PDF 没有可打印页面");
+
+  const targetWidthPx = mmToPixels(paperSpec.widthMm);
+  const targetHeightPx = mmToPixels(paperSpec.heightMm);
+  const marginPx = Math.min(
+    Math.floor(Math.min(targetWidthPx, targetHeightPx) / 4),
+    mmToPixels(paperSpec.safeMarginMm || 0)
+  );
+  const contentWidthPx = Math.max(1, targetWidthPx - (marginPx * 2));
+  const contentHeightPx = Math.max(1, targetHeightPx - (marginPx * 2));
+  const chunks = [];
+  const diagnostics = [];
+
+  for (const file of files) {
+    const metadata = await sharp(file).metadata();
+    let image = sharp(file).flatten({ background: "#ffffff" });
+    const shouldRotate = shouldRotateRasterPage(paperSpec, metadata, targetWidthPx, targetHeightPx, options.orientation || "auto");
+    if (shouldRotate) image = image.rotate(paperSpec.rotateDegrees || 90);
+    const raw = await image
+      .resize(contentWidthPx, contentHeightPx, {
+        fit: thermalFitForPaper(paperSpec),
+        position: "centre",
+        background: "#ffffff",
+        kernel: "lanczos3"
+      })
+      .extend({
+        top: marginPx,
+        bottom: targetHeightPx - contentHeightPx - marginPx,
+        left: marginPx,
+        right: targetWidthPx - contentWidthPx - marginPx,
+        background: "#ffffff"
+      })
+      .grayscale()
+      .threshold(160)
+      .raw()
+      .toBuffer();
+    const { packed, bytesPerRow } = packBitmapBits(raw, targetWidthPx, targetHeightPx);
+    chunks.push(Buffer.from(tsplHeader(paperSpec), "ascii"));
+    chunks.push(Buffer.from(`BITMAP 0,0,${bytesPerRow},${targetHeightPx},0,`, "ascii"));
+    chunks.push(packed);
+    chunks.push(Buffer.from("\r\nPRINT 1\r\n", "ascii"));
+    diagnostics.push({
+      source_px: [metadata.width || 0, metadata.height || 0],
+      output_px: [targetWidthPx, targetHeightPx],
+      bytes_per_row: bytesPerRow,
+      paper_mm: [paperSpec.widthMm, paperSpec.heightMm],
+      rotated: shouldRotate,
+      rotate_degrees: shouldRotate ? paperSpec.rotateDegrees || 90 : 0,
+      orientation: options.orientation || "auto",
+      margin_px: marginPx,
+      fit: thermalFitForPaper(paperSpec)
+    });
+  }
+  console.log(`[server-print] tspl ${paperSpec.value} ${JSON.stringify(diagnostics)}`);
+  return Buffer.concat(chunks);
+}
+
 async function rasterizePdfToThermalPdf(pdfBuffer, paperSpec, tempDir, options = {}) {
   const mutool = findMutool();
   if (!mutool) return null;
@@ -486,6 +644,21 @@ async function executePdfJob(job, pdfBuffer) {
   assertPrintablePdf(pdfBuffer, job.printer);
   const requestedPaperSpec = paperSpecByValue(job.meta?.paper_size);
   const paperSpec = await effectivePaperSpecForPdf(pdfBuffer, requestedPaperSpec, job.meta?.auto_paper);
+  if (paperSpec && job.printer === DEFAULT_LABEL_PRINTER) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ozon-tspl-"));
+    try {
+      const rawBuffer = await rasterizePdfToTspl(pdfBuffer, paperSpec, dir, { orientation: job.meta?.orientation || "auto" });
+      const rawPath = path.join(dir, `${path.basename(job.filename, path.extname(job.filename)) || "label"}.tspl`);
+      fs.writeFileSync(rawPath, rawBuffer);
+      for (let index = 0; index < job.copies; index += 1) {
+        await printRawFileWindows(rawPath, job.printer, `${job.source}-${job.id}`);
+      }
+      return;
+    } finally {
+      const cleanupTimer = setTimeout(() => fs.rm(dir, { recursive: true, force: true }, () => {}), 5 * 60_000);
+      cleanupTimer.unref?.();
+    }
+  }
   const printSettings = printSettingsForPaper(job.print_settings, paperSpec);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ozon-print-"));
   const pdfPath = path.join(dir, job.filename);
