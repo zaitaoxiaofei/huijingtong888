@@ -911,17 +911,18 @@ function variantOptionQuality(field = {}, kind = "color") {
 function findVariantDictionaryAttribute(kind = "color", options = {}) {
   const excludeIds = new Set((options.excludeIds || []).map((id) => String(id || "")));
   const strongIds = kind === "color" ? new Set(["10096"]) : new Set(["4295", "4298", "4299"]);
-  const weakIds = kind === "color" ? new Set(["8229"]) : new Set(["9048"]);
+  const weakIds = kind === "color" ? new Set(["8229"]) : new Set([]);
   const positive = kind === "color"
     ? ["color", "colour", "цвет", "цветтовара", "основнойцвет", "расцветка", "окраска", "颜色", "颜色分类"]
-    : ["size", "размер", "размерпроизводителя", "model", "модель", "型号", "型号名称", "规格", "尺寸"];
+    : ["size", "размер", "размерпроизводителя", "размернаясетка", "规格", "尺寸", "尺码", "容量", "款式", "套装", "комплект", "набор", "объем", "объём", "volume", "capacity"];
   const negative = kind === "color"
     ? ["размер", "size", "модель", "model", "тип", "type", "название", "наименование", "title", "name", "материал", "material", "品牌", "бренд"]
-    : ["цвет", "color", "colour", "материал", "material", "бренд", "brand", "颜色"];
+    : ["цвет", "color", "colour", "материал", "material", "бренд", "brand", "颜色", "model", "модель", "型号", "型号名称", "название", "наименование", "title", "name"];
   const ranked = templateEditor.attributes.map((field) => {
     const text = attributeTextBag(field);
     const id = Number(field.attribute_id || 0);
     if (excludeIds.has(String(id))) return { field, score: -100 };
+    if (kind === "spec" && id === 9048) return { field, score: -100 };
     const hasDictionary = Number(field.dictionary_id || 0) || (Array.isArray(field.values) && field.values.length);
     if (!hasDictionary) return { field, score: -100 };
     let score = 0;
@@ -932,7 +933,7 @@ function findVariantDictionaryAttribute(kind = "color", options = {}) {
     score += variantOptionQuality(field, kind);
     positive.forEach((keyword) => { if (text.includes(compactAttributeText(keyword))) score += 18; });
     negative.forEach((keyword) => { if (text.includes(compactAttributeText(keyword))) score -= 40; });
-    if (kind === "spec" && text.includes(compactAttributeText("модель")) && !text.includes(compactAttributeText("размер"))) score -= 8;
+    if (kind === "spec" && text.includes(compactAttributeText("модель"))) score -= 80;
     if (kind === "color" && weakIds.has(String(id)) && !positive.some((keyword) => text.includes(compactAttributeText(keyword)))) score -= 45;
     return { field, score };
   }).filter((item) => item.score > 0).sort((left, right) => right.score - left.score);
@@ -941,7 +942,7 @@ function findVariantDictionaryAttribute(kind = "color", options = {}) {
 
 const variantColorAttribute = computed(() => findVariantDictionaryAttribute("color"));
 const variantSpecAttribute = computed(() => findVariantDictionaryAttribute("spec", {
-  excludeIds: [variantColorAttribute.value?.attribute_id]
+  excludeIds: [variantColorAttribute.value?.attribute_id, 9048]
 }));
 
 function variantDictionaryOptions(field = {}) {
@@ -976,10 +977,20 @@ function translateSpecValue(value = "") {
   return translated;
 }
 
+function parentModelValue() {
+  return String(getAttributeByIdsOrNames([9048], ["型号名称", "Модель"], "") || "").trim();
+}
+
+function isParentModelSpecValue(value = "") {
+  const text = String(value || "").trim();
+  const model = parentModelValue();
+  return Boolean(text && model && text === model);
+}
+
 function variantSpecOptions(row = {}) {
   const values = [row.spec, ...variantDictionaryOptions(variantSpecAttribute.value || {})]
     .map((value) => String(value || "").trim())
-    .filter(Boolean);
+    .filter((value) => value && !isParentModelSpecValue(value));
   return Array.from(new Set(values)).map((value) => ({
     value,
     label: translateSpecValue(value) || value
@@ -1104,7 +1115,7 @@ function extractVariantDynamicAttribute(item = {}, field = null, kind = "color")
     const text = compactAttributeText(`${entry.name || ""}|${entry.attribute_name || ""}`);
     return kind === "color"
       ? ["color", "цвет", "颜色"].some((keyword) => text.includes(compactAttributeText(keyword)))
-      : ["size", "размер", "model", "модель", "型号", "规格"].some((keyword) => text.includes(compactAttributeText(keyword)));
+      : ["size", "размер", "规格", "尺寸", "尺码", "容量", "款式", "套装", "комплект", "набор", "объем", "объём", "volume", "capacity"].some((keyword) => text.includes(compactAttributeText(keyword)));
   });
   return String(unwrapDynamicAttributeValue(fallback?.value ?? fallback?.values)).trim();
 }
@@ -1281,9 +1292,11 @@ function normalizeVariantVideoFields(item = {}) {
 
 function normalizeEditorVariants(variants) {
   const colorAttribute = findVariantDictionaryAttribute("color");
-  const specAttribute = findVariantDictionaryAttribute("spec", { excludeIds: [colorAttribute?.attribute_id] });
+  const specAttribute = findVariantDictionaryAttribute("spec", { excludeIds: [colorAttribute?.attribute_id, 9048] });
   return (Array.isArray(variants) ? variants : []).map((item, index) => {
     const videoFields = normalizeVariantVideoFields(item);
+    const dynamicSpec = extractVariantDynamicAttribute(item, specAttribute, "spec");
+    const savedSpec = String(item?.spec || "").trim();
     return ({
     id: item?.id || `variant-${Date.now().toString(36)}-${index}`,
     sku: item?.sku || item?.source_sku || "",
@@ -1301,7 +1314,7 @@ function normalizeEditorVariants(variants) {
     old_price: Number(item?.old_price || 0),
     color: item?.color || extractVariantDynamicAttribute(item, colorAttribute, "color") || "",
     color_values: normalizeColorValues(item?.color_values || item?.colors || item?.color || extractVariantDynamicAttribute(item, colorAttribute, "color") || ""),
-    spec: item?.spec || extractVariantDynamicAttribute(item, specAttribute, "spec") || "",
+    spec: isParentModelSpecValue(savedSpec) ? (dynamicSpec || "") : (savedSpec || dynamicSpec || ""),
     main_tags: splitTagValue(item?.main_tags || item?.hashtags || item?.tags || ""),
     weight_g: Number(item?.weight_g || templateEditor.weight_g || 0),
     length_mm: normalizeVariantDimensionMm(item?.length_mm, item?.depth, item?.length_cm, templateEditor.length_cm),
@@ -1651,7 +1664,12 @@ function enableVariantField(field) {
 }
 
 function setVariantFieldMode(field, enabled) {
-  variantFieldMode[field] = Boolean(enabled);
+  const nextEnabled = Boolean(enabled);
+  if (!nextEnabled && variantFieldHasDiverged(field)) {
+    ElMessage.warning("该字段在变体里已有多个值，不能直接回退为公共字段，请先手动统一后再回退");
+    return;
+  }
+  variantFieldMode[field] = nextEnabled;
   if (!variantFieldMode[field]) {
     moveVariantFieldBackToCommon(field);
     return;
@@ -1660,25 +1678,46 @@ function setVariantFieldMode(field, enabled) {
     templateEditor.variants.forEach((row) => {
       row.title = row.title || templateEditor.title;
     });
+    templateEditor.title = "";
   } else if (field === "weight") {
     templateEditor.variants.forEach((row) => {
       row.weight_g = Number(row.weight_g || templateEditor.weight_g || 0);
     });
+    templateEditor.weight_g = 0;
   } else if (field === "dimensions") {
     templateEditor.variants.forEach((row) => {
       row.length_mm = Number(row.length_mm || cmToMm(templateEditor.length_cm) || 0);
       row.width_mm = Number(row.width_mm || cmToMm(templateEditor.width_cm) || 0);
       row.height_mm = Number(row.height_mm || cmToMm(templateEditor.height_cm) || 0);
     });
+    templateEditor.length_cm = 0;
+    templateEditor.width_cm = 0;
+    templateEditor.height_cm = 0;
   } else if (field === "tags") {
     templateEditor.variants.forEach((row) => {
       row.main_tags = Array.isArray(row.main_tags) && row.main_tags.length ? row.main_tags : fixedForm.value.tags.slice();
     });
+    updateFixedField("tags", []);
   }
 }
 
 function disableVariantField(field) {
   setVariantFieldMode(field, false);
+}
+
+function normalizedVariantFieldValue(row = {}, field = "") {
+  if (field === "title") return String(row.title || "").trim();
+  if (field === "weight") return String(Number(row.weight_g || 0));
+  if (field === "dimensions") return [row.length_mm, row.width_mm, row.height_mm].map((value) => Number(value || 0)).join("x");
+  if (field === "tags") return (Array.isArray(row.main_tags) ? row.main_tags : splitTagValue(row.main_tags)).map((item) => String(item || "").trim()).filter(Boolean).sort().join("|");
+  return String(row[field] || "").trim();
+}
+
+function variantFieldHasDiverged(field) {
+  const values = templateEditor.variants
+    .map((row) => normalizedVariantFieldValue(row, field))
+    .filter((value) => value && value !== "0" && value !== "0x0x0");
+  return new Set(values).size > 1;
 }
 
 function moveVariantFieldBackToCommon(field) {
@@ -2356,8 +2395,7 @@ function applyListingAiResult(result = {}, field = {}) {
     if (shouldSkipAiAttribute(attr)) return 0;
     const value = extractAttributeAiValue(result, attr, content);
     if (value !== undefined && value !== null && value !== "") {
-      attr.value = normalizeAttributeAiValue(value, attr);
-      return hasAttributeValue(attr) ? 1 : 0;
+      return applyAiValueToAttribute(attr, value) ? 1 : 0;
     }
   }
 
@@ -2405,8 +2443,7 @@ function applyListingAiResult(result = {}, field = {}) {
       const byName = result.attributes[item.name];
       const value = byId ?? byName;
       if (value !== undefined && value !== null && value !== "") {
-        item.value = normalizeAttributeAiValue(value, item);
-        if (hasAttributeValue(item)) changed += 1;
+        if (applyAiValueToAttribute(item, value)) changed += 1;
       }
     }
   }
@@ -2451,6 +2488,16 @@ function normalizeAttributeAiValue(value, attr = {}) {
   }
   if (attr.type === 'multiselect') return Array.isArray(value) ? value : splitTagValue(String(value || ''));
   return value;
+}
+
+function applyAiValueToAttribute(attr = {}, value) {
+  const normalized = normalizeAttributeAiValue(value, attr);
+  const hasDictionary = (attr.type === "select" || attr.type === "multiselect") && Array.isArray(attr.values) && attr.values.length;
+  if (hasDictionary && (Array.isArray(normalized) ? !normalized.length : !String(normalized || "").trim())) {
+    return false;
+  }
+  attr.value = normalized;
+  return hasAttributeValue(attr);
 }
 
 function applyVariantAiRows(rows = []) {
@@ -2560,6 +2607,7 @@ function buildTemplatePayload() {
   }
   const images = templateEditor.images.filter((item) => item.url);
   const attributes = templateEditor.attributes.filter((item) => item.name || item.value);
+  const payloadTitle = templateEditor.title || templateEditor.variants.find((item) => item.title || item.name)?.title || templateEditor.template_name;
   const variants = templateEditor.variants
     .filter((item) => item.sku || item.name)
     .map((item) => ({
@@ -2577,13 +2625,13 @@ function buildTemplatePayload() {
     category_name: templateEditor.category_name,
     shop_ids: draftForm.shop_ids,
     template_name: templateEditor.template_name,
-    title: templateEditor.title,
+    title: payloadTitle,
     description: templateEditor.description,
     attributes,
     images,
     editable_payload: {
       sku: templateEditor.source_ozon_sku,
-      title: templateEditor.title,
+      title: payloadTitle,
       description: templateEditor.description,
       category_id: templateEditor.ozon_category_id,
       description_category_id: templateEditor.description_category_id,
@@ -2880,7 +2928,7 @@ onMounted(loadAll);
                 </el-form-item>
                 <el-form-item label="标题" required>
                   <div class="field-with-tools">
-                    <el-input v-model="templateEditor.title" />
+                    <el-input v-model="templateEditor.title" :disabled="variantFieldMode.title" :placeholder="variantFieldMode.title ? '已加入变体标题' : ''" />
                     <el-button circle :type="variantFieldMode.title ? 'primary' : 'default'" @click="enableVariantField('title')">+</el-button>
                     <el-button circle :icon="InfoFilled" @click="openAttributeDetail({ name: '标题', value: templateEditor.title, type: 'text', required: true, source: 'main' })" />
                     <el-button circle @click="runFieldAi({ name: '标题' })">AI</el-button>
@@ -2893,7 +2941,7 @@ onMounted(loadAll);
                 </el-form-item>
                 <el-form-item label="包装重量" required>
                   <div class="unit-input">
-                    <el-input-number v-model="templateEditor.weight_g" :min="0" :controls="false" />
+                    <el-input-number v-model="templateEditor.weight_g" :min="0" :controls="false" :disabled="variantFieldMode.weight" />
                     <span>g</span>
                     <span class="field-note">注意单位是克</span>
                     <el-button class="private-field-toggle" :type="variantFieldMode.weight ? 'primary' : 'default'" @click="enableVariantField('weight')">{{ variantFieldMode.weight ? "-" : "+" }}</el-button>
@@ -2902,11 +2950,11 @@ onMounted(loadAll);
                 </el-form-item>
                 <el-form-item label="包装尺寸" required>
                   <div class="dimension-row">
-                    <el-input-number v-model="templateEditor.length_cm" :min="0" :controls="false" />
+                    <el-input-number v-model="templateEditor.length_cm" :min="0" :controls="false" :disabled="variantFieldMode.dimensions" />
                     <span>cm</span>
-                    <el-input-number v-model="templateEditor.width_cm" :min="0" :controls="false" />
+                    <el-input-number v-model="templateEditor.width_cm" :min="0" :controls="false" :disabled="variantFieldMode.dimensions" />
                     <span>cm</span>
-                    <el-input-number v-model="templateEditor.height_cm" :min="0" :controls="false" />
+                    <el-input-number v-model="templateEditor.height_cm" :min="0" :controls="false" :disabled="variantFieldMode.dimensions" />
                     <span>cm</span>
                     <span class="field-note">页面单位是厘米，提交 Ozon 时自动转毫米</span>
                     <el-button class="private-field-toggle" :type="variantFieldMode.dimensions ? 'primary' : 'default'" @click="enableVariantField('dimensions')">{{ variantFieldMode.dimensions ? "-" : "+" }}</el-button>
@@ -2935,7 +2983,7 @@ onMounted(loadAll);
                 </el-form-item>
                 <el-form-item label="产品标签">
                   <div class="field-with-tools">
-                    <el-select :model-value="fixedForm.tags" multiple filterable allow-create default-first-option @update:model-value="updateFixedField('tags', $event)">
+                    <el-select :model-value="fixedForm.tags" multiple filterable allow-create default-first-option :disabled="variantFieldMode.tags" @update:model-value="updateFixedField('tags', $event)">
                       <el-option v-for="tag in fixedForm.tags" :key="tag" :label="tag" :value="tag" />
                     </el-select>
                     <el-button class="private-field-toggle" :type="variantFieldMode.tags ? 'primary' : 'default'" @click="enableVariantField('tags')">{{ variantFieldMode.tags ? "-" : "+" }}</el-button>
@@ -2969,7 +3017,7 @@ onMounted(loadAll);
                         <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="option.value" :value="option.value" />
                         <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
                       </el-select>
-                      <el-select v-else-if="field.type === 'multiselect'" v-model="field.value" multiple filterable allow-create default-first-option :loading="attributeValueLoading[attributeFieldKey(field)]" @visible-change="ensureAttributeValuesLoaded(field, $event)">
+                      <el-select v-else-if="field.type === 'multiselect'" v-model="field.value" multiple filterable default-first-option :loading="attributeValueLoading[attributeFieldKey(field)]" @visible-change="ensureAttributeValuesLoaded(field, $event)">
                         <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="option.value" :value="option.value" />
                         <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
                       </el-select>
@@ -2994,7 +3042,7 @@ onMounted(loadAll);
                         <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="option.value" :value="option.value" />
                         <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
                       </el-select>
-                      <el-select v-else-if="field.type === 'multiselect'" v-model="field.value" multiple filterable allow-create default-first-option :loading="attributeValueLoading[attributeFieldKey(field)]" @visible-change="ensureAttributeValuesLoaded(field, $event)">
+                      <el-select v-else-if="field.type === 'multiselect'" v-model="field.value" multiple filterable default-first-option :loading="attributeValueLoading[attributeFieldKey(field)]" @visible-change="ensureAttributeValuesLoaded(field, $event)">
                         <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="option.value" :value="option.value" />
                         <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
                       </el-select>

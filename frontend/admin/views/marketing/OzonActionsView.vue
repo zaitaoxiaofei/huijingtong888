@@ -19,7 +19,7 @@ const SELLER_STATUS_OPTIONS = [
 
 const PRODUCT_PAGE_SIZE = 100;
 const AUTO_CLEANUP_ACTION_IDS = [3684628, 3702380];
-const AUTO_CLEANUP_INTERVAL_MINUTES = 30;
+const AUTO_CLEANUP_INTERVAL_MINUTES = 10;
 
 const SELLER_STATUS_META = {
   ACTIVE: { label: "进行中", type: "success" },
@@ -37,6 +37,7 @@ const ACTION_TYPE_ZH = {
   INDIVIDUAL_DISCOUNT_BY_PRODUCTS: "卖家积分",
   OZON_ACCOUNT_DISCOUNT: "Ozon 银行卡折扣",
   MULTI_LEVEL_DISCOUNT_ON_AMOUNT: "多级满额折扣",
+  MARKETPLACE_MULTI_LEVEL_DISCOUNT_ON_AMOUNT: "多级满额折扣",
   STOCK_DISCOUNT: "库存折扣",
   PROMO: "促销",
   MEGA_PROMO: "大促",
@@ -45,6 +46,12 @@ const ACTION_TYPE_ZH = {
 };
 
 const TITLE_REPLACEMENTS = [
+  ["Эластичный бустинг. Без ограничения срока действия", "弹性提升。无有效期限制"],
+  ["Эластичный бустинг", "弹性提升"],
+  ["Максимальный бустинг: усиление", "最大提升：加强"],
+  ["Максимальный бустинг", "最大提升"],
+  ["Техно-выгода", "数码优惠"],
+  ["Без ограничения срока действия", "无有效期限制"],
   ["Распродажа", "大促"],
   ["распродажа", "大促"],
   ["Акция", "活动"],
@@ -59,8 +66,17 @@ const TITLE_REPLACEMENTS = [
   ["супер", "超级"],
   ["Товары", "商品"],
   ["товары", "商品"],
+  ["Товар", "商品"],
+  ["товар", "商品"],
   ["Неделя", "周"],
   ["неделя", "周"],
+  ["Максимальное продвижение", "最大提升"],
+  ["Максимальный буст", "最大提升"],
+  ["бустинг", "提升"],
+  ["усиление", "加强"],
+  ["Увеличение продаж", "销量提升"],
+  ["Без ограничения срока", "无有效期限制"],
+  ["Складская скидка", "库存折扣"],
   ["Весна", "春季"],
   ["Лето", "夏季"],
   ["Осень", "秋季"],
@@ -75,6 +91,7 @@ const state = reactive({
   shops: [],
   storeId: "",
   mode: "official",
+  actionView: "available",
   sellerStatus: "",
   search: "",
   syncPercent: 50,
@@ -102,6 +119,24 @@ const currentPager = computed(() => state.productScope === "joined" ? state.prod
 const visibleProducts = computed(() => getPagerRows(currentPager.value));
 const candidateTotal = computed(() => getPagerDisplayTotal(state.productPagers.candidates, getKnownProductsTotal(selectedAction.value, "candidates")));
 const joinedTotal = computed(() => getPagerDisplayTotal(state.productPagers.joined, getKnownProductsTotal(selectedAction.value, "joined")));
+const filteredActions = computed(() => {
+  const keyword = String(state.search || "").trim().toLowerCase();
+  return state.actions.filter((row) => {
+    const title = `${localizeActionTitle(row)} ${getRawActionTitle(row)} ${getActionId(row)}`.toLowerCase();
+    if (keyword && !title.includes(keyword)) return false;
+    if (state.actionView === "joined") return getKnownProductsTotal(row, "joined") > 0;
+    if (state.actionView === "not_joined") return getKnownProductsTotal(row, "joined") === 0;
+    if (state.actionView === "completed") return isActionCompleted(row);
+    const candidates = getKnownProductsTotal(row, "candidates");
+    return !isActionCompleted(row) && (candidates == null || candidates > 0);
+  });
+});
+const actionViewOptions = computed(() => [
+  { label: `可用的 ${countActions("available")}`, value: "available" },
+  { label: `我正在参与 ${countActions("joined")}`, value: "joined" },
+  { label: `不参与 ${countActions("not_joined")}`, value: "not_joined" },
+  { label: `已完成 ${countActions("completed")}`, value: "completed" }
+]);
 
 function createEmptyProductPager() {
   return {
@@ -155,6 +190,11 @@ function formatDate(value) {
   if (Number.isNaN(date.getTime())) return String(value);
   const pad = (num) => (num < 10 ? `0${num}` : String(num));
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function shortDate(value) {
+  const text = formatDate(value);
+  return text === "-" ? "-" : text.split(" ")[0];
 }
 
 function numberText(value) {
@@ -270,6 +310,43 @@ function getKnownProductsTotal(action, scope) {
   const raw = scope === "joined" ? action?.participating_products_count ?? action?.sku_count : action?.potential_products_count;
   const total = Number(raw);
   return Number.isFinite(total) && total >= 0 ? total : null;
+}
+
+function getActionEndDate(row) {
+  return row?.date_end || row?.end_at || row?.ends_at || row?.end_date;
+}
+
+function isActionCompleted(row) {
+  const value = getActionEndDate(row);
+  if (!value) return false;
+  const date = new Date(value);
+  return !Number.isNaN(date.getTime()) && date.getTime() < Date.now();
+}
+
+function countActions(view) {
+  return state.actions.filter((row) => {
+    if (view === "joined") return getKnownProductsTotal(row, "joined") > 0;
+    if (view === "not_joined") return getKnownProductsTotal(row, "joined") === 0;
+    if (view === "completed") return isActionCompleted(row);
+    const candidates = getKnownProductsTotal(row, "candidates");
+    return !isActionCompleted(row) && (candidates == null || candidates > 0);
+  }).length;
+}
+
+function actionDateText(row) {
+  const start = shortDate(row?.date_start || row?.start_at || row?.starts_at || row?.start_date);
+  const end = shortDate(getActionEndDate(row));
+  const type = getActionType(row);
+  return `从 ${start} 至 ${end}${type && type !== "-" ? `，${type}` : ""}`;
+}
+
+function actionJoinText(row) {
+  const joined = getKnownProductsTotal(row, "joined");
+  const candidates = getKnownProductsTotal(row, "candidates");
+  if (joined > 0 && candidates > 0) return `${joined} 件商品参加，还可添加 ${candidates} 件商品`;
+  if (joined > 0) return `${joined} 件商品正在参加`;
+  if (candidates > 0) return "请添加商品";
+  return "暂无可添加商品";
 }
 
 function getPagerDisplayTotal(pager, totalHint) {
@@ -644,6 +721,7 @@ watch(() => state.storeId, async () => {
 watch(() => state.mode, async () => {
   state.selectedActionId = "";
   state.actions = [];
+  state.actionView = "available";
   resetProducts();
   await loadActions();
 });
@@ -671,7 +749,7 @@ onMounted(async () => {
         <el-select v-if="state.mode === 'seller'" v-model="state.sellerStatus" class="status-select">
           <el-option v-for="item in SELLER_STATUS_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
         </el-select>
-        <el-input v-if="state.mode === 'seller'" v-model="state.search" clearable placeholder="搜索活动，至少 3 个字符" class="search-input" @keyup.enter="loadActions">
+        <el-input v-model="state.search" clearable placeholder="促销活动名称" class="search-input" @keyup.enter="loadActions">
           <template #prefix><el-icon><Search /></el-icon></template>
         </el-input>
         <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Search" :loading="state.actionsLoading" @click="loadActions">拉取活动</el-button>
@@ -681,7 +759,7 @@ onMounted(async () => {
     <section class="ozon-actions-cleanup">
       <div>
         <strong>自动删活动商品</strong>
-        <span>仅针对当前店铺的官方活动 {{ state.cleanupConfig.actionIds.join(" / ") }}，配置会保存在后台。</span>
+        <span>每 {{ state.cleanupConfig.intervalMinutes }} 分钟扫描一次，仅移除 Ozon 自动添加的官方活动商品。当前活动：{{ state.cleanupConfig.actionIds.join(" / ") }}。</span>
         <small>后台任务：{{ state.cleanupConfig.taskEnabled ? (state.cleanupConfig.taskRunning ? "正在执行" : "已启用") : "未启用" }}；最近执行：{{ state.cleanupConfig.lastRunAt ? formatDate(state.cleanupConfig.lastRunAt) : "-" }}</small>
         <small>{{ cleanupResultSummary(state.cleanupConfig) }}</small>
       </div>
@@ -710,69 +788,50 @@ onMounted(async () => {
         </div>
         <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="state.actionsLoading" @click="loadActions">刷新</el-button>
       </div>
-      <el-table
-        v-loading="state.actionsLoading"
-        :data="state.actions"
-        border
-        stripe
-        height="calc(100vh - 390px)"
-        empty-text="暂无活动，请先拉取"
-        row-key="id"
-        :row-class-name="({ row }) => String(getActionId(row)) === String(state.selectedActionId) ? 'selected-action-row' : ''"
-        @row-click="openProducts"
-      >
-        <el-table-column label="活动" min-width="360">
-          <template #default="{ row }">
-            <div class="action-title">
-              <strong>{{ localizeActionTitle(row) }}</strong>
-              <small v-if="localizeActionTitle(row) !== getRawActionTitle(row)">原文：{{ getRawActionTitle(row) }}</small>
-              <small>ID: {{ getActionId(row) || "-" }}</small>
+      <div class="ozon-action-filter">
+        <el-segmented v-model="state.actionView" :options="actionViewOptions" />
+      </div>
+      <div v-loading="state.actionsLoading" class="ozon-action-list">
+        <div
+          v-for="row in filteredActions"
+          :key="getActionId(row)"
+          role="button"
+          tabindex="0"
+          class="ozon-action-card"
+          :class="{ 'is-selected': String(getActionId(row)) === String(state.selectedActionId) }"
+          @click="openProducts(row)"
+          @keydown.enter="openProducts(row)"
+        >
+          <div class="action-card-main">
+            <span class="action-card-date">{{ actionDateText(row) }}</span>
+            <strong>{{ localizeActionTitle(row) }}</strong>
+            <small v-if="localizeActionTitle(row) !== getRawActionTitle(row)">原文：{{ getRawActionTitle(row) }}</small>
+            <span :class="getKnownProductsTotal(row, 'joined') > 0 ? 'action-join is-active' : 'action-join'">{{ actionJoinText(row) }}</span>
+          </div>
+          <div class="action-card-side">
+            <div class="action-badges">
+              <el-tag v-if="state.mode !== 'seller'" type="warning" effect="dark">A 已自动添加</el-tag>
+              <el-tag v-else :type="statusMeta(row).type" effect="dark">{{ statusMeta(row).label }}</el-tag>
+              <el-tag v-if="getKnownProductsTotal(row, 'joined') > 0" type="success" effect="dark">我正在参与</el-tag>
             </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="类型" min-width="220">
-          <template #default="{ row }">
-            <el-tag>{{ getActionType(row) }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" width="120">
-          <template #default="{ row }">
-            <el-tag v-if="state.mode !== 'seller'" type="primary">官方活动</el-tag>
-            <el-tag v-else :type="statusMeta(row).type">{{ statusMeta(row).label }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="时间" width="190">
-          <template #default="{ row }">
-            <div class="time-cell">
-              <span>起: {{ formatDate(row?.date_start || row?.start_at || row?.starts_at || row?.start_date).split(" ")[0] }}</span>
-              <span>止: {{ formatDate(row?.date_end || row?.end_at || row?.ends_at || row?.end_date).split(" ")[0] }}</span>
+            <span class="action-card-count">可以添加 <b>{{ numberText(row?.potential_products_count) }}</b> 商品</span>
+            <div class="action-card-actions" @click.stop>
+              <el-button class="erp-btn-link" link type="primary" @click="openProducts(row)">管理商品</el-button>
+              <el-dropdown v-if="state.mode === 'seller'" trigger="click" @command="(cmd) => cmd === 'pause' ? toggleSellerAction(row, false) : cmd === 'resume' ? toggleSellerAction(row, true) : archiveSellerAction(row)">
+                <el-button class="erp-btn-link" link type="primary">更多</el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item v-if="getSellerActionStatus(row) === 'ACTIVE'" command="pause">暂停活动</el-dropdown-item>
+                    <el-dropdown-item v-if="['PAUSED', 'PLANNED'].includes(getSellerActionStatus(row))" command="resume">启用活动</el-dropdown-item>
+                    <el-dropdown-item command="archive">归档活动</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="数量" width="150">
-          <template #default="{ row }">
-            <div class="time-cell">
-              <span>可: {{ numberText(row?.potential_products_count) }}</span>
-              <span>已: {{ numberText(row?.participating_products_count ?? row?.sku_count) }}</span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="160" fixed="right">
-          <template #default="{ row }">
-            <el-button class="erp-btn-link" link type="primary" @click.stop="openProducts(row)">管理商品</el-button>
-            <el-dropdown v-if="state.mode === 'seller'" trigger="click" @command="(cmd) => cmd === 'pause' ? toggleSellerAction(row, false) : cmd === 'resume' ? toggleSellerAction(row, true) : archiveSellerAction(row)">
-              <el-button class="erp-btn-link" link type="primary" @click.stop>更多</el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item v-if="getSellerActionStatus(row) === 'ACTIVE'" command="pause">暂停活动</el-dropdown-item>
-                  <el-dropdown-item v-if="['PAUSED', 'PLANNED'].includes(getSellerActionStatus(row))" command="resume">启用活动</el-dropdown-item>
-                  <el-dropdown-item command="archive">归档活动</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-          </template>
-        </el-table-column>
-      </el-table>
+          </div>
+        </div>
+        <el-empty v-if="!state.actionsLoading && !filteredActions.length" description="暂无匹配活动，请调整搜索或状态筛选" />
+      </div>
     </section>
 
     <el-dialog v-model="state.productsModalOpen" width="min(1480px, 96vw)" class="ozon-products-dialog" destroy-on-close>
@@ -1010,6 +1069,110 @@ onMounted(async () => {
   margin-bottom: 12px;
 }
 
+.ozon-action-filter {
+  margin-bottom: 14px;
+}
+
+.ozon-action-filter :deep(.el-segmented) {
+  --el-segmented-item-selected-bg-color: #f8fbff;
+  --el-segmented-item-selected-color: #005bff;
+  border: 1px solid #d6e0ee;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.ozon-action-list {
+  min-height: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+  max-height: calc(100vh - 430px);
+  padding-right: 4px;
+}
+
+.ozon-action-card {
+  width: 100%;
+  min-height: 146px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+  gap: 24px;
+  align-items: center;
+  padding: 26px 28px;
+  border: 1px solid transparent;
+  border-radius: 24px;
+  background: #f5f7fb;
+  color: var(--erp-text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+
+.ozon-action-card:hover,
+.ozon-action-card.is-selected {
+  border-color: #0b68ff;
+  background: #f7faff;
+  box-shadow: 0 8px 22px rgba(15, 61, 122, 0.08);
+}
+
+.action-card-main,
+.action-card-side,
+.action-badges {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.action-card-main strong {
+  color: #07142b;
+  font-size: 18px;
+  line-height: 1.3;
+  font-weight: 800;
+}
+
+.action-card-main small,
+.action-card-date {
+  color: #60748f;
+  font-size: 14px;
+}
+
+.action-join {
+  color: #005bff;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.action-join.is-active {
+  color: #d95f00;
+}
+
+.action-card-side {
+  justify-items: end;
+  align-self: stretch;
+}
+
+.action-badges {
+  grid-auto-flow: column;
+  justify-content: end;
+  align-items: center;
+}
+
+.action-card-count {
+  align-self: end;
+  color: #07142b;
+  font-size: 15px;
+}
+
+.action-card-count b {
+  font-size: 18px;
+}
+
+.action-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .action-title strong {
   color: var(--erp-text);
   font-size: 14px;
@@ -1110,5 +1273,28 @@ onMounted(async () => {
   justify-content: space-between;
   color: var(--erp-text-secondary);
   font-size: 12px;
+}
+
+@media (max-width: 980px) {
+  .ozon-actions-toolbar,
+  .ozon-actions-cleanup {
+    flex-direction: column;
+  }
+
+  .ozon-action-list {
+    max-height: none;
+  }
+
+  .ozon-action-card {
+    grid-template-columns: 1fr;
+    border-radius: 18px;
+    padding: 20px;
+  }
+
+  .action-card-side,
+  .action-badges {
+    justify-items: start;
+    justify-content: start;
+  }
 }
 </style>

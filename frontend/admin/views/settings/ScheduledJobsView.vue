@@ -218,6 +218,14 @@ function configSummary(row) {
 
 function runSummary(run) {
   const result = run?.result || {};
+  if (run?.jobKey === "ozon_action_cleanup") {
+    if (!run?.result && Number(run?.resultSize || 0) > 0) return "清理结果已写入日志明细";
+    const parts = [];
+    parts.push(`扫描店铺 ${Number(result.stores || 0)}`);
+    parts.push(`移除 ${Number(result.removed || 0)}`);
+    if (Number(result.failed || 0) > 0) parts.push(`失败 ${Number(result.failed || 0)}`);
+    return parts.join(" / ");
+  }
   if (!run?.result && Number(run?.resultSize || 0) > 0) return `结果较大，已省略列表详情 (${Math.round(Number(run.resultSize || 0) / 1024)} KB)`;
   const rows = Array.isArray(result.results) ? result.results : [];
   const errorCodes = rows.map((item) => String(item?.error_code || "")).filter(Boolean);
@@ -250,6 +258,11 @@ function recentRuns(row) {
 
 function runErrorSummary(run) {
   const result = run?.result || {};
+  if (run?.jobKey === "ozon_action_cleanup") {
+    const rows = Array.isArray(result.results) ? result.results : [];
+    const errors = rows.map((item) => item?.error).filter(Boolean);
+    if (errors.length) return errors.slice(0, 2).join("；");
+  }
   const rows = Array.isArray(result.results) ? result.results : [];
   const errorCodes = rows.map((item) => String(item?.error_code || "")).filter(Boolean);
   if (errorCodes.includes("no_syncable_campaigns")) return "店铺当前未开广告或暂无可同步商品";
@@ -492,6 +505,7 @@ onMounted(loadJobs);
               >
                 补跑
               </el-button>
+              <el-button class="erp-btn-link" link :disabled="!row.recentRuns?.length" @click="openRunDetail(row)">日志</el-button>
             </div>
           </template>
         </el-table-column>
@@ -552,6 +566,36 @@ onMounted(loadJobs);
           <el-button class="erp-btn erp-btn-primary" type="primary" :loading="saving" @click="saveConfig">保存</el-button>
         </div>
       </template>
+    </el-dialog>
+
+    <el-dialog v-model="detailVisible" title="运行日志" width="760px">
+      <div v-if="activeJob" class="scheduled-dialog">
+        <div class="scheduled-dialog__header">
+          <strong>{{ activeJob.name }}</strong>
+          <span>{{ activeRun?.mode || "-" }} / {{ formatDateTime(activeRun?.startedAt) }}</span>
+        </div>
+        <el-table v-loading="detailLoading" :data="runEvents" class="erp-data-table" height="420" empty-text="暂无日志">
+          <el-table-column label="时间" width="160">
+            <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="86">
+            <template #default="{ row }">
+              <el-tag size="small" :type="eventStatusType(row.status)" effect="plain">{{ row.status || "info" }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="店铺" width="150">
+            <template #default="{ row }">{{ row.shop_name || row.shop_id || "-" }}</template>
+          </el-table-column>
+          <el-table-column label="内容" min-width="260">
+            <template #default="{ row }">
+              <div class="scheduled-event-message">
+                <span>{{ row.message || row.step_key || "-" }}</span>
+                <small v-if="eventDetailText(row)">{{ eventDetailText(row) }}</small>
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
     </el-dialog>
   </div>
 </template>
@@ -740,6 +784,24 @@ onMounted(loadJobs);
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.scheduled-event-message {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.scheduled-event-message span {
+  color: var(--erp-text);
+  font-size: 13px;
+}
+
+.scheduled-event-message small {
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-all;
 }
 
 @media (max-width: 960px) {

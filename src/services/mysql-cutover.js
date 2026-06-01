@@ -12745,6 +12745,214 @@ export async function orderDetailMysql(id) {
   return { order, items, finance, profit_detail_snapshot: profitDetailSnapshot };
 }
 
+const CUSTOMER_MESSAGE_TYPES = new Set(["pickup_notice", "order_update", "delay_comfort"]);
+
+function customerMessageTypeLabel(type) {
+  if (type === "pickup_notice") return "到货取货通知";
+  if (type === "delay_comfort") return "延误安抚";
+  return "订单动态回复";
+}
+
+function orderCustomerStatusLabel(row = {}) {
+  const raw = String(row.status || row.tracking_stage || row.logistics_status || "").trim();
+  const value = raw.toLowerCase();
+  const map = {
+    awaiting_packaging: "等待打包",
+    awaiting_deliver: "等待发货",
+    posting_registered: "已登记物流",
+    sent_by_seller: "商家已发货",
+    posting_transferred_to_courier_service: "已交给物流商",
+    posting_transferring: "运输中",
+    posting_in_carriage: "干线运输中",
+    posting_transferring_to_delivery: "转配送中",
+    posting_ready_for_pickup: "已到达取货点",
+    delivered: "已签收",
+    cancelled: "已取消"
+  };
+  return map[value] || raw || "状态同步中";
+}
+
+function customerMessageDeliveryWindow(row = {}) {
+  const begin = row.delivery_date_begin ? String(row.delivery_date_begin).slice(0, 10) : "";
+  const end = row.delivery_date_end ? String(row.delivery_date_end).slice(0, 10) : "";
+  if (begin && end && begin !== end) return `${begin} 至 ${end}`;
+  return end || begin || "";
+}
+
+function customerMessageProductSummary(row = {}) {
+  const names = String(row.product_names || "").split(",").map((item) => item.trim()).filter(Boolean);
+  if (!names.length) return "您购买的商品";
+  if (names.length === 1) return names[0];
+  return `${names[0]}等 ${names.length} 件商品`;
+}
+
+function customerMessageIsPickup(row = {}) {
+  const text = `${row.status || ""} ${row.tracking_stage || ""} ${row.logistics_status || ""}`.toLowerCase();
+  return text.includes("ready_for_pickup") || text.includes("pickup");
+}
+
+function customerMessageIsDelayed(row = {}) {
+  if (Number(row.is_overdue || 0)) return true;
+  const endTime = row.delivery_date_end ? Date.parse(row.delivery_date_end) : NaN;
+  const finished = /delivered|cancelled/i.test(`${row.status || ""} ${row.tracking_stage || ""}`);
+  return Number.isFinite(endTime) && endTime < Date.now() && !finished;
+}
+
+function customerMessageSuggestedType(row = {}) {
+  if (customerMessageIsDelayed(row)) return "delay_comfort";
+  if (customerMessageIsPickup(row)) return "pickup_notice";
+  return "order_update";
+}
+
+function buildCustomerMessage(row = {}, requestedType = "order_update") {
+  const type = CUSTOMER_MESSAGE_TYPES.has(requestedType) ? requestedType : customerMessageSuggestedType(row);
+  const posting = row.posting_number || row.order_number || "";
+  const status = orderCustomerStatusLabel(row);
+  const windowText = customerMessageDeliveryWindow(row);
+  const product = customerMessageProductSummary(row);
+  const tracking = row.tracking_number ? `物流单号：${row.tracking_number}。` : "";
+  const shop = row.shop_name ? `店铺：${row.shop_name}。` : "";
+  const suffix = "我们会继续关注订单进度，如有新的变化会及时同步给您。";
+
+  if (type === "pickup_notice") {
+    return [
+      "您好，您的订单已有最新进展。",
+      `订单 ${posting}（${product}）目前显示：${status}。`,
+      "包裹已到达取货点/可取货环节，请您留意 Ozon App 内的取货码、取货地址和取货截止时间，方便时尽快安排取货。",
+      tracking,
+      "感谢您的耐心等待，祝您取货顺利。"
+    ].filter(Boolean).join("\n");
+  }
+
+  if (type === "delay_comfort") {
+    return [
+      "您好，非常抱歉让您久等了。",
+      `我们查看了订单 ${posting}（${product}）的最新物流状态，目前显示：${status}。${windowText ? `系统预计送达时间为 ${windowText}，现在进度比预期慢。` : "目前物流进度比正常节奏慢。"}`,
+      "我们已经联系平台客服核实物流情况，并会持续跟进包裹后续动态。",
+      tracking,
+      "请您先不要担心，有新的进展我们会第一时间同步给您，感谢您的理解和耐心。"
+    ].filter(Boolean).join("\n");
+  }
+
+  return [
+    "您好，感谢您的咨询。",
+    `您咨询的订单 ${posting}（${product}）最新状态是：${status}。${windowText ? `当前预计送达/取货时间：${windowText}。` : ""}`,
+    tracking,
+    shop,
+    suffix
+  ].filter(Boolean).join("\n");
+}
+
+function customerMessageReason(row = {}, type = "") {
+  const targetType = type || customerMessageSuggestedType(row);
+  if (targetType === "pickup_notice") return "订单已进入取货/待取货阶段，适合提醒客户尽快取货。";
+  if (targetType === "delay_comfort") return "订单进度慢于预计时间，适合主动安抚并说明已联系平台客服。";
+  return "用于客户催单时快速回复当前订单最新动态。";
+}
+
+function normalizeCustomerMessageRow(row = {}, requestedType = "") {
+  const suggestedType = requestedType && CUSTOMER_MESSAGE_TYPES.has(requestedType) ? requestedType : customerMessageSuggestedType(row);
+  const message = buildCustomerMessage(row, suggestedType);
+  return {
+    ...row,
+    message_type: suggestedType,
+    message_type_label: customerMessageTypeLabel(suggestedType),
+    status_label: orderCustomerStatusLabel(row),
+    delivery_window_text: customerMessageDeliveryWindow(row),
+    product_summary: customerMessageProductSummary(row),
+    reason: customerMessageReason(row, suggestedType),
+    customer_message: message,
+    urgency: suggestedType === "delay_comfort" ? "warning" : suggestedType === "pickup_notice" ? "success" : "info"
+  };
+}
+
+export async function customerMessagesMysql(query = {}) {
+  ensureMysqlCutoverEnabled();
+  const messageType = String(query.type || query.message_type || "all");
+  const search = String(query.search || query.keyword || "").trim().toLowerCase();
+  const limit = Math.min(Math.max(Number(query.limit || 80), 1), 200);
+  const where = ["1 = 1"];
+  const params = [];
+  if (search) {
+    where.push(`(
+      LOWER(o.posting_number) LIKE ?
+      OR LOWER(COALESCE(o.order_number, '')) LIKE ?
+      OR LOWER(COALESCE(s.name, '')) LIKE ?
+      OR EXISTS (
+        SELECT 1 FROM order_items oi_search
+        WHERE oi_search.order_id = o.id
+          AND (LOWER(COALESCE(oi_search.ozon_sku, '')) LIKE ? OR LOWER(COALESCE(oi_search.ozon_name, '')) LIKE ?)
+      )
+    )`);
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+  }
+
+  const rows = await mysqlQuery(`
+    SELECT o.id, o.shop_id, o.posting_number, o.order_number, o.status, o.logistics_status, o.tracking_stage,
+      o.tracking_number, o.ordered_at, o.delivered_at, o.sync_state, s.name AS shop_name,
+      latest.customer_name, latest.buyer_city, latest.buyer_region, latest.delivery_date_begin, latest.delivery_date_end,
+      latest.warehouse_name, latest.tpl_provider,
+      raw.raw_json,
+      GROUP_CONCAT(DISTINCT COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), oi.ozon_sku) ORDER BY oi.id SEPARATOR ', ') AS product_names,
+      GROUP_CONCAT(DISTINCT oi.ozon_sku ORDER BY oi.ozon_sku SEPARATOR ', ') AS skus
+    FROM orders o
+    JOIN shops s ON s.id = o.shop_id
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku
+    LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
+    LEFT JOIN order_status_history latest ON latest.id = (
+      SELECT osh.id
+      FROM order_status_history osh
+      WHERE osh.order_id = o.id
+      ORDER BY osh.observed_at DESC, osh.id DESC
+      LIMIT 1
+    )
+    WHERE ${where.join(" AND ")}
+    GROUP BY o.id
+    ORDER BY o.ordered_at DESC, o.id DESC
+    LIMIT ${limit}
+  `, params);
+
+  const normalized = rows.map((row) => normalizeCustomerMessageRow(enrichOrderLogisticsFromRawForMessage(row)));
+  const filtered = messageType === "all" ? normalized : normalized.filter((row) => row.message_type === messageType);
+  const counts = filtered.reduce((acc, row) => {
+    acc[row.message_type] = Number(acc[row.message_type] || 0) + 1;
+    return acc;
+  }, {});
+  return {
+    rows: filtered,
+    total: filtered.length,
+    counts,
+    generated_at: new Date().toISOString()
+  };
+}
+
+function enrichOrderLogisticsFromRawForMessage(row = {}) {
+  const raw = parseJsonOrNull(row.raw_json) || {};
+  const analytics = raw.analytics_data || raw.analytics || {};
+  const deliveryMethod = raw.delivery_method || {};
+  return {
+    ...row,
+    delivery_date_begin: row.delivery_date_begin || analytics.delivery_date_begin || raw.delivery_date_begin || "",
+    delivery_date_end: row.delivery_date_end || analytics.delivery_date_end || raw.delivery_date_end || "",
+    buyer_city: row.buyer_city || analytics.city || raw.customer?.address?.city || "",
+    buyer_region: row.buyer_region || analytics.region || raw.customer?.address?.region || "",
+    warehouse_name: row.warehouse_name || deliveryMethod.warehouse || analytics.warehouse || "",
+    tpl_provider: row.tpl_provider || deliveryMethod.tpl_provider || analytics.tpl_provider || ""
+  };
+}
+
+export async function previewCustomerMessageMysql(body = {}) {
+  ensureMysqlCutoverEnabled();
+  const orderId = Number(body.order_id || body.orderId || 0);
+  if (!orderId) throw new Error("缺少订单 ID");
+  const result = await customerMessagesMysql({ search: "", limit: 200, type: "all" });
+  const row = result.rows.find((item) => Number(item.id) === orderId);
+  if (!row) throw new Error("未找到订单");
+  const type = String(body.type || body.message_type || row.message_type || "order_update");
+  return normalizeCustomerMessageRow(row, CUSTOMER_MESSAGE_TYPES.has(type) ? type : row.message_type);
+}
+
 export async function orderStatusHistoryMysql(orderId, query = {}) {
   ensureMysqlCutoverEnabled();
   const limit = Math.min(Math.max(Number(query.limit || 200), 1), 1000);

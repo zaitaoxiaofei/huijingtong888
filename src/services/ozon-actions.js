@@ -3,7 +3,7 @@ import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 const OZON_API_BASE = "https://api-seller.ozon.ru";
 const ACTION_CLEANUP_SETTING_PREFIX = "ozon.actions.cleanup:";
 const DEFAULT_CLEANUP_ACTION_IDS = [3684628, 3702380];
-const DEFAULT_CLEANUP_INTERVAL_MINUTES = 30;
+const DEFAULT_CLEANUP_INTERVAL_MINUTES = 10;
 const OZON_REQUEST_TIMEOUT_MS = 30000;
 const ACTION_PRODUCTS_PAGE_LIMIT = 100;
 const ACTION_DELETE_BATCH_LIMIT = 1000;
