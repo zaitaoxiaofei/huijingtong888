@@ -22,7 +22,7 @@ const state = reactive({
     from: "",
     to: "",
     page: 1,
-    pageSize: 30,
+    pageSize: 20,
     sortField: "priority",
     sortDirection: "desc"
   }
@@ -257,7 +257,7 @@ async function reset() {
   state.filters.from = "";
   state.filters.to = "";
   state.filters.page = 1;
-  state.filters.pageSize = 30;
+  state.filters.pageSize = 20;
   state.filters.sortField = "priority";
   state.filters.sortDirection = "desc";
   await loadRows();
@@ -270,7 +270,7 @@ function pageChange(page) {
 
 function sizeChange(size) {
   state.filters.page = 1;
-  state.filters.pageSize = Number(size || 50);
+  state.filters.pageSize = Number(size || 20);
   loadRows();
 }
 
@@ -279,7 +279,7 @@ onMounted(() => loadRows());
 </script>
 
 <template>
-  <div class="page-stack exception-workbench-page">
+  <div class="page-stack exception-workbench-page erp-paged-page">
     <el-card shadow="never" class="page-card exception-overview-card">
       <div class="exception-overview">
         <div class="exception-overview__main">
@@ -300,12 +300,12 @@ onMounted(() => loadRows());
             <span v-for="item in toolbarSummary" :key="item">{{ item }}</span>
             <small v-if="payload.generatedAt">生成时间 {{ dt(payload.generatedAt) }}</small>
           </div>
-          <el-button size="small" :loading="loading" @click="loadRows(true)">刷新数据</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" :loading="loading" @click="loadRows(true)">刷新数据</el-button>
         </div>
       </div>
     </el-card>
 
-    <el-card shadow="never" class="page-card exception-table-card">
+    <el-card shadow="never" class="page-card exception-table-card erp-paged-card">
       <template #header>
         <div class="page-card-header">
           <div>
@@ -324,25 +324,26 @@ onMounted(() => loadRows());
                 style="width: 240px"
                 @keyup.enter="search"
               />
-              <el-button type="primary" size="small" :loading="loading" @click="search">查询</el-button>
-              <el-button size="small" @click="reset">重置</el-button>
+              <el-button class="erp-btn erp-btn-primary" type="primary" size="small" :loading="loading" @click="search">查询</el-button>
+              <el-button class="erp-btn erp-btn-secondary" size="small" @click="reset">重置</el-button>
             </div>
-            <el-button :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'handled')">批量已处理</el-button>
-            <el-button type="warning" plain :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'ignored')">批量忽略</el-button>
-            <el-button plain :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'open')">恢复待处理</el-button>
+            <el-button class="erp-btn erp-btn-primary" :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'handled')">批量已处理</el-button>
+            <el-button class="erp-btn erp-btn-secondary" type="warning" plain :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'ignored')">批量忽略</el-button>
+            <el-button class="erp-btn erp-btn-secondary" plain :loading="actionLoading" :disabled="!state.selectedIds.length" @click="saveStates(state.selectedIds, 'open')">恢复待处理</el-button>
           </div>
         </div>
       </template>
 
-      <el-table
-        :data="payload.rows"
-        row-key="id"
-        stripe
-        class="erp-data-table exception-table"
-        table-layout="fixed"
-        v-loading="loading"
-        @selection-change="onSelect"
-      >
+      <div class="exception-table-wrap erp-table-scroll">
+        <el-table
+          :data="payload.rows"
+          row-key="id"
+          stripe
+          class="erp-data-table exception-table"
+          table-layout="fixed"
+          v-loading="loading"
+          @selection-change="onSelect"
+        >
         <el-table-column type="selection" width="48" />
 
         <el-table-column label="异常对象" min-width="330">
@@ -386,12 +387,12 @@ onMounted(() => loadRows());
         <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
             <div class="exception-actions-cell">
-              <el-button class="exception-action-button" size="small" plain @click="saveStates([row.id], 'handled')">已处理</el-button>
-              <el-button class="exception-action-button" size="small" plain type="warning" @click="saveStates([row.id], 'ignored')">忽略</el-button>
+              <el-button class="exception-action-button erp-btn-link" size="small" plain @click="saveStates([row.id], 'handled')">已处理</el-button>
+              <el-button class="exception-action-button erp-btn-link" size="small" plain type="warning" @click="saveStates([row.id], 'ignored')">忽略</el-button>
 
               <el-button
                 v-if="props.view === 'profit' && row.orderId"
-                class="exception-action-button"
+                class="exception-action-button erp-btn-link"
                 size="small"
                 plain
                 :loading="rowActionKey === actionKey(row.id, 'recalculate')"
@@ -400,12 +401,12 @@ onMounted(() => loadRows());
                 重算利润
               </el-button>
 
-              <el-button v-if="props.view === 'profit' && row.productId" class="exception-action-button" size="small" plain @click="openInventory(row)">查看库存</el-button>
-              <el-button v-if="props.view === 'binding'" class="exception-action-button" size="small" plain type="primary" @click="openBinding(row)">去绑定</el-button>
+              <el-button v-if="props.view === 'profit' && row.productId" class="exception-action-button erp-btn-link" size="small" plain @click="openInventory(row)">查看库存</el-button>
+              <el-button v-if="props.view === 'binding'" class="exception-action-button erp-btn-link" size="small" plain type="primary" @click="openBinding(row)">去绑定</el-button>
 
               <el-button
                 v-if="props.view === 'profit' && row.onlineProductId"
-                class="exception-action-button"
+                class="exception-action-button erp-btn-link erp-btn-link-danger"
                 size="small"
                 plain
                 type="danger"
@@ -417,14 +418,15 @@ onMounted(() => loadRows());
             </div>
           </template>
         </el-table-column>
-      </el-table>
+        </el-table>
+      </div>
 
       <PageFooterPagination
         class="exception-footer"
         :total="payload.total"
         :page="state.filters.page"
         :page-size="state.filters.pageSize"
-        :page-sizes="[30, 50, 100, 200]"
+        :page-sizes="[20, 50, 100, 200]"
         @update:page="pageChange"
         @update:page-size="sizeChange"
       />
@@ -433,7 +435,7 @@ onMounted(() => loadRows());
 </template>
 
 <style scoped>
-.exception-workbench-page { min-height: 100%; gap: 12px; }
+.exception-workbench-page { min-height: 0; gap: 12px; }
 .exception-overview-card { padding-bottom: 10px; }
 .exception-overview { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
 .exception-overview__main { display: grid; gap: 8px; min-width: 0; }
@@ -446,7 +448,8 @@ onMounted(() => loadRows());
 .exception-overview__aside { display: grid; gap: 8px; min-width: 300px; justify-items: end; }
 .exception-module-tabs { width: 100%; }
 .exception-toolbar__summary { display: flex; flex-wrap: wrap; gap: 8px 16px; color: #64748b; font-size: 13px; justify-content: flex-end; }
-.exception-table-card { display: flex; flex-direction: column; min-height: calc(100vh - 260px); }
+.exception-table-card { min-height: 0; }
+.exception-table-wrap { flex: 1 1 auto; }
 .exception-filter-inline { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .exception-object-cell { display: flex; gap: 12px; align-items: flex-start; }
 .exception-thumb { width: 56px; height: 56px; border-radius: 10px; border: 1px solid rgba(148, 163, 184, 0.25); background: #f8fafc; overflow: hidden; flex: none; }

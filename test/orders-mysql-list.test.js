@@ -2,14 +2,31 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { config } from "../src/config.js";
-import { closeMysqlPool } from "../src/mysql-pool.js";
+import { closeMysqlPool, mysqlQuery } from "../src/mysql-pool.js";
 import { ordersPagedMysql } from "../src/services/mysql-cutover.js";
+import { resolveOrderLogisticsRuleValue } from "../src/services/order-logistics-filter-rules.js";
 
 const mysqlTest = config.dbClient === "mysql" ? test : test.skip;
 
 test.after(async () => {
   await closeMysqlPool();
 });
+
+function logisticsRuleFilterValue(row = {}) {
+  const keywords = String(row.filter_keywords || "")
+    .split(/\r?\n|[|｜]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const fallbackKeywords = [row.name, row.carrier, row.channel]
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  return resolveOrderLogisticsRuleValue({
+    name: row.name,
+    carrier: row.carrier,
+    channel: row.channel,
+    warehousePatterns: keywords.length ? keywords : fallbackKeywords
+  }) || `logistics_rule_${row.id}`;
+}
 
 mysqlTest("MySQL order list supports status tabs, print filters, inventory sorting, and purchase search", async () => {
   const all = await ordersPagedMysql({ paged: "1", page: 1, pageSize: 5, status: "all" });
@@ -49,41 +66,37 @@ mysqlTest("MySQL order list supports status tabs, print filters, inventory sorti
 
 mysqlTest("MySQL order list supports logistics method filters", async () => {
   const all = await ordersPagedMysql({ paged: "1", page: 1, pageSize: 5 });
-  assert.ok(all.logisticsMethodOptions.some((option) => option.value === "cel_air_land_1_500g"));
-  assert.ok(all.logisticsMethodOptions.some((option) => option.value === "hunchun_2"));
-  assert.ok(all.logisticsMethodOptions.some((option) => option.value === "cel_land_500_25000g"));
-  assert.ok(all.logisticsMethodOptions.some((option) => option.value === "cel_land_2_30kg"));
-  assert.ok(all.logisticsMethodOptions.some((option) => option.value === "cel_land_0_5_30kg"));
-  assert.ok(!all.logisticsMethodOptions.some((option) => option.value === "cel_large_land"));
+  assert.ok(all.logisticsMethodOptions.some((option) => option.value === "all"));
 
-  const hunchunOption = all.logisticsMethodOptions.find((option) => option.value === "hunchun_2");
-  if (Number(hunchunOption?.count || 0) > 0) {
-    const hunchun = await ordersPagedMysql({ paged: "1", page: 1, pageSize: 5, logisticsMethod: "hunchun_2" });
-    assert.equal(hunchun.total, Number(hunchunOption.count || 0));
-    assert.ok(hunchun.rows.length <= 5);
-    assert.ok(hunchun.rows.every((row) => `${row.delivery_method_name || ""} ${row.warehouse_name || ""} ${row.logistics_channel || ""}`.toLowerCase().includes("hunchun")
-      || `${row.delivery_method_name || ""} ${row.warehouse_name || ""} ${row.logistics_channel || ""}`.toLowerCase().includes("hch-pd")));
+  const configuredRules = await mysqlQuery(`
+    SELECT id, name, filter_keywords, carrier, channel, enabled
+    FROM logistics_fee_rules
+  `);
+  const enabledValues = new Set(
+    configuredRules
+      .filter((row) => Number(row.enabled) !== 0)
+      .map(logisticsRuleFilterValue)
+      .filter(Boolean)
+  );
+  const disabledOnlyValues = new Set(
+    configuredRules
+      .filter((row) => Number(row.enabled) === 0)
+      .map(logisticsRuleFilterValue)
+      .filter((value) => value && !enabledValues.has(value))
+  );
+  const visibleOptions = all.logisticsMethodOptions.filter((option) => option.value !== "all");
+
+  if (configuredRules.length > 0) {
+    assert.ok(visibleOptions.length > 0);
+    assert.ok(visibleOptions.every((option) => enabledValues.has(option.value)));
+    assert.ok(visibleOptions.every((option) => !disabledOnlyValues.has(option.value)));
   }
+  assert.ok(visibleOptions.every((option) => Number(option.count || 0) > 0));
 
-  const celAirOption = all.logisticsMethodOptions.find((option) => option.value === "cel_air_land_1_500g");
-  if (Number(celAirOption?.count || 0) > 0) {
-    const celAir = await ordersPagedMysql({ paged: "1", page: 1, pageSize: 5, logisticsMethod: "cel_air_land_1_500g" });
-    assert.equal(celAir.total, Number(celAirOption.count || 0));
-    assert.ok(celAir.rows.length <= 5);
-    assert.ok(celAir.rows.every((row) => !`${row.delivery_method_name || ""} ${row.warehouse_name || ""} ${row.logistics_channel || ""}`.toLowerCase().includes("hunchun")));
-  }
-
-  for (const [value, expectedText] of [
-    ["cel_land_500_25000g", "cel陆运(500-25000g"],
-    ["cel_land_2_30kg", "cel陆运(2-30kg"],
-    ["cel_land_0_5_30kg", "cel陆运(0.5-30kg"]
-  ]) {
-    const option = all.logisticsMethodOptions.find((item) => item.value === value);
-    if (Number(option?.count || 0) <= 0) continue;
-    const result = await ordersPagedMysql({ paged: "1", page: 1, pageSize: 5, logisticsMethod: value });
+  for (const option of visibleOptions.slice(0, 3)) {
+    const result = await ordersPagedMysql({ paged: "1", page: 1, pageSize: 5, logisticsMethod: option.value });
     assert.equal(result.total, Number(option.count || 0));
     assert.ok(result.rows.length <= 5);
-    assert.ok(result.rows.every((row) => `${row.warehouse_name || ""}`.toLowerCase().includes(expectedText)));
   }
 });
 

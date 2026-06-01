@@ -3,9 +3,10 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 const rootDir = process.cwd();
-const outputDir = path.resolve(rootDir, "dist", "deploy");
+const outputDir = path.resolve(process.env.DEPLOY_OUTPUT_DIR || path.join(rootDir, "dist", "deploy"));
 
 const filesToCopy = [
+  ".env",
   ".env.example",
   "package-lock.json",
   "start.bat"
@@ -14,7 +15,8 @@ const filesToCopy = [
 const directoriesToCopy = [
   "public",
   "src",
-  "deploy"
+  "deploy",
+  "tools"
 ];
 
 function run(command, args, label) {
@@ -46,6 +48,11 @@ function runNpmScript(scriptName, label) {
 async function copyEntry(relativePath) {
   const source = path.resolve(rootDir, relativePath);
   const target = path.resolve(outputDir, relativePath);
+  try {
+    await fs.access(source);
+  } catch {
+    return;
+  }
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.cp(source, target, { recursive: true });
 }
@@ -63,6 +70,25 @@ async function writeDeployPackageJson() {
     JSON.stringify(packageJson, null, 2) + "\n",
     "utf8"
   );
+}
+
+async function rewriteDeployEnv() {
+  const deployEnvPath = path.resolve(outputDir, ".env");
+  try {
+    await fs.access(deployEnvPath);
+  } catch {
+    return;
+  }
+  const source = await fs.readFile(deployEnvPath, "utf8");
+  const lines = source.split(/\r?\n/);
+  let sawHost = false;
+  const rewritten = lines.map((line) => {
+    if (!line.startsWith("HOST=")) return line;
+    sawHost = true;
+    return "HOST=127.0.0.1";
+  });
+  if (!sawHost) rewritten.push("HOST=127.0.0.1");
+  await fs.writeFile(deployEnvPath, rewritten.join("\n"), "utf8");
 }
 
 async function rewriteDeployStartBat() {
@@ -128,6 +154,7 @@ for (const directory of directoriesToCopy) {
 }
 
 await writeDeployPackageJson();
+await rewriteDeployEnv();
 await rewriteDeployStartBat();
 
 const manifest = {

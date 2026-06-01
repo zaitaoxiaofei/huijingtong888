@@ -2,7 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
-import { uploadShopWatermark, withImageToken } from "../../api/tools/imageCropper";
+import { uploadShopWatermark } from "../../api/tools/imageCropper";
+import AuthenticatedImage from "../../components/AuthenticatedImage.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText, shanghaiDateTimeText } from "../../utils/shanghai-date";
 
@@ -317,8 +318,7 @@ const logisticsDialogTitle = computed(() => (logisticsDialog.mode === "create" ?
 const cancellationDialogTitle = computed(() => (cancellationDialog.mode === "create" ? "新增取消规则" : "编辑取消规则"));
 const shopWatermarkPreviewUrl = computed(() => {
   if (!shopDialog.form.id || !shopDialog.form.watermark_path) return "";
-  const base = `/api/tools/image-cropper/shop-watermark/${encodeURIComponent(shopDialog.form.id)}/file?v=${shopWatermarkPreviewVersion.value}`;
-  return withImageToken(base);
+  return `/api/tools/image-cropper/shop-watermark/${encodeURIComponent(shopDialog.form.id)}/file?v=${shopWatermarkPreviewVersion.value}`;
 });
 const shopWatermarkSampleImage = computed(() => (
   "/preview-assets/shop-watermark-background.png"
@@ -364,6 +364,18 @@ function formatDate(value) {
 
 function formatDateTime(value) {
   return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
+}
+
+function maskCredential(value) {
+  const text = String(value || "").trim();
+  if (!text) return "-";
+  if (text.includes("*")) return text;
+  if (text.length <= 8) return "****";
+  return `${text.slice(0, 4)}****${text.slice(-4)}`;
+}
+
+function secretConfiguredText(configured, hint) {
+  return configured ? maskCredential(hint || "已配置") : "未配置";
 }
 
 function resetShopFilters() {
@@ -973,7 +985,7 @@ onBeforeUnmount(() => {
           <p>旧版配置页不再作为新系统的配置入口。现在按左侧分类进入对应页面，每个页面只处理自己的新增、编辑、删除和刷新。</p>
         </div>
         <div class="page-card-actions">
-          <el-button @click="refreshSettingsData">刷新数据</el-button>
+          <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新数据</el-button>
         </div>
       </div>
     </el-card>
@@ -1006,41 +1018,66 @@ onBeforeUnmount(() => {
       </el-col>
 
       <el-col :xs="24" :xl="18">
-        <el-card v-if="activeSection === 'shops'" shadow="never" class="page-card settings-list-card">
-          <template #header>
-            <div class="page-card-header">
+        <section v-if="activeSection === 'shops'" class="shop-config-workbench">
+          <header class="shop-config-header">
+            <div>
+              <span>配置工作台</span>
+              <strong>{{ currentSectionMeta.title }}</strong>
+              <p>{{ currentSectionMeta.description }}</p>
+            </div>
+            <div class="shop-config-metrics">
               <div>
-                <strong>{{ currentSectionMeta.title }}</strong>
-                <span>{{ currentSectionMeta.description }}</span>
+                <span>店铺总数</span>
+                <strong>{{ shopTotal }}</strong>
               </div>
-              <div class="settings-header-actions">
-                <el-button @click="refreshSettingsData">刷新</el-button>
-                <el-button type="primary" @click="openCreateShopDialog">新增店铺</el-button>
+              <div>
+                <span>启用店铺</span>
+                <strong>{{ filteredShops.filter((row) => row.status === "active").length }}</strong>
+              </div>
+              <div>
+                <span>已配水印</span>
+                <strong>{{ filteredShops.filter((row) => row.watermark_path).length }}</strong>
               </div>
             </div>
-          </template>
+            <div class="settings-header-actions">
+              <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新</el-button>
+              <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateShopDialog">新增店铺</el-button>
+            </div>
+          </header>
 
-          <div class="filter-panel">
-            <el-form inline>
-              <el-form-item label="关键词">
-                <el-input v-model="state.filters.shopQuery" clearable placeholder="店铺名称 / 主体 / Client ID" style="width: 320px" @keyup.enter="state.filters.shopPage = 1" />
-              </el-form-item>
-              <el-form-item label="状态">
-                <el-select v-model="state.filters.shopStatus" style="width: 160px">
-                  <el-option label="全部状态" value="all" />
-                  <el-option label="启用" value="active" />
-                  <el-option label="停用" value="inactive" />
-                </el-select>
-              </el-form-item>
-              <el-form-item>
-                <el-button type="primary" @click="state.filters.shopPage = 1">查询</el-button>
-                <el-button @click="resetShopFilters">重置</el-button>
-              </el-form-item>
-            </el-form>
-          </div>
+          <div class="shop-config-content">
+            <div class="shop-config-panel shop-filter-panel">
+              <div>
+                <div class="section-head compact">
+                  <span>01</span>
+                  <strong>筛选条件</strong>
+                </div>
+              </div>
+              <el-form class="shop-filter-form">
+                <el-form-item label="关键词">
+                  <el-input v-model="state.filters.shopQuery" clearable placeholder="店铺名称 / 主体 / Client ID" @keyup.enter="state.filters.shopPage = 1" />
+                </el-form-item>
+                <el-form-item label="状态">
+                  <el-select v-model="state.filters.shopStatus">
+                    <el-option label="全部状态" value="all" />
+                    <el-option label="启用" value="active" />
+                    <el-option label="停用" value="inactive" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item class="shop-filter-actions">
+                  <el-button class="erp-btn erp-btn-primary" type="primary" @click="state.filters.shopPage = 1">查询</el-button>
+                  <el-button class="erp-btn erp-btn-secondary" @click="resetShopFilters">重置</el-button>
+                </el-form-item>
+              </el-form>
+            </div>
 
-          <div class="settings-table-wrap">
-            <el-table v-loading="loading" :data="pagedShops" stripe border class="erp-data-table">
+            <div class="shop-config-panel shop-table-panel">
+              <div class="section-head compact">
+                <span>02</span>
+                <strong>店铺与密钥配置</strong>
+              </div>
+              <div class="settings-table-wrap">
+                <el-table v-loading="loading" :data="pagedShops" stripe class="erp-data-table shop-config-table">
               <el-table-column label="店铺信息" min-width="240" fixed="left">
                 <template #default="{ row }">
                   <div class="settings-cell-stack">
@@ -1053,9 +1090,9 @@ onBeforeUnmount(() => {
                 <template #default="{ row }">
                   <div class="settings-cell-stack">
                     <span>Client ID：{{ row.ozon_client_id || "-" }}</span>
-                    <span class="muted-text">Key 标识：{{ row.api_key_hint || "-" }}</span>
+                    <span class="muted-text">Key 标识：{{ maskCredential(row.api_key_hint) }}</span>
                     <span>广告 Client：{{ row.performance_client_id || "-" }}</span>
-                    <span class="muted-text">广告 Secret：{{ row.performance_client_secret_configured ? (row.performance_client_secret_hint || "已配置") : "未配置" }}</span>
+                    <span class="muted-text">广告 Secret：{{ secretConfiguredText(row.performance_client_secret_configured, row.performance_client_secret_hint) }}</span>
                   </div>
                 </template>
               </el-table-column>
@@ -1065,9 +1102,9 @@ onBeforeUnmount(() => {
               <el-table-column label="水印" min-width="190">
                 <template #default="{ row }">
                   <div class="shop-watermark-table-cell">
-                    <img
+                    <AuthenticatedImage
                       v-if="row.watermark_path"
-                      :src="withImageToken(`/api/tools/image-cropper/shop-watermark/${encodeURIComponent(row.id)}/file`)"
+                      :src="`/api/tools/image-cropper/shop-watermark/${encodeURIComponent(row.id)}/file`"
                       :alt="`${row.name || '店铺'}水印`"
                     />
                     <div class="settings-cell-stack">
@@ -1088,12 +1125,14 @@ onBeforeUnmount(() => {
               <el-table-column label="操作" width="180" fixed="right">
                 <template #default="{ row }">
                   <div class="table-actions">
-                    <el-button link type="primary" @click="openEditShopDialog(row)">编辑</el-button>
-                    <el-button link type="danger" @click="handleDeleteShop(row)">删除</el-button>
+                    <el-button class="erp-btn-link" link type="primary" @click="openEditShopDialog(row)">编辑</el-button>
+                    <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="handleDeleteShop(row)">删除</el-button>
                   </div>
                 </template>
               </el-table-column>
             </el-table>
+              </div>
+            </div>
           </div>
 
           <PageFooterPagination
@@ -1104,7 +1143,7 @@ onBeforeUnmount(() => {
             @update:page="state.filters.shopPage = $event"
             @update:pageSize="state.filters.shopPageSize = $event; state.filters.shopPage = 1"
           />
-        </el-card>
+        </section>
 
         <el-card v-else-if="activeSection === 'people'" shadow="never" class="page-card settings-list-card">
           <template #header>
@@ -1114,8 +1153,8 @@ onBeforeUnmount(() => {
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="refreshSettingsData">刷新</el-button>
-                <el-button type="primary" @click="openCreatePersonDialog">新增人员</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreatePersonDialog">新增人员</el-button>
               </div>
             </div>
           </template>
@@ -1133,8 +1172,8 @@ onBeforeUnmount(() => {
                 </el-select>
               </el-form-item>
               <el-form-item>
-                <el-button type="primary" @click="state.filters.personPage = 1">查询</el-button>
-                <el-button @click="resetPersonFilters">重置</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="state.filters.personPage = 1">查询</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="resetPersonFilters">重置</el-button>
               </el-form-item>
             </el-form>
           </div>
@@ -1161,8 +1200,8 @@ onBeforeUnmount(() => {
               <el-table-column label="操作" width="180" fixed="right">
                 <template #default="{ row }">
                   <div class="table-actions">
-                    <el-button link type="primary" @click="openEditPersonDialog(row)">编辑</el-button>
-                    <el-button link type="danger" @click="handleDeletePerson(row)">停用</el-button>
+                    <el-button class="erp-btn-link" link type="primary" @click="openEditPersonDialog(row)">编辑</el-button>
+                    <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="handleDeletePerson(row)">停用</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -1187,8 +1226,8 @@ onBeforeUnmount(() => {
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="refreshSettingsData">刷新</el-button>
-                <el-button type="primary" @click="openCreateRateDialog">新增汇率</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateRateDialog">新增汇率</el-button>
               </div>
             </div>
           </template>
@@ -1199,8 +1238,8 @@ onBeforeUnmount(() => {
                 <el-input v-model="state.filters.rateQuery" clearable placeholder="汇率 / 来源 / 备注 / 日期" style="width: 320px" @keyup.enter="state.filters.ratePage = 1" />
               </el-form-item>
               <el-form-item>
-                <el-button type="primary" @click="state.filters.ratePage = 1">查询</el-button>
-                <el-button @click="resetRateFilters">重置</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="state.filters.ratePage = 1">查询</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="resetRateFilters">重置</el-button>
               </el-form-item>
             </el-form>
           </div>
@@ -1234,9 +1273,9 @@ onBeforeUnmount(() => {
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="refreshSettingsData">刷新</el-button>
-                <el-button type="primary" :loading="packagingRuleSubmitting" @click="submitPackagingFeeRule">保存规则</el-button>
-                <el-button :loading="historicalRecalcSubmitting" @click="submitHistoricalProfitRecalc">重算历史利润</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" :loading="packagingRuleSubmitting" @click="submitPackagingFeeRule">保存规则</el-button>
+                <el-button class="erp-btn erp-btn-secondary" :loading="historicalRecalcSubmitting" @click="submitHistoricalProfitRecalc">重算历史利润</el-button>
               </div>
             </div>
           </template>
@@ -1375,8 +1414,8 @@ onBeforeUnmount(() => {
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="refreshSettingsData">刷新</el-button>
-                <el-button type="primary" @click="openCreateLogisticsDialog">新增物流规则</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateLogisticsDialog">新增物流规则</el-button>
               </div>
             </div>
           </template>
@@ -1394,8 +1433,8 @@ onBeforeUnmount(() => {
                 </el-select>
               </el-form-item>
               <el-form-item>
-                <el-button type="primary" @click="state.filters.logisticsPage = 1">查询</el-button>
-                <el-button @click="resetLogisticsFilters">重置</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="state.filters.logisticsPage = 1">查询</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="resetLogisticsFilters">重置</el-button>
               </el-form-item>
             </el-form>
           </div>
@@ -1434,8 +1473,8 @@ onBeforeUnmount(() => {
               <el-table-column label="操作" width="180" fixed="right">
                 <template #default="{ row }">
                   <div class="table-actions">
-                    <el-button link type="primary" @click="openEditLogisticsDialog(row)">编辑</el-button>
-                    <el-button link :type="Number(row.enabled) !== 0 ? 'danger' : 'success'" @click="toggleLogisticsRule(row)">{{ Number(row.enabled) !== 0 ? "停用" : "启用" }}</el-button>
+                    <el-button class="erp-btn-link" link type="primary" @click="openEditLogisticsDialog(row)">编辑</el-button>
+                    <el-button class="erp-btn-link" link :type="Number(row.enabled) !== 0 ? 'danger' : 'success'" @click="toggleLogisticsRule(row)">{{ Number(row.enabled) !== 0 ? "停用" : "启用" }}</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -1460,8 +1499,8 @@ onBeforeUnmount(() => {
                 <span>{{ currentSectionMeta.description }}</span>
               </div>
               <div class="settings-header-actions">
-                <el-button @click="refreshSettingsData">刷新</el-button>
-                <el-button type="primary" @click="openCreateCancellationDialog">新增取消规则</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateCancellationDialog">新增取消规则</el-button>
               </div>
             </div>
           </template>
@@ -1479,8 +1518,8 @@ onBeforeUnmount(() => {
                 </el-select>
               </el-form-item>
               <el-form-item>
-                <el-button type="primary" @click="state.filters.cancellationPage = 1">查询</el-button>
-                <el-button @click="resetCancellationFilters">重置</el-button>
+                <el-button class="erp-btn erp-btn-primary" type="primary" @click="state.filters.cancellationPage = 1">查询</el-button>
+                <el-button class="erp-btn erp-btn-secondary" @click="resetCancellationFilters">重置</el-button>
               </el-form-item>
             </el-form>
           </div>
@@ -1520,8 +1559,8 @@ onBeforeUnmount(() => {
               <el-table-column label="操作" width="180" fixed="right">
                 <template #default="{ row }">
                   <div class="table-actions">
-                    <el-button link type="primary" @click="openEditCancellationDialog(row)">编辑</el-button>
-                    <el-button link :type="Number(row.enabled) !== 0 ? 'danger' : 'success'" @click="toggleCancellationRule(row)">{{ Number(row.enabled) !== 0 ? "停用" : "启用" }}</el-button>
+                    <el-button class="erp-btn-link" link type="primary" @click="openEditCancellationDialog(row)">编辑</el-button>
+                    <el-button class="erp-btn-link" link :type="Number(row.enabled) !== 0 ? 'danger' : 'success'" @click="toggleCancellationRule(row)">{{ Number(row.enabled) !== 0 ? "停用" : "启用" }}</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -1590,7 +1629,7 @@ onBeforeUnmount(() => {
                 <div class="shop-watermark-preview-box">
                   <div class="shop-watermark-preview-stage">
                     <img :src="shopWatermarkSampleImage" alt="水印预览样例图" class="shop-watermark-sample-image" />
-                    <img
+                    <AuthenticatedImage
                       v-if="shopWatermarkPreviewUrl"
                       :src="shopWatermarkPreviewUrl"
                       alt="店铺水印预览"
@@ -1615,7 +1654,7 @@ onBeforeUnmount(() => {
                   <el-slider v-model="shopDialog.form.watermark_opacity_percent" :min="10" :max="100" :step="1" />
                 </el-form-item>
                 <div class="shop-watermark-control-actions">
-                  <el-button @click="resetShopWatermarkOptions">恢复默认</el-button>
+                  <el-button class="erp-btn erp-btn-secondary" @click="resetShopWatermarkOptions">恢复默认</el-button>
                   <span class="muted-text">保存后会作为该店铺图片生成的默认水印参数。</span>
                 </div>
               </section>
@@ -1624,9 +1663,9 @@ onBeforeUnmount(() => {
         </el-row>
       </el-form>
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="closeShopDialog">取消</el-button>
-          <el-button type="primary" :loading="shopDialogSubmitting" @click="submitShopDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="closeShopDialog">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="shopDialogSubmitting" @click="submitShopDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>
@@ -1642,9 +1681,9 @@ onBeforeUnmount(() => {
         </el-row>
       </el-form>
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="closePersonDialog">取消</el-button>
-          <el-button type="primary" :loading="personDialogSubmitting" @click="submitPersonDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="closePersonDialog">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="personDialogSubmitting" @click="submitPersonDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>
@@ -1659,9 +1698,9 @@ onBeforeUnmount(() => {
         </el-row>
       </el-form>
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="closeRateDialog">取消</el-button>
-          <el-button type="primary" :loading="rateDialogSubmitting" @click="submitRateDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="closeRateDialog">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="rateDialogSubmitting" @click="submitRateDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>
@@ -1686,9 +1725,9 @@ onBeforeUnmount(() => {
         </el-row>
       </el-form>
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="closeLogisticsDialog">取消</el-button>
-          <el-button type="primary" :loading="logisticsDialogSubmitting" @click="submitLogisticsDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="closeLogisticsDialog">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="logisticsDialogSubmitting" @click="submitLogisticsDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>
@@ -1710,9 +1749,9 @@ onBeforeUnmount(() => {
         </el-row>
       </el-form>
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="closeCancellationDialog">取消</el-button>
-          <el-button type="primary" :loading="cancellationDialogSubmitting" @click="submitCancellationDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="closeCancellationDialog">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="cancellationDialogSubmitting" @click="submitCancellationDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>
@@ -1728,6 +1767,138 @@ onBeforeUnmount(() => {
 .settings-section-card { height: 100%; }
 .settings-list-card { height: calc(100vh - 330px); min-height: 520px; display: flex; flex-direction: column; }
 .settings-table-wrap { flex: 1; min-height: 0; overflow: auto; }
+.shop-config-workbench {
+  min-height: calc(100vh - 276px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 0 0 4px;
+}
+.shop-config-header {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) auto auto;
+  gap: 14px;
+  align-items: center;
+  padding: 14px 16px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 10px;
+  background: rgba(247, 250, 253, 0.94);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+}
+.shop-config-header > div:first-child {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+.shop-config-header > div:first-child > span {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+}
+.shop-config-header strong {
+  color: #0f172a;
+}
+.shop-config-header > div:first-child > strong {
+  font-size: 18px;
+}
+.shop-config-header p {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.shop-config-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(88px, 1fr));
+  gap: 8px;
+}
+.shop-config-metrics div {
+  min-height: 58px;
+  display: grid;
+  gap: 4px;
+  align-content: center;
+  padding: 8px 10px;
+  border: 1px solid #dbe5ef;
+  border-radius: 8px;
+  background: #fff;
+}
+.shop-config-metrics span {
+  color: #64748b;
+  font-size: 12px;
+}
+.shop-config-metrics strong {
+  font-size: 16px;
+}
+.shop-config-content {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
+}
+.shop-config-panel {
+  min-width: 0;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.06);
+  padding: 14px;
+}
+.shop-filter-panel {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 16px;
+  align-items: end;
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.section-head.compact {
+  margin-bottom: 12px;
+}
+.section-head span {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  background: #0f172a;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.section-head strong {
+  color: #0f172a;
+}
+.shop-filter-form {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) 180px auto;
+  gap: 12px;
+  align-items: end;
+}
+.shop-filter-form :deep(.el-form-item) {
+  margin: 0;
+}
+.shop-filter-form :deep(.el-input),
+.shop-filter-form :deep(.el-select) {
+  width: 100%;
+}
+.shop-filter-actions :deep(.el-form-item__content) {
+  display: flex;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+.shop-table-panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.shop-config-table {
+  border: 1px solid #dbe5ef;
+  border-radius: 8px;
+  overflow: hidden;
+}
 .settings-section-list { display: flex; flex-direction: column; gap: 10px; }
 .settings-section-item { width: 100%; padding: 16px 14px; border-radius: 14px; border: 1px solid var(--erp-border); background: var(--erp-surface-alt); text-align: left; cursor: pointer; transition: all 0.2s ease; }
 .settings-section-item strong { display: block; margin-bottom: 6px; color: var(--erp-text); }
@@ -1765,6 +1936,9 @@ onBeforeUnmount(() => {
 @media (max-width: 960px) {
   .settings-hero { flex-direction: column; align-items: flex-start; }
   .settings-list-card { height: auto; min-height: 0; }
+  .shop-config-workbench { min-height: 0; }
+  .shop-config-header, .shop-filter-panel, .shop-filter-form { grid-template-columns: 1fr; }
+  .shop-config-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .shop-watermark-config { grid-template-columns: 1fr; }
   .shop-watermark-control-actions { padding-left: 0; }
 }

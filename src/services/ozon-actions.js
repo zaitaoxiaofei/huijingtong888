@@ -30,7 +30,7 @@ async function readShop(storeId) {
   const id = Number(storeId || 0);
   if (!Number.isFinite(id) || id <= 0) throw statusError("请选择店铺");
   const rows = await mysqlQuery(`
-    SELECT id, name, ozon_client_id, ozon_api_key, api_key_hint, status
+    SELECT id, name, ozon_client_id, COALESCE(NULLIF(ozon_api_key, ''), api_key_hint) AS ozon_api_key, api_key_hint, status
     FROM shops
     WHERE id = ? AND status <> 'deleted'
     LIMIT 1
@@ -38,7 +38,7 @@ async function readShop(storeId) {
   const shop = rows[0];
   if (!shop) throw statusError("店铺不存在");
   const clientId = String(shop.ozon_client_id || "").trim();
-  const apiKey = String(shop.ozon_api_key || "").trim();
+  const apiKey = String(shop.ozon_api_key || shop.api_key_hint || "").trim();
   if (!clientId || !apiKey) throw statusError("店铺缺少 Ozon Client ID 或 API Key");
   return { ...shop, clientId, apiKey };
 }

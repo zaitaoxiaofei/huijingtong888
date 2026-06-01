@@ -7,6 +7,8 @@ import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
+import ProductTitleLink from "../../components/ProductTitleLink.vue";
+import { ozonBuyerProductLinkFromRow } from "../../utils/product-links";
 
 const route = useRoute();
 const router = useRouter();
@@ -34,7 +36,7 @@ const state = reactive({
     name: "",
     offer: "",
     page: 1,
-    pageSize: 30
+    pageSize: 20
   }
 });
 
@@ -69,6 +71,10 @@ function money(value) {
 
 function dateText(value) {
   return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
+}
+
+function ozonBuyerProductLinkFor(row) {
+  return ozonBuyerProductLinkFromRow(row);
 }
 
 function onlineStatusKey(row) {
@@ -208,7 +214,7 @@ function applyRouteState() {
     state.filters.name = String(route.query.name || "");
     state.filters.offer = String(route.query.offer || "");
     state.filters.page = asPositiveInt(route.query.page, 1);
-    state.filters.pageSize = asPositiveInt(route.query.pageSize, 30);
+    state.filters.pageSize = asPositiveInt(route.query.pageSize, 20);
   } finally {
     syncingRoute = false;
   }
@@ -222,7 +228,7 @@ function syncRouteQuery() {
     name: state.filters.name || undefined,
     offer: state.filters.offer || undefined,
     page: state.filters.page > 1 ? String(state.filters.page) : undefined,
-    pageSize: state.filters.pageSize !== 30 ? String(state.filters.pageSize) : undefined
+    pageSize: state.filters.pageSize !== 20 ? String(state.filters.pageSize) : undefined
   };
   const normalized = Object.fromEntries(Object.entries(nextQuery).filter(([, value]) => value != null && value !== ""));
   if (JSON.stringify(route.query || {}) === JSON.stringify(normalized)) return;
@@ -317,8 +323,8 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="page-stack online-products-page">
-    <el-card shadow="never" class="page-card online-products-card">
+  <div class="page-stack online-products-page erp-paged-page">
+    <el-card shadow="never" class="page-card online-products-card erp-paged-card">
       <div class="online-toolbar online-toolbar-sticky">
         <el-form inline>
           <el-form-item label="店铺">
@@ -334,14 +340,14 @@ onMounted(async () => {
             <el-input v-model="state.filters.offer" placeholder="货号 / SKU" clearable style="width: 220px" @keyup.enter="handleSearch" />
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="handleSearch">查询</el-button>
-            <el-button @click="handleReset">重置</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
           </el-form-item>
           <el-form-item>
-            <el-button :loading="syncLoading" :disabled="!state.selectedIds.length" @click="syncOnlineProducts(true)">
+            <el-button class="erp-btn erp-btn-secondary" :loading="syncLoading" :disabled="!state.selectedIds.length" @click="syncOnlineProducts(true)">
               同步所选商品
             </el-button>
-            <el-button type="primary" :loading="syncLoading" @click="syncOnlineProducts(false)">同步全部在线商品</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" :loading="syncLoading" @click="syncOnlineProducts(false)">同步全部在线商品</el-button>
           </el-form-item>
         </el-form>
 
@@ -359,7 +365,7 @@ onMounted(async () => {
         </div>
       </div>
 
-      <div class="online-table-wrap">
+      <div class="online-table-wrap erp-table-scroll">
         <el-table v-loading="loading" :data="pagedRows" stripe border class="erp-data-table" @selection-change="selectionChanged">
           <el-table-column type="selection" width="48" fixed="left" />
           <el-table-column label="店铺 / 状态" min-width="160" fixed="left">
@@ -383,7 +389,7 @@ onMounted(async () => {
               <div class="product-cell">
                 <ProductImagePreview :src="row.primary_image || row.image_url" />
                 <div class="cell-stack">
-                  <strong>{{ row.name || "-" }}</strong>
+                  <ProductTitleLink :title="row.name || row.ozon_sku || '-'" :href="ozonBuyerProductLinkFor(row)" :lines="2" />
                   <span class="muted-text">在线商品 ID: {{ row.id }}</span>
                   <span class="muted-text">Ozon Product ID: {{ row.ozon_product_id || "-" }}</span>
                 </div>
@@ -407,11 +413,11 @@ onMounted(async () => {
           </el-table-column>
           <el-table-column label="操作" width="260" fixed="right">
             <template #default="{ row }">
-              <el-space wrap>
-                <el-button link type="primary" @click="openBindDialog(row)">去绑定</el-button>
-                <el-button link @click="createProductFromOnline(row)">创建库存</el-button>
-                <el-button link type="danger" @click="archiveOnlineProduct(row)">归档商品</el-button>
-              </el-space>
+              <div class="erp-inline-actions">
+                <el-button class="erp-btn-link" link type="primary" @click="openBindDialog(row)">去绑定</el-button>
+                <el-button class="erp-btn-link" link @click="createProductFromOnline(row)">创建库存</el-button>
+                <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="archiveOnlineProduct(row)">归档商品</el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -422,7 +428,6 @@ onMounted(async () => {
         :total="state.total"
         :page="state.filters.page"
         :page-size="state.filters.pageSize"
-        :page-sizes="[30, 50, 100]"
         @update:page="handlePageChange"
         @update:pageSize="handlePageSizeChange"
       />
@@ -448,9 +453,9 @@ onMounted(async () => {
       </el-form>
 
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="bindDialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="bindSubmitting" @click="submitBind">确认绑定</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="bindDialogVisible = false">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="bindSubmitting" @click="submitBind">确认绑定</el-button>
         </div>
       </template>
     </el-dialog>
@@ -458,7 +463,7 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.online-products-page { min-height: 100%; }
+.online-products-page { min-height: 0; }
 .online-products-card :deep(.el-card__body) { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .online-toolbar { display: grid; gap: 12px; padding: 8px 0 14px; }
 .online-toolbar-sticky { position: sticky; top: 0; z-index: 3; background: var(--erp-surface); }
@@ -466,7 +471,6 @@ onMounted(async () => {
 .status-tab-tag { cursor: pointer; user-select: none; }
 .online-table-wrap { flex: 1; min-height: 0; overflow: auto; }
 .online-footer { margin-top: auto; }
-.dialog-footer { display: flex; justify-content: flex-end; gap: 12px; }
 .cell-stack { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .muted-text { color: var(--erp-text-secondary); font-size: 12px; line-height: 1.5; }
 .product-cell { display: flex; align-items: flex-start; gap: 12px; }

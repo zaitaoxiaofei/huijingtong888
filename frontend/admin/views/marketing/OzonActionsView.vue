@@ -674,7 +674,7 @@ onMounted(async () => {
         <el-input v-if="state.mode === 'seller'" v-model="state.search" clearable placeholder="搜索活动，至少 3 个字符" class="search-input" @keyup.enter="loadActions">
           <template #prefix><el-icon><Search /></el-icon></template>
         </el-input>
-        <el-button type="primary" :icon="Search" :loading="state.actionsLoading" @click="loadActions">拉取活动</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Search" :loading="state.actionsLoading" @click="loadActions">拉取活动</el-button>
       </div>
     </section>
 
@@ -694,7 +694,7 @@ onMounted(async () => {
           inactive-text="关闭"
           @change="saveCleanupEnabled"
         />
-        <el-button :icon="Refresh" :loading="state.cleanupLoading" :disabled="!state.storeId" @click="loadCleanupConfig">刷新</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="state.cleanupLoading" :disabled="!state.storeId" @click="loadCleanupConfig">刷新</el-button>
       </div>
     </section>
 
@@ -708,7 +708,7 @@ onMounted(async () => {
           <h2>活动列表</h2>
           <span>{{ state.mode === "seller" ? "卖家自建促销活动" : "Ozon 官方可参与活动" }}</span>
         </div>
-        <el-button :icon="Refresh" :loading="state.actionsLoading" @click="loadActions">刷新</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="state.actionsLoading" @click="loadActions">刷新</el-button>
       </div>
       <el-table
         v-loading="state.actionsLoading"
@@ -759,9 +759,9 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="操作" width="160" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click.stop="openProducts(row)">管理商品</el-button>
+            <el-button class="erp-btn-link" link type="primary" @click.stop="openProducts(row)">管理商品</el-button>
             <el-dropdown v-if="state.mode === 'seller'" trigger="click" @command="(cmd) => cmd === 'pause' ? toggleSellerAction(row, false) : cmd === 'resume' ? toggleSellerAction(row, true) : archiveSellerAction(row)">
-              <el-button link type="primary" @click.stop>更多</el-button>
+              <el-button class="erp-btn-link" link type="primary" @click.stop>更多</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item v-if="getSellerActionStatus(row) === 'ACTIVE'" command="pause">暂停活动</el-dropdown-item>
@@ -790,13 +790,13 @@ onMounted(async () => {
         </el-tabs>
 
         <div class="product-actions">
-          <el-button :loading="state.productsLoading" @click="loadProducts({ loadBoth: true })">重新拉取</el-button>
+          <el-button class="erp-btn erp-btn-secondary" :loading="state.productsLoading" @click="loadProducts({ loadBoth: true })">重新拉取</el-button>
           <el-input-number v-model="state.syncPercent" :min="1" :max="99" :precision="0" />
-          <el-button :disabled="!visibleProducts.length" @click="fillPercentPrice">{{ state.mode === "seller" ? "一键折扣" : "一键填活动价" }}</el-button>
-          <el-button type="danger" :disabled="!state.selectedRowKeys.length || state.productScope !== 'joined'" :loading="state.submitting" @click="removeSelected">
+          <el-button class="erp-btn erp-btn-secondary" :disabled="!visibleProducts.length" @click="fillPercentPrice">{{ state.mode === "seller" ? "一键折扣" : "一键填活动价" }}</el-button>
+          <el-button class="erp-btn erp-btn-danger" type="danger" :disabled="!state.selectedRowKeys.length || state.productScope !== 'joined'" :loading="state.submitting" @click="removeSelected">
             移除商品{{ state.selectedRowKeys.length && state.productScope === "joined" ? `(${state.selectedRowKeys.length})` : "" }}
           </el-button>
-          <el-button type="primary" :icon="Plus" :disabled="!state.selectedRowKeys.length" :loading="state.submitting" @click="submitSelected">
+          <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Plus" :disabled="!state.selectedRowKeys.length" :loading="state.submitting" @click="submitSelected">
             {{ state.productScope === "joined" ? "保存修改" : "加入活动" }}{{ state.selectedRowKeys.length ? `(${state.selectedRowKeys.length})` : "" }}
           </el-button>
         </div>
@@ -889,7 +889,7 @@ onMounted(async () => {
           </el-table-column>
           <el-table-column v-if="state.mode === 'official'" label="单条提交" width="120" fixed="right">
             <template #default="{ row }">
-              <el-button link type="primary" :loading="state.submittingProductKey === getProductKey(row)" @click="submitSingleProduct(row)">
+              <el-button class="erp-btn-link" link type="primary" :loading="state.submittingProductKey === getProductKey(row)" @click="submitSingleProduct(row)">
                 {{ state.productScope === "joined" ? "单条更新" : "单条加入" }}
               </el-button>
             </template>

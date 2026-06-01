@@ -3,16 +3,29 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
+import { shanghaiDateKey } from "../shanghai-time.js";
 import {
   createOzonProductBySku,
   fetchOzonCategoryAttributeValues,
   fetchOzonCategoryAttributes,
   fetchOzonDescriptionCategoryTree,
   fetchOzonProductImportInfo,
+  fetchOzonProductContentRating,
   fetchOzonProductInfoAttributes,
+  fetchOzonProductsByIds,
   importOzonProducts,
   searchOzonCategoryAttributeValues
 } from "../ozonClient.js";
+import { chatWithAiProvider } from "./ai-provider-settings.js";
+import {
+  createProductMysql,
+  selectionProductMysql
+} from "./mysql-cutover.js";
+import {
+  listingDraftToTemplatePayload,
+  prepareListingDraftFromCollectedSource
+} from "./listing-draft-preparer.js";
+import { normalizeCollectedListingDraft } from "./listing-collected-normalizer.js";
 
 let mysqlSchemaReady = false;
 const LISTING_MEDIA_ROOT = path.resolve(process.cwd(), "public", "uploads", "listing-media");
@@ -26,6 +39,8 @@ const LISTING_MEDIA_TYPES = new Map([
   [".mov", "video/quicktime"],
   [".webm", "video/webm"]
 ]);
+const OZON_PUBLISH_PRICE_MULTIPLIER = 2;
+const OZON_PUBLISH_OLD_PRICE_MULTIPLIER = 2;
 
 export async function listingCategoryTemplates(session) {
   await ensureListingAutomationSchema();
@@ -38,10 +53,11 @@ export async function listingCategoryTemplates(session) {
   `).then((rows) => rows.map(normalizeTemplateRow));
 }
 
-export async function listingCategoryTemplateDetail(id, session) {
+export async function listingCategoryTemplateDetail(id, session, query = {}) {
   await ensureListingAutomationSchema();
   const template = await listingCategoryTemplate(id, session);
   if (!template) throw new Error("类目模板不存在");
+  if (query?.mode === "editor" || query?.editor === "1" || query?.compact === "1") return compactTemplateForEditor(template);
   return template;
 }
 
@@ -255,6 +271,12 @@ export async function createListingCategoryTemplate(body, session) {
     JSON.stringify(payload.images),
     personId(session)
   ]);
+  await recordOzonCategoryUsage({
+    sourceModule: "listing_template",
+    sourceId: String(id),
+    ozonCategoryId: payload.ozon_category_id,
+    categoryName: payload.category_name
+  });
   return listingCategoryTemplate(id, session);
 }
 
@@ -313,12 +335,313 @@ export async function createListingTemplateFromCollectedProduct(body, session) {
     JSON.stringify(payload.images),
     personId(session)
   ]);
+  await recordOzonCategoryUsage({
+    sourceModule: "listing_template",
+    sourceId: String(id),
+    ozonCategoryId: payload.ozon_category_id,
+    categoryName: payload.category_name
+  });
 
   return {
     ok: true,
     reused: false,
     template: await listingCategoryTemplate(id, session)
   };
+}
+
+function firstCollectedValue(source = {}, keys = []) {
+  for (const key of keys) {
+    const value = source?.[key];
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return "";
+}
+
+function collectedNumber(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const text = String(value).replace(/\s+/g, "").replace(",", ".");
+  const match = text.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function collectedDate(value) {
+  const parsed = value ? new Date(value) : new Date();
+  if (Number.isNaN(parsed.getTime())) return shanghaiDateKey();
+  return shanghaiDateKey(parsed);
+}
+
+function collectedDateKey(value) {
+  if (!value) return "";
+  if (typeof value === "string") {
+    const match = value.match(/^\d{4}-\d{2}-\d{2}/);
+    if (match) return match[0];
+  }
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value || "").slice(0, 10);
+  return shanghaiDateKey(parsed);
+}
+
+function normalizePluginCollectedProduct(product = {}, tenantId = "admin") {
+  const sku = String(firstCollectedValue(product, ["sku", "product_id", "productId", "id"]) || "").trim();
+  const image = firstCollectedValue(product, ["productImage", "mainImage", "primary_image", "photo", "image_url", "imageUrl"]) ||
+    (Array.isArray(product.images) ? product.images.find(Boolean) : "");
+  const collectedAt = String(product.collectedAt || product.collected_at || new Date().toISOString());
+  const viewCount = collectedNumber(firstCollectedValue(product, ["qtyViewPdp", "views", "hitsView", "hits_view", "sessionCount"]));
+  const soldCount = collectedNumber(firstCollectedValue(product, ["soldCount", "orders", "orderCount", "avgOrdersOnAccDays"]));
+  const clickRate = collectedNumber(firstCollectedValue(product, ["custom_click_rate", "clickRate", "click_rate"]));
+  const conversionRate = collectedNumber(firstCollectedValue(product, ["convViewToOrder", "conversionRate", "conversion_rate"]));
+
+  return {
+    tenant_id: String(tenantId || "admin").trim() || "admin",
+    sku,
+    product_id: String(firstCollectedValue(product, ["product_id", "productId", "id"]) || sku).trim(),
+    title: String(firstCollectedValue(product, ["productTitle", "name", "title", "displayName", "display_name"]) || "").trim(),
+    product_url: String(firstCollectedValue(product, ["productUrl", "productLink", "link"]) || "").trim(),
+    image_url: String(image || "").trim(),
+    category_name: String(firstCollectedValue(product, ["category", "categoryName", "category_name"]) || "").trim(),
+    price: collectedNumber(firstCollectedValue(product, ["price", "productPrice", "sell_price", "cardPrice", "webPrice"])),
+    currency: String(firstCollectedValue(product, ["currency", "priceCurrency"]) || "RUB").trim(),
+    sold_count: soldCount,
+    view_count: viewCount,
+    click_rate: clickRate,
+    conversion_rate: conversionRate,
+    stock_count: collectedNumber(firstCollectedValue(product, ["stock", "fbsStock", "fboStock", "availableStock", "totalStock", "sumItemsInStock"])),
+    commission_rate: collectedNumber(firstCollectedValue(product, ["commission_rate", "commissionRate", "commission_percent", "commissionPercent", "commission"])),
+    collect_date: collectedDate(collectedAt),
+    collected_at: collectedAt
+  };
+}
+
+function parseCollectedPayloadJson(value) {
+  if (!value) return {};
+  if (typeof value === "object") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
+}
+
+function buildPluginCollectedProductPayload(row = {}) {
+  const raw = parseCollectedPayloadJson(row.payload_json);
+  return {
+    ...raw,
+    id: row.sku || raw.id || raw.sku,
+    sku: row.sku || raw.sku || "",
+    product_id: row.product_id || raw.product_id || raw.productId || "",
+    productTitle: row.title || raw.productTitle || raw.name || raw.title || "",
+    name: row.title || raw.name || raw.productTitle || raw.title || "",
+    productUrl: row.product_url || raw.productUrl || raw.productLink || "",
+    productImage: row.image_url || raw.productImage || raw.mainImage || "",
+    category: row.category_name || raw.category || raw.categoryName || "",
+    price: row.price ?? raw.price ?? raw.productPrice ?? "",
+    currency: row.currency || raw.currency || "RUB",
+    soldCount: row.sold_count ?? raw.soldCount ?? "",
+    qtyViewPdp: row.view_count ?? raw.qtyViewPdp ?? "",
+    custom_click_rate: row.click_rate ?? raw.custom_click_rate ?? "",
+    convViewToOrder: row.conversion_rate ?? raw.convViewToOrder ?? "",
+    stock: row.stock_count ?? raw.stock ?? "",
+    commission_rate: row.commission_rate ?? raw.commission_rate ?? raw.commissionRate ?? "",
+    collectDate: collectedDateKey(row.collect_date),
+    collectedAt: row.collected_at || raw.collectedAt || raw.collected_at || ""
+  };
+}
+
+function buildCollectorBoxRow(row = {}) {
+  return {
+    tenant_id: row.tenant_id || "admin",
+    sku: String(row.sku || ""),
+    product_id: String(row.product_id || ""),
+    title: String(row.title || ""),
+    product_url: String(row.product_url || ""),
+    image_url: String(row.image_url || ""),
+    category_name: String(row.category_name || ""),
+    price: row.price === null || row.price === undefined ? null : Number(row.price),
+    currency: String(row.currency || "RUB"),
+    sold_count: row.sold_count === null || row.sold_count === undefined ? null : Number(row.sold_count),
+    view_count: row.view_count === null || row.view_count === undefined ? null : Number(row.view_count),
+    click_rate: row.click_rate === null || row.click_rate === undefined ? null : Number(row.click_rate),
+    conversion_rate: row.conversion_rate === null || row.conversion_rate === undefined ? null : Number(row.conversion_rate),
+    stock_count: row.stock_count === null || row.stock_count === undefined ? null : Number(row.stock_count),
+    commission_rate: row.commission_rate === null || row.commission_rate === undefined ? null : Number(row.commission_rate),
+    collect_date: collectedDateKey(row.collect_date),
+    collected_at: row.collected_at || "",
+    status: row.status || "collected",
+    selection_product_id: row.selection_product_id || null,
+    listing_template_id: row.listing_template_id || null,
+    editPayload: parseCollectedPayloadJson(row.edit_payload_json),
+    edited_at: row.edited_at || "",
+    created_at: row.created_at || "",
+    updated_at: row.updated_at || ""
+  };
+}
+
+function normalizeCollectorBoxSummary(row = {}) {
+  return {
+    total: Number(row.total || 0),
+    todayCount: Number(row.today_count || 0),
+    titledCount: Number(row.titled_count || 0)
+  };
+}
+
+function percentToNumber(value) {
+  if (value === undefined || value === null || value === "") return 0;
+  if (typeof value === "number") return Number.isFinite(value) ? (value > 1 ? value / 100 : value) : 0;
+  const text = String(value).trim();
+  const number = Number(text.replace("%", "").replace(",", "."));
+  if (!Number.isFinite(number)) return 0;
+  return text.includes("%") || number > 1 ? number / 100 : number;
+}
+
+function buildCollectorSelectionNote(detail = {}) {
+  const parts = [
+    `来源：Ozon插件采集箱`,
+    detail.sku ? `SKU：${detail.sku}` : "",
+    detail.product_url ? `链接：${detail.product_url}` : "",
+    detail.collect_date ? `采集日期：${detail.collect_date}` : ""
+  ].filter(Boolean);
+  return parts.join("\n");
+}
+
+function normalizeCollectorBoxEditPayload(input = {}, detail = {}) {
+  const raw = detail.rawPayload || {};
+  const payload = detail.payload || {};
+  const dims = normalizeCollectedDimensions(input, payload, raw);
+  const images = normalizeImages(input.images || raw.images || payload.images || [detail.image_url]);
+  return {
+    title: String(input.title || input.productTitle || detail.title || payload.productTitle || `Ozon ${detail.sku || ""}`).trim(),
+    template_name: String(input.template_name || input.templateName || input.title || detail.title || `Ozon ${detail.sku || ""} 上架模板`).trim(),
+    category_name: String(input.category_name || input.categoryName || detail.category_name || raw.category_name || raw.category || "").trim(),
+    ozon_category_id: String(input.ozon_category_id || input.ozonCategoryId || raw.ozon_category_id || raw.category_id || "").trim(),
+    description_category_id: String(input.description_category_id || input.descriptionCategoryId || raw.description_category_id || raw.descriptionCategoryId || "").trim(),
+    type_id: String(input.type_id || input.typeId || raw.type_id || raw.typeId || "").trim(),
+    brand: String(input.brand || raw.brand || "").trim(),
+    model: String(input.model || input.spec || raw.model || "").trim(),
+    color: String(input.color || raw.color || "").trim(),
+    tags: normalizeStringList(input.tags || input.hashtags || raw.hashtags || []),
+    description: String(input.description || input.summary || raw.description || "").trim(),
+    operation_note: String(input.operation_note || input.operationNote || "").trim(),
+    price: numberFromOzonValue(input.price || detail.price || raw.price || 0),
+    old_price: numberFromOzonValue(input.old_price || input.oldPrice || raw.old_price || raw.originalPrice || 0),
+    currency: String(input.currency || detail.currency || raw.currency || "RUB").trim() || "RUB",
+    length_cm: Number(dims.length_cm || input.length_cm || 0),
+    width_cm: Number(dims.width_cm || input.width_cm || 0),
+    height_cm: Number(dims.height_cm || input.height_cm || 0),
+    weight_g: Number(dims.weight_g || input.weight_g || 0),
+    images,
+    source_sku: String(detail.sku || input.sku || raw.sku || "").trim(),
+    product_url: String(detail.product_url || input.product_url || raw.productUrl || "").trim(),
+    updated_by_person_id: detail.updated_by_person_id || null
+  };
+}
+
+function buildCollectorBoxEditAttributes(editPayload = {}, raw = {}) {
+  const attributes = normalizeAttributes([
+    ...normalizeArray(raw.attributes || raw.attribute_values || raw.characteristics || []),
+    ...normalizeArray(raw.ozonProductIntelligence?.attributes || raw.ozonProductIntelligence?.attribute_values || []),
+    ...normalizeArray(raw.ozonErpDetail?.attributes || raw.ozonErpDetail?.attribute_values || []),
+    ...normalizeArray(editPayload.attributes || [])
+  ]);
+  const upsert = (name, value, defaults = {}) => {
+    if (value === undefined || value === null || value === "") return;
+    const matched = attributes.find((item) => {
+      if (defaults.attribute_id && String(item.attribute_id || item.id || "") === String(defaults.attribute_id)) return true;
+      return String(item.name || "").trim() === name;
+    });
+    if (matched) {
+      matched.value = value;
+      if (defaults.attribute_id && !matched.attribute_id) matched.attribute_id = defaults.attribute_id;
+      if (defaults.type && !matched.type) matched.type = defaults.type;
+    } else {
+      attributes.push({ name, value, type: defaults.type || "text", attribute_id: defaults.attribute_id || "", source: "collector_edit" });
+    }
+  };
+  const richContent = editPayload.rich_content_json || editPayload.richContentJson || editPayload.rich_content || editPayload.richContent || raw.rich_content_json || raw.richContentJson || raw.rich_content || raw.richContent || raw.json_content || raw.jsonContent;
+  upsert("品牌", editPayload.brand || raw.brand || "无品牌", { attribute_id: 85 });
+  upsert("型号名称", editPayload.model, { attribute_id: 9048 });
+  upsert("颜色", editPayload.color);
+  upsert("产品标签", normalizeStringList(editPayload.tags).join(","), { attribute_id: 23171, type: "multiselect" });
+  upsert("简介", editPayload.description, { attribute_id: 4191, type: "textarea" });
+  upsert("JSON富内容", typeof richContent === "string" ? richContent : (richContent ? JSON.stringify(richContent, null, 2) : ""), { attribute_id: 11254, type: "rich_json" });
+  return attributes;
+}
+
+function collectedCategoryCandidates(raw = {}, detail = {}, body = {}) {
+  const candidates = [];
+  const push = (descriptionCategoryId, typeId, source = "unknown") => {
+    const descriptionId = Number(descriptionCategoryId || 0);
+    const productTypeId = Number(typeId || 0);
+    if (!descriptionId || !productTypeId) return;
+    if (candidates.some((item) => item.descriptionCategoryId === descriptionId && item.typeId === productTypeId)) return;
+    candidates.push({ descriptionCategoryId: descriptionId, typeId: productTypeId, source });
+  };
+
+  push(body.description_category_id || body.descriptionCategoryId, body.type_id || body.typeId, "request");
+  push(raw.description_category_id || raw.descriptionCategoryId, raw.type_id || raw.typeId, "raw_direct");
+
+  const rawIds = Array.isArray(raw.category_ids) ? raw.category_ids : [];
+  if (raw.category2Id && raw.category3Id) push(raw.category2Id, raw.category3Id, "category2_3");
+  if (rawIds.length >= 3) push(rawIds[rawIds.length - 2], rawIds[rawIds.length - 1], "category_ids_tail");
+  if (rawIds.length >= 2) push(rawIds[0], rawIds[rawIds.length - 1], "category_ids_root_leaf");
+
+  const categoryText = String(detail.category_name || raw.category || raw.category_name || raw.categoryName || "").trim();
+  const leafName = String(raw.category3 || raw.categoryName || "").trim();
+  return { candidates, categoryText, leafName };
+}
+
+async function resolveCollectorBoxListingCategory(detail = {}, body = {}) {
+  const raw = detail.rawPayload || {};
+  const { candidates, categoryText, leafName } = collectedCategoryCandidates(raw, detail, body);
+  for (const candidate of candidates) {
+    const cached = await row(`
+      SELECT *
+      FROM ozon_category_mappings
+      WHERE description_category_id = ? AND type_id = ? AND status = 'active'
+      LIMIT 1
+    `, [candidate.descriptionCategoryId, candidate.typeId]);
+    return cached ? normalizeOzonCategoryRow(cached) : {
+      description_category_id: String(candidate.descriptionCategoryId),
+      descriptionCategoryId: String(candidate.descriptionCategoryId),
+      type_id: String(candidate.typeId),
+      typeId: String(candidate.typeId),
+      ozon_category_id: `${candidate.descriptionCategoryId}:${candidate.typeId}`,
+      category_name: categoryText || leafName || ""
+    };
+  }
+
+  if (categoryText || leafName) {
+    const like = `%${leafName || categoryText.split("/").pop().trim()}%`;
+    const cached = await row(`
+      SELECT *
+      FROM ozon_category_mappings
+      WHERE status = 'active'
+        AND (
+          name_zh = ? OR path_zh = ? OR name_ru = ? OR path_ru = ?
+          OR name_zh LIKE ? OR path_zh LIKE ?
+        )
+      ORDER BY
+        CASE
+          WHEN name_zh = ? THEN 1
+          WHEN path_zh = ? THEN 2
+          WHEN path_zh LIKE ? THEN 3
+          ELSE 9
+        END,
+        updated_at DESC
+      LIMIT 1
+    `, [leafName, categoryText, leafName, categoryText, like, like, leafName, categoryText, like]);
+    if (cached) return normalizeOzonCategoryRow(cached);
+  }
+
+  const sku = String(detail.sku || raw.sku || "").trim();
+  if (!sku) return null;
+  const resolved = await resolveOzonCategoryFromSku({
+    sku,
+    shop_id: body.shop_id || body.shopId
+  }, null).catch(() => null);
+  return resolved?.category || null;
 }
 
 export async function saveListingCollectedProductDetail(body = {}, session = null) {
@@ -356,6 +679,365 @@ export async function saveListingCollectedProductDetail(body = {}, session = nul
     result.error || ""
   ]);
   return getListingCollectedProductDetail(collectionId, tenantId);
+}
+
+export async function syncCollectedProductsFromPlugin(products = [], tenantId = "admin") {
+  await ensureListingAutomationSchema();
+  const items = Array.isArray(products) ? products : [];
+  const normalizedTenantId = String(tenantId || "admin").trim() || "admin";
+  const results = [];
+
+  for (const product of items) {
+    const item = normalizePluginCollectedProduct(product, normalizedTenantId);
+    if (!item.sku) {
+      results.push({ success: false, error: "SKU_REQUIRED", product });
+      continue;
+    }
+    await mysqlExecute(`
+      INSERT INTO ozon_plugin_collected_products
+      (
+        tenant_id, sku, product_id, title, product_url, image_url, category_name,
+        price, currency, sold_count, view_count, click_rate, conversion_rate,
+        stock_count, commission_rate, collect_date, collected_at, payload_json, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON DUPLICATE KEY UPDATE
+        product_id = VALUES(product_id),
+        title = VALUES(title),
+        product_url = VALUES(product_url),
+        image_url = VALUES(image_url),
+        category_name = VALUES(category_name),
+        price = VALUES(price),
+        currency = VALUES(currency),
+        sold_count = VALUES(sold_count),
+        view_count = VALUES(view_count),
+        click_rate = VALUES(click_rate),
+        conversion_rate = VALUES(conversion_rate),
+        stock_count = VALUES(stock_count),
+        commission_rate = VALUES(commission_rate),
+        collect_date = VALUES(collect_date),
+        collected_at = VALUES(collected_at),
+        payload_json = VALUES(payload_json),
+        updated_at = CURRENT_TIMESTAMP
+    `, [
+      item.tenant_id,
+      item.sku,
+      item.product_id,
+      item.title,
+      item.product_url,
+      item.image_url,
+      item.category_name,
+      item.price,
+      item.currency,
+      item.sold_count,
+      item.view_count,
+      item.click_rate,
+      item.conversion_rate,
+      item.stock_count,
+      item.commission_rate,
+      item.collect_date,
+      item.collected_at,
+      JSON.stringify(product || {})
+    ]);
+    results.push({
+      success: true,
+      sku: item.sku,
+      collectDate: item.collect_date,
+      product: buildPluginCollectedProductPayload(item)
+    });
+  }
+
+  return {
+    importedCount: results.filter((item) => item.success).length,
+    failedCount: results.filter((item) => !item.success).length,
+    results
+  };
+}
+
+export async function lookupCollectedProductFromPlugin(sku, tenantId = "admin") {
+  await ensureListingAutomationSchema();
+  const normalizedSku = String(sku || "").trim();
+  if (!normalizedSku) return { found: false, needsRefresh: true, error: "SKU_REQUIRED" };
+  const detail = await row(`
+    SELECT *
+    FROM ozon_plugin_collected_products
+    WHERE tenant_id = ? AND sku = ?
+    ORDER BY collected_at DESC, updated_at DESC
+    LIMIT 1
+  `, [String(tenantId || "admin"), normalizedSku]);
+  if (!detail) return { found: false, needsRefresh: true, collectDate: "", product: null };
+  const collectDate = collectedDateKey(detail.collect_date);
+  return {
+    found: true,
+    needsRefresh: collectDate !== shanghaiDateKey(),
+    collectDate,
+    collectedAt: detail.collected_at,
+    status: detail.status || "collected",
+    selectionProductId: detail.selection_product_id || null,
+    listingTemplateId: detail.listing_template_id || null,
+    product: buildPluginCollectedProductPayload(detail)
+  };
+}
+
+export async function collectorBoxProducts(query = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const page = Math.max(1, Number(query.page || 1));
+  const pageSize = Math.min(Math.max(1, Number(query.pageSize || 20)), 100);
+  const offset = (page - 1) * pageSize;
+  const search = String(query.query || query.search || "").trim().toLowerCase();
+  const status = String(query.status || "all").trim();
+  const tenantId = String(query.tenantId || query.tenant_id || "admin").trim() || "admin";
+  const where = ["tenant_id = ?", "status <> 'deleted'"];
+  const params = [tenantId];
+  if (search) {
+    where.push("(LOWER(sku) LIKE ? OR LOWER(product_id) LIKE ? OR LOWER(title) LIKE ? OR LOWER(category_name) LIKE ?)");
+    const like = `%${search}%`;
+    params.push(like, like, like, like);
+  }
+  if (status === "today") {
+    where.push("collect_date = ?");
+    params.push(shanghaiDateKey());
+  } else if (status && status !== "all") {
+    where.push("status = ?");
+    params.push(status);
+  }
+  const whereSql = where.join(" AND ");
+  const rows = await all(`
+    SELECT *
+    FROM ozon_plugin_collected_products
+    WHERE ${whereSql}
+    ORDER BY updated_at DESC, collected_at DESC
+    LIMIT ? OFFSET ?
+  `, [...params, pageSize, offset]);
+  const totalRow = await row(`
+    SELECT COUNT(*) AS total
+    FROM ozon_plugin_collected_products
+    WHERE ${whereSql}
+  `, params);
+  const summaryRows = await all(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN collect_date = ? THEN 1 ELSE 0 END) AS today_count,
+      SUM(CASE WHEN COALESCE(title, '') <> '' THEN 1 ELSE 0 END) AS titled_count
+    FROM ozon_plugin_collected_products
+    WHERE tenant_id = ? AND status <> 'deleted'
+  `, [shanghaiDateKey(), tenantId]);
+  return {
+    rows: rows.map((item) => buildCollectorBoxRow(item)),
+    total: Number(totalRow?.total || 0),
+    page,
+    pageSize,
+    summary: normalizeCollectorBoxSummary(summaryRows[0] || {})
+  };
+}
+
+export async function collectorBoxProductDetail(sku, session = null, tenantId = "admin") {
+  await ensureListingAutomationSchema();
+  const normalizedTenantId = String(tenantId || "admin").trim() || "admin";
+  const detail = await row(`
+    SELECT *
+    FROM ozon_plugin_collected_products
+    WHERE tenant_id = ? AND sku = ?
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `, [normalizedTenantId, String(sku || "").trim()]);
+  if (!detail) return null;
+  return {
+    ...buildCollectorBoxRow(detail),
+    payload: buildPluginCollectedProductPayload(detail),
+    rawPayload: parseCollectedPayloadJson(detail.payload_json),
+    editPayload: parseCollectedPayloadJson(detail.edit_payload_json)
+  };
+}
+
+export async function deleteCollectorBoxProducts(body = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const tenantId = String(body.tenantId || body.tenant_id || "admin").trim() || "admin";
+  const skus = normalizeArray(body.skus || body.sku)
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  const uniqueSkus = [...new Set(skus)];
+  if (!uniqueSkus.length) throw new Error("请选择要删除的采集商品");
+  const placeholders = uniqueSkus.map(() => "?").join(", ");
+  await mysqlExecute(`
+    UPDATE ozon_plugin_collected_products
+    SET status = 'deleted', updated_at = CURRENT_TIMESTAMP
+    WHERE tenant_id = ? AND sku IN (${placeholders})
+  `, [tenantId, ...uniqueSkus]);
+  return {
+    ok: true,
+    deletedCount: uniqueSkus.length,
+    skus: uniqueSkus
+  };
+}
+
+export async function saveCollectorBoxEdit(sku, body = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const detail = await collectorBoxProductDetail(sku, session);
+  if (!detail) throw new Error("采集箱商品不存在");
+  const editPayload = normalizeCollectorBoxEditPayload(body.editPayload || body.edit_payload || body || {}, detail);
+  await mysqlExecute(`
+    UPDATE ozon_plugin_collected_products
+    SET edit_payload_json = ?, status = CASE WHEN status = 'selection_created' THEN status ELSE 'edited' END,
+        edited_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE tenant_id = ? AND sku = ?
+  `, [JSON.stringify(editPayload), detail.tenant_id || "admin", detail.sku]);
+  return collectorBoxProductDetail(detail.sku, session);
+}
+
+export async function createListingTemplateFromCollectorBox(sku, body = {}, session = null) {
+  const detail = await collectorBoxProductDetail(sku, session, body?.tenant_id || body?.tenantId || "admin");
+  if (!detail) throw new Error("采集箱商品不存在");
+  const forceRebuild = Boolean(body?.force || body?.force_rebuild || body?.forceRebuild || body?.refresh || body?.rebuild);
+  if (detail.listing_template_id && !forceRebuild) {
+    const existingTemplate = await listingCategoryTemplate(detail.listing_template_id, session);
+    if (existingTemplate) {
+      return {
+        ok: true,
+        reused: true,
+        template: body?.compact ? compactListingTemplateReference(existingTemplate) : existingTemplate,
+        collectorProduct: body?.compact ? undefined : detail
+      };
+    }
+  }
+
+  const normalized = await normalizeCollectedListingDraft({ detail, body }, {
+    sourceType: "collector_box",
+    normalizeEditPayload: normalizeCollectorBoxEditPayload,
+    resolveCategory: (currentDetail, currentBody) => resolveCollectorBoxListingCategory(currentDetail, currentBody).catch(() => null),
+    buildAttributes: buildCollectorBoxEditAttributes,
+    mergeAttributeDefinitions: mergeCachedCategoryAttributeDefinitions,
+    collectVariantRows: collectCollectedVariantRows,
+    normalizeVariant: normalizeCollectedVariant,
+    variantImages: collectedVariantImages,
+    normalizeImages,
+    normalizeDimensions: (editPayload) => ({
+      length_cm: Number(editPayload.length_cm || 0),
+      width_cm: Number(editPayload.width_cm || 0),
+      height_cm: Number(editPayload.height_cm || 0),
+      weight_g: Number(editPayload.weight_g || 0)
+    })
+  });
+  const editPayload = normalized.editPayload;
+  const result = await createListingTemplateFromCollectedProduct(normalized.templatePayload, session);
+  const templateId = result.template?.id || null;
+  await mysqlExecute(`
+    UPDATE ozon_plugin_collected_products
+    SET edit_payload_json = ?, listing_template_id = ?, status = CASE WHEN status = 'selection_created' THEN status ELSE 'listing_template_created' END,
+        edited_at = COALESCE(edited_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+    WHERE tenant_id = ? AND sku = ?
+  `, [JSON.stringify(editPayload), templateId, detail.tenant_id || "admin", detail.sku]);
+  if (body?.compact) {
+    return {
+      ok: true,
+      reused: Boolean(result.reused),
+      template: compactListingTemplateReference(result.template),
+      normalization: normalized.diagnostics
+    };
+  }
+  return {
+    ...result,
+    normalization: normalized.diagnostics,
+    collectorProduct: await collectorBoxProductDetail(detail.sku, session, detail.tenant_id || body?.tenant_id || body?.tenantId || "admin")
+  };
+}
+
+function compactListingTemplateReference(template = null) {
+  if (!template) return null;
+  return {
+    id: template.id,
+    template_name: template.template_name || "",
+    title: template.title || "",
+    source_ozon_sku: template.source_ozon_sku || ""
+  };
+}
+
+function compactTemplateForEditor(template = null) {
+  if (!template) return null;
+  const editable = { ...(template.editable_payload || {}) };
+  delete editable.source_raw;
+  delete editable.raw_request;
+  const compact = {
+    ...template,
+    editable_payload: editable,
+    source_raw: undefined,
+    source_raw_omitted: true
+  };
+  delete compact.source_raw_json;
+  delete compact.editable_payload_json;
+  delete compact.attributes_json;
+  delete compact.images_json;
+  delete compact.category_attributes_json;
+  delete compact.required_attributes_json;
+  delete compact.ai_rules_json;
+  delete compact.image_rules_json;
+  return compact;
+}
+export async function createSelectionFromCollectorBox(sku, body = {}, session = null) {
+  const detail = await collectorBoxProductDetail(sku, session, body?.tenant_id || body?.tenantId || "admin");
+  if (!detail) throw new Error("采集箱商品不存在");
+  const payload = detail.payload || {};
+  const raw = detail.rawPayload || {};
+  const dims = normalizeCollectedDimensions(payload, raw);
+  const imageUrls = normalizeImages(raw.images || payload.images || [detail.image_url])
+    .map((item) => String(item?.url || item || "").trim())
+    .filter(Boolean);
+  if (detail.selection_product_id) {
+    let existingProduct = await selectionProductMysql(detail.selection_product_id);
+    if (existingProduct) {
+      if (imageUrls[0] && /\[object Object\]/i.test(`${existingProduct.image_url || ""} ${existingProduct.detail_image_urls || ""}`)) {
+        await mysqlExecute(`
+          UPDATE products
+          SET image_url = ?, detail_image_urls = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `, [imageUrls[0], JSON.stringify(imageUrls.slice(1)), detail.selection_product_id]);
+        existingProduct = await selectionProductMysql(detail.selection_product_id);
+      }
+      return {
+        ok: true,
+        reused: true,
+        id: detail.selection_product_id,
+        product: existingProduct,
+        collectorProduct: detail
+      };
+    }
+  }
+  const title = String(body.name || payload.productTitle || detail.title || `Ozon ${detail.sku}`).trim();
+  const productBody = {
+    name: title,
+    image_url: imageUrls[0] || detail.image_url || "",
+    detail_image_urls: imageUrls.slice(1),
+    purchase_url: detail.product_url || payload.productUrl || "",
+    source_platform: "Ozon",
+    supplier_note: buildCollectorSelectionNote(detail),
+    ozon_category_id: raw.ozon_category_id || raw.category_id || "",
+    ozon_description_category_id: raw.description_category_id || raw.descriptionCategoryId || "",
+    ozon_type_id: raw.type_id || raw.typeId || "",
+    ozon_category_name: detail.category_name || raw.category_name || raw.category || "",
+    package_weight_g: Number(dims.weight_g || raw.weight_g || raw.custom_weight || 0),
+    length_cm: Number(dims.length_cm || 30),
+    width_cm: Number(dims.width_cm || 20),
+    height_cm: Number(dims.height_cm || 10),
+    listing_price_rub: Number(detail.price || raw.price || raw.productPrice || 0),
+    air_sale_price_rmb: Number(raw.priceCny || raw.soldSumCny || 0),
+    advertising_rate: percentToNumber(raw.drr || raw.advertising_rate || 0),
+    return_rate: percentToNumber(raw.nullableRedemptionRate || raw.return_rate || 0.05),
+    product_type: "selection",
+    selection_status: "draft",
+    created_by_person_id: session?.personId || null,
+    owner_person_id: body.owner_person_id || session?.personId || null
+  };
+  const result = await createProductMysql(productBody);
+  await mysqlExecute(`
+    UPDATE ozon_plugin_collected_products
+    SET status = 'selection_created', selection_product_id = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE tenant_id = ? AND sku = ?
+  `, [result.id, detail.tenant_id || "admin", detail.sku]);
+  return {
+    ...result,
+    product: await selectionProductMysql(result.id),
+    collectorProduct: await collectorBoxProductDetail(detail.sku, session, detail.tenant_id || body?.tenant_id || body?.tenantId || "admin")
+  };
 }
 
 export async function getListingCollectedProductDetail(id, tenantId = "admin") {
@@ -411,9 +1093,13 @@ export async function uploadListingMedia(req) {
   const url = `/uploads/listing-media/${storedName}`;
   const publishUrl = buildListingMediaPublishUrl(url);
   const asset = await registerListingMediaAsset({
-    source_module: "listing_upload",
+    source_module: file.fields?.source_module || file.fields?.sourceModule || "listing_upload",
+    source_id: file.fields?.source_id || file.fields?.sourceId || "",
+    batch_id: file.fields?.batch_id || file.fields?.batchId || "",
+    shop_id: nullableNumber(file.fields?.shop_id ?? file.fields?.shopId),
+    variant_id: nullableNumber(file.fields?.variant_id ?? file.fields?.variantId),
     media_type: expectedContentType.startsWith("video/") ? "video" : "image",
-    role: expectedContentType.startsWith("video/") ? "video" : "image",
+    role: file.fields?.role || (expectedContentType.startsWith("video/") ? "video" : "image"),
     local_path: path.relative(process.cwd(), filePath).replace(/\\/g, "/"),
     preview_url: url,
     publish_url: publishUrl || "",
@@ -423,7 +1109,12 @@ export async function uploadListingMedia(req) {
     file_size: file.buffer.length,
     hash_sha256: crypto.createHash("sha256").update(file.buffer).digest("hex"),
     status: publishUrl ? "public_ready" : "local_only",
-    metadata: { upload: "listing_media" }
+    metadata: {
+      upload: "listing_media",
+      assetVariantTitle: file.fields?.asset_variant_title || "",
+      assetVariantSourceTitle: file.fields?.asset_variant_source_title || "",
+      assetVariantOutputDir: file.fields?.asset_variant_output_dir || ""
+    }
   });
   return {
     ok: true,
@@ -442,27 +1133,245 @@ export async function uploadListingMedia(req) {
 
 export async function listingMediaAssets(query = {}, session = null) {
   await ensureListingAutomationSchema();
+  const paged = String(query.paged || "") === "1" || String(query.paged || "").toLowerCase() === "true";
+  const page = Math.max(Number(query.page || 1), 1);
+  const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || query.limit || 20), 1), 100);
   const limit = Math.min(Math.max(Number(query.limit || 100), 1), 500);
-  const rows = await all(`
-    SELECT *
-    FROM listing_media_assets
-    WHERE status <> 'deleted'
-    ORDER BY updated_at DESC, id DESC
-    LIMIT ?
-  `, [limit]);
+  const where = ["m.status <> 'deleted'"];
+  const params = [];
+  const keyword = cleanText(query.keyword || query.q || "", 160).toLowerCase();
+  const mediaType = cleanText(query.mediaType || query.media_type || "", 40).toLowerCase();
+  const role = cleanText(query.role || "", 80).toLowerCase();
+  const status = cleanText(query.status || "", 40).toLowerCase();
+  if (mediaType) {
+    where.push("LOWER(m.media_type) = ?");
+    params.push(mediaType);
+  }
+  if (role) {
+    where.push("LOWER(m.role) = ?");
+    params.push(role);
+  }
+  if (status) {
+    where.push("LOWER(m.status) = ?");
+    params.push(status);
+  }
+  if (keyword) {
+    where.push(`(
+      LOWER(COALESCE(v.source_title, '')) LIKE ? OR
+      LOWER(COALESCE(v.variant_title, '')) LIKE ? OR
+      LOWER(COALESCE(v.variant_title_zh, '')) LIKE ? OR
+      LOWER(COALESCE(m.batch_id, '')) LIKE ? OR
+      LOWER(COALESCE(m.source_id, '')) LIKE ? OR
+      LOWER(COALESCE(m.original_name, '')) LIKE ? OR
+      LOWER(COALESCE(m.storage_name, '')) LIKE ? OR
+      LOWER(COALESCE(v.ozon_category_name, '')) LIKE ? OR
+      LOWER(COALESCE(m.metadata_json, '')) LIKE ?
+    )`);
+    params.push(...Array(9).fill(`%${keyword}%`));
+  }
+  const joinedFrom = `
+      FROM listing_media_assets m
+      LEFT JOIN asset_variants v
+        ON v.batch_id = m.batch_id
+       AND (v.shop_id = m.shop_id OR m.shop_id IS NULL)
+      WHERE ${where.join(" AND ")}
+  `;
+  let rows;
+  try {
+    if (paged) {
+      const countRow = await row(`SELECT COUNT(*) AS total ${joinedFrom}`, params);
+      const total = Number(countRow?.total || 0);
+      rows = await all(`
+        SELECT m.*,
+               v.source_title AS asset_variant_source_title,
+               v.id AS asset_variant_id,
+               v.variant_title AS asset_variant_title,
+               v.variant_title_zh AS asset_variant_title_zh,
+               v.tags_json AS asset_variant_tags_json,
+               v.tag_style AS asset_variant_tag_style,
+               v.price_index AS asset_variant_price_index,
+               v.internal_price AS asset_variant_internal_price,
+               v.ozon_price AS asset_variant_ozon_price,
+               v.ozon_old_price AS asset_variant_ozon_old_price,
+               v.ozon_category_name AS asset_variant_ozon_category_name,
+               v.ozon_category_id AS asset_variant_ozon_category_id,
+               v.color AS asset_variant_color,
+               v.material_text AS asset_variant_material,
+               v.quantity_text AS asset_variant_quantity,
+               v.output_dir AS asset_variant_output_dir,
+               v.created_at AS asset_variant_created_at
+        ${joinedFrom}
+        ORDER BY m.updated_at DESC, m.id DESC
+        LIMIT ? OFFSET ?
+      `, [...params, pageSize, (page - 1) * pageSize]);
+      return {
+        rows: rows.map(normalizeListingMediaAssetRow),
+        total,
+        page,
+        pageSize,
+        totalPages: Math.max(1, Math.ceil(total / pageSize)),
+        mode: "paged"
+      };
+    }
+    rows = await all(`
+      SELECT m.*,
+             v.source_title AS asset_variant_source_title,
+             v.id AS asset_variant_id,
+             v.variant_title AS asset_variant_title,
+             v.variant_title_zh AS asset_variant_title_zh,
+             v.tags_json AS asset_variant_tags_json,
+             v.tag_style AS asset_variant_tag_style,
+             v.price_index AS asset_variant_price_index,
+             v.internal_price AS asset_variant_internal_price,
+             v.ozon_price AS asset_variant_ozon_price,
+             v.ozon_old_price AS asset_variant_ozon_old_price,
+             v.ozon_category_name AS asset_variant_ozon_category_name,
+             v.ozon_category_id AS asset_variant_ozon_category_id,
+             v.color AS asset_variant_color,
+             v.material_text AS asset_variant_material,
+             v.quantity_text AS asset_variant_quantity,
+             v.output_dir AS asset_variant_output_dir,
+             v.created_at AS asset_variant_created_at
+      FROM listing_media_assets m
+      LEFT JOIN asset_variants v
+        ON v.batch_id = m.batch_id
+       AND (v.shop_id = m.shop_id OR m.shop_id IS NULL)
+      WHERE m.status <> 'deleted'
+      ORDER BY m.updated_at DESC, m.id DESC
+      LIMIT ?
+    `, [limit]);
+  } catch (error) {
+    rows = await all(`
+      SELECT *
+      FROM listing_media_assets
+      WHERE status <> 'deleted'
+      ORDER BY updated_at DESC, id DESC
+      LIMIT ?
+    `, [limit]);
+  }
   return rows.map(normalizeListingMediaAssetRow);
+}
+
+export async function searchMaterialPackages(query = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const page = Math.max(Number(query.page || 1), 1);
+  const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 12), 1), 50);
+  const filters = {
+    keyword: cleanText(query.keyword, 120),
+    name: cleanText(query.name, 120),
+    shopId: Number(query.shopId || query.shop_id || 0),
+    brand: cleanText(query.brand, 120),
+    model: cleanText(query.model, 120),
+    productType: cleanText(query.productType || query.product_type, 120)
+  };
+  const where = ["t.status <> 'deleted'", "t.source_type IN ('asset_variant_engine', 'manual', 'ozon_frontend_collect', 'ozon_sku_copy')"];
+  const params = [];
+  if (filters.keyword) {
+    where.push(`(
+      t.template_name LIKE ? OR t.title LIKE ? OR t.category_name LIKE ? OR t.source_raw_json LIKE ? OR t.attributes_json LIKE ?
+    )`);
+    params.push(...Array(5).fill(`%${filters.keyword}%`));
+  }
+  if (filters.name) {
+    where.push("t.template_name LIKE ?");
+    params.push(`%${filters.name}%`);
+  }
+  if (filters.shopId) {
+    where.push("(t.source_shop_id = ? OR JSON_EXTRACT(t.source_raw_json, '$.shop_id') = ?)");
+    params.push(filters.shopId, filters.shopId);
+  }
+  if (filters.brand) {
+    where.push("(t.attributes_json LIKE ? OR t.editable_payload_json LIKE ?)");
+    params.push(`%${filters.brand}%`, `%${filters.brand}%`);
+  }
+  if (filters.model) {
+    where.push("(t.attributes_json LIKE ? OR t.editable_payload_json LIKE ?)");
+    params.push(`%${filters.model}%`, `%${filters.model}%`);
+  }
+  if (filters.productType) {
+    where.push("(t.category_name LIKE ? OR t.template_name LIKE ? OR t.editable_payload_json LIKE ?)");
+    params.push(`%${filters.productType}%`, `%${filters.productType}%`, `%${filters.productType}%`);
+  }
+  const offset = (page - 1) * pageSize;
+  const rows = await all(`
+    SELECT t.*, s.name AS shop_name
+    FROM listing_category_templates t
+    LEFT JOIN shops s ON s.id = t.source_shop_id
+    WHERE ${where.join(" AND ")}
+    ORDER BY t.updated_at DESC, t.id DESC
+    LIMIT ? OFFSET ?
+  `, [...params, pageSize, offset]);
+  return {
+    page,
+    pageSize,
+    items: rows.map(normalizeMaterialPackageRow)
+  };
+}
+
+export async function materialPackageDetail(id, session = null) {
+  await ensureListingAutomationSchema();
+  const item = await row(`
+    SELECT t.*, s.name AS shop_name
+    FROM listing_category_templates t
+    LEFT JOIN shops s ON s.id = t.source_shop_id
+    WHERE t.id = ? AND t.status <> 'deleted'
+    LIMIT 1
+  `, [Number(id)]);
+  if (!item) throw new Error("素材包不存在");
+  const template = normalizeTemplateRow(item);
+  return {
+    ...normalizeMaterialPackageRow(item),
+    template
+  };
+}
+
+export async function generateDeepSeekListingContent(body = {}, session = null) {
+  const type = cleanText(body.type, 64);
+  const context = objectValue(body.context || {});
+  const allowed = new Set(["listingForm", "title", "keywords", "tags", "description", "shortDescription", "categorySuggest", "attributeFill", "translateRu", "optimizeSeo", "imageCopy"]);
+  if (!allowed.has(type)) throw new Error("Unsupported DeepSeek generation type");
+  const result = await chatWithAiProvider({
+    temperature: 0.25,
+    maxTokens: 4000,
+    messages: [
+      { role: "system", content: "You are DeepSeek used inside an Ozon Russia listing ERP. Return only valid JSON with keys content and fields. No markdown." },
+      { role: "user", content: buildDeepSeekListingPrompt(type, context) }
+    ]
+  });
+  const parsed = parseAiContentJson(result.content);
+  return {
+    success: true,
+    data: {
+      content: String(parsed.content || result.content || "").trim(),
+      fields: objectValue(parsed.fields || parsed)
+    },
+    provider: result.provider,
+    model: result.model
+  };
+}
+
+export async function generateListingOfferId(body = {}, session = null) {
+  const brand = cleanText(body.brand, 32).toUpperCase() || "OZON";
+  const productType = cleanText(body.productType || body.product_type, 64);
+  const existing = new Set(normalizeStringList(body.existingIds || body.existing_ids).map((item) => item.toUpperCase()));
+  const prefix = cleanText(body.prefix, 64).toUpperCase() || `${brand}-${productTypeAbbr(productType)}`;
+  for (let index = 0; index < 100; index += 1) {
+    const offerId = `${prefix}-${Math.floor(100000 + Math.random() * 900000)}`;
+    if (!existing.has(offerId.toUpperCase())) return { offerId };
+  }
+  return { offerId: `${prefix}-${Date.now().toString().slice(-6)}` };
 }
 
 export async function listingOzonCategories(query = {}, session = null) {
   await ensureListingAutomationSchema();
   const keyword = String(query.keyword || query.q || "").trim();
-  const limit = Math.min(Math.max(Number(query.limit || 80), 1), 300);
+  const limit = Math.min(Math.max(Number(query.limit || 80), 1), 10000);
   const params = [];
   let where = "WHERE status = 'active'";
   if (keyword) {
-    where += " AND (name_zh LIKE ? OR name_ru LIKE ? OR path_zh LIKE ? OR path_ru LIKE ? OR CAST(description_category_id AS CHAR) LIKE ? OR CAST(type_id AS CHAR) LIKE ?)";
+    where += " AND (name_zh LIKE ? OR name_ru LIKE ? OR path_zh LIKE ? OR path_ru LIKE ?)";
     const like = `%${keyword}%`;
-    params.push(like, like, like, like, like, like);
+    params.push(like, like, like, like);
   }
   params.push(limit);
   const rows = await all(`
@@ -471,10 +1380,11 @@ export async function listingOzonCategories(query = {}, session = null) {
     ${where}
     ORDER BY
       CASE WHEN name_zh = ? OR name_ru = ? THEN 0 ELSE 1 END,
-      is_auto DESC,
-      updated_at DESC,
       path_zh ASC,
-      name_zh ASC
+      path_ru ASC,
+      name_zh ASC,
+      is_auto DESC,
+      updated_at DESC
     LIMIT ?
   `, keyword ? [...params.slice(0, -1), keyword, keyword, limit] : [keyword, keyword, limit]);
   return rows.map(normalizeOzonCategoryRow);
@@ -486,13 +1396,29 @@ export async function syncListingOzonCategories(body = {}, session = null) {
   const tree = await fetchOzonDescriptionCategoryTree(shop, { language: body.language || "ZH_HANS" });
   const rows = flattenOzonCategoryTree(tree);
   let saved = 0;
-  for (const item of rows) {
-    if (!item.descriptionCategoryId || !item.typeId) continue;
+  const validRows = rows.filter((item) => item.descriptionCategoryId && item.typeId);
+  for (const chunk of chunkArray(validRows, 300)) {
+    const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, 'ozon_api', ?, 'active', CURRENT_TIMESTAMP)").join(",");
+    const params = [];
+    for (const item of chunk) {
+      params.push(
+        item.descriptionCategoryId,
+        item.typeId,
+        item.nameRu,
+        item.nameZh,
+        item.pathRu,
+        item.pathZh,
+        item.parentDescriptionCategoryId,
+        item.isAuto ? 1 : 0,
+        shop.id,
+        JSON.stringify(item.raw || {})
+      );
+    }
     await run(`
       INSERT INTO ozon_category_mappings
       (description_category_id, type_id, name_ru, name_zh, path_ru, path_zh, parent_description_category_id,
        is_auto, source_shop_id, source, raw_json, status, synced_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ozon_api', ?, 'active', CURRENT_TIMESTAMP)
+      VALUES ${placeholders}
       ON DUPLICATE KEY UPDATE
         name_ru = VALUES(name_ru),
         name_zh = VALUES(name_zh),
@@ -505,21 +1431,66 @@ export async function syncListingOzonCategories(body = {}, session = null) {
         status = 'active',
         synced_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
-    `, [
-      item.descriptionCategoryId,
-      item.typeId,
-      item.nameRu,
-      item.nameZh,
-      item.pathRu,
-      item.pathZh,
-      item.parentDescriptionCategoryId,
-      item.isAuto ? 1 : 0,
-      shop.id,
-      JSON.stringify(item.raw || {})
-    ]);
-    saved += 1;
+    `, params);
+    saved += chunk.length;
   }
   return { ok: true, shopId: Number(shop.id), shopName: shop.name, saved };
+}
+
+export async function resolveOzonCategoryFromSku(body = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const sku = String(body.sku || body.ozon_sku || body.ozonSku || body.offer_id || body.offerId || "").trim();
+  if (!sku) throw new Error("请输入 Ozon SKU 或 offer_id");
+  const shop = await resolveOzonApiShop(body.shop_id || body.shopId);
+  const localProduct = await row(`
+    SELECT *
+    FROM online_products
+    WHERE shop_id = ?
+      AND (ozon_sku = ? OR ozon_product_id = ? OR offer_id = ?)
+    ORDER BY synced_at DESC, updated_at DESC
+    LIMIT 1
+  `, [shop.id, sku, sku, sku]);
+  if (!localProduct) throw new Error("本地在线商品缓存里没有找到这个 SKU，请先同步在线商品或换 offer_id 试一下");
+
+  const productId = Number(localProduct.ozon_product_id || 0);
+  const details = productId
+    ? await fetchOzonProductInfoAttributes(shop, { productIds: [productId], limit: 1 }).catch(() => [])
+    : [];
+  const detail = details[0] || {};
+  const localAttributes = parseJson(localProduct.attributes_json, {});
+  const descriptionCategoryId = Number(detail.description_category_id || detail.descriptionCategoryId || localAttributes.description_category_id || 0);
+  const typeId = Number(detail.type_id || detail.typeId || localAttributes.type_id || 0);
+  if (!descriptionCategoryId || !typeId) throw new Error("找到了商品，但没有读到 description_category_id/type_id");
+
+  const cached = await row(`
+    SELECT *
+    FROM ozon_category_mappings
+    WHERE description_category_id = ? AND type_id = ? AND status = 'active'
+    LIMIT 1
+  `, [descriptionCategoryId, typeId]);
+  const fallbackName = detail.category_name || localProduct.name || `${descriptionCategoryId}:${typeId}`;
+  const category = cached ? normalizeOzonCategoryRow(cached) : normalizeOzonCategoryRow({
+    description_category_id: descriptionCategoryId,
+    type_id: typeId,
+    name_zh: `待翻译类目 ${descriptionCategoryId}:${typeId}`,
+    name_ru: fallbackName,
+    path_zh: `待翻译类目 ${descriptionCategoryId}:${typeId}`,
+    path_ru: fallbackName,
+    raw_json: JSON.stringify(detail || {})
+  });
+  return {
+    ok: true,
+    shopId: Number(shop.id),
+    shopName: shop.name,
+    sku,
+    product: {
+      ozon_product_id: String(localProduct.ozon_product_id || ""),
+      ozon_sku: String(localProduct.ozon_sku || ""),
+      offer_id: String(localProduct.offer_id || ""),
+      name: localProduct.name || ""
+    },
+    category
+  };
 }
 
 export async function listingOzonCategoryAttributes(query = {}, session = null) {
@@ -533,6 +1504,26 @@ export async function listingOzonCategoryAttributes(query = {}, session = null) 
     WHERE description_category_id = ? AND type_id = ? AND status = 'active'
     ORDER BY is_required DESC, sort_order ASC, attribute_id ASC
   `, [descriptionCategoryId, typeId]);
+  if (!rows.length && query.auto_sync !== false && query.autoSync !== false) {
+    await syncListingOzonCategoryAttributes({
+      description_category_id: descriptionCategoryId,
+      type_id: typeId,
+      shop_id: query.shop_id || query.shopId,
+      language: query.language || "ZH_HANS",
+      sync_values: Boolean(query.sync_values || query.syncValues),
+      value_limit: query.value_limit || query.valueLimit || 120,
+      return_value_limit: query.value_limit || query.valueLimit || 120
+    }, session).catch(() => null);
+    const syncedRows = await all(`
+      SELECT *
+      FROM ozon_category_attributes
+      WHERE description_category_id = ? AND type_id = ? AND status = 'active'
+      ORDER BY is_required DESC, sort_order ASC, attribute_id ASC
+    `, [descriptionCategoryId, typeId]);
+    const syncedAttributes = syncedRows.map(normalizeOzonCategoryAttributeRow);
+    await attachCachedAttributeValues(syncedAttributes, descriptionCategoryId, typeId, Number(query.value_limit || query.valueLimit || 120));
+    return syncedAttributes;
+  }
   const attributes = rows.map(normalizeOzonCategoryAttributeRow);
   await attachCachedAttributeValues(attributes, descriptionCategoryId, typeId, Number(query.value_limit || query.valueLimit || 120));
   return attributes;
@@ -610,7 +1601,11 @@ export async function syncListingOzonCategoryAttributes(body = {}, session = nul
     typeId,
     saved,
     values_saved: valuesSaved,
-    attributes: await listingOzonCategoryAttributes({ description_category_id: descriptionCategoryId, type_id: typeId }, session)
+    attributes: await listingOzonCategoryAttributes({
+      description_category_id: descriptionCategoryId,
+      type_id: typeId,
+      value_limit: body.return_value_limit || body.returnValueLimit || body.value_limit || 40
+    }, session)
   };
 }
 
@@ -624,8 +1619,8 @@ export async function listingOzonAttributeValues(query = {}, session = null) {
   const params = [descriptionCategoryId, typeId, attributeId];
   let where = "WHERE description_category_id = ? AND type_id = ? AND attribute_id = ? AND status = 'active'";
   if (keyword) {
-    where += " AND value LIKE ?";
-    params.push(`%${keyword}%`);
+    where += " AND (value LIKE ? OR display_value_zh LIKE ?)";
+    params.push(`%${keyword}%`, `%${keyword}%`);
   }
   params.push(Math.min(Math.max(Number(query.limit || 80), 1), 500));
   const rows = await all(`
@@ -720,12 +1715,14 @@ export async function syncListingOzonAttributeValues(body = {}, session = null) 
     const dictionaryValueId = Number(item.id || item.dictionary_value_id || item.value_id || 0);
     const value = String(item.value || item.name || item.title || "").trim();
     if (!dictionaryValueId && !value) continue;
+    const displayValueZh = inferOzonAttributeDisplayValueZh(attributeId, value, item);
     await run(`
       INSERT INTO ozon_attribute_values
-      (description_category_id, type_id, attribute_id, dictionary_value_id, value, info, source_shop_id, raw_json, status, synced_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
+      (description_category_id, type_id, attribute_id, dictionary_value_id, value, display_value_zh, info, source_shop_id, raw_json, status, synced_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
       ON DUPLICATE KEY UPDATE
         value = VALUES(value),
+        display_value_zh = VALUES(display_value_zh),
         info = VALUES(info),
         source_shop_id = VALUES(source_shop_id),
         raw_json = VALUES(raw_json),
@@ -738,6 +1735,7 @@ export async function syncListingOzonAttributeValues(body = {}, session = null) 
       attributeId,
       dictionaryValueId,
       value,
+      displayValueZh,
       String(item.info || item.description || "").trim(),
       shop.id,
       JSON.stringify(item)
@@ -835,6 +1833,13 @@ export async function validateListingTemplatePublish(body = {}, session = null) 
   const variants = normalizeArray(editable.variants || template.variants || []).map(normalizeVariantMediaForPublish);
   const facts = {
     title: String(template.title || editable.title || template.template_name || "").trim(),
+    description: String(template.description || editable.description || "").trim(),
+    tags: splitTagValue(attributeValueByNames(attributes, ["tag", "hashtag", "标签"], [23171]) || template.tags || editable.tags || ""),
+    color: attributeValueByNames(attributes, ["color"], [10096]) || editable.color || template.color || "",
+    material: attributeValueByNames(attributes, ["material"], [7199]) || editable.material || template.material || "",
+    quantity: attributeValueByNames(attributes, ["quantity"], [7202]) || editable.quantity || template.quantity || "",
+    vehicleBrand: attributeValueByNames(attributes, ["vehicle brand", "car brand"], [7204]) || editable.vehicle_brand || template.vehicle_brand || "",
+    vehicleModel: attributeValueByNames(attributes, ["vehicle model", "car model"], [7212]) || editable.vehicle_model || template.vehicle_model || "",
     categoryId: String(template.ozon_category_id || editable.category_id || "").trim(),
     descriptionCategoryId: String(editable.description_category_id || template.description_category_id || "").trim(),
     typeId: String(editable.type_id || template.type_id || "").trim(),
@@ -856,6 +1861,9 @@ export async function validateListingTemplatePublish(body = {}, session = null) 
     errors.push("缺少包装长宽高");
   }
   if (!images.length && !variants.some((item) => normalizeImages(item.images || []).length)) errors.push("缺少商品图片");
+  const missingOfferIds = variants.filter((item) => !String(item.offer_id || item.offerId || item.sku || "").trim());
+  if (!variants.length) errors.push("缺少变体 / SKU");
+  if (missingOfferIds.length) errors.push(`货号 / offer_id 不能为空：${missingOfferIds.length} 个变体未生成`);
   const missingRequired = attributes.filter((item) => item.required && !normalizeAttributeValue(item.value));
   for (const item of missingRequired.slice(0, 20)) errors.push(`缺少必填属性：${item.name || item.attribute_id}`);
   const localMedia = [
@@ -867,12 +1875,17 @@ export async function validateListingTemplatePublish(body = {}, session = null) 
   if (localMedia.length) warnings.push("存在本地素材 URL，正式提交 Ozon 前需要转换为公网可访问地址或上传到 Ozon 支持的素材地址");
 
   const payload = buildOzonImportPreviewPayload(facts, template);
+  const qualityEstimate = estimateListingQualityFromPayload(payload);
+  if (qualityEstimate.score < 90) {
+    warnings.push(`本地内容评分预估 ${qualityEstimate.score}/100，建议补齐：${qualityEstimate.issues.slice(0, 3).join("；")}`);
+  }
   return {
     ok: errors.length === 0,
     errors,
     warnings,
     missing_required_attributes: missingRequired,
     payload,
+    quality_estimate: qualityEstimate,
     payload_note: "这是按当前模板生成的 Ozon product/import 预览结构，正式提交前仍需按店铺、offer_id、媒体公网地址和 Ozon 类目属性校验补齐。"
   };
 }
@@ -883,6 +1896,14 @@ export async function publishListingTemplateToOzon(body = {}, session = null) {
   if (!shopIds.length) throw new Error("请至少选择一个上架店铺");
 
   const validation = await validateListingTemplatePublish(body.template || body, session);
+  const sourceRecordId = Number(
+    body.source_record_id
+    || body.record_id
+    || body.recordId
+    || body.template?.source_raw?.record_id
+    || body.template?.editable_payload?.source_raw?.record_id
+    || 0
+  );
   const localMedia = collectLocalImportMedia(validation.payload);
   if (localMedia.length) {
     validation.errors.push("正式提交 Ozon 前需要先把图片/视频转为公网 URL，本地 /uploads 地址无法被 Ozon 拉取");
@@ -905,17 +1926,15 @@ export async function publishListingTemplateToOzon(body = {}, session = null) {
   for (const shop of shops) {
     let recordId = null;
     try {
-      recordId = await insert(`
-        INSERT INTO listing_publish_records
-        (draft_id, shop_id, offer_id, status, request_json, created_by_person_id, updated_at)
-        VALUES (0, ?, ?, 'submitted', ?, ?, CURRENT_TIMESTAMP)
-      `, [
-        shop.id,
-        firstOfferId(validation.payload),
-        JSON.stringify(validation.payload),
-        personId(session)
-      ]);
-      const response = await importOzonProducts(shop, validation.payload);
+      const shopPayload = await applyShopPublishDefaults(validation.payload, shop);
+      recordId = await preparePublishRecordForSubmit({
+        sourceRecordId,
+        shop,
+        shopPayload,
+        session,
+        updateExisting: shops.length === 1
+      });
+      const response = await importOzonProducts(shop, shopPayload);
       const taskId = response?.result?.task_id || response?.task_id || response?.result?.taskId || "";
       let importInfo = null;
       if (taskId) {
@@ -925,8 +1944,13 @@ export async function publishListingTemplateToOzon(body = {}, session = null) {
         taskId,
         response,
         importInfo,
-        status: importInfo?.error ? "submitted" : importInfoStatus(importInfo)
+        status: importInfoStatus(importInfo)
       });
+      const quality = await refreshPublishRecordQuality(recordId).catch((error) => ({
+        score: 0,
+        source: "refresh_failed",
+        issues: [error.message]
+      }));
       results.push({
         record_id: recordId,
         shop_id: shop.id,
@@ -934,7 +1958,8 @@ export async function publishListingTemplateToOzon(body = {}, session = null) {
         ok: true,
         task_id: taskId,
         response,
-        import_info: importInfo
+        import_info: importInfo,
+        quality
       });
     } catch (error) {
       if (recordId) {
@@ -961,17 +1986,167 @@ export async function publishListingTemplateToOzon(body = {}, session = null) {
   };
 }
 
+async function preparePublishRecordForSubmit({ sourceRecordId = 0, shop, shopPayload, session, updateExisting = false }) {
+  const requestJson = JSON.stringify(shopPayload);
+  const offerId = firstOfferId(shopPayload);
+  if (sourceRecordId && updateExisting) {
+    const current = await row("SELECT id, shop_id FROM listing_publish_records WHERE id = ? AND status <> 'deleted'", [sourceRecordId]);
+    if (!current) throw new Error("要更新的上架记录不存在");
+    if (Number(current.shop_id) !== Number(shop.id)) throw new Error("上架记录所属店铺与当前提交店铺不一致");
+    await run(`
+      UPDATE listing_publish_records
+      SET shop_id = ?, offer_id = ?, status = 'submitted', request_json = ?,
+          response_json = NULL, error_json = NULL, task_id = '', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [shop.id, offerId, requestJson, sourceRecordId]);
+    return sourceRecordId;
+  }
+  return insert(`
+    INSERT INTO listing_publish_records
+    (draft_id, shop_id, offer_id, status, request_json, created_by_person_id, updated_at)
+    VALUES (0, ?, ?, 'submitted', ?, ?, CURRENT_TIMESTAMP)
+  `, [
+    shop.id,
+    offerId,
+    requestJson,
+    personId(session)
+  ]);
+}
+
 export async function listingPublishRecords(query = {}, session = null) {
   await ensureListingAutomationSchema();
+  const paged = String(query.paged || "") === "1" || String(query.paged || "").toLowerCase() === "true";
+  const includePayload = String(query.includePayload || query.include_payload || "").toLowerCase() === "1"
+    || String(query.includePayload || query.include_payload || "").toLowerCase() === "true"
+    || (!paged && query.includePayload === undefined && query.include_payload === undefined);
   const limit = Math.min(Math.max(Number(query.limit || 80), 1), 300);
-  const rows = await all(`
-    SELECT r.*, s.name AS shop_name
+  const page = Math.max(Number(query.page || 1), 1);
+  const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 100);
+  const where = ["r.status <> 'deleted'"];
+  const params = [];
+  const nameQuery = cleanText(query.nameQuery || query.name || "", 120).toLowerCase();
+  const shopQuery = cleanText(query.shopQuery || query.shop || "", 120).toLowerCase();
+  const keyword = cleanText(query.query || query.keyword || "", 160).toLowerCase();
+  const status = cleanText(query.status || "all", 40);
+  const quality = cleanText(query.quality || "all", 40);
+
+  if (status === "success") where.push("r.status IN ('imported', 'published', 'success')");
+  else if (status === "processing") where.push("r.status IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending')");
+  else if (status === "failed") where.push("r.status IN ('failed', 'ozon_status_error')");
+  else if (status && status !== "all") {
+    where.push("r.status = ?");
+    params.push(status);
+  }
+  if (quality === "lt85") where.push("COALESCE(r.quality_score, 0) < 85");
+  else if (quality === "gte85") where.push("COALESCE(r.quality_score, 0) >= 85");
+  else if (quality === "gte90") where.push("COALESCE(r.quality_score, 0) >= 90");
+  if (nameQuery) {
+    where.push("LOWER(COALESCE(r.product_name, r.offer_id, '')) LIKE ?");
+    params.push(`%${nameQuery}%`);
+  }
+  if (shopQuery) {
+    where.push("LOWER(COALESCE(s.name, '')) LIKE ?");
+    params.push(`%${shopQuery}%`);
+  }
+  if (keyword) {
+    where.push(`(
+      LOWER(COALESCE(r.product_name, '')) LIKE ? OR
+      LOWER(COALESCE(r.offer_id, '')) LIKE ? OR
+      LOWER(COALESCE(s.name, '')) LIKE ? OR
+      LOWER(COALESCE(r.ozon_product_id, '')) LIKE ? OR
+      LOWER(COALESCE(r.task_id, '')) LIKE ? OR
+      LOWER(COALESCE(r.description_category_id, '')) LIKE ? OR
+      LOWER(COALESCE(r.type_id, '')) LIKE ? OR
+      LOWER(COALESCE(m.path_zh, m.name_zh, m.path_ru, m.name_ru, '')) LIKE ? OR
+      LOWER(COALESCE(r.price, '')) LIKE ? OR
+      LOWER(COALESCE(r.currency_code, '')) LIKE ?
+    )`);
+    params.push(...Array(10).fill(`%${keyword}%`));
+  }
+
+  const fromSql = `
     FROM listing_publish_records r
     LEFT JOIN shops s ON s.id = r.shop_id
+    LEFT JOIN online_products op
+      ON op.shop_id = r.shop_id
+     AND (
+       (r.offer_id IS NOT NULL AND r.offer_id <> '' AND CONVERT(op.offer_id USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.offer_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+       OR (r.ozon_product_id IS NOT NULL AND r.ozon_product_id <> '' AND CONVERT(op.ozon_product_id USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.ozon_product_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+       OR (r.ozon_sku IS NOT NULL AND r.ozon_sku <> '' AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+     )
+    LEFT JOIN ozon_category_mappings m
+      ON m.description_category_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].description_category_id')), ''), ':', 1), '') AS UNSIGNED)
+     AND m.type_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].type_id')), ''), ':', 1), '') AS UNSIGNED)
+     AND m.status = 'active'
+    WHERE ${where.join(" AND ")}
+  `;
+  if (paged) {
+    const countRow = await row(`SELECT COUNT(*) AS total ${fromSql}`, params);
+    const total = Number(countRow?.total || 0);
+    const rows = await all(`
+      SELECT r.*, s.name AS shop_name,
+        COALESCE(NULLIF(op.primary_image, ''), NULLIF(op.image_url, '')) AS online_primary_image,
+        COALESCE(NULLIF(m.path_zh, ''), NULLIF(m.name_zh, ''), NULLIF(m.path_ru, ''), NULLIF(m.name_ru, '')) AS category_name
+      ${fromSql}
+      ORDER BY r.updated_at DESC, r.id DESC
+      LIMIT ? OFFSET ?
+    `, [...params, pageSize, (page - 1) * pageSize]);
+    return {
+      rows: rows.map((item) => normalizePublishRecordRow(item, { includePayload })),
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      mode: "paged"
+    };
+  }
+  const rows = await all(`
+    SELECT r.*, s.name AS shop_name,
+      COALESCE(NULLIF(op.primary_image, ''), NULLIF(op.image_url, '')) AS online_primary_image,
+      COALESCE(NULLIF(m.path_zh, ''), NULLIF(m.name_zh, ''), NULLIF(m.path_ru, ''), NULLIF(m.name_ru, '')) AS category_name
+    FROM listing_publish_records r
+    LEFT JOIN shops s ON s.id = r.shop_id
+    LEFT JOIN online_products op
+      ON op.shop_id = r.shop_id
+     AND (
+       (r.offer_id IS NOT NULL AND r.offer_id <> '' AND CONVERT(op.offer_id USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.offer_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+       OR (r.ozon_product_id IS NOT NULL AND r.ozon_product_id <> '' AND CONVERT(op.ozon_product_id USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.ozon_product_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+       OR (r.ozon_sku IS NOT NULL AND r.ozon_sku <> '' AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+     )
+    LEFT JOIN ozon_category_mappings m
+      ON m.description_category_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].description_category_id')), ''), ':', 1), '') AS UNSIGNED)
+     AND m.type_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].type_id')), ''), ':', 1), '') AS UNSIGNED)
+     AND m.status = 'active'
+    WHERE r.status <> 'deleted'
     ORDER BY r.updated_at DESC, r.id DESC
     LIMIT ?
   `, [limit]);
-  return rows.map(normalizePublishRecordRow);
+  return rows.map((item) => normalizePublishRecordRow(item, { includePayload }));
+}
+
+export async function listingPublishRecordDetail(id, session = null) {
+  await ensureListingAutomationSchema();
+  const record = await row(`
+    SELECT r.*, s.name AS shop_name,
+      COALESCE(NULLIF(op.primary_image, ''), NULLIF(op.image_url, '')) AS online_primary_image,
+      COALESCE(NULLIF(m.path_zh, ''), NULLIF(m.name_zh, ''), NULLIF(m.path_ru, ''), NULLIF(m.name_ru, '')) AS category_name
+    FROM listing_publish_records r
+    LEFT JOIN shops s ON s.id = r.shop_id
+    LEFT JOIN online_products op
+      ON op.shop_id = r.shop_id
+     AND (
+       (r.offer_id IS NOT NULL AND r.offer_id <> '' AND CONVERT(op.offer_id USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.offer_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+       OR (r.ozon_product_id IS NOT NULL AND r.ozon_product_id <> '' AND CONVERT(op.ozon_product_id USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.ozon_product_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+       OR (r.ozon_sku IS NOT NULL AND r.ozon_sku <> '' AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+     )
+    LEFT JOIN ozon_category_mappings m
+      ON m.description_category_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].description_category_id')), ''), ':', 1), '') AS UNSIGNED)
+     AND m.type_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].type_id')), ''), ':', 1), '') AS UNSIGNED)
+     AND m.status = 'active'
+    WHERE r.id = ? AND r.status <> 'deleted'
+  `, [Number(id)]);
+  if (!record) throw new Error("上架记录不存在");
+  return normalizePublishRecordRow(record, { includePayload: true });
 }
 
 export async function refreshListingPublishRecord(id, session = null) {
@@ -991,6 +2166,7 @@ export async function refreshListingPublishRecord(id, session = null) {
     importInfo,
     status: importInfoStatus(importInfo)
   });
+  await refreshPublishRecordQuality(Number(id)).catch(() => null);
   const updated = await row(`
     SELECT r.*, s.name AS shop_name
     FROM listing_publish_records r
@@ -998,6 +2174,73 @@ export async function refreshListingPublishRecord(id, session = null) {
     WHERE r.id = ?
   `, [Number(id)]);
   return normalizePublishRecordRow(updated);
+}
+
+export async function retryListingPublishRecord(id, body = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const record = await row(`
+    SELECT r.*, s.name AS shop_name, s.ozon_client_id, COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS api_key_hint
+    FROM listing_publish_records r
+    LEFT JOIN shops s ON s.id = r.shop_id
+    WHERE r.id = ?
+  `, [Number(id)]);
+  if (!record) throw new Error("发布记录不存在");
+  const payload = normalizeRetryPublishPayload(body.payload || body.request || parseJson(record.request_json, {}));
+  if (!normalizeArray(payload.items).length) throw new Error("发布记录缺少可重试的 Ozon payload");
+
+  await run(`
+    UPDATE listing_publish_records
+    SET status = 'resubmitting', request_json = ?, error_json = NULL, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [JSON.stringify(payload), Number(id)]);
+
+  try {
+    const shopPayload = await applyShopPublishDefaults(payload, record);
+    await run(`
+      UPDATE listing_publish_records
+      SET request_json = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [JSON.stringify(shopPayload), Number(id)]);
+    const response = await importOzonProducts(record, shopPayload);
+    const taskId = response?.result?.task_id || response?.task_id || response?.result?.taskId || "";
+    let importInfo = null;
+    if (taskId) {
+      importInfo = await fetchOzonProductImportInfo(record, taskId).catch((error) => ({ error: error.message }));
+    }
+    await updatePublishRecordAfterSubmit(Number(id), {
+      taskId,
+      response,
+      importInfo,
+      status: importInfoStatus(importInfo)
+    });
+    await refreshPublishRecordQuality(Number(id)).catch(() => null);
+  } catch (error) {
+    await run(`
+      UPDATE listing_publish_records
+      SET status = 'failed', error_json = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [JSON.stringify({ message: error.message }), Number(id)]);
+  }
+
+  const updated = await row(`
+    SELECT r.*, s.name AS shop_name
+    FROM listing_publish_records r
+    LEFT JOIN shops s ON s.id = r.shop_id
+    WHERE r.id = ?
+  `, [Number(id)]);
+  return normalizePublishRecordRow(updated);
+}
+
+export async function deleteListingPublishRecord(id, session = null) {
+  await ensureListingAutomationSchema();
+  const record = await row("SELECT id FROM listing_publish_records WHERE id = ? AND status <> 'deleted'", [Number(id)]);
+  if (!record) throw new Error("上架记录不存在");
+  await run(`
+    UPDATE listing_publish_records
+    SET status = 'deleted', updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [Number(id)]);
+  return { ok: true, id: Number(id) };
 }
 
 export async function updateListingCategoryTemplate(id, body, session) {
@@ -1031,6 +2274,12 @@ export async function updateListingCategoryTemplate(id, body, session) {
     JSON.stringify(payload.source_raw),
     Number(id)
   ]);
+  await recordOzonCategoryUsage({
+    sourceModule: "listing_template",
+    sourceId: String(id),
+    ozonCategoryId: payload.ozon_category_id,
+    categoryName: payload.category_name
+  });
 
   return listingCategoryTemplate(id, session);
 }
@@ -1263,7 +2512,7 @@ function parseOzonProductDetail(detail = {}, current = {}) {
   const brandValue = attributeValueByNames(attributes, ["品牌", "Бренд"], [85]);
   const colorValue = attributeValueByNames(attributes, ["颜色", "Цвет"], [8229]);
   const modelValue = attributeValueByNames(attributes, ["型号", "Модель"], [9048]);
-  const tagsValue = attributeValueByNames(attributes, ["主图标签", "ключевые слова", "тег"], [10096]);
+  const tagsValue = attributeValueByNames(attributes, ["产品标签", "主图标签", "ключевые слова", "тег"], [10096]);
   const descriptionText = extractOzonDescriptionText(source, attributes, current);
   const richContent = extractOzonRichContent(source, attributes);
   const enrichedAttributes = enrichTemplateAttributes(attributes, {
@@ -1493,6 +2742,7 @@ export async function ensureListingAutomationSchema() {
         attribute_id BIGINT NOT NULL,
         dictionary_value_id BIGINT NOT NULL DEFAULT 0,
         value VARCHAR(1000) NOT NULL DEFAULT '',
+        display_value_zh VARCHAR(1000) NOT NULL DEFAULT '',
         info TEXT NULL,
         source_shop_id BIGINT NULL,
         raw_json LONGTEXT NULL,
@@ -1503,6 +2753,41 @@ export async function ensureListingAutomationSchema() {
         UNIQUE KEY uq_ozon_attribute_value (description_category_id, type_id, attribute_id, dictionary_value_id),
         INDEX idx_ozon_attribute_value_lookup (description_category_id, type_id, attribute_id, status),
         INDEX idx_ozon_attribute_value_text (value(160))
+      ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+    `);
+    await ensureMysqlColumn("ozon_attribute_values", "display_value_zh", "VARCHAR(1000) NOT NULL DEFAULT ''");
+    await mysqlExecute(`
+      CREATE TABLE IF NOT EXISTS ozon_category_sync_jobs (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        job_type VARCHAR(64) NOT NULL DEFAULT 'scheduled',
+        shop_id BIGINT NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'running',
+        payload_json LONGTEXT NULL,
+        result_json LONGTEXT NULL,
+        warning_json LONGTEXT NULL,
+        error_message TEXT NULL,
+        started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        finished_at TIMESTAMP NULL,
+        created_by_person_id BIGINT NULL,
+        INDEX idx_ozon_category_sync_jobs_status (job_type, status, started_at),
+        INDEX idx_ozon_category_sync_jobs_shop (shop_id, started_at)
+      ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+    `);
+    await mysqlExecute(`
+      CREATE TABLE IF NOT EXISTS ozon_category_usage (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        source_module VARCHAR(64) NOT NULL,
+        source_id VARCHAR(128) NOT NULL DEFAULT '',
+        description_category_id BIGINT NOT NULL,
+        type_id BIGINT NOT NULL,
+        category_name VARCHAR(500) NOT NULL DEFAULT '',
+        usage_count INT NOT NULL DEFAULT 1,
+        last_used_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_ozon_category_usage (source_module, source_id, description_category_id, type_id),
+        INDEX idx_ozon_category_usage_category (description_category_id, type_id, last_used_at),
+        INDEX idx_ozon_category_usage_module (source_module, last_used_at)
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
     await mysqlExecute(`
@@ -1599,6 +2884,10 @@ export async function ensureListingAutomationSchema() {
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
     await ensureMysqlColumn("listing_publish_records", "task_id", "VARCHAR(128) NOT NULL DEFAULT ''");
+    await ensureMysqlColumn("listing_publish_records", "quality_score", "DECIMAL(5,2) NOT NULL DEFAULT 0");
+    await ensureMysqlColumn("listing_publish_records", "quality_source", "VARCHAR(64) NOT NULL DEFAULT ''");
+    await ensureMysqlColumn("listing_publish_records", "quality_json", "LONGTEXT NULL");
+    await ensureMysqlColumn("listing_publish_records", "quality_checked_at", "TIMESTAMP NULL");
     await mysqlExecute(`
       CREATE TABLE IF NOT EXISTS listing_collected_product_details (
         id VARCHAR(160) NOT NULL,
@@ -1617,6 +2906,46 @@ export async function ensureListingAutomationSchema() {
         INDEX idx_listing_collected_sku (sku, updated_at)
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
+    await mysqlExecute(`
+      CREATE TABLE IF NOT EXISTS ozon_plugin_collected_products (
+        tenant_id VARCHAR(80) NOT NULL DEFAULT 'admin',
+        sku VARCHAR(128) NOT NULL,
+        product_id VARCHAR(128) NOT NULL DEFAULT '',
+        title VARCHAR(500) NOT NULL DEFAULT '',
+        product_url TEXT NULL,
+        image_url TEXT NULL,
+        category_name VARCHAR(500) NOT NULL DEFAULT '',
+        price DECIMAL(14,2) NULL,
+        currency VARCHAR(16) NOT NULL DEFAULT 'RUB',
+        sold_count DECIMAL(14,4) NULL,
+        view_count DECIMAL(14,4) NULL,
+        click_rate DECIMAL(14,6) NULL,
+        conversion_rate DECIMAL(14,6) NULL,
+        stock_count DECIMAL(14,4) NULL,
+        commission_rate DECIMAL(14,6) NULL,
+        collect_date DATE NOT NULL,
+        collected_at VARCHAR(64) NOT NULL DEFAULT '',
+        payload_json LONGTEXT NOT NULL,
+        status VARCHAR(64) NOT NULL DEFAULT 'collected',
+        selection_product_id BIGINT NULL,
+        listing_template_id BIGINT NULL,
+        edit_payload_json LONGTEXT NULL,
+        edited_at TIMESTAMP NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (tenant_id, sku),
+        INDEX idx_ozon_plugin_status (status, updated_at),
+        INDEX idx_ozon_plugin_selection (selection_product_id),
+        INDEX idx_ozon_plugin_listing_template (listing_template_id),
+        INDEX idx_ozon_plugin_collect_date (collect_date),
+        INDEX idx_ozon_plugin_collected_at (collected_at)
+      ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+    `);
+    await ensureMysqlColumn("ozon_plugin_collected_products", "status", "VARCHAR(64) NOT NULL DEFAULT 'collected'");
+    await ensureMysqlColumn("ozon_plugin_collected_products", "selection_product_id", "BIGINT NULL");
+    await ensureMysqlColumn("ozon_plugin_collected_products", "listing_template_id", "BIGINT NULL");
+    await ensureMysqlColumn("ozon_plugin_collected_products", "edit_payload_json", "LONGTEXT NULL");
+    await ensureMysqlColumn("ozon_plugin_collected_products", "edited_at", "TIMESTAMP NULL");
     await mysqlExecute(`
       CREATE TABLE IF NOT EXISTS listing_media_assets (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -1682,10 +3011,43 @@ function normalizeTemplatePayload(body = {}) {
 }
 
 function buildTemplatePayloadFromCollectedProduct(body = {}) {
+  if (body?.editable_payload || body?.editablePayload) {
+    const editablePayload = normalizeEditablePayload(body.editable_payload || body.editablePayload || {});
+    const images = normalizeImages(body.images || editablePayload.images);
+    const attributes = normalizeAttributes(body.attributes || editablePayload.attributes);
+    const sourceRaw = body.source_raw || body.sourceRaw || editablePayload.source_raw || {
+      source_type: "ozon_frontend_collect",
+      collected_product: body
+    };
+    return {
+      ozon_category_id: String(body.ozon_category_id || body.ozonCategoryId || editablePayload.category_id || "").trim(),
+      category_name: String(body.category_name || body.categoryName || editablePayload.category_name || "Ozon 前台采集模板").trim(),
+      template_name: String(body.template_name || body.templateName || body.local_template_name || body.localTemplateName || editablePayload.title || body.title || "Ozon 采集模板").trim(),
+      source_ozon_sku: String(body.source_ozon_sku || body.sourceOzonSku || editablePayload.sku || body.sku || "").trim(),
+      source_raw: sourceRaw,
+      required_attributes: splitLines(body.required_attributes || body.requiredAttributes),
+      ai_rules: objectValue(body.ai_rules || body.aiRules),
+      image_rules: objectValue(body.image_rules || body.imageRules),
+      title: String(body.title || editablePayload.title || "").trim(),
+      description: String(body.description || editablePayload.description || "").trim(),
+      attributes,
+      images,
+      editable_payload: {
+        ...editablePayload,
+        attributes,
+        images
+      }
+    };
+  }
+  const draft = prepareListingDraftFromCollectedSource(body, { sourceType: "ozon_frontend_collect" });
+  return listingDraftToTemplatePayload(draft, body);
+}
+
+function buildTemplatePayloadFromCollectedProductLegacy(body = {}) {
   const source = unwrapCollectedPayload(body);
   const editPayload = objectValue(source.editPayload || source.edit_payload || source.editable_payload || {});
   const followPayload = objectValue(source.followEditPayload || source.follow_edit_payload || editPayload.followEditPayload || {});
-  const rows = normalizeArray(source.rows || editPayload.rows || followPayload.rows || source.editorVariants || source.variants);
+  const rows = collectCollectedVariantRows(source, editPayload, followPayload);
   const attributes = normalizeAttributes(source.attributes || editPayload.attributes || followPayload.attributes || []);
   const hashtags = normalizeTagList(source.hashtags || editPayload.hashtags || followPayload.hashtags);
   const images = normalizeImages(
@@ -1698,7 +3060,10 @@ function buildTemplatePayloadFromCollectedProduct(body = {}) {
   const jsonContent = source.jsonContent ?? source.json_content ?? editPayload.jsonContent ?? editPayload.json_content ?? followPayload.json_content ?? "";
   const richText = typeof jsonContent === "string" ? jsonContent : (jsonContent ? JSON.stringify(jsonContent, null, 2) : "");
   const dimensions = normalizeCollectedDimensions(source, editPayload, rows[0]);
-  const variants = rows.length ? rows.map((item, index) => normalizeCollectedVariant(item, source, dimensions, hashtags, index)) : [
+  const variants = rows.length ? rows.map((item, index) => normalizeCollectedVariant({
+    ...item,
+    images: collectedVariantImages(item, images, rows.length > 1)
+  }, source, dimensions, hashtags, index)) : [
     normalizeCollectedVariant({
       sku: source.sku || source.productId || "",
       title,
@@ -1709,18 +3074,19 @@ function buildTemplatePayloadFromCollectedProduct(body = {}) {
     }, source, dimensions, hashtags, 0)
   ];
   const sku = String(source.sku || source.productId || editPayload.sku || variants[0]?.source_sku || "").trim();
+  const rawCategoryIds = Array.isArray(source.category_ids) ? source.category_ids : [];
+  const inferredDescriptionCategoryId = source.category2Id || (rawCategoryIds.length >= 3 ? rawCategoryIds[rawCategoryIds.length - 2] : "");
+  const inferredTypeId = source.category3Id || (rawCategoryIds.length >= 3 ? rawCategoryIds[rawCategoryIds.length - 1] : "");
   const descriptionCategoryId = String(
-    body.ozon_category_id ||
-    body.ozonCategoryId ||
     body.description_category_id ||
     body.descriptionCategoryId ||
-    source.description_category_id ||
-    source.descriptionCategoryId ||
     editPayload.description_category_id ||
     editPayload.descriptionCategoryId ||
+    (body.type_id || body.typeId || source.type_id || source.typeId || editPayload.type_id || editPayload.typeId ? (source.description_category_id || source.descriptionCategoryId) : "") ||
+    inferredDescriptionCategoryId ||
     ""
   ).trim();
-  const typeId = String(body.type_id || body.typeId || source.type_id || source.typeId || editPayload.type_id || editPayload.typeId || "").trim();
+  const typeId = String(body.type_id || body.typeId || source.type_id || source.typeId || editPayload.type_id || editPayload.typeId || inferredTypeId || "").trim();
   const legacyCategoryId = String(source.ozon_category_id || source.category_id || editPayload.category_id || "").trim();
   const fallbackCategoryId = buildOzonCategoryKey({
     description_category_id: descriptionCategoryId,
@@ -1807,10 +3173,17 @@ function normalizeCollectedDimensions(...sources) {
   const rawDims = firstValue("dimensions", "real_dimensions", "custom_volume");
   const dims = objectValue(rawDims);
   const parsedDims = parseCollectedDimensionText(rawDims);
+  const dimensionUnit = String(dims.unit || firstValue("dimension_unit", "dimensions_unit", "unit") || "").toLowerCase();
+  const cmValue = (cm, mmFallback) => {
+    const directCm = numberFromOzonValue(cm);
+    if (directCm) return directCm;
+    const mm = normalizeDimensionToMm(mmFallback, dimensionUnit);
+    return mm ? Number((mm / 10).toFixed(2)) : 0;
+  };
   return {
-    length_cm: numberFromOzonValue(firstValue("length_mm", "depth", "length") || dims.depth || dims.length || parsedDims.length || 0),
-    width_cm: numberFromOzonValue(firstValue("width_mm", "width") || dims.width || parsedDims.width || 0),
-    height_cm: numberFromOzonValue(firstValue("height_mm", "height") || dims.height || parsedDims.height || 0),
+    length_cm: cmValue(firstValue("length_cm") || dims.length_cm, firstValue("length_mm", "depth", "length") || dims.depth || dims.length || parsedDims.length || 0),
+    width_cm: cmValue(firstValue("width_cm") || dims.width_cm, firstValue("width_mm", "width") || dims.width || parsedDims.width || 0),
+    height_cm: cmValue(firstValue("height_cm") || dims.height_cm, firstValue("height_mm", "height") || dims.height || parsedDims.height || 0),
     weight_g: numberFromOzonValue(firstValue("weight_g", "weight", "custom_weight") || 0)
   };
 }
@@ -1829,10 +3202,18 @@ function parseCollectedDimensionText(value) {
 
 function normalizeCollectedVariant(item = {}, source = {}, dimensions = {}, tags = [], index = 0) {
   const rowDimensions = normalizeCollectedDimensions(item, dimensions);
-  const imageValues = normalizeImages([
+  const rowAttributes = normalizeAttributes(item.attributes || item.attribute_values || item.characteristics || []);
+  const dynamicAttributes = mergeCollectedDynamicAttributes(
+    collectedAttributesToDynamicAttributes(rowAttributes),
+    item.dynamic_attributes,
+    item.dynamicAttributes
+  );
+  const imageValues = dedupeImagesByUrl(normalizeImages([
     item.cover_image || item.coverImage || item.primary_image || item.mainImage || "",
     ...(normalizeArray(item.images || item.image_urls || item.imageUrls))
-  ]);
+  ]));
+  const fallbackImages = dedupeImagesByUrl(normalizeImages(source.images || source.image_urls || source.imageUrls || source.productImage || source.mainImage || []));
+  const images = imageValues.length ? imageValues : fallbackImages;
   const sku = String(item.sku || item.source_sku || "").trim();
   return {
     sku,
@@ -1841,7 +3222,7 @@ function normalizeCollectedVariant(item = {}, source = {}, dimensions = {}, tags
     offer_id: "",
     name: String(item.name || item.title || source.title || "").trim(),
     title: String(item.title || item.name || source.title || "").trim(),
-    images: imageValues,
+    images,
     video_cover_urls: normalizeStringList(item.video_cover_urls || item.cover_video_urls || item.cover_video || item.video_cover),
     video_urls: normalizeStringList(item.video_urls || item.videos || item.videoUrls || item.video_url),
     barcode: String(item.barcode || normalizeArray(item.barcodes)[0] || "").trim(),
@@ -1851,20 +3232,124 @@ function normalizeCollectedVariant(item = {}, source = {}, dimensions = {}, tags
     color: String(item.color || "").trim(),
     spec: String(item.spec || item.searchable_text || "").trim(),
     main_tags: normalizeTagList(item.hashtags || item.main_tags || tags),
+    attributes: rowAttributes,
+    dynamic_attributes: dynamicAttributes,
     weight_g: rowDimensions.weight_g || dimensions.weight_g || 0,
-    length_mm: rowDimensions.length_cm || dimensions.length_cm || 0,
-    width_mm: rowDimensions.width_cm || dimensions.width_cm || 0,
-    height_mm: rowDimensions.height_cm || dimensions.height_cm || 0,
+    length_cm: rowDimensions.length_cm || dimensions.length_cm || 0,
+    width_cm: rowDimensions.width_cm || dimensions.width_cm || 0,
+    height_cm: rowDimensions.height_cm || dimensions.height_cm || 0,
+    length_mm: Math.round(Number(rowDimensions.length_cm || dimensions.length_cm || 0) * 10),
+    width_mm: Math.round(Number(rowDimensions.width_cm || dimensions.width_cm || 0) * 10),
+    height_mm: Math.round(Number(rowDimensions.height_cm || dimensions.height_cm || 0) * 10),
     stock: Number(item.stock || item.quantity || 0),
     sort_order: Number(item.sort_order || index + 1)
   };
+}
+
+function collectedAttributesToDynamicAttributes(attributes = []) {
+  const result = {};
+  for (const item of normalizeAttributes(attributes)) {
+    const key = String(item.attribute_id || item.name || "").trim();
+    if (!key || item.value === undefined || item.value === null || item.value === "") continue;
+    result[key] = {
+      attribute_id: item.attribute_id || "",
+      name: item.name || "",
+      value: item.value,
+      values: item.values || [],
+      dictionary_id: item.dictionary_id || "",
+      type: item.type || "text",
+      source: item.source || "variant_attribute"
+    };
+  }
+  return result;
+}
+
+function mergeCollectedDynamicAttributes(...sources) {
+  return Object.assign({}, ...sources.map((source) => {
+    if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+    return source;
+  }));
+}
+
+function collectedVariantImages(item = {}, productImages = [], multiVariant = false) {
+  const ownImages = dedupeImagesByUrl(normalizeImages([
+    item.cover_image || item.coverImage || item.primary_image || item.primaryImage || item.main_image || item.mainImage || "",
+    ...(normalizeArray(item.images || item.image_urls || item.imageUrls))
+  ]));
+  if (ownImages.length) return ownImages;
+  const normalizedProductImages = dedupeImagesByUrl(normalizeImages(productImages || []));
+  if (!multiVariant) return normalizedProductImages;
+  return normalizedProductImages.slice(0, 1);
+}
+
+function dedupeImagesByUrl(images = []) {
+  const seen = new Set();
+  return normalizeArray(images).filter((image) => {
+    const url = String(image?.url || image || "").trim();
+    if (!url || seen.has(url)) return false;
+    seen.add(url);
+    return true;
+  });
+}
+
+function collectCollectedVariantRows(source = {}, editPayload = {}, followPayload = {}) {
+  const payload = objectValue(source.payload || source.rawPayload || {});
+  const normalized = objectValue(source.normalized || {});
+  const nestedFollow = objectValue(source.followEditPayload || source.follow_edit_payload || editPayload.followEditPayload || editPayload.follow_edit_payload || payload.followEditPayload || payload.follow_edit_payload || normalized.followEditPayload || {});
+  const rows = [
+    ...normalizeArray(source.editorVariants || source.editor_variants || editPayload.editorVariants || editPayload.editor_variants || payload.editorVariants || normalized.editorVariants),
+    ...normalizeArray(source.rows || editPayload.rows || followPayload.rows || nestedFollow.rows || payload.rows || normalized.rows),
+    ...normalizeArray(source.variants || source.variantRows || source.productVariants || source.skuVariants || source.offerVariants || editPayload.variants || payload.variants || normalized.variants),
+    ...normalizeArray(source.offers || source.children || source.products || payload.offers || payload.products),
+    ...normalizeArray(source.skus).map((item) => typeof item === "string" ? { sku: item } : item)
+  ];
+  const byKey = new Map();
+  for (const row of rows) {
+    const key = String(row?.sku || row?.source_sku || row?.offer_id || row?.variantId || row?.variant_id || row?.id || "").trim();
+    if (!key) continue;
+    const normalizedRow = { ...row, sku: row.sku || row.source_sku || key };
+    const previous = byKey.get(key);
+    byKey.set(key, previous ? mergeCollectedVariantRow(previous, normalizedRow) : normalizedRow);
+  }
+  return [...byKey.values()];
+}
+
+function mergeCollectedVariantRow(previous = {}, next = {}) {
+  const merged = { ...previous, ...next };
+  for (const key of ["images", "image_urls", "imageUrls", "video_urls", "videos", "attributes", "attribute_values", "characteristics", "hashtags"]) {
+    const previousList = normalizeArray(previous[key]);
+    const nextList = normalizeArray(next[key]);
+    if (previousList.length || nextList.length) merged[key] = dedupeLooseList([...previousList, ...nextList]);
+  }
+  merged.dynamic_attributes = mergeCollectedDynamicAttributes(previous.dynamic_attributes, previous.dynamicAttributes, next.dynamic_attributes, next.dynamicAttributes);
+  for (const key of ["title", "name", "cover_image", "coverImage", "primary_image", "primaryImage", "main_image", "mainImage", "searchable_text", "searchableText"]) {
+    merged[key] = next[key] || previous[key] || "";
+  }
+  return merged;
+}
+
+function dedupeLooseList(values = []) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const key = typeof value === "object" ? JSON.stringify(value) : String(value || "");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
 }
 
 function normalizeTagList(value) {
   return normalizeStringList(value).map((item) => item.startsWith("#") ? item : `#${item}`);
 }
 
+function splitLooseStringList(value) {
+  return String(value || "").split(/[,，\s\r\n]+/).map((item) => item.trim()).filter(Boolean);
+}
+
 function normalizeStringList(value) {
+  if (!Array.isArray(value) && !(value && typeof value === "object")) return splitLooseStringList(value);
   if (Array.isArray(value)) return value.flatMap((item) => normalizeStringList(item));
   if (value && typeof value === "object") return normalizeStringList(value.value || value.name || value.text || "");
   return String(value || "").split(/[,，\s\r\n]+/).map((item) => item.trim()).filter(Boolean);
@@ -1921,12 +3406,22 @@ function buildOzonCategoryKey({ description_category_id = "", type_id = "", cate
 
 function buildOzonImportPreviewPayload(facts = {}, template = {}) {
   const baseImages = facts.images.map((item) => item.url).filter(Boolean);
+  const safeDescription = sanitizeOzonBuyerDescription(facts.description);
+  const safeRichContent = sanitizeOzonRichContentJson(facts.richContent || "", safeDescription);
   const attrs = facts.attributes
     .filter((item) => item.attribute_id && normalizeAttributeValue(item.value))
+    .map((item) => Number(item.attribute_id) === 4191 ? { ...item, value: sanitizeOzonBuyerDescription(item.value || safeDescription) } : item)
+    .map((item) => Number(item.attribute_id) === 11254 ? { ...item, value: sanitizeOzonRichContentJson(item.value || safeRichContent, safeDescription) } : item)
     .map((item) => ({
       id: Number(item.attribute_id),
       values: normalizeAttributeValuesForOzon(item)
     }));
+  if (safeRichContent && !attrs.some((item) => Number(item.id || 0) === 11254)) {
+    attrs.push({
+      id: 11254,
+      values: [{ value: safeRichContent }]
+    });
+  }
   const variants = facts.variants.length ? facts.variants : [{ title: facts.title, images: facts.images }];
   return {
     items: variants.map((variant, index) => {
@@ -1938,18 +3433,26 @@ function buildOzonImportPreviewPayload(facts = {}, template = {}) {
         name: String(variant.title || variant.name || facts.title || "").trim(),
         price: String(numberFromOzonValue(variant.price || facts.price.value || 0)),
         old_price: String(numberFromOzonValue(variant.old_price || facts.price.old_price || facts.price.value || 0)),
-        currency_code: facts.price.currency_code || "RUB",
+        price_strategy_applied: Boolean(variant.price_strategy_applied || variant.priceStrategyApplied || facts.price.strategy_applied || facts.price.strategyApplied),
+        ...(facts.price.currency_code ? { currency_code: facts.price.currency_code } : {}),
         vat: String(facts.price.vat || "0"),
         description_category_id: Number(facts.descriptionCategoryId || 0) || undefined,
         type_id: Number(facts.typeId || 0) || undefined,
-        depth: Number(variant.length_mm || facts.dimensions.length_cm || 0),
-        width: Number(variant.width_mm || facts.dimensions.width_cm || 0),
-        height: Number(variant.height_mm || facts.dimensions.height_cm || 0),
+        depth: Number(variant.length_mm || cmToMm(facts.dimensions.length_cm) || 0),
+        width: Number(variant.width_mm || cmToMm(facts.dimensions.width_cm) || 0),
+        height: Number(variant.height_mm || cmToMm(facts.dimensions.height_cm) || 0),
         dimension_unit: "mm",
         weight: Number(variant.weight_g || facts.dimensions.weight_g || 0),
         weight_unit: "g",
         primary_image: primaryImage,
         images: finalImages.filter((url) => url !== primaryImage),
+        description: sanitizeOzonBuyerDescription(variant.description || safeDescription),
+        tags: normalizeArray(variant.tags || variant.main_tags || variant.hashtags || facts.tags),
+        color: String(variant.color || facts.color || "").trim(),
+        material: String(variant.material || facts.material || "").trim(),
+        quantity: String(variant.quantity || facts.quantity || "").trim(),
+        vehicle_brand: String(variant.vehicle_brand || facts.vehicleBrand || "").trim(),
+        vehicle_model: String(variant.vehicle_model || facts.vehicleModel || "").trim(),
         attributes: attrs,
         complex_attributes: buildOzonComplexAttributesPreview(variant, facts)
       };
@@ -1957,14 +3460,413 @@ function buildOzonImportPreviewPayload(facts = {}, template = {}) {
   };
 }
 
+function sanitizeOzonBuyerDescription(value) {
+  let text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  text = text
+    .replace(/\u041A\u043B\u044E\u0447\u0435\u0432\u044B\u0435\s+\u043E\u0441\u043E\u0431\u0435\u043D\u043D\u043E\u0441\u0442\u0438\s*:\s*[^.?!]+[.?!]?/giu, "")
+    .replace(/\u041A\u043B\u044E\u0447\u0435\u0432\u044B\u0435\s+\u0441\u043B\u043E\u0432\u0430\s*:\s*[^.?!]+[.?!]?/giu, "")
+    .replace(/\u0422\u0435\u0433\u0438\s*:\s*[^.?!]+[.?!]?/giu, "")
+    .replace(/\u0425\u044D\u0448\u0442\u0435\u0433\u0438\s*:\s*[^.?!]+[.?!]?/giu, "");
+  text = text.replace(/#[\p{L}\p{N}_-]+/gu, "");
+  text = text.replace(/\b(?:ruvibemart|ruvibe\s*mart)\b[,;\s]*/giu, "");
+  text = text
+    .replace(/\u0430\u0432\u0442\u043E\u0430\u043A\u0441\u0435\u0441\u0441\u0443\u0430\u0440\u044B[,;\s]*/giu, "")
+    .replace(/\u0430\u043A\u0441\u0435\u0441\u0441\u0443\u0430\u0440_\u0432_\u0430\u0432\u0442\u043E[,;\s]*/giu, "")
+    .replace(/\u0431\u0440\u0435\u043B\u043E\u043A_\u0430\u0432\u0442\u043E[,;\s]*/giu, "")
+    .replace(/\u043F\u043E\u0434\u0430\u0440\u043E\u043A_\u0432\u043E\u0434\u0438\u0442\u0435\u043B\u044E[,;\s]*/giu, "");
+  text = text.replace(/\s*,\s*,+/g, ", ").replace(/\s+([,.!?])/g, "$1").replace(/\s{2,}/g, " ").trim();
+  return text;
+}
+
+function sanitizeOzonRichContentJson(value, fallbackDescription = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw);
+    visitRichContentText(parsed, (text) => sanitizeOzonBuyerDescription(text || fallbackDescription));
+    return JSON.stringify(parsed);
+  } catch {
+    return raw;
+  }
+}
+
+function visitRichContentText(node, replacer) {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    node.forEach((item) => visitRichContentText(item, replacer));
+    return;
+  }
+  if (Object.prototype.hasOwnProperty.call(node, "content") && typeof node.content === "string") {
+    node.content = replacer(node.content);
+  }
+  for (const value of Object.values(node)) visitRichContentText(value, replacer);
+}
+
+async function applyShopPublishDefaults(payload = {}, shop = {}) {
+  const currencyCode = await resolveShopCurrencyCode(shop.id);
+  return {
+    ...payload,
+    items: await Promise.all(normalizeArray(payload.items).map(async (item) => applyOzonPriceStrategy({
+      ...item,
+      description: sanitizeOzonBuyerDescription(item.description),
+      currency_code: item.currency_code || currencyCode || "CNY",
+      complex_attributes: normalizeOzonComplexAttributesForPublish(item.complex_attributes),
+      attributes: await normalizeOzonDictionaryAttributes({
+        ...item,
+        description: sanitizeOzonBuyerDescription(item.description),
+        attributes: sanitizeOzonPayloadAttributes(item.attributes)
+      }, shop)
+    })))
+  };
+}
+
+function sanitizeOzonPayloadAttributes(attributes = []) {
+  return normalizeArray(attributes).map((attr) => {
+    const id = Number(attr.id || attr.attribute_id || 0);
+    if (![4191, 11254].includes(id)) return attr;
+    const values = normalizeArray(attr.values).map((value) => {
+      const raw = typeof value === "object" && value !== null ? value.value : value;
+      const clean = id === 11254 ? sanitizeOzonRichContentJson(raw) : sanitizeOzonBuyerDescription(raw);
+      return typeof value === "object" && value !== null ? { ...value, value: clean } : { value: clean };
+    }).filter((value) => String(value?.value || "").trim());
+    return { ...attr, values };
+  });
+}
+
+function normalizeOzonComplexAttributesForPublish(groups = []) {
+  return normalizeArray(groups)
+    .map((group) => ({
+      ...group,
+      attributes: normalizeArray(group.attributes)
+        .filter((attr) => Number(attr.id || 0) > 0)
+        .map((attr) => ({
+          ...attr,
+          id: Number(attr.id),
+          values: normalizeArray(attr.values).filter((value) => String(value?.value || value || "").trim())
+        }))
+    }))
+    .filter((group) => group.attributes.length);
+}
+
+async function normalizeOzonDictionaryAttributes(item = {}, shop = {}) {
+  const descriptionCategoryId = Number(item.description_category_id || 0);
+  const typeId = Number(item.type_id || 0);
+  const attributes = normalizeArray(item.attributes)
+    .filter((attr) => Number(attr.id || attr.attribute_id || 0) !== 10096 || !looksLikeProductTags(attr));
+  const byId = new Map(attributes.map((attr) => [Number(attr.id || attr.attribute_id || 0), attr]));
+
+  if (descriptionCategoryId && typeId) {
+    const categoryAttrIds = await getCategoryAttributeIdSet(descriptionCategoryId, typeId);
+    const hasCategoryAttr = (id) => !categoryAttrIds.size || categoryAttrIds.has(Number(id));
+    if (byId.has(85)) {
+      byId.set(85, await withDictionaryValue(byId.get(85), shop, descriptionCategoryId, typeId, 85, ["Нет бренда", "No brand"], {
+        dictionary_value_id: 126745801,
+        value: "Нет бренда"
+      }));
+    }
+    if (!byId.has(8229)) {
+      byId.set(8229, {
+        id: 8229,
+        values: [{ dictionary_value_id: typeId, value: "Чехол брелка автосигнализации" }]
+      });
+    } else {
+      byId.set(8229, await withDictionaryValue(byId.get(8229), shop, descriptionCategoryId, typeId, 8229, ["Чехол брелка автосигнализации", "Чехол"], {
+        dictionary_value_id: typeId,
+        value: "Чехол брелка автосигнализации"
+      }));
+    }
+    const colorText = extractVariantColor(item);
+    if (colorText) {
+      byId.set(10096, await withDictionaryValue({ id: 10096, values: [{ value: colorText }] }, shop, descriptionCategoryId, typeId, 10096, [colorText, "black", "черный"], {
+        dictionary_value_id: 61574,
+        value: "black"
+      }));
+    }
+    addPlainOzonAttribute(byId, 4383, item.weight);
+    addPlainOzonAttribute(byId, 4497, item.weight);
+    addPlainOzonAttribute(byId, 8415, mmToCm(item.depth));
+    addPlainOzonAttribute(byId, 8416, mmToCm(item.width));
+    addPlainOzonAttribute(byId, 4191, item.description);
+    addPlainOzonAttribute(byId, 23171, normalizeTagList(item.tags).join(" "));
+    if (hasCategoryAttr(4389)) {
+      await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 4389, ["中国", "China", "Китай"], null);
+    }
+    if (hasCategoryAttr(7578)) addPlainOzonAttribute(byId, 7578, "30");
+    if (hasCategoryAttr(4385)) addPlainOzonAttribute(byId, 4385, "30");
+    if (hasCategoryAttr(23485) && looksLikeSeatBeltProduct(item)) {
+      await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 23485, ["在安全带上", "安全带", "ремень безопасности"], null);
+    }
+
+    if (hasCategoryAttr(7202)) await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 7202, [item.quantity, "1"], null);
+    if (hasCategoryAttr(7199)) {
+      byId.delete(7199);
+      await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 7199, materialDictionaryQueries(item.material), materialDictionaryFallback(item.material));
+    }
+    const vehicle = extractVehicleFacts(item);
+    if (hasCategoryAttr(7204)) await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 7204, [item.vehicle_brand, vehicle.brand], null);
+    if (hasCategoryAttr(7212)) {
+      byId.delete(7212);
+      await addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, 7212, [item.vehicle_model], null);
+    }
+  }
+
+  return [...byId.values()].filter((attr) => Number(attr.id || attr.attribute_id || 0) && normalizeArray(attr.values).length);
+}
+
+function looksLikeProductTags(attr = {}) {
+  const text = normalizeArray(attr.values).map((value) => value?.value ?? value).join(" ");
+  return /(^|\s)#/.test(text);
+}
+
+const categoryAttributeIdSetCache = new Map();
+
+async function getCategoryAttributeIdSet(descriptionCategoryId, typeId) {
+  const key = `${Number(descriptionCategoryId || 0)}:${Number(typeId || 0)}`;
+  if (categoryAttributeIdSetCache.has(key)) return categoryAttributeIdSetCache.get(key);
+  const rows = await mysqlQuery(`
+    SELECT attribute_id
+    FROM ozon_category_attributes
+    WHERE description_category_id = ? AND type_id = ? AND status = 'active'
+  `, [Number(descriptionCategoryId || 0), Number(typeId || 0)]).catch(() => []);
+  const result = new Set(rows.map((row) => Number(row.attribute_id || 0)).filter(Boolean));
+  categoryAttributeIdSetCache.set(key, result);
+  return result;
+}
+
+function looksLikeSeatBeltProduct(item = {}) {
+  const text = [
+    item.name,
+    item.title,
+    item.description,
+    item.category_name,
+    item.product_type
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+  return /安全带|护肩|seat\s*belt|ремень безопасности|накладка на ремень/.test(text);
+}
+
+function extractVariantColor(item = {}) {
+  const text = String(item.color || item.colour || item.color_name || "").trim();
+  if (/黑|black|черн/i.test(text)) return "black";
+  if (/亮银|银|灰|silver|сереб|серый/i.test(text)) return "silver";
+  if (/白|white|бел/i.test(text)) return "white";
+  if (/红|red|красн/i.test(text)) return "red";
+  if (/蓝|blue|син/i.test(text)) return "blue";
+  if (/透明|transparent|прозрач/i.test(text)) return "transparent";
+  return text;
+}
+
+function addPlainOzonAttribute(byId, id, value) {
+  const text = normalizePlainOzonValue(value);
+  if (!text || byId.has(Number(id))) return;
+  byId.set(Number(id), { id: Number(id), values: [{ value: text }] });
+}
+
+function materialDictionaryQueries(value) {
+  const text = String(value || "").trim();
+  if (!text) return [];
+  if (/tpu|тпу|polyurethane|полиуретан|热塑|弹性体/i.test(text)) return ["TPU", "热塑性弹性体", "полиуретан"];
+  if (/abs/i.test(text)) return ["ABS", "ABS塑料", "ABS-пластик"];
+  if (/硅胶|silicone|силикон/i.test(text)) return ["硅胶", "silicone", "силикон"];
+  if (/皮|牛皮|leather|кожа/i.test(text)) return ["人造革", "искусственная кожа", "leather"];
+  if (/塑料|plastic|пластик/i.test(text)) return ["塑料", "plastic", "пластик"];
+  if (/不锈钢|钢|steel|нержав/i.test(text)) return ["不锈钢", "steel", "нержавеющая сталь"];
+  return [text];
+}
+
+function materialDictionaryFallback(value) {
+  return null;
+}
+
+async function addDictionaryOzonAttribute(byId, shop, descriptionCategoryId, typeId, id, queries = [], fallback = null) {
+  const cleanQueries = normalizeArray(queries).map((value) => String(value || "").trim()).filter(Boolean);
+  if (!cleanQueries.length && !fallback) return;
+  const existing = byId.get(Number(id));
+  const attr = await withDictionaryValue(existing || { id, values: cleanQueries.map((value) => ({ value })) }, shop, descriptionCategoryId, typeId, id, cleanQueries, fallback);
+  if (!normalizeArray(attr.values).some((value) => Number(value?.dictionary_value_id || value?.id || 0))) {
+    if (existing && cleanQueries.length) byId.delete(Number(id));
+    return;
+  }
+  byId.set(Number(id), attr);
+}
+
+function normalizePlainOzonValue(value) {
+  if (Array.isArray(value)) return value.map(normalizePlainOzonValue).filter(Boolean).join(" ");
+  if (value && typeof value === "object") return normalizePlainOzonValue(value.value || value.name || value.text || "");
+  return String(value ?? "").trim();
+}
+
+function mmToCm(value) {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "";
+  return String(Math.round((numeric / 10) * 100) / 100);
+}
+
+function extractVehicleFacts(item = {}) {
+  const haystack = [
+    item.name,
+    item.title,
+    item.description,
+    item.vehicle_brand,
+    item.vehicle_model
+  ].map((value) => String(value || "")).join(" ");
+  const brandMatch = haystack.match(/\b(Belgee|Tenet|Chery|Geely|Haval|Lada|Toyota|Kia|Hyundai|Volkswagen|Renault|Skoda|Nissan)\b/i);
+  const modelMatch = haystack.match(/\b([A-ZА-Я]{1,4}\d{1,3}|X50|X70|T4|T7|T8)\b/i);
+  const brand = brandMatch?.[1] || "";
+  const model = modelMatch?.[1] || "";
+  return {
+    brand,
+    model,
+    full: [brand, model].filter(Boolean).join(" ")
+  };
+}
+
+async function withDictionaryValue(attr = {}, shop, descriptionCategoryId, typeId, attributeId, queries = [], fallback = null) {
+  const existing = normalizeArray(attr.values).find((value) => Number(value?.dictionary_value_id || value?.id || 0));
+  if (existing) {
+    return {
+      id: Number(attr.id || attr.attribute_id || attributeId),
+      values: [{ dictionary_value_id: Number(existing.dictionary_value_id || existing.id), value: String(existing.value || "") }]
+    };
+  }
+  for (const query of expandDictionaryQueries(queries)) {
+    const cached = await findCachedDictionaryValue(descriptionCategoryId, typeId, attributeId, query).catch(() => null);
+    if (cached?.dictionary_value_id) {
+      return {
+        id: Number(attr.id || attr.attribute_id || attributeId),
+        values: [{ dictionary_value_id: Number(cached.dictionary_value_id), value: String(cached.value || query) }]
+      };
+    }
+    const values = await searchOzonCategoryAttributeValues(shop, {
+      descriptionCategoryId,
+      typeId,
+      attributeId,
+      value: query,
+      language: "DEFAULT",
+      limit: 50
+    }).catch(() => []);
+    const exact = chooseDictionaryMatch(values, query);
+    if (exact?.id || exact?.dictionary_value_id) {
+      return {
+        id: Number(attr.id || attr.attribute_id || attributeId),
+        values: [{ dictionary_value_id: Number(exact.id || exact.dictionary_value_id), value: String(exact.value || query) }]
+      };
+    }
+  }
+  return {
+    id: Number(attr.id || attr.attribute_id || attributeId),
+    values: fallback ? [fallback] : normalizeAttributeValuesForOzon(attr)
+  };
+}
+
+function chooseDictionaryMatch(values = [], query = "") {
+  const needle = String(query || "").trim().toLowerCase();
+  if (!needle) return null;
+  const normalizedNeedle = normalizeDictionaryText(needle);
+  return normalizeArray(values).find((item) => normalizeDictionaryText(item.value || "") === normalizedNeedle)
+    || normalizeArray(values).find((item) => {
+      const value = normalizeDictionaryText(item.value || "");
+      return normalizedNeedle.length >= 2 && (value.includes(normalizedNeedle) || normalizedNeedle.includes(value));
+    })
+    || null;
+}
+
+function normalizeDictionaryText(value = "") {
+  return String(value || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim();
+}
+
+async function findCachedDictionaryValue(descriptionCategoryId, typeId, attributeId, query) {
+  const text = String(query || "").trim();
+  if (!text) return null;
+  const rows = await mysqlQuery(`
+    SELECT dictionary_value_id, value
+    FROM ozon_attribute_values
+    WHERE description_category_id = ? AND type_id = ? AND attribute_id = ? AND status = 'active'
+      AND (LOWER(value) = LOWER(?) OR LOWER(value) LIKE LOWER(?))
+    ORDER BY CASE WHEN LOWER(value) = LOWER(?) THEN 0 ELSE 1 END, id ASC
+    LIMIT 1
+  `, [Number(descriptionCategoryId || 0), Number(typeId || 0), Number(attributeId || 0), text, `%${text}%`, text]);
+  return rows[0] || null;
+}
+
+function expandDictionaryQueries(queries = []) {
+  const seed = normalizeArray(queries).map((item) => String(item || "").trim()).filter(Boolean);
+  const expanded = [];
+  for (const query of seed) {
+    expanded.push(query);
+    const lower = query.toLowerCase();
+    if (/黑|black|черн/.test(lower)) expanded.push("black", "черный", "черная");
+    if (/亮银|银|silver|сереб/.test(lower)) expanded.push("silver", "серебристый", "серый");
+    if (/白|white|бел/.test(lower)) expanded.push("white", "белый", "белая");
+    if (/tpu|тпу/i.test(query)) expanded.push("TPU", "ТПУ", "полиуретан");
+    if (/china|китай|中国/i.test(query)) expanded.push("China", "Китай");
+    if (/belgee|белджи|белги/i.test(query)) expanded.push("Belgee", "Белджи");
+  }
+  return [...new Set(expanded.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function applyOzonPriceStrategy(item = {}) {
+  if (item.price_strategy_applied || item.priceStrategyApplied) {
+    const price = roundOzonMoney(numberFromOzonValue(item.price));
+    const oldPrice = roundOzonMoney(numberFromOzonValue(item.old_price || item.oldPrice || price * OZON_PUBLISH_OLD_PRICE_MULTIPLIER));
+    return {
+      ...item,
+      price: price ? String(price) : item.price,
+      old_price: oldPrice ? String(oldPrice) : item.old_price
+    };
+  }
+  const internalPrice = numberFromOzonValue(item.price);
+  if (!internalPrice) return item;
+  const publishPrice = roundOzonMoney(internalPrice * OZON_PUBLISH_PRICE_MULTIPLIER);
+  return {
+    ...item,
+    price: String(publishPrice),
+    old_price: String(roundOzonMoney(publishPrice * OZON_PUBLISH_OLD_PRICE_MULTIPLIER))
+  };
+}
+
+async function resolveShopCurrencyCode(shopId) {
+  const row = await mysqlQuery(`
+    SELECT currency_code
+    FROM online_products
+    WHERE shop_id = ? AND COALESCE(currency_code, '') <> ''
+    GROUP BY currency_code
+    ORDER BY COUNT(*) DESC
+    LIMIT 1
+  `, [Number(shopId)]).then((rows) => rows[0]).catch(() => null);
+  return String(row?.currency_code || "").trim().toUpperCase();
+}
+
+function cmToMm(value) {
+  const numeric = numberFromOzonValue(value);
+  return numeric ? Math.round(numeric * 10) : 0;
+}
+
+function roundOzonMoney(value) {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.round(numeric * 100) / 100;
+}
+
 function normalizeAttributeValuesForOzon(item = {}) {
-  const values = Array.isArray(item.value) ? item.value : String(item.value || "").split(/[,;\n]+/);
+  const sourceValues = Array.isArray(item.values) && item.values.length ? item.values : item.value;
+  const values = Array.isArray(sourceValues) ? sourceValues : [sourceValues];
+  const isRichContent = Number(item.attribute_id || item.id || 0) === 11254 || String(item.type || "").toLowerCase().includes("rich");
   return values.map((value) => {
+    if (value && typeof value === "object") {
+      const dictionaryValueId = Number(value.dictionary_value_id || value.id || 0);
+      const text = String(value.value || value.name || "").trim();
+      if (dictionaryValueId) return { dictionary_value_id: dictionaryValueId, value: text };
+      if (!isRichContent && (text.includes(",") || text.includes(";") || text.includes("\n"))) {
+        return String(text).split(/[,;\n]+/).map((part) => ({ value: part.trim() })).filter((part) => part.value);
+      }
+      return { value: text };
+    }
     const text = String(value || "").trim();
     const option = normalizeArray(item.values).find((candidate) => String(candidate.value || candidate.name || "") === text);
-    if (option?.id) return { dictionary_value_id: Number(option.id), value: text };
+    if (option?.id || option?.dictionary_value_id) return { dictionary_value_id: Number(option.id || option.dictionary_value_id), value: text };
     return { value: text };
-  }).filter((value) => value.value || value.dictionary_value_id);
+  }).flat().filter((value) => value.value || value.dictionary_value_id);
 }
 
 function buildOzonComplexAttributesPreview(variant = {}, facts = {}) {
@@ -1998,13 +3900,6 @@ function buildOzonComplexAttributesPreview(variant = {}, facts = {}) {
       ]
     });
   }
-  const richContent = facts.richContent;
-  if (richContent) {
-    result.push({
-      id: "rich_content_json",
-      values: [{ value: typeof richContent === "string" ? richContent : JSON.stringify(richContent) }]
-    });
-  }
   return result;
 }
 
@@ -2023,6 +3918,7 @@ function collectLocalImportMedia(payload = {}) {
   return normalizeArray(payload.items).flatMap((item) => [
     item.primary_image,
     ...normalizeArray(item.images),
+    ...normalizeArray(item.attributes).flatMap((attr) => normalizeArray(attr.values).map((value) => value.value)),
     ...normalizeArray(item.complex_attributes).flatMap((attr) => normalizeArray(attr.values).map((value) => value.value))
   ]).filter(isLocalImportMedia);
 }
@@ -2138,6 +4034,23 @@ function normalizeListingMediaAssetRow(row = {}) {
     sortOrder: Number(row.sort_order || row.sortOrder || 0),
     status: row.status || "",
     metadata,
+    assetVariantSourceTitle: row.asset_variant_source_title || row.assetVariantSourceTitle || metadata.assetVariantSourceTitle || metadata.sourceTitle || metadata.productTitle || "",
+    assetVariantId: nullableNumber(row.asset_variant_id ?? row.assetVariantId),
+    assetVariantTitle: row.asset_variant_title || row.assetVariantTitle || metadata.assetVariantTitle || "",
+    assetVariantTitleZh: row.asset_variant_title_zh || row.assetVariantTitleZh || metadata.assetVariantTitleZh || "",
+    assetVariantTags: parseJson(row.asset_variant_tags_json || row.assetVariantTagsJson, []),
+    assetVariantTagStyle: row.asset_variant_tag_style || row.assetVariantTagStyle || "",
+    assetVariantPriceIndex: Number(row.asset_variant_price_index || row.assetVariantPriceIndex || 0),
+    assetVariantInternalPrice: Number(row.asset_variant_internal_price || row.assetVariantInternalPrice || 0),
+    assetVariantOzonPrice: Number(row.asset_variant_ozon_price || row.assetVariantOzonPrice || 0),
+    assetVariantOzonOldPrice: Number(row.asset_variant_ozon_old_price || row.assetVariantOzonOldPrice || 0),
+    assetVariantOzonCategoryName: row.asset_variant_ozon_category_name || row.assetVariantOzonCategoryName || "",
+    assetVariantOzonCategoryId: row.asset_variant_ozon_category_id || row.assetVariantOzonCategoryId || "",
+    assetVariantColor: row.asset_variant_color || row.assetVariantColor || "",
+    assetVariantMaterial: row.asset_variant_material || row.assetVariantMaterial || "",
+    assetVariantQuantity: row.asset_variant_quantity || row.assetVariantQuantity || "",
+    assetVariantOutputDir: row.asset_variant_output_dir || row.assetVariantOutputDir || metadata.assetVariantOutputDir || "",
+    assetVariantCreatedAt: row.asset_variant_created_at || row.assetVariantCreatedAt || "",
     created_at: row.created_at || row.createdAt || "",
     updated_at: row.updated_at || row.updatedAt || ""
   };
@@ -2208,6 +4121,131 @@ function normalizeDraftPayload(body = {}) {
   };
 }
 
+function normalizeMaterialPackageRow(row = {}) {
+  const template = normalizeTemplateRow(row);
+  const editable = template.editable_payload || {};
+  const sourceRaw = template.source_raw || {};
+  const attributes = template.attributes || [];
+  const variants = normalizeArray(editable.variants);
+  const images = template.images || [];
+  const brand = attributeValueByNames(attributes, ["brand", "бренд", "品牌"], [85]) || editable.logistics?.brand || "";
+  const model = attributeValueByNames(attributes, ["model", "vehicle model", "car model", "车型", "型号"], [9048, 7212]) || editable.logistics?.model || editable.logistics?.spec || "";
+  const productType = template.category_name || editable.category_name || sourceRaw.category_name || "";
+  return {
+    id: Number(row.id || 0),
+    name: template.template_name || template.title || `素材包 ${row.id}`,
+    packageName: template.template_name || template.title || `素材包 ${row.id}`,
+    sourceShop: row.shop_name || sourceRaw.shop_name || "",
+    shopId: Number(row.source_shop_id || sourceRaw.shop_id || 0) || null,
+    brand,
+    model,
+    productType,
+    categoryName: template.category_name || "",
+    imageCount: images.length + variants.flatMap((item) => normalizeImages(item.images || [])).length,
+    variantCount: variants.length || 1,
+    updatedAt: row.updated_at || "",
+    templateId: Number(row.id || 0),
+    sourceType: row.source_type || "",
+    missingFields: materialPackageMissingFields(template)
+  };
+}
+
+function materialPackageMissingFields(template = {}) {
+  const editable = template.editable_payload || {};
+  const variants = normalizeArray(editable.variants);
+  const images = normalizeImages(template.images || editable.images || []);
+  const missing = [];
+  if (!template.template_name) missing.push("本地模板名");
+  if (!template.title && !editable.title) missing.push("商品标题");
+  if (!template.category_name && !editable.category_name) missing.push("产品类目");
+  if (!images.length && !variants.some((item) => normalizeImages(item.images || []).length)) missing.push("图片素材");
+  if (!variants.length) missing.push("SKU / 规格");
+  if (!objectValue(editable.price).value) missing.push("价格信息");
+  if (!objectValue(editable.dimensions).weight_g) missing.push("包装信息");
+  return missing;
+}
+
+function buildDeepSeekListingPrompt(type, context = {}) {
+  const contract = context?.target?.outputContract || { content: "string", fields: {} };
+  const commonRules = [
+    `Task type: ${type}`,
+    "You are an Ozon Russia listing assistant inside an ERP system.",
+    "Return valid JSON only. Do not return markdown. Do not explain your reasoning.",
+    "The response must match this contract exactly enough for the ERP to fill the form:",
+    JSON.stringify(contract),
+    "Use the provided form, Ozon category, attributes, variants, media and source hints.",
+    "Buyer-facing title, tags and descriptions must be natural Russian.",
+    "Title, tags, summary and rich content must describe the same search intent. Reuse the most important product keywords naturally across them without keyword stuffing.",
+    "Descriptions must be natural buyer prose, never comma-separated keyword lists.",
+    "Never copy tags, hashtags, shop names, or keyword dumps into summary/description/rich content text.",
+    "Do not use phrases like 'Ключевые особенности', 'Ключевые слова', 'Теги' or 'Хэштеги' inside buyer-facing descriptions.",
+    "Descriptions and rich content should highlight concrete selling points, compatible use cases, material benefits, fitment/vehicle context, color/style and everyday scenarios when present in context.",
+    "Rich content is important for organic exposure: its text must not be generic. It should reinforce the title and tags, explain buyer benefits, and include natural Ozon search phrases from the provided tags.",
+    "Do not invent a brand. If the product has no brand, use Нет бренда.",
+    "Do not put material such as TPU/ABS into model name. Model name should be a generated model/article style value.",
+    "For any attribute with values/options, choose exactly one of the provided option values. Do not invent an option.",
+    "Do not fill PDF, file, certificate, manual, instruction, or document upload attributes.",
+    "Return empty string for unknown fields instead of guessing."
+  ];
+
+  const typeRules = {
+    listingForm: [
+      "Generate a complete set of editable listing fields: title, model, tags, summary, richJson when possible, attributes, and variant row values.",
+      "Tags must start with #, use Russian words or underscore phrases, max 20 tags, each tag should be short.",
+      "Summary should be 100-150 Russian words and must connect title keywords, tags, product benefits, material, fitment and usage scenes as fluent sentences, not as a tag list.",
+      "If a tail image URL and summary exist, richJson should follow the Ozon raShowcase billboard structure with the image and text. The richJson text must be SEO-aligned with the title, tags and summary."
+    ],
+    title: ["Return fields.title and content as one Russian Ozon title."],
+    tags: ["Return fields.tags as an array of Russian #tags. Do not return prose."],
+    keywords: ["Return fields.tags or fields.keywords as an array of Russian #tags."],
+    shortDescription: ["Return fields.summary and content as a 100-150 word Russian description. It must naturally include the main title intent, tag keywords, selling points and use scenarios as fluent buyer prose, not a keyword block."],
+    description: ["Return fields.summary and/or fields.richJson. Rich JSON must be parseable JSON string or object. The text must use tail image plus SEO-aligned description connected to title and tags, but must not include literal tags or hashtag lists."],
+    attributeFill: [
+      "Fill only the requested attribute or missing required attributes.",
+      "Return fields.attributes keyed by attribute_id when available; also include fields.value for a single requested attribute."
+    ],
+    categorySuggest: ["Suggest category-related text only when requested."],
+    translateRu: ["Translate the requested field into Russian."],
+    optimizeSeo: ["Optimize existing title/tags/summary without changing factual product information."],
+    imageCopy: ["Generate short Russian copy based on product images and listing context."]
+  };
+
+  return [
+    ...commonRules,
+    ...(typeRules[type] || []),
+    "Context JSON:",
+    JSON.stringify(context)
+  ].join("\n");
+}
+function parseAiContentJson(content) {
+  const raw = String(content || "").trim();
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
+  const candidate = fenced || raw.match(/\{[\s\S]*\}/)?.[0] || raw;
+  try {
+    return objectValue(JSON.parse(candidate));
+  } catch {
+    return { content: raw, fields: {} };
+  }
+}
+
+function productTypeAbbr(value = "") {
+  const text = cleanText(value, 64).toUpperCase();
+  if (!text) return "ITEM";
+  const known = [
+    ["KEY", "KEY"],
+    ["钥匙", "KEY"],
+    ["SILL", "SILL"],
+    ["门槛", "SILL"],
+    ["COVER", "COVER"],
+    ["套", "COVER"],
+    ["MAT", "MAT"],
+    ["垫", "MAT"]
+  ];
+  const hit = known.find(([needle]) => text.includes(needle));
+  if (hit) return hit[1];
+  return text.replace(/[^A-Z0-9]+/g, "_").split("_").filter(Boolean).map((part) => part.slice(0, 4)).join("").slice(0, 10) || "ITEM";
+}
+
 function normalizeTemplateRow(row) {
   const editable = normalizeEditablePayload(parseJson(row.editable_payload_json, {}));
   const attributes = normalizeAttributes(parseJson(row.attributes_json, editable.attributes || []));
@@ -2236,10 +4274,14 @@ function normalizeTemplateRow(row) {
 function normalizeOzonCategoryRow(row = {}) {
   const descriptionCategoryId = Number(row.description_category_id || row.descriptionCategoryId || 0);
   const typeId = Number(row.type_id || row.typeId || 0);
-  const nameZh = row.name_zh || row.nameZh || "";
+  const rawNameZh = row.name_zh || row.nameZh || "";
   const nameRu = row.name_ru || row.nameRu || "";
-  const pathZh = row.path_zh || row.pathZh || "";
+  const rawPathZh = row.path_zh || row.pathZh || "";
   const pathRu = row.path_ru || row.pathRu || "";
+  const fallbackZh = descriptionCategoryId && typeId ? `待翻译类目 ${descriptionCategoryId}:${typeId}` : "";
+  const nameZh = rawNameZh && !hasCyrillicText(rawNameZh) ? rawNameZh : "";
+  const pathZh = rawPathZh && !hasCyrillicText(rawPathZh) ? rawPathZh : "";
+  const displayZh = pathZh || nameZh || fallbackZh;
   return {
     id: Number(row.id || 0),
     description_category_id: descriptionCategoryId,
@@ -2251,15 +4293,19 @@ function normalizeOzonCategoryRow(row = {}) {
     name_ru: nameRu,
     path_zh: pathZh,
     path_ru: pathRu,
-    label: pathZh || nameZh || pathRu || nameRu || `${descriptionCategoryId}:${typeId}`,
-    name: nameZh || nameRu,
-    subLabel: [nameRu, descriptionCategoryId && typeId ? `${descriptionCategoryId}:${typeId}` : ""].filter(Boolean).join(" · "),
+    label: displayZh || `${descriptionCategoryId}:${typeId}`,
+    name: nameZh || displayZh || nameRu,
+    subLabel: [pathRu || nameRu, descriptionCategoryId && typeId ? `${descriptionCategoryId}:${typeId}` : ""].filter(Boolean).join(" / "),
     parent_description_category_id: Number(row.parent_description_category_id || 0),
     is_auto: Boolean(row.is_auto),
     source_shop_id: row.source_shop_id ? Number(row.source_shop_id) : null,
     synced_at: row.synced_at || null,
     raw: parseJson(row.raw_json, row.raw || {})
   };
+}
+
+function hasCyrillicText(value) {
+  return /[\u0400-\u04ff]/.test(String(value || ""));
 }
 
 function normalizeOzonCategoryAttributeRow(row = {}) {
@@ -2287,26 +4333,349 @@ function normalizeOzonAttributeValueRow(row = {}) {
   const raw = parseJson(row.raw_json, row.raw || {});
   const dictionaryValueId = Number(row.dictionary_value_id || row.dictionaryValueId || raw.id || raw.dictionary_value_id || 0);
   const value = row.value || raw.value || raw.name || "";
+  const displayValueZh = row.display_value_zh || raw.display_value_zh || inferOzonAttributeDisplayValueZh(row.attribute_id || row.attributeId, value, raw);
   return {
     id: dictionaryValueId,
     dictionary_value_id: dictionaryValueId,
     value,
-    label: value,
+    label: displayValueZh || value,
+    display_value_zh: displayValueZh || "",
     info: row.info || raw.info || raw.description || "",
     raw
   };
 }
 
-function normalizePublishRecordRow(row = {}) {
+function inferOzonAttributeDisplayValueZh(attributeId, value = "", raw = {}) {
+  const text = String(value || raw.value || raw.name || "").trim();
+  if (!text) return "";
+  if (/[\u4e00-\u9fff]/.test(text)) return text;
+  const normalized = text.toLowerCase().replace(/ё/g, "е").replace(/[_-]+/g, " ").trim();
+  const colorMap = new Map([
+    ["black", "黑色"], ["черный", "黑色"], ["чёрный", "黑色"], ["белый", "白色"], ["white", "白色"],
+    ["silver", "银色"], ["серебристый", "银色"], ["gray", "灰色"], ["grey", "灰色"], ["серый", "灰色"],
+    ["red", "红色"], ["красный", "红色"], ["blue", "蓝色"], ["синий", "蓝色"], ["green", "绿色"], ["зеленый", "绿色"],
+    ["gold", "金色"], ["золотой", "金色"], ["brown", "棕色"], ["коричневый", "棕色"], ["transparent", "透明"], ["прозрачный", "透明"]
+  ]);
+  const materialMap = new Map([
+    ["plastic", "塑料"], ["пластик", "塑料"], ["полимер", "高分子材料"], ["искусственная кожа", "生态皮革"],
+    ["натуральная кожа", "真皮"], ["кожа", "皮革"], ["металл", "金属"], ["нержавеющая сталь", "不锈钢"],
+    ["термопластичный эластомер", "热塑性弹性体"], ["tpu", "TPU"], ["abs пластик", "ABS塑料"], ["abs", "ABS塑料"]
+  ]);
+  const brandMap = new Map([
+    ["geely", "吉利"], ["belgee", "Belgee"], ["haval", "哈弗"], ["chery", "奇瑞"], ["changan", "长安"],
+    ["omoda", "欧萌达"], ["jaecoo", "Jaecoo"], ["exeed", "星途"], ["tenet", "TENET"], ["lada", "拉达"],
+    ["toyota", "丰田"], ["kia", "起亚"], ["hyundai", "现代"], ["volkswagen", "大众"], ["nissan", "日产"]
+  ]);
+  const map = Number(attributeId) === 8229 || Number(attributeId) === 10096
+    ? colorMap
+    : Number(attributeId) === 7199
+      ? materialMap
+      : Number(attributeId) === 7204
+        ? brandMap
+        : null;
+  if (map) {
+    if (map.has(normalized)) return map.get(normalized);
+    for (const [key, label] of map.entries()) {
+      if (normalized.includes(key)) return label;
+    }
+  }
+  if (Number(attributeId) === 7212) return text;
+  return "";
+}
+
+function chunkArray(items = [], size = 300) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
+  return chunks;
+}
+
+function estimateListingQualityFromPayload(payload = {}) {
+  const item = normalizeArray(payload.items)[0] || {};
+  const attrs = normalizeArray(item.attributes);
+  const complexAttrs = normalizeArray(item.complex_attributes).flatMap((group) => normalizeArray(group.attributes));
+  const images = [item.primary_image, ...normalizeArray(item.images)].filter(Boolean);
+  const videos = complexAttrs
+    .filter((attr) => Number(attr.id || 0) === 21841)
+    .flatMap((attr) => normalizeArray(attr.values))
+    .filter((value) => String(value?.value || value || "").trim());
+  const richContent = attrs.find((attr) => Number(attr.id || attr.attribute_id || 0) === 11254);
+  const tags = attrs.find((attr) => Number(attr.id || attr.attribute_id || 0) === 10096);
+  const issues = [];
+  let score = 0;
+
+  const titleLength = String(item.name || "").trim().length;
+  if (titleLength >= 45) score += 12;
+  else issues.push("标题偏短，建议覆盖车型、材质、用途和颜色");
+  if (titleLength >= 80) score += 4;
+
+  if (item.description_category_id && item.type_id) score += 10;
+  else issues.push("缺少真实 Ozon 类目");
+
+  const requiredCore = [85, 9048];
+  const hasCore = requiredCore.every((id) => attrs.some((attr) => Number(attr.id || attr.attribute_id || 0) === id && normalizeArray(attr.values).length));
+  if (hasCore) score += 12;
+  else issues.push("品牌/型号名称等核心必填属性不完整");
+
+  const attrCount = attrs.filter((attr) => normalizeArray(attr.values).length).length;
+  score += Math.min(18, attrCount * 2);
+  if (attrCount < 8) issues.push("类目属性数量偏少，建议补齐材质、颜色、汽车品牌/车型、数量等可选特征");
+
+  if (images.length >= 6) score += 18;
+  else if (images.length >= 4) score += 13;
+  else if (images.length >= 1) score += 6;
+  else issues.push("缺少商品图片");
+
+  if (videos.length) score += 8;
+  else issues.push("缺少视频，媒体分可能偏低");
+
+  const descriptionLength = String(item.description || "").trim().length;
+  if (descriptionLength >= 450) score += 10;
+  else if (descriptionLength >= 220) score += 6;
+  else issues.push("简介偏短，建议 100-150 个俄语词并埋入标题/标签/卖点/场景");
+
+  const tagCount = normalizeArray(tags?.values).length || normalizeStringList(item.tags).length;
+  if (tagCount >= 15) score += 8;
+  else if (tagCount >= 8) score += 5;
+  else issues.push("产品标签数量不足，建议接近 20 个俄语标签");
+
+  if (richContent && normalizeArray(richContent.values).some((value) => String(value?.value || value || "").includes("raShowcase"))) score += 10;
+  else issues.push("JSON 富内容缺失或不是 Ozon 图文模板");
+
+  if (Number(item.weight || 0) && Number(item.depth || 0) && Number(item.width || 0) && Number(item.height || 0)) score += 8;
+  else issues.push("包装重量/尺寸不完整");
+
   return {
-    ...row,
+    score: Math.max(0, Math.min(100, Math.round(score))),
+    source: "local_estimate",
+    issues,
+    checked_at: new Date().toISOString()
+  };
+}
+
+function normalizeOzonContentRating(row = {}) {
+  const rawScore = row.rating ?? row.score ?? row.total_rating ?? row.content_rating ?? row.index ?? row.rating_value;
+  let score = Number(rawScore);
+  if (Number.isFinite(score) && score > 0 && score <= 5) score *= 20;
+  const groups = normalizeArray(row.groups || row.rating_groups || row.components || row.details);
+  if ((!Number.isFinite(score) || score <= 0) && groups.length) {
+    const total = groups.reduce((sum, group) => sum + Number(group.rating || group.score || group.value || 0), 0);
+    const max = groups.reduce((sum, group) => sum + Number(group.max_rating || group.max_score || group.max || 0), 0);
+    if (max > 0) score = (total / max) * 100;
+  }
+  const issues = normalizeArray(row.improve_attributes || row.recommendations || row.errors || row.warnings || row.conditions)
+    .map((item) => String(item?.message || item?.name || item?.title || item || "").trim())
+    .filter(Boolean);
+  for (const group of groups) {
+    const groupName = String(group.name || group.key || "").trim();
+    const fulfilledCost = Math.max(0, ...normalizeArray(group.conditions)
+      .filter((condition) => condition?.fulfilled === true)
+      .map((condition) => Number(condition.cost || 0)));
+    for (const condition of normalizeArray(group.conditions)) {
+      const key = String(condition?.key || "").toLowerCase();
+      const isMeaningfulUpgrade = Number(condition?.cost || 0) > fulfilledCost || key.includes("video") || key.includes("rich");
+      if (condition?.fulfilled === false && isMeaningfulUpgrade) {
+        const text = String(condition.description || condition.name || condition.key || "").trim();
+        if (text) issues.push(groupName ? `${groupName}: ${text}` : text);
+      }
+    }
+  }
+  return {
+    score: Number.isFinite(score) ? Math.max(0, Math.min(100, Math.round(score * 100) / 100)) : 0,
+    source: "ozon_rating_by_sku",
+    issues,
+    raw: row,
+    checked_at: new Date().toISOString()
+  };
+}
+
+async function refreshPublishRecordQuality(recordId) {
+  const record = await row(`
+    SELECT r.*, s.name AS shop_name, s.ozon_client_id, COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS api_key_hint
+    FROM listing_publish_records r
+    LEFT JOIN shops s ON s.id = r.shop_id
+    WHERE r.id = ?
+  `, [Number(recordId)]);
+  if (!record) return null;
+  let quality = {
+    score: 0,
+    source: "ozon_rating_pending",
+    issues: ["Ozon 暂未返回真实内容评分"],
+    checked_at: new Date().toISOString()
+  };
+  try {
+    const refs = extractImportedProductRefs(parseJson(record.response_json, {}), record);
+    const productIds = refs.productIds.length ? refs.productIds : [Number(record.ozon_product_id || 0)].filter(Boolean);
+    let skus = [];
+    if (productIds.length) {
+      const products = await fetchOzonProductsByIds(record, productIds);
+      skus.push(...products.map((item) => item.ozon_sku || item.sku || item.fbo_sku || item.fbs_sku).filter(Boolean));
+    }
+    if (!skus.length) {
+      const attrs = await fetchOzonProductInfoAttributes(record, {
+        productIds,
+        offerIds: refs.offerIds.length ? refs.offerIds : [record.offer_id].filter(Boolean),
+        limit: 20
+      });
+      skus.push(...attrs.map((item) => item.sku || item.fbo_sku || item.fbs_sku || item.ozon_sku).filter(Boolean));
+    }
+    skus = [...new Set(skus
+      .map((item) => String(item || "").trim())
+      .filter((item) => /^\d+$/.test(item)))];
+    if (skus.length) {
+      const ratings = await fetchOzonProductContentRating(record, { skus });
+      const normalized = ratings.map(normalizeOzonContentRating).filter((item) => item.score > 0);
+      if (normalized.length) {
+        quality = normalized.sort((a, b) => b.score - a.score)[0];
+      }
+    } else {
+      quality = {
+        score: 0,
+        source: "ozon_rating_waiting_sku",
+        issues: ["Ozon 已返回任务状态，但暂未返回可查询内容评分的 SKU"],
+        checked_at: new Date().toISOString()
+      };
+    }
+  } catch (error) {
+    quality = {
+      score: 0,
+      source: "ozon_rating_error",
+      issues: ["Ozon 内容评分接口查询失败"],
+      rating_error: error.message
+    };
+  }
+  await run(`
+    UPDATE listing_publish_records
+    SET quality_score = ?, quality_source = ?, quality_json = ?, quality_checked_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [
+    Number(quality.score || 0),
+    String(quality.source || "").slice(0, 64),
+    JSON.stringify(quality),
+    Number(recordId)
+  ]);
+  return quality;
+}
+
+function normalizePublishRecordRow(row = {}, options = {}) {
+  const includePayload = options.includePayload !== false;
+  const request = parseJson(row.request_json, {});
+  const response = includePayload ? parseJson(row.response_json, {}) : {};
+  const error = includePayload ? parseJson(row.error_json, null) : null;
+  const quality = parseJson(row.quality_json, null) || (Number(row.quality_score || 0) ? {
+    score: Number(row.quality_score || 0),
+    source: row.quality_source || ""
+  } : null);
+  const firstItem = normalizeArray(request.items)[0] || {};
+  const complexValues = normalizeArray(firstItem.complex_attributes)
+    .flatMap((group) => normalizeArray(group.attributes))
+    .flatMap((attr) => normalizeArray(attr.values).map((value) => ({ attr, value })));
+  const videoUrls = complexValues
+    .filter(({ attr }) => Number(attr.id || 0) === 21841)
+    .map(({ value }) => String(value?.value || "").trim())
+    .filter(Boolean);
+  const videoCoverUrls = complexValues
+    .filter(({ attr }) => Number(attr.id || 0) === 21845)
+    .map(({ value }) => String(value?.value || "").trim())
+    .filter(Boolean);
+  const images = [
+    firstItem.primary_image,
+    ...normalizeArray(firstItem.images)
+  ].map((item) => localListingPreviewUrl(item)).filter(Boolean);
+  const onlinePrimaryImage = String(row.online_primary_image || "").trim();
+  const qualitySource = row.quality_source || quality?.source || "";
+  const hasRealQuality = String(qualitySource || "").includes("ozon_rating_by_sku");
+  const realQualityScore = realOzonQualityScore(qualitySource, row.quality_score || quality?.score);
+  const {
+    request_json: _requestJson,
+    response_json: _responseJson,
+    error_json: _errorJson,
+    quality_json: _qualityJson,
+    ...baseRow
+  } = row;
+  const normalized = {
+    ...baseRow,
     id: Number(row.id || 0),
     draft_id: Number(row.draft_id || 0),
     shop_id: Number(row.shop_id || 0),
-    response: parseJson(row.response_json, {}),
-    request: parseJson(row.request_json, {}),
-    error: parseJson(row.error_json, null)
+    product_name: firstItem.name || row.offer_id || "",
+    primary_image: localListingPreviewUrl(firstItem.primary_image) || images[0] || onlinePrimaryImage || "",
+    fallback_image: onlinePrimaryImage,
+    images,
+    image_count: images.length,
+    video_urls: videoUrls,
+    video_cover_urls: videoCoverUrls,
+    price: firstItem.price || "",
+    old_price: firstItem.old_price || "",
+    currency_code: firstItem.currency_code || "",
+    weight: firstItem.weight || "",
+    depth: firstItem.depth || "",
+    width: firstItem.width || "",
+    height: firstItem.height || "",
+    description_category_id: firstItem.description_category_id || "",
+    type_id: firstItem.type_id || "",
+    quality: includePayload && hasRealQuality ? quality : {
+      score: includePayload ? 0 : realQualityScore,
+      source: qualitySource || "ozon_rating_pending",
+      issues: qualitySource ? normalizeArray(quality?.issues).slice(0, 8) : ["Ozon 暂未返回真实内容评分"]
+    },
+    quality_score: realQualityScore,
+    quality_source: hasRealQuality ? qualitySource : (qualitySource || "ozon_rating_pending"),
+    quality_checked_at: row.quality_checked_at || "",
+    quality_ok: realQualityScore >= 90,
+    quality_issues: hasRealQuality ? normalizeArray(quality?.issues).slice(0, includePayload ? 8 : 2) : []
   };
+  if (includePayload) {
+    normalized.response = response;
+    normalized.request = request;
+    normalized.error = error;
+  }
+  return normalized;
+}
+
+function localListingPreviewUrl(url = "") {
+  const value = String(url || "").trim();
+  if (!value) return "";
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      const parsed = new URL(value);
+      if (parsed.pathname.startsWith("/uploads/")) return parsed.pathname + parsed.search;
+    } catch {
+      return value;
+    }
+  }
+  return value;
+}
+
+function realOzonQualityScore(source = "", score = 0) {
+  if (!String(source || "").includes("ozon_rating_by_sku")) return 0;
+  return Number(score || 0);
+}
+
+function normalizeRetryPublishPayload(payload = {}) {
+  const next = objectValue(payload);
+  next.items = normalizeArray(next.items).map((item) => {
+    const complexAttributes = normalizeArray(item.complex_attributes);
+    const richValue = complexAttributes
+      .flatMap((group) => normalizeArray(group.attributes || group))
+      .find((attr) => String(attr.id || "").toLowerCase() === "rich_content_json")
+      ?.values?.[0]?.value;
+    const attributes = normalizeArray(item.attributes);
+    if (richValue && !attributes.some((attr) => Number(attr.id || attr.attribute_id || 0) === 11254)) {
+      attributes.push({ id: 11254, values: [{ value: String(richValue).trim() }] });
+    }
+    return {
+      ...item,
+      offer_id: String(item.offer_id || "").trim(),
+      name: String(item.name || "").trim(),
+      price: String(item.price || ""),
+      old_price: String(item.old_price || item.price || ""),
+      primary_image: String(item.primary_image || "").trim(),
+      images: normalizeStringList(item.images),
+      attributes,
+      complex_attributes: normalizeOzonComplexAttributesForPublish(complexAttributes)
+    };
+  });
+  return next;
 }
 
 function firstOfferId(payload = {}) {
@@ -2334,8 +4703,124 @@ async function updatePublishRecordAfterSubmit(recordId, { taskId = "", response 
   ]);
 }
 
+function normalizeOzonCategorySyncJobRow(row = {}) {
+  return {
+    ...row,
+    id: Number(row.id || 0),
+    shop_id: row.shop_id ? Number(row.shop_id) : null,
+    payload: parseJson(row.payload_json, {}),
+    result: parseJson(row.result_json, {}),
+    warnings: parseJson(row.warning_json, []),
+    ok: row.status === "success"
+  };
+}
+
+async function startOzonCategorySyncJob({ jobType = "scheduled", shopId = null, payload = {}, session = null } = {}) {
+  return insert(`
+    INSERT INTO ozon_category_sync_jobs
+    (job_type, shop_id, status, payload_json, created_by_person_id)
+    VALUES (?, ?, 'running', ?, ?)
+  `, [
+    String(jobType || "scheduled").slice(0, 64),
+    shopId ? Number(shopId) : null,
+    JSON.stringify(payload || {}),
+    personId(session)
+  ]);
+}
+
+async function finishOzonCategorySyncJob(jobId, status, result = {}, error = null) {
+  await run(`
+    UPDATE ozon_category_sync_jobs
+    SET status = ?, result_json = ?, error_message = ?, finished_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [
+    status,
+    JSON.stringify(result || {}),
+    error ? String(error.message || error).slice(0, 1000) : null,
+    Number(jobId)
+  ]);
+}
+
+async function appendOzonCategorySyncJobWarning(jobId, warning = {}) {
+  const current = await row("SELECT warning_json FROM ozon_category_sync_jobs WHERE id = ?", [Number(jobId)]);
+  const warnings = parseJson(current?.warning_json, []);
+  warnings.push(warning);
+  await run("UPDATE ozon_category_sync_jobs SET warning_json = ? WHERE id = ?", [JSON.stringify(warnings.slice(-200)), Number(jobId)]);
+}
+
+async function recordOzonCategoryUsage({ sourceModule = "unknown", sourceId = "", ozonCategoryId = "", categoryName = "" } = {}) {
+  const parsed = parseOzonCategoryKey(ozonCategoryId);
+  if (!parsed.descriptionCategoryId || !parsed.typeId) return;
+  await run(`
+    INSERT INTO ozon_category_usage
+    (source_module, source_id, description_category_id, type_id, category_name, usage_count, last_used_at)
+    VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+    ON DUPLICATE KEY UPDATE
+      category_name = VALUES(category_name),
+      usage_count = usage_count + 1,
+      last_used_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP
+  `, [
+    String(sourceModule || "unknown").slice(0, 64),
+    String(sourceId || "").slice(0, 128),
+    parsed.descriptionCategoryId,
+    parsed.typeId,
+    String(categoryName || "").slice(0, 500)
+  ]);
+}
+
+function parseOzonCategoryKey(value = "") {
+  const [descriptionCategoryId, typeId] = String(value || "").split(":").map((item) => Number(item || 0));
+  return {
+    descriptionCategoryId: Number.isFinite(descriptionCategoryId) ? descriptionCategoryId : 0,
+    typeId: Number.isFinite(typeId) ? typeId : 0
+  };
+}
+
+async function usedOzonCategoriesForSync(options = {}) {
+  const limit = Math.min(Math.max(Number(options.category_limit || options.categoryLimit || 80), 1), 500);
+  const rows = await all(`
+    SELECT description_category_id, type_id, MAX(category_name) AS category_name, MAX(last_used_at) AS last_used_at, SUM(usage_count) AS usage_count
+    FROM (
+      SELECT
+        CAST(SUBSTRING_INDEX(ozon_category_id, ':', 1) AS UNSIGNED) AS description_category_id,
+        CAST(SUBSTRING_INDEX(ozon_category_id, ':', -1) AS UNSIGNED) AS type_id,
+        category_name,
+        updated_at AS last_used_at,
+        1 AS usage_count
+      FROM listing_category_templates
+      WHERE status <> 'deleted' AND ozon_category_id LIKE '%:%'
+      UNION ALL
+      SELECT description_category_id, type_id, category_name, last_used_at, usage_count
+      FROM ozon_category_usage
+    ) used_categories
+    WHERE description_category_id > 0 AND type_id > 0
+    GROUP BY description_category_id, type_id
+    ORDER BY SUM(usage_count) DESC, MAX(last_used_at) DESC
+    LIMIT ?
+  `, [limit]);
+  if (rows.length) return rows.map((item) => ({
+    descriptionCategoryId: Number(item.description_category_id || 0),
+    typeId: Number(item.type_id || 0),
+    categoryName: item.category_name || ""
+  }));
+  const fallbackRows = await all(`
+    SELECT description_category_id, type_id, name_zh AS category_name
+    FROM ozon_category_mappings
+    WHERE status = 'active'
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `, [Math.min(limit, 20)]);
+  return fallbackRows.map((item) => ({
+    descriptionCategoryId: Number(item.description_category_id || 0),
+    typeId: Number(item.type_id || 0),
+    categoryName: item.category_name || ""
+  }));
+}
+
 function importInfoStatus(info = {}) {
-  if (!info || info.error) return "submitted";
+  if (!info) return "ozon_status_pending";
+  if (info.error) return "ozon_status_error";
   const result = info.result || info;
   const rawStatus = String(result.status || normalizeArray(result.items || result.products)[0]?.status || "").toLowerCase();
   if (rawStatus.includes("fail") || rawStatus.includes("error") || rawStatus.includes("rejected")) return "failed";
@@ -2382,9 +4867,10 @@ function flattenOzonCategoryTree(tree) {
   const walk = (node, parents = []) => {
     if (!node || typeof node !== "object") return;
     const rawName = String(node.category_name || node.name || node.title || node.type_name || "").trim();
-    const descriptionCategoryId = Number(node.description_category_id || node.descriptionCategoryId || node.category_id || 0);
+    const ownDescriptionCategoryId = Number(node.description_category_id || node.descriptionCategoryId || node.category_id || 0);
+    const descriptionCategoryId = ownDescriptionCategoryId || Number(parents.at(-1)?.descriptionCategoryId || 0);
     const typeId = Number(node.type_id || node.typeId || 0);
-    const path = [...parents, rawName].filter(Boolean);
+    const path = [...parents.map((item) => item.name).filter(Boolean), rawName].filter(Boolean);
     if (descriptionCategoryId && typeId) {
       rows.push({
         descriptionCategoryId,
@@ -2393,13 +4879,13 @@ function flattenOzonCategoryTree(tree) {
         nameZh: rawName,
         pathRu: path.join(" / "),
         pathZh: path.join(" / "),
-        parentDescriptionCategoryId: Number(node.parent_description_category_id || node.parent_id || 0),
+        parentDescriptionCategoryId: Number(node.parent_description_category_id || node.parent_id || ownDescriptionCategoryId || parents.at(-1)?.descriptionCategoryId || 0),
         isAuto: node.is_auto !== undefined ? Boolean(node.is_auto) : true,
         raw: node
       });
     }
     for (const child of normalizeArray(node.children || node.childs || node.items || node.types)) {
-      walk(child, path);
+      walk(child, [...parents, { name: rawName, descriptionCategoryId: ownDescriptionCategoryId || descriptionCategoryId }]);
     }
   };
   for (const root of roots) walk(root, []);
@@ -2458,21 +4944,24 @@ function normalizeAttributes(value) {
     if (typeof item === "string") {
       return { name: item, value: "", type: "text", required: false, values: [], sort_order: index + 1 };
     }
+    const values = Array.isArray(item?.values) ? item.values.map((option) => ({
+      id: option?.dictionary_value_id ?? option?.id ?? option?.value_id ?? "",
+      value: String(option?.value ?? option?.name ?? option?.text ?? option ?? "").trim()
+    })).filter((option) => option.value) : [];
+    const attributeId = item?.attribute_id || item?.id || "";
+    const isCollection = Boolean(item?.is_collection || item?.collection || String(item?.type || "").toLowerCase() === "multiselect");
     return {
-      name: String(item?.name || item?.attribute_name || "").trim(),
-      value: normalizeAttributeValue(item?.value ?? item?.attribute_value ?? ""),
+      name: String(item?.name || item?.attribute_name || item?.title || (attributeId ? `属性 ${attributeId}` : "")).trim(),
+      value: normalizeAttributeFormValue(item?.value ?? item?.attribute_value ?? (values.length ? values : ""), isCollection),
       required: Boolean(item?.required),
-      attribute_id: item?.attribute_id || item?.id || "",
+      attribute_id: attributeId,
       type: String(item?.type || item?.value_type || (item?.dictionary_id ? "select" : "text")).trim(),
       dictionary_id: item?.dictionary_id || "",
       is_collection: Boolean(item?.is_collection || item?.collection),
       group: String(item?.group || item?.group_name || "").trim(),
       hint: String(item?.hint || item?.description || "").trim(),
       source: String(item?.source || "ozon_copy").trim(),
-      values: Array.isArray(item?.values) ? item.values.map((option) => ({
-        id: option?.id ?? option?.value_id ?? "",
-        value: String(option?.value ?? option?.name ?? option ?? "").trim()
-      })).filter((option) => option.value) : [],
+      values,
       raw: item?.raw || item,
       sort_order: Number(item?.sort_order || index + 1)
     };
@@ -2552,7 +5041,7 @@ function enrichTemplateAttributes(attributes = [], facts = {}) {
   add(["标题", "Название"], facts.title, { name: "标题", required: true });
   add(["品牌", "Бренд"], facts.brand, { name: "品牌", required: true, attributeIds: [85], attribute_id: 85 });
   add(["型号", "Модель"], facts.model, { name: "型号名称", required: true, attributeIds: [9048], attribute_id: 9048 });
-  add(["主图标签", "ключевые слова", "тег"], facts.tags, { name: "主图标签", attributeIds: [10096], attribute_id: 10096, type: "multiselect" });
+  add(["产品标签", "主图标签", "ключевые слова", "тег"], facts.tags, { name: "产品标签", type: "multiselect" });
   add(["简介", "Аннотация", "Описание"], facts.description, { name: "简介", attributeIds: [4191], attribute_id: 4191, type: "textarea" });
   add(["JSON富内容", "Rich", "rich"], facts.richJson, { name: "JSON富内容", attributeIds: [11254], attribute_id: 11254, type: "rich_json" });
   return result;
@@ -2585,7 +5074,7 @@ function mergeCategoryAttributeDefinitions(valueAttributes = [], definitions = [
     if (definitionName) valuesByName.delete(definitionName);
     merged.push({
       name: String(definition.name || definition.attribute_name || value?.name || (id ? `属性 ${id}` : "")).trim(),
-      value: value?.value || "",
+      value: normalizeMergedCategoryAttributeValue(value, definition),
       required: Boolean(definition.is_required || definition.required || value?.required),
       attribute_id: id || value?.attribute_id || "",
       type: categoryAttributeType(definition, value),
@@ -2594,7 +5083,7 @@ function mergeCategoryAttributeDefinitions(valueAttributes = [], definitions = [
       group: String(definition.group_name || definition.group || value?.group || "").trim(),
       hint: String(definition.description || definition.hint || value?.hint || "").trim(),
       source: value ? "ozon_product_detail+category_definition" : "ozon_category_definition",
-      values: value?.values || [],
+      values: value?.values?.length ? value.values : (definition.values || []),
       raw: { definition, value: value?.raw || value || null },
       sort_order: Number(definition.sort_order || value?.sort_order || merged.length + 1)
     });
@@ -2606,6 +5095,95 @@ function mergeCategoryAttributeDefinitions(valueAttributes = [], definitions = [
     }
   }
   return merged.filter((item) => item.name || item.value || item.attribute_id);
+}
+
+function normalizeAttributeFormValue(value, isCollection = false) {
+  if (!isCollection) return normalizeAttributeValue(value);
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      if (item && typeof item === "object") return item.value ?? item.name ?? item.text ?? "";
+      return item;
+    }).map((item) => String(item || "").trim()).filter(Boolean);
+  }
+  if (value && typeof value === "object") {
+    return normalizeStringList(value.value || value.name || value.text || "");
+  }
+  return normalizeStringList(value);
+}
+
+function normalizeMergedCategoryAttributeValue(value = null, definition = {}) {
+  if (!value) return "";
+  const isCollection = Boolean(definition.is_collection || definition.collection || value.is_collection || value.type === "multiselect");
+  if (isCollection) {
+    if (Array.isArray(value.value)) return value.value.map((item) => String(item || "").trim()).filter(Boolean);
+    if (Array.isArray(value.values) && value.values.length) {
+      return value.values.map((item) => String(item?.value || item?.name || item?.text || item || "").trim()).filter(Boolean);
+    }
+    return normalizeStringList(value.value || "");
+  }
+  if (Array.isArray(value.value)) return value.value.map((item) => String(item || "").trim()).filter(Boolean).join(", ");
+  return value.value || "";
+}
+
+async function mergeCachedCategoryAttributeDefinitions(valueAttributes = [], descriptionCategoryId, typeId) {
+  const definitions = await listingOzonCategoryAttributes({
+    description_category_id: descriptionCategoryId,
+    type_id: typeId,
+    value_limit: 80,
+    sync_values: true
+  }).catch(() => []);
+  const merged = mergeCategoryAttributeDefinitions(valueAttributes, definitions);
+  return hydrateAttributeNamesFromAnyCategory(inferCollectedAttributeValues(merged));
+}
+
+function inferCollectedAttributeValues(attributes = []) {
+  return normalizeArray(attributes).map((item) => {
+    if (item.value !== undefined && item.value !== null && item.value !== "" && (!Array.isArray(item.value) || item.value.length)) return item;
+    const inferred = inferCollectedAttributeValue(item);
+    return inferred === undefined ? item : { ...item, value: inferred, source: `${item.source || "ozon_category_definition"}+inferred` };
+  });
+}
+
+function inferCollectedAttributeValue(attribute = {}) {
+  const id = Number(attribute.attribute_id || attribute.id || 0);
+  const values = normalizeArray(attribute.values);
+  const byText = (...patterns) => {
+    const matched = values.find((option) => patterns.some((pattern) => new RegExp(pattern, "i").test(String(option.value || option.label || option.name || ""))));
+    return matched?.value || matched?.label || "";
+  };
+  if (id === 85) return byText("无品牌", "нет бренда", "no brand") || "无品牌";
+  if (id === 9782) return byText("не опас", "безопас", "低", "нет") || "";
+  if (id === 8229) return byText("средство", "спрей", "аэрозоль", "гель", "杀虫", "喷") || "";
+  return undefined;
+}
+
+async function hydrateAttributeNamesFromAnyCategory(attributes = []) {
+  const needIds = normalizeArray(attributes)
+    .filter((item) => item.attribute_id && /^属性\s+\d+$/i.test(String(item.name || "")))
+    .map((item) => Number(item.attribute_id || 0))
+    .filter(Boolean);
+  const ids = [...new Set(needIds)];
+  if (!ids.length) return attributes;
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = await all(`
+    SELECT attribute_id, MAX(NULLIF(name, '')) AS name, MAX(NULLIF(attribute_type, '')) AS attribute_type,
+           MAX(dictionary_id) AS dictionary_id, MAX(is_collection) AS is_collection
+    FROM ozon_category_attributes
+    WHERE attribute_id IN (${placeholders}) AND status = 'active'
+    GROUP BY attribute_id
+  `, ids).catch(() => []);
+  const byId = new Map(rows.map((item) => [String(item.attribute_id), item]));
+  return attributes.map((item) => {
+    const cached = byId.get(String(item.attribute_id || ""));
+    if (!cached?.name) return item;
+    return {
+      ...item,
+      name: cached.name,
+      type: item.type && item.type !== "text" ? item.type : categoryAttributeType(cached, item),
+      dictionary_id: item.dictionary_id || cached.dictionary_id || "",
+      is_collection: Boolean(item.is_collection || cached.is_collection)
+    };
+  });
 }
 
 function normalizeAttributeNameKey(value) {
@@ -2768,6 +5346,11 @@ function normalizeArray(value) {
   return [value];
 }
 
+function cleanText(value, maxLength = 255) {
+  const text = String(value ?? "").trim();
+  return maxLength ? text.slice(0, maxLength) : text;
+}
+
 function objectValue(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) return value;
   if (!value) return {};
@@ -2797,17 +5380,25 @@ async function readListingMediaMultipart(req) {
   }
   const body = await readRequestBuffer(req, LISTING_MEDIA_MAX_BYTES + 1024 * 1024);
   const boundary = Buffer.from(`--${match[1] || match[2]}`);
+  const fields = {};
+  let file = null;
   for (const part of splitMultipartBuffer(body, boundary)) {
     const separator = part.indexOf("\r\n\r\n");
     if (separator < 0) continue;
     const headerText = part.subarray(0, separator).toString("utf8");
-    if (!/name="file"/i.test(headerText)) continue;
-    return {
-      filename: headerText.match(/filename="([^"]*)"/i)?.[1] || "upload",
-      contentType: headerText.match(/content-type:\s*([^\r\n]+)/i)?.[1]?.trim() || "",
-      buffer: part.subarray(separator + 4)
-    };
+    const name = headerText.match(/name="([^"]*)"/i)?.[1] || "";
+    if (!name) continue;
+    if (name === "file") {
+      file = {
+        filename: headerText.match(/filename="([^"]*)"/i)?.[1] || "upload",
+        contentType: headerText.match(/content-type:\s*([^\r\n]+)/i)?.[1]?.trim() || "",
+        buffer: part.subarray(separator + 4)
+      };
+    } else {
+      fields[name] = part.subarray(separator + 4).toString("utf8").trim();
+    }
   }
+  if (file) return { ...file, fields };
   const error = new Error("未找到上传字段 file");
   error.status = 400;
   throw error;
@@ -2871,3 +5462,5 @@ async function insert(sql, params = []) {
 async function run(sql, params = []) {
   return mysqlExecute(sql, params);
 }
+
+

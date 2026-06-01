@@ -1,4 +1,4 @@
-import client, { assertOpenAiConfigured, getOpenAiConfigStatus } from "./openaiClient.js";
+import { chatWithAiProvider } from "../../../services/ai-provider-settings.js";
 
 export const STYLE_TEMPLATES = {
   "Ozon高点击主图": "Russian Ozon e-commerce main image, high click-through rate, premium automotive accessory, clean composition, product centered, clear selling points, realistic product photography, 3:4 vertical layout",
@@ -17,15 +17,12 @@ const SYSTEM_PROMPT = [
 ].join("\n");
 
 export async function optimizeImagePrompt(payload = {}) {
-  assertOpenAiConfigured();
   const input = normalizePromptInput(payload);
-  const { textModel } = getOpenAiConfigStatus();
   const styleKeywords = STYLE_TEMPLATES[input.style] || input.style || STYLE_TEMPLATES["Ozon高点击主图"];
 
-  const completion = await client.chat.completions.create({
-    model: textModel,
+  const completion = await chatWithAiProvider({
     temperature: 0.4,
-    response_format: { type: "json_object" },
+    maxTokens: 900,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       {
@@ -44,7 +41,7 @@ export async function optimizeImagePrompt(payload = {}) {
             "明确 Russian Ozon e-commerce style",
             "明确画面比例、背景、光影、构图",
             "明确避免错误车型、错误文字、低质感、变形产品",
-            "如果是套图，让每个模块之间有明显 white/light gaps，方便自动裁切"
+            "如果是套图，让每个模块之间保留明显 white/light gaps，方便自动裁切"
           ],
           styleKeywords,
           negativePrompt: NEGATIVE_PROMPT,
@@ -54,14 +51,14 @@ export async function optimizeImagePrompt(payload = {}) {
     ]
   });
 
-  return normalizePromptResult(completion.choices?.[0]?.message?.content, input, styleKeywords);
+  return normalizePromptResult(completion.content, input, styleKeywords);
 }
 
 export function buildFallbackPrompt(payload = {}) {
   const input = normalizePromptInput(payload);
   const styleKeywords = STYLE_TEMPLATES[input.style] || input.style || STYLE_TEMPLATES["Ozon高点击主图"];
   const finalPrompt = [
-    `Create a professional Russian Ozon e-commerce automotive accessory image set.`,
+    "Create a professional Russian Ozon e-commerce automotive accessory image set.",
     `Product subject: ${input.productName || "automotive accessory"}.`,
     input.vehicleModel ? `Compatible vehicle model: ${input.vehicleModel}.` : "",
     input.sellingPoints ? `Key selling points: ${input.sellingPoints}.` : "",
@@ -92,7 +89,7 @@ function normalizePromptResult(rawContent, input, styleKeywords) {
         : ["主图展示角度", "卖点页1", "卖点页2"]
     };
   } catch (error) {
-    console.error("OpenAI prompt JSON parse failed", { error, rawContent, styleKeywords });
+    console.error("AI prompt JSON parse failed", { error, rawContent, styleKeywords });
     return buildFallbackPrompt(input);
   }
 }

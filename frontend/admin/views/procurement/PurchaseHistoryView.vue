@@ -188,7 +188,7 @@ onMounted(loadPageData);
         <h2>采购历史</h2>
       </div>
       <div class="page-card-actions">
-        <el-button @click="loadPageData">刷新数据</el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
       </div>
     </section>
 
@@ -205,8 +205,8 @@ onMounted(loadPageData);
             />
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="handleSearch">查询</el-button>
-            <el-button @click="handleReset">重置</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
           </el-form-item>
         </el-form>
       </div>
@@ -250,7 +250,7 @@ onMounted(loadPageData);
           </el-table-column>
           <el-table-column label="操作" width="130" fixed="right" align="center">
             <template #default="{ row }">
-              <el-button link type="primary" @click="openDetail(row)">查看详情</el-button>
+              <el-button class="erp-btn-link" link type="primary" @click="openDetail(row)">查看详情</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -320,9 +320,9 @@ onMounted(loadPageData);
       </div>
 
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="detailVisible = false">关闭</el-button>
-          <el-button type="danger" :loading="cancelling" @click="cancelOrder">取消采购单</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="detailVisible = false">关闭</el-button>
+          <el-button class="erp-btn erp-btn-danger" type="danger" :loading="cancelling" @click="cancelOrder">取消采购单</el-button>
         </div>
       </template>
     </el-dialog>

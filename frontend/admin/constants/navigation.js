@@ -1,33 +1,36 @@
-import { DataAnalysis, Document, Goods, House, Setting, ShoppingCart, Tools, WarningFilled } from "@element-plus/icons-vue";
+import { ChatDotRound, DataAnalysis, Document, Goods, House, Setting, ShoppingCart, Tools, WarningFilled } from "@element-plus/icons-vue";
 
 export const navigationMenus = [
-  { key: "dashboard", label: "首页看板", route: "/dashboard", icon: House },
+  { key: "dashboard", label: "首页", route: "/dashboard", icon: House },
   {
     key: "analytics",
-    label: "经营分析",
+    label: "看板",
     icon: DataAnalysis,
     children: [
-      { key: "profit-dashboard", label: "利润看板", route: "/profit" },
-      { key: "advertising-daily", label: "广告系统", route: "/advertising/daily" },
-      { key: "profit-aftersales", label: "售后损失", route: "/profit/aftersales" }
+      { key: "profit-dashboard", label: "利润分析", route: "/profit" },
+      { key: "advertising-daily", label: "广告分析", route: "/advertising/daily" },
+      { key: "ozon-actions", label: "Ozon 活动", route: "/ozon-actions" },
+      { key: "reviews", label: "买家评价", route: "/reviews", icon: ChatDotRound },
+      { key: "profit-aftersales", label: "售后损益", route: "/profit/aftersales" }
     ]
   },
   {
-    key: "tools",
-    label: "工具中心",
-    icon: Tools,
+    key: "products",
+    label: "运营",
+    icon: Goods,
     children: [
-      { key: "selection", label: "选品计价表", route: "/selection" },
-      { key: "asset-variant-center", label: "素材裂变中心", route: "/asset-variant-center" },
-      { key: "listing-automation", label: "多店铺上架自动化", route: "/listing-automation" },
-      { key: "tools-image-cropper", label: "电商套图拆分器", route: "/tools/ecommerce-image-splitter" },
-      { key: "tools-product-video-generator", label: "一键生成视频", route: "/tools/product-video-generator" },
-      { key: "tools-ai-image-generator", label: "AI 套图生成中心", route: "/tools/ai-image-generator" }
+      { key: "collector-box", label: "采集箱", route: "/collector-box" },
+      { key: "selection", label: "选品池", route: "/selection" },
+      { key: "listing-automation", label: "商品上架", route: "/listing-automation" },
+      { key: "listing-records", label: "上架记录", route: "/listing-records" },
+      { key: "online-products", label: "在线商品", route: "/online-products" },
+      { key: "asset-variant-center", label: "多店铺商品", route: "/asset-variant-center" },
+      { key: "main-image-vehicle-variant", label: "AI 素材优化", route: "/asset-variant-center/create" },
     ]
   },
   {
     key: "orders",
-    label: "订单中心",
+    label: "订单",
     icon: Document,
     children: [
       { key: "orders", label: "订单列表", route: "/orders" },
@@ -36,56 +39,68 @@ export const navigationMenus = [
   },
   {
     key: "inventory",
-    label: "库存管理",
+    label: "库存",
     icon: Goods,
     children: [
-      { key: "inventory-products", label: "产品库存表", route: "/inventory/products" },
-      { key: "inventory-fbp", label: "FBP 库存表", route: "/inventory/fbp" },
-      { key: "inventory-hidden", label: "已隐藏产品", route: "/inventory/hidden" },
-      { key: "inventory-mappings", label: "库存-SKU映射表", route: "/inventory/mappings" },
-      { key: "inventory-suppliers", label: "供应商配置", route: "/inventory/suppliers" },
-      { key: "inventory-alerts", label: "库存预警", route: "/inventory/alerts" }
+      { key: "inventory-products", label: "商品库存", route: "/inventory/products" },
+      { key: "inventory-fbp", label: "FBP 库存", route: "/inventory/fbp" },
+      { key: "inventory-fbp-opportunities", label: "备货建议", route: "/inventory/fbp-opportunities" },
+      { key: "inventory-mappings", label: "SKU 绑定", route: "/inventory/mappings" },
+      { key: "inventory-alerts", label: "库存预警", route: "/inventory/alerts" },
+      { key: "inventory-hidden", label: "已删除商品", route: "/inventory/hidden" },
+      { key: "inventory-suppliers", label: "供应商", route: "/inventory/suppliers" }
     ]
   },
   {
     key: "procurement",
-    label: "采购管理",
+    label: "采购",
     icon: ShoppingCart,
     children: [
-      { key: "procurement", label: "采购请求", route: "/procurement" },
-      { key: "purchase-list", label: "采购清单", route: "/purchase-list" },
-      { key: "purchase-history", label: "采购历史", route: "/purchase-history" }
-    ]
-  },
-  {
-    key: "products",
-    label: "商品管理",
-    icon: Goods,
-    children: [
-      { key: "multi-shop-publish", label: "多店铺商品发布中台", route: "/multi-shop-publish" },
-      { key: "ozon-actions", label: "活动管理", route: "/ozon-actions" },
-      { key: "online-products", label: "在线商品", route: "/online-products" }
+      { key: "procurement", label: "采购需求", route: "/procurement" },
+      { key: "purchase-list", label: "待采购清单", route: "/purchase-list" },
+      { key: "purchase-history", label: "采购记录", route: "/purchase-history" }
     ]
   },
   {
     key: "exceptions",
-    label: "异常中心",
+    label: "异常",
     icon: WarningFilled,
     children: [
       { key: "exceptions-profit", label: "利润异常", route: "/exceptions/profit" },
-      { key: "exceptions-deadline", label: "订单超时异常", route: "/exceptions/deadline" },
+      { key: "exceptions-deadline", label: "订单超时", route: "/exceptions/deadline" },
       { key: "exceptions-deadline-warning", label: "超时预警", route: "/exceptions/deadline-warning" },
       { key: "exceptions-stock", label: "库存异常", route: "/exceptions/stock" },
-      { key: "exceptions-binding", label: "未绑定仓库", route: "/exceptions/binding" }
+      { key: "exceptions-binding", label: "未绑定 SKU", route: "/exceptions/binding" }
+    ]
+  },
+  {
+    key: "tools",
+    label: "工具",
+    icon: Tools,
+    children: [
+      { key: "tools-image-cropper", label: "套图拆分", route: "/tools/ecommerce-image-splitter" },
+      { key: "tools-product-video-generator", label: "商品视频", route: "/tools/product-video-generator" }
     ]
   },
   {
     key: "settings",
-    label: "系统设置",
+    label: "系统",
     icon: Setting,
     children: [
-      { key: "settings", label: "配置中心", route: "/settings" },
-      { key: "settings-ai", label: "AI 配置", route: "/settings/ai" }
+      { key: "settings", label: "基础资料", route: "/settings" },
+      { key: "settings-scheduled-jobs", label: "自动任务", route: "/settings/scheduled-jobs" },
+      { key: "settings-ai", label: "AI 设置", route: "/settings/ai" },
+      { key: "settings-materials", label: "素材库", route: "/settings/materials" }
     ]
   }
 ];
+
+export const navigationIconByRoute = navigationMenus.reduce((map, menu) => {
+  if (menu.route) map.set(menu.route, menu.icon || null);
+  if (menu.children?.length) {
+    menu.children.forEach((child) => {
+      map.set(child.route, child.icon || menu.icon || null);
+    });
+  }
+  return map;
+}, new Map());

@@ -6,11 +6,18 @@ export function createCatalogRoutes({ services, readJson }) {
     "GET /api/online-products": (req, url) => services.onlineProducts(Object.fromEntries(url.searchParams.entries())),
     "GET /api/mappings": (req, url) => services.mappings(Object.fromEntries(url.searchParams.entries())),
     "POST /api/products": async (req) => {
-      const created = await services.createProduct(await readJson(req));
+      const body = await readJson(req);
+      const sessionPersonId = req._session?.personId || null;
+      const created = await services.createProduct({
+        ...body,
+        owner_person_id: body.owner_person_id || sessionPersonId,
+        created_by_person_id: body.created_by_person_id || sessionPersonId
+      });
       return { ...created, product: await services.selectionProduct(created.id) };
     },
     "POST /api/products/merge-preview": async (req) => services.previewMergeProducts(await readJson(req)),
     "POST /api/products/merge": async (req) => services.mergeProducts(await readJson(req)),
+    "POST /api/selection/selling-points/generate": async (req) => services.generateSelectionSellingPoints(await readJson(req)),
     "GET /api/products/merge-history": (req, url) => services.productMergeHistory(Object.fromEntries(url.searchParams.entries())),
     "POST /api/products/import-preview": async (req) => services.previewProductCsvImport(await readJson(req)),
     "POST /api/products/import-commit": async (req) => services.commitProductCsvImport(await readJson(req)),

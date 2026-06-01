@@ -25,7 +25,7 @@ const state = reactive({
     status: "all",
     query: "",
     page: 1,
-    pageSize: 30
+    pageSize: 20
   }
 });
 
@@ -168,7 +168,7 @@ function handleReset() {
   state.filters.status = "all";
   state.filters.query = "";
   state.filters.page = 1;
-  state.filters.pageSize = 30;
+  state.filters.pageSize = 20;
   loadOutboundRecords();
 }
 
@@ -251,7 +251,7 @@ onMounted(loadPageData);
         <h2>出库流水</h2>
       </div>
       <div class="page-card-actions">
-        <el-button @click="loadPageData">刷新数据</el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
       </div>
     </section>
 
@@ -309,8 +309,8 @@ onMounted(loadPageData);
               />
             </el-form-item>
             <el-form-item>
-              <el-button type="primary" @click="handleSearch">查询</el-button>
-              <el-button @click="handleReset">重置</el-button>
+              <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
+              <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
             </el-form-item>
           </el-form>
         </div>
@@ -438,7 +438,6 @@ onMounted(loadPageData);
           :page="state.filters.page"
           :page-size="state.filters.pageSize"
           :total-pages="totalPages"
-          :page-sizes="[30, 50, 100]"
           @update:page="handlePageChange"
           @update:pageSize="handlePageSizeChange"
         />

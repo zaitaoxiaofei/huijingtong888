@@ -574,9 +574,9 @@ async function submitDialog() {
               <el-col :span="12">
                 <el-form-item label="图片上传">
                   <el-upload :show-file-list="false" :auto-upload="false" accept="image/*" :on-change="handleImageUploadChange">
-                    <el-button :loading="imageUploadLoading">上传本地图片</el-button>
+                    <el-button class="erp-btn erp-btn-secondary" :loading="imageUploadLoading">上传本地图片</el-button>
                   </el-upload>
-                  <el-button v-if="form.image_url" link type="danger" @click="clearUploadedImage">清除</el-button>
+                  <el-button class="erp-btn-link-danger" v-if="form.image_url" link type="danger" @click="clearUploadedImage">清除</el-button>
                 </el-form-item>
               </el-col>
               <el-col :span="24">
@@ -736,9 +736,9 @@ async function submitDialog() {
     </el-form>
 
     <template #footer>
-      <div class="dialog-footer">
-        <el-button @click="closeDialog">取消</el-button>
-        <el-button type="primary" :loading="submitting" @click="submitDialog">保存</el-button>
+      <div class="erp-dialog-footer">
+        <el-button class="erp-btn erp-btn-secondary" @click="closeDialog">取消</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" :loading="submitting" @click="submitDialog">保存</el-button>
       </div>
     </template>
   </el-dialog>

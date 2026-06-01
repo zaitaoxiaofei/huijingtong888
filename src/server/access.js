@@ -9,7 +9,7 @@ export const SITE_ACCESS_SESSION_PATH = "/__site-access";
 
 const ACCESS_GATE_ENABLED = Boolean(config.siteAccessPassword);
 const ACCESS_COOKIE_NAME = config.siteAccessCookieName || "erp_site_access";
-const ACCESS_SESSION_HOURS = Math.max(1, Number(config.siteAccessSessionHours || 12));
+const ACCESS_SESSION_HOURS = Math.max(1, Number(config.siteAccessSessionHours || 168));
 const AUTH_RATE_LIMIT_WINDOW_MS = Math.max(1, Number(config.authRateLimitWindowMinutes || 15)) * 60 * 1000;
 const AUTH_RATE_LIMIT_MAX_ATTEMPTS = Math.max(1, Number(config.authRateLimitMaxAttempts || 8));
 

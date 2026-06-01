@@ -98,40 +98,44 @@ test("finance sync writes through adapter execute path", async () => {
 
 test("order sync writes through adapter execute and insert-id helpers", async () => {
   const executed = [];
+  const fetchedOptions = [];
   let nextId = 100;
   const deps = {
     nullable: (value) => (value === "" || value == null ? null : Number(value)),
     shops: () => [{ id: 1, name: "Shop A", status: "active" }],
     normalizeSyncDate: (value) => value || "",
-    fetchOzonPostings: async () => ({
-      requests: 1,
-      postings: [{
-        posting_number: "POST-1",
-        order_number: "ORDER-1",
-        status: "awaiting_deliver",
-        logistics_status: "",
-        tracking_stage: "",
-        ordered_at: "2026-05-10T10:00:00Z",
-        delivered_at: null,
-        buyer_region: "CN",
-        tracking_number: "TN-1",
-        external_tracking_url: "",
-        cancel_reason_id: null,
-        cancel_reason: "",
-        cancel_initiator: "",
-        cancel_type: "",
-        cancelled_after_ship: 0,
-        items: [{
-          ozon_sku: "SKU-1",
-          offer_id: "OFF-1",
-          ozon_product_id: "OP-1",
-          name: "Test SKU",
-          image_url: "https://example.com/a.png",
-          sale_price: 100,
-          quantity: 2
+    fetchOzonPostings: async (_shop, options) => {
+      fetchedOptions.push(options);
+      return {
+        requests: 1,
+        postings: [{
+          posting_number: "POST-1",
+          order_number: "ORDER-1",
+          status: "awaiting_deliver",
+          logistics_status: "",
+          tracking_stage: "",
+          ordered_at: "2026-05-10T10:00:00Z",
+          delivered_at: null,
+          buyer_region: "CN",
+          tracking_number: "TN-1",
+          external_tracking_url: "",
+          cancel_reason_id: null,
+          cancel_reason: "",
+          cancel_initiator: "",
+          cancel_type: "",
+          cancelled_after_ship: 0,
+          items: [{
+            ozon_sku: "SKU-1",
+            offer_id: "OFF-1",
+            ozon_product_id: "OP-1",
+            name: "Test SKU",
+            image_url: "https://example.com/a.png",
+            sale_price: 100,
+            quantity: 2
+          }]
         }]
-      }]
-    }),
+      };
+    },
     execute: (sql, params) => {
       executed.push({ sql, params });
       return { changes: 1 };
@@ -207,11 +211,100 @@ test("order sync writes through adapter execute and insert-id helpers", async ()
   assert.equal(result.fetched, 1);
   assert.equal(result.inserted, 1);
   assert.equal(result.updated, 0);
+  assert.equal(fetchedOptions[0].from, "2026-04-30T16:00:00.000Z");
+  assert.equal(fetchedOptions[0].to, "2026-05-31T15:59:59.999Z");
   assert.ok(executed.some((entry) => entry.sql.includes("INSERT INTO ozon_orders_raw")));
   assert.ok(executed.some((entry) => entry.insert && entry.sql.includes("INSERT INTO orders")));
   assert.ok(executed.some((entry) => entry.insert && entry.sql.includes("INSERT INTO order_items")));
   assert.ok(executed.some((entry) => entry.sql.includes("INSERT INTO outbound_records")));
   assert.ok(executed.some((entry) => entry.sql.includes("INSERT INTO sync_logs")));
+});
+
+test("order sync keeps split Ozon postings as separate ERP orders", async () => {
+  const executed = [];
+  let nextId = 2000;
+  const deps = {
+    nullable: (value) => (value === "" || value == null || value === "all" ? null : Number(value)),
+    shops: () => [{ id: 1, name: "Shop A", status: "active" }],
+    normalizeSyncDate: (value) => value ? String(value).slice(0, 10) : "",
+    fetchOzonPostings: async () => ({
+      requests: 1,
+      postings: [
+        {
+          posting_number: "PARENT-0001-1",
+          order_number: "PARENT-0001",
+          order_id: "ORDER-ROOT",
+          status: "awaiting_packaging",
+          tracking_stage: "awaiting_packaging",
+          logistics_status: "awaiting_packaging",
+          ordered_at: "2026-05-10T10:00:00.000Z",
+          buyer_region: "",
+          items: [{ ozon_sku: "SKU-A", name: "A", quantity: 1, sale_price: 10 }]
+        },
+        {
+          posting_number: "PARENT-0001-2",
+          order_number: "PARENT-0001",
+          order_id: "ORDER-ROOT",
+          status: "awaiting_packaging",
+          tracking_stage: "awaiting_packaging",
+          logistics_status: "awaiting_packaging",
+          ordered_at: "2026-05-10T10:00:00.000Z",
+          buyer_region: "",
+          items: [{ ozon_sku: "SKU-B", name: "B", quantity: 1, sale_price: 20 }]
+        }
+      ]
+    }),
+    execute: (sql, params) => {
+      executed.push({ sql, params });
+      return { changes: 1 };
+    },
+    insertAndGetId: (sql, params) => {
+      executed.push({ sql, params, insert: true });
+      nextId += 1;
+      return nextId;
+    },
+    get: (sql, params) => {
+      if (sql.includes("FROM orders WHERE shop_id = ? AND posting_number = ?")) return null;
+      if (sql.includes("FROM orders WHERE posting_number = ?")) return null;
+      if (sql.includes("FROM online_products WHERE shop_id = ? AND ozon_sku = ?")) return null;
+      if (sql.includes("SELECT id, quantity FROM order_items WHERE order_id = ? AND ozon_sku = ?")) return null;
+      if (sql.includes("SELECT id FROM order_items WHERE order_id = ? AND ozon_sku = ?")) return null;
+      if (sql.includes("FROM sku_mappings sm")) return null;
+      if (sql.includes("SELECT * FROM orders WHERE id = ?")) return { id: params[0], status: "awaiting_packaging" };
+      return null;
+    },
+    all: (sql) => sql.includes("SELECT * FROM order_items WHERE order_id = ?") ? [] : [],
+    dateKeyDaysAgo: () => "2026-05-01",
+    todayDateKey: () => "2026-05-31",
+    actualItemProfit: () => 0,
+    classifyOrderOutcome: () => "effective_sale",
+    describeCancellation: () => ({}),
+    estimateItemProfit: () => ({ freight: 0, commission: 0, paymentFee: 0, withdrawalFee: 0, advertisingCost: 0 }),
+    estimateOrderItemReturnLoss: () => 0,
+    invalidateExceptionWorkbenchCache: () => {},
+    orderQualityPrefixes: () => [],
+    packagingFeeForSaleAmount: () => 0,
+    postInventory: () => {},
+    recordOrderException: () => {},
+    refreshProfitAnalyticsSnapshots: () => {},
+    resolveOrderLossProfile: () => ({ code: "none" }),
+    resolveProfitSettlementStatus: () => "pending",
+    roundMoney: (value) => Math.round(Number(value || 0) * 100) / 100,
+    saveProfitItem: () => {},
+    syncOrderItemProfitFromBreakdown: () => {},
+    syncOutboundForOpenOrders: () => {}
+  };
+
+  const result = await syncDemoOrders(deps, { from: "2026-05-01", to: "2026-05-31" }, {});
+  const orderInserts = executed.filter((entry) => entry.insert && entry.sql.includes("INSERT INTO orders"));
+  const itemInserts = executed.filter((entry) => entry.insert && entry.sql.includes("INSERT INTO order_items"));
+
+  assert.equal(result.fetched, 2);
+  assert.equal(result.inserted, 2);
+  assert.equal(orderInserts.length, 2);
+  assert.deepEqual(orderInserts.map((entry) => entry.params[1]), ["PARENT-0001-1", "PARENT-0001-2"]);
+  assert.deepEqual(orderInserts.map((entry) => entry.params[2]), ["PARENT-0001", "PARENT-0001"]);
+  assert.equal(itemInserts.length, 2);
 });
 
 test("incremental new order sync starts from latest local order", async () => {
@@ -245,7 +338,7 @@ test("incremental new order sync starts from latest local order", async () => {
   assert.equal(result.mode, "new_orders");
   assert.equal(fetchedOptions.length, 1);
   assert.equal(fetchedOptions[0].from, "2026-05-31T07:45:00.000Z");
-  assert.equal(fetchedOptions[0].to, "2026-05-31T23:59:59.999Z");
+  assert.equal(fetchedOptions[0].to, "2026-05-31T15:59:59.999Z");
 });
 
 test("cancelled orders do not restore inventory without a posted outbound movement", () => {

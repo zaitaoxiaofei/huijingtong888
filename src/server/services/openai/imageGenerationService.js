@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import client, { assertOpenAiConfigured, getOpenAiConfigStatus } from "./openaiClient.js";
 import { clampImageCount } from "./promptService.js";
+import { aiImageRuntimeConfig } from "../../../services/ai-provider-settings.js";
 
 export const ROOT_DIR = process.cwd();
 export const GENERATED_ROOT = path.resolve(ROOT_DIR, process.env.AI_IMAGE_OUTPUT_DIR || "uploads/ai-generated");
@@ -14,7 +14,7 @@ const SIZE_BY_RATIO = {
 };
 
 export async function generateOpenAiImages({ taskId, finalPrompt, ratio = "3:4", imageCount = 1 }) {
-  assertOpenAiConfigured();
+  const runtimeConfig = await aiImageRuntimeConfig();
   const safeTaskId = validateTaskId(taskId);
   const count = clampImageCount(imageCount);
   const taskDir = resolveGeneratedTaskDir(safeTaskId);
@@ -24,23 +24,124 @@ export async function generateOpenAiImages({ taskId, finalPrompt, ratio = "3:4",
   for (let index = 1; index <= count; index += 1) {
     const filename = `generated_${String(index).padStart(3, "0")}.png`;
     const filePath = path.join(taskDir, filename);
-    const image = await client.images.generate({
-      model: getOpenAiConfigStatus().imageModel,
+    const image = await requestCompatibleImage({
+      runtimeConfig,
       prompt: [String(finalPrompt || "").trim(), `Image ${index} of ${count}.`].filter(Boolean).join("\n"),
-      n: 1,
       size: SIZE_BY_RATIO[ratio] || SIZE_BY_RATIO["3:4"]
     });
-    const b64 = image.data?.[0]?.b64_json;
-    if (!b64) {
-      const error = new Error("OpenAI did not return base64 image data");
-      error.status = 502;
-      throw error;
-    }
-    await fs.writeFile(filePath, Buffer.from(b64, "base64"));
+    await fs.writeFile(filePath, image);
     generatedImages.push(createImageRecord(safeTaskId, "generated", filename, filePath));
   }
 
   return generatedImages;
+}
+
+export async function editOpenAiImage({ imageBuffer, prompt, ratio = "3:4", filename = "source.png", contentType = "image/png" }) {
+  const runtimeConfig = await aiImageRuntimeConfig();
+  return requestCompatibleImageEdit({
+    runtimeConfig,
+    imageBuffer,
+    filename,
+    contentType,
+    prompt,
+    size: SIZE_BY_RATIO[ratio] || SIZE_BY_RATIO["3:4"]
+  });
+}
+
+async function requestCompatibleImage({ runtimeConfig, prompt, size }) {
+  const body = {
+    model: runtimeConfig.imageModel,
+    prompt,
+    n: 1,
+    size
+  };
+  return requestImageFromEndpoints({
+    runtimeConfig,
+    endpoints: imageEndpointCandidates(runtimeConfig.baseUrl, "generations"),
+    body,
+    fallbackMessage: "Image generation failed"
+  });
+}
+
+async function requestCompatibleImageEdit({ runtimeConfig, imageBuffer, filename, contentType, prompt, size }) {
+  const form = new FormData();
+  form.append("model", runtimeConfig.imageModel);
+  form.append("image", new Blob([imageBuffer], { type: contentType }), filename);
+  form.append("prompt", prompt);
+  form.append("n", "1");
+  form.append("size", size);
+  return requestImageFromEndpoints({
+    runtimeConfig,
+    endpoints: imageEndpointCandidates(runtimeConfig.baseUrl, "edits"),
+    body: form,
+    fallbackMessage: "Image edit failed"
+  });
+}
+
+async function requestImageFromEndpoints({ runtimeConfig, endpoints, body, fallbackMessage }) {
+  let lastError = null;
+  for (const endpoint of endpoints) {
+    const isForm = typeof FormData !== "undefined" && body instanceof FormData;
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${runtimeConfig.apiKey}`,
+        ...(isForm ? {} : { "Content-Type": "application/json" })
+      },
+      body: isForm ? body : JSON.stringify(body)
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = data?.error?.message || data?.message || `${fallbackMessage}: ${response.status}`;
+      lastError = new Error(`${message} (${endpoint})`);
+      lastError.status = response.status >= 400 && response.status < 500 ? 400 : 502;
+      if (response.status === 404 && endpoints.length > 1) continue;
+      throw lastError;
+    }
+
+    const first = data?.data?.[0] || data?.images?.[0] || data?.result?.[0] || data?.output?.[0];
+    const b64 = first?.b64_json || first?.base64 || first?.image_base64 || data?.b64_json || data?.base64;
+    if (b64) return Buffer.from(String(b64).replace(/^data:image\/\w+;base64,/, ""), "base64");
+    const imageUrl = first?.url || first?.image_url || first?.imageUrl || data?.url || data?.image_url;
+    if (imageUrl) {
+      const imageResponse = await fetch(imageUrl);
+      if (!imageResponse.ok) {
+        const error = new Error(`Failed to download generated image: ${imageResponse.status}`);
+        error.status = 502;
+        throw error;
+      }
+      return Buffer.from(await imageResponse.arrayBuffer());
+    }
+
+    const error = new Error("AI image provider did not return image data");
+    error.status = 502;
+    throw error;
+  }
+
+  if (lastError) throw lastError;
+  const error = new Error(`${fallbackMessage}: no endpoint available`);
+  error.status = 502;
+  throw error;
+}
+
+function imageEndpointCandidates(baseUrl, action) {
+  const base = String(baseUrl || "").replace(/\/+$/, "");
+  if (!base) return [];
+  const lower = base.toLowerCase();
+  const actionPath = action === "edits" ? "edits" : "generations";
+  const candidates = [];
+  if (lower.includes("www.cctq.ai") || lower.includes("cctq.ai")) {
+    candidates.push(`https://www.cctq.ai/v1/images/${actionPath}`);
+  }
+  if (lower.includes("code.b886.top") || lower.includes("api-cf.b886.top")) {
+    const hostBase = lower.includes("api-cf.b886.top") ? "https://api-cf.b886.top" : "https://code.b886.top";
+    candidates.push(`${hostBase}/v1/images/${actionPath}`);
+  }
+  if (lower.endsWith(`/images/${actionPath}`)) candidates.push(base);
+  if (lower.endsWith("/images")) candidates.push(`${base}/${actionPath}`);
+  candidates.push(`${base}/images/${actionPath}`);
+  return Array.from(new Set(candidates));
 }
 
 export function createImageRecord(taskId, scope, filename, filePath) {

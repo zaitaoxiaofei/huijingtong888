@@ -89,10 +89,21 @@ async function waitForPort(targetPort, timeoutMs = 30000) {
 }
 
 async function findPortPids(targetPort) {
-  if (process.platform === "win32") return [];
+  if (process.platform === "win32") {
+    try {
+      const stdout = await execFileText("powershell", [
+        "-NoProfile",
+        "-Command",
+        `Get-NetTCPConnection -LocalPort ${targetPort} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique`
+      ]);
+      return stdout.split(/\s+/).map(Number).filter((pid) => Number.isInteger(pid) && pid > 0);
+    } catch {
+      return [];
+    }
+  }
   try {
     const stdout = await execFileText("lsof", ["-ti", `tcp:${targetPort}`]);
-    return stdout.split(/\s+/).map(Number).filter(Number.isInteger);
+    return stdout.split(/\s+/).map(Number).filter((pid) => Number.isInteger(pid) && pid > 0);
   } catch {
     return [];
   }
@@ -108,7 +119,16 @@ async function restartPort(targetPort) {
 
   console.log(`[start-all] Port ${targetPort} is in use. Stopping process(es): ${pids.join(", ")}`);
   for (const pid of pids) {
-    if (pid !== process.pid) process.kill(pid, "SIGTERM");
+    if (pid === process.pid) continue;
+    if (process.platform === "win32") {
+      try {
+        await execFileText("taskkill", ["/PID", String(pid), "/F"]);
+      } catch {
+        // The port owner may have exited between detection and taskkill.
+      }
+    } else {
+      process.kill(pid, "SIGTERM");
+    }
   }
 
   const startedAt = Date.now();

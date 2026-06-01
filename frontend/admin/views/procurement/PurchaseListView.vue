@@ -419,14 +419,14 @@ onMounted(async () => {
         <p>按产品合并待采购请求，当前页面已切换为后端分页。</p>
       </div>
       <div class="page-card-actions">
-        <el-button @click="loadPageData">刷新数据</el-button>
-        <el-button type="primary" :disabled="!selectedRows.length" :loading="confirming" @click="confirmSelected">
+        <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" :disabled="!selectedRows.length" :loading="confirming" @click="confirmSelected">
           确认采购所选
         </el-button>
-        <el-button type="success" :disabled="!selectedInboundRows.length" :loading="confirmingInbound" @click="confirmSelectedInbound">
+        <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!selectedInboundRows.length" :loading="confirmingInbound" @click="confirmSelectedInbound">
           确认已入库所选
         </el-button>
-        <el-button type="success" :disabled="!pendingInboundRows.length" :loading="confirmingInbound" @click="confirmAllInbound">
+        <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!pendingInboundRows.length" :loading="confirmingInbound" @click="confirmAllInbound">
           确认已入库全部
         </el-button>
       </div>
@@ -443,13 +443,13 @@ onMounted(async () => {
             <el-tag type="info">已选采购 {{ selectedRows.length }} 种</el-tag>
             <el-tag type="success">已选入库 {{ selectedInboundRows.length }} 种</el-tag>
             <el-tag v-if="pendingInboundRows.length" type="warning">待入库已置顶</el-tag>
-            <el-button type="success" :disabled="!selectedInboundRows.length" :loading="confirmingInbound" @click="confirmSelectedInbound">
+            <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!selectedInboundRows.length" :loading="confirmingInbound" @click="confirmSelectedInbound">
               确认已入库所选
             </el-button>
-            <el-button type="success" :disabled="!pendingInboundRows.length" :loading="confirmingInbound" @click="confirmAllInbound">
+            <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!pendingInboundRows.length" :loading="confirmingInbound" @click="confirmAllInbound">
               确认已入库全部
             </el-button>
-            <el-button :disabled="!state.rows.length" :loading="confirming" @click="confirmAll">确认采购当前页</el-button>
+            <el-button class="erp-btn erp-btn-secondary" :disabled="!state.rows.length" :loading="confirming" @click="confirmAll">确认采购当前页</el-button>
           </div>
         </div>
       </template>
@@ -466,8 +466,8 @@ onMounted(async () => {
             />
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="handleSearch">查询</el-button>
-            <el-button @click="handleReset">重置</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
           </el-form-item>
         </el-form>
       </div>
@@ -553,10 +553,10 @@ onMounted(async () => {
 
           <el-table-column label="操作" width="250" fixed="right" align="center">
             <template #default="{ row }">
-              <div class="row-actions">
-                <el-button link type="primary" :disabled="actionDisabled(row, 'edit')" @click="handleEditAction(row)">编辑明细</el-button>
-                <el-button link type="success" :disabled="actionDisabled(row, 'purchase')" :loading="confirming && row.row_type === 'purchase'" @click="handlePurchaseAction(row)">确认采购</el-button>
-                <el-button link type="success" :disabled="actionDisabled(row, 'inbound')" :loading="confirmingInbound && row.row_type === 'inbound'" @click="handleInboundAction(row)">确认已入库</el-button>
+              <div class="row-actions erp-inline-actions">
+                <el-button class="erp-btn-link" link type="primary" :disabled="actionDisabled(row, 'edit')" @click="handleEditAction(row)">编辑明细</el-button>
+                <el-button class="erp-btn-link" link type="success" :disabled="actionDisabled(row, 'purchase')" :loading="confirming && row.row_type === 'purchase'" @click="handlePurchaseAction(row)">确认采购</el-button>
+                <el-button class="erp-btn-link" link type="success" :disabled="actionDisabled(row, 'inbound')" :loading="confirmingInbound && row.row_type === 'inbound'" @click="handleInboundAction(row)">确认已入库</el-button>
               </div>
             </template>
           </el-table-column>
@@ -625,9 +625,9 @@ onMounted(async () => {
       </div>
 
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="detailVisible = false">取消</el-button>
-          <el-button type="primary" :loading="detailSaving" @click="saveDetailRows">保存修改</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="detailVisible = false">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="detailSaving" @click="saveDetailRows">保存修改</el-button>
         </div>
       </template>
     </el-dialog>

@@ -44,6 +44,15 @@ function normalizeSyncDateTime(value) {
   return date.toISOString();
 }
 
+function normalizeShanghaiDateBoundary(value, boundary = "start") {
+  if (!value) return "";
+  const raw = String(value).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return "";
+  const time = boundary === "end" ? "23:59:59.999" : "00:00:00.000";
+  const date = new Date(`${raw}T${time}+08:00`);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
 function latestOrderSyncStart(deps, shopId, fallbackFrom, overlapMinutes = 15) {
   const latest = deps.get("SELECT ordered_at FROM orders WHERE shop_id = ? ORDER BY ordered_at DESC LIMIT 1", [shopId]);
   const latestDate = latest?.ordered_at ? new Date(latest.ordered_at) : null;
@@ -167,6 +176,9 @@ function isQualityPosting(deps, posting) {
 }
 
 function orderCancelLossApplies(deps, posting) {
+  if (typeof deps.classifyOrderAccounting === "function") {
+    return deps.classifyOrderAccounting(posting, { qualityPrefixes: deps.orderQualityPrefixes() }).loss_profile_code !== "none";
+  }
   if (isQualityPosting(deps, posting)) return false;
   const outcome = deps.classifyOrderOutcome(posting);
   const cancellation = deps.describeCancellation({ ...posting, outcome_type: outcome });
@@ -254,17 +266,6 @@ function upsertPosting(deps, shop, posting) {
   let insertedItems = 0;
   for (const item of posting.items || []) {
     upsertOnlineProductFromOrderItem(deps, shop, item);
-    const existingItem = deps.get("SELECT id FROM order_items WHERE order_id = ? AND ozon_sku = ?", [orderId, item.ozon_sku]);
-    if (existingItem) {
-      executeStatement(deps, `
-        UPDATE order_items
-        SET ozon_name = COALESCE(NULLIF(?, ''), ozon_name),
-          ozon_image_url = COALESCE(NULLIF(?, ''), ozon_image_url),
-          ozon_product_id = COALESCE(NULLIF(?, ''), ozon_product_id)
-        WHERE id = ?
-      `, [item.name || "", item.image_url || "", item.ozon_product_id || "", existingItem.id]);
-      continue;
-    }
     const mapping = deps.get(`
       SELECT sm.*, op.commissions_json AS commissions_json
       FROM sku_mappings sm
@@ -272,6 +273,44 @@ function upsertPosting(deps, shop, posting) {
       WHERE sm.shop_id = ? AND sm.ozon_sku = ? AND sm.active = 1
     `, [shop.id, item.ozon_sku]);
     const product = mapping ? deps.get("SELECT * FROM products WHERE id = ?", [mapping.product_id]) : null;
+    const existingItem = deps.get("SELECT id, quantity FROM order_items WHERE order_id = ? AND ozon_sku = ?", [orderId, item.ozon_sku]);
+    if (existingItem) {
+      const previousQuantity = Number(existingItem.quantity || 0);
+      const nextQuantity = Number(item.quantity || 1);
+      executeStatement(deps, `
+        UPDATE order_items
+        SET sku_mapping_id = COALESCE(?, sku_mapping_id),
+          ozon_name = COALESCE(NULLIF(?, ''), ozon_name),
+          ozon_image_url = COALESCE(NULLIF(?, ''), ozon_image_url),
+          ozon_product_id = COALESCE(NULLIF(?, ''), ozon_product_id),
+          quantity = ?,
+          sale_price = ?
+        WHERE id = ?
+      `, [mapping?.id || null, item.name || "", item.image_url || "", item.ozon_product_id || "", nextQuantity, item.sale_price, existingItem.id]);
+      if (product && mapping && previousQuantity !== nextQuantity) {
+        const quantityDelta = previousQuantity - nextQuantity;
+        deps.postInventory({
+          product_id: product.id,
+          shop_id: shop.id,
+          sku_mapping_id: mapping.id,
+          owner_person_id: mapping.person_id,
+          source_type: "order_outbound_adjustment",
+          source_ref: posting.posting_number,
+          quantity_delta: quantityDelta,
+          unit_cost: product.purchase_cost,
+          amount: Math.abs(quantityDelta) * Number(product.purchase_cost || 0),
+          related_posting_number: posting.posting_number,
+          related_order_item_id: existingItem.id,
+          note: "Ozon order item quantity changed during sync"
+        });
+        executeStatement(deps, `
+          UPDATE outbound_records
+          SET quantity = ?, note = ?
+          WHERE order_item_id = ? AND status = 'deducted'
+        `, [nextQuantity, "Updated by Ozon sync", existingItem.id]);
+      }
+      continue;
+    }
     const estimated = product && mapping ? deps.estimateItemProfit({ salePrice: item.sale_price, quantity: item.quantity, product, mapping }) : { commission: 0, profit: 0 };
     const settlement = deps.resolveProfitSettlementStatus(posting);
     const returnLossEstimate = product && mapping
@@ -364,10 +403,13 @@ export async function syncDemoOrders(deps, body = {}, options = {}) {
   const rawTo = body.to || body.date_to || body.dateTo;
   const rawFromDateTime = body.from_datetime || body.fromDateTime || "";
   const rawToDateTime = body.to_datetime || body.toDateTime || "";
+  const statuses = Array.isArray(body.statuses)
+    ? body.statuses.map((item) => String(item || "").trim()).filter(Boolean)
+    : String(body.status || "").split(",").map((item) => item.trim()).filter(Boolean);
   const from = deps.normalizeSyncDate(rawFromDateTime || rawFrom);
   const to = deps.normalizeSyncDate(rawToDateTime || rawTo);
-  const fetchFrom = normalizeSyncDateTime(rawFromDateTime) || from;
-  const fetchTo = normalizeSyncDateTime(rawToDateTime) || to;
+  const fetchFrom = normalizeSyncDateTime(rawFromDateTime) || normalizeShanghaiDateBoundary(rawFrom, "start") || from;
+  const fetchTo = normalizeSyncDateTime(rawToDateTime) || normalizeShanghaiDateBoundary(rawTo, "end") || to;
   if (from && to && from > to) throw new Error("结束日期不能早于开始日期");
   throwIfAborted(options.signal);
   let inserted = 0;
@@ -379,7 +421,7 @@ export async function syncDemoOrders(deps, body = {}, options = {}) {
   for (const shop of activeShops) {
     try {
       throwIfAborted(options.signal);
-      const result = await deps.fetchOzonPostings(shop, { from: fetchFrom, to: fetchTo, chunkDays: 14, signal: options.signal });
+      const result = await deps.fetchOzonPostings(shop, { from: fetchFrom, to: fetchTo, statuses, chunkDays: 14, signal: options.signal });
       throwIfAborted(options.signal);
       const postings = Array.isArray(result) ? result : result.postings || [];
       const shopStats = {
@@ -445,8 +487,7 @@ export async function syncOzonIncrementalOrders(deps, body = {}, options = {}) {
         const result = await syncDemoOrders(deps, fromLatest ? {
           shop_id: shop.id,
           from_datetime: start,
-          to,
-          to_datetime: `${to}T23:59:59.999Z`
+          to
         } : {
           shop_id: shop.id,
           from: range.from,

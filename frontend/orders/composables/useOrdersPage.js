@@ -508,14 +508,14 @@ export function useOrdersPage() {
     }
   }
 
-  async function runPrintOrders(orderIds = []) {
+  async function runPrintOrders(orderIds = [], options = {}) {
     const ids = Array.isArray(orderIds) ? orderIds.map(Number).filter(Boolean) : [];
     if (!ids.length) {
       ElMessage.warning("请选择需要打印的订单");
       return null;
     }
     try {
-      const result = await bulkPrintOrders(ids);
+      const result = await bulkPrintOrders(ids, options);
       await loadOrders();
       if (result?.cancelled) {
         ElMessage.info("已取消确认，订单未标记为已打印");
@@ -535,8 +535,19 @@ export function useOrdersPage() {
       return result;
     } catch (error) {
       ElMessage.error(`打印失败：${error?.message || "未知错误"}`);
-      throw error;
+      return null;
     }
+  }
+
+  function selectedIdsInCurrentRowOrder() {
+    const selected = selectedOrderIds.value instanceof Set ? selectedOrderIds.value : new Set();
+    const selectedIds = new Set([...selected].map(Number).filter(Boolean));
+    const ordered = (vm.rows || [])
+      .map((row) => Number(row.id))
+      .filter((id) => id && selectedIds.has(id));
+    const visible = new Set(ordered);
+    const hidden = [...selectedIds].filter((id) => !visible.has(id));
+    return [...ordered, ...hidden];
   }
 
   return {
@@ -649,15 +660,15 @@ export function useOrdersPage() {
       orderSyncAbort.value.abort();
       return null;
     },
-    bulkPrint: (orderIds = []) => runPrintOrders(orderIds),
+    bulkPrint: (orderIds = [], options = {}) => runPrintOrders(orderIds, options),
     bulkPrepare: (orderIds = []) => runPrepareOrders(orderIds),
     openQualityRules: () => openQualityRules(),
     saveQualityRules: (payload) => saveQualityRules(payload),
     resetRecentDates: () => resetRecentDates(),
     handleMoreAction: async (action) => {
       if (action === "recalculate-profit") return apiClient.post("/api/orders/recalculate-profits", {});
-      if (action === "print-selected") return runPrintOrders([...selectedOrderIds.value]);
-      if (action === "prepare-selected") return runPrepareOrders([...selectedOrderIds.value]);
+      if (action === "print-selected") return runPrintOrders(selectedIdsInCurrentRowOrder());
+      if (action === "prepare-selected") return runPrepareOrders(selectedIdsInCurrentRowOrder());
       return handleMoreOrderAction(action);
     },
     fetchOrderDetail: (orderId) => fetchOrderDetail(orderId),

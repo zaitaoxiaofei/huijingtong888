@@ -2,18 +2,48 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
 import { Buffer } from "node:buffer";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import sharp from "sharp";
+import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { config } from "../config.js";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { fetchOzonDescriptionCategoryTree } from "../ozonClient.js";
 import { chatWithAiProvider } from "./ai-provider-settings.js";
-import { ensureListingAutomationSchema, registerListingMediaAssetFromFile } from "./listing-automation.js";
+import { editOpenAiImage } from "../server/services/openai/imageGenerationService.js";
+import {
+  ensureListingAutomationSchema,
+  listingCategoryTemplateDetail,
+  publishListingTemplateToOzon,
+  registerListingMediaAssetFromFile,
+  validateListingTemplatePublish
+} from "./listing-automation.js";
 
 const ROOT_DIR = process.cwd();
 const VARIANT_ROOT = path.resolve(ROOT_DIR, "uploads", "shop-variants");
-const TAIL_TEMPLATE_ROOT = path.resolve(ROOT_DIR, "uploads", "asset-tail-templates");
-const ASSET_VARIANT_CONCURRENCY = 4;
+const TAIL_TEMPLATE_ROOT = path.resolve(ROOT_DIR, "public", "uploads", "asset-tail-templates");
+const LISTING_MEDIA_ROOT = path.resolve(ROOT_DIR, "public", "uploads", "listing-media");
+const ASSET_SHOP_CONCURRENCY = envInt("ASSET_SHOP_CONCURRENCY", 2, 1, 4);
+const ASSET_IMAGE_CONCURRENCY = envInt("ASSET_IMAGE_CONCURRENCY", 3, 1, 6);
+const ASSET_VIDEO_CONCURRENCY = envInt("ASSET_VIDEO_CONCURRENCY", 1, 1, 2);
+const OZON_SUBMIT_CONCURRENCY = envInt("OZON_SUBMIT_CONCURRENCY", 2, 1, 3);
+const ASSET_FAST_VIDEO = String(process.env.ASSET_FAST_VIDEO || "1").trim() !== "0";
+const SERVER_VIDEO_WIDTH = 900;
+const SERVER_VIDEO_HEIGHT = 1200;
+const SERVER_VIDEO_FPS = 24;
+const SERVER_VIDEO_DURATION_SECONDS = 6;
+const assetVideoLimiter = createConcurrencyLimiter(ASSET_VIDEO_CONCURRENCY);
 const TITLE_STYLES = ["traffic", "material", "scenario", "value", "premium"];
+const TAG_STYLES = ["traffic", "vehicle", "material", "compact", "scenario", "value", "premium"];
+const TAG_STYLE_LABELS = {
+  traffic: "搜索流量型",
+  vehicle: "精准车型型",
+  material: "材质卖点型",
+  compact: "简洁防跟卖型",
+  scenario: "场景适配型",
+  value: "性价比型",
+  premium: "高端质感型"
+};
 const TITLE_STYLE_LABELS = {
   traffic: "搜索流量型",
   material: "材质卖点型",
@@ -22,57 +52,73 @@ const TITLE_STYLE_LABELS = {
   premium: "高端质感型"
 };
 const MAIN_IMAGE_PLANS = [
-  { value: "original", label: "保留原始主图" },
-  { value: "watermarked", label: "主图加店铺水印" }
+  { value: "original", label: "原图方案" },
+  { value: "watermarked", label: "水印方案" },
+  { value: "ai_similar", label: "AI 相似图方案" }
 ];
-const DEFAULT_TAIL_CATEGORY = "通用汽车用品";
-const DEFAULT_TAIL_MODEL = "通用车型";
+const DEFAULT_TAIL_CATEGORY = "Auto accessories";
+const DEFAULT_TAIL_MODEL = "Generic model";
 const AUTO_CATEGORY_KEYWORDS = [
-  "авто", "автомоб", "машин", "транспорт", "запчаст", "аксессуар", "ключ", "брелок",
-  "汽车", "车", "汽配", "汽车用品", "钥匙", "配件"
+  "auto", "car", "vehicle", "accessory", "key", "case", "cover",
+  "interior", "lighting", "mat", "film", "protector"
 ];
 const CATEGORY_ZH_HINTS = [
-  ["Автотовары", "汽车用品"],
-  ["Автоаксессуары", "汽车配件"],
-  ["Автомобильные аксессуары", "汽车配件"],
-  ["Запчасти", "汽车零配件"],
-  ["Чехлы", "保护套"],
-  ["Ключ", "钥匙"],
-  ["Брелок", "钥匙扣"],
-  ["Коврики", "脚垫"],
-  ["Накладки", "装饰/保护贴"],
-  ["Пороги", "门槛条"]
+  ["Auto accessories", "Auto accessories"],
+  ["Key case", "Key case"],
+  ["Interior accessories", "Interior accessories"],
+  ["Protective film", "Protective film"],
+  ["Lighting", "Lighting"]
 ];
 const REAL_RUSSIA_VEHICLE_MODELS = [
-  vehicleSeed("Haval", "Хавейл", "Jolion", "Джолион", "哈弗 Jolion", "Haval Jolion", 2021, null, 1),
-  vehicleSeed("Haval", "Хавейл", "F7", "F7", "哈弗 F7", "Haval F7", 2019, null, 2),
-  vehicleSeed("Haval", "Хавейл", "M6", "M6", "哈弗 M6", "Haval M6", 2023, null, 3),
-  vehicleSeed("Haval", "Хавейл", "Dargo", "Дарго", "哈弗 Dargo", "Haval Dargo", 2022, null, 4),
-  vehicleSeed("Chery", "Чери", "Tiggo 4 Pro", "Тигго 4 Про", "奇瑞 Tiggo 4 Pro", "Chery Tiggo 4 Pro", 2022, null, 5),
-  vehicleSeed("Chery", "Чери", "Tiggo 7 Pro Max", "Тигго 7 Про Макс", "奇瑞 Tiggo 7 Pro Max", "Chery Tiggo 7 Pro Max", 2022, null, 6),
-  vehicleSeed("Chery", "Чери", "Tiggo 8 Pro Max", "Тигго 8 Про Макс", "奇瑞 Tiggo 8 Pro Max", "Chery Tiggo 8 Pro Max", 2022, null, 7),
-  vehicleSeed("Chery", "Чери", "Arrizo 8", "Арризо 8", "奇瑞 Arrizo 8", "Chery Arrizo 8", 2023, null, 8),
-  vehicleSeed("Geely", "Джили", "Coolray", "Кулрей", "吉利 Coolray", "Geely Coolray", 2020, null, 9),
-  vehicleSeed("Geely", "Джили", "Monjaro", "Монжаро", "吉利 Monjaro", "Geely Monjaro", 2023, null, 10),
-  vehicleSeed("Geely", "Джили", "Atlas Pro", "Атлас Про", "吉利 Atlas Pro", "Geely Atlas Pro", 2021, null, 11),
-  vehicleSeed("Geely", "Джили", "Tugella", "Тугелла", "吉利 Tugella", "Geely Tugella", 2020, null, 12),
-  vehicleSeed("Changan", "Чанган", "CS35 Plus", "CS35 Plus", "长安 CS35 Plus", "Changan CS35 Plus", 2019, null, 13),
-  vehicleSeed("Changan", "Чанган", "CS55 Plus", "CS55 Plus", "长安 CS55 Plus", "Changan CS55 Plus", 2022, null, 14),
-  vehicleSeed("Changan", "Чанган", "CS75 Plus", "CS75 Plus", "长安 CS75 Plus", "Changan CS75 Plus", 2022, null, 15),
-  vehicleSeed("Changan", "Чанган", "UNI-K", "UNI-K", "长安 UNI-K", "Changan UNI-K", 2022, null, 16),
-  vehicleSeed("Omoda", "Омода", "C5", "C5", "欧萌达 Omoda C5", "Omoda C5", 2022, null, 17),
-  vehicleSeed("Jaecoo", "Джейку", "J7", "J7", "Jaecoo J7", "Jaecoo J7", 2023, null, 18),
-  vehicleSeed("Jaecoo", "Джейку", "J8", "J8", "Jaecoo J8", "Jaecoo J8", 2024, null, 19),
-  vehicleSeed("Exeed", "Эксид", "TXL", "TXL", "星途 Exeed TXL", "Exeed TXL", 2020, null, 20),
-  vehicleSeed("Exeed", "Эксид", "VX", "VX", "星途 Exeed VX", "Exeed VX", 2021, null, 21),
-  vehicleSeed("Exeed", "Эксид", "LX", "LX", "星途 Exeed LX", "Exeed LX", 2021, null, 22),
-  vehicleSeed("Exeed", "Эксид", "RX", "RX", "星途 Exeed RX", "Exeed RX", 2023, null, 23),
-  vehicleSeed("TENET", "Тенет", "T4", "T4", "TENET T4", "TENET T4", 2025, null, 24),
-  vehicleSeed("TENET", "Тенет", "T7", "T7", "TENET T7", "TENET T7", 2025, null, 25),
-  vehicleSeed("TENET", "Тенет", "T8", "T8", "TENET T8", "TENET T8", 2025, null, 26)
+  vehicleSeed("Haval", "Haval", "Jolion", "Jolion", "Haval Jolion", "Haval Jolion", 2021, null, 1),
+  vehicleSeed("Haval", "Haval", "F7", "F7", "Haval F7", "Haval F7", 2019, null, 2),
+  vehicleSeed("Haval", "Haval", "M6", "M6", "Haval M6", "Haval M6", 2023, null, 3),
+  vehicleSeed("Haval", "Haval", "Dargo", "Dargo", "Haval Dargo", "Haval Dargo", 2022, null, 4),
+  vehicleSeed("Chery", "Chery", "Tiggo 4 Pro", "Tiggo 4 Pro", "Chery Tiggo 4 Pro", "Chery Tiggo 4 Pro", 2022, null, 5),
+  vehicleSeed("Chery", "Chery", "Tiggo 7 Pro Max", "Tiggo 7 Pro Max", "Chery Tiggo 7 Pro Max", "Chery Tiggo 7 Pro Max", 2022, null, 6),
+  vehicleSeed("Chery", "Chery", "Tiggo 8 Pro Max", "Tiggo 8 Pro Max", "Chery Tiggo 8 Pro Max", "Chery Tiggo 8 Pro Max", 2022, null, 7),
+  vehicleSeed("Chery", "Chery", "Arrizo 8", "Arrizo 8", "Chery Arrizo 8", "Chery Arrizo 8", 2023, null, 8),
+  vehicleSeed("Geely", "Geely", "Coolray", "Coolray", "Geely Coolray", "Geely Coolray", 2020, null, 9),
+  vehicleSeed("Geely", "Geely", "Monjaro", "Monjaro", "Geely Monjaro", "Geely Monjaro", 2023, null, 10),
+  vehicleSeed("Geely", "Geely", "Atlas Pro", "Atlas Pro", "Geely Atlas Pro", "Geely Atlas Pro", 2021, null, 11),
+  vehicleSeed("Geely", "Geely", "Tugella", "Tugella", "Geely Tugella", "Geely Tugella", 2020, null, 12),
+  vehicleSeed("Belgee", "Belgee", "X50", "X50", "Belgee X50", "Belgee X50", 2023, null, 13),
+  vehicleSeed("Belgee", "Belgee", "X70", "X70", "Belgee X70", "Belgee X70", 2024, null, 14),
+  vehicleSeed("Changan", "Changan", "CS35 Plus", "CS35 Plus", "Changan CS35 Plus", "Changan CS35 Plus", 2019, null, 15),
+  vehicleSeed("Changan", "Changan", "CS55 Plus", "CS55 Plus", "Changan CS55 Plus", "Changan CS55 Plus", 2022, null, 16),
+  vehicleSeed("Changan", "Changan", "CS75 Plus", "CS75 Plus", "Changan CS75 Plus", "Changan CS75 Plus", 2022, null, 17),
+  vehicleSeed("Changan", "Changan", "UNI-K", "UNI-K", "Changan UNI-K", "Changan UNI-K", 2022, null, 18),
+  vehicleSeed("Omoda", "Omoda", "C5", "C5", "Omoda C5", "Omoda C5", 2022, null, 19),
+  vehicleSeed("Jaecoo", "Jaecoo", "J7", "J7", "Jaecoo J7", "Jaecoo J7", 2023, null, 20),
+  vehicleSeed("Jaecoo", "Jaecoo", "J8", "J8", "Jaecoo J8", "Jaecoo J8", 2024, null, 21),
+  vehicleSeed("Exeed", "Exeed", "TXL", "TXL", "Exeed TXL", "Exeed TXL", 2020, null, 22),
+  vehicleSeed("Exeed", "Exeed", "VX", "VX", "Exeed VX", "Exeed VX", 2021, null, 23),
+  vehicleSeed("Exeed", "Exeed", "LX", "LX", "Exeed LX", "Exeed LX", 2021, null, 24),
+  vehicleSeed("Exeed", "Exeed", "RX", "RX", "Exeed RX", "Exeed RX", 2023, null, 25),
+  vehicleSeed("TENET", "TENET", "T4", "T4", "TENET T4", "TENET T4", 2025, null, 26),
+  vehicleSeed("TENET", "TENET", "T7", "T7", "TENET T7", "TENET T7", 2025, null, 27),
+  vehicleSeed("TENET", "TENET", "T8", "T8", "TENET T8", "TENET T8", 2025, null, 28)
 ];
-
 let schemaReady = false;
+const assetVariantJobQueue = [];
+let assetVariantJobRunning = false;
+
+function envInt(name, fallback, min = 1, max = 10) {
+  const value = Number(process.env[name]);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(value)));
+}
+
+class AssetVariantJobCancelledError extends Error {
+  constructor(message = "Asset variant job cancelled") {
+    super(message);
+    this.name = "AssetVariantJobCancelledError";
+  }
+}
+
+function isAssetVariantJobCancelledError(error) {
+  return error instanceof AssetVariantJobCancelledError || error?.name === "AssetVariantJobCancelledError";
+}
 
 function vehicleSeed(brand, brandRu, model, modelRu, labelZh, labelRu, yearFrom, yearTo, rank, aliases = []) {
   return { brand, brandRu, model, modelRu, labelZh, labelRu, yearFrom, yearTo, popularityRank: rank, aliases };
@@ -81,9 +127,9 @@ function vehicleSeed(brand, brandRu, model, modelRu, labelZh, labelRu, yearFrom,
 export async function assetVariantBootstrap() {
   await ensureAssetVariantSchema();
   const shops = await mysqlQuery(`
-    SELECT s.id, s.name, s.status, s.watermark_path,
+    SELECT s.id, s.name, s.status, s.legal_entity, s.watermark_path,
       s.watermark_position, s.watermark_x_percent, s.watermark_y_percent, s.watermark_scale_percent, s.watermark_opacity_percent,
-      r.title_style, r.watermark_template_id, r.tail_image_url, r.main_image_plan,
+      r.title_style, r.tag_style, r.price_index, r.price_role, r.watermark_template_id, r.tail_image_url, r.main_image_plan,
       r.tail_category, r.vehicle_model, r.tail_template_id
     FROM shops s
     LEFT JOIN shop_variant_rules r ON r.shop_id = s.id
@@ -123,6 +169,7 @@ export async function assetVariantBootstrap() {
       }))
     ],
     titleStyles: TITLE_STYLES.map((value) => ({ value, label: TITLE_STYLE_LABELS[value] })),
+    tagStyles: TAG_STYLES.map((value) => ({ value, label: TAG_STYLE_LABELS[value] || value })),
     mainImagePlans: MAIN_IMAGE_PLANS,
     tailCategories: uniqueValues([
       ...ozonCategories.filter((item) => item.isAuto).map((item) => item.nameZh || item.nameRu || item.pathZh),
@@ -144,11 +191,14 @@ export async function saveShopVariantRule(body = {}, session = null) {
   if (!shopId) throw new Error("请选择店铺");
   await mysqlExecute(`
     INSERT INTO shop_variant_rules
-    (shop_id, title_style, watermark_template_id, tail_image_url, main_image_plan,
+    (shop_id, title_style, tag_style, price_index, price_role, watermark_template_id, tail_image_url, main_image_plan,
      tail_category, vehicle_model, tail_template_id, updated_by_person_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       title_style = VALUES(title_style),
+      tag_style = VALUES(tag_style),
+      price_index = VALUES(price_index),
+      price_role = VALUES(price_role),
       watermark_template_id = VALUES(watermark_template_id),
       tail_image_url = VALUES(tail_image_url),
       main_image_plan = VALUES(main_image_plan),
@@ -160,6 +210,9 @@ export async function saveShopVariantRule(body = {}, session = null) {
   `, [
     shopId,
     normalizeTitleStyle(body.titleStyle || body.title_style),
+    normalizeTagStyle(body.tagStyle || body.tag_style || body.titleStyle || body.title_style),
+    normalizePriceIndex(body.priceIndex || body.price_index),
+    normalizePriceRole(body.priceRole || body.price_role),
     String(body.watermarkTemplateId || body.watermark_template_id || ""),
     String(body.tailImageUrl || body.tail_image_url || ""),
     String(body.mainImagePlan || body.main_image_plan || "watermarked"),
@@ -171,18 +224,19 @@ export async function saveShopVariantRule(body = {}, session = null) {
   return { ok: true, shopId };
 }
 
-export async function generateAssetVariants(body = {}, session = null) {
+export async function generateAssetVariants(body = {}, session = null, context = {}) {
   await ensureAssetVariantSchema();
+  await context.throwIfCancelled?.();
   const material = normalizeMaterialPayload(body.material || body);
   const shopIds = uniqueNumbers(body.shopIds || body.shop_ids);
   const rulesInput = Array.isArray(body.rules) ? body.rules : [];
-  if (!material.title) throw new Error("请填写原始标题");
-  if (!material.mainImage) throw new Error("请上传主图");
-  if (!shopIds.length) throw new Error("请选择店铺");
+  if (!material.title) throw new Error("Missing source title");
+  if (!material.mainImage) throw new Error("Missing main image");
+  if (!shopIds.length) throw new Error("Please select shops");
 
   const bootstrap = await assetVariantBootstrap();
   const shops = bootstrap.shops.filter((shop) => shopIds.includes(Number(shop.id)));
-  if (!shops.length) throw new Error("未找到可用店铺");
+  if (!shops.length) throw new Error("No available shops");
 
   const templateMap = new Map(bootstrap.watermarkTemplates.map((template) => [String(template.id), template]));
   const tailTemplateMap = new Map(bootstrap.tailTemplates.map((template) => [Number(template.id), template]));
@@ -191,12 +245,20 @@ export async function generateAssetVariants(body = {}, session = null) {
   const batchDir = path.join(VARIANT_ROOT, batchId);
   await fs.mkdir(batchDir, { recursive: true });
 
-  const variants = await mapWithConcurrency(shops, ASSET_VARIANT_CONCURRENCY, async (shop) => {
+  const variants = await mapWithConcurrency(shops, ASSET_SHOP_CONCURRENCY, async (shop, shopIndex) => {
+    await context.markStage?.("generate_assets", { current: shopIndex + 1, total: shops.length, shopId: shop.id, step: "shop_start" });
     const mergedRule = normalizeRule({ ...shop.rule, ...(ruleMap.get(Number(shop.id)) || {}) });
+    await context.throwIfCancelled?.();
     const titleCandidates = await generateTitleCandidates(material, shop);
+    await context.throwIfCancelled?.();
     const selectedTitle = titleCandidates[mergedRule.titleStyle] || fallbackTitle(material, mergedRule.titleStyle, shop);
     const title = selectedTitle.ru;
     const titleZh = selectedTitle.zh;
+    const priceIndex = resolveShopPriceIndex(mergedRule.priceIndex || mergedRule.price_index, material, { ...shop, rule: mergedRule });
+    const internalPrice = roundMoney(material.basePriceRmb * priceIndex);
+    const ozonPrice = roundMoney(internalPrice * 2);
+    const ozonOldPrice = roundMoney(internalPrice * 4);
+    const shopTags = generateShopTags(material, shop, mergedRule, title);
     const shopSlug = sanitizeFilename(`shop-${shop.id}-${shop.name}`);
     const shopDir = path.join(batchDir, shopSlug);
     const infoDir = path.join(shopDir, "product-info");
@@ -211,52 +273,99 @@ export async function generateAssetVariants(body = {}, session = null) {
       tailImageUrl: tailTemplate?.imagePath || mergedRule.tailImageUrl,
       mainImagePlan: mergedRule.mainImagePlan,
       batchId,
-      shopId: shop.id
+      shopId: shop.id,
+      sourceTitle: material.title,
+      variantTitle: title,
+      throwIfCancelled: context.throwIfCancelled
     });
+    await context.throwIfCancelled?.();
 
-    const productInfo = buildProductInfo({ shop, title, titleZh, material, images: generatedImages, rule: mergedRule, tailTemplate });
+    const productInfo = buildProductInfo({ shop, title, titleZh, material: { ...material, tags: shopTags }, images: generatedImages, rule: { ...mergedRule, priceIndex, internalPrice, ozonPrice, ozonOldPrice }, tailTemplate });
     await writeText(path.join(infoDir, "title.txt"), title);
-    await writeText(path.join(infoDir, "tags.txt"), material.tags.join(","));
+    await writeText(path.join(infoDir, "tags.txt"), shopTags.join(" "));
     await writeText(path.join(infoDir, "description.txt"), material.description);
     await writeText(path.join(infoDir, "product-info.json"), JSON.stringify(productInfo, null, 2));
     await fs.writeFile(path.join(infoDir, "product-info.xlsx"), buildProductInfoWorkbook(productInfo));
-    await fs.writeFile(path.join(shopDir, "listing.xlsx"), buildListingWorkbook({ shop, title, titleZh, material, images: generatedImages, rule: mergedRule, tailTemplate }));
-    await writeText(path.join(shopDir, "listing.json"), JSON.stringify(buildListingJson({ shop, title, titleZh, material, images: generatedImages, rule: mergedRule, tailTemplate }), null, 2));
+    await fs.writeFile(path.join(shopDir, "listing.xlsx"), buildListingWorkbook({ shop, title, titleZh, material: { ...material, tags: shopTags }, images: generatedImages, rule: { ...mergedRule, priceIndex, internalPrice, ozonPrice, ozonOldPrice }, tailTemplate }));
+    await writeText(path.join(shopDir, "listing.json"), JSON.stringify(buildListingJson({ shop, title, titleZh, material: { ...material, tags: shopTags }, images: generatedImages, rule: { ...mergedRule, priceIndex, internalPrice, ozonPrice, ozonOldPrice }, tailTemplate }), null, 2));
 
     const outputDir = path.relative(ROOT_DIR, shopDir).replace(/\\/g, "/");
     const localOutputDir = shopDir;
     const insertResult = await mysqlExecute(`
       INSERT INTO asset_variants
-      (batch_id, shop_id, source_title, variant_title, title_style, tags_json, description_text, images_json,
+      (batch_id, shop_id, source_title, variant_title, variant_title_zh, title_style, tag_style, price_index, internal_price, ozon_price, ozon_old_price, tags_json, description_text, images_json,
+       source_product_id, ozon_category_id, ozon_description_category_id, ozon_type_id, ozon_category_name,
+       length_cm, width_cm, height_cm, weight_g, color, vehicle_brand, material_text, quantity_text,
        output_dir, status, created_by_person_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'generated', ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generated', ?)
     `, [
       batchId,
       shop.id,
       material.title,
       title,
+      titleZh,
       mergedRule.titleStyle,
-      JSON.stringify(material.tags),
+      mergedRule.tagStyle,
+      priceIndex,
+      internalPrice,
+      ozonPrice,
+      ozonOldPrice,
+      JSON.stringify(shopTags),
       material.description,
       JSON.stringify(generatedImages),
+      Number(material.sourceProductId || material.source_product_id || 0) || null,
+      material.ozonCategoryId || material.ozon_category_id || "",
+      Number(material.ozonDescriptionCategoryId || material.ozon_description_category_id || 0) || 0,
+      Number(material.ozonTypeId || material.ozon_type_id || 0) || 0,
+      material.ozonCategoryName || material.ozon_category_name || "",
+      Number(material.lengthCm || 0),
+      Number(material.widthCm || 0),
+      Number(material.heightCm || 0),
+      Number(material.weightG || 0),
+      material.color || "",
+      material.vehicleBrand || "",
+      material.material || "",
+      material.quantity || "",
       outputDir,
       personId(session)
     ]);
 
     const variantId = Number(insertResult.insertId || 0);
     await insertGeneratedTitleCandidates(variantId, shop.id, titleCandidates);
+    await context.throwIfCancelled?.();
+    let videos = [];
+    const storedVariant = {
+      id: variantId,
+      batch_id: batchId,
+      shop_id: shop.id,
+      output_dir: outputDir,
+      images_json: JSON.stringify(generatedImages)
+    };
+    const generatedVideo = await ensureAssetVariantVideoFromImages(null, storedVariant, generatedImages, { throwIfCancelled: context.throwIfCancelled }).catch((error) => {
+      console.warn("server asset video generation failed:", error.message || error);
+      return null;
+    });
+    await context.throwIfCancelled?.();
+    if (generatedVideo) videos = [normalizeGeneratedVideoForResponse(generatedVideo)];
     return {
       id: variantId,
       batchId,
       shopId: shop.id,
       shopName: shop.name,
       title,
+      titleZh,
       titleStyle: mergedRule.titleStyle,
+      tagStyle: mergedRule.tagStyle,
+      priceIndex,
+      internalPrice,
+      ozonPrice,
+      ozonOldPrice,
       titleCandidates,
-      tags: material.tags,
+      tags: shopTags,
       description: material.description,
       productInfo,
       images: generatedImages,
+      videos,
       tailTemplate,
       previewUrl: generatedImages[0]?.previewUrl || "",
       outputDir,
@@ -272,9 +381,95 @@ export async function generateAssetVariants(body = {}, session = null) {
   return {
     ok: true,
     batchId,
+    createdAt: new Date().toISOString(),
     outputDir: path.relative(ROOT_DIR, batchDir).replace(/\\/g, "/"),
     localOutputDir: batchDir,
     variants
+  };
+}
+
+export async function deleteAssetVariantMediaGroup(body = {}, session = null) {
+  await ensureAssetVariantSchema();
+  await ensureListingAutomationSchema();
+  const batchId = String(body.batchId || body.batch_id || "").trim();
+  const shopId = Number(body.shopId || body.shop_id || 0) || null;
+  const assetIds = uniqueNumbers(body.assetIds || body.asset_ids);
+  if (!batchId && !assetIds.length) throw new Error("Missing batchId or assetIds");
+
+  let mediaAssets = [];
+  let variants = [];
+  let deleteMediaSql = "";
+  let deleteMediaParams = [];
+  let deleteVariantSql = "";
+  let deleteVariantParams = [];
+  if (batchId) {
+    const params = [batchId];
+    let shopWhere = "";
+    if (shopId) {
+      shopWhere = " AND shop_id = ?";
+      params.push(shopId);
+    }
+    mediaAssets = await mysqlQuery(`
+      SELECT id, local_path, source_path
+      FROM listing_media_assets
+      WHERE status <> 'deleted' AND batch_id = ?${shopWhere}
+    `, params);
+    variants = await mysqlQuery(`
+      SELECT id, output_dir
+      FROM asset_variants
+      WHERE batch_id = ?${shopWhere}
+    `, params);
+    deleteMediaSql = `DELETE FROM listing_media_assets WHERE batch_id = ?${shopWhere}`;
+    deleteMediaParams = params;
+    deleteVariantSql = `DELETE FROM asset_variants WHERE batch_id = ?${shopWhere}`;
+    deleteVariantParams = params;
+  } else {
+    const placeholders = assetIds.map(() => "?").join(",");
+    mediaAssets = await mysqlQuery(`
+      SELECT id, local_path, source_path
+      FROM listing_media_assets
+      WHERE status <> 'deleted' AND id IN (${placeholders})
+    `, assetIds);
+    deleteMediaSql = `DELETE FROM listing_media_assets WHERE id IN (${placeholders})`;
+    deleteMediaParams = assetIds;
+  }
+
+  const files = new Set();
+  const dirs = new Set();
+  for (const asset of mediaAssets) {
+    if (asset.local_path) files.add(asset.local_path);
+    if (asset.source_path) files.add(asset.source_path);
+  }
+  for (const variant of variants) {
+    if (variant.output_dir) dirs.add(variant.output_dir);
+  }
+  if (batchId && !shopId) dirs.add(path.relative(ROOT_DIR, path.join(VARIANT_ROOT, sanitizeFilename(batchId))).replace(/\\/g, "/"));
+
+  let deletedFiles = 0;
+  let deletedDirs = 0;
+  for (const filePath of files) {
+    if (await removeLocalAssetPath(filePath, { recursive: false })) deletedFiles += 1;
+  }
+  for (const dirPath of dirs) {
+    if (await removeLocalAssetPath(dirPath, { recursive: true })) deletedDirs += 1;
+  }
+
+  if (variants.length) {
+    const placeholders = variants.map(() => "?").join(",");
+    await mysqlExecute(`DELETE FROM generated_titles WHERE asset_variant_id IN (${placeholders})`, variants.map((row) => Number(row.id)));
+  }
+  if (deleteMediaSql) await mysqlExecute(deleteMediaSql, deleteMediaParams);
+  if (deleteVariantSql) await mysqlExecute(deleteVariantSql, deleteVariantParams);
+
+  return {
+    ok: true,
+    batchId,
+    shopId,
+    assetIds,
+    deletedMediaAssets: mediaAssets.length,
+    deletedVariants: variants.length,
+    deletedFiles,
+    deletedDirs
   };
 }
 
@@ -282,11 +477,11 @@ export async function generateAssetVariantTitlePreview(body = {}, session = null
   await ensureAssetVariantSchema();
   const material = normalizeMaterialPayload(body.material || body);
   const shopId = Number(body.shopId || body.shop_id || 0);
-  if (!material.title) throw new Error("请先填写原始标题");
+  if (!material.title) throw new Error("Missing material title");
   if (!shopId) throw new Error("请选择店铺");
   const bootstrap = await assetVariantBootstrap();
   const shop = bootstrap.shops.find((item) => Number(item.id) === shopId);
-  if (!shop) throw new Error("未找到店铺");
+  if (!shop) throw new Error("Shop not found");
   const rule = normalizeRule({ ...shop.rule, ...(body.rule || {}) });
   const candidates = await generateTitleCandidates(material, shop);
   const selected = candidates[rule.titleStyle] || fallbackTitle(material, rule.titleStyle, shop);
@@ -305,7 +500,7 @@ export async function importAssetVariantToListingAutomation(body = {}, session =
   await ensureAssetVariantSchema();
   await ensureListingAutomationSchema();
   const variantIds = uniqueNumbers(body.variantIds || body.variant_ids);
-  if (!variantIds.length) return { ok: true, imported: 0, drafts: [], note: "未选择素材包" };
+  if (!variantIds.length) return { ok: true, imported: 0, drafts: [], note: "No variants selected" };
 
   const variants = await mysqlQuery(`
     SELECT v.*, s.name AS shop_name, s.watermark_path
@@ -314,21 +509,31 @@ export async function importAssetVariantToListingAutomation(body = {}, session =
     WHERE v.id IN (${variantIds.map(() => "?").join(",")})
     ORDER BY v.id ASC
   `, variantIds);
-  if (!variants.length) return { ok: true, imported: 0, drafts: [], note: "没有找到可导入的素材包" };
+  if (!variants.length) return { ok: true, imported: 0, drafts: [], note: "No variant rows found" };
 
   const drafts = [];
+  const descriptionCache = new Map();
   await withMysqlTransaction(async (connection) => {
     for (const variant of variants) {
-      const images = parseJson(variant.images_json, []).map((image) => image.publishUrl || image.url || image.previewUrl || image.outputPath).filter(Boolean);
-      const templateId = await ensureAssetVariantListingTemplate(connection, variant, session);
-      const draftId = await insertListingDraft(connection, templateId, variant, images, session);
-      await insertListingShopCopy(connection, draftId, variant, images, session);
+      const mediaRows = await loadAssetVariantMediaRows(connection, variant);
+      const images = assetVariantImageItems(variant, mediaRows);
+      let videos = assetVariantVideoItems(mediaRows);
+      if (!videos.length) {
+        const generatedVideo = await ensureAssetVariantVideoFromImages(connection, variant, images).catch((error) => {
+          console.warn("asset variant video generation failed:", error.message || error);
+          return null;
+        });
+        if (generatedVideo) videos = [generatedVideo];
+      }
+      const templateId = await ensureAssetVariantListingTemplateFromPackage(connection, variant, images, videos, session, descriptionCache);
+      const draftId = await insertListingDraftFromPackage(connection, templateId, variant, images, videos, session);
+      await insertListingShopCopyFromPackage(connection, draftId, variant, images, videos, session);
       await connection.execute(`
         UPDATE asset_variants
         SET imported_to_listing = 1, imported_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `, [variant.id]);
-      drafts.push({ variantId: Number(variant.id), draftId, shopId: Number(variant.shop_id), shopName: variant.shop_name });
+      drafts.push({ variantId: Number(variant.id), templateId, draftId, shopId: Number(variant.shop_id), shopName: variant.shop_name });
     }
   });
 
@@ -336,7 +541,542 @@ export async function importAssetVariantToListingAutomation(body = {}, session =
     ok: true,
     imported: drafts.length,
     drafts,
-    note: `已导入 ${drafts.length} 个素材包到 listing-automation`
+    note: `已导入 ${drafts.length} 个素材包到编辑上架`
+  };
+}
+
+export async function publishAssetVariantsToOzon(body = {}, session = null, context = {}) {
+  await ensureAssetVariantSchema();
+  await ensureListingAutomationSchema();
+  await context.throwIfCancelled?.();
+  const variantIds = uniqueNumbers(body.variantIds || body.variant_ids);
+  if (!variantIds.length) return { ok: false, imported: 0, published: 0, results: [], note: "No variants selected" };
+
+  await context.markStage?.("import_listing", { variantCount: variantIds.length });
+  await context.throwIfCancelled?.();
+  const importResult = await importAssetVariantToListingAutomation({ variantIds }, session);
+  await context.throwIfCancelled?.();
+  const drafts = Array.isArray(importResult.drafts) ? importResult.drafts : [];
+  const results = await mapWithConcurrency(drafts, OZON_SUBMIT_CONCURRENCY, async (item, index) => {
+    await context.throwIfCancelled?.();
+    const variantId = Number(item.variantId || 0);
+    const draftId = Number(item.draftId || 0);
+    const shopId = Number(item.shopId || 0);
+    try {
+      await context.markStage?.("submit_ozon", {
+        current: index + 1,
+        total: drafts.length,
+        shopId,
+        variantId
+      });
+      await context.throwIfCancelled?.();
+      const draftRows = await mysqlQuery("SELECT template_id FROM listing_drafts WHERE id = ? LIMIT 1", [draftId]);
+      const templateId = Number(draftRows[0]?.template_id || 0);
+      if (!templateId || !shopId) throw new Error("Missing templateId or shopId");
+
+      const template = await listingCategoryTemplateDetail(templateId, session);
+      await context.throwIfCancelled?.();
+      const precheck = await validateAssetVariantPublishPrecheck({ template, shopId, variantId, draftId }, session);
+      await context.markStage?.("submit_precheck", {
+        current: index + 1,
+        total: drafts.length,
+        shopId,
+        variantId,
+        ok: precheck.ok,
+        errors: precheck.errors,
+        warnings: precheck.warnings
+      });
+      if (!precheck.ok) {
+        await updateAssetVariantPublishState({
+          variantId,
+          draftId,
+          shopId,
+          status: "precheck_failed",
+          publishResult: { precheck }
+        });
+        return {
+          variantId,
+          draftId,
+          shopId,
+          shopName: item.shopName || "",
+          ok: false,
+          status: "precheck_failed",
+          error: precheck.errors[0] || "Publish precheck failed",
+          precheck
+        };
+      }
+
+      await context.throwIfCancelled?.();
+      await updateAssetVariantPublishState({ variantId, draftId, shopId, status: "submitting" });
+      const publishResult = await publishListingTemplateToOzon({ template, shop_ids: [shopId] }, session);
+      const shopResult = (publishResult.results || []).find((row) => Number(row.shop_id) === shopId) || publishResult.results?.[0] || null;
+      const success = Boolean(shopResult?.ok);
+      const nextStatus = success ? statusFromOzonPublishResult(shopResult) : "failed";
+      await updateAssetVariantPublishState({
+        variantId,
+        draftId,
+        shopId,
+        status: nextStatus,
+        publishResult: shopResult || publishResult
+      });
+      return {
+        variantId,
+        draftId,
+        shopId,
+        shopName: item.shopName || shopResult?.shop_name || "",
+        ok: success,
+        status: nextStatus,
+        taskId: shopResult?.task_id || "",
+        recordId: shopResult?.record_id || null,
+        ozonProductId: firstOzonProductId(shopResult?.import_info || shopResult?.response),
+        precheck
+      };
+    } catch (error) {
+      await updateAssetVariantPublishState({
+        variantId,
+        draftId,
+        shopId,
+        status: "failed",
+        publishResult: { error: error.message || String(error) }
+      }).catch(() => null);
+      return {
+        variantId,
+        draftId,
+        shopId,
+        shopName: item.shopName || "",
+        ok: false,
+        status: "failed",
+        error: error.message || String(error)
+      };
+    }
+  });
+
+  const published = results.filter((item) => item.ok).length;
+  return {
+    ok: published > 0,
+    imported: importResult.imported || 0,
+    published,
+    failed: results.length - published,
+    importResult,
+    results,
+    note: published
+      ? `Published ${published} item(s) to Ozon${results.length - published ? `, failed ${results.length - published}` : ""}`
+      : "Create listing draft from asset variant"
+  };
+}
+
+async function validateAssetVariantPublishPrecheck({ template, shopId = 0, variantId = 0, draftId = 0 } = {}, session = null) {
+  const validation = await validateListingTemplatePublish(template, session);
+  const payload = validation.payload || {};
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const firstItem = items[0] || {};
+  const media = firstItem.images || payload.images || [];
+  const videos = firstItem.video_urls || firstItem.videos || payload.video_urls || [];
+  const richContent = firstItem.rich_content_json || firstItem.rich_content || payload.rich_content_json || "";
+  const errors = [...(validation.errors || [])];
+  const warnings = [...(validation.warnings || [])];
+
+  const title = String(firstItem.name || payload.name || template?.title || template?.template_name || "").trim();
+  if (hasReplacementMarks(title)) errors.push("Title contains unreadable replacement marks");
+  if (containsCjk(title)) warnings.push("Title still contains Chinese characters");
+  if (!media.length) errors.push("No product images prepared for Ozon");
+  if (!videos.length) warnings.push("No product video prepared");
+  if (!richContent) warnings.push("Rich content JSON is empty");
+  if (richContent && !isValidRichContentJson(richContent)) errors.push("Rich content JSON is not valid JSON");
+
+  const dimensions = firstItem.dimension || firstItem.dimensions || payload.dimensions || {};
+  const length = Number(dimensions.depth || dimensions.length || dimensions.length_cm || 0);
+  const width = Number(dimensions.width || dimensions.width_cm || 0);
+  const height = Number(dimensions.height || dimensions.height_cm || 0);
+  if ([length, width, height].some((value) => value > 0 && value < 10)) {
+    warnings.push("Package size looks too small; check cm to mm conversion before submit");
+  }
+
+  return {
+    ok: errors.length === 0 && Boolean(validation.ok),
+    shopId: Number(shopId || 0),
+    variantId: Number(variantId || 0),
+    draftId: Number(draftId || 0),
+    errors: uniqueValues(errors),
+    warnings: uniqueValues(warnings),
+    qualityEstimate: validation.quality_estimate || null,
+    checkedAt: new Date().toISOString()
+  };
+}
+
+export async function publishSelectionProductToOzon(body = {}, session = null, context = {}) {
+  await ensureAssetVariantSchema();
+  await ensureListingAutomationSchema();
+  const productId = Number(body.productId || body.product_id || body.selectionId || body.selection_id || 0);
+  if (!productId) throw new Error("缺少选品 ID");
+
+  await context.markStage?.("load_product", { productId });
+  const productRows = await mysqlQuery("SELECT * FROM products WHERE id = ? AND active = 1 LIMIT 1", [productId]);
+  const product = productRows[0];
+  if (!product) throw new Error("Product not found");
+  if (!Number(product.package_weight_g || product.weight_g || 0)) throw new Error("请先填写包装克重后再一键上架");
+  const publisherName = await personNameForSession(session);
+
+  await context.markStage?.("bootstrap", { productId });
+  const bootstrap = await assetVariantBootstrap();
+  const requestedShopIds = uniqueNumbers(body.shopIds || body.shop_ids);
+  const shopIds = (requestedShopIds.length ? requestedShopIds : bootstrap.shops.map((shop) => shop.id))
+    .map(Number)
+    .filter(Boolean);
+  if (!shopIds.length) throw new Error("Please select shops");
+
+  const mainImage = product.image_url || product.primary_image || `/api/products/${product.id}/image`;
+  const detailImages = normalizeProductImageList(product.detail_image_urls || product.detailImageUrls);
+  await context.markStage?.("generate_assets", { productId, shopCount: shopIds.length });
+  const generateResult = await generateAssetVariants({
+    material: {
+      title: product.name || product.product_name || product.selection_id || `Product ${product.id}`,
+      tags: product.tags || product.keywords || "",
+      description: product.selling_points || product.supplier_note || "",
+      ownerName: publisherName,
+      publisherName,
+      sourceProductId: product.id,
+      ozonCategoryId: product.ozon_category_id || "",
+      ozonDescriptionCategoryId: product.ozon_description_category_id || 0,
+      ozonTypeId: product.ozon_type_id || 0,
+      ozonCategoryName: product.ozon_category_name || "",
+      vehicleBrand: product.vehicle_brand || "",
+      vehicleModel: product.vehicle_model || "",
+      basePriceRmb: Number(product.air_sale_price_rmb || product.sale_price_rmb || product.listing_price_rub / (product.exchange_rate || 11.32) || 0),
+      quantity: product.purchase_quantity ? `${product.purchase_quantity} pcs` : "",
+      color: product.color || "",
+      material: product.material || "",
+      lengthCm: Number(product.length_cm || 0),
+      widthCm: Number(product.width_cm || 0),
+      heightCm: Number(product.height_cm || 0),
+      weightG: Number(product.package_weight_g || product.weight_g || 0),
+      mainImage,
+      detailImages
+    },
+    shopIds,
+    rules: bootstrap.shops
+      .filter((shop) => shopIds.includes(Number(shop.id)))
+      .map((shop) => ({ shopId: shop.id, ...(shop.rule || {}) }))
+  }, session, context);
+
+  const variantIds = (generateResult.variants || []).map((variant) => Number(variant.id || 0)).filter(Boolean);
+  await context.throwIfCancelled?.();
+  await context.markStage?.("publish_assets", { productId, variantCount: variantIds.length });
+  const publishResult = await publishAssetVariantsToOzon({ variantIds }, session, context);
+  await context.markStage?.("done", { productId, variantCount: variantIds.length, published: publishResult.published || 0 });
+  return {
+    ok: publishResult.ok,
+    productId,
+    selectionId: product.selection_id || "",
+    batchId: generateResult.batchId,
+    generated: variantIds.length,
+    ...publishResult
+  };
+}
+
+export async function enqueuePublishSelectionProductToOzon(body = {}, session = null) {
+  await ensureAssetVariantSchema();
+  const productId = Number(body.productId || body.product_id || body.selectionId || body.selection_id || 0);
+  if (!productId) throw new Error("Missing productId");
+  const jobNo = `AVJ-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Date.now().toString(36).toUpperCase()}`;
+  const insertResult = await mysqlExecute(`
+    INSERT INTO asset_variant_jobs
+    (job_no, job_type, status, product_id, request_json, created_by_person_id)
+    VALUES (?, 'publish_selection', 'queued', ?, ?, ?)
+  `, [
+    jobNo,
+    productId,
+    JSON.stringify(body || {}),
+    personId(session)
+  ]);
+  const jobId = Number(insertResult.insertId || 0);
+  enqueueAssetVariantJob({ id: jobId, session: { personId: personId(session) } });
+  return {
+    ok: true,
+    accepted: true,
+    jobId,
+    jobNo,
+    productId,
+    status: "queued",
+    note: `后台一键上架任务已创建：${jobNo}`
+  };
+}
+
+export async function assetVariantJobs(query = {}) {
+  await ensureAssetVariantSchema();
+  const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+  const rows = await mysqlQuery(`
+    SELECT j.*, p.name AS product_name, p.selection_id
+    FROM asset_variant_jobs j
+    LEFT JOIN products p ON p.id = j.product_id
+    ORDER BY j.id DESC
+    LIMIT ?
+  `, [limit]);
+  return rows.map(normalizeAssetVariantJobRow);
+}
+
+export async function assetVariantJobDetail(id) {
+  await ensureAssetVariantSchema();
+  const rows = await mysqlQuery(`
+    SELECT j.*, p.name AS product_name, p.selection_id
+    FROM asset_variant_jobs j
+    LEFT JOIN products p ON p.id = j.product_id
+    WHERE j.id = ?
+    LIMIT 1
+  `, [Number(id)]);
+  return rows[0] ? normalizeAssetVariantJobRow(rows[0]) : null;
+}
+
+export async function cancelAssetVariantJob(id, session = null) {
+  await ensureAssetVariantSchema();
+  const jobId = Number(id || 0);
+  if (!jobId) throw new Error("Missing jobId");
+  const rows = await mysqlQuery("SELECT * FROM asset_variant_jobs WHERE id = ? LIMIT 1", [jobId]);
+  const job = rows[0];
+  if (!job) throw new Error("Asset variant job not found");
+  if (!["queued", "running"].includes(String(job.status || ""))) {
+    return {
+      ok: true,
+      cancelled: false,
+      jobId,
+      status: job.status || "",
+      note: "Asset variant job is not running"
+    };
+  }
+  const beforeLength = assetVariantJobQueue.length;
+  for (let index = assetVariantJobQueue.length - 1; index >= 0; index -= 1) {
+    if (Number(assetVariantJobQueue[index]?.id || 0) === jobId) assetVariantJobQueue.splice(index, 1);
+  }
+  await mysqlExecute(`
+    UPDATE asset_variant_jobs
+    SET status = 'cancelled',
+      current_stage = 'cancelled',
+      progress_json = JSON_OBJECT('currentStage', 'cancelled', 'cancelledAt', UTC_TIMESTAMP()),
+      error_json = ?,
+      finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP),
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND status IN ('queued', 'running')
+  `, [JSON.stringify({ message: "Cancelled by user", personId: personId(session) || null }), jobId]);
+  return {
+    ok: true,
+    cancelled: true,
+    removedFromQueue: beforeLength !== assetVariantJobQueue.length,
+    jobId,
+    status: "cancelled",
+    note: "Asset variant job cancelled"
+  };
+}
+
+export async function retryAssetVariantJobFailures(id, session = null) {
+  await ensureAssetVariantSchema();
+  await ensureListingAutomationSchema();
+  const jobId = Number(id || 0);
+  if (!jobId) throw new Error("Missing jobId");
+  const jobRows = await mysqlQuery("SELECT * FROM asset_variant_jobs WHERE id = ? LIMIT 1", [jobId]);
+  const job = jobRows[0];
+  if (!job) throw new Error("Asset variant job not found");
+  const result = parseJson(job.result_json, {});
+  const failedVariantIds = uniqueNumbers((result.results || [])
+    .filter((item) => !item.ok)
+    .map((item) => item.variantId || item.variant_id));
+  if (!failedVariantIds.length) {
+    return { ok: true, retried: 0, note: "No failed asset variants to retry" };
+  }
+  const retryResult = await publishAssetVariantsToOzon({ variantIds: failedVariantIds }, session, {
+    markStage: async () => {}
+  });
+  return {
+    ok: retryResult.ok,
+    retried: failedVariantIds.length,
+    sourceJobId: jobId,
+    ...retryResult
+  };
+}
+
+function enqueueAssetVariantJob(job) {
+  if (assetVariantJobQueue.some((item) => Number(item.id) === Number(job.id))) return;
+  assetVariantJobQueue.push(job);
+  setTimeout(processNextAssetVariantJob, 0);
+}
+
+export async function recoverAssetVariantJobsOnStartup() {
+  await ensureAssetVariantSchema();
+  await mysqlExecute(`
+    UPDATE asset_variant_jobs
+    SET status = 'queued',
+      current_stage = 'recovered',
+      progress_json = JSON_OBJECT('currentStage', 'recovered', 'recoveredAt', UTC_TIMESTAMP()),
+      started_at = NULL,
+      finished_at = NULL,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'running' AND finished_at IS NULL
+  `);
+  const rows = await mysqlQuery(`
+    SELECT id, created_by_person_id
+    FROM asset_variant_jobs
+    WHERE status = 'queued'
+    ORDER BY created_at ASC, id ASC
+    LIMIT 50
+  `);
+  for (const row of rows) {
+    enqueueAssetVariantJob({ id: Number(row.id), session: { personId: Number(row.created_by_person_id || 0) || null } });
+  }
+  return { ok: true, queued: rows.length };
+}
+
+async function processNextAssetVariantJob() {
+  if (assetVariantJobRunning) return;
+  const job = assetVariantJobQueue.shift();
+  if (!job) return;
+  assetVariantJobRunning = true;
+  try {
+    await runAssetVariantJob(job);
+  } finally {
+    assetVariantJobRunning = false;
+    if (assetVariantJobQueue.length) setTimeout(processNextAssetVariantJob, 0);
+  }
+}
+
+async function runAssetVariantJob(job) {
+  const rows = await mysqlQuery("SELECT * FROM asset_variant_jobs WHERE id = ? LIMIT 1", [Number(job.id)]);
+  const row = rows[0];
+  if (!row || row.status !== "queued") return;
+  const request = parseJson(row.request_json, {});
+  const progress = createAssetVariantJobProgress(row.id);
+  await mysqlExecute(`
+    UPDATE asset_variant_jobs
+    SET status = 'running', current_stage = 'starting', progress_json = ?,
+      started_at = COALESCE(started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [JSON.stringify(progress.snapshot("starting")), row.id]);
+  try {
+    let result;
+    if (row.job_type === "publish_selection") {
+      result = await publishSelectionProductToOzon(request, job.session || null, {
+        jobId: row.id,
+        markStage: (stage, detail = {}) => updateAssetVariantJobStage(row.id, progress, stage, detail),
+        throwIfCancelled: () => throwIfAssetVariantJobCancelled(row.id)
+      });
+    } else {
+      throw new Error(`不支持的素材裂变任务类型：${row.job_type}`);
+    }
+    const status = result?.ok ? "success" : "failed";
+    const finalProgress = progress.finish(status);
+    await mysqlExecute(`
+      UPDATE asset_variant_jobs
+      SET status = ?, batch_id = ?, total_count = ?, success_count = ?, failed_count = ?,
+        result_json = ?, error_json = NULL, current_stage = ?, progress_json = ?,
+        finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND status = 'running'
+    `, [
+      status,
+      result?.batchId || "",
+      Number(result?.generated || result?.results?.length || 0),
+      Number(result?.published || 0),
+      Number(result?.failed || 0),
+      JSON.stringify(result || {}),
+      status,
+      JSON.stringify(finalProgress),
+      row.id
+    ]);
+  } catch (error) {
+    if (isAssetVariantJobCancelledError(error)) {
+      await mysqlExecute(`
+        UPDATE asset_variant_jobs
+        SET status = 'cancelled',
+          current_stage = 'cancelled',
+          error_json = ?,
+          finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status IN ('queued', 'running')
+      `, [JSON.stringify({ message: error.message || "Asset variant job cancelled" }), row.id]);
+      return;
+    }
+    const finalProgress = progress.finish("failed", { error: error.message || String(error) });
+    await mysqlExecute(`
+      UPDATE asset_variant_jobs
+      SET status = 'failed', failed_count = GREATEST(failed_count, 1), error_json = ?,
+        current_stage = 'failed', progress_json = ?,
+        finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND status = 'running'
+    `, [JSON.stringify({ message: error.message || String(error), stack: error.stack || "" }), JSON.stringify(finalProgress), row.id]);
+  }
+}
+
+function createAssetVariantJobProgress(jobId) {
+  const startedAt = Date.now();
+  const phases = [];
+  let current = null;
+  return {
+    snapshot(stage, detail = {}) {
+      const now = Date.now();
+      if (current && current.stage !== stage) {
+        current.endedAt = new Date(now).toISOString();
+        current.durationMs = now - current.startedMs;
+      }
+      if (!current || current.stage !== stage) {
+        current = {
+          stage,
+          detail,
+          startedAt: new Date(now).toISOString(),
+          startedMs: now
+        };
+        phases.push(current);
+      } else {
+        current.detail = { ...(current.detail || {}), ...detail };
+      }
+      return {
+        jobId: Number(jobId || 0),
+        currentStage: stage,
+        elapsedMs: now - startedAt,
+        phases: phases.map(({ startedMs, ...phase }) => phase)
+      };
+    },
+    finish(stage, detail = {}) {
+      return this.snapshot(stage, detail);
+    }
+  };
+}
+
+async function updateAssetVariantJobStage(jobId, progress, stage, detail = {}) {
+  await throwIfAssetVariantJobCancelled(jobId);
+  const snapshot = progress.snapshot(stage, detail);
+  await mysqlExecute(`
+    UPDATE asset_variant_jobs
+    SET current_stage = ?, progress_json = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND status = 'running'
+  `, [stage, JSON.stringify(snapshot), Number(jobId)]);
+}
+
+async function throwIfAssetVariantJobCancelled(jobId) {
+  const rows = await mysqlQuery("SELECT status FROM asset_variant_jobs WHERE id = ? LIMIT 1", [Number(jobId)]);
+  if (String(rows[0]?.status || "") === "cancelled") throw new AssetVariantJobCancelledError();
+}
+
+function normalizeAssetVariantJobRow(row = {}) {
+  return {
+    id: Number(row.id || 0),
+    jobId: Number(row.id || 0),
+    jobNo: row.job_no || "",
+    jobType: row.job_type || "",
+    status: row.status || "",
+    productId: Number(row.product_id || 0) || null,
+    productName: row.product_name || "",
+    selectionId: row.selection_id || "",
+    batchId: row.batch_id || "",
+    totalCount: Number(row.total_count || 0),
+    successCount: Number(row.success_count || 0),
+    failedCount: Number(row.failed_count || 0),
+    request: parseJson(row.request_json, null),
+    result: parseJson(row.result_json, null),
+    error: parseJson(row.error_json, null),
+    currentStage: row.current_stage || "",
+    progress: parseJson(row.progress_json, null),
+    createdByPersonId: Number(row.created_by_person_id || 0) || null,
+    startedAt: row.started_at || "",
+    finishedAt: row.finished_at || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || ""
   };
 }
 
@@ -372,7 +1112,7 @@ export async function syncAssetOzonCategories(body = {}) {
     LIMIT 1
   `, shopId ? [shopId] : []);
   const shop = shops[0];
-  if (!shop) throw new Error("没有找到带真实 Ozon API 凭证的店铺，无法同步真实类目");
+  if (!shop) throw new Error("Shop not found or missing Ozon API config");
   const tree = await fetchOzonDescriptionCategoryTree(shop, { language: body.language || "DEFAULT" });
   const rows = flattenOzonCategoryTree(tree);
   let saved = 0;
@@ -417,10 +1157,10 @@ export async function createAssetTailTemplate(body = {}, session = null) {
   const shopId = Number(body.shopId || body.shop_id || 0) || null;
   const category = cleanText(body.category || DEFAULT_TAIL_CATEGORY, 128);
   const vehicleModel = cleanText(body.vehicleModel || body.vehicle_model || DEFAULT_TAIL_MODEL, 128);
-  const name = cleanText(body.name || `${category}-${vehicleModel}-尾图`, 255);
+  const name = cleanText(body.name || `${category}-${vehicleModel}-image`, 255);
   const isDefault = Boolean(body.isDefault ?? body.is_default);
   const imagePath = await storeTailTemplateImage(body.image || body.imageData || body.image_data || body.imagePath || body.image_path, name);
-  if (!imagePath) throw new Error("请上传尾图模板图片");
+  if (!imagePath) throw new Error("Missing image path");
 
   if (isDefault) {
     await mysqlExecute(`
@@ -454,13 +1194,20 @@ export async function resolveAssetTailTemplateFile(id) {
   await ensureAssetVariantSchema();
   const template = (await assetTailTemplates()).find((item) => Number(item.id) === Number(id));
   if (!template?.imagePath) return null;
-  const filePath = resolveLocalAssetPath(template.imagePath);
-  try {
-    const buffer = await fs.readFile(filePath);
-    return { buffer, mime: mimeForPath(filePath) };
-  } catch {
-    return null;
+  const candidates = [
+    resolveLocalAssetPath(template.imagePath),
+    path.resolve(TAIL_TEMPLATE_ROOT, path.basename(String(template.imagePath || ""))),
+    path.resolve(ROOT_DIR, String(template.imagePath || "").replace(/^\/+/, ""))
+  ].filter(Boolean);
+  for (const filePath of uniqueValues(candidates)) {
+    try {
+      const buffer = await fs.readFile(filePath);
+      return { buffer, mime: mimeForPath(filePath) };
+    } catch {
+      // Try the next storage location; older templates have moved between roots.
+    }
   }
+  return null;
 }
 
 export async function resolveAssetVariantFile(batchId, filename) {
@@ -478,7 +1225,7 @@ export async function resolveAssetVariantFile(batchId, filename) {
 }
 
 async function ensureAssetVariantSchema() {
-  if (config.dbClient !== "mysql") throw new Error("素材裂变引擎当前需要 MySQL 模式");
+  if (config.dbClient !== "mysql") throw new Error("MySQL database is required");
   if (schemaReady) return;
   await ensureShopWatermarkDefaultColumns();
   await mysqlExecute(`
@@ -501,6 +1248,9 @@ async function ensureAssetVariantSchema() {
   await ensureMysqlColumn("shop_variant_rules", "tail_category", "VARCHAR(128) NOT NULL DEFAULT ''");
   await ensureMysqlColumn("shop_variant_rules", "vehicle_model", "VARCHAR(128) NOT NULL DEFAULT ''");
   await ensureMysqlColumn("shop_variant_rules", "tail_template_id", "BIGINT NULL");
+  await ensureMysqlColumn("shop_variant_rules", "tag_style", "VARCHAR(32) NOT NULL DEFAULT 'traffic'");
+  await ensureMysqlColumn("shop_variant_rules", "price_index", "DECIMAL(10,4) NOT NULL DEFAULT 1.0000");
+  await ensureMysqlColumn("shop_variant_rules", "price_role", "VARCHAR(32) NOT NULL DEFAULT ''");
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS asset_tail_templates (
       id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -527,9 +1277,23 @@ async function ensureAssetVariantSchema() {
       shop_id BIGINT NOT NULL,
       source_title VARCHAR(500) NOT NULL DEFAULT '',
       variant_title VARCHAR(500) NOT NULL DEFAULT '',
+      variant_title_zh VARCHAR(500) NOT NULL DEFAULT '',
       title_style VARCHAR(32) NOT NULL DEFAULT 'functional',
       tags_json LONGTEXT NULL,
       description_text LONGTEXT NULL,
+      source_product_id BIGINT NULL,
+      ozon_category_id VARCHAR(128) NOT NULL DEFAULT '',
+      ozon_description_category_id BIGINT NOT NULL DEFAULT 0,
+      ozon_type_id BIGINT NOT NULL DEFAULT 0,
+      ozon_category_name VARCHAR(500) NOT NULL DEFAULT '',
+      length_cm DECIMAL(10,2) NOT NULL DEFAULT 0,
+      width_cm DECIMAL(10,2) NOT NULL DEFAULT 0,
+      height_cm DECIMAL(10,2) NOT NULL DEFAULT 0,
+      weight_g DECIMAL(10,2) NOT NULL DEFAULT 0,
+      color VARCHAR(128) NOT NULL DEFAULT '',
+      vehicle_brand VARCHAR(128) NOT NULL DEFAULT '',
+      material_text VARCHAR(128) NOT NULL DEFAULT '',
+      quantity_text VARCHAR(64) NOT NULL DEFAULT '',
       images_json LONGTEXT NULL,
       output_dir TEXT NULL,
       status VARCHAR(32) NOT NULL DEFAULT 'draft',
@@ -541,6 +1305,82 @@ async function ensureAssetVariantSchema() {
       INDEX idx_asset_variants_shop (shop_id, created_at)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
+  await ensureMysqlColumn("asset_variants", "source_product_id", "BIGINT NULL");
+  await ensureMysqlColumn("asset_variants", "variant_title_zh", "VARCHAR(500) NOT NULL DEFAULT ''");
+  await ensureMysqlColumn("asset_variants", "ozon_category_id", "VARCHAR(128) NOT NULL DEFAULT ''");
+  await ensureMysqlColumn("asset_variants", "ozon_description_category_id", "BIGINT NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "ozon_type_id", "BIGINT NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "ozon_category_name", "VARCHAR(500) NOT NULL DEFAULT ''");
+  await ensureMysqlColumn("asset_variants", "length_cm", "DECIMAL(10,2) NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "width_cm", "DECIMAL(10,2) NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "height_cm", "DECIMAL(10,2) NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "weight_g", "DECIMAL(10,2) NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "color", "VARCHAR(128) NOT NULL DEFAULT ''");
+  await ensureMysqlColumn("asset_variants", "vehicle_brand", "VARCHAR(128) NOT NULL DEFAULT ''");
+  await ensureMysqlColumn("asset_variants", "material_text", "VARCHAR(128) NOT NULL DEFAULT ''");
+  await ensureMysqlColumn("asset_variants", "quantity_text", "VARCHAR(64) NOT NULL DEFAULT ''");
+  await ensureMysqlColumn("asset_variants", "tag_style", "VARCHAR(32) NOT NULL DEFAULT 'traffic'");
+  await ensureMysqlColumn("asset_variants", "price_index", "DECIMAL(10,4) NOT NULL DEFAULT 1.0000");
+  await ensureMysqlColumn("asset_variants", "internal_price", "DECIMAL(10,2) NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "ozon_price", "DECIMAL(10,2) NOT NULL DEFAULT 0");
+  await ensureMysqlColumn("asset_variants", "ozon_old_price", "DECIMAL(10,2) NOT NULL DEFAULT 0");
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS asset_variant_ai_cache (
+      id BIGINT PRIMARY KEY AUTO_INCREMENT,
+      cache_key VARCHAR(128) NOT NULL,
+      kind VARCHAR(64) NOT NULL DEFAULT '',
+      response_json LONGTEXT NULL,
+      provider VARCHAR(64) NOT NULL DEFAULT '',
+      status VARCHAR(32) NOT NULL DEFAULT 'ready',
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_asset_variant_ai_cache_key (cache_key),
+      INDEX idx_asset_variant_ai_cache_kind (kind, updated_at)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS asset_variant_video_cache (
+      id BIGINT PRIMARY KEY AUTO_INCREMENT,
+      source_hash VARCHAR(128) NOT NULL,
+      recipe_version VARCHAR(64) NOT NULL DEFAULT '',
+      publish_url TEXT NOT NULL,
+      preview_url TEXT NULL,
+      original_name VARCHAR(255) NOT NULL DEFAULT 'shop-video.mp4',
+      metadata_json LONGTEXT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_asset_variant_video_cache (source_hash, recipe_version),
+      INDEX idx_asset_variant_video_cache_updated (updated_at)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS asset_variant_jobs (
+      id BIGINT PRIMARY KEY AUTO_INCREMENT,
+      job_no VARCHAR(64) NOT NULL,
+      job_type VARCHAR(64) NOT NULL DEFAULT 'publish_selection',
+      status VARCHAR(32) NOT NULL DEFAULT 'queued',
+      product_id BIGINT NULL,
+      batch_id VARCHAR(128) NOT NULL DEFAULT '',
+      total_count INT NOT NULL DEFAULT 0,
+      success_count INT NOT NULL DEFAULT 0,
+      failed_count INT NOT NULL DEFAULT 0,
+      request_json LONGTEXT NULL,
+      result_json LONGTEXT NULL,
+      error_json LONGTEXT NULL,
+      current_stage VARCHAR(64) NOT NULL DEFAULT '',
+      progress_json LONGTEXT NULL,
+      created_by_person_id BIGINT NULL,
+      started_at TIMESTAMP NULL,
+      finished_at TIMESTAMP NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_asset_variant_jobs_no (job_no),
+      INDEX idx_asset_variant_jobs_status (status, created_at),
+      INDEX idx_asset_variant_jobs_product (product_id, created_at)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  await ensureMysqlColumn("asset_variant_jobs", "current_stage", "VARCHAR(64) NOT NULL DEFAULT ''");
+  await ensureMysqlColumn("asset_variant_jobs", "progress_json", "LONGTEXT NULL");
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS generated_titles (
       id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -696,7 +1536,8 @@ async function ensureVehicleSeedData() {
   }
 }
 
-async function generateVariantImages({ material, shopDir, watermark, tailImageUrl, mainImagePlan, batchId, shopId }) {
+async function generateVariantImages({ material, shopDir, watermark, tailImageUrl, mainImagePlan, batchId, shopId, sourceTitle = "", variantTitle = "", throwIfCancelled = null }) {
+  await throwIfCancelled?.();
   const images = [];
   const mainDir = path.join(shopDir, "images", "main");
   const detailDir = path.join(shopDir, "images", "details");
@@ -707,33 +1548,70 @@ async function generateVariantImages({ material, shopDir, watermark, tailImageUr
 
   const mainOutput = path.join(mainDir, "main-01.jpg");
   const mainBuffer = await readImageBuffer(material.mainImage);
+  await throwIfCancelled?.();
   if (mainImagePlan === "original") {
     await sharp(mainBuffer).rotate().jpeg({ quality: 92 }).toFile(mainOutput);
+  } else if (mainImagePlan === "ai_similar") {
+    const edited = await generateAiSimilarMainImage({
+      mainBuffer,
+      material,
+      sourceTitle,
+      variantTitle
+    });
+    await sharp(edited).rotate().jpeg({ quality: 92 }).toFile(mainOutput);
   } else {
     const mainImage = await applyWatermark(mainBuffer, watermark);
     await mainImage.jpeg({ quality: 92 }).toFile(mainOutput);
   }
-  images.push(await imageResult(mainOutput, "main", 1, { batchId, shopId }));
+  images.push(await imageResult(mainOutput, "main", 1, { batchId, shopId, sourceTitle, variantTitle }));
+  await throwIfCancelled?.();
 
-  const detailSources = [...material.detailImages];
+  const detailSources = material.detailImages.length ? [...material.detailImages] : [material.mainImage].filter(Boolean);
 
-  for (let index = 0; index < detailSources.length; index += 1) {
-    const source = detailSources[index];
+  const detailImages = await mapWithConcurrency(detailSources, ASSET_IMAGE_CONCURRENCY, async (source, index) => {
+    await throwIfCancelled?.();
     const output = path.join(detailDir, `detail-${String(index + 1).padStart(2, "0")}.jpg`);
     const buffer = await readImageBuffer(source);
+    await throwIfCancelled?.();
     const detailImage = await applyWatermark(buffer, watermark);
     await detailImage.jpeg({ quality: 92 }).toFile(output);
-    images.push(await imageResult(output, "detail", index + 1, { batchId, shopId }));
-  }
+    await throwIfCancelled?.();
+    return imageResult(output, "detail", index + 1, { batchId, shopId, sourceTitle, variantTitle });
+  });
+  images.push(...detailImages);
+  await throwIfCancelled?.();
 
   if (tailImageUrl) {
     const output = path.join(tailDir, `tail-01.jpg`);
     const buffer = await readImageBuffer(tailImageUrl);
+    await throwIfCancelled?.();
     const tailImage = await applyWatermark(buffer, watermark);
     await tailImage.jpeg({ quality: 92 }).toFile(output);
-    images.push(await imageResult(output, "tail", 1, { batchId, shopId }));
+    images.push(await imageResult(output, "tail", 1, { batchId, shopId, sourceTitle, variantTitle }));
   }
   return images;
+}
+
+async function generateAiSimilarMainImage({ mainBuffer, material, sourceTitle = "", variantTitle = "" }) {
+  const referencePng = await sharp(mainBuffer).rotate().png().toBuffer();
+  const prompt = [
+    "Use the uploaded image as a reference and create a similar but not identical e-commerce main image.",
+    "Keep the same product category, visual hierarchy, premium commercial ad feeling, and marketplace-ready 3:4 composition.",
+    "Do not copy the exact original image. Recompose lighting, background, product angle, and typography while preserving the selling intent.",
+    "For Ozon Russian market automotive accessory listing: luxury city or studio scene, clear product focus, high contrast, realistic materials.",
+    sourceTitle ? `Source product title: ${sourceTitle}.` : "",
+    variantTitle ? `Target listing title: ${variantTitle}.` : "",
+    material?.description ? `Product notes: ${cleanText(material.description, 400)}.` : "",
+    material?.tags ? `Keywords: ${cleanText(material.tags, 300)}.` : ""
+  ].filter(Boolean).join("\n");
+
+  return editOpenAiImage({
+    imageBuffer: referencePng,
+    filename: "main-reference.png",
+    contentType: "image/png",
+    prompt,
+    ratio: "3:4"
+  });
 }
 
 async function storeTailTemplateImage(source, name) {
@@ -742,7 +1620,7 @@ async function storeTailTemplateImage(source, name) {
   if (/^data:image\//i.test(text)) {
     await fs.mkdir(TAIL_TEMPLATE_ROOT, { recursive: true });
     const match = text.match(/^data:image\/([a-zA-Z0-9.+-]+);base64,(.+)$/);
-    if (!match) throw new Error("尾图模板图片格式不正确");
+    if (!match) throw new Error("Invalid asset variant file URL");
     const ext = imageExtension(match[1]);
     const filename = `${Date.now().toString(36)}-${sanitizeFilename(name).slice(0, 40)}.${ext}`;
     const filePath = path.join(TAIL_TEMPLATE_ROOT, filename);
@@ -763,7 +1641,13 @@ function imageExtension(mimePart) {
 async function generateTitleCandidates(material, shop) {
   try {
     const prompt = buildTitleGenerationPrompt(material, shop);
-    const result = await chatWithAiProvider({ prompt, temperature: 0.35, maxTokens: 900 });
+    const result = await cachedAiCall({
+      kind: "asset_variant_title",
+      cacheInput: { prompt },
+      provider: "",
+      request: { prompt, temperature: 0.35, maxTokens: 900 },
+      maxAttempts: 2
+    });
     return normalizeTitleCandidateObject(parseJsonFromText(result.content), material, shop);
   } catch {
     return Object.fromEntries(TITLE_STYLES.map((style) => [style, fallbackTitle(material, style, shop)]));
@@ -813,13 +1697,42 @@ async function insertGeneratedTitleCandidates(variantId, shopId, candidates) {
   }
 }
 
+async function cachedAiCall({ kind = "general", cacheInput = {}, provider = "", request = {}, maxAttempts = 2 } = {}) {
+  const cacheKey = stableHash({ kind, provider, cacheInput });
+  const rows = await mysqlQuery(`
+    SELECT response_json
+    FROM asset_variant_ai_cache
+    WHERE cache_key = ? AND status = 'ready'
+    LIMIT 1
+  `, [cacheKey]).catch(() => []);
+  const cached = parseJson(rows[0]?.response_json, null);
+  if (cached?.content) return { ...cached, cached: true };
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= Math.max(1, Number(maxAttempts || 1)); attempt += 1) {
+    try {
+      const result = await chatWithAiProvider(request);
+      await mysqlExecute(`
+        INSERT INTO asset_variant_ai_cache (cache_key, kind, response_json, provider, status)
+        VALUES (?, ?, ?, ?, 'ready')
+        ON DUPLICATE KEY UPDATE response_json = VALUES(response_json), provider = VALUES(provider), status = 'ready', updated_at = CURRENT_TIMESTAMP
+      `, [cacheKey, kind, JSON.stringify(result || {}), provider || request.provider || "default"]).catch(() => null);
+      return result;
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts) await sleep(400 * attempt);
+    }
+  }
+  throw lastError || new Error("AI request failed");
+}
+
 async function applyWatermark(sourceBuffer, watermark) {
   if (!watermark?.logoPath && !watermark?.logoUrl && !watermark?.logo_url) return sharp(sourceBuffer).rotate();
   const base = sharp(sourceBuffer).rotate();
   const metadata = await base.metadata();
   const baseWidth = Number(metadata.width || 0);
   const baseHeight = Number(metadata.height || 0);
-  if (!baseWidth || !baseHeight) throw new Error("无法识别图片尺寸");
+  if (!baseWidth || !baseHeight) throw new Error("闂佸搫鍟版慨鐢垫兜閸撲焦瀚氶柛鈩冾殔閻掑ジ鏌涢妷銉モ挃濠⒀勭墱娴滄悂宕崟闈涙");
 
   const watermarkBuffer = await readImageBuffer(watermark.logoPath || watermark.logoUrl || watermark.logo_url);
   const targetWidth = Math.max(1, Math.round(baseWidth * clamp(Number(watermark.sizePercent || watermark.size_percent || 22), 5, 60) / 100));
@@ -869,23 +1782,833 @@ function watermarkRect(baseWidth, baseHeight, width, height, position, margin, x
   };
 }
 
-async function ensureAssetVariantListingTemplate(connection, variant, session) {
-  const name = "素材裂变导入模板";
+async function loadAssetVariantMediaRows(connection, variant) {
+  const sql = `
+    SELECT *
+    FROM listing_media_assets
+    WHERE source_module = 'asset_variant'
+      AND status <> 'deleted'
+      AND batch_id = ?
+      AND (shop_id = ? OR shop_id IS NULL)
+    ORDER BY FIELD(role, 'main', 'detail', 'tail', 'video'), sort_order ASC, id ASC
+  `;
+  const params = [variant.batch_id || "", Number(variant.shop_id || 0)];
+  const rows = connection
+    ? (await connection.execute(sql, params))[0]
+    : await mysqlQuery(sql, params);
+  return Array.isArray(rows) ? rows : [];
+}
+
+function assetMediaUrl(item = {}) {
+  return item.publish_url || item.publishUrl || item.url || item.preview_url || item.previewUrl || item.outputPath || item.local_path || item.localPath || "";
+}
+
+function assetVariantImageItems(variant, mediaRows = []) {
+  const fromJson = parseJson(variant.images_json, []).map((image, index) => ({
+    url: assetMediaUrl(image),
+    preview_url: image.previewUrl || image.preview_url || image.url || "",
+    publish_url: image.publishUrl || image.publish_url || image.url || "",
+    type: image.type || image.role || "detail",
+    role: image.type || image.role || "detail",
+    name: image.name || image.original_name || "",
+    outputPath: image.outputPath || image.output_path || "",
+    localListingPath: image.localListingPath || image.local_listing_path || image.local_path || "",
+    sort_order: Number(image.sortOrder || image.sort_order || index + 1)
+  }));
+  const fromMedia = mediaRows
+    .filter((row) => String(row.media_type || "").toLowerCase() !== "video" && String(row.role || "").toLowerCase() !== "video")
+    .map((row, index) => ({
+      url: assetMediaUrl(row),
+      preview_url: row.preview_url || "",
+      publish_url: row.publish_url || "",
+      type: row.role || "detail",
+      role: row.role || "detail",
+      name: row.original_name || row.storage_name || "",
+      outputPath: row.source_path || "",
+      localListingPath: row.local_path || "",
+      sort_order: Number(row.sort_order || index + 1)
+    }));
+  const seen = new Set();
+  return [...fromJson, ...fromMedia].filter((image) => {
+    const url = String(image.url || "").trim();
+    if (!url || seen.has(url)) return false;
+    seen.add(url);
+    return true;
+  });
+}
+
+function assetVariantVideoItems(mediaRows = []) {
+  return mediaRows
+    .filter((row) => String(row.media_type || "").toLowerCase() === "video" || String(row.role || "").toLowerCase() === "video")
+    .map((row, index) => ({
+      url: assetMediaUrl(row),
+      preview_url: row.preview_url || "",
+      publish_url: row.publish_url || "",
+      name: row.original_name || row.storage_name || `video-${index + 1}`,
+      sort_order: Number(row.sort_order || index + 1)
+    }))
+    .filter((item) => item.url);
+}
+
+function normalizeGeneratedVideoForResponse(video = {}) {
+  const url = video.publish_url || video.publishUrl || video.url || "";
+  const previewUrl = video.preview_url || video.previewUrl || video.url || "";
+  return {
+    id: video.id || `server-video-${Date.now().toString(36)}`,
+    name: video.name || video.original_name || "shop-video.mp4",
+    url,
+    previewUrl,
+    localUrl: previewUrl,
+    publishUrl: video.publish_url || video.publishUrl || url,
+    size: Number(video.file_size || video.size || 0),
+    contentType: video.mime_type || video.contentType || "video/mp4"
+  };
+}
+
+async function ensureAssetVariantVideoFromImages(connection, variant = {}, images = [], context = {}) {
+  return assetVideoLimiter(() => ensureAssetVariantVideoFromImagesUnsafe(connection, variant, images, context));
+}
+
+async function ensureAssetVariantVideoFromImagesUnsafe(connection, variant = {}, images = [], context = {}) {
+  await context.throwIfCancelled?.();
+  const existingRows = await loadAssetVariantMediaRows(connection, variant);
+  const existingVideos = assetVariantVideoItems(existingRows.filter(isReusableAssetVideoRow));
+  if (existingVideos.length) return existingVideos[0];
+
+  const sourceImage = images.find((image) => String(image.role || image.type || "").toLowerCase() === "main") ||
+    images.find((image) => String(image.role || image.type || "").toLowerCase() === "tail") ||
+    images.find((image) => assetMediaUrl(image));
+  if (!sourceImage) return null;
+
+  const sourcePath = resolveLocalAssetPath(sourceImage.localListingPath || sourceImage.local_path || sourceImage.outputPath || sourceImage.output_path || sourceImage.url);
+  if (!sourcePath || !fsSync.existsSync(sourcePath)) return null;
+  await context.throwIfCancelled?.();
+
+  const variantDir = resolveLocalAssetPath(variant.output_dir || "");
+  if (!variantDir) return null;
+  const recipe = serverVideoRecipe();
+  const sourceHash = await fileSha256(sourcePath).catch(() => "");
+  if (sourceHash) {
+    const cachedRows = await mysqlQuery(`
+      SELECT publish_url, preview_url, original_name, metadata_json
+      FROM asset_variant_video_cache
+      WHERE source_hash = ? AND recipe_version = ?
+      LIMIT 1
+    `, [sourceHash, recipe.version]).catch(() => []);
+    const cached = cachedRows[0];
+    if (cached?.publish_url) {
+      return {
+        url: cached.publish_url,
+        preview_url: cached.preview_url || cached.publish_url,
+        publish_url: cached.publish_url,
+        name: cached.original_name || "shop-video.mp4",
+        sort_order: 1,
+        cached: true
+      };
+    }
+  }
+  await context.throwIfCancelled?.();
+  const videoDir = path.join(variantDir, "videos");
+  await fs.mkdir(videoDir, { recursive: true });
+  const videoPath = path.join(videoDir, "shop-video.mp4");
+  let generatedBy = "server_ffmpeg_fast";
+  if (ASSET_FAST_VIDEO) {
+    try {
+      await renderServerVideoFast(sourcePath, videoPath);
+      await context.throwIfCancelled?.();
+    } catch (error) {
+      generatedBy = "server_ffmpeg_frames";
+      console.warn("fast asset video generation failed, fallback to frame renderer:", error.message || error);
+      await renderServerVideoWithFrames(sourcePath, videoDir, videoPath, context);
+    }
+  } else {
+    generatedBy = "server_ffmpeg_frames";
+    await renderServerVideoWithFrames(sourcePath, videoDir, videoPath, context);
+  }
+  await context.throwIfCancelled?.();
+
+  const asset = await registerListingMediaAssetFromFile({
+    filePath: videoPath,
+    source_module: "asset_variant",
+    source_id: `${variant.batch_id || ""}:${variant.shop_id || ""}:video:1`,
+    batch_id: variant.batch_id || "",
+    shop_id: Number(variant.shop_id || 0) || null,
+    media_type: "video",
+    role: "video",
+    sort_order: 1,
+    original_name: "shop-video.mp4",
+    mime_type: "video/mp4",
+    metadata: {
+      generatedBy,
+      videoRecipe: recipe,
+      assetVariantId: Number(variant.id || 0),
+      sourceImage: sourceImage.outputPath || sourceImage.url || ""
+    }
+  });
+  if (sourceHash && asset.publish_url) {
+    await mysqlExecute(`
+      INSERT INTO asset_variant_video_cache (source_hash, recipe_version, publish_url, preview_url, original_name, metadata_json)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE publish_url = VALUES(publish_url), preview_url = VALUES(preview_url),
+        original_name = VALUES(original_name), metadata_json = VALUES(metadata_json), updated_at = CURRENT_TIMESTAMP
+    `, [
+      sourceHash,
+      recipe.version,
+      asset.publish_url || asset.publishUrl || asset.url || "",
+      asset.preview_url || asset.previewUrl || "",
+      asset.original_name || asset.storage_name || "shop-video.mp4",
+      JSON.stringify({ generatedBy, videoRecipe: recipe, sourceImage: sourceImage.outputPath || sourceImage.url || "" })
+    ]).catch(() => null);
+  }
+
+  return {
+    url: asset.publish_url || asset.publishUrl || asset.url || "",
+    preview_url: asset.preview_url || asset.previewUrl || "",
+    publish_url: asset.publish_url || asset.publishUrl || "",
+    name: asset.original_name || asset.storage_name || "shop-video.mp4",
+    sort_order: 1
+  };
+}
+
+async function renderServerVideoFast(sourcePath, videoPath) {
+  const frameCount = SERVER_VIDEO_FPS * SERVER_VIDEO_DURATION_SECONDS;
+  await runFfmpeg([
+    "-y",
+    "-loop", "1",
+    "-i", sourcePath,
+    "-f", "lavfi",
+    "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+    "-vf",
+    [
+      `scale=${SERVER_VIDEO_WIDTH}:${SERVER_VIDEO_HEIGHT}:force_original_aspect_ratio=increase`,
+      `crop=${SERVER_VIDEO_WIDTH}:${SERVER_VIDEO_HEIGHT}`,
+      `zoompan=z='min(zoom+0.00045,1.06)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${SERVER_VIDEO_WIDTH}x${SERVER_VIDEO_HEIGHT}:fps=${SERVER_VIDEO_FPS}`,
+      "format=yuv420p"
+    ].join(","),
+    "-frames:v", String(frameCount),
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "21",
+    "-c:a", "aac",
+    "-b:a", "96k",
+    "-shortest",
+    "-movflags", "+faststart",
+    videoPath
+  ]);
+}
+
+async function renderServerVideoWithFrames(sourcePath, videoDir, videoPath, context = {}) {
+  const frameDir = path.join(videoDir, "frames");
+  await fs.rm(frameDir, { recursive: true, force: true }).catch(() => {});
+  await fs.mkdir(frameDir, { recursive: true });
+  try {
+    await renderServerVideoFrames(sourcePath, frameDir, context);
+    await context.throwIfCancelled?.();
+    await runFfmpeg([
+      "-y",
+      "-framerate", String(SERVER_VIDEO_FPS),
+      "-i", path.join(frameDir, "frame-%04d.jpg"),
+      "-f", "lavfi",
+      "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+      "-r", String(SERVER_VIDEO_FPS),
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-crf", "21",
+      "-pix_fmt", "yuv420p",
+      "-c:a", "aac",
+      "-b:a", "96k",
+      "-shortest",
+      "-movflags", "+faststart",
+      videoPath
+    ]);
+  } finally {
+    await fs.rm(frameDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function renderServerVideoFrames(sourcePath, frameDir, context = {}) {
+  const frameCount = SERVER_VIDEO_FPS * SERVER_VIDEO_DURATION_SECONDS;
+  const source = sharp(sourcePath).rotate();
+  const metadata = await source.metadata();
+  const sourceWidth = Number(metadata.width || SERVER_VIDEO_WIDTH);
+  const sourceHeight = Number(metadata.height || SERVER_VIDEO_HEIGHT);
+  const sourceBuffer = await source.toBuffer();
+
+  for (let index = 0; index < frameCount; index += 1) {
+    if (index % 6 === 0) await context.throwIfCancelled?.();
+    const progress = index / Math.max(1, frameCount - 1);
+    const eased = progress < 0.5 ? 2 * progress * progress : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+    const scale = 1.04 + Math.max(0, Math.sin(progress * Math.PI * 10)) * 0.018 + eased * 0.035;
+    const coverScale = Math.max(SERVER_VIDEO_WIDTH / sourceWidth, SERVER_VIDEO_HEIGHT / sourceHeight) * scale;
+    const coverWidth = Math.max(SERVER_VIDEO_WIDTH, Math.round(sourceWidth * coverScale));
+    const coverHeight = Math.max(SERVER_VIDEO_HEIGHT, Math.round(sourceHeight * coverScale));
+    const shakeX = Math.sin(progress * Math.PI * 12) * SERVER_VIDEO_WIDTH * 0.004;
+    const shakeY = Math.cos(progress * Math.PI * 10) * SERVER_VIDEO_HEIGHT * 0.003;
+    const left = clamp(Math.round((coverWidth - SERVER_VIDEO_WIDTH) / 2 - shakeX), 0, Math.max(0, coverWidth - SERVER_VIDEO_WIDTH));
+    const top = clamp(Math.round((coverHeight - SERVER_VIDEO_HEIGHT) / 2 - shakeY), 0, Math.max(0, coverHeight - SERVER_VIDEO_HEIGHT));
+    const frameBase = await sharp(sourceBuffer)
+      .resize(coverWidth, coverHeight, { fit: "fill" })
+      .extract({ left, top, width: SERVER_VIDEO_WIDTH, height: SERVER_VIDEO_HEIGHT })
+      .jpeg({ quality: 94 })
+      .toBuffer();
+    const overlays = [
+      { input: Buffer.from(serverVideoShineSvg(progress)), left: 0, top: 0 },
+      { input: Buffer.from(serverVideoVignetteSvg()), left: 0, top: 0 }
+    ];
+    await sharp({
+      create: {
+        width: SERVER_VIDEO_WIDTH,
+        height: SERVER_VIDEO_HEIGHT,
+        channels: 3,
+        background: "#f8fafc"
+      }
+    })
+      .composite([{ input: frameBase, left: 0, top: 0 }, ...overlays])
+      .jpeg({ quality: 88, mozjpeg: true })
+      .toFile(path.join(frameDir, `frame-${String(index + 1).padStart(4, "0")}.jpg`));
+  }
+}
+
+function serverVideoRecipe() {
+  return {
+    version: "server-video-recipe-v3-fast",
+    width: SERVER_VIDEO_WIDTH,
+    height: SERVER_VIDEO_HEIGHT,
+    fps: SERVER_VIDEO_FPS,
+    durationSeconds: SERVER_VIDEO_DURATION_SECONDS,
+    motion: "fast_zoom",
+    effects: ASSET_FAST_VIDEO ? ["ken_burns_zoom"] : ["shine", "soft_vignette"],
+    format: "mp4_h264_aac"
+  };
+}
+
+function isReusableAssetVideoRow(row = {}) {
+  if (String(row.media_type || "").toLowerCase() !== "video" && String(row.role || "").toLowerCase() !== "video") return false;
+  const metadata = parseJson(row.metadata_json, {});
+  if (String(metadata.generatedBy || "").startsWith("server_ffmpeg")) {
+    return ["server-video-recipe-v2", "server-video-recipe-v3-fast"].includes(metadata.videoRecipe?.version);
+  }
+  return true;
+}
+
+function serverVideoShineSvg(progress) {
+  const width = SERVER_VIDEO_WIDTH;
+  const height = SERVER_VIDEO_HEIGHT;
+  const sweep = ((progress * 1.35) % 1.15) - 0.25;
+  const x = Math.round(width * sweep);
+  return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="shine" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="white" stop-opacity="0"/>
+        <stop offset="0.45" stop-color="white" stop-opacity="0.42"/>
+        <stop offset="1" stop-color="white" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <g transform="translate(${x} ${Math.round(height * 0.48)}) rotate(-12.6)">
+      <rect x="${-Math.round(width * 0.12)}" y="${-height}" width="${Math.round(width * 0.28)}" height="${height * 2}" fill="url(#shine)"/>
+    </g>
+  </svg>`;
+}
+
+function serverVideoVignetteSvg() {
+  const width = SERVER_VIDEO_WIDTH;
+  const height = SERVER_VIDEO_HEIGHT;
+  return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="shade" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="white" stop-opacity="0.10"/>
+        <stop offset="0.52" stop-color="white" stop-opacity="0"/>
+        <stop offset="1" stop-color="#0f172a" stop-opacity="0.10"/>
+      </linearGradient>
+    </defs>
+    <rect width="${width}" height="${height}" fill="url(#shade)"/>
+  </svg>`;
+}
+
+function runFfmpeg(args = []) {
+  return new Promise((resolve, reject) => {
+    const ffmpegPath = ffmpegInstaller?.path;
+    if (!ffmpegPath || !fsSync.existsSync(ffmpegPath)) {
+      reject(new Error("ffmpeg executable not found"));
+      return;
+    }
+    const child = spawn(ffmpegPath, args, { windowsHide: true });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(true);
+      else reject(new Error(stderr.slice(-1000) || `ffmpeg exited with code ${code}`));
+    });
+  });
+}
+
+function assetVariantModelName(variant) {
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const typeId = Number(variant.ozon_type_id || 0) || "asset";
+  const shopId = Number(variant.shop_id || 0) || "S";
+  const random = Math.random().toString(36).slice(2, 7).toUpperCase();
+  return `MZ-${today}-${typeId}-${shopId}-${random}`;
+}
+
+function assetVariantQuantity(value) {
+  return Number(String(value || "").match(/\d+/)?.[0] || 1);
+}
+
+
+async function assetVariantDescription(variant, tags = []) {
+  const title = cleanText(variant.variant_title || variant.source_title || "", 500);
+  const material = russianMaterialText(variant.material_text);
+  const color = russianColorText(variant.color);
+  const vehicle = extractLikelyCarModel(String(variant.variant_title || "") + " " + String(variant.source_title || "")) || "";
+  try {
+    const request = {
+      provider: "deepseek",
+      messages: [
+        { role: "system", content: [
+          "Write only natural buyer-facing Russian product prose for Ozon.",
+          "Do not include shop names, hashtags, tag lists, keyword dumps, or phrases like 'ключевые особенности', 'теги', 'ключевые слова'.",
+          "Do not paste comma-separated tags into the description.",
+          "Every sentence must explain real product information: purpose, material, fit, protection, use scenario, package contents.",
+          "No Chinese or English except brand/model names and material abbreviations such as TPU or ABS."
+        ].join(" ") },
+        { role: "user", content: [
+          "Write a natural Ozon short description in Russian, 100-150 words.",
+          "Title: " + title,
+          "Vehicle/model: " + vehicle,
+          "Material: " + material,
+          "Color: " + color,
+          "Semantic tags for context only, do not copy them literally: " + tags.join(" ")
+        ].join("\n") }
+      ],
+      response_format: { type: "text" }
+    };
+    const result = await cachedAiCall({
+      kind: "asset_variant_description",
+      cacheInput: request,
+      provider: "deepseek",
+      request,
+      maxAttempts: 2
+    });
+    const text = sanitizeOzonDescriptionText(cleanText(result.content || "", 1400));
+    if (russianWordCount(text) >= 70 && !looksBrokenGeneratedText(text) && !hasCjkText(text)) return text;
+  } catch (error) {
+    console.warn("asset variant description AI failed", error?.message || error);
+  }
+  return fallbackRussianDescription(variant, tags);
+}
+
+function russianWordCount(value) {
+  return String(value || "").split(/\s+/).filter(Boolean).length;
+}
+
+function sanitizeOzonDescriptionText(value) {
+  let text = String(value || "").replace(/\s+/g, " ").trim();
+  text = text
+    .replace(/Ключевые особенности\s*:\s*[^.?!]+[.?!]?/giu, "")
+    .replace(/Ключевые слова\s*:\s*[^.?!]+[.?!]?/giu, "")
+    .replace(/Теги\s*:\s*[^.?!]+[.?!]?/giu, "")
+    .replace(/Хэштеги\s*:\s*[^.?!]+[.?!]?/giu, "");
+  text = text.replace(/#[\p{L}\p{N}_-]+/gu, "");
+  text = text.replace(/\b(?:ruvibemart|ruvibe\s*mart)\b[,;\s]*/giu, "");
+  text = text.replace(/\s*,\s*,+/g, ", ").replace(/\s{2,}/g, " ").trim();
+  text = text.replace(/\s*,\s*,+/g, ", ").replace(/\s{2,}/g, " ").trim();
+  return text;
+}
+
+function fallbackRussianDescription(variant, tags = []) {
+  const material = russianMaterialText(variant.material_text);
+  const color = russianColorText(variant.color);
+  const vehicle = extractLikelyCarModel(variant.variant_title || variant.source_title || variant.vehicle_model || "") || "автомобиля";
+  const productType = detectProductType(variant.variant_title || variant.source_title || "", variant.description || "");
+  return sanitizeOzonDescriptionText([
+    `${productType} для ${vehicle} подходит для ежедневного использования, аккуратной защиты и удобного хранения.`,
+    `Материал ${material} помогает снизить риск царапин, потертостей и следов от постоянного контакта с другими предметами.`,
+    `Цвет ${color} выглядит сдержанно и легко сочетается с интерьером автомобиля и личными аксессуарами.`,
+    "Форма рассчитана на комфортный хват, быстрый доступ к кнопкам и уверенное использование в дороге, на парковке и дома.",
+    "Описание помогает покупателю понять назначение товара, ключевые преимущества, сценарии применения и совместимость с автомобилем.",
+    "Подходит как практичный автоаксессуар и небольшой подарок водителю."
+  ].join(" "));
+}
+
+function russianMaterialText(value) {
+  const text = String(value || "").trim();
+  if (/tpu|тпу|polyurethane|полиуретан|热塑|弹性体/i.test(text)) return "TPU";
+  if (/abs/i.test(text)) return "ABS-пластик";
+  if (/silicone|силикон|硅胶/i.test(text)) return "силикон";
+  if (/stainless|steel|нержав|不锈钢|钢/i.test(text)) return "нержавеющая сталь";
+  if (/leather|кожа|皮|牛皮/i.test(text)) return "искусственная кожа";
+  if (/plastic|пластик|塑料/i.test(text)) return "пластик";
+  return text && !/[\u4e00-\u9fff]/.test(text) && !looksBrokenGeneratedText(text) ? text : "прочный материал";
+}
+
+function russianColorText(value) {
+  const text = String(value || "").trim();
+  if (/black|черн|黑/i.test(text)) return "черный";
+  if (/white|бел|白/i.test(text)) return "белый";
+  if (/silver|серебр|gray|grey|серый|银|灰/i.test(text)) return "серебристый";
+  if (/red|красн|红/i.test(text)) return "красный";
+  if (/blue|син|голуб|蓝/i.test(text)) return "синий";
+  if (/gold|золот|金/i.test(text)) return "золотистый";
+  if (/transparent|прозрач|透明/i.test(text)) return "прозрачный";
+  return text && !/[\u4e00-\u9fff]/.test(text) && !looksBrokenGeneratedText(text) ? text : "черный";
+}
+
+function assetVariantDimensions(variant) {
+  return {
+    length_cm: numberValue(variant.length_cm),
+    width_cm: numberValue(variant.width_cm),
+    height_cm: numberValue(variant.height_cm),
+    weight_g: numberValue(variant.weight_g)
+  };
+}
+
+
+function assetVariantRichContentJson(description = "", images = [], title = "") {
+  const tailImage = images.find((image) => String(image.role || image.type || "").toLowerCase() === "tail");
+  const imageUrl = assetMediaUrl(tailImage || images.find((image) => assetMediaUrl(image)) || {});
+  const cleanDescription = sanitizeOzonDescriptionText(description);
+  if (!imageUrl || !cleanDescription) return "";
+  return JSON.stringify({
+    content: [{ widgetName: "raShowcase", type: "billboard", blocks: [{
+      imgLink: "",
+      img: { src: imageUrl, srcMobile: imageUrl, alt: "", position: "width_full", positionMobile: "width_full", widthMobile: 1024, heightMobile: 1536 },
+      title: { items: [{ type: "text", content: cleanRussianTitle(title || "Автомобильный аксессуар", 120) }], size: "size4", align: "left", color: "color1" },
+      text: { size: "size2", align: "left", color: "color1", items: [{ type: "text", content: cleanDescription }] }
+    }] }],
+    version: 0.3
+  });
+}
+
+function assetVariantAttributes(variant, tags = [], description = "", modelName = "", richContentJson = "") {
+  const cleanDescription = sanitizeOzonDescriptionText(description);
+  return [
+    { name: "Brand", value: "No brand", required: true, source: "asset_variant" },
+    { name: "Model name", value: modelName, required: true, attribute_id: 9048, source: "asset_variant" },
+    { name: "Product tags", value: tags.join(" "), values: tags, required: false, source: "asset_variant" },
+    { name: "Description", value: cleanDescription, required: false, attribute_id: 4191, type: "textarea", source: "asset_variant" },
+    { name: "Rich content JSON", value: richContentJson, required: false, attribute_id: 11254, type: "rich_json", source: "asset_variant" },
+    { name: "Color", value: variant.color || "", required: false, source: "asset_variant" },
+    { name: "Material", value: variant.material_text || "", required: false, source: "asset_variant" },
+    { name: "Quantity", value: variant.quantity_text || "", required: false, source: "asset_variant" },
+    { name: "Source", value: "asset-variant-engine", required: false, source: "asset_variant" },
+    { name: "Title style", value: variant.title_style || "", required: false, source: "asset_variant" }
+  ].map((item, index) => ({ ...item, sort_order: index + 1 })).filter((item) => item.value || item.values?.length);
+}
+
+function assetVariantVariantRow(variant, images = [], videos = [], modelName = "") {
+  const dimensions = assetVariantDimensions(variant);
+  const videoUrls = videos.map((item) => item.publish_url || item.url).filter(Boolean);
+  return {
+    id: `asset-variant-${variant.id}`,
+    sku: `AV-${variant.id}-${Date.now().toString(36)}`,
+    offer_id: `AV-${variant.id}-${Date.now().toString(36)}`,
+    name: variant.variant_title || variant.source_title || modelName,
+    title: variant.variant_title || variant.source_title || modelName,
+    images,
+    video_urls: videoUrls,
+    video_cover_urls: videoUrls,
+    price: numberValue(variant.ozon_price || numberValue(variant.internal_price) * 2),
+    old_price: numberValue(variant.ozon_old_price || numberValue(variant.internal_price) * 4),
+    price_strategy_applied: true,
+    color: variant.color || "",
+    vehicle_brand: variant.vehicle_brand || "",
+    spec: modelName,
+    material: variant.material_text || "",
+    quantity: assetVariantQuantity(variant.quantity_text),
+    weight_g: dimensions.weight_g,
+    length_mm: Math.round(dimensions.length_cm * 10),
+    width_mm: Math.round(dimensions.width_cm * 10),
+    height_mm: Math.round(dimensions.height_cm * 10),
+    stock: 0,
+    sort_order: 1
+  };
+}
+
+async function ensureAssetVariantListingTemplateFromPackage(connection, variant, images = [], videos = [], session, descriptionCache = null) {
+  const ozonCategoryId = cleanText(variant.ozon_category_id || "", 128) || "asset-variant";
+  const ozonCategoryName = cleanText(variant.ozon_category_name || "", 500) || "asset variant";
+  const descriptionCategoryId = Number(variant.ozon_description_category_id || 0) || 0;
+  const typeId = Number(variant.ozon_type_id || 0) || 0;
+  const tags = parseJson(variant.tags_json, []);
+  const modelName = assetVariantModelName(variant);
+  const descriptionCacheKey = [
+    Number(variant.source_product_id || 0) || variant.source_title || variant.variant_title || "",
+    variant.material_text || "",
+    variant.color || "",
+    variant.quantity_text || ""
+  ].join("|");
+  let description = descriptionCache?.get(descriptionCacheKey);
+  if (!description) {
+    description = await assetVariantDescription(variant, tags);
+    descriptionCache?.set(descriptionCacheKey, description);
+  }
+  const richContentJson = assetVariantRichContentJson(description, images, variant.variant_title || variant.source_title || "");
+  const dimensions = assetVariantDimensions(variant);
+  const attributes = assetVariantAttributes(variant, tags, description, modelName, richContentJson);
+  const sourceRaw = {
+    asset_variant_id: Number(variant.id),
+    batch_id: variant.batch_id || "",
+    shop_id: Number(variant.shop_id || 0),
+    shop_name: variant.shop_name || "",
+    ozon_category_id: ozonCategoryId,
+    description_category_id: descriptionCategoryId || "",
+    type_id: typeId || "",
+    category_name: ozonCategoryName,
+    price_index: Number(variant.price_index || 1),
+    internal_price: Number(variant.internal_price || 0),
+    ozon_price: Number(variant.ozon_price || 0),
+    ozon_old_price: Number(variant.ozon_old_price || 0)
+  };
+  const editablePayload = {
+    sku: `AV-${variant.id}`,
+    title: variant.variant_title || variant.source_title || "",
+    description,
+    ozon_category_id: ozonCategoryId,
+    description_category_id: descriptionCategoryId || "",
+    type_id: typeId || "",
+    legacy_category_id: ozonCategoryId,
+    category_name: ozonCategoryName,
+    source_raw: sourceRaw,
+    price: {
+      value: Number(variant.ozon_price || Number(variant.internal_price || 0) * 2 || 0),
+      old_price: Number(variant.ozon_old_price || Number(variant.internal_price || 0) * 4 || 0),
+      currency_code: "CNY",
+      strategy_applied: true,
+      vat: "0"
+    },
+    dimensions,
+    logistics: {
+      color: variant.color || "",
+      spec: modelName,
+      model: modelName,
+      material: variant.material_text || "",
+      quantity: assetVariantQuantity(variant.quantity_text)
+    },
+    rich_content_json: richContentJson,
+    rich_content: richContentJson,
+    images,
+    videos,
+    attributes,
+    variants: [assetVariantVariantRow(variant, images, videos, modelName)]
+  };
+  const name = `缂備浇浜慨闈涱焽濡ゅ懎绀岄柛娑卞墰閻熸劙鏌?${variant.batch_id || "batch"}-${variant.shop_name || variant.shop_id || "shop"}-${variant.id}`;
   const [rows] = await connection.execute(`
     SELECT id
     FROM listing_category_templates
-    WHERE source_type = 'asset_variant_engine' AND template_name = ? AND status <> 'deleted'
+    WHERE source_type = 'asset_variant_engine' AND template_name = ? AND ozon_category_id = ? AND status <> 'deleted'
     ORDER BY id ASC
     LIMIT 1
-  `, [name]);
+  `, [name, ozonCategoryId]);
+  if (rows[0]?.id) {
+    await connection.execute(`
+      UPDATE listing_category_templates
+      SET category_name = ?, source_raw_json = ?, editable_payload_json = ?, title = ?, description = ?,
+          attributes_json = ?, images_json = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [
+      ozonCategoryName,
+      JSON.stringify(sourceRaw),
+      JSON.stringify(editablePayload),
+      editablePayload.title,
+      editablePayload.description,
+      JSON.stringify(attributes),
+      JSON.stringify(images),
+      Number(rows[0].id)
+    ]);
+    return Number(rows[0].id);
+  }
+  const [result] = await connection.execute(`
+    INSERT INTO listing_category_templates
+    (ozon_category_id, category_name, template_name, required_attributes_json, ai_rules_json, title_prompt,
+     description_prompt, image_rules_json, source_type, source_raw_json, editable_payload_json, title, description,
+     attributes_json, images_json, created_by_person_id, updated_at)
+    VALUES (?, ?, ?, '[]', '{}', '', '', '{}', 'asset_variant_engine', ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `, [
+    ozonCategoryId,
+    ozonCategoryName,
+    name,
+    JSON.stringify(sourceRaw),
+    JSON.stringify(editablePayload),
+    editablePayload.title,
+    editablePayload.description,
+    JSON.stringify(attributes),
+    JSON.stringify(images),
+    personId(session)
+  ]);
+  return Number(result.insertId);
+}
+
+async function insertListingDraftFromPackage(connection, templateId, variant, images, videos = [], session) {
+  const manualFacts = {
+    source: "asset-variant-engine",
+    asset_variant_id: Number(variant.id),
+    batch_id: variant.batch_id,
+    title_style: variant.title_style,
+    tag_style: variant.tag_style,
+    price_index: Number(variant.price_index || 1),
+    internal_price: Number(variant.internal_price || 0),
+    ozon_price: Number(variant.ozon_price || 0),
+    ozon_old_price: Number(variant.ozon_old_price || 0),
+    tags: parseJson(variant.tags_json, []),
+    ozon_category_id: variant.ozon_category_id || "",
+    description_category_id: Number(variant.ozon_description_category_id || 0) || "",
+    type_id: Number(variant.ozon_type_id || 0) || "",
+    category_name: variant.ozon_category_name || "",
+    shop_id: Number(variant.shop_id),
+    shop_name: variant.shop_name || "",
+    videos
+  };
+  const [result] = await connection.execute(`
+    INSERT INTO listing_drafts
+    (template_id, product_name, internal_code, source_urls_json, source_images_json, cost_price, sale_price,
+     length_cm, width_cm, height_cm, weight_g, color, spec, quantity, manual_facts_json, ai_payload_json,
+     created_by_person_id, updated_at)
+    VALUES (?, ?, ?, '[]', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `, [
+    templateId,
+    variant.variant_title || variant.source_title || `asset variant ${variant.id}`,
+    `AV-${variant.id}`,
+    JSON.stringify(images),
+    Number(variant.internal_price || 0),
+    Number(variant.length_cm || 0),
+    Number(variant.width_cm || 0),
+    Number(variant.height_cm || 0),
+    Number(variant.weight_g || 0),
+    variant.color || "",
+    variant.material_text || "",
+    assetVariantQuantity(variant.quantity_text),
+    JSON.stringify(manualFacts),
+    JSON.stringify({ title: variant.variant_title, description: variant.description_text, videos }),
+    personId(session)
+  ]);
+  return Number(result.insertId);
+}
+
+async function insertListingShopCopyFromPackage(connection, draftId, variant, images, videos = [], session) {
+  const mappedImages = images.map((image, index) => ({
+    url: assetMediaUrl(image),
+    role: image.role || image.type || "",
+    sort_order: Number(image.sort_order || image.sortOrder || index + 1)
+  })).filter((image) => image.url);
+  const mappedVideos = videos.map((video, index) => ({
+    url: assetMediaUrl(video),
+    role: "video",
+    sort_order: Number(video.sort_order || index + 1)
+  })).filter((video) => video.url);
+  const validation = { blocked: false, level: "green", errors: [], warnings: [] };
+  await connection.execute(`
+    INSERT INTO listing_shop_copies
+    (draft_id, shop_id, offer_id, title, price, stock_quantity, watermark_path, images_json, validation_json,
+     status, created_by_person_id, updated_at)
+    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 'prepared', ?, CURRENT_TIMESTAMP)
+  `, [
+    draftId,
+    Number(variant.shop_id),
+    `AV-${variant.id}-${Date.now().toString(36)}`,
+    variant.variant_title || variant.source_title || "",
+    Number(variant.ozon_price || variant.internal_price || 0),
+    variant.watermark_path || "",
+    JSON.stringify([...mappedImages, ...mappedVideos]),
+    JSON.stringify(validation),
+    personId(session)
+  ]);
+}
+
+async function updateAssetVariantPublishState({ variantId = 0, draftId = 0, shopId = 0, status = "", publishResult = null } = {}) {
+  const normalizedStatus = String(status || "").slice(0, 32);
+  if (draftId && shopId) {
+    await mysqlExecute(`
+      UPDATE listing_shop_copies
+      SET status = ?, publish_response_json = ?,
+          published_at = CASE WHEN ? IN ('imported', 'published', 'success') THEN CURRENT_TIMESTAMP ELSE published_at END,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE draft_id = ? AND shop_id = ?
+    `, [
+      normalizedStatus,
+      publishResult ? JSON.stringify(publishResult) : null,
+      normalizedStatus,
+      Number(draftId),
+      Number(shopId)
+    ]);
+  }
+  if (variantId) {
+    await mysqlExecute("UPDATE asset_variants SET status = ? WHERE id = ?", [normalizedStatus || "generated", Number(variantId)]);
+  }
+}
+
+function statusFromOzonPublishResult(result = {}) {
+  const info = result.import_info || result.importInfo || {};
+  const raw = JSON.stringify(info || result || {}).toLowerCase();
+  if (raw.includes("fail") || raw.includes("error") || raw.includes("rejected")) return "failed";
+  if (raw.includes("import") || raw.includes("success") || raw.includes("done")) return "imported";
+  if (raw.includes("pending") || raw.includes("process") || raw.includes("moderation")) return "processing";
+  return result.task_id || result.taskId ? "submitted" : "published";
+}
+
+function firstOzonProductId(source = {}) {
+  const text = JSON.stringify(source || {});
+  const productIdMatch = text.match(/"product_id"\s*:\s*"?(\d+)/i) || text.match(/"ozon_product_id"\s*:\s*"?(\d+)/i);
+  return productIdMatch?.[1] || "";
+}
+
+async function markSourceProductsListed(variantIds = []) {
+  const ids = uniqueNumbers(variantIds);
+  if (!ids.length) return;
+  const rows = await mysqlQuery(`
+    SELECT DISTINCT source_product_id
+    FROM asset_variants
+    WHERE id IN (${ids.map(() => "?").join(",")})
+      AND source_product_id IS NOT NULL
+      AND source_product_id > 0
+  `, ids);
+  const productIds = uniqueNumbers(rows.map((row) => row.source_product_id));
+  if (!productIds.length) return;
+  await mysqlExecute(`
+    UPDATE products
+    SET selection_status = 'listed', updated_at = CURRENT_TIMESTAMP
+    WHERE id IN (${productIds.map(() => "?").join(",")})
+  `, productIds).catch(() => null);
+}
+
+function normalizeProductImageList(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item?.url || item || "").trim()).filter(Boolean);
+  const text = String(value || "").trim();
+  if (!text) return [];
+  const parsed = parseJson(text, null);
+  if (Array.isArray(parsed)) return parsed.map((item) => String(item?.url || item || "").trim()).filter(Boolean);
+  return text.split(/[\\n,;]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+async function ensureAssetVariantListingTemplate(connection, variant, session) {
+  const ozonCategoryId = cleanText(variant.ozon_category_id || "", 128) || "asset-variant";
+  const ozonCategoryName = cleanText(variant.ozon_category_name || "", 500) || "Auto accessories";
+  const descriptionCategoryId = Number(variant.ozon_description_category_id || 0) || 0;
+  const typeId = Number(variant.ozon_type_id || 0) || 0;
+  const name = ozonCategoryId === "asset-variant" ? "Asset variant category" : `Asset variant category ${ozonCategoryName || ozonCategoryId}`;
+  const [rows] = await connection.execute(`
+    SELECT id
+    FROM listing_category_templates
+    WHERE source_type = 'asset_variant_engine' AND template_name = ? AND ozon_category_id = ? AND status <> 'deleted'
+    ORDER BY id ASC
+    LIMIT 1
+  `, [name, ozonCategoryId]);
   if (rows[0]?.id) return Number(rows[0].id);
   const editablePayload = {
     title: variant.variant_title || variant.source_title || "",
     description: variant.description_text || "",
+    ozon_category_id: ozonCategoryId,
+    description_category_id: descriptionCategoryId || "",
+    type_id: typeId || "",
+    price: Number(variant.internal_price || 0),
+    old_price: Number(variant.ozon_old_price || 0),
     images: [],
     attributes: [
-      { name: "素材来源", value: "asset-variant-engine", required: false },
-      { name: "标题风格", value: variant.title_style || "", required: false }
+      { name: "Source", value: "asset-variant-engine", required: false },
+      { name: "Title style", value: variant.title_style || "", required: false },
+      { name: "Tags", value: parseJson(variant.tags_json, []).join(" "), required: false }
     ]
   };
   const [result] = await connection.execute(`
@@ -893,10 +2616,19 @@ async function ensureAssetVariantListingTemplate(connection, variant, session) {
     (ozon_category_id, category_name, template_name, required_attributes_json, ai_rules_json, title_prompt,
      description_prompt, image_rules_json, source_type, source_raw_json, editable_payload_json, title, description,
      attributes_json, images_json, created_by_person_id, updated_at)
-    VALUES ('asset-variant', '素材裂变', ?, '[]', '{}', '', '', '{}', 'asset_variant_engine', ?, ?, ?, ?, ?, '[]', ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, '[]', '{}', '', '', '{}', 'asset_variant_engine', ?, ?, ?, ?, ?, '[]', ?, CURRENT_TIMESTAMP)
   `, [
+    ozonCategoryId,
+    ozonCategoryName,
     name,
-    JSON.stringify({ asset_variant_id: variant.id, batch_id: variant.batch_id }),
+    JSON.stringify({
+      asset_variant_id: variant.id,
+      batch_id: variant.batch_id,
+      ozon_category_id: ozonCategoryId,
+      description_category_id: descriptionCategoryId || "",
+      type_id: typeId || "",
+      category_name: ozonCategoryName
+    }),
     JSON.stringify(editablePayload),
     editablePayload.title,
     editablePayload.description,
@@ -912,7 +2644,16 @@ async function insertListingDraft(connection, templateId, variant, images, sessi
     asset_variant_id: Number(variant.id),
     batch_id: variant.batch_id,
     title_style: variant.title_style,
+    tag_style: variant.tag_style,
+    price_index: Number(variant.price_index || 1),
+    internal_price: Number(variant.internal_price || 0),
+    ozon_price: Number(variant.ozon_price || 0),
+    ozon_old_price: Number(variant.ozon_old_price || 0),
     tags: parseJson(variant.tags_json, []),
+    ozon_category_id: variant.ozon_category_id || "",
+    description_category_id: Number(variant.ozon_description_category_id || 0) || "",
+    type_id: Number(variant.ozon_type_id || 0) || "",
+    category_name: variant.ozon_category_name || "",
     shop_id: Number(variant.shop_id),
     shop_name: variant.shop_name || ""
   };
@@ -921,12 +2662,20 @@ async function insertListingDraft(connection, templateId, variant, images, sessi
     (template_id, product_name, internal_code, source_urls_json, source_images_json, cost_price, sale_price,
      length_cm, width_cm, height_cm, weight_g, color, spec, quantity, manual_facts_json, ai_payload_json,
      created_by_person_id, updated_at)
-    VALUES (?, ?, ?, '[]', ?, 0, 0, 0, 0, 0, 0, '', '', 0, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, '[]', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `, [
     templateId,
-    variant.variant_title || variant.source_title || `素材裂变 ${variant.id}`,
+    variant.variant_title || variant.source_title || `缂備浇浜慨闈涱焽濡ゅ啯鍟戦柛灞捐壘缂?${variant.id}`,
     `AV-${variant.id}`,
     JSON.stringify(images),
+    Number(variant.internal_price || 0),
+    Number(variant.length_cm || 0),
+    Number(variant.width_cm || 0),
+    Number(variant.height_cm || 0),
+    Number(variant.weight_g || 0),
+    variant.color || "",
+    variant.material_text || "",
+    Number(String(variant.quantity_text || "").match(/\d+/)?.[0] || 1),
     JSON.stringify(manualFacts),
     JSON.stringify({ title: variant.variant_title, description: variant.description_text }),
     personId(session)
@@ -936,17 +2685,18 @@ async function insertListingDraft(connection, templateId, variant, images, sessi
 
 async function insertListingShopCopy(connection, draftId, variant, images, session) {
   const mappedImages = images.map((url, index) => ({ url, sort_order: index + 1 }));
-  const validation = { blocked: false, level: "yellow", errors: [], warnings: ["素材已导入，请补充价格、库存、尺寸、重量后再发布"] };
+  const validation = { blocked: false, level: "green", errors: [], warnings: [] };
   await connection.execute(`
     INSERT INTO listing_shop_copies
     (draft_id, shop_id, offer_id, title, price, stock_quantity, watermark_path, images_json, validation_json,
      status, created_by_person_id, updated_at)
-    VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, 'prepared', ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 'prepared', ?, CURRENT_TIMESTAMP)
   `, [
     draftId,
     Number(variant.shop_id),
     `AV-${variant.id}-${Date.now().toString(36)}`,
     variant.variant_title || variant.source_title || "",
+    Number(variant.ozon_price || variant.internal_price || 0),
     variant.watermark_path || "",
     JSON.stringify(mappedImages),
     JSON.stringify(validation),
@@ -957,8 +2707,17 @@ async function insertListingShopCopy(connection, draftId, variant, images, sessi
 function normalizeMaterialPayload(raw = {}) {
   return {
     title: cleanText(raw.title, 500),
+    ownerName: cleanText(raw.ownerName || raw.owner_name || "", 128),
     tags: normalizeTags(raw.tags),
     description: String(raw.description || "").trim(),
+    sourceProductId: Number(raw.sourceProductId || raw.source_product_id || 0) || null,
+    ozonCategoryId: cleanText(raw.ozonCategoryId || raw.ozon_category_id || "", 128),
+    ozonDescriptionCategoryId: Number(raw.ozonDescriptionCategoryId || raw.ozon_description_category_id || 0) || 0,
+    ozonTypeId: Number(raw.ozonTypeId || raw.ozon_type_id || 0) || 0,
+    ozonCategoryName: cleanText(raw.ozonCategoryName || raw.ozon_category_name || "", 500),
+    vehicleBrand: cleanText(raw.vehicleBrand || raw.vehicle_brand || raw.carBrand || raw.car_brand || "", 128),
+    vehicleModel: cleanText(raw.vehicleModel || raw.vehicle_model || raw.carModel || raw.car_model || "", 128),
+    basePriceRmb: numberValue(raw.basePriceRmb || raw.base_price_rmb || raw.salePriceRmb || raw.sale_price_rmb || raw.airSalePriceRmb || raw.air_sale_price_rmb),
     quantity: cleanText(raw.quantity || raw.quantityText || raw.quantity_text || "", 64),
     color: cleanText(raw.color || "", 128),
     material: cleanText(raw.material || raw.materialText || raw.material_text || "", 128),
@@ -971,11 +2730,119 @@ function normalizeMaterialPayload(raw = {}) {
   };
 }
 
+function normalizeTags(value) {
+  const source = Array.isArray(value)
+    ? value
+    : String(value || "").split(/[\n,;#]+/);
+  return uniqueValues(source
+    .map((item) => String(item?.value || item || "").trim())
+    .filter(Boolean)
+    .map((item) => item.startsWith("#") ? item : `#${item}`)
+  ).slice(0, 20);
+}
+
+async function mapWithConcurrency(items = [], concurrency = 2, worker) {
+  const list = Array.isArray(items) ? items : [];
+  const limit = Math.max(1, Math.min(Number(concurrency || 1), list.length || 1));
+  const results = new Array(list.length);
+  let cursor = 0;
+  async function runWorker() {
+    while (cursor < list.length) {
+      const index = cursor++;
+      results[index] = await worker(list[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: limit }, runWorker));
+  return results;
+}
+
+function createConcurrencyLimiter(concurrency = 1) {
+  const limit = Math.max(1, Number(concurrency || 1));
+  const queue = [];
+  let active = 0;
+
+  const runNext = () => {
+    if (active >= limit || !queue.length) return;
+    const item = queue.shift();
+    active += 1;
+    Promise.resolve()
+      .then(item.worker)
+      .then(item.resolve, item.reject)
+      .finally(() => {
+        active -= 1;
+        runNext();
+      });
+  };
+
+  return (worker) => new Promise((resolve, reject) => {
+    queue.push({ worker, resolve, reject });
+    runNext();
+  });
+}
+
+function hasReplacementMarks(value = "") {
+  const text = String(value || "");
+  return text.includes("�") || /\?{3,}/.test(text);
+}
+
+function containsCjk(value = "") {
+  return /[\u3400-\u9fff]/.test(String(value || ""));
+}
+
+function isValidRichContentJson(value = "") {
+  if (typeof value === "object" && value) return true;
+  const text = String(value || "").trim();
+  if (!text) return false;
+  try {
+    const parsed = JSON.parse(text);
+    return Boolean(parsed && typeof parsed === "object");
+  } catch {
+    return false;
+  }
+}
+
+async function fileSha256(filePath) {
+  const buffer = await fs.readFile(filePath);
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+function stableHash(value) {
+  return createHash("sha256").update(stableStringify(value)).digest("hex");
+}
+
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms || 0))));
+}
+
+async function writeText(filePath, content = "") {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, String(content ?? ""), "utf8");
+}
+
+function sanitizeFilename(value = "") {
+  return String(value || "asset")
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120) || "asset";
+}
+
 function normalizeShopRuleRow(row, index = 0) {
   return {
     id: Number(row.id),
     name: row.name,
     status: row.status,
+    legalEntity: row.legal_entity || "",
     watermark_path: normalizeUrl(row.watermark_path || ""),
     watermarkPath: normalizeUrl(row.watermark_path || ""),
     watermark_position: row.watermark_position || "bottom-right",
@@ -985,6 +2852,9 @@ function normalizeShopRuleRow(row, index = 0) {
     watermark_opacity_percent: Number(row.watermark_opacity_percent ?? 82),
     rule: normalizeRule({
       titleStyle: row.title_style || defaultTitleStyle(index),
+      tagStyle: row.tag_style,
+      priceIndex: row.price_index,
+      priceRole: row.price_role,
       watermarkTemplateId: row.watermark_template_id || (row.watermark_path ? `shop-${row.id}` : ""),
       tailImageUrl: row.tail_image_url,
       tailCategory: row.tail_category,
@@ -996,8 +2866,12 @@ function normalizeShopRuleRow(row, index = 0) {
 }
 
 function normalizeRule(rule = {}) {
+  const titleStyle = normalizeTitleStyle(rule.titleStyle || rule.title_style);
   return {
-    titleStyle: normalizeTitleStyle(rule.titleStyle || rule.title_style),
+    titleStyle,
+    tagStyle: normalizeTagStyle(rule.tagStyle || rule.tag_style || titleStyle),
+    priceIndex: normalizePriceIndex(rule.priceIndex || rule.price_index),
+    priceRole: normalizePriceRole(rule.priceRole || rule.price_role),
     watermarkTemplateId: String(rule.watermarkTemplateId || rule.watermark_template_id || ""),
     tailImageUrl: String(rule.tailImageUrl || rule.tail_image_url || ""),
     tailCategory: cleanText(rule.tailCategory || rule.tail_category || DEFAULT_TAIL_CATEGORY, 128),
@@ -1015,9 +2889,9 @@ function normalizeTailTemplate(row = {}) {
     shopName: row.shop_name || row.shopName || "",
     category: cleanText(row.category || DEFAULT_TAIL_CATEGORY, 128),
     vehicleModel: cleanText(row.vehicle_model || row.vehicleModel || DEFAULT_TAIL_MODEL, 128),
-    name: cleanText(row.name || "尾图模板", 255),
+    name: cleanText(row.name || "闁诲繐绻戦崕鍐裁瑰Ο浣曠喖鍩勯崘鈺冨嚒", 255),
     imagePath,
-    imageUrl: imagePath ? `/api/asset-variant-engine/tail-template-files/${encodeURIComponent(row.id)}` : "",
+    imageUrl: imagePath ? normalizeUrl(imagePath) : "",
     purpose: row.purpose || "anti_hijack",
     isDefault: Boolean(row.is_default ?? row.isDefault),
     sortOrder: Number(row.sort_order || row.sortOrder || 0),
@@ -1105,6 +2979,60 @@ function normalizeTitleStyle(value) {
   return TITLE_STYLES.includes(normalized) ? normalized : "traffic";
 }
 
+function normalizeTagStyle(value) {
+  const style = String(value || "traffic").trim();
+  return TAG_STYLES.includes(style) ? style : "traffic";
+}
+
+function normalizePriceIndex(value) {
+  const parsed = Number(value || 1);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 1;
+  return Math.min(Math.max(parsed, 0.1), 9.9999);
+}
+
+function normalizePriceRole(value) {
+  const role = String(value || "").trim();
+  return ["owner", "main", "new", "other_owner", "lift"].includes(role) ? role : "";
+}
+
+function priceIndexForRole(role) {
+  if (role === "owner" || role === "main") return 1;
+  if (role === "new") return 0.95;
+  if (role === "other_owner") return 1.05;
+  if (role === "lift") return 5;
+  return null;
+}
+
+function resolveShopPriceIndex(value, material = {}, shop = {}) {
+  const explicitRoleIndex = priceIndexForRole(shop.rule?.priceRole || shop.rule?.price_role);
+  if (explicitRoleIndex !== null) return explicitRoleIndex;
+  const ownerName = String(material.publisherName || material.publisher_name || material.ownerName || material.owner_name || "").trim();
+  const legalEntity = String(shop.legalEntity || shop.legal_entity || "").trim();
+  const shopText = `${shop.name || ""} ${legalEntity}`.toLowerCase();
+  const defaultIndex = ownerName && legalEntity && ownerName === legalEntity
+    ? 1
+    : /ruvibe\s*mart/i.test(String(shop.name || "").trim())
+      ? 1
+      : /(^|\s)(new|fresh)(\s|$)|新店|全新/.test(shopText)
+        ? 0.95
+        : 1.05;
+  const parsed = normalizePriceIndex(value);
+  if (Math.abs(parsed - 1) < 0.0001 && Math.abs(defaultIndex - 1) > 0.0001) return defaultIndex;
+  return parsed;
+}
+
+async function personNameForSession(session = null) {
+  const id = personId(session);
+  if (!id) return "";
+  const row = await mysqlQuery("SELECT name FROM people WHERE id = ? LIMIT 1", [id]).then((rows) => rows[0]).catch(() => null);
+  return String(row?.name || "").trim();
+}
+
+function roundMoney(value) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) ? Math.round(parsed * 100) / 100 : 0;
+}
+
 function defaultTitleStyle(index = 0) {
   return TITLE_STYLES[Math.abs(Number(index || 0)) % TITLE_STYLES.length];
 }
@@ -1147,15 +3075,21 @@ function defaultShopWatermark(shop) {
 
 async function readImageBuffer(source) {
   const text = String(source || "").trim();
-  if (!text) throw new Error("图片不能为空");
+  if (!text) throw new Error("Missing text");
   const dataUrlMatch = text.match(/^data:image\/[a-zA-Z0-9.+-]+;base64,(.+)$/);
   if (dataUrlMatch) return Buffer.from(dataUrlMatch[1], "base64");
+  const productImageMatch = text.match(/^\/?api\/products\/(\d+)\/image$/i);
+  if (productImageMatch) {
+    const rows = await mysqlQuery("SELECT image_url FROM products WHERE id = ? LIMIT 1", [Number(productImageMatch[1])]);
+    const storedImage = String(rows[0]?.image_url || "").trim();
+    if (storedImage && storedImage !== text) return readImageBuffer(storedImage);
+  }
   if (/^\/?api\//i.test(text)) {
     return fetchImageBuffer(new URL(text.replace(/^\/?/, "/"), config.appBaseUrl).toString());
   }
   if (/^https?:\/\//i.test(text)) {
     const response = await fetch(text);
-    if (!response.ok) throw new Error(`图片下载失败：${response.status}`);
+    if (!response.ok) throw new Error(`闂佹悶鍎辨晶鑺ユ櫠閺嶃劎鈻旈悗锝庡幗缁佹澘顭块幆鎵翱閻熸瑱绠撻弫?{response.status}`);
     return Buffer.from(await response.arrayBuffer());
   }
   return fs.readFile(resolveLocalAssetPath(text));
@@ -1163,7 +3097,7 @@ async function readImageBuffer(source) {
 
 async function fetchImageBuffer(url) {
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`图片下载失败：${response.status}`);
+  if (!response.ok) throw new Error(`闂佹悶鍎辨晶鑺ユ櫠閺嶃劎鈻旈悗锝庡幗缁佹澘顭块幆鎵翱閻熸瑱绠撻弫?{response.status}`);
   return Buffer.from(await response.arrayBuffer());
 }
 
@@ -1183,7 +3117,9 @@ async function imageResult(filePath, type, sortOrder = 1, context = {}) {
     sort_order: sortOrder,
     metadata: {
       sourceOutputPath: relative,
-      assetVariantBatchId: context.batchId || batchId || ""
+      assetVariantBatchId: context.batchId || batchId || "",
+      productTitle: context.sourceTitle || "",
+      variantTitle: context.variantTitle || ""
     }
   });
   return {
@@ -1204,48 +3140,100 @@ function fileUrl(batchId, filename) {
   return `/api/asset-variant-engine/files/${encodeURIComponent(batchId)}/${filename.split("/").map(encodeURIComponent).join("/")}`;
 }
 
+function normalizeUrl(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (/^https?:\/\//i.test(text) || /^data:/i.test(text)) return text;
+  const normalized = text.replace(/\\/g, "/");
+  if (normalized.startsWith("/api/") || normalized.startsWith("/uploads/")) return normalized;
+  const uploadsIndex = normalized.toLowerCase().lastIndexOf("/uploads/");
+  if (uploadsIndex >= 0) return normalized.slice(uploadsIndex);
+  const publicUploadsIndex = normalized.toLowerCase().lastIndexOf("/public/uploads/");
+  if (publicUploadsIndex >= 0) return normalized.slice(publicUploadsIndex + "/public".length);
+  return normalized.startsWith("/") ? normalized : `/${normalized}`;
+}
+
+function resolveLocalAssetPath(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  let normalized = text.replace(/\\/g, "/");
+  if (/^https?:\/\//i.test(normalized)) {
+    try {
+      normalized = decodeURIComponent(new URL(normalized).pathname || "");
+    } catch {
+      return text;
+    }
+  }
+  const assetFileMatch = normalized.match(/^\/?api\/asset-variant-engine\/files\/([^/]+)\/(.+)$/i);
+  if (assetFileMatch) {
+    const batchId = decodeURIComponent(assetFileMatch[1]);
+    const fileName = assetFileMatch[2].split("/").map((part) => decodeURIComponent(part)).join(path.sep);
+    return path.resolve(VARIANT_ROOT, batchId, fileName);
+  }
+  const candidates = [];
+  const withoutLeadingSlash = normalized.replace(/^\/+/, "");
+  if (withoutLeadingSlash.startsWith("uploads/")) {
+    candidates.push(path.resolve(ROOT_DIR, "public", withoutLeadingSlash));
+    candidates.push(path.resolve(ROOT_DIR, withoutLeadingSlash));
+  }
+  if (withoutLeadingSlash.startsWith("shop-watermarks/")) {
+    candidates.push(path.resolve(ROOT_DIR, "uploads", withoutLeadingSlash));
+    candidates.push(path.resolve(ROOT_DIR, "public", "uploads", withoutLeadingSlash));
+  }
+  if (withoutLeadingSlash.startsWith("public/")) {
+    candidates.push(path.resolve(ROOT_DIR, withoutLeadingSlash));
+  }
+  candidates.push(path.isAbsolute(normalized) ? normalized : path.resolve(ROOT_DIR, withoutLeadingSlash));
+  return candidates.find((candidate) => fsSync.existsSync(candidate)) || candidates[0] || text;
+}
+
+async function removeLocalAssetPath(value, { recursive = false } = {}) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  const absolute = path.resolve(ROOT_DIR, text);
+  const allowedRoots = [VARIANT_ROOT, LISTING_MEDIA_ROOT];
+  const allowed = allowedRoots.some((root) => {
+    const resolvedRoot = path.resolve(root);
+    return absolute !== resolvedRoot && absolute.startsWith(`${resolvedRoot}${path.sep}`);
+  });
+  if (!allowed) return false;
+  try {
+    await fs.rm(absolute, { recursive, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function mediaPublishValue(image = {}) {
   return image.publishUrl || image.publish_url || image.url || image.previewUrl || image.outputPath || "";
 }
+
 
 function buildListingWorkbook({ shop, title, titleZh, material, images, rule, tailTemplate }) {
   const mainImages = images.filter((image) => image.type === "main").map(mediaPublishValue);
   const detailImages = images.filter((image) => image.type === "detail").map(mediaPublishValue);
   const tailImages = images.filter((image) => image.type === "tail").map(mediaPublishValue);
-  const detailHeaders = detailImages.map((_, index) => `详情图${index + 1}`);
-  const tailHeaders = tailImages.map((_, index) => `尾图${index + 1}`);
+  const detailHeaders = detailImages.map((_, index) => "Detail image " + (index + 1));
+  const tailHeaders = tailImages.map((_, index) => "Tail image " + (index + 1));
   const rows = [
-    ["店铺", "类目", "车型", "俄语标题", "中文标题释义", "标签", "产品卖点", "颜色", "材质", "数量", "长cm", "宽cm", "高cm", "重量g", "主图", ...detailHeaders, ...tailHeaders, "尾图模板", "图片总数"],
-    [
-      shop.name,
-      rule?.tailCategory || "",
-      rule?.vehicleModel || "",
-      title,
-      titleZh || "",
-      material.tags.join(","),
-      material.description,
-      material.color || "",
-      material.material || "",
-      material.quantity || "",
-      material.lengthCm || "",
-      material.widthCm || "",
-      material.heightCm || "",
-      material.weightG || "",
-      mainImages.join("\n"),
-      ...detailImages,
-      ...tailImages,
-      tailTemplate?.name || "",
-      String(images.length)
-    ]
+    ["Shop", "Category", "Vehicle model", "Title RU", "Title CN", "Tags", "Description", "Color", "Material", "Quantity", "Length cm", "Width cm", "Height cm", "Weight g", "Main images", ...detailHeaders, ...tailHeaders, "Tail template", "Image count"],
+    [shop.name, rule?.tailCategory || "", rule?.vehicleModel || "", title, titleZh || "", material.tags.join(","), material.description, material.color || "", material.material || "", material.quantity || "", material.lengthCm || "", material.widthCm || "", material.heightCm || "", material.weightG || "", mainImages.join("\n"), ...detailImages, ...tailImages, tailTemplate?.name || "", String(images.length)]
   ];
   return createMinimalXlsx("listing", rows);
 }
-
 function buildProductInfo({ shop, title, titleZh, material, images, rule, tailTemplate }) {
   return {
     shop: { id: shop.id, name: shop.name },
     category: rule?.tailCategory || "",
-    vehicleModel: rule?.vehicleModel || "",
+    ozonCategory: {
+      id: material.ozonCategoryId || "",
+      descriptionCategoryId: material.ozonDescriptionCategoryId || 0,
+      typeId: material.ozonTypeId || 0,
+      name: material.ozonCategoryName || ""
+    },
+    vehicleBrand: material.vehicleBrand || "",
+    vehicleModel: material.vehicleModel || rule?.vehicleModel || "",
     title,
     titleRu: title,
     titleZh: titleZh || "",
@@ -1278,26 +3266,28 @@ function buildProductInfo({ shop, title, titleZh, material, images, rule, tailTe
   };
 }
 
+
 function buildProductInfoWorkbook(productInfo) {
   const rows = [
-    ["字段", "值"],
-    ["店铺", productInfo.shop.name],
-    ["类目", productInfo.category],
-    ["车型", productInfo.vehicleModel],
-    ["俄语标题", productInfo.titleRu || productInfo.title],
-    ["中文标题释义", productInfo.titleZh || ""],
-    ["标签", productInfo.tags.join(",")],
-    ["产品卖点", productInfo.sellingPoints || productInfo.description],
-    ["颜色", productInfo.color],
-    ["材质", productInfo.material],
-    ["数量", productInfo.quantity],
-    ["长cm", productInfo.dimensions.lengthCm || ""],
-    ["宽cm", productInfo.dimensions.widthCm || ""],
-    ["高cm", productInfo.dimensions.heightCm || ""],
-    ["重量g", productInfo.dimensions.weightG || ""],
-    ["主图文件夹", "images/main"],
-    ["详情图文件夹", "images/details"],
-    ["尾图文件夹", "images/tail"]
+    ["Field", "Value"],
+    ["Shop", productInfo.shop.name],
+    ["Category", productInfo.category],
+    ["Ozon category", productInfo.ozonCategory?.name || productInfo.ozonCategory?.id || ""],
+    ["Vehicle model", productInfo.vehicleModel],
+    ["Title RU", productInfo.titleRu || productInfo.title],
+    ["Title ZH", productInfo.titleZh || ""],
+    ["Tags", productInfo.tags.join(",")],
+    ["Selling points", productInfo.sellingPoints || productInfo.description],
+    ["Color", productInfo.color],
+    ["Material", productInfo.material],
+    ["Quantity", productInfo.quantity],
+    ["Length", productInfo.dimensions.lengthCm || ""],
+    ["Width", productInfo.dimensions.widthCm || ""],
+    ["Height", productInfo.dimensions.heightCm || ""],
+    ["Weight", productInfo.dimensions.weightG || ""],
+    ["Main images", "images/main"],
+    ["Detail images", "images/details"],
+    ["Tail images", "images/tail"]
   ];
   return createMinimalXlsx("product-info", rows);
 }
@@ -1309,6 +3299,12 @@ function buildListingJson({ shop, title, titleZh, material, images, rule, tailTe
       name: shop.name
     },
     category: rule?.tailCategory || "",
+    ozonCategory: {
+      id: material.ozonCategoryId || "",
+      descriptionCategoryId: material.ozonDescriptionCategoryId || 0,
+      typeId: material.ozonTypeId || 0,
+      name: material.ozonCategoryName || ""
+    },
     vehicleModel: rule?.vehicleModel || "",
     title,
     titleRu: title,
@@ -1341,55 +3337,123 @@ function buildListingJson({ shop, title, titleZh, material, images, rule, tailTe
 
 function fallbackTitle(material, style, shop) {
   const productType = detectProductType(material.title, material.description);
-  const carModel = extractLikelyCarModel(material.title) || "универсальная модель";
-  const materialPart = material.material ? "из " + russianFactValue(material.material, "material") : "для защиты";
+  const carModel = extractLikelyCarModel(`${material.vehicleModel || ""} ${material.title || ""}`) || "";
+  const materialPart = material.material ? russianFactValue(material.material, "material") : "";
   const colorValue = russianFactValue(material.color, "color");
   const quantityValue = russianFactValue(material.quantity, "quantity");
-  const colorPart = colorValue ? ", цвет " + colorValue : "";
-  const quantityPart = quantityValue ? ", " + quantityValue : "";
-  const base = {
-    traffic: {
-      ru: productType + ' для ключа ' + carModel + ' ' + materialPart + colorPart + quantityPart + ', автомобильный аксессуар',
-      zh: '搜索流量型标题：突出产品类型、车型、材质、颜色和常用搜索词'
-    },
-    material: {
-      ru: productType + ' для ключа ' + carModel + ' ' + materialPart + ', защита от царапин и ежедневного износа' + colorPart,
-      zh: '材质卖点型标题：突出材质、防刮、耐磨和日常保护'
-    },
-    scenario: {
-      ru: productType + ' для ключа ' + carModel + ', удобный аксессуар для ежедневного вождения и поездок' + colorPart,
-      zh: '场景适配型标题：突出日常通勤、车主使用和适配场景'
-    },
-    value: {
-      ru: 'Практичный ' + productType.toLowerCase() + ' для ключа ' + carModel + ' ' + materialPart + colorPart + quantityPart + ', выгодная комплектация',
-      zh: '性价比型标题：突出实用配置和用料搭配的综合价值'
-    },
-    premium: {
-      ru: 'Премиальный ' + productType.toLowerCase() + ' для ключа ' + carModel + ' ' + materialPart + colorPart + ', аккуратная посадка и стиль',
-      zh: '高端质感型标题：突出质感、贴合度和精致外观'
-    }
-  }[style] || {
-    ru: productType + ' для автомобильного ключа ' + materialPart + colorPart,
-    zh: '通用标题'
+  const parts = [carModel, materialPart, colorValue, quantityValue].filter(Boolean).join(" ");
+  const suffixByStyle = {
+    traffic: "для автомобиля, точная посадка и защита на каждый день",
+    material: "из прочного материала, аккуратная посадка и защита от износа",
+    scenario: "для ежедневного использования, удобного хранения и аккуратной защиты",
+    value: "практичный автоаксессуар для защиты и комфорта",
+    premium: "аккуратный автоаксессуар со сдержанным дизайном"
   };
-  return {
-    ru: cleanText(base.ru.replace(/\s+/g, ' '), 500),
-    zh: cleanText(base.zh, 500)
-  };
+  const ru = cleanRussianTitle(`${productType}${parts ? ` ${parts}` : ""}, ${suffixByStyle[style] || suffixByStyle.traffic}`, 500);
+  return { ru, zh: buildChineseTitleMeaning(ru, material) };
+}
+function buildChineseTitleMeaning(ruTitle, material = {}) {
+  const productType = chineseProductType(material.title, material.description);
+  const model = extractLikelyCarModel(String(material.vehicleModel || "") + " " + String(material.title || "")) || "";
+  const materialText = chineseFactValue(material.material, "material");
+  const colorText = chineseFactValue(material.color, "color");
+  const quantityText = chineseFactValue(material.quantity, "quantity");
+  const parts = [model, materialText, colorText, quantityText].filter(Boolean).join(" / ");
+  return cleanText(productType + (parts ? " - " + parts : ""), 500);
+}
+
+function chineseProductType(title, description) {
+  const text = String((title || "") + " " + (description || "")).toLowerCase();
+  if (text.includes("key") || text.includes("钥匙") || text.includes("брелок")) return "汽车钥匙保护壳";
+  if (text.includes("安全带") || text.includes("seat belt") || text.includes("ремень")) return "安全带护肩套";
+  if (text.includes("light") || text.includes("led") || text.includes("灯")) return "汽车灯饰";
+  if (text.includes("film") || text.includes("膜")) return "汽车保护膜";
+  return "汽车用品";
+}
+
+function chineseFactValue(value, type = "") {
+  const text = cleanText(value, 120);
+  if (!text) return "";
+  const lower = text.toLowerCase();
+  if (type === "color") {
+    if (lower.includes("black") || lower.includes("черн") || text.includes("黑")) return "黑色";
+    if (lower.includes("silver") || lower.includes("серебр") || text.includes("银")) return "银色";
+    if (lower.includes("white") || lower.includes("бел") || text.includes("白")) return "白色";
+  }
+  if (type === "quantity") {
+    const count = String(text).match(/\d+/)?.[0];
+    return count ? count + "件" : text;
+  }
+  return text;
+}
+
+function generateShopTags(material, shop, rule = {}, title = "") {
+  const model = extractLikelyCarModel(String(material.vehicleModel || "") + " " + String(material.title || "") + " " + String(title || "")) || "auto key";
+  const materialText = russianTagWord(material.material || "tpu");
+  const colorText = russianTagWord(material.color || "black");
+  const shopTag = tagToken(shop.name || shop.legalEntity || "shop");
+  const modelSafe = model.toLowerCase();
+  const base = [shopTag, modelSafe, modelSafe + " key", modelSafe + " cover", "auto accessories", "key cover", "car key case", "key protection", "scratch protection", "driver gift", materialText, materialText + " cover", colorText, colorText + " cover", "daily use", "precise fit", "soft cover", "button access", "car accessory", "protective case"];
+  return uniqueValues(base.map(tagToken)).slice(0, 20);
+}
+
+function extractLikelyCarModel(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const lower = text.toLowerCase();
+  const seeded = REAL_RUSSIA_VEHICLE_MODELS
+    .map((item) => [item.labelRu, item.labelZh, `${item.brand} ${item.model}`, item.model, ...(item.aliases || [])])
+    .flat()
+    .filter(Boolean)
+    .sort((a, b) => String(b).length - String(a).length)
+    .find((candidate) => lower.includes(String(candidate).toLowerCase()));
+  if (seeded) return seeded;
+  const brandModel = text.match(/\b([A-Za-z][A-Za-z-]{1,20})\s+([A-Za-z]?\d{1,3}[A-Za-z]?|[A-Za-z]{1,4}-?\d{1,3})\b/);
+  if (brandModel) return `${brandModel[1]} ${brandModel[2]}`;
+  const modelOnly = text.match(/\b(TENET|Belgee|Haval|Chery|Geely|Changan|Omoda|Jaecoo|Exeed)\b[^\w]{0,6}([A-Za-z]?\d{1,3}[A-Za-z]?|[A-Za-z]{1,4}-?\d{1,3})/i);
+  return modelOnly ? `${modelOnly[1]} ${modelOnly[2]}` : "";
+}
+
+function tagToken(value) {
+  const text = String(value || "").toLowerCase().replace(/ruvibe\s*mart/gi, "ruvibemart").replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_+|_+$/g, "").slice(0, 20);
+  return text ? "#" + text : "";
+}
+
+function russianTagWord(value) {
+  const text = String(value || "").toLowerCase();
+  if (text.includes("tpu")) return "tpu";
+  if (text.includes("abs")) return "abs";
+  if (text.includes("leather") || text.includes("кожа") || text.includes("皮")) return "кожа";
+  if (text.includes("metal") || text.includes("металл") || text.includes("钢")) return "металл";
+  if (text.includes("black") || text.includes("черн") || text.includes("黑")) return "черный";
+  if (text.includes("silver") || text.includes("серебр") || text.includes("银")) return "серебристый";
+  if (text.includes("white") || text.includes("бел") || text.includes("白")) return "белый";
+  return text && !looksBrokenGeneratedText(text) && !hasCjkText(text) ? text : "автоаксессуар";
 }
 
 function detectProductType(title, description) {
   const text = String((title || '') + ' ' + (description || '')).toLowerCase();
-  if (text.includes('key') || text.includes('ключ') || text.includes('钥匙')) return 'Чехол для автомобильного ключа';
-  if (text.includes('коврик') || text.includes('脚垫')) return 'Автомобильный коврик';
-  if (text.includes('наклад') || text.includes('门槛')) return 'Автомобильная накладка';
+  if (text.includes("安全带") || text.includes("seat belt") || text.includes("ремень")) return "Накладка на ремень безопасности";
+  if (text.includes('key') || text.includes('钥匙') || text.includes('брелок')) return 'Чехол для автомобильного ключа';
+  if (text.includes('light') || text.includes('led') || text.includes('灯') || text.includes('подсвет')) return 'Автомобильная подсветка';
+  if (text.includes('film') || text.includes('膜') || text.includes('пленк')) return 'Защитная пленка для автомобиля';
   return 'Автомобильный аксессуар';
 }
 
-function extractLikelyCarModel(title) {
-  const text = String(title || '');
-  const match = text.match(/(Belgee\s*X50|Belgee\s*X70|Haval\s*[A-Z0-9-]+|Chery\s*[A-Z0-9\s-]+|Geely\s*[A-Z0-9\s-]+|Omoda\s*[A-Z0-9-]+|Jaecoo\s*[A-Z0-9-]+|Exeed\s*[A-Z0-9-]+|TENET\s*[A-Z0-9-]+)/i);
-  return match ? match[1].replace(/\s+/g, ' ').trim() : '';
+function russianFactValue(value, type = "") {
+  let text = cleanText(value, 120);
+  if (!text) return "";
+  if (type === "color") return russianColorText(text);
+  if (type === "quantity") {
+    const number = text.match(/\d+/)?.[0];
+    return number ? number + " шт." : hasCjkText(text) ? "" : text;
+  }
+  if (type === "material") return russianMaterialText(text);
+  return hasCjkText(text) ? "" : text;
+}
+
+function looksLikeTitleStyleNote(value) {
+  return /title style|style note/i.test(String(value || ""));
 }
 
 function normalizeTitleCandidateObject(value, material, shop) {
@@ -1407,7 +3471,7 @@ function normalizeTitlePair(value, material, style, shop) {
     const zh = cleanText(value.zh || value.cn || value.titleZh || "", 500);
     return {
       ru: isInvalidRussianTitle(ru) ? fallback.ru : ru || fallback.ru,
-      zh: looksBrokenGeneratedText(zh) ? fallback.zh : zh || fallback.zh
+      zh: looksBrokenGeneratedText(zh) || looksLikeTitleStyleNote(zh) ? fallback.zh : zh || fallback.zh
     };
   }
   if (value) {
@@ -1425,126 +3489,32 @@ function isInvalidRussianTitle(value) {
 function hasCjkText(value) {
   return /[\u3400-\u9fff\u3040-\u30ff]/.test(String(value || ""));
 }
-
-function russianFactValue(value, type = "") {
-  let text = cleanText(value, 120);
-  if (!text) return "";
-  const lower = text.toLowerCase();
-  const colorMap = [
-    [/黑|black|черн/, "черный"],
-    [/白|white|бел/, "белый"],
-    [/银|сереб|silver/, "серебристый"],
-    [/灰|gray|grey|сер/, "серый"],
-    [/红|red|красн/, "красный"],
-    [/蓝|blue|син/, "синий"],
-    [/金|gold|золот/, "золотистый"]
-  ];
-  if (type === "color") {
-    const hit = colorMap.find(([pattern]) => pattern.test(lower) || pattern.test(text));
-    return hit ? hit[1] : hasCjkText(text) ? "" : text;
-  }
-  if (type === "quantity") {
-    const number = text.match(/\d+/)?.[0];
-    return number ? `${number} шт.` : hasCjkText(text) ? "" : text;
-  }
-  if (type === "material") {
-    if (/tpu|тпу/i.test(text)) return "TPU";
-    if (/皮|кож|leather/i.test(text)) return "кожи";
-    if (/金属|metal|металл/i.test(text)) return "металла";
-    return hasCjkText(text) ? "" : text;
-  }
-  return hasCjkText(text) ? "" : text;
-}
-
 function looksBrokenGeneratedText(value) {
   const text = String(value || "");
   if (!text) return false;
   const questionMarks = (text.match(/\?/g) || []).length;
   if (questionMarks >= 4 && questionMarks / Math.max(1, text.length) > 0.12) return true;
-  return /(?:�|鏍|绱|涓|閫|鍥|灏|棰|璇|搴|姘|鎻)/.test(text);
+  return /闂|閻|婵|缂|濞|鈧/.test(text);
 }
-
-function parseJsonFromText(text) {
-  const raw = String(text || "").trim();
-  try {
-    return JSON.parse(raw);
-  } catch {
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) return {};
-    try {
-      return JSON.parse(match[0]);
-    } catch {
-      return {};
-    }
-  }
-}
-
-async function mapWithConcurrency(items, concurrency, worker) {
-  const list = Array.isArray(items) ? items : [];
-  const limit = Math.max(1, Number(concurrency || 1));
-  const results = new Array(list.length);
-  let cursor = 0;
-  async function runNext() {
-    const index = cursor;
-    cursor += 1;
-    if (index >= list.length) return;
-    results[index] = await worker(list[index], index);
-    await runNext();
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, list.length) }, runNext));
-  return results;
-}
-
-function normalizeTags(value) {
-  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
-  return String(value || "").split(/[,，\n]/).map((item) => item.trim()).filter(Boolean);
-}
-
-async function writeText(filePath, content) {
-  await fs.writeFile(filePath, content || "", "utf8");
-}
-
-function normalizeUrl(url) {
-  const text = String(url || "").trim();
-  if (!text) return "";
-  if (/^(https?:|data:|blob:)/i.test(text)) return text;
-  if (text.startsWith("/")) return text;
-  return `/${text.replace(/^public[\\/]/, "").replace(/\\/g, "/")}`;
-}
-
-function resolveLocalAssetPath(value) {
-  const text = String(value || "").trim();
-  if (!text || /^https?:|^data:/i.test(text)) return text;
-  const clean = text.replace(/^\/+/, "");
-  const candidates = [
-    path.resolve(ROOT_DIR, clean),
-    path.resolve(ROOT_DIR, "uploads", clean.replace(/^uploads[\\/]/, "")),
-    path.resolve(ROOT_DIR, "public", clean.replace(/^public[\\/]/, ""))
-  ];
-  return candidates.find((candidate) => fsSync.existsSync(candidate)) || candidates[0];
-}
-
-function sanitizeFilename(value) {
-  return String(value || "asset").replace(/[<>:"/\\|?*\x00-\x1F]/g, "_").slice(0, 90);
-}
-
-function mimeForPath(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  if (ext === ".webp") return "image/webp";
-  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
-  if (ext === ".png") return "image/png";
-  if (ext === ".xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-  if (ext === ".txt") return "text/plain; charset=utf-8";
-  if (ext === ".json") return "application/json; charset=utf-8";
-  return "application/octet-stream";
-}
-
 function cleanText(value, max = 1000) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
 }
 
+function cleanRussianTitle(value, max = 500) {
+  let text = cleanText(value, max)
+    .replace(/\?{2,}/g, " ")
+    .replace(/[^\p{L}\p{N}\s,.\-+]/gu, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\s+,/g, ",")
+    .trim();
+  if (!text || looksBrokenGeneratedText(text) || hasCjkText(text)) {
+    text = "Автомобильный аксессуар для защиты и ежедневного использования";
+  }
+  return text.slice(0, max);
+}
+
 function personId(session) {
-  return Number(session?.person_id || session?.personId || 0) || null;
+  return Number(session?.personId || 0) || null;
 }
 
 function uniqueNumbers(value) {

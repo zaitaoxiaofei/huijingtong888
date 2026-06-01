@@ -75,11 +75,19 @@ function dateText(value) {
 function isRequestCompleted(row) {
   const status = String(row?.status || "");
   const orderStatus = String(row?.purchase_order_status || "");
-  return ["purchased", "done"].includes(status) || ["purchased", "partial_inbound", "inbound_done"].includes(orderStatus);
+  return status === "done" || orderStatus === "inbound_done";
+}
+
+function isRequestPurchased(row) {
+  const status = String(row?.status || "");
+  const orderStatus = String(row?.purchase_order_status || "");
+  return status === "purchased" || ["purchased", "partial_inbound"].includes(orderStatus);
 }
 
 function statusTagType(row) {
-  return isRequestCompleted(row) ? "success" : "warning";
+  if (isRequestCompleted(row)) return "success";
+  if (isRequestPurchased(row)) return "info";
+  return "warning";
 }
 
 function urgencyTagType(urgency) {
@@ -87,7 +95,9 @@ function urgencyTagType(urgency) {
 }
 
 function requestStatusText(row) {
-  return isRequestCompleted(row) ? "完成采购" : "等待采购";
+  if (isRequestCompleted(row)) return "已入库";
+  if (isRequestPurchased(row)) return "待入库";
+  return "等待采购";
 }
 
 function productImage(row) {
@@ -327,8 +337,8 @@ onMounted(loadPageData);
             <el-tag type="info">共 {{ totalRequests }} 条</el-tag>
           </div>
           <div class="page-card-actions">
-            <el-button @click="loadPageData">刷新数据</el-button>
-            <el-button type="primary" @click="openCreateDialog">新建采购请求</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新建采购请求</el-button>
           </div>
         </div>
       </template>
@@ -347,7 +357,7 @@ onMounted(loadPageData);
           <el-form-item label="状态">
             <el-select v-model="state.filters.status" style="width: 160px">
               <el-option label="等待采购" value="waiting_purchase" />
-              <el-option label="完成采购" value="completed_purchase" />
+              <el-option label="已采购/已入库" value="completed_purchase" />
             </el-select>
           </el-form-item>
           <el-form-item label="紧急程度">
@@ -364,8 +374,8 @@ onMounted(loadPageData);
             </el-select>
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="handleSearch">查询</el-button>
-            <el-button @click="handleReset">重置</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
           </el-form-item>
         </el-form>
       </div>
@@ -433,10 +443,10 @@ onMounted(loadPageData);
           </el-table-column>
           <el-table-column label="操作" width="180" fixed="right" align="center">
             <template #default="{ row }">
-              <el-space wrap>
-                <el-button link type="primary" @click="openEditRequestDialog(row)">编辑</el-button>
-                <el-button link type="danger" @click="deleteRequest(row)">删除</el-button>
-              </el-space>
+              <div class="erp-inline-actions">
+                <el-button class="erp-btn-link" link type="primary" @click="openEditRequestDialog(row)">编辑</el-button>
+                <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="deleteRequest(row)">删除</el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -601,9 +611,9 @@ onMounted(loadPageData);
       </div>
 
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="editDialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="editDialogSubmitting" @click="submitEditDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="editDialogVisible = false">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="editDialogSubmitting" @click="submitEditDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>

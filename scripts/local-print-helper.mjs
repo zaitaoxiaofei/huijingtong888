@@ -100,6 +100,8 @@ async function getPrinters() {
 
 async function getWindowsPrinters() {
   const command = [
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    "$OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
     "$printers = Get-Printer | Select-Object Name,DriverName,PortName,Default",
     "$printers | ConvertTo-Json -Compress"
   ].join("; ");

@@ -15,38 +15,43 @@ export async function fetchOzonPostings(shop, options = {}) {
   const to = normalizeIsoEnd(params.to, new Date());
   const limit = Math.min(Math.max(Number(params.limit || 1000), 1), 1000);
   const chunkDays = Math.min(Math.max(Number(params.chunkDays || 31), 1), 366);
+  const statuses = normalizeStatusList(params.statuses || params.status);
   const postingsByNumber = new Map();
   let requests = 0;
   let ranges = 0;
 
-  for (const [rangeSince, rangeTo] of splitDateRange(since, to, chunkDays)) {
-    throwIfAborted(params.signal);
-    ranges += 1;
-    let offset = 0;
-    while (true) {
+  for (const status of statuses.length ? statuses : [""]) {
+    for (const [rangeSince, rangeTo] of splitDateRange(since, to, chunkDays)) {
       throwIfAborted(params.signal);
-      const data = await ozonRequest(shop, "/v3/posting/fbs/list", {
-        dir: "DESC",
-        filter: { since: rangeSince, to: rangeTo },
-        limit,
-        offset,
-        with: {
-          analytics_data: true,
-          barcodes: true,
-          financial_data: true,
-          translit: true
+      ranges += 1;
+      let offset = 0;
+      while (true) {
+        throwIfAborted(params.signal);
+        const filter = { since: rangeSince, to: rangeTo };
+        if (status) filter.status = status;
+        const data = await ozonRequest(shop, "/v3/posting/fbs/list", {
+          dir: "DESC",
+          filter,
+          limit,
+          offset,
+          with: {
+            analytics_data: true,
+            barcodes: true,
+            financial_data: true,
+            translit: true
+          }
+        }, { signal: params.signal });
+        requests += 1;
+        const result = data.result || {};
+        const items = result.postings || [];
+        for (const item of items) {
+          const normalized = normalizeOzonPosting(item);
+          if (normalized.posting_number) postingsByNumber.set(normalized.posting_number, normalized);
         }
-      }, { signal: params.signal });
-      requests += 1;
-      const result = data.result || {};
-      const items = result.postings || [];
-      for (const item of items) {
-        const normalized = normalizeOzonPosting(item);
-        if (normalized.posting_number) postingsByNumber.set(normalized.posting_number, normalized);
+        if (!result.has_next || items.length < limit) break;
+        if (!items.length) break;
+        offset += limit;
       }
-      if (!result.has_next || items.length < limit) break;
-      if (!items.length) break;
-      offset += limit;
     }
   }
 
@@ -141,6 +146,87 @@ export async function fetchOzonProductStocks(shop, options = {}) {
   return rows;
 }
 
+export async function fetchOzonStockTurnover(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) return [];
+  const skus = [...new Set((options.skus || []).map((item) => Number(item)).filter(Boolean))];
+  const rows = [];
+  for (let index = 0; index < Math.max(skus.length, 1); index += 1000) {
+    const chunk = skus.length ? skus.slice(index, index + 1000) : [];
+    let offset = 0;
+    while (true) {
+      throwIfAborted(options.signal);
+      const payload = {
+        limit: Math.min(Math.max(Number(options.limit || 1000), 1), 1000),
+        offset
+      };
+      if (chunk.length) payload.sku = chunk;
+      const data = await ozonRequest(shop, "/v1/analytics/turnover/stocks", payload, { signal: options.signal });
+      const result = data.result || data;
+      const items = result.items || result.products || result.rows || [];
+      rows.push(...items.map(normalizeOzonStockTurnoverItem).filter((item) => item.ozon_sku));
+      if (chunk.length || items.length < payload.limit) break;
+      offset += payload.limit;
+    }
+    if (!skus.length) break;
+  }
+  return rows;
+}
+
+export async function fetchOzonManagedStocks(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) return [];
+  const skus = [...new Set((options.skus || []).map((item) => Number(item)).filter(Boolean))];
+  const rows = [];
+  for (let index = 0; index < Math.max(skus.length, 1); index += 1000) {
+    const chunk = skus.length ? skus.slice(index, index + 1000) : [];
+    let offset = 0;
+    while (true) {
+      throwIfAborted(options.signal);
+      const payload = {
+        filter: {},
+        limit: Math.min(Math.max(Number(options.limit || 1000), 1), 1000),
+        offset
+      };
+      if (chunk.length) payload.filter.sku = chunk;
+      const data = await ozonRequest(shop, "/v1/analytics/manage/stocks", payload, { signal: options.signal });
+      const result = data.result || data;
+      const items = result.items || result.products || result.rows || [];
+      rows.push(...items.map(normalizeOzonManagedStockItem).filter((item) => item.ozon_sku));
+      if (chunk.length || items.length < payload.limit) break;
+      offset += payload.limit;
+    }
+    if (!skus.length) break;
+  }
+  return rows;
+}
+
+function normalizeOzonStockTurnoverItem(item = {}) {
+  const sku = String(item.sku || item.ozon_sku || "");
+  return {
+    ozon_sku: sku,
+    average_daily_sales: numberFromOzon(item.ads ?? item.average_daily_sales ?? item.avg_daily_sales),
+    turnover_current_stock: stockNumber(item.current_stock ?? item.stock ?? item.stock_count),
+    stock_days: numberFromOzon(item.idc ?? item.days_on_stock ?? item.stock_days ?? item.turnover_days),
+    stock_level: String(item.idc_grade || item.stock_level || item.grade || ""),
+    raw_json: stringify(item)
+  };
+}
+
+function normalizeOzonManagedStockItem(item = {}) {
+  const sku = String(item.sku || item.ozon_sku || "");
+  return {
+    ozon_sku: sku,
+    offer_id: String(item.offer_id || ""),
+    warehouse_name: String(item.warehouse_name || ""),
+    valid_stock_count: stockNumber(item.valid_stock_count ?? item.valid_count ?? item.free_stock_count),
+    expiring_stock_count: stockNumber(item.expiring_stock_count ?? item.expiring_count ?? item.waiting_payment_stock_count),
+    waitingdocs_stock_count: stockNumber(item.waitingdocs_stock_count ?? item.waiting_docs_stock_count),
+    paid_stock_count: stockNumber(item.paid_stock_count ?? item.charged_stock_count ?? item.tariff_stock_count),
+    free_stock_count: stockNumber(item.free_stock_count ?? item.valid_stock_count),
+    paid_storage_start_at: String(item.paid_storage_start_at || item.paid_storage_start_date || item.storage_tariff_start_date || item.tariff_start_date || ""),
+    raw_json: stringify(item)
+  };
+}
+
 export async function updateOzonProductStocks(shop, stocks = [], options = {}) {
   const payloadStocks = (stocks || []).map((item) => ({
     offer_id: String(item.offer_id || ""),
@@ -162,6 +248,21 @@ export async function archiveOzonProducts(shop, productIds = [], options = {}) {
     return { result: true, product_id, demo: true };
   }
   return ozonRequest(shop, "/v1/product/archive", { product_id }, options);
+}
+
+export async function generateOzonBarcodes(shop, productIds = [], options = {}) {
+  const product_ids = [...new Set((productIds || []).map(Number).filter(Boolean))];
+  if (!product_ids.length) throw new Error("Missing Ozon product ids for barcode generation");
+  if (!hasRealOzonCredentials(shop)) {
+    return {
+      result: product_ids.map((id) => ({
+        product_id: id,
+        barcode: `OZN${String(id).padStart(10, "0").slice(-10)}`
+      })),
+      demo: true
+    };
+  }
+  return ozonRequest(shop, "/v1/barcode/generate", { product_ids }, options);
 }
 
 export async function createOzonProductBySku(shop, item, options = {}) {
@@ -262,6 +363,28 @@ export async function fetchOzonProductInfoAttributes(shop, options = {}) {
     data = await ozonRequest(shop, "/v3/products/info/attributes", payload, options);
   }
   return data.result?.items || data.items || data.result || [];
+}
+
+export async function fetchOzonProductContentRating(shop, options = {}) {
+  const skus = [...new Set((options.skus || options.sku || [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean))];
+  if (!skus.length) return [];
+  if (!hasRealOzonCredentials(shop)) {
+    return skus.map((sku) => ({
+      sku,
+      rating: 92,
+      groups: [
+        { name: "media", rating: 30, max_rating: 30 },
+        { name: "characteristics", rating: 35, max_rating: 35 },
+        { name: "description", rating: 27, max_rating: 35 }
+      ],
+      demo: true
+    }));
+  }
+  const data = await ozonRequest(shop, "/v1/product/rating-by-sku", { skus }, options);
+  const result = data.result || data;
+  return normalizeArray(result.products || result.items || result.ratings || result);
 }
 
 export async function fetchOzonCategoryAttributes(shop, options = {}) {
@@ -434,6 +557,60 @@ export async function shipOzonPosting(shop, postingNumber, products = [], option
   return ozonRequest(shop, "/v4/posting/fbs/ship", {
     posting_number: posting,
     packages: [{ products: packageProducts }]
+  }, options);
+}
+
+export async function fetchOzonReviews(shop, options = {}) {
+  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+    return { reviews: demoReviews(shop), total: 2, requests: 0 };
+  }
+
+  const reviews = [];
+  let lastId = String(options.last_id || options.lastId || "");
+  const limit = Math.min(Math.max(Number(options.limit || 100), 20), 100);
+  const status = String(options.status || "").trim();
+  let requests = 0;
+
+  while (requests < Math.max(1, Number(options.maxPages || 3))) {
+    const payload = { limit };
+    if (lastId) payload.last_id = lastId;
+    if (status && status !== "all") payload.status = status;
+    const data = await ozonRequest(shop, "/v1/review/list", payload, options);
+    requests += 1;
+    const result = data.result || data;
+    const items = result.reviews || result.items || [];
+    for (const item of items) reviews.push(normalizeOzonReview(item));
+    const total = Number(result.total || result.count || reviews.length);
+    lastId = String(result.last_id || "");
+    if (!result.has_next || !lastId || !items.length || reviews.length >= total || items.length < limit) return { reviews, total, requests };
+  }
+
+  return { reviews, total: reviews.length, requests };
+}
+
+export async function fetchOzonReviewComments(shop, reviewId, options = {}) {
+  const review_id = String(reviewId || "").trim();
+  if (!review_id) return [];
+  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+    return demoReviews(shop).find((item) => item.review_id === review_id)?.comments || [];
+  }
+  const data = await ozonRequest(shop, "/v1/review/comment/list", { review_id }, options);
+  const result = data.result || data;
+  return (result.comments || result.items || []).map(normalizeOzonReviewComment);
+}
+
+export async function createOzonReviewComment(shop, reviewId, text, options = {}) {
+  const review_id = String(reviewId || "").trim();
+  const commentText = String(text || "").trim();
+  if (!review_id) throw new Error("Missing Ozon review id");
+  if (!commentText) throw new Error("Missing review reply text");
+  if (!shop.ozon_client_id || !shop.api_key_hint || shop.api_key_hint.startsWith("demo")) {
+    return { result: { comment_id: `demo-comment-${Date.now()}`, review_id, text: commentText }, demo: true };
+  }
+  return ozonRequest(shop, "/v1/review/comment/create", {
+    mark_review_as_processed: true,
+    review_id,
+    text: commentText
   }, options);
 }
 
@@ -707,6 +884,38 @@ function normalizeOzonProduct(item, listVisibility = "") {
   };
 }
 
+function normalizeOzonReview(item = {}) {
+  const comments = (item.comments || item.review_comments || []).map(normalizeOzonReviewComment);
+  return {
+    review_id: String(item.id || item.review_id || item.uuid || ""),
+    ozon_sku: String(item.sku || item.ozon_sku || item.product_sku || ""),
+    offer_id: String(item.offer_id || item.offer || ""),
+    ozon_product_id: String(item.product_id || item.ozon_product_id || ""),
+    product_name: String(item.product_name || item.name || item.item_name || ""),
+    product_image: imageUrl(item.product_image || item.image || item.photos || item.images),
+    rating: Number(item.rating || item.grade || item.star || 0),
+    status: String(item.status || item.state || ""),
+    text: String(item.text || item.review_text || item.content || ""),
+    advantages: String(item.advantages || item.pros || ""),
+    disadvantages: String(item.disadvantages || item.cons || ""),
+    published_at: item.published_at || item.created_at || item.date || "",
+    updated_at: item.updated_at || "",
+    has_reply: Boolean(item.has_reply || item.is_commented || comments.length),
+    comments,
+    raw_json: stringify(item)
+  };
+}
+
+function normalizeOzonReviewComment(item = {}) {
+  return {
+    comment_id: String(item.id || item.comment_id || item.uuid || ""),
+    author: String(item.author || item.user || item.source || ""),
+    text: String(item.text || item.comment || item.content || ""),
+    created_at: item.created_at || item.date || "",
+    raw_json: stringify(item)
+  };
+}
+
 function normalizeOzonStockItem(item) {
   const productId = String(item.product_id || item.id || "");
   const offerId = String(item.offer_id || "");
@@ -883,6 +1092,11 @@ function normalizeIsoEnd(value, fallbackDate) {
   return fallbackDate.toISOString();
 }
 
+function normalizeStatusList(value) {
+  const list = Array.isArray(value) ? value : String(value || "").split(",");
+  return [...new Set(list.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
 function splitDateRange(sinceIso, toIso, chunkDays) {
   const ranges = [];
   const end = new Date(toIso);
@@ -1001,6 +1215,35 @@ function demoOnlineProducts(shop) {
     ozon_updated_at: "",
     status: "online",
     ...item
+  }));
+}
+
+function demoReviews(shop) {
+  const products = demoOnlineProducts(shop);
+  const now = new Date();
+  return products.slice(0, 2).map((product, index) => ({
+    review_id: `demo-review-${shop.id}-${index + 1}`,
+    ozon_sku: product.ozon_sku,
+    offer_id: product.offer_id,
+    ozon_product_id: product.ozon_product_id,
+    product_name: product.name,
+    product_image: product.primary_image || "",
+    rating: index === 0 ? 5 : 3,
+    status: index === 0 ? "UNPROCESSED" : "PROCESSED",
+    text: index === 0 ? "Good quality, fast delivery." : "Product is OK, packaging could be better.",
+    advantages: index === 0 ? "Quality" : "",
+    disadvantages: index === 0 ? "" : "Packaging",
+    published_at: new Date(now.getTime() - (index + 1) * DAY_MS).toISOString(),
+    updated_at: "",
+    has_reply: index > 0,
+    comments: index > 0 ? [{
+      comment_id: `demo-comment-${shop.id}-${index + 1}`,
+      author: "seller",
+      text: "Thank you for your feedback. We will improve the packaging.",
+      created_at: new Date(now.getTime() - index * DAY_MS).toISOString(),
+      raw_json: "{}"
+    }] : [],
+    raw_json: "{}"
   }));
 }
 

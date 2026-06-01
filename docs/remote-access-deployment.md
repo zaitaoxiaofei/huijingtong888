@@ -52,8 +52,11 @@ DATABASE_PATH=./data/ozon-profit-hub.sqlite
 APP_BASE_URL=https://erp.hjt888.xyz
 SITE_ACCESS_PASSWORD=replace-with-a-long-random-password
 SITE_ACCESS_COOKIE_NAME=erp_site_access
-SITE_ACCESS_SESSION_HOURS=12
+SITE_ACCESS_SESSION_HOURS=168
 APP_SESSION_TTL_HOURS=72
+WECHAT_LOGIN_APP_ID=
+WECHAT_LOGIN_APP_SECRET=
+WECHAT_LOGIN_REDIRECT_URI=https://erp.hjt888.xyz/api/auth/wechat/callback
 ```
 
 说明：
@@ -62,6 +65,8 @@ APP_SESSION_TTL_HOURS=72
 - `APP_BASE_URL`：决定站点口令页回跳地址和安全 Cookie 行为。
 - `SITE_ACCESS_PASSWORD`：外层访问口令；为空时，站点门禁会关闭。
 - `SITE_ACCESS_COOKIE_NAME`、`SITE_ACCESS_SESSION_HOURS`：控制口令通过后的 Cookie 名称和时长。
+- `WECHAT_LOGIN_APP_ID`、`WECHAT_LOGIN_APP_SECRET`：微信开放平台“网站应用”的扫码登录凭据；为空时微信登录按钮不会显示。
+- `WECHAT_LOGIN_REDIRECT_URI`：微信回调地址，应与开放平台后台配置一致，通常是 `https://你的域名/api/auth/wechat/callback`。
 
 ## 4. 本机启动
 

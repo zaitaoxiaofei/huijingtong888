@@ -200,6 +200,7 @@ Useful implementation references:
 - `docs/superpowers/specs/2026-05-12-online-products-copy-to-edit-design.md`: copy-online-product design notes, especially the rule that copied variants must not reuse the original `offer_id` as a submit-ready value.
 - `ozon_data/ozon_swagger.json`: local Seller API swagger snapshot. It confirms the current publish chain for product cards is `POST /v3/product/import` followed by `POST /v1/product/import/info`, and that category attributes should be based on `description_category_id` plus `type_id`.
 - Category sync now follows the same official chain as the reference project: `/v1/description-category/tree` is cached in `ozon_category_mappings`, `/v1/description-category/attribute` is cached in `ozon_category_attributes`, and dictionary values from `/v1/description-category/attribute/values` or `/values/search` are cached in `ozon_attribute_values`. These tables are intended as a system-level Ozon category library, not a listing-only helper.
+- The ERP runs a nightly Ozon category cache refresh after Beijing time 01:10 by default. It refreshes the category tree, then refreshes attributes and required dictionary values for categories already used by listing templates or `ozon_category_usage`. Sync history is stored in `ozon_category_sync_jobs`; category reuse is tracked in `ozon_category_usage`.
 
 Patterns worth carrying forward:
 

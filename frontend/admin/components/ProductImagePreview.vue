@@ -1,5 +1,6 @@
 <script setup>
 import { computed } from "vue";
+import { getAuthToken } from "../utils/api";
 
 const props = defineProps({
   src: { type: String, default: "" },
@@ -8,15 +9,23 @@ const props = defineProps({
   fit: { type: String, default: "contain" },
   size: { type: String, default: "default" },
   preview: { type: Boolean, default: true },
-  lazy: { type: Boolean, default: false }
+  lazy: { type: Boolean, default: true }
 });
 
 function normalizeImageSrc(src) {
   const value = String(src || "").trim();
   if (!value) return "";
   if (/^https?:\/\//i.test(value)) return `/api/image-proxy?url=${encodeURIComponent(value)}`;
-  if (/^(data:image\/|\/api\/|\/uploads\/)/i.test(value)) return value;
+  if (/^data:image\//i.test(value)) return value;
+  if (/^(\/api\/|\/uploads\/)/i.test(value)) return withImageToken(value);
   return "";
+}
+
+function withImageToken(url) {
+  const token = getAuthToken();
+  if (!token || !url || url.includes("token=")) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}token=${encodeURIComponent(token)}`;
 }
 
 const displaySrc = computed(() => normalizeImageSrc(props.src));

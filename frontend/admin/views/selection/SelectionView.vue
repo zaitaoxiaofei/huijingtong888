@@ -1,11 +1,15 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { Sparkles } from "lucide-vue-next";
 import { apiClient } from "../../utils/api";
+import { useAuthStore } from "../../stores/auth.js";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
+import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import OzonCategorySelect from "../../components/listing/OzonCategorySelect.vue";
 
 const loading = ref(false);
 const dialogVisible = ref(false);
@@ -18,9 +22,17 @@ const selectedRows = ref([]);
 const formRef = ref();
 const imageUploadLoading = ref(false);
 const detailImageUploadLoading = ref(false);
+const aiSellingPointsLoading = ref(false);
 const manualLogisticsRule = ref(false);
 const manualPackagingFee = ref(false);
+const oneClickPublishingRows = ref(new Set());
+const cancelingListingJobs = ref(new Set());
+const retryingListingJobs = ref(new Set());
+const materialOptionsLoading = ref(false);
+const catalogDictionaryLoading = ref(false);
 const router = useRouter();
+const authStore = useAuthStore();
+let listingJobPoller = null;
 
 const state = reactive({
   rows: [],
@@ -29,7 +41,8 @@ const state = reactive({
     products: 0,
     quotedRows: 0,
     missingQuoteRows: 0,
-    avgPurchaseCost: 0
+    avgPurchaseCost: 0,
+    status_counts: {}
   },
   people: [],
   suppliers: [],
@@ -38,8 +51,9 @@ const state = reactive({
     query: "",
     ownerPersonId: "all",
     quoteStatus: "all",
+    businessStatus: "all",
     page: 1,
-    pageSize: 30
+    pageSize: 20
   }
 });
 
@@ -64,24 +78,43 @@ const profitDialog = reactive({
   logisticsRule: null
 });
 
+const listingShopDialog = reactive({
+  visible: false,
+  loading: false,
+  submitting: false,
+  row: null,
+  shops: [],
+  selectedShopIds: []
+});
+
 const formRules = {
   name: [{ required: true, message: "请输入商品名称", trigger: "blur" }],
   owner_person_id: [{ required: true, message: "请选择负责人", trigger: "change" }],
   purchase_quantity: [{ required: true, message: "请输入采购数量", trigger: "blur" }]
 };
 
-const materialOptions = ["TPU", "皮革", "PVC", "锌合金", "锌合金+皮革", "硅胶", "ABS", "金属"];
-const colorOptions = ["黑色", "白色", "紫色", "红色", "蓝色", "绿色", "银色", "金色", "灰色", "棕色", "透明"];
+const fallbackMaterialOptions = ["热塑性弹性体", "塑料", "高分子材料", "锌合金", "生态皮革", "聚氯乙烯", "ABS塑料", "不锈钢"];
+const materialOptions = ref([...fallbackMaterialOptions]);
+const vehicleBrandOptions = ref([]);
+const vehicleOptions = ref([]);
+const fallbackColorOptions = ["黑色", "白色", "紫色", "红色", "蓝色", "绿色", "银色", "金色", "灰色", "棕色", "透明"];
+const colorOptions = ref([...fallbackColorOptions]);
 
 function createDefaultForm() {
   return {
     id: null,
     updated_at: "",
     name: "",
+    ozon_category_id: "",
+    ozon_description_category_id: "",
+    ozon_type_id: "",
+    ozon_category_name: "",
     image_url: "",
     detail_image_urls: [],
     material: "TPU",
     color: ["黑色"],
+    vehicle_brand: "",
+    vehicle_model: "",
     selling_points: "",
     purchase_url: "",
     source_platform: "1688",
@@ -107,17 +140,45 @@ function createDefaultForm() {
     desired_profit_value: 20,
     return_rate: 5,
     product_type: "selection",
-    selection_status: "draft"
+    selection_status: "draft",
+    source_selection_id: null,
+    variant_task_id: "",
+    variant_result_id: "",
+    variant_type: "",
+    is_variant_generated: 0,
+    material_asset_status: ""
   };
 }
 
 const total = computed(() => state.total);
 const pagedRows = computed(() => state.rows);
 const summary = computed(() => state.summary);
+const currentUserPersonId = computed(() => Number(authStore.user?.id || 0) || null);
+const currentUserName = computed(() => {
+  const direct = String(authStore.user?.name || authStore.user?.username || "").trim();
+  if (direct) return direct;
+  return state.people.find((person) => Number(person.id) === Number(currentUserPersonId.value))?.name || "";
+});
 
 const dialogTitle = computed(() => (dialog.mode === "create" ? "新增选品" : "编辑选品"));
 const importPreviewRows = computed(() => importState.rows.slice(0, 12));
 const importCommitRows = computed(() => importState.rows.filter((row) => row.ok).map((row) => row.data));
+
+watch(() => dialog.form.ozon_category_id, (value) => {
+  if (value) return;
+  dialog.form.ozon_description_category_id = "";
+  dialog.form.ozon_type_id = "";
+  dialog.form.ozon_category_name = "";
+});
+
+watch(
+  () => [dialog.form.ozon_description_category_id, dialog.form.ozon_type_id],
+  () => {
+    if (dialogVisible.value) loadCatalogDictionariesForCurrentCategory();
+  }
+);
+const catalogDictionaryCache = new Map();
+let catalogDictionaryRequestSeq = 0;
 const profitDetailRows = computed(() => buildProfitDetailRows(
   profitDialog.row,
   profitDialog.quote,
@@ -196,6 +257,7 @@ function buildSelectionQuery() {
     page: String(state.filters.page),
     pageSize: String(state.filters.pageSize),
     quoteStatus: String(state.filters.quoteStatus || "all"),
+    businessStatus: String(state.filters.businessStatus || "all"),
     ownerPersonId: String(state.filters.ownerPersonId || "all")
   });
   const searchText = String(state.filters.query || "").trim();
@@ -218,6 +280,17 @@ function selectNumericInput(event) {
 
 function normalizeTagValue(value) {
   return Array.isArray(value) ? value.filter(Boolean).join("+") : String(value || "").trim();
+}
+
+function catalogOptionValue(item) {
+  return typeof item === "string" ? item : String(item?.value || item?.label || "").trim();
+}
+
+function catalogOptionLabel(item) {
+  if (typeof item === "string") return item;
+  const label = String(item?.label || item?.display_value_zh || item?.displayValueZh || "").trim();
+  const value = String(item?.value || "").trim();
+  return label && label !== value ? `${label} / ${value}` : label || value;
 }
 
 function normalizeColorTags(value) {
@@ -676,16 +749,499 @@ function removeDetailImage(index) {
   dialog.form.detail_image_urls = normalizeDetailImages(dialog.form.detail_image_urls).filter((_, itemIndex) => itemIndex !== index);
 }
 
-function goToListing(row) {
+async function goToListing(row, shopIds = []) {
+  const id = Number(row?.id || 0);
+  if (!id || oneClickPublishingRows.value.has(id) || isListingJobActive(row)) return;
+  if (!Number(row?.package_weight_g || 0)) {
+    ElMessage.warning("请先填写包装克重后再一键上架");
+    return;
+  }
+  if (String(row?.selection_status || "") === "listed") {
+    try {
+      await ElMessageBox.confirm(
+        `产品“${row.name || row.selection_id || row.id}”已上架过，是否继续上架？`,
+        "确认重复上架",
+        { type: "warning", confirmButtonText: "继续上架", cancelButtonText: "取消" }
+      );
+    } catch (error) {
+      if (error === "cancel" || error === "close" || error?.message === "cancel") return;
+      throw error;
+    }
+  }
+  oneClickPublishingRows.value = new Set([...oneClickPublishingRows.value, id]);
+  try {
+    const result = await apiClient.post("/api/asset-variant-engine/publish-selection", {
+      productId: id,
+      shopIds: uniqueNumbers(shopIds)
+    });
+    if (result.accepted) {
+      ElMessage.success(result.note || `后台上架任务已创建：${result.jobNo || result.jobId || ""}`);
+      await loadPageData();
+    } else if (result.ok) {
+      ElMessage.success(result.note || `已自动提交 ${result.published || 0} 个店铺到 Ozon`);
+      await loadPageData();
+    } else {
+      ElMessage.warning(result.note || "一键上架已执行，但没有成功提交的店铺");
+    }
+  } catch (error) {
+    ElMessage.error(error.message || "一键上架失败");
+  } finally {
+    const next = new Set(oneClickPublishingRows.value);
+    next.delete(id);
+    oneClickPublishingRows.value = next;
+  }
+}
+
+async function openListingShopDialog(row) {
+  const id = Number(row?.id || 0);
+  if (!id || oneClickPublishingRows.value.has(id) || isListingJobActive(row)) return;
+  listingShopDialog.visible = true;
+  listingShopDialog.loading = true;
+  listingShopDialog.row = row;
+  listingShopDialog.shops = [];
+  listingShopDialog.selectedShopIds = [];
+  try {
+    const data = await apiClient.get("/api/asset-variant-engine/bootstrap", { noCache: true });
+    const shops = Array.isArray(data?.shops) ? data.shops : [];
+    listingShopDialog.shops = shops
+      .filter((shop) => String(shop.status || "").toLowerCase() !== "deleted")
+      .map((shop) => ({
+        id: Number(shop.id),
+        name: String(shop.name || `店铺 ${shop.id}`),
+        legalEntity: String(shop.legal_entity || shop.legalEntity || ""),
+        status: String(shop.status || ""),
+        priceIndex: effectiveListingShopPriceIndex(shop)
+      }))
+      .filter((shop) => shop.id);
+    listingShopDialog.selectedShopIds = listingShopDialog.shops.map((shop) => shop.id);
+  } catch (error) {
+    ElMessage.error(error.message || "加载店铺失败");
+    listingShopDialog.visible = false;
+  } finally {
+    listingShopDialog.loading = false;
+  }
+}
+
+function closeListingShopDialog() {
+  if (listingShopDialog.submitting) return;
+  listingShopDialog.visible = false;
+  listingShopDialog.row = null;
+  listingShopDialog.shops = [];
+  listingShopDialog.selectedShopIds = [];
+}
+
+function selectAllListingShops() {
+  listingShopDialog.selectedShopIds = listingShopDialog.shops.map((shop) => shop.id);
+}
+
+function clearListingShops() {
+  listingShopDialog.selectedShopIds = [];
+}
+
+function selectOwnerListingShops() {
+  const row = listingShopDialog.row || {};
+  const ownerText = String(row.owner_name || row.owner_person_name || row.owner || "").trim().toLowerCase();
+  if (!ownerText) return selectAllListingShops();
+  const matched = listingShopDialog.shops
+    .filter((shop) => `${shop.name} ${shop.legalEntity}`.toLowerCase().includes(ownerText))
+    .map((shop) => shop.id);
+  listingShopDialog.selectedShopIds = matched.length ? matched : listingShopDialog.selectedShopIds;
+}
+
+function selectRuvibeListingShops() {
+  const matched = listingShopDialog.shops
+    .filter((shop) => /ru\s*vibe|ruvibe/i.test(shop.name))
+    .map((shop) => shop.id);
+  listingShopDialog.selectedShopIds = matched.length ? matched : listingShopDialog.selectedShopIds;
+}
+
+function effectiveListingShopPriceIndex(shop = {}) {
+  const publisher = String(currentUserName.value || "").trim();
+  const legalEntity = String(shop.legal_entity || shop.legalEntity || "").trim();
+  const shopText = `${shop.name || ""} ${legalEntity}`.toLowerCase();
+  if (/ruvibe\s*mart/i.test(String(shop.name || "").trim())) return 1;
+  if (publisher && legalEntity && publisher === legalEntity) return 1;
+  if (/(^|\s)(new|fresh)(\s|$)|新店|全新/.test(shopText)) return 0.95;
+  return 1.05;
+}
+
+function isListingShopSelected(shopId) {
+  return uniqueNumbers(listingShopDialog.selectedShopIds).includes(Number(shopId));
+}
+
+function toggleListingShop(shopId) {
+  const id = Number(shopId);
+  if (!id) return;
+  const selected = new Set(uniqueNumbers(listingShopDialog.selectedShopIds));
+  if (selected.has(id)) selected.delete(id);
+  else selected.add(id);
+  listingShopDialog.selectedShopIds = [...selected];
+}
+
+function listingShopInitial(name = "") {
+  const text = String(name || "").replace(/[^a-z0-9]/gi, "").toUpperCase();
+  return text.slice(0, 2) || "OS";
+}
+
+function uniqueNumbers(values = []) {
+  return [...new Set((values || []).map((value) => Number(value)).filter(Boolean))];
+}
+
+async function submitListingShopDialog() {
+  const row = listingShopDialog.row;
+  const shopIds = uniqueNumbers(listingShopDialog.selectedShopIds);
+  if (!row) return;
+  if (!shopIds.length) {
+    ElMessage.warning("请至少选择一个上架店铺");
+    return;
+  }
+  listingShopDialog.submitting = true;
+  try {
+    await goToListing(row, shopIds);
+    listingShopDialog.visible = false;
+  } finally {
+    listingShopDialog.submitting = false;
+  }
+}
+
+async function cancelListingJob(row) {
+  const jobId = Number(row?.listing_job_id || 0);
+  if (!jobId || cancelingListingJobs.value.has(jobId)) return;
+  cancelingListingJobs.value = new Set([...cancelingListingJobs.value, jobId]);
+  try {
+    await apiClient.post(`/api/asset-variant-engine/jobs/${jobId}/cancel`, {});
+    ElMessage.success("已中断上架任务");
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "中断上架任务失败");
+  } finally {
+    const next = new Set(cancelingListingJobs.value);
+    next.delete(jobId);
+    cancelingListingJobs.value = next;
+  }
+}
+
+async function retryListingJobFailures(row) {
+  const jobId = Number(row?.listing_job_id || 0);
+  if (!jobId || retryingListingJobs.value.has(jobId)) return;
+  retryingListingJobs.value = new Set([...retryingListingJobs.value, jobId]);
+  try {
+    const result = await apiClient.post(`/api/asset-variant-engine/jobs/${jobId}/retry-failures`, {});
+    if (result.ok) {
+      ElMessage.success(`已重试失败店铺：${result.retried || 0} 个`);
+    } else {
+      ElMessage.warning(result.note || "没有可重试的失败店铺");
+    }
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "重试失败店铺失败");
+  } finally {
+    const next = new Set(retryingListingJobs.value);
+    next.delete(jobId);
+    retryingListingJobs.value = next;
+  }
+}
+
+function handleListingAction(row) {
+  if (isListingJobActive(row)) return cancelListingJob(row);
+  if (listingJobStatus(row) === "failed" && Number(row?.listing_job_success_count || 0) > 0) return retryListingJobFailures(row);
+  return openListingShopDialog(row);
+}
+
+function startVariant(row) {
   router.push({
-    name: "asset-variant-center",
+    name: "asset-variant-center-create",
     query: {
-      productId: String(row.id),
-      selectionId: row.selection_id || "",
+      baseSelectionId: String(row.id),
       source: "selection",
-      autoGenerate: "1"
+      autoImport: "1"
     }
   });
+}
+
+function startBatchVariant() {
+  if (!selectedRows.value.length) {
+    ElMessage.warning("请先选择需要 AI 内容优化的选品");
+    return;
+  }
+  const first = selectedRows.value[0];
+  router.push({
+    name: "asset-variant-center-create",
+    query: {
+      baseSelectionId: String(first.id),
+      batchSelectionIds: selectedRows.value.map((row) => row.id).join(","),
+      source: "selection",
+      autoImport: "1"
+    }
+  });
+}
+
+function variantTypeText(value) {
+  const map = {
+    same_model_main_image: "同车型主图裂变",
+    multi_model: "同款多车型裂变",
+    logo_text_replace: "Logo/文字替换裂变"
+  };
+  return map[value] || value || "-";
+}
+
+function selectionStatusText(row = {}) {
+  const status = String(row.selection_status || "draft");
+  if (status === "listed") return "已加入库存";
+  if (status === "merged") return "已合并";
+  if (status === "draft") return "选品中";
+  return status;
+}
+
+function selectionStatusTagType(row = {}) {
+  const status = String(row.selection_status || "draft");
+  if (status === "listed") return "success";
+  if (status === "merged") return "warning";
+  return "info";
+}
+
+const businessStatusOptions = [
+  { label: "全部状态", value: "all" },
+  { label: "待完善", value: "needs_work" },
+  { label: "可上架", value: "ready_to_publish" },
+  { label: "上架中", value: "publishing" },
+  { label: "上架失败", value: "publish_failed" },
+  { label: "已上架", value: "published" },
+  { label: "已入库", value: "in_inventory" },
+  { label: "已中断", value: "publish_cancelled" }
+];
+
+function hasSelectionMainImage(row = {}) {
+  return Boolean(String(row.image_url || "").trim());
+}
+
+function hasSelectionSellingPoints(row = {}) {
+  return Boolean(String(row.selling_points || "").trim());
+}
+
+function hasSelectionPrice(row = {}) {
+  return Number(row.listing_price_rub || 0) > 0 || Number(row.air_sale_price_rmb || 0) > 0;
+}
+
+function hasSelectionWeight(row = {}) {
+  return Number(row.package_weight_g || 0) > 0;
+}
+
+function hasSelectionDetailImages(row = {}) {
+  const raw = row.detail_image_urls;
+  if (Array.isArray(raw)) return raw.filter(Boolean).length > 0;
+  const text = String(raw || "").trim();
+  return Boolean(text && text !== "[]");
+}
+
+function hasSelectionCategory(row = {}) {
+  return Boolean(String(row.ozon_category_id || "").trim())
+    && Number(row.ozon_description_category_id || 0) > 0
+    && Number(row.ozon_type_id || 0) > 0;
+}
+
+function hasSelectionPurchaseCost(row = {}) {
+  return Number(row.purchase_cost || 0) > 0;
+}
+
+function hasSelectionDimensions(row = {}) {
+  return Number(row.length_cm || 0) > 0 && Number(row.width_cm || 0) > 0 && Number(row.height_cm || 0) > 0;
+}
+
+function hasSelectionOwner(row = {}) {
+  return Number(row.owner_person_id || 0) > 0;
+}
+
+function hasSelectionLogisticsRule(row = {}) {
+  return Number(row.logistics_rule_id || 0) > 0;
+}
+
+function selectionReadinessMissingItems(row = {}) {
+  const missing = [];
+  if (!hasSelectionMainImage(row)) missing.push("主图");
+  if (!hasSelectionDetailImages(row)) missing.push("详情图");
+  if (!hasSelectionSellingPoints(row)) missing.push("卖点");
+  if (!hasSelectionCategory(row)) missing.push("Ozon类目/类型");
+  if (!hasSelectionPrice(row)) missing.push("价格");
+  if (!hasSelectionPurchaseCost(row)) missing.push("采购成本");
+  if (!hasSelectionWeight(row)) missing.push("重量");
+  if (!hasSelectionDimensions(row)) missing.push("尺寸");
+  if (!hasSelectionOwner(row)) missing.push("负责人");
+  if (!hasSelectionLogisticsRule(row)) missing.push("物流规则");
+  return missing;
+}
+
+function selectionBusinessStatus(row = {}) {
+  const backendStatus = String(row.business_status || "").trim();
+  if (backendStatus) return backendStatus;
+  const selectionStatus = String(row.selection_status || "draft");
+  const jobStatus = listingJobStatus(row);
+  if (selectionStatus === "listed") return "in_inventory";
+  if (jobStatus === "queued" || jobStatus === "running") return "publishing";
+  if (jobStatus === "failed") return "publish_failed";
+  if (jobStatus === "success") return "published";
+  if (jobStatus === "cancelled") return "publish_cancelled";
+  return selectionReadinessMissingItems(row).length ? "needs_work" : "ready_to_publish";
+}
+
+function selectionBusinessStatusOption(row = {}) {
+  const status = selectionBusinessStatus(row);
+  return businessStatusOptions.find((item) => item.value === status) || { label: status || "未知", value: status || "unknown" };
+}
+
+function selectionBusinessStatusText(row = {}) {
+  return selectionBusinessStatusOption(row).label;
+}
+
+function selectionBusinessStatusTagType(row = {}) {
+  const status = selectionBusinessStatus(row);
+  if (status === "in_inventory" || status === "published") return "success";
+  if (status === "ready_to_publish") return "primary";
+  if (status === "publishing") return "warning";
+  if (status === "publish_failed") return "danger";
+  return "info";
+}
+
+function selectionReadinessMissingText(row = {}) {
+  if (selectionBusinessStatus(row) !== "needs_work") return "";
+  const readinessMissing = selectionReadinessMissingItems(row);
+  return readinessMissing.length ? `缺：${readinessMissing.join("、")}` : "";
+  const missing = [];
+  if (!hasSelectionMainImage(row)) missing.push("主图");
+  if (!hasSelectionSellingPoints(row)) missing.push("卖点");
+  if (!hasSelectionPrice(row)) missing.push("价格");
+  if (!hasSelectionWeight(row)) missing.push("重量");
+  return missing.length ? `缺：${missing.join("、")}` : "";
+}
+
+function listingJobStatus(row = {}) {
+  return String(row.listing_job_status || "").trim();
+}
+
+function isListingJobActive(row = {}) {
+  return ["queued", "running"].includes(listingJobStatus(row));
+}
+
+function listingJobText(row = {}) {
+  const status = listingJobStatus(row);
+  if (status === "cancelled") return "已中断上架";
+  const ahead = Number(row.listing_job_queue_ahead || 0);
+  if (status === "queued") return ahead > 0 ? `排队中，前方 ${ahead} 个任务` : "排队中，即将开始";
+  if (status === "running") return "正在生成并上架";
+  if (status === "success") return "已完成上架";
+  if (status === "failed") return "上架失败";
+  return row.selection_status === "listed" ? "已完成上架" : "未发起";
+}
+
+function listingJobSubText(row = {}) {
+  const status = listingJobStatus(row);
+  if (status === "cancelled") return row.listing_job_no || "已手动中断，可重新上架";
+  if (status === "success") return `${Number(row.listing_job_success_count || 0)} 个店铺成功`;
+  if (status === "failed") return Number(row.listing_job_failed_count || 0) ? `${Number(row.listing_job_failed_count || 0)} 个失败` : "请查看任务错误";
+  if (status === "running") return row.listing_job_no || "后台处理中";
+  if (status === "queued") return row.listing_job_no || "等待后台队列";
+  return "共享任务状态";
+}
+
+function listedTimeText(row = {}) {
+  if (row.selection_status !== "listed") return "";
+  return dateText(row.listing_job_finished_at || row.updated_at || row.created_at);
+}
+
+function parseMaybeJson(value, fallback = null) {
+  if (!value) return fallback;
+  if (typeof value === "object") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function listingJobProgress(row = {}) {
+  const progress = parseMaybeJson(row.listing_job_progress_json, null);
+  if (progress) return progress;
+  const elapsedMs = Number(row.listing_job_elapsed_ms || 0);
+  const currentStage = String(row.listing_job_current_stage || "").trim();
+  if (!elapsedMs && !currentStage) return null;
+  return { elapsedMs, currentStage, phases: [] };
+}
+
+function listingJobResult(row = {}) {
+  return parseMaybeJson(row.listing_job_result_json, null);
+}
+
+function listingJobStageText(row = {}) {
+  const stage = String(row.listing_job_current_stage || listingJobProgress(row)?.currentStage || "").trim();
+  const map = {
+    starting: "启动任务",
+    load_product: "读取选品",
+    bootstrap: "加载配置",
+    generate_assets: "生成素材",
+    publish_assets: "导入并提交",
+    import_listing: "导入编辑上架",
+    submit_precheck: "提交前校验",
+    submit_ozon: "提交 Ozon",
+    done: "完成收尾",
+    success: "已完成",
+    failed: "已失败",
+    recovered: "恢复排队"
+  };
+  return map[stage] || stage;
+}
+
+function listingJobElapsedText(row = {}) {
+  const progress = listingJobProgress(row);
+  const elapsed = Number(row.listing_job_elapsed_ms || progress?.elapsedMs || 0);
+  if (!elapsed) return "";
+  if (elapsed < 60000) return `${Math.max(1, Math.round(elapsed / 1000))} 秒`;
+  return `${Math.round(elapsed / 6000) / 10} 分钟`;
+}
+
+function listingJobFailureText(row = {}) {
+  const summaryError = String(row.listing_job_error_message || "").trim();
+  if (summaryError) return `失败：${summaryError}`;
+  const result = listingJobResult(row);
+  const firstFailed = Array.isArray(result?.results) ? result.results.find((item) => !item.ok) : null;
+  const error = firstFailed?.precheck?.errors?.[0] || firstFailed?.error || parseMaybeJson(row.listing_job_error_json, {})?.message || "";
+  return error ? `失败：${error}` : "";
+}
+
+function listingJobTooltipText(row = {}) {
+  const progress = listingJobProgress(row);
+  const phases = Array.isArray(progress?.phases) ? progress.phases : [];
+  const lines = [
+    `状态：${listingJobText(row)}`,
+    listingJobStageText(row) ? `当前阶段：${listingJobStageText(row)}` : "",
+    listingJobElapsedText(row) ? `已耗时：${listingJobElapsedText(row)}` : "",
+    Number(row.listing_job_queue_ahead || 0) ? `前方排队：${Number(row.listing_job_queue_ahead || 0)} 个任务` : "",
+    listingJobFailureText(row)
+  ].filter(Boolean);
+  const phaseLines = phases.slice(-6).map((phase) => {
+    const duration = Number(phase.durationMs || 0);
+    const durationText = duration ? ` ${Math.round(duration / 1000)}秒` : "";
+    return `${listingJobPhaseName(phase.stage)}${durationText}`;
+  });
+  return [...lines, ...phaseLines].join("\n") || "暂无任务信息";
+}
+
+function listingJobPhaseName(stage = "") {
+  const row = { listing_job_current_stage: stage };
+  return listingJobStageText(row) || stage || "-";
+}
+
+function listingJobCreatedTimeText(row = {}) {
+  return row.listing_job_created_at ? dateText(row.listing_job_created_at) : "";
+}
+
+function listingJobTagType(row = {}) {
+  const status = listingJobStatus(row);
+  if (status === "cancelled") return "info";
+  if (status === "success" || row.selection_status === "listed") return "success";
+  if (status === "failed") return "danger";
+  if (status === "running") return "primary";
+  if (status === "queued") return "warning";
+  return "info";
 }
 
 watch(
@@ -788,15 +1344,18 @@ function closeProfitDialog() {
   profitDialog.logisticsRule = null;
 }
 
-async function loadPageData() {
-  loading.value = true;
+async function loadPageData(options = {}) {
+  const silent = Boolean(options.silent);
+  if (!silent) loading.value = true;
+  let productsLoaded = false;
   try {
-    const [products, people, suppliers, logisticsRules] = await Promise.all([
-      apiClient.get(`/api/products/selection?${buildSelectionQuery()}`),
-      apiClient.get("/api/people"),
-      apiClient.get("/api/suppliers?paged=1&page=1&pageSize=100"),
-      apiClient.get("/api/logistics-rules")
-    ]);
+    const shouldLoadMeta = !silent || !state.people.length || !state.suppliers.length || !state.logisticsRules.length;
+    const metaPromise = Promise.all([
+      shouldLoadMeta ? apiClient.get("/api/people") : Promise.resolve(state.people),
+      shouldLoadMeta ? apiClient.get("/api/suppliers?paged=1&page=1&pageSize=100") : Promise.resolve(state.suppliers),
+      shouldLoadMeta ? apiClient.get("/api/logistics-rules") : Promise.resolve(state.logisticsRules)
+    ]).then((values) => ({ values }), (error) => ({ error }));
+    const products = await apiClient.get(`/api/products/selection?${buildSelectionQuery()}`);
     state.rows = normalizePagedRows(products);
     state.total = normalizePagedTotal(products, state.rows);
     state.summary = products?.summary || {
@@ -807,14 +1366,24 @@ async function loadPageData() {
         ? state.rows.reduce((sum, row) => sum + Number(row.purchase_cost || 0), 0) / state.rows.length
         : 0
     };
-    state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
-    state.suppliers = normalizePagedRows(suppliers);
-    state.logisticsRules = Array.isArray(logisticsRules) ? logisticsRules.filter((item) => Number(item.enabled) !== 0) : [];
-    selectedRows.value = [];
+    productsLoaded = true;
+    if (!silent) selectedRows.value = [];
+    if (!silent) loading.value = false;
+    if (shouldLoadMeta) {
+      const metaResult = await metaPromise;
+      if (metaResult.error) {
+        if (!silent) ElMessage.warning("基础资料加载失败，表格数据已先显示");
+        return;
+      }
+      const [people, suppliers, logisticsRules] = metaResult.values;
+      state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
+      state.suppliers = normalizePagedRows(suppliers);
+      state.logisticsRules = Array.isArray(logisticsRules) ? logisticsRules.filter((item) => Number(item.enabled) !== 0) : [];
+    }
   } catch (error) {
-    ElMessage.error(error.message || "选品计价表加载失败");
+    if (!silent) ElMessage.error(error.message || "选品计价表加载失败");
   } finally {
-    loading.value = false;
+    if (!silent) loading.value = false;
   }
 }
 
@@ -827,6 +1396,7 @@ async function handleReset() {
   state.filters.query = "";
   state.filters.ownerPersonId = "all";
   state.filters.quoteStatus = "all";
+  state.filters.businessStatus = "all";
   state.filters.page = 1;
   await loadPageData();
 }
@@ -846,6 +1416,13 @@ function handleSelectionChange(rows) {
   selectedRows.value = rows;
 }
 
+function preferredPersonId(fallback = null) {
+  const current = currentUserPersonId.value;
+  if (current && state.people.some((item) => Number(item.id) === Number(current))) return current;
+  if (fallback && state.people.some((item) => Number(item.id) === Number(fallback))) return fallback;
+  return state.people[0]?.id || "";
+}
+
 function resetDialogForm() {
   dialog.form = createDefaultForm();
   dialog.currentRow = null;
@@ -856,11 +1433,152 @@ function resetDialogForm() {
 function openCreateDialog() {
   dialog.mode = "create";
   resetDialogForm();
-  dialog.form.owner_person_id = state.people[0]?.id || "";
+  dialog.form.owner_person_id = preferredPersonId();
   dialog.form.logistics_rule_id = selectedLogisticsRule.value?.id || "";
   dialog.form.shipping_method = selectedLogisticsRule.value?.channel || "air_land";
   syncPackagingFee(dialog.form);
   dialogVisible.value = true;
+}
+
+function handleSelectionOzonCategorySelected(category) {
+  if (!category) return;
+  const descriptionCategoryId = category.description_category_id || category.descriptionCategoryId || "";
+  const typeId = category.type_id || category.typeId || "";
+  dialog.form.ozon_category_id = category.ozon_category_id || (descriptionCategoryId && typeId ? `${descriptionCategoryId}:${typeId}` : "");
+  dialog.form.ozon_description_category_id = descriptionCategoryId;
+  dialog.form.ozon_type_id = typeId;
+  dialog.form.ozon_category_name = displayOzonCategoryZh(category);
+}
+
+async function loadCatalogDictionariesForCurrentCategory() {
+  const seq = ++catalogDictionaryRequestSeq;
+  const descriptionCategoryId = Number(dialog.form.ozon_description_category_id || 0);
+  const typeId = Number(dialog.form.ozon_type_id || 0);
+  if (!descriptionCategoryId || !typeId) {
+    materialOptions.value = [...fallbackMaterialOptions];
+    colorOptions.value = [...fallbackColorOptions];
+    vehicleBrandOptions.value = [];
+    vehicleOptions.value = [];
+    return;
+  }
+  const cacheKey = `${descriptionCategoryId}:${typeId}`;
+  const cached = catalogDictionaryCache.get(cacheKey);
+  if (cached) {
+    applyCatalogDictionaries(cached);
+    return;
+  }
+  materialOptionsLoading.value = true;
+  catalogDictionaryLoading.value = true;
+  try {
+    let dictionaries = await loadCatalogDictionaries(descriptionCategoryId, typeId);
+    if (seq !== catalogDictionaryRequestSeq) return;
+    if (!dictionaries.material.length && !dictionaries.color.length && !dictionaries.vehicleBrand.length && !dictionaries.vehicle.length) {
+      await apiClient.post("/api/listing/ozon-category-attributes/sync", {
+        description_category_id: descriptionCategoryId,
+        type_id: typeId,
+        sync_values: true,
+        value_limit: 500,
+        language: "ZH_HANS"
+      }).catch(() => null);
+      dictionaries = await loadCatalogDictionaries(descriptionCategoryId, typeId);
+      if (seq !== catalogDictionaryRequestSeq) return;
+    }
+    catalogDictionaryCache.set(cacheKey, dictionaries);
+    applyCatalogDictionaries(dictionaries);
+  } catch {
+    materialOptions.value = [...fallbackMaterialOptions];
+    colorOptions.value = [...fallbackColorOptions];
+    vehicleBrandOptions.value = [];
+    vehicleOptions.value = [];
+  } finally {
+    materialOptionsLoading.value = false;
+    catalogDictionaryLoading.value = false;
+  }
+}
+
+function applyCatalogDictionaries(dictionaries = {}) {
+  materialOptions.value = dictionaries.material?.length ? sortPreferredCatalogOptions(dictionaries.material, ["热塑性弹性体", "塑料", "高分子材料", "聚氯乙烯", "泡沫聚氨酯", "锌合金", "生态皮革", "不锈钢"]) : [...fallbackMaterialOptions];
+  colorOptions.value = dictionaries.color?.length ? dictionaries.color : [...fallbackColorOptions];
+  vehicleBrandOptions.value = dictionaries.vehicleBrand || [];
+  vehicleOptions.value = dictionaries.vehicle || [];
+  const preferredTpu = materialOptions.value.find((item) => catalogOptionLabel(item).includes("热塑性弹性体") || /^tpu$/i.test(catalogOptionValue(item)));
+  if (/^tpu$/i.test(String(dialog.form.material || "").trim()) && preferredTpu) {
+    dialog.form.material = catalogOptionValue(preferredTpu);
+  }
+}
+
+async function loadCatalogDictionaries(descriptionCategoryId, typeId) {
+  const attributes = await apiClient.get(`/api/listing/ozon-category-attributes?${new URLSearchParams({
+    description_category_id: String(descriptionCategoryId),
+    type_id: String(typeId),
+    value_limit: "1"
+  }).toString()}`, { noCache: true }).catch(() => []);
+  const materialAttribute = findCatalogAttribute(attributes, { ids: [7199], names: ["材质", "材料", "material"] });
+  const colorAttribute = findCatalogAttribute(attributes, { ids: [10096, 8229], names: ["商品颜色", "颜色", "цвет", "color"] });
+  const vehicleBrandAttribute = findCatalogAttribute(attributes, { ids: [7204], names: ["汽车品牌", "品牌", "марка", "brand"] });
+  const vehicleAttribute = findCatalogAttribute(attributes, { ids: [7212], names: ["车型", "型号", "модель", "model"] });
+  const [material, color, vehicleBrand, vehicle] = await Promise.all([
+    loadAttributeValueOptions(descriptionCategoryId, typeId, materialAttribute?.attribute_id || materialAttribute?.attributeId || 0, 300),
+    loadAttributeValueOptions(descriptionCategoryId, typeId, colorAttribute?.attribute_id || colorAttribute?.attributeId || 0, 300),
+    loadAttributeValueOptions(descriptionCategoryId, typeId, vehicleBrandAttribute?.attribute_id || vehicleBrandAttribute?.attributeId || 0, 500),
+    loadAttributeValueOptions(descriptionCategoryId, typeId, vehicleAttribute?.attribute_id || vehicleAttribute?.attributeId || 0, 500)
+  ]);
+  return { material, color, vehicleBrand, vehicle };
+}
+
+function findCatalogAttribute(attributes = [], rule = {}) {
+  const rows = Array.isArray(attributes) ? attributes : [];
+  for (const targetId of (rule.ids || []).map(Number).filter(Boolean)) {
+    const exact = rows.find((attribute) => Number(attribute.attribute_id || attribute.attributeId || 0) === targetId);
+    if (exact) return exact;
+  }
+  const names = rule.names || [];
+  return rows.find((attribute) => {
+    const name = String(attribute.name || attribute.label || "").toLowerCase();
+    return names.some((item) => name.includes(String(item).toLowerCase()));
+  });
+}
+
+async function loadAttributeValueOptions(descriptionCategoryId, typeId, attributeId, limit = 300) {
+  if (!attributeId) return [];
+  const params = new URLSearchParams({
+    description_category_id: String(descriptionCategoryId),
+    type_id: String(typeId),
+    attribute_id: String(attributeId),
+    limit: String(limit)
+  });
+  const rows = await apiClient.get(`/api/listing/ozon-attribute-values?${params.toString()}`, { noCache: true }).catch(() => []);
+  const seen = new Set();
+  return (Array.isArray(rows) ? rows : [])
+    .map((row) => ({
+      value: String(row.value || "").trim(),
+      label: String(row.label || row.display_value_zh || row.value || "").trim(),
+      dictionaryValueId: Number(row.dictionary_value_id || row.id || 0)
+    }))
+    .filter((row) => row.value && !seen.has(row.value) && seen.add(row.value));
+}
+
+function sortPreferredCatalogOptions(options = [], preferred = []) {
+  const rank = (option) => {
+    const label = catalogOptionLabel(option);
+    const value = catalogOptionValue(option);
+    const index = preferred.findIndex((item) => label.includes(item) || value === item);
+    return index >= 0 ? index : preferred.length + 1;
+  };
+  return [...options].sort((a, b) => rank(a) - rank(b) || catalogOptionLabel(a).localeCompare(catalogOptionLabel(b), "zh-Hans-CN"));
+}
+
+function displayOzonCategoryZh(category = {}) {
+  const value = category.path_zh || category.pathZh || category.name_zh || category.nameZh || category.label || category.name || "";
+  const text = String(value || "").replace(/\s*>\s*/g, " / ").trim();
+  if (text && !/[\u0400-\u04ff]/.test(text)) return text;
+  return dialog.form.ozon_category_id ? `待翻译类目 ${dialog.form.ozon_category_id}` : "";
+}
+
+function normalizeStoredOzonCategoryName(value, categoryId) {
+  const text = String(value || "").trim();
+  if (text && !/[\u0400-\u04ff]/.test(text)) return text;
+  return categoryId ? `待翻译类目 ${categoryId}` : "";
 }
 
 async function openEditDialog(row) {
@@ -874,16 +1592,22 @@ async function openEditDialog(row) {
       id: detail.id,
       updated_at: detail.updated_at || "",
       name: detail.name || "",
+      ozon_category_id: detail.ozon_category_id || "",
+      ozon_description_category_id: detail.ozon_description_category_id || "",
+      ozon_type_id: detail.ozon_type_id || "",
+      ozon_category_name: normalizeStoredOzonCategoryName(detail.ozon_category_name, detail.ozon_category_id),
       image_url: detail.image_url || "",
       detail_image_urls: normalizeDetailImages(detail.detail_image_urls),
       material: detail.material || "TPU",
       color: normalizeColorTags(detail.color),
+      vehicle_brand: detail.vehicle_brand || "",
+      vehicle_model: detail.vehicle_model || "",
       selling_points: detail.selling_points || "",
       purchase_url: detail.purchase_url || "",
       source_platform: detail.source_platform || "1688",
       supplier_id: detail.supplier_id || "",
       supplier_note: detail.supplier_note || "",
-      owner_person_id: detail.owner_person_id || state.people[0]?.id || "",
+      owner_person_id: detail.owner_person_id || preferredPersonId(),
       shipping_method: detail.shipping_method || "air_land",
       logistics_rule_id: detail.logistics_rule_id || "",
       purchase_cost: Number(detail.purchase_cost || 0),
@@ -903,10 +1627,17 @@ async function openEditDialog(row) {
       desired_profit_value: Number(detail.desired_profit_value || 20),
       return_rate: roundMoney(resolvedReturnRate(detail) * 100),
       product_type: detail.product_type || "selection",
-      selection_status: detail.selection_status || "draft"
+      selection_status: detail.selection_status || "draft",
+      source_selection_id: detail.source_selection_id || null,
+      variant_task_id: detail.variant_task_id || "",
+      variant_result_id: detail.variant_result_id || "",
+      variant_type: detail.variant_type || "",
+      is_variant_generated: Number(detail.is_variant_generated || 0),
+      material_asset_status: detail.material_asset_status || ""
     };
     manualPackagingFee.value = true;
     dialogVisible.value = true;
+    await loadCatalogDictionariesForCurrentCategory();
   } catch (error) {
     ElMessage.error(error.message || "选品详情加载失败");
   } finally {
@@ -927,9 +1658,15 @@ async function submitDialog() {
   try {
     const payload = {
       ...dialog.form,
+      ozon_category_id: dialog.form.ozon_category_id || "",
+      ozon_description_category_id: Number(dialog.form.ozon_description_category_id || 0) || null,
+      ozon_type_id: Number(dialog.form.ozon_type_id || 0) || null,
+      ozon_category_name: dialog.form.ozon_category_name || "",
       detail_image_urls: normalizeDetailImages(dialog.form.detail_image_urls),
       material: normalizeTagValue(dialog.form.material),
       color: normalizeTagValue(dialog.form.color),
+      vehicle_brand: dialog.form.vehicle_brand || "",
+      vehicle_model: dialog.form.vehicle_model || "",
       supplier_id: dialog.form.supplier_id || null,
       owner_person_id: Number(dialog.form.owner_person_id || 0) || null,
       logistics_rule_id: Number(dialog.form.logistics_rule_id || 0) || null,
@@ -967,6 +1704,35 @@ async function submitDialog() {
     ElMessage.error(error.message || "保存失败");
   } finally {
     dialogSubmitting.value = false;
+  }
+}
+
+async function generateSellingPointsByAi() {
+  if (aiSellingPointsLoading.value) return;
+  aiSellingPointsLoading.value = true;
+  try {
+    const result = await apiClient.post("/api/selection/selling-points/generate", {
+      name: dialog.form.name,
+      ozon_category_name: dialog.form.ozon_category_name,
+      vehicle_brand: dialog.form.vehicle_brand,
+      vehicle_model: dialog.form.vehicle_model,
+      material: normalizeTagValue(dialog.form.material),
+      color: normalizeTagValue(dialog.form.color),
+      existing_selling_points: dialog.form.selling_points,
+      supplier_note: dialog.form.supplier_note,
+      source_platform: dialog.form.source_platform
+    });
+    const generated = String(result?.selling_points || "").trim();
+    if (!generated) {
+      ElMessage.warning("AI 没有返回可用卖点，请稍后重试");
+      return;
+    }
+    dialog.form.selling_points = generated;
+    ElMessage.success("AI 卖点已生成");
+  } catch (error) {
+    ElMessage.error(error.message || "AI 卖点生成失败");
+  } finally {
+    aiSellingPointsLoading.value = false;
   }
 }
 
@@ -1065,28 +1831,36 @@ function handleBatchAction() {
   ElMessage.info("批量操作会在后续迁移中接入统一动作中心。");
 }
 
-onMounted(loadPageData);
+function startListingJobPolling() {
+  if (listingJobPoller) window.clearInterval(listingJobPoller);
+  listingJobPoller = window.setInterval(() => {
+    loadPageData({ silent: true });
+  }, 8000);
+}
+
+onMounted(async () => {
+  await loadPageData();
+  startListingJobPolling();
+});
+
+onBeforeUnmount(() => {
+  if (listingJobPoller) window.clearInterval(listingJobPoller);
+});
 </script>
 
 <template>
-  <div class="page-stack selection-page">
+  <div class="page-stack selection-page erp-paged-page">
     <section class="page-hero selection-hero">
       <div>
         <h2>选品计价表</h2>
       </div>
       <div class="page-card-actions">
-        <el-button @click="openImportDialog">批量导入</el-button>
-        <el-button type="primary" @click="openCreateDialog">新增选品</el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="openImportDialog">批量导入</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新增选品</el-button>
       </div>
     </section>
 
-    <el-card shadow="never" class="page-card selection-table-card">
-      <template #header>
-        <div class="page-card-header">
-          <strong>选品列表</strong>
-        </div>
-      </template>
-
+    <el-card shadow="never" class="page-card selection-table-card erp-paged-card">
       <div class="filter-panel selection-filter-panel">
         <el-form inline>
           <el-form-item label="关键词">
@@ -1105,33 +1879,36 @@ onMounted(loadPageData);
               <el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="String(person.id)" />
             </el-select>
           </el-form-item>
-          <el-form-item label="报价状态">
-            <el-select v-model="state.filters.quoteStatus" style="width: 170px" @change="handleSearch">
-              <el-option label="全部状态" value="all" />
-              <el-option label="已命中报价" value="quoted" />
-              <el-option label="待补报价规则" value="missing" />
+          <el-form-item label="业务状态">
+            <el-select v-model="state.filters.businessStatus" style="width: 150px" @change="handleSearch">
+              <el-option
+                v-for="item in businessStatusOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
             </el-select>
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="handleSearch">查询</el-button>
-            <el-button @click="handleReset">重置</el-button>
-            <el-button type="primary" @click="openCreateDialog">新增选品</el-button>
-            <el-button @click="openImportDialog">批量导入</el-button>
-            <el-button :disabled="!selectedRows.length" @click="handleBatchAction">
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新增选品</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="openImportDialog">批量导入</el-button>
+            <el-button class="erp-btn erp-btn-secondary" :disabled="!selectedRows.length" @click="startBatchVariant">
+              批量AI内容优化
+            </el-button>
+            <el-button class="erp-btn erp-btn-secondary" :disabled="!selectedRows.length" @click="handleBatchAction">
               批量操作
             </el-button>
+          </el-form-item>
+          <el-form-item class="selection-filter-refresh">
+            <span class="muted-text">&#24050;&#36873; {{ selectedRows.length }} &#39033;</span>
+            <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">&#21047;&#26032;</el-button>
           </el-form-item>
         </el-form>
       </div>
 
-      <div class="toolbar-panel selection-toolbar-panel">
-        <div class="toolbar-right">
-          <span>已选 {{ selectedRows.length }} 项</span>
-          <el-button @click="loadPageData">刷新</el-button>
-        </div>
-      </div>
-
-      <div class="selection-table-wrap">
+      <div class="selection-table-wrap erp-table-scroll">
         <el-table
           v-loading="loading"
           :data="pagedRows"
@@ -1142,7 +1919,7 @@ onMounted(loadPageData);
           @selection-change="handleSelectionChange"
         >
           <el-table-column type="selection" width="46" fixed="left" />
-          <el-table-column label="商品信息" min-width="310" fixed="left">
+          <el-table-column label="商品信息" min-width="300" fixed="left">
             <template #default="{ row }">
               <div class="product-cell">
                 <ProductImagePreview
@@ -1152,21 +1929,67 @@ onMounted(loadPageData);
                   fit="cover"
                 />
                 <div class="cell-stack gap-sm">
-                  <strong class="product-name">{{ row.name || "-" }}</strong>
+                  <ProductTitleLink :title="row.name || '-'" :lines="2" />
                   <span class="muted-text">库存编码：{{ row.inventory_id || row.code || "-" }}</span>
                   <span class="muted-text">选品 ID：{{ row.selection_id || "-" }}</span>
+                  <span class="muted-text">创建：{{ dateText(row.created_at) }}</span>
+                  <span v-if="row.ozon_category_name || row.ozon_category_id" class="muted-text">
+                    Ozon 类目：{{ row.ozon_category_name || row.ozon_category_id }}
+                  </span>
+                  <el-tag v-if="row.is_variant_generated" type="warning" effect="plain" size="small">
+                    裂变生成
+                  </el-tag>
                 </div>
               </div>
             </template>
           </el-table-column>
 
-          <el-table-column label="卖点" min-width="220">
+          <el-table-column label="业务状态" min-width="150" align="center">
+            <template #default="{ row }">
+              <div class="cell-stack gap-xs align-center">
+                <el-tooltip
+                  :disabled="!selectionReadinessMissingText(row)"
+                  :content="selectionReadinessMissingText(row)"
+                  placement="top"
+                >
+                  <el-tag :type="selectionBusinessStatusTagType(row)" effect="plain">
+                    {{ selectionBusinessStatusText(row) }}
+                  </el-tag>
+                </el-tooltip>
+                <span class="muted-text">{{ selectionStatusText(row) }}</span>
+                <span v-if="listedTimeText(row)" class="muted-text">上架：{{ listedTimeText(row) }}</span>
+              </div>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="上架任务" min-width="190">
+            <template #default="{ row }">
+              <el-tooltip :content="listingJobTooltipText(row)" placement="top" effect="dark" :popper-style="{ whiteSpace: 'pre-line', maxWidth: '360px' }">
+              <div class="listing-job-cell">
+                <span class="listing-job-dot" :class="[`is-${listingJobStatus(row) || 'idle'}`, { spinning: isListingJobActive(row) }]"></span>
+                <div class="cell-stack gap-xs">
+                  <el-tag :type="listingJobTagType(row)" effect="light" size="small">
+                    {{ listingJobText(row) }}
+                  </el-tag>
+                  <span class="muted-text">{{ listingJobSubText(row) }}</span>
+                  <span v-if="listingJobStageText(row) || listingJobElapsedText(row)" class="muted-text">
+                    {{ [listingJobStageText(row), listingJobElapsedText(row)].filter(Boolean).join(" / ") }}
+                  </span>
+                  <span v-if="listingJobFailureText(row)" class="muted-text listing-job-error">{{ listingJobFailureText(row) }}</span>
+                  <span v-if="listingJobCreatedTimeText(row)" class="muted-text">创建：{{ listingJobCreatedTimeText(row) }}</span>
+                </div>
+              </div>
+              </el-tooltip>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="卖点" min-width="190">
             <template #default="{ row }">
               <div class="selling-points-cell">{{ row.selling_points || "-" }}</div>
             </template>
           </el-table-column>
 
-          <el-table-column label="归属 / 渠道" min-width="170">
+          <el-table-column label="归属 / 渠道" min-width="150">
             <template #default="{ row }">
               <div class="cell-stack gap-sm">
                 <span>{{ row.owner_name || "-" }}</span>
@@ -1176,7 +1999,7 @@ onMounted(loadPageData);
             </template>
           </el-table-column>
 
-          <el-table-column label="采购成本" min-width="150" align="right">
+          <el-table-column label="采购成本" min-width="125" align="right">
             <template #default="{ row }">
               <div class="cell-stack align-end gap-sm">
                 <strong>¥{{ money(row.purchase_cost) }}</strong>
@@ -1186,7 +2009,7 @@ onMounted(loadPageData);
             </template>
           </el-table-column>
 
-          <el-table-column label="售价" min-width="140" align="right">
+          <el-table-column label="售价" min-width="125" align="right">
             <template #default="{ row }">
               <div class="cell-stack align-end gap-sm">
                 <strong>¥{{ money(getSaleRmb(row)) }}</strong>
@@ -1196,7 +2019,7 @@ onMounted(loadPageData);
             </template>
           </el-table-column>
 
-          <el-table-column label="重量 / 尺寸" min-width="160" align="center">
+          <el-table-column label="重量 / 尺寸" min-width="135" align="center">
             <template #default="{ row }">
               <div class="cell-stack gap-sm">
                 <span>{{ numberText(row.package_weight_g) }} g</span>
@@ -1205,7 +2028,7 @@ onMounted(loadPageData);
             </template>
           </el-table-column>
 
-          <el-table-column label="利润报价" min-width="240">
+          <el-table-column label="利润报价" min-width="170">
             <template #default="{ row }">
               <div class="quote-grid">
                 <div class="quote-card" :class="{ 'is-missing': !getCurrentQuote(row, getLogisticsRuleForRow(row)) }">
@@ -1220,7 +2043,7 @@ onMounted(loadPageData);
                     <span>利润 ¥{{ money(getCurrentQuote(row, getLogisticsRuleForRow(row)).profit) }}</span>
                     <span>运费 ¥{{ money(getCurrentQuote(row, getLogisticsRuleForRow(row)).amount) }}</span>
                     <span>建议 {{ getCurrentSuggestedRub(row, getLogisticsRuleForRow(row)) ? `${money(getCurrentSuggestedRub(row, getLogisticsRuleForRow(row)))} RUB` : "-" }}</span>
-                    <el-button link type="primary" @click="openProfitDialog(row, getActiveChannelKey(row, getLogisticsRuleForRow(row)))">明细</el-button>
+                    <el-button class="erp-btn-link" link type="primary" @click="openProfitDialog(row, getActiveChannelKey(row, getLogisticsRuleForRow(row)))">明细</el-button>
                   </template>
                   <span v-else class="muted-text">未命中当前物流规则</span>
                 </div>
@@ -1228,7 +2051,7 @@ onMounted(loadPageData);
             </template>
           </el-table-column>
 
-          <el-table-column label="当前利润" min-width="150" align="center">
+          <el-table-column label="当前利润" min-width="130" align="center">
             <template #default="{ row }">
               <div class="cell-stack gap-sm">
                 <template v-if="getCurrentQuote(row, getLogisticsRuleForRow(row))">
@@ -1240,17 +2063,28 @@ onMounted(loadPageData);
             </template>
           </el-table-column>
 
-          <el-table-column label="更新时间" min-width="155">
-            <template #default="{ row }">{{ dateText(row.updated_at || row.created_at) }}</template>
+          <el-table-column label="流转操作" width="92" fixed="right" align="center">
+            <template #default="{ row }">
+              <div class="table-actions is-vertical">
+                <el-button
+                  link
+                  :type="isListingJobActive(row) ? 'danger' : 'warning'"
+                  :loading="oneClickPublishingRows.has(Number(row.id || 0)) || cancelingListingJobs.has(Number(row.listing_job_id || 0)) || retryingListingJobs.has(Number(row.listing_job_id || 0))"
+                  @click="handleListingAction(row)"
+                >
+                  {{ isListingJobActive(row) ? "中断上架" : "一键上架" }}
+                </el-button>
+                <el-button class="erp-btn-link" link type="primary" @click="startVariant(row)">AI内容优化</el-button>
+                <el-button class="erp-btn-link" link type="success" :disabled="row.selection_status === 'listed'" @click="addToInventory(row)">加入库存</el-button>
+              </div>
+            </template>
           </el-table-column>
 
-          <el-table-column label="操作" width="210" fixed="right">
+          <el-table-column label="维护操作" width="72" fixed="right" align="center">
             <template #default="{ row }">
-              <div class="table-actions">
-                <el-button link type="success" :disabled="row.selection_status === 'listed'" @click="addToInventory(row)">加入库存</el-button>
-                <el-button link type="warning" @click="goToListing(row)">去上架</el-button>
-                <el-button link type="primary" @click="openEditDialog(row)">编辑</el-button>
-                <el-button link type="danger" @click="handleDelete(row)">删除</el-button>
+              <div class="table-actions is-vertical">
+                <el-button class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
+                <el-button class="erp-btn-link-danger" link type="danger" @click="handleDelete(row)">删除</el-button>
               </div>
             </template>
           </el-table-column>
@@ -1262,11 +2096,80 @@ onMounted(loadPageData);
         :total="total"
         :page="state.filters.page"
         :page-size="state.filters.pageSize"
-        :page-sizes="[30, 50, 100]"
         @update:page="handlePageChange"
         @update:pageSize="handlePageSizeChange"
       />
     </el-card>
+
+    <el-dialog
+      v-model="listingShopDialog.visible"
+      title="选择上架店铺"
+      width="720px"
+      align-center
+      destroy-on-close
+      class="listing-shop-dialog erp-centered-dialog"
+      @closed="closeListingShopDialog"
+    >
+      <div class="listing-shop-dialog-body" v-loading="listingShopDialog.loading">
+        <div class="listing-shop-hero">
+          <div class="listing-shop-hero-icon">
+            <Sparkles :size="18" />
+          </div>
+          <div class="listing-shop-hero-main">
+            <span>一键上架确认</span>
+            <strong>{{ listingShopDialog.row?.name || listingShopDialog.row?.selection_id || "-" }}</strong>
+            <p>默认全店铺上架；临时测试或避开店铺时，取消对应店铺即可。</p>
+          </div>
+          <div class="listing-shop-hero-count">
+            <strong>{{ listingShopDialog.selectedShopIds.length }}</strong>
+            <span>/ {{ listingShopDialog.shops.length }} 店铺</span>
+          </div>
+        </div>
+        <div class="listing-shop-tools">
+          <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="selectAllListingShops">全选</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="clearListingShops">清空</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="selectOwnerListingShops">负责人店铺</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="selectRuvibeListingShops">RuVibe Mart</el-button>
+        </div>
+        <el-empty v-if="!listingShopDialog.loading && !listingShopDialog.shops.length" description="暂无可上架店铺" />
+        <div v-else class="listing-shop-grid">
+          <button
+            v-for="shop in listingShopDialog.shops"
+            :key="shop.id"
+            type="button"
+            class="listing-shop-option"
+            :class="{ 'is-selected': isListingShopSelected(shop.id) }"
+            @click="toggleListingShop(shop.id)"
+          >
+            <span class="listing-shop-check">{{ isListingShopSelected(shop.id) ? "✓" : "" }}</span>
+            <div class="listing-shop-avatar">{{ listingShopInitial(shop.name) }}</div>
+            <div class="listing-shop-option-content">
+              <div class="listing-shop-option-main">
+                <strong>{{ shop.name }}</strong>
+                <span>{{ shop.legalEntity || "未配置主体" }}</span>
+              </div>
+              <div class="listing-shop-option-meta">
+                <span>{{ shop.status || "active" }}</span>
+                <span>价格指数 {{ shop.priceIndex }}</span>
+              </div>
+            </div>
+          </button>
+        </div>
+      </div>
+      <template #footer>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="closeListingShopDialog">取消</el-button>
+          <el-button
+            type="primary"
+            :loading="listingShopDialog.submitting"
+            :disabled="listingShopDialog.loading || !listingShopDialog.selectedShopIds.length"
+            @click="submitListingShopDialog"
+          >
+            确认上架
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="dialogVisible"
@@ -1280,6 +2183,21 @@ onMounted(loadPageData);
       <el-form ref="formRef" :model="dialog.form" :rules="formRules" label-width="112px">
         <div class="selection-workbench">
           <div class="selection-workbench-main">
+            <el-alert
+              v-if="dialog.form.is_variant_generated"
+              type="warning"
+              :closable="false"
+              show-icon
+              class="variant-source-alert"
+            >
+              <template #title>
+                该商品由「{{ dialog.form.source_selection_id || "未知" }} 母商品」通过「{{ variantTypeText(dialog.form.variant_type) }}」生成。
+              </template>
+              <div class="variant-source-actions">
+                <el-button size="small" @click="dialog.form.source_selection_id && startVariant({ id: dialog.form.source_selection_id })">查看母商品</el-button>
+                <el-button size="small" @click="startVariant(dialog.form)">查看裂变任务</el-button>
+              </div>
+            </el-alert>
             <div class="form-section">
               <div class="form-section-title">基础信息</div>
               <el-row :gutter="18">
@@ -1295,6 +2213,46 @@ onMounted(loadPageData);
                     </el-select>
                   </el-form-item>
                 </el-col>
+                <el-col :span="12">
+                  <el-form-item label="Ozon 类目">
+                    <OzonCategorySelect
+                      v-model="dialog.form.ozon_category_id"
+                      :full-refresh="false"
+                      :display-label="dialog.form.ozon_category_name"
+                      placeholder="搜索并绑定本地 Ozon 类目"
+                      @select="handleSelectionOzonCategorySelected"
+                    />
+                  </el-form-item>
+                </el-col>
+                <el-col v-if="vehicleBrandOptions.length" :span="6">
+                  <el-form-item label="汽车品牌">
+                    <el-select
+                      v-model="dialog.form.vehicle_brand"
+                      filterable
+                      clearable
+                      allow-create
+                      default-first-option
+                      :loading="catalogDictionaryLoading"
+                      placeholder="选择 Ozon 汽车品牌"
+                    >
+                      <el-option v-for="item in vehicleBrandOptions" :key="catalogOptionValue(item)" :label="catalogOptionLabel(item)" :value="catalogOptionValue(item)" />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
+                <el-col v-if="vehicleOptions.length || dialog.form.vehicle_model" :span="6">
+                  <el-form-item label="汽车型号">
+                    <el-select
+                      v-model="dialog.form.vehicle_model"
+                      filterable
+                      allow-create
+                      default-first-option
+                      :loading="catalogDictionaryLoading"
+                      placeholder="选择或输入车型"
+                    >
+                      <el-option v-for="item in vehicleOptions" :key="catalogOptionValue(item)" :label="catalogOptionLabel(item)" :value="catalogOptionValue(item)" />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
                 <el-col :span="8">
                   <el-form-item label="材质">
                     <el-select
@@ -1302,15 +2260,11 @@ onMounted(loadPageData);
                       filterable
                       allow-create
                       default-first-option
+                      :loading="materialOptionsLoading"
                       placeholder="选择或输入材质"
                     >
-                      <el-option v-for="item in materialOptions" :key="item" :label="item" :value="item" />
+                      <el-option v-for="item in materialOptions" :key="catalogOptionValue(item)" :label="catalogOptionLabel(item)" :value="catalogOptionValue(item)" />
                     </el-select>
-                  </el-form-item>
-                </el-col>
-                <el-col :span="8">
-                  <el-form-item label="数量" prop="purchase_quantity">
-                    <el-input-number v-model="dialog.form.purchase_quantity" :min="1" :precision="0" :step="1" controls-position="right" @focus="selectNumericInput" />
                   </el-form-item>
                 </el-col>
                 <el-col :span="8">
@@ -1323,10 +2277,16 @@ onMounted(loadPageData);
                       default-first-option
                       collapse-tags
                       collapse-tags-tooltip
+                      :loading="catalogDictionaryLoading"
                       placeholder="选择或输入颜色"
                     >
-                      <el-option v-for="item in colorOptions" :key="item" :label="item" :value="item" />
+                      <el-option v-for="item in colorOptions" :key="catalogOptionValue(item)" :label="catalogOptionLabel(item)" :value="catalogOptionValue(item)" />
                     </el-select>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="8">
+                  <el-form-item label="数量" prop="purchase_quantity">
+                    <el-input-number v-model="dialog.form.purchase_quantity" :min="1" :precision="0" :step="1" controls-position="right" @focus="selectNumericInput" />
                   </el-form-item>
                 </el-col>
                 <el-col :span="4">
@@ -1362,7 +2322,25 @@ onMounted(loadPageData);
                   </el-form-item>
                 </el-col>
                 <el-col :span="24">
-                  <el-form-item label="产品卖点">
+                  <el-form-item>
+                    <template #label>
+                      <span class="selling-points-label">
+                        <span>产品卖点</span>
+                        <el-tooltip content="根据名称、车型、材质和已有卖点生成/丰富文案" placement="top">
+                          <el-button
+                            class="selling-points-ai-button"
+                            size="small"
+                            type="primary"
+                            link
+                            :icon="Sparkles"
+                            :loading="aiSellingPointsLoading"
+                            @click.stop.prevent="generateSellingPointsByAi"
+                          >
+                            AI丰富
+                          </el-button>
+                        </el-tooltip>
+                      </span>
+                    </template>
                     <el-input
                       v-model="dialog.form.selling_points"
                       type="textarea"
@@ -1559,9 +2537,9 @@ onMounted(loadPageData);
       </el-form>
 
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="dialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="dialogSubmitting" @click="submitDialog">保存</el-button>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="dialogVisible = false">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="dialogSubmitting" @click="submitDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>
@@ -1675,9 +2653,9 @@ onMounted(loadPageData);
       </div>
 
       <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="importDialogVisible = false">取消</el-button>
-          <el-button type="primary" :disabled="!importCommitRows.length" :loading="importSubmitting" @click="commitImport">
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="importDialogVisible = false">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :disabled="!importCommitRows.length" :loading="importSubmitting" @click="commitImport">
             确认导入
           </el-button>
         </div>
@@ -1688,7 +2666,7 @@ onMounted(loadPageData);
 
 <style scoped>
 .selection-page {
-  min-height: 100%;
+  min-height: 0;
 }
 
 .selection-hero p {
@@ -1696,20 +2674,30 @@ onMounted(loadPageData);
 }
 
 .selection-table-card {
-  display: flex;
-  flex-direction: column;
-  min-height: calc(100vh - 286px);
+  min-height: 0;
 }
 
 .selection-filter-panel {
   margin-bottom: 12px;
 }
 
-.selection-toolbar-panel {
-  display: flex;
+.selection-filter-panel :deep(.el-form) {
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  display: flex;
+  gap: 0;
+  width: 100%;
+}
+
+.selection-filter-refresh {
+  margin-left: auto;
+  margin-right: 0;
+}
+
+.selection-filter-refresh :deep(.el-form-item__content) {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
 }
 
 .toolbar-left,
@@ -1732,7 +2720,7 @@ onMounted(loadPageData);
 }
 
 .selection-table {
-  min-width: 1960px;
+  min-width: 1780px;
 }
 
 .selection-table :deep(.el-table__cell) {
@@ -1753,11 +2741,26 @@ onMounted(loadPageData);
   gap: 4px;
 }
 
+.gap-xs {
+  gap: 2px;
+}
+
 .align-end {
   align-items: flex-end;
 }
 
+.align-center {
+  align-items: center;
+}
+
 .muted-text {
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.field-hint {
+  margin-top: 6px;
   color: var(--erp-text-secondary);
   font-size: 12px;
   line-height: 1.5;
@@ -1783,6 +2786,62 @@ onMounted(loadPageData);
   overflow: hidden;
 }
 
+.listing-job-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+}
+
+.listing-job-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: #b8c2d6;
+  box-shadow: 0 0 0 4px rgba(184, 194, 214, .16);
+}
+
+.listing-job-dot.is-queued {
+  background: #e6a23c;
+  box-shadow: 0 0 0 4px rgba(230, 162, 60, .16);
+}
+
+.listing-job-dot.is-running {
+  background: #409eff;
+  box-shadow: 0 0 0 4px rgba(64, 158, 255, .16);
+}
+
+.listing-job-dot.is-success {
+  background: #67c23a;
+  box-shadow: 0 0 0 4px rgba(103, 194, 58, .16);
+}
+
+.listing-job-dot.is-failed {
+  background: #f56c6c;
+  box-shadow: 0 0 0 4px rgba(245, 108, 108, .16);
+}
+
+.listing-job-dot.spinning {
+  position: relative;
+}
+
+.listing-job-dot.spinning::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  border-radius: 50%;
+  border: 2px solid rgba(64, 158, 255, .2);
+  border-top-color: currentColor;
+  animation: listing-job-spin 900ms linear infinite;
+}
+
+@keyframes listing-job-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .product-thumb {
   width: 50px;
   height: 50px;
@@ -1802,7 +2861,7 @@ onMounted(loadPageData);
 
 .quote-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 10px;
 }
 
@@ -1833,6 +2892,20 @@ onMounted(loadPageData);
   align-items: center;
   flex-wrap: wrap;
   gap: 2px 10px;
+}
+
+.table-actions.is-vertical {
+  flex-direction: column;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 4px;
+}
+
+.table-actions.is-vertical :deep(.el-button) {
+  margin-left: 0;
+  padding: 0;
+  min-height: 20px;
+  font-size: 12px;
 }
 
 .form-section {
@@ -1995,6 +3068,24 @@ onMounted(loadPageData);
   color: var(--erp-text);
 }
 
+.selling-points-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.selling-points-ai-button {
+  height: 24px;
+  padding: 0;
+  font-weight: 600;
+}
+
+.selling-points-ai-button :deep(svg) {
+  width: 14px;
+  height: 14px;
+}
+
 .selection-form-dialog :deep(.el-input-number) {
   width: 100%;
   min-width: 104px;
@@ -2018,10 +3109,201 @@ onMounted(loadPageData);
   text-align: left;
 }
 
+.variant-source-alert {
+  margin-bottom: 14px;
+}
+
+.variant-source-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 .dialog-footer {
   display: flex;
   justify-content: flex-end;
   gap: 12px;
+}
+
+.listing-shop-dialog-body {
+  display: grid;
+  gap: 12px;
+  min-height: 220px;
+}
+
+.listing-shop-hero {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 14px;
+  border: 1px solid #dce8f6;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.listing-shop-hero-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: #1677ff;
+  background: #eef6ff;
+  border: 1px solid #cfe1ff;
+}
+
+.listing-shop-hero-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.listing-shop-hero-main span,
+.listing-shop-hero-main p,
+.listing-shop-hero-count span {
+  color: #697386;
+  font-size: 12px;
+}
+
+.listing-shop-hero-main strong {
+  color: #172033;
+  font-size: 16px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.listing-shop-hero-main p {
+  margin: 0;
+}
+
+.listing-shop-hero-count {
+  min-width: 84px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #edf1f7;
+  text-align: center;
+}
+
+.listing-shop-hero-count strong {
+  display: block;
+  color: #1677ff;
+  font-size: 22px;
+  line-height: 1.1;
+}
+
+.listing-shop-tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.listing-shop-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.listing-shop-option {
+  position: relative;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  min-height: 86px;
+  text-align: left;
+  border: 1px solid #e5eaf3;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color .16s ease, box-shadow .16s ease, background .16s ease, transform .16s ease;
+}
+
+.listing-shop-option:hover {
+  border-color: #8bbcff;
+  box-shadow: 0 8px 22px rgba(22, 119, 255, .08);
+  transform: translateY(-1px);
+}
+
+.listing-shop-option.is-selected {
+  border-color: #1677ff;
+  background: #f7fbff;
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, .10);
+}
+
+.listing-shop-check {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: #1677ff;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+}
+
+.listing-shop-option.is-selected .listing-shop-check {
+  opacity: 1;
+}
+
+.listing-shop-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: #24518f;
+  background: #eef6ff;
+  border: 1px solid #d7e8ff;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.listing-shop-option-content {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+}
+
+.listing-shop-option-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.listing-shop-option-main span,
+.listing-shop-option-meta {
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+}
+
+.listing-shop-option-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.listing-shop-option-meta span {
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: #f4f7fb;
+  color: #5d6b82;
 }
 
 .profit-dialog-title {
@@ -2059,6 +3341,15 @@ onMounted(loadPageData);
 
 .profit-detail-table :deep(.el-table__row:last-child td) {
   background: rgba(15, 118, 110, 0.08);
+}
+
+.listing-job-error {
+  color: #dc2626;
+  max-width: 220px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .import-dropzone {
@@ -2104,11 +3395,6 @@ onMounted(loadPageData);
 }
 
 @media (max-width: 960px) {
-  .selection-toolbar-panel {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
   .profit-summary-cards {
     grid-template-columns: 1fr;
     min-width: 0;

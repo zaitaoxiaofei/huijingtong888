@@ -1,4 +1,4 @@
-<script setup>
+﻿<script setup>
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -6,6 +6,7 @@ import { apiClient } from "../../utils/api";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
+import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
 import ProductCreateEditDialog from "../../components/inventory/ProductCreateEditDialog.vue";
 import {
@@ -71,7 +72,7 @@ const state = reactive({
     dateFrom: "",
     dateTo: "",
     page: 1,
-    pageSize: 30
+    pageSize: 20
   }
 });
 
@@ -81,7 +82,7 @@ const filterDefaults = {
   dateFrom: "",
   dateTo: "",
   page: 1,
-  pageSize: 30
+  pageSize: 20
 };
 
 const mergeFieldLabelMap = {
@@ -113,9 +114,7 @@ const mergeFieldLabelMap = {
   advertising_rate: "广告费率",
   return_rate: "退货率",
   owner_person_id: "负责人",
-  created_by_person_id: "创建人",
-  product_type: "产品类型",
-  selection_status: "库存状态"
+  created_by_person_id: "创建人"
 };
 
 const pagedRows = computed(() => state.products);
@@ -811,9 +810,9 @@ onMounted(async () => {
       @reset="handleReset"
     >
       <template #actions>
-        <el-button @click="openMergeHistoryDialog">合并历史</el-button>
-        <el-button :disabled="!canMergeProducts" @click="openMergeDialog">合并库存产品</el-button>
-        <el-button type="primary" @click="openCreateDialog">新增库存产品</el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="openMergeHistoryDialog">合并历史</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :disabled="!canMergeProducts" @click="openMergeDialog">合并库存产品</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新增库存产品</el-button>
       </template>
     </InventoryPageToolbar>
 
@@ -832,7 +831,7 @@ onMounted(async () => {
             <div class="product-cell">
               <ProductImagePreview :src="row.image_url" />
               <div class="cell-stack">
-                <strong>{{ row.name || "-" }}</strong>
+                <ProductTitleLink :title="row.name || '-'" :lines="2" />
                 <span class="muted-text">{{ row.inventory_id || row.code || "-" }}</span>
                 <span class="muted-text">负责人：{{ row.owner_name || "-" }}</span>
                 <span class="muted-text">店铺：{{ row.shop_names.join(" / ") || "-" }}</span>
@@ -867,7 +866,7 @@ onMounted(async () => {
                   <div class="profit-summary-metric">利润 ¥{{ inventoryProfitMoneyText(row, "profit") }}</div>
                   <div class="profit-summary-metric">运费 ¥{{ inventoryProfitMoneyText(row, "transport") }}</div>
                   <div class="profit-summary-metric">建议售价 ¥{{ inventoryProfitMoneyText(row, "suggestedSaleRmb") }}</div>
-                  <el-button link type="primary" class="sku-detail-link" @click="openInventoryProfitDetails(row)">明细</el-button>
+                  <el-button link type="primary" class="sku-detail-link erp-btn-link" @click="openInventoryProfitDetails(row)">明细</el-button>
                 </div>
               </template>
               <template v-else>
@@ -900,11 +899,11 @@ onMounted(async () => {
                   </el-tag>
                   <span v-if="row.sku_preview_extra" class="sku-preview-extra">+{{ row.sku_preview_extra }}</span>
                 </div>
-                <el-button link type="primary" class="sku-detail-link" @click="openMappingDetails(row)">查看详情</el-button>
+                <el-button link type="primary" class="sku-detail-link erp-btn-link" @click="openMappingDetails(row)">查看详情</el-button>
               </template>
               <template v-else>
                 <span class="muted-text">未绑定 SKU</span>
-                <el-button link type="primary" class="sku-detail-link" @click="openMappingDetails(row)">去绑定 SKU</el-button>
+                <el-button link type="primary" class="sku-detail-link erp-btn-link" @click="openMappingDetails(row)">去绑定 SKU</el-button>
               </template>
             </div>
           </template>
@@ -914,15 +913,15 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="操作" width="380" fixed="right">
           <template #default="{ row }">
-            <el-space wrap>
-              <el-button link type="primary" @click="openEditDialog(row)">编辑</el-button>
-              <el-button link type="primary" @click="openMappingDetails(row)">{{ row.bound_sku_count ? "SKU 详情" : "去绑定 SKU" }}</el-button>
-              <el-button link @click="openProcurement(row)">创建采购</el-button>
-              <el-button link @click="openProfitDetails(row)">订单利润明细</el-button>
-              <el-button link @click="openCancelDetails(row)">取消明细</el-button>
-              <el-button link type="warning" @click="recalculateProfits(row)">重算利润</el-button>
-              <el-button link type="danger" @click="removeFromInventory(row)">移出库存</el-button>
-            </el-space>
+            <div class="erp-inline-actions">
+              <el-button class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
+              <el-button class="erp-btn-link" link type="primary" @click="openMappingDetails(row)">{{ row.bound_sku_count ? "SKU 详情" : "去绑定 SKU" }}</el-button>
+              <el-button class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
+              <el-button class="erp-btn-link" link @click="openProfitDetails(row)">订单利润明细</el-button>
+              <el-button class="erp-btn-link" link @click="openCancelDetails(row)">取消明细</el-button>
+              <el-button class="erp-btn-link" link type="warning" @click="recalculateProfits(row)">重算利润</el-button>
+              <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="removeFromInventory(row)">移出库存</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -932,7 +931,7 @@ onMounted(async () => {
       :total="state.total"
       :page="state.filters.page"
       :page-size="state.filters.pageSize"
-      :page-sizes="[30, 50, 100]"
+      
       @update:page="handlePageChange"
       @update:pageSize="handlePageSizeChange"
     />
@@ -1587,3 +1586,4 @@ onMounted(async () => {
   }
 }
 </style>
+

@@ -1,5 +1,6 @@
 import {
   downloadAiZip,
+  generateCommerceCopyAction,
   generateImagesAction,
   generateWorkflowAction,
   optimizePromptAction,
@@ -11,6 +12,7 @@ export function createAiImageRoutes({ readJson }) {
   return {
     "GET /api/ai/status": () => status(),
     "POST /api/ai/optimize-prompt": (req) => optimizePromptAction(req, readJson),
+    "POST /api/ai/generate-commerce-copy": (req) => generateCommerceCopyAction(req, readJson),
     "POST /api/ai/generate-images": (req) => generateImagesAction(req, readJson),
     "POST /api/ai/generate-workflow": (req) => generateWorkflowAction(req, readJson)
   };
@@ -41,5 +43,5 @@ export async function handleAiImageRestRoute({ req, res, parts, json, notFound, 
     return json(res, { error: error.message }, error.status || 500);
   }
 
-  return notFound(res);
+  return false;
 }

@@ -16,6 +16,8 @@ export function evaluateAdSku(row = {}) {
   const spend = num(row.spend_rub);
   const revenue = num(row.revenue_rub);
   const clicks = num(row.clicks);
+  const addToCart = num(row.add_to_cart);
+  const addToCartAvailable = num(row.add_to_cart_available) > 0;
   const impressions = num(row.impressions);
   const orders = num(row.orders);
   const ctr = impressions ? clicks / impressions : num(row.ctr);
@@ -129,7 +131,7 @@ export function evaluateAdSku(row = {}) {
   if (!actions.length) actions.push("继续观察");
 
   return {
-    metrics: { spend, revenue, clicks, impressions, ctr, cr, roas, acos, cpc, orders, grossMarginRate, adNetProfit },
+    metrics: { spend, revenue, clicks, addToCart, addToCartAvailable, impressions, ctr, cr, roas, acos, cpc, orders, grossMarginRate, adNetProfit },
     healthScore,
     riskLevel,
     status,

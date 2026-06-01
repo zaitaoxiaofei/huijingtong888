@@ -1,4 +1,6 @@
 <script setup>
+import AuthenticatedImage from "../../admin/components/AuthenticatedImage.vue";
+
 defineProps({
   rows: { type: Array, default: () => [] }
 });
@@ -7,9 +9,7 @@ const emit = defineEmits(["create", "edit", "delete"]);
 
 function watermarkUrl(row) {
   if (!row?.id || !row?.watermark_path) return "";
-  const token = localStorage.getItem("authToken") || "";
-  const base = `/api/tools/image-cropper/shop-watermark/${encodeURIComponent(row.id)}/file`;
-  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  return `/api/tools/image-cropper/shop-watermark/${encodeURIComponent(row.id)}/file`;
 }
 </script>
 
@@ -45,7 +45,11 @@ function watermarkUrl(row) {
             <td>{{ row.api_key_hint || "-" }}</td>
             <td>
               <div class="vue-config-watermark-cell">
-                <img v-if="watermarkUrl(row)" :src="watermarkUrl(row)" :alt="`${row.name || '店铺'}水印`" />
+                <AuthenticatedImage
+                  v-if="watermarkUrl(row)"
+                  :src="watermarkUrl(row)"
+                  :alt="`${row.name || '店铺'}水印`"
+                />
                 <span>{{ row.watermark_name || (row.watermark_path ? "已配置" : "未配置") }}</span>
               </div>
             </td>

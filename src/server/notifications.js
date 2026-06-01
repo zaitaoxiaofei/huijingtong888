@@ -1,3 +1,99 @@
+import fs from "node:fs";
+import path from "node:path";
+
+const runtimeDir = path.resolve("data");
+const statusFile = path.join(runtimeDir, "global-update-status.json");
+const defaultPluginVersion = process.env.COLLECTOR_PLUGIN_VERSION || "1.3.3";
+const defaultPluginPackageName = `ozon-baodan-erp-plugin-${defaultPluginVersion}.rar`;
+const defaultStatus = {
+  app: {
+    version: process.env.APP_RELEASE_VERSION || "2026.05.31.1",
+    title: "后台已更新",
+    message: "系统后台已经发布新版本，请刷新页面以清理缓存并加载最新功能。",
+    action: "reload",
+    mandatory: true,
+    published_at: new Date().toISOString()
+  },
+  plugin: {
+    version: defaultPluginVersion,
+    title: "爆单ERP插件有新版本",
+    message: "爆单ERP插件已经更新，请下载最新版并重新安装。",
+    download_url: process.env.COLLECTOR_PLUGIN_DOWNLOAD_URL || `/downloads/${defaultPluginPackageName}`,
+    package_name: defaultPluginPackageName,
+    mandatory: true,
+    published_at: new Date().toISOString()
+  }
+};
+
+function normalizeUpdatePayload(input = {}) {
+  const app = input.app && typeof input.app === "object" ? input.app : {};
+  const plugin = input.plugin && typeof input.plugin === "object" ? input.plugin : {};
+  return {
+    app: {
+      ...defaultStatus.app,
+      ...app,
+      version: String(app.version || defaultStatus.app.version).trim()
+    },
+    plugin: {
+      ...defaultStatus.plugin,
+      ...plugin,
+      version: String(plugin.version || defaultStatus.plugin.version).trim(),
+      download_url: String(plugin.download_url || plugin.downloadUrl || defaultStatus.plugin.download_url).trim(),
+      package_name: String(plugin.package_name || plugin.packageName || `ozon-baodan-erp-plugin-${plugin.version || defaultStatus.plugin.version}.rar`).trim()
+    }
+  };
+}
+
+function readUpdateStatusFile() {
+  try {
+    if (!fs.existsSync(statusFile)) return defaultStatus;
+    return normalizeUpdatePayload(JSON.parse(fs.readFileSync(statusFile, "utf8")));
+  } catch (error) {
+    console.error("read global update status failed:", error.message);
+    return defaultStatus;
+  }
+}
+
+function writeUpdateStatusFile(payload) {
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.writeFileSync(statusFile, `${JSON.stringify(normalizeUpdatePayload(payload), null, 2)}\n`);
+}
+
+export function globalUpdateStatus(query = {}) {
+  const status = readUpdateStatusFile();
+  const appVersion = String(query.app_version || query.appVersion || "").trim();
+  const pluginVersion = String(query.plugin_version || query.pluginVersion || "").trim();
+  return {
+    app: {
+      ...status.app,
+      update_required: Boolean(appVersion && appVersion !== status.app.version)
+    },
+    plugin: {
+      ...status.plugin,
+      update_required: Boolean(pluginVersion && pluginVersion !== status.plugin.version)
+    }
+  };
+}
+
+export function updateGlobalUpdateStatus(body = {}) {
+  const current = readUpdateStatusFile();
+  const now = new Date().toISOString();
+  const next = {
+    app: {
+      ...current.app,
+      ...(body.app || {})
+    },
+    plugin: {
+      ...current.plugin,
+      ...(body.plugin || {})
+    }
+  };
+  if (body.app) next.app.published_at = body.app.published_at || now;
+  if (body.plugin) next.plugin.published_at = body.plugin.published_at || now;
+  writeUpdateStatusFile(next);
+  return globalUpdateStatus();
+}
+
 export function checkDailyPurchaseNotification(all) {
   const now = new Date();
   if (now.getHours() === 18 && now.getMinutes() === 0) generateDailyPurchaseNotification(all);
@@ -29,8 +125,8 @@ export function generateDailyPurchaseNotification(all) {
     const totalProducts = productList.length;
     const totalQuantity = productList.reduce((s, m) => s + m.total_quantity, 0);
     const totalAmount = productList.reduce((s, m) => s + m.total_amount, 0);
-    console.log(`[閲囪喘閫氱煡] ${new Date().toLocaleString()} - 褰撴棩閲囪喘娓呭崟宸茬敓鎴愶細${totalProducts} 绉嶄骇鍝侊紝${totalQuantity} 浠讹紝鎬婚噾棰?楼${totalAmount.toFixed(2)}`);
+    console.log(`[purchase notification] ${new Date().toLocaleString()} - pending products ${totalProducts}, quantity ${totalQuantity}, amount ${totalAmount.toFixed(2)}`);
   } catch (error) {
-    console.error("[閲囪喘閫氱煡] 鐢熸垚澶辫触:", error.message);
+    console.error("[purchase notification] failed:", error.message);
   }
 }

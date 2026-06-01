@@ -1,4 +1,4 @@
-<script setup>
+﻿<script setup>
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
@@ -7,6 +7,8 @@ import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
+import ProductTitleLink from "../../components/ProductTitleLink.vue";
+import { ozonBuyerProductLinkFromRow } from "../../utils/product-links";
 import { applyFilterQuery, buildFilterQuery, dateText, integer } from "./inventory-utils.js";
 
 const route = useRoute();
@@ -26,10 +28,11 @@ const state = reactive({
     shopId: "all",
     dateFrom: "",
     dateTo: "",
+    alertType: "all",
     sortKey: "fbp_available",
     sortDir: "asc",
     page: 1,
-    pageSize: 30
+    pageSize: 20
   }
 });
 
@@ -38,31 +41,65 @@ const filterDefaults = {
   shopId: "all",
   dateFrom: "",
   dateTo: "",
+  alertType: "all",
   sortKey: "fbp_available",
   sortDir: "asc",
   page: 1,
-  pageSize: 30
+  pageSize: 20
 };
 
 const pagedRows = computed(() => state.rows);
 
 function coverageText(row) {
-  const recent7d = Number(row.recent_7d_qty || 0);
-  if (recent7d <= 0) return "暂无销量";
-  const daily = recent7d / 7;
+  if (row.stock_days !== null && row.stock_days !== undefined && row.stock_days !== "") {
+    return `${Number(row.stock_days || 0).toFixed(1)} 天`;
+  }
+  if (row.coverage_days !== null && row.coverage_days !== undefined) {
+    return `${Number(row.coverage_days || 0).toFixed(1)} 天`;
+  }
+  const recent30d = Number(row.recent_30d_qty || 0);
+  if (recent30d <= 0) return Number(row.fbp_available || 0) > 0 ? "30天无销量" : "暂无销量";
+  const daily = recent30d / 30;
   const days = daily > 0 ? Number(row.fbp_available || 0) / daily : 0;
   return `${days.toFixed(1)} 天`;
 }
 
 function adviceText(row) {
+  if (row.suggestion) return row.suggestion;
   const available = Number(row.fbp_available || 0);
-  const recent3d = Number(row.recent_3d_qty || 0);
-  const recent7d = Number(row.recent_7d_qty || 0);
   const recent30d = Number(row.recent_30d_qty || 0);
-  if (recent3d > 0 && available <= recent3d) return "低于 3 天销量，建议立即补仓";
-  if (recent7d > 0 && available <= recent7d) return "低于 7 天销量，建议抓紧补货";
-  if (recent30d > 0 && available <= recent30d) return "低于 30 天销量，建议评估补货";
+  const daily = recent30d > 0 ? recent30d / 30 : 0;
+  const days = daily > 0 ? available / daily : null;
+  if (available <= 0) return "FBP已断货，优先补仓或调整库存策略。";
+  if (days !== null && days <= 7) return "预计7天内断货，建议立即补仓。";
+  if (days !== null && days <= 30) return "预计30天内断货，建议排入补货计划。";
+  if (days !== null && days >= 60) return "预计库存超过60天，关注资金占用和滞缓风险。";
+  if (!recent30d && available > 0) return "30天无销量但有FBP库存，检查是否需要促销或减少补仓。";
   return "库存相对充足";
+}
+
+function fbpAlertTag(row) {
+  if (row.alert_type === "out_of_stock") return "断货";
+  if (row.alert_type === "within_7_days") return "7天";
+  if (row.alert_type === "within_30_days") return "30天";
+  if (row.alert_type === "over_60_days") return "60天滞缓";
+  if (row.alert_type === "no_sales") return "30天无销量";
+  return "";
+}
+
+function fbpAlertTagType(row) {
+  if (row.alert_level === "danger") return "danger";
+  if (row.alert_level === "warning") return "warning";
+  return "info";
+}
+
+function paidStorageDateText(row) {
+  const value = String(row.paid_storage_start_at || "").slice(0, 10);
+  if (!value) return "-";
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+  const days = Math.ceil((date.getTime() - Date.now()) / 86400000);
+  return days > 0 ? `${value} / ${days}天` : value;
 }
 
 function setSort(sortKey) {
@@ -120,6 +157,10 @@ function openProcurement(row) {
   router.push({ path: "/procurement", query: { productId: String(row.product_id), from: "inventory-fbp" } });
 }
 
+function ozonBuyerProductLinkFor(row) {
+  return ozonBuyerProductLinkFromRow(row);
+}
+
 async function refreshStocks() {
   syncLoading.value = true;
   try {
@@ -158,6 +199,7 @@ async function loadPageData() {
       shopId: String(state.filters.shopId || "all"),
       dateFrom: String(state.filters.dateFrom || ""),
       dateTo: String(state.filters.dateTo || ""),
+      alertType: String(state.filters.alertType || "all"),
       sortKey: String(state.filters.sortKey || "fbp_available"),
       sortDir: String(state.filters.sortDir || "asc")
     });
@@ -182,7 +224,7 @@ async function loadPageData() {
 }
 
 watch(() => route.query, applyRouteState, { deep: true });
-watch(() => [state.filters.query, state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.sortKey, state.filters.sortDir, state.filters.page, state.filters.pageSize], syncRouteQuery);
+watch(() => [state.filters.query, state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.alertType, state.filters.sortKey, state.filters.sortDir, state.filters.page, state.filters.pageSize], syncRouteQuery);
 
 onMounted(async () => {
   applyRouteState();
@@ -201,7 +243,7 @@ onMounted(async () => {
       @reset="handleReset"
     >
       <template #actions>
-        <el-button :loading="syncLoading" @click="refreshStocks">刷新同步</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :loading="syncLoading" @click="refreshStocks">刷新同步</el-button>
       </template>
     </InventoryPageToolbar>
 
@@ -215,7 +257,7 @@ onMounted(async () => {
             <div class="product-cell">
               <ProductImagePreview :src="row.image_url" />
               <div class="cell-stack">
-                <strong>{{ row.name || row.ozon_sku || "-" }}</strong>
+                <ProductTitleLink :title="row.name || row.ozon_sku || '-'" :href="ozonBuyerProductLinkFor(row)" :lines="2" />
                 <span class="muted-text">SKU {{ row.ozon_sku || "-" }}</span>
                 <span class="muted-text">Offer {{ row.offer_id || "-" }}</span>
               </div>
@@ -230,6 +272,20 @@ onMounted(async () => {
           </template>
           <template #default="{ row }">
             <strong :class="{ 'danger-text': Number(row.fbp_available || 0) <= 0 }">{{ integer(row.fbp_available) }}</strong>
+          </template>
+        </el-table-column>
+        <el-table-column label="存储计费" width="150" align="center">
+          <template #default="{ row }">
+            <div class="cell-stack cell-center">
+              <strong>免费 {{ integer(row.free_stock_count ?? row.fbp_available) }}</strong>
+              <span class="muted-text">收费 {{ integer(row.paid_stock_count) }}</span>
+              <span v-if="Number(row.expiring_stock_count || 0)" class="muted-text">待付费 {{ integer(row.expiring_stock_count) }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="付费开始" width="150" align="center">
+          <template #default="{ row }">
+            <span class="muted-text">{{ paidStorageDateText(row) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="关联库存" min-width="220">
@@ -263,7 +319,12 @@ onMounted(async () => {
           </template>
         </el-table-column>
         <el-table-column label="库存覆盖" width="110" align="center">
-          <template #default="{ row }">{{ coverageText(row) }}</template>
+          <template #default="{ row }">
+            <div class="cell-stack cell-center">
+              <strong>{{ coverageText(row) }}</strong>
+              <el-tag v-if="fbpAlertTag(row)" :type="fbpAlertTagType(row)" size="small">{{ fbpAlertTag(row) }}</el-tag>
+            </div>
+          </template>
         </el-table-column>
         <el-table-column label="补货建议" min-width="220">
           <template #default="{ row }">
@@ -276,9 +337,9 @@ onMounted(async () => {
         <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
             <el-space wrap>
-              <el-button link type="primary" @click="syncSingleProduct(row)">同步库存</el-button>
-              <el-button link @click="openMappings()">编辑绑定</el-button>
-              <el-button link @click="openProcurement(row)">创建采购</el-button>
+              <el-button class="erp-btn-link" link type="primary" @click="syncSingleProduct(row)">同步库存</el-button>
+              <el-button class="erp-btn-link" link @click="openMappings()">编辑绑定</el-button>
+              <el-button class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
             </el-space>
           </template>
         </el-table-column>
@@ -289,9 +350,10 @@ onMounted(async () => {
       :total="state.total"
       :page="state.filters.page"
       :page-size="state.filters.pageSize"
-      :page-sizes="[30, 50, 100]"
+      
       @update:page="handlePageChange"
       @update:pageSize="handlePageSizeChange"
     />
   </div>
 </template>
+

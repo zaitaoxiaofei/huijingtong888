@@ -318,9 +318,9 @@ watch(currentUserPersonId, () => {
     </div>
 
     <template #footer>
-      <div class="dialog-footer">
-        <el-button @click="emit('update:modelValue', false)">取消</el-button>
-        <el-button type="primary" :loading="submitting" @click="submit">提交请求</el-button>
+      <div class="erp-dialog-footer">
+        <el-button class="erp-btn erp-btn-secondary" @click="emit('update:modelValue', false)">取消</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" :loading="submitting" @click="submit">提交请求</el-button>
       </div>
     </template>
   </el-dialog>

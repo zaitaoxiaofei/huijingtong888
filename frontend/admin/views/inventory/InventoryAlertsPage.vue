@@ -1,4 +1,4 @@
-<script setup>
+﻿<script setup>
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
@@ -6,6 +6,7 @@ import { apiClient } from "../../utils/api";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
+import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
 import { applyFilterQuery, buildFilterQuery, dateText, integer, stockStatusText, stockStatusType } from "./inventory-utils.js";
 
@@ -27,7 +28,7 @@ const state = reactive({
     dateFrom: "",
     dateTo: "",
     page: 1,
-    pageSize: 30
+    pageSize: 20
   }
 });
 
@@ -37,7 +38,7 @@ const filterDefaults = {
   dateFrom: "",
   dateTo: "",
   page: 1,
-  pageSize: 30
+  pageSize: 20
 };
 
 const pagedRows = computed(() => state.rows);
@@ -172,7 +173,7 @@ onMounted(async () => {
             <div class="product-cell">
               <ProductImagePreview :src="row.image_url" />
               <div class="cell-stack">
-                <strong>{{ row.product_name }}</strong>
+                <ProductTitleLink :title="row.product_name || '-'" :lines="2" />
                 <span class="muted-text">{{ row.inventory_id }}</span>
                 <span class="muted-text">{{ alertSkuSummary(row) }}</span>
               </div>
@@ -233,9 +234,9 @@ onMounted(async () => {
         <el-table-column label="操作" width="260" fixed="right">
           <template #default="{ row }">
             <el-space wrap>
-              <el-button link type="primary" @click="syncSingleProduct(row)">同步库存</el-button>
-              <el-button link @click="openMappings()">编辑绑定</el-button>
-              <el-button link @click="openProcurement(row)">创建采购</el-button>
+              <el-button class="erp-btn-link" link type="primary" @click="syncSingleProduct(row)">同步库存</el-button>
+              <el-button class="erp-btn-link" link @click="openMappings()">编辑绑定</el-button>
+              <el-button class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
             </el-space>
           </template>
         </el-table-column>
@@ -246,9 +247,10 @@ onMounted(async () => {
       :total="state.total"
       :page="state.filters.page"
       :page-size="state.filters.pageSize"
-      :page-sizes="[30, 50, 100]"
+      
       @update:page="handlePageChange"
       @update:pageSize="handlePageSizeChange"
     />
   </div>
 </template>
+

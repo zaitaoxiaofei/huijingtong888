@@ -187,7 +187,7 @@ function handlePageChange(page) {
 
 function handlePageSizeChange(size) {
   state.page = 1;
-  state.pageSize = Number(size || 30);
+  state.pageSize = Number(size || 20);
   loadRows();
 }
 
@@ -271,9 +271,9 @@ onBeforeUnmount(() => {
             @change="handleTabChange"
           />
           <div class="ranking-toolbar__actions">
-            <el-button type="primary" size="small" :loading="loading" @click="handleSearch">查询</el-button>
-            <el-button size="small" @click="handleReset">重置</el-button>
-            <el-button size="small" :loading="loading" @click="loadRows">刷新</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" size="small" :loading="loading" @click="handleSearch">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" size="small" @click="handleReset">重置</el-button>
+            <el-button class="erp-btn erp-btn-secondary" size="small" :loading="loading" @click="loadRows">刷新</el-button>
           </div>
         </div>
       </div>
@@ -313,7 +313,7 @@ onBeforeUnmount(() => {
             </el-table-column>
             <el-table-column label="操作" width="82" fixed="right">
               <template #default="{ row }">
-                <el-button link type="primary" @click="openDetail(row)">明细</el-button>
+                <el-button class="erp-btn-link" link type="primary" @click="openDetail(row)">明细</el-button>
               </template>
             </el-table-column>
           </template>
@@ -347,7 +347,7 @@ onBeforeUnmount(() => {
             </el-table-column>
             <el-table-column label="操作" width="82" fixed="right">
               <template #default="{ row }">
-                <el-button link type="primary" @click="openDetail(row)">明细</el-button>
+                <el-button class="erp-btn-link" link type="primary" @click="openDetail(row)">明细</el-button>
               </template>
             </el-table-column>
           </template>

@@ -19,7 +19,7 @@ export default defineConfig({
   publicDir: false,
   build: {
     outDir: path.resolve("public/vue-apps"),
-    emptyOutDir: true,
+    emptyOutDir: false,
     assetsDir: "assets",
     cssCodeSplit: true,
     manifest: true,
@@ -38,7 +38,7 @@ export default defineConfig({
           if (id.includes("/vue/")) return "vendor-vue";
           return "vendor";
         },
-        entryFileNames: "assets/[name]-view.js",
+        entryFileNames: `assets/[name]-view-[hash]-${buildStamp}.js`,
         chunkFileNames: `assets/[name]-[hash]-${buildStamp}.js`,
         assetFileNames: `assets/[name]-[hash]-${buildStamp}[extname]`
       }
