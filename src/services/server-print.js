@@ -3,15 +3,17 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { degrees, PDFDocument } from "pdf-lib";
+import sharp from "sharp";
 
 const PRINT_JOB_RETENTION = 100;
 const DEFAULT_LABEL_PRINTER = process.env.OZON_LABEL_PRINTER || "Gprinter GP-1324D";
 const DEFAULT_DOCUMENT_PRINTER = process.env.OZON_DOCUMENT_PRINTER || "Canon MG2500 series Printer";
 const MM_TO_PT = 72 / 25.4;
+const THERMAL_DPI = 203;
 const LABEL_PAPER_SIZES = [
-  { value: "order_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, fillPaper: true, aliases: ["72mm x 130mm", "72x130", "72*130", "order_label_76x130", "76mm x 130mm", "76x130", "76*130"] },
-  { value: "fbp_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, fillPaper: true, aliases: ["72mm x 130mm", "72x130", "72*130"] },
-  { value: "barcode_70x30", widthMm: 70, heightMm: 30, paperName: "70mm*30mm", fillPaper: true, aliases: ["70mm x 30mm", "70mm*30mm", "70x30", "70*30", "30x70", "30*70"] }
+  { value: "order_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, rasterFit: "cover", aliases: ["72mm x 130mm", "72x130", "72*130", "order_label_76x130", "76mm x 130mm", "76x130", "76*130"] },
+  { value: "fbp_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, rasterFit: "cover", aliases: ["72mm x 130mm", "72x130", "72*130"] },
+  { value: "barcode_70x30", widthMm: 70, heightMm: 30, paperName: "70mm*30mm", rasterFit: "fill", aliases: ["70mm x 30mm", "70mm*30mm", "70x30", "70*30", "30x70", "30*70"] }
 ];
 
 const jobs = [];
@@ -63,6 +65,17 @@ function findSumatraPdf() {
     path.resolve("tools", "sumatra", "SumatraPDF.exe"),
     "C:\\Program Files\\SumatraPDF\\SumatraPDF.exe",
     "C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe"
+  ].filter(Boolean);
+  return candidates.find((file) => {
+    try { return fs.existsSync(file); } catch { return false; }
+  }) || "";
+}
+
+function findMutool() {
+  const candidates = [
+    process.env.MUTOOL_PATH,
+    path.resolve("tools", "mutool.exe"),
+    path.resolve("tools", "mupdf", "mutool.exe")
   ].filter(Boolean);
   return candidates.find((file) => {
     try { return fs.existsSync(file); } catch { return false; }
@@ -230,6 +243,7 @@ export async function serverPrintPrinters() {
     ok: true,
     platform: process.platform,
     sumatra: process.platform === "win32" ? Boolean(findSumatraPdf()) : false,
+    mutool: process.platform === "win32" ? Boolean(findMutool()) : false,
     roles: {
       label: {
         printer: labelPrinter,
@@ -339,6 +353,66 @@ function roundMm(points) {
   return Math.round((points / MM_TO_PT) * 100) / 100;
 }
 
+function mmToPixels(mm) {
+  return Math.max(1, Math.round((Number(mm || 0) / 25.4) * THERMAL_DPI));
+}
+
+function thermalFitForPaper(paperSpec) {
+  return paperSpec?.rasterFit || "contain";
+}
+
+async function rasterizePdfToThermalPdf(pdfBuffer, paperSpec, tempDir) {
+  const mutool = findMutool();
+  if (!mutool) return null;
+  const inputPdf = path.join(tempDir, "source.pdf");
+  const pagePattern = path.join(tempDir, "page-%03d.png");
+  fs.writeFileSync(inputPdf, pdfBuffer);
+  await run(mutool, ["draw", "-q", "-r", String(THERMAL_DPI), "-o", pagePattern, inputPdf], { timeoutMs: 30_000 });
+
+  const files = fs.readdirSync(tempDir)
+    .filter((file) => /^page-\d+\.png$/i.test(file))
+    .sort()
+    .map((file) => path.join(tempDir, file));
+  if (!files.length) return null;
+
+  const output = await PDFDocument.create();
+  const pageWidthPt = paperSpec.widthMm * MM_TO_PT;
+  const pageHeightPt = paperSpec.heightMm * MM_TO_PT;
+  const targetWidthPx = mmToPixels(paperSpec.widthMm);
+  const targetHeightPx = mmToPixels(paperSpec.heightMm);
+  const diagnostics = [];
+
+  for (const file of files) {
+    const metadata = await sharp(file).metadata();
+    let image = sharp(file).flatten({ background: "#ffffff" });
+    const shouldRotate = Boolean(paperSpec.rotateLandscape && Number(metadata.width || 0) > Number(metadata.height || 0) && targetHeightPx > targetWidthPx);
+    if (shouldRotate) image = image.rotate(90);
+    const fit = thermalFitForPaper(paperSpec);
+    const resized = await image
+      .resize(targetWidthPx, targetHeightPx, {
+        fit,
+        position: "centre",
+        background: "#ffffff",
+        kernel: "lanczos3"
+      })
+      .grayscale()
+      .png()
+      .toBuffer();
+    const page = output.addPage([pageWidthPt, pageHeightPt]);
+    const png = await output.embedPng(resized);
+    page.drawImage(png, { x: 0, y: 0, width: pageWidthPt, height: pageHeightPt });
+    diagnostics.push({
+      source_px: [metadata.width || 0, metadata.height || 0],
+      output_px: [targetWidthPx, targetHeightPx],
+      paper_mm: [paperSpec.widthMm, paperSpec.heightMm],
+      rotated: shouldRotate,
+      fit
+    });
+  }
+  console.log(`[server-print] raster ${paperSpec.value} ${JSON.stringify(diagnostics)}`);
+  return Buffer.from(await output.save());
+}
+
 function coverCropBox(sourceWidth, sourceHeight, targetAspect) {
   const sourceAspect = sourceWidth / sourceHeight;
   if (!Number.isFinite(targetAspect) || targetAspect <= 0) {
@@ -359,11 +433,12 @@ async function executePdfJob(job, pdfBuffer) {
   const requestedPaperSpec = paperSpecByValue(job.meta?.paper_size);
   const paperSpec = await effectivePaperSpecForPdf(pdfBuffer, requestedPaperSpec);
   const printSettings = printSettingsForPaper(job.print_settings, paperSpec);
-  const printableBuffer = paperSpec ? await resizePdfToPaper(pdfBuffer, paperSpec) : pdfBuffer;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ozon-print-"));
   const pdfPath = path.join(dir, job.filename);
-  fs.writeFileSync(pdfPath, printableBuffer);
   try {
+    const rasterBuffer = paperSpec ? await rasterizePdfToThermalPdf(pdfBuffer, paperSpec, dir) : null;
+    const printableBuffer = rasterBuffer || (paperSpec ? await resizePdfToPaper(pdfBuffer, paperSpec) : pdfBuffer);
+    fs.writeFileSync(pdfPath, printableBuffer);
     for (let index = 0; index < job.copies; index += 1) {
       await printPdfFileWindows(pdfPath, job.printer, printSettings);
     }
