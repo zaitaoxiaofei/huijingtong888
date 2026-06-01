@@ -11,7 +11,7 @@ test("desktop startup wrappers use the shared start:all entrypoint", () => {
   assert.match(macStart, /npm\s+run\s+start:all/);
 });
 
-test("macOS command wrapper is executable", () => {
+test("macOS command wrapper is executable", { skip: process.platform === "win32" }, () => {
   const mode = fs.statSync("start-ozon-erp.command").mode;
 
   assert.notEqual(mode & 0o111, 0);
