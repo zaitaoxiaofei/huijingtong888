@@ -27,7 +27,9 @@ const OZON_FRONT_SCRIPT_FILES = [
 ];
 const OZON_FRONT_STYLE_FILES = ['content.css'];
 const OZON_INJECTION_DEBOUNCE_MS = 1200;
+const OZON_INJECTION_BLOCKED_TTL_MS = 5 * 60 * 1000;
 const ozonInjectionAttemptAtByTabId = new Map();
+const ozonInjectionBlockedByTabId = new Map();
 
 function normalizeErpBaseUrl(value) {
   if (typeof erpConfig.normalizeErpBaseUrl === 'function') {
@@ -215,6 +217,8 @@ async function injectOzonFrontContent(tabId, url, reason = 'auto') {
   if (!tabId || !isOzonFrontUrl(url) || !chrome?.scripting?.executeScript) return false;
   if (!(await hasOzonFrontPermission(url))) return false;
   const now = Date.now();
+  const blockedUntil = Number(ozonInjectionBlockedByTabId.get(tabId) || 0);
+  if (reason !== 'manual' && blockedUntil > now) return false;
   const lastAttemptAt = Number(ozonInjectionAttemptAtByTabId.get(tabId) || 0);
   if (now - lastAttemptAt < OZON_INJECTION_DEBOUNCE_MS) return false;
   ozonInjectionAttemptAtByTabId.set(tabId, now);
@@ -231,10 +235,16 @@ async function injectOzonFrontContent(tabId, url, reason = 'auto') {
       files: OZON_FRONT_SCRIPT_FILES
     });
     console.info('[Ozon ERP] Ozon front script injected', { tabId, reason });
+    ozonInjectionBlockedByTabId.delete(tabId);
     return true;
   } catch (error) {
     const message = error?.message || String(error);
-    console.warn('[Ozon ERP] Ozon front script injection failed: ' + message, { tabId, reason, url });
+    if (/blocked/i.test(message)) {
+      ozonInjectionBlockedByTabId.set(tabId, Date.now() + OZON_INJECTION_BLOCKED_TTL_MS);
+      console.warn('[Ozon ERP] Ozon front script injection blocked by browser site access. Grant Ozon site access from the extension popup or Edge extension details.', { tabId, reason, url });
+    } else {
+      console.warn('[Ozon ERP] Ozon front script injection failed: ' + message, { tabId, reason, url });
+    }
     return false;
   }
 }
@@ -1752,6 +1762,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type === 'OZON_ERP_COLLECTED_PRODUCTS_LOOKUP_BATCH') {
     return withResponse(lookupCollectedProductCaches(message.skus, message.syncContext), sendResponse);
+  }
+
+  if (message?.type === 'OZON_ERP_INJECT_ACTIVE_OZON_FRONT') {
+    chrome.tabs
+      .query({ active: true, currentWindow: true })
+      .then(async ([tab]) => {
+        if (!tab?.id || !isOzonFrontUrl(tab.url)) return { success: false, error: 'Current tab is not an Ozon front page' };
+        const injected = await injectOzonFrontContent(tab.id, tab.url, 'manual');
+        return { success: injected };
+      })
+      .then(sendResponse)
+      .catch((error) => sendResponse({ success: false, error: error?.message || String(error) }));
+    return true;
   }
 
   if (message?.type === 'OZON_ERP_LOCAL_PLUGIN_FETCH') {
