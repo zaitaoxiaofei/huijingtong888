@@ -362,6 +362,22 @@ function roundMm(points) {
   return Math.round((points / MM_TO_PT) * 100) / 100;
 }
 
+async function pdfPageSizesMm(pdfBuffer) {
+  const pdf = await PDFDocument.load(pdfBuffer);
+  return pdf.getPages().map((page) => {
+    const { width, height } = page.getSize();
+    return { widthMm: width / MM_TO_PT, heightMm: height / MM_TO_PT };
+  });
+}
+
+function isAlreadyPaperSized(pdfSizes = [], paperSpec = null) {
+  if (!paperSpec || !pdfSizes.length) return false;
+  return pdfSizes.every((item) => (
+    Math.abs(Number(item.widthMm || 0) - paperSpec.widthMm) <= 0.8
+    && Math.abs(Number(item.heightMm || 0) - paperSpec.heightMm) <= 0.8
+  ));
+}
+
 function mmToPixels(mm) {
   return Math.max(1, Math.round((Number(mm || 0) / 25.4) * THERMAL_DPI));
 }
@@ -470,8 +486,19 @@ async function executePdfJob(job, pdfBuffer) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ozon-print-"));
   const pdfPath = path.join(dir, job.filename);
   try {
-    const rasterBuffer = paperSpec ? await rasterizePdfToThermalPdf(pdfBuffer, paperSpec, dir, { orientation: job.meta?.orientation || "auto" }) : null;
-    const printableBuffer = rasterBuffer || (paperSpec ? await resizePdfToPaper(pdfBuffer, paperSpec) : pdfBuffer);
+    const sourceSizes = paperSpec ? await pdfPageSizesMm(pdfBuffer) : [];
+    const alreadyPaperSized = isAlreadyPaperSized(sourceSizes, paperSpec);
+    const rasterBuffer = paperSpec && !alreadyPaperSized
+      ? await rasterizePdfToThermalPdf(pdfBuffer, paperSpec, dir, { orientation: job.meta?.orientation || "auto" })
+      : null;
+    const printableBuffer = rasterBuffer || (!alreadyPaperSized && paperSpec ? await resizePdfToPaper(pdfBuffer, paperSpec) : pdfBuffer);
+    if (paperSpec) {
+      console.log(`[server-print] job-paper ${paperSpec.value} ${JSON.stringify({
+        source_mm: sourceSizes.map((item) => [Math.round(item.widthMm * 100) / 100, Math.round(item.heightMm * 100) / 100]),
+        already_paper_sized: alreadyPaperSized,
+        transformed: Boolean(rasterBuffer)
+      })}`);
+    }
     fs.writeFileSync(pdfPath, printableBuffer);
     for (let index = 0; index < job.copies; index += 1) {
       await printPdfFileWindows(pdfPath, job.printer, printSettings);
@@ -497,6 +524,15 @@ export async function serverTransformPdfForPaper(pdfBuffer, body = {}) {
     body.auto_paper === true || body.autoPaper === true
   );
   if (!paperSpec) return pdfBuffer;
+  const sourceSizes = await pdfPageSizesMm(pdfBuffer);
+  if (isAlreadyPaperSized(sourceSizes, paperSpec)) {
+    console.log(`[server-print] preview-paper ${paperSpec.value} ${JSON.stringify({
+      source_mm: sourceSizes.map((item) => [Math.round(item.widthMm * 100) / 100, Math.round(item.heightMm * 100) / 100]),
+      already_paper_sized: true,
+      transformed: false
+    })}`);
+    return pdfBuffer;
+  }
   const orientation = body.orientation || body.meta?.orientation || orientationFromPrintSettings(body.print_settings || body.printSettings || "");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ozon-print-preview-"));
   try {
