@@ -479,7 +479,7 @@ function packBitmapBits(rawPixels, widthPx, heightPx) {
   for (let y = 0; y < heightPx; y += 1) {
     for (let x = 0; x < widthPx; x += 1) {
       const value = rawPixels[(y * widthPx) + x];
-      if (value < 128) {
+      if (value >= 128) {
         const index = (y * bytesPerRow) + Math.floor(x / 8);
         packed[index] |= 0x80 >> (x % 8);
       }
