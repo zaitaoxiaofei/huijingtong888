@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>爆单ERP</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --text: #172033;
+        --muted: #667085;
+        --line: #d8dee8;
+        --soft-line: #e9edf4;
+        --surface: #ffffff;
+        --soft: #f6f8fb;
+        --blue: #1f6feb;
+        --blue-dark: #1757c2;
+        --green: #16a163;
+        --shadow: 0 12px 32px rgba(20, 30, 55, 0.14);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        width: 376px;
+        margin: 0;
+        padding: 0;
+        font-family: Arial, "Microsoft YaHei", sans-serif;
+        color: var(--text);
+        background: #eef2f7;
+      }
+
+      .shell {
+        min-height: 100%;
+        padding: 16px;
+        background:
+          linear-gradient(180deg, #ffffff 0%, #f7f9fc 74%, #eef2f7 100%);
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 17px;
+        line-height: 1.2;
+        font-weight: 700;
+        letter-spacing: 0;
+      }
+
+      .brand-logo-sticker {
+        display: inline-flex;
+        align-items: flex-end;
+        justify-content: center;
+        gap: 0;
+        height: 44px;
+        padding: 3px 0;
+        line-height: 1;
+        white-space: nowrap;
+        user-select: none;
+        filter: drop-shadow(0 4px 2px rgba(0, 0, 0, 0.18));
+        transform: scale(0.74);
+        transform-origin: left center;
+      }
+
+      .brand-ozon {
+        display: inline-block;
+        margin-right: 4px;
+        color: #1268ff;
+        font-family: Arial, sans-serif;
+        font-size: 36px;
+        font-weight: 900;
+        letter-spacing: -3px;
+        line-height: 0.9;
+        -webkit-text-stroke: 2.5px #ffffff;
+        paint-order: stroke fill;
+        text-shadow: 1.5px 0 0 #1d3f7a, -1.5px 0 0 #1d3f7a, 0 1.5px 0 #1d3f7a, 0 -1.5px 0 #1d3f7a;
+        transform: translateY(2px) skewX(-6deg);
+      }
+
+      .brand-char {
+        display: inline-block;
+        font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+        font-weight: 900;
+        letter-spacing: -2px;
+        -webkit-text-stroke: 3px #ffffff;
+        paint-order: stroke fill;
+        text-shadow: 1.5px 0 0 #242424, -1.5px 0 0 #242424, 0 1.5px 0 #242424, 0 -1.5px 0 #242424;
+      }
+
+      .brand-bao {
+        color: #050505;
+        font-size: 28px;
+        -webkit-text-stroke: 3.5px #ffffff;
+        transform: translateY(7px) rotate(-3deg);
+      }
+
+      .brand-dan {
+        color: #ef1f1f;
+      }
+
+      .brand-dan-1 {
+        font-size: 30px;
+        transform: translateY(5px) rotate(-1deg);
+      }
+
+      .brand-dan-2 {
+        font-size: 36px;
+        transform: translateY(1px);
+      }
+
+      .brand-dan-3 {
+        font-size: 44px;
+        transform: translateY(-5px) rotate(1deg);
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+        padding: 5px 8px;
+        border: 1px solid #c9ead9;
+        border-radius: 999px;
+        background: #edfdf5;
+        color: #087443;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .status-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: var(--green);
+        box-shadow: 0 0 0 3px rgba(22, 161, 99, 0.14);
+      }
+
+      .hint {
+        margin: 0 0 14px;
+        padding: 10px 12px;
+        border: 1px solid var(--soft-line);
+        border-radius: 8px;
+        background: var(--surface);
+        color: var(--muted);
+        line-height: 1.55;
+        font-size: 12px;
+        box-shadow: 0 1px 0 rgba(16, 24, 40, 0.03);
+      }
+
+      .panel {
+        display: grid;
+        gap: 12px;
+        padding: 12px;
+        border: 1px solid var(--soft-line);
+        border-radius: 8px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+
+      .section {
+        display: grid;
+        gap: 10px;
+      }
+
+      .section + .section {
+        padding-top: 12px;
+        border-top: 1px solid var(--soft-line);
+      }
+
+      .section-title {
+        margin: 0;
+        color: #344054;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      label {
+        display: grid;
+        gap: 5px;
+        color: #344054;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #fff;
+        color: var(--text);
+        font: inherit;
+        font-size: 13px;
+        outline: none;
+        transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+      }
+
+      input {
+        height: 34px;
+        padding: 7px 10px;
+      }
+
+      textarea {
+        min-height: 72px;
+        padding: 9px 10px;
+        resize: vertical;
+        line-height: 1.45;
+      }
+
+      input::placeholder,
+      textarea::placeholder {
+        color: #98a2b3;
+      }
+
+      input:focus,
+      textarea:focus {
+        border-color: var(--blue);
+        box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.13);
+      }
+
+      .checks {
+        display: grid;
+        gap: 8px;
+      }
+
+      .checks label {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 8px 9px;
+        border: 1px solid var(--soft-line);
+        border-radius: 8px;
+        background: var(--soft);
+        color: #344054;
+        font-weight: 500;
+        line-height: 1.45;
+      }
+
+      .checks input {
+        width: 15px;
+        height: 15px;
+        margin: 1px 0 0;
+        accent-color: var(--blue);
+        flex: 0 0 auto;
+      }
+
+      .actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 9px;
+        margin-top: 2px;
+      }
+
+      .actions.single {
+        grid-template-columns: 1fr;
+      }
+
+      button {
+        height: 36px;
+        border: 1px solid var(--blue);
+        border-radius: 7px;
+        background: var(--blue);
+        color: #fff;
+        cursor: pointer;
+        font: inherit;
+        font-size: 14px;
+        font-weight: 700;
+        transition: background 0.16s ease, border-color 0.16s ease, transform 0.08s ease;
+      }
+
+      button:hover {
+        border-color: var(--blue-dark);
+        background: var(--blue-dark);
+      }
+
+      button:active {
+        transform: translateY(1px);
+      }
+
+      button.secondary {
+        border-color: var(--line);
+        background: #fff;
+        color: #175cd3;
+      }
+
+      button.secondary:hover {
+        border-color: #b8c2d2;
+        background: #f8fbff;
+      }
+
+      #manual-sync {
+        height: 38px;
+      }
+
+      #status {
+        min-height: 18px;
+        color: var(--muted);
+        font-size: 12px;
+        white-space: pre-wrap;
+        line-height: 1.5;
+      }
+
+      #status.has-detail {
+        padding: 9px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--soft);
+        color: #344054;
+      }
+
+      .token-warning {
+        display: none;
+        margin-top: 2px;
+        padding: 8px 9px;
+        border: 1px solid #fedf89;
+        border-radius: 7px;
+        background: #fffbeb;
+        color: #92400e;
+        font-size: 12px;
+        font-weight: 500;
+        line-height: 1.45;
+      }
+
+      .token-warning.is-visible {
+        display: block;
+      }
+
+      .update-card {
+        display: none;
+        gap: 8px;
+        margin-bottom: 12px;
+        padding: 11px 12px;
+        border: 1px solid #f4c475;
+        border-radius: 8px;
+        background: #fffbeb;
+        color: #7c4a03;
+        box-shadow: 0 1px 0 rgba(16, 24, 40, 0.04);
+      }
+
+      .update-card.is-visible {
+        display: grid;
+      }
+
+      .update-card strong {
+        font-size: 13px;
+      }
+
+      .update-card p {
+        margin: 0;
+        line-height: 1.5;
+        font-size: 12px;
+      }
+
+      .update-card button {
+        width: 100%;
+        height: 32px;
+        margin-top: 2px;
+        border-color: #d97706;
+        background: #d97706;
+      }
+
+      .update-card button:hover {
+        border-color: #b45309;
+        background: #b45309;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <h1 aria-label="爆单ERP">
+          <span class="brand-logo-sticker">
+            <span class="brand-ozon">OZON</span>
+            <span class="brand-char brand-bao">爆</span>
+            <span class="brand-char brand-dan brand-dan-1">单</span>
+            <span class="brand-char brand-dan brand-dan-2">单</span>
+            <span class="brand-char brand-dan brand-dan-3">单</span>
+          </span>
+        </h1>
+        <span class="status-pill"><span class="status-dot"></span>爆单ERP</span>
+      </header>
+
+      <p class="hint">打开 Ozon 前台页面后会自动扫描商品，并查询 ERP 已采集状态；手动 SKU 会按需打开详情页补采。</p>
+
+      <section id="plugin-update-card" class="update-card">
+        <strong id="plugin-update-title">爆单ERP插件有新版本</strong>
+        <p id="plugin-update-message">请下载最新版爆单ERP插件并重新安装。</p>
+        <button id="plugin-update-download" type="button">下载最新版爆单ERP插件</button>
+      </section>
+
+      <section class="panel">
+        <div class="section">
+          <p class="section-title">ERP 配置</p>
+
+          <label>
+            ERP 地址
+            <input id="erp-base-url" type="text" placeholder="https://erp.hjt888.xyz" />
+          </label>
+
+          <label>
+            ERP 回传密钥
+            <input id="local-plugin-token" type="password" autocomplete="off" placeholder="留空使用默认回传令牌" />
+          </label>
+          <div id="token-warning" class="token-warning"></div>
+        </div>
+
+        <div class="section">
+          <p class="section-title">采集任务</p>
+
+          <label>
+            手动采集 SKU
+            <textarea id="manual-skus" rows="4" placeholder="支持换行、空格、逗号分隔，例如 2034213745"></textarea>
+          </label>
+
+          <div class="checks">
+            <label><input id="inject-cards" type="checkbox" /> 在商品卡片下方显示 ERP 状态（默认开启）</label>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="save">保存配置</button>
+          <button id="collect" class="secondary">采集当前页</button>
+        </div>
+        <div class="actions single">
+          <button id="manual-sync">采集指定 SKU</button>
+        </div>
+        <div id="status"></div>
+      </section>
+    </main>
+    <script src="erp-config.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

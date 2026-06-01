@@ -97,6 +97,24 @@ function summarizeScheduledJobResult(jobKey, resultPayload = {}) {
       summaryTruncated: true
     };
   }
+  if (jobKey === "ozon_action_cleanup") {
+    return {
+      status: String(payload.status || "success"),
+      stores: Number(payload.stores || 0),
+      removed: Number(payload.removed || 0),
+      failed: Number(payload.failed || 0),
+      results: Array.isArray(payload.results)
+        ? payload.results.slice(0, 20).map((item) => ({
+            storeId: item?.storeId,
+            storeName: truncateText(item?.storeName || "", 120),
+            status: String(item?.status || ""),
+            removed: Number(item?.removed || 0),
+            error: item?.error ? truncateText(item.error, 300) : "",
+            actionSummaries: Array.isArray(item?.actionSummaries) ? item.actionSummaries.slice(0, 8) : []
+          }))
+        : []
+    };
+  }
   return payload;
 }
 
@@ -198,7 +216,7 @@ function normalizeRunPreviewRow(row = {}) {
     finishedAt: row.finished_at || null,
     status: row.status || "",
     mode: row.mode || "",
-    result: null,
+    result: parseJson(row.result_json, null),
     errorMessage: row.error_message || "",
     resultSize: Number(row.result_size || 0)
   };
@@ -341,7 +359,7 @@ export async function listScheduledJobs(query = {}) {
   `);
   const limit = Math.min(Math.max(Number(query.run_limit || query.runLimit || 5), 1), 20);
   const runs = await mysqlQuery(`
-    SELECT id, job_key, planned_for, started_at, finished_at, status, mode, error_message,
+    SELECT id, job_key, planned_for, started_at, finished_at, status, mode, error_message, result_json,
            CHAR_LENGTH(COALESCE(result_json, '')) AS result_size
     FROM scheduled_job_runs
     ORDER BY started_at DESC

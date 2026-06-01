@@ -1,3 +1,5 @@
+import { serverTransformPdfForPaper } from "../../services/server-print.js";
+
 export function createOrderRoutes({ services, readJson, notFound, writeHead, json }) {
   return {
     "GET /api/orders": (req, url) => url?.searchParams?.get("paged")
@@ -41,18 +43,20 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "package-label") {
-    const label = await services.orderPackageLabel(await readJson(req), req._session?.personId);
+    const body = await readJson(req);
+    const label = await services.orderPackageLabel(body, req._session?.personId);
+    const buffer = await serverTransformPdfForPaper(label.buffer, body);
     writeHead(res, 200, {
       "Content-Type": "application/pdf",
       "Content-Disposition": `attachment; filename="${label.filename}"`,
-      "Content-Length": label.buffer.length,
+      "Content-Length": buffer.length,
       "X-Ozon-Label-Count": String(label.count || 0),
       "X-Ozon-Label-Failures": encodeURIComponent(JSON.stringify(label.failures || [])),
       "X-Ozon-Label-Printed-Ids": encodeURIComponent(JSON.stringify(label.printed_ids || [])),
       "X-Ozon-Label-Stats": encodeURIComponent(JSON.stringify(label.stats || {})),
       "Cache-Control": "no-store"
     });
-    res.end(label.buffer);
+    res.end(buffer);
     return true;
   }
 

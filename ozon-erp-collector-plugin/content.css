@@ -1,0 +1,1059 @@
+#ozon-erp-collector-root {
+  font-family: Arial, "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  color: #202733;
+}
+
+.ozon-erp-panel-head,
+.ozon-erp-card-title,
+.ozon-erp-card-actions,
+.ozon-erp-panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ozon-erp-panel-head strong,
+.ozon-erp-card-title {
+  font-weight: 700;
+}
+
+.ozon-erp-card-title strong {
+  color: #111827;
+  font-size: 15px;
+}
+
+.ozon-erp-panel-head span,
+.ozon-erp-card-title span {
+  color: #667085;
+  font-weight: 400;
+}
+
+.ozon-erp-title-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.ozon-erp-icon-btn {
+  width: 24px;
+  height: 24px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #667085;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 20px;
+  padding: 0;
+}
+
+.ozon-erp-icon-btn:hover {
+  color: #111827;
+  border-color: #98a2b3;
+}
+
+.ozon-erp-panel-line {
+  margin-top: 8px;
+  color: #3d444d;
+}
+
+.ozon-erp-panel-actions {
+  margin-top: 10px;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.ozon-erp-panel-actions button,
+.ozon-erp-card-actions button {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid #c9d7ea;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #155eef;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ozon-erp-btn {
+  position: relative;
+  min-width: 0;
+  flex: 0 1 auto;
+  height: 28px !important;
+  min-height: 28px !important;
+  border-radius: 8px !important;
+  font-weight: 700;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+  white-space: nowrap;
+}
+
+.ozon-erp-detail-card-panel .ozon-erp-card-actions {
+  margin-top: 0;
+  padding: 8px 12px;
+  border-top: 1px solid #eef1f6;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.ozon-erp-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.ozon-erp-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.88;
+}
+
+.ozon-erp-btn-collect {
+  border-color: #1677ff !important;
+  background: #1677ff !important;
+  color: #ffffff !important;
+  box-shadow: 0 8px 18px rgba(22, 119, 255, 0.26);
+}
+
+.ozon-erp-btn-secondary {
+  border-color: #d0d7de !important;
+  background: #ffffff !important;
+  color: #3d444d !important;
+  box-shadow: none;
+}
+
+.ozon-erp-btn-secondary.is-active {
+  border-color: #16a34a !important;
+  background: #ecfdf3 !important;
+  color: #15803d !important;
+}
+
+.ozon-erp-btn-sync {
+  border-color: #16a34a !important;
+  background: #16a34a !important;
+  color: #ffffff !important;
+  box-shadow: 0 8px 18px rgba(22, 163, 74, 0.24);
+}
+
+.ozon-erp-btn.is-loading {
+  padding-left: 24px !important;
+}
+
+.ozon-erp-btn.is-loading::before {
+  content: '';
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  margin-top: -6px;
+  border: 2px solid rgba(255, 255, 255, 0.38);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: ozon-erp-spin 0.7s linear infinite;
+}
+
+@keyframes ozon-erp-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.ozon-erp-card-insertion {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+.ozon-erp-detail-insertion {
+  width: 100%;
+  max-width: 100%;
+  clear: both;
+}
+
+.ozon-erp-card-panel {
+  box-sizing: border-box;
+  position: relative;
+  margin: 6px 0 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #e5eaf3;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
+  color: #1f2937;
+  font-family: Arial, "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+}
+
+.ozon-erp-detail-card-panel {
+  margin-top: 0;
+}
+
+.ozon-erp-card-groups {
+  display: block;
+  margin: 0;
+}
+
+.ozon-erp-screening {
+  display: block;
+}
+
+.ozon-erp-overview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #eef1f6;
+  background: #fbfcff;
+}
+
+.ozon-erp-overview .ozon-erp-card-metric:first-child {
+  grid-column: 1 / -1;
+}
+
+.ozon-erp-overview .ozon-erp-card-metric:first-child em {
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.ozon-erp-decision {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 10px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid #eef1f6;
+  border-radius: 0;
+  background: #f8fafc;
+}
+
+.ozon-erp-decision.is-good {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.ozon-erp-decision.is-mid {
+  border-color: #fed7aa;
+  background: #fff7ed;
+}
+
+.ozon-erp-decision.is-risk {
+  border-color: #fecaca;
+  background: #fff1f2;
+}
+
+.ozon-erp-decision-score {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 52px;
+  border-radius: 6px;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(208, 215, 222, 0.75);
+}
+
+.ozon-erp-decision-score span {
+  color: #6b7280;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.ozon-erp-decision-score strong {
+  color: #111827;
+  font-size: 24px;
+  line-height: 1.1;
+  letter-spacing: 0;
+}
+
+.ozon-erp-decision-main {
+  min-width: 0;
+}
+
+.ozon-erp-decision-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.ozon-erp-decision-line b {
+  min-width: 0;
+  overflow: hidden;
+  color: #111827;
+  font-size: 13px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ozon-erp-decision-risk {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #e0f2fe;
+  color: #0369a1;
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 700;
+}
+
+.ozon-erp-decision-risk.is-good {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.ozon-erp-decision-risk.is-mid {
+  background: #ffedd5;
+  color: #c2410c;
+}
+
+.ozon-erp-decision-risk.is-risk {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.ozon-erp-decision-main p {
+  margin: 6px 0 0;
+  color: #4b5563;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ozon-erp-decision-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.ozon-erp-decision-tags span {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 11px;
+  line-height: 22px;
+  font-weight: 700;
+  cursor: help;
+}
+
+.ozon-erp-card-group {
+  padding: 10px 12px;
+  border-bottom: 1px solid #eef1f6;
+}
+
+.ozon-erp-card-group:last-child {
+  border-bottom: 0;
+}
+
+.ozon-erp-card-group-title {
+  display: flex;
+  align-items: center;
+  margin-bottom: 8px;
+  color: #4b5563;
+  font-size: 12px;
+  line-height: 1.2;
+  font-weight: 700;
+}
+
+.ozon-erp-card-group-title::before {
+  content: '';
+  width: 3px;
+  height: 12px;
+  margin-right: 6px;
+  border-radius: 999px;
+  background: #6258f6;
+}
+
+.ozon-erp-card-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  column-gap: 10px;
+  row-gap: 8px;
+  margin: 0;
+}
+
+.ozon-erp-card-metric {
+  min-width: 0;
+}
+
+.ozon-erp-card-metric.has-tooltip {
+  cursor: help;
+}
+
+.ozon-erp-fee-lines {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 10px;
+  padding: 8px 10px;
+  border-top: 1px dashed #e5e7eb;
+  color: #374151;
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.ozon-erp-fee-lines span {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ozon-erp-fee-lines b {
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.ozon-erp-fee-lines em {
+  color: #111827;
+  font-style: normal;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.ozon-erp-card-metric.is-wide {
+  grid-column: 1 / -1;
+}
+
+.ozon-erp-card-metric b,
+.ozon-erp-card-metric em {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.ozon-erp-card-metric b {
+  margin-bottom: 2px;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.2;
+  font-weight: 400;
+}
+
+.ozon-erp-card-metric em {
+  color: #111827;
+  font-size: 13px;
+  line-height: 1.25;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.ozon-erp-card-metric.is-base em {
+  color: #111827;
+}
+
+.ozon-erp-card-metric.is-money em {
+  color: #005bff;
+}
+
+.ozon-erp-card-metric.is-sales em {
+  color: #005bff;
+}
+
+.ozon-erp-card-metric.is-traffic em {
+  color: #005bff;
+}
+
+.ozon-erp-card-metric.is-promo em {
+  color: #7c3aed;
+}
+
+.ozon-erp-card-metric.is-logistics em {
+  color: #111827;
+}
+
+.ozon-erp-card-metric.is-orange em {
+  color: #f97316;
+}
+
+.ozon-erp-card-metric.is-red em {
+  color: #ef4444;
+}
+
+.ozon-erp-funnel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  min-width: 0;
+}
+
+.ozon-erp-funnel span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  min-width: 0;
+  padding: 5px 6px;
+  border: 1px solid #dbeafe;
+  border-radius: 6px;
+  background: #f8fbff;
+  text-align: left;
+}
+
+.ozon-erp-funnel span:first-child {
+  grid-column: 1 / -1;
+}
+
+.ozon-erp-funnel b,
+.ozon-erp-funnel em {
+  display: inline-block;
+  min-width: 0;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.ozon-erp-funnel b {
+  order: 2;
+  color: #005bff;
+  font-size: 11px;
+  line-height: 1.25;
+  text-align: right;
+}
+
+.ozon-erp-funnel em {
+  order: 1;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.2;
+  font-style: normal;
+}
+
+.ozon-erp-funnel i {
+  display: none;
+}
+
+.ozon-erp-funnel-note {
+  margin-top: 7px;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: help;
+}
+
+.ozon-erp-card-title.collect-panel__header {
+  height: 42px;
+  padding: 0 12px;
+  border-bottom: 1px solid #eef1f6;
+  background: linear-gradient(180deg, #ffffff 0%, #f8faff 100%);
+}
+
+.ozon-erp-card-title .collect-panel__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #111827;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.ozon-erp-card-title .collect-panel__title span {
+  color: #111827;
+  font-weight: 700;
+}
+
+.collect-panel__logo {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  flex: 0 0 auto;
+}
+
+.ozon-erp-card-title .collect-panel__status {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid #bbf7d0;
+  border-radius: 999px;
+  background: #ecfdf3;
+  color: #16a34a;
+  font-size: 12px;
+  line-height: 1.2;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ozon-erp-card-panel[data-status="stale"] .collect-panel__status,
+.ozon-erp-card-panel[data-status="missing"] .collect-panel__status {
+  border-color: #fed7aa;
+  background: #fff3e8;
+  color: #f97316;
+}
+
+.ozon-erp-card-panel[data-status="error"] .collect-panel__status {
+  border-color: #fecaca;
+  background: #fee2e2;
+  color: #ef4444;
+}
+
+.ozon-erp-btn-collect.is-done {
+  border-color: #bbf7d0;
+  background: #ecfdf3;
+  color: #16a34a;
+  cursor: default;
+}
+
+.collect-metric__value.collect-metric__value--danger {
+  color: #ef4444;
+}
+
+.ozon-erp-card-metric.is-score em,
+.ozon-erp-card-metric.is-risk em {
+  color: #0969da;
+}
+
+.ozon-erp-card-metric.is-danger em {
+  color: #ef4444;
+}
+
+.collect-metric__value.collect-metric__value--score,
+.collect-metric__value.collect-metric__value--risk {
+  color: #0969da;
+}
+
+.collect-badge {
+  display: inline-flex !important;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 22px;
+  font-weight: 700;
+}
+
+.collect-badge--blue {
+  background: #eaf2ff;
+  color: #2563eb !important;
+}
+
+.collect-badge--orange {
+  background: #fff3e8;
+  color: #f97316 !important;
+}
+
+.collect-badge--purple {
+  background: #f3e8ff;
+  color: #7c3aed !important;
+}
+
+.collect-badge--red {
+  background: #fee2e2;
+  color: #ef4444 !important;
+}
+
+.ozon-erp-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(31, 35, 40, 0.46);
+  font-family: Arial, "Microsoft YaHei", sans-serif;
+}
+
+.ozon-erp-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(980px, 92vw);
+  height: min(760px, 88vh);
+  overflow: hidden;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 20px 60px rgba(31, 35, 40, 0.28);
+}
+
+.ozon-erp-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #d8dee4;
+  font-size: 14px;
+}
+
+.ozon-erp-modal-head button {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #0969da;
+  cursor: pointer;
+}
+
+.ozon-erp-modal-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #d8dee4;
+  color: #3d444d;
+  font-size: 13px;
+}
+
+.ozon-erp-json {
+  flex: 1;
+  margin: 0;
+  padding: 14px;
+  overflow: auto;
+  background: #f6f8fa;
+  color: #1f2328;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ozon-erp-field-settings {
+  width: min(860px, 94vw);
+  height: min(760px, 88vh);
+  border: 1px solid rgba(203, 213, 225, 0.95);
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.28);
+}
+
+.ozon-erp-field-settings .ozon-erp-modal-head {
+  align-items: center;
+  padding: 18px 20px 16px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #ffffff;
+}
+
+.ozon-erp-field-settings-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ozon-erp-field-settings-kicker {
+  color: #2563eb !important;
+  font-size: 12px !important;
+  line-height: 1.2 !important;
+  font-weight: 700 !important;
+}
+
+.ozon-erp-field-settings-heading strong {
+  color: #111827;
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.ozon-erp-field-settings-heading span {
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ozon-erp-field-settings .ozon-erp-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ozon-erp-field-settings .ozon-erp-modal-actions button {
+  min-width: 58px;
+  height: 32px;
+  border-color: #cbd5e1;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ozon-erp-field-settings .ozon-erp-modal-actions button:hover {
+  border-color: #2f81f7;
+  color: #0969da;
+}
+
+.ozon-erp-field-settings .ozon-erp-modal-actions button.primary {
+  border-color: #0969da;
+  background: #0969da;
+  color: #ffffff;
+}
+
+.ozon-erp-field-settings .ozon-erp-modal-actions button.primary:hover {
+  border-color: #0550ae;
+  background: #0550ae;
+  color: #ffffff;
+}
+
+.ozon-erp-field-settings-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
+  gap: 12px;
+  padding: 16px 18px 18px;
+  overflow: auto;
+  background: #f8fafc;
+}
+
+.ozon-erp-field-settings-group {
+  margin: 0;
+  padding: 13px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.ozon-erp-field-settings-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: #111827;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.ozon-erp-field-settings-title > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ozon-erp-field-settings-title em {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #2563eb;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 600;
+}
+
+.ozon-erp-field-settings-title-actions {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ozon-erp-field-settings-title-actions button {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid #dbe3ef;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.ozon-erp-field-settings-title-actions button:hover {
+  border-color: #2f81f7;
+  color: #0969da;
+}
+
+.ozon-erp-field-settings-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  gap: 7px;
+}
+
+.ozon-erp-field-settings-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 7px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.35;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.ozon-erp-field-settings-item:hover {
+  border-color: #93c5fd;
+  background: #f8fbff;
+}
+
+.ozon-erp-field-settings-item:has(input:checked) {
+  border-color: #2563eb;
+  background: #eff6ff;
+  color: #1d4ed8;
+  box-shadow: inset 3px 0 0 #2563eb;
+}
+
+.ozon-erp-field-settings-item input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #0969da;
+  flex-shrink: 0;
+}
+
+.ozon-erp-field-settings-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ozon-erp-field-settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px;
+  border-top: 1px solid #e5e7eb;
+  background: #ffffff;
+}
+
+.ozon-erp-field-settings-counter {
+  color: #475569;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ozon-erp-field-settings-footer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ozon-erp-field-settings-footer-actions button {
+  min-width: 64px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ozon-erp-field-settings-footer-actions button:hover {
+  border-color: #2563eb;
+  color: #1d4ed8;
+}
+
+.ozon-erp-field-settings-footer-actions button.primary {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #ffffff;
+}
+
+.ozon-erp-field-settings-footer-actions button.primary:hover {
+  border-color: #1d4ed8;
+  background: #1d4ed8;
+  color: #ffffff;
+}
+
+@media (max-width: 640px) {
+  .ozon-erp-field-settings .ozon-erp-modal-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .ozon-erp-field-settings .ozon-erp-modal-actions {
+    justify-content: flex-start;
+  }
+
+  .ozon-erp-field-settings-body {
+    grid-template-columns: 1fr;
+  }
+
+  .ozon-erp-field-settings-list {
+    grid-template-columns: 1fr;
+  }
+
+  .ozon-erp-field-settings-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .ozon-erp-field-settings-footer-actions {
+    justify-content: flex-start;
+  }
+}
+
+.ozon-erp-workbench-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 10px;
+  border-top: 1px solid #eef1f6;
+  background: #fbfcfe;
+}
+
+.ozon-erp-source-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid #d0d7de;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #3d444d;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.ozon-erp-source-badge.is-ok {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.ozon-erp-source-badge.is-warn {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.ozon-erp-source-badge.is-error {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.ozon-erp-status-link {
+  min-height: 22px;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  color: #0969da;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.ozon-erp-status-link:hover {
+  text-decoration: underline;
+}

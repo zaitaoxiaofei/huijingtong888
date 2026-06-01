@@ -1,0 +1,74 @@
+{
+  "manifest_version": 3,
+  "name": "爆单ERP",
+  "description": "爆单ERP 商品采集、采集箱同步和后台工作台入口",
+  "version": "1.3.3",
+  "permissions": ["activeTab", "alarms", "scripting", "storage", "tabs"],
+  "host_permissions": [
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://erp.hjt888.xyz/*",
+    "https://seller.ozon.ru/*",
+    "https://ozon.ru/*",
+    "https://ozon.kz/*",
+    "https://ozon.by/*",
+    "https://*.ozon.ru/*",
+    "https://*.ozon.kz/*",
+    "https://*.ozon.by/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "assets/logo-16.png",
+    "32": "assets/logo-32.png",
+    "48": "assets/logo-48.png",
+    "96": "assets/logo-96.png",
+    "128": "assets/logo-128.png"
+  },
+  "action": {
+    "default_title": "爆单ERP",
+    "default_icon": {
+      "16": "assets/logo-16.png",
+      "32": "assets/logo-32.png",
+      "48": "assets/logo-48.png",
+      "96": "assets/logo-96.png",
+      "128": "assets/logo-128.png"
+    },
+    "default_popup": "popup.html"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/logo-16.png", "assets/logo-32.png", "assets/logo-48.png"],
+      "matches": [
+        "https://ozon.ru/*",
+        "https://ozon.kz/*",
+        "https://ozon.by/*",
+        "https://*.ozon.ru/*",
+        "https://*.ozon.kz/*",
+        "https://*.ozon.by/*"
+      ]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://ozon.ru/*",
+        "https://ozon.kz/*",
+        "https://ozon.by/*",
+        "https://*.ozon.ru/*",
+        "https://*.ozon.kz/*",
+        "https://*.ozon.by/*"
+      ],
+      "exclude_matches": ["https://seller.ozon.ru/*"],
+      "js": ["erp-config.js", "collector.js", "content-core.js", "field-registry.js", "data-aggregator.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://seller.ozon.ru/*"],
+      "js": ["seller-bridge-content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

@@ -200,7 +200,7 @@ const BACKGROUND_ADVERTISING_TODAY_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(co
 const BACKGROUND_ADVERTISING_TODAY_SYNC_TIMEOUT_MS = Math.max(1, Number(config.backgroundAdvertisingTodaySyncTimeoutMinutes || 12)) * 60 * 1000;
 const BACKGROUND_OZON_STOCK_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundOzonStockSyncIntervalMinutes || 30)) * 60 * 1000;
 const BACKGROUND_OZON_STOCK_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundOzonStockSyncInitialDelaySeconds || 480)) * 1000;
-const OZON_ACTION_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
+const OZON_ACTION_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 
 const scheduledJobDefinitions = [
   {
@@ -1590,15 +1590,78 @@ async function runBackgroundOzonCategorySync() {
   }
 }
 
-async function runOzonActionCleanupSweep() {
+async function runOzonActionCleanupSweep(context = {}) {
   try {
+    await logScheduledJobEvent({
+      runId: context?.runId,
+      jobKey: "ozon_action_cleanup",
+      stepKey: "cleanup_start",
+      status: "info",
+      message: "开始扫描已开启自动清理的 Ozon 活动配置"
+    }).catch(() => {});
     const results = await services.runEnabledOzonActionCleanup();
-    if (!results.length) return { stores: 0, removed: 0, failed: 0 };
+    if (!results.length) {
+      await logScheduledJobEvent({
+        runId: context?.runId,
+        jobKey: "ozon_action_cleanup",
+        stepKey: "cleanup_finish",
+        status: "info",
+        message: "没有店铺开启 Ozon 活动自动清理",
+        detail: { stores: 0, removed: 0, failed: 0 }
+      }).catch(() => {});
+      return { stores: 0, removed: 0, failed: 0, results: [] };
+    }
     const removed = results.reduce((sum, item) => sum + Number(item?.count || 0), 0);
     const failed = results.filter((item) => item?.success === false).length;
+    for (const item of results) {
+      await logScheduledJobEvent({
+        runId: context?.runId,
+        jobKey: "ozon_action_cleanup",
+        stepKey: "store_cleanup",
+        status: item?.success === false ? "error" : "success",
+        shopId: item?.storeId,
+        shopName: item?.storeName,
+        message: item?.success === false
+          ? `店铺 ${item?.storeName || item?.storeId || "-"} 清理失败：${item?.error || "unknown"}`
+          : `店铺 ${item?.storeName || item?.storeId || "-"} 已移除 ${Number(item?.count || 0)} 个自动添加商品`,
+        detail: {
+          removed: Number(item?.count || 0),
+          actionSummaries: item?.actionSummaries || [],
+          error: item?.error || ""
+        }
+      }).catch(() => {});
+    }
+    await logScheduledJobEvent({
+      runId: context?.runId,
+      jobKey: "ozon_action_cleanup",
+      stepKey: "cleanup_finish",
+      status: failed > 0 ? "warning" : "success",
+      message: `Ozon 活动自动清理完成：扫描 ${results.length} 个店铺，移除 ${removed} 个商品，失败 ${failed} 个`,
+      detail: { stores: results.length, removed, failed }
+    }).catch(() => {});
     console.log(`ozon action cleanup sweep ok: stores ${results.length}, removed ${removed}, failed ${failed}`);
-    return { stores: results.length, removed, failed };
+    return {
+      status: failed > 0 ? "partial" : "success",
+      stores: results.length,
+      removed,
+      failed,
+      results: results.map((item) => ({
+        storeId: item?.storeId,
+        storeName: item?.storeName,
+        status: item?.success === false ? "error" : "ok",
+        removed: Number(item?.count || 0),
+        actionSummaries: item?.actionSummaries || [],
+        error: item?.error || ""
+      }))
+    };
   } catch (error) {
+    await logScheduledJobEvent({
+      runId: context?.runId,
+      jobKey: "ozon_action_cleanup",
+      stepKey: "cleanup_error",
+      status: "error",
+      message: error?.message || "Ozon 活动自动清理失败"
+    }).catch(() => {});
     console.error("ozon action cleanup sweep failed", error);
     throw error;
   }
