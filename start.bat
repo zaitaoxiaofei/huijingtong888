@@ -35,7 +35,7 @@ if %NODE_MAJOR% EQU 22 if %NODE_MINOR% LSS 5 (
 echo Node.js version:
 node --version
 echo.
-echo Building frontend and starting server...
+echo Building frontend, starting server, print helper, and Electron...
 echo.
-node scripts/start-with-build.mjs
+npm run start:all
 pause
