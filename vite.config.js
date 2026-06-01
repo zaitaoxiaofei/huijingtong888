@@ -5,17 +5,15 @@ import { ElementPlusResolver } from "unplugin-vue-components/resolvers";
 import ElementPlus from "unplugin-element-plus/vite";
 import path from "node:path";
 
+import { cloudflare } from "@cloudflare/vite-plugin";
+
 const buildStamp = process.env.OZON_BUILD_STAMP || String(Date.now());
 
 export default defineConfig({
   base: "/vue-apps/",
-  plugins: [
-    vue(),
-    Components({
-      resolvers: [ElementPlusResolver()]
-    }),
-    ElementPlus()
-  ],
+  plugins: [vue(), Components({
+    resolvers: [ElementPlusResolver()]
+  }), ElementPlus(), cloudflare()],
   publicDir: false,
   build: {
     outDir: path.resolve("public/vue-apps"),

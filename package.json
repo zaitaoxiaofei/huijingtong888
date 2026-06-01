@@ -32,7 +32,9 @@
     "db:backfill:order-history": "node scripts/backfill-order-status-history.mjs",
     "print-helper": "node scripts/local-print-helper.mjs",
     "build:desktop": "electron-builder --win nsis -c.electronDist=node_modules/electron/dist --publish never",
-    "build:desktop:portable": "electron-builder --win portable -c.electronDist=node_modules/electron/dist --publish never"
+    "build:desktop:portable": "electron-builder --win portable -c.electronDist=node_modules/electron/dist --publish never",
+    "deploy": "npm run build:frontend && wrangler deploy",
+    "preview": "npm run build:frontend && wrangler dev"
   },
   "engines": {
     "node": ">=22.5.0"
@@ -53,6 +55,7 @@
     "sharp": "^0.34.5"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.39.0",
     "@vitejs/plugin-vue": "^6.0.7",
     "cross-env": "^10.1.0",
     "electron": "^42.2.0",
@@ -61,7 +64,8 @@
     "unplugin-vue-components": "^32.0.0",
     "vite": "^8.0.13",
     "vue": "^3.5.34",
-    "vue-router": "^4.6.3"
+    "vue-router": "^4.6.3",
+    "wrangler": "^4.95.0"
   },
   "build": {
     "appId": "com.hjt888.ozonerp",
