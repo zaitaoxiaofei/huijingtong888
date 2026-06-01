@@ -1769,8 +1769,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .query({ active: true, currentWindow: true })
       .then(async ([tab]) => {
         if (!tab?.id || !isOzonFrontUrl(tab.url)) return { success: false, error: 'Current tab is not an Ozon front page' };
+        if (await hasOzonContentScript(tab.id)) return { success: true, alreadyLoaded: true };
         const injected = await injectOzonFrontContent(tab.id, tab.url, 'manual');
-        return { success: injected };
+        const loaded = injected ? await hasOzonContentScript(tab.id) : false;
+        return { success: Boolean(injected && loaded), injected, loaded };
       })
       .then(sendResponse)
       .catch((error) => sendResponse({ success: false, error: error?.message || String(error) }));

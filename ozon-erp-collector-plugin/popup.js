@@ -151,6 +151,15 @@ function isOzonFrontPage(url) {
   }
 }
 
+function originPatternForUrl(url) {
+  try {
+    const target = new URL(String(url || ''));
+    return `${target.protocol}//${target.hostname}/*`;
+  } catch (error) {
+    return '';
+  }
+}
+
 async function hasOzonAccess() {
   if (!chrome?.permissions?.contains) return true;
   return await chrome.permissions.contains({ origins: OZON_PERMISSION_ORIGINS }).catch(() => false);
@@ -163,26 +172,32 @@ async function refreshOzonAccessButton() {
 }
 
 async function grantOzonAccess() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !isOzonFrontPage(tab.url)) {
+    setStatus('请先切到 Ozon 商品页或列表页，再点击这个按钮。');
+    return;
+  }
   if (!chrome?.permissions?.request) {
     setStatus('当前浏览器不支持插件主动申请站点权限，请在扩展详情里把站点访问权限设为所有站点。');
     return;
   }
-  const granted = await chrome.permissions.request({ origins: OZON_PERMISSION_ORIGINS }).catch(() => false);
+  const currentOrigin = originPatternForUrl(tab.url);
+  const alreadyGranted = currentOrigin
+    ? await chrome.permissions.contains({ origins: [currentOrigin] }).catch(() => false)
+    : false;
+  const granted = alreadyGranted || await chrome.permissions.request({ origins: currentOrigin ? [currentOrigin] : OZON_PERMISSION_ORIGINS }).catch(() => false);
   await refreshOzonAccessButton();
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id || !isOzonFrontPage(tab.url)) {
-    setStatus(granted ? 'Ozon 权限已授权。请打开 Ozon 商品页或列表页后再重试。' : 'Edge 没有授予 Ozon 页面访问权限，请在扩展详情里把站点访问权限设为所有站点。');
-    return;
-  }
   const injected = await chrome.runtime.sendMessage({ type: 'OZON_ERP_INJECT_ACTIVE_OZON_FRONT' }).catch((error) => ({
     success: false,
     error: error?.message || String(error)
   }));
   if (injected?.success) {
-    setStatus('已在当前 Ozon 页面注入插件。如果后续页面仍无显示，请在扩展详情里把站点访问权限设为所有站点。');
+    setStatus(injected.alreadyLoaded ? '当前 Ozon 页面已加载插件脚本。如果页面没有面板，问题在页面渲染定位。' : '已在当前 Ozon 页面注入插件。');
     return;
   }
-  setStatus('Edge 仍然阻止注入。请打开扩展详情，把“站点访问权限”改为“在所有站点上”，然后刷新 Ozon 页面。');
+  setStatus(granted
+    ? '权限接口已返回允许，但 Edge 仍阻止脚本。请在扩展详情里把“站点访问权限”改为“在所有站点上”，再刷新 Ozon 页面。'
+    : 'Edge 没有授予当前 Ozon 域名权限。请在扩展详情里把“站点访问权限”改为“在所有站点上”。');
 }
 
 async function load() {
