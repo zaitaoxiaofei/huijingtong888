@@ -9,8 +9,8 @@ const DEFAULT_LABEL_PRINTER = process.env.OZON_LABEL_PRINTER || "Gprinter GP-132
 const DEFAULT_DOCUMENT_PRINTER = process.env.OZON_DOCUMENT_PRINTER || "Canon MG2500 series Printer";
 const MM_TO_PT = 72 / 25.4;
 const LABEL_PAPER_SIZES = [
-  { value: "order_label_76x130", widthMm: 76, heightMm: 130, paperName: "76mm x 130mm", rotateLandscape: true, aliases: ["76mm x 130mm", "76x130", "76*130"] },
-  { value: "fbp_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, aliases: ["72mm x 130mm", "72x130", "72*130"] },
+  { value: "order_label_76x130", widthMm: 76, heightMm: 130, paperName: "76mm x 130mm", rotateLandscape: true, fillPaper: true, aliases: ["76mm x 130mm", "76x130", "76*130"] },
+  { value: "fbp_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, fillPaper: true, aliases: ["72mm x 130mm", "72x130", "72*130"] },
   { value: "barcode_70x30", widthMm: 70, heightMm: 30, paperName: "70mm*30mm", aliases: ["70mm x 30mm", "70mm*30mm", "70x30", "70*30"] }
 ];
 
@@ -123,6 +123,16 @@ function normalizePaperSetting(printSettings = "") {
     .join(",");
 }
 
+function normalizeLabelPrintSettings(printSettings = "", paperSpec = null) {
+  const normalized = normalizePrintSettings(printSettings) || "fit";
+  if (!paperSpec) return normalized;
+  return normalized
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item && !["portrait", "landscape"].includes(item.toLowerCase()))
+    .join(",") || "noscale";
+}
+
 function resolveJobPaperSpec({ paperSize = "", printSettings = "", meta = {} } = {}) {
   return paperSpecByValue(paperSize)
     || paperSpecByValue(meta?.paper_size || meta?.paperSize || meta?.label_size || meta?.labelSize || meta?.preset)
@@ -174,7 +184,7 @@ function createJob({ source = "manual", printer = "label", printSettings = "fit"
     source,
     printer: printerForRole(printer),
     printer_role: printer,
-    print_settings: normalizePrintSettings(normalizedSettings) || "fit",
+    print_settings: normalizeLabelPrintSettings(normalizedSettings, paperSpec),
     copies: normalizeCopies(copies),
     filename: safeFilename(filename),
     user_id: userId,
@@ -258,7 +268,9 @@ async function resizePdfToPaper(pdfBuffer, paperSpec) {
     const shouldRotate = Boolean(paperSpec.rotateLandscape && sourceWidth > sourceHeight && targetHeight > targetWidth);
     const sourceBoxWidth = shouldRotate ? sourceHeight : sourceWidth;
     const sourceBoxHeight = shouldRotate ? sourceWidth : sourceHeight;
-    const scale = Math.min(targetWidth / sourceBoxWidth, targetHeight / sourceBoxHeight);
+    const scale = paperSpec.fillPaper
+      ? Math.max(targetWidth / sourceBoxWidth, targetHeight / sourceBoxHeight)
+      : Math.min(targetWidth / sourceBoxWidth, targetHeight / sourceBoxHeight);
     const drawWidth = sourceWidth * scale;
     const drawHeight = sourceHeight * scale;
     const visualWidth = sourceBoxWidth * scale;
