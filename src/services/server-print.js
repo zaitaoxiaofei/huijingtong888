@@ -11,8 +11,8 @@ const DEFAULT_DOCUMENT_PRINTER = process.env.OZON_DOCUMENT_PRINTER || "Canon MG2
 const MM_TO_PT = 72 / 25.4;
 const THERMAL_DPI = 203;
 const LABEL_PAPER_SIZES = [
-  { value: "order_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, rasterFit: "contain", aliases: ["72mm x 130mm", "72x130", "72*130", "order_label_76x130", "76mm x 130mm", "76x130", "76*130"] },
-  { value: "fbp_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, rasterFit: "contain", aliases: ["72mm x 130mm", "72x130", "72*130"] },
+  { value: "order_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, rotateDegrees: 270, rasterFit: "contain", safeMarginMm: 2, aliases: ["72mm x 130mm", "72x130", "72*130", "order_label_76x130", "76mm x 130mm", "76x130", "76*130"] },
+  { value: "fbp_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, rotateDegrees: 270, rasterFit: "contain", safeMarginMm: 2, aliases: ["72mm x 130mm", "72x130", "72*130"] },
   { value: "barcode_70x30", widthMm: 70, heightMm: 30, paperName: "70mm*30mm", rasterFit: "fill", aliases: ["70mm x 30mm", "70mm*30mm", "70x30", "70*30", "30x70", "30*70"] }
 ];
 
@@ -374,8 +374,8 @@ function shouldRotateRasterPage(paperSpec, metadata, targetWidthPx, targetHeight
   const sourceLandscape = Number(metadata.width || 0) > Number(metadata.height || 0);
   const targetPortrait = targetHeightPx > targetWidthPx;
   const targetLandscape = targetWidthPx > targetHeightPx;
-  if (orientation === "portrait") return sourceLandscape && targetPortrait;
-  if (orientation === "landscape") return !sourceLandscape && targetLandscape;
+  if (orientation === "portrait") return false;
+  if (orientation === "landscape") return (sourceLandscape && targetPortrait) || (!sourceLandscape && targetLandscape);
   return Boolean(paperSpec.rotateLandscape && sourceLandscape && targetPortrait);
 }
 
@@ -398,20 +398,33 @@ async function rasterizePdfToThermalPdf(pdfBuffer, paperSpec, tempDir, options =
   const pageHeightPt = paperSpec.heightMm * MM_TO_PT;
   const targetWidthPx = mmToPixels(paperSpec.widthMm);
   const targetHeightPx = mmToPixels(paperSpec.heightMm);
+  const marginPx = Math.min(
+    Math.floor(Math.min(targetWidthPx, targetHeightPx) / 4),
+    mmToPixels(paperSpec.safeMarginMm || 0)
+  );
+  const contentWidthPx = Math.max(1, targetWidthPx - (marginPx * 2));
+  const contentHeightPx = Math.max(1, targetHeightPx - (marginPx * 2));
   const diagnostics = [];
 
   for (const file of files) {
     const metadata = await sharp(file).metadata();
     let image = sharp(file).flatten({ background: "#ffffff" });
     const shouldRotate = shouldRotateRasterPage(paperSpec, metadata, targetWidthPx, targetHeightPx, options.orientation || "auto");
-    if (shouldRotate) image = image.rotate(90);
+    if (shouldRotate) image = image.rotate(paperSpec.rotateDegrees || 90);
     const fit = thermalFitForPaper(paperSpec);
     const resized = await image
-      .resize(targetWidthPx, targetHeightPx, {
+      .resize(contentWidthPx, contentHeightPx, {
         fit,
         position: "centre",
         background: "#ffffff",
         kernel: "lanczos3"
+      })
+      .extend({
+        top: marginPx,
+        bottom: targetHeightPx - contentHeightPx - marginPx,
+        left: marginPx,
+        right: targetWidthPx - contentWidthPx - marginPx,
+        background: "#ffffff"
       })
       .grayscale()
       .png()
@@ -424,7 +437,9 @@ async function rasterizePdfToThermalPdf(pdfBuffer, paperSpec, tempDir, options =
       output_px: [targetWidthPx, targetHeightPx],
       paper_mm: [paperSpec.widthMm, paperSpec.heightMm],
       rotated: shouldRotate,
+      rotate_degrees: shouldRotate ? paperSpec.rotateDegrees || 90 : 0,
       orientation: options.orientation || "auto",
+      margin_px: marginPx,
       fit
     });
   }
