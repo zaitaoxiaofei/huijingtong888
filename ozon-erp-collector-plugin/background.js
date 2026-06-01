@@ -1972,15 +1972,15 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create(PLUGIN_UPDATE_ALARM_NAME, { periodInMinutes: 60 });
-  checkPluginUpdateStatus().catch((error) => console.warn('[Ozon ERP] Plugin update check failed', error?.message || error));
+  checkPluginUpdateStatus().catch(() => {});
 });
 
 chrome.runtime.onStartup.addListener(() => {
   chrome.alarms.create(PLUGIN_UPDATE_ALARM_NAME, { periodInMinutes: 60 });
-  checkPluginUpdateStatus().catch((error) => console.warn('[Ozon ERP] Plugin update check failed', error?.message || error));
+  checkPluginUpdateStatus().catch(() => {});
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm?.name !== PLUGIN_UPDATE_ALARM_NAME) return;
-  checkPluginUpdateStatus().catch((error) => console.warn('[Ozon ERP] Plugin update check failed', error?.message || error));
+  checkPluginUpdateStatus().catch(() => {});
 });

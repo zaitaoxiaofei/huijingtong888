@@ -53,6 +53,11 @@ function setStatus(text) {
   fields.status.textContent = text || '';
 }
 
+function setStatusDetail(lines) {
+  fields.status.classList.add('has-detail');
+  fields.status.textContent = lines.filter(Boolean).join('\n');
+}
+
 function renderTokenWarning() {
   const token = String(fields.localPluginToken.value || '').trim();
   const usesDefaultToken = !token || token === DEFAULT_LOCAL_PLUGIN_TOKEN;
@@ -171,6 +176,25 @@ async function refreshOzonAccessButton() {
   fields.grantOzonAccess.disabled = false;
 }
 
+async function diagnoseActiveOzonPage() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !isOzonFrontPage(tab.url)) return;
+  const currentOrigin = originPatternForUrl(tab.url);
+  const originGranted = currentOrigin
+    ? await chrome.permissions.contains({ origins: [currentOrigin] }).catch(() => false)
+    : false;
+  const contentState = await chrome.tabs.sendMessage(tab.id, { type: 'OZON_ERP_EXPORT_STATE' }).catch((error) => ({
+    success: false,
+    error: error?.message || String(error)
+  }));
+  setStatusDetail([
+    `当前页：${new URL(tab.url).hostname}`,
+    `站点权限：${originGranted ? '已授权' : '未授权'}`,
+    `页面脚本：${contentState?.success === false ? '未加载' : '已加载'}`,
+    contentState?.success === false ? '处理：点击“授权 Ozon 页面访问”，或在扩展详情把站点访问权限改为“在所有站点上”。' : '如果页面仍无面板，问题在页面定位/渲染。'
+  ]);
+}
+
 async function grantOzonAccess() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !isOzonFrontPage(tab.url)) {
@@ -219,6 +243,7 @@ async function load() {
   await restoreManualProgress();
   await loadPluginUpdateStatus();
   await refreshOzonAccessButton();
+  if (!fields.status.textContent) await diagnoseActiveOzonPage();
 }
 
 async function save() {
