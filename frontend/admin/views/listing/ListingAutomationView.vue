@@ -871,6 +871,125 @@ function renderedAttributeOptions(field = {}) {
   return values.slice(0, ATTRIBUTE_OPTION_RENDER_LIMIT);
 }
 
+const editorCurrencyCode = computed(() => String(templateEditor.currency_code || "RUB").trim().toUpperCase() || "RUB");
+
+function attributeNameText(field = {}) {
+  return String(field.name || field.attribute_name || field.raw?.name || "").trim().toLowerCase();
+}
+
+function compactAttributeText(value = "") {
+  return String(value || "").toLowerCase().replace(/[\s_\-/:：()（）]+/g, "");
+}
+
+function attributeTextBag(field = {}) {
+  return [
+    field.name,
+    field.attribute_name,
+    field.raw?.name,
+    field.raw?.attribute_name,
+    field.hint,
+    field.raw?.hint
+  ].map(compactAttributeText).filter(Boolean).join("|");
+}
+
+function variantOptionQuality(field = {}, kind = "color") {
+  const values = Array.isArray(field.values) ? field.values : [];
+  if (!values.length) return 0;
+  const sample = values.slice(0, 20).map((option) => String(option?.value || option?.label || "").trim()).filter(Boolean);
+  if (!sample.length) return 0;
+  const averageLength = sample.reduce((sum, value) => sum + value.length, 0) / sample.length;
+  const longTextCount = sample.filter((value) => value.length > 38 || value.split(/\s+/).length > 5).length;
+  const commaListCount = sample.filter((value) => value.includes(",") || value.includes("，")).length;
+  let score = 0;
+  if (averageLength <= 24) score += 8;
+  if (averageLength > 44) score -= 14;
+  if (longTextCount >= Math.ceil(sample.length * 0.35)) score -= 18;
+  if (kind === "spec" && commaListCount >= Math.ceil(sample.length * 0.35)) score -= 12;
+  if (kind === "color" && commaListCount) score += 4;
+  return score;
+}
+
+function findVariantDictionaryAttribute(kind = "color", options = {}) {
+  const excludeIds = new Set((options.excludeIds || []).map((id) => String(id || "")));
+  const strongIds = kind === "color" ? new Set(["10096"]) : new Set(["4295", "4298", "4299"]);
+  const weakIds = kind === "color" ? new Set(["8229"]) : new Set(["9048"]);
+  const positive = kind === "color"
+    ? ["color", "colour", "цвет", "цветтовара", "основнойцвет", "расцветка", "окраска", "颜色", "颜色分类"]
+    : ["size", "размер", "размерпроизводителя", "model", "модель", "型号", "型号名称", "规格", "尺寸"];
+  const negative = kind === "color"
+    ? ["размер", "size", "модель", "model", "тип", "type", "название", "наименование", "title", "name", "материал", "material", "品牌", "бренд"]
+    : ["цвет", "color", "colour", "материал", "material", "бренд", "brand", "颜色"];
+  const ranked = templateEditor.attributes.map((field) => {
+    const text = attributeTextBag(field);
+    const id = Number(field.attribute_id || 0);
+    if (excludeIds.has(String(id))) return { field, score: -100 };
+    const hasDictionary = Number(field.dictionary_id || 0) || (Array.isArray(field.values) && field.values.length);
+    if (!hasDictionary) return { field, score: -100 };
+    let score = 0;
+    if (strongIds.has(String(id))) score += 100;
+    if (weakIds.has(String(id))) score += 12;
+    if (field.required) score += 4;
+    if (Array.isArray(field.values) && field.values.length) score += 8;
+    score += variantOptionQuality(field, kind);
+    positive.forEach((keyword) => { if (text.includes(compactAttributeText(keyword))) score += 18; });
+    negative.forEach((keyword) => { if (text.includes(compactAttributeText(keyword))) score -= 40; });
+    if (kind === "spec" && text.includes(compactAttributeText("модель")) && !text.includes(compactAttributeText("размер"))) score -= 8;
+    if (kind === "color" && weakIds.has(String(id)) && !positive.some((keyword) => text.includes(compactAttributeText(keyword)))) score -= 45;
+    return { field, score };
+  }).filter((item) => item.score > 0).sort((left, right) => right.score - left.score);
+  return ranked[0]?.field || null;
+}
+
+const variantColorAttribute = computed(() => findVariantDictionaryAttribute("color"));
+const variantSpecAttribute = computed(() => findVariantDictionaryAttribute("spec", {
+  excludeIds: [variantColorAttribute.value?.attribute_id]
+}));
+
+function variantDictionaryOptions(field = {}) {
+  return renderedAttributeOptions(field)
+    .map((option) => String(option?.value || option?.label || "").trim())
+    .filter(Boolean);
+}
+
+function ensureVariantDictionaryOptions(field = {}, visible = true) {
+  if (!field) return;
+  ensureAttributeValuesLoaded(field, visible);
+}
+
+function normalizeDynamicAttributeEntries(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value).map(([key, val]) => ({
+    attribute_id: /^\d+$/.test(String(key)) ? key : "",
+    name: val?.name || val?.attribute_name || key,
+    value: val?.value ?? val?.values ?? val
+  }));
+}
+
+function unwrapDynamicAttributeValue(value) {
+  if (Array.isArray(value)) return value.map(unwrapDynamicAttributeValue).filter(Boolean).join(", ");
+  if (value && typeof value === "object") return value.value ?? value.name ?? value.label ?? value.text ?? "";
+  return value ?? "";
+}
+
+function extractVariantDynamicAttribute(item = {}, field = null, kind = "color") {
+  const entries = normalizeDynamicAttributeEntries(item.dynamic_attributes || item.attributes || item.attribute_values);
+  if (!entries.length) return "";
+  const targetId = String(field?.attribute_id || "");
+  const targetName = compactAttributeText(field?.name || field?.raw?.name || "");
+  const fallback = entries.find((entry) => {
+    const entryId = String(entry.attribute_id || entry.id || "");
+    const entryName = compactAttributeText(entry.name || entry.attribute_name || "");
+    if (targetId && entryId === targetId) return true;
+    if (targetName && entryName && (entryName.includes(targetName) || targetName.includes(entryName))) return true;
+    const text = compactAttributeText(`${entry.name || ""}|${entry.attribute_name || ""}`);
+    return kind === "color"
+      ? ["color", "цвет", "颜色"].some((keyword) => text.includes(compactAttributeText(keyword)))
+      : ["size", "размер", "model", "модель", "型号", "规格"].some((keyword) => text.includes(compactAttributeText(keyword)));
+  });
+  return String(unwrapDynamicAttributeValue(fallback?.value ?? fallback?.values)).trim();
+}
+
 function attributeHasMoreOptions(field = {}) {
   return Array.isArray(field.values) && field.values.length > ATTRIBUTE_OPTION_RENDER_LIMIT;
 }
@@ -1031,6 +1150,8 @@ function normalizeEditorImages(images) {
 }
 
 function normalizeEditorVariants(variants) {
+  const colorAttribute = findVariantDictionaryAttribute("color");
+  const specAttribute = findVariantDictionaryAttribute("spec", { excludeIds: [colorAttribute?.attribute_id] });
   return (Array.isArray(variants) ? variants : []).map((item, index) => ({
     id: item?.id || `variant-${Date.now().toString(36)}-${index}`,
     sku: item?.sku || item?.source_sku || "",
@@ -1046,8 +1167,8 @@ function normalizeEditorVariants(variants) {
     cost_price: Number(item?.cost_price || 0),
     price: Number(item?.price || 0),
     old_price: Number(item?.old_price || 0),
-    color: item?.color || "",
-    spec: item?.spec || "",
+    color: item?.color || extractVariantDynamicAttribute(item, colorAttribute, "color") || "",
+    spec: item?.spec || extractVariantDynamicAttribute(item, specAttribute, "spec") || "",
     main_tags: splitTagValue(item?.main_tags || item?.hashtags || item?.tags || ""),
     weight_g: Number(item?.weight_g || templateEditor.weight_g || 0),
     length_mm: normalizeVariantDimensionMm(item?.length_mm, item?.depth, item?.length_cm, templateEditor.length_cm),
@@ -1536,6 +1657,17 @@ function openVariantVideoEditor(row, field, title) {
 
 function addVariantVideoLink() {
   ensureVariantLinks(variantVideoEditor.row, variantVideoEditor.field).push("");
+}
+
+function setPrimaryVariantVideo(value) {
+  const links = ensureVariantLinks(variantVideoEditor.row, variantVideoEditor.field);
+  if (links.length) links[0] = value;
+  else links.push(value);
+}
+
+function clearVariantVideos() {
+  const links = ensureVariantLinks(variantVideoEditor.row, variantVideoEditor.field);
+  links.splice(0, links.length);
 }
 
 function removeVariantVideoLink(index) {
@@ -2881,7 +3013,7 @@ onMounted(loadAll);
                     </el-select>
                   </template>
                 </el-table-column>
-                <el-table-column width="150">
+                <el-table-column width="160">
                   <template #header>
                     <div class="variant-col-header">
                       <span>颜色</span>
@@ -2889,9 +3021,22 @@ onMounted(loadAll);
                       <el-button link size="small" :loading="aiGenerating" @click="runVariantColumnAi('color')">AI</el-button>
                     </div>
                   </template>
-                  <template #default="{ row }"><el-input v-model="row.color" size="small" /></template>
+                  <template #default="{ row }">
+                    <el-select
+                      v-model="row.color"
+                      size="small"
+                      filterable
+                      allow-create
+                      clearable
+                      default-first-option
+                      :loading="attributeValueLoading[attributeFieldKey(variantColorAttribute || {})]"
+                      @visible-change="ensureVariantDictionaryOptions(variantColorAttribute, $event)"
+                    >
+                      <el-option v-for="option in variantDictionaryOptions(variantColorAttribute || {})" :key="option" :label="option" :value="option" />
+                    </el-select>
+                  </template>
                 </el-table-column>
-                <el-table-column width="170">
+                <el-table-column width="180">
                   <template #header>
                     <div class="variant-col-header">
                       <span>规格/型号</span>
@@ -2899,25 +3044,48 @@ onMounted(loadAll);
                       <el-button link size="small" :loading="aiGenerating" @click="runVariantColumnAi('spec')">AI</el-button>
                     </div>
                   </template>
-                  <template #default="{ row }"><el-input v-model="row.spec" size="small" /></template>
+                  <template #default="{ row }">
+                    <el-select
+                      v-model="row.spec"
+                      size="small"
+                      filterable
+                      allow-create
+                      clearable
+                      default-first-option
+                      :loading="attributeValueLoading[attributeFieldKey(variantSpecAttribute || {})]"
+                      @visible-change="ensureVariantDictionaryOptions(variantSpecAttribute, $event)"
+                    >
+                      <el-option v-for="option in variantDictionaryOptions(variantSpecAttribute || {})" :key="option" :label="option" :value="option" />
+                    </el-select>
+                  </template>
                 </el-table-column>
-                <el-table-column width="140">
+                <el-table-column width="150">
                   <template #header>
                     <div class="variant-col-header">
                       <span>售价</span>
                       <el-button link size="small" @click="applyFirstVariantField('price')">同首行</el-button>
                     </div>
                   </template>
-                  <template #default="{ row }"><el-input-number v-model="row.price" :min="0" :controls="false" size="small" /></template>
+                  <template #default="{ row }">
+                    <div class="money-cell">
+                      <el-input-number v-model="row.price" :min="0" :controls="false" size="small" />
+                      <span>{{ editorCurrencyCode }}</span>
+                    </div>
+                  </template>
                 </el-table-column>
-                <el-table-column width="140">
+                <el-table-column width="150">
                   <template #header>
                     <div class="variant-col-header">
                       <span>划线价</span>
                       <el-button link size="small" @click="applyFirstVariantField('old_price')">同首行</el-button>
                     </div>
                   </template>
-                  <template #default="{ row }"><el-input-number v-model="row.old_price" :min="0" :controls="false" size="small" /></template>
+                  <template #default="{ row }">
+                    <div class="money-cell">
+                      <el-input-number v-model="row.old_price" :min="0" :controls="false" size="small" />
+                      <span>{{ editorCurrencyCode }}</span>
+                    </div>
+                  </template>
                 </el-table-column>
                 <el-table-column v-if="false" width="120">
                   <template #header>
@@ -2996,7 +3164,7 @@ onMounted(loadAll);
       </div>
     </el-drawer>
 
-    <el-dialog v-model="variantImageEditor.visible" title="SKU图片编辑" width="92vw" class="variant-image-dialog" destroy-on-close>
+    <el-dialog v-model="variantImageEditor.visible" title="SKU图片编辑" width="1180px" top="5vh" class="variant-image-dialog" destroy-on-close>
       <div v-if="variantImageEditor.row" class="variant-image-workbench">
         <aside class="variant-image-panel">
           <div class="variant-image-tools">
@@ -3058,18 +3226,28 @@ onMounted(loadAll);
       </template>
     </el-dialog>
 
-    <el-dialog v-model="variantVideoEditor.visible" :title="variantVideoEditor.title" width="680px" class="variant-video-dialog" destroy-on-close>
+    <el-dialog v-model="variantVideoEditor.visible" :title="variantVideoEditor.title" width="760px" top="12vh" class="variant-video-dialog" destroy-on-close>
       <div v-if="variantVideoEditor.row" class="variant-image-editor">
         <div class="variant-video-rules">
           <p>格式：MP4、MOV</p>
           <p>大小不能超过 20 MB</p>
           <p>不超过30秒</p>
         </div>
-        <div class="drawer-actions">
+        <div class="variant-video-entry">
           <el-upload :show-file-list="false" accept="video/mp4,video/quicktime,video/webm" :http-request="uploadVariantVideoRequest(variantVideoEditor.row, variantVideoEditor.field, 'video')">
             <el-button type="primary" :loading="uploadingImage">上传视频</el-button>
           </el-upload>
-          <el-button @click="addVariantVideoLink">输入视频 URL</el-button>
+          <span>或</span>
+          <el-input
+            :model-value="ensureVariantLinks(variantVideoEditor.row, variantVideoEditor.field)[0] || ''"
+            placeholder="输入视频 URL 地址"
+            @update:model-value="setPrimaryVariantVideo"
+          >
+            <template #append>
+              <el-button @click="clearVariantVideos">清除</el-button>
+            </template>
+          </el-input>
+          <el-button @click="addVariantVideoLink">新增链接</el-button>
         </div>
         <div class="variant-video-list">
           <div v-for="(url, videoIndex) in ensureVariantLinks(variantVideoEditor.row, variantVideoEditor.field)" :key="`${url}-${videoIndex}`" class="variant-video-card">
@@ -3317,9 +3495,12 @@ onMounted(loadAll);
 .variant-table { max-width: 100%; min-width: 1180px; border-radius: 8px; overflow: hidden; }
 .dense-variant-table { width: 100%; border-color: #e7e9f0; }
 .dense-variant-table :deep(.el-table__header th) { background: #fafafa; color: #111827; font-weight: 700; }
-.dense-variant-table :deep(.el-table__cell) { vertical-align: top; }
+.dense-variant-table :deep(.el-table__cell) { vertical-align: middle; }
+.dense-variant-table :deep(.el-table__body .el-table__cell) { padding-top: 10px; padding-bottom: 10px; }
 .dense-variant-table :deep(.cell) { padding-left: 8px; padding-right: 8px; }
 .dense-variant-table :deep(.el-input-number) { width: 100%; }
+.dense-variant-table :deep(.el-select__wrapper),
+.dense-variant-table :deep(.el-input__wrapper) { min-height: 32px; border-radius: 7px; }
 .main-info-block { max-width: 760px; margin-left: auto; margin-right: auto; }
 .variants-block { width: min(1780px, calc(100vw - 96px)); max-width: 100%; margin: 12px auto 0; overflow-x: auto; padding-top: 24px; }
 .variants-block > .section-line { position: relative; display: grid; grid-template-columns: 1fr auto 1fr; max-width: 100%; margin: 0 0 10px; align-items: center; }
@@ -3334,32 +3515,39 @@ onMounted(loadAll);
 .variant-name-cell > .el-input:nth-of-type(2) { display: none; }
 .variant-name-cell strong { display: block; color: var(--el-text-color-primary); font-size: 12px; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .offer-id-cell { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
-.variant-media-cell { display: grid; gap: 6px; min-height: 70px; align-content: center; cursor: pointer; }
-.variant-thumb-stack, .variant-video-strip { display: flex; align-items: center; gap: 4px; min-height: 44px; }
+.money-cell { position: relative; display: block; }
+.money-cell :deep(.el-input__wrapper) { padding-right: 42px; }
+.money-cell span { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); min-width: 28px; height: 20px; display: inline-flex; align-items: center; justify-content: flex-end; color: #8a94a6; font-size: 12px; font-weight: 700; pointer-events: none; }
+.variant-media-cell { display: grid; gap: 7px; min-height: 76px; align-content: center; justify-items: center; cursor: pointer; padding: 2px 0; }
+.variant-thumb-stack, .variant-video-strip { display: flex; align-items: center; justify-content: center; gap: 4px; min-height: 44px; width: 100%; }
 .variant-thumb-button { width: 44px; height: 44px; padding: 0; border: 1px solid var(--el-border-color-lighter); border-radius: 4px; overflow: hidden; background: var(--el-fill-color-light); cursor: pointer; }
 .variant-thumb-button img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .variant-image-more { width: 28px; height: 28px; border-radius: 999px; display: grid; place-items: center; background: rgba(31, 41, 55, 0.38); color: #fff; font-size: 12px; font-weight: 800; }
 .variant-media-empty, .variant-video-empty-chip { width: 76px; height: 44px; border: 1px dashed var(--el-border-color); border-radius: 6px; background: var(--el-fill-color-extra-light); color: var(--el-text-color-secondary); cursor: pointer; }
 .variant-video-empty-chip { font-size: 13px; }
-.variant-media-actions { display: flex; align-items: center; gap: 10px; }
-.variant-media-actions :deep(.el-upload) { display: inline-flex; }
+.variant-media-actions { display: inline-flex; align-items: center; justify-content: center; gap: 0; height: 22px; padding: 0 6px; border-radius: 999px; background: transparent; }
+.variant-media-actions .el-button { height: 22px; padding: 0 5px; color: #344054; font-size: 12px; font-weight: 600; }
+.variant-media-actions .el-button:hover { color: var(--el-color-primary); background: transparent; }
+.variant-media-actions :deep(.el-upload) { display: inline-flex; align-items: center; }
+.variant-media-actions :deep(.el-upload)::before { content: ""; width: 1px; height: 11px; margin: 0 5px 0 1px; background: var(--el-border-color); }
 .variant-image-editor { display: flex; flex-direction: column; gap: 12px; }
 .variant-editor-thumb { width: 58px; height: 58px; border-radius: 6px; border: 1px solid var(--el-border-color-light); background: var(--el-fill-color-light); }
 .variant-image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
 .variant-image-card { display: grid; gap: 8px; align-content: start; padding: 10px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-fill-color-extra-light); }
 .variant-image-card :deep(.erp-image-preview--square) { width: 100%; min-width: 100%; max-width: 100%; height: auto; min-height: 0; max-height: none; aspect-ratio: 1; flex-basis: auto; border-radius: 6px; }
 .variant-image-empty { display: grid; place-items: center; width: 100%; aspect-ratio: 1; border: 1px dashed var(--el-border-color); border-radius: 6px; color: var(--el-text-color-secondary); background: var(--el-bg-color); }
+.variant-image-dialog :deep(.el-dialog) { max-width: calc(100vw - 96px); }
 .variant-image-dialog :deep(.el-dialog__body) { padding: 0; }
-.variant-image-workbench { display: grid; grid-template-columns: minmax(360px, 46%) minmax(420px, 1fr); min-height: 680px; max-height: calc(100vh - 180px); border-top: 1px solid var(--el-border-color-lighter); border-bottom: 1px solid var(--el-border-color-lighter); overflow: hidden; }
-.variant-image-panel { padding: 24px; overflow: auto; border-right: 1px solid var(--el-border-color-lighter); background: #fff; }
-.variant-image-tools { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
-.selected-grid { grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); }
+.variant-image-workbench { display: grid; grid-template-columns: minmax(310px, 40%) minmax(420px, 1fr); min-height: 500px; max-height: calc(100vh - 240px); border-top: 1px solid var(--el-border-color-lighter); border-bottom: 1px solid var(--el-border-color-lighter); overflow: hidden; }
+.variant-image-panel { padding: 16px; overflow: auto; border-right: 1px solid var(--el-border-color-lighter); background: #fff; }
+.variant-image-tools { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.selected-grid { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); }
 .selected-card { border-color: #ded8ff; background: #fbfaff; }
 .variant-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.variant-image-library { padding: 24px; overflow: auto; background: #fff; }
-.library-tabs { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--el-border-color-lighter); margin-bottom: 18px; }
+.variant-image-library { padding: 16px; overflow: auto; background: #fff; }
+.library-tabs { display: flex; align-items: center; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--el-border-color-lighter); margin-bottom: 14px; }
 .library-tabs :deep(.el-tabs__header) { margin: 0; }
-.library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(172px, 1fr)); gap: 18px; }
+.library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 12px; }
 .library-image-card { position: relative; display: grid; gap: 6px; padding: 0; border: 1px solid #dfe3ee; border-radius: 8px; background: #fff; overflow: hidden; cursor: pointer; text-align: left; color: var(--el-text-color-regular); }
 .library-image-card img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; background: var(--el-fill-color-light); }
 .library-image-card span { padding: 0 10px 10px; font-size: 12px; color: var(--el-text-color-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3371,11 +3559,13 @@ onMounted(loadAll);
 .variant-editor-video { width: 180px; max-height: 110px; border-radius: 6px; background: #101828; }
 .variant-video-empty { display: grid; place-items: center; width: 180px; height: 96px; border: 1px dashed var(--el-border-color); border-radius: 6px; color: var(--el-text-color-secondary); background: var(--el-bg-color); }
 .variant-video-dialog :deep(.el-dialog__body) { padding-top: 22px; }
-.variant-video-rules { display: grid; gap: 8px; margin-bottom: 22px; color: #697386; line-height: 1.5; }
+.variant-video-rules { display: grid; gap: 8px; margin-bottom: 18px; color: #697386; line-height: 1.5; }
 .variant-video-rules p { margin: 0; }
+.variant-video-entry { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: 12px; margin-bottom: 14px; }
 .inline-upload { margin-top: 6px; }
 .variant-sub-input { margin-top: 6px; }
-.variant-row-actions { display: flex; justify-content: center; gap: 8px; }
+.variant-row-actions { display: flex; justify-content: center; gap: 10px; }
+.variant-row-actions .el-button { margin: 0; font-weight: 600; }
 .attribute-detail h3 { margin: 0 0 16px; }
 .attribute-detail h4 { margin: 18px 0 10px; }
 .detail-options { display: flex; flex-wrap: wrap; gap: 8px; }

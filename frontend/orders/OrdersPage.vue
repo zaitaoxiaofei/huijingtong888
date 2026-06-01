@@ -104,7 +104,7 @@ const printDialog = reactive({
   submitting: false,
   previewing: false,
   orderIds: [],
-  preset: "order_label_76x130",
+  preset: "order_label_72x130",
   copies: 1,
   scale: "fit",
   orientation: "portrait",
@@ -113,10 +113,10 @@ const printDialog = reactive({
 
 const printPresetOptions = [
   {
-    label: "订单面单 76mm x 130mm",
-    value: "order_label_76x130",
+    label: "订单面单 72mm x 130mm",
+    value: "order_label_72x130",
     printer: "label",
-    paper: "76mm x 130mm",
+    paper: "72mm x 130mm",
     scale: "noscale",
     orientation: "portrait",
     color: "monochrome"
@@ -793,7 +793,7 @@ function openPrintDialog(orderIds = []) {
   const ids = Array.isArray(orderIds) ? orderIds.map(Number).filter(Boolean) : [];
   if (!ids.length) return ElMessage.warning("请选择需要打印的订单");
   printDialog.orderIds = ids;
-  printDialog.preset = "order_label_76x130";
+  printDialog.preset = "order_label_72x130";
   printDialog.copies = 1;
   printDialog.scale = "noscale";
   printDialog.orientation = "portrait";

@@ -9,8 +9,8 @@ const DEFAULT_LABEL_PRINTER = process.env.OZON_LABEL_PRINTER || "Gprinter GP-132
 const DEFAULT_DOCUMENT_PRINTER = process.env.OZON_DOCUMENT_PRINTER || "Canon MG2500 series Printer";
 const MM_TO_PT = 72 / 25.4;
 const LABEL_PAPER_SIZES = [
-  { value: "order_label_76x130", widthMm: 76, heightMm: 130, paperName: "76mm x 130mm", rotateLandscape: true, fillPaper: true, aliases: ["76mm x 130mm", "76x130", "76*130"] },
-  { value: "fbp_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, fillPaper: true, aliases: ["72mm x 130mm", "72x130", "72*130"] },
+  { value: "order_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, aliases: ["72mm x 130mm", "72x130", "72*130", "order_label_76x130", "76mm x 130mm", "76x130", "76*130"] },
+  { value: "fbp_label_72x130", widthMm: 72, heightMm: 130, paperName: "72mm x 130mm", rotateLandscape: true, aliases: ["72mm x 130mm", "72x130", "72*130"] },
   { value: "barcode_70x30", widthMm: 70, heightMm: 30, paperName: "70mm*30mm", aliases: ["70mm x 30mm", "70mm*30mm", "70x30", "70*30"] }
 ];
 
@@ -268,9 +268,7 @@ async function resizePdfToPaper(pdfBuffer, paperSpec) {
     const shouldRotate = Boolean(paperSpec.rotateLandscape && sourceWidth > sourceHeight && targetHeight > targetWidth);
     const sourceBoxWidth = shouldRotate ? sourceHeight : sourceWidth;
     const sourceBoxHeight = shouldRotate ? sourceWidth : sourceHeight;
-    const scale = paperSpec.fillPaper
-      ? Math.max(targetWidth / sourceBoxWidth, targetHeight / sourceBoxHeight)
-      : Math.min(targetWidth / sourceBoxWidth, targetHeight / sourceBoxHeight);
+    const scale = Math.min(targetWidth / sourceBoxWidth, targetHeight / sourceBoxHeight);
     const drawWidth = sourceWidth * scale;
     const drawHeight = sourceHeight * scale;
     const visualWidth = sourceBoxWidth * scale;

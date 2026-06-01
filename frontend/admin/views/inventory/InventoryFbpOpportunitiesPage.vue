@@ -24,11 +24,11 @@ const barcodeLoadingKeys = reactive({});
 const barcodePrintPresets = [
   { label: "条形码 70mm x 30mm", value: "barcode_70x30", printer: "label", printSettings: "fit,portrait,monochrome,paper=70mm x 30mm" },
   { label: "FBP 面单 72mm x 130mm", value: "fbp_label_72x130", printer: "label", printSettings: "fit,portrait,monochrome,paper=72mm x 130mm" },
-  { label: "订单面单 76mm x 130mm", value: "order_label_76x130", printer: "label", printSettings: "fit,portrait,monochrome,paper=76mm x 130mm" }
+  { label: "订单面单 72mm x 130mm", value: "order_label_72x130", printer: "label", printSettings: "fit,portrait,monochrome,paper=72mm x 130mm" }
 ];
 barcodePrintPresets[0].printSettings = "noscale,portrait,monochrome,paper=70mm*30mm";
 barcodePrintPresets[1].printSettings = "noscale,portrait,monochrome,paper=72mm x 130mm";
-barcodePrintPresets[2].printSettings = "noscale,portrait,monochrome,paper=76mm x 130mm";
+barcodePrintPresets[2].printSettings = "noscale,portrait,monochrome,paper=72mm x 130mm";
 const barcodePreview = reactive({
   visible: false,
   loading: false,
