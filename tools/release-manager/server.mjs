@@ -159,6 +159,21 @@ async function copyDir(source, target) {
   await fs.cp(source, target, { recursive: true });
 }
 
+async function replaceDirFromRelease(source, target) {
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const stamp = Date.now().toString(36);
+  const staging = `${target}.next-${stamp}`;
+  const previous = `${target}.previous-${stamp}`;
+  await fs.rm(staging, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+  await fs.rm(previous, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+  await fs.cp(source, staging, { recursive: true });
+  if (await pathExists(target)) {
+    await fs.rename(target, previous);
+  }
+  await fs.rename(staging, target);
+  await fs.rm(previous, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+}
+
 function runCommand(command, cwd, env) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, {
@@ -340,7 +355,7 @@ async function publishRelease(body = {}) {
     error.status = 404;
     throw error;
   }
-  await copyDir(releaseDir, config.liveDir);
+  await replaceDirFromRelease(releaseDir, config.liveDir);
   const publishedAt = new Date().toISOString();
   const manifest = await readJsonFile(path.join(releaseDir, "deploy-manifest.json"), {});
   const releaseStatus = {
@@ -750,16 +765,16 @@ function page() {
 
       async function publish(version) {
         if (!version) {
-          setStatus("?????????????");
+          setStatus("请先选择一个待发布版本包。");
           return;
         }
-        const current = state?.online?.version || "??????";
-        if (!window.confirm("?????? " + version + "????????? " + current + " ??")) return;
+        const current = state?.online?.version || "尚未发布版本";
+        if (!window.confirm("确认发布版本 " + version + "，替换当前线上版本 " + current + " 吗？")) return;
         setBusy(true);
         try {
-          setStatus("?????? " + version + "...");
+          setStatus("正在发布版本 " + version + "...");
           const result = await api("/api/publish", { method: "POST", body: JSON.stringify({ version, message: notesInput.value }) });
-          setStatus("????????????" + result.version);
+          setStatus("发布成功，当前线上版本：" + result.version);
           await refresh();
         } catch (error) {
           setStatus(error.message);
@@ -1569,22 +1584,22 @@ function pageV3() {
 
       function renderReleaseTable() {
         if (!state.releases.length) {
-          releaseTable.innerHTML = '<div class="empty"><div><strong>?????</strong><span>???????????</span></div></div>';
+          releaseTable.innerHTML = '<div class="empty"><div><strong>暂无版本包</strong><span>请先在左侧生成版本包。</span></div></div>';
           return;
         }
-        releaseTable.innerHTML = '<div class="table-wrap"><table><thead><tr><th class="col-pick">??</th><th class="col-version">???</th><th class="col-time">????</th><th class="col-status">??</th><th>???</th><th class="col-action">??</th></tr></thead><tbody>' +
+        releaseTable.innerHTML = '<div class="table-wrap"><table><thead><tr><th class="col-pick">选择</th><th class="col-version">版本号</th><th class="col-time">创建时间</th><th class="col-status">状态</th><th>包目录</th><th class="col-action">操作</th></tr></thead><tbody>' +
           state.releases.map(function (release) {
             const checked = release.version === selectedVersion;
             return '<tr class="' + (checked ? "selected" : "") + '" data-version="' + htmlEscape(release.version) + '">' +
               '<td class="col-pick"><input type="radio" name="releaseVersion" value="' + htmlEscape(release.version) + '"' + (checked ? " checked" : "") + ' /></td>' +
               '<td><div class="mono" title="' + htmlEscape(release.version) + '">' + htmlEscape(release.version) + '</div></td>' +
               '<td>' + htmlEscape(timeText(release.builtAt)) + '</td>' +
-              '<td><span class="badge ' + (release.isPublished ? "online" : "warning") + '">' + (release.isPublished ? "???" : "???") + '</span></td>' +
+              '<td><span class="badge ' + (release.isPublished ? "online" : "warning") + '">' + (release.isPublished ? "已发布" : "未发布") + '</span></td>' +
               '<td><div class="path-cell" title="' + htmlEscape(release.path) + '">' + htmlEscape(release.path) + '</div></td>' +
-              '<td class="col-action"><button data-publish-version="' + htmlEscape(release.version) + '">??</button></td>' +
+              '<td class="col-action"><button data-publish-version="' + htmlEscape(release.version) + '">发布</button></td>' +
             '</tr>';
           }).join("") + '</tbody></table></div>' +
-          '<div class="table-actions"><div class="selected-note">?????' + htmlEscape(selectedVersion || "-") + '</div><button class="primary" id="publishSelectedBtn">??????</button></div>';
+          '<div class="table-actions"><div class="selected-note">选中版本：' + htmlEscape(selectedVersion || "-") + '</div><button class="primary" id="publishSelectedBtn">发布选中版本</button></div>';
         releaseTable.querySelectorAll('input[name="releaseVersion"]').forEach(function (input) {
           input.addEventListener("change", function () {
             selectedVersion = input.value;

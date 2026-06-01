@@ -10,6 +10,8 @@ const text = {
   fallbackAria: "\u7206\u5355ERP \u52a0\u8f7d\u72b6\u6001",
   loading: "\u7206\u5355\u7cfb\u7edf\u542f\u52a8\u4e2d",
   loadingHint: "\u6b63\u5728\u52a0\u8f7d\u767b\u5f55\u9875\u9762\uff0c\u8bf7\u7a0d\u5019...",
+  retrying: "\u6b63\u5728\u52a0\u8f7d\u66f4\u65b0\u8d44\u6e90",
+  retryingHint: "\u65b0\u7248\u672c\u6587\u4ef6\u6b63\u5728\u5207\u6362\uff0c\u7cfb\u7edf\u5c06\u81ea\u52a8\u91cd\u8bd5...",
   errorTitle: "\u9875\u9762\u52a0\u8f7d\u5f02\u5e38",
   errorHint: "\u8bf7\u5237\u65b0\u9875\u9762\u91cd\u8bd5\uff0c\u6216\u8054\u7cfb\u7ba1\u7406\u5458\u68c0\u67e5\u524d\u7aef\u8d44\u6e90\u3002",
   missingManifest: "Vite manifest \u7f3a\u5c11 frontend/admin/main.js \u5165\u53e3\u3002"
@@ -128,16 +130,50 @@ ${styleTags}
         var title = document.getElementById("adminStaticLoginTitle");
         var hint = document.getElementById("adminStaticLoginHint");
         var fallbackTimer = 0;
+        var chunkReloadKey = "ozon-admin-shell-chunk-reload";
+        var maxChunkReloads = 5;
+        function errorMessage(event) {
+          var reason = event && (event.reason || event.error || event.message || event);
+          return String(reason && (reason.message || reason) || "");
+        }
+        function isChunkLoadError(event) {
+          var message = errorMessage(event);
+          var target = event && event.target;
+          var source = String(target && (target.src || target.href) || "");
+          return source.indexOf("/vue-apps/assets/") >= 0
+            || message.indexOf("Failed to fetch dynamically imported module") >= 0
+            || message.indexOf("Importing a module script failed") >= 0
+            || message.indexOf("Unable to preload CSS") >= 0
+            || message.indexOf("dynamically imported module") >= 0
+            || message.indexOf("static asset not found") >= 0;
+        }
+        function reloadForChunkError(event) {
+          if (!isChunkLoadError(event)) return false;
+          var attempts = Number(sessionStorage.getItem(chunkReloadKey) || "0");
+          if (attempts >= maxChunkReloads) return false;
+          sessionStorage.setItem(chunkReloadKey, String(attempts + 1));
+          window.clearTimeout(fallbackTimer);
+          showFallback(true, false, true);
+          window.setTimeout(function () {
+            var url = new URL(window.location.href);
+            url.searchParams.set("_erp_chunk_reload", Date.now().toString(36));
+            window.location.replace(url.toString());
+          }, Math.min(5000, 700 + attempts * 900));
+          return true;
+        }
         function shouldShowFallback() {
           var app = document.getElementById("adminApp");
           return !app || !app.children.length;
         }
-        function showFallback(force, isError) {
+        function showFallback(force, isError, isRetrying) {
           if (!fallback || (!force && !shouldShowFallback())) return;
           fallback.hidden = false;
           fallback.classList.remove("is-hidden");
           fallback.classList.toggle("is-error", Boolean(isError));
-          if (isError) {
+          if (isRetrying) {
+            title.textContent = "${text.retrying}";
+            hint.textContent = "${text.retryingHint}";
+          } else if (isError) {
             title.textContent = "${text.errorTitle}";
             hint.textContent = "${text.errorHint}";
           }
@@ -146,17 +182,20 @@ ${styleTags}
           if (!fallback) return;
           fallback.classList.add("is-hidden");
           fallback.hidden = true;
+          sessionStorage.removeItem(chunkReloadKey);
         }
         window.__showAdminStaticLoginFallback = function () {
           showFallback(true);
         };
         window.__hideAdminStaticLoginFallback = hideFallback;
         fallbackTimer = window.setTimeout(showFallback, 1200);
-        window.addEventListener("error", function () {
+        window.addEventListener("error", function (event) {
+          if (reloadForChunkError(event)) return;
           window.clearTimeout(fallbackTimer);
           showFallback(true, true);
-        });
-        window.addEventListener("unhandledrejection", function () {
+        }, true);
+        window.addEventListener("unhandledrejection", function (event) {
+          if (reloadForChunkError(event)) return;
           window.clearTimeout(fallbackTimer);
           showFallback(true, true);
         });
