@@ -118,6 +118,22 @@ import {
   syncOzonReviewsMysql
 } from "./reviews.js";
 import {
+  claimNextCollectRequests,
+  createCollectRun,
+  deleteCollectRun,
+  deleteSnapshot,
+  deleteSnapshots,
+  finishCollectRequest,
+  getAnalysis,
+  getSummary,
+  listCollectRuns,
+  listMetrics,
+  listSnapshots,
+  retryCollectRun,
+  saveSnapshot,
+  sellerAnalyticsDb
+} from "./seller-analytics.js";
+import {
   ensureProductBarcodeLabelCacheReadyMysql,
   generateProductBarcodeLabelMysql,
   listCachedBarcodeLabelsByOnlineProductIdsMysql,
@@ -455,6 +471,19 @@ export const mysqlRuntimeServices = {
   reviewCenter: reviewCenterMysql,
   reviewComments: reviewCommentsMysql,
   reviewReplyTemplates: reviewReplyTemplatesMysql,
+  sellerAnalyticsAnalysis: (query = {}, tenantId = "admin") => getAnalysis(sellerAnalyticsDb, query, tenantId),
+  sellerAnalyticsCollectRuns: (query = {}, tenantId = "admin") => listCollectRuns(sellerAnalyticsDb, query, tenantId),
+  sellerAnalyticsCreateCollectRun: (body = {}, tenantId = "admin") => createCollectRun(sellerAnalyticsDb, body, tenantId),
+  sellerAnalyticsDeleteCollectRun: (id, tenantId = "admin") => deleteCollectRun(sellerAnalyticsDb, id, tenantId),
+  sellerAnalyticsDeleteSnapshot: (id, tenantId = "admin") => deleteSnapshot(sellerAnalyticsDb, id, tenantId),
+  sellerAnalyticsDeleteSnapshots: (ids = [], tenantId = "admin") => deleteSnapshots(sellerAnalyticsDb, ids, tenantId),
+  sellerAnalyticsFinishCollectRequest: (runId, requestId, body = {}, tenantId = "admin") => finishCollectRequest(sellerAnalyticsDb, runId, requestId, body, tenantId),
+  sellerAnalyticsMetrics: (query = {}, tenantId = "admin") => listMetrics(sellerAnalyticsDb, query, tenantId),
+  sellerAnalyticsNextCollectRequests: (tenantId = "admin", limit = 6) => claimNextCollectRequests(sellerAnalyticsDb, tenantId, limit),
+  sellerAnalyticsRetryCollectRun: (id, tenantId = "admin") => retryCollectRun(sellerAnalyticsDb, id, tenantId),
+  sellerAnalyticsSaveSnapshot: (body = {}, tenantId = "admin") => saveSnapshot(sellerAnalyticsDb, body, tenantId),
+  sellerAnalyticsSnapshots: (query = {}, tenantId = "admin") => listSnapshots(sellerAnalyticsDb, query, tenantId),
+  sellerAnalyticsSummary: (tenantId = "admin") => getSummary(sellerAnalyticsDb, tenantId),
   saveShopVariantRule,
   syncAssetOzonCategories,
   syncListingOzonAttributeValues,

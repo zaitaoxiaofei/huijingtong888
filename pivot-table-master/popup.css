@@ -1,0 +1,237 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  width: 360px;
+  color: #172033;
+  background: #f5f7fb;
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.panel {
+  padding: 14px;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+p {
+  margin: 4px 0 0;
+  color: #64748b;
+}
+
+.section {
+  padding: 12px;
+  margin-bottom: 10px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+label {
+  display: block;
+  margin-bottom: 10px;
+}
+
+label span,
+.section-title {
+  display: block;
+  margin-bottom: 6px;
+  color: #475569;
+  font-weight: 600;
+}
+
+input {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  outline: none;
+}
+
+input:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+button {
+  height: 34px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  color: #172033;
+  background: #fff;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #f8fafc;
+}
+
+.primary {
+  border-color: #2563eb;
+  color: #fff;
+  background: #2563eb;
+}
+
+.primary:hover {
+  background: #1d4ed8;
+}
+
+.button-start {
+  border-color: #16a34a;
+  color: #fff;
+  background: #16a34a;
+}
+
+.button-start:hover {
+  background: #15803d;
+}
+
+.button-stop {
+  border-color: #dc2626;
+  color: #fff;
+  background: #dc2626;
+}
+
+.button-stop:hover {
+  background: #b91c1c;
+}
+
+button:disabled {
+  border-color: #cbd5e1;
+  color: #94a3b8;
+  background: #f1f5f9;
+  cursor: not-allowed;
+}
+
+.icon-btn {
+  width: 34px;
+  padding: 0;
+  font-size: 16px;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.stats div {
+  padding: 10px 8px;
+  text-align: center;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.stats span {
+  display: block;
+  margin-bottom: 3px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.stats strong {
+  font-size: 17px;
+}
+
+.status-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.status-line span {
+  color: #64748b;
+  font-weight: 600;
+}
+
+.status-line strong {
+  color: #2563eb;
+}
+
+.status-line strong.status-running {
+  color: #2563eb;
+}
+
+.status-line strong.status-enabled {
+  color: #16a34a;
+}
+
+.status-line strong.status-paused {
+  color: #64748b;
+}
+
+.status-line strong.status-missing {
+  color: #dc2626;
+}
+
+.seller-tab-missing {
+  color: #dc2626;
+  font-weight: 700;
+}
+
+.seller-tab-ready {
+  color: #15803d;
+}
+
+.muted,
+.empty {
+  color: #64748b;
+}
+
+.list {
+  max-height: 150px;
+  overflow: auto;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  padding: 7px 0;
+  border-top: 1px solid #eef2f7;
+}
+
+.row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.tag {
+  padding: 2px 6px;
+  color: #2563eb;
+  background: #eff6ff;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.log-success {
+  color: #15803d;
+}
+
+.log-error {
+  color: #dc2626;
+}
