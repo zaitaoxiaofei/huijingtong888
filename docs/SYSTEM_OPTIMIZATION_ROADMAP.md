@@ -1,6 +1,6 @@
 # Ozon ERP System Optimization Roadmap
 
-Last updated: 2026-05-17
+Last updated: 2026-06-01
 
 ## 1. Document Goal
 
@@ -386,6 +386,57 @@ Execution details for this phase are maintained in:
 
 - `docs/MYSQL_PREPARATION_PLAN.md`
 
+## Phase 6: Multi-User Concurrency Hardening
+
+### Goal
+
+Continue reducing multi-user operation risk after the first optimistic-lock pass, while keeping current production workflows stable.
+
+### Current Baseline
+
+The first pass has already protected the main daily edit paths with timestamp-based conflict checks:
+
+- Product edit, SKU mapping edit, procurement request edit, inbound record edit.
+- Shop, person, logistics rule, order cancellation rule edits.
+- Listing automation category templates and publish-record retry/edit flows.
+- AI provider config, AI strategy, AI prompt template, and shop asset variant rule saves.
+- Listing automation can open separate workspace tabs by full path.
+
+### Long-Term Backlog
+
+1. Add version checks to delete, disable, archive, and restore actions.
+   - Examples: people, shops, procurement requests, inbound records, logistics rules, cancellation rules, prompt templates, products, mappings.
+   - Expected behavior: if a row changed after the operator opened it, block the action and ask for refresh.
+
+2. Add conflict summaries to batch and merge actions.
+   - Examples: procurement request merge, inbound batch update, product merge, historical profit review batch actions.
+   - Expected behavior: validate all target row versions before execution and return a per-row conflict list instead of partially surprising the operator.
+
+3. Add operation idempotency and fresh-state checks to external platform actions.
+   - Examples: Ozon promotion add/remove products, seller action toggle/archive, online product archive/restore, advertising setting apply.
+   - Expected behavior: refresh or verify remote/local state before execution, reject duplicate clicks, and make retries safe.
+
+4. Extend optimistic locking to lower-frequency configuration pages.
+   - Examples: suppliers, stock warehouse rules, packaging fee rules, order quality rules, material assets, asset tail templates.
+   - Expected behavior: use the same `updated_at` payload pattern as the protected P0/P1 pages.
+
+5. Improve user-facing conflict recovery.
+   - Show who/when changed the record when that data is available.
+   - Offer a refresh-and-compare flow for long forms where retyping would be costly.
+   - Keep destructive actions explicit and easy to audit.
+
+### Priority
+
+- P1: Delete/disable/archive/restore version checks.
+- P2: Batch and merge conflict summaries.
+- P2: External Ozon/advertising action idempotency.
+- P3: Lower-frequency configuration optimistic locks.
+- P3: Rich conflict recovery UI.
+
+### Status
+
+Planned. Do not implement in the current optimization batch unless explicitly scheduled.
+
 ## 6. Suggested Execution Order
 
 Recommended working order:
@@ -395,6 +446,7 @@ Recommended working order:
 3. Phase 3: Sync and incremental strategy
 4. Phase 4: Frontend runtime optimization
 5. Phase 5: MySQL preparation and migration design
+6. Phase 6: Multi-user concurrency hardening
 
 Reason:
 

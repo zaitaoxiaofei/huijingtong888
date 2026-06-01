@@ -162,6 +162,9 @@ export async function createAiPromptTemplate(body = {}, personId = null) {
 export async function updateAiPromptTemplate(id, body = {}) {
   await ensureAiPromptTemplateTable();
   const previous = await aiPromptTemplateDetail(id);
+  if ((body.updated_at || body.updatedAt) && !sameSecond(body.updated_at || body.updatedAt, previous.updated_at || previous.updatedAt)) {
+    throw statusError("AI 提示词模板已被其他用户保存，请刷新后再继续编辑", 409);
+  }
   const payload = normalizeTemplatePayload({ ...previous, ...body });
   if (payload.is_default) await clearDefaultTemplate(payload.scene, payload.mode, Number(id));
   await mysqlExecute(`
@@ -311,6 +314,7 @@ function normalizeTemplateRow(row = {}) {
   return {
     ...row,
     id: Number(row.id),
+    updatedAt: row.updated_at || row.updatedAt || "",
     default_count: Number(row.default_count || 1),
     is_default: Number(row.is_default || 0),
     enabled: Number(row.enabled || 0),
@@ -400,4 +404,15 @@ function statusError(message, status = 500) {
   const error = new Error(message);
   error.status = status;
   return error;
+}
+
+function sameSecond(left, right) {
+  return normalizeSecond(left) === normalizeSecond(right);
+}
+
+function normalizeSecond(value) {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isNaN(date.getTime())) return Math.floor(date.getTime() / 1000);
+  return String(value).trim().slice(0, 19);
 }

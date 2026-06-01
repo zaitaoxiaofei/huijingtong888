@@ -629,6 +629,29 @@ function normalizeMysqlDateTime(value) {
   return normalized.slice(0, 19);
 }
 
+function expectedUpdatedAtFromBody(body = {}) {
+  return body.updated_at || body.updatedAt || body.version_updated_at || body.versionUpdatedAt || "";
+}
+
+function isSameMysqlTimestamp(left, right) {
+  const normalizedLeft = normalizeMysqlDateTime(left);
+  const normalizedRight = normalizeMysqlDateTime(right);
+  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
+}
+
+function throwStaleRecordError(message = "This record was modified by someone else. Please refresh before editing.") {
+  const error = new Error(message);
+  error.status = 409;
+  throw error;
+}
+
+function assertFreshRecord(body = {}, existing = {}, message) {
+  const expectedUpdatedAt = expectedUpdatedAtFromBody(body);
+  if (expectedUpdatedAt && !isSameMysqlTimestamp(expectedUpdatedAt, existing.updated_at)) {
+    throwStaleRecordError(message);
+  }
+}
+
 function firstJsonItem(value) {
   const parsed = parseJsonOrNull(value);
   if (!Array.isArray(parsed)) return "";
@@ -1529,6 +1552,7 @@ export async function updateLogisticsRuleMysql(id, body = {}) {
   ensureMysqlCutoverEnabled();
   const existing = await mysqlQueryOne("SELECT * FROM logistics_fee_rules WHERE id = ?", [Number(id)]);
   if (!existing) throw new Error("Logistics rule not found");
+  assertFreshRecord(body, existing, "物流规则已被其他用户保存，请刷新后再继续编辑");
 
   const payload = [
     requiredText(body.name ?? existing.name, "Rule name is required"),
@@ -1864,6 +1888,7 @@ export async function updateOrderCancellationRuleMysql(id, body = {}) {
   ensureMysqlCutoverEnabled();
   const existing = await mysqlQueryOne("SELECT * FROM order_cancellation_rules WHERE id = ?", [Number(id)]);
   if (!existing) throw new Error("Order cancellation rule not found");
+  assertFreshRecord(body, existing, "取消规则已被其他用户保存，请刷新后再继续编辑");
 
   const payload = [
     requiredText(body.name ?? existing.name, "Rule name is required"),
@@ -2454,6 +2479,9 @@ export async function createPersonMysql(body = {}, hashPassword, validatePasswor
 export async function updatePersonMysql(id, body = {}, hashPassword, validatePasswordStrength) {
   ensureMysqlCutoverEnabled();
   const personId = Number(id);
+  const existing = await mysqlQueryOne("SELECT id, updated_at FROM people WHERE id = ?", [personId]);
+  if (!existing) throw new Error("Person not found");
+  assertFreshRecord(body, existing, "人员资料已被其他用户保存，请刷新后再继续编辑");
   const payload = [
     body.name,
     body.username || null,
@@ -2568,6 +2596,7 @@ export async function updateShopMysql(id, body = {}) {
   await ensureShopAdvertisingCredentialSchemaMysql();
   const existing = await mysqlQueryOne("SELECT * FROM shops WHERE id = ?", [Number(id)]);
   if (!existing) throw new Error("Shop not found");
+  assertFreshRecord(body, existing, "店铺资料已被其他用户保存，请刷新后再继续编辑");
   const nextPerformanceSecret = String(body.performance_client_secret || "").trim()
     || String(existing.performance_client_secret || "");
 
@@ -6223,9 +6252,7 @@ export async function updateProductMysql(id, body = {}) {
     WHERE id = ? AND active = 1
   `, [productId]);
   if (!existing) throw new Error("Product not found or archived");
-  if (body.updated_at && normalizeMysqlDateTime(body.updated_at) !== normalizeMysqlDateTime(existing.updated_at)) {
-    throw new Error("Product was modified by someone else. Refresh before editing.");
-  }
+  assertFreshRecord(body, existing, "商品已被其他用户保存，请刷新后再继续编辑");
   const exchangeRate = Number(body.exchange_rate || await currentExchangeRateValueMysql() || 11.32);
   const desiredProfitValue = Number(body.desired_profit_value || 20);
   const targetMargin = Number(body.desired_profit_mode === "margin" ? (desiredProfitValue > 1 ? desiredProfitValue / 100 : desiredProfitValue) : 0.2);
@@ -7186,7 +7213,7 @@ export async function procurementSummaryMysql() {
       p.name, p.image_url, p.purchase_url, p.supplier_note,
       SUM(pr.quantity) AS total_quantity,
       SUM(pr.amount + COALESCE(pr.shipping_amount, 0)) AS total_amount,
-      GROUP_CONCAT(CONCAT(pe.name, ':', pr.quantity, '浠?锟?, pr.amount) SEPARATOR '||') AS requesters,
+      GROUP_CONCAT(CONCAT(pe.name, ':', pr.quantity, '件 ￥', pr.amount) SEPARATOR '||') AS requesters,
       GROUP_CONCAT(DISTINCT COALESCE(NULLIF(pr.purchase_url, ''), NULLIF(p.purchase_url, ''))) AS purchase_links,
       MIN(pr.created_at) AS earliest_created_at,
       MAX(CASE WHEN TIMESTAMPDIFF(DAY, pr.created_at, CURRENT_TIMESTAMP) >= 3 THEN 1 ELSE 0 END) AS overdue
@@ -9867,8 +9894,9 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
 export async function updateProcurementRequestMysql(id, body = {}) {
   ensureMysqlCutoverEnabled();
   const requestId = Number(id);
-  const existing = await mysqlQueryOne("SELECT id FROM procurement_requests WHERE id = ?", [requestId]);
+  const existing = await mysqlQueryOne("SELECT id, updated_at FROM procurement_requests WHERE id = ?", [requestId]);
   if (!existing) throw new Error("Procurement request not found");
+  assertFreshRecord(body, existing, "采购请求已被其他用户保存，请刷新后再继续编辑");
   const personId = await resolvePersonIdOrFirstMysql(body.person_id);
   await mysqlExecute(`
     UPDATE procurement_requests SET product_id = ?, person_id = ?, quantity = ?, amount = ?,
@@ -10195,6 +10223,7 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
   const inboundId = Number(id);
   const existing = await mysqlConnectionQueryOne(connection, "SELECT * FROM inbound_records WHERE id = ? FOR UPDATE", [inboundId]);
   if (!existing) throw new Error("Inbound record not found");
+  assertFreshRecord(body, existing, "入库记录已被其他用户保存，请刷新后再继续编辑");
   const productId = Number(body.product_id ?? existing.product_id);
   const personId = await resolvePersonIdOrFirstMysql(body.person_id ?? existing.person_id, connection);
   const quantity = Number(body.quantity ?? existing.quantity ?? 0);
@@ -12753,6 +12782,17 @@ function customerMessageTypeLabel(type) {
   return "订单动态回复";
 }
 
+function customerMessageRecordStatusLabel(status = "") {
+  if (status === "sent") return "已发";
+  if (status === "copied") return "已复制";
+  if (status === "skipped") return "已跳过";
+  if (status === "problem") return "已标记";
+  if (status === "disabled") return "不发送";
+  if (status === "read") return "已读";
+  if (status === "unread") return "未读";
+  return "仅草稿";
+}
+
 function orderCustomerStatusLabel(row = {}) {
   const raw = String(row.status || row.tracking_stage || row.logistics_status || "").trim();
   const value = raw.toLowerCase();
@@ -12850,33 +12890,74 @@ function customerMessageReason(row = {}, type = "") {
   return "用于客户催单时快速回复当前订单最新动态。";
 }
 
+function customerUniqueIdFromPosting(postingNumber = "") {
+  const value = String(postingNumber || "").trim();
+  if (!value) return "";
+  return value.split("-")[0] || value;
+}
+
 function normalizeCustomerMessageRow(row = {}, requestedType = "") {
   const suggestedType = requestedType && CUSTOMER_MESSAGE_TYPES.has(requestedType) ? requestedType : customerMessageSuggestedType(row);
   const message = buildCustomerMessage(row, suggestedType);
+  const orderStatusLabel = orderCustomerStatusLabel(row);
+  const customerUniqueId = row.customer_unique_id || customerUniqueIdFromPosting(row.posting_number || row.order_number);
   return {
     ...row,
+    task_key: `${row.id || row.posting_number || "order"}:${suggestedType}`,
+    order_id: Number(row.id || 0),
+    customer_unique_id: customerUniqueId,
+    customer_thread_key: `${row.shop_id || 0}:${customerUniqueId}`,
+    customer_order_count: Number(row.customer_order_count || 1),
+    customer_latest_order_at: row.customer_latest_order_at || row.ordered_at || "",
+    customer_latest_posting_number: row.customer_latest_posting_number || row.posting_number || "",
+    scenario: suggestedType,
     message_type: suggestedType,
     message_type_label: customerMessageTypeLabel(suggestedType),
-    status_label: orderCustomerStatusLabel(row),
+    status: "draft",
+    send_mode: "draft",
+    send_mode_label: "仅生成草稿",
+    status_label: "仅草稿",
+    read_state: row.read_state || "unread",
+    read_state_label: row.read_state === "read" ? "已读" : "未读",
+    status_label_order: orderStatusLabel,
     delivery_window_text: customerMessageDeliveryWindow(row),
     product_summary: customerMessageProductSummary(row),
     reason: customerMessageReason(row, suggestedType),
     customer_message: message,
+    message_text: message,
+    chat_enabled: true,
     urgency: suggestedType === "delay_comfort" ? "warning" : suggestedType === "pickup_notice" ? "success" : "info"
   };
 }
 
 export async function customerMessagesMysql(query = {}) {
   ensureMysqlCutoverEnabled();
+  await ensureCustomerMessageTablesMysql();
   const messageType = String(query.type || query.message_type || "all");
   const search = String(query.search || query.keyword || "").trim().toLowerCase();
+  const shopId = Number(query.shop_id || query.shopId || 0);
+  const dateFrom = String(query.date_from || query.dateFrom || "").slice(0, 10);
+  const dateTo = String(query.date_to || query.dateTo || "").slice(0, 10);
   const limit = Math.min(Math.max(Number(query.limit || 80), 1), 200);
   const where = ["1 = 1"];
   const params = [];
+  if (shopId) {
+    where.push("o.shop_id = ?");
+    params.push(shopId);
+  }
+  if (dateFrom) {
+    where.push("DATE(o.ordered_at) >= ?");
+    params.push(dateFrom);
+  }
+  if (dateTo) {
+    where.push("DATE(o.ordered_at) <= ?");
+    params.push(dateTo);
+  }
   if (search) {
     where.push(`(
       LOWER(o.posting_number) LIKE ?
       OR LOWER(COALESCE(o.order_number, '')) LIKE ?
+      OR LOWER(SUBSTRING_INDEX(o.posting_number, '-', 1)) LIKE ?
       OR LOWER(COALESCE(s.name, '')) LIKE ?
       OR EXISTS (
         SELECT 1 FROM order_items oi_search
@@ -12884,15 +12965,24 @@ export async function customerMessagesMysql(query = {}) {
           AND (LOWER(COALESCE(oi_search.ozon_sku, '')) LIKE ? OR LOWER(COALESCE(oi_search.ozon_name, '')) LIKE ?)
       )
     )`);
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
   }
 
   const rows = await mysqlQuery(`
-    SELECT o.id, o.shop_id, o.posting_number, o.order_number, o.status, o.logistics_status, o.tracking_stage,
-      o.tracking_number, o.ordered_at, o.delivered_at, o.sync_state, s.name AS shop_name,
-      latest.customer_name, latest.buyer_city, latest.buyer_region, latest.delivery_date_begin, latest.delivery_date_end,
-      latest.warehouse_name, latest.tpl_provider,
-      raw.raw_json,
+    SELECT o.id, o.shop_id, o.posting_number, SUBSTRING_INDEX(o.posting_number, '-', 1) AS customer_unique_id,
+      o.order_number, o.status, o.logistics_status, o.tracking_stage,
+      o.tracking_number, o.ordered_at, o.delivered_at, o.sync_state, MAX(s.name) AS shop_name,
+      MAX(customer_orders.customer_order_count) AS customer_order_count,
+      MAX(customer_orders.customer_latest_order_at) AS customer_latest_order_at,
+      MAX(customer_orders.customer_latest_posting_number) AS customer_latest_posting_number,
+      MAX(latest.customer_name) AS customer_name,
+      MAX(latest.buyer_city) AS buyer_city,
+      MAX(latest.buyer_region) AS buyer_region,
+      MAX(latest.delivery_date_begin) AS delivery_date_begin,
+      MAX(latest.delivery_date_end) AS delivery_date_end,
+      MAX(latest.warehouse_name) AS warehouse_name,
+      MAX(latest.tpl_provider) AS tpl_provider,
+      MAX(raw.raw_json) AS raw_json,
       GROUP_CONCAT(DISTINCT COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), oi.ozon_sku) ORDER BY oi.id SEPARATOR ', ') AS product_names,
       GROUP_CONCAT(DISTINCT oi.ozon_sku ORDER BY oi.ozon_sku SEPARATOR ', ') AS skus
     FROM orders o
@@ -12900,6 +12990,15 @@ export async function customerMessagesMysql(query = {}) {
     LEFT JOIN order_items oi ON oi.order_id = o.id
     LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku
     LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
+    LEFT JOIN (
+      SELECT shop_id, SUBSTRING_INDEX(posting_number, '-', 1) AS customer_unique_id,
+        COUNT(*) AS customer_order_count,
+        MAX(ordered_at) AS customer_latest_order_at,
+        SUBSTRING_INDEX(GROUP_CONCAT(posting_number ORDER BY ordered_at DESC, id DESC SEPARATOR ','), ',', 1) AS customer_latest_posting_number
+      FROM orders
+      WHERE COALESCE(posting_number, '') != ''
+      GROUP BY shop_id, SUBSTRING_INDEX(posting_number, '-', 1)
+    ) customer_orders ON customer_orders.shop_id = o.shop_id AND customer_orders.customer_unique_id = SUBSTRING_INDEX(o.posting_number, '-', 1)
     LEFT JOIN order_status_history latest ON latest.id = (
       SELECT osh.id
       FROM order_status_history osh
@@ -12913,10 +13012,44 @@ export async function customerMessagesMysql(query = {}) {
     LIMIT ${limit}
   `, params);
 
-  const normalized = rows.map((row) => normalizeCustomerMessageRow(enrichOrderLogisticsFromRawForMessage(row)));
-  const filtered = messageType === "all" ? normalized : normalized.filter((row) => row.message_type === messageType);
+  const normalizedBase = rows.map((row) => normalizeCustomerMessageRow(enrichOrderLogisticsFromRawForMessage(row)));
+  const recordKeys = normalizedBase.map((row) => Number(row.order_id || row.id || 0)).filter(Boolean);
+  let latestRecordMap = new Map();
+  if (recordKeys.length) {
+    const recordRows = await mysqlQuery(`
+      SELECT r.*
+      FROM customer_message_records r
+      JOIN (
+        SELECT order_id, scenario, MAX(id) AS id
+        FROM customer_message_records
+        WHERE order_id IN (${recordKeys.map(() => "?").join(",")})
+        GROUP BY order_id, scenario
+      ) latest ON latest.id = r.id
+    `, recordKeys);
+    latestRecordMap = new Map(recordRows.map((record) => [`${record.order_id}:${record.scenario}`, record]));
+  }
+  const normalized = normalizedBase.map((row) => {
+    const record = latestRecordMap.get(`${row.order_id}:${row.scenario}`);
+    const readState = record?.read_state || row.read_state || "unread";
+    return {
+      ...row,
+      status: record?.status || row.status,
+      status_label: customerMessageRecordStatusLabel(record?.status || row.status),
+      read_state: readState,
+      read_state_label: readState === "read" ? "已读" : "未读"
+    };
+  });
+  const filtered = messageType === "all"
+    ? normalized
+    : messageType === "read" || messageType === "unread"
+      ? normalized.filter((row) => row.read_state === messageType)
+      : messageType === "marked" || messageType === "problem"
+        ? normalized.filter((row) => row.status === "problem")
+      : normalized.filter((row) => row.message_type === messageType);
   const counts = filtered.reduce((acc, row) => {
     acc[row.message_type] = Number(acc[row.message_type] || 0) + 1;
+    acc[row.read_state] = Number(acc[row.read_state] || 0) + 1;
+    if (row.status === "problem") acc.marked = Number(acc.marked || 0) + 1;
     return acc;
   }, {});
   return {
@@ -12951,6 +13084,290 @@ export async function previewCustomerMessageMysql(body = {}) {
   if (!row) throw new Error("未找到订单");
   const type = String(body.type || body.message_type || row.message_type || "order_update");
   return normalizeCustomerMessageRow(row, CUSTOMER_MESSAGE_TYPES.has(type) ? type : row.message_type);
+}
+
+const DEFAULT_CUSTOMER_MESSAGE_SCENARIOS = [
+  { key: "order_created", label: "下单感谢" },
+  { key: "order_update", label: "催单回复" },
+  { key: "stall_comfort", label: "卡顿安抚" },
+  { key: "delay_comfort", label: "延误解释" },
+  { key: "pickup_notice", label: "到货取货" },
+  { key: "review_request", label: "取货后求好评" }
+];
+
+let customerMessageTablesReadyMysql = false;
+
+async function addCustomerMessageColumnMysql(tableName, columnName, definition) {
+  try {
+    await mysqlExecute(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  } catch (error) {
+    if (!String(error?.message || "").toLowerCase().includes("duplicate column")) throw error;
+  }
+}
+
+function customerMessageMysqlDate(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 19).replace("T", " ");
+}
+
+async function ensureCustomerMessageTablesMysql() {
+  if (customerMessageTablesReadyMysql) return;
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS customer_message_shop_settings (
+      shop_id INT NOT NULL PRIMARY KEY,
+      chat_enabled TINYINT(1) NOT NULL DEFAULT 0,
+      send_mode VARCHAR(32) NOT NULL DEFAULT 'draft',
+      stall_hours INT NOT NULL DEFAULT 36,
+      delay_hours_before_due INT NOT NULL DEFAULT 24,
+      review_delay_hours INT NOT NULL DEFAULT 48,
+      enabled_scenarios TEXT NULL,
+      note TEXT NULL,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `);
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS customer_message_templates (
+      scenario VARCHAR(64) NOT NULL PRIMARY KEY,
+      label VARCHAR(64) NOT NULL DEFAULT '',
+      enabled TINYINT(1) NOT NULL DEFAULT 1,
+      template_text TEXT NULL,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `);
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS customer_message_records (
+      id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      order_id BIGINT NOT NULL DEFAULT 0,
+      posting_number VARCHAR(128) NOT NULL DEFAULT '',
+      shop_id INT NOT NULL DEFAULT 0,
+      scenario VARCHAR(64) NOT NULL DEFAULT '',
+      status VARCHAR(32) NOT NULL DEFAULT 'draft',
+      read_state VARCHAR(32) NOT NULL DEFAULT 'unread',
+      read_at DATETIME NULL,
+      message_text TEXT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_customer_message_records_order (order_id, scenario, id),
+      KEY idx_customer_message_records_posting (posting_number)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `);
+  await addCustomerMessageColumnMysql("customer_message_records", "read_state", "VARCHAR(32) NOT NULL DEFAULT 'unread'");
+  await addCustomerMessageColumnMysql("customer_message_records", "read_at", "DATETIME NULL");
+  customerMessageTablesReadyMysql = true;
+}
+
+function defaultCustomerMessageTemplatesMysql() {
+  return [
+    {
+      scenario: "order_created",
+      label: "下单感谢",
+      name: "下单感谢",
+      enabled: true,
+      template_text: "您好，感谢您的下单！\n您的订单 {{posting_number}}（{{product_summary}}）我们已经收到，会尽快为您处理。"
+    },
+    {
+      scenario: "order_update",
+      label: "催单回复",
+      name: "催单回复",
+      enabled: true,
+      template_text: "您好，感谢您的咨询。\n您的订单 {{posting_number}}（{{product_summary}}）当前状态是：{{status_label}}。"
+    },
+    {
+      scenario: "stall_comfort",
+      label: "卡顿安抚",
+      name: "卡顿安抚",
+      enabled: true,
+      template_text: "您好，非常抱歉让您久等了。\n订单 {{posting_number}} 当前停留在 {{status_label}} 环节，我们会继续跟进。"
+    },
+    {
+      scenario: "delay_comfort",
+      label: "延误解释",
+      name: "延误解释",
+      enabled: true,
+      template_text: "您好，非常抱歉让您等待。\n订单 {{posting_number}} 当前显示 {{status_label}}，我们已经联系平台客服核实物流情况。"
+    },
+    {
+      scenario: "pickup_notice",
+      label: "到货取货",
+      name: "到货取货",
+      enabled: true,
+      template_text: "您好，您的订单 {{posting_number}} 已到达取货点/可取货环节，请留意 Ozon App 内的取货信息。"
+    },
+    {
+      scenario: "review_request",
+      label: "取货后求好评",
+      name: "取货后求好评",
+      enabled: true,
+      template_text: "您好，看到您的订单 {{posting_number}} 已完成取货/签收。如果体验不错，欢迎在 Ozon 给我们一个评价。"
+    }
+  ];
+}
+
+export async function customerMessageSettingsMysql() {
+  ensureMysqlCutoverEnabled();
+  await ensureCustomerMessageTablesMysql();
+  const [shops, shopSettingRows, templateRows] = await Promise.all([
+    shopsMysql(),
+    mysqlQuery("SELECT * FROM customer_message_shop_settings"),
+    mysqlQuery("SELECT * FROM customer_message_templates")
+  ]);
+  const shopSettings = new Map(shopSettingRows.map((row) => [Number(row.shop_id), row]));
+  const templatesByScenario = new Map(defaultCustomerMessageTemplatesMysql().map((template) => [template.scenario, { ...template }]));
+  for (const row of templateRows) {
+    const scenario = String(row.scenario || "").trim();
+    if (!scenario) continue;
+    const fallback = templatesByScenario.get(scenario) || {};
+    templatesByScenario.set(scenario, {
+      ...fallback,
+      scenario,
+      label: row.label || fallback.label || scenario,
+      name: row.label || fallback.name || scenario,
+      enabled: Boolean(Number(row.enabled)),
+      template_text: row.template_text || ""
+    });
+  }
+  return {
+    scenarios: DEFAULT_CUSTOMER_MESSAGE_SCENARIOS,
+    shops: shops.map((shop) => ({
+      shop_id: Number(shop.id),
+      shop_name: shop.name || shop.shop_name || "",
+      chat_enabled: Boolean(Number(shopSettings.get(Number(shop.id))?.chat_enabled || 0)),
+      send_mode: shopSettings.get(Number(shop.id))?.send_mode || "draft",
+      enabled_scenarios: parseJsonOrNull(shopSettings.get(Number(shop.id))?.enabled_scenarios) || DEFAULT_CUSTOMER_MESSAGE_SCENARIOS.map((item) => item.key),
+      stall_hours: Number(shopSettings.get(Number(shop.id))?.stall_hours || 48),
+      delay_hours_before_due: Number(shopSettings.get(Number(shop.id))?.delay_hours_before_due || 24),
+      review_delay_hours: Number(shopSettings.get(Number(shop.id))?.review_delay_hours || 24),
+      note: shopSettings.get(Number(shop.id))?.note || ""
+    })),
+    templates: DEFAULT_CUSTOMER_MESSAGE_SCENARIOS.map((scenario) => templatesByScenario.get(scenario.key)).filter(Boolean)
+  };
+}
+
+export async function updateCustomerMessageShopSettingMysql(body = {}) {
+  ensureMysqlCutoverEnabled();
+  await ensureCustomerMessageTablesMysql();
+  const shopId = Number(body.shop_id || body.shopId || 0);
+  if (!shopId) throw new Error("缺少店铺 ID");
+  await mysqlExecute(`
+    INSERT INTO customer_message_shop_settings
+      (shop_id, chat_enabled, send_mode, stall_hours, delay_hours_before_due, review_delay_hours, enabled_scenarios, note)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      chat_enabled = VALUES(chat_enabled),
+      send_mode = VALUES(send_mode),
+      stall_hours = VALUES(stall_hours),
+      delay_hours_before_due = VALUES(delay_hours_before_due),
+      review_delay_hours = VALUES(review_delay_hours),
+      enabled_scenarios = VALUES(enabled_scenarios),
+      note = VALUES(note)
+  `, [
+    shopId,
+    body.chat_enabled ? 1 : 0,
+    ["none", "draft", "confirm"].includes(String(body.send_mode || "")) ? String(body.send_mode) : "confirm",
+    Math.max(1, Number(body.stall_hours || 48)),
+    Math.max(1, Number(body.delay_hours_before_due || 24)),
+    Math.max(1, Number(body.review_delay_hours || 24)),
+    JSON.stringify(Array.isArray(body.enabled_scenarios) ? body.enabled_scenarios : DEFAULT_CUSTOMER_MESSAGE_SCENARIOS.map((item) => item.key)),
+    String(body.note || "")
+  ]);
+  return { ok: true, settings: await customerMessageSettingsMysql() };
+}
+
+export async function updateCustomerMessageTemplateMysql(body = {}) {
+  ensureMysqlCutoverEnabled();
+  await ensureCustomerMessageTablesMysql();
+  const scenario = String(body.scenario || "").trim();
+  if (!scenario) throw new Error("缺少消息场景");
+  const fallback = defaultCustomerMessageTemplatesMysql().find((template) => template.scenario === scenario) || {};
+  await mysqlExecute(`
+    INSERT INTO customer_message_templates (scenario, label, enabled, template_text)
+    VALUES (?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      label = VALUES(label),
+      enabled = VALUES(enabled),
+      template_text = VALUES(template_text)
+  `, [
+    scenario,
+    String(body.label || body.name || fallback.label || scenario),
+    body.enabled === false ? 0 : 1,
+    String(body.template_text || "")
+  ]);
+  return { ok: true, settings: await customerMessageSettingsMysql() };
+}
+
+export async function recordCustomerMessageMysql(body = {}) {
+  ensureMysqlCutoverEnabled();
+  await ensureCustomerMessageTablesMysql();
+  const orderId = Number(body.order_id || body.orderId || 0);
+  const scenario = String(body.scenario || body.message_type || "order_update");
+  const orderRows = orderId ? await mysqlQuery("SELECT id, shop_id, posting_number FROM orders WHERE id = ? LIMIT 1", [orderId]) : [];
+  const order = orderRows[0] || {};
+  const status = String(body.status || "draft");
+  const readState = String(body.read_state || body.readState || (status === "read" ? "read" : "unread"));
+  await mysqlExecute(`
+    INSERT INTO customer_message_records (order_id, posting_number, shop_id, scenario, status, read_state, read_at, message_text)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    orderId,
+    String(body.posting_number || order.posting_number || ""),
+    Number(body.shop_id || order.shop_id || 0),
+    scenario,
+    status,
+    readState === "read" ? "read" : "unread",
+    readState === "read" ? customerMessageMysqlDate() : null,
+    String(body.message_text || body.customer_message || "")
+  ]);
+  return { ok: true };
+}
+
+export async function customerMessageCustomerOrdersMysql(query = {}) {
+  ensureMysqlCutoverEnabled();
+  const shopId = Number(query.shop_id || query.shopId || 0);
+  const customerId = String(query.customer_id || query.customerUniqueId || query.customer_unique_id || "").trim();
+  if (!shopId || !customerId) return { rows: [] };
+  const rows = await mysqlQuery(`
+    SELECT o.id, o.shop_id, o.posting_number, o.status, o.tracking_stage, o.ordered_at, o.delivered_at,
+      GROUP_CONCAT(DISTINCT COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), oi.ozon_sku) ORDER BY oi.id SEPARATOR ', ') AS product_names,
+      GROUP_CONCAT(DISTINCT oi.ozon_sku ORDER BY oi.ozon_sku SEPARATOR ', ') AS skus,
+      SUM(COALESCE(oi.quantity, 1)) AS item_quantity,
+      MAX(op.image_url) AS image_url
+    FROM orders o
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku
+    WHERE o.shop_id = ? AND SUBSTRING_INDEX(o.posting_number, '-', 1) = ?
+    GROUP BY o.id
+    ORDER BY o.ordered_at DESC, o.id DESC
+    LIMIT 30
+  `, [shopId, customerId]);
+  return {
+    rows: rows.map((row) => ({
+      ...row,
+      status_label: orderCustomerStatusLabel(row),
+      product_summary: customerMessageProductSummary(row),
+      item_quantity: Number(row.item_quantity || 0),
+      stock_fbp: Number(row.stock_fbp || 0),
+      stock_fbs: Number(row.stock_fbs || 0)
+    }))
+  };
+}
+
+export async function sendCustomerMessageMysql(body = {}) {
+  ensureMysqlCutoverEnabled();
+  if (process.env.OZON_CUSTOMER_MESSAGE_SEND_ENABLED !== "1") {
+    return { ok: false, __status: 409, error: "真实发送开关未开启，当前仅允许手动测试和复制消息。" };
+  }
+  return { ok: false, __status: 501, error: "Ozon 聊天发送接口尚未绑定，已阻止发送。" };
+}
+
+export async function translateCustomerMessageRuMysql(body = {}) {
+  ensureMysqlCutoverEnabled();
+  const text = String(body.text || body.message_text || "").trim();
+  if (!text) return { text: "", translated_text: "" };
+  return {
+    text,
+    translated_text: text,
+    note: "俄语自动翻译接口尚未绑定，当前返回原文，避免误发错误翻译。"
+  };
 }
 
 export async function orderStatusHistoryMysql(orderId, query = {}) {
@@ -13018,6 +13435,7 @@ export async function updateSkuMappingMysql(id, body = {}) {
   const mappingId = Number(id);
   const existing = await mysqlQueryOne("SELECT * FROM sku_mappings WHERE id = ?", [mappingId]);
   if (!existing) throw new Error("SKU mapping not found");
+  assertFreshRecord(body, existing, "SKU 绑定已被其他用户保存，请刷新后再继续编辑");
 
   const productId = Number(body.product_id || existing.product_id);
   const product = await mysqlQueryOne("SELECT id FROM products WHERE id = ? AND active = 1", [productId]);

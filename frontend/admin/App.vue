@@ -1,5 +1,5 @@
-<script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+﻿<script setup>
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElNotification } from "element-plus";
 import zhCn from "element-plus/es/locale/lang/zh-cn";
@@ -11,16 +11,18 @@ const authStore = useAuthStore();
 const route = useRoute();
 const router = useRouter();
 const elementLocale = zhCn;
-const APP_RELEASE_VERSION = "2026.06.01.1";
+const APP_RELEASE_VERSION = String(import.meta.env.VITE_APP_RELEASE_VERSION || __APP_RELEASE_VERSION__ || "local");
+const APP_RELEASE_CHANNEL = String(import.meta.env.VITE_APP_RELEASE_CHANNEL || __APP_RELEASE_CHANNEL__ || "local");
 const UPDATE_CHECK_INTERVAL_MS = 60 * 1000;
 const APP_UPDATE_DISMISSED_PREFIX = "baodanDismissedAppUpdate";
-const updatePromptOpen = ref(false);
 const showLoginWelcome = ref(false);
 const loginWelcomeText = "欢迎大卖回归！";
 const loginWelcomeChars = computed(() => Array.from(loginWelcomeText));
 let updateCheckTimer = 0;
 let loginWelcomeTimer = 0;
 let updateEventSource = null;
+let updateNotification = null;
+let updateNotificationKey = "";
 useGlobalImagePreviewDismiss();
 
 function handleAuthExpired(event) {
@@ -89,23 +91,53 @@ function dismissAppUpdate(update = {}) {
   } catch {}
 }
 
-async function promptAppUpdate(update) {
+function closeAppUpdateNotification() {
+  if (updateNotification?.close) updateNotification.close();
+  updateNotification = null;
+  updateNotificationKey = "";
+}
+
+function promptAppUpdate(update) {
   if (isAppUpdateDismissed(update)) return;
-  if (updatePromptOpen.value) return;
-  updatePromptOpen.value = true;
-  dismissAppUpdate(update);
-  ElNotification({
-    title: update.title || "后台已更新",
-    message: update.message || "系统已发布新版本，空闲时刷新页面即可加载最新功能。",
+  const key = appUpdateDismissKey(update);
+  if (updateNotification && updateNotificationKey === key) return;
+  closeAppUpdateNotification();
+  updateNotificationKey = key;
+
+  const handleDismiss = () => {
+    dismissAppUpdate(update);
+    closeAppUpdateNotification();
+  };
+  const handleReload = async () => {
+    dismissAppUpdate(update);
+    closeAppUpdateNotification();
+    await reloadForUpdate();
+  };
+
+  updateNotification = ElNotification({
+    title: update.title || "系统已更新",
     type: "warning",
     position: "top-right",
     duration: 3000,
-    showClose: true
+    showClose: true,
+    customClass: "erp-update-toast",
+    message: h("div", { class: "erp-update-toast__body" }, [
+      h("span", update.message || "系统后台已经发布新版本，空闲时刷新页面即可加载最新功能。"),
+      h("div", { class: "erp-update-toast__actions" }, [
+        h("button", { type: "button", class: "erp-update-toast__link", onClick: handleDismiss }, "蹇界暐"),
+        h("button", { type: "button", class: "erp-update-toast__primary", onClick: handleReload }, "去更新")
+      ])
+    ]),
+    onClose: () => {
+      dismissAppUpdate(update);
+      if (updateNotificationKey === key) {
+        updateNotification = null;
+        updateNotificationKey = "";
+      }
+    }
   });
-  window.setTimeout(() => {
-    updatePromptOpen.value = false;
-  }, 3000);
 }
+
 function closeUpdateEventStream() {
   if (!updateEventSource) return;
   updateEventSource.close();
@@ -127,6 +159,7 @@ function openUpdateEventStream() {
   if (!token) return;
   const params = new URLSearchParams({
     app_version: APP_RELEASE_VERSION,
+    app_channel: APP_RELEASE_CHANNEL,
     token
   });
   updateEventSource = new EventSource(`/api/system/events?${params.toString()}`);
@@ -151,11 +184,15 @@ function openUpdateEventStream() {
 async function checkUpdateStatus() {
   if (!authStore.isAuthenticated) return;
   try {
-    const status = await apiClient.get(`/api/system/update-status?app_version=${encodeURIComponent(APP_RELEASE_VERSION)}`, {
+    const params = new URLSearchParams({
+      app_version: APP_RELEASE_VERSION,
+      app_channel: APP_RELEASE_CHANNEL
+    });
+    const status = await apiClient.get(`/api/system/update-status?${params.toString()}`, {
       routeScoped: false,
       noCache: true
     });
-    if (status?.app?.update_required) await promptAppUpdate(status.app);
+    if (status?.app?.update_required) promptAppUpdate(status.app);
     if (status?.plugin?.update_required) {
       window.dispatchEvent(new CustomEvent("app:plugin-update", { detail: status.plugin }));
     }
@@ -195,6 +232,7 @@ onBeforeUnmount(() => {
   closeUpdateEventStream();
   window.clearInterval(updateCheckTimer);
   window.clearTimeout(loginWelcomeTimer);
+  closeAppUpdateNotification();
 });
 </script>
 
@@ -226,7 +264,7 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   color: #ef1f1f;
-  font-family: "STXingkai", "华文行楷", "KaiTi", "楷体", cursive;
+  font-family: "STXingkai", "鍗庢枃琛屾シ", "KaiTi", "妤蜂綋", cursive;
   font-size: clamp(46px, 7vw, 96px);
   font-weight: 500;
   line-height: 1.08;
@@ -378,5 +416,48 @@ onBeforeUnmount(() => {
     top: 38%;
     font-size: clamp(36px, 12vw, 54px);
   }
+}
+
+:global(.erp-update-toast) {
+  width: 340px;
+  max-width: calc(100vw - 28px);
+  border-radius: 10px;
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.18);
+}
+
+:global(.erp-update-toast__body) {
+  display: grid;
+  gap: 10px;
+  color: #475467;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+:global(.erp-update-toast__actions) {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+:global(.erp-update-toast__link),
+:global(.erp-update-toast__primary) {
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+:global(.erp-update-toast__link) {
+  border: 1px solid #d0d5dd;
+  background: #ffffff;
+  color: #475467;
+}
+
+:global(.erp-update-toast__primary) {
+  border: 1px solid #1677ff;
+  background: #1677ff;
+  color: #ffffff;
 }
 </style>

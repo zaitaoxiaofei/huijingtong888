@@ -31,6 +31,7 @@ const ReviewCenterView = () => import("../views/reviews/ReviewCenterView.vue");
 const OzonActionsView = () => import("../views/marketing/OzonActionsView.vue");
 const OrdersView = () => import("../views/orders/OrdersView.vue");
 const OutboundView = () => import("../views/orders/OutboundView.vue");
+const CustomerMessagesView = () => import("../views/orders/CustomerMessagesView.vue");
 const ProcurementView = () => import("../views/procurement/ProcurementView.vue");
 const PurchaseListView = () => import("../views/procurement/PurchaseListView.vue");
 const PurchaseHistoryView = () => import("../views/procurement/PurchaseHistoryView.vue");
@@ -77,7 +78,7 @@ export const router = createRouter({
         { path: "online-products", name: "online-products", component: OnlineProductsView, meta: { title: "在线商品", breadcrumb: ["商品运营", "在线商品"] } },
         { path: "asset-variant-center", name: "asset-variant-center", component: ShopAssetVariantCenterView, meta: { title: "多店铺商品", breadcrumb: ["商品运营", "多店铺商品"] } },
         { path: "asset-variant-center/create", name: "asset-variant-center-create", component: AssetVariantCenterView, meta: { title: "AI 素材优化", breadcrumb: ["商品运营", "AI 素材优化"] } },
-        { path: "listing-automation", name: "listing-automation", component: ListingAutomationView, meta: { title: "商品上架", breadcrumb: ["商品运营", "商品上架"] } },
+        { path: "listing-automation", name: "listing-automation", component: ListingAutomationView, meta: { title: "商品上架", breadcrumb: ["商品运营", "商品上架"], tabKey: "fullPath" } },
         { path: "collector-box", name: "collector-box", component: CollectorBoxView, meta: { title: "采集箱", breadcrumb: ["商品运营", "采集箱"] } },
         { path: "listing-records", name: "listing-records", component: ListingPublishRecordsView, meta: { title: "上架记录", breadcrumb: ["商品运营", "上架记录"] } },
         { path: "ozon-actions", name: "ozon-actions", component: OzonActionsView, meta: { title: "Ozon 活动", breadcrumb: ["数据看板", "Ozon 活动"] } },
@@ -90,6 +91,7 @@ export const router = createRouter({
         { path: "reviews", name: "reviews", component: ReviewCenterView, meta: { title: "买家评价", breadcrumb: ["数据看板", "买家评价"] } },
         { path: "orders", name: "orders", component: OrdersView, meta: { title: "订单列表", breadcrumb: ["订单履约", "订单列表"] } },
         { path: "outbound", name: "outbound", component: OutboundView, meta: { title: "出库记录", breadcrumb: ["订单履约", "出库记录"] } },
+        { path: "customer-messages", name: "customer-messages", component: CustomerMessagesView, meta: { title: "客户消息", breadcrumb: ["订单履约", "客户消息"] } },
         { path: "procurement", name: "procurement", component: ProcurementView, meta: { title: "采购需求", breadcrumb: ["采购入库", "采购需求"] } },
         { path: "purchase-list", name: "purchase-list", component: PurchaseListView, meta: { title: "待采购清单", breadcrumb: ["采购入库", "待采购清单"] } },
         { path: "purchase-history", name: "purchase-history", component: PurchaseHistoryView, meta: { title: "采购记录", breadcrumb: ["采购入库", "采购记录"] } },

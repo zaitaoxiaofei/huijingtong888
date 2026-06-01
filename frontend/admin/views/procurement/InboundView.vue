@@ -33,6 +33,7 @@ const total = computed(() => state.total);
 function createDefaultForm() {
   return {
     id: null,
+    updated_at: "",
     product_id: null,
     person_id: null,
     quantity: 0,
@@ -108,7 +109,8 @@ function openEditDialog(row) {
     purchase_url: row.purchase_url || "",
     status: row.status || "pending_arrival",
     note: row.note || "",
-    qc_status: row.qc_status || "pending"
+    qc_status: row.qc_status || "pending",
+    updated_at: row.updated_at || ""
   };
   dialogVisible.value = true;
 }
@@ -129,7 +131,8 @@ async function submitDialog() {
       purchase_url: dialog.form.purchase_url || "",
       status: dialog.form.status || "pending_arrival",
       note: dialog.form.note || "",
-      qc_status: dialog.form.qc_status || "pending"
+      qc_status: dialog.form.qc_status || "pending",
+      updated_at: dialog.form.updated_at || ""
     };
 
     if (dialog.form.id) {

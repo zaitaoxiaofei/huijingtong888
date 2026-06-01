@@ -2185,6 +2185,17 @@ export async function retryListingPublishRecord(id, body = {}, session = null) {
     WHERE r.id = ?
   `, [Number(id)]);
   if (!record) throw new Error("发布记录不存在");
+  const expectedUpdatedAt = body?.updated_at || body?.updatedAt || body?.version_updated_at || body?.versionUpdatedAt || "";
+  if (expectedUpdatedAt && !sameTimestamp(expectedUpdatedAt, record.updated_at)) {
+    const error = new Error("上架记录已被其他用户保存，请刷新后再继续操作");
+    error.status = 409;
+    throw error;
+  }
+  if (["submitted", "processing", "resubmitting", "ozon_status_pending"].includes(String(record.status || ""))) {
+    const error = new Error("这条上架记录正在处理中，请刷新状态后再操作");
+    error.status = 409;
+    throw error;
+  }
   const payload = normalizeRetryPublishPayload(body.payload || body.request || parseJson(record.request_json, {}));
   if (!normalizeArray(payload.items).length) throw new Error("发布记录缺少可重试的 Ozon payload");
 
@@ -2246,6 +2257,12 @@ export async function deleteListingPublishRecord(id, session = null) {
 export async function updateListingCategoryTemplate(id, body, session) {
   await ensureListingAutomationSchema();
   const current = await listingCategoryTemplate(id, session);
+  const expectedUpdatedAt = body?.updated_at || body?.updatedAt || body?.version_updated_at || body?.versionUpdatedAt || "";
+  if (expectedUpdatedAt && current && !sameTimestamp(expectedUpdatedAt, current.updated_at)) {
+    const error = new Error("模板已被其他用户保存，请刷新后再继续编辑");
+    error.status = 409;
+    throw error;
+  }
   if (!current) throw new Error("类目模板不存在");
 
   const payload = normalizeTemplateUpdatePayload(body, current);
@@ -2282,6 +2299,19 @@ export async function updateListingCategoryTemplate(id, body, session) {
   });
 
   return listingCategoryTemplate(id, session);
+}
+
+function sameTimestamp(left, right) {
+  const leftMs = timestampMs(left);
+  const rightMs = timestampMs(right);
+  return Number.isFinite(leftMs) && Number.isFinite(rightMs) && Math.abs(leftMs - rightMs) < 1000;
+}
+
+function timestampMs(value) {
+  if (!value) return NaN;
+  if (value instanceof Date) return value.getTime();
+  const parsed = Date.parse(String(value).replace(" ", "T"));
+  return Number.isFinite(parsed) ? parsed : NaN;
 }
 
 export async function listingDrafts(query = {}, session) {

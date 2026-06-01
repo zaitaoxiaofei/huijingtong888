@@ -81,6 +81,10 @@ export async function aiProviderConfig() {
 export async function updateAiProviderConfig(body = {}, personId = null) {
   await ensureSettingsTables();
   const previous = await readStoredConfig();
+  const expectedUpdatedAt = body.updated_at || body.updatedAt || "";
+  if (expectedUpdatedAt && previous.updated_at && !sameSecond(expectedUpdatedAt, previous.updated_at)) {
+    throw statusError("AI 配置已被其他用户保存，请刷新后再继续编辑", 409);
+  }
   const provider = normalizeProvider(body.provider || previous.provider);
   const preset = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.custom;
   const previousProvider = previous.providers[provider] || {};
@@ -385,10 +389,10 @@ async function testOpenAiCompatibleModels(runtimeConfig) {
 
 async function readStoredConfig() {
   await ensureSettingsTables();
-  const row = await mysqlQuery("SELECT value_json FROM system_settings WHERE `key` = ? LIMIT 1", [SETTING_KEY]).then((rows) => rows[0]);
+  const row = await mysqlQuery("SELECT value_json, updated_at FROM system_settings WHERE `key` = ? LIMIT 1", [SETTING_KEY]).then((rows) => rows[0]);
   if (!row?.value_json) return defaultSettings();
   try {
-    return normalizeStoredSettings(JSON.parse(row.value_json));
+    return { ...normalizeStoredSettings(JSON.parse(row.value_json)), updated_at: row.updated_at || "" };
   } catch {
     return defaultSettings();
   }
@@ -417,6 +421,7 @@ function sanitizeConfig(value = {}) {
   const settings = normalizeStoredSettings(value);
   const selected = settings.providers[settings.provider] || {};
   return {
+    updated_at: value.updated_at || "",
     provider: settings.provider,
     name: selected.name || PROVIDER_PRESETS[settings.provider]?.name || "",
     baseUrl: selected.baseUrl || "",
@@ -431,6 +436,18 @@ function sanitizeConfig(value = {}) {
     routes: settings.routes,
     presets: PROVIDER_PRESETS
   };
+}
+
+function sameSecond(left, right) {
+  const leftDate = normalizeSecond(left);
+  const rightDate = normalizeSecond(right);
+  return Boolean(leftDate && rightDate && leftDate === rightDate);
+}
+
+function normalizeSecond(value) {
+  if (!value) return "";
+  if (value instanceof Date) return value.toISOString().replace("T", " ").replace("Z", "").slice(0, 19);
+  return String(value).replace("T", " ").replace("Z", "").slice(0, 19);
 }
 
 function defaultSettings() {

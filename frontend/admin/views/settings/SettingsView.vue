@@ -143,6 +143,7 @@ const cancellationFormRules = {
 function createDefaultShopForm() {
   return {
     id: null,
+    updated_at: "",
     name: "",
     legal_entity: "",
     ozon_client_id: "",
@@ -167,6 +168,7 @@ function createDefaultShopForm() {
 function createDefaultPersonForm() {
   return {
     id: null,
+    updated_at: "",
     name: "",
     username: "",
     role: "operator",
@@ -187,6 +189,7 @@ function createDefaultRateForm() {
 function createDefaultLogisticsForm() {
   return {
     id: null,
+    updated_at: "",
     name: "",
     carrier: "CEL",
     channel: "standard",
@@ -226,6 +229,7 @@ function createDefaultPackagingFeeRecalc() {
 function createDefaultCancellationForm() {
   return {
     id: null,
+    updated_at: "",
     name: "",
     match_text: "",
     match_mode: "contains",
@@ -488,6 +492,7 @@ function openEditShopDialog(row) {
   shopWatermarkPreviewVersion.value += 1;
   shopDialog.form = {
     id: row.id,
+    updated_at: row.updated_at || "",
     name: row.name || "",
     legal_entity: row.legal_entity || "",
     ozon_client_id: row.ozon_client_id || "",
@@ -520,6 +525,7 @@ function openEditPersonDialog(row) {
   personDialog.mode = "edit";
   personDialog.form = {
     id: row.id,
+    updated_at: row.updated_at || "",
     name: row.name || "",
     username: row.username || "",
     role: row.role || "operator",

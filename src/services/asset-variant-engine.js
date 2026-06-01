@@ -130,7 +130,7 @@ export async function assetVariantBootstrap() {
     SELECT s.id, s.name, s.status, s.legal_entity, s.watermark_path,
       s.watermark_position, s.watermark_x_percent, s.watermark_y_percent, s.watermark_scale_percent, s.watermark_opacity_percent,
       r.title_style, r.tag_style, r.price_index, r.price_role, r.watermark_template_id, r.tail_image_url, r.main_image_plan,
-      r.tail_category, r.vehicle_model, r.tail_template_id
+      r.tail_category, r.vehicle_model, r.tail_template_id, r.updated_at AS rule_updated_at
     FROM shops s
     LEFT JOIN shop_variant_rules r ON r.shop_id = s.id
     WHERE s.status <> 'deleted'
@@ -189,6 +189,13 @@ export async function saveShopVariantRule(body = {}, session = null) {
   await ensureAssetVariantSchema();
   const shopId = Number(body.shopId || body.shop_id || 0);
   if (!shopId) throw new Error("请选择店铺");
+  const existing = await mysqlQuery("SELECT updated_at FROM shop_variant_rules WHERE shop_id = ? LIMIT 1", [shopId]).then((rows) => rows[0]);
+  const expectedUpdatedAt = body.updated_at || body.updatedAt || body.ruleUpdatedAt || body.rule_updated_at || "";
+  if (expectedUpdatedAt && existing?.updated_at && normalizeSecond(expectedUpdatedAt) !== normalizeSecond(existing.updated_at)) {
+    const error = new Error("店铺素材规则已被其他用户保存，请刷新后再继续编辑");
+    error.status = 409;
+    throw error;
+  }
   await mysqlExecute(`
     INSERT INTO shop_variant_rules
     (shop_id, title_style, tag_style, price_index, price_role, watermark_template_id, tail_image_url, main_image_plan,
@@ -221,7 +228,8 @@ export async function saveShopVariantRule(body = {}, session = null) {
     Number(body.tailTemplateId || body.tail_template_id || 0) || null,
     personId(session)
   ]);
-  return { ok: true, shopId };
+  const updated = await mysqlQuery("SELECT updated_at FROM shop_variant_rules WHERE shop_id = ? LIMIT 1", [shopId]).then((rows) => rows[0]);
+  return { ok: true, shopId, updated_at: updated?.updated_at || "" };
 }
 
 export async function generateAssetVariants(body = {}, session = null, context = {}) {
@@ -2782,7 +2790,7 @@ function createConcurrencyLimiter(concurrency = 1) {
 
 function hasReplacementMarks(value = "") {
   const text = String(value || "");
-  return text.includes("�") || /\?{3,}/.test(text);
+  return text.includes("\uFFFD") || /\?{3,}/.test(text);
 }
 
 function containsCjk(value = "") {
@@ -2860,7 +2868,8 @@ function normalizeShopRuleRow(row, index = 0) {
       tailCategory: row.tail_category,
       vehicleModel: row.vehicle_model,
       tailTemplateId: row.tail_template_id,
-      mainImagePlan: row.main_image_plan
+      mainImagePlan: row.main_image_plan,
+      updated_at: row.rule_updated_at || ""
     })
   };
 }
@@ -2877,8 +2886,15 @@ function normalizeRule(rule = {}) {
     tailCategory: cleanText(rule.tailCategory || rule.tail_category || DEFAULT_TAIL_CATEGORY, 128),
     vehicleModel: cleanText(rule.vehicleModel || rule.vehicle_model || DEFAULT_TAIL_MODEL, 128),
     tailTemplateId: Number(rule.tailTemplateId || rule.tail_template_id || 0) || null,
-    mainImagePlan: String(rule.mainImagePlan || rule.main_image_plan || "watermarked")
+    mainImagePlan: String(rule.mainImagePlan || rule.main_image_plan || "watermarked"),
+    updated_at: rule.updated_at || rule.updatedAt || ""
   };
+}
+
+function normalizeSecond(value) {
+  if (!value) return "";
+  if (value instanceof Date) return value.toISOString().replace("T", " ").replace("Z", "").slice(0, 19);
+  return String(value).replace("T", " ").replace("Z", "").slice(0, 19);
 }
 
 function normalizeTailTemplate(row = {}) {

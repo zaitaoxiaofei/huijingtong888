@@ -47,7 +47,7 @@ export function createStaticHandler(publicDir) {
     const isVersionedAsset = /\/vue-apps\/assets\/.+\.[a-z0-9_-]+\.(css|js)$/i.test(cleanPath)
       || /[?&]v=\d+/i.test(cleanPath);
     const isMutableEntryAsset = /\/vue-apps\/assets\/(admin-view|config-view|admin|config)\.(js|css)$/i.test(cleanPath);
-    if (cleanPath === "/admin.html" || ext === ".html") {
+    if (cleanPath === "/admin.html" || cleanPath === "/release.json" || ext === ".html") {
       headers["Cache-Control"] = "no-store, must-revalidate";
     } else if (isVueAppAsset) {
       headers["Cache-Control"] = "no-store, must-revalidate";

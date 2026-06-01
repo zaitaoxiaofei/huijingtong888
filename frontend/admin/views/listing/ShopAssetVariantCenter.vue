@@ -1010,7 +1010,8 @@ function buildShopVideoName(variant) {
   return `${base}-${shop}-video.${ext}`;
 }
 async function saveRule(shop) {
-  await apiClient.post("/api/asset-variant-engine/rules", { shopId: shop.id, ...state.rules[shop.id] });
+  const result = await apiClient.post("/api/asset-variant-engine/rules", { shopId: shop.id, ...state.rules[shop.id] });
+  if (result?.updated_at && state.rules[shop.id]) state.rules[shop.id].updated_at = result.updated_at;
   ElMessage.success(`${shop.name} 规则已保存`);
 }
 

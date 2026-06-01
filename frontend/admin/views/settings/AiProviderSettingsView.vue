@@ -8,6 +8,7 @@ const loading = ref(false);
 const saving = ref(false);
 const testing = ref(false);
 const testResult = ref(null);
+const configUpdatedAt = ref("");
 
 const form = reactive({
   provider: "deepseek",
@@ -102,6 +103,7 @@ async function loadConfig() {
   loading.value = true;
   try {
     const data = await apiClient.get("/api/ai-provider/config", { noCache: true });
+    configUpdatedAt.value = data.updated_at || "";
     savedProviders.value = data.providers || {};
     Object.assign(routes, normalizeRoutes(data.routes || data.globalRoutes || {}, data));
     applyConfigToForm(data.provider || "deepseek", data);
@@ -127,8 +129,10 @@ async function saveConfig() {
       imageModel: form.imageModel,
       videoModel: form.videoModel,
       enabled: form.enabled,
-      routes
+      routes,
+      updated_at: configUpdatedAt.value || ""
     });
+    configUpdatedAt.value = data.updated_at || "";
     savedProviders.value = data.providers || {};
     Object.assign(routes, normalizeRoutes(data.routes || {}, data));
     applyConfigToForm(data.provider || form.provider, data);

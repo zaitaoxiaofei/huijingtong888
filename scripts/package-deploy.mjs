@@ -4,6 +4,8 @@ import { spawn } from "node:child_process";
 
 const rootDir = process.cwd();
 const outputDir = path.resolve(process.env.DEPLOY_OUTPUT_DIR || path.join(rootDir, "dist", "deploy"));
+const releaseVersion = process.env.OZON_RELEASE_VERSION || process.env.APP_RELEASE_VERSION || "local";
+const releaseChannel = process.env.OZON_RELEASE_CHANNEL || "production";
 
 const filesToCopy = [
   ".env",
@@ -159,6 +161,8 @@ await rewriteDeployStartBat();
 
 const manifest = {
   builtAt: new Date().toISOString(),
+  version: releaseVersion,
+  channel: releaseChannel,
   frontendOutput: "public/vue-apps",
   startupCommand: "npm start",
   includedFiles: filesToCopy,

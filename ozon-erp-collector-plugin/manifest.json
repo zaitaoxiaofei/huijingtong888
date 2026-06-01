@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "爆单ERP",
   "description": "爆单ERP 商品采集、采集箱同步和后台工作台入口",
-  "version": "1.3.5",
+  "version": "1.3.6",
   "permissions": ["activeTab", "alarms", "scripting", "storage", "tabs"],
   "host_permissions": [
     "http://localhost/*",

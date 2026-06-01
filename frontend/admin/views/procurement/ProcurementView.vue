@@ -47,6 +47,7 @@ const lockCreateProduct = computed(() => Boolean(initialProductId.value));
 
 function createDefaultForm() {
   return {
+    updated_at: "",
     product_id: null,
     person_id: null,
     quantity: 1,
@@ -206,7 +207,8 @@ async function openEditRequestDialog(row) {
     source_type: row.source_type || "1688",
     supplier_id: row.supplier_id || "",
     purchase_url: row.purchase_url || "",
-    note: row.note || ""
+    note: row.note || "",
+    updated_at: row.updated_at || ""
   };
   editDialog.requestId = row.id;
   editDialog.productQuery = row.product_name || row.product_code || "";

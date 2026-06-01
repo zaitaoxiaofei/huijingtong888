@@ -1,4 +1,6 @@
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $hostStackScript = Join-Path $PSScriptRoot "start-host-stack.ps1"

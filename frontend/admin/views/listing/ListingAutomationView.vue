@@ -126,7 +126,8 @@ const templateEditor = reactive({
   attributes: [],
   images: [],
   variants: [],
-  rawJson: "{}"
+  rawJson: "{}",
+  updated_at: ""
 });
 
 const attributeDrawer = reactive({
@@ -684,7 +685,8 @@ function newBlankTemplate() {
     ]),
     images: [],
     variants: [],
-    rawJson: "{}"
+    rawJson: "{}",
+    updated_at: ""
   });
   draftForm.template_id = "";
 }
@@ -770,6 +772,7 @@ function fillTemplateEditor(template) {
   if (!templateEditor.variants.length && (templateEditor.title || templateEditor.images.length)) addVariantRow();
   sourceRawOmitted.value = Boolean(template.source_raw_omitted);
   templateEditor.rawJson = sourceRawOmitted.value ? "" : JSON.stringify(template.source_raw || editable.source_raw || editable.raw_request || {}, null, 2);
+  templateEditor.updated_at = template.updated_at || "";
 }
 
 function firstNonEmptyArray(...values) {
@@ -2538,6 +2541,12 @@ async function saveTemplateEditor() {
     state.templates = [saved, ...state.templates.filter((item) => Number(item.id) !== Number(saved.id))];
     draftForm.template_id = saved.id;
     ElMessage.success(creating ? "新模板已创建" : "模板已保存");
+  } catch (error) {
+    if (error?.status === 409) {
+      ElMessage.error(error.message || "模板已被其他用户保存，请刷新后再继续编辑");
+      return;
+    }
+    throw error;
   } finally {
     savingTemplate.value = false;
   }
@@ -2623,6 +2632,7 @@ function buildTemplatePayload() {
   const payload = {
     ozon_category_id: templateEditor.ozon_category_id,
     category_name: templateEditor.category_name,
+    updated_at: templateEditor.updated_at || "",
     shop_ids: draftForm.shop_ids,
     template_name: templateEditor.template_name,
     title: payloadTitle,

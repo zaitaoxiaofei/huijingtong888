@@ -1,4 +1,7 @@
 $ErrorActionPreference = "Stop"
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 $repoDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $repoDir

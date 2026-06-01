@@ -34,7 +34,8 @@ export const navigationMenus = [
     icon: Document,
     children: [
       { key: "orders", label: "订单列表", route: "/orders" },
-      { key: "outbound", label: "出库记录", route: "/outbound" }
+      { key: "outbound", label: "出库记录", route: "/outbound" },
+      { key: "customer-messages", label: "客户消息", route: "/customer-messages", icon: ChatDotRound }
     ]
   },
   {

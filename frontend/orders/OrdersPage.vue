@@ -1436,7 +1436,7 @@ onMounted(async () => {
               :preview-src-list="[detailPrimaryImageUrl]"
               preview-teleported
             />
-            <div v-else class="orders-profit-order-thumb orders-profit-order-image-empty">鏃犲浘</div>
+            <div v-else class="orders-profit-order-thumb orders-profit-order-image-empty">无图</div>
             <div class="orders-profit-order-copy">
               <strong>{{ detailPrimaryItem.product_name || detailPrimaryItem.ozon_name || "订单商品" }}</strong>
               <span>{{ detailPrimaryItem.owner_name || "未分配负责人" }} / 状态: {{ rowStateLabel(detailOrder) }}</span>
@@ -1539,7 +1539,7 @@ onMounted(async () => {
                   :preview-src-list="[detailItemImageUrl(row)]"
                   preview-teleported
                 />
-                <div v-else class="vue-orders-detail-item-thumb vue-orders-detail-item-thumb-empty">鏃犲浘</div>
+                <div v-else class="vue-orders-detail-item-thumb vue-orders-detail-item-thumb-empty">无图</div>
               </template>
             </el-table-column>
             <el-table-column prop="ozon_sku" label="SKU" min-width="150" />

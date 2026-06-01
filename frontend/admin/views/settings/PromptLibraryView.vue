@@ -2132,6 +2132,7 @@ function selectStrategyForEdit(item = {}) {
     priority: Number(item.priority || 0),
     enabled: Boolean(item.enabled),
     version: Number(item.version || 1),
+    updated_at: item.updated_at || item.updatedAt || "",
     metadata_json: JSON.stringify(item.metadata || {}, null, 2)
   });
 }
@@ -2156,6 +2157,7 @@ async function saveStrategy() {
       priority: strategyForm.priority,
       enabled: strategyForm.enabled ? 1 : 0,
       version: strategyForm.version,
+      updated_at: strategyForm.updated_at || "",
       metadata: parseJsonSafe(strategyForm.metadata_json, {})
     };
     const saved = strategyForm.id
@@ -2197,7 +2199,8 @@ function selectTemplateForEdit(item) {
     default_count: Number(item.default_count || 1),
     is_default: Boolean(item.is_default),
     enabled: Boolean(item.enabled),
-    sort_order: Number(item.sort_order || 0)
+    sort_order: Number(item.sort_order || 0),
+    updated_at: item.updated_at || item.updatedAt || ""
   });
 }
 
@@ -2285,7 +2288,8 @@ function createBlankTemplate() {
     default_count: 1,
     is_default: false,
     enabled: true,
-    sort_order: 0
+    sort_order: 0,
+    updated_at: ""
   };
 }
 
@@ -2304,6 +2308,7 @@ function createBlankStrategy() {
     priority: 50,
     enabled: true,
     version: 1,
+    updated_at: "",
     metadata_json: "{}"
   };
 }

@@ -149,6 +149,9 @@ export async function createAiStrategy(body = {}, personId = null) {
 export async function updateAiStrategy(id, body = {}) {
   await ensureAiStrategyTables();
   const previous = await aiStrategyDetail(id);
+  if ((body.updated_at || body.updatedAt) && !sameSecond(body.updated_at || body.updatedAt, previous.updated_at || previous.updatedAt)) {
+    throw statusError("AI 策略已被其他用户保存，请刷新后再继续编辑", 409);
+  }
   const payload = normalizeStrategyPayload({ ...previous, ...body });
   await mysqlExecute(`
     UPDATE ai_strategies
@@ -380,6 +383,7 @@ function normalizeStrategyRow(row = {}) {
   return {
     ...row,
     id: Number(row.id),
+    updatedAt: row.updated_at || row.updatedAt || "",
     business_modes: parseArray(row.business_modes_json),
     applicable_goals: parseArray(row.applicable_goals_json),
     applicable_assets: parseArray(row.applicable_assets_json),
@@ -527,4 +531,16 @@ function statusError(message, status = 500) {
   const error = new Error(message);
   error.status = status;
   return error;
+}
+
+function sameSecond(left, right) {
+  const leftText = normalizeSecond(left);
+  const rightText = normalizeSecond(right);
+  return Boolean(leftText && rightText && leftText === rightText);
+}
+
+function normalizeSecond(value) {
+  if (!value) return "";
+  if (value instanceof Date) return value.toISOString().replace("T", " ").replace("Z", "").slice(0, 19);
+  return String(value).replace("T", " ").replace("Z", "").slice(0, 19);
 }

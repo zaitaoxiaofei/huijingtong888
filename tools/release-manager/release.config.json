@@ -1,0 +1,10 @@
+{
+  "port": 8791,
+  "projectDir": "../..",
+  "deployOutputDir": "../../dist/deploy",
+  "releasesDir": "../../dist/releases",
+  "liveDir": "../../dist/live",
+  "currentFile": "../../dist/releases/current.json",
+  "buildCommand": "npm run package:deploy",
+  "channel": "production"
+}

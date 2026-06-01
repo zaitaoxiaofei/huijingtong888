@@ -194,6 +194,7 @@ async function editInListingAutomation(row) {
   const key = `listing-record-draft-${detail.id}-${Date.now()}`;
   sessionStorage.setItem(key, JSON.stringify({
     record_id: detail.id,
+    updated_at: detail.updated_at || "",
     shop_id: detail.shop_id,
     template: buildTemplateFromRecord(detail)
   }));
@@ -362,7 +363,10 @@ async function retryRecord() {
   }
   retrying.value = true;
   try {
-    const updated = await apiClient.post(`/api/listing/publish-records/${drawer.row.id}/retry`, { payload });
+    const updated = await apiClient.post(`/api/listing/publish-records/${drawer.row.id}/retry`, {
+      payload,
+      updated_at: drawer.row.updated_at || ""
+    });
     const index = state.rows.findIndex((row) => Number(row.id) === Number(updated.id));
     if (index >= 0) state.rows[index] = updated;
     drawer.visible = false;

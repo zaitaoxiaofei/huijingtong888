@@ -1,4 +1,6 @@
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $desktopDist = Join-Path $projectRoot "dist\desktop"

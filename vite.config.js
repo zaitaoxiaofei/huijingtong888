@@ -6,9 +6,15 @@ import ElementPlus from "unplugin-element-plus/vite";
 import path from "node:path";
 
 const buildStamp = process.env.OZON_BUILD_STAMP || String(Date.now());
+const releaseVersion = process.env.OZON_RELEASE_VERSION || process.env.APP_RELEASE_VERSION || "local";
+const releaseChannel = process.env.OZON_RELEASE_CHANNEL || "local";
 
 export default defineConfig({
   base: "/vue-apps/",
+  define: {
+    __APP_RELEASE_VERSION__: JSON.stringify(releaseVersion),
+    __APP_RELEASE_CHANNEL__: JSON.stringify(releaseChannel)
+  },
   plugins: [
     vue(),
     Components({

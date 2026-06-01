@@ -39,6 +39,7 @@ const state = reactive({
 
 const dialog = reactive({
   id: null,
+  updated_at: "",
   product_id: "",
   person_id: ""
 });
@@ -148,6 +149,7 @@ async function ensureProductOptions(row = null) {
 
 async function openEditDialog(row) {
   dialog.id = row.id;
+  dialog.updated_at = row.updated_at || "";
   dialog.product_id = row.product_id;
   dialog.person_id = row.person_id || "";
   await ensureProductOptions(row);
@@ -178,7 +180,8 @@ async function submitDialog() {
   try {
     await apiClient.put(`/api/mappings/${dialog.id}`, {
       product_id: Number(dialog.product_id),
-      person_id: dialog.person_id ? Number(dialog.person_id) : null
+      person_id: dialog.person_id ? Number(dialog.person_id) : null,
+      updated_at: dialog.updated_at || ""
     });
     ElMessage.success("SKU 绑定已更新");
     dialogVisible.value = false;

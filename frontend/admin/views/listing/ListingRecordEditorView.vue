@@ -14,6 +14,7 @@ const deleting = ref(false);
 
 const state = reactive({
   recordId: null,
+  updated_at: "",
   shopId: null,
   shopName: "",
   status: "",
@@ -71,6 +72,7 @@ async function loadDraft() {
 function buildDraftFromRow(row) {
   return {
     record_id: row.id,
+    updated_at: row.updated_at || "",
     shop_id: row.shop_id,
     shop_name: row.shop_name,
     status: row.status,
@@ -91,6 +93,7 @@ function applyDraft(draft) {
   const sourceRaw = draft.template?.editable_payload?.source_raw || draft.template?.source_raw || draft.request || {};
   const item = sourceRaw.items?.[0] || {};
   state.recordId = Number(draft.record_id || draft.recordId || route.query.recordId || 0) || null;
+  state.updated_at = draft.updated_at || draft.updatedAt || "";
   state.shopId = Number(draft.shop_id || draft.shopId || sourceRaw.shop_id || 0) || null;
   state.shopName = draft.shop_name || "";
   state.status = draft.status || "";
@@ -155,7 +158,11 @@ async function submitRecord() {
   });
   submitting.value = true;
   try {
-    const updated = await apiClient.post(`/api/listing/publish-records/${state.recordId}/retry`, { payload });
+    const updated = await apiClient.post(`/api/listing/publish-records/${state.recordId}/retry`, {
+      payload,
+      updated_at: state.updated_at || ""
+    });
+    state.updated_at = updated.updated_at || "";
     state.status = updated.status;
     state.responseText = JSON.stringify({ response: updated.response, error: updated.error }, null, 2);
     ElMessage.success("已重新提交 Ozon，可回到上架记录稍后刷新状态");

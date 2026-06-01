@@ -132,10 +132,10 @@ const filteredActions = computed(() => {
   });
 });
 const actionViewOptions = computed(() => [
-  { label: `可用的 ${countActions("available")}`, value: "available" },
-  { label: `我正在参与 ${countActions("joined")}`, value: "joined" },
-  { label: `不参与 ${countActions("not_joined")}`, value: "not_joined" },
-  { label: `已完成 ${countActions("completed")}`, value: "completed" }
+  { label: `当前可用 ${countActions("available")}`, value: "available" },
+  { label: `当前参与 ${countActions("joined")}`, value: "joined" },
+  { label: `当前未参与 ${countActions("not_joined")}`, value: "not_joined" },
+  { label: `当前已完成 ${countActions("completed")}`, value: "completed" }
 ]);
 
 function createEmptyProductPager() {
@@ -784,12 +784,13 @@ onMounted(async () => {
       <div class="section-head">
         <div>
           <h2>活动列表</h2>
-          <span>{{ state.mode === "seller" ? "卖家自建促销活动" : "Ozon 官方可参与活动" }}</span>
+          <span>{{ state.mode === "seller" ? "卖家自建促销活动，按当前筛选拉取" : "Ozon 官方当前返回的可参与活动" }}</span>
         </div>
         <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="state.actionsLoading" @click="loadActions">刷新</el-button>
       </div>
       <div class="ozon-action-filter">
         <el-segmented v-model="state.actionView" :options="actionViewOptions" />
+        <small>统计只基于当前拉取到的活动，不等于 Ozon 后台历史活动全量。</small>
       </div>
       <div v-loading="state.actionsLoading" class="ozon-action-list">
         <div
@@ -1070,7 +1071,14 @@ onMounted(async () => {
 }
 
 .ozon-action-filter {
+  display: grid;
+  gap: 6px;
   margin-bottom: 14px;
+}
+
+.ozon-action-filter small {
+  color: var(--erp-text-secondary);
+  font-size: 12px;
 }
 
 .ozon-action-filter :deep(.el-segmented) {

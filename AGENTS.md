@@ -84,6 +84,18 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Empty image states should keep the same thumbnail box size and show a short neutral label such as `无图`.
 - Compact thumbnails are acceptable only in dense side lists, rankings, task cards, or secondary panels where the image is not the main inspection target.
 
+## 7. System-Level Text Encoding Requirement
+
+**This is a required project rule for every code change: all text files must remain UTF-8, and new mojibake is a blocking defect.**
+
+- Source code, docs, config, SQL, HTML, Vue, JS, CSS, JSON, shell scripts, and startup scripts must be saved as UTF-8.
+- Do not save files as GBK, ANSI, or mixed encodings. Do not paste already-corrupted text matching common mojibake markers such as U+952F, U+FFFD, U+9416, U+920B, U+93C3, or the sequence U+6D60 followed by `?`.
+- Keep `.editorconfig`, `.gitattributes`, `.vscode/settings.json`, and `scripts/check-text-encoding.mjs` in place as mandatory project safeguards.
+- Any task that edits Chinese copy, Windows `.bat`/`.ps1` scripts, generated user-facing text, or packaging metadata must run `npm run check:encoding` before completion.
+- If terminal output looks garbled, verify the file content with Node/editor UTF-8 reading before editing. Display garbling is not proof that the file is corrupt.
+- Windows entry scripts should set UTF-8 where practical, such as `chcp 65001` for `.bat` and `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)` for PowerShell.
+- If `npm run check:encoding` fails, fix the encoding issue before reporting the task as done.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
