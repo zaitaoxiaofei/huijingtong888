@@ -465,7 +465,7 @@ function tsplHeader(paperSpec) {
   return [
     `SIZE ${paperSpec.widthMm} mm,${paperSpec.heightMm} mm`,
     `GAP ${TSPL_GAP_MM} mm,0 mm`,
-    "SPEED 4",
+    "SPEED 6",
     "DENSITY 8",
     "DIRECTION 0",
     "REFERENCE 0,0",
