@@ -1,27 +1,30 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage, ElNotification } from "element-plus";
 import zhCn from "element-plus/es/locale/lang/zh-cn";
 import { useAuthStore } from "./stores/auth";
 import { useGlobalImagePreviewDismiss } from "./composables/useGlobalImagePreviewDismiss";
-import { apiClient } from "./utils/api";
+import { apiClient, getAuthToken } from "./utils/api";
 
 const authStore = useAuthStore();
 const route = useRoute();
 const router = useRouter();
 const elementLocale = zhCn;
-const APP_RELEASE_VERSION = "2026.05.31.1";
+const APP_RELEASE_VERSION = "2026.06.01.1";
 const UPDATE_CHECK_INTERVAL_MS = 60 * 1000;
+const APP_UPDATE_DISMISSED_PREFIX = "baodanDismissedAppUpdate";
 const updatePromptOpen = ref(false);
 const showLoginWelcome = ref(false);
 const loginWelcomeText = "欢迎大卖回归！";
 const loginWelcomeChars = computed(() => Array.from(loginWelcomeText));
 let updateCheckTimer = 0;
 let loginWelcomeTimer = 0;
+let updateEventSource = null;
 useGlobalImagePreviewDismiss();
 
 function handleAuthExpired(event) {
+  closeUpdateEventStream();
   authStore.clearSession();
   ElMessage.warning(event?.detail?.message || "登录已失效，请重新登录");
   if (route.name !== "login") {
@@ -59,22 +62,90 @@ async function reloadForUpdate() {
   window.location.replace(url.toString());
 }
 
+function appUpdateDismissKey(update = {}) {
+  return [
+    String(update.version || ""),
+    String(update.published_at || update.publishedAt || "")
+  ].filter(Boolean).join("@") || String(update.title || "app-update");
+}
+
+function currentUserUpdateDismissKey() {
+  const user = authStore.user || {};
+  const userKey = String(user.id || user.person_id || user.username || user.name || "anonymous").trim() || "anonymous";
+  return `${APP_UPDATE_DISMISSED_PREFIX}:${userKey}`;
+}
+
+function isAppUpdateDismissed(update = {}) {
+  try {
+    return window.localStorage?.getItem(currentUserUpdateDismissKey()) === appUpdateDismissKey(update);
+  } catch {
+    return false;
+  }
+}
+
+function dismissAppUpdate(update = {}) {
+  try {
+    window.localStorage?.setItem(currentUserUpdateDismissKey(), appUpdateDismissKey(update));
+  } catch {}
+}
+
 async function promptAppUpdate(update) {
+  if (isAppUpdateDismissed(update)) return;
   if (updatePromptOpen.value) return;
   updatePromptOpen.value = true;
-  try {
-    await ElMessageBox.alert(update.message || "系统后台已经发布新版本，请刷新页面以加载最新内容。", update.title || "后台已更新", {
-      type: "warning",
-      confirmButtonText: "立即刷新",
-      showClose: update.mandatory !== true,
-      closeOnClickModal: update.mandatory !== true,
-      closeOnPressEscape: update.mandatory !== true,
-      customClass: "erp-update-dialog"
-    });
-    await reloadForUpdate();
-  } catch {
+  dismissAppUpdate(update);
+  ElNotification({
+    title: update.title || "后台已更新",
+    message: update.message || "系统已发布新版本，空闲时刷新页面即可加载最新功能。",
+    type: "warning",
+    position: "top-right",
+    duration: 3000,
+    showClose: true
+  });
+  window.setTimeout(() => {
     updatePromptOpen.value = false;
+  }, 3000);
+}
+function closeUpdateEventStream() {
+  if (!updateEventSource) return;
+  updateEventSource.close();
+  updateEventSource = null;
+}
+
+function handleUpdateStatusPayload(status) {
+  if (status?.app?.update_required) {
+    promptAppUpdate(status.app);
   }
+  if (status?.plugin?.update_required) {
+    window.dispatchEvent(new CustomEvent("app:plugin-update", { detail: status.plugin }));
+  }
+}
+
+function openUpdateEventStream() {
+  if (!authStore.isAuthenticated || updateEventSource || typeof EventSource === "undefined") return;
+  const token = getAuthToken();
+  if (!token) return;
+  const params = new URLSearchParams({
+    app_version: APP_RELEASE_VERSION,
+    token
+  });
+  updateEventSource = new EventSource(`/api/system/events?${params.toString()}`);
+  updateEventSource.addEventListener("hello", (event) => {
+    try {
+      handleUpdateStatusPayload(JSON.parse(event.data || "{}")?.status);
+    } catch {}
+  });
+  updateEventSource.addEventListener("update", (event) => {
+    try {
+      handleUpdateStatusPayload(JSON.parse(event.data || "{}"));
+    } catch (error) {
+      console.warn("parse update event failed", error);
+    }
+  });
+  updateEventSource.onerror = () => {
+    closeUpdateEventStream();
+    window.setTimeout(openUpdateEventStream, 10000);
+  };
 }
 
 async function checkUpdateStatus() {
@@ -88,6 +159,7 @@ async function checkUpdateStatus() {
     if (status?.plugin?.update_required) {
       window.dispatchEvent(new CustomEvent("app:plugin-update", { detail: status.plugin }));
     }
+    openUpdateEventStream();
   } catch (error) {
     if (Number(error?.status || 0) !== 401) console.warn("check update status failed", error);
   }
@@ -108,6 +180,7 @@ onMounted(async () => {
   window.addEventListener("app:auth-expired", handleAuthExpired);
   consumeLoginWelcome();
   await checkUpdateStatus();
+  openUpdateEventStream();
   updateCheckTimer = window.setInterval(checkUpdateStatus, UPDATE_CHECK_INTERVAL_MS);
 });
 
@@ -119,6 +192,7 @@ watch(
 
 onBeforeUnmount(() => {
   window.removeEventListener("app:auth-expired", handleAuthExpired);
+  closeUpdateEventStream();
   window.clearInterval(updateCheckTimer);
   window.clearTimeout(loginWelcomeTimer);
 });

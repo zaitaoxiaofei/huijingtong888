@@ -59,7 +59,7 @@ import {
   siteAccessUsesSecureCookie
 } from "./server/access.js";
 import { systemInfo } from "./server/maintenance.js";
-import { checkDailyPurchaseNotification, globalUpdateStatus, updateGlobalUpdateStatus } from "./server/notifications.js";
+import { checkDailyPurchaseNotification, globalUpdateStatus, subscribeGlobalUpdateEvents, updateGlobalUpdateStatus } from "./server/notifications.js";
 import { shanghaiDateKey } from "./shanghai-time.js";
 import { mysqlExecute, mysqlQuery } from "./mysql-pool.js";
 
@@ -399,6 +399,18 @@ async function handleSiteAccess(req, res, url) {
 }
 
 async function handleRestRoute(req, res, url, parts) {
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "system" && parts[2] === "events") {
+    writeHead(res, 200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no"
+    });
+    const unsubscribe = subscribeGlobalUpdateEvents(res, Object.fromEntries(url.searchParams.entries()));
+    req.on("close", unsubscribe);
+    return true;
+  }
+
   if (req.method === "GET" && parts[0] === "downloads" && (
     /^ozon-baodan-erp-plugin-[0-9][0-9A-Za-z.-]*\.rar$/.test(parts[1] || "") ||
     parts[1] === "ozon-baodan-erp-plugin.rar" ||
@@ -1724,6 +1736,7 @@ function allowQueryTokenAuth(req, parts = [], url) {
   if (!url.searchParams.get("token")) return false;
   if (parts[0] !== "api") return false;
   if (parts[1] === "ai" && parts[2] === "file") return true;
+  if (parts[1] === "system" && parts[2] === "events") return true;
   if (parts[1] === "tools" && parts[2] === "image-cropper") return true;
   if (parts[1] === "asset-variant-engine" && parts[2] === "files") return true;
   return false;

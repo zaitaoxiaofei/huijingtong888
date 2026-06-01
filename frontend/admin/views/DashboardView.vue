@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   CircleDollarSign,
   ClipboardList,
+  Download,
   Flame,
   PackageCheck,
   RefreshCw,
@@ -24,6 +25,7 @@ const router = useRouter();
 const loading = ref(false);
 const refreshing = ref(false);
 const hasDashboardLoaded = ref(false);
+const pluginStatus = ref(null);
 let dashboardSnapshotRefreshTimer = null;
 const dashboard = ref({
   summary: {},
@@ -59,6 +61,8 @@ const fbpWithin30Count = computed(() => fbpAlerts.value.filter((item) => item.al
 const procurementRows = computed(() => Array.isArray(dashboard.value.alerts?.procurement) ? dashboard.value.alerts.procurement : []);
 const initialDashboardLoading = computed(() => loading.value && !hasDashboardLoaded.value);
 const dashboardUpdating = computed(() => refreshing.value && hasDashboardLoaded.value);
+const pluginDownloadUrl = computed(() => pluginStatus.value?.download_url || "/downloads/ozon-erp-collector-plugin.rar");
+const pluginVersionText = computed(() => pluginStatus.value?.version ? `v${pluginStatus.value.version}` : "最新版");
 
 const urgentCount = computed(() => Number(summary.value.urgent_count || 0));
 const stockWarningCount = computed(() => Number(summary.value.warning_count || 0));
@@ -193,6 +197,22 @@ function aftersalesQuery(bucket = "all", openDetail = false) {
   };
   if (openDetail && bucket !== "all") query.detailBucket = bucket;
   return query;
+}
+
+function downloadCollectorPlugin() {
+  window.location.href = pluginDownloadUrl.value;
+}
+
+async function loadPluginUpdateStatus() {
+  try {
+    const status = await apiClient.get("/api/system/update-status", {
+      routeScoped: false,
+      noCache: true
+    });
+    pluginStatus.value = status?.plugin || null;
+  } catch (error) {
+    console.warn("load plugin update status failed", error);
+  }
 }
 
 function todayAftersalesQuery(bucket) {
@@ -643,7 +663,10 @@ function refreshDashboard() {
   loadDashboard({ refresh: true });
 }
 
-onMounted(loadDashboard);
+onMounted(() => {
+  loadDashboard();
+  loadPluginUpdateStatus();
+});
 
 onBeforeUnmount(() => {
   if (dashboardSnapshotRefreshTimer) window.clearTimeout(dashboardSnapshotRefreshTimer);
@@ -667,6 +690,11 @@ onBeforeUnmount(() => {
             <RefreshCw :size="13" />
             更新中
           </span>
+          <el-button class="plugin-download-button" size="small" @click="downloadCollectorPlugin">
+            <Download :size="14" />
+            下载采集插件
+            <small>{{ pluginVersionText }}</small>
+          </el-button>
           <el-button class="ghost-button" size="small" :loading="loading || refreshing" @click="refreshDashboard">
             <RefreshCw :size="14" />
             刷新
@@ -910,8 +938,14 @@ button {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 12px;
+}
+
+.operating-card__top > div:first-child {
+  flex: 1 1 360px;
+  min-width: 0;
 }
 
 .brand-pill {
@@ -978,6 +1012,25 @@ button {
   --el-button-hover-bg-color: #f0efff;
   --el-button-hover-border-color: #6258f6;
   --el-button-hover-text-color: #6258f6;
+}
+
+.plugin-download-button {
+  height: 32px;
+  border-radius: 8px;
+  font-weight: 700;
+  --el-button-bg-color: #0b63ff;
+  --el-button-border-color: #0b63ff;
+  --el-button-text-color: #ffffff;
+  --el-button-hover-bg-color: #004fe0;
+  --el-button-hover-border-color: #004fe0;
+  --el-button-hover-text-color: #ffffff;
+}
+
+.plugin-download-button small {
+  margin-left: 2px;
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .hero-core-grid {

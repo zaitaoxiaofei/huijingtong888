@@ -5,13 +5,14 @@ const runtimeDir = path.resolve("data");
 const statusFile = path.join(runtimeDir, "global-update-status.json");
 const defaultPluginVersion = process.env.COLLECTOR_PLUGIN_VERSION || "1.3.3";
 const defaultPluginPackageName = `ozon-baodan-erp-plugin-${defaultPluginVersion}.rar`;
+const updateSubscribers = new Set();
 const defaultStatus = {
   app: {
-    version: process.env.APP_RELEASE_VERSION || "2026.05.31.1",
+    version: process.env.APP_RELEASE_VERSION || "2026.06.01.1",
     title: "后台已更新",
-    message: "系统后台已经发布新版本，请刷新页面以清理缓存并加载最新功能。",
+    message: "系统后台已经发布新版本，空闲时刷新页面即可加载最新功能。",
     action: "reload",
-    mandatory: true,
+    mandatory: false,
     published_at: new Date().toISOString()
   },
   plugin: {
@@ -59,6 +60,53 @@ function writeUpdateStatusFile(payload) {
   fs.writeFileSync(statusFile, `${JSON.stringify(normalizeUpdatePayload(payload), null, 2)}\n`);
 }
 
+function sendUpdateEvent(res, eventName, payload) {
+  if (res.destroyed || res.writableEnded) return false;
+  res.write(`event: ${eventName}\n`);
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  return true;
+}
+
+export function subscribeGlobalUpdateEvents(res, query = {}) {
+  const client = {
+    res,
+    appVersion: String(query.app_version || query.appVersion || "").trim(),
+    pluginVersion: String(query.plugin_version || query.pluginVersion || "").trim()
+  };
+  updateSubscribers.add(client);
+
+  sendUpdateEvent(res, "hello", {
+    connected: true,
+    server_time: new Date().toISOString(),
+    status: globalUpdateStatus({
+      app_version: client.appVersion,
+      plugin_version: client.pluginVersion
+    })
+  });
+
+  const heartbeat = setInterval(() => {
+    if (!sendUpdateEvent(res, "ping", { server_time: new Date().toISOString() })) {
+      clearInterval(heartbeat);
+      updateSubscribers.delete(client);
+    }
+  }, 25000);
+
+  return () => {
+    clearInterval(heartbeat);
+    updateSubscribers.delete(client);
+  };
+}
+
+export function broadcastGlobalUpdateStatus(status = readUpdateStatusFile()) {
+  for (const client of [...updateSubscribers]) {
+    const payload = globalUpdateStatus({
+      app_version: client.appVersion,
+      plugin_version: client.pluginVersion
+    });
+    if (!sendUpdateEvent(client.res, "update", payload)) updateSubscribers.delete(client);
+  }
+}
+
 export function globalUpdateStatus(query = {}) {
   const status = readUpdateStatusFile();
   const appVersion = String(query.app_version || query.appVersion || "").trim();
@@ -91,7 +139,9 @@ export function updateGlobalUpdateStatus(body = {}) {
   if (body.app) next.app.published_at = body.app.published_at || now;
   if (body.plugin) next.plugin.published_at = body.plugin.published_at || now;
   writeUpdateStatusFile(next);
-  return globalUpdateStatus();
+  const status = globalUpdateStatus();
+  broadcastGlobalUpdateStatus(status);
+  return status;
 }
 
 export function checkDailyPurchaseNotification(all) {
