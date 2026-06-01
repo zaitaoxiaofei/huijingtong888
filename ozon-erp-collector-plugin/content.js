@@ -201,7 +201,7 @@
       return 'ERP 鏈湴鏈嶅姟鏈繛鎺ワ紝璇风‘璁?ERP 宸插惎鍔ㄥ悗閲嶈瘯';
     }
     if (/local plugin endpoint requires localhost|valid plugin token|403/i.test(message)) {
-      return 'ERP 鎻掍欢鎺堟潈澶辫触锛岃閲嶆柊鎵撳紑 ERP 鎴栨鏌ユ彃浠?token 閰嶇疆';
+      return 'ERP 插件授权失败，请重新打开 ERP 或检查插件 token 配置';
     }
     if (/杩斿洖浜嗛〉闈㈠唴瀹箌Unexpected token\s*</i.test(message)) {
       return 'ERP 插件接口未正确挂载，请重启 ERP 后重试';
@@ -1220,7 +1220,7 @@
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    throw new Error(`閲囬泦鏁版嵁宸叉彁浜わ紝浣嗘暟鎹簱鏆傛椂璇诲彇涓嶅埌锛?{lastError || id}`);
+    throw new Error(`采集数据已提交，但数据库暂时读取不到：${lastError || id}`);
   }
 
   async function ensureCollectedSaved(result) {
@@ -1941,7 +1941,8 @@
   }
 
   async function openProductEditor(result, options = {}) {
-    // 棰勭暀鏃х紪杈戦〉鍏ュ彛锛氬綋鍓?UI 涓嶅啀鐩存帴缁戝畾锛岄伩鍏嶆妸鈥滈噰闆嗏€濊瑙ｄ负鈥滅洿鎺ヤ笂鏋垛€濄€?    const silent = options.silent === true;
+    // 预留旧编辑页入口：当前 UI 不再直接绑定，避免把“采集”误解为“直接上架”。
+    const silent = options.silent === true;
     let collectionId = result?.savedCollectionId || result?.collectionId;
     let saveFailureMessage = '';
     const sourcePayload = buildEditorSourcePayload(result);
@@ -1956,8 +1957,8 @@
     if (!silent) {
       renderDetailPanel(
         saveFailureMessage
-          ? '閲囬泦璇︽儏鏈啓鍏ユ湰鍦扮紦瀛橈紝姝ｅ湪鎵撳紑鏃х紪杈戦〉'
-          : '閲囬泦鏁版嵁宸插叆搴擄紝姝ｅ湪鎵撳紑鏃х紪杈戦〉',
+          ? '采集详情未写入本地缓存，正在打开旧编辑页'
+          : '采集数据已入库，正在打开旧编辑页',
         result
       );
     }

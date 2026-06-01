@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "爆单ERP",
   "description": "爆单ERP 商品采集、采集箱同步和后台工作台入口",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "permissions": ["activeTab", "alarms", "scripting", "storage", "tabs"],
   "host_permissions": [
     "http://localhost/*",
@@ -10,8 +10,14 @@
     "https://erp.hjt888.xyz/*",
     "https://seller.ozon.ru/*",
     "https://ozon.ru/*",
+    "https://www.ozon.ru/*",
+    "https://m.ozon.ru/*",
     "https://ozon.kz/*",
+    "https://www.ozon.kz/*",
+    "https://m.ozon.kz/*",
     "https://ozon.by/*",
+    "https://www.ozon.by/*",
+    "https://m.ozon.by/*",
     "https://*.ozon.ru/*",
     "https://*.ozon.kz/*",
     "https://*.ozon.by/*"
@@ -42,8 +48,14 @@
       "resources": ["assets/logo-16.png", "assets/logo-32.png", "assets/logo-48.png"],
       "matches": [
         "https://ozon.ru/*",
+        "https://www.ozon.ru/*",
+        "https://m.ozon.ru/*",
         "https://ozon.kz/*",
+        "https://www.ozon.kz/*",
+        "https://m.ozon.kz/*",
         "https://ozon.by/*",
+        "https://www.ozon.by/*",
+        "https://m.ozon.by/*",
         "https://*.ozon.ru/*",
         "https://*.ozon.kz/*",
         "https://*.ozon.by/*"
@@ -54,8 +66,14 @@
     {
       "matches": [
         "https://ozon.ru/*",
+        "https://www.ozon.ru/*",
+        "https://m.ozon.ru/*",
         "https://ozon.kz/*",
+        "https://www.ozon.kz/*",
+        "https://m.ozon.kz/*",
         "https://ozon.by/*",
+        "https://www.ozon.by/*",
+        "https://m.ozon.by/*",
         "https://*.ozon.ru/*",
         "https://*.ozon.kz/*",
         "https://*.ozon.by/*"
