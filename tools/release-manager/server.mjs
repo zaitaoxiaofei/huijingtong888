@@ -749,23 +749,24 @@ function page() {
       }
 
       async function publish(version) {
-        if (!version) return;
+        if (!version) {
+          setStatus("?????????????");
+          return;
+        }
+        const current = state?.online?.version || "??????";
+        if (!window.confirm("?????? " + version + "????????? " + current + " ??")) return;
         setBusy(true);
         try {
-          log(\`正在发布 \${version}...\`);
-          const result = await api("/api/publish", {
-            method: "POST",
-            body: JSON.stringify({ version, message: notesInput.value })
-          });
-          log(\`发布完成：\${result.version}\\n\${result.liveDir}\`);
+          setStatus("?????? " + version + "...");
+          const result = await api("/api/publish", { method: "POST", body: JSON.stringify({ version, message: notesInput.value }) });
+          setStatus("????????????" + result.version);
           await refresh();
         } catch (error) {
-          log(error.message);
+          setStatus(error.message);
         } finally {
           setBusy(false);
         }
       }
-
       document.getElementById("refreshBtn").addEventListener("click", refresh);
       document.getElementById("buildBtn").addEventListener("click", build);
       document.getElementById("publishLatestBtn").addEventListener("click", () => publish(state?.releases?.[0]?.version));
@@ -1568,26 +1569,39 @@ function pageV3() {
 
       function renderReleaseTable() {
         if (!state.releases.length) {
-          releaseTable.innerHTML = '<div class="empty"><div><strong>暂无版本包</strong><span>请先在左侧生成版本包。</span></div></div>';
+          releaseTable.innerHTML = '<div class="empty"><div><strong>?????</strong><span>???????????</span></div></div>';
           return;
         }
-        releaseTable.innerHTML =
-          '<div class="table-wrap"><table><thead><tr><th class="col-pick">选择</th><th class="col-version">版本号</th><th class="col-time">创建时间</th><th>包目录</th></tr></thead><tbody>' +
+        releaseTable.innerHTML = '<div class="table-wrap"><table><thead><tr><th class="col-pick">??</th><th class="col-version">???</th><th class="col-time">????</th><th class="col-status">??</th><th>???</th><th class="col-action">??</th></tr></thead><tbody>' +
           state.releases.map(function (release) {
             const checked = release.version === selectedVersion;
-            return '<tr class="' + (checked ? "selected" : "") + '">' +
+            return '<tr class="' + (checked ? "selected" : "") + '" data-version="' + htmlEscape(release.version) + '">' +
               '<td class="col-pick"><input type="radio" name="releaseVersion" value="' + htmlEscape(release.version) + '"' + (checked ? " checked" : "") + ' /></td>' +
               '<td><div class="mono" title="' + htmlEscape(release.version) + '">' + htmlEscape(release.version) + '</div></td>' +
               '<td>' + htmlEscape(timeText(release.builtAt)) + '</td>' +
+              '<td><span class="badge ' + (release.isPublished ? "online" : "warning") + '">' + (release.isPublished ? "???" : "???") + '</span></td>' +
               '<td><div class="path-cell" title="' + htmlEscape(release.path) + '">' + htmlEscape(release.path) + '</div></td>' +
+              '<td class="col-action"><button data-publish-version="' + htmlEscape(release.version) + '">??</button></td>' +
             '</tr>';
           }).join("") + '</tbody></table></div>' +
-          '<div class="table-actions"><div class="selected-note">选中版本：' + htmlEscape(selectedVersion || "-") + '</div><button class="primary" id="publishSelectedBtn">发布选中版本</button></div>';
-
+          '<div class="table-actions"><div class="selected-note">?????' + htmlEscape(selectedVersion || "-") + '</div><button class="primary" id="publishSelectedBtn">??????</button></div>';
         releaseTable.querySelectorAll('input[name="releaseVersion"]').forEach(function (input) {
           input.addEventListener("change", function () {
             selectedVersion = input.value;
             render(state);
+          });
+        });
+        releaseTable.querySelectorAll('tr[data-version]').forEach(function (row) {
+          row.addEventListener("click", function (event) {
+            if (event.target.closest("button")) return;
+            selectedVersion = row.dataset.version;
+            render(state);
+          });
+        });
+        releaseTable.querySelectorAll('button[data-publish-version]').forEach(function (button) {
+          button.addEventListener("click", function () {
+            selectedVersion = button.dataset.publishVersion;
+            publish(selectedVersion);
           });
         });
         document.getElementById("publishSelectedBtn").addEventListener("click", function () { publish(selectedVersion); });
@@ -1735,6 +1749,7 @@ function pageV4() {
       .col-version { width: 154px; }
       .col-time { width: 118px; }
       .col-status { width: 86px; }
+      .col-action { width: 78px; text-align: right; }
       .mono { overflow: hidden; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
       .path-cell { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
       .table-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; }
@@ -1833,29 +1848,44 @@ function pageV4() {
       }
       function renderReleaseTable() {
         if (!state.releases.length) {
-          releaseTable.innerHTML = '<div class="empty"><div><strong>暂无版本包</strong><span>请先在左侧生成版本包。</span></div></div>';
+          releaseTable.innerHTML = '<div class="empty"><div><strong>\u6682\u65e0\u7248\u672c\u5305</strong><span>\u8bf7\u5148\u5728\u5de6\u4fa7\u751f\u6210\u7248\u672c\u5305\u3002</span></div></div>';
           return;
         }
-        releaseTable.innerHTML = '<div class="table-wrap"><table><thead><tr><th class="col-pick">选择</th><th class="col-version">版本号</th><th class="col-time">创建时间</th><th class="col-status">状态</th><th>包目录</th></tr></thead><tbody>' +
+        releaseTable.innerHTML = '<div class="table-wrap"><table><thead><tr><th class="col-pick">\u9009\u62e9</th><th class="col-version">\u7248\u672c\u53f7</th><th class="col-time">\u521b\u5efa\u65f6\u95f4</th><th class="col-status">\u72b6\u6001</th><th>\u5305\u76ee\u5f55</th><th class="col-action">\u64cd\u4f5c</th></tr></thead><tbody>' +
           state.releases.map(function (release) {
             const checked = release.version === selectedVersion;
-            return '<tr class="' + (checked ? "selected" : "") + '">' +
+            return '<tr class="' + (checked ? "selected" : "") + '" data-version="' + htmlEscape(release.version) + '">' +
               '<td class="col-pick"><input type="radio" name="releaseVersion" value="' + htmlEscape(release.version) + '"' + (checked ? " checked" : "") + ' /></td>' +
               '<td><div class="mono" title="' + htmlEscape(release.version) + '">' + htmlEscape(release.version) + '</div></td>' +
               '<td>' + htmlEscape(timeText(release.builtAt)) + '</td>' +
-              '<td><span class="badge ' + (release.isPublished ? "online" : "warning") + '">' + (release.isPublished ? "已发布" : "未发布") + '</span></td>' +
+              '<td><span class="badge ' + (release.isPublished ? "online" : "warning") + '">' + (release.isPublished ? "\u5df2\u53d1\u5e03" : "\u672a\u53d1\u5e03") + '</span></td>' +
               '<td><div class="path-cell" title="' + htmlEscape(release.path) + '">' + htmlEscape(release.path) + '</div></td>' +
+              '<td class="col-action"><button data-publish-version="' + htmlEscape(release.version) + '">\u4e0a\u67b6</button></td>' +
             '</tr>';
           }).join("") + '</tbody></table></div>' +
-          '<div class="table-actions"><div class="selected-note">选中版本：' + htmlEscape(selectedVersion || "-") + '</div><button class="primary" id="publishSelectedBtn">发布选中版本</button></div>';
+          '<div class="table-actions"><div class="selected-note">\u9009\u4e2d\u7248\u672c\uff1a' + htmlEscape(selectedVersion || "-") + '</div><button class="primary" id="publishSelectedBtn">\u4e0a\u67b6\u9009\u4e2d\u7248\u672c</button></div>';
         releaseTable.querySelectorAll('input[name="releaseVersion"]').forEach(function (input) {
           input.addEventListener("change", function () {
             selectedVersion = input.value;
             render(state);
           });
         });
+        releaseTable.querySelectorAll('tr[data-version]').forEach(function (row) {
+          row.addEventListener("click", function (event) {
+            if (event.target.closest("button")) return;
+            selectedVersion = row.dataset.version;
+            render(state);
+          });
+        });
+        releaseTable.querySelectorAll('button[data-publish-version]').forEach(function (button) {
+          button.addEventListener("click", function () {
+            selectedVersion = button.dataset.publishVersion;
+            publish(selectedVersion);
+          });
+        });
         document.getElementById("publishSelectedBtn").addEventListener("click", function () { publish(selectedVersion); });
       }
+
       function renderOnlineList() {
         const rows = state.publishedReleases || [];
         if (!rows.length) {
@@ -1900,16 +1930,16 @@ function pageV4() {
       }
       async function publish(version) {
         if (!version) {
-          setStatus("请先选择一个待发布版本包。");
+          setStatus("\u8bf7\u5148\u9009\u62e9\u4e00\u4e2a\u5f85\u4e0a\u67b6\u7248\u672c\u5305\u3002");
           return;
         }
-        const current = state?.online?.version || "尚未发布版本";
-        if (!window.confirm("确认发布版本 " + version + "，替换当前线上版本 " + current + " 吗？")) return;
+        const current = state?.online?.version || "\u5c1a\u672a\u53d1\u5e03\u7248\u672c";
+        if (!window.confirm("\u786e\u8ba4\u4e0a\u67b6\u7248\u672c " + version + "\uff0c\u66ff\u6362\u5f53\u524d\u7ebf\u4e0a\u7248\u672c " + current + " \u5417\uff1f")) return;
         setBusy(true);
         try {
-          setStatus("正在发布版本 " + version + "...");
+          setStatus("\u6b63\u5728\u4e0a\u67b6\u7248\u672c " + version + "...");
           const result = await api("/api/publish", { method: "POST", body: JSON.stringify({ version, message: notesInput.value }) });
-          setStatus("发布成功，当前线上版本：" + result.version);
+          setStatus("\u4e0a\u67b6\u6210\u529f\uff0c\u5f53\u524d\u7ebf\u4e0a\u7248\u672c\uff1a" + result.version);
           await refresh();
         } catch (error) {
           setStatus(error.message);

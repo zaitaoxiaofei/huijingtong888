@@ -1,4 +1,4 @@
-﻿if (typeof importScripts === 'function') {
+if (typeof importScripts === 'function') {
   try {
     importScripts('erp-config.js');
   } catch (error) {}
@@ -90,7 +90,7 @@ async function checkPluginUpdateStatus() {
   }, 12000);
   const json = await response.json().catch(() => ({}));
   if (!response.ok || json?.success === false) {
-    throw new Error(json?.error || `鎻掍欢鏇存柊鐘舵€佹鏌ュけ璐ワ細HTTP ${response.status}`);
+    throw new Error(json?.error || `闂備礁婀辩划顖滄暜婵犲倵鏋庨柕蹇嬪€曢崡鎶芥倵濞戞鎴︽偂閳ь剟姊虹紒姗嗙劸闁糕晜鐗犻崺鈧い鎴ｆ硶閸斿秵銇勯妷銉﹀殗鐎殿喖顭锋俊鐑藉Ψ閿濆嫭婢€闂佽崵濮甸崝鎴﹀磿閼姐倖顫曢柣褍寮P ${response.status}`);
   }
   const plugin = json?.data?.plugin || json?.plugin || null;
   await chrome.storage.local.set({
@@ -139,7 +139,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
     });
   } catch (error) {
     if (error?.name === 'AbortError') {
-      throw new Error('ERP 鎺ュ彛璇锋眰瓒呮椂锛岃纭 ERP 鏈嶅姟鏄惁宸插惎鍔ㄦ垨缃戠粶鏄惁姝ｅ父');
+      throw new Error('ERP request timed out');
     }
     throw error;
   } finally {
@@ -209,11 +209,11 @@ async function injectOzonFrontContent(tabId, url, reason = 'auto') {
       target: { tabId },
       files: OZON_FRONT_SCRIPT_FILES
     });
-    console.info('[鐖嗗崟ERP] 宸蹭富鍔ㄦ敞鍏?Ozon 鍓嶅彴鑴氭湰', { tabId, reason });
+    console.info('[Ozon ERP] Ozon front script injected', { tabId, reason });
     return true;
   } catch (error) {
     const message = error?.message || String(error);
-    console.warn('[鐖嗗崟ERP] Ozon 鍓嶅彴鑴氭湰涓诲姩娉ㄥ叆澶辫触锛? + message, { tabId, reason, url });
+    console.warn('[Ozon ERP] Ozon front script injection failed: ' + message, { tabId, reason, url });
     return false;
   }
 }
@@ -292,7 +292,7 @@ async function importCollectedProductPayloadToErpDb(payload, syncContext = null,
     return {
       success: false,
       error: 'ERP_TENANT_REQUIRED',
-      message: '璇峰厛鎵撳紑骞剁櫥褰曚竴涓?ERP 椤甸潰锛岃鎻掍欢璇嗗埆绉熸埛鍚庡啀鎵嬪姩閲囬泦鍟嗗搧'
+      message: 'ERP tenant required before manual collect'
     };
   }
 
@@ -301,7 +301,7 @@ async function importCollectedProductPayloadToErpDb(payload, syncContext = null,
     return {
       success: false,
       error: 'ERP_SYNC_URL_INVALID',
-      message: '褰撳墠 ERP 鍚屾鍦板潃鏃犳晥锛岃妫€鏌ユ彃浠朵腑鐨?ERP 鍦板潃閰嶇疆'
+      message: 'Invalid ERP sync URL, check plugin ERP base URL'
     };
   }
 
@@ -330,7 +330,7 @@ async function importCollectedProductPayloadToErpDb(payload, syncContext = null,
   } catch (error) {}
 
   if (!response.ok || json?.success === false) {
-    const message = json?.error || text || `鍚屾鍒?ERP 鏁版嵁搴撳け璐ワ細HTTP ${response.status}`;
+    const message = json?.error || text || `Sync to ERP database failed: HTTP ${response.status}`;
     return {
       success: false,
       error: json?.error || `HTTP_${response.status}`,
@@ -352,7 +352,7 @@ async function lookupCollectedProductCache(sku, syncContext = null) {
     return {
       success: false,
       error: 'SKU_REQUIRED',
-      message: '缂哄皯 SKU锛屾棤娉曟煡璇㈠凡閲囬泦鍟嗗搧'
+      message: 'SKU is required to query collected products'
     };
   }
 
@@ -364,7 +364,7 @@ async function lookupCollectedProductCache(sku, syncContext = null) {
     return {
       success: false,
       error: 'ERP_LOOKUP_URL_INVALID',
-      message: '褰撳墠 ERP 鏌ヨ鍦板潃鏃犳晥锛岃妫€鏌ユ彃浠朵腑鐨?ERP 鍦板潃閰嶇疆'
+      message: 'Invalid ERP lookup URL, check plugin ERP base URL'
     };
   }
 
@@ -387,7 +387,7 @@ async function lookupCollectedProductCache(sku, syncContext = null) {
     return {
       success: false,
       error: json?.error || `HTTP_${response.status}`,
-      message: json?.error || text || `鏌ヨ宸查噰闆嗗晢鍝佸け璐ワ細HTTP ${response.status}`
+      message: json?.error || text || `Query collected product failed: HTTP ${response.status}`
     };
   }
 
@@ -484,16 +484,16 @@ async function testSellerTabCommunication() {
         resolve({ success: false, error: 'COMMUNICATION_FAILED', detail: chrome.runtime.lastError.message });
         return;
       }
-      resolve(response?.pong === true ? { success: true, message: '閫氫俊姝ｅ父' } : { success: false, error: 'NO_RESPONSE', detail: JSON.stringify(response) });
+      resolve(response?.pong === true ? { success: true, message: 'Communication OK' } : { success: false, error: 'NO_RESPONSE', detail: JSON.stringify(response) });
     });
   });
 }
 
 async function refreshSellerTab() {
   const tab = await findSellerTab();
-  if (!tab?.id) return { success: false, error: 'NO_SELLER_TAB', message: '娌℃湁鎵惧埌 seller.ozon.ru 椤甸潰' };
+  if (!tab?.id) return { success: false, error: 'NO_SELLER_TAB', message: 'No seller.ozon.ru page found' };
   await chrome.tabs.reload(tab.id);
-  return { success: true, message: 'seller.ozon.ru 椤甸潰宸插埛鏂帮紝璇风◢鍊欓噸璇? };
+  return { success: true, message: 'seller.ozon.ru page refreshed, please retry later' };
 }
 
 async function sendMessageToSellerTab(tabId, payload) {
@@ -503,7 +503,7 @@ async function sendMessageToSellerTab(tabId, payload) {
         resolve({
           success: false,
           error: 'TAB_COMMUNICATION_FAILED',
-          message: '涓?seller.ozon.ru Tab 閫氫俊澶辫触'
+          message: 'Failed to communicate with seller.ozon.ru tab'
         });
         return;
       }
@@ -535,7 +535,7 @@ async function sendMessageToTabWithRetry(tabId, payload, retries = 5, intervalMs
       await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
   }
-  return { success: false, error: '椤甸潰鏈搷搴旓紝璇峰埛鏂?Ozon 椤甸潰鍚庨噸璇? };
+  return { success: false, error: 'Page not responding, refresh Ozon and retry' };
 }
 
 async function reinjectSellerBridge(tabId) {
@@ -550,7 +550,7 @@ async function reinjectSellerBridge(tabId) {
 async function crossTabOzonRequest(message, sender) {
   const tab = await ensureSellerTab();
   if (!tab?.id) {
-    return { success: true, hasSellerTab: false, error: 'NO_SELLER_TAB', message: '璇峰厛鎵撳紑 seller.ozon.ru 椤甸潰' };
+    return { success: true, hasSellerTab: false, error: 'NO_SELLER_TAB', message: 'Open seller.ozon.ru first' };
   }
   const requestPayload = {
     type: 'OZON_SKU_API_REQUEST',
@@ -674,7 +674,7 @@ function selectSellerTitle(sources, keys) {
 function normalizeSellerBrand(value) {
   const text = cleanText(value);
   if (!text) return '';
-  return text === '斜械蟹 斜褉械薪写邪' ? '鏃犲搧鐗? : text;
+  return text === 'без бренда' ? 'No brand' : text;
 }
 
 function normalizeSellerCategoryIds(source = {}) {
@@ -1010,17 +1010,17 @@ async function requestSellerBridgeDataFromBackground(sku, apiType = 'sales', var
     variantId
   }, null);
   if (!response) {
-    throw new Error('seller.ozon.ru 鏈繑鍥炲搷搴?);
+    throw new Error('seller.ozon.ru did not return a response');
   }
   if (response.success !== true) {
-    throw new Error(response.message || response.error || 'seller.ozon.ru 璇锋眰澶辫触');
+    throw new Error(response.message || response.error || 'seller.ozon.ru request failed');
   }
   return response.data;
 }
 
 async function fetchSellerCollectedProductFields(sku) {
   const normalizedSku = String(sku || '').trim();
-  if (!normalizedSku) throw new Error('缂哄皯 SKU');
+  if (!normalizedSku) throw new Error('SKU is required');
 
   const fields = {};
   const raw = {};
@@ -1043,7 +1043,7 @@ async function fetchSellerCollectedProductFields(sku) {
       if (hasFilledValue(raw.salesMeta.benchmark)) fields.salesBenchmark = raw.salesMeta.benchmark;
       resolvedVariantId = String(raw.sales.variantId || raw.sales.variant_id || '').trim();
     } else {
-      warnings.push('seller sales 鏈繑鍥炲晢鍝佹暟鎹?);
+      warnings.push('seller sales did not return product data');
     }
   } catch (error) {
     warnings.push(error?.message || String(error));
@@ -1410,7 +1410,7 @@ async function emitAutoCollectListProgress(tabId, progress) {
 async function collectSellerOnlySkusToCollectedProducts(message, sender = null) {
   const skus = normalizeManualSkuList(message?.skus || []);
   if (skus.length === 0) {
-    return { success: false, error: 'AUTO_SKU_REQUIRED', message: '缂哄皯闇€瑕佽嚜鍔ㄩ噰闆嗙殑 SKU' };
+    return { success: false, error: 'AUTO_SKU_REQUIRED', message: 'Missing SKUs for auto collection' };
   }
 
   const writeToErp = message?.writeToErp === true;
@@ -1424,7 +1424,7 @@ async function collectSellerOnlySkusToCollectedProducts(message, sender = null) 
       const sellerResult = await fetchSellerCollectedProductFields(sku);
       const payload = buildSellerOnlyCollectedProductPayload(sku, sellerResult, baseBySku.get(sku));
       if (!payload.sku || Object.keys(sellerResult.fields || {}).length === 0) {
-        throw new Error((sellerResult.warnings || []).filter(Boolean)[0] || 'seller 未返回可用字段');
+        throw new Error((sellerResult.warnings || []).filter(Boolean)[0] || 'seller did not return usable fields');
       }
       if (!writeToErp) {
         const item = {
@@ -1456,7 +1456,7 @@ async function collectSellerOnlySkusToCollectedProducts(message, sender = null) 
         const item = {
           sku,
           success: false,
-          error: importResult?.message || importResult?.error || '鍐欏叆宸查噰闆嗗晢鍝佸け璐?
+          error: importResult?.message || importResult?.error || 'Failed to write collected product'
         };
         results.push(item);
         await emitAutoCollectListProgress(sourceTabId, item);
@@ -1489,7 +1489,7 @@ function normalizeManualSkuList(value) {
   return Array.from(
     new Set(
       source
-        .split(/[\s,锛?锛沒+/g)
+        .split(/[\s,，;；]+/g)
         .map((item) => item.trim())
         .filter(Boolean)
     )
@@ -1544,7 +1544,7 @@ function buildManualCollectSummary(items, fallback = '') {
   const successCount = safeItems.filter((item) => item?.status === 'success').length;
   const errorCount = safeItems.filter((item) => item?.status === 'error').length;
   const runningCount = safeItems.filter((item) => item?.status === 'running').length;
-  return `鎵归噺閲囬泦涓細宸插畬鎴?${successCount}锛屽け璐?${errorCount}锛岄噰闆嗕腑 ${runningCount}锛屽叡 ${safeItems.length}`;
+  return `Batch collecting: done ${successCount}, failed ${errorCount}, running ${runningCount}, total ${safeItems.length}`;
 }
 
 async function persistManualCollectProgress(progress, options = {}) {
@@ -1572,16 +1572,16 @@ async function persistManualCollectProgress(progress, options = {}) {
 async function collectManualDetailSkus(message) {
   const skus = normalizeManualSkuList(message?.skus || []);
   if (skus.length === 0) {
-    return { success: false, error: 'MANUAL_SKU_REQUIRED', message: '璇峰厛濉啓 SKU' };
+    return { success: false, error: 'MANUAL_SKU_REQUIRED', message: 'Please enter SKU first' };
   }
 
   await saveManualCollectProgressState({
     active: true,
-    summary: `鍑嗗閲囬泦 ${skus.length} 涓?SKU...`,
+    summary: `Preparing to collect ${skus.length} SKU...`,
     items: skus.map((sku) => ({
       sku,
       status: 'pending',
-      text: `绛夊緟閲囬泦锛?{sku}`
+      text: `Waiting: ${sku}`
     }))
   });
 
@@ -1590,12 +1590,12 @@ async function collectManualDetailSkus(message) {
     await persistManualCollectProgress({
       sku,
       status: 'running',
-      text: `閲囬泦涓細${sku}`
+      text: `Collecting: ${sku}`
     });
     await emitManualCollectProgress({
       sku,
       status: 'running',
-      text: `閲囬泦涓細${sku}`
+      text: `Collecting: ${sku}`
     });
     try {
       if (message?.forceCollect !== true) {
@@ -1614,12 +1614,12 @@ async function collectManualDetailSkus(message) {
           await persistManualCollectProgress({
             sku,
             status: 'success',
-            text: `宸蹭娇鐢?ERP 宸查噰闆嗘暟鎹細${sku}`
+            text: `Used ERP collected data: ${sku}`
           });
           await emitManualCollectProgress({
             sku,
             status: 'success',
-            text: `宸蹭娇鐢?ERP 宸查噰闆嗘暟鎹細${sku}`
+            text: `Used ERP collected data: ${sku}`
           });
           continue;
         }
@@ -1627,12 +1627,12 @@ async function collectManualDetailSkus(message) {
           await persistManualCollectProgress({
             sku,
             status: 'running',
-            text: `闇€瑕佽ˉ閲囷細${sku}`
+            text: `Needs refresh collection: ${sku}`
           });
           await emitManualCollectProgress({
             sku,
             status: 'running',
-            text: `闇€瑕佽ˉ閲囷細${sku}`
+            text: `Needs refresh collection: ${sku}`
           });
         }
       }
@@ -1650,39 +1650,39 @@ async function collectManualDetailSkus(message) {
           await persistManualCollectProgress({
             sku,
             status: 'success',
-            text: `宸插畬鎴愶細${sku}`
+            text: `Done: ${sku}`
           });
           await emitManualCollectProgress({
             sku,
             status: 'success',
-            text: `宸插畬鎴愶細${sku}`
+            text: `Done: ${sku}`
           });
         } else {
-          const errorMessage = importResult?.message || importResult?.error || '鍐欏叆宸查噰闆嗗晢鍝佸け璐?;
+          const errorMessage = importResult?.message || importResult?.error || 'Failed to write collected product';
           results.push({ sku, success: false, tabId: tab.id, error: errorMessage });
           await persistManualCollectProgress({
             sku,
             status: 'error',
-            text: `澶辫触锛?{sku} - ${errorMessage}`
+            text: `Failed: ${sku} - ${errorMessage}`
           });
           await emitManualCollectProgress({
             sku,
             status: 'error',
-            text: `澶辫触锛?{sku} - ${errorMessage}`
+            text: `Failed: ${sku} - ${errorMessage}`
           });
         }
       } else {
-        const errorMessage = response?.message || response?.error || '璇︽儏椤甸噰闆嗗け璐?;
+        const errorMessage = response?.message || response?.error || 'Detail page collection failed';
         results.push({ sku, success: false, tabId: tab.id, error: errorMessage });
         await persistManualCollectProgress({
           sku,
           status: 'error',
-          text: `澶辫触锛?{sku} - ${errorMessage}`
+          text: `Failed: ${sku} - ${errorMessage}`
         });
         await emitManualCollectProgress({
           sku,
           status: 'error',
-          text: `澶辫触锛?{sku} - ${errorMessage}`
+          text: `Failed: ${sku} - ${errorMessage}`
         });
       }
     } catch (error) {
@@ -1691,12 +1691,12 @@ async function collectManualDetailSkus(message) {
       await persistManualCollectProgress({
         sku,
         status: 'error',
-        text: `澶辫触锛?{sku} - ${errorMessage}`
+        text: `Failed: ${sku} - ${errorMessage}`
       });
       await emitManualCollectProgress({
         sku,
         status: 'error',
-        text: `澶辫触锛?{sku} - ${errorMessage}`
+        text: `Failed: ${sku} - ${errorMessage}`
       });
     }
   }
@@ -1704,7 +1704,7 @@ async function collectManualDetailSkus(message) {
   const successCount = results.filter((item) => item.success).length;
   await saveManualCollectProgressState({
     active: false,
-    summary: `宸插啓鍏ュ凡閲囬泦鍟嗗搧锛氭垚鍔?${successCount} 涓紝澶辫触 ${skus.length - successCount} 涓猔,
+    summary: `Collected products written: ${successCount} succeeded, ${skus.length - successCount} failed`,
     items: (await getManualCollectProgressState()).items
   });
   return {
@@ -1738,7 +1738,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try {
       url = new URL(message.url);
     } catch (error) {
-      sendResponse({ success: false, error: '鏈湴鎺ュ彛 URL 鏃犳晥' });
+      sendResponse({ success: false, error: 'Invalid local API URL' });
       return false;
     }
 
@@ -1746,7 +1746,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then((rawErpBaseUrl) => (rawErpBaseUrl ? normalizeErpBaseUrl(rawErpBaseUrl) : getErpBaseUrl()))
       .then(async (erpBaseUrl) => {
         if (!isAllowedLocalPluginUrl(url.toString(), erpBaseUrl)) {
-          sendResponse({ success: false, error: '鍙厑璁歌闂綋鍓?ERP 閰嶇疆涓嬬殑鏈湴鎻掍欢鎺ュ彛' });
+          sendResponse({ success: false, error: 'Only local plugin API under current ERP config is allowed' });
           return null;
         }
         const nextOptions = message.options && typeof message.options === 'object' ? { ...message.options } : {};
@@ -1766,7 +1766,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({
             success: false,
             error: 'ERP_TENANT_REQUIRED',
-            message: '璇峰厛鎵撳紑骞剁櫥褰曚竴涓?ERP 椤甸潰锛岃鎻掍欢璇嗗埆绉熸埛鍚庡啀璇?
+            message: 'ERP tenant required before manual collect'
           });
           return null;
         }
@@ -1800,7 +1800,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try {
       url = new URL(message.url);
     } catch (error) {
-      sendResponse({ success: false, error: 'ERP API URL 鏃犳晥' });
+      sendResponse({ success: false, error: 'Invalid ERP API URL' });
       return false;
     }
 
@@ -1808,7 +1808,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then((rawErpBaseUrl) => (rawErpBaseUrl ? normalizeErpBaseUrl(rawErpBaseUrl) : getErpBaseUrl()))
       .then(async (erpBaseUrl) => {
         if (!isAllowedErpApiUrl(url.toString(), erpBaseUrl)) {
-          sendResponse({ success: false, error: '鍙厑璁歌闂綋鍓?ERP 閰嶇疆涓嬬殑 API 鎺ュ彛' });
+          sendResponse({ success: false, error: 'Only API under current ERP config is allowed' });
           return null;
         }
         const nextOptions = message.options && typeof message.options === 'object' ? { ...message.options } : {};
@@ -1845,7 +1845,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.tabs
       .query({ active: true, currentWindow: true })
       .then(async ([tab]) => {
-        if (!tab?.id) return { success: false, error: '娌℃湁鎵惧埌褰撳墠鏍囩椤? };
+        if (!tab?.id) return { success: false, error: 'Current tab not found' };
         return await chrome.tabs.sendMessage(tab.id, { type: 'OZON_ERP_EXPORT_STATE' });
       })
       .then(sendResponse)
@@ -1857,7 +1857,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.tabs
       .query({ active: true, currentWindow: true })
       .then(async ([tab]) => {
-        if (!tab?.id) return { success: false, error: '娌℃湁鎵惧埌褰撳墠鏍囩椤? };
+        if (!tab?.id) return { success: false, error: 'Current tab not found' };
         return await chrome.tabs.sendMessage(tab.id, { type: 'OZON_ERP_MANUAL_COLLECT_DETAIL' });
       })
       .then(sendResponse)
@@ -1953,15 +1953,15 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create(PLUGIN_UPDATE_ALARM_NAME, { periodInMinutes: 60 });
-  checkPluginUpdateStatus().catch((error) => console.warn('[鐖嗗崟ERP] 鎻掍欢鏇存柊妫€鏌ュけ璐?, error?.message || error));
+  checkPluginUpdateStatus().catch((error) => console.warn('[Ozon ERP] Plugin update check failed', error?.message || error));
 });
 
 chrome.runtime.onStartup.addListener(() => {
   chrome.alarms.create(PLUGIN_UPDATE_ALARM_NAME, { periodInMinutes: 60 });
-  checkPluginUpdateStatus().catch((error) => console.warn('[鐖嗗崟ERP] 鎻掍欢鏇存柊妫€鏌ュけ璐?, error?.message || error));
+  checkPluginUpdateStatus().catch((error) => console.warn('[Ozon ERP] Plugin update check failed', error?.message || error));
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm?.name !== PLUGIN_UPDATE_ALARM_NAME) return;
-  checkPluginUpdateStatus().catch((error) => console.warn('[鐖嗗崟ERP] 鎻掍欢鏇存柊妫€鏌ュけ璐?, error?.message || error));
+  checkPluginUpdateStatus().catch((error) => console.warn('[Ozon ERP] Plugin update check failed', error?.message || error));
 });

@@ -40,6 +40,8 @@ const shopOptions = computed(() => [
   ...state.shops.map((shop) => ({ value: String(shop.shop_id), label: shop.shop_name }))
 ]);
 
+const scenarioOrder = ["order_created", "order_update", "stall_comfort", "delay_comfort", "pickup_notice", "review_request"];
+
 function dt(value) {
   return value ? String(value).slice(0, 19).replace("T", " ") : "-";
 }
@@ -58,8 +60,11 @@ function productLine(row) {
 
 function scenarioState(row, scenario) {
   const current = row.scenario === scenario.key || row.message_type === scenario.key;
-  const done = current && ["sent", "copied", "read", "skipped"].includes(row.status);
-  if (done) return { type: "done", tagType: "success" };
+  const currentIndex = scenarioOrder.indexOf(row.scenario || row.message_type);
+  const scenarioIndex = scenarioOrder.indexOf(scenario.key);
+  const done = scenarioIndex >= 0 && currentIndex >= 0 && scenarioIndex < currentIndex;
+  const actionDone = current && ["sent", "copied", "skipped"].includes(row.status);
+  if (done || actionDone) return { type: "done", tagType: "success" };
   if (current) return { type: "current", tagType: "warning" };
   return { type: "pending", tagType: "info" };
 }
@@ -102,7 +107,7 @@ async function openChat(row) {
   chatVisible.value = true;
   await loadHistoryOrders(row);
   if (row.read_state !== "read") {
-    await recordMessage(row, "read", false, { readState: "read", reload: false });
+    await recordMessage(row, row.status || "draft", false, { readState: "read", reload: false });
     row.read_state = "read";
     row.read_state_label = "已读";
   }

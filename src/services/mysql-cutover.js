@@ -12774,10 +12774,13 @@ export async function orderDetailMysql(id) {
   return { order, items, finance, profit_detail_snapshot: profitDetailSnapshot };
 }
 
-const CUSTOMER_MESSAGE_TYPES = new Set(["pickup_notice", "order_update", "delay_comfort"]);
+const CUSTOMER_MESSAGE_TYPES = new Set(["order_created", "order_update", "stall_comfort", "delay_comfort", "pickup_notice", "review_request"]);
 
 function customerMessageTypeLabel(type) {
+  if (type === "order_created") return "下单感谢";
+  if (type === "stall_comfort") return "卡顿安抚";
   if (type === "pickup_notice") return "到货取货通知";
+  if (type === "review_request") return "取货后求好评";
   if (type === "delay_comfort") return "延误安抚";
   return "订单动态回复";
 }
@@ -12831,6 +12834,11 @@ function customerMessageIsPickup(row = {}) {
   return text.includes("ready_for_pickup") || text.includes("pickup");
 }
 
+function customerMessageIsDelivered(row = {}) {
+  const text = `${row.status || ""} ${row.tracking_stage || ""} ${row.logistics_status || ""}`.toLowerCase();
+  return text.includes("delivered") || text.includes("签收");
+}
+
 function customerMessageIsDelayed(row = {}) {
   if (Number(row.is_overdue || 0)) return true;
   const endTime = row.delivery_date_end ? Date.parse(row.delivery_date_end) : NaN;
@@ -12838,9 +12846,21 @@ function customerMessageIsDelayed(row = {}) {
   return Number.isFinite(endTime) && endTime < Date.now() && !finished;
 }
 
+function customerMessageIsStalled(row = {}) {
+  const orderedAt = row.ordered_at ? Date.parse(row.ordered_at) : NaN;
+  const finished = /delivered|cancelled/i.test(`${row.status || ""} ${row.tracking_stage || ""}`);
+  if (!Number.isFinite(orderedAt) || finished) return false;
+  const ageHours = (Date.now() - orderedAt) / 3600000;
+  const text = `${row.status || ""} ${row.tracking_stage || ""} ${row.logistics_status || ""}`.toLowerCase();
+  return ageHours >= 36 && /awaiting|packaging|deliver|transferring|posting/.test(text);
+}
+
 function customerMessageSuggestedType(row = {}) {
+  if (customerMessageIsDelivered(row)) return "review_request";
   if (customerMessageIsDelayed(row)) return "delay_comfort";
   if (customerMessageIsPickup(row)) return "pickup_notice";
+  if (customerMessageIsStalled(row)) return "stall_comfort";
+  if (/awaiting_packaging|awaiting_deliver/i.test(`${row.status || ""} ${row.tracking_stage || ""}`)) return "order_created";
   return "order_update";
 }
 
@@ -12861,6 +12881,34 @@ function buildCustomerMessage(row = {}, requestedType = "order_update") {
       "包裹已到达取货点/可取货环节，请您留意 Ozon App 内的取货码、取货地址和取货截止时间，方便时尽快安排取货。",
       tracking,
       "感谢您的耐心等待，祝您取货顺利。"
+    ].filter(Boolean).join("\n");
+  }
+
+  if (type === "review_request") {
+    return [
+      "您好，感谢您选择我们的商品。",
+      `订单 ${posting}（${product}）目前显示：${status}。`,
+      "如果商品使用体验不错，欢迎您方便时在 Ozon 留下评价，这对我们非常重要。",
+      "后续使用中如有任何问题，也可以随时联系我们。"
+    ].filter(Boolean).join("\n");
+  }
+
+  if (type === "order_created") {
+    return [
+      "您好，感谢您的下单！",
+      `您的订单 ${posting}（${product}）我们已经收到，目前显示：${status}。`,
+      shop,
+      "我们会尽快处理订单，并持续关注后续发货和物流进度。"
+    ].filter(Boolean).join("\n");
+  }
+
+  if (type === "stall_comfort") {
+    return [
+      "您好，非常抱歉让您久等了。",
+      `订单 ${posting}（${product}）当前停留在：${status}。${windowText ? `系统预计送达/取货时间为 ${windowText}。` : ""}`,
+      "我们已经在关注这个订单的进度，如发现异常会继续联系平台客服核实。",
+      tracking,
+      "感谢您的耐心等待，我们会有新进展就及时同步给您。"
     ].filter(Boolean).join("\n");
   }
 
@@ -12885,7 +12933,10 @@ function buildCustomerMessage(row = {}, requestedType = "order_update") {
 
 function customerMessageReason(row = {}, type = "") {
   const targetType = type || customerMessageSuggestedType(row);
+  if (targetType === "order_created") return "订单刚进入履约链路，适合先感谢客户下单并说明会尽快处理。";
+  if (targetType === "stall_comfort") return "订单停留在同一履约环节较久，适合提前安抚客户。";
   if (targetType === "pickup_notice") return "订单已进入取货/待取货阶段，适合提醒客户尽快取货。";
+  if (targetType === "review_request") return "订单已完成履约，适合礼貌邀请客户评价。";
   if (targetType === "delay_comfort") return "订单进度慢于预计时间，适合主动安抚并说明已联系平台客服。";
   return "用于客户催单时快速回复当前订单最新动态。";
 }
