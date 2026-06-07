@@ -170,76 +170,9 @@ const mainAttributeFields = computed(() => {
   return [];
 });
 const hiddenAttributeCount = computed(() => Math.max(optionalSchemaAttributeFields.value.length - mainAttributeFields.value.length, 0));
-const missingRequiredAttributes = computed(() => templateEditor.attributes.filter((item) => item.required && !hasAttributeValue(item)));
-const filledRequiredAttributeCount = computed(() => templateEditor.attributes.filter((item) => item.required && hasAttributeValue(item)).length);
-const requiredAttributeCount = computed(() => templateEditor.attributes.filter((item) => item.required).length);
-const schemaAttributeCount = computed(() => templateEditor.attributes.filter((item) => item.attribute_id).length);
-const filledSchemaAttributeCount = computed(() => templateEditor.attributes.filter((item) => item.attribute_id && hasAttributeValue(item)).length);
-const missingOptionalSchemaAttributes = computed(() => templateEditor.attributes.filter((item) => item.attribute_id && !item.required && !hasAttributeValue(item)));
-const dictionarySchemaAttributes = computed(() => templateEditor.attributes.filter((item) => Number(item.dictionary_id || 0)));
-const filledDictionaryAttributeCount = computed(() => dictionarySchemaAttributes.value.filter((item) => hasAttributeValue(item)).length);
-const schemaQualityScore = computed(() => {
-  const total = Math.max(schemaAttributeCount.value, 1);
-  const requiredPenalty = missingRequiredAttributes.value.length * 8;
-  const base = Math.round((filledSchemaAttributeCount.value / total) * 100);
-  return Math.max(0, Math.min(100, base - requiredPenalty));
-});
-const schemaQualityCards = computed(() => [
-  {
-    label: "Schema",
-    value: `${filledSchemaAttributeCount.value}/${schemaAttributeCount.value}`,
-    detail: templateEditor.description_category_id && templateEditor.type_id ? `${templateEditor.description_category_id}:${templateEditor.type_id}` : "No Ozon category",
-    tone: schemaAttributeCount.value ? "ok" : "warn"
-  },
-  {
-    label: "Required",
-    value: `${filledRequiredAttributeCount.value}/${requiredAttributeCount.value}`,
-    detail: missingRequiredAttributes.value.length ? `${missingRequiredAttributes.value.length} missing` : "Complete",
-    tone: missingRequiredAttributes.value.length ? "danger" : "ok"
-  },
-  {
-    label: "Dictionary",
-    value: `${filledDictionaryAttributeCount.value}/${dictionarySchemaAttributes.value.length}`,
-    detail: "Local Ozon dictionary cache",
-    tone: dictionarySchemaAttributes.value.length && filledDictionaryAttributeCount.value < dictionarySchemaAttributes.value.length ? "warn" : "ok"
-  },
-  {
-    label: "Quality",
-    value: `${schemaQualityScore.value}/100`,
-    detail: schemaQualityScore.value >= 95 ? "95+ target reached" : `${Math.max(0, 95 - schemaQualityScore.value)} points to 95`,
-    tone: schemaQualityScore.value >= 95 ? "ok" : "warn"
-  }
-]);
-const templateHealthCards = computed(() => [
-  {
-    label: "Ozon后台类目",
-    value: templateEditor.description_category_id && templateEditor.type_id ? "已带出" : "未带出",
-    detail: templateEditor.description_category_id && templateEditor.type_id
-      ? `${templateEditor.description_category_id}:${templateEditor.type_id}`
-      : "需要Ozon详情或采集数据",
-    tone: templateEditor.description_category_id && templateEditor.type_id ? "ok" : "warn"
-  },
-  {
-    label: "必填属性",
-    value: `${filledRequiredAttributeCount.value}/${requiredAttributeCount.value}`,
-    detail: missingRequiredAttributes.value.length ? `缺 ${missingRequiredAttributes.value.length} 项` : "已填写",
-    tone: missingRequiredAttributes.value.length ? "danger" : "ok"
-  },
-  {
-    label: "富文本",
-    value: fixedForm.value.richJson ? "已带入" : "未带入",
-    detail: fixedForm.value.summary ? "简介可用" : "简介为空",
-    tone: fixedForm.value.richJson || fixedForm.value.summary ? "ok" : "warn"
-  },
-  {
-    label: "变体",
-    value: `${templateEditor.variants.length} 个`,
-    detail: templateEditor.variants.some((item) => item.images?.length) ? "含图片" : "缺图片",
-    tone: templateEditor.variants.length ? "ok" : "warn"
-  }
-]);
 const selectedCopyJob = computed(() => state.copyJobs.find((item) => Number(item.id) === Number(state.selectedCopyJobId)) || null);
 const missingVariantOfferIds = computed(() => templateEditor.variants.filter((item) => !String(item.offer_id || "").trim()));
+const variantAttributeFields = computed(() => templateEditor.attributes.filter((field) => isVariantAttributeField(field)));
 const filteredTemplates = computed(() => {
   const keyword = String(templateKeyword.value || "").trim().toLowerCase();
   if (!keyword) return state.templates.slice(0, 8);
@@ -828,6 +761,55 @@ function attributeFieldKey(field = {}) {
   return String(field.attribute_id || field.name || field.sort_order || "");
 }
 
+function variantAttributeModeKey(field = {}) {
+  return `attr:${attributeFieldKey(field)}`;
+}
+
+function isVariantAttributeField(field = {}) {
+  return Boolean(variantFieldMode[variantAttributeModeKey(field)]);
+}
+
+function ensureVariantDynamicAttributes(row = {}) {
+  if (!row.dynamic_attributes || Array.isArray(row.dynamic_attributes) || typeof row.dynamic_attributes !== "object") row.dynamic_attributes = {};
+  return row.dynamic_attributes;
+}
+
+function variantDynamicAttributeKey(field = {}) {
+  return String(field.attribute_id || field.name || field.sort_order || "");
+}
+
+function normalizeVariantAttributeValueForField(value, field = {}) {
+  if (field.type === "multiselect" || field.is_collection) {
+    if (Array.isArray(value)) return value;
+    if (value === undefined || value === null || value === "") return [];
+    return splitTagValue(String(value || ""));
+  }
+  return value ?? "";
+}
+
+function variantAttributeEntry(row = {}, field = {}) {
+  const map = ensureVariantDynamicAttributes(row);
+  const key = variantDynamicAttributeKey(field);
+  if (!map[key] || typeof map[key] !== "object" || Array.isArray(map[key])) {
+    map[key] = {
+      attribute_id: field.attribute_id || "",
+      name: field.name || "",
+      value: normalizeVariantAttributeValueForField(field.value, field)
+    };
+  }
+  map[key].attribute_id = map[key].attribute_id || field.attribute_id || "";
+  map[key].name = map[key].name || field.name || "";
+  return map[key];
+}
+
+function getVariantAttributeValue(row = {}, field = {}) {
+  return variantAttributeEntry(row, field).value;
+}
+
+function setVariantAttributeValue(row = {}, field = {}, value) {
+  variantAttributeEntry(row, field).value = normalizeVariantAttributeValueForField(value, field);
+}
+
 function applyCleanRecordAttributeFallbacks(editable = {}, logistics = {}) {
   const summary = getAttributeByNames(["简介", "Аннотация", "Описание"], templateEditor.description || editable.description || "");
   const richJson = editable.rich_content_json || getAttributeByNames(["JSON富内容", "Rich", "rich"], "");
@@ -869,8 +851,52 @@ function stableStringHash(value = "") {
 }
 
 function renderedAttributeOptions(field = {}) {
-  const values = Array.isArray(field.values) ? field.values : [];
-  return values.slice(0, ATTRIBUTE_OPTION_RENDER_LIMIT);
+  const values = [
+    ...(Array.isArray(field.selected_values) ? field.selected_values : []),
+    ...(Array.isArray(field.selectedValues) ? field.selectedValues : []),
+    ...(Array.isArray(field.values) ? field.values : [])
+  ];
+  const seen = new Set();
+  return values.filter((option) => {
+    const key = String(option?.dictionary_value_id || option?.id || option?.value || option?.label || "").trim();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, ATTRIBUTE_OPTION_RENDER_LIMIT);
+}
+
+function attributeOptionText(option = {}) {
+  if (option === undefined || option === null) return "";
+  if (typeof option !== "object") return String(option || "").trim();
+  return String(option.value ?? option.name ?? option.text ?? option.label ?? option.id ?? option.dictionary_value_id ?? "").trim();
+}
+
+function cleanAttributeOptionLabel(value = "") {
+  return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function hasChineseText(value = "") {
+  return /[\u3400-\u9fff]/.test(String(value || ""));
+}
+
+function attributeOptionLabel(option = {}) {
+  if (!option || typeof option !== "object") return attributeOptionText(option);
+  const candidates = [
+    option.display_value_zh,
+    option.displayValueZh,
+    option.label_zh,
+    option.labelZh,
+    option.zh,
+    option.cn,
+    option.label,
+    option.raw?.display_value_zh,
+    option.raw?.displayValueZh,
+    option.raw?.label_zh,
+    option.raw?.labelZh,
+    option.raw?.zh,
+    option.raw?.cn
+  ].map(cleanAttributeOptionLabel).filter(Boolean);
+  return candidates.find(hasChineseText) || cleanAttributeOptionLabel(option.label || option.value || option.name || option.text || "");
 }
 
 const editorCurrencyCode = computed(() => String(templateEditor.currency_code || "RUB").trim().toUpperCase() || "RUB");
@@ -1497,6 +1523,36 @@ function cleanOfferIdPart(value = "", fallback = "OZON") {
   return (normalized || fallback).slice(0, 24);
 }
 
+function offerIdRandomToken(length = 4) {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = new Uint8Array(length);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+  }
+  return Array.from({ length }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
+}
+
+function offerIdSourceToken(row = {}) {
+  const raw = [
+    row.source_sku,
+    row.source_offer_id,
+    templateEditor.source_ozon_sku,
+    templateEditor.id,
+    draftForm.internal_code,
+    collectorSourceSku.value,
+    templateEditor.title
+  ].map((value) => String(value || "").trim()).find(Boolean);
+  if (!raw) return `NEW${Date.now().toString(36).toUpperCase().slice(-4)}`;
+  const cleaned = cleanOfferIdPart(raw, "");
+  return cleaned || stableStringHash(raw).slice(0, 10);
+}
+
+function offerIdShopToken() {
+  const shopId = draftForm.shop_ids[0] || copyForm.shop_id || "";
+  return shopId ? `S${cleanOfferIdPart(shopId, "0").slice(0, 8)}` : "S0";
+}
+
 function productTypeAbbr(value = "") {
   const words = String(value || "").match(/[A-Za-z0-9]+/g) || [];
   if (!words.length) return "SKU";
@@ -1504,18 +1560,22 @@ function productTypeAbbr(value = "") {
   return words.slice(0, 4).map((word) => word[0]).join("").toUpperCase();
 }
 
-function generateLocalOfferId(existingIds = new Set(), index = 0) {
+function generateLocalOfferId(existingIds = new Set(), index = 0, row = {}) {
   const { brand, productType } = offerIdPrefix();
-  const prefix = `${cleanOfferIdPart(brand)}-${cleanOfferIdPart(productTypeAbbr(productType), "SKU")}`;
-  for (let offset = 0; offset < 1000; offset += 1) {
-    const suffix = String(index + offset + 1).padStart(3, "0");
-    const id = `${prefix}-${suffix}`;
+  const brandToken = cleanOfferIdPart(brand).slice(0, 12);
+  const typeToken = cleanOfferIdPart(productTypeAbbr(productType), "SKU").slice(0, 8);
+  const sourceToken = offerIdSourceToken(row).slice(0, 18);
+  const variantToken = `V${String(Math.max(0, index) + 1).padStart(3, "0")}`;
+  const timeToken = Date.now().toString(36).toUpperCase().slice(-5);
+  const prefix = `${brandToken}-${typeToken}-${sourceToken}-${offerIdShopToken()}-${variantToken}`;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const id = `${prefix}-${timeToken}-${offerIdRandomToken(4)}`.slice(0, 128);
     if (!existingIds.has(id)) {
       existingIds.add(id);
       return id;
     }
   }
-  const fallback = `${prefix}-${Date.now().toString(36).toUpperCase().slice(-6)}`;
+  const fallback = `${prefix}-${timeToken}-${stableStringHash(`${sourceToken}:${index}:${Math.random()}`).slice(0, 6)}`.slice(0, 128);
   existingIds.add(fallback);
   return fallback;
 }
@@ -1524,7 +1584,7 @@ function generateVariantOfferId(row) {
   if (!row) return;
   const existingIds = new Set(templateEditor.variants.map((item) => String(item.offer_id || "").trim()).filter(Boolean));
   existingIds.delete(String(row.offer_id || "").trim());
-  row.offer_id = generateLocalOfferId(existingIds, templateEditor.variants.indexOf(row));
+  row.offer_id = generateLocalOfferId(existingIds, templateEditor.variants.indexOf(row), row);
 }
 
 function generateMissingVariantOfferIds() {
@@ -1534,8 +1594,8 @@ function generateMissingVariantOfferIds() {
     return;
   }
   const existingIds = new Set(templateEditor.variants.map((item) => String(item.offer_id || "").trim()).filter(Boolean));
-  rows.forEach((row, index) => {
-    row.offer_id = generateLocalOfferId(existingIds, templateEditor.variants.indexOf(row) + index);
+  rows.forEach((row) => {
+    row.offer_id = generateLocalOfferId(existingIds, templateEditor.variants.indexOf(row), row);
   });
   ElMessage.success(`已生成 ${rows.length} 个货号 / offer_id`);
 }
@@ -1568,6 +1628,12 @@ function applyFirstVariantField(field) {
     }
   });
   ElMessage.success("已同步首行内容");
+}
+
+function applyFirstVariantTitleToRow(row) {
+  const first = templateEditor.variants[0];
+  if (!first || !row || row === first) return;
+  row.title = cloneVariantValue(first.title);
 }
 
 function doubleVariantPriceField(field) {
@@ -1701,6 +1767,12 @@ function setVariantFieldMode(field, enabled) {
       row.main_tags = Array.isArray(row.main_tags) && row.main_tags.length ? row.main_tags : fixedForm.value.tags.slice();
     });
     updateFixedField("tags", []);
+  } else if (String(field || "").startsWith("attr:")) {
+    const attr = templateEditor.attributes.find((item) => variantAttributeModeKey(item) === field);
+    if (!attr) return;
+    templateEditor.variants.forEach((row) => {
+      setVariantAttributeValue(row, attr, getVariantAttributeValue(row, attr) || cloneVariantValue(attr.value));
+    });
   }
 }
 
@@ -1713,6 +1785,12 @@ function normalizedVariantFieldValue(row = {}, field = "") {
   if (field === "weight") return String(Number(row.weight_g || 0));
   if (field === "dimensions") return [row.length_mm, row.width_mm, row.height_mm].map((value) => Number(value || 0)).join("x");
   if (field === "tags") return (Array.isArray(row.main_tags) ? row.main_tags : splitTagValue(row.main_tags)).map((item) => String(item || "").trim()).filter(Boolean).sort().join("|");
+  if (String(field || "").startsWith("attr:")) {
+    const attr = templateEditor.attributes.find((item) => variantAttributeModeKey(item) === field);
+    const value = attr ? getVariantAttributeValue(row, attr) : "";
+    if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean).sort().join("|");
+    return String(value || "").trim();
+  }
   return String(row[field] || "").trim();
 }
 
@@ -1741,8 +1819,40 @@ function moveVariantFieldBackToCommon(field) {
   } else if (field === "tags") {
     const value = rows.map((row) => row.main_tags).find((value) => Array.isArray(value) && value.length);
     if (value) updateFixedField("tags", value.slice());
+  } else if (String(field || "").startsWith("attr:")) {
+    const attr = templateEditor.attributes.find((item) => variantAttributeModeKey(item) === field);
+    const value = attr
+      ? rows.map((row) => getVariantAttributeValue(row, attr)).find((item) => Array.isArray(item) ? item.length : String(item || "").trim())
+      : null;
+    if (attr && value !== null && value !== undefined) {
+      attr.value = cloneVariantValue(value);
+      rows.forEach((row) => {
+        if (row.dynamic_attributes && typeof row.dynamic_attributes === "object" && !Array.isArray(row.dynamic_attributes)) {
+          delete row.dynamic_attributes[variantDynamicAttributeKey(attr)];
+        }
+      });
+    }
   }
   ElMessage.success("已合并为公共字段");
+}
+
+function enableVariantAttribute(field = {}) {
+  setVariantFieldMode(variantAttributeModeKey(field), true);
+}
+
+function disableVariantAttribute(field = {}) {
+  setVariantFieldMode(variantAttributeModeKey(field), false);
+}
+
+function applyFirstVariantAttribute(field = {}) {
+  const first = templateEditor.variants[0];
+  if (!first) return;
+  const value = cloneVariantValue(getVariantAttributeValue(first, field));
+  templateEditor.variants.forEach((row, index) => {
+    if (index === 0) return;
+    setVariantAttributeValue(row, field, cloneVariantValue(value));
+  });
+  ElMessage.success("已同步首行属性");
 }
 
 function cloneVariantValue(value) {
@@ -3024,11 +3134,11 @@ onMounted(loadAll);
                   <el-form-item v-for="(field, index) in requiredSchemaAttributeFields" :key="`${field.attribute_id || field.name}-required-${index}`" :required="field.required" :label="field.name || '未命名属性'">
                     <div class="field-with-tools">
                       <el-select v-if="field.type === 'select'" v-model="field.value" filterable clearable :loading="attributeValueLoading[attributeFieldKey(field)]" @visible-change="ensureAttributeValuesLoaded(field, $event)">
-                        <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="option.value" :value="option.value" />
+                        <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="attributeOptionLabel(option)" :value="option.value" />
                         <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
                       </el-select>
                       <el-select v-else-if="field.type === 'multiselect'" v-model="field.value" multiple filterable default-first-option :loading="attributeValueLoading[attributeFieldKey(field)]" @visible-change="ensureAttributeValuesLoaded(field, $event)">
-                        <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="option.value" :value="option.value" />
+                        <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="attributeOptionLabel(option)" :value="option.value" />
                         <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
                       </el-select>
                       <el-input-number v-else-if="field.type === 'number'" v-model="field.value" :controls="false" />
@@ -3038,6 +3148,7 @@ onMounted(loadAll);
                       <el-tag :type="attributeStatusType(field)" effect="plain">{{ attributeStatusText(field) }}</el-tag>
                       <el-button circle @click="runFieldAi({ ...field, type: 'attributeFill', attributeField: field })">AI</el-button>
                       <el-button circle :icon="InfoFilled" @click="openAttributeDetail(field)" />
+                      <el-button class="private-field-toggle" :type="isVariantAttributeField(field) ? 'primary' : 'default'" @click="isVariantAttributeField(field) ? disableVariantAttribute(field) : enableVariantAttribute(field)">{{ isVariantAttributeField(field) ? "-" : "+" }}</el-button>
                     </div>
                   </el-form-item>
                 </div>
@@ -3049,11 +3160,11 @@ onMounted(loadAll);
                   <el-form-item v-for="(field, index) in mainAttributeFields" :key="`${field.attribute_id || field.name}-optional-${index}`" :required="field.required" :label="field.name || '未命名属性'">
                     <div class="field-with-tools">
                       <el-select v-if="field.type === 'select'" v-model="field.value" filterable clearable :loading="attributeValueLoading[attributeFieldKey(field)]" @visible-change="ensureAttributeValuesLoaded(field, $event)">
-                        <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="option.value" :value="option.value" />
+                        <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="attributeOptionLabel(option)" :value="option.value" />
                         <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
                       </el-select>
                       <el-select v-else-if="field.type === 'multiselect'" v-model="field.value" multiple filterable default-first-option :loading="attributeValueLoading[attributeFieldKey(field)]" @visible-change="ensureAttributeValuesLoaded(field, $event)">
-                        <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="option.value" :value="option.value" />
+                        <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="attributeOptionLabel(option)" :value="option.value" />
                         <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
                       </el-select>
                       <el-input-number v-else-if="field.type === 'number'" v-model="field.value" :controls="false" />
@@ -3063,6 +3174,7 @@ onMounted(loadAll);
                       <el-tag :type="attributeStatusType(field)" effect="plain">{{ attributeStatusText(field) }}</el-tag>
                       <el-button circle @click="runFieldAi({ ...field, type: 'attributeFill', attributeField: field })">AI</el-button>
                       <el-button circle :icon="InfoFilled" @click="openAttributeDetail(field)" />
+                      <el-button class="private-field-toggle" :type="isVariantAttributeField(field) ? 'primary' : 'default'" @click="isVariantAttributeField(field) ? disableVariantAttribute(field) : enableVariantAttribute(field)">{{ isVariantAttributeField(field) ? "-" : "+" }}</el-button>
                     </div>
                   </el-form-item>
                 </div>
@@ -3089,6 +3201,7 @@ onMounted(loadAll);
                     <template #dropdown>
                       <el-dropdown-menu>
                         <el-dropdown-item @click="applyFirstVariantField('images')">图片同首行</el-dropdown-item>
+                        <el-dropdown-item @click="applyFirstVariantField('title')">标题同首行</el-dropdown-item>
                         <el-dropdown-item @click="applyFirstVariantField('price')">售价同首行</el-dropdown-item>
                         <el-dropdown-item @click="applyFirstVariantField('old_price')">划线价同首行</el-dropdown-item>
                         <el-dropdown-item @click="applyFirstVariantField('main_tags')">标签同首行</el-dropdown-item>
@@ -3216,7 +3329,12 @@ onMounted(loadAll);
                       <el-button link size="small" type="danger" @click="disableVariantField('title')">-</el-button>
                     </div>
                   </template>
-                  <template #default="{ row }"><el-input v-model="row.title" size="small" /></template>
+                  <template #default="{ row, $index }">
+                    <div class="variant-title-cell">
+                      <el-input v-model="row.title" size="small" />
+                      <el-button v-if="$index > 0" size="small" @click="applyFirstVariantTitleToRow(row)">同首行</el-button>
+                    </div>
+                  </template>
                 </el-table-column>
                 <el-table-column v-if="variantFieldMode.weight" width="130">
                   <template #header>
@@ -3271,6 +3389,49 @@ onMounted(loadAll);
                     <el-select v-model="row.main_tags" multiple filterable allow-create default-first-option collapse-tags collapse-tags-tooltip size="small">
                       <el-option v-for="tag in row.main_tags" :key="tag" :label="tag" :value="tag" />
                     </el-select>
+                  </template>
+                </el-table-column>
+                <el-table-column v-for="field in variantAttributeFields" :key="`variant-attr-${attributeFieldKey(field)}`" width="220">
+                  <template #header>
+                    <div class="variant-col-header">
+                      <span>{{ field.name || "属性" }}</span>
+                      <el-button link size="small" @click="applyFirstVariantAttribute(field)">同首行</el-button>
+                      <el-button link size="small" type="danger" @click="disableVariantAttribute(field)">-</el-button>
+                    </div>
+                  </template>
+                  <template #default="{ row }">
+                    <el-select
+                      v-if="field.type === 'select'"
+                      :model-value="getVariantAttributeValue(row, field)"
+                      size="small"
+                      filterable
+                      clearable
+                      :loading="attributeValueLoading[attributeFieldKey(field)]"
+                      @visible-change="ensureAttributeValuesLoaded(field, $event)"
+                      @update:model-value="setVariantAttributeValue(row, field, $event)"
+                    >
+                      <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="attributeOptionLabel(option)" :value="option.value" />
+                      <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
+                    </el-select>
+                    <el-select
+                      v-else-if="field.type === 'multiselect'"
+                      :model-value="getVariantAttributeValue(row, field)"
+                      size="small"
+                      multiple
+                      filterable
+                      default-first-option
+                      collapse-tags
+                      collapse-tags-tooltip
+                      :loading="attributeValueLoading[attributeFieldKey(field)]"
+                      @visible-change="ensureAttributeValuesLoaded(field, $event)"
+                      @update:model-value="setVariantAttributeValue(row, field, $event)"
+                    >
+                      <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="attributeOptionLabel(option)" :value="option.value" />
+                      <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
+                    </el-select>
+                    <el-input-number v-else-if="field.type === 'number'" :model-value="Number(getVariantAttributeValue(row, field) || 0)" :controls="false" size="small" @update:model-value="setVariantAttributeValue(row, field, $event)" />
+                    <el-switch v-else-if="field.type === 'boolean'" :model-value="Boolean(getVariantAttributeValue(row, field))" @update:model-value="setVariantAttributeValue(row, field, $event)" />
+                    <el-input v-else :model-value="getVariantAttributeValue(row, field)" size="small" @update:model-value="setVariantAttributeValue(row, field, $event)" />
                   </template>
                 </el-table-column>
                 <el-table-column width="160">
@@ -3697,24 +3858,6 @@ onMounted(loadAll);
 .template-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .template-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .ozon-editor { max-width: 100%; margin: 0 auto; }
-.template-health-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 4px auto 12px; max-width: 980px; }
-.template-health-card { border: 1px solid var(--el-border-color-light); border-radius: 8px; padding: 10px 12px; background: var(--el-fill-color-extra-light); min-width: 0; }
-.template-health-card span, .template-health-card small { display: block; color: var(--el-text-color-secondary); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.template-health-card strong { display: block; margin: 4px 0 2px; font-size: 17px; color: var(--el-text-color-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.template-health-card.is-ok { border-color: var(--el-color-success-light-5); background: var(--el-color-success-light-9); }
-.template-health-card.is-warn { border-color: var(--el-color-warning-light-5); background: var(--el-color-warning-light-9); }
-.template-health-card.is-danger { border-color: var(--el-color-danger-light-5); background: var(--el-color-danger-light-9); }
-.schema-quality-panel { max-width: 980px; margin: 0 auto 12px; border: 1px solid var(--el-border-color-light); border-radius: 8px; padding: 12px; background: var(--el-fill-color-extra-light); }
-.schema-quality-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
-.schema-quality-header h3 { margin: 0 0 4px; font-size: 15px; text-align: left; }
-.schema-quality-header p { margin: 0; color: var(--el-text-color-secondary); font-size: 12px; }
-.schema-quality-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.schema-quality-card { border: 1px solid var(--el-border-color-lighter); border-radius: 8px; padding: 8px 10px; background: var(--el-bg-color); min-width: 0; }
-.schema-quality-card span, .schema-quality-card small { display: block; color: var(--el-text-color-secondary); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.schema-quality-card strong { display: block; margin: 3px 0; font-size: 16px; color: var(--el-text-color-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.schema-quality-card.is-ok { border-color: var(--el-color-success-light-5); }
-.schema-quality-card.is-warn { border-color: var(--el-color-warning-light-5); }
-.schema-quality-card.is-danger { border-color: var(--el-color-danger-light-5); }
 .schema-missing-strip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; color: var(--el-text-color-secondary); font-size: 12px; }
 .missing-required-strip { max-width: 980px; margin: 0 auto 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; border: 1px solid var(--el-color-danger-light-7); border-radius: 8px; background: var(--el-color-danger-light-9); }
 .editor-block { padding: 28px 0 14px; }
@@ -3782,6 +3925,8 @@ onMounted(loadAll);
 .variant-name-cell { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .variant-name-cell > .el-input:nth-of-type(2) { display: none; }
 .variant-name-cell strong { display: block; color: var(--el-text-color-primary); font-size: 12px; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.variant-title-cell { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
+.variant-title-cell .el-button { margin: 0; padding-left: 8px; padding-right: 8px; }
 .offer-id-cell { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
 .money-cell { position: relative; display: block; }
 .money-cell :deep(.el-input__wrapper) { padding-right: 42px; }
@@ -3873,8 +4018,7 @@ onMounted(loadAll);
 @media (max-width: 1100px) {
   .source-grid { grid-template-columns: 1fr; }
   .template-card-list { grid-template-columns: 1fr; max-height: none; }
-  .sku-toolbar, .template-search-row, .collected-import-grid, .category-meta-grid, .template-health-grid, .schema-quality-grid { grid-template-columns: 1fr; }
-  .schema-quality-header { flex-direction: column; }
+  .sku-toolbar, .template-search-row, .collected-import-grid, .category-meta-grid { grid-template-columns: 1fr; }
 }
 .template-preview { margin-top: 12px; }
 .image-tile { position: relative; aspect-ratio: 1; border: 1px solid var(--el-border-color-light); border-radius: 8px; overflow: hidden; background: var(--el-fill-color-light); }
@@ -3894,5 +4038,3 @@ onMounted(loadAll);
   .template-name-box { grid-column: 1 / -1; min-width: 0; }
 }
 </style>
-
-
