@@ -6,6 +6,9 @@
 
   const EXECUTE_TYPE = 'PIVOT_ERP_ANALYTICS_EXECUTE_REQUEST';
   const EXECUTE_RESULT_TYPE = 'PIVOT_ERP_ANALYTICS_EXECUTE_RESULT';
+  const nativeFetch = typeof window.fetch === 'function' ? window.fetch.bind(window) : null;
+  const nativeJsonStringify = JSON.stringify.bind(JSON);
+  const nativeJsonParse = JSON.parse.bind(JSON);
   const TARGET_PATHS = [
     '/api/site/seller-analytics/charts/v3/table/totals',
     '/api/site/seller-analytics/charts/v3/table/by_sku',
@@ -23,8 +26,8 @@
     seasonality: '季节性'
   };
 
-  function isSellerAnalyticsPage() {
-    return /^https:\/\/seller\.ozon\.ru\/app\/analytics(?:[/?#]|$)/i.test(window.location.href);
+  function isSellerPage() {
+    return /^https:\/\/seller\.ozon\.ru(?:[/?#]|$)/i.test(window.location.href);
   }
 
   function normalizeTargetUrl(url) {
@@ -117,6 +120,21 @@
     return result;
   }
 
+  function cleanJsonParse(text) {
+    if (!text) return null;
+    let frame = null;
+    try {
+      frame = document.createElement('iframe');
+      frame.style.cssText = 'display:none!important';
+      document.documentElement.appendChild(frame);
+      return frame.contentWindow.JSON.parse(text);
+    } catch (error) {
+      return nativeJsonParse(text);
+    } finally {
+      if (frame) frame.remove();
+    }
+  }
+
   function buildRequestHeaders(inputHeaders) {
     const canonicalNames = {
       accept: 'Accept',
@@ -160,22 +178,23 @@
   }
 
   async function executeRequest(request) {
-    if (!isSellerAnalyticsPage()) throw new Error('请先打开 seller.ozon.ru 分析页面');
+    if (!isSellerPage()) throw new Error('请先打开 seller.ozon.ru 页面');
     const requestUrl = toAbsoluteTargetUrl(request?.request_url);
     if (!shouldCapture(requestUrl)) throw new Error('不允许采集该接口');
     const method = String(request?.request_method || 'POST').toUpperCase();
     const requestBody = request?.request_body || null;
     const headers = buildRequestHeaders(request?.request_headers);
-    const response = await fetch(requestUrl, {
+    const requestFetch = nativeFetch || fetch.bind(window);
+    const response = await requestFetch(requestUrl, {
       method,
       credentials: 'include',
       headers,
-      body: method === 'GET' ? undefined : JSON.stringify(requestBody || {})
+      body: method === 'GET' ? undefined : nativeJsonStringify(requestBody || {})
     });
     const text = await response.text();
     let responseBody = text;
     try {
-      responseBody = text ? JSON.parse(text) : null;
+      responseBody = cleanJsonParse(text);
     } catch (error) {}
     return {
       success: response.ok,

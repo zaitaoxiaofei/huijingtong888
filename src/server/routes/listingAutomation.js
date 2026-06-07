@@ -5,8 +5,13 @@ export function createListingAutomationRoutes({ services, readJson }) {
     "DELETE /api/listing/collector-box": async (req) => services.deleteCollectorBoxProducts(await readJson(req), req._session),
     "POST /api/listing/templates": async (req) => services.createListingCategoryTemplate(await readJson(req), req._session),
     "POST /api/listing/templates/from-collected": async (req) => services.createListingTemplateFromCollectedProduct(await readJson(req), req._session),
+    "POST /api/listing/templates/from-online-product": async (req) => {
+      const body = await readJson(req);
+      return services.createListingTemplateFromOnlineProduct(Number(body?.online_product_id || body?.onlineProductId || body?.id || 0), body, req._session);
+    },
     "POST /api/listing/templates/validate-publish": async (req) => services.validateListingTemplatePublish(await readJson(req), req._session),
     "POST /api/listing/templates/publish-to-ozon": async (req) => services.publishListingTemplateToOzon(await readJson(req), req._session),
+    "GET /api/listing/template-health-check": (req) => services.listingTemplateHealthCheck(req.query || {}, req._session),
     "GET /api/listing/publish-records": (req) => services.listingPublishRecords(req.query || {}, req._session),
     "GET /api/listing/media/assets": (req) => services.listingMediaAssets(req.query || {}, req._session),
     "GET /api/material-packages/search": (req) => services.searchMaterialPackages(req.query || {}, req._session),
@@ -24,6 +29,7 @@ export function createListingAutomationRoutes({ services, readJson }) {
     "GET /api/listing/copy-jobs": (req) => services.listingCopyJobs(req._session),
     "POST /api/listing/copy-from-sku": async (req) => services.copyListingTemplateFromOzonSku(await readJson(req), req._session),
     "POST /api/listing/media/upload": (req) => services.uploadListingMedia(req),
+    "POST /api/listing/media/watermark": async (req) => services.watermarkListingMedia(await readJson(req), req._session),
     "GET /api/listing/drafts": (req, url) => services.listingDrafts(Object.fromEntries(url.searchParams.entries()), req._session),
     "POST /api/listing/drafts": async (req) => services.createListingDraft(await readJson(req), req._session)
   };
@@ -31,6 +37,14 @@ export function createListingAutomationRoutes({ services, readJson }) {
 
 export async function handleListingAutomationRestRoute({ req, res, parts, services, readJson, json }) {
   if (parts[0] !== "api" || parts[1] !== "listing") return false;
+
+  if (req.method === "GET" && parts[2] === "templates" && parts[3] && parts[4] === "diagnostics") {
+    return json(res, await services.listingTemplateMappingDiagnostics(Number(parts[3]), req.query || {}, req._session));
+  }
+
+  if (req.method === "POST" && parts[2] === "templates" && parts[3] && parts[4] === "repair-mapping") {
+    return json(res, await services.repairListingTemplateMapping(Number(parts[3]), await readJson(req), req._session));
+  }
 
   if (parts[2] === "templates" && parts[3]) {
     if (req.method === "GET") {
@@ -43,6 +57,9 @@ export async function handleListingAutomationRestRoute({ req, res, parts, servic
 
   if (parts[2] === "collector-box" && parts[3]) {
     const sku = decodeURIComponent(parts[3]);
+    if (req.method === "GET" && parts[4] === "diagnostics") {
+      return json(res, await services.collectorBoxMappingDiagnostics(sku, req.query || {}, req._session));
+    }
     if (req.method === "GET") {
       return json(res, await services.collectorBoxProductDetail(sku, req._session));
     }

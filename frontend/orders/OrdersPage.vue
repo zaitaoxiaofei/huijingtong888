@@ -1,5 +1,5 @@
 ﻿<script setup>
-import { computed, defineAsyncComponent, defineExpose, onMounted, reactive, ref, watch } from "vue";
+import { computed, defineExpose, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import zhCn from "element-plus/es/locale/lang/zh-cn";
@@ -21,7 +21,6 @@ import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order
 import "./orders-view.css";
 import "../admin/styles/erp-theme.css";
 
-const ProcurementRequestCreateDialog = defineAsyncComponent(() => import("../admin/components/procurement/ProcurementRequestCreateDialog.vue"));
 const route = useRoute();
 const router = useRouter();
 const elementLocale = zhCn;
@@ -34,6 +33,7 @@ const {
   totalPages,
   selectedOrderIds,
   loadOrders,
+  loadLogisticsOptions,
   submitFilters,
   changeStatus,
   changePrintView,
@@ -56,6 +56,9 @@ const {
   printSingleOrder,
   recalculateOrderProfit,
   saveOrderMark,
+  loadStatusTabPreference,
+  saveStatusTabPreference,
+  defaultStatusTabOrder,
 } = useOrdersPage();
 
 const selectedCount = computed(() => selectedOrderIds.value.size);
@@ -72,6 +75,7 @@ const someRowsSelected = computed(() => {
 const detailDialog = reactive({
   visible: false,
   loading: false,
+  recalculating: false,
   mode: "detail",
   orderId: null,
   data: null
@@ -85,10 +89,7 @@ const qualityDialog = reactive({
   note: ""
 });
 
-const procurementDialog = reactive({
-  visible: false,
-  productId: null
-});
+const stockDebtAdjustingProductId = ref(null);
 
 const orderProcurementDialog = reactive({
   visible: false,
@@ -109,6 +110,12 @@ const printDialog = reactive({
   scale: "noscale",
   orientation: "auto",
   color: "monochrome"
+});
+
+const statusPreferenceDialog = reactive({
+  visible: false,
+  saving: false,
+  order: []
 });
 
 const printPresetOptions = [
@@ -166,6 +173,13 @@ const selectedPrintPreset = computed(() => (
   printPresetOptions.find((item) => item.value === printDialog.preset) || printPresetOptions[0]
 ));
 
+const statusTabLabelMap = computed(() => new Map((vm.statusTabs || []).map((item) => [item.value, item.label])));
+
+const statusPreferenceRows = computed(() => statusPreferenceDialog.order.map((value) => ({
+  value,
+  label: statusTabLabelMap.value.get(value) || value
+})));
+
 const inventoryDialog = reactive({
   visible: false,
   mode: "bind",
@@ -180,8 +194,7 @@ const inventoryDialog = reactive({
   sourceUrl: "",
   baseName: "",
   baseWeightG: "",
-  purchaseUrl: "",
-  createProcurementRequest: true
+  purchaseUrl: ""
 });
 
 const inventoryOptionsLoading = ref(false);
@@ -216,8 +229,7 @@ const createForm = reactive({
   shippingMethod: "",
   logisticsRuleId: "",
   urgency: "normal",
-  neededBy: "",
-  createProcurementRequest: true
+  neededBy: ""
 });
 
 
@@ -231,8 +243,7 @@ const detailOrder = computed(() => detailDialog.data?.order || {});
 const detailItems = computed(() => detailDialog.data?.items || []);
 const detailFinance = computed(() => detailDialog.data?.finance || []);
 const detailProfitSnapshot = computed(() => detailDialog.data?.profit_detail_snapshot || null);
-const detailPrimaryItem = computed(() => detailItems.value[0] || {});
-const detailPrimaryImageUrl = computed(() => detailItemImageUrl(detailPrimaryItem.value));
+const detailOrderHasMultipleItems = computed(() => detailItems.value.length > 1);
 const detailProfit = computed(() => buildOrderProfitDetail(
   detailOrder.value,
   detailItems.value,
@@ -240,6 +251,20 @@ const detailProfit = computed(() => buildOrderProfitDetail(
   detailProfitSnapshot.value,
   { formatMoney, formatSignedMoney, formatPercent }
 ));
+const detailProfitItemCards = computed(() => detailItems.value.map((item, index) => ({
+  id: item.id || `${item.ozon_sku || "item"}-${index}`,
+  index: index + 1,
+  name: item.product_name || item.ozon_name || "订单商品",
+  sku: item.ozon_sku || "-",
+  offerId: item.offer_id || "-",
+  imageUrl: detailItemImageUrl(item),
+  saleAmount: detailItemSaleAmount(item),
+  estimatedProfit: Number(item.estimated_profit || item.net_profit_cny || 0),
+  actualProfit: item.settlement_state === "accrued" || item.profit_status === "accrued"
+    ? Number(item.actual_profit || item.net_profit_cny || 0)
+    : null,
+  statusText: item.settlement_state === "accrued" || item.profit_status === "accrued" ? "已结算" : "预估中"
+})));
 const selectedInventoryProduct = computed(() => (
   inventoryOptions.products.find((row) => Number(row.id) === Number(bindForm.productId)) || null
 ));
@@ -368,6 +393,55 @@ function toggleRow(orderId, checked) {
   selectedOrderIds.value = next;
 }
 
+function currentStatusTabOrder() {
+  const fallback = Array.isArray(defaultStatusTabOrder) ? defaultStatusTabOrder : [];
+  const current = (vm.statusTabs || []).map((item) => String(item.value || "")).filter(Boolean);
+  return current.length ? current : fallback;
+}
+
+function openStatusPreferenceDialog() {
+  statusPreferenceDialog.order = [...currentStatusTabOrder()];
+  statusPreferenceDialog.visible = true;
+}
+
+function moveStatusPreference(index, delta) {
+  const nextIndex = Number(index) + Number(delta);
+  if (nextIndex < 0 || nextIndex >= statusPreferenceDialog.order.length) return;
+  const next = [...statusPreferenceDialog.order];
+  const [item] = next.splice(index, 1);
+  next.splice(nextIndex, 0, item);
+  statusPreferenceDialog.order = next;
+}
+
+function pinStatusPreference(index, target) {
+  const next = [...statusPreferenceDialog.order];
+  const [item] = next.splice(index, 1);
+  if (!item) return;
+  if (target === "bottom") {
+    next.push(item);
+  } else {
+    next.unshift(item);
+  }
+  statusPreferenceDialog.order = next;
+}
+
+function resetStatusPreference() {
+  statusPreferenceDialog.order = [...defaultStatusTabOrder];
+}
+
+async function saveStatusPreference() {
+  statusPreferenceDialog.saving = true;
+  try {
+    await saveStatusTabPreference(statusPreferenceDialog.order);
+    statusPreferenceDialog.visible = false;
+    ElMessage.success("订单标签顺序已保存");
+  } catch (error) {
+    ElMessage.error(error.message || "保存订单标签顺序失败");
+  } finally {
+    statusPreferenceDialog.saving = false;
+  }
+}
+
 function rowStateLabel(row) {
   const status = String(row?.status || "").toLowerCase();
   const stage = String(row?.tracking_stage || "").toLowerCase();
@@ -449,18 +523,19 @@ function rowAvailableActions(row) {
   const procurementTotal = Number(row?.procurement_total_item_count || 0);
   const procurementHandledCount = Number(row?.procurement_handled_item_count || 0);
   const procurementHandled = procurementTotal > 0 && procurementHandledCount >= procurementTotal;
-  const localActions = {
-    print: beforeTransit && !isFbp && (printed || isAwaitingDeliver),
-    prepare: displayStateKey !== "awaiting_deliver" && beforeTransit && isAwaitingPackaging,
-    purchase: beforeTransit && isAwaitingDeliver && !procurementHandled,
-    profit: true
-  };
   const apiActions = row?.availableActions && typeof row.availableActions === "object" ? row.availableActions : {};
+  const showPrepare = beforeTransit && !isFbp && isAwaitingPackaging && apiActions.prepare !== false;
+  const showPurchase = beforeTransit && (isAwaitingDeliver || isAwaitingPackaging) && !procurementHandled && apiActions.purchase !== false;
+  const showPrint = beforeTransit && isAwaitingDeliver && apiActions.print !== false;
+  const canPrint = showPrint && !isFbp && (Boolean(apiActions.print) || printed || isAwaitingDeliver);
   return {
     ...apiActions,
-    print: beforeTransit && !isFbp && (Boolean(apiActions.print) || localActions.print),
-    prepare: beforeTransit && !isAwaitingDeliver && (Boolean(apiActions.prepare) || localActions.prepare),
-    purchase: beforeTransit && isAwaitingDeliver && !procurementHandled && (apiActions.purchase !== false),
+    print: canPrint,
+    prepare: showPrepare,
+    purchase: showPurchase,
+    showPrint,
+    showPrepare,
+    showPurchase,
     profit: apiActions.profit !== false
   };
 }
@@ -498,6 +573,10 @@ function detailItemImageUrl(item = {}) {
     || firstCsvValue(detailOrder.value.order_image_urls)
     || firstCsvValue(detailOrder.value.image_urls)
     || "";
+}
+
+function detailItemSaleAmount(item = {}) {
+  return Number(item.sale_amount_cny || 0) || (Number(item.sale_price || 0) * Number(item.quantity || 0));
 }
 
 function buildProfitSummary(row) {
@@ -585,9 +664,15 @@ function buildTableRow(row) {
       const fallbackIndex = productIds.findIndex((id) => Number(id) === productId);
       return {
         productId,
+        orderItemId: Number(item.orderItemId || 0) || null,
         sku: item.sku || "",
         productName: fallbackIndex >= 0 ? (productNames[fallbackIndex] || item.name) : (item.name || productNames[0] || "库存商品"),
-        amountText: `CNY ${formatMoney(profitSummary.revenue)}`
+        saleAmount: Number(item.saleAmount || 0),
+        estimatedProfit: Number(item.estimatedProfit || 0),
+        actualProfit: Number(item.actualProfit || 0),
+        actualProfitReady: Boolean(item.actualProfitReady),
+        amountText: `CNY ${formatMoney(item.saleAmount || 0)}`,
+        stock: item.stock || { fbs: 0, fbp: 0 }
       };
     })
     .filter((item) => {
@@ -737,7 +822,6 @@ function resetInventoryDialog() {
   inventoryDialog.baseName = "";
   inventoryDialog.baseWeightG = "";
   inventoryDialog.purchaseUrl = "";
-  inventoryDialog.createProcurementRequest = true;
   bindForm.productId = "";
   bindForm.personId = "";
   createForm.personId = "";
@@ -757,7 +841,6 @@ function resetInventoryDialog() {
   createForm.shippingMethod = "";
   createForm.urgency = "normal";
   createForm.neededBy = "";
-  createForm.createProcurementRequest = true;
   bindProductQuery.value = "";
   inventoryListPage.value = 1;
   inventoryOptions.products = [];
@@ -868,6 +951,11 @@ function bulkPrintSelected() {
   return openPrintDialog(ids);
 }
 
+function handleToolbarMoreAction(action) {
+  if (action === "print-selected") return bulkPrintSelected();
+  return handleMoreAction(action);
+}
+
 function bulkPrepareSelected() {
   if (!selectedOrderIds.value.size) return ElMessage.warning("请先选择订单");
   const ids = selectedActionOrderIds("prepare");
@@ -939,11 +1027,26 @@ async function bootstrapFromRoute() {
 }
 
 async function handleRecalculate(orderId) {
-  await recalculateOrderProfit(orderId);
-  orderDetailCache.delete(Number(orderId));
-  await loadOrders();
-  if (detailDialog.visible && Number(detailDialog.orderId) === Number(orderId)) {
-    await openDrawer(detailDialog.mode, orderId);
+  const numericOrderId = Number(orderId || 0);
+  if (!numericOrderId || detailDialog.recalculating) return;
+  detailDialog.recalculating = true;
+  try {
+    const result = await recalculateOrderProfit(numericOrderId);
+    orderDetailCache.delete(numericOrderId);
+    await loadOrders();
+    if (detailDialog.visible && Number(detailDialog.orderId) === numericOrderId) {
+      await openDrawer(detailDialog.mode, numericOrderId);
+    }
+    const updated = Number(result?.updated || 0);
+    const unbound = Number(result?.unbound || 0);
+    const parts = [];
+    parts.push(updated > 0 ? `已重算 ${updated} 个商品行` : "已执行重算，当前没有可更新的商品行");
+    if (unbound > 0) parts.push(`${unbound} 个商品行未绑定库存产品`);
+    ElMessage.success(parts.join("，"));
+  } catch (error) {
+    ElMessage.error(error?.message || "重算利润失败");
+  } finally {
+    detailDialog.recalculating = false;
   }
 }
 
@@ -998,11 +1101,6 @@ async function handleSaveMark(orderId, markType) {
       : row
   ));
   ElMessage.success("订单标记已更新");
-}
-
-function handleOpenProcurement(productId) {
-  procurementDialog.productId = Number(productId || 0) || null;
-  procurementDialog.visible = Boolean(procurementDialog.productId);
 }
 
 async function handleOpenOrderProcurement(orderId) {
@@ -1066,6 +1164,36 @@ function handleProcurementQuantityChange(product) {
   product.purchase_shipping = 0;
 }
 
+async function handleAdjustStockDebt(product) {
+  const productId = Number(product?.product_id || 0);
+  const quantity = Math.max(0, Number(product?.stock_debt || 0));
+  if (!productId || quantity <= 0) return;
+  await ElMessageBox.confirm(
+    `确认给「${product.product_name || product.product_code || productId}」新增 ${quantity} 件历史负库存冲正流水？这会把账面库存补到 0，不会删除原始订单出库记录。`,
+    "冲正历史欠账",
+    { type: "warning", confirmButtonText: "确认冲正", cancelButtonText: "取消" }
+  );
+  stockDebtAdjustingProductId.value = productId;
+  try {
+    await apiClient.post("/api/inventory/stock-debts/adjust", {
+      product_id: productId,
+      quantity,
+      note: `订单采购弹框冲正历史负库存：${product.product_code || productId} / ${product.product_name || ""}`
+    });
+    ElMessage.success("历史欠账已冲正");
+    const selectedIds = [...orderProcurementDialog.selectedItemIds];
+    orderProcurementDialog.preview = await previewOrderProcurement(orderProcurementDialog.orderId);
+    initializeProcurementPurchaseInputs();
+    const availableIds = new Set(orderProcurementItems.value.map((item) => Number(item.order_item_id)).filter(Boolean));
+    orderProcurementDialog.selectedItemIds = selectedIds.filter((id) => availableIds.has(Number(id)));
+    await loadOrders();
+  } catch (error) {
+    if (error !== "cancel") ElMessage.error(error.message || "历史欠账冲正失败");
+  } finally {
+    stockDebtAdjustingProductId.value = null;
+  }
+}
+
 async function submitOrderProcurement() {
   if (!orderProcurementDialog.orderId) return;
   if (!orderProcurementDialog.selectedItemIds.length) {
@@ -1083,14 +1211,14 @@ async function submitOrderProcurement() {
     const stockCount = Number(result?.stock_satisfied_count || 0);
     const markedCount = Number(result?.marked_count || 0);
     if (markedCount > 0) {
-      ElMessage.success(`采购已处理：${stockCount} 条库存可满足，${createdCount} 条已创建采购请求`);
+      ElMessage.success(`采购建议已处理：${stockCount} 条库存可满足，${createdCount} 条已生成采购建议`);
     } else {
       ElMessage.info("当前没有新的待采购订单明细");
     }
     orderProcurementDialog.visible = false;
     await loadOrders();
   } catch (error) {
-    ElMessage.error(error.message || "创建采购请求失败");
+    ElMessage.error(error.message || "生成采购建议失败");
   } finally {
     orderProcurementDialog.submitting = false;
   }
@@ -1125,12 +1253,6 @@ async function createInventoryForFirstProcurementMissingItem() {
   if (!item) return;
   orderProcurementDialog.visible = false;
   await handleOpenCreateProductFromOrder(item.order_id || orderProcurementDialog.orderId, item.ozon_sku);
-}
-
-async function handleProcurementCreated() {
-  procurementDialog.visible = false;
-  procurementDialog.productId = null;
-  await loadOrders();
 }
 
 async function handleOpenBindProductFromOrder(orderId, sku) {
@@ -1176,7 +1298,6 @@ async function handleOpenCreateProductFromOrder(orderId, sku) {
   inventoryDialog.baseName = context.itemName;
   inventoryDialog.baseWeightG = context.baseWeightG;
   inventoryDialog.purchaseUrl = context.sourceUrl;
-  inventoryDialog.createProcurementRequest = true;
   createForm.personId = preferredPersonId();
   createForm.name = context.itemName;
   createForm.purchaseUrl = context.sourceUrl;
@@ -1195,7 +1316,6 @@ async function handleOpenCreateProductFromOrder(orderId, sku) {
   createForm.logisticsRuleId = "";
   createForm.urgency = "normal";
   createForm.neededBy = "";
-  createForm.createProcurementRequest = true;
   const defaultRule = defaultLogisticsRule();
   if (defaultRule) {
     createForm.logisticsRuleId = String(defaultRule.id);
@@ -1250,16 +1370,16 @@ async function submitInventoryDialog() {
         note: createForm.note || createForm.supplierNote || "",
         purchase_total_amount: createForm.amount ? Number(createForm.amount) : 0,
         domestic_shipping_total: createForm.shippingAmount ? Number(createForm.shippingAmount) : 0,
-        purchase_quantity: createQuantity.value,
+        purchase_quantity: 1,
+        procurement_quantity: createQuantity.value,
         supplier_id: createForm.supplierId || null,
         source_platform: createForm.sourcePlatform || "1688",
         shipping_method: createForm.shippingMethod || "cel_air_land",
         logistics_rule_id: createForm.logisticsRuleId ? Number(createForm.logisticsRuleId) : null,
         urgency: createForm.urgency || "normal",
-        needed_by: createForm.neededBy || null,
-        create_procurement_request: createForm.createProcurementRequest ? "1" : ""
+        needed_by: createForm.neededBy || null
       });
-      ElMessage.success(createForm.createProcurementRequest ? "库存商品已创建，并已同步提交采购请求" : "库存商品已创建");
+      ElMessage.success("库存商品已创建");
     }
     resetInventoryDialog();
     await loadOrders();
@@ -1278,8 +1398,15 @@ watch(() => route.query.orderId, async () => {
 });
 
 onMounted(async () => {
+  await loadStatusTabPreference();
+  if (route.query.orderId) {
+    await bootstrapFromRoute();
+    return;
+  }
   await loadOrders();
-  await bootstrapFromRoute();
+  if (vm.filters.logisticsMethod && vm.filters.logisticsMethod !== "all") {
+    void loadLogisticsOptions().catch(() => {});
+  }
 });
 </script>
 
@@ -1303,9 +1430,10 @@ onMounted(async () => {
       @sync-incremental="syncRecentOrdersAction"
       @sync-full="syncAllOrdersAction"
       @cancel-sync="cancelSync"
-      @more-action="handleMoreAction"
+      @more-action="handleToolbarMoreAction"
       @open-quality-rules="showQualityRules"
       @reset-dates="resetRecentDates"
+      @load-logistics-options="loadLogisticsOptions"
     >
       <OrdersStatusTabs
         :status-tabs="vm.statusTabs"
@@ -1318,8 +1446,7 @@ onMounted(async () => {
         @change-status="changeStatus"
         @change-print-view="changePrintView"
         @change-mark-filter="changeMarkFilter"
-        @bulk-print="bulkPrintSelected"
-        @bulk-prepare="bulkPrepareSelected"
+        @configure-status-tabs="openStatusPreferenceDialog"
       />
     </OrdersToolbar>
 
@@ -1339,7 +1466,6 @@ onMounted(async () => {
         @save-mark="handleSaveMark"
         @open-bind-product-from-order="handleOpenBindProductFromOrder"
         @open-create-product-from-order="handleOpenCreateProductFromOrder"
-        @open-procurement="handleOpenProcurement"
         @open-order-procurement="handleOpenOrderProcurement"
       />
 
@@ -1354,6 +1480,38 @@ onMounted(async () => {
         />
       </div>
     </div>
+
+    <el-dialog
+      v-model="statusPreferenceDialog.visible"
+      title="订单标签顺序"
+      width="640px"
+      align-center
+      class="erp-centered-dialog"
+    >
+      <div class="orders-status-preference-list">
+        <div
+          v-for="(item, index) in statusPreferenceRows"
+          :key="item.value"
+          class="orders-status-preference-item"
+        >
+          <span class="orders-status-preference-index">{{ index + 1 }}</span>
+          <strong>{{ item.label }}</strong>
+          <div class="orders-status-preference-actions">
+            <el-button size="small" :disabled="index === 0" @click="pinStatusPreference(index, 'top')">置顶</el-button>
+            <el-button size="small" :disabled="index === 0" @click="moveStatusPreference(index, -1)">上移</el-button>
+            <el-button size="small" :disabled="index === statusPreferenceRows.length - 1" @click="moveStatusPreference(index, 1)">下移</el-button>
+            <el-button size="small" :disabled="index === statusPreferenceRows.length - 1" @click="pinStatusPreference(index, 'bottom')">置底</el-button>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <div class="erp-dialog-footer">
+          <el-button class="erp-btn erp-btn-secondary" @click="resetStatusPreference">恢复默认</el-button>
+          <el-button class="erp-btn erp-btn-secondary" @click="statusPreferenceDialog.visible = false">取消</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="statusPreferenceDialog.saving" @click="saveStatusPreference">保存</el-button>
+        </div>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="printDialog.visible"
@@ -1422,26 +1580,60 @@ onMounted(async () => {
           </div>
           <div class="vue-orders-detail-dialog-actions">
             <el-button v-if="hasAftersalesReturnContext()" @click="backToAftersales">返回售后补损</el-button>
-            <el-button v-if="detailDialog.mode === 'profit'" type="primary" @click="handleRecalculate(detailDialog.orderId)">重算利润</el-button>
+            <el-button
+              v-if="detailDialog.mode === 'profit'"
+              type="primary"
+              :loading="detailDialog.recalculating"
+              :disabled="detailDialog.loading || detailDialog.recalculating"
+              @click="handleRecalculate(detailDialog.orderId)"
+            >
+              重算利润
+            </el-button>
           </div>
         </div>
 
         <div v-if="detailDialog.mode === 'profit'" class="orders-profit-detail-shell">
-          <div class="orders-profit-order-card">
-            <el-image
-              v-if="detailPrimaryImageUrl"
-              :src="detailPrimaryImageUrl"
-              fit="contain"
-              class="orders-profit-order-thumb"
-              :preview-src-list="[detailPrimaryImageUrl]"
-              preview-teleported
-            />
-            <div v-else class="orders-profit-order-thumb orders-profit-order-image-empty">无图</div>
-            <div class="orders-profit-order-copy">
-              <strong>{{ detailPrimaryItem.product_name || detailPrimaryItem.ozon_name || "订单商品" }}</strong>
-              <span>{{ detailPrimaryItem.owner_name || "未分配负责人" }} / 状态: {{ rowStateLabel(detailOrder) }}</span>
-              <span>SKU: {{ detailPrimaryItem.ozon_sku || "-" }} / 货号: {{ detailPrimaryItem.offer_id || "-" }}</span>
-            </div>
+          <div v-if="detailProfitItemCards.length" class="orders-profit-item-grid">
+            <article
+              v-for="card in detailProfitItemCards"
+              :key="card.id"
+              class="orders-profit-item-card"
+            >
+              <el-image
+                v-if="card.imageUrl"
+                :src="card.imageUrl"
+                fit="contain"
+                class="orders-profit-item-thumb"
+                :preview-src-list="[card.imageUrl]"
+                preview-teleported
+              />
+              <div v-else class="orders-profit-item-thumb orders-profit-item-thumb-empty">无图</div>
+              <div class="orders-profit-item-copy">
+                <strong>{{ card.index }}. {{ card.name }}</strong>
+                <span>SKU: {{ card.sku }} / 货号: {{ card.offerId }}</span>
+                <span>{{ card.statusText }}</span>
+              </div>
+              <div class="orders-profit-item-metrics">
+                <div>
+                  <span>销售额</span>
+                  <strong>CNY {{ formatMoney(card.saleAmount) }}</strong>
+                </div>
+                <div>
+                  <span>预估利润</span>
+                  <strong :class="moneyValueClass(card.estimatedProfit)">CNY {{ formatMoney(card.estimatedProfit) }}</strong>
+                </div>
+                <div>
+                  <span>实际利润</span>
+                  <strong v-if="card.actualProfit !== null" :class="moneyValueClass(card.actualProfit)">CNY {{ formatMoney(card.actualProfit) }}</strong>
+                  <strong v-else>--</strong>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <div class="orders-profit-aggregate-head">
+            <strong>整单汇总</strong>
+            <span>下方金额为该订单全部商品行的合计，便于核对整单利润。</span>
           </div>
 
           <div class="orders-profit-summary-grid">
@@ -1733,7 +1925,7 @@ onMounted(async () => {
           <div class="create-workbench">
             <div class="dialog-search-head create-workbench-head">
               <strong>创建库存工作台</strong>
-              <span>先保留来源信息，再补全商品主数据、规格和采购请求。提交时会同时创建库存和采购请求。</span>
+              <span>先保留来源信息，再补全商品主数据、规格和成本信息，提交后会创建库存并自动绑定当前 SKU。</span>
             </div>
 
             <el-form label-position="top" class="order-inventory-form create-inventory-form">
@@ -1785,7 +1977,7 @@ onMounted(async () => {
                   <span>用于采购成本、物流规则和计费克重计算。</span>
                 </div>
                 <div class="create-grid create-grid--spec">
-                  <el-form-item label="采购数量">
+                  <el-form-item label="本次采购数量">
                     <el-input-number v-model="createForm.quantity" :min="1" :step="1" controls-position="right" style="width: 100%" />
                   </el-form-item>
                   <el-form-item label="货款金额">
@@ -1839,8 +2031,8 @@ onMounted(async () => {
 
               <div class="create-form-section">
                 <div class="create-section-title">
-                  <strong>采购请求</strong>
-                  <span>勾选后会在创建库存时同步提交采购请求。</span>
+                  <strong>补充说明</strong>
+                  <span>用于记录来源备注、供应提示和交接信息，不会自动生成采购请求。</span>
                 </div>
                 <div class="create-grid create-grid--proc">
                   <el-form-item label="紧急程度">
@@ -1849,11 +2041,8 @@ onMounted(async () => {
                   <el-form-item label="需求日期">
                     <el-input v-model="createForm.neededBy" placeholder="例如 2026-05-20" />
                   </el-form-item>
-                  <el-form-item label="同步采购">
-                    <el-switch v-model="createForm.createProcurementRequest" />
-                  </el-form-item>
-                  <el-form-item label="采购说明" class="create-grid-span-2">
-                    <el-input v-model="createForm.note" type="textarea" :rows="3" placeholder="提交到采购请求里的备注" />
+                  <el-form-item label="库存备注" class="create-grid-span-2">
+                    <el-input v-model="createForm.note" type="textarea" :rows="3" placeholder="记录当前订单的补货说明、时效要求或交接备注" />
                   </el-form-item>
                   <el-form-item label="供应备注" class="create-grid-span-2">
                     <el-input v-model="createForm.supplierNote" type="textarea" :rows="3" placeholder="补充来源说明、采购提醒或人工备注" />
@@ -1892,10 +2081,6 @@ onMounted(async () => {
             <strong>{{ inventoryDialog.sku || "-" }}</strong>
           </div>
           <div class="create-footer-summary">
-            <span>采购请求</span>
-            <strong>{{ createForm.createProcurementRequest ? "同步提交" : "不创建" }}</strong>
-          </div>
-          <div class="create-footer-summary">
             <span>供应商</span>
             <strong>{{ supplierName(createForm.supplierId) || "未指定" }}</strong>
           </div>
@@ -1905,7 +2090,7 @@ onMounted(async () => {
       <template #footer>
         <el-button @click="resetInventoryDialog">取消</el-button>
         <el-button type="primary" :loading="inventoryDialog.submitting" @click="submitInventoryDialog">
-          {{ inventoryDialog.mode === "bind" ? "确认绑定" : (createForm.createProcurementRequest ? "创建库存并提交采购" : "仅创建库存") }}
+          {{ inventoryDialog.mode === "bind" ? "确认绑定" : "创建库存" }}
         </el-button>
       </template>
     </el-dialog>
@@ -1965,8 +2150,27 @@ onMounted(async () => {
             </div>
             <div class="order-procurement-stock-grid">
               <div>
-                <span>库存中</span>
+                <span>可用库存</span>
                 <strong>{{ product.current_stock }}</strong>
+              </div>
+              <div>
+                <span>账面库存</span>
+                <strong>{{ product.ledger_stock ?? product.current_stock }}</strong>
+              </div>
+              <div :class="{ 'is-shortage': Number(product.stock_debt || 0) > 0 }">
+                <span>历史欠账</span>
+                <strong>{{ product.stock_debt || 0 }}</strong>
+                <el-button
+                  v-if="Number(product.stock_debt || 0) > 0"
+                  class="order-procurement-stock-action"
+                  size="small"
+                  type="warning"
+                  plain
+                  :loading="stockDebtAdjustingProductId === Number(product.product_id)"
+                  @click="handleAdjustStockDebt(product)"
+                >
+                  冲正旧账
+                </el-button>
               </div>
               <div>
                 <span>采购在途</span>
@@ -2052,7 +2256,7 @@ onMounted(async () => {
             <el-table-column label="处理建议" width="150">
               <template #default="{ row }">
                 <el-tag :type="Number(row.product?.current_stock || 0) >= Number(row.product?.total_quantity || 0) ? 'success' : 'warning'" effect="light">
-                  {{ Number(row.product?.current_stock || 0) >= Number(row.product?.total_quantity || 0) ? "库存可满足" : "创建采购请求" }}
+                  {{ Number(row.product?.current_stock || 0) >= Number(row.product?.total_quantity || 0) ? "库存可满足" : "生成采购建议" }}
                 </el-tag>
               </template>
             </el-table-column>
@@ -2095,17 +2299,10 @@ onMounted(async () => {
           :loading="orderProcurementDialog.submitting"
           @click="submitOrderProcurement"
         >
-          确认处理
+          生成采购建议
         </el-button>
       </template>
     </el-dialog>
-
-    <ProcurementRequestCreateDialog
-      v-model="procurementDialog.visible"
-      :initial-product-id="procurementDialog.productId"
-      lock-product
-      @created="handleProcurementCreated"
-    />
     </section>
   </el-config-provider>
 </template>

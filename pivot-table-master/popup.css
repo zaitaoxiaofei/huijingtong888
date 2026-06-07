@@ -188,6 +188,36 @@ button:disabled {
   color: #dc2626;
 }
 
+.runtime-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-card {
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.runtime-card span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.runtime-card strong {
+  color: #172033;
+  font-size: 14px;
+}
+
+.runtime-card em {
+  color: #64748b;
+  font-style: normal;
+  word-break: break-word;
+}
+
 .seller-tab-missing {
   color: #dc2626;
   font-weight: 700;

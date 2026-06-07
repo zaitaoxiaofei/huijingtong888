@@ -20,7 +20,8 @@ const emit = defineEmits([
   "cancel-sync",
   "more-action",
   "open-quality-rules",
-  "reset-dates"
+  "reset-dates",
+  "load-logistics-options"
 ]);
 
 const dateRange = computed({
@@ -77,6 +78,7 @@ function handleCommand(command) {
             :model-value="filters.logisticsMethod"
             class="orders-toolbar-select orders-toolbar-logistics-select"
             @change="changeLogisticsMethod"
+            @visible-change="$event && emit('load-logistics-options')"
           >
             <el-option
               v-for="option in logisticsMethodOptions"
@@ -144,9 +146,6 @@ function handleCommand(command) {
                 >
                   同步当前范围
                 </el-button>
-              </el-tooltip>
-              <el-tooltip content="后台会按配置周期滚动刷新近 90 天订单状态" placement="top">
-                <el-tag class="orders-toolbar-background-tag" effect="plain" round>后台状态刷新</el-tag>
               </el-tooltip>
             </div>
 

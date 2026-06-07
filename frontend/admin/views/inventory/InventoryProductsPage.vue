@@ -4,14 +4,15 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
 import { createLatestRequestGate } from "../../utils/request-gate";
+import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
 import ProductCreateEditDialog from "../../components/inventory/ProductCreateEditDialog.vue";
+import ProcurementRequestCreateDialog from "../../components/procurement/ProcurementRequestCreateDialog.vue";
 import {
   applyFilterQuery,
-  buildFilterQuery,
   dateText,
   integer,
   money,
@@ -34,12 +35,56 @@ const profitDetailLoading = ref(false);
 const profitDetailDialogVisible = ref(false);
 const profitDetailDialogTitle = ref("");
 const profitDetailRows = ref([]);
+const profitDetailPreferredMode = ref("estimated");
 const profitPreviewDialogVisible = ref(false);
 const profitPreviewDialogTitle = ref("");
 const profitPreviewRows = ref([]);
 const profitPreviewSummary = ref(null);
+const procurementCreateVisible = ref(false);
+const procurementCreateProductId = ref(null);
+const productSalesDialogVisible = ref(false);
+const productSalesDialogTitle = ref("");
+const productSalesLoading = ref(false);
+const productSalesRows = ref([]);
+const productSalesTotal = ref(0);
+const productSalesCurrentProduct = ref(null);
+const productProcurementDialogVisible = ref(false);
+const productProcurementDialogTitle = ref("");
+const productProcurementLoading = ref(false);
+const productProcurementSaving = ref(false);
+const productProcurementRows = ref([]);
+const productProcurementTotal = ref(0);
+const productProcurementCurrentProduct = ref(null);
+const profitDetailCurrentProduct = ref(null);
 const dialogProduct = ref(null);
 const selectedRows = ref([]);
+
+const detailPageDefaults = {
+  page: 1,
+  pageSize: 20
+};
+const productSalesPager = reactive({ ...detailPageDefaults });
+const productProcurementPager = reactive({ ...detailPageDefaults });
+const profitDetailPager = reactive({ ...detailPageDefaults });
+const profitDetailTotal = ref(0);
+const productSalesFilters = reactive({
+  query: "",
+  shopId: "all",
+  dateFrom: "",
+  dateTo: ""
+});
+const productProcurementFilters = reactive({
+  query: "",
+  personId: "all",
+  dateFrom: "",
+  dateTo: ""
+});
+const profitDetailFilters = reactive({
+  query: "",
+  shopId: "all",
+  dateFrom: "",
+  dateTo: ""
+});
 
 const mergeDialogVisible = ref(false);
 const mergePreviewLoading = ref(false);
@@ -72,7 +117,9 @@ const state = reactive({
     dateFrom: "",
     dateTo: "",
     page: 1,
-    pageSize: 20
+    pageSize: 20,
+    sortKey: "",
+    sortDir: ""
   }
 });
 
@@ -82,7 +129,9 @@ const filterDefaults = {
   dateFrom: "",
   dateTo: "",
   page: 1,
-  pageSize: 20
+  pageSize: 20,
+  sortKey: "",
+  sortDir: ""
 };
 
 const mergeFieldLabelMap = {
@@ -118,6 +167,8 @@ const mergeFieldLabelMap = {
 };
 
 const pagedRows = computed(() => state.products);
+const inventoryTotalPages = computed(() => Math.max(1, Math.ceil(Number(state.total || 0) / Math.max(1, Number(state.filters.pageSize || 1)))));
+const inventoryFooterSummary = computed(() => `第 ${Number(state.filters.page || 1)} / ${inventoryTotalPages.value} 页，共 ${integer(state.total)} 条记录`);
 const canMergeProducts = computed(() => selectedRows.value.length >= 2);
 const mergeCountRows = computed(() => {
   const summary = mergePreview.moveCountsSummary || {};
@@ -154,8 +205,43 @@ const profitDetailSummary = computed(() => {
     actualProfit: 0
   });
 });
+const productSalesSummary = computed(() => productSalesRows.value.reduce((summary, row) => {
+  summary.quantity += Number(row.quantity || 0);
+  summary.amount += Number(row.order_amount || 0);
+  summary.profit += Number(row.actual_profit || row.estimated_profit || 0);
+  return summary;
+}, { quantity: 0, amount: 0, profit: 0 }));
+const productProcurementSummary = computed(() => productProcurementRows.value.reduce((summary, row) => {
+  summary.quantity += Number(row.quantity || 0);
+  summary.amount += Number(row.amount || 0) + Number(row.shipping_amount || 0);
+  return summary;
+}, { quantity: 0, amount: 0 }));
 
 const INVENTORY_PROFIT_TARGET_MARGIN = 0.2;
+
+function toFilterDateValue(value) {
+  if (!value) return "";
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+    const matched = trimmed.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (matched) return matched[1];
+    const parsed = new Date(trimmed);
+    return Number.isNaN(parsed.getTime()) ? trimmed.slice(0, 10) : parsed.toISOString().slice(0, 10);
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? "" : value.toISOString().slice(0, 10);
+  }
+  if (typeof value === "number") {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString().slice(0, 10);
+  }
+  if (typeof value === "object" && typeof value?.toDate === "function") {
+    const parsed = value.toDate();
+    return parsed instanceof Date && !Number.isNaN(parsed.getTime()) ? parsed.toISOString().slice(0, 10) : "";
+  }
+  return "";
+}
 
 function mappingPrimaryText(mapping) {
   return mapping.ozon_sku || mapping.offer_id || mapping.online_name || "-";
@@ -341,6 +427,48 @@ function inventoryProfitMoneyText(row, key) {
   return value === null ? "-" : money(value);
 }
 
+function rowNumber(row, key) {
+  return Number(row?.[key] || 0);
+}
+
+function localStock(row) {
+  return rowNumber(row, "stock");
+}
+
+function fbpStock(row) {
+  return rowNumber(row, "fbp_stock");
+}
+
+function fbpTransferStock(row) {
+  return rowNumber(row, "fbp_transfer_in_transit_qty");
+}
+
+function fbsStock(row) {
+  return rowNumber(row, "fbs_stock");
+}
+
+function totalProductStock(row) {
+  return localStock(row) + fbpStock(row);
+}
+
+function stockForInventoryValue(row) {
+  return Math.max(0, totalProductStock(row));
+}
+
+function productInventoryValue(row) {
+  return stockForInventoryValue(row) * getInventoryPurchaseCost(row);
+}
+
+function averageOrderAmount(row) {
+  const orderCount = rowNumber(row, "order_count");
+  return orderCount > 0 ? rowNumber(row, "total_sales_amount") / orderCount : 0;
+}
+
+function averagePurchaseCost(row) {
+  const quantity = rowNumber(row, "total_purchase_quantity");
+  return quantity > 0 ? rowNumber(row, "total_purchase_amount") / quantity : getInventoryPurchaseCost(row);
+}
+
 function buildInventoryProfitDetailRows(row, preview) {
   return [
     { label: "售价", value: `¥${money(preview.salePrice)}`, note: "取当前产品历史平均售价" },
@@ -377,11 +505,16 @@ function profitDetailCalculatedProfit(row) {
 }
 
 function profitDetailIsAccrued(row) {
-  return String(row?.settlement_state || "").toLowerCase() === "accrued";
+  return String(row?.profit_model || "").toLowerCase() === "actual"
+    || String(row?.settlement_state || "").toLowerCase() === "accrued";
 }
 
 function profitDetailCurrentProfit(row) {
-  return profitDetailIsAccrued(row) ? profitDetailActualProfit(row) : profitDetailCalculatedProfit(row);
+  if (String(row?.profit_model || "").toLowerCase() === "actual") {
+    const actual = profitDetailActualProfit(row);
+    return actual || profitDetailCalculatedProfit(row);
+  }
+  return profitDetailCalculatedProfit(row);
 }
 
 function profitDetailHasCalculatedProfit(row) {
@@ -417,9 +550,76 @@ function profitDetailMargin(row) {
 }
 
 function profitDetailStatusText(row) {
-  if (profitDetailIsAccrued(row)) return "已入账";
-  if (profitDetailHasCalculatedProfit(row)) return "已计算";
+  if (String(row?.profit_model_text || "")) return row.profit_model_text;
+  if (profitDetailIsAccrued(row)) return "真实利润";
+  if (profitDetailHasCalculatedProfit(row)) return "预估利润";
   return "待计算";
+}
+
+function labelFromMap(value, map, fallback = "-") {
+  const key = String(value || "").trim();
+  if (!key) return fallback;
+  return map[key] || map[key.toLowerCase()] || key;
+}
+
+function orderStatusText(value) {
+  return labelFromMap(value, {
+    awaiting_packaging: "待打包",
+    awaiting_deliver: "待发货",
+    delivering: "配送中",
+    delivered: "已签收",
+    cancelled: "已取消",
+    canceled: "已取消",
+    return: "退货中",
+    returned: "已退货",
+    arbitration: "仲裁中",
+    dispute: "纠纷中"
+  });
+}
+
+function outboundStatusText(value) {
+  return labelFromMap(value, {
+    deducted: "已出库",
+    cancelled: "已取消",
+    pending: "待处理",
+    posted: "已记账"
+  });
+}
+
+function procurementStatusText(value) {
+  return labelFromMap(value, {
+    pending: "待处理",
+    suggested: "待处理",
+    submitted: "待处理",
+    merged: "待处理",
+    approved: "待处理",
+    purchased: "待处理",
+    partial_inbound: "待处理",
+    inbound_done: "已完成",
+    done: "已完成",
+    cancelled: "已取消"
+  });
+}
+
+function procurementUrgencyText(value) {
+  return labelFromMap(value, {
+    normal: "普通",
+    urgent: "加急"
+  });
+}
+
+function procurementSourceText(value) {
+  return labelFromMap(value, {
+    "1688": "1688",
+    pdd: "拼多多",
+    supplier: "供应商",
+    wechat: "微信",
+    other: "其他"
+  });
+}
+
+function detailImage(row) {
+  return row?.image_urls || row?.order_image_urls || row?.product_image_url || row?.image_url || "";
 }
 
 function profitDetailStatusTagType(row) {
@@ -432,6 +632,10 @@ function profitDetailProfitClass(value) {
   if (Number(value || 0) > 0) return "profit-positive";
   if (Number(value || 0) < 0) return "profit-negative";
   return "profit-neutral";
+}
+
+function pendingAccruedProfit(row) {
+  return Number(row?.estimated_profit_total || 0) - Number(row?.actual_profit_total || 0);
 }
 
 function profitDetailBreakdownRows(row) {
@@ -450,6 +654,25 @@ function profitDetailBreakdownRows(row) {
   ];
 }
 
+function profitDetailModelRows(row, mode) {
+  const rows = row?.profit_models?.[mode]?.rows;
+  return Array.isArray(rows) ? rows : [];
+}
+
+function profitDetailModelLabel(row, mode) {
+  return row?.profit_models?.[mode]?.label || (mode === "actual" ? "真实利润" : "预估利润");
+}
+
+function profitDetailModelReady(row, mode) {
+  return Boolean(row?.profit_models?.[mode]?.ready);
+}
+
+function profitDetailModelValueText(item) {
+  if (item?.value_type === "number") return integer(item?.value || 0);
+  if (item?.value === null || item?.value === undefined || item?.value === "") return "-";
+  return `¥${money(item.value)}`;
+}
+
 function applyRouteState() {
   syncingRoute = true;
   try {
@@ -460,20 +683,23 @@ function applyRouteState() {
   }
 }
 
-function syncRouteQuery() {
-  if (syncingRoute) return;
-  const next = buildFilterQuery(route, state.filters, filterDefaults);
-  if (JSON.stringify(route.query || {}) === JSON.stringify(next)) return;
-  router.replace({ query: next });
-}
+const syncRouteQuery = createDefaultRouteQuerySync({
+  route,
+  router,
+  filters: state.filters,
+  defaults: filterDefaults,
+  isSyncingRoute: () => syncingRoute
+});
 
 function handleSearch() {
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
 function handleReset() {
   Object.assign(state.filters, filterDefaults);
+  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -490,6 +716,13 @@ function handlePageSizeChange(size) {
 
 function handleSelectionChange(rows) {
   selectedRows.value = Array.isArray(rows) ? rows : [];
+}
+
+function handleTableSortChange({ prop, order }) {
+  state.filters.sortKey = prop || "";
+  state.filters.sortDir = order === "ascending" ? "asc" : (order === "descending" ? "desc" : "");
+  state.filters.page = 1;
+  loadPageData();
 }
 
 function openCreateDialog() {
@@ -655,45 +888,89 @@ async function undoMergeHistory(row) {
 async function removeFromInventory(row) {
   try {
     await ElMessageBox.confirm(
-      `确认将库存产品「${row.name || row.id}」移出库存吗？`,
-      "移出库存",
+      `确认删除库存产品「${row.name || row.id}」吗？`,
+      "删除库存产品",
       {
         type: "warning",
-        confirmButtonText: "移出库存",
+        confirmButtonText: "删除",
         cancelButtonText: "取消"
       }
     );
     await apiClient.post(`/api/products/${row.id}/remove-from-inventory`, {});
-    ElMessage.success("已移出库存");
+    ElMessage.success("已删除库存产品");
     await loadPageData();
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
-    ElMessage.error(error.message || "移出库存失败");
+    ElMessage.error(error.message || "删除库存产品失败");
   }
 }
 
-async function recalculateProfits(row) {
-  try {
-    await apiClient.post(`/api/products/${row.id}/recalculate-profits`, {});
-    ElMessage.success("该产品关联订单利润已重算");
-    await loadPageData();
-  } catch (error) {
-    ElMessage.error(error.message || "重算利润失败");
-  }
+async function openProfitDetailsByMode(row, mode = "estimated") {
+  profitDetailCurrentProduct.value = row;
+  profitDetailPreferredMode.value = mode === "actual" ? "actual" : "estimated";
+  Object.assign(profitDetailPager, detailPageDefaults);
+  Object.assign(profitDetailFilters, {
+    query: "",
+    shopId: "all",
+    dateFrom: "",
+    dateTo: ""
+  });
+  await loadProfitDetails();
 }
 
-async function openProfitDetails(row) {
+async function loadProfitDetails() {
+  const row = profitDetailCurrentProduct.value;
+  if (!row?.id) return;
   profitDetailLoading.value = true;
   profitDetailDialogVisible.value = true;
-  profitDetailDialogTitle.value = `${row.name || row.product_name} - 订单利润明细`;
+  profitDetailDialogTitle.value = `${row.name || row.product_name} - ${profitDetailPreferredMode.value === "actual" ? "真实利润" : "预估利润"}明细`;
   try {
-    profitDetailRows.value = await apiClient.get(`/api/products/${row.id}/order-profit-details`);
+    const params = new URLSearchParams({
+      paged: "1",
+      page: String(profitDetailPager.page),
+      pageSize: String(profitDetailPager.pageSize),
+      shopId: String(profitDetailFilters.shopId || "all"),
+      dateFrom: toFilterDateValue(profitDetailFilters.dateFrom),
+      dateTo: toFilterDateValue(profitDetailFilters.dateTo)
+    });
+    const query = String(profitDetailFilters.query || "").trim();
+    if (query) params.set("query", query);
+    const result = await apiClient.get(`/api/products/${row.id}/order-profit-details?${params.toString()}`);
+    profitDetailRows.value = Array.isArray(result?.rows) ? result.rows : (Array.isArray(result) ? result : []);
+    profitDetailTotal.value = Number(result?.total || profitDetailRows.value.length);
   } catch (error) {
     profitDetailRows.value = [];
+    profitDetailTotal.value = 0;
     ElMessage.error(error.message || "加载订单利润明细失败");
   } finally {
     profitDetailLoading.value = false;
   }
+}
+
+function handleProfitDetailPageChange(page) {
+  profitDetailPager.page = page;
+  loadProfitDetails();
+}
+
+function handleProfitDetailPageSizeChange(size) {
+  profitDetailPager.pageSize = size;
+  profitDetailPager.page = 1;
+  loadProfitDetails();
+}
+
+function submitProfitDetailFilters() {
+  profitDetailPager.page = 1;
+  loadProfitDetails();
+}
+
+function resetProfitDetailFilters() {
+  Object.assign(profitDetailFilters, {
+    query: "",
+    shopId: "all",
+    dateFrom: "",
+    dateTo: ""
+  });
+  submitProfitDetailFilters();
 }
 
 async function openInventoryProfitDetails(row) {
@@ -723,13 +1000,236 @@ async function openCancelDetails(row) {
 }
 
 function openProcurement(row) {
-  router.push({
-    path: "/procurement",
-    query: {
-      productId: String(row.id),
-      from: "inventory-products"
-    }
+  procurementCreateProductId.value = Number(row.id || 0) || null;
+  procurementCreateVisible.value = Boolean(procurementCreateProductId.value);
+}
+
+async function handleProcurementCreated() {
+  procurementCreateVisible.value = false;
+  procurementCreateProductId.value = null;
+  await loadPageData();
+}
+
+async function openProductSalesDetails(row) {
+  productSalesCurrentProduct.value = row;
+  Object.assign(productSalesPager, detailPageDefaults);
+  Object.assign(productSalesFilters, {
+    query: "",
+    shopId: "all",
+    dateFrom: "",
+    dateTo: ""
   });
+  await loadProductSalesDetails();
+}
+
+async function loadProductSalesDetails() {
+  const row = productSalesCurrentProduct.value;
+  if (!row?.id) return;
+  productSalesDialogVisible.value = true;
+  productSalesDialogTitle.value = `${row.name || row.product_name || "产品"} - 销售出库明细`;
+  productSalesLoading.value = true;
+  try {
+    const params = new URLSearchParams({
+      paged: "1",
+      page: String(productSalesPager.page),
+      pageSize: String(productSalesPager.pageSize),
+      productId: String(row.id),
+      status: "deducted",
+      shopId: String(productSalesFilters.shopId || "all"),
+      dateFrom: toFilterDateValue(productSalesFilters.dateFrom),
+      dateTo: toFilterDateValue(productSalesFilters.dateTo)
+    });
+    const query = String(productSalesFilters.query || "").trim();
+    if (query) params.set("query", query);
+    const result = await apiClient.get(`/api/outbound-records?${params.toString()}`);
+    productSalesRows.value = Array.isArray(result?.rows) ? result.rows : [];
+    productSalesTotal.value = Number(result?.total || productSalesRows.value.length);
+  } catch (error) {
+    ElMessage.error(error.message || "加载销售出库明细失败");
+  } finally {
+    productSalesLoading.value = false;
+  }
+}
+
+function handleProductSalesPageChange(page) {
+  productSalesPager.page = page;
+  loadProductSalesDetails();
+}
+
+function handleProductSalesPageSizeChange(size) {
+  productSalesPager.pageSize = size;
+  productSalesPager.page = 1;
+  loadProductSalesDetails();
+}
+
+function submitProductSalesFilters() {
+  productSalesPager.page = 1;
+  loadProductSalesDetails();
+}
+
+function resetProductSalesFilters() {
+  Object.assign(productSalesFilters, {
+    query: "",
+    shopId: "all",
+    dateFrom: "",
+    dateTo: ""
+  });
+  submitProductSalesFilters();
+}
+
+async function openProductProcurementDetails(row) {
+  productProcurementCurrentProduct.value = row;
+  Object.assign(productProcurementPager, detailPageDefaults);
+  Object.assign(productProcurementFilters, {
+    query: "",
+    personId: "all",
+    dateFrom: "",
+    dateTo: ""
+  });
+  await loadProductProcurementDetails();
+}
+
+async function loadProductProcurementDetails() {
+  const row = productProcurementCurrentProduct.value;
+  if (!row?.id) return;
+  productProcurementDialogVisible.value = true;
+  productProcurementDialogTitle.value = `${row.name || row.product_name || "产品"} - 采购记录`;
+  productProcurementLoading.value = true;
+  try {
+    const params = new URLSearchParams({
+      paged: "1",
+      page: String(productProcurementPager.page),
+      pageSize: String(productProcurementPager.pageSize),
+      productId: String(row.id),
+      status: "all",
+      personId: String(productProcurementFilters.personId || "all"),
+      dateFrom: toFilterDateValue(productProcurementFilters.dateFrom),
+      dateTo: toFilterDateValue(productProcurementFilters.dateTo)
+    });
+    const query = String(productProcurementFilters.query || "").trim();
+    if (query) params.set("query", query);
+    const result = await apiClient.get(`/api/procurement/requests?${params.toString()}`);
+    productProcurementRows.value = Array.isArray(result?.rows) ? result.rows : [];
+    productProcurementTotal.value = Number(result?.total || productProcurementRows.value.length);
+  } catch (error) {
+    ElMessage.error(error.message || "加载采购记录失败");
+  } finally {
+    productProcurementLoading.value = false;
+  }
+}
+
+async function saveProductProcurementRow(row) {
+  const requestId = Number(row?.id || 0);
+  if (!requestId) return;
+  try {
+    await ElMessageBox.confirm(
+      `确认保存采购记录 #${requestId} 的修改吗？修改历史采购记录可能影响采购统计、成本和利润口径。`,
+      "编辑风险提醒",
+      {
+        type: "warning",
+        confirmButtonText: "继续保存",
+        cancelButtonText: "取消"
+      }
+    );
+  } catch (error) {
+    if (error === "cancel" || error === "close" || error?.message === "cancel") return;
+    throw error;
+  }
+  productProcurementSaving.value = true;
+  try {
+    await apiClient.put(`/api/procurement/requests/${requestId}`, {
+      updated_at: row.updated_at || "",
+      product_id: Number(row.product_id || 0) || null,
+      person_id: Number(row.person_id || 0) || null,
+      quantity: Number(row.quantity || 0),
+      amount: Number(row.amount || 0),
+      shipping_amount: Number(row.shipping_amount || 0),
+      urgency: row.urgency || "normal",
+      source_type: row.source_type || "1688",
+      supplier_id: row.supplier_id || null,
+      purchase_url: row.purchase_url || "",
+      note: row.note || "",
+      status: row.status || "submitted"
+    });
+    ElMessage.success("采购记录已更新");
+    await loadProductProcurementDetails();
+  } catch (error) {
+    ElMessage.error(error.message || "保存采购记录失败");
+  } finally {
+    productProcurementSaving.value = false;
+  }
+}
+
+async function deleteProductProcurementRow(row) {
+  const requestId = Number(row?.id || 0);
+  if (!requestId) return;
+  try {
+    await ElMessageBox.confirm(
+      `确认删除采购记录 #${requestId} 吗？删除历史采购记录可能影响采购统计、成本和利润口径。`,
+      "删除风险提醒",
+      {
+        type: "warning",
+        confirmButtonText: "确认删除",
+        cancelButtonText: "取消"
+      }
+    );
+    productProcurementSaving.value = true;
+    await apiClient.delete(`/api/procurement/requests/${requestId}`);
+    ElMessage.success("采购记录已删除");
+    await Promise.all([loadProductProcurementDetails(), loadPageData()]);
+  } catch (error) {
+    if (error === "cancel" || error === "close" || error?.message === "cancel") return;
+    ElMessage.error(error.message || "删除采购记录失败");
+  } finally {
+    productProcurementSaving.value = false;
+  }
+}
+
+async function directInboundProductProcurementRow(row) {
+  const requestId = Number(row?.id || 0);
+  if (!requestId) return;
+  try {
+    await ElMessageBox.confirm(`确认将采购记录 #${requestId} 直接入库吗？`, "直接入库", {
+      type: "warning",
+      confirmButtonText: "确认入库",
+      cancelButtonText: "取消"
+    });
+    productProcurementSaving.value = true;
+    await apiClient.post("/api/procurement/requests/direct-inbound", { request_ids: [requestId] });
+    ElMessage.success("采购记录已直接入库");
+    await Promise.all([loadProductProcurementDetails(), loadPageData()]);
+  } catch (error) {
+    if (error === "cancel" || error === "close" || error?.message === "cancel") return;
+    ElMessage.error(error.message || "采购记录直接入库失败");
+  } finally {
+    productProcurementSaving.value = false;
+  }
+}
+
+function handleProductProcurementPageChange(page) {
+  productProcurementPager.page = page;
+  loadProductProcurementDetails();
+}
+
+function handleProductProcurementPageSizeChange(size) {
+  productProcurementPager.pageSize = size;
+  productProcurementPager.page = 1;
+  loadProductProcurementDetails();
+}
+
+function submitProductProcurementFilters() {
+  productProcurementPager.page = 1;
+  loadProductProcurementDetails();
+}
+
+function resetProductProcurementFilters() {
+  Object.assign(productProcurementFilters, {
+    query: "",
+    personId: "all",
+    dateFrom: "",
+    dateTo: ""
+  });
+  submitProductProcurementFilters();
 }
 
 function openMappingDetails(row) {
@@ -753,7 +1253,9 @@ async function loadPageData() {
       pageSize: String(state.filters.pageSize),
       shopId: String(state.filters.shopId || "all"),
       dateFrom: String(state.filters.dateFrom || ""),
-      dateTo: String(state.filters.dateTo || "")
+      dateTo: String(state.filters.dateTo || ""),
+      sortKey: String(state.filters.sortKey || ""),
+      sortDir: String(state.filters.sortDir || "")
     });
     const query = String(state.filters.query || "").trim();
     if (query) params.set("query", query);
@@ -770,6 +1272,12 @@ async function loadPageData() {
     if (!listRequestGate.isLatest(requestToken)) return;
     state.products = Array.isArray(products?.rows) ? products.rows : [];
     state.total = Number(products?.total || 0);
+    const resolvedTotalPages = Math.max(1, Math.ceil(state.total / Math.max(1, Number(state.filters.pageSize || 1))));
+    if (state.filters.page > resolvedTotalPages) {
+      state.filters.page = resolvedTotalPages;
+      loadPageData();
+      return;
+    }
     selectedRows.value = [];
     if (!dictionaryLoaded) {
       state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
@@ -788,7 +1296,7 @@ async function loadPageData() {
 
 watch(() => route.query, applyRouteState, { deep: true });
 watch(
-  () => [state.filters.query, state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize],
+  () => [state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize, state.filters.sortKey, state.filters.sortDir],
   syncRouteQuery
 );
 watch(() => mergePreview.targetProductId, updateMergeCountSummary);
@@ -824,9 +1332,10 @@ onMounted(async () => {
         border
         class="erp-data-table"
         @selection-change="handleSelectionChange"
+        @sort-change="handleTableSortChange"
       >
         <el-table-column type="selection" width="48" fixed="left" />
-        <el-table-column label="产品信息" min-width="300" fixed="left">
+        <el-table-column label="产品信息" prop="product" min-width="340" fixed="left" sortable="custom">
           <template #default="{ row }">
             <div class="product-cell">
               <ProductImagePreview :src="row.image_url" />
@@ -834,93 +1343,99 @@ onMounted(async () => {
                 <ProductTitleLink :title="row.name || '-'" :lines="2" />
                 <span class="muted-text">{{ row.inventory_id || row.code || "-" }}</span>
                 <span class="muted-text">负责人：{{ row.owner_name || "-" }}</span>
-                <span class="muted-text">店铺：{{ row.shop_names.join(" / ") || "-" }}</span>
+                <span class="muted-text">绑定 SKU：{{ integer(row.bound_sku_count) }} 个</span>
               </div>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="库存 / 在途" width="140" align="center">
+        <el-table-column label="库存" prop="stock" width="180" align="center" sortable="custom">
+          <template #default="{ row }">
+            <div class="inventory-stock-cell">
+              <div class="stock-total-line">
+                <span>总库存</span>
+                <strong>{{ integer(totalProductStock(row)) }}</strong>
+              </div>
+              <div class="stock-split-grid">
+                <span>本地 {{ integer(localStock(row)) }}</span>
+                <span>FBP {{ integer(fbpStock(row)) }}</span>
+              </div>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="采购在途" prop="incoming_stock" width="120" align="center" sortable="custom">
           <template #default="{ row }">
             <div class="cell-stack cell-center">
-              <strong>{{ integer(row.stock) }}</strong>
-              <span class="muted-text">在途 {{ integer(row.incoming_stock) }}</span>
+              <strong>{{ integer(row.incoming_stock) }}</strong>
+              <span class="muted-text">采购/入库</span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="成本 / 售价" min-width="160" align="right">
+        <el-table-column label="FBP发仓" prop="fbp_transfer_in_transit_qty" width="120" align="center" sortable="custom">
+          <template #default="{ row }">
+            <div class="cell-stack cell-center">
+              <strong>{{ integer(fbpTransferStock(row)) }}</strong>
+              <span class="muted-text">待入FBP</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="销售表现" prop="total_sales_amount" min-width="190" align="right" sortable="custom">
+          <template #default="{ row }">
+            <el-button class="metric-cell-link" link type="primary" @click.stop="openProductSalesDetails(row)">
+              <div class="metric-cell-content cell-stack cell-align-end">
+                <strong>{{ integer(row.total_sales_quantity) }} 件</strong>
+                <span class="muted-text">销售额 ¥{{ money(row.total_sales_amount) }}</span>
+                <span class="muted-text">订单 {{ integer(row.order_count) }} / 均单 ¥{{ money(averageOrderAmount(row)) }}</span>
+              </div>
+            </el-button>
+          </template>
+        </el-table-column>
+        <el-table-column label="采购成本" prop="total_purchase_amount" min-width="170" align="right" sortable="custom">
+          <template #default="{ row }">
+            <el-button class="metric-cell-link" link type="primary" @click.stop="openProductProcurementDetails(row)">
+              <div class="metric-cell-content cell-stack cell-align-end">
+                <strong>总采购 ¥{{ money(row.total_purchase_amount) }}</strong>
+                <span class="muted-text">采购数 {{ integer(row.total_purchase_quantity) }}</span>
+                <span class="muted-text">均成本 ¥{{ money(averagePurchaseCost(row)) }}</span>
+              </div>
+            </el-button>
+          </template>
+        </el-table-column>
+        <el-table-column label="预估利润" prop="estimated_profit_total" min-width="170" align="right" sortable="custom">
+          <template #default="{ row }">
+            <el-button class="metric-cell-link" link type="success" @click.stop="openProfitDetailsByMode(row, 'estimated')">
+              <div class="metric-cell-content cell-stack cell-align-end">
+                <strong :class="profitDetailProfitClass(row.estimated_profit_total)">¥{{ money(row.estimated_profit_total) }}</strong>
+                <span class="muted-text">待入账 ¥{{ money(pendingAccruedProfit(row)) }}</span>
+                <span class="muted-text">利润率 {{ percent(row.profit_rate) }}</span>
+              </div>
+            </el-button>
+          </template>
+        </el-table-column>
+        <el-table-column label="真实利润" prop="actual_profit_total" min-width="170" align="right" sortable="custom">
+          <template #default="{ row }">
+            <el-button class="metric-cell-link" link type="primary" @click.stop="openProfitDetailsByMode(row, 'actual')">
+              <div class="metric-cell-content cell-stack cell-align-end">
+                <strong :class="profitDetailProfitClass(row.actual_profit_total)">¥{{ money(row.actual_profit_total) }}</strong>
+                <span class="muted-text">已入账利润</span>
+                <span class="muted-text">参考件利 ¥{{ inventoryProfitMoneyText(row, "profit") }}</span>
+              </div>
+            </el-button>
+          </template>
+        </el-table-column>
+        <el-table-column label="库存占用" prop="inventory_value" min-width="150" align="right" sortable="custom">
           <template #default="{ row }">
             <div class="cell-stack cell-align-end">
-              <strong>成本 ¥{{ money(row.avg_unit_cost) }}</strong>
-              <span class="muted-text">售价 ¥{{ money(row.avg_sale_price) }}</span>
+              <strong>¥{{ money(productInventoryValue(row)) }}</strong>
+              <span class="muted-text">库存 {{ integer(stockForInventoryValue(row)) }} x 成本</span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="利润详情" min-width="230">
+        <el-table-column label="操作" width="120" fixed="right">
           <template #default="{ row }">
-            <div class="profit-summary-cell">
-              <template v-if="hasInventoryProfitPreview(row)">
-                <div class="profit-summary-card">
-                  <div class="profit-summary-row">
-                    <span class="profit-summary-rate">{{ inventoryProfitMarginText(row) }}</span>
-                  </div>
-                  <div class="profit-summary-metric">利润 ¥{{ inventoryProfitMoneyText(row, "profit") }}</div>
-                  <div class="profit-summary-metric">运费 ¥{{ inventoryProfitMoneyText(row, "transport") }}</div>
-                  <div class="profit-summary-metric">建议售价 ¥{{ inventoryProfitMoneyText(row, "suggestedSaleRmb") }}</div>
-                  <el-button link type="primary" class="sku-detail-link erp-btn-link" @click="openInventoryProfitDetails(row)">明细</el-button>
-                </div>
-              </template>
-              <template v-else>
-                <span class="muted-text">{{ inventoryProfitStatusText(row) }}</span>
-              </template>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="历史销售" min-width="150" align="right">
-          <template #default="{ row }">
-            <div class="cell-stack cell-align-end">
-              <strong>销售额 ¥{{ money(row.total_sales_amount) }}</strong>
-              <span class="muted-text">订单 {{ integer(row.order_count) }}</span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="已绑定 SKU" min-width="320">
-          <template #default="{ row }">
-            <div class="sku-summary-cell">
-              <template v-if="row.bound_sku_count">
-                <div class="sku-preview-list">
-                  <el-tag
-                    v-for="mapping in row.sku_preview"
-                    :key="mapping.id"
-                    size="small"
-                    effect="plain"
-                    class="sku-preview-tag"
-                  >
-                    {{ mappingPreviewText(mapping) }}
-                  </el-tag>
-                  <span v-if="row.sku_preview_extra" class="sku-preview-extra">+{{ row.sku_preview_extra }}</span>
-                </div>
-                <el-button link type="primary" class="sku-detail-link erp-btn-link" @click="openMappingDetails(row)">查看详情</el-button>
-              </template>
-              <template v-else>
-                <span class="muted-text">未绑定 SKU</span>
-                <el-button link type="primary" class="sku-detail-link erp-btn-link" @click="openMappingDetails(row)">去绑定 SKU</el-button>
-              </template>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="创建时间" width="170">
-          <template #default="{ row }">{{ dateText(row.created_at) }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="380" fixed="right">
-          <template #default="{ row }">
-            <div class="erp-inline-actions">
+            <div class="inventory-actions">
               <el-button class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
-              <el-button class="erp-btn-link" link type="primary" @click="openMappingDetails(row)">{{ row.bound_sku_count ? "SKU 详情" : "去绑定 SKU" }}</el-button>
               <el-button class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
-              <el-button class="erp-btn-link" link @click="openProfitDetails(row)">订单利润明细</el-button>
-              <el-button class="erp-btn-link" link @click="openCancelDetails(row)">取消明细</el-button>
-              <el-button class="erp-btn-link" link type="warning" @click="recalculateProfits(row)">重算利润</el-button>
-              <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="removeFromInventory(row)">移出库存</el-button>
+              <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="removeFromInventory(row)">删除</el-button>
             </div>
           </template>
         </el-table-column>
@@ -931,7 +1446,8 @@ onMounted(async () => {
       :total="state.total"
       :page="state.filters.page"
       :page-size="state.filters.pageSize"
-      
+      :total-pages="inventoryTotalPages"
+      :summary="inventoryFooterSummary"
       @update:page="handlePageChange"
       @update:pageSize="handlePageSizeChange"
     />
@@ -1086,11 +1602,237 @@ onMounted(async () => {
       @saved="handleDialogSaved"
     />
 
-    <el-dialog v-model="profitDetailDialogVisible" :title="profitDetailDialogTitle" width="1280px" align-center class="erp-centered-dialog">
+    <ProcurementRequestCreateDialog
+      v-model="procurementCreateVisible"
+      :initial-product-id="procurementCreateProductId"
+      :lock-product="true"
+      @created="handleProcurementCreated"
+    />
+
+    <el-dialog v-model="productSalesDialogVisible" :title="productSalesDialogTitle" width="1380px" top="4vh" align-center class="erp-centered-dialog inventory-detail-dialog inventory-detail-dialog--wide">
+      <div class="product-detail-summary">
+        <div class="product-detail-summary-item">
+          <span>当前明细</span>
+          <strong>{{ integer(productSalesRows.length) }} / {{ integer(productSalesTotal) }}</strong>
+        </div>
+        <div class="product-detail-summary-item">
+          <span>出库件数</span>
+          <strong>{{ integer(productSalesSummary.quantity) }}</strong>
+        </div>
+        <div class="product-detail-summary-item">
+          <span>销售额</span>
+          <strong>¥{{ money(productSalesSummary.amount) }}</strong>
+        </div>
+        <div class="product-detail-summary-item">
+          <span>利润</span>
+          <strong :class="profitDetailProfitClass(productSalesSummary.profit)">¥{{ money(productSalesSummary.profit) }}</strong>
+        </div>
+      </div>
+      <div class="detail-filter-bar" @keydown.enter.prevent="submitProductSalesFilters">
+        <el-form inline class="detail-filter-form" @submit.prevent="submitProductSalesFilters">
+          <el-form-item label="店铺">
+            <el-select v-model="productSalesFilters.shopId" style="width: 180px">
+              <el-option label="全部店铺" value="all" />
+              <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="开始">
+            <el-date-picker v-model="productSalesFilters.dateFrom" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" />
+          </el-form-item>
+          <el-form-item label="结束">
+            <el-date-picker v-model="productSalesFilters.dateTo" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" />
+          </el-form-item>
+          <el-form-item label="搜索" class="detail-filter-search">
+            <el-input
+              v-model="productSalesFilters.query"
+              clearable
+              placeholder="订单号 / SKU / 名称 / 店铺"
+              style="width: 100%"
+              @keyup.enter="submitProductSalesFilters"
+            />
+          </el-form-item>
+          <el-form-item class="detail-filter-actions">
+            <el-button class="erp-btn erp-btn-primary" native-type="submit" type="primary" @click="submitProductSalesFilters">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="resetProductSalesFilters">重置</el-button>
+          </el-form-item>
+        </el-form>
+      </div>
+      <div class="inventory-dialog-table-wrap">
+        <el-table
+          v-loading="productSalesLoading"
+          :data="productSalesRows"
+          height="100%"
+          stripe
+          border
+          class="erp-data-table"
+        >
+          <el-table-column label="图片" width="86" fixed="left" align="center">
+            <template #default="{ row }">
+              <ProductImagePreview :src="detailImage(row)" size="portrait" :alt="row.product_name || row.ozon_sku || '订单商品图片'" />
+            </template>
+          </el-table-column>
+          <el-table-column prop="outbound_time" label="出库时间" width="170" />
+          <el-table-column prop="order_ref" label="订单号" min-width="220" />
+          <el-table-column prop="shop_name" label="店铺" min-width="150" />
+          <el-table-column prop="ozon_sku" label="SKU" min-width="180" />
+          <el-table-column prop="quantity" label="数量" width="80" align="center" />
+          <el-table-column label="售价" width="110" align="right">
+            <template #default="{ row }">¥{{ money(row.sale_price) }}</template>
+          </el-table-column>
+          <el-table-column label="销售额" width="120" align="right">
+            <template #default="{ row }">¥{{ money(row.order_amount) }}</template>
+          </el-table-column>
+          <el-table-column label="利润" width="150" align="right">
+            <template #default="{ row }">
+              <div class="profit-value-cell">
+                <strong :class="profitDetailProfitClass(profitDetailCurrentProfit(row))">¥{{ money(profitDetailCurrentProfit(row)) }}</strong>
+                <span class="profit-subline">{{ profitDetailStatusText(row) }}</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="110">
+            <template #default="{ row }">{{ outboundStatusText(row.status) }}</template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <PageFooterPagination
+        :total="productSalesTotal"
+        :page="productSalesPager.page"
+        :page-size="productSalesPager.pageSize"
+        @update:page="handleProductSalesPageChange"
+        @update:pageSize="handleProductSalesPageSizeChange"
+      />
+    </el-dialog>
+
+    <el-dialog v-model="productProcurementDialogVisible" :title="productProcurementDialogTitle" width="1460px" top="4vh" align-center class="erp-centered-dialog inventory-detail-dialog inventory-detail-dialog--wide">
+      <div class="product-detail-summary">
+        <div class="product-detail-summary-item">
+          <span>当前明细</span>
+          <strong>{{ integer(productProcurementRows.length) }} / {{ integer(productProcurementTotal) }}</strong>
+        </div>
+        <div class="product-detail-summary-item">
+          <span>采购数量</span>
+          <strong>{{ integer(productProcurementSummary.quantity) }}</strong>
+        </div>
+        <div class="product-detail-summary-item">
+          <span>采购金额</span>
+          <strong>¥{{ money(productProcurementSummary.amount) }}</strong>
+        </div>
+      </div>
+      <div class="detail-filter-bar" @keydown.enter.prevent="submitProductProcurementFilters">
+        <el-form inline class="detail-filter-form" @submit.prevent="submitProductProcurementFilters">
+          <el-form-item label="人员">
+            <el-select v-model="productProcurementFilters.personId" style="width: 180px">
+              <el-option label="全部人员" value="all" />
+              <el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="String(person.id)" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="开始">
+            <el-date-picker v-model="productProcurementFilters.dateFrom" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" />
+          </el-form-item>
+          <el-form-item label="结束">
+            <el-date-picker v-model="productProcurementFilters.dateTo" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" />
+          </el-form-item>
+          <el-form-item label="搜索" class="detail-filter-search">
+            <el-input
+              v-model="productProcurementFilters.query"
+              clearable
+              placeholder="SKU / 名称 / 备注 / 链接"
+              style="width: 100%"
+              @keyup.enter="submitProductProcurementFilters"
+            />
+          </el-form-item>
+          <el-form-item class="detail-filter-actions">
+            <el-button class="erp-btn erp-btn-primary" native-type="submit" type="primary" @click="submitProductProcurementFilters">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="resetProductProcurementFilters">重置</el-button>
+          </el-form-item>
+        </el-form>
+      </div>
+      <div class="inventory-dialog-table-wrap">
+        <el-table v-loading="productProcurementLoading || productProcurementSaving" :data="productProcurementRows" height="100%" stripe border class="erp-data-table">
+          <el-table-column label="图片" width="86" fixed="left" align="center">
+            <template #default="{ row }">
+              <ProductImagePreview :src="detailImage(row)" size="portrait" :alt="row.product_name || '采购商品图片'" />
+            </template>
+          </el-table-column>
+          <el-table-column prop="created_at" label="提交时间" width="170">
+            <template #default="{ row }">{{ dateText(row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column prop="person_name" label="提交人" width="140" />
+          <el-table-column prop="supplier_name" label="供应商" min-width="180" />
+          <el-table-column label="数量" width="110" align="center">
+            <template #default="{ row }">
+              <el-input-number v-model="row.quantity" :min="1" :precision="0" controls-position="right" />
+            </template>
+          </el-table-column>
+          <el-table-column label="货款" width="130" align="right">
+            <template #default="{ row }">
+              <el-input-number v-model="row.amount" :min="0" :precision="2" controls-position="right" />
+            </template>
+          </el-table-column>
+          <el-table-column label="运费" width="130" align="right">
+            <template #default="{ row }">
+              <el-input-number v-model="row.shipping_amount" :min="0" :precision="2" controls-position="right" />
+            </template>
+          </el-table-column>
+          <el-table-column label="来源" width="140">
+            <template #default="{ row }">
+              <el-select v-model="row.source_type">
+                <el-option label="1688" value="1688" />
+                <el-option label="拼多多" value="pdd" />
+                <el-option label="供应商" value="supplier" />
+                <el-option label="微信" value="wechat" />
+                <el-option label="其他" value="other" />
+              </el-select>
+            </template>
+          </el-table-column>
+          <el-table-column label="紧急程度" width="120">
+            <template #default="{ row }">
+              <el-select v-model="row.urgency">
+                <el-option label="普通" value="normal" />
+                <el-option label="加急" value="urgent" />
+              </el-select>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="120">
+            <template #default="{ row }">{{ procurementStatusText(row.status) }}</template>
+          </el-table-column>
+          <el-table-column prop="purchase_order_no" label="采购单" min-width="180" />
+          <el-table-column label="采购链接" min-width="320">
+            <template #default="{ row }">
+              <el-input v-model="row.purchase_url" placeholder="https://..." />
+            </template>
+          </el-table-column>
+          <el-table-column label="备注" min-width="280">
+            <template #default="{ row }">
+              <el-input v-model="row.note" placeholder="备注" />
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="170" fixed="right">
+            <template #default="{ row }">
+              <div class="erp-inline-actions">
+                <el-button class="erp-btn-link" link type="primary" @click="saveProductProcurementRow(row)">保存</el-button>
+                <el-button class="erp-btn-link" link type="success" @click="directInboundProductProcurementRow(row)">直接入库</el-button>
+                <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="deleteProductProcurementRow(row)">删除</el-button>
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <PageFooterPagination
+        :total="productProcurementTotal"
+        :page="productProcurementPager.page"
+        :page-size="productProcurementPager.pageSize"
+        @update:page="handleProductProcurementPageChange"
+        @update:pageSize="handleProductProcurementPageSizeChange"
+      />
+    </el-dialog>
+
+    <el-dialog v-model="profitDetailDialogVisible" :title="profitDetailDialogTitle" width="1480px" top="4vh" align-center class="erp-centered-dialog inventory-detail-dialog inventory-detail-dialog--wide">
       <div class="profit-detail-head">
         <div class="profit-detail-card">
-          <span>订单数</span>
-          <strong>{{ integer(profitDetailSummary.orderCount) }}</strong>
+          <span>当前明细</span>
+          <strong>{{ integer(profitDetailRows.length) }} / {{ integer(profitDetailTotal) }}</strong>
         </div>
         <div class="profit-detail-card">
           <span>销售额合计</span>
@@ -1105,63 +1847,145 @@ onMounted(async () => {
           <strong :class="profitDetailProfitClass(profitDetailSummary.actualProfit)">¥{{ money(profitDetailSummary.actualProfit) }}</strong>
         </div>
       </div>
+      <div class="detail-filter-bar" @keydown.enter.prevent="submitProfitDetailFilters">
+        <el-form inline class="detail-filter-form" @submit.prevent="submitProfitDetailFilters">
+          <el-form-item label="店铺">
+            <el-select v-model="profitDetailFilters.shopId" style="width: 180px">
+              <el-option label="全部店铺" value="all" />
+              <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="开始">
+            <el-date-picker v-model="profitDetailFilters.dateFrom" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" />
+          </el-form-item>
+          <el-form-item label="结束">
+            <el-date-picker v-model="profitDetailFilters.dateTo" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" />
+          </el-form-item>
+          <el-form-item label="搜索" class="detail-filter-search">
+            <el-input
+              v-model="profitDetailFilters.query"
+              clearable
+              placeholder="订单号 / SKU / 名称 / 店铺"
+              style="width: 100%"
+              @keyup.enter="submitProfitDetailFilters"
+            />
+          </el-form-item>
+          <el-form-item class="detail-filter-actions">
+            <el-button class="erp-btn erp-btn-primary" native-type="submit" type="primary" @click="submitProfitDetailFilters">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="resetProfitDetailFilters">重置</el-button>
+          </el-form-item>
+        </el-form>
+      </div>
 
-      <el-table v-loading="profitDetailLoading" :data="profitDetailRows" stripe border class="erp-data-table">
-        <el-table-column type="expand" width="56">
-          <template #default="{ row }">
-            <div class="profit-breakdown-panel">
-              <div class="profit-breakdown-grid">
-                <div
-                  v-for="item in profitDetailBreakdownRows(row)"
-                  :key="`${row.order_item_id || row.posting_number}-${item.label}`"
-                  class="profit-breakdown-item"
-                  :class="{ 'is-highlight': item.highlight }"
-                >
-                  <span>{{ item.label }}</span>
-                  <strong :class="item.highlight ? profitDetailProfitClass(item.value) : ''">¥{{ money(item.value) }}</strong>
+      <div class="inventory-dialog-table-wrap inventory-dialog-table-wrap--profit">
+        <el-table
+          v-loading="profitDetailLoading"
+          :data="profitDetailRows"
+          height="100%"
+          stripe
+          border
+          class="erp-data-table"
+        >
+          <el-table-column label="图片" width="86" fixed="left" align="center">
+            <template #default="{ row }">
+              <ProductImagePreview :src="detailImage(row)" size="portrait" :alt="row.product_name || row.posting_number || '订单商品图片'" />
+            </template>
+          </el-table-column>
+          <el-table-column type="expand" width="56">
+            <template #default="{ row }">
+              <div class="profit-breakdown-panel">
+                <div class="profit-breakdown-models">
+                  <div class="profit-breakdown-model">
+                    <div class="profit-breakdown-model__head">
+                      <strong>{{ profitDetailModelLabel(row, "estimated") }}</strong>
+                      <span>按预估模型展开收费项</span>
+                    </div>
+                    <div class="profit-breakdown-grid">
+                      <div
+                        v-for="item in profitDetailModelRows(row, 'estimated')"
+                        :key="`${row.order_item_id || row.posting_number}-estimated-${item.key}`"
+                        class="profit-breakdown-item"
+                        :class="{ 'is-highlight': item.emphasize }"
+                      >
+                        <span>{{ item.label }}</span>
+                        <strong :class="item.emphasize ? profitDetailProfitClass(item.value) : ''">{{ profitDetailModelValueText(item) }}</strong>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="profit-breakdown-model">
+                    <div class="profit-breakdown-model__head">
+                      <strong>{{ profitDetailModelLabel(row, "actual") }}</strong>
+                      <span>{{ profitDetailModelReady(row, "actual") ? "按真实入账模型展开收费项" : "当前订单暂未形成完整真实利润" }}</span>
+                    </div>
+                    <div class="profit-breakdown-grid">
+                      <div
+                        v-for="item in profitDetailModelRows(row, 'actual')"
+                        :key="`${row.order_item_id || row.posting_number}-actual-${item.key}`"
+                        class="profit-breakdown-item"
+                        :class="{ 'is-highlight': item.emphasize }"
+                      >
+                        <span>{{ item.label }}</span>
+                        <strong :class="item.emphasize ? profitDetailProfitClass(item.value) : ''">{{ profitDetailModelValueText(item) }}</strong>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="profit-breakdown-meta">
+                  <span>成本来源：{{ row.cost_source || "-" }}</span>
+                  <span>当前取值：未结束订单默认看预估利润，已结束订单默认看真实利润</span>
                 </div>
               </div>
-              <div class="profit-breakdown-meta">
-                <span>成本来源：{{ row.cost_source || "-" }}</span>
-                <span>公式：销售额 - 各项成本费用 = 当前利润</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="posting_number" label="订单号" min-width="220" />
+          <el-table-column prop="shop_name" label="店铺" min-width="150" />
+          <el-table-column prop="quantity" label="数量" width="80" align="center" />
+          <el-table-column label="销售额" width="120" align="right">
+            <template #default="{ row }">¥{{ money(profitDetailRevenue(row)) }}</template>
+          </el-table-column>
+          <el-table-column label="利润模型" width="110" align="center">
+            <template #default="{ row }">
+              <el-tag :type="profitDetailStatusTagType(row)">{{ profitDetailStatusText(row) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="当前利润" width="150" align="right">
+            <template #default="{ row }">
+              <div class="profit-value-cell">
+                <strong :class="profitDetailProfitClass(profitDetailCurrentProfit(row))">¥{{ money(profitDetailCurrentProfit(row)) }}</strong>
+                <span class="profit-subline">预估 ¥{{ money(profitDetailEstimatedProfit(row)) }} / 真实 ¥{{ money(profitDetailActualProfit(row)) }}</span>
               </div>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column prop="posting_number" label="订单号" min-width="180" />
-        <el-table-column prop="shop_name" label="店铺" min-width="130" />
-        <el-table-column prop="quantity" label="数量" width="80" align="center" />
-        <el-table-column label="销售额" width="120" align="right">
-          <template #default="{ row }">¥{{ money(profitDetailRevenue(row)) }}</template>
-        </el-table-column>
-        <el-table-column label="利润状态" width="110" align="center">
-          <template #default="{ row }">
-            <el-tag :type="profitDetailStatusTagType(row)">{{ profitDetailStatusText(row) }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="当前利润" width="150" align="right">
-          <template #default="{ row }">
-            <div class="profit-value-cell">
-              <strong :class="profitDetailProfitClass(profitDetailCurrentProfit(row))">¥{{ money(profitDetailCurrentProfit(row)) }}</strong>
-              <span class="profit-subline">预估 ¥{{ money(profitDetailEstimatedProfit(row)) }} / 已入账 ¥{{ money(profitDetailActualProfit(row)) }}</span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="利润率" width="100" align="right">
-          <template #default="{ row }">{{ percent(profitDetailMargin(row)) }}</template>
-        </el-table-column>
-        <el-table-column label="成本合计" width="120" align="right">
-          <template #default="{ row }">¥{{ money(profitDetailTotalCost(row)) }}</template>
-        </el-table-column>
-        <el-table-column prop="status" label="状态" width="140" />
-        <el-table-column prop="ordered_at" label="下单时间" min-width="170">
-          <template #default="{ row }">{{ dateText(row.ordered_at) }}</template>
-        </el-table-column>
-      </el-table>
+            </template>
+          </el-table-column>
+          <el-table-column label="利润率" width="100" align="right">
+            <template #default="{ row }">{{ percent(profitDetailMargin(row)) }}</template>
+          </el-table-column>
+          <el-table-column label="成本合计" width="120" align="right">
+            <template #default="{ row }">¥{{ money(profitDetailTotalCost(row)) }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="140">
+            <template #default="{ row }">{{ orderStatusText(row.status || row.order_status) }}</template>
+          </el-table-column>
+          <el-table-column prop="ordered_at" label="下单时间" min-width="190">
+            <template #default="{ row }">{{ dateText(row.ordered_at) }}</template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <PageFooterPagination
+        :total="profitDetailTotal"
+        :page="profitDetailPager.page"
+        :page-size="profitDetailPager.pageSize"
+        @update:page="handleProfitDetailPageChange"
+        @update:pageSize="handleProfitDetailPageSizeChange"
+      />
     </el-dialog>
 
     <el-dialog v-model="detailDialogVisible" :title="detailDialogTitle" width="980px" align-center class="erp-centered-dialog">
       <el-table v-loading="detailLoading" :data="detailRows" stripe border class="erp-data-table">
+        <el-table-column label="图片" width="86" fixed="left" align="center">
+          <template #default="{ row }">
+            <ProductImagePreview :src="detailImage(row)" size="portrait" :alt="row.product_name || row.posting_number || '订单商品图片'" />
+          </template>
+        </el-table-column>
         <el-table-column prop="posting_number" label="订单号" min-width="180" />
         <el-table-column prop="shop_name" label="店铺" min-width="120" />
         <el-table-column prop="quantity" label="数量" width="80" align="center" />
@@ -1171,7 +1995,9 @@ onMounted(async () => {
         <el-table-column prop="estimated_profit" label="利润" width="110" align="right">
           <template #default="{ row }">{{ money(row.actual_profit || row.estimated_profit) }}</template>
         </el-table-column>
-        <el-table-column prop="status" label="状态" width="140" />
+        <el-table-column label="状态" width="140">
+          <template #default="{ row }">{{ orderStatusText(row.status || row.order_status) }}</template>
+        </el-table-column>
         <el-table-column prop="ordered_at" label="下单时间" min-width="170">
           <template #default="{ row }">{{ dateText(row.ordered_at) }}</template>
         </el-table-column>
@@ -1201,6 +2027,7 @@ onMounted(async () => {
         <el-table-column prop="note" label="说明" min-width="360" />
       </el-table>
     </el-dialog>
+
   </div>
 </template>
 
@@ -1232,8 +2059,245 @@ onMounted(async () => {
   padding: 0;
 }
 
+.inventory-page-shell :deep(.inventory-toolbar-sticky) {
+  position: relative;
+  flex: 0 0 auto;
+  z-index: 2;
+}
+
+.inventory-page-shell.inventory-card {
+  height: 100%;
+  overflow: hidden;
+}
+
+.inventory-page-shell > .erp-data-table {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+}
+
+.inventory-page-shell > .inventory-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.inventory-page-shell > .inventory-table-wrap :deep(.erp-data-table) {
+  height: 100%;
+}
+
+.inventory-page-shell > .inventory-table-wrap :deep(.erp-data-table .el-table__body-wrapper) {
+  height: calc(100% - var(--el-table-header-height, 44px));
+}
+
+.inventory-detail-dialog :deep(.el-dialog) {
+  display: flex;
+  flex-direction: column;
+  max-height: 92vh;
+}
+
+.inventory-detail-dialog--wide :deep(.el-dialog) {
+  width: min(1480px, 96vw) !important;
+}
+
+.inventory-detail-dialog :deep(.el-dialog__body) {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.inventory-dialog-table-wrap {
+  min-height: 320px;
+  height: min(54vh, 560px);
+  overflow: hidden;
+}
+
+.inventory-dialog-table-wrap--profit {
+  height: min(52vh, 540px);
+}
+
+.inventory-detail-dialog :deep(.page-footer-pagination) {
+  margin-top: 0;
+  padding-top: 0;
+}
+
+.inventory-page-shell > :deep(.table-footer),
+.inventory-page-shell > :deep(.page-footer-pagination) {
+  flex: 0 0 auto;
+}
+
 .cell-align-end {
   align-items: flex-end;
+}
+
+.metric-cell-link {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  width: 100%;
+  min-height: 64px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  text-align: right;
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+
+.metric-cell-link :deep(.el-button__text) {
+  width: 100%;
+}
+
+.metric-cell-content {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  width: 100%;
+  min-height: 48px;
+}
+
+.metric-cell-link strong {
+  color: #1d4ed8;
+}
+
+.metric-cell-link:hover {
+  border-color: #bfdbfe;
+  background: #f8fbff;
+}
+
+.detail-filter-bar {
+  padding: 10px 12px;
+  border: 1px solid #dbe6f3;
+  border-radius: 10px;
+  background: #fbfdff;
+}
+
+.detail-filter-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 0;
+}
+
+.detail-filter-form :deep(.el-input),
+.detail-filter-form :deep(.el-select),
+.detail-filter-form :deep(.el-date-editor) {
+  max-width: 100%;
+}
+
+.detail-filter-form :deep(.el-form-item) {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-end;
+  margin-bottom: 0;
+  margin-right: 14px;
+}
+
+.detail-filter-form :deep(.el-form-item__content) {
+  display: flex;
+  align-items: center;
+}
+
+.inventory-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 6px;
+}
+
+.inventory-actions :deep(.el-button) {
+  margin-left: 0;
+}
+
+.detail-filter-search {
+  flex: 1 1 360px !important;
+  min-width: 320px;
+}
+
+.detail-filter-search :deep(.el-form-item__content) {
+  width: 100%;
+}
+
+.detail-filter-actions {
+  flex: 0 0 auto !important;
+  margin-left: auto;
+  padding-left: 16px;
+  margin-right: 0 !important;
+}
+
+.detail-filter-actions :deep(.el-form-item__content) {
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.product-detail-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.product-detail-summary-item {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid #dbe6f3;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.product-detail-summary-item span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.product-detail-summary-item strong {
+  color: #0f172a;
+  font-size: 18px;
+}
+
+.inventory-stock-cell {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.stock-total-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+}
+
+.stock-total-line span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.stock-total-line strong {
+  color: #0f172a;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.stock-split-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.stock-split-grid span {
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid #dbe6f3;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.3;
 }
 
 .profit-summary-cell {
@@ -1364,6 +2428,33 @@ onMounted(async () => {
   display: grid;
   gap: 12px;
   padding: 12px 8px;
+}
+
+.profit-breakdown-models {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.profit-breakdown-model {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.profit-breakdown-model__head {
+  display: grid;
+  gap: 4px;
+}
+
+.profit-breakdown-model__head strong {
+  color: #0f172a;
+  font-size: 14px;
+}
+
+.profit-breakdown-model__head span {
+  color: #64748b;
+  font-size: 12px;
 }
 
 .profit-breakdown-grid {
@@ -1577,7 +2668,23 @@ onMounted(async () => {
 
 @media (max-width: 960px) {
   .profit-detail-head,
+  .product-detail-summary,
   .profit-preview-head {
+    grid-template-columns: 1fr;
+  }
+
+  .detail-filter-actions {
+    width: 100%;
+    margin-left: 0;
+    padding-left: 0;
+  }
+
+  .detail-filter-actions :deep(.el-form-item__content) {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .profit-breakdown-models {
     grid-template-columns: 1fr;
   }
 

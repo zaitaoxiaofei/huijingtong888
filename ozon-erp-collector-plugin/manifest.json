@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "爆单ERP",
-  "description": "爆单ERP 商品采集、采集箱同步和后台工作台入口",
+  "name": "爆单ERP 商品信息采集插件",
+  "description": "采集 Ozon 前台商品信息、同步采集箱并打开后台工作台",
   "version": "1.4.1",
   "permissions": ["activeTab", "alarms", "scripting", "storage", "tabs"],
   "host_permissions": [
@@ -47,7 +47,7 @@
     "128": "assets/logo-128.png"
   },
   "action": {
-    "default_title": "爆单ERP",
+    "default_title": "爆单ERP 商品信息采集插件",
     "default_icon": {
       "16": "assets/logo-16.png",
       "32": "assets/logo-32.png",

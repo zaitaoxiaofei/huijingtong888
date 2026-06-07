@@ -49,6 +49,10 @@ export function watermarkCropperImages(payload) {
   return apiClient.post("/api/tools/image-cropper/watermark", payload);
 }
 
+export function watermarkListingMedia(payload) {
+  return apiClient.post("/api/listing/media/watermark", payload);
+}
+
 export async function uploadShopWatermark(shopId, file) {
   const formData = new FormData();
   formData.append("file", file);
@@ -70,6 +74,7 @@ export async function uploadShopWatermark(shopId, file) {
 export function withImageToken(url) {
   const token = getAuthToken();
   if (!token || !url) return url;
+  if (!isLocalProtectedUrl(url)) return url;
   const separator = url.includes("?") ? "&" : "?";
   return `${url}${separator}token=${encodeURIComponent(token)}`;
 }
@@ -81,5 +86,17 @@ export function downloadUrl(url) {
 function uploadHeaders() {
   const token = getAuthToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function isLocalProtectedUrl(url = "") {
+  const value = String(url || "").trim();
+  if (!value) return false;
+  if (value.startsWith("/")) return true;
+  try {
+    const parsed = new URL(value, window.location.origin);
+    return parsed.origin === window.location.origin;
+  } catch {
+    return false;
+  }
 }
 

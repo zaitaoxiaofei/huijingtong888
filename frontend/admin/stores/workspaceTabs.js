@@ -3,6 +3,7 @@ import { defineStore } from "pinia";
 import { navigationIconByRoute } from "../constants/navigation.js";
 
 const WORKSPACE_TABS_STORAGE_KEY = "ozon-admin-workspace-tabs";
+const MAX_RESTORED_TABS = 8;
 
 function clonePlainObject(value) {
   return { ...(value || {}) };
@@ -33,11 +34,37 @@ function serializeRoute(route) {
   };
 }
 
+function normalizeFullPathTabKey(route) {
+  const path = String(route.path || "").trim();
+  const query = { ...(route.query || {}) };
+  delete query.tabTitle;
+  delete query.title;
+  const entries = Object.entries(query)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .sort(([a], [b]) => a.localeCompare(b))
+    .flatMap(([key, value]) => {
+      if (Array.isArray(value)) {
+        return value.map((item) => `${encodeURIComponent(key)}=${encodeURIComponent(String(item))}`);
+      }
+      return `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`;
+    });
+  return entries.length ? `${path}?${entries.join("&")}` : path;
+}
+
+function normalizeWorkbenchTabKey(route) {
+  const path = String(route.path || "").trim();
+  const workbenchId = String(route.query?.workbenchId || "").trim();
+  return workbenchId ? `${path}?workbenchId=${encodeURIComponent(workbenchId)}` : path;
+}
+
 function resolveTabKey(route) {
-  return route.meta?.tabKey === "fullPath" ? route.fullPath : route.path;
+  if (route.meta?.tabKey === "workbench") return normalizeWorkbenchTabKey(route);
+  return route.meta?.tabKey === "fullPath" ? normalizeFullPathTabKey(route) : route.path;
 }
 
 function resolveTabTitle(route) {
+  const dynamicTitle = String(route.query?.tabTitle || route.query?.title || "").trim();
+  if (dynamicTitle) return dynamicTitle;
   return String(route.meta?.title || route.name || route.path || "Untitled").trim();
 }
 
@@ -62,6 +89,21 @@ function toPersistedTab(tab) {
 
 function canPersistRoute(route) {
   return route?.path && !route.meta?.public;
+}
+
+function compactRestoredTabs(tabs, activeKey) {
+  if (tabs.length <= MAX_RESTORED_TABS) return tabs;
+  const pinnedTabs = tabs.filter((tab) => tab.pinned || !tab.closable);
+  const activeTab = tabs.find((tab) => tab.key === activeKey);
+  const recentTabs = tabs.filter((tab) => tab !== activeTab && !pinnedTabs.includes(tab)).slice(-MAX_RESTORED_TABS);
+  const compacted = [...pinnedTabs, activeTab, ...recentTabs].filter(Boolean);
+  return compacted.slice(Math.max(0, compacted.length - MAX_RESTORED_TABS));
+}
+
+function dedupeTabsByKey(tabs) {
+  const byKey = new Map();
+  for (const tab of tabs) byKey.set(tab.key, tab);
+  return [...byKey.values()];
 }
 
 export const useWorkspaceTabsStore = defineStore("workspace-tabs", () => {
@@ -134,10 +176,14 @@ export const useWorkspaceTabsStore = defineStore("workspace-tabs", () => {
           route: cloneRouteLocation(resolved)
         });
       }
-      tabs.value = sortTabs(restoredTabs);
-      activeKey.value = restoredTabs.some((tab) => tab.key === parsed?.activeKey)
+      const restoredActiveKey = restoredTabs.some((tab) => tab.key === parsed?.activeKey)
         ? parsed.activeKey
         : restoredTabs[restoredTabs.length - 1]?.key || "";
+      tabs.value = sortTabs(compactRestoredTabs(dedupeTabsByKey(restoredTabs), restoredActiveKey));
+      activeKey.value = tabs.value.some((tab) => tab.key === restoredActiveKey)
+        ? restoredActiveKey
+        : tabs.value[tabs.value.length - 1]?.key || "";
+      persistState();
     } catch {
       sessionStorage.removeItem(WORKSPACE_TABS_STORAGE_KEY);
     }

@@ -139,6 +139,7 @@ async function waitForPort(targetPort, timeoutMs = 30000) {
 }
 
 await runNpmScript("build:frontend", "Frontend build");
+await runNpmScript("package:plugin", "Plugin packaging");
 await freePort(port);
 const server = startManaged(process.execPath, ["src/server.js"], "Server startup");
 const serverExit = waitForExit(server);

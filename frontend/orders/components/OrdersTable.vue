@@ -24,7 +24,6 @@ const emit = defineEmits([
   "save-mark",
   "open-bind-product-from-order",
   "open-create-product-from-order",
-  "open-procurement",
   "open-order-procurement"
 ]);
 
@@ -90,6 +89,10 @@ function formatPrintDateParts(value) {
 function formatMoney(value) {
   const amount = Number(value || 0);
   return Number.isFinite(amount) ? amount.toFixed(2) : "0.00";
+}
+
+function hasActualProfit(item) {
+  return Boolean(item?.actualProfitReady);
 }
 
 async function copyText(value) {
@@ -277,8 +280,11 @@ function orderTitleParts(row) {
                 </span>
               </template>
             </div>
-            <div class="orders-order-quantity" :class="{ 'is-multi': row.quantitySummary > 1 }">
-              数量 {{ row.quantitySummary }}
+            <div class="orders-order-quantity">
+              <span>数量</span>
+              <span class="orders-item-quantity" :class="{ 'is-multi': Number(row.quantitySummary || 0) > 1 }">
+                x{{ Number(row.quantitySummary || 0) || 1 }}
+              </span>
             </div>
           </div>
         </template>
@@ -318,6 +324,7 @@ function orderTitleParts(row) {
                     :src="item.imageUrl"
                     :preview-src-list="[item.imageUrl]"
                     preview-teleported
+                    lazy
                     fit="contain"
                     class="orders-thumb-image"
                   />
@@ -339,6 +346,9 @@ function orderTitleParts(row) {
                 <div v-else class="orders-cell-title orders-product-name">{{ item.name }}</div>
                 <div class="orders-sku-row">
                   <span class="orders-cell-meta-line">SKU: {{ item.sku }}</span>
+                  <span class="orders-item-quantity" :class="{ 'is-multi': Number(item.quantity || 0) > 1 }">
+                    x{{ Number(item.quantity || 0) || 1 }}
+                  </span>
                   <el-tooltip content="复制 SKU" placement="top">
                     <button type="button" class="orders-icon-button" aria-label="复制 SKU" @click="copyText(item.sku)">
                       <el-icon><CopyDocument /></el-icon>
@@ -360,6 +370,9 @@ function orderTitleParts(row) {
               真实:
               <span v-if="row.profitSummary.hasActual">CNY {{ formatMoney(row.profitSummary.actual) }}</span>
               <span v-else>--</span>
+            </div>
+            <div v-if="Number(row.productDisplayRows?.length || 0) > 1" class="orders-profit-merge-hint">
+              已按 {{ Number(row.productDisplayRows?.length || 0) }} 个商品分别计算后汇总
             </div>
             <el-tooltip content="查看利润详情" placement="top">
               <el-button
@@ -387,7 +400,7 @@ function orderTitleParts(row) {
         </template>
       </el-table-column>
 
-      <el-table-column label="物流信息" min-width="168">
+      <el-table-column label="物流信息" min-width="220">
         <template #default="{ row }">
           <div class="orders-cell-stack">
             <div class="orders-delivery-main orders-delivery-main-compact">{{ row.logisticsSummary.deliveryMethodLabel || "FBS" }}</div>
@@ -431,8 +444,13 @@ function orderTitleParts(row) {
             >
               <small class="orders-stock-product-name orders-product-name">{{ product.productName }}</small>
               <div class="orders-stock-inline-facts">
-                <span>FBP: {{ row.stockSummary?.fbp || 0 }}</span>
-                <span>FBS: {{ row.stockSummary?.fbs || 0 }}</span>
+                <span>金额: {{ product.amountText }}</span>
+                <span>预计: CNY {{ formatMoney(product.estimatedProfit) }}</span>
+                <span>真实: {{ hasActualProfit(product) ? `CNY ${formatMoney(product.actualProfit)}` : '--' }}</span>
+              </div>
+              <div class="orders-stock-inline-facts">
+                <span>FBP: {{ product.stock?.fbp || 0 }}</span>
+                <span>FBS: {{ product.stock?.fbs || 0 }}</span>
               </div>
               <div class="orders-inline-actions orders-inline-actions-compact">
                 <el-button
@@ -442,14 +460,6 @@ function orderTitleParts(row) {
                   @click="emit('open-bind-product-from-order', row.id, product.sku)"
                 >
                   修改绑定
-                </el-button>
-                <el-button
-                  v-if="product.productId"
-                  size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-primary"
-                  @click="emit('open-procurement', product.productId)"
-                >
-                  创建采购
                 </el-button>
               </div>
             </div>
@@ -484,7 +494,7 @@ function orderTitleParts(row) {
         </template>
       </el-table-column>
 
-      <el-table-column label="取消原因" min-width="148">
+      <el-table-column label="取消原因" min-width="112">
         <template #default="{ row }">
           <div class="orders-cancel-cell">
             <small>{{ row.cancelReasonText }}</small>
@@ -496,27 +506,23 @@ function orderTitleParts(row) {
         <template #default="{ row }">
           <div class="orders-actions-cell orders-actions-cell-vertical">
             <el-button
-              v-if="row.availableActions.purchase"
+              v-if="row.availableActions.showPurchase"
               size="small"
               class="orders-inline-accent-button orders-inline-accent-button-secondary"
               @click="emit('open-order-procurement', row.id)"
             >
               去采购
             </el-button>
-            <div v-else-if="row.procurementState?.handled" class="orders-procurement-done">
-              <el-tag type="success" effect="light">{{ row.procurementState.label }}</el-tag>
-              <small>{{ row.procurementState.detail }}</small>
-            </div>
             <el-button
-              v-else
+              v-if="row.availableActions.showPrepare"
               size="small"
               class="orders-inline-accent-button orders-inline-accent-button-primary"
-              :disabled="row.availableActions.prepare === false"
               @click="emit('prepare-order', row.id)"
             >
               备货
             </el-button>
             <el-button
+              v-if="row.availableActions.showPrint"
               size="small"
               class="orders-inline-accent-button orders-inline-accent-button-secondary"
               :disabled="row.availableActions.print === false"

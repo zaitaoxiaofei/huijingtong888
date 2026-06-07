@@ -26,13 +26,14 @@ const summaryText = computed(() => (
 ));
 
 const pageStatusText = computed(() => `${Number(props.page || 1)} / ${resolvedTotalPages.value} 页`);
+const showPageSizeSelect = computed(() => Array.isArray(props.pageSizes) && props.pageSizes.length > 1);
 </script>
 
 <template>
   <div class="table-footer erp-footer-pagination" :class="{ 'is-compact': compact }">
     <div class="table-footer-meta erp-footer-pagination__meta">{{ summaryText }}</div>
     <div class="erp-footer-pagination__actions">
-      <div class="erp-page-size">
+      <div v-if="showPageSizeSelect" class="erp-page-size">
         <span>{{ pageSizeLabel }}</span>
         <el-select
           :model-value="pageSize"

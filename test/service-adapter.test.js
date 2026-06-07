@@ -220,6 +220,118 @@ test("order sync writes through adapter execute and insert-id helpers", async ()
   assert.ok(executed.some((entry) => entry.sql.includes("INSERT INTO sync_logs")));
 });
 
+test("delivered orders without finance do not become accrued actual profit", async () => {
+  const executed = [];
+  let nextId = 300;
+  const deps = {
+    nullable: (value) => (value === "" || value == null ? null : Number(value)),
+    shops: () => [{ id: 1, name: "Shop A", status: "active" }],
+    normalizeSyncDate: (value) => value || "",
+    fetchOzonPostings: async () => ({
+      requests: 1,
+      postings: [{
+        posting_number: "POST-D-1",
+        order_number: "ORDER-D-1",
+        status: "delivered",
+        logistics_status: "delivered",
+        tracking_stage: "posting_delivered",
+        ordered_at: "2026-05-10T10:00:00Z",
+        delivered_at: "2026-05-12T10:00:00Z",
+        buyer_region: "CN",
+        tracking_number: "TN-D-1",
+        external_tracking_url: "",
+        cancel_reason_id: null,
+        cancel_reason: "",
+        cancel_initiator: "",
+        cancel_type: "",
+        cancelled_after_ship: 0,
+        items: [{
+          ozon_sku: "SKU-D-1",
+          offer_id: "OFF-D-1",
+          ozon_product_id: "OP-D-1",
+          name: "Delivered Test SKU",
+          image_url: "https://example.com/d.png",
+          sale_price: 100,
+          quantity: 1
+        }]
+      }]
+    }),
+    execute: (sql, params) => {
+      executed.push({ sql, params });
+      return { changes: 1 };
+    },
+    insertAndGetId: (sql, params) => {
+      executed.push({ sql, params, insert: true });
+      nextId += 1;
+      return nextId;
+    },
+    get: (sql, params) => {
+      if (sql.includes("FROM orders WHERE shop_id = ? AND posting_number = ?")) return null;
+      if (sql.includes("FROM orders WHERE posting_number = ?")) return null;
+      if (sql.includes("FROM online_products WHERE shop_id = ? AND ozon_sku = ?")) return null;
+      if (sql.includes("SELECT id, quantity FROM order_items WHERE order_id = ? AND ozon_sku = ?")) return null;
+      if (sql.includes("FROM sku_mappings sm")) {
+        return {
+          id: 901,
+          product_id: 902,
+          person_id: 903,
+          online_product_id: 904,
+          ozon_sku: "SKU-D-1",
+          offer_id: "OFF-D-1"
+        };
+      }
+      if (sql.includes("SELECT * FROM products WHERE id = ?")) {
+        return {
+          id: 902,
+          purchase_cost: 20,
+          domestic_shipping: 5,
+          international_shipping: 6,
+          handling_fee: 1
+        };
+      }
+      if (sql.includes("SELECT * FROM orders WHERE id = ?")) return { id: params[0], status: "delivered" };
+      return null;
+    },
+    all: (sql) => {
+      if (sql.includes("SELECT * FROM order_items WHERE order_id = ?")) return [];
+      return [];
+    },
+    dateKeyDaysAgo: () => "2026-05-01",
+    todayDateKey: () => "2026-05-31",
+    actualItemProfit: () => 999,
+    classifyOrderOutcome: () => "effective_sale",
+    describeCancellation: () => ({}),
+    estimateItemProfit: () => ({
+      freight: 6,
+      commission: 10,
+      paymentFee: 1,
+      withdrawalFee: 1,
+      advertisingCost: 0
+    }),
+    estimateOrderItemReturnLoss: () => 0,
+    invalidateExceptionWorkbenchCache: () => {},
+    orderQualityPrefixes: () => [],
+    packagingFeeForSaleAmount: () => 1,
+    postInventory: () => {},
+    recordOrderException: () => {},
+    refreshProfitAnalyticsSnapshots: () => {},
+    resolveOrderLossProfile: () => ({ code: "none" }),
+    resolveProfitSettlementStatus: () => "pending",
+    roundMoney: (value) => Math.round(Number(value || 0) * 100) / 100,
+    saveProfitItem: () => {},
+    syncOrderItemProfitFromBreakdown: () => {},
+    syncOutboundForOpenOrders: () => {}
+  };
+
+  await syncDemoOrders(deps, {
+    from: "2026-05-01",
+    to: "2026-05-31"
+  }, {});
+
+  assert.ok(executed.some((entry) => entry.sql.includes("UPDATE order_items") && String(entry.sql).includes("settlement_state = CASE")));
+  assert.equal(executed.some((entry) => entry.sql.includes("SET net_profit_cny = ?") && entry.params?.includes(999)), false);
+ });
+
 test("order sync keeps split Ozon postings as separate ERP orders", async () => {
   const executed = [];
   let nextId = 2000;
@@ -500,4 +612,46 @@ test("cancelled order restore updates an existing return movement instead of add
   assert.ok(calls.some((entry) => String(entry.sql || "").includes("UPDATE inventory_movements")
     && String(entry.sql || "").includes("WHERE id = ?")
     && entry.params.at(-1) === 201));
+});
+
+test("outbound sync does not create stock deduction for order items bound after order import", () => {
+  const calls = [];
+  const deps = {
+    all: (sql) => {
+      if (sql.includes("WHERE LOWER(o.status) LIKE '%cancel%'")) return [];
+      if (sql.includes("WHERE LOWER(o.status) NOT LIKE '%cancel%'")) {
+        return [{
+          id: 1,
+          sku_mapping_id: null,
+          quantity: 2,
+          posting_number: "POST-LATE-BIND",
+          shop_id: 1,
+          mapping_id: 11,
+          product_id: 21,
+          person_id: 31,
+          online_product_id: 41,
+          ozon_sku: "SKU-1",
+          purchase_cost: 5,
+          frozen_purchase_cost: 5
+        }];
+      }
+      return [];
+    },
+    get: () => null,
+    db: {
+      prepare: (sql) => ({
+        run: (...params) => calls.push({ sql, params })
+      })
+    },
+    postInventory: (body) => calls.push({ postInventory: body }),
+    rebuildInventoryCurrentForProduct: (productId) => calls.push({ rebuild: productId }),
+    recordOrderException: () => {}
+  };
+
+  const result = syncOutboundForOpenOrders(deps);
+
+  assert.deepEqual(result, { deducted: 0, pending: 0 });
+  assert.equal(calls.some((entry) => entry.postInventory?.source_type === "order_outbound"), false);
+  assert.ok(calls.some((entry) => String(entry.sql || "").includes("UPDATE order_items SET sku_mapping_id")));
+  assert.ok(calls.some((entry) => String(entry.sql || "").includes("UPDATE order_exceptions SET status = 'resolved'")));
 });

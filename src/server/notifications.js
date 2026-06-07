@@ -5,6 +5,8 @@ const runtimeDir = path.resolve("data");
 const statusFile = path.join(runtimeDir, "global-update-status.json");
 const defaultPluginVersion = process.env.COLLECTOR_PLUGIN_VERSION || "1.4.1";
 const defaultPluginPackageName = `ozon-baodan-erp-plugin-${defaultPluginVersion}.rar`;
+const defaultAnalyticsPluginVersion = process.env.ANALYTICS_PLUGIN_VERSION || "1.0.23";
+const defaultAnalyticsPluginPackageName = `ozon-seller-analytics-plugin-${defaultAnalyticsPluginVersion}.rar`;
 const updateSubscribers = new Set();
 const defaultStatus = {
   app: {
@@ -23,12 +25,24 @@ const defaultStatus = {
     package_name: defaultPluginPackageName,
     mandatory: true,
     published_at: new Date().toISOString()
+  },
+  analytics_plugin: {
+    version: defaultAnalyticsPluginVersion,
+    title: "店铺数据分析插件有新版本",
+    message: "店铺数据分析插件已经更新，请下载最新版并重新安装。",
+    download_url: process.env.ANALYTICS_PLUGIN_DOWNLOAD_URL || `/downloads/${defaultAnalyticsPluginPackageName}`,
+    package_name: defaultAnalyticsPluginPackageName,
+    mandatory: true,
+    published_at: new Date().toISOString()
   }
 };
 
 function normalizeUpdatePayload(input = {}) {
   const app = input.app && typeof input.app === "object" ? input.app : {};
   const plugin = input.plugin && typeof input.plugin === "object" ? input.plugin : {};
+  const analyticsPlugin = input.analytics_plugin && typeof input.analytics_plugin === "object"
+    ? input.analytics_plugin
+    : (input.analyticsPlugin && typeof input.analyticsPlugin === "object" ? input.analyticsPlugin : {});
   return {
     app: {
       ...defaultStatus.app,
@@ -41,6 +55,13 @@ function normalizeUpdatePayload(input = {}) {
       version: String(plugin.version || defaultStatus.plugin.version).trim(),
       download_url: String(plugin.download_url || plugin.downloadUrl || defaultStatus.plugin.download_url).trim(),
       package_name: String(plugin.package_name || plugin.packageName || `ozon-baodan-erp-plugin-${plugin.version || defaultStatus.plugin.version}.rar`).trim()
+    },
+    analytics_plugin: {
+      ...defaultStatus.analytics_plugin,
+      ...analyticsPlugin,
+      version: String(analyticsPlugin.version || defaultStatus.analytics_plugin.version).trim(),
+      download_url: String(analyticsPlugin.download_url || analyticsPlugin.downloadUrl || defaultStatus.analytics_plugin.download_url).trim(),
+      package_name: String(analyticsPlugin.package_name || analyticsPlugin.packageName || `ozon-seller-analytics-plugin-${analyticsPlugin.version || defaultStatus.analytics_plugin.version}.rar`).trim()
     }
   };
 }
@@ -111,6 +132,7 @@ export function globalUpdateStatus(query = {}) {
   const status = readUpdateStatusFile();
   const appVersion = String(query.app_version || query.appVersion || "").trim();
   const pluginVersion = String(query.plugin_version || query.pluginVersion || "").trim();
+  const analyticsPluginVersion = String(query.analytics_plugin_version || query.analyticsPluginVersion || "").trim();
   return {
     app: {
       ...status.app,
@@ -119,6 +141,10 @@ export function globalUpdateStatus(query = {}) {
     plugin: {
       ...status.plugin,
       update_required: Boolean(pluginVersion && pluginVersion !== status.plugin.version)
+    },
+    analytics_plugin: {
+      ...status.analytics_plugin,
+      update_required: Boolean(analyticsPluginVersion && analyticsPluginVersion !== status.analytics_plugin.version)
     }
   };
 }
@@ -134,10 +160,15 @@ export function updateGlobalUpdateStatus(body = {}) {
     plugin: {
       ...current.plugin,
       ...(body.plugin || {})
+    },
+    analytics_plugin: {
+      ...current.analytics_plugin,
+      ...(body.analytics_plugin || body.analyticsPlugin || {})
     }
   };
   if (body.app) next.app.published_at = body.app.published_at || now;
   if (body.plugin) next.plugin.published_at = body.plugin.published_at || now;
+  if (body.analytics_plugin || body.analyticsPlugin) next.analytics_plugin.published_at = body.analytics_plugin?.published_at || body.analyticsPlugin?.published_at || now;
   writeUpdateStatusFile(next);
   const status = globalUpdateStatus();
   broadcastGlobalUpdateStatus(status);

@@ -151,6 +151,46 @@ print(json.dumps(cropper.detect_regions(image, mode="auto")))
   assert.ok(boxes[4][0] >= 720 && boxes[4][1] >= 724 && boxes[4][2] >= 350);
 });
 
+test("auto splitting keeps clean two-by-two collage as four panels", () => {
+  const script = String.raw`
+import importlib.util
+import json
+import numpy as np
+
+spec = importlib.util.spec_from_file_location("image_cropper", "src/server/python/image_cropper.py")
+cropper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cropper)
+
+image = np.full((1448, 1086, 3), 18, dtype=np.uint8)
+image[0:762, 0:539] = (34, 34, 36)
+image[0:762, 546:1086] = (42, 42, 44)
+image[769:1448, 0:539] = (58, 58, 60)
+image[769:1448, 546:1086] = (66, 66, 68)
+
+image[:, 539:546] = 255
+image[762:769, :] = 255
+
+# Bright copy bands inside the bottom-right panel should not create extra splits.
+image[1046:1071, 546:1086] = 238
+image[1270:1357, 546:1086] = 238
+
+print(json.dumps(cropper.detect_regions(image, mode="auto")))
+`;
+
+  const result = spawnSync(process.env.PYTHON || "python", ["-c", script], {
+    cwd: process.cwd(),
+    encoding: "utf8"
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const boxes = JSON.parse(result.stdout);
+  assert.equal(boxes.length, 4);
+  assert.ok(boxes[0][0] === 0 && boxes[0][1] === 0 && boxes[0][2] >= 530 && boxes[0][3] >= 750);
+  assert.ok(boxes[1][0] >= 540 && boxes[1][1] === 0 && boxes[1][2] >= 530 && boxes[1][3] >= 750);
+  assert.ok(boxes[2][0] === 0 && boxes[2][1] >= 760 && boxes[2][2] >= 530 && boxes[2][3] >= 670);
+  assert.ok(boxes[3][0] >= 540 && boxes[3][1] >= 760 && boxes[3][2] >= 530 && boxes[3][3] >= 670);
+});
+
 test("cropping trims small internal separator leftovers", () => {
   const script = String.raw`
 import importlib.util

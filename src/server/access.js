@@ -6,6 +6,7 @@ const attempts = new Map();
 export const SITE_ACCESS_LOGIN_PATH = "/__site-access/login";
 export const SITE_ACCESS_LOGOUT_PATH = "/__site-access/logout";
 export const SITE_ACCESS_SESSION_PATH = "/__site-access";
+export const SITE_ACCESS_API_LOGIN_PATH = "/__site-access/api-login";
 
 const ACCESS_GATE_ENABLED = Boolean(config.siteAccessPassword);
 const ACCESS_COOKIE_NAME = config.siteAccessCookieName || "erp_site_access";
@@ -97,6 +98,8 @@ export function isSiteAccessEnabled() {
 export function isSiteAccessAuthorized(req) {
   if (!ACCESS_GATE_ENABLED) return true;
   if (isDirectLocalRequest(req)) return true;
+  const headerToken = String(req.headers["x-site-access-token"] || "").trim();
+  if (verifySiteAccessCookie(headerToken)) return true;
   const cookies = parseCookies(req);
   return verifySiteAccessCookie(cookies[ACCESS_COOKIE_NAME]);
 }

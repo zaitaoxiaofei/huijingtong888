@@ -54,7 +54,7 @@ const mainImageUrl = ref("");
 const logoImageUrl = ref("");
 const videoUrl = ref("");
 const videoBlob = ref(null);
-const videoName = ref("product-video.webm");
+const videoName = ref("product-video.mp4");
 const errorMessage = ref("");
 
 const watermarkShops = computed(() => shops.value.filter((shop) => shop.status !== "deleted" && shop.watermark_path));
@@ -150,7 +150,7 @@ async function generateVideo() {
     const blob = await renderVideo({ image, logo });
     videoBlob.value = blob;
     videoUrl.value = URL.createObjectURL(blob);
-    videoName.value = buildVideoName();
+    videoName.value = buildVideoName(blob.type);
     ElMessage.success("视频已生成");
   } catch (error) {
     errorMessage.value = error.message || "视频生成失败";
@@ -183,7 +183,8 @@ async function renderVideo({ image, logo }) {
     recorder.onerror = () => reject(new Error("浏览器录制视频失败"));
     recorder.onstop = () => {
       audioContext?.close?.();
-      resolve(new Blob(chunks, { type: recorder.mimeType || "video/webm" }));
+      const outputMimeType = recorder.mimeType || mimeType || "video/webm";
+      resolve(new Blob(chunks, { type: outputMimeType }));
     };
 
     function drawFrame(now) {
@@ -457,14 +458,22 @@ function loadImage(src) {
 }
 
 function chooseMimeType() {
-  const candidates = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
+  if (typeof MediaRecorder === "undefined") return "";
+  const candidates = [
+    "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+    "video/mp4",
+    "video/webm;codecs=vp9,opus",
+    "video/webm;codecs=vp8,opus",
+    "video/webm"
+  ];
   return candidates.find((item) => MediaRecorder.isTypeSupported(item)) || "";
 }
 
-function buildVideoName() {
+function buildVideoName(mimeType = "") {
   const base = (mainImageFile.value?.name || "product-main").replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "-");
   const shop = selectedShop.value?.name ? `-${selectedShop.value.name.replace(/[^\w.-]+/g, "-")}` : "";
-  return `${base}${shop}-video.webm`;
+  const ext = mimeType.includes("mp4") ? "mp4" : "webm";
+  return `${base}${shop}-video.${ext}`;
 }
 
 function easeInOut(value) {

@@ -8,7 +8,8 @@ import { useAuthStore } from "../../stores/auth.js";
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   initialProductId: { type: [Number, String, null], default: null },
-  lockProduct: { type: Boolean, default: false }
+  lockProduct: { type: Boolean, default: false },
+  sourceOrderContext: { type: Object, default: () => ({}) }
 });
 
 const emit = defineEmits(["update:modelValue", "created"]);
@@ -30,6 +31,9 @@ const candidateProducts = computed(() => state.products.slice(0, 12));
 
 const selectedProduct = computed(() => state.products.find((row) => Number(row.id) === Number(form.product_id)) || null);
 const currentUserPersonId = computed(() => Number(authStore.user?.id || 0) || null);
+const selectedProductEmptyText = computed(() => (
+  props.lockProduct ? "正在加载当前库存商品，请稍候。" : "请先在左侧搜索并选择商品。"
+));
 
 function createDefaultForm() {
   return {
@@ -48,6 +52,7 @@ function createDefaultForm() {
 
 function resetForm() {
   Object.assign(form, createDefaultForm());
+  if (props.lockProduct && props.initialProductId) form.product_id = Number(props.initialProductId);
   productQuery.value = "";
 }
 
@@ -86,13 +91,31 @@ function applyProductToForm(row) {
 function syncInitialProduct() {
   if (!props.initialProductId) return;
   const matched = state.products.find((row) => Number(row.id) === Number(props.initialProductId));
-  if (!matched) return;
+  if (!matched) {
+    if (props.lockProduct) form.product_id = Number(props.initialProductId);
+    return;
+  }
   applyProductToForm(matched);
   productQuery.value = matched.name || matched.inventory_id || matched.code || "";
 }
 
+async function ensureInitialProductLoaded() {
+  const productId = Number(props.initialProductId || 0);
+  if (!productId || state.products.some((row) => Number(row.id) === productId)) return;
+  try {
+    const result = await apiClient.get(`/api/products/${productId}`);
+    const product = result?.data || result;
+    if (product?.id) {
+      state.products = [product, ...state.products.filter((row) => Number(row.id) !== productId)];
+    }
+  } catch (error) {
+    if (!props.lockProduct) ElMessage.error(error.message || "加载采购商品失败");
+  }
+}
+
 async function ensureOptionsLoaded() {
   if (state.products.length && state.people.length) {
+    await ensureInitialProductLoaded();
     syncInitialProduct();
     return;
   }
@@ -107,6 +130,7 @@ async function ensureOptionsLoaded() {
     state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
     state.suppliers = Array.isArray(suppliers?.rows) ? suppliers.rows : [];
     form.person_id = preferredPersonId();
+    await ensureInitialProductLoaded();
     syncInitialProduct();
   } catch (error) {
     ElMessage.error(error.message || "初始化采购表单失败");
@@ -127,6 +151,7 @@ async function searchProducts() {
   try {
     const products = await apiClient.get(productsQueryString());
     state.products = Array.isArray(products?.rows) ? products.rows : [];
+    await ensureInitialProductLoaded();
     syncInitialProduct();
   } catch (error) {
     ElMessage.error(error.message || "搜索商品失败");
@@ -148,7 +173,10 @@ async function submit() {
       amount: Number(form.amount || 0),
       shipping_amount: Number(form.shipping_amount || 0),
       person_id: Number(form.person_id || 0) || null,
-      supplier_id: form.supplier_id || null
+      supplier_id: form.supplier_id || null,
+      source_order_id: Number(props.sourceOrderContext?.orderId || 0) || null,
+      source_order_item_id: Number(props.sourceOrderContext?.orderItemId || 0) || null,
+      source_ozon_sku: props.sourceOrderContext?.ozonSku || null
     });
     ElMessage.success("采购请求已创建");
     emit("created");
@@ -168,8 +196,11 @@ watch(() => props.modelValue, async (visible) => {
   }
 });
 
-watch(() => props.initialProductId, () => {
-  if (props.modelValue) syncInitialProduct();
+watch(() => props.initialProductId, async () => {
+  if (props.modelValue) {
+    await ensureInitialProductLoaded();
+    syncInitialProduct();
+  }
 });
 
 watch(currentUserPersonId, () => {
@@ -245,7 +276,7 @@ watch(currentUserPersonId, () => {
               </div>
             </div>
           </template>
-          <span v-else class="muted-text">请先在左侧搜索并选择商品。</span>
+          <span v-else class="muted-text">{{ selectedProductEmptyText }}</span>
         </div>
 
         <el-form label-width="110px">

@@ -3,7 +3,6 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import {
-  Activity,
   AlertTriangle,
   ArrowDownRight,
   ArrowUpRight,
@@ -17,6 +16,7 @@ import {
   RefreshCw,
   Sparkles,
   Target,
+  Truck,
   Zap
 } from "lucide-vue-next";
 import { apiClient } from "../utils/api";
@@ -27,6 +27,10 @@ const refreshing = ref(false);
 const hasDashboardLoaded = ref(false);
 const pluginStatus = ref(null);
 let dashboardSnapshotRefreshTimer = null;
+
+function createAiWorkbenchId() {
+  return `aiwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
 const dashboard = ref({
   summary: {},
   commerce: {
@@ -49,6 +53,8 @@ const adToday = computed(() => commerce.value.advertising?.today || {});
 const adYesterday = computed(() => commerce.value.advertising?.yesterday || {});
 const profitTrend = computed(() => commerce.value.profit_trend || {});
 const aftersalesLoss = computed(() => summary.value.aftersales_loss || {});
+const monthShippingCost = computed(() => summary.value.month_shipping_cost || {});
+const monthOrderOutcomes = computed(() => summary.value.month_order_outcomes || {});
 const fbpOpportunitySummary = computed(() => summary.value.fbp_opportunities || {});
 const commerceShops = computed(() => Array.isArray(commerce.value.shops) ? commerce.value.shops : []);
 const adShops = computed(() => Array.isArray(adToday.value.shops) ? adToday.value.shops : []);
@@ -61,8 +67,24 @@ const fbpWithin30Count = computed(() => fbpAlerts.value.filter((item) => item.al
 const procurementRows = computed(() => Array.isArray(dashboard.value.alerts?.procurement) ? dashboard.value.alerts.procurement : []);
 const initialDashboardLoading = computed(() => loading.value && !hasDashboardLoaded.value);
 const dashboardUpdating = computed(() => refreshing.value && hasDashboardLoaded.value);
-const pluginDownloadUrl = computed(() => pluginStatus.value?.download_url || "/downloads/ozon-erp-collector-plugin.rar");
-const pluginVersionText = computed(() => pluginStatus.value?.version ? `v${pluginStatus.value.version}` : "最新版");
+const pluginDownloads = computed(() => {
+  const collector = pluginStatus.value?.collector || pluginStatus.value?.plugin || pluginStatus.value || {};
+  const analytics = pluginStatus.value?.analytics || pluginStatus.value?.analytics_plugin || {};
+  return [
+    {
+      key: "collector",
+      name: "商品采集插件",
+      version: collector.version ? `v${collector.version}` : "v1.4.1",
+      downloadUrl: collector.download_url || "/downloads/ozon-erp-collector-plugin.rar"
+    },
+    {
+      key: "analytics",
+      name: "店铺分析插件",
+      version: analytics.version ? `v${analytics.version}` : "v1.0.23",
+      downloadUrl: analytics.download_url || "/downloads/ozon-seller-analytics-plugin.rar"
+    }
+  ];
+});
 
 const urgentCount = computed(() => Number(summary.value.urgent_count || 0));
 const stockWarningCount = computed(() => Number(summary.value.warning_count || 0));
@@ -98,6 +120,15 @@ function decimalText(value, digits = 2) {
 
 function percentText(value) {
   return hasValue(value) ? `${(Number(value || 0) * 100).toFixed(1)}%` : "待接入";
+}
+
+function ratioText(value) {
+  return hasValue(value) ? `${Number(value || 0).toFixed(2)}x` : "待接入";
+}
+
+function firstMetricNumber(...values) {
+  const matched = values.find((value) => hasValue(value));
+  return hasValue(matched) ? Number(matched || 0) : null;
 }
 
 function shortTimeText(value) {
@@ -159,6 +190,16 @@ function open(path, query = {}) {
     router.push({ path: "/inventory/fbp", query: fbpAlertQuery(null, query.alertType || query.alert_type || "all") });
     return;
   }
+  if (path === "/asset-variant-center/create") {
+    router.push({
+      path,
+      query: {
+        ...query,
+        workbenchId: createAiWorkbenchId()
+      }
+    });
+    return;
+  }
   router.push({ path, query });
 }
 
@@ -199,8 +240,9 @@ function aftersalesQuery(bucket = "all", openDetail = false) {
   return query;
 }
 
-function downloadCollectorPlugin() {
-  window.location.href = pluginDownloadUrl.value;
+function downloadPlugin(plugin) {
+  if (!plugin?.downloadUrl) return;
+  window.location.href = plugin.downloadUrl;
 }
 
 async function loadPluginUpdateStatus() {
@@ -209,7 +251,7 @@ async function loadPluginUpdateStatus() {
       routeScoped: false,
       noCache: true
     });
-    pluginStatus.value = status?.plugin || null;
+    pluginStatus.value = status || null;
   } catch (error) {
     console.warn("load plugin update status failed", error);
   }
@@ -265,6 +307,32 @@ function shopBreakdown(source, valueKey, formatter, suffixLabel = "") {
   return rows;
 }
 
+function shopOutcomeBreakdown(source, outcomeKey, emptyLabel = "暂无数据") {
+  const quantityKey = `${outcomeKey}_quantity`;
+  const ordersKey = `${outcomeKey}_orders`;
+  const revenueKey = `${outcomeKey}_revenue`;
+  const rows = (source || [])
+    .map((item) => {
+      const quantity = Number(item?.[quantityKey] || 0);
+      const orders = Number(item?.[ordersKey] || 0);
+      const revenue = Number(item?.[revenueKey] || 0);
+      return {
+        shop_name: item.shop_name || `店铺 ${item.shop_id || ""}`.trim(),
+        quantity,
+        orders,
+        revenue,
+        text: `${metricNumber(quantity, " 件")} / ${metricNumber(orders, " 单")} / ${metricMoney(revenue)}`
+      };
+    })
+    .sort((a, b) => (
+      (b.quantity - a.quantity) ||
+      (b.orders - a.orders) ||
+      (b.revenue - a.revenue)
+    ));
+  if (!rows.length) return [{ shop_name: "店铺明细", text: emptyLabel }];
+  return rows;
+}
+
 function todaySalesBreakdown() {
   return [
     { shop_name: "总销售额", text: metricMoney(today.value.total_revenue ?? today.value.revenue) },
@@ -317,7 +385,25 @@ const adTooltipPopperOptions = {
 };
 
 const profitDelta = computed(() => delta(today.value.profit, yesterday.value.profit));
+const monthProfitDelta = computed(() => delta(profitTrend.value.month_total_profit, profitTrend.value.previous_month_total_profit));
+const monthRevenueDelta = computed(() => delta(profitTrend.value.month_total_revenue, profitTrend.value.previous_month_total_revenue));
+const monthEffectiveOrders = computed(() => firstMetricNumber(
+  profitTrend.value.month_effective_orders,
+  monthOrderOutcomes.value.effective_orders,
+  monthShippingCost.value.order_count
+));
+const previousMonthEffectiveOrders = computed(() => firstMetricNumber(profitTrend.value.previous_month_effective_orders));
+const monthCancelledOrders = computed(() => firstMetricNumber(profitTrend.value.month_cancelled_orders, monthOrderOutcomes.value.cancelled_orders));
+const previousMonthCancelledOrders = computed(() => firstMetricNumber(profitTrend.value.previous_month_cancelled_orders));
+const monthCancelledQuantity = computed(() => firstMetricNumber(profitTrend.value.month_cancelled_quantity, monthOrderOutcomes.value.cancelled_quantity));
+const monthReturnOrders = computed(() => firstMetricNumber(profitTrend.value.month_return_orders, monthOrderOutcomes.value.return_orders));
+const previousMonthReturnOrders = computed(() => firstMetricNumber(profitTrend.value.previous_month_return_orders));
+const monthReturnQuantity = computed(() => firstMetricNumber(profitTrend.value.month_return_quantity, monthOrderOutcomes.value.return_quantity));
+const monthEffectiveOrderDelta = computed(() => delta(monthEffectiveOrders.value, previousMonthEffectiveOrders.value));
+const monthCancelledOrderDelta = computed(() => delta(monthCancelledOrders.value, previousMonthCancelledOrders.value));
+const monthReturnOrderDelta = computed(() => delta(monthReturnOrders.value, previousMonthReturnOrders.value));
 const roiDelta = computed(() => delta(adToday.value.roi, adYesterday.value.roi));
+const adSpendDelta = computed(() => delta(adToday.value.spend_cny, adYesterday.value.spend_cny));
 const salesDelta = computed(() => delta(today.value.effective_revenue ?? today.value.revenue, yesterday.value.effective_revenue ?? yesterday.value.revenue));
 const effectiveOrderDelta = computed(() => delta(today.value.effective_orders, yesterday.value.effective_orders));
 const adCostJump = computed(() => Number(adToday.value.spend_cny || 0) > Number(adYesterday.value.spend_cny || 0) * 1.3);
@@ -340,6 +426,59 @@ const adDataFreshness = computed(() => {
 const fbpInventoryQuantityText = computed(() => {
   if (!hasValue(summary.value.fbp_inventory_quantity)) return "FBP货值";
   return `FBP ${numberText(summary.value.fbp_inventory_quantity)}件`;
+});
+const monthShippingCostState = computed(() => {
+  if (!hasValue(monthShippingCost.value.purchase_cost)) return "成本待接入";
+  if (!hasValue(monthShippingCost.value.purchase_cost_ratio)) return "销售额待接入";
+  return `采购占比 ${percentText(monthShippingCost.value.purchase_cost_ratio)}`;
+});
+const monthFreightCostState = computed(() => {
+  if (!hasValue(monthShippingCost.value.shipping_cost)) return "运费待接入";
+  if (!hasValue(monthShippingCost.value.shipping_cost_ratio)) return "销售额待接入";
+  return `运费占比 ${percentText(monthShippingCost.value.shipping_cost_ratio)}`;
+});
+const monthPurchaseCostShops = computed(() => Array.isArray(monthShippingCost.value.shops) ? monthShippingCost.value.shops : []);
+const monthPurchaseCostBreakdownRows = computed(() => {
+  const rows = [
+    {
+      label: "全部店铺",
+      revenue: metricMoney(monthShippingCost.value.revenue),
+      purchaseCost: metricMoney(monthShippingCost.value.purchase_cost),
+      ratio: percentText(monthShippingCost.value.purchase_cost_ratio),
+      orders: metricNumber(monthShippingCost.value.order_count, " 单")
+    }
+  ];
+  monthPurchaseCostShops.value.forEach((shop) => {
+    rows.push({
+      label: shop.shop_name || `店铺 ${shop.shop_id || ""}`.trim(),
+      revenue: metricMoney(shop.revenue),
+      purchaseCost: metricMoney(shop.purchase_cost),
+      ratio: percentText(shop.purchase_cost_ratio),
+      orders: metricNumber(shop.order_count, " 单")
+    });
+  });
+  return rows;
+});
+const monthFreightCostBreakdownRows = computed(() => {
+  const rows = [
+    {
+      label: "全部店铺",
+      revenue: metricMoney(monthShippingCost.value.revenue),
+      freightCost: metricMoney(monthShippingCost.value.shipping_cost),
+      ratio: percentText(monthShippingCost.value.shipping_cost_ratio),
+      orders: metricNumber(monthShippingCost.value.order_count, " 单")
+    }
+  ];
+  monthPurchaseCostShops.value.forEach((shop) => {
+    rows.push({
+      label: shop.shop_name || `店铺 ${shop.shop_id || ""}`.trim(),
+      revenue: metricMoney(shop.revenue),
+      freightCost: metricMoney(shop.shipping_cost),
+      ratio: percentText(shop.shipping_cost_ratio),
+      orders: metricNumber(shop.order_count, " 单")
+    });
+  });
+  return rows;
 });
 const fbpOpportunityText = computed(() => {
   const total = Number(fbpOpportunitySummary.value.total || 0);
@@ -410,7 +549,7 @@ const secondaryMetrics = computed(() => [
     path: "/profit/aftersales",
     query: todayAftersalesQuery("pre_fulfillment_cancel"),
     breakdownTitle: "各店铺今日取消",
-    breakdown: shopBreakdown(commerceShops.value, "cancelled_revenue", metricMoney)
+    breakdown: shopOutcomeBreakdown(commerceShops.value, "cancelled")
   },
   {
     label: "退货件数",
@@ -421,27 +560,32 @@ const secondaryMetrics = computed(() => [
     path: "/profit/aftersales",
     query: todayAftersalesQuery("rejected_unclaimed"),
     breakdownTitle: "各店铺今日退货",
-    breakdown: shopBreakdown(commerceShops.value, "return_revenue", metricMoney)
+    breakdown: shopOutcomeBreakdown(commerceShops.value, "return")
   },
   {
-    label: "待回款",
-    value: metricMoney(today.value.pending_profit),
-    note: "利润待确认",
-    direction: "flat",
-    icon: PackageCheck,
-    path: "/profit",
-    breakdownTitle: "各店铺待回款",
-    breakdown: shopBreakdown(commerceShops.value, "pending_profit", metricMoney)
-  },
-  {
-    label: "广告消耗",
-    value: metricMoney(adToday.value.spend_cny),
+    label: "广告ROI",
+    value: decimalText(adToday.value.roi),
     note: adDataFreshness.value.text,
-    direction: adDataFreshness.value.direction,
+    direction: roiDelta.value.direction,
     icon: Target,
     path: "/advertising/daily",
-    breakdownTitle: "各店铺广告消耗",
-    breakdown: shopBreakdown(adShops.value, "spend_cny", metricMoney)
+    breakdownTitle: "各店铺广告ROI",
+    breakdown: shopBreakdown(adShops.value, "roi", (value) => decimalText(value))
+  },
+  {
+    label: "当月采购成本",
+    value: metricMoney(monthShippingCost.value.purchase_cost),
+    note: monthShippingCostState.value,
+    direction: Number(monthShippingCost.value.purchase_cost_ratio || 0) <= 0.45 ? "up" : "down",
+    icon: PackageCheck,
+    path: "/profit",
+    breakdownTitle: "当月采购成本构成",
+    breakdown: [
+      { shop_name: "有效销售订单", text: metricNumber(monthShippingCost.value.order_count, " 单") },
+      { shop_name: "销售件数", text: metricNumber(monthShippingCost.value.item_quantity, " 件") },
+      { shop_name: "当月销售额", text: metricMoney(monthShippingCost.value.revenue) },
+      { shop_name: "采购成本占比", text: percentText(monthShippingCost.value.purchase_cost_ratio) }
+    ]
   }
 ]);
 
@@ -525,7 +669,7 @@ const opportunityCards = computed(() => [
   },
   {
     product: firstProcurement.value.product_name || "高利润可放量商品",
-    reason: `${procurementCount.value} 个待采购商品`,
+    reason: `${procurementCount.value} 个待入库商品`,
     advice: "优先补有销量 SKU",
     icon: PackageCheck,
     primary: "去采购",
@@ -598,7 +742,7 @@ const dashboardInsightCards = computed(() => [
     items: [
       ["高ROI放量", opportunityCards.value[0]?.product ? "1个" : "0个"],
       ["加购信号", metricNumber(adToday.value.add_to_cart, "次")],
-      ["待采购", metricNumber(procurementCount.value, "个")],
+      ["待入库", metricNumber(procurementCount.value, "个")],
       ["下一步", opportunityCards.value[0]?.primary || "观察"]
     ]
   }
@@ -679,29 +823,34 @@ onBeforeUnmount(() => {
       <div class="operating-card" :class="`is-${businessTone}`">
         <div class="operating-card__top">
           <div>
-            <div class="brand-pill">
-              <Activity :size="14" />
-              Ozon经营驾驶舱
-            </div>
             <h1>今日经营总览</h1>
-            <p>利润与广告 ROI 优先，AI 只提示关键经营信号。</p>
           </div>
           <span v-if="dashboardUpdating" class="refresh-status">
             <RefreshCw :size="13" />
             更新中
           </span>
-          <el-button class="plugin-download-button" size="small" @click="downloadCollectorPlugin">
-            <Download :size="14" />
-            下载采集插件
-            <small>{{ pluginVersionText }}</small>
-          </el-button>
+          <div class="plugin-download-group" aria-label="插件下载">
+            <button
+              v-for="plugin in pluginDownloads"
+              :key="plugin.key"
+              class="plugin-download-card"
+              type="button"
+              @click="downloadPlugin(plugin)"
+            >
+              <Download :size="15" />
+              <span>
+                <strong>{{ plugin.name }}</strong>
+                <small>{{ plugin.version }}</small>
+              </span>
+            </button>
+          </div>
           <el-button class="ghost-button" size="small" :loading="loading || refreshing" @click="refreshDashboard">
             <RefreshCw :size="14" />
             刷新
           </el-button>
         </div>
 
-        <div class="hero-core-grid">
+        <div class="hero-core-grid today-core-grid">
           <article class="primary-metric profit-card" @click="open('/profit')">
             <div class="metric-label">
               <CircleDollarSign :size="16" />
@@ -717,6 +866,106 @@ onBeforeUnmount(() => {
               <em>{{ profitState }}</em>
             </div>
           </article>
+
+          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip">
+            <template #content>
+              <div class="shop-breakdown">
+                <h4>今日销售额构成</h4>
+                <div v-for="row in todaySalesBreakdown()" :key="`today-sales-${row.shop_name}`">
+                  <span>{{ row.shop_name }}</span>
+                  <strong>{{ row.text }}</strong>
+                </div>
+              </div>
+            </template>
+            <article class="primary-metric today-sales-card" @click="open('/profit')">
+              <div class="metric-label">
+                <CircleDollarSign :size="16" />
+                今日有效营业额
+              </div>
+              <strong>{{ metricMoney(today.effective_revenue ?? today.revenue) }}</strong>
+              <div class="metric-footer">
+                <span :class="`delta is-${salesDelta.direction}`">
+                  <ArrowUpRight v-if="salesDelta.direction === 'up'" :size="14" />
+                  <ArrowDownRight v-else-if="salesDelta.direction === 'down'" :size="14" />
+                  较昨日 {{ salesDelta.text }}
+                </span>
+                <em>有效销售</em>
+              </div>
+            </article>
+          </el-tooltip>
+
+          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip">
+            <template #content>
+              <div class="shop-breakdown">
+                <h4>今日订单构成</h4>
+                <div v-for="row in todayOrdersBreakdown()" :key="`today-orders-${row.shop_name}`">
+                  <span>{{ row.shop_name }}</span>
+                  <strong>{{ row.text }}</strong>
+                </div>
+              </div>
+            </template>
+            <article class="primary-metric today-orders-card" @click="open('/orders')">
+              <div class="metric-label">
+                <ClipboardList :size="16" />
+                今日有效订单
+              </div>
+              <strong>{{ metricNumber(today.effective_orders, " 单") }}</strong>
+              <div class="metric-footer">
+                <span :class="`delta is-${effectiveOrderDelta.direction}`">
+                  <ArrowUpRight v-if="effectiveOrderDelta.direction === 'up'" :size="14" />
+                  <ArrowDownRight v-else-if="effectiveOrderDelta.direction === 'down'" :size="14" />
+                  较昨日 {{ effectiveOrderDelta.text }}
+                </span>
+                <em>总计 {{ metricNumber(today.order_count, " 单") }}</em>
+              </div>
+            </article>
+          </el-tooltip>
+
+          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip">
+            <template #content>
+              <div class="shop-breakdown">
+                <h4>各店铺今日取消</h4>
+                <div v-for="row in shopOutcomeBreakdown(commerceShops, 'cancelled')" :key="`today-cancel-${row.shop_name}`">
+                  <span>{{ row.shop_name }}</span>
+                  <strong>{{ row.text }}</strong>
+                </div>
+              </div>
+            </template>
+            <article class="primary-metric today-cancel-card" @click="open('/profit/aftersales', todayAftersalesQuery('pre_fulfillment_cancel'))">
+              <div class="metric-label">
+                <RefreshCw :size="16" />
+                今日取消
+              </div>
+              <strong>{{ metricNumber(today.cancelled_quantity, " 件") }}</strong>
+              <div class="metric-footer">
+                <span class="delta is-flat">{{ metricNumber(today.cancelled_orders, " 单") }}</span>
+                <em>{{ metricMoney(today.cancelled_revenue) }}</em>
+              </div>
+            </article>
+          </el-tooltip>
+
+          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip">
+            <template #content>
+              <div class="shop-breakdown">
+                <h4>各店铺今日退货</h4>
+                <div v-for="row in shopOutcomeBreakdown(commerceShops, 'return')" :key="`today-return-${row.shop_name}`">
+                  <span>{{ row.shop_name }}</span>
+                  <strong>{{ row.text }}</strong>
+                </div>
+              </div>
+            </template>
+            <article class="primary-metric today-return-card" @click="open('/profit/aftersales', todayAftersalesQuery('rejected_unclaimed'))">
+              <div class="metric-label">
+                <AlertTriangle :size="16" />
+                退货件数
+              </div>
+              <strong>{{ metricNumber(today.return_quantity, " 件") }}</strong>
+              <div class="metric-footer">
+                <span class="delta is-flat">{{ metricNumber(today.return_orders, " 单") }}</span>
+                <em>{{ metricMoney(today.return_revenue) }}</em>
+              </div>
+            </article>
+          </el-tooltip>
 
           <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip ad-breakdown-tooltip" :popper-options="adTooltipPopperOptions">
             <template #content>
@@ -750,6 +999,13 @@ onBeforeUnmount(() => {
                 广告ROI
               </div>
               <strong>{{ decimalText(adToday.roi) }}</strong>
+              <div class="metric-subline">
+                <span>当日广告花费</span>
+                <div class="metric-subline-value">
+                  <b>{{ metricMoney(adToday.spend_cny) }}</b>
+                  <small :class="`is-${adSpendDelta.direction}`">较昨日 {{ adSpendDelta.text }}</small>
+                </div>
+              </div>
               <div class="metric-footer">
                 <span :class="`delta is-${roiDelta.direction}`">
                   <ArrowUpRight v-if="roiDelta.direction === 'up'" :size="14" />
@@ -758,6 +1014,110 @@ onBeforeUnmount(() => {
                 </span>
                 <em>{{ roiState }}</em>
                 <small :class="`freshness is-${adDataFreshness.tone}`">{{ adDataFreshness.text }}</small>
+              </div>
+            </article>
+          </el-tooltip>
+        </div>
+
+        <div class="hero-core-grid month-core-grid compact-month-grid">
+          <article class="primary-metric today-sales-card" @click="open('/profit')">
+            <div class="metric-label">
+              <CircleDollarSign :size="16" />
+              当月销售额
+            </div>
+            <strong>{{ metricMoney(profitTrend.month_total_revenue) }}</strong>
+            <div class="metric-footer">
+              <span :class="`delta is-${monthRevenueDelta.direction}`">
+                <ArrowUpRight v-if="monthRevenueDelta.direction === 'up'" :size="14" />
+                <ArrowDownRight v-else-if="monthRevenueDelta.direction === 'down'" :size="14" />
+                较上月 {{ monthRevenueDelta.text }}
+              </span>
+              <em>有效销售</em>
+            </div>
+          </article>
+
+          <article class="primary-metric month-profit-card" @click="open('/profit')">
+            <div class="metric-label">
+              <CircleDollarSign :size="16" />
+              当月利润
+            </div>
+            <strong>{{ metricMoney(profitTrend.month_total_profit) }}</strong>
+            <div class="metric-footer">
+              <span :class="`delta is-${monthProfitDelta.direction}`">
+                <ArrowUpRight v-if="monthProfitDelta.direction === 'up'" :size="14" />
+                <ArrowDownRight v-else-if="monthProfitDelta.direction === 'down'" :size="14" />
+                较上月 {{ monthProfitDelta.text }}
+              </span>
+              <em>本月累计</em>
+            </div>
+          </article>
+
+          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip purchase-breakdown-tooltip" :popper-options="adTooltipPopperOptions">
+            <template #content>
+              <div class="shop-breakdown purchase-breakdown">
+                <h4>当月采购成本占比</h4>
+                <div class="purchase-breakdown-table">
+                  <div class="purchase-breakdown-row purchase-breakdown-head">
+                    <span>店铺</span>
+                    <span>销售额</span>
+                    <span>采购成本</span>
+                    <span>占比</span>
+                    <span>订单</span>
+                  </div>
+                  <div v-for="row in monthPurchaseCostBreakdownRows" :key="row.label" class="purchase-breakdown-row">
+                    <strong>{{ row.label }}</strong>
+                    <b>{{ row.revenue }}</b>
+                    <b>{{ row.purchaseCost }}</b>
+                    <b>{{ row.ratio }}</b>
+                    <b>{{ row.orders }}</b>
+                  </div>
+                </div>
+              </div>
+            </template>
+            <article class="primary-metric inventory-ratio-card" @click="open('/profit')">
+              <div class="metric-label">
+                <PackageCheck :size="16" />
+                当月采购成本
+              </div>
+              <strong>{{ metricMoney(monthShippingCost.purchase_cost) }}</strong>
+              <div class="metric-footer">
+                <span class="delta is-flat">{{ monthShippingCostState }}</span>
+                <em>占当月销售额</em>
+              </div>
+            </article>
+          </el-tooltip>
+
+          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip purchase-breakdown-tooltip" :popper-options="adTooltipPopperOptions">
+            <template #content>
+              <div class="shop-breakdown purchase-breakdown">
+                <h4>当月运费占比</h4>
+                <div class="purchase-breakdown-table">
+                  <div class="purchase-breakdown-row purchase-breakdown-head">
+                    <span>店铺</span>
+                    <span>销售额</span>
+                    <span>运费</span>
+                    <span>占比</span>
+                    <span>订单</span>
+                  </div>
+                  <div v-for="row in monthFreightCostBreakdownRows" :key="row.label" class="purchase-breakdown-row">
+                    <strong>{{ row.label }}</strong>
+                    <b>{{ row.revenue }}</b>
+                    <b>{{ row.freightCost }}</b>
+                    <b>{{ row.ratio }}</b>
+                    <b>{{ row.orders }}</b>
+                  </div>
+                </div>
+              </div>
+            </template>
+            <article class="primary-metric shipping-cost-card" @click="open('/profit')">
+              <div class="metric-label">
+                <Truck :size="16" />
+                当月运费
+              </div>
+              <strong>{{ metricMoney(monthShippingCost.shipping_cost) }}</strong>
+              <div class="metric-footer">
+                <span class="delta is-flat">{{ monthFreightCostState }}</span>
+                <em>占当月销售额</em>
               </div>
             </article>
           </el-tooltip>
@@ -773,26 +1133,46 @@ onBeforeUnmount(() => {
               <em>FBP货值</em>
             </div>
           </article>
-        </div>
 
-        <div class="secondary-metric-grid">
-          <el-tooltip v-for="item in secondaryMetrics" :key="item.label" placement="top" effect="light" popper-class="shop-breakdown-tooltip">
-            <template #content>
-              <div class="shop-breakdown">
-                <h4>{{ item.breakdownTitle }}</h4>
-                <div v-for="row in item.breakdown" :key="`${item.label}-${row.shop_name}`">
-                  <span>{{ row.shop_name }}</span>
-                  <strong>{{ row.text }}</strong>
-                </div>
-              </div>
-            </template>
-            <button type="button" @click="open(item.path, item.query || {})">
-              <component :is="item.icon" :size="16" />
-              <span>{{ item.label }}</span>
-              <strong>{{ item.value }}</strong>
-              <small :class="`is-${item.direction}`">{{ item.note }}</small>
-            </button>
-          </el-tooltip>
+          <article class="primary-metric today-orders-card" @click="open('/orders')">
+            <div class="metric-label">
+              <ClipboardList :size="16" />
+              当月有效订单
+            </div>
+            <strong>{{ metricNumber(monthEffectiveOrders, " 单") }}</strong>
+            <div class="metric-footer">
+              <span :class="`delta is-${monthEffectiveOrderDelta.direction}`">
+                <ArrowUpRight v-if="monthEffectiveOrderDelta.direction === 'up'" :size="14" />
+                <ArrowDownRight v-else-if="monthEffectiveOrderDelta.direction === 'down'" :size="14" />
+                较上月 {{ monthEffectiveOrderDelta.text }}
+              </span>
+              <em>本月累计</em>
+            </div>
+          </article>
+
+          <article class="primary-metric today-cancel-card" @click="open('/profit/aftersales', todayAftersalesQuery('pre_fulfillment_cancel'))">
+            <div class="metric-label">
+              <RefreshCw :size="16" />
+              当月取消订单
+            </div>
+            <strong>{{ metricNumber(monthCancelledOrders, " 单") }}</strong>
+            <div class="metric-footer">
+              <span :class="`delta is-${monthCancelledOrderDelta.direction}`">较上月 {{ monthCancelledOrderDelta.text }}</span>
+              <em>{{ metricNumber(monthCancelledQuantity, " 件") }}</em>
+            </div>
+          </article>
+
+          <article class="primary-metric today-return-card" @click="open('/profit/aftersales', todayAftersalesQuery('rejected_unclaimed'))">
+            <div class="metric-label">
+              <AlertTriangle :size="16" />
+              当月退货订单
+            </div>
+            <strong>{{ metricNumber(monthReturnOrders, " 单") }}</strong>
+            <div class="metric-footer">
+              <span :class="`delta is-${monthReturnOrderDelta.direction}`">较上月 {{ monthReturnOrderDelta.text }}</span>
+              <em>{{ metricNumber(monthReturnQuantity, " 件") }}</em>
+            </div>
+          </article>
         </div>
 
         <div class="business-reminder">
@@ -855,11 +1235,57 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .commerce-dashboard {
+  --dashboard-bg: #f6f8fc;
+  --dashboard-surface: #ffffff;
+  --dashboard-surface-soft: #f8fafd;
+  --dashboard-border: #e5eaf2;
+  --dashboard-border-strong: rgba(37, 99, 235, 0.28);
+  --dashboard-text: #0f172a;
+  --dashboard-muted: #64748b;
+  --dashboard-text-light: #94a3b8;
+  --dashboard-hover-shadow: 0 12px 30px rgba(15, 23, 42, 0.09);
+  --dashboard-card-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+  --metric-accent: #2563eb;
+  --metric-profit: #059669;
+  --metric-revenue: #059669;
+  --metric-orders: #2563eb;
+  --metric-neutral: #0f172a;
+  --metric-danger: #ef4444;
+  --metric-cost: #d97706;
+  --metric-logistics: #2563eb;
   position: relative;
+  display: flex;
+  flex-direction: column;
   min-height: 100%;
+  height: 100%;
   padding: 12px;
-  background: #f5f7fb;
-  color: #1f2937;
+  background:
+    radial-gradient(circle at 10% 0%, rgba(37, 99, 235, 0.08) 0, rgba(37, 99, 235, 0) 30%),
+    linear-gradient(180deg, #f8fafd 0%, var(--dashboard-bg) 100%) !important;
+  color: var(--dashboard-text);
+  box-sizing: border-box;
+}
+
+.commerce-dashboard::before,
+.commerce-dashboard::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.commerce-dashboard::before {
+  z-index: 0;
+  opacity: 0.2;
+  background-image:
+    linear-gradient(rgba(37, 99, 235, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(37, 99, 235, 0.05) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.62), transparent 64%);
+}
+
+.commerce-dashboard::after {
+  display: none;
 }
 
 button {
@@ -889,36 +1315,43 @@ button {
   min-width: 20px;
   height: 20px;
   border-radius: 999px;
-  color: #111827;
-  background: #f8c36a;
+  color: #0f172a;
+  background: #bfdbfe;
   font-size: 12px;
 }
 
 .hero-grid {
+  position: relative;
+  z-index: 1;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  flex: 1 1 auto;
   gap: 10px;
   align-items: stretch;
+  min-height: 0;
 }
 
 .operating-card {
   position: relative;
   overflow: hidden;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   min-height: 0;
-  padding: 14px;
-  border: 1px solid #eef1f6;
+  padding: 16px;
+  border: 1px solid var(--dashboard-border) !important;
   border-radius: 12px;
-  color: #1f2937;
-  background: #ffffff;
-  box-shadow: 0 4px 14px rgba(31, 41, 55, 0.04);
+  color: var(--dashboard-text);
+  background: #ffffff !important;
+  box-shadow: var(--dashboard-card-shadow) !important;
 }
 
 .operating-card.is-danger {
-  background: #ffffff;
+  background: #ffffff !important;
 }
 
 .operating-card.is-warning {
-  background: #ffffff;
+  background: #ffffff !important;
 }
 
 .operating-card::before {
@@ -948,24 +1381,9 @@ button {
   min-width: 0;
 }
 
-.brand-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  width: fit-content;
-  margin-bottom: 8px;
-  padding: 4px 10px;
-  border: 1px solid #dedbff;
-  border-radius: 999px;
-  color: #6258f6;
-  background: #f0efff;
-  font-size: 12px;
-  font-weight: 700;
-}
-
 .operating-card h1 {
   margin: 0;
-  color: #1f2937;
+  color: var(--dashboard-text);
   font-size: 22px;
   font-weight: 700;
   line-height: 1.18;
@@ -974,7 +1392,7 @@ button {
 
 .operating-card p {
   margin: 6px 0 0;
-  color: #7b8497;
+  color: var(--dashboard-muted);
   font-size: 13px;
 }
 
@@ -986,8 +1404,8 @@ button {
   margin-left: auto;
   padding: 3px 9px;
   border-radius: 999px;
-  color: #4b5563;
-  background: #f3f5f9;
+  color: #475569;
+  background: #f3f7fb;
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
@@ -1007,136 +1425,415 @@ button {
   height: 32px;
   border-radius: 8px;
   --el-button-bg-color: #ffffff;
-  --el-button-border-color: #e7eaf3;
+  --el-button-border-color: var(--dashboard-border);
   --el-button-text-color: #4b5563;
-  --el-button-hover-bg-color: #f0efff;
-  --el-button-hover-border-color: #6258f6;
-  --el-button-hover-text-color: #6258f6;
+  --el-button-hover-bg-color: #eef6ff;
+  --el-button-hover-border-color: #93c5fd;
+  --el-button-hover-text-color: #1d4ed8;
+  transition: all 0.18s ease;
 }
 
-.plugin-download-button {
-  height: 32px;
+.ghost-button:hover {
+  box-shadow: 0 6px 18px rgba(37, 99, 235, 0.12);
+  transform: translateY(-1px);
+}
+
+.plugin-download-group {
+  display: flex;
+  flex: 0 1 520px;
+  align-items: stretch;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.plugin-download-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 210px;
+  max-width: 260px;
+  min-height: 42px;
+  padding: 7px 10px;
+  border: 1px solid var(--dashboard-border);
   border-radius: 8px;
-  font-weight: 700;
-  --el-button-bg-color: #0b63ff;
-  --el-button-border-color: #0b63ff;
-  --el-button-text-color: #ffffff;
-  --el-button-hover-bg-color: #004fe0;
-  --el-button-hover-border-color: #004fe0;
-  --el-button-hover-text-color: #ffffff;
+  color: #1d4ed8;
+  background: #ffffff;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: var(--dashboard-card-shadow);
+  transition: all 0.18s ease;
 }
 
-.plugin-download-button small {
-  margin-left: 2px;
-  color: rgba(255, 255, 255, 0.76);
+.plugin-download-card:hover {
+  border-color: var(--dashboard-border-strong);
+  color: #1e40af;
+  background: #eff6ff;
+  box-shadow: var(--dashboard-hover-shadow);
+  transform: translateY(-2px);
+}
+
+.plugin-download-card svg {
+  flex: 0 0 auto;
+}
+
+.plugin-download-card span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.plugin-download-card strong,
+.plugin-download-card small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-download-card strong {
+  color: inherit;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.plugin-download-card small {
+  color: #475569;
   font-size: 11px;
   font-weight: 700;
 }
 
 .hero-core-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  grid-template-columns: repeat(5, minmax(150px, 1fr));
   gap: 10px;
+  align-items: start;
   margin-bottom: 10px;
+}
+
+.today-core-grid {
+  grid-template-columns: repeat(6, minmax(136px, 1fr));
+}
+
+.month-core-grid {
+  grid-template-columns: repeat(8, minmax(108px, 1fr));
+  margin-bottom: 12px;
 }
 
 .primary-metric,
 .ai-signal-panel,
 .secondary-metric-grid button {
-  border: 1px solid #eef1f6;
-  border-radius: 10px;
-  background: #ffffff;
-  box-shadow: none;
+  border: 1px solid var(--dashboard-border) !important;
+  border-radius: 12px;
+  background: var(--dashboard-surface) !important;
+  box-shadow: var(--dashboard-card-shadow) !important;
 }
 
 .primary-metric {
-  min-height: 124px;
-  padding: 16px;
+  position: relative;
+  overflow: hidden;
+  min-height: 116px;
+  padding: 16px 18px;
   cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.today-core-grid .primary-metric {
+  min-height: 116px;
+}
+
+.primary-metric::before {
+  display: none;
+}
+
+.primary-metric:hover {
+  border-color: var(--dashboard-border-strong) !important;
+  box-shadow: var(--dashboard-hover-shadow) !important;
+  background: #ffffff !important;
+  transform: translateY(-2px);
+}
+
+.compact-month-grid .primary-metric {
+  min-height: 90px;
+  padding: 11px 12px;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.045) !important;
+}
+
+.compact-month-grid .metric-label {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.compact-month-grid .metric-footer {
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.compact-month-grid .metric-footer em,
+.compact-month-grid .delta {
+  font-size: 11px;
 }
 
 .profit-card {
   background: #ffffff;
+  --metric-accent: var(--metric-profit);
 }
 
 .roi-card {
   background: #ffffff;
+  --metric-accent: var(--metric-orders);
+}
+
+.today-sales-card {
+  background: #ffffff;
+  --metric-accent: var(--metric-revenue);
+}
+
+.today-orders-card {
+  background: #ffffff;
+  --metric-accent: var(--metric-orders);
+}
+
+.today-cancel-card {
+  background: #ffffff;
+  --metric-accent: var(--metric-danger);
+}
+
+.today-return-card {
+  background: #ffffff;
+  --metric-accent: var(--metric-danger);
+}
+
+.month-profit-card {
+  background: #ffffff;
+  --metric-accent: var(--metric-profit);
 }
 
 .inventory-value-card {
   background: #ffffff;
+  --metric-accent: var(--metric-logistics);
+}
+
+.inventory-ratio-card {
+  background: #ffffff;
+  --metric-accent: var(--metric-cost);
+}
+
+.shipping-cost-card {
+  background: #ffffff;
+  --metric-accent: var(--metric-logistics);
 }
 
 .metric-label {
   display: flex;
   align-items: center;
   gap: 7px;
-  color: #7b8497;
+  color: var(--dashboard-muted);
   font-size: 13px;
   font-weight: 700;
+}
+
+.metric-label svg {
+  color: #2563eb;
 }
 
 .primary-metric strong {
   display: block;
   margin-top: 12px;
-  color: #f97316;
-  font-size: 36px;
+  color: var(--dashboard-text);
+  font-size: 32px;
+  font-weight: 700;
   line-height: 1;
 }
 
+.today-core-grid .primary-metric strong {
+  font-size: 32px;
+}
+
+.compact-month-grid .primary-metric strong {
+  margin-top: 8px;
+  color: #334155 !important;
+  font-size: 23px;
+  font-weight: 700;
+}
+
+.profit-card strong {
+  color: var(--metric-profit) !important;
+}
+
 .roi-card strong {
-  color: #60a5fa;
+  color: var(--metric-orders) !important;
+}
+
+.today-sales-card strong {
+  color: var(--metric-revenue) !important;
+}
+
+.today-orders-card strong {
+  color: var(--metric-orders) !important;
+}
+
+.today-cancel-card strong {
+  color: var(--metric-danger) !important;
+}
+
+.today-return-card strong {
+  color: var(--metric-danger) !important;
+}
+
+.month-profit-card strong {
+  color: var(--metric-profit) !important;
 }
 
 .inventory-value-card strong {
-  color: #14b8a6;
+  color: var(--metric-logistics) !important;
+}
+
+.inventory-ratio-card strong {
+  color: var(--metric-cost) !important;
+}
+
+.shipping-cost-card strong {
+  color: var(--metric-logistics) !important;
+}
+
+.today-core-grid .profit-card strong,
+.today-core-grid .today-sales-card strong {
+  color: var(--metric-revenue) !important;
+}
+
+.today-core-grid .today-orders-card strong,
+.today-core-grid .roi-card strong {
+  color: var(--metric-orders) !important;
+}
+
+.today-core-grid .today-cancel-card strong,
+.today-core-grid .today-return-card strong {
+  color: var(--metric-danger) !important;
+}
+
+.compact-month-grid .inventory-ratio-card strong,
+.compact-month-grid .shipping-cost-card strong {
+  color: var(--metric-cost) !important;
+}
+
+.compact-month-grid .today-orders-card strong,
+.compact-month-grid .inventory-value-card strong {
+  color: #2563eb !important;
+}
+
+.compact-month-grid .today-cancel-card strong,
+.compact-month-grid .today-return-card strong {
+  color: #dc2626 !important;
 }
 
 .metric-footer {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 8px;
   margin-top: 12px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.metric-footer > * {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metric-subline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.metric-subline span {
+  min-width: 0;
+}
+
+.metric-subline b {
+  flex-shrink: 0;
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.metric-subline-value {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+}
+
+.metric-subline-value small {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.metric-subline-value small.is-up {
+  color: #10b981;
+}
+
+.metric-subline-value small.is-down {
+  color: #ef4444;
+}
+
+.metric-subline-value small.is-flat {
+  color: #64748b;
 }
 
 .metric-footer em {
   padding: 3px 8px;
+  border: 1px solid #e5eaf2;
   border-radius: 999px;
-  color: #7b8497;
-  background: #f3f5f9;
+  color: #64748b;
+  background: #f9fafb;
   font-size: 12px;
   font-style: normal;
+  font-weight: 700;
 }
 
 .metric-footer .freshness {
   display: inline-flex;
+  flex: 0 1 auto;
   align-items: center;
   min-height: 22px;
   padding: 3px 8px;
+  border: 1px solid transparent;
   border-radius: 999px;
-  background: #f3f5f9;
+  background: #f9fafb;
   font-size: 12px;
   font-weight: 800;
 }
 
 .metric-footer .freshness.is-success {
-  color: #15803d;
-  background: #ecfdf3;
+  color: #047857;
+  background: #ecfdf5;
+  border-color: #bbf7d0;
 }
 
 .metric-footer .freshness.is-warning {
   color: #b45309;
-  background: #fff7e6;
+  background: #fffbeb;
+  border-color: #fde68a;
 }
 
 .metric-footer .freshness.is-danger {
-  color: #ef4444;
-  background: #fff1f1;
+  color: #dc2626;
+  background: #fef2f2;
+  border-color: #fecaca;
 }
 
 .delta {
   display: inline-flex;
+  flex: 0 1 auto;
   align-items: center;
   gap: 4px;
   font-size: 12px;
@@ -1145,7 +1842,7 @@ button {
 
 .delta.is-up,
 .secondary-metric-grid small.is-up {
-  color: #22c55e;
+  color: #10b981;
 }
 
 .delta.is-down,
@@ -1208,7 +1905,7 @@ button {
 }
 
 .signal-row em.is-warn {
-  background: #f59e0b;
+  background: #64748b;
 }
 
 .signal-row em.is-danger {
@@ -1234,7 +1931,7 @@ button {
 }
 
 .secondary-metric-grid button svg {
-  color: #6258f6;
+  color: #2563eb;
 }
 
 .secondary-metric-grid span,
@@ -1246,14 +1943,18 @@ button {
 }
 
 :global(.shop-breakdown-tooltip) {
-  max-width: 280px;
-  border: 0 !important;
+  max-width: min(380px, calc(100vw - 32px));
+  border: 1px solid #e5e7eb !important;
   border-radius: 10px !important;
-  box-shadow: 0 16px 34px rgba(15, 23, 42, 0.18) !important;
+  box-shadow: 0 16px 34px rgba(15, 23, 42, 0.14) !important;
 }
 
 :global(.ad-breakdown-tooltip) {
   max-width: min(720px, calc(100vw - 32px));
+}
+
+:global(.purchase-breakdown-tooltip) {
+  max-width: min(620px, calc(100vw - 32px));
 }
 
 :global(.shop-breakdown) {
@@ -1275,11 +1976,19 @@ button {
   border-top: 1px solid #eef2f7;
   color: #64748b;
   font-size: 12px;
+  transition: background 0.18s ease, color 0.18s ease;
 }
 
 :global(.shop-breakdown strong) {
+  max-width: 180px;
   color: #0f172a;
-  white-space: nowrap;
+  text-align: right;
+  white-space: normal;
+  line-height: 1.45;
+}
+
+:global(.shop-breakdown div:hover) {
+  background: #f8fafc;
 }
 
 :global(.ad-breakdown) {
@@ -1287,7 +1996,18 @@ button {
   min-width: 0;
 }
 
+:global(.purchase-breakdown) {
+  width: min(580px, calc(100vw - 48px));
+  min-width: 0;
+}
+
 :global(.ad-breakdown-table) {
+  display: block !important;
+  width: 100%;
+  gap: 0;
+}
+
+:global(.purchase-breakdown-table) {
   display: block !important;
   width: 100%;
   gap: 0;
@@ -1300,6 +2020,22 @@ button {
   gap: 8px;
   padding: 6px 0;
   border-top: 1px solid #eef2f7;
+  transition: background 0.18s ease;
+}
+
+:global(.purchase-breakdown-row) {
+  display: grid !important;
+  grid-template-columns: minmax(112px, 1.35fr) repeat(4, minmax(70px, 0.8fr));
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid #eef2f7;
+  transition: background 0.18s ease;
+}
+
+:global(.ad-breakdown-row:not(.ad-breakdown-head):hover),
+:global(.purchase-breakdown-row:not(.purchase-breakdown-head):hover) {
+  background: #f8fafc;
 }
 
 :global(.ad-breakdown-head) {
@@ -1309,31 +2045,45 @@ button {
   font-weight: 800;
 }
 
+:global(.purchase-breakdown-head) {
+  padding-top: 0;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
+}
+
 :global(.ad-breakdown-row strong),
 :global(.ad-breakdown-row b),
-:global(.ad-breakdown-row span) {
+:global(.ad-breakdown-row span),
+:global(.purchase-breakdown-row strong),
+:global(.purchase-breakdown-row b),
+:global(.purchase-breakdown-row span) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-:global(.ad-breakdown-row strong) {
+:global(.ad-breakdown-row strong),
+:global(.purchase-breakdown-row strong) {
   color: #334155;
   font-size: 12px;
 }
 
-:global(.ad-breakdown-row b) {
+:global(.ad-breakdown-row b),
+:global(.purchase-breakdown-row b) {
   color: #0f172a;
   font-size: 12px;
   text-align: right;
 }
 
-:global(.ad-breakdown-head span) {
+:global(.ad-breakdown-head span),
+:global(.purchase-breakdown-head span) {
   text-align: right;
 }
 
-:global(.ad-breakdown-head span:first-child) {
+:global(.ad-breakdown-head span:first-child),
+:global(.purchase-breakdown-head span:first-child) {
   text-align: left;
 }
 
@@ -1359,32 +2109,34 @@ button {
   height: 32px;
   margin-top: 10px;
   padding: 0 12px;
-  border: 1px solid #ffe6a6;
+  border: 1px solid #dbeafe;
   border-radius: 8px;
-  color: #b45309;
-  background: #fff7e6;
+  color: #1e40af;
+  background: linear-gradient(90deg, #eff6ff 0%, #ffffff 100%);
   font-size: 13px;
   font-weight: 600;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
 }
 
 
 .hero-insight-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  flex: 1 1 auto;
   gap: 10px;
   margin-top: 10px;
+  min-height: 0;
 }
 
 .hero-health-panel {
-  padding: 14px;
-  border: 1px solid #eef1f6;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px;
+  border: 1px solid var(--dashboard-border);
   border-radius: 12px;
-  background: #ffffff;
-  box-shadow: none;
-}
-
-.hero-health-panel {
-  box-shadow: none;
+  background: var(--dashboard-surface);
+  box-shadow: var(--dashboard-card-shadow);
 }
 
 .hero-health-panel .section-heading {
@@ -1392,48 +2144,57 @@ button {
 }
 
 .hero-health-panel .section-heading h2 {
-  color: #6258f6;
+  color: #1d4ed8;
   font-size: 14px;
   font-weight: 600;
 }
 
 .hero-health-panel .section-heading span {
-  color: #7b8497;
+  color: var(--dashboard-muted);
 }
 
 .hero-insight-grid .health-grid {
   grid-template-columns: repeat(6, minmax(0, 1fr));
+  flex: 1 1 auto;
   gap: 8px;
+  min-height: 0;
 }
 
 .hero-insight-grid .health-card {
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--dashboard-border) !important;
   border-radius: 10px;
-  background: #ffffff;
-  box-shadow: none;
+  background: var(--dashboard-surface) !important;
+  box-shadow: var(--dashboard-card-shadow) !important;
+  transition: all 0.18s ease;
 }
 
 .hero-insight-grid .health-card {
-  min-height: 118px;
-  padding: 12px;
+  min-height: 104px;
+  padding: 11px;
+}
+
+.hero-insight-grid .health-card:hover {
+  border-color: var(--dashboard-border-strong) !important;
+  box-shadow: var(--dashboard-hover-shadow) !important;
+  transform: translateY(-2px);
 }
 
 .hero-insight-grid .health-card svg {
-  color: #6258f6;
+  color: #1d4ed8;
   opacity: 1;
 }
 
 .hero-insight-grid .health-card strong {
-  color: #1f2937;
+  color: var(--dashboard-text);
   font-size: 13px;
 }
 
 .hero-insight-grid .health-card dt {
-  color: #7b8497;
+  color: var(--dashboard-muted);
 }
 
 .hero-insight-grid .health-card dd {
-  color: #4b5563;
+  color: #475569;
 }
 
 .hero-rail {
@@ -1452,18 +2213,18 @@ button {
 }
 
 .hero-insight-grid .hero-health-panel {
-  border: 1px solid #eef1f6;
-  background: #ffffff;
-  box-shadow: none;
+  border: 1px solid var(--dashboard-border);
+  background: var(--dashboard-surface);
+  box-shadow: var(--dashboard-card-shadow);
 }
 
 .hero-insight-grid .health-card {
-  border: 1px solid #eef1f6;
-  background: #ffffff;
+  border: 1px solid var(--dashboard-border) !important;
+  background: var(--dashboard-surface) !important;
 }
 
 .hero-insight-grid .health-card svg {
-  color: #6258f6;
+  color: #1d4ed8;
   opacity: 1;
 }
 
@@ -1479,15 +2240,16 @@ button {
   height: 28px;
   padding: 5px;
   border-radius: 8px;
-  background: #f0efff;
+  background: #eff6ff;
+  color: #2563eb;
 }
 
 .hero-insight-grid .health-card strong {
-  color: #1f2937;
+  color: var(--dashboard-text);
 }
 
 .hero-insight-grid .health-card dt {
-  color: #7b8497;
+  color: var(--dashboard-muted);
 }
 
 .hero-insight-grid .health-card dd {
@@ -1551,11 +2313,11 @@ button {
 }
 
 .compact-item.is-warning {
-  background: #fff7ed;
+  background: #f1f5f9;
 }
 
 .compact-item.is-amber {
-  background: #fefce8;
+  background: #f8fafc;
 }
 
 .compact-item strong,
@@ -1657,8 +2419,8 @@ button {
 }
 
 .action-item.is-warning b {
-  color: #78350f;
-  background: #fbbf24;
+  color: #334155;
+  background: #cbd5e1;
 }
 
 .pressure-grid {
@@ -1713,7 +2475,7 @@ button {
 .health-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  gap: 9px;
 }
 
 .health-card {
@@ -1768,11 +2530,21 @@ button {
   background: transparent;
   text-align: left;
   cursor: pointer;
+  border-radius: 7px;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.health-card-row.is-static {
+  cursor: default;
+}
+
+.health-card-row:not(.is-static):hover {
+  background: #f1f5ff;
 }
 
 .health-card-row:hover .health-card-label,
 .health-card-row:hover .health-card-value {
-  color: #6258f6;
+  color: #1d4ed8;
 }
 
 .health-card-label {
@@ -1863,6 +2635,11 @@ button {
   .hero-rail {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .plugin-download-group {
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
 }
 
 @media (max-width: 980px) {
@@ -1903,6 +2680,15 @@ button {
 
   .primary-metric strong {
     font-size: 34px;
+  }
+
+  .plugin-download-group {
+    flex-direction: column;
+  }
+
+  .plugin-download-card {
+    width: 100%;
+    max-width: none;
   }
 
   .action-item,

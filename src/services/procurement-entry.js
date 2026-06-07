@@ -40,6 +40,10 @@ export function submitProcurementRequests(body = {}) {
   return procurementRuntime().submitProcurementRequestsImpl(body);
 }
 
+export function directInboundProcurementRequests(body = {}) {
+  return procurementRuntime().directInboundProcurementRequestsImpl(body);
+}
+
 export function deleteProcurementRequest(id) {
   return procurementRuntime().deleteProcurementRequestImpl(id);
 }

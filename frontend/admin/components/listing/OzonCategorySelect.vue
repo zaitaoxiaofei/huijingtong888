@@ -71,7 +71,6 @@ watch(() => props.displayLabel, () => {
 
 onMounted(() => {
   if (props.modelValue && props.displayLabel) keyword.value = displayModelValueLabel(props.modelValue);
-  loadCategories(props.modelValue || "", { limit: props.modelValue ? 20 : BROWSE_CATEGORY_LIMIT, syncKeyword: Boolean(props.modelValue) });
   document.addEventListener("mousedown", handleDocumentMouseDown);
 });
 

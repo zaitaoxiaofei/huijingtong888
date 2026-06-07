@@ -5,31 +5,30 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { createLatestRequestGate } from "../../utils/request-gate";
+import { createRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 
 const route = useRoute();
 const router = useRouter();
-let syncingRoute = false;
 const listRequestGate = createLatestRequestGate();
+let syncingRoute = false;
 
 const loading = ref(false);
-const confirming = ref(false);
-const confirmingInbound = ref(false);
+const inboundSubmitting = ref(false);
+const cancelSubmitting = ref(false);
 const detailVisible = ref(false);
 const detailSaving = ref(false);
 
 const state = reactive({
   rows: [],
-  inboundRows: [],
   total: 0,
   filters: {
     query: "",
     page: 1,
     pageSize: 20
   },
-  selectedProductIds: [],
-  selectedInboundIds: []
+  selectedRows: []
 });
 
 const detailDialog = reactive({
@@ -38,24 +37,12 @@ const detailDialog = reactive({
   rows: []
 });
 
-const pendingInboundRows = computed(() => state.inboundRows.map((row) => ({
-    ...row,
-    row_type: "inbound",
-    row_key: `inbound-${row.inbound_record_id}`,
-    total_quantity: Number(row.expected_quantity || row.remaining_quantity || row.actual_quantity || 0),
-    total_amount: Number(row.amount || 0),
-    total_shipping: Number(row.shipping_amount || 0),
-    request_count: 1,
-    earliest_created_at: row.order_created_at || row.inbound_created_at || row.purchased_at || "",
-    requests: []
-  })));
-const tableRows = computed(() => [
-  ...pendingInboundRows.value,
-  ...state.rows.map((row) => ({ ...row, row_type: "purchase", row_key: `purchase-${row.product_id}` }))
-]);
-const selectedRows = computed(() => tableRows.value.filter((row) => row.row_type === "purchase" && state.selectedProductIds.includes(Number(row.product_id))));
-const selectedInboundRows = computed(() => tableRows.value.filter((row) => row.row_type === "inbound" && state.selectedInboundIds.includes(Number(row.inbound_record_id))));
-const totalRows = computed(() => Number(state.total || 0) + state.inboundRows.length);
+const tableRows = computed(() => state.rows.map((row) => ({
+  ...row,
+  row_key: `purchase-${row.product_id}`
+})));
+
+const totalRows = computed(() => Number(state.total || 0));
 
 function money(value) {
   return Number(value || 0).toFixed(2);
@@ -74,7 +61,7 @@ function productImage(row) {
 }
 
 function arrayText(value) {
-  return Array.isArray(value) ? value.filter(Boolean).join("、") : String(value || "");
+  return Array.isArray(value) ? value.filter(Boolean).join(" / ") : String(value || "");
 }
 
 function sourceLabel(source) {
@@ -87,7 +74,6 @@ function sourceLabel(source) {
 }
 
 function requestSourceSummary(row) {
-  if (row.row_type === "inbound") return row.order_no || row.purchase_order_no || "采购单";
   const sources = (row.requests || []).map((item) => sourceLabel(item.source_type || item.product_source_platform));
   return Array.from(new Set(sources)).join(" / ") || "-";
 }
@@ -119,19 +105,15 @@ async function loadPageData() {
   const requestToken = listRequestGate.next();
   loading.value = true;
   try {
-    const [result, inboundRows] = await Promise.all([
-      apiClient.get(`/api/procurement/requests?${procurementQueryString()}`),
-      apiClient.get("/api/procurement/pending-inbound")
-    ]);
+    const result = await apiClient.get(`/api/procurement/requests?${procurementQueryString()}`);
     if (!listRequestGate.isLatest(requestToken)) return;
     state.rows = Array.isArray(result?.rows) ? result.rows : [];
-    state.inboundRows = Array.isArray(inboundRows) ? inboundRows : [];
     state.total = Number(result?.total || 0);
-    state.selectedProductIds = state.selectedProductIds.filter((id) => state.rows.some((row) => Number(row.product_id) === id));
-    state.selectedInboundIds = state.selectedInboundIds.filter((id) => state.inboundRows.some((row) => Number(row.inbound_record_id) === id));
+    const availableKeys = new Set(state.rows.map((row) => `purchase-${row.product_id}`));
+    state.selectedRows = state.selectedRows.filter((row) => availableKeys.has(String(row.row_key || "")));
   } catch (error) {
     if (!listRequestGate.isLatest(requestToken)) return;
-    ElMessage.error(error.message || "采购清单加载失败");
+    ElMessage.error(error.message || "待入库清单加载失败");
   } finally {
     if (listRequestGate.isLatest(requestToken)) loading.value = false;
   }
@@ -139,12 +121,14 @@ async function loadPageData() {
 
 function handleSearch() {
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
 function handleReset() {
   state.filters.query = "";
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -172,68 +156,55 @@ function applyRouteState() {
   }
 }
 
-function syncRouteQuery() {
-  if (syncingRoute) return;
-  const nextQuery = {
-    query: state.filters.query || undefined,
-    page: state.filters.page > 1 ? String(state.filters.page) : undefined,
-    pageSize: state.filters.pageSize !== 20 ? String(state.filters.pageSize) : undefined
-  };
-  const normalizedNext = Object.fromEntries(Object.entries(nextQuery).filter(([, value]) => value != null && value !== ""));
-  if (JSON.stringify(route.query || {}) === JSON.stringify(normalizedNext)) return;
-  router.replace({ query: normalizedNext });
-}
+const syncRouteQuery = createRouteQuerySync({
+  route,
+  router,
+  isSyncingRoute: () => syncingRoute,
+  buildQuery(mode) {
+    const includeTextFilters = mode === "manual";
+    return {
+      query: includeTextFilters ? state.filters.query || undefined : undefined,
+      page: state.filters.page > 1 ? String(state.filters.page) : undefined,
+      pageSize: state.filters.pageSize !== 20 ? String(state.filters.pageSize) : undefined
+    };
+  }
+});
 
 function handleSelectionChange(rows) {
-  state.selectedProductIds = rows.filter((row) => row.row_type === "purchase").map((row) => Number(row.product_id));
-  state.selectedInboundIds = rows.filter((row) => row.row_type === "inbound").map((row) => Number(row.inbound_record_id));
+  state.selectedRows = Array.isArray(rows) ? rows : [];
 }
 
 function canSelectRow(row) {
-  return row.row_type === "purchase" || row.row_type === "inbound";
+  return Boolean(row?.row_key);
 }
 
 function rowStatusText(row) {
-  return row.row_type === "inbound" ? "待入库" : (row.overdue ? "超期" : "待采购");
+  return row.overdue ? "超期待入库" : "待入库";
 }
 
 function rowStatusType(row) {
-  if (row.row_type === "inbound") return "warning";
-  return row.overdue ? "danger" : "info";
-}
-
-function rowClassName({ row }) {
-  return row.row_type === "inbound" ? "inbound-ready-row" : "";
+  return row.overdue ? "danger" : "warning";
 }
 
 function flowTimes(row) {
   return [
-    { label: "创建", value: row.row_type === "inbound" ? row.order_created_at || row.earliest_created_at : row.earliest_created_at },
-    { label: "采购", value: row.row_type === "inbound" ? row.purchased_at : "" },
-    { label: "入库", value: row.inbound_approved_at || row.approved_at || "" }
+    { label: "最早创建", value: row.earliest_created_at || "" },
+    { label: "最近创建", value: row.latest_created_at || "" }
   ];
 }
 
 function actionDisabled(row, action) {
-  if (action === "edit") return row.row_type !== "purchase";
-  if (action === "purchase") return row.row_type !== "purchase";
-  if (action === "inbound") return row.row_type !== "inbound";
+  const requests = Array.isArray(row?.requests) ? row.requests : [];
+  if (!requests.length) return true;
+  if (action === "edit") return false;
+  if (action === "inbound") return inboundSubmitting.value;
+  if (action === "cancel") return cancelSubmitting.value;
   return false;
 }
 
 function handleEditAction(row) {
   if (actionDisabled(row, "edit")) return;
   openEditDialog(row);
-}
-
-function handlePurchaseAction(row) {
-  if (actionDisabled(row, "purchase")) return;
-  confirmRow(row);
-}
-
-function handleInboundAction(row) {
-  if (actionDisabled(row, "inbound")) return;
-  confirmInbound(row);
 }
 
 function openEditDialog(row) {
@@ -252,7 +223,8 @@ function openEditDialog(row) {
     supplier_id: item.supplier_id || null,
     purchase_url: item.purchase_url || "",
     note: item.note || "",
-    created_at: item.created_at || ""
+    created_at: item.created_at || "",
+    updated_at: item.updated_at || ""
   }));
   detailVisible.value = true;
 }
@@ -278,6 +250,7 @@ async function saveDetailRows() {
   try {
     for (const row of detailDialog.rows) {
       await apiClient.put(`/api/procurement/requests/${row.id}`, {
+        updated_at: row.updated_at || undefined,
         product_id: row.product_id,
         person_id: row.person_id,
         quantity: Number(row.quantity || 0),
@@ -302,108 +275,84 @@ async function saveDetailRows() {
   }
 }
 
-async function confirmRequests(requestIds, label) {
+function collectRequestIds(rows = []) {
+  return rows.flatMap((row) => (row.requests || []).map((item) => Number(item.id))).filter(Boolean);
+}
+
+async function directInboundRequests(rows, label) {
+  const requestIds = collectRequestIds(rows);
   if (!requestIds.length) return;
 
   try {
-    await ElMessageBox.confirm(`确认采购${label}吗？确认后会生成采购单并进入待入库。`, "确认采购", {
+    await ElMessageBox.confirm(`确认将${label}直接入库吗？确认后会增加库存。`, "确认入库", {
       type: "warning",
-      confirmButtonText: "确认采购",
+      confirmButtonText: "确认入库",
       cancelButtonText: "取消"
     });
 
-    confirming.value = true;
-    await apiClient.post("/api/procurement/purchase-orders/confirm-from-requests-async", { request_ids: requestIds });
-    const targetIds = new Set(requestIds.map(Number).filter(Boolean));
-    const beforeCount = state.rows.length;
-    state.rows = state.rows.filter((row) => !(row.requests || []).some((item) => targetIds.has(Number(item.id))));
-    state.total = Math.max(0, Number(state.total || 0) - (beforeCount - state.rows.length));
-    ElMessage.success("已提交采购处理，后台正在生成采购单和待入库记录");
-    state.selectedProductIds = [];
-    window.setTimeout(() => {
-      loadPageData();
-    }, 1500);
+    inboundSubmitting.value = true;
+    await apiClient.post("/api/procurement/requests/direct-inbound", { request_ids: requestIds });
+    ElMessage.success("采购记录已入库");
+    state.selectedRows = [];
+    await loadPageData();
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
-    ElMessage.error(error.message || "确认采购失败");
+    ElMessage.error(error.message || "入库失败");
   } finally {
-    confirming.value = false;
+    inboundSubmitting.value = false;
   }
 }
 
-async function confirmRow(row) {
-  const requestIds = (row.requests || []).map((item) => Number(item.id)).filter(Boolean);
-  await confirmRequests(requestIds, `产品“${row.product_name || row.product_code || row.product_id}”`);
+async function handleInboundAction(row) {
+  if (actionDisabled(row, "inbound")) return;
+  await directInboundRequests([row], `产品「${row.product_name || row.product_code || row.product_id}」`);
 }
 
-async function confirmSelected() {
-  const requestIds = selectedRows.value.flatMap((row) => (row.requests || []).map((item) => Number(item.id))).filter(Boolean);
-  await confirmRequests(requestIds, `选中的 ${selectedRows.value.length} 种产品`);
+async function inboundSelectedRows() {
+  await directInboundRequests(state.selectedRows, `选中的 ${state.selectedRows.length} 个商品`);
 }
 
-async function confirmAll() {
-  const requestIds = state.rows.flatMap((row) => (row.requests || []).map((item) => Number(item.id))).filter(Boolean);
-  await confirmRequests(requestIds, `当前页中的 ${state.rows.length} 种产品`);
-}
+async function cancelRequests(rows, label) {
+  const requests = rows.flatMap((row) => Array.isArray(row.requests) ? row.requests : []);
+  if (!requests.length) return;
 
-function inboundPayload(row) {
-  return {
-    product_id: Number(row.product_id || 0) || null,
-    quantity: Number(row.expected_quantity || row.remaining_quantity || row.actual_quantity || 0),
-    amount: Number(row.amount || 0),
-    shipping_amount: Number(row.shipping_amount || 0),
-    purchase_url: row.purchase_url || "",
-    status: "approved",
-    note: row.inbound_note || "",
-    qc_status: row.qc_status || "approved"
-  };
-}
-
-async function confirmInboundRows(rows, label) {
-  const targetRows = rows.filter((row) => Number(row.inbound_record_id || 0));
-  if (!targetRows.length) return;
   try {
-    await ElMessageBox.confirm(
-      `确认${label}已入库吗？确认后会增加库存。`,
-      "确认入库",
-      { type: "warning", confirmButtonText: "确认入库", cancelButtonText: "取消" }
-    );
-    confirmingInbound.value = true;
-    await apiClient.post("/api/inbound-records/batch-update-async", {
-      records: targetRows.map((row) => ({
-        id: row.inbound_record_id,
-        payload: inboundPayload(row)
-      }))
+    await ElMessageBox.confirm(`确认取消${label}吗？取消后将不会继续入库。`, "取消采购", {
+      type: "warning",
+      confirmButtonText: "确认取消",
+      cancelButtonText: "返回"
     });
-    const targetIds = new Set(targetRows.map((row) => Number(row.inbound_record_id)).filter(Boolean));
-    state.inboundRows = state.inboundRows.filter((row) => !targetIds.has(Number(row.inbound_record_id)));
-    state.selectedInboundIds = state.selectedInboundIds.filter((id) => !targetIds.has(Number(id)));
-    ElMessage.success(targetRows.length > 1 ? `已提交 ${targetRows.length} 条入库处理，后台正在更新库存` : "已提交入库处理，后台正在更新库存");
-    window.setTimeout(() => {
-      loadPageData();
-    }, 1500);
+
+    cancelSubmitting.value = true;
+    for (const item of requests) {
+      await apiClient.put(`/api/procurement/requests/${item.id}`, {
+        updated_at: item.updated_at || undefined,
+        status: "cancelled",
+        approval_status: "cancelled"
+      });
+    }
+    ElMessage.success("采购记录已取消");
+    state.selectedRows = [];
+    await loadPageData();
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
-    ElMessage.error(error.message || "确认入库失败");
+    ElMessage.error(error.message || "取消采购失败");
   } finally {
-    confirmingInbound.value = false;
+    cancelSubmitting.value = false;
   }
 }
 
-async function confirmInbound(row) {
-  await confirmInboundRows([row], `产品“${row.product_name || row.product_code || row.product_id}”`);
+async function handleCancelAction(row) {
+  if (actionDisabled(row, "cancel")) return;
+  await cancelRequests([row], `产品「${row.product_name || row.product_code || row.product_id}」`);
 }
 
-async function confirmSelectedInbound() {
-  await confirmInboundRows(selectedInboundRows.value, `选中的 ${selectedInboundRows.value.length} 个待入库产品`);
-}
-
-async function confirmAllInbound() {
-  await confirmInboundRows(pendingInboundRows.value, `全部 ${pendingInboundRows.value.length} 个待入库产品`);
+async function cancelSelectedRows() {
+  await cancelRequests(state.selectedRows, `选中的 ${state.selectedRows.length} 个商品`);
 }
 
 watch(() => route.query, applyRouteState, { deep: true });
-watch(() => [state.filters.query, state.filters.page, state.filters.pageSize], syncRouteQuery);
+watch(() => [state.filters.page, state.filters.pageSize], syncRouteQuery);
 
 onMounted(async () => {
   applyRouteState();
@@ -415,19 +364,16 @@ onMounted(async () => {
   <div class="page-stack procurement-list-page procurement-workspace-page">
     <section class="page-hero">
       <div>
-        <h2>采购清单</h2>
-        <p>按产品合并待采购请求，当前页面已切换为后端分页。</p>
+        <h2>待入库清单</h2>
+        <p>采购流程统一收口到这里处理，只保留编辑、入库和取消。</p>
       </div>
       <div class="page-card-actions">
         <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
-        <el-button class="erp-btn erp-btn-primary" type="primary" :disabled="!selectedRows.length" :loading="confirming" @click="confirmSelected">
-          确认采购所选
+        <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!state.selectedRows.length" :loading="inboundSubmitting" @click="inboundSelectedRows">
+          批量入库
         </el-button>
-        <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!selectedInboundRows.length" :loading="confirmingInbound" @click="confirmSelectedInbound">
-          确认已入库所选
-        </el-button>
-        <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!pendingInboundRows.length" :loading="confirmingInbound" @click="confirmAllInbound">
-          确认已入库全部
+        <el-button class="erp-btn erp-btn-danger" :disabled="!state.selectedRows.length" :loading="cancelSubmitting" @click="cancelSelectedRows">
+          选中取消
         </el-button>
       </div>
     </section>
@@ -436,20 +382,13 @@ onMounted(async () => {
       <template #header>
         <div class="page-card-header">
           <div>
-            <strong>待采购产品</strong>
-            <span class="muted-text">共 {{ totalRows }} 种，含待入库 {{ state.inboundRows.length }} 种</span>
+            <strong>待入库商品</strong>
+            <span class="muted-text">共 {{ totalRows }} 种，已选 {{ state.selectedRows.length }} 种</span>
           </div>
           <div class="page-card-actions">
-            <el-tag type="info">已选采购 {{ selectedRows.length }} 种</el-tag>
-            <el-tag type="success">已选入库 {{ selectedInboundRows.length }} 种</el-tag>
-            <el-tag v-if="pendingInboundRows.length" type="warning">待入库已置顶</el-tag>
-            <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!selectedInboundRows.length" :loading="confirmingInbound" @click="confirmSelectedInbound">
-              确认已入库所选
+            <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!state.selectedRows.length" :loading="inboundSubmitting" @click="inboundSelectedRows">
+              批量入库（{{ state.selectedRows.length }}）
             </el-button>
-            <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!pendingInboundRows.length" :loading="confirmingInbound" @click="confirmAllInbound">
-              确认已入库全部
-            </el-button>
-            <el-button class="erp-btn erp-btn-secondary" :disabled="!state.rows.length" :loading="confirming" @click="confirmAll">确认采购当前页</el-button>
           </div>
         </div>
       </template>
@@ -481,7 +420,6 @@ onMounted(async () => {
           stripe
           border
           class="erp-data-table"
-          :row-class-name="rowClassName"
           @selection-change="handleSelectionChange"
         >
           <el-table-column type="selection" width="56" reserve-selection :selectable="canSelectRow" />
@@ -500,23 +438,23 @@ onMounted(async () => {
             </template>
           </el-table-column>
 
-          <el-table-column label="请求数" width="90" align="center">
+          <el-table-column label="明细数" width="90" align="center">
             <template #default="{ row }">{{ numberText(row.request_count) }}</template>
           </el-table-column>
           <el-table-column label="总数量" width="90" align="center">
             <template #default="{ row }">{{ numberText(row.total_quantity) }}</template>
           </el-table-column>
           <el-table-column label="货款" width="110" align="right">
-            <template #default="{ row }">¥{{ money(row.total_amount) }}</template>
+            <template #default="{ row }">￥{{ money(row.total_amount) }}</template>
           </el-table-column>
           <el-table-column label="运费" width="110" align="right">
-            <template #default="{ row }">¥{{ money(row.total_shipping) }}</template>
+            <template #default="{ row }">￥{{ money(row.total_shipping) }}</template>
           </el-table-column>
           <el-table-column label="均摊单价" width="110" align="right">
-            <template #default="{ row }">¥{{ averageUnitCost(row) }}</template>
+            <template #default="{ row }">￥{{ averageUnitCost(row) }}</template>
           </el-table-column>
 
-          <el-table-column label="采购来源" min-width="260">
+          <el-table-column label="采购来源" min-width="280">
             <template #default="{ row }">
               <div class="source-cell">
                 <span>供应商：{{ arrayText(row.supplier_names) || row.other_source || "-" }}</span>
@@ -535,13 +473,13 @@ onMounted(async () => {
             </template>
           </el-table-column>
 
-          <el-table-column label="状态" width="100" align="center">
+          <el-table-column label="状态" width="110" align="center">
             <template #default="{ row }">
               <el-tag :type="rowStatusType(row)">{{ rowStatusText(row) }}</el-tag>
             </template>
           </el-table-column>
 
-          <el-table-column label="流程时间" width="190">
+          <el-table-column label="时间" width="210">
             <template #default="{ row }">
               <div class="time-cell">
                 <span v-for="item in flowTimes(row)" :key="item.label">
@@ -551,12 +489,12 @@ onMounted(async () => {
             </template>
           </el-table-column>
 
-          <el-table-column label="操作" width="250" fixed="right" align="center">
+          <el-table-column label="操作" width="280" fixed="right" align="center">
             <template #default="{ row }">
               <div class="row-actions erp-inline-actions">
                 <el-button class="erp-btn-link" link type="primary" :disabled="actionDisabled(row, 'edit')" @click="handleEditAction(row)">编辑明细</el-button>
-                <el-button class="erp-btn-link" link type="success" :disabled="actionDisabled(row, 'purchase')" :loading="confirming && row.row_type === 'purchase'" @click="handlePurchaseAction(row)">确认采购</el-button>
-                <el-button class="erp-btn-link" link type="success" :disabled="actionDisabled(row, 'inbound')" :loading="confirmingInbound && row.row_type === 'inbound'" @click="handleInboundAction(row)">确认已入库</el-button>
+                <el-button class="erp-btn-link" link type="success" :disabled="actionDisabled(row, 'inbound')" :loading="inboundSubmitting" @click="handleInboundAction(row)">入库</el-button>
+                <el-button class="erp-btn-link" link type="danger" :disabled="actionDisabled(row, 'cancel')" :loading="cancelSubmitting" @click="handleCancelAction(row)">取消</el-button>
               </div>
             </template>
           </el-table-column>
@@ -586,10 +524,10 @@ onMounted(async () => {
       <div class="page-stack">
         <div class="detail-header">
           <strong>{{ detailDialog.productName || "-" }}</strong>
-          <span class="muted-text">这里修改的是当前产品下等待采购的采购请求。</span>
+          <span class="muted-text">这里修改的是当前商品下待入库的采购记录。</span>
         </div>
 
-        <el-alert type="info" :closable="false" class="profit-sync-alert" title="保存后会同步重算当前产品关联订单利润。" />
+        <el-alert type="info" :closable="false" class="profit-sync-alert" title="保存后会同步重算当前商品关联订单利润。" />
 
         <el-table :data="detailDialog.rows" stripe border class="erp-data-table">
           <el-table-column prop="person_name" label="申请人" width="120" />
@@ -664,22 +602,6 @@ onMounted(async () => {
   gap: 12px;
 }
 
-.product-thumb {
-  width: 68px;
-  height: 68px;
-  flex-shrink: 0;
-  border-radius: 12px;
-  overflow: hidden;
-  background: #f2f4f7;
-}
-
-.product-thumb-fallback {
-  display: grid;
-  place-items: center;
-  color: #909399;
-  font-size: 12px;
-}
-
 .product-cell-meta,
 .source-cell,
 .detail-header {
@@ -710,21 +632,7 @@ onMounted(async () => {
   white-space: nowrap;
 }
 
-:deep(.inbound-ready-row) {
-  background: #f0fdf4;
-}
-
-:deep(.inbound-ready-row td.el-table__cell) {
-  background: #f0fdf4 !important;
-}
-
 .profit-sync-alert {
   margin-bottom: 12px;
-}
-
-.dialog-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 12px;
 }
 </style>

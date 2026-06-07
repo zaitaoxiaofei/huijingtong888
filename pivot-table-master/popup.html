@@ -25,7 +25,16 @@
           <span>租户</span>
           <input id="tenantId" type="text" autocomplete="off">
         </label>
+        <label>
+          <span>ERP Token</span>
+          <input id="localPluginToken" type="password" autocomplete="off" placeholder="留空使用默认回传令牌">
+        </label>
+        <label>
+          <span>本地镜像</span>
+          <input id="localMirrorBaseUrl" type="text" autocomplete="off" placeholder="http://127.0.0.1:8787">
+        </label>
         <div class="actions">
+          <button id="authProbeBtn" type="button">测试后台直连</button>
           <button id="saveBtn" type="button">保存</button>
           <button id="pollBtn" type="button" class="primary">立即采集</button>
           <button id="startPollingBtn" type="button" class="button-start">启动轮询</button>
@@ -43,6 +52,27 @@
       <section class="section status-line">
         <span>轮询状态</span>
         <strong id="pollingStatus">未启动</strong>
+      </section>
+
+      <section class="section runtime">
+        <div class="section-title">运行状态</div>
+        <div class="runtime-grid">
+          <div class="runtime-card">
+            <span>页面状态</span>
+            <strong id="pageStatus">等待识别</strong>
+            <em id="pageStatusHint">请打开 Ozon 数据分析页</em>
+          </div>
+          <div class="runtime-card">
+            <span>同步任务</span>
+            <strong id="taskStatus">等待任务</strong>
+            <em id="taskStatusHint">暂无执行中的采集任务</em>
+          </div>
+          <div class="runtime-card">
+            <span>服务状态</span>
+            <strong id="serviceStatus">已连接官网</strong>
+            <em id="serviceStatusHint">https://erp.hjt888.xyz/</em>
+          </div>
+        </div>
       </section>
 
       <section class="section">

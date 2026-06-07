@@ -194,19 +194,19 @@
     }
   }
 
-  function normalizeLocalPluginErrorMessage(error, fallback = 'ERP 鏈湴鎺ュ彛璇锋眰澶辫触') {
+  function normalizeLocalPluginErrorMessage(error, fallback = 'ERP 本地接口请求失败') {
     const message = String(error?.message || error || '').trim();
     if (!message) return fallback;
     if (/Failed to fetch|ERR_CONNECTION_REFUSED|ECONNREFUSED|NetworkError|Load failed/i.test(message)) {
-      return 'ERP 鏈湴鏈嶅姟鏈繛鎺ワ紝璇风‘璁?ERP 宸插惎鍔ㄥ悗閲嶈瘯';
+      return 'ERP 本地服务未连接，请确认 ERP 已启动后重试';
     }
     if (/local plugin endpoint requires localhost|valid plugin token|403/i.test(message)) {
       return 'ERP 插件授权失败，请重新打开 ERP 或检查插件 token 配置';
     }
-    if (/杩斿洖浜嗛〉闈㈠唴瀹箌Unexpected token\s*</i.test(message)) {
+    if (/返回了页面内容|Unexpected token\s*</i.test(message)) {
       return 'ERP 插件接口未正确挂载，请重启 ERP 后重试';
     }
-    if (/timeout|瓒呮椂|AbortError/i.test(message)) {
+    if (/timeout|超时|AbortError/i.test(message)) {
       return 'ERP 接口请求超时，请稍后重试或检查 ERP 服务状态';
     }
     return message;
@@ -222,7 +222,7 @@
     const text = await response.text();
     const json = parseJsonResponseText(text);
     if (!response.ok || json?.success === false) {
-      throw new Error(json?.error || json?.message || text || `ERP 鐘舵€佹鏌ュけ璐ワ細HTTP ${response.status}`);
+      throw new Error(json?.error || json?.message || text || `ERP 状态检查失败：HTTP ${response.status}`);
     }
     return json?.data || json || {};
   }
@@ -585,7 +585,7 @@
       .flatMap((item) => {
         if (!item) return [];
         if (typeof item === 'object') return [item.text, item.value, item.name, item.title, item.label].filter(Boolean);
-        return String(item).split(/[\n\r]+|,|锛寍\s+/g);
+        return String(item).split(/[\n\r]+|,|，|\s+/g);
       })
       .map((item) => {
         const text = String(item || '').trim();
@@ -676,8 +676,8 @@
     const numeric = normalizeDecimal(value);
     if (numeric === null) return '';
     const normalizedUnit = String(unit || '').trim().toLowerCase();
-    if (['褋屑', 'cm'].includes(normalizedUnit)) return formatMeasurementValue(numeric * 10);
-    if (['屑', 'm'].includes(normalizedUnit)) return formatMeasurementValue(numeric * 1000);
+    if (['см', 'cm'].includes(normalizedUnit)) return formatMeasurementValue(numeric * 10);
+    if (['м', 'm'].includes(normalizedUnit)) return formatMeasurementValue(numeric * 1000);
     if (['in', 'inch', 'inches'].includes(normalizedUnit)) return formatMeasurementValue(numeric * 25.4);
     return formatMeasurementValue(numeric);
   }
@@ -686,7 +686,7 @@
     const numeric = normalizeDecimal(value);
     if (numeric === null) return '';
     const normalizedUnit = String(unit || '').trim().toLowerCase();
-    if (['泻谐', 'kg'].includes(normalizedUnit)) return formatMeasurementValue(numeric * 1000);
+    if (['кг', 'kg'].includes(normalizedUnit)) return formatMeasurementValue(numeric * 1000);
     if (['lb', 'lbs', 'pound', 'pounds'].includes(normalizedUnit)) return formatMeasurementValue(numeric * 453.59237);
     return formatMeasurementValue(numeric);
   }
@@ -707,7 +707,7 @@
       };
     }
     const match = text.match(
-      /(\d+(?:[,.]\d+)?)\s*[x脳*]\s*(\d+(?:[,.]\d+)?)\s*[x脳*]\s*(\d+(?:[,.]\d+)?)(?:\s*(屑屑|mm|褋屑|cm|屑|m|in|inch|inches))?/i
+      /(\d+(?:[,.]\d+)?)\s*[x×*]\s*(\d+(?:[,.]\d+)?)\s*[x×*]\s*(\d+(?:[,.]\d+)?)(?:\s*(мм|mm|см|cm|м|m|in|inch|inches))?/i
     );
     if (!match) {
       return {
@@ -871,16 +871,16 @@
     const firstRow = rows[0] || null;
     const firstVariant = variants[0] || null;
 
-    // 浼樺厛浣跨敤褰撳墠璇︽儏椤?URL 涓殑鍟嗗搧 SKU
+    // 优先使用当前详情页 URL 中的商品 SKU
     appendUniqueSku(candidates, pageSku());
 
-    // 鍐嶆部鐢ㄦ棫閫昏緫閲岀殑浼樺厛椤哄簭
+    // 再沿用旧逻辑里的优先顺序
     appendUniqueSku(candidates, firstRow?.sku);
     appendUniqueSku(candidates, firstVariant?.sku);
     appendUniqueSku(candidates, result?.sku);
     appendUniqueSku(candidates, result?.productDetail?.sku);
 
-    // 鏈€鍚庤ˉ鍏呭叾浣欏彉浣?SKU锛岄€愪釜鍏滃簳灏濊瘯
+    // 最后补充其他变体 SKU，逐个兜底尝试
     rows.forEach((item) => appendUniqueSku(candidates, item?.sku));
     variants.forEach((item) => appendUniqueSku(candidates, item?.sku));
     detailVariants.forEach((item) => appendUniqueSku(candidates, item?.sku));
@@ -991,7 +991,7 @@
 
   async function directLocalPluginFetch(url, options = {}, erpBaseUrl = resolveErpBaseUrl(), timeoutMs = 15000) {
     if (!isAllowedLocalPluginUrlFor(url, erpBaseUrl)) {
-      throw new Error('鍙厑璁歌闂綋鍓?ERP 閰嶇疆涓嬬殑鏈湴鎻掍欢鎺ュ彛');
+      throw new Error('只允许访问当前 ERP 配置下的本地插件接口');
     }
     const response = await fetchWithTimeout(url, {
       ...options,
@@ -1087,7 +1087,7 @@
       options: requestOptions
     });
     if (!result?.success) {
-      throw new Error(result?.message || result?.error || 'ERP API 璇锋眰澶辫触');
+      throw new Error(result?.message || result?.error || 'ERP API 请求失败');
     }
     return {
       ok: Boolean(result.ok),
@@ -1101,7 +1101,7 @@
   }
 
   async function saveCollectedSnapshotToDb(sourcePayload, requestContext = null) {
-    if (!sourcePayload?.collectionId) throw new Error('閲囬泦鏁版嵁缂哄皯 collectionId');
+    if (!sourcePayload?.collectionId) throw new Error('采集数据缺少 collectionId');
     const response = await localPluginFetch(`${resolveLocalPluginApiBaseUrlFor(requestContext?.erpBaseUrl)}/collected-product-details`, {
       method: 'POST',
       headers: {
@@ -1145,7 +1145,7 @@
       throw new Error('本地服务返回了页面内容，采集详情接口可能未正确挂载');
     }
     if (!response.ok || json?.success === false) {
-      throw new Error(json?.error || text || `淇濆瓨閲囬泦鏁版嵁澶辫触锛欻TTP ${response.status}`);
+      throw new Error(json?.error || text || `保存采集数据失败：HTTP ${response.status}`);
     }
     return json?.data?.id || json?.data?.detail?.id || sourcePayload.collectionId;
   }
@@ -1153,7 +1153,7 @@
   async function syncCollectedProductToCollectorBox(productPayload, requestContext = null) {
     const payload = productPayload && typeof productPayload === 'object' ? productPayload : {};
     const sku = String(payload.sku || payload.product_id || payload.productId || '').trim();
-    if (!sku) throw new Error('閲囬泦鏁版嵁缂哄皯 SKU');
+    if (!sku) throw new Error('采集数据缺少 SKU');
     const response = await localPluginFetch(`${resolveLocalPluginApiBaseUrlFor(requestContext?.erpBaseUrl)}/collected-products/sync`, {
       method: 'POST',
       headers: {
@@ -1178,10 +1178,10 @@
       json = text ? JSON.parse(text) : null;
     } catch (error) {}
     if (!json && text && /^\s*</.test(text)) {
-      throw new Error('鏈湴鏈嶅姟杩斿洖浜嗛〉闈㈠唴瀹癸紝閲囬泦绠卞悓姝ユ帴鍙ｅ彲鑳芥湭姝ｇ‘鎸傝浇');
+      throw new Error('本地服务返回了页面内容，采集箱同步接口可能未正确挂载');
     }
     if (!response.ok || json?.success === false) {
-      throw new Error(json?.error || text || `鍚屾鍒伴噰闆嗙澶辫触锛欻TTP ${response.status}`);
+      throw new Error(json?.error || text || `同步到采集箱失败：HTTP ${response.status}`);
     }
     return {
       collectionId: json?.data?.id || json?.id || sku,
@@ -1192,7 +1192,7 @@
 
   async function waitForCollectedSnapshot(collectionId, timeoutMs = 8000, requestContext = null) {
     const id = String(collectionId || '').trim();
-    if (!id) throw new Error('閲囬泦鏁版嵁缂哄皯 collectionId');
+    if (!id) throw new Error('采集数据缺少 collectionId');
     const deadline = Date.now() + timeoutMs;
     let lastError = '';
     while (Date.now() < deadline) {
@@ -1284,11 +1284,11 @@
         <div class="ozon-erp-modal-head">
           <strong>${escapeHtml(title)}</strong>
           <div class="ozon-erp-modal-actions">
-            ${options.publish ? '<button type="button" data-action="publish" class="primary">鎵撳紑閲囬泦绠?/button>' : ''}
+            ${options.publish ? '<button type="button" data-action="publish" class="primary">打开采集箱</button>' : ''}
             ${Array.isArray(options.extraActions) ? options.extraActions.map((action) => `
               <button type="button" data-action="${escapeHtml(action.action)}" class="${escapeHtml(action.className || '')}">${escapeHtml(action.label)}</button>
             `).join('') : ''}
-            <button type="button" data-action="close">鍏抽棴</button>
+            <button type="button" data-action="close">关闭</button>
           </div>
         </div>
         <div class="ozon-erp-modal-summary"></div>
@@ -1331,19 +1331,19 @@
     }
     if (payload?.error) {
       return `
-        <span>SKU锛?{escapeHtml(payload.sku || '-')}</span>
-        <span>澶辫触鍘熷洜锛?{escapeHtml(payload.error)}</span>
+        <span>SKU：${escapeHtml(payload.sku || '-')}</span>
+        <span>失败原因：${escapeHtml(payload.error)}</span>
       `;
     }
     if (payload?.followEditPayload) {
       const rows = payload.followEditPayload.rows || [];
       return `
-        <span>SKU锛?{escapeHtml(payload.sku || '-')}</span>
-        <span>鍙樹綋琛岋細${rows.length}</span>
-        <span>鍥剧墖锛?{payload.productDetail?.images?.length || 0}</span>
-        <span>瑙嗛锛?{payload.productDetail?.videos?.length || 0}</span>
-        <span>seller绫荤洰锛?{escapeHtml(payload.category_ids?.join?.(' > ') || payload.sellerFallback?.error || '鏈幏鍙?)}</span>
-        <span>seller寰呰皟鐢細${payload.requestSpecs?.seller?.length || 0}</span>
+        <span>SKU：${escapeHtml(payload.sku || '-')}</span>
+        <span>变体行：${rows.length}</span>
+        <span>图片：${payload.productDetail?.images?.length || 0}</span>
+        <span>视频：${payload.productDetail?.videos?.length || 0}</span>
+        <span>seller类目：${escapeHtml(payload.category_ids?.join?.(' > ') || payload.sellerFallback?.error || '未获取')}</span>
+        <span>seller待调用：${payload.requestSpecs?.seller?.length || 0}</span>
       `;
     }
     if (payload?.listRows) {
@@ -1351,13 +1351,13 @@
       const remaining = Number(autoCollect.remainingCount || 0);
       const requested = Number(autoCollect.requestedCount || 0);
       return `
-        <span>鍒楄〃 SKU锛?{payload.listRows.length}</span>
-        <span>宸叉煡璇?ERP 宸查噰闆嗗晢鍝佺姸鎬?/span>
-        ${requested ? `<span>鏈琛ラ噰锛?{requested}</span>` : ''}
-        ${remaining ? `<span>寰呯户缁ˉ閲囷細${remaining}</span>` : ''}
+        <span>列表 SKU：${payload.listRows.length}</span>
+        <span>已查询 ERP 已采集商品状态</span>
+        ${requested ? `<span>本次补采：${requested}</span>` : ''}
+        ${remaining ? `<span>待继续补采：${remaining}</span>` : ''}
       `;
     }
-    return '<span>棰勮鏁版嵁</span>';
+    return '<span>预览数据</span>';
   }
 
   function renderDetailPanel(status, detail, cacheData = null) {
@@ -1421,7 +1421,7 @@
     const routeVersion = state.routeVersion;
     state.detailSku = normalizedSku;
     let liveDetail = currentDetail;
-    renderDetailPanel('姝ｅ湪璇诲彇褰撳墠椤甸潰浠锋牸', liveDetail);
+    renderDetailPanel('正在读取当前页面价格', liveDetail);
     try {
       liveDetail = await fetchCurrentPageDetailSnapshot(normalizedSku) || liveDetail;
       if (routeKey !== state.routeKey || routeVersion !== state.routeVersion || pageSku() !== normalizedSku || state.detailStatus === 'running') return;
@@ -2012,8 +2012,8 @@
     if (!silent) {
       renderDetailPanel(
         saveFailureMessage
-          ? '宸叉墦寮€娴忚鍣ㄥ晢鍝佺紪杈戦〉锛屽彲鐩存帴缁х画缂栬緫'
-          : '宸叉墦寮€娴忚鍣ㄥ晢鍝佺紪杈戦〉',
+          ? '已打开浏览器商品编辑页，可直接继续编辑'
+          : '已打开浏览器商品编辑页',
         result
       );
     }
@@ -2037,7 +2037,7 @@
       .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
-    const match = source.match(/(^|[^\d%])(\d[\d\s.,]*?)\s*(?:鈧絴褉褍斜\.?|褉褍斜谢械泄|褉\b)/i);
+    const match = source.match(/(^|[^\d%])(\d[\d\s.,]*?)\s*(?:₽|руб\.?|рублей|р\b)/i);
     if (!match) return '';
     const compact = match[2].replace(/\s+/g, '');
     const lastComma = compact.lastIndexOf(',');
@@ -2061,7 +2061,7 @@
       .trim();
     if (!source) return [];
     const prices = [];
-    const pattern = /(^|[^\d%])(\d[\d\s.,]*?)\s*(鈧絴褉褍斜\.?|褉褍斜谢械泄|褉\b)/ig;
+    const pattern = /(^|[^\d%])(\d[\d\s.,]*?)\s*(₽|руб\.?|рублей|р\b)/ig;
     let match = null;
     while ((match = pattern.exec(source))) {
       const value = parseListCardPrice(`${match[2]} ${match[3]}`);
@@ -2071,7 +2071,7 @@
   }
 
   function isLikelySecondaryPriceText(text) {
-    return /(褉邪褋褋褉芯褔|泻褉械写懈褌|锌谢邪褌械卸|胁 屑械褋褟褑|屑械褋褟褑|x\s*\d+|褋泻懈写泻|斜邪谢谢|cashback|泻褝褕斜褝泻|写芯\s+\d|芯褌\s+\d)/i.test(String(text || ''));
+    return /(рассроч|кредит|платеж|в месяц|месяц|x\s*\d+|скидк|балл|cashback|кэшбэк|до\s+\d|от\s+\d)/i.test(String(text || ''));
   }
 
   function isVisibleNode(node) {
@@ -2178,12 +2178,12 @@
       text = text
         .replace(/^\s*\d[\d\s.,]*\s*(?:₽|руб\.?|рублей|р\b)\s*/i, '')
         .replace(/^\s*\d[\d\s.,]*\s*¥\s*/i, '')
-        .replace(/^\s*[鈥撯€斺垝-]?\s*\d{1,3}\s*%\s*/i, '')
+        .replace(/^\s*[–—-]?\s*\d{1,3}\s*%\s*/i, '')
         .trim();
     }
     text = text
-      .replace(/\d(?:[.,]\d+)?\s+\d[\d\s.,]*\s*(?:芯褌蟹褘胁邪|芯褌蟹褘胁芯胁|芯褑械薪泻[邪懈]?|reviews?).*$/i, '')
-      .replace(/\s+\d(?:[.,]\d+)?\s+\d[\d\s.,]*\s*(?:芯褌蟹褘胁邪|芯褌蟹褘胁芯胁|芯褑械薪泻[邪懈]?|reviews?).*$/i, '')
+      .replace(/\d(?:[.,]\d+)?\s+\d[\d\s.,]*\s*(?:отзыва|отзывов|оценк[аи]?|reviews?).*$/i, '')
+      .replace(/\s+\d(?:[.,]\d+)?\s+\d[\d\s.,]*\s*(?:отзыва|отзывов|оценк[аи]?|reviews?).*$/i, '')
       .replace(/\s+/g, ' ')
       .trim();
     return /[A-Za-z\u0400-\u04ff]/.test(text) ? text : '';
@@ -2644,12 +2644,12 @@
 
   function resolveReturnRateMeta(product) {
     return resolveRateWithSource(product, [
-      ['nullableRedemptionRate', 'Seller鐪熷疄閫€璐х巼'],
-      ['return_rate', '鍟嗗搧閫€璐х巼'],
-      ['returnRate', '鍟嗗搧閫€璐х巼'],
-      ['returnCancelRate', '閫€璐у彇娑堢巼'],
-      ['return_cancel_rate', '閫€璐у彇娑堢巼']
-    ], 0.05, '榛樿閫€璐х巼');
+      ['nullableRedemptionRate', 'Seller真实退货率'],
+      ['return_rate', '商品退货率'],
+      ['returnRate', '商品退货率'],
+      ['returnCancelRate', '退货取消率'],
+      ['return_cancel_rate', '退货取消率']
+    ], 0.05, '默认退货率');
   }
 
   function resolveAdvertisingRateMeta(product) {
@@ -3147,7 +3147,7 @@
     }
     if (resolver.startsWith('unit:')) {
       const [, paths = '', unit = ''] = resolver.split(':');
-      const unitPattern = unit === 'g' ? /\b(?:g|kg|谐|泻谐)\b/i : /\b(?:mm|cm|m|屑屑|褋屑|屑)\b/i;
+      const unitPattern = unit === 'g' ? /\b(?:g|kg|г|кг)\b/i : /\b(?:mm|cm|m|мм|см|м)\b/i;
       return formatCardValueWithUnit(pickCardValue(product, paths.split(',')), unit, unitPattern);
     }
     if (resolver.startsWith('intelligence:')) {
@@ -3195,7 +3195,7 @@
       if (days !== null && days < 30) return 'orange';
     }
     if (field.key === 'fee_completeness') {
-      return buildBreakevenEstimate(product).completeness === '瀹屾暣' ? 'sales' : 'orange';
+      return buildBreakevenEstimate(product).completeness === '完整' ? 'sales' : 'orange';
     }
     return field.tone || 'base';
   }
@@ -3254,7 +3254,7 @@
     for (const field of fields) {
       let group = grouped.find((item) => item.title === field.group);
       if (!group) {
-        group = { title: field.group || '鍏朵粬', items: [] };
+        group = { title: field.group || '其他', items: [] };
         grouped.push(group);
       }
       group.items.push(field);
@@ -3268,12 +3268,12 @@
       <div class="ozon-erp-modal ozon-erp-field-settings">
         <div class="ozon-erp-modal-head">
           <div class="ozon-erp-field-settings-heading">
-            <span class="ozon-erp-field-settings-kicker">鏄剧ず瀛楁</span>
-            <strong>缂栬緫鎻掍欢灞曠ず瀛楁</strong>
-            <span>鎸夐€夊搧鍒濈瓫娴佺▼鍕鹃€夐渶瑕佸睍绀虹殑瀛楁锛岄厤缃細淇濆瓨鍦ㄥ綋鍓嶆祻瑙堝櫒銆?/span>
+            <span class="ozon-erp-field-settings-kicker">显示字段</span>
+            <strong>编辑插件展示字段</strong>
+            <span>按选品初筛流程勾选需要展示的字段，配置会保存在当前浏览器。</span>
           </div>
           <div class="ozon-erp-modal-actions">
-            <button type="button" data-action="close">鍏抽棴</button>
+            <button type="button" data-action="close">关闭</button>
           </div>
         </div>
         <div class="ozon-erp-field-settings-body">
@@ -3281,10 +3281,10 @@
             <section class="ozon-erp-field-settings-group" data-field-group="${groupIndex}">
               <div class="ozon-erp-field-settings-title">
                 <span>${escapeHtml(group.title)}</span>
-                <em>${group.items.length} 椤?/em>
+                <em>${group.items.length} 项</em>
                 <span class="ozon-erp-field-settings-title-actions">
-                  <button type="button" data-action="select-group" data-field-group="${groupIndex}">鍏ㄩ€?/button>
-                  <button type="button" data-action="clear-group" data-field-group="${groupIndex}">娓呯┖</button>
+                  <button type="button" data-action="select-group" data-field-group="${groupIndex}">全选</button>
+                  <button type="button" data-action="clear-group" data-field-group="${groupIndex}">清空</button>
                 </span>
               </div>
               <div class="ozon-erp-field-settings-list">
@@ -3301,10 +3301,10 @@
         <div class="ozon-erp-field-settings-footer">
           <span class="ozon-erp-field-settings-counter" data-role="selected-count"></span>
           <div class="ozon-erp-field-settings-footer-actions">
-            <button type="button" data-action="select-all">鍏ㄩ€?/button>
-            <button type="button" data-action="select-none">娓呯┖</button>
-            <button type="button" data-action="reset">鎭㈠榛樿</button>
-            <button type="button" data-action="save" class="primary">淇濆瓨</button>
+            <button type="button" data-action="select-all">全选</button>
+            <button type="button" data-action="select-none">清空</button>
+            <button type="button" data-action="reset">恢复默认</button>
+            <button type="button" data-action="save" class="primary">保存</button>
           </div>
         </div>
       </div>
@@ -3338,7 +3338,7 @@
     inputs().forEach((input) => input.addEventListener('change', updateSelectedCount));
     mask.querySelector('[data-action="reset"]')?.addEventListener('click', () => {
       saveVisibleFieldKeys(null).then(close).catch((error) => {
-        openPreviewModal('瀛楁璁剧疆淇濆瓨澶辫触', { error: error?.message || String(error) });
+        openPreviewModal('字段设置保存失败', { error: error?.message || String(error) });
       });
     });
     mask.querySelector('[data-action="save"]')?.addEventListener('click', () => {
@@ -3350,7 +3350,7 @@
         return;
       }
       saveVisibleFieldKeys(keys).then(close).catch((error) => {
-        openPreviewModal('瀛楁璁剧疆淇濆瓨澶辫触', { error: error?.message || String(error) });
+        openPreviewModal('字段设置保存失败', { error: error?.message || String(error) });
       });
     });
     mask.addEventListener('click', (event) => {
@@ -3362,16 +3362,16 @@
 
   function groupCardMetricRows(metrics) {
     const groupOrder = new Map([
-      ['鍩虹', 10],
-      ['鏍稿績姒傝', 20],
-      ['淇濇湰娴嬬畻', 30],
-      ['娴侀噺杞寲', 40],
-      ['鎺ㄥ箍渚濊禆', 50],
-      ['搴撳瓨鐗╂祦', 60]
+      ['基础', 10],
+      ['核心概览', 20],
+      ['保本测算', 30],
+      ['流量转化', 40],
+      ['推广依赖', 50],
+      ['库存物流', 60]
     ]);
     const groups = [];
     for (const item of metrics) {
-      const title = item.group || '鍏朵粬';
+      const title = item.group || '其他';
       let group = groups.find((entry) => entry.title === title);
       if (!group) {
         group = { title, items: [] };
@@ -3565,25 +3565,25 @@
 
   function renderFunnelPanel(metrics) {
     const entries = [
-      ['total_views', '鏇濆厜'],
-      ['card_views', '娴忚'],
-      ['click_rate', '鐐瑰嚮'],
-      ['cart_rate', '鍔犺喘'],
-      ['view_conversion_rate', '鎴愪氦'],
-      ['monthly_sales', '鏈堥攢']
+      ['total_views', '曝光'],
+      ['card_views', '浏览'],
+      ['click_rate', '点击'],
+      ['cart_rate', '加购'],
+      ['view_conversion_rate', '成交'],
+      ['monthly_sales', '月销']
     ].map(([key, label]) => {
       const metric = metricByKey(metrics, key);
       return metric ? `<span><b>${escapeHtml(metric.value || '--')}</b><em>${escapeHtml(label)}</em></span>` : '';
     }).filter(Boolean);
     const judgementMetric = metricByKey(metrics, 'funnel_judgement');
     if (!entries.length && !judgementMetric) return '';
-    const cells = entries.join('<i>鈫?/i>');
-    const judgement = metricByKey(metrics, 'funnel_judgement')?.value || '绛夊緟鏇村娴侀噺鏁版嵁';
+    const cells = entries.join('<i>→</i>');
+    const judgement = metricByKey(metrics, 'funnel_judgement')?.value || '等待更多流量数据';
     return `
       <section class="ozon-erp-card-group collect-section">
-        <div class="ozon-erp-card-group-title collect-section__title">杞寲婕忔枟</div>
+        <div class="ozon-erp-card-group-title collect-section__title">转化漏斗</div>
         ${cells ? `<div class="ozon-erp-funnel">${cells}</div>` : ''}
-        ${judgementMetric ? `<div class="ozon-erp-funnel-note" title="鐐瑰嚮寮变紭鍏堢湅涓诲浘銆佹爣棰樺拰浠锋牸锛涘姞璐急鐪嬭鎯呴〉銆佽瘎浠峰拰浠锋牸鎵挎帴锛涙垚浜ゅ急鐪嬬墿娴併€佸簱瀛樸€佽瘎浠峰拰淇冮攢绔炰簤銆?>婕忔枟鍒ゆ柇锛?{escapeHtml(judgement)}</div>` : ''}
+        ${judgementMetric ? `<div class="ozon-erp-funnel-note" title="点击弱优先看主图、标题和价格；加购弱看详情页、评价和价格承接；成交弱看物流、库存、评价和促销竞争。">漏斗判断：${escapeHtml(judgement)}</div>` : ''}
       </section>
     `;
   }
@@ -3597,14 +3597,14 @@
       <div class="ozon-erp-screening">
         ${overviewCells ? `<section class="ozon-erp-overview">${overviewCells}</section>` : ''}
         ${renderDecisionSummary(row, metrics)}
-        ${renderMetricGroupExtras('鏅鸿兘鍒ゆ柇', metrics, '鏅鸿兘鍒ゆ柇', ['product_score', 'risk_level'])}
-        ${renderMetricGroupExtras('鏍稿績姒傝', metrics, '鏍稿績姒傝', ['ozon_card_price', 'monthly_sales', 'monthly_revenue', 'sales_rank', 'risk_level'])}
-        ${renderMetricSection('鍩虹淇℃伅', metrics, ['category', 'brand', 'sales_schema', 'created_at', 'create_age_days'], '鍩虹')}
-        ${renderMetricSection('淇濇湰娴嬬畻', metrics, ['web_price', 'breakeven_cost_limit', 'suggested_purchase_cost', 'fee_completeness', 'estimated_international_freight', 'rfbs_commission'], '淇濇湰娴嬬畻')}
+        ${renderMetricGroupExtras('智能判断', metrics, '智能判断', ['product_score', 'risk_level'])}
+        ${renderMetricGroupExtras('核心概览', metrics, '核心概览', ['ozon_card_price', 'monthly_sales', 'monthly_revenue', 'sales_rank', 'risk_level'])}
+        ${renderMetricSection('基础信息', metrics, ['category', 'brand', 'sales_schema', 'created_at', 'create_age_days'], '基础')}
+        ${renderMetricSection('保本测算', metrics, ['web_price', 'breakeven_cost_limit', 'suggested_purchase_cost', 'fee_completeness', 'estimated_international_freight', 'rfbs_commission'], '保本测算')}
         ${renderBreakevenFeeList(row)}
         ${renderFunnelPanel(metrics)}
-        ${renderMetricSection('鎺ㄥ箍渚濊禆', metrics, ['promo_dependency', 'ad_cost_ratio', 'promo_revenue_share', 'paid_promotion_days', 'promo_days'], '鎺ㄥ箍渚濊禆')}
-        ${renderMetricSection('搴撳瓨鐗╂祦', metrics, ['stock', 'accessibility_days', 'accessibility', 'return_cancel_rate', 'dimensions', 'weight'], '搴撳瓨鐗╂祦')}
+        ${renderMetricSection('推广依赖', metrics, ['promo_dependency', 'ad_cost_ratio', 'promo_revenue_share', 'paid_promotion_days', 'promo_days'], '推广依赖')}
+        ${renderMetricSection('库存物流', metrics, ['stock', 'accessibility_days', 'accessibility', 'return_cancel_rate', 'dimensions', 'weight'], '库存物流')}
       </div>
     `;
   }
@@ -3690,7 +3690,7 @@
     }
     if (action === 'refresh-seller') {
       refreshSellerDashboard().then(() => refreshWorkbenchStatuses()).catch((error) => {
-        openPreviewModal('Seller 鍒锋柊澶辫触', { error: error?.message || String(error) });
+        openPreviewModal('Seller 刷新失败', { error: error?.message || String(error) });
       });
       return;
     }
@@ -3703,7 +3703,7 @@
       setLocalWatchStatus(sku, action === 'watch').then(() => {
         renderProductDataPanel(panel, state.detailUiRow?.sku === sku ? state.detailUiRow : row, options);
       }).catch((error) => {
-        openPreviewModal(action === 'watch' ? '鍔犲叆鐩戞帶澶辫触' : '鍙栨秷鐩戞帶澶辫触', {
+        openPreviewModal(action === 'watch' ? '加入监控失败' : '取消监控失败', {
           error: error?.message || String(error),
           sku,
           scope: 'local-plugin-storage'
@@ -3836,7 +3836,7 @@
       json = text ? JSON.parse(text) : null;
     } catch (error) {}
     if (!response.ok || json?.success === false) {
-      throw new Error(normalizeLocalPluginErrorMessage(json?.error || json?.message || text || `ERP 鍔ㄤ綔澶辫触锛欻TTP ${response.status}`, 'ERP 鍔ㄤ綔澶辫触'));
+      throw new Error(normalizeLocalPluginErrorMessage(json?.error || json?.message || text || `ERP 动作失败：HTTP ${response.status}`, 'ERP 动作失败'));
     }
     return json?.data || json || {};
   }
@@ -4400,7 +4400,7 @@
     row.erpLookup = {
       ...(row.erpLookup || {}),
       status: 'error',
-      statusText: result?.error || result?.message || '閲囬泦澶辫触',
+      statusText: result?.error || result?.message || '采集失败',
       needsRefresh: true
     };
     return row;

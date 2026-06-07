@@ -7,6 +7,7 @@ import { archiveMaterialAsset, listMaterialAssets } from "../../api/materialAsse
 import { withImageToken } from "../../api/tools/imageCropper";
 import { apiClient } from "../../utils/api";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import ProductImagePreview from "../../components/ProductImagePreview.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -78,13 +79,12 @@ async function loadAssets() {
     const common = {
       paged: "1",
       keyword: filters.keyword.trim(),
-      mediaType: filters.mediaType,
       role: filters.role,
       status: filters.status
     };
     const [materialRows, shopRows, bootstrap] = await Promise.all([
-      listMaterialAssets({ ...common, page: pager.main.page, pageSize: pager.main.pageSize }),
-      apiClient.get(`/api/listing/media/assets?${new URLSearchParams({ ...common, page: String(pager.shop.page), pageSize: String(pager.shop.pageSize) }).toString()}`, { noCache: true }).catch(() => ({ rows: [], total: 0 })),
+      listMaterialAssets({ ...common, asset_type: filters.mediaType || "image", page: pager.main.page, pageSize: pager.main.pageSize }),
+      apiClient.get(`/api/listing/media/assets?${new URLSearchParams({ ...common, mediaType: filters.mediaType, page: String(pager.shop.page), pageSize: String(pager.shop.pageSize) }).toString()}`, { noCache: true }).catch(() => ({ rows: [], total: 0 })),
       apiClient.get("/api/asset-variant-engine/bootstrap", { noCache: true }).catch(() => ({ shops: [] }))
     ]);
     materialAssets.value = Array.isArray(materialRows?.rows) ? materialRows.rows : [];
@@ -166,10 +166,25 @@ function statusValue(item = {}) {
 
 function previewUrl(item = {}) {
   const url = mediaType(item) === "video"
-    ? item.publishUrl || item.publish_url || item.previewUrl || item.preview_url || item.url || ""
-    : item.thumbnail_url || item.thumbnailUrl || item.previewUrl || item.preview_url || item.publishUrl || item.publish_url || item.url || "";
+    ? item.previewUrl || item.preview_url || item.localUrl || item.local_url || item.publishUrl || item.publish_url || item.url || ""
+    : item.thumbnail_url || item.thumbnailUrl || item.previewUrl || item.preview_url || item.localUrl || item.local_url || item.url || item.publishUrl || item.publish_url || "";
   if (!url || /^blob:|^data:/i.test(url)) return url;
-  return withImageToken(url);
+  return withImageToken(normalizeLocalPreviewUrl(url));
+}
+
+function normalizeLocalPreviewUrl(url) {
+  const value = String(url || "").trim();
+  if (!/^https?:\/\//i.test(value)) return value;
+  try {
+    const parsed = new URL(value);
+    const isKnownAppHost = ["localhost", "127.0.0.1", "erp.hjt888.xyz"].includes(parsed.hostname);
+    if (isKnownAppHost && /^(\/api\/|\/uploads\/)/i.test(parsed.pathname)) {
+      return `${parsed.pathname}${parsed.search || ""}`;
+    }
+  } catch {
+    return value;
+  }
+  return value;
 }
 
 function openPreview(item) {
@@ -325,7 +340,7 @@ onMounted(loadAssets);
                       preload="metadata"
                       playsinline
                     />
-                    <img v-else-if="previewUrl(row)" :src="previewUrl(row)" alt="素材预览">
+                    <ProductImagePreview v-else-if="previewUrl(row)" :src="previewUrl(row)" alt="asset preview" size="compact" :preview="false" :lazy="false" />
                     <span v-else class="empty-thumb">-</span>
                   </button>
                 </template>
@@ -376,7 +391,7 @@ onMounted(loadAssets);
           <el-table-column label="预览" width="86" align="center">
             <template #default="{ row }">
               <button type="button" class="thumb-button" @click="openPreview(row)">
-                <img v-if="previewUrl(row)" :src="previewUrl(row)" alt="素材预览">
+                <ProductImagePreview v-if="previewUrl(row)" :src="previewUrl(row)" alt="asset preview" size="compact" :preview="false" :lazy="false" />
                 <span v-else class="empty-thumb">-</span>
               </button>
             </template>

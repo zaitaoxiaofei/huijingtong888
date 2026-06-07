@@ -1,3 +1,5 @@
+import { beginApiPerf, endApiPerf } from "./performance-monitor.js";
+
 const AUTH_TOKEN_KEY = "authToken";
 const GET_CACHE_TTL_MS = 30000;
 const cachedGetPrefixes = [
@@ -11,21 +13,27 @@ const getCache = new Map();
 const routeScopedControllers = new Set();
 const routeAbortedSignals = new WeakSet();
 
-function notifyAuthExpired(message) {
+function currentRedirectPath() {
+  const hash = String(window.location.hash || "");
+  const path = hash.startsWith("#") ? hash.slice(1) : hash;
+  if (path.startsWith("/") && !path.startsWith("/login")) return path;
+  return "/dashboard";
+}
+
+function notifyAuthExpired(message, url = "") {
   if (authRedirecting) return;
   authRedirecting = true;
   clearAuthToken();
   window.dispatchEvent(new CustomEvent("app:auth-expired", {
     detail: {
-      message: message || "登录已失效，请重新登录"
+      message: message || "登录状态已失效，请重新登录",
+      redirect: currentRedirectPath(),
+      url: String(url || "")
     }
   }));
   window.setTimeout(() => {
-    if (!String(window.location.hash || "").startsWith("#/login")) {
-      window.location.hash = "#/login";
-    }
     authRedirecting = false;
-  }, 0);
+  }, 1500);
 }
 
 function abortRouteScopedRequests() {
@@ -68,6 +76,7 @@ function buildHeaders(customHeaders = {}) {
 }
 
 async function request(url, options = {}) {
+  const trace = beginApiPerf(url, options);
   let response;
   try {
     response = await fetch(url, {
@@ -76,8 +85,10 @@ async function request(url, options = {}) {
     });
   } catch (error) {
     if (error?.name === "AbortError" && routeAbortedSignals.has(options.signal)) {
+      endApiPerf(trace, { error: "route_aborted" });
       return new Promise(() => {});
     }
+    endApiPerf(trace, { error: error?.name || "fetch_error" });
     if (error?.name === "AbortError") throw error;
     throw error;
   }
@@ -91,14 +102,17 @@ async function request(url, options = {}) {
     const error = new Error(data?.error || `Request failed with status ${response.status}`);
     error.status = response.status;
     error.payload = data;
-    if (response.status === 401) notifyAuthExpired(data?.error);
+    endApiPerf(trace, { status: response.status, error: error.message });
+    if (response.status === 401 && options.authExpiredRedirect !== false) notifyAuthExpired(data?.error, url);
     throw error;
   }
 
+  endApiPerf(trace, { status: response.status });
   return data;
 }
 
 async function blobRequest(url, options = {}) {
+  const trace = beginApiPerf(url, options);
   let response;
   try {
     response = await fetch(url, {
@@ -106,6 +120,7 @@ async function blobRequest(url, options = {}) {
       headers: buildHeaders(options.headers)
     });
   } catch (error) {
+    endApiPerf(trace, { error: error?.name || "fetch_error" });
     if (error?.name === "AbortError") throw error;
     throw error;
   }
@@ -118,10 +133,12 @@ async function blobRequest(url, options = {}) {
     const error = new Error(data?.error || data || `Request failed with status ${response.status}`);
     error.status = response.status;
     error.payload = data;
-    if (response.status === 401) notifyAuthExpired(data?.error);
+    endApiPerf(trace, { status: response.status, error: error.message });
+    if (response.status === 401 && options.authExpiredRedirect !== false) notifyAuthExpired(data?.error, url);
     throw error;
   }
 
+  endApiPerf(trace, { status: response.status });
   return {
     blob: await response.blob(),
     headers: response.headers,
@@ -198,6 +215,7 @@ export function getAuthToken() {
 export function setAuthToken(token) {
   try {
     window.localStorage?.setItem(AUTH_TOKEN_KEY, token);
+    authRedirecting = false;
   } catch {
     // Ignore storage failures; the next authenticated request will surface auth state.
   }

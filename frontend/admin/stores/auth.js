@@ -2,12 +2,39 @@ import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import { apiClient, clearAuthToken, getAuthToken, setAuthToken } from "../utils/api";
 
-const BOOTSTRAP_TIMEOUT_MS = 5000;
+const AUTH_USER_CACHE_KEY = "baodanAuthUser";
+const BOOTSTRAP_TIMEOUT_MS = 3000;
+const BACKGROUND_VERIFY_TIMEOUT_MS = 2500;
+
+function readCachedUser() {
+  try {
+    return JSON.parse(window.localStorage?.getItem(AUTH_USER_CACHE_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedUser(user) {
+  try {
+    window.localStorage?.setItem(AUTH_USER_CACHE_KEY, JSON.stringify(user));
+  } catch {
+    // Local cache is only a startup optimization.
+  }
+}
+
+function clearCachedUser() {
+  try {
+    window.localStorage?.removeItem(AUTH_USER_CACHE_KEY);
+  } catch {
+    // Ignore storage failures; server-side auth still controls access.
+  }
+}
 
 export const useAuthStore = defineStore("auth", () => {
   const user = ref(null);
   const bootstrapped = ref(false);
   const loading = ref(false);
+  let verifyPromise = null;
 
   const isAuthenticated = computed(() => Boolean(user.value));
 
@@ -17,20 +44,55 @@ export const useAuthStore = defineStore("auth", () => {
       bootstrapped.value = true;
       return;
     }
+    const cachedUser = readCachedUser();
+    if (cachedUser) {
+      user.value = cachedUser;
+      bootstrapped.value = true;
+      verifySession({ background: true });
+      return;
+    }
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), BOOTSTRAP_TIMEOUT_MS);
     try {
-      user.value = await apiClient.get("/api/auth/me", {
+      const currentUser = await apiClient.get("/api/auth/me", {
         routeScoped: false,
         noCache: true,
         signal: controller.signal
       });
+      user.value = currentUser;
+      writeCachedUser(currentUser);
     } catch {
       clearSession();
     } finally {
       window.clearTimeout(timeoutId);
       bootstrapped.value = true;
     }
+  }
+
+  async function verifySession({ background = false } = {}) {
+    if (verifyPromise) return verifyPromise;
+    if (!getAuthToken()) {
+      clearSession();
+      return;
+    }
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), BACKGROUND_VERIFY_TIMEOUT_MS);
+    verifyPromise = apiClient.get("/api/auth/me", {
+      routeScoped: false,
+      noCache: true,
+      signal: controller.signal
+    }).then((currentUser) => {
+      user.value = currentUser;
+      writeCachedUser(currentUser);
+      return currentUser;
+    }).catch((error) => {
+      if (Number(error?.status || 0) === 401 || !background) clearSession();
+      return null;
+    }).finally(() => {
+      window.clearTimeout(timeoutId);
+      verifyPromise = null;
+    });
+    return verifyPromise;
   }
 
   async function login(payload) {
@@ -59,6 +121,7 @@ export const useAuthStore = defineStore("auth", () => {
     }
     setAuthToken(result.token);
     user.value = result.user;
+    writeCachedUser(result.user);
     bootstrapped.value = true;
     return result;
   }
@@ -78,6 +141,7 @@ export const useAuthStore = defineStore("auth", () => {
 
   function clearSession() {
     clearAuthToken();
+    clearCachedUser();
     user.value = null;
   }
 
@@ -90,6 +154,7 @@ export const useAuthStore = defineStore("auth", () => {
     login,
     completeWechatLogin,
     applyLoginResult,
+    verifySession,
     bindWechat,
     logout,
     clearSession

@@ -227,6 +227,8 @@ const schemas = {
     field("avg_unit_cost", scalar("number", "Average unit cost.")),
     field("avg_sale_price", scalar("number", "Average realized sale price.")),
     field("avg_profit", scalar("number", "Average estimated profit per sold unit.")),
+    field("estimated_profit_total", scalar("number", "Total estimated profit for sold items.")),
+    field("actual_profit_total", scalar("number", "Total accrued actual profit for sold items.")),
     field("profit_rate", scalar("number", "Average profit ratio.")),
     field("order_count", scalar("number", "Distinct order count.")),
     field("sku_count", scalar("number", "Count of active mapped SKUs.")),
@@ -343,6 +345,36 @@ const schemas = {
     field("warehouse_id", scalar("string", "Optional target warehouse identifier.")),
     field("payload", scalar("object", "Action-specific payload."))
   ], { additionalProperties: false }),
+
+  OzonWarehouseRecord: objectOf("Ozon seller warehouse record.", [
+    field("warehouse_id", scalar("string", "Ozon warehouse identifier."), true),
+    field("name", scalar("string", "Warehouse display name.")),
+    field("status", scalar("string", "Warehouse status.")),
+    field("delivery_schema", scalar("string", "Delivery schema such as fbs or rfbs."))
+  ]),
+
+  OnlineProductWarehousesResponse: objectOf("Warehouses available for a shop.", [
+    field("shop_id", scalar("number", "Shop identifier."), true),
+    field("shop_name", scalar("string", "Shop display name.")),
+    field("warehouses", arrayOf(ref("OzonWarehouseRecord"), "Ozon warehouses."), true)
+  ]),
+
+  OnlineProductBatchStockRequest: objectOf("Bulk stock update for selected online products.", [
+    field("online_product_ids", arrayOf(scalar("number", "Online product identifier."), "Selected online product ids."), true),
+    field("shop_id", scalar("number", "Target shop identifier.")),
+    field("warehouse_id", scalar("string", "Target Ozon warehouse identifier."), true),
+    field("stock", scalar("number", "Stock quantity to set. Defaults to 888."))
+  ], { additionalProperties: false }),
+
+  OnlineProductBatchStockResponse: objectOf("Bulk Ozon stock update result.", [
+    field("ok", scalar("boolean", "Whether the operation succeeded."), true),
+    field("shop_id", scalar("number", "Target shop identifier.")),
+    field("warehouse_id", scalar("string", "Target Ozon warehouse identifier.")),
+    field("stock", scalar("number", "Submitted stock quantity.")),
+    field("requested_count", scalar("number", "Number of selected online products.")),
+    field("target_count", scalar("number", "Number of submitted Ozon stock targets.")),
+    field("skipped", arrayOf(scalar("object", "Skipped online-product summary."), "Skipped rows."))
+  ]),
 
   CreateProductFromOnlineProductRequest: objectOf("Create an ERP product from an online product.", [
     field("online_product_id", scalar("number", "Local online product identifier."), true),
@@ -1088,6 +1120,16 @@ const endpoints = [
       requestBody: body(ref("OnlineProductBindRequest")),
       responses: [response(200, "application/json", ref("MutationOk"))]
     }),
+    endpoint("GET", "/api/online-products/warehouses", "Return Ozon warehouses for a shop.", {
+      auth: "authenticated",
+      query: [param("shop_id", scalar("number", "Shop identifier."), true)],
+      responses: [response(200, "application/json", ref("OnlineProductWarehousesResponse"))]
+    }),
+    endpoint("POST", "/api/online-products/batch-stock", "Update Ozon stock for selected online products.", {
+      auth: "authenticated",
+      requestBody: body(ref("OnlineProductBatchStockRequest")),
+      responses: [response(200, "application/json", ref("OnlineProductBatchStockResponse"))]
+    }),
     endpoint("POST", "/api/online-products/action", "Record and execute a managed online-product action.", {
       auth: "authenticated",
       requestBody: body(ref("OnlineProductActionRequest")),
@@ -1168,6 +1210,19 @@ const endpoints = [
       auth: "authenticated",
       requestBody: body(ref("InventoryMovementRequest")),
       responses: [response(200, "application/json", ref("MutationOk"))]
+    }),
+    endpoint("GET", "/api/inventory/stock-debts", "Return products whose posted inventory ledger is negative.", {
+      auth: "authenticated",
+      queryParams: [
+        param("search", scalar("string", "Optional product/SKU search text.")),
+        param("limit", scalar("number", "Maximum rows to return."))
+      ],
+      responses: [response(200, "application/json", scalar("object", "Stock-debt rows."))]
+    }),
+    endpoint("POST", "/api/inventory/stock-debts/adjust", "Create a positive manual adjustment to clear historical negative stock debt.", {
+      auth: "authenticated",
+      requestBody: body(scalar("object", "Stock-debt adjustment request.")),
+      responses: [response(200, "application/json", scalar("object", "Adjustment result."))]
     }),
     endpoint("GET", "/api/inbound-records", "Return inbound record rows.", {
       auth: "authenticated",

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const toolDir = path.dirname(fileURLToPath(import.meta.url));
 const configPath = path.resolve(toolDir, "release.config.json");
+let activeOperation = null;
 
 function resolveFromTool(value) {
   return path.resolve(toolDir, value || "");
@@ -18,10 +19,16 @@ async function readConfig() {
     projectDir: resolveFromTool(raw.projectDir || "../.."),
     deployOutputDir: resolveFromTool(raw.deployOutputDir || "../../dist/deploy"),
     releasesDir: resolveFromTool(raw.releasesDir || "../../dist/releases"),
+    previewDir: resolveFromTool(raw.previewDir || "../../dist/preview"),
     liveDir: resolveFromTool(raw.liveDir || "../../dist/live"),
     currentFile: resolveFromTool(raw.currentFile || "../../dist/releases/current.json"),
+    previewFile: resolveFromTool(raw.previewFile || "../../dist/releases/preview.json"),
     publishedFile: resolveFromTool(raw.publishedFile || "../../dist/releases/published-releases.json"),
     port: Number(process.env.RELEASE_TOOL_PORT || raw.port || 8791),
+    previewPort: Number(process.env.OZON_RELEASE_PREVIEW_PORT || raw.previewPort || 8788),
+    previewHealthUrl: process.env.OZON_RELEASE_PREVIEW_HEALTH_URL || raw.previewHealthUrl || `http://127.0.0.1:${Number(process.env.OZON_RELEASE_PREVIEW_PORT || raw.previewPort || 8788)}/admin.html`,
+    localHealthUrl: process.env.OZON_RELEASE_LOCAL_HEALTH_URL || raw.localHealthUrl || "http://127.0.0.1:8787/admin.html",
+    publicHealthUrl: process.env.OZON_RELEASE_PUBLIC_HEALTH_URL || raw.publicHealthUrl || "https://erp.hjt888.xyz/admin.html",
     channel: process.env.OZON_RELEASE_CHANNEL || raw.channel || "production"
   };
 }
@@ -60,6 +67,56 @@ function shanghaiReleaseVersion(date = new Date()) {
 
 function cleanVersion(input) {
   return String(input || "").trim().replace(/[^0-9A-Za-z._-]/g, "-").replace(/-+/g, "-");
+}
+
+function publicOperation(operation) {
+  if (!operation) return null;
+  return {
+    type: operation.type,
+    label: operation.label,
+    startedAt: operation.startedAt,
+    updatedAt: operation.updatedAt,
+    currentStep: operation.currentStep,
+    steps: operation.steps,
+    logs: operation.logs
+  };
+}
+
+async function runExclusiveOperation(type, label, action) {
+  if (activeOperation) {
+    const error = new Error(`${activeOperation.label}正在进行中，请等待完成后再操作。`);
+    error.status = 409;
+    error.validation = {
+      detail: `开始时间：${activeOperation.startedAt}\n为了避免重复打包或覆盖发布目录，当前任务完成前会阻止新的发布操作。`
+    };
+    throw error;
+  }
+  activeOperation = {
+    type,
+    label,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    currentStep: "",
+    steps: [],
+    logs: []
+  };
+  try {
+    return await action();
+  } finally {
+    activeOperation = null;
+  }
+}
+
+function updateOperationStep(title, status = "running", detail = "") {
+  if (!activeOperation) return;
+  const now = new Date().toISOString();
+  activeOperation.updatedAt = now;
+  activeOperation.currentStep = title;
+  const step = { title, status, detail, at: now };
+  activeOperation.steps = [...activeOperation.steps, step].slice(-24);
+  if (detail) {
+    activeOperation.logs = [...activeOperation.logs, `${title}: ${detail}`].slice(-80);
+  }
 }
 
 async function pathExists(target) {
@@ -161,17 +218,20 @@ async function copyDir(source, target) {
 
 async function replaceDirFromRelease(source, target) {
   await fs.mkdir(path.dirname(target), { recursive: true });
-  const stamp = Date.now().toString(36);
-  const staging = `${target}.next-${stamp}`;
-  const previous = `${target}.previous-${stamp}`;
-  await fs.rm(staging, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
-  await fs.rm(previous, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
-  await fs.cp(source, staging, { recursive: true });
-  if (await pathExists(target)) {
-    await fs.rename(target, previous);
+  await fs.mkdir(target, { recursive: true });
+  const parent = path.dirname(target);
+  const base = path.basename(target);
+  const leftovers = await fs.readdir(parent, { withFileTypes: true }).catch(() => []);
+  for (const entry of leftovers) {
+    if (entry.name.startsWith(`${base}.next-`) || entry.name.startsWith(`${base}.previous-`)) {
+      await fs.rm(path.join(parent, entry.name), { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+    }
   }
-  await fs.rename(staging, target);
-  await fs.rm(previous, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+  const entries = await fs.readdir(target, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    await fs.rm(path.join(target, entry.name), { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+  }
+  await fs.cp(source, target, { recursive: true, force: true });
 }
 
 function runCommand(command, cwd, env) {
@@ -205,6 +265,61 @@ function runCommand(command, cwd, env) {
   });
 }
 
+async function wait(ms) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function stopErpServerOnPort(config, port) {
+  const command = `powershell -NoProfile -ExecutionPolicy Bypass -Command "$pids = Get-NetTCPConnection -LocalPort ${Number(port)} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique; if ($pids) { Write-Host ('Stopping ERP listener on ${Number(port)}: ' + ($pids -join ', ')); foreach ($pidValue in $pids) { try { Stop-Process -Id $pidValue -Force -ErrorAction Stop } catch {} }; Start-Sleep -Seconds 2 } else { Write-Host 'No ERP listener on ${Number(port)}' }"`;
+  return await runCommand(command, config.projectDir, process.env);
+}
+
+async function httpCheck(url, options = {}) {
+  const timeoutMs = options.timeoutMs || 8000;
+  const attempts = options.attempts || 1;
+  const delayMs = options.delayMs || 1000;
+  let lastError = null;
+  for (let index = 1; index <= attempts; index += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        redirect: "manual",
+        signal: controller.signal,
+        headers: {
+          "Cache-Control": "no-cache"
+        }
+      });
+      clearTimeout(timeout);
+      if (response.status >= 200 && response.status < 500) {
+        return { ok: true, status: response.status, url, attempt: index };
+      }
+      lastError = new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      clearTimeout(timeout);
+      lastError = error;
+    }
+    if (index < attempts) await wait(delayMs);
+  }
+  const message = lastError?.name === "AbortError" ? "请求超时" : (lastError?.message || "请求失败");
+  return { ok: false, status: 0, url, error: message, attempt: attempts };
+}
+
+async function restartErpServer(config, deployDir, port) {
+  const script = path.join(config.projectDir, "deploy", "windows-host", "start-erp-server.ps1");
+  const command = `powershell -NoProfile -ExecutionPolicy Bypass -File "${script}" -DeployDir "${deployDir}" -Port ${Number(port)}`;
+  return await runCommand(command, config.projectDir, process.env);
+}
+
+async function restartLiveServer(config) {
+  return await restartErpServer(config, config.liveDir, 8787);
+}
+
+async function restartPreviewServer(config) {
+  return await restartErpServer(config, config.previewDir, config.previewPort);
+}
+
 async function listReleases(config) {
   await fs.mkdir(config.releasesDir, { recursive: true });
   const entries = await fs.readdir(config.releasesDir, { withFileTypes: true });
@@ -226,9 +341,60 @@ async function listReleases(config) {
   return rows;
 }
 
+async function applyPreviewRelease(config, version, releaseDir) {
+  updateOperationStep("停止本地试运行服务", "running", `127.0.0.1:${config.previewPort}`);
+  const stopLog = await stopErpServerOnPort(config, config.previewPort);
+  updateOperationStep("本地试运行服务已停止", "done", stopLog.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-3).join(" | "));
+
+  updateOperationStep("应用到本地试运行目录", "running", config.previewDir);
+  await replaceDirFromRelease(releaseDir, config.previewDir);
+  updateOperationStep("本地试运行目录已更新", "done", config.previewDir);
+
+  const previewedAt = new Date().toISOString();
+  await fs.mkdir(path.dirname(config.previewFile), { recursive: true });
+  await fs.writeFile(
+    config.previewFile,
+    `${JSON.stringify({
+      version,
+      channel: config.channel,
+      previewedAt,
+      releaseDir,
+      previewDir: config.previewDir,
+      previewPort: config.previewPort,
+      previewUrl: `http://127.0.0.1:${config.previewPort}/`
+    }, null, 2)}\n`,
+    "utf8"
+  );
+
+  updateOperationStep("重启本地试运行服务", "running", `127.0.0.1:${config.previewPort}`);
+  const restartLog = await restartPreviewServer(config);
+  updateOperationStep("本地试运行服务已重启", "done", restartLog.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-4).join(" | "));
+
+  updateOperationStep("检测本地试运行访问", "running", config.previewHealthUrl);
+  const previewHealth = await httpCheck(config.previewHealthUrl, { attempts: 5, delayMs: 1200, timeoutMs: 8000 });
+  if (!previewHealth.ok) {
+    const error = new Error("本地试运行服务健康检查失败");
+    error.status = 502;
+    error.validation = { detail: `${config.previewHealthUrl}\n${previewHealth.error}` };
+    updateOperationStep("本地试运行访问失败", "failed", error.validation.detail);
+    throw error;
+  }
+  updateOperationStep("本地试运行访问正常", "done", `HTTP ${previewHealth.status}`);
+
+  return {
+    version,
+    previewedAt,
+    previewDir: config.previewDir,
+    previewPort: config.previewPort,
+    previewUrl: `http://127.0.0.1:${config.previewPort}/`,
+    previewHealth
+  };
+}
+
 async function state() {
   const config = await readConfig();
   const current = await readJsonFile(config.currentFile, {});
+  const preview = await readJsonFile(config.previewFile, {});
   const releases = await listReleases(config);
   const storedPublishedRecords = await readPublishedRecords(config);
   const publishedRecords = current.version && !storedPublishedRecords.some((record) => record.version === current.version)
@@ -256,10 +422,16 @@ async function state() {
       port: config.port,
       projectDir: config.projectDir,
       releasesDir: config.releasesDir,
+      previewDir: config.previewDir,
       liveDir: config.liveDir,
       currentFile: config.currentFile,
+      previewFile: config.previewFile,
       publishedFile: config.publishedFile,
       buildCommand: config.buildCommand,
+      previewPort: config.previewPort,
+      previewHealthUrl: config.previewHealthUrl,
+      localHealthUrl: config.localHealthUrl,
+      publicHealthUrl: config.publicHealthUrl,
       channel: config.channel
     },
     workspace,
@@ -270,16 +442,26 @@ async function state() {
       liveDir: config.liveDir,
       releaseDir: current.releaseDir || ""
     },
+    preview: {
+      version: preview.version || "",
+      previewedAt: preview.previewedAt || "",
+      previewDir: preview.previewDir || config.previewDir,
+      releaseDir: preview.releaseDir || "",
+      previewPort: preview.previewPort || config.previewPort,
+      previewUrl: preview.previewUrl || `http://127.0.0.1:${config.previewPort}/`
+    },
     hasUnbuiltChanges,
     nextVersion: workspace.nextVersion,
     current,
+    activeOperation: publicOperation(activeOperation),
     live: liveManifest,
     releases: releases.map((release, index) => ({
       ...release,
       isLatest: index === 0,
       isPublished: publishedMap.has(release.version),
       publishedAt: publishedMap.get(release.version)?.publishedAt || "",
-      isOnline: Boolean(onlineVersion && release.version === onlineVersion)
+      isOnline: Boolean(onlineVersion && release.version === onlineVersion),
+      isPreview: Boolean(preview.version && release.version === preview.version)
     })),
     publishedReleases: publishedRecords.map((record) => ({
       ...record,
@@ -293,6 +475,7 @@ async function buildRelease(body = {}) {
   const config = await readConfig();
   const version = cleanVersion(body.version) || shanghaiReleaseVersion();
   const releaseDir = path.join(config.releasesDir, version);
+  updateOperationStep("准备生成版本包", "running", version);
   if (await pathExists(releaseDir) && !body.overwrite) {
     const error = new Error(`Release ${version} already exists.`);
     error.status = 409;
@@ -311,14 +494,18 @@ async function buildRelease(body = {}) {
   };
   let buildLog = "";
   try {
+    updateOperationStep("执行打包命令", "running", config.buildCommand || "npm run package:deploy");
     buildLog = await runCommand(config.buildCommand || "npm run package:deploy", config.projectDir, env);
+    updateOperationStep("打包命令完成", "done", version);
   } catch (error) {
+    updateOperationStep("打包命令失败", "failed", error.detail || error.message);
     error.status = 500;
     error.validation = {
       detail: error.detail || ""
     };
     throw error;
   }
+  updateOperationStep("复制版本包到发布历史", "running", releaseDir);
   await copyDir(config.deployOutputDir, releaseDir);
 
   const deployManifestPath = path.join(releaseDir, "deploy-manifest.json");
@@ -334,16 +521,19 @@ async function buildRelease(body = {}) {
     }, null, 2)}\n`,
     "utf8"
   );
+  updateOperationStep("版本包生成完成", "done", releaseDir);
   return {
     version,
     releaseDir,
+    steps: publicOperation(activeOperation)?.steps || [],
     log: buildLog.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-12)
   };
 }
 
-async function publishRelease(body = {}) {
+async function previewRelease(body = {}) {
   const config = await readConfig();
   const version = cleanVersion(body.version);
+  updateOperationStep("准备部署到本地试运行", "running", version || "");
   if (!version) {
     const error = new Error("version is required");
     error.status = 400;
@@ -355,7 +545,38 @@ async function publishRelease(body = {}) {
     error.status = 404;
     throw error;
   }
+  const preview = await applyPreviewRelease(config, version, releaseDir);
+  updateOperationStep("本地试运行部署完成", "done", preview.previewUrl);
+  return {
+    version,
+    releaseDir,
+    preview,
+    steps: publicOperation(activeOperation)?.steps || []
+  };
+}
+
+async function publishRelease(body = {}) {
+  const config = await readConfig();
+  const version = cleanVersion(body.version);
+  updateOperationStep("准备上架版本", "running", version || "");
+  if (!version) {
+    const error = new Error("version is required");
+    error.status = 400;
+    throw error;
+  }
+  const releaseDir = path.join(config.releasesDir, version);
+  if (!await pathExists(releaseDir)) {
+    const error = new Error(`Release ${version} does not exist.`);
+    error.status = 404;
+    throw error;
+  }
+  updateOperationStep("停止正式本地服务", "running", "127.0.0.1:8787");
+  const stopLog = await stopErpServerOnPort(config, 8787);
+  updateOperationStep("正式本地服务已停止", "done", stopLog.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-3).join(" | "));
+
+  updateOperationStep("复制版本到线上目录", "running", config.liveDir);
   await replaceDirFromRelease(releaseDir, config.liveDir);
+  updateOperationStep("线上目录已更新", "done", config.liveDir);
   const publishedAt = new Date().toISOString();
   const manifest = await readJsonFile(path.join(releaseDir, "deploy-manifest.json"), {});
   const releaseStatus = {
@@ -369,6 +590,7 @@ async function publishRelease(body = {}) {
       channel: config.channel
     }
   };
+  updateOperationStep("写入发布记录", "running", version);
   await fs.mkdir(path.dirname(config.currentFile), { recursive: true });
   await fs.writeFile(
     config.currentFile,
@@ -393,11 +615,51 @@ async function publishRelease(body = {}) {
     `${JSON.stringify(releaseStatus, null, 2)}\n`,
     "utf8"
   );
-  return { version, liveDir: config.liveDir };
+  updateOperationStep("重启线上本地服务", "running", "127.0.0.1:8787");
+  try {
+    const restartLog = await restartLiveServer(config);
+    updateOperationStep("线上本地服务已重启", "done", restartLog.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-4).join(" | "));
+  } catch (error) {
+    updateOperationStep("线上本地服务重启失败", "failed", error.detail || error.message);
+    error.status = 500;
+    error.validation = { detail: error.detail || error.message };
+    throw error;
+  }
+
+  updateOperationStep("检测本地访问", "running", config.localHealthUrl);
+  const localHealth = await httpCheck(config.localHealthUrl, { attempts: 5, delayMs: 1200, timeoutMs: 8000 });
+  if (!localHealth.ok) {
+    const error = new Error("发布后本地服务健康检查失败");
+    error.status = 502;
+    error.validation = { detail: `${config.localHealthUrl}\n${localHealth.error}` };
+    updateOperationStep("本地访问失败", "failed", error.validation.detail);
+    throw error;
+  }
+  updateOperationStep("本地访问正常", "done", `HTTP ${localHealth.status}`);
+
+  updateOperationStep("检测线上域名", "running", config.publicHealthUrl);
+  const publicHealth = await httpCheck(config.publicHealthUrl, { attempts: 4, delayMs: 1500, timeoutMs: 10000 });
+  if (!publicHealth.ok) {
+    const error = new Error("发布后线上域名健康检查失败");
+    error.status = 502;
+    error.validation = { detail: `${config.publicHealthUrl}\n${publicHealth.error}` };
+    updateOperationStep("线上域名访问失败", "failed", error.validation.detail);
+    throw error;
+  }
+  updateOperationStep("线上域名访问正常", "done", `HTTP ${publicHealth.status}`);
+  updateOperationStep("发布完成", "done", version);
+  return {
+    version,
+    liveDir: config.liveDir,
+    localHealth,
+    publicHealth,
+    steps: publicOperation(activeOperation)?.steps || []
+  };
 }
 
 async function buildAndPublishRelease(body = {}) {
   const built = await buildRelease(body);
+  await previewRelease({ version: built.version });
   const published = await publishRelease({
     ...body,
     version: built.version
@@ -410,9 +672,22 @@ async function buildAndPublishRelease(body = {}) {
 
 async function handleApi(req, res, pathname) {
   if (req.method === "GET" && pathname === "/api/state") return json(res, await state());
-  if (req.method === "POST" && pathname === "/api/build") return json(res, await buildRelease(await readBody(req)));
-  if (req.method === "POST" && pathname === "/api/publish") return json(res, await publishRelease(await readBody(req)));
-  if (req.method === "POST" && pathname === "/api/build-and-publish") return json(res, await buildAndPublishRelease(await readBody(req)));
+  if (req.method === "POST" && pathname === "/api/build") {
+    const body = await readBody(req);
+    return json(res, await runExclusiveOperation("build", "版本包生成", () => buildRelease(body)));
+  }
+  if (req.method === "POST" && pathname === "/api/preview") {
+    const body = await readBody(req);
+    return json(res, await runExclusiveOperation("preview", "本地试运行部署", () => previewRelease(body)));
+  }
+  if (req.method === "POST" && pathname === "/api/publish") {
+    const body = await readBody(req);
+    return json(res, await runExclusiveOperation("publish", "版本发布", () => publishRelease(body)));
+  }
+  if (req.method === "POST" && pathname === "/api/build-and-publish") {
+    const body = await readBody(req);
+    return json(res, await runExclusiveOperation("build-and-publish", "一键生成并发布", () => buildAndPublishRelease(body)));
+  }
   return json(res, { error: "Not found" }, 404);
 }
 
@@ -1373,15 +1648,26 @@ function pageV3() {
       }
       body { margin: 0; background: var(--bg); color: var(--text); font-family: Arial, "Microsoft YaHei", sans-serif; }
       button, input, textarea { font: inherit; }
-      .shell { width: min(1480px, calc(100vw - 40px)); margin: 0 auto; padding: 22px 0 32px; }
-      header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
-      h1 { margin: 0; font-size: 28px; letter-spacing: 0; }
-      .subtitle { margin-top: 6px; color: var(--muted); font-size: 14px; }
+      .shell { width: min(1480px, calc(100vw - 40px)); margin: 0 auto; padding: 20px 0 32px; }
+      header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+      h1 { margin: 0; font-size: 26px; letter-spacing: 0; }
+      .subtitle { margin-top: 5px; color: var(--muted); font-size: 13px; }
+      .env-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+      .env-card { min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255, 255, 255, 0.76); }
+      .env-card span { color: var(--muted); font-size: 12px; font-weight: 800; }
+      .env-card strong { display: block; margin-top: 5px; overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+      .env-card small { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.35; }
+      .env-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+      .env-card { min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: 0 10px 24px rgba(20, 38, 68, 0.05); }
+      .env-card span { display: block; color: var(--muted); font-size: 12px; font-weight: 800; }
+      .env-card strong { display: block; margin-top: 5px; overflow: hidden; color: var(--text); font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+      .env-card small { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.35; }
       button { height: 34px; border: 1px solid var(--line-strong); border-radius: 7px; padding: 0 13px; background: #fff; color: #27384f; font-weight: 700; cursor: pointer; }
       button:hover { border-color: rgba(63, 95, 137, 0.55); background: #f7faff; }
       button.primary { border-color: var(--primary); background: var(--primary); color: #fff; }
       button.primary:hover { border-color: var(--primary-dark); background: var(--primary-dark); }
-      button:disabled { opacity: 0.55; cursor: wait; }
+      button:disabled { opacity: 0.56; cursor: not-allowed; }
+      .is-busy button:disabled { cursor: wait; }
       .dashboard-grid { display: grid; grid-template-columns: 360px minmax(0, 1.35fr) minmax(0, 1.1fr); gap: 12px; align-items: stretch; }
       .card { min-width: 0; min-height: 520px; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); }
       .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 14px 16px 11px; border-bottom: 1px solid #edf1f7; }
@@ -1567,6 +1853,9 @@ function pageV3() {
 
       function renderSummary() {
         const selected = releaseByVersion(selectedVersion) || state?.pending || null;
+        const preview = state?.preview || {};
+        const previewUrl = preview.previewUrl || ("http://127.0.0.1:" + (state?.config?.previewPort || 8788) + "/");
+        const previewLine = preview.version ? (preview.version + "  " + previewUrl) : "\u6682\u672a\u542f\u52a8";
         pendingSummary.innerHTML =
           '<div class="summary">' +
             '<div class="summary-title"><strong class="' + (selected ? "" : "empty") + '">' + htmlEscape(selected?.version || "还没有生成版本包") + '</strong><span class="badge ' + (selected ? "success" : "warning") + '">' + (selected ? "已选择" : "未生成") + '</span></div>' +
@@ -1654,7 +1943,8 @@ function pageV3() {
           const result = await api("/api/build", { method: "POST", body: JSON.stringify({ notes: notesInput.value }) });
           selectedVersion = result.version;
           notesInput.value = "";
-          setStatus("版本包生成完成：" + result.version, result.log || []);
+          const previewText = result.preview?.previewUrl ? ("\u672c\u5730\u8bd5\u8fd0\u884c\uff1a" + result.preview.previewUrl) : "";
+          setStatus("\u7248\u672c\u5305\u5df2\u751f\u6210\u5e76\u542f\u52a8\u672c\u5730\u8bd5\u8fd0\u884c\uff1a" + result.version, [previewText].concat(result.steps?.length ? result.steps.map(function (step) { return step.title + (step.detail ? " - " + step.detail : ""); }) : (result.log || [])).filter(Boolean));
           await refresh();
         } catch (error) {
           setStatus(error.message, error.detail);
@@ -1719,17 +2009,17 @@ function pageV4() {
       }
       body { margin: 0; background: var(--bg); color: var(--text); font-family: Arial, "Microsoft YaHei", sans-serif; }
       button, input, textarea { font: inherit; }
-      .shell { width: min(1480px, calc(100vw - 40px)); margin: 0 auto; padding: 22px 0 32px; }
+      .shell { width: min(1680px, calc(100vw - 40px)); margin: 0 auto; padding: 22px 0 28px; }
       header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
-      h1 { margin: 0; font-size: 28px; letter-spacing: 0; }
-      .subtitle { margin-top: 6px; color: var(--muted); font-size: 14px; }
+      h1 { margin: 0; font-size: 28px; letter-spacing: 0; cursor: help; }
+      .subtitle { margin-top: 6px; color: var(--muted); font-size: 13px; }
       button { height: 34px; border: 1px solid var(--line-strong); border-radius: 7px; padding: 0 13px; background: #fff; color: #27384f; font-weight: 700; cursor: pointer; }
       button:hover { border-color: rgba(63, 95, 137, 0.55); background: #f7faff; }
       button.primary { border-color: var(--primary); background: var(--primary); color: #fff; }
       button.primary:hover { border-color: var(--primary-dark); background: var(--primary-dark); }
       button:disabled { opacity: 0.55; cursor: wait; }
-      .dashboard-grid { display: grid; grid-template-columns: 360px minmax(0, 1.35fr) minmax(0, 1.1fr); gap: 12px; align-items: stretch; }
-      .card { min-width: 0; min-height: 520px; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); }
+      .dashboard-grid { display: grid; grid-template-columns: 340px minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: stretch; }
+      .card { min-width: 0; min-height: 500px; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); }
       .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 14px 16px 11px; border-bottom: 1px solid #edf1f7; }
       .card-head h2 { margin: 0; font-size: 17px; }
       .card-head small { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.35; }
@@ -1743,7 +2033,13 @@ function pageV4() {
       .version-preview span { color: var(--muted); font-size: 12px; font-weight: 800; }
       .version-preview strong { min-width: 0; overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
       .build-actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
-      .status-text { max-height: 92px; min-height: 44px; margin-top: auto; overflow: auto; padding: 10px; border-radius: 8px; background: #101828; color: #d0d5dd; font-size: 12px; line-height: 1.45; white-space: pre-wrap; }
+      .status-box { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); padding: 12px; }
+      .status-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; color: var(--muted); font-size: 12px; font-weight: 800; }
+      .spinner { display: none; width: 16px; height: 16px; border: 2px solid #d6deea; border-top-color: var(--primary); border-radius: 999px; animation: spin 0.8s linear infinite; }
+      .is-busy .spinner { display: inline-block; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .status-text { max-height: 150px; min-height: 92px; overflow: auto; padding: 10px; border-radius: 8px; background: #101828; color: #d0d5dd; font-size: 12px; line-height: 1.45; white-space: pre-wrap; }
+      .operation-panel { display: none; }
       .summary { display: grid; gap: 7px; margin-bottom: 12px; padding: 11px; border: 1px solid #e5ebf4; border-radius: 8px; background: #fbfcfe; }
       .summary-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
       .summary-title strong { min-width: 0; overflow: hidden; font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
@@ -1764,11 +2060,18 @@ function pageV4() {
       .col-version { width: 154px; }
       .col-time { width: 118px; }
       .col-status { width: 86px; }
-      .col-action { width: 78px; text-align: right; }
+      .col-action { width: 106px; text-align: right; }
+      .online-table .col-action button { white-space: nowrap; }
       .mono { overflow: hidden; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
       .path-cell { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
       .table-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; }
       .selected-note { min-width: 0; color: var(--muted); font-size: 12px; }
+      .online-package-block { display: grid; gap: 12px; }
+      .history-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 12px 0 8px; color: var(--muted); font-size: 12px; font-weight: 800; }
+      .online-action { display: grid; gap: 8px; margin-bottom: 12px; padding: 11px; border: 1px solid #e3eaf4; border-radius: 8px; background: #fbfcfe; }
+      .online-action strong { font-size: 14px; }
+      .online-action span { color: var(--muted); font-size: 12px; line-height: 1.4; }
+      .online-action button { justify-self: start; }
       .empty { display: grid; place-items: center; min-height: 220px; border: 1px dashed #cfd8e6; border-radius: 8px; background: #fbfcfe; color: var(--muted); text-align: center; }
       .empty strong { display: block; margin-bottom: 6px; color: var(--text); }
       @media (max-width: 1180px) {
@@ -1782,43 +2085,52 @@ function pageV4() {
     <div class="shell">
       <header>
         <div>
-          <h1>ERP 发布控制台</h1>
-          <div class="subtitle">先生成本地待发布版本包，再从本地版本包中选择一个发布到线上；右侧只显示真正发布过的线上版本。</div>
+          <h1 title="流程：左侧生成版本包；中间部署到 8788 本地验证；右侧把 8788 正在运行的版本上架到 8787 和线上。">ERP 发布控制台</h1>
+          <div class="subtitle">生成包 → 部署 8788 → 部署线上</div>
         </div>
         <button id="refreshBtn">刷新状态</button>
       </header>
       <div class="dashboard-grid">
         <section class="card build-card">
-          <div class="card-head"><div><h2>生成版本包</h2><small>这里只负责编译当前本地代码。</small></div></div>
+          <div class="card-head"><div><h2>生成版本包</h2><small>只编译当前本地代码，不影响 8788 和线上。</small></div></div>
           <div class="card-body">
-            <p class="hint">填写更新说明后点击生成。版本号自动生成，生成完成后进入中间的本地待发布列表。</p>
+            <p class="hint">生成完成后，中间栏会出现新版本；再手动部署到 8788 验证。</p>
             <div class="version-preview"><span>即将生成版本号</span><strong id="versionPreview">-</strong></div>
             <label>更新说明 <textarea id="notesInput" placeholder="例如：修复订单同步问题，优化库存页面"></textarea></label>
             <div class="build-actions"><button class="primary" id="buildBtn">生成版本包</button></div>
-            <div class="status-text" id="statusText">准备就绪。</div>
           </div>
         </section>
         <section class="card">
-          <div class="card-head"><div><h2>本地待发布版本包</h2><small>最新版本排在最上面；状态显示已发布或未发布。</small></div></div>
-          <div class="card-body"><div id="pendingSummary"></div><div id="releaseTable"></div></div>
+          <div class="card-head"><div><h2>本地版本包</h2><small>选中版本后，右下角部署到 8788。</small></div></div>
+          <div class="card-body"><div id="middleOperationPanel" class="operation-panel"></div><div id="pendingSummary"></div><div id="releaseTable"></div></div>
         </section>
         <section class="card">
-          <div class="card-head"><div><h2>线上版本</h2><small>只有发布成功后的版本才会进入这里。</small></div></div>
-          <div class="card-body"><div id="onlineSummary"></div><div id="onlineList"></div></div>
+          <div class="card-head"><div><h2>线上版本包</h2><small>选择版本包后，直接部署到 8787 和线上域名。</small></div></div>
+          <div class="card-body"><div id="rightOperationPanel" class="operation-panel"></div><div id="onlineSummary"></div><div id="onlineAction"></div><div id="onlineList"></div></div>
         </section>
+      </div>
+      <div class="status-box">
+        <div class="status-head"><span>运行日志</span><i class="spinner"></i></div>
+        <div class="status-text" id="statusText">准备就绪。</div>
       </div>
     </div>
     <script>
       const versionPreview = document.getElementById("versionPreview");
       const notesInput = document.getElementById("notesInput");
       const statusText = document.getElementById("statusText");
+      const middleOperationPanel = document.getElementById("middleOperationPanel");
+      const rightOperationPanel = document.getElementById("rightOperationPanel");
       const pendingSummary = document.getElementById("pendingSummary");
       const releaseTable = document.getElementById("releaseTable");
       const onlineSummary = document.getElementById("onlineSummary");
+      const onlineAction = document.getElementById("onlineAction");
       const onlineList = document.getElementById("onlineList");
-      const buttons = Array.from(document.querySelectorAll("button"));
+      const buildBtn = document.getElementById("buildBtn");
+      const buildBtnText = "生成版本包";
+      let localBusy = false;
       let state = null;
       let selectedVersion = "";
+      let selectedOnlineVersion = "";
       function htmlEscape(value) {
         return String(value ?? "").replace(/[&<>"']/g, function (char) {
           return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char];
@@ -1830,7 +2142,37 @@ function pageV4() {
         if (!Number.isFinite(date.getTime())) return value;
         return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(date);
       }
-      function setBusy(busy) { buttons.forEach(function (button) { button.disabled = busy; }); }
+      function operationText(operation) {
+        if (!operation) return "";
+        const target = operation.type === "publish" || operation.type === "build-and-publish" ? "上架到 8787 / dist/live / 线上域名" : "部署到 8788 / dist/preview";
+        const lines = [
+          operation.label + "\u6b63\u5728\u8fdb\u884c\u4e2d\uff0c\u5f53\u524d\u9636\u6bb5\uff1a" + (operation.currentStep || "\u51c6\u5907\u4e2d"),
+          "\u76ee\u6807\uff1a" + target,
+          "\u5f00\u59cb\uff1a" + timeText(operation.startedAt),
+          "\u66f4\u65b0\uff1a" + timeText(operation.updatedAt)
+        ];
+        (operation.steps || []).slice(-8).forEach(function (step) {
+          const mark = step.status === "done" ? "\u2713" : (step.status === "failed" ? "\u00d7" : "...");
+          lines.push(mark + " " + timeText(step.at) + " " + step.title + (step.detail ? " - " + step.detail : ""));
+        });
+        return lines.join("\\n");
+      }
+      function setOperationPanels(text) {
+        [middleOperationPanel, rightOperationPanel].forEach(function (panel) {
+          panel.textContent = text || "";
+          panel.classList.toggle("is-visible", Boolean(text));
+        });
+      }
+      function setBusy(busy, label) {
+        localBusy = busy;
+        document.body.classList.toggle("is-busy", busy);
+        Array.from(document.querySelectorAll("button, input, textarea")).forEach(function (control) {
+          const permanentlyLocked = control.dataset.locked === "true";
+          control.disabled = busy ? true : permanentlyLocked;
+          control.title = busy ? "正在部署或上架中，请稍后再选择。" : "";
+        });
+        if (buildBtn) buildBtn.textContent = busy ? (label || "\u5904\u7406\u4e2d...") : buildBtnText;
+      }
       function setStatus(message, detail) {
         const more = Array.isArray(detail) ? detail.join("\\n") : String(detail || "");
         statusText.textContent = more ? String(message || "") + "\\n" + more : String(message || "");
@@ -1848,17 +2190,59 @@ function pageV4() {
       function releaseByVersion(version) {
         return (state?.releases || []).find(function (release) { return release.version === version; }) || null;
       }
+      function startProgressPolling() {
+        window.clearInterval(window.__releaseProgressTimer);
+        window.__releaseProgressTimer = window.setInterval(function () {
+          api("/api/state").then(render).catch(function () {});
+        }, 900);
+      }
+      function stopProgressPolling() {
+        window.clearInterval(window.__releaseProgressTimer);
+        window.__releaseProgressTimer = 0;
+      }
       function renderSummary() {
         const selected = releaseByVersion(selectedVersion) || state?.pending || null;
+        const selectedIsPreview = Boolean(selected?.version && selected.version === state?.preview?.version);
+        const selectedBadge = selected
+          ? selected.isPublished
+            ? "已发布"
+            : selectedIsPreview
+              ? "8788试运行中"
+              : "未试运行"
+          : "未生成";
+        const selectedBadgeClass = selected?.isPublished ? "online" : (selectedIsPreview ? "success" : "warning");
         pendingSummary.innerHTML = '<div class="summary">' +
-          '<div class="summary-title"><strong class="' + (selected ? "" : "empty") + '">' + htmlEscape(selected?.version || "还没有生成版本包") + '</strong><span class="badge ' + (selected?.isPublished ? "online" : "warning") + '">' + (selected ? (selected.isPublished ? "已发布" : "未发布") : "未生成") + '</span></div>' +
+          '<div class="summary-title"><strong class="' + (selected ? "" : "empty") + '">' + htmlEscape(selected?.version || "还没有生成版本包") + '</strong><span class="badge ' + selectedBadgeClass + '">' + selectedBadge + '</span></div>' +
           '<div class="meta-row"><span>创建时间</span><strong>' + htmlEscape(timeText(selected?.builtAt)) + '</strong></div>' +
           '<div class="meta-row"><span>包目录</span><strong title="' + htmlEscape(selected?.path || "-") + '">' + htmlEscape(selected?.path || "-") + '</strong></div>' +
         '</div>';
+        const preview = state?.preview || {};
+        const previewUrl = preview.previewUrl || ("http://127.0.0.1:" + (state?.config?.previewPort || 8788) + "/");
+        const previewLine = preview.version ? (preview.version + "  " + previewUrl) : "\u6682\u672a\u542f\u52a8";
+        pendingSummary.innerHTML = pendingSummary.innerHTML.slice(0, -6) +
+          '<div class="meta-row"><span>8788当前</span><strong title="' + htmlEscape(previewLine) + '">' + htmlEscape(previewLine) + '</strong></div></div>';
+        const onlineSelected = releaseByVersion(selectedOnlineVersion) || (state.publishedReleases || []).find(function (release) { return release.version === selectedOnlineVersion; }) || null;
+        const onlineIsPreview = Boolean(onlineSelected?.version && onlineSelected.version === state?.preview?.version);
+        const onlineIsPublished = Boolean(onlineSelected?.isPublished || (state.publishedReleases || []).some(function (release) { return release.version === onlineSelected?.version; }));
+        const onlineBadge = onlineSelected
+          ? onlineSelected.isOnline || onlineSelected.version === state?.online?.version
+            ? "当前线上"
+            : onlineIsPublished
+              ? "已发布"
+              : onlineIsPreview
+                ? "8788试运行中"
+                : "未上架"
+          : "暂无版本";
+        const onlineBadgeClass = onlineBadge === "8788试运行中" || onlineBadge === "当前线上" ? "success" : (onlineBadge === "已发布" ? "online" : "warning");
+        const onlineRecord = (state.publishedReleases || []).find(function (release) { return release.version === onlineSelected?.version; }) || null;
+        const onlinePath = onlineRecord?.liveDir || onlineSelected?.path || onlineSelected?.liveDir || onlineSelected?.releaseDir || "-";
+        const onlineTime = onlineRecord?.publishedAt || onlineSelected?.publishedAt || onlineSelected?.previewedAt || onlineSelected?.builtAt || (onlineSelected?.version === state?.preview?.version ? state?.preview?.previewedAt : "");
         onlineSummary.innerHTML = '<div class="summary">' +
-          '<div class="summary-title"><strong class="' + (state?.online?.version ? "" : "empty") + '">' + htmlEscape(state?.online?.version || "尚未发布版本") + '</strong><span class="badge ' + (state?.online?.version ? "online" : "warning") + '">' + (state?.online?.version ? "当前线上" : "未发布") + '</span></div>' +
-          '<div class="meta-row"><span>发布时间</span><strong>' + htmlEscape(timeText(state?.online?.publishedAt)) + '</strong></div>' +
-          '<div class="meta-row"><span>线上目录</span><strong title="' + htmlEscape(state?.online?.liveDir || "-") + '">' + htmlEscape(state?.online?.liveDir || "-") + '</strong></div>' +
+          '<div class="summary-title"><strong class="' + (onlineSelected ? "" : "empty") + '">' + htmlEscape(onlineSelected?.version || "暂无线上版本包") + '</strong><span class="badge ' + onlineBadgeClass + '">' + onlineBadge + '</span></div>' +
+          '<div class="meta-row"><span>时间</span><strong>' + htmlEscape(timeText(onlineTime)) + '</strong></div>' +
+          '<div class="meta-row"><span>包目录</span><strong title="' + htmlEscape(onlinePath) + '">' + htmlEscape(onlinePath) + '</strong></div>' +
+          '<div class="meta-row"><span>线上当前</span><strong title="' + htmlEscape(state?.online?.version || "-") + '">' + htmlEscape(state?.online?.version || "-") + '</strong></div>' +
+          '<div class="meta-row"><span>线上域名</span><strong title="' + htmlEscape(state?.config?.publicHealthUrl || "-") + '">' + htmlEscape(state?.config?.publicHealthUrl || "-") + '</strong></div>' +
         '</div>';
       }
       function renderReleaseTable() {
@@ -1866,81 +2250,179 @@ function pageV4() {
           releaseTable.innerHTML = '<div class="empty"><div><strong>\u6682\u65e0\u7248\u672c\u5305</strong><span>\u8bf7\u5148\u5728\u5de6\u4fa7\u751f\u6210\u7248\u672c\u5305\u3002</span></div></div>';
           return;
         }
+        const locked = localBusy || Boolean(state.activeOperation);
+        const selectedRelease = releaseByVersion(selectedVersion);
+        const selectedIsPreview = Boolean(selectedRelease?.version && selectedRelease.version === state?.preview?.version);
         releaseTable.innerHTML = '<div class="table-wrap"><table><thead><tr><th class="col-pick">\u9009\u62e9</th><th class="col-version">\u7248\u672c\u53f7</th><th class="col-time">\u521b\u5efa\u65f6\u95f4</th><th class="col-status">\u72b6\u6001</th><th>\u5305\u76ee\u5f55</th><th class="col-action">\u64cd\u4f5c</th></tr></thead><tbody>' +
           state.releases.map(function (release) {
             const checked = release.version === selectedVersion;
+            const disabled = locked;
+            const permanentLock = "";
+            const isPreview = release.version === state?.preview?.version;
+            const rowStatus = release.isOnline ? "\u5f53\u524d\u7ebf\u4e0a" : (release.isPublished ? "\u5df2\u4e0a\u67b6" : (isPreview ? "8788试运行中" : "未试运行"));
             return '<tr class="' + (checked ? "selected" : "") + '" data-version="' + htmlEscape(release.version) + '">' +
-              '<td class="col-pick"><input type="radio" name="releaseVersion" value="' + htmlEscape(release.version) + '"' + (checked ? " checked" : "") + ' /></td>' +
+              '<td class="col-pick"><input type="radio" name="releaseVersion" value="' + htmlEscape(release.version) + '"' + permanentLock + (checked ? " checked" : "") + (disabled ? " disabled" : "") + ' /></td>' +
               '<td><div class="mono" title="' + htmlEscape(release.version) + '">' + htmlEscape(release.version) + '</div></td>' +
               '<td>' + htmlEscape(timeText(release.builtAt)) + '</td>' +
-              '<td><span class="badge ' + (release.isPublished ? "online" : "warning") + '">' + (release.isPublished ? "\u5df2\u53d1\u5e03" : "\u672a\u53d1\u5e03") + '</span></td>' +
+              '<td><span class="badge ' + (release.isOnline || isPreview ? "success" : (release.isPublished ? "online" : "warning")) + '">' + rowStatus + '</span></td>' +
               '<td><div class="path-cell" title="' + htmlEscape(release.path) + '">' + htmlEscape(release.path) + '</div></td>' +
-              '<td class="col-action"><button data-publish-version="' + htmlEscape(release.version) + '">\u4e0a\u67b6</button></td>' +
+              '<td class="col-action"><button data-preview-version="' + htmlEscape(release.version) + '"' + permanentLock + (disabled ? " disabled" : "") + '>' + (isPreview ? "重启8788" : "部署8788") + '</button></td>' +
             '</tr>';
           }).join("") + '</tbody></table></div>' +
-          '<div class="table-actions"><div class="selected-note">\u9009\u4e2d\u7248\u672c\uff1a' + htmlEscape(selectedVersion || "-") + '</div><button class="primary" id="publishSelectedBtn">\u4e0a\u67b6\u9009\u4e2d\u7248\u672c</button></div>';
+          '<div class="table-actions"><div class="selected-note">选中版本：' + htmlEscape(selectedVersion || "暂无可部署版本") + (selectedVersion && !selectedIsPreview ? "（点击表格右侧“部署8788”后，可在右栏上架）" : "") + '</div></div>';
         releaseTable.querySelectorAll('input[name="releaseVersion"]').forEach(function (input) {
           input.addEventListener("change", function () {
+            if (input.disabled) return;
             selectedVersion = input.value;
             render(state);
           });
         });
         releaseTable.querySelectorAll('tr[data-version]').forEach(function (row) {
           row.addEventListener("click", function (event) {
-            if (event.target.closest("button")) return;
+            if (locked || event.target.closest("button")) return;
             selectedVersion = row.dataset.version;
             render(state);
           });
         });
-        releaseTable.querySelectorAll('button[data-publish-version]').forEach(function (button) {
+        releaseTable.querySelectorAll('button[data-preview-version]').forEach(function (button) {
           button.addEventListener("click", function () {
-            selectedVersion = button.dataset.publishVersion;
-            publish(selectedVersion);
+            if (button.disabled) return;
+            selectedVersion = button.dataset.previewVersion;
+            deployPreview(selectedVersion);
           });
         });
-        document.getElementById("publishSelectedBtn").addEventListener("click", function () { publish(selectedVersion); });
+      }
+
+      function renderOnlineAction() {
+        const locked = localBusy || Boolean(state.activeOperation);
+        const rows = state.releases.map(function (release) {
+          const published = (state.publishedReleases || []).find(function (record) { return record.version === release.version; }) || null;
+          const isOnline = Boolean(release.isOnline || state?.online?.version === release.version);
+          return {
+            version: release.version,
+            time: isOnline ? (published?.publishedAt || release.publishedAt || release.builtAt) : release.builtAt,
+            path: release.path || published?.releaseDir || "-",
+            isPreview: Boolean(release.isPreview || state?.preview?.version === release.version),
+            isPublished: Boolean(release.isPublished || published),
+            isOnline
+          };
+        });
+        if (!rows.length) {
+          onlineAction.innerHTML = '<div class="empty"><div><strong>暂无线上版本包</strong><span>请先在左侧生成版本包。</span></div></div>';
+          return;
+        }
+        onlineAction.innerHTML = '<div class="table-wrap online-table"><table><thead><tr><th class="col-pick">选择</th><th class="col-version">版本号</th><th class="col-time">创建/发布时间</th><th class="col-status">状态</th><th>包目录</th><th class="col-action">操作</th></tr></thead><tbody>' +
+          rows.map(function (release) {
+            const checked = release.version === selectedOnlineVersion;
+            const canPublish = Boolean(!locked);
+            const disabled = locked;
+            const status = release.isOnline ? "当前线上" : (release.isPublished ? "已发布" : (release.isPreview ? "8788试运行中" : "未上架"));
+            const badgeClass = release.isOnline ? "success" : (release.isPublished ? "online" : "warning");
+            const actionText = release.isOnline ? "重新部署" : "部署线上";
+            return '<tr class="' + (checked ? "selected" : "") + '" data-online-version="' + htmlEscape(release.version) + '" data-online-publishable="' + (canPublish ? "1" : "0") + '">' +
+              '<td class="col-pick"><input type="radio" name="onlineVersion" value="' + htmlEscape(release.version) + '"' + (checked ? " checked" : "") + (disabled ? " disabled" : "") + ' /></td>' +
+              '<td><div class="mono" title="' + htmlEscape(release.version) + '">' + htmlEscape(release.version) + '</div></td>' +
+              '<td>' + htmlEscape(timeText(release.time)) + '</td>' +
+              '<td><span class="badge ' + badgeClass + '">' + status + '</span></td>' +
+              '<td><div class="path-cell" title="' + htmlEscape(release.path) + '">' + htmlEscape(release.path) + '</div></td>' +
+              '<td class="col-action"><button data-publish-version="' + htmlEscape(release.version) + '"' + (canPublish ? "" : ' data-locked="true" disabled') + '>' + actionText + '</button></td>' +
+            '</tr>';
+          }).join("") + '</tbody></table></div>' +
+          '<div class="table-actions"><div class="selected-note">选中版本：' + htmlEscape(selectedOnlineVersion || "暂无可部署版本") + '</div></div>';
+        onlineAction.querySelectorAll('input[name="onlineVersion"]').forEach(function (input) {
+          input.addEventListener("change", function () {
+            if (input.disabled) return;
+            selectedOnlineVersion = input.value;
+            render(state);
+          });
+        });
+        onlineAction.querySelectorAll('tr[data-online-version]').forEach(function (row) {
+          row.addEventListener("click", function () {
+            if (locked || row.dataset.onlinePublishable !== "1") return;
+            selectedOnlineVersion = row.dataset.onlineVersion;
+            render(state);
+          });
+        });
+        onlineAction.querySelectorAll('button[data-publish-version]').forEach(function (button) {
+          button.addEventListener("click", function () {
+            if (button.disabled) return;
+            selectedOnlineVersion = button.dataset.publishVersion;
+            publish(selectedOnlineVersion);
+          });
+        });
       }
 
       function renderOnlineList() {
-        const rows = state.publishedReleases || [];
-        if (!rows.length) {
-          onlineList.innerHTML = '<div class="empty"><div><strong>暂无线上版本</strong><span>只有发布成功后的版本才会出现在这里。</span></div></div>';
-          return;
-        }
-        onlineList.innerHTML = '<div class="table-wrap"><table><thead><tr><th class="col-version">版本号</th><th class="col-time">发布时间</th><th class="col-status">状态</th><th>线上目录</th></tr></thead><tbody>' +
-          rows.map(function (release) {
-            const isOnline = release.isOnline;
-            return '<tr class="' + (isOnline ? "selected" : "") + '">' +
-              '<td><div class="mono" title="' + htmlEscape(release.version) + '">' + htmlEscape(release.version) + '</div></td>' +
-              '<td>' + htmlEscape(timeText(release.publishedAt)) + '</td>' +
-              '<td><span class="badge ' + (isOnline ? "success" : "online") + '">' + (isOnline ? "当前线上" : "已发布") + '</span></td>' +
-              '<td><div class="path-cell" title="' + htmlEscape(release.liveDir || "-") + '">' + htmlEscape(release.liveDir || "-") + '</div></td>' +
-            '</tr>';
-          }).join("") + '</tbody></table></div>';
+        onlineList.innerHTML = "";
       }
       function render(next) {
         state = next;
         const hasSelected = state.releases.some(function (release) { return release.version === selectedVersion; });
-        if (!hasSelected) selectedVersion = state.pending?.version || state.releases[0]?.version || "";
+        if (!hasSelected) selectedVersion = state?.online?.version || state?.preview?.version || state.releases[0]?.version || "";
+        const onlineHasSelected = state.releases.some(function (release) { return release.version === selectedOnlineVersion; });
+        if (!onlineHasSelected) selectedOnlineVersion = state?.online?.version || state.releases[0]?.version || "";
         versionPreview.textContent = state.workspace.nextVersion || "-";
         renderSummary();
         renderReleaseTable();
+        renderOnlineAction();
         renderOnlineList();
+        if (state.activeOperation) {
+          setBusy(true, state.activeOperation.type === "publish" ? "部署中..." : "\u751f\u6210\u4e2d...");
+          const text = operationText(state.activeOperation);
+          setOperationPanels(text);
+          setStatus(text, "\u4e3a\u907f\u514d\u91cd\u590d\u6253\u5305\u6216\u8986\u76d6\u53d1\u5e03\u76ee\u5f55\uff0c\u5f53\u524d\u4efb\u52a1\u7ed3\u675f\u524d\u6309\u94ae\u5df2\u9501\u5b9a\u3002");
+        } else if (!localBusy) {
+          setOperationPanels("");
+          setBusy(false);
+        }
       }
       async function refresh() { render(await api("/api/state")); }
       async function build() {
-        setBusy(true);
+        if (localBusy || state?.activeOperation) {
+          setStatus(operationText(state?.activeOperation) || "\u5df2\u6709\u4efb\u52a1\u5728\u8fdb\u884c\u4e2d\uff0c\u8bf7\u7a0d\u7b49\u3002");
+          return;
+        }
+        setBusy(true, "生成中...");
+        startProgressPolling();
         try {
           setStatus("正在生成版本包...");
           const result = await api("/api/build", { method: "POST", body: JSON.stringify({ notes: notesInput.value }) });
           selectedVersion = result.version;
           notesInput.value = "";
-          setStatus("版本包生成完成：" + result.version, result.log || []);
+          setStatus("版本包生成完成：" + result.version, ["下一步：在中间栏点击“部署到8788”进行本地验证。"].concat(result.steps?.length ? result.steps.map(function (step) { return step.title + (step.detail ? " - " + step.detail : ""); }) : (result.log || [])));
           await refresh();
         } catch (error) {
           setStatus(error.message, error.detail);
         } finally {
+          stopProgressPolling();
           setBusy(false);
+          refresh().catch(function () {});
+        }
+      }
+      async function deployPreview(version) {
+        if (!version) {
+          setStatus("请先选择一个版本包。");
+          return;
+        }
+        const release = releaseByVersion(version);
+        if (localBusy || state?.activeOperation) {
+          setStatus(operationText(state?.activeOperation) || "\u5df2\u6709\u4efb\u52a1\u5728\u8fdb\u884c\u4e2d\uff0c\u8bf7\u7a0d\u7b49\u3002");
+          return;
+        }
+        setBusy(true, "部署8788中...");
+        startProgressPolling();
+        try {
+          setStatus("正在把选中版本部署到 8788 本地试运行：" + version);
+          const result = await api("/api/preview", { method: "POST", body: JSON.stringify({ version }) });
+          const previewUrl = result.preview?.previewUrl || ("http://127.0.0.1:" + (state?.config?.previewPort || 8788) + "/");
+          setStatus("8788 当前运行版本已替换为：" + result.version, ["试运行地址：" + previewUrl, "确认页面无误后，可在右侧部署到线上。"].concat(result.steps?.map(function (step) { return step.title + (step.detail ? " - " + step.detail : ""); }) || []));
+          await refresh();
+        } catch (error) {
+          setStatus(error.message, error.detail);
+        } finally {
+          stopProgressPolling();
+          setBusy(false);
+          refresh().catch(function () {});
         }
       }
       async function publish(version) {
@@ -1949,24 +2431,35 @@ function pageV4() {
           return;
         }
         const current = state?.online?.version || "\u5c1a\u672a\u53d1\u5e03\u7248\u672c";
-        if (!window.confirm("\u786e\u8ba4\u4e0a\u67b6\u7248\u672c " + version + "\uff0c\u66ff\u6362\u5f53\u524d\u7ebf\u4e0a\u7248\u672c " + current + " \u5417\uff1f")) return;
-        setBusy(true);
+        const sameVersion = state?.online?.version === version;
+        const confirmText = sameVersion
+          ? "确认重新部署当前线上版本 " + version + " 吗？\\n\\n本操作会重新复制到 dist/live，重启 8787，并检查线上域名。"
+          : "确认部署版本 " + version + "，替换当前线上版本 " + current + " 吗？\\n\\n本操作会复制到 dist/live，重启 8787，并检查线上域名。";
+        if (!window.confirm(confirmText)) return;
+        if (localBusy || state?.activeOperation) {
+          setStatus(operationText(state?.activeOperation) || "\u5df2\u6709\u4efb\u52a1\u5728\u8fdb\u884c\u4e2d\uff0c\u8bf7\u7a0d\u7b49\u3002");
+          return;
+        }
+        setBusy(true, "部署中...");
+        startProgressPolling();
         try {
-          setStatus("\u6b63\u5728\u4e0a\u67b6\u7248\u672c " + version + "...");
+          setStatus("正在部署到 8787 和线上域名：" + version, "已锁定版本选择和部署按钮，请等待健康检查完成。");
           const result = await api("/api/publish", { method: "POST", body: JSON.stringify({ version, message: notesInput.value }) });
-          setStatus("\u4e0a\u67b6\u6210\u529f\uff0c\u5f53\u524d\u7ebf\u4e0a\u7248\u672c\uff1a" + result.version);
+          setStatus("部署成功，8787 当前运行版本和线上版本已替换为：" + result.version, result.steps?.map(function (step) { return step.title + (step.detail ? " - " + step.detail : ""); }) || []);
           await refresh();
         } catch (error) {
-          setStatus(error.message);
+          setStatus(error.message, error.detail);
         } finally {
+          stopProgressPolling();
           setBusy(false);
+          refresh().catch(function () {});
         }
       }
       document.getElementById("refreshBtn").addEventListener("click", refresh);
       document.getElementById("buildBtn").addEventListener("click", build);
       refresh().catch(function (error) { setStatus(error.message); });
       window.setInterval(function () {
-        if (!buttons.some(function (button) { return button.disabled; })) refresh().catch(function () {});
+        refresh().catch(function () {});
       }, 5000);
     </script>
   </body>

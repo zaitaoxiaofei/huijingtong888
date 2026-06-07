@@ -46,6 +46,7 @@ import {
   SITE_ACCESS_LOGIN_PATH,
   SITE_ACCESS_LOGOUT_PATH,
   SITE_ACCESS_SESSION_PATH,
+  SITE_ACCESS_API_LOGIN_PATH,
   clearRateLimit,
   consumeRateLimit,
   createSiteAccessCookieValue,
@@ -73,9 +74,32 @@ const imageProxyCacheDir = path.resolve("runtime", "image-proxy-cache");
 const imageProxyInflight = new Map();
 const IMAGE_PROXY_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const IMAGE_PROXY_BROWSER_CACHE_SECONDS = 24 * 60 * 60;
-const IMAGE_PROXY_PLACEHOLDER_CACHE_SECONDS = 10 * 60;
-const IMAGE_PROXY_FETCH_TIMEOUT_MS = 3000;
+const IMAGE_PROXY_FETCH_TIMEOUT_MS = 12000;
 const IMAGE_PROXY_MAX_CACHE_BYTES = 8 * 1024 * 1024;
+
+async function resolveDownloadArtifactPath(filename) {
+  const normalized = String(filename || "").trim();
+  if (!normalized) {
+    const error = new Error("Missing download filename");
+    error.statusCode = 400;
+    throw error;
+  }
+  const candidates = Array.from(new Set([
+    path.resolve("dist", normalized),
+    path.resolve("..", normalized),
+    path.resolve("..", "dist", normalized),
+    path.resolve(normalized)
+  ]));
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {}
+  }
+  const error = new Error(`Download artifact not found for ${normalized}. Checked: ${candidates.join(" | ")}`);
+  error.statusCode = 404;
+  throw error;
+}
 
 const routeModules = {
   ...createCatalogRoutes({ services, readJson }),
@@ -126,12 +150,17 @@ const routes = {
   "GET /api/inventory": () => services.inventory(),
   "GET /api/stock-alerts": (req) => services.stockAlerts(req.query || {}),
   "GET /api/fbp-opportunities": (req) => services.fbpOpportunities(req.query || {}),
+  "GET /api/fbp-transfer-records": (req) => services.fbpTransferRecords(req.query || {}),
   "GET /api/stock-warehouse-rules": () => services.stockWarehouseRules(),
   "GET /api/erp/inventory-current": () => services.inventoryCurrent(),
   "GET /api/erp/raw-orders": () => services.rawOzonOrders(),
   "GET /api/erp/profit-items": () => services.profitItems(),
   "GET /api/erp/order-exceptions": () => services.orderExceptions(),
   "POST /api/exchange-rate": async (req) => services.updateExchangeRate(await readJson(req)),
+  "POST /api/fbp-transfer-records": async (req) => services.createFbpTransferRecord(await readJson(req), req._session?.personId),
+  "POST /api/fbp-transfer-records/confirm-received": async (req) => services.confirmFbpTransferReceived(await readJson(req), req._session?.personId),
+  "POST /api/fbp-transfer-records/pdf-preview": async (req) => services.previewFbpSupplyPdf(await readJson(req)),
+  "POST /api/fbp-transfer-records/pdf-import": async (req) => services.importFbpSupplyPdf(await readJson(req), req._session?.personId),
   "POST /api/pricing/cel-fbs": async (req) => calculateCelFbsPricing(await readJson(req)),
 };
 
@@ -202,7 +231,7 @@ const BACKGROUND_ADVERTISING_TODAY_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(co
 const BACKGROUND_ADVERTISING_TODAY_SYNC_TIMEOUT_MS = Math.max(1, Number(config.backgroundAdvertisingTodaySyncTimeoutMinutes || 12)) * 60 * 1000;
 const BACKGROUND_OZON_STOCK_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundOzonStockSyncIntervalMinutes || 30)) * 60 * 1000;
 const BACKGROUND_OZON_STOCK_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundOzonStockSyncInitialDelaySeconds || 480)) * 1000;
-const OZON_ACTION_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+const OZON_ACTION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
 const scheduledJobDefinitions = [
   {
@@ -322,14 +351,29 @@ const scheduledJobDefinitions = [
     maxCatchupRuns: 1
   },
   {
+    key: "listing_publish_record_sync",
+    name: "上架记录状态和评分同步",
+    category: "listing",
+    priority: "high",
+    intervalMinutes: 10,
+    initialDelaySeconds: 300,
+    catchupEnabled: true,
+    maxCatchupRuns: 1,
+    config: {
+      limit: 30,
+      minAgeMinutes: 5,
+      maxAgeDays: 7
+    }
+  },
+  {
     key: "ozon_action_cleanup",
     name: "Ozon 营销动作清理",
     category: "maintenance",
     priority: "normal",
     intervalMinutes: Math.round(OZON_ACTION_CLEANUP_INTERVAL_MS / 60000),
     initialDelaySeconds: 5,
-    catchupEnabled: false,
-    maxCatchupRuns: 0
+    catchupEnabled: true,
+    maxCatchupRuns: 1
   }
 ];
 
@@ -344,6 +388,7 @@ const scheduledJobHandlers = {
   advertising_today_sync: runBackgroundAdvertisingTodaySync,
   ozon_stock_sync: runBackgroundOzonStockSync,
   ozon_category_sync: runBackgroundOzonCategorySync,
+  listing_publish_record_sync: (job) => services.autoSyncListingPublishRecords(job?.config || {}),
   ozon_action_cleanup: runOzonActionCleanupSweep
 };
 
@@ -355,6 +400,24 @@ const scheduledJobScheduler = new ScheduledJobScheduler({
 
 async function handleSiteAccess(req, res, url) {
   const nextPath = normalizeNextPath(url.searchParams.get("next") || "/");
+
+  if (req.method === "POST" && url.pathname === SITE_ACCESS_API_LOGIN_PATH) {
+    const body = await readJson(req);
+    const rateKey = `gate:${getClientIp(req)}`;
+    const rate = consumeRateLimit(rateKey);
+    if (!rate.allowed) {
+      return json(res, { error: "尝试次数过多，请稍后再试" }, 429);
+    }
+    if ((body.password || body.access_password || "") !== getSiteAccessPassword()) {
+      return json(res, { error: "访问口令错误，请重试" }, 401);
+    }
+    clearRateLimit(rateKey);
+    return json(res, {
+      ok: true,
+      token: createSiteAccessCookieValue(),
+      expires_in: getSiteAccessCookieMaxAgeSeconds()
+    });
+  }
 
   if (req.method === "GET" && url.pathname === SITE_ACCESS_LOGOUT_PATH) {
     clearCookie(res, getSiteAccessCookieName(), {
@@ -415,15 +478,20 @@ async function handleRestRoute(req, res, url, parts) {
 
   if (req.method === "GET" && parts[0] === "downloads" && (
     /^ozon-baodan-erp-plugin-[0-9][0-9A-Za-z.-]*\.rar$/.test(parts[1] || "") ||
+    /^ozon-seller-analytics-plugin-[0-9][0-9A-Za-z.-]*\.rar$/.test(parts[1] || "") ||
     parts[1] === "ozon-baodan-erp-plugin.rar" ||
-    parts[1] === "ozon-erp-collector-plugin.rar"
+    parts[1] === "ozon-erp-collector-plugin.rar" ||
+    parts[1] === "ozon-seller-analytics-plugin.rar"
   )) {
     let filename = parts[1];
     if (filename === "ozon-baodan-erp-plugin.rar" || filename === "ozon-erp-collector-plugin.rar") {
       const status = globalUpdateStatus();
       filename = status.plugin.package_name || `ozon-baodan-erp-plugin-${status.plugin.version}.rar`;
+    } else if (filename === "ozon-seller-analytics-plugin.rar") {
+      const status = globalUpdateStatus();
+      filename = status.analytics_plugin.package_name || `ozon-seller-analytics-plugin-${status.analytics_plugin.version}.rar`;
     }
-    const filePath = path.resolve("..", filename);
+    const filePath = await resolveDownloadArtifactPath(filename);
     const buffer = await fs.readFile(filePath);
     writeHead(res, 200, {
       "Content-Type": "application/vnd.rar",
@@ -480,6 +548,7 @@ async function handleRestRoute(req, res, url, parts) {
   const catalogRestHandled = await handleCatalogRestRoute({
     req,
     res,
+    url,
     parts,
     services,
     readJson,
@@ -815,11 +884,48 @@ async function handleLocalPluginRoute(req, res, parts) {
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
 
+  if (parts[2] === "seller-analytics" && parts[3] === "plugin-status" && req.method === "POST") {
+    const body = await readJson(req);
+    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
+    const result = await services.sellerAnalyticsSavePluginStatus(body || {}, tenantId);
+    return localPluginJson(req, res, { success: true, data: result, ...result });
+  }
+
+  if (parts[2] === "seller-analytics" && parts[3] === "plugin-prepare" && parts[4] === "next" && req.method === "GET") {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim() || "admin";
+    const request = await services.sellerAnalyticsClaimPluginPrepare(tenantId);
+    return localPluginJson(req, res, { success: true, data: request, request });
+  }
+
+  if (parts[2] === "seller-analytics" && parts[3] === "plugin-prepare" && parts[4] === "result" && req.method === "POST") {
+    const body = await readJson(req);
+    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
+    const result = await services.sellerAnalyticsFinishPluginPrepare(body || {}, tenantId);
+    return localPluginJson(req, res, { success: true, data: result, ...result });
+  }
+
+  if (parts[2] === "seller-analytics" && parts[3] === "auth-probe" && req.method === "POST") {
+    const body = await readJson(req);
+    const result = await services.sellerAnalyticsProbeAuth(body || {});
+    return localPluginJson(req, res, { success: true, data: result, ...result });
+  }
+
+  if (parts[2] === "seller-analytics" && parts[3] === "auth-bindings" && req.method === "POST") {
+    const body = await readJson(req);
+    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
+    const result = await services.sellerAnalyticsBindAuth(body || {}, tenantId);
+    return localPluginJson(req, res, { success: true, data: result, ...result });
+  }
+
   if (parts[2] === "seller-analytics" && parts[3] === "collect-runs" && parts[4] === "next" && req.method === "GET") {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim() || "admin";
     const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || 6), 20));
-    const requests = await services.sellerAnalyticsNextCollectRequests(tenantId, limit);
+    const requests = await services.sellerAnalyticsNextCollectRequests(tenantId, limit, {
+      store_id: url.searchParams.get("store_id") || url.searchParams.get("storeId") || "",
+      company_id: url.searchParams.get("company_id") || url.searchParams.get("companyId") || ""
+    });
     return localPluginJson(req, res, { success: true, data: requests, requests });
   }
 
@@ -890,7 +996,7 @@ function sendImagePlaceholder(res) {
   writeHead(res, 200, {
     "Content-Type": "image/svg+xml; charset=utf-8",
     "Content-Length": buffer.length,
-    "Cache-Control": `public, max-age=${IMAGE_PROXY_PLACEHOLDER_CACHE_SECONDS}`,
+    "Cache-Control": "no-store, must-revalidate",
     "X-Image-Proxy-Cache": "PLACEHOLDER"
   });
   return res.end(buffer);
@@ -958,8 +1064,10 @@ async function fetchRemoteImagePayload(target) {
     const upstream = await fetch(target, {
       signal: controller.signal,
       headers: {
-        "User-Agent": "ozon-erp-image-proxy/1.0",
-        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Referer": "https://www.ozon.ru/",
+        "Origin": "https://www.ozon.ru"
       }
     });
     if (!upstream.ok) return null;
@@ -1044,7 +1152,7 @@ const server = http.createServer(async (req, res) => {
       return serveStatic(url.pathname, req, res);
     }
 
-    if (url.pathname === SITE_ACCESS_SESSION_PATH || url.pathname === SITE_ACCESS_LOGIN_PATH || url.pathname === SITE_ACCESS_LOGOUT_PATH) {
+    if (url.pathname === SITE_ACCESS_SESSION_PATH || url.pathname === SITE_ACCESS_LOGIN_PATH || url.pathname === SITE_ACCESS_LOGOUT_PATH || url.pathname === SITE_ACCESS_API_LOGIN_PATH) {
       if (await handleSiteAccess(req, res, url)) return;
     }
 

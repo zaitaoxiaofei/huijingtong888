@@ -71,7 +71,9 @@ const indexDefinitions = [
   ["ozon_stock_snapshots", "idx_ozon_stock_sku_synced_desc", "CREATE INDEX idx_ozon_stock_sku_synced_desc ON ozon_stock_snapshots (shop_id, ozon_sku, stock_type, synced_at DESC)"],
   ["order_items", "idx_order_items_sku_order_qty", "CREATE INDEX idx_order_items_sku_order_qty ON order_items (ozon_sku, order_id, quantity)"],
   ["orders", "idx_orders_status_stage_shop_ordered", "CREATE INDEX idx_orders_status_stage_shop_ordered ON orders (status, tracking_stage, shop_id, ordered_at)"],
-  ["ozon_orders_raw", "idx_raw_orders_store_posting_id", "CREATE INDEX idx_raw_orders_store_posting_id ON ozon_orders_raw (store_id, posting_number, id)"]
+  ["ozon_orders_raw", "idx_raw_orders_store_posting_id", "CREATE INDEX idx_raw_orders_store_posting_id ON ozon_orders_raw (store_id, posting_number, id)"],
+  ["online_products", "idx_online_products_shop_sku", "CREATE INDEX idx_online_products_shop_sku ON online_products (shop_id, ozon_sku)"],
+  ["order_item_procurement_marks", "idx_order_item_procurement_marks_item_status", "CREATE INDEX idx_order_item_procurement_marks_item_status ON order_item_procurement_marks (order_item_id, status)"]
 ];
 
 async function indexExists(tableName, indexName) {

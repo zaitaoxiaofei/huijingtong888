@@ -31,21 +31,31 @@ import {
 } from "../services/orders-service.js";
 
 const SHOPS_CACHE_TTL_MS = 5 * 60 * 1000;
+const LOGISTICS_OPTIONS_CACHE_TTL_MS = 10 * 60 * 1000;
+const ORDERS_META_DELAY_MS = 1200;
+const DEFAULT_ORDER_STATUS = "awaiting_packaging";
+const ORDER_STATUS_TAB_PREFERENCE_KEY = "orders.status_tabs";
 let shopsCache = {
   rows: [],
   timestamp: 0
 };
+let logisticsOptionsCache = {
+  rows: [],
+  timestamp: 0
+};
+let ordersMetaTimer = 0;
 
 const STATUS_TABS = [
-  { value: "all", label: "全部订单" },
   { value: "awaiting_packaging", label: "等待备货" },
   { value: "awaiting_deliver", label: "等待发货" },
   { value: "delivering", label: "运输中" },
-  { value: "dispute", label: "有争议" },
   { value: "delivered", label: "已签收" },
   { value: "cancelled", label: "已取消" },
+  { value: "dispute", label: "有争议" },
+  { value: "all", label: "全部订单" },
   { value: "unbound", label: "待绑定库存" }
 ];
+const DEFAULT_STATUS_TAB_ORDER = STATUS_TABS.map((item) => item.value);
 
 const MARK_OPTIONS = [
   { value: "", label: "无标记", color: "none", filterable: false },
@@ -94,7 +104,7 @@ function createDefaultFilters(defaultFrom, defaultTo) {
   return {
     page: 1,
     pageSize: DEFAULT_PAGE_SIZE,
-    status: "all",
+    status: DEFAULT_ORDER_STATUS,
     shopId: "all",
     logisticsMethod: "all",
     dateFrom: defaultFrom,
@@ -159,15 +169,59 @@ export function useOrdersPage() {
   const orderSyncCancelReason = ref("");
   const ordersListAbort = ref(null);
   const ordersMetaAbort = ref(null);
+  const logisticsOptionsAbort = ref(null);
+  const logisticsOptionsPromise = ref(null);
   const ordersLoadToken = ref(0);
+  const statusTabOrder = ref([...DEFAULT_STATUS_TAB_ORDER]);
   const defaultTo = shanghaiDateKey();
   const defaultFrom = shanghaiDateDaysAgo(90);
 
+  function normalizeStatusTabOrder(order = []) {
+    const validValues = new Set(DEFAULT_STATUS_TAB_ORDER);
+    const selected = Array.isArray(order)
+      ? order.map((item) => String(item || "")).filter((item) => validValues.has(item))
+      : [];
+    return [...new Set([...selected, ...DEFAULT_STATUS_TAB_ORDER])];
+  }
+
+  function statusTabMetaMap() {
+    return new Map(STATUS_TABS.map((item) => [item.value, item]));
+  }
+
   function buildStatusTabs(counts = {}, total = 0) {
-    return STATUS_TABS.map((item) => ({
+    const byValue = statusTabMetaMap();
+    return normalizeStatusTabOrder(statusTabOrder.value).map((value) => byValue.get(value)).filter(Boolean).map((item) => ({
       ...item,
       count: Number(counts?.[item.value] || (item.value === "all" ? total || 0 : 0))
     }));
+  }
+
+  function applyStatusTabOrder(order = []) {
+    statusTabOrder.value = normalizeStatusTabOrder(order);
+    vm.statusTabs = buildStatusTabs(vm.meta.counts || {}, Number(vm.meta.total || 0));
+  }
+
+  async function loadStatusTabPreference() {
+    try {
+      const result = await apiClient.get(`/api/user-preferences?${new URLSearchParams({ key: ORDER_STATUS_TAB_PREFERENCE_KEY }).toString()}`, { noCache: true });
+      const order = Array.isArray(result?.value?.order) ? result.value.order : [];
+      applyStatusTabOrder(order);
+      return statusTabOrder.value;
+    } catch (error) {
+      console.warn("load order status tab preference failed", error);
+      applyStatusTabOrder(DEFAULT_STATUS_TAB_ORDER);
+      return statusTabOrder.value;
+    }
+  }
+
+  async function saveStatusTabPreference(order = []) {
+    const normalized = normalizeStatusTabOrder(order);
+    applyStatusTabOrder(normalized);
+    await apiClient.post("/api/user-preferences", {
+      key: ORDER_STATUS_TAB_PREFERENCE_KEY,
+      value: { order: normalized }
+    });
+    return normalized;
   }
 
   function buildOrdersParams(filters = {}, extra = {}) {
@@ -175,7 +229,7 @@ export function useOrdersPage() {
       paged: "1",
       page: String(filters.page || 1),
       pageSize: String(filters.pageSize || DEFAULT_PAGE_SIZE),
-      status: filters.status || "all",
+      status: filters.status || DEFAULT_ORDER_STATUS,
       shopId: filters.shopId || "all",
       logisticsMethod: filters.logisticsMethod || "all",
       dateFrom: filters.dateFrom || "",
@@ -211,7 +265,7 @@ export function useOrdersPage() {
 
   const totalPages = computed(() => Math.max(1, Math.ceil((vm.meta.total || 0) / (vm.filters.pageSize || DEFAULT_PAGE_SIZE))));
   const totalLabel = computed(() => `${vm.meta.total || 0} 条订单`);
-  const activeStatusLabel = computed(() => vm.statusTabs.find((item) => item.value === vm.filters.status)?.label || "全部订单");
+  const activeStatusLabel = computed(() => vm.statusTabs.find((item) => item.value === vm.filters.status)?.label || "等待备货");
 
   function patch(payload = {}) {
     const hasOwn = (key) => Object.prototype.hasOwnProperty.call(payload, key);
@@ -237,7 +291,7 @@ export function useOrdersPage() {
       vm.filters = {
         page: Number(filters.page || 1),
         pageSize: Number(filters.pageSize || DEFAULT_PAGE_SIZE),
-        status: String(filters.status || "all"),
+        status: String(filters.status || DEFAULT_ORDER_STATUS),
         shopId: String(filters.shopId || "all"),
         logisticsMethod: String(filters.logisticsMethod || "all"),
         dateFrom: String(filters.dateFrom || defaultFrom),
@@ -261,6 +315,7 @@ export function useOrdersPage() {
   }
 
   async function loadOrdersMeta(filtersSnapshot, requestToken) {
+    window.clearTimeout(ordersMetaTimer);
     ordersMetaAbort.value?.abort();
     const controller = new AbortController();
     ordersMetaAbort.value = controller;
@@ -273,28 +328,12 @@ export function useOrdersPage() {
       const result = await apiClient.get(`/api/orders?${metaParams.toString()}`, { signal: controller.signal });
       if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
       const counts = result?.counts || {};
-      const total = Number((result?.total ?? vm.meta.total) || 0);
       patch({
-        statusTabs: buildStatusTabs(counts, total),
-        logisticsMethodOptions: Array.isArray(result?.logisticsMethodOptions) && result.logisticsMethodOptions.length > 1
-          ? result.logisticsMethodOptions
-          : DEFAULT_LOGISTICS_METHOD_OPTIONS,
+        statusTabs: buildStatusTabs(counts, Number(counts?.all ?? vm.meta.total ?? 0)),
         meta: {
-          total,
+          total: vm.meta.total,
           counts
         }
-      });
-      const logisticsParams = buildOrdersParams(filtersSnapshot, {
-        includeRows: "0",
-        includeCounts: "0",
-        includeLogisticsOptions: "1"
-      });
-      const logisticsResult = await apiClient.get(`/api/orders?${logisticsParams.toString()}`, { signal: controller.signal });
-      if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
-      patch({
-        logisticsMethodOptions: Array.isArray(logisticsResult?.logisticsMethodOptions) && logisticsResult.logisticsMethodOptions.length > 1
-          ? logisticsResult.logisticsMethodOptions
-          : vm.logisticsMethodOptions
       });
     } catch (error) {
       if (error?.name === "AbortError") return;
@@ -320,17 +359,18 @@ export function useOrdersPage() {
         includeCounts: "0",
         includeLogisticsOptions: "0"
       });
-      const [result, shops] = await Promise.all([
-        apiClient.get(`/api/orders?${params.toString()}`, { signal: controller.signal }),
-        fetchShopsCached()
-      ]);
+      const shopsPromise = fetchShopsCached().catch((error) => {
+        console.warn("fetch shops for orders failed", error);
+        return vm.shops;
+      });
+      const result = await apiClient.get(`/api/orders?${params.toString()}`, { signal: controller.signal });
       if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
 
       const total = Number(result.total || 0);
 
       patch({
         rows: Array.isArray(result.rows) ? result.rows : [],
-        shops: Array.isArray(shops) ? shops : [],
+        shops: vm.shops,
         markOptions: MARK_OPTIONS,
         printViews: PRINT_VIEWS,
         moreActions: MORE_ACTIONS,
@@ -344,7 +384,15 @@ export function useOrdersPage() {
         statusTabs: buildStatusTabs(vm.meta.counts, total),
         meta: { total, counts: vm.meta.counts || {} }
       });
-      void loadOrdersMeta(filtersSnapshot, requestToken);
+      loading.value = false;
+      void shopsPromise.then((shops) => {
+        if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
+        if (Array.isArray(shops)) patch({ shops });
+      });
+      window.clearTimeout(ordersMetaTimer);
+      ordersMetaTimer = window.setTimeout(() => {
+        void loadOrdersMeta(filtersSnapshot, requestToken);
+      }, ORDERS_META_DELAY_MS);
     } catch (error) {
       if (error?.name === "AbortError") return;
       if (error?.status === 401) ElMessage.error("登录已失效，请重新登录");
@@ -539,6 +587,52 @@ export function useOrdersPage() {
     }
   }
 
+  async function loadLogisticsOptions({ force = false } = {}) {
+    if (!force && logisticsOptionsCache.rows.length && Date.now() - logisticsOptionsCache.timestamp < LOGISTICS_OPTIONS_CACHE_TTL_MS) {
+      patch({ logisticsMethodOptions: logisticsOptionsCache.rows });
+      return logisticsOptionsCache.rows;
+    }
+    if (logisticsOptionsPromise.value) return logisticsOptionsPromise.value;
+
+    logisticsOptionsAbort.value?.abort();
+    const controller = new AbortController();
+    logisticsOptionsAbort.value = controller;
+    const filtersSnapshot = { ...vm.filters, logisticsMethod: "all" };
+    const params = buildOrdersParams(filtersSnapshot, {
+      includeRows: "0",
+      includeCounts: "0",
+      includeLogisticsOptions: "1"
+    });
+
+    logisticsOptionsPromise.value = apiClient
+      .get(`/api/orders?${params.toString()}`, { signal: controller.signal })
+      .then((result) => {
+        if (controller.signal.aborted) return vm.logisticsMethodOptions;
+        const rows = Array.isArray(result?.logisticsMethodOptions) && result.logisticsMethodOptions.length > 1
+          ? result.logisticsMethodOptions
+          : DEFAULT_LOGISTICS_METHOD_OPTIONS;
+        logisticsOptionsCache = {
+          rows,
+          timestamp: Date.now()
+        };
+        patch({ logisticsMethodOptions: rows });
+        return rows;
+      })
+      .catch((error) => {
+        if (error?.name === "AbortError") return vm.logisticsMethodOptions;
+        console.warn("loadLogisticsOptions failed", error);
+        return vm.logisticsMethodOptions;
+      })
+      .finally(() => {
+        if (logisticsOptionsAbort.value === controller) {
+          logisticsOptionsAbort.value = null;
+        }
+        logisticsOptionsPromise.value = null;
+      });
+
+    return logisticsOptionsPromise.value;
+  }
+
   function selectedIdsInCurrentRowOrder() {
     const selected = selectedOrderIds.value instanceof Set ? selectedOrderIds.value : new Set();
     const selectedIds = new Set([...selected].map(Number).filter(Boolean));
@@ -559,6 +653,7 @@ export function useOrdersPage() {
     activeStatusLabel,
     patch,
     loadOrders,
+    loadLogisticsOptions,
     submitFilters: async (nextFilters = null) => {
       if (nextFilters && typeof nextFilters === "object") {
         vm.filters = {
@@ -685,6 +780,10 @@ export function useOrdersPage() {
     openCreateProductFromOrder: (orderId, sku) => openCreateProductFromOrder(orderId, sku),
     jumpToStockProduct: (productId) => jumpToStockProduct(productId),
     openProcurement: (productId) => openProcurement(productId),
+    loadStatusTabPreference,
+    saveStatusTabPreference,
+    defaultStatusTabOrder: DEFAULT_STATUS_TAB_ORDER,
+    statusTabOrder,
     defaultFrom,
     defaultTo
   };

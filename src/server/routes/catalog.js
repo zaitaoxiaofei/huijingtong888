@@ -4,6 +4,7 @@ export function createCatalogRoutes({ services, readJson }) {
     "GET /api/products/selection": (req, url) => services.selectionProducts(Object.fromEntries(url.searchParams.entries())),
     "GET /api/products/hidden": (req, url) => services.hiddenProducts(Object.fromEntries(url.searchParams.entries())),
     "GET /api/online-products": (req, url) => services.onlineProducts(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/online-products/warehouses": (req, url) => services.onlineProductWarehouses(Object.fromEntries(url.searchParams.entries())),
     "GET /api/mappings": (req, url) => services.mappings(Object.fromEntries(url.searchParams.entries())),
     "POST /api/products": async (req) => {
       const body = await readJson(req);
@@ -23,18 +24,19 @@ export function createCatalogRoutes({ services, readJson }) {
     "POST /api/products/import-commit": async (req) => services.commitProductCsvImport(await readJson(req)),
     "POST /api/online-products": async (req) => services.createOnlineProduct(await readJson(req)) || { ok: true },
     "POST /api/online-products/bind": async (req) => services.bindOnlineProduct(await readJson(req)) || { ok: true },
+    "POST /api/online-products/batch-stock": async (req) => services.batchUpdateOnlineProductStocks(await readJson(req), req._session?.personId),
     "POST /api/online-products/action": async (req) => services.performOnlineProductAction(await readJson(req), req._session?.personId),
     "POST /api/online-products/create-product": async (req) => services.createProductFromOnlineProduct(await readJson(req))
   };
 }
 
-export async function handleCatalogRestRoute({ req, res, parts, services, readJson, json, notFound, sendProductImage }) {
+export async function handleCatalogRestRoute({ req, res, url, parts, services, readJson, json, notFound, sendProductImage }) {
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "order-profit-details") {
-    return json(res, await services.productOrderProfitDetails(Number(parts[2])));
+    return json(res, await services.productOrderProfitDetails(Number(parts[2]), Object.fromEntries(url.searchParams.entries())));
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "cancel-details") {
-    return json(res, await services.productCancelDetails(Number(parts[2])));
+    return json(res, await services.productCancelDetails(Number(parts[2]), Object.fromEntries(url.searchParams.entries())));
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && /^\d+$/.test(parts[2] || "") && !parts[3]) {
@@ -47,12 +49,17 @@ export async function handleCatalogRestRoute({ req, res, parts, services, readJs
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "products" && parts[2]) {
-    await services.updateProduct(Number(parts[2]), await readJson(req));
-    return json(res, { ok: true });
+    const productId = Number(parts[2]);
+    await services.updateProduct(productId, await readJson(req));
+    return json(res, { ok: true, product: await services.selectionProduct(productId) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "recalculate-profits") {
     return json(res, services.recalculateOrderProfitsForProduct(Number(parts[2])));
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "force-recalculate-profits") {
+    return json(res, await services.forceRecalculateOrderProfitsForProduct(Number(parts[2]), await readJson(req)));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "add-to-inventory") {
@@ -87,6 +94,10 @@ export async function handleCatalogRestRoute({ req, res, parts, services, readJs
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "online-products" && parts[2]) {
     return json(res, await services.updateOnlineProduct(Number(parts[2]), await readJson(req)));
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "online-products" && parts[2] && parts[3] === "edit-draft") {
+    return json(res, await services.onlineProductEditDraft(Number(parts[2])));
   }
 
   return false;

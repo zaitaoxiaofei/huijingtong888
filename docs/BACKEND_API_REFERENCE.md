@@ -182,7 +182,7 @@ One background task execution record.
 | `plannedFor` | `string` | No | Planned execution timestamp. |
 | `startedAt` | `string` | No | Run start timestamp. |
 | `finishedAt` | `string` | No | Run finish timestamp. |
-| `status` | `string` | No | Run status: running, success, failed, or skipped. |
+| `status` | `string` | No | Run status: running, success, partial, failed, or skipped. |
 | `mode` | `string` | No | Run source such as scheduled, manual, or catchup. |
 | `payload` | `object` | No | Schedule payload captured when the run started. |
 | `result` | `object` | No | Handler result payload for successful or skipped runs. |
@@ -527,6 +527,54 @@ Managed Ozon online-product action request.
 | `action_type` | `string` | Yes | Action type such as zero_stock or archive. |
 | `warehouse_id` | `string` | No | Optional target warehouse identifier. |
 | `payload` | `object` | No | Action-specific payload. |
+
+### OzonWarehouseRecord
+
+Ozon seller warehouse record.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `warehouse_id` | `string` | Yes | Ozon warehouse identifier. |
+| `name` | `string` | No | Warehouse display name. |
+| `status` | `string` | No | Warehouse status. |
+| `delivery_schema` | `string` | No | Delivery schema such as fbs or rfbs. |
+
+### OnlineProductWarehousesResponse
+
+Warehouses available for a shop.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `shop_id` | `number` | Yes | Shop identifier. |
+| `shop_name` | `string` | No | Shop display name. |
+| `warehouses` | `array<OzonWarehouseRecord>` | Yes | Ozon warehouses. |
+
+### OnlineProductBatchStockRequest
+
+Bulk stock update for selected online products.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `online_product_ids` | `array<number>` | Yes | Selected online product ids. |
+| `shop_id` | `number` | No | Target shop identifier. |
+| `warehouse_id` | `string` | Yes | Target Ozon warehouse identifier. |
+| `stock` | `number` | No | Stock quantity to set. Defaults to 888. |
+
+### OnlineProductBatchStockResponse
+
+Bulk Ozon stock update result.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ok` | `boolean` | Yes | Whether the operation succeeded. |
+| `shop_id` | `number` | No | Target shop identifier. |
+| `warehouse_id` | `string` | No | Target Ozon warehouse identifier. |
+| `stock` | `number` | No | Submitted stock quantity. |
+| `requested_count` | `number` | No | Number of selected online products. |
+| `target_count` | `number` | No | Number of submitted Ozon stock targets. |
+| `skipped` | `array<object>` | No | Skipped rows. |
 
 ### CreateProductFromOnlineProductRequest
 
@@ -1786,6 +1834,26 @@ Bind an online product to an ERP product and owner.
 - Responses:
   - `200` `application/json` -> `MutationOk`
 
+#### `GET /api/online-products/warehouses`
+
+Return Ozon warehouses for a shop.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `shop_id` (`number`, required): Shop identifier.
+- Responses:
+  - `200` `application/json` -> `OnlineProductWarehousesResponse`
+
+#### `POST /api/online-products/batch-stock`
+
+Update Ozon stock for selected online products.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `OnlineProductBatchStockRequest`
+- Responses:
+  - `200` `application/json` -> `OnlineProductBatchStockResponse`
+
 #### `POST /api/online-products/action`
 
 Record and execute a managed online-product action.
@@ -1945,6 +2013,24 @@ Create a manual inventory movement row.
   - Schema: `InventoryMovementRequest`
 - Responses:
   - `200` `application/json` -> `MutationOk`
+
+#### `GET /api/inventory/stock-debts`
+
+Return products whose posted inventory ledger is negative.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory/stock-debts/adjust`
+
+Create a positive manual adjustment to clear historical negative stock debt.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
 
 #### `GET /api/inbound-records`
 

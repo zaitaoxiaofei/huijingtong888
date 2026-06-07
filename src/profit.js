@@ -14,6 +14,38 @@ export function estimateItemProfit({ salePrice, quantity, product, mapping }) {
   const price = Number(salePrice);
   const qty = Number(quantity || 1);
   const exchangeRate = toNumber(product.exchange_rate, 11.32);
+  const explicitLogisticsFreight = logisticsRuleFreight(product);
+  const resolvedCommissionRate = commissionRate(price, mapping, exchangeRate);
+  if (explicitLogisticsFreight !== null) {
+    const purchaseCostPerUnit = roundMoney(
+      toNumber(product.purchase_cost) +
+      toNumber(product.domestic_shipping) / Math.max(toNumber(product.purchase_quantity, 1), 1) +
+      toNumber(product.handling_fee)
+    );
+    const perItem = calculateProfitQuote({
+      saleRmb: price,
+      purchaseCost: purchaseCostPerUnit,
+      freightAmount: explicitLogisticsFreight,
+      commissionRate: resolvedCommissionRate,
+      returnRate: toNumber(product.return_rate, 0.05),
+      withdrawalRate: toNumber(product.withdrawal_fee_rate, 0.012),
+      advertisingRate: toNumber(product.advertising_rate, 0)
+    });
+    return {
+      commission: roundMoney(toNumber(perItem.commission) * qty),
+      paymentFee: roundMoney(toNumber(perItem.paymentFee) * qty),
+      withdrawalFee: roundMoney(toNumber(perItem.withdrawalFee) * qty),
+      advertisingCost: roundMoney(toNumber(perItem.advertisingCost) * qty),
+      expectedReturnLoss: roundMoney(toNumber(perItem.expectedReturnLoss) * qty),
+      cost: roundMoney((purchaseCostPerUnit + explicitLogisticsFreight) * qty),
+      freight: roundMoney(explicitLogisticsFreight),
+      channel: String(product.logistics_rule_channel || product.shipping_method || ""),
+      category: String(product.logistics_rule_name || product.logistics_rule_carrier || "manual_rule"),
+      commissionRate: resolvedCommissionRate,
+      commissionSource: ozonCommissionRate(mapping) !== null ? "ozon" : "fallback",
+      profit: roundMoney(toNumber(perItem.profit) * qty)
+    };
+  }
   const quote = calculateCelFbsPricing({
     sale_rmb: price,
     listing_price_rub: price * exchangeRate,
@@ -29,7 +61,6 @@ export function estimateItemProfit({ salePrice, quantity, product, mapping }) {
     withdrawal_fee_rate: product.withdrawal_fee_rate ?? 0.012,
     advertising_rate: product.advertising_rate ?? 0
   });
-  const resolvedCommissionRate = commissionRate(price, mapping, exchangeRate);
   if (quote?.matched) {
     const channel = selectQuoteChannel(quote.channels, product.shipping_method);
     const purchaseCost = toNumber(quote.purchaseCost);
@@ -79,6 +110,16 @@ export function estimateItemProfit({ salePrice, quantity, product, mapping }) {
     commissionSource: ozonCommissionRate(mapping) !== null ? "ozon" : "fallback",
     profit: roundMoney(toNumber(perItem.profit) * qty)
   };
+}
+
+function logisticsRuleFreight(product = {}) {
+  if (!Number(product?.logistics_rule_id || 0)) return null;
+  const base = toNumberOrNull(product?.logistics_rule_base_fee_cny);
+  const perGram = toNumberOrNull(product?.logistics_rule_per_gram_cny);
+  const perTicket = toNumberOrNull(product?.logistics_rule_per_ticket_cny);
+  if (base === null && perGram === null && perTicket === null) return null;
+  const weight = Math.max(0, toNumber(product?.package_weight_g, 0));
+  return roundMoney((base || 0) + weight * (perGram || 0) + (perTicket || 0));
 }
 
 export function ozonCommissionRate(mapping) {

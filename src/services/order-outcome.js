@@ -386,7 +386,7 @@ export function isTerminalOutcome(row = {}) {
   return classifyOrderOutcome(row) !== "active";
 }
 
-export function buildOrderOutcomeSql(alias = "o", dialect = "sqlite") {
+export function buildOrderOutcomeSql(alias = "o", dialect = "mysql") {
   const concatText = (...parts) => {
     if (String(dialect || "").toLowerCase() === "mysql") {
       return `CONCAT_WS(' ', ${parts.map((part) => `COALESCE(${part}, '')`).join(", ")})`;

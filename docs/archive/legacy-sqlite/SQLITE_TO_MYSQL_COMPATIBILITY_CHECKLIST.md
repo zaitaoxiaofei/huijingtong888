@@ -1,5 +1,7 @@
 # SQLite to MySQL Compatibility Checklist
 
+> Historical note: this checklist is retained as migration history. The current runtime baseline is MySQL; this file should not be read as evidence that SQLite is still active in production.
+
 Last updated: 2026-05-17
 
 ## 1. Purpose

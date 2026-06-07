@@ -197,6 +197,7 @@ CREATE TABLE IF NOT EXISTS procurement_requests (
   cancelled_at DATETIME NULL,
   urgency VARCHAR(32) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_procurement_status (status, purchase_order_id),
   KEY idx_procurement_status_created (status, created_at),
   KEY idx_procurement_product_status (product_id, status),

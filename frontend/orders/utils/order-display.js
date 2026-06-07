@@ -47,6 +47,11 @@ export function buildProductDisplayRows(row = {}) {
   const skuImages = parseSkuMap(row, "sku_images");
   const skuNames = parseSkuMap(row, "sku_names");
   const skuQuantities = parseSkuMap(row, "sku_quantities", (value) => Number(value || 0));
+  const orderItemIds = parseSkuMap(row, "sku_order_item_ids", (value) => Number(value || 0));
+  const saleAmounts = parseSkuMap(row, "sku_sale_amounts", (value) => Number(value || 0));
+  const estimatedProfits = parseSkuMap(row, "sku_estimated_profits", (value) => Number(value || 0));
+  const actualProfits = parseSkuMap(row, "sku_actual_profits", (value) => Number(value || 0));
+  const actualProfitReadyMap = parseSkuMap(row, "sku_actual_profit_ready", (value) => String(value || "") === "1");
   const ozonProductIds = parseSkuMap(row, "sku_ozon_product_ids");
   const productIds = parseSkuMap(row, "sku_product_ids", (value) => Number(value || 0));
   const onlineIds = parseSkuMap(row, "sku_online_product_ids", (value) => Number(value || 0));
@@ -66,7 +71,12 @@ export function buildProductDisplayRows(row = {}) {
       sku: row.ozon_sku || "-",
       name: skuNames.get(row.ozon_sku) || fallbackName || row.ozon_sku || "待创建库存商品",
       quantity: Number(row.total_quantity || row.quantity_total || row.quantity || row.item_count || 1),
+      orderItemId: Number(row.order_item_id || 0) || 0,
       imageUrl: fallbackImage,
+      saleAmount: Number(row.revenue || 0),
+      estimatedProfit: Number(row.estimated_profit || 0),
+      actualProfit: Number(row.actual_profit || 0),
+      actualProfitReady: Math.abs(Number(row.actual_profit || 0)) > 0.000001 || String(row.status || "").toLowerCase() === "delivered",
       stock: { fbs: 0, fbp: 0 },
       productId: 0,
       onlineId: 0,
@@ -79,11 +89,17 @@ export function buildProductDisplayRows(row = {}) {
   return skus.map((sku) => {
     const ozonProductId = ozonProductIds.get(sku) || fallbackOzonProductId(sku) || "";
     const onlineId = onlineIds.get(sku) || 0;
+    const hasSkuImage = skuImages.has(sku);
     return {
       sku,
       name: skuNames.get(sku) || fallbackName || sku || "待创建库存商品",
       quantity: skuQuantities.get(sku) || 0,
-      imageUrl: skuImages.get(sku) || fallbackImage || inventoryImages[0] || "",
+      orderItemId: orderItemIds.get(sku) || 0,
+      imageUrl: hasSkuImage ? (skuImages.get(sku) || "") : (fallbackImage || inventoryImages[0] || ""),
+      saleAmount: saleAmounts.get(sku) || 0,
+      estimatedProfit: estimatedProfits.get(sku) || 0,
+      actualProfit: actualProfits.get(sku) || 0,
+      actualProfitReady: actualProfitReadyMap.get(sku) || false,
       stock: stockMap.get(sku) || { fbs: 0, fbp: 0 },
       productId: productIds.get(sku) || 0,
       onlineId,

@@ -963,17 +963,10 @@ export async function advertisingPilotShopMysql() {
   const rows = await mysqlQuery(`
     SELECT id, name
     FROM shops
-    WHERE LOWER(name) LIKE '%vibermart%'
-       OR LOWER(name) LIKE '%vibe mart%'
-       OR LOWER(name) LIKE '%ruvibe%'
-    ORDER BY
-      CASE
-        WHEN LOWER(name) LIKE '%vibermart%' THEN 1
-        WHEN LOWER(name) LIKE '%vibe mart%' THEN 2
-        WHEN LOWER(name) LIKE '%ruvibe%' THEN 3
-        ELSE 9
-      END,
-      id
+    WHERE status = 'active'
+      AND COALESCE(NULLIF(TRIM(performance_client_id), ''), '') <> ''
+      AND COALESCE(NULLIF(TRIM(performance_client_secret), ''), NULLIF(TRIM(performance_client_secret_hint), ''), '') <> ''
+    ORDER BY id
     LIMIT 1
   `);
   return rows?.[0] || null;
@@ -1039,6 +1032,20 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
       await hydrateCampaignProductSettings(token, selectedCampaigns, options);
       await refreshCampaignMetadataRows(shop.id, selectedCampaigns, { from, to });
       await refreshCampaignProductSettingsRows(shop.id, selectedCampaigns, { from, to });
+      await cleanupInactivePendingAdvertisingRowsMysql(shop.id, selectedCampaigns, { from, to });
+      const targetPendingRemaining = await countTargetPendingAdvertisingRowsMysql(shop.id, body, { from, to });
+      if (targetPendingRemaining.checked && targetPendingRemaining.count === 0) {
+        results.push({
+          shop_id: shop.id,
+          shop_name: shop.name,
+          campaigns: selectedCampaigns.length,
+          fetched: 0,
+          imported: 0,
+          placeholder_rows: 0,
+          status: "target_sku_cleared"
+        });
+        continue;
+      }
       if (body.metadata_only || body.metadataOnly) {
         results.push({
           shop_id: shop.id,
@@ -1350,6 +1357,116 @@ async function refreshCampaignProductSettingsRows(shopId, campaigns = [], range 
   }
 }
 
+function isInactiveAdvertisingState(value) {
+  const state = String(value || "").trim().toLowerCase();
+  if (!state) return false;
+  const inactiveWords = [
+    "stopped",
+    "stop",
+    "paused",
+    "pause",
+    "archived",
+    "archive",
+    "deleted",
+    "finished",
+    "inactive",
+    "disabled",
+    "ended",
+    "blocked",
+    "cancelled",
+    "canceled"
+  ];
+  return inactiveWords.some((word) => state.includes(word));
+}
+
+function isInactiveCampaign(campaign = {}) {
+  return isInactiveAdvertisingState(campaign.state || campaign.status || campaign.campaign_state || campaign.campaignState);
+}
+
+function isInactiveCampaignProduct(product = {}) {
+  if (product.active === false || product.is_active === false || product.enabled === false || product.is_enabled === false) return true;
+  if (product.active === 0 || product.is_active === 0 || product.enabled === 0 || product.is_enabled === 0) return true;
+  return isInactiveAdvertisingState(
+    product.state
+    || product.status
+    || product.product_state
+    || product.productState
+    || product.ad_state
+    || product.adState
+    || product.campaign_product_state
+    || product.campaignProductState
+  );
+}
+
+async function cleanupInactivePendingAdvertisingRowsMysql(shopId, campaigns = [], range = {}) {
+  const from = String(range.from || "").slice(0, 10);
+  const to = String(range.to || "").slice(0, 10);
+  if (!shopId || !from || !to) return;
+
+  for (const campaign of campaigns) {
+    const campaignId = String(campaign.id || "").trim();
+    if (!campaignId) continue;
+    if (isInactiveCampaign(campaign)) {
+      await mysqlExecute(`
+        DELETE FROM ozon_ad_sku_daily
+        WHERE shop_id = ?
+          AND campaign_id = ?
+          AND source = 'ozon_performance_pending'
+          AND date_key >= ?
+          AND date_key <= ?
+      `, [Number(shopId), campaignId, from, to]);
+      continue;
+    }
+
+    if (!campaign.productSettingsFetched) continue;
+    const activeSkus = (campaign.productSettings || []).map((product) => String(product.sku || "").trim()).filter(Boolean);
+    if (!activeSkus.length) {
+      await mysqlExecute(`
+        DELETE FROM ozon_ad_sku_daily
+        WHERE shop_id = ?
+          AND campaign_id = ?
+          AND source = 'ozon_performance_pending'
+          AND date_key >= ?
+          AND date_key <= ?
+      `, [Number(shopId), campaignId, from, to]);
+      continue;
+    }
+    await mysqlExecute(`
+      DELETE FROM ozon_ad_sku_daily
+      WHERE shop_id = ?
+        AND campaign_id = ?
+        AND source = 'ozon_performance_pending'
+        AND date_key >= ?
+        AND date_key <= ?
+        AND ozon_sku NOT IN (${activeSkus.map(() => "?").join(", ")})
+    `, [Number(shopId), campaignId, from, to, ...activeSkus]);
+  }
+}
+
+async function countTargetPendingAdvertisingRowsMysql(shopId, body = {}, range = {}) {
+  const from = String(range.from || "").slice(0, 10);
+  const to = String(range.to || "").slice(0, 10);
+  const targetSkus = Array.isArray(body.target_skus || body.targetSkus)
+    ? (body.target_skus || body.targetSkus).map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  if (!shopId || !from || !to || !targetSkus.length) return { checked: false, count: 0 };
+  const campaignIds = Array.isArray(body.campaign_ids || body.campaignIds)
+    ? (body.campaign_ids || body.campaignIds).map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const campaignWhere = campaignIds.length ? `AND campaign_id IN (${campaignIds.map(() => "?").join(", ")})` : "";
+  const rows = await mysqlQuery(`
+    SELECT COUNT(*) AS total
+    FROM ozon_ad_sku_daily
+    WHERE shop_id = ?
+      AND source = 'ozon_performance_pending'
+      AND date_key >= ?
+      AND date_key <= ?
+      AND ozon_sku IN (${targetSkus.map(() => "?").join(", ")})
+      ${campaignWhere}
+  `, [Number(shopId), from, to, ...targetSkus, ...campaignIds]);
+  return { checked: true, count: Number(rows?.[0]?.total || 0) };
+}
+
 async function buildPendingAdvertisingRowsMysql(shop = {}, campaigns = [], context = {}) {
   const normalizedKeys = new Set((context.normalized || []).map((row) => [
     row.date_key,
@@ -1361,6 +1478,7 @@ async function buildPendingAdvertisingRowsMysql(shop = {}, campaigns = [], conte
   const dates = dateKeysBetween(context.from, context.to);
   const rows = [];
   for (const campaign of campaigns) {
+    if (isInactiveCampaign(campaign)) continue;
     const productSettings = await pendingCampaignProductsMysql(shop, campaign);
     for (const product of productSettings) {
       const sku = String(product.sku || "").trim();
@@ -1441,6 +1559,7 @@ async function buildPendingAdvertisingRowsMysql(shop = {}, campaigns = [], conte
 
 async function pendingCampaignProductsMysql(shop = {}, campaign = {}) {
   const settings = Array.isArray(campaign.productSettings) ? campaign.productSettings : [];
+  if (campaign.productSettingsFetched) return settings.filter((product) => String(product.sku || "").trim());
   const productsBySku = new Map(settings.map((product) => [String(product.sku || "").trim(), product]).filter(([sku]) => sku));
   const historicalRows = await mysqlQuery(`
     SELECT ozon_sku, MAX(campaign_bid_rub) AS bid_rub, MAX(campaign_target_cir) AS target_cir
@@ -1562,13 +1681,19 @@ async function hydrateCampaignProductSettings(token, campaigns = [], options = {
     try {
       const data = await performanceRequest(`/api/client/campaign/${campaign.id}/v2/products`, null, { ...options, token, method: "GET" });
       const rows = Array.isArray(data.products) ? data.products : Array.isArray(data.list) ? data.list : [];
-      campaign.productSettings = rows.map((row) => ({
-        sku: String(row.sku || row.ozon_sku || row.product_sku || "").trim(),
-        bidRub: normalizePerformanceMoney(firstNumber(row.bid, row.bidRub, row.bid_rub, row.cpc, row.price)),
-        targetCir: firstNumber(row.targetCir, row.target_cir, row.targetDRR, row.target_drr, row.drr)
-      })).filter((row) => row.sku);
+      campaign.productSettingsFetched = true;
+      campaign.productSettings = rows
+        .filter((row) => !isInactiveCampaignProduct(row))
+        .map((row) => ({
+          sku: String(row.sku || row.ozon_sku || row.product_sku || "").trim(),
+          bidRub: normalizePerformanceMoney(firstNumber(row.bid, row.bidRub, row.bid_rub, row.cpc, row.price)),
+          targetCir: firstNumber(row.targetCir, row.target_cir, row.targetDRR, row.target_drr, row.drr),
+          state: String(row.state || row.status || row.product_state || row.productState || row.ad_state || row.adState || "")
+        }))
+        .filter((row) => row.sku);
       campaign.productsBySku = new Map(campaign.productSettings.map((row) => [row.sku, row]));
     } catch {
+      campaign.productSettingsFetched = false;
       campaign.productSettings = [];
       campaign.productsBySku = new Map();
     }

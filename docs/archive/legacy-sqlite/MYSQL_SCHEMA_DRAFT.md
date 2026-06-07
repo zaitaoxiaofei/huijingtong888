@@ -1,5 +1,7 @@
 # MySQL Schema Draft
 
+> Historical note: this draft was produced during the SQLite-to-MySQL transition. Keep it as migration history, not as a statement that SQLite is still the active runtime.
+
 Last updated: 2026-05-17
 
 ## 1. Goal

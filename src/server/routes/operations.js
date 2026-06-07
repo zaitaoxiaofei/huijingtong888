@@ -6,13 +6,17 @@ export function createOperationsRoutes({ services, readJson }) {
     "GET /api/order-cancellation-rules": () => services.orderCancellationRules(),
     "GET /api/inbound-records": (req, url) => services.inboundRecords(Object.fromEntries(url.searchParams.entries())),
     "GET /api/outbound-records": (req, url) => services.outboundRecords(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/fbp-transfer-records": (req, url) => services.fbpTransferRecords(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/summary": () => services.procurementSummary(),
     "GET /api/procurement/requests": (req, url) => services.procurementRequests(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/purchase-orders": (req, url) => services.purchaseOrders(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/pending-inbound": () => services.pendingInboundItems(),
     "GET /api/customer-messages": (req, url) => services.customerMessages(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/customer-chats": (req, url) => services.customerChatThreads(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/customer-chats/messages": (req, url) => services.customerChatThreadMessages(Object.fromEntries(url.searchParams.entries())),
     "GET /api/customer-message-customer-orders": (req, url) => services.customerMessageCustomerOrders(Object.fromEntries(url.searchParams.entries())),
     "GET /api/customer-message-settings": () => services.customerMessageSettings(),
+    "GET /api/user-preferences": (req, url) => services.userPreference(Object.fromEntries(url.searchParams.entries()), req._session?.personId),
     "GET /api/shops": () => services.shops(),
     "GET /api/people": () => services.people(),
     "POST /api/people": async (req) => services.createPerson(await readJson(req)) || { ok: true },
@@ -21,15 +25,21 @@ export function createOperationsRoutes({ services, readJson }) {
     "POST /api/procurement/purchase-orders/confirm-from-requests-async": async (req) => services.startConfirmProcurementRequestsPurchased(await readJson(req)),
     "POST /api/procurement/purchase-orders": async (req) => services.mergeProcurementRequests(await readJson(req)),
     "POST /api/inbound-records": async (req) => services.createInboundRecord(await readJson(req)) || { ok: true },
+    "POST /api/fbp-transfer-records": async (req) => services.createFbpTransferRecord(await readJson(req), req._session?.personId) || { ok: true },
     "POST /api/inbound-records/batch-update-async": async (req) => services.startBatchUpdateInboundRecords(await readJson(req)),
     "POST /api/inbound-records/batch-update": async (req) => services.batchUpdateInboundRecords(await readJson(req)),
     "POST /api/inventory/movements": async (req) => services.createInventoryMovement(await readJson(req)) || { ok: true },
+    "GET /api/inventory/stock-debts": (req, url) => services.inventoryStockDebts(Object.fromEntries(url.searchParams.entries())),
+    "POST /api/inventory/stock-debts/adjust": async (req) => services.adjustInventoryStockDebt(await readJson(req), req._session?.personId),
     "POST /api/customer-messages/preview": async (req) => services.previewCustomerMessage(await readJson(req)),
     "POST /api/customer-messages/record": async (req) => services.recordCustomerMessage(await readJson(req)),
     "POST /api/customer-messages/send": async (req) => services.sendCustomerMessage(await readJson(req)),
     "POST /api/customer-messages/translate-ru": async (req) => services.translateCustomerMessageRu(await readJson(req)),
+    "POST /api/customer-chats/sync": async (req) => services.syncCustomerChats(await readJson(req)),
     "POST /api/customer-message-settings/shop": async (req) => services.updateCustomerMessageShopSetting(await readJson(req)),
     "POST /api/customer-message-settings/template": async (req) => services.updateCustomerMessageTemplate(await readJson(req)),
+    "POST /api/customer-message-settings/template/translate-zh": async (req) => services.translateCustomerMessageTemplateZh(await readJson(req)),
+    "POST /api/user-preferences": async (req) => services.updateUserPreference(await readJson(req), req._session?.personId),
     "POST /api/logistics-rules": async (req) => services.createLogisticsRule(await readJson(req)),
     "POST /api/order-cancellation-rules": async (req) => services.createOrderCancellationRule(await readJson(req)),
     "POST /api/order-cancellation-rules/test": async (req) => services.testOrderCancellationRule(await readJson(req)),
@@ -79,6 +89,10 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "requests" && parts[3] === "submit") {
     return json(res, await services.submitProcurementRequests(await readJson(req)));
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "requests" && parts[3] === "direct-inbound") {
+    return json(res, await services.directInboundProcurementRequests(await readJson(req)));
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "requests" && parts[3]) {

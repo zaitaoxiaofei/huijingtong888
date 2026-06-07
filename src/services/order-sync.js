@@ -93,26 +93,22 @@ function saveRawPosting(deps, shop, posting) {
 function accrueDeliveredItems(deps, orderId) {
   const order = deps.get("SELECT * FROM orders WHERE id = ?", [orderId]);
   if (!order || order.status !== "delivered") return;
-  const items = deps.all("SELECT * FROM order_items WHERE order_id = ?", [orderId]);
-  for (const item of items) {
-    const profitItem = deps.get("SELECT commission_fee_cny, ozon_service_fee_cny, return_loss_cny, advertising_cost_cny, other_fee_cny, purchase_cost_cny, domestic_shipping_cny, international_shipping_cny, packaging_cost_cny, net_profit_cny, profit_status FROM order_profit_items WHERE order_item_id = ?", [item.id]);
-    if (profitItem && (Number(profitItem.commission_fee_cny || 0) > 0 || Number(profitItem.ozon_service_fee_cny || 0) > 0 || String(profitItem.profit_status || "") === "accrued")) {
-      executeStatement(deps, "UPDATE order_items SET actual_profit = ?, settlement_state = 'accrued' WHERE id = ?", [Number(profitItem.net_profit_cny || 0), item.id]);
-      executeStatement(deps, `
-        UPDATE order_profit_items
-        SET profit_status = 'accrued', updated_at = CURRENT_TIMESTAMP
-        WHERE order_item_id = ?
-      `, [item.id]);
-      continue;
-    }
-    const actualProfit = deps.actualItemProfit(item, profitItem);
-    executeStatement(deps, "UPDATE order_items SET actual_profit = ?, settlement_state = 'accrued' WHERE id = ?", [actualProfit, item.id]);
-    executeStatement(deps, `
-      UPDATE order_profit_items
-      SET net_profit_cny = ?, profit_status = 'accrued', updated_at = CURRENT_TIMESTAMP
-      WHERE order_item_id = ?
-    `, [actualProfit, item.id]);
-  }
+  executeStatement(deps, `
+    UPDATE order_items
+    SET actual_profit = 0,
+      settlement_state = CASE WHEN COALESCE(settlement_state, '') = 'accrued' THEN settlement_state ELSE 'pending' END
+    WHERE order_id = ?
+      AND COALESCE(settlement_state, '') != 'accrued'
+  `, [orderId]);
+  executeStatement(deps, `
+    UPDATE order_profit_items
+    SET profit_status = CASE WHEN COALESCE(profit_status, '') = 'accrued' THEN profit_status ELSE 'estimated' END,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE order_item_id IN (
+      SELECT id FROM order_items WHERE order_id = ?
+    )
+      AND COALESCE(profit_status, '') != 'accrued'
+  `, [orderId]);
 }
 
 function upsertOnlineProductFromOrderItem(deps, shop, item) {
@@ -127,15 +123,16 @@ function upsertOnlineProductFromOrderItem(deps, shop, item) {
         image_url = COALESCE(NULLIF(?, ''), image_url),
         primary_image = COALESCE(NULLIF(?, ''), primary_image),
         sale_price = CASE WHEN sale_price = 0 THEN ? ELSE sale_price END,
+        published_at = COALESCE(published_at, NULLIF(?, '')),
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `, [item.offer_id || "", item.ozon_product_id || "", item.name || "", item.image_url || "", item.image_url || "", Number(item.sale_price || 0), existing.id]);
+    `, [item.offer_id || "", item.ozon_product_id || "", item.name || "", item.image_url || "", item.image_url || "", Number(item.sale_price || 0), item.published_at || item.created_at || "", existing.id]);
     return existing;
   }
   const onlineProductId = insertAndGetId(deps, `
     INSERT INTO online_products
-    (shop_id, ozon_sku, offer_id, ozon_product_id, name, image_url, primary_image, sale_price, currency_code, status, visibility, raw_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RUB', 'historical', 'order_snapshot', ?)
+    (shop_id, ozon_sku, offer_id, ozon_product_id, name, image_url, primary_image, sale_price, currency_code, status, visibility, raw_json, published_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RUB', 'historical', 'order_snapshot', ?, ?)
   `, [
     shop.id,
     item.ozon_sku,
@@ -145,7 +142,8 @@ function upsertOnlineProductFromOrderItem(deps, shop, item) {
     item.image_url || "",
     item.image_url || "",
     Number(item.sale_price || 0),
-    JSON.stringify(item)
+    JSON.stringify(item),
+    item.published_at || item.created_at || ""
   ]);
   return { id: onlineProductId, shop_id: shop.id, ozon_sku: item.ozon_sku };
 }

@@ -52,6 +52,10 @@ def detect_regions(
     elif mode == "vertical":
         boxes = boxes_from_lines(bounds, [], vertical_lines, width, height)
     else:
+        uniform_grid_boxes = common_uniform_grid_boxes(image, bounds)
+        if len(uniform_grid_boxes) >= 2 and is_reliable_separator_partition(uniform_grid_boxes, width, height):
+            return uniform_grid_boxes
+
         collage_boxes = common_collage_layout_boxes(image, bounds)
         if len(collage_boxes) >= 2 and is_reliable_separator_partition(collage_boxes, width, height):
             return collage_boxes
@@ -325,6 +329,28 @@ def recursive_separator_boxes(image, bounds):
     return sort_boxes_row_major(boxes)
 
 
+def common_uniform_grid_boxes(image, bounds):
+    x0, y0, x1, y1 = bounds
+    width = x1 - x0
+    height = y1 - y0
+    separator = build_separator_mask(image)
+
+    root_horizontal = local_separator_candidates(image, separator, bounds, "horizontal")
+    root_vertical = local_separator_candidates(image, separator, bounds, "vertical")
+    if len(root_horizontal) != 1 or len(root_vertical) != 1:
+        return []
+
+    _, split_top, split_bottom, _ = root_horizontal[0]
+    _, split_left, split_right, _ = root_vertical[0]
+    boxes = sort_boxes_row_major([
+        box_from_rect((x0, y0, split_left, split_top)),
+        box_from_rect((split_right, y0, x1, split_top)),
+        box_from_rect((x0, split_bottom, split_left, y1)),
+        box_from_rect((split_right, split_bottom, x1, y1)),
+    ])
+    return boxes if is_balanced_uniform_grid(boxes, width, height) else []
+
+
 def common_collage_layout_boxes(image, bounds):
     x0, y0, x1, y1 = bounds
     width = x1 - x0
@@ -468,6 +494,31 @@ def local_separator_candidates(image, separator, rect, orientation):
         score = local_score + min(0.18, balance * 0.18) + min(0.08, span / 2000) + min(0.32, contrast / 280)
         candidates.append((orientation, int(split_start), int(split_end), score))
     return candidates
+
+
+def is_balanced_uniform_grid(boxes, image_width, image_height):
+    if len(boxes) != 4:
+        return False
+
+    widths = np.array([box[2] for box in boxes], dtype=np.float64)
+    heights = np.array([box[3] for box in boxes], dtype=np.float64)
+    areas = widths * heights
+    if np.min(widths) < image_width * 0.22 or np.min(heights) < image_height * 0.22:
+        return False
+    if float(np.min(areas) / max(np.max(areas), 1)) < 0.42:
+        return False
+
+    row_one, row_two = boxes[:2], boxes[2:]
+    col_one = [boxes[0], boxes[2]]
+    col_two = [boxes[1], boxes[3]]
+    row_tolerance = max(18, int(image_height * 0.04))
+    col_tolerance = max(18, int(image_width * 0.04))
+
+    top_aligned = abs(row_one[0][1] - row_one[1][1]) <= row_tolerance
+    bottom_aligned = abs(row_two[0][1] - row_two[1][1]) <= row_tolerance
+    left_aligned = abs(col_one[0][0] - col_one[1][0]) <= col_tolerance
+    right_aligned = abs(col_two[0][0] - col_two[1][0]) <= col_tolerance
+    return top_aligned and bottom_aligned and left_aligned and right_aligned
 
 
 def build_strict_separator_mask(image):

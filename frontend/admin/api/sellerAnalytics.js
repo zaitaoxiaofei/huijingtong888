@@ -22,8 +22,36 @@ export function getSellerAnalyticsCollectRuns(params = {}) {
   return apiClient.get(`/api/db/seller-analytics/collect-runs${queryString(params)}`, { noCache: true });
 }
 
+export function getSellerAnalyticsOperationTodos(params = {}) {
+  return apiClient.get(`/api/db/seller-analytics/operation-todos${queryString(params)}`, { noCache: true });
+}
+
+export function getSellerAnalyticsPluginStatus() {
+  return apiClient.get("/api/db/seller-analytics/plugin-status", { noCache: true });
+}
+
+export function getSellerAnalyticsAuthBindingStatus(params = {}) {
+  return apiClient.get(`/api/db/seller-analytics/auth-binding${queryString(params)}`, { noCache: true });
+}
+
+export function validateSellerAnalyticsPluginStatus(params = {}) {
+  return apiClient.get(`/api/db/seller-analytics/plugin-status/validate${queryString(params)}`, { noCache: true });
+}
+
+export function prepareSellerAnalyticsPlugin(payload = {}) {
+  return apiClient.post("/api/db/seller-analytics/plugin-prepare", payload);
+}
+
 export function createSellerAnalyticsCollectRun(payload = {}) {
   return apiClient.post("/api/db/seller-analytics/collect-runs", payload);
+}
+
+export function startSellerAnalyticsDirectCollect(payload = {}) {
+  return apiClient.post("/api/db/seller-analytics/direct-collect/start", payload);
+}
+
+export function refreshSellerAnalyticsOperationTodos(payload = {}) {
+  return apiClient.post("/api/db/seller-analytics/operation-todos/refresh", payload);
 }
 
 export function retrySellerAnalyticsCollectRun(id) {

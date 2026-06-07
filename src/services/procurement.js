@@ -7,6 +7,7 @@ export {
   createProcurementRequest,
   updateProcurementRequest,
   submitProcurementRequests,
+  directInboundProcurementRequests,
   deleteProcurementRequest,
   mergeProcurementRequests,
   confirmPurchaseOrder,

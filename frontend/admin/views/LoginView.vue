@@ -73,6 +73,7 @@ const qrLogin = reactive({
   status: "",
   pollTimer: 0
 });
+let wechatStatusTimer = 0;
 
 const themeIcon = computed(() => (appStore.theme === "dark" ? Sunny : MoonNight));
 const themeLabel = computed(() => (appStore.theme === "dark" ? text.light : text.dark));
@@ -98,7 +99,33 @@ function openLoginForm() {
 }
 
 function waitForSuccessMoment() {
-  return new Promise((resolve) => window.setTimeout(resolve, 950));
+  return new Promise((resolve) => window.setTimeout(resolve, 120));
+}
+
+function normalizeRedirectTarget(value = "/dashboard") {
+  const target = String(value || "/dashboard").trim() || "/dashboard";
+  return target.startsWith("/") ? target : "/dashboard";
+}
+
+function redirectTarget() {
+  return normalizeRedirectTarget(route.query.redirect || "/dashboard");
+}
+
+function shouldUseFastRedirect(target) {
+  return String(target || "") !== "/dashboard";
+}
+
+async function finishLoginRedirect(target) {
+  const safeTarget = normalizeRedirectTarget(target);
+  if (shouldUseFastRedirect(safeTarget)) {
+    sessionStorage.removeItem("baodanLoginWelcome");
+    await router.replace(safeTarget);
+    return;
+  }
+  sessionStorage.setItem("baodanLoginWelcome", "1");
+  loginStage.value = "success";
+  await waitForSuccessMoment();
+  await router.replace(safeTarget);
 }
 
 onMounted(() => {
@@ -109,6 +136,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   setLoginViewportState(false);
+  window.clearTimeout(wechatStatusTimer);
   stopQrPolling();
 });
 
@@ -124,11 +152,8 @@ async function handleSubmit() {
       ElMessage.success("\u5fae\u4fe1\u5df2\u7ed1\u5b9a\uff0c\u4e0b\u6b21\u53ef\u76f4\u63a5\u626b\u7801\u767b\u5f55");
     }
     localStorage.setItem("loginUsername", form.username);
-    sessionStorage.setItem("baodanLoginWelcome", "1");
-    loginStage.value = "success";
     ElMessage.success(`${text.welcomeBack}\uff0c${user.name || user.username}`);
-    await waitForSuccessMoment();
-    router.replace(String(route.query.redirect || "/dashboard").split("?")[0]);
+    await finishLoginRedirect(redirectTarget());
   } catch (error) {
     loginStage.value = "form";
     ElMessage.error(error.message || text.loginFailed);
@@ -152,25 +177,30 @@ async function initializeWechatLogin() {
     loginStage.value = "success";
     try {
       const result = await authStore.completeWechatLogin(String(query.wechatTicket));
-      sessionStorage.setItem("baodanLoginWelcome", "1");
-      await waitForSuccessMoment();
-      router.replace(String(result.redirect || query.redirect || "/dashboard").split("?")[0]);
+      await finishLoginRedirect(String(result.redirect || query.redirect || "/dashboard"));
       return;
     } catch (error) {
       loginStage.value = "form";
       ElMessage.error(error.message || text.loginFailed);
     }
   }
-  try {
-    const status = await fetchWechatStatus();
-    wechat.enabled = Boolean(status.enabled && status.authUrl);
-  } catch {
-    wechat.enabled = false;
-  }
+  scheduleWechatStatusCheck();
+}
+
+function scheduleWechatStatusCheck() {
+  window.clearTimeout(wechatStatusTimer);
+  wechatStatusTimer = window.setTimeout(async () => {
+    try {
+      const status = await fetchWechatStatus();
+      wechat.enabled = Boolean(status.enabled && status.authUrl);
+    } catch {
+      wechat.enabled = false;
+    }
+  }, 2000);
 }
 
 async function fetchWechatStatus() {
-  const target = String(route.query.redirect || "/dashboard").split("?")[0];
+  const target = redirectTarget();
   const response = await fetch(`/api/auth/wechat/status?redirect=${encodeURIComponent(target)}`, {
     headers: { "Content-Type": "application/json" }
   });
@@ -197,7 +227,7 @@ async function startQrLogin() {
   qrLogin.status = text.qrWaiting;
   stopQrPolling();
   try {
-    const target = String(route.query.redirect || "/dashboard").split("?")[0];
+    const target = redirectTarget();
     const response = await fetch(`/api/auth/qr/start?redirect=${encodeURIComponent(target)}`, {
       headers: { "Content-Type": "application/json" }
     });
@@ -232,11 +262,8 @@ async function pollQrLogin() {
     if (data.status === "confirmed" && data.token && data.user) {
       stopQrPolling();
       authStore.applyLoginResult(data);
-      sessionStorage.setItem("baodanLoginWelcome", "1");
       qrLogin.status = "\u5df2\u786e\u8ba4\uff0c\u6b63\u5728\u8fdb\u5165...";
-      loginStage.value = "success";
-      await waitForSuccessMoment();
-      router.replace(String(data.redirect || route.query.redirect || "/dashboard").split("?")[0]);
+      await finishLoginRedirect(String(data.redirect || route.query.redirect || "/dashboard"));
       return;
     }
     if (data.status === "expired") {

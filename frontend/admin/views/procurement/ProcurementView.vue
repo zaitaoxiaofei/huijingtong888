@@ -18,6 +18,7 @@ const loading = ref(false);
 const dialogVisible = ref(false);
 const editDialogVisible = ref(false);
 const editDialogSubmitting = ref(false);
+const directInboundSubmittingIds = ref([]);
 
 const state = reactive({
   requests: [],
@@ -79,15 +80,9 @@ function isRequestCompleted(row) {
   return status === "done" || orderStatus === "inbound_done";
 }
 
-function isRequestPurchased(row) {
-  const status = String(row?.status || "");
-  const orderStatus = String(row?.purchase_order_status || "");
-  return status === "purchased" || ["purchased", "partial_inbound"].includes(orderStatus);
-}
-
 function statusTagType(row) {
   if (isRequestCompleted(row)) return "success";
-  if (isRequestPurchased(row)) return "info";
+  if (String(row?.status || "") === "cancelled") return "danger";
   return "warning";
 }
 
@@ -96,9 +91,9 @@ function urgencyTagType(urgency) {
 }
 
 function requestStatusText(row) {
-  if (isRequestCompleted(row)) return "已入库";
-  if (isRequestPurchased(row)) return "待入库";
-  return "等待采购";
+  if (String(row?.status || "") === "cancelled") return "已取消";
+  if (isRequestCompleted(row)) return "已完成";
+  return "待处理";
 }
 
 function productImage(row) {
@@ -141,7 +136,7 @@ const editCandidateProducts = computed(() => {
 const selectedEditProduct = computed(() => state.products.find((row) => Number(row.id) === Number(editDialog.form.product_id)) || null);
 
 function isRequestSelectable(row) {
-  return row.status === "pending";
+  return !isRequestCompleted(row) && String(row?.status || "") !== "cancelled";
 }
 
 function handleSelectionChange(rows) {
@@ -269,6 +264,31 @@ async function submitEditDialog() {
   }
 }
 
+function canDirectInboundRequest(row) {
+  return !isRequestCompleted(row) && String(row?.status || "") !== "cancelled";
+}
+
+function directInboundLoading(row) {
+  return directInboundSubmittingIds.value.includes(Number(row?.id || 0));
+}
+
+async function directInboundRequest(row) {
+  const requestId = Number(row?.id || 0);
+  if (!requestId) return;
+  try {
+    directInboundSubmittingIds.value = [...new Set([...directInboundSubmittingIds.value, requestId])];
+    await apiClient.post("/api/procurement/requests/direct-inbound", {
+      request_ids: [requestId]
+    });
+    ElMessage.success("采购记录已直接入库");
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "直接入库失败");
+  } finally {
+    directInboundSubmittingIds.value = directInboundSubmittingIds.value.filter((id) => id !== requestId);
+  }
+}
+
 async function deleteRequest(row) {
   try {
     await ElMessageBox.confirm(`确认删除采购请求「${row.product_name || row.product_code || row.id}」吗？`, "删除采购请求", {
@@ -358,8 +378,9 @@ onMounted(loadPageData);
           </el-form-item>
           <el-form-item label="状态">
             <el-select v-model="state.filters.status" style="width: 160px">
-              <el-option label="等待采购" value="waiting_purchase" />
-              <el-option label="已采购/已入库" value="completed_purchase" />
+              <el-option label="待处理" value="waiting_purchase" />
+              <el-option label="已完成" value="completed_purchase" />
+              <el-option label="已取消" value="cancelled" />
             </el-select>
           </el-form-item>
           <el-form-item label="紧急程度">
@@ -443,9 +464,19 @@ onMounted(loadPageData);
           <el-table-column prop="created_at" label="创建时间" width="170">
             <template #default="{ row }">{{ dateText(row.created_at) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="180" fixed="right" align="center">
+          <el-table-column label="操作" width="260" fixed="right" align="center">
             <template #default="{ row }">
               <div class="erp-inline-actions">
+                <el-button
+                  v-if="canDirectInboundRequest(row)"
+                  class="erp-btn-link"
+                  link
+                  type="success"
+                  :loading="directInboundLoading(row)"
+                  @click="directInboundRequest(row)"
+                >
+                  直接入库
+                </el-button>
                 <el-button class="erp-btn-link" link type="primary" @click="openEditRequestDialog(row)">编辑</el-button>
                 <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="deleteRequest(row)">删除</el-button>
               </div>
@@ -675,9 +706,9 @@ onMounted(loadPageData);
 .product-thumb,
 .selected-product-thumb {
   width: 64px;
-  height: 64px;
+  height: 84px;
   flex: none;
-  border-radius: 18px;
+  border-radius: 8px;
   overflow: hidden;
   border: 1px solid rgba(198, 209, 225, 0.75);
   background: #fff;
@@ -875,5 +906,3 @@ onMounted(loadPageData);
   }
 }
 </style>
-
-

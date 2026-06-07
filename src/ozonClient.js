@@ -199,6 +199,168 @@ export async function fetchOzonManagedStocks(shop, options = {}) {
   return rows;
 }
 
+export async function fetchOzonWarehouses(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) return demoWarehouses(shop);
+  const errors = [];
+  for (const path of ["/v1/warehouse/list", "/v2/warehouse/list"]) {
+    try {
+      const data = await ozonRequest(shop, path, {}, options);
+      return normalizeOzonWarehouses(data);
+    } catch (error) {
+      errors.push(`${path}: ${error?.message || error}`);
+      if (options.signal?.aborted) throwIfAborted(options.signal);
+    }
+  }
+  throw new Error(`Ozon 仓库列表获取失败：${errors.join(" | ")}`);
+}
+
+export async function fetchOzonFboSupplyOrders(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) return [];
+  const limit = Math.min(Math.max(Number(options.limit || 100), 1), 100);
+  const maxPages = Math.max(1, Number(options.maxPages || 10));
+  const errors = [];
+  for (const path of ["/v3/supply-order/list", "/v2/supply-order/list", "/v1/supply-order/list", "/v1/fbo/supply-order/list"]) {
+    try {
+      const orders = [];
+      let lastId = "";
+      for (let page = 0; page < maxPages; page += 1) {
+        throwIfAborted(options.signal);
+        const payload = buildOzonSupplyOrderListPayload(path, { ...options, limit, lastId });
+        const data = await ozonRequest(shop, path, payload, { signal: options.signal });
+        const result = data.result || data;
+        const items = result.items || result.supply_orders || result.orders || result.list || result.order_ids || [];
+        for (const item of items) orders.push(normalizeOzonFboSupplyOrder(item, shop));
+        lastId = result.last_id || result.lastId || result.cursor || "";
+        if (!lastId || items.length < limit) break;
+      }
+      return orders.filter((item) => item.supply_order_id || item.supply_order_number);
+    } catch (error) {
+      errors.push(`${path}: ${error?.message || error}`);
+      if (options.signal?.aborted) throwIfAborted(options.signal);
+    }
+  }
+  throw new Error(`Ozon FBO supply-order list failed for ${shop.name || shop.id}: ${errors.join(" | ")}`);
+}
+
+function buildOzonSupplyOrderListPayload(path = "", options = {}) {
+  const limit = Math.min(Math.max(Number(options.limit || 100), 1), 100);
+  const lastId = String(options.lastId || "");
+  if (path.includes("/v3/")) {
+    const states = Array.isArray(options.states) && options.states.length
+      ? options.states.map(Number).filter(Boolean)
+      : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    const payload = {
+      filter: { states },
+      limit,
+      sort_by: Number(options.sortBy || options.sort_by || 1)
+    };
+    if (lastId) payload.last_id = lastId;
+    return payload;
+  }
+  const payload = { limit };
+  if (lastId) payload.last_id = lastId;
+  if (options.status) payload.status = String(options.status);
+  return payload;
+}
+
+export async function fetchOzonFboSupplyOrderItems(shop, supplyOrder = {}, options = {}) {
+  if (!hasRealOzonCredentials(shop)) return [];
+  const supplyOrderId = String(supplyOrder.supply_order_id || supplyOrder.id || "").trim();
+  const supplyOrderNumber = String(supplyOrder.supply_order_number || supplyOrder.number || "").trim();
+  if (!supplyOrderId && !supplyOrderNumber) return [];
+  const errors = [];
+  for (const path of ["/v3/supply-order/get", "/v1/supply-order/items", "/v1/supply-order/bundle", "/v2/supply-order/get", "/v1/supply-order/get", "/v1/fbo/supply-order/bundle", "/v1/fbo/supply-order/get"]) {
+    try {
+      const payload = buildOzonSupplyOrderDetailPayload(path, supplyOrderId || supplyOrderNumber);
+      const data = await ozonRequest(shop, path, payload, { signal: options.signal });
+      const result = data.result || data;
+      const items = extractOzonSupplyOrderItems(result);
+      return normalizeOzonFboSupplyOrderItems(items, supplyOrder, shop);
+    } catch (error) {
+      errors.push(`${path}: ${error?.message || error}`);
+      if (options.signal?.aborted) throwIfAborted(options.signal);
+    }
+  }
+  throw new Error(`Ozon FBO supply-order items failed for ${shop.name || shop.id}: ${errors.join(" | ")}`);
+}
+
+function normalizeOzonFboSupplyOrder(item = {}, shop = {}) {
+  if (typeof item === "string" || typeof item === "number") {
+    return {
+      shop_id: shop.id,
+      shop_name: shop.name || "",
+      supply_order_id: String(item),
+      supply_order_number: String(item),
+      status: "",
+      warehouse_name: "",
+      created_at: "",
+      updated_at: "",
+      appointment_at: "",
+      raw_json: stringify({ order_id: item })
+    };
+  }
+  const raw = item.supply_order || item.order || item;
+  return {
+    shop_id: shop.id,
+    shop_name: shop.name || "",
+    supply_order_id: String(raw.supply_order_id || raw.id || raw.order_id || ""),
+    supply_order_number: String(raw.supply_order_number || raw.order_number || raw.number || raw.name || ""),
+    status: String(raw.status || raw.state || ""),
+    warehouse_name: String(raw.warehouse_name || raw.warehouse?.name || raw.destination_warehouse_name || ""),
+    created_at: String(raw.created_at || raw.createdAt || raw.created || ""),
+    updated_at: String(raw.updated_at || raw.updatedAt || ""),
+    appointment_at: String(raw.appointment_at || raw.appointment?.date || raw.timeslot?.from || raw.shipping_date || ""),
+    raw_json: stringify(raw)
+  };
+}
+
+function buildOzonSupplyOrderDetailPayload(path = "", orderId = "") {
+  if (path.includes("/v3/")) return { order_ids: [String(orderId)] };
+  if (path.includes("/bundle")) return { bundle_ids: [String(orderId)], limit: 100 };
+  return {
+    supply_order_id: String(orderId),
+    supply_order_number: String(orderId)
+  };
+}
+
+function extractOzonSupplyOrderItems(result = {}) {
+  if (Array.isArray(result)) return result;
+  if (Array.isArray(result.items)) return result.items;
+  if (Array.isArray(result.products)) return result.products;
+  if (Array.isArray(result.skus)) return result.skus;
+  if (Array.isArray(result.bundles)) return result.bundles;
+  if (Array.isArray(result.orders)) return result.orders.flatMap((order) => (
+    order.items || order.products || order.skus || order.bundles || []
+  ));
+  if (Array.isArray(result.supply_orders)) return result.supply_orders.flatMap((order) => (
+    order.items || order.products || order.skus || order.bundles || []
+  ));
+  if (Array.isArray(result.supply_order?.items)) return result.supply_order.items;
+  return [];
+}
+
+function normalizeOzonFboSupplyOrderItems(items = [], supplyOrder = {}, shop = {}) {
+  const list = Array.isArray(items) ? items : [items];
+  return list.map((item = {}) => {
+    const raw = item.product || item.item || item;
+    return {
+      shop_id: shop.id,
+      shop_name: shop.name || "",
+      supply_order_id: supplyOrder.supply_order_id || "",
+      supply_order_number: supplyOrder.supply_order_number || "",
+      status: supplyOrder.status || "",
+      warehouse_name: supplyOrder.warehouse_name || "",
+      appointment_at: supplyOrder.appointment_at || "",
+      ozon_sku: String(raw.sku || raw.ozon_sku || raw.fbo_sku || ""),
+      offer_id: String(raw.offer_id || raw.offerId || raw.vendor_code || ""),
+      product_id: String(raw.product_id || raw.ozon_product_id || ""),
+      quantity: stockNumber(raw.quantity || raw.count || raw.amount || raw.requested_quantity || raw.shipped_quantity),
+      accepted_quantity: stockNumber(raw.accepted_quantity || raw.received_quantity || raw.placed_quantity || raw.fact_quantity),
+      raw_json: stringify(raw)
+    };
+  }).filter((item) => item.ozon_sku || item.offer_id || item.product_id);
+}
+
 function normalizeOzonStockTurnoverItem(item = {}) {
   const sku = String(item.sku || item.ozon_sku || "");
   return {
@@ -263,6 +425,45 @@ export async function generateOzonBarcodes(shop, productIds = [], options = {}) 
     };
   }
   return ozonRequest(shop, "/v1/barcode/generate", { product_ids }, options);
+}
+
+function normalizeOzonWarehouses(data = {}) {
+  return normalizeOzonArrayPayload(data, ["warehouses", "items", "result"])
+    .filter((item = {}) => !isArchivedOzonWarehouse(item))
+    .map((item = {}) => ({
+      warehouse_id: String(item.warehouse_id || item.id || item.source_id || ""),
+      name: String(item.name || item.warehouse_name || item.title || item.source_name || ""),
+      status: String(item.status || item.state || ""),
+      is_rfbs: Boolean(item.is_rfbs || item.rfbs || item.delivery_schema === "rfbs"),
+      delivery_schema: String(item.delivery_schema || item.type || ""),
+      raw_json: stringify(item)
+    }))
+    .filter((item) => item.warehouse_id);
+}
+
+function isArchivedOzonWarehouse(item = {}) {
+  if (item.is_archived === true || item.archived === true || item.is_deleted === true || item.deleted === true) return true;
+  if (item.is_active === false || item.active === false || item.enabled === false) return true;
+  const statusText = [
+    item.status,
+    item.state,
+    item.warehouse_status,
+    item.warehouseStatus,
+    item.visibility,
+    item.lifecycle_status,
+    item.lifecycleStatus
+  ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean).join(" ");
+  if (!statusText) return false;
+  return [
+    "archive",
+    "archived",
+    "inactive",
+    "disabled",
+    "deleted",
+    "closed",
+    "blocked",
+    "removed"
+  ].some((marker) => statusText.includes(marker));
 }
 
 export async function createOzonProductBySku(shop, item, options = {}) {
@@ -614,6 +815,54 @@ export async function createOzonReviewComment(shop, reviewId, text, options = {}
   }, options);
 }
 
+export async function fetchOzonChatList(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) return { chats: [], endpoint: "", raw: null };
+  const limit = Math.min(Math.max(Number(options.limit || 50), 1), 100);
+  const offset = Math.max(Number(options.offset || 0), 0);
+  const basePayload = { limit, offset };
+  const defaultFilter = { chat_status: options.chat_status || "Opened" };
+  const candidates = [
+    { path: "/v3/chat/list", payload: { ...basePayload, filter: options.filter || defaultFilter } },
+    { path: "/v3/chat/list", payload: { ...basePayload, filter: options.filter || {} } },
+    { path: "/v3/chat/list", payload: basePayload },
+    { path: "/v2/chat/list", payload: { ...basePayload, filter: options.filter || defaultFilter } },
+    { path: "/v2/chat/list", payload: { ...basePayload, filter: options.filter || {} } },
+    { path: "/v1/chat/list", payload: { ...basePayload, filter: options.filter || defaultFilter } },
+    { path: "/v1/chat/list", payload: basePayload }
+  ];
+  return firstSuccessfulOzonChatRequest(shop, candidates, (data, endpoint) => ({
+    chats: normalizeOzonArrayPayload(data, ["chats", "items", "dialogs"]),
+    endpoint,
+    raw: data
+  }), options);
+}
+
+export async function fetchOzonChatHistory(shop, chatId, options = {}) {
+  if (!hasRealOzonCredentials(shop)) return { messages: [], endpoint: "", raw: null };
+  const chat_id = String(chatId || "").trim();
+  if (!chat_id) return { messages: [], endpoint: "", raw: null };
+  const limit = Math.min(Math.max(Number(options.limit || 50), 1), 100);
+  const offset = Math.max(Number(options.offset || 0), 0);
+  const fromMessageId = String(options.from_message_id || options.fromMessageId || "").trim();
+  const candidates = [
+    ...(fromMessageId ? [
+      { path: "/v3/chat/history", payload: { chat_id, from_message_id: fromMessageId, direction: "Backward", limit } },
+      { path: "/v3/chat/history", payload: { chat_id, from_message_id: fromMessageId, direction: "Forward", limit } }
+    ] : []),
+    { path: "/v3/chat/history", payload: { chat_id, direction: "Forward", limit } },
+    { path: "/v3/chat/history", payload: { chat_id, direction: "Backward", limit } },
+    { path: "/v2/chat/history", payload: { chat_id, limit, offset } },
+    { path: "/v1/chat/history", payload: { chat_id, limit, offset } },
+    { path: "/v2/chat/messages", payload: { chat_id, limit, offset } },
+    { path: "/v1/chat/messages", payload: { chat_id, limit, offset } }
+  ];
+  return firstSuccessfulOzonChatRequest(shop, candidates, (data, endpoint) => ({
+    messages: normalizeOzonArrayPayload(data, ["messages", "items"]),
+    endpoint,
+    raw: data
+  }), options);
+}
+
 async function fetchOzonProductIds(shop) {
   const productIds = new Map();
   const visibilityFilters = [
@@ -726,7 +975,10 @@ async function ozonRequestOnce(shop, path, payload, options = {}) {
   }
   if (!response.ok) {
     const message = data.message || data.error || text || `Ozon API ${response.status}`;
-    throw new Error(`Ozon ${path} failed: ${message}`);
+    const error = new Error(`Ozon ${path} failed: ${message}`);
+    error.statusCode = response.status;
+    error.path = path;
+    throw error;
   }
   return data;
 }
@@ -765,6 +1017,32 @@ function ozonApiKey(shop = {}) {
 function hasRealOzonCredentials(shop = {}) {
   const apiKey = ozonApiKey(shop);
   return Boolean(shop.ozon_client_id && apiKey && !apiKey.startsWith("demo"));
+}
+
+async function firstSuccessfulOzonChatRequest(shop, candidates = [], normalize, options = {}) {
+  const errors = [];
+  for (const candidate of candidates) {
+    try {
+      const data = await ozonRequest(shop, candidate.path, candidate.payload, options);
+      return normalize(data, candidate.path);
+    } catch (error) {
+      errors.push(`${candidate.path}: ${error?.message || error}`);
+      if (options.signal?.aborted) throwIfAborted(options.signal);
+    }
+  }
+  const message = errors.join(" | ") || "Ozon chat endpoint unavailable";
+  throw new Error(`Ozon chat request failed for ${shop.name || shop.id}: ${message}`);
+}
+
+function normalizeOzonArrayPayload(data = {}, keys = []) {
+  const result = data?.result || data || {};
+  for (const key of keys) {
+    if (Array.isArray(result?.[key])) return result[key];
+    if (Array.isArray(data?.[key])) return data[key];
+  }
+  if (Array.isArray(result)) return result;
+  if (Array.isArray(result?.result)) return result.result;
+  return [];
 }
 
 async function ozonBinaryRequest(shop, path, payload, options = {}) {
@@ -836,13 +1114,26 @@ function throwIfAborted(signal) {
   throw new Error(reason || "本次拉取已取消");
 }
 
+function resolvedOzonSku(item = {}) {
+  return String(
+    item.sku
+      || item.fbo_sku
+      || item.fbs_sku
+      || item.product_sku
+      || item.productSku
+      || item.ozon_sku
+      || firstSourceSku(item.sources)
+      || ""
+  );
+}
+
 function normalizeOzonProduct(item, listVisibility = "") {
   const images = productImages(item);
   const primaryImage = imageUrl(item.primary_image || item.primary_image_url || item.image || item.main_image || item.color_image || images[0] || "");
   const price = numberFromOzon(item.price ?? item.marketing_price ?? item.old_price);
   const marketingPrice = numberFromOzon(item.marketing_price);
   const oldPrice = numberFromOzon(item.old_price);
-  const sku = item.sku || item.fbo_sku || item.fbs_sku || firstSourceSku(item.sources) || item.barcode || item.offer_id || String(item.id || item.product_id || "");
+  const sku = resolvedOzonSku(item);
   const archived = Boolean(item.archived || item.is_archived || item.is_autoarchived || listVisibility === "ARCHIVED");
   const visibility = item.visibility || listVisibility || (item.visibility_details?.has_price === false ? "limited" : (item.visible === false ? "hidden" : "visible"));
   const attributes = {
@@ -880,8 +1171,17 @@ function normalizeOzonProduct(item, listVisibility = "") {
     commissions_json: stringify(item.commissions || item.commission || []),
     attributes_json: stringify(attributes),
     raw_json: stringify(item),
+    published_at: item.published_at || item.created_at || item.date || "",
     ozon_updated_at: item.updated_at || item.updated_at_in_ozon || item.created_at || ""
   };
+}
+
+export function normalizeOzonProductForTest(item, listVisibility = "") {
+  return normalizeOzonProduct(item, listVisibility);
+}
+
+export function normalizeOzonPostingForTest(item) {
+  return normalizeOzonPosting(item);
 }
 
 function normalizeOzonReview(item = {}) {
@@ -919,7 +1219,7 @@ function normalizeOzonReviewComment(item = {}) {
 function normalizeOzonStockItem(item) {
   const productId = String(item.product_id || item.id || "");
   const offerId = String(item.offer_id || "");
-  const sku = String(item.sku || item.fbo_sku || item.fbs_sku || item.ozon_sku || firstSourceSku(item.sources) || offerId || productId);
+  const sku = resolvedOzonSku(item);
   const stockRows = normalizeArray(item.stocks || item.stock || item.sources || item.warehouses || []);
   if (!stockRows.length) {
     return [{
@@ -1047,7 +1347,7 @@ function normalizeOzonPosting(item) {
         || ""
       );
       return {
-        ozon_sku: String(product.sku || product.offer_id || ""),
+        ozon_sku: resolvedOzonPostingSku(product),
         ozon_product_id: String(product.product_id || product.id || financialProduct.product_id || financialProduct.id || ""),
         offer_id: String(product.offer_id || ""),
         name: product.name || "",
@@ -1125,6 +1425,18 @@ function imageUrl(value) {
 function firstSourceSku(sources) {
   if (!Array.isArray(sources)) return "";
   return sources.find((source) => source?.sku)?.sku || "";
+}
+
+function resolvedOzonPostingSku(item = {}) {
+  return String(
+    item.sku
+      || item.ozon_sku
+      || item.product_sku
+      || item.productSku
+      || item.fbo_sku
+      || item.fbs_sku
+      || ""
+  );
 }
 
 function numberFromOzon(value) {
@@ -1274,4 +1586,17 @@ function demoStockRows(shop) {
       raw_json: JSON.stringify(item)
     }
   ]));
+}
+
+function demoWarehouses(shop) {
+  return [
+    {
+      warehouse_id: `100${Number(shop?.id || 0) || 1}`,
+      name: "Demo FBS 仓库",
+      status: "active",
+      is_rfbs: false,
+      delivery_schema: "fbs",
+      raw_json: "{}"
+    }
+  ];
 }

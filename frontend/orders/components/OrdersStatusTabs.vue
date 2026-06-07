@@ -1,5 +1,6 @@
 <script setup>
 import { computed } from "vue";
+import { Sort } from "@element-plus/icons-vue";
 
 const props = defineProps({
   statusTabs: { type: Array, default: () => [] },
@@ -15,8 +16,7 @@ const emit = defineEmits([
   "change-status",
   "change-print-view",
   "change-mark-filter",
-  "bulk-print",
-  "bulk-prepare"
+  "configure-status-tabs"
 ]);
 
 const visibleMarkFilters = computed(() => (
@@ -26,10 +26,6 @@ const visibleMarkFilters = computed(() => (
 const deliveryPrintViews = computed(() => (
   (props.printViews || []).filter((item) => item && item.value !== "all")
 ));
-
-function actionLabel(base, count) {
-  return count > 0 ? `${base} ${count}` : base;
-}
 
 function tabTone(value) {
   return {
@@ -93,23 +89,12 @@ function tabTone(value) {
         </div>
 
         <div class="orders-status-actions">
+          <el-tooltip content="调整订单标签顺序" placement="top">
+            <button type="button" class="orders-status-sort-button" aria-label="调整订单标签顺序" @click="emit('configure-status-tabs')">
+              <el-icon><Sort /></el-icon>
+            </button>
+          </el-tooltip>
           <span class="orders-selected-count" :class="{ active: selectedCount > 0 }">已选 {{ selectedCount }}</span>
-          <button
-            type="button"
-            class="orders-chip-button orders-status-action-button orders-status-action-print"
-            :disabled="selectedCount <= 0"
-            @click="emit('bulk-print')"
-          >
-            {{ actionLabel("批量打印", selectedCount) }}
-          </button>
-          <el-button
-            class="orders-status-action-slot orders-status-action-prepare orders-toolbar-btn orders-toolbar-btn-primary"
-            type="primary"
-            :disabled="selectedCount <= 0"
-            @click="emit('bulk-prepare')"
-          >
-            {{ actionLabel("批量备货", selectedCount) }}
-          </el-button>
         </div>
       </div>
     </div>

@@ -1,6 +1,7 @@
 import {
   createListingCategoryTemplate,
   createListingTemplateFromCollectedProduct,
+  createListingTemplateFromOnlineProduct,
   createListingDraft,
   copyListingTemplateFromOzonSku,
   generateListingShopCopies,
@@ -32,15 +33,21 @@ import {
   lookupCollectedProductFromPlugin,
   collectorBoxProducts,
   collectorBoxProductDetail,
+  collectorBoxMappingDiagnostics,
   deleteCollectorBoxProducts,
   createSelectionFromCollectorBox,
   createListingTemplateFromCollectorBox,
+  listingTemplateMappingDiagnostics,
+  listingTemplateHealthCheck,
+  repairListingTemplateMapping,
   syncListingOzonAttributeValues,
   syncListingOzonCategories,
   syncListingOzonCategoryAttributes,
   uploadListingMedia,
   validateListingTemplatePublish,
-  updateListingCategoryTemplate
+  updateListingCategoryTemplate,
+  autoSyncListingPublishRecords,
+  onlineProductListingEditDraft
 } from "./listing-automation.js";
 import {
   assetVariantBootstrap,
@@ -61,6 +68,7 @@ import {
   resolveAssetTailTemplateFile,
   resolveAssetVariantFile,
   saveShopVariantRule,
+  selectionPublishShops,
   syncAssetOzonCategories
 } from "./asset-variant-engine.js";
 import {
@@ -71,6 +79,76 @@ import {
   testAiProviderConfig,
   updateAiProviderConfig
 } from "./ai-provider-settings.js";
+
+async function translateCustomerMessageTemplateZh(body = {}) {
+  const scenario = String(body.scenario || "").trim();
+  const label = String(body.label || body.name || scenario || "客户消息模板").trim();
+  const text = String(body.template_text || body.text || "").trim();
+  if (!text) return { ok: true, translated_text: "", template_translation: "" };
+  const strictResult = await chatWithAiProvider({
+    temperature: 0.1,
+    maxTokens: 700,
+    messages: [
+      {
+        role: "system",
+        content: [
+          "你是跨境电商运营助理，负责把俄语客户消息模板翻译成中文示意。",
+          "只输出中文译文，不要输出俄语，不要使用 Markdown，不要加标题或解释。",
+          "必须完整保留所有模板变量原文，例如 {{posting_number}}、{{product_summary}}、{{status_label}}、{{shop_name}}，变量名和花括号都不能改。",
+          "只翻译人能读懂的俄语文字；遇到变量时把变量放在中文句子中合适的位置。",
+          "语气要像运营自己看的中文对照稿，清楚自然，不要 AI 腔，不要逐字生硬直译。",
+          "如果原模板是多行，请尽量保持相近的换行结构，方便和上方俄语模板对照。"
+        ].join("\n")
+      },
+      {
+        role: "user",
+        content: `场景：${label}\n\n请把下面俄语模板翻译成中文示意，并保留所有 {{变量}}：\n${text}`
+      }
+    ]
+  });
+  const strictTranslated = String(strictResult.content || "")
+    .replace(/^```[a-zA-Z]*\s*/g, "")
+    .replace(/```$/g, "")
+    .trim();
+  return {
+    ok: true,
+    translated_text: strictTranslated,
+    template_translation: strictTranslated,
+    provider: strictResult.provider,
+    model: strictResult.model
+  };
+  const result = await chatWithAiProvider({
+    temperature: 0.1,
+    maxTokens: 700,
+    messages: [
+      {
+        role: "system",
+        content: [
+          "你是跨境电商运营助理，负责把俄语客户消息模板翻译成中文释义。",
+          "只输出中文，不要输出俄语，不要使用 Markdown。",
+          "保留模板变量，例如 {{posting_number}}、{{product_summary}}、{{status_label}}，不要翻译变量名。",
+          "翻译要让运营看懂这段模板发给客户是什么意思，语气自然简洁。",
+          "如果原文是多行模板，请按大意翻译成 2-5 行中文，不要逐字生硬直译。"
+        ].join("\n")
+      },
+      {
+        role: "user",
+        content: `场景：${label}\n\n俄语模板：\n${text}`
+      }
+    ]
+  });
+  const translated = String(result.content || "")
+    .replace(/^```[a-zA-Z]*\s*/g, "")
+    .replace(/```$/g, "")
+    .trim();
+  return {
+    ok: true,
+    translated_text: translated,
+    template_translation: translated,
+    provider: result.provider,
+    model: result.model
+  };
+}
 import {
   aiPromptTemplateDetail,
   aiPromptTemplates,
@@ -84,10 +162,13 @@ import {
 import {
   aiStrategies,
   aiStrategyDetail,
+  aiStrategyLayerRuleDetail,
   aiStrategyLayerRules,
   createAiStrategy,
+  createAiStrategyLayerRule,
   deleteAiStrategy,
   resolveAiStrategyPlan,
+  updateAiStrategyLayerRule,
   updateAiStrategy
 } from "./ai-strategies.js";
 import {
@@ -118,19 +199,31 @@ import {
   syncOzonReviewsMysql
 } from "./reviews.js";
 import {
+  claimPluginPrepareRequest,
   claimNextCollectRequests,
+  authBindingStatus,
   createCollectRun,
   deleteCollectRun,
   deleteSnapshot,
   deleteSnapshots,
   finishCollectRequest,
+  finishPluginPrepareRequest,
   getAnalysis,
+  getPluginStatus,
   getSummary,
   listCollectRuns,
   listMetrics,
+  listOperationTodos,
   listSnapshots,
+  preparePlugin,
+  probeSellerAnalyticsAuth,
+  refreshOperationTodos,
   retryCollectRun,
+  saveAuthBinding,
+  savePluginStatus,
   saveSnapshot,
+  startDirectCollect,
+  validatePluginStatus,
   sellerAnalyticsDb
 } from "./seller-analytics.js";
 import {
@@ -144,14 +237,19 @@ import {
   addSelectionToInventoryMysql,
   applyHistoricalProfitReviewActionMysql,
   batchUpdateInboundRecordsMysql,
+  batchUpdateOnlineProductStocksMysql,
   bindOnlineProductMysql,
   cancelPurchaseOrderMysql,
   cleanExpiredSessionsMysql,
   cleanupHistoricalDeliveredReturnLossMysql,
+  cleanupHistoricalUnconfirmedActualProfitMysql,
   commitProductCsvImportMysql,
+  confirmFbpTransferReceivedMysql,
   confirmPurchaseOrderMysql,
   createInboundRecordMysql,
   createInventoryMovementMysql,
+  customerChatThreadMessagesMysql,
+  customerChatThreadsMysql,
   customerMessageCustomerOrdersMysql,
   customerMessageSettingsMysql,
   customerMessagesMysql,
@@ -163,6 +261,7 @@ import {
   createOrderProcurementRequestsMysql,
   createOrderCancellationRuleMysql,
   createPersonMysql,
+  createFbpTransferRecordMysql,
   createProcurementRequestMysql,
   createProductFromOnlineProductMysql,
   createProductMysql,
@@ -171,6 +270,7 @@ import {
   createSupplierMysql,
   currentExchangeRateMysql,
   dashboardMysql,
+  directInboundProcurementRequestsMysql,
   deleteInboundRecordMysql,
   deleteLogisticsRuleMysql,
   deleteOrderCancellationRuleMysql,
@@ -189,14 +289,18 @@ import {
   hiddenProductsMysql,
   historicalProfitReviewMysql,
   inboundRecordsMysql,
+  adjustInventoryStockDebtMysql,
   inventoryCurrentMysql,
   inventoryMysql,
+  inventoryStockDebtsMysql,
   logisticsRulesMysql,
   markOrderLabelsPrintedMysql,
   mappingsMysql,
   mergeProcurementRequestsMysql,
   mergeProductsMysql,
   onlineProductsMysql,
+  onlineProductEditDraftMysql,
+  onlineProductWarehousesMysql,
   productMergeHistoryMysql,
   orderPackageLabelMysql,
   orderCancellationRulesMysql,
@@ -237,6 +341,7 @@ import {
   purchaseOrdersMysql,
   rawOzonOrdersMysql,
   recalculateAllMappedOrderProfitsMysql,
+  forceRecalculateOrderProfitsForProductMysql,
   recalculateHistoricalOrderProfitsMysql,
   recalculateOrderProfitMysql,
   recalculateOrderProfitsForProductMysql,
@@ -252,14 +357,17 @@ import {
   startBatchUpdateInboundRecordsMysql,
   startConfirmProcurementRequestsPurchasedMysql,
   fbpOpportunitiesMysql,
+  fbpTransferRecordsMysql,
   stockAlertsMysql,
   stockWarehouseRulesMysql,
   submitProcurementRequestsMysql,
   suppliersMysql,
   syncDemoOrdersMysql,
+  syncCustomerChatsMysql,
   syncKnownOzonPostingDetailsMysql,
   syncOzonIncrementalOrdersMysql,
   syncOzonFinanceMysql,
+  syncOzonFboSupplyOrdersMysql,
   syncOzonOnlineProductsMysql,
   syncOzonPostingsByNumberMysql,
   syncOzonStocksMysql,
@@ -270,6 +378,7 @@ import {
   updateCustomerMessageShopSettingMysql,
   updateCustomerMessageTemplateMysql,
   updateInboundRecordMysql,
+  updateUserPreferenceMysql,
   updateLogisticsRuleMysql,
   updateOnlineProductMysql,
   updateOrderCancellationRuleMysql,
@@ -282,6 +391,7 @@ import {
   updateShopMysql,
   updateSkuMappingMysql,
   updateStockWarehouseRuleMysql,
+  userPreferenceMysql,
   updateSupplierMysql,
   shipOrdersMysql
 } from "./mysql-cutover.js";
@@ -298,6 +408,10 @@ import {
   saveOzonActionCleanupConfigMysql,
   toggleOzonSellerActionMysql
 } from "./ozon-actions.js";
+import {
+  importFbpSupplyPdfMysql,
+  previewFbpSupplyPdfMysql
+} from "./fbp-supply-pdf-import.js";
 
 function notMigrated(name) {
   return () => {
@@ -331,8 +445,12 @@ export const mysqlRuntimeServices = {
   aiPromptTemplates,
   aiStrategies,
   aiStrategyDetail,
+  aiStrategyLayerRuleDetail,
   aiStrategyLayerRules,
+  createAiStrategyLayerRule,
+  updateAiStrategyLayerRule,
   bindOnlineProduct: bindOnlineProductMysql,
+  batchUpdateOnlineProductStocks: batchUpdateOnlineProductStocksMysql,
   batchUpdateInboundRecords: batchUpdateInboundRecordsMysql,
   cancelPurchaseOrder: cancelPurchaseOrderMysql,
   chatWithAiProvider,
@@ -340,14 +458,19 @@ export const mysqlRuntimeServices = {
   confirmPurchaseOrder: confirmPurchaseOrderMysql,
   createInboundRecord: createInboundRecordMysql,
   createInventoryMovement: createInventoryMovementMysql,
+  adjustInventoryStockDebt: adjustInventoryStockDebtMysql,
+  customerChatThreadMessages: customerChatThreadMessagesMysql,
+  customerChatThreads: customerChatThreadsMysql,
   customerMessageCustomerOrders: customerMessageCustomerOrdersMysql,
   customerMessageSettings: customerMessageSettingsMysql,
   customerMessages: customerMessagesMysql,
   sendCustomerMessage: sendCustomerMessageMysql,
+  translateCustomerMessageTemplateZh,
   translateCustomerMessageRu: translateCustomerMessageRuMysql,
   createLogisticsRule: createLogisticsRuleMysql,
   createListingCategoryTemplate,
   createListingTemplateFromCollectedProduct,
+  createListingTemplateFromOnlineProduct,
   createSelectionFromCollectorBox,
   createListingDraft,
   copyListingTemplateFromOzonSku,
@@ -365,6 +488,7 @@ export const mysqlRuntimeServices = {
   createStockWarehouseRule: createStockWarehouseRuleMysql,
   createSupplier: createSupplierMysql,
   currentExchangeRate: currentExchangeRateMysql,
+  directInboundProcurementRequests: directInboundProcurementRequestsMysql,
   deleteInboundRecord: deleteInboundRecordMysql,
   deleteLogisticsRule: deleteLogisticsRuleMysql,
   deleteOrderCancellationRule: deleteOrderCancellationRuleMysql,
@@ -390,11 +514,13 @@ export const mysqlRuntimeServices = {
   publishSelectionProductToOzon,
   recoverAssetVariantJobsOnStartup,
   retryAssetVariantJobFailures,
+  selectionPublishShops,
   generateSelectionSellingPoints,
   getOzonActionCleanupConfig: getOzonActionCleanupConfigMysql,
   hardDeletePerson: hardDeletePersonMysql,
   hiddenProducts: hiddenProductsMysql,
   inboundRecords: inboundRecordsMysql,
+  inventoryStockDebts: inventoryStockDebtsMysql,
   inventory: inventoryMysql,
   inventoryCurrent: inventoryCurrentMysql,
   logisticsRules: logisticsRulesMysql,
@@ -402,8 +528,12 @@ export const mysqlRuntimeServices = {
   listingCategoryTemplates,
   collectorBoxProductDetail,
   collectorBoxProducts,
+  collectorBoxMappingDiagnostics,
   deleteCollectorBoxProducts,
   createListingTemplateFromCollectorBox,
+  listingTemplateMappingDiagnostics,
+  listingTemplateHealthCheck,
+  repairListingTemplateMapping,
   listingCopyJobs,
   listingDrafts,
   listingMediaAssets,
@@ -419,6 +549,7 @@ export const mysqlRuntimeServices = {
   listingOzonCategorySyncJobs,
   listingPublishRecordDetail,
   listingPublishRecords,
+  autoSyncListingPublishRecords,
   listingShopCopies,
   listOzonActionCandidates: listOzonActionCandidatesMysql,
   listOzonActionProducts: listOzonActionProductsMysql,
@@ -430,6 +561,8 @@ export const mysqlRuntimeServices = {
   mergeProcurementRequests: mergeProcurementRequestsMysql,
   mergeProducts: mergeProductsMysql,
   onlineProducts: onlineProductsMysql,
+  onlineProductEditDraft: onlineProductListingEditDraft,
+  onlineProductWarehouses: onlineProductWarehousesMysql,
   productMergeHistory: productMergeHistoryMysql,
   orderCancellationRules: orderCancellationRulesMysql,
   orderDetail: orderDetailMysql,
@@ -474,12 +607,24 @@ export const mysqlRuntimeServices = {
   sellerAnalyticsAnalysis: (query = {}, tenantId = "admin") => getAnalysis(sellerAnalyticsDb, query, tenantId),
   sellerAnalyticsCollectRuns: (query = {}, tenantId = "admin") => listCollectRuns(sellerAnalyticsDb, query, tenantId),
   sellerAnalyticsCreateCollectRun: (body = {}, tenantId = "admin") => createCollectRun(sellerAnalyticsDb, body, tenantId),
+  sellerAnalyticsStartDirectCollect: (body = {}, tenantId = "admin") => startDirectCollect(sellerAnalyticsDb, body, tenantId),
+  sellerAnalyticsPreparePlugin: (body = {}, tenantId = "admin") => preparePlugin(sellerAnalyticsDb, body, tenantId),
+  sellerAnalyticsClaimPluginPrepare: (tenantId = "admin") => claimPluginPrepareRequest(sellerAnalyticsDb, tenantId),
+  sellerAnalyticsFinishPluginPrepare: (body = {}, tenantId = "admin") => finishPluginPrepareRequest(sellerAnalyticsDb, body, tenantId),
+  sellerAnalyticsProbeAuth: (body = {}) => probeSellerAnalyticsAuth(body),
+  sellerAnalyticsBindAuth: (body = {}, tenantId = "admin") => saveAuthBinding(sellerAnalyticsDb, body, tenantId),
+  sellerAnalyticsAuthBindingStatus: (query = {}, tenantId = "admin") => authBindingStatus(sellerAnalyticsDb, query, tenantId),
   sellerAnalyticsDeleteCollectRun: (id, tenantId = "admin") => deleteCollectRun(sellerAnalyticsDb, id, tenantId),
   sellerAnalyticsDeleteSnapshot: (id, tenantId = "admin") => deleteSnapshot(sellerAnalyticsDb, id, tenantId),
   sellerAnalyticsDeleteSnapshots: (ids = [], tenantId = "admin") => deleteSnapshots(sellerAnalyticsDb, ids, tenantId),
   sellerAnalyticsFinishCollectRequest: (runId, requestId, body = {}, tenantId = "admin") => finishCollectRequest(sellerAnalyticsDb, runId, requestId, body, tenantId),
   sellerAnalyticsMetrics: (query = {}, tenantId = "admin") => listMetrics(sellerAnalyticsDb, query, tenantId),
-  sellerAnalyticsNextCollectRequests: (tenantId = "admin", limit = 6) => claimNextCollectRequests(sellerAnalyticsDb, tenantId, limit),
+  sellerAnalyticsNextCollectRequests: (tenantId = "admin", limit = 6, query = {}) => claimNextCollectRequests(sellerAnalyticsDb, tenantId, limit, query),
+  sellerAnalyticsOperationTodos: (query = {}, tenantId = "admin") => listOperationTodos(sellerAnalyticsDb, query, tenantId),
+  sellerAnalyticsPluginStatus: (tenantId = "admin") => getPluginStatus(sellerAnalyticsDb, tenantId),
+  sellerAnalyticsSavePluginStatus: (body = {}, tenantId = "admin") => savePluginStatus(sellerAnalyticsDb, body, tenantId),
+  sellerAnalyticsValidatePluginStatus: (query = {}, tenantId = "admin") => validatePluginStatus(sellerAnalyticsDb, query, tenantId),
+  sellerAnalyticsRefreshOperationTodos: (query = {}, tenantId = "admin") => refreshOperationTodos(sellerAnalyticsDb, query, tenantId),
   sellerAnalyticsRetryCollectRun: (id, tenantId = "admin") => retryCollectRun(sellerAnalyticsDb, id, tenantId),
   sellerAnalyticsSaveSnapshot: (body = {}, tenantId = "admin") => saveSnapshot(sellerAnalyticsDb, body, tenantId),
   sellerAnalyticsSnapshots: (query = {}, tenantId = "admin") => listSnapshots(sellerAnalyticsDb, query, tenantId),
@@ -498,14 +643,20 @@ export const mysqlRuntimeServices = {
   selectionProduct: selectionProductMysql,
   selectionProducts: selectionProductsMysql,
   shops: shopsMysql,
+  confirmFbpTransferReceived: confirmFbpTransferReceivedMysql,
+  createFbpTransferRecord: createFbpTransferRecordMysql,
+  importFbpSupplyPdf: importFbpSupplyPdfMysql,
+  previewFbpSupplyPdf: previewFbpSupplyPdfMysql,
   startBatchUpdateInboundRecords: startBatchUpdateInboundRecordsMysql,
   startConfirmProcurementRequestsPurchased: startConfirmProcurementRequestsPurchasedMysql,
   fbpOpportunities: fbpOpportunitiesMysql,
+  fbpTransferRecords: fbpTransferRecordsMysql,
   stockAlerts: stockAlertsMysql,
   stockWarehouseRules: stockWarehouseRulesMysql,
   submitProcurementRequests: submitProcurementRequestsMysql,
   suppliers: suppliersMysql,
   syncOzonFinance: syncOzonFinanceMysql,
+  syncOzonFboSupplyOrders: syncOzonFboSupplyOrdersMysql,
   syncKnownOzonPostingDetails: syncKnownOzonPostingDetailsMysql,
   syncOzonOnlineProducts: syncOzonOnlineProductsMysql,
   toggleOzonSellerAction: toggleOzonSellerActionMysql,
@@ -516,6 +667,7 @@ export const mysqlRuntimeServices = {
   updateCustomerMessageShopSetting: updateCustomerMessageShopSettingMysql,
   updateCustomerMessageTemplate: updateCustomerMessageTemplateMysql,
   updateInboundRecord: updateInboundRecordMysql,
+  updateUserPreference: updateUserPreferenceMysql,
   updateListingCategoryTemplate,
   updateLogisticsRule: updateLogisticsRuleMysql,
   updateOnlineProduct: updateOnlineProductMysql,
@@ -530,11 +682,13 @@ export const mysqlRuntimeServices = {
   updateShop: updateShopMysql,
   updateSkuMapping: updateSkuMappingMysql,
   updateStockWarehouseRule: updateStockWarehouseRuleMysql,
+  userPreference: userPreferenceMysql,
   updateSupplier: updateSupplierMysql,
 
   all: allMysql,
   applyHistoricalProfitReviewAction: applyHistoricalProfitReviewActionMysql,
   cleanupHistoricalDeliveredReturnLoss: cleanupHistoricalDeliveredReturnLossMysql,
+  cleanupHistoricalUnconfirmedActualProfit: cleanupHistoricalUnconfirmedActualProfitMysql,
   commitProductCsvImport: commitProductCsvImportMysql,
   dashboard: dashboardMysql,
   ensureProductBarcodeLabelCacheReady: ensureProductBarcodeLabelCacheReadyMysql,
@@ -549,8 +703,11 @@ export const mysqlRuntimeServices = {
   performOnlineProductAction: performOnlineProductActionMysql,
   previewCustomerMessage: previewCustomerMessageMysql,
   recordCustomerMessage: recordCustomerMessageMysql,
+  customerChatThreadMessages: customerChatThreadMessagesMysql,
+  customerChatThreads: customerChatThreadsMysql,
   customerMessageCustomerOrders: customerMessageCustomerOrdersMysql,
   sendCustomerMessage: sendCustomerMessageMysql,
+  translateCustomerMessageTemplateZh,
   translateCustomerMessageRu: translateCustomerMessageRuMysql,
   previewMergeProducts: previewMergeProductsMysql,
   previewOrderProcurement: previewOrderProcurementMysql,
@@ -561,6 +718,7 @@ export const mysqlRuntimeServices = {
   profitRankingDetails: profitRankingDetailsMysql,
   profitSummary: profitSummaryMysql,
   recalculateAllMappedOrderProfits: recalculateAllMappedOrderProfitsMysql,
+  forceRecalculateOrderProfitsForProduct: forceRecalculateOrderProfitsForProductMysql,
   recalculateHistoricalOrderProfits: recalculateHistoricalOrderProfitsMysql,
   recalculateOrderProfit: recalculateOrderProfitMysql,
   recalculateOrderProfitsForProduct: recalculateOrderProfitsForProductMysql,
@@ -572,6 +730,7 @@ export const mysqlRuntimeServices = {
   refreshOzonCategoryCache,
   shipOrders: shipOrdersMysql,
   syncDemoOrders: syncDemoOrdersMysql,
+  syncCustomerChats: syncCustomerChatsMysql,
   syncOzonIncrementalOrders: syncOzonIncrementalOrdersMysql,
   syncOzonStocks: syncOzonStocksMysql,
   testAiProviderConfig,

@@ -25,6 +25,7 @@
     "docs:api:check": "node scripts/check-api-docs.mjs",
     "check:health": "node scripts/health-check.mjs",
     "check:deploy-preflight": "node scripts/check-deploy-preflight.mjs",
+    "check:inventory-merge-risks": "node scripts/audit-inventory-merge-risks.mjs",
     "profile:http-pages": "node scripts/profile-mysql-pages.mjs",
     "check:ui": "node scripts/check-ui-design-system.mjs",
     "check:frontend-safety": "node scripts/check-frontend-safety.mjs",

@@ -555,12 +555,12 @@ onBeforeUnmount(() => {
 }
 
 .sku-thumb {
-  width: 48px !important;
-  min-width: 48px !important;
-  max-width: 48px !important;
-  height: 64px !important;
-  min-height: 64px !important;
-  max-height: 64px !important;
+  width: 64px !important;
+  min-width: 64px !important;
+  max-width: 64px !important;
+  height: 84px !important;
+  min-height: 84px !important;
+  max-height: 84px !important;
   margin: 0 auto;
   display: flex !important;
   align-items: center !important;
@@ -569,21 +569,21 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   border: 1px solid rgba(148, 163, 184, 0.18);
   background: #f8fafc;
-  flex: 0 0 48px !important;
+  flex: 0 0 64px !important;
 }
 
 .sku-thumb__img {
-  width: 48px !important;
-  min-width: 48px !important;
-  max-width: 48px !important;
-  height: 64px !important;
-  min-height: 64px !important;
-  max-height: 64px !important;
+  width: 64px !important;
+  min-width: 64px !important;
+  max-width: 64px !important;
+  height: 84px !important;
+  min-height: 84px !important;
+  max-height: 84px !important;
   display: block !important;
   object-fit: contain !important;
   object-position: center center !important;
   overflow: hidden !important;
-  flex: 0 0 48px !important;
+  flex: 0 0 64px !important;
   cursor: zoom-in;
 }
 

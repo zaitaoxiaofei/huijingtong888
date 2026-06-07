@@ -1,5 +1,7 @@
 # MySQL Preparation Plan
 
+> Historical note: this document records the earlier SQLite-to-MySQL migration plan. The current runtime baseline is already MySQL, and `DATABASE_PATH` is no longer part of active runtime configuration.
+
 Last updated: 2026-05-17
 
 ## 1. Goal
@@ -303,7 +305,7 @@ Remove known SQLite-only SQL patterns from high-value paths.
 
 Current checklist document:
 
-- [docs/SQLITE_TO_MYSQL_COMPATIBILITY_CHECKLIST.md](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/docs/SQLITE_TO_MYSQL_COMPATIBILITY_CHECKLIST.md)
+- [SQLITE_TO_MYSQL_COMPATIBILITY_CHECKLIST.md](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/docs/archive/legacy-sqlite/SQLITE_TO_MYSQL_COMPATIBILITY_CHECKLIST.md)
 
 ### Acceptance criteria
 
@@ -395,7 +397,7 @@ Prepare the production switch only after dry-run quality is acceptable.
 | Split schema/migration/bootstrap/repair logic | Next | Backend | Reduce `src/db.js` responsibilities. |
 | SQLite-specific SQL audit | Next | Backend | Produce a query compatibility checklist. |
 | MySQL driver selection | Next | Backend | Prefer `mysql2`; ORM decision can remain later. |
-| MySQL schema draft | In progress | Backend | Initial draft now lives in `docs/MYSQL_SCHEMA_DRAFT.md`; continue table-by-table refinement and DDL generation. |
+| MySQL schema draft | In progress | Backend | Initial draft now lives in `docs/archive/legacy-sqlite/MYSQL_SCHEMA_DRAFT.md`; continue table-by-table refinement and DDL generation. |
 | SQLite-to-MySQL migration script | In progress | Backend | SQLite-side export/verification plus MySQL-side init/import/compare scripts now exist; next step is executing them against a reachable MySQL instance. |
 | Backup/restore redesign for MySQL | Backlog | Backend/Ops | Current docs and scripts are SQLite-only. |
 | MySQL dry run on real snapshot | In progress | Backend | SQLite export side is ready and MySQL import/compare scripts exist; next step is importing into MySQL and comparing counts/aggregates with real connection settings. |
@@ -446,7 +448,7 @@ Decision criteria:
 When progress is made on this plan:
 
 1. Update the relevant row in [docs/DEVELOPMENT_TRACKER.md](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/docs/DEVELOPMENT_TRACKER.md).
-2. If the execution order changes, update [docs/SYSTEM_OPTIMIZATION_ROADMAP.md](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/docs/SYSTEM_OPTIMIZATION_ROADMAP.md).
+2. If the execution order changes, update [SYSTEM_OPTIMIZATION_ROADMAP.md](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/docs/archive/legacy-sqlite/SYSTEM_OPTIMIZATION_ROADMAP.md).
 3. If runtime entry or config changes, update [docs/PROJECT_GUIDE.md](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/docs/PROJECT_GUIDE.md).
 
 ## 11. Definition of Ready

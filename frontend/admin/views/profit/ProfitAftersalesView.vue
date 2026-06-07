@@ -715,7 +715,7 @@ onMounted(async () => {
 
 .aftersales-item-thumb {
   width: 64px;
-  height: 64px;
+  height: 84px;
   display: block;
   border: 1px solid #e2e8f0;
   border-radius: 8px;

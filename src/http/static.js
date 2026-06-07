@@ -44,17 +44,16 @@ export function createStaticHandler(publicDir) {
     const ext = path.extname(filePath);
     const headers = { "Content-Type": CONTENT_TYPES[ext] || "application/octet-stream" };
     const isVueAppAsset = /\/vue-apps\/assets\/.+\.(css|js)$/i.test(cleanPath);
-    const isVersionedAsset = /\/vue-apps\/assets\/.+\.[a-z0-9_-]+\.(css|js)$/i.test(cleanPath)
-      || /[?&]v=\d+/i.test(cleanPath);
+    const isVersionedAsset = /\/vue-apps\/assets\/.+-[a-z0-9_-]{6,}\.(css|js)$/i.test(cleanPath);
     const isMutableEntryAsset = /\/vue-apps\/assets\/(admin-view|config-view|admin|config)\.(js|css)$/i.test(cleanPath);
     if (cleanPath === "/admin.html" || cleanPath === "/release.json" || ext === ".html") {
-      headers["Cache-Control"] = "no-store, must-revalidate";
-    } else if (isVueAppAsset) {
       headers["Cache-Control"] = "no-store, must-revalidate";
     } else if (isMutableEntryAsset) {
       headers["Cache-Control"] = "no-store, must-revalidate";
     } else if (isVersionedAsset) {
       headers["Cache-Control"] = "public, max-age=31536000, immutable";
+    } else if (isVueAppAsset) {
+      headers["Cache-Control"] = "public, max-age=600, must-revalidate";
     } else if ([".css", ".js"].includes(ext)) {
       headers["Cache-Control"] = "public, max-age=600, must-revalidate";
     }

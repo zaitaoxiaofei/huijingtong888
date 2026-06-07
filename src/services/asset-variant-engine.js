@@ -13,13 +13,16 @@ import { chatWithAiProvider } from "./ai-provider-settings.js";
 import { editOpenAiImage } from "../server/services/openai/imageGenerationService.js";
 import {
   ensureListingAutomationSchema,
+  generateUniqueListingOfferId,
   listingCategoryTemplateDetail,
   publishListingTemplateToOzon,
   registerListingMediaAssetFromFile,
+  standardizeListingTemplateForAutomation,
   validateListingTemplatePublish
 } from "./listing-automation.js";
 
 const ROOT_DIR = process.cwd();
+const LOCAL_ASSET_ROOTS = localAssetRootCandidates(ROOT_DIR);
 const VARIANT_ROOT = path.resolve(ROOT_DIR, "uploads", "shop-variants");
 const TAIL_TEMPLATE_ROOT = path.resolve(ROOT_DIR, "public", "uploads", "asset-tail-templates");
 const LISTING_MEDIA_ROOT = path.resolve(ROOT_DIR, "public", "uploads", "listing-media");
@@ -182,6 +185,48 @@ export async function assetVariantBootstrap() {
     ozonCategories,
     vehicleModelOptions: vehicleModels,
     tailTemplates
+  };
+}
+
+export async function selectionPublishShops(query = {}) {
+  await ensureAssetVariantSchema();
+  const productId = Number(query.productId || query.product_id || query.selectionId || query.selection_id || 0);
+  let ownerPersonId = 0;
+  let ownerName = "";
+  if (productId) {
+    const productRows = await mysqlQuery(`
+      SELECT p.owner_person_id, pe.name AS owner_name
+      FROM products p
+      LEFT JOIN people pe ON pe.id = p.owner_person_id
+      WHERE p.id = ? AND p.active = 1
+      LIMIT 1
+    `, [productId]);
+    ownerPersonId = Number(productRows[0]?.owner_person_id || 0) || 0;
+    ownerName = String(productRows[0]?.owner_name || "").trim();
+  }
+  const shops = await mysqlQuery(`
+    SELECT s.id, s.name, s.status, s.legal_entity,
+      r.price_role, r.price_index
+    FROM shops s
+    LEFT JOIN shop_variant_rules r ON r.shop_id = s.id
+    WHERE s.status <> 'deleted'
+    ORDER BY s.id
+  `);
+  return {
+    productId,
+    ownerPersonId,
+    ownerName,
+    shops: shops.map((row) => ({
+      id: Number(row.id),
+      name: row.name || "",
+      status: row.status || "",
+      legalEntity: row.legal_entity || "",
+      legal_entity: row.legal_entity || "",
+      rule: normalizeRule({
+        priceRole: row.price_role,
+        priceIndex: row.price_index
+      })
+    }))
   };
 }
 
@@ -685,6 +730,17 @@ async function validateAssetVariantPublishPrecheck({ template, shopId = 0, varia
   const warnings = [...(validation.warnings || [])];
 
   const title = String(firstItem.name || payload.name || template?.title || template?.template_name || "").trim();
+  const shop = shopId ? await mysqlQuery("SELECT name, legal_entity FROM shops WHERE id = ? LIMIT 1", [Number(shopId)]).then((rows) => rows[0] || null).catch(() => null) : null;
+  const contentCheck = inspectAssetVariantListingContent({
+    title,
+    description: firstItem.description || payload.description || template?.description || "",
+    richContent,
+    tags: extractAssetVariantTagsForCheck(firstItem, payload, template),
+    categoryName: firstItem.category_name || payload.category_name || template?.category_name || "",
+    shopName: shop?.name || shop?.legal_entity || ""
+  });
+  errors.push(...contentCheck.errors);
+  warnings.push(...contentCheck.warnings);
   if (hasReplacementMarks(title)) errors.push("Title contains unreadable replacement marks");
   if (containsCjk(title)) warnings.push("Title still contains Chinese characters");
   if (!media.length) errors.push("No product images prepared for Ozon");
@@ -712,6 +768,108 @@ async function validateAssetVariantPublishPrecheck({ template, shopId = 0, varia
   };
 }
 
+export function inspectAssetVariantListingContent({
+  title = "",
+  description = "",
+  richContent = "",
+  tags = [],
+  categoryName = "",
+  shopName = ""
+} = {}) {
+  const errors = [];
+  const warnings = [];
+  const normalizedTags = normalizeTags(tags);
+  const tagText = normalizedTags.join(" ");
+  const bodyText = [title, description, richContentText(richContent)].join(" ");
+  const factsText = [title, description, categoryName].join(" ");
+  const shop = cleanText(shopName, 160);
+  const shopTag = shopNameTagToken(shop);
+
+  if (shop) {
+    if (!normalizedTags.some((tag) => sameTagToken(tag, shopTag))) {
+      errors.push(`Product tags must include shop tag ${shopTag}`);
+    }
+    if (!containsLooseText(description, shop)) {
+      errors.push(`Description must mention shop name ${shop}`);
+    }
+    if (richContent && !containsLooseText(richContentText(richContent), shop)) {
+      warnings.push(`Rich content text should mention shop name ${shop}`);
+    }
+  } else {
+    warnings.push("Shop name is unavailable; cannot enforce shop-bound listing text");
+  }
+
+  if (containsCjk(title)) warnings.push("Title contains Chinese characters");
+  if (containsCjk(description)) warnings.push("Description contains Chinese characters");
+  if (normalizedTags.length < 8) warnings.push("Product tags look too sparse; consider adding category and buyer-search terms");
+  if (String(description || "").split(/\s+/).filter(Boolean).length < 50) warnings.push("Description is short; Ozon SEO text may be weak");
+
+  const looksLikeKeyProduct = /key|fob|\u94a5\u5319|брелок/i.test(factsText);
+  const hasKeyCaseTerms = /key[\s_-]*(case|cover|protection)|car[\s_-]*key|брелок|ключ/i.test(`${tagText} ${bodyText}`);
+  if (!looksLikeKeyProduct && hasKeyCaseTerms) {
+    errors.push("Non-key product content contains key-case related terms");
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors: uniqueValues(errors),
+    warnings: uniqueValues(warnings),
+    tags: normalizedTags
+  };
+}
+
+function extractAssetVariantTagsForCheck(firstItem = {}, payload = {}, template = {}) {
+  const editable = objectValue(template?.editable_payload || template?.editablePayload || {});
+  const attrs = [
+    ...normalizeArray(firstItem.attributes),
+    ...normalizeArray(payload.attributes),
+    ...normalizeArray(template?.attributes),
+    ...normalizeArray(editable.attributes)
+  ];
+  const attrTags = attrs
+    .filter((attr) => /tag|hashtag|тег|ключевые|标签/i.test(String(attr?.name || "")) || Number(attr?.attribute_id || attr?.id || 0) === 23171)
+    .flatMap((attr) => normalizeArray(attr?.values).map((item) => item?.value || item?.name || item).concat(attr?.value || []));
+  return [
+    ...normalizeArray(firstItem.tags || firstItem.hashtags),
+    ...normalizeArray(payload.tags || payload.hashtags),
+    ...normalizeArray(template?.tags),
+    ...normalizeArray(editable.tags || editable.hashtags),
+    ...attrTags
+  ];
+}
+
+function richContentText(value = "") {
+  if (!value) return "";
+  if (typeof value !== "string") return JSON.stringify(value);
+  try {
+    return JSON.stringify(JSON.parse(value));
+  } catch {
+    return value;
+  }
+}
+
+function normalizeArray(value) {
+  if (Array.isArray(value)) return value.filter((item) => item !== undefined && item !== null && item !== "");
+  if (value === undefined || value === null || value === "") return [];
+  return [value];
+}
+
+function objectValue(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value === "string" && value.trim().startsWith("{")) return parseJson(value, {});
+  return {};
+}
+
+function sameTagToken(left = "", right = "") {
+  return tagToken(left) === tagToken(right);
+}
+
+function containsLooseText(haystack = "", needle = "") {
+  const normalize = (value) => String(value || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+  const right = normalize(needle);
+  return Boolean(right && normalize(haystack).includes(right));
+}
+
 export async function publishSelectionProductToOzon(body = {}, session = null, context = {}) {
   await ensureAssetVariantSchema();
   await ensureListingAutomationSchema();
@@ -723,14 +881,15 @@ export async function publishSelectionProductToOzon(body = {}, session = null, c
   const product = productRows[0];
   if (!product) throw new Error("Product not found");
   if (!Number(product.package_weight_g || product.weight_g || 0)) throw new Error("请先填写包装克重后再一键上架");
-  const publisherName = await personNameForSession(session);
+  const ownerPersonId = Number(product.owner_person_id || 0) || null;
+  const productOwnerName = ownerPersonId ? await personNameById(ownerPersonId) : "";
+  const publisherName = productOwnerName || await personNameForSession(session);
 
   await context.markStage?.("bootstrap", { productId });
   const bootstrap = await assetVariantBootstrap();
   const requestedShopIds = uniqueNumbers(body.shopIds || body.shop_ids);
-  const shopIds = (requestedShopIds.length ? requestedShopIds : bootstrap.shops.map((shop) => shop.id))
-    .map(Number)
-    .filter(Boolean);
+  if (!requestedShopIds.length) throw new Error("请至少选择一个上架店铺");
+  const shopIds = requestedShopIds.map(Number).filter(Boolean);
   if (!shopIds.length) throw new Error("Please select shops");
 
   const mainImage = product.image_url || product.primary_image || `/api/products/${product.id}/image`;
@@ -786,6 +945,9 @@ export async function enqueuePublishSelectionProductToOzon(body = {}, session = 
   await ensureAssetVariantSchema();
   const productId = Number(body.productId || body.product_id || body.selectionId || body.selection_id || 0);
   if (!productId) throw new Error("Missing productId");
+  const shopIds = uniqueNumbers(body.shopIds || body.shop_ids);
+  if (!shopIds.length) throw new Error("请至少选择一个上架店铺");
+  const requestBody = { ...body, shopIds };
   const jobNo = `AVJ-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Date.now().toString(36).toUpperCase()}`;
   const insertResult = await mysqlExecute(`
     INSERT INTO asset_variant_jobs
@@ -794,7 +956,7 @@ export async function enqueuePublishSelectionProductToOzon(body = {}, session = 
   `, [
     jobNo,
     productId,
-    JSON.stringify(body || {}),
+    JSON.stringify(requestBody),
     personId(session)
   ]);
   const jobId = Number(insertResult.insertId || 0);
@@ -1000,6 +1162,7 @@ async function runAssetVariantJob(job) {
       `, [JSON.stringify({ message: error.message || "Asset variant job cancelled" }), row.id]);
       return;
     }
+    const errorPayload = buildAssetVariantJobErrorPayload(error);
     const finalProgress = progress.finish("failed", { error: error.message || String(error) });
     await mysqlExecute(`
       UPDATE asset_variant_jobs
@@ -1007,7 +1170,7 @@ async function runAssetVariantJob(job) {
         current_stage = 'failed', progress_json = ?,
         finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND status = 'running'
-    `, [JSON.stringify({ message: error.message || String(error), stack: error.stack || "" }), JSON.stringify(finalProgress), row.id]);
+    `, [JSON.stringify(errorPayload), JSON.stringify(finalProgress), row.id]);
   }
 }
 
@@ -1085,6 +1248,50 @@ function normalizeAssetVariantJobRow(row = {}) {
     finishedAt: row.finished_at || "",
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || ""
+  };
+}
+
+function buildAssetVariantJobErrorPayload(error) {
+  const rawMessage = String(error?.message || error || "").trim();
+  const assetPath = String(error?.assetPath || "").trim();
+  const source = String(error?.source || "").trim();
+  const lower = `${rawMessage} ${assetPath} ${source}`.toLowerCase();
+  if (error?.code === "LOCAL_ASSET_MISSING" || lower.includes("enoent") || lower.includes("no such file or directory")) {
+    if (lower.includes("shop-watermarks")) {
+      return {
+        code: "watermark_file_missing",
+        message: "店铺水印文件不存在，无法生成上架图片",
+        fix_tip: "请到店铺配置里重新上传这个店铺的水印图片，或先关闭/清空该店铺水印后再重新一键上架。",
+        raw_message: rawMessage,
+        asset_path: assetPath || source,
+        at: new Date().toISOString()
+      };
+    }
+    return {
+      code: "local_image_missing",
+      message: "本地图片文件不存在，无法生成上架素材",
+      fix_tip: "请重新上传商品主图/详情图，或把采集图片改成可访问的公网图片后再重新一键上架。",
+      raw_message: rawMessage,
+      asset_path: assetPath || source,
+      at: new Date().toISOString()
+    };
+  }
+  if (lower.includes("http") && (lower.includes("image") || lower.includes("图片"))) {
+    return {
+      code: "remote_image_unavailable",
+      message: "采集图片链接无法下载，无法生成上架素材",
+      fix_tip: "请打开图片链接确认能访问；如果源站防盗链，建议先把图片上传到本地素材后再一键上架。",
+      raw_message: rawMessage,
+      at: new Date().toISOString()
+    };
+  }
+  return {
+    code: "asset_variant_job_error",
+    message: rawMessage || "一键上架任务失败，未返回具体原因",
+    fix_tip: "请检查商品图片、店铺水印、类目、重量尺寸和价格后再重试。",
+    raw_message: rawMessage,
+    stack: error?.stack || "",
+    at: new Date().toISOString()
   };
 }
 
@@ -1578,15 +1785,20 @@ async function generateVariantImages({ material, shopDir, watermark, tailImageUr
 
   const detailImages = await mapWithConcurrency(detailSources, ASSET_IMAGE_CONCURRENCY, async (source, index) => {
     await throwIfCancelled?.();
-    const output = path.join(detailDir, `detail-${String(index + 1).padStart(2, "0")}.jpg`);
-    const buffer = await readImageBuffer(source);
-    await throwIfCancelled?.();
-    const detailImage = await applyWatermark(buffer, watermark);
-    await detailImage.jpeg({ quality: 92 }).toFile(output);
-    await throwIfCancelled?.();
-    return imageResult(output, "detail", index + 1, { batchId, shopId, sourceTitle, variantTitle });
+    try {
+      const output = path.join(detailDir, `detail-${String(index + 1).padStart(2, "0")}.jpg`);
+      const buffer = await readImageBuffer(source);
+      await throwIfCancelled?.();
+      const detailImage = await applyWatermark(buffer, watermark);
+      await detailImage.jpeg({ quality: 92 }).toFile(output);
+      await throwIfCancelled?.();
+      return imageResult(output, "detail", index + 1, { batchId, shopId, sourceTitle, variantTitle });
+    } catch (error) {
+      console.warn(`skip unavailable detail image ${index + 1}:`, error?.message || error);
+      return null;
+    }
   });
-  images.push(...detailImages);
+  images.push(...detailImages.filter(Boolean));
   await throwIfCancelled?.();
 
   if (tailImageUrl) {
@@ -1606,7 +1818,7 @@ async function generateAiSimilarMainImage({ mainBuffer, material, sourceTitle = 
     "Use the uploaded image as a reference and create a similar but not identical e-commerce main image.",
     "Keep the same product category, visual hierarchy, premium commercial ad feeling, and marketplace-ready 3:4 composition.",
     "Do not copy the exact original image. Recompose lighting, background, product angle, and typography while preserving the selling intent.",
-    "For Ozon Russian market automotive accessory listing: luxury city or studio scene, clear product focus, high contrast, realistic materials.",
+    `For an Ozon Russian marketplace listing in category "${material?.ozonCategoryName || "marketplace product"}": clean commercial scene, clear product focus, high contrast, realistic materials.`,
     sourceTitle ? `Source product title: ${sourceTitle}.` : "",
     variantTitle ? `Target listing title: ${variantTitle}.` : "",
     material?.description ? `Product notes: ${cleanText(material.description, 400)}.` : "",
@@ -1666,6 +1878,7 @@ function buildTitleGenerationPrompt(material, shop) {
   const dimensions = [material.lengthCm, material.widthCm, material.heightCm].filter(Boolean).join(' x ');
   const productFacts = {
     sourceProductNameZh: material.title || '',
+    ozonCategoryName: material.ozonCategoryName || '',
     color: material.color || '',
     material: material.material || '',
     quantity: material.quantity || '',
@@ -1676,10 +1889,10 @@ function buildTitleGenerationPrompt(material, shop) {
     shopName: shop?.name || ''
   };
   return [
-    'You are an Ozon Russia listing title specialist for automotive accessories.',
+    'You are an Ozon Russia listing title specialist. Use the selected Ozon category and product facts as the source of truth.',
     'The input product name is Chinese source material only. Do NOT transliterate it and do NOT place the Chinese name at the beginning of the Russian title.',
     'The Russian title field MUST contain Russian/Latin letters and numbers only where needed. It MUST NOT contain any Chinese characters.',
-    'Create original Russian product titles that fit Ozon product card expectations: the buyer must quickly understand product type, compatible car/model if present, material, color, quantity, and key value.',
+    'Create original Russian product titles that fit Ozon product card expectations: the buyer must quickly understand product type, selected category, compatibility only if present, material, color, quantity, and key value.',
     'Use natural Russian. Avoid keyword stuffing, unsupported claims, price words, discount words, contact info, competitor names, and absolute claims such as best/guaranteed/original unless the fact is explicitly provided.',
     'Do not use words meaning replica/fake/copy/1:1/analog/original/genuine. Keep titles truthful to the given facts.',
     'Return ONLY valid JSON with keys traffic, material, scenario, value, premium.',
@@ -2170,14 +2383,17 @@ async function assetVariantDescription(variant, tags = []) {
   const title = cleanText(variant.variant_title || variant.source_title || "", 500);
   const material = russianMaterialText(variant.material_text);
   const color = russianColorText(variant.color);
-  const vehicle = extractLikelyCarModel(String(variant.variant_title || "") + " " + String(variant.source_title || "")) || "";
+  const category = cleanText(variant.ozon_category_name || "", 500);
+  const sourceNotes = cleanText(variant.description_text || variant.description || "", 600);
+  const shopName = cleanText(variant.shop_name || variant.shopName || "", 160);
   try {
     const request = {
       provider: "deepseek",
       messages: [
         { role: "system", content: [
           "Write only natural buyer-facing Russian product prose for Ozon.",
-          "Do not include shop names, hashtags, tag lists, keyword dumps, or phrases like 'ключевые особенности', 'теги', 'ключевые слова'.",
+          "Include the shop name naturally once and invite the buyer to purchase from this shop.",
+          "Do not include hashtags, tag lists, keyword dumps, or phrases like 'ключевые особенности', 'теги', 'ключевые слова'.",
           "Do not paste comma-separated tags into the description.",
           "Every sentence must explain real product information: purpose, material, fit, protection, use scenario, package contents.",
           "No Chinese or English except brand/model names and material abbreviations such as TPU or ABS."
@@ -2185,9 +2401,11 @@ async function assetVariantDescription(variant, tags = []) {
         { role: "user", content: [
           "Write a natural Ozon short description in Russian, 100-150 words.",
           "Title: " + title,
-          "Vehicle/model: " + vehicle,
+          "Ozon category: " + category,
+          "Source selling points: " + sourceNotes,
           "Material: " + material,
           "Color: " + color,
+          "Shop name that must be mentioned once: " + shopName,
           "Semantic tags for context only, do not copy them literally: " + tags.join(" ")
         ].join("\n") }
       ],
@@ -2200,7 +2418,7 @@ async function assetVariantDescription(variant, tags = []) {
       request,
       maxAttempts: 2
     });
-    const text = sanitizeOzonDescriptionText(cleanText(result.content || "", 1400));
+    const text = ensureShopBoundDescription(sanitizeOzonDescriptionText(cleanText(result.content || "", 1400)), shopName);
     if (russianWordCount(text) >= 70 && !looksBrokenGeneratedText(text) && !hasCjkText(text)) return text;
   } catch (error) {
     console.warn("asset variant description AI failed", error?.message || error);
@@ -2220,7 +2438,6 @@ function sanitizeOzonDescriptionText(value) {
     .replace(/Теги\s*:\s*[^.?!]+[.?!]?/giu, "")
     .replace(/Хэштеги\s*:\s*[^.?!]+[.?!]?/giu, "");
   text = text.replace(/#[\p{L}\p{N}_-]+/gu, "");
-  text = text.replace(/\b(?:ruvibemart|ruvibe\s*mart)\b[,;\s]*/giu, "");
   text = text.replace(/\s*,\s*,+/g, ", ").replace(/\s{2,}/g, " ").trim();
   text = text.replace(/\s*,\s*,+/g, ", ").replace(/\s{2,}/g, " ").trim();
   return text;
@@ -2229,16 +2446,33 @@ function sanitizeOzonDescriptionText(value) {
 function fallbackRussianDescription(variant, tags = []) {
   const material = russianMaterialText(variant.material_text);
   const color = russianColorText(variant.color);
-  const vehicle = extractLikelyCarModel(variant.variant_title || variant.source_title || variant.vehicle_model || "") || "автомобиля";
-  const productType = detectProductType(variant.variant_title || variant.source_title || "", variant.description || "");
-  return sanitizeOzonDescriptionText([
-    `${productType} для ${vehicle} подходит для ежедневного использования, аккуратной защиты и удобного хранения.`,
-    `Материал ${material} помогает снизить риск царапин, потертостей и следов от постоянного контакта с другими предметами.`,
-    `Цвет ${color} выглядит сдержанно и легко сочетается с интерьером автомобиля и личными аксессуарами.`,
-    "Форма рассчитана на комфортный хват, быстрый доступ к кнопкам и уверенное использование в дороге, на парковке и дома.",
-    "Описание помогает покупателю понять назначение товара, ключевые преимущества, сценарии применения и совместимость с автомобилем.",
-    "Подходит как практичный автоаксессуар и небольшой подарок водителю."
-  ].join(" "));
+  const category = cleanRussianFact(variant.ozon_category_name);
+  const sourceNotes = cleanRussianFact(variant.description_text || variant.description);
+  const shopName = cleanText(variant.shop_name || variant.shopName || "", 160);
+  const inferredProductType = detectProductTypeByFacts(
+    variant.variant_title || variant.source_title || "",
+    variant.description_text || variant.description || "",
+    variant.ozon_category_name || ""
+  );
+  const categoryText = category ? `Категория товара: ${category}.` : "";
+  const notesText = sourceNotes ? `Особенности: ${sourceNotes}.` : "";
+  return ensureShopBoundDescription(sanitizeOzonDescriptionText([
+    `${inferredProductType} подходит для ежедневного использования и помогает покупателю решить практичную задачу без лишней подготовки.`,
+    categoryText,
+    `Материал ${material} выбран для аккуратного внешнего вида, комфортного контакта и стабильной формы при обычной эксплуатации.`,
+    `Цвет ${color} легко сочетается с разными стилями и делает товар универсальным для повседневного применения.`,
+    notesText,
+    "Описание сформировано на основе карточки товара, выбранной категории и заполненных характеристик, поэтому его можно использовать как основу для проверки перед публикацией."
+  ].join(" ")), shopName);
+}
+
+function ensureShopBoundDescription(description = "", shopName = "") {
+  const text = sanitizeOzonDescriptionText(description);
+  const shop = cleanText(shopName, 160);
+  if (!shop) return text;
+  const escaped = shop.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (new RegExp(escaped, "i").test(text)) return text;
+  return `${text} Добро пожаловать в магазин ${shop}: здесь можно выбрать этот товар для повседневного использования и оформить покупку в нашем магазине.`;
 }
 
 function russianMaterialText(value) {
@@ -2283,7 +2517,7 @@ function assetVariantRichContentJson(description = "", images = [], title = "") 
     content: [{ widgetName: "raShowcase", type: "billboard", blocks: [{
       imgLink: "",
       img: { src: imageUrl, srcMobile: imageUrl, alt: "", position: "width_full", positionMobile: "width_full", widthMobile: 1024, heightMobile: 1536 },
-      title: { items: [{ type: "text", content: cleanRussianTitle(title || "Автомобильный аксессуар", 120) }], size: "size4", align: "left", color: "color1" },
+      title: { items: [{ type: "text", content: cleanRussianTitle(title || "Товар для Ozon", 120) }], size: "size4", align: "left", color: "color1" },
       text: { size: "size2", align: "left", color: "color1", items: [{ type: "text", content: cleanDescription }] }
     }] }],
     version: 0.3
@@ -2320,6 +2554,7 @@ function assetVariantVariantRow(variant, images = [], videos = [], modelName = "
     video_cover_urls: videoUrls,
     price: numberValue(variant.ozon_price || numberValue(variant.internal_price) * 2),
     old_price: numberValue(variant.ozon_old_price || numberValue(variant.internal_price) * 4),
+    price_strategy_mode: "finalized",
     price_strategy_applied: true,
     color: variant.color || "",
     vehicle_brand: variant.vehicle_brand || "",
@@ -2343,6 +2578,7 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
   const tags = parseJson(variant.tags_json, []);
   const modelName = assetVariantModelName(variant);
   const descriptionCacheKey = [
+    variant.shop_name || variant.shopName || variant.shop_id || "",
     Number(variant.source_product_id || 0) || variant.source_title || variant.variant_title || "",
     variant.material_text || "",
     variant.color || "",
@@ -2358,6 +2594,7 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
   const attributes = assetVariantAttributes(variant, tags, description, modelName, richContentJson);
   const sourceRaw = {
     asset_variant_id: Number(variant.id),
+    source_product_id: Number(variant.source_product_id || 0) || null,
     batch_id: variant.batch_id || "",
     shop_id: Number(variant.shop_id || 0),
     shop_name: variant.shop_name || "",
@@ -2372,6 +2609,7 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
   };
   const editablePayload = {
     sku: `AV-${variant.id}`,
+    source_product_id: Number(variant.source_product_id || 0) || null,
     title: variant.variant_title || variant.source_title || "",
     description,
     ozon_category_id: ozonCategoryId,
@@ -2384,6 +2622,7 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
       value: Number(variant.ozon_price || Number(variant.internal_price || 0) * 2 || 0),
       old_price: Number(variant.ozon_old_price || Number(variant.internal_price || 0) * 4 || 0),
       currency_code: "CNY",
+      strategy_mode: "finalized",
       strategy_applied: true,
       vat: "0"
     },
@@ -2402,6 +2641,39 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
     attributes,
     variants: [assetVariantVariantRow(variant, images, videos, modelName)]
   };
+  const templatePayload = await standardizeListingTemplateForAutomation({
+    ozon_category_id: ozonCategoryId,
+    category_name: ozonCategoryName,
+    template_name: `asset_variant_engine:${variant.batch_id || "batch"}:${variant.shop_id || "shop"}:${variant.id}`,
+    title: editablePayload.title,
+    description: editablePayload.description,
+    source_type: "asset_variant_engine",
+    source_ozon_sku: editablePayload.sku,
+    source_raw: {
+      ...sourceRaw,
+      source_type: "asset_variant_engine",
+      from_selection_product: Boolean(variant.source_product_id),
+      selection_product_id: Number(variant.source_product_id || 0) || null
+    },
+    editable_payload: {
+      ...editablePayload,
+      source_raw: {
+        ...sourceRaw,
+        source_type: "asset_variant_engine",
+        from_selection_product: Boolean(variant.source_product_id),
+        selection_product_id: Number(variant.source_product_id || 0) || null
+      }
+    },
+    attributes,
+    images
+  }, {
+    sourceType: "asset_variant_engine",
+    sourceId: String(variant.id || ""),
+    shopId: Number(variant.shop_id || 0),
+    autoSync: false,
+    syncValues: false,
+    diagnostics: true
+  });
   const name = `缂備浇浜慨闈涱焽濡ゅ懎绀岄柛娑卞墰閻熸劙鏌?${variant.batch_id || "batch"}-${variant.shop_name || variant.shop_id || "shop"}-${variant.id}`;
   const [rows] = await connection.execute(`
     SELECT id
@@ -2417,13 +2689,13 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
           attributes_json = ?, images_json = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `, [
-      ozonCategoryName,
-      JSON.stringify(sourceRaw),
-      JSON.stringify(editablePayload),
-      editablePayload.title,
-      editablePayload.description,
-      JSON.stringify(attributes),
-      JSON.stringify(images),
+      templatePayload.category_name || ozonCategoryName,
+      JSON.stringify(templatePayload.source_raw || sourceRaw),
+      JSON.stringify(templatePayload.editable_payload || editablePayload),
+      templatePayload.title || editablePayload.title,
+      templatePayload.description || editablePayload.description,
+      JSON.stringify(templatePayload.attributes || attributes),
+      JSON.stringify(templatePayload.images || images),
       Number(rows[0].id)
     ]);
     return Number(rows[0].id);
@@ -2435,15 +2707,15 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
      attributes_json, images_json, created_by_person_id, updated_at)
     VALUES (?, ?, ?, '[]', '{}', '', '', '{}', 'asset_variant_engine', ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `, [
-    ozonCategoryId,
-    ozonCategoryName,
+    templatePayload.ozon_category_id || ozonCategoryId,
+    templatePayload.category_name || ozonCategoryName,
     name,
-    JSON.stringify(sourceRaw),
-    JSON.stringify(editablePayload),
-    editablePayload.title,
-    editablePayload.description,
-    JSON.stringify(attributes),
-    JSON.stringify(images),
+    JSON.stringify(templatePayload.source_raw || sourceRaw),
+    JSON.stringify(templatePayload.editable_payload || editablePayload),
+    templatePayload.title || editablePayload.title,
+    templatePayload.description || editablePayload.description,
+    JSON.stringify(templatePayload.attributes || attributes),
+    JSON.stringify(templatePayload.images || images),
     personId(session)
   ]);
   return Number(result.insertId);
@@ -2496,6 +2768,10 @@ async function insertListingDraftFromPackage(connection, templateId, variant, im
 }
 
 async function insertListingShopCopyFromPackage(connection, draftId, variant, images, videos = [], session) {
+  const offerId = await generateUniqueListingOfferId({
+    shopId: Number(variant.shop_id),
+    sourceProductId: Number(variant.source_product_id || 0) || 0
+  });
   const mappedImages = images.map((image, index) => ({
     url: assetMediaUrl(image),
     role: image.role || image.type || "",
@@ -2509,13 +2785,14 @@ async function insertListingShopCopyFromPackage(connection, draftId, variant, im
   const validation = { blocked: false, level: "green", errors: [], warnings: [] };
   await connection.execute(`
     INSERT INTO listing_shop_copies
-    (draft_id, shop_id, offer_id, title, price, stock_quantity, watermark_path, images_json, validation_json,
+    (draft_id, shop_id, offer_id, source_product_id, title, price, stock_quantity, watermark_path, images_json, validation_json,
      status, created_by_person_id, updated_at)
-    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 'prepared', ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'prepared', ?, CURRENT_TIMESTAMP)
   `, [
     draftId,
     Number(variant.shop_id),
-    `AV-${variant.id}-${Date.now().toString(36)}`,
+    offerId,
+    Number(variant.source_product_id || 0) || null,
     variant.variant_title || variant.source_title || "",
     Number(variant.ozon_price || variant.internal_price || 0),
     variant.watermark_path || "",
@@ -2692,17 +2969,22 @@ async function insertListingDraft(connection, templateId, variant, images, sessi
 }
 
 async function insertListingShopCopy(connection, draftId, variant, images, session) {
+  const offerId = await generateUniqueListingOfferId({
+    shopId: Number(variant.shop_id),
+    sourceProductId: Number(variant.source_product_id || 0) || 0
+  });
   const mappedImages = images.map((url, index) => ({ url, sort_order: index + 1 }));
   const validation = { blocked: false, level: "green", errors: [], warnings: [] };
   await connection.execute(`
     INSERT INTO listing_shop_copies
-    (draft_id, shop_id, offer_id, title, price, stock_quantity, watermark_path, images_json, validation_json,
+    (draft_id, shop_id, offer_id, source_product_id, title, price, stock_quantity, watermark_path, images_json, validation_json,
      status, created_by_person_id, updated_at)
-    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 'prepared', ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'prepared', ?, CURRENT_TIMESTAMP)
   `, [
     draftId,
     Number(variant.shop_id),
-    `AV-${variant.id}-${Date.now().toString(36)}`,
+    offerId,
+    Number(variant.source_product_id || 0) || null,
     variant.variant_title || variant.source_title || "",
     Number(variant.ozon_price || variant.internal_price || 0),
     variant.watermark_path || "",
@@ -3020,18 +3302,21 @@ function priceIndexForRole(role) {
 }
 
 function resolveShopPriceIndex(value, material = {}, shop = {}) {
-  const explicitRoleIndex = priceIndexForRole(shop.rule?.priceRole || shop.rule?.price_role);
-  if (explicitRoleIndex !== null) return explicitRoleIndex;
+  const role = String(shop.rule?.priceRole || shop.rule?.price_role || "").trim();
   const ownerName = String(material.publisherName || material.publisher_name || material.ownerName || material.owner_name || "").trim();
   const legalEntity = String(shop.legalEntity || shop.legal_entity || "").trim();
   const shopText = `${shop.name || ""} ${legalEntity}`.toLowerCase();
+  const ownerMatched = Boolean(ownerName && legalEntity && ownerName === legalEntity);
+  if (role === "main") return 1;
+  if (ownerMatched) return 1;
+  if (role === "new") return 0.95;
+  if (role === "lift") return 5;
+  if (role === "owner" || role === "other_owner") return 1.05;
   const defaultIndex = ownerName && legalEntity && ownerName === legalEntity
     ? 1
-    : /ruvibe\s*mart/i.test(String(shop.name || "").trim())
-      ? 1
-      : /(^|\s)(new|fresh)(\s|$)|新店|全新/.test(shopText)
-        ? 0.95
-        : 1.05;
+    : /(^|\s)(new|fresh)(\s|$)|新店|全新/.test(shopText)
+      ? 0.95
+      : 1.05;
   const parsed = normalizePriceIndex(value);
   if (Math.abs(parsed - 1) < 0.0001 && Math.abs(defaultIndex - 1) > 0.0001) return defaultIndex;
   return parsed;
@@ -3039,6 +3324,10 @@ function resolveShopPriceIndex(value, material = {}, shop = {}) {
 
 async function personNameForSession(session = null) {
   const id = personId(session);
+  return personNameById(id);
+}
+
+async function personNameById(id) {
   if (!id) return "";
   const row = await mysqlQuery("SELECT name FROM people WHERE id = ? LIMIT 1", [id]).then((rows) => rows[0]).catch(() => null);
   return String(row?.name || "").trim();
@@ -3108,7 +3397,15 @@ async function readImageBuffer(source) {
     if (!response.ok) throw new Error(`闂佹悶鍎辨晶鑺ユ櫠閺嶃劎鈻旈悗锝庡幗缁佹澘顭块幆鎵翱閻熸瑱绠撻弫?{response.status}`);
     return Buffer.from(await response.arrayBuffer());
   }
-  return fs.readFile(resolveLocalAssetPath(text));
+  const localPath = resolveLocalAssetPath(text);
+  if (!fsSync.existsSync(localPath)) {
+    const error = new Error(`本地图片文件不存在：${text}`);
+    error.code = "LOCAL_ASSET_MISSING";
+    error.assetPath = localPath;
+    error.source = text;
+    throw error;
+  }
+  return fs.readFile(localPath);
 }
 
 async function fetchImageBuffer(url) {
@@ -3169,6 +3466,21 @@ function normalizeUrl(value = "") {
   return normalized.startsWith("/") ? normalized : `/${normalized}`;
 }
 
+function localAssetRootCandidates(rootDir = ROOT_DIR) {
+  const roots = [];
+  let current = path.resolve(rootDir || ".");
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    roots.push(current);
+    const parent = path.dirname(current);
+    if (!parent || parent === current) break;
+    current = parent;
+  }
+  return roots.filter((root, index, list) => {
+    if (list.indexOf(root) !== index) return false;
+    return fsSync.existsSync(path.join(root, "package.json")) || fsSync.existsSync(path.join(root, "uploads"));
+  });
+}
+
 function resolveLocalAssetPath(value = "") {
   const text = String(value || "").trim();
   if (!text) return "";
@@ -3188,19 +3500,22 @@ function resolveLocalAssetPath(value = "") {
   }
   const candidates = [];
   const withoutLeadingSlash = normalized.replace(/^\/+/, "");
-  if (withoutLeadingSlash.startsWith("uploads/")) {
-    candidates.push(path.resolve(ROOT_DIR, "public", withoutLeadingSlash));
-    candidates.push(path.resolve(ROOT_DIR, withoutLeadingSlash));
+  for (const root of LOCAL_ASSET_ROOTS) {
+    if (withoutLeadingSlash.startsWith("uploads/")) {
+      candidates.push(path.resolve(root, "public", withoutLeadingSlash));
+      candidates.push(path.resolve(root, withoutLeadingSlash));
+    }
+    if (withoutLeadingSlash.startsWith("shop-watermarks/")) {
+      candidates.push(path.resolve(root, "uploads", withoutLeadingSlash));
+      candidates.push(path.resolve(root, "public", "uploads", withoutLeadingSlash));
+    }
+    if (withoutLeadingSlash.startsWith("public/")) {
+      candidates.push(path.resolve(root, withoutLeadingSlash));
+    }
+    candidates.push(path.isAbsolute(normalized) ? normalized : path.resolve(root, withoutLeadingSlash));
   }
-  if (withoutLeadingSlash.startsWith("shop-watermarks/")) {
-    candidates.push(path.resolve(ROOT_DIR, "uploads", withoutLeadingSlash));
-    candidates.push(path.resolve(ROOT_DIR, "public", "uploads", withoutLeadingSlash));
-  }
-  if (withoutLeadingSlash.startsWith("public/")) {
-    candidates.push(path.resolve(ROOT_DIR, withoutLeadingSlash));
-  }
-  candidates.push(path.isAbsolute(normalized) ? normalized : path.resolve(ROOT_DIR, withoutLeadingSlash));
-  return candidates.find((candidate) => fsSync.existsSync(candidate)) || candidates[0] || text;
+  const uniqueCandidates = uniqueValues(candidates);
+  return uniqueCandidates.find((candidate) => fsSync.existsSync(candidate)) || uniqueCandidates[0] || text;
 }
 
 async function removeLocalAssetPath(value, { recursive = false } = {}) {
@@ -3352,39 +3667,30 @@ function buildListingJson({ shop, title, titleZh, material, images, rule, tailTe
 }
 
 function fallbackTitle(material, style, shop) {
-  const productType = detectProductType(material.title, material.description);
-  const carModel = extractLikelyCarModel(`${material.vehicleModel || ""} ${material.title || ""}`) || "";
-  const materialPart = material.material ? russianFactValue(material.material, "material") : "";
-  const colorValue = russianFactValue(material.color, "color");
-  const quantityValue = russianFactValue(material.quantity, "quantity");
-  const parts = [carModel, materialPart, colorValue, quantityValue].filter(Boolean).join(" ");
-  const suffixByStyle = {
-    traffic: "для автомобиля, точная посадка и защита на каждый день",
-    material: "из прочного материала, аккуратная посадка и защита от износа",
-    scenario: "для ежедневного использования, удобного хранения и аккуратной защиты",
-    value: "практичный автоаксессуар для защиты и комфорта",
-    premium: "аккуратный автоаксессуар со сдержанным дизайном"
+  const genericProductType = detectProductTypeByFacts(material.title, material.description, material.ozonCategoryName);
+  const genericModel = extractLikelyCarModel(`${material.vehicleModel || ""} ${material.title || ""}`) || "";
+  const genericMaterial = material.material ? russianFactValue(material.material, "material") : "";
+  const genericColor = russianFactValue(material.color, "color");
+  const genericQuantity = russianFactValue(material.quantity, "quantity");
+  const genericParts = [genericModel, genericMaterial, genericColor, genericQuantity].filter(Boolean).join(" ");
+  const genericSuffixByStyle = {
+    traffic: "для ежедневного использования, удобная форма и практичная комплектация",
+    material: "из прочного материала, аккуратное исполнение и надежность на каждый день",
+    scenario: "для повседневного применения, удобного хранения и бережного использования",
+    value: "практичный товар для дома, поездки или личного использования",
+    premium: "аккуратный дизайн, приятный внешний вид и универсальное применение"
   };
-  const ru = cleanRussianTitle(`${productType}${parts ? ` ${parts}` : ""}, ${suffixByStyle[style] || suffixByStyle.traffic}`, 500);
-  return { ru, zh: buildChineseTitleMeaning(ru, material) };
+  const genericRu = cleanRussianTitle(`${genericProductType}${genericParts ? ` ${genericParts}` : ""}, ${genericSuffixByStyle[style] || genericSuffixByStyle.traffic}`, 500);
+  return { ru: genericRu, zh: buildChineseTitleMeaning(genericRu, material) };
 }
 function buildChineseTitleMeaning(ruTitle, material = {}) {
-  const productType = chineseProductType(material.title, material.description);
-  const model = extractLikelyCarModel(String(material.vehicleModel || "") + " " + String(material.title || "")) || "";
-  const materialText = chineseFactValue(material.material, "material");
-  const colorText = chineseFactValue(material.color, "color");
-  const quantityText = chineseFactValue(material.quantity, "quantity");
-  const parts = [model, materialText, colorText, quantityText].filter(Boolean).join(" / ");
-  return cleanText(productType + (parts ? " - " + parts : ""), 500);
-}
-
-function chineseProductType(title, description) {
-  const text = String((title || "") + " " + (description || "")).toLowerCase();
-  if (text.includes("key") || text.includes("钥匙") || text.includes("брелок")) return "汽车钥匙保护壳";
-  if (text.includes("安全带") || text.includes("seat belt") || text.includes("ремень")) return "安全带护肩套";
-  if (text.includes("light") || text.includes("led") || text.includes("灯")) return "汽车灯饰";
-  if (text.includes("film") || text.includes("膜")) return "汽车保护膜";
-  return "汽车用品";
+  const genericProductType = chineseProductTypeByFacts(material.title, material.description, material.ozonCategoryName);
+  const genericModel = extractLikelyCarModel(String(material.vehicleModel || "") + " " + String(material.title || "")) || "";
+  const genericMaterial = chineseFactValue(material.material, "material");
+  const genericColor = chineseFactValue(material.color, "color");
+  const genericQuantity = chineseFactValue(material.quantity, "quantity");
+  const genericParts = [genericModel, genericMaterial, genericColor, genericQuantity].filter(Boolean).join(" / ");
+  return cleanText(genericProductType + (genericParts ? " - " + genericParts : ""), 500);
 }
 
 function chineseFactValue(value, type = "") {
@@ -3404,13 +3710,74 @@ function chineseFactValue(value, type = "") {
 }
 
 function generateShopTags(material, shop, rule = {}, title = "") {
-  const model = extractLikelyCarModel(String(material.vehicleModel || "") + " " + String(material.title || "") + " " + String(title || "")) || "auto key";
-  const materialText = russianTagWord(material.material || "tpu");
-  const colorText = russianTagWord(material.color || "black");
-  const shopTag = tagToken(shop.name || shop.legalEntity || "shop");
-  const modelSafe = model.toLowerCase();
-  const base = [shopTag, modelSafe, modelSafe + " key", modelSafe + " cover", "auto accessories", "key cover", "car key case", "key protection", "scratch protection", "driver gift", materialText, materialText + " cover", colorText, colorText + " cover", "daily use", "precise fit", "soft cover", "button access", "car accessory", "protective case"];
-  return uniqueValues(base.map(tagToken)).slice(0, 20);
+  const generatedShopTag = shopNameTagToken(shop.name || shop.legalEntity || "shop");
+  const inferredProductType = detectProductTypeByFacts(material.title, material.description, material.ozonCategoryName);
+  const materialTag = safeRussianTagWord(material.material);
+  const colorTag = safeRussianTagWord(material.color);
+  const inferredModel = extractLikelyCarModel(String(material.vehicleModel || "") + " " + String(material.title || "") + " " + String(title || ""));
+  const factsText = `${material.title || ""} ${material.description || ""} ${material.ozonCategoryName || ""}`;
+  const keyCaseTerms = /key|fob|\u94a5\u5319|брелок/i.test(factsText)
+    ? ["key cover", "car key case", "key protection", "button access"]
+    : [];
+  const tagBase = [
+    ...normalizeTags(material.tags),
+    ...keywordTokens(material.ozonCategoryName),
+    ...keywordTokens(material.title),
+    ...keywordTokens(material.description),
+    inferredModel,
+    inferredProductType,
+    materialTag,
+    colorTag,
+    "ozon",
+    "daily use",
+    "comfortable",
+    "practical",
+    ...keyCaseTerms
+  ];
+  return uniqueValues([generatedShopTag, ...tagBase.map(tagToken)].filter(Boolean)).slice(0, 20);
+}
+
+function keywordTokens(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[#_,;|/]+/g, " ")
+    .split(/\s+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 2 && !/^\d+$/.test(item))
+    .slice(0, 12);
+}
+
+function safeRussianTagWord(value) {
+  const text = russianTagWord(value);
+  return text && !looksBrokenGeneratedText(text) ? text : "";
+}
+
+function cleanRussianFact(value) {
+  const text = cleanText(value, 500);
+  if (!text || looksBrokenGeneratedText(text) || hasCjkText(text)) return "";
+  return text;
+}
+
+function detectProductTypeByFacts(title = "", description = "", category = "") {
+  const text = String(`${title} ${description} ${category}`).toLowerCase();
+  const categoryText = cleanRussianFact(category);
+  const titleText = cleanRussianFact(title);
+  if (/seat\s*belt|shoulder|pad|cushion|\u5b89\u5168\u5e26|\u62a4\u80a9|\u80a9\u57ab|remen|ремен/.test(text)) return "Накладка на ремень безопасности";
+  if (/key|fob|\u94a5\u5319|брелок/.test(text)) return "Чехол для автомобильного ключа";
+  if (/light|led|\u706f|подсвет/.test(text)) return "Подсветка";
+  if (/film|\u819c|пленк/.test(text)) return "Защитная пленка";
+  if (categoryText) return categoryText;
+  if (titleText) return titleText;
+  return "Товар для Ozon";
+}
+
+function chineseProductTypeByFacts(title = "", description = "", category = "") {
+  const text = String(`${title} ${description} ${category}`).toLowerCase();
+  if (/seat\s*belt|shoulder|pad|cushion|\u5b89\u5168\u5e26|\u62a4\u80a9|\u80a9\u57ab|remen|ремен/.test(text)) return "\u5b89\u5168\u5e26\u62a4\u80a9";
+  if (/key|fob|\u94a5\u5319|брелок/.test(text)) return "\u94a5\u5319\u4fdd\u62a4\u58f3";
+  if (/light|led|\u706f|подсвет/.test(text)) return "\u706f\u9970\u914d\u4ef6";
+  if (/film|\u819c|пленк/.test(text)) return "\u4fdd\u62a4\u819c";
+  return cleanText(category || title || "\u5546\u54c1", 120);
 }
 
 function extractLikelyCarModel(value = "") {
@@ -3431,8 +3798,14 @@ function extractLikelyCarModel(value = "") {
 }
 
 function tagToken(value) {
-  const text = String(value || "").toLowerCase().replace(/ruvibe\s*mart/gi, "ruvibemart").replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_+|_+$/g, "").slice(0, 20);
+  const text = String(value || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_+|_+$/g, "").slice(0, 20);
   return text ? "#" + text : "";
+}
+
+function shopNameTagToken(value) {
+  const raw = String(value || "").trim();
+  const compact = raw.replace(/[^\p{L}\p{N}]+/gu, "").slice(0, 30);
+  return compact ? `#${compact}` : "";
 }
 
 function russianTagWord(value) {
@@ -3444,16 +3817,7 @@ function russianTagWord(value) {
   if (text.includes("black") || text.includes("черн") || text.includes("黑")) return "черный";
   if (text.includes("silver") || text.includes("серебр") || text.includes("银")) return "серебристый";
   if (text.includes("white") || text.includes("бел") || text.includes("白")) return "белый";
-  return text && !looksBrokenGeneratedText(text) && !hasCjkText(text) ? text : "автоаксессуар";
-}
-
-function detectProductType(title, description) {
-  const text = String((title || '') + ' ' + (description || '')).toLowerCase();
-  if (text.includes("安全带") || text.includes("seat belt") || text.includes("ремень")) return "Накладка на ремень безопасности";
-  if (text.includes('key') || text.includes('钥匙') || text.includes('брелок')) return 'Чехол для автомобильного ключа';
-  if (text.includes('light') || text.includes('led') || text.includes('灯') || text.includes('подсвет')) return 'Автомобильная подсветка';
-  if (text.includes('film') || text.includes('膜') || text.includes('пленк')) return 'Защитная пленка для автомобиля';
-  return 'Автомобильный аксессуар';
+  return text && !looksBrokenGeneratedText(text) && !hasCjkText(text) ? text : "";
 }
 
 function russianFactValue(value, type = "") {
@@ -3524,7 +3888,7 @@ function cleanRussianTitle(value, max = 500) {
     .replace(/\s+,/g, ",")
     .trim();
   if (!text || looksBrokenGeneratedText(text) || hasCjkText(text)) {
-    text = "Автомобильный аксессуар для защиты и ежедневного использования";
+    text = "Товар для Ozon";
   }
   return text.slice(0, max);
 }

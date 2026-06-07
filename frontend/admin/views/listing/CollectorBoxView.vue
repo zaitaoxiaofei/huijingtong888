@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Delete, MoreFilled, Refresh, Search } from "@element-plus/icons-vue";
+import { Delete, MagicStick, Refresh, Search } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
@@ -10,6 +10,90 @@ import ProductTitleLink from "../../components/ProductTitleLink.vue";
 
 const route = useRoute();
 const router = useRouter();
+const collectorWorkbenchReady = ref(false);
+let collectorWorkbenchSaveTimer = 0;
+const COLLECTOR_WORKBENCH_STORAGE_PREFIX = "collectorBoxWorkbenchState:";
+const collectorWorkbenchId = computed(() => String(route.query.workbenchId || "").trim());
+const collectorWorkbenchStorageKey = computed(() => `${COLLECTOR_WORKBENCH_STORAGE_PREFIX}${collectorWorkbenchId.value || "default"}`);
+
+function createAiWorkbenchId() {
+  return `aiwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createListingWorkbenchId() {
+  return `liwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createSelectionWorkbenchId() {
+  return `selwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createCollectorWorkbenchId() {
+  return `colwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function ensureCollectorWorkbenchRouteId() {
+  if (collectorWorkbenchId.value) return;
+  router.replace({
+    query: {
+      ...route.query,
+      workbenchId: createCollectorWorkbenchId()
+    }
+  }).catch(() => {});
+}
+
+function collectorTabTitle() {
+  const routeSku = String(route.query.sku || "").trim();
+  const detailSku = String(detail.value?.sku || "").trim();
+  const keyword = String(state.filters.query || "").trim();
+  if (routeSku) return `采集箱 · ${routeSku}`;
+  if (detailSku) return `采集箱 · ${detailSku}`;
+  if (keyword) return `采集箱 · ${keyword.slice(0, 18)}`;
+  return "采集箱";
+}
+
+function syncCollectorWorkbenchTabTitle() {
+  const nextTitle = collectorTabTitle();
+  if (String(route.query.tabTitle || "").trim() === nextTitle) return;
+  router.replace({
+    query: {
+      ...route.query,
+      tabTitle: nextTitle
+    }
+  }).catch(() => {});
+}
+
+function saveCollectorWorkbenchState() {
+  if (!collectorWorkbenchId.value) return;
+  window.clearTimeout(collectorWorkbenchSaveTimer);
+  collectorWorkbenchSaveTimer = window.setTimeout(() => {
+    try {
+      localStorage.setItem(collectorWorkbenchStorageKey.value, JSON.stringify({
+        filters: state.filters,
+        detailVisible: detailVisible.value,
+        detailSku: detail.value?.sku || "",
+        savedAt: new Date().toISOString()
+      }));
+    } catch (error) {
+      console.warn("saveCollectorWorkbenchState failed", error);
+    }
+  }, 120);
+}
+
+function restoreCollectorWorkbenchState() {
+  try {
+    const raw = localStorage.getItem(collectorWorkbenchStorageKey.value)
+      || localStorage.getItem("collectorBoxWorkbenchState");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw || "{}");
+    if (parsed?.filters) Object.assign(state.filters, parsed.filters);
+    detailVisible.value = Boolean(parsed?.detailVisible);
+    return String(parsed?.detailSku || "").trim();
+  } catch {
+    localStorage.removeItem(collectorWorkbenchStorageKey.value);
+    return null;
+  }
+}
 
 const loading = ref(false);
 const detailLoading = ref(false);
@@ -19,6 +103,10 @@ const deletingSku = ref("");
 const batchDeleting = ref(false);
 const detailVisible = ref(false);
 const detail = ref(null);
+const detailDiagnostics = ref(null);
+const detailDiagnosticsLoading = ref(false);
+const rawPayloadPreviewLoaded = ref(false);
+const rawPayloadPreviewText = ref("");
 
 const state = reactive({
   rows: [],
@@ -73,6 +161,11 @@ const listingPreviewFields = computed(() => [
 ]);
 const footerSummary = computed(() => `第 ${state.filters.page} 页`);
 
+function loadRawPayloadPreview() {
+  rawPayloadPreviewText.value = JSON.stringify(rawPayload.value || detail.value?.payload || {}, null, 2);
+  rawPayloadPreviewLoaded.value = true;
+}
+
 function firstFilled(values) {
   return values.find((value) => value !== null && value !== undefined && value !== "") ?? "";
 }
@@ -109,6 +202,18 @@ function skuCount(row) {
 
 const selectedSkus = computed(() => state.selectedRows.map((row) => String(row?.sku || "").trim()).filter(Boolean));
 
+function collectorCategoryLabel(row = {}) {
+  return String(
+    row?.category_name
+    || row?.category_hint
+    || row?.editPayload?.category_name
+    || row?.editPayload?.categoryName
+    || row?.editPayload?.category3
+    || row?.editPayload?.category
+    || ""
+  ).trim() || "未识别类目";
+}
+
 function productTitle(row) {
   return String(row?.title || (row?.sku ? `Ozon ${row.sku}` : "")).trim();
 }
@@ -131,6 +236,38 @@ function statusType(row) {
   if (row?.status === "selection_created" || row?.status === "listing_template_created") return "success";
   if (row?.status === "edited") return "primary";
   return "warning";
+}
+
+function diagnosticsType(result = {}) {
+  if (!result || detailDiagnosticsLoading.value) return "info";
+  if (Number(result.summary?.blockers || 0)) return "danger";
+  if (Number(result.summary?.warnings || 0)) return "warning";
+  return "success";
+}
+
+function diagnosticsTitle(result = {}) {
+  if (detailDiagnosticsLoading.value) return "正在体检字段映射";
+  if (!result) return "尚未体检字段映射";
+  if (Number(result.summary?.blockers || 0)) return "存在阻断项";
+  if (Number(result.summary?.warnings || 0)) return "存在需复核项";
+  return "映射基础可用";
+}
+
+function diagnosticsSummary(result = {}) {
+  const summary = result?.summary || {};
+  if (!result) return "打开商品详情后自动检查类目、必填属性和字典值。";
+  return [
+    `评分 ${Number(result.score || 0)}`,
+    `必填缺 ${Number(summary.missing_required || 0)}`,
+    `字典未绑定 ${Number(summary.dictionary_unresolved || 0)}`,
+    `非当前类目 ${Number(summary.outside_category || 0)}`
+  ].join(" / ");
+}
+
+function diagnosticIssueType(level = "") {
+  if (level === "blocker") return "danger";
+  if (level === "warning") return "warning";
+  return "info";
 }
 
 function buildQuery() {
@@ -172,13 +309,38 @@ function resetFilters() {
 async function openDetail(row) {
   detailVisible.value = true;
   detail.value = null;
+  detailDiagnostics.value = null;
+  rawPayloadPreviewLoaded.value = false;
+  rawPayloadPreviewText.value = "";
   detailLoading.value = true;
   try {
     detail.value = await apiClient.get(`/api/listing/collector-box/${encodeURIComponent(row.sku)}`, { noCache: true });
+    loadDetailDiagnostics(row.sku).catch(() => {});
   } catch (error) {
     ElMessage.error(error.message || "详情加载失败");
   } finally {
     detailLoading.value = false;
+  }
+}
+
+async function loadDetailDiagnostics(sku) {
+  if (!sku) return;
+  detailDiagnosticsLoading.value = true;
+  try {
+    detailDiagnostics.value = await apiClient.get(`/api/listing/collector-box/${encodeURIComponent(sku)}/diagnostics`, { noCache: true });
+  } catch (error) {
+    detailDiagnostics.value = {
+      ok: false,
+      score: 0,
+      summary: { issues: 1, blockers: 1, warnings: 0 },
+      issues: [{
+        level: "blocker",
+        title: "体检失败",
+        message: error.message || "无法生成映射体检结果"
+      }]
+    };
+  } finally {
+    detailDiagnosticsLoading.value = false;
   }
 }
 
@@ -191,12 +353,17 @@ async function openEdit(row) {
   await createListingTemplate(row);
 }
 
-function handleRowCommand(command, row) {
-  if (command === "detail") return openDetail(row);
-  if (command === "ozon") return openOzon(row);
-  if (command === "selection") return createSelection(row);
-  if (command === "delete") return deleteRow(row);
-  return null;
+function openAiOptimize(row) {
+  if (!row?.sku) return;
+  router.push({
+    name: "asset-variant-center-create",
+    query: {
+      workbenchId: createAiWorkbenchId(),
+      collectorSku: String(row.sku),
+      source: "collector_box",
+      autoImport: "1"
+    }
+  });
 }
 
 function handleSelectionChange(rows) {
@@ -213,7 +380,7 @@ async function createListingTemplate(row) {
   creatingTemplateSku.value = row.sku;
   try {
     if (row.listing_template_id) {
-      router.push({ path: "/listing-automation", query: { templateId: row.listing_template_id, collectorSku: row.sku } });
+      router.push({ path: "/listing-automation", query: { workbenchId: createListingWorkbenchId(), templateId: row.listing_template_id, collectorSku: row.sku } });
       return;
     }
     const result = await apiClient.post(`/api/listing/collector-box/${encodeURIComponent(row.sku)}/create-listing-template`, {
@@ -222,7 +389,7 @@ async function createListingTemplate(row) {
     });
     ElMessage.success(result?.reused ? "已载入已有上架模板" : "已生成上架编辑模板");
     const templateId = result?.template?.id;
-    if (templateId) router.push({ path: "/listing-automation", query: { templateId, collectorSku: row.sku } });
+    if (templateId) router.push({ path: "/listing-automation", query: { workbenchId: createListingWorkbenchId(), templateId, collectorSku: row.sku } });
     loadRows().catch(() => {});
   } catch (error) {
     ElMessage.error(error.message || "创建上架模板失败");
@@ -244,7 +411,14 @@ async function createSelection(row) {
     ElMessage.success("已生成选品池草稿");
     await loadRows();
     if (result?.product?.id || result?.id) {
-      router.push({ path: "/selection", query: { productId: result.product?.id || result.id } });
+      router.push({
+        path: "/selection",
+        query: {
+          workbenchId: createSelectionWorkbenchId(),
+          tabTitle: `选品池 · ${row.sku}`,
+          productId: result.product?.id || result.id
+        }
+      });
     }
   } catch (error) {
     ElMessage.error(error.message || "加入选品池失败");
@@ -293,12 +467,44 @@ async function batchDeleteRows() {
     batchDeleting.value = false;
   }
 }
-
 watch(() => [state.filters.page, state.filters.pageSize], loadRows);
 
+watch(
+  [
+    () => JSON.stringify(state.filters),
+    () => detailVisible.value,
+    () => detail.value?.sku || ""
+  ],
+  () => {
+    if (!collectorWorkbenchReady.value) return;
+    saveCollectorWorkbenchState();
+  }
+);
+
+watch(
+  [
+    () => route.query.sku,
+    () => detail.value?.sku || ""
+  ],
+  () => {
+    if (!collectorWorkbenchReady.value || !collectorWorkbenchId.value) return;
+    syncCollectorWorkbenchTabTitle();
+  }
+);
+
 onMounted(() => {
+  ensureCollectorWorkbenchRouteId();
+  const restoredDetailSku = restoreCollectorWorkbenchState();
   if (route.query.sku) state.filters.query = String(route.query.sku);
-  loadRows();
+  loadRows().then(async () => {
+    const nextSku = String(route.query.sku || restoredDetailSku || "").trim();
+    if (!nextSku || !detailVisible.value) return;
+    const row = state.rows.find((item) => String(item?.sku || "").trim() === nextSku);
+    if (row) await openDetail(row);
+    collectorWorkbenchReady.value = true;
+  });
+  if (!collectorWorkbenchReady.value) collectorWorkbenchReady.value = true;
+  syncCollectorWorkbenchTabTitle();
 });
 </script>
 
@@ -307,7 +513,7 @@ onMounted(() => {
     <el-card shadow="never" class="page-card erp-paged-card collector-list-card">
       <div class="collector-toolbar">
         <div class="collector-filter-row">
-          <el-input v-model="state.filters.query" clearable placeholder="搜索 SKU、标题、类目" class="collector-search" @keyup.enter="search" />
+          <el-input v-model="state.filters.query" clearable placeholder="搜索 SKU 或商品标题" class="collector-search" @keyup.enter="search" />
           <el-select v-model="state.filters.status" class="collector-status-filter" @change="search">
             <el-option v-for="option in statusOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
@@ -342,24 +548,24 @@ onMounted(() => {
             <ProductImagePreview :src="row.image_url" />
           </template>
         </el-table-column>
-        <el-table-column label="产品名称" min-width="360" fixed="left">
+        <el-table-column label="商品信息" min-width="360" fixed="left">
           <template #default="{ row }">
             <div class="product-main table-title-cell">
               <ProductTitleLink :title="productTitle(row)" :href="productBuyerLink(row)" :lines="2" />
-              <span>{{ row.category_name || "未识别类目" }}</span>
+              <span>{{ collectorCategoryLabel(row) }}</span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="采集价格" width="130" align="center">
+        <el-table-column label="价格" width="130" align="center">
           <template #default="{ row }">{{ formatNumber(row.price, 2) }} {{ row.currency }}</template>
         </el-table-column>
         <el-table-column label="SKU数量" width="100" align="center">
           <template #default="{ row }">{{ skuCount(row) }}</template>
         </el-table-column>
-        <el-table-column label="采集来源" width="120" align="center">
+        <el-table-column label="来源平台" width="120" align="center">
           <template #default>ozon</template>
         </el-table-column>
-        <el-table-column label="运营数据" width="150" align="center">
+        <el-table-column label="销量/浏览" width="150" align="center">
           <template #default="{ row }">
             <span>{{ formatNumber(row.sold_count) }} / {{ formatNumber(row.view_count) }}</span>
           </template>
@@ -375,7 +581,7 @@ onMounted(() => {
         <el-table-column label="更新时间" width="150" align="center">
           <template #default="{ row }">{{ formatDateTime(row.updated_at || row.edited_at || row.collected_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right" align="center">
+        <el-table-column label="操作" width="500" fixed="right" align="center">
           <template #default="{ row }">
             <div class="row-actions">
               <el-button
@@ -385,19 +591,38 @@ onMounted(() => {
                 :loading="creatingTemplateSku === row.sku"
                 @click="openEdit(row)"
               >
-                编辑上架
+                编辑商品
               </el-button>
-              <el-dropdown trigger="click" @command="(command) => handleRowCommand(command, row)">
-                <el-button size="small" circle :icon="MoreFilled" />
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item command="detail">查看详情</el-dropdown-item>
-                    <el-dropdown-item command="ozon">打开 Ozon</el-dropdown-item>
-                    <el-dropdown-item command="selection" :disabled="row.status === 'selection_created'">加入选品池</el-dropdown-item>
-                    <el-dropdown-item command="delete" divided :disabled="deletingSku === row.sku">删除</el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
+              <el-button
+                size="small"
+                type="success"
+                plain
+                :icon="MagicStick"
+                @click="openAiOptimize(row)"
+              >
+                AI优化
+              </el-button>
+              <el-button size="small" plain @click="openDetail(row)">查看详情</el-button>
+              <el-button size="small" plain @click="openOzon(row)">打开 Ozon</el-button>
+              <el-button
+                size="small"
+                type="warning"
+                plain
+                :loading="creatingSku === row.sku"
+                :disabled="row.status === 'selection_created'"
+                @click="createSelection(row)"
+              >
+                创建选品
+              </el-button>
+              <el-button
+                size="small"
+                type="danger"
+                plain
+                :loading="deletingSku === row.sku"
+                @click="deleteRow(row)"
+              >
+                删除
+              </el-button>
             </div>
           </template>
         </el-table-column>
@@ -410,7 +635,7 @@ onMounted(() => {
       />
     </el-card>
 
-    <el-drawer v-model="detailVisible" title="采集商品详情" size="860px" class="collector-detail-drawer">
+    <el-drawer v-model="detailVisible" title="商品详情" size="860px" class="collector-detail-drawer">
       <div v-loading="detailLoading" class="detail-drawer">
         <template v-if="detail">
           <section class="listing-preview-hero">
@@ -420,7 +645,7 @@ onMounted(() => {
                 <h3>{{ detail.title || `Ozon ${detail.sku}` }}</h3>
                 <el-tag :type="statusType(detail)" effect="plain">{{ statusText(detail) }}</el-tag>
               </div>
-              <p>{{ detail.category_name || "未识别类目" }}</p>
+              <p>{{ collectorCategoryLabel(detail || {}) }}</p>
               <div class="listing-preview-actions">
                 <el-button @click="openOzon(detail)">打开 Ozon</el-button>
                 <el-button
@@ -429,7 +654,7 @@ onMounted(() => {
                   :loading="creatingTemplateSku === detail.sku"
                   @click="openEdit(detail)"
                 >
-                  编辑上架
+                  编辑商品
                 </el-button>
                 <el-button
                   type="warning"
@@ -437,17 +662,17 @@ onMounted(() => {
                   :loading="creatingSku === detail.sku"
                   @click="createSelection(detail)"
                 >
-                  加入选品池
+                  创建选品
                 </el-button>
               </div>
             </div>
           </section>
 
           <section class="listing-panel">
-          <div class="listing-panel__head">
-            <h4>上架基础信息</h4>
-              <span>点击编辑上架后会带入商品上架模板</span>
-          </div>
+            <div class="listing-panel__head">
+              <h4>商品信息</h4>
+              <span>从采集箱同步的商品基础信息，可用于创建选品或继续编辑。</span>
+            </div>
             <div class="listing-field-grid">
               <div v-for="field in listingPreviewFields" :key="field.label" class="listing-field">
                 <span>{{ field.label }}</span>
@@ -457,14 +682,38 @@ onMounted(() => {
             </div>
           </section>
 
+          <section class="listing-panel diagnostics-panel" v-loading="detailDiagnosticsLoading">
+            <div class="listing-panel__head">
+              <h4>映射体检</h4>
+              <el-tag :type="diagnosticsType(detailDiagnostics)" effect="plain">{{ diagnosticsTitle(detailDiagnostics) }}</el-tag>
+            </div>
+            <div class="diagnostics-summary">
+              <strong>{{ diagnosticsSummary(detailDiagnostics) }}</strong>
+              <span v-if="detailDiagnostics?.category?.description_category_id">
+                Ozon 类目 {{ detailDiagnostics.category.description_category_id }}:{{ detailDiagnostics.category.type_id }}
+              </span>
+              <span v-else>未确认 Ozon 后台类目</span>
+            </div>
+            <div v-if="detailDiagnostics?.issues?.length" class="diagnostics-issues">
+              <el-tag
+                v-for="(issue, index) in detailDiagnostics.issues.slice(0, 8)"
+                :key="`${issue.code}-${index}`"
+                :type="diagnosticIssueType(issue.level)"
+                effect="plain"
+              >
+                {{ issue.title }}：{{ issue.message }}
+              </el-tag>
+            </div>
+          </section>
+
           <section class="listing-panel">
             <div class="listing-panel__head">
-              <h4>运营判断数据</h4>
-              <span>按上架页常看的价格、销量、体积来排布</span>
+              <h4>销售表现</h4>
+              <span>采集商品的基础销售、浏览和尺寸信息。</span>
             </div>
             <div class="metric-grid">
               <div class="metric-card">
-                <span>前台价格</span>
+                <span>价格</span>
                 <strong>{{ formatNumber(detail.price, 2) }} {{ detail.currency || "RUB" }}</strong>
               </div>
               <div class="metric-card">
@@ -502,18 +751,19 @@ onMounted(() => {
 
           <section class="listing-panel">
             <div class="listing-panel__head">
-              <h4>图片素材</h4>
-              <span>{{ detailImages.length ? `${detailImages.length} 张可用图片` : "暂无图片" }}</span>
+              <h4>商品图片</h4>
+              <span>{{ detailImages.length ? `${detailImages.length} 张图片` : "暂无图片" }}</span>
             </div>
             <div v-if="detailImages.length" class="image-strip">
               <ProductImagePreview v-for="image in detailImages" :key="image" :src="image" size="square" />
             </div>
-            <el-empty v-else description="暂无图片素材" :image-size="72" />
+            <el-empty v-else description="暂无图片" :image-size="72" />
           </section>
 
           <el-collapse class="raw-collapse">
-            <el-collapse-item title="查看原始采集数据" name="raw">
-              <pre class="payload-preview">{{ JSON.stringify(rawPayload || detail.payload || {}, null, 2) }}</pre>
+            <el-collapse-item title="原始数据" name="raw">
+              <el-button v-if="!rawPayloadPreviewLoaded" class="erp-btn erp-btn-secondary" @click="loadRawPayloadPreview">加载原始数据</el-button>
+              <pre v-else class="payload-preview">{{ rawPayloadPreviewText }}</pre>
             </el-collapse-item>
           </el-collapse>
         </template>
@@ -615,7 +865,14 @@ onMounted(() => {
 
 .row-actions {
   justify-content: center;
-  gap: 8px;
+  gap: 6px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.row-actions .el-button {
+  margin-left: 0;
+  padding-inline: 8px;
 }
 
 .detail-drawer {
@@ -730,6 +987,30 @@ onMounted(() => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
   gap: 10px;
+}
+
+.diagnostics-panel {
+  border-color: var(--el-color-warning-light-5);
+  background: var(--el-color-warning-light-9);
+}
+
+.diagnostics-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  color: var(--el-text-color-secondary);
+}
+
+.diagnostics-summary strong {
+  color: var(--el-text-color-primary);
+}
+
+.diagnostics-issues {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .raw-collapse {

@@ -3,7 +3,7 @@ import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 const OZON_API_BASE = "https://api-seller.ozon.ru";
 const ACTION_CLEANUP_SETTING_PREFIX = "ozon.actions.cleanup:";
 const DEFAULT_CLEANUP_ACTION_IDS = [3684628, 3702380];
-const DEFAULT_CLEANUP_INTERVAL_MINUTES = 10;
+const DEFAULT_CLEANUP_INTERVAL_MINUTES = 60;
 const OZON_REQUEST_TIMEOUT_MS = 30000;
 const ACTION_PRODUCTS_PAGE_LIMIT = 100;
 const ACTION_DELETE_BATCH_LIMIT = 1000;
@@ -336,9 +336,67 @@ export function extractOfficialActionCleanupProductIds(products = []) {
   return result;
 }
 
-function normalizeCleanupConfig(storeId, rawValue = null) {
+function normalizeOfficialActionSummary(action = {}) {
+  const actionId = Number(action?.actionId ?? action?.id ?? action?.action_id);
+  if (!Number.isFinite(actionId) || actionId <= 0) return null;
+  return {
+    actionId,
+    title: String(action?.title ?? action?.name ?? ""),
+    actionType: String(action?.action_type ?? action?.type ?? ""),
+    status: String(action?.status ?? ""),
+    isParticipating: Boolean(action?.is_participating),
+    dateStart: String(action?.date_start ?? action?.start_at ?? ""),
+    dateEnd: String(action?.date_end ?? action?.end_at ?? "")
+  };
+}
+
+export function extractOfficialActionSummaries(data = {}) {
+  const rows = Array.isArray(data)
+    ? data
+    : Array.isArray(data?.result)
+      ? data.result
+      : Array.isArray(data?.result?.actions)
+        ? data.result.actions
+        : Array.isArray(data?.actions)
+          ? data.actions
+          : [];
+  const seen = new Set();
+  const result = [];
+  for (const row of rows) {
+    const summary = normalizeOfficialActionSummary(row);
+    if (!summary || seen.has(summary.actionId)) continue;
+    seen.add(summary.actionId);
+    result.push(summary);
+  }
+  return result.sort((a, b) => a.actionId - b.actionId);
+}
+
+function snapshotActionSummaries(actions = []) {
+  return extractOfficialActionSummaries(actions).map((item) => ({
+    actionId: item.actionId,
+    title: item.title,
+    actionType: item.actionType,
+    status: item.status,
+    isParticipating: item.isParticipating,
+    dateStart: item.dateStart,
+    dateEnd: item.dateEnd
+  }));
+}
+
+export function officialActionCatalogChanged(previous = [], next = []) {
+  return JSON.stringify(snapshotActionSummaries(previous)) !== JSON.stringify(snapshotActionSummaries(next));
+}
+
+export function buildOfficialActionCleanupIds(currentActions = [], fallbackActionIds = []) {
+  const currentIds = extractOfficialActionSummaries(currentActions).map((item) => item.actionId);
+  if (currentIds.length) return Array.from(new Set(currentIds));
+  return normalizeCleanupActionIds(fallbackActionIds);
+}
+
+function normalizeCleanupConfig(storeId, rawValue = null, options = {}) {
+  const hasStoredValue = rawValue !== null && rawValue !== undefined && rawValue !== "";
   let parsed = {};
-  if (rawValue) {
+  if (hasStoredValue) {
     try {
       parsed = typeof rawValue === "string" ? JSON.parse(rawValue) : rawValue;
     } catch {
@@ -347,16 +405,20 @@ function normalizeCleanupConfig(storeId, rawValue = null) {
   }
   const normalizedStoreId = String(storeId || "").trim();
   const actionIds = normalizeCleanupActionIds(parsed.actionIds);
+  const enabled = hasStoredValue ? parsed.enabled === true : options.defaultEnabled === true;
   return {
     storeId: normalizedStoreId,
     storeName: "",
-    enabled: parsed.enabled === true,
+    enabled,
     actionIds,
+    lastSyncedActions: snapshotActionSummaries(parsed.lastSyncedActions || []),
+    lastActionListSyncedAt: parsed.lastActionListSyncedAt || "",
+    lastActionListChangedAt: parsed.lastActionListChangedAt || "",
     intervalMinutes: DEFAULT_CLEANUP_INTERVAL_MINUTES,
     lastRunAt: parsed.lastRunAt || "",
     lastError: parsed.lastError || "",
     lastResult: parsed.lastResult || null,
-    taskEnabled: parsed.enabled === true,
+    taskEnabled: enabled,
     taskRunning: cleanupRunningStores.has(normalizedStoreId)
   };
 }
@@ -378,7 +440,7 @@ export async function getOzonActionCleanupConfigMysql(query = {}) {
   await ensureSettingsTables();
   const rows = await mysqlQuery("SELECT value_json FROM system_settings WHERE `key` = ? LIMIT 1", [settingKey(storeId)]);
   return {
-    ...normalizeCleanupConfig(storeId, rows[0]?.value_json),
+    ...normalizeCleanupConfig(storeId, rows[0]?.value_json, { defaultEnabled: true }),
     storeName: shop.name || ""
   };
 }
@@ -443,19 +505,39 @@ async function deleteOfficialActionProducts(shop, actionId, productIds, signal) 
   return removedCount;
 }
 
+async function fetchCurrentOfficialActionSummaries(shop, signal) {
+  const data = await ozonRequest("/v1/actions", { method: "GET", shop, signal });
+  return extractOfficialActionSummaries(data);
+}
+
 export async function listOzonActionCleanupConfigsMysql() {
   await ensureSettingsTables();
-  const rows = await mysqlQuery(
+  const settingRows = await mysqlQuery(
     "SELECT `key`, value_json FROM system_settings WHERE `key` LIKE ?",
     [`${ACTION_CLEANUP_SETTING_PREFIX}%`]
   );
-  return rows
-    .map((row) => {
-      const key = String(row?.key || "");
-      const storeId = key.startsWith(ACTION_CLEANUP_SETTING_PREFIX) ? key.slice(ACTION_CLEANUP_SETTING_PREFIX.length) : "";
-      return normalizeCleanupConfig(storeId, row?.value_json);
-    })
-    .filter((item) => item.storeId);
+  const settingsByStore = new Map();
+  for (const row of settingRows) {
+    const key = String(row?.key || "");
+    const storeId = key.startsWith(ACTION_CLEANUP_SETTING_PREFIX) ? key.slice(ACTION_CLEANUP_SETTING_PREFIX.length) : "";
+    if (storeId) settingsByStore.set(storeId, row?.value_json);
+  }
+
+  const shopRows = await mysqlQuery(`
+    SELECT id, name
+    FROM shops
+    WHERE status = 'active'
+      AND COALESCE(NULLIF(TRIM(ozon_client_id), ''), '') <> ''
+      AND COALESCE(NULLIF(TRIM(ozon_api_key), ''), NULLIF(TRIM(api_key_hint), ''), '') <> ''
+    ORDER BY id
+  `);
+  return shopRows.map((shop) => {
+    const storeId = String(shop.id || "").trim();
+    return {
+      ...normalizeCleanupConfig(storeId, settingsByStore.get(storeId), { defaultEnabled: true }),
+      storeName: shop.name || ""
+    };
+  });
 }
 
 export async function runOzonActionCleanupForStoreMysql(storeId, config = null, options = {}) {
@@ -485,21 +567,46 @@ export async function runOzonActionCleanupForStoreMysql(storeId, config = null, 
     const actionSummaries = [];
     const errors = [];
     let removedCount = 0;
+    let currentActions = [];
+    let actionListSync = {
+      syncedAt: now,
+      actionCount: 0,
+      actionIds: [],
+      changed: false,
+      error: ""
+    };
 
-    for (const actionId of current.actionIds || DEFAULT_CLEANUP_ACTION_IDS) {
+    try {
+      currentActions = await fetchCurrentOfficialActionSummaries(shop, options.signal);
+      actionListSync = {
+        ...actionListSync,
+        actionCount: currentActions.length,
+        actionIds: currentActions.map((item) => item.actionId),
+        changed: officialActionCatalogChanged(current.lastSyncedActions || [], currentActions)
+      };
+    } catch (error) {
+      actionListSync = {
+        ...actionListSync,
+        error: error?.message || "action list sync failed"
+      };
+      errors.push(`actions list: ${actionListSync.error}`);
+    }
+
+    const cleanupActionIds = buildOfficialActionCleanupIds(currentActions, current.actionIds || DEFAULT_CLEANUP_ACTION_IDS);
+    for (const actionId of cleanupActionIds) {
       try {
         const productIds = await fetchAllJoinedActionProductIds(shop, actionId, options.signal);
         if (!productIds.length) {
-          actionSummaries.push({ actionId, removedCount: 0, skippedManualOnly: true });
+          actionSummaries.push({ actionId, detectedCount: 0, removedCount: 0, skippedManualOnly: true });
           continue;
         }
         const actionRemovedCount = await deleteOfficialActionProducts(shop, actionId, productIds, options.signal);
         removedCount += actionRemovedCount;
-        actionSummaries.push({ actionId, removedCount: actionRemovedCount });
+        actionSummaries.push({ actionId, detectedCount: productIds.length, removedCount: actionRemovedCount });
       } catch (error) {
         const message = error?.message || "unknown";
         errors.push(`活动 ${actionId}: ${message}`);
-        actionSummaries.push({ actionId, removedCount: 0, error: message });
+        actionSummaries.push({ actionId, detectedCount: 0, removedCount: 0, error: message });
       }
     }
 
@@ -508,8 +615,11 @@ export async function runOzonActionCleanupForStoreMysql(storeId, config = null, 
       ...current,
       enabled: current.enabled,
       actionIds: current.actionIds,
+      lastSyncedActions: currentActions.length ? currentActions : current.lastSyncedActions,
+      lastActionListSyncedAt: actionListSync.error ? current.lastActionListSyncedAt : now,
+      lastActionListChangedAt: actionListSync.changed ? now : current.lastActionListChangedAt,
       lastRunAt: now,
-      lastResult: { removedCount, actionSummaries },
+      lastResult: { removedCount, actionSummaries, actionListSync },
       lastError
     });
     return {
@@ -518,6 +628,7 @@ export async function runOzonActionCleanupForStoreMysql(storeId, config = null, 
       storeName: shop.name || normalizedStoreId,
       count: removedCount,
       actionSummaries,
+      actionListSync,
       config: { ...saved, taskRunning: false },
       ...(lastError ? { error: lastError } : {})
     };

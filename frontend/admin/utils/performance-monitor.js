@@ -55,10 +55,19 @@ function isLocalRuntime() {
 }
 
 function isEnabled() {
+  const search = String(window.location.search || "");
+  if (/[?&]_erp_perf=(1|on|true)\b/i.test(search)) {
+    writeStorage("erpPerfMonitor", "on");
+    return true;
+  }
   const setting = String(readStorage("erpPerfMonitor") || "").toLowerCase();
   if (setting === "off" || setting === "0") return false;
   if (setting === "on" || setting === "1") return true;
   return isLocalRuntime();
+}
+
+function bootStartedAt() {
+  return Number(window.__ERP_BOOT_STARTED_AT || 0);
 }
 
 function normalizeUrl(url) {
@@ -103,6 +112,8 @@ function finishRoute(reason = "idle") {
     title: currentRoute.title,
     elapsedMs,
     reason,
+    bootToRouteStartMs: bootStartedAt() ? roundMs(currentRoute.startedAt - bootStartedAt()) : null,
+    bootToRouteReadyMs: bootStartedAt() && currentRoute.routeReadyAt ? roundMs(currentRoute.routeReadyAt - bootStartedAt()) : null,
     routeReadyMs: currentRoute.routeReadyAt ? roundMs(currentRoute.routeReadyAt - currentRoute.startedAt) : null,
     api: currentRoute.apiSummary,
     startedAt: new Date(currentRoute.wallClockStartedAt).toISOString()
@@ -167,7 +178,7 @@ export function markRouteReadyPerf(to) {
 
 export function beginApiPerf(url, options = {}) {
   if (!isEnabled()) return null;
-  return {
+  const trace = {
     id: ++apiSequence,
     routeId: currentRoute?.finished ? null : currentRoute?.id || null,
     route: inferCurrentRoute(),
@@ -175,6 +186,11 @@ export function beginApiPerf(url, options = {}) {
     url: normalizeUrl(url),
     startedAt: now()
   };
+  if (currentRoute && trace.routeId === currentRoute.id && !currentRoute.finished) {
+    currentRoute.pendingApi += 1;
+    scheduleSummary();
+  }
+  return trace;
 }
 
 export function endApiPerf(trace, result = {}) {

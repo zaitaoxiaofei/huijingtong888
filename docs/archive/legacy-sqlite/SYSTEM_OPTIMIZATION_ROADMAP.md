@@ -1,5 +1,7 @@
 # Ozon ERP System Optimization Roadmap
 
+> Historical note: this roadmap includes pre-cutover SQLite analysis. The current runtime baseline is MySQL.
+
 Last updated: 2026-06-01
 
 ## 1. Document Goal
@@ -384,7 +386,7 @@ Reporting/snapshot tables:
 
 Execution details for this phase are maintained in:
 
-- `docs/MYSQL_PREPARATION_PLAN.md`
+- `docs/archive/legacy-sqlite/MYSQL_PREPARATION_PLAN.md`
 
 ## Phase 6: Multi-User Concurrency Hardening
 

@@ -176,7 +176,7 @@ export async function generateSelectionSellingPoints(payload = {}) {
   const runtimeConfig = await resolveRuntimeConfig({}, { requireEnabled: true, route: "text" });
   const context = buildSelectionSellingPointContext(payload);
   if (!context.hasUsefulInfo) {
-    throw statusError("????????????????????????????", 400);
+    throw statusError("缺少可用于生成卖点的商品信息", 400);
   }
 
   try {
@@ -186,11 +186,11 @@ export async function generateSelectionSellingPoints(payload = {}) {
           {
             role: "system",
             content: [
-              "?? Ozon ?????????",
-              "????????????????????????",
-              "??????????????????? Markdown??????",
-              "????????????????????????????????????????????",
-              "??????????"
+              "你是 Ozon 汽车用品上架文案助手。",
+              "请只输出俄语产品卖点，不要输出中文。",
+              "写成一段自然、可直接用于产品卖点/简介的文案，不要使用 Markdown 列表。",
+              "如果输入里有乱码、连续问号或无意义符号，请忽略它们，只保留可理解的商品事实。",
+              "不要编造未提供的车型、材质、颜色、数量。"
             ].join("\n")
           },
           {
@@ -309,13 +309,13 @@ async function callOpenAiCompatibleChat(runtimeConfig, options = {}) {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw statusError(data?.error?.message || data?.message || `AI ???????${response.status}`, response.status);
+      throw statusError(data?.error?.message || data?.message || `AI 请求失败：${response.status}`, response.status);
     }
     const content = extractAiTextContent(data);
-    if (!content) throw statusError("AI ??????????", 502);
+    if (!content) throw statusError("AI 没有返回可用内容", 502);
     return { content, usage: data.usage, raw: data };
   } catch (error) {
-    if (error?.name === "AbortError") throw statusError("AI ??????", 504);
+    if (error?.name === "AbortError") throw statusError("AI 请求超时", 504);
     throw error;
   } finally {
     clearTimeout(timeout);
@@ -665,6 +665,15 @@ function cleanText(value) {
   return String(value || "").trim().slice(0, 2000);
 }
 
+function cleanAiCommerceText(value) {
+  return cleanText(value)
+    .replace(/[\uFFFD\u952F\u9416\u920B\u93C3]/g, " ")
+    .replace(/\?{2,}/g, " ")
+    .replace(/[?？]{1,}\s*(?=[\u4e00-\u9fffA-Za-zА-Яа-я0-9])/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 function finiteNumber(value, fallback) {
   if (value === null || value === undefined || value === "") return fallback;
   const parsed = Number(value);
@@ -673,69 +682,117 @@ function finiteNumber(value, fallback) {
 
 function buildSelectionSellingPointContext(payload = {}) {
   const fields = [
-    ["????", payload.name],
-    ["Ozon ??", payload.ozon_category_name || payload.categoryName],
-    ["????", payload.vehicle_model || payload.vehicleModel],
-    ["??", payload.material],
-    ["??", Array.isArray(payload.color) ? payload.color.join("?") : payload.color],
-    ["??????", payload.existing_selling_points || payload.selling_points || payload.sellingPoints],
-    ["?????", payload.supplier_note || payload.supplierNote],
-    ["????", payload.source_platform || payload.sourcePlatform]
+    ["商品名称", payload.name],
+    ["Ozon 类目", payload.ozon_category_name || payload.categoryName],
+    ["适配车型", payload.vehicle_model || payload.vehicleModel],
+    ["材质", payload.material],
+    ["颜色", Array.isArray(payload.color) ? payload.color.join(", ") : payload.color],
+    ["已有卖点", payload.existing_selling_points || payload.selling_points || payload.sellingPoints],
+    ["供应商备注", payload.supplier_note || payload.supplierNote],
+    ["来源平台", payload.source_platform || payload.sourcePlatform]
   ]
-    .map(([label, value]) => [label, cleanText(value)])
+    .map(([label, value]) => [label, cleanAiCommerceText(value)])
     .filter(([, value]) => value);
 
   return {
     hasUsefulInfo: fields.length > 0,
     prompt: [
-      "??????????????",
-      "??????????????????????????????????????????????????????????",
-      "????????????????????????????????????",
+      "请根据下面信息生成俄语产品卖点。",
+      "要求：突出适配车型、材质、用途、防刮耐磨、安装方便等确定信息；输入中没有的信息不要补。",
+      "输出：1 段俄语，60-100 个俄语词左右，适合 Ozon 商品上架。",
       "",
-      ...fields.map(([label, value]) => label + '?' + value)
+      ...fields.map(([label, value]) => `${label}: ${value}`)
     ].join("\n")
   };
 }
 
 function isUsableSelectionSellingPoints(value) {
-  const text = cleanText(value);
+  const text = cleanAiCommerceText(value);
   if (!text) return false;
   if (text.length < 24) return false;
+  if (hasBrokenCommerceText(text)) return false;
   const lower = text.toLowerCase();
-  if (lower.startsWith("? ?????????")) return false;
-  if (lower.includes("?? ???? ????????")) return false;
-  if (lower.includes("?????") || lower.includes("??????")) return false;
-  const chineseChars = (text.match(/[一-鿿]/g) || []).length;
-  return chineseChars >= 12;
+  if (lower.includes("i'm sorry") || lower.includes("не могу") || lower.includes("cannot")) return false;
+  const cyrillicChars = (text.match(/[А-Яа-яЁё]/g) || []).length;
+  const chineseChars = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+  return cyrillicChars >= 20 && chineseChars < 8;
 }
 
 function fallbackSelectionSellingPoints(payload = {}) {
-  const name = cleanText(payload.name || payload.productName || "????");
-  const category = cleanText(payload.ozon_category_name || payload.categoryName || "");
-  const vehicleModel = cleanText(payload.vehicle_model || payload.vehicleModel || payload.vehicle_brand || payload.vehicleBrand || "");
-  const material = cleanText(payload.material || "");
-  const color = cleanText(Array.isArray(payload.color) ? payload.color.join("?") : payload.color || "");
-  const existing = cleanText(payload.existing_selling_points || payload.selling_points || payload.sellingPoints || "");
-  const sourcePlatform = cleanText(payload.source_platform || payload.sourcePlatform || "");
-  const parts = [
-    name,
-    vehicleModel ? ('??' + vehicleModel + '??????') : '???????????????',
-    material ? ('??' + material + '???????????') : '??????????????',
-    color ? (color + '????????????') : '?????????????',
-    category ? ('???' + category + '?????????') : '????????????',
-    sourcePlatform ? ('????' + sourcePlatform + '?????????????') : '????????????'
-  ].filter(Boolean);
-  if (existing) parts.unshift(existing);
-  return parts.join('?') + '?';
+  const name = cleanAiCommerceText(payload.name || payload.productName || "");
+  const category = cleanAiCommerceText(payload.ozon_category_name || payload.categoryName || "");
+  const sourceText = [name, category, payload.supplier_note, payload.existing_selling_points, payload.selling_points].map(cleanAiCommerceText).join(" ");
+  const vehicleModel = cleanAiCommerceText(payload.vehicle_model || payload.vehicleModel || payload.vehicle_brand || payload.vehicleBrand || extractVehicleModel(sourceText));
+  const material = translateMaterial(cleanAiCommerceText(payload.material || sourceText));
+  const color = translateColor(cleanAiCommerceText(Array.isArray(payload.color) ? payload.color.join(", ") : payload.color || sourceText));
+  const existing = stripChineseText(cleanAiCommerceText(payload.existing_selling_points || payload.selling_points || payload.sellingPoints || ""));
+
+  const title = vehicleModel ? "Комплект защитных накладок" : "Автомобильный защитный аксессуар";
+  const vehicleText = vehicleModel ? ` для ${vehicleModel}` : "";
+  const materialText = material ? ` Материал: ${material}.` : "";
+  const colorText = color ? ` Цвет: ${color}.` : "";
+  const categoryText = category && !/[\u4e00-\u9fff]/.test(category) ? ` Подходит для категории: ${category}.` : "";
+  const existingText = existing ? ` ${existing}` : "";
+
+  return normalizeGeneratedSellingPoints(
+    `${title}${vehicleText}. ${materialText}${colorText}${categoryText} Аксессуар помогает защитить поверхность автомобиля от царапин, потертостей и следов ежедневной эксплуатации. Установка простая и не требует сложной подготовки. Изделие аккуратно дополняет внешний вид автомобиля и подходит для повседневного использования.${existingText}`
+  );
+}
+
+function extractVehicleModel(value) {
+  const text = cleanAiCommerceText(value);
+  const match = text.match(/\b(TENET\s*[A-Z0-9-]+|Chery\s*[A-Z0-9-]+|Nissan\s*[A-Z0-9-]+|Toyota\s*[A-Z0-9-]+|Haval\s*[A-Z0-9-]+)\b/i);
+  return match ? match[1].replace(/\s+/g, " ").trim() : "";
+}
+
+function translateMaterial(value) {
+  const text = cleanAiCommerceText(value).toLowerCase();
+  if (!text) return "";
+  if (/人造革|人造皮革|искусственн/.test(text)) return "искусственная кожа";
+  if (/碳纤|карбон/.test(text)) return "карбоновая фактура";
+  if (/皮革|кож/.test(text)) return "кожа";
+  if (/пластик/.test(text)) return "пластик";
+  const stripped = stripChineseText(text);
+  return /[А-Яа-яЁё]/.test(stripped) ? stripped : "";
+}
+
+function translateColor(value) {
+  const text = cleanAiCommerceText(value).toLowerCase();
+  if (!text) return "";
+  if (/黑色|черн/.test(text)) return "черный";
+  if (/白色|бел/.test(text)) return "белый";
+  if (/粉|роз/.test(text)) return "розовый";
+  if (/сер/.test(text)) return "серый";
+  const stripped = stripChineseText(text);
+  return /[А-Яа-яЁё]/.test(stripped) ? stripped : "";
+}
+
+function stripChineseText(value) {
+  return cleanAiCommerceText(value)
+    .replace(/[\u4e00-\u9fff]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
 function normalizeGeneratedSellingPoints(value) {
   return String(value || "")
     .replace(/```[\s\S]*?```/g, (block) => block.replace(/```/g, ""))
+    .replace(/[\uFFFD\u952F\u9416\u920B\u93C3]/g, " ")
+    .replace(/\?{2,}/g, " ")
     .replace(/^\s*[-*\d.、)）]+\s*/gm, "")
     .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
     .trim()
     .slice(0, 1200);
+}
+
+function hasBrokenCommerceText(value) {
+  const text = String(value || "");
+  if (!text) return false;
+  if (/[\uFFFD\u952F\u9416\u920B\u93C3]/.test(text)) return true;
+  if (/\?{3,}/.test(text)) return true;
+  const questionMarks = (text.match(/\?/g) || []).length;
+  return questionMarks >= 6 && questionMarks / Math.max(text.length, 1) > 0.04;
 }
 
 function statusError(message, status = 500) {

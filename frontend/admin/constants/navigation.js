@@ -11,7 +11,6 @@ export const navigationMenus = [
       { key: "seller-analytics", label: "数据分析", route: "/seller-analytics" },
       { key: "advertising-daily", label: "广告分析", route: "/advertising/daily" },
       { key: "ozon-actions", label: "Ozon 活动", route: "/ozon-actions" },
-      { key: "reviews", label: "买家评价", route: "/reviews", icon: ChatDotRound },
       { key: "profit-aftersales", label: "售后损益", route: "/profit/aftersales" }
     ]
   },
@@ -49,8 +48,7 @@ export const navigationMenus = [
       { key: "inventory-fbp-opportunities", label: "备货建议", route: "/inventory/fbp-opportunities" },
       { key: "inventory-mappings", label: "SKU 绑定", route: "/inventory/mappings" },
       { key: "inventory-alerts", label: "库存预警", route: "/inventory/alerts" },
-      { key: "inventory-hidden", label: "已删除商品", route: "/inventory/hidden" },
-      { key: "inventory-suppliers", label: "供应商", route: "/inventory/suppliers" }
+      { key: "inventory-hidden", label: "已删除商品", route: "/inventory/hidden" }
     ]
   },
   {
@@ -58,9 +56,9 @@ export const navigationMenus = [
     label: "采购",
     icon: ShoppingCart,
     children: [
-      { key: "procurement", label: "采购需求", route: "/procurement" },
-      { key: "purchase-list", label: "待采购清单", route: "/purchase-list" },
-      { key: "purchase-history", label: "采购记录", route: "/purchase-history" }
+      { key: "purchase-list", label: "待入库清单", route: "/purchase-list" },
+      { key: "purchase-history", label: "入库记录", route: "/purchase-history" },
+      { key: "inventory-suppliers", label: "供应商", route: "/inventory/suppliers" }
     ]
   },
   {

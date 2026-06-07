@@ -147,6 +147,7 @@ function fillFormFromValue(value = {}) {
     product_type: value.product_type || (isInventoryTarget.value ? "main" : "selection"),
     selection_status: value.selection_status || (isInventoryTarget.value ? "listed" : "draft")
   });
+  manualLogisticsRule.value = Boolean(value.logistics_rule_id);
   manualPackagingFee.value = true;
 }
 

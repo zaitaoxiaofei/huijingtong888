@@ -8,7 +8,7 @@
 - Current admin source: `frontend/admin/*`
 - Current frontend build output: `public/vue-apps/*`
 - Shared backend: `src/server.js` + `src/services.js` + `src/services/*`
-- Data layer: `src/db.js` + `data/*.sqlite`
+- Data layer: MySQL runtime configured through `.env` and `src/config.js`
 
 ### Main Entry Points
 
@@ -20,10 +20,10 @@
 
 ### Stable Areas
 
-- SQLite schema
+- MySQL schema and runtime contracts
 - Backend API contracts
 - Session and access control
-- Data files and backup workflow
+- Deployment and remote access workflow
 
 ### Vue-Owned Areas
 
@@ -73,3 +73,4 @@
 - Keep all new business work inside `frontend/admin`
 - Continue aligning search bars, tables, and pagers across modules
 - Keep the runtime focused on current Vue admin routes only
+- Keep SQLite migration history out of current runtime-facing docs

@@ -1,8 +1,9 @@
 {
-  "name": "pivotTable",
-  "version": "1.0.0",
+  "name": "爆单ERP 店铺数据分析插件",
+  "description": "采集 Ozon Seller 后台分析数据并同步到爆单ERP",
+  "version": "1.0.23",
   "manifest_version": 3,
-  "permissions": ["storage", "webRequest", "scripting"],
+  "permissions": ["storage", "webRequest", "scripting", "cookies"],
   "host_permissions": [
     "http://*/*",
     "https://*/*",
@@ -12,7 +13,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Ozon ERP 采集",
+    "default_title": "爆单ERP 店铺数据分析插件",
     "default_popup": "popup.html"
   },
   "content_scripts": [
@@ -21,7 +22,7 @@
         "https://seller.ozon.ru/*"
       ],
       "js": [
-        "content/ozon.js"
+        "content/erp-relay-page.js"
       ],
       "run_at": "document_start",
       "world": "MAIN",
@@ -32,7 +33,7 @@
         "https://seller.ozon.ru/*"
       ],
       "js": [
-        "content/erp-relay-page.js"
+        "content/ozon.js"
       ],
       "run_at": "document_start",
       "world": "MAIN",

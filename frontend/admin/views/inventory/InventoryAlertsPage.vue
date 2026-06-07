@@ -4,11 +4,12 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { apiClient } from "../../utils/api";
 import { createLatestRequestGate } from "../../utils/request-gate";
+import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
-import { applyFilterQuery, buildFilterQuery, dateText, integer, stockStatusText, stockStatusType } from "./inventory-utils.js";
+import { applyFilterQuery, dateText, integer, stockStatusText, stockStatusType } from "./inventory-utils.js";
 
 const route = useRoute();
 const router = useRouter();
@@ -42,6 +43,14 @@ const filterDefaults = {
 };
 
 const pagedRows = computed(() => state.rows);
+const syncRouteQuery = createDefaultRouteQuerySync({
+  route,
+  router,
+  filters: state.filters,
+  defaults: filterDefaults,
+  manualKeys: ["query"],
+  isSyncingRoute: () => syncingRoute
+});
 
 function alertSkuSummary(row) {
   const skus = Array.isArray(row.skus) ? row.skus : [];
@@ -65,20 +74,15 @@ function applyRouteState() {
   }
 }
 
-function syncRouteQuery() {
-  if (syncingRoute) return;
-  const next = buildFilterQuery(route, state.filters, filterDefaults);
-  if (JSON.stringify(route.query || {}) === JSON.stringify(next)) return;
-  router.replace({ query: next });
-}
-
 function handleSearch() {
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
 function handleReset() {
   Object.assign(state.filters, filterDefaults);
+  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -94,7 +98,7 @@ function handlePageSizeChange(size) {
 }
 
 function openProcurement(row) {
-  router.push({ path: "/procurement", query: { productId: String(row.product_id), from: "inventory-alerts" } });
+  router.push({ path: "/purchase-list", query: { productId: String(row.product_id), from: "inventory-alerts" } });
 }
 
 function openMappings() {
@@ -147,7 +151,7 @@ async function loadPageData() {
 }
 
 watch(() => route.query, applyRouteState, { deep: true });
-watch(() => [state.filters.query, state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize], syncRouteQuery);
+watch(() => [state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize], syncRouteQuery);
 
 onMounted(async () => {
   applyRouteState();

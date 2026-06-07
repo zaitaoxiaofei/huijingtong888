@@ -111,6 +111,7 @@ export function syncOutboundForOpenOrders(deps) {
       pending += 1;
       continue;
     }
+    const hadOrderItemMapping = Number(row.sku_mapping_id || 0) > 0;
     if (Number(row.sku_mapping_id || 0) !== Number(row.mapping_id)) {
       deps.db.prepare("UPDATE order_items SET sku_mapping_id = ? WHERE id = ?").run(row.mapping_id, row.id);
     }
@@ -120,6 +121,9 @@ export function syncOutboundForOpenOrders(deps) {
       LIMIT 1
     `, [row.id]);
     if (existed) {
+      if (Number(existed.product_id) !== Number(row.product_id)) {
+        continue;
+      }
       if (existed.status !== "posted" || Number(existed.product_id) !== Number(row.product_id)) {
         deps.db.prepare(`
           UPDATE inventory_movements
@@ -139,6 +143,13 @@ export function syncOutboundForOpenOrders(deps) {
         deps.rebuildInventoryCurrentForProduct(existed.product_id);
         deps.rebuildInventoryCurrentForProduct(row.product_id);
       }
+      continue;
+    }
+    if (!hadOrderItemMapping) {
+      deps.db.prepare(`
+        UPDATE order_exceptions SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP
+        WHERE store_id = ? AND posting_number = ? AND ozon_sku = ? AND exception_type IN ('UNMAPPED_SKU', 'OUTBOUND_UNBOUND_SKU')
+      `).run(row.shop_id, row.posting_number, row.ozon_sku);
       continue;
     }
     const qty = -Math.abs(Number(row.quantity || 1));

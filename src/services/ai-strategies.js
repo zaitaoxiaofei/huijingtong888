@@ -212,6 +212,64 @@ export async function aiStrategyLayerRules(query = {}) {
   return rows.map(normalizeLayerRuleRow);
 }
 
+export async function aiStrategyLayerRuleDetail(id) {
+  await ensureAiStrategyTables();
+  const row = await mysqlQuery("SELECT * FROM ai_strategy_layer_rules WHERE id = ? LIMIT 1", [Number(id)]).then((rows) => rows[0]);
+  if (!row) throw statusError("AI 类目策略树不存在", 404);
+  return normalizeLayerRuleRow(row);
+}
+
+export async function createAiStrategyLayerRule(body = {}) {
+  await ensureAiStrategyTables();
+  const payload = normalizeLayerRulePayload(body);
+  const result = await mysqlExecute(`
+    INSERT INTO ai_strategy_layer_rules (
+      scope, rule_key, title, aliases_json, goal_strategy_map_json,
+      sort_order, enabled, metadata_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    payload.scope,
+    payload.rule_key,
+    payload.title,
+    payload.aliases_json,
+    payload.goal_strategy_map_json,
+    payload.sort_order,
+    payload.enabled,
+    payload.metadata_json
+  ]);
+  return aiStrategyLayerRuleDetail(result.insertId);
+}
+
+export async function updateAiStrategyLayerRule(id, body = {}) {
+  await ensureAiStrategyTables();
+  const previous = await aiStrategyLayerRuleDetail(id);
+  const payload = normalizeLayerRulePayload({ ...previous, ...body });
+  await mysqlExecute(`
+    UPDATE ai_strategy_layer_rules
+    SET scope = ?,
+        rule_key = ?,
+        title = ?,
+        aliases_json = ?,
+        goal_strategy_map_json = ?,
+        sort_order = ?,
+        enabled = ?,
+        metadata_json = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [
+    payload.scope,
+    payload.rule_key,
+    payload.title,
+    payload.aliases_json,
+    payload.goal_strategy_map_json,
+    payload.sort_order,
+    payload.enabled,
+    payload.metadata_json,
+    Number(id)
+  ]);
+  return aiStrategyLayerRuleDetail(id);
+}
+
 export async function resolveAiStrategyPlan(body = {}) {
   await ensureAiStrategyTables();
   const businessMode = cleanText(body.businessMode || body.business_mode || "product_optimization", 64);
@@ -375,6 +433,22 @@ function normalizeStrategyPayload(body = {}) {
     priority: clampInt(body.priority, -999999, 999999, 0),
     enabled: Number(body.enabled ?? 1) ? 1 : 0,
     version: clampInt(body.version, 1, 999999, 1),
+    metadata_json: normalizeJson(body.metadata_json || body.metadataJson || body.metadata || {})
+  };
+}
+
+function normalizeLayerRulePayload(body = {}) {
+  const title = cleanText(body.title || body.name, 191);
+  if (!title) throw statusError("类目策略树名称不能为空", 400);
+  const keySource = body.rule_key || body.ruleKey || body.key || title;
+  return {
+    scope: cleanText(body.scope || "category", 32) || "category",
+    rule_key: cleanText(keySource, 128),
+    title,
+    aliases_json: stringifyArray(body.aliases),
+    goal_strategy_map_json: normalizeJson(body.goal_strategy_map || body.goalStrategyMap || body.goals || {}),
+    sort_order: clampInt(body.sort_order ?? body.sortOrder, -999999, 999999, 0),
+    enabled: Number(body.enabled ?? 1) ? 1 : 0,
     metadata_json: normalizeJson(body.metadata_json || body.metadataJson || body.metadata || {})
   };
 }

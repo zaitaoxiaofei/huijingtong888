@@ -4,9 +4,19 @@ import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js
 
 const TAB_KEYS = ['overview', 'all_metrics', 'funnel', 'hot', 'search', 'abc', 'need_promotion', 'card_quality']
 const COLLECT_RUN_PREFIX = 'seller_analytics_collect_run:'
+const AUTH_BINDING_PREFIX = 'seller_analytics_auth_binding:'
+const PLUGIN_STATUS_SETTING_KEY = 'seller_analytics_plugin_status'
+const PLUGIN_PREPARE_SETTING_KEY = 'seller_analytics_plugin_prepare'
 const DEFAULT_COLLECT_SOURCE_KEYS = TAB_KEYS
 const DEFAULT_PAGE_LIMIT = 30
 const COLLECT_REQUEST_STALE_MS = 120000
+const DEFAULT_AUTO_COLLECT_MAX_PAGES = 500
+const PLUGIN_STATUS_STALE_MS = 45000
+const DIRECT_COLLECT_BATCH_SIZE = 9
+const DIRECT_COLLECT_INITIAL_DELAY_MS = 250
+const DIRECT_COLLECT_MIN_DELAY_MS = 180
+const DIRECT_COLLECT_MAX_CONCURRENCY = 3
+const DIRECT_COLLECT_AUTH_TTL_MS = 24 * 60 * 60 * 1000
 const ABC_ANALYSIS_REQUEST_URL = 'https://seller.ozon.ru/api/site/seller-analytics/charts/v3/abc'
 const OFFICIAL_ALL_METRICS = [
   'revenue',
@@ -115,6 +125,11 @@ const SOURCE_LABEL_TO_TAB_KEY = {
   卡片质量: 'card_quality'
 }
 const collectRunStateLocks = new Map()
+const directCollectWorkers = new Set()
+const directCollectRateState = new Map()
+const analysisCache = new Map()
+const ANALYSIS_CACHE_TTL_MS = 60000
+const ANALYSIS_CACHE_MAX_ENTRIES = 80
 
 function newId(prefix) {
   return `${prefix}_${crypto.randomUUID()}`
@@ -123,6 +138,84 @@ function newId(prefix) {
 function safeString(value) {
   if (value === undefined || value === null) return ''
   return String(value).trim()
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms || 0))))
+}
+
+function normalizeSellerAnalyticsImageUrl(value) {
+  const text = safeString(value)
+  if (!text) return ''
+  if (/^data:image\//i.test(text)) return text
+  if (text.startsWith('[') || text.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text)
+      if (Array.isArray(parsed)) return normalizeSellerAnalyticsImageUrl(parsed[0])
+      if (parsed && typeof parsed === 'object') {
+        return normalizeSellerAnalyticsImageUrl(parsed.url || parsed.image_url || parsed.imageUrl || parsed.src || parsed.link || parsed.href || '')
+      }
+    } catch {
+      return text
+    }
+  }
+  const first = text.includes('||')
+    ? text.split(/\s*\|\|\s*/).map((item) => item.trim()).find(Boolean)
+    : text.split(/\s*,\s*/).map((item) => item.trim()).find(Boolean)
+  return safeString(first || text)
+}
+
+function serializeAnalysisProduct(product = {}) {
+  return {
+    ...product,
+    image_url: normalizeSellerAnalyticsImageUrl(product.image_url)
+  }
+}
+
+function clearAnalysisCache(tenantId = '') {
+  const tenantPrefix = safeString(tenantId)
+  if (!tenantPrefix) {
+    analysisCache.clear()
+    return
+  }
+  for (const key of analysisCache.keys()) {
+    if (key.startsWith(`${tenantPrefix}:`)) analysisCache.delete(key)
+  }
+}
+
+function stableCacheValue(value) {
+  if (Array.isArray(value)) return value.map(stableCacheValue)
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((result, key) => {
+      const next = value[key]
+      if (next !== undefined && next !== null && next !== '') result[key] = stableCacheValue(next)
+      return result
+    }, {})
+  }
+  return value
+}
+
+function analysisCacheKey(query = {}, tenantId = 'admin') {
+  return `${safeString(tenantId) || 'admin'}:${JSON.stringify(stableCacheValue(query))}`
+}
+
+function getCachedAnalysis(query = {}, tenantId = 'admin') {
+  const key = analysisCacheKey(query, tenantId)
+  const cached = analysisCache.get(key)
+  if (!cached) return null
+  if (Date.now() - cached.createdAt > ANALYSIS_CACHE_TTL_MS) {
+    analysisCache.delete(key)
+    return null
+  }
+  return cached.result
+}
+
+function setCachedAnalysis(query = {}, tenantId = 'admin', result) {
+  const key = analysisCacheKey(query, tenantId)
+  analysisCache.set(key, { createdAt: Date.now(), result })
+  if (analysisCache.size <= ANALYSIS_CACHE_MAX_ENTRIES) return
+  const firstKey = analysisCache.keys().next().value
+  if (firstKey) analysisCache.delete(firstKey)
 }
 
 function normalizeAbcGrade(value) {
@@ -208,6 +301,17 @@ const SELLER_ANALYTICS_METRIC_COLUMNS = [
   'impressions', 'card_views', 'search_position', 'add_to_cart', 'conversion_rate',
   'abc_revenue', 'abc_quantity', 'suggestion', 'raw_data', 'captured_at'
 ]
+const SELLER_ANALYTICS_DIAGNOSIS_COLUMNS = [
+  'id', 'tenant_id', 'shop_id', 'biz_date', 'period_key', 'product_id', 'sku', 'offer_id',
+  'product_name', 'image_url', 'segment', 'priority', 'score', 'main_problem',
+  'recommended_action', 'metrics_json', 'evidence_json', 'diagnosed_at'
+]
+const SELLER_ANALYTICS_TODO_COLUMNS = [
+  'id', 'tenant_id', 'shop_id', 'biz_date', 'period_key', 'product_id', 'sku', 'offer_id',
+  'product_name', 'image_url', 'segment', 'priority', 'score', 'problem_type',
+  'recommended_action', 'evidence_json', 'status', 'owner', 'action_taken',
+  'resolved_at', 'created_at', 'updated_at'
+]
 
 async function ensureSellerAnalyticsSchema() {
   await mysqlExecute(`
@@ -281,6 +385,60 @@ async function ensureSellerAnalyticsSchema() {
       KEY idx_seller_metrics_offer (tenant_id, offer_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `)
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS seller_analytics_product_diagnosis (
+      id VARCHAR(96) NOT NULL PRIMARY KEY,
+      tenant_id VARCHAR(80) NOT NULL DEFAULT 'admin',
+      shop_id VARCHAR(80) NULL,
+      biz_date DATE NULL,
+      period_key VARCHAR(120) NULL,
+      product_id VARCHAR(128) NULL,
+      sku VARCHAR(128) NULL,
+      offer_id VARCHAR(255) NULL,
+      product_name VARCHAR(512) NULL,
+      image_url TEXT NULL,
+      segment VARCHAR(80) NULL,
+      priority VARCHAR(32) NULL,
+      score DECIMAL(18,4) NULL,
+      main_problem VARCHAR(255) NULL,
+      recommended_action TEXT NULL,
+      metrics_json LONGTEXT NULL,
+      evidence_json LONGTEXT NULL,
+      diagnosed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      KEY idx_seller_diagnosis_tenant_date (tenant_id, biz_date, priority),
+      KEY idx_seller_diagnosis_product (tenant_id, sku, offer_id, product_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `)
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS seller_analytics_operation_todos (
+      id VARCHAR(96) NOT NULL PRIMARY KEY,
+      tenant_id VARCHAR(80) NOT NULL DEFAULT 'admin',
+      shop_id VARCHAR(80) NULL,
+      biz_date DATE NULL,
+      period_key VARCHAR(120) NULL,
+      product_id VARCHAR(128) NULL,
+      sku VARCHAR(128) NULL,
+      offer_id VARCHAR(255) NULL,
+      product_name VARCHAR(512) NULL,
+      image_url TEXT NULL,
+      segment VARCHAR(80) NULL,
+      priority VARCHAR(32) NULL,
+      score DECIMAL(18,4) NULL,
+      problem_type VARCHAR(255) NULL,
+      recommended_action TEXT NULL,
+      evidence_json LONGTEXT NULL,
+      status VARCHAR(32) NOT NULL DEFAULT 'open',
+      owner VARCHAR(120) NULL,
+      action_taken TEXT NULL,
+      resolved_at DATETIME NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      KEY idx_seller_todos_tenant_status_date (tenant_id, status, biz_date, priority),
+      KEY idx_seller_todos_product (tenant_id, sku, offer_id, product_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `)
 }
 
 function insertSql(table, columns) {
@@ -289,6 +447,15 @@ function insertSql(table, columns) {
     VALUES (${columns.map(() => '?').join(', ')})
     ON DUPLICATE KEY UPDATE ${columns.filter((column) => column !== 'id').map((column) => `\`${column}\` = VALUES(\`${column}\`)`).join(', ')}
   `
+}
+
+function sellerAnalyticsEntityConfig(entityName) {
+  if (entityName === 'Setting') return { table: 'settings', columns: null }
+  if (entityName === 'SellerAnalyticsSnapshot') return { table: 'seller_analytics_snapshots', columns: SELLER_ANALYTICS_SNAPSHOT_COLUMNS }
+  if (entityName === 'SellerAnalyticsProductMetric') return { table: 'seller_analytics_product_metrics', columns: SELLER_ANALYTICS_METRIC_COLUMNS }
+  if (entityName === 'SellerAnalyticsProductDiagnosis') return { table: 'seller_analytics_product_diagnosis', columns: SELLER_ANALYTICS_DIAGNOSIS_COLUMNS }
+  if (entityName === 'SellerAnalyticsOperationTodo') return { table: 'seller_analytics_operation_todos', columns: SELLER_ANALYTICS_TODO_COLUMNS }
+  return { table: 'seller_analytics_product_metrics', columns: SELLER_ANALYTICS_METRIC_COLUMNS }
 }
 
 class SellerAnalyticsRepository {
@@ -310,15 +477,10 @@ class SellerAnalyticsRepository {
       `, [payload.key, payload.tenant_id || 'admin', payload.value, mysqlDateValue(payload.updated_at) || mysqlDateValue(new Date())])
       return payload
     }
-    const table = this.entityName === 'SellerAnalyticsSnapshot'
-      ? 'seller_analytics_snapshots'
-      : 'seller_analytics_product_metrics'
-    const columns = this.entityName === 'SellerAnalyticsSnapshot'
-      ? SELLER_ANALYTICS_SNAPSHOT_COLUMNS
-      : SELLER_ANALYTICS_METRIC_COLUMNS
+    const { table, columns } = sellerAnalyticsEntityConfig(this.entityName)
     await mysqlExecute(insertSql(table, columns), columns.map((column) => {
       const value = payload[column]
-      return column === 'captured_at' ? mysqlDateValue(value) : value
+      return ['captured_at', 'diagnosed_at', 'resolved_at', 'created_at', 'updated_at'].includes(column) ? mysqlDateValue(value) : value
     }))
     return payload
   }
@@ -331,11 +493,7 @@ class SellerAnalyticsRepository {
   async find(options = {}) {
     await ensureSellerAnalyticsSchema()
     if (this.entityName === 'OnlineProduct') return this.findOnlineProducts()
-    const table = this.entityName === 'Setting'
-      ? 'settings'
-      : this.entityName === 'SellerAnalyticsSnapshot'
-        ? 'seller_analytics_snapshots'
-        : 'seller_analytics_product_metrics'
+    const { table } = sellerAnalyticsEntityConfig(this.entityName)
     const whereInput = Array.isArray(options.where) ? options.where : [options.where || {}]
     const order = options.order || {}
     const take = Math.max(1, Math.min(Number(options.take || 500), 5000))
@@ -386,9 +544,7 @@ class SellerAnalyticsRepository {
 
   async count(options = {}) {
     await ensureSellerAnalyticsSchema()
-    const table = this.entityName === 'SellerAnalyticsSnapshot'
-      ? 'seller_analytics_snapshots'
-      : 'seller_analytics_product_metrics'
+    const { table } = sellerAnalyticsEntityConfig(this.entityName)
     const { sql, params } = buildWhereClause(options.where || {})
     const rows = await mysqlQuery(`SELECT COUNT(*) AS total FROM ${table} WHERE ${sql}`, params)
     return Number(rows[0]?.total || 0)
@@ -401,9 +557,7 @@ class SellerAnalyticsRepository {
       const result = await mysqlExecute(`DELETE FROM settings WHERE ${sql}`, params)
       return { affected: result.affectedRows || 0 }
     }
-    const table = this.entityName === 'SellerAnalyticsSnapshot'
-      ? 'seller_analytics_snapshots'
-      : 'seller_analytics_product_metrics'
+    const { table } = sellerAnalyticsEntityConfig(this.entityName)
     const { sql, params } = buildWhereClause(where)
     const result = await mysqlExecute(`DELETE FROM ${table} WHERE ${sql}`, params)
     return { affected: result.affectedRows || 0 }
@@ -459,11 +613,18 @@ const sellerAnalyticsDb = {
   entityMetadatas: [
     { name: 'SellerAnalyticsSnapshot' },
     { name: 'SellerAnalyticsProductMetric' },
+    { name: 'SellerAnalyticsProductDiagnosis' },
+    { name: 'SellerAnalyticsOperationTodo' },
     { name: 'OnlineProduct' }
   ],
   getRepository(entityName) {
     return new SellerAnalyticsRepository(entityName)
   }
+}
+
+function stableId(prefix, parts = []) {
+  const hash = crypto.createHash('sha1').update(parts.map((part) => safeString(part)).join('|')).digest('hex').slice(0, 24)
+  return `${prefix}_${hash}`
 }
 
 async function withCollectRunStateLock(tenantId, work) {
@@ -498,6 +659,12 @@ function parsePositiveInteger(value, fallback, max = 100) {
   const parsed = Number.parseInt(String(value ?? ''), 10)
   if (!Number.isFinite(parsed) || parsed < 1) return fallback
   return Math.min(parsed, max)
+}
+
+function parseBoolean(value) {
+  if (typeof value === 'boolean') return value
+  const raw = safeString(value).toLowerCase()
+  return ['1', 'true', 'yes', 'on', 'auto', 'full'].includes(raw)
 }
 
 function normalizeCompanyId(value) {
@@ -722,9 +889,10 @@ function includesAll(source, required) {
   return required.every((item) => set.has(item))
 }
 
-function collectRunMatchesRequest(run, period, requests) {
+function collectRunMatchesRequest(run, period, requests, storeId = '') {
   if (!['pending', 'running'].includes(run?.status)) return false
   if (run.current_period?.date_from !== period.current_period.date_from || run.current_period?.date_to !== period.current_period.date_to) return false
+  if (safeString(run.store_id || run.storeId) !== safeString(storeId)) return false
   const requestedSources = Array.from(new Set(requests.map((item) => item.source_key).filter(Boolean)))
   const requestedPages = Array.from(new Set(requests
     .filter((item) => item.endpoint_type === 'by_sku')
@@ -737,8 +905,321 @@ function getSettingKeyForCollectRun(id) {
   return `${COLLECT_RUN_PREFIX}${id}`
 }
 
+function getSettingKeyForAuthBinding(storeId) {
+  return `${AUTH_BINDING_PREFIX}${safeString(storeId) || 'default'}`
+}
+
 function parseSettingValue(row) {
   return parseJson(row?.value, null)
+}
+
+function sanitizeAuthHeaders(headers = {}) {
+  const allowed = new Set([
+    'accept',
+    'accept-language',
+    'content-type',
+    'x-o3-app-name',
+    'x-o3-company-id',
+    'x-o3-language',
+    'x-o3-page-type',
+    'user-agent'
+  ])
+  const result = {}
+  for (const [key, value] of Object.entries(headers || {})) {
+    const normalizedKey = String(key || '').trim()
+    const lowerKey = normalizedKey.toLowerCase()
+    if (!normalizedKey || !allowed.has(lowerKey)) continue
+    result[normalizedKey] = String(value || '')
+  }
+  return result
+}
+
+function normalizeAuthBinding(payload = {}, tenantId = 'admin') {
+  const storeId = safeString(payload.store_id || payload.storeId || payload.company_id || payload.companyId || payload.current_company_id || payload.currentCompanyId)
+  const cookie = safeString(payload.cookie || payload.cookie_header || payload.cookieHeader)
+  const now = new Date().toISOString()
+  return {
+    tenant_id: safeString(payload.tenant_id || payload.tenantId || tenantId) || 'admin',
+    store_id: storeId,
+    company_id: storeId,
+    shop_name: safeString(payload.shop_name || payload.shopName),
+    cookie,
+    headers: sanitizeAuthHeaders(payload.headers || payload.request_headers || payload.requestHeaders),
+    bound_at: mysqlDateValue(payload.bound_at || payload.boundAt) || now,
+    updated_at: now,
+    last_ok_at: mysqlDateValue(payload.last_ok_at || payload.lastOkAt) || '',
+    last_error: safeString(payload.last_error || payload.lastError),
+    last_status: Number(payload.last_status || payload.lastStatus || 0) || 0,
+    source: safeString(payload.source || 'plugin-cookie-binding') || 'plugin-cookie-binding'
+  }
+}
+
+function publicAuthBinding(binding = null) {
+  if (!binding) return null
+  const updatedMs = binding.updated_at ? new Date(binding.updated_at).getTime() : 0
+  const stale = !updatedMs || Date.now() - updatedMs > DIRECT_COLLECT_AUTH_TTL_MS
+  return {
+    bound: Boolean(binding.cookie),
+    store_id: binding.store_id || binding.company_id || '',
+    company_id: binding.company_id || binding.store_id || '',
+    shop_name: binding.shop_name || '',
+    updated_at: binding.updated_at || '',
+    bound_at: binding.bound_at || '',
+    last_ok_at: binding.last_ok_at || '',
+    last_error: binding.last_error || '',
+    last_status: binding.last_status || 0,
+    stale
+  }
+}
+
+function emptyAuthBindingStatus(error = null) {
+  return {
+    bound: false,
+    store_id: '',
+    company_id: '',
+    shop_name: '',
+    updated_at: '',
+    bound_at: '',
+    last_ok_at: '',
+    last_error: error ? safeString(error.message || error) : '',
+    last_status: 0,
+    stale: true
+  }
+}
+
+async function saveAuthBinding(db, payload = {}, tenantId = 'admin') {
+  const binding = normalizeAuthBinding(payload, tenantId)
+  if (!binding.store_id) {
+    const error = new Error('Missing Ozon company id for auth binding')
+    error.statusCode = 400
+    throw error
+  }
+  if (!binding.cookie) {
+    const error = new Error('Missing Ozon cookie for auth binding')
+    error.statusCode = 400
+    throw error
+  }
+  const repo = db.getRepository('Setting')
+  await repo.save({
+    key: getSettingKeyForAuthBinding(binding.store_id),
+    tenant_id: tenantId,
+    value: stringifyJson(binding),
+    updated_at: binding.updated_at
+  })
+  return publicAuthBinding(binding)
+}
+
+async function getAuthBinding(db, storeId = '', tenantId = 'admin') {
+  const id = safeString(storeId)
+  if (!id) return null
+  const repo = db.getRepository('Setting')
+  const row = await repo.findOne({ where: { key: getSettingKeyForAuthBinding(id), tenant_id: tenantId } })
+  const binding = normalizeAuthBinding(parseSettingValue(row), tenantId)
+  if (!binding.cookie || !binding.store_id) return null
+  const updatedMs = binding.updated_at ? new Date(binding.updated_at).getTime() : 0
+  if (!updatedMs || Date.now() - updatedMs > DIRECT_COLLECT_AUTH_TTL_MS) return null
+  return binding
+}
+
+async function authBindingStatus(db, query = {}, tenantId = 'admin') {
+  try {
+    const storeId = safeString(query.store_id || query.storeId || query.shop_id || query.shopId || query.company_id || query.companyId)
+    if (!storeId) return emptyAuthBindingStatus()
+    const repo = db.getRepository('Setting')
+    const row = await repo.findOne({ where: { key: getSettingKeyForAuthBinding(storeId), tenant_id: tenantId } })
+    const binding = normalizeAuthBinding(parseSettingValue(row), tenantId)
+    if (!binding.cookie || !binding.store_id) return emptyAuthBindingStatus()
+    return publicAuthBinding(binding) || emptyAuthBindingStatus()
+  } catch (error) {
+    console.warn('seller analytics auth binding status failed', error)
+    return emptyAuthBindingStatus(error)
+  }
+}
+
+async function savePluginStatus(db, payload = {}, tenantId = 'admin') {
+  const repo = db.getRepository('Setting')
+  const sellerTab = payload?.seller_tab && typeof payload.seller_tab === 'object'
+    ? {
+        id: Number(payload.seller_tab.id || 0) || null,
+        title: safeString(payload.seller_tab.title),
+        url: safeString(payload.seller_tab.url)
+      }
+    : null
+  const status = {
+    tenant_id: tenantId,
+    seller_missing: payload?.seller_missing === true,
+    polling_enabled: payload?.polling_enabled === true,
+    plugin_version: safeString(payload?.plugin_version),
+    current_company_id: safeString(payload?.current_company_id || payload?.company_id || payload?.store_id),
+    seller_tab: sellerTab,
+    synced_at: mysqlDateValue(payload?.synced_at) || new Date().toISOString(),
+    synced_at_ms: Number(payload?.synced_at_ms || Date.now())
+  }
+  await repo.save({
+    key: PLUGIN_STATUS_SETTING_KEY,
+    tenant_id: tenantId,
+    value: stringifyJson(status),
+    updated_at: new Date()
+  })
+  return status
+}
+
+async function getPluginStatus(db, tenantId = 'admin') {
+  const repo = db.getRepository('Setting')
+  const row = await repo.findOne({ where: { key: PLUGIN_STATUS_SETTING_KEY, tenant_id: tenantId } })
+  const status = parseSettingValue(row)
+  if (!status) {
+    return {
+      ok: false,
+      code: 'plugin_offline',
+      message: '还没有收到店铺分析插件的状态，请先打开插件和 Ozon 分析页。',
+      last_seen_at: null,
+      plugin_online: false
+    }
+  }
+  const lastSeenAt = safeString(status.synced_at || row?.updated_at)
+  const lastSeenMs = Number(status.synced_at_ms || 0) || (lastSeenAt ? new Date(lastSeenAt).getTime() : 0)
+  const pluginOnline = Boolean(lastSeenMs && (Date.now() - lastSeenMs) <= PLUGIN_STATUS_STALE_MS)
+  return {
+    ...status,
+    last_seen_at: lastSeenAt || null,
+    plugin_online: pluginOnline,
+    stale: !pluginOnline
+  }
+}
+
+async function validatePluginStatus(db, query = {}, tenantId = 'admin') {
+  const status = await getPluginStatus(db, tenantId)
+  const expectedStoreId = safeString(query.store_id || query.storeId || query.company_id || query.companyId || query.shop_id || query.shopId)
+  const expectedShopName = safeString(query.shop_name || query.shopName)
+  const expectedLabel = expectedShopName || (expectedStoreId ? `店铺 ${expectedStoreId}` : '当前店铺')
+
+  if (!status.plugin_online) {
+    return {
+      ...status,
+      ok: false,
+      code: 'plugin_offline',
+      message: '店铺分析插件暂时没有连上 ERP。',
+      detail: '请确认插件已安装并保持启用，然后打开对应店铺的 seller.ozon.ru/app/analytics 页面，等待几秒后再试。'
+    }
+  }
+  if (status.seller_missing || !status.seller_tab?.url) {
+    return {
+      ...status,
+      ok: false,
+      code: 'seller_tab_missing',
+      message: '插件还没有找到 Ozon 分析页面。',
+      detail: '请先打开对应店铺的 seller.ozon.ru/app/analytics 页面，再回来启动采集。'
+    }
+  }
+  if (!expectedStoreId) {
+    return {
+      ...status,
+      ok: false,
+      code: 'missing_expected_store',
+      message: '当前还没有选中可验证的店铺。',
+      detail: '请先在数据分析页面选择店铺，再启动采集。'
+    }
+  }
+  if (!status.current_company_id) {
+    return {
+      ...status,
+      ok: false,
+      code: 'missing_plugin_company',
+      message: '插件已经连上 Ozon 分析页，但还没识别到当前店铺。',
+      detail: '请在 Ozon 分析页停留几秒，必要时刷新页面后再试。'
+    }
+  }
+  if (safeString(status.current_company_id) !== expectedStoreId) {
+    return {
+      ...status,
+      ok: false,
+      code: 'company_mismatch',
+      message: `当前插件连接的店铺和 ERP 选择的 ${expectedLabel} 不一致。`,
+      detail: `ERP 期望店铺 ID：${expectedStoreId}；插件当前店铺 ID：${status.current_company_id}。请切到正确的 Ozon 店铺分析页后再启动采集。`,
+      expected_store_id: expectedStoreId
+    }
+  }
+  return {
+    ...status,
+    ok: true,
+    code: 'ready',
+    message: `插件校验通过，当前店铺和 ERP 里的 ${expectedLabel} 一致。`,
+    detail: '可以开始采集。',
+    expected_store_id: expectedStoreId
+  }
+}
+
+function normalizePrepareRequest(value = null) {
+  if (!value || typeof value !== 'object') return null
+  return {
+    id: safeString(value.id),
+    tenant_id: safeString(value.tenant_id || value.tenantId || 'admin') || 'admin',
+    status: safeString(value.status || 'pending') || 'pending',
+    expected_store_id: safeString(value.expected_store_id || value.expectedStoreId || value.store_id || value.storeId || value.company_id || value.companyId),
+    expected_shop_name: safeString(value.expected_shop_name || value.expectedShopName || value.shop_name || value.shopName),
+    target_url: safeString(value.target_url || value.targetUrl) || 'https://seller.ozon.ru/app/analytics/graphs',
+    current_company_id: safeString(value.current_company_id || value.currentCompanyId),
+    error: safeString(value.error),
+    created_at: mysqlDateValue(value.created_at || value.createdAt) || new Date().toISOString(),
+    updated_at: mysqlDateValue(value.updated_at || value.updatedAt) || new Date().toISOString()
+  }
+}
+
+async function getPluginPrepareRequest(db, tenantId = 'admin') {
+  const repo = db.getRepository('Setting')
+  const row = await repo.findOne({ where: { key: PLUGIN_PREPARE_SETTING_KEY, tenant_id: tenantId } })
+  return normalizePrepareRequest(parseSettingValue(row))
+}
+
+async function savePluginPrepareRequest(db, request, tenantId = 'admin') {
+  const repo = db.getRepository('Setting')
+  const next = normalizePrepareRequest({ ...request, tenant_id: tenantId, updated_at: new Date().toISOString() })
+  await repo.save({
+    key: PLUGIN_PREPARE_SETTING_KEY,
+    tenant_id: tenantId,
+    value: stringifyJson(next),
+    updated_at: new Date()
+  })
+  return next
+}
+
+async function preparePlugin(db, payload = {}, tenantId = 'admin') {
+  const now = new Date().toISOString()
+  const request = {
+    id: newId('sap'),
+    tenant_id: tenantId,
+    status: 'pending',
+    expected_store_id: safeString(payload.store_id || payload.storeId || payload.company_id || payload.companyId || payload.shop_id || payload.shopId),
+    expected_shop_name: safeString(payload.shop_name || payload.shopName),
+    target_url: safeString(payload.target_url || payload.targetUrl) || 'https://seller.ozon.ru/app/analytics/graphs',
+    current_company_id: '',
+    error: '',
+    created_at: now,
+    updated_at: now
+  }
+  return savePluginPrepareRequest(db, request, tenantId)
+}
+
+async function claimPluginPrepareRequest(db, tenantId = 'admin') {
+  const request = await getPluginPrepareRequest(db, tenantId)
+  if (!request || !['pending', 'running'].includes(request.status)) return null
+  return savePluginPrepareRequest(db, { ...request, status: 'running', error: '' }, tenantId)
+}
+
+async function finishPluginPrepareRequest(db, payload = {}, tenantId = 'admin') {
+  const request = await getPluginPrepareRequest(db, tenantId)
+  if (!request) return null
+  const success = payload?.success !== false
+  const currentCompanyId = safeString(payload.current_company_id || payload.currentCompanyId || payload.company_id || payload.companyId)
+  const expectedStoreId = safeString(request.expected_store_id)
+  const mismatch = success && expectedStoreId && currentCompanyId && expectedStoreId !== currentCompanyId
+  return savePluginPrepareRequest(db, {
+    ...request,
+    status: success ? (mismatch ? 'mismatch' : 'ready') : 'failed',
+    current_company_id: currentCompanyId,
+    error: success ? '' : safeString(payload.error || 'PREPARE_FAILED')
+  }, tenantId)
 }
 
 async function saveCollectRunState(db, run) {
@@ -769,7 +1250,11 @@ async function listCollectRuns(db, query = {}, tenantId = 'admin') {
     .orderBy('setting.updated_at', 'DESC')
     .take(take)
     .getMany()
-  return rows.map(parseSettingValue).filter(Boolean)
+  const storeId = safeString(query.store_id || query.storeId || query.shop_id || query.shopId)
+  return rows
+    .map(parseSettingValue)
+    .filter(Boolean)
+    .filter((run) => !storeId || safeString(run.store_id || run.storeId) === storeId)
 }
 
 function buildCollectRequestBody(sourceKey, endpointType, period, pageIndex = 0, limit = DEFAULT_PAGE_LIMIT) {
@@ -826,13 +1311,15 @@ function buildCollectRequests(payload = {}, period) {
     ? payload.source_keys || payload.sourceKeys
     : DEFAULT_COLLECT_SOURCE_KEYS
   const normalizedSourceKeys = sourceKeys.map((key) => safeString(key)).filter((key) => SOURCE_METRICS[key])
-  const pages = parsePositiveInteger(payload.pages, 1, 10)
+  const autoAllPages = parseBoolean(payload.auto_all_pages ?? payload.autoAllPages ?? payload.full_store ?? payload.fullStore)
+  const pages = autoAllPages ? 1 : parsePositiveInteger(payload.pages, 1, 10)
   const singlePage = Number.parseInt(String(payload.page ?? payload.current_page ?? payload.currentPage ?? ''), 10)
-  const pageIndexes = Number.isFinite(singlePage) && singlePage > 0
+  const pageIndexes = !autoAllPages && Number.isFinite(singlePage) && singlePage > 0
     ? [singlePage - 1]
     : Array.from({ length: pages }, (_, index) => index)
   const limit = parsePositiveInteger(payload.limit, DEFAULT_PAGE_LIMIT, 100)
   const requestHeaders = buildCollectRequestHeaders(payload)
+  const maxPages = parsePositiveInteger(payload.max_pages ?? payload.maxPages, DEFAULT_AUTO_COLLECT_MAX_PAGES, DEFAULT_AUTO_COLLECT_MAX_PAGES)
   const requests = []
   for (const sourceKey of normalizedSourceKeys) {
     requests.push({
@@ -854,6 +1341,9 @@ function buildCollectRequests(payload = {}, period) {
         source_label: TAB_LABELS[sourceKey] || sourceKey,
         endpoint_type: 'by_sku',
         page_index: pageIndex,
+        auto_all_pages: autoAllPages,
+        max_pages: maxPages,
+        limit,
         request_url: 'https://seller.ozon.ru/api/site/seller-analytics/charts/v3/table/by_sku',
         request_method: 'POST',
         request_headers: requestHeaders,
@@ -866,22 +1356,307 @@ function buildCollectRequests(payload = {}, period) {
   return requests
 }
 
+function normalizeProbeHeaders(headers = {}) {
+  const result = {}
+  for (const [key, value] of Object.entries(headers || {})) {
+    const normalizedKey = String(key || '').trim()
+    const lowerKey = normalizedKey.toLowerCase()
+    if (!normalizedKey || ['host', 'content-length', 'connection'].includes(lowerKey)) continue
+    result[normalizedKey] = String(value || '')
+  }
+  return result
+}
+
+async function probeSellerAnalyticsAuth(payload = {}) {
+  const period = resolveCollectPeriod({
+    period_key: payload.period_key || payload.periodKey || 'yesterday',
+    date_from: payload.date_from || payload.dateFrom,
+    date_to: payload.date_to || payload.dateTo
+  })
+  const companyId = safeString(payload.company_id || payload.companyId || payload.current_company_id || payload.currentCompanyId)
+  const cookie = safeString(payload.cookie || payload.cookie_header || payload.cookieHeader)
+  if (!cookie) {
+    const error = new Error('Missing Ozon cookie')
+    error.statusCode = 400
+    throw error
+  }
+  const headers = {
+    ...buildCollectRequestHeaders({ company_id: companyId }),
+    ...normalizeProbeHeaders(payload.headers || payload.request_headers || payload.requestHeaders),
+    Cookie: cookie
+  }
+  if (companyId) headers['X-O3-Company-Id'] = companyId
+  const response = await fetch('https://seller.ozon.ru/api/site/seller-analytics/charts/v3/table/totals', {
+    method: 'POST',
+    headers,
+    body: stringifyJson(buildCollectRequestBody('overview', 'totals', period, 0, DEFAULT_PAGE_LIMIT)),
+    signal: AbortSignal.timeout(20000)
+  })
+  const text = await response.text()
+  let json = null
+  try {
+    json = text ? JSON.parse(text) : null
+  } catch (error) {}
+  return {
+    ok: response.ok,
+    status: response.status,
+    status_text: response.statusText,
+    company_id: companyId,
+    period_key: period.periodKey,
+    current_period: period.current_period,
+    content_type: response.headers.get('content-type') || '',
+    response_keys: json && typeof json === 'object' ? Object.keys(json).slice(0, 20) : [],
+    preview: json ? '' : text.slice(0, 500),
+    has_json: Boolean(json)
+  }
+}
+
+function directRateKey(tenantId, storeId) {
+  return `${safeString(tenantId) || 'admin'}:${safeString(storeId) || 'default'}`
+}
+
+function getDirectRateState(tenantId, storeId) {
+  const key = directRateKey(tenantId, storeId)
+  const current = directCollectRateState.get(key) || {
+    delay_ms: DIRECT_COLLECT_INITIAL_DELAY_MS,
+    concurrency: 2,
+    consecutive_success: 0,
+    consecutive_errors: 0,
+    last_status: 0
+  }
+  current.delay_ms = Math.max(DIRECT_COLLECT_MIN_DELAY_MS, Number(current.delay_ms || DIRECT_COLLECT_INITIAL_DELAY_MS))
+  current.concurrency = Math.min(
+    DIRECT_COLLECT_MAX_CONCURRENCY,
+    Math.max(1, Number(current.concurrency || 2))
+  )
+  directCollectRateState.set(key, current)
+  return current
+}
+
+function tuneDirectRate(tenantId, storeId, status, ok) {
+  const state = getDirectRateState(tenantId, storeId)
+  state.last_status = Number(status || 0)
+  if (ok) {
+    state.consecutive_success = Number(state.consecutive_success || 0) + 1
+    state.consecutive_errors = 0
+    state.delay_ms = Math.max(DIRECT_COLLECT_MIN_DELAY_MS, Math.round(Number(state.delay_ms || DIRECT_COLLECT_INITIAL_DELAY_MS) * 0.82))
+    if (state.consecutive_success >= 8) {
+      state.concurrency = Math.min(DIRECT_COLLECT_MAX_CONCURRENCY, Number(state.concurrency || 1) + 1)
+      state.consecutive_success = 0
+    }
+    return state
+  }
+  state.consecutive_success = 0
+  state.consecutive_errors = Number(state.consecutive_errors || 0) + 1
+  if ([401, 403].includes(Number(status))) {
+    state.concurrency = 1
+    state.delay_ms = Math.max(Number(state.delay_ms || DIRECT_COLLECT_INITIAL_DELAY_MS), 3000)
+  } else if (Number(status) === 429) {
+    state.concurrency = 1
+    state.delay_ms = Math.min(20000, Math.max(5000, Number(state.delay_ms || DIRECT_COLLECT_INITIAL_DELAY_MS) * 2.5))
+  } else {
+    state.concurrency = Math.max(1, Number(state.concurrency || 1) - 1)
+    state.delay_ms = Math.min(10000, Math.max(1000, Number(state.delay_ms || DIRECT_COLLECT_INITIAL_DELAY_MS) * 1.5))
+  }
+  return state
+}
+
+async function updateAuthBindingResult(db, binding, patch = {}, tenantId = 'admin') {
+  if (!binding?.store_id) return null
+  const repo = db.getRepository('Setting')
+  const next = {
+    ...binding,
+    ...patch,
+    updated_at: patch.updated_at !== undefined ? patch.updated_at : (binding.updated_at || new Date().toISOString())
+  }
+  await repo.save({
+    key: getSettingKeyForAuthBinding(binding.store_id),
+    tenant_id: tenantId,
+    value: stringifyJson(next),
+    updated_at: new Date().toISOString()
+  })
+  return publicAuthBinding(next)
+}
+
+async function fetchDirectCollectRequest(db, request, binding, tenantId = 'admin') {
+  const storeId = safeString(binding.store_id || binding.company_id)
+  const rate = getDirectRateState(tenantId, storeId)
+  if (Number(rate.delay_ms || 0) > 0) await sleep(Number(rate.delay_ms || 0))
+  const requestUrl = safeString(request.request_url)
+  const method = safeString(request.request_method || 'POST').toUpperCase()
+  const headers = {
+    ...buildCollectRequestHeaders({ company_id: storeId }),
+    ...sanitizeAuthHeaders(binding.headers || {}),
+    ...sanitizeAuthHeaders(request.request_headers || {}),
+    Cookie: binding.cookie
+  }
+  if (storeId) headers['X-O3-Company-Id'] = storeId
+  const response = await fetch(requestUrl, {
+    method,
+    headers,
+    body: method === 'GET' ? undefined : stringifyJson(request.request_body || {}),
+    signal: AbortSignal.timeout(30000)
+  })
+  const text = await response.text()
+  let responseBody = text
+  try {
+    responseBody = text ? JSON.parse(text) : null
+  } catch (error) {}
+  tuneDirectRate(tenantId, storeId, response.status, response.ok)
+  await updateAuthBindingResult(db, binding, response.ok
+    ? { last_ok_at: new Date().toISOString(), last_error: '', last_status: response.status }
+    : {
+        last_error: `HTTP ${response.status}`,
+        last_status: response.status,
+        ...(response.status === 401 || response.status === 403 ? { updated_at: '' } : {})
+      }, tenantId)
+  return {
+    success: response.ok,
+    page_url: 'backend-direct://seller-analytics',
+    request_url: requestUrl,
+    request_method: method,
+    request_headers: headers,
+    request_body: request.request_body,
+    source_button_label: request.source_label || null,
+    source_button_key: request.source_key || null,
+    source_context: {
+      collection_run_id: request.run_id,
+      collection_request_id: request.request_id,
+      endpoint_type: request.endpoint_type,
+      page_index: request.page_index || 0,
+      inferredFrom: 'backend_direct_cookie_binding',
+      capturedAt: new Date().toISOString()
+    },
+    response_status: response.status,
+    response_headers: Object.fromEntries(response.headers.entries()),
+    response_body: responseBody,
+    error: response.ok ? null : `HTTP ${response.status}`
+  }
+}
+
+async function processDirectCollectRun(db, tenantId = 'admin', storeId = '') {
+  const workerKey = `${tenantId}:${safeString(storeId) || 'default'}`
+  if (directCollectWorkers.has(workerKey)) return { started: false, reason: 'already_running' }
+  const binding = await getAuthBinding(db, storeId, tenantId)
+  if (!binding) return { started: false, reason: 'missing_auth_binding' }
+  directCollectWorkers.add(workerKey)
+  try {
+    let idleLoops = 0
+    while (idleLoops < 2) {
+      const currentBinding = await getAuthBinding(db, storeId, tenantId)
+      if (!currentBinding) return { started: true, stopped: 'auth_binding_missing' }
+      const rate = getDirectRateState(tenantId, storeId)
+      const concurrency = Math.min(DIRECT_COLLECT_MAX_CONCURRENCY, Math.max(1, Number(rate.concurrency || 1)))
+      const batchSize = Math.max(DIRECT_COLLECT_BATCH_SIZE, concurrency * 3)
+      const requests = await claimNextCollectRequests(db, tenantId, batchSize, {
+        store_id: storeId,
+        company_id: storeId
+      })
+      if (!requests.length) {
+        idleLoops += 1
+        await sleep(1000)
+        continue
+      }
+      idleLoops = 0
+      const workers = Array.from({ length: Math.min(concurrency, requests.length) }, async (_, workerIndex) => {
+        for (let index = workerIndex; index < requests.length; index += concurrency) {
+          const request = requests[index]
+          const payload = await fetchDirectCollectRequest(db, request, currentBinding, tenantId).catch((error) => ({
+            success: false,
+            error: error?.message || String(error)
+          }))
+          await finishCollectRequest(db, request.run_id, request.request_id, payload, tenantId)
+          if ([401, 403].includes(Number(payload.response_status || 0))) {
+            throw new Error(`Direct auth rejected: HTTP ${payload.response_status}`)
+          }
+        }
+      })
+      await Promise.all(workers)
+    }
+    return { started: true, stopped: 'queue_empty' }
+  } finally {
+    directCollectWorkers.delete(workerKey)
+  }
+}
+
+function startDirectCollectRun(db, tenantId = 'admin', storeId = '') {
+  const id = safeString(storeId)
+  if (!id) return { started: false, reason: 'missing_store_id' }
+  processDirectCollectRun(db, tenantId, id).catch(() => {})
+  return { started: true }
+}
+
+function getCollectRequestLimit(request = {}) {
+  const explicit = parsePositiveInteger(request.limit, 0, 100)
+  if (explicit > 0) return explicit
+  const body = parseJson(request.request_body, {}) || {}
+  return parsePositiveInteger(body.limit, DEFAULT_PAGE_LIMIT, 100)
+}
+
+function responseItemCount(value) {
+  return getResponseItems(value).length
+}
+
+function appendNextAutoPageRequest(run, request, payload) {
+  if (!request.auto_all_pages || request.endpoint_type !== 'by_sku') return false
+  const pageIndex = parsePageIndex(request.page_index) || 0
+  const limit = getCollectRequestLimit(request)
+  const count = responseItemCount(payload.response_body || payload.responseBody || payload.data)
+  if (count < limit) {
+    request.auto_stop_reason = `第 ${pageIndex + 1} 页返回 ${count} 条，少于每页 ${limit} 条`
+    return false
+  }
+  const maxPages = parsePositiveInteger(request.max_pages, DEFAULT_AUTO_COLLECT_MAX_PAGES, DEFAULT_AUTO_COLLECT_MAX_PAGES)
+  const nextPageIndex = pageIndex + 1
+  if (nextPageIndex >= maxPages) {
+    request.auto_stop_reason = `已达到自动采集最大页数 ${maxPages}`
+    return false
+  }
+  const alreadyQueued = (run.requests || []).some((item) =>
+    item.source_key === request.source_key &&
+    item.endpoint_type === 'by_sku' &&
+    parsePageIndex(item.page_index) === nextPageIndex
+  )
+  if (alreadyQueued) return false
+  run.requests.push({
+    id: newId('sar'),
+    source_key: request.source_key,
+    source_label: request.source_label || TAB_LABELS[request.source_key] || request.source_key,
+    endpoint_type: 'by_sku',
+    page_index: nextPageIndex,
+    auto_all_pages: true,
+    max_pages: maxPages,
+    limit,
+    parent_request_id: request.id,
+    request_url: request.request_url,
+    request_method: request.request_method || 'POST',
+    request_headers: { ...(request.request_headers || {}) },
+    request_body: buildCollectRequestBody(request.source_key, 'by_sku', run, nextPageIndex, limit),
+    status: 'pending',
+    attempts: 0
+  })
+  run.request_count = (run.requests || []).length
+  return true
+}
+
 async function createCollectRun(db, payload = {}, tenantId = 'admin') {
   return withCollectRunStateLock(tenantId, async () => {
     const period = resolveCollectPeriod(payload)
     const requests = buildCollectRequests(payload, period)
+    const storeId = safeString(payload.store_id || payload.storeId || payload.shop_id || payload.shopId || payload.company_id || payload.companyId) || null
     if (requests.length === 0) {
       const error = new Error('Missing collect requests')
       error.statusCode = 400
       throw error
     }
     const activeRuns = await listCollectRuns(db, { limit: 100 }, tenantId)
-    const matchingRun = activeRuns.find((run) => collectRunMatchesRequest(run, period, requests))
+    const matchingRun = activeRuns.find((run) => collectRunMatchesRequest(run, period, requests, storeId))
     if (matchingRun) return { ...matchingRun, reused: true }
     const now = new Date().toISOString()
     const run = {
       id: newId('sacr'),
       tenant_id: tenantId,
+      store_id: storeId,
       status: 'pending',
       period_key: period.periodKey,
       current_period: period.current_period,
@@ -893,16 +1668,62 @@ async function createCollectRun(db, payload = {}, tenantId = 'admin') {
       created_at: now,
       updated_at: now
     }
-    return saveCollectRunState(db, run)
+    const saved = await saveCollectRunState(db, run)
+    return saved
   })
 }
 
-async function claimNextCollectRequest(db, tenantId = 'admin') {
+async function startDirectCollect(db, payload = {}, tenantId = 'admin') {
+  const storeId = safeString(payload.store_id || payload.storeId || payload.shop_id || payload.shopId || payload.company_id || payload.companyId)
+  if (!storeId) {
+    const error = new Error('Missing store id for direct collect')
+    error.statusCode = 400
+    throw error
+  }
+  const binding = await getAuthBinding(db, storeId, tenantId)
+  if (!binding) {
+    return {
+      started: false,
+      reason: 'missing_auth_binding',
+      auth_binding: emptyAuthBindingStatus()
+    }
+  }
+  return {
+    ...startDirectCollectRun(db, tenantId, storeId),
+    auth_binding: publicAuthBinding(binding)
+  }
+}
+
+function normalizeCollectStoreIds(value) {
+  const values = Array.isArray(value) ? value : [value]
+  return Array.from(new Set(values.map(safeString).filter(Boolean)))
+}
+
+function runMatchesAnyStoreId(run, storeIds = []) {
+  const normalized = normalizeCollectStoreIds(storeIds)
+  if (!normalized.length) return true
+  const runStoreId = safeString(run?.store_id || run?.storeId)
+  return normalized.includes(runStoreId)
+}
+
+async function claimNextCollectRequest(db, tenantId = 'admin', options = {}) {
   return withCollectRunStateLock(tenantId, async () => {
+    const requestedStoreIds = normalizeCollectStoreIds([
+      options.store_id,
+      options.storeId,
+      options.shop_id,
+      options.shopId,
+      options.company_id,
+      options.companyId,
+      ...(Array.isArray(options.store_ids || options.storeIds) ? (options.store_ids || options.storeIds) : [])
+    ])
     const runs = await listCollectRuns(db, { limit: 50 }, tenantId)
-    const run = runs
+    const pendingRuns = runs
       .filter((item) => ['pending', 'running'].includes(item.status))
-      .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')))[0]
+      .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
+    const run = (requestedStoreIds.length
+      ? pendingRuns.find((item) => runMatchesAnyStoreId(item, requestedStoreIds))
+      : pendingRuns[0]) || null
     if (!run) return null
     const now = Date.now()
     for (const item of run.requests || []) {
@@ -937,11 +1758,11 @@ async function claimNextCollectRequest(db, tenantId = 'admin') {
   })
 }
 
-async function claimNextCollectRequests(db, tenantId = 'admin', limit = 6) {
+async function claimNextCollectRequests(db, tenantId = 'admin', limit = 6, options = {}) {
   const take = parsePositiveInteger(limit, 6, 20)
   const requests = []
   for (let index = 0; index < take; index += 1) {
-    const request = await claimNextCollectRequest(db, tenantId)
+    const request = await claimNextCollectRequest(db, tenantId, options)
     if (!request) break
     requests.push(request)
   }
@@ -1019,6 +1840,7 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
         page_url: payload.page_url || payload.pageUrl
       }, tenantId)
       request.status = 'success'
+      appendNextAutoPageRequest(run, request, payload)
       appendAbcAnalysisRequest(run, request, payload)
     } else {
       request.status = 'failed'
@@ -1031,7 +1853,16 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
     run.status = doneCount >= Number(run.request_count || 0) ? (run.failed_count > 0 ? 'failed' : 'success') : 'running'
     run.updated_at = new Date().toISOString()
     await saveCollectRunState(db, run)
-    return { run, request, snapshot: snapshotResult?.snapshot || null, metricCount: snapshotResult?.metricCount || 0 }
+    let operationTodos = null
+    if (run.status === 'success') {
+      operationTodos = await refreshOperationTodos(db, {
+        period_key: run.period_key,
+        date_from: run.current_period?.date_from,
+        date_to: run.current_period?.date_to,
+        focus_limit: 500
+      }, tenantId)
+    }
+    return { run, request, snapshot: snapshotResult?.snapshot || null, metricCount: snapshotResult?.metricCount || 0, operationTodos }
   })
 }
 
@@ -1310,7 +2141,7 @@ function normalizeMetricRow(row, context = {}) {
     offer_id: offerId || null,
     sku: sku || null,
     product_name: productName || null,
-    image_url: safeString(getFirstFrom(sources, ['image', 'image_url', 'imageUrl', 'photo', 'picture'])) || null,
+    image_url: normalizeSellerAnalyticsImageUrl(getFirstFrom(sources, ['image', 'image_url', 'imageUrl', 'photo', 'picture', 'pictures', 'images'])) || null,
     order_amount: toNumber(getMoneyValue(getFirst(metricInfo, ['revenueV2', 'order_amount', 'orderAmount', 'revenue', 'gmv', 'sumGmv', 'orderedAmount']))),
     order_count: orderedUnits,
     impressions: toNumber(getFirst(metricInfo, ['total_views', 'totalViews', 'search_views', 'searchViews', 'impressions', 'shows', 'showCount', 'viewsSearch', 'searchShows'])),
@@ -1385,6 +2216,7 @@ async function saveSnapshot(db, payload = {}, tenantId = 'admin') {
     .filter(Boolean)
 
   if (rows.length > 0) await metricRepo.save(rows)
+  clearAnalysisCache(tenantId)
   return { snapshot, metricCount: rows.length }
 }
 
@@ -1750,6 +2582,15 @@ async function enrichProductsWithOnlineProducts(db, tenantId, products, rows = [
     const raw = parseJson(online.raw_data, {}) || {}
     const contentRating = getOnlineProductContentRating(online)
     const onlineContent = extractOnlineProductContent(raw)
+    const onlineImageUrl = normalizeSellerAnalyticsImageUrl(
+      online.primary_image
+      || online.image_url
+      || raw.primary_image
+      || raw.image_url
+      || raw.main_image
+      || raw.images
+      || raw.pictures
+    )
     let estimatedProfit = null
     if (canEstimateProfit) {
       try {
@@ -1776,6 +2617,7 @@ async function enrichProductsWithOnlineProducts(db, tenantId, products, rows = [
       richContent: onlineContent.richContent,
       store_id: online.store_id,
       status: online.status,
+      image_url: onlineImageUrl,
       price: online.price,
       cost: online.cost,
       shipping: online.shipping,
@@ -1784,6 +2626,7 @@ async function enrichProductsWithOnlineProducts(db, tenantId, products, rows = [
       estimatedProfit,
       contentRating
     }
+    if (!product.image_url && onlineImageUrl) product.image_url = onlineImageUrl
     product.metrics.onlinePrice = toNumber(online.price ?? raw.price)
     product.metrics.onlineCost = toNumber(online.cost ?? raw.cost) ?? toNumber(estimatedProfit?.purchase_cost)
     product.metrics.onlineShipping = toNumber(online.shipping ?? raw.shipping) ?? toNumber(estimatedProfit?.shipping_fee)
@@ -1907,6 +2750,163 @@ function buildProductRecommendations(product) {
     priority,
     recommendations: recommendations.sort((a, b) => b.points - a.points).slice(0, 4)
   }
+}
+
+function priorityRank(priority) {
+  if (priority === 'high') return 3
+  if (priority === 'medium') return 2
+  return 1
+}
+
+function inferOperationSegment(product = {}, recommendation = {}) {
+  const m = product.metrics || {}
+  const exposure = m.searchViews || m.totalViews || 0
+  const pdpViews = m.pdpViews || 0
+  const addToCart = m.addToCart || 0
+  const orderedUnits = m.orderedUnits || 0
+  const returns = (m.returnedUnitsByOrderDate || 0) + (m.returnedUnits || 0)
+  const cancellations = (m.cancelledUnitsByOrderDate || 0) + (m.cancelledUnits || 0)
+  if ((m.stockoutDays || 0) > 0 || (m.recommendedSupply || 0) > 0) return 'inventory_risk'
+  if (m.estimatedGrossMargin !== null && m.estimatedGrossMargin !== undefined && m.estimatedGrossMargin < 10) return 'profit_risk'
+  if ((m.drr || 0) >= 20) return 'ad_efficiency_risk'
+  if (returns > 0 || cancellations > 0 || ((m.productRating || 0) > 0 && m.productRating < 4.5)) return 'aftersales_risk'
+  if (addToCart > 0 && orderedUnits <= 0) return 'order_gap'
+  if (pdpViews >= 20 && addToCart <= 0) return 'detail_gap'
+  if (exposure >= 100 && pdpViews <= 10) return 'click_gap'
+  if (exposure < 20 && orderedUnits <= 0) return 'traffic_gap'
+  if ((m.revenue || 0) > 0 && orderedUnits > 0 && priorityRank(product.priority) <= 1) return 'scale_candidate'
+  return safeString(recommendation.type) ? 'diagnosis_followup' : 'watchlist'
+}
+
+function operationBizDateFromQuery(query = {}, analysis = {}) {
+  const explicit = normalizeDateOnly(query.biz_date || query.bizDate || query.date_to || query.dateTo)
+  if (explicit) return explicit
+  const latest = normalizeDateOnly(analysis?.summary?.latestCapturedAt)
+  return latest || formatDateOnly(new Date())
+}
+
+function operationShopId(product = {}, query = {}) {
+  return safeString(query.shop_id || query.shopId || query.store_id || query.storeId || product.store_id || product.shop_id)
+}
+
+function productIdentity(product = {}) {
+  return safeString(product.sku || product.offer_id || product.product_id || product.productKey || product.product_name)
+}
+
+function buildOperationRowsFromAnalysis(analysis = {}, query = {}, tenantId = 'admin') {
+  const products = Array.isArray(analysis.focusProducts) ? analysis.focusProducts : []
+  const now = new Date()
+  const nowText = now.toISOString()
+  const bizDate = operationBizDateFromQuery(query, analysis)
+  const periodKey = safeString(query.period_key || query.periodKey || analysis?.summary?.periodKey || '7d') || '7d'
+  const diagnosisRows = []
+  const todoRows = []
+  for (const product of products) {
+    const identity = productIdentity(product)
+    if (!identity) continue
+    const recommendations = Array.isArray(product.recommendations) ? product.recommendations : []
+    const firstRecommendation = recommendations[0] || {}
+    const segment = inferOperationSegment(product, firstRecommendation)
+    const shopId = operationShopId(product, query) || null
+    const diagnosisId = stableId('sad', [tenantId, shopId, bizDate, periodKey, identity])
+    diagnosisRows.push({
+      id: diagnosisId,
+      tenant_id: tenantId,
+      shop_id: shopId,
+      biz_date: bizDate,
+      period_key: periodKey,
+      product_id: safeString(product.product_id || product.productId) || null,
+      sku: safeString(product.sku) || null,
+      offer_id: safeString(product.offer_id || product.offerId) || null,
+      product_name: safeString(product.product_name || product.productName) || null,
+      image_url: safeString(product.image_url || product.imageUrl) || null,
+      segment,
+      priority: product.priority || 'low',
+      score: Number(product.score || 0),
+      main_problem: safeString(firstRecommendation.type || segment) || segment,
+      recommended_action: safeString(firstRecommendation.action) || null,
+      metrics_json: stringifyJson(product.metrics || {}),
+      evidence_json: stringifyJson({ recommendations }),
+      diagnosed_at: now
+    })
+    for (const recommendation of recommendations.slice(0, 3)) {
+      const todoSegment = inferOperationSegment(product, recommendation)
+      todoRows.push({
+        id: stableId('sato', [tenantId, shopId, bizDate, periodKey, identity, todoSegment, recommendation.type, recommendation.action]),
+        tenant_id: tenantId,
+        shop_id: shopId,
+        biz_date: bizDate,
+        period_key: periodKey,
+        product_id: safeString(product.product_id || product.productId) || null,
+        sku: safeString(product.sku) || null,
+        offer_id: safeString(product.offer_id || product.offerId) || null,
+        product_name: safeString(product.product_name || product.productName) || null,
+        image_url: safeString(product.image_url || product.imageUrl) || null,
+        segment: todoSegment,
+        priority: product.priority || 'low',
+        score: Number(product.score || recommendation.points || 0),
+        problem_type: safeString(recommendation.type || todoSegment) || todoSegment,
+        recommended_action: safeString(recommendation.action || recommendation.reason) || null,
+        evidence_json: stringifyJson({
+          reason: recommendation.reason || '',
+          evidence: recommendation.evidence || '',
+          metrics: product.metrics || {}
+        }),
+        status: 'open',
+        owner: null,
+        action_taken: null,
+        resolved_at: null,
+        created_at: nowText,
+        updated_at: nowText
+      })
+    }
+  }
+  return { diagnosisRows, todoRows, bizDate, periodKey }
+}
+
+async function refreshOperationTodos(db, query = {}, tenantId = 'admin') {
+  const analysisQuery = {
+    ...query,
+    page: query.page || 1,
+    product_limit: query.product_limit || query.productLimit || 100,
+    focus_limit: query.focus_limit || query.focusLimit || 500,
+    limit: query.limit || 500
+  }
+  const analysis = await getAnalysis(db, analysisQuery, tenantId)
+  const { diagnosisRows, todoRows, bizDate, periodKey } = buildOperationRowsFromAnalysis(analysis, analysisQuery, tenantId)
+  const diagnosisRepo = db.getRepository('SellerAnalyticsProductDiagnosis')
+  const todoRepo = db.getRepository('SellerAnalyticsOperationTodo')
+  await diagnosisRepo.delete({ tenant_id: tenantId, biz_date: bizDate, period_key: periodKey })
+  await todoRepo.delete({ tenant_id: tenantId, biz_date: bizDate, period_key: periodKey, status: 'open' })
+  if (diagnosisRows.length) await diagnosisRepo.save(diagnosisRows)
+  if (todoRows.length) await todoRepo.save(todoRows)
+  return {
+    success: true,
+    bizDate,
+    periodKey,
+    diagnosisCount: diagnosisRows.length,
+    todoCount: todoRows.length
+  }
+}
+
+async function listOperationTodos(db, query = {}, tenantId = 'admin') {
+  const repo = db.getRepository('SellerAnalyticsOperationTodo')
+  const where = { tenant_id: tenantId }
+  const status = safeString(query.status || 'open')
+  const bizDate = normalizeDateOnly(query.biz_date || query.bizDate)
+  const periodKey = safeString(query.period_key || query.periodKey)
+  const segment = safeString(query.segment)
+  if (status && status !== 'all') where.status = status
+  if (bizDate) where.biz_date = bizDate
+  if (periodKey) where.period_key = periodKey
+  if (segment) where.segment = segment
+  const take = Math.min(Math.max(Number(query.limit || 100), 1), 500)
+  const rows = await repo.find({ where, order: { biz_date: 'DESC', score: 'DESC', updated_at: 'DESC' }, take })
+  return rows.sort((a, b) =>
+    priorityRank(b.priority) - priorityRank(a.priority) ||
+    Number(b.score || 0) - Number(a.score || 0) ||
+    String(b.updated_at || '').localeCompare(String(a.updated_at || ''))
+  )
 }
 
 function hasAdviceMetric(value) {
@@ -2224,21 +3224,42 @@ function analysisProductMatchesKeyword(product, keyword) {
 }
 
 async function getAnalysis(db, query = {}, tenantId = 'admin') {
+  const cached = getCachedAnalysis(query, tenantId)
+  if (cached) {
+    if (query.profile === '1' || query.debug === '1') {
+      console.info(`[seller-analytics] analysis cache hit tenant=${tenantId}`)
+    }
+    return cached
+  }
+  const timings = {}
+  const startedAt = Date.now()
+  let stageAt = startedAt
+  const mark = (name) => {
+    const now = Date.now()
+    timings[name] = now - stageAt
+    stageAt = now
+  }
   const hasProductPage = query.page !== undefined && query.page !== null && query.page !== ''
   const requestedProductPage = Math.max(1, Number.parseInt(String(query.page || 1), 10) || 1)
   const productLimit = Math.min(
     Math.max(Number.parseInt(String(query.product_limit || query.productLimit || DEFAULT_PAGE_LIMIT), 10) || DEFAULT_PAGE_LIMIT, 1),
     100
   )
+  const focusLimit = Math.min(
+    Math.max(Number.parseInt(String(query.focus_limit || query.focusLimit || 200), 10) || 200, 1),
+    500
+  )
   const rows = await listSnapshots(db, {
     limit: query.limit || 500,
     period_key: query.period_key || query.periodKey,
     date_from: query.date_from || query.dateFrom,
     date_to: query.date_to || query.dateTo,
+    store_id: query.store_id || query.storeId || query.shop_id || query.shopId,
     page_index: query.page_index ?? query.pageIndex,
     page: query.page,
     all_pages: hasProductPage
   }, tenantId)
+  mark('snapshots')
   const tabFilter = safeString(query.tab_key || query.tabKey)
   const productsByKey = new Map()
   const productIndex = new Map()
@@ -2293,17 +3314,7 @@ async function getAnalysis(db, query = {}, tenantId = 'admin') {
     product.sourceLabels = Array.from(product.sourceLabels)
     return product
   })
-  let onlineProductRows = []
-  if (products.length > 0) {
-    try {
-      onlineProductRows = await db.getRepository('OnlineProduct').find({ where: { tenant_id: tenantId } })
-    } catch (error) {
-      onlineProductRows = []
-    }
-  }
-  await enrichProductsWithOnlineProducts(db, tenantId, products, onlineProductRows)
-  await enrichProductsWithCustomerProfile(db, tenantId, products, query)
-
+  mark('normalize')
   const analyzedProducts = products.map((product) => {
     const analysis = buildProductRecommendations(product)
     return {
@@ -2317,9 +3328,31 @@ async function getAnalysis(db, query = {}, tenantId = 'admin') {
   const matchedProducts = analyzedProducts.filter((product) => analysisProductMatchesKeyword(product, keyword))
   const analysisSort = normalizeAnalysisSort(query)
   matchedProducts.sort((a, b) => compareAnalysisProducts(a, b, analysisSort))
+  mark('rank')
   const pagedProducts = hasProductPage
     ? matchedProducts.slice((requestedProductPage - 1) * productLimit, requestedProductPage * productLimit)
     : matchedProducts
+  const focusProducts = matchedProducts.slice(0, focusLimit)
+  const enrichmentTargets = Array.from(new Set([...pagedProducts, ...focusProducts]))
+  let onlineProductRows = []
+  if (enrichmentTargets.length > 0) {
+    try {
+      onlineProductRows = await db.getRepository('OnlineProduct').find({ where: { tenant_id: tenantId } })
+    } catch (error) {
+      onlineProductRows = []
+    }
+  }
+  await enrichProductsWithOnlineProducts(db, tenantId, enrichmentTargets, onlineProductRows)
+  mark('online')
+  await enrichProductsWithCustomerProfile(db, tenantId, enrichmentTargets, query)
+  mark('customer')
+  for (const product of enrichmentTargets) {
+    const analysis = buildProductRecommendations(product)
+    product.score = analysis.score
+    product.priority = analysis.priority
+    product.recommendations = analysis.recommendations
+  }
+  mark('rerank')
 
   const recommendations = pagedProducts.flatMap((product) =>
     product.recommendations.map((recommendation) => ({
@@ -2328,19 +3361,19 @@ async function getAnalysis(db, query = {}, tenantId = 'admin') {
       sku: product.sku,
       offer_id: product.offer_id,
       product_name: product.product_name,
-      image_url: product.image_url,
+      image_url: normalizeSellerAnalyticsImageUrl(product.image_url),
       priority: product.priority,
       score: product.score,
       sourceLabels: product.sourceLabels
     }))
   ).sort((a, b) => b.score - a.score || b.points - a.points)
-  const focusProducts = matchedProducts.map((product) => ({
+  const serializedFocusProducts = focusProducts.map((product) => ({
     productKey: product.productKey,
     sku: product.sku,
     offer_id: product.offer_id,
     product_id: product.product_id,
     product_name: product.product_name,
-    image_url: product.image_url,
+    image_url: normalizeSellerAnalyticsImageUrl(product.image_url),
     metrics: product.metrics,
     sourceLabels: product.sourceLabels,
     score: product.score,
@@ -2357,7 +3390,7 @@ async function getAnalysis(db, query = {}, tenantId = 'admin') {
   const maxCollectedPageIndex = sortedCollectedPageIndexes.length > 0
     ? sortedCollectedPageIndexes[sortedCollectedPageIndexes.length - 1]
     : -1
-  return {
+  const result = {
     summary: {
       snapshotCount: rows.length,
       productCount: matchedProducts.length,
@@ -2377,12 +3410,18 @@ async function getAnalysis(db, query = {}, tenantId = 'admin') {
       latestCapturedAt: rows[0]?.captured_at || null,
       sourceCount: Object.keys(totalsBySource).length
     },
-    products: pagedProducts,
-    focusProducts,
+    products: pagedProducts.map(serializeAnalysisProduct),
+    focusProducts: serializedFocusProducts,
     recommendations,
     totalsRow: activeTotals,
     totalsBySource
   }
+  timings.total = Date.now() - startedAt
+  if (query.profile === '1' || query.debug === '1' || timings.total >= 300) {
+    console.info(`[seller-analytics] analysis tenant=${tenantId} products=${matchedProducts.length} page=${requestedProductPage} ${JSON.stringify(timings)}`)
+  }
+  setCachedAnalysis(query, tenantId, result)
+  return result
 }
 
 async function listMetrics(db, query = {}, tenantId = 'admin') {
@@ -2398,7 +3437,9 @@ async function listSnapshots(db, query = {}, tenantId = 'admin') {
   const repo = db.getRepository('SellerAnalyticsSnapshot')
   const where = { tenant_id: tenantId }
   const tabKey = safeString(query.tab_key || query.tabKey)
+  const storeId = safeString(query.store_id || query.storeId || query.shop_id || query.shopId)
   if (tabKey) where.tab_key = tabKey
+  if (storeId) where.store_id = storeId
   const take = Math.min(Math.max(Number(query.limit || 50), 1), 1000)
   const rows = await repo.find({ where, order: { captured_at: 'DESC', created_at: 'DESC' }, take })
   return rows
@@ -2423,6 +3464,7 @@ async function deleteSnapshot(db, id, tenantId = 'admin') {
   }
   const metricDelete = await metricRepo.delete({ tenant_id: tenantId, snapshot_id: snapshotId })
   const snapshotDelete = await snapshotRepo.delete({ tenant_id: tenantId, id: snapshotId })
+  clearAnalysisCache(tenantId)
   return {
     success: true,
     deletedSnapshotCount: Number(snapshotDelete.affected || 0),
@@ -2446,6 +3488,7 @@ async function deleteSnapshots(db, ids = [], tenantId = 'admin') {
   }
   const metricDelete = await metricRepo.delete({ tenant_id: tenantId, snapshot_id: In(foundIds) })
   const snapshotDelete = await snapshotRepo.delete({ tenant_id: tenantId, id: In(foundIds) })
+  clearAnalysisCache(tenantId)
   return {
     success: true,
     deletedSnapshotCount: Number(snapshotDelete.affected || 0),
@@ -2468,6 +3511,8 @@ async function getSummary(db, tenantId = 'admin') {
 }
 
 export {
+  authBindingStatus,
+  claimPluginPrepareRequest,
   claimNextCollectRequest,
   claimNextCollectRequests,
   createCollectRun,
@@ -2477,15 +3522,26 @@ export {
   ensureSellerAnalyticsSchema,
   finishCollectRequest,
   getAnalysis,
+  getPluginPrepareRequest,
   getSummary,
   inferSourceFromMetrics,
   inferSourceFromRequest,
   listCollectRuns,
   listMetrics,
+  listOperationTodos,
+  getPluginStatus,
   listSnapshots,
   normalizeSellerAnalyticsUrl,
+  refreshOperationTodos,
+  preparePlugin,
+  finishPluginPrepareRequest,
+  probeSellerAnalyticsAuth,
   resolveCollectPeriod,
   retryCollectRun,
+  saveAuthBinding,
+  savePluginStatus,
   saveSnapshot,
+  startDirectCollect,
+  validatePluginStatus,
   sellerAnalyticsDb
 };

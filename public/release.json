@@ -1,7 +1,7 @@
 {
   "app": "ozon-erp",
-  "version": "local",
-  "channel": "local",
-  "build_stamp": "",
-  "built_at": "2026-06-01T12:55:14.724Z"
+  "version": "2026.06.07.175718",
+  "channel": "production",
+  "build_stamp": "20260607175718",
+  "built_at": "2026-06-07T09:57:21.874Z"
 }

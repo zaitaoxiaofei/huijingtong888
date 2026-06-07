@@ -713,7 +713,13 @@ function openPromptLibrary() {
 }
 
 function backToSelection() {
-  router.push("/selection");
+  const query = {};
+  const baseSelectionId = String(route.query.baseSelectionId || "").trim();
+  const source = String(route.query.source || "").trim();
+  if (baseSelectionId) query.productId = baseSelectionId;
+  if (baseSelectionId) query.openEdit = "1";
+  if (source === "selection" && baseSelectionId) query.tabTitle = `选品池 · ID ${baseSelectionId}`;
+  router.push({ path: "/selection", query });
 }
 
 onMounted(loadBootstrap);

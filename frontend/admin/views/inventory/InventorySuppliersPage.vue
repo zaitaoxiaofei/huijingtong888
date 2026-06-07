@@ -4,14 +4,16 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
 import { createLatestRequestGate } from "../../utils/request-gate";
+import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
-import { applyFilterQuery, buildFilterQuery, dateText } from "./inventory-utils.js";
+import { applyFilterQuery, dateText } from "./inventory-utils.js";
 
 const route = useRoute();
 const router = useRouter();
 let syncingRoute = false;
 const listRequestGate = createLatestRequestGate();
+let lastLoadedQueryKey = "";
 
 const loading = ref(false);
 const dialogVisible = ref(false);
@@ -46,6 +48,14 @@ const filterDefaults = {
 };
 
 const pagedRows = computed(() => state.rows);
+const syncRouteQuery = createDefaultRouteQuerySync({
+  route,
+  router,
+  filters: state.filters,
+  defaults: filterDefaults,
+  manualKeys: ["query"],
+  isSyncingRoute: () => syncingRoute
+});
 
 function applyRouteState() {
   syncingRoute = true;
@@ -56,20 +66,16 @@ function applyRouteState() {
   }
 }
 
-function syncRouteQuery() {
-  if (syncingRoute) return;
-  const next = buildFilterQuery(route, state.filters, filterDefaults);
-  if (JSON.stringify(route.query || {}) === JSON.stringify(next)) return;
-  router.replace({ query: next });
-}
-
 function handleSearch() {
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
 function handleReset() {
   Object.assign(state.filters, filterDefaults);
+  lastLoadedQueryKey = "";
+  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -123,7 +129,7 @@ async function submitDialog() {
       ElMessage.success("供应商已新增");
     }
     dialogVisible.value = false;
-    await loadPageData();
+    await loadPageData({ force: true });
   } catch (error) {
     ElMessage.error(error.message || "保存供应商失败");
   } finally {
@@ -140,14 +146,27 @@ async function deleteSupplier(row) {
     });
     await apiClient.delete(`/api/suppliers/${row.id}`);
     ElMessage.success("供应商已删除");
-    await loadPageData();
+    await loadPageData({ force: true });
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
     ElMessage.error(error.message || "删除供应商失败");
   }
 }
 
-async function loadPageData() {
+function buildRequestKey() {
+  return JSON.stringify({
+    page: Number(state.filters.page || 1),
+    pageSize: Number(state.filters.pageSize || 20),
+    query: String(state.filters.query || "").trim(),
+    dateFrom: String(state.filters.dateFrom || ""),
+    dateTo: String(state.filters.dateTo || "")
+  });
+}
+
+async function loadPageData(options = {}) {
+  const force = options.force === true;
+  const requestKey = buildRequestKey();
+  if (!force && requestKey === lastLoadedQueryKey) return;
   const requestToken = listRequestGate.next();
   loading.value = true;
   try {
@@ -162,6 +181,7 @@ async function loadPageData() {
     if (query) params.set("query", query);
     const rows = await apiClient.get(`/api/suppliers?${params.toString()}`);
     if (!listRequestGate.isLatest(requestToken)) return;
+    lastLoadedQueryKey = requestKey;
     state.rows = Array.isArray(rows?.rows) ? rows.rows : [];
     state.total = Number(rows?.total || 0);
   } catch (error) {
@@ -173,7 +193,7 @@ async function loadPageData() {
 }
 
 watch(() => route.query, applyRouteState, { deep: true });
-watch(() => [state.filters.query, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize], syncRouteQuery);
+watch(() => [state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize], syncRouteQuery);
 
 onMounted(async () => {
   applyRouteState();
@@ -197,7 +217,7 @@ onMounted(async () => {
     </InventoryPageToolbar>
 
     <div class="inventory-table-wrap">
-      <el-table v-loading="loading" :data="pagedRows" stripe border class="erp-data-table">
+      <el-table v-loading="loading" :data="pagedRows" row-key="id" stripe border class="erp-data-table">
         <el-table-column prop="name" label="供应商名称" min-width="220" fixed="left" />
         <el-table-column prop="contact_person" label="联系人" min-width="120" />
         <el-table-column prop="contact_phone" label="联系电话" min-width="150" />

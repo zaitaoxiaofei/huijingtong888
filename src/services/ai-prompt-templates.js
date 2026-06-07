@@ -88,6 +88,7 @@ const DEFAULT_TEMPLATES = [
       "No misleading official authorization.",
       "No distorted product geometry.",
       "No gibberish text.",
+      "No Chinese text or Chinese characters.",
       "No extra accessories not present in the reference image."
     ].join("\n"),
     variables_json: "[]",
@@ -288,6 +289,25 @@ export async function ensureAiPromptTemplateTable() {
         item.sort_order
       ]);
     }
+  }
+  await ensureGlobalNegativeNoChineseRule();
+}
+
+async function ensureGlobalNegativeNoChineseRule() {
+  const rule = "No Chinese text or Chinese characters.";
+  const rows = await mysqlQuery(`
+    SELECT id, negative_prompt
+    FROM ai_prompt_templates
+    WHERE scene = 'global_negative'
+      AND enabled = 1
+  `);
+  for (const row of rows) {
+    const current = String(row.negative_prompt || "");
+    if (current.toLowerCase().includes("no chinese text") || current.includes("不能有中文")) continue;
+    await mysqlExecute(
+      "UPDATE ai_prompt_templates SET negative_prompt = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+      [[current, rule].filter(Boolean).join("\n"), Number(row.id)]
+    );
   }
 }
 

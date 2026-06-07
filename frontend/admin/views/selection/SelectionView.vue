@@ -1,7 +1,8 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { MagicStick } from "@element-plus/icons-vue";
 import { Sparkles } from "lucide-vue-next";
 import { apiClient } from "../../utils/api";
 import { useAuthStore } from "../../stores/auth.js";
@@ -30,9 +31,98 @@ const cancelingListingJobs = ref(new Set());
 const retryingListingJobs = ref(new Set());
 const materialOptionsLoading = ref(false);
 const catalogDictionaryLoading = ref(false);
+const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
 let listingJobPoller = null;
+const routeEditOpened = ref(false);
+const selectionWorkbenchReady = ref(false);
+let selectionWorkbenchSaveTimer = 0;
+const SELECTION_WORKBENCH_STORAGE_PREFIX = "selectionWorkbenchState:";
+const selectionWorkbenchId = computed(() => String(route.query.workbenchId || "").trim());
+const selectionWorkbenchStorageKey = computed(() => `${SELECTION_WORKBENCH_STORAGE_PREFIX}${selectionWorkbenchId.value || "default"}`);
+
+function createAiWorkbenchId() {
+  return `aiwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createSelectionWorkbenchId() {
+  return `selwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function ensureSelectionWorkbenchRouteId() {
+  if (selectionWorkbenchId.value) return;
+  router.replace({
+    query: {
+      ...route.query,
+      workbenchId: createSelectionWorkbenchId()
+    }
+  }).catch(() => {});
+}
+
+function selectionTabTitle() {
+  const routeSku = String(route.query.sku || "").trim();
+  const routeProductId = String(route.query.productId || "").trim();
+  const formName = String(dialog.form?.name || "").trim();
+  const currentRowId = String(dialog.currentRow?.id || "").trim();
+  if (routeSku) return `选品池 · ${routeSku}`;
+  if (dialogVisible.value && formName) return `选品池 · ${formName.slice(0, 18)}`;
+  if (dialogVisible.value && currentRowId) return `选品池 · ID ${currentRowId}`;
+  if (routeProductId) return `选品池 · ID ${routeProductId}`;
+  return "选品池";
+}
+
+function syncSelectionWorkbenchTabTitle() {
+  const nextTitle = selectionTabTitle();
+  if (String(route.query.tabTitle || "").trim() === nextTitle) return;
+  router.replace({
+    query: {
+      ...route.query,
+      tabTitle: nextTitle
+    }
+  }).catch(() => {});
+}
+
+function saveSelectionWorkbenchState() {
+  if (!selectionWorkbenchId.value) return;
+  window.clearTimeout(selectionWorkbenchSaveTimer);
+  selectionWorkbenchSaveTimer = window.setTimeout(() => {
+    try {
+      localStorage.setItem(selectionWorkbenchStorageKey.value, JSON.stringify({
+        filters: state.filters,
+        dialogVisible: dialogVisible.value,
+        dialogMode: dialog.mode,
+        dialogCurrentRowId: dialog.currentRow?.id || null,
+        dialogForm: dialog.form,
+        importDialogVisible: importDialogVisible.value,
+        profitDialogVisible: profitDialogVisible.value,
+        savedAt: new Date().toISOString()
+      }));
+    } catch (error) {
+      console.warn("saveSelectionWorkbenchState failed", error);
+    }
+  }, 120);
+}
+
+function restoreSelectionWorkbenchState() {
+  try {
+    const raw = localStorage.getItem(selectionWorkbenchStorageKey.value)
+      || localStorage.getItem("selectionWorkbenchState");
+    if (!raw) return;
+    const parsed = JSON.parse(raw || "{}");
+    if (parsed?.filters) Object.assign(state.filters, parsed.filters);
+    if (parsed?.dialogForm) {
+      dialog.mode = parsed.dialogMode || "create";
+      dialog.currentRow = parsed.dialogCurrentRowId ? { id: parsed.dialogCurrentRowId } : null;
+      dialog.form = { ...createDefaultForm(), ...parsed.dialogForm };
+      dialogVisible.value = Boolean(parsed.dialogVisible);
+    }
+    importDialogVisible.value = Boolean(parsed?.importDialogVisible);
+    profitDialogVisible.value = Boolean(parsed?.profitDialogVisible);
+  } catch {
+    localStorage.removeItem(selectionWorkbenchStorageKey.value);
+  }
+}
 
 const state = reactive({
   rows: [],
@@ -154,11 +244,6 @@ const total = computed(() => state.total);
 const pagedRows = computed(() => state.rows);
 const summary = computed(() => state.summary);
 const currentUserPersonId = computed(() => Number(authStore.user?.id || 0) || null);
-const currentUserName = computed(() => {
-  const direct = String(authStore.user?.name || authStore.user?.username || "").trim();
-  if (direct) return direct;
-  return state.people.find((person) => Number(person.id) === Number(currentUserPersonId.value))?.name || "";
-});
 
 const dialogTitle = computed(() => (dialog.mode === "create" ? "新增选品" : "编辑选品"));
 const importPreviewRows = computed(() => importState.rows.slice(0, 12));
@@ -175,6 +260,35 @@ watch(
   () => [dialog.form.ozon_description_category_id, dialog.form.ozon_type_id],
   () => {
     if (dialogVisible.value) loadCatalogDictionariesForCurrentCategory();
+  }
+);
+
+watch(
+  [
+    () => JSON.stringify(state.filters),
+    () => dialogVisible.value,
+    () => dialog.mode,
+    () => JSON.stringify(dialog.form),
+    () => importDialogVisible.value,
+    () => profitDialogVisible.value
+  ],
+  () => {
+    if (!selectionWorkbenchReady.value) return;
+    saveSelectionWorkbenchState();
+  }
+);
+
+watch(
+  [
+    () => route.query.sku,
+    () => route.query.productId,
+    () => dialogVisible.value,
+    () => dialog.form.name,
+    () => dialog.currentRow?.id
+  ],
+  () => {
+    if (!selectionWorkbenchReady.value || !selectionWorkbenchId.value) return;
+    syncSelectionWorkbenchTabTitle();
   }
 );
 const catalogDictionaryCache = new Map();
@@ -251,7 +365,7 @@ function normalizePagedTotal(payload, fallbackRows = []) {
   return Array.isArray(payload) ? fallbackRows.length : Number(payload?.total || 0);
 }
 
-function buildSelectionQuery() {
+function buildSelectionQuery(options = {}) {
   const params = new URLSearchParams({
     paged: "1",
     page: String(state.filters.page),
@@ -260,6 +374,7 @@ function buildSelectionQuery() {
     businessStatus: String(state.filters.businessStatus || "all"),
     ownerPersonId: String(state.filters.ownerPersonId || "all")
   });
+  if (options.summaryMode) params.set("summaryMode", String(options.summaryMode));
   const searchText = String(state.filters.query || "").trim();
   if (searchText) params.set("query", searchText);
   return params.toString();
@@ -801,19 +916,20 @@ async function openListingShopDialog(row) {
   listingShopDialog.shops = [];
   listingShopDialog.selectedShopIds = [];
   try {
-    const data = await apiClient.get("/api/asset-variant-engine/bootstrap", { noCache: true });
+    const data = await apiClient.get(`/api/asset-variant-engine/selection-publish-shops?productId=${encodeURIComponent(id)}`, { noCache: true });
+    const ownerRow = {
+      ...row,
+      owner_name: row.owner_name || row.owner_person_name || data?.ownerName || "",
+      owner_person_id: row.owner_person_id || data?.ownerPersonId || ""
+    };
     const shops = Array.isArray(data?.shops) ? data.shops : [];
     listingShopDialog.shops = shops
       .filter((shop) => String(shop.status || "").toLowerCase() !== "deleted")
-      .map((shop) => ({
-        id: Number(shop.id),
-        name: String(shop.name || `店铺 ${shop.id}`),
-        legalEntity: String(shop.legal_entity || shop.legalEntity || ""),
-        status: String(shop.status || ""),
-        priceIndex: effectiveListingShopPriceIndex(shop)
-      }))
-      .filter((shop) => shop.id);
-    listingShopDialog.selectedShopIds = listingShopDialog.shops.map((shop) => shop.id);
+      .map((shop) => normalizeListingShopOption(shop, ownerRow))
+      .filter((shop) => shop.id)
+      .sort(compareListingShopOptions);
+    const recommended = listingShopDialog.shops.filter((shop) => shop.recommended).map((shop) => shop.id);
+    listingShopDialog.selectedShopIds = recommended.length ? recommended : listingShopDialog.shops.map((shop) => shop.id);
   } catch (error) {
     ElMessage.error(error.message || "加载店铺失败");
     listingShopDialog.visible = false;
@@ -839,30 +955,67 @@ function clearListingShops() {
 }
 
 function selectOwnerListingShops() {
-  const row = listingShopDialog.row || {};
-  const ownerText = String(row.owner_name || row.owner_person_name || row.owner || "").trim().toLowerCase();
-  if (!ownerText) return selectAllListingShops();
   const matched = listingShopDialog.shops
-    .filter((shop) => `${shop.name} ${shop.legalEntity}`.toLowerCase().includes(ownerText))
+    .filter((shop) => shop.priceGroup === "owner")
     .map((shop) => shop.id);
   listingShopDialog.selectedShopIds = matched.length ? matched : listingShopDialog.selectedShopIds;
 }
 
-function selectRuvibeListingShops() {
+function selectMainPriceListingShops() {
   const matched = listingShopDialog.shops
-    .filter((shop) => /ru\s*vibe|ruvibe/i.test(shop.name))
+    .filter((shop) => shop.priceGroup === "main" || shop.priceGroup === "owner")
     .map((shop) => shop.id);
   listingShopDialog.selectedShopIds = matched.length ? matched : listingShopDialog.selectedShopIds;
+}
+
+function normalizeListingShopOption(shop = {}, row = {}) {
+  const price = listingShopPriceDecision(shop, row);
+  return {
+    id: Number(shop.id),
+    name: String(shop.name || `店铺 ${shop.id}`),
+    legalEntity: String(shop.legal_entity || shop.legalEntity || ""),
+    status: String(shop.status || ""),
+    priceRole: String(shop.rule?.priceRole || shop.rule?.price_role || ""),
+    priceIndex: price.index,
+    priceGroup: price.group,
+    priceLabel: price.label,
+    recommended: price.recommended,
+    sortRank: price.sortRank
+  };
+}
+
+function compareListingShopOptions(left, right) {
+  const leftRank = Number(left.sortRank ?? 99);
+  const rightRank = Number(right.sortRank ?? 99);
+  if (leftRank !== rightRank) return leftRank - rightRank;
+  if (left.recommended !== right.recommended) return left.recommended ? -1 : 1;
+  return Number(left.id || 0) - Number(right.id || 0);
+}
+
+function listingOwnerName(row = {}) {
+  return String(row.owner_name || row.owner_person_name || row.owner || "").trim();
+}
+
+function listingShopOwnerMatched(shop = {}, row = {}) {
+  const ownerName = listingOwnerName(row);
+  const legalEntity = String(shop.legal_entity || shop.legalEntity || "").trim();
+  return Boolean(ownerName && legalEntity && ownerName === legalEntity);
+}
+
+function listingShopPriceDecision(shop = {}, row = {}) {
+  const role = String(shop.rule?.priceRole || shop.rule?.price_role || shop.priceRole || "").trim();
+  if (role === "main") return { index: 1, group: "main", label: "主店铺", recommended: true, sortRank: 10 };
+  if (listingShopOwnerMatched(shop, row)) return { index: 1, group: "owner", label: "负责人店铺", recommended: true, sortRank: 20 };
+  const legalEntity = String(shop.legal_entity || shop.legalEntity || "").trim();
+  const shopText = `${shop.name || ""} ${legalEntity}`.toLowerCase();
+  if (role === "new" || /(^|\s)(new|fresh)(\s|$)|新店|全新/.test(shopText)) return { index: 0.95, group: "new", label: "新店铺", recommended: false, sortRank: 40 };
+  if (role === "owner") return { index: 1.05, group: "other_owner", label: "其他负责人店铺", recommended: false, sortRank: 50 };
+  if (role === "lift") return { index: 5, group: "lift", label: "台下/抬价店铺", recommended: false, sortRank: 80 };
+  return { index: 1.05, group: "matrix", label: "矩阵店铺", recommended: false, sortRank: 60 };
 }
 
 function effectiveListingShopPriceIndex(shop = {}) {
-  const publisher = String(currentUserName.value || "").trim();
-  const legalEntity = String(shop.legal_entity || shop.legalEntity || "").trim();
-  const shopText = `${shop.name || ""} ${legalEntity}`.toLowerCase();
-  if (/ruvibe\s*mart/i.test(String(shop.name || "").trim())) return 1;
-  if (publisher && legalEntity && publisher === legalEntity) return 1;
-  if (/(^|\s)(new|fresh)(\s|$)|新店|全新/.test(shopText)) return 0.95;
-  return 1.05;
+  return listingShopPriceDecision(shop, listingShopDialog.row || {}).index;
 }
 
 function isListingShopSelected(shopId) {
@@ -952,6 +1105,7 @@ function startVariant(row) {
   router.push({
     name: "asset-variant-center-create",
     query: {
+      workbenchId: createAiWorkbenchId(),
       baseSelectionId: String(row.id),
       source: "selection",
       autoImport: "1"
@@ -968,12 +1122,38 @@ function startBatchVariant() {
   router.push({
     name: "asset-variant-center-create",
     query: {
+      workbenchId: createAiWorkbenchId(),
       baseSelectionId: String(first.id),
       batchSelectionIds: selectedRows.value.map((row) => row.id).join(","),
       source: "selection",
       autoImport: "1"
     }
   });
+}
+
+function selectionReturnTarget() {
+  const returnTo = String(route.query.returnTo || "").trim();
+  if (!returnTo) return null;
+  const query = {};
+  const baseSelectionId = String(route.query.baseSelectionId || route.query.productId || "").trim();
+  if (baseSelectionId) query.baseSelectionId = baseSelectionId;
+  if (String(route.query.autoImport || "").trim()) query.autoImport = String(route.query.autoImport);
+  if (String(route.query.source || "").trim()) query.source = String(route.query.source);
+  return { path: returnTo, query };
+}
+
+function goBackToSelectionReturnTarget() {
+  const target = selectionReturnTarget();
+  if (!target) return;
+  router.push(target);
+}
+
+async function openRouteEditDialogIfNeeded() {
+  const productId = Number(route.query.productId || 0) || null;
+  const openEdit = String(route.query.openEdit || "").trim() === "1";
+  if (!productId || !openEdit || routeEditOpened.value) return;
+  routeEditOpened.value = true;
+  await openEditDialog({ id: productId });
 }
 
 function variantTypeText(value) {
@@ -1073,7 +1253,6 @@ function selectionReadinessMissingItems(row = {}) {
 
 function selectionBusinessStatus(row = {}) {
   const backendStatus = String(row.business_status || "").trim();
-  if (backendStatus) return backendStatus;
   const selectionStatus = String(row.selection_status || "draft");
   const jobStatus = listingJobStatus(row);
   if (selectionStatus === "listed") return "in_inventory";
@@ -1081,6 +1260,7 @@ function selectionBusinessStatus(row = {}) {
   if (jobStatus === "failed") return "publish_failed";
   if (jobStatus === "success") return "published";
   if (jobStatus === "cancelled") return "publish_cancelled";
+  if (backendStatus && backendStatus !== "draft") return backendStatus;
   return selectionReadinessMissingItems(row).length ? "needs_work" : "ready_to_publish";
 }
 
@@ -1102,6 +1282,14 @@ function selectionBusinessStatusTagType(row = {}) {
   return "info";
 }
 
+function selectionStageText(row = {}) {
+  const stage = selectionStatusText(row);
+  const status = selectionBusinessStatusText(row);
+  if (!stage || stage === status) return "";
+  if (selectionBusinessStatus(row) === "in_inventory") return "";
+  return `阶段：${stage}`;
+}
+
 function selectionReadinessMissingText(row = {}) {
   if (selectionBusinessStatus(row) !== "needs_work") return "";
   const readinessMissing = selectionReadinessMissingItems(row);
@@ -1116,6 +1304,19 @@ function selectionReadinessMissingText(row = {}) {
 
 function listingJobStatus(row = {}) {
   return String(row.listing_job_status || "").trim();
+}
+
+function listingJobStatusLabel(row = {}) {
+  const status = listingJobStatus(row);
+  const map = {
+    queued: "排队中",
+    running: "执行中",
+    success: "已完成",
+    failed: "失败",
+    cancelled: "已中断",
+    idle: "未发起"
+  };
+  return map[status] || status || "未发起";
 }
 
 function isListingJobActive(row = {}) {
@@ -1181,13 +1382,13 @@ function listingJobStageText(row = {}) {
     publish_assets: "导入并提交",
     import_listing: "导入编辑上架",
     submit_precheck: "提交前校验",
-    submit_ozon: "提交 Ozon",
+    submit_ozon: "提交平台",
     done: "完成收尾",
     success: "已完成",
     failed: "已失败",
     recovered: "恢复排队"
   };
-  return map[stage] || stage;
+  return map[stage] || (stage ? "未知阶段" : "");
 }
 
 function listingJobElapsedText(row = {}) {
@@ -1199,12 +1400,103 @@ function listingJobElapsedText(row = {}) {
 }
 
 function listingJobFailureText(row = {}) {
-  const summaryError = String(row.listing_job_error_message || "").trim();
+  const summaryError = friendlyListingJobErrorMessage(row);
   if (summaryError) return `失败：${summaryError}`;
   const result = listingJobResult(row);
   const firstFailed = Array.isArray(result?.results) ? result.results.find((item) => !item.ok) : null;
   const error = firstFailed?.precheck?.errors?.[0] || firstFailed?.error || parseMaybeJson(row.listing_job_error_json, {})?.message || "";
-  return error ? `失败：${error}` : "";
+  return error ? `失败：${friendlyListingJobErrorMessage({ listing_job_error_message: error })}` : "";
+}
+
+function listingJobContentIssues(row = {}) {
+  const result = listingJobResult(row);
+  const rows = Array.isArray(result?.results) ? result.results : [];
+  return rows.flatMap((item) => {
+    const shopName = item.shopName || item.shop_name || (item.shopId ? `店铺 ${item.shopId}` : "店铺");
+    const errors = Array.isArray(item.precheck?.errors) ? item.precheck.errors : [];
+    const warnings = Array.isArray(item.precheck?.warnings) ? item.precheck.warnings : [];
+    return [
+      ...errors.map((message) => ({ type: "error", shopName, message: friendlyListingJobErrorMessage({ listing_job_error_message: message }) || message })),
+      ...warnings.map((message) => ({ type: "warning", shopName, message: friendlyListingJobErrorMessage({ listing_job_error_message: message }) || message }))
+    ];
+  });
+}
+
+function listingJobContentIssueCounts(row = {}) {
+  const issues = listingJobContentIssues(row);
+  return {
+    errors: issues.filter((item) => item.type === "error").length,
+    warnings: issues.filter((item) => item.type !== "error").length
+  };
+}
+
+function listingJobContentTooltipText(row = {}) {
+  const issues = listingJobContentIssues(row);
+  if (!issues.length) return "";
+  const counts = listingJobContentIssueCounts(row);
+  const summary = [
+    counts.errors ? `${counts.errors} 条错误` : "",
+    counts.warnings ? `${counts.warnings} 条提醒` : ""
+  ].filter(Boolean).join("，");
+  const lines = [`内容体检：${summary || "暂无异常"}`];
+  return [
+    ...lines,
+    ...issues.slice(0, 8).map((item) => `${item.type === "error" ? "错误" : "提醒"}：${item.shopName} - ${item.message}`),
+    issues.length > 8 ? `还有 ${issues.length - 8} 条，请打开任务详情查看` : ""
+  ].filter(Boolean).join("\n");
+}
+
+function listingJobContentTagText(row = {}) {
+  const counts = listingJobContentIssueCounts(row);
+  if (counts.errors) return "体检";
+  if (counts.warnings) return "提醒";
+  return "";
+}
+
+function listingJobFixTip(row = {}) {
+  const direct = String(row.listing_job_error_fix_tip || "").trim();
+  if (direct) return friendlyListingText(direct, "处理建议请查看后台日志");
+  const raw = String(row.listing_job_error_message || row.listing_job_raw_error_message || "").toLowerCase();
+  if (raw.includes("shop-watermarks")) return "请到店铺配置里重新上传这个店铺的水印图片，或先清空该店铺水印后再重新一键上架。";
+  if (raw.includes("enoent") || raw.includes("no such file or directory")) return "请重新上传缺失的商品图片/店铺水印，确认图片文件存在后再重新一键上架。";
+  return "";
+}
+
+function friendlyListingText(message = "", fallback = "任务异常，请查看后台日志") {
+  const text = String(message || "").trim();
+  if (!text) return "";
+  return /[A-Za-z]{3,}/.test(text) ? fallback : text;
+}
+
+function friendlyListingJobErrorMessage(row = {}) {
+  const message = String(row.listing_job_error_message || row.listing_job_raw_error_message || "").trim();
+  const lower = message.toLowerCase();
+  if (!message) return "";
+  if (lower.includes("no product video prepared")) return "未准备商品视频";
+  if (lower.includes("rich content json is empty")) return "富文本内容为空";
+  if (lower.includes("rich content json is not valid json")) return "富文本格式不正确";
+  if (lower.includes("no product images prepared")) return "未准备商品图片";
+  if (lower.includes("package size looks too small")) return "包裹尺寸看起来偏小，请检查单位是否正确";
+  if (lower.includes("title contains unreadable replacement marks")) return "标题包含乱码或替换字符";
+  if (lower.includes("description contains unreadable replacement marks")) return "描述包含乱码或替换字符";
+  if (lower.includes("product tags must include shop tag")) {
+    const tag = message.match(/#\S+/)?.[0] || "店铺标签";
+    return `标签缺少店铺名标签 ${tag}`;
+  }
+  if (lower.includes("description must mention shop name")) {
+    const shop = message.replace(/.*shop name\s*/i, "").trim();
+    return shop ? `描述缺少店铺名 ${shop}` : "描述缺少店铺名";
+  }
+  if (lower.includes("rich content text should mention shop name")) return "富文本建议加入店铺名";
+  if (lower.includes("non-key product content contains key-case related terms")) return "非钥匙类商品出现钥匙壳/钥匙套相关词";
+  if (lower.includes("product tags look too sparse")) return "标签数量偏少，建议补充类目词和买家搜索词";
+  if (lower.includes("description is short")) return "描述偏短，搜索文案可能不足";
+  if (lower.includes("title contains chinese")) return "标题仍包含中文";
+  if (lower.includes("description contains chinese")) return "描述仍包含中文";
+  if (lower.includes("shop-watermarks")) return "店铺水印文件不存在，无法生成上架图片";
+  if (lower.includes("enoent") || lower.includes("no such file or directory")) return "本地图片文件不存在，无法生成上架素材";
+  if (lower.includes("http") && (lower.includes("image") || lower.includes("图片"))) return "采集图片链接无法下载，无法生成上架素材";
+  return friendlyListingText(message);
 }
 
 function listingJobTooltipText(row = {}) {
@@ -1215,7 +1507,8 @@ function listingJobTooltipText(row = {}) {
     listingJobStageText(row) ? `当前阶段：${listingJobStageText(row)}` : "",
     listingJobElapsedText(row) ? `已耗时：${listingJobElapsedText(row)}` : "",
     Number(row.listing_job_queue_ahead || 0) ? `前方排队：${Number(row.listing_job_queue_ahead || 0)} 个任务` : "",
-    listingJobFailureText(row)
+    listingJobFailureText(row),
+    listingJobFixTip(row) ? `处理建议：${listingJobFixTip(row)}` : ""
   ].filter(Boolean);
   const phaseLines = phases.slice(-6).map((phase) => {
     const duration = Number(phase.durationMs || 0);
@@ -1346,6 +1639,7 @@ function closeProfitDialog() {
 
 async function loadPageData(options = {}) {
   const silent = Boolean(options.silent);
+  const summaryMode = options.summaryMode || (silent ? "skip" : "full");
   if (!silent) loading.value = true;
   let productsLoaded = false;
   try {
@@ -1355,17 +1649,21 @@ async function loadPageData(options = {}) {
       shouldLoadMeta ? apiClient.get("/api/suppliers?paged=1&page=1&pageSize=100") : Promise.resolve(state.suppliers),
       shouldLoadMeta ? apiClient.get("/api/logistics-rules") : Promise.resolve(state.logisticsRules)
     ]).then((values) => ({ values }), (error) => ({ error }));
-    const products = await apiClient.get(`/api/products/selection?${buildSelectionQuery()}`);
+    const products = await apiClient.get(`/api/products/selection?${buildSelectionQuery({ summaryMode })}`);
     state.rows = normalizePagedRows(products);
     state.total = normalizePagedTotal(products, state.rows);
-    state.summary = products?.summary || {
-      products: state.total,
-      quotedRows: state.rows.filter((row) => !!getCurrentQuote(row, getLogisticsRuleForRow(row))).length,
-      missingQuoteRows: state.rows.filter((row) => !getCurrentQuote(row, getLogisticsRuleForRow(row))).length,
-      avgPurchaseCost: state.rows.length
-        ? state.rows.reduce((sum, row) => sum + Number(row.purchase_cost || 0), 0) / state.rows.length
-        : 0
-    };
+    if (products?.summary) {
+      state.summary = products.summary;
+    } else if (!silent) {
+      state.summary = {
+        products: state.total,
+        quotedRows: state.rows.filter((row) => !!getCurrentQuote(row, getLogisticsRuleForRow(row))).length,
+        missingQuoteRows: state.rows.filter((row) => !getCurrentQuote(row, getLogisticsRuleForRow(row))).length,
+        avgPurchaseCost: state.rows.length
+          ? state.rows.reduce((sum, row) => sum + Number(row.purchase_cost || 0), 0) / state.rows.length
+          : 0
+      };
+    }
     productsLoaded = true;
     if (!silent) selectedRows.value = [];
     if (!silent) loading.value = false;
@@ -1650,7 +1948,35 @@ function handleDialogClosed() {
   formRef.value?.clearValidate?.();
 }
 
-async function submitDialog() {
+function upsertSelectionRow(row) {
+  if (!row || !row.id) return;
+  const nextRow = { ...row };
+  const index = state.rows.findIndex((item) => Number(item.id) === Number(row.id));
+  if (index >= 0) {
+    state.rows.splice(index, 1, nextRow);
+    return;
+  }
+  state.rows.unshift(nextRow);
+  state.total += 1;
+}
+
+function refreshSelectionSummaryFromRows() {
+  const rows = Array.isArray(state.rows) ? state.rows : [];
+  const quotedRows = rows.filter((row) => !!getCurrentQuote(row, getLogisticsRuleForRow(row))).length;
+  const missingQuoteRows = rows.length - quotedRows;
+  const avgPurchaseCost = rows.length
+    ? rows.reduce((sum, row) => sum + Number(row.purchase_cost || 0), 0) / rows.length
+    : 0;
+  state.summary = {
+    ...(state.summary || {}),
+    products: state.total,
+    quotedRows,
+    missingQuoteRows,
+    avgPurchaseCost
+  };
+}
+
+async function submitDialog(options = {}) {
   if (!formRef.value) return;
   await formRef.value.validate();
 
@@ -1691,15 +2017,28 @@ async function submitDialog() {
     };
 
     if (dialog.mode === "create") {
-      await apiClient.post("/api/products", payload);
+      const response = await apiClient.post("/api/products", payload);
+      const savedProduct = response?.product || null;
+      if (savedProduct) {
+        upsertSelectionRow(savedProduct);
+        refreshSelectionSummaryFromRows();
+      }
       ElMessage.success("选品已新增");
     } else {
-      await apiClient.put(`/api/products/${dialog.form.id}`, payload);
+      const response = await apiClient.put(`/api/products/${dialog.form.id}`, payload);
+      const savedProduct = response?.product || null;
+      if (savedProduct) {
+        upsertSelectionRow(savedProduct);
+        refreshSelectionSummaryFromRows();
+      }
       ElMessage.success("选品已更新");
     }
 
     dialogVisible.value = false;
-    await loadPageData();
+    loadPageData({ silent: true });
+    if (options.returnAfter) {
+      goBackToSelectionReturnTarget();
+    }
   } catch (error) {
     ElMessage.error(error.message || "保存失败");
   } finally {
@@ -1839,12 +2178,21 @@ function startListingJobPolling() {
 }
 
 onMounted(async () => {
+  ensureSelectionWorkbenchRouteId();
+  restoreSelectionWorkbenchState();
   await loadPageData();
+  if (dialogVisible.value && dialog.mode === "edit" && dialog.currentRow?.id && !String(route.query.openEdit || "").trim()) {
+    await openEditDialog({ id: dialog.currentRow.id });
+  }
+  await openRouteEditDialogIfNeeded();
+  selectionWorkbenchReady.value = true;
+  syncSelectionWorkbenchTabTitle();
   startListingJobPolling();
 });
 
 onBeforeUnmount(() => {
   if (listingJobPoller) window.clearInterval(listingJobPoller);
+  window.clearTimeout(selectionWorkbenchSaveTimer);
 });
 </script>
 
@@ -1879,7 +2227,7 @@ onBeforeUnmount(() => {
               <el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="String(person.id)" />
             </el-select>
           </el-form-item>
-          <el-form-item label="业务状态">
+          <el-form-item label="状态">
             <el-select v-model="state.filters.businessStatus" style="width: 150px" @change="handleSearch">
               <el-option
                 v-for="item in businessStatusOptions"
@@ -1894,8 +2242,8 @@ onBeforeUnmount(() => {
             <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
             <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新增选品</el-button>
             <el-button class="erp-btn erp-btn-secondary" @click="openImportDialog">批量导入</el-button>
-            <el-button class="erp-btn erp-btn-secondary" :disabled="!selectedRows.length" @click="startBatchVariant">
-              批量AI内容优化
+            <el-button class="erp-btn erp-btn-secondary" :icon="MagicStick" :disabled="!selectedRows.length" @click="startBatchVariant">
+              批量AI优化
             </el-button>
             <el-button class="erp-btn erp-btn-secondary" :disabled="!selectedRows.length" @click="handleBatchAction">
               批量操作
@@ -1925,7 +2273,6 @@ onBeforeUnmount(() => {
                 <ProductImagePreview
                   :src="row.image_url"
                   :preview-list="row.image_url ? [row.image_url] : null"
-                  size="square"
                   fit="cover"
                 />
                 <div class="cell-stack gap-sm">
@@ -1944,7 +2291,7 @@ onBeforeUnmount(() => {
             </template>
           </el-table-column>
 
-          <el-table-column label="业务状态" min-width="150" align="center">
+          <el-table-column label="状态" min-width="150" align="center">
             <template #default="{ row }">
               <div class="cell-stack gap-xs align-center">
                 <el-tooltip
@@ -1956,30 +2303,48 @@ onBeforeUnmount(() => {
                     {{ selectionBusinessStatusText(row) }}
                   </el-tag>
                 </el-tooltip>
-                <span class="muted-text">{{ selectionStatusText(row) }}</span>
+                <span v-if="selectionStageText(row)" class="muted-text">{{ selectionStageText(row) }}</span>
                 <span v-if="listedTimeText(row)" class="muted-text">上架：{{ listedTimeText(row) }}</span>
               </div>
             </template>
           </el-table-column>
 
-          <el-table-column label="上架任务" min-width="190">
+          <el-table-column label="上架任务" min-width="220">
             <template #default="{ row }">
-              <el-tooltip :content="listingJobTooltipText(row)" placement="top" effect="dark" :popper-style="{ whiteSpace: 'pre-line', maxWidth: '360px' }">
               <div class="listing-job-cell">
                 <span class="listing-job-dot" :class="[`is-${listingJobStatus(row) || 'idle'}`, { spinning: isListingJobActive(row) }]"></span>
-                <div class="cell-stack gap-xs">
-                  <el-tag :type="listingJobTagType(row)" effect="light" size="small">
-                    {{ listingJobText(row) }}
-                  </el-tag>
-                  <span class="muted-text">{{ listingJobSubText(row) }}</span>
-                  <span v-if="listingJobStageText(row) || listingJobElapsedText(row)" class="muted-text">
-                    {{ [listingJobStageText(row), listingJobElapsedText(row)].filter(Boolean).join(" / ") }}
-                  </span>
-                  <span v-if="listingJobFailureText(row)" class="muted-text listing-job-error">{{ listingJobFailureText(row) }}</span>
-                  <span v-if="listingJobCreatedTimeText(row)" class="muted-text">创建：{{ listingJobCreatedTimeText(row) }}</span>
+                <div class="listing-job-content">
+                  <div class="listing-job-title-row">
+                    <el-tooltip :content="listingJobTooltipText(row)" placement="top" effect="dark" :popper-style="{ whiteSpace: 'pre-line', maxWidth: '360px' }">
+                      <span class="listing-job-status-trigger">
+                        <strong>{{ listingJobText(row) }}</strong>
+                        <el-tag v-if="listingJobStatus(row)" :type="listingJobTagType(row)" effect="plain" size="small">
+                          {{ listingJobStatusLabel(row) }}
+                        </el-tag>
+                      </span>
+                    </el-tooltip>
+                    <el-tooltip
+                      v-if="listingJobContentTagText(row)"
+                      :content="listingJobContentTooltipText(row)"
+                      placement="top"
+                      effect="dark"
+                      :popper-style="{ whiteSpace: 'pre-line', maxWidth: '360px' }"
+                    >
+                      <el-tag class="listing-content-check-tag" type="info" effect="plain" size="small">
+                        {{ listingJobContentTagText(row) }}
+                      </el-tag>
+                    </el-tooltip>
+                  </div>
+                  <span class="listing-job-meta">{{ listingJobSubText(row) }}</span>
+                  <div v-if="listingJobStageText(row) || listingJobElapsedText(row)" class="listing-job-progress-line">
+                    <span v-if="listingJobStageText(row)">{{ listingJobStageText(row) }}</span>
+                    <span v-if="listingJobElapsedText(row)">{{ listingJobElapsedText(row) }}</span>
+                  </div>
+                  <span v-if="listingJobFailureText(row)" class="listing-job-error">{{ listingJobFailureText(row) }}</span>
+                  <span v-if="listingJobFixTip(row)" class="listing-job-fix-tip">{{ listingJobFixTip(row) }}</span>
+                  <span v-if="listingJobCreatedTimeText(row)" class="listing-job-meta">创建：{{ listingJobCreatedTimeText(row) }}</span>
                 </div>
               </div>
-              </el-tooltip>
             </template>
           </el-table-column>
 
@@ -2074,7 +2439,7 @@ onBeforeUnmount(() => {
                 >
                   {{ isListingJobActive(row) ? "中断上架" : "一键上架" }}
                 </el-button>
-                <el-button class="erp-btn-link" link type="primary" @click="startVariant(row)">AI内容优化</el-button>
+                <el-button class="erp-btn-link" link type="primary" :icon="MagicStick" @click="startVariant(row)">AI优化</el-button>
                 <el-button class="erp-btn-link" link type="success" :disabled="row.selection_status === 'listed'" @click="addToInventory(row)">加入库存</el-button>
               </div>
             </template>
@@ -2129,7 +2494,7 @@ onBeforeUnmount(() => {
           <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="selectAllListingShops">全选</el-button>
           <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="clearListingShops">清空</el-button>
           <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="selectOwnerListingShops">负责人店铺</el-button>
-          <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="selectRuvibeListingShops">RuVibe Mart</el-button>
+          <el-button class="erp-btn erp-btn-secondary" size="small" plain @click="selectMainPriceListingShops">主价店铺</el-button>
         </div>
         <el-empty v-if="!listingShopDialog.loading && !listingShopDialog.shops.length" description="暂无可上架店铺" />
         <div v-else class="listing-shop-grid">
@@ -2150,7 +2515,7 @@ onBeforeUnmount(() => {
               </div>
               <div class="listing-shop-option-meta">
                 <span>{{ shop.status || "active" }}</span>
-                <span>价格指数 {{ shop.priceIndex }}</span>
+                <span>{{ shop.priceLabel }} · 价格指数 {{ shop.priceIndex }}</span>
               </div>
             </div>
           </button>
@@ -2407,7 +2772,7 @@ onBeforeUnmount(() => {
                 <el-col :span="24">
                   <div class="selection-media-grid">
                     <div class="selection-image-preview-row">
-                      <ProductImagePreview :src="dialog.form.image_url" size="square" />
+                      <ProductImagePreview :src="dialog.form.image_url" />
                       <div class="selection-image-preview-meta">
                         <strong>商品主图</strong>
                         <span>{{ dialog.form.image_url ? "点击缩略图可预览" : "未上传图片" }}</span>
@@ -2415,7 +2780,7 @@ onBeforeUnmount(() => {
                     </div>
                     <div class="detail-image-list">
                       <div v-for="(image, index) in normalizeDetailImages(dialog.form.detail_image_urls)" :key="`${image}-${index}`" class="detail-image-item">
-                        <ProductImagePreview :src="image" size="square" />
+                        <ProductImagePreview :src="image" />
                         <el-button link type="danger" @click="removeDetailImage(index)">移除</el-button>
                       </div>
                       <div v-if="!normalizeDetailImages(dialog.form.detail_image_urls).length" class="detail-image-empty">未上传详情图</div>
@@ -2539,6 +2904,14 @@ onBeforeUnmount(() => {
       <template #footer>
         <div class="erp-dialog-footer">
           <el-button class="erp-btn erp-btn-secondary" @click="dialogVisible = false">取消</el-button>
+          <el-button
+            v-if="selectionReturnTarget() && dialog.mode === 'edit'"
+            class="erp-btn erp-btn-secondary"
+            :loading="dialogSubmitting"
+            @click="submitDialog({ returnAfter: true })"
+          >
+            保存并返回AI工作台
+          </el-button>
           <el-button class="erp-btn erp-btn-primary" type="primary" :loading="dialogSubmitting" @click="submitDialog">保存</el-button>
         </div>
       </template>
@@ -2551,7 +2924,6 @@ onBeforeUnmount(() => {
             <ProductImagePreview
               :src="profitDialog.row.image_url"
               :preview-list="profitDialog.row.image_url ? [profitDialog.row.image_url] : null"
-              size="square"
               fit="cover"
             />
             <div class="cell-stack gap-sm">
@@ -2777,7 +3149,7 @@ onBeforeUnmount(() => {
 }
 
 .selling-points-cell {
-  color: var(--erp-text);
+  color: var(--erp-text-secondary);
   font-size: 13px;
   line-height: 1.5;
   display: -webkit-box;
@@ -2788,9 +3160,9 @@ onBeforeUnmount(() => {
 
 .listing-job-cell {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
-  min-height: 42px;
+  min-height: 56px;
 }
 
 .listing-job-dot {
@@ -2836,6 +3208,73 @@ onBeforeUnmount(() => {
   animation: listing-job-spin 900ms linear infinite;
 }
 
+.listing-job-content {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.listing-job-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.listing-job-title-row strong {
+  min-width: 0;
+  color: var(--erp-text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.listing-job-status-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  cursor: help;
+}
+
+.listing-job-title-row :deep(.el-tag) {
+  flex: 0 0 auto;
+  height: 20px;
+  padding: 0 6px;
+  line-height: 18px;
+}
+
+.listing-content-check-tag {
+  cursor: help;
+  border-color: #cbd5e1;
+  color: #475569;
+  background: #f8fafc;
+}
+
+.listing-job-meta,
+.listing-job-progress-line,
+.listing-job-error,
+.listing-job-fix-tip {
+  max-width: 240px;
+}
+
+.listing-job-progress-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  color: var(--erp-text-secondary);
+}
+
+.listing-job-progress-line span + span::before {
+  content: "/";
+  margin-right: 6px;
+  color: var(--erp-border-strong);
+}
+
 @keyframes listing-job-spin {
   to {
     transform: rotate(360deg);
@@ -2843,9 +3282,9 @@ onBeforeUnmount(() => {
 }
 
 .product-thumb {
-  width: 50px;
-  height: 50px;
-  border-radius: 10px;
+  width: 64px;
+  height: 84px;
+  border-radius: 8px;
   border: 1px solid var(--erp-border);
   background: #fff;
   flex-shrink: 0;
@@ -3346,6 +3785,15 @@ onBeforeUnmount(() => {
 .listing-job-error {
   color: #dc2626;
   max-width: 220px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.listing-job-fix-tip {
+  color: #b45309;
+  max-width: 240px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;

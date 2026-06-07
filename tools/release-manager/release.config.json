@@ -3,8 +3,14 @@
   "projectDir": "../..",
   "deployOutputDir": "../../dist/deploy",
   "releasesDir": "../../dist/releases",
+  "previewDir": "../../dist/preview",
   "liveDir": "../../dist/live",
   "currentFile": "../../dist/releases/current.json",
+  "previewFile": "../../dist/releases/preview.json",
   "buildCommand": "npm run package:deploy",
+  "previewPort": 8788,
+  "previewHealthUrl": "http://127.0.0.1:8788/admin.html",
+  "localHealthUrl": "http://127.0.0.1:8787/admin.html",
+  "publicHealthUrl": "https://erp.hjt888.xyz/admin.html",
   "channel": "production"
 }

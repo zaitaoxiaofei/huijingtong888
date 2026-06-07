@@ -24,12 +24,12 @@ export function productImage(id) {
   return catalogProductsRuntime().productImageImpl(id);
 }
 
-export function productOrderProfitDetails(productId) {
-  return catalogProductsRuntime().productOrderProfitDetailsImpl(productId);
+export function productOrderProfitDetails(productId, query = {}) {
+  return catalogProductsRuntime().productOrderProfitDetailsImpl(productId, query);
 }
 
-export function productCancelDetails(productId) {
-  return catalogProductsRuntime().productCancelDetailsImpl(productId);
+export function productCancelDetails(productId, query = {}) {
+  return catalogProductsRuntime().productCancelDetailsImpl(productId, query);
 }
 
 export function hiddenProducts(query = {}) {

@@ -4,11 +4,12 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
 import { createLatestRequestGate } from "../../utils/request-gate";
+import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
-import { applyFilterQuery, buildFilterQuery, dateText } from "./inventory-utils.js";
+import { applyFilterQuery, dateText } from "./inventory-utils.js";
 
 const route = useRoute();
 const router = useRouter();
@@ -93,20 +94,24 @@ function applyRouteState() {
   }
 }
 
-function syncRouteQuery() {
-  if (syncingRoute) return;
-  const next = buildFilterQuery(route, state.filters, filterDefaults);
-  if (JSON.stringify(route.query || {}) === JSON.stringify(next)) return;
-  router.replace({ query: next });
-}
+const syncRouteQuery = createDefaultRouteQuerySync({
+  route,
+  router,
+  filters: state.filters,
+  defaults: filterDefaults,
+  manualKeys: ["query"],
+  isSyncingRoute: () => syncingRoute
+});
 
 function handleSearch() {
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
 function handleReset() {
   Object.assign(state.filters, filterDefaults);
+  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -246,7 +251,7 @@ async function loadPageData() {
 
 watch(() => route.query, applyRouteState, { deep: true });
 watch(
-  () => [state.filters.query, state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize],
+  () => [state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize],
   syncRouteQuery
 );
 
@@ -409,5 +414,3 @@ onMounted(async () => {
   }
 }
 </style>
-
-

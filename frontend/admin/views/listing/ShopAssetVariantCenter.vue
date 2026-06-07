@@ -19,6 +19,9 @@ import { useAuthStore } from "../../stores/auth.js";
 
 const VIDEO_DURATION = 8;
 const VIDEO_GENERATE_CONCURRENCY = 4;
+const SOURCE_DETAIL_IMAGE_LIMIT = 24;
+const SOURCE_IMAGE_META_CONCURRENCY = 4;
+const SOURCE_IMAGE_META_TIMEOUT_MS = 4500;
 const PRICE_ROLES = [
   { value: "owner", label: "负责人店铺", index: 1, type: "success", desc: "默认链接归属店铺，价格指数 1.00" },
   { value: "main", label: "主店铺", index: 1, type: "success", desc: "主推店铺，价格指数 1.00" },
@@ -123,6 +126,10 @@ const enabledShopCount = computed(() => state.selectedShopIds.length);
 const detailStatusText = computed(() => `${material.detailImages.length} 张详情图`);
 const mainUploadStatus = computed(() => (material.mainImage?.url ? "已上传" : "待上传"));
 const configuredShops = computed(() => state.shops.filter((shop) => String(shop.status || "").toLowerCase() !== "deleted"));
+
+function createListingWorkbenchId() {
+  return `liwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 async function loadBootstrap() {
   loading.value = true;
@@ -256,10 +263,11 @@ function defaultPriceIndexForShop(shop) {
 }
 
 function defaultPriceRoleForShop(shop) {
+  const configuredRole = String(shop?.rule?.priceRole || shop?.rule?.price_role || "").trim();
+  if (configuredRole) return configuredRole;
   const ownerName = String(authStore.user?.name || authStore.user?.username || state.sourceProduct?.ownerName || state.sourceProduct?.owner_name || "").trim();
   const legalEntity = String(shop?.legalEntity || shop?.legal_entity || "").trim();
   if (ownerName && legalEntity && ownerName === legalEntity) return "owner";
-  if (/ruvibe\s*mart/i.test(String(shop?.name || "").trim())) return "main";
   if (isNewShop(shop)) return "new";
   return "other_owner";
 }
@@ -283,7 +291,8 @@ function isOwnerShop(shop) {
 }
 
 function isMainShop(shop) {
-  return /ruvibe\s*mart/i.test(String(shop?.name || "").trim());
+  const role = state.rules[shop?.id]?.priceRole || shop?.rule?.priceRole || shop?.rule?.price_role || "";
+  return String(role).trim() === "main";
 }
 
 function isNewShop(shop) {
@@ -335,37 +344,67 @@ function applyDefaultMatrixRules() {
 }
 
 function normalizeSourceImageList(value) {
-  if (Array.isArray(value)) return value.filter(Boolean);
+  if (Array.isArray(value)) return value.flatMap(normalizeSourceImageList).filter(Boolean);
+  if (value && typeof value === "object") {
+    return normalizeSourceImageList(value.url || value.image_url || value.imageUrl || value.src || value.link || "");
+  }
   const text = String(value || "").trim();
   if (!text) return [];
   try {
     const parsed = JSON.parse(text);
-    if (Array.isArray(parsed)) return parsed.filter(Boolean);
+    if (Array.isArray(parsed) || (parsed && typeof parsed === "object")) return normalizeSourceImageList(parsed);
   } catch {
     // Fall through to delimiter parsing.
   }
-  return text.split(/\r\n|[,，]+/).map((item) => item.trim()).filter(Boolean);
+  return text.split(/\r?\n|\s*\|\|\s*|[,，]+/).map((item) => item.trim()).filter(Boolean);
 }
 
 function previewUrlForSourceImage(url) {
   const text = String(url || "").trim();
   if (!text || /^data:/i.test(text) || /^blob:/i.test(text)) return text;
+  if (/^\/\//.test(text)) return `${window.location.protocol}${text}`;
   return withImageToken(text);
 }
 
+function proxiedSourceImageUrl(url) {
+  const text = String(url || "").trim();
+  if (/^https?:\/\//i.test(text)) return `/api/image-proxy?url=${encodeURIComponent(text)}`;
+  if (/^\/\//.test(text)) {
+    const absoluteUrl = `${window.location.protocol}${text}`;
+    return `/api/image-proxy?url=${encodeURIComponent(absoluteUrl)}`;
+  }
+  return "";
+}
+
+function sourceImageName(url, fallbackName) {
+  const text = String(url || "").trim();
+  if (/^data:/i.test(text) || /^blob:/i.test(text)) return fallbackName;
+  try {
+    const parsed = /^\/\//.test(text) ? new URL(`${window.location.protocol}${text}`) : new URL(text, window.location.origin);
+    return decodeURIComponent(parsed.pathname.split("/").filter(Boolean).pop() || "") || fallbackName;
+  } catch {
+    return text.split(/[\\/]/).filter(Boolean).pop() || fallbackName;
+  }
+}
+
 async function imageMetaFromUrl(url, fallbackName) {
-  const previewUrl = previewUrlForSourceImage(url);
+  let previewUrl = previewUrlForSourceImage(url);
   if (!previewUrl) return null;
-  const meta = await imageSize(previewUrl).catch(() => ({ width: 0, height: 0 }));
-  const filename = /^data:/i.test(String(url || ""))
-     fallbackName
-    : String(url).split(/[\\/]/).pop().split("")[0] || fallbackName;
+  let meta = await imageSize(previewUrl).catch(() => null);
+  if (!meta) {
+    const proxiedUrl = proxiedSourceImageUrl(url);
+    if (proxiedUrl) {
+      previewUrl = withImageToken(proxiedUrl);
+      meta = await imageSize(previewUrl).catch(() => null);
+    }
+  }
+  const filename = sourceImageName(url, fallbackName);
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     name: filename || fallbackName,
     size: 0,
-    width: meta.width,
-    height: meta.height,
+    width: meta?.width || 0,
+    height: meta?.height || 0,
     url: previewUrl,
     status: "已导入"
   };
@@ -374,10 +413,40 @@ async function imageMetaFromUrl(url, fallbackName) {
 function imageSize(url) {
   return new Promise((resolve, reject) => {
     const image = new Image();
-    image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
-    image.onerror = reject;
+    const timer = window.setTimeout(() => {
+      image.onload = null;
+      image.onerror = null;
+      image.src = "";
+      reject(new Error("image size timeout"));
+    }, SOURCE_IMAGE_META_TIMEOUT_MS);
+    image.onload = () => {
+      window.clearTimeout(timer);
+      resolve({ width: image.naturalWidth, height: image.naturalHeight });
+    };
+    image.onerror = (error) => {
+      window.clearTimeout(timer);
+      reject(error);
+    };
     image.src = url;
   });
+}
+
+async function imageMetasFromUrls(urls = []) {
+  const limitedUrls = [...new Set(normalizeSourceImageList(urls))].slice(0, SOURCE_DETAIL_IMAGE_LIMIT);
+  const output = [];
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < limitedUrls.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const meta = await imageMetaFromUrl(limitedUrls[index], `详情图 ${index + 1}`);
+      if (meta) output[index] = meta;
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(SOURCE_IMAGE_META_CONCURRENCY, limitedUrls.length) }, () => worker())
+  );
+  return output.filter(Boolean);
 }
 
 async function onMainImageChange(file) {
@@ -536,9 +605,7 @@ async function applySelectionProduct(product) {
   const nextMainImage = await imageMetaFromUrl(mainImage, "选品主图");
   if (nextMainImage) material.mainImage = nextMainImage;
   if (detailImages.length) {
-    material.detailImages = (await Promise.all(
-      detailImages.map((url, index) => imageMetaFromUrl(url, `详情图 ${index + 1}`))
-    )).filter(Boolean);
+    material.detailImages = await imageMetasFromUrls(detailImages);
   }
 
   state.sourceProduct = {
@@ -551,6 +618,128 @@ async function applySelectionProduct(product) {
     ozonCategoryName: product.ozon_category_name || ""
   };
   refreshDefaultPriceIndexes();
+}
+
+async function applyCollectorBoxProduct(product) {
+  if (!product?.sku) return;
+  const raw = product.rawPayload || product.raw_payload || {};
+  const payload = product.payload || {};
+  const edit = product.editPayload || product.edit_payload || {};
+  const images = [...new Set(normalizeSourceImageList([
+    product.image_url,
+    product.primary_image,
+    raw.productImage,
+    raw.mainImage,
+    raw.primary_image,
+    raw.image_url,
+    raw.images,
+    payload.images,
+    edit.images
+  ]))];
+  const mainImage = images[0] || "";
+  const detailImages = images.filter((url) => url !== mainImage);
+  const dimensions = payload.dimensions || raw.dimensions || {};
+
+  material.title = product.title || payload.productTitle || raw.title || material.title;
+  material.sourceProductId = String(product.sku || "");
+  material.ozonCategoryId = product.ozon_category_id || payload.ozon_category_id || "";
+  material.ozonDescriptionCategoryId = product.description_category_id || payload.description_category_id || "";
+  material.ozonTypeId = product.type_id || payload.type_id || "";
+  material.ozonCategoryName = product.category_name || payload.category || raw.categoryName || raw.category || "";
+  material.color = displayJoin(payload.color || raw.color) || material.color;
+  material.material = displayJoin(payload.material || raw.material) || material.material;
+  material.quantity = payload.quantity || raw.quantity || material.quantity;
+  material.vehicleModel = payload.vehicleModel || raw.vehicleModel || raw.vehicle_model || material.vehicleModel;
+  material.basePriceRmb = cleanMetricValue(product.price ?? raw.price ?? material.basePriceRmb);
+  material.lengthCm = cleanMetricValue(dimensions.length_cm ?? dimensions.length ?? raw.length_cm ?? raw.length ?? material.lengthCm);
+  material.widthCm = cleanMetricValue(dimensions.width_cm ?? dimensions.width ?? raw.width_cm ?? raw.width ?? material.widthCm);
+  material.heightCm = cleanMetricValue(dimensions.height_cm ?? dimensions.height ?? raw.height_cm ?? raw.height ?? material.heightCm);
+  material.weightG = cleanMetricValue(dimensions.weight_g ?? dimensions.weight ?? raw.weight_g ?? raw.weight ?? material.weightG);
+  material.description = payload.description || raw.description || material.description;
+
+  const nextMainImage = await imageMetaFromUrl(mainImage, "采集箱主图");
+  if (nextMainImage) material.mainImage = nextMainImage;
+  if (detailImages.length) {
+    material.detailImages = await imageMetasFromUrls(detailImages);
+  }
+
+  state.sourceProduct = {
+    id: product.sku,
+    code: product.sku,
+    name: product.title || raw.title || "",
+    ownerName: product.owner_name || product.ownerName || "",
+    ozonCategoryId: material.ozonCategoryId,
+    ozonCategoryName: material.ozonCategoryName
+  };
+  refreshDefaultPriceIndexes();
+}
+
+async function applyPublishRecord(record) {
+  if (!record?.id) return;
+  const request = record.request || {};
+  const item = (Array.isArray(request.items) ? request.items[0] : null) || {};
+  const images = prioritizeSourceImages([...new Set(normalizeSourceImageList([
+    record.primary_image,
+    record.images,
+    item.primary_image,
+    item.images,
+    record.fallback_image,
+    record.online_primary_image
+  ]))]);
+  const mainImage = images[0] || "";
+  const detailImages = images.filter((url) => url !== mainImage);
+  const depthMm = Number(item.depth || record.depth || 0);
+  const widthMm = Number(item.width || record.width || 0);
+  const heightMm = Number(item.height || record.height || 0);
+
+  material.title = item.name || record.product_name || record.offer_id || material.title;
+  material.sourceProductId = String(record.offer_id || record.id || "");
+  material.ozonDescriptionCategoryId = item.description_category_id || record.description_category_id || "";
+  material.ozonTypeId = item.type_id || record.type_id || "";
+  material.ozonCategoryId = material.ozonDescriptionCategoryId && material.ozonTypeId
+    ? `${material.ozonDescriptionCategoryId}:${material.ozonTypeId}`
+    : "";
+  material.ozonCategoryName = record.category_name || "";
+  material.color = displayJoin(item.color) || material.color;
+  material.material = displayJoin(item.material) || material.material;
+  material.quantity = item.quantity || material.quantity;
+  material.basePriceRmb = cleanMetricValue(item.price ?? record.price ?? material.basePriceRmb);
+  material.lengthCm = cleanMetricValue(depthMm ? depthMm / 10 : material.lengthCm);
+  material.widthCm = cleanMetricValue(widthMm ? widthMm / 10 : material.widthCm);
+  material.heightCm = cleanMetricValue(heightMm ? heightMm / 10 : material.heightCm);
+  material.weightG = cleanMetricValue(item.weight ?? record.weight ?? material.weightG);
+  material.description = item.description || material.description;
+
+  const nextMainImage = await imageMetaFromUrl(mainImage, "上架记录主图");
+  if (nextMainImage) material.mainImage = nextMainImage;
+  if (detailImages.length) {
+    material.detailImages = await imageMetasFromUrls(detailImages);
+  }
+
+  state.sourceProduct = {
+    id: record.id,
+    code: record.offer_id || "",
+    name: item.name || record.product_name || "",
+    ownerName: record.owner_name || record.ownerName || "",
+    ozonCategoryId: material.ozonCategoryId,
+    ozonCategoryName: material.ozonCategoryName
+  };
+  refreshDefaultPriceIndexes();
+}
+
+function isWeakSourceImageUrl(url = "") {
+  const value = String(url || "").trim();
+  if (!/^https?:\/\//i.test(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.origin !== window.location.origin && parsed.pathname.startsWith("/uploads/");
+  } catch {
+    return false;
+  }
+}
+
+function prioritizeSourceImages(images = []) {
+  return normalizeSourceImageList(images).sort((left, right) => Number(isWeakSourceImageUrl(left)) - Number(isWeakSourceImageUrl(right)));
 }
 
 async function loadSelectionSourceFromRoute() {
@@ -572,6 +761,40 @@ async function loadSelectionSourceFromRoute() {
   } catch (error) {
     ElMessage.error(error.message || "从选品计价表带入失败");
   }
+}
+
+async function loadCollectorSourceFromRoute() {
+  const collectorSku = String(route.query.collectorSku || "").trim();
+  if (!collectorSku || route.query.source !== "collector_box") return;
+  try {
+    const product = await apiClient.get(`/api/listing/collector-box/${encodeURIComponent(collectorSku)}`, { noCache: true });
+    await applyCollectorBoxProduct(product);
+    ElMessage.success("已从采集箱带入主图、详情图和产品信息");
+    await nextTick();
+    document.querySelector(".rule-list")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    ElMessage.error(error.message || "从采集箱带入失败");
+  }
+}
+
+async function loadPublishRecordSourceFromRoute() {
+  const listingRecordId = Number(route.query.listingRecordId || 0);
+  if (!listingRecordId || route.query.source !== "listing_record") return;
+  try {
+    const record = await apiClient.get(`/api/listing/publish-records/${listingRecordId}`, { noCache: true });
+    await applyPublishRecord(record);
+    ElMessage.success("已从上架记录带入主图、详情图和产品信息");
+    await nextTick();
+    document.querySelector(".rule-list")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    ElMessage.error(error.message || "从上架记录带入失败");
+  }
+}
+
+async function loadRouteSource() {
+  await loadSelectionSourceFromRoute();
+  await loadCollectorSourceFromRoute();
+  await loadPublishRecordSourceFromRoute();
 }
 
 function buildGeneratePayload(shopIds = state.selectedShopIds) {
@@ -1060,7 +1283,13 @@ async function importToListingAutomation() {
 async function goToListingAutomation() {
   await importToListingAutomation();
   if (state.variants.length) {
-    router.push({ name: "listing-automation" });
+    router.push({
+      name: "listing-automation",
+      query: {
+        workbenchId: createListingWorkbenchId(),
+        tabTitle: `商品上架 · 素材包 ${state.batchId || Date.now()}`
+      }
+    });
   }
 }
 
@@ -1703,13 +1932,13 @@ function scrollToResults() {
 }
 
 watch(
-  () => [route.query.source, route.query.productId],
-  () => loadSelectionSourceFromRoute()
+  () => [route.query.source, route.query.productId, route.query.collectorSku, route.query.listingRecordId],
+  () => loadRouteSource()
 );
 
 onMounted(async () => {
   await loadBootstrap();
-  await loadSelectionSourceFromRoute();
+  await loadRouteSource();
 });
 </script>
 
@@ -2637,5 +2866,3 @@ onMounted(async () => {
   .rule-row { grid-template-columns: 1fr; }
 }
 </style>
-
-

@@ -1,6 +1,7 @@
 export function createAssetVariantEngineRoutes({ services, readJson }) {
   return {
     "GET /api/asset-variant-engine/bootstrap": (req) => services.assetVariantBootstrap(req.query || {}, req._session),
+    "GET /api/asset-variant-engine/selection-publish-shops": (req) => services.selectionPublishShops(req.query || {}, req._session),
     "GET /api/asset-variant-engine/jobs": (req) => services.assetVariantJobs(req.query || {}, req._session),
     "GET /api/asset-variant-engine/tail-templates": (req) => services.assetTailTemplates(req.query || {}, req._session),
     "POST /api/asset-variant-engine/tail-templates": async (req) => services.createAssetTailTemplate(await readJson(req), req._session),

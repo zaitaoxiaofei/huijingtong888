@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { apiClient } from "../../utils/api";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import { shanghaiDateKey, shanghaiMonthStart } from "../../utils/shanghai-date";
 
 const loading = ref(false);
@@ -334,17 +335,7 @@ onMounted(loadPageData);
               <template #default="{ row }">
                 <div class="erp-product-media-cell">
                   <div class="erp-product-thumb-wrap">
-                    <div class="erp-product-thumb" style="width: 48px; min-width: 48px; max-width: 48px; height: 64px; min-height: 64px; max-height: 64px;">
-                      <img
-                        v-if="imageSource(row)"
-                        :src="imageSource(row)"
-                        class="erp-product-thumb-image"
-                        style="width: 48px; min-width: 48px; max-width: 48px; height: 64px; min-height: 64px; max-height: 64px; object-fit: contain; object-position: center center; display: block; flex: 0 0 48px;"
-                        alt=""
-                        loading="lazy"
-                      />
-                      <div v-else class="erp-product-thumb-empty">无图</div>
-                    </div>
+                    <ProductImagePreview :src="imageSource(row)" :alt="row.product_name || row.ozon_sku || '商品图片'" />
                   </div>
                   <div class="erp-product-copy outbound-info-block">
                     <strong>{{ row.ozon_sku || "-" }}</strong>
@@ -368,17 +359,7 @@ onMounted(loadPageData);
               <template #default="{ row }">
                 <div class="erp-product-media-cell">
                   <div class="erp-product-thumb-wrap">
-                    <div class="erp-product-thumb" style="width: 48px; min-width: 48px; max-width: 48px; height: 64px; min-height: 64px; max-height: 64px;">
-                      <img
-                        v-if="row.product_image_url"
-                        :src="row.product_image_url"
-                        class="erp-product-thumb-image"
-                        style="width: 48px; min-width: 48px; max-width: 48px; height: 64px; min-height: 64px; max-height: 64px; object-fit: contain; object-position: center center; display: block; flex: 0 0 48px;"
-                        alt=""
-                        loading="lazy"
-                      />
-                      <div v-else class="erp-product-thumb-empty">无图</div>
-                    </div>
+                    <ProductImagePreview :src="row.product_image_url" :alt="row.product_name || row.product_code || '商品图片'" />
                   </div>
                   <div class="erp-product-copy outbound-info-block">
                     <strong>{{ row.product_code || "-" }}</strong>

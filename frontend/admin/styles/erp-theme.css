@@ -183,11 +183,11 @@ body,
   border-radius: 0 !important;
   background: #ffffff !important;
   border-bottom: 1px solid var(--erp-border-light) !important;
-  box-shadow: none !important;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03) !important;
 }
 
 .erp-sidebar {
-  background: var(--erp-card);
+  background: #ffffff;
   border-right: 1px solid var(--erp-border-light);
   box-shadow: none;
 }
@@ -219,6 +219,7 @@ body,
   color: var(--erp-text-regular);
   font-size: 13px;
   font-weight: 500;
+  transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
 }
 
 .erp-menu .el-menu-item .el-icon,
@@ -227,13 +228,20 @@ body,
 }
 
 .erp-menu .el-menu-item.is-active {
-  background: var(--erp-primary-soft);
-  color: var(--erp-primary);
-  box-shadow: inset 0 0 0 1px rgba(98, 88, 246, 0.1);
+  background: #eff6ff;
+  color: #2563eb;
+  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.12);
 }
 
 .erp-menu .el-menu-item.is-active::before {
-  background: var(--erp-primary);
+  background: #2563eb;
+}
+
+.erp-menu .el-menu-item:hover,
+.erp-menu .el-sub-menu__title:hover {
+  background: #f6f8fc;
+  color: #1d4ed8;
+  transform: translateX(1px);
 }
 
 .erp-workspace-panels {
@@ -557,12 +565,12 @@ body,
 .orders-thumb-empty,
 .picker-thumb,
 .selected-product-thumb {
-  width: 48px !important;
-  height: 48px !important;
-  min-width: 48px !important;
-  min-height: 48px !important;
-  max-width: 52px !important;
-  max-height: 52px !important;
+  width: 64px !important;
+  height: 84px !important;
+  min-width: 64px !important;
+  min-height: 84px !important;
+  max-width: 64px !important;
+  max-height: 84px !important;
   border-radius: var(--erp-radius-sm) !important;
   border: 1px solid var(--erp-border-light);
   object-fit: cover;
@@ -574,19 +582,6 @@ body,
 .orders-product-cell,
 .orders-product-main {
   gap: 9px !important;
-}
-
-.ad-dashboard-page .product-cell .thumb img,
-.ad-dashboard-page .product-cell .thumb .el-image__inner {
-  width: 100% !important;
-  height: 100% !important;
-  min-width: 100% !important;
-  min-height: 100% !important;
-  max-width: none !important;
-  max-height: none !important;
-  border: 0 !important;
-  border-radius: 0 !important;
-  object-fit: cover !important;
 }
 
 .cell-stack,

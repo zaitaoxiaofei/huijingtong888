@@ -1,7 +1,6 @@
 import { createApp } from "vue";
 import { createPinia } from "pinia";
 import { ElLoading } from "element-plus";
-import "element-plus/dist/index.css";
 import App from "./App.vue";
 import { router } from "./router";
 import "./styles/index.css";
@@ -11,7 +10,7 @@ import { useAppStore } from "./stores/app";
 const DYNAMIC_IMPORT_RELOAD_STATE = "ozon-admin-dynamic-import-reload-state";
 const DYNAMIC_IMPORT_PENDING_ROUTE = "ozon-admin-dynamic-import-pending-route";
 const DYNAMIC_IMPORT_INTENDED_ROUTE = "ozon-admin-dynamic-import-intended-route";
-const DYNAMIC_IMPORT_RELOAD_MAX_ATTEMPTS = 4;
+const DYNAMIC_IMPORT_RELOAD_MAX_ATTEMPTS = 2;
 
 function shouldReloadForDynamicImportError(error) {
   const message = String(error?.message || error || "");
@@ -47,7 +46,7 @@ function reloadForDynamicImportError(targetRoute = "") {
     const url = new URL(window.location.href);
     url.searchParams.set("_erp_chunk_reload", Date.now().toString(36));
     window.location.replace(url.toString());
-  }, Math.min(3000, 500 + attempts * 750));
+  }, 250 + attempts * 500);
   return true;
 }
 

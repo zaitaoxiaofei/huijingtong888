@@ -19,7 +19,7 @@ const SELLER_STATUS_OPTIONS = [
 
 const PRODUCT_PAGE_SIZE = 100;
 const AUTO_CLEANUP_ACTION_IDS = [3684628, 3702380];
-const AUTO_CLEANUP_INTERVAL_MINUTES = 10;
+const AUTO_CLEANUP_INTERVAL_MINUTES = 60;
 
 const SELLER_STATUS_META = {
   ACTIVE: { label: "进行中", type: "success" },
@@ -106,11 +106,14 @@ const state = reactive({
     joined: createEmptyProductPager()
   },
   cleanupConfig: createEmptyCleanupConfig(),
+  cleanupConfigsByStore: {},
   actionsLoading: false,
   productsLoading: false,
   submitting: false,
   submittingProductKey: "",
   cleanupLoading: false,
+  allCleanupLoading: false,
+  cleanupRunAllLoading: false,
   cleanupSaving: false
 });
 
@@ -137,6 +140,26 @@ const actionViewOptions = computed(() => [
   { label: `当前未参与 ${countActions("not_joined")}`, value: "not_joined" },
   { label: `当前已完成 ${countActions("completed")}`, value: "completed" }
 ]);
+const cleanupShopRows = computed(() => state.shops
+  .filter((shop) => String(shop?.status || "").toLowerCase() !== "deleted")
+  .map((shop) => {
+    const storeId = String(shop.id);
+    return {
+      shop,
+      config: state.cleanupConfigsByStore[storeId] || (storeId === String(state.storeId) ? state.cleanupConfig : createEmptyCleanupConfig(storeId))
+    };
+  }));
+const cleanupActivityScopeText = computed(() => {
+  const syncedActions = Array.isArray(state.cleanupConfig.lastSyncedActions) ? state.cleanupConfig.lastSyncedActions : [];
+  const syncedIds = syncedActions.map((item) => Number(item?.actionId || item?.id || 0)).filter((item) => Number.isFinite(item) && item > 0);
+  const syncIds = Array.isArray(state.cleanupConfig.lastResult?.actionListSync?.actionIds)
+    ? state.cleanupConfig.lastResult.actionListSync.actionIds.map(Number).filter((item) => Number.isFinite(item) && item > 0)
+    : [];
+  const ids = syncedIds.length ? syncedIds : syncIds;
+  if (!ids.length) return "活动列表会先从 Ozon 后台实时同步；同步失败时才使用兜底活动范围。";
+  const visibleIds = ids.slice(0, 6).join(" / ");
+  return ids.length > 6 ? `最近同步活动：${visibleIds} 等 ${ids.length} 个。` : `最近同步活动：${visibleIds}。`;
+});
 
 function createEmptyProductPager() {
   return {
@@ -155,6 +178,9 @@ function createEmptyCleanupConfig(storeId = "") {
     enabled: false,
     actionIds: AUTO_CLEANUP_ACTION_IDS.slice(),
     intervalMinutes: AUTO_CLEANUP_INTERVAL_MINUTES,
+    lastSyncedActions: [],
+    lastActionListSyncedAt: "",
+    lastActionListChangedAt: "",
     lastRunAt: "",
     lastError: "",
     lastResult: null,
@@ -176,6 +202,9 @@ function normalizeCleanupConfig(payload, storeId = "") {
     enabled: raw.enabled === true,
     actionIds: actionIds.length ? actionIds : base.actionIds,
     intervalMinutes: Number(raw.intervalMinutes) > 0 ? Number(raw.intervalMinutes) : base.intervalMinutes,
+    lastSyncedActions: Array.isArray(raw.lastSyncedActions) ? raw.lastSyncedActions : [],
+    lastActionListSyncedAt: String(raw.lastActionListSyncedAt || ""),
+    lastActionListChangedAt: String(raw.lastActionListChangedAt || ""),
     lastRunAt: String(raw.lastRunAt || ""),
     lastError: String(raw.lastError || ""),
     lastResult: raw.lastResult && typeof raw.lastResult === "object" ? raw.lastResult : null,
@@ -190,6 +219,14 @@ function formatDate(value) {
   if (Number.isNaN(date.getTime())) return String(value);
   const pad = (num) => (num < 10 ? `0${num}` : String(num));
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const pad = (num) => (num < 10 ? `0${num}` : String(num));
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function shortDate(value) {
@@ -398,6 +435,7 @@ async function loadShops() {
     const payload = await apiClient.get("/api/shops", { noCache: true });
     state.shops = Array.isArray(payload) ? payload : payload?.rows || [];
     if (!state.storeId && state.shops[0]) state.storeId = String(state.shops[0].id);
+    await loadAllCleanupConfigs();
   } catch (error) {
     state.shops = [];
     ElMessage.error(`加载店铺失败：${error.message || "unknown"}`);
@@ -413,11 +451,36 @@ async function loadCleanupConfig() {
   try {
     const payload = await apiClient.get(`/api/ozon/actions/cleanup-config?storeId=${encodeURIComponent(state.storeId)}`, { noCache: true });
     state.cleanupConfig = normalizeCleanupConfig(payload, state.storeId);
+    state.cleanupConfigsByStore = { ...state.cleanupConfigsByStore, [String(state.storeId)]: state.cleanupConfig };
   } catch (error) {
     state.cleanupConfig = createEmptyCleanupConfig(state.storeId);
+    state.cleanupConfigsByStore = { ...state.cleanupConfigsByStore, [String(state.storeId)]: state.cleanupConfig };
     ElMessage.error(`加载自动清理状态失败：${error.message || "unknown"}`);
   } finally {
     state.cleanupLoading = false;
+  }
+}
+
+async function loadAllCleanupConfigs() {
+  if (!state.shops.length) {
+    state.cleanupConfigsByStore = {};
+    return;
+  }
+  state.allCleanupLoading = true;
+  try {
+    const entries = await Promise.all(state.shops.map(async (shop) => {
+      const storeId = String(shop.id);
+      try {
+        const payload = await apiClient.get(`/api/ozon/actions/cleanup-config?storeId=${encodeURIComponent(storeId)}`, { noCache: true });
+        return [storeId, normalizeCleanupConfig(payload, storeId)];
+      } catch (error) {
+        return [storeId, { ...createEmptyCleanupConfig(storeId), storeName: String(shop.name || ""), lastError: error.message || "unknown" }];
+      }
+    }));
+    state.cleanupConfigsByStore = Object.fromEntries(entries);
+    if (state.storeId && state.cleanupConfigsByStore[String(state.storeId)]) state.cleanupConfig = state.cleanupConfigsByStore[String(state.storeId)];
+  } finally {
+    state.allCleanupLoading = false;
   }
 }
 
@@ -436,12 +499,32 @@ async function saveCleanupEnabled(enabled) {
   try {
     const payload = await apiClient.post("/api/ozon/actions/cleanup-config", { storeId: state.storeId, enabled });
     state.cleanupConfig = normalizeCleanupConfig(payload?.config, state.storeId);
+    state.cleanupConfigsByStore = { ...state.cleanupConfigsByStore, [String(state.storeId)]: state.cleanupConfig };
     ElMessage.success(enabled ? "已开启当前店铺自动清理配置" : "已关闭当前店铺自动清理配置");
   } catch (error) {
     state.cleanupConfig = previous;
     ElMessage.error(`保存自动清理配置失败：${error.message || "unknown"}`);
   } finally {
     state.cleanupSaving = false;
+  }
+}
+
+async function runAllCleanupNow() {
+  await ElMessageBox.confirm("确认立即扫描所有已启用店铺并删除 Ozon 自动加入活动的商品吗？手动加入的活动商品不会删除。", "立即执行自动删活动", {
+    type: "warning",
+    confirmButtonText: "立即扫描并删除",
+    cancelButtonText: "取消",
+    confirmButtonClass: "el-button--danger"
+  });
+  state.cleanupRunAllLoading = true;
+  try {
+    await apiClient.post("/api/scheduled-jobs/run", { job_key: "ozon_action_cleanup" });
+    ElMessage.success("已执行全店自动删活动任务");
+    await Promise.all([loadAllCleanupConfigs(), loadCleanupConfig()]);
+  } catch (error) {
+    ElMessage.error(`执行全店自动删活动失败：${error.message || "unknown"}`);
+  } finally {
+    state.cleanupRunAllLoading = false;
   }
 }
 
@@ -713,6 +796,53 @@ function cleanupResultSummary(config) {
   return total > 0 ? `最近移除 ${total} 个自动添加商品（${detail}）` : `最近执行完成（${detail}）`;
 }
 
+function cleanupStatusLabel(config) {
+  if (config?.taskRunning) return "执行中";
+  if (config?.lastError) return "最近失败";
+  if (config?.enabled) return config?.lastRunAt ? "运行正常" : "已启用";
+  return "未启用";
+}
+
+function cleanupStatusType(config) {
+  if (config?.taskRunning) return "warning";
+  if (config?.lastError) return "danger";
+  if (config?.enabled) return "success";
+  return "info";
+}
+
+function cleanupRemovedCount(config) {
+  return Number(config?.lastResult?.removedCount || 0);
+}
+
+function cleanupDetectedActionCount(config) {
+  return Number(config?.lastResult?.actionListSync?.actionCount || config?.lastSyncedActions?.length || 0);
+}
+
+function cleanupTooltipText(shop, config) {
+  const result = config?.lastResult || {};
+  const actionListSync = result.actionListSync || {};
+  const summaries = Array.isArray(result.actionSummaries) ? result.actionSummaries : [];
+  const syncedActions = Array.isArray(config?.lastSyncedActions) ? config.lastSyncedActions : [];
+  const actionLines = summaries.length
+    ? summaries.map((item) => `活动 ${item.actionId}：识别自动商品 ${Number(item.detectedCount ?? item.removedCount ?? 0)} 个，已删除 ${Number(item.removedCount || 0)} 个${item.error ? `，错误：${item.error}` : ""}`)
+    : ["暂无活动商品删除明细"];
+  const catalogLines = syncedActions.slice(0, 8).map((item) => `活动 ${item.actionId}：${item.title || "-"}${item.isParticipating ? "（参与中）" : ""}`);
+  return [
+    `店铺：${shop?.name || config?.storeName || config?.storeId || "-"}`,
+    `后台任务：${config?.enabled ? "已启用" : "未启用"}`,
+    `最近执行：${formatDateTime(config?.lastRunAt)}`,
+    `活动列表同步：${formatDateTime(config?.lastActionListSyncedAt || actionListSync.syncedAt)}`,
+    `活动列表变化：${actionListSync.changed ? "本次有变化" : "本次无变化"}`,
+    `识别活动数：${cleanupDetectedActionCount(config)}`,
+    `已删除自动商品：${cleanupRemovedCount(config)}`,
+    config?.lastError ? `错误：${config.lastError}` : "",
+    "活动明细：",
+    ...actionLines,
+    catalogLines.length ? "最近同步活动：" : "",
+    ...catalogLines
+  ].filter(Boolean).join("\n");
+}
+
 watch(() => state.storeId, async () => {
   await loadCleanupConfig();
   await loadActions();
@@ -759,7 +889,7 @@ onMounted(async () => {
     <section class="ozon-actions-cleanup">
       <div>
         <strong>自动删活动商品</strong>
-        <span>每 {{ state.cleanupConfig.intervalMinutes }} 分钟扫描一次，仅移除 Ozon 自动添加的官方活动商品。当前活动：{{ state.cleanupConfig.actionIds.join(" / ") }}。</span>
+        <span>每 {{ state.cleanupConfig.intervalMinutes }} 分钟扫描一次，仅移除 Ozon 自动添加的官方活动商品。{{ cleanupActivityScopeText }}</span>
         <small>后台任务：{{ state.cleanupConfig.taskEnabled ? (state.cleanupConfig.taskRunning ? "正在执行" : "已启用") : "未启用" }}；最近执行：{{ state.cleanupConfig.lastRunAt ? formatDate(state.cleanupConfig.lastRunAt) : "-" }}</small>
         <small>{{ cleanupResultSummary(state.cleanupConfig) }}</small>
       </div>
@@ -773,6 +903,25 @@ onMounted(async () => {
           @change="saveCleanupEnabled"
         />
         <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="state.cleanupLoading" :disabled="!state.storeId" @click="loadCleanupConfig">刷新</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="state.allCleanupLoading" @click="loadAllCleanupConfigs">刷新全部店铺</el-button>
+        <el-button class="erp-btn erp-btn-danger" type="danger" :loading="state.cleanupRunAllLoading" @click="runAllCleanupNow">立即扫描全部店铺</el-button>
+      </div>
+      <div class="cleanup-shop-status">
+        <el-tooltip
+          v-for="{ shop, config } in cleanupShopRows"
+          :key="shop.id"
+          placement="top"
+          effect="light"
+          :content="cleanupTooltipText(shop, config)"
+          :popper-style="{ whiteSpace: 'pre-line', maxWidth: '420px' }"
+        >
+          <button type="button" class="cleanup-shop-card" :class="`is-${cleanupStatusType(config)}`">
+            <span class="cleanup-shop-name">{{ shop.name }}</span>
+            <el-tag :type="cleanupStatusType(config)" size="small">{{ cleanupStatusLabel(config) }}</el-tag>
+            <span>最近 {{ config.lastRunAt ? formatDate(config.lastRunAt) : "-" }}</span>
+            <span>识别活动 {{ cleanupDetectedActionCount(config) }} / 删除 {{ cleanupRemovedCount(config) }}</span>
+          </button>
+        </el-tooltip>
       </div>
     </section>
 
@@ -1043,6 +1192,7 @@ onMounted(async () => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 16px;
   padding: 12px 16px;
 }
@@ -1055,6 +1205,58 @@ onMounted(async () => {
   flex-direction: column;
   gap: 4px;
   min-width: 0;
+}
+
+.cleanup-shop-status {
+  flex: 1 0 100%;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.cleanup-shop-card {
+  width: 100%;
+  min-height: 86px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-content: start;
+  gap: 6px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--erp-border);
+  border-radius: 8px;
+  background: var(--erp-surface-alt);
+  color: var(--erp-text-secondary);
+  text-align: left;
+  cursor: help;
+}
+
+.cleanup-shop-card.is-success {
+  border-color: #b7eb8f;
+  background: #f6ffed;
+}
+
+.cleanup-shop-card.is-warning {
+  border-color: #ffe58f;
+  background: #fffbe6;
+}
+
+.cleanup-shop-card.is-danger {
+  border-color: #ffccc7;
+  background: #fff2f0;
+}
+
+.cleanup-shop-card > span:not(.cleanup-shop-name) {
+  grid-column: 1 / -1;
+  font-size: 12px;
+}
+
+.cleanup-shop-name {
+  overflow: hidden;
+  color: var(--erp-text);
+  font-size: 13px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ozon-actions-tabs {
@@ -1230,7 +1432,7 @@ onMounted(async () => {
 .product-image {
   flex: 0 0 64px;
   width: 64px;
-  height: 64px;
+  height: 84px;
   border: 1px solid var(--erp-border);
   border-radius: 8px;
   background: var(--erp-surface-alt);

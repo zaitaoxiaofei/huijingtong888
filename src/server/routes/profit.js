@@ -23,6 +23,7 @@ export function createProfitRoutes({ services, readJson }) {
     "POST /api/order-profit-detail-snapshots/refresh": async (req) => services.refreshOrderProfitDetailSnapshots(await readJson(req)),
     "POST /api/profits/recalculate-historical": async (req) => services.recalculateHistoricalOrderProfits(await readJson(req)),
     "POST /api/profits/cleanup-delivered-return-loss": async (req) => services.cleanupHistoricalDeliveredReturnLoss(await readJson(req)),
+    "POST /api/profits/cleanup-unconfirmed-actual-profit": async (req) => services.cleanupHistoricalUnconfirmedActualProfit(await readJson(req)),
     "POST /api/profits/historical-review/actions": async (req) => services.applyHistoricalProfitReviewAction(await readJson(req), req._session?.personId),
     "GET /api/ozon-finance/summary": () => services.ozonFinanceSummary()
   };

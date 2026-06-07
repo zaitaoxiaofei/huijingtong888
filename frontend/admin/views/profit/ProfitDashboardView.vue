@@ -1,63 +1,40 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { apiClient } from "../../utils/api";
 import ProfitTrendChart from "../../components/profit/ProfitTrendChart.vue";
 import ProfitRankingView from "./ProfitRankingView.vue";
 import { formatInteger, formatMoney, formatMonthLabel, formatShortDate } from "./profit-utils.js";
-import { shanghaiDateKey, shanghaiMonthStart } from "../../utils/shanghai-date";
+import { shanghaiDateKey } from "../../utils/shanghai-date";
 
 const route = useRoute();
 const router = useRouter();
 const loading = ref(false);
 const syncLoading = ref(false);
-const shops = ref([]);
 const sectionLoading = ref({
   summary: false,
   dailyTrend: false,
-  monthlyTrend: false,
-  aftersales: false
+  monthlyTrend: false
 });
 const sectionErrors = ref({
   summary: "",
   dailyTrend: "",
-  monthlyTrend: "",
-  aftersales: ""
+  monthlyTrend: ""
 });
 const dashboard = ref({
   ranges: {},
   dailyTrend14: [],
   previousDailyTrend14: [],
-  monthlyTrend12: [],
-  aftersales: {
-    buckets: [],
-    totals: {},
-    missing_alert: {}
-  }
+  monthlyTrend12: []
 });
 
 let dashboardAbortController = null;
-let aftersalesAbortController = null;
 let dashboardLoadTimer = 0;
 
 function todayText() {
   return shanghaiDateKey();
 }
-
-function monthStartText() {
-  return shanghaiMonthStart();
-}
-
-function createAftersalesFilters() {
-  return {
-    from: monthStartText(),
-    to: todayText(),
-    shopId: "all"
-  };
-}
-
-const aftersalesFilters = reactive(createAftersalesFilters());
 
 const viewTabs = [
   { label: "看板", value: "/profit" },
@@ -190,13 +167,6 @@ const monthlyTrendWithMargin = computed(() => (
   }))
 ));
 
-const currentAftersalesShopName = computed(() => {
-  if (aftersalesFilters.shopId === "all") return "全部店铺";
-  return shops.value.find((item) => String(item.id) === String(aftersalesFilters.shopId))?.name || "未知店铺";
-});
-
-const aftersalesRangeSummary = computed(() => `${aftersalesFilters.from || "--"} 至 ${aftersalesFilters.to || "--"}`);
-
 function formatPercentValue(value) {
   return `${Number(value || 0).toFixed(1)}%`;
 }
@@ -240,17 +210,6 @@ function assignSectionPayload(section, payload) {
   }
   if (section === "monthly-trend") {
     dashboard.value = { ...dashboard.value, monthlyTrend12: payload?.monthlyTrend12 || [] };
-    return;
-  }
-  if (section === "aftersales") {
-    dashboard.value = {
-      ...dashboard.value,
-      aftersales: {
-        buckets: payload?.buckets || [],
-        totals: payload?.totals || {},
-        missing_alert: payload?.missing_alert || {}
-      }
-    };
   }
 }
 
@@ -261,37 +220,12 @@ function withRefreshParams(params, forceRefresh = false) {
   return params;
 }
 
-function aftersalesQueryString(forceRefresh = false) {
-  const params = new URLSearchParams({
-    from: aftersalesFilters.from || "",
-    to: aftersalesFilters.to || "",
-    shopId: aftersalesFilters.shopId || "all"
-  });
-  return withRefreshParams(params, forceRefresh).toString();
-}
-
-function validateAftersalesFilters() {
-  if (aftersalesFilters.from && aftersalesFilters.to && aftersalesFilters.from > aftersalesFilters.to) {
-    ElMessage.warning("开始日期不能晚于结束日期");
-    return false;
-  }
-  return true;
-}
-
-async function loadShops() {
-  if (shops.value.length) return;
-  const payload = await apiClient.get("/api/shops");
-  shops.value = Array.isArray(payload?.rows) ? payload.rows : Array.isArray(payload) ? payload : [];
-}
-
 async function loadDashboardSection(section, signal, options = {}) {
   setSectionLoading(section, true);
   setSectionError(section, "");
   try {
     const forceRefresh = Boolean(options.forceRefresh);
-    const payload = section === "aftersales"
-      ? await apiClient.get(`/api/profit-aftersales?${aftersalesQueryString(forceRefresh)}`, { signal, noCache: forceRefresh, cache: forceRefresh ? "no-store" : undefined })
-      : await apiClient.get(`/api/profit-dashboard?${withRefreshParams(new URLSearchParams({ section }), forceRefresh).toString()}`, { signal, noCache: forceRefresh, cache: forceRefresh ? "no-store" : undefined });
+    const payload = await apiClient.get(`/api/profit-dashboard?${withRefreshParams(new URLSearchParams({ section }), forceRefresh).toString()}`, { signal, noCache: forceRefresh, cache: forceRefresh ? "no-store" : undefined });
     if (signal.aborted) return;
     assignSectionPayload(section, payload);
   } catch (error) {
@@ -303,16 +237,7 @@ async function loadDashboardSection(section, signal, options = {}) {
   }
 }
 
-async function loadAftersalesCard(forceRefresh = false) {
-  if (!validateAftersalesFilters()) return;
-  aftersalesAbortController?.abort();
-  aftersalesAbortController = new AbortController();
-  await loadDashboardSection("aftersales", aftersalesAbortController.signal, { forceRefresh });
-}
-
 async function loadDashboard(forceRefresh = false) {
-  if (!validateAftersalesFilters()) return;
-  aftersalesAbortController?.abort();
   dashboardAbortController?.abort();
   dashboardAbortController = new AbortController();
   const { signal } = dashboardAbortController;
@@ -320,8 +245,7 @@ async function loadDashboard(forceRefresh = false) {
   const jobs = [
     loadDashboardSection("summary", signal, { forceRefresh }),
     loadDashboardSection("daily-trend", signal, { forceRefresh }),
-    loadDashboardSection("monthly-trend", signal, { forceRefresh }),
-    loadDashboardSection("aftersales", signal, { forceRefresh })
+    loadDashboardSection("monthly-trend", signal, { forceRefresh })
   ];
   const results = await Promise.allSettled(jobs);
   if (signal.aborted) return;
@@ -364,36 +288,19 @@ function handleViewChange(target) {
   if (target && target !== route.path) router.push(target);
 }
 
-function resetAftersalesFilters() {
-  Object.assign(aftersalesFilters, createAftersalesFilters());
-  loadAftersalesCard(true);
-}
-
 function openAftersalesPage() {
-  router.push({
-    path: "/profit/aftersales",
-    query: {
-      from: aftersalesFilters.from || undefined,
-      to: aftersalesFilters.to || undefined,
-      shopId: aftersalesFilters.shopId !== "all" ? aftersalesFilters.shopId : undefined
-    }
-  });
+  router.push("/profit/aftersales");
 }
 
 onMounted(() => {
   dashboardLoadTimer = window.setTimeout(() => {
-    Promise.allSettled([loadShops(), loadDashboard()]).then((results) => {
-      if (results[0]?.status === "rejected") {
-        ElMessage.error(results[0].reason?.message || "店铺列表加载失败");
-      }
-    });
+    loadDashboard();
   }, 0);
 });
 
 onBeforeUnmount(() => {
   if (dashboardLoadTimer) window.clearTimeout(dashboardLoadTimer);
   dashboardAbortController?.abort();
-  aftersalesAbortController?.abort();
 });
 </script>
 
@@ -437,9 +344,9 @@ onBeforeUnmount(() => {
     </el-card>
 
     <template v-if="isDashboardView">
-    <el-row :gutter="16">
+    <el-row :gutter="16" class="profit-dashboard-main-row">
       <el-col :xs="24" :xl="12" class="profit-trend-col">
-        <el-card shadow="never" class="page-card" v-loading="sectionLoading.dailyTrend">
+        <el-card shadow="never" class="page-card profit-panel-card profit-trend-panel" v-loading="sectionLoading.dailyTrend">
           <ProfitTrendChart
             :rows="dashboard.dailyTrend14"
             :compare-rows="dashboard.previousDailyTrend14"
@@ -459,7 +366,7 @@ onBeforeUnmount(() => {
       </el-col>
 
       <el-col :xs="24" :xl="12" class="profit-matrix-col">
-        <el-card shadow="never" class="page-card" v-loading="sectionLoading.summary">
+        <el-card shadow="never" class="page-card profit-panel-card profit-matrix-panel" v-loading="sectionLoading.summary">
           <template #header>
             <div class="page-card-header">
               <div>
@@ -503,119 +410,9 @@ onBeforeUnmount(() => {
       </el-col>
     </el-row>
 
-    <el-card shadow="never" class="page-card" v-loading="sectionLoading.aftersales">
-      <template #header>
-        <div class="page-card-header">
-          <div>
-            <strong>售后损失分类</strong>
-            <span>取消、拒收、错发破损、质量问题和平台/证件问题分开统计。</span>
-          </div>
-        </div>
-      </template>
-
-      <div class="profit-aftersales-toolbar">
-        <el-form inline @submit.prevent>
-          <el-form-item label="开始日期">
-            <el-date-picker
-              v-model="aftersalesFilters.from"
-              type="date"
-              value-format="YYYY-MM-DD"
-              placeholder="开始日期"
-              style="width: 160px"
-            />
-          </el-form-item>
-          <el-form-item label="结束日期">
-            <el-date-picker
-              v-model="aftersalesFilters.to"
-              type="date"
-              value-format="YYYY-MM-DD"
-              placeholder="结束日期"
-              style="width: 160px"
-            />
-          </el-form-item>
-          <el-form-item label="店铺">
-            <el-select v-model="aftersalesFilters.shopId" style="width: 180px">
-              <el-option label="全部店铺" value="all" />
-              <el-option v-for="shop in shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
-            </el-select>
-          </el-form-item>
-          <el-form-item>
-            <el-button class="erp-btn erp-btn-primary" type="primary" :loading="sectionLoading.aftersales" @click="loadAftersalesCard">查询</el-button>
-            <el-button class="erp-btn erp-btn-secondary" @click="resetAftersalesFilters">重置</el-button>
-          </el-form-item>
-        </el-form>
-        <div class="profit-aftersales-summary">
-          <span>时间段：{{ aftersalesRangeSummary }}</span>
-          <span>店铺：{{ currentAftersalesShopName }}</span>
-        </div>
-      </div>
-
-      <el-alert
-        v-if="dashboard.aftersales?.missing_alert?.message"
-        class="profit-aftersale-alert"
-        type="warning"
-        :closable="false"
-        :title="dashboard.aftersales.missing_alert.message"
-      />
-
-      <div class="profit-summary-table-wrap">
-        <table class="profit-summary-table profit-aftersale-table">
-          <thead>
-            <tr>
-              <th>类型</th>
-              <th>订单数</th>
-              <th>件数</th>
-              <th>涉及销售额</th>
-              <th>估算损失</th>
-              <th>已入账损失</th>
-              <th>成本缺失</th>
-              <th>运费缺失</th>
-              <th>待核实</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in dashboard.aftersales.buckets" :key="row.key">
-              <th>
-                <strong>{{ row.label }}</strong>
-                <small>{{ row.loss_policy }}</small>
-              </th>
-              <td><strong>{{ formatInteger(row.order_count) }}</strong><small>单</small></td>
-              <td><strong>{{ formatInteger(row.item_quantity) }}</strong><small>件</small></td>
-              <td><strong>{{ formatMoney(row.sale_amount_cny) }}</strong><small>CNY</small></td>
-              <td><strong>{{ formatMoney(row.estimated_loss_cny) }}</strong><small>CNY</small></td>
-              <td><strong>{{ formatMoney(row.actual_loss_cny) }}</strong><small>CNY</small></td>
-              <td :class="{ 'aftersale-warning-cell': row.missing_cost_count > 0 }">
-                <strong>{{ formatInteger(row.missing_cost_count) }}</strong><small>项</small>
-              </td>
-              <td :class="{ 'aftersale-warning-cell': row.missing_shipping_count > 0 }">
-                <strong>{{ formatInteger(row.missing_shipping_count) }}</strong><small>项</small>
-              </td>
-              <td :class="{ 'aftersale-warning-cell': row.needs_review_count > 0 }">
-                <strong>{{ formatInteger(row.needs_review_count) }}</strong><small>项</small>
-              </td>
-            </tr>
-          </tbody>
-          <tfoot>
-            <tr>
-              <th>合计</th>
-              <td><strong>{{ formatInteger(dashboard.aftersales.totals?.order_count) }}</strong><small>单</small></td>
-              <td><strong>{{ formatInteger(dashboard.aftersales.totals?.item_quantity) }}</strong><small>件</small></td>
-              <td><strong>{{ formatMoney(dashboard.aftersales.totals?.sale_amount_cny) }}</strong><small>CNY</small></td>
-              <td><strong>{{ formatMoney(dashboard.aftersales.totals?.estimated_loss_cny) }}</strong><small>CNY</small></td>
-              <td><strong>{{ formatMoney(dashboard.aftersales.totals?.actual_loss_cny) }}</strong><small>CNY</small></td>
-              <td><strong>{{ formatInteger(dashboard.aftersales.totals?.missing_cost_count) }}</strong><small>项</small></td>
-              <td><strong>{{ formatInteger(dashboard.aftersales.totals?.missing_shipping_count) }}</strong><small>项</small></td>
-              <td><strong>{{ formatInteger(dashboard.aftersales.totals?.needs_review_count) }}</strong><small>项</small></td>
-            </tr>
-          </tfoot>
-        </table>
-      </div>
-      <div v-if="sectionErrors.aftersales" class="profit-dashboard-section-error">{{ sectionErrors.aftersales }}</div>
-    </el-card>
-
-    <el-row :gutter="16">
+    <el-row :gutter="16" class="profit-dashboard-monthly-row">
       <el-col :xs="24" :xl="8">
-        <el-card shadow="never" class="page-card" v-loading="sectionLoading.monthlyTrend">
+        <el-card shadow="never" class="page-card profit-panel-card profit-monthly-card" v-loading="sectionLoading.monthlyTrend">
           <ProfitTrendChart
             :rows="dashboard.monthlyTrend12"
             title="近 12 个月营业额趋势"
@@ -633,7 +430,7 @@ onBeforeUnmount(() => {
         </el-card>
       </el-col>
       <el-col :xs="24" :xl="8">
-        <el-card shadow="never" class="page-card" v-loading="sectionLoading.monthlyTrend">
+        <el-card shadow="never" class="page-card profit-panel-card profit-monthly-card" v-loading="sectionLoading.monthlyTrend">
           <ProfitTrendChart
             :rows="dashboard.monthlyTrend12"
             title="近 12 个月单量趋势"
@@ -651,7 +448,7 @@ onBeforeUnmount(() => {
         </el-card>
       </el-col>
       <el-col :xs="24" :xl="8">
-        <el-card shadow="never" class="page-card" v-loading="sectionLoading.monthlyTrend">
+        <el-card shadow="never" class="page-card profit-panel-card profit-monthly-card" v-loading="sectionLoading.monthlyTrend">
           <ProfitTrendChart
             :rows="monthlyTrendWithMargin"
             title="近 12 个月利润率趋势"
@@ -681,8 +478,36 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.profit-dashboard-hero { align-items: center; gap: 12px; }
-.profit-dashboard-hero-card { padding-bottom: 8px; }
+:global(.profit-dashboard-page .profit-dashboard-hero-card) {
+  display: block !important;
+}
+
+.profit-dashboard-page {
+  gap: 16px;
+}
+
+.profit-dashboard-hero {
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+}
+
+.profit-dashboard-hero-card {
+  padding-bottom: 8px;
+}
+
+:deep(.profit-dashboard-hero-card > .el-card__body) {
+  padding: 18px;
+}
+
+.profit-dashboard-hero h2 {
+  font-size: 20px;
+}
+
+.profit-dashboard-hero p {
+  font-size: 13px;
+}
+
 .profit-view-switch-bar {
   display: flex;
   justify-content: flex-end;
@@ -690,8 +515,86 @@ onBeforeUnmount(() => {
   gap: 8px;
   min-height: 32px;
 }
-.profit-matrix-col { order: 1; }
-.profit-trend-col { order: 2; }
+
+.profit-summary-strip {
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+  gap: 8px;
+  min-height: 0;
+  margin-top: 16px;
+}
+
+.profit-summary-card {
+  min-height: 76px;
+  justify-content: space-between;
+  border-radius: 8px;
+}
+
+.profit-summary-card strong {
+  font-size: 17px;
+}
+
+.profit-dashboard-main-row,
+.profit-dashboard-monthly-row {
+  align-items: stretch;
+  row-gap: 16px;
+}
+
+.profit-dashboard-main-row > .el-col,
+.profit-dashboard-monthly-row > .el-col {
+  display: flex;
+}
+
+.profit-panel-card {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+:deep(.profit-panel-card) {
+  display: flex;
+  flex-direction: column;
+}
+
+:deep(.profit-panel-card > .el-card__body) {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.profit-trend-panel,
+.profit-matrix-panel {
+  min-height: 430px;
+}
+
+.profit-matrix-panel :deep(.el-card__body) {
+  padding-bottom: 14px;
+}
+
+.profit-matrix-panel :deep(.el-card__header) {
+  padding: 16px 18px 10px;
+  border-bottom: 0;
+}
+
+.profit-summary-table-wrap {
+  flex: 1;
+  min-height: 0;
+}
+
+.profit-summary-table {
+  min-width: 760px;
+  border-spacing: 0 6px;
+}
+
+.profit-summary-table tbody th,
+.profit-summary-table tbody td {
+  padding: 8px 10px;
+}
+
+.profit-monthly-card {
+  min-height: 335px;
+}
+
 .profit-dashboard-section-error {
   margin-top: 10px;
   color: #b91c1c;
@@ -716,51 +619,6 @@ onBeforeUnmount(() => {
   color: #3b82f6;
 }
 
-.profit-aftersale-alert {
-  margin-bottom: 12px;
-}
-
-.profit-aftersales-toolbar {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.profit-aftersales-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-  color: #64748b;
-  font-size: 12px;
-}
-
-.profit-aftersale-table th:first-child {
-  min-width: 180px;
-}
-
-.profit-aftersale-table th strong,
-.profit-aftersale-table th small {
-  display: block;
-}
-
-.profit-aftersale-table th small {
-  margin-top: 4px;
-  color: #64748b;
-  font-weight: 500;
-  white-space: normal;
-}
-
-.profit-aftersale-table tfoot th,
-.profit-aftersale-table tfoot td {
-  background: #f8fafc;
-  border-top: 1px solid #cbd5e1;
-}
-
-.aftersale-warning-cell strong {
-  color: #b45309;
-}
-
 :global(:root[data-theme="dark"] .profit-summary-table thead .summary-today-column) {
   color: #bfdbfe;
 }
@@ -773,16 +631,27 @@ onBeforeUnmount(() => {
   color: #93c5fd;
 }
 
-:global(:root[data-theme="dark"] .profit-aftersale-table tfoot th),
-:global(:root[data-theme="dark"] .profit-aftersale-table tfoot td) {
-  background: #0f172a;
-  border-top-color: #334155;
+@media (max-width: 1360px) {
+  .profit-summary-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 780px) {
-  .profit-aftersales-summary {
-    flex-direction: column;
-    gap: 6px;
+  .profit-view-switch-bar,
+  .profit-dashboard-hero {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .profit-summary-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .profit-trend-panel,
+  .profit-matrix-panel,
+  .profit-monthly-card {
+    min-height: 0;
   }
 }
 </style>

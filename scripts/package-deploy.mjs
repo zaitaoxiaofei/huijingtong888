@@ -21,6 +21,12 @@ const directoriesToCopy = [
   "tools"
 ];
 
+const pluginPackagePatterns = [
+  /^ozon-baodan-erp-plugin(?:-[0-9][0-9A-Za-z.-]*)?\.rar$/,
+  /^ozon-erp-collector-plugin\.rar$/,
+  /^ozon-seller-analytics-plugin(?:-[0-9][0-9A-Za-z.-]*)?\.rar$/
+];
+
 function run(command, args, label) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -57,6 +63,28 @@ async function copyEntry(relativePath) {
   }
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.cp(source, target, { recursive: true });
+}
+
+async function copyPluginPackages() {
+  const packageSourceDir = path.resolve(rootDir, "..");
+  const packageTargetDir = path.dirname(outputDir);
+  let entries = [];
+  try {
+    entries = await fs.readdir(packageSourceDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const copied = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !pluginPackagePatterns.some((pattern) => pattern.test(entry.name))) continue;
+    const source = path.join(packageSourceDir, entry.name);
+    const target = path.join(packageTargetDir, entry.name);
+    await fs.mkdir(packageTargetDir, { recursive: true });
+    await fs.copyFile(source, target);
+    copied.push(entry.name);
+  }
+  return copied;
 }
 
 async function writeDeployPackageJson() {
@@ -143,6 +171,7 @@ async function rewriteDeployStartBat() {
 }
 
 await runNpmScript("build:frontend", "Frontend build");
+await runNpmScript("package:plugin", "Plugin packaging");
 
 await fs.rm(outputDir, { recursive: true, force: true });
 await fs.mkdir(outputDir, { recursive: true });
@@ -155,6 +184,8 @@ for (const directory of directoriesToCopy) {
   await copyEntry(directory);
 }
 
+const includedPluginPackages = await copyPluginPackages();
+
 await writeDeployPackageJson();
 await rewriteDeployEnv();
 await rewriteDeployStartBat();
@@ -166,7 +197,8 @@ const manifest = {
   frontendOutput: "public/vue-apps",
   startupCommand: "npm start",
   includedFiles: filesToCopy,
-  includedDirectories: directoriesToCopy
+  includedDirectories: directoriesToCopy,
+  includedPluginPackages
 };
 
 await fs.writeFile(

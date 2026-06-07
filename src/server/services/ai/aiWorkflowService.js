@@ -239,7 +239,9 @@ export async function generateCommerceCopy(payload = {}) {
         content: [
           "你是俄罗斯 Ozon 汽车用品运营文案专家。",
           "你只返回 JSON，不要 Markdown，不要解释。",
-          "根据商品信息生成可用于素材包回写的中文标题、标签和描述。",
+          "根据商品信息生成可直接回写的俄语标题、标签和描述。",
+          "标题、标签、描述、富内容文本都不允许包含任何中文字符。",
+          "必须保留导入来源里的商品主体，不允许把明确商品退化成泛类目。",
           "不要编造认证、官方授权、销量、质保、尺寸或不存在的配件。"
         ].join("\n")
       },
@@ -247,15 +249,21 @@ export async function generateCommerceCopy(payload = {}) {
         role: "user",
         content: JSON.stringify({
           outputShape: {
-            titles: ["4个中文标题方案，每个不超过30字"],
-            tags: ["8-14个中文或英文搜索标签"],
-            description: "120-220字中文商品描述"
+            titles: ["2个俄语标题方案：第1个高点击标题，第2个高搜索标题"],
+            tags: ["15-20个俄语标签，全部带 #，每个少于30字符"],
+            description: "150-250个俄语词的自然商品描述"
           },
           rules: [
-            "标题突出品牌、车型、材质、产品类型和核心功能",
-            "标签覆盖品牌词、车型词、材质词、功能词和类目词",
-            "描述保留商品真实结构，只做电商表达优化"
+            "标题必须是俄语，并保留原始商品主体词，不得改成泛类目。",
+            "第1个标题偏点击转化，第2个标题偏搜索覆盖。",
+            "标签必须全部是俄语标签，至少15个，全部带 #，单个标签少于30字符，避免重复。",
+            "描述必须是150-250个俄语词，自然、连贯、适合Ozon，不得关键词堆砌。",
+            "返回结果中不允许出现任何中文字符。",
+            "信息不足时保守生成，不得臆造车型、材质、数量、认证或配件。"
           ],
+          titleModes: context.titleModes,
+          sourceContext: context.sourceContext,
+          additionalRules: context.rules,
           input: context
         })
       }
@@ -378,19 +386,25 @@ function normalizeCommerceCopyInput(payload = {}) {
     material: cleanCommerceText(payload.material),
     color: cleanCommerceText(payload.color),
     productType: cleanCommerceText(payload.productType),
+    title: cleanCommerceText(payload.title),
+    summary: cleanCommerceText(payload.summary),
+    richContent: cleanCommerceText(payload.richContent),
     sellingPoints: cleanCommerceText(payload.sellingPoints),
     tags: Array.isArray(payload.tags) ? payload.tags.map(cleanCommerceText).filter(Boolean).slice(0, 20) : cleanCommerceText(payload.tags),
     optimizationTarget: cleanCommerceText(payload.optimizationTarget),
-    strategies: Array.isArray(payload.strategies) ? payload.strategies.map(cleanCommerceText).filter(Boolean).slice(0, 12) : []
+    strategies: Array.isArray(payload.strategies) ? payload.strategies.map(cleanCommerceText).filter(Boolean).slice(0, 12) : [],
+    titleModes: Array.isArray(payload.titleModes) ? payload.titleModes.map(cleanCommerceText).filter(Boolean).slice(0, 4) : [],
+    rules: Array.isArray(payload.rules) ? payload.rules.map(cleanCommerceText).filter(Boolean).slice(0, 20) : [],
+    sourceContext: payload.sourceContext && typeof payload.sourceContext === "object" ? payload.sourceContext : null
   };
 }
 
 function normalizeCommerceCopyResult(rawContent, context) {
   try {
     const parsed = JSON.parse(String(rawContent || "{}"));
-    const titles = normalizeCopyList(parsed.titles || parsed.titleSuggestions || parsed.title, 4);
-    const tags = normalizeCopyList(parsed.tags || parsed.keywords, 14);
-    const description = cleanCommerceText(parsed.description || parsed.summary || "");
+    const titles = normalizeRussianTitleList(parsed.titles || parsed.titleSuggestions || parsed.title, context);
+    const tags = normalizeRussianTagList(parsed.tags || parsed.keywords, context);
+    const description = normalizeRussianDescriptionText(parsed.description || parsed.summary || "", context);
     if (titles.length || tags.length || description) {
       return {
         titles: titles.length ? titles : fallbackCommerceTitles(context),
@@ -415,36 +429,157 @@ function normalizeCopyList(value, limit) {
   return text.split(/[\n,，、]+/).map(cleanCommerceText).filter(Boolean).slice(0, limit);
 }
 
+function containsChineseText(value) {
+  return /[\u4e00-\u9fff]/.test(String(value || ""));
+}
+
+function hasRussianText(value) {
+  return /[А-Яа-яЁё]/.test(String(value || ""));
+}
+
+function normalizeRussianTitleList(value, context) {
+  const list = normalizeCopyList(value, 6)
+    .filter((item) => !containsChineseText(item))
+    .filter((item) => hasRussianText(item))
+    .filter((item) => titleMatchesCommerceFocus(item, context));
+  const fallback = fallbackCommerceTitles(context);
+  return uniqueCommerceValues([...list, ...fallback])
+    .filter((item) => !containsChineseText(item))
+    .filter((item) => hasRussianText(item))
+    .slice(0, 2);
+}
+
+function normalizeRussianTagList(value, context) {
+  const list = Array.isArray(value) ? value : normalizeCopyList(value, 40);
+  const normalized = list
+    .flatMap((item) => String(item || "").split(/[\n,，、]+/))
+    .map((item) => formatRussianCommerceTag(item))
+    .filter(Boolean);
+  return uniqueCommerceValues([...normalized, ...fallbackCommerceTags(context)]).slice(0, 20);
+}
+
+function normalizeRussianDescriptionText(value, context) {
+  const text = cleanCommerceText(value);
+  if (!text || containsChineseText(text) || !hasRussianText(text)) return fallbackCommerceDescription(context);
+  const words = countCommerceWords(text);
+  return words >= 150 && words <= 250 ? text : fallbackCommerceDescription(context);
+}
+
+function countCommerceWords(value) {
+  return (String(value || "").match(/[A-Za-zА-Яа-яЁё0-9-]+/g) || []).length;
+}
+
+function normalizeBrandForRussianText(value) {
+  const text = cleanCommerceText(value);
+  if (!text || /^(no brand|без бренда|нет бренда|无品牌)$/i.test(text)) return "";
+  return containsChineseText(text) ? "" : text;
+}
+
+function normalizeRussianOnlyText(value, fallback = "") {
+  const text = cleanCommerceText(value);
+  if (!text || containsChineseText(text) || !hasRussianText(text)) return fallback;
+  return text;
+}
+
+function uniqueCommerceValues(items = []) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const text = cleanCommerceText(item).toLowerCase();
+    if (!text || seen.has(text)) return false;
+    seen.add(text);
+    return true;
+  });
+}
+
+function productTypeRuFallback(context = {}) {
+  const text = `${context.title || ""} ${context.productType || ""} ${context.productName || ""}`.toLowerCase();
+  if (text.includes("门槛")) return "накладки на порог";
+  if (text.includes("钥匙")) return "чехол для ключа";
+  if (text.includes("脚垫") || text.includes("垫")) return "коврики";
+  if (text.includes("保护壳")) return "защитный чехол";
+  return "автоаксессуар";
+}
+
+function titleMatchesCommerceFocus(value, context = {}) {
+  const text = String(value || "").toLowerCase();
+  const signals = primaryCommerceSignals(context);
+  return !signals.length || signals.some((item) => text.includes(item));
+}
+
+function primaryCommerceSignals(context = {}) {
+  const text = `${context.title || ""} ${context.productName || ""} ${context.productType || ""}`.toLowerCase();
+  if (text.includes("门槛")) return ["порог", "наклад"];
+  if (text.includes("钥匙")) return ["ключ", "чех"];
+  if (text.includes("脚垫") || text.includes("垫")) return ["ковр"];
+  const fallback = productTypeRuFallback(context);
+  return fallback.split(/\s+/).map((item) => item.toLowerCase()).filter((item) => item.length > 4).slice(0, 2);
+}
+
+function formatRussianCommerceTag(value) {
+  const text = cleanCommerceText(value)
+    .replace(/^#+/, "")
+    .replace(/\s+/g, "_")
+    .replace(/[^\p{L}\p{N}_-]+/gu, "")
+    .trim();
+  if (!text) return "";
+  const tag = `#${text}`;
+  if (tag.length >= 30) return "";
+  if (containsChineseText(tag) || !hasRussianText(tag)) return "";
+  return tag;
+}
+
 function fallbackCommerceTitles(context) {
-  const target = context.targetModel || context.brand || "通用车型";
-  const base = `${target} ${context.material || ""}${context.productType || context.productName || "汽车配件"}`.replace(/\s+/g, " ").trim();
+  const target = context.targetModel || context.brand || "автомобиля";
+  const baseType = productTypeRuFallback(context);
+  const material = cleanCommerceText(context.material);
+  const brand = normalizeBrandForRussianText(context.brand);
   return [
-    `${base} 高端防刮保护配件`,
-    `${base} 专车适配易安装套装`,
-    `${context.brand || target} ${context.productType || "汽车配件"} 耐磨升级款`,
-    `${target} ${context.productType || context.productName || "汽车配件"} Ozon热卖款`
-  ];
+    `${baseType} для ${brand || target}, ${material || "прочный материал"}, защита и стиль салона`,
+    `${baseType} ${brand || ""} ${target}, аксессуар для защиты и аккуратного внешнего вида`
+  ].map((item) => item.replace(/\s+/g, " ").trim());
 }
 
 function fallbackCommerceTags(context) {
-  return Array.from(new Set([
-    context.brand,
+  const base = [
+    normalizeBrandForRussianText(context.brand),
     context.targetModel,
+    productTypeRuFallback(context),
     context.material,
-    context.color,
-    context.productType,
-    context.categoryName,
-    "汽车配件",
-    "防刮耐磨",
-    "易安装",
-    "Ozon"
-  ].filter(Boolean))).slice(0, 12);
+    normalizeRussianOnlyText(context.color),
+    "автоаксессуары",
+    "накладки_на_порог",
+    "защита_порога",
+    "защита_автомобиля",
+    "аксессуары_для_авто",
+    "легкая_установка",
+    "прочный_материал",
+    "защита_от_царапин",
+    "внутренний_тюнинг",
+    "декор_салона",
+    "стильный_аксессуар",
+    "защитная_накладка",
+    "тюнинг_авто",
+    "комплект_для_авто",
+    "ozon"
+  ];
+  return uniqueCommerceValues(base.map(formatRussianCommerceTag).filter(Boolean)).slice(0, 20);
 }
 
 function fallbackCommerceDescription(context) {
-  const target = context.targetModel || context.brand || "通用车型";
-  const base = `${target} ${context.material || ""}${context.productType || context.productName || "汽车配件"}`.replace(/\s+/g, " ").trim();
-  return `${base}，适合日常汽车用品场景。突出${context.sellingPoints || "耐磨、防刮、安装便捷"}，可用于主图、详情图和上架描述优化。`;
+  const target = cleanCommerceText(context.targetModel || normalizeBrandForRussianText(context.brand) || "автомобиля");
+  const type = productTypeRuFallback(context);
+  const material = cleanCommerceText(context.material || "прочный материал");
+  const color = normalizeRussianOnlyText(context.color);
+  const selling = normalizeRussianOnlyText(context.sellingPoints, "Аккуратный внешний вид, защита от царапин и простая установка без сложного инструмента.");
+  const text = [
+    `${type} для ${target} подходит для ежедневного использования и помогает сохранить аккуратный вид автомобиля. Аксессуар закрывает зону, которая чаще всего сталкивается с обувью, пылью, песком и регулярной эксплуатационной нагрузкой.`,
+    `Материал ${material}${color ? `, цвет ${color},` : ","} выглядит аккуратно и хорошо сочетается с интерьером автомобиля. Поверхность помогает снизить риск появления царапин, потертостей и следов постоянного использования, сохраняя более ухоженный вид салона.`,
+    `Изделие подходит для тех, кто хочет совместить защитную функцию с более аккуратной подачей автомобиля. Его удобно использовать в повседневной эксплуатации, а внешний вид остается спокойным и понятным для покупателя без перегруженных декоративных элементов.`,
+    `Такой аксессуар можно выбрать как для обновления внешнего вида, так и для дополнительной защиты зоны порога от износа. ${selling} Описание ориентировано на покупателя Ozon и объясняет практическую пользу товара естественным русским языком без неестественного набора ключевых слов.`
+  ].join(" ");
+  return countCommerceWords(text) >= 150
+    ? text
+    : `${text} Такой формат помогает покупателю быстрее понять назначение товара, его преимущества, сценарий использования и ожидаемый эффект в повседневной эксплуатации.`;
 }
 
 function cleanCommerceText(value) {

@@ -23,7 +23,7 @@ function persistRecalculatedItem(deps, { itemId, mapping, product, estimated, se
       platform_fee_actual = CASE WHEN ? = 'accrued' AND COALESCE(actual_profit, 0) = 0 THEN ? ELSE platform_fee_actual END,
       aftersale_loss = ?,
       estimated_profit = ?,
-      actual_profit = CASE WHEN ? = 'accrued' AND COALESCE(actual_profit, 0) = 0 THEN ? ELSE actual_profit END,
+      actual_profit = CASE WHEN ? = 'accrued' THEN ? ELSE 0 END,
       settlement_state = ?
     WHERE id = ?
   `).run(

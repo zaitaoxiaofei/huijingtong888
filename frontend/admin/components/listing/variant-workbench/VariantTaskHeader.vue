@@ -42,7 +42,6 @@ function inferBrand(text) {
       <ProductImagePreview
         :src="baseImage"
         :preview-list="baseImage ? [baseImage] : null"
-        size="square"
         fit="cover"
         class="base-image"
       />
@@ -112,7 +111,7 @@ function inferBrand(text) {
 
 .base-image {
   width: 64px;
-  height: 64px;
+  height: 84px;
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid #dbe5ef;

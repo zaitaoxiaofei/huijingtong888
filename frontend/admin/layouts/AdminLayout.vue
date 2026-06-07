@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { KeepAlive, computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
 import { Bell, Close, Expand, Fold, MoonNight, Paperclip, RefreshRight, Sunny } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -36,11 +36,19 @@ const contextMenu = ref({
   x: 0,
   y: 0
 });
-const pluginUpdate = ref(null);
+const pluginUpdates = ref({});
 const routeSwitching = ref(false);
 let routeSwitchTimer = 0;
 const prefetchedRoutes = new Set();
+const PLUGIN_UPDATE_DISMISSED_PREFIX = "ozon-admin-plugin-update-dismissed";
 const submenuKeys = navigationMenus.filter((menu) => menu.children?.length).map((menu) => menu.key);
+const AI_WORKBENCH_ROUTE = "/asset-variant-center/create";
+const NAV_WORKBENCH_IDS = new Map([
+  ["/collector-box", "colwb-main"],
+  ["/selection", "selwb-main"],
+  ["/listing-automation", "liwb-main"],
+  [AI_WORKBENCH_ROUTE, "aiwb-main"]
+]);
 const menuParentByRoute = navigationMenus.reduce((map, menu) => {
   if (!menu.children?.length) return map;
   menu.children.forEach((child) => {
@@ -57,6 +65,21 @@ function rememberIntendedRoute(target) {
 function handleMenuSelect(index) {
   const target = String(index || "").trim();
   if (!target.startsWith("/")) return;
+  const navWorkbenchId = NAV_WORKBENCH_IDS.get(target);
+  if (navWorkbenchId) {
+    const nextTarget = {
+      path: target,
+      query: {
+        workbenchId: navWorkbenchId
+      }
+    };
+    const nextFullPath = `${target}?workbenchId=${navWorkbenchId}`;
+    if (route.path === target && String(route.query.workbenchId || "") === navWorkbenchId) return;
+    rememberIntendedRoute(nextFullPath);
+    showRouteSwitching();
+    router.push(nextTarget).catch(() => {});
+    return;
+  }
   rememberIntendedRoute(target);
   if (target === route.path && !Object.keys(route.query || {}).length) return;
   showRouteSwitching();
@@ -222,16 +245,66 @@ function handleWindowBlur() {
 }
 
 function handlePluginUpdate(event) {
-  pluginUpdate.value = event?.detail || null;
+  const detail = event?.detail || null;
+  const type = String(detail?.type || "collector_plugin").trim() || "collector_plugin";
+  if (!detail) return;
+  const update = { ...detail, type };
+  if (isPluginUpdateDismissed(update)) return;
+  pluginUpdates.value = {
+    ...pluginUpdates.value,
+    [type]: update
+  };
+}
+
+function clearPluginUpdate(event) {
+  const type = String(event?.detail?.type || "").trim();
+  if (!type || !pluginUpdates.value[type]) return;
+  const next = { ...pluginUpdates.value };
+  delete next[type];
+  pluginUpdates.value = next;
 }
 
 function openPluginDownload() {
-  const url = String(pluginUpdate.value?.download_url || "").trim();
+  const update = activePluginUpdate.value;
+  const url = String(update?.download_url || "").trim();
   if (!url) return;
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
+function pluginUpdateDismissKey(update) {
+  const type = String(update?.type || "collector_plugin").trim() || "collector_plugin";
+  const targetVersion = String(update?.latest_version || update?.version || update?.target_version || "").trim() || "unknown";
+  const installedVersion = String(update?.installed_version || update?.current_version || "").trim() || "none";
+  return `${PLUGIN_UPDATE_DISMISSED_PREFIX}:${type}:${targetVersion}:${installedVersion}`;
+}
+
+function isPluginUpdateDismissed(update) {
+  if (update?.mandatory === true) return false;
+  try {
+    return window.localStorage.getItem(pluginUpdateDismissKey(update)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function dismissPluginUpdate() {
+  const update = activePluginUpdate.value;
+  if (!update?.type) return;
+  if (update.mandatory !== true) {
+    try {
+      window.localStorage.setItem(pluginUpdateDismissKey(update), "1");
+    } catch {
+      // Ignore storage failures so closing still hides the current alert.
+    }
+  }
+  const next = { ...pluginUpdates.value };
+  delete next[update.type];
+  pluginUpdates.value = next;
+}
+
 const contextTab = computed(() => tabsStore.findTab(contextMenu.value.tabKey));
+const activePluginUpdate = computed(() => null);
+const keepAliveRouteNames = ["asset-variant-center-create", "listing-automation", "collector-box", "selection"];
 const contextTabCanClose = computed(() => Boolean(contextTab.value?.closable));
 const contextTabPinned = computed(() => Boolean(contextTab.value?.pinned || !contextTab.value?.closable));
 const contextTabIndex = computed(() => workspaceTabs.value.findIndex((tab) => tab.key === contextMenu.value.tabKey));
@@ -286,12 +359,14 @@ onMounted(() => {
   window.addEventListener("pointerdown", handleGlobalPointerDown);
   window.addEventListener("blur", handleWindowBlur);
   window.addEventListener("app:plugin-update", handlePluginUpdate);
+  window.addEventListener("app:plugin-update-clear", clearPluginUpdate);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("pointerdown", handleGlobalPointerDown);
   window.removeEventListener("blur", handleWindowBlur);
   window.removeEventListener("app:plugin-update", handlePluginUpdate);
+  window.removeEventListener("app:plugin-update-clear", clearPluginUpdate);
   window.clearTimeout(routeSwitchTimer);
 });
 </script>
@@ -365,8 +440,8 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="erp-header-right">
-          <el-badge :value="pluginUpdate ? 1 : 0" class="erp-header-badge" :hidden="!pluginUpdate">
-            <el-button circle @click="pluginUpdate && openPluginDownload()">
+          <el-badge :value="activePluginUpdate ? 1 : 0" class="erp-header-badge" :hidden="!activePluginUpdate">
+            <el-button circle @click="activePluginUpdate && openPluginDownload()">
               <el-icon><Bell /></el-icon>
             </el-button>
           </el-badge>
@@ -385,18 +460,18 @@ onBeforeUnmount(() => {
       <el-main class="erp-content">
           <div class="erp-content-inner">
           <el-alert
-            v-if="pluginUpdate"
+            v-if="activePluginUpdate"
             class="erp-plugin-update-alert"
             type="warning"
             show-icon
-            :closable="pluginUpdate.mandatory !== true"
-            @close="pluginUpdate = null"
+            :closable="activePluginUpdate.mandatory !== true"
+            @close="dismissPluginUpdate"
           >
             <template #title>
-              <strong>{{ pluginUpdate.title || "爆单ERP插件有新版本" }}</strong>
+              <strong>{{ activePluginUpdate.title || "插件有新版本" }}</strong>
             </template>
             <div class="erp-plugin-update-alert__body">
-              <span>{{ pluginUpdate.message || "请下载最新版爆单ERP插件并重新安装。" }}</span>
+              <span>{{ activePluginUpdate.message || "下载新版插件后重新安装即可。" }}</span>
               <el-button size="small" type="warning" @click="openPluginDownload">下载插件</el-button>
             </div>
           </el-alert>
@@ -434,7 +509,11 @@ onBeforeUnmount(() => {
               <strong>正在切换页面</strong>
             </div>
             <div class="erp-workspace-panel">
-              <RouterView :key="`${route.fullPath}:${tabsStore.refreshToken}`" />
+              <RouterView v-slot="{ Component, route: currentRoute }">
+                <KeepAlive :include="keepAliveRouteNames">
+                  <component :is="Component" :key="`${currentRoute.fullPath}:${tabsStore.refreshToken}`" />
+                </KeepAlive>
+              </RouterView>
             </div>
           </div>
         </div>

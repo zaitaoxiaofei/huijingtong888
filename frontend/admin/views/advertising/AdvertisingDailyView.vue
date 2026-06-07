@@ -5,9 +5,12 @@ import { Refresh, Search } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
 import { buildAdTasks, evaluateAdSku, summarizeAdDashboard, toneType } from "./ad-rules";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import ProductImagePreview from "../../components/ProductImagePreview.vue";
 
 const loading = ref(false);
 const syncing = ref(false);
+const syncingPendingAll = ref(false);
+const syncingPendingKey = ref("");
 const detailLoading = ref(false);
 const detailVisible = ref(false);
 const profitDetailVisible = ref(false);
@@ -53,6 +56,22 @@ const enrichedRows = computed(() => state.rows.map((row) => ({ ...row, evaluatio
 const filteredRows = computed(() => enrichedRows.value.filter(matchesFilters));
 const settledRows = computed(() => filteredRows.value.filter((row) => !isAdPending(row)));
 const pendingRows = computed(() => filteredRows.value.filter(isAdPending));
+const pendingCampaignSyncScope = computed(() => {
+  const campaignIds = new Set();
+  const shopIds = new Set();
+  for (const row of pendingRows.value) {
+    const shopId = Number(row.shop_id || 0);
+    const campaignId = String(row.campaign_id || "").trim();
+    if (!shopId || !campaignId) continue;
+    shopIds.add(shopId);
+    campaignIds.add(campaignId);
+  }
+  return {
+    shopIds: [...shopIds],
+    campaignIds: [...campaignIds],
+    skuCount: new Set(pendingRows.value.map((row) => String(row.ozon_sku || "")).filter(Boolean)).size
+  };
+});
 const filteredSummary = computed(() => summarizeRows(settledRows.value));
 const dashboard = computed(() => summarizeAdDashboard(settledRows.value));
 const tasks = computed(() => buildAdTasks(settledRows.value));
@@ -772,6 +791,71 @@ async function syncFromOzon() {
   }
 }
 
+function pendingSyncKey(row = {}) {
+  return [row.shop_id, row.campaign_id, row.ozon_sku].map((item) => String(item || "")).join(":");
+}
+
+async function syncPendingSku(row = {}) {
+  const shopId = Number(row.shop_id || 0);
+  const campaignId = String(row.campaign_id || "").trim();
+  if (!shopId || !campaignId) return ElMessage.warning("当前 SKU 缺少店铺或广告活动 ID，请先同步 Ozon 广告");
+
+  const key = pendingSyncKey(row);
+  syncingPendingKey.value = key;
+  try {
+    const result = await apiClient.post("/api/advertising/daily/sync", {
+      shop_id: shopId,
+      campaign_ids: [campaignId],
+      target_skus: [String(row.ozon_sku || "").trim()].filter(Boolean),
+      from: state.filters.from,
+      to: state.filters.to,
+      include_inactive: true
+    });
+    if (Array.isArray(result.errors) && result.errors.length) {
+      ElMessage.warning(result.errors.join("；"));
+    } else if (Number(result.placeholder_rows || 0) > 0) {
+      ElMessage.warning("已重新请求 Ozon 报表，但 Ozon 仍提示待返回，请稍后再同步");
+    } else {
+      ElMessage.success(`已同步 SKU ${row.ozon_sku || ""} 所在广告活动的最新报表`);
+    }
+    await loadRows();
+  } catch (error) {
+    ElMessage.error(error.message || "同步 SKU 广告报表失败");
+  } finally {
+    syncingPendingKey.value = "";
+  }
+}
+
+async function syncAllPendingSkus() {
+  const scope = pendingCampaignSyncScope.value;
+  if (!scope.campaignIds.length || !scope.shopIds.length) {
+    return ElMessage.warning("当前筛选下没有可同步的待返回广告活动");
+  }
+
+  syncingPendingAll.value = true;
+  try {
+    const result = await apiClient.post("/api/advertising/daily/sync", {
+      shop_ids: scope.shopIds,
+      campaign_ids: scope.campaignIds,
+      from: state.filters.from,
+      to: state.filters.to,
+      include_inactive: true
+    });
+    if (Array.isArray(result.errors) && result.errors.length) {
+      ElMessage.warning(result.errors.join("；"));
+    } else if (Number(result.placeholder_rows || 0) > 0) {
+      ElMessage.warning(`已重试 ${scope.campaignIds.length} 个广告活动，但仍有 Ozon 报表待返回`);
+    } else {
+      ElMessage.success(`已同步 ${scope.skuCount} 个待返回 SKU / ${scope.campaignIds.length} 个广告活动`);
+    }
+    await loadRows();
+  } catch (error) {
+    ElMessage.error(error.message || "批量同步待返回报表失败");
+  } finally {
+    syncingPendingAll.value = false;
+  }
+}
+
 function handleSearch() {
   state.page = 1;
   loadRows();
@@ -901,7 +985,7 @@ onMounted(bootstrap);
 
     <el-tabs v-model="activeTab" class="ad-tabs">
       <el-tab-pane label="广告驾驶舱" name="dashboard">
-        <div class="tab-pane-stack">
+        <div class="tab-pane-stack dashboard-pane">
     <section class="decision-layer">
       <div class="health-card" :class="storeHealth.tone">
         <div class="health-title">
@@ -947,13 +1031,24 @@ onMounted(bootstrap);
       <div class="panel-head">
         <strong>SKU广告管理</strong>
         <span v-if="activeTodoModule">{{ activeTodoModule.title }}：{{ activeTodoModule.rows.length }} 个 SKU <el-button link type="primary" @click="clearActionFilter">清除</el-button></span>
-        <span v-else>高风险自动置顶，只显示主诊断和主动作</span>
+        <span v-else>
+          高风险自动置顶，只显示主诊断和主动作
+          <el-button
+            v-if="pendingCampaignSyncScope.campaignIds.length"
+            link
+            type="primary"
+            :loading="syncingPendingAll"
+            @click="syncAllPendingSkus"
+          >
+            同步全部待返回
+          </el-button>
+        </span>
       </div>
       <el-table
         v-loading="loading"
         :data="pagedRows"
         stripe
-        height="540"
+        height="100%"
         table-layout="fixed"
         class="erp-data-table ad-table"
         :row-class-name="rowClassName"
@@ -988,20 +1083,21 @@ onMounted(bootstrap);
         <el-table-column label="SKU / 商品" min-width="310" fixed="left">
           <template #default="{ row }">
             <div class="product-cell">
-              <div class="thumb">
-                <el-image
-                  v-if="row.image_url"
-                  :src="row.image_url"
-                  fit="cover"
-                  :preview-src-list="[row.image_url]"
-                  :initial-index="0"
-                  preview-teleported
-                />
-                <span v-else>无图</span>
-              </div>
+              <ProductImagePreview :src="row.image_url" :alt="row.product_name || row.ozon_sku || '商品图片'" />
               <div>
                 <strong>{{ row.ozon_sku }}</strong>
-                <el-tag v-if="isAdPending(row)" size="small" type="warning" effect="plain">Ozon 报表待返回</el-tag>
+                <div v-if="isAdPending(row)" class="pending-report-actions">
+                  <el-tag size="small" type="warning" effect="plain">Ozon 报表待返回</el-tag>
+                  <el-button
+                    link
+                    type="primary"
+                    size="small"
+                    :loading="syncingPendingKey === pendingSyncKey(row)"
+                    @click.stop="syncPendingSku(row)"
+                  >
+                    同步报表
+                  </el-button>
+                </div>
                 <span>{{ row.product_name || row.offer_id || "未同步商品信息" }}</span>
               </div>
             </div>
@@ -1162,17 +1258,7 @@ onMounted(bootstrap);
           <div v-else class="spend-list">
             <div v-for="row in highSpendSkuRank" :key="`${row.shop_id}-${row.ozon_sku}`" class="spend-row sku">
               <div class="spend-product">
-                <div class="thumb compact">
-                  <el-image
-                    v-if="row.image_url"
-                    :src="row.image_url"
-                    fit="cover"
-                    :preview-src-list="[row.image_url]"
-                    :initial-index="0"
-                    preview-teleported
-                  />
-                  <span v-else>无图</span>
-                </div>
+                <ProductImagePreview :src="row.image_url" size="compact" :alt="row.product_name || row.ozon_sku || '商品图片'" />
                 <div>
                   <strong>{{ row.ozon_sku }}</strong>
                   <span>{{ row.product_name || row.offer_id || "未同步商品信息" }}</span>
@@ -1208,10 +1294,7 @@ onMounted(bootstrap);
             <h3>ROAS Top 5</h3>
             <div v-for="row in dashboard.bestRows" :key="`roas-${row.ozon_sku}`" class="rank-row with-product">
               <div class="rank-product">
-                <div class="thumb mini">
-                  <el-image v-if="row.image_url" :src="row.image_url" fit="cover" :preview-src-list="[row.image_url]" :initial-index="0" preview-teleported />
-                  <span v-else>无图</span>
-                </div>
+                <ProductImagePreview :src="row.image_url" size="mini" :alt="row.product_name || row.ozon_sku || '商品图片'" />
                 <div><strong>{{ row.ozon_sku }}</strong><span>{{ row.product_name || row.offer_id || "未同步商品信息" }}</span></div>
               </div>
               <i><b :style="{ width: progressWidth(row.evaluation.metrics.roas, 8) }"></b></i><em>{{ decimal(row.evaluation.metrics.roas) }}</em>
@@ -1221,10 +1304,7 @@ onMounted(bootstrap);
             <h3>CTR Top 5</h3>
             <div v-for="row in ctrTopRows" :key="`ctr-${row.ozon_sku}`" class="rank-row with-product">
               <div class="rank-product">
-                <div class="thumb mini">
-                  <el-image v-if="row.image_url" :src="row.image_url" fit="cover" :preview-src-list="[row.image_url]" :initial-index="0" preview-teleported />
-                  <span v-else>无图</span>
-                </div>
+                <ProductImagePreview :src="row.image_url" size="mini" :alt="row.product_name || row.ozon_sku || '商品图片'" />
                 <div><strong>{{ row.ozon_sku }}</strong><span>{{ row.product_name || row.offer_id || "未同步商品信息" }}</span></div>
               </div>
               <i><b :style="{ width: progressWidth(row.evaluation.metrics.ctr, 0.08) }"></b></i><em>{{ percent(row.evaluation.metrics.ctr) }}</em>
@@ -1234,10 +1314,7 @@ onMounted(bootstrap);
             <h3>风险 SKU Top 5</h3>
             <div v-for="row in dashboard.highRisk" :key="`risk-${row.ozon_sku}`" class="rank-row with-product danger">
               <div class="rank-product">
-                <div class="thumb mini">
-                  <el-image v-if="row.image_url" :src="row.image_url" fit="cover" :preview-src-list="[row.image_url]" :initial-index="0" preview-teleported />
-                  <span v-else>无图</span>
-                </div>
+                <ProductImagePreview :src="row.image_url" size="mini" :alt="row.product_name || row.ozon_sku || '商品图片'" />
                 <div><strong>{{ row.ozon_sku }}</strong><span>{{ row.product_name || row.offer_id || "未同步商品信息" }}</span></div>
               </div>
               <i><b :style="{ width: progressWidth(100 - row.evaluation.healthScore, 100) }"></b></i><em>{{ row.evaluation.healthScore }}</em>
@@ -1276,17 +1353,7 @@ onMounted(bootstrap);
           <template v-if="column.rows.length">
             <div v-for="task in pagedTasks(column)" :key="task.id" class="task-card">
               <div class="task-product">
-                <div class="thumb compact">
-                  <el-image
-                    v-if="task.imageUrl"
-                    :src="task.imageUrl"
-                    fit="cover"
-                    :preview-src-list="[task.imageUrl]"
-                    :initial-index="0"
-                    preview-teleported
-                  />
-                  <span v-else>无图</span>
-                </div>
+                <ProductImagePreview :src="task.imageUrl" size="compact" :alt="task.productName || task.sku || '商品图片'" />
                 <div>
                   <strong>{{ task.title }}</strong>
                   <span>{{ task.sku }} / {{ task.shop }}</span>
@@ -1311,17 +1378,7 @@ onMounted(bootstrap);
     <el-drawer v-model="detailVisible" size="900px" title="SKU广告详情">
       <div v-if="currentRow" class="drawer-stack">
         <section class="drawer-product">
-          <div class="thumb large">
-            <el-image
-              v-if="currentRow.image_url"
-              :src="currentRow.image_url"
-              fit="cover"
-              :preview-src-list="[currentRow.image_url]"
-              :initial-index="0"
-              preview-teleported
-            />
-            <span v-else>无图</span>
-          </div>
+          <ProductImagePreview :src="currentRow.image_url" size="large" :alt="currentRow.product_name || currentRow.ozon_sku || '商品图片'" />
           <div>
             <strong>{{ currentRow.ozon_sku }}</strong>
             <span>{{ currentRow.product_name || currentRow.offer_id || "未同步商品信息" }}</span>
@@ -1374,10 +1431,7 @@ onMounted(bootstrap);
     <el-dialog v-model="strategyDialogVisible" title="广告策略参数" width="520px">
       <div v-if="currentRow" class="strategy-dialog">
         <section class="drawer-product">
-          <div class="thumb compact">
-            <el-image v-if="currentRow.image_url" :src="currentRow.image_url" fit="cover" />
-            <span v-else>无图</span>
-          </div>
+          <ProductImagePreview :src="currentRow.image_url" size="compact" :alt="currentRow.product_name || currentRow.ozon_sku || '商品图片'" />
           <div>
             <strong>{{ currentRow.ozon_sku }}</strong>
             <span>{{ currentRow.product_name || currentRow.offer_id || "未同步商品信息" }}</span>
@@ -1408,10 +1462,7 @@ onMounted(bootstrap);
     <el-dialog v-model="profitDetailVisible" title="利润计算详情" width="620px">
       <div v-if="currentRow" class="profit-detail-dialog">
         <section class="drawer-product">
-          <div class="thumb compact">
-            <el-image v-if="currentRow.image_url" :src="currentRow.image_url" fit="cover" />
-            <span v-else>无图</span>
-          </div>
+          <ProductImagePreview :src="currentRow.image_url" size="compact" :alt="currentRow.product_name || currentRow.ozon_sku || '商品图片'" />
           <div>
             <strong>{{ currentRow.ozon_sku }}</strong>
             <span>{{ currentRow.product_name || currentRow.offer_id || "未同步商品信息" }}</span>
@@ -1454,12 +1505,15 @@ onMounted(bootstrap);
 <style scoped>
 .ad-dashboard-page {
   width: 100%;
+  height: 100%;
+  min-height: 0;
   max-width: none;
   margin: 0 auto;
-  padding-bottom: 24px;
+  padding-bottom: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow: hidden;
 }
 
 .filter-card,
@@ -1580,16 +1634,38 @@ onMounted(bootstrap);
   border-radius: 10px;
   padding: 0 16px 16px;
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .ad-tabs :deep(.el-tabs__header) {
+  flex: 0 0 auto;
   margin-bottom: 16px;
+}
+
+.ad-tabs :deep(.el-tabs__content) {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.ad-tabs :deep(.el-tab-pane) {
+  height: 100%;
+  min-height: 0;
 }
 
 .tab-pane-stack {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+}
+
+.dashboard-pane {
+  overflow: hidden;
 }
 
 .health-card {
@@ -1757,6 +1833,15 @@ onMounted(bootstrap);
   padding: 16px;
 }
 
+.sku-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
 .decision-layer .todo-panel {
   display: flex;
   flex-direction: column;
@@ -1847,62 +1932,6 @@ onMounted(bootstrap);
   min-width: 0;
 }
 
-.thumb {
-  width: 48px;
-  height: 64px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #f8fafc;
-  overflow: hidden;
-  display: grid;
-  place-items: center;
-  color: #9ca3af;
-  font-size: 12px;
-  flex: 0 0 auto;
-}
-
-.thumb.large {
-  width: 96px;
-  height: 128px;
-}
-
-.thumb.compact {
-  width: 42px;
-  height: 56px;
-  border-radius: 7px;
-}
-
-.product-cell .thumb {
-  width: 64px;
-  height: 84px;
-  border-radius: 8px;
-}
-
-.thumb.mini {
-  width: 36px;
-  height: 48px;
-  border-radius: 6px;
-}
-
-.thumb .el-image {
-  width: 100%;
-  height: 100%;
-  cursor: zoom-in;
-}
-
-.thumb :deep(.el-image),
-.thumb :deep(.el-image__wrapper),
-.thumb :deep(.el-image__inner) {
-  width: 100% !important;
-  height: 100% !important;
-  display: block !important;
-}
-
-.thumb :deep(.el-image__inner) {
-  object-fit: cover !important;
-  object-position: center !important;
-}
-
 .product-cell strong,
 .product-cell span,
 .drawer-product strong,
@@ -1919,6 +1948,19 @@ onMounted(bootstrap);
 .drawer-product small,
 .short-advice {
   color: #6b7280;
+  font-size: 12px;
+}
+
+.pending-report-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.pending-report-actions :deep(.el-button) {
+  height: 20px;
+  padding: 0;
   font-size: 12px;
 }
 
@@ -1997,6 +2039,11 @@ onMounted(bootstrap);
   color: #64748b;
   font-size: 12px;
   font-weight: 700;
+}
+
+.ad-table {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .ad-table :deep(.ad-row-danger) {
@@ -2119,6 +2166,34 @@ onMounted(bootstrap);
 .table-footer {
   padding-top: 12px;
   color: #6b7280;
+}
+
+.ad-table-footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 50px;
+  padding: 8px 14px;
+  border-top: 1px solid #eef2f7;
+  background: #fff;
+  color: #64748b;
+  box-shadow: 0 -6px 18px rgba(15, 23, 42, 0.035);
+}
+
+.ad-table-footer > span {
+  flex: 0 0 auto;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ad-table-footer :deep(.erp-footer-pagination) {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .spend-overview-grid {

@@ -45,34 +45,65 @@ export async function suppliersMysql(query = {}) {
     where.push("(LOWER(COALESCE(s.name, '')) LIKE ? OR LOWER(COALESCE(s.contact_person, '')) LIKE ? OR LOWER(COALESCE(s.contact_phone, '')) LIKE ? OR LOWER(COALESCE(s.wechat_id, '')) LIKE ? OR LOWER(COALESCE(s.business_note, '')) LIKE ?)");
     params.push(like, like, like, like, like);
   }
-  const selectSql = `
-    SELECT s.*,
-      (SELECT COUNT(*) FROM products p WHERE p.supplier_id = s.id AND p.active = 1) AS product_count
+  const fromSql = `
     FROM suppliers s
     WHERE ${where.join(" AND ")}
   `;
   if (!paged) {
-    return await mysqlQuery(`
-      ${selectSql}
+    const rows = await mysqlQuery(`
+      SELECT s.*
+      ${fromSql}
       ORDER BY s.id DESC
     `, params);
+    return await attachProductCounts(rows);
   }
   const offset = (page - 1) * pageSize;
   const [totalRow, rows] = await Promise.all([
-    mysqlQueryOne(`SELECT COUNT(*) AS total FROM (${selectSql}) supplier_rows`, params),
+    mysqlQueryOne(`
+      SELECT COUNT(*) AS total
+      ${fromSql}
+    `, params),
     mysqlQuery(`
-      ${selectSql}
+      SELECT s.*
+      ${fromSql}
       ORDER BY s.id DESC
       LIMIT ? OFFSET ?
     `, [...params, pageSize, offset])
   ]);
+  const countedRows = await attachProductCounts(rows);
   return {
-    rows,
+    rows: countedRows,
     total: Number(totalRow?.total || 0),
     page,
     pageSize,
     mode: "paged"
   };
+}
+
+async function attachProductCounts(rows) {
+  if (!Array.isArray(rows) || !rows.length) return [];
+  const supplierIds = rows
+    .map((row) => Number(row.id))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  if (!supplierIds.length) {
+    return rows.map((row) => ({ ...row, product_count: 0 }));
+  }
+
+  const placeholders = supplierIds.map(() => "?").join(", ");
+  const counts = await mysqlQuery(`
+    SELECT supplier_id, COUNT(*) AS product_count
+    FROM products
+    WHERE active = 1 AND supplier_id IN (${placeholders})
+    GROUP BY supplier_id
+  `, supplierIds);
+  const countMap = new Map(
+    counts.map((row) => [Number(row.supplier_id), Number(row.product_count || 0)])
+  );
+
+  return rows.map((row) => ({
+    ...row,
+    product_count: countMap.get(Number(row.id)) || 0
+  }));
 }
 
 export async function createSupplierMysql(body = {}) {

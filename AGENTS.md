@@ -61,17 +61,16 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
-## 5. Local Server Port
+## 5. Protected Ports and Local Verification
 
-**Use the existing app port. Do not start random preview ports.**
+**Use `8788` for Codex local work. Never auto-operate protected ports.**
 
-- The Ozon ERP app runs on port `8787`.
-- All local verification must use the unified `8787` entrypoint, especially `http://localhost:8787/admin.html#/...` for the admin app.
-- Local code and the official website deployment may be updated at different times, but the local verification port must not change. This prevents checking an old page after code changes.
-- After frontend or backend updates, rebuild and restart the current project on `8787`.
-- Do not start separate Vite/dev preview ports such as `5173`, `5174`, or ad-hoc ports such as `8790` unless the user explicitly asks for a temporary isolated server.
-- If `8787` is already running, stop the process that owns `8787`, then start the current project there again so the browser URL stays the same.
-- When reporting a local verification URL, prefer the canonical admin URL format: `http://localhost:8787/admin.html#/[route]`.
+- Codex may use `8788` for local editing, debugging, temporary deployment, service restart, and verification. This is the dedicated local testing environment.
+- Codex must never start, restart, deploy, bind, stop, replace, or otherwise operate services on `8087` unless the user explicitly authorizes that exact action.
+- Treat `8787` as a protected production-equivalent port as well. Do not operate services on `8787` unless the user explicitly authorizes that exact action.
+- Packaging and deployment to protected ports are manual release actions controlled by the user. Do not perform them as part of automatic debugging or verification.
+- If a protected port is already running, leave it alone unless the user explicitly asks for that exact protected-port action.
+- When reporting a local verification URL, prefer the dedicated test URL format: `http://localhost:8788/admin.html#/[route]`.
 
 ## 6. Product Image Display
 

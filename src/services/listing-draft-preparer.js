@@ -307,6 +307,10 @@ function buildOzonCategoryKey({ description_category_id = "", type_id = "", cate
   return String(category_id || fallback || "").trim();
 }
 
+function resolveCollectedPriceStrategyMode(priceStrategyApplied) {
+  return priceStrategyApplied ? "finalized" : "multiply_on_publish";
+}
+
 function unwrapSource(body = {}) {
   const data = body.data || body.detail || body.normalized || body.payload || body;
   if (data?.editPayload && Object.keys(data).length <= 3) return { ...data.editPayload, collectionId: data.collectionId || data.id };
@@ -317,6 +321,15 @@ export function prepareListingDraftFromCollectedSource(body = {}, options = {}) 
   const source = unwrapSource(body);
   const editPayload = objectValue(source.editPayload || source.edit_payload || source.editable_payload || {});
   const followPayload = objectValue(source.followEditPayload || source.follow_edit_payload || editPayload.followEditPayload || {});
+  const priceStrategyApplied = Boolean(
+    options.sourceType === "collector_box"
+    || source.price_strategy_applied
+    || source.priceStrategyApplied
+    || editPayload.price_strategy_applied
+    || editPayload.priceStrategyApplied
+    || followPayload.price_strategy_applied
+    || followPayload.priceStrategyApplied
+  );
   const rows = collectVariantRows(source, editPayload, followPayload);
   const attributes = normalizeAttributes(source.attributes || editPayload.attributes || followPayload.attributes || []);
   const hashtags = normalizeTagList(firstFilled(
@@ -425,7 +438,9 @@ export function prepareListingDraftFromCollectedSource(body = {}, options = {}) 
       value: numberValue(source.price || editPayload.price || rows[0]?.price || 0),
       old_price: numberValue(source.originalPrice || source.old_price || rows[0]?.old_price || 0),
       currency_code: source.currency || editPayload.currency || followPayload.currecny || "RUB",
-      vat: String(source.vat || editPayload.vat || "0")
+      vat: String(source.vat || editPayload.vat || "0"),
+      strategy_mode: resolveCollectedPriceStrategyMode(priceStrategyApplied),
+      strategy_applied: priceStrategyApplied
     },
     dimensions,
     logistics: {
@@ -444,6 +459,13 @@ export function prepareListingDraftFromCollectedSource(body = {}, options = {}) 
       collected_product: body
     }
   };
+  if (priceStrategyApplied) {
+    editablePayload.variants = editablePayload.variants.map((item) => ({
+      ...item,
+      price_strategy_mode: "finalized",
+      price_strategy_applied: true
+    }));
+  }
   return {
     sourceType: options.sourceType || "ozon_frontend_collect",
     sourceId: options.sourceId || sku || source.collectionId || source.id || "",

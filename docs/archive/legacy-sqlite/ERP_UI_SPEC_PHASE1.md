@@ -1,5 +1,7 @@
 # ERP UI Spec Phase 1
 
+> Historical note: this phase spec was written during the old SQLite era. The current runtime baseline is MySQL.
+
 ## Goal
 
 定义当前 ERP 新后台的统一壳层标准，并明确系统已经完成到 `Vue 3 + Element Plus` 管理端的主入口切换。

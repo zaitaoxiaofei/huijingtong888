@@ -349,7 +349,7 @@ onMounted(() => loadRows());
         <el-table-column label="异常对象" min-width="330">
           <template #default="{ row }">
             <div class="exception-object-cell">
-              <ProductImagePreview :src="row.image_url" size="square" />
+              <ProductImagePreview :src="row.image_url" :alt="row.product_name || row.subject || '商品图片'" />
               <div class="exception-object-copy">
                 <div class="exception-object-copy__top">
                   <el-tag size="small" effect="light" :type="levelType(row.level)">{{ typeLabel(row) }}</el-tag>
@@ -452,7 +452,6 @@ onMounted(() => loadRows());
 .exception-table-wrap { flex: 1 1 auto; }
 .exception-filter-inline { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .exception-object-cell { display: flex; gap: 12px; align-items: flex-start; }
-.exception-thumb { width: 56px; height: 56px; border-radius: 10px; border: 1px solid rgba(148, 163, 184, 0.25); background: #f8fafc; overflow: hidden; flex: none; }
 .exception-object-copy { min-width: 0; display: grid; gap: 6px; }
 .exception-object-copy__top { display: flex; flex-wrap: wrap; gap: 6px; }
 .exception-object-copy strong { color: #0f172a; line-height: 1.4; }

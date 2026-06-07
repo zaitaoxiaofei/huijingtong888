@@ -5,10 +5,12 @@ import { InfoFilled } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
 import { createLatestRequestGate } from "../../utils/request-gate";
+import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
-import { applyFilterQuery, buildFilterQuery, dateText, integer } from "./inventory-utils.js";
+import ProcurementRequestCreateDialog from "../../components/procurement/ProcurementRequestCreateDialog.vue";
+import { applyFilterQuery, dateText, integer } from "./inventory-utils.js";
 
 const route = useRoute();
 const router = useRouter();
@@ -19,7 +21,36 @@ let routeReady = false;
 
 const loading = ref(false);
 const exportLoading = ref(false);
+const supplySyncLoading = ref(false);
+const pdfImportVisible = ref(false);
+const pdfPreviewLoading = ref(false);
+const pdfImportSubmitting = ref(false);
+const pdfImportFileName = ref("");
+const pdfImportBase64 = ref("");
 const previewFrameRef = ref(null);
+const procurementCreateVisible = ref(false);
+const procurementCreateProductId = ref(null);
+const fbpTransferVisible = ref(false);
+const fbpTransferSubmitting = ref(false);
+const fbpTransferRow = ref(null);
+const fbpReceiveVisible = ref(false);
+const fbpReceiveLoading = ref(false);
+const fbpReceiveSubmittingId = ref(0);
+const fbpReceiveRow = ref(null);
+const fbpReceiveRecords = ref([]);
+const fbpReceiveForm = reactive({
+  recordId: 0,
+  receivedQuantity: 0,
+  note: ""
+});
+const fbpTransferForm = reactive({
+  quantity: 1,
+  status: "sent",
+  tracking_no: "",
+  box_no: "",
+  expected_arrival_at: "",
+  note: ""
+});
 const barcodeLoadingKeys = reactive({});
 const barcodePrintPresets = [
   { label: "条形码 70mm x 30mm", value: "barcode_70x30", printer: "label", printSettings: "fit,portrait,monochrome,paper=70mm x 30mm" },
@@ -42,6 +73,12 @@ const barcodePreview = reactive({
   helperAvailable: false,
   helperStatus: "",
   directPrinting: false
+});
+const pdfImportPreview = reactive({
+  shop: null,
+  header: {},
+  items: [],
+  checks: {}
 });
 const state = reactive({
   rows: [],
@@ -101,6 +138,25 @@ function localInventoryTotal(row) {
   return Number(row.local_stock || 0) + Number(row.pending_procurement_qty || 0);
 }
 
+function transferActionTooltip(row) {
+  return [
+    `建议发仓：${integer(row.suggested_transfer_qty)} 件`,
+    `建议采购：${integer(row.suggested_purchase_qty)} 件`,
+    `发仓在途：${integer(row.fbp_transfer_in_transit_qty)} 件`
+  ].join("\n");
+}
+
+function inventoryTooltipCn(row) {
+  return [
+    `本地：库存 ${integer(row.local_stock)} + 采购在途 ${integer(row.pending_procurement_qty)} = ${integer(localInventoryTotal(row))} 件`,
+    `FBP发仓：${integer(row.fbp_transfer_in_transit_qty)} 件`,
+    `FBP可售：${integer(row.fbp_available)} 件`,
+    `FBS可售：${integer(row.fbs_available)} 件`,
+    `覆盖天数：${coverageText(row)}`,
+    `仓库分布：${warehouseText(row)}`
+  ].join("\n");
+}
+
 function suggestedQtyTooltip(row) {
   return `建议入库：${integer(row.suggested_qty)} 件\n目标覆盖：${integer(row.target_days)} 天`;
 }
@@ -115,8 +171,9 @@ function trendTooltip(row) {
 
 function inventoryTooltip(row) {
   return [
+    `本地：在库 ${integer(row.local_stock)} + 采购在途 ${integer(row.pending_procurement_qty)} = ${integer(localInventoryTotal(row))} 件`,
+    `FBP发仓：${integer(row.fbp_transfer_in_transit_qty)} 件`,
     `FBP：${integer(row.fbp_available)} 件`,
-    `本地：在库 ${integer(row.local_stock)} + 在途 ${integer(row.pending_procurement_qty)} = ${integer(localInventoryTotal(row))} 件`,
     `FBS：${integer(row.fbs_available)} 件`,
     `覆盖：${coverageText(row)}`,
     `仓库分布：${warehouseText(row)}`
@@ -177,6 +234,25 @@ async function exportSkuIds() {
   }
 }
 
+async function syncOzonSupplyOrders() {
+  supplySyncLoading.value = true;
+  try {
+    const payload = await apiClient.post("/api/sync/ozon-fbo-supplies", {
+      shop_id: state.filters.shopId === "all" ? null : state.filters.shopId
+    });
+    if (payload?.status === "partial_error") {
+      ElMessage.warning(payload?.message || "Ozon入仓请求已部分同步，请查看失败店铺");
+    } else {
+      ElMessage.success(payload?.message || "Ozon入仓请求已同步");
+    }
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "同步 Ozon 入仓请求失败");
+  } finally {
+    supplySyncLoading.value = false;
+  }
+}
+
 function setSort(sortKey) {
   if (state.filters.sortKey === sortKey) state.filters.sortDir = state.filters.sortDir === "asc" ? "desc" : "asc";
   else {
@@ -201,20 +277,24 @@ function applyRouteState() {
   }
 }
 
-function syncRouteQuery() {
-  if (syncingRoute) return;
-  const next = buildFilterQuery(route, state.filters, filterDefaults);
-  if (JSON.stringify(route.query || {}) === JSON.stringify(next)) return;
-  router.replace({ query: next });
-}
+const syncRouteQuery = createDefaultRouteQuerySync({
+  route,
+  router,
+  filters: state.filters,
+  defaults: filterDefaults,
+  manualKeys: ["query", "minSales"],
+  isSyncingRoute: () => syncingRoute
+});
 
 function handleSearch() {
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
 function handleReset() {
   Object.assign(state.filters, filterDefaults);
+  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -230,7 +310,143 @@ function handlePageSizeChange(size) {
 }
 
 function openProcurement(row) {
-  router.push({ path: "/procurement", query: { productId: String(row.product_id || ""), from: "fbp-opportunities" } });
+  procurementCreateProductId.value = Number(row.product_id || 0) || null;
+  procurementCreateVisible.value = Boolean(procurementCreateProductId.value);
+}
+
+async function handleProcurementCreated() {
+  procurementCreateVisible.value = false;
+  procurementCreateProductId.value = null;
+  await loadPageData();
+}
+
+function openFbpTransfer(row) {
+  fbpTransferRow.value = row;
+  fbpTransferForm.quantity = Math.max(1, Math.round(Number(row?.suggested_transfer_qty || row?.suggested_qty || 1)));
+  fbpTransferForm.status = "sent";
+  fbpTransferForm.tracking_no = "";
+  fbpTransferForm.box_no = "";
+  fbpTransferForm.expected_arrival_at = "";
+  fbpTransferForm.note = row?.suggested_action === "purchase"
+    ? `备货建议：先采购 ${integer(row.suggested_purchase_qty)} 件，采购到货后发 FBP`
+    : `备货建议：本地发仓 ${integer(row.suggested_transfer_qty || row.suggested_qty)} 件`;
+  fbpTransferVisible.value = true;
+}
+
+async function submitFbpTransfer() {
+  const row = fbpTransferRow.value;
+  if (!row?.product_id) {
+    ElMessage.error("缺少产品信息，无法创建 FBP 发仓");
+    return;
+  }
+  const quantity = Math.max(1, Math.round(Number(fbpTransferForm.quantity || 0)));
+  fbpTransferSubmitting.value = true;
+  try {
+    await apiClient.post("/api/fbp-transfer-records", {
+      product_id: row.product_id,
+      mapping_id: row.mapping_id || null,
+      shop_id: row.shop_id || null,
+      ozon_sku: row.ozon_sku || "",
+      quantity,
+      status: fbpTransferForm.status || "sent",
+      tracking_no: fbpTransferForm.tracking_no,
+      box_no: fbpTransferForm.box_no,
+      expected_arrival_at: fbpTransferForm.expected_arrival_at || null,
+      note: fbpTransferForm.note
+    });
+    ElMessage.success("FBP 发仓记录已创建");
+    fbpTransferVisible.value = false;
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "创建 FBP 发仓失败");
+  } finally {
+    fbpTransferSubmitting.value = false;
+  }
+}
+
+function remainingReceiveQuantity(record) {
+  return Math.max(0, Number(record?.quantity || 0) - Number(record?.listed_quantity || 0));
+}
+
+function fbpTransferStatusText(status) {
+  return {
+    draft: "草稿",
+    sent: "已发出",
+    in_transit: "运输中",
+    received: "部分入仓",
+    listed: "已入仓",
+    exception: "异常",
+    closed: "已关闭",
+    cancelled: "已取消"
+  }[status] || status || "-";
+}
+
+async function loadFbpReceiveRecords() {
+  const row = fbpReceiveRow.value;
+  if (!row?.product_id) return;
+  fbpReceiveLoading.value = true;
+  try {
+    const params = new URLSearchParams({
+      productId: String(row.product_id || ""),
+      shopId: String(row.shop_id || ""),
+      ozonSku: String(row.ozon_sku || ""),
+      onlyOpen: "1",
+      pageSize: "100"
+    });
+    const payload = await apiClient.get(`/api/fbp-transfer-records?${params.toString()}`);
+    fbpReceiveRecords.value = Array.isArray(payload?.rows) ? payload.rows : [];
+  } catch (error) {
+    ElMessage.error(error.message || "FBP 发仓记录加载失败");
+  } finally {
+    fbpReceiveLoading.value = false;
+  }
+}
+
+async function openFbpReceiveDialog(row) {
+  if (Number(row?.fbp_transfer_in_transit_qty || 0) <= 0) {
+    ElMessage.info("当前没有待确认的 FBP 发仓");
+    return;
+  }
+  fbpReceiveRow.value = row;
+  fbpReceiveForm.recordId = 0;
+  fbpReceiveForm.receivedQuantity = 0;
+  fbpReceiveForm.note = "";
+  fbpReceiveVisible.value = true;
+  await loadFbpReceiveRecords();
+}
+
+function prepareFbpReceive(record) {
+  fbpReceiveForm.recordId = Number(record.id || 0);
+  fbpReceiveForm.receivedQuantity = remainingReceiveQuantity(record);
+  fbpReceiveForm.note = "";
+}
+
+async function confirmFbpReceive(record) {
+  const recordId = Number(record?.id || fbpReceiveForm.recordId || 0);
+  if (!recordId) return;
+  const quantity = Number(fbpReceiveForm.recordId === recordId ? fbpReceiveForm.receivedQuantity : remainingReceiveQuantity(record));
+  if (quantity <= 0) {
+    ElMessage.warning("请输入本次入仓数量");
+    return;
+  }
+  fbpReceiveSubmittingId.value = recordId;
+  try {
+    const payload = await apiClient.post("/api/fbp-transfer-records/confirm-received", {
+      id: recordId,
+      received_quantity: quantity,
+      note: fbpReceiveForm.recordId === recordId ? fbpReceiveForm.note : ""
+    });
+    ElMessage.success(payload?.remaining_quantity > 0 ? "已确认部分入仓" : "已确认全部入仓");
+    await loadFbpReceiveRecords();
+    await loadPageData();
+    if (!fbpReceiveRecords.value.some((item) => remainingReceiveQuantity(item) > 0)) {
+      fbpReceiveVisible.value = false;
+    }
+  } catch (error) {
+    ElMessage.error(error.message || "确认 FBP 入仓失败");
+  } finally {
+    fbpReceiveSubmittingId.value = 0;
+  }
 }
 
 function rowBarcodeLoadingKey(row) {
@@ -275,6 +491,78 @@ async function blobToBase64(blob) {
     binary += String.fromCharCode(...chunk);
   }
   return btoa(binary);
+}
+
+function resetPdfImportPreview() {
+  pdfImportFileName.value = "";
+  pdfImportBase64.value = "";
+  pdfImportPreview.shop = null;
+  pdfImportPreview.header = {};
+  pdfImportPreview.items = [];
+  pdfImportPreview.checks = {};
+}
+
+function openPdfImportDialog() {
+  resetPdfImportPreview();
+  pdfImportVisible.value = true;
+}
+
+async function handlePdfImportFileChange(file) {
+  const rawFile = file?.raw || file;
+  if (!rawFile) return;
+  if (!String(rawFile.name || "").toLowerCase().endsWith(".pdf")) {
+    ElMessage.error("请上传 PDF 文件");
+    return;
+  }
+  pdfImportFileName.value = rawFile.name || "fbp-supply.pdf";
+  pdfPreviewLoading.value = true;
+  try {
+    pdfImportBase64.value = await blobToBase64(rawFile);
+    const payload = await apiClient.post("/api/fbp-transfer-records/pdf-preview", {
+      pdf_base64: pdfImportBase64.value,
+      filename: pdfImportFileName.value
+    });
+    pdfImportPreview.shop = payload.shop || null;
+    pdfImportPreview.header = payload.header || {};
+    pdfImportPreview.items = Array.isArray(payload.items) ? payload.items : [];
+    pdfImportPreview.checks = payload.checks || {};
+    if (pdfImportPreview.checks.unmatched_count) {
+      ElMessage.warning(`PDF 已解析，有 ${pdfImportPreview.checks.unmatched_count} 个 SKU 未匹配`);
+    } else {
+      ElMessage.success("PDF 已解析，SKU 全部匹配");
+    }
+  } catch (error) {
+    resetPdfImportPreview();
+    ElMessage.error(error.message || "解析 FBP 入库单 PDF 失败");
+  } finally {
+    pdfPreviewLoading.value = false;
+  }
+}
+
+async function confirmPdfImport() {
+  if (!pdfImportBase64.value) {
+    ElMessage.warning("请先上传并解析 PDF");
+    return;
+  }
+  if (Number(pdfImportPreview.checks?.unmatched_count || 0) > 0) {
+    ElMessage.error("还有 SKU 未匹配，请先绑定后再导入");
+    return;
+  }
+  pdfImportSubmitting.value = true;
+  try {
+    const payload = await apiClient.post("/api/fbp-transfer-records/pdf-import", {
+      pdf_base64: pdfImportBase64.value,
+      filename: pdfImportFileName.value
+    });
+    ElMessage.success(payload?.message || "FBP 入库单已导入");
+    pdfImportVisible.value = false;
+    resetPdfImportPreview();
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "导入 FBP 入库单失败");
+  } finally {
+    pdfImportSubmitting.value = false;
+  }
 }
 
 function ensureBarcodeTarget(row, actionText) {
@@ -588,11 +876,9 @@ watch(
   { deep: true }
 );
 watch(() => [
-  state.filters.query,
   state.filters.shopId,
   state.filters.priority,
   state.filters.signal,
-  state.filters.minSales,
   state.filters.sortKey,
   state.filters.sortDir,
   state.filters.page,
@@ -637,6 +923,12 @@ onMounted(async () => {
         <el-input v-model="state.filters.minSales" placeholder="最低" style="width: 90px" @keyup.enter="handleSearch" />
       </el-form-item>
       <template #actions>
+        <el-button class="erp-btn erp-btn-secondary" @click="openPdfImportDialog">
+          导入PDF
+        </el-button>
+        <el-button class="erp-btn erp-btn-secondary" :loading="supplySyncLoading" @click="syncOzonSupplyOrders">
+          同步入仓请求
+        </el-button>
         <div class="fbp-toolbar-summary">
           <article v-for="card in summaryCards" :key="card.label" class="fbp-toolbar-summary-item">
             <span>{{ card.label }}</span>
@@ -699,11 +991,36 @@ onMounted(async () => {
             </button>
           </template>
           <template #default="{ row }">
-            <el-tooltip placement="top" effect="light" :content="inventoryTooltip(row)" :popper-style="{ whiteSpace: 'pre-line', maxWidth: '280px' }">
+            <el-tooltip placement="top" effect="light" :content="inventoryTooltipCn(row)" :popper-style="{ whiteSpace: 'pre-line', maxWidth: '280px' }">
               <div class="inventory-summary-cell">
+                <span><strong>本地+采购</strong><em>{{ integer(localInventoryTotal(row)) }}</em></span>
+                <button
+                  type="button"
+                  class="inventory-summary-action"
+                  :disabled="Number(row.fbp_transfer_in_transit_qty || 0) <= 0"
+                  @click.stop="openFbpReceiveDialog(row)"
+                >
+                  <strong>FBP发仓</strong><em>{{ integer(row.fbp_transfer_in_transit_qty) }}</em>
+                </button>
                 <span><strong>FBP</strong><em>{{ integer(row.fbp_available) }}</em></span>
-                <span><strong>本地</strong><em>{{ integer(localInventoryTotal(row)) }}</em></span>
                 <span><strong>FBS</strong><em>{{ integer(row.fbs_available) }}</em></span>
+              </div>
+            </el-tooltip>
+          </template>
+        </el-table-column>
+        <el-table-column label="建议动作" width="150" align="center">
+          <template #header>
+            <button type="button" class="inventory-sort-btn" @click="setSort('suggested_transfer_qty')">
+              建议动作 {{ sortMark("suggested_transfer_qty") }}
+            </button>
+          </template>
+          <template #default="{ row }">
+            <el-tooltip placement="top" effect="light" :content="transferActionTooltip(row)" :popper-style="{ whiteSpace: 'pre-line', maxWidth: '240px' }">
+              <div class="fbp-cell-stack fbp-cell-center">
+                <el-tag :type="row.suggested_action === 'transfer' ? 'success' : 'warning'" effect="light">
+                  {{ row.suggested_action_text || "观察" }}
+                </el-tag>
+                <span class="fbp-cell-meta-line">发仓 {{ integer(row.suggested_transfer_qty) }} / 采购 {{ integer(row.suggested_purchase_qty) }}</span>
               </div>
             </el-tooltip>
           </template>
@@ -793,10 +1110,26 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="110" fixed="right">
+        <el-table-column label="操作" width="130" fixed="right">
           <template #default="{ row }">
             <div class="fbp-actions-cell">
-              <el-button size="small" class="fbp-inline-button fbp-inline-button-primary" @click="openProcurement(row)">创建采购</el-button>
+              <el-button
+                size="small"
+                class="fbp-inline-button fbp-inline-button-primary"
+                :disabled="Number(row.suggested_transfer_qty || 0) <= 0 && Number(row.local_stock || 0) <= 0"
+                @click="openFbpTransfer(row)"
+              >
+                创建发仓
+              </el-button>
+              <el-button
+                size="small"
+                class="fbp-inline-button fbp-inline-button-secondary"
+                :disabled="Number(row.fbp_transfer_in_transit_qty || 0) <= 0"
+                @click="openFbpReceiveDialog(row)"
+              >
+                确认入仓
+              </el-button>
+              <el-button size="small" class="fbp-inline-button fbp-inline-button-secondary" @click="openProcurement(row)">创建采购</el-button>
             </div>
           </template>
         </el-table-column>
@@ -810,6 +1143,239 @@ onMounted(async () => {
       @update:page="handlePageChange"
       @update:pageSize="handlePageSizeChange"
     />
+
+    <ProcurementRequestCreateDialog
+      v-model="procurementCreateVisible"
+      :initial-product-id="procurementCreateProductId"
+      :lock-product="true"
+      @created="handleProcurementCreated"
+    />
+
+    <el-dialog
+      v-model="fbpReceiveVisible"
+      title="确认 FBP 入仓"
+      width="min(960px, 96vw)"
+      top="6vh"
+      destroy-on-close
+    >
+      <div class="fbp-receive-header" v-if="fbpReceiveRow">
+        <ProductImagePreview :src="fbpReceiveRow.image_url" />
+        <div>
+          <strong>{{ fbpReceiveRow.product_name || fbpReceiveRow.name || fbpReceiveRow.ozon_sku || "产品" }}</strong>
+          <span>{{ fbpReceiveRow.shop_name || "-" }} / SKU {{ fbpReceiveRow.ozon_sku || "-" }}</span>
+          <em>当前待入仓 {{ integer(fbpReceiveRow.fbp_transfer_in_transit_qty) }} 件</em>
+        </div>
+      </div>
+      <el-table
+        v-loading="fbpReceiveLoading"
+        :data="fbpReceiveRecords"
+        border
+        stripe
+        class="erp-data-table fbp-receive-table"
+      >
+        <el-table-column label="状态" width="96">
+          <template #default="{ row }">
+            <el-tag :type="remainingReceiveQuantity(row) > 0 ? 'warning' : 'success'" effect="light">
+              {{ fbpTransferStatusText(row.status) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="数量" width="150" align="center">
+          <template #default="{ row }">
+            <div class="fbp-cell-stack fbp-cell-center">
+              <strong>{{ integer(row.listed_quantity) }} / {{ integer(row.quantity) }}</strong>
+              <span class="fbp-cell-meta-line">剩余 {{ integer(remainingReceiveQuantity(row)) }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="入仓单/箱号" min-width="180">
+          <template #default="{ row }">
+            <div class="fbp-cell-stack">
+              <strong>{{ row.source_ref || row.tracking_no || "-" }}</strong>
+              <span class="fbp-cell-meta-line">箱号 {{ row.box_no || "-" }}</span>
+              <span class="fbp-cell-meta-line">仓库 {{ row.warehouse_name || "-" }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="时间" width="180">
+          <template #default="{ row }">
+            <div class="fbp-cell-stack">
+              <span class="fbp-cell-meta-line">发出：{{ dateText(row.shipped_at) }}</span>
+              <span class="fbp-cell-meta-line">预计：{{ dateText(row.expected_arrival_at) }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="本次入仓" width="210">
+          <template #default="{ row }">
+            <div class="fbp-receive-input">
+              <el-input-number
+                v-if="fbpReceiveForm.recordId === Number(row.id)"
+                v-model="fbpReceiveForm.receivedQuantity"
+                :min="1"
+                :max="remainingReceiveQuantity(row)"
+                :step="1"
+                :precision="0"
+                controls-position="right"
+              />
+              <el-button v-else link type="primary" :disabled="remainingReceiveQuantity(row) <= 0" @click="prepareFbpReceive(row)">
+                填写数量
+              </el-button>
+              <el-input
+                v-if="fbpReceiveForm.recordId === Number(row.id)"
+                v-model="fbpReceiveForm.note"
+                placeholder="备注"
+                maxlength="80"
+              />
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="120" fixed="right">
+          <template #default="{ row }">
+            <el-button
+              size="small"
+              type="primary"
+              :disabled="remainingReceiveQuantity(row) <= 0"
+              :loading="fbpReceiveSubmittingId === Number(row.id)"
+              @click="confirmFbpReceive(row)"
+            >
+              确认入仓
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="fbpReceiveVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="fbpTransferVisible"
+      title="创建 FBP 发仓"
+      width="560px"
+      align-center
+      destroy-on-close
+    >
+      <div class="fbp-transfer-product" v-if="fbpTransferRow">
+        <ProductImagePreview :src="fbpTransferRow.image_url" />
+        <div>
+          <strong>{{ fbpTransferRow.product_name || fbpTransferRow.name || fbpTransferRow.ozon_sku || "产品" }}</strong>
+          <span>{{ fbpTransferRow.shop_name || "-" }} / SKU {{ fbpTransferRow.ozon_sku || "-" }}</span>
+        </div>
+      </div>
+      <el-form label-width="92px" class="fbp-transfer-form">
+        <el-form-item label="发仓数量">
+          <el-input-number v-model="fbpTransferForm.quantity" :min="1" :step="1" :precision="0" controls-position="right" style="width: 180px" />
+          <span class="fbp-form-tip">本地可用 {{ integer(fbpTransferRow?.local_stock) }} 件</span>
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="fbpTransferForm.status" style="width: 180px">
+            <el-option label="已发出" value="sent" />
+            <el-option label="运输中" value="in_transit" />
+            <el-option label="草稿" value="draft" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="物流单号">
+          <el-input v-model="fbpTransferForm.tracking_no" placeholder="可选" />
+        </el-form-item>
+        <el-form-item label="箱号">
+          <el-input v-model="fbpTransferForm.box_no" placeholder="可选" />
+        </el-form-item>
+        <el-form-item label="预计到达">
+          <el-date-picker v-model="fbpTransferForm.expected_arrival_at" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" placeholder="可选" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="fbpTransferForm.note" type="textarea" :rows="3" maxlength="300" show-word-limit />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="fbpTransferVisible = false">取消</el-button>
+        <el-button type="primary" :loading="fbpTransferSubmitting" @click="submitFbpTransfer">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="pdfImportVisible"
+      title="导入 FBP 入库单 PDF"
+      width="min(980px, 96vw)"
+      top="6vh"
+      destroy-on-close
+      @closed="resetPdfImportPreview"
+    >
+      <div class="fbp-pdf-import-shell">
+        <el-upload
+          class="fbp-pdf-upload"
+          drag
+          accept="application/pdf,.pdf"
+          :auto-upload="false"
+          :limit="1"
+          :show-file-list="false"
+          :on-change="handlePdfImportFileChange"
+        >
+          <div class="fbp-pdf-upload-text">
+            <strong>{{ pdfImportFileName || "选择或拖入 Ozon FBP 入库单 PDF" }}</strong>
+            <span>系统会先解析并校验 SKU 匹配，不会直接写入库存</span>
+          </div>
+        </el-upload>
+
+        <el-skeleton v-if="pdfPreviewLoading" :rows="6" animated />
+        <template v-else-if="pdfImportPreview.header?.supply_order_id">
+          <div class="fbp-pdf-summary">
+            <article>
+              <span>入库单</span>
+              <strong>{{ pdfImportPreview.header.supply_order_id }}</strong>
+            </article>
+            <article>
+              <span>店铺</span>
+              <strong>{{ pdfImportPreview.shop?.name || "-" }}</strong>
+            </article>
+            <article>
+              <span>仓库</span>
+              <strong>{{ pdfImportPreview.header.warehouse_name || "-" }}</strong>
+            </article>
+            <article>
+              <span>数量</span>
+              <strong>{{ integer(pdfImportPreview.checks.parsed_quantity) }} / {{ integer(pdfImportPreview.header.total_quantity) }}</strong>
+            </article>
+          </div>
+          <el-alert
+            v-if="pdfImportPreview.checks.unmatched_count"
+            type="warning"
+            show-icon
+            :closable="false"
+            :title="`有 ${pdfImportPreview.checks.unmatched_count} 个 SKU 未匹配，请先绑定后再导入`"
+          />
+          <el-alert
+            v-else
+            type="success"
+            show-icon
+            :closable="false"
+            title="SKU 已全部匹配，可以导入为 FBP 发仓在途"
+          />
+          <el-table :data="pdfImportPreview.items" border stripe class="erp-data-table fbp-pdf-preview-table">
+            <el-table-column label="Ozon SKU" prop="ozon_sku" width="150" />
+            <el-table-column label="数量" prop="quantity" width="90" align="center" />
+            <el-table-column label="匹配产品" min-width="220">
+              <template #default="{ row }">
+                <span v-if="row.matched">{{ row.product_name || row.product_id }}</span>
+                <el-tag v-else type="danger" effect="light">未匹配</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="PDF 商品名" prop="title" min-width="260" show-overflow-tooltip />
+          </el-table>
+        </template>
+      </div>
+      <template #footer>
+        <el-button @click="pdfImportVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :disabled="!pdfImportPreview.header?.supply_order_id || Number(pdfImportPreview.checks?.unmatched_count || 0) > 0"
+          :loading="pdfImportSubmitting"
+          @click="confirmPdfImport"
+        >
+          确认导入
+        </el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="barcodePreview.visible"
@@ -875,6 +1441,23 @@ onMounted(async () => {
   gap: 14px;
 }
 
+.fbp-opportunity-page :deep(.inventory-toolbar-sticky) {
+  position: static;
+}
+
+.fbp-opportunity-page .inventory-table-wrap {
+  flex: none;
+  min-height: 320px;
+}
+
+.fbp-opportunity-page :deep(.erp-data-table) {
+  height: auto;
+}
+
+.fbp-opportunity-page :deep(.erp-data-table .el-table__body-wrapper) {
+  height: auto;
+}
+
 .fbp-toolbar-summary {
   display: inline-flex;
   align-items: center;
@@ -904,6 +1487,62 @@ onMounted(async () => {
   font-weight: 700;
   line-height: 1.2;
   white-space: nowrap;
+}
+
+.fbp-pdf-import-shell {
+  display: grid;
+  gap: 14px;
+}
+
+.fbp-pdf-upload :deep(.el-upload-dragger) {
+  padding: 22px 18px;
+  border-radius: 8px;
+}
+
+.fbp-pdf-upload-text {
+  display: grid;
+  gap: 6px;
+  color: #475569;
+}
+
+.fbp-pdf-upload-text strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+.fbp-pdf-upload-text span {
+  font-size: 12px;
+}
+
+.fbp-pdf-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.fbp-pdf-summary article {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.fbp-pdf-summary span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.fbp-pdf-summary strong {
+  min-width: 0;
+  color: #111827;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.fbp-pdf-preview-table {
+  max-height: 360px;
 }
 
 .fbp-cell-stack {
@@ -962,7 +1601,7 @@ onMounted(async () => {
 
 .inventory-summary-cell {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   align-items: flex-start;
   gap: 8px;
   min-width: 144px;
@@ -970,10 +1609,29 @@ onMounted(async () => {
   cursor: help;
 }
 
-.inventory-summary-cell span {
+.inventory-summary-cell span,
+.inventory-summary-action {
   display: grid;
   gap: 2px;
   justify-items: center;
+}
+
+.inventory-summary-action {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.inventory-summary-action:disabled {
+  cursor: default;
+}
+
+.inventory-summary-action:not(:disabled):hover em {
+  color: var(--erp-primary);
+  text-decoration: underline;
 }
 
 .inventory-summary-cell strong {
@@ -1040,8 +1698,86 @@ onMounted(async () => {
 }
 
 .fbp-actions-cell {
-  display: flex;
+  display: grid;
+  gap: 6px;
   justify-content: center;
+}
+
+.fbp-transfer-product {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.fbp-transfer-product strong,
+.fbp-transfer-product span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fbp-transfer-product strong {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.fbp-transfer-product span,
+.fbp-form-tip {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.fbp-transfer-form {
+  padding-top: 4px;
+}
+
+.fbp-receive-header {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.fbp-receive-header strong,
+.fbp-receive-header span,
+.fbp-receive-header em {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fbp-receive-header strong {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.fbp-receive-header span,
+.fbp-receive-header em {
+  color: #64748b;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.fbp-receive-table {
+  width: 100%;
+}
+
+.fbp-receive-input {
+  display: grid;
+  gap: 6px;
+}
+
+.fbp-form-tip {
+  margin-left: 10px;
 }
 
 .fbp-barcode-actions {

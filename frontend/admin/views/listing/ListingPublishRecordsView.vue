@@ -2,10 +2,11 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Delete, Edit, Refresh, Search, VideoCamera, View } from "@element-plus/icons-vue";
+import { Delete, Edit, MagicStick, Refresh, Search, VideoCamera, View } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
 import { withImageToken } from "../../api/tools/imageCropper";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import { ozonBuyerProductLinkFromRow } from "../../utils/product-links";
 
@@ -18,13 +19,24 @@ const batchRefreshing = ref(false);
 const batchDeleting = ref(false);
 const selectedRows = ref([]);
 const router = useRouter();
-const recordImagePlaceholder = "data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='8' fill='%23f3f6fb'/%3E%3Cpath d='M18 42l10-12 7 8 5-6 8 10H18z' fill='%23c7d0dd'/%3E%3Ccircle cx='24' cy='23' r='5' fill='%23c7d0dd'/%3E%3C/svg%3E";
+const recordImagePlaceholder = "data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='84' viewBox='0 0 64 84'%3E%3Crect width='64' height='84' rx='8' fill='%23f3f6fb'/%3E%3Cpath d='M14 56l13-16 9 10 7-8 11 14H14z' fill='%23c7d0dd'/%3E%3Ccircle cx='25' cy='30' r='5' fill='%23c7d0dd'/%3E%3C/svg%3E";
+let drawerPayloadCache = null;
+let drawerResponseCache = null;
+
+function createAiWorkbenchId() {
+  return `aiwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createListingWorkbenchId() {
+  return `liwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 const state = reactive({
   rows: [],
+  shops: [],
   query: "",
   nameQuery: "",
-  shopQuery: "",
+  shopId: "all",
   status: "all",
   quality: "all",
   page: 1,
@@ -35,7 +47,9 @@ const state = reactive({
 const drawer = reactive({
   visible: false,
   row: null,
+  technicalJsonLoaded: false,
   payloadText: "",
+  responseText: "",
   form: {
     name: "",
     offer_id: "",
@@ -81,7 +95,7 @@ async function loadRecords() {
     });
     if (state.query.trim()) params.set("query", state.query.trim());
     if (state.nameQuery.trim()) params.set("nameQuery", state.nameQuery.trim());
-    if (state.shopQuery.trim()) params.set("shopQuery", state.shopQuery.trim());
+    if (state.shopId !== "all") params.set("shopId", String(state.shopId));
     const result = await apiClient.get(`/api/listing/publish-records?${params.toString()}`, { noCache: true });
     state.rows = Array.isArray(result?.rows) ? result.rows : [];
     state.total = Number(result?.total || 0);
@@ -93,6 +107,18 @@ async function loadRecords() {
   }
 }
 
+async function loadShops() {
+  const rows = await apiClient.get("/api/shops", { noCache: true });
+  state.shops = Array.isArray(rows)
+    ? rows
+      .filter((shop) => String(shop.status || "").toLowerCase() !== "deleted")
+      .map((shop) => ({
+        id: String(shop.id),
+        name: String(shop.name || `店铺 ${shop.id}`)
+      }))
+    : [];
+}
+
 function handleSelectionChange(rows) {
   selectedRows.value = rows;
 }
@@ -100,7 +126,7 @@ function handleSelectionChange(rows) {
 function resetFilters() {
   state.query = "";
   state.nameQuery = "";
-  state.shopQuery = "";
+  state.shopId = "all";
   state.status = "all";
   state.quality = "all";
   state.page = 1;
@@ -146,6 +172,14 @@ function statusText(status) {
   return map[status] || status || "未知";
 }
 
+function publishFailureReason(row = {}) {
+  return row.error_summary || row.error?.message || "";
+}
+
+function publishFailureFixTip(row = {}) {
+  return row.error_fix_tip || row.error?.fix_tip || "";
+}
+
 function isSuccessStatus(status) {
   return ["imported", "published", "success"].includes(status);
 }
@@ -176,6 +210,22 @@ function qualitySourceText(source) {
   return value || "未返回";
 }
 
+function recordPriceText(row = {}) {
+  const price = Number(row.price || 0);
+  const oldPrice = Number(row.old_price || 0);
+  const currency = row.currency_code || "RUB";
+  if (!price) return "-";
+  return oldPrice && oldPrice !== price
+    ? `${price} ${currency} / 划线 ${oldPrice}`
+    : `${price} ${currency}`;
+}
+
+function compactDateTime(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "-";
+  return text.replace("T", " ").replace(/\.\d+Z?$/, "").replace(/Z$/, "").slice(0, 16);
+}
+
 async function loadPublishRecordDetail(row) {
   if (row?.request?.items) return row;
   detailLoadingId.value = row.id;
@@ -190,18 +240,53 @@ async function loadPublishRecordDetail(row) {
 }
 
 async function editInListingAutomation(row) {
-  const detail = await loadPublishRecordDetail(row);
-  const key = `listing-record-draft-${detail.id}-${Date.now()}`;
-  sessionStorage.setItem(key, JSON.stringify({
-    record_id: detail.id,
-    updated_at: detail.updated_at || "",
-    shop_id: detail.shop_id,
-    template: buildTemplateFromRecord(detail)
-  }));
-  router.push({ name: "listing-automation", query: { recordDraft: key, recordId: detail.id } });
+  if (!row?.id) return;
+  router.push({
+    name: "listing-automation",
+    query: {
+      workbenchId: createListingWorkbenchId(),
+      tabTitle: `商品上架 · 记录 ${row.id}`,
+      recordId: row.id,
+      returnTo: router.currentRoute.value.fullPath
+    }
+  });
+}
+
+function openAiOptimize(row) {
+  if (!row?.id) return;
+  router.push({
+    name: "asset-variant-center-create",
+    query: {
+      workbenchId: createAiWorkbenchId(),
+      tabTitle: `AI素材优化 · 记录 ${row.id}`,
+      listingRecordId: String(row.id),
+      source: "listing_record",
+      autoImport: "1",
+      importAt: String(Date.now())
+    }
+  });
 }
 
 function buildTemplateFromRecord(row) {
+  const snapshot = plainClone(row.template_snapshot, null);
+  if (snapshot?.editable_payload) {
+    const editable = snapshot.editable_payload || {};
+    const sourceRaw = plainClone(snapshot.source_raw || editable.source_raw || {}, {});
+    sourceRaw.record_id = row.id;
+    sourceRaw.shop_id = row.shop_id;
+    sourceRaw.from_publish_record = true;
+    if (!sourceRaw.offer_id) sourceRaw.offer_id = row.offer_id || editable.sku || "";
+    return {
+      ...snapshot,
+      id: "",
+      template_name: snapshot.template_name || `上架记录 ${row.id} / ${row.offer_id || editable.sku || ""}`,
+      source_raw: sourceRaw,
+      editable_payload: {
+        ...editable,
+        source_raw: sourceRaw
+      }
+    };
+  }
   const payload = plainClone(row.request, { items: [] });
   const item = payload.items?.[0] || {};
   const images = [item.primary_image, ...(item.images || [])].filter(Boolean).map((url, index) => ({ url, sort_order: index + 1 }));
@@ -209,7 +294,7 @@ function buildTemplateFromRecord(row) {
   const modelName = generatedModelName(row, item);
   const productTags = extractProductTags(item);
   const richJson = extractRichContentJson(item);
-  const material = extractAttributeValue(item, ["材料", "材质", "material", "материал"]) || item.material || "";
+  const material = extractAttributeValue(item, ["材料", "材质", "material", "материал"], [7199]) || item.material || "";
   const categoryName = row.category_name || row.category_name_zh || row.path_zh || item.category_name || item.description_category_name || "";
   const variant = {
     id: `record-${row.id}`,
@@ -282,15 +367,18 @@ function generatedModelName(row, item = {}) {
 }
 
 function extractProductTags(item = {}) {
-  const raw = extractAttributeValue(item, ["产品标签", "主题标签", "主图标签", "tag", "тег", "ключ"]);
+  const raw = extractAttributeValue(item, ["产品标签", "主题标签", "主图标签", "tag", "тег", "ключ"], [10096, 23171]);
   return String(raw || "").split(/[\s,，;；]+/).map((value) => value.trim()).filter((value) => value.startsWith("#") || /[a-zа-яё0-9_]/i.test(value)).slice(0, 20);
 }
 
-function extractAttributeValue(item = {}, names = []) {
+function extractAttributeValue(item = {}, names = [], ids = []) {
   const attrs = Array.isArray(item.attributes) ? item.attributes : [];
   for (const attr of attrs) {
     const name = String(attr?.name || attr?.attribute_name || "").toLowerCase();
-    if (!names.some((needle) => name.includes(String(needle).toLowerCase()))) continue;
+    const attrId = Number(attr?.id || attr?.attribute_id || 0);
+    const matchesName = names.some((needle) => name.includes(String(needle).toLowerCase()));
+    const matchesId = ids.some((id) => Number(id) === attrId);
+    if (!matchesName && !matchesId) continue;
     const values = Array.isArray(attr.values) ? attr.values : [];
     const first = values.map((value) => value?.value || value?.name || value?.text || value).filter(Boolean)[0];
     return String(attr.value || first || "").trim();
@@ -299,7 +387,8 @@ function extractAttributeValue(item = {}, names = []) {
 }
 
 function extractRichContentJson(item = {}) {
-  const direct = extractAttributeValue(item, ["JSON富内容", "Rich", "rich"]);
+  if (item.rich_content_json) return String(item.rich_content_json || "");
+  const direct = extractAttributeValue(item, ["JSON富内容", "Rich", "rich"], [11254]);
   if (direct) return direct;
   const complexGroups = Array.isArray(item.complex_attributes) ? item.complex_attributes : [];
   for (const group of complexGroups) {
@@ -316,6 +405,11 @@ async function openDrawer(row) {
   const payload = plainClone(detail.request, { items: [] });
   const item = payload.items?.[0] || {};
   drawer.row = detail;
+  drawerPayloadCache = payload;
+  drawerResponseCache = { response: detail.response, error: detail.error };
+  drawer.technicalJsonLoaded = false;
+  drawer.payloadText = "";
+  drawer.responseText = "";
   drawer.form = {
     name: item.name || "",
     offer_id: item.offer_id || "",
@@ -325,7 +419,6 @@ async function openDrawer(row) {
     imagesText: (item.images || []).join("\n"),
     videoUrlsText: extractVideoUrls(item).join("\n")
   };
-  drawer.payloadText = JSON.stringify(payload, null, 2);
   drawer.visible = true;
 }
 
@@ -338,7 +431,9 @@ function plainClone(value, fallback = {}) {
 }
 
 function applyFormToPayload() {
-  const payload = JSON.parse(drawer.payloadText || "{}");
+  const payload = drawer.technicalJsonLoaded
+    ? JSON.parse(drawer.payloadText || "{}")
+    : plainClone(drawerPayloadCache || {}, {});
   if (!Array.isArray(payload.items) || !payload.items[0]) payload.items = [{}];
   const item = payload.items[0];
   item.name = drawer.form.name;
@@ -348,8 +443,15 @@ function applyFormToPayload() {
   item.primary_image = drawer.form.primary_image;
   item.images = splitLines(drawer.form.imagesText);
   setVideoUrls(item, splitLines(drawer.form.videoUrlsText));
-  drawer.payloadText = JSON.stringify(payload, null, 2);
+  drawerPayloadCache = payload;
+  if (drawer.technicalJsonLoaded) drawer.payloadText = JSON.stringify(payload, null, 2);
   return payload;
+}
+
+function loadDrawerTechnicalJson() {
+  drawer.payloadText = JSON.stringify(drawerPayloadCache || {}, null, 2);
+  drawer.responseText = JSON.stringify(drawerResponseCache || {}, null, 2);
+  drawer.technicalJsonLoaded = true;
 }
 
 async function retryRecord() {
@@ -367,6 +469,8 @@ async function retryRecord() {
       payload,
       updated_at: drawer.row.updated_at || ""
     });
+    drawerResponseCache = { response: updated.response, error: updated.error };
+    if (drawer.technicalJsonLoaded) drawer.responseText = JSON.stringify(drawerResponseCache, null, 2);
     const index = state.rows.findIndex((row) => Number(row.id) === Number(updated.id));
     if (index >= 0) state.rows[index] = updated;
     drawer.visible = false;
@@ -487,17 +591,13 @@ function splitLines(value) {
   return String(value || "").split(/\r?\n|,|，/).map((item) => item.trim()).filter(Boolean);
 }
 
-function prettyJson(value) {
-  return JSON.stringify(value || {}, null, 2);
-}
-
 function previewImageUrl(url = "") {
   const value = String(url || "").trim();
   if (!value) return "";
   if (/^https?:\/\//i.test(value)) {
     try {
       const parsed = new URL(value);
-      if (parsed.pathname.startsWith("/uploads/")) return withImageToken(`${parsed.pathname}${parsed.search}`);
+      if (parsed.origin === window.location.origin && parsed.pathname.startsWith("/uploads/")) return withImageToken(`${parsed.pathname}${parsed.search}`);
     } catch {
       return value;
     }
@@ -506,12 +606,26 @@ function previewImageUrl(url = "") {
   return value;
 }
 
+function isWeakPreviewImageUrl(url = "") {
+  const value = String(url || "").trim();
+  if (!/^https?:\/\//i.test(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.origin !== window.location.origin && parsed.pathname.startsWith("/uploads/");
+  } catch {
+    return false;
+  }
+}
+
 function recordPreviewCandidates(row = {}) {
   return [
     row.primary_image,
     ...(Array.isArray(row.images) ? row.images : []),
     row.fallback_image
-  ].map(previewImageUrl).filter(Boolean);
+  ]
+    .map(previewImageUrl)
+    .filter(Boolean)
+    .sort((left, right) => Number(isWeakPreviewImageUrl(left)) - Number(isWeakPreviewImageUrl(right)));
 }
 
 function recordPreviewImage(row = {}) {
@@ -533,7 +647,9 @@ function handleRecordImageError(event, row = {}) {
   image.src = recordImagePlaceholder;
 }
 
-onMounted(loadRecords);
+onMounted(async () => {
+  await Promise.all([loadShops(), loadRecords()]);
+});
 </script>
 
 <template>
@@ -541,8 +657,11 @@ onMounted(loadRecords);
     <section class="toolbar-panel">
       <div class="toolbar-filters">
         <el-input v-model="state.nameQuery" :prefix-icon="Search" clearable placeholder="名称 / offer_id" @keyup.enter="searchRecords" @clear="searchRecords" />
-        <el-input v-model="state.shopQuery" clearable placeholder="店铺" @keyup.enter="searchRecords" @clear="searchRecords" />
-        <el-input v-model="state.query" clearable placeholder="基础信息：task / 类目 / product id" @keyup.enter="searchRecords" @clear="searchRecords" />
+        <el-select v-model="state.shopId" filterable placeholder="店铺" @change="searchRecords">
+          <el-option label="全部店铺" value="all" />
+          <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="shop.id" />
+        </el-select>
+        <el-input v-model="state.query" clearable placeholder="offer / product id / 类目" @keyup.enter="searchRecords" @clear="searchRecords" />
         <el-select v-model="state.status" placeholder="状态" @change="searchRecords">
           <el-option label="全部状态" value="all" />
           <el-option label="上架成功" value="success" />
@@ -560,7 +679,6 @@ onMounted(loadRecords);
         <span class="selection-count">已选 {{ selectedRows.length }} / 当前 {{ filteredRows.length }}</span>
         <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Search" @click="searchRecords">查询</el-button>
         <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="loading" @click="loadRecords">刷新</el-button>
-        <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="batchRefreshing" :disabled="!selectedRows.length" @click="batchRefreshRecords">批量刷新</el-button>
         <el-button class="erp-btn erp-btn-danger" type="danger" plain :icon="Delete" :loading="batchDeleting" :disabled="!selectedRows.length" @click="batchDeleteRecords">批量删除</el-button>
         <el-button class="erp-btn erp-btn-secondary" @click="resetFilters">重置</el-button>
       </div>
@@ -577,15 +695,15 @@ onMounted(loadRecords);
         @selection-change="handleSelectionChange"
       >
       <el-table-column type="selection" width="44" fixed="left" />
-      <el-table-column label="商品" min-width="360">
+      <el-table-column label="商品" min-width="300">
         <template #default="{ row }">
           <div class="record-product">
-            <img
+            <ProductImagePreview
               :src="recordPreviewImage(row) || recordImagePlaceholder"
-              alt=""
-              loading="lazy"
-              data-preview-index="0"
-              @error="handleRecordImageError($event, row)"
+              :preview-list="recordPreviewCandidates(row)"
+              size="portrait"
+              fit="cover"
+              proxy-remote
             />
             <div>
               <ProductTitleLink :title="publishRecordProductTitle(row)" :href="publishRecordBuyerLink(row)" :lines="2" />
@@ -595,10 +713,19 @@ onMounted(loadRecords);
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="店铺" min-width="130" prop="shop_name" />
+      <el-table-column label="店铺" width="118" prop="shop_name" />
       <el-table-column label="状态" width="120">
         <template #default="{ row }">
           <el-tag :type="statusType(row.status)" effect="plain">{{ statusText(row.status) }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="失败原因" min-width="220">
+        <template #default="{ row }">
+          <div v-if="publishFailureReason(row)" class="failure-cell">
+            <strong>{{ publishFailureReason(row) }}</strong>
+            <span v-if="publishFailureFixTip(row)">{{ publishFailureFixTip(row) }}</span>
+          </div>
+          <span v-else class="muted-text">-</span>
         </template>
       </el-table-column>
       <el-table-column label="内容评分" width="150">
@@ -612,29 +739,22 @@ onMounted(loadRecords);
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="价格" width="130">
-        <template #default="{ row }">{{ row.price }} {{ row.currency_code }}</template>
-      </el-table-column>
-      <el-table-column label="技术信息" min-width="220">
+      <el-table-column label="售价" width="176">
         <template #default="{ row }">
-          <div class="tech-stack">
-          <span>task: {{ row.task_id || "-" }}</span>
-          <span>product: {{ row.ozon_product_id || "-" }}</span>
-          <span>cat: {{ row.description_category_id || "-" }} / {{ row.type_id || "-" }}</span>
-          <span v-if="row.quality_checked_at">score checked: {{ row.quality_checked_at }}</span>
-        </div>
-      </template>
-    </el-table-column>
-      <el-table-column label="更新时间" width="175">
-        <template #default="{ row }">{{ row.updated_at || row.created_at }}</template>
+          <span class="price-cell">{{ recordPriceText(row) }}</span>
+        </template>
       </el-table-column>
-      <el-table-column label="操作" width="132" fixed="right" class-name="record-actions-column">
+      <el-table-column label="更新时间" width="176">
+        <template #default="{ row }">
+          <span class="record-text nowrap">{{ compactDateTime(row.updated_at || row.created_at) }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="196" fixed="right" class-name="record-actions-column">
         <template #default="{ row }">
           <div class="row-actions">
-            <el-button class="erp-btn erp-btn-secondary" size="small" type="primary" plain :icon="Edit" :loading="detailLoadingId === row.id" @click="editInListingAutomation(row)">编辑</el-button>
-            <el-button class="erp-btn erp-btn-secondary" size="small" plain :icon="View" :loading="detailLoadingId === row.id" @click="openDrawer(row)">档案</el-button>
-            <el-button class="erp-btn erp-btn-secondary" size="small" type="success" plain :icon="Refresh" :loading="refreshingId === row.id" @click="refreshRecord(row)">刷新</el-button>
-            <el-button class="erp-btn erp-btn-danger" size="small" type="danger" plain :icon="Delete" :loading="deletingId === row.id" @click="deleteRecord(row)">删除</el-button>
+            <el-button class="erp-btn-link" link type="primary" :icon="Edit" :disabled="detailLoadingId === row.id" @click="editInListingAutomation(row)">编辑</el-button>
+            <el-button class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiOptimize(row)">AI优化</el-button>
+            <el-button class="erp-btn-link-danger" link type="danger" :icon="Delete" :disabled="deletingId === row.id" @click="deleteRecord(row)">删除</el-button>
           </div>
         </template>
       </el-table-column>
@@ -652,10 +772,12 @@ onMounted(loadRecords);
     <el-drawer v-model="drawer.visible" title="上架记录详情" size="760px">
       <div v-if="drawer.row" class="record-drawer">
         <section class="drawer-hero">
-          <img
+          <ProductImagePreview
             :src="recordPreviewImage(drawer.row) || recordImagePlaceholder"
-            alt=""
-            @error="handleRecordImageError($event, drawer.row)"
+            :preview-list="recordPreviewCandidates(drawer.row)"
+            size="portrait"
+            fit="cover"
+            proxy-remote
           />
           <div>
             <el-tag :type="statusType(drawer.row.status)" effect="plain">{{ statusText(drawer.row.status) }}</el-tag>
@@ -663,6 +785,15 @@ onMounted(loadRecords);
             <span>{{ drawer.row.shop_name }} / {{ drawer.row.offer_id }}</span>
           </div>
         </section>
+
+        <el-alert
+          v-if="publishFailureReason(drawer.row)"
+          type="error"
+          :title="publishFailureReason(drawer.row)"
+          :description="publishFailureFixTip(drawer.row)"
+          show-icon
+          :closable="false"
+        />
 
         <el-form label-width="96px">
           <el-form-item label="标题">
@@ -690,10 +821,15 @@ onMounted(loadRecords);
 
         <el-collapse>
           <el-collapse-item title="技术 JSON">
-            <el-input v-model="drawer.payloadText" type="textarea" :rows="18" />
+            <div class="technical-json-toolbar">
+              <el-button v-if="!drawer.technicalJsonLoaded" class="erp-btn erp-btn-secondary" :icon="View" @click="loadDrawerTechnicalJson">加载技术 JSON</el-button>
+            </div>
+            <el-input v-if="drawer.technicalJsonLoaded" v-model="drawer.payloadText" type="textarea" :rows="18" />
+            <el-empty v-else description="技术 JSON 较大，默认不渲染；需要查看或手改时再加载。" />
           </el-collapse-item>
           <el-collapse-item title="Ozon 返回 / 错误">
-            <el-input :model-value="prettyJson({ response: drawer.row.response, error: drawer.row.error })" type="textarea" :rows="14" readonly />
+            <el-input v-if="drawer.technicalJsonLoaded" v-model="drawer.responseText" type="textarea" :rows="14" readonly />
+            <el-empty v-else description="返回明细按需加载，避免大 JSON 卡住页面。" />
           </el-collapse-item>
         </el-collapse>
 
@@ -708,7 +844,7 @@ onMounted(loadRecords);
 
 <style scoped>
 .publish-records-page { gap: 12px; min-height: 0; }
-.record-product span, .record-product em, .tech-stack span, .drawer-hero span { color: #697386; font-size: 12px; }
+.record-product span, .record-product em, .drawer-hero span, .muted-text { color: #697386; font-size: 12px; }
 .toolbar-panel {
   display: flex;
   align-items: center;
@@ -741,26 +877,41 @@ onMounted(loadRecords);
 .publish-table-wrap {
   flex: 1 1 auto;
 }
-.record-product { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; align-items: center; }
-.record-product img, .drawer-hero img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; border: 1px solid #edf1f7; background: #f8fafc; }
-.record-product div, .tech-stack, .drawer-hero div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.record-product { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 10px; align-items: center; }
+.record-product :deep(.erp-image-preview) { width: 56px; height: 74px; }
+.drawer-hero img { width: 64px; height: 84px; object-fit: cover; border-radius: 8px; border: 1px solid #edf1f7; background: #f8fafc; }
+.record-product div, .drawer-hero div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .record-product strong { overflow-wrap: anywhere; }
-.quality-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-.quality-cell span, .quality-cell em { color: #697386; font-size: 12px; font-style: normal; }
-.row-actions {
-  display: grid;
-  grid-template-columns: repeat(2, 54px);
-  gap: 6px;
-  justify-content: center;
+.record-text,
+.price-cell,
+.failure-cell strong,
+.failure-cell span,
+.quality-cell span,
+.quality-cell em {
+  color: #475467;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.45;
 }
-.row-actions .el-button {
-  width: 54px;
-  margin-left: 0;
+.record-text.nowrap { white-space: nowrap; }
+.price-cell { display: inline-block; overflow-wrap: anywhere; }
+.quality-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.quality-cell em { font-style: normal; }
+.failure-cell { display: flex; flex-direction: column; gap: 4px; line-height: 1.35; }
+.failure-cell strong { overflow-wrap: anywhere; }
+.failure-cell span { overflow-wrap: anywhere; }
+.row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
 }
 .record-drawer { display: flex; flex-direction: column; gap: 16px; }
-.drawer-hero { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 12px; align-items: center; padding: 12px; border: 1px solid #e5eaf3; border-radius: 8px; background: #f8fafc; }
+.drawer-hero { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; align-items: center; padding: 12px; border: 1px solid #e5eaf3; border-radius: 8px; background: #f8fafc; }
 .drawer-hero strong { font-size: 16px; overflow-wrap: anywhere; }
 .drawer-actions { display: flex; justify-content: flex-end; gap: 10px; position: sticky; bottom: 0; background: #fff; padding-top: 12px; }
+.technical-json-toolbar { display: flex; justify-content: flex-start; margin-bottom: 10px; }
 @media (max-width: 1280px) {
   .toolbar-panel {
     align-items: stretch;
