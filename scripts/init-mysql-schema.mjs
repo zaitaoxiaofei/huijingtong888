@@ -81,6 +81,12 @@ CREATE TABLE IF NOT EXISTS products (
   material VARCHAR(255) NULL,
   color VARCHAR(255) NULL,
   selling_points TEXT NULL,
+  listing_title_ru TEXT NULL,
+  listing_tags_ru TEXT NULL,
+  listing_description_ru TEXT NULL,
+  listing_title_prompt TEXT NULL,
+  listing_tags_prompt TEXT NULL,
+  listing_description_prompt TEXT NULL,
   purchase_url TEXT NULL,
   supplier_note TEXT NULL,
   source_platform VARCHAR(64) NOT NULL DEFAULT '1688',
@@ -283,6 +289,8 @@ CREATE TABLE IF NOT EXISTS outbound_records (
   ozon_sku VARCHAR(128) NULL,
   person_id BIGINT UNSIGNED NULL,
   quantity INT NOT NULL,
+  stock_location VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN',
+  stock_location_source VARCHAR(64) NOT NULL DEFAULT 'legacy_unknown',
   reason VARCHAR(64) NOT NULL DEFAULT 'order',
   status VARCHAR(32) NOT NULL DEFAULT 'deducted',
   note TEXT NULL,
@@ -290,6 +298,7 @@ CREATE TABLE IF NOT EXISTS outbound_records (
   KEY idx_outbound_order_item (order_item_id),
   KEY idx_outbound_order_sku (order_ref, product_id, ozon_sku),
   KEY idx_outbound_status_created (status, created_at),
+  KEY idx_outbound_stock_location (stock_location, status, created_at),
   KEY idx_outbound_shop_created (shop_id, created_at),
   KEY idx_outbound_created (created_at, id),
   KEY idx_outbound_order_ref (order_ref)
@@ -304,6 +313,8 @@ CREATE TABLE IF NOT EXISTS inventory_movements (
   source_type VARCHAR(64) NOT NULL,
   source_ref VARCHAR(255) NULL,
   quantity_delta INT NOT NULL,
+  stock_location VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN',
+  stock_location_source VARCHAR(64) NOT NULL DEFAULT 'legacy_unknown',
   unit_cost DECIMAL(18,4) NOT NULL DEFAULT 0,
   amount DECIMAL(18,4) NOT NULL DEFAULT 0,
   movement_type VARCHAR(64) NULL,
@@ -315,6 +326,7 @@ CREATE TABLE IF NOT EXISTS inventory_movements (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_inventory_product_status (product_id, status),
   KEY idx_inventory_related_order_item (related_order_item_id),
+  KEY idx_inventory_stock_location (stock_location, status, created_at),
   KEY idx_inventory_source_ref (source_type, source_ref(128)),
   KEY idx_inventory_related_posting (related_posting_number, product_id, source_type, status),
   KEY idx_inventory_created (created_at, id)
@@ -870,9 +882,19 @@ try {
     "ALTER TABLE shops ADD COLUMN watermark_opacity_percent DECIMAL(8,4) NOT NULL DEFAULT 82.0000",
     "ALTER TABLE people ADD COLUMN password_hash TEXT NULL",
     "ALTER TABLE products ADD COLUMN supplier_id BIGINT UNSIGNED NULL",
+    "ALTER TABLE products ADD COLUMN listing_title_ru TEXT NULL",
+    "ALTER TABLE products ADD COLUMN listing_tags_ru TEXT NULL",
+    "ALTER TABLE products ADD COLUMN listing_description_ru TEXT NULL",
+    "ALTER TABLE products ADD COLUMN listing_title_prompt TEXT NULL",
+    "ALTER TABLE products ADD COLUMN listing_tags_prompt TEXT NULL",
+    "ALTER TABLE products ADD COLUMN listing_description_prompt TEXT NULL",
     "ALTER TABLE procurement_requests ADD COLUMN cancelled_at DATETIME NULL",
     "ALTER TABLE inventory_movements ADD COLUMN movement_type VARCHAR(64) NULL",
     "ALTER TABLE inventory_movements ADD COLUMN operator VARCHAR(255) NULL",
+    "ALTER TABLE inventory_movements ADD COLUMN stock_location VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'",
+    "ALTER TABLE inventory_movements ADD COLUMN stock_location_source VARCHAR(64) NOT NULL DEFAULT 'legacy_unknown'",
+    "ALTER TABLE outbound_records ADD COLUMN stock_location VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'",
+    "ALTER TABLE outbound_records ADD COLUMN stock_location_source VARCHAR(64) NOT NULL DEFAULT 'legacy_unknown'",
     "ALTER TABLE order_label_prints ADD COLUMN print_batch_id VARCHAR(64) NULL",
     "ALTER TABLE order_label_prints ADD COLUMN print_sequence INT NULL"
   ];
@@ -891,6 +913,8 @@ try {
   }
   const indexStatements = [
     "CREATE INDEX idx_outbound_shop_created ON outbound_records (shop_id, created_at)",
+    "CREATE INDEX idx_outbound_stock_location ON outbound_records (stock_location, status, created_at)",
+    "CREATE INDEX idx_inventory_stock_location ON inventory_movements (stock_location, status, created_at)",
     "CREATE INDEX idx_order_label_prints_sequence ON order_label_prints (printed_at, print_batch_id, print_sequence, order_id)"
   ];
   for (const sql of indexStatements) {

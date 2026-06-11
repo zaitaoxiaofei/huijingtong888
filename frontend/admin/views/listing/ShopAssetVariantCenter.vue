@@ -19,6 +19,7 @@ import { useAuthStore } from "../../stores/auth.js";
 
 const VIDEO_DURATION = 8;
 const VIDEO_GENERATE_CONCURRENCY = 4;
+const videoImageCache = new Map();
 const SOURCE_DETAIL_IMAGE_LIMIT = 24;
 const SOURCE_IMAGE_META_CONCURRENCY = 4;
 const SOURCE_IMAGE_META_TIMEOUT_MS = 4500;
@@ -256,6 +257,114 @@ function cleanMetricValue(value) {
   const number = Number(text);
   if (!Number.isFinite(number)) return text;
   return String(Math.round(number));
+}
+
+function objectValue(value) {
+  if (!value) return null;
+  if (typeof value === "object") return value;
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function sourcePayloads(row = {}) {
+  const edited = [
+    objectValue(row.source_template_snapshot),
+    objectValue(row.templateSnapshot),
+    objectValue(row.template_snapshot),
+    objectValue(row.listingTemplate),
+    objectValue(row.listing_template),
+    objectValue(row.editPayload),
+    objectValue(row.edit_payload),
+    objectValue(row.editablePayload),
+    objectValue(row.editable_payload)
+  ].filter((item) => item && typeof item === "object");
+  const raw = [
+    row,
+    objectValue(row.rawPayload),
+    objectValue(row.raw_payload),
+    objectValue(row.raw),
+    objectValue(row.raw_json),
+    objectValue(row.payload),
+    objectValue(row.request),
+    objectValue(row.request_json)
+  ].filter((item) => item && typeof item === "object");
+  const base = [...edited, ...raw];
+  return [
+    ...base,
+    ...base.flatMap((item) => [
+      objectValue(item.editPayload),
+      objectValue(item.edit_payload),
+      objectValue(item.editablePayload),
+      objectValue(item.editable_payload),
+      objectValue(item.payload),
+      objectValue(item.rawPayload),
+      objectValue(item.raw_payload),
+      objectValue(item.source_raw),
+      objectValue(item.templateSnapshot),
+      objectValue(item.template_snapshot),
+      objectValue(item.listingTemplate),
+      objectValue(item.listing_template)
+    ]).filter((item) => item && typeof item === "object")
+  ];
+}
+
+function payloadValue(payloads = [], keys = []) {
+  for (const payload of payloads) {
+    for (const key of keys) {
+      const value = payload?.[key];
+      if (Array.isArray(value) ? value.length : String(value ?? "").trim()) return value;
+    }
+  }
+  return "";
+}
+
+function parseCategoryIds(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+  const text = String(value || "").trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return parseCategoryIds(parsed);
+  } catch {
+    // Split plain category paths below.
+  }
+  return text.split(/\s*(?:>|\/|,|，)\s*/).map((item) => item.trim()).filter(Boolean);
+}
+
+function categoryMetaFromPayloads(payloads = []) {
+  let descriptionCategoryId = String(payloadValue(payloads, [
+    "description_category_id",
+    "descriptionCategoryId",
+    "ozon_description_category_id",
+    "ozonDescriptionCategoryId"
+  ]) || "").trim();
+  let typeId = String(payloadValue(payloads, ["type_id", "typeId", "ozon_type_id", "ozonTypeId"]) || "").trim();
+  const categoryIds = parseCategoryIds(payloadValue(payloads, ["category_ids", "categoryIds"]));
+  if (!descriptionCategoryId && categoryIds.length >= 2) descriptionCategoryId = categoryIds[categoryIds.length - 2];
+  if (!typeId && categoryIds.length) typeId = categoryIds[categoryIds.length - 1];
+  const ozonCategoryId = String(payloadValue(payloads, [
+    "ozon_category_id",
+    "ozonCategoryId",
+    "category_id",
+    "categoryId"
+  ]) || (descriptionCategoryId && typeId ? `${descriptionCategoryId}:${typeId}` : "")).trim();
+  return {
+    ozonCategoryId,
+    descriptionCategoryId,
+    typeId,
+    categoryName: String(payloadValue(payloads, [
+      "ozon_category_name",
+      "ozonCategoryName",
+      "category_name",
+      "categoryName",
+      "category",
+      "product_type"
+    ]) || "").trim()
+  };
 }
 
 function defaultPriceIndexForShop(shop) {
@@ -581,15 +690,16 @@ function selectionProductMainImage(product) {
 
 async function applySelectionProduct(product) {
   if (!product.id) return;
+  const categoryMeta = categoryMetaFromPayloads(sourcePayloads(product));
   const mainImage = selectionProductMainImage(product);
   const detailImages = normalizeSourceImageList(product.detail_image_urls || product.detailImageUrls);
 
   material.title = product.name || product.product_name || material.title;
   material.sourceProductId = String(product.id || "");
-  material.ozonCategoryId = product.ozon_category_id || "";
-  material.ozonDescriptionCategoryId = product.ozon_description_category_id || "";
-  material.ozonTypeId = product.ozon_type_id || "";
-  material.ozonCategoryName = product.ozon_category_name || "";
+  material.ozonCategoryId = categoryMeta.ozonCategoryId;
+  material.ozonDescriptionCategoryId = categoryMeta.descriptionCategoryId;
+  material.ozonTypeId = categoryMeta.typeId;
+  material.ozonCategoryName = categoryMeta.categoryName;
   material.color = displayJoin(product.color) || material.color;
   material.material = displayJoin(product.material) || material.material;
   material.quantity = product.purchase_quantity ? `${product.purchase_quantity} 件` : material.quantity;
@@ -614,14 +724,15 @@ async function applySelectionProduct(product) {
     selectionId: product.selection_id,
     name: product.name || product.product_name || "",
     ownerName: product.owner_name || product.ownerName || "",
-    ozonCategoryId: product.ozon_category_id || "",
-    ozonCategoryName: product.ozon_category_name || ""
+    ozonCategoryId: categoryMeta.ozonCategoryId,
+    ozonCategoryName: categoryMeta.categoryName
   };
   refreshDefaultPriceIndexes();
 }
 
 async function applyCollectorBoxProduct(product) {
   if (!product?.sku) return;
+  const categoryMeta = categoryMetaFromPayloads(sourcePayloads(product));
   const raw = product.rawPayload || product.raw_payload || {};
   const payload = product.payload || {};
   const edit = product.editPayload || product.edit_payload || {};
@@ -642,10 +753,10 @@ async function applyCollectorBoxProduct(product) {
 
   material.title = product.title || payload.productTitle || raw.title || material.title;
   material.sourceProductId = String(product.sku || "");
-  material.ozonCategoryId = product.ozon_category_id || payload.ozon_category_id || "";
-  material.ozonDescriptionCategoryId = product.description_category_id || payload.description_category_id || "";
-  material.ozonTypeId = product.type_id || payload.type_id || "";
-  material.ozonCategoryName = product.category_name || payload.category || raw.categoryName || raw.category || "";
+  material.ozonCategoryId = categoryMeta.ozonCategoryId;
+  material.ozonDescriptionCategoryId = categoryMeta.descriptionCategoryId;
+  material.ozonTypeId = categoryMeta.typeId;
+  material.ozonCategoryName = categoryMeta.categoryName;
   material.color = displayJoin(payload.color || raw.color) || material.color;
   material.material = displayJoin(payload.material || raw.material) || material.material;
   material.quantity = payload.quantity || raw.quantity || material.quantity;
@@ -678,6 +789,7 @@ async function applyPublishRecord(record) {
   if (!record?.id) return;
   const request = record.request || {};
   const item = (Array.isArray(request.items) ? request.items[0] : null) || {};
+  const categoryMeta = categoryMetaFromPayloads([...sourcePayloads(record), ...sourcePayloads(item)]);
   const images = prioritizeSourceImages([...new Set(normalizeSourceImageList([
     record.primary_image,
     record.images,
@@ -694,12 +806,10 @@ async function applyPublishRecord(record) {
 
   material.title = item.name || record.product_name || record.offer_id || material.title;
   material.sourceProductId = String(record.offer_id || record.id || "");
-  material.ozonDescriptionCategoryId = item.description_category_id || record.description_category_id || "";
-  material.ozonTypeId = item.type_id || record.type_id || "";
-  material.ozonCategoryId = material.ozonDescriptionCategoryId && material.ozonTypeId
-    ? `${material.ozonDescriptionCategoryId}:${material.ozonTypeId}`
-    : "";
-  material.ozonCategoryName = record.category_name || "";
+  material.ozonCategoryId = categoryMeta.ozonCategoryId;
+  material.ozonDescriptionCategoryId = categoryMeta.descriptionCategoryId;
+  material.ozonTypeId = categoryMeta.typeId;
+  material.ozonCategoryName = categoryMeta.categoryName;
   material.color = displayJoin(item.color) || material.color;
   material.material = displayJoin(item.material) || material.material;
   material.quantity = item.quantity || material.quantity;
@@ -1038,8 +1148,10 @@ async function generateVideoForVariant(variant) {
   if (!imageUrl) throw new Error("请先准备主图");
   const watermark = shop ? watermarkTemplateFor(shop) : null;
   const logoUrl = watermarkPreviewUrl(watermark);
-  const image = await loadVideoImage(imageUrl);
-  const logo = logoUrl ? await loadVideoImage(logoUrl).catch(() => null) : null;
+  const [image, logo] = await Promise.all([
+    loadVideoImage(imageUrl),
+    logoUrl ? loadVideoImage(logoUrl, { cache: true }).catch(() => null) : null
+  ]);
   const blob = await renderShopVideo({ image, logo, watermark });
   const name = buildShopVideoName(variant);
   const objectUrl = URL.createObjectURL(blob);
@@ -1203,14 +1315,21 @@ function drawVideoLogo(ctx, width, height, logo, watermark = {}) {
   ctx.restore();
 }
 
-function loadVideoImage(src) {
-  return new Promise((resolve, reject) => {
+function loadVideoImage(src, options = {}) {
+  const cacheKey = options.cache ? String(src || "") : "";
+  if (cacheKey && videoImageCache.has(cacheKey)) return videoImageCache.get(cacheKey);
+  const promise = new Promise((resolve, reject) => {
     const image = new Image();
     image.crossOrigin = "anonymous";
     image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error("Image loading failed"));
+    image.onerror = () => {
+      if (cacheKey) videoImageCache.delete(cacheKey);
+      reject(new Error("Image loading failed"));
+    };
     image.src = src;
   });
+  if (cacheKey) videoImageCache.set(cacheKey, promise);
+  return promise;
 }
 
 function chooseVideoMimeType() {

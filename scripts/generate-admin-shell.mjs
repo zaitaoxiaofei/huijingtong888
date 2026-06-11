@@ -43,79 +43,6 @@ async function main() {
     .filter(Boolean)
     .map((file) => `    <link rel="modulepreload" href="/vue-apps/${file}" />`)
     .join("\n");
-  const routePreloadSources = {
-    "/dashboard": "frontend/admin/views/DashboardView.vue",
-    "/exceptions/profit": "frontend/admin/views/exceptions/ProfitExceptionView.vue",
-    "/exceptions/deadline": "frontend/admin/views/exceptions/DeadlineExceptionView.vue",
-    "/exceptions/deadline-warning": "frontend/admin/views/exceptions/DeadlineWarningExceptionView.vue",
-    "/exceptions/stock": "frontend/admin/views/exceptions/StockExceptionView.vue",
-    "/exceptions/binding": "frontend/admin/views/exceptions/BindingExceptionView.vue",
-    "/inventory": "frontend/admin/views/inventory/InventoryView.vue",
-    "/inventory/products": "frontend/admin/views/inventory/InventoryProductsPage.vue",
-    "/inventory/fbp": "frontend/admin/views/inventory/InventoryFbpPage.vue",
-    "/inventory/fbp-opportunities": "frontend/admin/views/inventory/InventoryFbpOpportunitiesPage.vue",
-    "/inventory/hidden": "frontend/admin/views/inventory/InventoryHiddenPage.vue",
-    "/inventory/mappings": "frontend/admin/views/inventory/InventoryMappingsPage.vue",
-    "/inventory/suppliers": "frontend/admin/views/inventory/InventorySuppliersPage.vue",
-    "/inventory/alerts": "frontend/admin/views/inventory/InventoryAlertsPage.vue",
-    "/online-products": "frontend/admin/views/inventory/OnlineProductsView.vue",
-    "/asset-variant-center": "frontend/admin/views/listing/ShopAssetVariantCenter.vue",
-    "/asset-variant-center/create": "frontend/admin/views/settings/PromptLibraryView.vue",
-    "/listing-automation": "frontend/admin/views/listing/ListingAutomationView.vue",
-    "/collector-box": "frontend/admin/views/listing/CollectorBoxView.vue",
-    "/listing-records": "frontend/admin/views/listing/ListingPublishRecordsView.vue",
-    "/ozon-actions": "frontend/admin/views/marketing/OzonActionsView.vue",
-    "/selection": "frontend/admin/views/selection/SelectionView.vue",
-    "/profit": "frontend/admin/views/profit/ProfitDashboardView.vue",
-    "/seller-analytics": "frontend/admin/views/analytics/SellerAnalyticsView.vue",
-    "/profit/aftersales": "frontend/admin/views/profit/ProfitAftersalesView.vue",
-    "/profit/sku-ranking": "frontend/admin/views/profit/ProfitDashboardView.vue",
-    "/profit/shop-ranking": "frontend/admin/views/profit/ProfitDashboardView.vue",
-    "/advertising/daily": "frontend/admin/views/advertising/AdvertisingDailyView.vue",
-    "/orders": "frontend/admin/views/orders/OrdersView.vue",
-    "/outbound": "frontend/admin/views/orders/OutboundView.vue",
-    "/customer-messages": "frontend/admin/views/orders/CustomerMessagesView.vue",
-    "/procurement": "frontend/admin/views/procurement/ProcurementView.vue",
-    "/purchase-list": "frontend/admin/views/procurement/PurchaseListView.vue",
-    "/purchase-history": "frontend/admin/views/procurement/PurchaseHistoryView.vue",
-    "/settings": "frontend/admin/views/settings/SettingsView.vue",
-    "/settings/scheduled-jobs": "frontend/admin/views/settings/ScheduledJobsView.vue",
-    "/settings/ai": "frontend/admin/views/settings/AiProviderSettingsView.vue",
-    "/settings/materials": "frontend/admin/views/settings/MaterialCenterView.vue",
-    "/tools/product-video-generator": "frontend/admin/views/tools/ProductVideoGenerator.vue",
-    "/tools/image-cropper": "frontend/admin/views/tools/EcommerceImageSplitterV3.vue",
-    "/tools/ecommerce-image-splitter": "frontend/admin/views/tools/EcommerceImageSplitterV3.vue"
-  };
-  const routePreloadMap = Object.fromEntries(Object.entries(routePreloadSources)
-    .map(([route, source]) => {
-      const entry = manifest[source];
-      if (!entry?.file) return null;
-      return [route, {
-        js: `/vue-apps/${entry.file}`,
-        css: (entry.css || []).map((file) => `/vue-apps/${file}`)
-      }];
-    })
-    .filter(Boolean));
-  const routePreloadScript = `    <script>
-      (function () {
-        var preloadMap = ${JSON.stringify(routePreloadMap)};
-        var route = decodeURIComponent(String(window.location.hash || "#/dashboard").slice(1).split("?")[0] || "/dashboard");
-        var preload = preloadMap[route];
-        if (!preload) return;
-        function addLink(rel, href) {
-          if (!href || document.querySelector('link[href="' + href + '"]')) return;
-          var link = document.createElement("link");
-          link.rel = rel;
-          link.href = href;
-          document.head.appendChild(link);
-        }
-        addLink("modulepreload", preload.js);
-        (preload.css || []).forEach(function (href) {
-          addLink("stylesheet", href);
-        });
-      })();
-    </script>`;
-
   const html = `<!doctype html>
 <html lang="zh-CN">
   <head>
@@ -131,7 +58,6 @@ async function main() {
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232563eb'/%3E%3Ctext x='50%25' y='54%25' text-anchor='middle' font-size='28' font-family='Arial, sans-serif' font-weight='700' fill='white'%3EOZ%3C/text%3E%3C/svg%3E" />
 ${styleTags}
 ${modulePreloadTags}
-${routePreloadScript}
     <style>
       .admin-static-login-fallback {
         position: fixed;

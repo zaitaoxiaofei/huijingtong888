@@ -22,10 +22,12 @@ export const navigationMenus = [
       { key: "collector-box", label: "采集箱", route: "/collector-box" },
       { key: "selection", label: "选品池", route: "/selection" },
       { key: "listing-automation", label: "商品上架", route: "/listing-automation" },
-      { key: "listing-records", label: "上架记录", route: "/listing-records" },
+      { key: "listing-records", label: "草稿箱", route: "/listing-records" },
+      { key: "listing-publish-records", label: "上架记录", route: "/listing-publish-records" },
       { key: "online-products", label: "在线商品", route: "/online-products" },
-      { key: "asset-variant-center", label: "多店铺商品", route: "/asset-variant-center" },
-      { key: "main-image-vehicle-variant", label: "AI 素材优化", route: "/asset-variant-center/create" },
+      { key: "asset-variant-center", label: "AI商品4 多店铺", route: "/asset-variant-center" },
+      { key: "ai-product-variant-wizard", label: "AI裂变", route: "/asset-variant-center/wizard" },
+      { key: "ai-optimization-workbench-v2", label: "AI商品3 内容优化", route: "/ai-optimization-workbench-v2" },
     ]
   },
   {
@@ -90,6 +92,7 @@ export const navigationMenus = [
       { key: "settings", label: "基础资料", route: "/settings" },
       { key: "settings-scheduled-jobs", label: "自动任务", route: "/settings/scheduled-jobs" },
       { key: "settings-ai", label: "AI 设置", route: "/settings/ai" },
+      { key: "settings-prompts", label: "AI提示词库", route: "/settings/prompts" },
       { key: "settings-materials", label: "素材库", route: "/settings/materials" }
     ]
   }

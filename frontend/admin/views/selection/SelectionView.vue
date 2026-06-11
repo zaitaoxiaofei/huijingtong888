@@ -15,6 +15,7 @@ import OzonCategorySelect from "../../components/listing/OzonCategorySelect.vue"
 const loading = ref(false);
 const dialogVisible = ref(false);
 const dialogSubmitting = ref(false);
+const dialogDetailLoading = ref(false);
 const importDialogVisible = ref(false);
 const importLoading = ref(false);
 const importSubmitting = ref(false);
@@ -24,6 +25,8 @@ const formRef = ref();
 const imageUploadLoading = ref(false);
 const detailImageUploadLoading = ref(false);
 const aiSellingPointsLoading = ref(false);
+const imageDirty = ref(false);
+const detailImagesDirty = ref(false);
 const manualLogisticsRule = ref(false);
 const manualPackagingFee = ref(false);
 const oneClickPublishingRows = ref(new Set());
@@ -35,9 +38,11 @@ const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
 let listingJobPoller = null;
-const routeEditOpened = ref(false);
+const routeEditOpenedKey = ref("");
+const routeEditDraftRow = ref(null);
 const selectionWorkbenchReady = ref(false);
 let selectionWorkbenchSaveTimer = 0;
+let editDetailRequestSeq = 0;
 const SELECTION_WORKBENCH_STORAGE_PREFIX = "selectionWorkbenchState:";
 const selectionWorkbenchId = computed(() => String(route.query.workbenchId || "").trim());
 const selectionWorkbenchStorageKey = computed(() => `${SELECTION_WORKBENCH_STORAGE_PREFIX}${selectionWorkbenchId.value || "default"}`);
@@ -48,6 +53,21 @@ function createAiWorkbenchId() {
 
 function createSelectionWorkbenchId() {
   return `selwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function isInlineImageValue(value) {
+  return String(value || "").startsWith("data:image/");
+}
+
+function createSelectionWorkbenchDialogFormSnapshot(form = {}) {
+  const snapshot = { ...form };
+  if (isInlineImageValue(snapshot.image_url)) snapshot.image_url = "";
+  if (Array.isArray(snapshot.detail_image_urls)) {
+    snapshot.detail_image_urls = snapshot.detail_image_urls.filter((url) => !isInlineImageValue(url));
+  } else if (typeof snapshot.detail_image_urls === "string" && snapshot.detail_image_urls.includes("data:image/")) {
+    snapshot.detail_image_urls = "";
+  }
+  return snapshot;
 }
 
 function ensureSelectionWorkbenchRouteId() {
@@ -63,10 +83,10 @@ function ensureSelectionWorkbenchRouteId() {
 function selectionTabTitle() {
   const routeSku = String(route.query.sku || "").trim();
   const routeProductId = String(route.query.productId || "").trim();
-  const formName = String(dialog.form?.name || "").trim();
+  const currentRowName = String(dialog.currentRow?.name || "").trim();
   const currentRowId = String(dialog.currentRow?.id || "").trim();
   if (routeSku) return `选品池 · ${routeSku}`;
-  if (dialogVisible.value && formName) return `选品池 · ${formName.slice(0, 18)}`;
+  if (dialogVisible.value && dialog.mode === "edit" && currentRowName) return `选品池 · ${currentRowName.slice(0, 18)}`;
   if (dialogVisible.value && currentRowId) return `选品池 · ID ${currentRowId}`;
   if (routeProductId) return `选品池 · ID ${routeProductId}`;
   return "选品池";
@@ -93,12 +113,18 @@ function saveSelectionWorkbenchState() {
         dialogVisible: dialogVisible.value,
         dialogMode: dialog.mode,
         dialogCurrentRowId: dialog.currentRow?.id || null,
-        dialogForm: dialog.form,
+        dialogForm: createSelectionWorkbenchDialogFormSnapshot(dialog.form),
         importDialogVisible: importDialogVisible.value,
         profitDialogVisible: profitDialogVisible.value,
         savedAt: new Date().toISOString()
       }));
     } catch (error) {
+      if (error?.name === "QuotaExceededError") {
+        try {
+          localStorage.removeItem(selectionWorkbenchStorageKey.value);
+          localStorage.removeItem("selectionWorkbenchState");
+        } catch {}
+      }
       console.warn("saveSelectionWorkbenchState failed", error);
     }
   }, 120);
@@ -109,6 +135,7 @@ function restoreSelectionWorkbenchState() {
     const raw = localStorage.getItem(selectionWorkbenchStorageKey.value)
       || localStorage.getItem("selectionWorkbenchState");
     if (!raw) return;
+    localStorage.removeItem("selectionWorkbenchState");
     const parsed = JSON.parse(raw || "{}");
     if (parsed?.filters) Object.assign(state.filters, parsed.filters);
     if (parsed?.dialogForm) {
@@ -177,6 +204,13 @@ const listingShopDialog = reactive({
   selectedShopIds: []
 });
 
+const listingPromptDialog = reactive({
+  visible: false,
+  field: "title",
+  title: "",
+  value: ""
+});
+
 const formRules = {
   name: [{ required: true, message: "请输入商品名称", trigger: "blur" }],
   owner_person_id: [{ required: true, message: "请选择负责人", trigger: "change" }],
@@ -189,6 +223,23 @@ const vehicleBrandOptions = ref([]);
 const vehicleOptions = ref([]);
 const fallbackColorOptions = ["黑色", "白色", "紫色", "红色", "蓝色", "绿色", "银色", "金色", "灰色", "棕色", "透明"];
 const colorOptions = ref([...fallbackColorOptions]);
+const commonSelectionValueTranslations = new Map([
+  ["abs пластик", "ABS塑料"],
+  ["abs-пластик", "ABS塑料"],
+  ["пластик", "塑料"],
+  ["термопластичный полиуретан", "热塑性聚氨酯"],
+  ["тпу", "TPU"],
+  ["tpu", "TPU"],
+  ["черный", "黑色"],
+  ["чёрный", "黑色"],
+  ["белый", "白色"],
+  ["синий", "蓝色"],
+  ["красный", "红色"],
+  ["серый", "灰色"],
+  ["серебристый", "银色"],
+  ["золотой", "金色"],
+  ["прозрачный", "透明"]
+]);
 
 function createDefaultForm() {
   return {
@@ -206,6 +257,12 @@ function createDefaultForm() {
     vehicle_brand: "",
     vehicle_model: "",
     selling_points: "",
+    listing_title_ru: "",
+    listing_tags_ru: "",
+    listing_description_ru: "",
+    listing_title_prompt: "",
+    listing_tags_prompt: "",
+    listing_description_prompt: "",
     purchase_url: "",
     source_platform: "1688",
     supplier_id: "",
@@ -268,7 +325,7 @@ watch(
     () => JSON.stringify(state.filters),
     () => dialogVisible.value,
     () => dialog.mode,
-    () => JSON.stringify(dialog.form),
+    () => JSON.stringify(createSelectionWorkbenchDialogFormSnapshot(dialog.form)),
     () => importDialogVisible.value,
     () => profitDialogVisible.value
   ],
@@ -283,12 +340,32 @@ watch(
     () => route.query.sku,
     () => route.query.productId,
     () => dialogVisible.value,
-    () => dialog.form.name,
+    () => dialog.mode,
     () => dialog.currentRow?.id
   ],
   () => {
     if (!selectionWorkbenchReady.value || !selectionWorkbenchId.value) return;
     syncSelectionWorkbenchTabTitle();
+  }
+);
+
+watch(
+  [
+    () => route.query.productId,
+    () => route.query.openEdit
+  ],
+  async () => {
+    if (!selectionWorkbenchReady.value) return;
+    await openRouteEditDialogIfNeeded();
+    syncSelectionWorkbenchTabTitle();
+  }
+);
+
+watch(
+  () => dialogVisible.value,
+  (visible) => {
+    if (!selectionWorkbenchReady.value || visible || !isRouteEditMode()) return;
+    clearRouteEditState();
   }
 );
 const catalogDictionaryCache = new Map();
@@ -375,6 +452,7 @@ function buildSelectionQuery(options = {}) {
     ownerPersonId: String(state.filters.ownerPersonId || "all")
   });
   if (options.summaryMode) params.set("summaryMode", String(options.summaryMode));
+  if (options.summaryOnly) params.set("summaryOnly", "1");
   const searchText = String(state.filters.query || "").trim();
   if (searchText) params.set("query", searchText);
   return params.toString();
@@ -405,14 +483,32 @@ function catalogOptionLabel(item) {
   if (typeof item === "string") return item;
   const label = String(item?.label || item?.display_value_zh || item?.displayValueZh || "").trim();
   const value = String(item?.value || "").trim();
-  return label && label !== value ? `${label} / ${value}` : label || value;
+  return label && label !== value ? `${label} / ${translateCommonSelectionValue(value)}` : label || translateCommonSelectionValue(value);
+}
+
+function translateCommonSelectionValue(value = "") {
+  const text = String(value || "").trim();
+  return commonSelectionValueTranslations.get(text.toLowerCase().replace(/\s+/g, " ")) || text;
+}
+
+function isBadSelectionColorValue(value = "") {
+  const text = String(value || "").trim();
+  return !text || text.length > 24 || /чехол|брел|автосигнал|модел|шт\.|для\s/i.test(text);
+}
+
+function isBadSelectionVehicleModel(value = "") {
+  const text = String(value || "").trim();
+  return !text || text.length > 80 || /чехол|брел|ключ|автосигнал|шт\.|,/.test(text);
 }
 
 function normalizeColorTags(value) {
   if (Array.isArray(value)) return value.filter(Boolean);
   const text = String(value || "").trim();
   if (!text) return ["黑色"];
-  return text.split(/\s*[+＋,，/、]\s*/).filter(Boolean);
+  return text
+    .split(/\s*[+＋,，/、]\s*/)
+    .map(translateCommonSelectionValue)
+    .filter((item) => item && !isBadSelectionColorValue(item));
 }
 
 function roundMoney(value) {
@@ -813,6 +909,7 @@ async function handleImageUpload(file) {
   try {
     const dataUrl = await readImageAsDataUrl(rawFile);
     dialog.form.image_url = dataUrl;
+    imageDirty.value = true;
     ElMessage.success("图片已导入");
     return false;
   } catch (error) {
@@ -829,6 +926,7 @@ function handleImageUploadChange(uploadFile) {
 
 function clearUploadedImage() {
   dialog.form.image_url = "";
+  imageDirty.value = true;
 }
 
 function normalizeDetailImages(value) {
@@ -850,6 +948,7 @@ async function handleDetailImageUploadChange(uploadFile) {
   try {
     const dataUrl = await readImageAsDataUrl(rawFile);
     dialog.form.detail_image_urls = [...normalizeDetailImages(dialog.form.detail_image_urls), dataUrl];
+    detailImagesDirty.value = true;
     ElMessage.success("详情图已导入");
     return false;
   } catch (error) {
@@ -862,6 +961,7 @@ async function handleDetailImageUploadChange(uploadFile) {
 
 function removeDetailImage(index) {
   dialog.form.detail_image_urls = normalizeDetailImages(dialog.form.detail_image_urls).filter((_, itemIndex) => itemIndex !== index);
+  detailImagesDirty.value = true;
 }
 
 async function goToListing(row, shopIds = []) {
@@ -1040,6 +1140,63 @@ function uniqueNumbers(values = []) {
   return [...new Set((values || []).map((value) => Number(value)).filter(Boolean))];
 }
 
+function listingPromptFieldKey(field) {
+  if (field === "tags") return "listing_tags_prompt";
+  if (field === "description") return "listing_description_prompt";
+  return "listing_title_prompt";
+}
+
+function defaultListingPrompt(field) {
+  const base = [
+    "最终输出必须是俄语，不允许出现任何中文。",
+    "商品名称是内部中文参考；如果已填写俄语标题、标签或描述，必须优先围绕这些俄语素材生成。",
+    "不得改变真实产品类型，不得套用历史商品、相似商品或错误类目文案。",
+    "结合 Ozon 类目、车型、材质、颜色、尺寸、重量和卖点生成。"
+  ];
+  if (field === "tags") {
+    return [
+      ...base,
+      "生成 15-20 个标签：优先包含产品类型、车型/型号、材质、颜色、使用场景、买家搜索词。",
+      "标签可以包含俄语、拉丁品牌名、车型型号和数字，但不能包含中文。"
+    ].join("\n");
+  }
+  if (field === "description") {
+    return [
+      ...base,
+      "生成 150-300 字符左右的俄语描述，最多 500 字符。",
+      "描述必须通顺自然，围绕标题和卖点展开，不要堆砌标签。"
+    ].join("\n");
+  }
+  return [
+    ...base,
+    "生成适合 Ozon 搜索和转化的俄语标题，标题必须准确表达产品类型。",
+    "如果手动填写了俄语标题，负责人店铺必须直接使用该标题，其它店铺只能基于该标题做轻微策略变体。"
+  ].join("\n");
+}
+
+function openListingPromptDialog(field) {
+  const key = listingPromptFieldKey(field);
+  const titleMap = {
+    title: "商品标题提示词",
+    tags: "商品标签提示词",
+    description: "商品描述提示词"
+  };
+  listingPromptDialog.field = field;
+  listingPromptDialog.title = titleMap[field] || titleMap.title;
+  listingPromptDialog.value = dialog.form[key] || defaultListingPrompt(field);
+  listingPromptDialog.visible = true;
+}
+
+function saveListingPromptDialog() {
+  const key = listingPromptFieldKey(listingPromptDialog.field);
+  dialog.form[key] = listingPromptDialog.value || "";
+  listingPromptDialog.visible = false;
+}
+
+function resetListingPromptDialog() {
+  listingPromptDialog.value = defaultListingPrompt(listingPromptDialog.field);
+}
+
 async function submitListingShopDialog() {
   const row = listingShopDialog.row;
   const shopIds = uniqueNumbers(listingShopDialog.selectedShopIds);
@@ -1103,7 +1260,7 @@ function handleListingAction(row) {
 
 function startVariant(row) {
   router.push({
-    name: "asset-variant-center-create",
+    name: "asset-variant-center-wizard",
     query: {
       workbenchId: createAiWorkbenchId(),
       baseSelectionId: String(row.id),
@@ -1120,7 +1277,7 @@ function startBatchVariant() {
   }
   const first = selectedRows.value[0];
   router.push({
-    name: "asset-variant-center-create",
+    name: "asset-variant-center-wizard",
     query: {
       workbenchId: createAiWorkbenchId(),
       baseSelectionId: String(first.id),
@@ -1148,12 +1305,63 @@ function goBackToSelectionReturnTarget() {
   router.push(target);
 }
 
+function openSelectionEditPage(row) {
+  const productId = Number(row?.id || 0) || null;
+  if (!productId) return;
+  routeEditDraftRow.value = row;
+  router.push({
+    name: "selection",
+    query: {
+      ...route.query,
+      workbenchId: selectionWorkbenchId.value || createSelectionWorkbenchId(),
+      productId: String(productId),
+      openEdit: "1",
+      source: "selection"
+    }
+  }).catch(() => {});
+}
+
+function clearRouteEditState() {
+  if (!isRouteEditMode()) return;
+  const query = { ...route.query };
+  delete query.productId;
+  delete query.openEdit;
+  delete query.source;
+  delete query.tabTitle;
+  routeEditOpenedKey.value = "";
+  router.replace({ name: "selection", query }).catch(() => {});
+  try {
+    localStorage.removeItem(selectionWorkbenchStorageKey.value);
+  } catch {}
+}
+
+function closeSelectionEditDialog() {
+  clearRouteEditState();
+  dialogVisible.value = false;
+  if (!state.rows.length) loadPageData({ silent: true });
+}
+
+function handleSelectionDialogBeforeClose(done) {
+  closeSelectionEditDialog();
+  if (typeof done === "function") done();
+}
+
+function handleSelectionDialogVisibleChange(visible) {
+  if (visible) return;
+  closeSelectionEditDialog();
+}
+
 async function openRouteEditDialogIfNeeded() {
   const productId = Number(route.query.productId || 0) || null;
   const openEdit = String(route.query.openEdit || "").trim() === "1";
-  if (!productId || !openEdit || routeEditOpened.value) return;
-  routeEditOpened.value = true;
-  await openEditDialog({ id: productId });
+  const editKey = openEdit && productId ? `${productId}` : "";
+  if (!editKey || routeEditOpenedKey.value === editKey) return;
+  routeEditOpenedKey.value = editKey;
+  loadSelectionMetaData({ silent: true }).catch(() => {});
+  const draftRow = Number(routeEditDraftRow.value?.id || 0) === productId
+    ? routeEditDraftRow.value
+    : state.rows.find((item) => Number(item.id || 0) === productId);
+  await openEditDialog(draftRow || { id: productId });
 }
 
 function variantTypeText(value) {
@@ -1479,15 +1687,6 @@ function friendlyListingJobErrorMessage(row = {}) {
   if (lower.includes("package size looks too small")) return "包裹尺寸看起来偏小，请检查单位是否正确";
   if (lower.includes("title contains unreadable replacement marks")) return "标题包含乱码或替换字符";
   if (lower.includes("description contains unreadable replacement marks")) return "描述包含乱码或替换字符";
-  if (lower.includes("product tags must include shop tag")) {
-    const tag = message.match(/#\S+/)?.[0] || "店铺标签";
-    return `标签缺少店铺名标签 ${tag}`;
-  }
-  if (lower.includes("description must mention shop name")) {
-    const shop = message.replace(/.*shop name\s*/i, "").trim();
-    return shop ? `描述缺少店铺名 ${shop}` : "描述缺少店铺名";
-  }
-  if (lower.includes("rich content text should mention shop name")) return "富文本建议加入店铺名";
   if (lower.includes("non-key product content contains key-case related terms")) return "非钥匙类商品出现钥匙壳/钥匙套相关词";
   if (lower.includes("product tags look too sparse")) return "标签数量偏少，建议补充类目词和买家搜索词";
   if (lower.includes("description is short")) return "描述偏短，搜索文案可能不足";
@@ -1637,13 +1836,47 @@ function closeProfitDialog() {
   profitDialog.logisticsRule = null;
 }
 
+function isRouteEditMode() {
+  return Boolean(Number(route.query.productId || 0)) && String(route.query.openEdit || "").trim() === "1";
+}
+
+async function loadSelectionMetaData(options = {}) {
+  const silent = Boolean(options.silent);
+  const force = Boolean(options.force);
+  if (!force && state.people.length && state.suppliers.length && state.logisticsRules.length) return true;
+  try {
+    const [people, suppliers, logisticsRules] = await Promise.all([
+      apiClient.get("/api/people"),
+      apiClient.get("/api/suppliers?paged=1&page=1&pageSize=100"),
+      apiClient.get("/api/logistics-rules")
+    ]);
+    state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
+    state.suppliers = normalizePagedRows(suppliers);
+    state.logisticsRules = Array.isArray(logisticsRules) ? logisticsRules.filter((item) => Number(item.enabled) !== 0) : [];
+    return true;
+  } catch (error) {
+    if (!silent) ElMessage.warning(error.message || "基础资料加载失败");
+    return false;
+  }
+}
+
+async function refreshSelectionSummary() {
+  try {
+    const products = await apiClient.get(`/api/products/selection?${buildSelectionQuery({ summaryMode: "full", summaryOnly: true })}`);
+    if (products?.summary) state.summary = products.summary;
+  } catch (error) {
+    console.warn("refreshSelectionSummary failed", error);
+  }
+}
+
 async function loadPageData(options = {}) {
   const silent = Boolean(options.silent);
-  const summaryMode = options.summaryMode || (silent ? "skip" : "full");
+  const deferMeta = Boolean(options.deferMeta);
+  const summaryMode = options.summaryMode || "skip";
   if (!silent) loading.value = true;
   let productsLoaded = false;
   try {
-    const shouldLoadMeta = !silent || !state.people.length || !state.suppliers.length || !state.logisticsRules.length;
+    const shouldLoadMeta = !deferMeta && (!silent || !state.people.length || !state.suppliers.length || !state.logisticsRules.length);
     const metaPromise = Promise.all([
       shouldLoadMeta ? apiClient.get("/api/people") : Promise.resolve(state.people),
       shouldLoadMeta ? apiClient.get("/api/suppliers?paged=1&page=1&pageSize=100") : Promise.resolve(state.suppliers),
@@ -1724,6 +1957,11 @@ function preferredPersonId(fallback = null) {
 function resetDialogForm() {
   dialog.form = createDefaultForm();
   dialog.currentRow = null;
+  dialogDetailLoading.value = false;
+  routeEditDraftRow.value = null;
+  editDetailRequestSeq += 1;
+  imageDirty.value = false;
+  detailImagesDirty.value = false;
   manualLogisticsRule.value = false;
   manualPackagingFee.value = false;
 }
@@ -1803,6 +2041,11 @@ function applyCatalogDictionaries(dictionaries = {}) {
   if (/^tpu$/i.test(String(dialog.form.material || "").trim()) && preferredTpu) {
     dialog.form.material = catalogOptionValue(preferredTpu);
   }
+  dialog.form.material = catalogOptionValue(findMatchingCatalogOption(materialOptions.value, dialog.form.material)) || translateCommonSelectionValue(dialog.form.material);
+  dialog.form.color = normalizeColorTags(dialog.form.color)
+    .map((value) => catalogOptionValue(findMatchingCatalogOption(colorOptions.value, value)) || translateCommonSelectionValue(value))
+    .filter(Boolean);
+  if (isBadSelectionVehicleModel(dialog.form.vehicle_model)) dialog.form.vehicle_model = "";
 }
 
 async function loadCatalogDictionaries(descriptionCategoryId, typeId) {
@@ -1866,6 +2109,17 @@ function sortPreferredCatalogOptions(options = [], preferred = []) {
   return [...options].sort((a, b) => rank(a) - rank(b) || catalogOptionLabel(a).localeCompare(catalogOptionLabel(b), "zh-Hans-CN"));
 }
 
+function findMatchingCatalogOption(options = [], value = "") {
+  const text = String(value || "").trim();
+  const translated = translateCommonSelectionValue(text);
+  if (!text) return null;
+  return options.find((item) => {
+    const optionValue = catalogOptionValue(item);
+    const optionLabel = catalogOptionLabel(item);
+    return optionValue === text || optionValue === translated || optionLabel.includes(text) || optionLabel.includes(translated);
+  }) || null;
+}
+
 function displayOzonCategoryZh(category = {}) {
   const value = category.path_zh || category.pathZh || category.name_zh || category.nameZh || category.label || category.name || "";
   const text = String(value || "").replace(/\s*>\s*/g, " / ").trim();
@@ -1879,67 +2133,87 @@ function normalizeStoredOzonCategoryName(value, categoryId) {
   return categoryId ? `待翻译类目 ${categoryId}` : "";
 }
 
+function buildEditDialogForm(detail = {}) {
+  const materialValue = translateCommonSelectionValue(detail.material || "TPU");
+  const colorValue = normalizeColorTags(detail.color);
+  return {
+    ...createDefaultForm(),
+    id: detail.id,
+    updated_at: detail.updated_at || "",
+    name: detail.name || "",
+    ozon_category_id: detail.ozon_category_id || "",
+    ozon_description_category_id: detail.ozon_description_category_id || "",
+    ozon_type_id: detail.ozon_type_id || "",
+    ozon_category_name: normalizeStoredOzonCategoryName(detail.ozon_category_name, detail.ozon_category_id),
+    image_url: detail.image_url || "",
+    detail_image_urls: normalizeDetailImages(detail.detail_image_urls),
+    material: materialValue || "TPU",
+    color: colorValue.length ? colorValue : ["黑色"],
+    vehicle_brand: detail.vehicle_brand || "",
+    vehicle_model: isBadSelectionVehicleModel(detail.vehicle_model) ? "" : detail.vehicle_model || "",
+    selling_points: detail.selling_points || "",
+    listing_title_ru: detail.listing_title_ru || "",
+    listing_tags_ru: detail.listing_tags_ru || "",
+    listing_description_ru: detail.listing_description_ru || "",
+    listing_title_prompt: detail.listing_title_prompt || "",
+    listing_tags_prompt: detail.listing_tags_prompt || "",
+    listing_description_prompt: detail.listing_description_prompt || "",
+    purchase_url: detail.purchase_url || "",
+    source_platform: detail.source_platform || "1688",
+    supplier_id: detail.supplier_id || "",
+    supplier_note: detail.supplier_note || "",
+    owner_person_id: detail.owner_person_id || preferredPersonId(),
+    shipping_method: detail.shipping_method || "air_land",
+    logistics_rule_id: detail.logistics_rule_id || "",
+    purchase_cost: Number(detail.purchase_cost || 0),
+    domestic_shipping: Number(detail.domestic_shipping || 0),
+    handling_fee: Number(detail.handling_fee || 0),
+    purchase_quantity: Number(detail.purchase_quantity || 1),
+    package_weight_g: Number(detail.package_weight_g || 0),
+    length_cm: Number(detail.length_cm || 30),
+    width_cm: Number(detail.width_cm || 20),
+    height_cm: Number(detail.height_cm || 10),
+    sale_price_rmb: Number(detail.sale_price_rmb || detail.air_sale_price_rmb || 0),
+    listing_price_rub: Number(detail.listing_price_rub || 0),
+    air_sale_price_rmb: Number(detail.air_sale_price_rmb || 0),
+    exchange_rate: Number(detail.exchange_rate || 11.32),
+    advertising_rate: Number(detail.advertising_rate || 0),
+    desired_profit_mode: detail.desired_profit_mode || "margin",
+    desired_profit_value: Number(detail.desired_profit_value || 20),
+    return_rate: roundMoney(resolvedReturnRate(detail) * 100),
+    product_type: detail.product_type || "selection",
+    selection_status: detail.selection_status || "draft",
+    source_selection_id: detail.source_selection_id || null,
+    variant_task_id: detail.variant_task_id || "",
+    variant_result_id: detail.variant_result_id || "",
+    variant_type: detail.variant_type || "",
+    is_variant_generated: Number(detail.is_variant_generated || 0),
+    material_asset_status: detail.material_asset_status || ""
+  };
+}
+
 async function openEditDialog(row) {
-  loading.value = true;
+  const productId = Number(row?.id || 0);
+  if (!productId) return;
+  const seq = ++editDetailRequestSeq;
+  dialog.mode = "edit";
+  dialog.currentRow = row;
+  imageDirty.value = false;
+  detailImagesDirty.value = false;
+  manualPackagingFee.value = true;
+  dialogDetailLoading.value = true;
   try {
-    const detail = await apiClient.get(`/api/products/${row.id}`);
-    dialog.mode = "edit";
-    dialog.currentRow = row;
-    dialog.form = {
-      ...createDefaultForm(),
-      id: detail.id,
-      updated_at: detail.updated_at || "",
-      name: detail.name || "",
-      ozon_category_id: detail.ozon_category_id || "",
-      ozon_description_category_id: detail.ozon_description_category_id || "",
-      ozon_type_id: detail.ozon_type_id || "",
-      ozon_category_name: normalizeStoredOzonCategoryName(detail.ozon_category_name, detail.ozon_category_id),
-      image_url: detail.image_url || "",
-      detail_image_urls: normalizeDetailImages(detail.detail_image_urls),
-      material: detail.material || "TPU",
-      color: normalizeColorTags(detail.color),
-      vehicle_brand: detail.vehicle_brand || "",
-      vehicle_model: detail.vehicle_model || "",
-      selling_points: detail.selling_points || "",
-      purchase_url: detail.purchase_url || "",
-      source_platform: detail.source_platform || "1688",
-      supplier_id: detail.supplier_id || "",
-      supplier_note: detail.supplier_note || "",
-      owner_person_id: detail.owner_person_id || preferredPersonId(),
-      shipping_method: detail.shipping_method || "air_land",
-      logistics_rule_id: detail.logistics_rule_id || "",
-      purchase_cost: Number(detail.purchase_cost || 0),
-      domestic_shipping: Number(detail.domestic_shipping || 0),
-      handling_fee: Number(detail.handling_fee || 0),
-      purchase_quantity: Number(detail.purchase_quantity || 1),
-      package_weight_g: Number(detail.package_weight_g || 0),
-      length_cm: Number(detail.length_cm || 30),
-      width_cm: Number(detail.width_cm || 20),
-      height_cm: Number(detail.height_cm || 10),
-      sale_price_rmb: Number(detail.sale_price_rmb || detail.air_sale_price_rmb || 0),
-      listing_price_rub: Number(detail.listing_price_rub || 0),
-      air_sale_price_rmb: Number(detail.air_sale_price_rmb || 0),
-      exchange_rate: Number(detail.exchange_rate || 11.32),
-      advertising_rate: Number(detail.advertising_rate || 0),
-      desired_profit_mode: detail.desired_profit_mode || "margin",
-      desired_profit_value: Number(detail.desired_profit_value || 20),
-      return_rate: roundMoney(resolvedReturnRate(detail) * 100),
-      product_type: detail.product_type || "selection",
-      selection_status: detail.selection_status || "draft",
-      source_selection_id: detail.source_selection_id || null,
-      variant_task_id: detail.variant_task_id || "",
-      variant_result_id: detail.variant_result_id || "",
-      variant_type: detail.variant_type || "",
-      is_variant_generated: Number(detail.is_variant_generated || 0),
-      material_asset_status: detail.material_asset_status || ""
-    };
-    manualPackagingFee.value = true;
+    const detail = await apiClient.get(`/api/products/${productId}`, { noCache: true });
+    if (seq !== editDetailRequestSeq) return;
+    dialog.currentRow = { ...row, ...detail };
+    dialog.form = buildEditDialogForm(detail);
+    imageDirty.value = false;
+    detailImagesDirty.value = false;
     dialogVisible.value = true;
-    await loadCatalogDictionariesForCurrentCategory();
   } catch (error) {
-    ElMessage.error(error.message || "选品详情加载失败");
+    if (seq === editDetailRequestSeq) ElMessage.error(error.message || "选品详情加载失败");
   } finally {
-    loading.value = false;
+    if (seq === editDetailRequestSeq) dialogDetailLoading.value = false;
   }
 }
 
@@ -1978,6 +2252,10 @@ function refreshSelectionSummaryFromRows() {
 
 async function submitDialog(options = {}) {
   if (!formRef.value) return;
+  if (dialog.mode === "edit" && dialogDetailLoading.value) {
+    ElMessage.warning("商品详情仍在加载，请稍后保存");
+    return;
+  }
   await formRef.value.validate();
 
   dialogSubmitting.value = true;
@@ -1988,7 +2266,6 @@ async function submitDialog(options = {}) {
       ozon_description_category_id: Number(dialog.form.ozon_description_category_id || 0) || null,
       ozon_type_id: Number(dialog.form.ozon_type_id || 0) || null,
       ozon_category_name: dialog.form.ozon_category_name || "",
-      detail_image_urls: normalizeDetailImages(dialog.form.detail_image_urls),
       material: normalizeTagValue(dialog.form.material),
       color: normalizeTagValue(dialog.form.color),
       vehicle_brand: dialog.form.vehicle_brand || "",
@@ -2015,6 +2292,16 @@ async function submitDialog(options = {}) {
       selection_status: dialog.mode === "create" ? "draft" : dialog.form.selection_status || "draft",
       product_type: dialog.mode === "create" ? "selection" : dialog.form.product_type || "selection"
     };
+    if (dialog.mode === "create" || imageDirty.value) {
+      payload.image_url = dialog.form.image_url || "";
+    } else {
+      delete payload.image_url;
+    }
+    if (dialog.mode === "create" || detailImagesDirty.value) {
+      payload.detail_image_urls = normalizeDetailImages(dialog.form.detail_image_urls);
+    } else {
+      delete payload.detail_image_urls;
+    }
 
     if (dialog.mode === "create") {
       const response = await apiClient.post("/api/products", payload);
@@ -2023,6 +2310,8 @@ async function submitDialog(options = {}) {
         upsertSelectionRow(savedProduct);
         refreshSelectionSummaryFromRows();
       }
+      imageDirty.value = false;
+      detailImagesDirty.value = false;
       ElMessage.success("选品已新增");
     } else {
       const response = await apiClient.put(`/api/products/${dialog.form.id}`, payload);
@@ -2031,6 +2320,8 @@ async function submitDialog(options = {}) {
         upsertSelectionRow(savedProduct);
         refreshSelectionSummaryFromRows();
       }
+      imageDirty.value = false;
+      detailImagesDirty.value = false;
       ElMessage.success("选品已更新");
     }
 
@@ -2173,21 +2464,28 @@ function handleBatchAction() {
 function startListingJobPolling() {
   if (listingJobPoller) window.clearInterval(listingJobPoller);
   listingJobPoller = window.setInterval(() => {
-    loadPageData({ silent: true });
-  }, 8000);
+    if (!state.rows.some((row) => isListingJobActive(row))) return;
+    loadPageData({ silent: true, summaryMode: "skip", deferMeta: true });
+  }, 15000);
 }
 
 onMounted(async () => {
   ensureSelectionWorkbenchRouteId();
-  restoreSelectionWorkbenchState();
-  await loadPageData();
-  if (dialogVisible.value && dialog.mode === "edit" && dialog.currentRow?.id && !String(route.query.openEdit || "").trim()) {
-    await openEditDialog({ id: dialog.currentRow.id });
+  if (isRouteEditMode()) {
+    await openRouteEditDialogIfNeeded();
+  } else {
+    restoreSelectionWorkbenchState();
+    await loadPageData({ summaryMode: "skip", deferMeta: true });
+    loadSelectionMetaData({ silent: true }).then(() => {
+      syncSelectionWorkbenchTabTitle();
+    });
+    if (dialogVisible.value && dialog.mode === "edit" && dialog.currentRow?.id && !String(route.query.openEdit || "").trim()) {
+      await openEditDialog({ id: dialog.currentRow.id });
+    }
   }
-  await openRouteEditDialogIfNeeded();
   selectionWorkbenchReady.value = true;
   syncSelectionWorkbenchTabTitle();
-  startListingJobPolling();
+  if (!isRouteEditMode()) startListingJobPolling();
 });
 
 onBeforeUnmount(() => {
@@ -2272,8 +2570,8 @@ onBeforeUnmount(() => {
               <div class="product-cell">
                 <ProductImagePreview
                   :src="row.image_url"
-                  :preview-list="row.image_url ? [row.image_url] : null"
                   fit="cover"
+                  :preview="false"
                 />
                 <div class="cell-stack gap-sm">
                   <ProductTitleLink :title="row.name || '-'" :lines="2" />
@@ -2448,7 +2746,7 @@ onBeforeUnmount(() => {
           <el-table-column label="维护操作" width="72" fixed="right" align="center">
             <template #default="{ row }">
               <div class="table-actions is-vertical">
-                <el-button class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
+                <el-button class="erp-btn-link" link type="primary" @click="openSelectionEditPage(row)">编辑</el-button>
                 <el-button class="erp-btn-link-danger" link type="danger" @click="handleDelete(row)">删除</el-button>
               </div>
             </template>
@@ -2537,17 +2835,51 @@ onBeforeUnmount(() => {
     </el-dialog>
 
     <el-dialog
+      v-model="listingPromptDialog.visible"
+      :title="listingPromptDialog.title"
+      width="720px"
+      align-center
+      class="erp-centered-dialog"
+    >
+      <el-input
+        v-model="listingPromptDialog.value"
+        type="textarea"
+        :rows="12"
+        placeholder="填写后续 AI 生成时要遵守的业务提示词"
+      />
+      <template #footer>
+        <div class="erp-dialog-footer">
+          <el-button @click="resetListingPromptDialog">恢复默认</el-button>
+          <el-button @click="listingPromptDialog.visible = false">取消</el-button>
+          <el-button type="primary" @click="saveListingPromptDialog">保存提示词</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="dialogVisible"
       :title="dialogTitle"
       width="1180px"
       align-center
       destroy-on-close
+      :before-close="handleSelectionDialogBeforeClose"
       class="selection-form-dialog erp-centered-dialog"
+      @update:model-value="handleSelectionDialogVisibleChange"
+      @close="closeSelectionEditDialog"
       @closed="handleDialogClosed"
     >
       <el-form ref="formRef" :model="dialog.form" :rules="formRules" label-width="112px">
         <div class="selection-workbench">
           <div class="selection-workbench-main">
+            <el-alert
+              v-if="dialogDetailLoading"
+              type="info"
+              :closable="false"
+              show-icon
+              class="variant-source-alert"
+            >
+              <template #title>正在补全商品详情，当前表单已可先查看和编辑。</template>
+            </el-alert>
             <el-alert
               v-if="dialog.form.is_variant_generated"
               type="warning"
@@ -2741,10 +3073,55 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="form-section">
-              <div class="form-section-title">上传主图和详情图</div>
-              <el-row :gutter="18">
+              <div class="form-section-title">素材区域</div>
+              <div class="listing-material-grid">
+                <div class="listing-material-card">
+                  <div class="listing-material-head">
+                    <div>
+                      <strong>商品标题</strong>
+                      <span>Ozon 俄语标题</span>
+                    </div>
+                    <el-button link type="primary" @click="openListingPromptDialog('title')">查看/编辑提示词</el-button>
+                  </div>
+                  <el-input
+                    v-model="dialog.form.listing_title_ru"
+                    placeholder="可填写俄语标题；负责人店铺会优先直接使用"
+                  />
+                </div>
+                <div class="listing-material-card">
+                  <div class="listing-material-head">
+                    <div>
+                      <strong>商品标签</strong>
+                      <span>优先用于生成店铺标签</span>
+                    </div>
+                    <el-button link type="primary" @click="openListingPromptDialog('tags')">查看/编辑提示词</el-button>
+                  </div>
+                  <el-input
+                    v-model="dialog.form.listing_tags_ru"
+                    type="textarea"
+                    :rows="2"
+                    placeholder="可填写俄语标签，用空格、逗号或换行分隔"
+                  />
+                </div>
+                <div class="listing-material-card">
+                  <div class="listing-material-head">
+                    <div>
+                      <strong>商品描述</strong>
+                      <span>建议 150-300 字符，必须通顺且无中文</span>
+                    </div>
+                    <el-button link type="primary" @click="openListingPromptDialog('description')">查看/编辑提示词</el-button>
+                  </div>
+                  <el-input
+                    v-model="dialog.form.listing_description_ru"
+                    type="textarea"
+                    :rows="4"
+                    placeholder="可填写俄语描述；未填写时会根据卖点和属性生成"
+                  />
+                </div>
+              </div>
+              <el-row :gutter="18" class="selection-media-upload-row">
                 <el-col :span="12">
-                  <el-form-item label="上传主图">
+                  <el-form-item label="素材主图">
                     <el-upload
                       :show-file-list="false"
                       :auto-upload="false"
@@ -2757,7 +3134,7 @@ onBeforeUnmount(() => {
                   </el-form-item>
                 </el-col>
                 <el-col :span="12">
-                  <el-form-item label="上传详情图">
+                  <el-form-item label="素材详情图">
                     <el-upload
                       :show-file-list="false"
                       :auto-upload="false"
@@ -2765,7 +3142,7 @@ onBeforeUnmount(() => {
                       accept="image/*"
                       :on-change="handleDetailImageUploadChange"
                     >
-                      <el-button :loading="detailImageUploadLoading">上传详情图</el-button>
+                      <el-button :loading="detailImageUploadLoading">上传素材详情图</el-button>
                     </el-upload>
                   </el-form-item>
                 </el-col>
@@ -2783,7 +3160,7 @@ onBeforeUnmount(() => {
                         <ProductImagePreview :src="image" />
                         <el-button link type="danger" @click="removeDetailImage(index)">移除</el-button>
                       </div>
-                      <div v-if="!normalizeDetailImages(dialog.form.detail_image_urls).length" class="detail-image-empty">未上传详情图</div>
+                      <div v-if="!normalizeDetailImages(dialog.form.detail_image_urls).length" class="detail-image-empty">未上传素材详情图</div>
                     </div>
                   </div>
                 </el-col>
@@ -2903,16 +3280,17 @@ onBeforeUnmount(() => {
 
       <template #footer>
         <div class="erp-dialog-footer">
-          <el-button class="erp-btn erp-btn-secondary" @click="dialogVisible = false">取消</el-button>
+          <el-button class="erp-btn erp-btn-secondary" @click="closeSelectionEditDialog">取消</el-button>
           <el-button
             v-if="selectionReturnTarget() && dialog.mode === 'edit'"
             class="erp-btn erp-btn-secondary"
             :loading="dialogSubmitting"
+            :disabled="dialogDetailLoading"
             @click="submitDialog({ returnAfter: true })"
           >
             保存并返回AI工作台
           </el-button>
-          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="dialogSubmitting" @click="submitDialog">保存</el-button>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="dialogSubmitting" :disabled="dialogDetailLoading" @click="submitDialog">保存</el-button>
         </div>
       </template>
     </el-dialog>
@@ -3363,6 +3741,54 @@ onBeforeUnmount(() => {
   font-size: 14px;
   font-weight: 600;
   color: var(--erp-text);
+}
+
+.listing-material-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.listing-material-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--erp-border);
+  border-radius: 8px;
+  background: var(--erp-surface);
+}
+
+.listing-material-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.listing-material-head > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.listing-material-head strong {
+  color: var(--erp-text);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.listing-material-head span {
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.listing-material-head :deep(.el-button) {
+  margin-left: 0;
+  padding: 0;
+}
+
+.selection-media-upload-row {
+  margin-top: 14px;
 }
 
 .selection-image-preview-row {

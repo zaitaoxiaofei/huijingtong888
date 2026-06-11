@@ -8,6 +8,24 @@ function defaultHeaders(extra = {}) {
   };
 }
 
+function serverTimingHeader(res) {
+  const startedAt = Number(res?._serverTimingStartedAt || 0);
+  if (!startedAt) return "";
+  const now = performance.now();
+  const marks = Array.isArray(res._serverTimingMarks) ? res._serverTimingMarks : [];
+  const segments = [`total;dur=${Math.max(0, now - startedAt).toFixed(1)}`];
+  let previousAt = startedAt;
+  for (const mark of marks) {
+    const label = String(mark?.label || "step").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 32) || "step";
+    const at = Number(mark?.at || previousAt);
+    if (!Number.isFinite(at)) continue;
+    segments.push(`${label};dur=${Math.max(0, at - previousAt).toFixed(1)}`);
+    previousAt = at;
+  }
+  if (previousAt < now) segments.push(`finish;dur=${Math.max(0, now - previousAt).toFixed(1)}`);
+  return segments.join(", ");
+}
+
 export function appendSetCookie(res, cookieValue) {
   if (!res._setCookies) res._setCookies = [];
   res._setCookies.push(cookieValue);
@@ -29,6 +47,10 @@ export function clearCookie(res, name, options = {}) {
 
 export function writeHead(res, status, headers = {}) {
   const finalHeaders = defaultHeaders(headers);
+  if (!finalHeaders["Server-Timing"]) {
+    const timing = serverTimingHeader(res);
+    if (timing) finalHeaders["Server-Timing"] = timing;
+  }
   if (res._setCookies?.length) {
     finalHeaders["Set-Cookie"] = res._setCookies;
     res._setCookies = [];

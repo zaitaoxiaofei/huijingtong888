@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { closeMysqlPool, mysqlQuery } from "../src/mysql-pool.js";
@@ -9,6 +10,7 @@ test.after(async () => {
 });
 
 const selectionProductList = selectionProductsMysql;
+const selectionViewSource = readFileSync(new URL("../frontend/admin/views/selection/SelectionView.vue", import.meta.url), "utf8");
 
 test("selection products support paged list contract", async () => {
   const result = await selectionProductList({ paged: "1", page: 1, pageSize: 5 });
@@ -63,4 +65,16 @@ test("selection products include legacy main draft rows", async () => {
 
   assert.equal(result.total, Number(expected.total || 0));
   assert.ok(result.rows.every((row) => row.product_type === "selection"));
+});
+
+test("selection view keeps full summary scans out of normal page loads", () => {
+  assert.match(selectionViewSource, /const summaryMode = options\.summaryMode \|\| "skip";/);
+  assert.match(selectionViewSource, /await loadPageData\(\{ summaryMode: "skip", deferMeta: true \}\);/);
+  assert.doesNotMatch(selectionViewSource, /refreshSelectionSummary\(\);\s*\n\s*if \(dialogVisible\.value/);
+});
+
+test("selection edit dialog waits for full detail before showing the form", () => {
+  const body = selectionViewSource.match(/async function openEditDialog\(row\) \{[\s\S]*?\n\}/)?.[0] || "";
+  assert.doesNotMatch(body, /dialog\.form = buildEditDialogForm\(\{ \.\.\.row, id: productId \}\);/);
+  assert.ok(body.indexOf("apiClient.get(`/api/products/${productId}`") < body.indexOf("dialogVisible.value = true"));
 });

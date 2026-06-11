@@ -2,7 +2,6 @@ import { createRouter, createWebHashHistory } from "vue-router";
 import AdminLayout from "../layouts/AdminLayout.vue";
 import MobileLayout from "../layouts/MobileLayout.vue";
 import LoginView from "../views/LoginView.vue";
-import SellerAnalyticsView from "../views/analytics/SellerAnalyticsView.vue";
 import { useAuthStore } from "../stores/auth";
 import { markRouteReadyPerf, startRoutePerf } from "../utils/performance-monitor";
 
@@ -24,12 +23,14 @@ const OnlineProductsView = () => import("../views/inventory/OnlineProductsView.v
 const ListingAutomationView = () => import("../views/listing/ListingAutomationView.vue");
 const ListingPublishRecordsView = () => import("../views/listing/ListingPublishRecordsView.vue");
 const CollectorBoxView = () => import("../views/listing/CollectorBoxView.vue");
-const AssetVariantCenterView = () => import("../views/settings/PromptLibraryView.vue");
+const AiProductVariantWizardView = () => import("../views/listing/AiOptimizationWorkbenchV2.vue");
 const ShopAssetVariantCenterView = () => import("../views/listing/ShopAssetVariantCenter.vue");
+const AiOptimizationWorkbenchV2View = () => import("../views/settings/PromptLibraryView.vue");
 const SelectionView = () => import("../views/selection/SelectionView.vue");
 const ProfitDashboardView = () => import("../views/profit/ProfitDashboardView.vue");
 const ProfitAftersalesView = () => import("../views/profit/ProfitAftersalesView.vue");
 const AdvertisingDailyView = () => import("../views/advertising/AdvertisingDailyView.vue");
+const SellerAnalyticsView = () => import("../views/analytics/SellerAnalyticsView.vue");
 const OzonActionsView = () => import("../views/marketing/OzonActionsView.vue");
 const OrdersView = () => import("../views/orders/OrdersView.vue");
 const OutboundView = () => import("../views/orders/OutboundView.vue");
@@ -39,6 +40,7 @@ const PurchaseHistoryView = () => import("../views/procurement/PurchaseHistoryVi
 const SettingsView = () => import("../views/settings/SettingsView.vue");
 const AiProviderSettingsView = () => import("../views/settings/AiProviderSettingsView.vue");
 const MaterialCenterView = () => import("../views/settings/MaterialCenterView.vue");
+const AiPromptLibraryView = () => import("../views/settings/AiPromptLibraryView.vue");
 const ScheduledJobsView = () => import("../views/settings/ScheduledJobsView.vue");
 const ImageCropperView = () => import("../views/tools/ImageCropper.vue");
 const EcommerceImageSplitterView = () => import("../views/tools/EcommerceImageSplitterV3.vue");
@@ -110,10 +112,13 @@ export const router = createRouter({
         },
         { path: "online-products", name: "online-products", component: OnlineProductsView, meta: { title: "在线商品", breadcrumb: ["商品运营", "在线商品"] } },
         { path: "asset-variant-center", name: "asset-variant-center", component: ShopAssetVariantCenterView, meta: { title: "多店铺商品", breadcrumb: ["商品运营", "多店铺商品"] } },
-        { path: "asset-variant-center/create", name: "asset-variant-center-create", component: AssetVariantCenterView, meta: { title: "AI 素材优化", breadcrumb: ["商品运营", "AI 素材优化"], tabKey: "workbench" } },
+        { path: "asset-variant-center/create", name: "asset-variant-center-create", redirect: (to) => ({ name: "asset-variant-center-wizard", query: to.query }) },
+        { path: "asset-variant-center/wizard", name: "asset-variant-center-wizard", component: AiProductVariantWizardView, meta: { title: "AI裂变", breadcrumb: ["商品运营", "AI裂变"], tabKey: "workbench" } },
+        { path: "ai-optimization-workbench-v2", name: "ai-optimization-workbench-v2", component: AiOptimizationWorkbenchV2View, meta: { title: "AI 优化新版", breadcrumb: ["商品运营", "AI 优化新版"], tabKey: "workbench" } },
         { path: "listing-automation", name: "listing-automation", component: ListingAutomationView, meta: { title: "商品上架", breadcrumb: ["商品运营", "商品上架"], tabKey: "workbench" } },
         { path: "collector-box", name: "collector-box", component: CollectorBoxView, meta: { title: "采集箱", breadcrumb: ["商品运营", "采集箱"], tabKey: "workbench" } },
-        { path: "listing-records", name: "listing-records", component: ListingPublishRecordsView, meta: { title: "上架记录", breadcrumb: ["商品运营", "上架记录"] } },
+        { path: "listing-records", name: "listing-records", component: ListingPublishRecordsView, meta: { title: "草稿箱", breadcrumb: ["商品运营", "草稿箱"], recordMode: "drafts" } },
+        { path: "listing-publish-records", name: "listing-publish-records", component: ListingPublishRecordsView, meta: { title: "上架记录", breadcrumb: ["商品运营", "上架记录"], recordMode: "publish" } },
         {
           path: "listing-records/edit",
           name: "listing-record-editor",
@@ -121,7 +126,7 @@ export const router = createRouter({
             name: "listing-automation",
             query: {
               ...to.query,
-              returnTo: String(to.query.returnTo || "/listing-records")
+              returnTo: String(to.query.returnTo || "/listing-publish-records")
             }
           }),
           meta: { title: "编辑上架", breadcrumb: ["商品运营", "上架记录", "编辑上架"], tabKey: "workbench" }
@@ -145,10 +150,10 @@ export const router = createRouter({
         { path: "settings/scheduled-jobs", name: "settings-scheduled-jobs", component: ScheduledJobsView, meta: { title: "自动任务", breadcrumb: ["系统管理", "自动任务"] } },
         { path: "settings/ai", name: "settings-ai", component: AiProviderSettingsView, meta: { title: "AI 设置", breadcrumb: ["系统管理", "AI 设置"] } },
         { path: "settings/materials", name: "settings-materials", component: MaterialCenterView, meta: { title: "素材库", breadcrumb: ["系统管理", "素材库"] } },
+        { path: "settings/prompts", name: "settings-prompts", component: AiPromptLibraryView, meta: { title: "AI提示词库", breadcrumb: ["系统管理", "AI提示词库"] } },
         { path: "tools/product-video-generator", name: "tools-product-video-generator", component: ProductVideoGeneratorView, meta: { title: "商品视频", breadcrumb: ["实用工具", "商品视频"] } },
         { path: "tools/image-cropper", name: "tools-image-cropper", component: EcommerceImageSplitterView, meta: { title: "图片自动裁切工具", breadcrumb: ["实用工具", "图片自动裁切工具"] } },
         { path: "tools/ecommerce-image-splitter", name: "tools-ecommerce-image-splitter", component: EcommerceImageSplitterView, meta: { title: "套图拆分", breadcrumb: ["实用工具", "套图拆分"] } },
-        { path: "settings/prompts", redirect: "/asset-variant-center/create" },
         { path: ":pathMatch(.*)*", redirect: "/dashboard" }
       ]
     }

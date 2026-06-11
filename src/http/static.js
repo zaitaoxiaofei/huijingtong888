@@ -32,7 +32,9 @@ function sendStaticNotFound(res, cleanPath) {
   res.end(body);
 }
 
-export function createStaticHandler(publicDir) {
+export function createStaticHandler(publicDir, options = {}) {
+  const extraRoots = Array.isArray(options.extraRoots) ? options.extraRoots.map((root) => path.resolve(root)) : [];
+  const extraRouteRoots = Array.isArray(options.extraRouteRoots) ? options.extraRouteRoots : [];
   function preferredEncoding(req) {
     const acceptEncoding = String(req.headers["accept-encoding"] || "").toLowerCase();
     if (acceptEncoding.includes("br")) return "br";
@@ -52,6 +54,8 @@ export function createStaticHandler(publicDir) {
       headers["Cache-Control"] = "no-store, must-revalidate";
     } else if (isVersionedAsset) {
       headers["Cache-Control"] = "public, max-age=31536000, immutable";
+      headers["CDN-Cache-Control"] = "public, max-age=31536000, immutable";
+      headers["Cloudflare-CDN-Cache-Control"] = "public, max-age=31536000, immutable";
     } else if (isVueAppAsset) {
       headers["Cache-Control"] = "public, max-age=600, must-revalidate";
     } else if ([".css", ".js"].includes(ext)) {
@@ -115,6 +119,24 @@ export function createStaticHandler(publicDir) {
 
     if (fs.existsSync(filePath) && !fs.statSync(filePath).isDirectory()) {
       return sendFile(filePath, cleanPath, req, res);
+    }
+
+    for (const routeRoot of extraRouteRoots) {
+      const prefix = String(routeRoot.prefix || "");
+      const roots = Array.isArray(routeRoot.roots) ? routeRoot.roots.map((root) => path.resolve(root)) : [];
+      if (!prefix || !cleanPath.startsWith(prefix)) continue;
+      const relativePath = cleanPath.slice(prefix.length).replace(/^\/+/, "");
+      for (const root of roots) {
+        const targetPath = path.resolve(root, relativePath);
+        if (!targetPath.startsWith(root) || !fs.existsSync(targetPath) || fs.statSync(targetPath).isDirectory()) continue;
+        return sendFile(targetPath, cleanPath, req, res);
+      }
+    }
+
+    for (const root of extraRoots) {
+      const targetPath = path.join(root, cleanPath);
+      if (!targetPath.startsWith(root) || !fs.existsSync(targetPath) || fs.statSync(targetPath).isDirectory()) continue;
+      return sendFile(targetPath, cleanPath, req, res);
     }
 
     if (!isFileRequest) {

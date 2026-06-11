@@ -13,16 +13,14 @@ The startup script:
 1. Reuses MySQL if `127.0.0.1:3306` is already listening.
 2. Otherwise starts `mysqld.exe` with `C:\ProgramData\MySQL\OzonERP\my.ini`.
 3. Waits for MySQL to accept TCP connections.
-4. Starts the Cloudflare Tunnel for `https://erp.hjt888.xyz/`.
-5. Builds the frontend and starts the ERP server.
+4. Builds the frontend and starts the ERP server on the local test port.
 
 The app still reads database credentials from `.env`. The current local MySQL layout expects:
 
 - MySQL server: `C:\Program Files\MySQL\MySQL Server 8.4\bin\mysqld.exe`
 - MySQL config: `C:\ProgramData\MySQL\OzonERP\my.ini`
 - MySQL data directory: `C:\ProgramData\MySQL\OzonERP\data`
-- ERP URL after startup: `http://localhost:8787`
-- Public ERP URL after startup: `https://erp.hjt888.xyz/`
+- ERP URL after startup: `http://localhost:8788`
 
 Override the machine-specific MySQL paths before startup when needed:
 
@@ -38,8 +36,8 @@ To start only MySQL without starting the tunnel or ERP server:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-local-mysql.ps1
 ```
 
-To start MySQL and only refresh the Cloudflare Tunnel:
+To start MySQL and the Cloudflare Tunnel explicitly:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-local-mysql.ps1 -StartTunnel
+npm run start:mysql:tunnel
 ```

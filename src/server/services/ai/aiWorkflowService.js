@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import path from "node:path";
+import { config } from "../../../config.js";
 import { buildZip, runPythonCropper } from "../tools/imageCropperService.js";
 import { aiProviderConfig, chatWithAiProvider } from "../../../services/ai-provider-settings.js";
 import { buildFallbackPrompt, clampImageCount, optimizeImagePrompt } from "../openai/promptService.js";
@@ -18,6 +19,7 @@ import {
 
 const CROPPED_ROOT = path.resolve(ROOT_DIR, process.env.AI_CROP_OUTPUT_DIR || "uploads/ai-cropped");
 const ALLOWED_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+const AI_SOURCE_IMAGE_FETCH_TIMEOUT_MS = 20000;
 
 export async function getAiStatus() {
   return aiProviderConfig().then((providerConfig) => ({
@@ -141,7 +143,7 @@ function parseDataImageUrl(value) {
 
 async function fetchSourceImage(source) {
   const url = normalizeFetchableSourceUrl(source);
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(AI_SOURCE_IMAGE_FETCH_TIMEOUT_MS) });
   if (!response.ok) {
     const error = new Error(`参考图读取失败，HTTP ${response.status}`);
     error.status = response.status >= 400 && response.status < 500 ? 400 : 502;
@@ -173,7 +175,11 @@ function normalizeFetchableSourceUrl(source) {
 }
 
 function localAppOrigin() {
-  return process.env.APP_ORIGIN || process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${process.env.PORT || 8787}`;
+  return process.env.APP_ORIGIN
+    || process.env.PUBLIC_BASE_URL
+    || process.env.APP_BASE_URL
+    || config.appBaseUrl
+    || `http://127.0.0.1:${process.env.PORT || 8788}`;
 }
 
 function normalizeImageContentType(contentType) {

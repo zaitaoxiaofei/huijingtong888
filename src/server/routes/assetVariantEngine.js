@@ -6,6 +6,7 @@ export function createAssetVariantEngineRoutes({ services, readJson }) {
     "GET /api/asset-variant-engine/tail-templates": (req) => services.assetTailTemplates(req.query || {}, req._session),
     "POST /api/asset-variant-engine/tail-templates": async (req) => services.createAssetTailTemplate(await readJson(req), req._session),
     "POST /api/asset-variant-engine/generate": async (req) => services.generateAssetVariants(await readJson(req), req._session),
+    "POST /api/asset-variant-engine/generate-video": async (req) => services.generateAssetVariantVideoFromImage(await readJson(req), req._session),
     "POST /api/asset-variant-engine/title-preview": async (req) => services.generateAssetVariantTitlePreview(await readJson(req), req._session),
     "POST /api/asset-variant-engine/sync-ozon-categories": async (req) => services.syncAssetOzonCategories(await readJson(req), req._session),
     "POST /api/asset-variant-engine/rules": async (req) => services.saveShopVariantRule(await readJson(req), req._session),

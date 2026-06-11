@@ -12,6 +12,7 @@ export async function handleMaterialAssetRestRoute({ req, res, parts, services, 
   try {
     if (req.method === "GET" && !parts[3]) return json(res, await services.materialAssetDetail(id));
     if (req.method === "PUT" && !parts[3]) return json(res, await services.updateMaterialAsset(id, await readJson(req)));
+    if (req.method === "DELETE" && !parts[3]) return json(res, await services.deleteMaterialAsset(id));
     if (req.method === "POST" && parts[3] === "archive") return json(res, await services.archiveMaterialAsset(id));
   } catch (error) {
     return json(res, { error: error.message }, error.status || 500);

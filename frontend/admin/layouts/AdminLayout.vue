@@ -1,7 +1,7 @@
 <script setup>
 import { KeepAlive, computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
-import { Bell, Close, Expand, Fold, MoonNight, Paperclip, RefreshRight, Sunny } from "@element-plus/icons-vue";
+import { Bell, Close, Download, Expand, Fold, MoonNight, Paperclip, RefreshRight, Sunny } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { navigationMenus } from "../constants/navigation.js";
 import { prefetchRouteComponent } from "../router";
@@ -37,17 +37,23 @@ const contextMenu = ref({
   y: 0
 });
 const pluginUpdates = ref({});
+const pluginDownloadLinks = [
+  { command: "collector", label: "商品采集插件", url: "/downloads/ozon-erp-collector-plugin.rar" },
+  { command: "analytics", label: "店铺分析插件", url: "/downloads/ozon-seller-analytics-plugin.rar" }
+];
 const routeSwitching = ref(false);
 let routeSwitchTimer = 0;
 const prefetchedRoutes = new Set();
 const PLUGIN_UPDATE_DISMISSED_PREFIX = "ozon-admin-plugin-update-dismissed";
 const submenuKeys = navigationMenus.filter((menu) => menu.children?.length).map((menu) => menu.key);
-const AI_WORKBENCH_ROUTE = "/asset-variant-center/create";
+const AI_VARIANT_WIZARD_ROUTE = "/asset-variant-center/wizard";
+const AI_OPTIMIZATION_V2_ROUTE = "/ai-optimization-workbench-v2";
 const NAV_WORKBENCH_IDS = new Map([
   ["/collector-box", "colwb-main"],
   ["/selection", "selwb-main"],
   ["/listing-automation", "liwb-main"],
-  [AI_WORKBENCH_ROUTE, "aiwb-main"]
+  [AI_VARIANT_WIZARD_ROUTE, "aiwizard-main"],
+  [AI_OPTIMIZATION_V2_ROUTE, "aiopt-v2-main"]
 ]);
 const menuParentByRoute = navigationMenus.reduce((map, menu) => {
   if (!menu.children?.length) return map;
@@ -126,7 +132,65 @@ function handleTabClick(key) {
   router.push(tab.route.fullPath).catch(() => {});
 }
 
-function handleTabClose(key) {
+const WORKBENCH_DRAFT_ROUTES = new Map([
+  ["/listing-automation", { label: "商品上架", keyPrefix: "listing-workbench-draft:" }],
+  [AI_VARIANT_WIZARD_ROUTE, { label: "AI裂变", keyPrefix: "ozon-ai-product-variant-workbench-draft:" }],
+  [AI_OPTIMIZATION_V2_ROUTE, { label: "AI 优化新版", keyPrefix: "ozon-ai-optimization-workbench-v2-draft:" }]
+]);
+
+function workbenchDraftKeyForTab(tab) {
+  const config = WORKBENCH_DRAFT_ROUTES.get(tab?.route?.path);
+  if (!config) return "";
+  const workbenchId = String(tab.route.query?.workbenchId || "").trim();
+  return workbenchId ? `${config.keyPrefix}${workbenchId}` : "";
+}
+
+function tabHasSavedWorkbenchDraft(tab) {
+  const key = workbenchDraftKeyForTab(tab);
+  if (!key) return false;
+  try {
+    return Boolean(window.sessionStorage.getItem(key) || window.localStorage.getItem(key));
+  } catch {
+    return false;
+  }
+}
+
+function clearWorkbenchDraftForTab(tab) {
+  const key = workbenchDraftKeyForTab(tab);
+  if (!key) return;
+  try {
+    window.sessionStorage.removeItem(key);
+    window.localStorage.removeItem(key);
+  } catch {
+    // Storage cleanup is best-effort; closing the tab should still work.
+  }
+}
+
+async function confirmClosingWorkbenchTabs(tabs) {
+  const riskyTabs = tabs.filter(tabHasSavedWorkbenchDraft);
+  if (!riskyTabs.length) return true;
+  const labels = [...new Set(riskyTabs.map((tab) => WORKBENCH_DRAFT_ROUTES.get(tab.route.path)?.label || tab.title))];
+  await ElMessageBox.confirm(
+    `将关闭 ${labels.join("、")} 中未提交的页面草稿，关闭后本页面临时数据会清除。是否继续？`,
+    "关闭工作台草稿",
+    {
+      type: "warning",
+      confirmButtonText: "关闭并清除",
+      cancelButtonText: "取消"
+    }
+  );
+  riskyTabs.forEach(clearWorkbenchDraftForTab);
+  return true;
+}
+
+async function handleTabClose(key) {
+  const tab = tabsStore.findTab(key);
+  if (!tab) return;
+  try {
+    await confirmClosingWorkbenchTabs([tab]);
+  } catch {
+    return;
+  }
   const fallbackRoute = tabsStore.closeTab(key);
   if (!fallbackRoute || fallbackRoute === route.fullPath) return;
   rememberIntendedRoute(fallbackRoute);
@@ -134,7 +198,7 @@ function handleTabClose(key) {
   router.push(fallbackRoute).catch(() => {});
 }
 
-function handleTabCommand(command) {
+async function handleTabCommand(command) {
   const targetTab = contextTab.value;
   closeTabContextMenu();
 
@@ -144,6 +208,12 @@ function handleTabCommand(command) {
   }
 
   if (command === "close-others") {
+    const closingTabs = workspaceTabs.value.filter((tab) => tab.key !== activeTabKey.value && tab.closable && !tab.pinned);
+    try {
+      await confirmClosingWorkbenchTabs(closingTabs);
+    } catch {
+      return;
+    }
     const fallbackRoute = tabsStore.closeOtherTabs(activeTabKey.value);
     if (!fallbackRoute || fallbackRoute === route.fullPath) return;
     rememberIntendedRoute(fallbackRoute);
@@ -153,6 +223,12 @@ function handleTabCommand(command) {
   }
 
   if (command === "close-all") {
+    const closingTabs = workspaceTabs.value.filter((tab) => tab.closable && !tab.pinned);
+    try {
+      await confirmClosingWorkbenchTabs(closingTabs);
+    } catch {
+      return;
+    }
     const fallbackRoute = tabsStore.closeAllTabs();
     if (!fallbackRoute || fallbackRoute === route.fullPath) return;
     rememberIntendedRoute(fallbackRoute);
@@ -195,6 +271,15 @@ function handleTabCommand(command) {
   }
 
   if (command === "close-left") {
+    const tabIndex = workspaceTabs.value.findIndex((item) => item.key === tab.key);
+    const closingTabs = workspaceTabs.value
+      .slice(0, Math.max(0, tabIndex))
+      .filter((item) => item.closable && !item.pinned);
+    try {
+      await confirmClosingWorkbenchTabs(closingTabs);
+    } catch {
+      return;
+    }
     const fallbackRoute = tabsStore.closeLeftTabs(tab.key);
     if (!fallbackRoute) return;
     if (route.fullPath !== fallbackRoute) {
@@ -206,6 +291,15 @@ function handleTabCommand(command) {
   }
 
   if (command === "close-right") {
+    const tabIndex = workspaceTabs.value.findIndex((item) => item.key === tab.key);
+    const closingTabs = workspaceTabs.value
+      .slice(tabIndex + 1)
+      .filter((item) => item.closable && !item.pinned);
+    try {
+      await confirmClosingWorkbenchTabs(closingTabs);
+    } catch {
+      return;
+    }
     const fallbackRoute = tabsStore.closeRightTabs(tab.key);
     if (!fallbackRoute) return;
     if (route.fullPath !== fallbackRoute) {
@@ -271,6 +365,12 @@ function openPluginDownload() {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
+function handlePluginDownloadCommand(command) {
+  const item = pluginDownloadLinks.find((link) => link.command === command);
+  if (!item?.url) return;
+  window.open(item.url, "_blank", "noopener,noreferrer");
+}
+
 function pluginUpdateDismissKey(update) {
   const type = String(update?.type || "collector_plugin").trim() || "collector_plugin";
   const targetVersion = String(update?.latest_version || update?.version || update?.target_version || "").trim() || "unknown";
@@ -304,7 +404,7 @@ function dismissPluginUpdate() {
 
 const contextTab = computed(() => tabsStore.findTab(contextMenu.value.tabKey));
 const activePluginUpdate = computed(() => null);
-const keepAliveRouteNames = ["asset-variant-center-create", "listing-automation", "collector-box", "selection"];
+const keepAliveRouteNames = ["asset-variant-center-create", "asset-variant-center-wizard", "ai-optimization-workbench-v2", "listing-automation", "collector-box", "selection"];
 const contextTabCanClose = computed(() => Boolean(contextTab.value?.closable));
 const contextTabPinned = computed(() => Boolean(contextTab.value?.pinned || !contextTab.value?.closable));
 const contextTabIndex = computed(() => workspaceTabs.value.findIndex((tab) => tab.key === contextMenu.value.tabKey));
@@ -440,6 +540,22 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="erp-header-right">
+          <el-dropdown trigger="click" @command="handlePluginDownloadCommand">
+            <el-button circle title="插件下载">
+              <el-icon><Download /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item
+                  v-for="item in pluginDownloadLinks"
+                  :key="item.command"
+                  :command="item.command"
+                >
+                  {{ item.label }}
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <el-badge :value="activePluginUpdate ? 1 : 0" class="erp-header-badge" :hidden="!activePluginUpdate">
             <el-button circle @click="activePluginUpdate && openPluginDownload()">
               <el-icon><Bell /></el-icon>

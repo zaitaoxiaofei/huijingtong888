@@ -1,6 +1,6 @@
 ﻿<script setup>
-import { computed, onMounted, reactive, ref } from "vue";
-import { useRouter } from "vue-router";
+import { computed, onMounted, reactive, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, Edit, MagicStick, Refresh, Search, VideoCamera, View } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
@@ -19,6 +19,7 @@ const batchRefreshing = ref(false);
 const batchDeleting = ref(false);
 const selectedRows = ref([]);
 const router = useRouter();
+const route = useRoute();
 const recordImagePlaceholder = "data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='84' viewBox='0 0 64 84'%3E%3Crect width='64' height='84' rx='8' fill='%23f3f6fb'/%3E%3Cpath d='M14 56l13-16 9 10 7-8 11 14H14z' fill='%23c7d0dd'/%3E%3Ccircle cx='25' cy='30' r='5' fill='%23c7d0dd'/%3E%3C/svg%3E";
 let drawerPayloadCache = null;
 let drawerResponseCache = null;
@@ -61,10 +62,49 @@ const drawer = reactive({
   }
 });
 
+const batchListing = reactive({
+  visible: false,
+  loading: false,
+  publishing: false,
+  shopIds: [],
+  textVariantEnabled: true,
+  baseShopId: "",
+  textVariantStyle: "light",
+  textVariantFields: ["title", "tags", "description"],
+  shopStyles: {},
+  result: null
+});
+
+const textVariantStyleOptions = [
+  { label: "轻量差异化", value: "light" },
+  { label: "高点击率", value: "ctr" },
+  { label: "场景化", value: "scene" },
+  { label: "材质卖点", value: "material" }
+];
+
+const pageMode = computed(() => route.meta?.recordMode === "publish" ? "publish" : "drafts");
+const isDraftMode = computed(() => pageMode.value === "drafts");
+const isPublishMode = computed(() => pageMode.value === "publish");
 const filteredRows = computed(() => state.rows);
+const selectedDraftRows = computed(() => isDraftMode.value ? selectedRows.value.filter((row) => row.row_type === "draft") : []);
+const drawerTitle = computed(() => isDraftMode.value ? "草稿项目详情" : "上架记录详情");
+const statusOptions = computed(() => isDraftMode.value
+  ? [
+    { label: "全部状态", value: "all" },
+    { label: "编辑中", value: "editing" },
+    { label: "待上架", value: "waiting" }
+  ]
+  : [
+    { label: "全部状态", value: "all" },
+    { label: "上架成功", value: "success" },
+    { label: "等待处理", value: "processing" },
+    { label: "上架失败", value: "failed" }
+  ]);
 
 function matchesStatusFilter(status, filter) {
   if (!filter || filter === "all") return true;
+  if (filter === "editing") return status === "editing";
+  if (filter === "waiting") return status === "waiting";
   if (filter === "success") return isSuccessStatus(status);
   if (filter === "processing") return ["submitted", "processing", "resubmitting", "ozon_status_pending"].includes(status);
   if (filter === "failed") return ["failed", "ozon_status_error"].includes(status);
@@ -78,6 +118,8 @@ const summary = computed(() => {
     success: rows.filter((row) => isSuccessStatus(row.status)).length,
     processing: rows.filter((row) => ["submitted", "processing", "resubmitting", "ozon_status_pending"].includes(row.status)).length,
     failed: rows.filter((row) => row.status === "failed").length,
+    editing: rows.filter((row) => row.status === "editing").length,
+    waiting: rows.filter((row) => row.status === "waiting").length,
     quality90: rows.filter((row) => Number(row.quality_score || 0) >= 90).length
   };
 });
@@ -85,6 +127,7 @@ const summary = computed(() => {
 async function loadRecords() {
   loading.value = true;
   try {
+    const endpoint = isPublishMode.value ? "/api/listing/publish-records" : "/api/listing/draft-projects";
     const params = new URLSearchParams({
       paged: "1",
       page: String(state.page),
@@ -93,18 +136,26 @@ async function loadRecords() {
       quality: state.quality,
       includePayload: "0"
     });
+    if (isDraftMode.value) params.set("view", "drafts");
     if (state.query.trim()) params.set("query", state.query.trim());
     if (state.nameQuery.trim()) params.set("nameQuery", state.nameQuery.trim());
     if (state.shopId !== "all") params.set("shopId", String(state.shopId));
-    const result = await apiClient.get(`/api/listing/publish-records?${params.toString()}`, { noCache: true });
-    state.rows = Array.isArray(result?.rows) ? result.rows : [];
-    state.total = Number(result?.total || 0);
+    const result = await apiClient.get(`${endpoint}?${params.toString()}`, { noCache: true });
+    state.rows = (Array.isArray(result?.rows) ? result.rows : []).map(normalizeDraftProjectFallback);
+    state.total = Number(result?.total || state.rows.length);
     state.page = Number(result?.page || state.page);
     state.pageSize = Number(result?.pageSize || state.pageSize);
     selectedRows.value = [];
   } finally {
     loading.value = false;
   }
+}
+
+async function reloadRecordsAfterDelete(deletedCount = 1) {
+  const remainingTotal = Math.max(0, Number(state.total || 0) - Number(deletedCount || 0));
+  const lastPage = Math.max(1, Math.ceil(remainingTotal / Number(state.pageSize || 20)));
+  if (state.page > lastPage) state.page = lastPage;
+  await loadRecords();
 }
 
 async function loadShops() {
@@ -133,6 +184,14 @@ function resetFilters() {
   loadRecords();
 }
 
+function resetModeFilters() {
+  state.status = "all";
+  state.quality = "all";
+  state.page = 1;
+  selectedRows.value = [];
+  loadRecords();
+}
+
 function searchRecords() {
   state.page = 1;
   loadRecords();
@@ -150,6 +209,8 @@ function handlePageSizeChange(size) {
 }
 
 function statusType(status) {
+  if (status === "editing") return "info";
+  if (status === "waiting") return "warning";
   if (isSuccessStatus(status)) return "success";
   if (["submitted", "processing", "resubmitting", "ozon_status_pending"].includes(status)) return "warning";
   if (status === "ozon_status_error") return "danger";
@@ -162,6 +223,8 @@ function statusText(status) {
     imported: "上架成功",
     published: "上架成功",
     success: "上架成功",
+    editing: "编辑中",
+    waiting: "等待上架",
     submitted: "已提交 Ozon",
     processing: "Ozon处理中",
     resubmitting: "重新提交中",
@@ -220,6 +283,16 @@ function recordPriceText(row = {}) {
     : `${price} ${currency}`;
 }
 
+function normalizeDraftProjectFallback(row = {}) {
+  const rowType = row.row_type || (row.request ? "publish_record" : "draft");
+  return {
+    ...row,
+    row_type: rowType,
+    row_key: row.row_key || `${rowType === "draft" ? "draft" : "record"}-${row.id}`,
+    source_label: row.source_label || (rowType === "draft" ? "商品上架" : "上架记录")
+  };
+}
+
 function compactDateTime(value = "") {
   const text = String(value || "").trim();
   if (!text) return "-";
@@ -227,6 +300,7 @@ function compactDateTime(value = "") {
 }
 
 async function loadPublishRecordDetail(row) {
+  if (row?.row_type === "draft") return row;
   if (row?.request?.items) return row;
   detailLoadingId.value = row.id;
   try {
@@ -241,6 +315,18 @@ async function loadPublishRecordDetail(row) {
 
 async function editInListingAutomation(row) {
   if (!row?.id) return;
+  if (row.row_type === "draft") {
+    router.push({
+      name: "listing-automation",
+      query: {
+        workbenchId: createListingWorkbenchId(),
+        tabTitle: `商品上架 · 草稿 ${row.id}`,
+        draftId: row.id,
+        returnTo: router.currentRoute.value.fullPath
+      }
+    });
+    return;
+  }
   router.push({
     name: "listing-automation",
     query: {
@@ -252,17 +338,41 @@ async function editInListingAutomation(row) {
   });
 }
 
-function openAiOptimize(row) {
+function openAiWorkbench(row, mode = "optimization") {
   if (!row?.id) return;
+  const sourceQuery = row.row_type === "draft"
+    ? { draftId: String(row.id), source: "listing_draft" }
+    : { listingRecordId: String(row.id), source: "listing_record" };
   router.push({
-    name: "asset-variant-center-create",
+    name: mode === "variant" ? "asset-variant-center-wizard" : "ai-optimization-workbench-v2",
     query: {
       workbenchId: createAiWorkbenchId(),
-      tabTitle: `AI素材优化 · 记录 ${row.id}`,
-      listingRecordId: String(row.id),
-      source: "listing_record",
+      tabTitle: `${mode === "variant" ? "AI裂变" : "AI优化"} · ${row.row_type === "draft" ? "草稿" : "记录"} ${row.id}`,
+      ...sourceQuery,
       autoImport: "1",
       importAt: String(Date.now())
+    }
+  });
+}
+
+function batchOpenAiVariantWorkbench() {
+  const rows = selectedDraftRows.value;
+  if (!rows.length) {
+    ElMessage.warning("请先选择要 AI 裂变的草稿");
+    return;
+  }
+  const first = rows[0];
+  router.push({
+    name: "asset-variant-center-wizard",
+    query: {
+      workbenchId: createAiWorkbenchId(),
+      tabTitle: rows.length > 1 ? `AI裂变 · ${rows.length} 个草稿` : `AI裂变 · 草稿 ${first.id}`,
+      source: "listing_draft",
+      draftId: String(first.id),
+      draftIds: rows.map((row) => row.id).join(","),
+      autoImport: "1",
+      importAt: String(Date.now()),
+      returnTo: router.currentRoute.value.fullPath
     }
   });
 }
@@ -401,6 +511,10 @@ function extractRichContentJson(item = {}) {
 }
 
 async function openDrawer(row) {
+  if (row?.row_type === "draft") {
+    editInListingAutomation(row);
+    return;
+  }
   const detail = await loadPublishRecordDetail(row);
   const payload = plainClone(detail.request, { items: [] });
   const item = payload.items?.[0] || {};
@@ -481,6 +595,10 @@ async function retryRecord() {
 }
 
 async function refreshRecord(row) {
+  if (row?.row_type === "draft") {
+    await loadRecords();
+    return;
+  }
   refreshingId.value = row.id;
   try {
     const updated = await apiClient.post(`/api/listing/publish-records/${row.id}/refresh`, {});
@@ -493,7 +611,7 @@ async function refreshRecord(row) {
 }
 
 async function batchRefreshRecords() {
-  const rows = selectedRows.value.filter((row) => row?.id);
+  const rows = selectedRows.value.filter((row) => row?.id && row.row_type !== "draft");
   if (!rows.length) {
     ElMessage.warning("请先选择要刷新的上架记录");
     return;
@@ -514,6 +632,22 @@ async function batchRefreshRecords() {
 }
 
 async function deleteRecord(row) {
+  if (row?.row_type === "draft") {
+    await ElMessageBox.confirm(
+      "删除后该草稿不再显示，未提交的等待上架副本也会同步移除。",
+      "确认删除草稿",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" }
+    );
+    deletingId.value = row.id;
+    try {
+      await apiClient.delete(`/api/listing/drafts/${row.id}`);
+      ElMessage.success("草稿已删除");
+      await reloadRecordsAfterDelete(1);
+    } finally {
+      deletingId.value = null;
+    }
+    return;
+  }
   await ElMessageBox.confirm(
     "删除后这条上架记录不会再显示在列表里，已经在 Ozon 上架的商品不会被下架。",
     "确认删除上架记录",
@@ -522,17 +656,37 @@ async function deleteRecord(row) {
   deletingId.value = row.id;
   try {
     await apiClient.delete(`/api/listing/publish-records/${row.id}`);
-    state.rows = state.rows.filter((item) => Number(item.id) !== Number(row.id));
     ElMessage.success("上架记录已删除");
+    await reloadRecordsAfterDelete(1);
   } finally {
     deletingId.value = null;
   }
 }
 
 async function batchDeleteRecords() {
-  const rows = selectedRows.value.filter((row) => row?.id);
+  const rows = isDraftMode.value
+    ? selectedDraftRows.value
+    : selectedRows.value.filter((row) => row?.id && row.row_type !== "draft");
   if (!rows.length) {
-    ElMessage.warning("请先选择要删除的上架记录");
+    ElMessage.warning(isDraftMode.value ? "请先选择要删除的草稿" : "请先选择要删除的上架记录");
+    return;
+  }
+  if (isDraftMode.value) {
+    await ElMessageBox.confirm(
+      `确认删除选中的 ${rows.length} 个草稿？未提交的等待上架副本也会同步移除。`,
+      "批量删除草稿",
+      { type: "warning", confirmButtonText: "批量删除", cancelButtonText: "取消" }
+    );
+    batchDeleting.value = true;
+    try {
+      const ids = new Set(rows.map((row) => Number(row.id)));
+      await Promise.all(rows.map((row) => apiClient.delete(`/api/listing/drafts/${row.id}`)));
+      selectedRows.value = [];
+      ElMessage.success(`已删除 ${ids.size} 个草稿`);
+      await reloadRecordsAfterDelete(ids.size);
+    } finally {
+      batchDeleting.value = false;
+    }
     return;
   }
   await ElMessageBox.confirm(
@@ -543,15 +697,153 @@ async function batchDeleteRecords() {
   batchDeleting.value = true;
   try {
     const ids = new Set(rows.map((row) => Number(row.id)));
-    for (const row of rows) {
-      await apiClient.delete(`/api/listing/publish-records/${row.id}`);
-    }
-    state.rows = state.rows.filter((row) => !ids.has(Number(row.id)));
+    await apiClient.post("/api/listing/publish-records/batch-delete", { ids: [...ids] });
     selectedRows.value = [];
     ElMessage.success(`已删除 ${ids.size} 条上架记录`);
+    await reloadRecordsAfterDelete(ids.size);
   } finally {
     batchDeleting.value = false;
   }
+}
+
+function openBatchListingDialog() {
+  const rows = selectedDraftRows.value;
+  if (!rows.length) {
+    ElMessage.warning("请先选择编辑中或等待上架的草稿");
+    return;
+  }
+  batchListing.shopIds = state.shops.map((shop) => shop.id).slice(0, 1);
+  batchListing.result = null;
+  ensureBatchTextVariantBaseShop();
+  batchListing.visible = true;
+}
+
+function selectedBatchTextVariantShops() {
+  const selected = new Set(batchListing.shopIds.map((id) => String(id)));
+  return state.shops.filter((shop) => selected.has(String(shop.id)));
+}
+
+function ensureBatchTextVariantBaseShop() {
+  if (!batchListing.shopIds.length) {
+    batchListing.baseShopId = "";
+    batchListing.shopStyles = {};
+    return;
+  }
+  if (!batchListing.shopIds.some((id) => String(id) === String(batchListing.baseShopId))) {
+    batchListing.baseShopId = batchListing.shopIds[0];
+  }
+  syncBatchTextVariantShopStyles();
+}
+
+function syncBatchTextVariantShopStyles() {
+  const selected = new Set(batchListing.shopIds.map((id) => String(id)));
+  Object.keys(batchListing.shopStyles || {}).forEach((shopId) => {
+    if (!selected.has(String(shopId))) delete batchListing.shopStyles[shopId];
+  });
+  batchListing.shopIds.forEach((shopId) => {
+    const key = String(shopId);
+    if (!batchListing.shopStyles[key]) batchListing.shopStyles[key] = batchListing.textVariantStyle || "light";
+  });
+}
+
+function setAllBatchTextVariantStyles(style) {
+  batchListing.textVariantStyle = style;
+  batchListing.shopIds.forEach((shopId) => {
+    if (String(shopId) !== String(batchListing.baseShopId)) {
+      batchListing.shopStyles[String(shopId)] = style;
+    }
+  });
+}
+
+function buildBatchTextVariantPolicy() {
+  return {
+    enabled: Boolean(batchListing.textVariantEnabled && batchListing.shopIds.length > 1),
+    base_shop_id: batchListing.baseShopId || batchListing.shopIds[0] || "",
+    style: batchListing.textVariantStyle,
+    shop_styles: batchListing.shopStyles,
+    fields: batchListing.textVariantFields
+  };
+}
+
+async function confirmBatchListingDrafts() {
+  const rows = selectedDraftRows.value;
+  if (!rows.length) {
+    ElMessage.warning("请先选择编辑中或等待上架的草稿");
+    return;
+  }
+  if (!batchListing.shopIds.length) {
+    ElMessage.warning("请选择要上架的店铺");
+    return;
+  }
+  batchListing.loading = true;
+  try {
+    let success = 0;
+    for (const row of rows) {
+      await apiClient.post(`/api/listing/drafts/${row.id}/shop-copies`, {
+        shop_ids: batchListing.shopIds
+      });
+      success += 1;
+    }
+    batchListing.visible = false;
+    ElMessage.success(`已为 ${success} 个草稿生成等待上架副本`);
+    await loadRecords();
+  } finally {
+    batchListing.loading = false;
+  }
+}
+
+async function publishBatchListingDrafts() {
+  const rows = selectedDraftRows.value;
+  if (!rows.length) {
+    ElMessage.warning("请先选择编辑中或等待上架的草稿");
+    return;
+  }
+  if (!batchListing.shopIds.length) {
+    ElMessage.warning("请选择要上架的店铺");
+    return;
+  }
+  await ElMessageBox.confirm(
+    `将按 ${rows.length} 个草稿 x ${batchListing.shopIds.length} 个店铺正式提交到 Ozon。提交前会逐个校验图片、视频、类目和必填属性。`,
+    "确认批量提交 Ozon",
+    { type: "warning", confirmButtonText: "提交 Ozon", cancelButtonText: "取消" }
+  );
+  batchListing.publishing = true;
+  batchListing.result = null;
+  try {
+    const result = await apiClient.post("/api/listing/drafts/batch-publish", {
+      draft_ids: rows.map((row) => row.id),
+      shop_ids: batchListing.shopIds,
+      text_variant_policy: buildBatchTextVariantPolicy()
+    });
+    batchListing.result = result;
+    const success = Number(result?.summary?.success || 0);
+    const failed = Number(result?.summary?.failed || 0);
+    if (success && !failed) ElMessage.success(`已提交 ${success} 个店铺任务到 Ozon`);
+    else if (success) ElMessage.warning(`已提交 ${success} 个，失败 ${failed} 个，请查看结果`);
+    else ElMessage.error("批量提交未成功，请查看结果");
+    await loadRecords();
+  } finally {
+    batchListing.publishing = false;
+  }
+}
+
+function batchOpenDraftsForListing() {
+  const rows = selectedDraftRows.value;
+  if (!rows.length) {
+    ElMessage.warning("请先选择编辑中或等待上架的草稿");
+    return;
+  }
+  const first = rows[0];
+  router.push({
+    name: "listing-automation",
+    query: {
+      workbenchId: createListingWorkbenchId(),
+      tabTitle: rows.length > 1 ? `商品上架 · ${rows.length} 个草稿` : `商品上架 · 草稿 ${first.id}`,
+      draftId: first.id,
+      draftIds: rows.map((row) => row.id).join(","),
+      returnTo: router.currentRoute.value.fullPath
+    }
+  });
 }
 
 function extractVideoUrls(item = {}) {
@@ -650,6 +942,8 @@ function handleRecordImageError(event, row = {}) {
 onMounted(async () => {
   await Promise.all([loadShops(), loadRecords()]);
 });
+
+watch(pageMode, resetModeFilters);
 </script>
 
 <template>
@@ -663,12 +957,9 @@ onMounted(async () => {
         </el-select>
         <el-input v-model="state.query" clearable placeholder="offer / product id / 类目" @keyup.enter="searchRecords" @clear="searchRecords" />
         <el-select v-model="state.status" placeholder="状态" @change="searchRecords">
-          <el-option label="全部状态" value="all" />
-          <el-option label="上架成功" value="success" />
-          <el-option label="等待处理" value="processing" />
-          <el-option label="上架失败" value="failed" />
+          <el-option v-for="option in statusOptions" :key="option.value" :label="option.label" :value="option.value" />
         </el-select>
-        <el-select v-model="state.quality" placeholder="评分" @change="searchRecords">
+        <el-select v-if="isPublishMode" v-model="state.quality" placeholder="评分" @change="searchRecords">
           <el-option label="全部评分" value="all" />
           <el-option label="85分以下" value="lt85" />
           <el-option label="85分以上" value="gte85" />
@@ -679,6 +970,8 @@ onMounted(async () => {
         <span class="selection-count">已选 {{ selectedRows.length }} / 当前 {{ filteredRows.length }}</span>
         <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Search" @click="searchRecords">查询</el-button>
         <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="loading" @click="loadRecords">刷新</el-button>
+        <el-button v-if="isDraftMode" class="erp-btn erp-btn-primary" type="primary" :disabled="!selectedDraftRows.length" @click="openBatchListingDialog">批量去上架</el-button>
+        <el-button v-if="isDraftMode" class="erp-btn erp-btn-secondary" type="primary" plain :icon="MagicStick" :disabled="!selectedDraftRows.length" @click="batchOpenAiVariantWorkbench">AI裂变</el-button>
         <el-button class="erp-btn erp-btn-danger" type="danger" plain :icon="Delete" :loading="batchDeleting" :disabled="!selectedRows.length" @click="batchDeleteRecords">批量删除</el-button>
         <el-button class="erp-btn erp-btn-secondary" @click="resetFilters">重置</el-button>
       </div>
@@ -691,7 +984,7 @@ onMounted(async () => {
         border
         stripe
         class="erp-data-table publish-table"
-        row-key="id"
+        row-key="row_key"
         @selection-change="handleSelectionChange"
       >
       <el-table-column type="selection" width="44" fixed="left" />
@@ -700,9 +993,9 @@ onMounted(async () => {
           <div class="record-product">
             <ProductImagePreview
               :src="recordPreviewImage(row) || recordImagePlaceholder"
-              :preview-list="recordPreviewCandidates(row)"
               size="portrait"
               fit="cover"
+              :preview="false"
               proxy-remote
             />
             <div>
@@ -714,21 +1007,23 @@ onMounted(async () => {
         </template>
       </el-table-column>
       <el-table-column label="店铺" width="118" prop="shop_name" />
+      <el-table-column label="来源" width="118" prop="source_label" />
       <el-table-column label="状态" width="120">
         <template #default="{ row }">
           <el-tag :type="statusType(row.status)" effect="plain">{{ statusText(row.status) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="失败原因" min-width="220">
+      <el-table-column v-if="isPublishMode" label="失败原因" min-width="220">
         <template #default="{ row }">
           <div v-if="publishFailureReason(row)" class="failure-cell">
             <strong>{{ publishFailureReason(row) }}</strong>
             <span v-if="publishFailureFixTip(row)">{{ publishFailureFixTip(row) }}</span>
           </div>
+          <span v-else-if="row.row_type === 'draft'" class="muted-text">草稿可继续编辑或选择店铺上架</span>
           <span v-else class="muted-text">-</span>
         </template>
       </el-table-column>
-      <el-table-column label="内容评分" width="150">
+      <el-table-column v-if="isPublishMode" label="内容评分" width="150">
         <template #default="{ row }">
           <div class="quality-cell">
             <el-tag :type="qualityType(row.quality_score)" effect="plain">{{ row.quality_score ? `${row.quality_score} 分` : "未返回" }}</el-tag>
@@ -749,11 +1044,12 @@ onMounted(async () => {
           <span class="record-text nowrap">{{ compactDateTime(row.updated_at || row.created_at) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="196" fixed="right" class-name="record-actions-column">
+      <el-table-column label="操作" width="276" fixed="right" class-name="record-actions-column">
         <template #default="{ row }">
           <div class="row-actions">
             <el-button class="erp-btn-link" link type="primary" :icon="Edit" :disabled="detailLoadingId === row.id" @click="editInListingAutomation(row)">编辑</el-button>
-            <el-button class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiOptimize(row)">AI优化</el-button>
+            <el-button class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiWorkbench(row, 'optimization')">AI优化</el-button>
+            <el-button class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiWorkbench(row, 'variant')">AI裂变</el-button>
             <el-button class="erp-btn-link-danger" link type="danger" :icon="Delete" :disabled="deletingId === row.id" @click="deleteRecord(row)">删除</el-button>
           </div>
         </template>
@@ -769,7 +1065,7 @@ onMounted(async () => {
       @update:pageSize="handlePageSizeChange"
     />
 
-    <el-drawer v-model="drawer.visible" title="上架记录详情" size="760px">
+    <el-drawer v-model="drawer.visible" :title="drawerTitle" size="760px">
       <div v-if="drawer.row" class="record-drawer">
         <section class="drawer-hero">
           <ProductImagePreview
@@ -839,6 +1135,74 @@ onMounted(async () => {
         </div>
       </div>
     </el-drawer>
+
+    <el-dialog v-model="batchListing.visible" title="批量生成上架副本" width="520px">
+      <el-form label-width="92px">
+        <el-form-item label="草稿数量">
+          <span class="record-text">已选择 {{ selectedDraftRows.length }} 个草稿项目</span>
+        </el-form-item>
+        <el-form-item label="目标店铺">
+          <el-select v-model="batchListing.shopIds" multiple filterable collapse-tags collapse-tags-tooltip placeholder="请选择店铺" @change="ensureBatchTextVariantBaseShop">
+            <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="shop.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="文案变体">
+          <div class="batch-text-variant-panel">
+            <div class="batch-text-variant-main">
+              <el-switch v-model="batchListing.textVariantEnabled" :disabled="batchListing.shopIds.length < 2" active-text="多店铺发布时启用" />
+              <span>{{ batchListing.shopIds.length < 2 ? "选择两个以上店铺后可用" : "基准店铺保留原文，其他店铺按策略轻量改写" }}</span>
+            </div>
+            <div v-if="batchListing.textVariantEnabled" class="batch-text-variant-controls">
+              <div class="batch-text-variant-row">
+                <span>批量策略</span>
+                <el-select :model-value="batchListing.textVariantStyle" placeholder="批量设置其他店铺" @update:model-value="setAllBatchTextVariantStyles">
+                  <el-option v-for="item in textVariantStyleOptions" :key="item.value" :label="item.label" :value="item.value" />
+                </el-select>
+              </div>
+              <el-checkbox-group v-model="batchListing.textVariantFields">
+                <el-checkbox label="title">标题</el-checkbox>
+                <el-checkbox label="tags">标签</el-checkbox>
+                <el-checkbox label="description">简介</el-checkbox>
+              </el-checkbox-group>
+              <div class="batch-text-variant-shops">
+                <div v-for="shop in selectedBatchTextVariantShops()" :key="shop.id" class="batch-text-variant-shop">
+                  <span>{{ shop.name }}</span>
+                  <el-radio
+                    :model-value="batchListing.baseShopId"
+                    :label="shop.id"
+                    @update:model-value="batchListing.baseShopId = $event; syncBatchTextVariantShopStyles()"
+                  >
+                    原版保留
+                  </el-radio>
+                  <el-select
+                    v-if="String(shop.id) !== String(batchListing.baseShopId)"
+                    v-model="batchListing.shopStyles[String(shop.id)]"
+                    placeholder="选择策略"
+                  >
+                    <el-option v-for="item in textVariantStyleOptions" :key="item.value" :label="item.label" :value="item.value" />
+                  </el-select>
+                  <em v-else>不改当前文案</em>
+                </div>
+              </div>
+            </div>
+          </div>
+        </el-form-item>
+      </el-form>
+      <el-alert
+        v-if="batchListing.result"
+        class="batch-publish-result"
+        :type="batchListing.result.ok ? 'success' : 'warning'"
+        :title="`提交结果：成功 ${batchListing.result.summary?.success || 0}，失败 ${batchListing.result.summary?.failed || 0}`"
+        show-icon
+        :closable="false"
+      />
+      <template #footer>
+        <el-button @click="batchListing.visible = false">取消</el-button>
+        <el-button @click="batchOpenDraftsForListing">打开上架页</el-button>
+        <el-button type="primary" :loading="batchListing.loading" @click="confirmBatchListingDrafts">生成等待上架副本</el-button>
+        <el-button type="danger" :loading="batchListing.publishing" @click="publishBatchListingDrafts">批量提交 Ozon</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -869,6 +1233,21 @@ onMounted(async () => {
   gap: 8px;
   flex-wrap: wrap;
 }
+.batch-text-variant-panel { width: 100%; display: flex; flex-direction: column; gap: 10px; }
+.batch-text-variant-main, .batch-text-variant-row, .batch-text-variant-shop {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.batch-text-variant-main span, .batch-text-variant-shop em { color: #697386; font-size: 12px; font-style: normal; }
+.batch-text-variant-controls { display: flex; flex-direction: column; gap: 10px; padding: 10px; border: 1px solid #e5eaf3; border-radius: 6px; background: #f8fbff; }
+.batch-text-variant-row > span { color: #1f2d3d; font-size: 12px; }
+.batch-text-variant-row .el-select { width: 180px; }
+.batch-text-variant-shops { display: flex; flex-direction: column; gap: 8px; max-height: 190px; overflow: auto; }
+.batch-text-variant-shop { justify-content: space-between; padding: 8px 10px; border: 1px solid #edf1f7; border-radius: 6px; background: #fff; }
+.batch-text-variant-shop > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-text-variant-shop .el-select { width: 150px; }
+.batch-publish-result { margin-top: 10px; }
 .selection-count {
   color: #697386;
   font-size: 12px;

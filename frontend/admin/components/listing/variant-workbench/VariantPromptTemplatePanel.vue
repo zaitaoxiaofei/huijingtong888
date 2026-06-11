@@ -28,8 +28,8 @@ function updateField(key, value) {
   <section class="prompt-template-panel">
     <div class="panel-head">
       <div>
-        <h3>提示词模板</h3>
-        <p>从系统提示词库复用模板，生成前可预览和临时编辑最终 Prompt。</p>
+        <h3>配置提示词</h3>
+        <p>不配置会使用通用策略；配置后，本次裂变素材都会参考这里生成。</p>
       </div>
       <el-button class="erp-btn-link" link type="primary" @click="$emit('open-library')">管理模板</el-button>
     </div>
@@ -38,7 +38,7 @@ function updateField(key, value) {
       :model-value="model.templateId"
       filterable
       clearable
-      placeholder="选择提示词模板"
+      placeholder="选择提示词模板，不选则使用通用策略"
       @update:model-value="updateField('templateId', $event)"
     >
       <el-option
@@ -73,12 +73,12 @@ function updateField(key, value) {
       :model-value="model.userPrompt"
       type="textarea"
       :rows="3"
-      placeholder="本次生成补充要求，例如：背景更明亮，保留产品结构，突出不锈钢质感"
+      placeholder="本次生成补充要求，例如：只替换 logo 和车型文字，材质、颜色、光泽、构图保持一致"
       @update:model-value="updateField('userPrompt', $event)"
     />
 
     <div class="prompt-actions">
-      <el-button class="erp-btn erp-btn-secondary" @click="$emit('preview')">预览 / 编辑 Prompt</el-button>
+      <el-button class="erp-btn erp-btn-secondary" @click="$emit('preview')">预览 / 编辑提示词</el-button>
     </div>
   </section>
 </template>

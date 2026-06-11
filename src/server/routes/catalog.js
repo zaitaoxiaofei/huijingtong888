@@ -14,7 +14,7 @@ export function createCatalogRoutes({ services, readJson }) {
         owner_person_id: body.owner_person_id || sessionPersonId,
         created_by_person_id: body.created_by_person_id || sessionPersonId
       });
-      return { ...created, product: await services.selectionProduct(created.id) };
+      return { ...created, product: await services.selectionProduct(created.id, { includeDetails: 0 }) };
     },
     "POST /api/products/merge-preview": async (req) => services.previewMergeProducts(await readJson(req)),
     "POST /api/products/merge": async (req) => services.mergeProducts(await readJson(req)),
@@ -40,18 +40,30 @@ export async function handleCatalogRestRoute({ req, res, url, parts, services, r
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && /^\d+$/.test(parts[2] || "") && !parts[3]) {
-    const detail = await services.selectionProduct(Number(parts[2]));
+    const detail = await services.selectionProduct(Number(parts[2]), Object.fromEntries(url.searchParams.entries()));
     return detail ? json(res, detail) : notFound(res);
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "detail-images" && /^\d+$/.test(parts[4] || "")) {
+    return sendProductImage(res, Number(parts[2]), () => services.productDetailImage(Number(parts[2]), Number(parts[4])), {
+      thumbnail: ["1", "true", "yes"].includes(String(url.searchParams.get("thumb") || "").toLowerCase()),
+      width: Number(url.searchParams.get("w") || 0),
+      version: url.searchParams.get("v") || ""
+    });
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "image") {
-    return sendProductImage(res, Number(parts[2]), services.productImage || null);
+    return sendProductImage(res, Number(parts[2]), services.productImage || null, {
+      thumbnail: ["1", "true", "yes"].includes(String(url.searchParams.get("thumb") || "").toLowerCase()),
+      width: Number(url.searchParams.get("w") || 0),
+      version: url.searchParams.get("v") || ""
+    });
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "products" && parts[2]) {
     const productId = Number(parts[2]);
     await services.updateProduct(productId, await readJson(req));
-    return json(res, { ok: true, product: await services.selectionProduct(productId) });
+    return json(res, { ok: true, product: await services.selectionProduct(productId, { includeDetails: 0 }) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "recalculate-profits") {

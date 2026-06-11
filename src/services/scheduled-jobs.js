@@ -97,6 +97,39 @@ function summarizeScheduledJobResult(jobKey, resultPayload = {}) {
       summaryTruncated: true
     };
   }
+  if (jobKey === "seller_analytics_daily_sync") {
+    return {
+      status: String(payload.status || "success"),
+      warning: truncateText(payload.warning || "", 1000),
+      periodKey: String(payload.periodKey || payload.period_key || ""),
+      days: Number(payload.days || 0),
+      totalShops: Number(payload.totalShops || 0),
+      selectedShops: Number(payload.selectedShops || 0),
+      okShops: Number(payload.okShops || 0),
+      nonOkShops: Number(payload.nonOkShops || 0),
+      createdRuns: Number(payload.createdRuns || 0),
+      skippedNoAuth: Number(payload.skippedNoAuth || 0),
+      timeoutShops: Number(payload.timeoutShops || 0),
+      nextCursor: Number(payload.nextCursor || 0),
+      results: Array.isArray(payload.results)
+        ? payload.results.slice(0, 20).map((item) => ({
+            shop_id: Number(item?.shop_id || item?.shopId || 0),
+            shop_name: truncateText(item?.shop_name || item?.shopName || "", 120),
+            store_id: truncateText(item?.store_id || item?.storeId || "", 80),
+            status: String(item?.status || ""),
+            run_id: truncateText(item?.run_id || item?.runId || "", 120),
+            completed: Number(item?.completed || 0),
+            failed: Number(item?.failed || 0),
+            requestCount: Number(item?.requestCount || item?.request_count || 0),
+            todoCount: Number(item?.todoCount || 0),
+            error_code: item?.error_code ? String(item.error_code) : "",
+            error: item?.error ? truncateText(item.error, 300) : ""
+          }))
+        : [],
+      errors: Array.isArray(payload.errors) ? payload.errors.slice(0, MAX_RESULT_ERRORS).map((item) => truncateText(item, 400)) : [],
+      summaryTruncated: Array.isArray(payload.results) && payload.results.length > 20
+    };
+  }
   if (jobKey === "ozon_action_cleanup") {
     return {
       status: String(payload.status || "success"),

@@ -165,7 +165,7 @@ test("automation standardizer resolves dict placeholders through cached dictiona
   assert.match(automationSource, /function dictionaryOptionDisplayValue/);
   assert.match(automationSource, /function dictionaryModelIdFromAny/);
   assert.match(automationSource, /dictionaryOptionDisplayValue\(item, definition\.values\)/);
-  assert.match(automationSource, /dictionaryOptionDisplayValue\(value\.value \|\| value, definition\.values\)/);
+  assert.match(automationSource, /dictionaryOptionDisplayValue\(value\.value \?\? value\.values\?\.\[0\] \?\? "", definition\.values\)/);
   assert.match(automationSource, /Number\(item\.dictionary_value_id \|\| item\.id \|\| item\.value_id \|\| 0\)/);
 });
 
@@ -184,6 +184,79 @@ test("selected dictionary hydration also reads selected ids from matching option
   assert.match(automationSource, /if \(!ref\?\.dictionary_value_id\) continue;/);
   assert.match(automationSource, /function alignAttributeValueToSelectedOptions\(value, selectedValues = \[\], isCollection = false\)/);
   assert.match(automationSource, /const alignedValue = alignAttributeValueToSelectedOptions\(field\.value, mergedSelectedValues/);
+});
+
+test("automation standardizer auto-selects a single required dictionary option", () => {
+  assert.match(automationSource, /function autoSelectSingleRequiredDictionaryValue\(attribute = \{\}\)/);
+  assert.match(automationSource, /options\.length !== 1/);
+  assert.match(automationSource, /selected_values: \[selected\]/);
+  assert.match(automationSource, /autoSelectSingleRequiredDictionaryValue\(applyRequiredAttributeDefault\(attribute, attributeContextText\)\)/);
+  assert.match(automationSource, /function applyRequiredAttributeDefault\(attribute = \{\}, contextText = ""\)/);
+  assert.match(automationSource, /attributeId === 23487/);
+  assert.match(automationSource, /attributeId === 4389/);
+  assert.match(automationSource, /function findDictionaryOptionByTexts\(options = \[\], texts = \[\]\)/);
+});
+
+test("automation standardizer infers heated hair-cap product type from product context", () => {
+  assert.match(automationSource, /const attributeContextText = normalizedValues/);
+  assert.match(automationSource, /attributeId === 8229 && \/термошап/);
+  assert.match(automationSource, /selectRequiredDictionaryDefault\(attribute, \["Термошапка", "加热发帽"\]\)/);
+});
+
+test("automation standardizer does not treat schema attribute names as generated values", () => {
+  assert.match(automationSource, /const hasExplicitValue = value\.value !== undefined/);
+  assert.match(automationSource, /const hasExplicitValues = Array\.isArray\(value\.values\) && value\.values\.length > 0/);
+  assert.match(automationSource, /if \(!hasExplicitValue && !hasExplicitValues\) return ""/);
+  assert.match(automationSource, /value\.value \?\? value\.values\?\.\[0\] \?\? ""/);
+});
+
+test("Ozon publish adds stable high-value attributes only when the category supports them", () => {
+  assert.match(automationSource, /const inferredQuantity = inferListingPackageQuantity\(item\)/);
+  assert.match(automationSource, /if \(hasCategoryAttr\(4384\)\) addPlainOzonAttribute\(byId, 4384, inferredQuantity\.label\)/);
+  assert.match(automationSource, /if \(hasCategoryAttr\(11650\)\) addPlainOzonAttribute\(byId, 11650, inferredQuantity\.count\)/);
+  assert.match(automationSource, /if \(hasCategoryAttr\(23249\)\) addPlainOzonAttribute\(byId, 23249, inferredQuantity\.count\)/);
+  assert.match(automationSource, /if \(hasCategoryAttr\(5629\)\) await addDictionaryOzonAttribute/);
+  assert.match(automationSource, /vehicle\.model, vehicle\.full/);
+  assert.match(automationSource, /function shouldAutoPublishMaterialAttribute\(descriptionCategoryId, typeId\)/);
+  assert.match(automationSource, /publishOzonTagList\(item\)\.join\(" "\)/);
+});
+
+test("Ozon publish auto-selects missing required dictionary attributes only from provided options", () => {
+  assert.match(automationSource, /async function autoSelectMissingRequiredDictionaryAttributes/);
+  assert.match(automationSource, /await autoSelectMissingRequiredDictionaryAttributes\(byId/);
+  assert.match(automationSource, /Choose only from the provided option dictionary_value_id values/);
+  assert.match(automationSource, /Do not invent values/);
+  assert.match(automationSource, /const selected = options\.find\(\(option\) => Number\(option\.dictionary_value_id/);
+  assert.match(automationSource, /source: "ai_required_dictionary_option"/);
+  assert.match(automationSource, /export async function validateListingTemplatePublishForShop/);
+  assert.match(automationSource, /await validateListingTemplatePublishForShop\(body\.template \|\| body, shops\[0\]\.id, session\)/);
+});
+
+test("publish precheck verifies public listing media URLs instead of trusting local files", () => {
+  assert.match(automationSource, /async function unreachablePublishMediaUrls\(urls = \[\]\)/);
+  assert.match(automationSource, /async function isReachableRemoteMediaUrl\(url = ""\)/);
+  assert.doesNotMatch(automationSource, /if \(resolveListingMediaLocalPath\(url\)\) return null;/);
+  assert.match(automationSource, /公网素材不可访问，Ozon 会下载失败/);
+});
+
+test("listing media upload syncs local files to the public ERP before publishing", () => {
+  assert.match(automationSource, /async function ensureListingMediaPublicUrl\(/);
+  assert.match(automationSource, /async function syncListingMediaFileToPublicBase\(/);
+  assert.match(automationSource, /\/api\/listing\/media\/public-upload/);
+  assert.match(automationSource, /config\.localPluginPublicToken/);
+  assert.match(automationSource, /skip_public_sync/);
+});
+
+test("publish record previews can localize configured public listing media URLs", () => {
+  assert.match(automationSource, /function localListingPreviewUrl\(url = ""\)/);
+  assert.match(automationSource, /config\.listingMediaPublicBaseUrl \|\| config\.appBaseUrl/);
+  assert.match(automationSource, /parsed\.origin === appOrigin \|\| parsed\.origin === mediaOrigin/);
+});
+
+test("Ozon content rating errors fall back to local quality instead of zeroing the record", () => {
+  assert.match(automationSource, /function localQualityFallbackFromRecord\(record = \{\}, source = "local_estimate", issues = \[\]\)/);
+  assert.match(automationSource, /local_estimate_after_ozon_rating_error/);
+  assert.doesNotMatch(automationSource, /source: "ozon_rating_error",\n\s+issues: \["Ozon 内容评分接口查询失败"\]/);
 });
 
 test("collector template creation pre-resolves cached dictionary display values before editor opens", () => {

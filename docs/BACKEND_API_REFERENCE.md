@@ -362,6 +362,8 @@ Selection or inventory product with computed business metrics.
 | `avg_unit_cost` | `number` | No | Average unit cost. |
 | `avg_sale_price` | `number` | No | Average realized sale price. |
 | `avg_profit` | `number` | No | Average estimated profit per sold unit. |
+| `estimated_profit_total` | `number` | No | Total estimated profit for sold items. |
+| `actual_profit_total` | `number` | No | Total accrued actual profit for sold items. |
 | `profit_rate` | `number` | No | Average profit ratio. |
 | `order_count` | `number` | No | Distinct order count. |
 | `sku_count` | `number` | No | Count of active mapped SKUs. |
@@ -1217,6 +1219,96 @@ Run the CEL FBS pricing calculator.
 | `height_cm` | `number` | No | Package height in centimeters. |
 | `exchange_rate` | `number` | No | CNY to RUB exchange rate. |
 | `target_margin` | `number` | No | Target margin ratio. |
+
+### AiStrategyBundle
+
+AI strategy bundle that binds a category to per-asset strategy keys.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | `number` | No | Bundle identifier. |
+| `bundle_key` | `string` | No | Stable bundle key. |
+| `title` | `string` | No | Bundle title. |
+| `description` | `string` | No | Operator-facing bundle summary. |
+| `category_node_id` | `number` | No | Linked AI strategy category node identifier. |
+| `match_keywords` | `array<string>` | No | Keywords that boost bundle matching. |
+| `exclude_keywords` | `array<string>` | No | Keywords that suppress bundle matching. |
+| `strategy_map` | `object` | No | Map of asset key to strategy keys. |
+| `priority` | `number` | No | Bundle sort priority. |
+| `enabled` | `number` | No | Whether the bundle is enabled. |
+
+### AiStrategyCategoryNode
+
+Searchable AI strategy category node used to organize strategy bundles.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | `number` | No | Category node identifier. |
+| `parent_id` | `number` | No | Parent category node identifier. |
+| `category_key` | `string` | No | Stable category key. |
+| `title` | `string` | No | Category title. |
+| `aliases` | `array<string>` | No | Aliases used for search and matching. |
+| `match_keywords` | `array<string>` | No | Keywords used for search and matching. |
+| `sort_order` | `number` | No | Category sort order. |
+| `enabled` | `number` | No | Whether the category node is enabled. |
+
+### AiStrategyBundleMatchRequest
+
+Product context used to recommend category strategy bundles.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `productName` | `string` | No | Product name or listing title. |
+| `categoryText` | `string` | No | Collected category, Ozon category, or operator category text. |
+| `ozonCategory` | `string` | No | Ozon category label. |
+| `material` | `string` | No | Material text such as stainless steel, ABS, or carbon sticker. |
+| `color` | `string` | No | Color text. |
+| `sellingPoints` | `string` | No | Known product selling points. |
+
+### AiStrategyBundleMatchResponse
+
+Matched category and ranked strategy bundle recommendations.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `inputText` | `string` | No | Normalized input text used for matching. |
+| `category` | `object` | No | Matched category node with path. |
+| `bundles` | `array<AiStrategyBundle>` | No | Ranked matching bundles. |
+| `defaultBundle` | `AiStrategyBundle` | No | Highest ranked bundle. |
+
+### AiStrategyPlanRequest
+
+Resolve AI strategies from goal, category text, optional selected titles, and optional strategy bundle.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `businessMode` | `string` | No | Business mode such as product_optimization or product_variant. |
+| `goalKey` | `string` | No | Goal key such as low_ctr or low_conversion. |
+| `categoryText` | `string` | No | Category text used for inherited layer rules. |
+| `selectedTitles` | `array<string>` | No | Manual strategy titles. |
+| `bundleKey` | `string` | No | Optional selected strategy bundle key. |
+| `bundleId` | `number` | No | Optional selected strategy bundle identifier. |
+| `assets` | `array<string>` | No | Optional asset filter such as main_image or detail_image. |
+
+### AiStrategyPlanResponse
+
+Resolved AI strategy plan with strategy modules and optional selected bundle.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `version` | `string` | No | Strategy library version. |
+| `businessMode` | `string` | No | Resolved business mode. |
+| `goalKey` | `string` | No | Resolved goal key. |
+| `layers` | `array<object>` | No | Matched layers. |
+| `bundle` | `object` | No | Selected bundle summary, when a bundle was supplied. |
+| `strategies` | `array<object>` | No | Resolved strategies. |
+| `strategyIds` | `array<string>` | No | Resolved strategy keys. |
+| `strategyTitles` | `array<string>` | No | Resolved strategy titles. |
+| `positiveModules` | `array<string>` | No | Positive prompt modules. |
+| `negativeModules` | `array<string>` | No | Negative prompt modules. |
+| `assets` | `array<string>` | No | Affected asset keys. |
 
 ## Endpoints
 
@@ -2222,6 +2314,116 @@ Return procurement items that are still waiting for inbound completion.
   - `200` `application/json` -> `array<object>`
 
 ### Configuration
+
+#### `GET /api/ai-strategies`
+
+Return AI strategy atoms used by prompt plans.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `array<object>`
+
+#### `POST /api/ai-strategies/resolve`
+
+Resolve an AI prompt strategy plan from goal, category context, selected strategies, and optional bundle.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `AiStrategyPlanRequest`
+- Responses:
+  - `200` `application/json` -> `AiStrategyPlanResponse`
+
+#### `GET /api/ai-strategy-category-nodes`
+
+Return AI strategy category tree nodes.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `array<AiStrategyCategoryNode>`
+
+#### `POST /api/ai-strategy-category-nodes`
+
+Create a searchable AI strategy category node.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `AiStrategyCategoryNode`
+- Responses:
+  - `200` `application/json` -> `AiStrategyCategoryNode`
+
+#### `GET /api/ai-strategy-category-nodes/:id`
+
+Return one AI strategy category node.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Category node identifier.
+- Responses:
+  - `200` `application/json` -> `AiStrategyCategoryNode`
+  - `404` `application/json` -> `ErrorResponse`
+
+#### `PUT /api/ai-strategy-category-nodes/:id`
+
+Update a searchable AI strategy category node.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Category node identifier.
+- Request body: required
+  - Schema: `AiStrategyCategoryNode`
+- Responses:
+  - `200` `application/json` -> `AiStrategyCategoryNode`
+
+#### `GET /api/ai-strategy-bundles`
+
+Return AI category strategy bundles.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `array<AiStrategyBundle>`
+
+#### `POST /api/ai-strategy-bundles`
+
+Create an AI category strategy bundle.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `AiStrategyBundle`
+- Responses:
+  - `200` `application/json` -> `AiStrategyBundle`
+
+#### `GET /api/ai-strategy-bundles/:id`
+
+Return one AI category strategy bundle.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Strategy bundle identifier.
+- Responses:
+  - `200` `application/json` -> `AiStrategyBundle`
+  - `404` `application/json` -> `ErrorResponse`
+
+#### `PUT /api/ai-strategy-bundles/:id`
+
+Update an AI category strategy bundle.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Strategy bundle identifier.
+- Request body: required
+  - Schema: `AiStrategyBundle`
+- Responses:
+  - `200` `application/json` -> `AiStrategyBundle`
+
+#### `POST /api/ai-strategy-bundles/match`
+
+Recommend AI category strategy bundles from product context.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `AiStrategyBundleMatchRequest`
+- Responses:
+  - `200` `application/json` -> `AiStrategyBundleMatchResponse`
 
 #### `GET /api/shops`
 

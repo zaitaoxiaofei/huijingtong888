@@ -83,7 +83,22 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Empty image states should keep the same thumbnail box size and show a short neutral label such as `无图`.
 - Compact thumbnails are acceptable only in dense side lists, rankings, task cards, or secondary panels where the image is not the main inspection target.
 
-## 7. System-Level Text Encoding Requirement
+## 7. Listing Automation Protected Workflow
+
+**The product listing page is a protected operational workflow, not a disposable UI surface.**
+
+- The route `/listing-automation` and `frontend/admin/views/listing/ListingAutomationView.vue` must preserve core operator workflows unless the user explicitly asks to change that workflow.
+- SKU image editing must keep image upload, manual URL entry, template-image reuse, image preview, selected-image deletion, and drag-and-drop sorting.
+- Drag-and-drop sorting in the selected SKU image area is a protected behavior. If this area is changed, keep `draggable`, `dragstart`, `dragover`, `drop`, and order persistence behavior covered by tests.
+- Publish payloads must include only selected dictionary values. Do not send the full option candidate list, raw Ozon attribute JSON, or unknown dictionary placeholders as selected values.
+- Routed entry points from drafts, publish records, online products, or collector data must not restore stale local listing drafts.
+- Ozon dictionary attributes and variant attributes must show human-readable labels where available; raw dictionary IDs should not be shown as normal operator-facing values.
+- Keep Ozon optional attributes paged in small batches, and keep variant dictionary editing lazy through a focused editor/drawer instead of rendering every option in every table cell.
+- Heavy listing overlays such as attribute details, variant attribute editors, import drawers, API debug drawers, publish validation, and publish result drawers should mount lazily with `v-if`.
+- Before changing listing image, variant, Ozon attribute, draft restore, publish payload, or route bootstrap behavior, inspect the relevant tests in `test/listing-template-health-check.test.js`, `test/listing-record-editor-view.test.js`, and `test/listing-draft-create-ai-payload.test.js`.
+- After changing the listing automation page or its directly related listing services, run the focused listing tests before completion.
+
+## 8. System-Level Text Encoding Requirement
 
 **This is a required project rule for every code change: all text files must remain UTF-8, and new mojibake is a blocking defect.**
 

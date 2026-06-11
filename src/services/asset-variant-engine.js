@@ -18,7 +18,8 @@ import {
   publishListingTemplateToOzon,
   registerListingMediaAssetFromFile,
   standardizeListingTemplateForAutomation,
-  validateListingTemplatePublish
+  validateListingTemplatePublish,
+  validateListingTemplatePublishForShop
 } from "./listing-automation.js";
 
 const ROOT_DIR = process.cwd();
@@ -27,15 +28,19 @@ const VARIANT_ROOT = path.resolve(ROOT_DIR, "uploads", "shop-variants");
 const TAIL_TEMPLATE_ROOT = path.resolve(ROOT_DIR, "public", "uploads", "asset-tail-templates");
 const LISTING_MEDIA_ROOT = path.resolve(ROOT_DIR, "public", "uploads", "listing-media");
 const ASSET_SHOP_CONCURRENCY = envInt("ASSET_SHOP_CONCURRENCY", 2, 1, 4);
+const ASSET_TEXT_CONCURRENCY = envInt("ASSET_TEXT_CONCURRENCY", 10, 1, 30);
+const ASSET_VARIANT_IMAGE_CONCURRENCY = envInt("ASSET_VARIANT_IMAGE_CONCURRENCY", 3, 1, 6);
 const ASSET_IMAGE_CONCURRENCY = envInt("ASSET_IMAGE_CONCURRENCY", 3, 1, 6);
-const ASSET_VIDEO_CONCURRENCY = envInt("ASSET_VIDEO_CONCURRENCY", 1, 1, 2);
+const ASSET_VIDEO_CONCURRENCY = envInt("ASSET_VIDEO_CONCURRENCY", 2, 1, 4);
 const OZON_SUBMIT_CONCURRENCY = envInt("OZON_SUBMIT_CONCURRENCY", 2, 1, 3);
 const ASSET_FAST_VIDEO = String(process.env.ASSET_FAST_VIDEO || "1").trim() !== "0";
 const SERVER_VIDEO_WIDTH = 900;
 const SERVER_VIDEO_HEIGHT = 1200;
 const SERVER_VIDEO_FPS = 24;
 const SERVER_VIDEO_DURATION_SECONDS = 6;
+const SERVER_VIDEO_GENERATION_TIMEOUT_MS = envInt("SERVER_VIDEO_GENERATION_TIMEOUT_MS", 70000, 15000, 180000);
 const assetVideoLimiter = createConcurrencyLimiter(ASSET_VIDEO_CONCURRENCY);
+const assetVideoInflight = new Map();
 const TITLE_STYLES = ["traffic", "material", "scenario", "value", "premium"];
 const TAG_STYLES = ["traffic", "vehicle", "material", "compact", "scenario", "value", "premium"];
 const TAG_STYLE_LABELS = {
@@ -298,21 +303,53 @@ export async function generateAssetVariants(body = {}, session = null, context =
   const batchDir = path.join(VARIANT_ROOT, batchId);
   await fs.mkdir(batchDir, { recursive: true });
 
-  const variants = await mapWithConcurrency(shops, ASSET_SHOP_CONCURRENCY, async (shop, shopIndex) => {
-    await context.markStage?.("generate_assets", { current: shopIndex + 1, total: shops.length, shopId: shop.id, step: "shop_start" });
+  const textPlans = await mapWithConcurrency(shops, ASSET_TEXT_CONCURRENCY, async (shop, shopIndex) => {
+    await context.markStage?.("generate_text", { current: shopIndex + 1, total: shops.length, shopId: shop.id, step: "title_tags" });
     const mergedRule = normalizeRule({ ...shop.rule, ...(ruleMap.get(Number(shop.id)) || {}) });
     await context.throwIfCancelled?.();
-    const titleCandidates = await generateTitleCandidates(material, shop);
+    const copyPack = await generateVariantCopyPack(material, shop, mergedRule).catch((error) => {
+      console.warn("asset variant copy pack AI failed:", error?.message || error);
+      return null;
+    });
+    const titleCandidates = copyPack?.titleCandidates || await generateTitleCandidates(material, shop);
     await context.throwIfCancelled?.();
-    const selectedTitle = titleCandidates[mergedRule.titleStyle] || fallbackTitle(material, mergedRule.titleStyle, shop);
+    const selectedTitle = selectListingTitleForShop({
+      manualTitleRu: material.listingTitleRu,
+      titleCandidates,
+      style: mergedRule.titleStyle,
+      material,
+      shop
+    });
     const title = selectedTitle.ru;
     const titleZh = selectedTitle.zh;
     const priceIndex = resolveShopPriceIndex(mergedRule.priceIndex || mergedRule.price_index, material, { ...shop, rule: mergedRule });
     const internalPrice = roundMoney(material.basePriceRmb * priceIndex);
-    const ozonPrice = roundMoney(internalPrice * 2);
-    const ozonOldPrice = roundMoney(internalPrice * 4);
-    const shopTags = generateShopTags(material, shop, mergedRule, title);
+    const ozonPrice = roundMoney(internalPrice);
+    const ozonOldPrice = 0;
+    const shopTags = copyPack?.tags?.length ? copyPack.tags : generateShopTags(material, shop, mergedRule, title);
+    const descriptionText = copyPack?.description || listingDescriptionText(material);
     const shopSlug = sanitizeFilename(`shop-${shop.id}-${shop.name}`);
+    return {
+      shop,
+      shopIndex,
+      mergedRule,
+      titleCandidates,
+      title,
+      titleZh,
+      priceIndex,
+      internalPrice,
+      ozonPrice,
+      ozonOldPrice,
+      shopTags,
+      descriptionText,
+      shopSlug
+    };
+  });
+
+  const variants = await mapWithConcurrency(textPlans, ASSET_VARIANT_IMAGE_CONCURRENCY, async (plan, planIndex) => {
+    const { shop, shopIndex, mergedRule, titleCandidates, title, titleZh, priceIndex, internalPrice, ozonPrice, ozonOldPrice, shopTags, descriptionText, shopSlug } = plan;
+    await context.markStage?.("generate_images", { current: planIndex + 1, total: textPlans.length, shopId: shop.id, step: "main_image" });
+    await context.throwIfCancelled?.();
     const shopDir = path.join(batchDir, shopSlug);
     const infoDir = path.join(shopDir, "product-info");
     await fs.mkdir(infoDir, { recursive: true });
@@ -333,14 +370,14 @@ export async function generateAssetVariants(body = {}, session = null, context =
     });
     await context.throwIfCancelled?.();
 
-    const productInfo = buildProductInfo({ shop, title, titleZh, material: { ...material, tags: shopTags }, images: generatedImages, rule: { ...mergedRule, priceIndex, internalPrice, ozonPrice, ozonOldPrice }, tailTemplate });
+    const productInfo = buildProductInfo({ shop, title, titleZh, material: { ...material, description: descriptionText, tags: shopTags }, images: generatedImages, rule: { ...mergedRule, priceIndex, internalPrice, ozonPrice, ozonOldPrice }, tailTemplate });
     await writeText(path.join(infoDir, "title.txt"), title);
     await writeText(path.join(infoDir, "tags.txt"), shopTags.join(" "));
-    await writeText(path.join(infoDir, "description.txt"), material.description);
+    await writeText(path.join(infoDir, "description.txt"), descriptionText);
     await writeText(path.join(infoDir, "product-info.json"), JSON.stringify(productInfo, null, 2));
     await fs.writeFile(path.join(infoDir, "product-info.xlsx"), buildProductInfoWorkbook(productInfo));
-    await fs.writeFile(path.join(shopDir, "listing.xlsx"), buildListingWorkbook({ shop, title, titleZh, material: { ...material, tags: shopTags }, images: generatedImages, rule: { ...mergedRule, priceIndex, internalPrice, ozonPrice, ozonOldPrice }, tailTemplate }));
-    await writeText(path.join(shopDir, "listing.json"), JSON.stringify(buildListingJson({ shop, title, titleZh, material: { ...material, tags: shopTags }, images: generatedImages, rule: { ...mergedRule, priceIndex, internalPrice, ozonPrice, ozonOldPrice }, tailTemplate }), null, 2));
+    await fs.writeFile(path.join(shopDir, "listing.xlsx"), buildListingWorkbook({ shop, title, titleZh, material: { ...material, description: descriptionText, tags: shopTags }, images: generatedImages, rule: { ...mergedRule, priceIndex, internalPrice, ozonPrice, ozonOldPrice }, tailTemplate }));
+    await writeText(path.join(shopDir, "listing.json"), JSON.stringify(buildListingJson({ shop, title, titleZh, material: { ...material, description: descriptionText, tags: shopTags }, images: generatedImages, rule: { ...mergedRule, priceIndex, internalPrice, ozonPrice, ozonOldPrice }, tailTemplate }), null, 2));
 
     const outputDir = path.relative(ROOT_DIR, shopDir).replace(/\\/g, "/");
     const localOutputDir = shopDir;
@@ -386,20 +423,7 @@ export async function generateAssetVariants(body = {}, session = null, context =
     const variantId = Number(insertResult.insertId || 0);
     await insertGeneratedTitleCandidates(variantId, shop.id, titleCandidates);
     await context.throwIfCancelled?.();
-    let videos = [];
-    const storedVariant = {
-      id: variantId,
-      batch_id: batchId,
-      shop_id: shop.id,
-      output_dir: outputDir,
-      images_json: JSON.stringify(generatedImages)
-    };
-    const generatedVideo = await ensureAssetVariantVideoFromImages(null, storedVariant, generatedImages, { throwIfCancelled: context.throwIfCancelled }).catch((error) => {
-      console.warn("server asset video generation failed:", error.message || error);
-      return null;
-    });
-    await context.throwIfCancelled?.();
-    if (generatedVideo) videos = [normalizeGeneratedVideoForResponse(generatedVideo)];
+    const videos = [];
     return {
       id: variantId,
       batchId,
@@ -537,7 +561,13 @@ export async function generateAssetVariantTitlePreview(body = {}, session = null
   if (!shop) throw new Error("Shop not found");
   const rule = normalizeRule({ ...shop.rule, ...(body.rule || {}) });
   const candidates = await generateTitleCandidates(material, shop);
-  const selected = candidates[rule.titleStyle] || fallbackTitle(material, rule.titleStyle, shop);
+  const selected = selectListingTitleForShop({
+    manualTitleRu: material.listingTitleRu,
+    titleCandidates: candidates,
+    style: rule.titleStyle,
+    material,
+    shop
+  });
   return {
     ok: true,
     shopId,
@@ -546,6 +576,101 @@ export async function generateAssetVariantTitlePreview(body = {}, session = null
     titleRu: selected.ru,
     titleZh: selected.zh,
     candidates
+  };
+}
+
+export async function generateAssetVariantVideoFromImage(body = {}, session = null) {
+  await ensureAssetVariantSchema();
+  const imageUrl = cleanText(body.imageUrl || body.image_url || body.mainImageUrl || body.main_image_url);
+  if (!imageUrl) throw new Error("请先准备主图后再生成视频");
+  const sourceId = cleanText(body.sourceId || body.source_id || body.productId || body.product_id || "ai-optimization");
+  const recipe = serverVideoRecipe();
+  let sourcePath = resolveLocalAssetPath(imageUrl);
+  let sourceName = path.basename(sourcePath || "") || "video-source.jpg";
+  let materializedSourceBuffer = null;
+  let sourceHash = "";
+  if (sourcePath && fsSync.existsSync(sourcePath)) {
+    sourceHash = await fileSha256(sourcePath).catch(() => "");
+    const cachedVideo = sourceHash ? await loadCachedAssetVariantVideo(sourceHash, recipe) : null;
+    if (cachedVideo) return { video: normalizeGeneratedVideoForResponse(cachedVideo) };
+  } else {
+    const sourceBuffer = await readImageBuffer(imageUrl);
+    materializedSourceBuffer = await sharp(sourceBuffer)
+      .rotate()
+      .resize(SERVER_VIDEO_WIDTH, SERVER_VIDEO_HEIGHT, { fit: "cover" })
+      .jpeg({ quality: 92 })
+      .toBuffer();
+    sourceHash = hashBuffer(materializedSourceBuffer);
+    const cachedVideo = await loadCachedAssetVariantVideo(sourceHash, recipe);
+    if (cachedVideo) return { video: normalizeGeneratedVideoForResponse(cachedVideo) };
+  }
+  const batchId = `aiopt-video-${Date.now().toString(36)}-${createHash("sha1").update(`${sourceId}:${imageUrl}`).digest("hex").slice(0, 8)}`;
+  const outputDir = path.join(VARIANT_ROOT, batchId);
+  const imageDir = path.join(outputDir, "images");
+  await fs.mkdir(outputDir, { recursive: true });
+  if (!sourcePath || !fsSync.existsSync(sourcePath)) {
+    await fs.mkdir(imageDir, { recursive: true });
+    sourcePath = path.join(imageDir, "video-source.jpg");
+    await fs.writeFile(sourcePath, materializedSourceBuffer);
+    sourceName = "video-source.jpg";
+  }
+  const variant = {
+    id: 0,
+    batch_id: batchId,
+    shop_id: 0,
+    output_dir: outputDir,
+    variant_title: cleanText(body.title || body.productName || body.product_name || ""),
+    category_name: cleanText(body.categoryName || body.category_name || "")
+  };
+  const generatedVideo = await withTimeout(ensureAssetVariantVideoFromImages(null, variant, [{
+    role: "main",
+    type: "main",
+    url: imageUrl,
+    outputPath: sourcePath,
+    localListingPath: sourcePath,
+    name: sourceName
+  }]), SERVER_VIDEO_GENERATION_TIMEOUT_MS, "视频生成超时，请稍后重试或先保存草稿");
+  if (!generatedVideo) throw new Error("视频生成失败，请确认主图可访问");
+  return { video: normalizeGeneratedVideoForResponse(generatedVideo) };
+}
+
+export async function generateListingVariantMediaFromImage(body = {}, session = null) {
+  await ensureAssetVariantSchema();
+  const imageUrl = cleanText(body.imageUrl || body.image_url || body.mainImageUrl || body.main_image_url);
+  if (!imageUrl) throw new Error("请先准备变体主图");
+  const sourceBuffer = await readImageBuffer(imageUrl);
+  const sourceId = cleanText(body.sourceId || body.source_id || body.offerId || body.offer_id || body.sku || "listing-variant");
+  const batchId = `listing-media-${Date.now().toString(36)}-${createHash("sha1").update(`${sourceId}:${imageUrl}`).digest("hex").slice(0, 8)}`;
+  const outputDir = path.join(VARIANT_ROOT, batchId);
+  const imageDir = path.join(outputDir, "images");
+  await fs.mkdir(imageDir, { recursive: true });
+  const sourcePath = path.join(imageDir, "video-source.jpg");
+  await sharp(sourceBuffer)
+    .rotate()
+    .resize(SERVER_VIDEO_WIDTH, SERVER_VIDEO_HEIGHT, { fit: "cover" })
+    .jpeg({ quality: 92 })
+    .toFile(sourcePath);
+  const generatedVideo = await withTimeout(ensureAssetVariantVideoFromImages(null, {
+    id: 0,
+    batch_id: batchId,
+    shop_id: 0,
+    output_dir: outputDir,
+    variant_title: cleanText(body.title || body.name || "")
+  }, [{
+    role: "main",
+    type: "main",
+    url: imageUrl,
+    outputPath: sourcePath,
+    localListingPath: sourcePath,
+    name: "video-source.jpg"
+  }]), SERVER_VIDEO_GENERATION_TIMEOUT_MS, "视频生成超时，请稍后重试或先保存草稿");
+  if (!generatedVideo) throw new Error("视频生成失败，请确认主图可访问");
+  const video = normalizeGeneratedVideoForResponse(generatedVideo);
+  if (!video.publishUrl) throw new Error("视频已生成，但未获得公网素材地址，暂不能写入 Ozon 上架字段");
+  return {
+    ok: true,
+    cover: video,
+    video
   };
 }
 
@@ -719,13 +844,15 @@ export async function publishAssetVariantsToOzon(body = {}, session = null, cont
 }
 
 async function validateAssetVariantPublishPrecheck({ template, shopId = 0, variantId = 0, draftId = 0 } = {}, session = null) {
-  const validation = await validateListingTemplatePublish(template, session);
+  const validation = shopId
+    ? await validateListingTemplatePublishForShop(template, shopId, session)
+    : await validateListingTemplatePublish(template, session);
   const payload = validation.payload || {};
   const items = Array.isArray(payload.items) ? payload.items : [];
   const firstItem = items[0] || {};
   const media = firstItem.images || payload.images || [];
-  const videos = firstItem.video_urls || firstItem.videos || payload.video_urls || [];
-  const richContent = firstItem.rich_content_json || firstItem.rich_content || payload.rich_content_json || "";
+  const videos = extractAssetVariantVideosForCheck(firstItem, payload);
+  const richContent = extractAssetVariantRichContentForCheck(firstItem, payload, template);
   const errors = [...(validation.errors || [])];
   const warnings = [...(validation.warnings || [])];
 
@@ -782,29 +909,14 @@ export function inspectAssetVariantListingContent({
   const tagText = normalizedTags.join(" ");
   const bodyText = [title, description, richContentText(richContent)].join(" ");
   const factsText = [title, description, categoryName].join(" ");
-  const shop = cleanText(shopName, 160);
-  const shopTag = shopNameTagToken(shop);
 
-  if (shop) {
-    if (!normalizedTags.some((tag) => sameTagToken(tag, shopTag))) {
-      errors.push(`Product tags must include shop tag ${shopTag}`);
-    }
-    if (!containsLooseText(description, shop)) {
-      errors.push(`Description must mention shop name ${shop}`);
-    }
-    if (richContent && !containsLooseText(richContentText(richContent), shop)) {
-      warnings.push(`Rich content text should mention shop name ${shop}`);
-    }
-  } else {
-    warnings.push("Shop name is unavailable; cannot enforce shop-bound listing text");
-  }
-
-  if (containsCjk(title)) warnings.push("Title contains Chinese characters");
-  if (containsCjk(description)) warnings.push("Description contains Chinese characters");
+  if (containsCjk(title)) errors.push("Title contains Chinese characters");
+  if (containsCjk(description)) errors.push("Description contains Chinese characters");
+  if (normalizedTags.some((tag) => containsCjk(tag))) errors.push("Product tags contain Chinese characters");
   if (normalizedTags.length < 8) warnings.push("Product tags look too sparse; consider adding category and buyer-search terms");
   if (String(description || "").split(/\s+/).filter(Boolean).length < 50) warnings.push("Description is short; Ozon SEO text may be weak");
 
-  const looksLikeKeyProduct = /key|fob|\u94a5\u5319|брелок/i.test(factsText);
+  const looksLikeKeyProduct = /key|fob|\u94a5\u5319|钥匙|遥控器|брелок|ключ/i.test(factsText);
   const hasKeyCaseTerms = /key[\s_-]*(case|cover|protection)|car[\s_-]*key|брелок|ключ/i.test(`${tagText} ${bodyText}`);
   if (!looksLikeKeyProduct && hasKeyCaseTerms) {
     errors.push("Non-key product content contains key-case related terms");
@@ -820,6 +932,7 @@ export function inspectAssetVariantListingContent({
 
 function extractAssetVariantTagsForCheck(firstItem = {}, payload = {}, template = {}) {
   const editable = objectValue(template?.editable_payload || template?.editablePayload || {});
+  const sourceRaw = objectValue(editable.source_raw || editable.sourceRaw || template?.source_raw || template?.sourceRaw || {});
   const attrs = [
     ...normalizeArray(firstItem.attributes),
     ...normalizeArray(payload.attributes),
@@ -830,12 +943,60 @@ function extractAssetVariantTagsForCheck(firstItem = {}, payload = {}, template 
     .filter((attr) => /tag|hashtag|тег|ключевые|标签/i.test(String(attr?.name || "")) || Number(attr?.attribute_id || attr?.id || 0) === 23171)
     .flatMap((attr) => normalizeArray(attr?.values).map((item) => item?.value || item?.name || item).concat(attr?.value || []));
   return [
-    ...normalizeArray(firstItem.tags || firstItem.hashtags),
-    ...normalizeArray(payload.tags || payload.hashtags),
-    ...normalizeArray(template?.tags),
-    ...normalizeArray(editable.tags || editable.hashtags),
+    ...normalizeTagsForCheck(firstItem.tags || firstItem.hashtags),
+    ...normalizeTagsForCheck(payload.tags || payload.hashtags),
+    ...normalizeTagsForCheck(template?.tags),
+    ...normalizeTagsForCheck(editable.tags || editable.hashtags),
+    ...normalizeTagsForCheck(sourceRaw.tags || sourceRaw.hashtags),
     ...attrTags
   ];
+}
+
+function extractAssetVariantVideosForCheck(firstItem = {}, payload = {}) {
+  return [
+    ...normalizeArray(firstItem.video_urls || firstItem.videos || firstItem.video_url),
+    ...normalizeArray(payload.video_urls || payload.videos || payload.video_url),
+    ...extractAssetVariantComplexAttributeValues(firstItem, 21841),
+    ...extractAssetVariantComplexAttributeValues(payload, 21841)
+  ].filter(Boolean);
+}
+
+function extractAssetVariantRichContentForCheck(firstItem = {}, payload = {}, template = {}) {
+  const editable = objectValue(template?.editable_payload || template?.editablePayload || {});
+  return String(
+    firstItem.rich_content_json
+    || firstItem.rich_content
+    || payload.rich_content_json
+    || payload.rich_content
+    || attributeValueForCheck(firstItem.attributes, 11254)
+    || attributeValueForCheck(payload.attributes, 11254)
+    || attributeValueForCheck(template?.attributes, 11254)
+    || editable.rich_content_json
+    || editable.rich_content
+    || attributeValueForCheck(editable.attributes, 11254)
+    || ""
+  ).trim();
+}
+
+function extractAssetVariantComplexAttributeValues(source = {}, attributeId = 0) {
+  return normalizeArray(source?.complex_attributes || source?.complexAttributes)
+    .flatMap((group) => normalizeArray(group?.attributes || group))
+    .filter((attr) => Number(attr?.id || attr?.attribute_id || 0) === Number(attributeId || 0))
+    .flatMap((attr) => normalizeArray(attr?.values))
+    .map((value) => String(value?.value || value || "").trim())
+    .filter(Boolean);
+}
+
+function attributeValueForCheck(attributes = [], attributeId = 0) {
+  const attr = normalizeArray(attributes).find((item) => Number(item?.attribute_id || item?.id || 0) === Number(attributeId || 0));
+  if (!attr) return "";
+  const direct = normalizeArray(attr.value).join(" ").trim();
+  if (direct) return direct;
+  return normalizeArray(attr.values).map((value) => value?.value || value?.name || value).filter(Boolean).join(" ").trim();
+}
+
+function normalizeTagsForCheck(value = []) {
+  return normalizeTags(value);
 }
 
 function richContentText(value = "") {
@@ -858,16 +1019,6 @@ function objectValue(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) return value;
   if (typeof value === "string" && value.trim().startsWith("{")) return parseJson(value, {});
   return {};
-}
-
-function sameTagToken(left = "", right = "") {
-  return tagToken(left) === tagToken(right);
-}
-
-function containsLooseText(haystack = "", needle = "") {
-  const normalize = (value) => String(value || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
-  const right = normalize(needle);
-  return Boolean(right && normalize(haystack).includes(right));
 }
 
 export async function publishSelectionProductToOzon(body = {}, session = null, context = {}) {
@@ -900,6 +1051,12 @@ export async function publishSelectionProductToOzon(body = {}, session = null, c
       title: product.name || product.product_name || product.selection_id || `Product ${product.id}`,
       tags: product.tags || product.keywords || "",
       description: product.selling_points || product.supplier_note || "",
+      listingTitleRu: product.listing_title_ru || "",
+      listingTagsRu: product.listing_tags_ru || "",
+      listingDescriptionRu: product.listing_description_ru || "",
+      listingTitlePrompt: product.listing_title_prompt || "",
+      listingTagsPrompt: product.listing_tags_prompt || "",
+      listingDescriptionPrompt: product.listing_description_prompt || "",
       ownerName: publisherName,
       publisherName,
       sourceProductId: product.id,
@@ -923,7 +1080,11 @@ export async function publishSelectionProductToOzon(body = {}, session = null, c
     shopIds,
     rules: bootstrap.shops
       .filter((shop) => shopIds.includes(Number(shop.id)))
-      .map((shop) => ({ shopId: shop.id, ...(shop.rule || {}) }))
+      .map((shop) => ({
+        shopId: shop.id,
+        ...(shop.rule || {}),
+        watermarkTemplateId: shop.watermarkPath ? `shop-${shop.id}` : ""
+      }))
   }, session, context);
 
   const variantIds = (generateResult.variants || []).map((variant) => Number(variant.id || 0)).filter(Boolean);
@@ -1257,6 +1418,16 @@ function buildAssetVariantJobErrorPayload(error) {
   const source = String(error?.source || "").trim();
   const lower = `${rawMessage} ${assetPath} ${source}`.toLowerCase();
   if (error?.code === "LOCAL_ASSET_MISSING" || lower.includes("enoent") || lower.includes("no such file or directory")) {
+    if (lower.includes("asset-tail-templates")) {
+      return {
+        code: "tail_template_missing",
+        message: "店铺尾图模板文件不存在，无法生成上架素材",
+        fix_tip: "请到店铺尾图模板里重新上传或保存该店铺的尾图模板，或先同步 preview/live 的 asset-tail-templates 后再重新一键上架。",
+        raw_message: rawMessage,
+        asset_path: assetPath || source,
+        at: new Date().toISOString()
+      };
+    }
     if (lower.includes("shop-watermarks")) {
       return {
         code: "watermark_file_missing",
@@ -1412,7 +1583,8 @@ export async function resolveAssetTailTemplateFile(id) {
   const candidates = [
     resolveLocalAssetPath(template.imagePath),
     path.resolve(TAIL_TEMPLATE_ROOT, path.basename(String(template.imagePath || ""))),
-    path.resolve(ROOT_DIR, String(template.imagePath || "").replace(/^\/+/, ""))
+    path.resolve(ROOT_DIR, String(template.imagePath || "").replace(/^\/+/, "")),
+    path.resolve(ROOT_DIR, "public", "uploads", "asset-tail-templates", path.basename(String(template.imagePath || "")))
   ].filter(Boolean);
   for (const filePath of uniqueValues(candidates)) {
     try {
@@ -1874,38 +2046,112 @@ async function generateTitleCandidates(material, shop) {
   }
 }
 
-function buildTitleGenerationPrompt(material, shop) {
-  const dimensions = [material.lengthCm, material.widthCm, material.heightCm].filter(Boolean).join(' x ');
-  const productFacts = {
-    sourceProductNameZh: material.title || '',
-    ozonCategoryName: material.ozonCategoryName || '',
-    color: material.color || '',
-    material: material.material || '',
-    quantity: material.quantity || '',
-    dimensionsCm: dimensions,
-    weightG: material.weightG || '',
-    sellingPointsZh: material.description || '',
-    tags: material.tags || [],
-    shopName: shop?.name || ''
-  };
+async function generateVariantCopyPack(material, shop, rule = {}) {
+  const prompt = buildVariantCopyPackPrompt(material, shop, rule);
+  const result = await cachedAiCall({
+    kind: "asset_variant_copy_pack",
+    cacheInput: { prompt },
+    provider: "",
+    request: { prompt, temperature: 0.35, maxTokens: 2500 },
+    maxAttempts: 1
+  });
+  return normalizeVariantCopyPack(parseJsonFromText(result.content), material, shop, rule);
+}
+
+function buildVariantCopyPackPrompt(material, shop, rule = {}) {
+  const productFacts = buildListingProductFacts(material, shop);
   return [
-    'You are an Ozon Russia listing title specialist. Use the selected Ozon category and product facts as the source of truth.',
+    "You are a Russian ecommerce listing copy specialist. Use the selected category and product facts as the source of truth.",
+    "Generate one complete copy package for an AI variant workflow: title candidates, product tags, and product description.",
+    "Russian copy MUST contain Russian/Latin letters and numbers only where needed. It MUST NOT contain Chinese characters.",
+    "Do not include marketplace names or platform-sensitive words such as Ozon, Wildberries, AliExpress, marketplace, or seller-service wording.",
+    "If manualTitleRu/manualDescriptionRu/manualTagsRu are provided, treat them as authoritative product identity. Preserve product type, compatible model, quantity, material, color, and core purpose.",
+    "Only make light ecommerce-style improvements. Never replace the product with generic wording such as товар, аксессуар, изделие, товар для дома, универсальный товар, or unrelated broad phrases.",
+    "Every title must start from a concrete product identity: product type + compatible model/object if present + quantity/package + material/color + purpose.",
+    "Use natural Russian. Avoid keyword stuffing, unsupported claims, price words, discount words, contact info, competitor names, and absolute claims such as best/guaranteed/original unless explicitly provided.",
+    "Do not use words meaning replica/fake/copy/1:1/analog/original/genuine. Keep all copy truthful to the facts.",
+    "Tags must be Russian hashtags, deduplicated, useful for search, each shorter than 30 characters, and formatted with leading #.",
+    "Description must be natural buyer-facing Russian prose, 80-160 words, no markdown, no bullet list, no hashtags, no keyword dump.",
+    "Return ONLY valid JSON with this exact shape:",
+    '{"titles":{"traffic":{"ru":"...","zh":"..."},"material":{"ru":"...","zh":"..."},"scenario":{"ru":"...","zh":"..."},"value":{"ru":"...","zh":"..."},"premium":{"ru":"...","zh":"..."}},"tags":["#..."],"description":"..."}',
+    "Title target length: 70-130 characters. Return all five title styles.",
+    "Return 15-25 tags.",
+    `Preferred title style for this shop: ${normalizeTitleStyle(rule.titleStyle || rule.title_style || "traffic")}.`,
+    `Preferred tag style for this shop: ${normalizeTagStyle(rule.tagStyle || rule.tag_style || "traffic")}.`,
+    "Product facts JSON:",
+    JSON.stringify(productFacts, null, 2),
+    material.listingTitlePrompt || material.listingTagsPrompt || material.listingDescriptionPrompt ? "User additional requirements:" : "",
+    material.listingTitlePrompt ? `Title: ${String(material.listingTitlePrompt).trim()}` : "",
+    material.listingTagsPrompt ? `Tags: ${String(material.listingTagsPrompt).trim()}` : "",
+    material.listingDescriptionPrompt ? `Description: ${String(material.listingDescriptionPrompt).trim()}` : ""
+  ].filter(Boolean).join("\n");
+}
+
+function normalizeVariantCopyPack(value, material, shop, rule = {}) {
+  const source = value && typeof value === "object" ? value : {};
+  const titleSource = source.titles && typeof source.titles === "object" && !Array.isArray(source.titles)
+    ? source.titles
+    : titlesArrayToObject(source.titles);
+  const titleCandidates = normalizeTitleCandidateObject(titleSource, material, shop);
+  const tags = normalizeCopyPackTags(source.tags || source.hashtags || source.keywords);
+  const description = sanitizeOzonDescriptionText(cleanText(source.description || source.desc || "", 1600));
+  const selectedStyle = normalizeTitleStyle(rule.titleStyle || rule.title_style || "traffic");
+  const selectedTitle = titleCandidates[selectedStyle] || titleCandidates.traffic;
+  if (!selectedTitle?.ru || isInvalidRussianTitle(selectedTitle.ru)) throw new Error("AI copy pack returned invalid title");
+  if (tags.length < 8) throw new Error("AI copy pack returned too few tags");
+  if (!isUsableCopyPackDescription(description)) throw new Error("AI copy pack returned invalid description");
+  return { titleCandidates, tags, description };
+}
+
+function titlesArrayToObject(value) {
+  const output = {};
+  for (const item of Array.isArray(value) ? value : []) {
+    const mode = normalizeTitleStyle(item?.mode || item?.style || item?.key || "");
+    if (TITLE_STYLES.includes(mode)) output[mode] = item;
+  }
+  return output;
+}
+
+function normalizeCopyPackTags(value) {
+  const tags = normalizeListingTags(Array.isArray(value) ? value : String(value || "").split(/[\n,，;；\s]+/), 25)
+    .map((tag) => cleanText(tag, 64))
+    .filter((tag) => tag && !hasCjkText(tag) && !looksBrokenGeneratedText(tag) && tag.length <= 30);
+  return uniqueValues(tags).slice(0, 25);
+}
+
+function isUsableCopyPackDescription(value) {
+  const text = sanitizeOzonDescriptionText(value);
+  if (!text || hasCjkText(text) || looksBrokenGeneratedText(text)) return false;
+  const words = russianWordCount(text);
+  return words >= 50 && words <= 220;
+}
+
+function buildTitleGenerationPrompt(material, shop) {
+  const productFacts = buildListingProductFacts(material, shop);
+  return [
+    'You are a Russian ecommerce listing title specialist. Use the selected category and product facts as the source of truth.',
     'The input product name is Chinese source material only. Do NOT transliterate it and do NOT place the Chinese name at the beginning of the Russian title.',
     'The Russian title field MUST contain Russian/Latin letters and numbers only where needed. It MUST NOT contain any Chinese characters.',
-    'Create original Russian product titles that fit Ozon product card expectations: the buyer must quickly understand product type, selected category, compatibility only if present, material, color, quantity, and key value.',
+    'The generated title must not contain marketplace names or platform-sensitive words such as Ozon, Wildberries, AliExpress, marketplace, or seller-service wording.',
+    'If manualTitleRu is provided, treat it as the authoritative product identity. Preserve product type, compatible model, quantity, material, color, and core purpose from manualTitleRu.',
+    'For manualTitleRu, only make light ecommerce-style variations. Never replace it with generic wording such as "товар для дома", "универсальный товар", or unrelated broad product phrases.',
+    'Every title must start from a concrete product identity: product type + compatible model/object if present + quantity/package + material/color + purpose. Never use generic product type words like "товар", "аксессуар", or "изделие" unless a more specific product type is impossible.',
+    'Create original Russian product titles for a product card: the buyer must quickly understand product type, selected category, compatibility only if present, material, color, quantity, and key value.',
     'Use natural Russian. Avoid keyword stuffing, unsupported claims, price words, discount words, contact info, competitor names, and absolute claims such as best/guaranteed/original unless the fact is explicitly provided.',
     'Do not use words meaning replica/fake/copy/1:1/analog/original/genuine. Keep titles truthful to the given facts.',
     'Return ONLY valid JSON with keys traffic, material, scenario, value, premium.',
-    'Each key must be an object: {"ru":"Russian Ozon title","zh":"Chinese meaning of the Russian title"}.',
+    'Each key must be an object: {"ru":"Russian product title","zh":"Chinese meaning of the Russian title"}.',
     'Russian title target length: 70-120 characters. Chinese meaning target length: 35-80 Chinese characters.',
     'Style strategy:',
     'traffic: search-oriented. Include product type + compatible car/model terms + common buyer search terms, but keep it readable.',
     'material: emphasize material, protection, durability, anti-scratch/fit only if supported by selling points.',
-    'scenario: emphasize daily use, car owner use, commuting, gift/use scene, and compatibility.',
+    'scenario: emphasize the concrete installation/use scene, compatible vehicle/object, and the protection or convenience problem solved.',
     'value: emphasize practical configuration and value-for-money without saying cheap or mentioning price.',
     'premium: emphasize refined look, material texture, precise fit, custom/special feel only when appropriate.',
     'Product facts JSON:',
-    JSON.stringify(productFacts, null, 2)
+    JSON.stringify(productFacts, null, 2),
+    material.listingTitlePrompt ? 'User title prompt override/additional requirements:' : '',
+    material.listingTitlePrompt ? String(material.listingTitlePrompt).trim() : ''
   ].join('\n');
 }
 async function insertGeneratedTitleCandidates(variantId, shopId, candidates) {
@@ -1916,6 +2162,58 @@ async function insertGeneratedTitleCandidates(variantId, shopId, candidates) {
       VALUES (?, ?, ?, ?, 'ai_or_fallback', 'generated')
     `, [variantId, shopId, style, title]);
   }
+}
+
+function buildListingProductFacts(material = {}, shop = {}) {
+  const dimensions = [material.lengthCm, material.widthCm, material.heightCm].filter(Boolean).join(" x ");
+  const manualTitleRu = cleanRussianListingText(material.listingTitleRu, 500);
+  const manualTagsRu = cleanRussianListingText(material.listingTagsRu, 800);
+  const manualDescriptionRu = cleanRussianListingText(material.listingDescriptionRu, 1200);
+  const sourceText = [
+    manualTitleRu,
+    manualTagsRu,
+    manualDescriptionRu,
+    material.title,
+    material.description,
+    material.ozonCategoryName,
+    material.material,
+    material.color,
+    material.quantity,
+    material.vehicleBrand,
+    material.vehicleModel
+  ].filter(Boolean).join(" ");
+  const quantity = inferRussianQuantity(sourceText, material.quantity);
+  const vehicleModel = material.vehicleModel || extractLikelyCarModel(sourceText) || extractFreeCarModel(sourceText);
+  return {
+    sourceProductNameZh: material.title || "",
+    ozonCategoryName: material.ozonCategoryName || "",
+    manualTitleRu,
+    manualTagsRu,
+    manualDescriptionRu,
+    hasManualRussianTitle: Boolean(manualTitleRu),
+    hasManualRussianTags: Boolean(manualTagsRu),
+    hasManualRussianDescription: Boolean(manualDescriptionRu),
+    authoritativeFields: {
+      title: Boolean(manualTitleRu),
+      tags: Boolean(manualTagsRu),
+      description: Boolean(manualDescriptionRu),
+      quantity: Boolean(quantity),
+      material: Boolean(material.material),
+      color: Boolean(material.color),
+      vehicleModel: Boolean(vehicleModel)
+    },
+    tags: material.tags || [],
+    color: material.color || "",
+    material: material.material || "",
+    quantity,
+    rawQuantity: material.quantity || "",
+    vehicleBrand: material.vehicleBrand || "",
+    vehicleModel,
+    dimensionsCm: dimensions,
+    weightG: material.weightG || "",
+    sellingPointsZh: material.description || "",
+    shopName: shop?.name || ""
+  };
 }
 
 async function cachedAiCall({ kind = "general", cacheInput = {}, provider = "", request = {}, maxAttempts = 2 } = {}) {
@@ -2086,8 +2384,42 @@ function normalizeGeneratedVideoForResponse(video = {}) {
   };
 }
 
+async function loadCachedAssetVariantVideo(sourceHash, recipe = serverVideoRecipe()) {
+  if (!sourceHash) return null;
+  const cachedRows = await mysqlQuery(`
+    SELECT publish_url, preview_url, original_name, metadata_json
+    FROM asset_variant_video_cache
+    WHERE source_hash = ? AND recipe_version = ?
+    LIMIT 1
+  `, [sourceHash, recipe.version]).catch(() => []);
+  const cached = cachedRows[0];
+  if (!cached?.publish_url) return null;
+  return {
+    url: cached.publish_url,
+    preview_url: cached.preview_url || cached.publish_url,
+    publish_url: cached.publish_url,
+    name: cached.original_name || "shop-video.mp4",
+    sort_order: 1,
+    cached: true
+  };
+}
+
+function hashBuffer(buffer) {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
 async function ensureAssetVariantVideoFromImages(connection, variant = {}, images = [], context = {}) {
   return assetVideoLimiter(() => ensureAssetVariantVideoFromImagesUnsafe(connection, variant, images, context));
+}
+
+function withTimeout(promise, timeoutMs, message = "Operation timed out") {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 async function ensureAssetVariantVideoFromImagesUnsafe(connection, variant = {}, images = [], context = {}) {
@@ -2110,25 +2442,34 @@ async function ensureAssetVariantVideoFromImagesUnsafe(connection, variant = {},
   const recipe = serverVideoRecipe();
   const sourceHash = await fileSha256(sourcePath).catch(() => "");
   if (sourceHash) {
-    const cachedRows = await mysqlQuery(`
-      SELECT publish_url, preview_url, original_name, metadata_json
-      FROM asset_variant_video_cache
-      WHERE source_hash = ? AND recipe_version = ?
-      LIMIT 1
-    `, [sourceHash, recipe.version]).catch(() => []);
-    const cached = cachedRows[0];
-    if (cached?.publish_url) {
-      return {
-        url: cached.publish_url,
-        preview_url: cached.preview_url || cached.publish_url,
-        publish_url: cached.publish_url,
-        name: cached.original_name || "shop-video.mp4",
-        sort_order: 1,
-        cached: true
-      };
-    }
+    const cached = await loadCachedAssetVariantVideo(sourceHash, recipe);
+    if (cached) return cached;
   }
   await context.throwIfCancelled?.();
+
+  const inflightKey = sourceHash ? `${sourceHash}:${recipe.version}` : "";
+  if (inflightKey && assetVideoInflight.has(inflightKey)) {
+    return assetVideoInflight.get(inflightKey);
+  }
+  const task = generateAndRegisterAssetVariantVideo({
+    variant,
+    sourceImage,
+    sourcePath,
+    variantDir,
+    sourceHash,
+    recipe,
+    context
+  });
+  if (!inflightKey) return task;
+  assetVideoInflight.set(inflightKey, task);
+  try {
+    return await task;
+  } finally {
+    assetVideoInflight.delete(inflightKey);
+  }
+}
+
+async function generateAndRegisterAssetVariantVideo({ variant = {}, sourceImage = {}, sourcePath = "", variantDir = "", sourceHash = "", recipe = serverVideoRecipe(), context = {} } = {}) {
   const videoDir = path.join(variantDir, "videos");
   await fs.mkdir(videoDir, { recursive: true });
   const videoPath = path.join(videoDir, "shop-video.mp4");
@@ -2374,8 +2715,17 @@ function assetVariantModelName(variant) {
   return `MZ-${today}-${typeId}-${shopId}-${random}`;
 }
 
-function assetVariantQuantity(value) {
-  return Number(String(value || "").match(/\d+/)?.[0] || 1);
+function assetVariantQuantity(value, context = {}) {
+  const direct = String(value || "").match(/\d{1,2}/)?.[0];
+  if (direct) return Number(direct);
+  const facts = [
+    context.variant_title,
+    context.source_title,
+    context.description_text,
+    context.ozon_category_name
+  ].filter(Boolean).join(" ");
+  const inferred = inferRussianQuantity(facts, "");
+  return Number(String(inferred || "").match(/\d{1,2}/)?.[0] || 0);
 }
 
 
@@ -2386,26 +2736,30 @@ async function assetVariantDescription(variant, tags = []) {
   const category = cleanText(variant.ozon_category_name || "", 500);
   const sourceNotes = cleanText(variant.description_text || variant.description || "", 600);
   const shopName = cleanText(variant.shop_name || variant.shopName || "", 160);
+  const manualDescription = cleanRussianListingText(sourceNotes, 1400);
+  if (manualDescription && russianWordCount(manualDescription) >= 8) {
+    return sanitizeOzonDescriptionText(manualDescription);
+  }
   try {
     const request = {
       provider: "deepseek",
       messages: [
         { role: "system", content: [
-          "Write only natural buyer-facing Russian product prose for Ozon.",
-          "Include the shop name naturally once and invite the buyer to purchase from this shop.",
+          "Write only natural buyer-facing Russian product prose.",
+          "Do not include marketplace names or platform-sensitive words such as Ozon, Wildberries, AliExpress, marketplace, or seller-service wording.",
           "Do not include hashtags, tag lists, keyword dumps, or phrases like 'ключевые особенности', 'теги', 'ключевые слова'.",
           "Do not paste comma-separated tags into the description.",
           "Every sentence must explain real product information: purpose, material, fit, protection, use scenario, package contents.",
           "No Chinese or English except brand/model names and material abbreviations such as TPU or ABS."
         ].join(" ") },
         { role: "user", content: [
-          "Write a natural Ozon short description in Russian, 100-150 words.",
+          "Write a natural short product description in Russian, 80-130 words.",
           "Title: " + title,
           "Ozon category: " + category,
           "Source selling points: " + sourceNotes,
           "Material: " + material,
           "Color: " + color,
-          "Shop name that must be mentioned once: " + shopName,
+          "Shop name for context only, do not force it into the text: " + shopName,
           "Semantic tags for context only, do not copy them literally: " + tags.join(" ")
         ].join("\n") }
       ],
@@ -2418,8 +2772,10 @@ async function assetVariantDescription(variant, tags = []) {
       request,
       maxAttempts: 2
     });
-    const text = ensureShopBoundDescription(sanitizeOzonDescriptionText(cleanText(result.content || "", 1400)), shopName);
-    if (russianWordCount(text) >= 70 && !looksBrokenGeneratedText(text) && !hasCjkText(text)) return text;
+    const text = sanitizeOzonDescriptionText(cleanText(result.content || "", 1400));
+    if (russianWordCount(text) >= 70 && !looksBrokenGeneratedText(text) && !hasCjkText(text)) {
+      return text;
+    }
   } catch (error) {
     console.warn("asset variant description AI failed", error?.message || error);
   }
@@ -2438,6 +2794,7 @@ function sanitizeOzonDescriptionText(value) {
     .replace(/Теги\s*:\s*[^.?!]+[.?!]?/giu, "")
     .replace(/Хэштеги\s*:\s*[^.?!]+[.?!]?/giu, "");
   text = text.replace(/#[\p{L}\p{N}_-]+/gu, "");
+  text = stripSensitiveMarketplaceText(text);
   text = text.replace(/\s*,\s*,+/g, ", ").replace(/\s{2,}/g, " ").trim();
   text = text.replace(/\s*,\s*,+/g, ", ").replace(/\s{2,}/g, " ").trim();
   return text;
@@ -2454,29 +2811,29 @@ function fallbackRussianDescription(variant, tags = []) {
     variant.description_text || variant.description || "",
     variant.ozon_category_name || ""
   );
-  const categoryText = category ? `Категория товара: ${category}.` : "";
-  const notesText = sourceNotes ? `Особенности: ${sourceNotes}.` : "";
-  return ensureShopBoundDescription(sanitizeOzonDescriptionText([
-    `${inferredProductType} подходит для ежедневного использования и помогает покупателю решить практичную задачу без лишней подготовки.`,
-    categoryText,
-    `Материал ${material} выбран для аккуратного внешнего вида, комфортного контакта и стабильной формы при обычной эксплуатации.`,
-    `Цвет ${color} легко сочетается с разными стилями и делает товар универсальным для повседневного применения.`,
-    notesText,
-    "Описание сформировано на основе карточки товара, выбранной категории и заполненных характеристик, поэтому его можно использовать как основу для проверки перед публикацией."
-  ].join(" ")), shopName);
-}
-
-function ensureShopBoundDescription(description = "", shopName = "") {
-  const text = sanitizeOzonDescriptionText(description);
-  const shop = cleanText(shopName, 160);
-  if (!shop) return text;
-  const escaped = shop.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  if (new RegExp(escaped, "i").test(text)) return text;
-  return `${text} Добро пожаловать в магазин ${shop}: здесь можно выбрать этот товар для повседневного использования и оформить покупку в нашем магазине.`;
+  const identity = requireListingProductIdentity({
+    title: variant.variant_title || variant.source_title || "",
+    description: variant.description_text || variant.description || "",
+    ozonCategoryName: variant.ozon_category_name || "",
+    material: variant.material_text || "",
+    color: variant.color || "",
+    quantity: variant.quantity_text || ""
+  });
+  return sanitizeOzonDescriptionText([
+    `${identity.productType}${identity.model ? ` для ${identity.model}` : ""} предназначены для ${identity.purpose || "защиты автомобиля"}.`,
+    [identity.quantity, identity.material, identity.color].filter(Boolean).join(", ") + ".",
+    sourceNotes ? `Особенности: ${sourceNotes}.` : "",
+    "Подходят для аккуратной установки и помогают сохранить внешний вид деталей при ежедневной эксплуатации."
+  ].filter(Boolean).join(" "));
 }
 
 function russianMaterialText(value) {
   const text = String(value || "").trim();
+  if (/abs/i.test(text)) return "ABS-пластик";
+  if (/stainless|steel|нержав|不锈钢/i.test(text)) return "нержавеющая сталь";
+  if (/tpu|тпу|polyurethane|полиуретан/i.test(text)) return "TPU";
+  if (/silicone|силикон/i.test(text)) return "силикон";
+  if (/leather|кожа|экокожа|искусственная кожа/i.test(text)) return "искусственная кожа";
   if (/tpu|тпу|polyurethane|полиуретан|热塑|弹性体/i.test(text)) return "TPU";
   if (/abs/i.test(text)) return "ABS-пластик";
   if (/silicone|силикон|硅胶/i.test(text)) return "силикон";
@@ -2488,6 +2845,12 @@ function russianMaterialText(value) {
 
 function russianColorText(value) {
   const text = String(value || "").trim();
+  if (/глянц|gloss|亮黑|亮面/i.test(text)) return /black|черн|黑/i.test(text) ? "черный глянец" : "глянцевый";
+  if (/black|черн|黑/i.test(text)) return "черный";
+  if (/white|бел|白/i.test(text)) return "белый";
+  if (/silver|серебр|gray|grey|серый|银/i.test(text)) return "серебристый";
+  if (/red|красн|红/i.test(text)) return "красный";
+  if (/blue|син|голуб|蓝/i.test(text)) return "синий";
   if (/black|черн|黑/i.test(text)) return "черный";
   if (/white|бел|白/i.test(text)) return "белый";
   if (/silver|серебр|gray|grey|серый|银|灰/i.test(text)) return "серебристый";
@@ -2512,12 +2875,13 @@ function assetVariantRichContentJson(description = "", images = [], title = "") 
   const tailImage = images.find((image) => String(image.role || image.type || "").toLowerCase() === "tail");
   const imageUrl = assetMediaUrl(tailImage || images.find((image) => assetMediaUrl(image)) || {});
   const cleanDescription = sanitizeOzonDescriptionText(description);
-  if (!imageUrl || !cleanDescription) return "";
+  const cleanTitle = cleanRussianTitle(title, 120);
+  if (!imageUrl || !cleanDescription || !cleanTitle) return "";
   return JSON.stringify({
     content: [{ widgetName: "raShowcase", type: "billboard", blocks: [{
       imgLink: "",
       img: { src: imageUrl, srcMobile: imageUrl, alt: "", position: "width_full", positionMobile: "width_full", widthMobile: 1024, heightMobile: 1536 },
-      title: { items: [{ type: "text", content: cleanRussianTitle(title || "Товар для Ozon", 120) }], size: "size4", align: "left", color: "color1" },
+      title: { items: [{ type: "text", content: cleanTitle }], size: "size4", align: "left", color: "color1" },
       text: { size: "size2", align: "left", color: "color1", items: [{ type: "text", content: cleanDescription }] }
     }] }],
     version: 0.3
@@ -2529,7 +2893,7 @@ function assetVariantAttributes(variant, tags = [], description = "", modelName 
   return [
     { name: "Brand", value: "No brand", required: true, source: "asset_variant" },
     { name: "Model name", value: modelName, required: true, attribute_id: 9048, source: "asset_variant" },
-    { name: "Product tags", value: tags.join(" "), values: tags, required: false, source: "asset_variant" },
+    { name: "Product tags", value: tags.join(" "), values: tags, required: false, attribute_id: 23171, type: "multiselect", source: "asset_variant" },
     { name: "Description", value: cleanDescription, required: false, attribute_id: 4191, type: "textarea", source: "asset_variant" },
     { name: "Rich content JSON", value: richContentJson, required: false, attribute_id: 11254, type: "rich_json", source: "asset_variant" },
     { name: "Color", value: variant.color || "", required: false, source: "asset_variant" },
@@ -2552,15 +2916,15 @@ function assetVariantVariantRow(variant, images = [], videos = [], modelName = "
     images,
     video_urls: videoUrls,
     video_cover_urls: videoUrls,
-    price: numberValue(variant.ozon_price || numberValue(variant.internal_price) * 2),
-    old_price: numberValue(variant.ozon_old_price || numberValue(variant.internal_price) * 4),
+    price: numberValue(variant.ozon_price || variant.internal_price),
+    old_price: numberValue(variant.ozon_old_price),
     price_strategy_mode: "finalized",
     price_strategy_applied: true,
     color: variant.color || "",
     vehicle_brand: variant.vehicle_brand || "",
     spec: modelName,
     material: variant.material_text || "",
-    quantity: assetVariantQuantity(variant.quantity_text),
+    quantity: assetVariantQuantity(variant.quantity_text, variant),
     weight_g: dimensions.weight_g,
     length_mm: Math.round(dimensions.length_cm * 10),
     width_mm: Math.round(dimensions.width_cm * 10),
@@ -2598,6 +2962,9 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
     batch_id: variant.batch_id || "",
     shop_id: Number(variant.shop_id || 0),
     shop_name: variant.shop_name || "",
+    shop_watermark_applied: Boolean(variant.watermark_path),
+    publish_media_pre_watermarked: Boolean(variant.watermark_path),
+    tags,
     ozon_category_id: ozonCategoryId,
     description_category_id: descriptionCategoryId || "",
     type_id: typeId || "",
@@ -2617,10 +2984,11 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
     type_id: typeId || "",
     legacy_category_id: ozonCategoryId,
     category_name: ozonCategoryName,
+    tags,
     source_raw: sourceRaw,
     price: {
-      value: Number(variant.ozon_price || Number(variant.internal_price || 0) * 2 || 0),
-      old_price: Number(variant.ozon_old_price || Number(variant.internal_price || 0) * 4 || 0),
+      value: Number(variant.ozon_price || variant.internal_price || 0),
+      old_price: Number(variant.ozon_old_price || 0),
       currency_code: "CNY",
       strategy_mode: "finalized",
       strategy_applied: true,
@@ -2632,7 +3000,7 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
       spec: modelName,
       model: modelName,
       material: variant.material_text || "",
-      quantity: assetVariantQuantity(variant.quantity_text)
+      quantity: assetVariantQuantity(variant.quantity_text, variant)
     },
     rich_content_json: richContentJson,
     rich_content: richContentJson,
@@ -2759,7 +3127,7 @@ async function insertListingDraftFromPackage(connection, templateId, variant, im
     Number(variant.weight_g || 0),
     variant.color || "",
     variant.material_text || "",
-    assetVariantQuantity(variant.quantity_text),
+    assetVariantQuantity(variant.quantity_text, variant),
     JSON.stringify(manualFacts),
     JSON.stringify({ title: variant.variant_title, description: variant.description_text, videos }),
     personId(session)
@@ -3000,6 +3368,12 @@ function normalizeMaterialPayload(raw = {}) {
     ownerName: cleanText(raw.ownerName || raw.owner_name || "", 128),
     tags: normalizeTags(raw.tags),
     description: String(raw.description || "").trim(),
+    listingTitleRu: cleanRussianListingText(raw.listingTitleRu || raw.listing_title_ru || "", 500),
+    listingTagsRu: cleanRussianListingText(raw.listingTagsRu || raw.listing_tags_ru || "", 800),
+    listingDescriptionRu: cleanRussianListingText(raw.listingDescriptionRu || raw.listing_description_ru || "", 1200),
+    listingTitlePrompt: cleanText(raw.listingTitlePrompt || raw.listing_title_prompt || "", 1200),
+    listingTagsPrompt: cleanText(raw.listingTagsPrompt || raw.listing_tags_prompt || "", 1200),
+    listingDescriptionPrompt: cleanText(raw.listingDescriptionPrompt || raw.listing_description_prompt || "", 1200),
     sourceProductId: Number(raw.sourceProductId || raw.source_product_id || 0) || null,
     ozonCategoryId: cleanText(raw.ozonCategoryId || raw.ozon_category_id || "", 128),
     ozonDescriptionCategoryId: Number(raw.ozonDescriptionCategoryId || raw.ozon_description_category_id || 0) || 0,
@@ -3024,11 +3398,48 @@ function normalizeTags(value) {
   const source = Array.isArray(value)
     ? value
     : String(value || "").split(/[\n,;#]+/);
-  return uniqueValues(source
+  return normalizeListingTags(source
+    .map((item) => String(item?.value || item || "").trim())
+    .filter(Boolean), 40);
+}
+
+function normalizeListingTags(value = [], limit = 40) {
+  return uniqueValues((Array.isArray(value) ? value : [value])
     .map((item) => String(item?.value || item || "").trim())
     .filter(Boolean)
     .map((item) => item.startsWith("#") ? item : `#${item}`)
-  ).slice(0, 20);
+    .filter((item) => !isSensitiveListingTag(item))
+  ).slice(0, Math.max(1, Number(limit || 40)));
+}
+
+function isSensitiveListingTag(value = "") {
+  const token = String(value || "").trim().replace(/^#+/, "").toLowerCase();
+  return hasSensitiveMarketplaceText(token)
+    || token === "marketplace"
+    || token.includes("seller")
+    || token.includes("продавец");
+}
+
+function hasSensitiveMarketplaceText(value = "") {
+  return /\b(ozon|wildberries|aliexpress|amazon|ebay|marketplace)\b|для_ozon|озон|вайлдберриз/i.test(String(value || ""));
+}
+
+function stripSensitiveMarketplaceText(value = "") {
+  return String(value || "")
+    .replace(/\b(ozon|wildberries|aliexpress|amazon|ebay|marketplace)\b/gi, "")
+    .replace(/озон|вайлдберриз/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+,/g, ",")
+    .replace(/,\s*,+/g, ",")
+    .trim();
+}
+
+function isGenericMarketplaceText(value = "") {
+  const text = normalizeTitleGroundingText(value);
+  return !text
+    || hasSensitiveMarketplaceText(text)
+    || /^(товар|аксессуар|изделие)(\s|$)/i.test(text)
+    || /товар\s+для\s+дома|личного\s+использования|ежедневного\s+использования/i.test(text);
 }
 
 async function mapWithConcurrency(items = [], concurrency = 2, worker) {
@@ -3666,22 +4077,195 @@ function buildListingJson({ shop, title, titleZh, material, images, rule, tailTe
   };
 }
 
-function fallbackTitle(material, style, shop) {
-  const genericProductType = detectProductTypeByFacts(material.title, material.description, material.ozonCategoryName);
-  const genericModel = extractLikelyCarModel(`${material.vehicleModel || ""} ${material.title || ""}`) || "";
-  const genericMaterial = material.material ? russianFactValue(material.material, "material") : "";
-  const genericColor = russianFactValue(material.color, "color");
-  const genericQuantity = russianFactValue(material.quantity, "quantity");
-  const genericParts = [genericModel, genericMaterial, genericColor, genericQuantity].filter(Boolean).join(" ");
-  const genericSuffixByStyle = {
-    traffic: "для ежедневного использования, удобная форма и практичная комплектация",
-    material: "из прочного материала, аккуратное исполнение и надежность на каждый день",
-    scenario: "для повседневного применения, удобного хранения и бережного использования",
-    value: "практичный товар для дома, поездки или личного использования",
-    premium: "аккуратный дизайн, приятный внешний вид и универсальное применение"
+function buildListingProductIdentity(material = {}) {
+  const productFacts = buildListingProductFacts(material);
+  const facts = [
+    productFacts.manualTitleRu,
+    productFacts.manualTagsRu,
+    productFacts.manualDescriptionRu,
+    productFacts.sourceProductNameZh,
+    productFacts.sellingPointsZh,
+    productFacts.ozonCategoryName,
+    productFacts.material,
+    productFacts.color,
+    productFacts.quantity,
+    productFacts.rawQuantity,
+    productFacts.vehicleBrand,
+    productFacts.vehicleModel
+  ].filter(Boolean).join(" ");
+  const productType = inferRussianProductType(facts, material.ozonCategoryName);
+  const model = productFacts.vehicleModel || extractLikelyCarModel(facts) || extractFreeCarModel(facts);
+  const materialText = inferRussianMaterial(facts, productFacts.material);
+  const colorText = inferRussianColor(facts, productFacts.color);
+  const quantityText = productFacts.quantity || inferRussianQuantity(facts, productFacts.rawQuantity);
+  const purpose = inferRussianPurpose(productType, facts);
+  const searchTerms = inferRussianSearchTerms(productType, model);
+  return {
+    productType,
+    model,
+    material: materialText,
+    color: colorText,
+    quantity: quantityText,
+    purpose,
+    searchTerms
   };
-  const genericRu = cleanRussianTitle(`${genericProductType}${genericParts ? ` ${genericParts}` : ""}, ${genericSuffixByStyle[style] || genericSuffixByStyle.traffic}`, 500);
-  return { ru: genericRu, zh: buildChineseTitleMeaning(genericRu, material) };
+}
+
+function requireListingProductIdentity(material = {}) {
+  const identity = buildListingProductIdentity(material);
+  if (!identity.productType) {
+    const error = new Error("商品类型识别失败，请补充俄语商品标题、商品卖点或更准确的类目信息后再生成上架素材");
+    error.code = "LISTING_PRODUCT_IDENTITY_UNKNOWN";
+    throw error;
+  }
+  return identity;
+}
+
+function looksLikeKeyLanyard(text = "") {
+  return /手绳|挂绳|钥匙扣|钥匙链|挂件|吊饰|lanyard|strap|key\s*chain|keychain|брелок|ремешок|шнурок|подвеск/i.test(String(text || ""));
+}
+
+function looksLikeKeyCase(text = "") {
+  const value = String(text || "");
+  return /钥匙壳|钥匙套|保护壳|保护套|key\s*(case|cover|shell)|fob\s*(case|cover)|чехол|корпус|накладк[аи]\s+на\s+ключ/i.test(value);
+}
+
+function inferRussianProductType(facts = "", category = "") {
+  const text = String(facts || "").toLowerCase();
+  if (/порог|накладк|迎宾条|门槛|踏板|threshold|door\s*sill/i.test(text)) return "Накладки на пороги автомобиля";
+  if (/seat\s*belt|shoulder|pad|cushion|\u5b89\u5168\u5e26|\u62a4\u80a9|\u80a9\u57ab|ремен/i.test(text)) return "Накладка на ремень безопасности";
+  if (looksLikeKeyLanyard(text)) return "Брелок-ремешок для автомобильного ключа";
+  if (looksLikeKeyCase(text)) return "Чехол для автомобильного ключа";
+  if (/key|fob|\u94a5\u5319|钥匙|брелок|ключ/i.test(text)) return "Брелок для автомобильного ключа";
+  if (/light|led|\u706f|подсвет/i.test(text)) return "Автомобильная подсветка";
+  if (/film|\u819c|пленк|плёнк/i.test(text)) return "Защитная пленка";
+  const cleanCategory = cleanRussianFact(category);
+  if (cleanCategory && !isGenericMarketplaceText(cleanCategory)) return cleanCategory;
+  const cleanTitle = cleanRussianFact(facts);
+  return cleanTitle && !isGenericMarketplaceText(cleanTitle) ? cleanTitle : "";
+}
+
+function inferRussianMaterial(facts = "", explicit = "") {
+  const text = String(`${explicit || ""} ${facts || ""}`).toLowerCase();
+  const values = [];
+  if (/abs|абс/i.test(text)) values.push("ABS-пластик");
+  if (/stainless|нержав|steel|сталь|不锈钢/i.test(text)) values.push("нержавеющая сталь");
+  if (/tpu|тпу|polyurethane|полиуретан/i.test(text)) values.push("TPU");
+  if (/silicone|силикон/i.test(text)) values.push("силикон");
+  if (/leather|кожа|экокожа|искусственная кожа/i.test(text)) values.push("искусственная кожа");
+  return uniqueValues(values).join(" + ") || russianMaterialText(explicit);
+}
+
+function inferRussianColor(facts = "", explicit = "") {
+  const text = String(`${explicit || ""} ${facts || ""}`).toLowerCase();
+  const color = russianColorText(explicit);
+  if (/глянц|gloss|亮黑|亮面/i.test(text)) return /черн|black|黑/i.test(text) ? "черный глянец" : "глянцевый";
+  if (/черн|black|黑/i.test(text)) return "черный";
+  if (/серебр|silver|银/i.test(text)) return "серебристый";
+  if (/бел|white|白/i.test(text)) return "белый";
+  return color;
+}
+
+function inferRussianQuantity(facts = "", explicit = "") {
+  const text = String(`${explicit || ""} ${facts || ""}`);
+  const packageMatch = text.match(/(?:комплект|набор)\s*(?:из|на)?\s*(\d{1,2})\s*(?:шт|штук|pcs|pieces|件|个)?/i)
+    || text.match(/(\d{1,2})\s*(?:шт|штук|pcs|pieces|件套|件装|个装|件|个)/i)
+    || text.match(/(?:set|pack)\s*(?:of)?\s*(\d{1,2})/i);
+  if (packageMatch) return `комплект ${packageMatch[1]} шт.`;
+  const number = String(explicit || "").match(/\d{1,2}/)?.[0];
+  return number ? `комплект ${number} шт.` : "";
+}
+
+function inferRussianPurpose(productType = "", facts = "") {
+  const text = String(`${productType} ${facts}`).toLowerCase();
+  if (/порог|накладк|迎宾条|门槛|踏板/i.test(text)) return "защита дверных порогов от царапин и износа";
+  if (/ремешок|шнурок|подвеск|挂绳|手绳|брелок/i.test(text) && !looksLikeKeyCase(text)) return "удобное крепление и переноска ключей";
+  if (/ключ|钥匙/i.test(text)) return "защита ключа от царапин и потертостей";
+  if (/ремень|安全带/i.test(text)) return "мягкая защита плеча при поездках";
+  if (/пленк|膜/i.test(text)) return "защита поверхности от царапин";
+  return "для защиты и аккуратного внешнего вида";
+}
+
+function inferRussianSearchTerms(productType = "", model = "") {
+  if (/порог/i.test(productType)) return ["защитные накладки на пороги", model ? `накладки на пороги ${model}` : "", "защита дверных порогов"].filter(Boolean).join(", ");
+  if (/ремешок|брелок/i.test(productType)) return ["брелок для ключей", model ? `брелок для ключей ${model}` : "", "ремешок для автомобильного ключа"].filter(Boolean).join(", ");
+  if (/ключ/i.test(productType)) return ["чехол для ключа", model ? `чехол для ключа ${model}` : "", "защита автомобильного ключа"].filter(Boolean).join(", ");
+  return [productType, model].filter(Boolean).join(" ");
+}
+
+function extractFreeCarModel(value = "") {
+  const text = String(value || "");
+  const eMas = text.match(/\be\.?\s*mas\s*7\b/i);
+  if (eMas) return "e.MAS7";
+  const simple = text.match(/\b([A-Za-z][A-Za-z.-]{0,12})\s*([A-Za-z]?\d{1,3}[A-Za-z]?)\b/);
+  return simple ? `${simple[1]}${simple[2]}` : "";
+}
+
+function fallbackTitle(material, style, shop) {
+  const manualTitleRu = cleanRussianListingText(material.listingTitleRu, 500);
+  if (manualTitleRu) return { ru: manualTitleRu, zh: buildChineseTitleMeaning(manualTitleRu, material) };
+  const identity = requireListingProductIdentity(material);
+  const parts = [
+    identity.productType,
+    identity.model ? `для ${identity.model}` : "",
+    identity.quantity,
+    identity.material,
+    identity.color,
+    identity.purpose
+  ].filter(Boolean);
+  const styleTail = {
+    traffic: identity.searchTerms,
+    material: identity.material ? `прочные ${identity.material}, защита от царапин и следов износа` : "защита от царапин и следов износа",
+    scenario: identity.purpose || "для аккуратной защиты автомобиля",
+    value: identity.quantity ? `${identity.quantity}, готовое решение для установки` : "готовое решение для установки",
+    premium: identity.color ? `${identity.color}, аккуратный внешний вид и плотная посадка` : "аккуратный внешний вид и плотная посадка"
+  };
+  const specificRu = cleanRussianTitle(`${parts.join(", ")}, ${styleTail[style] || styleTail.traffic}`, 500);
+  if (!specificRu) {
+    const error = new Error("商品标题生成失败，请补充俄语商品标题或更准确的商品卖点后再生成上架素材");
+    error.code = "LISTING_TITLE_GENERATION_FAILED";
+    throw error;
+  }
+  return { ru: specificRu, zh: buildChineseTitleMeaning(specificRu, material) };
+}
+
+function selectListingTitleForShop({ manualTitleRu = "", titleCandidates = {}, style = "traffic", material = {}, shop = {} } = {}) {
+  const manual = cleanRussianListingText(manualTitleRu, 500);
+  if (!manual) return titleCandidates[style] || fallbackTitle(material, style, shop);
+  if (isOwnerShopForListingMaterial(shop, material)) {
+    return { ru: manual, zh: buildChineseTitleMeaning(manual, material) };
+  }
+  const candidate = titleCandidates[style];
+  if (candidate?.ru && isTitleGroundedInManualTitle(candidate.ru, manual)) return candidate;
+  return { ru: manual, zh: buildChineseTitleMeaning(manual, material) };
+}
+
+function isTitleGroundedInManualTitle(candidate = "", manual = "") {
+  const candidateText = normalizeTitleGroundingText(candidate);
+  const manualText = normalizeTitleGroundingText(manual);
+  if (!candidateText || !manualText) return false;
+  if (/товар\s+для\s+ozon|товар\s+для\s+дома|личного\s+использования/i.test(candidateText)) return false;
+  const manualTokens = manualText.split(/\s+/).filter((token) => token.length >= 3 && !TITLE_GROUNDING_STOP_WORDS.has(token));
+  const uniqueManualTokens = uniqueValues(manualTokens).slice(0, 24);
+  const matched = uniqueManualTokens.filter((token) => candidateText.includes(token));
+  const hasIdentityToken = /\b(e\s*mas7|emas7|mas7)\b/i.test(candidateText)
+    || matched.some((token) => /наклад|порог|дверн|защит|сталь|пластик|глянц/.test(token));
+  return hasIdentityToken && matched.length >= Math.min(4, Math.max(2, uniqueManualTokens.length));
+}
+
+const TITLE_GROUNDING_STOP_WORDS = new Set([
+  "для", "или", "как", "это", "при", "под", "над", "без", "что", "шт", "комплект",
+  "черный", "черная", "черное", "автомобиля", "авто", "пластик"
+]);
+
+function normalizeTitleGroundingText(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\be\s+mas7\b/gi, "emas7")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 function buildChineseTitleMeaning(ruTitle, material = {}) {
   const genericProductType = chineseProductTypeByFacts(material.title, material.description, material.ozonCategoryName);
@@ -3709,6 +4293,37 @@ function chineseFactValue(value, type = "") {
   return text;
 }
 
+function buildFallbackListingTags(material = {}, title = "") {
+  const identity = requireListingProductIdentity({ ...material, listingTitleRu: title || material.listingTitleRu });
+  const tags = [];
+  const modelTag = identity.model ? identity.model.replace(/\s+/g, "_") : "";
+  if (modelTag) {
+    tags.push(modelTag, `для_${modelTag}`);
+  }
+  if (/порог/i.test(identity.productType)) {
+    tags.push(
+      modelTag ? `пороги_${modelTag}` : "",
+      modelTag ? `накладки_${modelTag}` : "",
+      "накладки_на_пороги",
+      "защита_порогов",
+      "дверные_пороги",
+      "пороги_авто",
+      "пороговые_накладки",
+      "защита_от_царапин"
+    );
+  } else if (/ремешок|брелок/i.test(identity.productType) && !/чехол/i.test(identity.productType)) {
+    tags.push("брелок_для_ключей", "ремешок_для_ключей", "авто_брелок", "ключи_авто");
+  } else if (/ключ/i.test(identity.productType)) {
+    tags.push("чехол_для_ключа", "авто_ключ", "защита_ключа");
+  } else {
+    tags.push(...keywordTokens(identity.productType).map((token) => token.replace(/\s+/g, "_")));
+  }
+  if (identity.material) tags.push(...identity.material.split(/\s*\+\s*/).map((item) => item.replace(/[^\p{L}\p{N}]+/gu, "_")));
+  if (identity.color) tags.push(identity.color.replace(/[^\p{L}\p{N}]+/gu, "_"));
+  if (identity.quantity) tags.push(identity.quantity.replace(/[^\p{L}\p{N}]+/gu, "_"));
+  return normalizeListingTags(tags.filter(Boolean), 40);
+}
+
 function generateShopTags(material, shop, rule = {}, title = "") {
   const generatedShopTag = shopNameTagToken(shop.name || shop.legalEntity || "shop");
   const inferredProductType = detectProductTypeByFacts(material.title, material.description, material.ozonCategoryName);
@@ -3716,25 +4331,56 @@ function generateShopTags(material, shop, rule = {}, title = "") {
   const colorTag = safeRussianTagWord(material.color);
   const inferredModel = extractLikelyCarModel(String(material.vehicleModel || "") + " " + String(material.title || "") + " " + String(title || ""));
   const factsText = `${material.title || ""} ${material.description || ""} ${material.ozonCategoryName || ""}`;
-  const keyCaseTerms = /key|fob|\u94a5\u5319|брелок/i.test(factsText)
+  const manualTags = normalizeTags(cleanRussianListingText(material.listingTagsRu, 800));
+  if (manualTags.length) {
+    return normalizeListingTags(manualTags, 40);
+  }
+  const identityTags = buildFallbackListingTags(material, title);
+  if (identityTags.length) {
+    return normalizeListingTags(identityTags, 40).filter((tag) => !hasCjkText(tag));
+  }
+  const keyCaseTerms = looksLikeKeyCase(factsText)
     ? ["key cover", "car key case", "key protection", "button access"]
     : [];
   const tagBase = [
+    ...manualTags,
     ...normalizeTags(material.tags),
     ...keywordTokens(material.ozonCategoryName),
     ...keywordTokens(material.title),
     ...keywordTokens(material.description),
+    ...keywordTokens(material.listingTagsPrompt),
     inferredModel,
     inferredProductType,
     materialTag,
     colorTag,
-    "ozon",
-    "daily use",
-    "comfortable",
-    "practical",
+    "защита_авто",
+    "установка_в_авто",
+    "автоаксессуары",
     ...keyCaseTerms
   ];
-  return uniqueValues([generatedShopTag, ...tagBase.map(tagToken)].filter(Boolean)).slice(0, 20);
+  const fallbackTags = generatedShopTag ? [...tagBase.map(tagToken), generatedShopTag] : tagBase.map(tagToken);
+  return normalizeListingTags(fallbackTags.filter(Boolean), 40)
+    .filter((tag) => !hasCjkText(tag))
+    .slice(0, 40);
+}
+
+function cleanRussianListingText(value = "", limit = 1000) {
+  const text = cleanText(value, limit);
+  return hasCjkText(text) ? "" : text;
+}
+
+function listingDescriptionText(material = {}) {
+  return cleanRussianListingText(material.listingDescriptionRu, 1200)
+    || cleanText(material.description || "", 1200);
+}
+
+function isOwnerShopForListingMaterial(shop = {}, material = {}) {
+  const owner = cleanText(material.ownerName || material.publisherName || "", 160).toLowerCase();
+  if (!owner) return false;
+  const legalEntity = cleanText(shop.legal_entity || shop.legalEntity || "", 160).toLowerCase();
+  const shopName = cleanText(shop.name || "", 160).toLowerCase();
+  const role = String(shop.rule?.priceRole || shop.rule?.price_role || "").trim().toLowerCase();
+  return role === "main" || role === "owner" || legalEntity === owner || shopName === owner;
 }
 
 function keywordTokens(value = "") {
@@ -3762,19 +4408,30 @@ function detectProductTypeByFacts(title = "", description = "", category = "") {
   const text = String(`${title} ${description} ${category}`).toLowerCase();
   const categoryText = cleanRussianFact(category);
   const titleText = cleanRussianFact(title);
+  if (/порог|накладк|迎宾条|门槛|踏板|threshold|door\s*sill/i.test(text)) return "Накладки на пороги автомобиля";
+  if (/seat\s*belt|shoulder|pad|cushion|\u5b89\u5168\u5e26|\u62a4\u80a9|\u80a9\u57ab|ремень/i.test(text)) return "Накладка на ремень безопасности";
+  if (looksLikeKeyLanyard(text)) return "Брелок-ремешок для автомобильного ключа";
+  if (looksLikeKeyCase(text)) return "Чехол для автомобильного ключа";
+  if (/key|fob|\u94a5\u5319|钥匙|брелок|ключ/i.test(text)) return "Брелок для автомобильного ключа";
+  if (/light|led|\u706f|подсвет/i.test(text)) return "Автомобильная подсветка";
+  if (/film|\u819c|пленк|плёнк/i.test(text)) return "Защитная пленка";
   if (/seat\s*belt|shoulder|pad|cushion|\u5b89\u5168\u5e26|\u62a4\u80a9|\u80a9\u57ab|remen|ремен/.test(text)) return "Накладка на ремень безопасности";
-  if (/key|fob|\u94a5\u5319|брелок/.test(text)) return "Чехол для автомобильного ключа";
+  if (looksLikeKeyLanyard(text)) return "Брелок-ремешок для автомобильного ключа";
+  if (looksLikeKeyCase(text)) return "Чехол для автомобильного ключа";
+  if (/key|fob|\u94a5\u5319|брелок/.test(text)) return "Брелок для автомобильного ключа";
   if (/light|led|\u706f|подсвет/.test(text)) return "Подсветка";
   if (/film|\u819c|пленк/.test(text)) return "Защитная пленка";
-  if (categoryText) return categoryText;
-  if (titleText) return titleText;
-  return "Товар для Ozon";
+  if (categoryText && !isGenericMarketplaceText(categoryText)) return categoryText;
+  if (titleText && !isGenericMarketplaceText(titleText)) return titleText;
+  return "";
 }
 
 function chineseProductTypeByFacts(title = "", description = "", category = "") {
   const text = String(`${title} ${description} ${category}`).toLowerCase();
   if (/seat\s*belt|shoulder|pad|cushion|\u5b89\u5168\u5e26|\u62a4\u80a9|\u80a9\u57ab|remen|ремен/.test(text)) return "\u5b89\u5168\u5e26\u62a4\u80a9";
-  if (/key|fob|\u94a5\u5319|брелок/.test(text)) return "\u94a5\u5319\u4fdd\u62a4\u58f3";
+  if (looksLikeKeyLanyard(text)) return "\u94a5\u5319\u6302\u7ef3";
+  if (looksLikeKeyCase(text)) return "\u94a5\u5319\u4fdd\u62a4\u58f3";
+  if (/key|fob|\u94a5\u5319|брелок/.test(text)) return "\u94a5\u5319\u6263";
   if (/light|led|\u706f|подсвет/.test(text)) return "\u706f\u9970\u914d\u4ef6";
   if (/film|\u819c|пленк/.test(text)) return "\u4fdd\u62a4\u819c";
   return cleanText(category || title || "\u5546\u54c1", 120);
@@ -3799,7 +4456,7 @@ function extractLikelyCarModel(value = "") {
 
 function tagToken(value) {
   const text = String(value || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_+|_+$/g, "").slice(0, 20);
-  return text ? "#" + text : "";
+  return text && !hasCjkText(text) ? "#" + text : "";
 }
 
 function shopNameTagToken(value) {
@@ -3863,7 +4520,7 @@ function normalizeTitlePair(value, material, style, shop) {
 
 function isInvalidRussianTitle(value) {
   const text = String(value || "");
-  return !text || looksBrokenGeneratedText(text) || hasCjkText(text);
+  return !text || looksBrokenGeneratedText(text) || hasCjkText(text) || isGenericMarketplaceText(text);
 }
 
 function hasCjkText(value) {
@@ -3881,15 +4538,13 @@ function cleanText(value, max = 1000) {
 }
 
 function cleanRussianTitle(value, max = 500) {
-  let text = cleanText(value, max)
+  let text = stripSensitiveMarketplaceText(cleanText(value, max))
     .replace(/\?{2,}/g, " ")
     .replace(/[^\p{L}\p{N}\s,.\-+]/gu, " ")
     .replace(/\s+/g, " ")
     .replace(/\s+,/g, ",")
     .trim();
-  if (!text || looksBrokenGeneratedText(text) || hasCjkText(text)) {
-    text = "Товар для Ozon";
-  }
+  if (!text || looksBrokenGeneratedText(text) || hasCjkText(text) || isGenericMarketplaceText(text)) return "";
   return text.slice(0, max);
 }
 
@@ -3907,6 +4562,21 @@ function parseJson(value, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function parseJsonFromText(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const unwrapped = text
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+  const direct = parseJson(unwrapped, null);
+  if (direct) return direct;
+  const start = unwrapped.indexOf("{");
+  const end = unwrapped.lastIndexOf("}");
+  if (start >= 0 && end > start) return parseJson(unwrapped.slice(start, end + 1), null);
+  return null;
 }
 
 function numberValue(value) {

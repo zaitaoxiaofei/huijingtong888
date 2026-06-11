@@ -1,7 +1,13 @@
 import { apiClient } from "../../utils/api";
 
 export function listAiPromptTemplates(params = {}) {
-  return apiClient.get("/api/ai-prompt-templates", { ...params, noCache: true });
+  const query = new URLSearchParams();
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") return;
+    query.set(key, String(value));
+  });
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return apiClient.get(`/api/ai-prompt-templates${suffix}`, { noCache: true });
 }
 
 export function createAiPromptTemplate(payload) {

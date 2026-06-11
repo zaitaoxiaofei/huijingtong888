@@ -1,7 +1,7 @@
 <script setup>
 const model = defineModel({ type: Object, required: true });
 
-const imageStyles = ["高端原厂风", "白底清晰风", "安装场景风", "Ozon爆款风", "自定义Prompt"];
+const imageStyles = ["高级原厂风", "白底清晰风", "安装场景风", "Ozon 爆款风", "自定义 Prompt"];
 </script>
 
 <template>
@@ -26,7 +26,7 @@ const imageStyles = ["高端原厂风", "白底清晰风", "安装场景风", "O
         </button>
       </div>
       <el-input
-        v-if="model.mainImageStyle === '自定义Prompt'"
+        v-if="model.mainImageStyle === '自定义 Prompt'"
         v-model="model.customPrompt"
         type="textarea"
         :rows="3"
@@ -40,7 +40,7 @@ const imageStyles = ["高端原厂风", "白底清晰风", "安装场景风", "O
         v-model="model.detailImageStrategy"
         :options="[
           { label: '继承母商品', value: 'inherit' },
-          { label: 'AI重新生成', value: 'regenerate' }
+          { label: 'AI 重新生成', value: 'regenerate' }
         ]"
       />
     </div>
@@ -61,7 +61,7 @@ const imageStyles = ["高端原厂风", "白底清晰风", "安装场景风", "O
         v-model="model.writeBackMode"
         :options="[
           { label: '自动回写选品表', value: 'auto' },
-          { label: '仅保存主图方案', value: 'plan_only' }
+          { label: '仅保存方案', value: 'plan_only' }
         ]"
       />
     </div>

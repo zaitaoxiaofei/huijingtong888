@@ -888,6 +888,52 @@
     return candidates;
   }
 
+  function buildSellerCategoryPatch(sellerResult) {
+    const sellerPatch = { ...(sellerResult?.fields || {}) };
+    for (const key of ['price', 'productPrice', 'sell_price', 'cardPrice', 'originalPrice', 'currency']) {
+      delete sellerPatch[key];
+    }
+    const categoryIds = normalizeCategoryIds(sellerPatch.category_ids || sellerPatch.categoryIds);
+    const descriptionCategoryId =
+      sellerPatch.description_category_id ||
+      sellerPatch.descriptionCategoryId ||
+      (categoryIds.length >= 2 ? String(categoryIds[categoryIds.length - 2]) : '');
+    const typeId =
+      sellerPatch.type_id ||
+      sellerPatch.typeId ||
+      (categoryIds.length > 0 ? String(categoryIds[categoryIds.length - 1]) : '');
+    return {
+      ...sellerPatch,
+      category: sellerPatch.category || '',
+      category_ids: categoryIds,
+      category_commission: sellerPatch.category_commission || null,
+      description_category_id: descriptionCategoryId,
+      type_id: typeId
+    };
+  }
+
+  function removeVariantOnlySellerFields(patch) {
+    const cleanPatch = { ...(patch || {}) };
+    delete cleanPatch.attributes;
+    delete cleanPatch.variantId;
+    delete cleanPatch.variantName;
+    delete cleanPatch.origin_variant_id;
+    delete cleanPatch.bundle_id;
+    delete cleanPatch.offer_id;
+    delete cleanPatch.barcode;
+    delete cleanPatch.barcodes;
+    return cleanPatch;
+  }
+
+  function applySellerPatchBySku(items, patchBySku) {
+    if (!Array.isArray(items) || !patchBySku || typeof patchBySku !== 'object') return;
+    items.forEach((item) => {
+      const sku = String(item?.sku || item?.source_sku || item?.product_id || '').trim();
+      if (!sku || !patchBySku[sku]) return;
+      applyCollectedFieldPatch(item, patchBySku[sku]);
+    });
+  }
+
   async function enrichDetailWithSellerFallback(result) {
     const candidateSkus = collectDetailSkuCandidates(result);
     if (candidateSkus.length === 0) return result;
@@ -897,11 +943,21 @@
       let sellerResult = null;
       let requestedSku = '';
       const errors = [];
-      for (const sku of candidateSkus) {
+      const sellerResultBySku = {};
+      const sellerPatchBySku = {};
+      const maxVariantSellerFetch = 30;
+      for (const sku of candidateSkus.slice(0, maxVariantSellerFetch)) {
         try {
-          sellerResult = await collector.fetchSellerFallbackData(sku);
-          requestedSku = sku;
-          if (sellerResult?.fields && Object.keys(sellerResult.fields).length > 0) break;
+          const currentSellerResult = await collector.fetchSellerFallbackData(sku);
+          if (currentSellerResult?.fields && Object.keys(currentSellerResult.fields).length > 0) {
+            sellerResultBySku[sku] = currentSellerResult;
+            sellerPatchBySku[sku] = buildSellerCategoryPatch(currentSellerResult);
+            if (!sellerResult) {
+              sellerResult = currentSellerResult;
+              requestedSku = sku;
+            }
+            continue;
+          }
           errors.push(`${sku}: seller 未返回可用字段`);
         } catch (error) {
           errors.push(`${sku}: ${error?.message || String(error)}`);
@@ -910,57 +966,58 @@
       if (!sellerResult?.fields || Object.keys(sellerResult.fields).length === 0) {
         throw new Error(errors[0] || 'seller 兜底未返回可用商品数据');
       }
-      const sellerPatch = { ...sellerResult.fields };
-      for (const key of ['price', 'productPrice', 'sell_price', 'cardPrice', 'originalPrice', 'currency']) {
-        delete sellerPatch[key];
-      }
-      const categoryIds = normalizeCategoryIds(sellerPatch.category_ids || sellerPatch.categoryIds);
-      const descriptionCategoryId =
-        sellerPatch.description_category_id ||
-        sellerPatch.descriptionCategoryId ||
-        (categoryIds.length >= 2 ? String(categoryIds[categoryIds.length - 2]) : '');
-      const typeId =
-        sellerPatch.type_id ||
-        sellerPatch.typeId ||
-        (categoryIds.length > 0 ? String(categoryIds[categoryIds.length - 1]) : '');
-      const categoryPatch = {
-        ...sellerPatch,
-        category: sellerPatch.category || '',
-        category_ids: categoryIds,
-        category_commission: sellerPatch.category_commission || null,
-        description_category_id: descriptionCategoryId,
-        type_id: typeId
-      };
-      Object.assign(result, categoryPatch, { sellerFallback: sellerResult });
+      const rootPatch = buildSellerCategoryPatch(sellerResult);
+      const productPatch = removeVariantOnlySellerFields(rootPatch);
+      Object.assign(result, productPatch, {
+        sellerFallback: sellerResult,
+        sellerVariantBySku: sellerPatchBySku,
+        variantSellerFallbacks: Object.fromEntries(
+          Object.entries(sellerResultBySku).map(([sku, item]) => [
+            sku,
+            {
+              sku,
+              fields: sellerPatchBySku[sku] || {},
+              warnings: Array.isArray(item?.warnings) ? item.warnings : []
+            }
+          ])
+        )
+      });
       if (result.productDetail && typeof result.productDetail === 'object') {
-        applyCollectedFieldPatch(result.productDetail, categoryPatch);
-      }
-      if (Array.isArray(result.variants)) result.variants.forEach((item) => applyCollectedFieldPatch(item, categoryPatch));
-      if (Array.isArray(result.rows)) result.rows.forEach((item) => applyCollectedFieldPatch(item, categoryPatch));
-      if (result.followEditPayload && typeof result.followEditPayload === 'object') {
-        applyCollectedFieldPatch(result.followEditPayload, categoryPatch);
-        if (Array.isArray(result.followEditPayload.rows)) {
-          result.followEditPayload.rows.forEach((item) => applyCollectedFieldPatch(item, categoryPatch));
+        applyCollectedFieldPatch(result.productDetail, productPatch);
+        const detailSku = String(result.productDetail.sku || '').trim();
+        if (detailSku && sellerPatchBySku[detailSku]) {
+          applyCollectedFieldPatch(result.productDetail, sellerPatchBySku[detailSku]);
         }
+      }
+      applySellerPatchBySku(result.variants, sellerPatchBySku);
+      applySellerPatchBySku(result.rows, sellerPatchBySku);
+      if (Array.isArray(result.productDetail?.variants)) applySellerPatchBySku(result.productDetail.variants, sellerPatchBySku);
+      if (result.followEditPayload && typeof result.followEditPayload === 'object') {
+        applyCollectedFieldPatch(result.followEditPayload, productPatch);
+        result.followEditPayload.sellerVariantBySku = sellerPatchBySku;
+        result.followEditPayload.variantSellerFallbacks = result.variantSellerFallbacks;
+        applySellerPatchBySku(result.followEditPayload.rows, sellerPatchBySku);
       }
       if (result.normalized && typeof result.normalized === 'object') {
-        applyCollectedFieldPatch(result.normalized, categoryPatch);
+        applyCollectedFieldPatch(result.normalized, productPatch);
         result.normalized.sellerFallback = sellerResult;
+        result.normalized.sellerVariantBySku = sellerPatchBySku;
+        result.normalized.variantSellerFallbacks = result.variantSellerFallbacks;
         if (result.normalized.editPayload && typeof result.normalized.editPayload === 'object') {
-          applyCollectedFieldPatch(result.normalized.editPayload, categoryPatch);
+          applyCollectedFieldPatch(result.normalized.editPayload, productPatch);
           result.normalized.editPayload.sellerFallback = sellerResult;
-          if (Array.isArray(result.normalized.editPayload.editorVariants)) {
-            result.normalized.editPayload.editorVariants.forEach((item) => applyCollectedFieldPatch(item, categoryPatch));
-          }
-          if (Array.isArray(result.normalized.editPayload.followEditPayload?.rows)) {
-            result.normalized.editPayload.followEditPayload.rows.forEach((item) => applyCollectedFieldPatch(item, categoryPatch));
-          }
+          result.normalized.editPayload.sellerVariantBySku = sellerPatchBySku;
+          result.normalized.editPayload.variantSellerFallbacks = result.variantSellerFallbacks;
+          applySellerPatchBySku(result.normalized.editPayload.editorVariants, sellerPatchBySku);
+          applySellerPatchBySku(result.normalized.editPayload.followEditPayload?.rows, sellerPatchBySku);
         }
       }
+      const fetchedSkuCount = Object.keys(sellerPatchBySku).length;
+      const skippedSkuCount = Math.max(0, candidateSkus.length - maxVariantSellerFetch);
       stages.push({
         name: 'seller_fallback',
         status: 'success',
-        detail: `${requestedSku}${categoryPatch.category_ids.length ? ` -> ${categoryPatch.category_ids.join(' > ')}` : ''}`,
+        detail: `${requestedSku}${productPatch.category_ids.length ? ` -> ${productPatch.category_ids.join(' > ')}` : ''}; variants ${fetchedSkuCount}${skippedSkuCount ? `, skipped ${skippedSkuCount}` : ''}`,
         at: new Date().toISOString()
       });
     } catch (error) {
@@ -1560,6 +1617,9 @@
     const editorVariants = rows.map((row, index) => {
       const rowImages = Array.isArray(row.images) ? row.images : [];
       const primary = row.cover_image || rowImages[0] || '';
+      const rowAttributes = Array.isArray(row.attributes) && row.attributes.length > 0
+        ? row.attributes
+        : rows.length > 1 ? [] : attributes;
       return {
         id: row.collection_row_id || `${collectionId}_${row.sku || index}`,
         source_sku: String(row.sku || ''),
@@ -1580,7 +1640,7 @@
         images: primary ? rowImages.filter((item) => item && item !== primary) : rowImages,
         video_urls: normalizeVideoUrls(row.video_urls || row.videos || detail.videoUrls || detail.videos || []),
         cover_video_urls: [],
-        attributes: Array.isArray(row.attributes) && row.attributes.length > 0 ? row.attributes : attributes,
+        attributes: rowAttributes,
         hashtags: normalizeHashtags(row.hashtags || hashtags),
         searchable_text: row.searchable_text || ''
       };
@@ -1608,6 +1668,9 @@
       new_description_category_id: pickValue(['new_description_category_id', 'newDescriptionCategoryId']),
       type_id: typeId,
       sellerEnrichment: result?.sellerEnrichment || result?.normalized?.sellerEnrichment || null,
+      sellerFallback: result?.sellerFallback || result?.normalized?.sellerFallback || null,
+      sellerVariantBySku: result?.sellerVariantBySku || result?.normalized?.sellerVariantBySku || null,
+      variantSellerFallbacks: result?.variantSellerFallbacks || result?.normalized?.variantSellerFallbacks || null,
       price: detail.cardPrice ?? detail.price ?? '',
       webPrice: detail.webPrice ?? detail.price ?? '',
       productPrice: detail.cardPrice ?? detail.price ?? '',
@@ -1851,6 +1914,9 @@
       'originalVideos',
       'hashtags',
       'attributes',
+      'sellerFallback',
+      'sellerVariantBySku',
+      'variantSellerFallbacks',
       'variants',
       'editorVariants',
       'followEditPayload',

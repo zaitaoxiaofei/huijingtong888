@@ -5,7 +5,7 @@ import { openStartupPage } from "./open-startup-page.mjs";
 
 const rootDir = process.cwd();
 const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
-const port = Number(process.env.PORT || 8787);
+const port = Number(process.env.PORT || 8788);
 const printHelperPort = Number(process.env.OZON_PRINT_HELPER_PORT || 17878);
 const appBaseUrl = process.env.APP_BASE_URL || `http://localhost:${port}`;
 const electronRemoteUrl = process.env.ELECTRON_REMOTE_URL || appBaseUrl;

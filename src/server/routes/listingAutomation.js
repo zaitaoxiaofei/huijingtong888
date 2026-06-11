@@ -11,8 +11,11 @@ export function createListingAutomationRoutes({ services, readJson }) {
     },
     "POST /api/listing/templates/validate-publish": async (req) => services.validateListingTemplatePublish(await readJson(req), req._session),
     "POST /api/listing/templates/publish-to-ozon": async (req) => services.publishListingTemplateToOzon(await readJson(req), req._session),
+    "POST /api/listing/variant-media/generate": async (req) => services.generateListingVariantMediaFromImage(await readJson(req), req._session),
     "GET /api/listing/template-health-check": (req) => services.listingTemplateHealthCheck(req.query || {}, req._session),
+    "GET /api/listing/draft-projects": (req, url) => services.listingDraftProjects(Object.fromEntries(url.searchParams.entries()), req._session),
     "GET /api/listing/publish-records": (req) => services.listingPublishRecords(req.query || {}, req._session),
+    "POST /api/listing/publish-records/batch-delete": async (req) => services.deleteListingPublishRecords(await readJson(req), req._session),
     "GET /api/listing/media/assets": (req) => services.listingMediaAssets(req.query || {}, req._session),
     "GET /api/material-packages/search": (req) => services.searchMaterialPackages(req.query || {}, req._session),
     "POST /api/ai/deepseek/generate": async (req) => services.generateDeepSeekListingContent(await readJson(req), req._session),
@@ -31,6 +34,11 @@ export function createListingAutomationRoutes({ services, readJson }) {
     "POST /api/listing/media/upload": (req) => services.uploadListingMedia(req),
     "POST /api/listing/media/watermark": async (req) => services.watermarkListingMedia(await readJson(req), req._session),
     "GET /api/listing/drafts": (req, url) => services.listingDrafts(Object.fromEntries(url.searchParams.entries()), req._session),
+    "POST /api/listing/drafts/batch-publish": async (req) => services.publishListingDraftsToOzon(await readJson(req), req._session),
+    "POST /api/listing/drafts/repair-media-contamination": async (req) => services.repairListingDraftMediaContamination(await readJson(req), req._session),
+    "GET /api/listing/ai-variant-assets": (req, url) => services.listingAiVariantAssets(Object.fromEntries(url.searchParams.entries()), req._session),
+    "POST /api/listing/ai-variant-assets": async (req) => services.saveListingAiVariantAsset(await readJson(req), req._session),
+    "POST /api/listing/drafts/ai-variant-lightweight": async (req) => services.createAiVariantListingDraftLightweight(await readJson(req), req._session),
     "POST /api/listing/drafts": async (req) => services.createListingDraft(await readJson(req), req._session)
   };
 }
@@ -85,6 +93,18 @@ export async function handleListingAutomationRestRoute({ req, res, parts, servic
     return json(res, await services.listingShopCopies(Number(parts[3]), req._session));
   }
 
+  if (req.method === "GET" && parts[2] === "drafts" && parts[3]) {
+    return json(res, await services.listingDraftDetail(Number(parts[3]), req._session));
+  }
+
+  if (req.method === "PUT" && parts[2] === "drafts" && parts[3]) {
+    return json(res, await services.updateListingDraft(Number(parts[3]), await readJson(req), req._session));
+  }
+
+  if (req.method === "DELETE" && parts[2] === "drafts" && parts[3]) {
+    return json(res, await services.deleteListingDraft(Number(parts[3]), req._session));
+  }
+
   if (req.method === "POST" && parts[2] === "copy-jobs" && parts[3] && parts[4] === "refresh") {
     return json(res, await services.refreshListingCopyJob(Number(parts[3]), req._session));
   }
@@ -99,6 +119,10 @@ export async function handleListingAutomationRestRoute({ req, res, parts, servic
 
   if (req.method === "POST" && parts[2] === "publish-records" && parts[3] && parts[4] === "retry") {
     return json(res, await services.retryListingPublishRecord(Number(parts[3]), await readJson(req), req._session));
+  }
+
+  if (req.method === "POST" && parts[2] === "publish-records" && parts[3] && parts[4] === "draft") {
+    return json(res, await services.saveListingPublishRecordDraft(Number(parts[3]), await readJson(req), req._session));
   }
 
   if (req.method === "DELETE" && parts[2] === "publish-records" && parts[3]) {

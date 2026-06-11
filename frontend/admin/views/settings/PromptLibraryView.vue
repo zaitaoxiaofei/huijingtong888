@@ -1794,7 +1794,8 @@ async function loadSourceSelections() {
     const params = new URLSearchParams({
       paged: "1",
       page: String(pager.page),
-      pageSize: String(pager.pageSize)
+      pageSize: String(pager.pageSize),
+      summaryMode: "skip"
     });
     if (pager.keyword.trim()) params.set("query", pager.keyword.trim());
     const selections = await apiClient.get(`/api/products/selection?${params.toString()}`, { noCache: true });
@@ -1816,7 +1817,8 @@ async function loadSourceCollectors() {
     const pager = sourceFilters.collector;
     const params = new URLSearchParams({
       page: String(pager.page),
-      pageSize: String(pager.pageSize)
+      pageSize: String(pager.pageSize),
+      summaryMode: "skip"
     });
     if (pager.keyword.trim()) params.set("query", pager.keyword.trim());
     const result = await apiClient.get(`/api/listing/collector-box?${params.toString()}`, { noCache: true });
@@ -4957,7 +4959,7 @@ function normalizeKey(value) {
 
 function openNewWorkbench() {
   router.push({
-    path: "/asset-variant-center/create",
+    path: "/asset-variant-center/wizard",
     query: {
       workbenchId: createWorkbenchId()
     }

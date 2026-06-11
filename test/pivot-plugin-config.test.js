@@ -26,6 +26,14 @@ test("pivot analytics plugin polling is enabled by default unless manually pause
   assert.match(source, /panelState\.pollingEnabled = stored\[POLLING_ENABLED_KEY\] !== false/);
 });
 
+test("pivot analytics plugin claims collect tasks for the current Ozon store only", () => {
+  const source = backgroundSource();
+
+  assert.match(source, /const companyId = currentSellerCompanyId\(sellerTab\?\.id\) \|\| panelState\.currentCompanyId \|\| ''/);
+  assert.match(source, /params\.set\('store_id', companyId\)/);
+  assert.match(source, /params\.set\('company_id', companyId\)/);
+});
+
 test("pivot analytics plugin popup exposes token configuration", () => {
   assert.match(popupHtml(), /id="localPluginToken"/);
   assert.match(popupHtml(), /id="localMirrorBaseUrl"/);

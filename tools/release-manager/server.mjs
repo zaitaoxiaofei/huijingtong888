@@ -1,5 +1,6 @@
 import http from "node:http";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -12,8 +13,21 @@ function resolveFromTool(value) {
   return path.resolve(toolDir, value || "");
 }
 
+function localLanIpv4() {
+  const addresses = Object.values(os.networkInterfaces())
+    .flat()
+    .filter((item) => item && item.family === "IPv4" && !item.internal)
+    .map((item) => item.address)
+    .filter(Boolean);
+  return addresses.sort((left, right) => {
+    const score = (address) => address.startsWith("192.168.") ? 0 : address.startsWith("10.") ? 1 : 2;
+    return score(left) - score(right);
+  })[0] || "127.0.0.1";
+}
+
 async function readConfig() {
   const raw = JSON.parse(await fs.readFile(configPath, "utf8"));
+  const previewPort = Number(process.env.OZON_RELEASE_PREVIEW_PORT || raw.previewPort || 8788);
   return {
     ...raw,
     projectDir: resolveFromTool(raw.projectDir || "../.."),
@@ -25,8 +39,9 @@ async function readConfig() {
     previewFile: resolveFromTool(raw.previewFile || "../../dist/releases/preview.json"),
     publishedFile: resolveFromTool(raw.publishedFile || "../../dist/releases/published-releases.json"),
     port: Number(process.env.RELEASE_TOOL_PORT || raw.port || 8791),
-    previewPort: Number(process.env.OZON_RELEASE_PREVIEW_PORT || raw.previewPort || 8788),
-    previewHealthUrl: process.env.OZON_RELEASE_PREVIEW_HEALTH_URL || raw.previewHealthUrl || `http://127.0.0.1:${Number(process.env.OZON_RELEASE_PREVIEW_PORT || raw.previewPort || 8788)}/admin.html`,
+    previewPort,
+    previewUrl: process.env.OZON_RELEASE_PREVIEW_URL || raw.previewUrl || `http://${localLanIpv4()}:${previewPort}/`,
+    previewHealthUrl: process.env.OZON_RELEASE_PREVIEW_HEALTH_URL || raw.previewHealthUrl || `http://127.0.0.1:${previewPort}/admin.html`,
     localHealthUrl: process.env.OZON_RELEASE_LOCAL_HEALTH_URL || raw.localHealthUrl || "http://127.0.0.1:8787/admin.html",
     publicHealthUrl: process.env.OZON_RELEASE_PUBLIC_HEALTH_URL || raw.publicHealthUrl || "https://erp.hjt888.xyz/admin.html",
     channel: process.env.OZON_RELEASE_CHANNEL || raw.channel || "production"
@@ -216,21 +231,62 @@ async function copyDir(source, target) {
   await fs.cp(source, target, { recursive: true });
 }
 
+function pathSegmentsForMatch(value) {
+  return String(value || "")
+    .split(path.sep)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function pathStartsWithParts(value, parts) {
+  const segments = pathSegmentsForMatch(value);
+  return parts.every((part, index) => segments[index] === part);
+}
+
+async function removeDirContentsExcept(root, preservedPartsList = []) {
+  const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const entryPath = path.join(root, entry.name);
+    const relativeParts = pathSegmentsForMatch(path.relative(root, entryPath));
+    const exactPreserve = preservedPartsList.some((parts) => (
+      parts.length === relativeParts.length && parts.every((part, index) => relativeParts[index] === part)
+    ));
+    if (exactPreserve) continue;
+    const nestedPreserves = preservedPartsList
+      .filter((parts) => pathStartsWithParts(parts.join(path.sep), relativeParts))
+      .map((parts) => parts.slice(relativeParts.length));
+    if (entry.isDirectory() && nestedPreserves.length) {
+      await removeDirContentsExcept(entryPath, nestedPreserves);
+      continue;
+    }
+    await fs.rm(entryPath, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+  }
+}
+
 async function replaceDirFromRelease(source, target) {
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.mkdir(target, { recursive: true });
   const parent = path.dirname(target);
   const base = path.basename(target);
+  const uploadRoots = [
+    ["public", "uploads"],
+    ["uploads"]
+  ];
+  const preservedUploadRoots = [];
+  for (const parts of uploadRoots) {
+    const sourceUploads = path.join(source, ...parts);
+    const targetUploads = path.join(target, ...parts);
+    if (!await pathExists(sourceUploads) && await pathExists(targetUploads)) {
+      preservedUploadRoots.push(parts);
+    }
+  }
   const leftovers = await fs.readdir(parent, { withFileTypes: true }).catch(() => []);
   for (const entry of leftovers) {
     if (entry.name.startsWith(`${base}.next-`) || entry.name.startsWith(`${base}.previous-`)) {
       await fs.rm(path.join(parent, entry.name), { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     }
   }
-  const entries = await fs.readdir(target, { withFileTypes: true }).catch(() => []);
-  for (const entry of entries) {
-    await fs.rm(path.join(target, entry.name), { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
-  }
+  await removeDirContentsExcept(target, preservedUploadRoots);
   await fs.cp(source, target, { recursive: true, force: true });
 }
 
@@ -306,9 +362,11 @@ async function httpCheck(url, options = {}) {
   return { ok: false, status: 0, url, error: message, attempt: attempts };
 }
 
-async function restartErpServer(config, deployDir, port) {
+async function restartErpServer(config, deployDir, port, options = {}) {
   const script = path.join(config.projectDir, "deploy", "windows-host", "start-erp-server.ps1");
-  const command = `powershell -NoProfile -ExecutionPolicy Bypass -File "${script}" -DeployDir "${deployDir}" -Port ${Number(port)}`;
+  const hostArg = options.host ? ` -BindHost "${options.host}"` : "";
+  const appBaseUrlArg = options.appBaseUrl ? ` -AppBaseUrl "${options.appBaseUrl}"` : "";
+  const command = `powershell -NoProfile -ExecutionPolicy Bypass -File "${script}" -DeployDir "${deployDir}" -Port ${Number(port)}${hostArg}${appBaseUrlArg}`;
   return await runCommand(command, config.projectDir, process.env);
 }
 
@@ -317,7 +375,15 @@ async function restartLiveServer(config) {
 }
 
 async function restartPreviewServer(config) {
-  return await restartErpServer(config, config.previewDir, config.previewPort);
+  return await restartErpServer(config, config.previewDir, config.previewPort, { host: "0.0.0.0" });
+}
+
+async function checkPreviewLocalAccess(config) {
+  const command = `node scripts/check-local-access.mjs`;
+  return await runCommand(command, config.projectDir, {
+    ...process.env,
+    PORT: String(config.previewPort)
+  });
 }
 
 async function listReleases(config) {
@@ -361,7 +427,7 @@ async function applyPreviewRelease(config, version, releaseDir) {
       releaseDir,
       previewDir: config.previewDir,
       previewPort: config.previewPort,
-      previewUrl: `http://127.0.0.1:${config.previewPort}/`
+      previewUrl: config.previewUrl
     }, null, 2)}\n`,
     "utf8"
   );
@@ -381,12 +447,23 @@ async function applyPreviewRelease(config, version, releaseDir) {
   }
   updateOperationStep("本地试运行访问正常", "done", `HTTP ${previewHealth.status}`);
 
+  updateOperationStep("检测本机和局域网入口", "running", `localhost/LAN:${config.previewPort}`);
+  try {
+    const accessLog = await checkPreviewLocalAccess(config);
+    updateOperationStep("本机和局域网入口正常", "done", accessLog.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(" | "));
+  } catch (error) {
+    updateOperationStep("本机和局域网入口失败", "failed", error.detail || error.message);
+    error.status = 502;
+    error.validation = { detail: error.detail || error.message };
+    throw error;
+  }
+
   return {
     version,
     previewedAt,
     previewDir: config.previewDir,
     previewPort: config.previewPort,
-    previewUrl: `http://127.0.0.1:${config.previewPort}/`,
+    previewUrl: config.previewUrl,
     previewHealth
   };
 }
@@ -429,6 +506,7 @@ async function state() {
       publishedFile: config.publishedFile,
       buildCommand: config.buildCommand,
       previewPort: config.previewPort,
+      previewUrl: config.previewUrl,
       previewHealthUrl: config.previewHealthUrl,
       localHealthUrl: config.localHealthUrl,
       publicHealthUrl: config.publicHealthUrl,
@@ -448,7 +526,7 @@ async function state() {
       previewDir: preview.previewDir || config.previewDir,
       releaseDir: preview.releaseDir || "",
       previewPort: preview.previewPort || config.previewPort,
-      previewUrl: preview.previewUrl || `http://127.0.0.1:${config.previewPort}/`
+      previewUrl: preview.previewUrl || config.previewUrl
     },
     hasUnbuiltChanges,
     nextVersion: workspace.nextVersion,
@@ -570,6 +648,18 @@ async function publishRelease(body = {}) {
     error.status = 404;
     throw error;
   }
+
+  updateOperationStep("上架前检测 8788 入口", "running", `localhost/LAN:${config.previewPort}`);
+  try {
+    const accessLog = await checkPreviewLocalAccess(config);
+    updateOperationStep("8788 入口检测通过", "done", accessLog.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(" | "));
+  } catch (error) {
+    updateOperationStep("8788 入口检测失败", "failed", error.detail || error.message);
+    error.status = 502;
+    error.validation = { detail: error.detail || error.message };
+    throw error;
+  }
+
   updateOperationStep("停止正式本地服务", "running", "127.0.0.1:8787");
   const stopLog = await stopErpServerOnPort(config, 8787);
   updateOperationStep("正式本地服务已停止", "done", stopLog.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-3).join(" | "));
@@ -670,6 +760,60 @@ async function buildAndPublishRelease(body = {}) {
   };
 }
 
+function assertReleasePathInside(config, releaseDir) {
+  const relative = path.relative(config.releasesDir, releaseDir);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    const error = new Error("Invalid release path.");
+    error.status = 400;
+    throw error;
+  }
+}
+
+async function deleteRelease(body = {}) {
+  const config = await readConfig();
+  const version = cleanVersion(body.version);
+  if (!version) {
+    const error = new Error("version is required");
+    error.status = 400;
+    throw error;
+  }
+
+  const current = await readJsonFile(config.currentFile, {});
+  if (current.version === version) {
+    const error = new Error("Cannot delete the current online release.");
+    error.status = 409;
+    throw error;
+  }
+
+  const preview = await readJsonFile(config.previewFile, {});
+  if (preview.version === version) {
+    const error = new Error("Cannot delete the release currently running on 8788.");
+    error.status = 409;
+    throw error;
+  }
+
+  const publishedRecords = await readPublishedRecords(config);
+
+  const releaseDir = path.join(config.releasesDir, version);
+  assertReleasePathInside(config, releaseDir);
+  if (!await pathExists(releaseDir)) {
+    const error = new Error(`Release ${version} does not exist.`);
+    error.status = 404;
+    throw error;
+  }
+
+  await fs.rm(releaseDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+  const nextPublishedRecords = publishedRecords.filter((record) => record.version !== version);
+  if (nextPublishedRecords.length !== publishedRecords.length) {
+    await savePublishedRecords(config, nextPublishedRecords);
+  }
+  return {
+    version,
+    releaseDir,
+    deleted: true
+  };
+}
+
 async function handleApi(req, res, pathname) {
   if (req.method === "GET" && pathname === "/api/state") return json(res, await state());
   if (req.method === "POST" && pathname === "/api/build") {
@@ -687,6 +831,10 @@ async function handleApi(req, res, pathname) {
   if (req.method === "POST" && pathname === "/api/build-and-publish") {
     const body = await readBody(req);
     return json(res, await runExclusiveOperation("build-and-publish", "一键生成并发布", () => buildAndPublishRelease(body)));
+  }
+  if (req.method === "POST" && pathname === "/api/delete-release") {
+    const body = await readBody(req);
+    return json(res, await runExclusiveOperation("delete", "delete release", () => deleteRelease(body)));
   }
   return json(res, { error: "Not found" }, 404);
 }
@@ -2017,6 +2165,8 @@ function pageV4() {
       button:hover { border-color: rgba(63, 95, 137, 0.55); background: #f7faff; }
       button.primary { border-color: var(--primary); background: var(--primary); color: #fff; }
       button.primary:hover { border-color: var(--primary-dark); background: var(--primary-dark); }
+      button.danger { border-color: #fecaca; color: #b42318; }
+      button.danger:hover { border-color: #ef4444; background: #fff5f5; }
       button:disabled { opacity: 0.55; cursor: wait; }
       .dashboard-grid { display: grid; grid-template-columns: 340px minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: stretch; }
       .card { min-width: 0; min-height: 500px; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); }
@@ -2060,7 +2210,9 @@ function pageV4() {
       .col-version { width: 154px; }
       .col-time { width: 118px; }
       .col-status { width: 86px; }
-      .col-action { width: 106px; text-align: right; }
+      .col-action { width: 148px; text-align: right; }
+      .row-actions { display: inline-flex; justify-content: flex-end; gap: 6px; }
+      .row-actions button { padding: 0 9px; white-space: nowrap; }
       .online-table .col-action button { white-space: nowrap; }
       .mono { overflow: hidden; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
       .path-cell { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
@@ -2259,6 +2411,7 @@ function pageV4() {
             const disabled = locked;
             const permanentLock = "";
             const isPreview = release.version === state?.preview?.version;
+            const canDelete = Boolean(!locked && !release.isOnline && !isPreview);
             const rowStatus = release.isOnline ? "\u5f53\u524d\u7ebf\u4e0a" : (release.isPublished ? "\u5df2\u4e0a\u67b6" : (isPreview ? "8788试运行中" : "未试运行"));
             return '<tr class="' + (checked ? "selected" : "") + '" data-version="' + htmlEscape(release.version) + '">' +
               '<td class="col-pick"><input type="radio" name="releaseVersion" value="' + htmlEscape(release.version) + '"' + permanentLock + (checked ? " checked" : "") + (disabled ? " disabled" : "") + ' /></td>' +
@@ -2266,7 +2419,7 @@ function pageV4() {
               '<td>' + htmlEscape(timeText(release.builtAt)) + '</td>' +
               '<td><span class="badge ' + (release.isOnline || isPreview ? "success" : (release.isPublished ? "online" : "warning")) + '">' + rowStatus + '</span></td>' +
               '<td><div class="path-cell" title="' + htmlEscape(release.path) + '">' + htmlEscape(release.path) + '</div></td>' +
-              '<td class="col-action"><button data-preview-version="' + htmlEscape(release.version) + '"' + permanentLock + (disabled ? " disabled" : "") + '>' + (isPreview ? "重启8788" : "部署8788") + '</button></td>' +
+              '<td class="col-action"><div class="row-actions"><button data-preview-version="' + htmlEscape(release.version) + '"' + permanentLock + (disabled ? " disabled" : "") + '>' + (isPreview ? "重启8788" : "部署8788") + '</button><button class="danger" data-delete-version="' + htmlEscape(release.version) + '"' + (canDelete ? "" : ' data-locked="true" disabled') + '>\u5220\u9664</button></div></td>' +
             '</tr>';
           }).join("") + '</tbody></table></div>' +
           '<div class="table-actions"><div class="selected-note">选中版本：' + htmlEscape(selectedVersion || "暂无可部署版本") + (selectedVersion && !selectedIsPreview ? "（点击表格右侧“部署8788”后，可在右栏上架）" : "") + '</div></div>';
@@ -2289,6 +2442,12 @@ function pageV4() {
             if (button.disabled) return;
             selectedVersion = button.dataset.previewVersion;
             deployPreview(selectedVersion);
+          });
+        });
+        releaseTable.querySelectorAll('button[data-delete-version]').forEach(function (button) {
+          button.addEventListener("click", function () {
+            if (button.disabled) return;
+            deleteLocalRelease(button.dataset.deleteVersion);
           });
         });
       }
@@ -2421,6 +2580,34 @@ function pageV4() {
           setStatus(error.message, error.detail);
         } finally {
           stopProgressPolling();
+          setBusy(false);
+          refresh().catch(function () {});
+        }
+      }
+      async function deleteLocalRelease(version) {
+        if (!version) {
+          setStatus("\u8bf7\u5148\u9009\u62e9\u8981\u5220\u9664\u7684\u7248\u672c\u5305\u3002");
+          return;
+        }
+        if (localBusy || state?.activeOperation) {
+          setStatus(operationText(state?.activeOperation) || "\u5df2\u6709\u4efb\u52a1\u5728\u8fdb\u884c\u4e2d\uff0c\u8bf7\u7a0d\u7b49\u3002");
+          return;
+        }
+        const release = releaseByVersion(version);
+        const historyNote = release?.isPublished ? "\\n\\n\u8be5\u7248\u672c\u66fe\u7ecf\u53d1\u5e03\u8fc7\uff0c\u5220\u9664\u540e\u4f1a\u540c\u6b65\u79fb\u9664\u53d1\u5e03\u5386\u53f2\u8bb0\u5f55\u3002" : "";
+        const confirmText = "\u786e\u8ba4\u5220\u9664\u7248\u672c\u5305 " + version + " \u5417\uff1f\\n\\n\u53ea\u4f1a\u5220\u9664\u672c\u5730\u7248\u672c\u5305\u76ee\u5f55\uff1a\\n" + (release?.path || "") + historyNote;
+        if (!window.confirm(confirmText)) return;
+        setBusy(true, "\u5220\u9664\u4e2d...");
+        try {
+          setStatus("\u6b63\u5728\u5220\u9664\u7248\u672c\u5305\uff1a" + version);
+          const result = await api("/api/delete-release", { method: "POST", body: JSON.stringify({ version }) });
+          if (selectedVersion === result.version) selectedVersion = "";
+          if (selectedOnlineVersion === result.version) selectedOnlineVersion = "";
+          setStatus("\u7248\u672c\u5305\u5df2\u5220\u9664\uff1a" + result.version, result.releaseDir);
+          await refresh();
+        } catch (error) {
+          setStatus(error.message, error.detail);
+        } finally {
           setBusy(false);
           refresh().catch(function () {});
         }

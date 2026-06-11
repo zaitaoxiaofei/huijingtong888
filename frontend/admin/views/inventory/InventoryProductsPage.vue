@@ -58,6 +58,23 @@ const productProcurementCurrentProduct = ref(null);
 const profitDetailCurrentProduct = ref(null);
 const dialogProduct = ref(null);
 const selectedRows = ref([]);
+const manualOutboundVisible = ref(false);
+const manualOutboundSubmitting = ref(false);
+const manualOutboundProduct = ref(null);
+const manualOutboundEditingId = ref(0);
+const manualOutboundDeletingId = ref(0);
+const manualOutboundRecordsVisible = ref(false);
+const manualOutboundRecordsLoading = ref(false);
+const manualOutboundRecordsProduct = ref(null);
+const manualOutboundRecordsRows = ref([]);
+const manualOutboundRecordsTotal = ref(0);
+const manualOutboundForm = reactive({
+  quantity: 1,
+  stock_location: "LOCAL",
+  reason: "sample_loss",
+  loss_amount: 0,
+  note: ""
+});
 
 const detailPageDefaults = {
   page: 1,
@@ -66,6 +83,7 @@ const detailPageDefaults = {
 const productSalesPager = reactive({ ...detailPageDefaults });
 const productProcurementPager = reactive({ ...detailPageDefaults });
 const profitDetailPager = reactive({ ...detailPageDefaults });
+const manualOutboundRecordsPager = reactive({ ...detailPageDefaults });
 const profitDetailTotal = ref(0);
 const productSalesFilters = reactive({
   query: "",
@@ -166,6 +184,29 @@ const mergeFieldLabelMap = {
   created_by_person_id: "创建人"
 };
 
+const manualOutboundReasons = [
+  { label: "样品损耗", value: "sample_loss" },
+  { label: "物流损耗", value: "logistics_loss" },
+  { label: "库存丢失", value: "stock_lost" },
+  { label: "质检报废", value: "quality_scrap" },
+  { label: "包装破损", value: "packaging_damage" },
+  { label: "拍摄/测评消耗", value: "content_sample" },
+  { label: "盘点差异", value: "stocktaking_gap" },
+  { label: "客户补发", value: "customer_reship" },
+  { label: "供应商少发/错发", value: "supplier_short_wrong" },
+  { label: "其他", value: "other" }
+];
+
+function manualOutboundReasonLabel(value) {
+  return manualOutboundReasons.find((item) => item.value === value)?.label || "其他";
+}
+
+function movementStockLocationText(value) {
+  if (value === "FBP") return "FBP";
+  if (value === "LOCAL") return "本地";
+  return "未标记";
+}
+
 const pagedRows = computed(() => state.products);
 const inventoryTotalPages = computed(() => Math.max(1, Math.ceil(Number(state.total || 0) / Math.max(1, Number(state.filters.pageSize || 1)))));
 const inventoryFooterSummary = computed(() => `第 ${Number(state.filters.page || 1)} / ${inventoryTotalPages.value} 页，共 ${integer(state.total)} 条记录`);
@@ -216,6 +257,7 @@ const productProcurementSummary = computed(() => productProcurementRows.value.re
   summary.amount += Number(row.amount || 0) + Number(row.shipping_amount || 0);
   return summary;
 }, { quantity: 0, amount: 0 }));
+const manualOutboundDialogTitle = computed(() => manualOutboundEditingId.value ? "编辑手动出库" : "手动出库");
 
 const INVENTORY_PROFIT_TARGET_MARGIN = 0.2;
 
@@ -432,7 +474,7 @@ function rowNumber(row, key) {
 }
 
 function localStock(row) {
-  return rowNumber(row, "stock");
+  return rowNumber(row, "stock") - fbpStock(row);
 }
 
 function fbpStock(row) {
@@ -448,11 +490,11 @@ function fbsStock(row) {
 }
 
 function totalProductStock(row) {
-  return localStock(row) + fbpStock(row);
+  return rowNumber(row, "stock");
 }
 
 function stockForInventoryValue(row) {
-  return Math.max(0, totalProductStock(row));
+  return totalProductStock(row);
 }
 
 function productInventoryValue(row) {
@@ -1004,6 +1046,148 @@ function openProcurement(row) {
   procurementCreateVisible.value = Boolean(procurementCreateProductId.value);
 }
 
+function openManualOutbound(row) {
+  if (!row?.id) return;
+  manualOutboundProduct.value = row;
+  manualOutboundEditingId.value = 0;
+  Object.assign(manualOutboundForm, {
+    quantity: 1,
+    stock_location: "LOCAL",
+    reason: "sample_loss",
+    loss_amount: 0,
+    note: ""
+  });
+  manualOutboundVisible.value = true;
+}
+
+function openEditManualOutboundRecord(row) {
+  if (!row?.id) return;
+  manualOutboundEditingId.value = Number(row.id);
+  manualOutboundProduct.value = manualOutboundRecordsProduct.value;
+  Object.assign(manualOutboundForm, {
+    quantity: Math.abs(Math.round(Number(row.quantity_delta || 0))) || 1,
+    stock_location: row.stock_location || "LOCAL",
+    reason: "other",
+    loss_amount: Number(row.amount || 0),
+    note: String(row.note || "").replace(/^手动出库：[^/]+\/?\s*/, "")
+  });
+  manualOutboundVisible.value = true;
+}
+
+async function submitManualOutbound() {
+  const product = manualOutboundProduct.value;
+  const quantity = Math.round(Number(manualOutboundForm.quantity || 0));
+  if (!product?.id || quantity <= 0) {
+    ElMessage.warning("请输入大于 0 的出库数量");
+    return;
+  }
+  const reasonLabel = manualOutboundReasonLabel(manualOutboundForm.reason);
+  manualOutboundSubmitting.value = true;
+  try {
+    const payload = {
+      product_id: Number(product.id),
+      source_type: "manual_outbound",
+      quantity,
+      stock_location: manualOutboundForm.stock_location || "LOCAL",
+      amount: Number(manualOutboundForm.loss_amount || 0),
+      reason: reasonLabel,
+      note: [
+        `手动出库：${reasonLabel}`,
+        manualOutboundForm.note
+      ].filter(Boolean).join(" / ")
+    };
+    if (manualOutboundEditingId.value) {
+      await apiClient.put(`/api/inventory/movements/${manualOutboundEditingId.value}`, payload);
+      ElMessage.success("手动出库记录已更新");
+    } else {
+      await apiClient.post("/api/inventory/movements", payload);
+      ElMessage.success("手动出库已记录");
+    }
+    manualOutboundVisible.value = false;
+    manualOutboundEditingId.value = 0;
+    if (manualOutboundRecordsVisible.value && Number(manualOutboundRecordsProduct.value?.id || 0) === Number(product.id)) {
+      await loadManualOutboundRecords();
+    }
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "手动出库失败");
+  } finally {
+    manualOutboundSubmitting.value = false;
+  }
+}
+
+async function deleteManualOutboundRecord(row) {
+  const id = Number(row?.id || 0);
+  if (!id) return;
+  try {
+    await ElMessageBox.confirm(
+      `确认删除这条手动出库记录吗？删除后会重新计算该产品库存。`,
+      "删除手动出库",
+      {
+        type: "warning",
+        confirmButtonText: "确认删除",
+        cancelButtonText: "取消"
+      }
+    );
+  } catch (error) {
+    if (error === "cancel" || error === "close" || error?.message === "cancel") return;
+    throw error;
+  }
+  manualOutboundDeletingId.value = id;
+  try {
+    await apiClient.delete(`/api/inventory/movements/${id}`);
+    ElMessage.success("手动出库记录已删除");
+    await loadManualOutboundRecords();
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "删除手动出库记录失败");
+  } finally {
+    manualOutboundDeletingId.value = 0;
+  }
+}
+
+async function openManualOutboundRecords(row) {
+  manualOutboundRecordsProduct.value = row;
+  Object.assign(manualOutboundRecordsPager, detailPageDefaults);
+  await loadManualOutboundRecords();
+}
+
+async function loadManualOutboundRecords() {
+  const row = manualOutboundRecordsProduct.value;
+  if (!row?.id) return;
+  manualOutboundRecordsVisible.value = true;
+  manualOutboundRecordsLoading.value = true;
+  try {
+    const params = new URLSearchParams({
+      paged: "1",
+      page: String(manualOutboundRecordsPager.page),
+      pageSize: String(manualOutboundRecordsPager.pageSize),
+      productId: String(row.id),
+      sourceType: "manual_outbound"
+    });
+    const result = await apiClient.get(`/api/inventory?${params.toString()}`);
+    manualOutboundRecordsRows.value = Array.isArray(result?.rows) ? result.rows : [];
+    manualOutboundRecordsTotal.value = Number(result?.total || manualOutboundRecordsRows.value.length);
+  } catch (error) {
+    manualOutboundRecordsRows.value = [];
+    manualOutboundRecordsTotal.value = 0;
+    ElMessage.error(error.message || "加载手动出库记录失败");
+  } finally {
+    manualOutboundRecordsLoading.value = false;
+  }
+}
+
+function handleManualOutboundRecordsPageChange(page) {
+  manualOutboundRecordsPager.page = page;
+  loadManualOutboundRecords();
+}
+
+function handleManualOutboundRecordsPageSizeChange(size) {
+  manualOutboundRecordsPager.pageSize = size;
+  manualOutboundRecordsPager.page = 1;
+  loadManualOutboundRecords();
+}
+
 async function handleProcurementCreated() {
   procurementCreateVisible.value = false;
   procurementCreateProductId.value = null;
@@ -1400,6 +1584,17 @@ onMounted(async () => {
             </el-button>
           </template>
         </el-table-column>
+        <el-table-column label="手动出库" prop="manual_outbound_quantity" min-width="160" align="right" sortable="custom">
+          <template #default="{ row }">
+            <el-button class="metric-cell-link" link type="warning" @click.stop="openManualOutboundRecords(row)">
+              <div class="metric-cell-content cell-stack cell-align-end">
+                <strong>总损 {{ integer(row.manual_outbound_quantity) }} 件</strong>
+                <span class="muted-text">损耗金额 ¥{{ money(row.manual_outbound_amount) }}</span>
+                <span class="muted-text">点击查看记录</span>
+              </div>
+            </el-button>
+          </template>
+        </el-table-column>
         <el-table-column label="预估利润" prop="estimated_profit_total" min-width="170" align="right" sortable="custom">
           <template #default="{ row }">
             <el-button class="metric-cell-link" link type="success" @click.stop="openProfitDetailsByMode(row, 'estimated')">
@@ -1435,6 +1630,8 @@ onMounted(async () => {
             <div class="inventory-actions">
               <el-button class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
               <el-button class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
+              <el-button class="erp-btn-link" link type="warning" @click="openManualOutbound(row)">手动出库</el-button>
+              <el-button class="erp-btn-link" link @click="openManualOutboundRecords(row)">出库记录</el-button>
               <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="removeFromInventory(row)">删除</el-button>
             </div>
           </template>
@@ -1589,6 +1786,129 @@ onMounted(async () => {
           </template>
         </el-table-column>
       </el-table>
+    </el-dialog>
+
+    <el-dialog
+      v-model="manualOutboundVisible"
+      :title="manualOutboundDialogTitle"
+      width="520px"
+      align-center
+      class="erp-centered-dialog"
+    >
+      <el-form label-width="96px" class="manual-outbound-form">
+        <el-form-item label="库存产品">
+          <div class="manual-outbound-product">
+            <strong>{{ manualOutboundProduct?.name || "-" }}</strong>
+            <span>{{ manualOutboundProduct?.inventory_id || manualOutboundProduct?.code || "-" }}</span>
+          </div>
+        </el-form-item>
+        <el-form-item label="出库位置">
+          <el-radio-group v-model="manualOutboundForm.stock_location">
+            <el-radio-button label="LOCAL">本地</el-radio-button>
+            <el-radio-button label="FBP">FBP</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="出库数量">
+          <el-input-number v-model="manualOutboundForm.quantity" :min="1" :precision="0" :step="1" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="产品损失">
+          <el-input-number v-model="manualOutboundForm.loss_amount" :min="0" :precision="2" :step="1" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="出库原因">
+          <el-select v-model="manualOutboundForm.reason" filterable>
+            <el-option
+              v-for="reason in manualOutboundReasons"
+              :key="reason.value"
+              :label="reason.label"
+              :value="reason.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="manualOutboundForm.note" type="textarea" :rows="3" placeholder="可填写责任说明、单号、处理人等" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="manualOutboundVisible = false">取消</el-button>
+          <el-button type="primary" :loading="manualOutboundSubmitting" @click="submitManualOutbound">
+            {{ manualOutboundEditingId ? "保存修改" : "确认出库" }}
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="manualOutboundRecordsVisible"
+      :title="`${manualOutboundRecordsProduct?.name || '产品'} - 手动出库记录`"
+      width="1120px"
+      top="6vh"
+      align-center
+      class="erp-centered-dialog inventory-detail-dialog"
+    >
+      <div class="manual-outbound-record-head">
+        <div class="manual-outbound-product">
+          <strong>{{ manualOutboundRecordsProduct?.name || "-" }}</strong>
+          <span>{{ manualOutboundRecordsProduct?.inventory_id || manualOutboundRecordsProduct?.code || "-" }}</span>
+        </div>
+        <el-button type="warning" @click="openManualOutbound(manualOutboundRecordsProduct)">新增手动出库</el-button>
+      </div>
+      <el-table
+        v-loading="manualOutboundRecordsLoading"
+        :data="manualOutboundRecordsRows"
+        height="480"
+        stripe
+        border
+        class="erp-data-table"
+      >
+        <el-table-column label="时间" width="170">
+          <template #default="{ row }">{{ dateText(row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column label="位置" width="90" align="center">
+          <template #default="{ row }">
+            <el-tag :type="row.stock_location === 'FBP' ? 'success' : 'info'" effect="plain">
+              {{ movementStockLocationText(row.stock_location) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="总损数量" width="100" align="right">
+          <template #default="{ row }">{{ integer(Math.abs(Number(row.quantity_delta || 0))) }}</template>
+        </el-table-column>
+        <el-table-column label="损耗金额" width="120" align="right">
+          <template #default="{ row }">¥{{ money(row.amount) }}</template>
+        </el-table-column>
+        <el-table-column label="操作人" width="120">
+          <template #default="{ row }">{{ row.operator_name || row.operator || "-" }}</template>
+        </el-table-column>
+        <el-table-column label="原因 / 备注" min-width="320">
+          <template #default="{ row }">
+            <div class="manual-outbound-note">
+              <strong>{{ row.note || "手动出库" }}</strong>
+              <span>{{ row.source_ref || row.id }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="120" fixed="right" align="center">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openEditManualOutboundRecord(row)">编辑</el-button>
+            <el-button
+              link
+              type="danger"
+              :loading="manualOutboundDeletingId === row.id"
+              @click="deleteManualOutboundRecord(row)"
+            >
+              删除
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <PageFooterPagination
+        :total="manualOutboundRecordsTotal"
+        :page="manualOutboundRecordsPager.page"
+        :page-size="manualOutboundRecordsPager.pageSize"
+        @update:page="handleManualOutboundRecordsPageChange"
+        @update:pageSize="handleManualOutboundRecordsPageSizeChange"
+      />
     </el-dialog>
 
     <ProductCreateEditDialog
@@ -2210,6 +2530,58 @@ onMounted(async () => {
 
 .inventory-actions :deep(.el-button) {
   margin-left: 0;
+}
+
+.manual-outbound-form {
+  padding: 4px 8px 0;
+}
+
+.manual-outbound-product {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  line-height: 1.35;
+}
+
+.manual-outbound-product strong,
+.manual-outbound-product span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.manual-outbound-product span {
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+}
+
+.manual-outbound-record-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.manual-outbound-note {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  line-height: 1.35;
+}
+
+.manual-outbound-note strong,
+.manual-outbound-note span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.manual-outbound-note span {
+  color: var(--erp-text-secondary);
+  font-size: 12px;
 }
 
 .detail-filter-search {

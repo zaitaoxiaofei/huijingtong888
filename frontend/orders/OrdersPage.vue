@@ -1053,7 +1053,6 @@ async function handleRecalculate(orderId) {
 async function handlePrepareOrder(orderId) {
   await prepareSingleOrder(orderId);
   orderDetailCache.delete(Number(orderId));
-  await loadOrders();
 }
 
 async function handlePrintOrder(orderId) {
@@ -1403,7 +1402,7 @@ onMounted(async () => {
     await bootstrapFromRoute();
     return;
   }
-  await loadOrders();
+  await loadOrders({ includeCounts: true });
   if (vm.filters.logisticsMethod && vm.filters.logisticsMethod !== "all") {
     void loadLogisticsOptions().catch(() => {});
   }

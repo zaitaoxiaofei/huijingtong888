@@ -226,6 +226,17 @@ function runSummary(run) {
     if (Number(result.failed || 0) > 0) parts.push(`失败 ${Number(result.failed || 0)}`);
     return parts.join(" / ");
   }
+  if (run?.jobKey === "seller_analytics_daily_sync") {
+    if (!run?.result && Number(run?.resultSize || 0) > 0) return "店铺分析同步结果已写入日志明细";
+    const parts = [];
+    if (result.periodKey) parts.push(`周期 ${result.periodKey}`);
+    if (Number(result.selectedShops || 0) > 0) parts.push(`店铺 ${Number(result.selectedShops || 0)}`);
+    if (Number(result.okShops || 0) > 0) parts.push(`成功 ${Number(result.okShops || 0)}`);
+    if (Number(result.nonOkShops || 0) > 0) parts.push(`未完成 ${Number(result.nonOkShops || 0)}`);
+    if (Number(result.createdRuns || 0) > 0) parts.push(`批次 ${Number(result.createdRuns || 0)}`);
+    if (Number(result.skippedNoAuth || 0) > 0) parts.push(`授权 ${Number(result.skippedNoAuth || 0)}`);
+    return parts.join(" / ");
+  }
   if (!run?.result && Number(run?.resultSize || 0) > 0) return `结果较大，已省略列表详情 (${Math.round(Number(run.resultSize || 0) / 1024)} KB)`;
   const rows = Array.isArray(result.results) ? result.results : [];
   const errorCodes = rows.map((item) => String(item?.error_code || "")).filter(Boolean);
@@ -262,6 +273,12 @@ function runErrorSummary(run) {
     const rows = Array.isArray(result.results) ? result.results : [];
     const errors = rows.map((item) => item?.error).filter(Boolean);
     if (errors.length) return errors.slice(0, 2).join("；");
+  }
+  if (run?.jobKey === "seller_analytics_daily_sync") {
+    const rows = Array.isArray(result.results) ? result.results : [];
+    const errors = rows.map((item) => item?.error).filter(Boolean);
+    if (errors.length) return errors.slice(0, 2).join("；");
+    if (Number(result.skippedNoAuth || 0) > 0) return "部分店铺缺少或过期 Ozon 分析授权";
   }
   const rows = Array.isArray(result.results) ? result.results : [];
   const errorCodes = rows.map((item) => String(item?.error_code || "")).filter(Boolean);
@@ -348,6 +365,7 @@ function jobDescription(row) {
     analytics_refresh: "刷新利润分析快照，把订单、货件、售后变化重新汇总到利润看板和分析报表。",
     advertising_sync: "同步最近窗口期的广告数据，适合补齐近几天广告消耗、销售额和 ROI。",
     advertising_today_sync: "高频同步今天的广告数据，让首页和广告页尽量接近当日最新表现。",
+    seller_analytics_daily_sync: "每天后台同步已配置店铺的 Ozon 店铺分析近 7 天数据，并刷新商品诊断和行动项。",
     ozon_stock_sync: "同步 Ozon FBP 库存和可用量，用于库存预警、货值和库龄分析。",
     ozon_category_sync: "刷新 Ozon 类目属性与字典缓存，保证上架、编辑商品时的类目数据是新的。",
     ozon_action_cleanup: "清理 Ozon 营销动作里的自动添加商品，保持活动数据整洁。"

@@ -79,10 +79,38 @@ function normalizeDimensions(...sources) {
   };
 }
 
+function attributesToDynamicAttributes(attributes = []) {
+  const result = {};
+  for (const item of normalizeArray(attributes)) {
+    if (!item || typeof item !== "object") continue;
+    const attributeId = item.attribute_id || item.attributeId || item.id || "";
+    const key = String(attributeId || item.name || item.attribute_name || "").trim();
+    if (!key) continue;
+    const values = normalizeArray(item.values).map((option) => ({
+      id: option?.dictionary_value_id ?? option?.id ?? option?.value_id ?? "",
+      dictionary_value_id: option?.dictionary_value_id ?? option?.id ?? option?.value_id ?? "",
+      value: String(option?.value ?? option?.name ?? option?.text ?? option ?? "").trim()
+    })).filter((option) => option.value);
+    const value = String(item.value ?? item.attribute_value ?? values.map((option) => option.value).join(", ") ?? "").trim();
+    if (!value && !values.length) continue;
+    result[key] = {
+      attribute_id: attributeId,
+      name: String(item.name || item.attribute_name || item.title || "").trim(),
+      value,
+      values,
+      dictionary_id: item.dictionary_id || "",
+      type: item.type || item.value_type || "text",
+      source: item.source || "variant_attribute"
+    };
+  }
+  return result;
+}
+
 function normalizeVariant(row = {}, source = {}, dimensions = {}, tags = [], index = 0) {
   const rowDimensions = normalizeDimensions(row, dimensions);
   const images = normalizeImages(row.images || row.image_urls || row.imageUrls || source.images || []);
   const sku = String(row.sku || row.source_sku || row.offer_id || source.sku || "").trim();
+  const rowAttributes = normalizeArray(row.attributes || row.attribute_values || row.characteristics);
   return {
     sku,
     source_sku: sku,
@@ -100,8 +128,8 @@ function normalizeVariant(row = {}, source = {}, dimensions = {}, tags = [], ind
     color: String(row.color || "").trim(),
     spec: String(row.spec || row.searchable_text || row.searchableText || "").trim(),
     main_tags: normalizeStringList(row.hashtags || row.main_tags || tags).map((item) => item.startsWith("#") ? item : `#${item}`),
-    attributes: normalizeArray(row.attributes || row.attribute_values || row.characteristics),
-    dynamic_attributes: row.dynamic_attributes || row.dynamicAttributes || {},
+    attributes: rowAttributes,
+    dynamic_attributes: { ...attributesToDynamicAttributes(rowAttributes), ...(row.dynamic_attributes || row.dynamicAttributes || {}) },
     weight_g: rowDimensions.weight_g || dimensions.weight_g || 0,
     length_cm: rowDimensions.length_cm || dimensions.length_cm || 0,
     width_cm: rowDimensions.width_cm || dimensions.width_cm || 0,
@@ -117,6 +145,7 @@ function normalizeVariant(row = {}, source = {}, dimensions = {}, tags = [], ind
 function collectVariantRows(source = {}, editPayload = {}) {
   const payload = objectValue(source.payload || source.rawPayload || {});
   const normalized = objectValue(source.normalized || {});
+  const sellerVariantBySku = collectSellerVariantBySku(source, editPayload, payload, normalized);
   const rows = [
     ...normalizeArray(source.editorVariants || source.editor_variants || editPayload.editorVariants || editPayload.editor_variants || payload.editorVariants || normalized.editorVariants),
     ...normalizeArray(source.rows || editPayload.rows || payload.rows || normalized.rows),
@@ -128,7 +157,48 @@ function collectVariantRows(source = {}, editPayload = {}) {
   for (const row of rows) {
     const key = String(row?.sku || row?.source_sku || row?.offer_id || row?.variantId || row?.variant_id || row?.id || "").trim();
     if (!key) continue;
-    byKey.set(key, { ...(byKey.get(key) || {}), ...row, sku: row.sku || row.source_sku || key });
+    const next = mergeSellerVariantPatch({ ...row, sku: row.sku || row.source_sku || key }, sellerVariantBySku[key]);
+    byKey.set(key, { ...(byKey.get(key) || {}), ...next });
+  }
+  return [...byKey.values()];
+}
+
+function collectSellerVariantBySku(...sources) {
+  const result = {};
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    for (const [sku, patch] of Object.entries(objectValue(source.sellerVariantBySku || source.seller_variant_by_sku))) {
+      if (sku && patch && typeof patch === "object") result[String(sku).trim()] = patch;
+    }
+    for (const [sku, fallback] of Object.entries(objectValue(source.variantSellerFallbacks || source.variant_seller_fallbacks))) {
+      const fields = objectValue(fallback?.fields || fallback);
+      if (sku && Object.keys(fields).length) result[String(sku).trim()] = { ...(result[String(sku).trim()] || {}), ...fields };
+    }
+  }
+  return result;
+}
+
+function mergeSellerVariantPatch(row = {}, patch = {}) {
+  if (!patch || typeof patch !== "object") return row;
+  const attributes = mergeAttributesByKey(row.attributes || row.attribute_values || row.characteristics || [], patch.attributes || []);
+  return {
+    ...row,
+    ...(patch.variantId ? { variantId: patch.variantId } : {}),
+    ...(patch.variantName ? { variantName: patch.variantName } : {}),
+    ...(patch.origin_variant_id ? { origin_variant_id: patch.origin_variant_id } : {}),
+    ...(patch.bundle_id ? { bundle_id: patch.bundle_id } : {}),
+    ...(patch.barcode && !row.barcode ? { barcode: patch.barcode } : {}),
+    attributes: attributes.length ? attributes : row.attributes
+  };
+}
+
+function mergeAttributesByKey(...sources) {
+  const byKey = new Map();
+  for (const attr of sources.flatMap((source) => normalizeArray(source))) {
+    if (!attr || typeof attr !== "object") continue;
+    const key = String(attr.attribute_id || attr.attributeId || attr.id || attr.name || attr.attribute_name || "").trim();
+    if (!key) continue;
+    byKey.set(key, { ...(byKey.get(key) || {}), ...attr });
   }
   return [...byKey.values()];
 }

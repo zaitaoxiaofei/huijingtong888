@@ -219,6 +219,185 @@ export async function aiStrategyLayerRuleDetail(id) {
   return normalizeLayerRuleRow(row);
 }
 
+export async function aiStrategyCategoryNodes(query = {}) {
+  await ensureAiStrategyTables();
+  const clauses = [];
+  const params = [];
+  if (query.enabled !== undefined && query.enabled !== "") {
+    clauses.push("enabled = ?");
+    params.push(Number(query.enabled) ? 1 : 0);
+  }
+  const keyword = String(query.q || query.keyword || "").trim().toLowerCase();
+  if (keyword) {
+    clauses.push("(LOWER(title) LIKE ? OR LOWER(category_key) LIKE ? OR LOWER(aliases_json) LIKE ? OR LOWER(match_keywords_json) LIKE ?)");
+    params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const rows = await mysqlQuery(`
+    SELECT *
+    FROM ai_strategy_category_nodes
+    ${where}
+    ORDER BY sort_order ASC, id ASC
+  `, params);
+  return rows.map(normalizeCategoryNodeRow);
+}
+
+export async function aiStrategyCategoryNodeDetail(id) {
+  await ensureAiStrategyTables();
+  const row = await mysqlQuery("SELECT * FROM ai_strategy_category_nodes WHERE id = ? LIMIT 1", [Number(id)]).then((rows) => rows[0]);
+  if (!row) throw statusError("AI strategy category node does not exist", 404);
+  return normalizeCategoryNodeRow(row);
+}
+
+export async function createAiStrategyCategoryNode(body = {}) {
+  await ensureAiStrategyTables();
+  const payload = await normalizeCategoryNodePayload(body);
+  const result = await mysqlExecute(`
+    INSERT INTO ai_strategy_category_nodes (
+      parent_id, category_key, title, aliases_json, match_keywords_json,
+      sort_order, enabled, metadata_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    payload.parent_id,
+    payload.category_key,
+    payload.title,
+    payload.aliases_json,
+    payload.match_keywords_json,
+    payload.sort_order,
+    payload.enabled,
+    payload.metadata_json
+  ]);
+  return aiStrategyCategoryNodeDetail(result.insertId);
+}
+
+export async function updateAiStrategyCategoryNode(id, body = {}) {
+  await ensureAiStrategyTables();
+  const previous = await aiStrategyCategoryNodeDetail(id);
+  const payload = await normalizeCategoryNodePayload({ ...previous, ...body });
+  await mysqlExecute(`
+    UPDATE ai_strategy_category_nodes
+    SET parent_id = ?,
+        category_key = ?,
+        title = ?,
+        aliases_json = ?,
+        match_keywords_json = ?,
+        sort_order = ?,
+        enabled = ?,
+        metadata_json = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [
+    payload.parent_id,
+    payload.category_key,
+    payload.title,
+    payload.aliases_json,
+    payload.match_keywords_json,
+    payload.sort_order,
+    payload.enabled,
+    payload.metadata_json,
+    Number(id)
+  ]);
+  return aiStrategyCategoryNodeDetail(id);
+}
+
+export async function aiStrategyBundles(query = {}) {
+  await ensureAiStrategyTables();
+  const clauses = [];
+  const params = [];
+  if (query.categoryNodeId || query.category_node_id) {
+    clauses.push("b.category_node_id = ?");
+    params.push(Number(query.categoryNodeId || query.category_node_id));
+  }
+  if (query.enabled !== undefined && query.enabled !== "") {
+    clauses.push("b.enabled = ?");
+    params.push(Number(query.enabled) ? 1 : 0);
+  }
+  const keyword = String(query.q || query.keyword || "").trim().toLowerCase();
+  if (keyword) {
+    clauses.push("(LOWER(b.title) LIKE ? OR LOWER(b.bundle_key) LIKE ? OR LOWER(b.description) LIKE ? OR LOWER(b.match_keywords_json) LIKE ? OR LOWER(c.title) LIKE ? OR LOWER(c.category_key) LIKE ?)");
+    params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const rows = await mysqlQuery(`
+    SELECT b.*, c.category_key, c.title AS category_title
+    FROM ai_strategy_bundles b
+    LEFT JOIN ai_strategy_category_nodes c ON c.id = b.category_node_id
+    ${where}
+    ORDER BY b.priority DESC, b.id ASC
+  `, params);
+  return rows.map(normalizeBundleRow);
+}
+
+export async function aiStrategyBundleDetail(id) {
+  await ensureAiStrategyTables();
+  const row = await mysqlQuery(`
+    SELECT b.*, c.category_key, c.title AS category_title
+    FROM ai_strategy_bundles b
+    LEFT JOIN ai_strategy_category_nodes c ON c.id = b.category_node_id
+    WHERE b.id = ?
+    LIMIT 1
+  `, [Number(id)]).then((rows) => rows[0]);
+  if (!row) throw statusError("AI strategy bundle does not exist", 404);
+  return normalizeBundleRow(row);
+}
+
+export async function createAiStrategyBundle(body = {}) {
+  await ensureAiStrategyTables();
+  const payload = normalizeBundlePayload(body);
+  const result = await mysqlExecute(`
+    INSERT INTO ai_strategy_bundles (
+      bundle_key, title, description, category_node_id, match_keywords_json,
+      exclude_keywords_json, strategy_map_json, priority, enabled, metadata_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    payload.bundle_key,
+    payload.title,
+    payload.description,
+    payload.category_node_id,
+    payload.match_keywords_json,
+    payload.exclude_keywords_json,
+    payload.strategy_map_json,
+    payload.priority,
+    payload.enabled,
+    payload.metadata_json
+  ]);
+  return aiStrategyBundleDetail(result.insertId);
+}
+
+export async function updateAiStrategyBundle(id, body = {}) {
+  await ensureAiStrategyTables();
+  const previous = await aiStrategyBundleDetail(id);
+  const payload = normalizeBundlePayload({ ...previous, ...body });
+  await mysqlExecute(`
+    UPDATE ai_strategy_bundles
+    SET bundle_key = ?,
+        title = ?,
+        description = ?,
+        category_node_id = ?,
+        match_keywords_json = ?,
+        exclude_keywords_json = ?,
+        strategy_map_json = ?,
+        priority = ?,
+        enabled = ?,
+        metadata_json = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [
+    payload.bundle_key,
+    payload.title,
+    payload.description,
+    payload.category_node_id,
+    payload.match_keywords_json,
+    payload.exclude_keywords_json,
+    payload.strategy_map_json,
+    payload.priority,
+    payload.enabled,
+    payload.metadata_json,
+    Number(id)
+  ]);
+  return aiStrategyBundleDetail(id);
+}
+
 export async function createAiStrategyLayerRule(body = {}) {
   await ensureAiStrategyTables();
   const payload = normalizeLayerRulePayload(body);
@@ -274,22 +453,29 @@ export async function resolveAiStrategyPlan(body = {}) {
   await ensureAiStrategyTables();
   const businessMode = cleanText(body.businessMode || body.business_mode || "product_optimization", 64);
   const goalKey = cleanText(body.goalKey || body.goal_key || body.goal || "low_ctr", 64);
+  const selectedBundle = await resolveSelectedBundle(body);
+  const assetFilter = new Set(normalizeArray(body.assets || body.applicableAssets || body.applicable_assets));
   const selectedTitles = normalizeArray(body.selectedTitles || body.selected_titles || body.selectedStrategies || body.selected_strategies);
   const fallbackTitles = normalizeArray(body.fallbackTitles || body.fallback_titles || body.fallbackStrategies || body.fallback_strategies);
   const categoryText = cleanLongText(body.categoryText || body.category_text || "");
   const selected = selectedTitles.length ? selectedTitles : fallbackTitles;
   const strategies = (await aiStrategies({ enabled: 1 })).filter((item) => strategyMatches(item, businessMode, goalKey));
+  const allStrategies = (await aiStrategies({ enabled: 1 })).filter((item) => (item.business_modes || []).includes(businessMode));
   const byKey = new Map(strategies.map((item) => [item.strategy_key, item]));
+  const byKeyAll = new Map(allStrategies.map((item) => [item.strategy_key, item]));
   const byTitle = new Map();
   for (const item of strategies) {
     [item.title, ...(item.aliases || [])].forEach((title) => byTitle.set(normalize(title), item));
   }
   const layers = await resolveMatchingLayers(goalKey, categoryText);
+  const bundleStrategies = selectedBundle ? resolveBundleStrategyKeys(selectedBundle, assetFilter)
+    .map((key) => byKeyAll.get(key))
+    .filter(Boolean) : [];
   const selectedStrategies = selected
     .map((title) => byTitle.get(normalize(title)) || createTemporaryStrategy(title, businessMode, goalKey))
     .filter(Boolean);
   const inheritedStrategies = layers.flatMap((layer) => layer.strategy_keys.map((key) => byKey.get(key)).filter(Boolean));
-  const merged = dedupeStrategies([...selectedStrategies, ...inheritedStrategies])
+  const merged = dedupeStrategies([...bundleStrategies, ...selectedStrategies, ...inheritedStrategies])
     .sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0));
   const conflictKeys = new Set();
   const chosen = [];
@@ -303,12 +489,42 @@ export async function resolveAiStrategyPlan(body = {}) {
     businessMode,
     goalKey,
     layers,
+    bundle: selectedBundle ? compactBundle(selectedBundle, assetFilter) : null,
     strategies: chosen,
     strategyIds: chosen.map((item) => item.strategy_key),
     strategyTitles: chosen.map((item) => item.title),
     positiveModules: chosen.flatMap((item) => item.positive_modules || []),
     negativeModules: chosen.flatMap((item) => item.negative_modules || []),
     assets: [...new Set(chosen.flatMap((item) => item.applicable_assets || []))]
+  };
+}
+
+export async function matchAiStrategyBundles(body = {}) {
+  await ensureAiStrategyTables();
+  const text = normalize([
+    body.productName || body.product_name,
+    body.title,
+    body.categoryText || body.category_text,
+    body.ozonCategory || body.ozon_category,
+    body.material,
+    body.color,
+    body.sellingPoints || body.selling_points
+  ].filter(Boolean).join(" "));
+  const nodes = await aiStrategyCategoryNodes({ enabled: 1 });
+  const matchedNode = bestCategoryNodeMatch(nodes, text);
+  const bundles = await aiStrategyBundles({ enabled: 1 });
+  const matchedBundles = bundles
+    .map((bundle) => scoreBundleMatch(bundle, text, matchedNode))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || Number(b.priority || 0) - Number(a.priority || 0));
+  return {
+    inputText: text,
+    category: matchedNode ? {
+      ...matchedNode,
+      path: buildCategoryPath(nodes, matchedNode)
+    } : null,
+    bundles: matchedBundles,
+    defaultBundle: matchedBundles[0] || null
   };
 }
 
@@ -350,6 +566,42 @@ export async function ensureAiStrategyTables() {
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       INDEX idx_ai_strategy_layer_scope (scope, enabled, sort_order)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS ai_strategy_category_nodes (
+      id BIGINT PRIMARY KEY AUTO_INCREMENT,
+      parent_id BIGINT NULL,
+      category_key VARCHAR(128) NOT NULL UNIQUE,
+      title VARCHAR(191) NOT NULL,
+      aliases_json LONGTEXT NULL,
+      match_keywords_json LONGTEXT NULL,
+      sort_order INT NOT NULL DEFAULT 0,
+      enabled TINYINT NOT NULL DEFAULT 1,
+      metadata_json LONGTEXT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_ai_strategy_category_parent (parent_id, enabled, sort_order),
+      INDEX idx_ai_strategy_category_key (category_key)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS ai_strategy_bundles (
+      id BIGINT PRIMARY KEY AUTO_INCREMENT,
+      bundle_key VARCHAR(128) NOT NULL UNIQUE,
+      title VARCHAR(191) NOT NULL,
+      description TEXT NULL,
+      category_node_id BIGINT NULL,
+      match_keywords_json LONGTEXT NULL,
+      exclude_keywords_json LONGTEXT NULL,
+      strategy_map_json LONGTEXT NULL,
+      priority INT NOT NULL DEFAULT 0,
+      enabled TINYINT NOT NULL DEFAULT 1,
+      metadata_json LONGTEXT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_ai_strategy_bundle_category (category_node_id, enabled, priority),
+      INDEX idx_ai_strategy_bundle_key (bundle_key)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
   await seedAiStrategies();
@@ -404,6 +656,12 @@ async function seedAiStrategies() {
   }
 }
 
+async function categoryNodeIdByKey(key) {
+  if (!key) return null;
+  const row = await mysqlQuery("SELECT id FROM ai_strategy_category_nodes WHERE category_key = ? LIMIT 1", [key]).then((rows) => rows[0]);
+  return row ? Number(row.id) : null;
+}
+
 async function resolveMatchingLayers(goalKey, categoryText) {
   const text = normalize(categoryText);
   const rows = await aiStrategyLayerRules({ enabled: 1 });
@@ -453,6 +711,41 @@ function normalizeLayerRulePayload(body = {}) {
   };
 }
 
+async function normalizeCategoryNodePayload(body = {}) {
+  const title = cleanText(body.title || body.name, 191);
+  if (!title) throw statusError("AI strategy category title is required", 400);
+  const keySource = body.category_key || body.categoryKey || body.key || title;
+  const parentKey = cleanText(body.parentCategoryKey || body.parent_category_key || "", 128);
+  return {
+    parent_id: Number(body.parent_id ?? body.parentId ?? 0) || (parentKey ? await categoryNodeIdByKey(parentKey) : null),
+    category_key: cleanText(keySource, 128),
+    title,
+    aliases_json: stringifyArray(body.aliases),
+    match_keywords_json: stringifyArray(body.match_keywords || body.matchKeywords || body.keywords),
+    sort_order: clampInt(body.sort_order ?? body.sortOrder, -999999, 999999, 0),
+    enabled: Number(body.enabled ?? 1) ? 1 : 0,
+    metadata_json: normalizeJson(body.metadata_json || body.metadataJson || body.metadata || {})
+  };
+}
+
+function normalizeBundlePayload(body = {}) {
+  const title = cleanText(body.title || body.name, 191);
+  if (!title) throw statusError("AI strategy bundle title is required", 400);
+  const keySource = body.bundle_key || body.bundleKey || body.key || title;
+  return {
+    bundle_key: cleanText(keySource, 128),
+    title,
+    description: cleanLongText(body.description),
+    category_node_id: Number(body.category_node_id || body.categoryNodeId || 0) || null,
+    match_keywords_json: stringifyArray(body.match_keywords || body.matchKeywords || body.keywords),
+    exclude_keywords_json: stringifyArray(body.exclude_keywords || body.excludeKeywords),
+    strategy_map_json: normalizeJson(body.strategy_map || body.strategyMap || {}),
+    priority: clampInt(body.priority, -999999, 999999, 0),
+    enabled: Number(body.enabled ?? 1) ? 1 : 0,
+    metadata_json: normalizeJson(body.metadata_json || body.metadataJson || body.metadata || {})
+  };
+}
+
 function normalizeStrategyRow(row = {}) {
   return {
     ...row,
@@ -468,6 +761,33 @@ function normalizeStrategyRow(row = {}) {
     priority: Number(row.priority || 0),
     enabled: Number(row.enabled || 0),
     version: Number(row.version || 1),
+    metadata: parseJson(row.metadata_json, {})
+  };
+}
+
+function normalizeCategoryNodeRow(row = {}) {
+  return {
+    ...row,
+    id: Number(row.id),
+    parent_id: row.parent_id == null ? null : Number(row.parent_id),
+    aliases: parseArray(row.aliases_json),
+    match_keywords: parseArray(row.match_keywords_json),
+    sort_order: Number(row.sort_order || 0),
+    enabled: Number(row.enabled || 0),
+    metadata: parseJson(row.metadata_json, {})
+  };
+}
+
+function normalizeBundleRow(row = {}) {
+  return {
+    ...row,
+    id: Number(row.id),
+    category_node_id: row.category_node_id == null ? null : Number(row.category_node_id),
+    match_keywords: parseArray(row.match_keywords_json),
+    exclude_keywords: parseArray(row.exclude_keywords_json),
+    strategy_map: parseJson(row.strategy_map_json, {}),
+    priority: Number(row.priority || 0),
+    enabled: Number(row.enabled || 0),
     metadata: parseJson(row.metadata_json, {})
   };
 }
@@ -513,6 +833,100 @@ function seedLayer(scope, key, title, aliases, goalMap, sortOrder) {
     enabled: 1,
     metadata: { seed: true, libraryVersion: LIBRARY_VERSION }
   };
+}
+
+async function resolveSelectedBundle(body = {}) {
+  const bundleId = Number(body.bundleId || body.bundle_id || body.strategyBundleId || body.strategy_bundle_id || 0);
+  if (bundleId) return aiStrategyBundleDetail(bundleId);
+  const bundleKey = cleanText(body.bundleKey || body.bundle_key || body.strategyBundleKey || body.strategy_bundle_key || "", 128);
+  if (!bundleKey) return null;
+  const row = await mysqlQuery(`
+    SELECT b.*, c.category_key, c.title AS category_title
+    FROM ai_strategy_bundles b
+    LEFT JOIN ai_strategy_category_nodes c ON c.id = b.category_node_id
+    WHERE b.bundle_key = ?
+    LIMIT 1
+  `, [bundleKey]).then((rows) => rows[0]);
+  return row ? normalizeBundleRow(row) : null;
+}
+
+function resolveBundleStrategyKeys(bundle, assetFilter = new Set()) {
+  const strategyMap = bundle?.strategy_map || {};
+  const entries = Object.entries(strategyMap)
+    .filter(([asset]) => !assetFilter.size || assetFilter.has(asset));
+  return [...new Set(entries.flatMap(([, keys]) => normalizeArray(keys)))];
+}
+
+function compactBundle(bundle, assetFilter = new Set()) {
+  const strategyMap = Object.fromEntries(Object.entries(bundle.strategy_map || {})
+    .filter(([asset]) => !assetFilter.size || assetFilter.has(asset))
+    .map(([asset, keys]) => [asset, normalizeArray(keys)]));
+  return {
+    id: bundle.id,
+    key: bundle.bundle_key,
+    title: bundle.title,
+    description: bundle.description,
+    categoryNodeId: bundle.category_node_id,
+    categoryKey: bundle.category_key,
+    categoryTitle: bundle.category_title,
+    strategyMap
+  };
+}
+
+function bestCategoryNodeMatch(nodes = [], text = "") {
+  const scored = nodes
+    .map((node) => {
+      const keywords = [node.title, node.category_key, ...(node.aliases || []), ...(node.match_keywords || [])];
+      const hits = keywords.filter((keyword) => keywordMatches(text, keyword));
+      const depth = categoryDepth(nodes, node);
+      return {
+        node,
+        hits,
+        score: hits.length * 20 + depth * 5 + Number(node.sort_order || 0) / 1000
+      };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+  return scored[0]?.node || null;
+}
+
+function scoreBundleMatch(bundle, text, matchedNode) {
+  const excludes = bundle.exclude_keywords || [];
+  if (excludes.some((keyword) => keywordMatches(text, keyword))) {
+    return { ...bundle, score: 0, reasons: [] };
+  }
+  const hits = (bundle.match_keywords || []).filter((keyword) => keywordMatches(text, keyword));
+  const categoryScore = matchedNode && Number(bundle.category_node_id || 0) === matchedNode.id ? 40 : 0;
+  const keywordScore = hits.length ? 40 + hits.length * 15 : 0;
+  const score = categoryScore + keywordScore + Math.max(0, Number(bundle.priority || 0)) / 10;
+  return {
+    ...bundle,
+    score: Math.round(score),
+    reasons: [
+      ...(categoryScore ? [`category:${matchedNode.category_key}`] : []),
+      ...hits.map((keyword) => `keyword:${keyword}`)
+    ]
+  };
+}
+
+function buildCategoryPath(nodes = [], node) {
+  const byId = new Map(nodes.map((item) => [item.id, item]));
+  const path = [];
+  let cursor = node;
+  while (cursor) {
+    path.unshift({ id: cursor.id, key: cursor.category_key, title: cursor.title });
+    cursor = cursor.parent_id ? byId.get(cursor.parent_id) : null;
+  }
+  return path;
+}
+
+function categoryDepth(nodes = [], node) {
+  return buildCategoryPath(nodes, node).length;
+}
+
+function keywordMatches(text, keyword) {
+  const needle = normalize(keyword);
+  return Boolean(needle && text.includes(needle));
 }
 
 function strategyMatches(item, businessMode, goalKey) {

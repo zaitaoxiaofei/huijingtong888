@@ -1148,6 +1148,56 @@ body {
   gap: 12px;
 }
 
+.collector-toolbar,
+.collector-filter-row,
+.collector-toolbar-actions {
+  display: flex;
+  align-items: center;
+}
+
+.collector-toolbar {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.collector-filter-row {
+  flex: 1;
+  gap: 10px;
+  min-width: 0;
+}
+
+.collector-toolbar-actions {
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.collector-search {
+  width: min(360px, 38vw);
+}
+
+.collector-status-filter {
+  width: 150px;
+}
+
+@media (max-width: 760px) {
+  .collector-toolbar,
+  .collector-filter-row,
+  .collector-toolbar-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .collector-toolbar-actions {
+    margin-left: 0;
+  }
+
+  .collector-search,
+  .collector-status-filter {
+    width: 100%;
+  }
+}
+
 .el-empty {
   padding: 10px 0;
 }

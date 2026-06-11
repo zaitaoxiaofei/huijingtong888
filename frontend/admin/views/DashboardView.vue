@@ -9,8 +9,9 @@ import {
   Boxes,
   CheckCircle2,
   CircleDollarSign,
+  Copy,
   ClipboardList,
-  Download,
+  ExternalLink,
   Flame,
   PackageCheck,
   RefreshCw,
@@ -25,8 +26,10 @@ const router = useRouter();
 const loading = ref(false);
 const refreshing = ref(false);
 const hasDashboardLoaded = ref(false);
-const pluginStatus = ref(null);
+const operationTodos = ref([]);
+const selectedOperationShopId = ref("all");
 let dashboardSnapshotRefreshTimer = null;
+const COMMAND_PANEL_LIMIT = 5;
 
 function createAiWorkbenchId() {
   return `aiwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -65,26 +68,22 @@ const fbpOutOfStockCount = computed(() => fbpAlerts.value.filter((item) => item.
 const fbpWithin7Count = computed(() => fbpAlerts.value.filter((item) => item.alert_type === "within_7_days").length);
 const fbpWithin30Count = computed(() => fbpAlerts.value.filter((item) => item.alert_type === "within_30_days").length);
 const procurementRows = computed(() => Array.isArray(dashboard.value.alerts?.procurement) ? dashboard.value.alerts.procurement : []);
+const operationTodoRows = computed(() => Array.isArray(operationTodos.value) ? operationTodos.value : []);
+const operationShopOptions = computed(() => {
+  const map = new Map();
+  operationTodoRows.value.forEach((row) => {
+    const id = String(row.shop_id || row.shopId || "").trim();
+    if (!id) return;
+    map.set(id, row.shop_name || row.shopName || `店铺 ${id}`);
+  });
+  return Array.from(map, ([id, name]) => ({ id, name }));
+});
+const todoRows = computed(() => {
+  if (selectedOperationShopId.value === "all") return operationTodoRows.value;
+  return operationTodoRows.value.filter((row) => String(row.shop_id || row.shopId || "") === String(selectedOperationShopId.value));
+});
 const initialDashboardLoading = computed(() => loading.value && !hasDashboardLoaded.value);
 const dashboardUpdating = computed(() => refreshing.value && hasDashboardLoaded.value);
-const pluginDownloads = computed(() => {
-  const collector = pluginStatus.value?.collector || pluginStatus.value?.plugin || pluginStatus.value || {};
-  const analytics = pluginStatus.value?.analytics || pluginStatus.value?.analytics_plugin || {};
-  return [
-    {
-      key: "collector",
-      name: "商品采集插件",
-      version: collector.version ? `v${collector.version}` : "v1.4.1",
-      downloadUrl: collector.download_url || "/downloads/ozon-erp-collector-plugin.rar"
-    },
-    {
-      key: "analytics",
-      name: "店铺分析插件",
-      version: analytics.version ? `v${analytics.version}` : "v1.0.23",
-      downloadUrl: analytics.download_url || "/downloads/ozon-seller-analytics-plugin.rar"
-    }
-  ];
-});
 
 const urgentCount = computed(() => Number(summary.value.urgent_count || 0));
 const stockWarningCount = computed(() => Number(summary.value.warning_count || 0));
@@ -112,6 +111,10 @@ function metricMoney(value) {
 
 function metricNumber(value, suffix = "") {
   return hasValue(value) ? `${numberText(value)}${suffix}` : "待接入";
+}
+
+function compactNumber(value, suffix = "") {
+  return hasValue(value) ? `${numberText(value)}${suffix}` : "0";
 }
 
 function decimalText(value, digits = 2) {
@@ -190,9 +193,9 @@ function open(path, query = {}) {
     router.push({ path: "/inventory/fbp", query: fbpAlertQuery(null, query.alertType || query.alert_type || "all") });
     return;
   }
-  if (path === "/asset-variant-center/create") {
+  if (path === "/asset-variant-center/create" || path === "/asset-variant-center/wizard") {
     router.push({
-      path,
+      path: "/asset-variant-center/wizard",
       query: {
         ...query,
         workbenchId: createAiWorkbenchId()
@@ -201,6 +204,129 @@ function open(path, query = {}) {
     return;
   }
   router.push({ path, query });
+}
+
+function todoEvidence(row = {}) {
+  const raw = row.evidence_json || row.evidenceJson || row.evidence || "";
+  if (!raw) return {};
+  if (typeof raw === "object") return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+function todoTitle(row = {}) {
+  return row.product_name || row.productName || row.offer_id || row.offerId || row.sku || "未命名商品";
+}
+
+function todoProductCode(row = {}) {
+  return row.offer_id || row.offerId || row.sku || row.product_id || row.productId || "";
+}
+
+function todoSku(row = {}) {
+  return row.sku || row.offer_id || row.offerId || row.product_id || row.productId || "";
+}
+
+function todoOfferId(row = {}) {
+  return row.offer_id || row.offerId || "";
+}
+
+function todoImage(row = {}) {
+  return row.image_url || row.imageUrl || row.primary_image || row.primaryImage || "";
+}
+
+function todoReason(row = {}) {
+  const evidence = todoEvidence(row);
+  return row.recommended_action || row.recommendedAction || evidence.reason || evidence.evidence || row.problem_type || row.problemType || "查看商品诊断";
+}
+
+function todoScore(row = {}) {
+  return Number(row.score || 0);
+}
+
+function todoMatches(row = {}, segments = [], keywords = []) {
+  const segment = String(row.segment || "").toLowerCase();
+  const type = String(row.problem_type || row.problemType || "").toLowerCase();
+  const text = `${segment} ${type} ${row.recommended_action || row.recommendedAction || ""}`;
+  return segments.includes(segment) || keywords.some((keyword) => text.includes(keyword.toLowerCase()));
+}
+
+function uniqueTodos(rows = []) {
+  const seen = new Set();
+  return rows.filter((row) => {
+    const key = todoIdentity(row);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function todoIdentity(row = {}) {
+  return [row.sku, row.offer_id || row.offerId, row.product_id || row.productId, row.product_name || row.productName]
+    .filter(Boolean)
+    .join("|") || row.id || "";
+}
+
+function topTodos(filter, limit = 3) {
+  return uniqueTodos(todoRows.value.filter(filter))
+    .sort((a, b) => todoScore(b) - todoScore(a))
+    .slice(0, limit);
+}
+
+function claimTodos(rows = [], used = new Set(), limit = COMMAND_PANEL_LIMIT) {
+  const claimed = [];
+  for (const row of rows) {
+    const key = todoIdentity(row);
+    if (!key || used.has(key)) continue;
+    used.add(key);
+    claimed.push(row);
+    if (claimed.length >= limit) break;
+  }
+  return claimed;
+}
+
+function commandProductRows(rows = [], options = {}) {
+  const fallbackRoute = options.route || "/seller-analytics";
+  const moduleLabel = options.moduleLabel || "店铺分析";
+  const actionText = options.actionText || "去处理";
+  return rows.map((row) => ({
+    key: row.id || `${todoProductCode(row)}-${row.problem_type || row.problemType || row.recommended_action || row.recommendedAction}`,
+    title: todoTitle(row),
+    code: todoProductCode(row),
+    sku: todoSku(row),
+    offerId: todoOfferId(row),
+    image: todoImage(row),
+    reason: todoReason(row),
+    tag: row.problem_type || row.problemType || row.segment || "建议",
+    shopId: row.shop_id || row.shopId || "",
+    shopName: row.shop_name || row.shopName || "",
+    moduleLabel,
+    actionText,
+    route: row.route || fallbackRoute,
+    query: row.isFallback ? {} : {
+      keyword: todoProductCode(row) || todoTitle(row),
+      ...(row.shop_id || row.shopId ? { shopId: String(row.shop_id || row.shopId) } : {}),
+      periodKey: row.period_key || row.periodKey || "7d"
+    }
+  }));
+}
+
+async function copyCommandProduct(row = {}) {
+  const text = row.sku || row.offerId || row.code || row.title || "";
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success("已复制 SKU/货号");
+  } catch {
+    ElMessage.error("复制失败，请手动复制 SKU");
+  }
+}
+
+async function openCommandProduct(row = {}) {
+  await copyCommandProduct(row);
+  open(row.route, row.query);
 }
 
 function fbpAlertQuery(row = firstStockAlert.value, alertType = "all") {
@@ -238,23 +364,6 @@ function aftersalesQuery(bucket = "all", openDetail = false) {
   };
   if (openDetail && bucket !== "all") query.detailBucket = bucket;
   return query;
-}
-
-function downloadPlugin(plugin) {
-  if (!plugin?.downloadUrl) return;
-  window.location.href = plugin.downloadUrl;
-}
-
-async function loadPluginUpdateStatus() {
-  try {
-    const status = await apiClient.get("/api/system/update-status", {
-      routeScoped: false,
-      noCache: true
-    });
-    pluginStatus.value = status || null;
-  } catch (error) {
-    console.warn("load plugin update status failed", error);
-  }
 }
 
 function todayAftersalesQuery(bucket) {
@@ -655,7 +764,7 @@ const opportunityCards = computed(() => [
     primary: "去放量",
     secondary: "AI优化",
     primaryPath: "/advertising/daily",
-    secondaryPath: "/asset-variant-center/create"
+    secondaryPath: "/asset-variant-center/wizard"
   },
   {
     product: "高加购低成交商品",
@@ -748,6 +857,125 @@ const dashboardInsightCards = computed(() => [
   }
 ]);
 
+const mustHandleTodos = computed(() => topTodos((row) => todoMatches(row, [
+  "inventory_risk",
+  "profit_risk",
+  "ad_efficiency_risk",
+  "aftersales_risk"
+], ["库存", "补货", "利润", "广告", "售后", "退货", "取消"]), 3));
+
+const optimizeTodos = computed(() => topTodos((row) => todoMatches(row, [
+  "click_gap",
+  "detail_gap",
+  "order_gap",
+  "traffic_gap",
+  "diagnosis_followup"
+], ["主图", "详情", "标题", "转化", "点击", "加购", "曝光"]), 5));
+
+const adCandidateTodos = computed(() => topTodos((row) => todoMatches(row, [
+  "scale_candidate"
+], ["放量", "已有成交", "测试"]), 3));
+
+const noInvestTodos = computed(() => topTodos((row) => todoMatches(row, [
+  "profit_risk",
+  "ad_efficiency_risk",
+  "inventory_risk",
+  "aftersales_risk"
+], ["不建议", "利润", "库存", "售后", "DRR", "低效"]), 3));
+
+const reviewTodos = computed(() => uniqueTodos(todoRows.value.filter((row) => row.status && row.status !== "open"))
+  .sort((a, b) => String(b.updated_at || b.updatedAt || "").localeCompare(String(a.updated_at || a.updatedAt || "")))
+  .slice(0, 3));
+
+const commandPanels = computed(() => {
+  const used = new Set();
+  const mustRows = claimTodos(mustHandleTodos.value, used);
+  const potentialRows = claimTodos(adCandidateTodos.value, used);
+  const optimizeRows = claimTodos(optimizeTodos.value, used);
+  const adRows = claimTodos(adCandidateTodos.value, used);
+  const avoidRows = claimTodos(noInvestTodos.value, used);
+  const reviewRows = claimTodos(reviewTodos.value, used);
+
+  return [
+    {
+      key: "must",
+      title: "今日必处理",
+      subtitle: "先保交付和止损",
+      tone: "danger",
+      route: "/seller-analytics",
+      empty: "暂无高优先级风险",
+      moduleLabel: "店铺分析",
+      rows: commandProductRows(mustRows, { route: "/seller-analytics", moduleLabel: "店铺分析", actionText: "看风险" })
+    },
+    {
+      key: "potential",
+      title: "潜力商品",
+      subtitle: "少数值得盯的机会",
+      tone: "success",
+      route: "/advertising/daily",
+      empty: "暂无明确放量信号",
+      moduleLabel: "广告分析",
+      rows: commandProductRows(potentialRows, { route: "/advertising/daily", moduleLabel: "广告分析", actionText: "看放量" })
+    },
+    {
+      key: "optimize",
+      title: "待优化商品",
+      subtitle: "有信号但还没成交",
+      tone: "warning",
+      route: "/seller-analytics",
+      empty: "暂无待优化商品",
+      moduleLabel: "店铺分析",
+      rows: commandProductRows(optimizeRows, { route: "/seller-analytics", moduleLabel: "店铺分析", actionText: "看诊断" })
+    },
+    {
+      key: "ad",
+      title: "可投广告",
+      subtitle: "只从可放量里挑",
+      tone: "primary",
+      route: "/advertising/daily",
+      empty: "暂无可投广告商品",
+      moduleLabel: "广告分析",
+      rows: commandProductRows(adRows, { route: "/advertising/daily", moduleLabel: "广告分析", actionText: "去投放" })
+    },
+    {
+      key: "avoid",
+      title: "不建议投入",
+      subtitle: "先别浪费预算",
+      tone: "muted",
+      route: "/seller-analytics",
+      empty: "暂无禁止投入项",
+      moduleLabel: "店铺分析",
+      rows: commandProductRows(avoidRows, { route: "/seller-analytics", moduleLabel: "店铺分析", actionText: "看原因" })
+    },
+    {
+      key: "review",
+      title: "昨日行动回看",
+      subtitle: "看动作有没有结果",
+      tone: "review",
+      route: "/seller-analytics",
+      empty: "暂无已完成动作",
+      moduleLabel: "店铺分析",
+      rows: commandProductRows(reviewRows, { route: "/seller-analytics", moduleLabel: "店铺分析", actionText: "看回看" })
+    }
+  ];
+});
+
+const commandSummary = computed(() => ({
+  must: commandPanels.value.find((panel) => panel.key === "must")?.rows.length || 0,
+  optimize: commandPanels.value.find((panel) => panel.key === "optimize")?.rows.length || 0,
+  ad: commandPanels.value.find((panel) => panel.key === "ad")?.rows.length || 0,
+  avoid: commandPanels.value.find((panel) => panel.key === "avoid")?.rows.length || 0
+}));
+
+async function loadOperationTodos() {
+  try {
+    const rows = await apiClient.get("/api/db/seller-analytics/operation-todos?status=all&limit=80", { noCache: true });
+    operationTodos.value = Array.isArray(rows) ? rows : [];
+  } catch (error) {
+    console.warn("load dashboard operation todos failed", error);
+  }
+}
+
 async function loadDashboard(options = {}) {
   const forceRefresh = options === true || options?.refresh === true;
   const snapshotOnly = options?.snapshotOnly === true;
@@ -805,11 +1033,12 @@ function scheduleDashboardSnapshotReload() {
 
 function refreshDashboard() {
   loadDashboard({ refresh: true });
+  loadOperationTodos();
 }
 
 onMounted(() => {
   loadDashboard();
-  loadPluginUpdateStatus();
+  loadOperationTodos();
 });
 
 onBeforeUnmount(() => {
@@ -829,21 +1058,6 @@ onBeforeUnmount(() => {
             <RefreshCw :size="13" />
             更新中
           </span>
-          <div class="plugin-download-group" aria-label="插件下载">
-            <button
-              v-for="plugin in pluginDownloads"
-              :key="plugin.key"
-              class="plugin-download-card"
-              type="button"
-              @click="downloadPlugin(plugin)"
-            >
-              <Download :size="15" />
-              <span>
-                <strong>{{ plugin.name }}</strong>
-                <small>{{ plugin.version }}</small>
-              </span>
-            </button>
-          </div>
           <el-button class="ghost-button" size="small" :loading="loading || refreshing" @click="refreshDashboard">
             <RefreshCw :size="14" />
             刷新
@@ -1181,7 +1395,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="hero-insight-grid">
-          <section class="health-panel hero-health-panel">
+          <section class="health-panel hero-health-panel hero-health-panel--compact">
             <div class="section-heading">
               <span>Business Health</span>
               <h2>经营健康摘要</h2>
@@ -1202,7 +1416,7 @@ onBeforeUnmount(() => {
                   <strong>{{ card.title }}</strong>
                 </div>
                 <div class="health-card-list">
-                  <template v-for="row in card.items" :key="row.alertType || row.label || row[0]">
+                  <template v-for="row in (card.items || []).slice(0, 3)" :key="row.alertType || row.label || row[0]">
                     <button
                       v-if="row.alertType || row.route"
                       type="button"
@@ -1223,6 +1437,74 @@ onBeforeUnmount(() => {
                       </span>
                     </div>
                   </template>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section class="command-center-panel">
+            <div class="section-heading command-heading">
+              <div>
+                <span>运营动作中心</span>
+                <h2>今日运营动作</h2>
+              </div>
+              <div class="command-heading__tools">
+                <el-select v-model="selectedOperationShopId" class="command-shop-select" size="small" placeholder="店铺">
+                  <el-option label="全部店铺" value="all" />
+                  <el-option
+                    v-for="shop in operationShopOptions"
+                    :key="shop.id"
+                    :label="shop.name"
+                    :value="shop.id"
+                  />
+                </el-select>
+                <div class="command-summary">
+                  <b>{{ compactNumber(commandSummary.must, "项") }}</b><span>必处理</span>
+                  <b>{{ compactNumber(commandSummary.optimize, "项") }}</b><span>待优化</span>
+                  <b>{{ compactNumber(commandSummary.ad, "项") }}</b><span>可投广告</span>
+                </div>
+              </div>
+            </div>
+            <div class="command-grid">
+              <article
+                v-for="panel in commandPanels"
+                :key="panel.key"
+                :class="`command-card command-card--${panel.tone}`"
+              >
+                <button type="button" class="command-card__head" @click="open(panel.route)">
+                  <span>{{ panel.subtitle }}</span>
+                  <strong>{{ panel.title }}</strong>
+                </button>
+                <div class="command-card__list">
+                  <article
+                    v-for="row in panel.rows.slice(0, COMMAND_PANEL_LIMIT)"
+                    :key="row.key"
+                    class="command-row"
+                  >
+                    <button type="button" class="command-product" @click="openCommandProduct(row)">
+                      <img v-if="row.image" :src="row.image" :alt="row.title" loading="lazy" />
+                      <span v-else class="command-product__placeholder">{{ (row.sku || row.title || "?").slice(0, 1) }}</span>
+                      <span class="command-product__info">
+                        <strong>{{ row.title }}</strong>
+                        <small>SKU：{{ row.sku || "待补充" }}</small>
+                        <small v-if="row.offerId && row.offerId !== row.sku">货号：{{ row.offerId }}</small>
+                      </span>
+                    </button>
+                    <div class="command-reason">
+                      <span>{{ row.reason }}</span>
+                    </div>
+                    <div class="command-row__actions">
+                      <span class="command-module">{{ row.moduleLabel }}</span>
+                      <button type="button" class="command-icon-button" title="复制 SKU/货号" @click.stop="copyCommandProduct(row)">
+                        <Copy :size="13" />
+                      </button>
+                      <button type="button" class="command-action-button" @click="openCommandProduct(row)">
+                        <ExternalLink :size="13" />
+                        {{ row.actionText }}
+                      </button>
+                    </div>
+                  </article>
+                  <div v-if="!panel.rows.length" class="command-empty">{{ panel.empty }}</div>
                 </div>
               </article>
             </div>
@@ -1325,20 +1607,20 @@ button {
   z-index: 1;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   gap: 10px;
-  align-items: stretch;
-  min-height: 0;
+  align-items: start;
+  min-height: auto;
 }
 
 .operating-card {
   position: relative;
-  overflow: hidden;
+  overflow: visible;
   display: flex;
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   flex-direction: column;
-  min-height: 0;
-  padding: 16px;
+  min-height: auto;
+  padding: 14px;
   border: 1px solid var(--dashboard-border) !important;
   border-radius: 12px;
   color: var(--dashboard-text);
@@ -1438,71 +1720,6 @@ button {
   transform: translateY(-1px);
 }
 
-.plugin-download-group {
-  display: flex;
-  flex: 0 1 520px;
-  align-items: stretch;
-  justify-content: flex-end;
-  gap: 8px;
-  min-width: 0;
-}
-
-.plugin-download-card {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 210px;
-  max-width: 260px;
-  min-height: 42px;
-  padding: 7px 10px;
-  border: 1px solid var(--dashboard-border);
-  border-radius: 8px;
-  color: #1d4ed8;
-  background: #ffffff;
-  text-align: left;
-  cursor: pointer;
-  box-shadow: var(--dashboard-card-shadow);
-  transition: all 0.18s ease;
-}
-
-.plugin-download-card:hover {
-  border-color: var(--dashboard-border-strong);
-  color: #1e40af;
-  background: #eff6ff;
-  box-shadow: var(--dashboard-hover-shadow);
-  transform: translateY(-2px);
-}
-
-.plugin-download-card svg {
-  flex: 0 0 auto;
-}
-
-.plugin-download-card span {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.plugin-download-card strong,
-.plugin-download-card small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.plugin-download-card strong {
-  color: inherit;
-  font-size: 13px;
-  font-weight: 800;
-}
-
-.plugin-download-card small {
-  color: #475569;
-  font-size: 11px;
-  font-weight: 700;
-}
-
 .hero-core-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(150px, 1fr));
@@ -1532,14 +1749,15 @@ button {
 .primary-metric {
   position: relative;
   overflow: hidden;
-  min-height: 116px;
-  padding: 16px 18px;
+  min-height: 104px;
+  padding: 13px 15px;
   cursor: pointer;
   transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background 0.18s ease;
 }
 
 .today-core-grid .primary-metric {
   min-height: 116px;
+  height: 116px;
 }
 
 .primary-metric::before {
@@ -1554,8 +1772,8 @@ button {
 }
 
 .compact-month-grid .primary-metric {
-  min-height: 90px;
-  padding: 11px 12px;
+  min-height: 82px;
+  padding: 9px 11px;
   box-shadow: 0 4px 14px rgba(15, 23, 42, 0.045) !important;
 }
 
@@ -1639,21 +1857,21 @@ button {
 
 .primary-metric strong {
   display: block;
-  margin-top: 12px;
+  margin-top: 10px;
   color: var(--dashboard-text);
-  font-size: 32px;
+  font-size: 29px;
   font-weight: 700;
   line-height: 1;
 }
 
 .today-core-grid .primary-metric strong {
-  font-size: 32px;
+  font-size: 29px;
 }
 
 .compact-month-grid .primary-metric strong {
-  margin-top: 8px;
+  margin-top: 7px;
   color: #334155 !important;
-  font-size: 23px;
+  font-size: 21px;
   font-weight: 700;
 }
 
@@ -1753,6 +1971,45 @@ button {
   margin-top: 8px;
   color: #64748b;
   font-size: 12px;
+}
+
+.today-core-grid .roi-card .metric-subline {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 11px;
+}
+
+.today-core-grid .roi-card .metric-subline b {
+  font-size: 12px;
+}
+
+.today-core-grid .roi-card .metric-subline-value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.today-core-grid .roi-card .metric-subline-value small {
+  max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.today-core-grid .roi-card .metric-footer {
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+  overflow: visible;
+}
+
+.today-core-grid .roi-card .metric-footer > * {
+  max-width: none;
+  overflow: visible;
+  white-space: nowrap;
 }
 
 .metric-subline span {
@@ -2107,7 +2364,7 @@ button {
   align-items: center;
   gap: 8px;
   height: 32px;
-  margin-top: 10px;
+  margin-top: 8px;
   padding: 0 12px;
   border: 1px solid #dbeafe;
   border-radius: 8px;
@@ -2122,17 +2379,17 @@ button {
 .hero-insight-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   gap: 10px;
   margin-top: 10px;
-  min-height: 0;
+  min-height: auto;
 }
 
 .hero-health-panel {
   display: flex;
   flex-direction: column;
-  min-height: 0;
-  padding: 12px;
+  min-height: auto;
+  padding: 10px;
   border: 1px solid var(--dashboard-border);
   border-radius: 12px;
   background: var(--dashboard-surface);
@@ -2140,7 +2397,7 @@ button {
 }
 
 .hero-health-panel .section-heading {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .hero-health-panel .section-heading h2 {
@@ -2155,9 +2412,9 @@ button {
 
 .hero-insight-grid .health-grid {
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  flex: 1 1 auto;
-  gap: 8px;
-  min-height: 0;
+  flex: 0 0 auto;
+  gap: 7px;
+  min-height: auto;
 }
 
 .hero-insight-grid .health-card {
@@ -2169,8 +2426,8 @@ button {
 }
 
 .hero-insight-grid .health-card {
-  min-height: 104px;
-  padding: 11px;
+  min-height: 72px;
+  padding: 8px;
 }
 
 .hero-insight-grid .health-card:hover {
@@ -2231,14 +2488,14 @@ button {
 .hero-insight-grid .health-card > div {
   flex-direction: column;
   align-items: flex-start;
-  gap: 7px;
-  margin-bottom: 12px;
+  gap: 5px;
+  margin-bottom: 7px;
 }
 
 .hero-insight-grid .health-card > div svg {
-  width: 28px;
-  height: 28px;
-  padding: 5px;
+  width: 22px;
+  height: 22px;
+  padding: 4px;
   border-radius: 8px;
   background: #eff6ff;
   color: #2563eb;
@@ -2254,6 +2511,283 @@ button {
 
 .hero-insight-grid .health-card dd {
   color: #4b5563;
+}
+
+.command-center-panel {
+  padding: 12px;
+  border: 1px solid var(--dashboard-border);
+  border-radius: 12px;
+  background: var(--dashboard-surface);
+  box-shadow: var(--dashboard-card-shadow);
+}
+
+.command-heading {
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.command-heading__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.command-shop-select {
+  width: 150px;
+}
+
+.command-heading h2 {
+  color: #0f172a;
+  font-size: 15px;
+}
+
+.command-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px 7px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.command-summary b {
+  color: #0f172a;
+}
+
+.command-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  align-items: start;
+  gap: 8px;
+}
+
+.command-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #e5eaf2;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.command-card__head {
+  display: grid;
+  width: 100%;
+  min-height: 54px;
+  gap: 2px;
+  padding: 10px;
+  border: 0;
+  background: #f8fafc;
+  text-align: left;
+  cursor: pointer;
+}
+
+.command-card__head span {
+  overflow: hidden;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-card__head strong {
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.command-card__list {
+  display: grid;
+  max-height: 430px;
+  overflow: auto;
+  padding: 6px;
+}
+
+.command-row {
+  display: grid;
+  grid-template-areas:
+    "product actions"
+    "reason actions";
+  grid-template-columns: minmax(0, 1fr) 76px;
+  align-items: center;
+  min-height: 92px;
+  gap: 7px 9px;
+  padding: 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  text-align: left;
+}
+
+.command-row + .command-row {
+  border-top: 1px solid #eef2f7;
+  border-radius: 0;
+}
+
+.command-row:hover {
+  background: #f8fafc;
+}
+
+.command-product {
+  grid-area: product;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.command-product img,
+.command-product__placeholder {
+  width: 36px;
+  aspect-ratio: 3 / 4;
+  height: auto;
+  border-radius: 7px;
+  object-fit: cover;
+}
+
+.command-product__placeholder {
+  display: grid;
+  place-items: center;
+  color: #64748b;
+  background: #eef2f7;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.command-product__info {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.command-product__info strong {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 12px;
+  line-height: 1.28;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.command-product__info small {
+  overflow: hidden;
+  color: #64748b;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-reason {
+  grid-area: reason;
+  min-width: 0;
+  padding: 5px 7px;
+  border-radius: 6px;
+  color: #475569;
+  background: #f8fafc;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.command-reason span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.command-row__actions {
+  grid-area: actions;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.command-module {
+  width: 100%;
+  overflow: hidden;
+  text-align: center;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-icon-button,
+.command-action-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #dbe4f0;
+  border-radius: 7px;
+  color: #2563eb;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.command-icon-button {
+  width: 32px;
+  height: 28px;
+}
+
+.command-action-button {
+  gap: 4px;
+  width: 72px;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.command-icon-button:hover,
+.command-action-button:hover {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+
+.command-empty {
+  padding: 12px 8px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.command-card--danger .command-card__head {
+  background: #fff1f2;
+}
+
+.command-card--success .command-card__head {
+  background: #f0fdf4;
+}
+
+.command-card--warning .command-card__head {
+  background: #fffbeb;
+}
+
+.command-card--primary .command-card__head {
+  background: #eff6ff;
+}
+
+.command-card--muted .command-card__head {
+  background: #f1f5f9;
+}
+
+.command-card--review .command-card__head {
+  background: #f5f3ff;
 }
 
 .rail-panel {
@@ -2636,17 +3170,14 @@ button {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .plugin-download-group {
-    flex-basis: 100%;
-    justify-content: flex-start;
-  }
 }
 
 @media (max-width: 980px) {
   .hero-core-grid,
   .secondary-metric-grid,
   .ai-advice-strip,
-  .health-grid {
+  .health-grid,
+  .command-grid {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -2674,21 +3205,13 @@ button {
   .secondary-metric-grid,
   .ai-advice-strip,
   .ops-grid,
-  .health-grid {
+  .health-grid,
+  .command-grid {
     grid-template-columns: 1fr;
   }
 
   .primary-metric strong {
     font-size: 34px;
-  }
-
-  .plugin-download-group {
-    flex-direction: column;
-  }
-
-  .plugin-download-card {
-    width: 100%;
-    max-width: none;
   }
 
   .action-item,

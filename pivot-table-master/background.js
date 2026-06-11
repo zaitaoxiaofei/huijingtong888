@@ -335,6 +335,12 @@ async function getNextCollectRequests() {
     logPanel(`同步插件状态失败：${error?.message || error}`, 'error');
   });
   const params = new URLSearchParams({ limit: String(BATCH_SIZE) });
+  const sellerTab = panelState.sellerTab || await findSellerAnalyticsTab() || await findAnySellerTab();
+  const companyId = currentSellerCompanyId(sellerTab?.id) || panelState.currentCompanyId || '';
+  if (companyId) {
+    params.set('store_id', companyId);
+    params.set('company_id', companyId);
+  }
   const response = await fetch(`${config.erpBaseUrl}/api/local-plugin/seller-analytics/collect-runs/next?${params.toString()}`, {
     method: 'GET',
     headers: localPluginHeaders(config)

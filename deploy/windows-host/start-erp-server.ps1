@@ -1,6 +1,8 @@
 param(
   [string]$DeployDir = "",
-  [int]$Port = 8787
+  [int]$Port = 8787,
+  [string]$BindHost = "127.0.0.1",
+  [string]$AppBaseUrl = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,6 +34,24 @@ if (-not (Test-Path (Join-Path $deployDir ".env"))) {
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
+if ([string]::IsNullOrWhiteSpace($BindHost)) {
+  $BindHost = "127.0.0.1"
+}
+
+if ([string]::IsNullOrWhiteSpace($AppBaseUrl)) {
+  if ($BindHost -eq "0.0.0.0") {
+    $lanAddress = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+      Where-Object { -not $_.IPAddress.StartsWith("127.") -and $_.IPAddress -notlike "169.254.*" } |
+      Sort-Object @{ Expression = { if ($_.IPAddress.StartsWith("192.168.")) { 0 } elseif ($_.IPAddress.StartsWith("10.")) { 1 } else { 2 } } }, InterfaceMetric |
+      Select-Object -First 1 -ExpandProperty IPAddress
+    if ($lanAddress) {
+      $AppBaseUrl = "http://${lanAddress}:$Port"
+    }
+  } else {
+    $AppBaseUrl = "http://${BindHost}:$Port"
+  }
+}
+
 $existing = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
 if ($existing) {
   Write-Host "Stopping existing ERP listener on ${Port}: $($existing -join ', ')"
@@ -41,10 +61,16 @@ if ($existing) {
   Start-Sleep -Seconds 2
 }
 
-Write-Host "Starting ERP server from $deployDir on port $Port"
+$startCommand = "set PORT=$Port&& set HOST=$BindHost"
+if (-not [string]::IsNullOrWhiteSpace($AppBaseUrl)) {
+  $startCommand = "$startCommand&& set APP_BASE_URL=$AppBaseUrl"
+}
+$startCommand = "$startCommand&& node src/server.js 1>> `"$outLog`" 2>> `"$errLog`""
+
+Write-Host "Starting ERP server from $deployDir on ${BindHost}:$Port"
 Start-Process `
   -FilePath "cmd.exe" `
-  -ArgumentList "/d", "/s", "/c", "set PORT=$Port&& node src/server.js 1>> `"$outLog`" 2>> `"$errLog`"" `
+  -ArgumentList "/d", "/s", "/c", $startCommand `
   -WorkingDirectory $deployDir `
   -WindowStyle Hidden
 
@@ -54,7 +80,10 @@ if (-not $started) {
   throw "ERP server did not start on port $Port. Check $outLog and $errLog"
 }
 
-Write-Host "ERP server is listening on 127.0.0.1:$Port"
+Write-Host "ERP server is listening on ${BindHost}:$Port"
+if (-not [string]::IsNullOrWhiteSpace($AppBaseUrl)) {
+  Write-Host "ERP base URL: $AppBaseUrl"
+}
 Write-Host "Logs:"
 Write-Host "  $outLog"
 Write-Host "  $errLog"

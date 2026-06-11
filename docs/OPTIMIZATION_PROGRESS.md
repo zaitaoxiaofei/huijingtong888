@@ -1,6 +1,6 @@
 # Optimization Progress
 
-Last updated: 2026-05-25
+Last updated: 2026-06-08
 
 This tracker follows the 80-point principle: prefer small, verified changes that reduce daily maintenance cost or improve real hot paths.
 
@@ -53,6 +53,9 @@ This tracker follows the 80-point principle: prefer small, verified changes that
 - Moved order page formatting helpers into `frontend/orders/utils/order-format.js`.
 - Made order logistics filter options use only enabled system logistics rules once rules are configured; disabled rules no longer leak into order filters, and logistics rule changes now clear order logistics option caches.
 - Extended logistics rule value parsing so configured Chinese/English CEL and postal rules resolve to the same stable values used by listing and order filtering.
+- Changed local development defaults from port 8787 to 8788 while keeping deployment/release paths on 8787.
+- Fixed idempotent MySQL schema ensure so duplicate index errors do not block profiling or runtime checks.
+- Optimized the default products paged list by first selecting page IDs, then loading only lightweight list fields and page-scoped aggregates; local profiling reduced the products dependency from about 40.3s to about 0.66s.
 
 ## Notes
 

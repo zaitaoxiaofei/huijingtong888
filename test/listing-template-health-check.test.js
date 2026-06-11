@@ -123,6 +123,24 @@ test("listing automation keeps heavy overlays lazy without changing the main edi
   assert.doesNotMatch(listingAutomationViewSource, /safe-editor-shell/);
 });
 
+test("listing automation keeps selected SKU images draggable for sorting", () => {
+  assert.match(listingAutomationViewSource, /draggingImageIndex:\s*-1/);
+  assert.match(listingAutomationViewSource, /dragOverImageIndex:\s*-1/);
+  assert.match(listingAutomationViewSource, /function reorderVariantImage\(fromIndex, toIndex\)/);
+  assert.match(listingAutomationViewSource, /draggable="true"/);
+  assert.match(listingAutomationViewSource, /@dragstart="startVariantImageDrag\(imageIndex\)"/);
+  assert.match(listingAutomationViewSource, /@dragover\.prevent="variantImageEditor\.dragOverImageIndex = imageIndex"/);
+  assert.match(listingAutomationViewSource, /@drop="reorderVariantImage\(variantImageEditor\.draggingImageIndex, imageIndex\)"/);
+  assert.match(listingAutomationViewSource, /@dragend="finishVariantImageDrag"/);
+  assert.match(listingAutomationViewSource, /selected-card\.drag-over/);
+});
+
+test("listing automation lets operators preview selected SKU images", () => {
+  assert.match(listingAutomationViewSource, /function variantSelectedPreviewList\(\)/);
+  assert.match(listingAutomationViewSource, /<el-image[\s\S]*class="variant-selected-image"[\s\S]*:preview-src-list="variantSelectedPreviewList\(\)"[\s\S]*preview-teleported/);
+  assert.doesNotMatch(listingAutomationViewSource, /class="variant-selected-image" @click="toggleVariantImageSelection\(image\)"/);
+});
+
 test("ozon category selector does not fetch the category tree on mount", () => {
   assert.match(ozonCategorySelectSource, /function openSearchPanel\(\)/);
   assert.match(ozonCategorySelectSource, /loadCategories\("", \{ limit: BROWSE_CATEGORY_LIMIT \}\);/);

@@ -20,3 +20,7 @@ export function updateMaterialAsset(id, payload) {
 export function archiveMaterialAsset(id) {
   return apiClient.post(`/api/material-assets/${encodeURIComponent(id)}/archive`, {});
 }
+
+export function deleteMaterialAsset(id) {
+  return apiClient.delete(`/api/material-assets/${encodeURIComponent(id)}`);
+}

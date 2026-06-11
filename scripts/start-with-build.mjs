@@ -5,7 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { openStartupPage } from "./open-startup-page.mjs";
 
 const rootDir = process.cwd();
-const port = Number(process.env.PORT || 8787);
+const port = Number(process.env.PORT || 8788);
 const appBaseUrl = process.env.APP_BASE_URL || `http://localhost:${port}`;
 
 function run(command, args, label) {

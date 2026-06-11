@@ -19,6 +19,10 @@ const listRequestGate = createLatestRequestGate();
 const warehouseCacheByShop = new Map();
 let dictionaryLoaded = false;
 
+function createAiWorkbenchId() {
+  return `aiwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 const loading = ref(false);
 const syncLoading = ref(false);
 const openingEditId = ref(0);
@@ -405,6 +409,21 @@ async function createProductFromOnline(row) {
   }
 }
 
+function openOnlineProductAiWorkbench(row, mode = "optimization") {
+  if (!row?.id) return;
+  router.push({
+    name: mode === "variant" ? "asset-variant-center-wizard" : "ai-optimization-workbench-v2",
+    query: {
+      workbenchId: createAiWorkbenchId(),
+      tabTitle: `${mode === "variant" ? "AI裂变" : "AI优化"} · ${row.offer_id || row.name || row.id}`,
+      onlineProductId: String(row.id),
+      source: "online_product",
+      autoImport: "1",
+      importAt: String(Date.now())
+    }
+  });
+}
+
 async function archiveOnlineProduct(row) {
   try {
     await ElMessageBox.confirm(`确认归档在线商品「${row.name || row.ozon_sku}」吗？`, "归档确认", {
@@ -615,10 +634,12 @@ onBeforeUnmount(() => {
           <el-table-column label="最后同步时间" min-width="160">
             <template #default="{ row }">{{ dateText(row.synced_at || row.updated_at) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="340" fixed="right">
+          <el-table-column label="操作" width="470" fixed="right">
             <template #default="{ row }">
               <div class="erp-inline-actions">
                 <el-button class="erp-btn-link" link type="primary" :loading="openingEditId === Number(row.id)" @click="openOnlineProductEditor(row)">编辑上架</el-button>
+                <el-button class="erp-btn-link" link type="primary" @click="openOnlineProductAiWorkbench(row, 'optimization')">AI优化</el-button>
+                <el-button class="erp-btn-link" link type="primary" @click="openOnlineProductAiWorkbench(row, 'variant')">AI裂变</el-button>
                 <el-button class="erp-btn-link" link type="primary" @click="openBindDialog(row)">去绑定</el-button>
                 <el-button class="erp-btn-link" link @click="createProductFromOnline(row)">创建库存</el-button>
                 <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="archiveOnlineProduct(row)">归档商品</el-button>

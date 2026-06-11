@@ -12,6 +12,8 @@ const SIZE_BY_RATIO = {
   // gpt-image-1 accepts closest supported portrait size through the Images API.
   "4:5": "1024x1536"
 };
+const AI_IMAGE_PROVIDER_TIMEOUT_MS = Math.max(15000, Number(process.env.AI_IMAGE_PROVIDER_TIMEOUT_MS || 120000));
+const AI_IMAGE_DOWNLOAD_TIMEOUT_MS = Math.max(10000, Number(process.env.AI_IMAGE_DOWNLOAD_TIMEOUT_MS || 30000));
 
 export async function generateOpenAiImages({ taskId, finalPrompt, ratio = "3:4", imageCount = 1 }) {
   const runtimeConfig = await aiImageRuntimeConfig();
@@ -88,7 +90,8 @@ async function requestImageFromEndpoints({ runtimeConfig, endpoints, body, fallb
         Authorization: `Bearer ${runtimeConfig.apiKey}`,
         ...(isForm ? {} : { "Content-Type": "application/json" })
       },
-      body: isForm ? body : JSON.stringify(body)
+      body: isForm ? body : JSON.stringify(body),
+      signal: AbortSignal.timeout(AI_IMAGE_PROVIDER_TIMEOUT_MS)
     });
 
     const data = await response.json().catch(() => ({}));
@@ -105,7 +108,7 @@ async function requestImageFromEndpoints({ runtimeConfig, endpoints, body, fallb
     if (b64) return Buffer.from(String(b64).replace(/^data:image\/\w+;base64,/, ""), "base64");
     const imageUrl = first?.url || first?.image_url || first?.imageUrl || data?.url || data?.image_url;
     if (imageUrl) {
-      const imageResponse = await fetch(imageUrl);
+      const imageResponse = await fetch(imageUrl, { signal: AbortSignal.timeout(AI_IMAGE_DOWNLOAD_TIMEOUT_MS) });
       if (!imageResponse.ok) {
         const error = new Error(`Failed to download generated image: ${imageResponse.status}`);
         error.status = 502;

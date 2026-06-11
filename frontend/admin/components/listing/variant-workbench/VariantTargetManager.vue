@@ -1,6 +1,6 @@
 <script setup>
 import { computed, reactive, ref } from "vue";
-import { Delete, Plus, Rank } from "@element-plus/icons-vue";
+import { Plus, Rank } from "@element-plus/icons-vue";
 import ProductImagePreview from "../../ProductImagePreview.vue";
 
 const props = defineProps({
@@ -39,7 +39,10 @@ function addManual() {
 }
 
 function applyPaste() {
-  const lines = pasteText.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+  const lines = pasteText.value
+    .split(/\r?\n|[,，;]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
   emit("add-targets", lines);
   pasteText.value = "";
   pasteDialog.value = false;
@@ -52,14 +55,14 @@ function toggleTemplate(key) {
 }
 
 function applyTemplates() {
-  const rows = [];
+  const nextRows = [];
   props.templates.forEach((group) => {
     group.models.forEach((model) => {
       const key = `${group.brand}-${model}`;
-      if (selectedTemplateKeys.value.includes(key)) rows.push(`${group.brand} ${model}`);
+      if (selectedTemplateKeys.value.includes(key)) nextRows.push(`${group.brand} ${model}`);
     });
   });
-  emit("add-targets", rows);
+  emit("add-targets", nextRows);
   templateDialog.value = false;
 }
 
@@ -73,7 +76,7 @@ function applyImport() {
   importDialog.value = false;
 }
 
-function addPlan(style = "高端原厂风") {
+function addPlan(style = "高级原厂风") {
   emit("add-plan", { name: style, style });
 }
 
@@ -98,10 +101,10 @@ function onDrop(targetId) {
     </div>
 
     <div v-if="isMainPlan" class="plan-actions">
-      <el-button class="erp-btn erp-btn-secondary" @click="addPlan('高端原厂风')">高端原厂风</el-button>
+      <el-button class="erp-btn erp-btn-secondary" @click="addPlan('高级原厂风')">高级原厂风</el-button>
       <el-button class="erp-btn erp-btn-secondary" @click="addPlan('白底清晰风')">白底清晰风</el-button>
       <el-button class="erp-btn erp-btn-secondary" @click="addPlan('安装场景风')">安装场景风</el-button>
-      <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Plus" @click="addPlan('自定义Prompt')">添加方案</el-button>
+      <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Plus" @click="addPlan('自定义 Prompt')">添加方案</el-button>
     </div>
 
     <div v-else class="target-actions">
@@ -125,7 +128,7 @@ function onDrop(targetId) {
       >
         <el-icon><Rank /></el-icon>
         <span>{{ display(row) }}</span>
-        <button type="button" @click="$emit('remove', row.id)">×</button>
+        <button type="button" aria-label="删除" @click="$emit('remove', row.id)">×</button>
       </div>
       <div v-if="!rows.length" class="empty-inline">还没有目标，先添加车型或主图方案。</div>
     </div>

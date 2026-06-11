@@ -789,6 +789,70 @@ const schemas = {
     field("height_cm", scalar("number", "Package height in centimeters.")),
     field("exchange_rate", scalar("number", "CNY to RUB exchange rate.")),
     field("target_margin", scalar("number", "Target margin ratio."))
+  ], { additionalProperties: false }),
+
+  AiStrategyBundle: objectOf("AI strategy bundle that binds a category to per-asset strategy keys.", [
+    field("id", scalar("number", "Bundle identifier.")),
+    field("bundle_key", scalar("string", "Stable bundle key.")),
+    field("title", scalar("string", "Bundle title.")),
+    field("description", scalar("string", "Operator-facing bundle summary.")),
+    field("category_node_id", scalar("number", "Linked AI strategy category node identifier.")),
+    field("match_keywords", arrayOf(scalar("string", "Matching keyword."), "Keywords that boost bundle matching.")),
+    field("exclude_keywords", arrayOf(scalar("string", "Exclusion keyword."), "Keywords that suppress bundle matching.")),
+    field("strategy_map", scalar("object", "Map of asset key to strategy keys.")),
+    field("priority", scalar("number", "Bundle sort priority.")),
+    field("enabled", scalar("number", "Whether the bundle is enabled."))
+  ]),
+
+  AiStrategyCategoryNode: objectOf("Searchable AI strategy category node used to organize strategy bundles.", [
+    field("id", scalar("number", "Category node identifier.")),
+    field("parent_id", scalar("number", "Parent category node identifier.")),
+    field("category_key", scalar("string", "Stable category key.")),
+    field("title", scalar("string", "Category title.")),
+    field("aliases", arrayOf(scalar("string", "Category alias."), "Aliases used for search and matching.")),
+    field("match_keywords", arrayOf(scalar("string", "Matching keyword."), "Keywords used for search and matching.")),
+    field("sort_order", scalar("number", "Category sort order.")),
+    field("enabled", scalar("number", "Whether the category node is enabled."))
+  ]),
+
+  AiStrategyBundleMatchRequest: objectOf("Product context used to recommend category strategy bundles.", [
+    field("productName", scalar("string", "Product name or listing title.")),
+    field("categoryText", scalar("string", "Collected category, Ozon category, or operator category text.")),
+    field("ozonCategory", scalar("string", "Ozon category label.")),
+    field("material", scalar("string", "Material text such as stainless steel, ABS, or carbon sticker.")),
+    field("color", scalar("string", "Color text.")),
+    field("sellingPoints", scalar("string", "Known product selling points."))
+  ], { additionalProperties: true }),
+
+  AiStrategyBundleMatchResponse: objectOf("Matched category and ranked strategy bundle recommendations.", [
+    field("inputText", scalar("string", "Normalized input text used for matching.")),
+    field("category", scalar("object", "Matched category node with path.")),
+    field("bundles", arrayOf(ref("AiStrategyBundle"), "Ranked matching bundles.")),
+    field("defaultBundle", ref("AiStrategyBundle", "Highest ranked bundle."))
+  ]),
+
+  AiStrategyPlanRequest: objectOf("Resolve AI strategies from goal, category text, optional selected titles, and optional strategy bundle.", [
+    field("businessMode", scalar("string", "Business mode such as product_optimization or product_variant.")),
+    field("goalKey", scalar("string", "Goal key such as low_ctr or low_conversion.")),
+    field("categoryText", scalar("string", "Category text used for inherited layer rules.")),
+    field("selectedTitles", arrayOf(scalar("string", "Manually selected strategy title."), "Manual strategy titles.")),
+    field("bundleKey", scalar("string", "Optional selected strategy bundle key.")),
+    field("bundleId", scalar("number", "Optional selected strategy bundle identifier.")),
+    field("assets", arrayOf(scalar("string", "Asset key."), "Optional asset filter such as main_image or detail_image."))
+  ], { additionalProperties: true }),
+
+  AiStrategyPlanResponse: objectOf("Resolved AI strategy plan with strategy modules and optional selected bundle.", [
+    field("version", scalar("string", "Strategy library version.")),
+    field("businessMode", scalar("string", "Resolved business mode.")),
+    field("goalKey", scalar("string", "Resolved goal key.")),
+    field("layers", arrayOf(scalar("object", "Matched inherited strategy layer."), "Matched layers.")),
+    field("bundle", scalar("object", "Selected bundle summary, when a bundle was supplied.")),
+    field("strategies", arrayOf(scalar("object", "Resolved strategy."), "Resolved strategies.")),
+    field("strategyIds", arrayOf(scalar("string", "Strategy key."), "Resolved strategy keys.")),
+    field("strategyTitles", arrayOf(scalar("string", "Strategy title."), "Resolved strategy titles.")),
+    field("positiveModules", arrayOf(scalar("string", "Positive prompt module."), "Positive prompt modules.")),
+    field("negativeModules", arrayOf(scalar("string", "Negative prompt module."), "Negative prompt modules.")),
+    field("assets", arrayOf(scalar("string", "Asset key."), "Affected asset keys."))
   ], { additionalProperties: false })
 };
 
@@ -1321,6 +1385,60 @@ const endpoints = [
     })
   ]),
   section("Configuration", [
+    endpoint("GET", "/api/ai-strategies", "Return AI strategy atoms used by prompt plans.", {
+      auth: "authenticated",
+      responses: [response(200, "application/json", arrayOf(scalar("object", "AI strategy row."), "AI strategy rows."))]
+    }),
+    endpoint("POST", "/api/ai-strategies/resolve", "Resolve an AI prompt strategy plan from goal, category context, selected strategies, and optional bundle.", {
+      auth: "authenticated",
+      requestBody: body(ref("AiStrategyPlanRequest")),
+      responses: [response(200, "application/json", ref("AiStrategyPlanResponse"))]
+    }),
+    endpoint("GET", "/api/ai-strategy-category-nodes", "Return AI strategy category tree nodes.", {
+      auth: "authenticated",
+      responses: [response(200, "application/json", arrayOf(ref("AiStrategyCategoryNode"), "Category nodes."))]
+    }),
+    endpoint("POST", "/api/ai-strategy-category-nodes", "Create a searchable AI strategy category node.", {
+      auth: "authenticated",
+      requestBody: body(ref("AiStrategyCategoryNode")),
+      responses: [response(200, "application/json", ref("AiStrategyCategoryNode"))]
+    }),
+    endpoint("GET", "/api/ai-strategy-category-nodes/:id", "Return one AI strategy category node.", {
+      auth: "authenticated",
+      pathParams: [param("id", scalar("number", "Category node identifier."))],
+      responses: [response(200, "application/json", ref("AiStrategyCategoryNode")), response(404, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("PUT", "/api/ai-strategy-category-nodes/:id", "Update a searchable AI strategy category node.", {
+      auth: "authenticated",
+      pathParams: [param("id", scalar("number", "Category node identifier."))],
+      requestBody: body(ref("AiStrategyCategoryNode")),
+      responses: [response(200, "application/json", ref("AiStrategyCategoryNode"))]
+    }),
+    endpoint("GET", "/api/ai-strategy-bundles", "Return AI category strategy bundles.", {
+      auth: "authenticated",
+      responses: [response(200, "application/json", arrayOf(ref("AiStrategyBundle"), "Strategy bundles."))]
+    }),
+    endpoint("POST", "/api/ai-strategy-bundles", "Create an AI category strategy bundle.", {
+      auth: "authenticated",
+      requestBody: body(ref("AiStrategyBundle")),
+      responses: [response(200, "application/json", ref("AiStrategyBundle"))]
+    }),
+    endpoint("GET", "/api/ai-strategy-bundles/:id", "Return one AI category strategy bundle.", {
+      auth: "authenticated",
+      pathParams: [param("id", scalar("number", "Strategy bundle identifier."))],
+      responses: [response(200, "application/json", ref("AiStrategyBundle")), response(404, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("PUT", "/api/ai-strategy-bundles/:id", "Update an AI category strategy bundle.", {
+      auth: "authenticated",
+      pathParams: [param("id", scalar("number", "Strategy bundle identifier."))],
+      requestBody: body(ref("AiStrategyBundle")),
+      responses: [response(200, "application/json", ref("AiStrategyBundle"))]
+    }),
+    endpoint("POST", "/api/ai-strategy-bundles/match", "Recommend AI category strategy bundles from product context.", {
+      auth: "authenticated",
+      requestBody: body(ref("AiStrategyBundleMatchRequest")),
+      responses: [response(200, "application/json", ref("AiStrategyBundleMatchResponse"))]
+    }),
     endpoint("GET", "/api/shops", "Return shop master data.", {
       auth: "authenticated",
       responses: [response(200, "application/json", arrayOf(ref("ShopRecord"), "Shop rows."))]

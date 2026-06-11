@@ -37,7 +37,7 @@ function writeBackText(value) {
         <strong>已生成商品池</strong>
       </div>
       <div>
-        <el-button class="erp-btn erp-btn-secondary" :icon="ShoppingCart" @click="$emit('enter-listing')">批量进入上架</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="ShoppingCart" @click="$emit('enter-listing')">进入上架流程</el-button>
         <el-button class="erp-btn erp-btn-secondary" type="success" :icon="Upload" @click="$emit('write-back-all')">批量回写</el-button>
       </div>
     </div>
@@ -53,13 +53,14 @@ function writeBackText(value) {
           <div class="pool-facts">
             <span>品牌：{{ item.brand || "-" }}</span>
             <span>车型：{{ item.displayName || item.model || "-" }}</span>
-            <span>详情图：{{ item.inheritDetailImages ? `继承 ${item.detailImageCount} 张` : "AI重新生成" }}</span>
+            <span>详情图：{{ item.inheritDetailImages ? `继承 ${item.detailImageCount} 张` : "AI 重新生成" }}</span>
             <span>标题：{{ item.titleStatus }}</span>
             <span>标签：{{ item.tagStatus }}</span>
             <span>视频：{{ item.videoStatus }}</span>
           </div>
           <div class="pool-actions">
-            <el-button class="erp-btn erp-btn-secondary" size="small" type="success" :icon="Upload" :disabled="item.writeBackStatus === 'written_back'" @click="$emit('write-back', item)">回写到选品表</el-button>
+            <el-button class="erp-btn erp-btn-secondary" size="small" type="success" :icon="Upload" :disabled="item.writeBackStatus === 'written_back'" @click="$emit('write-back', item)">保存上架草稿</el-button>
+            <el-button class="erp-btn erp-btn-secondary" size="small" :icon="ShoppingCart" @click="$emit('enter-listing', item)">上架预览</el-button>
             <el-button class="erp-btn erp-btn-secondary" size="small" :icon="Refresh" @click="$emit('regenerate', item.targetId)">重新生成</el-button>
             <el-button class="erp-btn erp-btn-danger" size="small" type="danger" :icon="Delete" @click="$emit('delete', item.id)">删除</el-button>
           </div>
@@ -67,7 +68,7 @@ function writeBackText(value) {
       </article>
 
       <div v-if="!visibleResults.length" class="pool-empty">
-        生成完成的商品会进入这里，随后可以回写选品表或进入店铺上架流程。
+        生成完成的商品会进入这里，随后可以回写选品表或继续进入上架流程。
       </div>
     </div>
   </section>

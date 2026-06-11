@@ -20,6 +20,34 @@ export function listAiStrategyLayerRules(params = {}) {
   return apiClient.get("/api/ai-strategy-layer-rules", { ...params, noCache: true });
 }
 
+export function listAiStrategyCategoryNodes(params = {}) {
+  return apiClient.get("/api/ai-strategy-category-nodes", { ...params, noCache: true });
+}
+
+export function createAiStrategyCategoryNode(payload) {
+  return apiClient.post("/api/ai-strategy-category-nodes", payload);
+}
+
+export function updateAiStrategyCategoryNode(id, payload) {
+  return apiClient.put(`/api/ai-strategy-category-nodes/${encodeURIComponent(id)}`, payload);
+}
+
+export function listAiStrategyBundles(params = {}) {
+  return apiClient.get("/api/ai-strategy-bundles", { ...params, noCache: true });
+}
+
+export function createAiStrategyBundle(payload) {
+  return apiClient.post("/api/ai-strategy-bundles", payload);
+}
+
+export function updateAiStrategyBundle(id, payload) {
+  return apiClient.put(`/api/ai-strategy-bundles/${encodeURIComponent(id)}`, payload);
+}
+
+export function matchAiStrategyBundles(payload) {
+  return apiClient.post("/api/ai-strategy-bundles/match", payload);
+}
+
 export function createAiStrategyLayerRule(payload) {
   return apiClient.post("/api/ai-strategy-layer-rules", payload);
 }

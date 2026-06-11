@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Refresh, Search } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
@@ -23,6 +23,8 @@ const quality = ref(null);
 const detailRows = ref([]);
 const trendRows = ref([]);
 const currentRow = ref(null);
+let qualityRequestSeq = 0;
+let trendRequestSeq = 0;
 const strategyForm = reactive({
   mode: "bid",
   bidRub: 0,
@@ -103,9 +105,7 @@ const tableSortedRows = computed(() => {
   });
 });
 const pagedRows = computed(() => {
-  const sorted = tableSortedRows.value;
-  const start = (state.page - 1) * state.pageSize;
-  return sorted.slice(start, start + state.pageSize);
+  return tableSortedRows.value;
 });
 const diagnosisOptions = computed(() => {
   const values = [...new Set(filteredRows.value.map((row) => primaryTag(row).label).filter(Boolean))];
@@ -735,14 +735,16 @@ async function bootstrap() {
 
 function buildParams(options = {}) {
   const params = new URLSearchParams({
-    page: "1",
-    pageSize: "1000",
+    page: String(options.page ?? state.page),
+    pageSize: String(options.pageSize ?? state.pageSize),
     sortBy: state.sortBy,
     sortOrder: state.sortOrder === "ascending" ? "asc" : "desc"
   });
   if (options.includeShop !== false && state.filters.shopId) params.set("shopId", state.filters.shopId);
   if (state.filters.from) params.set("from", state.filters.from);
   if (state.filters.to) params.set("to", state.filters.to);
+  const keyword = String(state.filters.keyword || "").trim();
+  if (keyword) params.set("keyword", keyword);
   return params;
 }
 
@@ -750,21 +752,41 @@ async function loadRows() {
   loading.value = true;
   try {
     const params = buildParams();
-    const [listPayload, summaryPayload, detailsPayload, qualityPayload] = await Promise.all([
+    const [listPayload, summaryPayload] = await Promise.all([
       apiClient.get(`/api/advertising/daily?${params.toString()}`),
-      apiClient.get(`/api/advertising/daily/summary?${params.toString()}`),
-      apiClient.get(`/api/advertising/daily/details?${params.toString()}`),
-      apiClient.get(`/api/advertising/daily/quality?${params.toString()}`)
+      apiClient.get(`/api/advertising/daily/summary?${params.toString()}`)
     ]);
     state.rows = Array.isArray(listPayload?.rows) ? listPayload.rows : [];
     state.total = Number(listPayload?.total || state.rows.length);
+    state.page = Number(listPayload?.page || state.page);
+    state.pageSize = Number(listPayload?.pageSize || state.pageSize);
     summary.value = summaryPayload || {};
-    trendRows.value = Array.isArray(detailsPayload?.rows) ? detailsPayload.rows : [];
-    quality.value = qualityPayload || null;
+    void loadQualitySnapshot();
+    if (activeTab.value === "insights") void loadTrendRows();
   } catch (error) {
     ElMessage.error(error.message || "广告数据加载失败");
   } finally {
     loading.value = false;
+  }
+}
+
+async function loadQualitySnapshot() {
+  const seq = ++qualityRequestSeq;
+  try {
+    const payload = await apiClient.get(`/api/advertising/daily/quality?${buildParams({ page: 1 }).toString()}`);
+    if (seq === qualityRequestSeq) quality.value = payload || null;
+  } catch (error) {
+    console.warn("load advertising quality failed", error);
+  }
+}
+
+async function loadTrendRows() {
+  const seq = ++trendRequestSeq;
+  try {
+    const payload = await apiClient.get(`/api/advertising/daily/details?${buildParams({ page: 1, pageSize: 100 }).toString()}`);
+    if (seq === trendRequestSeq) trendRows.value = Array.isArray(payload?.rows) ? payload.rows : [];
+  } catch (error) {
+    console.warn("load advertising trend rows failed", error);
   }
 }
 
@@ -884,7 +906,10 @@ function handleReset() {
 function handleSortChange({ prop, order }) {
   tableFilters.sortProp = prop || "";
   tableFilters.sortOrder = order || "";
-  resetTablePage();
+  state.sortBy = prop || state.sortBy;
+  state.sortOrder = order || state.sortOrder;
+  state.page = 1;
+  loadRows();
 }
 
 async function openDetails(row) {
@@ -909,6 +934,10 @@ function goMaterialCenter(row) {
   const sku = encodeURIComponent(row?.ozon_sku || "");
   window.location.hash = `/asset-variant-center?sku=${sku}`;
 }
+
+watch(activeTab, (tab) => {
+  if (tab === "insights" && !trendRows.value.length) void loadTrendRows();
+});
 
 onMounted(bootstrap);
 </script>
@@ -1197,14 +1226,14 @@ onMounted(bootstrap);
         </el-table-column>
       </el-table>
       <div class="ad-table-footer">
-        <span>共 {{ tableFilteredRows.length }} 个 SKU</span>
+        <span>共 {{ state.total }} 个 SKU</span>
         <PageFooterPagination
-          :total="tableFilteredRows.length"
+          :total="state.total"
           :page="state.page"
           :page-size="state.pageSize"
           compact
-          @update:page="state.page = $event"
-          @update:pageSize="state.pageSize = $event; resetTablePage()"
+          @update:page="state.page = $event; loadRows()"
+          @update:pageSize="state.pageSize = $event; state.page = 1; loadRows()"
         />
       </div>
     </section>

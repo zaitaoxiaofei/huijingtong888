@@ -4,6 +4,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import sharp from "sharp";
 import { config } from "./config.js";
 import { calculateCelFbsPricing } from "./celRates.js";
 import { mysqlRuntimeServices } from "./services/mysql-runtime-services.js";
@@ -62,15 +63,21 @@ import {
 } from "./server/access.js";
 import { systemInfo } from "./server/maintenance.js";
 import { checkDailyPurchaseNotification, globalUpdateStatus, subscribeGlobalUpdateEvents, updateGlobalUpdateStatus } from "./server/notifications.js";
-import { shanghaiDateKey } from "./shanghai-time.js";
+import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { mysqlExecute, mysqlQuery } from "./mysql-pool.js";
 
 const services = mysqlRuntimeServices;
 
 const publicDir = path.resolve("public");
-const serveStatic = createStaticHandler(publicDir);
+const serveStatic = createStaticHandler(publicDir, {
+  extraRouteRoots: [{
+    prefix: "/uploads/listing-media/",
+    roots: resolveListingMediaStaticRoots()
+  }]
+});
 const handleAuth = createAuthHandler(readJson);
 const imageProxyCacheDir = path.resolve("runtime", "image-proxy-cache");
+const productThumbnailCacheDir = path.resolve("runtime", "product-thumbnail-cache");
 const imageProxyInflight = new Map();
 const IMAGE_PROXY_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const IMAGE_PROXY_BROWSER_CACHE_SECONDS = 24 * 60 * 60;
@@ -147,7 +154,7 @@ const routes = {
   "POST /api/scheduled-jobs/config": async (req) => updateScheduledJobConfig(await readJson(req)),
   "GET /api/exchange-rate/current": () => services.currentExchangeRate(),
   "GET /api/exchange-rates": () => services.exchangeRates(),
-  "GET /api/inventory": () => services.inventory(),
+  "GET /api/inventory": (req) => services.inventory(req.query || {}),
   "GET /api/stock-alerts": (req) => services.stockAlerts(req.query || {}),
   "GET /api/fbp-opportunities": (req) => services.fbpOpportunities(req.query || {}),
   "GET /api/fbp-transfer-records": (req) => services.fbpTransferRecords(req.query || {}),
@@ -202,6 +209,7 @@ let backgroundAnalyticsRefreshRunning = false;
 let backgroundDashboardSnapshotRefreshRunning = false;
 let backgroundAdvertisingSyncRunning = false;
 let backgroundAdvertisingTodaySyncRunning = false;
+let backgroundSellerAnalyticsSyncRunning = false;
 let backgroundOzonStockSyncRunning = false;
 let backgroundOzonCategorySyncRunning = false;
 let backgroundHeavyTaskRunning = "";
@@ -229,6 +237,8 @@ const BACKGROUND_ADVERTISING_SYNC_TIMEOUT_MS = Math.max(1, Number(config.backgro
 const BACKGROUND_ADVERTISING_TODAY_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundAdvertisingTodaySyncIntervalMinutes || 15)) * 60 * 1000;
 const BACKGROUND_ADVERTISING_TODAY_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAdvertisingTodaySyncInitialDelaySeconds || 120)) * 1000;
 const BACKGROUND_ADVERTISING_TODAY_SYNC_TIMEOUT_MS = Math.max(1, Number(config.backgroundAdvertisingTodaySyncTimeoutMinutes || 12)) * 60 * 1000;
+const BACKGROUND_SELLER_ANALYTICS_SYNC_DAYS = Math.max(1, Number(config.backgroundSellerAnalyticsSyncDays || 7));
+const BACKGROUND_SELLER_ANALYTICS_SYNC_TIMEOUT_MS = Math.max(1, Number(config.backgroundSellerAnalyticsSyncTimeoutMinutes || 45)) * 60 * 1000;
 const BACKGROUND_OZON_STOCK_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundOzonStockSyncIntervalMinutes || 30)) * 60 * 1000;
 const BACKGROUND_OZON_STOCK_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundOzonStockSyncInitialDelaySeconds || 480)) * 1000;
 const OZON_ACTION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
@@ -329,6 +339,25 @@ const scheduledJobDefinitions = [
     }
   },
   {
+    key: "seller_analytics_daily_sync",
+    name: "Ozon 店铺分析每日同步",
+    category: "analytics",
+    priority: "high",
+    scheduleType: "daily",
+    dailyTime: `${String(config.backgroundSellerAnalyticsSyncHour || 8).padStart(2, "0")}:${String(config.backgroundSellerAnalyticsSyncMinute || 0).padStart(2, "0")}`,
+    catchupEnabled: true,
+    maxCatchupRuns: 1,
+    config: {
+      scope: "recent_window",
+      days: BACKGROUND_SELLER_ANALYTICS_SYNC_DAYS,
+      timeoutMinutes: Math.round(BACKGROUND_SELLER_ANALYTICS_SYNC_TIMEOUT_MS / 60000),
+      maxShopsPerRun: 50,
+      maxPages: 500,
+      requestLimit: 30,
+      waitPollMs: 2000
+    }
+  },
+  {
     key: "ozon_stock_sync",
     name: "Ozon FBP 库存同步",
     category: "inventory",
@@ -386,6 +415,7 @@ const scheduledJobHandlers = {
   dashboard_snapshot_refresh: runBackgroundDashboardSnapshotRefresh,
   advertising_sync: runBackgroundAdvertisingSync,
   advertising_today_sync: runBackgroundAdvertisingTodaySync,
+  seller_analytics_daily_sync: runBackgroundSellerAnalyticsDailySync,
   ozon_stock_sync: runBackgroundOzonStockSync,
   ozon_category_sync: runBackgroundOzonCategorySync,
   listing_publish_record_sync: (job) => services.autoSyncListingPublishRecords(job?.config || {}),
@@ -708,7 +738,7 @@ function isAllowedLocalPluginCorsOrigin(origin) {
   if (value.startsWith("chrome-extension://")) return true;
   try {
     const url = new URL(value);
-    const appUrl = new URL(config.appBaseUrl || "http://localhost:8787");
+    const appUrl = new URL(config.appBaseUrl || "http://localhost:8788");
     const hostname = url.hostname.toLowerCase();
     const appHostname = appUrl.hostname.toLowerCase();
     if (
@@ -948,36 +978,72 @@ async function handleLocalPluginRoute(req, res, parts) {
 }
 
 
-async function sendProductImage(res, productId, imageLoader = null) {
+async function sendProductImage(res, productId, imageLoader = null, options = {}) {
   try {
     const image = imageLoader ? await imageLoader(productId) : await services.productImage(productId);
     if (!image) return notFound(res);
+    const thumbnail = Boolean(options.thumbnail);
+    const thumbnailWidth = Math.min(Math.max(Number(options.width || 180), 80), 360);
     const aiFile = await resolveAiImageFile(String(image));
     if (aiFile) {
-      const buffer = await fs.readFile(aiFile.filePath);
+      const originalBuffer = await fs.readFile(aiFile.filePath);
+      const imageBody = thumbnail
+        ? await productThumbnailBuffer(originalBuffer, `${productId}:${options.version || ""}:${aiFile.filePath}`, thumbnailWidth)
+        : { buffer: originalBuffer, contentType: aiFile.contentType, cacheControl: "no-store, must-revalidate" };
       writeHead(res, 200, {
-        "Content-Type": aiFile.contentType,
-        "Content-Length": buffer.length,
-        "Cache-Control": "no-store, must-revalidate",
-        "Pragma": "no-cache"
+        "Content-Type": imageBody.contentType,
+        "Content-Length": imageBody.buffer.length,
+        "Cache-Control": imageBody.cacheControl,
+        ...(thumbnail ? { "X-Product-Image-Variant": "thumbnail" } : { "Pragma": "no-cache" })
       });
-      return res.end(buffer);
+      return res.end(imageBody.buffer);
     }
     const match = String(image).match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
     if (!match) return json(res, { error: "Unsupported image" }, 415);
-    const buffer = Buffer.from(match[2], "base64");
+    const originalBuffer = Buffer.from(match[2], "base64");
+    const imageBody = thumbnail
+      ? await productThumbnailBuffer(originalBuffer, `${productId}:${options.version || ""}:${createHash("sha256").update(String(image)).digest("hex")}`, thumbnailWidth)
+      : { buffer: originalBuffer, contentType: match[1], cacheControl: "no-store, must-revalidate" };
     writeHead(res, 200, {
-      "Content-Type": match[1],
-      "Content-Length": buffer.length,
-      "Cache-Control": "no-store, must-revalidate",
-      "Pragma": "no-cache"
+      "Content-Type": imageBody.contentType,
+      "Content-Length": imageBody.buffer.length,
+      "Cache-Control": imageBody.cacheControl,
+      ...(thumbnail ? { "X-Product-Image-Variant": "thumbnail" } : { "Pragma": "no-cache" })
     });
-    return res.end(buffer);
+    return res.end(imageBody.buffer);
   } catch (error) {
     if (Number(error?.status || 0) === 404) return notFound(res);
     console.error("send product image failed:", error);
     return json(res, { error: "Product image unavailable" }, 500);
   }
+}
+
+async function productThumbnailBuffer(buffer, cacheSeed, width) {
+  const height = Math.round(width * 1.32);
+  const cacheKey = createHash("sha256").update(`${cacheSeed}:${width}:${height}:webp72`).digest("hex");
+  const cachePath = path.join(productThumbnailCacheDir, `${cacheKey}.webp`);
+  try {
+    const cached = await fs.readFile(cachePath);
+    return {
+      buffer: cached,
+      contentType: "image/webp",
+      cacheControl: "private, max-age=86400"
+    };
+  } catch {
+    // Cache miss.
+  }
+  const resized = await sharp(buffer)
+    .rotate()
+    .resize({ width, height, fit: "cover", withoutEnlargement: true })
+    .webp({ quality: 72 })
+    .toBuffer();
+  await fs.mkdir(productThumbnailCacheDir, { recursive: true });
+  await fs.writeFile(cachePath, resized).catch(() => null);
+  return {
+    buffer: resized,
+    contentType: "image/webp",
+    cacheControl: "private, max-age=86400"
+  };
 }
 
 async function resolveAiImageFile(imageUrl) {
@@ -1130,6 +1196,11 @@ const server = http.createServer(async (req, res) => {
 
     const url = new URL(req.url, `http://${req.headers.host}`);
     const parts = url.pathname.split("/").filter(Boolean);
+    if (parts[0] === "api") {
+      req._timingMarks = [];
+      res._serverTimingStartedAt = startedAt;
+      res._serverTimingMarks = req._timingMarks;
+    }
     res.on("finish", () => logSlowApiRequest({ req, res, url, startedAt }));
 
     let localPluginHandled = false;
@@ -1148,8 +1219,15 @@ const server = http.createServer(async (req, res) => {
     }
     if (localPluginHandled !== false) return;
 
-    if ((req.method === "GET" || req.method === "HEAD") && isPublicListingMediaPath(parts)) {
+    if ((req.method === "GET" || req.method === "HEAD") && (isPublicListingMediaPath(parts) || isVersionedVueAssetPath(url.pathname))) {
       return serveStatic(url.pathname, req, res);
+    }
+
+    if (req.method === "POST" && parts[0] === "api" && parts[1] === "listing" && parts[2] === "media" && parts[3] === "public-upload") {
+      const token = String(url.searchParams.get("token") || req.headers["x-local-plugin-token"] || "").trim();
+      const expected = String(config.localPluginPublicToken || "").trim();
+      if (!token || !expected || !safeEqualText(token, expected)) return json(res, { error: "素材公网同步未授权" }, 403);
+      return json(res, await services.uploadListingMedia(req, { skipPublicSync: true, publicUpload: true }));
     }
 
     if (url.pathname === SITE_ACCESS_SESSION_PATH || url.pathname === SITE_ACCESS_LOGIN_PATH || url.pathname === SITE_ACCESS_LOGOUT_PATH || url.pathname === SITE_ACCESS_API_LOGIN_PATH) {
@@ -1197,7 +1275,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "image") {
-      return sendProductImage(res, Number(parts[2]));
+      return sendProductImage(res, Number(parts[2]), null, {
+        thumbnail: ["1", "true", "yes"].includes(String(url.searchParams.get("thumb") || "").toLowerCase()),
+        width: Number(url.searchParams.get("w") || 0),
+        version: url.searchParams.get("v") || ""
+      });
     }
 
     if (req.method === "GET" && parts[0] === "api" && parts[1] === "ai" && parts[2] === "file") {
@@ -1449,6 +1531,41 @@ async function listActiveAdvertisingShopIds() {
     ORDER BY id
   `);
   return rows.map((row) => Number(row.id)).filter((id) => id > 0);
+}
+
+function getSellerAnalyticsStoreId(shop = {}) {
+  return String(
+    shop.seller_company_id ||
+    shop.sellerCompanyId ||
+    shop.ozon_company_id ||
+    shop.ozonCompanyId ||
+    shop.ozon_client_id ||
+    shop.ozonClientId ||
+    shop.store_client_id ||
+    shop.storeClientId ||
+    shop.client_id ||
+    shop.clientId ||
+    shop.company_id ||
+    shop.companyId ||
+    ""
+  ).trim();
+}
+
+async function listActiveSellerAnalyticsShops() {
+  const rows = await mysqlQuery(`
+    SELECT id, name, ozon_client_id, status
+    FROM shops
+    WHERE status = 'active'
+      AND COALESCE(NULLIF(TRIM(ozon_client_id), ''), '') <> ''
+    ORDER BY id
+  `);
+  return rows
+    .map((row) => ({
+      id: Number(row.id || 0),
+      name: String(row.name || "").trim(),
+      storeId: getSellerAnalyticsStoreId(row)
+    }))
+    .filter((row) => row.id > 0 && row.storeId);
 }
 
 async function persistScheduledJobConfigPatch(jobKey, patch = {}) {
@@ -1705,6 +1822,258 @@ async function runBackgroundAdvertisingTodaySync(context = {}) {
   }
 }
 
+function waitForBackgroundJob(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms || 0))));
+}
+
+function sellerAnalyticsPeriodPayload(days = 7) {
+  const normalizedDays = Math.max(1, Number(days || 7));
+  if (normalizedDays === 7) return { period_key: "7d" };
+  if (normalizedDays === 28) return { period_key: "28d" };
+  return {
+    period_key: "custom",
+    date_from: shanghaiDateDaysAgo(normalizedDays, new Date()),
+    date_to: shanghaiDateDaysAgo(1, new Date())
+  };
+}
+
+async function waitForSellerAnalyticsCollectRun(runId, tenantId = "admin", options = {}) {
+  const deadline = Date.now() + Math.max(1000, Number(options.timeoutMs || 60000));
+  const pollMs = Math.max(500, Number(options.pollMs || 2000));
+  while (Date.now() < deadline) {
+    const runs = await services.sellerAnalyticsCollectRuns({ limit: 100 }, tenantId);
+    const run = (Array.isArray(runs) ? runs : []).find((item) => item.id === runId);
+    if (run && !["pending", "running"].includes(String(run.status || ""))) return { run, timedOut: false };
+    await waitForBackgroundJob(pollMs);
+  }
+  const runs = await services.sellerAnalyticsCollectRuns({ limit: 100 }, tenantId).catch(() => []);
+  const run = (Array.isArray(runs) ? runs : []).find((item) => item.id === runId) || null;
+  return { run, timedOut: true };
+}
+
+async function syncOneSellerAnalyticsShop(shop, context, options) {
+  const tenantId = options.tenantId || "admin";
+  const periodKey = options.periodKey || "7d";
+  const periodPayload = options.periodPayload || { period_key: periodKey };
+  const startedAt = Date.now();
+  const baseResult = {
+    shop_id: shop.id,
+    shop_name: shop.name,
+    store_id: shop.storeId,
+    status: "pending"
+  };
+  const binding = await services.sellerAnalyticsAuthBindingStatus({
+    store_id: shop.storeId,
+    shop_id: shop.id,
+    company_id: shop.storeId
+  }, tenantId);
+  if (!binding?.bound || binding?.stale) {
+    return {
+      ...baseResult,
+      status: "skipped",
+      error_code: binding?.stale ? "auth_binding_stale" : "missing_auth_binding",
+      error: binding?.stale ? "店铺分析授权已过期，请在数据分析页重新绑定授权。" : "店铺尚未绑定 Ozon 分析授权。"
+    };
+  }
+
+  const run = await services.sellerAnalyticsCreateCollectRun({
+    ...periodPayload,
+    store_id: shop.storeId,
+    company_id: shop.storeId,
+    full_store: true,
+    auto_all_pages: true,
+    max_pages: options.maxPages,
+    limit: options.requestLimit
+  }, tenantId);
+  await logScheduledJobEvent({
+    runId: context?.runId,
+    jobKey: "seller_analytics_daily_sync",
+    stepKey: "shop_run_created",
+    status: "info",
+    shopId: shop.id,
+    shopName: shop.name,
+    message: `Created seller analytics collect run ${run.id}`,
+    detail: { storeId: shop.storeId, collectRunId: run.id, reused: Boolean(run.reused), periodKey }
+  }).catch(() => {});
+
+  const start = await services.sellerAnalyticsStartDirectCollect({
+    store_id: shop.storeId,
+    company_id: shop.storeId
+  }, tenantId);
+  if (!start?.started) {
+    return {
+      ...baseResult,
+      status: "error",
+      run_id: run.id,
+      requestCount: Number(run.request_count || 0),
+      error_code: start?.reason || "direct_collect_not_started",
+      error: start?.reason || "后台直连同步未启动"
+    };
+  }
+
+  const { run: finishedRun, timedOut } = await waitForSellerAnalyticsCollectRun(run.id, tenantId, {
+    timeoutMs: options.shopTimeoutMs,
+    pollMs: options.waitPollMs
+  });
+  const finalRun = finishedRun || run;
+  const status = timedOut ? "timeout" : String(finalRun.status || "unknown");
+  const todoResult = status === "success"
+    ? await services.sellerAnalyticsRefreshOperationTodos({
+        ...periodPayload,
+        store_id: shop.storeId,
+        focus_limit: 500
+      }, tenantId).catch((error) => ({ error: error?.message || String(error) }))
+    : null;
+  return {
+    ...baseResult,
+    status,
+    run_id: run.id,
+    reused: Boolean(run.reused),
+    requestCount: Number(finalRun.request_count || run.request_count || 0),
+    completed: Number(finalRun.completed_count || 0),
+    failed: Number(finalRun.failed_count || 0),
+    todoCount: Number(todoResult?.todoCount || todoResult?.data?.todoCount || 0),
+    diagnosisCount: Number(todoResult?.diagnosisCount || todoResult?.data?.diagnosisCount || 0),
+    elapsedMs: Date.now() - startedAt,
+    error_code: timedOut ? "collect_timeout" : (status === "failed" ? "collect_failed" : ""),
+    error: timedOut ? "店铺分析同步等待超时，后台队列可能仍在继续。" : ""
+  };
+}
+
+async function runBackgroundSellerAnalyticsDailySync(context = {}) {
+  if (backgroundSellerAnalyticsSyncRunning) return { skipped: true, reason: "already_running" };
+  if (backgroundHeavyTaskRunning) {
+    console.log(`background seller analytics sync skipped: ${backgroundHeavyTaskRunning} is running`);
+    return { skipped: true, reason: backgroundHeavyTaskRunning, retryDelaySeconds: 180 };
+  }
+  backgroundSellerAnalyticsSyncRunning = true;
+  backgroundHeavyTaskRunning = "seller_analytics_daily_sync";
+  const tenantId = "admin";
+  const days = Math.max(1, Number(context?.config?.days || BACKGROUND_SELLER_ANALYTICS_SYNC_DAYS));
+  const periodPayload = sellerAnalyticsPeriodPayload(days);
+  const periodKey = periodPayload.period_key;
+  const maxShopsPerRun = Math.max(1, Math.min(50, Number(context?.config?.maxShopsPerRun || 12)));
+  const shopCursor = Math.max(0, Number(context?.config?.shopCursor || 0));
+  const timeoutMinutes = Math.max(1, Number(context?.config?.timeoutMinutes || BACKGROUND_SELLER_ANALYTICS_SYNC_TIMEOUT_MS / 60000));
+  const totalTimeoutAt = Date.now() + timeoutMinutes * 60 * 1000;
+  const maxPages = Math.max(1, Math.min(1000, Number(context?.config?.maxPages || 500)));
+  const requestLimit = Math.max(1, Math.min(100, Number(context?.config?.requestLimit || 30)));
+  const waitPollMs = Math.max(500, Number(context?.config?.waitPollMs || 2000));
+  try {
+    await logScheduledJobEvent({
+      runId: context?.runId,
+      jobKey: "seller_analytics_daily_sync",
+      stepKey: "job_start",
+      status: "info",
+      message: "Starting seller analytics daily sync",
+      detail: { config: context?.config || {}, periodKey, days }
+    }).catch(() => {});
+    const shops = await listActiveSellerAnalyticsShops();
+    const { selectedShopIds, nextCursor } = rotateShopIds(shops.map((shop) => shop.id), shopCursor, maxShopsPerRun);
+    const selected = selectedShopIds.map((id) => shops.find((shop) => shop.id === id)).filter(Boolean);
+    if (!selected.length) return { skipped: true, reason: "no_configured_seller_analytics_shops", retryDelaySeconds: 300 };
+
+    const results = [];
+    for (const shop of selected) {
+      const remainingMs = totalTimeoutAt - Date.now();
+      if (remainingMs <= 0) {
+        results.push({
+          shop_id: shop.id,
+          shop_name: shop.name,
+          store_id: shop.storeId,
+          status: "timeout",
+          error_code: "job_timeout",
+          error: "定时任务总超时，剩余店铺未执行。"
+        });
+        continue;
+      }
+      await logScheduledJobEvent({
+        runId: context?.runId,
+        jobKey: "seller_analytics_daily_sync",
+        stepKey: "shop_start",
+        status: "info",
+        shopId: shop.id,
+        shopName: shop.name,
+        message: `Starting seller analytics sync for ${shop.name || shop.id}`,
+        detail: { storeId: shop.storeId, periodKey }
+      }).catch(() => {});
+      const result = await syncOneSellerAnalyticsShop(shop, context, {
+        tenantId,
+        periodKey,
+        periodPayload,
+        maxPages,
+        requestLimit,
+        waitPollMs,
+        shopTimeoutMs: Math.min(remainingMs, Math.max(60_000, Math.floor((timeoutMinutes * 60_000) / Math.max(1, selected.length))))
+      }).catch((error) => ({
+        shop_id: shop.id,
+        shop_name: shop.name,
+        store_id: shop.storeId,
+        status: "error",
+        error_code: "unhandled_error",
+        error: error?.message || String(error)
+      }));
+      results.push(result);
+      await logScheduledJobEvent({
+        runId: context?.runId,
+        jobKey: "seller_analytics_daily_sync",
+        stepKey: "shop_finish",
+        status: result.status === "success" ? "success" : result.status === "skipped" ? "warning" : "error",
+        shopId: shop.id,
+        shopName: shop.name,
+        message: `Seller analytics sync ${result.status} for ${shop.name || shop.id}`,
+        detail: result
+      }).catch(() => {});
+    }
+
+    await persistScheduledJobConfigPatch("seller_analytics_daily_sync", { shopCursor: nextCursor, maxShopsPerRun });
+    const okShops = results.filter((item) => item.status === "success").length;
+    const nonOkShops = results.length - okShops;
+    const skippedNoAuth = results.filter((item) => ["missing_auth_binding", "auth_binding_stale"].includes(item.error_code)).length;
+    const timeoutShops = results.filter((item) => item.status === "timeout").length;
+    const errors = results.filter((item) => item.error).map((item) => `${item.shop_name || item.shop_id}: ${item.error}`);
+    const warning = nonOkShops > 0 ? `${nonOkShops} shop(s) did not finish successfully` : "";
+    const status = nonOkShops > 0 ? "partial" : "success";
+    await logScheduledJobEvent({
+      runId: context?.runId,
+      jobKey: "seller_analytics_daily_sync",
+      stepKey: "job_finish",
+      status: status === "success" ? "success" : "warning",
+      message: warning || "Seller analytics daily sync finished",
+      detail: { okShops, nonOkShops, skippedNoAuth, timeoutShops, nextCursor, periodKey }
+    }).catch(() => {});
+    return {
+      status,
+      warning,
+      periodKey,
+      days,
+      totalShops: shops.length,
+      selectedShops: selected.length,
+      okShops,
+      nonOkShops,
+      createdRuns: results.filter((item) => item.run_id).length,
+      skippedNoAuth,
+      timeoutShops,
+      nextCursor,
+      results,
+      errors
+    };
+  } catch (error) {
+    await logScheduledJobEvent({
+      runId: context?.runId,
+      jobKey: "seller_analytics_daily_sync",
+      stepKey: "job_error",
+      status: "error",
+      message: error?.message || "Seller analytics daily sync failed"
+    }).catch(() => {});
+    console.error("background seller analytics sync failed", error);
+    throw error;
+  } finally {
+    backgroundSellerAnalyticsSyncRunning = false;
+    if (backgroundHeavyTaskRunning === "seller_analytics_daily_sync") backgroundHeavyTaskRunning = "";
+  }
+}
+
 async function runBackgroundOzonStockSync() {
   if (backgroundOzonStockSyncRunning) return { skipped: true, reason: "already_running" };
   if (backgroundHeavyTaskRunning) {
@@ -1875,6 +2244,22 @@ function isPublicListingMediaPath(parts = []) {
   return parts[0] === "uploads" && parts[1] === "listing-media" && Boolean(parts[2]);
 }
 
+function resolveListingMediaStaticRoots() {
+  const roots = [];
+  const add = (target) => {
+    const resolved = path.resolve(target);
+    if (!roots.includes(resolved)) roots.push(resolved);
+  };
+  add(path.resolve("public", "uploads", "listing-media"));
+  add(path.resolve("..", "..", "public", "uploads", "listing-media"));
+  add(path.resolve(process.env.LISTING_MEDIA_ROOT || "public/uploads/listing-media"));
+  return roots;
+}
+
+function isVersionedVueAssetPath(pathname = "") {
+  return /^\/vue-apps\/assets\/[^/]+-[A-Za-z0-9_-]{6,}(?:-\d{12,})?\.(?:js|css)$/i.test(String(pathname || ""));
+}
+
 function isPublicAuthCallbackPath(req, parts = []) {
   if (parts[0] !== "api" || parts[1] !== "auth") return false;
   if (req.method === "GET" && parts[2] === "qr" && parts[3] === "confirm-page") return true;
@@ -1888,6 +2273,7 @@ function allowQueryTokenAuth(req, parts = [], url) {
   if (!url.searchParams.get("token")) return false;
   if (parts[0] !== "api") return false;
   if (parts[1] === "ai" && parts[2] === "file") return true;
+  if (parts[1] === "products" && parts[2] && (parts[3] === "image" || parts[3] === "detail-images")) return true;
   if (parts[1] === "system" && parts[2] === "events") return true;
   if (parts[1] === "tools" && parts[2] === "image-cropper") return true;
   if (parts[1] === "asset-variant-engine" && parts[2] === "files") return true;

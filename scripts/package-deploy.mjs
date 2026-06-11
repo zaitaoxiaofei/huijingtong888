@@ -6,6 +6,7 @@ const rootDir = process.cwd();
 const outputDir = path.resolve(process.env.DEPLOY_OUTPUT_DIR || path.join(rootDir, "dist", "deploy"));
 const releaseVersion = process.env.OZON_RELEASE_VERSION || process.env.APP_RELEASE_VERSION || "local";
 const releaseChannel = process.env.OZON_RELEASE_CHANNEL || "production";
+const includeUploads = process.env.OZON_DEPLOY_INCLUDE_UPLOADS === "1";
 
 const filesToCopy = [
   ".env",
@@ -21,10 +22,18 @@ const directoriesToCopy = [
   "tools"
 ];
 
-const pluginPackagePatterns = [
-  /^ozon-baodan-erp-plugin(?:-[0-9][0-9A-Za-z.-]*)?\.rar$/,
-  /^ozon-erp-collector-plugin\.rar$/,
-  /^ozon-seller-analytics-plugin(?:-[0-9][0-9A-Za-z.-]*)?\.rar$/
+const pluginPackageRules = [
+  {
+    aliasPattern: /^ozon-baodan-erp-plugin\.rar$/,
+    versionPattern: /^ozon-baodan-erp-plugin-([0-9][0-9A-Za-z.-]*)\.rar$/
+  },
+  {
+    aliasPattern: /^ozon-erp-collector-plugin\.rar$/
+  },
+  {
+    aliasPattern: /^ozon-seller-analytics-plugin\.rar$/,
+    versionPattern: /^ozon-seller-analytics-plugin-([0-9][0-9A-Za-z.-]*)\.rar$/
+  }
 ];
 
 function run(command, args, label) {
@@ -62,7 +71,15 @@ async function copyEntry(relativePath) {
     return;
   }
   await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.cp(source, target, { recursive: true });
+  await fs.cp(source, target, {
+    recursive: true,
+    filter: relativePath === "public" && !includeUploads
+      ? (sourcePath) => {
+          const relativeSource = path.relative(source, sourcePath);
+          return relativeSource !== "uploads" && !relativeSource.startsWith(`uploads${path.sep}`);
+        }
+      : undefined
+  });
 }
 
 async function copyPluginPackages() {
@@ -75,9 +92,22 @@ async function copyPluginPackages() {
     return [];
   }
 
+  const selectedNames = new Set();
+  for (const rule of pluginPackageRules) {
+    const versioned = [];
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      if (rule.aliasPattern?.test(entry.name)) selectedNames.add(entry.name);
+      const match = rule.versionPattern ? entry.name.match(rule.versionPattern) : null;
+      if (match) versioned.push({ name: entry.name, version: match[1] });
+    }
+    versioned.sort((a, b) => b.version.localeCompare(a.version, undefined, { numeric: true, sensitivity: "base" }));
+    if (versioned[0]) selectedNames.add(versioned[0].name);
+  }
+
   const copied = [];
   for (const entry of entries) {
-    if (!entry.isFile() || !pluginPackagePatterns.some((pattern) => pattern.test(entry.name))) continue;
+    if (!entry.isFile() || !selectedNames.has(entry.name)) continue;
     const source = path.join(packageSourceDir, entry.name);
     const target = path.join(packageTargetDir, entry.name);
     await fs.mkdir(packageTargetDir, { recursive: true });
@@ -198,6 +228,7 @@ const manifest = {
   startupCommand: "npm start",
   includedFiles: filesToCopy,
   includedDirectories: directoriesToCopy,
+  includedUploads: includeUploads,
   includedPluginPackages
 };
 

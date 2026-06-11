@@ -36,6 +36,8 @@ function buildDbConfig() {
   const mysqlPassword = process.env.DB_PASSWORD || "";
   const poolMin = readNumberEnv("DB_POOL_MIN", 0);
   const poolMax = readNumberEnv("DB_POOL_MAX", 10);
+  const poolQueueLimit = readNumberEnv("DB_POOL_QUEUE_LIMIT", 100);
+  const poolAcquireTimeoutMs = readNumberEnv("DB_POOL_ACQUIRE_TIMEOUT_MS", 10000);
 
   if (poolMin < 0) {
     throw new Error(`DB_POOL_MIN must be >= 0, received ${poolMin}`);
@@ -43,6 +45,14 @@ function buildDbConfig() {
 
   if (poolMax < 1) {
     throw new Error(`DB_POOL_MAX must be >= 1, received ${poolMax}`);
+  }
+
+  if (poolQueueLimit < 0) {
+    throw new Error(`DB_POOL_QUEUE_LIMIT must be >= 0, received ${poolQueueLimit}`);
+  }
+
+  if (poolAcquireTimeoutMs < 1000) {
+    throw new Error(`DB_POOL_ACQUIRE_TIMEOUT_MS must be >= 1000, received ${poolAcquireTimeoutMs}`);
   }
 
   if (poolMin > poolMax) {
@@ -65,7 +75,9 @@ function buildDbConfig() {
     user: mysqlUser,
     password: mysqlPassword,
     poolMin,
-    poolMax
+    poolMax,
+    poolQueueLimit,
+    poolAcquireTimeoutMs
   };
 }
 
@@ -73,7 +85,7 @@ const dbConfig = buildDbConfig();
 
 export const config = {
   host: process.env.HOST || "",
-  port: readNumberEnv("PORT", 8787),
+  port: readNumberEnv("PORT", 8788),
   dbClient: dbConfig.client,
   dbHost: dbConfig.host,
   dbPort: dbConfig.port,
@@ -82,7 +94,9 @@ export const config = {
   dbPassword: dbConfig.password,
   dbPoolMin: dbConfig.poolMin,
   dbPoolMax: dbConfig.poolMax,
-  appBaseUrl: process.env.APP_BASE_URL || "http://localhost:8787",
+  dbPoolQueueLimit: dbConfig.poolQueueLimit,
+  dbPoolAcquireTimeoutMs: dbConfig.poolAcquireTimeoutMs,
+  appBaseUrl: process.env.APP_BASE_URL || "http://localhost:8788",
   localPluginSharedSecret: process.env.LOCAL_PLUGIN_SHARED_SECRET || "",
   localPluginPublicToken: process.env.LOCAL_PLUGIN_PUBLIC_TOKEN || "",
   listingMediaPublicBaseUrl: process.env.LISTING_MEDIA_PUBLIC_BASE_URL || process.env.PUBLIC_MEDIA_BASE_URL || "",

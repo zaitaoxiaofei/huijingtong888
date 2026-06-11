@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ArrowLeft, Delete, MagicStick, Refresh, Search, View } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { archiveMaterialAsset, listMaterialAssets } from "../../api/materialAssets";
+import { archiveMaterialAsset, deleteMaterialAsset, listMaterialAssets } from "../../api/materialAssets";
 import { withImageToken } from "../../api/tools/imageCropper";
 import { apiClient } from "../../utils/api";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
@@ -258,6 +258,23 @@ async function archiveAsset(row) {
   }
 }
 
+async function deleteAsset(row) {
+  if (!row?.id) return;
+  await ElMessageBox.confirm(`确定删除「${row.title || row.product_name || row.id}」吗？素材记录会从素材库移除，已注册的底层图片文件会保留。`, "删除素材记录", {
+    type: "warning",
+    confirmButtonText: "删除",
+    cancelButtonText: "取消"
+  });
+  deleting.value = true;
+  try {
+    await deleteMaterialAsset(row.id);
+    ElMessage.success("素材记录已删除");
+    await loadAssets();
+  } finally {
+    deleting.value = false;
+  }
+}
+
 async function deleteShopAsset(row) {
   if (!row?.id) return;
   await ElMessageBox.confirm(`确定删除「${assetTitle(row)}」吗？本地文件和素材记录都会删除。`, "删除素材", {
@@ -422,10 +439,11 @@ onMounted(loadAssets);
           <el-table-column label="更新时间" width="180">
             <template #default="{ row }">{{ formatTime(row.updated_at || row.updatedAt) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="150" fixed="right">
+          <el-table-column label="操作" width="190" fixed="right">
             <template #default="{ row }">
               <el-button class="erp-btn-link" size="small" link type="primary" :icon="View" @click="openPreview(row)">预览</el-button>
               <el-button class="erp-btn-link-danger" size="small" link type="danger" :icon="Delete" :loading="archiving" :disabled="row.status === 'archived'" @click="archiveAsset(row)">归档</el-button>
+              <el-button class="erp-btn-link-danger" size="small" link type="danger" :icon="Delete" :loading="deleting" @click="deleteAsset(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>

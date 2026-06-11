@@ -2,14 +2,19 @@ import { beginApiPerf, endApiPerf } from "./performance-monitor.js";
 
 const AUTH_TOKEN_KEY = "authToken";
 const GET_CACHE_TTL_MS = 30000;
+const PERSISTED_GET_CACHE_TTL_MS = 5 * 60 * 1000;
+const PERSISTED_GET_CACHE_PREFIX = "erp:get-cache:";
 const cachedGetPrefixes = [
   "/api/shops",
   "/api/people",
   "/api/suppliers",
-  "/api/logistics-rules"
+  "/api/logistics-rules",
+  "/api/db/seller-analytics/plugin-status",
+  "/api/system/update-status"
 ];
 let authRedirecting = false;
 const getCache = new Map();
+const getInflightCache = new Map();
 const routeScopedControllers = new Set();
 const routeAbortedSignals = new WeakSet();
 
@@ -50,6 +55,27 @@ function isCacheableGet(url, options = {}) {
   if (options.signal || options.noCache || options.cache === "no-store") return false;
   const path = String(url || "").split("?")[0];
   return cachedGetPrefixes.some((prefix) => path === prefix);
+}
+
+function readPersistedGetCache(key) {
+  try {
+    const cached = JSON.parse(window.sessionStorage?.getItem(`${PERSISTED_GET_CACHE_PREFIX}${key}`) || "null");
+    if (!cached || cached.expiresAt <= Date.now()) return null;
+    return cached.data;
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedGetCache(key, data) {
+  try {
+    window.sessionStorage?.setItem(`${PERSISTED_GET_CACHE_PREFIX}${key}`, JSON.stringify({
+      data,
+      expiresAt: Date.now() + PERSISTED_GET_CACHE_TTL_MS
+    }));
+  } catch {
+    // Ignore storage quota or privacy-mode failures.
+  }
 }
 
 function clearGetCacheForMutation(url = "") {
@@ -152,10 +178,24 @@ export const apiClient = {
     const key = String(url);
     const cached = getCache.get(key);
     if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.data);
-    return routeScopedGet(url, options).then((data) => {
+    const persisted = readPersistedGetCache(key);
+    if (persisted !== null) {
+      getCache.set(key, { data: persisted, expiresAt: Date.now() + GET_CACHE_TTL_MS });
+      return Promise.resolve(persisted);
+    }
+    const inflight = getInflightCache.get(key);
+    if (inflight) return inflight;
+    const requestOptions = { ...options };
+    delete requestOptions.routeScoped;
+    const requestPromise = request(url, { method: "GET", ...requestOptions }).then((data) => {
       getCache.set(key, { data, expiresAt: Date.now() + GET_CACHE_TTL_MS });
+      writePersistedGetCache(key, data);
       return data;
+    }).finally(() => {
+      getInflightCache.delete(key);
     });
+    getInflightCache.set(key, requestPromise);
+    return requestPromise;
   },
   post(url, body, options = {}) {
     clearGetCacheForMutation(url);

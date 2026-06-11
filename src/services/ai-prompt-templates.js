@@ -76,6 +76,112 @@ const DEFAULT_TEMPLATES = [
     sort_order: 30
   },
   {
+    name: "详情图生成-卖点说明图",
+    scene: "detail_image",
+    mode: "image_to_image",
+    description: "基于商品图生成详情页卖点说明图，适合展示材质、安装、尺寸和使用场景。",
+    positive_prompt: [
+      "Use the uploaded product image as the accurate product reference.",
+      "Create a marketplace detail image for {{product_name}}.",
+      "Detail image type: {{detail_image_type}}.",
+      "Target brand/model: {{target_brand}} {{target_model}}.",
+      "Material and color: {{material}}, {{color}}.",
+      "Key selling points: {{selling_points}}.",
+      "The layout should explain the benefit clearly with clean visual hierarchy.",
+      "Keep the product realistic, sharp, and consistent with the reference.",
+      "User extra instruction: {{user_prompt}}.",
+      "Aspect ratio: {{ratio}}."
+    ].join("\n"),
+    negative_prompt: [
+      "No watermark.",
+      "No fake certification badge.",
+      "No misleading official authorization.",
+      "No distorted product shape.",
+      "No unreadable text.",
+      "No extra accessories that are not in the source product."
+    ].join("\n"),
+    variables_json: JSON.stringify(defaultVariables()),
+    default_ratio: "3:4",
+    default_count: 1,
+    is_default: 1,
+    enabled: 1,
+    sort_order: 40
+  },
+  {
+    name: "标题生成-Ozon搜索标题",
+    scene: "title_generation",
+    mode: "text",
+    description: "生成覆盖品牌、车型、类目、材质和核心卖点的 Ozon 商品标题。",
+    positive_prompt: [
+      "Generate 5 Ozon product title options.",
+      "Product: {{product_name}}.",
+      "Target brand/model: {{target_brand}} {{target_model}}.",
+      "Category: {{ozon_category}}.",
+      "Material/color: {{material}}, {{color}}.",
+      "Required keywords: {{title_keywords}}.",
+      "Selling points: {{selling_points}}.",
+      "Keep titles concise, searchable, readable, and marketplace-compliant.",
+      "Avoid fake official claims and unsupported certification wording.",
+      "User extra instruction: {{user_prompt}}."
+    ].join("\n"),
+    negative_prompt: "No fake official authorization. No exaggerated claims. No unrelated brand names. No keyword stuffing.",
+    variables_json: JSON.stringify(defaultVariables()),
+    default_ratio: "3:4",
+    default_count: 1,
+    is_default: 1,
+    enabled: 1,
+    sort_order: 50
+  },
+  {
+    name: "标签生成-Ozon搜索标签",
+    scene: "tag_generation",
+    mode: "text",
+    description: "生成围绕品牌、车型、类目、材质、功能和场景的搜索标签。",
+    positive_prompt: [
+      "Generate Ozon search tags for {{product_name}}.",
+      "Target brand/model: {{target_brand}} {{target_model}}.",
+      "Category: {{ozon_category}}.",
+      "Material/color: {{material}}, {{color}}.",
+      "Seed keywords: {{tags_keywords}}.",
+      "Selling points: {{selling_points}}.",
+      "Group tags by brand/model, category, material, function, and usage scenario.",
+      "Return concise tags only, without unrelated words.",
+      "User extra instruction: {{user_prompt}}."
+    ].join("\n"),
+    negative_prompt: "No unrelated brands. No duplicate tags. No fake certification terms. No misleading compatibility claims.",
+    variables_json: JSON.stringify(defaultVariables()),
+    default_ratio: "3:4",
+    default_count: 1,
+    is_default: 1,
+    enabled: 1,
+    sort_order: 60
+  },
+  {
+    name: "描述生成-卖点与适配说明",
+    scene: "description_generation",
+    mode: "text",
+    description: "生成商品描述、卖点段落和适配说明，可用于简介或富文本草稿。",
+    positive_prompt: [
+      "Write a clear Ozon product description for {{product_name}}.",
+      "Target brand/model: {{target_brand}} {{target_model}}.",
+      "Category: {{ozon_category}}.",
+      "Material/color: {{material}}, {{color}}.",
+      "Description points: {{description_points}}.",
+      "Selling points: {{selling_points}}.",
+      "Include fitment, material benefits, installation notes, package reminder, and buyer reassurance.",
+      "Use concise marketplace copy with practical details.",
+      "Avoid unsupported official claims.",
+      "User extra instruction: {{user_prompt}}."
+    ].join("\n"),
+    negative_prompt: "No fake official authorization. No unsupported warranty promise. No exaggerated or unverifiable claims. No unrelated vehicle models.",
+    variables_json: JSON.stringify(defaultVariables()),
+    default_ratio: "3:4",
+    default_count: 1,
+    is_default: 1,
+    enabled: 1,
+    sort_order: 70
+  },
+  {
     name: "全局负面提示词-电商图片",
     scene: "global_negative",
     mode: "global",
@@ -116,6 +222,11 @@ export async function aiPromptTemplates(query = {}) {
     clauses.push("enabled = ?");
     params.push(Number(query.enabled) ? 1 : 0);
   }
+  const keyword = cleanText(query.keyword || query.q || query.search);
+  if (keyword) {
+    clauses.push("(name LIKE ? OR keywords LIKE ? OR description LIKE ? OR prompt_payload_json LIKE ?)");
+    params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+  }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const rows = await mysqlQuery(`
     SELECT *
@@ -139,17 +250,19 @@ export async function createAiPromptTemplate(body = {}, personId = null) {
   if (payload.is_default) await clearDefaultTemplate(payload.scene, payload.mode);
   const result = await mysqlExecute(`
     INSERT INTO ai_prompt_templates (
-      name, scene, mode, description, positive_prompt, negative_prompt, variables_json,
+      name, scene, mode, keywords, description, positive_prompt, negative_prompt, variables_json, prompt_payload_json,
       default_ratio, default_count, is_default, enabled, sort_order, created_by
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, [
     payload.name,
     payload.scene,
     payload.mode,
+    payload.keywords,
     payload.description,
     payload.positive_prompt,
     payload.negative_prompt,
     payload.variables_json,
+    payload.prompt_payload_json,
     payload.default_ratio,
     payload.default_count,
     payload.is_default,
@@ -173,10 +286,12 @@ export async function updateAiPromptTemplate(id, body = {}) {
     SET name = ?,
         scene = ?,
         mode = ?,
+        keywords = ?,
         description = ?,
         positive_prompt = ?,
         negative_prompt = ?,
         variables_json = ?,
+        prompt_payload_json = ?,
         default_ratio = ?,
         default_count = ?,
         is_default = ?,
@@ -188,10 +303,12 @@ export async function updateAiPromptTemplate(id, body = {}) {
     payload.name,
     payload.scene,
     payload.mode,
+    payload.keywords,
     payload.description,
     payload.positive_prompt,
     payload.negative_prompt,
     payload.variables_json,
+    payload.prompt_payload_json,
     payload.default_ratio,
     payload.default_count,
     payload.is_default,
@@ -250,10 +367,12 @@ export async function ensureAiPromptTemplateTable() {
       name VARCHAR(191) NOT NULL,
       scene VARCHAR(64) NOT NULL DEFAULT '',
       mode VARCHAR(64) NOT NULL DEFAULT '',
+      keywords TEXT NULL,
       description TEXT NULL,
       positive_prompt LONGTEXT NULL,
       negative_prompt LONGTEXT NULL,
       variables_json LONGTEXT NULL,
+      prompt_payload_json LONGTEXT NULL,
       default_ratio VARCHAR(16) NOT NULL DEFAULT '3:4',
       default_count INT NOT NULL DEFAULT 1,
       is_default TINYINT NOT NULL DEFAULT 0,
@@ -266,31 +385,50 @@ export async function ensureAiPromptTemplateTable() {
       INDEX idx_ai_prompt_templates_enabled (enabled)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
-  const count = await mysqlQuery("SELECT COUNT(*) AS count FROM ai_prompt_templates").then((rows) => Number(rows[0]?.count || 0));
-  if (!count) {
-    for (const item of DEFAULT_TEMPLATES) {
-      await mysqlExecute(`
-        INSERT INTO ai_prompt_templates (
-          name, scene, mode, description, positive_prompt, negative_prompt, variables_json,
-          default_ratio, default_count, is_default, enabled, sort_order
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [
-        item.name,
-        item.scene,
-        item.mode,
-        item.description,
-        item.positive_prompt,
-        item.negative_prompt,
-        item.variables_json,
-        item.default_ratio,
-        item.default_count,
-        item.is_default,
-        item.enabled,
-        item.sort_order
-      ]);
-    }
-  }
+  await addAiPromptTemplateColumn("keywords", "TEXT NULL");
+  await addAiPromptTemplateColumn("prompt_payload_json", "LONGTEXT NULL");
+  await ensureDefaultPromptTemplates();
   await ensureGlobalNegativeNoChineseRule();
+}
+
+async function addAiPromptTemplateColumn(column, definition) {
+  await mysqlExecute(`ALTER TABLE ai_prompt_templates ADD COLUMN ${column} ${definition}`).catch((error) => {
+    const message = String(error?.message || "");
+    if (message.includes("Duplicate column") || message.includes("重复")) return;
+    throw error;
+  });
+}
+
+async function ensureDefaultPromptTemplates() {
+  for (const item of DEFAULT_TEMPLATES) {
+    const exists = await mysqlQuery("SELECT id FROM ai_prompt_templates WHERE name = ? LIMIT 1", [item.name]).then((rows) => rows[0]);
+    if (exists) continue;
+    const defaultExists = item.is_default
+      ? await mysqlQuery(
+        "SELECT id FROM ai_prompt_templates WHERE scene = ? AND mode = ? AND is_default = 1 LIMIT 1",
+        [item.scene, item.mode]
+      ).then((rows) => rows[0])
+      : null;
+    await mysqlExecute(`
+      INSERT INTO ai_prompt_templates (
+        name, scene, mode, description, positive_prompt, negative_prompt, variables_json,
+        default_ratio, default_count, is_default, enabled, sort_order
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      item.name,
+      item.scene,
+      item.mode,
+      item.description,
+      item.positive_prompt,
+      item.negative_prompt,
+      item.variables_json,
+      item.default_ratio,
+      item.default_count,
+      defaultExists ? 0 : item.is_default,
+      item.enabled,
+      item.sort_order
+    ]);
+  }
 }
 
 async function ensureGlobalNegativeNoChineseRule() {
@@ -318,10 +456,12 @@ function normalizeTemplatePayload(body = {}) {
     name,
     scene: cleanText(body.scene || "main_image_variant"),
     mode: cleanText(body.mode || "image_to_image"),
+    keywords: normalizeKeywords(body.keywords ?? body.keywordText ?? body.keyword),
     description: cleanLongText(body.description),
     positive_prompt: cleanLongText(body.positive_prompt ?? body.positivePrompt),
     negative_prompt: cleanLongText(body.negative_prompt ?? body.negativePrompt),
     variables_json: normalizeVariablesJson(body.variables_json ?? body.variablesJson ?? body.variables),
+    prompt_payload_json: normalizeJsonText(body.prompt_payload_json ?? body.promptPayloadJson ?? body.promptPayload),
     default_ratio: cleanText(body.default_ratio ?? body.defaultRatio ?? "3:4") || "3:4",
     default_count: clampInteger(body.default_count ?? body.defaultCount, 1, 8, 1),
     is_default: Number(body.is_default ?? body.isDefault ?? 0) ? 1 : 0,
@@ -339,7 +479,10 @@ function normalizeTemplateRow(row = {}) {
     is_default: Number(row.is_default || 0),
     enabled: Number(row.enabled || 0),
     sort_order: Number(row.sort_order || 0),
-    variables: parseJsonArray(row.variables_json)
+    keywords: String(row.keywords || ""),
+    keywordList: splitKeywords(row.keywords),
+    variables: parseJsonArray(row.variables_json),
+    promptPayload: parseJsonObject(row.prompt_payload_json)
   };
 }
 
@@ -357,6 +500,27 @@ function normalizeVariablesJson(value) {
 
 function normalizeVariables(value = {}) {
   return Object.fromEntries(Object.entries(value || {}).map(([key, item]) => [key, item == null ? "" : String(item)]));
+}
+
+function normalizeJsonText(value) {
+  if (value == null || value === "") return "";
+  if (typeof value === "object") return JSON.stringify(value);
+  const text = String(value || "").trim();
+  if (!text) return "";
+  try {
+    return JSON.stringify(JSON.parse(text));
+  } catch {
+    return text;
+  }
+}
+
+function normalizeKeywords(value) {
+  if (Array.isArray(value)) return value.map((item) => cleanText(item)).filter(Boolean).join(", ");
+  return String(value || "")
+    .split(/\r?\n|[,，、;；]/)
+    .map((item) => cleanText(item))
+    .filter(Boolean)
+    .join(", ");
 }
 
 function renderTemplateText(template, variables) {
@@ -388,6 +552,10 @@ function defaultVariables() {
     "selling_points",
     "ozon_category",
     "main_image_style",
+    "detail_image_type",
+    "title_keywords",
+    "tags_keywords",
+    "description_points",
     "source_image_url",
     "replace_from_text",
     "replace_to_text",
@@ -404,6 +572,22 @@ function parseJsonArray(value) {
   } catch {
     return [];
   }
+}
+
+function parseJsonObject(value) {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function splitKeywords(value) {
+  return String(value || "")
+    .split(/\r?\n|[,，、;；]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function cleanText(value) {

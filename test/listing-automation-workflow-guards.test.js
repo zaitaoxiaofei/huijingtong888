@@ -1,0 +1,87 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+
+const listingAutomationViewSource = readFileSync(new URL("../frontend/admin/views/listing/ListingAutomationView.vue", import.meta.url), "utf8");
+const systemRulesSource = readFileSync(new URL("../AGENTS.md", import.meta.url), "utf8");
+
+test("listing automation selected SKU images keep drag sorting", () => {
+  assert.match(listingAutomationViewSource, /draggingImageIndex:\s*-1/);
+  assert.match(listingAutomationViewSource, /dragOverImageIndex:\s*-1/);
+  assert.match(listingAutomationViewSource, /function reorderVariantImage\(fromIndex, toIndex\)/);
+  assert.match(listingAutomationViewSource, /draggable="true"/);
+  assert.match(listingAutomationViewSource, /@dragstart="startVariantImageDrag\(imageIndex\)"/);
+  assert.match(listingAutomationViewSource, /@dragover\.prevent="variantImageEditor\.dragOverImageIndex = imageIndex"/);
+  assert.match(listingAutomationViewSource, /@drop="reorderVariantImage\(variantImageEditor\.draggingImageIndex, imageIndex\)"/);
+  assert.match(listingAutomationViewSource, /@dragend="finishVariantImageDrag"/);
+  assert.match(listingAutomationViewSource, /item\.sort_order = index \+ 1/);
+  assert.match(listingAutomationViewSource, /selected-card\.drag-over/);
+});
+
+test("listing automation SKU image library keeps tab sources separated", () => {
+  assert.match(listingAutomationViewSource, /function variantImageLibrarySources\(tab = "sku"\)/);
+  assert.match(listingAutomationViewSource, /if \(tab === "sku"\) return currentImages\.filter\(\(image, index\) => isSkuImageCandidate/);
+  assert.match(listingAutomationViewSource, /if \(tab === "detail"\) return templateDetailImageCandidates\(\)/);
+  assert.match(listingAutomationViewSource, /if \(tab === "ai"\) return aiGeneratedImageCandidates\(\)/);
+  assert.match(listingAutomationViewSource, /function isDetailImageCandidate/);
+  assert.match(listingAutomationViewSource, /generatedDetailImages/);
+});
+
+test("listing draft save does not overwrite manually selected SKU images from template", () => {
+  assert.match(listingAutomationViewSource, /function syncDraftImagesFromTemplateIfEmpty\(\)/);
+  assert.match(listingAutomationViewSource, /if \(draftForm\.source_images\.length\) return/);
+  const createDraftStart = listingAutomationViewSource.indexOf("async function createDraft()");
+  const saveCurrentStart = listingAutomationViewSource.indexOf("async function saveCurrentToDraft()");
+  const generateCopiesStart = listingAutomationViewSource.indexOf("async function generateCopies()");
+  assert.ok(createDraftStart > 0);
+  assert.ok(saveCurrentStart > createDraftStart);
+  assert.ok(generateCopiesStart > saveCurrentStart);
+  const createDraftSource = listingAutomationViewSource.slice(createDraftStart, saveCurrentStart);
+  const saveCurrentSource = listingAutomationViewSource.slice(saveCurrentStart, generateCopiesStart);
+  assert.match(createDraftSource, /await saveCurrentTemplateSnapshot\(\)/);
+  assert.match(createDraftSource, /syncDraftImagesFromTemplateIfEmpty\(\)/);
+  assert.doesNotMatch(createDraftSource, /applyTemplateToDraft\(\)/);
+  assert.match(saveCurrentSource, /syncDraftImagesFromTemplateIfEmpty\(\)/);
+  assert.doesNotMatch(saveCurrentSource, /applyTemplateToDraft\(\)/);
+});
+
+test("listing draft edit updates existing draft and syncs SKU image selections", () => {
+  assert.match(listingAutomationViewSource, /function syncDraftImagesFromVariantImages\(\)/);
+  assert.match(listingAutomationViewSource, /syncDraftImagesFromVariantImages\(\);\s*\n\s*variantImageEditor\.visible = false/);
+  assert.match(listingAutomationViewSource, /draftForm\.source_images = sourceImages/);
+  assert.match(listingAutomationViewSource, /const currentDraftId = Number\(state\.selectedDraftId \|\| 0\)/);
+  assert.match(listingAutomationViewSource, /apiClient\.put\(`\/api\/listing\/drafts\/\$\{currentDraftId\}`,\s*draftPayload\)/);
+  assert.match(listingAutomationViewSource, /apiClient\.post\("\/api\/listing\/drafts",\s*draftPayload\)/);
+});
+
+test("listing automation P0 guards keep publish and routed draft behavior safe", () => {
+  assert.match(listingAutomationViewSource, /const hasBootstrap = hasListingBootstrapParams\(\);/);
+  assert.match(listingAutomationViewSource, /localStorage\.removeItem\(listingWorkbenchDraftStorageKey\.value\);/);
+  assert.match(listingAutomationViewSource, /function normalizeAttributeForPayload\(item = \{\}\)/);
+  assert.match(listingAutomationViewSource, /const \{ selected_values, selectedValues, values, raw, \.\.\.payloadItem \} = item;/);
+  assert.match(listingAutomationViewSource, /\.map\(\(item\) => normalizeAttributeForPayload\(item\)\)/);
+  assert.match(listingAutomationViewSource, /dynamic_attributes: Object\.fromEntries/);
+  assert.match(listingAutomationViewSource, /function displayAttributeOptionLabel\(option = \{\}, field = \{\}\)/);
+  assert.match(listingAutomationViewSource, /return dictId \? "待同步字典值" : attributeOptionText\(option\);/);
+});
+
+test("listing automation P1 guards keep heavy attribute editing lazy", () => {
+  assert.match(listingAutomationViewSource, /const OPTIONAL_ATTRIBUTE_PAGE_SIZE = 12;/);
+  assert.match(listingAutomationViewSource, /optionalAttributeVisibleLimit \+= OPTIONAL_ATTRIBUTE_PAGE_SIZE/);
+  assert.match(listingAutomationViewSource, /function variantAttributeDisplayText\(row = \{\}, field = \{\}\)/);
+  assert.match(listingAutomationViewSource, /function openVariantAttributeEditor\(row = \{\}, field = \{\}\)/);
+  assert.match(listingAutomationViewSource, /class="variant-attribute-summary"/);
+  assert.match(listingAutomationViewSource, /v-if="variantAttributeDrawer\.visible" v-model="variantAttributeDrawer\.visible"/);
+  assert.match(listingAutomationViewSource, /v-if="attributeDrawer\.visible" v-model="attributeDrawer\.visible"/);
+  assert.match(listingAutomationViewSource, /v-if="publishValidation\.visible" v-model="publishValidation\.visible"/);
+  assert.doesNotMatch(listingAutomationViewSource, /setVariantAttributeValue\(row, field, \$event\)/);
+});
+
+test("listing automation protected workflow is documented in AGENTS", () => {
+  assert.match(systemRulesSource, /Listing Automation Protected Workflow/);
+  assert.match(systemRulesSource, /SKU image editing must keep image upload, manual URL entry, template-image reuse, image preview, selected-image deletion, and drag-and-drop sorting/);
+  assert.match(systemRulesSource, /Drag-and-drop sorting in the selected SKU image area is a protected behavior/);
+  assert.match(systemRulesSource, /Publish payloads must include only selected dictionary values/);
+  assert.match(systemRulesSource, /Routed entry points from drafts, publish records, online products, or collector data must not restore stale local listing drafts/);
+  assert.match(systemRulesSource, /Keep Ozon optional attributes paged in small batches/);
+});

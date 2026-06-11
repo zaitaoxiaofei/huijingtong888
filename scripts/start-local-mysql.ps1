@@ -84,6 +84,12 @@ if ($StartTunnel) {
 
 if ($StartApp) {
   Set-Location -LiteralPath $rootDir
+  if (-not $env:PORT) {
+    $env:PORT = if ($StartTunnel) { "8787" } else { "8788" }
+  }
+  if (-not $env:APP_BASE_URL) {
+    $env:APP_BASE_URL = "http://localhost:$($env:PORT)"
+  }
   Write-Host "Building frontend and starting ERP server..."
   & node scripts/start-with-build.mjs
   exit $LASTEXITCODE

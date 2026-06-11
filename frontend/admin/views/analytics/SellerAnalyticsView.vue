@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Refresh, Search, VideoPlay } from "@element-plus/icons-vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
@@ -14,11 +15,14 @@ import {
   getSellerAnalyticsPluginStatus,
   getSellerAnalyticsSnapshots,
   prepareSellerAnalyticsPlugin,
+  refreshSellerAnalyticsOperationTodos,
   retrySellerAnalyticsCollectRun,
+  startSellerAnalyticsDirectCollect,
   validateSellerAnalyticsPluginStatus
 } from "../../api/sellerAnalytics";
 import { apiClient } from "../../utils/api";
 
+const route = useRoute();
 const ANALYTICS_PAGE_SIZE = 30;
 const FILTER_CACHE_KEY_PREFIX = "ozon-erp:seller-analytics:filters";
 const DAILY_SYNC_PERIOD_KEYS = ["7d", "28d"];
@@ -217,6 +221,7 @@ const tableMetricColumns = [
 const loading = ref(false);
 const metaLoading = ref(false);
 const collecting = ref(false);
+const generatingTodos = ref(false);
 const bindingAuth = ref(false);
 const activePane = ref("metrics");
 const shops = ref([]);
@@ -516,6 +521,21 @@ const overviewFunnelStages = computed(() => {
     }
   ];
 });
+const overviewStatItems = computed(() => {
+  const metrics = overviewMetrics.value || {};
+  const exposure = summary.value.totalViews ?? metrics.totalViews ?? metrics.searchViews ?? 0;
+  const visits = metrics.pdpViews ?? metrics.cardViews ?? 0;
+  const carts = metrics.totalAddToCart ?? metrics.addToCart ?? 0;
+  const orders = summary.value.orderedUnits ?? metrics.orderedUnits ?? 0;
+  return [
+    { key: "revenue", label: "订购金额", value: summary.value.revenue, type: "money", helper: `订购数 ${formatMetric(orders, "int")}` },
+    { key: "orders", label: "订购数", value: orders, type: "int", helper: carts ? `加购到订购 ${formatFunnelRate(orders, carts) || "-"}` : "当前周期订单件数" },
+    { key: "exposure", label: "曝光", value: exposure, type: "int", helper: "总展示/搜索展示" },
+    { key: "visits", label: "访问", value: visits, type: "int", helper: exposure ? `曝光到访问 ${formatFunnelRate(visits, exposure) || "-"}` : "商品卡片访问" },
+    { key: "carts", label: "加购", value: carts, type: "int", helper: visits ? `访问到加购 ${formatFunnelRate(carts, visits) || "-"}` : "加购总计" },
+    { key: "accepted", label: "成交", value: metrics.acceptedUnits ?? metrics.purchasedUnits ?? orders, type: "int", helper: orders ? `订购成交 ${formatFunnelRate(metrics.acceptedUnits ?? metrics.purchasedUnits ?? orders, orders) || "-"}` : "有效成交件数" }
+  ];
+});
 const actionInsights = computed(() => {
   const rows = (focusProducts.value.length ? focusProducts.value : products.value).filter((row) => !row.isTotalsRow);
   const labelOf = (row) => row.product_name || row.offer_id || row.sku || "-";
@@ -657,20 +677,21 @@ function median(values) {
 }
 
 function getShopSellerStoreId(shop = {}) {
+  const source = shop || {};
   return String(
-    shop.seller_company_id ||
-    shop.sellerCompanyId ||
-    shop.ozon_company_id ||
-    shop.ozonCompanyId ||
-    shop.ozon_client_id ||
-    shop.ozonClientId ||
-    shop.store_client_id ||
-    shop.storeClientId ||
-    shop.client_id ||
-    shop.clientId ||
-    shop.company_id ||
-    shop.companyId ||
-    shop.id ||
+    source.seller_company_id ||
+    source.sellerCompanyId ||
+    source.ozon_company_id ||
+    source.ozonCompanyId ||
+    source.ozon_client_id ||
+    source.ozonClientId ||
+    source.store_client_id ||
+    source.storeClientId ||
+    source.client_id ||
+    source.clientId ||
+    source.company_id ||
+    source.companyId ||
+    source.id ||
     ""
   ).trim();
 }
@@ -713,6 +734,17 @@ function loadCachedFilter() {
   } catch {}
 }
 
+function applyRouteFilters() {
+  const query = route.query || {};
+  const shopId = String(query.shopId || query.shop_id || "").trim();
+  const keyword = String(query.keyword || query.query || "").trim();
+  const periodKey = String(query.periodKey || query.period_key || "").trim();
+  if (shopId && shops.value.some((shop) => String(shop.id) === shopId)) state.filters.shopId = shopId;
+  if (keyword) state.filters.keyword = keyword;
+  if (periodKey && periods.some((item) => item.value === periodKey)) state.filters.periodKey = periodKey;
+  if (shopId || keyword || periodKey) state.page = 1;
+}
+
 function cacheFilter() {
   localStorage.setItem(filterCacheKey(), JSON.stringify({
     shopId: state.filters.shopId,
@@ -750,29 +782,51 @@ async function loadShops() {
   if (!state.filters.shopId && first) state.filters.shopId = String(first.id);
 }
 
+function buildAnalysisQueryParams(overrides = {}) {
+  return {
+    ...periodParams.value,
+    tab_key: state.filters.tabKey,
+    keyword: state.filters.keyword,
+    store_id: selectedStoreId.value,
+    page: state.page,
+    product_limit: ANALYTICS_PAGE_SIZE,
+    focus_limit: 200,
+    sort_key: state.sortKey,
+    sort_order: state.sortOrder,
+    limit: 1000,
+    ...overrides
+  };
+}
+
 async function refreshData(silent = false) {
   if (!silent) loading.value = true;
   try {
     cacheFilter();
     markMetaStale();
-    const params = {
-      ...periodParams.value,
-      tab_key: state.filters.tabKey,
-      keyword: state.filters.keyword,
-      store_id: selectedStoreId.value,
-      page: state.page,
-      product_limit: ANALYTICS_PAGE_SIZE,
-      focus_limit: 200,
-      sort_key: state.sortKey,
-      sort_order: state.sortOrder,
-      limit: 1000
-    };
+    const params = buildAnalysisQueryParams();
     const nextAnalysis = await getSellerAnalyticsAnalysis(params);
     analysis.value = nextAnalysis || analysis.value;
     await loadRunsMeta(true);
     await loadActiveMetaPane(true);
   } finally {
     loading.value = false;
+  }
+}
+
+async function generateOperationTodos() {
+  generatingTodos.value = true;
+  try {
+    const result = await refreshSellerAnalyticsOperationTodos(buildAnalysisQueryParams({
+      page: 1,
+      product_limit: 100,
+      focus_limit: 500
+    }));
+    const payload = result?.data || result || {};
+    ElMessage.success(`已生成 ${Number(payload.todoCount || 0)} 条行动项，诊断 ${Number(payload.diagnosisCount || 0)} 个商品`);
+  } catch (error) {
+    ElMessage.error(error?.message || "生成行动项失败");
+  } finally {
+    generatingTodos.value = false;
   }
 }
 
@@ -880,6 +934,15 @@ function buildCollectPayload(overrides = {}) {
     company_id: selectedStoreId.value,
     ...overrides
   };
+}
+
+async function createCollectRunAndStartDirect(payload = {}) {
+  const result = await createSellerAnalyticsCollectRun(payload);
+  const direct = await startSellerAnalyticsDirectCollect(payload).catch((error) => ({
+    started: false,
+    reason: error?.message || String(error)
+  }));
+  return { result, direct };
 }
 
 async function ensureCollectReady() {
@@ -1023,10 +1086,14 @@ async function handleCollect(page = nextCollectPage.value) {
   const targetPage = Math.max(1, Number(page || nextCollectPage.value || 1));
   collecting.value = true;
   try {
-    const result = await createSellerAnalyticsCollectRun(buildCollectPayload({
+    const { result, direct } = await createCollectRunAndStartDirect(buildCollectPayload({
       page: targetPage,
     }));
-    ElMessage.success(result?.data?.reused ? "已存在进行中的采集批次，插件会继续同步" : "已创建采集批次，插件会在已登录的 Ozon 页面中同步");
+    if (direct?.started === false) {
+      ElMessage.warning("已创建采集批次，但后端直连暂未启动，请重新绑定当前店铺授权");
+    } else {
+      ElMessage.success(result?.data?.reused ? "已存在进行中的采集批次，后端会继续同步" : "已创建采集批次，后端将按目标店铺直连同步");
+    }
     await Promise.all([refreshData(true), loadRunsMeta(true)]);
   } finally {
     collecting.value = false;
@@ -1045,11 +1112,15 @@ async function collectFullStore() {
   if (!(await ensureCollectReady())) return;
   collecting.value = true;
   try {
-    const result = await createSellerAnalyticsCollectRun(buildCollectPayload({
+    const { result, direct } = await createCollectRunAndStartDirect(buildCollectPayload({
       auto_all_pages: true,
       full_store: true
     }));
-    ElMessage.success(result?.data?.reused ? "已存在进行中的全店采集批次，插件会继续同步" : "已创建全店自动采集，插件会在已登录的 Ozon 页面中同步");
+    if (direct?.started === false) {
+      ElMessage.warning("已创建全店采集批次，但后端直连暂未启动，请重新绑定当前店铺授权");
+    } else {
+      ElMessage.success(result?.data?.reused ? "已存在进行中的全店采集批次，后端会继续同步" : "已创建全店自动采集，后端将按目标店铺直连同步");
+    }
     await Promise.all([refreshData(true), loadRunsMeta(true)]);
   } finally {
     collecting.value = false;
@@ -1066,16 +1137,21 @@ async function collectDailyDefaultPeriods() {
   try {
     const results = [];
     for (const periodKey of DAILY_SYNC_PERIOD_KEYS) {
-      results.push(await createSellerAnalyticsCollectRun(buildCollectPayload({
+      results.push(await createCollectRunAndStartDirect(buildCollectPayload({
         period_key: periodKey,
         auto_all_pages: true,
         full_store: true
       })));
     }
-    const reusedCount = results.filter((result) => result?.data?.reused).length;
-    ElMessage.success(reusedCount
-      ? `已创建/复用 ${DAILY_SYNC_PERIOD_KEYS.length} 个日常同步批次，其中 ${reusedCount} 个已在进行中`
-      : "已创建近 7 天和近 28 天全店同步批次");
+    const reusedCount = results.filter((item) => item?.result?.data?.reused).length;
+    const directFailed = results.some((item) => item?.direct?.started === false);
+    if (directFailed) {
+      ElMessage.warning("已创建日常同步批次，但有店铺后端直连暂未启动，请重新绑定授权");
+    } else {
+      ElMessage.success(reusedCount
+        ? `已创建/复用 ${DAILY_SYNC_PERIOD_KEYS.length} 个日常同步批次，其中 ${reusedCount} 个已在进行中`
+        : "已创建近 7 天和近 28 天全店同步批次，后端将按目标店铺直连同步");
+    }
     await Promise.all([refreshData(true), loadRunsMeta(true)]);
   } finally {
     collecting.value = false;
@@ -1470,6 +1546,7 @@ onMounted(async () => {
   loadCachedFilter();
   if (!state.filters.dateRange?.length) state.filters.dateRange = [todayKey(-6), todayKey(-1)];
   await loadShops();
+  applyRouteFilters();
   await refreshData();
   await Promise.all([loadPluginStatus().catch(() => {}), loadPluginValidation().catch(() => {}), loadAuthBindingStatus().catch(() => {})]);
   startPolling();
@@ -1508,6 +1585,7 @@ onBeforeUnmount(() => {
         <div class="seller-toolbar__query">
           <el-button :icon="Search" @click="handleSearch">查询</el-button>
           <el-button :icon="Refresh" @click="refreshData()">刷新</el-button>
+          <el-button type="success" :loading="generatingTodos" @click="generateOperationTodos">生成行动项</el-button>
         </div>
         <el-select
           v-model="state.filters.tabKey"
@@ -1546,18 +1624,6 @@ onBeforeUnmount(() => {
             <em>{{ directSyncStatus.detail }}</em>
           </div>
         </div>
-        <div class="seller-sync-assistant__actions">
-          <el-button
-            v-if="!authBindingStatus?.bound || authBindingStatus?.stale"
-            type="warning"
-            size="large"
-            :loading="bindingAuth"
-            @click="bindCurrentShopAuth"
-          >
-            首次绑定授权
-          </el-button>
-          <el-button size="large" :loading="metaLoading" @click="loadPluginValidation">重新识别店铺</el-button>
-        </div>
         <div class="seller-sync-assistant__progress">
           <div class="seller-sync-assistant__progress-row" :class="`seller-sync-assistant__progress-row--${prepareFlow.tone}`">
             <el-tag :type="prepareFlow.tone === 'danger' ? 'danger' : prepareFlow.tone === 'success' ? 'success' : prepareFlow.tone === 'warning' ? 'warning' : 'info'" effect="light">
@@ -1574,6 +1640,18 @@ onBeforeUnmount(() => {
           </div>
           <el-progress v-if="runningRun" :percentage="progressPercent" :show-text="false" :stroke-width="6" class="seller-sync-assistant__progress-bar" />
         </div>
+        <div class="seller-sync-assistant__actions">
+          <el-button
+            v-if="!authBindingStatus?.bound || authBindingStatus?.stale"
+            type="warning"
+            size="large"
+            :loading="bindingAuth"
+            @click="bindCurrentShopAuth"
+          >
+            首次绑定授权
+          </el-button>
+          <el-button size="large" :loading="metaLoading" @click="loadPluginValidation">重新识别店铺</el-button>
+        </div>
       </section>
 
       <section class="seller-ozon-overview">
@@ -1584,17 +1662,10 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="seller-ozon-metrics">
-          <div class="seller-ozon-money">
-            <span>订购金额</span>
-            <strong>{{ formatMetric(summary.revenue, "money") }}</strong>
-            <em>订购数 {{ formatMetric(summary.orderedUnits, "int") }}</em>
-          </div>
-          <div class="seller-ozon-funnel">
-            <div v-for="stage in overviewFunnelStages" :key="stage.key" class="seller-ozon-funnel-stage">
-              <span>{{ stage.label }}</span>
-              <strong>{{ formatMetric(stage.value, stage.type) }}</strong>
-              <em v-if="stage.rate">{{ stage.rate }}</em>
-            </div>
+          <div v-for="item in overviewStatItems" :key="item.key" class="seller-ozon-metric">
+            <span>{{ item.label }}</span>
+            <strong>{{ formatMetric(item.value, item.type) }}</strong>
+            <em>{{ item.helper }}</em>
           </div>
         </div>
       </section>
@@ -1954,23 +2025,24 @@ onBeforeUnmount(() => {
 .seller-source-tabs--inline { align-self: center; align-items: center; height: 32px; }
 .seller-source-tabs button { flex: 0 0 auto; height: 32px; border: 1px solid var(--el-border-color); background: var(--el-bg-color); border-radius: 6px; padding: 0 11px; cursor: pointer; color: var(--el-text-color-regular); font-size: 14px; line-height: 30px; white-space: nowrap; }
 .seller-source-tabs button.is-active { border-color: var(--el-color-primary); color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
-.seller-sync-assistant { display: grid; grid-template-columns: minmax(170px, 240px) minmax(330px, 1fr) auto minmax(260px, 360px); gap: 10px; align-items: center; padding: 9px 12px; border: 1px solid rgba(37, 99, 235, 0.18); border-radius: 12px; background: radial-gradient(circle at 0% 0%, rgba(59, 130, 246, 0.14), transparent 30%), linear-gradient(135deg, #eff6ff 0%, #f8fafc 52%, #ecfeff 100%); box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06); }
+.seller-sync-assistant { display: grid; grid-template-columns: minmax(190px, 240px) minmax(520px, 1.15fr) minmax(430px, 1fr) max-content; gap: 10px; align-items: stretch; padding: 9px 12px; border: 1px solid rgba(37, 99, 235, 0.18); border-radius: 12px; background: radial-gradient(circle at 0% 0%, rgba(59, 130, 246, 0.14), transparent 30%), linear-gradient(135deg, #eff6ff 0%, #f8fafc 52%, #ecfeff 100%); box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06); }
 .seller-sync-assistant--success { border-color: rgba(34, 197, 94, 0.3); background: radial-gradient(circle at 0% 0%, rgba(34, 197, 94, 0.16), transparent 30%), linear-gradient(135deg, #f0fdf4 0%, #f8fafc 52%, #ecfeff 100%); }
 .seller-sync-assistant--warning { border-color: rgba(245, 158, 11, 0.32); background: radial-gradient(circle at 0% 0%, rgba(245, 158, 11, 0.18), transparent 30%), linear-gradient(135deg, #fffbeb 0%, #f8fafc 52%, #eff6ff 100%); }
 .seller-sync-assistant--danger { border-color: rgba(239, 68, 68, 0.28); background: radial-gradient(circle at 0% 0%, rgba(239, 68, 68, 0.16), transparent 30%), linear-gradient(135deg, #fef2f2 0%, #f8fafc 52%, #eff6ff 100%); }
-.seller-sync-assistant__copy { display: grid; gap: 3px; min-width: 0; }
+.seller-sync-assistant__copy { display: grid; gap: 3px; align-content: center; min-width: 0; }
 .seller-sync-assistant__copy strong { color: #0f172a; font-size: 16px; letter-spacing: .01em; }
-.seller-sync-assistant__copy span { overflow: hidden; color: #475569; font-size: 12px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.seller-sync-assistant__copy span { color: #475569; font-size: 12px; line-height: 1.35; white-space: normal; }
 .seller-sync-assistant__steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; min-width: 0; }
-.seller-sync-assistant__steps > div { display: grid; gap: 2px; min-width: 0; padding: 6px 8px; border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 9px; background: rgba(255, 255, 255, 0.72); backdrop-filter: blur(6px); }
+.seller-sync-assistant__steps > div { display: grid; gap: 2px; align-content: center; min-width: 0; padding: 6px 8px; border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 9px; background: rgba(255, 255, 255, 0.72); backdrop-filter: blur(6px); }
 .seller-sync-assistant__steps span { color: #64748b; font-size: 12px; }
-.seller-sync-assistant__steps strong { overflow: hidden; color: #0f172a; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
-.seller-sync-assistant__steps em { overflow: hidden; color: #64748b; font-size: 12px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
-.seller-sync-assistant__actions { display: flex; gap: 8px; justify-content: flex-end; white-space: nowrap; }
+.seller-sync-assistant__steps strong { color: #0f172a; font-size: 13px; line-height: 1.25; white-space: normal; }
+.seller-sync-assistant__steps em { color: #64748b; font-size: 12px; font-style: normal; line-height: 1.25; white-space: normal; }
+.seller-sync-assistant__actions { display: flex; flex-direction: column; gap: 8px; align-items: stretch; justify-content: center; white-space: nowrap; }
+.seller-sync-assistant__actions .el-button { margin-left: 0; }
 .seller-sync-assistant__progress { display: grid; gap: 5px; min-width: 0; padding: 7px 9px; border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 10px; background: rgba(255, 255, 255, 0.66); }
 .seller-sync-assistant__progress-row { display: flex; gap: 6px; align-items: center; min-width: 0; color: #64748b; font-size: 12px; }
 .seller-sync-assistant__progress-row .el-tag { flex: 0 0 auto; }
-.seller-sync-assistant__progress-row span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seller-sync-assistant__progress-row span { flex: 1 1 auto; min-width: 0; line-height: 1.35; white-space: normal; }
 .seller-sync-assistant__progress-row strong { flex: 0 0 auto; color: #0f172a; font-size: 13px; }
 .seller-sync-assistant__progress-row--success span { color: var(--el-color-success); }
 .seller-sync-assistant__progress-row--warning span { color: var(--el-color-warning); }
@@ -1994,22 +2066,11 @@ onBeforeUnmount(() => {
 .seller-collect-status--success > span { color: var(--el-color-success); }
 .seller-collect-status--warning > span { color: var(--el-color-warning); }
 .seller-collect-status--danger > span { color: var(--el-color-danger); }
-.seller-ozon-metrics { display: grid; grid-template-columns: minmax(178px, 220px) minmax(0, 1fr); gap: 6px; align-items: stretch; min-width: 0; }
-.seller-ozon-money { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "label value" "sub sub"; gap: 1px 8px; align-items: center; min-height: 38px; padding: 5px 8px; border-radius: 7px; border: 1px solid rgba(148, 163, 184, 0.16); background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7); }
-.seller-ozon-money span,
-.seller-ozon-funnel-stage span { color: var(--el-text-color-secondary); font-size: 12px; }
-.seller-ozon-money span { grid-area: label; }
-.seller-ozon-money strong { grid-area: value; overflow: hidden; color: var(--el-text-color-primary); font-size: 18px; line-height: 1.1; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
-.seller-ozon-money em,
-.seller-ozon-funnel-stage em { color: var(--el-text-color-secondary); font-style: normal; font-size: 12px; }
-.seller-ozon-money em { grid-area: sub; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.seller-ozon-funnel { display: grid; grid-template-columns: repeat(4, minmax(112px, 1fr)); align-items: stretch; overflow: hidden; border: 1px solid var(--el-border-color-lighter); border-radius: 7px; background: #fff; }
-.seller-ozon-funnel-stage { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "label rate" "value rate"; gap: 1px 8px; align-items: center; min-height: 38px; padding: 5px 8px; background: linear-gradient(90deg, #ffffff 0%, #f8fbff 100%); }
-.seller-ozon-funnel-stage + .seller-ozon-funnel-stage { border-left: 1px solid var(--el-border-color-lighter); }
-.seller-ozon-funnel-stage + .seller-ozon-funnel-stage::before { content: ""; position: absolute; left: -7px; top: 50%; width: 12px; height: 12px; border-top: 1px solid var(--el-border-color); border-right: 1px solid var(--el-border-color); background: #fff; transform: translateY(-50%) rotate(45deg); }
-.seller-ozon-funnel-stage span { grid-area: label; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.seller-ozon-funnel-stage strong { grid-area: value; overflow: hidden; color: var(--el-text-color-primary); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
-.seller-ozon-funnel-stage em { grid-area: rate; align-self: center; justify-self: end; color: #64748b; font-size: 12px; }
+.seller-ozon-metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; align-items: stretch; min-width: 0; }
+.seller-ozon-metric { display: grid; grid-template-rows: auto 1fr auto; gap: 2px; align-items: center; min-height: 42px; min-width: 0; padding: 5px 8px; border-radius: 7px; border: 1px solid rgba(148, 163, 184, 0.16); background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7); }
+.seller-ozon-metric span { overflow: hidden; color: var(--el-text-color-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.seller-ozon-metric strong { overflow: hidden; color: var(--el-text-color-primary); font-size: 16px; line-height: 1.12; text-overflow: ellipsis; white-space: nowrap; }
+.seller-ozon-metric em { overflow: hidden; color: var(--el-text-color-secondary); font-style: normal; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .seller-collect-progress { width: 100%; }
 .seller-insights { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .seller-insights--workbench { display: grid; margin-top: 4px; }
@@ -2244,10 +2305,10 @@ onBeforeUnmount(() => {
 
 @media (max-width: 1200px) {
   .seller-sync-assistant { grid-template-columns: 1fr; align-items: stretch; }
-  .seller-sync-assistant__actions { justify-content: flex-start; flex-wrap: wrap; }
-  .seller-ozon-overview { flex-direction: column; }
+  .seller-sync-assistant__actions { flex-direction: row; justify-content: flex-start; flex-wrap: wrap; }
+  .seller-ozon-overview { grid-template-columns: 1fr; }
   .seller-ozon-overview__head { min-width: 0; max-width: none; }
-  .seller-ozon-metrics { grid-template-columns: 122px minmax(0, 1fr); }
+  .seller-ozon-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .seller-collect-panel { min-width: 0; }
   .seller-insights { grid-template-columns: 1fr; }
 }

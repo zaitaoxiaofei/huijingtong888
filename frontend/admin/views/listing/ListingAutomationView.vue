@@ -1,11 +1,12 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { InfoFilled, Plus, Search, UploadFilled } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
 import { uploadCropperImage, uploadListingMedia, withImageToken } from "../../api/tools/imageCropper";
 import OzonCategorySelect from "../../components/listing/OzonCategorySelect.vue";
+import OzonRichContentEditor from "../../components/listing/OzonRichContentEditor.vue";
 
 const loading = ref(false);
 const searchingSku = ref(false);
@@ -13,6 +14,8 @@ const copyingSku = ref(false);
 const creatingDraft = ref(false);
 const generatingCopies = ref(false);
 const uploadingImage = ref(false);
+const generatingVariantCovers = ref(false);
+const generatingVariantVideos = ref(false);
 const loadingTemplate = ref(false);
 const savingTemplate = ref(false);
 const refreshingCopy = ref(false);
@@ -21,11 +24,17 @@ const validatingPublish = ref(false);
 const publishingToOzon = ref(false);
 const collectorTemplateApplied = ref(false);
 const showMoreAttributes = ref(false);
-const optionalAttributeVisibleLimit = ref(24);
+const OPTIONAL_ATTRIBUTE_PAGE_SIZE = 12;
+const optionalAttributeVisibleLimit = ref(OPTIONAL_ATTRIBUTE_PAGE_SIZE);
 const showApiDebug = ref(false);
+const richEditorVisible = ref(false);
 const sourceRawOmitted = ref(false);
 const ATTRIBUTE_OPTION_RENDER_LIMIT = 60;
+const COLOR_ATTRIBUTE_OPTION_LOAD_LIMIT = 300;
+const COLOR_ATTRIBUTE_IDS = new Set(["10096", "22814"]);
 const attributeValueLoading = reactive({});
+const attributeValueLoadTried = reactive({});
+const attributeValueCache = reactive({});
 const recordDraftApplied = ref(false);
 const templateKeyword = ref("");
 const selectedVariantRows = ref([]);
@@ -35,6 +44,11 @@ const materialReferencing = ref(false);
 const referencedMaterialPackage = ref(null);
 const route = useRoute();
 const router = useRouter();
+const workbenchId = computed(() => String(route.query.workbenchId || "").trim());
+const listingWorkbenchDraftStorageKey = computed(() => `listing-workbench-draft:${workbenchId.value || "default"}`);
+let listingDraftSaveTimer = null;
+let listingWorkbenchReady = false;
+let restoringListingWorkbenchDraft = false;
 const materialSearch = reactive({
   keyword: "",
   name: "",
@@ -48,7 +62,9 @@ const variantImageEditor = reactive({
   visible: false,
   row: null,
   selectedUrls: [],
-  activeTab: "sku"
+  activeTab: "sku",
+  draggingImageIndex: -1,
+  dragOverImageIndex: -1
 });
 const variantVideoEditor = reactive({
   visible: false,
@@ -101,6 +117,21 @@ const draftForm = reactive({
   shop_ids: []
 });
 
+const textVariantPolicy = reactive({
+  enabled: false,
+  baseShopId: "",
+  style: "light",
+  fields: ["title", "tags", "description"],
+  shopStyles: {}
+});
+
+const textVariantStyleOptions = [
+  { label: "轻量差异化", value: "light" },
+  { label: "高点击率", value: "ctr" },
+  { label: "场景化", value: "scene" },
+  { label: "材质卖点", value: "material" }
+];
+
 const templateEditor = reactive({
   id: "",
   ozon_category_id: "",
@@ -132,6 +163,11 @@ const templateEditor = reactive({
 
 const attributeDrawer = reactive({
   visible: false,
+  field: null
+});
+const variantAttributeDrawer = reactive({
+  visible: false,
+  row: null,
   field: null
 });
 
@@ -172,7 +208,37 @@ const mainAttributeFields = computed(() => {
 const hiddenAttributeCount = computed(() => Math.max(optionalSchemaAttributeFields.value.length - mainAttributeFields.value.length, 0));
 const selectedCopyJob = computed(() => state.copyJobs.find((item) => Number(item.id) === Number(state.selectedCopyJobId)) || null);
 const missingVariantOfferIds = computed(() => templateEditor.variants.filter((item) => !String(item.offer_id || "").trim()));
+const selectedTextVariantShops = computed(() => draftForm.shop_ids
+  .map((shopId) => state.shops.find((shop) => String(shop.id) === String(shopId)) || { id: shopId, name: `店铺 ${shopId}` }));
 const variantAttributeFields = computed(() => templateEditor.attributes.filter((field) => isVariantAttributeField(field)));
+const visibleVariantAttributeFields = computed(() => filterDuplicateVariantColorFields(dedupeVariantAttributeFields([
+  ...variantAttributeFields.value,
+  ...autoVariantAxisFields.value
+])));
+const showCollectedVariantOptionColumn = computed(() =>
+  visibleVariantAttributeFields.value.length === 0 && variantFieldHasDiverged("spec")
+);
+const collectedVariantOptionLabel = computed(() => variantSpecLooksLikeColor() ? "颜色" : "变体属性");
+const collectedVariantOptionOptions = computed(() => {
+  const colorMode = variantSpecLooksLikeColor();
+  const values = templateEditor.variants
+    .map((row) => String(row.spec || "").trim())
+    .filter(Boolean);
+  return Array.from(new Set(values)).map((value) => ({
+    value,
+    label: colorMode ? (translateColorValue(value) || value) : value
+  }));
+});
+const showLegacyVariantColorColumn = computed(() =>
+  visibleVariantAttributeFields.value.length === 0
+  && !showCollectedVariantOptionColumn.value
+  && variantFieldHasDiverged("color")
+);
+const showLegacyVariantSpecColumn = computed(() =>
+  visibleVariantAttributeFields.value.length === 0
+  && !showCollectedVariantOptionColumn.value
+  && variantFieldHasDiverged("spec")
+);
 const filteredTemplates = computed(() => {
   const keyword = String(templateKeyword.value || "").trim().toLowerCase();
   if (!keyword) return state.templates.slice(0, 8);
@@ -185,14 +251,138 @@ const filteredTemplates = computed(() => {
 function hasListingBootstrapParams() {
   return Boolean(
     Number(route.query.templateId || 0)
+    || Number(route.query.draftId || 0)
     || String(route.query.recordDraft || "").trim()
     || String(route.query.recordId || "").trim()
     || String(route.query.collectorSku || "").trim()
   );
 }
 
+function createWorkbenchId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function ensureListingWorkbenchRouteId() {
+  if (workbenchId.value) return;
+  await router.replace({
+    query: {
+      ...route.query,
+      workbenchId: createWorkbenchId()
+    }
+  }).catch(() => {});
+}
+
+function clonePlain(value, fallback) {
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return fallback;
+  }
+}
+
+function hasSavedListingWorkbenchDraft() {
+  try {
+    return Boolean(localStorage.getItem(listingWorkbenchDraftStorageKey.value));
+  } catch {
+    return false;
+  }
+}
+
+function createListingWorkbenchDraftSnapshot() {
+  return {
+    version: 1,
+    step: state.step,
+    selectedCopyJobId: state.selectedCopyJobId,
+    selectedDraftId: state.selectedDraftId,
+    searchedProduct: clonePlain(state.searchedProduct, null),
+    copies: clonePlain(state.copies, []),
+    copyForm: clonePlain(copyForm, {}),
+    draftForm: clonePlain(draftForm, {}),
+    textVariantPolicy: clonePlain(textVariantPolicy, {}),
+    templateEditor: clonePlain(templateEditor, {}),
+    showMoreAttributes: showMoreAttributes.value,
+    optionalAttributeVisibleLimit: optionalAttributeVisibleLimit.value,
+    sourceRawOmitted: sourceRawOmitted.value,
+    savedAt: new Date().toISOString()
+  };
+}
+
+function hasMeaningfulListingWorkbenchDraft(snapshot = createListingWorkbenchDraftSnapshot()) {
+  const editor = snapshot.templateEditor || {};
+  const draft = snapshot.draftForm || {};
+  return Boolean(
+    editor.id
+    || editor.title
+    || editor.template_name
+    || editor.category_name
+    || editor.images?.length
+    || editor.variants?.length
+    || draft.product_name
+    || draft.source_images?.length
+    || snapshot.copies?.length
+  );
+}
+
+function restoreListingWorkbenchDraft() {
+  let parsed = null;
+  try {
+    const raw = localStorage.getItem(listingWorkbenchDraftStorageKey.value);
+    if (!raw) return false;
+    parsed = JSON.parse(raw);
+  } catch {
+    localStorage.removeItem(listingWorkbenchDraftStorageKey.value);
+    return false;
+  }
+  if (!parsed || parsed.version !== 1) return false;
+  restoringListingWorkbenchDraft = true;
+  try {
+    Object.assign(copyForm, parsed.copyForm || {});
+    Object.assign(draftForm, parsed.draftForm || {});
+    Object.assign(textVariantPolicy, parsed.textVariantPolicy || {});
+    if (!textVariantPolicy.shopStyles || typeof textVariantPolicy.shopStyles !== "object") textVariantPolicy.shopStyles = {};
+    syncTextVariantShopStyles();
+    Object.assign(templateEditor, parsed.templateEditor || {});
+    state.step = parsed.step || "edit";
+    state.selectedCopyJobId = parsed.selectedCopyJobId ?? state.selectedCopyJobId;
+    state.selectedDraftId = parsed.selectedDraftId ?? state.selectedDraftId;
+    state.searchedProduct = parsed.searchedProduct || null;
+    state.copies = Array.isArray(parsed.copies) ? parsed.copies : [];
+    showMoreAttributes.value = Boolean(parsed.showMoreAttributes);
+    optionalAttributeVisibleLimit.value = Number(parsed.optionalAttributeVisibleLimit || OPTIONAL_ATTRIBUTE_PAGE_SIZE);
+    sourceRawOmitted.value = Boolean(parsed.sourceRawOmitted);
+    return true;
+  } finally {
+    restoringListingWorkbenchDraft = false;
+  }
+}
+
+function saveListingWorkbenchDraft() {
+  if (!listingWorkbenchReady || restoringListingWorkbenchDraft || !workbenchId.value) return;
+  const snapshot = createListingWorkbenchDraftSnapshot();
+  try {
+    if (!hasMeaningfulListingWorkbenchDraft(snapshot)) {
+      localStorage.removeItem(listingWorkbenchDraftStorageKey.value);
+      return;
+    }
+    localStorage.setItem(listingWorkbenchDraftStorageKey.value, JSON.stringify(snapshot));
+  } catch {
+    // Keep editing available even if browser storage is full.
+  }
+}
+
+function scheduleListingWorkbenchDraftSave() {
+  if (!listingWorkbenchReady || restoringListingWorkbenchDraft || !workbenchId.value) return;
+  if (listingDraftSaveTimer) window.clearTimeout(listingDraftSaveTimer);
+  listingDraftSaveTimer = window.setTimeout(() => {
+    listingDraftSaveTimer = null;
+    saveListingWorkbenchDraft();
+  }, 250);
+}
+
 async function loadAll() {
-  if (!hasListingBootstrapParams()) {
+  const hasBootstrap = hasListingBootstrapParams();
+  const hasLocalDraft = hasSavedListingWorkbenchDraft();
+  if (!hasBootstrap && !hasLocalDraft) {
     newBlankTemplate();
     state.templates = [];
     state.drafts = [];
@@ -207,24 +397,36 @@ async function loadAll() {
   loading.value = true;
   try {
     const templateId = Number(route.query.templateId || 0);
+    const draftId = Number(route.query.draftId || 0);
+    const recordId = Number(route.query.recordId || 0);
+    const hasRecordDraft = Boolean(String(route.query.recordDraft || "").trim());
+    const needsOnlyRouteRecord = Boolean(templateId || draftId || recordId || hasRecordDraft);
     const routeTemplateRequest = templateId
       ? apiClient.get(`/api/listing/templates/${templateId}?mode=editor`, { noCache: true }).catch(handleListingApiMissing)
       : Promise.resolve(null);
-    const templatesRequest = templateId
+    const routeDraftRequest = draftId
+      ? apiClient.get(`/api/listing/drafts/${draftId}`, { noCache: true }).catch(handleListingApiMissing)
+      : Promise.resolve(null);
+    const routeRecordRequest = recordId
+      ? apiClient.get(`/api/listing/publish-records/${recordId}`, { noCache: true }).catch(handlePublishRecordRouteMissing)
+      : Promise.resolve(null);
+    const templatesRequest = needsOnlyRouteRecord
       ? Promise.resolve([])
       : apiClient.get("/api/listing/templates", { noCache: true }).catch(handleListingApiMissing);
-    const draftsRequest = templateId
+    const draftsRequest = needsOnlyRouteRecord
       ? Promise.resolve([])
       : apiClient.get("/api/listing/drafts", { noCache: true }).catch(handleListingApiMissing);
-    const copyJobsRequest = templateId
+    const copyJobsRequest = needsOnlyRouteRecord
       ? Promise.resolve([])
       : apiClient.get("/api/listing/copy-jobs", { noCache: true }).catch(handleListingApiMissing);
-    const [shops, templates, drafts, copyJobs, routeTemplate] = await Promise.all([
+    const [shops, templates, drafts, copyJobs, routeTemplate, routeDraft, routeRecord] = await Promise.all([
       apiClient.get("/api/shops"),
       templatesRequest,
       draftsRequest,
       copyJobsRequest,
-      routeTemplateRequest
+      routeTemplateRequest,
+      routeDraftRequest,
+      routeRecordRequest
     ]);
     state.shops = Array.isArray(shops) ? shops.filter((shop) => shop.status !== "deleted") : [];
     state.templates = routeTemplate?.id
@@ -234,26 +436,82 @@ async function loadAll() {
     state.copyJobs = Array.isArray(copyJobs) ? copyJobs : [];
     if (!copyForm.shop_id && state.shops[0]) copyForm.shop_id = state.shops[0].id;
     if (!state.selectedCopyJobId && state.copyJobs[0]) state.selectedCopyJobId = state.copyJobs[0].id;
-    await applyTemplateFromRoute(routeTemplate);
+    if (hasLocalDraft && restoreListingWorkbenchDraft()) return;
+    if (!hasBootstrap) {
+      newBlankTemplate();
+      state.templates = [];
+      state.drafts = [];
+      state.copyJobs = [];
+      state.copies = [];
+      state.selectedCopyJobId = null;
+      state.selectedDraftId = null;
+      state.searchedProduct = null;
+      state.step = "edit";
+      return;
+    }
+    await applyTemplateFromRoute(routeTemplate, { safeOpen: true });
+    await applyListingDraftFromRoute(routeDraft);
     applyRecordDraftFromRoute();
+    await applyPublishRecordFromRoute(routeRecord);
   } finally {
     loading.value = false;
   }
 }
 
-async function applyTemplateFromRoute(routeTemplate = null) {
+async function applyTemplateFromRoute(routeTemplate = null, options = {}) {
   if (collectorTemplateApplied.value) return;
   const templateId = Number(route.query.templateId || 0);
   if (!templateId || templateEditor.id) return;
   const template = routeTemplate?.id ? routeTemplate : state.templates.find((item) => Number(item.id) === templateId);
   if (!template) return;
   collectorTemplateApplied.value = true;
-  fillTemplateEditor(template);
+  fillTemplateEditor(template, options);
   draftForm.template_id = template.id;
   state.step = "edit";
   showMoreAttributes.value = false;
-  optionalAttributeVisibleLimit.value = 40;
+  optionalAttributeVisibleLimit.value = OPTIONAL_ATTRIBUTE_PAGE_SIZE;
   ElMessage.success("已载入采集箱数据，请在商品上架页继续编辑");
+}
+
+async function applyListingDraftFromRoute(routeDraft = null) {
+  const draftId = Number(route.query.draftId || 0);
+  if (!draftId) return;
+  const draft = routeDraft?.id ? routeDraft : state.drafts.find((item) => Number(item.id) === draftId);
+  if (!draft) {
+    ElMessage.warning("草稿不存在或已被删除");
+    return;
+  }
+  state.selectedDraftId = draft.id;
+  state.drafts = [draft, ...state.drafts.filter((item) => Number(item.id) !== Number(draft.id))];
+  const templateId = Number(draft.template_id || 0);
+  if (templateId) {
+    const template = await apiClient.get(`/api/listing/templates/${templateId}?mode=editor`, { noCache: true }).catch(handleListingApiMissing);
+    if (template?.id) {
+      state.templates = [template, ...state.templates.filter((item) => Number(item.id) !== Number(template.id))];
+      fillTemplateEditor(template, { safeOpen: true });
+    }
+  }
+  Object.assign(draftForm, {
+    template_id: draft.template_id || draftForm.template_id,
+    product_name: draft.product_name || "",
+    internal_code: draft.internal_code || "",
+    source_urls: Array.isArray(draft.source_urls) ? draft.source_urls.join("\n") : "",
+    source_images: (Array.isArray(draft.source_images) ? draft.source_images : []).map((item) => {
+      const url = typeof item === "string" ? item : item?.url || "";
+      return { name: typeof item === "string" ? item : item?.name || url, url };
+    }).filter((item) => item.url),
+    cost_price: Number(draft.cost_price || 0),
+    sale_price: Number(draft.sale_price || 0),
+    length_cm: Number(draft.length_cm || 0),
+    width_cm: Number(draft.width_cm || 0),
+    height_cm: Number(draft.height_cm || 0),
+    weight_g: Number(draft.weight_g || 0),
+    color: draft.color || "",
+    spec: draft.spec || "",
+    quantity: Number(draft.quantity || 0)
+  });
+  state.step = "shops";
+  ElMessage.success("已载入草稿，可继续选择店铺并上架");
 }
 
 async function applyRecordDraftFromRoute() {
@@ -264,7 +522,7 @@ async function applyRecordDraftFromRoute() {
   try {
     const draft = JSON.parse(sessionStorage.getItem(key) || "{}");
     if (!draft?.template) throw new Error("empty draft");
-    fillTemplateEditor(draft.template);
+    fillTemplateEditor(draft.template, { safeOpen: true });
     const shopId = draft.shop_id || draft.template?.source_raw?.shop_id || "";
     draftForm.shop_ids = shopId ? [shopId] : [];
     showMoreAttributes.value = false;
@@ -273,6 +531,179 @@ async function applyRecordDraftFromRoute() {
   } catch {
     ElMessage.error("上架记录草稿读取失败，请从上架记录重新进入");
   }
+}
+
+async function applyPublishRecordFromRoute(routeRecord = null) {
+  if (recordDraftApplied.value) return;
+  const recordId = Number(route.query.recordId || 0);
+  if (!recordId) return;
+  recordDraftApplied.value = true;
+  const record = routeRecord?.id ? routeRecord : null;
+  if (!record) {
+    ElMessage.error("上架记录不存在或已被删除");
+    return;
+  }
+  const template = buildTemplateFromPublishRecord(record);
+  if (!template?.editable_payload && !template?.title) {
+    ElMessage.error("上架记录缺少可编辑模板数据");
+    return;
+  }
+  fillTemplateEditor(template, { safeOpen: true });
+  const shopId = record.shop_id || template.source_raw?.shop_id || template.editable_payload?.source_raw?.shop_id || "";
+  draftForm.shop_ids = shopId ? [shopId] : [];
+  showMoreAttributes.value = false;
+  state.step = "edit";
+  if (templateEditor.description_category_id && templateEditor.type_id) await hydrateRecordDraftCategory();
+  ElMessage.success(`已从上架记录 ${recordId} 载入可编辑草稿`);
+}
+
+function buildTemplateFromPublishRecord(row = {}) {
+  const snapshot = clonePlain(row.template_snapshot, null);
+  if (snapshot?.editable_payload) {
+    const editable = snapshot.editable_payload || {};
+    const sourceRaw = clonePlain(snapshot.source_raw || editable.source_raw || {}, {});
+    sourceRaw.record_id = row.id;
+    sourceRaw.shop_id = row.shop_id;
+    sourceRaw.from_publish_record = true;
+    if (!sourceRaw.offer_id) sourceRaw.offer_id = row.offer_id || editable.sku || "";
+    return {
+      ...snapshot,
+      id: "",
+      updated_at: row.updated_at || "",
+      template_name: snapshot.template_name || `上架记录 ${row.id} / ${row.offer_id || editable.sku || ""}`,
+      source_raw: sourceRaw,
+      editable_payload: {
+        ...editable,
+        source_raw: sourceRaw
+      }
+    };
+  }
+  const payload = clonePlain(row.request, { items: [] });
+  const item = Array.isArray(payload.items) ? payload.items[0] || {} : {};
+  const images = [item.primary_image, ...(Array.isArray(item.images) ? item.images : [])]
+    .filter(Boolean)
+    .map((url, index) => ({ url, sort_order: index + 1 }));
+  const attrs = Array.isArray(item.attributes) ? item.attributes : [];
+  const richJson = item.rich_content_json || publishRecordAttributeValue(item, [11254], ["JSON", "Rich", "rich"]);
+  const tags = splitTagValue(publishRecordAttributeValue(item, [23171, 10096], ["标签", "tag", "тег", "ключ"]));
+  const modelName = publishRecordAttributeValue(item, [9048], ["型号", "Модель"]) || `MODEL-${String(item.offer_id || row.offer_id || row.id || Date.now()).replace(/[^a-z0-9]+/gi, "").slice(-10).toUpperCase()}`;
+  const enrichedAttrs = normalizeEditorAttributes(attrs);
+  upsertPublishRecordAttribute(enrichedAttrs, [9048], ["型号", "Модель"], { name: "型号名称", attribute_id: 9048, value: modelName, required: true, source: "publish_record" });
+  if (tags.length) upsertPublishRecordAttribute(enrichedAttrs, [23171], ["标签", "tag", "тег", "ключ"], { name: "产品标签", attribute_id: 23171, value: tags.join(","), values: tags, type: "multiselect", source: "publish_record" });
+  if (richJson) upsertPublishRecordAttribute(enrichedAttrs, [11254], ["JSON", "Rich", "rich"], { name: "JSON富内容", attribute_id: 11254, value: richJson, type: "rich_json", source: "publish_record" });
+  const sourceRaw = { ...payload, record_id: row.id, shop_id: row.shop_id, offer_id: item.offer_id || row.offer_id || "", from_publish_record: true };
+  return {
+    id: "",
+    updated_at: row.updated_at || "",
+    ozon_category_id: item.description_category_id && item.type_id ? `${item.description_category_id}:${item.type_id}` : "",
+    category_name: row.category_name || item.category_name || "",
+    template_name: `上架记录 ${row.id} / ${item.offer_id || row.offer_id || ""}`,
+    title: item.name || row.product_name || "",
+    description: item.description || "",
+    attributes: enrichedAttrs,
+    images,
+    source_raw: sourceRaw,
+    editable_payload: {
+      sku: item.offer_id || row.offer_id || "",
+      title: item.name || row.product_name || "",
+      description: item.description || "",
+      description_category_id: item.description_category_id || "",
+      type_id: item.type_id || "",
+      legacy_category_id: item.description_category_id && item.type_id ? `${item.description_category_id}:${item.type_id}` : "",
+      price: { value: Number(item.price || row.price || 0), old_price: Number(item.old_price || row.old_price || 0), currency_code: item.currency_code || row.currency_code || "RUB", vat: item.vat || "0" },
+      dimensions: { length_cm: Number(item.depth || 0) / 10, width_cm: Number(item.width || 0) / 10, height_cm: Number(item.height || 0) / 10, weight_g: Number(item.weight || 0) },
+      logistics: { color: item.color || "", spec: item.material || "", quantity: item.quantity || "" },
+      rich_content_json: richJson,
+      category_name: row.category_name || item.category_name || "",
+      attributes: enrichedAttrs,
+      images,
+      variants: [{
+        id: `record-${row.id}`,
+        sku: item.offer_id || row.offer_id || "",
+        offer_id: item.offer_id || row.offer_id || "",
+        title: item.name || row.product_name || "",
+        images,
+        video_urls: publishRecordVideoUrls(item),
+        video_cover_urls: publishRecordVideoCoverUrls(item),
+        price: Number(item.price || row.price || 0),
+        old_price: Number(item.old_price || row.old_price || 0),
+        weight_g: Number(item.weight || 0),
+        length_mm: Number(item.depth || 0),
+        width_mm: Number(item.width || 0),
+        height_mm: Number(item.height || 0),
+        stock: Number(item.stock || 0)
+      }],
+      source_raw: sourceRaw
+    }
+  };
+}
+
+function publishRecordAttributeValue(item = {}, ids = [], names = []) {
+  const attrs = Array.isArray(item.attributes) ? item.attributes : [];
+  for (const attr of attrs) {
+    const attrId = Number(attr?.id || attr?.attribute_id || 0);
+    const name = String(attr?.name || attr?.attribute_name || "").toLowerCase();
+    if (!ids.some((id) => Number(id) === attrId) && !names.some((needle) => name.includes(String(needle).toLowerCase()))) continue;
+    const values = Array.isArray(attr.values) ? attr.values : [];
+    const firstValue = values.map((value) => value?.value || value?.name || value?.text || value).filter(Boolean)[0];
+    return String(attr.value || firstValue || "").trim();
+  }
+  return "";
+}
+
+function upsertPublishRecordAttribute(attributes, ids = [], names = [], payload = {}) {
+  const existing = attributes.find((item) => {
+    const attrId = Number(item?.attribute_id || item?.id || 0);
+    const name = String(item?.name || "").toLowerCase();
+    return ids.some((id) => Number(id) === attrId) || names.some((needle) => name.includes(String(needle).toLowerCase()));
+  });
+  if (existing) Object.assign(existing, payload);
+  else attributes.push(payload);
+}
+
+function publishRecordVideoUrls(item = {}) {
+  const direct = [
+    item.video_url,
+    ...(Array.isArray(item.video_urls) ? item.video_urls : []),
+    ...(Array.isArray(item.videos) ? item.videos : [])
+  ].filter(Boolean);
+  if (direct.length) return [...new Set(direct.map((url) => String(url || "").trim()).filter(Boolean))].slice(0, 1);
+  const complexGroups = Array.isArray(item.complex_attributes) ? item.complex_attributes : [];
+  const urls = [];
+  for (const group of complexGroups) {
+    for (const attr of Array.isArray(group?.attributes) ? group.attributes : []) {
+      for (const value of Array.isArray(attr?.values) ? attr.values : []) {
+        const text = String(value?.value || value?.file_url || value?.url || "").trim();
+        if (/\.(mp4|mov|webm)(\?|$)/i.test(text)) urls.push(text);
+      }
+    }
+  }
+  return [...new Set(urls)].slice(0, 1);
+}
+
+function publishRecordVideoCoverUrls(item = {}) {
+  const direct = [
+    item.video_cover_url,
+    item.cover_video_url,
+    ...(Array.isArray(item.video_cover_urls) ? item.video_cover_urls : []),
+    ...(Array.isArray(item.cover_video_urls) ? item.cover_video_urls : [])
+  ].filter(Boolean);
+  if (direct.length) {
+    return [...new Set(direct.map((url) => String(url || "").trim()).filter((url) => /\.(jpe?g|png|webp)(\?|$)/i.test(url)))].slice(0, 1);
+  }
+  const complexGroups = Array.isArray(item.complex_attributes) ? item.complex_attributes : [];
+  const urls = [];
+  for (const group of complexGroups) {
+    for (const attr of Array.isArray(group?.attributes) ? group.attributes : []) {
+      const attrId = Number(attr?.id || attr?.attribute_id || 0);
+      if (attrId && attrId !== 21845) continue;
+      for (const value of Array.isArray(attr?.values) ? attr.values : []) {
+        const text = String(value?.value || value?.file_url || value?.url || "").trim();
+        if (/\.(jpe?g|png|webp)(\?|$)/i.test(text)) urls.push(text);
+      }
+    }
+  }
+  return [...new Set(urls)].slice(0, 1);
 }
 
 async function hydrateRecordDraftCategory() {
@@ -302,6 +733,12 @@ function handleListingApiMissing(error) {
     return [];
   }
   throw error;
+}
+
+function handlePublishRecordRouteMissing(error) {
+  const message = String(error?.payload?.error || error?.message || "");
+  if (error?.status === 404 || message.includes("\u4e0a\u67b6\u8bb0\u5f55\u4e0d\u5b58\u5728")) return null;
+  return handleListingApiMissing(error);
 }
 
 async function searchSku() {
@@ -437,10 +874,43 @@ function prettyJson(value) {
 
 function selectAllShops() {
   draftForm.shop_ids = state.shops.filter((shop) => shop.status !== "deleted").map((shop) => shop.id);
+  ensureTextVariantBaseShop();
 }
 
 function clearSelectedShops() {
   draftForm.shop_ids = [];
+  textVariantPolicy.baseShopId = "";
+}
+
+function ensureTextVariantBaseShop() {
+  if (!draftForm.shop_ids.length) {
+    textVariantPolicy.baseShopId = "";
+    return;
+  }
+  if (!draftForm.shop_ids.some((id) => String(id) === String(textVariantPolicy.baseShopId))) {
+    textVariantPolicy.baseShopId = draftForm.shop_ids[0];
+  }
+  syncTextVariantShopStyles();
+}
+
+function syncTextVariantShopStyles() {
+  const selected = new Set(draftForm.shop_ids.map((id) => String(id)));
+  Object.keys(textVariantPolicy.shopStyles || {}).forEach((shopId) => {
+    if (!selected.has(String(shopId))) delete textVariantPolicy.shopStyles[shopId];
+  });
+  draftForm.shop_ids.forEach((shopId) => {
+    const key = String(shopId);
+    if (!textVariantPolicy.shopStyles[key]) textVariantPolicy.shopStyles[key] = textVariantPolicy.style || "light";
+  });
+}
+
+function setAllTextVariantStyles(style) {
+  textVariantPolicy.style = style;
+  draftForm.shop_ids.forEach((shopId) => {
+    if (String(shopId) !== String(textVariantPolicy.baseShopId)) {
+      textVariantPolicy.shopStyles[String(shopId)] = style;
+    }
+  });
 }
 
 async function handleOzonCategorySelected(category) {
@@ -469,7 +939,7 @@ async function syncSelectedCategoryAttributes() {
       return_value_limit: 30
     });
     mergeOzonCategoryAttributes(result.attributes || []);
-    optionalAttributeVisibleLimit.value = 24;
+    optionalAttributeVisibleLimit.value = OPTIONAL_ATTRIBUTE_PAGE_SIZE;
     showMoreAttributes.value = false;
     ElMessage.success(`已同步 ${result.saved || 0} 个类目属性`);
   } finally {
@@ -494,7 +964,7 @@ async function syncFullCategorySchema() {
       return_value_limit: 50
     });
     mergeOzonCategoryAttributes(result.attributes || []);
-    optionalAttributeVisibleLimit.value = 40;
+    optionalAttributeVisibleLimit.value = OPTIONAL_ATTRIBUTE_PAGE_SIZE;
     showMoreAttributes.value = true;
     ElMessage.success(`Full schema synced: ${result.saved || 0} attributes, ${result.values_saved || 0} values`);
   } finally {
@@ -665,7 +1135,8 @@ async function importCollectedProductJson() {
   }
 }
 
-function fillTemplateEditor(template) {
+function fillTemplateEditor(template, options = {}) {
+  const safeOpen = Boolean(options.safeOpen);
   const editable = template.editable_payload || {};
   const price = editable.price || {};
   const dimensions = editable.dimensions || {};
@@ -702,14 +1173,30 @@ function fillTemplateEditor(template) {
   applyOzonAttributeMappings();
   templateEditor.images = normalizeEditorImages(template.images || editable.images || []);
   templateEditor.variants = normalizeEditorVariants(editable.variants || template.variants || []);
+  if (isAiOptimizationTemplate(template) && templateEditor.images.length && templateEditor.variants.length) {
+    templateEditor.variants[0].images = templateEditor.images.map((item, index) => ({ ...item, sort_order: index + 1 }));
+  }
   if (!templateEditor.variants.length && (templateEditor.title || templateEditor.images.length)) addVariantRow();
-  sourceRawOmitted.value = Boolean(template.source_raw_omitted);
-  templateEditor.rawJson = sourceRawOmitted.value ? "" : JSON.stringify(template.source_raw || editable.source_raw || editable.raw_request || {}, null, 2);
+  sourceRawOmitted.value = safeOpen || Boolean(template.source_raw_omitted);
+  if (!safeOpen) {
+    templateEditor.rawJson = sourceRawOmitted.value ? "" : JSON.stringify(template.source_raw || editable.source_raw || editable.raw_request || {}, null, 2);
+  } else {
+    templateEditor.rawJson = "";
+  }
   templateEditor.updated_at = template.updated_at || "";
 }
 
 function firstNonEmptyArray(...values) {
   return values.find((value) => Array.isArray(value) && value.length) || [];
+}
+
+function isAiOptimizationTemplate(template = {}) {
+  const sourceType = String(template.source_type || template.sourceType || "").toLowerCase();
+  const editable = template.editable_payload || template.editablePayload || {};
+  const sourceRaw = template.source_raw || template.sourceRaw || editable.source_raw || editable.sourceRaw || {};
+  return sourceType.includes("ai_optimization")
+    || Boolean(sourceRaw.ai_optimization || sourceRaw.aiOptimization)
+    || Boolean(editable.ai_optimization || editable.aiOptimization);
 }
 
 function applyTemplateAttributeFallbacks(editable = {}, logistics = {}) {
@@ -754,7 +1241,7 @@ function normalizeIncomingAttributeValue(item = {}) {
 }
 
 function fixedAttributeNames() {
-  return ["标题", "品牌", "包装重量", "包装尺寸", "重量", "尺寸", "型号", "型号名称", "产品标签", "主题标签", "主图标签", "简介", "JSON富内容", "颜色"];
+  return ["标题", "品牌", "包装重量", "包装尺寸", "重量", "尺寸", "型号", "型号名称", "产品标签", "主题标签", "主图标签", "简介", "JSON富内容"];
 }
 
 function attributeFieldKey(field = {}) {
@@ -808,6 +1295,55 @@ function getVariantAttributeValue(row = {}, field = {}) {
 
 function setVariantAttributeValue(row = {}, field = {}, value) {
   variantAttributeEntry(row, field).value = normalizeVariantAttributeValueForField(value, field);
+}
+
+function variantAttributeSelectModelValue(row = {}, field = {}) {
+  return getVariantAttributeValue(row, field);
+}
+
+function updateVariantAttributeSelectValue(row = {}, field = {}, value) {
+  setVariantAttributeValue(row, field, value);
+  if (isColorAttributeField(field)) {
+    row.color_values = normalizeColorValues(value);
+    row.color = normalizeColorForPayload(row);
+  }
+}
+
+function attributeOptionModelValue(option = {}) {
+  return option?.value ?? option?.label ?? option?.name ?? option?.text ?? "";
+}
+
+function variantAttributeDisplayText(row = {}, field = {}) {
+  const entry = variantAttributeEntry(row, field);
+  const selectedValues = Array.isArray(entry.selected_values || entry.selectedValues) ? (entry.selected_values || entry.selectedValues) : [];
+  if (selectedValues.length) {
+    const labels = selectedValues.map((item) => item?.display_value_zh || item?.label || item?.value || item?.name || item?.text || "").filter(Boolean);
+    if (labels.length) return labels.join(", ");
+  }
+  if (entry.display_value_zh || entry.label) return String(entry.display_value_zh || entry.label || "").trim();
+  const value = entry.value;
+  const values = Array.isArray(value) ? value : [value];
+  const labels = values.map((item) => {
+    if (item && typeof item === "object") return item.display_value_zh || item.label || item.value || item.name || item.text || "";
+    const text = String(item || "").trim();
+    if (!text) return "";
+    const matchedById = renderedAttributeOptions(field).find((option) =>
+      [option?.dictionary_value_id, option?.id, option?.value_id].some((id) => String(id || "") === text)
+    );
+    if (matchedById) return displayAttributeOptionLabel(matchedById, field);
+    const matchedByValue = renderedAttributeOptions(field).find((option) =>
+      [option?.value, option?.label, option?.name, option?.text].some((candidate) => String(candidate || "") === text)
+    );
+    return matchedByValue ? displayAttributeOptionLabel(matchedByValue, field) : text;
+  }).filter(Boolean);
+  return labels.join(", ") || "未填写";
+}
+
+function openVariantAttributeEditor(row = {}, field = {}) {
+  variantAttributeDrawer.row = row;
+  variantAttributeDrawer.field = field;
+  ensureAttributeValuesLoaded(field, true);
+  variantAttributeDrawer.visible = true;
 }
 
 function applyCleanRecordAttributeFallbacks(editable = {}, logistics = {}) {
@@ -899,6 +1435,47 @@ function attributeOptionLabel(option = {}) {
   return candidates.find(hasChineseText) || cleanAttributeOptionLabel(option.label || option.value || option.name || option.text || "");
 }
 
+function displayAttributeOptionLabel(option = {}, field = {}) {
+  const label = attributeOptionLabel(option);
+  if (label) return label;
+  const dictId = option?.dictionary_value_id || option?.id || option?.value_id;
+  return dictId ? "待同步字典值" : attributeOptionText(option);
+}
+
+function selectedAttributeOptions(item = {}) {
+  const selectedValues = [
+    ...(Array.isArray(item.selected_values) ? item.selected_values : []),
+    ...(Array.isArray(item.selectedValues) ? item.selectedValues : [])
+  ];
+  if (selectedValues.length) return selectedValues;
+  const currentValues = Array.isArray(item.value) ? item.value : [item.value];
+  const currentSet = new Set(currentValues.map((value) => String(value || "").trim()).filter(Boolean));
+  if (!currentSet.size) return [];
+  return (Array.isArray(item.values) ? item.values : []).filter((option) => {
+    const candidates = [
+      option?.value,
+      option?.label,
+      option?.name,
+      option?.text,
+      option?.dictionary_value_id,
+      option?.id
+    ].map((value) => String(value || "").trim()).filter(Boolean);
+    return candidates.some((value) => currentSet.has(value));
+  });
+}
+
+function normalizeAttributeForPayload(item = {}) {
+  const { selected_values, selectedValues, values, raw, ...payloadItem } = item;
+  const selectedPayloadValues = selectedAttributeOptions(item)
+    .map((option) => ({
+      dictionary_value_id: Number(option?.dictionary_value_id || option?.id || option?.value_id || 0) || undefined,
+      value: String(option?.value || option?.label || option?.name || option?.text || "").trim()
+    }))
+    .filter((option) => option.dictionary_value_id || option.value);
+  const value = Array.isArray(item.value) ? item.value.filter(Boolean) : item.value;
+  return { ...payloadItem, value, values: selectedPayloadValues };
+}
+
 const editorCurrencyCode = computed(() => String(templateEditor.currency_code || "RUB").trim().toUpperCase() || "RUB");
 
 function attributeNameText(field = {}) {
@@ -939,7 +1516,7 @@ function variantOptionQuality(field = {}, kind = "color") {
 
 function findVariantDictionaryAttribute(kind = "color", options = {}) {
   const excludeIds = new Set((options.excludeIds || []).map((id) => String(id || "")));
-  const strongIds = kind === "color" ? new Set(["10096"]) : new Set(["4295", "4298", "4299"]);
+  const strongIds = kind === "color" ? new Set(["10096", "22814"]) : new Set(["4295", "4298", "4299"]);
   const weakIds = kind === "color" ? new Set(["8229"]) : new Set([]);
   const positive = kind === "color"
     ? ["color", "colour", "цвет", "цветтовара", "основнойцвет", "расцветка", "окраска", "颜色", "颜色分类"]
@@ -973,6 +1550,161 @@ const variantColorAttribute = computed(() => findVariantDictionaryAttribute("col
 const variantSpecAttribute = computed(() => findVariantDictionaryAttribute("spec", {
   excludeIds: [variantColorAttribute.value?.attribute_id, 9048]
 }));
+const autoVariantAxisFields = computed(() => {
+  const manualKeys = new Set(variantAttributeFields.value.map((field) => attributeFieldKey(field)));
+  return dedupeVariantAttributeFields([
+    ...templateEditor.attributes,
+    ...variantDynamicAttributeFields()
+  ])
+    .filter((field) => !manualKeys.has(attributeFieldKey(field)))
+    .filter(isAutoVariantAxisField);
+});
+
+function variantDynamicAttributeFields() {
+  const byKey = new Map();
+  templateEditor.variants.forEach((row) => {
+    const map = row?.dynamic_attributes || row?.dynamicAttributes || {};
+    if (!map || typeof map !== "object" || Array.isArray(map)) return;
+    Object.entries(map).forEach(([key, entry]) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
+      const attributeId = String(entry.attribute_id || entry.id || (/^\d+$/.test(String(key)) ? key : "") || "").trim();
+      const fieldKey = attributeId || String(entry.name || entry.attribute_name || key || "").trim();
+      if (!fieldKey) return;
+      const previous = byKey.get(fieldKey) || {};
+      byKey.set(fieldKey, mergeVariantDynamicAttributeField(previous, {
+        name: entry.name || entry.attribute_name || previous.name || key,
+        attribute_id: attributeId || previous.attribute_id || "",
+        type: entry.type || previous.type || (entry.dictionary_id || entry.values?.length || entry.selected_values?.length ? "select" : "text"),
+        dictionary_id: entry.dictionary_id || previous.dictionary_id || "",
+        is_collection: Boolean(entry.is_collection || previous.is_collection),
+        values: [
+          ...(previous.values || []),
+          ...(Array.isArray(entry.selected_values) ? entry.selected_values : []),
+          ...(Array.isArray(entry.selectedValues) ? entry.selectedValues : []),
+          ...(Array.isArray(entry.values) ? entry.values : [])
+        ],
+        source: entry.source || previous.source || "variant_dynamic_attribute",
+        sort_order: previous.sort_order || templateEditor.attributes.length + byKey.size + 1
+      }));
+    });
+  });
+  return [...byKey.values()];
+}
+
+function mergeVariantDynamicAttributeField(previous = {}, next = {}) {
+  return {
+    ...previous,
+    ...next,
+    values: dedupeAttributeOptions([...(previous.values || []), ...(next.values || [])])
+  };
+}
+
+function dedupeAttributeOptions(options = []) {
+  const seen = new Set();
+  return options.filter((option) => {
+    const key = String(option?.dictionary_value_id || option?.id || option?.value_id || option?.value || option?.label || "").trim();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function dedupeVariantAttributeFields(fields = []) {
+  const seen = new Set();
+  return fields.filter((field) => {
+    const key = attributeFieldKey(field);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function filterDuplicateVariantColorFields(fields = []) {
+  const colorFields = fields.filter(isColorAttributeField);
+  if (colorFields.length <= 1) return fields;
+  const keep = colorFields
+    .map((field) => ({ field, score: variantColorAxisQualityScore(field) }))
+    .sort((left, right) => right.score - left.score)[0]?.field;
+  const keepKey = attributeFieldKey(keep || {});
+  return fields.filter((field) => !isColorAttributeField(field) || attributeFieldKey(field) === keepKey);
+}
+
+function normalizeArray(value) {
+  if (Array.isArray(value)) return value;
+  if (value === undefined || value === null || value === "") return [];
+  return [value];
+}
+
+function variantColorAxisQualityScore(field = {}) {
+  const values = templateEditor.variants.map((row) => variantAttributeDisplayText(row, field)).filter(Boolean);
+  const uniqueCount = new Set(values).size;
+  const entries = templateEditor.variants.map((row) => findVariantDynamicAttributeEntry(row, field)).filter(Boolean);
+  const zhCount = entries.filter((entry) => String(entry.display_value_zh || entry.label || "").trim()).length;
+  const selectedIdCount = entries.flatMap((entry) => normalizeArray(entry.selected_values || entry.selectedValues || entry.values))
+    .filter((item) => Number(item?.dictionary_value_id || item?.id || item?.value_id || 0))
+    .length;
+  const repairedCount = entries.filter((entry) => String(entry.source || "").includes("repair")).length;
+  const id = Number(field.attribute_id || field.id || 0);
+  return uniqueCount * 100 + zhCount * 10 + selectedIdCount * 4 + repairedCount * 20 + (COLOR_ATTRIBUTE_IDS.has(String(id)) ? 8 : 0);
+}
+
+function isAutoVariantAxisField(field = {}) {
+  if (!field || !templateEditor.variants.length) return false;
+  const id = Number(field.attribute_id || field.id || 0);
+  if ([85, 9048, 23171, 4191, 11254].includes(id)) return false;
+  if (isColorAttributeField(field)) {
+    return hasDivergedVariantAttributeValue(field) || variantFieldHasDiverged("color") || templateEditor.variants.some((row) => normalizeColorValues(row.color_values?.length ? row.color_values : row.color).length);
+  }
+  if (!Number(field.dictionary_id || 0) && !Array.isArray(field.values) && !field.attribute_id) return false;
+  return hasDivergedVariantAttributeValue(field);
+}
+
+function hasDivergedVariantAttributeValue(field = {}) {
+  const values = templateEditor.variants
+    .map((row) => normalizedVariantAttributeAxisValue(row, field))
+    .filter(Boolean);
+  return new Set(values).size > 1;
+}
+
+function normalizedVariantAttributeAxisValue(row = {}, field = {}) {
+  const value = rawVariantDynamicAttributeValue(row, field);
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .map((item) => {
+      if (item && typeof item === "object") {
+        return String(item.dictionary_value_id || item.id || item.value_id || item.value || item.label || item.name || item.text || "").trim();
+      }
+      return String(item || "").trim();
+    })
+    .filter(Boolean)
+    .sort()
+    .join("|");
+}
+
+function findVariantDynamicAttributeEntry(row = {}, field = {}) {
+  const map = row?.dynamic_attributes || row?.dynamicAttributes || {};
+  if (!map || typeof map !== "object" || Array.isArray(map)) return null;
+  const targetId = String(field.attribute_id || field.id || "").trim();
+  if (targetId) {
+    for (const [key, entry] of Object.entries(map)) {
+      const entryId = String(entry?.attribute_id || entry?.id || (/^\d+$/.test(String(key)) ? key : "")).trim();
+      if (entryId === targetId || String(key || "").trim() === targetId) return entry;
+    }
+    return null;
+  }
+  const targetName = compactAttributeText(field.name || field.attribute_name || field.raw?.name || "");
+  if (!targetName) return null;
+  for (const [key, entry] of Object.entries(map)) {
+    const entryName = compactAttributeText(entry?.name || entry?.attribute_name || key);
+    if (entryName && (entryName.includes(targetName) || targetName.includes(entryName))) return entry;
+  }
+  return null;
+}
+
+function rawVariantDynamicAttributeValue(row = {}, field = {}) {
+  const entry = findVariantDynamicAttributeEntry(row, field);
+  return entry?.value ?? entry?.values ?? "";
+}
 
 function variantDictionaryOptions(field = {}) {
   return renderedAttributeOptions(field)
@@ -1096,8 +1828,13 @@ function normalizeColorForPayload(row = {}) {
   return values.join(", ");
 }
 
-function variantColorOptions(row = {}) {
-  const values = [...normalizeColorValues(row.color), ...normalizeColorValues(row.color_values), ...variantDictionaryOptions(variantColorAttribute.value || {})];
+function variantColorOptions(row = {}, field = variantColorAttribute.value || {}) {
+  const values = [
+    ...normalizeColorValues(row.color),
+    ...normalizeColorValues(row.color_values),
+    ...normalizeColorValues(getVariantAttributeValue(row, field)),
+    ...variantDictionaryOptions(field || {})
+  ];
   return Array.from(new Set(values.filter(Boolean))).map((value) => ({
     value,
     label: translateColorValue(value) || value
@@ -1108,11 +1845,34 @@ function syncVariantColor(row) {
   if (!row) return;
   row.color_values = normalizeColorValues(row.color_values);
   row.color = normalizeColorForPayload(row);
+  if (variantColorAttribute.value) setVariantAttributeValue(row, variantColorAttribute.value, row.color_values);
+}
+
+function updateVariantColorAttribute(row = {}, field = {}, value = []) {
+  row.color_values = normalizeColorValues(value);
+  row.color = normalizeColorForPayload(row);
+  setVariantAttributeValue(row, field, row.color_values);
 }
 
 function ensureVariantDictionaryOptions(field = {}, visible = true) {
   if (!field) return;
   ensureAttributeValuesLoaded(field, visible);
+}
+
+function attributeValueCacheKey(field = {}) {
+  return [
+    templateEditor.description_category_id,
+    templateEditor.type_id,
+    field.attribute_id,
+    isColorAttributeField(field) ? "color" : "default"
+  ].map((item) => String(item || "").trim()).join(":");
+}
+
+function isColorAttributeField(field = {}) {
+  const id = String(field.attribute_id || field.id || "").trim();
+  if (COLOR_ATTRIBUTE_IDS.has(id)) return true;
+  const text = attributeTextBag(field);
+  return ["color", "colour", "\u0446\u0432\u0435\u0442", "\u989c\u8272"].some((keyword) => text.includes(compactAttributeText(keyword)));
 }
 
 function normalizeDynamicAttributeEntries(value) {
@@ -1158,22 +1918,43 @@ async function ensureAttributeValuesLoaded(field = {}, visible = true) {
   if (!templateEditor.description_category_id || !templateEditor.type_id) return;
   if (Array.isArray(field.values) && field.values.length > ATTRIBUTE_OPTION_RENDER_LIMIT) return;
   const key = attributeFieldKey(field);
+  const cacheKey = attributeValueCacheKey(field);
+  if (Array.isArray(attributeValueCache[cacheKey])) {
+    if (attributeValueCache[cacheKey].length) field.values = mergeAttributeOptions(field.values || [], attributeValueCache[cacheKey]);
+    return;
+  }
+  if (attributeValueLoadTried[cacheKey]) return;
   if (attributeValueLoading[key]) return;
   attributeValueLoading[key] = true;
+  attributeValueLoadTried[cacheKey] = true;
   try {
+    const colorField = isColorAttributeField(field);
     const params = new URLSearchParams({
       description_category_id: String(templateEditor.description_category_id),
       type_id: String(templateEditor.type_id),
       attribute_id: String(field.attribute_id),
-      limit: "120"
+      limit: String(colorField ? COLOR_ATTRIBUTE_OPTION_LOAD_LIMIT : 120)
     });
+    if (colorField) params.set("cache_hint", "color");
     const values = await apiClient.get(`/api/listing/ozon-attribute-values?${params.toString()}`, { noCache: true });
-    if (Array.isArray(values) && values.length) field.values = values;
+    attributeValueCache[cacheKey] = Array.isArray(values) ? values : [];
+    if (Array.isArray(values) && values.length) field.values = mergeAttributeOptions(field.values || [], values);
   } catch {
     // Keep the editor responsive even when a large dictionary fails to load.
   } finally {
     attributeValueLoading[key] = false;
   }
+}
+
+function mergeAttributeOptions(current = [], incoming = []) {
+  return dedupeAttributeOptions([
+    ...(Array.isArray(current) ? current : []),
+    ...(Array.isArray(incoming) ? incoming : [])
+  ]);
+}
+
+function isAttributeOptionLoading(field = {}) {
+  return Boolean(attributeValueLoading[attributeFieldKey(field)] && renderedAttributeOptions(field).length === 0);
 }
 
 function isFixedAttributeField(field = {}) {
@@ -1279,10 +2060,39 @@ const fixedForm = computed({
 function splitTagValue(value) {
   if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
   return String(value || "")
-    .split(/[\s,，;；|]+/)
+    .replace(/#/g, " #")
+    .split(/[\s,，;；|/、\n\r\t]+/)
     .map((item) => item.trim())
     .filter(Boolean);
 }
+
+function normalizeTagList(value) {
+  const parts = Array.isArray(value)
+    ? value.flatMap((item) => splitTagValue(item))
+    : splitTagValue(value);
+  return Array.from(new Set(parts.map((item) => String(item || "").trim()).filter(Boolean)));
+}
+
+function updateFixedTags(value) {
+  updateFixedField("tags", normalizeTagList(value));
+}
+
+function updateVariantTags(row = {}, value) {
+  row.main_tags = normalizeTagList(value);
+}
+
+function clearFixedTags() {
+  updateFixedField("tags", []);
+}
+
+function clearAllFixedTags() {
+  updateFixedField("tags", []);
+}
+
+function clearVariantTags(row = {}) {
+  row.main_tags = [];
+}
+
 function cmToMm(value) {
   const number = Number(value || 0);
   return Number.isFinite(number) ? Math.round(number * 10) : 0;
@@ -1303,16 +2113,23 @@ function normalizeAttributeType(item) {
 function normalizeEditorImages(images) {
   return (Array.isArray(images) ? images : []).map((item, index) => ({
     url: item?.url || "",
+    previewUrl: item?.previewUrl || item?.preview_url || item?.thumbnail_url || "",
+    publishUrl: item?.publishUrl || item?.publish_url || "",
+    type: item?.type || item?.role || "",
+    role: item?.role || item?.type || "",
     name: item?.name || "",
+    outputPath: item?.outputPath || item?.output_path || "",
     sort_order: Number(item?.sort_order || index + 1)
   }));
 }
 
 function normalizeVariantVideoFields(item = {}) {
-  const coverLinks = normalizeVariantLinks(item?.video_cover_urls || item?.cover_video_urls || item?.cover_video || "");
-  const skuLinks = normalizeVariantLinks(item?.video_urls || item?.videos || item?.video_url || "");
-  const cover = coverLinks[0] || (skuLinks.length > 1 ? skuLinks[0] : "");
-  const video = skuLinks.find((url) => url && url !== cover) || (!coverLinks.length ? skuLinks[0] : "");
+  const coverLinks = normalizeVariantLinks(item?.video_cover_urls || item?.cover_video_urls || item?.cover_video || "")
+    .filter((url) => /\.(mp4|mov|webm)(\?|$)/i.test(url));
+  const skuLinks = normalizeVariantLinks(item?.video_urls || item?.videos || item?.video_url || "")
+    .filter((url) => /\.(mp4|mov|webm)(\?|$)/i.test(url));
+  const cover = coverLinks[0] || "";
+  const video = skuLinks[0] || "";
   return {
     video_cover_urls: cover ? [cover] : [],
     video_urls: video ? [video] : []
@@ -1341,6 +2158,8 @@ function normalizeEditorVariants(variants) {
     cost_price: Number(item?.cost_price || 0),
     price: Number(item?.price || 0),
     old_price: Number(item?.old_price || 0),
+    price_strategy_mode: item?.price_strategy_mode || item?.priceStrategyMode || "",
+    price_strategy_applied: Boolean(item?.price_strategy_applied || item?.priceStrategyApplied),
     color: item?.color || extractVariantDynamicAttribute(item, colorAttribute, "color") || "",
     color_values: normalizeColorValues(item?.color_values || item?.colors || item?.color || extractVariantDynamicAttribute(item, colorAttribute, "color") || ""),
     spec: isParentModelSpecValue(savedSpec) ? (dynamicSpec || "") : (savedSpec || dynamicSpec || ""),
@@ -1630,6 +2449,77 @@ function applyFirstVariantField(field) {
   ElMessage.success("已同步首行内容");
 }
 
+function applyFirstVariantVideoMedia(field = "video_urls") {
+  const first = templateEditor.variants[0];
+  if (!first) {
+    ElMessage.warning("请先添加首行变体");
+    return;
+  }
+  const source = [
+    ...ensureVariantLinks(first, field),
+    ...ensureVariantLinks(first, field === "video_cover_urls" ? "video_urls" : "video_cover_urls")
+  ].find(Boolean);
+  if (!source) {
+    ElMessage.warning("请先在首行上传或填写视频");
+    return;
+  }
+  templateEditor.variants.forEach((row) => {
+    row.video_cover_urls = [source];
+    row.video_urls = [source];
+  });
+  ElMessage.success(`已同步 ${templateEditor.variants.length} 个变体的视频封面和视频`);
+}
+
+function variantPrimaryImageUrl(row = {}) {
+  const ownImage = ensureVariantOwnImages(row).find((image) => variantImageUrl(image));
+  if (ownImage) return variantImageUrl(ownImage);
+  const templateImage = templateEditor.images.find((image) => variantImageUrl(image));
+  return templateImage ? variantImageUrl(templateImage) : "";
+}
+
+async function generateVariantMedia(row, field) {
+  const imageUrl = variantPrimaryImageUrl(row);
+  if (!imageUrl) throw new Error(`${row.name || row.sku || "当前变体"} 缺少主图`);
+  const result = await apiClient.post("/api/listing/variant-media/generate", {
+    imageUrl,
+    sourceId: row.offer_id || row.sku || row.source_sku || row.id,
+    title: row.title || row.name || templateEditor.title || templateEditor.template_name
+  });
+  const videoUrl = result.video?.publishUrl || result.cover?.publishUrl || "";
+  if (!videoUrl) throw new Error(`${row.name || row.sku || "当前变体"} 未获得公网视频地址`);
+  row.video_cover_urls = [videoUrl];
+  row.video_urls = [videoUrl];
+}
+
+async function generateAllVariantMedia(field) {
+  const rows = templateEditor.variants.filter((row) => row.sku || row.name || ensureVariantOwnImages(row).length);
+  if (!rows.length) {
+    ElMessage.warning("请先添加变体");
+    return;
+  }
+  const loadingRef = field === "video_cover_urls" ? generatingVariantCovers : generatingVariantVideos;
+  loadingRef.value = true;
+  let done = 0;
+  const failures = [];
+  try {
+    for (const row of rows) {
+      try {
+        await generateVariantMedia(row, field);
+        done += 1;
+      } catch (error) {
+        failures.push(error.message || "生成失败");
+      }
+    }
+    if (failures.length) {
+      ElMessage.warning(`已生成 ${done} 个，${failures.length} 个失败：${failures[0]}`);
+    } else {
+      ElMessage.success(`已生成 ${done} 个变体视频，并同步到视频封面和视频`);
+    }
+  } finally {
+    loadingRef.value = false;
+  }
+}
+
 function applyFirstVariantTitleToRow(row) {
   const first = templateEditor.variants[0];
   if (!first || !row || row === first) return;
@@ -1801,6 +2691,27 @@ function variantFieldHasDiverged(field) {
   return new Set(values).size > 1;
 }
 
+function variantSpecLooksLikeColor() {
+  const values = templateEditor.variants
+    .map((row) => String(row.spec || "").trim())
+    .filter(Boolean);
+  if (!values.length) return false;
+  const colorLikeCount = values.filter(isColorLikeText).length;
+  return colorLikeCount >= Math.ceil(values.length * 0.6);
+}
+
+function isColorLikeText(value = "") {
+  const tokens = normalizeColorValues(value).map((item) => item.toLowerCase());
+  if (!tokens.length) return false;
+  const colorWords = [
+    "бел", "черн", "чёрн", "золот", "серебр", "сер", "красн", "син", "голуб", "зелен", "зелён",
+    "желт", "жёлт", "оранж", "роз", "фиолет", "корич", "беж", "бордов", "хром", "металлик",
+    "black", "white", "gray", "grey", "red", "blue", "green", "yellow", "orange", "pink", "purple", "brown", "beige",
+    "黑", "白", "灰", "红", "蓝", "绿", "黄", "橙", "粉", "紫", "棕", "金", "银", "透明"
+  ];
+  return tokens.every((token) => colorWords.some((word) => token.includes(word)));
+}
+
 function moveVariantFieldBackToCommon(field) {
   const rows = templateEditor.variants || [];
   if (field === "title") {
@@ -1851,6 +2762,10 @@ function applyFirstVariantAttribute(field = {}) {
   templateEditor.variants.forEach((row, index) => {
     if (index === 0) return;
     setVariantAttributeValue(row, field, cloneVariantValue(value));
+    if (isColorAttributeField(field)) {
+      row.color_values = normalizeColorValues(value);
+      row.color = normalizeColorForPayload(row);
+    }
   });
   ElMessage.success("已同步首行属性");
 }
@@ -1889,6 +2804,8 @@ function openVariantImageEditor(row) {
   variantImageEditor.row = row;
   variantImageEditor.selectedUrls = ensureVariantOwnImages(row).map((item) => item.url).filter(Boolean);
   variantImageEditor.activeTab = "sku";
+  variantImageEditor.draggingImageIndex = -1;
+  variantImageEditor.dragOverImageIndex = -1;
   variantImageEditor.visible = true;
 }
 
@@ -1910,12 +2827,70 @@ function toggleVariantImageSelection(image) {
 }
 
 function variantImageLibrary() {
-  const sources = [
-    ...ensureVariantOwnImages(variantImageEditor.row),
-    ...templateEditor.images,
-    ...templateEditor.variants.flatMap((row) => Array.isArray(row.images) ? row.images : [])
-  ];
-  return dedupeImages(sources).filter((item) => item.url).map((item, index) => ({ ...item, sort_order: item.sort_order || index + 1 }));
+  const sources = variantImageLibrarySources(variantImageEditor.activeTab);
+  return dedupeImages(sources)
+    .filter((item) => item.url)
+    .map((item, index) => ({ ...item, sort_order: item.sort_order || index + 1 }));
+}
+
+function variantImageLibrarySources(tab = "sku") {
+  const currentImages = ensureVariantOwnImages(variantImageEditor.row);
+  if (tab === "sku") return currentImages.filter((image, index) => isSkuImageCandidate(image, index, currentImages.length));
+  if (tab === "detail") return templateDetailImageCandidates();
+  if (tab === "network") return networkImageCandidates();
+  if (tab === "ai") return aiGeneratedImageCandidates();
+  return currentImages;
+}
+
+function isSkuImageCandidate(image = {}, index = 0, total = 0) {
+  const role = String(image.type || image.role || image.name || image.outputPath || "").toLowerCase();
+  if (/detail|tail|details|rich/.test(role)) return false;
+  return index === 0 || /main|sku|variant/.test(role) || total <= 1;
+}
+
+function isDetailImageCandidate(image = {}, index = 0, total = 0) {
+  const role = String(image.type || image.role || image.name || image.outputPath || "").toLowerCase();
+  if (/main|sku/.test(role) && !/detail/.test(role)) return false;
+  if (/detail|details|rich/.test(role)) return true;
+  return index > 0 && index < Math.max(total - 1, 1);
+}
+
+function templateDetailImageCandidates() {
+  const templateImages = templateEditor.images.filter((image, index) => isDetailImageCandidate(image, index, templateEditor.images.length));
+  const variantImages = templateEditor.variants.flatMap((row) => {
+    const images = Array.isArray(row.images) ? row.images : [];
+    return images.filter((image, index) => isDetailImageCandidate(image, index, images.length));
+  });
+  return [...templateImages, ...variantImages];
+}
+
+function networkImageCandidates() {
+  return templateEditor.images
+    .filter((image) => /^https?:\/\//i.test(variantImageUrl(image)))
+    .filter((image) => !String(image.type || image.role || image.outputPath || "").toLowerCase().includes("detail"));
+}
+
+function aiGeneratedImageCandidates() {
+  const rows = [variantImageEditor.row, ...templateEditor.variants].filter(Boolean);
+  const sources = rows.flatMap((row) => [
+    row.generatedMainImageUrl,
+    row.generated_main_image_url,
+    ...(Array.isArray(row.generatedDetailImages) ? row.generatedDetailImages : []),
+    ...(Array.isArray(row.generated_detail_images) ? row.generated_detail_images : [])
+  ]);
+  return sources.map((url, index) => ({
+    url: String(url || "").trim(),
+    name: `AI ${index + 1}`,
+    type: "ai",
+    role: "ai"
+  })).filter((item) => item.url);
+}
+
+function variantSelectedPreviewList() {
+  return ensureVariantOwnImages(variantImageEditor.row)
+    .map((item) => variantImageUrl(item))
+    .filter(Boolean)
+    .map((url) => withImageToken(url));
 }
 
 function confirmVariantImageEditor() {
@@ -1928,8 +2903,17 @@ function confirmVariantImageEditor() {
     url,
     sort_order: index + 1
   }));
+  syncDraftImagesFromVariantImages();
   variantImageEditor.visible = false;
   ElMessage.success("已更新 SKU 图片");
+}
+
+function syncDraftImagesFromVariantImages() {
+  const images = templateEditor.variants.flatMap((variant) => Array.isArray(variant.images) ? variant.images : []);
+  const sourceImages = dedupeImages(images.length ? images : templateEditor.images);
+  draftForm.source_images = sourceImages
+    .map((item) => ({ name: item.name || item.url, url: variantImageUrl(item) }))
+    .filter((item) => item.url);
 }
 
 function addVariantImageLink() {
@@ -1948,6 +2932,31 @@ function removeVariantImage(index) {
   const url = variantImageUrl(removed);
   const selectedIndex = variantImageEditor.selectedUrls.indexOf(url);
   if (selectedIndex >= 0) variantImageEditor.selectedUrls.splice(selectedIndex, 1);
+}
+
+function startVariantImageDrag(index) {
+  variantImageEditor.draggingImageIndex = index;
+  variantImageEditor.dragOverImageIndex = index;
+}
+
+function finishVariantImageDrag() {
+  variantImageEditor.draggingImageIndex = -1;
+  variantImageEditor.dragOverImageIndex = -1;
+}
+
+function reorderVariantImage(fromIndex, toIndex) {
+  const images = ensureVariantOwnImages(variantImageEditor.row);
+  if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= images.length || toIndex >= images.length) {
+    finishVariantImageDrag();
+    return;
+  }
+  const [image] = images.splice(fromIndex, 1);
+  images.splice(toIndex, 0, image);
+  images.forEach((item, index) => {
+    item.sort_order = index + 1;
+  });
+  variantImageEditor.selectedUrls = images.map((item) => variantImageUrl(item)).filter(Boolean);
+  finishVariantImageDrag();
 }
 
 function useTemplateImagesForVariant() {
@@ -2005,20 +3014,21 @@ function removeVariantVideoLink(index) {
   ensureVariantLinks(variantVideoEditor.row, variantVideoEditor.field).splice(0, 1);
 }
 
-function richContentImageUrl() {
-  const variantTail = templateEditor.variants
+function richContentImageUrl(position = "last") {
+  const variantImages = templateEditor.variants
     .flatMap((row) => Array.isArray(row.images) ? row.images : [])
-    .filter((item) => item?.url)
-    .at(-1);
-  const templateTail = templateEditor.images.filter((item) => item?.url).at(-1);
-  return (variantTail || templateTail)?.url || templateEditor.images.find((item) => item?.url)?.url || "";
+    .filter((item) => item?.url);
+  const templateImages = templateEditor.images.filter((item) => item?.url);
+  const images = [...variantImages, ...templateImages];
+  const picked = position === "first" ? images[0] : images.at(-1);
+  return picked?.url || "";
 }
 
-function generateRichContentJson() {
-  const imageUrl = richContentImageUrl();
+function generateRichContentJson(position = "last") {
+  const imageUrl = richContentImageUrl(position);
   const text = String(fixedForm.value.summary || templateEditor.description || "").trim();
   if (!imageUrl) {
-    ElMessage.warning("请先准备尾图或商品图片");
+    ElMessage.warning(position === "first" ? "请先准备首图或商品图片" : "请先准备尾图或商品图片");
     return "";
   }
   if (!text) {
@@ -2062,8 +3072,13 @@ function generateRichContentJson() {
   };
   const json = JSON.stringify(rich, null, 2);
   updateFixedField("richJson", json);
-  ElMessage.success("已生成 JSON 富内容");
+  ElMessage.success(position === "first" ? "已用首图生成 JSON 富内容" : "已用尾图生成 JSON 富内容");
   return json;
+}
+
+function handleRichEditorSave(value) {
+  updateFixedField("richJson", value);
+  ElMessage.success("Ozon 图文富内容已更新");
 }
 
 function variantLinkText(value) {
@@ -2645,7 +3660,7 @@ async function saveTemplateEditor() {
     const payload = buildTemplatePayload();
     const creating = !templateEditor.id;
     const saved = templateEditor.id
-      ? await apiClient.put(`/api/listing/templates/${templateEditor.id}`, payload)
+      ? await updateTemplateWithConflictRetry(payload, { retryOnConflict: true })
       : await apiClient.post("/api/listing/templates", payload);
     fillTemplateEditor(saved);
     state.templates = [saved, ...state.templates.filter((item) => Number(item.id) !== Number(saved.id))];
@@ -2660,6 +3675,93 @@ async function saveTemplateEditor() {
   } finally {
     savingTemplate.value = false;
   }
+}
+
+async function updateTemplateWithConflictRetry(payload = {}, options = {}) {
+  const id = templateEditor.id;
+  if (!id) return null;
+  const requestPayload = options.skipVersionCheck ? { ...payload, updated_at: "" } : payload;
+  try {
+    return await apiClient.put(`/api/listing/templates/${id}`, requestPayload);
+  } catch (error) {
+    if (error?.status !== 409 || !options.retryOnConflict) throw error;
+    const latest = await apiClient.get(`/api/listing/templates/${id}?mode=editor`, { noCache: true, routeScoped: false });
+    return apiClient.put(`/api/listing/templates/${id}`, {
+      ...payload,
+      updated_at: latest?.updated_at || ""
+    });
+  }
+}
+
+async function saveCurrentTemplateSnapshot(options = {}) {
+  if (!templateEditor.id) return null;
+  ensureTemplateName();
+  const payload = buildTemplatePayload();
+  const saved = await updateTemplateWithConflictRetry(payload, { retryOnConflict: true, skipVersionCheck: Boolean(collectorSourceSku.value) });
+  fillTemplateEditor(saved);
+  state.templates = [saved, ...state.templates.filter((item) => Number(item.id) !== Number(saved.id))];
+  draftForm.template_id = saved.id;
+  saveListingWorkbenchDraft();
+  if (collectorSourceSku.value) {
+    await saveCollectorBoxEditSnapshot(payload).catch((error) => {
+      if (!options.silentCollectorWarning) ElMessage.warning(error.message || "采集箱编辑状态同步失败，但上架模板已保存");
+    });
+  }
+  return saved;
+}
+
+async function saveCollectorBoxEditSnapshot(templatePayload = buildTemplatePayload()) {
+  const sku = collectorSourceSku.value;
+  if (!sku) return null;
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 18000);
+  try {
+    return await apiClient.put(`/api/listing/collector-box/${encodeURIComponent(sku)}/edit`, {
+      edit_payload: templatePayloadToCollectorBoxEditPayload(templatePayload)
+    }, { signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("采集箱编辑状态同步超时，请稍后重试保存");
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function templatePayloadToCollectorBoxEditPayload(payload = {}) {
+  const editable = payload.editable_payload || {};
+  const price = editable.price || {};
+  const dimensions = editable.dimensions || {};
+  const logistics = editable.logistics || {};
+  const variants = Array.isArray(editable.variants) ? editable.variants : [];
+  const images = payload.images?.length
+    ? payload.images
+    : variants.flatMap((item) => Array.isArray(item.images) ? item.images : []);
+  return {
+    ...editable,
+    title: payload.title || editable.title || "",
+    template_name: payload.template_name || templateEditor.template_name || "",
+    category_name: payload.category_name || editable.category_name || "",
+    ozon_category_id: payload.ozon_category_id || editable.category_id || "",
+    description_category_id: editable.description_category_id || templateEditor.description_category_id || "",
+    type_id: editable.type_id || templateEditor.type_id || "",
+    brand: fixedForm.value.brand || "",
+    model: templateEditor.spec || "",
+    color: logistics.color || templateEditor.color || "",
+    tags: fixedForm.value.tags || [],
+    description: payload.description || editable.description || "",
+    price: Number(price.value || templateEditor.price_value || 0),
+    old_price: Number(price.old_price || templateEditor.old_price || 0),
+    currency: price.currency_code || templateEditor.currency_code || "RUB",
+    length_cm: Number(dimensions.length_cm || templateEditor.length_cm || 0),
+    width_cm: Number(dimensions.width_cm || templateEditor.width_cm || 0),
+    height_cm: Number(dimensions.height_cm || templateEditor.height_cm || 0),
+    weight_g: Number(dimensions.weight_g || templateEditor.weight_g || 0),
+    images: dedupeImages(images),
+    variants,
+    attributes: payload.attributes || editable.attributes || [],
+    source_sku: templateEditor.source_ozon_sku || collectorSourceSku.value || "",
+    product_url: payload.source_raw?.product_url || payload.source_raw?.collected_product?.product_url || ""
+  };
 }
 
 async function validatePublishPayload() {
@@ -2694,6 +3796,13 @@ async function publishTemplateToOzon() {
     const result = await apiClient.post("/api/listing/templates/publish-to-ozon", {
       template,
       shop_ids: draftForm.shop_ids,
+      text_variant_policy: {
+        enabled: Boolean(textVariantPolicy.enabled && draftForm.shop_ids.length > 1),
+        base_shop_id: textVariantPolicy.baseShopId || draftForm.shop_ids[0] || "",
+        style: textVariantPolicy.style,
+        shop_styles: textVariantPolicy.shopStyles,
+        fields: textVariantPolicy.fields
+      },
       source_record_id: template.source_raw?.record_id || route.query.recordId || ""
     });
     publishSubmit.result = result;
@@ -2725,19 +3834,27 @@ function buildTemplatePayload() {
     sourceRaw = {};
   }
   const images = templateEditor.images.filter((item) => item.url);
-  const attributes = templateEditor.attributes.filter((item) => item.name || item.value);
+  const attributes = templateEditor.attributes
+    .filter((item) => item.name || item.value)
+    .map((item) => normalizeAttributeForPayload(item));
   const payloadTitle = templateEditor.title || templateEditor.variants.find((item) => item.title || item.name)?.title || templateEditor.template_name;
   const variants = templateEditor.variants
     .filter((item) => item.sku || item.name)
     .map((item) => ({
       ...item,
+      price_strategy_mode: item.price_strategy_mode || "finalized",
+      price_strategy_applied: true,
       color: normalizeColorForPayload(item),
       title: variantFieldMode.title ? item.title : templateEditor.title,
       weight_g: variantFieldMode.weight ? item.weight_g : Number(templateEditor.weight_g || 0),
       length_mm: variantFieldMode.dimensions ? item.length_mm : cmToMm(templateEditor.length_cm),
       width_mm: variantFieldMode.dimensions ? item.width_mm : cmToMm(templateEditor.width_cm),
       height_mm: variantFieldMode.dimensions ? item.height_mm : cmToMm(templateEditor.height_cm),
-      main_tags: variantFieldMode.tags ? item.main_tags : fixedForm.value.tags
+      main_tags: variantFieldMode.tags ? item.main_tags : fixedForm.value.tags,
+      dynamic_attributes: Object.fromEntries(Object.entries(item.dynamic_attributes || {}).map(([key, attribute]) => [
+        key,
+        normalizeAttributeForPayload(attribute)
+      ]))
     }));
   const payload = {
     ozon_category_id: templateEditor.ozon_category_id,
@@ -2762,7 +3879,9 @@ function buildTemplatePayload() {
         value: Number(templateEditor.price_value || 0),
         old_price: Number(templateEditor.old_price || 0),
         currency_code: templateEditor.currency_code || "RUB",
-        vat: templateEditor.vat || "0"
+        vat: templateEditor.vat || "0",
+        strategy_mode: "finalized",
+        strategy_applied: true
       },
       dimensions: {
         length_cm: Number(templateEditor.length_cm || 0),
@@ -2806,6 +3925,13 @@ function applyTemplateToDraft() {
   const images = templateEditor.images.length ? templateEditor.images : variantImages;
   draftForm.source_images = dedupeImages(images).map((item) => ({ name: item.name || item.url, url: item.url }));
   state.step = "edit";
+}
+
+function syncDraftImagesFromTemplateIfEmpty() {
+  if (draftForm.source_images.length) return;
+  const variantImages = templateEditor.variants.flatMap((variant) => Array.isArray(variant.images) ? variant.images : []);
+  const images = templateEditor.images.length ? templateEditor.images : variantImages;
+  draftForm.source_images = dedupeImages(images).map((item) => ({ name: item.name || item.url, url: item.url }));
 }
 
 function dedupeImages(images = []) {
@@ -2865,6 +3991,25 @@ async function uploadImageRequest(options) {
 }
 
 async function createDraft() {
+  const recordId = Number(route.query.recordId || 0);
+  if (recordId) {
+    creatingDraft.value = true;
+    try {
+      applyOzonAttributeMappings();
+      const template = buildTemplatePayload();
+      const updated = await apiClient.post(`/api/listing/publish-records/${recordId}/draft`, {
+        template,
+        updated_at: templateEditor.updated_at || ""
+      });
+      templateEditor.updated_at = updated.updated_at || templateEditor.updated_at || "";
+      ElMessage.success("已保存到当前上架记录，未提交 Ozon");
+    } catch (error) {
+      ElMessage.error(error.message || "保存上架记录草稿失败");
+    } finally {
+      creatingDraft.value = false;
+    }
+    return;
+  }
   ensureDraftFormFromTemplate();
   if (!draftForm.template_id) {
     ElMessage.warning("请先添加 SKU 模板");
@@ -2878,11 +4023,17 @@ async function createDraft() {
   creatingDraft.value = true;
   try {
     applyOzonAttributeMappings();
-    const created = await apiClient.post("/api/listing/drafts", {
+    await saveCurrentTemplateSnapshot();
+    syncDraftImagesFromTemplateIfEmpty();
+    const draftPayload = {
       ...draftForm,
       source_images: draftForm.source_images.map((item) => item.url)
-    });
-    state.drafts.unshift(created);
+    };
+    const currentDraftId = Number(state.selectedDraftId || 0);
+    const created = currentDraftId
+      ? await apiClient.put(`/api/listing/drafts/${currentDraftId}`, draftPayload)
+      : await apiClient.post("/api/listing/drafts", draftPayload);
+    state.drafts = [created, ...state.drafts.filter((item) => Number(item.id) !== Number(created.id))];
     state.selectedDraftId = created.id;
     if (draftForm.shop_ids.length) {
       state.copies = await apiClient.post(`/api/listing/drafts/${created.id}/shop-copies`, {
@@ -2902,7 +4053,7 @@ async function createDraft() {
 }
 
 async function saveCurrentToDraft() {
-  applyTemplateToDraft();
+  syncDraftImagesFromTemplateIfEmpty();
   await createDraft();
 }
 
@@ -2957,12 +4108,43 @@ function money(value) {
   return Number(value || 0).toFixed(2);
 }
 
-onMounted(loadAll);
+watch(
+  () => createListingWorkbenchDraftSnapshot(),
+  scheduleListingWorkbenchDraftSave,
+  { deep: true }
+);
+
+watch(
+  () => draftForm.shop_ids.slice(),
+  () => ensureTextVariantBaseShop(),
+  { deep: true }
+);
+
+onMounted(async () => {
+  await ensureListingWorkbenchRouteId();
+  await loadAll();
+  listingWorkbenchReady = true;
+  saveListingWorkbenchDraft();
+});
+
+onBeforeUnmount(() => {
+  if (listingDraftSaveTimer) window.clearTimeout(listingDraftSaveTimer);
+});
 </script>
 
 <template>
-  <div class="copy-page" v-loading="loading">
+  <div class="copy-page">
+    <OzonRichContentEditor
+      :model-value="fixedForm.richJson"
+      :visible="richEditorVisible"
+      :title="templateEditor.title"
+      @update:model-value="updateFixedField('richJson', $event)"
+      @update:visible="richEditorVisible = $event"
+      @save="handleRichEditorSave"
+    />
+
     <section class="copy-header">
+      <div v-if="loading" class="route-loading-strip">正在载入草稿数据...</div>
       <div v-if="collectorSourceSku" class="collector-source-bar">
         <div>
           <span>采集箱来源</span>
@@ -2971,12 +4153,8 @@ onMounted(loadAll);
         <el-button size="small" @click="backToCollectorBox">返回采集箱</el-button>
       </div>
       <div class="header-actions">
-        <el-button @click="loadAll">刷新</el-button>
         <el-button type="success" :loading="aiGenerating" @click="runFieldAi({ name: 'all', type: 'attributeFill' })">AI 一键生成文案</el-button>
-        <el-button @click="validatePublishPayload">检查上架</el-button>
-        <el-button @click="saveTemplateEditor">创建模板</el-button>
         <el-button :loading="creatingDraft" @click="createDraft">保存草稿</el-button>
-        <el-button type="primary" @click="validatePublishPayload">准备发布</el-button>
         <el-button type="danger" :loading="publishingToOzon" @click="publishTemplateToOzon">提交 Ozon</el-button>
       </div>
     </section>
@@ -3008,6 +4186,47 @@ onMounted(loadAll);
                     </el-select>
                     <el-button @click="selectAllShops">全选</el-button>
                     <el-button @click="clearSelectedShops">清空</el-button>
+                  </div>
+                </el-form-item>
+                <el-form-item label="文案变体">
+                  <div class="text-variant-panel">
+                    <div class="text-variant-main">
+                      <el-switch v-model="textVariantPolicy.enabled" :disabled="draftForm.shop_ids.length < 2" active-text="多店铺发布时启用" />
+                      <span>{{ draftForm.shop_ids.length < 2 ? "选择两个以上店铺后可用" : "基准店铺不改，其他店铺轻量优化标题、标签和简介" }}</span>
+                    </div>
+                    <div v-if="textVariantPolicy.enabled" class="text-variant-controls">
+                      <div class="text-variant-batch">
+                        <span>批量策略</span>
+                        <el-select :model-value="textVariantPolicy.style" placeholder="批量设置其他店铺" @update:model-value="setAllTextVariantStyles">
+                          <el-option v-for="item in textVariantStyleOptions" :key="item.value" :label="item.label" :value="item.value" />
+                        </el-select>
+                      </div>
+                      <el-checkbox-group v-model="textVariantPolicy.fields">
+                        <el-checkbox label="title">标题</el-checkbox>
+                        <el-checkbox label="tags">标签</el-checkbox>
+                        <el-checkbox label="description">简介</el-checkbox>
+                      </el-checkbox-group>
+                      <div class="text-variant-shop-list">
+                        <div v-for="shop in selectedTextVariantShops" :key="shop.id" class="text-variant-shop-row">
+                          <span>{{ shop.name }}</span>
+                          <el-radio
+                            :model-value="textVariantPolicy.baseShopId"
+                            :label="shop.id"
+                            @update:model-value="textVariantPolicy.baseShopId = $event; syncTextVariantShopStyles()"
+                          >
+                            原版保留
+                          </el-radio>
+                          <el-select
+                            v-if="String(shop.id) !== String(textVariantPolicy.baseShopId)"
+                            v-model="textVariantPolicy.shopStyles[String(shop.id)]"
+                            placeholder="选择策略"
+                          >
+                            <el-option v-for="item in textVariantStyleOptions" :key="item.value" :label="item.label" :value="item.value" />
+                          </el-select>
+                          <em v-else>不改当前页面文案</em>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </el-form-item>
                 <el-form-item label="产品类目" required>
@@ -3103,10 +4322,11 @@ onMounted(loadAll);
                 </el-form-item>
                 <el-form-item label="产品标签">
                   <div class="field-with-tools">
-                    <el-select :model-value="fixedForm.tags" multiple filterable allow-create default-first-option :disabled="variantFieldMode.tags" @update:model-value="updateFixedField('tags', $event)">
+                    <el-select :model-value="fixedForm.tags" multiple filterable allow-create default-first-option collapse-tags collapse-tags-tooltip :disabled="variantFieldMode.tags" @update:model-value="updateFixedTags">
                       <el-option v-for="tag in fixedForm.tags" :key="tag" :label="tag" :value="tag" />
                     </el-select>
                     <el-button class="private-field-toggle" :type="variantFieldMode.tags ? 'primary' : 'default'" @click="enableVariantField('tags')">{{ variantFieldMode.tags ? "-" : "+" }}</el-button>
+                    <el-button :disabled="variantFieldMode.tags || !fixedForm.tags.length" @click="clearAllFixedTags">清空全部</el-button>
                     <el-button circle @click="runFieldAi({ name: '产品标签' })">AI</el-button>
                     <el-button circle :icon="InfoFilled" @click="openAttributeDetail({ name: '产品标签', value: fixedForm.tags, type: 'multiselect', required: false, source: 'fixed_form' })" />
                   </div>
@@ -3121,7 +4341,11 @@ onMounted(loadAll);
                 <el-form-item label="JSON富内容">
                   <div class="field-with-tools wide-tools">
                     <el-input :model-value="fixedForm.richJson" type="textarea" :rows="5" placeholder="JSON富内容" @update:model-value="updateFixedField('richJson', $event)" />
-                    <el-button @click="generateRichContentJson">尾图+简介生成</el-button>
+                    <div class="rich-json-actions">
+                      <el-button type="primary" @click="richEditorVisible = true">图文编辑</el-button>
+                      <el-button @click="generateRichContentJson('first')">首图+简介</el-button>
+                      <el-button @click="generateRichContentJson('last')">尾图+简介</el-button>
+                    </div>
                     <el-button circle :icon="InfoFilled" @click="openAttributeDetail({ name: 'JSON富内容', value: fixedForm.richJson, type: 'rich_json', required: false, source: 'fixed_form' })" />
                   </div>
                 </el-form-item>
@@ -3133,11 +4357,11 @@ onMounted(loadAll);
                   </div>
                   <el-form-item v-for="(field, index) in requiredSchemaAttributeFields" :key="`${field.attribute_id || field.name}-required-${index}`" :required="field.required" :label="field.name || '未命名属性'">
                     <div class="field-with-tools">
-                      <el-select v-if="field.type === 'select'" v-model="field.value" filterable clearable :loading="attributeValueLoading[attributeFieldKey(field)]" @visible-change="ensureAttributeValuesLoaded(field, $event)">
+                  <el-select v-if="field.type === 'select'" v-model="field.value" filterable clearable :loading="isAttributeOptionLoading(field)" @visible-change="ensureAttributeValuesLoaded(field, $event)">
                         <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="attributeOptionLabel(option)" :value="option.value" />
                         <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
                       </el-select>
-                      <el-select v-else-if="field.type === 'multiselect'" v-model="field.value" multiple filterable default-first-option :loading="attributeValueLoading[attributeFieldKey(field)]" @visible-change="ensureAttributeValuesLoaded(field, $event)">
+                  <el-select v-else-if="field.type === 'multiselect'" v-model="field.value" multiple filterable default-first-option :loading="isAttributeOptionLoading(field)" @visible-change="ensureAttributeValuesLoaded(field, $event)">
                         <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="attributeOptionLabel(option)" :value="option.value" />
                         <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
                       </el-select>
@@ -3155,15 +4379,15 @@ onMounted(loadAll);
                 <div v-if="mainAttributeFields.length" class="schema-required-panel schema-optional-panel">
                   <div class="subsection-title">
                     <h3>Ozon 类目属性</h3>
-                    <el-button v-if="hiddenAttributeCount > 0" size="small" @click="optionalAttributeVisibleLimit += 24">继续显示 {{ Math.min(24, hiddenAttributeCount) }} 项</el-button>
+                    <el-button v-if="hiddenAttributeCount > 0" size="small" @click="optionalAttributeVisibleLimit += OPTIONAL_ATTRIBUTE_PAGE_SIZE">继续显示 {{ Math.min(OPTIONAL_ATTRIBUTE_PAGE_SIZE, hiddenAttributeCount) }} 项</el-button>
                   </div>
                   <el-form-item v-for="(field, index) in mainAttributeFields" :key="`${field.attribute_id || field.name}-optional-${index}`" :required="field.required" :label="field.name || '未命名属性'">
                     <div class="field-with-tools">
-                      <el-select v-if="field.type === 'select'" v-model="field.value" filterable clearable :loading="attributeValueLoading[attributeFieldKey(field)]" @visible-change="ensureAttributeValuesLoaded(field, $event)">
+                    <el-select v-if="field.type === 'select'" v-model="field.value" filterable clearable :loading="isAttributeOptionLoading(field)" @visible-change="ensureAttributeValuesLoaded(field, $event)">
                         <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="attributeOptionLabel(option)" :value="option.value" />
                         <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
                       </el-select>
-                      <el-select v-else-if="field.type === 'multiselect'" v-model="field.value" multiple filterable default-first-option :loading="attributeValueLoading[attributeFieldKey(field)]" @visible-change="ensureAttributeValuesLoaded(field, $event)">
+                    <el-select v-else-if="field.type === 'multiselect'" v-model="field.value" multiple filterable default-first-option :loading="isAttributeOptionLoading(field)" @visible-change="ensureAttributeValuesLoaded(field, $event)">
                         <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="attributeOptionLabel(option)" :value="option.value" />
                         <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
                       </el-select>
@@ -3278,7 +4502,8 @@ onMounted(loadAll);
                   <template #header>
                     <div class="variant-col-header">
                       <span>视频封面</span>
-                      <el-button link size="small" @click="applyFirstVariantField('video_cover_urls')">同首行</el-button>
+                      <el-button link size="small" @click="applyFirstVariantVideoMedia('video_cover_urls')">同首行</el-button>
+                      <el-button link size="small" :loading="generatingVariantCovers" @click="generateAllVariantMedia('video_cover_urls')">一键生成</el-button>
                     </div>
                   </template>
                   <template #default="{ row }">
@@ -3301,7 +4526,8 @@ onMounted(loadAll);
                   <template #header>
                     <div class="variant-col-header">
                       <span>视频</span>
-                      <el-button link size="small" @click="applyFirstVariantField('video_urls')">同首行</el-button>
+                      <el-button link size="small" @click="applyFirstVariantVideoMedia('video_urls')">同首行</el-button>
+                      <el-button link size="small" :loading="generatingVariantVideos" @click="generateAllVariantMedia('video_urls')">一键生成</el-button>
                     </div>
                   </template>
                   <template #default="{ row }">
@@ -3386,12 +4612,15 @@ onMounted(loadAll);
                     </div>
                   </template>
                   <template #default="{ row }">
-                    <el-select v-model="row.main_tags" multiple filterable allow-create default-first-option collapse-tags collapse-tags-tooltip size="small">
-                      <el-option v-for="tag in row.main_tags" :key="tag" :label="tag" :value="tag" />
-                    </el-select>
+                    <div class="variant-tags-cell">
+                      <el-select :model-value="row.main_tags" multiple filterable allow-create default-first-option collapse-tags collapse-tags-tooltip size="small" @update:model-value="updateVariantTags(row, $event)">
+                        <el-option v-for="tag in row.main_tags" :key="tag" :label="tag" :value="tag" />
+                      </el-select>
+                      <el-button link type="danger" :disabled="!row.main_tags?.length" @click="clearVariantTags(row)">清空</el-button>
+                    </div>
                   </template>
                 </el-table-column>
-                <el-table-column v-for="field in variantAttributeFields" :key="`variant-attr-${attributeFieldKey(field)}`" width="220">
+                <el-table-column v-for="field in visibleVariantAttributeFields" :key="`variant-attr-${attributeFieldKey(field)}`" width="220">
                   <template #header>
                     <div class="variant-col-header">
                       <span>{{ field.name || "属性" }}</span>
@@ -3401,40 +4630,28 @@ onMounted(loadAll);
                   </template>
                   <template #default="{ row }">
                     <el-select
-                      v-if="field.type === 'select'"
-                      :model-value="getVariantAttributeValue(row, field)"
-                      size="small"
-                      filterable
-                      clearable
-                      :loading="attributeValueLoading[attributeFieldKey(field)]"
-                      @visible-change="ensureAttributeValuesLoaded(field, $event)"
-                      @update:model-value="setVariantAttributeValue(row, field, $event)"
-                    >
-                      <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="attributeOptionLabel(option)" :value="option.value" />
-                      <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
-                    </el-select>
-                    <el-select
-                      v-else-if="field.type === 'multiselect'"
-                      :model-value="getVariantAttributeValue(row, field)"
+                      v-if="isColorAttributeField(field)"
+                      :model-value="variantAttributeSelectModelValue(row, field)"
                       size="small"
                       multiple
                       filterable
+                      allow-create
+                      clearable
                       default-first-option
                       collapse-tags
                       collapse-tags-tooltip
-                      :loading="attributeValueLoading[attributeFieldKey(field)]"
-                      @visible-change="ensureAttributeValuesLoaded(field, $event)"
-                      @update:model-value="setVariantAttributeValue(row, field, $event)"
+                      :loading="isAttributeOptionLoading(field)"
+                      @visible-change="ensureVariantDictionaryOptions(field, $event)"
+                      @update:model-value="updateVariantColorAttribute(row, field, $event)"
                     >
-                      <el-option v-for="option in renderedAttributeOptions(field)" :key="option.id || option.value" :label="attributeOptionLabel(option)" :value="option.value" />
-                      <el-option v-if="attributeHasMoreOptions(field)" disabled :value="`__more_${field.attribute_id}`" :label="`仅显示前 ${ATTRIBUTE_OPTION_RENDER_LIMIT} 个选项，输入关键词可继续筛选`" />
+                      <el-option v-for="option in variantColorOptions(row, field)" :key="option.value" :label="option.label" :value="option.value" />
                     </el-select>
-                    <el-input-number v-else-if="field.type === 'number'" :model-value="Number(getVariantAttributeValue(row, field) || 0)" :controls="false" size="small" @update:model-value="setVariantAttributeValue(row, field, $event)" />
-                    <el-switch v-else-if="field.type === 'boolean'" :model-value="Boolean(getVariantAttributeValue(row, field))" @update:model-value="setVariantAttributeValue(row, field, $event)" />
-                    <el-input v-else :model-value="getVariantAttributeValue(row, field)" size="small" @update:model-value="setVariantAttributeValue(row, field, $event)" />
+                    <button v-else type="button" class="variant-attribute-summary" @click="openVariantAttributeEditor(row, field)">
+                      {{ variantAttributeDisplayText(row, field) }}
+                    </button>
                   </template>
                 </el-table-column>
-                <el-table-column width="160">
+                <el-table-column v-if="showLegacyVariantColorColumn" width="160">
                   <template #header>
                     <div class="variant-col-header">
                       <span>颜色</span>
@@ -3453,7 +4670,7 @@ onMounted(loadAll);
                       default-first-option
                       collapse-tags
                       collapse-tags-tooltip
-                      :loading="attributeValueLoading[attributeFieldKey(variantColorAttribute || {})]"
+                      :loading="isAttributeOptionLoading(variantColorAttribute || {})"
                       @visible-change="ensureVariantDictionaryOptions(variantColorAttribute, $event)"
                       @change="syncVariantColor(row)"
                     >
@@ -3461,7 +4678,28 @@ onMounted(loadAll);
                     </el-select>
                   </template>
                 </el-table-column>
-                <el-table-column width="180">
+                <el-table-column v-if="showCollectedVariantOptionColumn" width="190">
+                  <template #header>
+                    <div class="variant-col-header">
+                      <span>{{ collectedVariantOptionLabel }}</span>
+                      <el-button link size="small" @click="applyFirstVariantField('spec')">同首行</el-button>
+                      <el-button link size="small" :loading="aiGenerating" @click="runVariantColumnAi('spec')">AI</el-button>
+                    </div>
+                  </template>
+                  <template #default="{ row }">
+                    <el-select
+                      v-model="row.spec"
+                      size="small"
+                      filterable
+                      allow-create
+                      clearable
+                      default-first-option
+                    >
+                      <el-option v-for="option in collectedVariantOptionOptions" :key="option.value" :label="option.label" :value="option.value" />
+                    </el-select>
+                  </template>
+                </el-table-column>
+                <el-table-column v-if="showLegacyVariantSpecColumn" width="180">
                   <template #header>
                     <div class="variant-col-header">
                       <span>规格/型号</span>
@@ -3477,7 +4715,7 @@ onMounted(loadAll);
                       allow-create
                       clearable
                       default-first-option
-                      :loading="attributeValueLoading[attributeFieldKey(variantSpecAttribute || {})]"
+                      :loading="isAttributeOptionLoading(variantSpecAttribute || {})"
                       @visible-change="ensureVariantDictionaryOptions(variantSpecAttribute, $event)"
                     >
                       <el-option v-for="option in variantSpecOptions(row)" :key="option.value" :label="option.label" :value="option.value" />
@@ -3570,7 +4808,7 @@ onMounted(loadAll);
 
     </div>
 
-    <el-drawer v-model="attributeDrawer.visible" title="属性详情" size="460px">
+    <el-drawer v-if="attributeDrawer.visible" v-model="attributeDrawer.visible" title="属性详情" size="460px">
       <div v-if="attributeDrawer.field" class="attribute-detail">
         <h3>{{ attributeDrawer.field.name }}</h3>
         <el-descriptions :column="1" border>
@@ -3591,7 +4829,7 @@ onMounted(loadAll);
       </div>
     </el-drawer>
 
-    <el-dialog v-model="variantImageEditor.visible" title="SKU图片编辑" width="1180px" top="5vh" class="variant-image-dialog" destroy-on-close>
+    <el-dialog v-if="variantImageEditor.visible" v-model="variantImageEditor.visible" title="SKU图片编辑" width="1180px" top="5vh" class="variant-image-dialog" destroy-on-close>
       <div v-if="variantImageEditor.row" class="variant-image-workbench">
         <aside class="variant-image-panel">
           <div class="variant-image-tools">
@@ -3602,10 +4840,31 @@ onMounted(loadAll);
             <el-button @click="addVariantImageLink">新增链接</el-button>
           </div>
           <div class="variant-image-grid selected-grid">
-            <div v-for="(image, imageIndex) in ensureVariantOwnImages(variantImageEditor.row)" :key="`${image.url}-${imageIndex}`" class="variant-image-card selected-card">
-              <button v-if="image.url" type="button" class="variant-selected-image" @click="toggleVariantImageSelection(image)">
-                <img :src="withImageToken(image.previewUrl || image.url)" :alt="image.name || 'SKU image'" loading="lazy" />
-              </button>
+            <div
+              v-for="(image, imageIndex) in ensureVariantOwnImages(variantImageEditor.row)"
+              :key="`${image.url}-${imageIndex}`"
+              class="variant-image-card selected-card"
+              :class="{
+                dragging: variantImageEditor.draggingImageIndex === imageIndex,
+                'drag-over': variantImageEditor.dragOverImageIndex === imageIndex && variantImageEditor.draggingImageIndex !== imageIndex
+              }"
+              draggable="true"
+              @dragstart="startVariantImageDrag(imageIndex)"
+              @dragover.prevent="variantImageEditor.dragOverImageIndex = imageIndex"
+              @drop="reorderVariantImage(variantImageEditor.draggingImageIndex, imageIndex)"
+              @dragend="finishVariantImageDrag"
+            >
+              <el-image
+                v-if="image.url"
+                class="variant-selected-image"
+                :src="withImageToken(image.previewUrl || image.url)"
+                :alt="image.name || 'SKU image'"
+                :preview-src-list="variantSelectedPreviewList()"
+                :initial-index="imageIndex"
+                fit="cover"
+                preview-teleported
+                hide-on-click-modal
+              />
               <div v-else class="variant-image-empty">图片链接</div>
               <el-input v-model="image.url" size="small" placeholder="https://..." @change="syncVariantImageLink(image)" />
               <div class="variant-card-footer">
@@ -3697,7 +4956,51 @@ onMounted(loadAll);
       </template>
     </el-dialog>
 
-    <el-drawer v-model="collectedImport.visible" title="导入 Ozon 前台采集数据" size="720px">
+    <el-drawer v-if="variantAttributeDrawer.visible" v-model="variantAttributeDrawer.visible" title="SKU属性编辑" size="520px">
+      <div v-if="variantAttributeDrawer.row && variantAttributeDrawer.field" class="attribute-detail">
+        <h3>{{ variantAttributeDrawer.field.name }}</h3>
+        <el-select
+          v-if="variantAttributeDrawer.field.type === 'select'"
+          :model-value="variantAttributeSelectModelValue(variantAttributeDrawer.row, variantAttributeDrawer.field)"
+          filterable
+          clearable
+          :loading="isAttributeOptionLoading(variantAttributeDrawer.field)"
+          @visible-change="ensureAttributeValuesLoaded(variantAttributeDrawer.field, $event)"
+          @update:model-value="updateVariantAttributeSelectValue(variantAttributeDrawer.row, variantAttributeDrawer.field, $event)"
+        >
+          <el-option
+            v-for="option in renderedAttributeOptions(variantAttributeDrawer.field)"
+            :key="option.id || option.value"
+            :label="displayAttributeOptionLabel(option, variantAttributeDrawer.field)"
+            :value="attributeOptionModelValue(option)"
+          />
+        </el-select>
+        <el-select
+          v-else-if="variantAttributeDrawer.field.type === 'multiselect'"
+          :model-value="variantAttributeSelectModelValue(variantAttributeDrawer.row, variantAttributeDrawer.field)"
+          multiple
+          filterable
+          default-first-option
+          collapse-tags
+          collapse-tags-tooltip
+          :loading="isAttributeOptionLoading(variantAttributeDrawer.field)"
+          @visible-change="ensureAttributeValuesLoaded(variantAttributeDrawer.field, $event)"
+          @update:model-value="updateVariantAttributeSelectValue(variantAttributeDrawer.row, variantAttributeDrawer.field, $event)"
+        >
+          <el-option
+            v-for="option in renderedAttributeOptions(variantAttributeDrawer.field)"
+            :key="option.id || option.value"
+            :label="displayAttributeOptionLabel(option, variantAttributeDrawer.field)"
+            :value="attributeOptionModelValue(option)"
+          />
+        </el-select>
+        <el-input-number v-else-if="variantAttributeDrawer.field.type === 'number'" :model-value="Number(variantAttributeSelectModelValue(variantAttributeDrawer.row, variantAttributeDrawer.field) || 0)" :controls="false" @update:model-value="updateVariantAttributeSelectValue(variantAttributeDrawer.row, variantAttributeDrawer.field, $event)" />
+        <el-switch v-else-if="variantAttributeDrawer.field.type === 'boolean'" :model-value="Boolean(variantAttributeSelectModelValue(variantAttributeDrawer.row, variantAttributeDrawer.field))" @update:model-value="updateVariantAttributeSelectValue(variantAttributeDrawer.row, variantAttributeDrawer.field, $event)" />
+        <el-input v-else :model-value="variantAttributeSelectModelValue(variantAttributeDrawer.row, variantAttributeDrawer.field)" @update:model-value="updateVariantAttributeSelectValue(variantAttributeDrawer.row, variantAttributeDrawer.field, $event)" />
+      </div>
+    </el-drawer>
+
+    <el-drawer v-if="collectedImport.visible" v-model="collectedImport.visible" title="导入 Ozon 前台采集数据" size="720px">
       <div class="collected-import">
         <el-alert
           type="info"
@@ -3727,7 +5030,7 @@ onMounted(loadAll);
       </div>
     </el-drawer>
 
-    <el-drawer v-model="showApiDebug" title="Ozon 接口调试" size="720px">
+    <el-drawer v-if="showApiDebug" v-model="showApiDebug" title="Ozon 接口调试" size="720px">
       <div v-if="selectedCopyJob" class="api-debug">
         <el-alert type="info" :closable="false" title="这里用于确认 Ozon 每一步真实返回，后续字段映射按这里的数据来定。" />
         <el-descriptions :column="2" border>
@@ -3757,7 +5060,7 @@ onMounted(loadAll);
       <el-empty v-else description="暂无选中的复制任务" />
     </el-drawer>
 
-    <el-drawer v-model="publishValidation.visible" title="发布前校验" size="760px">
+    <el-drawer v-if="publishValidation.visible" v-model="publishValidation.visible" title="发布前校验" size="760px">
       <div v-if="publishValidation.result" class="publish-validation">
         <el-alert
           :type="publishValidation.result.ok ? 'success' : 'error'"
@@ -3780,7 +5083,7 @@ onMounted(loadAll);
       </div>
     </el-drawer>
 
-    <el-drawer v-model="publishSubmit.visible" title="Ozon 提交结果" size="760px">
+    <el-drawer v-if="publishSubmit.visible" v-model="publishSubmit.visible" title="Ozon 提交结果" size="760px">
       <div v-if="publishSubmit.result" class="publish-validation">
         <el-alert
           :type="publishSubmit.result.ok ? 'success' : 'warning'"
@@ -3813,6 +5116,7 @@ onMounted(loadAll);
 <style scoped>
 .copy-page { display: flex; flex-direction: column; gap: 0; height: 100%; min-height: 0; overflow-y: auto; overflow-x: hidden; background: #fff; }
 .copy-header { position: sticky; top: 0; z-index: 20; display: flex; justify-content: flex-end; align-items: center; gap: 12px; padding: 10px 24px; margin: -16px -16px 0; background: rgba(255, 255, 255, 0.98); border-bottom: 1px solid #eef0f5; backdrop-filter: blur(8px); }
+.route-loading-strip { position: absolute; left: 24px; bottom: -29px; height: 28px; display: inline-flex; align-items: center; padding: 0 12px; border: 1px solid #bfdbfe; border-radius: 6px; background: #eff6ff; color: #1d4ed8; font-size: 12px; font-weight: 700; box-shadow: 0 8px 18px rgba(37, 99, 235, 0.12); }
 .copy-header h1, .section-heading h2 { margin: 0; }
 .copy-header p, .section-heading p { margin: 6px 0 0; color: var(--el-text-color-secondary); }
 .collector-source-bar { margin-right: auto; display: flex; align-items: center; gap: 12px; padding: 8px 12px; border: 1px solid var(--el-color-primary-light-7); border-radius: 8px; background: var(--el-color-primary-light-9); min-width: 0; }
@@ -3877,9 +5181,21 @@ onMounted(loadAll);
 .variant-actions .el-button { margin-left: 0; }
 .field-with-tools { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto auto; align-items: center; gap: 8px; width: 100%; }
 .field-with-tools.wide-tools { grid-template-columns: minmax(0, 1fr) auto auto; align-items: flex-start; }
+.rich-json-actions { display: flex; flex-direction: column; gap: 8px; min-width: 108px; }
+.rich-json-actions .el-button { width: 100%; margin-left: 0; justify-content: center; }
+.rich-json-actions .el-button + .el-button { margin-left: 0; }
 .private-field-toggle { min-width: 38px; height: 32px; padding-left: 8px; padding-right: 8px; border-color: #6c63ff; color: #5b54ef; }
 .unit-input, .dimension-row { display: flex; align-items: center; gap: 8px; width: 100%; }
 .shop-select-box { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; width: 100%; }
+.text-variant-panel { display: grid; gap: 8px; width: 100%; }
+.text-variant-main { display: flex; align-items: center; gap: 12px; color: #64748b; font-size: 13px; }
+.text-variant-controls { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: stretch; }
+.text-variant-batch { display: grid; grid-template-columns: 72px minmax(180px, 260px); align-items: center; gap: 8px; color: #64748b; font-size: 13px; }
+.text-variant-controls :deep(.el-checkbox-group) { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+.text-variant-shop-list { display: grid; gap: 6px; max-width: 580px; }
+.text-variant-shop-row { display: grid; grid-template-columns: minmax(150px, 1fr) 92px minmax(160px, 220px); align-items: center; gap: 8px; min-height: 32px; }
+.text-variant-shop-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.text-variant-shop-row em { color: #94a3b8; font-style: normal; font-size: 13px; }
 .unit-input .el-input-number { flex: 1; }
 .dimension-row .el-input-number { min-width: 0; flex: 1; }
 .unit-input span, .dimension-row span { color: var(--el-text-color-secondary); }
@@ -3927,6 +5243,8 @@ onMounted(loadAll);
 .variant-name-cell strong { display: block; color: var(--el-text-color-primary); font-size: 12px; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .variant-title-cell { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
 .variant-title-cell .el-button { margin: 0; padding-left: 8px; padding-right: 8px; }
+.variant-tags-cell { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
+.variant-tags-cell .el-button { margin: 0; padding-left: 4px; padding-right: 4px; }
 .offer-id-cell { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
 .money-cell { position: relative; display: block; }
 .money-cell :deep(.el-input__wrapper) { padding-right: 42px; }
@@ -3943,13 +5261,15 @@ onMounted(loadAll);
 .variant-media-actions .el-button:hover { color: var(--el-color-primary); background: transparent; }
 .variant-media-actions :deep(.el-upload) { display: inline-flex; align-items: center; }
 .variant-media-actions :deep(.el-upload)::before { content: ""; width: 1px; height: 11px; margin: 0 5px 0 1px; background: var(--el-border-color); }
+.variant-attribute-summary { width: 100%; min-height: 32px; padding: 5px 10px; border: 1px solid #d9e6ff; border-radius: 6px; background: #f8fbff; color: #344054; font-family: inherit; font-size: 13px; font-weight: 400; line-height: 20px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.variant-attribute-summary:hover { border-color: var(--el-color-primary); color: #1d4ed8; background: #eff6ff; }
 .variant-image-editor { display: flex; flex-direction: column; gap: 12px; }
 .variant-editor-thumb { width: 58px; height: 58px; border-radius: 6px; border: 1px solid var(--el-border-color-light); background: var(--el-fill-color-light); }
 .variant-image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
 .variant-image-card { display: grid; grid-template-rows: 1fr 32px 26px; gap: 8px; align-content: start; min-height: 0; padding: 10px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-fill-color-extra-light); overflow: hidden; }
 .variant-image-card :deep(.erp-image-preview--square) { width: 100%; min-width: 100%; max-width: 100%; height: auto; min-height: 0; max-height: none; aspect-ratio: 1; flex-basis: auto; border-radius: 6px; }
-.variant-selected-image { width: 100%; min-width: 0; aspect-ratio: 1; padding: 0; border: 1px solid var(--el-border-color-lighter); border-radius: 6px; overflow: hidden; background: var(--el-fill-color-light); cursor: pointer; }
-.variant-selected-image img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.variant-selected-image { width: 100%; min-width: 0; aspect-ratio: 1; border: 1px solid var(--el-border-color-lighter); border-radius: 6px; overflow: hidden; background: var(--el-fill-color-light); cursor: zoom-in; }
+.variant-selected-image :deep(.el-image__inner) { width: 100%; height: 100%; object-fit: cover; display: block; }
 .variant-image-empty { display: grid; place-items: center; width: 100%; aspect-ratio: 1; border: 1px dashed var(--el-border-color); border-radius: 6px; color: var(--el-text-color-secondary); background: var(--el-bg-color); }
 .variant-image-card :deep(.el-input__wrapper) { min-height: 32px; }
 .variant-image-card :deep(.el-input__inner) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3959,7 +5279,11 @@ onMounted(loadAll);
 .variant-image-panel { padding: 16px; overflow: auto; border-right: 1px solid var(--el-border-color-lighter); background: #fff; }
 .variant-image-tools { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
 .selected-grid { grid-template-columns: repeat(auto-fill, minmax(128px, 128px)); align-items: start; }
-.selected-card { border-color: #ded8ff; background: #fbfaff; }
+.selected-card { position: relative; border-color: #ded8ff; background: #fbfaff; transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease, background 0.16s ease; }
+.selected-card[draggable="true"] { cursor: grab; }
+.selected-card.dragging { opacity: 0.62; cursor: grabbing; transform: scale(0.96); box-shadow: 0 10px 24px rgba(67, 56, 202, 0.18); }
+.selected-card.drag-over { border-color: #6c5ce7; background: #f3f0ff; transform: translateY(-3px); box-shadow: 0 0 0 2px rgba(108, 92, 231, 0.16); }
+.selected-card.drag-over::before { content: ""; position: absolute; inset: 8px auto 8px -4px; width: 4px; border-radius: 999px; background: #6c5ce7; }
 .variant-card-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; }
 .variant-card-footer .el-tag { max-width: 100%; min-width: 0; overflow: hidden; }
 .variant-card-footer :deep(.el-tag__content) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

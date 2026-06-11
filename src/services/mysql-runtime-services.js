@@ -3,13 +3,19 @@ import {
   createListingTemplateFromCollectedProduct,
   createListingTemplateFromOnlineProduct,
   createListingDraft,
+  updateListingDraft,
+  createAiVariantListingDraftLightweight,
+  deleteListingDraft,
   copyListingTemplateFromOzonSku,
   generateListingShopCopies,
   getListingCollectedProductDetail,
   listingCategoryTemplateDetail,
   listingCategoryTemplates,
   listingCopyJobs,
+  listingDraftProjects,
+  listingDraftDetail,
   listingDrafts,
+  listingAiVariantAssets,
   listingMediaAssets,
   materialPackageDetail,
   searchMaterialPackages,
@@ -23,6 +29,8 @@ import {
   listingPublishRecords,
   listingShopCopies,
   publishListingTemplateToOzon,
+  publishListingDraftsToOzon,
+  deleteListingPublishRecords,
   deleteListingPublishRecord,
   refreshListingCopyJob,
   refreshListingPublishRecord,
@@ -34,11 +42,13 @@ import {
   collectorBoxProducts,
   collectorBoxProductDetail,
   collectorBoxMappingDiagnostics,
+  saveCollectorBoxEdit,
   deleteCollectorBoxProducts,
   createSelectionFromCollectorBox,
   createListingTemplateFromCollectorBox,
   listingTemplateMappingDiagnostics,
   listingTemplateHealthCheck,
+  repairListingDraftMediaContamination,
   repairListingTemplateMapping,
   syncListingOzonAttributeValues,
   syncListingOzonCategories,
@@ -47,7 +57,8 @@ import {
   validateListingTemplatePublish,
   updateListingCategoryTemplate,
   autoSyncListingPublishRecords,
-  onlineProductListingEditDraft
+  onlineProductListingEditDraft,
+  saveListingAiVariantAsset
 } from "./listing-automation.js";
 import {
   assetVariantBootstrap,
@@ -60,6 +71,8 @@ import {
   enqueuePublishSelectionProductToOzon,
   generateAssetVariantTitlePreview,
   generateAssetVariants,
+  generateAssetVariantVideoFromImage,
+  generateListingVariantMediaFromImage,
   importAssetVariantToListingAutomation,
   publishAssetVariantsToOzon,
   publishSelectionProductToOzon,
@@ -82,7 +95,7 @@ import {
 
 async function translateCustomerMessageTemplateZh(body = {}) {
   const scenario = String(body.scenario || "").trim();
-  const label = String(body.label || body.name || scenario || "客户消息模板").trim();
+  const label = String(body.label || body.name || scenario || "customer message template").trim();
   const text = String(body.template_text || body.text || "").trim();
   if (!text) return { ok: true, translated_text: "", template_translation: "" };
   const strictResult = await chatWithAiProvider({
@@ -92,17 +105,17 @@ async function translateCustomerMessageTemplateZh(body = {}) {
       {
         role: "system",
         content: [
-          "你是跨境电商运营助理，负责把俄语客户消息模板翻译成中文示意。",
-          "只输出中文译文，不要输出俄语，不要使用 Markdown，不要加标题或解释。",
-          "必须完整保留所有模板变量原文，例如 {{posting_number}}、{{product_summary}}、{{status_label}}、{{shop_name}}，变量名和花括号都不能改。",
-          "只翻译人能读懂的俄语文字；遇到变量时把变量放在中文句子中合适的位置。",
-          "语气要像运营自己看的中文对照稿，清楚自然，不要 AI 腔，不要逐字生硬直译。",
-          "如果原模板是多行，请尽量保持相近的换行结构，方便和上方俄语模板对照。"
+          "Translate the Russian customer message template into Chinese for an ecommerce operator.",
+          "Output Chinese only. Do not output Russian, Markdown, headings, or explanations.",
+          "Preserve template variables exactly, including braces, for example {{posting_number}}, {{product_summary}}, {{status_label}}, and {{shop_name}}.",
+          "Translate only human-readable Russian text. Place variables naturally in the Chinese sentence.",
+          "Keep the tone natural and concise for an operations-side reference translation.",
+          "If the source template has multiple lines, preserve a similar line structure when practical."
         ].join("\n")
       },
       {
         role: "user",
-        content: `场景：${label}\n\n请把下面俄语模板翻译成中文示意，并保留所有 {{变量}}：\n${text}`
+        content: `Scenario: ${label}\n\nTranslate this Russian template into Chinese and preserve all {{variables}}:\n${text}`
       }
     ]
   });
@@ -124,16 +137,16 @@ async function translateCustomerMessageTemplateZh(body = {}) {
       {
         role: "system",
         content: [
-          "你是跨境电商运营助理，负责把俄语客户消息模板翻译成中文释义。",
-          "只输出中文，不要输出俄语，不要使用 Markdown。",
-          "保留模板变量，例如 {{posting_number}}、{{product_summary}}、{{status_label}}，不要翻译变量名。",
-          "翻译要让运营看懂这段模板发给客户是什么意思，语气自然简洁。",
-          "如果原文是多行模板，请按大意翻译成 2-5 行中文，不要逐字生硬直译。"
+          "Translate the Russian customer message template into Chinese meaning.",
+          "Output Chinese only. Do not output Russian or Markdown.",
+          "Preserve template variables exactly and do not translate variable names.",
+          "Make the translation clear to an ecommerce operator and keep it natural.",
+          "For long multi-line templates, summarize into two to five Chinese lines if appropriate."
         ].join("\n")
       },
       {
         role: "user",
-        content: `场景：${label}\n\n俄语模板：\n${text}`
+        content: `Scenario: ${label}\n\nRussian template:\n${text}`
       }
     ]
   });
@@ -161,19 +174,29 @@ import {
 } from "./ai-prompt-templates.js";
 import {
   aiStrategies,
+  aiStrategyBundleDetail,
+  aiStrategyBundles,
+  aiStrategyCategoryNodeDetail,
+  aiStrategyCategoryNodes,
   aiStrategyDetail,
   aiStrategyLayerRuleDetail,
   aiStrategyLayerRules,
   createAiStrategy,
+  createAiStrategyBundle,
+  createAiStrategyCategoryNode,
   createAiStrategyLayerRule,
   deleteAiStrategy,
+  matchAiStrategyBundles,
   resolveAiStrategyPlan,
+  updateAiStrategyBundle,
+  updateAiStrategyCategoryNode,
   updateAiStrategyLayerRule,
   updateAiStrategy
 } from "./ai-strategies.js";
 import {
   archiveMaterialAsset,
   createMaterialAsset,
+  deleteMaterialAsset,
   materialAssetDetail,
   materialAssets,
   updateMaterialAsset
@@ -272,6 +295,7 @@ import {
   dashboardMysql,
   directInboundProcurementRequestsMysql,
   deleteInboundRecordMysql,
+  deleteInventoryMovementMysql,
   deleteLogisticsRuleMysql,
   deleteOrderCancellationRuleMysql,
   deletePersonMysql,
@@ -326,6 +350,7 @@ import {
   profitAftersalesDetailsMysql,
   profitAftersalesMysql,
   productCancelDetailsMysql,
+  productDetailImageMysql,
   productImageMysql,
   productOrderProfitDetailsMysql,
   productsMysql,
@@ -378,6 +403,7 @@ import {
   updateCustomerMessageShopSettingMysql,
   updateCustomerMessageTemplateMysql,
   updateInboundRecordMysql,
+  updateInventoryMovementMysql,
   updateUserPreferenceMysql,
   updateLogisticsRuleMysql,
   updateOnlineProductMysql,
@@ -444,9 +470,15 @@ export const mysqlRuntimeServices = {
   aiPromptTemplateDetail,
   aiPromptTemplates,
   aiStrategies,
+  aiStrategyBundleDetail,
+  aiStrategyBundles,
+  aiStrategyCategoryNodeDetail,
+  aiStrategyCategoryNodes,
   aiStrategyDetail,
   aiStrategyLayerRuleDetail,
   aiStrategyLayerRules,
+  createAiStrategyBundle,
+  createAiStrategyCategoryNode,
   createAiStrategyLayerRule,
   updateAiStrategyLayerRule,
   bindOnlineProduct: bindOnlineProductMysql,
@@ -458,6 +490,8 @@ export const mysqlRuntimeServices = {
   confirmPurchaseOrder: confirmPurchaseOrderMysql,
   createInboundRecord: createInboundRecordMysql,
   createInventoryMovement: createInventoryMovementMysql,
+  updateInventoryMovement: updateInventoryMovementMysql,
+  deleteInventoryMovement: deleteInventoryMovementMysql,
   adjustInventoryStockDebt: adjustInventoryStockDebtMysql,
   customerChatThreadMessages: customerChatThreadMessagesMysql,
   customerChatThreads: customerChatThreadsMysql,
@@ -473,6 +507,7 @@ export const mysqlRuntimeServices = {
   createListingTemplateFromOnlineProduct,
   createSelectionFromCollectorBox,
   createListingDraft,
+  createAiVariantListingDraftLightweight,
   copyListingTemplateFromOzonSku,
   createOnlineProduct: createOnlineProductMysql,
   createOrderCancellationRule: createOrderCancellationRuleMysql,
@@ -497,6 +532,7 @@ export const mysqlRuntimeServices = {
   deleteProduct: deleteProductMysql,
   deleteAiPromptTemplate,
   deleteAiStrategy,
+  deleteMaterialAsset,
   deletePurchaseOrder: deletePurchaseOrderMysql,
   deleteShop: deleteShopMysql,
   deleteSkuMapping: deleteSkuMappingMysql,
@@ -506,6 +542,8 @@ export const mysqlRuntimeServices = {
   exceptionWorkbench: exceptionWorkbenchMysql,
   generateListingShopCopies,
   generateAssetVariants,
+  generateAssetVariantVideoFromImage,
+  generateListingVariantMediaFromImage,
   enqueuePublishSelectionProductToOzon,
   assetVariantJobs,
   assetVariantJobDetail,
@@ -529,13 +567,20 @@ export const mysqlRuntimeServices = {
   collectorBoxProductDetail,
   collectorBoxProducts,
   collectorBoxMappingDiagnostics,
+  saveCollectorBoxEdit,
+  saveListingAiVariantAsset,
   deleteCollectorBoxProducts,
   createListingTemplateFromCollectorBox,
   listingTemplateMappingDiagnostics,
   listingTemplateHealthCheck,
+  repairListingDraftMediaContamination,
   repairListingTemplateMapping,
   listingCopyJobs,
+  listingDraftProjects,
+  listingDraftDetail,
   listingDrafts,
+  listingAiVariantAssets,
+  deleteListingDraft,
   listingMediaAssets,
   materialPackageDetail,
   materialAssetDetail,
@@ -549,12 +594,14 @@ export const mysqlRuntimeServices = {
   listingOzonCategorySyncJobs,
   listingPublishRecordDetail,
   listingPublishRecords,
+  deleteListingPublishRecords,
   autoSyncListingPublishRecords,
   listingShopCopies,
   listOzonActionCandidates: listOzonActionCandidatesMysql,
   listOzonActionProducts: listOzonActionProductsMysql,
   listOzonActions: listOzonActionsMysql,
   publishListingTemplateToOzon,
+  publishListingDraftsToOzon,
   getListingCollectedProductDetail,
   lookupCollectedProductFromPlugin,
   mappings: mappingsMysql,
@@ -579,6 +626,7 @@ export const mysqlRuntimeServices = {
   pendingInboundItems: pendingInboundItemsMysql,
   people: peopleMysql,
   productCancelDetails: productCancelDetailsMysql,
+  productDetailImage: productDetailImageMysql,
   productImage: productImageMysql,
   productOrderProfitDetails: productOrderProfitDetailsMysql,
   products: productsMysql,
@@ -593,6 +641,7 @@ export const mysqlRuntimeServices = {
   refreshDashboardSnapshot: refreshDashboardSnapshotMysql,
   refreshOrderProfitDetailSnapshots: refreshOrderProfitDetailSnapshotsMysql,
   replyOzonReview: replyOzonReviewMysql,
+  matchAiStrategyBundles,
   resolveAiStrategyPlan,
   restoreProduct: restoreProductMysql,
   removeProductFromInventory: removeProductFromInventoryMysql,
@@ -672,6 +721,8 @@ export const mysqlRuntimeServices = {
   updateLogisticsRule: updateLogisticsRuleMysql,
   updateOnlineProduct: updateOnlineProductMysql,
   updateOrderCancellationRule: updateOrderCancellationRuleMysql,
+  updateAiStrategyBundle,
+  updateAiStrategyCategoryNode,
   updateAiStrategy,
   updateOrderMark: updateOrderMarkMysql,
   updatePackagingFeeRule: updatePackagingFeeRuleMysql,

@@ -1,0 +1,503 @@
+{
+  "aiVariantCandidate": {
+    "ozon_category_id": "17028922:971712345",
+    "category_name": "Car trunk mats",
+    "template_name": "AI trunk mat variant",
+    "title": "Trunk mat for TENET T4, black",
+    "description": "Durable trunk mat for TENET T4. Protects the cargo area from dirt and moisture.",
+    "attributes": [
+      {
+        "attribute_id": 85,
+        "name": "Brand",
+        "required": true,
+        "type": "select",
+        "value": "No brand",
+        "values": [
+          { "dictionary_value_id": 126745801, "value": "No brand" },
+          { "dictionary_value_id": 123456789, "value": "Other brand" }
+        ],
+        "selected_values": [
+          { "dictionary_value_id": 126745801, "value": "No brand" }
+        ]
+      },
+      {
+        "attribute_id": 7199,
+        "name": "Material",
+        "required": true,
+        "value": "EVA"
+      },
+      {
+        "attribute_id": 23171,
+        "name": "Search tags",
+        "type": "multiselect",
+        "value": ["trunk mat", "tenet t4", "car accessory"]
+      }
+    ],
+    "images": [
+      { "url": "https://cdn.example.test/listing/ai-trunk-main.jpg", "sort_order": 1 },
+      { "url": "https://cdn.example.test/listing/ai-trunk-detail.jpg", "sort_order": 2 }
+    ],
+    "editable_payload": {
+      "description_category_id": "17028922",
+      "type_id": "971712345",
+      "price": {
+        "value": 1990,
+        "old_price": 2490,
+        "currency_code": "RUB",
+        "vat": "0"
+      },
+      "dimensions": {
+        "length_cm": 68,
+        "width_cm": 42,
+        "height_cm": 6,
+        "weight_g": 1200
+      },
+      "variants": [
+        {
+          "offer_id": "AI-TENET-T4-BLACK-001",
+          "title": "Trunk mat for TENET T4, black",
+          "price": 1990,
+          "color": "black",
+          "images": [
+            { "url": "https://cdn.example.test/listing/ai-trunk-main.jpg", "sort_order": 1 },
+            { "url": "https://cdn.example.test/listing/ai-trunk-detail.jpg", "sort_order": 2 }
+          ],
+          "video_urls": ["https://cdn.example.test/listing/ai-trunk-video.mp4"],
+          "video_cover_urls": ["https://cdn.example.test/listing/ai-trunk-video.mp4"],
+          "dynamic_attributes": {
+            "10096": {
+              "attribute_id": 10096,
+              "value": "black",
+              "values": [
+                { "dictionary_value_id": 61574, "value": "black" },
+                { "dictionary_value_id": 61575, "value": "white" }
+              ],
+              "selected_values": [
+                { "dictionary_value_id": 61574, "value": "black" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "source_raw": {
+      "source": "ai_optimization_v2",
+      "result_id": "fixture-ai-result-1"
+    }
+  },
+  "collectorCandidate": {
+    "ozon_category_id": "17030000:971700001",
+    "category_name": "Seat belt pads",
+    "template_name": "Collector seat belt pad",
+    "title": "Soft seat belt shoulder pad, black, 2 pcs",
+    "description": "Soft shoulder pads reduce pressure from the seat belt and improve comfort in daily driving.",
+    "attributes": [
+      {
+        "attribute_id": 85,
+        "name": "Brand",
+        "required": true,
+        "value": "No brand",
+        "selected_values": [
+          { "dictionary_value_id": 126745801, "value": "No brand" }
+        ]
+      },
+      {
+        "attribute_id": 7202,
+        "name": "Quantity",
+        "required": true,
+        "value": "2"
+      },
+      {
+        "attribute_id": 10096,
+        "name": "Color",
+        "required": true,
+        "value": "black",
+        "values": [
+          { "dictionary_value_id": 61574, "value": "black" },
+          { "dictionary_value_id": 61575, "value": "white" },
+          { "dictionary_value_id": 61576, "value": "red" }
+        ]
+      }
+    ],
+    "images": [
+      { "url": "https://cdn.example.test/listing/collector-belt-main.jpg", "sort_order": 1 },
+      { "url": "https://cdn.example.test/listing/collector-belt-detail.jpg", "sort_order": 2 }
+    ],
+    "editable_payload": {
+      "description_category_id": "17030000",
+      "type_id": "971700001",
+      "price": {
+        "value": 690,
+        "old_price": 990,
+        "currency_code": "RUB",
+        "vat": "0"
+      },
+      "dimensions": {
+        "length_cm": 25,
+        "width_cm": 8,
+        "height_cm": 4,
+        "weight_g": 220
+      },
+      "variants": [
+        {
+          "offer_id": "COLLECTOR-BELT-PAD-BLACK-2PCS",
+          "title": "Soft seat belt shoulder pad, black, 2 pcs",
+          "color": "black",
+          "quantity": "2",
+          "images": [
+            { "url": "https://cdn.example.test/listing/collector-belt-main.jpg", "sort_order": 1 }
+          ]
+        }
+      ]
+    },
+    "source_raw": {
+      "source": "collector_box",
+      "sku": "collector-fixture-1"
+    }
+  },
+  "publishRecordRetryCandidate": {
+    "ozon_category_id": "17031000:971700777",
+    "category_name": "Car key cases",
+    "template_name": "Retry key case listing",
+    "title": "Protective key case for TENET T4/T4L",
+    "description": "Protective key case for TENET T4 and T4L remote keys. The case helps reduce scratches during daily use.",
+    "attributes": [
+      {
+        "attribute_id": 85,
+        "name": "Brand",
+        "required": true,
+        "value": "No brand",
+        "selected_values": [
+          { "dictionary_value_id": 126745801, "value": "No brand" }
+        ]
+      },
+      {
+        "attribute_id": 7199,
+        "name": "Material",
+        "required": true,
+        "value": "TPU"
+      },
+      {
+        "attribute_id": 9048,
+        "name": "Model name",
+        "required": true,
+        "value": "TENET T4/T4L"
+      }
+    ],
+    "images": [
+      { "url": "https://cdn.example.test/listing/retry-key-main.jpg", "sort_order": 1 },
+      { "url": "https://cdn.example.test/listing/retry-key-detail.jpg", "sort_order": 2 }
+    ],
+    "editable_payload": {
+      "description_category_id": "17031000",
+      "type_id": "971700777",
+      "price": {
+        "value": 890,
+        "old_price": 1190,
+        "currency_code": "RUB",
+        "vat": "0"
+      },
+      "dimensions": {
+        "length_cm": 10,
+        "width_cm": 6,
+        "height_cm": 3,
+        "weight_g": 100
+      },
+      "variants": [
+        {
+          "offer_id": "RETRY-TENET-KEY-CASE-001",
+          "title": "Protective key case for TENET T4/T4L",
+          "images": [
+            { "url": "https://cdn.example.test/listing/retry-key-main.jpg", "sort_order": 1 },
+            { "url": "https://cdn.example.test/listing/retry-key-detail.jpg", "sort_order": 2 }
+          ],
+          "attributes": [
+            {
+              "attribute_id": 10096,
+              "value": "black",
+              "values": [
+                { "dictionary_value_id": 61574, "value": "black" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "source_raw": {
+      "source": "publish_record_retry",
+      "record_id": 10001,
+      "from_publish_record": true
+    }
+  },
+  "collectorRawSource": {
+    "sku": "RAW-COLLECTOR-TRUNK-001",
+    "productId": "3743961788",
+    "title": "Collected trunk mat for TENET T4",
+    "description": "Collected source description for a black trunk mat. The source includes category, dimensions, images, and variant attributes.",
+    "category": "Car trunk mats",
+    "description_category_id": "17028922",
+    "type_id": "971712345",
+    "price": 1880,
+    "originalPrice": 2380,
+    "dimensions": {
+      "length": 70,
+      "width": 45,
+      "height": 5,
+      "unit": "cm"
+    },
+    "weight": 1350,
+    "images": [
+      "https://cdn.example.test/listing/raw-collector-main.jpg",
+      "https://cdn.example.test/listing/raw-collector-detail.jpg"
+    ],
+    "hashtags": ["trunk mat", "tenet t4", "black"],
+    "attributes": [
+      {
+        "attribute_id": 85,
+        "name": "Brand",
+        "value": "No brand",
+        "selected_values": [
+          { "dictionary_value_id": 126745801, "value": "No brand" }
+        ]
+      },
+      {
+        "attribute_id": 7199,
+        "name": "Material",
+        "value": "EVA"
+      },
+      {
+        "attribute_id": 10096,
+        "name": "Color",
+        "value": "black",
+        "values": [
+          { "dictionary_value_id": 61574, "value": "black" },
+          { "dictionary_value_id": 61575, "value": "white" }
+        ],
+        "selected_values": [
+          { "dictionary_value_id": 61574, "value": "black" }
+        ]
+      }
+    ],
+    "variants": [
+      {
+        "sku": "RAW-COLLECTOR-TRUNK-BLACK",
+        "title": "Collected trunk mat for TENET T4, black",
+        "price": 1880,
+        "color": "black",
+        "images": [
+          "https://cdn.example.test/listing/raw-collector-main.jpg"
+        ],
+        "attributes": [
+          {
+            "attribute_id": 10096,
+            "name": "Color",
+            "value": "black",
+            "values": [
+              { "dictionary_value_id": 61574, "value": "black" },
+              { "dictionary_value_id": 61575, "value": "white" }
+            ],
+            "selected_values": [
+              { "dictionary_value_id": 61574, "value": "black" }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "aiVariantRawResult": {
+    "sourceProduct": {
+      "id": "BASE-AI-001",
+      "sourceId": "BASE-OFFER-001",
+      "title": "Base trunk mat for TENET vehicles",
+      "category": "Car trunk mats",
+      "brand": "No brand",
+      "material": "EVA",
+      "imageUrl": "https://cdn.example.test/listing/ai-raw-base-main.jpg",
+      "detailImages": [
+        "https://cdn.example.test/listing/ai-raw-base-detail.jpg"
+      ],
+      "templateSnapshot": {
+        "ozon_category_id": "17028922:971712345",
+        "category_name": "Car trunk mats",
+        "template_name": "Base AI trunk template",
+        "title": "Base trunk mat for TENET vehicles",
+        "description": "Base description before AI variant optimization.",
+        "attributes": [
+          {
+            "attribute_id": 85,
+            "name": "Brand",
+            "required": true,
+            "value": "No brand",
+            "selected_values": [
+              { "dictionary_value_id": 126745801, "value": "No brand" }
+            ]
+          },
+          {
+            "attribute_id": 7199,
+            "name": "Material",
+            "required": true,
+            "value": "EVA"
+          }
+        ],
+        "images": [
+          { "url": "https://cdn.example.test/listing/ai-raw-base-main.jpg", "sort_order": 1 }
+        ],
+        "editable_payload": {
+          "description_category_id": "17028922",
+          "type_id": "971712345",
+          "price": {
+            "value": 2090,
+            "old_price": 2590,
+            "currency_code": "RUB",
+            "vat": "0"
+          },
+          "dimensions": {
+            "length_cm": 72,
+            "width_cm": 48,
+            "height_cm": 6,
+            "weight_g": 1450
+          },
+          "variants": []
+        }
+      }
+    },
+    "result": {
+      "id": "AI-RAW-RESULT-001",
+      "sourceBatchId": "AI-BATCH-001",
+      "variantTarget": "TENET T4",
+      "title": "AI optimized trunk mat for TENET T4, black",
+      "description": "AI optimized durable trunk mat for TENET T4. The mat protects the cargo area from dust, snow, and moisture.",
+      "tags": ["trunk mat", "tenet t4", "eva mat"],
+      "generatedMainImageUrl": "https://cdn.example.test/listing/ai-raw-generated-main.jpg",
+      "generatedDetailImages": [
+        "https://cdn.example.test/listing/ai-raw-generated-detail.jpg"
+      ],
+      "video": {
+        "publishUrl": "https://cdn.example.test/listing/ai-raw-generated-video.mp4"
+      },
+      "attributes": {
+        "color": "black",
+        "material": "EVA"
+      },
+      "dynamicAttributes": {
+        "10096": {
+          "attribute_id": 10096,
+          "name": "Color",
+          "value": "black",
+          "values": [
+            { "dictionary_value_id": 61574, "value": "black" },
+            { "dictionary_value_id": 61575, "value": "white" }
+          ],
+          "selected_values": [
+            { "dictionary_value_id": 61574, "value": "black" }
+          ]
+        }
+      }
+    }
+  },
+  "onlineProductEditTemplate": {
+    "ozon_category_id": "17032000:971701111",
+    "category_name": "Window deflectors",
+    "template_name": "Online product copied edit draft",
+    "title": "Window deflectors for TENET T4, 4 pcs",
+    "description": "Window deflectors for TENET T4 help reduce rain and wind entering the cabin.",
+    "source_type": "online_product_live",
+    "source_ozon_sku": "ONLINE-TENET-DEFLECTOR-SOURCE",
+    "source_raw": {
+      "source_type": "online_product_live",
+      "online_product_id": 99801,
+      "offer_id": "ONLINE-TENET-DEFLECTOR-SOURCE",
+      "from_online_product": true
+    },
+    "attributes": [
+      {
+        "attribute_id": 85,
+        "name": "Brand",
+        "required": true,
+        "value": "No brand",
+        "selected_values": [
+          { "dictionary_value_id": 126745801, "value": "No brand" }
+        ]
+      },
+      {
+        "attribute_id": 7199,
+        "name": "Material",
+        "required": true,
+        "value": "ABS plastic"
+      },
+      {
+        "attribute_id": 23171,
+        "name": "Search tags",
+        "value": ["window deflector", "tenet t4", "rain guard"]
+      }
+    ],
+    "images": [
+      { "url": "https://cdn.example.test/listing/online-deflector-main.jpg", "sort_order": 1 },
+      { "url": "https://cdn.example.test/listing/online-deflector-detail.jpg", "sort_order": 2 }
+    ],
+    "editable_payload": {
+      "sku": "ONLINE-TENET-DEFLECTOR-SOURCE",
+      "description_category_id": "17032000",
+      "type_id": "971701111",
+      "price": {
+        "value": 1590,
+        "old_price": 2190,
+        "currency_code": "RUB",
+        "vat": "0"
+      },
+      "dimensions": {
+        "length_cm": 56,
+        "width_cm": 12,
+        "height_cm": 8,
+        "weight_g": 700
+      },
+      "attributes": [
+        {
+          "attribute_id": 85,
+          "name": "Brand",
+          "required": true,
+          "value": "No brand",
+          "selected_values": [
+            { "dictionary_value_id": 126745801, "value": "No brand" }
+          ]
+        },
+        {
+          "attribute_id": 7199,
+          "name": "Material",
+          "required": true,
+          "value": "ABS plastic"
+        }
+      ],
+      "variants": [
+        {
+          "offer_id": "ONLINE-TENET-DEFLECTOR-PUBLISH",
+          "source_offer_id": "ONLINE-TENET-DEFLECTOR-SOURCE",
+          "title": "Window deflectors for TENET T4, 4 pcs",
+          "images": [
+            { "url": "https://cdn.example.test/listing/online-deflector-main.jpg", "sort_order": 1 }
+          ],
+          "dynamic_attributes": {
+            "10096": {
+              "attribute_id": 10096,
+              "name": "Color",
+              "value": "black",
+              "values": [
+                { "dictionary_value_id": 61574, "value": "black" },
+                { "dictionary_value_id": 61575, "value": "white" }
+              ],
+              "selected_values": [
+                { "dictionary_value_id": 61574, "value": "black" }
+              ]
+            }
+          }
+        }
+      ],
+      "source_raw": {
+        "source_type": "online_product_live",
+        "online_product_id": 99801,
+        "offer_id": "ONLINE-TENET-DEFLECTOR-SOURCE",
+        "from_online_product": true
+      }
+    }
+  }
+}

@@ -73,6 +73,7 @@ function normalizeAttributes(value) {
     const attributeId = item?.attribute_id || item?.attributeId || item?.id || "";
     const values = normalizeArray(item?.values).map((option) => ({
       id: option?.dictionary_value_id ?? option?.id ?? option?.value_id ?? "",
+      dictionary_value_id: option?.dictionary_value_id ?? option?.id ?? option?.value_id ?? "",
       value: String(option?.value ?? option?.name ?? option?.text ?? option ?? "").trim()
     })).filter((option) => option.value);
     return {
@@ -210,6 +211,7 @@ function collectVariantRows(source = {}, editPayload = {}, followPayload = {}) {
   const payload = objectValue(source.payload || source.rawPayload || {});
   const normalized = objectValue(source.normalized || {});
   const nestedFollow = objectValue(source.followEditPayload || source.follow_edit_payload || editPayload.followEditPayload || editPayload.follow_edit_payload || payload.followEditPayload || payload.follow_edit_payload || normalized.followEditPayload || {});
+  const sellerVariantBySku = collectSellerVariantBySku(source, editPayload, payload, normalized, nestedFollow);
   const rows = [
     ...normalizeArray(source.editorVariants || source.editor_variants || editPayload.editorVariants || editPayload.editor_variants || payload.editorVariants || normalized.editorVariants),
     ...normalizeArray(source.rows || editPayload.rows || followPayload.rows || nestedFollow.rows || payload.rows || normalized.rows),
@@ -221,9 +223,49 @@ function collectVariantRows(source = {}, editPayload = {}, followPayload = {}) {
   for (const row of rows) {
     const key = String(row?.sku || row?.source_sku || row?.offer_id || row?.variantId || row?.variant_id || row?.id || "").trim();
     if (!key) continue;
-    const next = { ...row, sku: row.sku || row.source_sku || key };
+    const next = mergeSellerVariantPatch({ ...row, sku: row.sku || row.source_sku || key }, sellerVariantBySku[key]);
     const previous = byKey.get(key);
     byKey.set(key, previous ? mergeVariantRow(previous, next) : next);
+  }
+  return [...byKey.values()];
+}
+
+function collectSellerVariantBySku(...sources) {
+  const result = {};
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    for (const [sku, patch] of Object.entries(objectValue(source.sellerVariantBySku || source.seller_variant_by_sku))) {
+      if (sku && patch && typeof patch === "object") result[String(sku).trim()] = patch;
+    }
+    for (const [sku, fallback] of Object.entries(objectValue(source.variantSellerFallbacks || source.variant_seller_fallbacks))) {
+      const fields = objectValue(fallback?.fields || fallback);
+      if (sku && Object.keys(fields).length) result[String(sku).trim()] = { ...(result[String(sku).trim()] || {}), ...fields };
+    }
+  }
+  return result;
+}
+
+function mergeSellerVariantPatch(row = {}, patch = {}) {
+  if (!patch || typeof patch !== "object") return row;
+  const attributes = mergeAttributesByKey(row.attributes || row.attribute_values || row.characteristics || [], patch.attributes || []);
+  return {
+    ...row,
+    ...(patch.variantId ? { variantId: patch.variantId } : {}),
+    ...(patch.variantName ? { variantName: patch.variantName } : {}),
+    ...(patch.origin_variant_id ? { origin_variant_id: patch.origin_variant_id } : {}),
+    ...(patch.bundle_id ? { bundle_id: patch.bundle_id } : {}),
+    ...(patch.barcode && !row.barcode ? { barcode: patch.barcode } : {}),
+    attributes: attributes.length ? attributes : row.attributes
+  };
+}
+
+function mergeAttributesByKey(...sources) {
+  const byKey = new Map();
+  for (const attr of sources.flatMap((source) => normalizeArray(source))) {
+    if (!attr || typeof attr !== "object") continue;
+    const key = String(attr.attribute_id || attr.attributeId || attr.id || attr.name || attr.attribute_name || "").trim();
+    if (!key) continue;
+    byKey.set(key, { ...(byKey.get(key) || {}), ...attr });
   }
   return [...byKey.values()];
 }

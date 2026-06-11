@@ -28,7 +28,7 @@ export function createOperationsRoutes({ services, readJson }) {
     "POST /api/fbp-transfer-records": async (req) => services.createFbpTransferRecord(await readJson(req), req._session?.personId) || { ok: true },
     "POST /api/inbound-records/batch-update-async": async (req) => services.startBatchUpdateInboundRecords(await readJson(req)),
     "POST /api/inbound-records/batch-update": async (req) => services.batchUpdateInboundRecords(await readJson(req)),
-    "POST /api/inventory/movements": async (req) => services.createInventoryMovement(await readJson(req)) || { ok: true },
+    "POST /api/inventory/movements": async (req) => services.createInventoryMovement(await readJson(req), req._session?.personId) || { ok: true },
     "GET /api/inventory/stock-debts": (req, url) => services.inventoryStockDebts(Object.fromEntries(url.searchParams.entries())),
     "POST /api/inventory/stock-debts/adjust": async (req) => services.adjustInventoryStockDebt(await readJson(req), req._session?.personId),
     "POST /api/customer-messages/preview": async (req) => services.previewCustomerMessage(await readJson(req)),
@@ -64,6 +64,14 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "people" && parts[2]) {
     await services.updatePerson(Number(parts[2]), await readJson(req));
     return json(res, { ok: true });
+  }
+
+  if (req.method === "PUT" && parts[0] === "api" && parts[1] === "inventory" && parts[2] === "movements" && parts[3]) {
+    return json(res, await services.updateInventoryMovement(Number(parts[3]), await readJson(req), req._session?.personId));
+  }
+
+  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "inventory" && parts[2] === "movements" && parts[3]) {
+    return json(res, await services.deleteInventoryMovement(Number(parts[3]), req._session?.personId));
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "people" && parts[2]) {

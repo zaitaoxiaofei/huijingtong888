@@ -96,7 +96,8 @@ async function ensureMysqlColumns(table, statements = []) {
     try {
       await mysqlExecute(sql);
     } catch (error) {
-      if (error?.code === "ER_DUP_FIELDNAME") continue;
+      if (["ER_DUP_FIELDNAME", "ER_DUP_KEYNAME"].includes(error?.code)) continue;
+      if (/Duplicate column name|Duplicate key name/i.test(error?.message || "")) continue;
       throw error;
     }
   }
@@ -115,6 +116,21 @@ async function ensureOzonStockStorageSchemaMysql() {
     "ALTER TABLE ozon_stock_snapshots ADD COLUMN stock_level VARCHAR(64) NOT NULL DEFAULT ''"
   ]);
   ozonStockStorageSchemaReady = true;
+}
+
+async function ensureStockLocationSchemaMysql() {
+  if (stockLocationSchemaReadyMysql) return;
+  await ensureMysqlColumns("outbound_records", [
+    "ALTER TABLE outbound_records ADD COLUMN stock_location VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'",
+    "ALTER TABLE outbound_records ADD COLUMN stock_location_source VARCHAR(64) NOT NULL DEFAULT 'legacy_unknown'",
+    "CREATE INDEX idx_outbound_stock_location ON outbound_records (stock_location, status, created_at)"
+  ]);
+  await ensureMysqlColumns("inventory_movements", [
+    "ALTER TABLE inventory_movements ADD COLUMN stock_location VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'",
+    "ALTER TABLE inventory_movements ADD COLUMN stock_location_source VARCHAR(64) NOT NULL DEFAULT 'legacy_unknown'",
+    "CREATE INDEX idx_inventory_stock_location ON inventory_movements (stock_location, status, created_at)"
+  ]);
+  stockLocationSchemaReadyMysql = true;
 }
 
 async function ensureProfitAnalyticsSchemaMysql() {
@@ -146,6 +162,7 @@ let orderPackageLabelCacheSchemaReady = false;
 let ozonStockStorageSchemaReady = false;
 let dashboardSnapshotSchemaReady = false;
 let profitAnalyticsSchemaReadyMysql = false;
+let stockLocationSchemaReadyMysql = false;
 let logisticsRuleFilterCacheMysql = null;
 const orderLogisticsRuleMatchCacheMysql = new Map();
 let shopWatermarkSchemaReadyMysql = false;
@@ -375,6 +392,12 @@ async function ensureSelectionCreativeSchemaMysql() {
     "ALTER TABLE products ADD COLUMN vehicle_brand VARCHAR(255) NULL",
     "ALTER TABLE products ADD COLUMN vehicle_model VARCHAR(255) NULL",
     "ALTER TABLE products ADD COLUMN selling_points TEXT NULL",
+    "ALTER TABLE products ADD COLUMN listing_title_ru TEXT NULL",
+    "ALTER TABLE products ADD COLUMN listing_tags_ru TEXT NULL",
+    "ALTER TABLE products ADD COLUMN listing_description_ru TEXT NULL",
+    "ALTER TABLE products ADD COLUMN listing_title_prompt TEXT NULL",
+    "ALTER TABLE products ADD COLUMN listing_tags_prompt TEXT NULL",
+    "ALTER TABLE products ADD COLUMN listing_description_prompt TEXT NULL",
     "ALTER TABLE products ADD COLUMN ozon_category_id VARCHAR(128) NOT NULL DEFAULT ''",
     "ALTER TABLE products ADD COLUMN ozon_description_category_id BIGINT NOT NULL DEFAULT 0",
     "ALTER TABLE products ADD COLUMN ozon_type_id BIGINT NOT NULL DEFAULT 0",
@@ -387,7 +410,8 @@ async function ensureSelectionCreativeSchemaMysql() {
     "ALTER TABLE products ADD COLUMN material_asset_status VARCHAR(64) NOT NULL DEFAULT ''",
     "ALTER TABLE products ADD COLUMN advertising_rate DECIMAL(10,4) NOT NULL DEFAULT 0",
     "CREATE INDEX idx_products_selection_owner_updated ON products (active, owner_person_id, updated_at, id)",
-    "CREATE INDEX idx_products_selection_status_updated ON products (active, selection_status, product_type, updated_at, id)"
+    "CREATE INDEX idx_products_selection_status_updated ON products (active, selection_status, product_type, updated_at, id)",
+    "CREATE INDEX idx_products_selection_active_updated ON products (active, updated_at, id)"
   ];
   for (const sql of statements) {
     try {
@@ -595,13 +619,13 @@ async function mysqlInsertAndGetId(sql, params = []) {
   return Number(result.insertId || 0);
 }
 
-function withProductImageEndpointMysql(row) {
+function withProductImageEndpointMysql(row, options = {}) {
   if (!row) return row;
   const image = String(row.image_url || "");
   if (!shouldServeProductImageThroughEndpointMysql(image)) return row;
   return {
     ...row,
-    image_url: productImageEndpointMysql(row)
+    image_url: productImageEndpointMysql(row, options)
   };
 }
 
@@ -611,13 +635,27 @@ function compactProductImageUrlForListMysql(row = {}) {
   return productImageEndpointMysql({
     id: row.id || row.product_id,
     updated_at: row.updated_at || row.image_updated_at || row.created_at
-  });
+  }, { thumbnail: true });
 }
 
-function productImageEndpointMysql(row = {}) {
+function productImageEndpointMysql(row = {}, options = {}) {
   const versionSource = row.updated_at || row.image_updated_at || "";
-  const version = versionSource ? `?v=${encodeURIComponent(String(versionSource))}` : "";
-  return `/api/products/${row.id}/image${version}`;
+  const params = new URLSearchParams();
+  if (versionSource) params.set("v", String(versionSource));
+  if (options.thumbnail) params.set("thumb", "1");
+  if (options.width) params.set("w", String(options.width));
+  const query = params.toString();
+  return `/api/products/${row.id}/image${query ? `?${query}` : ""}`;
+}
+
+function productDetailImageEndpointMysql(row = {}, index = 0, options = {}) {
+  const versionSource = row.updated_at || row.image_updated_at || "";
+  const params = new URLSearchParams();
+  if (versionSource) params.set("v", String(versionSource));
+  if (options.thumbnail) params.set("thumb", "1");
+  if (options.width) params.set("w", String(options.width));
+  const query = params.toString();
+  return `/api/products/${row.id}/detail-images/${index}${query ? `?${query}` : ""}`;
 }
 
 function compactProductListRowMysql(row) {
@@ -628,7 +666,7 @@ function compactProductListRowMysql(row) {
     code: row.code,
     inventory_id: row.inventory_id,
     name: row.name,
-    image_url: shouldServeProductImageThroughEndpointMysql(imageUrl) ? productImageEndpointMysql(row) : imageUrl,
+    image_url: shouldServeProductImageThroughEndpointMysql(imageUrl) ? productImageEndpointMysql(row, { thumbnail: true }) : imageUrl,
     owner_person_id: row.owner_person_id,
     owner_name: row.owner_name || "",
     created_by_person_id: row.created_by_person_id,
@@ -655,6 +693,8 @@ function compactProductListRowMysql(row) {
     avg_unit_cost: Number(row.avg_unit_cost || 0),
     total_purchase_amount: Number(row.total_purchase_amount || 0),
     total_purchase_quantity: Number(row.total_purchase_quantity || 0),
+    manual_outbound_quantity: Number(row.manual_outbound_quantity || 0),
+    manual_outbound_amount: Number(row.manual_outbound_amount || 0),
     incoming_stock: Number(row.incoming_stock || 0),
     fbp_stock: Number(row.fbp_stock || row.fbp_total || 0),
     fbp_transfer_in_transit_qty: Number(row.fbp_transfer_in_transit_qty || 0),
@@ -751,9 +791,35 @@ function shouldServeProductImageThroughEndpointMysql(image) {
 function isProductImageEndpointMysql(value, productId) {
   const image = String(value || "").trim();
   if (!image) return false;
-  const match = image.match(/^\/api\/products\/(\d+)\/image(?:[?#].*)?$/i);
+  const match = image.match(/^\/api\/products\/(\d+)\/(?:image|detail-images\/\d+)(?:[?#].*)?$/i);
   if (!match) return false;
   return !productId || Number(match[1]) === Number(productId);
+}
+
+function productDetailImageEndpointIndexMysql(value, productId) {
+  const image = String(value || "").trim();
+  if (!image) return null;
+  const match = image.match(/^\/api\/products\/(\d+)\/detail-images\/(\d+)(?:[?#].*)?$/i);
+  if (!match) return null;
+  if (productId && Number(match[1]) !== Number(productId)) return null;
+  return Number(match[2]);
+}
+
+function productDetailImageListMysql(value) {
+  const parsed = parseJsonOrNull(value);
+  const list = Array.isArray(value)
+    ? value
+    : Array.isArray(parsed)
+      ? parsed
+      : String(value || "").split(/\r?\n|,/);
+  return list.map((item) => String(item || "").trim()).filter(Boolean);
+}
+
+function productDetailImagePreviewUrlsMysql(row = {}, options = {}) {
+  return productDetailImageListMysql(row.detail_image_urls).map((image, index) => {
+    if (!shouldServeProductImageThroughEndpointMysql(image)) return image;
+    return productDetailImageEndpointMysql(row, index, options);
+  });
 }
 
 function normalizeOzonCategoryIdMysql(value) {
@@ -765,17 +831,19 @@ function normalizeOzonCategoryNameMysql(value) {
 }
 
 function normalizeProductDetailImagesMysql(value) {
-  const list = Array.isArray(value)
-    ? value
-    : parseJsonOrNull(value) || String(value || "").split(/\r?\n|,/);
+  const list = productDetailImageListMysql(value);
   return JSON.stringify(list.map((item) => normalizeProductImageUrlMysql(item)).filter(Boolean));
 }
 
 function normalizeProductDetailImagesForUpdateMysql(value, existingValue = "", productId = null) {
-  const rawList = Array.isArray(value)
-    ? value
-    : parseJsonOrNull(value) || String(value || "").split(/\r?\n|,/);
-  const normalized = normalizeProductDetailImagesMysql(rawList);
+  const rawList = productDetailImageListMysql(value);
+  const existingList = productDetailImageListMysql(existingValue);
+  const resolvedList = rawList.map((item) => {
+    const endpointIndex = productDetailImageEndpointIndexMysql(item, productId);
+    if (endpointIndex !== null) return existingList[endpointIndex] || "";
+    return normalizeProductImageUrlMysql(item);
+  }).filter(Boolean);
+  const normalized = JSON.stringify(resolvedList);
   const normalizedList = parseJsonOrNull(normalized) || [];
   if (!normalizedList.length && rawList.some((item) => isProductImageEndpointMysql(item, productId))) {
     return existingValue || normalized;
@@ -996,6 +1064,41 @@ function logisticsModeKeyMysql(row = {}) {
   return combined.includes("hun chun") || combined.includes("hunchun") || combined.includes("娣锋槬") || combined.includes("娣峰窛") || combined.includes("鐝叉槬") || combined.includes("椋庤埞") || combined.includes("棰ㄨ埞") || combined.includes("fbp")
     ? "fbp"
     : "fbs";
+}
+
+function normalizeStockLocationMysql(value = "") {
+  const text = String(value || "").trim().toUpperCase();
+  return ["LOCAL", "FBP", "UNKNOWN"].includes(text) ? text : "UNKNOWN";
+}
+
+function isFbpLogisticsTextMysql(value = "") {
+  return /fbp|fbo|hunchun|hun chun|hch-pd|hch-cr|cel fbp|fbp standard|珲春|混春|混川/i.test(String(value || ""));
+}
+
+function resolveOrderStockLocationMysql(posting = {}) {
+  const raw = parseOzonPostingRawMysql(posting);
+  const deliveryMethod = raw.delivery_method || posting.delivery_method || {};
+  const analytics = raw.analytics_data || posting.analytics_data || {};
+  const warehouseName = textValueMysql(deliveryMethod.warehouse, deliveryMethod.name, raw.warehouse_name, posting.warehouse_name);
+  const deliveryMethodName = textValueMysql(deliveryMethod.name, posting.delivery_method_name);
+  const logisticsChannel = textValueMysql(deliveryMethod.tpl_provider, analytics.tpl_provider, raw.tpl_provider, posting.logistics_channel, posting.tracking_number);
+  const logisticsText = `${warehouseName} ${deliveryMethodName} ${logisticsChannel} ${raw.delivery_type || ""} ${posting.raw_json || ""}`;
+  const ruleValue = resolveOrderLogisticsRuleValue({
+    value: posting.resolved_logistics_rule_value,
+    label: posting.resolved_logistics_rule_name,
+    name: deliveryMethodName,
+    channel: logisticsChannel,
+    carrier: deliveryMethodName,
+    warehousePatterns: [warehouseName, deliveryMethodName, logisticsChannel]
+  });
+  const hasLogisticsText = Boolean(String(logisticsText || "").trim());
+  if (ruleValue === "hunchun_2" || isFbpLogisticsTextMysql(logisticsText)) {
+    return { stockLocation: "FBP", stockLocationSource: "order_warehouse_rule" };
+  }
+  if (hasLogisticsText) {
+    return { stockLocation: "LOCAL", stockLocationSource: "order_warehouse_rule" };
+  }
+  return { stockLocation: "UNKNOWN", stockLocationSource: "missing_order_warehouse" };
 }
 
 function orderTimestampPagedValueMysql(row) {
@@ -5211,6 +5314,8 @@ export async function onlineProductsMysql(query = {}) {
   const status = String(query.status || "all");
   const nameText = String(query.name || query.query || "").trim().toLowerCase();
   const offerText = String(query.offer || query.sku || "").trim().toLowerCase();
+  const startDate = String(query.startDate || query.start_date || "").trim();
+  const endDate = String(query.endDate || query.end_date || "").trim();
   const where = [];
   const params = [];
   if (shopId !== "all") {
@@ -5225,12 +5330,21 @@ export async function onlineProductsMysql(query = {}) {
     where.push("(LOWER(COALESCE(op.offer_id, '')) LIKE ? OR LOWER(COALESCE(op.ozon_sku, '')) LIKE ?)");
     params.push(`%${offerText}%`, `%${offerText}%`);
   }
+  if (startDate) {
+    where.push("DATE(COALESCE(op.published_at, op.ozon_updated_at, op.synced_at, op.updated_at)) >= ?");
+    params.push(startDate);
+  }
+  if (endDate) {
+    where.push("DATE(COALESCE(op.published_at, op.ozon_updated_at, op.synced_at, op.updated_at)) <= ?");
+    params.push(endDate);
+  }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const selectSql = `
     SELECT
       op.id, op.shop_id, op.ozon_sku, op.offer_id, op.ozon_product_id, op.name, op.image_url, op.primary_image,
       op.sale_price, op.currency_code, op.marketing_price, op.old_price, op.status, op.visibility, op.archived,
-      op.is_discounted, op.images_json, op.barcodes_json, op.stocks_json, op.commissions_json, op.attributes_json, op.raw_json,
+      op.is_discounted,
+      CASE WHEN JSON_VALID(op.images_json) THEN JSON_UNQUOTE(JSON_EXTRACT(op.images_json, '$[0]')) ELSE '' END AS first_image_url,
       CASE WHEN op.raw_json IS NOT NULL AND op.raw_json != '' THEN 1 ELSE 0 END AS has_raw_json,
       op.published_at, op.ozon_updated_at, op.product_id, op.synced_at, op.updated_at,
       s.name AS shop_name,
@@ -5246,6 +5360,44 @@ export async function onlineProductsMysql(query = {}) {
     ${whereSql}
   `;
   if (paged) {
+    if (status === "all") {
+      const [totalRow, countRows, rows] = await Promise.all([
+        mysqlQueryOne(`
+          SELECT COUNT(*) AS total
+          FROM online_products op
+          JOIN shops s ON s.id = op.shop_id
+          LEFT JOIN products p ON p.id = op.product_id
+          ${whereSql}
+        `, params),
+        mysqlQuery(`
+          SELECT ${onlineStatusKeySqlMysql("op")} AS status_key, COUNT(*) AS count
+          FROM online_products op
+          JOIN shops s ON s.id = op.shop_id
+          LEFT JOIN products p ON p.id = op.product_id
+          ${whereSql}
+          GROUP BY status_key
+        `, params),
+        mysqlQuery(`
+          ${selectSql}
+          ORDER BY COALESCE(op.published_at, op.ozon_updated_at, op.synced_at, op.updated_at) DESC, op.id DESC
+          LIMIT ? OFFSET ?
+        `, [...params, pageSize, (page - 1) * pageSize])
+      ]);
+      const statusCounts = { all: Number(totalRow?.total || 0), selling: 0, ready: 0, error: 0, moderation: 0, hidden: 0, archived: 0, other: 0 };
+      for (const item of countRows) statusCounts[item.status_key] = Number(item.count || 0);
+      const mappedRows = rows.map((row) => {
+        const fallbackImage = String(row.primary_image || row.image_url || row.first_image_url || "").trim();
+        return { ...row, primary_image: fallbackImage, image_url: fallbackImage };
+      });
+      return {
+        rows: mappedRows,
+        total: Number(totalRow?.total || 0),
+        statusCounts,
+        page,
+        pageSize,
+        mode: "paged"
+      };
+    }
     const allIds = await mysqlQuery(`
       SELECT op.id, op.status, op.visibility, op.archived, op.published_at, op.synced_at, op.updated_at, op.ozon_updated_at
       FROM online_products op
@@ -5269,7 +5421,7 @@ export async function onlineProductsMysql(query = {}) {
       ORDER BY CASE op.id ${orderSql} END
     `, [...params, ...pageIds]);
     const mappedRows = rows.map((row) => {
-      const fallbackImage = String(row.primary_image || row.image_url || firstJsonItem(row.images_json) || "").trim();
+      const fallbackImage = String(row.primary_image || row.image_url || row.first_image_url || "").trim();
       return { ...row, primary_image: fallbackImage, image_url: fallbackImage };
     });
     return {
@@ -5287,7 +5439,7 @@ export async function onlineProductsMysql(query = {}) {
   `, params);
 
   const mappedRows = rows.map((row) => {
-    const fallbackImage = String(row.primary_image || row.image_url || firstJsonItem(row.images_json) || "").trim();
+    const fallbackImage = String(row.primary_image || row.image_url || row.first_image_url || "").trim();
     return {
       ...row,
       primary_image: fallbackImage,
@@ -5353,6 +5505,22 @@ function onlineStatusKeyMysql(row) {
   if (visibility.includes("hidden") || visibility.includes("blocked") || visibility.includes("removed_from_sale") || status.includes("hidden") || status.includes("offline")) return "hidden";
   if (status.includes("online") || status.includes("active") || status.includes("sell") || visibility.includes("in_sale") || visibility.includes("visible") || visibility.includes("moderated")) return "selling";
   return "other";
+}
+
+function onlineStatusKeySqlMysql(alias = "op") {
+  const status = `LOWER(COALESCE(${alias}.status, ''))`;
+  const visibility = `LOWER(COALESCE(${alias}.visibility, ''))`;
+  return `
+    CASE
+      WHEN COALESCE(${alias}.archived, 0) <> 0 OR ${status} LIKE '%archive%' THEN 'archived'
+      WHEN ${status} LIKE '%error%' OR ${status} LIKE '%fail%' OR ${visibility} LIKE '%failed%' OR ${visibility} LIKE '%banned%' THEN 'error'
+      WHEN ${status} LIKE '%moder%' OR ${status} LIKE '%edit%' OR ${status} LIKE '%validation%' OR ${visibility} LIKE '%pending%' THEN 'moderation'
+      WHEN ${status} LIKE '%ready%' OR ${status} LIKE '%created%' OR ${visibility} LIKE '%ready_to_supply%' OR ${visibility} LIKE '%empty_stock%' THEN 'ready'
+      WHEN ${visibility} LIKE '%hidden%' OR ${visibility} LIKE '%blocked%' OR ${visibility} LIKE '%removed_from_sale%' OR ${status} LIKE '%hidden%' OR ${status} LIKE '%offline%' THEN 'hidden'
+      WHEN ${status} LIKE '%online%' OR ${status} LIKE '%active%' OR ${status} LIKE '%sell%' OR ${visibility} LIKE '%in_sale%' OR ${visibility} LIKE '%visible%' OR ${visibility} LIKE '%moderated%' THEN 'selling'
+      ELSE 'other'
+    END
+  `;
 }
 
 function onlineStatusCountsMysql(rows) {
@@ -6398,6 +6566,8 @@ export async function productsMysql(query = {}) {
     total_sales_amount: "total_sales_amount",
     order_count: "order_count",
     total_purchase_amount: "total_purchase_amount",
+    manual_outbound_quantity: "manual_outbound_quantity",
+    manual_outbound_amount: "manual_outbound_amount",
     avg_unit_cost: "avg_unit_cost",
     estimated_profit_total: "estimated_profit_total",
     actual_profit_total: "actual_profit_total",
@@ -6405,6 +6575,16 @@ export async function productsMysql(query = {}) {
     inventory_value: "inventory_value"
   };
   const productSortSql = sortSqlMap[sortKey] ? `${sortSqlMap[sortKey]} ${sortDir}, p.id DESC` : "p.id DESC";
+  const productListFieldsSql = `
+        p.id, p.selection_id, p.code, p.name, p.image_url,
+        p.owner_person_id, p.created_by_person_id, p.supplier_id,
+        p.purchase_url, p.source_platform, p.shipping_method,
+        p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
+        p.package_weight_g, p.length_cm, p.width_cm, p.height_cm,
+        p.listing_price_rub, p.air_sale_price_rmb, p.exchange_rate,
+        p.desired_profit_mode, p.desired_profit_value, p.return_rate,
+        p.active, p.created_at, p.updated_at
+  `;
   const where = ["p.active = 1"];
   const params = [];
 
@@ -6453,16 +6633,27 @@ export async function productsMysql(query = {}) {
       LEFT JOIN people pe ON pe.id = p.owner_person_id
       ${whereSql}
     `, params);
+    const pageRows = await mysqlQuery(`
+      SELECT p.id
+      FROM products p
+      LEFT JOIN people pe ON pe.id = p.owner_person_id
+      ${whereSql}
+      ORDER BY p.id DESC
+      LIMIT ? OFFSET ?
+    `, [...params, pageSize, offset]);
+    const pageIds = pageRows.map((row) => Number(row.id || 0)).filter(Boolean);
+    if (!pageIds.length) {
+      return {
+        rows: [],
+        total: Number(totalRow?.total || 0),
+        page,
+        pageSize,
+        mode: "paged"
+      };
+    }
+    const pagePlaceholders = pageIds.map(() => "?").join(", ");
     const rows = await mysqlQuery(`
-      WITH page_products AS (
-        SELECT p.id
-        FROM products p
-        LEFT JOIN people pe ON pe.id = p.owner_person_id
-        ${whereSql}
-        ORDER BY p.id DESC
-        LIMIT ? OFFSET ?
-      )
-      SELECT p.*,
+      SELECT ${productListFieldsSql},
         CASE
           WHEN p.code LIKE 'P-%' THEN p.code
           ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
@@ -6473,6 +6664,8 @@ export async function productsMysql(query = {}) {
         COALESCE(proc.avg_unit_cost, stock.avg_unit_cost, p.purchase_cost) AS avg_unit_cost,
         COALESCE(proc.total_purchase_amount, stock.total_purchase_amount, 0) AS total_purchase_amount,
         COALESCE(proc.total_purchase_quantity, 0) AS total_purchase_quantity,
+        COALESCE(manual_loss.manual_outbound_quantity, 0) AS manual_outbound_quantity,
+        COALESCE(manual_loss.manual_outbound_amount, 0) AS manual_outbound_amount,
         COALESCE(incoming.incoming_stock, 0) AS incoming_stock,
         COALESCE(fbp_transfer.fbp_transfer_in_transit_qty, 0) AS fbp_transfer_in_transit_qty,
         COALESCE(skus.sku_count, 0) AS sku_count,
@@ -6489,8 +6682,7 @@ export async function productsMysql(query = {}) {
         CASE WHEN COALESCE(sales.total_sales_amount, 0) > 0
           THEN COALESCE(sales.estimated_profit_total, 0) / sales.total_sales_amount
           ELSE 0 END AS profit_rate
-      FROM page_products pp
-      JOIN products p ON p.id = pp.id
+      FROM products p
       LEFT JOIN people pe ON pe.id = p.owner_person_id
       LEFT JOIN people creator ON creator.id = p.created_by_person_id
       LEFT JOIN (
@@ -6502,18 +6694,24 @@ export async function productsMysql(query = {}) {
             ELSE NULL END AS avg_unit_cost,
           SUM(CASE WHEN im.quantity_delta > 0 THEN im.amount ELSE 0 END) AS total_purchase_amount
         FROM inventory_movements im
-        JOIN page_products pp_stock ON pp_stock.id = im.product_id
-        WHERE im.status = 'posted'
+        WHERE im.status = 'posted' AND im.product_id IN (${pagePlaceholders})
         GROUP BY im.product_id
       ) stock ON stock.product_id = p.id
+      LEFT JOIN (
+        SELECT product_id,
+          SUM(ABS(quantity_delta)) AS manual_outbound_quantity,
+          SUM(amount) AS manual_outbound_amount
+        FROM inventory_movements
+        WHERE status = 'posted' AND source_type = 'manual_outbound' AND product_id IN (${pagePlaceholders})
+        GROUP BY product_id
+      ) manual_loss ON manual_loss.product_id = p.id
       LEFT JOIN (
         SELECT pr.product_id,
           SUM(pr.quantity) AS total_purchase_quantity,
           SUM(pr.amount + COALESCE(pr.shipping_amount, 0)) AS total_purchase_amount,
           CASE WHEN SUM(pr.quantity) > 0 THEN SUM(pr.amount + COALESCE(pr.shipping_amount, 0)) / SUM(pr.quantity) ELSE NULL END AS avg_unit_cost
         FROM procurement_requests pr
-        JOIN page_products pp_proc ON pp_proc.id = pr.product_id
-        WHERE pr.status != 'cancelled'
+        WHERE pr.status != 'cancelled' AND pr.product_id IN (${pagePlaceholders})
         GROUP BY pr.product_id
       ) proc ON proc.product_id = p.id
       LEFT JOIN (
@@ -6521,13 +6719,11 @@ export async function productsMysql(query = {}) {
         FROM (
           SELECT ir.product_id, ir.quantity
           FROM inbound_records ir
-          JOIN page_products pp_inbound ON pp_inbound.id = ir.product_id
-          WHERE ir.status = 'pending_arrival'
+          WHERE ir.status = 'pending_arrival' AND ir.product_id IN (${pagePlaceholders})
           UNION ALL
           SELECT pr.product_id, pr.quantity
           FROM procurement_requests pr
-          JOIN page_products pp_submitted ON pp_submitted.id = pr.product_id
-          WHERE pr.status = 'submitted'
+          WHERE pr.status = 'submitted' AND pr.product_id IN (${pagePlaceholders})
         ) incoming_rows
         GROUP BY product_id
       ) incoming ON incoming.product_id = p.id
@@ -6535,8 +6731,7 @@ export async function productsMysql(query = {}) {
         SELECT ftr.product_id,
           SUM(GREATEST(ftr.quantity - COALESCE(ftr.listed_quantity, 0), 0)) AS fbp_transfer_in_transit_qty
         FROM fbp_transfer_records ftr
-        JOIN page_products pp_transfer ON pp_transfer.id = ftr.product_id
-        WHERE ftr.status IN ('sent', 'in_transit', 'received')
+        WHERE ftr.status IN ('sent', 'in_transit', 'received') AND ftr.product_id IN (${pagePlaceholders})
         GROUP BY ftr.product_id
       ) fbp_transfer ON fbp_transfer.product_id = p.id
       LEFT JOIN (
@@ -6544,9 +6739,8 @@ export async function productsMysql(query = {}) {
           GROUP_CONCAT(sm.ozon_sku ORDER BY sm.id DESC SEPARATOR ', ') AS skus,
           GROUP_CONCAT(CONCAT(COALESCE(s.name, ''), ' / ', COALESCE(sm.ozon_sku, '')) ORDER BY sm.id DESC SEPARATOR '||') AS origin_skus
         FROM sku_mappings sm
-        JOIN page_products pp_skus ON pp_skus.id = sm.product_id
         LEFT JOIN shops s ON s.id = sm.shop_id
-        WHERE sm.active = 1
+        WHERE sm.active = 1 AND sm.product_id IN (${pagePlaceholders})
         GROUP BY sm.product_id
       ) skus ON skus.product_id = p.id
       LEFT JOIN (
@@ -6557,12 +6751,24 @@ export async function productsMysql(query = {}) {
           SUM(CASE WHEN obr.status = 'deducted' THEN COALESCE(NULLIF(oi.actual_profit, 0), 0) ELSE 0 END) AS actual_profit_total,
           COUNT(DISTINCT CASE WHEN obr.status = 'deducted' THEN obr.order_ref END) AS order_count
         FROM outbound_records obr
-        JOIN page_products pp_sales ON pp_sales.id = obr.product_id
         LEFT JOIN order_items oi ON oi.id = obr.order_item_id
+        WHERE obr.product_id IN (${pagePlaceholders})
         GROUP BY obr.product_id
       ) sales ON sales.product_id = p.id
-      ORDER BY p.id DESC
-    `, [...params, pageSize, offset]);
+      WHERE p.id IN (${pagePlaceholders})
+      ORDER BY FIELD(p.id, ${pagePlaceholders})
+    `, [
+      ...pageIds,
+      ...pageIds,
+      ...pageIds,
+      ...pageIds,
+      ...pageIds,
+      ...pageIds,
+      ...pageIds,
+      ...pageIds,
+      ...pageIds,
+      ...pageIds
+    ]);
 
     const mappingSummaries = await productMappingSummariesMysql(rows.map((row) => Number(row.id)));
     const enriched = rows.map((row) => compactProductListRowMysql({
@@ -6590,6 +6796,7 @@ export async function productsMysql(query = {}) {
     const offset = (page - 1) * pageSize;
     const needsStockSort = ["stock", "inventory_value"].includes(sortKey);
     const needsProcSort = ["total_purchase_amount", "avg_unit_cost", "inventory_value"].includes(sortKey);
+    const needsManualLossSort = ["manual_outbound_quantity", "manual_outbound_amount"].includes(sortKey);
     const needsIncomingSort = sortKey === "incoming_stock";
     const needsFbpTransferSort = sortKey === "fbp_transfer_in_transit_qty";
     const needsSalesSort = ["total_sales_quantity", "total_sales_amount", "order_count", "estimated_profit_total", "actual_profit_total", "profit_rate"].includes(sortKey);
@@ -6622,6 +6829,18 @@ export async function productsMysql(query = {}) {
           WHERE status != 'cancelled'
           GROUP BY product_id
         ) proc ON proc.product_id = p.id
+      `);
+    }
+    if (needsManualLossSort) {
+      sortJoins.push(`
+        LEFT JOIN (
+          SELECT product_id,
+            SUM(ABS(quantity_delta)) AS manual_outbound_quantity,
+            SUM(amount) AS manual_outbound_amount
+          FROM inventory_movements
+          WHERE status = 'posted' AND source_type = 'manual_outbound'
+          GROUP BY product_id
+        ) manual_loss ON manual_loss.product_id = p.id
       `);
     }
     if (needsIncomingSort) {
@@ -6682,18 +6901,20 @@ export async function productsMysql(query = {}) {
     }
     const sortExpressions = {
       product: "p.name",
-      stock: "(COALESCE(stock.stock, 0) + COALESCE(fbp.fbp_stock, 0))",
+      stock: "COALESCE(stock.stock, 0)",
       incoming_stock: "COALESCE(incoming.incoming_stock, 0)",
       fbp_transfer_in_transit_qty: "COALESCE(fbp_transfer.fbp_transfer_in_transit_qty, 0)",
       total_sales_quantity: "COALESCE(sales.total_sales_quantity, 0)",
       total_sales_amount: "COALESCE(sales.total_sales_amount, 0)",
       order_count: "COALESCE(sales.order_count, 0)",
       total_purchase_amount: "COALESCE(proc.total_purchase_amount, stock.total_purchase_amount, 0)",
+      manual_outbound_quantity: "COALESCE(manual_loss.manual_outbound_quantity, 0)",
+      manual_outbound_amount: "COALESCE(manual_loss.manual_outbound_amount, 0)",
       avg_unit_cost: "COALESCE(proc.avg_unit_cost, stock.avg_unit_cost, p.purchase_cost, 0)",
       estimated_profit_total: "COALESCE(sales.estimated_profit_total, 0)",
       actual_profit_total: "COALESCE(sales.actual_profit_total, 0)",
       profit_rate: "CASE WHEN COALESCE(sales.total_sales_amount, 0) > 0 THEN COALESCE(sales.estimated_profit_total, 0) / sales.total_sales_amount ELSE 0 END",
-      inventory_value: "(GREATEST(COALESCE(stock.stock, 0) + COALESCE(fbp.fbp_stock, 0), 0) * COALESCE(proc.avg_unit_cost, stock.avg_unit_cost, p.purchase_cost, 0))"
+      inventory_value: "(COALESCE(stock.stock, 0) * COALESCE(proc.avg_unit_cost, stock.avg_unit_cost, p.purchase_cost, 0))"
     };
     const sortedPageRows = await mysqlQuery(`
       SELECT p.id
@@ -6722,7 +6943,7 @@ export async function productsMysql(query = {}) {
     }
     const pagePlaceholders = pageIds.map(() => "?").join(", ");
     const rows = await mysqlQuery(`
-      SELECT p.*,
+      SELECT ${productListFieldsSql},
         CASE
           WHEN p.code LIKE 'P-%' THEN p.code
           ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
@@ -6733,11 +6954,13 @@ export async function productsMysql(query = {}) {
         COALESCE(proc.avg_unit_cost, stock.avg_unit_cost, p.purchase_cost) AS avg_unit_cost,
         COALESCE(proc.total_purchase_amount, stock.total_purchase_amount, 0) AS total_purchase_amount,
         COALESCE(proc.total_purchase_quantity, 0) AS total_purchase_quantity,
+        COALESCE(manual_loss.manual_outbound_quantity, 0) AS manual_outbound_quantity,
+        COALESCE(manual_loss.manual_outbound_amount, 0) AS manual_outbound_amount,
         COALESCE(incoming.incoming_stock, 0) AS incoming_stock,
         COALESCE(fbp_transfer.fbp_transfer_in_transit_qty, 0) AS fbp_transfer_in_transit_qty,
         COALESCE(fbp.fbp_stock, 0) AS fbp_stock,
-        (COALESCE(stock.stock, 0) + COALESCE(fbp.fbp_stock, 0)) AS total_stock,
-        (GREATEST(COALESCE(stock.stock, 0) + COALESCE(fbp.fbp_stock, 0), 0) * COALESCE(proc.avg_unit_cost, stock.avg_unit_cost, p.purchase_cost, 0)) AS inventory_value,
+        COALESCE(stock.stock, 0) AS total_stock,
+        (COALESCE(stock.stock, 0) * COALESCE(proc.avg_unit_cost, stock.avg_unit_cost, p.purchase_cost, 0)) AS inventory_value,
         COALESCE(skus.sku_count, 0) AS sku_count,
         COALESCE(skus.skus, '') AS mapped_skus,
         COALESCE(skus.origin_skus, '') AS origin_skus,
@@ -6767,6 +6990,14 @@ export async function productsMysql(query = {}) {
         WHERE status = 'posted' AND product_id IN (${pagePlaceholders})
         GROUP BY product_id
       ) stock ON stock.product_id = p.id
+      LEFT JOIN (
+        SELECT product_id,
+          SUM(ABS(quantity_delta)) AS manual_outbound_quantity,
+          SUM(amount) AS manual_outbound_amount
+        FROM inventory_movements
+        WHERE status = 'posted' AND source_type = 'manual_outbound' AND product_id IN (${pagePlaceholders})
+        GROUP BY product_id
+      ) manual_loss ON manual_loss.product_id = p.id
       LEFT JOIN (
         SELECT product_id,
           SUM(quantity) AS total_purchase_quantity,
@@ -6838,6 +7069,7 @@ export async function productsMysql(query = {}) {
       ...pageIds,
       ...pageIds,
       ...pageIds,
+      ...pageIds,
       ...pageIds
     ]);
     const mappingSummaries = await productMappingSummariesMysql(pageIds);
@@ -6863,7 +7095,7 @@ export async function productsMysql(query = {}) {
   }
 
   const selectSql = `
-    SELECT p.*,
+    SELECT ${productListFieldsSql},
       CASE
         WHEN p.code LIKE 'P-%' THEN p.code
         ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
@@ -6874,11 +7106,13 @@ export async function productsMysql(query = {}) {
       COALESCE(proc.avg_unit_cost, stock.avg_unit_cost, p.purchase_cost) AS avg_unit_cost,
       COALESCE(proc.total_purchase_amount, stock.total_purchase_amount, 0) AS total_purchase_amount,
       COALESCE(proc.total_purchase_quantity, 0) AS total_purchase_quantity,
+      COALESCE(manual_loss.manual_outbound_quantity, 0) AS manual_outbound_quantity,
+      COALESCE(manual_loss.manual_outbound_amount, 0) AS manual_outbound_amount,
       COALESCE(incoming.incoming_stock, 0) AS incoming_stock,
       COALESCE(fbp_transfer.fbp_transfer_in_transit_qty, 0) AS fbp_transfer_in_transit_qty,
       COALESCE(fbp.fbp_stock, 0) AS fbp_stock,
-      (COALESCE(stock.stock, 0) + COALESCE(fbp.fbp_stock, 0)) AS total_stock,
-      (GREATEST(COALESCE(stock.stock, 0) + COALESCE(fbp.fbp_stock, 0), 0) * COALESCE(proc.avg_unit_cost, stock.avg_unit_cost, p.purchase_cost, 0)) AS inventory_value,
+      COALESCE(stock.stock, 0) AS total_stock,
+      (COALESCE(stock.stock, 0) * COALESCE(proc.avg_unit_cost, stock.avg_unit_cost, p.purchase_cost, 0)) AS inventory_value,
       COALESCE(skus.sku_count, 0) AS sku_count,
       COALESCE(skus.skus, '') AS mapped_skus,
       COALESCE(skus.origin_skus, '') AS origin_skus,
@@ -6908,6 +7142,14 @@ export async function productsMysql(query = {}) {
       WHERE status = 'posted'
       GROUP BY product_id
     ) stock ON stock.product_id = p.id
+    LEFT JOIN (
+      SELECT product_id,
+        SUM(ABS(quantity_delta)) AS manual_outbound_quantity,
+        SUM(amount) AS manual_outbound_amount
+      FROM inventory_movements
+      WHERE status = 'posted' AND source_type = 'manual_outbound'
+      GROUP BY product_id
+    ) manual_loss ON manual_loss.product_id = p.id
     LEFT JOIN (
       SELECT product_id,
         SUM(quantity) AS total_purchase_quantity,
@@ -7102,6 +7344,7 @@ export async function selectionProductsMysql(query = {}) {
   const includeDetails = String(query.includeDetails || query.include_details || query.full || "") === "1";
   const summaryMode = String(query.summaryMode || query.summary_mode || "full").toLowerCase();
   const includeSummary = summaryMode !== "skip" && summaryMode !== "none" && summaryMode !== "false" && summaryMode !== "0";
+  const summaryOnly = String(query.summaryOnly || query.summary_only || "") === "1";
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
   const searchText = String(query.query || query.search || "").trim().toLowerCase();
@@ -7173,6 +7416,8 @@ export async function selectionProductsMysql(query = {}) {
       END AS inventory_id,
       p.name, p.ozon_category_id, p.ozon_description_category_id, p.ozon_type_id, p.ozon_category_name,
       p.image_url, ${includeDetails ? "p.detail_image_urls" : "NULL AS detail_image_urls"}, p.material, p.color, p.vehicle_brand, p.vehicle_model, p.selling_points,
+      p.listing_title_ru, p.listing_tags_ru, p.listing_description_ru,
+      p.listing_title_prompt, p.listing_tags_prompt, p.listing_description_prompt,
       p.purchase_url, p.supplier_note, p.source_platform, p.supplier_id, p.shipping_method, p.logistics_rule_id,
       p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
       p.package_weight_g, p.length_cm, p.width_cm, p.height_cm,
@@ -7194,7 +7439,7 @@ export async function selectionProductsMysql(query = {}) {
       COALESCE(JSON_UNQUOTE(JSON_EXTRACT(aj.error_json, '$.raw_message')), '') AS listing_job_raw_error_message,
       aj.batch_id AS listing_job_batch_id, aj.total_count AS listing_job_total_count,
       aj.success_count AS listing_job_success_count, aj.failed_count AS listing_job_failed_count,
-      aj.result_json AS listing_job_result_json, aj.progress_json AS listing_job_progress_json, aj.error_json AS listing_job_error_json,
+      NULL AS listing_job_result_json, NULL AS listing_job_progress_json, NULL AS listing_job_error_json,
       aj.created_at AS listing_job_created_at, aj.started_at AS listing_job_started_at,
       aj.finished_at AS listing_job_finished_at, aj.updated_at AS listing_job_updated_at,
       (
@@ -7211,16 +7456,48 @@ export async function selectionProductsMysql(query = {}) {
     ${selectionFieldsSql}
     ${rowFromSql}
   `;
-  const enrichSelectionRows = (rows) => rows.map((row) => ({
-    ...withProductImageEndpointMysql(row),
-    pricing: calculateSelectionPricing(row),
-    business_status: selectionBusinessStatusMysql(row)
-  }));
+  const enrichSelectionRows = (rows) => rows.map((row) => {
+    const nextRow = includeDetails
+      ? { ...row, detail_image_urls: productDetailImagePreviewUrlsMysql(row, { thumbnail: true, width: 220 }) }
+      : row;
+    return {
+      ...withProductImageEndpointMysql(nextRow, { thumbnail: true }),
+      pricing: calculateSelectionPricing(row),
+      business_status: selectionBusinessStatusMysql(row)
+    };
+  });
   const summaryFromEnrichedRows = (rows) => selectionSummaryMysql(rows.map((row) => ({
     ...row,
     pricing: row.pricing || calculateSelectionPricing(row),
     business_status: row.business_status || selectionBusinessStatusMysql(row)
   })));
+
+  if (paged && quoteStatus === "all" && businessStatus === "all" && summaryOnly) {
+    const [totalRow, summaryRows] = await Promise.all([
+      mysqlQueryOne(`SELECT COUNT(*) AS total ${filterFromSql}`, params),
+      mysqlQuery(`
+        SELECT p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
+          p.package_weight_g, p.length_cm, p.width_cm, p.height_cm,
+          p.listing_price_rub, p.air_sale_price_rmb, p.exchange_rate,
+          p.desired_profit_mode, p.desired_profit_value, p.target_margin,
+          p.advertising_rate, p.return_rate
+        ${filterFromSql}
+      `, params)
+    ]);
+    const total = Number(totalRow?.total || 0);
+    return {
+      rows: [],
+      total,
+      page,
+      pageSize,
+      mode: "summary_only",
+      summary: {
+        ...selectionSummaryFromPricingRowsMysql(summaryRows),
+        products: total,
+        status_counts: { all: total }
+      }
+    };
+  }
 
   if (paged && quoteStatus === "all" && businessStatus === "all") {
     const offset = (page - 1) * pageSize;
@@ -7228,7 +7505,7 @@ export async function selectionProductsMysql(query = {}) {
       mysqlQueryOne(`SELECT COUNT(*) AS total ${filterFromSql}`, params),
       mysqlQuery(`
         ${selectSql}
-        ORDER BY COALESCE(p.updated_at, p.created_at) DESC, p.id DESC
+        ORDER BY p.updated_at DESC, p.id DESC
         LIMIT ? OFFSET ?
       `, [...params, pageSize, offset])
     ];
@@ -7266,7 +7543,7 @@ export async function selectionProductsMysql(query = {}) {
 
   const rows = await mysqlQuery(`
     ${selectSql}
-    ORDER BY COALESCE(p.updated_at, p.created_at) DESC, p.id DESC
+    ORDER BY p.updated_at DESC, p.id DESC
   `, params);
   const enriched = enrichSelectionRows(rows);
   const filtered = quoteStatus === "all"
@@ -7290,10 +7567,11 @@ export async function selectionProductsMysql(query = {}) {
   };
 }
 
-export async function selectionProductMysql(id) {
+export async function selectionProductMysql(id, query = {}) {
   ensureMysqlCutoverEnabled();
   await ensureSelectionCreativeSchemaMysql();
   await ensureAssetVariantJobsTableMysql();
+  const includeDetails = String(query.includeDetails ?? query.include_details ?? "1") !== "0";
   const row = await mysqlQueryOne(`
     SELECT p.id, p.selection_id, p.code,
       CASE
@@ -7301,7 +7579,9 @@ export async function selectionProductMysql(id) {
         ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
       END AS inventory_id,
       p.name, p.ozon_category_id, p.ozon_description_category_id, p.ozon_type_id, p.ozon_category_name,
-      p.image_url, p.detail_image_urls, p.material, p.color, p.vehicle_brand, p.vehicle_model, p.selling_points,
+      p.image_url, ${includeDetails ? "p.detail_image_urls" : "NULL AS detail_image_urls"}, p.material, p.color, p.vehicle_brand, p.vehicle_model, p.selling_points,
+      p.listing_title_ru, p.listing_tags_ru, p.listing_description_ru,
+      p.listing_title_prompt, p.listing_tags_prompt, p.listing_description_prompt,
       p.purchase_url, p.supplier_note, p.source_platform, p.supplier_id, p.shipping_method, p.logistics_rule_id,
       p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
       p.package_weight_g, p.length_cm, p.width_cm, p.height_cm,
@@ -7345,7 +7625,17 @@ export async function selectionProductMysql(id) {
     LEFT JOIN people creator ON creator.id = p.created_by_person_id
     WHERE p.active = 1 AND p.id = ?
   `, [Number(id)]);
-  return row ? { ...withProductImageEndpointMysql(row), pricing: calculateSelectionPricing(row) } : null;
+  if (!row) return null;
+  const detailImageUrls = includeDetails
+    ? productDetailImagePreviewUrlsMysql(row, { thumbnail: true, width: 220 })
+    : [];
+  return {
+    ...withProductImageEndpointMysql({
+      ...row,
+      detail_image_urls: detailImageUrls
+    }),
+    pricing: calculateSelectionPricing(row)
+  };
 }
 
 export async function productImageMysql(id) {
@@ -7354,6 +7644,13 @@ export async function productImageMysql(id) {
   const image = String(row?.image_url || "").trim();
   if (/^\/api\/products\/\d+\/image$/i.test(image)) return "";
   return image;
+}
+
+export async function productDetailImageMysql(id, index = 0) {
+  ensureMysqlCutoverEnabled();
+  const row = await mysqlQueryOne("SELECT detail_image_urls FROM products WHERE id = ? AND active = 1", [Number(id)]);
+  const images = productDetailImageListMysql(row?.detail_image_urls);
+  return images[Number(index)] || "";
 }
 
 async function productOrderDetailRowsMysql(productId, cancelled, query = {}) {
@@ -7843,12 +8140,13 @@ export async function createProductMysql(body = {}) {
       INSERT INTO products
       (selection_id, code, name, ozon_category_id, ozon_description_category_id, ozon_type_id, ozon_category_name,
        image_url, detail_image_urls, material, color, vehicle_brand, vehicle_model, selling_points,
+       listing_title_ru, listing_tags_ru, listing_description_ru, listing_title_prompt, listing_tags_prompt, listing_description_prompt,
        purchase_url, supplier_note, source_platform, supplier_id, shipping_method,
        logistics_rule_id, recommended_shipping_method, purchase_cost, domestic_shipping, handling_fee, purchase_quantity,
        package_weight_g, length_cm, width_cm, height_cm, listing_price_rub, air_sale_price_rmb, exchange_rate,
        target_margin, desired_profit_mode, desired_profit_value, advertising_rate, return_rate, owner_person_id, created_by_person_id, product_type, selection_status,
        source_selection_id, variant_task_id, variant_result_id, variant_type, is_variant_generated, material_asset_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       selectionId,
       code,
@@ -7864,6 +8162,12 @@ export async function createProductMysql(body = {}) {
       body.vehicle_brand || body.vehicleBrand || "",
       body.vehicle_model || body.vehicleModel || "",
       body.selling_points || "",
+      body.listing_title_ru || body.listingTitleRu || "",
+      body.listing_tags_ru || body.listingTagsRu || "",
+      body.listing_description_ru || body.listingDescriptionRu || "",
+      body.listing_title_prompt || body.listingTitlePrompt || "",
+      body.listing_tags_prompt || body.listingTagsPrompt || "",
+      body.listing_description_prompt || body.listingDescriptionPrompt || "",
       body.purchase_url || "",
       body.supplier_note || "",
       body.source_platform || "1688",
@@ -8116,6 +8420,12 @@ export async function updateProductMysql(id, body = {}) {
       vehicle_brand = COALESCE(?, vehicle_brand),
       vehicle_model = COALESCE(?, vehicle_model),
       selling_points = COALESCE(?, selling_points),
+      listing_title_ru = COALESCE(?, listing_title_ru),
+      listing_tags_ru = COALESCE(?, listing_tags_ru),
+      listing_description_ru = COALESCE(?, listing_description_ru),
+      listing_title_prompt = COALESCE(?, listing_title_prompt),
+      listing_tags_prompt = COALESCE(?, listing_tags_prompt),
+      listing_description_prompt = COALESCE(?, listing_description_prompt),
       purchase_url = ?, supplier_note = ?, source_platform = ?, supplier_id = ?, shipping_method = ?, logistics_rule_id = ?,
       purchase_cost = ?, domestic_shipping = ?, handling_fee = ?, purchase_quantity = ?,
       package_weight_g = ?, length_cm = ?, width_cm = ?, height_cm = ?,
@@ -8136,6 +8446,12 @@ export async function updateProductMysql(id, body = {}) {
     body.vehicle_brand === undefined && body.vehicleBrand === undefined ? null : body.vehicle_brand || body.vehicleBrand || "",
     body.vehicle_model === undefined && body.vehicleModel === undefined ? null : body.vehicle_model || body.vehicleModel || "",
     body.selling_points === undefined ? null : body.selling_points || "",
+    body.listing_title_ru === undefined && body.listingTitleRu === undefined ? null : body.listing_title_ru || body.listingTitleRu || "",
+    body.listing_tags_ru === undefined && body.listingTagsRu === undefined ? null : body.listing_tags_ru || body.listingTagsRu || "",
+    body.listing_description_ru === undefined && body.listingDescriptionRu === undefined ? null : body.listing_description_ru || body.listingDescriptionRu || "",
+    body.listing_title_prompt === undefined && body.listingTitlePrompt === undefined ? null : body.listing_title_prompt || body.listingTitlePrompt || "",
+    body.listing_tags_prompt === undefined && body.listingTagsPrompt === undefined ? null : body.listing_tags_prompt || body.listingTagsPrompt || "",
+    body.listing_description_prompt === undefined && body.listingDescriptionPrompt === undefined ? null : body.listing_description_prompt || body.listingDescriptionPrompt || "",
     body.purchase_url || "",
     body.supplier_note || "",
     body.source_platform || "1688",
@@ -9032,23 +9348,26 @@ async function productMappingSummariesMysql(productIds = []) {
   if (!ids.length) return new Map();
   const placeholders = ids.map(() => "?").join(", ");
   const rows = await mysqlQuery(`
-    SELECT sm.id, sm.product_id, sm.shop_id, s.name AS shop_name,
-      sm.ozon_sku, sm.offer_id,
-      COALESCE(sm.display_name, op.name, '') AS online_name,
-      COALESCE(stock.fbp_stock, 0) AS fbp_stock,
-      COALESCE(stock.fbs_stock, 0) AS fbs_stock
-    FROM sku_mappings sm
-    LEFT JOIN shops s ON s.id = sm.shop_id
-    LEFT JOIN online_products op ON op.id = sm.online_product_id
-    LEFT JOIN (
-      SELECT shop_id, ozon_sku,
-        SUM(CASE WHEN stock_type = 'fbp_real' THEN present ELSE 0 END) AS fbp_stock,
-        SUM(CASE WHEN stock_type = 'fbs_virtual' THEN present ELSE 0 END) AS fbs_stock
-      FROM ozon_stock_snapshots
-      GROUP BY shop_id, ozon_sku
-    ) stock ON stock.shop_id = sm.shop_id AND stock.ozon_sku = sm.ozon_sku
-    WHERE sm.active = 1 AND sm.product_id IN (${placeholders})
-    ORDER BY sm.id DESC
+    WITH relevant_mappings AS (
+      SELECT sm.id, sm.product_id, sm.shop_id, s.name AS shop_name,
+        sm.ozon_sku, sm.offer_id,
+        COALESCE(sm.display_name, op.name, '') AS online_name
+      FROM sku_mappings sm
+      LEFT JOIN shops s ON s.id = sm.shop_id
+      LEFT JOIN online_products op ON op.id = sm.online_product_id
+      WHERE sm.active = 1 AND sm.product_id IN (${placeholders})
+    )
+    SELECT rm.id, rm.product_id, rm.shop_id, rm.shop_name,
+      rm.ozon_sku, rm.offer_id, rm.online_name,
+      SUM(CASE WHEN stock.stock_type = 'fbp_real' THEN COALESCE(stock.present, 0) ELSE 0 END) AS fbp_stock,
+      SUM(CASE WHEN stock.stock_type = 'fbs_virtual' THEN COALESCE(stock.present, 0) ELSE 0 END) AS fbs_stock
+    FROM relevant_mappings rm
+    LEFT JOIN ozon_stock_snapshots stock
+      ON stock.shop_id = rm.shop_id
+      AND stock.ozon_sku = rm.ozon_sku
+      AND stock.stock_type IN ('fbp_real', 'fbs_virtual')
+    GROUP BY rm.id, rm.product_id, rm.shop_id, rm.shop_name, rm.ozon_sku, rm.offer_id, rm.online_name
+    ORDER BY rm.id DESC
   `, ids);
   const summaries = new Map();
   for (const row of rows) {
@@ -9504,13 +9823,16 @@ async function rebuildInventoryCurrentForProductMysql(connection, productId) {
 }
 
 async function postInventoryMysql(connection, body = {}) {
+  await ensureStockLocationSchemaMysql();
   const quantityDelta = Number(body.quantity_delta || 0);
   const movementType = body.movement_type || movementTypeFromSourceMysql(body.source_type, quantityDelta);
+  const stockLocation = normalizeStockLocationMysql(body.stock_location);
+  const stockLocationSource = String(body.stock_location_source || (stockLocation === "UNKNOWN" ? "legacy_unknown" : "explicit")).slice(0, 64);
   const [result] = await connection.execute(`
     INSERT INTO inventory_movements
-    (product_id, shop_id, sku_mapping_id, owner_person_id, source_type, source_ref, quantity_delta, unit_cost, amount,
-     status, note, movement_type, related_posting_number, related_order_item_id, operator)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (product_id, shop_id, sku_mapping_id, owner_person_id, source_type, source_ref, quantity_delta, stock_location, stock_location_source,
+     unit_cost, amount, status, note, movement_type, related_posting_number, related_order_item_id, operator)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, [
     Number(body.product_id),
     nullableInteger(body.shop_id),
@@ -9519,6 +9841,8 @@ async function postInventoryMysql(connection, body = {}) {
     body.source_type || "manual_adjustment",
     body.source_ref || null,
     quantityDelta,
+    stockLocation,
+    stockLocationSource,
     Number(body.unit_cost || 0),
     Number(body.amount || 0),
     body.status || "posted",
@@ -10307,6 +10631,7 @@ async function upsertPostingMysql(shop, posting) {
     updated = 1;
   }
   await recordOrderStatusHistoryMysql(shop, posting, orderId, lifecycle);
+  const outboundStockLocation = resolveOrderStockLocationMysql(posting);
 
   let insertedItems = 0;
   for (const item of posting.items || []) {
@@ -10346,15 +10671,17 @@ async function upsertPostingMysql(shop, posting) {
           quantity_delta: quantityDelta,
           unit_cost: product.purchase_cost,
           amount: Math.abs(quantityDelta) * Number(product.purchase_cost || 0),
+          stock_location: outboundStockLocation.stockLocation,
+          stock_location_source: outboundStockLocation.stockLocationSource,
           related_posting_number: posting.posting_number,
           related_order_item_id: existingItem.id,
           note: "Ozon order item quantity changed during sync"
         });
         await mysqlExecute(`
           UPDATE outbound_records
-          SET quantity = ?, note = ?
+          SET quantity = ?, stock_location = ?, stock_location_source = ?, note = ?
           WHERE order_item_id = ? AND status = 'deducted'
-        `, [nextQuantity, "Updated by Ozon sync", existingItem.id]);
+        `, [nextQuantity, outboundStockLocation.stockLocation, outboundStockLocation.stockLocationSource, "Updated by Ozon sync", existingItem.id]);
       }
       if (product && mapping) {
         const estimated = estimateItemProfit({ salePrice: item.sale_price, quantity: nextQuantity, product, mapping });
@@ -10432,6 +10759,8 @@ async function upsertPostingMysql(shop, posting) {
         source_type: "order_outbound",
         source_ref: posting.posting_number,
         quantity_delta: qty,
+        stock_location: outboundStockLocation.stockLocation,
+        stock_location_source: outboundStockLocation.stockLocationSource,
         unit_cost: product.purchase_cost,
         amount: Math.abs(qty) * product.purchase_cost,
         related_posting_number: posting.posting_number,
@@ -10439,9 +10768,9 @@ async function upsertPostingMysql(shop, posting) {
         note: "Ozon order outbound"
       });
       await mysqlExecute(`
-        INSERT INTO outbound_records (product_id, shop_id, online_product_id, order_ref, order_item_id, ozon_sku, person_id, quantity, reason, status, note)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'order', 'deducted', ?)
-      `, [product.id, shop.id, mapping.online_product_id, posting.posting_number, orderItemId, item.ozon_sku, mapping.person_id, item.quantity, "Created by Ozon sync"]);
+        INSERT INTO outbound_records (product_id, shop_id, online_product_id, order_ref, order_item_id, ozon_sku, person_id, quantity, stock_location, stock_location_source, reason, status, note)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'order', 'deducted', ?)
+      `, [product.id, shop.id, mapping.online_product_id, posting.posting_number, orderItemId, item.ozon_sku, mapping.person_id, item.quantity, outboundStockLocation.stockLocation, outboundStockLocation.stockLocationSource, "Created by Ozon sync"]);
     }
     insertedItems += 1;
   }
@@ -12584,10 +12913,116 @@ export async function updateProcurementRequestMysql(id, body = {}) {
       const orderId = Number(existing.purchase_order_id || 0);
       const affectedProductIds = [...new Set([Number(existing.product_id || 0), nextProductId].filter(Boolean))];
       await refreshPurchaseOrderItemsFromMergedRequestsMysql(connection, orderId, affectedProductIds);
+    } else if (Number(existing.purchase_order_id || 0)) {
+      const orderId = Number(existing.purchase_order_id || 0);
+      const affectedProductIds = [...new Set([Number(existing.product_id || 0), nextProductId].filter(Boolean))];
+      for (const productId of affectedProductIds) {
+        await syncFinalizedPurchaseFactsFromProcurementRequestsMysql(connection, orderId, productId);
+      }
     }
 
     return { ok: true };
   });
+}
+
+async function syncFinalizedPurchaseFactsFromProcurementRequestsMysql(connection, orderId, productId) {
+  const normalizedOrderId = Number(orderId || 0);
+  const normalizedProductId = Number(productId || 0);
+  if (!normalizedOrderId || !normalizedProductId) return false;
+
+  const order = await mysqlConnectionQueryOne(connection, "SELECT * FROM purchase_orders WHERE id = ? FOR UPDATE", [normalizedOrderId]);
+  if (!order || ["pending_purchase", "cancelled"].includes(String(order.status || ""))) return false;
+
+  const item = await mysqlConnectionQueryOne(connection, `
+    SELECT *
+    FROM purchase_order_items
+    WHERE purchase_order_id = ? AND product_id = ?
+    FOR UPDATE
+  `, [normalizedOrderId, normalizedProductId]);
+  if (!item) return false;
+
+  const summary = await mysqlConnectionQueryOne(connection, `
+    SELECT
+      COALESCE(SUM(quantity), 0) AS quantity,
+      COALESCE(SUM(amount), 0) AS amount,
+      COALESCE(SUM(shipping_amount), 0) AS shipping_amount,
+      MAX(NULLIF(purchase_url, '')) AS purchase_url,
+      GROUP_CONCAT(NULLIF(note, '') SEPARATOR '; ') AS note
+    FROM procurement_requests
+    WHERE purchase_order_id = ?
+      AND product_id = ?
+      AND status NOT IN ('cancelled')
+  `, [normalizedOrderId, normalizedProductId]);
+  const quantity = Math.max(0, Number(summary?.quantity || 0));
+  const amount = Number(summary?.amount || 0);
+  const shippingAmount = Number(summary?.shipping_amount || 0);
+  const unitCost = quantity ? (amount + shippingAmount) / quantity : 0;
+  const purchaseUrl = summary?.purchase_url || item.purchase_url || "";
+  const note = summary?.note || item.note || "";
+
+  await connection.execute(`
+    UPDATE purchase_order_items
+    SET requested_quantity = ?, actual_quantity = ?, inbound_quantity = ?,
+      unit_cost = ?, amount = ?, shipping_amount = ?, purchase_url = ?, note = ?,
+      status = CASE
+        WHEN ? > 0 AND inbound_quantity >= actual_quantity THEN 'inbound_done'
+        WHEN inbound_quantity > 0 THEN 'partial_inbound'
+        ELSE status
+      END
+    WHERE id = ?
+  `, [
+    quantity,
+    quantity,
+    String(item.status || "") === "inbound_done" ? quantity : Math.min(Number(item.inbound_quantity || 0), quantity),
+    unitCost,
+    amount,
+    shippingAmount,
+    purchaseUrl,
+    note,
+    quantity,
+    Number(item.id)
+  ]);
+
+  const inboundRows = await mysqlConnectionQuery(connection, `
+    SELECT *
+    FROM inbound_records
+    WHERE purchase_order_item_id = ?
+    ORDER BY CASE WHEN status = 'approved' THEN 0 ELSE 1 END, id ASC
+    FOR UPDATE
+  `, [Number(item.id)]);
+  if (inboundRows.length === 1) {
+    const inbound = inboundRows[0];
+    await connection.execute(`
+      UPDATE inbound_records
+      SET quantity = ?, amount = ?, shipping_amount = ?, unit_cost = ?, purchase_url = ?, note = ?
+      WHERE id = ?
+    `, [quantity, amount, shippingAmount, unitCost, purchaseUrl, note, Number(inbound.id)]);
+    if (String(inbound.status || "") === "approved") {
+      await upsertInboundInventoryMovementMysql(connection, Number(inbound.id), {
+        product_id: normalizedProductId,
+        owner_person_id: inbound.person_id,
+        quantity,
+        unitCost,
+        amount: amount + shippingAmount,
+        note
+      });
+    }
+  }
+
+  const orderSummary = await mysqlConnectionQueryOne(connection, `
+    SELECT
+      COALESCE(SUM(actual_quantity), 0) AS total_quantity,
+      COALESCE(SUM(amount + shipping_amount), 0) AS total_amount
+    FROM purchase_order_items
+    WHERE purchase_order_id = ?
+  `, [normalizedOrderId]);
+  await connection.execute(`
+    UPDATE purchase_orders
+    SET total_quantity = ?, total_amount = ?
+    WHERE id = ?
+  `, [Number(orderSummary?.total_quantity || 0), Number(orderSummary?.total_amount || 0), normalizedOrderId]);
+  await refreshPurchaseOrderStatusMysql(connection, normalizedOrderId);
+  return true;
 }
 
 async function refreshPurchaseOrderItemsFromMergedRequestsMysql(connection, orderId, productIds = []) {
@@ -13209,11 +13644,82 @@ export async function deleteInboundRecordMysql(id) {
   });
 }
 
-export async function createInventoryMovementMysql(body = {}) {
+export async function createInventoryMovementMysql(body = {}, userId = null) {
   ensureMysqlCutoverEnabled();
   return await withMysqlTransaction(async (connection) => {
-    const id = await postInventoryMysql(connection, body);
+    const sourceType = String(body.source_type || body.sourceType || "").trim();
+    const isManualOutbound = sourceType === "manual_outbound";
+    const quantity = Number(body.quantity ?? body.quantity_delta ?? 0);
+    const productId = Number(body.product_id || body.productId || 0);
+    if (isManualOutbound && (!productId || quantity <= 0)) {
+      throw new Error("手动出库需要选择库存产品并填写大于 0 的出库数量");
+    }
+    const payload = isManualOutbound ? {
+      ...body,
+      product_id: productId,
+      source_type: "manual_outbound",
+      source_ref: body.source_ref || `manual_outbound_${productId}_${Date.now()}`,
+      quantity_delta: -Math.abs(quantity),
+      amount: Number(body.amount ?? body.loss_amount ?? 0),
+      movement_type: "ORDER_SHIPPED",
+      stock_location: normalizeStockLocationMysql(body.stock_location || "LOCAL"),
+      stock_location_source: body.stock_location_source || "manual",
+      note: body.note || body.reason || "手动出库",
+      operator: userId ? String(userId) : (body.operator || "manual_outbound")
+    } : body;
+    const id = await postInventoryMysql(connection, payload);
     return { id };
+  });
+}
+
+export async function updateInventoryMovementMysql(id, body = {}, userId = null) {
+  ensureMysqlCutoverEnabled();
+  const movementId = Number(id || 0);
+  if (!movementId) throw new Error("缺少库存流水 ID");
+  return await withMysqlTransaction(async (connection) => {
+    const existing = await mysqlConnectionQueryOne(connection, "SELECT * FROM inventory_movements WHERE id = ? FOR UPDATE", [movementId]);
+    if (!existing) throw new Error("库存流水不存在");
+    if (String(existing.source_type || "") !== "manual_outbound") throw new Error("只能编辑手动出库记录");
+    const quantity = Math.round(Number(body.quantity ?? body.quantity_delta ?? Math.abs(Number(existing.quantity_delta || 0))));
+    if (quantity <= 0) throw new Error("请输入大于 0 的出库数量");
+    const stockLocation = normalizeStockLocationMysql(body.stock_location || existing.stock_location || "LOCAL");
+    const amount = Number(body.amount ?? body.loss_amount ?? existing.amount ?? 0);
+    const operator = userId ? String(userId) : String(body.operator || existing.operator || "manual_outbound");
+    await connection.execute(`
+      UPDATE inventory_movements
+      SET quantity_delta = ?,
+        stock_location = ?,
+        stock_location_source = 'manual',
+        amount = ?,
+        note = ?,
+        movement_type = 'ORDER_SHIPPED',
+        status = 'posted',
+        operator = ?
+      WHERE id = ?
+    `, [
+      -Math.abs(quantity),
+      stockLocation,
+      amount,
+      body.note || existing.note || "手动出库",
+      operator,
+      movementId
+    ]);
+    await rebuildInventoryCurrentForProductMysql(connection, Number(existing.product_id));
+    return { ok: true, id: movementId };
+  });
+}
+
+export async function deleteInventoryMovementMysql(id, userId = null) {
+  ensureMysqlCutoverEnabled();
+  const movementId = Number(id || 0);
+  if (!movementId) throw new Error("缺少库存流水 ID");
+  return await withMysqlTransaction(async (connection) => {
+    const existing = await mysqlConnectionQueryOne(connection, "SELECT * FROM inventory_movements WHERE id = ? FOR UPDATE", [movementId]);
+    if (!existing) return { ok: true, deleted: false };
+    if (String(existing.source_type || "") !== "manual_outbound") throw new Error("只能删除手动出库记录");
+    await connection.execute("DELETE FROM inventory_movements WHERE id = ?", [movementId]);
+    await rebuildInventoryCurrentForProductMysql(connection, Number(existing.product_id));
+    return { ok: true, deleted: true, operator: userId ? String(userId) : "" };
   });
 }
 
@@ -14788,21 +15294,95 @@ export async function dashboardMysql(query = {}) {
   return rebuildDashboardSnapshotMysql({ forceRefresh: false });
 }
 
-export async function inventoryMysql() {
+export async function inventoryMysql(query = {}) {
   ensureMysqlCutoverEnabled();
-  return await mysqlQuery(`
-    SELECT im.*, p.code AS product_code, p.name AS product_name, s.name AS shop_name, pe.name AS owner_name
+  await ensureStockLocationSchemaMysql();
+
+  const paged = String(query.paged || "") === "1";
+  const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
+  const page = Math.max(Number(query.page || 1), 1);
+  const productId = Number(query.productId || query.product_id || 0);
+  const sourceType = String(query.sourceType || query.source_type || "").trim();
+  const rawStockLocation = String(query.stockLocation || query.stock_location || "").trim().toUpperCase();
+  const stockLocation = ["LOCAL", "FBP", "UNKNOWN"].includes(rawStockLocation) ? rawStockLocation : "";
+  const search = String(query.query || query.search || "").trim();
+  const where = [];
+  const params = [];
+
+  if (productId > 0) {
+    where.push("im.product_id = ?");
+    params.push(productId);
+  }
+  if (sourceType) {
+    where.push("im.source_type = ?");
+    params.push(sourceType);
+  }
+  if (stockLocation) {
+    where.push("im.stock_location = ?");
+    params.push(stockLocation);
+  }
+  if (search) {
+    where.push(`(
+      p.name LIKE ? OR p.code LIKE ? OR im.note LIKE ? OR im.source_ref LIKE ?
+    )`);
+    const like = `%${search}%`;
+    params.push(like, like, like, like);
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const selectSql = `
+    SELECT
+      im.*,
+      p.code AS product_code,
+      p.name AS product_name,
+      p.image_url AS product_image_url,
+      s.name AS shop_name,
+      pe.name AS owner_name,
+      COALESCE(op.name, im.operator, '') AS operator_name
     FROM inventory_movements im
     JOIN products p ON p.id = im.product_id
     LEFT JOIN shops s ON s.id = im.shop_id
     LEFT JOIN people pe ON pe.id = im.owner_person_id
-    ORDER BY im.created_at DESC, im.id DESC
-    LIMIT 300
-  `);
+    LEFT JOIN people op ON op.id = CASE WHEN im.operator REGEXP '^[0-9]+$' THEN CAST(im.operator AS UNSIGNED) ELSE NULL END
+    ${whereSql}
+  `;
+  const orderSql = "ORDER BY im.created_at DESC, im.id DESC";
+
+  if (!paged) {
+    return await mysqlQuery(`
+      ${selectSql}
+      ${orderSql}
+      LIMIT 300
+    `, params);
+  }
+
+  const offset = (page - 1) * pageSize;
+  const [totalRow, rows] = await Promise.all([
+    mysqlQueryOne(`
+      SELECT COUNT(*) AS total
+      FROM inventory_movements im
+      JOIN products p ON p.id = im.product_id
+      ${whereSql}
+    `, params),
+    mysqlQuery(`
+      ${selectSql}
+      ${orderSql}
+      LIMIT ? OFFSET ?
+    `, [...params, pageSize, offset])
+  ]);
+
+  return {
+    rows,
+    total: Number(totalRow?.total || 0),
+    page,
+    pageSize,
+    mode: "paged"
+  };
 }
 
 export async function outboundRecordsMysql(query = {}) {
   ensureMysqlCutoverEnabled();
+  await ensureStockLocationSchemaMysql();
   const paged = String(query.paged || "") === "1";
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
@@ -14857,6 +15437,8 @@ export async function outboundRecordsMysql(query = {}) {
 function outboundRecordsWhereMysql(query = {}) {
   const status = String(query.status || "all");
   const shopId = String(query.shopId || query.shop_id || "all");
+  const rawStockLocation = String(query.stockLocation || query.stock_location || "").trim();
+  const stockLocation = normalizeStockLocationMysql(rawStockLocation);
   const productId = Number(query.productId || query.product_id || 0);
   const dateFrom = String(query.dateFrom || query.date_from || "").trim();
   const dateTo = String(query.dateTo || query.date_to || "").trim();
@@ -14871,6 +15453,10 @@ function outboundRecordsWhereMysql(query = {}) {
   if (shopId !== "all" && shopId) {
     where.push("obr.shop_id = ?");
     params.push(Number(shopId));
+  }
+  if (rawStockLocation) {
+    where.push("obr.stock_location = ?");
+    params.push(stockLocation);
   }
   if (productId) {
     where.push("obr.product_id = ?");
@@ -14954,6 +15540,163 @@ function outboundRecordsSelectMysql(whereSql = "") {
     LEFT JOIN orders o ON o.posting_number = obr.order_ref AND o.shop_id = obr.shop_id
     ${whereSql}
   `;
+}
+
+function stockLocationClassificationSqlMysql() {
+  return `
+    CASE
+      WHEN LOWER(CONCAT_WS(' ', COALESCE(osh.warehouse_name, ''), COALESCE(osh.tpl_provider, ''), COALESCE(osh.raw_status_json, ''), COALESCE(raw.raw_json, ''), COALESCE(o.tracking_number, '')))
+        REGEXP 'fbp|fbo|hunchun|hun chun|hch-pd|hch-cr|cel fbp|fbp standard|珲春|混春|混川'
+      THEN 'FBP'
+      WHEN o.id IS NOT NULL
+      THEN 'LOCAL'
+      ELSE 'UNKNOWN'
+    END
+  `;
+}
+
+function stockLocationSourceClassificationSqlMysql() {
+  return `
+    CASE
+      WHEN o.id IS NULL
+      THEN 'missing_order'
+      WHEN LOWER(CONCAT_WS(' ', COALESCE(osh.warehouse_name, ''), COALESCE(osh.tpl_provider, ''), COALESCE(osh.raw_status_json, ''), COALESCE(raw.raw_json, ''), COALESCE(o.tracking_number, '')))
+        REGEXP 'fbp|fbo|hunchun|hun chun|hch-pd|hch-cr|cel fbp|fbp standard|珲春|混春|混川'
+      THEN 'order_warehouse_rule'
+      ELSE 'order_warehouse_rule'
+    END
+  `;
+}
+
+function outboundStockLocationBackfillJoinSqlMysql() {
+  return `
+    FROM outbound_records obr
+    LEFT JOIN orders o ON o.posting_number = obr.order_ref AND o.shop_id = obr.shop_id
+    LEFT JOIN ozon_orders_raw raw ON raw.store_id = obr.shop_id AND raw.posting_number = obr.order_ref
+    LEFT JOIN (
+      SELECT h.*
+      FROM order_status_history h
+      JOIN (
+        SELECT order_id, MAX(observed_at) AS observed_at
+        FROM order_status_history
+        GROUP BY order_id
+      ) latest ON latest.order_id = h.order_id AND latest.observed_at = h.observed_at
+    ) osh ON osh.order_id = o.id
+  `;
+}
+
+export async function backfillOutboundStockLocationsMysql(options = {}) {
+  ensureMysqlCutoverEnabled();
+  await ensureStockLocationSchemaMysql();
+  const apply = options.apply === true || String(options.apply || "").toLowerCase() === "true";
+  const force = options.force === true || String(options.force || "").toLowerCase() === "true";
+  const limit = Math.max(0, Number(options.limit || 0));
+  const targetWhere = force ? "1 = 1" : "(obr.stock_location IS NULL OR obr.stock_location = '' OR obr.stock_location = 'UNKNOWN')";
+  const classificationSql = stockLocationClassificationSqlMysql();
+  const sourceSql = stockLocationSourceClassificationSqlMysql();
+  const joinSql = outboundStockLocationBackfillJoinSqlMysql();
+  const limitSql = limit ? "LIMIT ?" : "";
+  const params = limit ? [limit] : [];
+
+  const previewRows = await mysqlQuery(`
+    SELECT next_stock_location AS stock_location, COUNT(*) AS count
+    FROM (
+      SELECT obr.id, ${classificationSql} AS next_stock_location
+      ${joinSql}
+      WHERE ${targetWhere}
+      ${limitSql}
+    ) classified
+    GROUP BY next_stock_location
+    ORDER BY next_stock_location
+  `, params);
+
+  if (!apply) {
+    return {
+      ok: true,
+      mode: "dry_run",
+      force,
+      limit,
+      outbound: {
+        preview: previewRows.map((row) => ({
+          stock_location: normalizeStockLocationMysql(row.stock_location),
+          count: Number(row.count || 0)
+        }))
+      },
+      inventory_movements: { updated: 0 }
+    };
+  }
+
+  const candidateRows = await mysqlQuery(`
+    SELECT obr.id, ${classificationSql} AS stock_location, ${sourceSql} AS stock_location_source
+    ${joinSql}
+    WHERE ${targetWhere}
+    ORDER BY obr.id ASC
+    ${limitSql}
+  `, params);
+
+  let outboundUpdated = 0;
+  let movementUpdated = 0;
+  for (const row of candidateRows) {
+    const stockLocation = normalizeStockLocationMysql(row.stock_location);
+    const stockLocationSource = String(row.stock_location_source || "legacy_unknown").slice(0, 64);
+    const outboundResult = await mysqlExecute(`
+      UPDATE outbound_records
+      SET stock_location = ?, stock_location_source = ?
+      WHERE id = ?
+    `, [stockLocation, stockLocationSource, row.id]);
+    outboundUpdated += Number(outboundResult?.affectedRows || 0);
+    const movementResult = await mysqlExecute(`
+      UPDATE inventory_movements im
+      JOIN outbound_records obr ON obr.order_item_id = im.related_order_item_id
+        AND obr.product_id = im.product_id
+        AND obr.order_ref = im.related_posting_number
+      SET im.stock_location = obr.stock_location,
+        im.stock_location_source = LEFT(CONCAT('outbound_', obr.stock_location_source), 64)
+      WHERE obr.id = ?
+        AND im.source_type IN ('order_outbound', 'order_outbound_adjustment')
+        AND (${force ? "1 = 1" : "im.stock_location IS NULL OR im.stock_location = '' OR im.stock_location = 'UNKNOWN'"})
+    `, [row.id]);
+    movementUpdated += Number(movementResult?.affectedRows || 0);
+    if (Number(movementResult?.affectedRows || 0) === 0) {
+      const fallbackMovementResult = await mysqlExecute(`
+        UPDATE inventory_movements im
+        JOIN outbound_records obr ON obr.order_item_id = im.related_order_item_id
+        SET im.stock_location = obr.stock_location,
+          im.stock_location_source = LEFT(CONCAT('outbound_order_item_', obr.stock_location_source), 64)
+        WHERE obr.id = ?
+          AND im.source_type IN ('order_outbound', 'order_outbound_adjustment')
+          AND (${force ? "1 = 1" : "im.stock_location IS NULL OR im.stock_location = '' OR im.stock_location = 'UNKNOWN'"})
+      `, [row.id]);
+      movementUpdated += Number(fallbackMovementResult?.affectedRows || 0);
+    }
+  }
+  const remainingMovementResult = await mysqlExecute(`
+    UPDATE inventory_movements im
+    JOIN outbound_records obr ON obr.order_item_id = im.related_order_item_id
+    SET im.stock_location = obr.stock_location,
+      im.stock_location_source = LEFT(CONCAT('outbound_order_item_', obr.stock_location_source), 64)
+    WHERE obr.stock_location IN ('LOCAL', 'FBP')
+      AND im.source_type IN ('order_outbound', 'order_outbound_adjustment')
+      AND (${force ? "1 = 1" : "im.stock_location IS NULL OR im.stock_location = '' OR im.stock_location = 'UNKNOWN'"})
+  `);
+  movementUpdated += Number(remainingMovementResult?.affectedRows || 0);
+
+  return {
+    ok: true,
+    mode: "applied",
+    force,
+    limit,
+    outbound: {
+      preview: previewRows.map((row) => ({
+        stock_location: normalizeStockLocationMysql(row.stock_location),
+        count: Number(row.count || 0)
+      })),
+      updated: outboundUpdated
+    },
+    inventory_movements: {
+      updated: movementUpdated
+    }
+  };
 }
 
 export async function ordersMysql() {

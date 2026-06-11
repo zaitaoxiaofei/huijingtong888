@@ -6,12 +6,13 @@ const viewSource = () => fs.readFileSync("frontend/admin/views/analytics/SellerA
 const routerSource = () => fs.readFileSync("frontend/admin/router/index.js", "utf8");
 const shellSource = () => fs.readFileSync("scripts/generate-admin-shell.mjs", "utf8");
 
-test("seller analytics route is bundled with the admin shell to avoid first-open chunk reloads", () => {
+test("seller analytics route is lazy-loaded so the admin shell can start quickly", () => {
   const router = routerSource();
   const shell = shellSource();
 
-  assert.match(router, /import SellerAnalyticsView from "\.\.\/views\/analytics\/SellerAnalyticsView\.vue"/);
-  assert.doesNotMatch(router, /const SellerAnalyticsView = \(\) => import\("\.\.\/views\/analytics\/SellerAnalyticsView\.vue"\)/);
+  assert.doesNotMatch(router, /import SellerAnalyticsView from "\.\.\/views\/analytics\/SellerAnalyticsView\.vue"/);
+  assert.match(router, /const SellerAnalyticsView = \(\) => import\("\.\.\/views\/analytics\/SellerAnalyticsView\.vue"\)/);
+  assert.doesNotMatch(shell, /routePreloadSources|SellerAnalyticsView\.vue/);
   assert.match(shell, /loadingHint: "\\u6b63\\u5728\\u52a0\\u8f7d\\u7cfb\\u7edf\\u8d44\\u6e90/);
 });
 
@@ -99,6 +100,7 @@ test("seller analytics shop filter refreshes and is sent to analysis APIs", () =
   assert.match(source, /v-model="state\.filters\.shopId"[^>]*@change="handleSearch"/);
   assert.match(source, /const selectedStoreId = computed/);
   assert.match(source, /function getShopSellerStoreId/);
+  assert.match(source, /const source = shop \|\| \{\};/);
   assert.match(source, /function normalizeShopOption/);
   assert.match(source, /if \(cached\.shopId\) state\.filters\.shopId = String\(cached\.shopId\)/);
   assert.match(source, /tabKey: state\.filters\.tabKey/);
@@ -179,10 +181,13 @@ test("seller analytics can create daily 7d and 28d full-store collect runs", () 
 
   assert.match(source, /const DAILY_SYNC_PERIOD_KEYS = \["7d", "28d"\]/);
   assert.match(source, /function buildCollectPayload/);
+  assert.match(source, /startSellerAnalyticsDirectCollect/);
+  assert.match(source, /async function createCollectRunAndStartDirect/);
   assert.match(source, /store_id:\s*selectedStoreId\.value/);
   assert.match(source, /company_id:\s*selectedStoreId\.value/);
   assert.match(source, /async function collectDailyDefaultPeriods/);
   assert.match(source, /for \(const periodKey of DAILY_SYNC_PERIOD_KEYS\)/);
+  assert.match(source, /createCollectRunAndStartDirect\(buildCollectPayload/);
   assert.match(source, /period_key:\s*periodKey/);
   assert.match(source, /auto_all_pages:\s*true/);
   assert.match(source, /full_store:\s*true/);

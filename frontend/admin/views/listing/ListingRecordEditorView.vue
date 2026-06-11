@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { ArrowLeft, Check, Delete, MagicStick, Refresh, View } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
+import OzonRichContentEditor from "../../components/listing/OzonRichContentEditor.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -14,6 +15,7 @@ const deleting = ref(false);
 const aiAction = ref("");
 const translating = ref(false);
 const technicalJsonLoaded = ref(false);
+const richEditorVisible = ref(false);
 let rawPayloadCache = null;
 let rawResponseCache = null;
 
@@ -70,7 +72,7 @@ function backToRecordListOrReturn() {
     router.push(target);
     return;
   }
-  router.push({ name: "listing-records" });
+  router.push({ name: "listing-publish-records" });
 }
 
 onMounted(loadDraft);
@@ -501,6 +503,12 @@ function parseRichContentPreview(value) {
   };
 }
 
+function handleRichEditorSave(value) {
+  state.form.richJson = value;
+  applyFormToPayload();
+  ElMessage.success("Ozon 图文富内容已更新");
+}
+
 function visitRichNode(node, blocks, images) {
   if (!node) return;
   if (Array.isArray(node)) {
@@ -553,6 +561,13 @@ function plainClone(value, fallback = null) {
 
 <template>
   <div class="page-stack record-editor" v-loading="loading">
+    <OzonRichContentEditor
+      v-model="state.form.richJson"
+      v-model:visible="richEditorVisible"
+      :title="state.form.name"
+      @save="handleRichEditorSave"
+    />
+
     <section class="workspace-header">
       <div>
         <h1>编辑上架</h1>
@@ -567,7 +582,7 @@ function plainClone(value, fallback = null) {
         >
           返回AI工作台
         </el-button>
-        <el-button class="erp-btn erp-btn-secondary" :icon="ArrowLeft" @click="router.push({ name: 'listing-records' })">返回记录</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="ArrowLeft" @click="router.push({ name: 'listing-publish-records' })">返回记录</el-button>
         <el-button class="erp-btn erp-btn-danger" type="danger" plain :icon="Delete" :loading="deleting" @click="deleteRecord">删除记录</el-button>
         <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Check" :loading="submitting" @click="submitRecord">重新提交 Ozon</el-button>
       </div>
@@ -616,6 +631,7 @@ function plainClone(value, fallback = null) {
             :src="url"
             :preview-list="imagePreview"
             :initial-index="index"
+            fit="contain"
             size="default"
           />
         </div>
@@ -652,7 +668,10 @@ function plainClone(value, fallback = null) {
       <div class="editor-panel">
         <div class="panel-title">
           <h2>富内容预览</h2>
-          <el-button size="small" :icon="MagicStick" :loading="aiAction === 'description'" @click="runAi('description')">AI 富内容</el-button>
+          <div class="panel-actions">
+            <el-button size="small" type="primary" :icon="View" @click="richEditorVisible = true">图文编辑</el-button>
+            <el-button size="small" :icon="MagicStick" :loading="aiAction === 'description'" @click="runAi('description')">AI 富内容</el-button>
+          </div>
         </div>
         <el-input v-model="state.form.richJson" type="textarea" :rows="8" placeholder="Ozon rich content JSON。下方会自动解析成人能看的图文预览。" />
         <div class="rich-preview">
@@ -663,6 +682,7 @@ function plainClone(value, fallback = null) {
               :src="url"
               :preview-list="richPreview.images"
               :initial-index="index"
+              fit="contain"
               size="default"
             />
           </div>
@@ -706,8 +726,24 @@ function plainClone(value, fallback = null) {
 .form-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .form-row:has(.el-form-item:nth-child(4)) { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .image-strip { display: flex; gap: 8px; flex-wrap: wrap; margin-left: 110px; }
-.image-strip img,
-.image-strip :deep(.el-image) { width: 72px; height: 72px; object-fit: cover; border: 1px solid #edf1f7; border-radius: 8px; background: #f8fafc; }
+.image-strip :deep(.erp-image-preview) {
+  width: 72px !important;
+  min-width: 72px !important;
+  max-width: 72px !important;
+  height: 96px !important;
+  min-height: 96px !important;
+  max-height: 96px !important;
+  flex-basis: 72px !important;
+  aspect-ratio: 3 / 4;
+  border: 1px solid #edf1f7;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.image-strip :deep(.erp-image-preview__image),
+.image-strip :deep(.el-image__inner) {
+  object-fit: contain !important;
+  background: #f8fafc;
+}
 .translation-card { margin-left: 110px; padding: 12px 14px; border: 1px solid rgba(37, 99, 235, 0.16); border-radius: 8px; background: rgba(239, 246, 255, 0.76); color: #334155; }
 .translation-card strong { display: block; margin-bottom: 6px; color: #2563eb; }
 .translation-card p { margin: 4px 0; white-space: pre-wrap; line-height: 1.65; }

@@ -23,3 +23,8 @@ test("AI listing record writeback stores rich content in request and complex att
   assert.match(source, /item\.rich_content_json = JSON\.stringify\(richContent\)/);
   assert.match(source, /id: "rich_content_json", values: \[\{ value: text \}\]/);
 });
+
+test("AI source picker keeps source lists lightweight", () => {
+  assert.match(source, /summaryMode:\s*"skip"/);
+  assert.match(source, /includePayload:\s*"0"/);
+});

@@ -345,7 +345,7 @@ export function useOrdersPage() {
     }
   }
 
-  async function loadOrders() {
+  async function loadOrders(options = {}) {
     ordersListAbort.value?.abort();
     ordersMetaAbort.value?.abort();
     const controller = new AbortController();
@@ -356,7 +356,7 @@ export function useOrdersPage() {
     try {
       const filtersSnapshot = { ...vm.filters };
       const params = buildOrdersParams(filtersSnapshot, {
-        includeCounts: "0",
+        includeCounts: options.includeCounts ? "1" : "0",
         includeLogisticsOptions: "0"
       });
       const shopsPromise = fetchShopsCached().catch((error) => {
@@ -367,6 +367,7 @@ export function useOrdersPage() {
       if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
 
       const total = Number(result.total || 0);
+      const counts = result?.counts || vm.meta.counts || {};
 
       patch({
         rows: Array.isArray(result.rows) ? result.rows : [],
@@ -381,8 +382,8 @@ export function useOrdersPage() {
           page: Number(result.page || filtersSnapshot.page || 1),
           pageSize: Number(result.pageSize || filtersSnapshot.pageSize || DEFAULT_PAGE_SIZE)
         },
-        statusTabs: buildStatusTabs(vm.meta.counts, total),
-        meta: { total, counts: vm.meta.counts || {} }
+        statusTabs: buildStatusTabs(counts, Number(counts?.all ?? total)),
+        meta: { total, counts }
       });
       loading.value = false;
       void shopsPromise.then((shops) => {
@@ -390,9 +391,11 @@ export function useOrdersPage() {
         if (Array.isArray(shops)) patch({ shops });
       });
       window.clearTimeout(ordersMetaTimer);
-      ordersMetaTimer = window.setTimeout(() => {
-        void loadOrdersMeta(filtersSnapshot, requestToken);
-      }, ORDERS_META_DELAY_MS);
+      if (!options.includeCounts) {
+        ordersMetaTimer = window.setTimeout(() => {
+          void loadOrdersMeta(filtersSnapshot, requestToken);
+        }, ORDERS_META_DELAY_MS);
+      }
     } catch (error) {
       if (error?.name === "AbortError") return;
       if (error?.status === 401) ElMessage.error("登录已失效，请重新登录");
@@ -507,7 +510,7 @@ export function useOrdersPage() {
     try {
       const result = await apiClient.post(url, body, { signal: controller.signal });
       vm.syncStatus = messages.refreshing;
-      await loadOrders();
+      await loadOrders({ includeCounts: true });
       vm.syncStatus = messages.success(result);
       ElMessage.success(messages.successToast(result));
       return result;
@@ -537,7 +540,6 @@ export function useOrdersPage() {
     try {
       const result = await bulkPrepareOrders(ids);
       applyPreparedOrdersLocally(ids, result);
-      void loadOrders().catch(() => {});
       const alreadyShippedCount = Number(result?.already_shipped_count || 0);
       if (alreadyShippedCount > 0) {
         const normalCount = Math.max(0, ids.length - alreadyShippedCount);
@@ -552,7 +554,7 @@ export function useOrdersPage() {
       return result;
     } catch (error) {
       ElMessage.error(friendlyPrepareError(error));
-      throw error;
+      return null;
     }
   }
 
@@ -564,7 +566,7 @@ export function useOrdersPage() {
     }
     try {
       const result = await bulkPrintOrders(ids, options);
-      await loadOrders();
+      await loadOrders({ includeCounts: true });
       if (result?.cancelled) {
         ElMessage.info("已取消确认，订单未标记为已打印");
         return result;
@@ -662,7 +664,7 @@ export function useOrdersPage() {
         };
       }
       await submitOrderFilters(vm.filters);
-      await loadOrders();
+      await loadOrders({ includeCounts: true });
     },
     changeStatus: (status) => {
       vm.filters = {

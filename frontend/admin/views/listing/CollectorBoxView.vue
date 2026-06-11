@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, MagicStick, Refresh, Search } from "@element-plus/icons-vue";
@@ -107,6 +107,12 @@ const detailDiagnostics = ref(null);
 const detailDiagnosticsLoading = ref(false);
 const rawPayloadPreviewLoaded = ref(false);
 const rawPayloadPreviewText = ref("");
+const selectionDialogVisible = ref(false);
+const selectionDialogLoading = ref(false);
+const selectionDialogRow = ref(null);
+const selectionVariantRows = ref([]);
+const selectedSelectionVariants = ref([]);
+const selectionVariantTable = ref(null);
 
 const state = reactive({
   rows: [],
@@ -132,15 +138,22 @@ const statusOptions = [
 
 const detailPayload = computed(() => detail.value?.payload || {});
 const rawPayload = computed(() => detail.value?.rawPayload || detail.value?.raw_payload || {});
+const detailTemplateSnapshot = computed(() => detail.value?.templateSnapshot || detail.value?.template_snapshot || detail.value?.listingTemplate || detail.value?.listing_template || {});
 const detailImages = computed(() => {
-  const values = [
-    ...(Array.isArray(rawPayload.value.images) ? rawPayload.value.images : []),
-    ...(Array.isArray(detailPayload.value.images) ? detailPayload.value.images : []),
-    detail.value?.image_url,
-    rawPayload.value.productImage,
-    rawPayload.value.mainImage
+  const templateEditable = detailTemplateSnapshot.value.editable_payload || detailTemplateSnapshot.value.editablePayload || {};
+  const editPayload = detail.value?.editPayload || detail.value?.edit_payload || {};
+  const groups = [
+    [
+      ...normalizeImageValues(detailTemplateSnapshot.value.images),
+      ...normalizeImageValues(templateEditable.images)
+    ],
+    normalizeImageValues(editPayload.images || editPayload.image_urls || editPayload.imageUrls),
+    normalizeImageValues(detailPayload.value.images),
+    normalizeImageValues(rawPayload.value.images || rawPayload.value.image_urls || rawPayload.value.imageUrls),
+    [detail.value?.image_url, rawPayload.value.productImage, rawPayload.value.mainImage]
   ];
-  return [...new Set(values.map((item) => String(item || "").trim()).filter(Boolean))].slice(0, 12);
+  const values = groups.find((items) => items.some((item) => imageUrlValue(item))) || [];
+  return [...new Set(values.map(imageUrlValue).filter(Boolean))].slice(0, 12);
 });
 const detailDimensions = computed(() => {
   const dimensions = detailPayload.value.dimensions || rawPayload.value.dimensions || {};
@@ -160,6 +173,7 @@ const listingPreviewFields = computed(() => [
   { label: "当前状态", value: statusText(detail.value || {}) }
 ]);
 const footerSummary = computed(() => `第 ${state.filters.page} 页`);
+const selectionVariantCount = computed(() => selectedSelectionVariants.value.length || selectionVariantRows.value.length || 1);
 
 function loadRawPayloadPreview() {
   rawPayloadPreviewText.value = JSON.stringify(rawPayload.value || detail.value?.payload || {}, null, 2);
@@ -168,6 +182,15 @@ function loadRawPayloadPreview() {
 
 function firstFilled(values) {
   return values.find((value) => value !== null && value !== undefined && value !== "") ?? "";
+}
+
+function normalizeImageValues(value) {
+  return Array.isArray(value) ? value : (value ? [value] : []);
+}
+
+function imageUrlValue(item) {
+  if (item && typeof item === "object") return String(item.url || item.src || "").trim();
+  return String(item || "").trim();
 }
 
 function formatNumber(value, digits = 0) {
@@ -270,23 +293,24 @@ function diagnosticIssueType(level = "") {
   return "info";
 }
 
-function buildQuery() {
+function buildQuery(options = {}) {
   const params = new URLSearchParams();
   params.set("page", String(state.filters.page));
   params.set("pageSize", String(state.filters.pageSize));
+  if (options.summaryMode) params.set("summaryMode", String(options.summaryMode));
   if (state.filters.query.trim()) params.set("query", state.filters.query.trim());
   if (state.filters.status !== "all") params.set("status", state.filters.status);
   return params;
 }
 
-async function loadRows() {
+async function loadRows(options = {}) {
   loading.value = true;
   try {
-    const result = await apiClient.get(`/api/listing/collector-box?${buildQuery().toString()}`, { noCache: true });
+    const result = await apiClient.get(`/api/listing/collector-box?${buildQuery(options).toString()}`, { noCache: true });
     state.rows = result.rows || [];
     state.selectedRows = [];
     state.total = Number(result.total || 0);
-    state.summary = result.summary || {};
+    if (result.summary) state.summary = result.summary;
   } catch (error) {
     ElMessage.error(error.message || "采集箱加载失败");
   } finally {
@@ -349,14 +373,79 @@ async function ensureDetail(row) {
   return await apiClient.get(`/api/listing/collector-box/${encodeURIComponent(row.sku)}`, { noCache: true });
 }
 
+function normalizeArray(value) {
+  if (Array.isArray(value)) return value;
+  if (value === undefined || value === null || value === "") return [];
+  return [value];
+}
+
+function normalizeVariantKey(row = {}, index = 0) {
+  return String(row.sku || row.source_sku || row.offer_id || row.variantId || row.variant_id || row.id || index).trim();
+}
+
+function collectSelectionVariantRows(source = {}) {
+  const payload = source.payload || {};
+  const raw = source.rawPayload || source.raw_payload || {};
+  const editPayload = source.editPayload || source.edit_payload || {};
+  const candidates = [
+    ...normalizeArray(source.editorVariants || source.editor_variants || editPayload.editorVariants || editPayload.editor_variants || payload.editorVariants || raw.editorVariants),
+    ...normalizeArray(source.rows || editPayload.rows || payload.rows || raw.rows),
+    ...normalizeArray(source.variants || source.variantRows || editPayload.variants || payload.variants || raw.variants),
+    ...normalizeArray(source.offers || source.children || source.products || payload.offers || raw.offers || raw.products),
+    ...normalizeArray(source.skus || payload.skus || raw.skus).map((item) => (typeof item === "string" ? { sku: item } : item))
+  ];
+  const byKey = new Map();
+  candidates.forEach((item, index) => {
+    if (!item || typeof item !== "object") return;
+    const key = normalizeVariantKey(item, index);
+    if (!key || byKey.has(key)) return;
+    const images = normalizeArray(item.images || item.image_urls || item.imageUrls);
+    byKey.set(key, {
+      key,
+      sku: String(item.sku || item.source_sku || key).trim(),
+      title: String(item.title || item.name || source.title || "").trim(),
+      price: item.price || item.cardPrice || item.sell_price || source.price || "",
+      image: item.coverImage || item.cover_image || item.primary_image || item.mainImage || images[0] || source.image_url || "",
+      raw: item
+    });
+  });
+  if (byKey.size) return [...byKey.values()];
+  return [{
+    key: String(source.sku || "main"),
+    sku: String(source.sku || ""),
+    title: String(source.title || ""),
+    price: source.price || "",
+    image: source.image_url || "",
+    raw: { sku: source.sku, title: source.title }
+  }];
+}
+
+async function openSelectionDialog(row) {
+  if (!row?.sku) return;
+  creatingSku.value = row.sku;
+  try {
+    const fullDetail = await ensureDetail(row);
+    selectionDialogRow.value = fullDetail;
+    selectionVariantRows.value = collectSelectionVariantRows(fullDetail);
+    selectedSelectionVariants.value = [...selectionVariantRows.value];
+    selectionDialogVisible.value = true;
+    await nextTick();
+    selectionVariantRows.value.forEach((item) => selectionVariantTable.value?.toggleRowSelection(item, true));
+  } catch (error) {
+    ElMessage.error(error.message || "选品创建预览加载失败");
+  } finally {
+    creatingSku.value = "";
+  }
+}
+
 async function openEdit(row) {
   await createListingTemplate(row);
 }
 
-function openAiOptimize(row) {
+function openAiWorkbench(row, mode = "optimization") {
   if (!row?.sku) return;
   router.push({
-    name: "asset-variant-center-create",
+    name: mode === "variant" ? "asset-variant-center-wizard" : "ai-optimization-workbench-v2",
     query: {
       workbenchId: createAiWorkbenchId(),
       collectorSku: String(row.sku),
@@ -400,15 +489,24 @@ async function createListingTemplate(row) {
 
 async function createSelection(row) {
   if (!row?.sku) return;
-  await ElMessageBox.confirm("将该采集商品生成选品池草稿，后续可继续完善成本、物流和上架资料。", "加入选品池", {
-    confirmButtonText: "生成草稿",
-    cancelButtonText: "取消",
-    type: "info"
-  });
+  const selected = selectedSelectionVariants.value.length ? selectedSelectionVariants.value : selectionVariantRows.value;
+  if (!selected.length) {
+    ElMessage.warning("请至少保留一个变体");
+    return;
+  }
   creatingSku.value = row.sku;
+  selectionDialogLoading.value = true;
   try {
-    const result = await apiClient.post(`/api/listing/collector-box/${encodeURIComponent(row.sku)}/create-selection`, {});
-    ElMessage.success("已生成选品池草稿");
+    const result = await apiClient.post(`/api/listing/collector-box/${encodeURIComponent(row.sku)}/create-selection`, {
+      variantCount: selected.length,
+      variantSelections: selected.map((item) => ({
+        key: item.key,
+        sku: item.sku,
+        selected: true
+      }))
+    });
+    ElMessage.success(`已生成 ${result?.created_count || selected.length || 1} 个选品池草稿`);
+    selectionDialogVisible.value = false;
     await loadRows();
     if (result?.product?.id || result?.id) {
       router.push({
@@ -424,6 +522,7 @@ async function createSelection(row) {
     ElMessage.error(error.message || "加入选品池失败");
   } finally {
     creatingSku.value = "";
+    selectionDialogLoading.value = false;
   }
 }
 
@@ -496,7 +595,7 @@ onMounted(() => {
   ensureCollectorWorkbenchRouteId();
   const restoredDetailSku = restoreCollectorWorkbenchState();
   if (route.query.sku) state.filters.query = String(route.query.sku);
-  loadRows().then(async () => {
+  loadRows({ summaryMode: "skip" }).then(async () => {
     const nextSku = String(route.query.sku || restoredDetailSku || "").trim();
     if (!nextSku || !detailVisible.value) return;
     const row = state.rows.find((item) => String(item?.sku || "").trim() === nextSku);
@@ -581,7 +680,7 @@ onMounted(() => {
         <el-table-column label="更新时间" width="150" align="center">
           <template #default="{ row }">{{ formatDateTime(row.updated_at || row.edited_at || row.collected_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="500" fixed="right" align="center">
+        <el-table-column label="操作" width="580" fixed="right" align="center">
           <template #default="{ row }">
             <div class="row-actions">
               <el-button
@@ -598,9 +697,18 @@ onMounted(() => {
                 type="success"
                 plain
                 :icon="MagicStick"
-                @click="openAiOptimize(row)"
+                @click="openAiWorkbench(row, 'optimization')"
               >
                 AI优化
+              </el-button>
+              <el-button
+                size="small"
+                type="success"
+                plain
+                :icon="MagicStick"
+                @click="openAiWorkbench(row, 'variant')"
+              >
+                AI裂变
               </el-button>
               <el-button size="small" plain @click="openDetail(row)">查看详情</el-button>
               <el-button size="small" plain @click="openOzon(row)">打开 Ozon</el-button>
@@ -610,7 +718,7 @@ onMounted(() => {
                 plain
                 :loading="creatingSku === row.sku"
                 :disabled="row.status === 'selection_created'"
-                @click="createSelection(row)"
+                @click="openSelectionDialog(row)"
               >
                 创建选品
               </el-button>
@@ -660,7 +768,7 @@ onMounted(() => {
                   type="warning"
                   :disabled="detail.status === 'selection_created'"
                   :loading="creatingSku === detail.sku"
-                  @click="createSelection(detail)"
+                  @click="openSelectionDialog(detail)"
                 >
                   创建选品
                 </el-button>
@@ -769,6 +877,55 @@ onMounted(() => {
         </template>
       </div>
     </el-drawer>
+
+    <el-dialog
+      v-model="selectionDialogVisible"
+      title="选择入池变体"
+      width="820px"
+      class="selection-variant-dialog"
+    >
+      <div class="selection-dialog-summary">
+        <strong>将裂变成 {{ selectionVariantCount }} 个选品草稿</strong>
+        <span>默认保留全部变体，每个草稿会带入对应变体的图片、尺寸、重量、俄语标题、标签、描述和可复用属性。</span>
+      </div>
+      <el-table
+        ref="selectionVariantTable"
+        :data="selectionVariantRows"
+        border
+        row-key="key"
+        class="selection-variant-table"
+        @selection-change="selectedSelectionVariants = $event"
+      >
+        <el-table-column type="selection" width="48" />
+        <el-table-column label="图片" width="88" align="center">
+          <template #default="{ row }">
+            <ProductImagePreview :src="row.image" size="square" />
+          </template>
+        </el-table-column>
+        <el-table-column label="变体" min-width="320">
+          <template #default="{ row }">
+            <div class="variant-preview-cell">
+              <strong>{{ row.title || row.sku || "未命名变体" }}</strong>
+              <span>{{ row.sku || "-" }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="价格" width="120" align="center">
+          <template #default="{ row }">{{ formatNumber(row.price, 2) }}</template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="selectionDialogVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="selectionDialogLoading"
+          :disabled="!selectedSelectionVariants.length"
+          @click="createSelection(selectionDialogRow)"
+        >
+          生成草稿
+        </el-button>
+      </template>
+    </el-dialog>
 
   </div>
 </template>
@@ -1011,6 +1168,39 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
+}
+
+.selection-dialog-summary {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 14px;
+  color: var(--el-text-color-secondary);
+}
+
+.selection-dialog-summary strong {
+  color: var(--el-text-color-primary);
+  font-size: 15px;
+}
+
+.selection-variant-table {
+  width: 100%;
+}
+
+.variant-preview-cell {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.variant-preview-cell strong,
+.variant-preview-cell span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.variant-preview-cell span {
+  color: var(--el-text-color-secondary);
 }
 
 .raw-collapse {
