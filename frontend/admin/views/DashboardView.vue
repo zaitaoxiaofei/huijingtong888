@@ -1788,6 +1788,7 @@ button {
 
 .month-core-grid {
   grid-template-columns: repeat(8, minmax(108px, 1fr));
+  grid-auto-rows: 82px;
   margin-bottom: 12px;
 }
 
@@ -1810,8 +1811,8 @@ button {
 }
 
 .today-core-grid .primary-metric {
-  min-height: 116px;
-  height: 116px;
+  min-height: 126px;
+  height: 126px;
 }
 
 .primary-metric::before {
@@ -1827,8 +1828,25 @@ button {
 
 .compact-month-grid .primary-metric {
   min-height: 82px;
+  height: 82px;
   padding: 9px 11px;
   box-shadow: 0 4px 14px rgba(15, 23, 42, 0.045) !important;
+}
+
+.compact-month-grid .month-ad-spend-card {
+  grid-row: span 2;
+  height: 174px;
+  min-height: 174px;
+  padding: 13px 14px;
+}
+
+.compact-month-grid .month-ad-spend-card strong {
+  margin-top: 18px;
+  font-size: 26px;
+}
+
+.compact-month-grid .month-ad-spend-card .metric-footer {
+  margin-top: 18px;
 }
 
 .compact-month-grid .metric-label {
