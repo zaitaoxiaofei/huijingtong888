@@ -27,8 +27,36 @@ test("listing automation SKU image library keeps tab sources separated", () => {
   assert.match(listingAutomationViewSource, /generatedDetailImages/);
 });
 
+test("listing automation SKU image editor saves only the visible selected image list", () => {
+  const openEditorStart = listingAutomationViewSource.indexOf("function openVariantImageEditor(row)");
+  const confirmEditorStart = listingAutomationViewSource.indexOf("function confirmVariantImageEditor()");
+  const syncDraftStart = listingAutomationViewSource.indexOf("function syncDraftImagesFromVariantImages()");
+  assert.ok(openEditorStart > 0);
+  assert.ok(confirmEditorStart > openEditorStart);
+  assert.ok(syncDraftStart > confirmEditorStart);
+  const imageEditorSource = listingAutomationViewSource.slice(openEditorStart, syncDraftStart);
+  assert.match(imageEditorSource, /function isVariantImageSelected\(image\)[\s\S]*ensureVariantOwnImages\(variantImageEditor\.row\)\.some/);
+  assert.match(imageEditorSource, /function toggleVariantImageSelection\(image\)[\s\S]*images\.push\(\{/);
+  assert.match(imageEditorSource, /variantImageEditor\.row\.images = dedupeImages\(ensureVariantOwnImages\(variantImageEditor\.row\)\)/);
+  assert.doesNotMatch(imageEditorSource, /ownUrls/);
+  assert.doesNotMatch(imageEditorSource, /finalUrls/);
+  assert.doesNotMatch(imageEditorSource, /\[\.\.\.ownUrls,\s*\.\.\.variantImageEditor\.selectedUrls\]/);
+  assert.match(listingAutomationViewSource, /@click="addCurrentLibraryImagesToVariant"/);
+  assert.match(listingAutomationViewSource, /@click="clearVariantImages"/);
+});
+
+test("listing automation SKU image editor keeps large image libraries scrollable", () => {
+  assert.match(listingAutomationViewSource, /variant-image-workbench[\s\S]*height: calc\(100vh - 190px\)/);
+  assert.match(listingAutomationViewSource, /variant-image-panel[\s\S]*overflow-y: auto/);
+  assert.match(listingAutomationViewSource, /variant-image-library[\s\S]*overflow-y: auto/);
+  assert.match(listingAutomationViewSource, /library-tabs[\s\S]*position: sticky/);
+  assert.match(listingAutomationViewSource, /library-grid[\s\S]*repeat\(auto-fill, minmax\(118px, 1fr\)\)/);
+});
+
 test("listing draft save does not overwrite manually selected SKU images from template", () => {
+  assert.match(listingAutomationViewSource, /const draftImagesManuallyEdited = ref\(false\)/);
   assert.match(listingAutomationViewSource, /function syncDraftImagesFromTemplateIfEmpty\(\)/);
+  assert.match(listingAutomationViewSource, /if \(draftImagesManuallyEdited\.value\) return/);
   assert.match(listingAutomationViewSource, /if \(draftForm\.source_images\.length\) return/);
   const createDraftStart = listingAutomationViewSource.indexOf("async function createDraft()");
   const saveCurrentStart = listingAutomationViewSource.indexOf("async function saveCurrentToDraft()");
@@ -49,6 +77,14 @@ test("listing draft edit updates existing draft and syncs SKU image selections",
   assert.match(listingAutomationViewSource, /function syncDraftImagesFromVariantImages\(\)/);
   assert.match(listingAutomationViewSource, /syncDraftImagesFromVariantImages\(\);\s*\n\s*variantImageEditor\.visible = false/);
   assert.match(listingAutomationViewSource, /draftForm\.source_images = sourceImages/);
+  assert.match(listingAutomationViewSource, /draftImagesManuallyEdited\.value = true/);
+  assert.match(listingAutomationViewSource, /function markVariantImagesEdited\(row\)/);
+  assert.match(listingAutomationViewSource, /row\.images_manually_edited = true/);
+  assert.match(listingAutomationViewSource, /const hasEditedVariantImages = templateEditor\.variants\.some/);
+  assert.match(listingAutomationViewSource, /function syncEditorImagesFromSavedDraft\(draft = \{\}\)/);
+  assert.match(listingAutomationViewSource, /syncEditorImagesFromSavedDraft\(created\)/);
+  assert.match(listingAutomationViewSource, /function syncVariantImageLink\(image\)[\s\S]*syncDraftImagesFromVariantImages\(\);/);
+  assert.match(listingAutomationViewSource, /function removeVariantImage\(index\)[\s\S]*syncDraftImagesFromVariantImages\(\);/);
   assert.match(listingAutomationViewSource, /const currentDraftId = Number\(state\.selectedDraftId \|\| 0\)/);
   assert.match(listingAutomationViewSource, /apiClient\.put\(`\/api\/listing\/drafts\/\$\{currentDraftId\}`,\s*draftPayload\)/);
   assert.match(listingAutomationViewSource, /apiClient\.post\("\/api\/listing\/drafts",\s*draftPayload\)/);

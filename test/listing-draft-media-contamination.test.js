@@ -35,3 +35,10 @@ test("draft save paths drop duplicated user facts images while preserving clean 
   assert.match(source, /sanitizeDraftManualFactsMedia\(objectValue\(payload\.manual_facts \|\| payload\.manualFacts\), sourceImages, \{ dropImages: true \}\)/);
   assert.match(source, /sanitizeDraftManualFactsMedia\(\{\s*[\s\S]*normalizedTemplate\.editable_payload[\s\S]*\}, payload\.source_images, \{ forceImages: true \}\)/);
 });
+
+test("manually edited draft variant images do not fall back to template images", () => {
+  assert.match(source, /const variantImagesEdited = Boolean\(variant\?\.images_manually_edited \|\| variant\?\.image_edit_intent === "manual"\)/);
+  assert.match(source, /const rawVariantImages = variantImagesEdited \? \(variant\.images \|\| \[\]\)/);
+  assert.match(source, /variantImagesEdited \? variantImages : \(variantImages\.length \? variantImages : cleanImages\)/);
+  assert.match(source, /images: normalizeImages\(\(item\.images_manually_edited \|\| item\.image_edit_intent === "manual"\) \? \(item\.images \|\| \[\]\) : \(item\.images \|\| finalImages\)\)/);
+});

@@ -468,6 +468,34 @@ function normalizeSourceImageList(value) {
   return text.split(/\r?\n|\s*\|\|\s*|[,，]+/).map((item) => item.trim()).filter(Boolean);
 }
 
+function imageListFromPayloadKeys(payloads = [], keys = []) {
+  for (const payload of payloads) {
+    for (const key of keys) {
+      const images = normalizeSourceImageList(payload?.[key]);
+      if (images.length) return images;
+    }
+  }
+  return [];
+}
+
+function sourceAssetImages(payloads = []) {
+  return imageListFromPayloadKeys(payloads, [
+    "source_images",
+    "sourceImages",
+    "user_images",
+    "userImages",
+    "uploaded_images",
+    "uploadedImages",
+    "imported_images",
+    "importedImages"
+  ]);
+}
+
+function templateSnapshotImagesFromSource(product = {}) {
+  const payloads = sourcePayloads(product);
+  return imageListFromPayloadKeys(payloads, ["images", "images_json", "image_urls", "imageUrls"]);
+}
+
 function previewUrlForSourceImage(url) {
   const text = String(url || "").trim();
   if (!text || /^data:/i.test(text) || /^blob:/i.test(text)) return text;
@@ -732,20 +760,33 @@ async function applySelectionProduct(product) {
 
 async function applyCollectorBoxProduct(product) {
   if (!product?.sku) return;
-  const categoryMeta = categoryMetaFromPayloads(sourcePayloads(product));
+  const payloads = sourcePayloads(product);
+  const categoryMeta = categoryMetaFromPayloads(payloads);
   const raw = product.rawPayload || product.raw_payload || {};
   const payload = product.payload || {};
   const edit = product.editPayload || product.edit_payload || {};
+  const editVariantImages = normalizeSourceImageList(
+    (Array.isArray(edit.variants || edit.editorVariants || edit.editor_variants)
+      ? (edit.variants || edit.editorVariants || edit.editor_variants)
+      : []).flatMap((variant) => variant?.images || variant?.image_urls || variant?.imageUrls || [])
+  );
   const images = [...new Set(normalizeSourceImageList([
+    sourceAssetImages(payloads),
+    editVariantImages,
+    edit.images,
+    edit.image_urls,
+    edit.imageUrls,
+    templateSnapshotImagesFromSource(product),
+    raw.images,
+    raw.image_urls,
+    raw.imageUrls,
+    payload.images,
     product.image_url,
     product.primary_image,
     raw.productImage,
     raw.mainImage,
     raw.primary_image,
-    raw.image_url,
-    raw.images,
-    payload.images,
-    edit.images
+    raw.image_url
   ]))];
   const mainImage = images[0] || "";
   const detailImages = images.filter((url) => url !== mainImage);
@@ -789,8 +830,11 @@ async function applyPublishRecord(record) {
   if (!record?.id) return;
   const request = record.request || {};
   const item = (Array.isArray(request.items) ? request.items[0] : null) || {};
-  const categoryMeta = categoryMetaFromPayloads([...sourcePayloads(record), ...sourcePayloads(item)]);
+  const payloads = [...sourcePayloads(record), ...sourcePayloads(item)];
+  const categoryMeta = categoryMetaFromPayloads(payloads);
   const images = prioritizeSourceImages([...new Set(normalizeSourceImageList([
+    sourceAssetImages(payloads),
+    templateSnapshotImagesFromSource(record),
     record.primary_image,
     record.images,
     item.primary_image,

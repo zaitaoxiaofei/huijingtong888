@@ -32,6 +32,15 @@ function sendStaticNotFound(res, cleanPath) {
   res.end(body);
 }
 
+function findAiWorkbenchProxyAsset(publicDir, cleanPath) {
+  if (!/^\/vue-apps\/assets\/AiOptimizationWorkbenchV2-[^/]+\.(?:js|css)$/i.test(cleanPath)) return "";
+  const fileName = path.posix.basename(cleanPath);
+  const proxyPath = path.join(publicDir, "ai-workbench-proxy", "assets", fileName);
+  if (!proxyPath.startsWith(publicDir)) return "";
+  if (!fs.existsSync(proxyPath) || fs.statSync(proxyPath).isDirectory()) return "";
+  return proxyPath;
+}
+
 export function createStaticHandler(publicDir, options = {}) {
   const extraRoots = Array.isArray(options.extraRoots) ? options.extraRoots.map((root) => path.resolve(root)) : [];
   const extraRouteRoots = Array.isArray(options.extraRouteRoots) ? options.extraRouteRoots : [];
@@ -119,6 +128,11 @@ export function createStaticHandler(publicDir, options = {}) {
 
     if (fs.existsSync(filePath) && !fs.statSync(filePath).isDirectory()) {
       return sendFile(filePath, cleanPath, req, res);
+    }
+
+    const aiWorkbenchProxyAsset = findAiWorkbenchProxyAsset(publicDir, cleanPath);
+    if (aiWorkbenchProxyAsset) {
+      return sendFile(aiWorkbenchProxyAsset, cleanPath, req, res);
     }
 
     for (const routeRoot of extraRouteRoots) {

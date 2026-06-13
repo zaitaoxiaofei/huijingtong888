@@ -243,6 +243,36 @@ function payloadImages(payloads, keys = []) {
   return [];
 }
 
+function sourceAssetImages(payloads = []) {
+  return payloadImages(payloads, [
+    "source_images",
+    "sourceImages",
+    "user_images",
+    "userImages",
+    "uploaded_images",
+    "uploadedImages",
+    "imported_images",
+    "importedImages"
+  ]);
+}
+
+function editableAssetPayloads(row = {}) {
+  return [
+    parseMaybeJson(row.editPayload),
+    parseMaybeJson(row.edit_payload),
+    parseMaybeJson(row.editablePayload),
+    parseMaybeJson(row.editable_payload)
+  ].filter((item) => item && typeof item === "object");
+}
+
+function editableVariantAssetImages(row = {}) {
+  return editableAssetPayloads(row)
+    .flatMap((payload) => Array.isArray(payload.variants || payload.editorVariants || payload.editor_variants)
+      ? (payload.variants || payload.editorVariants || payload.editor_variants)
+      : [])
+    .flatMap((variant) => normalizeImageList(variant?.images || variant?.image_urls || variant?.imageUrls || []));
+}
+
 function payloadAttributeValue(payloads = [], namePatterns = []) {
   const patterns = namePatterns.map((item) => item instanceof RegExp ? item : new RegExp(String(item), "i"));
   for (const payload of payloads) {
@@ -464,8 +494,23 @@ function normalizeProduct(row = {}, source = "collector", index = 0) {
     || payloadAttributeValue(payloads, [/品牌|brand|марка/i])
     || inferBrand(`${name} ${model} ${rawTags}`)
     || "";
-  const imageList = payloadImages(payloads, ["image_url", "main_image_url", "primary_image", "cover_image", "cover", "images", "image_urls", "imageUrls", "images_json", "source_images", "media_assets"]);
-  const allImages = payloadImages(payloads, ["detail_image_urls", "detailImageUrls", "detail_images", "detailImages", "rich_content_images", "images", "image_urls", "imageUrls", "images_json", "source_images", "media_assets"]);
+  const userAssetImages = sourceAssetImages(payloads);
+  const editedVariantAssetImages = editableVariantAssetImages(row);
+  const editedAssetImages = payloadImages(editableAssetPayloads(row), ["images", "image_urls", "imageUrls", "images_json", "media_assets"]);
+  const imageList = userAssetImages.length
+    ? userAssetImages
+    : editedVariantAssetImages.length
+      ? editedVariantAssetImages
+    : editedAssetImages.length
+      ? editedAssetImages
+    : payloadImages(payloads, ["image_url", "main_image_url", "primary_image", "cover_image", "cover", "images", "image_urls", "imageUrls", "images_json", "media_assets"]);
+  const allImages = userAssetImages.length
+    ? userAssetImages
+    : editedVariantAssetImages.length
+      ? editedVariantAssetImages
+    : editedAssetImages.length
+      ? editedAssetImages
+    : payloadImages(payloads, ["detail_image_urls", "detailImageUrls", "detail_images", "detailImages", "rich_content_images", "images", "image_urls", "imageUrls", "images_json", "media_assets"]);
   const detailImages = allImages.filter((image, imageIndex) => imageIndex > 0 || image !== imageList[0]);
   const tags = splitTags(rawTags).length ? splitTags(rawTags) : [brand, model, inferCategory(row)].filter(Boolean);
   const material = firstFilled(
@@ -677,8 +722,17 @@ async function hydrateImportProduct(product, index) {
       return normalizeProduct({ ...product.raw, ...detail }, "collector", index);
     }
     if (product.source === "draft" && product.raw?.template_id) {
-      const template = await apiClient.get(`/api/listing/templates/${encodeURIComponent(product.raw.template_id)}`, { noCache: true });
-      return normalizeProduct({ ...product.raw, template_snapshot: template }, "draft", index);
+      const [draftDetail, template] = await Promise.all([
+        product.sourceId
+          ? apiClient.get(`/api/listing/drafts/${encodeURIComponent(product.sourceId)}`, { noCache: true }).catch(() => null)
+          : Promise.resolve(null),
+        apiClient.get(`/api/listing/templates/${encodeURIComponent(product.raw.template_id)}`, { noCache: true }).catch(() => null)
+      ]);
+      return normalizeProduct({
+        ...product.raw,
+        ...(draftDetail || {}),
+        template_snapshot: draftDetail?.template_snapshot || draftDetail?.template || template
+      }, "draft", index);
     }
     if (product.source === "online" && product.sourceId) {
       const draft = await apiClient.get(`/api/online-products/${encodeURIComponent(product.sourceId)}/edit-draft`, { noCache: true });

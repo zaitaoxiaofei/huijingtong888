@@ -17,3 +17,13 @@ test("admin shell links vendor CSS before mounting Vue", () => {
   assert.match(shell, /adminEntry\.imports \|\| \[\]\)\s*\n\s*\.flatMap\(\(key\) => manifest\[key\]\?\.css \|\| \[\]\)/);
   assert.match(shell, /const styleTags = \[\.\.\.new Set\(styleFiles\)\]/);
 });
+
+test("admin shell keeps watching for Vue mount before showing the startup fallback", () => {
+  const shell = readFileSync(new URL("../scripts/generate-admin-shell.mjs", import.meta.url), "utf8");
+
+  assert.match(shell, /function hideFallbackWhenAppMounted\(\)/);
+  assert.match(shell, /fallbackWatchTimer = window\.setInterval\(hideFallbackWhenAppMounted, 250\)/);
+  assert.match(shell, /window\.clearInterval\(fallbackWatchTimer\)/);
+  assert.match(shell, /window\.setTimeout\(function \(\) \{\s*window\.clearInterval\(fallbackWatchTimer\);\s*\}, 10000\)/);
+  assert.match(shell, /body:has\(#adminApp > \*\) #adminStaticLoginFallback/);
+});

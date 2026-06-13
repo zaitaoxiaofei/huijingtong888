@@ -47,7 +47,7 @@ export async function generateImages(payload = {}) {
   const taskId = crypto.randomUUID();
   const ratio = normalizeRatio(payload.ratio);
   const imageCount = clampImageCount(payload.imageCount ?? payload.count);
-  const finalPrompt = String(payload.finalPrompt || payload.prompt || "").trim();
+  const finalPrompt = String(payload.finalPrompt || payload.prompt || buildImagePromptFallback(payload)).trim();
   if (!finalPrompt) {
     const error = new Error("finalPrompt 不能为空");
     error.status = 400;
@@ -85,6 +85,40 @@ export async function generateImages(payload = {}) {
     publicError.status = error.status || 502;
     throw publicError;
   }
+}
+
+function buildImagePromptFallback(payload = {}) {
+  const row = payload.row || payload.product || payload.source || {};
+  const facts = [
+    payload.title,
+    payload.productName,
+    payload.product_name,
+    payload.variantTarget,
+    payload.variant_target,
+    payload.categoryName,
+    payload.category_name,
+    payload.description,
+    payload.summary,
+    payload.material,
+    payload.color,
+    row?.title,
+    row?.name,
+    row?.productName,
+    row?.product_name,
+    row?.variantTarget,
+    row?.variant_target,
+    row?.description,
+    row?.material,
+    row?.color
+  ].map((item) => String(item || "").trim()).filter(Boolean);
+  const sourceFacts = Array.from(new Set(facts)).join(", ");
+  if (!sourceFacts) return "";
+  return [
+    "Create a clean ecommerce product image for the exact source product.",
+    "Keep the original product identity, material, color, shape, quantity, and compatibility facts.",
+    "Do not add unrelated vehicle models, brand logos, platform logos, watermarks, certifications, or extra accessories.",
+    `Source product facts: ${sourceFacts}`
+  ].join("\n");
 }
 
 async function generateImageEdits({ taskId, finalPrompt, ratio, imageCount, sourceImage }) {
@@ -143,7 +177,7 @@ function parseDataImageUrl(value) {
 
 async function fetchSourceImage(source) {
   const url = normalizeFetchableSourceUrl(source);
-  const response = await fetch(url, { signal: AbortSignal.timeout(AI_SOURCE_IMAGE_FETCH_TIMEOUT_MS) });
+  const response = await fetchSourceImageResponse(url);
   if (!response.ok) {
     const error = new Error(`参考图读取失败，HTTP ${response.status}`);
     error.status = response.status >= 400 && response.status < 500 ? 400 : 502;
@@ -156,6 +190,34 @@ async function fetchSourceImage(source) {
     filename: `reference.${extensionForContentType(contentType)}`,
     source
   };
+}
+
+async function fetchSourceImageResponse(url) {
+  const response = await fetch(url, {
+    headers: sourceImageFetchHeaders(url),
+    signal: AbortSignal.timeout(AI_SOURCE_IMAGE_FETCH_TIMEOUT_MS)
+  });
+  if (response.ok || ![401, 403, 404].includes(response.status)) return response;
+  return fetch(url, {
+    headers: sourceImageFetchHeaders(url, { retry: true }),
+    signal: AbortSignal.timeout(AI_SOURCE_IMAGE_FETCH_TIMEOUT_MS)
+  });
+}
+
+function sourceImageFetchHeaders(url, { retry = false } = {}) {
+  const headers = {
+    Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+  };
+  if (!retry) return headers;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    headers.Referer = host.includes("ozon") ? "https://www.ozon.ru/" : `${parsed.origin}/`;
+    headers.Origin = host.includes("ozon") ? "https://www.ozon.ru" : parsed.origin;
+  } catch {}
+  return headers;
 }
 
 function normalizeFetchableSourceUrl(source) {

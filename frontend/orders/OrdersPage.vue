@@ -185,6 +185,7 @@ const inventoryDialog = reactive({
   mode: "bind",
   submitting: false,
   orderId: null,
+  orderItemId: null,
   sku: "",
   onlineProductId: null,
   currentProductId: null,
@@ -736,6 +737,7 @@ function resolveOrderInventoryContext(orderId, sku) {
   const baseWeightG = Number(displayItem?.weight_g || row.package_weight_g || 0) || "";
   return {
     sku: itemSku,
+    orderItemId: Number(displayItem?.orderItemId || 0) || null,
     onlineProductId,
     currentProductId,
     currentProductName,
@@ -812,6 +814,7 @@ function resetInventoryDialog() {
   inventoryDialog.mode = "bind";
   inventoryDialog.submitting = false;
   inventoryDialog.orderId = null;
+  inventoryDialog.orderItemId = null;
   inventoryDialog.sku = "";
   inventoryDialog.onlineProductId = null;
   inventoryDialog.currentProductId = null;
@@ -1264,6 +1267,7 @@ async function handleOpenBindProductFromOrder(orderId, sku) {
   inventoryDialog.mode = "bind";
   inventoryDialog.visible = true;
   inventoryDialog.orderId = Number(orderId);
+  inventoryDialog.orderItemId = context.orderItemId;
   inventoryDialog.sku = context.sku;
   inventoryDialog.onlineProductId = context.onlineProductId;
   inventoryDialog.currentProductId = context.currentProductId;
@@ -1287,6 +1291,7 @@ async function handleOpenCreateProductFromOrder(orderId, sku) {
   inventoryDialog.mode = "create";
   inventoryDialog.visible = true;
   inventoryDialog.orderId = Number(orderId);
+  inventoryDialog.orderItemId = context.orderItemId;
   inventoryDialog.sku = context.sku;
   inventoryDialog.onlineProductId = context.onlineProductId;
   inventoryDialog.currentProductId = context.currentProductId;
@@ -1350,6 +1355,8 @@ async function submitInventoryDialog() {
     if (inventoryDialog.mode === "bind") {
       await apiClient.post("/api/online-products/bind", {
         online_product_id: inventoryDialog.onlineProductId,
+        order_item_id: inventoryDialog.orderItemId,
+        ozon_sku: inventoryDialog.sku,
         product_id: Number(bindForm.productId),
         person_id: bindForm.personId ? Number(bindForm.personId) : null
       });
@@ -1357,6 +1364,8 @@ async function submitInventoryDialog() {
     } else {
       await apiClient.post("/api/online-products/create-product", {
         online_product_id: inventoryDialog.onlineProductId,
+        order_item_id: inventoryDialog.orderItemId,
+        ozon_sku: inventoryDialog.sku,
         person_id: createForm.personId ? Number(createForm.personId) : null,
         owner_person_id: createForm.personId ? Number(createForm.personId) : null,
         name: createForm.name || inventoryDialog.itemName,

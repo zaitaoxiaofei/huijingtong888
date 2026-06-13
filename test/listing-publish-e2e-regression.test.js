@@ -132,15 +132,15 @@ test("publish-record retry candidate preserves retry offer and strips unsafe pla
   assert.deepEqual(compactAttributeValues(attributeById(item, 10096).values), [{ dictionary_value_id: 61574, value: "black" }]);
 });
 
-test("publish validation blocks local-only media before Ozon submit", async () => {
+test("publish validation defers local-only media blocking until final shop payload", async () => {
   const candidate = clone(fixtures.aiVariantCandidate);
   candidate.images[0].url = "/uploads/listing-media/local-preview.jpg";
   candidate.editable_payload.variants[0].images[0].url = "http://localhost:8788/uploads/listing-media/local-preview.jpg";
 
   const result = await validateListingTemplatePublish(candidate);
 
-  assert.equal(result.ok, false);
-  assert.match(result.errors.join("\n"), /公网|Ozon|uploads|URL/i);
+  assert.equal(result.ok, true, result.errors?.join("\n"));
+  assert.doesNotMatch(result.errors.join("\n"), /uploads|Local|localhost/i);
 });
 
 test("publish validation blocks missing Ozon category identifiers", async () => {

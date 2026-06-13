@@ -28,6 +28,7 @@ const pdfImportSubmitting = ref(false);
 const pdfImportFileName = ref("");
 const pdfImportBase64 = ref("");
 const previewFrameRef = ref(null);
+const fbpTableWrapRef = ref(null);
 const procurementCreateVisible = ref(false);
 const procurementCreateProductId = ref(null);
 const fbpTransferVisible = ref(false);
@@ -307,6 +308,17 @@ function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
   loadPageData();
+}
+
+function handleFbpTableWheel(event) {
+  const wrap = fbpTableWrapRef.value;
+  if (!wrap || !event?.deltaY) return;
+  const before = wrap.scrollTop;
+  wrap.scrollTop += event.deltaY;
+  if (wrap.scrollTop !== before) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
 }
 
 function openProcurement(row) {
@@ -938,7 +950,7 @@ onMounted(async () => {
       </template>
     </InventoryPageToolbar>
 
-    <div class="inventory-table-wrap">
+    <div ref="fbpTableWrapRef" class="inventory-table-wrap" @wheel.capture="handleFbpTableWheel">
       <el-table v-loading="loading" :data="state.rows" stripe border class="erp-data-table">
         <el-table-column label="店铺" width="130" fixed="left">
           <template #default="{ row }">
@@ -1437,25 +1449,31 @@ onMounted(async () => {
 
 <style scoped>
 .fbp-opportunity-page {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 14px;
+  height: 100%;
+  overflow: hidden;
 }
 
 .fbp-opportunity-page :deep(.inventory-toolbar-sticky) {
-  position: static;
+  position: relative;
+  flex: 0 0 auto;
+  z-index: 2;
 }
 
 .fbp-opportunity-page .inventory-table-wrap {
-  flex: none;
+  flex: 1 1 auto;
   min-height: 320px;
+  overflow: hidden;
 }
 
 .fbp-opportunity-page :deep(.erp-data-table) {
-  height: auto;
+  height: 100%;
 }
 
 .fbp-opportunity-page :deep(.erp-data-table .el-table__body-wrapper) {
-  height: auto;
+  height: calc(100% - var(--el-table-header-height, 44px));
 }
 
 .fbp-toolbar-summary {

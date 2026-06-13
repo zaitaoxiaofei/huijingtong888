@@ -7,6 +7,8 @@ const publishRecordsSource = readFileSync(new URL("../frontend/admin/views/listi
 const collectorBoxSource = readFileSync(new URL("../frontend/admin/views/listing/CollectorBoxView.vue", import.meta.url), "utf8");
 const listingAutomationSource = readFileSync(new URL("../frontend/admin/views/listing/ListingAutomationView.vue", import.meta.url), "utf8");
 const aiOptimizationWorkbenchSource = readFileSync(new URL("../frontend/admin/views/listing/AiOptimizationWorkbenchV2.vue", import.meta.url), "utf8");
+const assetVariantCenterSource = readFileSync(new URL("../frontend/admin/views/listing/AssetVariantCenter.vue", import.meta.url), "utf8");
+const aiWorkbenchProxySource = readFileSync(new URL("../public/ai-workbench-proxy/assets/AiOptimizationWorkbenchV2-BDMw-MxS-codex-empty-boundary-20260613110500.js", import.meta.url), "utf8");
 const listingAutomationRouteSource = readFileSync(new URL("../src/server/routes/listingAutomation.js", import.meta.url), "utf8");
 const listingAutomationServiceSource = readFileSync(new URL("../src/services/listing-automation.js", import.meta.url), "utf8");
 const mysqlRuntimeServicesSource = readFileSync(new URL("../src/services/mysql-runtime-services.js", import.meta.url), "utf8");
@@ -148,12 +150,29 @@ test("draft box can batch publish drafts with multi-shop text variant policy", (
   assert.match(publishRecordsSource, /batchListing = reactive\(\{[\s\S]*textVariantEnabled/);
   assert.match(publishRecordsSource, /buildBatchTextVariantPolicy/);
   assert.match(publishRecordsSource, /selectedBatchTextVariantShops/);
-  assert.match(publishRecordsSource, /批量提交 Ozon/);
+  assert.match(publishRecordsSource, /批量上架草稿/);
+  assert.match(publishRecordsSource, /批量上架/);
+  assert.doesNotMatch(publishRecordsSource, /生成等待上架副本/);
+  assert.doesNotMatch(publishRecordsSource, /打开上架页<\/el-button>/);
+  assert.match(publishRecordsSource, /router\.push\(\{ name: "listing-publish-records", query: \{ status: "processing" \} \}\)/);
   assert.match(publishRecordsSource, /\/api\/listing\/drafts\/batch-publish/);
   assert.match(listingAutomationRouteSource, /"POST \/api\/listing\/drafts\/batch-publish"/);
   assert.match(listingAutomationRouteSource, /services\.publishListingDraftsToOzon/);
   assert.match(listingAutomationServiceSource, /export async function publishListingDraftsToOzon/);
+  assert.match(listingAutomationServiceSource, /backgroundListingPublishTasks/);
+  assert.match(listingAutomationServiceSource, /runBackgroundListingPublish/);
+  assert.match(listingAutomationServiceSource, /initialStatus: "processing"/);
+  assert.match(listingAutomationServiceSource, /draftId,/);
+  assert.match(listingAutomationServiceSource, /template_payload_json LONGTEXT NULL/);
+  assert.match(listingAutomationServiceSource, /template_payload: templatePayload && Object\.keys\(templatePayload\)\.length \? templatePayload : null/);
+  assert.match(listingAutomationServiceSource, /if \(draft\.template_payload\)/);
+  assert.match(listingAutomationServiceSource, /normalizeTemplatePayload\(payload\.template_payload\)/);
   assert.match(listingAutomationServiceSource, /buildPublishTemplateFromListingDraft/);
+  assert.match(listingAutomationServiceSource, /const userFacts = objectValue\(manualFacts\.user_facts/);
+  assert.match(listingAutomationServiceSource, /userFacts\.price/);
+  assert.match(listingAutomationServiceSource, /rich_content_json: richContentJson/);
+  assert.match(listingAutomationServiceSource, /userFacts\.variants \|\| manualFacts\.variants/);
+  assert.match(listingAutomationServiceSource, /normalizeAttributeValuesForOzon\(item\)\.length/);
   assert.match(listingAutomationServiceSource, /text_variant_policy/);
   assert.match(mysqlRuntimeServicesSource, /publishListingDraftsToOzon/);
 });
@@ -215,32 +234,39 @@ test("listing automation draft save persists edited collector templates first", 
   assert.match(listingAutomationSource, /controller\.abort\(\), 18000/);
   assert.match(listingAutomationSource, /采集箱编辑状态同步超时，请稍后重试保存/);
   assert.match(listingAutomationSource, /function templatePayloadToCollectorBoxEditPayload/);
-  assert.match(listingAutomationSource, /await saveCurrentTemplateSnapshot\(\);[\s\S]*applyTemplateToDraft\(\);[\s\S]*apiClient\.post\("\/api\/listing\/drafts"/);
+  assert.match(listingAutomationSource, /function buildDraftTemplatePayloadForSave\(\)/);
+  assert.match(listingAutomationSource, /template_payload: templatePayload/);
+  assert.match(listingAutomationSource, /if \(draft\.template_payload \|\| draft\.templatePayload\)/);
+  assert.match(listingAutomationSource, /await saveCurrentTemplateSnapshot\(\);[\s\S]*syncDraftImagesFromTemplateIfEmpty\(\);[\s\S]*apiClient\.post\("\/api\/listing\/drafts"/);
   assert.match(listingAutomationRouteSource, /services\.saveCollectorBoxEdit/);
   assert.match(mysqlRuntimeServicesSource, /saveCollectorBoxEdit/);
 });
 
 test("AI variant import prefers edited collector images over original collected image", () => {
-  const sourcePayloads = aiOptimizationWorkbenchSource.match(/function sourcePayloads\(row = \{\}, options = \{\}\) \{[\s\S]*?\n\}/)?.[0] || "";
+  const sourcePayloads = assetVariantCenterSource.match(/function sourcePayloads\(row = \{\}\) \{[\s\S]*?\n\}/)?.[0] || "";
   assert.match(sourcePayloads, /const edited = \[/);
   assert.ok(sourcePayloads.indexOf("parseMaybeJson(row.editPayload)") < sourcePayloads.indexOf("row,"), "edited payloads must be inspected before the raw collector row");
-  assert.match(aiOptimizationWorkbenchSource, /const imageList = payloadImages\(payloads, \["image_url"[\s\S]*?"images"/);
-  assert.match(aiOptimizationWorkbenchSource, /async function attachCollectorTemplateSnapshot/);
-  assert.match(aiOptimizationWorkbenchSource, /payload\.listing_template_id/);
-  assert.match(aiOptimizationWorkbenchSource, /apiClient\.get\(`\/api\/listing\/templates\/\$\{encodeURIComponent\(templateId\)\}`/);
-  assert.match(aiOptimizationWorkbenchSource, /const payload = await attachCollectorTemplateSnapshot\(\{ \.\.\.product\.raw, \.\.\.detail \}\)/);
-  assert.match(aiOptimizationWorkbenchSource, /descriptor\.source === "collector"[\s\S]*attachCollectorTemplateSnapshot\(payload \|\| \{\}\)/);
+  assert.match(assetVariantCenterSource, /function editableAssetPayloads\(row = \{\}\)/);
+  assert.match(assetVariantCenterSource, /function editableVariantAssetImages\(row = \{\}\)/);
+  assert.match(assetVariantCenterSource, /const userAssetImages = sourceAssetImages\(payloads\)/);
+  assert.match(assetVariantCenterSource, /const editedVariantAssetImages = editableVariantAssetImages\(row\)/);
+  assert.match(assetVariantCenterSource, /const editedAssetImages = payloadImages\(editableAssetPayloads\(row\), \["images"/);
+  assert.match(assetVariantCenterSource, /const imageList = userAssetImages\.length\s*\?\s*userAssetImages\s*:\s*editedVariantAssetImages\.length\s*\?\s*editedVariantAssetImages\s*:\s*editedAssetImages\.length/s);
+  assert.match(aiWorkbenchProxySource, /sourceImages=rs\(r,\[`source_images`,`sourceImages`,`user_images`,`userImages`,`uploaded_images`,`uploadedImages`,`imported_images`,`importedImages`\]\)/);
+  assert.match(aiWorkbenchProxySource, /variantImages=.*?flatMap.*?imageUrls/s);
+  assert.match(aiWorkbenchProxySource, /p=sourceImages\.length\?sourceImages:variantImages\.length\?variantImages:rs\(r,\[`image_url`,`main_image_url`,`primary_image`,`cover_image`,`cover`,`images`/);
   assert.match(listingAutomationServiceSource, /function collectorBoxDisplayImageUrl/);
   assert.match(listingAutomationServiceSource, /const editedImages = normalizeImages\(editPayload\.images/);
+  assert.match(listingAutomationServiceSource, /userAssetImages,[\s\S]*editedVariantImages,[\s\S]*editedImages,[\s\S]*templateImages/);
+  assert.match(listingAutomationSource, /source_images: dedupeImages\(sourceImages\)/);
   assert.match(listingAutomationServiceSource, /image_url: imageUrl/);
   assert.match(listingAutomationServiceSource, /original_image_url: String\(row\.image_url \|\| ""\)/);
   assert.match(listingAutomationServiceSource, /listing_template_id, edit_payload_json, edited_at/);
 });
 
 test("AI variant import from publish records prefers the published request image", () => {
-  const sourcePayloads = aiOptimizationWorkbenchSource.match(/function sourcePayloads\(row = \{\}, options = \{\}\) \{[\s\S]*?\n\}/)?.[0] || "";
-  assert.match(sourcePayloads, /const base = options\.preferRaw \? \[\.\.\.raw, \.\.\.edited\] : \[\.\.\.edited, \.\.\.raw\]/);
-  assert.match(aiOptimizationWorkbenchSource, /sourcePayloads\(row, \{ preferRaw: source === "listing" \}\)/);
+  assert.match(aiWorkbenchProxySource, /\$o\(e,\{preferRaw:t===`listing`\}\)/);
+  assert.match(aiWorkbenchProxySource, /i=t\.preferRaw\?\[\.\.\.r,\.\.\.n\]:\[\.\.\.n,\.\.\.r\]/);
 });
 
 test("AI variant asset records are persisted server-side for later recovery", () => {

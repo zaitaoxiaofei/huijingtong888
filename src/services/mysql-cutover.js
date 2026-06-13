@@ -5540,12 +5540,15 @@ export async function bindOnlineProductMysql(body = {}) {
   if (!online) throw new Error("Online product not found");
 
   const product = await mysqlQueryOne("SELECT id FROM products WHERE id = ? AND active = 1", [productId]);
-  if (!product) throw new Error("Product not found");
+  if (!product) throw new Error(`Product not found: ${productId}`);
 
   const personId = await resolveExistingPersonId(body.person_id);
+  const bindSku = String(body.ozon_sku || online.ozon_sku || "").trim();
+  if (!bindSku) throw new Error("ozon_sku is required");
+  const orderItemId = Number(body.order_item_id || body.orderItemId || 0);
   const existingMapping = await mysqlQueryOne(
     "SELECT * FROM sku_mappings WHERE shop_id = ? AND ozon_sku = ?",
-    [Number(online.shop_id), String(online.ozon_sku || "")]
+    [Number(online.shop_id), bindSku]
   );
 
   await mysqlExecute("UPDATE online_products SET product_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [productId, onlineProductId]);
@@ -5571,7 +5574,7 @@ export async function bindOnlineProductMysql(body = {}) {
       productId,
       personId,
       onlineProductId,
-      String(online.ozon_sku || ""),
+      bindSku,
       String(online.offer_id || ""),
       String(online.name || "")
     ];
@@ -5581,7 +5584,7 @@ export async function bindOnlineProductMysql(body = {}) {
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `, payload);
     mappingId = Number(result.insertId);
-    const legacyExisting = db.prepare("SELECT id FROM sku_mappings WHERE shop_id = ? AND ozon_sku = ?").get(Number(online.shop_id), String(online.ozon_sku || ""));
+    const legacyExisting = db.prepare("SELECT id FROM sku_mappings WHERE shop_id = ? AND ozon_sku = ?").get(Number(online.shop_id), bindSku);
     if (legacyExisting) {
       db.prepare(`
         UPDATE sku_mappings
@@ -5595,6 +5598,24 @@ export async function bindOnlineProductMysql(body = {}) {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(mappingId, ...payload);
     }
+  }
+
+  if (orderItemId) {
+    const updateOrderItemPayload = [mappingId, orderItemId, bindSku, Number(online.shop_id)];
+    await mysqlExecute(`
+      UPDATE order_items
+      SET sku_mapping_id = ?
+      WHERE id = ?
+        AND TRIM(ozon_sku) = ?
+        AND order_id IN (SELECT id FROM orders WHERE shop_id = ?)
+    `, updateOrderItemPayload);
+    db.prepare(`
+      UPDATE order_items
+      SET sku_mapping_id = ?
+      WHERE id = ?
+        AND TRIM(ozon_sku) = ?
+        AND order_id IN (SELECT id FROM orders WHERE shop_id = ?)
+    `).run(...updateOrderItemPayload);
   }
 
   return { ok: true, mapping_id: mappingId, product_id: productId };
@@ -9258,15 +9279,22 @@ export async function createProductFromOnlineProductMysql(body = {}) {
   const onlineProductId = Number(body.online_product_id);
   const online = await mysqlQueryOne("SELECT * FROM online_products WHERE id = ?", [onlineProductId]);
   if (!online) throw new Error("Online product not found");
+  const bindSku = String(body.ozon_sku || online.ozon_sku || "").trim();
   const existingMapping = await mysqlQueryOne(`
-    SELECT sm.*, p.code, p.name
+    SELECT sm.*, p.id AS active_product_id, p.code, p.name
     FROM sku_mappings sm
-    JOIN products p ON p.id = sm.product_id
+    LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1
     WHERE sm.shop_id = ? AND sm.ozon_sku = ? AND sm.active = 1
     LIMIT 1
-  `, [online.shop_id, online.ozon_sku]);
-  if (existingMapping) {
-    await mysqlExecute("UPDATE online_products SET product_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [existingMapping.product_id, online.id]);
+  `, [online.shop_id, bindSku || online.ozon_sku]);
+  if (existingMapping?.id && existingMapping?.active_product_id) {
+    await bindOnlineProductMysql({
+      online_product_id: online.id,
+      order_item_id: body.order_item_id || body.orderItemId,
+      ozon_sku: bindSku,
+      product_id: existingMapping.product_id,
+      person_id: body.person_id || body.owner_person_id || existingMapping.person_id
+    });
     return {
       id: existingMapping.product_id,
       code: existingMapping.code,
@@ -9281,6 +9309,8 @@ export async function createProductFromOnlineProductMysql(body = {}) {
     if (product) {
       await bindOnlineProductMysql({
         online_product_id: online.id,
+        order_item_id: body.order_item_id || body.orderItemId,
+        ozon_sku: bindSku,
         product_id: product.id,
         person_id: body.person_id || body.owner_person_id
       });
@@ -9337,6 +9367,8 @@ export async function createProductFromOnlineProductMysql(body = {}) {
   });
   await bindOnlineProductMysql({
     online_product_id: online.id,
+    order_item_id: body.order_item_id || body.orderItemId,
+    ozon_sku: bindSku,
     product_id: product.id,
     person_id: body.person_id || body.owner_person_id
   });
@@ -14719,9 +14751,11 @@ function latestIsoDateTimeMysql(rows = [], key) {
   return latest ? new Date(latest).toISOString() : "";
 }
 
-async function dashboardAdSummaryMysql(dateKey) {
+async function dashboardAdSummaryMysql(fromDateKey, toDateKey = fromDateKey) {
+  const from = String(fromDateKey || toDateKey || todayDateKeyMysql()).slice(0, 10);
+  const to = String(toDateKey || from).slice(0, 10);
   try {
-    const dateFilter = profitOrderedAtUtcRangeMysql("o", dateKey, dateKey);
+    const dateFilter = profitOrderedAtUtcRangeMysql("o", from, to);
     const outcome = buildOrderOutcomeSql("o", "mysql");
     const effectiveBusinessSale = `(${outcome.effectiveSale} AND NOT ${outcome.afterDeliveryReturn})`;
     const rows = await mysqlQuery(`
@@ -14756,17 +14790,17 @@ async function dashboardAdSummaryMysql(dateKey) {
         JOIN (
           SELECT DISTINCT shop_id, ozon_sku
           FROM ozon_ad_sku_daily
-          WHERE date_key = ?
+          WHERE date_key >= ? AND date_key <= ?
             AND COALESCE(ozon_sku, '') != ''
         ) ad_sku ON ad_sku.shop_id = o.shop_id AND ad_sku.ozon_sku = oi.ozon_sku
         WHERE 1=1 ${dateFilter.whereSql}
           AND ${effectiveBusinessSale}
         GROUP BY o.shop_id
       ) local ON local.shop_id = ad.shop_id
-      WHERE ad.date_key = ?
+      WHERE ad.date_key >= ? AND ad.date_key <= ?
       GROUP BY ad.shop_id, s.name
       ORDER BY spend_cny DESC
-    `, [dateKey, ...dateFilter.params, dateKey]);
+    `, [from, to, ...dateFilter.params, from, to]);
     const row = rows.reduce((acc, item) => ({
       row_count: Number(acc.row_count || 0) + Number(item.row_count || 0),
       shop_count: Number(acc.shop_count || 0) + 1,
@@ -14784,7 +14818,13 @@ async function dashboardAdSummaryMysql(dateKey) {
       revenue_cny: Number(acc.revenue_cny || 0) + Number(item.revenue_cny || 0),
       local_revenue_cny: Number(acc.local_revenue_cny || 0) + Number(item.local_revenue_cny || 0)
     }), {});
-    if (!Number(row?.row_count || 0)) return emptyDashboardAdSummaryMysql(dateKey);
+    if (!Number(row?.row_count || 0)) {
+      return {
+        ...emptyDashboardAdSummaryMysql(to),
+        from,
+        to
+      };
+    }
     const exchangeRate = await currentExchangeRateValueMysql();
     const spendRub = Number(row?.spend_rub || 0);
     const revenueRub = Number(row?.revenue_rub || 0);
@@ -14796,7 +14836,9 @@ async function dashboardAdSummaryMysql(dateKey) {
     const lastSyncedAt = latestIsoDateTimeMysql(rows, "last_synced_at");
     const lastUpdatedAt = latestIsoDateTimeMysql(rows, "last_updated_at");
     return {
-      date_key: dateKey,
+      date_key: to,
+      from,
+      to,
       data_available: true,
       shop_count: Number(row?.shop_count || 0),
       sku_count: Number(row?.sku_count || 0),
@@ -14849,7 +14891,11 @@ async function dashboardAdSummaryMysql(dateKey) {
     };
   } catch (error) {
     console.warn("[dashboard] ad summary unavailable:", error.message);
-    return emptyDashboardAdSummaryMysql(dateKey, "unavailable");
+    return {
+      ...emptyDashboardAdSummaryMysql(to, "unavailable"),
+      from,
+      to
+    };
   }
 }
 
@@ -15180,7 +15226,8 @@ async function buildDashboardPayloadMysql({ forceRefresh = false } = {}) {
   const adLatestDate = await latestDashboardAdDateMysql(today);
   const adCurrentDate = adLatestDate || today;
   const adPreviousDate = adLatestDate ? dateKeyMysql(addDaysMysql(new Date(`${adLatestDate}T00:00:00+08:00`), -1)) : dateKeyDaysAgoMysql(1);
-  const [stock, procurement, todayProfit, yesterdayProfit, profitTrend, shopBreakdown, adToday, adYesterday, fbpInventoryValue, monthShippingCost, fbpOpportunities, aftersalesLoss, scheduledJobs] = await Promise.all([
+  const adMonthFrom = `${String(today).slice(0, 7)}-01`;
+  const [stock, procurement, todayProfit, yesterdayProfit, profitTrend, shopBreakdown, adToday, adYesterday, adMonth, fbpInventoryValue, monthShippingCost, fbpOpportunities, aftersalesLoss, scheduledJobs] = await Promise.all([
     stockAlertsMysql({ mode: "fbp-alerts", paged: "1", page: 1, pageSize: 100 }),
     procurementRequestsMysql({ grouped: "1", paged: "1", page: 1, pageSize: 8 }),
     profitSummaryOverviewMysql(today, today),
@@ -15189,6 +15236,7 @@ async function buildDashboardPayloadMysql({ forceRefresh = false } = {}) {
     dashboardShopCommerceBreakdownMysql(today),
     dashboardAdSummaryMysql(adCurrentDate),
     dashboardAdSummaryMysql(adPreviousDate),
+    dashboardAdSummaryMysql(adMonthFrom, today),
     dashboardFbpInventoryValueMysql(),
     dashboardMonthShippingCostSummaryMysql(today),
     fbpOpportunitiesMysql({ page: 1, pageSize: 8 }),
@@ -15235,7 +15283,8 @@ async function buildDashboardPayloadMysql({ forceRefresh = false } = {}) {
         latest_date_key: adLatestDate || "",
         is_latest_today: adLatestDate === today,
         today: adToday,
-        yesterday: adYesterday
+        yesterday: adYesterday,
+        month: adMonth
       }
     },
     alerts: {

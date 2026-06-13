@@ -92,6 +92,12 @@ import {
   testAiProviderConfig,
   updateAiProviderConfig
 } from "./ai-provider-settings.js";
+import {
+  aiGenerationTasks,
+  createAiGenerationTasks,
+  recoverAiGenerationTasksOnStartup,
+  retryAiGenerationTask
+} from "./ai-generation-tasks.js";
 
 async function translateCustomerMessageTemplateZh(body = {}) {
   const scenario = String(body.scenario || "").trim();
@@ -467,6 +473,7 @@ export const mysqlRuntimeServices = {
   generateAssetVariantTitlePreview,
   aiProviderConfig,
   aiProviderPresets,
+  aiGenerationTasks,
   aiPromptTemplateDetail,
   aiPromptTemplates,
   aiStrategies,
@@ -507,6 +514,7 @@ export const mysqlRuntimeServices = {
   createListingTemplateFromOnlineProduct,
   createSelectionFromCollectorBox,
   createListingDraft,
+  updateListingDraft,
   createAiVariantListingDraftLightweight,
   copyListingTemplateFromOzonSku,
   createOnlineProduct: createOnlineProductMysql,
@@ -516,6 +524,7 @@ export const mysqlRuntimeServices = {
   createProcurementRequest: createProcurementRequestMysql,
   createProduct: createProductMysql,
   createAiPromptTemplate,
+  createAiGenerationTasks,
   createAiStrategy,
   createMaterialAsset,
   createProductFromOnlineProduct: createProductFromOnlineProductMysql,
@@ -551,7 +560,9 @@ export const mysqlRuntimeServices = {
   publishAssetVariantsToOzon,
   publishSelectionProductToOzon,
   recoverAssetVariantJobsOnStartup,
+  recoverAiGenerationTasksOnStartup,
   retryAssetVariantJobFailures,
+  retryAiGenerationTask,
   selectionPublishShops,
   generateSelectionSellingPoints,
   getOzonActionCleanupConfig: getOzonActionCleanupConfigMysql,

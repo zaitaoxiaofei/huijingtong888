@@ -29,6 +29,7 @@ const optionalAttributeVisibleLimit = ref(OPTIONAL_ATTRIBUTE_PAGE_SIZE);
 const showApiDebug = ref(false);
 const richEditorVisible = ref(false);
 const sourceRawOmitted = ref(false);
+const draftImagesManuallyEdited = ref(false);
 const ATTRIBUTE_OPTION_RENDER_LIMIT = 60;
 const COLOR_ATTRIBUTE_OPTION_LOAD_LIMIT = 300;
 const COLOR_ATTRIBUTE_IDS = new Set(["10096", "22814"]);
@@ -61,7 +62,6 @@ const materialSearch = reactive({
 const variantImageEditor = reactive({
   visible: false,
   row: null,
-  selectedUrls: [],
   activeTab: "sku",
   draggingImageIndex: -1,
   dragOverImageIndex: -1
@@ -484,7 +484,9 @@ async function applyListingDraftFromRoute(routeDraft = null) {
   state.selectedDraftId = draft.id;
   state.drafts = [draft, ...state.drafts.filter((item) => Number(item.id) !== Number(draft.id))];
   const templateId = Number(draft.template_id || 0);
-  if (templateId) {
+  if (draft.template_payload || draft.templatePayload) {
+    fillTemplateEditor(draft.template_payload || draft.templatePayload, { safeOpen: true });
+  } else if (templateId) {
     const template = await apiClient.get(`/api/listing/templates/${templateId}?mode=editor`, { noCache: true }).catch(handleListingApiMissing);
     if (template?.id) {
       state.templates = [template, ...state.templates.filter((item) => Number(item.id) !== Number(template.id))];
@@ -1184,6 +1186,33 @@ function fillTemplateEditor(template, options = {}) {
     templateEditor.rawJson = "";
   }
   templateEditor.updated_at = template.updated_at || "";
+}
+
+function syncEditorImagesFromSavedDraft(draft = {}) {
+  const manualFacts = draft.manual_facts || draft.manualFacts || {};
+  const savedVariants = Array.isArray(manualFacts.variants) ? manualFacts.variants : [];
+  const savedImages = normalizeEditorImages(draft.source_images || manualFacts.images || []);
+  if (savedImages.length || draftImagesManuallyEdited.value) {
+    templateEditor.images = savedImages;
+    draftForm.source_images = savedImages.map((item) => ({ name: item.name || item.url, url: item.url })).filter((item) => item.url);
+  }
+  if (!savedVariants.length) return;
+  templateEditor.variants = templateEditor.variants.map((row, index) => {
+    const saved = savedVariants.find((item) => (
+      (item.offer_id && item.offer_id === row.offer_id)
+      || (item.sku && item.sku === row.sku)
+      || (item.source_sku && item.source_sku === row.source_sku)
+    )) || savedVariants[index];
+    if (!saved) return row;
+    const manuallyEdited = Boolean(saved.images_manually_edited || saved.image_edit_intent === "manual");
+    if (!manuallyEdited && !Array.isArray(saved.images)) return row;
+    return {
+      ...row,
+      images: normalizeEditorImages(saved.images || []),
+      images_manually_edited: manuallyEdited || row.images_manually_edited,
+      image_edit_intent: manuallyEdited ? "manual" : row.image_edit_intent
+    };
+  });
 }
 
 function firstNonEmptyArray(...values) {
@@ -2207,12 +2236,7 @@ async function uploadTemplateImagesRequest(options) {
 }
 
 function uploadVariantImagesRequest(row) {
-  return (options) => uploadMediaIntoList(options, ensureVariantOwnImages(row), "image", (image) => {
-    const url = variantImageUrl(image);
-    if (variantImageEditor.visible && url && !variantImageEditor.selectedUrls.includes(url)) {
-      variantImageEditor.selectedUrls.push(url);
-    }
-  });
+  return (options) => uploadMediaIntoList(options, ensureVariantOwnImages(row), "image", () => markVariantImagesEdited(row));
 }
 
 function uploadVariantVideoRequest(row, field, expectedType = "video") {
@@ -2799,10 +2823,15 @@ function ensureVariantOwnImages(row) {
   return row.images;
 }
 
+function markVariantImagesEdited(row) {
+  if (!row) return;
+  row.images_manually_edited = true;
+  row.image_edit_intent = "manual";
+}
+
 function openVariantImageEditor(row) {
   ensureVariantOwnImages(row);
   variantImageEditor.row = row;
-  variantImageEditor.selectedUrls = ensureVariantOwnImages(row).map((item) => item.url).filter(Boolean);
   variantImageEditor.activeTab = "sku";
   variantImageEditor.draggingImageIndex = -1;
   variantImageEditor.dragOverImageIndex = -1;
@@ -2815,15 +2844,25 @@ function variantImageUrl(image) {
 
 function isVariantImageSelected(image) {
   const url = variantImageUrl(image);
-  return url && variantImageEditor.selectedUrls.includes(url);
+  return url && ensureVariantOwnImages(variantImageEditor.row).some((item) => variantImageUrl(item) === url);
 }
 
 function toggleVariantImageSelection(image) {
   const url = variantImageUrl(image);
   if (!url) return;
-  const index = variantImageEditor.selectedUrls.indexOf(url);
-  if (index >= 0) variantImageEditor.selectedUrls.splice(index, 1);
-  else variantImageEditor.selectedUrls.push(url);
+  const images = ensureVariantOwnImages(variantImageEditor.row);
+  const index = images.findIndex((item) => variantImageUrl(item) === url);
+  if (index >= 0) {
+    images.splice(index, 1);
+    markVariantImagesEdited(variantImageEditor.row);
+    return;
+  }
+  images.push({
+    ...image,
+    url,
+    sort_order: images.length + 1
+  });
+  markVariantImagesEdited(variantImageEditor.row);
 }
 
 function variantImageLibrary() {
@@ -2895,43 +2934,70 @@ function variantSelectedPreviewList() {
 
 function confirmVariantImageEditor() {
   if (!variantImageEditor.row) return;
-  const byUrl = new Map(variantImageLibrary().map((item) => [variantImageUrl(item), item]));
-  const ownUrls = ensureVariantOwnImages(variantImageEditor.row).map((item) => variantImageUrl(item)).filter(Boolean);
-  const finalUrls = Array.from(new Set([...ownUrls, ...variantImageEditor.selectedUrls]));
-  variantImageEditor.row.images = finalUrls.map((url, index) => ({
-    ...(byUrl.get(url) || {}),
-    url,
-    sort_order: index + 1
-  }));
+  markVariantImagesEdited(variantImageEditor.row);
+  variantImageEditor.row.images = dedupeImages(ensureVariantOwnImages(variantImageEditor.row))
+    .filter((item) => variantImageUrl(item))
+    .map((item, index) => ({
+      ...item,
+      url: variantImageUrl(item),
+      sort_order: index + 1
+    }));
   syncDraftImagesFromVariantImages();
   variantImageEditor.visible = false;
   ElMessage.success("已更新 SKU 图片");
 }
 
+function addCurrentLibraryImagesToVariant() {
+  if (!variantImageEditor.row) return;
+  markVariantImagesEdited(variantImageEditor.row);
+  const images = ensureVariantOwnImages(variantImageEditor.row);
+  const existing = new Set(images.map((item) => variantImageUrl(item)).filter(Boolean));
+  for (const image of variantImageLibrary()) {
+    const url = variantImageUrl(image);
+    if (!url || existing.has(url)) continue;
+    images.push({
+      ...image,
+      url,
+      sort_order: images.length + 1
+    });
+    existing.add(url);
+  }
+}
+
+function clearVariantImages() {
+  if (!variantImageEditor.row) return;
+  markVariantImagesEdited(variantImageEditor.row);
+  ensureVariantOwnImages(variantImageEditor.row).splice(0);
+  syncDraftImagesFromVariantImages();
+}
+
 function syncDraftImagesFromVariantImages() {
   const images = templateEditor.variants.flatMap((variant) => Array.isArray(variant.images) ? variant.images : []);
-  const sourceImages = dedupeImages(images.length ? images : templateEditor.images);
+  const hasEditedVariantImages = templateEditor.variants.some((variant) => variant?.images_manually_edited || variant?.image_edit_intent === "manual");
+  const sourceImages = dedupeImages(images.length ? images : hasEditedVariantImages ? [] : templateEditor.images);
   draftForm.source_images = sourceImages
     .map((item) => ({ name: item.name || item.url, url: variantImageUrl(item) }))
     .filter((item) => item.url);
+  draftImagesManuallyEdited.value = true;
 }
 
 function addVariantImageLink() {
+  markVariantImagesEdited(variantImageEditor.row);
   const images = ensureVariantOwnImages(variantImageEditor.row);
   images.push({ url: "", name: "", sort_order: images.length + 1 });
+  draftImagesManuallyEdited.value = true;
 }
 
 function syncVariantImageLink(image) {
-  const url = variantImageUrl(image);
-  if (url && !variantImageEditor.selectedUrls.includes(url)) variantImageEditor.selectedUrls.push(url);
+  markVariantImagesEdited(variantImageEditor.row);
+  syncDraftImagesFromVariantImages();
 }
 
 function removeVariantImage(index) {
+  markVariantImagesEdited(variantImageEditor.row);
   const images = ensureVariantOwnImages(variantImageEditor.row);
-  const [removed] = images.splice(index, 1);
-  const url = variantImageUrl(removed);
-  const selectedIndex = variantImageEditor.selectedUrls.indexOf(url);
-  if (selectedIndex >= 0) variantImageEditor.selectedUrls.splice(selectedIndex, 1);
+  images.splice(index, 1);
+  syncDraftImagesFromVariantImages();
 }
 
 function startVariantImageDrag(index) {
@@ -2951,18 +3017,20 @@ function reorderVariantImage(fromIndex, toIndex) {
     return;
   }
   const [image] = images.splice(fromIndex, 1);
+  markVariantImagesEdited(variantImageEditor.row);
   images.splice(toIndex, 0, image);
   images.forEach((item, index) => {
     item.sort_order = index + 1;
   });
-  variantImageEditor.selectedUrls = images.map((item) => variantImageUrl(item)).filter(Boolean);
+  syncDraftImagesFromVariantImages();
   finishVariantImageDrag();
 }
 
 function useTemplateImagesForVariant() {
   if (!variantImageEditor.row) return;
+  markVariantImagesEdited(variantImageEditor.row);
   variantImageEditor.row.images = templateEditor.images.filter((item) => item.url).map((item, index) => ({ ...item, sort_order: index + 1 }));
-  variantImageEditor.selectedUrls = variantImageEditor.row.images.map((item) => item.url).filter(Boolean);
+  syncDraftImagesFromVariantImages();
   ElMessage.success("已使用模板图片");
 }
 
@@ -3733,9 +3801,11 @@ function templatePayloadToCollectorBoxEditPayload(payload = {}) {
   const dimensions = editable.dimensions || {};
   const logistics = editable.logistics || {};
   const variants = Array.isArray(editable.variants) ? editable.variants : [];
+  const variantImages = variants.flatMap((item) => Array.isArray(item.images) ? item.images : []);
   const images = payload.images?.length
     ? payload.images
-    : variants.flatMap((item) => Array.isArray(item.images) ? item.images : []);
+    : variantImages;
+  const sourceImages = variantImages.length ? variantImages : images;
   return {
     ...editable,
     title: payload.title || editable.title || "",
@@ -3757,6 +3827,7 @@ function templatePayloadToCollectorBoxEditPayload(payload = {}) {
     height_cm: Number(dimensions.height_cm || templateEditor.height_cm || 0),
     weight_g: Number(dimensions.weight_g || templateEditor.weight_g || 0),
     images: dedupeImages(images),
+    source_images: dedupeImages(sourceImages),
     variants,
     attributes: payload.attributes || editable.attributes || [],
     source_sku: templateEditor.source_ozon_sku || collectorSourceSku.value || "",
@@ -3924,14 +3995,34 @@ function applyTemplateToDraft() {
   const variantImages = templateEditor.variants.flatMap((variant) => Array.isArray(variant.images) ? variant.images : []);
   const images = templateEditor.images.length ? templateEditor.images : variantImages;
   draftForm.source_images = dedupeImages(images).map((item) => ({ name: item.name || item.url, url: item.url }));
+  draftImagesManuallyEdited.value = false;
   state.step = "edit";
 }
 
 function syncDraftImagesFromTemplateIfEmpty() {
+  if (draftImagesManuallyEdited.value) return;
   if (draftForm.source_images.length) return;
   const variantImages = templateEditor.variants.flatMap((variant) => Array.isArray(variant.images) ? variant.images : []);
   const images = templateEditor.images.length ? templateEditor.images : variantImages;
   draftForm.source_images = dedupeImages(images).map((item) => ({ name: item.name || item.url, url: item.url }));
+}
+
+function buildDraftTemplatePayloadForSave() {
+  const payload = buildTemplatePayload();
+  const draftImages = normalizeEditorImages(draftForm.source_images || []);
+  if (!draftImages.length) return payload;
+  payload.images = draftImages;
+  payload.editable_payload = {
+    ...(payload.editable_payload || {}),
+    images: draftImages
+  };
+  if (draftImagesManuallyEdited.value) {
+    payload.editable_payload.variants = (payload.editable_payload.variants || []).map((variant) => {
+      const manuallyEdited = Boolean(variant.images_manually_edited || variant.image_edit_intent === "manual");
+      return manuallyEdited ? variant : { ...variant, images: draftImages };
+    });
+  }
+  return payload;
 }
 
 function dedupeImages(images = []) {
@@ -3964,7 +4055,7 @@ function ensureDraftFormFromTemplate() {
   draftForm.color = draftForm.color || templateEditor.color || normalizeColorForPayload(firstVariant);
   draftForm.spec = draftForm.spec || templateEditor.spec || firstVariant.spec || "";
   draftForm.quantity = Number(draftForm.quantity || templateEditor.quantity || firstVariant.stock || 0);
-  if (!draftForm.source_images.length) {
+  if (!draftImagesManuallyEdited.value && !draftForm.source_images.length) {
     const variantImages = templateEditor.variants.flatMap((variant) => Array.isArray(variant.images) ? variant.images : []);
     const images = templateEditor.images.length ? templateEditor.images : variantImages;
     draftForm.source_images = dedupeImages(images).map((item) => ({ name: item.name || item.url, url: item.url }));
@@ -3980,6 +4071,7 @@ async function uploadImageRequest(options) {
       url: result.previewUrl,
       taskId: result.taskId
     });
+    draftImagesManuallyEdited.value = true;
     options.onSuccess?.(result);
     ElMessage.success("图片已上传");
   } catch (error) {
@@ -4025,9 +4117,11 @@ async function createDraft() {
     applyOzonAttributeMappings();
     await saveCurrentTemplateSnapshot();
     syncDraftImagesFromTemplateIfEmpty();
+    const templatePayload = buildDraftTemplatePayloadForSave();
     const draftPayload = {
       ...draftForm,
-      source_images: draftForm.source_images.map((item) => item.url)
+      source_images: draftForm.source_images.map((item) => item.url),
+      template_payload: templatePayload
     };
     const currentDraftId = Number(state.selectedDraftId || 0);
     const created = currentDraftId
@@ -4035,6 +4129,7 @@ async function createDraft() {
       : await apiClient.post("/api/listing/drafts", draftPayload);
     state.drafts = [created, ...state.drafts.filter((item) => Number(item.id) !== Number(created.id))];
     state.selectedDraftId = created.id;
+    syncEditorImagesFromSavedDraft(created);
     if (draftForm.shop_ids.length) {
       state.copies = await apiClient.post(`/api/listing/drafts/${created.id}/shop-copies`, {
         shop_ids: draftForm.shop_ids
@@ -4080,6 +4175,7 @@ async function generateCopies() {
 
 function removeImage(index) {
   draftForm.source_images.splice(index, 1);
+  draftImagesManuallyEdited.value = true;
 }
 
 function validationType(row) {
@@ -4886,8 +4982,8 @@ onBeforeUnmount(() => {
               <el-button>批量操作</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item @click="variantImageEditor.selectedUrls = variantImageLibrary().map((item) => item.url)">全选图库</el-dropdown-item>
-                  <el-dropdown-item @click="variantImageEditor.selectedUrls = []">清空选择</el-dropdown-item>
+                  <el-dropdown-item @click="addCurrentLibraryImagesToVariant">全选图库</el-dropdown-item>
+                  <el-dropdown-item @click="clearVariantImages">清空选择</el-dropdown-item>
                   <el-dropdown-item @click="useTemplateImagesForVariant">模板图覆盖</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -5273,12 +5369,12 @@ onBeforeUnmount(() => {
 .variant-image-empty { display: grid; place-items: center; width: 100%; aspect-ratio: 1; border: 1px dashed var(--el-border-color); border-radius: 6px; color: var(--el-text-color-secondary); background: var(--el-bg-color); }
 .variant-image-card :deep(.el-input__wrapper) { min-height: 32px; }
 .variant-image-card :deep(.el-input__inner) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.variant-image-dialog :deep(.el-dialog) { max-width: calc(100vw - 96px); }
-.variant-image-dialog :deep(.el-dialog__body) { padding: 0; }
-.variant-image-workbench { display: grid; grid-template-columns: minmax(310px, 40%) minmax(420px, 1fr); min-height: 500px; max-height: calc(100vh - 240px); border-top: 1px solid var(--el-border-color-lighter); border-bottom: 1px solid var(--el-border-color-lighter); overflow: hidden; }
-.variant-image-panel { padding: 16px; overflow: auto; border-right: 1px solid var(--el-border-color-lighter); background: #fff; }
-.variant-image-tools { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
-.selected-grid { grid-template-columns: repeat(auto-fill, minmax(128px, 128px)); align-items: start; }
+.variant-image-dialog :deep(.el-dialog) { max-width: calc(100vw - 80px); }
+.variant-image-dialog :deep(.el-dialog__body) { padding: 0; max-height: calc(100vh - 150px); overflow: hidden; }
+.variant-image-workbench { display: grid; grid-template-columns: minmax(320px, 38%) minmax(460px, 1fr); height: calc(100vh - 190px); min-height: 520px; border-top: 1px solid var(--el-border-color-lighter); border-bottom: 1px solid var(--el-border-color-lighter); overflow: hidden; }
+.variant-image-panel { min-height: 0; padding: 16px; overflow-y: auto; overscroll-behavior: contain; border-right: 1px solid var(--el-border-color-lighter); background: #fff; }
+.variant-image-tools { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px; margin: -16px -16px 12px; padding: 16px; flex-wrap: wrap; background: rgba(255, 255, 255, 0.96); border-bottom: 1px solid var(--el-border-color-lighter); backdrop-filter: blur(8px); }
+.selected-grid { grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); align-items: start; }
 .selected-card { position: relative; border-color: #ded8ff; background: #fbfaff; transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease, background 0.16s ease; }
 .selected-card[draggable="true"] { cursor: grab; }
 .selected-card.dragging { opacity: 0.62; cursor: grabbing; transform: scale(0.96); box-shadow: 0 10px 24px rgba(67, 56, 202, 0.18); }
@@ -5287,10 +5383,10 @@ onBeforeUnmount(() => {
 .variant-card-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; }
 .variant-card-footer .el-tag { max-width: 100%; min-width: 0; overflow: hidden; }
 .variant-card-footer :deep(.el-tag__content) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.variant-image-library { padding: 16px; overflow: auto; background: #fff; }
-.library-tabs { display: flex; align-items: center; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--el-border-color-lighter); margin-bottom: 14px; }
+.variant-image-library { min-height: 0; padding: 16px; overflow-y: auto; overscroll-behavior: contain; background: #fff; }
+.library-tabs { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--el-border-color-lighter); margin: -16px -16px 14px; padding: 12px 16px 0; background: rgba(255, 255, 255, 0.96); backdrop-filter: blur(8px); }
 .library-tabs :deep(.el-tabs__header) { margin: 0; }
-.library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 12px; }
+.library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 10px; padding-bottom: 20px; }
 .library-image-card { position: relative; display: grid; gap: 6px; padding: 0; border: 1px solid #dfe3ee; border-radius: 8px; background: #fff; overflow: hidden; cursor: pointer; text-align: left; color: var(--el-text-color-regular); }
 .library-image-card img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; background: var(--el-fill-color-light); }
 .library-image-card span { padding: 0 10px 10px; font-size: 12px; color: var(--el-text-color-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

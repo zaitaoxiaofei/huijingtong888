@@ -18,6 +18,10 @@ const useProxyFallback = ref(false);
 const fallbackIndex = ref(0);
 
 function firstImageValue(src) {
+  if (src && typeof src === "object") {
+    if (Array.isArray(src)) return firstImageValue(src[0]);
+    return firstImageValue(src.url || src.image_url || src.imageUrl || src.src || src.link || src.href || src.file_name || "");
+  }
   const value = String(src || "").trim();
   if (!value) return "";
   if (/^data:image\//i.test(value)) return value;

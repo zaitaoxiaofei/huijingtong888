@@ -26,6 +26,7 @@ import { createSyncRoutes } from "./server/routes/sync.js";
 import { createReviewRoutes, handleReviewRestRoute } from "./server/routes/reviews.js";
 import { createListingAutomationRoutes, handleListingAutomationRestRoute, handleMaterialPackageRestRoute } from "./server/routes/listingAutomation.js";
 import { createAssetVariantEngineRoutes, handleAssetVariantEngineRestRoute } from "./server/routes/assetVariantEngine.js";
+import { createAiGenerationTaskRoutes, handleAiGenerationTaskRestRoute } from "./server/routes/aiGenerationTasks.js";
 import { createAiPromptTemplateRoutes, handleAiPromptTemplateRestRoute } from "./server/routes/aiPromptTemplates.js";
 import { createAiStrategyRoutes, handleAiStrategyRestRoute } from "./server/routes/aiStrategies.js";
 import { createMaterialAssetRoutes, handleMaterialAssetRestRoute } from "./server/routes/materialAssets.js";
@@ -121,6 +122,7 @@ const routeModules = {
   ...createSyncRoutes({ services, readJson, syncExceptionWorkbenchOrders }),
   ...createListingAutomationRoutes({ services, readJson }),
   ...createAssetVariantEngineRoutes({ services, readJson }),
+  ...createAiGenerationTaskRoutes({ services, readJson }),
   ...createAiPromptTemplateRoutes({ services, readJson }),
   ...createAiStrategyRoutes({ services, readJson }),
   ...createMaterialAssetRoutes({ services, readJson }),
@@ -663,6 +665,19 @@ async function handleRestRoute(req, res, url, parts) {
   });
   if (assetVariantHandled !== false) {
     return assetVariantHandled;
+  }
+
+  const aiGenerationTaskHandled = await handleAiGenerationTaskRestRoute({
+    req,
+    res,
+    parts,
+    services,
+    readJson,
+    json,
+    notFound
+  });
+  if (aiGenerationTaskHandled !== false) {
+    return aiGenerationTaskHandled;
   }
 
   const imageCropperRestHandled = await handleImageCropperRestRoute({
@@ -1226,7 +1241,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && parts[0] === "api" && parts[1] === "listing" && parts[2] === "media" && parts[3] === "public-upload") {
       const token = String(url.searchParams.get("token") || req.headers["x-local-plugin-token"] || "").trim();
       const expected = String(config.localPluginPublicToken || "").trim();
-      if (!token || !expected || !safeEqualText(token, expected)) return json(res, { error: "素材公网同步未授权" }, 403);
+      if (!token || !expected || !safeEqualText(token, expected)) {
+        console.warn(`[forbidden] ${req.method} ${url.pathname} reason=public_upload_token`);
+        return json(res, { error: "素材公网同步未授权" }, 403);
+      }
       return json(res, await services.uploadListingMedia(req, { skipPublicSync: true, publicUpload: true }));
     }
 
@@ -1235,7 +1253,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (!isSiteAccessAuthorized(req) && !isPublicAuthCallbackPath(req, parts)) {
-      if (parts[0] === "api") return json(res, { error: "访问受限，请先通过内部访问验证" }, 403);
+      if (parts[0] === "api") {
+        console.warn(`[forbidden] ${req.method} ${url.pathname} reason=site_access`);
+        return json(res, { error: "访问受限，请先通过内部访问验证" }, 403);
+      }
       return html(res, renderSiteAccessPage("", `${url.pathname}${url.search || ""}`), 401);
     }
 
@@ -1323,7 +1344,10 @@ const server = http.createServer(async (req, res) => {
       req._session = session;
       req.query = Object.fromEntries(url.searchParams.entries());
       const authorization = authorizeApiRequest(req, parts);
-      if (!authorization.allowed) return json(res, { error: authorization.error || "权限不足" }, authorization.status || 403);
+      if (!authorization.allowed) {
+        console.warn(`[forbidden] ${req.method} ${url.pathname} reason=authorization detail=${authorization.error || "权限不足"}`);
+        return json(res, { error: authorization.error || "权限不足" }, authorization.status || 403);
+      }
     }
 
     markRequestTiming(req, "before_rest");
@@ -1360,8 +1384,15 @@ server.listen(config.port, config.host || undefined, () => {
       console.log(`scheduled job scheduler started with ${scheduledJobDefinitions.length} job(s)`);
     })
     .catch((error) => console.error("scheduled job scheduler startup failed", error));
-  setTimeout(recoverAssetVariantJobs, 3000);
+  setTimeout(recoverGenerationJobs, 3000);
 });
+
+async function recoverGenerationJobs() {
+  await Promise.allSettled([
+    recoverAssetVariantJobs(),
+    recoverAiGenerationTasks()
+  ]);
+}
 
 async function recoverAssetVariantJobs() {
   try {
@@ -1369,6 +1400,15 @@ async function recoverAssetVariantJobs() {
     if (result?.queued) console.log(`asset variant job recovery queued ${result.queued} job(s)`);
   } catch (error) {
     console.error("asset variant job recovery failed", error);
+  }
+}
+
+async function recoverAiGenerationTasks() {
+  try {
+    const result = await services.recoverAiGenerationTasksOnStartup?.();
+    if (result?.ok) console.log("ai generation task worker recovered");
+  } catch (error) {
+    console.error("ai generation task recovery failed", error);
   }
 }
 

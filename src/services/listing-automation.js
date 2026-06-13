@@ -33,6 +33,7 @@ import { standardizeListingTemplatePayload } from "./listing-template-standardiz
 import { getAiTaskFile } from "../server/services/ai/aiWorkflowService.js";
 
 let mysqlSchemaReady = false;
+const backgroundListingPublishTasks = new Set();
 const LISTING_MEDIA_ROOTS = resolveListingMediaRoots();
 const LISTING_MEDIA_ROOT = LISTING_MEDIA_ROOTS[0];
 const SHOP_WATERMARK_ROOTS = [
@@ -62,6 +63,19 @@ const LISTING_PUBLISH_SHOP_SELECT = `
   FROM shops
 `;
 const attributeValueMemoryCache = new Map();
+
+function runBackgroundListingPublish(label, task) {
+  const promise = Promise.resolve()
+    .then(task)
+    .catch((error) => {
+      console.warn(`[listing-automation] ${label} failed:`, error?.message || error);
+    })
+    .finally(() => {
+      backgroundListingPublishTasks.delete(promise);
+    });
+  backgroundListingPublishTasks.add(promise);
+  return promise;
+}
 
 function listingPublishRecordNotFoundError() {
   const error = new Error("\u4e0a\u67b6\u8bb0\u5f55\u4e0d\u5b58\u5728");
@@ -626,14 +640,25 @@ function collectorBoxImageSources(detail = {}, editInput = null) {
   const payload = objectValue(detail.payload || {});
   const raw = objectValue(detail.rawPayload || detail.raw_payload || {});
   const editPayload = objectValue(editInput || detail.editPayload || detail.edit_payload || {});
+  const userAssetImages = normalizeImages([
+    ...normalizeArray(detail.source_images || detail.sourceImages),
+    ...normalizeArray(detail.user_images || detail.userImages),
+    ...normalizeArray(detail.uploaded_images || detail.uploadedImages),
+    ...normalizeArray(payload.source_images || payload.sourceImages),
+    ...normalizeArray(editPayload.source_images || editPayload.sourceImages),
+    ...normalizeArray(editPayload.user_images || editPayload.userImages),
+    ...normalizeArray(editPayload.uploaded_images || editPayload.uploadedImages)
+  ]);
   const templateImages = collectorBoxTemplateImages(detail);
   const editedImages = normalizeImages(editPayload.images || editPayload.image_urls || editPayload.imageUrls || []);
   const editedVariantImages = normalizeArray(editPayload.variants || editPayload.editorVariants || editPayload.editor_variants)
     .flatMap((variant) => normalizeImages(variant?.images || variant?.image_urls || variant?.imageUrls || []));
   const rawImages = normalizeImages(raw.images || raw.image_urls || raw.imageUrls || payload.images || []);
   const groups = [
+    userAssetImages,
+    editedVariantImages,
+    editedImages,
     templateImages,
-    [...editedImages, ...editedVariantImages],
     rawImages,
     [detail.image_url, raw.productImage, raw.mainImage]
   ];
@@ -788,13 +813,21 @@ function buildCollectorSelectionVariants(detail = {}, body = {}) {
     images: baseImages
   };
   if (rows.length) {
-    return rows.map((item, index) => ({
-      ...normalizeCollectedVariant({
-        ...item,
-        images: collectedVariantImages(item, baseImages, rows.length > 1)
-      }, source, baseDimensions, baseTags, index),
-      selection_key: variantSelectionKey(item, index)
-    }));
+    const preferEditedImages = hasEditedCollectorImages(detail, editInput);
+    return rows.map((item, index) => {
+      const images = collectedVariantImages(item, baseImages, rows.length > 1, preferEditedImages);
+      const imagePatch = preferEditedImages
+        ? { cover_image: "", coverImage: "", primary_image: "", primaryImage: "", main_image: "", mainImage: "" }
+        : {};
+      return {
+        ...normalizeCollectedVariant({
+          ...item,
+          ...imagePatch,
+          images
+        }, source, baseDimensions, baseTags, index),
+        selection_key: variantSelectionKey(item, index)
+      };
+    });
   }
   return [normalizeCollectedVariant({
     sku: detail.sku || raw.sku || payload.sku || "",
@@ -831,7 +864,7 @@ function selectedCollectorVariants(variants = [], body = {}) {
 export function buildSelectionProductBodiesFromCollectorBox(detail = {}, body = {}, session = null) {
   const payload = objectValue(detail.payload || {});
   const raw = objectValue(detail.rawPayload || detail.raw_payload || {});
-  const editInput = objectValue(body.editPayload || body.edit_payload || body || {});
+  const editInput = objectValue(body.editPayload || body.edit_payload || detail.editPayload || detail.edit_payload || {});
   const variants = buildCollectorSelectionVariants(detail, body);
   const selectedVariants = selectedCollectorVariants(variants, body);
   const baseDimensions = normalizeCollectedDimensions(editInput, payload, raw, detail);
@@ -4259,19 +4292,6 @@ export async function validateListingTemplatePublish(body = {}, session = null) 
   ].filter(isLocalImportMedia);
   if (localMedia.length) warnings.push("瀛樺湪鏈湴绱犳潗 URL锛屾寮忔彁浜?Ozon 鍓嶉渶瑕佽浆鎹负鍏綉鍙闂湴鍧€鎴栦笂浼犲埌 Ozon 鏀寔鐨勭礌鏉愬湴鍧€");
 
-  if (localMedia.length && isPreviewRuntimeWithRemoteListingMediaBase()) {
-    errors.push("\u5f53\u524d 8788 \u9884\u89c8\u73af\u5883\u4e0a\u4f20\u7684\u56fe\u7247\u6216\u89c6\u9891\u8fd8\u6ca1\u6709\u540c\u6b65\u5230\u516c\u7f51\u7d20\u6750\u5730\u5740\uff0c\u76f4\u63a5\u63d0\u4ea4\u7ed9 Ozon \u4f1a\u5bfc\u81f4\u5b83\u6293\u53d6 404\u3002\u8bf7\u6539\u5728\u6b63\u5f0f\u73af\u5883\u4e0a\u4f20\u7d20\u6750\uff0c\u6216\u5148\u540c\u6b65\u5230\u516c\u7f51\u540e\u518d\u53d1\u5e03\u3002");
-  }
-  const unreachableRemoteMedia = await unreachablePublishMediaUrls([
-    ...images.map((item) => publishableListingMediaUrl(item.url)),
-    ...variants.flatMap((item) => normalizeImages(item.images || []).map((image) => publishableListingMediaUrl(image.url))),
-    ...variants.flatMap((item) => normalizeStringList(item.video_urls || item.videos || item.video_url).map(publishableListingMediaUrl)),
-    ...variants.flatMap((item) => normalizeStringList(item.video_cover_urls || item.cover_video_urls || item.video_cover).map(publishableListingMediaUrl))
-  ]);
-  if (unreachableRemoteMedia.length) {
-    errors.push(`Public media is not reachable; Ozon may fail to download: ${unreachableRemoteMedia.slice(0, 3).join(", ")}`);
-  }
-
   const payload = buildOzonImportPreviewPayload(facts, template);
   const qualityEstimate = estimateListingQualityFromPayload(payload);
   if (qualityEstimate.score < 90) {
@@ -4356,15 +4376,18 @@ export async function prepareListingTemplatePublishMediaPreview(body = {}, sessi
   const results = [];
 
   for (const shop of shops) {
-    const textVariantPayload = await applyShopTextVariantToPayload(validation.payload, shop, textVariantPolicy);
-    const defaultedPayload = await applyShopPublishDefaults(textVariantPayload, shop);
-    const watermarkedPayload = shouldReusePreparedShopWatermarkMedia(body, shop)
-      ? { ...defaultedPayload, watermark_summary: preparedShopWatermarkSummary(defaultedPayload, shop) }
-      : await applyShopWatermarkedImagesToPayload(defaultedPayload, shop, session);
-    const tailImageUrl = await resolveShopTailImageUrl(shop, session);
-    const tailApplied = appendTailImageToPayload(watermarkedPayload, tailImageUrl);
-    const shopPayload = await prepareSafeShopOfferIds(tailApplied.payload, {
+    const {
+      textVariantPayload,
+      watermarkedPayload,
+      tailImageUrl,
+      tailApplied,
+      shopPayload
+    } = await buildShopPublishPayloadForOzon({
+      basePayload: validation.payload,
       shop,
+      textVariantPolicy,
+      body,
+      session,
       sourceRecordId,
       updateExisting,
       sourceProductId
@@ -4392,6 +4415,75 @@ export async function prepareListingTemplatePublishMediaPreview(body = {}, sessi
   };
 }
 
+async function buildShopPublishPayloadForOzon({
+  basePayload = {},
+  shop = {},
+  textVariantPolicy = {},
+  body = {},
+  session = null,
+  sourceRecordId = 0,
+  updateExisting = false,
+  sourceProductId = 0
+} = {}) {
+  const textVariantPayload = await applyShopTextVariantToPayload(basePayload, shop, textVariantPolicy);
+  const defaultedPayload = await applyShopPublishDefaults(textVariantPayload, shop);
+  const watermarkedPayload = shouldReusePreparedShopWatermarkMedia(body, shop)
+    ? { ...defaultedPayload, watermark_summary: preparedShopWatermarkSummary(defaultedPayload, shop) }
+    : await applyShopWatermarkedImagesToPayload(defaultedPayload, shop, session);
+  const tailImageUrl = await resolveShopTailImageUrl(shop, session);
+  const tailApplied = appendTailImageToPayload(watermarkedPayload, tailImageUrl);
+  const shopPayload = await prepareSafeShopOfferIds(tailApplied.payload, {
+    shop,
+    sourceRecordId,
+    updateExisting,
+    sourceProductId
+  });
+  return {
+    textVariantPayload,
+    watermarkedPayload,
+    tailImageUrl,
+    tailApplied,
+    shopPayload
+  };
+}
+
+function assertPublishPayloadHasOnlyPublicMedia(payload = {}, validation = null) {
+  const localMedia = collectLocalImportMedia(payload);
+  if (!localMedia.length) return;
+  const message = "Before submitting to Ozon, convert images and videos to public URLs. Local /uploads URLs cannot be fetched by Ozon.";
+  if (validation) {
+    validation.errors = [...normalizeArray(validation.errors), message];
+    validation.ok = false;
+  }
+  const error = new Error(message);
+  error.status = 400;
+  error.validation = validation || null;
+  error.local_media = localMedia.slice(0, 20);
+  throw error;
+}
+
+async function assertPublishPayloadMediaReachable(payload = {}, validation = null) {
+  const mediaUrls = normalizeArray(payload.items).flatMap((item) => [
+    item.primary_image,
+    ...normalizeArray(item.images),
+    ...normalizeArray(item.attributes).flatMap((attr) => normalizeArray(attr.values).map((value) => value.value)),
+    ...normalizeArray(item.complex_attributes).flatMap((group) => normalizeArray(group.attributes || group)
+      .flatMap((attr) => normalizeArray(attr.values).map((value) => value.value)))
+  ]);
+  const unreachableRemoteMedia = await unreachablePublishMediaUrls(mediaUrls);
+  if (!unreachableRemoteMedia.length) return;
+  const message = `Public media is not reachable; Ozon may fail to download: ${unreachableRemoteMedia.slice(0, 3).join(", ")}`;
+  if (validation) {
+    validation.errors = [...normalizeArray(validation.errors), message];
+    validation.ok = false;
+  }
+  const error = new Error(message);
+  error.status = 400;
+  error.validation = validation || null;
+  error.unreachable_media = unreachableRemoteMedia;
+  throw error;
+}
+
 export async function publishListingTemplateToOzon(body = {}, session = null) {
   await ensureListingAutomationSchema();
   const shopIds = [...new Set((body.shop_ids || body.shopIds || body.template?.shop_ids || []).map(Number).filter(Boolean))];
@@ -4412,11 +4504,6 @@ export async function publishListingTemplateToOzon(body = {}, session = null) {
     || body.template?.editable_payload?.source_raw?.record_id
     || 0
   );
-  const localMedia = collectLocalImportMedia(validation.payload);
-  if (localMedia.length) {
-    validation.errors.push("Before submitting to Ozon, convert images and videos to public URLs. Local /uploads URLs cannot be fetched by Ozon.");
-    validation.ok = false;
-  }
   if (!validation.ok) {
     const error = new Error(validation.errors[0] || "鍙戝竷鍓嶆牎楠屾湭閫氳繃");
     error.status = 400;
@@ -4440,19 +4527,24 @@ export async function publishListingTemplateToOzon(body = {}, session = null) {
   for (const shop of shops) {
     let recordId = null;
     try {
-      const textVariantPayload = await applyShopTextVariantToPayload(validation.payload, shop, textVariantPolicy);
-      const defaultedPayload = await applyShopPublishDefaults(textVariantPayload, shop);
-      const watermarkedPayload = shouldReusePreparedShopWatermarkMedia(body, shop)
-        ? { ...defaultedPayload, watermark_summary: preparedShopWatermarkSummary(defaultedPayload, shop) }
-        : await applyShopWatermarkedImagesToPayload(defaultedPayload, shop, session);
-      const tailImageUrl = await resolveShopTailImageUrl(shop, session);
-      const tailApplied = appendTailImageToPayload(watermarkedPayload, tailImageUrl);
-      const shopPayload = await prepareSafeShopOfferIds(tailApplied.payload, {
+      const {
+        textVariantPayload,
+        watermarkedPayload,
+        tailImageUrl,
+        tailApplied,
+        shopPayload
+      } = await buildShopPublishPayloadForOzon({
+        basePayload: validation.payload,
         shop,
+        textVariantPolicy,
+        body,
+        session,
         sourceRecordId,
         updateExisting,
         sourceProductId
       });
+      assertPublishPayloadHasOnlyPublicMedia(shopPayload, validation);
+      await assertPublishPayloadMediaReachable(shopPayload, validation);
       recordId = await preparePublishRecordForSubmit({
         sourceRecordId,
         shop,
@@ -4533,6 +4625,137 @@ export async function publishListingDraftsToOzon(body = {}, session = null) {
   if (!draftIds.length) throw new Error("璇峰厛閫夋嫨瑕佷笂鏋剁殑鑽夌");
   if (!shopIds.length) throw new Error("Please select at least one shop");
 
+  const shops = await all(
+    `${LISTING_PUBLISH_SHOP_SELECT} WHERE id IN (${shopIds.map(() => "?").join(",")}) AND status <> 'deleted'`,
+    shopIds
+  );
+  if (!shops.length) throw new Error("No available target shops");
+
+  const textVariantPolicySource = body.text_variant_policy || body.textVariantPolicy || {};
+  const results = [];
+  for (const draftId of draftIds) {
+    let draft = null;
+    try {
+      draft = await listingDraft(draftId, session);
+      const template = await buildPublishTemplateFromListingDraft(draft, session);
+      const validation = await validateListingTemplatePublishForShop(template, shops[0].id, session);
+      if (!validation.ok) {
+        const error = new Error(validation.errors[0] || "鍙戝竷鍓嶆牎楠屾湭閫氳繃");
+        error.status = 400;
+        error.validation = validation;
+        throw error;
+      }
+
+      const sourceProductId = await resolveListingSourceProductId(template, validation.payload);
+      const textVariantPolicy = normalizeShopTextVariantPolicy(textVariantPolicySource, shops);
+      for (const shop of shops) {
+        let recordId = null;
+        try {
+          const {
+            textVariantPayload,
+            watermarkedPayload,
+            tailImageUrl,
+            tailApplied,
+            shopPayload
+          } = await buildShopPublishPayloadForOzon({
+            basePayload: validation.payload,
+            shop,
+            textVariantPolicy,
+            body: { template },
+            session,
+            sourceRecordId: 0,
+            updateExisting: false,
+            sourceProductId
+          });
+          assertPublishPayloadHasOnlyPublicMedia(shopPayload, validation);
+          await assertPublishPayloadMediaReachable(shopPayload, validation);
+          recordId = await preparePublishRecordForSubmit({
+            shop,
+            shopPayload,
+            session,
+            sourceProductId,
+            offerSource: "draft_batch_publish",
+            templateSnapshot: template,
+            draftId,
+            initialStatus: "processing"
+          });
+          results.push({
+            record_id: recordId,
+            draft_id: draftId,
+            draft_name: draft.product_name || draft.internal_code || `鑽夌 ${draftId}`,
+            shop_id: shop.id,
+            shop_name: shop.name,
+            ok: true,
+            status: "processing"
+          });
+          runBackgroundListingPublish(`draft ${draftId} record ${recordId}`, () => submitPreparedListingPublishRecord({
+            recordId,
+            shop,
+            shopPayload,
+            textVariantSummary: textVariantPayload.text_variant_summary || null,
+            watermarkSummary: watermarkedPayload.watermark_summary || null,
+            tailSummary: {
+              configured: Boolean(tailImageUrl),
+              appended: Number(tailApplied.appended || 0)
+            }
+          }));
+        } catch (error) {
+          const errorPayload = buildOzonPublishErrorPayload(error, { shop, recordId });
+          if (recordId) {
+            await run(`
+              UPDATE listing_publish_records
+              SET status = 'failed', error_json = ?, updated_at = CURRENT_TIMESTAMP
+              WHERE id = ?
+            `, [JSON.stringify(errorPayload), recordId]).catch(() => null);
+          }
+          results.push({
+            record_id: recordId,
+            draft_id: draftId,
+            draft_name: draft.product_name || draft.internal_code || `鑽夌 ${draftId}`,
+            shop_id: shop.id,
+            shop_name: shop.name,
+            ok: false,
+            error: errorPayload.message,
+            fix_tip: errorPayload.fix_tip
+          });
+        }
+      }
+    } catch (error) {
+      results.push({
+        draft_id: draftId,
+        draft_name: draft?.product_name || draft?.internal_code || `鑽夌 ${draftId}`,
+        shop_id: 0,
+        shop_name: "",
+        ok: false,
+        error: error.message || "鑽夌鎵归噺鎻愪氦澶辫触"
+      });
+    }
+  }
+
+  const queued = results.filter((item) => item.ok).length;
+  const failed = results.length - queued;
+  return {
+    ok: queued > 0,
+    async: true,
+    summary: {
+      drafts: draftIds.length,
+      shops: shopIds.length,
+      total: results.length,
+      queued,
+      success: queued,
+      failed
+    },
+    results
+  };
+}
+
+export async function publishListingDraftsToOzonSync(body = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const draftIds = [...new Set(normalizeArray(body.draft_ids || body.draftIds || body.ids).map(Number).filter(Boolean))];
+  const shopIds = [...new Set(normalizeArray(body.shop_ids || body.shopIds).map(Number).filter(Boolean))];
+  if (!draftIds.length) throw new Error("璇峰厛閫夋嫨瑕佷笂鏋剁殑鑽夌");
+  if (!shopIds.length) throw new Error("Please select at least one shop");
+
   const results = [];
   for (const draftId of draftIds) {
     let draft = null;
@@ -4579,31 +4802,139 @@ export async function publishListingDraftsToOzon(body = {}, session = null) {
   };
 }
 
+async function submitPreparedListingPublishRecord({
+  recordId,
+  shop,
+  shopPayload,
+  textVariantSummary = null,
+  watermarkSummary = null,
+  tailSummary = null
+} = {}) {
+  if (!recordId || !shop || !shopPayload) return null;
+  try {
+    const response = await importOzonProducts(shop, shopPayload);
+    const taskId = response?.result?.task_id || response?.task_id || response?.result?.taskId || "";
+    let importInfo = null;
+    if (taskId) {
+      importInfo = await fetchOzonProductImportInfo(shop, taskId).catch((error) => ({ error: error.message }));
+    }
+    await updatePublishRecordAfterSubmit(recordId, {
+      taskId,
+      response: {
+        submit: response,
+        text_variant_summary: textVariantSummary,
+        watermark_summary: watermarkSummary,
+        tail_summary: tailSummary
+      },
+      importInfo,
+      status: importInfoStatus(importInfo)
+    });
+    await refreshPublishRecordQuality(recordId).catch((error) => ({
+      score: 0,
+      source: "refresh_failed",
+      issues: [error.message]
+    }));
+    return { ok: true, record_id: recordId, task_id: taskId };
+  } catch (error) {
+    const errorPayload = buildOzonPublishErrorPayload(error, { shop, recordId });
+    await run(`
+      UPDATE listing_publish_records
+      SET status = 'failed', error_json = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [JSON.stringify(errorPayload), Number(recordId)]).catch(() => null);
+    return { ok: false, record_id: recordId, error: errorPayload.message };
+  }
+}
+
 async function buildPublishTemplateFromListingDraft(draft = {}, session = null) {
+  if (draft.template_payload) {
+    const editable = objectValue(draft.template_payload.editable_payload || {});
+    const price = objectValue(editable.price || {});
+    const dimensions = objectValue(editable.dimensions || {});
+    const draftSalePrice = Number(draft.sale_price || 0);
+    if (draftSalePrice > 0 && !numberFromOzonValue(price.value || price.price)) price.value = draftSalePrice;
+    for (const [key, value] of Object.entries({
+      length_cm: Number(draft.length_cm || 0),
+      width_cm: Number(draft.width_cm || 0),
+      height_cm: Number(draft.height_cm || 0),
+      weight_g: Number(draft.weight_g || 0)
+    })) {
+      if (value > 0 && !numberFromOzonValue(dimensions[key])) dimensions[key] = value;
+    }
+    const images = normalizeImages(draft.template_payload.images || editable.images || []);
+    const draftImages = normalizeImages(draft.source_images || []);
+    const finalImages = images.length ? images : draftImages;
+    return normalizeTemplatePayload({
+      ...draft.template_payload,
+      title: draft.template_payload.title || editable.title || draft.product_name || "",
+      images: finalImages,
+      source_raw: {
+        ...(draft.template_payload.source_raw || {}),
+        source_type: "listing_draft_batch_publish",
+        listing_draft_id: draft.id
+      },
+      editable_payload: {
+        ...editable,
+        title: editable.title || draft.template_payload.title || draft.product_name || "",
+        price,
+        dimensions,
+        images: finalImages,
+        source_raw: {
+          ...(draft.template_payload.editable_payload?.source_raw || draft.template_payload.source_raw || {}),
+          source_type: "listing_draft_batch_publish",
+          listing_draft_id: draft.id
+        }
+      }
+    });
+  }
+
   const template = draft.template_id
     ? await listingCategoryTemplateRaw(Number(draft.template_id), session)
     : null;
   if (!template) throw new Error(`鑽夌 ${draft.id || ""} 缂哄皯鍙敤绫荤洰妯℃澘`);
 
   const manualFacts = objectValue(draft.manual_facts || {});
+  const userFacts = objectValue(manualFacts.user_facts || manualFacts.userFacts || {});
   const editableFacts = normalizeEditablePayload({
     ...(template.editable_payload || {}),
-    ...manualFacts
+    ...manualFacts,
+    ...userFacts
   });
-  const attributes = normalizeAttributes(manualFacts.attributes || editableFacts.attributes || template.attributes || []);
+  const attributes = normalizeAttributes(userFacts.attributes || manualFacts.attributes || editableFacts.attributes || template.attributes || []);
   const draftImages = normalizeImages(draft.source_images || []).filter((item) => item.url);
-  const images = normalizeImages(manualFacts.images || editableFacts.images || template.images || []);
+  const images = normalizeImages(userFacts.images || manualFacts.images || editableFacts.images || template.images || []);
   const finalImages = images.length ? images : draftImages;
-  const title = String(draft.product_name || manualFacts.title || editableFacts.title || template.title || template.template_name || "").trim();
-  const description = String(manualFacts.description || editableFacts.description || template.description || "").trim();
-  const variants = normalizeArray(editableFacts.variants || template.editable_payload?.variants).map((item, index) => ({
-    ...item,
-    title: item.title || item.name || title,
-    name: item.name || item.title || title,
-    images: normalizeImages(item.images || finalImages),
-    ...(Number(draft.sale_price || 0) > 0 ? { price: Number(draft.sale_price || 0), price_value: Number(draft.sale_price || 0) } : {}),
-    ...(index === 0 && draft.internal_code ? { sku: item.sku || draft.internal_code, offer_id: item.offer_id || draft.internal_code } : {})
-  }));
+  const title = String(draft.product_name || userFacts.title || manualFacts.title || editableFacts.title || template.title || template.template_name || "").trim();
+  const description = String(userFacts.description || manualFacts.description || editableFacts.description || template.description || "").trim();
+  const price = {
+    ...objectValue(template.editable_payload?.price || {}),
+    ...objectValue(manualFacts.price || {}),
+    ...objectValue(userFacts.price || {}),
+    ...objectValue(editableFacts.price || {})
+  };
+  const draftSalePrice = Number(draft.sale_price || 0);
+  if (draftSalePrice > 0 && !numberFromOzonValue(price.value || price.price)) price.value = draftSalePrice;
+  const dimensions = {
+    ...objectValue(template.editable_payload?.dimensions || {}),
+    ...objectValue(manualFacts.dimensions || {}),
+    ...objectValue(userFacts.dimensions || {}),
+    ...objectValue(editableFacts.dimensions || {})
+  };
+  const richContentJson = userFacts.rich_content_json || userFacts.rich_content || manualFacts.rich_content_json || manualFacts.rich_content || editableFacts.rich_content_json || editableFacts.rich_content || "";
+  const variants = normalizeArray(userFacts.variants || manualFacts.variants || editableFacts.variants || template.editable_payload?.variants).map((item, index) => {
+    const variantPrice = numberFromOzonValue(item.price || item.price_value || item.priceValue || 0);
+    const finalPrice = variantPrice || numberFromOzonValue(price.value || price.price || 0) || draftSalePrice;
+    const variantOldPrice = numberFromOzonValue(item.old_price || item.oldPrice || 0) || numberFromOzonValue(price.old_price || price.oldPrice || 0);
+    return {
+      ...item,
+      title: item.title || item.name || title,
+      name: item.name || item.title || title,
+      images: normalizeImages((item.images_manually_edited || item.image_edit_intent === "manual") ? (item.images || []) : (item.images || finalImages)),
+      ...(finalPrice > 0 ? { price: finalPrice, price_value: finalPrice } : {}),
+      ...(variantOldPrice > 0 ? { old_price: variantOldPrice } : {}),
+      ...(index === 0 && draft.internal_code ? { sku: item.sku || draft.internal_code, offer_id: item.offer_id || draft.internal_code } : {})
+    };
+  });
 
   return normalizeTemplatePayload({
     ...template,
@@ -4617,6 +4948,10 @@ async function buildPublishTemplateFromListingDraft(draft = {}, session = null) 
       ...editableFacts,
       title,
       description,
+      price,
+      dimensions,
+      rich_content_json: richContentJson,
+      rich_content: richContentJson,
       attributes,
       images: finalImages,
       variants,
@@ -4630,7 +4965,102 @@ async function buildPublishTemplateFromListingDraft(draft = {}, session = null) 
   });
 }
 
-async function preparePublishRecordForSubmit({ sourceRecordId = 0, shop, shopPayload, session, updateExisting = false, sourceProductId = 0, offerSource = "", templateSnapshot = null }) {
+async function buildCanonicalDraftTemplatePayload(payload = {}, template = null, session = null) {
+  const baseTemplate = template || (payload.template_id
+    ? await listingCategoryTemplateRaw(Number(payload.template_id), session)
+    : null);
+  if (!baseTemplate) return null;
+
+  const manualFacts = objectValue(payload.manual_facts || {});
+  const userFacts = objectValue(manualFacts.user_facts || manualFacts.userFacts || {});
+  const sourceImages = normalizeImages(payload.source_images || []);
+  const editable = normalizeEditablePayload({
+    ...(baseTemplate.editable_payload || {}),
+    ...manualFacts,
+    ...userFacts
+  });
+  const images = normalizeImages(userFacts.images || manualFacts.images || editable.images || baseTemplate.images || []);
+  const finalImages = images.length ? images : sourceImages;
+  const salePrice = Number(payload.sale_price || 0);
+  const price = {
+    ...objectValue(baseTemplate.editable_payload?.price || {}),
+    ...objectValue(manualFacts.price || {}),
+    ...objectValue(userFacts.price || {})
+  };
+  if (salePrice > 0 && !numberFromOzonValue(price.value || price.price)) price.value = salePrice;
+  const dimensions = {
+    ...objectValue(baseTemplate.editable_payload?.dimensions || {}),
+    ...objectValue(manualFacts.dimensions || {}),
+    ...objectValue(userFacts.dimensions || {})
+  };
+  const draftDimensions = {
+    length_cm: Number(payload.length_cm || 0),
+    width_cm: Number(payload.width_cm || 0),
+    height_cm: Number(payload.height_cm || 0),
+    weight_g: Number(payload.weight_g || 0)
+  };
+  for (const [key, value] of Object.entries(draftDimensions)) {
+    if (value > 0 && !numberFromOzonValue(dimensions[key])) dimensions[key] = value;
+  }
+  const title = String(payload.product_name || userFacts.title || manualFacts.title || editable.title || baseTemplate.title || baseTemplate.template_name || "").trim();
+  const description = String(userFacts.description || manualFacts.description || editable.description || baseTemplate.description || "").trim();
+  const attributes = normalizeAttributes(userFacts.attributes || manualFacts.attributes || editable.attributes || baseTemplate.attributes || []);
+  const richContentJson = userFacts.rich_content_json || userFacts.rich_content || manualFacts.rich_content_json || manualFacts.rich_content || editable.rich_content_json || editable.rich_content || "";
+  const variants = normalizeArray(userFacts.variants || manualFacts.variants || editable.variants || baseTemplate.editable_payload?.variants).map((item, index) => {
+    const variantPrice = numberFromOzonValue(item.price || item.price_value || item.priceValue || 0);
+    const finalPrice = variantPrice || numberFromOzonValue(price.value || price.price || 0) || salePrice;
+    return {
+      ...item,
+      title: item.title || item.name || title,
+      name: item.name || item.title || title,
+      images: normalizeImages((item.images_manually_edited || item.image_edit_intent === "manual") ? (item.images || []) : (item.images || finalImages)),
+      ...(finalPrice > 0 ? { price: finalPrice, price_value: finalPrice } : {}),
+      ...(index === 0 && payload.internal_code ? { sku: item.sku || payload.internal_code, offer_id: item.offer_id || payload.internal_code } : {})
+    };
+  });
+  const sourceRaw = {
+    ...(baseTemplate.source_raw || {}),
+    ...(editable.source_raw || {}),
+    source_type: "listing_draft",
+    source_template_id: Number(baseTemplate.id || payload.template_id || 0)
+  };
+  return normalizeTemplatePayload({
+    ...baseTemplate,
+    template_name: title || baseTemplate.template_name,
+    title,
+    description,
+    attributes,
+    images: finalImages,
+    source_raw: sourceRaw,
+    editable_payload: {
+      ...(baseTemplate.editable_payload || {}),
+      ...editable,
+      title,
+      description,
+      price,
+      dimensions,
+      rich_content_json: richContentJson,
+      rich_content: richContentJson,
+      attributes,
+      images: finalImages,
+      variants,
+      source_raw: sourceRaw
+    }
+  });
+}
+
+async function preparePublishRecordForSubmit({
+  sourceRecordId = 0,
+  shop,
+  shopPayload,
+  session,
+  updateExisting = false,
+  sourceProductId = 0,
+  offerSource = "",
+  templateSnapshot = null,
+  draftId = 0,
+  initialStatus = "submitted"
+}) {
   const requestJson = JSON.stringify(shopPayload);
   const standardizedSnapshot = templateSnapshot
     ? await standardizeListingTemplatePayload(normalizeTemplatePayload(templateSnapshot), listingTemplateStandardizerOptions({
@@ -4661,10 +5091,12 @@ async function preparePublishRecordForSubmit({ sourceRecordId = 0, shop, shopPay
   return insert(`
     INSERT INTO listing_publish_records
     (draft_id, shop_id, offer_id, status, request_json, template_snapshot_json, source_product_id, offer_source, created_by_person_id, updated_at)
-    VALUES (0, ?, ?, 'submitted', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `, [
+    Number(draftId || 0),
     shop.id,
     offerId,
+    String(initialStatus || "submitted"),
     requestJson,
     templateSnapshotJson,
     Number(sourceProductId || 0) || null,
@@ -5861,14 +6293,21 @@ export async function createListingDraft(body, session) {
     manual_facts: payload.manual_facts || {},
     source: payload.ai_payload?.source || (payload.manual_facts?.ai_optimization_result_id ? "ai_optimization_v2" : "listing_draft")
   };
+  const templatePayload = Object.keys(objectValue(payload.template_payload || {})).length
+    ? normalizeTemplatePayload(payload.template_payload)
+    : await buildCanonicalDraftTemplatePayload({
+      ...payload,
+      manual_facts: manualFacts,
+      ai_payload: aiPayload
+    }, normalizedTemplate, session);
 
   stageStarted = Date.now();
   const id = await insert(`
     INSERT INTO listing_drafts
     (template_id, product_name, internal_code, source_urls_json, source_images_json, cost_price, sale_price,
-     length_cm, width_cm, height_cm, weight_g, color, spec, quantity, manual_facts_json, ai_payload_json,
+     length_cm, width_cm, height_cm, weight_g, color, spec, quantity, template_payload_json, manual_facts_json, ai_payload_json,
      created_by_person_id, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `, [
     payload.template_id,
     payload.product_name,
@@ -5884,6 +6323,7 @@ export async function createListingDraft(body, session) {
     payload.color,
     payload.spec,
     payload.quantity,
+    JSON.stringify(templatePayload || {}),
     JSON.stringify(manualFacts),
     JSON.stringify(aiPayload),
     personId(session)
@@ -5921,11 +6361,18 @@ export async function updateListingDraft(id, body = {}, session = null) {
     manual_facts: payload.manual_facts || {},
     source: payload.ai_payload?.source || existing.ai_payload?.source || (payload.manual_facts?.ai_optimization_result_id ? "ai_optimization_v2" : "listing_draft")
   };
+  const templatePayload = Object.keys(objectValue(payload.template_payload || {})).length
+    ? normalizeTemplatePayload(payload.template_payload)
+    : await buildCanonicalDraftTemplatePayload({
+      ...payload,
+      manual_facts: manualFacts,
+      ai_payload: aiPayload
+    }, normalizedTemplate, session);
   await mysqlExecute(`
     UPDATE listing_drafts
     SET template_id = ?, product_name = ?, internal_code = ?, source_urls_json = ?, source_images_json = ?,
         cost_price = ?, sale_price = ?, length_cm = ?, width_cm = ?, height_cm = ?, weight_g = ?,
-        color = ?, spec = ?, quantity = ?, manual_facts_json = ?, ai_payload_json = ?,
+        color = ?, spec = ?, quantity = ?, template_payload_json = ?, manual_facts_json = ?, ai_payload_json = ?,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ? AND status <> 'deleted'
   `, [
@@ -5943,6 +6390,7 @@ export async function updateListingDraft(id, body = {}, session = null) {
     payload.color,
     payload.spec,
     payload.quantity,
+    JSON.stringify(templatePayload || {}),
     JSON.stringify(manualFacts),
     JSON.stringify(aiPayload),
     draftId
@@ -6031,6 +6479,14 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
     payload
   }, session);
   payload.template_id = draftTemplateId;
+  const draftTemplate = await listingCategoryTemplateRaw(draftTemplateId, session).catch(() => null);
+  const templatePayload = Object.keys(objectValue(payload.template_payload || {})).length
+    ? normalizeTemplatePayload(payload.template_payload)
+    : await buildCanonicalDraftTemplatePayload({
+      ...payload,
+      manual_facts: manualFacts,
+      ai_payload: aiPayload
+    }, draftTemplate, session);
   logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.template_upsert", stageStarted, {
     templateId: draftTemplateId,
     mode: Number(existing?.template_id || 0) ? "update" : "insert"
@@ -6053,6 +6509,7 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
     payload.color,
     payload.spec,
     payload.quantity,
+    JSON.stringify(templatePayload || {}),
     JSON.stringify(manualFacts),
     JSON.stringify(aiPayload),
     personId(session)
@@ -6062,7 +6519,7 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
       UPDATE listing_drafts
       SET template_id = ?, product_name = ?, internal_code = ?, source_urls_json = ?, source_images_json = ?,
           cost_price = ?, sale_price = ?, length_cm = ?, width_cm = ?, height_cm = ?, weight_g = ?,
-          color = ?, spec = ?, quantity = ?, manual_facts_json = ?, ai_payload_json = ?,
+          color = ?, spec = ?, quantity = ?, template_payload_json = ?, manual_facts_json = ?, ai_payload_json = ?,
           created_by_person_id = COALESCE(created_by_person_id, ?), updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND status <> 'deleted'
     `, [...params, draftId]);
@@ -6070,9 +6527,9 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
     draftId = await insert(`
       INSERT INTO listing_drafts
       (template_id, product_name, internal_code, source_urls_json, source_images_json, cost_price, sale_price,
-       length_cm, width_cm, height_cm, weight_g, color, spec, quantity, manual_facts_json, ai_payload_json,
+       length_cm, width_cm, height_cm, weight_g, color, spec, quantity, template_payload_json, manual_facts_json, ai_payload_json,
        created_by_person_id, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     `, params);
   }
   logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.upsert", stageStarted, { draftId, mode: existing ? "update" : "insert" });
@@ -6090,6 +6547,7 @@ function applyAiVariantDraftPatch(editable = {}, patch = {}) {
   const tags = normalizeStringList(patch.tags || patch.hashtags);
   const images = normalizeImages(cleanListingImageUrls(patch.images || patch.source_images || patch.sourceImages || next.images || []));
   const videoUrls = normalizeStringList(patch.video_urls || patch.videoUrls || patch.video_url || patch.videoUrl);
+  const richContentJson = String(patch.rich_content_json || patch.richContentJson || patch.richTextContent || patch.richText || "").trim();
   if (title) {
     next.title = title;
     next.name = title;
@@ -6097,7 +6555,11 @@ function applyAiVariantDraftPatch(editable = {}, patch = {}) {
   if (description) next.description = description;
   if (tags.length) next.hashtags = tags;
   if (images.length) next.images = images;
-  next.attributes = syncAiVariantTextAttributes(next.attributes || [], { title, description, tags });
+  if (richContentJson) {
+    next.rich_content_json = richContentJson;
+    next.richContentJson = richContentJson;
+  }
+  next.attributes = syncAiVariantTextAttributes(next.attributes || [], { title, description, tags, richContentJson });
   next.logistics = {
     ...(next.logistics || {}),
     ...(tags.length ? { tags } : {})
@@ -6165,9 +6627,11 @@ function sanitizeDraftManualFactsMedia(manualFacts = {}, sourceImages = [], opti
   if (shouldTouchVariants) {
     next.variants = normalizeArray(next.variants).map((variant, index) => {
       const cleanVariant = { ...variant };
-      const variantImages = cleanListingImageUrls(index === 0 ? cleanImages : (variant.images || cleanImages));
+      const variantImagesEdited = Boolean(variant?.images_manually_edited || variant?.image_edit_intent === "manual");
+      const rawVariantImages = variantImagesEdited ? (variant.images || []) : (index === 0 ? cleanImages : (variant.images || cleanImages));
+      const variantImages = cleanListingImageUrls(rawVariantImages);
       const shouldSetImages = options.forceImages || Object.prototype.hasOwnProperty.call(variant || {}, "images");
-      if (shouldSetImages) cleanVariant.images = normalizeImages(variantImages.length ? variantImages : cleanImages);
+      if (shouldSetImages) cleanVariant.images = normalizeImages(variantImagesEdited ? variantImages : (variantImages.length ? variantImages : cleanImages));
       if (Object.prototype.hasOwnProperty.call(variant || {}, "video_urls") || Object.prototype.hasOwnProperty.call(variant || {}, "videos") || Object.prototype.hasOwnProperty.call(variant || {}, "video_url")) {
         cleanVariant.video_urls = cleanListingVideoUrls(variant.video_urls || variant.videos || variant.video_url);
       }
@@ -6223,6 +6687,7 @@ function syncAiVariantTextAttributes(attributes = [], facts = {}) {
   upsert(["鏍囬", "袧邪蟹胁邪薪懈械"], facts.title, { name: "鏍囬", required: true });
   upsert(["浜у搧鏍囩", "涓诲浘鏍囩", "泻谢褞褔械胁褘械 褋谢芯胁邪", "褌械谐"], facts.tags, { name: "浜у搧鏍囩", attribute_id: 23171, type: "multiselect" });
   upsert(["Description", "Аннотация", "Описание"], facts.description, { name: "Description", attribute_id: 4191, type: "textarea" });
+  upsert(["rich_content_json", "Rich content JSON", "JSON富内容"], facts.richContentJson, { name: "rich_content_json", attribute_id: 11254, type: "rich_json" });
   return next;
 }
 
@@ -6234,13 +6699,15 @@ async function upsertAiVariantListingDraftTemplate(input = {}, session = null) {
   };
   const title = String(input.title || editable.title || baseTemplate.title || baseTemplate.template_name || "").trim();
   const description = String(input.description || editable.description || baseTemplate.description || "").trim();
+  const richContentJson = String(input.editable?.rich_content_json || input.editable?.richContentJson || editable.rich_content_json || editable.richContentJson || "").trim();
   const images = normalizeImages(input.images || editable.images || baseTemplate.images || []);
   const attributes = syncAiVariantTextAttributes(
     input.editable?.attributes || editable.attributes || baseTemplate.attributes || [],
     {
       title,
       description,
-      tags: normalizeStringList(input.editable?.hashtags || editable.hashtags || input.manualFacts?.hashtags || [])
+      tags: normalizeStringList(input.editable?.hashtags || editable.hashtags || input.manualFacts?.hashtags || []),
+      richContentJson
     }
   );
   const sourceRaw = {
@@ -6257,6 +6724,7 @@ async function upsertAiVariantListingDraftTemplate(input = {}, session = null) {
     title,
     name: title,
     description,
+    ...(richContentJson ? { rich_content_json: richContentJson, richContentJson } : {}),
     attributes,
     images,
     source_raw: sourceRaw
@@ -7125,6 +7593,7 @@ export async function ensureListingAutomationSchema() {
         color VARCHAR(128) NOT NULL DEFAULT '',
         spec VARCHAR(255) NOT NULL DEFAULT '',
         quantity INT NOT NULL DEFAULT 0,
+        template_payload_json LONGTEXT NULL,
         manual_facts_json LONGTEXT NOT NULL,
         ai_payload_json LONGTEXT NOT NULL,
         status VARCHAR(32) NOT NULL DEFAULT 'draft',
@@ -7134,6 +7603,7 @@ export async function ensureListingAutomationSchema() {
         INDEX idx_listing_drafts_owner_status (created_by_person_id, status, updated_at)
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
+    await ensureMysqlColumn("listing_drafts", "template_payload_json", "LONGTEXT NULL");
     await mysqlExecute(`
       CREATE TABLE IF NOT EXISTS listing_ai_variant_assets (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -7770,15 +8240,31 @@ function mergeCollectedDynamicAttributes(...sources) {
   }));
 }
 
-function collectedVariantImages(item = {}, productImages = [], multiVariant = false) {
+function collectedVariantImages(item = {}, productImages = [], multiVariant = false, preferProductImages = false) {
+  const normalizedProductImages = dedupeImagesByUrl(normalizeImages(productImages || []));
+  if (preferProductImages && normalizedProductImages.length) return multiVariant ? normalizedProductImages.slice(0, 1) : normalizedProductImages;
   const ownImages = dedupeImagesByUrl(normalizeImages([
     item.cover_image || item.coverImage || item.primary_image || item.primaryImage || item.main_image || item.mainImage || "",
     ...(normalizeArray(item.images || item.image_urls || item.imageUrls))
   ]));
   if (ownImages.length) return ownImages;
-  const normalizedProductImages = dedupeImagesByUrl(normalizeImages(productImages || []));
   if (!multiVariant) return normalizedProductImages;
   return normalizedProductImages.slice(0, 1);
+}
+
+function hasEditedCollectorImages(detail = {}, editPayload = {}) {
+  const userImages = normalizeImages([
+    ...normalizeArray(detail.source_images || detail.sourceImages),
+    ...normalizeArray(detail.user_images || detail.userImages),
+    ...normalizeArray(detail.uploaded_images || detail.uploadedImages),
+    ...normalizeArray(editPayload.source_images || editPayload.sourceImages),
+    ...normalizeArray(editPayload.user_images || editPayload.userImages),
+    ...normalizeArray(editPayload.uploaded_images || editPayload.uploadedImages)
+  ]);
+  if (userImages.length) return true;
+  const editedVariantImages = normalizeArray(editPayload.variants || editPayload.editorVariants || editPayload.editor_variants)
+    .flatMap((variant) => normalizeImages(variant?.images || variant?.image_urls || variant?.imageUrls || []));
+  return editedVariantImages.length > 0;
 }
 
 function dedupeImagesByUrl(images = []) {
@@ -8130,7 +8616,7 @@ function buildOzonImportPreviewPayload(facts = {}, template = {}) {
   const safeDescription = sanitizeOzonBuyerDescription(facts.description);
   const safeRichContent = sanitizeOzonRichContentJson(facts.richContent || "", safeDescription);
   const attrs = facts.attributes
-    .filter((item) => item.attribute_id && normalizeAttributeValue(item.value))
+    .filter((item) => item.attribute_id && normalizeAttributeValuesForOzon(item).length)
     .filter((item) => !isSchemaPlaceholderAttributeValue(item))
     .map((item) => Number(item.attribute_id) === 4191 ? { ...item, value: sanitizeOzonBuyerDescription(item.value || safeDescription) } : item)
     .map((item) => Number(item.attribute_id) === 11254 ? { ...item, value: sanitizeOzonRichContentJson(item.value || safeRichContent, safeDescription) } : item)
@@ -9758,6 +10244,7 @@ function normalizeDraftPayload(body = {}) {
     color: String(body.color || "").trim(),
     spec: String(body.spec || "").trim(),
     quantity: Number(body.quantity || 0),
+    template_payload: objectValue(body.template_payload || body.templatePayload || body.template || body.canonical_payload || body.canonicalPayload),
     manual_facts: objectValue(body.manual_facts || body.manualFacts),
     ai_payload: objectValue(body.ai_payload || body.aiPayload)
   };
@@ -9833,7 +10320,7 @@ function buildDeepSeekListingPrompt(type, context = {}) {
   const typeRules = {
     listingForm: [
       "Generate a complete set of editable listing fields: title, model, tags, summary, richJson when possible, attributes, and variant row values.",
-      "Tags must start with #, use Russian words or underscore phrases, max 20 tags, each tag should be short.",
+      "Tags must start with #, use Russian words or underscore phrases, max 25 tags, each tag should be short.",
       "Summary must be 150-250 Russian words and read like a coherent product description with smooth sentence flow.",
       "The summary may naturally include product benefits, material, fitment and usage scenes, but do not force every title word or tag into it.",
       "Do not write a keyword block, tag list, or unnatural stitched text; Ozon may reject descriptions that look like keyword stuffing.",
@@ -9848,8 +10335,9 @@ function buildDeepSeekListingPrompt(type, context = {}) {
       "Use only the most relevant search phrases when they fit naturally."
     ],
     description: [
-      "Return fields.summary and/or fields.richJson. Rich JSON must be parseable JSON string or object.",
-      "The text must use fluent SEO-aware Russian copy connected to the product, but must not include literal tags, hashtag lists, or keyword stuffing."
+      "Return fields.summary and content as plain Russian buyer prose only.",
+      "Do not return richJson, JSON strings, markdown, hashtag lists, or keyword stuffing.",
+      "The text must use fluent SEO-aware Russian copy connected to the product."
     ],
     attributeFill: [
       "Fill only the requested attribute or missing required attributes.",
@@ -9878,7 +10366,21 @@ function parseAiContentJson(content) {
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
   const candidate = fenced || raw.match(/\{[\s\S]*\}/)?.[0] || raw;
   try {
-    return objectValue(JSON.parse(candidate));
+    const parsed = objectValue(JSON.parse(candidate));
+    const nested = typeof parsed.content === "string" && /^\s*\{[\s\S]*\}\s*$/.test(parsed.content)
+      ? objectValue(JSON.parse(parsed.content))
+      : null;
+    if (nested && (nested.content !== undefined || nested.fields !== undefined)) {
+      return {
+        ...parsed,
+        content: nested.content ?? parsed.content,
+        fields: {
+          ...objectValue(parsed.fields || {}),
+          ...objectValue(nested.fields || nested)
+        }
+      };
+    }
+    return parsed;
   } catch {
     return { content: raw, fields: {} };
   }
@@ -12126,10 +12628,12 @@ function importStatus(response) {
 }
 
 function normalizeDraftRow(row) {
+  const templatePayload = parseJson(row.template_payload_json, null);
   return {
     ...row,
     source_urls: parseJson(row.source_urls_json, []),
     source_images: parseJson(row.source_images_json, []),
+    template_payload: templatePayload && Object.keys(templatePayload).length ? templatePayload : null,
     manual_facts: parseJson(row.manual_facts_json, {}),
     ai_payload: parseJson(row.ai_payload_json, {})
   };

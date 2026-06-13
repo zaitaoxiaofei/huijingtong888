@@ -27,6 +27,8 @@ const LOCAL_ASSET_ROOTS = localAssetRootCandidates(ROOT_DIR);
 const VARIANT_ROOT = path.resolve(ROOT_DIR, "uploads", "shop-variants");
 const TAIL_TEMPLATE_ROOT = path.resolve(ROOT_DIR, "public", "uploads", "asset-tail-templates");
 const LISTING_MEDIA_ROOT = path.resolve(ROOT_DIR, "public", "uploads", "listing-media");
+const AI_GENERATED_ROOT = path.resolve(ROOT_DIR, process.env.AI_IMAGE_OUTPUT_DIR || "uploads/ai-generated");
+const AI_CROPPED_ROOT = path.resolve(ROOT_DIR, process.env.AI_CROP_OUTPUT_DIR || "uploads/ai-cropped");
 const ASSET_SHOP_CONCURRENCY = envInt("ASSET_SHOP_CONCURRENCY", 2, 1, 4);
 const ASSET_TEXT_CONCURRENCY = envInt("ASSET_TEXT_CONCURRENCY", 10, 1, 30);
 const ASSET_VARIANT_IMAGE_CONCURRENCY = envInt("ASSET_VARIANT_IMAGE_CONCURRENCY", 3, 1, 6);
@@ -583,55 +585,66 @@ export async function generateAssetVariantVideoFromImage(body = {}, session = nu
   await ensureAssetVariantSchema();
   const imageUrl = cleanText(body.imageUrl || body.image_url || body.mainImageUrl || body.main_image_url);
   if (!imageUrl) throw new Error("请先准备主图后再生成视频");
-  const sourceId = cleanText(body.sourceId || body.source_id || body.productId || body.product_id || "ai-optimization");
-  const recipe = serverVideoRecipe();
-  let sourcePath = resolveLocalAssetPath(imageUrl);
-  let sourceName = path.basename(sourcePath || "") || "video-source.jpg";
-  let materializedSourceBuffer = null;
-  let sourceHash = "";
-  if (sourcePath && fsSync.existsSync(sourcePath)) {
-    sourceHash = await fileSha256(sourcePath).catch(() => "");
-    const cachedVideo = sourceHash ? await loadCachedAssetVariantVideo(sourceHash, recipe) : null;
-    if (cachedVideo) return { video: normalizeGeneratedVideoForResponse(cachedVideo) };
-  } else {
-    const sourceBuffer = await readImageBuffer(imageUrl);
-    materializedSourceBuffer = await sharp(sourceBuffer)
-      .rotate()
-      .resize(SERVER_VIDEO_WIDTH, SERVER_VIDEO_HEIGHT, { fit: "cover" })
-      .jpeg({ quality: 92 })
-      .toBuffer();
-    sourceHash = hashBuffer(materializedSourceBuffer);
-    const cachedVideo = await loadCachedAssetVariantVideo(sourceHash, recipe);
-    if (cachedVideo) return { video: normalizeGeneratedVideoForResponse(cachedVideo) };
+  try {
+    const sourceId = cleanText(body.sourceId || body.source_id || body.productId || body.product_id || "ai-optimization");
+    const recipe = serverVideoRecipe();
+    let sourcePath = resolveLocalAssetPath(imageUrl);
+    let sourceName = path.basename(sourcePath || "") || "video-source.jpg";
+    let materializedSourceBuffer = null;
+    let sourceHash = "";
+    if (sourcePath && fsSync.existsSync(sourcePath)) {
+      sourceHash = await fileSha256(sourcePath).catch(() => "");
+      const cachedVideo = sourceHash ? await loadCachedAssetVariantVideo(sourceHash, recipe) : null;
+      if (cachedVideo) return { video: normalizeGeneratedVideoForResponse(cachedVideo) };
+    } else {
+      const sourceBuffer = await readImageBuffer(imageUrl);
+      materializedSourceBuffer = await sharp(sourceBuffer)
+        .rotate()
+        .resize(SERVER_VIDEO_WIDTH, SERVER_VIDEO_HEIGHT, { fit: "cover" })
+        .jpeg({ quality: 92 })
+        .toBuffer();
+      sourceHash = hashBuffer(materializedSourceBuffer);
+      const cachedVideo = await loadCachedAssetVariantVideo(sourceHash, recipe);
+      if (cachedVideo) return { video: normalizeGeneratedVideoForResponse(cachedVideo) };
+    }
+    const batchId = `aiopt-video-${Date.now().toString(36)}-${createHash("sha1").update(`${sourceId}:${imageUrl}`).digest("hex").slice(0, 8)}`;
+    const outputDir = path.join(VARIANT_ROOT, batchId);
+    const imageDir = path.join(outputDir, "images");
+    await fs.mkdir(outputDir, { recursive: true });
+    if (!sourcePath || !fsSync.existsSync(sourcePath)) {
+      await fs.mkdir(imageDir, { recursive: true });
+      sourcePath = path.join(imageDir, "video-source.jpg");
+      await fs.writeFile(sourcePath, materializedSourceBuffer);
+      sourceName = "video-source.jpg";
+    }
+    const variant = {
+      id: 0,
+      batch_id: batchId,
+      shop_id: 0,
+      output_dir: outputDir,
+      variant_title: cleanText(body.title || body.productName || body.product_name || ""),
+      category_name: cleanText(body.categoryName || body.category_name || "")
+    };
+    const generatedVideo = await withTimeout(ensureAssetVariantVideoFromImages(null, variant, [{
+      role: "main",
+      type: "main",
+      url: imageUrl,
+      outputPath: sourcePath,
+      localListingPath: sourcePath,
+      name: sourceName
+    }], { skipPublicSync: true }), SERVER_VIDEO_GENERATION_TIMEOUT_MS, "视频生成超时，请稍后重试或先保存草稿");
+    if (!generatedVideo) throw new Error("视频生成失败，请确认主图可访问");
+    return { video: normalizeGeneratedVideoForResponse(generatedVideo) };
+  } catch (error) {
+    const payload = buildAssetVariantJobErrorPayload(error);
+    if (["local_image_missing", "remote_image_unavailable"].includes(payload.code)) {
+      const normalized = new Error(payload.message);
+      normalized.status = 400;
+      normalized.validation = payload;
+      throw normalized;
+    }
+    throw error;
   }
-  const batchId = `aiopt-video-${Date.now().toString(36)}-${createHash("sha1").update(`${sourceId}:${imageUrl}`).digest("hex").slice(0, 8)}`;
-  const outputDir = path.join(VARIANT_ROOT, batchId);
-  const imageDir = path.join(outputDir, "images");
-  await fs.mkdir(outputDir, { recursive: true });
-  if (!sourcePath || !fsSync.existsSync(sourcePath)) {
-    await fs.mkdir(imageDir, { recursive: true });
-    sourcePath = path.join(imageDir, "video-source.jpg");
-    await fs.writeFile(sourcePath, materializedSourceBuffer);
-    sourceName = "video-source.jpg";
-  }
-  const variant = {
-    id: 0,
-    batch_id: batchId,
-    shop_id: 0,
-    output_dir: outputDir,
-    variant_title: cleanText(body.title || body.productName || body.product_name || ""),
-    category_name: cleanText(body.categoryName || body.category_name || "")
-  };
-  const generatedVideo = await withTimeout(ensureAssetVariantVideoFromImages(null, variant, [{
-    role: "main",
-    type: "main",
-    url: imageUrl,
-    outputPath: sourcePath,
-    localListingPath: sourcePath,
-    name: sourceName
-  }]), SERVER_VIDEO_GENERATION_TIMEOUT_MS, "视频生成超时，请稍后重试或先保存草稿");
-  if (!generatedVideo) throw new Error("视频生成失败，请确认主图可访问");
-  return { video: normalizeGeneratedVideoForResponse(generatedVideo) };
 }
 
 export async function generateListingVariantMediaFromImage(body = {}, session = null) {
@@ -671,6 +684,49 @@ export async function generateListingVariantMediaFromImage(body = {}, session = 
     ok: true,
     cover: video,
     video
+  };
+}
+
+export async function ensureAssetVariantImagePublishUrl(source = "", context = {}) {
+  const sourceUrl = cleanText(source, 2000);
+  if (!sourceUrl) return { url: "", publishUrl: "", previewUrl: "", status: "empty" };
+  if (/^https?:\/\//i.test(sourceUrl) && !isLocalFileApiSource(sourceUrl)) {
+    return { url: sourceUrl, publishUrl: sourceUrl, previewUrl: sourceUrl, status: "remote" };
+  }
+  if (/^data:/i.test(sourceUrl)) {
+    return { url: sourceUrl, publishUrl: "", previewUrl: sourceUrl, status: "data_url" };
+  }
+  if (!isLocalFileApiSource(sourceUrl) && !/^\/?uploads\//i.test(sourceUrl) && !/^\/?public\//i.test(sourceUrl)) {
+    return { url: sourceUrl, publishUrl: "", previewUrl: sourceUrl, status: "unchanged" };
+  }
+  const localPath = resolveLocalAssetPath(sourceUrl);
+  if (!localPath || !fsSync.existsSync(localPath)) {
+    return { url: sourceUrl, publishUrl: "", previewUrl: sourceUrl, status: "local_missing" };
+  }
+  const asset = await registerListingMediaAssetFromFile({
+    filePath: localPath,
+    source_module: context.sourceModule || context.source_module || "ai_variant_rich_text",
+    source_id: context.sourceId || context.source_id || sourceUrl,
+    batch_id: context.batchId || context.batch_id || "",
+    shop_id: context.shopId ?? context.shop_id ?? null,
+    media_type: "image",
+    role: context.role || "rich_text_image",
+    sort_order: context.sortOrder || context.sort_order || 1,
+    metadata: {
+      sourceUrl,
+      fieldKey: "richText",
+      resultId: context.resultId || context.result_id || "",
+      workflowId: context.workflowId || context.workflow_id || ""
+    }
+  });
+  const publishUrl = asset.publishUrl || asset.publish_url || "";
+  const previewUrl = asset.previewUrl || asset.preview_url || "";
+  return {
+    url: publishUrl || previewUrl || sourceUrl,
+    publishUrl,
+    previewUrl,
+    assetId: asset.id,
+    status: publishUrl ? "public_ready" : "local_ready"
   };
 }
 
@@ -2500,6 +2556,7 @@ async function generateAndRegisterAssetVariantVideo({ variant = {}, sourceImage 
     sort_order: 1,
     original_name: "shop-video.mp4",
     mime_type: "video/mp4",
+    skipPublicSync: context.skipPublicSync || context.skip_public_sync || false,
     metadata: {
       generatedBy,
       videoRecipe: recipe,
@@ -3800,12 +3857,23 @@ async function readImageBuffer(source) {
     const storedImage = String(rows[0]?.image_url || "").trim();
     if (storedImage && storedImage !== text) return readImageBuffer(storedImage);
   }
+  if (isLocalFileApiSource(text)) {
+    const localPath = resolveLocalAssetPath(text);
+    if (!fsSync.existsSync(localPath)) {
+      const error = new Error(`本地图片文件不存在：${text}`);
+      error.code = "LOCAL_ASSET_MISSING";
+      error.assetPath = localPath;
+      error.source = text;
+      throw error;
+    }
+    return fs.readFile(localPath);
+  }
   if (/^\/?api\//i.test(text)) {
     return fetchImageBuffer(new URL(text.replace(/^\/?/, "/"), config.appBaseUrl).toString());
   }
   if (/^https?:\/\//i.test(text)) {
     const response = await fetch(text);
-    if (!response.ok) throw new Error(`闂佹悶鍎辨晶鑺ユ櫠閺嶃劎鈻旈悗锝庡幗缁佹澘顭块幆鎵翱閻熸瑱绠撻弫?{response.status}`);
+    if (!response.ok) throw new Error(`远程图片下载失败：${response.status}`);
     return Buffer.from(await response.arrayBuffer());
   }
   const localPath = resolveLocalAssetPath(text);
@@ -3821,7 +3889,7 @@ async function readImageBuffer(source) {
 
 async function fetchImageBuffer(url) {
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`闂佹悶鍎辨晶鑺ユ櫠閺嶃劎鈻旈悗锝庡幗缁佹澘顭块幆鎵翱閻熸瑱绠撻弫?{response.status}`);
+  if (!response.ok) throw new Error(`远程图片下载失败：${response.status}`);
   return Buffer.from(await response.arrayBuffer());
 }
 
@@ -3892,6 +3960,18 @@ function localAssetRootCandidates(rootDir = ROOT_DIR) {
   });
 }
 
+function aiFileRootCandidates(scope = "generated") {
+  const folder = scope === "cropped" ? "ai-cropped" : "ai-generated";
+  const configuredRoot = scope === "cropped" ? AI_CROPPED_ROOT : AI_GENERATED_ROOT;
+  const candidates = [configuredRoot];
+  for (const root of LOCAL_ASSET_ROOTS) {
+    candidates.push(path.resolve(root, "uploads", folder));
+    candidates.push(path.resolve(root, "dist", "preview", "uploads", folder));
+    candidates.push(path.resolve(root, "dist", "deploy", "uploads", folder));
+  }
+  return uniqueValues(candidates);
+}
+
 function resolveLocalAssetPath(value = "") {
   const text = String(value || "").trim();
   if (!text) return "";
@@ -3903,15 +3983,27 @@ function resolveLocalAssetPath(value = "") {
       return text;
     }
   }
+  normalized = normalized.split(/[?#]/)[0];
   const assetFileMatch = normalized.match(/^\/?api\/asset-variant-engine\/files\/([^/]+)\/(.+)$/i);
   if (assetFileMatch) {
     const batchId = decodeURIComponent(assetFileMatch[1]);
     const fileName = assetFileMatch[2].split("/").map((part) => decodeURIComponent(part)).join(path.sep);
     return path.resolve(VARIANT_ROOT, batchId, fileName);
   }
+  const aiFileMatch = normalized.match(/^\/?api\/ai\/file\/([^/]+)\/(generated|cropped)\/(.+)$/i);
+  if (aiFileMatch) {
+    const taskId = decodeURIComponent(aiFileMatch[1]);
+    const scope = String(aiFileMatch[2] || "").toLowerCase();
+    const fileName = aiFileMatch[3].split("/").map((part) => decodeURIComponent(part)).join(path.sep);
+    const candidates = aiFileRootCandidates(scope).map((root) => path.resolve(root, taskId, fileName));
+    return candidates.find((candidate) => fsSync.existsSync(candidate)) || candidates[0] || text;
+  }
   const candidates = [];
   const withoutLeadingSlash = normalized.replace(/^\/+/, "");
   for (const root of LOCAL_ASSET_ROOTS) {
+    if (withoutLeadingSlash.startsWith("preview-assets/")) {
+      candidates.push(path.resolve(root, "public", withoutLeadingSlash));
+    }
     if (withoutLeadingSlash.startsWith("uploads/")) {
       candidates.push(path.resolve(root, "public", withoutLeadingSlash));
       candidates.push(path.resolve(root, withoutLeadingSlash));
@@ -3927,6 +4019,21 @@ function resolveLocalAssetPath(value = "") {
   }
   const uniqueCandidates = uniqueValues(candidates);
   return uniqueCandidates.find((candidate) => fsSync.existsSync(candidate)) || uniqueCandidates[0] || text;
+}
+
+function isLocalFileApiSource(value = "") {
+  const text = String(value || "").trim().replace(/\\/g, "/");
+  if (!text) return false;
+  let pathname = text;
+  if (/^https?:\/\//i.test(text)) {
+    try {
+      pathname = new URL(text).pathname || "";
+    } catch {
+      return false;
+    }
+  }
+  return /^\/?api\/asset-variant-engine\/files\/[^/]+\/.+/i.test(pathname)
+    || /^\/?api\/ai\/file\/[^/]+\/(?:generated|cropped)\/.+/i.test(pathname);
 }
 
 async function removeLocalAssetPath(value, { recursive = false } = {}) {

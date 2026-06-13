@@ -55,6 +55,22 @@ function rememberIntendedRoute(targetRoute) {
   if (route.startsWith("/")) sessionStorage.setItem(DYNAMIC_IMPORT_INTENDED_ROUTE, route);
 }
 
+function installSelectDropdownWheelFix() {
+  document.addEventListener("wheel", (event) => {
+    const dropdown = event.target?.closest?.(".el-select-dropdown");
+    if (!dropdown) return;
+    const scrollWrap = dropdown.querySelector(".el-scrollbar__wrap");
+    if (!scrollWrap || scrollWrap.scrollHeight <= scrollWrap.clientHeight) return;
+
+    const before = scrollWrap.scrollTop;
+    scrollWrap.scrollTop += event.deltaY;
+    if (scrollWrap.scrollTop !== before) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, { capture: true, passive: false });
+}
+
 const app = createApp(App);
 const pinia = createPinia();
 
@@ -85,6 +101,10 @@ router.afterEach((to) => {
   if (sessionStorage.getItem(DYNAMIC_IMPORT_INTENDED_ROUTE) === to.fullPath) {
     sessionStorage.removeItem(DYNAMIC_IMPORT_INTENDED_ROUTE);
   }
+  if (sessionStorage.getItem(DYNAMIC_IMPORT_PENDING_ROUTE) === to.fullPath) {
+    sessionStorage.removeItem(DYNAMIC_IMPORT_PENDING_ROUTE);
+    clearDynamicImportReloadState();
+  }
 });
 
 router.onError((error, to) => {
@@ -99,17 +119,23 @@ window.addEventListener("vite:preloadError", (event) => {
   }
 });
 
+installSelectDropdownWheelFix();
+
 app.mount("#adminApp");
 window.__hideAdminStaticLoginFallback?.();
 
 router.isReady().then(() => {
   window.__hideAdminStaticLoginFallback?.();
-  clearDynamicImportReloadState();
   const pendingRoute = sessionStorage.getItem(DYNAMIC_IMPORT_PENDING_ROUTE);
-  if (!pendingRoute) return;
-  sessionStorage.removeItem(DYNAMIC_IMPORT_PENDING_ROUTE);
-  sessionStorage.removeItem(DYNAMIC_IMPORT_INTENDED_ROUTE);
+  if (!pendingRoute) {
+    clearDynamicImportReloadState();
+    return;
+  }
   if (pendingRoute !== router.currentRoute.value.fullPath) {
     router.replace(pendingRoute).catch(() => {});
+    return;
   }
+  sessionStorage.removeItem(DYNAMIC_IMPORT_PENDING_ROUTE);
+  sessionStorage.removeItem(DYNAMIC_IMPORT_INTENDED_ROUTE);
+  clearDynamicImportReloadState();
 });

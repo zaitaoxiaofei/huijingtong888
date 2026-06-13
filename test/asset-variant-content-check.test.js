@@ -163,3 +163,39 @@ test("asset variant on-demand video generation has a bounded timeout", () => {
   assert.match(assetVariantSource, /withTimeout\(ensureAssetVariantVideoFromImages\(null, variant/);
   assert.match(assetVariantSource, /视频生成超时，请稍后重试或先保存草稿/);
 });
+
+test("asset variant on-demand video reports unreadable source images as validation errors", () => {
+  const videoSection = assetVariantSource.match(/export async function generateAssetVariantVideoFromImage[\s\S]*?export async function generateListingVariantMediaFromImage/)?.[0] || "";
+  assert.match(videoSection, /buildAssetVariantJobErrorPayload\(error\)/);
+  assert.match(videoSection, /local_image_missing/);
+  assert.match(videoSection, /remote_image_unavailable/);
+  assert.match(videoSection, /normalized\.status = 400/);
+  assert.match(videoSection, /normalized\.validation = payload/);
+  assert.match(assetVariantSource, /远程图片下载失败：\$\{response\.status\}/);
+});
+
+test("asset variant on-demand video accepts public preview images without public sync", () => {
+  assert.match(assetVariantSource, /withoutLeadingSlash\.startsWith\("preview-assets\/"\)/);
+  assert.match(assetVariantSource, /path\.resolve\(root, "public", withoutLeadingSlash\)/);
+  assert.match(assetVariantSource, /skipPublicSync:\s*true/);
+  assert.match(assetVariantSource, /skipPublicSync:\s*context\.skipPublicSync \|\| context\.skip_public_sync \|\| false/);
+});
+
+test("asset variant video reads generated AI file API images from local storage", () => {
+  assert.match(assetVariantSource, /function isLocalFileApiSource\(value = ""\)/);
+  assert.match(assetVariantSource, /isLocalFileApiSource\(text\)/);
+  assert.match(assetVariantSource, /api\\\/ai\\\/file\\\/\[\^\/\]\+\\\/\(\?:generated\|cropped\)\\\/\.\+/);
+  assert.match(assetVariantSource, /const AI_GENERATED_ROOT = path\.resolve\(ROOT_DIR, process\.env\.AI_IMAGE_OUTPUT_DIR \|\| "uploads\/ai-generated"\)/);
+  assert.match(assetVariantSource, /const AI_CROPPED_ROOT = path\.resolve\(ROOT_DIR, process\.env\.AI_CROP_OUTPUT_DIR \|\| "uploads\/ai-cropped"\)/);
+  assert.match(assetVariantSource, /function aiFileRootCandidates\(scope = "generated"\)/);
+  assert.match(assetVariantSource, /path\.resolve\(root, "dist", "preview", "uploads", folder\)/);
+  assert.match(assetVariantSource, /path\.resolve\(root, "dist", "deploy", "uploads", folder\)/);
+  assert.match(assetVariantSource, /candidates\.find\(\(candidate\) => fsSync\.existsSync\(candidate\)\)/);
+});
+
+test("asset variant rich text can publish internal generated images before embedding them", () => {
+  assert.match(assetVariantSource, /export async function ensureAssetVariantImagePublishUrl\(source = "", context = {}\)/);
+  assert.match(assetVariantSource, /source_module: context\.sourceModule \|\| context\.source_module \|\| "ai_variant_rich_text"/);
+  assert.match(assetVariantSource, /role: context\.role \|\| "rich_text_image"/);
+  assert.match(assetVariantSource, /status: publishUrl \? "public_ready" : "local_ready"/);
+});

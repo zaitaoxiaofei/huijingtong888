@@ -76,6 +76,9 @@ ${modulePreloadTags}
       .admin-static-login-fallback.is-hidden {
         display: none;
       }
+      body:has(#adminApp > *) #adminStaticLoginFallback {
+        display: none !important;
+      }
       .admin-static-login-card {
         width: min(420px, 100%);
         padding: 30px;
@@ -141,6 +144,7 @@ ${modulePreloadTags}
         var title = document.getElementById("adminStaticLoginTitle");
         var hint = document.getElementById("adminStaticLoginHint");
         var fallbackTimer = 0;
+        var fallbackWatchTimer = 0;
         var chunkReloadKey = "ozon-admin-shell-chunk-reload";
         var maxChunkReloads = 2;
         function errorMessage(event) {
@@ -220,15 +224,28 @@ ${modulePreloadTags}
         }
         function hideFallback() {
           if (!fallback) return;
+          window.clearTimeout(fallbackTimer);
+          window.clearInterval(fallbackWatchTimer);
           fallback.classList.add("is-hidden");
           fallback.hidden = true;
           sessionStorage.removeItem(chunkReloadKey);
+        }
+        function hideFallbackWhenAppMounted() {
+          if (!shouldShowFallback()) hideFallback();
         }
         window.__showAdminStaticLoginFallback = function () {
           showFallback(true);
         };
         window.__hideAdminStaticLoginFallback = hideFallback;
         fallbackTimer = window.setTimeout(showFallback, 2600);
+        var app = document.getElementById("adminApp");
+        if (app && window.MutationObserver) {
+          new MutationObserver(hideFallbackWhenAppMounted).observe(app, { childList: true });
+        }
+        fallbackWatchTimer = window.setInterval(hideFallbackWhenAppMounted, 250);
+        window.setTimeout(function () {
+          window.clearInterval(fallbackWatchTimer);
+        }, 10000);
         window.addEventListener("error", function (event) {
           if (reloadForChunkError(event)) return;
           if (!shouldShowFatalError(event)) return;

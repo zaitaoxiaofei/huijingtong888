@@ -64,7 +64,6 @@ const drawer = reactive({
 
 const batchListing = reactive({
   visible: false,
-  loading: false,
   publishing: false,
   shopIds: [],
   textVariantEnabled: true,
@@ -100,6 +99,14 @@ const statusOptions = computed(() => isDraftMode.value
     { label: "等待处理", value: "processing" },
     { label: "上架失败", value: "failed" }
   ]);
+
+function applyRouteStatusFilter() {
+  const status = String(route.query.status || "").trim();
+  if (!status) return;
+  if (statusOptions.value.some((option) => option.value === status)) {
+    state.status = status;
+  }
+}
 
 function matchesStatusFilter(status, filter) {
   if (!filter || filter === "all") return true;
@@ -189,6 +196,15 @@ function resetModeFilters() {
   state.quality = "all";
   state.page = 1;
   selectedRows.value = [];
+  loadRecords();
+}
+
+function resetModeFiltersFromRoute() {
+  state.status = "all";
+  state.quality = "all";
+  state.page = 1;
+  selectedRows.value = [];
+  applyRouteStatusFilter();
   loadRecords();
 }
 
@@ -765,33 +781,6 @@ function buildBatchTextVariantPolicy() {
   };
 }
 
-async function confirmBatchListingDrafts() {
-  const rows = selectedDraftRows.value;
-  if (!rows.length) {
-    ElMessage.warning("请先选择编辑中或等待上架的草稿");
-    return;
-  }
-  if (!batchListing.shopIds.length) {
-    ElMessage.warning("请选择要上架的店铺");
-    return;
-  }
-  batchListing.loading = true;
-  try {
-    let success = 0;
-    for (const row of rows) {
-      await apiClient.post(`/api/listing/drafts/${row.id}/shop-copies`, {
-        shop_ids: batchListing.shopIds
-      });
-      success += 1;
-    }
-    batchListing.visible = false;
-    ElMessage.success(`已为 ${success} 个草稿生成等待上架副本`);
-    await loadRecords();
-  } finally {
-    batchListing.loading = false;
-  }
-}
-
 async function publishBatchListingDrafts() {
   const rows = selectedDraftRows.value;
   if (!rows.length) {
@@ -804,8 +793,8 @@ async function publishBatchListingDrafts() {
   }
   await ElMessageBox.confirm(
     `将按 ${rows.length} 个草稿 x ${batchListing.shopIds.length} 个店铺正式提交到 Ozon。提交前会逐个校验图片、视频、类目和必填属性。`,
-    "确认批量提交 Ozon",
-    { type: "warning", confirmButtonText: "提交 Ozon", cancelButtonText: "取消" }
+    "确认批量上架",
+    { type: "warning", confirmButtonText: "批量上架", cancelButtonText: "取消" }
   );
   batchListing.publishing = true;
   batchListing.result = null;
@@ -816,12 +805,16 @@ async function publishBatchListingDrafts() {
       text_variant_policy: buildBatchTextVariantPolicy()
     });
     batchListing.result = result;
-    const success = Number(result?.summary?.success || 0);
+    const success = Number(result?.summary?.queued || result?.summary?.success || 0);
     const failed = Number(result?.summary?.failed || 0);
-    if (success && !failed) ElMessage.success(`已提交 ${success} 个店铺任务到 Ozon`);
-    else if (success) ElMessage.warning(`已提交 ${success} 个，失败 ${failed} 个，请查看结果`);
-    else ElMessage.error("批量提交未成功，请查看结果");
-    await loadRecords();
+    if (success) {
+      ElMessage.success(`已创建 ${success} 条上架任务，状态会在上架记录中更新`);
+      batchListing.visible = false;
+      await router.push({ name: "listing-publish-records", query: { status: "processing" } });
+    } else {
+      ElMessage.error("批量上架任务创建失败，请查看结果");
+    }
+    if (failed && success) ElMessage.warning(`${failed} 条任务创建失败，请查看结果`);
   } finally {
     batchListing.publishing = false;
   }
@@ -884,6 +877,9 @@ function splitLines(value) {
 }
 
 function previewImageUrl(url = "") {
+  if (url && typeof url === "object") {
+    return previewImageUrl(url.url || url.image_url || url.imageUrl || url.src || url.link || url.href || url.file_name || "");
+  }
   const value = String(url || "").trim();
   if (!value) return "";
   if (/^https?:\/\//i.test(value)) {
@@ -940,10 +936,17 @@ function handleRecordImageError(event, row = {}) {
 }
 
 onMounted(async () => {
+  applyRouteStatusFilter();
   await Promise.all([loadShops(), loadRecords()]);
 });
 
-watch(pageMode, resetModeFilters);
+watch(pageMode, resetModeFiltersFromRoute);
+
+watch(() => route.query.status, () => {
+  applyRouteStatusFilter();
+  state.page = 1;
+  loadRecords();
+});
 </script>
 
 <template>
@@ -993,9 +996,9 @@ watch(pageMode, resetModeFilters);
           <div class="record-product">
             <ProductImagePreview
               :src="recordPreviewImage(row) || recordImagePlaceholder"
+              :preview-list="recordPreviewCandidates(row)"
               size="portrait"
               fit="cover"
-              :preview="false"
               proxy-remote
             />
             <div>
@@ -1136,7 +1139,7 @@ watch(pageMode, resetModeFilters);
       </div>
     </el-drawer>
 
-    <el-dialog v-model="batchListing.visible" title="批量生成上架副本" width="520px">
+    <el-dialog v-model="batchListing.visible" title="批量上架草稿" width="560px">
       <el-form label-width="92px">
         <el-form-item label="草稿数量">
           <span class="record-text">已选择 {{ selectedDraftRows.length }} 个草稿项目</span>
@@ -1198,9 +1201,7 @@ watch(pageMode, resetModeFilters);
       />
       <template #footer>
         <el-button @click="batchListing.visible = false">取消</el-button>
-        <el-button @click="batchOpenDraftsForListing">打开上架页</el-button>
-        <el-button type="primary" :loading="batchListing.loading" @click="confirmBatchListingDrafts">生成等待上架副本</el-button>
-        <el-button type="danger" :loading="batchListing.publishing" @click="publishBatchListingDrafts">批量提交 Ozon</el-button>
+        <el-button type="primary" :loading="batchListing.publishing" @click="publishBatchListingDrafts">批量上架</el-button>
       </template>
     </el-dialog>
   </div>

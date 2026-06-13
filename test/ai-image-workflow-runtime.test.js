@@ -19,3 +19,11 @@ test("AI image generation network calls have bounded timeouts", () => {
   assert.match(imageGenerationSource, /AbortSignal\.timeout\(AI_IMAGE_PROVIDER_TIMEOUT_MS\)/);
   assert.match(imageGenerationSource, /AbortSignal\.timeout\(AI_IMAGE_DOWNLOAD_TIMEOUT_MS\)/);
 });
+
+test("AI image source fetch retries draft images with browser-like headers", () => {
+  assert.match(workflowSource, /function sourceImageFetchHeaders/);
+  assert.match(workflowSource, /User-Agent/);
+  assert.match(workflowSource, /Referer/);
+  assert.match(workflowSource, /\[401, 403, 404\]\.includes\(response\.status\)/);
+  assert.doesNotMatch(workflowSource, /falling back to text-to-image/);
+});

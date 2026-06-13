@@ -11,14 +11,14 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232563eb'/%3E%3Ctext x='50%25' y='54%25' text-anchor='middle' font-size='28' font-family='Arial, sans-serif' font-weight='700' fill='white'%3EOZ%3C/text%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="/vue-apps/assets/admin-CTGBssbL-1781195768022.css?v=mq9pz0kn" />
-    <link rel="stylesheet" href="/vue-apps/assets/vendor-element-plus-DuB5IIf2-1781195768022.css?v=mq9pz0kn" />
-    <link rel="modulepreload" href="/vue-apps/assets/rolldown-runtime-BJ6gOB6Y-1781195768022.js" />
-    <link rel="modulepreload" href="/vue-apps/assets/api-BbFIwSu4-1781195768022.js" />
-    <link rel="modulepreload" href="/vue-apps/assets/vendor-d-qkza-J-1781195768022.js" />
-    <link rel="modulepreload" href="/vue-apps/assets/vendor-element-plus-DkzUsTUJ-1781195768022.js" />
-    <link rel="modulepreload" href="/vue-apps/assets/vendor-pinia-CbdS9Qjt-1781195768022.js" />
-    <link rel="modulepreload" href="/vue-apps/assets/vendor-vue-router-BaNRu2z2-1781195768022.js" />
+    <link rel="stylesheet" href="/vue-apps/assets/admin-CTGBssbL-20260613223741.css?v=mqcgmexu" />
+    <link rel="stylesheet" href="/vue-apps/assets/vendor-element-plus-DuB5IIf2-20260613223741.css?v=mqcgmexu" />
+    <link rel="modulepreload" href="/vue-apps/assets/rolldown-runtime-BFHBXGyn-20260613223741.js" />
+    <link rel="modulepreload" href="/vue-apps/assets/api-0BwmgUeI-20260613223741.js" />
+    <link rel="modulepreload" href="/vue-apps/assets/vendor-B_Nn3KPv-20260613223741.js" />
+    <link rel="modulepreload" href="/vue-apps/assets/vendor-element-plus-0G2oWoJw-20260613223741.js" />
+    <link rel="modulepreload" href="/vue-apps/assets/vendor-pinia-Cwc232wJ-20260613223741.js" />
+    <link rel="modulepreload" href="/vue-apps/assets/vendor-vue-router-kuc29sRT-20260613223741.js" />
     <style>
       .admin-static-login-fallback {
         position: fixed;
@@ -36,6 +36,9 @@
       }
       .admin-static-login-fallback.is-hidden {
         display: none;
+      }
+      body:has(#adminApp > *) #adminStaticLoginFallback {
+        display: none !important;
       }
       .admin-static-login-card {
         width: min(420px, 100%);
@@ -102,6 +105,7 @@
         var title = document.getElementById("adminStaticLoginTitle");
         var hint = document.getElementById("adminStaticLoginHint");
         var fallbackTimer = 0;
+        var fallbackWatchTimer = 0;
         var chunkReloadKey = "ozon-admin-shell-chunk-reload";
         var maxChunkReloads = 2;
         function errorMessage(event) {
@@ -181,15 +185,28 @@
         }
         function hideFallback() {
           if (!fallback) return;
+          window.clearTimeout(fallbackTimer);
+          window.clearInterval(fallbackWatchTimer);
           fallback.classList.add("is-hidden");
           fallback.hidden = true;
           sessionStorage.removeItem(chunkReloadKey);
+        }
+        function hideFallbackWhenAppMounted() {
+          if (!shouldShowFallback()) hideFallback();
         }
         window.__showAdminStaticLoginFallback = function () {
           showFallback(true);
         };
         window.__hideAdminStaticLoginFallback = hideFallback;
         fallbackTimer = window.setTimeout(showFallback, 2600);
+        var app = document.getElementById("adminApp");
+        if (app && window.MutationObserver) {
+          new MutationObserver(hideFallbackWhenAppMounted).observe(app, { childList: true });
+        }
+        fallbackWatchTimer = window.setInterval(hideFallbackWhenAppMounted, 250);
+        window.setTimeout(function () {
+          window.clearInterval(fallbackWatchTimer);
+        }, 10000);
         window.addEventListener("error", function (event) {
           if (reloadForChunkError(event)) return;
           if (!shouldShowFatalError(event)) return;
@@ -204,6 +221,6 @@
         });
       })();
     </script>
-    <script type="module" src="/vue-apps/assets/admin-view-CFMJQdbz-1781195768022.js?v=mq9pz0kn"></script>
+    <script type="module" src="/vue-apps/assets/admin-view-BDBJAtmy-20260613223741.js?v=mqcgmexu"></script>
   </body>
 </html>

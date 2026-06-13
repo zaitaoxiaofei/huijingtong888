@@ -39,7 +39,7 @@ const dashboard = ref({
   commerce: {
     today: {},
     yesterday: {},
-    advertising: { today: {}, yesterday: {} }
+    advertising: { today: {}, yesterday: {}, month: {} }
   },
   alerts: {
     fbp: [],
@@ -54,6 +54,7 @@ const today = computed(() => commerce.value.today || {});
 const yesterday = computed(() => commerce.value.yesterday || {});
 const adToday = computed(() => commerce.value.advertising?.today || {});
 const adYesterday = computed(() => commerce.value.advertising?.yesterday || {});
+const adMonth = computed(() => commerce.value.advertising?.month || {});
 const profitTrend = computed(() => commerce.value.profit_trend || {});
 const aftersalesLoss = computed(() => summary.value.aftersales_loss || {});
 const monthShippingCost = computed(() => summary.value.month_shipping_cost || {});
@@ -61,6 +62,7 @@ const monthOrderOutcomes = computed(() => summary.value.month_order_outcomes || 
 const fbpOpportunitySummary = computed(() => summary.value.fbp_opportunities || {});
 const commerceShops = computed(() => Array.isArray(commerce.value.shops) ? commerce.value.shops : []);
 const adShops = computed(() => Array.isArray(adToday.value.shops) ? adToday.value.shops : []);
+const adMonthShops = computed(() => Array.isArray(adMonth.value.shops) ? adMonth.value.shops : []);
 const fbpAlerts = computed(() => Array.isArray(dashboard.value.alerts?.fbp) ? dashboard.value.alerts.fbp : []);
 const fbpShortageAlerts = computed(() => fbpAlerts.value.filter((item) => ["out_of_stock", "within_7_days", "within_30_days"].includes(item.alert_type)));
 const fbpSlowAlerts = computed(() => fbpAlerts.value.filter((item) => ["over_60_days", "no_sales"].includes(item.alert_type)));
@@ -482,6 +484,25 @@ const adBreakdownTableRows = computed(() => {
   const rows = [adMetricRow("全部店铺", adToday.value)];
   adShops.value.forEach((shop) => {
     rows.push(adMetricRow(shop.shop_name || `店铺 ${shop.shop_id || ""}`.trim(), shop));
+  });
+  return rows;
+});
+const adMonthSpendBreakdownRows = computed(() => {
+  const rows = [
+    {
+      label: "全部店铺",
+      spend: metricMoney(adMonth.value.spend_cny),
+      roi: decimalText(adMonth.value.roi),
+      orders: metricNumber(adMonth.value.orders, " 单")
+    }
+  ];
+  adMonthShops.value.forEach((shop) => {
+    rows.push({
+      label: shop.shop_name || `店铺 ${shop.shop_id || ""}`.trim(),
+      spend: metricMoney(shop.spend_cny),
+      roi: decimalText(shop.roi),
+      orders: metricNumber(shop.orders, " 单")
+    });
   });
   return rows;
 });
@@ -1265,6 +1286,39 @@ onBeforeUnmount(() => {
               <em>本月累计</em>
             </div>
           </article>
+
+          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip month-ad-spend-tooltip" :popper-options="adTooltipPopperOptions">
+            <template #content>
+              <div class="shop-breakdown month-ad-spend-breakdown">
+                <h4>当月各店铺广告花费</h4>
+                <div class="month-ad-spend-table">
+                  <div class="month-ad-spend-row month-ad-spend-head">
+                    <span>店铺</span>
+                    <span>广告花费</span>
+                    <span>ROI</span>
+                    <span>订单</span>
+                  </div>
+                  <div v-for="row in adMonthSpendBreakdownRows" :key="row.label" class="month-ad-spend-row">
+                    <strong>{{ row.label }}</strong>
+                    <b>{{ row.spend }}</b>
+                    <b>{{ row.roi }}</b>
+                    <b>{{ row.orders }}</b>
+                  </div>
+                </div>
+              </div>
+            </template>
+            <article class="primary-metric roi-card month-ad-spend-card" @click="open('/advertising/daily')">
+              <div class="metric-label">
+                <Target :size="16" />
+                总广告花费
+              </div>
+              <strong>{{ metricMoney(adMonth.spend_cny) }}</strong>
+              <div class="metric-footer">
+                <span class="delta is-flat">当月累计</span>
+                <em>{{ metricNumber(adMonth.shop_count, " 店") }}</em>
+              </div>
+            </article>
+          </el-tooltip>
 
           <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip purchase-breakdown-tooltip" :popper-options="adTooltipPopperOptions">
             <template #content>
@@ -2214,6 +2268,10 @@ button {
   max-width: min(620px, calc(100vw - 32px));
 }
 
+:global(.month-ad-spend-tooltip) {
+  max-width: min(520px, calc(100vw - 32px));
+}
+
 :global(.shop-breakdown) {
   min-width: 220px;
 }
@@ -2258,6 +2316,11 @@ button {
   min-width: 0;
 }
 
+:global(.month-ad-spend-breakdown) {
+  width: min(480px, calc(100vw - 48px));
+  min-width: 0;
+}
+
 :global(.ad-breakdown-table) {
   display: block !important;
   width: 100%;
@@ -2265,6 +2328,12 @@ button {
 }
 
 :global(.purchase-breakdown-table) {
+  display: block !important;
+  width: 100%;
+  gap: 0;
+}
+
+:global(.month-ad-spend-table) {
   display: block !important;
   width: 100%;
   gap: 0;
@@ -2290,8 +2359,19 @@ button {
   transition: background 0.18s ease;
 }
 
+:global(.month-ad-spend-row) {
+  display: grid !important;
+  grid-template-columns: minmax(128px, 1.45fr) repeat(3, minmax(72px, 0.8fr));
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid #eef2f7;
+  transition: background 0.18s ease;
+}
+
 :global(.ad-breakdown-row:not(.ad-breakdown-head):hover),
-:global(.purchase-breakdown-row:not(.purchase-breakdown-head):hover) {
+:global(.purchase-breakdown-row:not(.purchase-breakdown-head):hover),
+:global(.month-ad-spend-row:not(.month-ad-spend-head):hover) {
   background: #f8fafc;
 }
 
@@ -2309,12 +2389,22 @@ button {
   font-weight: 800;
 }
 
+:global(.month-ad-spend-head) {
+  padding-top: 0;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
+}
+
 :global(.ad-breakdown-row strong),
 :global(.ad-breakdown-row b),
 :global(.ad-breakdown-row span),
 :global(.purchase-breakdown-row strong),
 :global(.purchase-breakdown-row b),
-:global(.purchase-breakdown-row span) {
+:global(.purchase-breakdown-row span),
+:global(.month-ad-spend-row strong),
+:global(.month-ad-spend-row b),
+:global(.month-ad-spend-row span) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2322,25 +2412,29 @@ button {
 }
 
 :global(.ad-breakdown-row strong),
-:global(.purchase-breakdown-row strong) {
+:global(.purchase-breakdown-row strong),
+:global(.month-ad-spend-row strong) {
   color: #334155;
   font-size: 12px;
 }
 
 :global(.ad-breakdown-row b),
-:global(.purchase-breakdown-row b) {
+:global(.purchase-breakdown-row b),
+:global(.month-ad-spend-row b) {
   color: #0f172a;
   font-size: 12px;
   text-align: right;
 }
 
 :global(.ad-breakdown-head span),
-:global(.purchase-breakdown-head span) {
+:global(.purchase-breakdown-head span),
+:global(.month-ad-spend-head span) {
   text-align: right;
 }
 
 :global(.ad-breakdown-head span:first-child),
-:global(.purchase-breakdown-head span:first-child) {
+:global(.purchase-breakdown-head span:first-child),
+:global(.month-ad-spend-head span:first-child) {
   text-align: left;
 }
 

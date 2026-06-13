@@ -65,13 +65,13 @@ test("collector box selection creation keeps each selected variant as its own dr
   assert.match(bodies[0].listing_tags_ru, /#ключ/);
   assert.match(bodies[0].listing_description_ru, /Base Russian description/);
   assert.equal(bodies[0].material, "TPU");
-  assert.equal(bodies[0].color, "黑色");
+  assert.equal(bodies[0].color, "Черный");
   assert.equal(bodies[0].ozon_category_id, "170:970");
   assert.equal(bodies[0].ozon_description_category_id, "170");
   assert.equal(bodies[0].ozon_type_id, "970");
   assert.equal(bodies[0].vehicle_model, "");
-  assert.match(bodies[0].supplier_note, /可复用属性/);
-  assert.match(bodies[1].supplier_note, /变体SKU：1002/);
+  assert.match(bodies[0].supplier_note, /Материал/);
+  assert.equal(bodies[1].variant_result_id, "1002");
 });
 
 test("collector box selection creation can keep only chosen variants", () => {
@@ -92,7 +92,7 @@ test("collector box selection creation can keep only chosen variants", () => {
   assert.equal(bodies[0].variant_result_id, "2002");
 });
 
-test("collector box selection creation prefers edited listing template images over raw payload images", () => {
+test("collector box selection creation prefers edited collector images over template and raw images", () => {
   const bodies = buildSelectionProductBodiesFromCollectorBox({
     sku: "3000",
     title: "Edited image product",
@@ -114,7 +114,93 @@ test("collector box selection creation prefers edited listing template images ov
   }, {});
 
   assert.equal(bodies.length, 1);
-  assert.equal(bodies[0].image_url, "template-main.jpg");
-  assert.deepEqual(bodies[0].detail_image_urls, ["template-detail-1.jpg", "template-editable-main.jpg"]);
+  assert.equal(bodies[0].image_url, "collector-edit.jpg");
+  assert.deepEqual(bodies[0].detail_image_urls, []);
   assert.equal(bodies[0].detail_image_urls.includes("raw-main.jpg"), false);
+});
+
+test("collector box selection creation keeps user source images above template and raw images", () => {
+  const bodies = buildSelectionProductBodiesFromCollectorBox({
+    sku: "4000",
+    title: "User asset product",
+    image_url: "cover-old.jpg",
+    source_images: ["user-main.jpg", "user-detail.jpg"],
+    templateSnapshot: {
+      images: ["template-main.jpg", "template-detail.jpg"]
+    },
+    editPayload: {
+      images: ["collector-edit.jpg"]
+    },
+    rawPayload: {
+      images: ["raw-main.jpg", "raw-detail.jpg"]
+    }
+  }, {});
+
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].image_url, "user-main.jpg");
+  assert.deepEqual(bodies[0].detail_image_urls, ["user-detail.jpg"]);
+});
+
+test("collector box selection creation prefers edited variant images over old top-level collector images", () => {
+  const bodies = buildSelectionProductBodiesFromCollectorBox({
+    sku: "5000",
+    title: "Edited variant image product",
+    image_url: "old-collected-main.jpg",
+    editPayload: {
+      images: ["old-collected-main.jpg", "old-collected-detail.jpg"],
+      variants: [
+        {
+          images: ["uploaded-main.png", "uploaded-detail.png"]
+        }
+      ]
+    },
+    rawPayload: {
+      images: ["raw-main.jpg", "raw-detail.jpg"]
+    }
+  }, {});
+
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].image_url, "uploaded-main.png");
+  assert.deepEqual(bodies[0].detail_image_urls, ["uploaded-detail.png"]);
+});
+
+test("collector box selection creation lets edited variant images override old variant cover image", () => {
+  const bodies = buildSelectionProductBodiesFromCollectorBox({
+    sku: "3457326716",
+    title: "Edited collected product",
+    image_url: "old-collected-main.jpg",
+    editPayload: {
+      images: ["old-collected-main.jpg", "old-collected-detail.jpg"],
+      variants: [
+        {
+          sku: "3720611837",
+          source_sku: "3720611837",
+          images: ["uploaded-main.png", "uploaded-detail.png"]
+        }
+      ]
+    },
+    rawPayload: {
+      variants: [
+        {
+          sku: "3720611837",
+          coverImage: "old-variant-cover.jpg",
+          images: ["old-variant-cover.jpg", "old-variant-detail.jpg"]
+        }
+      ]
+    },
+    payload: {
+      variants: [
+        {
+          sku: "3720611837",
+          coverImage: "old-payload-cover.jpg",
+          images: ["old-payload-cover.jpg"]
+        }
+      ]
+    }
+  }, {});
+
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].image_url, "uploaded-main.png");
+  assert.deepEqual(bodies[0].detail_image_urls, ["uploaded-detail.png"]);
+  assert.equal(bodies[0].image_url.includes("old-variant-cover"), false);
 });

@@ -235,8 +235,9 @@ test("Ozon publish auto-selects missing required dictionary attributes only from
 test("publish precheck verifies public listing media URLs instead of trusting local files", () => {
   assert.match(automationSource, /async function unreachablePublishMediaUrls\(urls = \[\]\)/);
   assert.match(automationSource, /async function isReachableRemoteMediaUrl\(url = ""\)/);
+  assert.match(automationSource, /async function assertPublishPayloadMediaReachable\(payload = \{\}, validation = null\)/);
   assert.doesNotMatch(automationSource, /if \(resolveListingMediaLocalPath\(url\)\) return null;/);
-  assert.match(automationSource, /公网素材不可访问，Ozon 会下载失败/);
+  assert.match(automationSource, /Public media is not reachable; Ozon may fail to download/);
 });
 
 test("listing media upload syncs local files to the public ERP before publishing", () => {

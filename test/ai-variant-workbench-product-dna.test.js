@@ -77,3 +77,19 @@ test("ProductDNA includes default forbidden claims", () => {
   assert.ok(dna.constraints.forbiddenClaims.includes("official authorization"));
   assert.ok(dna.constraints.forbiddenClaims.includes("unsupported compatibility"));
 });
+
+test("ProductDNA treats user source images as the highest-priority media facts", () => {
+  const dna = buildProductDNA({
+    id: "p-source-images",
+    name: "User image product",
+    imageUrl: "raw-main.jpg",
+    detailImages: ["raw-detail.jpg"],
+    source_images: ["user-main.jpg", "user-detail.jpg"],
+    templateSnapshot: {
+      images: ["template-main.jpg", "template-detail.jpg"]
+    }
+  });
+
+  assert.equal(dna.assets.mainImage, "user-main.jpg");
+  assert.deepEqual(dna.assets.detailImages, ["user-detail.jpg"]);
+});

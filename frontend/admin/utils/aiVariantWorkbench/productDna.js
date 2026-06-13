@@ -38,10 +38,24 @@ export function buildProductDNA(product = {}, row = null) {
   const template = normalizeTemplateSnapshot(row?.templateSnapshot || product.templateSnapshot, product) || {};
   const raw = product.raw || {};
   const attributes = collectTemplateAttributes(template);
-  const sourceImages = normalizeImageList(template.images || template.editable_payload?.images || [
-    product.imageUrl,
-    ...(Array.isArray(product.detailImages) ? product.detailImages : [])
-  ]);
+  const userAssetImages = normalizeImageList(
+    row?.source_images
+    || row?.sourceImages
+    || product.source_images
+    || product.sourceImages
+    || product.user_images
+    || product.userImages
+    || product.uploaded_images
+    || product.uploadedImages
+    || raw.source_images
+    || raw.sourceImages
+  );
+  const sourceImages = userAssetImages.length
+    ? userAssetImages
+    : normalizeImageList(template.images || template.editable_payload?.images || [
+      product.imageUrl,
+      ...(Array.isArray(product.detailImages) ? product.detailImages : [])
+    ]);
   const knownFacts = [];
   const unknownFacts = [];
   const addKnown = (labelText, value) => {

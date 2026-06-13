@@ -101,6 +101,24 @@ function buildHeaders(customHeaders = {}) {
   return headers;
 }
 
+function recordForbiddenApi(url = "", error = null) {
+  if (typeof window === "undefined") return;
+  const item = {
+    url: String(url || ""),
+    status: 403,
+    message: String(error?.message || error?.payload?.error || "Forbidden"),
+    at: new Date().toISOString()
+  };
+  try {
+    const list = Array.isArray(window.__ERP_FORBIDDEN__) ? window.__ERP_FORBIDDEN__ : [];
+    list.push(item);
+    window.__ERP_FORBIDDEN__ = list.slice(-50);
+  } catch {
+    window.__ERP_FORBIDDEN__ = [item];
+  }
+  console.warn("[erp-forbidden]", item);
+}
+
 async function request(url, options = {}) {
   const trace = beginApiPerf(url, options);
   let response;
@@ -129,6 +147,7 @@ async function request(url, options = {}) {
     error.status = response.status;
     error.payload = data;
     endApiPerf(trace, { status: response.status, error: error.message });
+    if (response.status === 403) recordForbiddenApi(url, error);
     if (response.status === 401 && options.authExpiredRedirect !== false) notifyAuthExpired(data?.error, url);
     throw error;
   }
@@ -160,6 +179,7 @@ async function blobRequest(url, options = {}) {
     error.status = response.status;
     error.payload = data;
     endApiPerf(trace, { status: response.status, error: error.message });
+    if (response.status === 403) recordForbiddenApi(url, error);
     if (response.status === 401 && options.authExpiredRedirect !== false) notifyAuthExpired(data?.error, url);
     throw error;
   }
