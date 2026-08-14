@@ -27,9 +27,9 @@ const searchPanelVisible = ref(false);
 const selectRootRef = ref();
 const categoryPopoverRef = ref();
 const browsePath = ref([]);
+const browseLevelColumns = ref([[]]);
 const searchMode = ref(false);
-const BROWSE_CATEGORY_LIMIT = 300;
-const SEARCH_CATEGORY_LIMIT = 80;
+const SEARCH_CATEGORY_LIMIT = 200;
 let searchTimer = null;
 let requestSeq = 0;
 
@@ -37,7 +37,7 @@ const categoryMap = computed(() => new Map(categories.value.map((category) => [c
 const selectedCategory = computed(() => categoryMap.value.get(selectedValue.value) || null);
 const isSearchMode = computed(() => searchMode.value && String(keyword.value || "").trim().length > 0);
 const categoryTree = computed(() => buildCategoryTree(categories.value));
-const browseColumns = computed(() => {
+const searchColumns = computed(() => {
   const columns = [categoryTree.value];
   let children = categoryTree.value;
   for (const activeKey of browsePath.value) {
@@ -48,6 +48,8 @@ const browseColumns = computed(() => {
   }
   return columns;
 });
+const browseColumns = computed(() => (isSearchMode.value ? searchColumns.value : browseLevelColumns.value));
+const browseItemCount = computed(() => browseColumns.value[browseColumns.value.length - 1]?.length || 0);
 
 watch(() => props.modelValue, (value) => {
   selectedValue.value = value || "";
@@ -105,6 +107,22 @@ async function loadCategories(query = "", options = {}) {
   }
 }
 
+async function loadBrowseLevel(parentPath = "", columnIndex = 0) {
+  const seq = ++requestSeq;
+  loading.value = true;
+  try {
+    const params = new URLSearchParams({ mode: "browse" });
+    if (parentPath) params.set("parent_path", parentPath);
+    const result = await apiClient.get(`/api/listing/ozon-categories?${params.toString()}`, { noCache: true });
+    if (seq !== requestSeq) return;
+    const nodes = Array.isArray(result?.nodes) ? result.nodes : [];
+    browseLevelColumns.value = [...browseLevelColumns.value.slice(0, columnIndex), nodes];
+  } finally {
+    if (seq === requestSeq) loading.value = false;
+    nextTick(() => categoryPopoverRef.value?.popperRef?.updatePopper?.());
+  }
+}
+
 function scheduleSearch(query) {
   if (searchTimer) window.clearTimeout(searchTimer);
   searchTimer = window.setTimeout(() => {
@@ -125,7 +143,8 @@ async function syncCategories() {
         shop_id: props.shopId || undefined,
         language: "ZH_HANS"
       });
-    await loadCategories(keyword.value, { limit: 60 });
+    if (String(keyword.value || "").trim()) await loadCategories(keyword.value, { limit: SEARCH_CATEGORY_LIMIT });
+    else await loadBrowseLevel("", 0);
     emit("sync", result);
     ElMessage.success(props.fullRefresh
       ? `类目缓存已刷新：类目 ${result.categories || result.saved || 0}，属性 ${result.attributes || 0}`
@@ -141,8 +160,8 @@ function openSearchPanel() {
   if (cleanValue) {
     searchMode.value = true;
     if (!categories.value.length) loadCategories(cleanValue, { limit: SEARCH_CATEGORY_LIMIT, autoExpandQuery: true });
-  } else if (!categories.value.length) {
-    loadCategories("", { limit: BROWSE_CATEGORY_LIMIT });
+  } else if (!browseLevelColumns.value[0]?.length) {
+    loadBrowseLevel("", 0);
   }
   nextTick(() => categoryPopoverRef.value?.popperRef?.updatePopper?.());
 }
@@ -162,7 +181,8 @@ function handleKeywordInput(value) {
   if (!cleanValue) {
     searchMode.value = false;
     emit("update:modelValue", "");
-    loadCategories("", { limit: BROWSE_CATEGORY_LIMIT });
+    browsePath.value = [];
+    loadBrowseLevel("", 0);
     return;
   }
   searchMode.value = true;
@@ -178,11 +198,15 @@ function clearSelection() {
   keyword.value = "";
   searchMode.value = false;
   emit("update:modelValue", "");
-  loadCategories("", { limit: BROWSE_CATEGORY_LIMIT });
+  browsePath.value = [];
+  loadBrowseLevel("", 0);
 }
 
 function selectCategory(category = {}) {
   if (!category?.ozon_category_id) return;
+  if (!categoryMap.value.has(category.ozon_category_id)) {
+    categories.value = [category, ...categories.value];
+  }
   selectedValue.value = category.ozon_category_id;
   keyword.value = displayCategoryLabel(category);
   searchMode.value = false;
@@ -191,9 +215,18 @@ function selectCategory(category = {}) {
   emit("select", category);
 }
 
-function handleBrowseNode(node, columnIndex, shouldSelect = false) {
+async function handleBrowseNode(node, columnIndex) {
   browsePath.value = [...browsePath.value.slice(0, columnIndex), node.key];
-  if (shouldSelect && node.category) selectCategory(node.category);
+  if (isSearchMode.value) {
+    if (node.children?.length) return;
+    if (node.category) selectCategory(node.category);
+    return;
+  }
+  if (node.has_children) {
+    await loadBrowseLevel(node.path, columnIndex + 1);
+    return;
+  }
+  if (node.category) selectCategory(node.category);
 }
 
 function isBrowseNodeActive(node, columnIndex) {
@@ -412,14 +445,14 @@ function normalizeSearchText(value) {
         <div class="category-result-panel">
           <div class="category-result-head">
             <span>{{ isSearchMode ? "搜索类目" : "按层级选择类目" }}</span>
-            <small>{{ loading ? "加载中..." : `显示 ${categories.length} 条` }}</small>
+            <small>{{ loading ? "加载中..." : (isSearchMode ? `匹配 ${categories.length} 条` : `当前层 ${browseItemCount} 项`) }}</small>
           </div>
 
-          <div v-if="!loading && !categories.length" class="category-empty">
+          <div v-if="!loading && !browseColumns[0]?.length" class="category-empty">
             没有找到匹配类目，可以换一个关键词或同步类目缓存。
           </div>
 
-          <div v-if="categories.length" class="category-cascader-panel">
+          <div v-if="browseColumns[0]?.length" class="category-cascader-panel">
             <div v-for="(column, columnIndex) in browseColumns" :key="columnIndex" class="category-cascader-column">
               <button
                 v-for="node in column"
@@ -427,11 +460,10 @@ function normalizeSearchText(value) {
                 type="button"
                 class="category-cascader-node"
                 :class="{ active: isBrowseNodeActive(node, columnIndex) }"
-                @mouseenter="handleBrowseNode(node, columnIndex)"
-                @mousedown.prevent="handleBrowseNode(node, columnIndex, true)"
+                @mousedown.prevent="handleBrowseNode(node, columnIndex)"
               >
                 <span>{{ node.label }}</span>
-                <span v-if="node.children?.length" class="category-cascader-arrow">›</span>
+                <span v-if="node.children?.length || node.has_children" class="category-cascader-arrow">›</span>
               </button>
             </div>
           </div>

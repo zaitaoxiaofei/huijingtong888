@@ -172,6 +172,8 @@ test("automation standardizer resolves dict placeholders through cached dictiona
 test("Ozon publish normalization ignores unselected dictionary option candidates", () => {
   assert.match(automationSource, /function selectedAttributeValuesForOzon\(item = \{\}\)/);
   assert.match(automationSource, /const selectedValues = normalizeArray\(item\.selected_values \|\| item\.selectedValues\);/);
+  assert.match(automationSource, /function rebuildCollectionDictionaryValues\(currentValues = \[\], optionValues = \[\]\)/);
+  assert.match(automationSource, /rebuildCollectionDictionaryValues\(item\.value, optionValues\)/);
   assert.match(automationSource, /const sourceValues = selectedAttributeValuesForOzon\(item\);/);
   assert.match(automationSource, /optionValues\.find\(\(option\) =>/);
   assert.doesNotMatch(automationSource, /const sourceValues = Array\.isArray\(item\.values\) && item\.values\.length \? item\.values : item\.value;/);
@@ -218,7 +220,11 @@ test("Ozon publish adds stable high-value attributes only when the category supp
   assert.match(automationSource, /if \(hasCategoryAttr\(5629\)\) await addDictionaryOzonAttribute/);
   assert.match(automationSource, /vehicle\.model, vehicle\.full/);
   assert.match(automationSource, /function shouldAutoPublishMaterialAttribute\(descriptionCategoryId, typeId\)/);
-  assert.match(automationSource, /publishOzonTagList\(item\)\.join\(" "\)/);
+  assert.match(automationSource, /const safeTags = cleanPublishOzonTagList\(item\)/);
+  assert.match(automationSource, /byId\.set\(23171, \{ id: 23171, values: safeTags\.map\(\(value\) => \(\{ value \}\)\) \}\)/);
+  assert.match(automationSource, /const isTagAttribute = attributeId === 23171/);
+  assert.match(automationSource, /if \(isTagAttribute\) return normalizeOzonHashtags\(text, 20\)\.map\(\(tag\) => \(\{ value: tag \}\)\)/);
+  assert.doesNotMatch(automationSource, /publishOzonTagList\(item\)\.join\(" "\)/);
 });
 
 test("Ozon publish auto-selects missing required dictionary attributes only from provided options", () => {
@@ -232,12 +238,16 @@ test("Ozon publish auto-selects missing required dictionary attributes only from
   assert.match(automationSource, /await validateListingTemplatePublishForShop\(body\.template \|\| body, shops\[0\]\.id, session\)/);
 });
 
-test("publish precheck verifies public listing media URLs instead of trusting local files", () => {
+test("publish precheck blocks public listing media that is not fully downloadable", () => {
+  const reachabilitySource = automationSource.match(/async function assertPublishPayloadMediaReachable\(payload = \{\}, validation = null\)[\s\S]*?export async function publishListingTemplateToOzon/)?.[0] || "";
   assert.match(automationSource, /async function unreachablePublishMediaUrls\(urls = \[\]\)/);
   assert.match(automationSource, /async function isReachableRemoteMediaUrl\(url = ""\)/);
   assert.match(automationSource, /async function assertPublishPayloadMediaReachable\(payload = \{\}, validation = null\)/);
   assert.doesNotMatch(automationSource, /if \(resolveListingMediaLocalPath\(url\)\) return null;/);
-  assert.match(automationSource, /Public media is not reachable; Ozon may fail to download/);
+  assert.match(reachabilitySource, /Public media is not fully downloadable; Ozon submit was blocked/);
+  assert.match(reachabilitySource, /validation\.errors = \[\.\.\.normalizeArray\(validation\.errors\), message\]/);
+  assert.match(reachabilitySource, /error\.unreachable_media = unavailableRemoteMedia/);
+  assert.match(reachabilitySource, /throw error/);
 });
 
 test("listing media upload syncs local files to the public ERP before publishing", () => {

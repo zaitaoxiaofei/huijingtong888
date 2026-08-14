@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizePurchasePlanMysql } from "../src/services/mysql-cutover.js";
+import { normalizePurchasePlanMysql as legacyNormalizePurchasePlanMysql } from "../src/services/mysql-cutover.js";
+import { normalizePurchasePlanMysql } from "../src/services/mysql-procurement-plan.js";
+
+test("mysql cutover keeps the procurement plan compatibility export", () => {
+  assert.equal(legacyNormalizePurchasePlanMysql, normalizePurchasePlanMysql);
+});
 
 test("normalizePurchasePlanMysql prefers procurement quantity over product default purchase quantity", () => {
   const plan = normalizePurchasePlanMysql({

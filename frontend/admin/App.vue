@@ -264,6 +264,27 @@ function openUpdateEventStream() {
       console.warn("parse update event failed", error);
     }
   });
+  updateEventSource.addEventListener("ai-task", (event) => {
+    try {
+      window.dispatchEvent(new CustomEvent("erp:ai-task-update", { detail: JSON.parse(event.data || "{}") }));
+    } catch (error) {
+      console.warn("parse AI task event failed", error);
+    }
+  });
+  updateEventSource.addEventListener("sku-order-tracking", (event) => {
+    try {
+      const payload = JSON.parse(event.data || "{}");
+      ElNotification({
+        title: payload.title || "SKU 单量预警",
+        message: payload.message || "追踪中的 SKU 出现销量变化，请及时查看。",
+        type: payload.level === "warning" ? "warning" : "info",
+        duration: 12000,
+        onClick: () => router.push(payload.route || "/order-tracking")
+      });
+    } catch (error) {
+      console.warn("parse SKU order tracking event failed", error);
+    }
+  });
   updateEventSource.onerror = () => {
     updateEventFailureCount += 1;
     if (updateEventFailureCount >= UPDATE_EVENT_FAILURE_LIMIT) {

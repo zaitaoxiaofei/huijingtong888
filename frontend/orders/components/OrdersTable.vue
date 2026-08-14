@@ -20,9 +20,13 @@ const emit = defineEmits([
   "toggle-row",
   "open-profit",
   "prepare-order",
+  "split-order",
   "print-order",
   "save-mark",
   "open-bind-product-from-order",
+  "edit-inventory-product",
+  "open-product-components",
+  "view-product-components",
   "open-create-product-from-order",
   "open-order-procurement"
 ]);
@@ -176,6 +180,10 @@ function rowSelected(row) {
   return props.selectedIds instanceof Set ? props.selectedIds.has(Number(row.id)) : false;
 }
 
+function orderRowClassName({ row }) {
+  return row?.profitSummary?.alertLevel ? "is-low-profit-order" : "";
+}
+
 function markValue(row) {
   return String(row.mark_type || "");
 }
@@ -200,6 +208,57 @@ function markLabel(value) {
 function orderTitleParts(row) {
   return Array.isArray(row?.orderTitleParts) ? row.orderTitleParts : [];
 }
+
+function hasEnoughLocalStock(row) {
+  const products = Array.isArray(row?.inventorySummaries) ? row.inventorySummaries : [];
+  if (!products.length) return false;
+  return products.every((product) => Number(product.stock?.local || 0) >= Math.max(1, Number(product.quantity || 1)));
+}
+
+function hasEnoughProcurementSupply(row) {
+  const products = Array.isArray(row?.inventorySummaries) ? row.inventorySummaries : [];
+  if (!products.length) return false;
+  return products.every((product) => (
+    Number(product.stock?.local || 0) + Number(product.incoming || 0)
+      >= Math.max(1, Number(product.quantity || 1))
+  ));
+}
+
+function isFbpOrder(row) {
+  const text = [
+    row?.logisticsSummary?.deliveryMethodLabel,
+    row?.logisticsSummary?.resolvedRuleName,
+    row?.logisticsSummary?.warehouse,
+    row?.delivery_method_name,
+    row?.delivery_method,
+    row?.shipping_method,
+    row?.logistics_channel
+  ].map((item) => String(item || "").toLowerCase()).join(" ");
+  return text.includes("fbp")
+    || text.includes("hunchun")
+    || text.includes("hun chun")
+    || text.includes("珲春")
+    || text.includes("混春")
+    || text.includes("混川");
+}
+
+function procurementActionLabel(row) {
+  if (hasEnoughLocalStock(row)) return "有库存";
+  if (hasEnoughProcurementSupply(row)) return "在途可满足";
+  if (isFbpOrder(row)) return "有库存";
+  const detail = String(row?.procurementState?.detail || "");
+  if (detail.includes("库存可满足")) return "有库存";
+  if (detail.includes("已提交采购")) return "有库存";
+  return "待采购";
+}
+
+function procurementActionClass(row) {
+  const label = procurementActionLabel(row);
+  return label === "有库存"
+    || label === "在途可满足"
+    ? "orders-inline-accent-button-success"
+    : "orders-inline-accent-button-danger-soft";
+}
 </script>
 
 <template>
@@ -212,6 +271,7 @@ function orderTitleParts(row) {
       class="orders-table"
       table-layout="fixed"
       empty-text="当前筛选下暂无订单"
+      :row-class-name="orderRowClassName"
     >
       <el-table-column width="54" fixed="left" align="center">
         <template #header>
@@ -280,6 +340,7 @@ function orderTitleParts(row) {
                 </span>
               </template>
             </div>
+            <el-tag v-if="row.qualityCheckOrder" class="orders-quality-check-tag" type="danger" size="small" effect="light">质检单</el-tag>
             <div class="orders-order-quantity">
               <span>数量</span>
               <span class="orders-item-quantity" :class="{ 'is-multi': Number(row.quantitySummary || 0) > 1 }">
@@ -365,12 +426,29 @@ function orderTitleParts(row) {
         <template #default="{ row }">
           <div class="orders-cell-stack orders-money-cell">
             <div class="orders-cell-meta-line">金额: {{ row.amountText }}</div>
-            <div class="orders-cell-meta-line">预计: CNY {{ formatMoney(row.profitSummary.estimated) }}</div>
+            <div
+              class="orders-cell-meta-line"
+              :class="{ 'orders-low-profit-value': row.profitSummary.effectiveType === 'estimated' && row.profitSummary.alertLevel }"
+            >
+              预计: CNY {{ formatMoney(row.profitSummary.estimated) }}
+            </div>
             <div class="orders-cell-meta-line">
               真实:
-              <span v-if="row.profitSummary.hasActual">CNY {{ formatMoney(row.profitSummary.actual) }}</span>
+              <span
+                v-if="row.profitSummary.hasActual"
+                :class="{ 'orders-low-profit-value': row.profitSummary.effectiveType === 'actual' && row.profitSummary.alertLevel }"
+              >CNY {{ formatMoney(row.profitSummary.actual) }}</span>
               <span v-else>--</span>
             </div>
+            <el-tag
+              v-if="row.profitSummary.alertLevel"
+              class="orders-low-profit-tag"
+              type="danger"
+              size="small"
+              effect="light"
+            >
+              {{ row.profitSummary.alertLevel === "loss" ? "亏损" : "低利润" }}
+            </el-tag>
             <div v-if="Number(row.productDisplayRows?.length || 0) > 1" class="orders-profit-merge-hint">
               已按 {{ Number(row.productDisplayRows?.length || 0) }} 个商品分别计算后汇总
             </div>
@@ -404,7 +482,8 @@ function orderTitleParts(row) {
         <template #default="{ row }">
           <div class="orders-cell-stack">
             <div class="orders-delivery-main orders-delivery-main-compact">{{ row.logisticsSummary.deliveryMethodLabel || "FBS" }}</div>
-            <div class="orders-cell-meta-line orders-logistics-warehouse">{{ row.logisticsSummary.resolvedRuleName || "--" }}</div>
+            <div class="orders-cell-meta-line orders-logistics-warehouse">Ozon: {{ row.logisticsSummary.ozonMethodName || "--" }}</div>
+            <div class="orders-cell-meta-line orders-logistics-warehouse">{{ row.logisticsSummary.ruleSourceLabel }}: {{ row.logisticsSummary.resolvedRuleName || "--" }}</div>
             <div v-if="row.logisticsSummary.shipmentNumber" class="orders-logistics-id-row">
               <span>货件: {{ row.logisticsSummary.shipmentNumber }}</span>
               <el-tooltip content="复制货件号" placement="top">
@@ -439,7 +518,7 @@ function orderTitleParts(row) {
           <div class="orders-stock-list">
             <div
               v-for="product in row.inventorySummaries"
-              :key="`${row.id}-inventory-${product.productId}`"
+              :key="`${row.id}-inventory-${product.inventoryKey || product.productId}`"
               class="orders-inventory-item orders-inventory-item-plain"
             >
               <small class="orders-stock-product-name orders-product-name">{{ product.productName }}</small>
@@ -450,7 +529,7 @@ function orderTitleParts(row) {
               </div>
               <div class="orders-stock-inline-facts">
                 <span>FBP: {{ product.stock?.fbp || 0 }}</span>
-                <span>FBS: {{ product.stock?.fbs || 0 }}</span>
+                <span>{{ product.inventoryMode === "combo" || Number(product.componentCount || 0) > 0 ? "子产品可组" : "本地" }}: {{ product.stock?.local || 0 }}</span>
               </div>
               <div class="orders-inline-actions orders-inline-actions-compact">
                 <el-button
@@ -460,6 +539,30 @@ function orderTitleParts(row) {
                   @click="emit('open-bind-product-from-order', row.id, product.sku)"
                 >
                   修改绑定
+                </el-button>
+                <el-button
+                  v-if="Number(product.productId || 0) > 0"
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
+                  @click="emit('edit-inventory-product', product.productId)"
+                >
+                  编辑库存
+                </el-button>
+                <el-button
+                  v-if="product.inventoryMode === 'single' && Number(product.productId || 0) > 0"
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
+                  @click="emit('open-product-components', product.productId)"
+                >
+                  绑定子产品
+                </el-button>
+                <el-button
+                  v-if="product.inventoryMode === 'single' && Number(product.productId || 0) > 0 && Number(product.componentCount || 0) > 0"
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
+                  @click="emit('view-product-components', product.productId)"
+                >
+                  查看子产品（{{ product.componentCount }}）
                 </el-button>
               </div>
             </div>
@@ -471,7 +574,7 @@ function orderTitleParts(row) {
               <small class="orders-stock-product-name orders-product-name">{{ item.name }}</small>
               <div class="orders-stock-inline-facts">
                 <span>FBP: {{ item.stock?.fbp || 0 }}</span>
-                <span>FBS: {{ item.stock?.fbs || 0 }}</span>
+                <span>本地: 未绑定</span>
               </div>
               <div class="orders-inline-actions orders-inline-actions-compact">
                 <el-button
@@ -494,10 +597,14 @@ function orderTitleParts(row) {
         </template>
       </el-table-column>
 
-      <el-table-column label="取消原因" min-width="112">
+      <el-table-column label="归类 / 具体原因" min-width="250">
         <template #default="{ row }">
           <div class="orders-cancel-cell">
-            <small>{{ row.cancelReasonText }}</small>
+            <strong v-if="row.cancelCategoryText !== '--'">{{ row.cancelCategoryText }}</strong>
+            <small v-else>--</small>
+            <span v-if="row.cancelReasonText !== '--'">具体原因：{{ row.cancelReasonText }}</span>
+            <small v-if="row.cancelInitiatorText">{{ row.cancelInitiatorText }}</small>
+            <small v-if="row.cancelReasonMeta">{{ row.cancelReasonMeta }}</small>
           </div>
         </template>
       </el-table-column>
@@ -508,10 +615,11 @@ function orderTitleParts(row) {
             <el-button
               v-if="row.availableActions.showPurchase"
               size="small"
-              class="orders-inline-accent-button orders-inline-accent-button-secondary"
+              class="orders-inline-accent-button"
+              :class="procurementActionClass(row)"
               @click="emit('open-order-procurement', row.id)"
             >
-              去采购
+              {{ procurementActionLabel(row) }}
             </el-button>
             <el-button
               v-if="row.availableActions.showPrepare"
@@ -521,6 +629,22 @@ function orderTitleParts(row) {
             >
               备货
             </el-button>
+            <el-tooltip
+              v-if="row.availableActions.showSplitPrepare"
+              :content="row.availableActions.splitPrepare ? '按商品数量拆分多个包裹后备货' : '订单已经备货并进入等待发货，Ozon 不允许撤回后重新拆分'"
+              placement="top"
+            >
+              <span>
+                <el-button
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
+                  :disabled="row.availableActions.splitPrepare === false"
+                  @click="emit('split-order', row.id)"
+                >
+                  {{ row.availableActions.splitPrepare ? "拆分备货" : "已备货，不能拆分" }}
+                </el-button>
+              </span>
+            </el-tooltip>
             <el-button
               v-if="row.availableActions.showPrint"
               size="small"

@@ -35,7 +35,10 @@ function parseSkuMap(row, fieldName, transform = (value) => value) {
     "sku_product_ids",
     "sku_online_product_ids",
     "sku_mapping_ids",
-    "sku_stock_summaries"
+    "sku_inventory_modes",
+    "sku_stock_summaries",
+    "sku_incoming_summaries",
+    "sku_component_counts"
   ].includes(fieldName) ? "," : "||";
   for (const item of parseMappedPairs(row?.[fieldName], separator)) {
     if (!map.has(item.key)) map.set(item.key, transform(item.value));
@@ -54,12 +57,16 @@ export function buildProductDisplayRows(row = {}) {
   const actualProfitReadyMap = parseSkuMap(row, "sku_actual_profit_ready", (value) => String(value || "") === "1");
   const ozonProductIds = parseSkuMap(row, "sku_ozon_product_ids");
   const productIds = parseSkuMap(row, "sku_product_ids", (value) => Number(value || 0));
+  const inventoryNames = parseSkuMap(row, "sku_inventory_names");
   const onlineIds = parseSkuMap(row, "sku_online_product_ids", (value) => Number(value || 0));
+  const inventoryModes = parseSkuMap(row, "sku_inventory_modes");
   const inventoryImages = splitCsv(row.inventory_image_urls);
   const stockMap = parseSkuMap(row, "sku_stock_summaries", (value) => {
     const parts = String(value || "").split(":");
-    return { fbs: Number(parts[0] || 0), fbp: Number(parts[1] || 0) };
+    return { fbs: Number(parts[0] || 0), fbp: Number(parts[1] || 0), local: Number(parts[2] || 0) };
   });
+  const incomingMap = parseSkuMap(row, "sku_incoming_summaries", (value) => Number(value || 0));
+  const componentCountMap = parseSkuMap(row, "sku_component_counts", (value) => Number(value || 0));
   const skus = splitCsv(row.skus);
   const unboundSkus = new Set(splitCsv(row.unbound_skus));
   const rawFallbackName = firstCsvValue(row.product_names);
@@ -77,9 +84,12 @@ export function buildProductDisplayRows(row = {}) {
       estimatedProfit: Number(row.estimated_profit || 0),
       actualProfit: Number(row.actual_profit || 0),
       actualProfitReady: Math.abs(Number(row.actual_profit || 0)) > 0.000001 || String(row.status || "").toLowerCase() === "delivered",
-      stock: { fbs: 0, fbp: 0 },
+      stock: { fbs: 0, fbp: 0, local: 0 },
+      incoming: 0,
+      componentCount: 0,
       productId: 0,
       onlineId: 0,
+      inventoryMode: "unbound",
       ozonProductId: String(row.ozon_product_id || row.ozon_sku || ""),
       unbound: true,
       productLink: ozonBuyerProductLinkFor(row.ozon_product_id || row.ozon_sku)
@@ -101,8 +111,12 @@ export function buildProductDisplayRows(row = {}) {
       actualProfit: actualProfits.get(sku) || 0,
       actualProfitReady: actualProfitReadyMap.get(sku) || false,
       stock: stockMap.get(sku) || { fbs: 0, fbp: 0 },
+      incoming: incomingMap.get(sku) || 0,
+      componentCount: componentCountMap.get(sku) || 0,
       productId: productIds.get(sku) || 0,
+      inventoryName: inventoryNames.get(sku) || "",
       onlineId,
+      inventoryMode: inventoryModes.get(sku) || (productIds.get(sku) ? "single" : "unbound"),
       ozonProductId,
       unbound: unboundSkus.has(sku),
       productLink: ozonBuyerProductLinkFor(ozonProductId)

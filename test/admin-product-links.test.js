@@ -18,7 +18,7 @@ test("admin product links prefer real sku from online product row", () => {
   assert.equal(ozonBuyerProductLinkFromRow(row), "https://www.ozon.ru/product/4601347655/");
 });
 
-test("admin product links fall back to ozon product id when sku is unavailable", () => {
+test("admin product links do not use seller product id as buyer sku", () => {
   const row = {
     ozon_product_id: "4779399576",
     ozon_sku: "__MISSING_SKU__:4779399576",
@@ -28,6 +28,6 @@ test("admin product links fall back to ozon product id when sku is unavailable",
     })
   };
 
-  assert.equal(ozonBuyerProductKeyFromRow(row), "4779399576");
-  assert.equal(ozonBuyerProductLinkFromRow(row), "https://www.ozon.ru/product/4779399576/");
+  assert.equal(ozonBuyerProductKeyFromRow(row), "");
+  assert.equal(ozonBuyerProductLinkFromRow(row), "");
 });

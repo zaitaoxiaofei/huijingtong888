@@ -1,0 +1,29 @@
+[Unit]
+Description=Ozon ERP application
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ozon-erp
+Group=ozon-erp
+WorkingDirectory=/opt/ozon-erp/current
+EnvironmentFile=/etc/ozon-erp/ozon-erp.env
+Environment=NODE_ENV=production
+Environment=NODE_OPTIONS=--max-old-space-size=768
+ExecStart=/usr/bin/node src/server.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/ozon-erp/shared
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ozon-erp
+
+[Install]
+WantedBy=multi-user.target

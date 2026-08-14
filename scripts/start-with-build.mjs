@@ -7,6 +7,11 @@ import { openStartupPage } from "./open-startup-page.mjs";
 const rootDir = process.cwd();
 const port = Number(process.env.PORT || 8788);
 const appBaseUrl = process.env.APP_BASE_URL || `http://localhost:${port}`;
+const protectedPorts = new Set([8787, 8087]);
+
+if (protectedPorts.has(port) && process.env.ALLOW_PROTECTED_PORT_OPERATION !== "1") {
+  throw new Error(`Refusing to start or restart protected port ${port}. Use PORT=8788 for local verification.`);
+}
 
 function run(command, args, label) {
   return new Promise((resolve, reject) => {
@@ -129,7 +134,7 @@ async function freePort(targetPort) {
   throw new Error(`Port ${targetPort} is still in use after stopping ${pids.join(", ")}.`);
 }
 
-async function waitForPort(targetPort, timeoutMs = 30000) {
+async function waitForPort(targetPort, timeoutMs = 90000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     if (await isPortOpen(targetPort)) return;

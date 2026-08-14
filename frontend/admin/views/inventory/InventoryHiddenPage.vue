@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
@@ -14,7 +15,6 @@ const route = useRoute();
 const router = useRouter();
 let syncingRoute = false;
 const listRequestGate = createLatestRequestGate();
-let shopsLoaded = false;
 
 const loading = ref(false);
 const state = reactive({
@@ -106,16 +106,12 @@ async function loadPageData() {
     });
     const query = String(state.filters.query || "").trim();
     if (query) params.set("query", query);
-    const requests = [apiClient.get(`/api/products/hidden?${params.toString()}`)];
-    if (!shopsLoaded) requests.push(apiClient.get("/api/shops"));
+    const requests = [apiClient.get(`/api/products/hidden?${params.toString()}`), loadShopDictionary()];
     const [rows, shops] = await Promise.all(requests);
     if (!listRequestGate.isLatest(requestToken)) return;
     state.rows = Array.isArray(rows?.rows) ? rows.rows : [];
     state.total = Number(rows?.total || 0);
-    if (!shopsLoaded) {
-      state.shops = Array.isArray(shops) ? shops : [];
-      shopsLoaded = true;
-    }
+    state.shops = Array.isArray(shops) ? shops : [];
   } catch (error) {
     if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "已隐藏产品加载失败");

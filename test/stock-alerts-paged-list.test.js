@@ -40,6 +40,21 @@ test("stock alerts support FBP flattened paged list contract", async () => {
   }
 });
 
+test("stock alerts support FBP alert paged list contract", async () => {
+  const result = await stockAlertsMysql({ mode: "fbp-alerts", paged: "1", page: 1, pageSize: 5, sortKey: "fbp_available", sortDir: "asc" });
+
+  assert.equal(result.mode, "fbp-alerts");
+  assert.ok(result.total >= result.rows.length);
+  assert.ok(result.rows.length <= 5);
+
+  for (const row of result.rows) {
+    assert.ok(row.product_id);
+    assert.notEqual(row.ozon_sku, undefined);
+    assert.notEqual(row.fbp_available, undefined);
+    assert.ok(["out_of_stock", "within_7_days", "within_15_days"].includes(row.alert_type));
+  }
+});
+
 test("stock alerts support search and shop filters", async () => {
   const first = await stockAlertsMysql({ mode: "fbp", paged: "1", page: 1, pageSize: 20 });
   if (!first.rows.length) return;

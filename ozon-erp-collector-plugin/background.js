@@ -16,6 +16,12 @@ const SELLER_BRIDGE_URL = 'https://seller.ozon.ru/app/products';
 const MANUAL_PROGRESS_STORAGE_KEY = 'ozon-erp-manual-progress';
 const PLUGIN_UPDATE_STATUS_STORAGE_KEY = 'ozon-erp-plugin-update-status';
 const PLUGIN_UPDATE_ALARM_NAME = 'ozon-erp-plugin-update-check';
+const SERVER_PUBLISH_MEDIA_SIDECAR_ALARM_NAME = 'ozon-erp-server-publish-media-sidecar';
+const SERVER_PUBLISH_MEDIA_SIDECAR_INTERVAL_MINUTES = 0.5;
+const SERVER_PUBLISH_MEDIA_SIDECAR_INITIAL_DELAY_MINUTES = 0.05;
+const SERVER_PUBLISH_MEDIA_SIDECAR_LIMIT = 20;
+const SERVER_PUBLISH_MEDIA_SIDECAR_CONCURRENCY = 8;
+const SERVER_PUBLISH_MEDIA_SIDECAR_LEASE_MS = 10 * 60 * 1000;
 const PLUGIN_VERSION = chrome.runtime.getManifest?.().version || '0.0.0';
 const OZON_FRONT_SCRIPT_FILES = [
   'erp-config.js',
@@ -30,6 +36,8 @@ const OZON_INJECTION_DEBOUNCE_MS = 1200;
 const OZON_INJECTION_BLOCKED_TTL_MS = 5 * 60 * 1000;
 const ozonInjectionAttemptAtByTabId = new Map();
 const ozonInjectionBlockedByTabId = new Map();
+let serverPublishMediaSidecarPromise = null;
+let sellerAuthSyncPromise = null;
 
 function normalizeErpBaseUrl(value) {
   if (typeof erpConfig.normalizeErpBaseUrl === 'function') {
@@ -147,6 +155,113 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+async function fetchLocalPluginJson(pathname, options = {}) {
+  const erpBaseUrl = await getErpBaseUrl();
+  const url = `${resolveLocalPluginApiBaseUrl(erpBaseUrl)}${pathname.startsWith('/') ? pathname : `/${pathname}`}`;
+  if (!isAllowedLocalPluginUrl(url, erpBaseUrl)) {
+    return { success: false, error: 'LOCAL_PLUGIN_URL_INVALID', message: 'Invalid local plugin API URL' };
+  }
+  const headers = {
+    Accept: 'application/json',
+    ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+    ...(options.headers || {})
+  };
+  const token = await getLocalPluginToken();
+  if (token) headers['x-local-plugin-token'] = token;
+  let tenantId = String(headers['x-tenant-id'] || headers['X-Tenant-Id'] || '').trim();
+  if (!tenantId) tenantId = await resolveErpTenantId(erpBaseUrl);
+  if (!tenantId) tenantId = 'admin';
+  headers['x-tenant-id'] = tenantId;
+  await cacheErpTenantId(tenantId, erpBaseUrl);
+  const response = await fetchWithTimeout(url, {
+    method: options.method || 'GET',
+    headers,
+    body: options.body ? JSON.stringify(options.body) : undefined
+  }, Number(options.timeoutMs || 15000));
+  const text = await response.text();
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch (error) {
+    json = { success: false, error: text || `HTTP ${response.status}` };
+  }
+  if (!response.ok && json?.success !== false) {
+    return { ...json, success: false, error: json?.error || `HTTP ${response.status}` };
+  }
+  return json;
+}
+
+async function getSellerCookieInfo(tabUrl = 'https://seller.ozon.ru/') {
+  const cookies = await chrome.cookies.getAll({ domain: 'seller.ozon.ru' });
+  const header = cookies.filter((item) => item?.name).map((item) => `${item.name}=${item.value || ''}`).join('; ');
+  const preferredNames = ['sc_company_id', 'company_id', 'seller_company_id'];
+  let companyId = '';
+  for (const name of preferredNames) {
+    const cookie = await chrome.cookies.get({ url: String(tabUrl || 'https://seller.ozon.ru/'), name });
+    if (cookie?.value) { companyId = String(cookie.value).trim(); break; }
+  }
+  const portableCookies = cookies.filter((item) => item?.name).map((item) => ({
+    name: item.name,
+    value: item.value || '',
+    domain: item.domain || '.seller.ozon.ru',
+    path: item.path || '/',
+    secure: Boolean(item.secure),
+    httpOnly: Boolean(item.httpOnly),
+    sameSite: item.sameSite || 'unspecified',
+    expirationDate: Number(item.expirationDate || 0) || null
+  }));
+  return { header, companyId, cookies: portableCookies };
+}
+
+async function syncPendingSellerAuthBinding(observedCompanyId = '', sender = {}) {
+  const prepareResponse = await fetchLocalPluginJson('/seller-analytics/plugin-prepare/next');
+  const request = prepareResponse?.request || prepareResponse?.data || null;
+  if (!request?.id) return { success: true, pending: false };
+  const expectedCompanyId = String(request.expected_store_id || request.expectedStoreId || request.store_id || request.company_id || '').trim();
+  const cookieInfo = await getSellerCookieInfo(sender?.tab?.url);
+  const currentCompanyId = String(observedCompanyId || cookieInfo.companyId || '').trim();
+  if (!cookieInfo.header || !currentCompanyId) return { success: false, pending: true, error: 'SELLER_AUTH_CONTEXT_MISSING' };
+  if (expectedCompanyId && currentCompanyId !== expectedCompanyId) {
+    return { success: false, pending: true, ignored: true, error: 'SELLER_COMPANY_MISMATCH', expectedCompanyId, currentCompanyId };
+  }
+  const probeResponse = await fetchLocalPluginJson('/seller-analytics/auth-probe', {
+    method: 'POST',
+    body: {
+      company_id: currentCompanyId,
+      cookie: cookieInfo.header,
+      headers: { 'x-o3-company-id': currentCompanyId }
+    },
+    timeoutMs: 30000
+  });
+  const probe = probeResponse?.data || probeResponse;
+  const usable = probeResponse?.success !== false && probe?.ok !== false && ![401, 403].includes(Number(probe?.status || 0));
+  if (usable) {
+    const bindingResponse = await fetchLocalPluginJson('/seller-analytics/auth-bindings', {
+      method: 'POST',
+      body: {
+        company_id: currentCompanyId,
+        store_id: currentCompanyId,
+        cookie: cookieInfo.header,
+        cookies: cookieInfo.cookies,
+        headers: { 'x-o3-company-id': currentCompanyId },
+        source: 'collector-plugin-auto-bind',
+        plugin_version: PLUGIN_VERSION,
+        captured_at: new Date().toISOString()
+      }
+    });
+    if (bindingResponse?.success === false) throw new Error(bindingResponse?.error || 'Seller auth binding failed');
+  }
+  await fetchLocalPluginJson('/seller-analytics/plugin-prepare/result', {
+    method: 'POST',
+    body: {
+      success: usable,
+      current_company_id: currentCompanyId,
+      error: usable ? '' : `AUTH_PROBE_HTTP_${probe?.status || 'UNKNOWN'}`
+    }
+  });
+  return { success: usable, pending: false, companyId: currentCompanyId, probe };
 }
 
 async function queryTabs(queryInfo) {
@@ -353,7 +468,7 @@ async function importCollectedProductPayloadToErpDb(payload, syncContext = null,
     body: JSON.stringify({
       products: [payload]
     })
-  });
+  }, 30000);
   const text = await response.text();
   let json = null;
   try {
@@ -438,17 +553,26 @@ async function lookupCollectedProductCaches(skus, syncContext = null) {
         .filter(Boolean)
     )
   );
-  const results = [];
-  for (const sku of normalizedSkus) {
-    const result = await lookupCollectedProductCache(sku, syncContext).catch((error) => ({
-      success: false,
-      error: error?.message || String(error)
-    }));
-    results.push({
-      sku,
-      ...result
-    });
+  const batch = await fetchLocalPluginJson('/collected-products/lookup-batch', {
+    method: 'POST',
+    body: { skus: normalizedSkus, syncContext },
+    timeoutMs: 30000
+  }).catch(() => null);
+  if (batch?.success && Array.isArray(batch.results)) {
+    return { success: true, total: normalizedSkus.length, results: batch.results };
   }
+  const results = [];
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(6, normalizedSkus.length || 1) }, async () => {
+    while (cursor < normalizedSkus.length) {
+      const sku = normalizedSkus[cursor++];
+      const result = await lookupCollectedProductCache(sku, syncContext).catch((error) => ({
+        success: false,
+        error: error?.message || String(error)
+      }));
+      results.push({ sku, ...result });
+    }
+  }));
   return {
     success: true,
     total: normalizedSkus.length,
@@ -605,6 +729,266 @@ async function crossTabOzonRequest(message, sender) {
   return await sendMessageToSellerTab(tab.id, requestPayload);
 }
 
+async function crossTabOzonMediaUpload(message, sender) {
+  const tab = await ensureSellerTab();
+  if (!tab?.id) {
+    return { success: false, error: 'NO_SELLER_TAB', message: 'Open seller.ozon.ru first' };
+  }
+  const requestPayload = {
+    type: 'OZON_ERP_MEDIA_UPLOAD',
+    requestId: message.requestId,
+    mediaType: message.mediaType || message.kind || 'image',
+    fileName: message.fileName || '',
+    mimeType: message.mimeType || '',
+    dataUrl: message.dataUrl || '',
+    sourceTabId: sender?.tab?.id
+  };
+  const initialResponse = await sendMessageToSellerTab(tab.id, requestPayload);
+  if (initialResponse?.error !== 'TAB_COMMUNICATION_FAILED') return initialResponse;
+  try {
+    await reinjectSellerBridge(tab.id);
+  } catch (error) {
+    return initialResponse;
+  }
+  return await sendMessageToSellerTab(tab.id, requestPayload);
+}
+
+async function runFbpFillTask(message) {
+  const tabs = await queryTabs({ url: '*://seller.ozon.ru/app/fbp-supply/create-order/*' });
+  const tab = tabs.find((item) => item.status === 'complete' && /\/app\/fbp-supply\/create-order\/\d+/i.test(String(item.url || '')));
+  if (!tab?.id) {
+    return { success: false, error: 'FBP_PAGE_REQUIRED', message: '请先打开Ozon FBP申请的“商品和货位”页面，然后重试' };
+  }
+  await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+  const requestPayload = {
+    type: 'OZON_ERP_FBP_FILL',
+    requestId: message.requestId,
+    payload: message.payload || {}
+  };
+  const initialResponse = await sendMessageToSellerTab(tab.id, requestPayload);
+  if (initialResponse?.error !== 'TAB_COMMUNICATION_FAILED') return initialResponse;
+  try {
+    await reinjectSellerBridge(tab.id);
+  } catch (error) {
+    return initialResponse;
+  }
+  return await sendMessageToSellerTab(tab.id, requestPayload);
+}
+
+function normalizeServerPublishMediaKind(value = '') {
+  return String(value || '').trim().toLowerCase() === 'video' ? 'video' : 'image';
+}
+
+function inferServerPublishMediaMimeType(sourceUrl = '', kind = 'image', fallback = '') {
+  const explicit = String(fallback || '').trim();
+  if (explicit) return explicit;
+  const text = String(sourceUrl || '').trim();
+  const dataMatch = text.match(/^data:([^;,]+)[;,]/i);
+  if (dataMatch?.[1]) return dataMatch[1];
+  let pathname = text.split(/[?#]/)[0].toLowerCase();
+  try {
+    pathname = new URL(text).pathname.toLowerCase();
+  } catch (error) {}
+  if (/\.jpe?g$/.test(pathname)) return 'image/jpeg';
+  if (/\.png$/.test(pathname)) return 'image/png';
+  if (/\.webp$/.test(pathname)) return 'image/webp';
+  if (/\.gif$/.test(pathname)) return 'image/gif';
+  if (/\.mov$/.test(pathname)) return 'video/quicktime';
+  if (/\.webm$/.test(pathname)) return 'video/webm';
+  if (/\.mp4$/.test(pathname)) return 'video/mp4';
+  return normalizeServerPublishMediaKind(kind) === 'video' ? 'video/mp4' : 'image/jpeg';
+}
+
+function inferServerPublishMediaFileName(job = {}) {
+  const explicit = String(job.fileName || job.file_name || '').trim();
+  if (explicit) return explicit;
+  const sourceUrl = String(job.sourceUrl || job.source_url || '').trim();
+  try {
+    const name = decodeURIComponent(new URL(sourceUrl).pathname.split('/').filter(Boolean).pop() || '');
+    if (name && /\.[A-Za-z0-9]{2,5}$/.test(name)) return name.slice(0, 160);
+  } catch (error) {}
+  const kind = normalizeServerPublishMediaKind(job.kind);
+  const mimeType = inferServerPublishMediaMimeType(sourceUrl, kind, job.mimeType || job.mime_type);
+  const extension = mimeType.includes('png') ? '.png'
+    : mimeType.includes('webp') ? '.webp'
+      : mimeType.includes('gif') ? '.gif'
+        : mimeType.includes('mp4') ? '.mp4'
+          : mimeType.includes('quicktime') ? '.mov'
+            : mimeType.includes('webm') ? '.webm'
+              : '.jpg';
+  return `${kind}-${Date.now().toString(36)}${extension}`;
+}
+
+function arrayBufferToBase64(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer || new ArrayBuffer(0));
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
+}
+
+async function serverPublishMediaSourceToDataUrl(job = {}) {
+  const sourceUrl = String(job.sourceUrl || job.source_url || '').trim();
+  if (!sourceUrl) throw new Error('Media upload job is missing sourceUrl');
+  if (/^data:/i.test(sourceUrl)) {
+    return {
+      dataUrl: sourceUrl,
+      mimeType: inferServerPublishMediaMimeType(sourceUrl, job.kind, job.mimeType || job.mime_type),
+      fileName: inferServerPublishMediaFileName(job)
+    };
+  }
+  const response = await fetch(sourceUrl, {
+    method: 'GET',
+    credentials: 'omit',
+    cache: 'no-store'
+  });
+  if (!response?.ok) throw new Error(`Download media failed: HTTP ${response?.status || 0}`);
+  const contentType = String(response.headers?.get?.('content-type') || '').split(';')[0].trim();
+  const mimeType = inferServerPublishMediaMimeType(sourceUrl, job.kind, job.mimeType || job.mime_type || contentType);
+  const arrayBuffer = await response.arrayBuffer();
+  return {
+    dataUrl: `data:${mimeType};base64,${arrayBufferToBase64(arrayBuffer)}`,
+    mimeType,
+    fileName: inferServerPublishMediaFileName({ ...job, mimeType })
+  };
+}
+
+function buildServerPublishMediaSidecarRunnerId() {
+  const extensionId = String(chrome.runtime?.id || 'collector-plugin').trim() || 'collector-plugin';
+  return `collector_plugin_media_sidecar_${extensionId}`;
+}
+
+async function completeServerPublishMediaUploadJob(job = {}, payload = {}) {
+  const jobId = encodeURIComponent(String(job.jobId || job.job_id || '').trim());
+  const mediaJobId = encodeURIComponent(String(job.mediaJobId || job.media_job_id || job.id || '').trim());
+  if (!jobId || !mediaJobId) return { success: false, error: 'MEDIA_JOB_ID_MISSING' };
+  return await fetchLocalPluginJson(`/server-publish/media-upload-jobs/${jobId}/${mediaJobId}`, {
+    method: 'POST',
+    body: payload
+  });
+}
+
+async function processServerPublishMediaUploadJob(job = {}) {
+  try {
+    const source = await serverPublishMediaSourceToDataUrl(job);
+    const uploadResponse = await crossTabOzonMediaUpload({
+      type: 'OZON_ERP_MEDIA_UPLOAD',
+      requestId: `server-publish-${job.jobId || job.job_id || 'job'}-${job.mediaJobId || job.media_job_id || job.id || Date.now()}`,
+      mediaType: normalizeServerPublishMediaKind(job.kind),
+      fileName: source.fileName,
+      mimeType: source.mimeType,
+      dataUrl: source.dataUrl
+    }, {});
+    const uploadedUrl = String(uploadResponse?.url || uploadResponse?.resultUrl || uploadResponse?.data?.url || '').trim();
+    if (!uploadResponse?.success || !uploadedUrl) {
+      const message = String(uploadResponse?.message || uploadResponse?.error || 'Seller media upload failed').trim();
+      await completeServerPublishMediaUploadJob(job, {
+        success: false,
+        error: uploadResponse?.error || 'SELLER_MEDIA_UPLOAD_FAILED',
+        message
+      });
+      return {
+        success: false,
+        jobId: job.jobId || job.job_id || '',
+        mediaJobId: job.mediaJobId || job.media_job_id || job.id || '',
+        error: uploadResponse?.error || 'SELLER_MEDIA_UPLOAD_FAILED',
+        message
+      };
+    }
+    const completeResponse = await completeServerPublishMediaUploadJob(job, {
+      success: true,
+      url: uploadedUrl,
+      message: ''
+    });
+    if (completeResponse?.success === false) {
+      return {
+        success: false,
+        jobId: job.jobId || job.job_id || '',
+        mediaJobId: job.mediaJobId || job.media_job_id || job.id || '',
+        error: completeResponse.error || 'MEDIA_UPLOAD_RESULT_WRITE_FAILED',
+        message: completeResponse.message || completeResponse.error || 'Media upload result write failed'
+      };
+    }
+    return {
+      success: true,
+      jobId: job.jobId || job.job_id || '',
+      mediaJobId: job.mediaJobId || job.media_job_id || job.id || '',
+      url: uploadedUrl
+    };
+  } catch (error) {
+    const message = error?.message || String(error);
+    await completeServerPublishMediaUploadJob(job, {
+      success: false,
+      error: 'SERVER_PUBLISH_MEDIA_SIDECAR_FAILED',
+      message
+    }).catch(() => null);
+    return {
+      success: false,
+      jobId: job.jobId || job.job_id || '',
+      mediaJobId: job.mediaJobId || job.media_job_id || job.id || '',
+      error: 'SERVER_PUBLISH_MEDIA_SIDECAR_FAILED',
+      message
+    };
+  }
+}
+
+async function runServerPublishMediaSidecar(options = {}) {
+  if (serverPublishMediaSidecarPromise && options.force !== true) {
+    return await serverPublishMediaSidecarPromise;
+  }
+  serverPublishMediaSidecarPromise = (async () => {
+    const runnerId = options.runnerId || buildServerPublishMediaSidecarRunnerId();
+    const limit = Math.max(1, Math.min(20, Number(options.limit || SERVER_PUBLISH_MEDIA_SIDECAR_LIMIT) || SERVER_PUBLISH_MEDIA_SIDECAR_LIMIT));
+    const leaseMs = Math.max(60000, Number(options.leaseMs || SERVER_PUBLISH_MEDIA_SIDECAR_LEASE_MS) || SERVER_PUBLISH_MEDIA_SIDECAR_LEASE_MS);
+    const concurrency = Math.max(1, Math.min(12, Number(options.concurrency || SERVER_PUBLISH_MEDIA_SIDECAR_CONCURRENCY) || SERVER_PUBLISH_MEDIA_SIDECAR_CONCURRENCY));
+    const results = [];
+    let claimed = 0;
+    while (true) {
+      const claim = await fetchLocalPluginJson('/server-publish/media-upload-jobs/claim', {
+        method: 'POST',
+        body: { runnerId, limit, leaseMs }
+      });
+      if (claim?.success === false) {
+        if (!claimed) return { success: false, error: claim.error, message: claim.message || claim.error, claimed: 0, results: [] };
+        break;
+      }
+      const jobs = Array.isArray(claim?.jobs) ? claim.jobs : [];
+      if (!jobs.length) break;
+      const resultOffset = results.length;
+      claimed += jobs.length;
+      let cursor = 0;
+      await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, async () => {
+        while (cursor < jobs.length) {
+          const index = cursor++;
+          results[resultOffset + index] = await processServerPublishMediaUploadJob(jobs[index]);
+        }
+      }));
+      if (jobs.length < limit) break;
+    }
+    return {
+      success: !results.some((item) => item?.success === false),
+      claimed,
+      results
+    };
+  })();
+  try {
+    return await serverPublishMediaSidecarPromise;
+  } finally {
+    serverPublishMediaSidecarPromise = null;
+  }
+}
+
+function scheduleServerPublishMediaSidecar() {
+  if (!chrome.alarms?.create) return;
+  chrome.alarms.create(SERVER_PUBLISH_MEDIA_SIDECAR_ALARM_NAME, {
+    delayInMinutes: SERVER_PUBLISH_MEDIA_SIDECAR_INITIAL_DELAY_MINUTES,
+    periodInMinutes: SERVER_PUBLISH_MEDIA_SIDECAR_INTERVAL_MINUTES
+  });
+}
+
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -629,6 +1013,46 @@ function firstFilledValue(source = {}, keys = []) {
     if (hasFilledValue(value)) return value;
   }
   return '';
+}
+
+function firstFilledValueDeep(source = {}, keys = [], depth = 0) {
+  if (!source || typeof source !== 'object' || depth > 4) return '';
+  const wanted = new Set(keys.map((key) => String(key).toLowerCase()));
+  for (const [key, value] of Object.entries(source)) {
+    if (wanted.has(String(key).toLowerCase()) && hasFilledValue(value)) return value;
+  }
+  for (const value of Object.values(source)) {
+    if (!value || typeof value !== 'object') continue;
+    const nested = firstFilledValueDeep(value, keys, depth + 1);
+    if (hasFilledValue(nested)) return nested;
+  }
+  return '';
+}
+
+function normalizeSellerAttributeValue(item = {}) {
+  const firstValue = Array.isArray(item?.values) ? item.values[0] : null;
+  const value = item?.value ?? item?.attribute_value ?? item?.text ?? firstValue?.value ?? firstValue?.name ?? firstValue?.text;
+  if (Array.isArray(value)) return value.map((entry) => normalizeSellerAttributeValue(entry)).filter(Boolean).join(', ');
+  if (value && typeof value === 'object') {
+    return cleanText(value.value ?? value.name ?? value.text ?? value.label ?? value.display_value ?? '');
+  }
+  return cleanText(value);
+}
+
+function sellerAttributeValueByIds(attributes = [], ids = []) {
+  const wanted = new Set(ids.map((id) => String(id)));
+  for (const item of Array.isArray(attributes) ? attributes : []) {
+    const key = String(item?.key || item?.attribute_id || item?.attributeId || item?.id || '').trim();
+    if (!wanted.has(key)) continue;
+    const value = normalizeSellerAttributeValue(item);
+    if (value) return value;
+  }
+  return '';
+}
+
+function sellerMeasurementByAttributeIds(attributes = [], ids = []) {
+  const value = sellerAttributeValueByIds(attributes, ids);
+  return formatMeasurement(value);
 }
 
 function normalizeSellerPrice(value) {
@@ -724,6 +1148,26 @@ function normalizeSellerBaseCategoryIds(source = {}) {
     .filter((item) => Number.isFinite(item.id) && item.id > 0)
     .sort((a, b) => (Number.isFinite(a.level) ? a.level : 0) - (Number.isFinite(b.level) ? b.level : 0))
     .map((item) => item.id);
+}
+
+function normalizeSellerTypeId(source = {}) {
+  const value =
+    source.description_type_dict_value ??
+    source.descriptionTypeDictValue ??
+    source.type_id ??
+    source.typeId ??
+    '';
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? String(numeric) : '';
+}
+
+function appendSellerTypeIdToCategoryIds(categoryIds, typeId) {
+  const ids = Array.isArray(categoryIds) ? categoryIds.slice() : [];
+  const numericTypeId = Number(typeId);
+  if (Number.isFinite(numericTypeId) && numericTypeId > 0 && !ids.includes(numericTypeId)) {
+    ids.push(numericTypeId);
+  }
+  return ids;
 }
 
 function normalizeSellerCategoryPath(source = {}) {
@@ -936,8 +1380,17 @@ function buildSellerBaseInfoFields(source = {}) {
   const brand = normalizeSellerBrand(variant.brand_name || variant.brand);
   if (brand) result.brand = brand;
   if (hasFilledValue(variant.brand_id)) result.brandId = variant.brand_id;
-  const categoryIds = normalizeSellerBaseCategoryIds(variant);
+  const sellerTypeId = normalizeSellerTypeId(variant);
+  const categoryIds = appendSellerTypeIdToCategoryIds(normalizeSellerBaseCategoryIds(variant), sellerTypeId);
   if (categoryIds.length > 0) result.category_ids = categoryIds;
+  if (!hasFilledValue(result.description_category_id) && categoryIds.length >= 2) {
+    result.description_category_id = String(categoryIds[categoryIds.length - 2]);
+  }
+  if (sellerTypeId) {
+    result.type_id = sellerTypeId;
+  } else if (!hasFilledValue(result.type_id) && categoryIds.length >= 1) {
+    result.type_id = String(categoryIds[categoryIds.length - 1]);
+  }
   const images = normalizeSellerImages(variant.main_image, variant.secondary_images, variant.images);
   if (images.length > 0) {
     result.images = images;
@@ -984,10 +1437,11 @@ function extractVariantV1Logistics(source = {}) {
 
 function extractVariantV2Logistics(source = {}) {
   const item = source?.item && typeof source.item === 'object' ? source.item : source;
-  const depth = formatMeasurement(item?.depth);
-  const width = formatMeasurement(item?.width);
-  const height = formatMeasurement(item?.height);
-  const weight = formatMeasurement(item?.weight);
+  const attributes = Array.isArray(item?.attributes) ? item.attributes : (Array.isArray(source?.attributes) ? source.attributes : []);
+  const depth = formatMeasurement(firstFilledValueDeep(item, ['depth', 'length', 'length_mm', 'depth_mm'])) || sellerMeasurementByAttributeIds(attributes, ['9454']);
+  const width = formatMeasurement(firstFilledValueDeep(item, ['width', 'width_mm'])) || sellerMeasurementByAttributeIds(attributes, ['9455']);
+  const height = formatMeasurement(firstFilledValueDeep(item, ['height', 'height_mm'])) || sellerMeasurementByAttributeIds(attributes, ['9456']);
+  const weight = formatMeasurement(firstFilledValueDeep(item, ['weight', 'weight_g', 'package_weight', 'custom_weight'])) || sellerMeasurementByAttributeIds(attributes, ['4497']);
   const customVolume = depth && width && height ? `${depth}x${width}x${height}` : '';
   return {
     custom_weight: weight || '',
@@ -1013,12 +1467,25 @@ function buildSellerVariantFields(source = {}, options = {}) {
   if (hasFilledValue(item.barcode)) result.barcode = item.barcode;
   if (hasFilledValue(item.description_category_id)) result.description_category_id = item.description_category_id;
   if (hasFilledValue(item.new_description_category_id)) result.new_description_category_id = item.new_description_category_id;
+  const sellerTypeId = normalizeSellerTypeId(item);
+  if (sellerTypeId) result.type_id = sellerTypeId;
+  else if (hasFilledValue(item.type_id)) result.type_id = item.type_id;
   if (hasFilledValue(item.origin_variant_id)) result.origin_variant_id = item.origin_variant_id;
+  const attributes = Array.isArray(item.attributes) ? item.attributes : [];
+  const color = firstFilledValue(item, ['color', 'color_name', 'colorName']) || sellerAttributeValueByIds(attributes, ['8229', '10096', '22814']);
+  const modelName = firstFilledValue(item, ['model_name', 'modelName', 'model']) || sellerAttributeValueByIds(attributes, ['9048']);
+  if (hasFilledValue(color)) result.color = color;
+  if (hasFilledValue(modelName)) {
+    result.modelName = modelName;
+    result.spec = result.spec || modelName;
+  }
   const itemTitle = item.name || item.title || '';
-  if (hasFilledValue(itemTitle)) {
+  if (hasFilledValue(itemTitle) && (!hasFilledValue(color) || cleanText(itemTitle) !== cleanText(color))) {
     result.variantName = itemTitle;
     result.name = result.name || itemTitle;
     result.productTitle = result.productTitle || itemTitle;
+  } else if (hasFilledValue(modelName)) {
+    result.variantName = result.variantName || modelName;
   }
   const images = normalizeSellerImages(item.primary_image, item.images, item.color_image);
   if (images.length > 0) {
@@ -1027,7 +1494,7 @@ function buildSellerVariantFields(source = {}, options = {}) {
     result.productImage = images[0];
     result.mainImage = images[0];
   }
-  if (Array.isArray(item.attributes) && item.attributes.length > 0) result.attributes = item.attributes;
+  if (attributes.length > 0) result.attributes = attributes;
   applySellerCommissionFields(result, source, source?.item);
   return result;
 }
@@ -1145,6 +1612,37 @@ async function fetchSellerCollectedProductFields(sku) {
   return { fields, raw, warnings };
 }
 
+function buildSellerCollectedProductFieldsFromPool(item = {}) {
+  const raw = item?.raw && typeof item.raw === 'object' ? item.raw : {};
+  const fields = {};
+  const warnings = Array.isArray(item?.warnings) ? [...item.warnings] : [];
+  if (raw.sales) {
+    Object.assign(fields, buildSellerSalesFields(raw.sales));
+    if (hasFilledValue(raw.salesMeta?.updateDate)) fields.salesUpdateDate = raw.salesMeta.updateDate;
+    if (hasFilledValue(raw.salesMeta?.totals)) fields.salesTotals = raw.salesMeta.totals;
+    if (hasFilledValue(raw.salesMeta?.benchmark)) fields.salesBenchmark = raw.salesMeta.benchmark;
+  }
+  if (raw.baseInfo) {
+    const categoryIds = fields.category_ids;
+    Object.assign(fields, buildSellerBaseInfoFields(raw.baseInfo));
+    if (Array.isArray(categoryIds) && categoryIds.length > 0) fields.category_ids = categoryIds;
+  }
+  if (raw.variant) {
+    Object.assign(fields, buildSellerVariantFields(raw.variant, { variantMode: raw.variantApiType || 'variant_v2' }));
+  }
+  fields.seller_source_shop_id = item.source_shop_id || '';
+  fields.seller_source_shop_name = item.source_shop_name || '';
+  fields.seller_source_company_id = item.source_company_id || '';
+  raw.variantId = raw.variantId || '';
+  raw.poolSource = {
+    shopId: item.source_shop_id || null,
+    shopName: item.source_shop_name || '',
+    companyId: item.source_company_id || '',
+    durationMs: Number(item.duration_ms || 0)
+  };
+  return { fields, raw, warnings };
+}
+
 function normalizeBaseProductPayload(product = {}) {
   if (!product || typeof product !== 'object') return null;
   const sku = String(product.sku || product.product_id || product.productId || '').trim();
@@ -1171,11 +1669,8 @@ function normalizeBaseProductPayload(product = {}) {
     payload.cardPrice = price;
   }
   if (hasFilledValue(product.originalPrice)) payload.originalPrice = normalizeSellerPrice(product.originalPrice) || product.originalPrice;
-  const currency = String(product.priceCurrency || product.currency || '').trim().toUpperCase();
-  if (currency) {
-    payload.priceCurrency = currency;
-    payload.currency = currency;
-  }
+  payload.priceCurrency = 'CNY';
+  payload.currency = 'CNY';
   if (images.length > 0) {
     payload.images = images;
     payload.productImage = images[0];
@@ -1285,6 +1780,10 @@ function buildSellerOnlyCollectedProductPayload(sku, sellerResult, baseProduct =
   } else {
     applyFirstFilled(payload, 'productImage', sources);
   }
+  const mainImage = String(payload.productImage || payload.mainImage || payload.images?.find(Boolean) || '').trim();
+  payload.productImage = mainImage;
+  payload.mainImage = mainImage;
+  payload.images = mainImage ? [mainImage] : [];
   return payload;
 }
 
@@ -1345,6 +1844,7 @@ function buildCollectedProductDisplayPayload(payload = {}) {
     'description_type_dict_value',
     'description_category_id',
     'new_description_category_id',
+    'type_id',
     'salesSchema',
     'sources',
     'soldCount',
@@ -1449,10 +1949,48 @@ async function collectSellerOnlySkusToCollectedProducts(message, sender = null) 
   const sourceTabId = sender?.tab?.id || message?.sourceTabId || null;
   const results = [];
   let cursor = 0;
-  const concurrency = Math.max(1, Math.min(Number(message?.concurrency || 12), 24));
+  const concurrency = Math.max(1, Math.min(Number(message?.concurrency || 3), 3));
+  const poolResponse = await fetchLocalPluginJson('/collector-seller-pool/collect', {
+    method: 'POST',
+    body: { skus },
+    timeoutMs: 120000
+  }).catch(() => null);
+  const poolAttempted = Array.isArray(poolResponse?.results);
+  const poolWorkerCount = Number(poolResponse?.worker_count || poolResponse?.data?.worker_count || 0);
+  const poolBySku = new Map((poolAttempted ? poolResponse.results : [])
+    .filter((item) => item?.sku)
+    .map((item) => [String(item.sku), item]));
   async function collectOne(sku) {
     try {
-      const sellerResult = await fetchSellerCollectedProductFields(sku);
+      const poolItem = poolBySku.get(String(sku));
+      const poolWarning = poolItem?.warnings?.filter(Boolean)?.[0] || poolItem?.error || '';
+      const collectionRoute = poolItem?.success
+        ? {
+            mode: 'pool',
+            workerCount: poolWorkerCount,
+            shopName: poolItem.source_shop_name || '',
+            companyId: poolItem.source_company_id || '',
+            durationMs: Number(poolItem.duration_ms || 0),
+            status: Number(poolItem.status || 200)
+          }
+        : {
+            mode: 'browser_fallback',
+            workerCount: poolWorkerCount,
+            shopName: '',
+            companyId: '',
+            durationMs: Number(poolItem?.duration_ms || 0),
+            status: Number(poolItem?.status || 0),
+            warning: poolWarning || (poolAttempted ? 'Seller pool did not return usable data' : 'Seller pool unavailable')
+          };
+      let sellerResult;
+      if (poolItem?.success) {
+        sellerResult = buildSellerCollectedProductFieldsFromPool(poolItem);
+      } else {
+        sellerResult = await fetchSellerCollectedProductFields(sku);
+        if (poolWarning) {
+          sellerResult.warnings = [`Seller pool fallback: ${poolWarning}`, ...(sellerResult.warnings || [])];
+        }
+      }
       const payload = buildSellerOnlyCollectedProductPayload(sku, sellerResult, baseBySku.get(sku));
       if (!payload.sku || Object.keys(sellerResult.fields || {}).length === 0) {
         throw new Error((sellerResult.warnings || []).filter(Boolean)[0] || 'seller did not return usable fields');
@@ -1465,7 +2003,8 @@ async function collectSellerOnlySkusToCollectedProducts(message, sender = null) 
           previewOnly: true,
           product: buildCollectedProductDisplayPayload(payload),
           collectDate: new Date().toISOString().slice(0, 10),
-          source: 'seller_preview'
+          source: 'seller_preview',
+          collectionRoute
         };
         results.push(item);
         await emitAutoCollectListProgress(sourceTabId, item);
@@ -1479,7 +2018,8 @@ async function collectSellerOnlySkusToCollectedProducts(message, sender = null) 
           imported: true,
           product: buildCollectedProductDisplayPayload(payload),
           collectDate: new Date().toISOString().slice(0, 10),
-          importResult
+          importResult,
+          collectionRoute
         };
         results.push(item);
         await emitAutoCollectListProgress(sourceTabId, item);
@@ -1487,7 +2027,8 @@ async function collectSellerOnlySkusToCollectedProducts(message, sender = null) 
         const item = {
           sku,
           success: false,
-          error: importResult?.message || importResult?.error || 'Failed to write collected product'
+          error: importResult?.message || importResult?.error || 'Failed to write collected product',
+          collectionRoute
         };
         results.push(item);
         await emitAutoCollectListProgress(sourceTabId, item);
@@ -1748,11 +2289,30 @@ async function collectManualDetailSkus(message) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'OZON_ERP_SELLER_AUTH_SYNC') {
+    const isSellerTab = /^https:\/\/seller\.ozon\.ru\//i.test(String(sender?.tab?.url || ''));
+    if (!isSellerTab) {
+      sendResponse({ success: false, pending: true, ignored: true, error: 'SELLER_TAB_REQUIRED' });
+      return false;
+    }
+    if (!sellerAuthSyncPromise) {
+      sellerAuthSyncPromise = syncPendingSellerAuthBinding(message.companyId, sender)
+        .finally(() => { sellerAuthSyncPromise = null; });
+    }
+    sellerAuthSyncPromise
+      .then(sendResponse)
+      .catch((error) => sendResponse({ success: false, error: error?.message || String(error) }));
+    return true;
+  }
+
   if (message?.type === 'CHECK_SELLER_TAB') return withResponse(checkSellerTab(), sendResponse);
   if (message?.type === 'OPEN_NEW_TAB') return withResponse(chrome.tabs.create({ url: message.url }), sendResponse);
   if (message?.type === 'TEST_SELLER_TAB_COMMUNICATION') return withResponse(testSellerTabCommunication(), sendResponse);
   if (message?.type === 'REFRESH_SELLER_TAB') return withResponse(refreshSellerTab(), sendResponse);
   if (message?.type === 'CROSS_TAB_OZON_REQUEST') return withResponse(crossTabOzonRequest(message, sender), sendResponse);
+  if (message?.type === 'OZON_ERP_MEDIA_UPLOAD') return withResponse(crossTabOzonMediaUpload(message, sender), sendResponse);
+  if (message?.type === 'OZON_ERP_FBP_FILL_REQUEST') return withResponse(runFbpFillTask(message), sendResponse);
+  if (message?.type === 'OZON_ERP_RUN_SERVER_PUBLISH_MEDIA_SIDECAR') return withResponse(runServerPublishMediaSidecar({ force: true, ...(message.options || {}) }), sendResponse);
   if (message?.type === 'OZON_ERP_COLLECT_MANUAL_DETAIL_SKUS') return withResponse(collectManualDetailSkus(message), sendResponse);
   if (message?.type === 'OZON_ERP_AUTO_COLLECT_LIST_SKUS') {
     return withResponse(collectSellerOnlySkusToCollectedProducts({ ...message, writeToErp: false }, sender), sendResponse);
@@ -1972,15 +2532,22 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create(PLUGIN_UPDATE_ALARM_NAME, { periodInMinutes: 60 });
+  scheduleServerPublishMediaSidecar();
   checkPluginUpdateStatus().catch(() => {});
 });
 
 chrome.runtime.onStartup.addListener(() => {
   chrome.alarms.create(PLUGIN_UPDATE_ALARM_NAME, { periodInMinutes: 60 });
+  scheduleServerPublishMediaSidecar();
   checkPluginUpdateStatus().catch(() => {});
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm?.name !== PLUGIN_UPDATE_ALARM_NAME) return;
-  checkPluginUpdateStatus().catch(() => {});
+  if (alarm?.name === PLUGIN_UPDATE_ALARM_NAME) {
+    checkPluginUpdateStatus().catch(() => {});
+    return;
+  }
+  if (alarm?.name === SERVER_PUBLISH_MEDIA_SIDECAR_ALARM_NAME) {
+    runServerPublishMediaSidecar().catch(() => {});
+  }
 });

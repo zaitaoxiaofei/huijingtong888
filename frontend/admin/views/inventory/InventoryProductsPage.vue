@@ -2,13 +2,17 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { View } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
+import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
+import InventoryStructuredSearch from "../../components/inventory/InventoryStructuredSearch.vue";
+import ProductCompositionDialog from "../../components/inventory/ProductCompositionDialog.vue";
 import ProductCreateEditDialog from "../../components/inventory/ProductCreateEditDialog.vue";
 import ProcurementRequestCreateDialog from "../../components/procurement/ProcurementRequestCreateDialog.vue";
 import {
@@ -19,6 +23,18 @@ import {
   percent
 } from "./inventory-utils.js";
 
+const INVENTORY_LIST_CACHE_TTL_MS = 30 * 1000;
+const INVENTORY_LIST_CACHE_MAX_ENTRIES = 30;
+const inventoryListCache = new Map();
+
+function cacheInventoryList(requestUrl, result) {
+  if (inventoryListCache.size >= INVENTORY_LIST_CACHE_MAX_ENTRIES) {
+    const oldestKey = inventoryListCache.keys().next().value;
+    if (oldestKey) inventoryListCache.delete(oldestKey);
+  }
+  inventoryListCache.set(requestUrl, { timestamp: Date.now(), result });
+}
+
 const route = useRoute();
 const router = useRouter();
 let syncingRoute = false;
@@ -28,6 +44,9 @@ const listRequestGate = createLatestRequestGate();
 const loading = ref(false);
 const detailLoading = ref(false);
 const dialogVisible = ref(false);
+const productCreateDialogRef = ref(null);
+const quickComponentCreateVisible = ref(false);
+const quickComponentRole = ref("included");
 const detailDialogVisible = ref(false);
 const detailDialogTitle = ref("");
 const detailRows = ref([]);
@@ -56,7 +75,12 @@ const productProcurementRows = ref([]);
 const productProcurementTotal = ref(0);
 const productProcurementCurrentProduct = ref(null);
 const profitDetailCurrentProduct = ref(null);
+const productProfitRecalculatingId = ref(0);
+const productProfitRecalculatingMode = ref("");
 const dialogProduct = ref(null);
+const compositionDialogVisible = ref(false);
+const compositionDialogProduct = ref(null);
+const compositionDialogRefreshKey = ref(0);
 const selectedRows = ref([]);
 const manualOutboundVisible = ref(false);
 const manualOutboundSubmitting = ref(false);
@@ -68,6 +92,8 @@ const manualOutboundRecordsLoading = ref(false);
 const manualOutboundRecordsProduct = ref(null);
 const manualOutboundRecordsRows = ref([]);
 const manualOutboundRecordsTotal = ref(0);
+const componentDetailLoadingId = ref(0);
+const componentDetailsByProductId = reactive({});
 const manualOutboundForm = reactive({
   quantity: 1,
   stock_location: "LOCAL",
@@ -119,6 +145,7 @@ const mergePreview = reactive({
   affectedCounts: {},
   moveCountsSummary: {},
   targetProductId: null,
+  compositionSourceProductId: null,
   fieldSources: {}
 });
 
@@ -130,8 +157,19 @@ const state = reactive({
   logisticsRules: [],
   shops: [],
   filters: {
+    searchMode: "fuzzy",
     query: "",
+    inventoryCategory: "",
+    productName: "",
+    vehicleBrand: "",
+    fitmentType: "",
+    vehicleModel: [],
+    accessoryName: "",
+    color: "",
+    material: [],
+    process: "",
     shopId: "all",
+    inventoryType: "all",
     dateFrom: "",
     dateTo: "",
     page: 1,
@@ -142,8 +180,19 @@ const state = reactive({
 });
 
 const filterDefaults = {
+  searchMode: "fuzzy",
   query: "",
+  inventoryCategory: "",
+  productName: "",
+  vehicleBrand: "",
+  fitmentType: "",
+  vehicleModel: [],
+  accessoryName: "",
+  color: "",
+  material: [],
+  process: "",
   shopId: "all",
+  inventoryType: "all",
   dateFrom: "",
   dateTo: "",
   page: 1,
@@ -474,6 +523,9 @@ function rowNumber(row, key) {
 }
 
 function localStock(row) {
+  if (hasProductComponents(row) && row.component_available !== null && row.component_available !== undefined) {
+    return Number(row.component_available || 0);
+  }
   return rowNumber(row, "stock") - fbpStock(row);
 }
 
@@ -490,7 +542,22 @@ function fbsStock(row) {
 }
 
 function totalProductStock(row) {
+  if (hasProductComponents(row)) return localStock(row) + fbpStock(row);
   return rowNumber(row, "stock");
+}
+
+function productAutoType(row) {
+  if (hasProductComponents(row)) return "套装";
+  return Number(row?.is_accessory || 0) ? "配件" : "单品";
+}
+
+function productAutoTypeTag(row) {
+  if (hasProductComponents(row)) return "warning";
+  return Number(row?.is_accessory || 0) ? "success" : "info";
+}
+
+function productUnit(row) {
+  return row?.stock_unit || "个";
 }
 
 function stockForInventoryValue(row) {
@@ -509,6 +576,34 @@ function averageOrderAmount(row) {
 function averagePurchaseCost(row) {
   const quantity = rowNumber(row, "total_purchase_quantity");
   return quantity > 0 ? rowNumber(row, "total_purchase_amount") / quantity : getInventoryPurchaseCost(row);
+}
+
+function hasProductComponents(row) {
+  return Number(row?.component_count || 0) > 0;
+}
+
+function componentDetailRows(row) {
+  return componentDetailsByProductId[Number(row?.id || 0)] || [];
+}
+
+async function loadComponentDetails(row) {
+  const productId = Number(row?.id || 0);
+  if (!productId || !hasProductComponents(row) || componentDetailsByProductId[productId]) return;
+  componentDetailLoadingId.value = productId;
+  try {
+    const detail = await apiClient.get(`/api/products/${productId}`, { noCache: true });
+    componentDetailsByProductId[productId] = Array.isArray(detail?.composition_items) ? detail.composition_items : [];
+  } catch (error) {
+    ElMessage.error(error.message || "加载子产品库存详情失败");
+  } finally {
+    componentDetailLoadingId.value = 0;
+  }
+}
+
+function componentRowAvailable(row) {
+  const quantity = Number(row?.quantity || 0);
+  if (!quantity) return 0;
+  return Math.floor(Number(row?.local_stock || 0) / quantity);
 }
 
 function buildInventoryProfitDetailRows(row, preview) {
@@ -547,8 +642,9 @@ function profitDetailCalculatedProfit(row) {
 }
 
 function profitDetailIsAccrued(row) {
+  if (String(row?.profit_stage || "").toLowerCase() === "finance_accrued") return true;
   return String(row?.profit_model || "").toLowerCase() === "actual"
-    || String(row?.settlement_state || "").toLowerCase() === "accrued";
+    || Number(row?.actual_profit_ready || 0) === 1;
 }
 
 function profitDetailCurrentProfit(row) {
@@ -592,6 +688,7 @@ function profitDetailMargin(row) {
 }
 
 function profitDetailStatusText(row) {
+  if (String(row?.profit_stage_text || "")) return row.profit_stage_text;
   if (String(row?.profit_model_text || "")) return row.profit_model_text;
   if (profitDetailIsAccrued(row)) return "真实利润";
   if (profitDetailHasCalculatedProfit(row)) return "预估利润";
@@ -784,10 +881,88 @@ async function openEditDialog(row) {
   }
 }
 
+function openCompositionDialog(row) {
+  if (!row?.id) return;
+  compositionDialogProduct.value = row;
+  compositionDialogVisible.value = true;
+}
+
+function openQuickCreateFromComposition() {
+  dialogProduct.value = null;
+  dialogVisible.value = true;
+}
+
+function openQuickComponentCreate({ role = "included" } = {}) {
+  quickComponentRole.value = role === "gift" ? "gift" : "included";
+  quickComponentCreateVisible.value = true;
+}
+
+async function addQuickComponentToCurrentProduct(product = {}) {
+  let resolvedProduct = product;
+  const productId = Number(product?.id || product?.product_id || 0);
+  if (productId && (!product?.name || !product?.stock_unit)) {
+    resolvedProduct = await apiClient.get(`/api/products/${productId}`, { noCache: true });
+  }
+  productCreateDialogRef.value?.addExternalComponentProduct?.(resolvedProduct, quickComponentRole.value);
+}
+
+async function handleQuickComponentCreated({ product } = {}) {
+  quickComponentCreateVisible.value = false;
+  await addQuickComponentToCurrentProduct(product || {});
+  ElMessage.success("配件库存已创建并加入当前商品");
+  await loadPageData();
+}
+
+async function handleQuickComponentExistingSelected(row) {
+  quickComponentCreateVisible.value = false;
+  await addQuickComponentToCurrentProduct(row || {});
+  ElMessage.success("已有配件已加入当前商品");
+}
+
 async function handleDialogSaved({ mode }) {
+  const editedProduct = dialogProduct.value;
+  const returnTo = String(route.query.returnTo || "").trim();
   dialogVisible.value = false;
   dialogProduct.value = null;
   ElMessage.success(mode === "edit" ? "库存产品已更新" : "库存产品已创建");
+  await loadPageData();
+  if (mode === "edit" && route.query.recalculateAfterSave === "1" && editedProduct?.id) {
+    try {
+      await ElMessageBox.confirm(
+        "库存资料已保存。是否立即重算该产品关联订单的预估利润？",
+        "继续处理利润差异",
+        {
+          type: "warning",
+          confirmButtonText: "立即重算",
+          cancelButtonText: "稍后处理"
+        }
+      );
+      await recalculateProfits(editedProduct);
+    } catch (error) {
+      if (error !== "cancel" && error !== "close" && error?.message !== "cancel") throw error;
+    }
+  }
+  if (mode === "edit" && returnTo.startsWith("/") && !returnTo.startsWith("//")) {
+    await router.replace(returnTo);
+    return;
+  }
+  if (compositionDialogVisible.value && mode !== "edit") {
+    compositionDialogRefreshKey.value += 1;
+  }
+}
+
+async function handleExistingProductSelected(row) {
+  dialogVisible.value = false;
+  dialogProduct.value = null;
+  ElMessage.info("已找到现有库存商品，未创建重复商品");
+  await openEditDialog(row);
+}
+
+async function handleCompositionSaved({ productId } = {}) {
+  const id = Number(productId || compositionDialogProduct.value?.id || 0);
+  if (id) delete componentDetailsByProductId[id];
+  compositionDialogVisible.value = false;
+  compositionDialogProduct.value = null;
   await loadPageData();
 }
 
@@ -797,7 +972,17 @@ function resetMergePreview() {
   mergePreview.affectedCounts = {};
   mergePreview.moveCountsSummary = {};
   mergePreview.targetProductId = null;
+  mergePreview.compositionSourceProductId = null;
   mergePreview.fieldSources = {};
+}
+
+function selectDefaultMergeCompositionSource() {
+  const targetId = Number(mergePreview.targetProductId || 0);
+  const target = mergePreview.products.find((row) => Number(row.id) === targetId);
+  const fallback = mergePreview.products.find((row) => Number(row.component_count || 0) > 0);
+  mergePreview.compositionSourceProductId = Number(target?.component_count || 0) > 0
+    ? targetId
+    : (Number(fallback?.id || 0) || null);
 }
 
 function updateMergeCountSummary() {
@@ -833,6 +1018,7 @@ async function openMergeDialog() {
     mergePreview.conflicts = Array.isArray(result?.conflicts) ? result.conflicts : [];
     mergePreview.affectedCounts = result?.affected_counts || {};
     mergePreview.targetProductId = Number(mergePreview.products[0]?.id || selectedRows.value[0]?.id || 0) || null;
+    selectDefaultMergeCompositionSource();
     for (const field of mergePreview.conflicts) {
       mergePreview.fieldSources[field.key] = Number(field.options?.[0]?.sourceId || mergePreview.targetProductId || 0);
     }
@@ -855,6 +1041,7 @@ async function submitMergeProducts() {
     await apiClient.post("/api/products/merge", {
       product_ids: mergePreview.products.map((row) => row.id),
       target_product_id: mergePreview.targetProductId,
+      composition_source_product_id: mergePreview.compositionSourceProductId,
       field_sources: mergePreview.fieldSources
     });
     ElMessage.success("库存产品已合并");
@@ -944,6 +1131,99 @@ async function removeFromInventory(row) {
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
     ElMessage.error(error.message || "删除库存产品失败");
+  }
+}
+
+async function recalculateProfits(row) {
+  const productId = Number(row?.id || 0);
+  if (!productId) return;
+  productProfitRecalculatingId.value = productId;
+  productProfitRecalculatingMode.value = "estimated";
+  try {
+    const result = await apiClient.post(`/api/products/${productId}/recalculate-profits`, {
+      only_missing_purchase: route.query.source === "pending-settlement-costs" ? 1 : 0
+    });
+    const updated = Number(result?.updated || 0);
+    ElMessage.success(`该产品预估利润已重算：${updated} 行`);
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "重算预估利润失败");
+  } finally {
+    productProfitRecalculatingId.value = 0;
+    productProfitRecalculatingMode.value = "";
+  }
+}
+
+function isActualProfitDetailRow(row = {}) {
+  return Number(row.actual_profit_ready || 0) === 1
+    || String(row.profit_stage || "").toLowerCase() === "finance_accrued"
+    || String(row.profit_model || "").toLowerCase() === "actual";
+}
+
+async function loadActualProfitOrderItemIds(productId) {
+  const orderItemIds = [];
+  let page = 1;
+  let total = 0;
+  const pageSize = 100;
+  do {
+    const params = new URLSearchParams({
+      paged: "1",
+      page: String(page),
+      pageSize: String(pageSize),
+      shopId: "all",
+      dateFrom: "",
+      dateTo: ""
+    });
+    const result = await apiClient.get(`/api/products/${productId}/order-profit-details?${params.toString()}`);
+    const rows = Array.isArray(result?.rows) ? result.rows : [];
+    total = Number(result?.total || rows.length);
+    for (const detailRow of rows) {
+      if (isActualProfitDetailRow(detailRow) && Number(detailRow.order_item_id || 0) > 0) {
+        orderItemIds.push(Number(detailRow.order_item_id));
+      }
+    }
+    page += 1;
+  } while ((page - 1) * pageSize < total);
+  return [...new Set(orderItemIds)];
+}
+
+async function recalculateActualProfits(row) {
+  const productId = Number(row?.id || 0);
+  if (!productId) return;
+  try {
+    await ElMessageBox.confirm(
+      "真实利润重算会保留 Ozon 账单费用口径，适合采购成本等本地成本修正；克重、尺寸或物流方式变更通常只需要重算预估利润。",
+      "重算真实利润",
+      {
+        type: "warning",
+        confirmButtonText: "重算真实利润",
+        cancelButtonText: "取消"
+      }
+    );
+  } catch (error) {
+    if (error === "cancel" || error === "close" || error?.message === "cancel") return;
+    throw error;
+  }
+  productProfitRecalculatingId.value = productId;
+  productProfitRecalculatingMode.value = "actual";
+  try {
+    const orderItemIds = await loadActualProfitOrderItemIds(productId);
+    if (!orderItemIds.length) {
+      ElMessage.warning("当前产品没有可重算的真实利润明细");
+      return;
+    }
+    const result = await apiClient.post(`/api/products/${productId}/force-recalculate-profits`, {
+      order_item_ids: orderItemIds
+    });
+    const updated = Number(result?.updated || 0);
+    const financeItems = Number(result?.finance_reapplied?.items || 0);
+    ElMessage.success(`该产品真实利润已重算：${updated} 行，账单刷新 ${financeItems} 行`);
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "重算真实利润失败");
+  } finally {
+    productProfitRecalculatingId.value = 0;
+    productProfitRecalculatingMode.value = "";
   }
 }
 
@@ -1064,8 +1344,12 @@ function openEditManualOutboundRecord(row) {
   if (!row?.id) return;
   manualOutboundEditingId.value = Number(row.id);
   manualOutboundProduct.value = manualOutboundRecordsProduct.value;
+  const componentQuantity = Number(row.parent_component_quantity || 0);
+  const parentQuantity = componentQuantity > 0
+    ? Math.abs(Number(row.quantity_delta || 0)) / componentQuantity
+    : Math.abs(Number(row.quantity_delta || 0));
   Object.assign(manualOutboundForm, {
-    quantity: Math.abs(Math.round(Number(row.quantity_delta || 0))) || 1,
+    quantity: Math.round(parentQuantity) || 1,
     stock_location: row.stock_location || "LOCAL",
     reason: "other",
     loss_amount: Number(row.amount || 0),
@@ -1336,7 +1620,7 @@ async function saveProductProcurementRow(row) {
       status: row.status || "submitted"
     });
     ElMessage.success("采购记录已更新");
-    await loadProductProcurementDetails();
+    await Promise.all([loadProductProcurementDetails(), loadPageData()]);
   } catch (error) {
     ElMessage.error(error.message || "保存采购记录失败");
   } finally {
@@ -1436,24 +1720,40 @@ async function loadPageData() {
       page: String(state.filters.page),
       pageSize: String(state.filters.pageSize),
       shopId: String(state.filters.shopId || "all"),
+      inventoryType: String(state.filters.inventoryType || "all"),
       dateFrom: String(state.filters.dateFrom || ""),
       dateTo: String(state.filters.dateTo || ""),
       sortKey: String(state.filters.sortKey || ""),
       sortDir: String(state.filters.sortDir || "")
     });
     const query = String(state.filters.query || "").trim();
-    if (query) params.set("query", query);
-    const requests = [apiClient.get(`/api/products?${params.toString()}`)];
+    if (state.filters.searchMode === "fuzzy" && query) params.set("query", query);
+    if (state.filters.searchMode === "exact") {
+      for (const key of ["inventoryCategory", "productName", "vehicleBrand", "vehicleModel", "accessoryName", "color", "material", "process"]) {
+        const value = Array.isArray(state.filters[key]) ? state.filters[key].join(",") : String(state.filters[key] || "").trim();
+        if (value) params.set(key, value);
+      }
+    }
+    const requestUrl = `/api/products?${params.toString()}`;
+    const cached = inventoryListCache.get(requestUrl);
+    const hasFreshCache = Boolean(cached && Date.now() - cached.timestamp < INVENTORY_LIST_CACHE_TTL_MS);
+    if (hasFreshCache) {
+      state.products = Array.isArray(cached.result?.rows) ? cached.result.rows : [];
+      state.total = Number(cached.result?.total || 0);
+      selectedRows.value = [];
+      loading.value = false;
+    }
+    const requests = [apiClient.get(requestUrl), loadShopDictionary()];
     if (!dictionaryLoaded) {
       requests.push(
         apiClient.get("/api/people"),
         apiClient.get("/api/suppliers"),
-        apiClient.get("/api/shops"),
         apiClient.get("/api/logistics-rules")
       );
     }
-    const [products, people, suppliers, shops, logisticsRules] = await Promise.all(requests);
+    const [products, shops, people, suppliers, logisticsRules] = await Promise.all(requests);
     if (!listRequestGate.isLatest(requestToken)) return;
+    cacheInventoryList(requestUrl, products);
     state.products = Array.isArray(products?.rows) ? products.rows : [];
     state.total = Number(products?.total || 0);
     const resolvedTotalPages = Math.max(1, Math.ceil(state.total / Math.max(1, Number(state.filters.pageSize || 1))));
@@ -1463,10 +1763,10 @@ async function loadPageData() {
       return;
     }
     selectedRows.value = [];
+    state.shops = Array.isArray(shops) ? shops : [];
     if (!dictionaryLoaded) {
       state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
       state.suppliers = Array.isArray(suppliers) ? suppliers : [];
-      state.shops = Array.isArray(shops) ? shops : [];
       state.logisticsRules = Array.isArray(logisticsRules) ? logisticsRules.filter((item) => Number(item.enabled) !== 0) : [];
       dictionaryLoaded = true;
     }
@@ -1480,14 +1780,20 @@ async function loadPageData() {
 
 watch(() => route.query, applyRouteState, { deep: true });
 watch(
-  () => [state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize, state.filters.sortKey, state.filters.sortDir],
+  () => [state.filters.searchMode, state.filters.shopId, state.filters.inventoryType, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize, state.filters.sortKey, state.filters.sortDir, state.filters.inventoryCategory, state.filters.productName, state.filters.vehicleBrand, state.filters.vehicleModel, state.filters.accessoryName, state.filters.color, state.filters.material, state.filters.process],
   syncRouteQuery
 );
-watch(() => mergePreview.targetProductId, updateMergeCountSummary);
+watch(() => mergePreview.targetProductId, () => {
+  updateMergeCountSummary();
+  selectDefaultMergeCompositionSource();
+});
 
 onMounted(async () => {
   applyRouteState();
   await loadPageData();
+  if (route.query.openEdit === "1" && Number(route.query.productId || 0) > 0) {
+    await openEditDialog({ id: Number(route.query.productId) });
+  }
 });
 </script>
 
@@ -1496,17 +1802,35 @@ onMounted(async () => {
     <InventoryPageToolbar
       :filters="state.filters"
       :shops="state.shops"
+      :show-query="state.filters.searchMode === 'fuzzy'"
       query-label="产品搜索"
       query-placeholder="产品名称 / SKU / 库存编码 / 负责人"
       @search="handleSearch"
       @reset="handleReset"
     >
+      <el-form-item label="搜索方式">
+        <el-segmented v-model="state.filters.searchMode" :options="[{ label: '模糊搜索', value: 'fuzzy' }, { label: '精确搜索', value: 'exact' }]" />
+      </el-form-item>
+      <el-form-item label="产品类型">
+        <el-select v-model="state.filters.inventoryType" style="width: 140px">
+          <el-option label="全部库存" value="all" />
+          <el-option label="单品" value="single" />
+          <el-option label="套装" value="combo" />
+          <el-option label="配件" value="accessory" />
+        </el-select>
+      </el-form-item>
       <template #actions>
         <el-button class="erp-btn erp-btn-secondary" @click="openMergeHistoryDialog">合并历史</el-button>
         <el-button class="erp-btn erp-btn-secondary" :disabled="!canMergeProducts" @click="openMergeDialog">合并库存产品</el-button>
         <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新增库存产品</el-button>
       </template>
     </InventoryPageToolbar>
+
+    <InventoryStructuredSearch
+      v-if="state.filters.searchMode === 'exact'"
+      :model-value="state.filters"
+      @update:model-value="Object.assign(state.filters, $event)"
+    />
 
     <div class="inventory-table-wrap">
       <el-table
@@ -1526,6 +1850,10 @@ onMounted(async () => {
               <div class="cell-stack">
                 <ProductTitleLink :title="row.name || '-'" :lines="2" />
                 <span class="muted-text">{{ row.inventory_id || row.code || "-" }}</span>
+                <div class="product-type-tags">
+                  <el-tag size="small" :type="productAutoTypeTag(row)" effect="light">{{ productAutoType(row) }}</el-tag>
+                  <span class="muted-text">单位：{{ productUnit(row) }}</span>
+                </div>
                 <span class="muted-text">负责人：{{ row.owner_name || "-" }}</span>
                 <span class="muted-text">绑定 SKU：{{ integer(row.bound_sku_count) }} 个</span>
               </div>
@@ -1537,11 +1865,51 @@ onMounted(async () => {
             <div class="inventory-stock-cell">
               <div class="stock-total-line">
                 <span>总库存</span>
-                <strong>{{ integer(totalProductStock(row)) }}</strong>
+                <strong>{{ integer(totalProductStock(row)) }} {{ productUnit(row) }}</strong>
               </div>
               <div class="stock-split-grid">
-                <span>本地 {{ integer(localStock(row)) }}</span>
-                <span>FBP {{ integer(fbpStock(row)) }}</span>
+                <span class="local-stock-line">
+                  本地 {{ integer(localStock(row)) }} {{ productUnit(row) }}
+                  <el-popover
+                    v-if="hasProductComponents(row)"
+                    placement="left"
+                    width="420"
+                    trigger="hover"
+                    @show="loadComponentDetails(row)"
+                  >
+                    <template #reference>
+                      <el-button
+                        class="stock-detail-eye"
+                        link
+                        type="primary"
+                        :icon="View"
+                        :loading="componentDetailLoadingId === Number(row.id)"
+                        @click.stop
+                      />
+                    </template>
+                    <div class="component-stock-popover">
+                      <div class="component-stock-head">
+                        <strong>子产品库存详情</strong>
+                        <span>本地可组 {{ integer(localStock(row)) }} {{ productUnit(row) }}</span>
+                      </div>
+                      <div v-if="componentDetailRows(row).length" class="component-stock-list">
+                        <div v-for="component in componentDetailRows(row)" :key="component.component_product_id" class="component-stock-row">
+                          <div>
+                            <strong>{{ component.component_name || component.inventory_id || "-" }}</strong>
+                            <span>{{ component.inventory_id || component.code || "-" }}</span>
+                          </div>
+                          <div>
+                            <span>本地 {{ integer(component.local_stock) }} {{ component.stock_unit || "个" }}</span>
+                            <span>用量 {{ component.quantity }} {{ component.stock_unit || "个" }}</span>
+                            <strong>可组 {{ integer(componentRowAvailable(component)) }}</strong>
+                          </div>
+                        </div>
+                      </div>
+                      <div v-else class="component-stock-empty">正在加载子产品库存...</div>
+                    </div>
+                  </el-popover>
+                </span>
+                <span>FBP {{ integer(fbpStock(row)) }} {{ productUnit(row) }}</span>
               </div>
             </div>
           </template>
@@ -1625,13 +1993,16 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="120" fixed="right">
+        <el-table-column label="操作" width="132" fixed="right">
           <template #default="{ row }">
             <div class="inventory-actions">
               <el-button class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
+              <el-button class="erp-btn-link" link type="primary" @click="openCompositionDialog(row)">添加子产品</el-button>
               <el-button class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
               <el-button class="erp-btn-link" link type="warning" @click="openManualOutbound(row)">手动出库</el-button>
               <el-button class="erp-btn-link" link @click="openManualOutboundRecords(row)">出库记录</el-button>
+              <el-button class="erp-btn-link" link type="success" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'estimated'" @click="recalculateProfits(row)">重算预估</el-button>
+              <el-button class="erp-btn-link" link type="primary" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'actual'" @click="recalculateActualProfits(row)">重算真实</el-button>
               <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="removeFromInventory(row)">删除</el-button>
             </div>
           </template>
@@ -1697,6 +2068,24 @@ onMounted(async () => {
               <strong>{{ integer(item.total) }}</strong>
             </div>
           </div>
+        </div>
+
+        <div v-if="mergePreview.products.some((row) => Number(row.component_count || 0) > 0)" class="merge-compare-section">
+          <div class="merge-section-head">
+            <span class="merge-section-title">套装子产品关系</span>
+            <span class="merge-section-tip">整套关系只能保留一份，不会合并子产品或叠加数量。默认优先采用保留库存的套装；保留库存没有套装时，继承一个已有套装。</span>
+          </div>
+          <el-radio-group v-model="mergePreview.compositionSourceProductId" class="merge-composition-options">
+            <el-radio
+              v-for="product in mergePreview.products.filter((row) => Number(row.component_count || 0) > 0)"
+              :key="`composition-${product.id}`"
+              :value="product.id"
+              border
+            >
+              <strong>{{ mergeProductName(product) }}</strong>
+              <span>：{{ product.component_summary || `${product.component_count} 个子产品` }}</span>
+            </el-radio>
+          </el-radio-group>
         </div>
 
         <div v-if="mergePreview.conflicts.length" class="merge-compare-section">
@@ -1864,6 +2253,14 @@ onMounted(async () => {
         <el-table-column label="时间" width="170">
           <template #default="{ row }">{{ dateText(row.created_at) }}</template>
         </el-table-column>
+        <el-table-column label="扣减产品" min-width="180">
+          <template #default="{ row }">
+            <div class="manual-outbound-note">
+              <strong>{{ row.product_name || "-" }}</strong>
+              <span>{{ row.product_code || "-" }}</span>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="位置" width="90" align="center">
           <template #default="{ row }">
             <el-tag :type="row.stock_location === 'FBP' ? 'success' : 'info'" effect="plain">
@@ -1912,14 +2309,38 @@ onMounted(async () => {
     </el-dialog>
 
     <ProductCreateEditDialog
+      ref="productCreateDialogRef"
       v-model:visible="dialogVisible"
       :mode="dialogProduct ? 'edit' : 'create'"
       target="inventory"
+      :edit-product-id="dialogProduct?.id || null"
       :people="state.people"
       :suppliers="state.suppliers"
       :logistics-rules="state.logisticsRules"
       :value="dialogProduct"
       @saved="handleDialogSaved"
+      @existing-selected="handleExistingProductSelected"
+      @quick-create-component="openQuickComponentCreate"
+      @manage-components="openCompositionDialog"
+    />
+
+    <ProductCreateEditDialog
+      v-model:visible="quickComponentCreateVisible"
+      mode="create"
+      target="inventory"
+      :people="state.people"
+      :suppliers="state.suppliers"
+      :logistics-rules="state.logisticsRules"
+      @saved="handleQuickComponentCreated"
+      @existing-selected="handleQuickComponentExistingSelected"
+    />
+
+    <ProductCompositionDialog
+      v-model:visible="compositionDialogVisible"
+      :product="compositionDialogProduct"
+      :refresh-key="compositionDialogRefreshKey"
+      @saved="handleCompositionSaved"
+      @quick-create="openQuickCreateFromComposition"
     />
 
     <ProcurementRequestCreateDialog
@@ -2252,7 +2673,7 @@ onMounted(async () => {
                 </div>
                 <div class="profit-breakdown-meta">
                   <span>成本来源：{{ row.cost_source || "-" }}</span>
-                  <span>当前取值：未结束订单默认看预估利润，已结束订单默认看真实利润</span>
+                  <span>当前取值：未到账订单默认看预估利润，账单已到账后才切换真实利润</span>
                 </div>
               </div>
             </template>
@@ -2368,6 +2789,14 @@ onMounted(async () => {
 
 .sku-preview-tag {
   max-width: 220px;
+}
+
+.product-type-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .sku-preview-extra {
@@ -2670,6 +3099,79 @@ onMounted(async () => {
   color: #334155;
   font-size: 12px;
   line-height: 1.3;
+}
+
+.local-stock-line {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
+
+.stock-detail-eye.el-button {
+  min-width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 12px;
+}
+
+.component-stock-popover {
+  display: grid;
+  gap: 10px;
+}
+
+.component-stock-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.component-stock-head strong {
+  color: #0f172a;
+  font-size: 14px;
+}
+
+.component-stock-head span,
+.component-stock-empty {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.component-stock-list {
+  display: grid;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.component-stock-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, auto);
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid #dbe6f3;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.component-stock-row > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.component-stock-row strong {
+  color: #0f172a;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.component-stock-row span {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .profit-summary-cell {

@@ -8,6 +8,7 @@ import { prefetchRouteComponent } from "../router";
 import { useAuthStore } from "../stores/auth";
 import { useAppStore } from "../stores/app";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
+import { openAiEcommerceSuiteWindow, openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../utils/ai-variant-lab-window";
 
 const route = useRoute();
 const router = useRouter();
@@ -19,6 +20,7 @@ const DYNAMIC_IMPORT_INTENDED_ROUTE = "ozon-admin-dynamic-import-intended-route"
 const menuRef = ref(null);
 
 const activeMenu = computed(() => route.path);
+const standaloneMode = computed(() => String(route.query.standalone || "") === "1");
 const breadcrumbs = computed(() => route.meta.breadcrumb || ["ERP Admin"]);
 const breadcrumbItems = computed(() => {
   const items = Array.isArray(breadcrumbs.value) ? breadcrumbs.value.filter(Boolean) : [];
@@ -46,13 +48,15 @@ let routeSwitchTimer = 0;
 const prefetchedRoutes = new Set();
 const PLUGIN_UPDATE_DISMISSED_PREFIX = "ozon-admin-plugin-update-dismissed";
 const submenuKeys = navigationMenus.filter((menu) => menu.children?.length).map((menu) => menu.key);
-const AI_VARIANT_WIZARD_ROUTE = "/asset-variant-center/wizard";
+const AI_VARIANT_LAB_ROUTE = "/ai-variant-lab";
+const AI_PRODUCT_MATERIAL_OPTIMIZER_ROUTE = "/ai-product-material-optimizer";
 const AI_OPTIMIZATION_V2_ROUTE = "/ai-optimization-workbench-v2";
+const AI_ECOMMERCE_SUITE_ROUTE = "/ai-ecommerce-suite";
 const NAV_WORKBENCH_IDS = new Map([
   ["/collector-box", "colwb-main"],
   ["/selection", "selwb-main"],
   ["/listing-automation", "liwb-main"],
-  [AI_VARIANT_WIZARD_ROUTE, "aiwizard-main"],
+  [AI_VARIANT_LAB_ROUTE, "ailab-main"],
   [AI_OPTIMIZATION_V2_ROUTE, "aiopt-v2-main"]
 ]);
 const menuParentByRoute = navigationMenus.reduce((map, menu) => {
@@ -71,6 +75,18 @@ function rememberIntendedRoute(target) {
 function handleMenuSelect(index) {
   const target = String(index || "").trim();
   if (!target.startsWith("/")) return;
+  if (target === AI_VARIANT_LAB_ROUTE) {
+    openAiVariantLabWindow({ source: "menu" });
+    return;
+  }
+  if (target === AI_PRODUCT_MATERIAL_OPTIMIZER_ROUTE) {
+    openAiProductMaterialOptimizerWindow({ source: "menu" });
+    return;
+  }
+  if (target === AI_ECOMMERCE_SUITE_ROUTE) {
+    openAiEcommerceSuiteWindow({ source: "menu" });
+    return;
+  }
   const navWorkbenchId = NAV_WORKBENCH_IDS.get(target);
   if (navWorkbenchId) {
     const nextTarget = {
@@ -134,7 +150,6 @@ function handleTabClick(key) {
 
 const WORKBENCH_DRAFT_ROUTES = new Map([
   ["/listing-automation", { label: "商品上架", keyPrefix: "listing-workbench-draft:" }],
-  [AI_VARIANT_WIZARD_ROUTE, { label: "AI裂变", keyPrefix: "ozon-ai-product-variant-workbench-draft:" }],
   [AI_OPTIMIZATION_V2_ROUTE, { label: "AI 优化新版", keyPrefix: "ozon-ai-optimization-workbench-v2-draft:" }]
 ]);
 
@@ -148,6 +163,10 @@ function workbenchDraftKeyForTab(tab) {
 function tabHasSavedWorkbenchDraft(tab) {
   const key = workbenchDraftKeyForTab(tab);
   if (!key) return false;
+  if (tab?.route?.query?.draftId || tab?.route?.query?.templateId || tab?.route?.query?.recordId || tab?.route?.query?.recordDraft) {
+    clearWorkbenchDraftForTab(tab);
+    return false;
+  }
   try {
     return Boolean(window.sessionStorage.getItem(key) || window.localStorage.getItem(key));
   } catch {
@@ -404,7 +423,6 @@ function dismissPluginUpdate() {
 
 const contextTab = computed(() => tabsStore.findTab(contextMenu.value.tabKey));
 const activePluginUpdate = computed(() => null);
-const keepAliveRouteNames = ["asset-variant-center-create", "asset-variant-center-wizard", "ai-optimization-workbench-v2", "listing-automation", "collector-box", "selection"];
 const contextTabCanClose = computed(() => Boolean(contextTab.value?.closable));
 const contextTabPinned = computed(() => Boolean(contextTab.value?.pinned || !contextTab.value?.closable));
 const contextTabIndex = computed(() => workspaceTabs.value.findIndex((tab) => tab.key === contextMenu.value.tabKey));
@@ -472,8 +490,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <el-container class="erp-shell">
-    <el-aside :width="appStore.sidebarCollapsed ? '52px' : '180px'" class="erp-sidebar">
+  <el-container class="erp-shell" :class="{ 'is-standalone': standaloneMode }">
+    <el-aside v-if="!standaloneMode" :width="appStore.sidebarCollapsed ? '52px' : '180px'" class="erp-sidebar">
       <div class="erp-sidebar-inner">
         <button type="button" class="erp-logo" aria-label="爆单单单" @click="openDashboard">
           <span class="brand-logo-sticker">
@@ -526,7 +544,7 @@ onBeforeUnmount(() => {
     </el-aside>
 
     <el-container class="erp-main-shell">
-      <el-header class="erp-header">
+      <el-header v-if="!standaloneMode" class="erp-header">
         <div class="erp-header-left">
           <el-button text @click="appStore.toggleSidebar()">
             <el-icon size="18"><component :is="appStore.sidebarCollapsed ? Expand : Fold" /></el-icon>
@@ -592,7 +610,7 @@ onBeforeUnmount(() => {
             </div>
           </el-alert>
 
-          <div v-if="workspaceTabs.length" class="erp-workspace-tabs" role="tablist" aria-label="Open pages">
+          <div v-if="!standaloneMode && workspaceTabs.length" class="erp-workspace-tabs" role="tablist" aria-label="Open pages">
             <button
               v-for="tab in workspaceTabs"
               :key="tab.key"
@@ -626,8 +644,8 @@ onBeforeUnmount(() => {
             </div>
             <div class="erp-workspace-panel">
               <RouterView v-slot="{ Component, route: currentRoute }">
-                <KeepAlive :include="keepAliveRouteNames">
-                  <component :is="Component" :key="`${currentRoute.fullPath}:${tabsStore.refreshToken}`" />
+                <KeepAlive :max="6">
+                  <component :is="Component" :key="`${activeTabKey || currentRoute.path}:${tabsStore.refreshToken}`" />
                 </KeepAlive>
               </RouterView>
             </div>

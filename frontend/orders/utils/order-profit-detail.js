@@ -30,12 +30,21 @@ function shippingMethodLabel(value) {
 }
 
 function financeCategory(row = {}) {
-  const raw = String(row.service_name || row.operation_type_name || row.service_type || row.operation_type || "").trim();
+  const raw = [row.service_type, row.service_name, row.operation_type, row.operation_type_name]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join(" ");
   const normalized = raw.toLowerCase();
-  if (normalized.includes("sale_commission") || raw === "Ozon 销售佣金") return "commission";
+  if (normalized.includes("sale_commission") || normalized.includes("commission") || raw === "Ozon 销售佣金") return "commission";
   if (normalized.includes("marketplaceredistributionofacquiringoperation")) return "collecting_fee";
   if (normalized.includes("return_delivery_charge") || normalized.includes("returnflowlogistic") || normalized.includes("returnnotdelivtocustomer")) return "aftersale_loss";
-  if (normalized.includes("delivery_charge")) return "platform_delivery";
+  if (
+    normalized.includes("delivery_charge")
+    || normalized.includes("marketplaceredistributionofdeliveryservicesoperation")
+    || normalized.includes("marketplaceserviceitemredistributionlastmile")
+  ) return "platform_delivery";
+  if (normalized.includes("agencyfeeaggregator3plglobal")) return "international_transport";
+  if (normalized.includes("возврат") || normalized.includes("компенсац")) return "aftersale_loss";
   if (raw === "袩械褉械胁褘褋褌邪胁谢械薪懈械 褍褋谢褍谐 写芯褋褌邪胁泻懈" || raw.includes("写芯褋褌邪胁")) return "platform_delivery";
   if (raw.includes("屑械卸写褍薪邪褉芯写") || raw.includes("褌褉邪薪褋锌芯褉褌薪芯-褝泻褋锌械写懈褑懈芯薪薪褘褏")) return "international_transport";
   if (raw.includes("效邪褋褌懈褔薪邪褟 泻芯屑锌械薪褋邪褑懈褟 锌芯泻褍锌邪褌械谢褞") || raw.includes("胁芯蟹胁褉邪褌") || raw.includes("薪械写芯胁谢芯卸")) return "aftersale_loss";
@@ -48,6 +57,15 @@ function sumRows(rows = [], getter = () => 0) {
 
 function itemSaleAmount(item) {
   return positiveAmount(item.sale_amount_cny) || Number(item.sale_price || 0) * Number(item.quantity || 1);
+}
+
+function orderSaleAmount(rows = [], order = {}, financeRows = []) {
+  const outcome = String(order.outcome_type || "");
+  if (outcome === "cancelled_pre_fulfillment") return 0;
+  if (["rejected_unclaimed", "after_delivery_return"].includes(outcome)) {
+    return hasFinanceSaleAccrual(financeRows) ? sumRows(rows, (item) => positiveAmount(item.sale_amount_cny)) : 0;
+  }
+  return sumRows(rows, itemSaleAmount);
 }
 
 function itemQuantity(item) {
@@ -67,11 +85,64 @@ function itemEstimatedInternationalShipping(item) {
 }
 
 function itemActualPurchaseCost(item) {
-  return positiveAmount(item.purchase_cost_cny) || itemEstimatedPurchaseCost(item);
+  return numberOrNull(item.purchase_cost_cny) ?? itemEstimatedPurchaseCost(item);
 }
 
 function itemActualDomesticShipping(item) {
-  return positiveAmount(item.domestic_shipping_cny) || itemEstimatedDomesticShipping(item);
+  return numberOrNull(item.domestic_shipping_cny) ?? itemEstimatedDomesticShipping(item);
+}
+
+function isTerminalNoOriginalRevenue(order = {}) {
+  return ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(String(order.outcome_type || "").trim());
+}
+
+function terminalLossPolicy(order = {}) {
+  const outcome = String(order.outcome_type || "").trim();
+  const profile = String(order.loss_profile_code || "").trim().toLowerCase();
+  if (outcome === "cancelled_pre_fulfillment") {
+    return { purchase: false, domestic: false, international: false, packaging: false, commission: false, service: false, collecting: true, aftersaleFinance: false };
+  }
+  if (profile === "purchase_collecting") {
+    return { purchase: true, domestic: false, international: true, packaging: false, commission: false, service: false, collecting: true, aftersaleFinance: true };
+  }
+  if (profile === "commission_purchase_collecting_international") {
+    return { purchase: true, domestic: true, international: true, packaging: false, commission: true, service: false, collecting: true, aftersaleFinance: true };
+  }
+  if (profile === "purchase_collecting_international" || outcome === "after_delivery_return") {
+    return { purchase: true, domestic: true, international: true, packaging: false, commission: false, service: false, collecting: true, aftersaleFinance: true };
+  }
+  if (outcome === "rejected_unclaimed") {
+    return { purchase: true, domestic: false, international: true, packaging: false, commission: false, service: false, collecting: true, aftersaleFinance: true };
+  }
+  return { purchase: false, domestic: false, international: false, packaging: false, commission: false, service: false, collecting: false, aftersaleFinance: true };
+}
+
+function appliedOrEstimated(applied, estimated) {
+  return positiveAmount(applied) || positiveAmount(estimated);
+}
+
+function terminalComponentTotals(rows = [], order = {}) {
+  const policy = terminalLossPolicy(order);
+  const totals = (rows || []).reduce((acc, item) => {
+    const referencePurchase = itemEstimatedPurchaseCost(item);
+    const referenceDomestic = itemEstimatedDomesticShipping(item);
+    const referenceInternational = itemEstimatedInternationalShipping(item);
+    const financeActual = itemHasFinanceActualProfit(item);
+    acc.purchase += policy.purchase ? (financeActual ? numberOrNull(item.purchase_cost_cny) ?? referencePurchase : appliedOrEstimated(item.purchase_cost_cny, referencePurchase)) : 0;
+    acc.domestic += policy.domestic ? (financeActual ? numberOrNull(item.domestic_shipping_cny) ?? referenceDomestic : appliedOrEstimated(item.domestic_shipping_cny, referenceDomestic)) : 0;
+    acc.international += policy.international ? (financeActual ? numberOrNull(item.international_shipping_cny) ?? referenceInternational : appliedOrEstimated(item.international_shipping_cny, referenceInternational)) : 0;
+    acc.packaging += policy.packaging ? positiveAmount(item.packaging_cost_cny) : 0;
+    acc.commission += policy.commission
+      ? (financeActual ? numberOrNull(item.commission_fee_cny) ?? positiveAmount(item.estimated_commission) : positiveAmount(item.commission_fee_cny) || positiveAmount(item.estimated_commission))
+      : 0;
+    acc.collecting += policy.collecting ? positiveAmount(item.other_fee_cny) : 0;
+    acc.service += policy.service ? positiveAmount(item.ozon_service_fee_cny) : 0;
+    acc.aftersale += policy.aftersaleFinance
+      ? (financeActual ? numberOrNull(item.return_loss_cny) ?? positiveAmount(item.aftersale_loss) : positiveAmount(item.return_loss_cny) || positiveAmount(item.aftersale_loss))
+      : 0;
+    return acc;
+  }, { purchase: 0, domestic: 0, international: 0, packaging: 0, commission: 0, collecting: 0, service: 0, aftersale: 0, other: 0 });
+  return Object.fromEntries(Object.entries(totals).map(([key, value]) => [key, roundMoneyValue(value)]));
 }
 
 function itemHasFinanceActualProfit(item = {}) {
@@ -82,6 +153,12 @@ function itemHasFinanceActualProfit(item = {}) {
 
 function hasFinanceSaleAccrual(finance = []) {
   return (finance || []).some((row) => Math.abs(Number(row.accruals_for_sale_cny || row.accruals_for_sale || 0)) > 0.005);
+}
+
+function hasRequiredFinanceBasis(finance = [], order = {}) {
+  const outcome = String(order.outcome_type || "");
+  if (["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(outcome)) return true;
+  return hasFinanceSaleAccrual(finance) && finance.some((row) => financeCategory(row) === "commission");
 }
 
 function isFinalProfitOutcome(order = {}) {
@@ -103,15 +180,20 @@ function isFinalProfitOutcome(order = {}) {
 function financeCategoryTotal(finance = [], categories = []) {
   const keys = new Set(Array.isArray(categories) ? categories : [categories]);
   let matched = false;
-  const total = (finance || []).reduce((sum, row) => {
+  let hasSignedAmount = false;
+  let fallbackTotal = 0;
+  const signedTotal = (finance || []).reduce((sum, row) => {
     if (!keys.has(financeCategory(row))) return sum;
     matched = true;
-    const feeAmount = numberOrNull(row.fee_amount_cny);
     const rawAmount = Number(row.amount_cny || 0);
-    const amount = feeAmount !== null ? feeAmount : rawAmount < 0 ? Math.abs(rawAmount) : 0;
-    return sum + amount;
+    if (Math.abs(rawAmount) > 0.000001) {
+      hasSignedAmount = true;
+      return sum + rawAmount;
+    }
+    fallbackTotal += positiveAmount(row.fee_amount_cny);
+    return sum;
   }, 0);
-  return matched ? roundMoneyValue(total) : null;
+  return matched ? roundMoneyValue(hasSignedAmount ? Math.max(0, -signedTotal) : fallbackTotal) : null;
 }
 
 function valueDiff(actual, estimated) {
@@ -196,7 +278,12 @@ const defaultFormatters = {
 
 export function buildOrderProfitDetail(order = {}, items = [], finance = [], snapshot = null, formatters = {}) {
   const display = { ...defaultFormatters, ...formatters };
-  if (snapshot?.summary && Array.isArray(snapshot?.rows)) {
+  const snapshotRows = Array.isArray(snapshot?.detailRows)
+    ? snapshot.detailRows
+    : Array.isArray(snapshot?.rows)
+      ? snapshot.rows
+      : null;
+  if (snapshot?.summary && snapshotRows) {
     const summary = {
       saleAmount: Number(snapshot.summary.saleAmount || snapshot.sale_amount_cny || 0),
       estimatedProfit: Number(snapshot.summary.estimatedProfit || snapshot.estimated_profit_cny || 0),
@@ -214,7 +301,7 @@ export function buildOrderProfitDetail(order = {}, items = [], finance = [], sna
     return {
       summary,
       cards: buildDetailMetricCards(summary, display),
-      rows: snapshot.rows.map((row) => ({
+      rows: snapshotRows.map((row) => ({
         ...row,
         note: row.note || snapshotDetailNote(row.key),
         strong: Boolean(row.strong)
@@ -224,21 +311,23 @@ export function buildOrderProfitDetail(order = {}, items = [], finance = [], sna
   }
   const rows = Array.isArray(items) ? items : [];
   const financeRows = Array.isArray(finance) ? finance : [];
-  const hasFinalFinanceBasis = financeRows.length > 0 && (hasFinanceSaleAccrual(financeRows) || isFinalProfitOutcome(order));
+  const terminalNoOriginalRevenue = isTerminalNoOriginalRevenue(order);
+  const hasFinalFinanceBasis = financeRows.length > 0 && hasRequiredFinanceBasis(financeRows, order);
   const actualProfitReady = hasFinalFinanceBasis && rows.length > 0 && rows.every((item) => itemHasFinanceActualProfit(item));
-  const saleAmount = sumRows(rows, itemSaleAmount);
+  const terminalTotals = terminalNoOriginalRevenue ? terminalComponentTotals(rows, order) : null;
+  const saleAmount = orderSaleAmount(rows, order, financeRows);
   const estimated = {
     sale: saleAmount,
-    purchase: sumRows(rows, itemEstimatedPurchaseCost),
-    domestic: sumRows(rows, itemEstimatedDomesticShipping),
-    international: sumRows(rows, itemEstimatedInternationalShipping),
-    packaging: sumRows(rows, (item) => positiveAmount(item.packaging_cost_cny)),
-    commission: sumRows(rows, (item) => positiveAmount(item.estimated_commission) || positiveAmount(item.commission_fee_cny)),
-    collecting: 0,
-    service: sumRows(rows, (item) => positiveAmount(item.ozon_service_fee_cny)),
-    aftersale: sumRows(rows, (item) => positiveAmount(item.aftersale_loss) || positiveAmount(item.return_loss_cny)),
-    other: sumRows(rows, (item) => positiveAmount(item.advertising_cost_cny) + positiveAmount(item.other_fee_cny)),
-    profit: sumRows(rows, (item) => numberOrNull(item.estimated_profit) ?? numberOrNull(item.net_profit_cny) ?? 0)
+    purchase: terminalTotals ? terminalTotals.purchase : sumRows(rows, itemEstimatedPurchaseCost),
+    domestic: terminalTotals ? terminalTotals.domestic : sumRows(rows, itemEstimatedDomesticShipping),
+    international: terminalTotals ? terminalTotals.international : sumRows(rows, itemEstimatedInternationalShipping),
+    packaging: terminalTotals ? terminalTotals.packaging : sumRows(rows, (item) => positiveAmount(item.packaging_cost_cny)),
+    commission: terminalTotals ? terminalTotals.commission : sumRows(rows, (item) => positiveAmount(item.estimated_commission) || positiveAmount(item.commission_fee_cny)),
+    collecting: terminalTotals ? terminalTotals.collecting : 0,
+    service: terminalTotals ? terminalTotals.service : sumRows(rows, (item) => positiveAmount(item.ozon_service_fee_cny)),
+    aftersale: terminalTotals ? terminalTotals.aftersale : sumRows(rows, (item) => positiveAmount(item.aftersale_loss) || positiveAmount(item.return_loss_cny)),
+    other: terminalTotals ? terminalTotals.other : sumRows(rows, (item) => positiveAmount(item.advertising_cost_cny) + positiveAmount(item.other_fee_cny)),
+    profit: terminalTotals ? null : sumRows(rows, (item) => numberOrNull(item.estimated_profit) ?? numberOrNull(item.net_profit_cny) ?? 0)
   };
   const financeInternational = financeCategoryTotal(financeRows, ["platform_delivery", "international_transport"]);
   const financeCommission = financeCategoryTotal(financeRows, "commission");
@@ -247,24 +336,28 @@ export function buildOrderProfitDetail(order = {}, items = [], finance = [], sna
   const financeAftersale = financeCategoryTotal(financeRows, "aftersale_loss");
   const actual = {
     sale: saleAmount,
-    purchase: sumRows(rows, itemActualPurchaseCost),
-    domestic: sumRows(rows, itemActualDomesticShipping),
-    international: financeInternational ?? (actualProfitReady ? 0 : null),
-    packaging: sumRows(rows, (item) => positiveAmount(item.packaging_cost_cny)),
-    commission: financeCommission ?? (actualProfitReady ? 0 : null),
-    collecting: financeCollecting ?? (actualProfitReady ? 0 : null),
-    service: financeService ?? (actualProfitReady ? 0 : null),
-    aftersale: financeAftersale ?? (actualProfitReady ? 0 : null),
-    other: actualProfitReady ? sumRows(rows, (item) => positiveAmount(item.advertising_cost_cny) + positiveAmount(item.other_fee_cny)) : null,
+    purchase: terminalTotals ? terminalTotals.purchase : sumRows(rows, itemActualPurchaseCost),
+    domestic: terminalTotals ? terminalTotals.domestic : sumRows(rows, itemActualDomesticShipping),
+    international: terminalTotals ? terminalTotals.international : financeInternational ?? (actualProfitReady ? 0 : null),
+    packaging: terminalTotals ? terminalTotals.packaging : sumRows(rows, (item) => positiveAmount(item.packaging_cost_cny)),
+    commission: terminalTotals ? terminalTotals.commission : financeCommission ?? (actualProfitReady ? 0 : null),
+    collecting: terminalTotals ? terminalTotals.collecting : financeCollecting ?? (actualProfitReady ? 0 : null),
+    service: terminalTotals ? terminalTotals.service : financeService ?? (actualProfitReady ? 0 : null),
+    aftersale: terminalTotals ? terminalTotals.aftersale : financeAftersale ?? (actualProfitReady ? 0 : null),
+    other: terminalTotals
+      ? terminalTotals.other
+      : actualProfitReady
+        ? sumRows(rows, (item) => positiveAmount(item.advertising_cost_cny) + (financeCollecting === null ? positiveAmount(item.other_fee_cny) : 0))
+        : null,
     profit: null
   };
   const estimatedCostTotal = roundMoneyValue(estimated.purchase + estimated.domestic + estimated.international + estimated.packaging + estimated.commission + estimated.collecting + estimated.service + estimated.aftersale + estimated.other);
-  const actualCostTotal = actualProfitReady
+  const actualCostTotal = actualProfitReady || terminalTotals
     ? roundMoneyValue(actual.purchase + actual.domestic + (actual.international || 0) + actual.packaging + (actual.commission || 0) + (actual.collecting || 0) + (actual.service || 0) + (actual.aftersale || 0) + (actual.other || 0))
     : null;
-  const estimatedProfit = estimated.profit || roundMoneyValue(saleAmount - estimatedCostTotal);
-  const actualProfit = actualProfitReady ? roundMoneyValue(saleAmount - actualCostTotal) : null;
-  const actualMargin = actualProfitReady && saleAmount ? actualProfit / saleAmount * 100 : null;
+  const estimatedProfit = terminalTotals ? roundMoneyValue(saleAmount - estimatedCostTotal) : estimated.profit || roundMoneyValue(saleAmount - estimatedCostTotal);
+  const actualProfit = actualProfitReady || terminalTotals ? roundMoneyValue(saleAmount - actualCostTotal) : null;
+  const actualMargin = (actualProfitReady || terminalTotals) && saleAmount ? actualProfit / saleAmount * 100 : null;
 
   const moneyRow = (key, label, note) => ({
     key,
@@ -321,7 +414,7 @@ export function buildOrderProfitDetail(order = {}, items = [], finance = [], sna
     profitDiff: actualProfitReady ? roundMoneyValue(actualProfit - estimatedProfit) : null,
     actualMargin,
     hasActual: financeRows.length > 0 || actualProfitReady,
-    actualProfitReady,
+    actualProfitReady: actualProfitReady || Boolean(terminalTotals),
     financeRows: financeRows.length,
     estimatedCostTotal,
     actualCostTotal

@@ -599,6 +599,27 @@
   color: #ef4444;
 }
 
+.ozon-erp-collection-route {
+  margin: 8px 10px 0;
+  padding: 5px 8px;
+  border: 1px solid #bae6fd;
+  border-radius: 7px;
+  overflow: hidden;
+  background: #f0f9ff;
+  color: #0369a1;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ozon-erp-collection-route.is-fallback {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #c2410c;
+}
+
 .ozon-erp-btn-collect.is-done {
   border-color: #bbf7d0;
   background: #ecfdf3;

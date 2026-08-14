@@ -18,7 +18,12 @@ const activeTab = ref(route.query.source === "main-image" ? "main" : "shop");
 const shopAssets = ref([]);
 const materialAssets = ref([]);
 const shops = ref([]);
+const aiMainImageAssets = ref([]);
+const selectedMaterialRows = ref([]);
+const selectedShopRows = ref([]);
 const previewDialog = reactive({ visible: false, title: "素材预览", url: "", type: "image" });
+let aiMainImageRequestSeq = 0;
+let materialLoadSeq = 0;
 const filters = reactive({
   keyword: "",
   role: "",
@@ -71,9 +76,11 @@ watch(activeTab, (tab) => {
   if (route.query.source !== source) {
     router.replace({ name: "settings-materials", query: { ...route.query, source } });
   }
+  loadAssets();
 });
 
 async function loadAssets() {
+  const seq = ++materialLoadSeq;
   loading.value = true;
   try {
     const common = {
@@ -82,25 +89,143 @@ async function loadAssets() {
       role: filters.role,
       status: filters.status
     };
-    const [materialRows, shopRows, bootstrap] = await Promise.all([
-      listMaterialAssets({ ...common, asset_type: filters.mediaType || "image", page: pager.main.page, pageSize: pager.main.pageSize }),
-      apiClient.get(`/api/listing/media/assets?${new URLSearchParams({ ...common, mediaType: filters.mediaType, page: String(pager.shop.page), pageSize: String(pager.shop.pageSize) }).toString()}`, { noCache: true }).catch(() => ({ rows: [], total: 0 })),
-      apiClient.get("/api/asset-variant-engine/bootstrap", { noCache: true }).catch(() => ({ shops: [] }))
-    ]);
-    materialAssets.value = Array.isArray(materialRows?.rows) ? materialRows.rows : [];
-    shopAssets.value = Array.isArray(shopRows?.rows) ? shopRows.rows : [];
-    pager.main.total = Number(materialRows?.total || 0);
-    pager.shop.total = Number(shopRows?.total || 0);
-    pager.main.page = Number(materialRows?.page || pager.main.page);
-    pager.shop.page = Number(shopRows?.page || pager.shop.page);
-    pager.main.pageSize = Number(materialRows?.pageSize || pager.main.pageSize);
-    pager.shop.pageSize = Number(shopRows?.pageSize || pager.shop.pageSize);
-    shops.value = Array.isArray(bootstrap?.shops) ? bootstrap.shops : [];
+    if (activeTab.value === "main") {
+      await loadMainAssets(common, seq);
+    } else {
+      await loadShopAssets(common, seq);
+    }
   } catch (error) {
     ElMessage.error(error.message || "素材中心加载失败");
   } finally {
     loading.value = false;
   }
+}
+
+async function loadMainAssets(common = {}, seq = materialLoadSeq) {
+  const materialRows = await listMaterialAssets({
+    ...common,
+    asset_type: filters.mediaType || "image",
+    page: pager.main.page,
+    pageSize: pager.main.pageSize
+  });
+  if (seq !== materialLoadSeq) return;
+  const baseRows = Array.isArray(materialRows?.rows) ? materialRows.rows : [];
+  materialAssets.value = mergeMaterialRows(baseRows, aiMainImageAssets.value);
+  pager.main.total = Number(materialRows?.total || 0) + aiMainImageAssets.value.length;
+  pager.main.page = Number(materialRows?.page || pager.main.page);
+  pager.main.pageSize = Number(materialRows?.pageSize || pager.main.pageSize);
+  void refreshAiMainImageAssets(common);
+}
+
+async function loadShopAssets(common = {}, seq = materialLoadSeq) {
+  const shopRows = await apiClient.get(`/api/listing/media/assets?${new URLSearchParams({ ...common, mediaType: filters.mediaType, page: String(pager.shop.page), pageSize: String(pager.shop.pageSize) }).toString()}`, { noCache: true }).catch(() => ({ rows: [], total: 0 }));
+  if (seq !== materialLoadSeq) return;
+  shopAssets.value = Array.isArray(shopRows?.rows) ? shopRows.rows : [];
+  pager.shop.total = Number(shopRows?.total || 0);
+  pager.shop.page = Number(shopRows?.page || pager.shop.page);
+  pager.shop.pageSize = Number(shopRows?.pageSize || pager.shop.pageSize);
+  void loadShopNames();
+}
+
+async function loadShopNames() {
+  if (shops.value.length) return;
+  const bootstrap = await apiClient.get("/api/asset-variant-engine/bootstrap", { noCache: true }).catch(() => ({ shops: [] }));
+  shops.value = Array.isArray(bootstrap?.shops) ? bootstrap.shops : [];
+}
+
+async function refreshAiMainImageAssets(common = {}) {
+  const seq = ++aiMainImageRequestSeq;
+  const rows = await loadAiMainImageAssets(common);
+  if (seq !== aiMainImageRequestSeq) return;
+  aiMainImageAssets.value = rows;
+  materialAssets.value = mergeMaterialRows(materialAssets.value.filter((row) => !isAiVariantAssetRow(row)), rows);
+  pager.main.total = Math.max(Number(pager.main.total || 0), materialAssets.value.length);
+}
+
+async function loadAiMainImageAssets(common = {}) {
+  if (filters.mediaType && filters.mediaType !== "image") return [];
+  if (filters.role && filters.role !== "main_image") return [];
+  const params = new URLSearchParams({
+    field_key: "main_image",
+    repair_temp_ai: "1",
+    compact: "1",
+    limit: String(Math.min(Math.max(Number(pager.main.pageSize || 20), 1), 50))
+  });
+  const keyword = String(common.keyword || "").trim();
+  if (keyword) params.set("sourceProductId", keyword);
+  const rows = await apiClient.get(`/api/listing/ai-variant-assets?${params.toString()}`, { noCache: true }).catch(() => []);
+  return normalizeAiMainImageAssetRows(Array.isArray(rows) ? rows : []);
+}
+
+function normalizeAiMainImageAssetRows(rows = []) {
+  return rows
+    .map((row) => {
+      const asset = row.asset || {};
+      const url = firstDisplayableAiAssetUrl(asset);
+      if (!url) return null;
+      const snapshot = row.row_snapshot || row.rowSnapshot || {};
+      return {
+        id: `ai-main-${row.id}`,
+        sourceAiAssetId: row.id,
+        asset_type: "image",
+        role: "main_image",
+        title: row.product_name || snapshot.title || `AI主图 ${row.result_id || row.id}`,
+        url,
+        thumbnail_url: url,
+        local_url: displayableAiAssetUrl(asset.localUrl) || "",
+        publish_url: displayableAiAssetUrl(asset.publishUrl || asset.url) || "",
+        source_type: row.source_module || "ai_variant_lab",
+        source_id: row.source_product_id || "",
+        source_batch_id: row.source_batch_id || "",
+        variant_task_id: row.workbench_id || row.source_batch_id || "",
+        variant_result_id: row.result_id || "",
+        target_model: row.variant_target || snapshot.target_variant_value || "",
+        product_name: row.product_name || snapshot.title || "",
+        status: row.field_status || row.status || "generated",
+        metadata: {
+          aiVariantAsset: true,
+          sourceAiAssetId: row.id,
+          listingDraftId: row.listing_draft_id || row.listingDraftId || null,
+          sourceImageUrl: asset.sourceImageUrl || "",
+          downloadUrl: asset.downloadUrl || ""
+        },
+        updated_at: row.updated_at || row.updatedAt,
+        updatedAt: row.updatedAt || row.updated_at
+      };
+    })
+    .filter((row) => row && matchesKeyword(row, [
+      row.title,
+      row.product_name,
+      row.source_id,
+      row.variant_task_id,
+      row.variant_result_id,
+      row.target_model
+    ]));
+}
+
+function firstDisplayableAiAssetUrl(asset = {}) {
+  return [
+    asset.publishUrl,
+    asset.localUrl,
+    asset.url,
+    asset.downloadUrl
+  ].map(displayableAiAssetUrl).find(Boolean) || "";
+}
+
+function displayableAiAssetUrl(value = "") {
+  const url = String(value || "").trim();
+  if (!url || /^\/api\/ai\/file\//i.test(url) || /\/api\/ai\/file\//i.test(url)) return "";
+  return url;
+}
+
+function mergeMaterialRows(baseRows = [], aiRows = []) {
+  const seen = new Set();
+  return [...aiRows, ...baseRows].filter((row) => {
+    const key = row.sourceAiAssetId ? `ai:${row.sourceAiAssetId}` : `material:${row.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function clearFilters() {
@@ -133,6 +258,11 @@ function handleMaterialPageSizeChange(kind, size) {
   loadAssets();
 }
 
+function handleSelectionChange(kind, rows = []) {
+  if (kind === "main") selectedMaterialRows.value = rows;
+  else selectedShopRows.value = rows;
+}
+
 function goBackToSource() {
   if (returnTo.value) {
     router.push(returnTo.value);
@@ -162,6 +292,10 @@ function roleValue(item = {}) {
 
 function statusValue(item = {}) {
   return String(item.status || "").toLowerCase();
+}
+
+function isAiVariantAssetRow(item = {}) {
+  return Boolean(item.sourceAiAssetId || item.metadata?.aiVariantAsset);
 }
 
 function previewUrl(item = {}) {
@@ -260,6 +394,10 @@ async function archiveAsset(row) {
 
 async function deleteAsset(row) {
   if (!row?.id) return;
+  if (isAiVariantAssetRow(row)) {
+    await deleteAiVariantAssetRows([row]);
+    return;
+  }
   await ElMessageBox.confirm(`确定删除「${row.title || row.product_name || row.id}」吗？素材记录会从素材库移除，已注册的底层图片文件会保留。`, "删除素材记录", {
     type: "warning",
     confirmButtonText: "删除",
@@ -269,6 +407,26 @@ async function deleteAsset(row) {
   try {
     await deleteMaterialAsset(row.id);
     ElMessage.success("素材记录已删除");
+    await loadAssets();
+  } finally {
+    deleting.value = false;
+  }
+}
+
+async function deleteAiVariantAssetRows(rows = []) {
+  const ids = rows.map((row) => Number(row.sourceAiAssetId || 0)).filter(Boolean);
+  if (!ids.length) return;
+  await ElMessageBox.confirm(`确定删除 ${ids.length} 个 AI 素材记录吗？已注册的底层图片文件会保留。`, "删除 AI 素材记录", {
+    type: "warning",
+    confirmButtonText: "删除",
+    cancelButtonText: "取消"
+  });
+  deleting.value = true;
+  try {
+    const result = await apiClient.post("/api/listing/ai-variant-assets/batch-delete", { ids });
+    ElMessage.success(`已删除 ${result.deleted || ids.length} 个 AI 素材记录`);
+    selectedMaterialRows.value = [];
+    aiMainImageAssets.value = aiMainImageAssets.value.filter((row) => !ids.includes(Number(row.sourceAiAssetId || 0)));
     await loadAssets();
   } finally {
     deleting.value = false;
@@ -286,6 +444,55 @@ async function deleteShopAsset(row) {
   try {
     const result = await apiClient.post("/api/asset-variant-engine/delete-media-group", { assetIds: [row.id] });
     ElMessage.success(`已删除 ${result.deletedMediaAssets || 1} 个素材`);
+    await loadAssets();
+  } finally {
+    deleting.value = false;
+  }
+}
+
+async function deleteSelectedMaterialAssets() {
+  const rows = selectedMaterialRows.value;
+  if (!rows.length) return;
+  const aiRows = rows.filter(isAiVariantAssetRow);
+  const materialRows = rows.filter((row) => !isAiVariantAssetRow(row));
+  await ElMessageBox.confirm(`确定删除选中的 ${rows.length} 个主图 / AI 素材记录吗？已注册的底层图片文件会保留。`, "批量删除素材", {
+    type: "warning",
+    confirmButtonText: "删除",
+    cancelButtonText: "取消"
+  });
+  deleting.value = true;
+  try {
+    let deleted = 0;
+    const aiIds = aiRows.map((row) => Number(row.sourceAiAssetId || 0)).filter(Boolean);
+    if (aiIds.length) {
+      const result = await apiClient.post("/api/listing/ai-variant-assets/batch-delete", { ids: aiIds });
+      deleted += Number(result.deleted || aiIds.length);
+    }
+    for (const row of materialRows) {
+      await deleteMaterialAsset(row.id);
+      deleted += 1;
+    }
+    ElMessage.success(`已删除 ${deleted} 个素材记录`);
+    selectedMaterialRows.value = [];
+    await loadAssets();
+  } finally {
+    deleting.value = false;
+  }
+}
+
+async function deleteSelectedShopAssets() {
+  const rows = selectedShopRows.value;
+  if (!rows.length) return;
+  await ElMessageBox.confirm(`确定删除选中的 ${rows.length} 个店铺矩阵素材吗？本地文件和素材记录都会删除。`, "批量删除店铺素材", {
+    type: "warning",
+    confirmButtonText: "删除",
+    cancelButtonText: "取消"
+  });
+  deleting.value = true;
+  try {
+    const result = await apiClient.post("/api/asset-variant-engine/delete-media-group", { assetIds: rows.map((row) => row.id).filter(Boolean) });
+    ElMessage.success(`已删除 ${result.deletedMediaAssets || rows.length} 个素材`);
+    selectedShopRows.value = [];
     await loadAssets();
   } finally {
     deleting.value = false;
@@ -345,8 +552,13 @@ onMounted(loadAssets);
     <el-tabs v-model="activeTab" class="material-tabs">
       <el-tab-pane label="店铺矩阵素材" name="shop">
         <div class="material-tab-panel">
+          <div class="material-batch-bar">
+            <span>已选 {{ selectedShopRows.length }} 个</span>
+            <el-button class="erp-btn erp-btn-danger" :icon="Delete" :disabled="!selectedShopRows.length" :loading="deleting" @click="deleteSelectedShopAssets">删除选中</el-button>
+          </div>
           <div class="material-table-wrap erp-table-scroll">
-            <el-table :data="filteredShopAssets" border stripe class="material-table erp-data-table">
+            <el-table :data="filteredShopAssets" border stripe class="material-table erp-data-table" @selection-change="handleSelectionChange('shop', $event)">
+              <el-table-column type="selection" width="44" fixed="left" />
               <el-table-column label="预览" width="92" align="center">
                 <template #default="{ row }">
                   <button type="button" class="thumb-button portrait-thumb" @click="openPreview(row)">
@@ -403,8 +615,13 @@ onMounted(loadAssets);
 
       <el-tab-pane label="主图 / AI 素材" name="main">
         <div class="material-tab-panel">
+          <div class="material-batch-bar">
+            <span>已选 {{ selectedMaterialRows.length }} 个</span>
+            <el-button class="erp-btn erp-btn-danger" :icon="Delete" :disabled="!selectedMaterialRows.length" :loading="deleting" @click="deleteSelectedMaterialAssets">删除选中</el-button>
+          </div>
           <div class="material-table-wrap erp-table-scroll">
-        <el-table :data="filteredMaterialAssets" border stripe class="material-table erp-data-table">
+        <el-table :data="filteredMaterialAssets" border stripe class="material-table erp-data-table" @selection-change="handleSelectionChange('main', $event)">
+          <el-table-column type="selection" width="44" fixed="left" />
           <el-table-column label="预览" width="86" align="center">
             <template #default="{ row }">
               <button type="button" class="thumb-button" @click="openPreview(row)">
@@ -442,7 +659,7 @@ onMounted(loadAssets);
           <el-table-column label="操作" width="190" fixed="right">
             <template #default="{ row }">
               <el-button class="erp-btn-link" size="small" link type="primary" :icon="View" @click="openPreview(row)">预览</el-button>
-              <el-button class="erp-btn-link-danger" size="small" link type="danger" :icon="Delete" :loading="archiving" :disabled="row.status === 'archived'" @click="archiveAsset(row)">归档</el-button>
+              <el-button v-if="!isAiVariantAssetRow(row)" class="erp-btn-link-danger" size="small" link type="danger" :icon="Delete" :loading="archiving" :disabled="row.status === 'archived'" @click="archiveAsset(row)">归档</el-button>
               <el-button class="erp-btn-link-danger" size="small" link type="danger" :icon="Delete" :loading="deleting" @click="deleteAsset(row)">删除</el-button>
             </template>
           </el-table-column>
@@ -573,6 +790,17 @@ onMounted(loadAssets);
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.material-batch-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  margin-bottom: 8px;
+  color: #64748b;
+  font-size: 13px;
 }
 
 .material-table-wrap {

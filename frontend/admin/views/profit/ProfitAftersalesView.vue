@@ -3,6 +3,9 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
+import ErpFilterBar from "../../components/ErpFilterBar.vue";
+import ErpPageHeader from "../../components/ErpPageHeader.vue";
+import { loadShopDictionary } from "../../utils/shop-dictionary";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import { formatInteger, formatMoney, formatShortDate } from "./profit-utils.js";
 import { shanghaiDateKey, shanghaiMonthStart, shanghaiDateText } from "../../utils/shanghai-date";
@@ -50,6 +53,29 @@ const detail = reactive({
   total: 0,
   totalPages: 1
 });
+
+const detailTotals = computed(() => (
+  (detail.rows || []).reduce((acc, row) => {
+    acc.sale_amount_cny += Number(row.sale_amount_cny || 0);
+    acc.purchase_cost_cny += Number(row.purchase_cost_cny || 0);
+    acc.domestic_shipping_cny += Number(row.domestic_shipping_cny || 0);
+    acc.international_shipping_cny += Number(row.international_shipping_cny || 0);
+    acc.collecting_fee_cny += Number(row.collecting_fee_cny || 0);
+    acc.commission_fee_cny += Number(row.commission_fee_cny || 0);
+    acc.aftersale_finance_fee_cny += Number(row.aftersale_finance_fee_cny || row.return_loss_cny || 0);
+    acc.total_loss_cny += Number(row.total_loss_cny || row.estimated_loss_cny || 0);
+    return acc;
+  }, {
+    sale_amount_cny: 0,
+    purchase_cost_cny: 0,
+    domestic_shipping_cny: 0,
+    international_shipping_cny: 0,
+    collecting_fee_cny: 0,
+    commission_fee_cny: 0,
+    aftersale_finance_fee_cny: 0,
+    total_loss_cny: 0
+  })
+));
 
 const bucketOptions = [
   { label: "全部", value: "all" },
@@ -222,8 +248,7 @@ async function batchRecalculateDetailRows() {
 }
 
 async function loadShops() {
-  if (shops.value.length) return;
-  const payload = await apiClient.get("/api/shops");
+  const payload = await loadShopDictionary();
   shops.value = Array.isArray(payload?.rows) ? payload.rows : Array.isArray(payload) ? payload : [];
 }
 
@@ -293,6 +318,83 @@ async function refreshDetail() {
   await loadDetail(detail.row);
 }
 
+function csvValue(value) {
+  const text = String(value ?? "");
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function downloadCsv(filename, rows) {
+  const blob = new Blob(["\ufeff", rows.join("\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+async function exportDetailRows() {
+  if (!detail.row) return;
+  detailActionLoading.value = true;
+  try {
+    const params = new URLSearchParams({
+      from: state.filters.from || "",
+      to: state.filters.to || "",
+      shopId: state.filters.shopId || "all",
+      bucket: detail.row.key || "all",
+      page: "1",
+      pageSize: "10000",
+      export: "1"
+    });
+    const payload = await apiClient.get(`/api/profit-aftersales/details?${params.toString()}`);
+    const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+    const columns = [
+      ["shop_name", "店铺"],
+      ["posting_number", "Posting"],
+      ["order_number", "订单号"],
+      ["ordered_at", "下单时间"],
+      ["status", "订单状态"],
+      ["tracking_stage", "物流阶段"],
+      ["logistics_status", "物流状态"],
+      ["bucket_label", "售后类型"],
+      ["reason_label", "原因"],
+      ["reason_group_label", "原因分组"],
+      ["cancel_reason", "原始原因"],
+      ["item_names", "商品"],
+      ["skus", "SKU"],
+      ["item_quantity", "件数"],
+      ["sale_amount_cny", "保留收入"],
+      ["purchase_cost_cny", "货值损失"],
+      ["domestic_shipping_cny", "国内运费损失"],
+      ["international_shipping_cny", "国际运费损失"],
+      ["collecting_fee_cny", "收单费损失"],
+      ["commission_fee_cny", "佣金损失"],
+      ["aftersale_finance_fee_cny", "售后财务费"],
+      ["total_loss_cny", "总损失"],
+      ["reference_purchase_cost_cny", "订单冻结货值"],
+      ["reference_domestic_shipping_cny", "订单冻结国内运费"],
+      ["reference_international_shipping_cny", "订单冻结国际运费"],
+      ["loss_policy", "计算规则"],
+      ["missing_cost_count", "缺成本项"],
+      ["missing_shipping_count", "缺运费项"],
+      ["needs_review", "待核实"]
+    ];
+    const csvRows = [
+      columns.map(([, label]) => csvValue(label)).join(","),
+      ...rows.map((row) => columns.map(([key]) => csvValue(row[key])).join(","))
+    ];
+    const filename = `售后损益明细_${detail.row.key || "all"}_${state.filters.from || ""}_${state.filters.to || ""}.csv`;
+    downloadCsv(filename, csvRows);
+    ElMessage.success(`已导出 ${rows.length} 条售后明细`);
+  } catch (error) {
+    ElMessage.error(error.message || "售后明细导出失败");
+  } finally {
+    detailActionLoading.value = false;
+  }
+}
+
 function resetFilters() {
   Object.assign(state.filters, defaultFilters());
   loadAftersales();
@@ -318,8 +420,14 @@ function backToDashboard() {
 }
 
 function syncFiltersFromRoute() {
-  state.filters.from = String(route.query.from || route.query.aftersalesFrom || state.filters.from || monthStartText());
-  state.filters.to = String(route.query.to || route.query.aftersalesTo || state.filters.to || todayText());
+  const year = Number(route.query.year || 0);
+  const month = Number(route.query.month || route.query.selectedMonth || 0);
+  const monthPrefix = year && month >= 1 && month <= 12 ? `${year}-${String(month).padStart(2, "0")}` : "";
+  const monthEnd = monthPrefix
+    ? shanghaiDateKey(new Date(year, month, 0, 12))
+    : "";
+  state.filters.from = String(route.query.from || route.query.aftersalesFrom || (monthPrefix ? `${monthPrefix}-01` : "") || state.filters.from || monthStartText());
+  state.filters.to = String(route.query.to || route.query.aftersalesTo || (monthEnd > todayText() ? todayText() : monthEnd) || state.filters.to || todayText());
   state.filters.shopId = String(route.query.shopId || route.query.aftersalesShopId || state.filters.shopId || "all");
   state.filters.bucket = String(route.query.bucket || state.filters.bucket || "all");
 }
@@ -355,18 +463,14 @@ onMounted(async () => {
 <template>
   <div class="page-stack profit-aftersales-page">
     <el-card shadow="never" class="page-card">
-      <div class="page-hero">
-        <div>
-          <h2>售后损失</h2>
-          <p>独立查看取消、拒收、错发破损、质量问题和平台/证件问题的数量、销售额和损失。</p>
-        </div>
-        <div class="page-card-actions">
+      <ErpPageHeader title="售后损失" description="独立查看取消、拒收、错发破损、质量问题和平台/证件问题的数量、销售额和损失。">
+        <template #actions>
           <el-button class="erp-btn erp-btn-secondary" @click="backToDashboard">返回利润看板</el-button>
           <el-button class="erp-btn erp-btn-secondary" type="primary" plain @click="loadAftersales">刷新</el-button>
-        </div>
-      </div>
+        </template>
+      </ErpPageHeader>
 
-      <div class="aftersales-toolbar">
+      <ErpFilterBar class="aftersales-toolbar">
         <el-form inline @submit.prevent>
           <el-form-item label="开始日期">
             <el-date-picker v-model="state.filters.from" value-format="YYYY-MM-DD" type="date" placeholder="开始日期" />
@@ -390,7 +494,7 @@ onMounted(async () => {
             <el-button class="erp-btn erp-btn-secondary" @click="resetFilters">重置</el-button>
           </el-form-item>
         </el-form>
-      </div>
+      </ErpFilterBar>
 
       <el-alert
         v-if="state.missingAlert?.message"
@@ -481,7 +585,14 @@ onMounted(async () => {
       </div>
     </el-card>
 
-    <el-dialog v-model="detailVisible" title="售后明细" width="1460px" destroy-on-close class="erp-centered-dialog">
+    <el-dialog
+      v-model="detailVisible"
+      title="售后明细"
+      width="min(1320px, calc(100vw - 96px))"
+      top="5vh"
+      destroy-on-close
+      class="erp-centered-dialog aftersales-detail-modal"
+    >
       <div v-loading="detailLoading" class="aftersales-detail-dialog">
         <div class="aftersales-detail-header">
           <div>
@@ -491,8 +602,40 @@ onMounted(async () => {
           <div class="aftersales-detail-meta">
             <span>{{ currentShopName }}</span>
             <span>{{ formatDate(state.filters.from) }} - {{ formatDate(state.filters.to) }}</span>
+            <el-button class="erp-btn erp-btn-secondary" size="small" :loading="detailActionLoading" @click="exportDetailRows">导出全部</el-button>
             <el-button class="erp-btn erp-btn-secondary" size="small" :loading="detailActionLoading" @click="batchRecalculateDetailRows">批量重算</el-button>
             <el-button class="erp-btn erp-btn-secondary" size="small" @click="refreshDetail">刷新</el-button>
+          </div>
+        </div>
+
+        <div class="aftersales-detail-summary">
+          <div>
+            <span>当前页收入</span>
+            <strong>{{ formatMoney(detailTotals.sale_amount_cny) }}</strong>
+          </div>
+          <div>
+            <span>货值损失</span>
+            <strong>{{ formatMoney(detailTotals.purchase_cost_cny) }}</strong>
+          </div>
+          <div>
+            <span>国内运费</span>
+            <strong>{{ formatMoney(detailTotals.domestic_shipping_cny) }}</strong>
+          </div>
+          <div>
+            <span>国际运费</span>
+            <strong>{{ formatMoney(detailTotals.international_shipping_cny) }}</strong>
+          </div>
+          <div>
+            <span>收单费</span>
+            <strong>{{ formatMoney(detailTotals.collecting_fee_cny) }}</strong>
+          </div>
+          <div>
+            <span>售后财务费</span>
+            <strong>{{ formatMoney(detailTotals.aftersale_finance_fee_cny) }}</strong>
+          </div>
+          <div class="aftersales-detail-summary__total">
+            <span>当前页总损失</span>
+            <strong>{{ formatMoney(detailTotals.total_loss_cny) }}</strong>
           </div>
         </div>
 
@@ -567,13 +710,27 @@ onMounted(async () => {
             <el-table-column prop="purchase_cost_cny" label="成本" width="100">
               <template #default="{ row }">{{ formatMoney(row.purchase_cost_cny) }}</template>
             </el-table-column>
+            <el-table-column prop="domestic_shipping_cny" label="国内运费" width="100">
+              <template #default="{ row }">{{ formatMoney(row.domestic_shipping_cny) }}</template>
+            </el-table-column>
             <el-table-column prop="international_shipping_cny" label="国际运费" width="100">
               <template #default="{ row }">{{ formatMoney(row.international_shipping_cny) }}</template>
+            </el-table-column>
+            <el-table-column prop="collecting_fee_cny" label="收单费" width="100">
+              <template #default="{ row }">{{ formatMoney(row.collecting_fee_cny) }}</template>
             </el-table-column>
             <el-table-column prop="commission_fee_cny" label="佣金" width="100">
               <template #default="{ row }">{{ formatMoney(row.commission_fee_cny) }}</template>
             </el-table-column>
-            <el-table-column label="处理" width="250" fixed="right">
+            <el-table-column prop="aftersale_finance_fee_cny" label="售后费" width="100">
+              <template #default="{ row }">{{ formatMoney(row.aftersale_finance_fee_cny || row.return_loss_cny) }}</template>
+            </el-table-column>
+            <el-table-column prop="total_loss_cny" label="总损失" width="110">
+              <template #default="{ row }">
+                <strong class="aftersales-loss-total">{{ formatMoney(row.total_loss_cny || row.estimated_loss_cny) }}</strong>
+              </template>
+            </el-table-column>
+            <el-table-column label="处理" width="210" fixed="right">
               <template #default="{ row }">
                 <div class="aftersales-actions-cell">
                   <el-button class="erp-btn-link" link type="primary" @click="openOrder(row)">查看订单</el-button>
@@ -672,11 +829,20 @@ onMounted(async () => {
   font-weight: 700;
 }
 
+.aftersales-detail-modal :deep(.el-dialog) {
+  max-width: calc(100vw - 48px);
+}
+
+.aftersales-detail-modal :deep(.el-dialog__body) {
+  padding-top: 12px;
+}
+
 .aftersales-detail-dialog {
   display: flex;
   flex-direction: column;
-  min-height: 620px;
-  max-height: calc(100vh - 180px);
+  height: min(720px, calc(100vh - 160px));
+  min-height: 520px;
+  max-height: calc(100vh - 160px);
 }
 
 .aftersales-detail-header {
@@ -706,11 +872,55 @@ onMounted(async () => {
   justify-content: flex-end;
 }
 
+.aftersales-detail-summary {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.aftersales-detail-summary div {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.aftersales-detail-summary span {
+  display: block;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.aftersales-detail-summary strong {
+  display: block;
+  margin-top: 4px;
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.aftersales-detail-summary__total {
+  background: #fff7ed !important;
+  border-color: #fed7aa !important;
+}
+
+.aftersales-detail-summary__total strong,
+.aftersales-loss-total {
+  color: #c2410c;
+}
+
 .aftersales-detail-table-wrap {
   flex: 1;
   min-height: 0;
   overflow: auto;
   margin-bottom: 8px;
+}
+
+.aftersales-detail-table-wrap :deep(.el-table) {
+  min-width: 1280px;
 }
 
 .aftersales-item-thumb {
@@ -818,6 +1028,10 @@ onMounted(async () => {
 @media (max-width: 1200px) {
   .aftersales-summary {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .aftersales-detail-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

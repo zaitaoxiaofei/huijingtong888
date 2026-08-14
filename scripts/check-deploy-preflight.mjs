@@ -15,19 +15,27 @@ const requiredKeys = [
 
 function parseEnvFile(text = "") {
   const values = {};
-  for (const rawLine of String(text || "").split(/\r?\n/)) {
+  const invalidLines = [];
+  for (const [index, rawLine] of String(text || "").split(/\r?\n/).entries()) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
     const separatorIndex = line.indexOf("=");
-    if (separatorIndex <= 0) continue;
+    if (separatorIndex <= 0) {
+      invalidLines.push(index + 1);
+      continue;
+    }
     const key = line.slice(0, separatorIndex).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      invalidLines.push(index + 1);
+      continue;
+    }
     let value = line.slice(separatorIndex + 1).trim();
     if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
     values[key] = value;
   }
-  return values;
+  return { values, invalidLines };
 }
 
 let envText = "";
@@ -38,10 +46,14 @@ try {
   process.exit(1);
 }
 
-const envValues = parseEnvFile(envText);
+const { values: envValues, invalidLines } = parseEnvFile(envText);
 const failures = requiredKeys.filter((key) => !String(envValues[key] || "").trim());
 
-if (failures.length) {
+if (invalidLines.length) {
+  console.error(`[deploy-preflight] Invalid .env syntax at line(s): ${invalidLines.join(", ")}. Expected KEY=VALUE.`);
+}
+
+if (failures.length || invalidLines.length) {
   for (const key of failures) {
     console.error(`[deploy-preflight] Missing or empty required key: ${key}`);
   }

@@ -96,7 +96,7 @@
     return Number.isFinite(parsed) ? parsed : null;
   }
 
-  function detectCurrency(value, fallback = 'RUB') {
+  function detectCurrency(value, fallback = 'CNY') {
     const symbol = String(value || '').match(/[^\d\s,.]+$/)?.[0];
     const entry = Object.entries(CURRENCY_SYMBOLS).find(([, item]) => item === symbol);
     return entry ? entry[0] : fallback;
@@ -115,6 +115,85 @@
       } catch (error) {}
     }
     return '';
+  }
+
+  function pickTextLike(value) {
+    if (value == null) return '';
+    if (typeof value === 'string' || typeof value === 'number') return cleanText(value);
+    if (Array.isArray(value)) return value.map(pickTextLike).filter(Boolean).join('/');
+    if (typeof value !== 'object') return '';
+    return cleanText(
+      value.text ||
+      value.title ||
+      value.name ||
+      value.label ||
+      value.caption ||
+      value.categoryName ||
+      value.category_name ||
+      value.path ||
+      value.pathName ||
+      ''
+    );
+  }
+
+  function extractCategoryNamesFromNode(node, depth = 0, result = []) {
+    if (!node || depth > 7 || result.length >= 8) return result;
+    if (Array.isArray(node)) {
+      node.forEach((item) => extractCategoryNamesFromNode(item, depth + 1, result));
+      return result;
+    }
+    if (typeof node !== 'object') return result;
+    const keys = ['breadcrumbs', 'breadcrumb', 'categoryPath', 'categories', 'category', 'catalogPath'];
+    for (const key of keys) {
+      const value = node[key];
+      if (!value) continue;
+      if (Array.isArray(value)) {
+        value.forEach((item) => {
+          const text = pickTextLike(item);
+          if (text && !result.includes(text)) result.push(text);
+        });
+      } else {
+        const text = pickTextLike(value);
+        if (text && !result.includes(text)) result.push(text);
+      }
+    }
+    for (const value of Object.values(node)) {
+      if (value && typeof value === 'object') extractCategoryNamesFromNode(value, depth + 1, result);
+    }
+    return result;
+  }
+
+  function extractSeoCategoryPath(page) {
+    const scripts = Array.isArray(page?.seo?.script) ? page.seo.script : [];
+    for (const item of scripts) {
+      const text = item?.innerHTML;
+      if (!text) continue;
+      try {
+        const parsed = JSON.parse(text);
+        const graphs = Array.isArray(parsed) ? parsed : [parsed, ...(Array.isArray(parsed?.['@graph']) ? parsed['@graph'] : [])];
+        for (const graph of graphs) {
+          const type = Array.isArray(graph?.['@type']) ? graph['@type'].join(' ') : String(graph?.['@type'] || '');
+          if (!/BreadcrumbList/i.test(type)) continue;
+          const names = (Array.isArray(graph.itemListElement) ? graph.itemListElement : [])
+            .map((entry) => pickTextLike(entry?.item?.name || entry?.name || entry?.item))
+            .filter(Boolean);
+          if (names.length) return names.join('/');
+        }
+      } catch (error) {}
+    }
+    return '';
+  }
+
+  function extractCategoryMetaFromPage(page) {
+    const names = extractCategoryNamesFromNode(page?.widgetStates || {});
+    const widgetCategory = names.length ? names.join('/') : '';
+    const seoCategory = extractSeoCategoryPath(page);
+    const category = cleanText(widgetCategory || seoCategory);
+    return {
+      category,
+      categoryName: category.split('/').filter(Boolean).pop() || category,
+      category_path: category
+    };
   }
 
   function cleanImageUrl(url) {
@@ -509,6 +588,7 @@
     const characteristics = parseCharacteristicsWidget(page.widgetStates);
     const hashtags = extractHashtagsFromWidget(hashtagsWidget);
     const extractedAttributes = extractCharacteristicsFromWidget(characteristics);
+    const categoryMeta = extractCategoryMetaFromPage(page);
 
     const images = (gallery?.images || []).map((item) => item.src || item.url).filter(Boolean);
     const videos = gallery?.videos || [];
@@ -566,6 +646,9 @@
       images,
       videos,
       videoUrls: normalizeVideoUrls(videos),
+      category: categoryMeta.category,
+      categoryName: categoryMeta.categoryName,
+      category_path: categoryMeta.category_path,
       weight_g: logistics.weight_g,
       depth: logistics.depth,
       width: logistics.width,
@@ -582,7 +665,7 @@
         detail: result.requestUrl,
         modalVariants: modalRequestUrl
       },
-      raw: { heading, price, gallery, aspects, characteristics, hashtags: hashtagsWidget, seoPriceCurrency }
+      raw: { heading, price, gallery, aspects, characteristics, hashtags: hashtagsWidget, seoPriceCurrency, categoryMeta }
     };
   }
 
@@ -663,7 +746,7 @@
   }
 
   async function fetchAllVariantDetails(seedSku, options = {}) {
-    const seedDetail = await fetchProductDetail(seedSku, { includeVariants: true });
+    const seedDetail = options.seedDetail || await fetchProductDetail(seedSku, { includeVariants: true });
     const modalVariants = options.maxVariants
       ? (seedDetail.variants || []).slice(0, options.maxVariants)
       : seedDetail.variants || [];
@@ -889,6 +972,46 @@
     return '';
   }
 
+  function firstFilledValueDeep(source = {}, keys = [], depth = 0) {
+    if (!source || typeof source !== 'object' || depth > 4) return '';
+    const wanted = new Set(keys.map((key) => String(key).toLowerCase()));
+    for (const [key, value] of Object.entries(source)) {
+      if (wanted.has(String(key).toLowerCase()) && hasFilledValue(value)) return value;
+    }
+    for (const value of Object.values(source)) {
+      if (!value || typeof value !== 'object') continue;
+      const nested = firstFilledValueDeep(value, keys, depth + 1);
+      if (hasFilledValue(nested)) return nested;
+    }
+    return '';
+  }
+
+  function normalizeSellerAttributeText(item = {}) {
+    const firstValue = Array.isArray(item?.values) ? item.values[0] : null;
+    const value = item?.value ?? item?.attribute_value ?? item?.text ?? firstValue?.value ?? firstValue?.name ?? firstValue?.text;
+    if (Array.isArray(value)) return value.map((entry) => normalizeSellerAttributeText(entry)).filter(Boolean).join(', ');
+    if (value && typeof value === 'object') {
+      return cleanText(value.value ?? value.name ?? value.text ?? value.label ?? value.display_value ?? '');
+    }
+    return cleanText(value);
+  }
+
+  function sellerAttributeTextByIds(attributes = [], ids = []) {
+    const wanted = new Set(ids.map((id) => String(id)));
+    for (const item of Array.isArray(attributes) ? attributes : []) {
+      const key = String(item?.key || item?.attribute_id || item?.attributeId || item?.id || '').trim();
+      if (!wanted.has(key)) continue;
+      const value = normalizeSellerAttributeText(item);
+      if (value) return value;
+    }
+    return '';
+  }
+
+  function sellerMeasurementByAttributeIds(attributes = [], ids = []) {
+    const value = sellerAttributeTextByIds(attributes, ids);
+    return normalizeSellerMeasurement(value);
+  }
+
   function normalizeSellerPrice(value) {
     if (value === undefined || value === null || value === '') return '';
     if (typeof value === 'number') return Number.isFinite(value) ? value : '';
@@ -970,6 +1093,26 @@
       .filter((item) => Number.isFinite(item.id) && item.id > 0)
       .sort((a, b) => (Number.isFinite(a.level) ? a.level : 0) - (Number.isFinite(b.level) ? b.level : 0))
       .map((item) => item.id);
+  }
+
+  function normalizeSellerTypeId(source = {}) {
+    const value =
+      source.description_type_dict_value ??
+      source.descriptionTypeDictValue ??
+      source.type_id ??
+      source.typeId ??
+      '';
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && numeric > 0 ? String(numeric) : '';
+  }
+
+  function appendSellerTypeIdToCategoryIds(categoryIds, typeId) {
+    const ids = Array.isArray(categoryIds) ? categoryIds.slice() : [];
+    const numericTypeId = Number(typeId);
+    if (Number.isFinite(numericTypeId) && numericTypeId > 0 && !ids.includes(numericTypeId)) {
+      ids.push(numericTypeId);
+    }
+    return ids;
   }
 
   function normalizeSellerCategoryPath(source = {}) {
@@ -1132,6 +1275,13 @@
     return formatMeasurement(numeric);
   }
 
+  function normalizeSellerWeightMeasurement(value, unit = '') {
+    const numeric = normalizeDecimal(value && typeof value === 'object' ? (value.value ?? value.amount ?? '') : value);
+    if (numeric == null) return '';
+    const sourceUnit = String(unit || value?.unit || value?.weight_unit || value || '').trim().toLowerCase();
+    return formatMeasurement((sourceUnit.includes('kg') || sourceUnit.includes('кг')) ? numeric * 1000 : numeric);
+  }
+
   function buildSellerSalesFields(source = {}) {
     if (!source || typeof source !== 'object') return {};
     const result = { ...source };
@@ -1196,8 +1346,17 @@
     const brand = normalizeSellerBrand(variant.brand_name || variant.brand);
     if (brand) result.brand = brand;
     if (hasFilledValue(variant.brand_id)) result.brandId = variant.brand_id;
-    const categoryIds = normalizeSellerBaseCategoryIds(variant);
+    const sellerTypeId = normalizeSellerTypeId(variant);
+    const categoryIds = appendSellerTypeIdToCategoryIds(normalizeSellerBaseCategoryIds(variant), sellerTypeId);
     if (categoryIds.length > 0) result.category_ids = categoryIds;
+    if (!hasFilledValue(result.description_category_id) && categoryIds.length >= 2) {
+      result.description_category_id = String(categoryIds[categoryIds.length - 2]);
+    }
+    if (sellerTypeId) {
+      result.type_id = sellerTypeId;
+    } else if (!hasFilledValue(result.type_id) && categoryIds.length >= 1) {
+      result.type_id = String(categoryIds[categoryIds.length - 1]);
+    }
     const images = normalizeSellerImages(variant.main_image, variant.secondary_images, variant.images);
     if (images.length > 0) {
       result.images = images;
@@ -1226,7 +1385,7 @@
       if (key === '9454') depth = normalizeSellerMeasurement(value);
       if (key === '9455') width = normalizeSellerMeasurement(value);
       if (key === '9456') height = normalizeSellerMeasurement(value);
-      if (key === '4497') weight = normalizeSellerMeasurement(value);
+      if (key === '4497') weight = normalizeSellerWeightMeasurement(value, item?.unit || firstValue?.unit || '');
     }
 
     const customVolume = depth && width && height ? `${depth}x${width}x${height}` : '';
@@ -1244,10 +1403,14 @@
 
   function extractVariantV2Logistics(source = {}) {
     const item = source?.item && typeof source.item === 'object' ? source.item : source;
-    const depth = normalizeSellerMeasurement(item?.depth);
-    const width = normalizeSellerMeasurement(item?.width);
-    const height = normalizeSellerMeasurement(item?.height);
-    const weight = normalizeSellerMeasurement(item?.weight);
+    const attributes = Array.isArray(item?.attributes) ? item.attributes : (Array.isArray(source?.attributes) ? source.attributes : []);
+    const depth = normalizeSellerMeasurement(firstFilledValueDeep(item, ['depth', 'length', 'length_mm', 'depth_mm'])) || sellerMeasurementByAttributeIds(attributes, ['9454']);
+    const width = normalizeSellerMeasurement(firstFilledValueDeep(item, ['width', 'width_mm'])) || sellerMeasurementByAttributeIds(attributes, ['9455']);
+    const height = normalizeSellerMeasurement(firstFilledValueDeep(item, ['height', 'height_mm'])) || sellerMeasurementByAttributeIds(attributes, ['9456']);
+    const weight = normalizeSellerWeightMeasurement(
+      firstFilledValueDeep(item, ['weight_g', 'weight', 'package_weight', 'custom_weight']),
+      firstFilledValueDeep(item, ['weight_unit', 'package_weight_unit', 'unit'])
+    ) || normalizeSellerWeightMeasurement(sellerAttributeTextByIds(attributes, ['4497']));
     const customVolume = depth && width && height ? `${depth}x${width}x${height}` : '';
     return {
       custom_weight: weight || '',
@@ -1319,12 +1482,25 @@
     if (hasFilledValue(item.barcode)) result.barcode = item.barcode;
     if (hasFilledValue(item.description_category_id)) result.description_category_id = item.description_category_id;
     if (hasFilledValue(item.new_description_category_id)) result.new_description_category_id = item.new_description_category_id;
+    const sellerTypeId = normalizeSellerTypeId(item);
+    if (sellerTypeId) result.type_id = sellerTypeId;
+    else if (hasFilledValue(item.type_id)) result.type_id = item.type_id;
     if (hasFilledValue(item.origin_variant_id)) result.origin_variant_id = item.origin_variant_id;
+    const rawAttributes = Array.isArray(item.attributes) ? item.attributes : (Array.isArray(source.attributes) ? source.attributes : []);
+    const color = firstFilledValue(item, ['color', 'color_name', 'colorName']) || sellerAttributeTextByIds(rawAttributes, ['8229', '10096', '22814']);
+    const modelName = firstFilledValue(item, ['model_name', 'modelName', 'model']) || sellerAttributeTextByIds(rawAttributes, ['9048']);
+    if (hasFilledValue(color)) result.color = color;
+    if (hasFilledValue(modelName)) {
+      result.modelName = modelName;
+      result.spec = result.spec || modelName;
+    }
     const itemTitle = item.name || item.title || '';
-    if (hasFilledValue(itemTitle)) {
+    if (hasFilledValue(itemTitle) && (!hasFilledValue(color) || cleanText(itemTitle) !== cleanText(color))) {
       result.variantName = itemTitle;
       result.name = result.name || itemTitle;
       result.productTitle = result.productTitle || itemTitle;
+    } else if (hasFilledValue(modelName)) {
+      result.variantName = result.variantName || modelName;
     }
     const images = normalizeSellerImages(item.primary_image, item.images, item.color_image);
     if (images.length > 0) {
@@ -1461,7 +1637,7 @@
     const followEditPayload = {
       scene: 'plugin',
       sku,
-      currecny: productDetail.currency || 'RUB',
+      currecny: 'CNY',
       hashtags,
       attributes,
       rows,
@@ -1480,7 +1656,7 @@
       originalPrice: productDetail.originalPrice ?? null,
       cardPrice: productDetail.cardPrice ?? null,
       productPrice: productDetail.cardPrice ?? productDetail.price ?? null,
-      currency: productDetail.currency || 'RUB',
+      currency: 'CNY',
       mainImage: productDetail.coverImage || images[0] || '',
       images,
       videos: productDetail.videos || [],
@@ -1502,7 +1678,7 @@
         sku,
         title: productDetail.title || '',
         price: productDetail.cardPrice ?? productDetail.price ?? null,
-        currency: productDetail.currency || 'RUB',
+        currency: 'CNY',
         mainImage: productDetail.coverImage || images[0] || '',
         images,
         videos: normalizeVideoUrls(productDetail.videos || []),
@@ -1542,11 +1718,17 @@
     pushStage(stages, 'detail', 'success', productDetail.title || sku);
 
     let variants = productDetail.variants || [];
+    const descriptionPromise = withTimeout(
+      fetchRichDescriptionJson(sku),
+      options.descriptionTimeoutMs || 10000,
+      { jsonContent: null, requestUrl: '' }
+    );
     if (options.includeVariants !== false) {
       pushStage(stages, 'variant_details', 'running', `${variants.length} variants`);
       variants = await fetchAllVariantDetails(sku, {
         maxVariants: options.maxVariants,
-        concurrency: options.concurrency || 4
+        concurrency: options.concurrency || 4,
+        seedDetail: productDetail
       }).catch((error) => {
         pushStage(stages, 'variant_details', 'warning', error?.message || 'variant detail failed');
         return productDetail.variants || [];
@@ -1555,11 +1737,7 @@
     }
 
     pushStage(stages, 'rich_description', 'running');
-    const descriptionResult = await withTimeout(
-      fetchRichDescriptionJson(sku),
-      options.descriptionTimeoutMs || 10000,
-      { jsonContent: null, requestUrl: '' }
-    );
+    const descriptionResult = await descriptionPromise;
     const jsonContent = descriptionResult?.jsonContent ?? null;
     productDetail.hashtags = mergeHashtags(productDetail.hashtags, descriptionResult?.hashtags);
     productDetail.raw.characteristics = mergeCharacteristicWidgets(productDetail.raw.characteristics, descriptionResult?.characteristics);
@@ -1571,7 +1749,7 @@
     const followEditPayload = {
       scene: 'plugin',
       sku,
-      currecny: productDetail.currency || 'RUB',
+      currecny: 'CNY',
       hashtags: productDetail.hashtags || [],
       attributes: productDetail.attributes || [],
       rows,

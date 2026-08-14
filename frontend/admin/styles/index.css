@@ -1429,16 +1429,16 @@ body {
 }
 
 .erp-image-preview {
-  width: 64px;
-  min-width: 64px;
-  max-width: 64px;
+  width: 63px;
+  min-width: 63px;
+  max-width: 63px;
   height: 84px;
   min-height: 84px;
   max-height: 84px;
   display: flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 64px;
+  flex: 0 0 63px;
   border-radius: 8px;
   border: 1px solid #e5e7eb;
   background: #f8fafc;
@@ -1466,13 +1466,13 @@ body {
 }
 
 .erp-image-preview--portrait {
-  width: 64px;
-  min-width: 64px;
-  max-width: 64px;
+  width: 63px;
+  min-width: 63px;
+  max-width: 63px;
   height: 84px;
   min-height: 84px;
   max-height: 84px;
-  flex-basis: 64px;
+  flex-basis: 63px;
 }
 
 .erp-image-preview--compact {
@@ -1501,9 +1501,9 @@ body {
   width: 42px;
   min-width: 42px;
   max-width: 42px;
-  height: 54px;
-  min-height: 54px;
-  max-height: 54px;
+  height: 56px;
+  min-height: 56px;
+  max-height: 56px;
   flex-basis: 42px;
 }
 

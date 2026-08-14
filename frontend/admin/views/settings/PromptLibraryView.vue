@@ -3,9 +3,10 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Download, MagicStick, Picture, Refresh, Search, Setting, UploadFilled, View } from "@element-plus/icons-vue";
-import { downloadUrl, generateAiCommerceCopy, generateAiImages, withImageToken } from "../../api/tools/aiImageGenerator";
+import { downloadUrl, generateAiCommerceCopy, generateAiImages, pullAiImageTaskResult, withImageToken } from "../../api/tools/aiImageGenerator";
 import { createMaterialAsset, listMaterialAssets, updateMaterialAsset } from "../../api/materialAssets";
 import { apiClient } from "../../utils/api";
+import { openAiVariantLabWindow } from "../../utils/ai-variant-lab-window";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import {
@@ -369,6 +370,7 @@ const outputOptions = assetGroups.flatMap((group) => group.items);
 const ratioOptions = ["3:4", "1:1", "4:5"];
 const IMAGE_GENERATION_CONCURRENCY = 3;
 const COPY_GENERATION_CONCURRENCY = 5;
+const WRITEBACK_CONCURRENCY = 3;
 
 const loading = ref(false);
 const workbenchId = computed(() => String(route.query.workbenchId || "").trim());
@@ -381,6 +383,16 @@ const selectedTemplateId = ref(null);
 const activeImage = ref("");
 const previewPositivePrompt = ref("");
 const previewNegativePrompt = ref("");
+const promptEditorState = reactive({
+  positivePrompt: "",
+  negativePrompt: "",
+  variablesJson: "{}"
+});
+const previewContext = reactive({
+  targetModel: "",
+  strategyTitles: [],
+  job: {}
+});
 
 const strategyDrawer = ref(false);
 const diagnosisDrawer = ref(false);
@@ -420,6 +432,8 @@ const sourceImportingId = ref("");
 const routeSelectionImporting = ref(false);
 const importedRouteSelectionId = ref("");
 const importedRouteCollectorSku = ref("");
+const importedRouteOnlineProductSignature = ref("");
+const importedRouteDraftSignature = ref("");
 const importedRouteListingRecordId = ref("");
 const importedRouteListingRecordSignature = ref("");
 const sourceOnlineProductsLoaded = ref(false);
@@ -768,8 +782,8 @@ function buildWorkbenchPositivePromptSources(strategyTitles = selectedStrategyTi
     : job.type === "详情图"
       ? `Asset output: generate one Ozon detail image module: ${job.detailType || "详情图"}. Keep the product consistent with the source product while explaining this single module only.`
       : "Asset output: generate commerce copy only. Do not request or describe image generation.";
-  if (task.advancedPositivePrompt) {
-    return [{ source: "高级正向", lines: linesToArray(task.advancedPositivePrompt) }];
+  if (promptEditorState.positivePrompt) {
+    return [{ source: "高级正向", lines: linesToArray(promptEditorState.positivePrompt) }];
   }
   return [
     { source: "平台规则", lines: [task.promptModules.platformRule] },
@@ -789,8 +803,8 @@ function buildWorkbenchPositivePromptSources(strategyTitles = selectedStrategyTi
 
 function buildWorkbenchNegativePromptSources(strategyTitles = selectedStrategyTitles.value) {
   const strategyPlan = resolveStrategyPlanForTitles(strategyTitles);
-  if (task.advancedNegativePrompt) {
-    return [{ source: "高级负向", lines: linesToArray(task.advancedNegativePrompt) }];
+  if (promptEditorState.negativePrompt) {
+    return [{ source: "高级负向", lines: linesToArray(promptEditorState.negativePrompt) }];
   }
   return [
     { source: "商品负向", lines: [task.promptModules.negativePrompt] },
@@ -835,9 +849,13 @@ function buildNegativePrompt(strategyTitles = selectedStrategyTitles.value) {
 }
 const finalPrompt = computed(() => buildPositivePrompt());
 const finalNegativePrompt = computed(() => buildNegativePrompt());
-const workbenchPreviewJob = computed(() => buildGenerationJobs()[0] || {});
-const workbenchPreviewStrategyTitles = computed(() => workbenchPreviewJob.value.strategyTitles || selectedStrategyTitles.value.slice(0, 1));
-const workbenchPreviewTargetModel = computed(() => workbenchPreviewJob.value.targetModel || task.targets[0] || "");
+const workbenchPreviewJob = computed(() => previewContext.job || {});
+const workbenchPreviewStrategyTitles = computed(() => (
+  previewContext.strategyTitles?.length
+    ? previewContext.strategyTitles
+    : workbenchPreviewJob.value.strategyTitles || selectedStrategyTitles.value.slice(0, 1)
+));
+const workbenchPreviewTargetModel = computed(() => previewContext.targetModel || task.targets[0] || "");
 const workbenchPreviewTemplateType = computed(() => {
   if (task.sourceType === "selection") return "选品池模板";
   if (task.sourceType === "online_product") return "在线商品模板";
@@ -1593,6 +1611,8 @@ onMounted(() => {
   refreshRemoteStrategyPlan();
   importSelectionFromRoute();
   importCollectorFromRoute();
+  importOnlineProductFromRoute();
+  importListingDraftFromRoute();
   importListingRecordFromRoute();
   aiWorkbenchReady.value = true;
 });
@@ -1603,6 +1623,14 @@ watch(() => route.query.baseSelectionId, () => {
 
 watch(() => route.query.collectorSku, () => {
   importCollectorFromRoute();
+});
+
+watch(() => [route.query.onlineProductId, route.query.source, route.query.autoImport, route.query.importAt], () => {
+  importOnlineProductFromRoute();
+});
+
+watch(() => [route.query.draftId, route.query.draftIds, route.query.source, route.query.autoImport, route.query.importAt], () => {
+  importListingDraftFromRoute();
 });
 
 watch(() => [route.query.listingRecordId, route.query.source, route.query.autoImport, route.query.importAt], () => {
@@ -1676,13 +1704,20 @@ watch([
   refreshRemoteStrategyPlan();
 });
 
+watch(selectedTemplateId, (value) => {
+  const template = templates.value.find((item) => item.id === value && item.enabled);
+  if (template) applyTemplate(template);
+});
+
 async function loadTemplates() {
   loading.value = true;
   try {
     templates.value = await listAiPromptTemplates();
+    const selectedTemplate = templates.value.find((item) => item.id === selectedTemplateId.value && item.enabled);
     const defaultTemplate = templates.value.find((item) => item.scene === "main_image_variant" && item.is_default && item.enabled)
       || templates.value.find((item) => item.scene === "main_image_variant" && item.enabled);
-    if (defaultTemplate) applyTemplate(defaultTemplate);
+    if (selectedTemplate) applyTemplate(selectedTemplate);
+    else if (defaultTemplate) applyTemplate(defaultTemplate);
   } catch (error) {
     ElMessage.error(error.message || "提示词库加载失败");
   } finally {
@@ -2537,6 +2572,54 @@ async function importListingRecordSource(row = {}) {
   }
 }
 
+function applyListingDraftSource(detail = {}) {
+  const template = detail.template_payload || detail.templatePayload || {};
+  const editable = template.editable_payload || template.editablePayload || {};
+  const firstVariant = Array.isArray(editable.variants) ? editable.variants[0] : (Array.isArray(template.variants) ? template.variants[0] : {});
+  const images = normalizeImageList([
+    detail.source_images,
+    detail.sourceImages,
+    editable.images,
+    template.images,
+    firstVariant?.images
+  ]);
+  const title = detail.product_name || editable.title || template.title || firstVariant?.name || detail.internal_code || task.title;
+  const description = detail.manual_facts?.description || editable.description || template.description || firstVariant?.description || task.summary;
+  const tags = detail.manual_facts?.tags || detail.manual_facts?.hashtags || editable.tags || template.tags || firstVariant?.tags || task.productTags;
+  task.productName = title || task.productName;
+  task.title = title || task.title;
+  task.brand = normalizeImportedBrand(detail.manual_facts?.brand || editable.brand || template.brand || task.brand);
+  task.vehicleModel = resolveImportedVehicleModel({ raw: detail.manual_facts || editable || {}, detail });
+  task.material = cleanImportedField(detail.manual_facts?.material || editable.material || template.material) || task.material;
+  task.color = normalizeTextValue(detail.color || detail.manual_facts?.color || editable.color || template.color, task.color);
+  task.quantity = detail.quantity || detail.manual_facts?.quantity || editable.quantity || task.quantity;
+  task.categoryName = detail.category_name || template.category_name || editable.category_name || task.categoryName;
+  task.productType = detail.category_name || template.type_name || editable.type_name || task.productType;
+  task.sellingPoints = description || task.sellingPoints;
+  task.productTags = normalizeTextValue(tags, task.productTags);
+  task.summary = description || task.summary;
+  task.richContent = detail.rich_content_json || detail.richContentJson || editable.rich_content_json || editable.richContentJson || task.richContent;
+  task.packageWeightG = detail.weight_g || editable.weight || task.packageWeightG;
+  task.lengthCm = detail.length_cm || editable.length_cm || task.lengthCm;
+  task.widthCm = detail.width_cm || editable.width_cm || task.widthCm;
+  task.heightCm = detail.height_cm || editable.height_cm || task.heightCm;
+  task.salePrice = detail.sale_price ?? firstVariant?.price ?? task.salePrice;
+  task.sourceImageUrl = normalizeInternalImageUrl(images[0] || task.sourceImageUrl);
+  task.sourceImageOriginalUrl = task.sourceImageUrl;
+  task.detailImageCount = Math.max(images.length - 1, 0);
+  task.videoCount = normalizeImageList(detail.video_urls || detail.videoUrls || editable.video_urls || editable.videoUrls).length;
+  task.sourceType = "material_asset";
+  task.sourceId = String(detail.id || "");
+  task.sourceSelectionId = null;
+  task.sourceCollectorSku = "";
+  task.sourceListingRecordId = "";
+  task.sourcePackageId = "";
+  task.sourceLabel = `草稿 #${detail.id || ""}${detail.internal_code ? ` / ${detail.internal_code}` : ""}`;
+  sourceSubmitMode.value = "asset_only";
+  sourceImageRenderKey.value += 1;
+  refreshRecommendedStrategiesFromCategory();
+}
+
 async function importSelectionFromRoute() {
   const selectionId = String(route.query.baseSelectionId || "").trim();
   if (!selectionId || importedRouteSelectionId.value === selectionId || routeSelectionImporting.value) return;
@@ -2571,6 +2654,44 @@ async function importCollectorFromRoute() {
   }
 }
 
+async function importOnlineProductFromRoute() {
+  const onlineProductId = String(route.query.onlineProductId || "").trim();
+  const signature = `${onlineProductId}:${String(route.query.source || "")}:${String(route.query.autoImport || "")}:${String(route.query.importAt || "")}`;
+  const alreadyImportedCurrentProduct = task.sourceType === "online_product" && String(task.sourceId || "") === onlineProductId;
+  if (!onlineProductId || routeSelectionImporting.value) return;
+  if (importedRouteOnlineProductSignature.value === signature && alreadyImportedCurrentProduct) return;
+  routeSelectionImporting.value = true;
+  try {
+    const detail = await apiClient.get(`/api/online-products/${encodeURIComponent(onlineProductId)}/edit-draft`, { noCache: true });
+    applyOnlineProductSource(detail || {});
+    importedRouteOnlineProductSignature.value = signature;
+    ElMessage.success(`已从在线商品 ${onlineProductId} 返回 AI 内容优化`);
+  } catch (error) {
+    ElMessage.error(error.message || "导入在线商品到 AI 内容优化失败");
+  } finally {
+    routeSelectionImporting.value = false;
+  }
+}
+
+async function importListingDraftFromRoute() {
+  const draftId = firstRouteId(route.query.draftId || route.query.draftIds);
+  const signature = `${draftId}:${String(route.query.source || "")}:${String(route.query.autoImport || "")}:${String(route.query.importAt || "")}`;
+  const alreadyImportedCurrentDraft = task.sourceType === "material_asset" && String(task.sourceId || "") === draftId && String(task.sourceLabel || "").startsWith("草稿 #");
+  if (!draftId || routeSelectionImporting.value) return;
+  if (importedRouteDraftSignature.value === signature && alreadyImportedCurrentDraft) return;
+  routeSelectionImporting.value = true;
+  try {
+    const detail = await apiClient.get(`/api/listing/drafts/${encodeURIComponent(draftId)}`, { noCache: true });
+    applyListingDraftSource(detail || {});
+    importedRouteDraftSignature.value = signature;
+    ElMessage.success(`已从草稿 ${draftId} 返回 AI 内容优化`);
+  } catch (error) {
+    ElMessage.error(error.message || "导入草稿到 AI 内容优化失败");
+  } finally {
+    routeSelectionImporting.value = false;
+  }
+}
+
 async function importListingRecordFromRoute() {
   const recordId = String(route.query.listingRecordId || "").trim();
   const signature = `${recordId}:${String(route.query.source || "")}:${String(route.query.autoImport || "")}:${String(route.query.importAt || "")}`;
@@ -2590,6 +2711,11 @@ async function importListingRecordFromRoute() {
   } finally {
     routeSelectionImporting.value = false;
   }
+}
+
+function firstRouteId(value) {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return String(raw || "").split(",").map((item) => item.trim()).find(Boolean) || "";
 }
 
 function importAssetSource(asset = {}) {
@@ -2650,7 +2776,7 @@ function applyTemplate(template) {
   task.ratio = template.default_ratio || "3:4";
   task.imageCount = Number(template.default_count || 1);
   task.promptModules.styleRule = template.positive_prompt || "";
-  if (template.negative_prompt) task.promptModules.negativePrompt = template.negative_prompt;
+  task.promptModules.negativePrompt = template.negative_prompt || "";
 }
 
 function addTargetFromInput() {
@@ -2864,18 +2990,34 @@ async function renderPromptForTarget(targetModel = task.targets[0] || "", strate
     templateId: template.id,
     positivePrompt,
     negativePrompt,
-    variables: buildVariables(targetModel)
+    variables: buildVariables(targetModel),
+    assetKind: resolvePromptAssetKind(job),
+    detailImageType: job.detailType || ""
   });
+}
+
+function resolvePromptAssetKind(job = {}) {
+  if (job.type === "主图") return "main_image";
+  if (job.type === "详情图") return "detail_image";
+  if (job.type === "标题") return "title";
+  if (job.type === "标签") return "tags";
+  if (job.type === "描述") return "description";
+  return task.outputs.includes("主图") ? "main_image" : "title";
 }
 
 async function previewPrompt() {
   strategyDrawer.value = true;
   try {
     const firstJob = buildGenerationJobs()[0];
+    previewContext.targetModel = firstJob?.targetModel || task.targets[0] || "";
+    previewContext.strategyTitles = firstJob?.strategyTitles?.length ? [...firstJob.strategyTitles] : selectedStrategyTitles.value.slice(0, 1);
+    previewContext.job = firstJob ? { ...firstJob } : {};
     const result = await renderPromptForTarget(firstJob?.targetModel || "", firstJob?.strategyTitles || selectedStrategyTitles.value.slice(0, 1));
     previewPositivePrompt.value = result.finalPositivePrompt;
     previewNegativePrompt.value = result.finalNegativePrompt;
-    task.variablesJson = JSON.stringify(buildVariables(firstJob?.targetModel || task.targets[0] || ""), null, 2);
+    promptEditorState.positivePrompt = "";
+    promptEditorState.negativePrompt = "";
+    promptEditorState.variablesJson = JSON.stringify(buildVariables(firstJob?.targetModel || task.targets[0] || ""), null, 2);
   } catch (error) {
     ElMessage.error(error.message || "Prompt 预览失败");
   }
@@ -2978,6 +3120,7 @@ function buildGenerationJobs() {
 
 async function generateOne(job) {
   job.status = "生成中";
+  job.pendingTaskId = "";
   job.progress = 30;
   const prompt = await renderPromptForTarget(job.targetModel, job.strategyTitles, job);
   const strategyPlan = resolveStrategyPlanForTitles(job.strategyTitles);
@@ -2988,6 +3131,7 @@ async function generateOne(job) {
     await fillCopyResults(job);
     await persistCopyAsset(job);
     job.status = "已完成";
+    job.pendingTaskId = "";
     job.progress = 100;
     logs.value.unshift({
       time: new Date().toLocaleString(),
@@ -3015,6 +3159,7 @@ async function generateOne(job) {
         mode: sourceImageForRequest ? "image_to_image" : "text_to_image"
       });
     } catch (error) {
+      if (error?.code === "AI_TASK_STILL_RUNNING") throw error;
       if (!sourceImageForRequest) throw error;
       logs.value.unshift({
         time: new Date().toLocaleString(),
@@ -3107,7 +3252,8 @@ async function generateOne(job) {
       model: "CCTQ-image2"
     });
   } catch (error) {
-    job.status = "失败";
+    job.status = error?.code === "AI_TASK_STILL_RUNNING" ? "等待服务商" : "失败";
+    job.pendingTaskId = error?.taskId || job.pendingTaskId || "";
     job.errorMessage = error.message || "生成失败";
     logs.value.unshift({
       time: startedAt.toLocaleString(),
@@ -3579,9 +3725,68 @@ async function regenerateResult(item) {
 }
 
 function editPromptForItem(item) {
-  task.advancedPositivePrompt = item.finalPositivePrompt || finalPrompt.value;
-  task.advancedNegativePrompt = item.finalNegativePrompt || finalNegativePrompt.value;
+  previewContext.targetModel = item.targetModel || task.targets[0] || "";
+  previewContext.strategyTitles = item.strategyTitles?.length ? [...item.strategyTitles] : [item.strategyTitle].filter(Boolean);
+  previewContext.job = { ...item };
+  promptEditorState.positivePrompt = item.finalPositivePrompt || finalPrompt.value;
+  promptEditorState.negativePrompt = item.finalNegativePrompt || finalNegativePrompt.value;
+  promptEditorState.variablesJson = JSON.stringify(buildVariables(item.targetModel || task.targets[0] || ""), null, 2);
   strategyDrawer.value = true;
+}
+
+async function pullPendingResult(item) {
+  if (!item.pendingTaskId) return;
+  item.status = "拉回中";
+  try {
+    const result = await pullAiImageTaskResult(item.pendingTaskId);
+    const image = result.generatedImages?.[0] || result.croppedImages?.[0];
+    if (!image?.url) throw new Error("任务已完成，但未返回可用图片");
+    item.imageUrl = image.url;
+    item.downloadUrl = image.url;
+    if (!item.assetId) {
+      const asset = await createMaterialAsset({
+        asset_type: "image",
+        role: item.type === "详情图" ? "detail_image" : "main_image",
+        title: `${task.productName} ${item.targetModel || item.strategyTitle || "AI 图片"}`,
+        url: item.imageUrl,
+        thumbnail_url: item.imageUrl,
+        source_type: "ai_generated",
+        source_id: item.id,
+        source_selection_id: task.sourceSelectionId,
+        source_package_id: task.sourcePackageId,
+        variant_task_id: task.sourceId,
+        variant_result_id: item.id,
+        target_brand: task.brand,
+        target_model: item.targetModel,
+        product_name: task.productName,
+        style: `${selectedStyle.value.title} / ${item.strategyTitle || ""}`.trim(),
+        ratio: task.ratio,
+        prompt_template_id: selectedTemplateId.value,
+        final_prompt: item.finalPositivePrompt,
+        negative_prompt: item.finalNegativePrompt,
+        provider: result.provider || "cctq-image2",
+        model: result.model || "gpt-image-2",
+        status: "pending_review",
+        metadata: {
+          recoveredTaskId: item.pendingTaskId,
+          generationMode: result.generationMode || "image_to_image",
+          recoveredAt: new Date().toISOString()
+        }
+      });
+      item.assetId = asset.id;
+      item.assetStatus = asset.status;
+    }
+    item.status = "已完成";
+    item.progress = 100;
+    item.errorMessage = "";
+    item.pendingTaskId = "";
+    ElMessage.success("已从后台任务拉回图片");
+  } catch (error) {
+    item.status = error?.code === "AI_TASK_STILL_RUNNING" ? "等待服务商" : "失败";
+    item.errorMessage = error.message || "拉回图片失败";
+    if (error?.code === "AI_TASK_STILL_RUNNING") ElMessage.info("服务商仍在生成，任务会继续保留，可稍后再次拉回");
+    else ElMessage.error(item.errorMessage);
+  }
 }
 
 function applyGeneratedTitle(value) {
@@ -4347,10 +4552,28 @@ async function batchWriteBack() {
     }
     return;
   }
-  for (const item of writable) {
-    await writeBack(item, { skipConfirm: true });
-  }
-  ElMessage.success(`已提交 ${writable.length} 组结果`);
+  const settled = await runWriteBackQueue(writable, WRITEBACK_CONCURRENCY);
+  const failedCount = settled.filter((item) => item.status === "rejected").length;
+  if (failedCount) ElMessage.warning(`已提交 ${writable.length - failedCount} 组，${failedCount} 组失败，可单独重试`);
+  else ElMessage.success(`已提交 ${writable.length} 组结果`);
+}
+
+async function runWriteBackQueue(items = [], concurrency = WRITEBACK_CONCURRENCY) {
+  const settled = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      try {
+        await writeBack(items[index], { skipConfirm: true });
+        settled[index] = { status: "fulfilled" };
+      } catch (reason) {
+        settled[index] = { status: "rejected", reason };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return settled;
 }
 
 function saveDraft(options = {}) {
@@ -4389,6 +4612,7 @@ function createResultShell(queueItem = {}) {
     createdAt: new Date().toLocaleString(),
     isMain: false,
     errorMessage: "",
+    pendingTaskId: "",
     finalPositivePrompt: "",
     finalNegativePrompt: ""
   };
@@ -4791,6 +5015,13 @@ function selectTemplateForEdit(item) {
     description: item.description || "",
     positive_prompt: item.positive_prompt || "",
     negative_prompt: item.negative_prompt || "",
+    main_image_prompt: item.main_image_prompt || "",
+    detail_image_prompt_json: typeof item.detail_image_prompt_json === "string"
+      ? item.detail_image_prompt_json
+      : JSON.stringify(item.detailImagePrompts || {}, null, 2),
+    title_prompt: item.title_prompt || "",
+    tags_prompt: item.tags_prompt || "",
+    description_prompt: item.description_prompt || "",
     variables_json: JSON.stringify(item.variables || [], null, 2),
     default_ratio: item.default_ratio || "3:4",
     default_count: Number(item.default_count || 1),
@@ -4850,8 +5081,8 @@ async function saveCurrentAsTemplate() {
     name: `${selectedStyle.value.title} ${task.productType} 模板`,
     scene: "main_image_variant",
     mode: task.sourceImageUrl ? "image_to_image" : "text_to_image",
-    positive_prompt: finalPrompt.value,
-    negative_prompt: finalNegativePrompt.value,
+    positive_prompt: promptEditorState.positivePrompt || finalPrompt.value,
+    negative_prompt: promptEditorState.negativePrompt || finalNegativePrompt.value,
     default_ratio: task.ratio,
     default_count: task.imageCount,
     enabled: true
@@ -4880,6 +5111,11 @@ function createBlankTemplate() {
     description: "",
     positive_prompt: "",
     negative_prompt: "",
+    main_image_prompt: "",
+    detail_image_prompt_json: "{}",
+    title_prompt: "",
+    tags_prompt: "",
+    description_prompt: "",
     variables_json: JSON.stringify(["product_name", "target_model", "material", "selling_points", "ratio"], null, 2),
     default_ratio: "3:4",
     default_count: 1,
@@ -4958,12 +5194,7 @@ function normalizeKey(value) {
 }
 
 function openNewWorkbench() {
-  router.push({
-    path: "/asset-variant-center/wizard",
-    query: {
-      workbenchId: createWorkbenchId()
-    }
-  }).catch(() => {});
+  openAiVariantLabWindow({ source: "prompt_library" });
 }
 </script>
 
@@ -5465,9 +5696,10 @@ function openNewWorkbench() {
                     <span>{{ item.type }}{{ item.detailType ? ` / ${item.detailType}` : "" }} · {{ item.strategyTitle }} · {{ item.ratio }} · {{ item.createdAt }}</span>
                     <span v-if="item.assetId">素材资产 #{{ item.assetId }} · {{ item.assetStatus }}</span>
                   </div>
-                  <div v-if="item.status === '失败'" class="asset-error">{{ item.errorMessage }}</div>
+                  <div v-if="['失败', '等待服务商'].includes(item.status)" class="asset-error">{{ item.errorMessage }}</div>
                   <div class="asset-actions">
                     <el-button class="erp-btn erp-btn-secondary" size="small" :icon="Refresh" @click="regenerateResult(item)">重新生成</el-button>
+                    <el-button v-if="item.pendingTaskId" class="erp-btn erp-btn-secondary" size="small" type="primary" plain @click="pullPendingResult(item)">继续等待 / 拉回</el-button>
                     <el-button class="erp-btn erp-btn-secondary" size="small" @click="editPromptForItem(item)">编辑Prompt</el-button>
                     <el-button class="erp-btn erp-btn-secondary" size="small" :icon="Download" tag="a" :href="item.downloadUrl ? downloadUrl(item.downloadUrl) : undefined" :disabled="!item.downloadUrl">下载</el-button>
                     <el-button class="erp-btn erp-btn-secondary" size="small" @click="setAsMain(item)">设为主图</el-button>
@@ -6048,7 +6280,7 @@ function openNewWorkbench() {
         <div class="advanced-template-picker">
           <span>图片风格 / 模板</span>
           <el-select v-model="selectedTemplateId" placeholder="自动匹配模板" clearable>
-            <el-option v-for="item in enabledTemplates" :key="item.id" :label="item.name" :value="item.id" @click="applyTemplate(item)" />
+            <el-option v-for="item in enabledTemplates" :key="item.id" :label="item.name" :value="item.id" />
           </el-select>
         </div>
         <div class="prompt-preview-grid">
@@ -6075,11 +6307,11 @@ function openNewWorkbench() {
 
       <el-collapse class="strategy-advanced-collapse">
         <el-collapse-item title="高级编辑" name="advanced">
-          <el-input v-model="task.advancedPositivePrompt" type="textarea" :rows="7" placeholder="正向Prompt，留空则使用模块化拼接" />
-          <el-input v-model="task.advancedNegativePrompt" class="mt-10" type="textarea" :rows="5" placeholder="负向Prompt，留空则使用负向规则" />
-          <el-input v-model="task.variablesJson" class="mt-10" type="textarea" :rows="5" placeholder="变量JSON" />
+          <el-input v-model="promptEditorState.positivePrompt" type="textarea" :rows="7" placeholder="正向Prompt，留空则使用模块化拼接" />
+          <el-input v-model="promptEditorState.negativePrompt" class="mt-10" type="textarea" :rows="5" placeholder="负向Prompt，留空则使用负向规则" />
+          <el-input v-model="promptEditorState.variablesJson" class="mt-10" type="textarea" :rows="5" placeholder="变量JSON" />
           <div class="advanced-actions">
-            <el-button class="erp-btn erp-btn-secondary" @click="task.advancedPositivePrompt = ''; task.advancedNegativePrompt = ''">恢复模块化Prompt</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="promptEditorState.positivePrompt = ''; promptEditorState.negativePrompt = ''">恢复模块化Prompt</el-button>
             <el-button class="erp-btn erp-btn-primary" type="primary" @click="saveCurrentAsTemplate">保存为模板</el-button>
           </div>
         </el-collapse-item>
@@ -6510,6 +6742,11 @@ function openNewWorkbench() {
             <el-form-item label="说明"><el-input v-model="templateForm.description" /></el-form-item>
             <el-form-item label="正向Prompt"><el-input v-model="templateForm.positive_prompt" type="textarea" :rows="8" /></el-form-item>
             <el-form-item label="负向Prompt"><el-input v-model="templateForm.negative_prompt" type="textarea" :rows="5" /></el-form-item>
+            <el-form-item label="主图 Prompt"><el-input v-model="templateForm.main_image_prompt" type="textarea" :rows="5" /></el-form-item>
+            <el-form-item label="详情图 Prompt JSON"><el-input v-model="templateForm.detail_image_prompt_json" type="textarea" :rows="6" /></el-form-item>
+            <el-form-item label="标题 Prompt"><el-input v-model="templateForm.title_prompt" type="textarea" :rows="5" /></el-form-item>
+            <el-form-item label="标签 Prompt"><el-input v-model="templateForm.tags_prompt" type="textarea" :rows="5" /></el-form-item>
+            <el-form-item label="描述 Prompt"><el-input v-model="templateForm.description_prompt" type="textarea" :rows="6" /></el-form-item>
             <el-form-item label="变量JSON"><el-input v-model="templateForm.variables_json" type="textarea" :rows="4" /></el-form-item>
             <div class="template-switches">
               <el-switch v-model="templateForm.enabled" active-text="启用" inactive-text="停用" />

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   classifyOrderAccounting,
+  estimateOutcomeReturnLoss,
   isQualityCheckOrder
 } from "../src/services/order-outcome.js";
 
@@ -15,13 +16,24 @@ test("quality-check prefixes take precedence over ordinary aftersale buckets", (
     cancel_reason: "buyer rejected"
   };
 
-  const accounting = classifyOrderAccounting(row, { qualityPrefixes: ["0213"] });
+  const accounting = classifyOrderAccounting(row, { qualityPrefixes: ["02131"] });
 
   assert.equal(accounting.is_quality_order, true);
   assert.equal(accounting.order_nature, "quality_check");
   assert.equal(accounting.loss_profile_code, "none");
   assert.equal(accounting.aftersale_bucket, "platform_document_issue");
   assert.equal(accounting.should_include_aftersale_loss, false);
+});
+
+test("quality-check rules only match the configured full prefix", () => {
+  const row = {
+    posting_number: "0213176013-0142-1",
+    status: "cancelled",
+    cancel_reason: "buyer rejected"
+  };
+
+  assert.equal(isQualityCheckOrder(row, { qualityPrefixes: ["02131"] }), true);
+  assert.equal(isQualityCheckOrder(row, { qualityPrefixes: ["02130"] }), false);
 });
 
 test("Ozon description inspection reasons are treated as platform checks", () => {
@@ -76,4 +88,23 @@ test("ordinary quality issue remains in the quality issue bucket", () => {
   assert.equal(accounting.aftersale_bucket, "quality_issue");
   assert.equal(accounting.loss_profile_code, "commission_purchase_collecting_international");
   assert.equal(accounting.should_include_aftersale_loss, true);
+});
+
+test("return loss estimates use reason-specific cost components", () => {
+  const base = {
+    outcome: "after_delivery_return",
+    quantity: 1,
+    purchaseCostPerUnit: 2,
+    domesticShippingPerUnit: 1,
+    internationalShippingPerUnit: 5,
+    packagingCostTotal: 0.5,
+    commissionFeeTotal: 3,
+    collectingFeeTotal: 0.5,
+    serviceFeeTotal: 4
+  };
+
+  assert.equal(estimateOutcomeReturnLoss({ ...base, lossProfileCode: "purchase_collecting" }), 7.5);
+  assert.equal(estimateOutcomeReturnLoss({ ...base, lossProfileCode: "purchase_collecting_international" }), 8.5);
+  assert.equal(estimateOutcomeReturnLoss({ ...base, lossProfileCode: "commission_purchase_collecting_international" }), 11.5);
+  assert.equal(estimateOutcomeReturnLoss({ ...base, lossProfileCode: "none" }), 0);
 });

@@ -33,11 +33,16 @@ test("ai generation task routes expose create, query, and retry APIs", () => {
 test("ai generation task worker isolates field failures", () => {
   assert.match(serviceSource, /status = 'running'/);
   assert.match(serviceSource, /status = 'done'/);
-  assert.match(serviceSource, /status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END/);
+  assert.match(serviceSource, /status = CASE WHEN \? = 1 THEN 'provider_pending' WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END/);
   assert.match(serviceSource, /activeByField/);
   assert.match(serviceSource, /WORKER_LIMITS/);
   assert.match(serviceSource, /video: 1/);
   assert.match(serviceSource, /richText: 3/);
+  assert.match(serviceSource, /AI_IMAGE_TASK_CONCURRENCY_CAP/);
+  assert.match(serviceSource, /aiImageRuntimePoolConfig/);
+  assert.match(serviceSource, /field_key IN \('mainImage', 'detailImages'\)/);
+  assert.doesNotMatch(serviceSource, /mainImage: 1/);
+  assert.doesNotMatch(serviceSource, /detailImages: 1/);
 });
 
 test("ai generation task inputs are compacted before MySQL insert", () => {
@@ -62,6 +67,9 @@ test("ai generation task handlers cover text fields, rich text, and video", () =
   assert.match(serviceSource, /视频生成缺少新主图，不能使用母素材参考图/);
   assert.doesNotMatch(serviceSource, /input\.row\?\.product\?\.imageUrl/);
   assert.match(serviceSource, /widgetName: "raShowcase"/);
+  assert.match(serviceSource, /type: "billboard"/);
+  assert.match(serviceSource, /version: 0\.3/);
+  assert.match(serviceSource, /srcMobile: mainImage/);
   assert.match(serviceSource, /richTextContent/);
 });
 
@@ -103,9 +111,10 @@ test("ai variant rich text requires generated title description and main image",
 });
 
 test("ai generation tasks recover running tasks on server startup", () => {
-  assert.match(serviceSource, /UPDATE ai_generation_tasks SET status = 'queued', started_at = NULL WHERE status = 'running'/);
+  assert.match(serviceSource, /UPDATE ai_generation_tasks SET status = 'queued', started_at = NULL WHERE status IN \('running', 'provider_pending'\)/);
   assert.match(serverSource, /recoverAiGenerationTasks/);
   assert.match(runtimeServicesSource, /recoverAiGenerationTasksOnStartup/);
+  assert.match(serviceSource, /status IN \('running', 'provider_pending'\)/);
 });
 
 test("ai variant rich text does not fall back to mother material fields", () => {

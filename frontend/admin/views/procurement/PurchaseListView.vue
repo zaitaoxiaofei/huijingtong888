@@ -6,6 +6,8 @@ import { apiClient } from "../../utils/api";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import { createRouteQuerySync } from "../../utils/route-query-sync.js";
+import ErpFilterBar from "../../components/ErpFilterBar.vue";
+import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 
@@ -19,6 +21,21 @@ const inboundSubmitting = ref(false);
 const cancelSubmitting = ref(false);
 const detailVisible = ref(false);
 const detailSaving = ref(false);
+const expandedRowKeys = ref([]);
+const savingRequestIds = ref([]);
+
+const sourceTypeOptions = [
+  { label: "1688", value: "1688" },
+  { label: "拼多多", value: "pdd" },
+  { label: "供应商", value: "supplier" },
+  { label: "微信", value: "wechat" },
+  { label: "其他", value: "other" }
+];
+
+const urgencyOptions = [
+  { label: "普通", value: "normal" },
+  { label: "加急", value: "urgent" }
+];
 
 const state = reactive({
   rows: [],
@@ -57,7 +74,13 @@ function dateText(value) {
 }
 
 function productImage(row) {
-  return row?.product_image_url || row?.image_url || "";
+  const productId = Number(row?.product_id || 0);
+  return productId ? `/api/products/${productId}/image?thumb=1&w=180` : "";
+}
+
+function productPreviewImage(row) {
+  const productId = Number(row?.product_id || 0);
+  return productId ? `/api/products/${productId}/image` : "";
 }
 
 function arrayText(value) {
@@ -76,6 +99,19 @@ function sourceLabel(source) {
 function requestSourceSummary(row) {
   const sources = (row.requests || []).map((item) => sourceLabel(item.source_type || item.product_source_platform));
   return Array.from(new Set(sources)).join(" / ") || "-";
+}
+
+function uniqueRequestValues(row, field) {
+  const values = (row.requests || []).map((item) => String(item?.[field] || "").trim()).filter(Boolean);
+  return Array.from(new Set(values));
+}
+
+function requestPurchaseLinks(row) {
+  return uniqueRequestValues(row, "purchase_url");
+}
+
+function requestNotes(row) {
+  return uniqueRequestValues(row, "note");
 }
 
 function averageUnitCost(row) {
@@ -204,7 +240,55 @@ function actionDisabled(row, action) {
 
 function handleEditAction(row) {
   if (actionDisabled(row, "edit")) return;
-  openEditDialog(row);
+  toggleRowExpanded(row);
+}
+
+function handleExpandChange(row, expandedRows) {
+  expandedRowKeys.value = expandedRows.map((item) => item.row_key).filter(Boolean);
+}
+
+function toggleRowExpanded(row) {
+  const key = String(row?.row_key || "");
+  if (!key) return;
+  expandedRowKeys.value = expandedRowKeys.value.includes(key)
+    ? expandedRowKeys.value.filter((item) => item !== key)
+    : [...expandedRowKeys.value, key];
+}
+
+function requestSaving(row) {
+  return savingRequestIds.value.includes(Number(row?.id || 0));
+}
+
+function normalizeRequestForSave(row = {}) {
+  return {
+    updated_at: row.updated_at || undefined,
+    product_id: Number(row.product_id || 0) || null,
+    person_id: Number(row.person_id || 0) || null,
+    quantity: Number(row.quantity || 0),
+    amount: Number(row.amount || 0),
+    shipping_amount: Number(row.shipping_amount || 0),
+    urgency: row.urgency || "normal",
+    source_type: row.source_type || "1688",
+    supplier_id: row.supplier_id || null,
+    purchase_url: row.purchase_url || "",
+    note: row.note || ""
+  };
+}
+
+async function saveRequestRow(row) {
+  const requestId = Number(row?.id || 0);
+  if (!requestId || requestSaving(row)) return;
+  savingRequestIds.value = [...new Set([...savingRequestIds.value, requestId])];
+  try {
+    await apiClient.put(`/api/procurement/requests/${requestId}`, normalizeRequestForSave(row));
+    await recalculateProductProfits([row.product_id]);
+    ElMessage.success("采购明细已保存");
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "保存采购明细失败");
+  } finally {
+    savingRequestIds.value = savingRequestIds.value.filter((id) => id !== requestId);
+  }
 }
 
 function openEditDialog(row) {
@@ -249,19 +333,7 @@ async function saveDetailRows() {
   detailSaving.value = true;
   try {
     for (const row of detailDialog.rows) {
-      await apiClient.put(`/api/procurement/requests/${row.id}`, {
-        updated_at: row.updated_at || undefined,
-        product_id: row.product_id,
-        person_id: row.person_id,
-        quantity: Number(row.quantity || 0),
-        amount: Number(row.amount || 0),
-        shipping_amount: Number(row.shipping_amount || 0),
-        urgency: row.urgency || "normal",
-        source_type: row.source_type || "1688",
-        supplier_id: row.supplier_id || null,
-        purchase_url: row.purchase_url || "",
-        note: row.note || ""
-      });
+      await apiClient.put(`/api/procurement/requests/${row.id}`, normalizeRequestForSave(row));
     }
     await recalculateProductProfits(detailDialog.rows.map((row) => row.product_id));
     ElMessage.success("采购明细已更新");
@@ -362,12 +434,8 @@ onMounted(async () => {
 
 <template>
   <div class="page-stack procurement-list-page procurement-workspace-page">
-    <section class="page-hero">
-      <div>
-        <h2>待入库清单</h2>
-        <p>采购流程统一收口到这里处理，只保留编辑、入库和取消。</p>
-      </div>
-      <div class="page-card-actions">
+    <ErpPageHeader title="待入库清单" description="采购流程统一收口到这里处理，只保留编辑、入库和取消。">
+      <template #actions>
         <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
         <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!state.selectedRows.length" :loading="inboundSubmitting" @click="inboundSelectedRows">
           批量入库
@@ -375,8 +443,8 @@ onMounted(async () => {
         <el-button class="erp-btn erp-btn-danger" :disabled="!state.selectedRows.length" :loading="cancelSubmitting" @click="cancelSelectedRows">
           选中取消
         </el-button>
-      </div>
-    </section>
+      </template>
+    </ErpPageHeader>
 
     <el-card shadow="never" class="page-card procurement-list-card procurement-workspace-card">
       <template #header>
@@ -394,21 +462,23 @@ onMounted(async () => {
       </template>
 
       <div class="procurement-toolbar procurement-toolbar-sticky procurement-workspace-filter">
-        <el-form inline>
-          <el-form-item label="关键词">
-            <el-input
-              v-model="state.filters.query"
-              placeholder="商品名称 / 编码 / SKU / 申请人 / 采购链接"
-              clearable
-              style="width: 360px"
-              @keyup.enter="handleSearch"
-            />
-          </el-form-item>
-          <el-form-item>
+        <ErpFilterBar>
+          <el-form inline>
+            <el-form-item label="关键词">
+              <el-input
+                v-model="state.filters.query"
+                placeholder="商品名称 / 编码 / SKU / 申请人 / 采购链接"
+                clearable
+                style="width: 360px"
+                @keyup.enter="handleSearch"
+              />
+            </el-form-item>
+          </el-form>
+          <template #actions>
             <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
             <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
-          </el-form-item>
-        </el-form>
+          </template>
+        </ErpFilterBar>
       </div>
 
       <div class="list-wrap">
@@ -416,18 +486,98 @@ onMounted(async () => {
           v-loading="loading"
           :data="tableRows"
           :row-key="(row) => row.row_key"
+          :expand-row-keys="expandedRowKeys"
           height="100%"
           stripe
           border
           class="erp-data-table"
           @selection-change="handleSelectionChange"
+          @expand-change="handleExpandChange"
         >
           <el-table-column type="selection" width="56" reserve-selection :selectable="canSelectRow" />
+          <el-table-column type="expand" width="48">
+            <template #default="{ row }">
+              <div class="purchase-inline-editor">
+                <div class="purchase-inline-editor__header">
+                  <strong>{{ row.product_name || row.product_code || "-" }}</strong>
+                  <span class="muted-text">直接修改明细后点“保存”，保存后会同步重算关联订单利润。</span>
+                </div>
+                <el-table :data="row.requests || []" stripe border class="erp-data-table purchase-inline-table">
+                  <el-table-column prop="person_name" label="申请人" width="100" />
+                  <el-table-column label="数量" width="112" align="center">
+                    <template #default="{ row: item }">
+                      <el-input-number v-model="item.quantity" :min="1" :precision="0" controls-position="right" />
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="货款" width="128">
+                    <template #default="{ row: item }">
+                      <el-input-number v-model="item.amount" :min="0" :precision="2" controls-position="right" />
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="运费" width="128">
+                    <template #default="{ row: item }">
+                      <el-input-number v-model="item.shipping_amount" :min="0" :precision="2" controls-position="right" />
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="来源" width="124">
+                    <template #default="{ row: item }">
+                      <el-select v-model="item.source_type">
+                        <el-option
+                          v-for="option in sourceTypeOptions"
+                          :key="option.value"
+                          :label="option.label"
+                          :value="option.value"
+                        />
+                      </el-select>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="紧急" width="104">
+                    <template #default="{ row: item }">
+                      <el-select v-model="item.urgency">
+                        <el-option
+                          v-for="option in urgencyOptions"
+                          :key="option.value"
+                          :label="option.label"
+                          :value="option.value"
+                        />
+                      </el-select>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="采购链接" min-width="260">
+                    <template #default="{ row: item }">
+                      <el-input v-model="item.purchase_url" placeholder="https://..." clearable />
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="备注" min-width="220">
+                    <template #default="{ row: item }">
+                      <el-input v-model="item.note" placeholder="颜色、规格、供应提醒" clearable />
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="96" align="center" fixed="right">
+                    <template #default="{ row: item }">
+                      <el-button
+                        class="erp-btn-link"
+                        link
+                        type="primary"
+                        :loading="requestSaving(item)"
+                        @click="saveRequestRow(item)"
+                      >
+                        保存
+                      </el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+            </template>
+          </el-table-column>
 
           <el-table-column label="产品信息" min-width="360" fixed="left">
             <template #default="{ row }">
               <div class="product-cell">
-                <ProductImagePreview :src="productImage(row)" />
+                <ProductImagePreview
+                  :src="productImage(row)"
+                  :preview-list="productPreviewImage(row) ? [productPreviewImage(row)] : []"
+                />
                 <div class="product-cell-meta">
                   <strong>{{ row.product_name || "-" }}</strong>
                   <span>编码：{{ row.product_code || "-" }}</span>
@@ -473,6 +623,32 @@ onMounted(async () => {
             </template>
           </el-table-column>
 
+          <el-table-column label="采购链接" min-width="260">
+            <template #default="{ row }">
+              <div v-if="requestPurchaseLinks(row).length" class="link-note-cell">
+                <a
+                  v-for="link in requestPurchaseLinks(row)"
+                  :key="link"
+                  :href="link"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {{ link }}
+                </a>
+              </div>
+              <span v-else class="empty-text">-</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="备注信息" min-width="260">
+            <template #default="{ row }">
+              <div v-if="requestNotes(row).length" class="link-note-cell">
+                <span v-for="note in requestNotes(row)" :key="note">{{ note }}</span>
+              </div>
+              <span v-else class="empty-text">-</span>
+            </template>
+          </el-table-column>
+
           <el-table-column label="状态" width="110" align="center">
             <template #default="{ row }">
               <el-tag :type="rowStatusType(row)">{{ rowStatusText(row) }}</el-tag>
@@ -492,7 +668,7 @@ onMounted(async () => {
           <el-table-column label="操作" width="280" fixed="right" align="center">
             <template #default="{ row }">
               <div class="row-actions erp-inline-actions">
-                <el-button class="erp-btn-link" link type="primary" :disabled="actionDisabled(row, 'edit')" @click="handleEditAction(row)">编辑明细</el-button>
+                <el-button class="erp-btn-link" link type="primary" :disabled="actionDisabled(row, 'edit')" @click="handleEditAction(row)">展开编辑</el-button>
                 <el-button class="erp-btn-link" link type="success" :disabled="actionDisabled(row, 'inbound')" :loading="inboundSubmitting" @click="handleInboundAction(row)">入库</el-button>
                 <el-button class="erp-btn-link" link type="danger" :disabled="actionDisabled(row, 'cancel')" :loading="cancelSubmitting" @click="handleCancelAction(row)">取消</el-button>
               </div>
@@ -615,6 +791,22 @@ onMounted(async () => {
   word-break: break-all;
 }
 
+.link-note-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.link-note-cell a {
+  color: var(--el-color-primary);
+}
+
+.empty-text {
+  color: var(--erp-text-secondary);
+}
+
 .time-cell {
   display: flex;
   flex-direction: column;
@@ -630,6 +822,32 @@ onMounted(async () => {
   justify-content: center;
   gap: 8px;
   white-space: nowrap;
+}
+
+.purchase-inline-editor {
+  display: grid;
+  gap: 10px;
+  padding: 12px 16px 14px 72px;
+  background: #f8fafc;
+}
+
+.purchase-inline-editor__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.purchase-inline-table {
+  width: 100%;
+}
+
+.purchase-inline-table :deep(.el-input-number) {
+  width: 100%;
+}
+
+.purchase-inline-table :deep(.el-select) {
+  width: 100%;
 }
 
 .profit-sync-alert {

@@ -4,7 +4,7 @@ import { ElMessage } from "element-plus";
 import { Download, Refresh, VideoCamera } from "@element-plus/icons-vue";
 import { getVideoGeneratorShops, withMediaToken } from "../../api/tools/productVideoGenerator";
 
-const VIDEO_DURATION = 8;
+const VIDEO_DURATION = 10;
 const DEFAULT_BGM_URL = "/media/default-product-bgm.mp3";
 const POSITION_OPTIONS = [
   { label: "左上角", value: "top-left" },

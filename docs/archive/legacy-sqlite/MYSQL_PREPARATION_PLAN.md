@@ -237,7 +237,7 @@ Split runtime connection concerns from schema management concerns.
 - `src/db-bootstrap.js` now owns demo-data and bootstrap seed entrypoints.
 - `src/db-repairs.js` now owns safe repair helpers for outbound audit backfill, inventory-current rebuild, and recursive product-image cleanup.
 - `src/db-schema.js` now exists as the extraction target for schema-related responsibilities; base schema, supplemental schema, and index helpers are now part of the active initialization flow.
-- `src/services/analytics-refresh.js` and `src/services/analytics-refresh-entry.js` now have adapter-capable runtime wiring, so analytics snapshot rebuild no longer depends on a hardcoded SQLite execution path.
+- `src/services/analytics-refresh.js` contains the legacy adapter-capable snapshot logic. Its unused runtime entry was later removed because the active MySQL implementation is asynchronous and uses MySQL-specific upsert semantics.
 - `src/services/finance-sync.js` now routes its core write path through adapter-compatible execute helpers while keeping SQLite fallback behavior.
 - `src/services/order-sync.js` now routes raw posting persistence, core order/item inserts, outbound record writes, and sync log writes through adapter-compatible helpers or adapter-style insert-id helpers.
 - `src/db.js` still owns schema creation, upgrade steps, and one legacy encoded repair routine that should remain local until its seed/update data can be extracted safely without corruption.

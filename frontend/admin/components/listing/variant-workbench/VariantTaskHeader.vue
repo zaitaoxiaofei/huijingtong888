@@ -1,6 +1,6 @@
 ﻿<script setup>
 import { computed } from "vue";
-import { ArrowLeft, CircleCheck, MagicStick, VideoPause, Upload, DocumentChecked } from "@element-plus/icons-vue";
+import { ArrowLeft, CircleCheck, MagicStick, VideoPause, Upload, DocumentChecked, RefreshRight, Delete } from "@element-plus/icons-vue";
 import ProductImagePreview from "../../ProductImagePreview.vue";
 
 const props = defineProps({
@@ -10,10 +10,12 @@ const props = defineProps({
   generatedCount: { type: Number, default: 0 },
   writtenBackCount: { type: Number, default: 0 },
   generating: { type: Boolean, default: false },
-  writingBack: { type: Boolean, default: false }
+  writingBack: { type: Boolean, default: false },
+  restoredFromDraft: { type: Boolean, default: false },
+  restoredDraftTime: { type: String, default: "" }
 });
 
-defineEmits(["save-draft", "start-generate", "pause-task", "write-back-all", "back"]);
+defineEmits(["save-draft", "start-generate", "pause-task", "write-back-all", "back", "reset-task", "discard-draft"]);
 
 const statusMeta = computed(() => ({
   draft: ["草稿", "info"],
@@ -34,6 +36,12 @@ function inferBrand(text) {
   const match = String(text || "").match(/\b(TENET|BELGEE|HAVAL|CHERY|JAECOO|GEELY|OMODA|EXEED|CHANGAN)\b/i);
   return match ? match[1].toUpperCase() : "-";
 }
+
+const restoredText = computed(() => {
+  if (!props.restoredFromDraft) return "";
+  if (!props.restoredDraftTime) return "已恢复上次未完成任务";
+  return `已恢复 ${props.restoredDraftTime} 保存的任务`;
+});
 </script>
 
 <template>
@@ -76,7 +84,12 @@ function inferBrand(text) {
     </div>
 
     <div class="task-actions">
+      <div v-if="restoredText" class="restore-banner">
+        <el-tag type="warning" effect="light">{{ restoredText }}</el-tag>
+      </div>
       <el-button class="erp-btn erp-btn-secondary" :icon="DocumentChecked" @click="$emit('save-draft')">保存草稿</el-button>
+      <el-button class="erp-btn erp-btn-secondary" :icon="RefreshRight" @click="$emit('reset-task')">新建任务</el-button>
+      <el-button class="erp-btn erp-btn-secondary" :icon="Delete" @click="$emit('discard-draft')">放弃草稿</el-button>
       <el-button class="erp-btn erp-btn-primary" type="primary" :icon="MagicStick" :loading="generating" @click="$emit('start-generate')">开始生成</el-button>
       <el-button class="erp-btn erp-btn-secondary" :icon="VideoPause" :disabled="!generating" @click="$emit('pause-task')">暂停任务</el-button>
       <el-button class="erp-btn erp-btn-secondary" type="success" :icon="Upload" :loading="writingBack" @click="$emit('write-back-all')">批量回写</el-button>
@@ -182,6 +195,12 @@ function inferBrand(text) {
 
 .task-actions {
   justify-content: flex-end;
+}
+
+.restore-banner {
+  display: flex;
+  align-items: center;
+  margin-right: 4px;
 }
 
 @media (max-width: 1500px) {

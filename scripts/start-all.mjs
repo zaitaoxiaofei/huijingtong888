@@ -12,6 +12,11 @@ const electronRemoteUrl = process.env.ELECTRON_REMOTE_URL || appBaseUrl;
 const shouldStartPrintHelper = process.env.OZON_START_PRINT_HELPER !== "0";
 const shouldStartElectron = process.env.OZON_START_ELECTRON === "1";
 const managedChildren = [];
+const protectedPorts = new Set([8787, 8087]);
+
+if (protectedPorts.has(port) && process.env.ALLOW_PROTECTED_PORT_OPERATION !== "1") {
+  throw new Error(`Refusing to start or restart protected port ${port}. Use PORT=8788 for local verification.`);
+}
 
 function run(command, args, label, env = {}) {
   return new Promise((resolve, reject) => {

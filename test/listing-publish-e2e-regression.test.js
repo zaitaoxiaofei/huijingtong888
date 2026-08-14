@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { validateListingTemplatePublish } from "../src/services/listing-automation.js";
+import { repairCollectedVariantColorAxisDeterministic, validateListingTemplatePublish } from "../src/services/listing-automation.js";
 import {
   buildTemplateCandidateFromAiVariantResult,
   buildTemplateCandidateFromCollectedSource,
@@ -92,6 +92,100 @@ test("AI variant publish candidate becomes an Ozon-compatible import payload", a
 
   assert.deepEqual(complexAttributeValues(item, 21841), [{ value: "https://cdn.example.test/listing/ai-trunk-video.mp4" }]);
   assert.deepEqual(complexAttributeValues(item, 21845), [{ dictionary_value_id: 0, value: "https://cdn.example.test/listing/ai-trunk-video.mp4" }]);
+});
+
+test("publish payload uses edited SKU name even when variant title is stale", async () => {
+  const candidate = clone(fixtures.aiVariantCandidate);
+  candidate.title = "Old template title";
+  candidate.editable_payload.title = "Old editable title";
+  candidate.editable_payload.variants[0].title = "Old variant title";
+  candidate.editable_payload.variants[0].name = "Edited SKU buyer-facing name";
+
+  const result = await validateListingTemplatePublish(candidate);
+
+  assert.equal(result.ok, true, result.errors?.join("\n"));
+  assert.equal(result.payload.items[0].name, "Edited SKU buyer-facing name");
+});
+
+test("publish validation accepts a SKU row price when the shared template price is empty", async () => {
+  const candidate = clone(fixtures.aiVariantCandidate);
+  candidate.editable_payload.price.value = 0;
+  candidate.editable_payload.price.price = 0;
+  candidate.editable_payload.variants[0].price = 0;
+  candidate.editable_payload.variants[0].price_value = 1299;
+
+  const result = await validateListingTemplatePublish(candidate);
+
+  assert.equal(result.ok, true, result.errors?.join("\n"));
+  assert.equal(result.payload.items[0].price, "1299");
+  assert.doesNotMatch(result.errors.join("\n"), /销售价格/);
+});
+
+test("publish validation reports a missing price when only some SKU rows have prices", async () => {
+  const candidate = clone(fixtures.aiVariantCandidate);
+  candidate.editable_payload.price.value = 0;
+  candidate.editable_payload.price.price = 0;
+  candidate.editable_payload.variants[0].price = 1299;
+  candidate.editable_payload.variants.push({
+    ...clone(candidate.editable_payload.variants[0]),
+    sku: "AI-TENET-T4-BLACK-002",
+    offer_id: "AI-TENET-T4-BLACK-002",
+    price: 0,
+    price_value: 0
+  });
+
+  const result = await validateListingTemplatePublish(candidate);
+
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join("\n"), /缺少销售价格/);
+});
+
+test("publish validation accepts independent package values from every variant", async () => {
+  const candidate = clone(fixtures.aiVariantCandidate);
+  const originalDimensions = clone(candidate.editable_payload.dimensions);
+  candidate.editable_payload.dimensions = { length_cm: 0, width_cm: 0, height_cm: 0, weight_g: 0 };
+  Object.assign(candidate.editable_payload.variants[0], {
+    length_mm: originalDimensions.length_cm * 10,
+    width_mm: originalDimensions.width_cm * 10,
+    height_mm: originalDimensions.height_cm * 10,
+    weight_g: originalDimensions.weight_g
+  });
+  candidate.editable_payload.variants.push({
+    ...clone(candidate.editable_payload.variants[0]),
+    sku: "AI-TENET-T4-BLACK-002",
+    offer_id: "AI-TENET-T4-BLACK-002",
+    length_mm: 710,
+    width_mm: 430,
+    height_mm: 70,
+    weight_g: 1300
+  });
+
+  const result = await validateListingTemplatePublish(candidate);
+
+  assert.equal(result.ok, true, result.errors?.join("\n"));
+  assert.equal(result.payload.items[0].weight, 1200);
+  assert.equal(result.payload.items[1].weight, 1300);
+  assert.equal(result.payload.items[1].depth, 710);
+});
+
+test("publish validation identifies the exact variant missing package values", async () => {
+  const candidate = clone(fixtures.aiVariantCandidate);
+  candidate.editable_payload.dimensions = { length_cm: 0, width_cm: 0, height_cm: 0, weight_g: 0 };
+  candidate.editable_payload.variants.push({
+    ...clone(candidate.editable_payload.variants[0]),
+    sku: "AI-TENET-T4-BLACK-002",
+    offer_id: "AI-TENET-T4-BLACK-002",
+    length_mm: 0,
+    width_mm: 0,
+    height_mm: 0,
+    weight_g: 0
+  });
+
+  const result = await validateListingTemplatePublish(candidate);
+
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join("\n"), /第 2 个变体（AI-TENET-T4-BLACK-002）缺少包裹重量/);
+  assert.match(result.errors.join("\n"), /第 2 个变体（AI-TENET-T4-BLACK-002）缺少包裹长宽高/);
 });
 
 test("collector-box candidate keeps selected dictionary values and physical units", async () => {
@@ -200,6 +294,156 @@ test("collector raw source normalizes into a submit-ready Ozon candidate after o
   assert.deepEqual(compactAttributeValues(attributeById(item, 10096).values), [{ dictionary_value_id: 61574, value: "black" }]);
 });
 
+test("deterministic collector color repair hydrates single variant plain color into dictionary selection", async () => {
+  const normalized = {
+    category: {
+      description_category_id: 17028922,
+      type_id: 971712345
+    },
+    templatePayload: {
+      editable_payload: {
+        description_category_id: 17028922,
+        type_id: 971712345,
+        attributes: [
+          {
+            attribute_id: 10096,
+            name: "Color",
+            dictionary_id: 555,
+            values: [
+              { dictionary_value_id: 61574, value: "black", display_value_zh: "black" }
+            ]
+          }
+        ],
+        variants: [
+          {
+            sku: "SINGLE-BLACK-1",
+            color: "black",
+            dynamic_attributes: {}
+          }
+        ]
+      }
+    },
+    draft: {
+      attributes: [
+        {
+          attribute_id: 10096,
+          name: "Color",
+          dictionary_id: 555,
+          values: [
+            { dictionary_value_id: 61574, value: "black", display_value_zh: "black" }
+          ]
+        }
+      ]
+    },
+    payload: {
+      attributes: [
+        {
+          attribute_id: 10096,
+          name: "Color",
+          dictionary_id: 555,
+          values: [
+            { dictionary_value_id: 61574, value: "black", display_value_zh: "black" }
+          ]
+        }
+      ]
+    }
+  };
+
+  await repairCollectedVariantColorAxisDeterministic(normalized);
+
+  const repaired = normalized.templatePayload.editable_payload.variants[0].dynamic_attributes["10096"];
+  assert.ok(repaired);
+  assert.deepEqual(compactAttributeValues(repaired.selected_values), [{ dictionary_value_id: 61574, value: "black" }]);
+  assert.equal(normalized.templatePayload.editable_payload.variants[0].color, "black");
+});
+
+test("deterministic collector color repair projects top-level color attribute into single variant", async () => {
+  const normalized = {
+    category: {
+      description_category_id: 17028922,
+      type_id: 971712345
+    },
+    templatePayload: {
+      editable_payload: {
+        description_category_id: 17028922,
+        type_id: 971712345,
+        attributes: [
+          {
+            attribute_id: 10096,
+            name: "Color",
+            dictionary_id: 555,
+            value: "black",
+            values: [
+              { dictionary_value_id: 61574, value: "black", display_value_zh: "black" }
+            ],
+            selected_values: [
+              { dictionary_value_id: 61574, value: "black", display_value_zh: "black" }
+            ]
+          }
+        ],
+        variants: [
+          {
+            sku: "TOPLEVEL-BLACK-1",
+            dynamic_attributes: {}
+          }
+        ]
+      }
+    },
+    draft: { attributes: [] },
+    payload: { attributes: [] }
+  };
+
+  await repairCollectedVariantColorAxisDeterministic(normalized);
+
+  const repaired = normalized.templatePayload.editable_payload.variants[0].dynamic_attributes["10096"];
+  assert.ok(repaired);
+  assert.deepEqual(compactAttributeValues(repaired.selected_values), [{ dictionary_value_id: 61574, value: "black" }]);
+  assert.deepEqual(
+    compactAttributeValues(normalized.templatePayload.editable_payload.attributes[0].selected_values),
+    [{ dictionary_value_id: 61574, value: "black" }]
+  );
+});
+
+test("deterministic collector color repair does not select every color dictionary candidate", async () => {
+  const normalized = {
+    templatePayload: {
+      editable_payload: {
+        variants: [{
+          sku: "CANDIDATE-COLORS-1",
+          color: "black",
+          dynamic_attributes: {
+            10096: {
+              attribute_id: 10096,
+              name: "Color",
+              value: ["black"],
+              values: [
+                { dictionary_value_id: 61574, value: "black" },
+                { dictionary_value_id: 61575, value: "white" },
+                { dictionary_value_id: 61576, value: "silver" }
+              ],
+              selected_values: [
+                { dictionary_value_id: 61574, value: "black" },
+                { dictionary_value_id: 61575, value: "white" },
+                { dictionary_value_id: 61576, value: "silver" }
+              ]
+            }
+          }
+        }]
+      }
+    },
+    draft: { attributes: [] },
+    payload: { attributes: [] }
+  };
+
+  await repairCollectedVariantColorAxisDeterministic(normalized);
+
+  const repaired = normalized.templatePayload.editable_payload.variants[0].dynamic_attributes["10096"];
+  assert.deepEqual(compactAttributeValues(repaired.selected_values), [
+    { dictionary_value_id: 61574, value: "black" }
+  ]);
+  assert.equal(repaired.values.length, 3);
+});
+
 test("AI variant raw result can be merged into a publishable Ozon candidate", async () => {
   const candidate = buildTemplateCandidateFromAiVariantResult(fixtures.aiVariantRawResult, {
     offerId: "AI-RAW-TENET-T4-PUBLISH",
@@ -224,6 +468,69 @@ test("AI variant raw result can be merged into a publishable Ozon candidate", as
   assert.deepEqual(complexAttributeValues(item, 21841), [{ value: "https://cdn.example.test/listing/ai-raw-generated-video.mp4" }]);
   assert.deepEqual(complexAttributeValues(item, 21845), [{ dictionary_value_id: 0, value: "https://cdn.example.test/listing/ai-raw-generated-video.mp4" }]);
   assert.doesNotMatch(JSON.stringify(item.attributes), /white/);
+});
+
+test("publish validation sanitizes AI variant tags into Ozon-safe hashtags", async () => {
+  const candidate = clone(fixtures.aiVariantCandidate);
+  candidate.attributes = [
+    ...(candidate.attributes || []).filter((attribute) => Number(attribute.attribute_id || attribute.id || 0) !== 23171),
+    {
+      attribute_id: 23171,
+      name: "Search tags",
+      type: "multiselect",
+      value: ["  TENET T4  ", "багажник/коврик", "门槛条", "##car accessory", "!!!", "багажник/коврик"]
+    }
+  ];
+  candidate.editable_payload.variants[0].hashtags = ["  TENET T4  ", "багажник/коврик", "门槛条", "##car accessory", "!!!"];
+
+  const result = await validateListingTemplatePublish(candidate);
+
+  assert.equal(result.ok, true, result.errors?.join("\n"));
+  const item = result.payload.items[0];
+  assert.deepEqual(item.tags, ["#TENET_T4", "#багажник_коврик", "#car_accessory"]);
+  assert.deepEqual(
+    compactAttributeValues(attributeById(item, 23171).values),
+    [
+      { dictionary_value_id: undefined, value: "#TENET_T4 #багажник_коврик #car_accessory" }
+    ]
+  );
+});
+
+test("publish validation splits space-separated AI tags into separate Ozon tags", async () => {
+  const candidate = clone(fixtures.aiVariantCandidate);
+  candidate.attributes = (candidate.attributes || []).filter((attribute) => Number(attribute.attribute_id || attribute.id || 0) !== 23171);
+  candidate.editable_payload.variants[0].hashtags = "#TENET_T4 #органайзер #автоаксессуары";
+
+  const result = await validateListingTemplatePublish(candidate);
+
+  assert.equal(result.ok, true, result.errors?.join("\n"));
+  const item = result.payload.items[0];
+  assert.deepEqual(item.tags.slice(0, 3), ["#TENET_T4", "#органайзер", "#автоаксессуары"]);
+});
+
+test("publish validation maps name-only collector product tags to Ozon attribute 23171", async () => {
+  const candidate = clone(fixtures.aiVariantCandidate);
+  candidate.attributes = [
+    ...(candidate.attributes || []).filter((attribute) => Number(attribute.attribute_id || attribute.id || 0) !== 23171),
+    {
+      name: "Product tags",
+      type: "multiselect",
+      value: "#TENET_T4 #organizer"
+    }
+  ];
+  candidate.editable_payload.variants[0].hashtags = [];
+
+  const result = await validateListingTemplatePublish(candidate);
+
+  assert.equal(result.ok, true, result.errors?.join("\n"));
+  const item = result.payload.items[0];
+  assert.deepEqual(item.tags.slice(0, 2), ["#TENET_T4", "#organizer"]);
+  assert.deepEqual(
+    compactAttributeValues(attributeById(item, 23171).values),
+    [
+      { dictionary_value_id: undefined, value: "#TENET_T4 #organizer" }
+    ]
+  );
 });
 
 test("online product edit template standardizes into a publishable Ozon candidate", async () => {

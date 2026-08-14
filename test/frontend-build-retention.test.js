@@ -7,8 +7,8 @@ const source = readFileSync(new URL("../scripts/clean-frontend-build.mjs", impor
 test("frontend build cleanup keeps recent route chunks to avoid first-open white screens", () => {
   assert.match(source, /const frontendAssetsDir = path\.join\(frontendOutputDir, "assets"\)/);
   assert.match(source, /const ASSET_RETENTION_MS = Number\(process\.env\.FRONTEND_ASSET_RETENTION_MS \|\| 24 \* 60 \* 60 \* 1000\)/);
-  assert.doesNotMatch(source, /await fs\.rm\(frontendOutputDir, removeOptions\)/);
-  assert.match(source, /await fs\.rm\(path\.join\(frontendOutputDir, "\.vite"\), removeOptions\)/);
+  assert.match(source, /await removeWithRetries\(path\.join\(frontendOutputDir, "\.vite"\), removeOptions\)/);
+  assert.match(source, /if \(isTempBuildOutput\) \{\s*await removeWithRetries\(frontendOutputDir, removeOptions\)/);
   assert.match(source, /async function pruneOldAssets\(assetsDir, retentionMs\)/);
 });
 

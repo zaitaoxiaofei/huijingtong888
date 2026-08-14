@@ -10,7 +10,7 @@ export const SITE_ACCESS_API_LOGIN_PATH = "/__site-access/api-login";
 
 const ACCESS_GATE_ENABLED = Boolean(config.siteAccessPassword);
 const ACCESS_COOKIE_NAME = config.siteAccessCookieName || "erp_site_access";
-const ACCESS_SESSION_HOURS = Math.max(1, Number(config.siteAccessSessionHours || 168));
+const ACCESS_SESSION_HOURS = Math.max(1, Number(config.siteAccessSessionHours || 720));
 const AUTH_RATE_LIMIT_WINDOW_MS = Math.max(1, Number(config.authRateLimitWindowMinutes || 15)) * 60 * 1000;
 const AUTH_RATE_LIMIT_MAX_ATTEMPTS = Math.max(1, Number(config.authRateLimitMaxAttempts || 8));
 
@@ -112,7 +112,15 @@ export function getSiteAccessCookieMaxAgeSeconds() {
   return ACCESS_SESSION_HOURS * 3600;
 }
 
-export function siteAccessUsesSecureCookie() {
+export function siteAccessUsesSecureCookie(req = null) {
+  if (req) {
+    const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+    if (forwardedProto) return forwardedProto === "https";
+    const cfVisitor = String(req.headers["cf-visitor"] || "");
+    if (/"scheme"\s*:\s*"https"/i.test(cfVisitor)) return true;
+    if (req.socket?.encrypted) return true;
+    return false;
+  }
   return config.appBaseUrl.startsWith("https://");
 }
 

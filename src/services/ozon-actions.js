@@ -2,11 +2,14 @@ import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 
 const OZON_API_BASE = "https://api-seller.ozon.ru";
 const ACTION_CLEANUP_SETTING_PREFIX = "ozon.actions.cleanup:";
-const DEFAULT_CLEANUP_ACTION_IDS = [3684628, 3702380];
-const DEFAULT_CLEANUP_INTERVAL_MINUTES = 60;
+const DEFAULT_CLEANUP_INTERVAL_MINUTES = 15;
+const KNOWN_ACTION_RETENTION_DAYS = 14;
+const UNAVAILABLE_ACTION_RETENTION_DAYS = 3;
 const OZON_REQUEST_TIMEOUT_MS = 30000;
 const ACTION_PRODUCTS_PAGE_LIMIT = 100;
 const ACTION_DELETE_BATCH_LIMIT = 1000;
+const ACTION_DELETE_VERIFY_DELAYS_MS = [2000, 5000];
+const ACTION_PRODUCTS_MAX_PAGES = 200;
 const cleanupRunningStores = new Set();
 let enabledCleanupSweepRunning = false;
 
@@ -315,11 +318,11 @@ function settingKey(storeId) {
 }
 
 function normalizeCleanupActionIds(value) {
-  const raw = Array.isArray(value) ? value : DEFAULT_CLEANUP_ACTION_IDS;
+  const raw = Array.isArray(value) ? value : [];
   const ids = raw
     .map(Number)
     .filter((item) => Number.isFinite(item) && item > 0);
-  return ids.length ? Array.from(new Set(ids)) : DEFAULT_CLEANUP_ACTION_IDS.slice();
+  return Array.from(new Set(ids));
 }
 
 export function extractOfficialActionCleanupProductIds(products = []) {
@@ -387,10 +390,149 @@ export function officialActionCatalogChanged(previous = [], next = []) {
   return JSON.stringify(snapshotActionSummaries(previous)) !== JSON.stringify(snapshotActionSummaries(next));
 }
 
-export function buildOfficialActionCleanupIds(currentActions = [], fallbackActionIds = []) {
+function daysAgoIso(days, now = new Date()) {
+  return new Date(now.getTime() - Math.max(0, Number(days || 0)) * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function isIsoBefore(value, threshold) {
+  if (!value || !threshold) return false;
+  const time = new Date(value).getTime();
+  const thresholdTime = new Date(threshold).getTime();
+  return Number.isFinite(time) && Number.isFinite(thresholdTime) && time < thresholdTime;
+}
+
+export function normalizeKnownActionCatalog(value = []) {
+  const rows = Array.isArray(value) ? value : [];
+  const seen = new Set();
+  const result = [];
+  for (const row of rows) {
+    const summary = normalizeOfficialActionSummary(row);
+    if (!summary || seen.has(summary.actionId)) continue;
+    seen.add(summary.actionId);
+    result.push({
+      ...summary,
+      firstSeenAt: String(row?.firstSeenAt || row?.first_seen_at || ""),
+      lastSeenAt: String(row?.lastSeenAt || row?.last_seen_at || ""),
+      lastCheckedAt: String(row?.lastCheckedAt || row?.last_checked_at || ""),
+      unavailableSince: String(row?.unavailableSince || row?.unavailable_since || ""),
+      lastUnavailableAt: String(row?.lastUnavailableAt || row?.last_unavailable_at || ""),
+      unavailableCount: Math.max(0, Number(row?.unavailableCount || row?.unavailable_count || 0)),
+      source: String(row?.source || "ozon")
+    });
+  }
+  return result.sort((a, b) => a.actionId - b.actionId);
+}
+
+export function mergeKnownActionCatalog(previous = [], currentActions = [], options = {}) {
+  const now = options.now || new Date().toISOString();
+  const retentionThreshold = daysAgoIso(options.retentionDays ?? KNOWN_ACTION_RETENTION_DAYS, new Date(now));
+  const unavailableThreshold = daysAgoIso(options.unavailableRetentionDays ?? UNAVAILABLE_ACTION_RETENTION_DAYS, new Date(now));
+  const previousRows = normalizeKnownActionCatalog(previous);
+  const byId = new Map(previousRows.map((item) => [item.actionId, item]));
+  const currentRows = extractOfficialActionSummaries(currentActions);
+
+  for (const item of currentRows) {
+    const previousItem = byId.get(item.actionId) || {};
+    byId.set(item.actionId, {
+      ...previousItem,
+      ...item,
+      firstSeenAt: previousItem.firstSeenAt || now,
+      lastSeenAt: now,
+      unavailableSince: "",
+      lastUnavailableAt: "",
+      unavailableCount: 0,
+      source: previousItem.source || "ozon"
+    });
+  }
+
+  const seedActionIds = Object.prototype.hasOwnProperty.call(options, "seedActionIds")
+    ? options.seedActionIds
+    : [];
+  for (const actionId of normalizeCleanupActionIds(seedActionIds)) {
+    if (byId.has(actionId)) continue;
+    byId.set(actionId, {
+      actionId,
+      title: "",
+      actionType: "",
+      status: "",
+      isParticipating: false,
+      dateStart: "",
+      dateEnd: "",
+      firstSeenAt: now,
+      lastSeenAt: now,
+      lastCheckedAt: "",
+      unavailableSince: "",
+      lastUnavailableAt: "",
+      unavailableCount: 0,
+      source: "legacy_seed"
+    });
+  }
+
+  return Array.from(byId.values())
+    .filter((item) => {
+      if (item.unavailableSince && isIsoBefore(item.unavailableSince, unavailableThreshold)) return false;
+      if (item.lastSeenAt && isIsoBefore(item.lastSeenAt, retentionThreshold)) return false;
+      return true;
+    })
+    .sort((a, b) => a.actionId - b.actionId);
+}
+
+export function recordKnownActionCheck(catalog = [], actionId, patch = {}, options = {}) {
+  const now = options.now || new Date().toISOString();
+  const rows = normalizeKnownActionCatalog(catalog);
+  const targetId = Number(actionId);
+  if (!Number.isFinite(targetId) || targetId <= 0) return rows;
+  const index = rows.findIndex((item) => item.actionId === targetId);
+  const current = index >= 0 ? rows[index] : {
+    actionId: targetId,
+    title: "",
+    actionType: "",
+    status: "",
+    isParticipating: false,
+    dateStart: "",
+    dateEnd: "",
+    firstSeenAt: now,
+    lastSeenAt: "",
+    lastCheckedAt: "",
+    unavailableSince: "",
+    lastUnavailableAt: "",
+    unavailableCount: 0,
+    source: "checked"
+  };
+  const next = {
+    ...current,
+    lastCheckedAt: now,
+    ...(patch.unavailable
+      ? {
+          unavailableSince: current.unavailableSince || now,
+          lastUnavailableAt: now,
+          unavailableCount: Math.max(0, Number(current.unavailableCount || 0)) + 1
+        }
+      : {
+          unavailableSince: "",
+          lastUnavailableAt: "",
+          unavailableCount: 0
+        })
+  };
+  if (index >= 0) rows[index] = next;
+  else rows.push(next);
+  return mergeKnownActionCatalog(rows, [], {
+    now,
+    seedActionIds: [],
+    retentionDays: options.retentionDays,
+    unavailableRetentionDays: options.unavailableRetentionDays
+  });
+}
+
+export function buildOfficialActionCleanupIds(currentActions = [], knownCatalog = []) {
   const currentIds = extractOfficialActionSummaries(currentActions).map((item) => item.actionId);
-  if (currentIds.length) return Array.from(new Set(currentIds));
-  return normalizeCleanupActionIds(fallbackActionIds);
+  const knownRows = Array.isArray(knownCatalog) && knownCatalog.some((item) => item && typeof item === "object")
+    ? normalizeKnownActionCatalog(knownCatalog).map((item) => item.actionId)
+    : normalizeCleanupActionIds(knownCatalog);
+  return Array.from(new Set([
+    ...currentIds,
+    ...knownRows
+  ]));
 }
 
 function normalizeCleanupConfig(storeId, rawValue = null, options = {}) {
@@ -405,12 +547,16 @@ function normalizeCleanupConfig(storeId, rawValue = null, options = {}) {
   }
   const normalizedStoreId = String(storeId || "").trim();
   const actionIds = normalizeCleanupActionIds(parsed.actionIds);
+  const knownActions = mergeKnownActionCatalog(parsed.knownActions || parsed.knownActionCatalog || [], parsed.lastSyncedActions || [], {
+    seedActionIds: actionIds
+  });
   const enabled = hasStoredValue ? parsed.enabled === true : options.defaultEnabled === true;
   return {
     storeId: normalizedStoreId,
     storeName: "",
     enabled,
     actionIds,
+    knownActions,
     lastSyncedActions: snapshotActionSummaries(parsed.lastSyncedActions || []),
     lastActionListSyncedAt: parsed.lastActionListSyncedAt || "",
     lastActionListChangedAt: parsed.lastActionListChangedAt || "",
@@ -453,6 +599,7 @@ async function persistCleanupConfig(storeId, config) {
     storeId: String(storeId || "").trim(),
     intervalMinutes: DEFAULT_CLEANUP_INTERVAL_MINUTES,
     actionIds: normalizeCleanupActionIds(config?.actionIds),
+    knownActions: normalizeKnownActionCatalog(config?.knownActions || config?.knownActionCatalog || []),
     updatedAt: new Date().toISOString()
   };
   await mysqlExecute(`
@@ -466,7 +613,10 @@ async function persistCleanupConfig(storeId, config) {
 async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
   let lastId = "";
   const productIds = [];
-  while (true) {
+  const seenCursors = new Set();
+  let pageCount = 0;
+  let scannedCount = 0;
+  while (pageCount < ACTION_PRODUCTS_MAX_PAGES) {
     const payload = {
       action_id: Number(actionId),
       limit: ACTION_PRODUCTS_PAGE_LIMIT
@@ -475,39 +625,79 @@ async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
     const response = await ozonRequest("/v1/actions/products", { payload, shop, signal });
     const result = response?.result || {};
     const rows = Array.isArray(result.products) ? result.products : [];
+    pageCount += 1;
+    scannedCount += rows.length;
     productIds.push(...extractOfficialActionCleanupProductIds(rows));
-    if (!rows.length || result.last_id === undefined || result.last_id === null || result.last_id === "") break;
-    lastId = result.last_id;
+    const nextCursor = String(result.last_id ?? "").trim();
+    if (!rows.length || !nextCursor) {
+      return {
+        productIds: Array.from(new Set(productIds)),
+        pageCount,
+        scannedCount
+      };
+    }
+    if (seenCursors.has(nextCursor)) {
+      throw statusError(`活动 ${actionId} 商品分页游标重复，已停止以避免漏删`, 502);
+    }
+    seenCursors.add(nextCursor);
+    lastId = nextCursor;
     await sleep(180);
   }
-  return Array.from(new Set(productIds));
+  throw statusError(`活动 ${actionId} 商品分页超过 ${ACTION_PRODUCTS_MAX_PAGES} 页，已停止以避免漏删`, 502);
 }
 
 async function deleteOfficialActionProducts(shop, actionId, productIds, signal) {
   const rows = Array.isArray(productIds)
     ? productIds.map(Number).filter((item) => Number.isFinite(item) && item > 0)
     : [];
-  let removedCount = 0;
-  for (let index = 0; index < rows.length; index += ACTION_DELETE_BATCH_LIMIT) {
-    const batch = rows.slice(index, index + ACTION_DELETE_BATCH_LIMIT);
-    if (!batch.length) continue;
-    await ozonRequest("/v1/actions/products/deactivate", {
-      payload: {
-        action_id: Number(actionId),
-        product_ids: batch
-      },
-      shop,
-      signal
-    });
-    removedCount += batch.length;
-    await sleep(180);
+  const targetIds = new Set(rows);
+  let remainingIds = rows;
+  let submittedCount = 0;
+  let pageCount = 0;
+  let scannedCount = 0;
+  let lateDetectedCount = 0;
+  for (const verifyDelayMs of ACTION_DELETE_VERIFY_DELAYS_MS) {
+    for (let index = 0; index < remainingIds.length; index += ACTION_DELETE_BATCH_LIMIT) {
+      const batch = remainingIds.slice(index, index + ACTION_DELETE_BATCH_LIMIT);
+      if (!batch.length) continue;
+      await ozonRequest("/v1/actions/products/deactivate", {
+        payload: {
+          action_id: Number(actionId),
+          product_ids: batch
+        },
+        shop,
+        signal
+      });
+      submittedCount += batch.length;
+      await sleep(180);
+    }
+    await sleep(verifyDelayMs);
+    const scan = await fetchAllJoinedActionProductIds(shop, actionId, signal);
+    pageCount += scan.pageCount;
+    scannedCount += scan.scannedCount;
+    const newlyDetectedIds = scan.productIds.filter((productId) => !targetIds.has(productId));
+    lateDetectedCount += newlyDetectedIds.length;
+    newlyDetectedIds.forEach((productId) => targetIds.add(productId));
+    remainingIds = scan.productIds;
+    if (!remainingIds.length) break;
   }
-  return removedCount;
+  return {
+    submittedCount,
+    removedCount: targetIds.size - remainingIds.length,
+    remainingIds,
+    pageCount,
+    scannedCount,
+    lateDetectedCount
+  };
 }
 
 async function fetchCurrentOfficialActionSummaries(shop, signal) {
   const data = await ozonRequest("/v1/actions", { method: "GET", shop, signal });
   return extractOfficialActionSummaries(data);
+}
+
+function isOzonActionNotFoundError(error) {
+  return /resource not found/i.test(String(error?.message || error || ""));
 }
 
 export async function listOzonActionCleanupConfigsMysql() {
@@ -584,6 +774,10 @@ export async function runOzonActionCleanupForStoreMysql(storeId, config = null, 
         actionIds: currentActions.map((item) => item.actionId),
         changed: officialActionCatalogChanged(current.lastSyncedActions || [], currentActions)
       };
+      current.knownActions = mergeKnownActionCatalog(current.knownActions || [], currentActions, {
+        now,
+        seedActionIds: current.actionIds || []
+      });
     } catch (error) {
       actionListSync = {
         ...actionListSync,
@@ -591,30 +785,66 @@ export async function runOzonActionCleanupForStoreMysql(storeId, config = null, 
       };
       errors.push(`actions list: ${actionListSync.error}`);
     }
+    actionListSync.knownActionCount = normalizeKnownActionCatalog(current.knownActions || []).length;
 
-    const cleanupActionIds = buildOfficialActionCleanupIds(currentActions, current.actionIds || DEFAULT_CLEANUP_ACTION_IDS);
+    const cleanupActionIds = buildOfficialActionCleanupIds(currentActions, current.knownActions || current.actionIds || []);
     for (const actionId of cleanupActionIds) {
       try {
-        const productIds = await fetchAllJoinedActionProductIds(shop, actionId, options.signal);
+        const scan = await fetchAllJoinedActionProductIds(shop, actionId, options.signal);
+        const productIds = scan.productIds;
+        current.knownActions = recordKnownActionCheck(current.knownActions || [], actionId, { unavailable: false }, { now });
         if (!productIds.length) {
-          actionSummaries.push({ actionId, detectedCount: 0, removedCount: 0, skippedManualOnly: true });
+          actionSummaries.push({ actionId, detectedCount: 0, removedCount: 0, skippedManualOnly: true, pageCount: scan.pageCount, scannedCount: scan.scannedCount });
           continue;
         }
-        const actionRemovedCount = await deleteOfficialActionProducts(shop, actionId, productIds, options.signal);
-        removedCount += actionRemovedCount;
-        actionSummaries.push({ actionId, detectedCount: productIds.length, removedCount: actionRemovedCount });
+        const deletion = await deleteOfficialActionProducts(shop, actionId, productIds, options.signal);
+        removedCount += deletion.removedCount;
+        if (deletion.remainingIds.length) {
+          const message = `删除后复查仍有 ${deletion.remainingIds.length} 个自动加入商品留在活动中`;
+          errors.push(`活动 ${actionId}: ${message}`);
+          actionSummaries.push({
+            actionId,
+            detectedCount: productIds.length,
+            removedCount: deletion.removedCount,
+            remainingCount: deletion.remainingIds.length,
+            pageCount: scan.pageCount + deletion.pageCount,
+            scannedCount: scan.scannedCount + deletion.scannedCount,
+            lateDetectedCount: deletion.lateDetectedCount,
+            error: message
+          });
+          continue;
+        }
+        actionSummaries.push({
+          actionId,
+          detectedCount: productIds.length,
+          removedCount: deletion.removedCount,
+          remainingCount: 0,
+          pageCount: scan.pageCount + deletion.pageCount,
+          scannedCount: scan.scannedCount + deletion.scannedCount,
+          lateDetectedCount: deletion.lateDetectedCount,
+          verified: true
+        });
       } catch (error) {
         const message = error?.message || "unknown";
+        if (isOzonActionNotFoundError(error)) {
+          current.knownActions = recordKnownActionCheck(current.knownActions || [], actionId, { unavailable: true }, { now });
+          actionSummaries.push({ actionId, detectedCount: 0, removedCount: 0, skippedUnavailable: true, error: message });
+          continue;
+        }
         errors.push(`活动 ${actionId}: ${message}`);
         actionSummaries.push({ actionId, detectedCount: 0, removedCount: 0, error: message });
       }
     }
 
     const lastError = errors.join("；");
+    const knownActions = normalizeKnownActionCatalog(current.knownActions || []);
+    actionListSync.knownActionCount = knownActions.length;
+    actionListSync.knownActionIds = knownActions.map((item) => item.actionId);
     const saved = await persistCleanupConfig(normalizedStoreId, {
       ...current,
       enabled: current.enabled,
       actionIds: current.actionIds,
+      knownActions: current.knownActions,
       lastSyncedActions: currentActions.length ? currentActions : current.lastSyncedActions,
       lastActionListSyncedAt: actionListSync.error ? current.lastActionListSyncedAt : now,
       lastActionListChangedAt: actionListSync.changed ? now : current.lastActionListChangedAt,

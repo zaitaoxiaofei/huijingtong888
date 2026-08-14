@@ -2,7 +2,7 @@ import { calculateProfitQuote } from "./pricingFormula.js";
 
 const RMB_PER_RUB_DEFAULT = 1 / 11.32;
 
-const OZON_RFBS_RULES = [
+const OZON_RFBS_RULES_BEFORE_2026_07_24 = [
   {
     category: "Extra Small",
     label: "超级轻小件",
@@ -118,6 +118,48 @@ const OZON_RFBS_RULES = [
   }
 ];
 
+const CEL_RATE_EFFECTIVE_AT = Date.parse("2026-07-24T00:00:00+08:00");
+const CEL_V724_RATES = {
+  "Extra Small": {
+    express: [0.0505, 3.37], standard: [0.0393, 3.37], economy: [0.0281, 3.37]
+  },
+  Budget: {
+    express: [0.0371, 25.83], standard: [0.0281, 25.83], economy: [0.0191, 25.83]
+  },
+  Small: {
+    express: [0.0505, 17.97], standard: [0.0393, 17.97], economy: [0.0281, 17.97]
+  },
+  Big: {
+    standard: [0.0281, 40.44], economy: [0.0191, 40.44]
+  },
+  "Premium Small": {
+    express: [0.0505, 24.71], standard: [0.0393, 24.71], economy: [0.0281, 24.71]
+  },
+  "Premium Big": {
+    standard: [0.0314, 69.64], economy: [0.0258, 69.64]
+  }
+};
+
+const OZON_RFBS_RULES_FROM_2026_07_24 = OZON_RFBS_RULES_BEFORE_2026_07_24.map((rule) => {
+  const rates = CEL_V724_RATES[rule.category];
+  if (!rates) return rule;
+  const channels = Object.fromEntries(Object.entries(rule.channels).map(([key, channel]) => {
+    const [perGram, perTicket] = rates[key] || [channel.perGram, channel.perTicket];
+    return [key, { ...channel, perGram, perTicket }];
+  }));
+  if (rule.category === "Premium Big") {
+    return { ...rule, channels, volumetricDivisor: 12000, hundredGramCeil: false };
+  }
+  return { ...rule, channels };
+});
+
+function celRulesForEffectiveAt(value) {
+  const timestamp = value ? new Date(value).getTime() : Date.now();
+  return Number.isFinite(timestamp) && timestamp < CEL_RATE_EFFECTIVE_AT
+    ? OZON_RFBS_RULES_BEFORE_2026_07_24
+    : OZON_RFBS_RULES_FROM_2026_07_24;
+}
+
 export function calculateSelectionPricing(product) {
   const listingPriceRub = Number(product.listing_price_rub || product.target_price || 0);
   const weightKg = Number(product.package_weight_g || 0) / 1000;
@@ -127,7 +169,7 @@ export function calculateSelectionPricing(product) {
   const exchangeRate = Number(product.exchange_rate || 11.32);
   const saleRmb = Number(product.air_sale_price_rmb || 0) || listingPriceRub * (exchangeRate ? 1 / exchangeRate : RMB_PER_RUB_DEFAULT);
   const purchaseCost = purchaseCostPerUnit(product);
-  const rule = matchRule({ listingPriceRub, weightKg, length, width, height });
+  const rule = matchRule({ listingPriceRub, weightKg, length, width, height }, celRulesForEffectiveAt(product.pricing_effective_at));
   const airChannel = rule?.channels.standard || rule?.channels.express || null;
   const landChannel = rule?.channels.economy || null;
   const airFreight = airChannel ? freight(rule, airChannel, { weightKg, length, width, height }) : null;
@@ -214,7 +256,10 @@ export function calculateCelFbsPricing(input) {
   const returnRate = Number(input.return_rate ?? 0.05);
   const withdrawalFeeRate = Number(input.withdrawal_fee_rate ?? 0.012);
   const advertisingRate = Number(input.advertising_rate ?? 0);
-  const rule = matchRule({ listingPriceRub, weightKg, length, width, height });
+  const rule = matchRule(
+    { listingPriceRub, weightKg, length, width, height },
+    celRulesForEffectiveAt(input.pricing_effective_at || input.ordered_at)
+  );
 
   if (!rule) {
     return {
@@ -271,11 +316,11 @@ export function calculateCelFbsPricing(input) {
   };
 }
 
-function matchRule({ listingPriceRub, weightKg, length, width, height }) {
+function matchRule({ listingPriceRub, weightKg, length, width, height }, rules) {
   const sum = length + width + height;
   const maxSide = Math.max(length, width, height);
   const volumeKg = volumetricWeight(length, width, height);
-  return OZON_RFBS_RULES.find((rule) => {
+  return rules.find((rule) => {
     const charged = chargeableWeight(rule, { weightKg, length, width, height });
     if (listingPriceRub < rule.minRub || listingPriceRub > rule.maxRub) return false;
     if (weightKg < rule.minKg || weightKg > rule.maxKg) return false;

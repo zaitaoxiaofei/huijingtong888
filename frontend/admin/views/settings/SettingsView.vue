@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { uploadShopWatermark } from "../../api/tools/imageCropper";
 import AuthenticatedImage from "../../components/AuthenticatedImage.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
@@ -67,8 +68,9 @@ const state = reactive({
     ratePageSize: 10,
     logisticsQuery: "",
     logisticsStatus: "all",
+    logisticsVersionStatus: "all",
     logisticsPage: 1,
-    logisticsPageSize: 10,
+    logisticsPageSize: 20,
     cancellationQuery: "",
     cancellationStatus: "all",
     cancellationPage: 1,
@@ -119,7 +121,8 @@ const logisticsDialog = reactive({ mode: "create", form: createDefaultLogisticsF
 const cancellationDialog = reactive({ mode: "create", form: createDefaultCancellationForm() });
 
 const shopFormRules = {
-  name: [{ required: true, message: "请输入店铺名称", trigger: "blur" }]
+  name: [{ required: true, message: "请输入店铺名称", trigger: "blur" }],
+  user_id: [{ required: true, message: "请选择店长", trigger: "change" }]
 };
 
 const personFormRules = {
@@ -146,7 +149,9 @@ function createDefaultShopForm() {
     updated_at: "",
     name: "",
     legal_entity: "",
+    user_id: null,
     ozon_client_id: "",
+    ozon_seller_id: "",
     api_key_hint: "",
     ozon_api_key: "",
     performance_client_id: "",
@@ -161,6 +166,12 @@ function createDefaultShopForm() {
     watermark_scale_percent: 22,
     watermark_opacity_percent: 82,
     payout_rate: 0.33,
+    customer_message_enabled: false,
+    chat_capability: "unchecked",
+    chat_capability_checked_at: "",
+    chat_capability_error: "",
+    webhook_last_received_at: "",
+    webhook_last_event_type: "",
     status: "active"
   };
 }
@@ -171,6 +182,7 @@ function createDefaultPersonForm() {
     updated_at: "",
     name: "",
     username: "",
+    avatar_url: "",
     role: "operator",
     active: 1,
     password: ""
@@ -202,6 +214,8 @@ function createDefaultLogisticsForm() {
     per_gram_cny: 0.026,
     per_ticket_cny: 0,
     enabled: 1,
+    source_rule_id: null,
+    effective_from: "",
     filter_keywords: "",
     note: ""
   };
@@ -253,7 +267,7 @@ const filteredShops = computed(() => {
   return state.shops.filter((row) => {
     if (status !== "all" && String(row.status || "active") !== status) return false;
     if (!query) return true;
-    const haystack = [row.name, row.legal_entity, row.ozon_client_id, row.api_key_hint].map((item) => String(item || "").toLowerCase()).join(" ");
+    const haystack = [row.name, row.user_name, row.legal_entity, row.ozon_client_id, row.api_key_hint].map((item) => String(item || "").toLowerCase()).join(" ");
     return haystack.includes(query);
   });
 });
@@ -282,9 +296,11 @@ const filteredRates = computed(() => {
 const filteredLogisticsRules = computed(() => {
   const query = String(state.filters.logisticsQuery || "").trim().toLowerCase();
   const status = String(state.filters.logisticsStatus || "all");
+  const versionStatus = String(state.filters.logisticsVersionStatus || "all");
   return state.logisticsRules.filter((row) => {
     if (status === "active" && Number(row.enabled) === 0) return false;
     if (status === "inactive" && Number(row.enabled) !== 0) return false;
+    if (versionStatus !== "all" && logisticsVersionStatus(row).key !== versionStatus) return false;
     if (!query) return true;
     const haystack = [row.name, row.carrier, row.channel, row.mode, row.note].map((item) => String(item || "").toLowerCase()).join(" ");
     return haystack.includes(query);
@@ -318,7 +334,60 @@ const cancellationTotal = computed(() => filteredCancellationRules.value.length)
 const shopDialogTitle = computed(() => (shopDialog.mode === "create" ? "新增店铺" : "编辑店铺"));
 const personDialogTitle = computed(() => (personDialog.mode === "create" ? "新增人员" : "编辑人员"));
 const rateDialogTitle = computed(() => "新增汇率");
-const logisticsDialogTitle = computed(() => (logisticsDialog.mode === "create" ? "新增物流规则" : "编辑物流规则"));
+const logisticsDialogTitle = computed(() => ({
+  create: "新增物流规则",
+  version: "新增运费版本",
+  edit: "编辑物流规则"
+}[logisticsDialog.mode] || "物流规则"));
+
+function logisticsVersionStatus(row) {
+  const now = Date.now();
+  const parseUtc = (value, fallback) => {
+    if (!value) return fallback;
+    const text = String(value);
+    return new Date(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text : `${text.replace(" ", "T")}Z`).getTime();
+  };
+  const from = parseUtc(row.effective_from, 0);
+  const to = parseUtc(row.effective_to, Infinity);
+  if (from > now) return { key: "pending", label: "待生效", type: "warning" };
+  if (to <= now) return { key: "expired", label: "已过期", type: "info" };
+  return { key: "current", label: "当前版本", type: "success" };
+}
+
+const logisticsVersionGroups = computed(() => {
+  const groups = new Map();
+  for (const row of state.logisticsRules) {
+    const key = Number(row.version_group_id || row.id);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  for (const rows of groups.values()) {
+    rows.sort((left, right) => new Date(left.effective_from || 0).getTime() - new Date(right.effective_from || 0).getTime());
+  }
+  return groups;
+});
+
+function logisticsVersionMeta(row) {
+  const rows = logisticsVersionGroups.value.get(Number(row.version_group_id || row.id)) || [row];
+  const index = Math.max(0, rows.findIndex((item) => Number(item.id) === Number(row.id)));
+  return { number: index + 1, total: rows.length, previous: index > 0 ? rows[index - 1] : null };
+}
+
+function logisticsRateDelta(row, field) {
+  const previous = logisticsVersionMeta(row).previous;
+  const previousValue = Number(previous?.[field] || 0);
+  if (!previous || previousValue <= 0) return "";
+  const percent = ((Number(row[field] || 0) - previousValue) / previousValue) * 100;
+  return `${percent >= 0 ? "+" : ""}${percent.toFixed(1)}%`;
+}
+
+function logisticsEffectiveFromText(row) {
+  const raw = row?.effective_from;
+  if (!raw) return "历史起点";
+  const timestamp = new Date(raw).getTime();
+  if (Number.isFinite(timestamp) && timestamp <= Date.parse("1970-01-02T00:00:00Z")) return "历史起点";
+  return shanghaiDateTimeText(raw, { assumeUtcWhenNaive: true });
+}
 const cancellationDialogTitle = computed(() => (cancellationDialog.mode === "create" ? "新增取消规则" : "编辑取消规则"));
 const shopWatermarkPreviewUrl = computed(() => {
   if (!shopDialog.form.id || !shopDialog.form.watermark_path) return "";
@@ -402,6 +471,7 @@ function resetRateFilters() {
 function resetLogisticsFilters() {
   state.filters.logisticsQuery = "";
   state.filters.logisticsStatus = "all";
+  state.filters.logisticsVersionStatus = "all";
   state.filters.logisticsPage = 1;
 }
 
@@ -421,7 +491,7 @@ async function loadSettingsData(force = false) {
     await loadSectionData(activeSection.value, force);
     return;
     const [shops, people, rates, packagingFeeRule, packagingFeeRuleChanges, logisticsRules, cancellationRules] = await Promise.all([
-      apiClient.get("/api/shops"),
+      loadShopDictionary({ force }),
       apiClient.get("/api/people"),
       apiClient.get("/api/exchange-rates"),
       apiClient.get("/api/settings/packaging-fee-rule"),
@@ -449,8 +519,12 @@ async function loadSettingsData(force = false) {
 async function loadSectionData(section, force = false) {
   if (!force && loadedSections[section]) return;
   if (section === "shops") {
-    const shops = await apiClient.get("/api/shops");
+    const [shops, people] = await Promise.all([
+      loadShopDictionary({ force }),
+      apiClient.get("/api/people")
+    ]);
     state.shops = Array.isArray(shops) ? shops : [];
+    state.people = Array.isArray(people) ? people : [];
   } else if (section === "people") {
     const people = await apiClient.get("/api/people");
     state.people = Array.isArray(people) ? people : [];
@@ -487,7 +561,7 @@ function openCreateShopDialog() {
   shopDialogVisible.value = true;
 }
 
-function openEditShopDialog(row) {
+async function openEditShopDialog(row) {
   shopDialog.mode = "edit";
   shopWatermarkPreviewVersion.value += 1;
   shopDialog.form = {
@@ -495,7 +569,9 @@ function openEditShopDialog(row) {
     updated_at: row.updated_at || "",
     name: row.name || "",
     legal_entity: row.legal_entity || "",
+    user_id: Number(row.user_id || 0) || null,
     ozon_client_id: row.ozon_client_id || "",
+    ozon_seller_id: row.ozon_seller_id || "",
     api_key_hint: row.api_key_hint || "",
     ozon_api_key: row.ozon_api_key || "",
     performance_client_id: row.performance_client_id || "",
@@ -510,9 +586,46 @@ function openEditShopDialog(row) {
     watermark_scale_percent: clampPercent(Number(row.watermark_scale_percent ?? 22), 8, 45),
     watermark_opacity_percent: clampPercent(Number(row.watermark_opacity_percent ?? 82), 10, 100),
     payout_rate: Number(row.payout_rate || 0.33),
+    customer_message_enabled: false,
+    chat_capability: "unchecked",
+    chat_capability_checked_at: "",
+    chat_capability_error: "",
+    webhook_last_received_at: "",
+    webhook_last_event_type: "",
     status: row.status || "active"
   };
   shopDialogVisible.value = true;
+  try {
+    const settings = await apiClient.get("/api/customer-message-settings");
+    const messageShop = (settings?.shops || []).find((item) => Number(item.shop_id) === Number(row.id));
+    if (messageShop) Object.assign(shopDialog.form, {
+      customer_message_enabled: Boolean(messageShop.chat_enabled),
+      chat_capability: messageShop.chat_capability || "unchecked",
+      chat_capability_checked_at: messageShop.chat_capability_checked_at || "",
+      chat_capability_error: messageShop.chat_capability_error || "",
+      webhook_last_received_at: messageShop.webhook_last_received_at || "",
+      webhook_last_event_type: messageShop.webhook_last_event_type || ""
+    });
+  } catch (error) {
+    ElMessage.warning(error.message || "自动客户消息配置加载失败");
+  }
+}
+
+async function checkShopCustomerMessageCapability() {
+  if (!shopDialog.form.id) return;
+  shopDialogSubmitting.value = true;
+  try {
+    const result = await apiClient.post("/api/customer-message-settings/shop/check-capability", { shop_id: shopDialog.form.id });
+    shopDialog.form.chat_capability = result?.ok ? "available" : "unavailable";
+    shopDialog.form.chat_capability_checked_at = new Date().toISOString();
+    shopDialog.form.chat_capability_error = result?.ok ? "" : (result?.error || "聊天权限不可用");
+    if (result?.ok) ElMessage.success("Ozon聊天权限检测通过");
+    else ElMessage.warning(shopDialog.form.chat_capability_error);
+  } catch (error) {
+    ElMessage.error(error.message || "聊天权限检测失败");
+  } finally {
+    shopDialogSubmitting.value = false;
+  }
 }
 
 function openCreatePersonDialog() {
@@ -528,6 +641,7 @@ function openEditPersonDialog(row) {
     updated_at: row.updated_at || "",
     name: row.name || "",
     username: row.username || "",
+    avatar_url: row.avatar_url || "",
     role: row.role || "operator",
     active: Number(row.active ?? 1),
     password: ""
@@ -554,6 +668,20 @@ function openEditLogisticsDialog(row) {
     ...row,
     id: row.id,
     enabled: Number(row.enabled ?? 1)
+  };
+  logisticsDialogVisible.value = true;
+}
+
+function openVersionLogisticsDialog(row) {
+  logisticsDialog.mode = "version";
+  logisticsDialog.form = {
+    ...createDefaultLogisticsForm(),
+    ...row,
+    id: null,
+    updated_at: "",
+    source_rule_id: Number(row.id),
+    effective_from: `${shanghaiDateKey(new Date(Date.now() + 86400000))} 00:00`,
+    enabled: 1
   };
   logisticsDialogVisible.value = true;
 }
@@ -672,10 +800,19 @@ async function submitShopDialog() {
       payout_rate: Number(shopDialog.form.payout_rate || 0)
     };
     if (shopDialog.mode === "create") {
-      await apiClient.post("/api/shops", payload);
+      const created = await apiClient.post("/api/shops", payload);
+      if (created?.id) await apiClient.post("/api/customer-message-settings/shop", {
+        shop_id: created.id, chat_enabled: false, send_mode: "none"
+      });
       ElMessage.success("店铺已新增");
     } else {
       await apiClient.put(`/api/shops/${shopDialog.form.id}`, payload);
+      await apiClient.post("/api/customer-message-settings/shop", {
+        shop_id: shopDialog.form.id,
+        chat_enabled: Boolean(shopDialog.form.customer_message_enabled),
+        send_mode: shopDialog.form.customer_message_enabled ? "auto" : "none",
+        note: "店铺管理页面维护"
+      });
       ElMessage.success("店铺已更新");
     }
     shopDialogVisible.value = false;
@@ -743,9 +880,9 @@ async function submitLogisticsDialog() {
       per_ticket_cny: Number(logisticsDialog.form.per_ticket_cny || 0),
       enabled: Number(logisticsDialog.form.enabled ?? 1)
     };
-    if (logisticsDialog.mode === "create") {
+    if (logisticsDialog.mode === "create" || logisticsDialog.mode === "version") {
       await apiClient.post("/api/logistics-rules", payload);
-      ElMessage.success("物流规则已新增");
+      ElMessage.success(logisticsDialog.mode === "version" ? "新运费版本已新增" : "物流规则已新增");
     } else {
       await apiClient.put(`/api/logistics-rules/${logisticsDialog.form.id}`, payload);
       ElMessage.success("物流规则已更新");
@@ -833,6 +970,10 @@ async function handleDeleteShop(row) {
       cancelButtonText: "取消"
     });
     await apiClient.delete(`/api/shops/${row.id}`);
+    state.shops = state.shops.filter((item) => Number(item.id) !== Number(row.id));
+    if (state.filters.shopPage > 1 && pagedShops.value.length === 0) {
+      state.filters.shopPage -= 1;
+    }
     ElMessage.success("店铺已删除");
     await refreshSettingsData();
   } catch (error) {
@@ -875,6 +1016,22 @@ async function toggleLogisticsRule(row) {
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
     ElMessage.error(error.message || `${actionText}失败`);
+  }
+}
+
+async function deleteLogisticsRule(row) {
+  try {
+    await ElMessageBox.confirm(`确认永久删除物流规则「${row.name || row.id}」的 V${logisticsVersionMeta(row).number} 吗？已被商品或订单引用的版本不会被删除。`, "删除物流规则", {
+      type: "warning",
+      confirmButtonText: "确认删除",
+      cancelButtonText: "取消"
+    });
+    await apiClient.delete(`/api/logistics-rules/${row.id}`);
+    ElMessage.success("物流规则已删除");
+    await refreshSettingsData();
+  } catch (error) {
+    if (error === "cancel" || error === "close" || error?.message === "cancel") return;
+    ElMessage.error(error.message || "物流规则删除失败");
   }
 }
 
@@ -983,112 +1140,52 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="page-stack settings-page">
-    <el-card shadow="never" class="page-card settings-hero-card">
-      <div class="settings-hero">
-        <div>
-          <el-tag effect="light" type="primary">新架构</el-tag>
-          <h2>系统设置</h2>
-          <p>旧版配置页不再作为新系统的配置入口。现在按左侧分类进入对应页面，每个页面只处理自己的新增、编辑、删除和刷新。</p>
-        </div>
-        <div class="page-card-actions">
-          <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新数据</el-button>
-        </div>
-      </div>
+    <el-card shadow="never" class="page-card settings-nav-card">
+      <el-tabs :model-value="activeSection" class="settings-tabs" @tab-change="goSection">
+        <el-tab-pane v-for="item in sectionOptions" :key="item.key" :label="item.label" :name="item.key" />
+      </el-tabs>
     </el-card>
 
-    <el-row :gutter="16">
-      <el-col :xs="24" :xl="6">
-        <el-card shadow="never" class="page-card settings-section-card">
-          <template #header>
-            <div class="page-card-header">
-              <div>
-                <strong>设置分类</strong>
-                <span>选择哪一个分类，右侧就管理哪一个分类。</span>
-              </div>
-            </div>
-          </template>
-          <div class="settings-section-list">
-            <button
-              v-for="item in sectionOptions"
-              :key="item.key"
-              type="button"
-              class="settings-section-item"
-              :class="{ active: activeSection === item.key }"
-              @click="goSection(item.key)"
-            >
-              <strong>{{ item.label }}</strong>
-              <span>{{ item.description }}</span>
-            </button>
+    <el-card v-if="activeSection === 'shops'" shadow="never" class="page-card settings-list-card">
+      <template #header>
+        <div class="page-card-header">
+          <div>
+            <strong>{{ currentSectionMeta.title }}</strong>
+            <span>{{ currentSectionMeta.description }}</span>
           </div>
-        </el-card>
-      </el-col>
+          <div class="settings-header-actions">
+            <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateShopDialog">新增店铺</el-button>
+          </div>
+        </div>
+      </template>
 
-      <el-col :xs="24" :xl="18">
-        <section v-if="activeSection === 'shops'" class="shop-config-workbench">
-          <header class="shop-config-header">
-            <div>
-              <span>配置工作台</span>
-              <strong>{{ currentSectionMeta.title }}</strong>
-              <p>{{ currentSectionMeta.description }}</p>
-            </div>
-            <div class="shop-config-metrics">
-              <div>
-                <span>店铺总数</span>
-                <strong>{{ shopTotal }}</strong>
-              </div>
-              <div>
-                <span>启用店铺</span>
-                <strong>{{ filteredShops.filter((row) => row.status === "active").length }}</strong>
-              </div>
-              <div>
-                <span>已配水印</span>
-                <strong>{{ filteredShops.filter((row) => row.watermark_path).length }}</strong>
-              </div>
-            </div>
-            <div class="settings-header-actions">
-              <el-button class="erp-btn erp-btn-secondary" @click="refreshSettingsData">刷新</el-button>
-              <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateShopDialog">新增店铺</el-button>
-            </div>
-          </header>
+      <div class="filter-panel">
+        <el-form inline>
+          <el-form-item label="关键词">
+            <el-input v-model="state.filters.shopQuery" clearable placeholder="店铺名称 / 店长 / Client ID" @keyup.enter="state.filters.shopPage = 1" />
+          </el-form-item>
+          <el-form-item label="状态">
+            <el-select v-model="state.filters.shopStatus">
+              <el-option label="全部状态" value="all" />
+              <el-option label="启用" value="active" />
+              <el-option label="停用" value="inactive" />
+            </el-select>
+          </el-form-item>
+          <el-form-item>
+            <el-button class="erp-btn erp-btn-primary" type="primary" @click="state.filters.shopPage = 1">查询</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="resetShopFilters">重置</el-button>
+          </el-form-item>
+        </el-form>
+      </div>
 
-          <div class="shop-config-content">
-            <div class="shop-config-panel shop-filter-panel">
-              <div>
-                <div class="section-head compact">
-                  <span>01</span>
-                  <strong>筛选条件</strong>
-                </div>
-              </div>
-              <el-form class="shop-filter-form">
-                <el-form-item label="关键词">
-                  <el-input v-model="state.filters.shopQuery" clearable placeholder="店铺名称 / 主体 / Client ID" @keyup.enter="state.filters.shopPage = 1" />
-                </el-form-item>
-                <el-form-item label="状态">
-                  <el-select v-model="state.filters.shopStatus">
-                    <el-option label="全部状态" value="all" />
-                    <el-option label="启用" value="active" />
-                    <el-option label="停用" value="inactive" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item class="shop-filter-actions">
-                  <el-button class="erp-btn erp-btn-primary" type="primary" @click="state.filters.shopPage = 1">查询</el-button>
-                  <el-button class="erp-btn erp-btn-secondary" @click="resetShopFilters">重置</el-button>
-                </el-form-item>
-              </el-form>
-            </div>
-
-            <div class="shop-config-panel shop-table-panel">
-              <div class="section-head compact">
-                <span>02</span>
-                <strong>店铺与密钥配置</strong>
-              </div>
-              <div class="settings-table-wrap">
-                <el-table v-loading="loading" :data="pagedShops" stripe class="erp-data-table shop-config-table">
+      <div class="settings-table-wrap">
+        <el-table v-loading="loading" :data="pagedShops" stripe border class="erp-data-table">
               <el-table-column label="店铺信息" min-width="240" fixed="left">
                 <template #default="{ row }">
                   <div class="settings-cell-stack">
                     <strong>{{ row.name || "-" }}</strong>
-                    <span class="muted-text">主体：{{ row.legal_entity || "-" }}</span>
+                    <span class="muted-text">店长：{{ row.user_name || "未绑定" }}</span>
                   </div>
                 </template>
               </el-table-column>
@@ -1136,22 +1233,20 @@ onBeforeUnmount(() => {
                   </div>
                 </template>
               </el-table-column>
-            </el-table>
-              </div>
-            </div>
-          </div>
+        </el-table>
+      </div>
 
-          <PageFooterPagination
-            :total="shopTotal"
-            :page="state.filters.shopPage"
-            :page-size="state.filters.shopPageSize"
-            :page-sizes="[10, 20, 50]"
-            @update:page="state.filters.shopPage = $event"
-            @update:pageSize="state.filters.shopPageSize = $event; state.filters.shopPage = 1"
-          />
-        </section>
+      <PageFooterPagination
+        :total="shopTotal"
+        :page="state.filters.shopPage"
+        :page-size="state.filters.shopPageSize"
+        :page-sizes="[10, 20, 50]"
+        @update:page="state.filters.shopPage = $event"
+        @update:pageSize="state.filters.shopPageSize = $event; state.filters.shopPage = 1"
+      />
+    </el-card>
 
-        <el-card v-else-if="activeSection === 'people'" shadow="never" class="page-card settings-list-card">
+    <el-card v-else-if="activeSection === 'people'" shadow="never" class="page-card settings-list-card">
           <template #header>
             <div class="page-card-header">
               <div>
@@ -1438,6 +1533,14 @@ onBeforeUnmount(() => {
                   <el-option label="停用" value="inactive" />
                 </el-select>
               </el-form-item>
+              <el-form-item label="版本">
+                <el-select v-model="state.filters.logisticsVersionStatus" style="width: 150px">
+                  <el-option label="全部版本" value="all" />
+                  <el-option label="当前版本" value="current" />
+                  <el-option label="待生效" value="pending" />
+                  <el-option label="已过期" value="expired" />
+                </el-select>
+              </el-form-item>
               <el-form-item>
                 <el-button class="erp-btn erp-btn-primary" type="primary" @click="state.filters.logisticsPage = 1">查询</el-button>
                 <el-button class="erp-btn erp-btn-secondary" @click="resetLogisticsFilters">重置</el-button>
@@ -1450,7 +1553,10 @@ onBeforeUnmount(() => {
               <el-table-column label="规则" min-width="240" fixed="left">
                 <template #default="{ row }">
                   <div class="settings-cell-stack">
-                    <strong>{{ row.name || "-" }}</strong>
+                    <div class="logistics-rule-title">
+                      <strong>{{ row.name || "-" }}</strong>
+                      <el-tag size="small" effect="plain">V{{ logisticsVersionMeta(row).number }}</el-tag>
+                    </div>
                     <span class="muted-text">{{ row.carrier || "-" }} / {{ row.channel || "-" }} / {{ row.mode === "fixed" ? "固定费用" : "按克重" }}</span>
                   </div>
                 </template>
@@ -1467,8 +1573,22 @@ onBeforeUnmount(() => {
                 <template #default="{ row }">
                   <div class="settings-cell-stack">
                     <span>基础费：{{ Number(row.base_fee_cny || 0).toFixed(3) }}</span>
-                    <span class="muted-text">每克：{{ Number(row.per_gram_cny || 0).toFixed(4) }} / 每票：{{ Number(row.per_ticket_cny || 0).toFixed(3) }}</span>
+                    <span>每克：{{ Number(row.per_gram_cny || 0).toFixed(4) }} <b v-if="logisticsRateDelta(row, 'per_gram_cny')" class="rate-delta">{{ logisticsRateDelta(row, "per_gram_cny") }}</b></span>
+                    <span>每票：{{ Number(row.per_ticket_cny || 0).toFixed(3) }} <b v-if="logisticsRateDelta(row, 'per_ticket_cny')" class="rate-delta">{{ logisticsRateDelta(row, "per_ticket_cny") }}</b></span>
                   </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="生效时间（北京时间）" min-width="190">
+                <template #default="{ row }">
+                  <div class="settings-cell-stack">
+                    <el-tag :type="logisticsVersionStatus(row).type" effect="light">{{ logisticsVersionStatus(row).label }}</el-tag>
+                    <strong class="logistics-effective-time">{{ logisticsEffectiveFromText(row) }}</strong>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="失效时间（北京时间）" min-width="180">
+                <template #default="{ row }">
+                  <span :class="row.effective_to ? 'logistics-expiry-time' : 'muted-text'">{{ row.effective_to ? shanghaiDateTimeText(row.effective_to, { assumeUtcWhenNaive: true }) : "长期有效" }}</span>
                 </template>
               </el-table-column>
               <el-table-column label="状态" width="100" align="center">
@@ -1476,11 +1596,13 @@ onBeforeUnmount(() => {
                   <el-tag :type="Number(row.enabled) !== 0 ? 'success' : 'info'" effect="light">{{ Number(row.enabled) !== 0 ? "启用" : "停用" }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="180" fixed="right">
+              <el-table-column label="操作" width="300" fixed="right">
                 <template #default="{ row }">
                   <div class="table-actions">
+                    <el-button class="erp-btn-link" link type="primary" :disabled="Boolean(row.effective_to)" @click="openVersionLogisticsDialog(row)">新增版本</el-button>
                     <el-button class="erp-btn-link" link type="primary" @click="openEditLogisticsDialog(row)">编辑</el-button>
                     <el-button class="erp-btn-link" link :type="Number(row.enabled) !== 0 ? 'danger' : 'success'" @click="toggleLogisticsRule(row)">{{ Number(row.enabled) !== 0 ? "停用" : "启用" }}</el-button>
+                    <el-button class="erp-btn-link" link type="danger" @click="deleteLogisticsRule(row)">删除</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -1491,7 +1613,6 @@ onBeforeUnmount(() => {
             :total="logisticsTotal"
             :page="state.filters.logisticsPage"
             :page-size="state.filters.logisticsPageSize"
-            :page-sizes="[10, 20, 50]"
             @update:page="state.filters.logisticsPage = $event"
             @update:pageSize="state.filters.logisticsPageSize = $event; state.filters.logisticsPage = 1"
           />
@@ -1581,16 +1702,27 @@ onBeforeUnmount(() => {
             @update:page="state.filters.cancellationPage = $event"
             @update:pageSize="state.filters.cancellationPageSize = $event; state.filters.cancellationPage = 1"
           />
-        </el-card>
-      </el-col>
-    </el-row>
+    </el-card>
 
     <el-dialog v-model="shopDialogVisible" :title="shopDialogTitle" width="980px" align-center class="erp-centered-dialog" destroy-on-close @closed="clearShopForm">
       <el-form ref="shopFormRef" :model="shopDialog.form" :rules="shopFormRules" label-width="110px">
         <el-row :gutter="18">
           <el-col :span="12"><el-form-item label="店铺名称" prop="name"><el-input v-model="shopDialog.form.name" placeholder="请输入店铺名称" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item label="主体名称"><el-input v-model="shopDialog.form.legal_entity" placeholder="请输入主体名称" /></el-form-item></el-col>
+          <el-col :span="12">
+            <el-form-item label="店长" prop="user_id">
+              <el-select v-model="shopDialog.form.user_id" filterable placeholder="请选择店长" style="width: 100%">
+                <el-option
+                  v-for="person in state.people"
+                  :key="person.id"
+                  :label="person.name"
+                  :value="Number(person.id)"
+                  :disabled="Number(person.active) === 0"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
           <el-col :span="12"><el-form-item label="Client ID"><el-input v-model="shopDialog.form.ozon_client_id" placeholder="请输入 Ozon Client ID" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="Seller ID"><el-input v-model="shopDialog.form.ozon_seller_id" placeholder="用于识别 Ozon Push 通知中的店铺" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="API Key"><el-input v-model="shopDialog.form.ozon_api_key" type="password" show-password placeholder="Ozon Seller API Key，用于真实同步和上架" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="Key 标识"><el-input v-model="shopDialog.form.api_key_hint" placeholder="备注标识；未填 API Key 时兼容旧密钥字段" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="广告 Client ID"><el-input v-model="shopDialog.form.performance_client_id" placeholder="Ozon Performance Client ID" /></el-form-item></el-col>
@@ -1681,6 +1813,7 @@ onBeforeUnmount(() => {
         <el-row :gutter="18">
           <el-col :span="12"><el-form-item label="人员姓名" prop="name"><el-input v-model="personDialog.form.name" placeholder="请输入人员姓名" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="登录名"><el-input v-model="personDialog.form.username" placeholder="可选" /></el-form-item></el-col>
+          <el-col :span="24"><el-form-item label="头像链接"><el-input v-model="personDialog.form.avatar_url" placeholder="https://..." clearable /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="角色"><el-select v-model="personDialog.form.role"><el-option label="operator" value="operator" /><el-option label="admin" value="admin" /><el-option label="manager" value="manager" /></el-select></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="状态"><el-select v-model="personDialog.form.active"><el-option label="启用" :value="1" /><el-option label="停用" :value="0" /></el-select></el-form-item></el-col>
           <el-col :span="24"><el-form-item label="密码"><el-input v-model="personDialog.form.password" type="password" show-password placeholder="编辑时留空表示不修改密码" /></el-form-item></el-col>
@@ -1717,14 +1850,15 @@ onBeforeUnmount(() => {
           <el-col :span="12"><el-form-item label="规则名称" prop="name"><el-input v-model="logisticsDialog.form.name" placeholder="例如：中国邮政 500g 以下" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="物流商"><el-input v-model="logisticsDialog.form.carrier" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="渠道"><el-input v-model="logisticsDialog.form.channel" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item label="计费模式"><el-select v-model="logisticsDialog.form.mode"><el-option label="按克重" value="per_gram" /><el-option label="固定费用" value="fixed" /></el-select></el-form-item></el-col>
-          <el-col :span="12"><el-form-item label="最小克重"><el-input-number v-model="logisticsDialog.form.min_weight_g" :min="0" :precision="0" :step="1" controls-position="right" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item label="最大克重"><el-input-number v-model="logisticsDialog.form.max_weight_g" :min="0" :precision="0" :step="1" controls-position="right" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item label="最低售价(RUB)"><el-input-number v-model="logisticsDialog.form.min_price_rub" :min="0" :precision="0" :step="1" controls-position="right" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item label="最高售价(RUB)"><el-input-number v-model="logisticsDialog.form.max_price_rub" :min="0" :precision="0" :step="1" controls-position="right" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item label="基础费用(RMB)"><el-input-number v-model="logisticsDialog.form.base_fee_cny" :min="0" :precision="3" :step="0.001" controls-position="right" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item label="每克费用(RMB)"><el-input-number v-model="logisticsDialog.form.per_gram_cny" :min="0" :precision="4" :step="0.0001" controls-position="right" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item label="每票费用(RMB)"><el-input-number v-model="logisticsDialog.form.per_ticket_cny" :min="0" :precision="3" :step="0.001" controls-position="right" /></el-form-item></el-col>
+          <el-col v-if="logisticsDialog.mode === 'version'" :span="12"><el-form-item label="生效时间" required><el-date-picker v-model="logisticsDialog.form.effective_from" type="datetime" value-format="YYYY-MM-DD HH:mm" format="YYYY-MM-DD HH:mm" placeholder="按北京时间选择" style="width: 100%" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="计费模式"><el-select v-model="logisticsDialog.form.mode" :disabled="logisticsDialog.mode === 'edit'"><el-option label="按克重" value="per_gram" /><el-option label="固定费用" value="fixed" /></el-select></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="最小克重"><el-input-number v-model="logisticsDialog.form.min_weight_g" :disabled="logisticsDialog.mode === 'edit'" :min="0" :precision="0" :step="1" controls-position="right" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="最大克重"><el-input-number v-model="logisticsDialog.form.max_weight_g" :disabled="logisticsDialog.mode === 'edit'" :min="0" :precision="0" :step="1" controls-position="right" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="最低售价(RUB)"><el-input-number v-model="logisticsDialog.form.min_price_rub" :disabled="logisticsDialog.mode === 'edit'" :min="0" :precision="0" :step="1" controls-position="right" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="最高售价(RUB)"><el-input-number v-model="logisticsDialog.form.max_price_rub" :disabled="logisticsDialog.mode === 'edit'" :min="0" :precision="0" :step="1" controls-position="right" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="基础费用(RMB)"><el-input-number v-model="logisticsDialog.form.base_fee_cny" :disabled="logisticsDialog.mode === 'edit'" :min="0" :precision="3" :step="0.001" controls-position="right" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="每克费用(RMB)"><el-input-number v-model="logisticsDialog.form.per_gram_cny" :disabled="logisticsDialog.mode === 'edit'" :min="0" :precision="4" :step="0.0001" controls-position="right" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="每票费用(RMB)"><el-input-number v-model="logisticsDialog.form.per_ticket_cny" :disabled="logisticsDialog.mode === 'edit'" :min="0" :precision="3" :step="0.001" controls-position="right" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="状态"><el-select v-model="logisticsDialog.form.enabled"><el-option label="启用" :value="1" /><el-option label="停用" :value="0" /></el-select></el-form-item></el-col>
           <el-col :span="24"><el-form-item label="筛选关键词"><el-input v-model="logisticsDialog.form.filter_keywords" type="textarea" :rows="3" placeholder="一行一个，保存后用于订单列表物流筛选匹配" /></el-form-item></el-col>
           <el-col :span="24"><el-form-item label="备注"><el-input v-model="logisticsDialog.form.note" type="textarea" :rows="3" placeholder="可选" /></el-form-item></el-col>
@@ -1765,157 +1899,29 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.settings-page { gap: 16px; }
-.settings-hero-card { background: linear-gradient(180deg, rgba(231, 240, 255, 0.92), rgba(255, 255, 255, 0.98)); }
-.settings-hero { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.settings-hero h2 { margin: 10px 0 8px; font-size: 24px; }
-.settings-hero p { margin: 0; color: var(--erp-text-secondary); line-height: 1.7; max-width: 760px; }
-.settings-section-card { height: 100%; }
-.settings-list-card { height: calc(100vh - 330px); min-height: 520px; display: flex; flex-direction: column; }
+.settings-page { gap: 12px; }
+.settings-nav-card :deep(.el-card__body) { padding: 0 16px; }
+.settings-tabs :deep(.el-tabs__header) { margin: 0; }
+.settings-tabs :deep(.el-tabs__nav-wrap::after) { height: 1px; }
+.settings-tabs :deep(.el-tabs__item) { height: 48px; padding: 0 20px; font-weight: 600; }
+.settings-tabs :deep(.el-tabs__content) { display: none; }
+.settings-list-card { height: calc(100vh - 224px); min-height: 520px; display: flex; flex-direction: column; }
+.settings-list-card :deep(.el-card__body) { flex: 1; min-height: 0; display: flex; flex-direction: column; padding-bottom: 0; }
 .settings-table-wrap { flex: 1; min-height: 0; overflow: auto; }
-.shop-config-workbench {
-  min-height: calc(100vh - 276px);
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: 14px;
-  padding: 0 0 4px;
-}
-.shop-config-header {
-  display: grid;
-  grid-template-columns: minmax(300px, 1fr) auto auto;
-  gap: 14px;
-  align-items: center;
-  padding: 14px 16px;
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  border-radius: 10px;
-  background: rgba(247, 250, 253, 0.94);
-  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
-}
-.shop-config-header > div:first-child {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-}
-.shop-config-header > div:first-child > span {
-  color: #2563eb;
-  font-size: 12px;
-  font-weight: 700;
-}
-.shop-config-header strong {
-  color: #0f172a;
-}
-.shop-config-header > div:first-child > strong {
-  font-size: 18px;
-}
-.shop-config-header p {
-  margin: 0;
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.5;
-}
-.shop-config-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(88px, 1fr));
-  gap: 8px;
-}
-.shop-config-metrics div {
-  min-height: 58px;
-  display: grid;
-  gap: 4px;
-  align-content: center;
-  padding: 8px 10px;
-  border: 1px solid #dbe5ef;
-  border-radius: 8px;
-  background: #fff;
-}
-.shop-config-metrics span {
-  color: #64748b;
-  font-size: 12px;
-}
-.shop-config-metrics strong {
-  font-size: 16px;
-}
-.shop-config-content {
-  min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 14px;
-}
-.shop-config-panel {
-  min-width: 0;
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.78);
-  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.06);
-  padding: 14px;
-}
-.shop-filter-panel {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 16px;
-  align-items: end;
-}
-.section-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.section-head.compact {
-  margin-bottom: 12px;
-}
-.section-head span {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-  background: #0f172a;
-  color: #fff;
-  font-size: 12px;
-  font-weight: 700;
-}
-.section-head strong {
-  color: #0f172a;
-}
-.shop-filter-form {
-  display: grid;
-  grid-template-columns: minmax(260px, 1fr) 180px auto;
-  gap: 12px;
-  align-items: end;
-}
-.shop-filter-form :deep(.el-form-item) {
-  margin: 0;
-}
-.shop-filter-form :deep(.el-input),
-.shop-filter-form :deep(.el-select) {
-  width: 100%;
-}
-.shop-filter-actions :deep(.el-form-item__content) {
-  display: flex;
-  gap: 8px;
-  flex-wrap: nowrap;
-}
-.shop-table-panel {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-.shop-config-table {
-  border: 1px solid #dbe5ef;
-  border-radius: 8px;
-  overflow: hidden;
-}
-.settings-section-list { display: flex; flex-direction: column; gap: 10px; }
-.settings-section-item { width: 100%; padding: 16px 14px; border-radius: 14px; border: 1px solid var(--erp-border); background: var(--erp-surface-alt); text-align: left; cursor: pointer; transition: all 0.2s ease; }
-.settings-section-item strong { display: block; margin-bottom: 6px; color: var(--erp-text); }
-.settings-section-item span { display: block; color: var(--erp-text-secondary); font-size: 12px; line-height: 1.6; }
-.settings-section-item.active { border-color: rgba(37, 99, 235, 0.28); background: var(--erp-primary-soft); box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.08); }
+.settings-list-card .filter-panel :deep(.el-input) { width: 320px; }
+.settings-list-card .filter-panel :deep(.el-select) { width: 160px; }
 .settings-header-actions, .dialog-footer, .table-actions, .settings-cell-stack { display: flex; }
 .settings-header-actions, .dialog-footer { align-items: center; gap: 12px; }
 .dialog-footer { justify-content: flex-end; }
 .settings-cell-stack { flex-direction: column; gap: 4px; }
+.logistics-rule-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.logistics-rule-title strong { min-width: 0; overflow-wrap: anywhere; }
+.rate-delta { margin-left: 4px; color: #dc2626; font-size: 12px; font-weight: 600; }
+.logistics-effective-time { color: var(--erp-text); font-size: 13px; font-weight: 600; }
+.logistics-expiry-time { color: #b45309; font-size: 13px; font-weight: 600; }
 .table-actions { align-items: center; flex-wrap: wrap; gap: 2px 10px; }
 .shop-watermark-row { min-height: 32px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.field-suffix { margin-left: 8px; color: var(--erp-text-secondary); }
 .shop-watermark-table-cell { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .shop-watermark-table-cell img { width: 52px; height: 32px; object-fit: contain; border: 1px solid var(--erp-border); border-radius: 6px; background:
   linear-gradient(45deg, rgba(148, 163, 184, 0.16) 25%, transparent 25%, transparent 75%, rgba(148, 163, 184, 0.16) 75%),
@@ -1940,11 +1946,11 @@ onBeforeUnmount(() => {
 .shop-watermark-control-actions { display: flex; align-items: center; gap: 10px; padding-left: 80px; }
 .muted-text { color: var(--erp-text-secondary); font-size: 12px; line-height: 1.5; }
 @media (max-width: 960px) {
-  .settings-hero { flex-direction: column; align-items: flex-start; }
   .settings-list-card { height: auto; min-height: 0; }
-  .shop-config-workbench { min-height: 0; }
-  .shop-config-header, .shop-filter-panel, .shop-filter-form { grid-template-columns: 1fr; }
-  .shop-config-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .settings-nav-card :deep(.el-card__body) { overflow-x: auto; }
+  .settings-tabs { min-width: 620px; }
+  .settings-list-card .filter-panel :deep(.el-input),
+  .settings-list-card .filter-panel :deep(.el-select) { width: 100%; }
   .shop-watermark-config { grid-template-columns: 1fr; }
   .shop-watermark-control-actions { padding-left: 0; }
 }

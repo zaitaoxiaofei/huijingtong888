@@ -3,6 +3,9 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Refresh, Search } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
+import ErpFilterBar from "../../components/ErpFilterBar.vue";
+import ErpPageHeader from "../../components/ErpPageHeader.vue";
+import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { buildAdTasks, evaluateAdSku, summarizeAdDashboard, toneType } from "./ad-rules";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
@@ -723,7 +726,7 @@ function metricTrendText() {
 async function bootstrap() {
   loading.value = true;
   try {
-    const shopPayload = await apiClient.get("/api/shops");
+    const shopPayload = await loadShopDictionary();
     shops.value = Array.isArray(shopPayload) ? shopPayload : (shopPayload?.rows || []);
     await loadRows();
   } catch (error) {
@@ -944,8 +947,15 @@ onMounted(bootstrap);
 
 <template>
   <div class="ad-dashboard-page">
+    <ErpPageHeader title="广告分析" description="统一查看广告表现、同步质量、风险诊断与优化动作。">
+      <template #actions>
+        <el-button class="erp-btn erp-btn-secondary" type="success" :loading="syncing" @click="syncFromOzon">同步 Ozon 广告</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="loading" @click="loadRows">刷新</el-button>
+      </template>
+    </ErpPageHeader>
     <section class="filter-card">
-      <el-form class="filter-form" inline>
+      <ErpFilterBar>
+        <el-form class="filter-form" inline>
         <el-form-item label="店铺">
           <el-select v-model="state.filters.shopId" filterable clearable placeholder="全部店铺" style="width: 176px">
             <el-option label="全部店铺" value="" />
@@ -985,13 +995,12 @@ onMounted(bootstrap);
             <el-option label="SKU" value="sku" />
           </el-select>
         </el-form-item>
-      </el-form>
-      <div class="filter-actions">
-        <el-button type="primary" :icon="Search" :loading="loading" @click="handleSearch">查询</el-button>
-        <el-button @click="handleReset">重置</el-button>
-        <el-button type="success" :loading="syncing" @click="syncFromOzon">同步 Ozon 广告</el-button>
-        <el-button type="primary" :icon="Refresh" :loading="loading" @click="loadRows">刷新</el-button>
-      </div>
+        </el-form>
+        <template #actions>
+          <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Search" :loading="loading" @click="handleSearch">查询</el-button>
+          <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
+        </template>
+      </ErpFilterBar>
     </section>
 
     <section class="sync-quality-card">
@@ -1561,7 +1570,6 @@ onMounted(bootstrap);
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
 }
 
-.filter-actions,
 .row-actions,
 .drawer-actions {
   display: flex;
@@ -1592,17 +1600,6 @@ onMounted(bootstrap);
 
 .filter-form :deep(.el-form-item__label) {
   padding-right: 6px;
-}
-
-.filter-actions {
-  flex: 0 0 auto;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  padding-bottom: 6px;
-}
-
-.filter-actions :deep(.el-button + .el-button) {
-  margin-left: 0;
 }
 
 .sync-quality-card {

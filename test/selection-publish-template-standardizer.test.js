@@ -69,3 +69,13 @@ test("selection publish product type is inferred instead of hardcoded to key cas
   assert.match(listingSource, /брелок для ключей/);
   assert.doesNotMatch(listingSource, /values:\s*\[\{\s*dictionary_value_id:\s*typeId,\s*value:\s*"Чехол брелка автосигнализации"\s*\}\]/);
 });
+test("selection publish precheck warns on local media without blocking publish", () => {
+  assert.match(assetSource, /const media = assetVariantPayloadMediaUrls\(firstItem, payload\);/);
+  assert.match(assetSource, /const localMedia = media\.filter\(isLocalOzonMediaUrl\);/);
+  assert.match(assetSource, /continuing without selection media blocking/);
+  assert.match(assetSource, /function assetVariantPayloadMediaUrls\(firstItem = \{\}, payload = \{\}\)/);
+  assert.match(assetSource, /firstItem\.primary_image/);
+  assert.match(assetSource, /payload\.primary_image/);
+  assert.match(assetSource, /function isLocalOzonMediaUrl\(value = ""\)/);
+  assert.doesNotMatch(assetSource, /localMedia[\s\S]{0,240}errors\.push/);
+});

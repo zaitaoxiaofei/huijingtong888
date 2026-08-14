@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
+import { AI_WORKBENCH_PROXY_FALLBACK_ASSETS } from "./aiWorkbenchProxyAssets.js";
 import { notFound, writeHead } from "./response.js";
 
 const CONTENT_TYPES = {
@@ -32,16 +33,38 @@ function sendStaticNotFound(res, cleanPath) {
   res.end(body);
 }
 
+function isPathInsideRoot(root, targetPath) {
+  const relativePath = path.relative(root, targetPath);
+  return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+}
+
+function normalizeStaticPath(pathname = "") {
+  const text = String(pathname || "/");
+  const parsed = new URL(text, "http://static.local");
+  return parsed.pathname || "/";
+}
+
 function findAiWorkbenchProxyAsset(publicDir, cleanPath) {
-  if (!/^\/vue-apps\/assets\/AiOptimizationWorkbenchV2-[^/]+\.(?:js|css)$/i.test(cleanPath)) return "";
+  if (!/^\/vue-apps\/assets\/[^/]+-[A-Za-z0-9_-]{6,}(?:-\d{12,13})?\.(?:js|css)$/i.test(cleanPath)) return "";
   const fileName = path.posix.basename(cleanPath);
+  if (!AI_WORKBENCH_PROXY_FALLBACK_ASSETS.has(fileName)) return "";
   const proxyPath = path.join(publicDir, "ai-workbench-proxy", "assets", fileName);
-  if (!proxyPath.startsWith(publicDir)) return "";
+  if (!isPathInsideRoot(publicDir, proxyPath)) return "";
   if (!fs.existsSync(proxyPath) || fs.statSync(proxyPath).isDirectory()) return "";
   return proxyPath;
 }
 
+function isAiWorkbenchProxyAssetPath(cleanPath) {
+  return /^\/ai-workbench-proxy\/assets\/[^/]+\.(?:js|css)$/i.test(cleanPath);
+}
+
+function isAllowedAiWorkbenchProxyAsset(cleanPath) {
+  if (!isAiWorkbenchProxyAssetPath(cleanPath)) return true;
+  return AI_WORKBENCH_PROXY_FALLBACK_ASSETS.has(path.posix.basename(cleanPath));
+}
+
 export function createStaticHandler(publicDir, options = {}) {
+  const publicRoot = path.resolve(publicDir);
   const extraRoots = Array.isArray(options.extraRoots) ? options.extraRoots.map((root) => path.resolve(root)) : [];
   const extraRouteRoots = Array.isArray(options.extraRouteRoots) ? options.extraRouteRoots : [];
   function preferredEncoding(req) {
@@ -54,13 +77,21 @@ export function createStaticHandler(publicDir, options = {}) {
   function sendFile(filePath, cleanPath, req, res) {
     const ext = path.extname(filePath);
     const headers = { "Content-Type": CONTENT_TYPES[ext] || "application/octet-stream" };
+    const isAiWorkbenchProxyAsset = /^\/ai-workbench-proxy\/assets\/.+\.(css|js)$/i.test(cleanPath);
     const isVueAppAsset = /\/vue-apps\/assets\/.+\.(css|js)$/i.test(cleanPath);
     const isVersionedAsset = /\/vue-apps\/assets\/.+-[a-z0-9_-]{6,}\.(css|js)$/i.test(cleanPath);
     const isMutableEntryAsset = /\/vue-apps\/assets\/(admin-view|config-view|admin|config)\.(js|css)$/i.test(cleanPath);
+    const isListingMediaAsset = /^\/uploads\/listing-media\/[^/]+$/i.test(cleanPath);
     if (cleanPath === "/admin.html" || cleanPath === "/release.json" || ext === ".html") {
       headers["Cache-Control"] = "no-store, must-revalidate";
     } else if (isMutableEntryAsset) {
       headers["Cache-Control"] = "no-store, must-revalidate";
+    } else if (isAiWorkbenchProxyAsset) {
+      headers["Cache-Control"] = "no-store, must-revalidate";
+    } else if (isListingMediaAsset) {
+      headers["Cache-Control"] = "public, max-age=31536000, immutable";
+      headers["CDN-Cache-Control"] = "public, max-age=31536000, immutable";
+      headers["Cloudflare-CDN-Cache-Control"] = "public, max-age=31536000, immutable";
     } else if (isVersionedAsset) {
       headers["Cache-Control"] = "public, max-age=31536000, immutable";
       headers["CDN-Cache-Control"] = "public, max-age=31536000, immutable";
@@ -118,19 +149,24 @@ export function createStaticHandler(publicDir, options = {}) {
   }
 
   return function serveStatic(pathname, req, res) {
-    const cleanPath = pathname === "/" || pathname === "/index.html" ? "/admin.html" : pathname;
-    const filePath = path.join(publicDir, cleanPath);
+    const normalizedPath = normalizeStaticPath(pathname);
+    const cleanPath = normalizedPath === "/" || normalizedPath === "/index.html" ? "/admin.html" : normalizedPath;
+    const filePath = path.join(publicRoot, cleanPath);
     const isFileRequest = path.posix.extname(cleanPath) !== "";
 
-    if (!filePath.startsWith(publicDir)) {
+    if (!isPathInsideRoot(publicRoot, filePath)) {
       return notFound(res);
+    }
+
+    if (!isAllowedAiWorkbenchProxyAsset(cleanPath)) {
+      return sendStaticNotFound(res, cleanPath);
     }
 
     if (fs.existsSync(filePath) && !fs.statSync(filePath).isDirectory()) {
       return sendFile(filePath, cleanPath, req, res);
     }
 
-    const aiWorkbenchProxyAsset = findAiWorkbenchProxyAsset(publicDir, cleanPath);
+    const aiWorkbenchProxyAsset = findAiWorkbenchProxyAsset(publicRoot, cleanPath);
     if (aiWorkbenchProxyAsset) {
       return sendFile(aiWorkbenchProxyAsset, cleanPath, req, res);
     }
@@ -142,20 +178,20 @@ export function createStaticHandler(publicDir, options = {}) {
       const relativePath = cleanPath.slice(prefix.length).replace(/^\/+/, "");
       for (const root of roots) {
         const targetPath = path.resolve(root, relativePath);
-        if (!targetPath.startsWith(root) || !fs.existsSync(targetPath) || fs.statSync(targetPath).isDirectory()) continue;
+        if (!isPathInsideRoot(root, targetPath) || !fs.existsSync(targetPath) || fs.statSync(targetPath).isDirectory()) continue;
         return sendFile(targetPath, cleanPath, req, res);
       }
     }
 
     for (const root of extraRoots) {
       const targetPath = path.join(root, cleanPath);
-      if (!targetPath.startsWith(root) || !fs.existsSync(targetPath) || fs.statSync(targetPath).isDirectory()) continue;
+      if (!isPathInsideRoot(root, targetPath) || !fs.existsSync(targetPath) || fs.statSync(targetPath).isDirectory()) continue;
       return sendFile(targetPath, cleanPath, req, res);
     }
 
     if (!isFileRequest) {
-      const adminPath = path.join(publicDir, "admin.html");
-      if (adminPath.startsWith(publicDir) && fs.existsSync(adminPath) && !fs.statSync(adminPath).isDirectory()) {
+      const adminPath = path.join(publicRoot, "admin.html");
+      if (isPathInsideRoot(publicRoot, adminPath) && fs.existsSync(adminPath) && !fs.statSync(adminPath).isDirectory()) {
         return sendFile(adminPath, "/admin.html", req, res);
       }
     }

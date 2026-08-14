@@ -1,12 +1,17 @@
 ﻿<script setup>
-import { computed, defineExpose, onMounted, reactive, ref, watch } from "vue";
+import { computed, defineExpose, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { Delete, Plus } from "@element-plus/icons-vue";
 import zhCn from "element-plus/es/locale/lang/zh-cn";
 import OrdersStatusTabs from "./components/OrdersStatusTabs.vue";
 import OrdersTable from "./components/OrdersTable.vue";
 import OrdersToolbar from "./components/OrdersToolbar.vue";
 import PageFooterPagination from "../admin/components/PageFooterPagination.vue";
+import OzonCategorySelect from "../admin/components/listing/OzonCategorySelect.vue";
+import ProductCompositionDialog from "../admin/components/inventory/ProductCompositionDialog.vue";
+import ProductCreateEditDialog from "../admin/components/inventory/ProductCreateEditDialog.vue";
+import InventoryStructuredSearch from "../admin/components/inventory/InventoryStructuredSearch.vue";
 import { apiClient } from "../admin/utils/api.js";
 import { useOrdersPage } from "./composables/useOrdersPage.js";
 import {
@@ -18,14 +23,18 @@ import {
 import { buildProductDisplayRows, firstCsvValue, splitCsv } from "./utils/order-display.js";
 import { formatDateTime, formatLogisticsRuleLabel, formatMoney, formatPercent, formatSignedMoney, moneyValueClass } from "./utils/order-format.js";
 import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order-profit-detail.js";
+import { inventoryProductNameGroup, scoreInventorySimilarity } from "../admin/utils/inventory-similarity.js";
+import { previewOrderLabels } from "./services/orders-service.js";
 import "./orders-view.css";
 import "../admin/styles/erp-theme.css";
 
 const route = useRoute();
 const router = useRouter();
+const emit = defineEmits(["inventory-completed"]);
 const elementLocale = zhCn;
 
 const orderDetailCache = new Map();
+let latestOrderSyncTimer = 0;
 
 const {
   vm,
@@ -36,6 +45,7 @@ const {
   loadLogisticsOptions,
   submitFilters,
   changeStatus,
+  changeFulfillmentType,
   changePrintView,
   changeMarkFilter,
   changePage,
@@ -51,12 +61,14 @@ const {
   handleMoreAction,
   fetchOrderDetail,
   prepareSingleOrder,
+  prepareSplitOrder,
   previewOrderProcurement,
   createOrderProcurementRequests,
   printSingleOrder,
   recalculateOrderProfit,
   saveOrderMark,
   loadStatusTabPreference,
+  loadLatestOrderSyncStatus,
   saveStatusTabPreference,
   defaultStatusTabOrder,
 } = useOrdersPage();
@@ -98,6 +110,33 @@ const orderProcurementDialog = reactive({
   orderId: null,
   preview: null,
   selectedItemIds: []
+});
+
+const splitOrderDialog = reactive({
+  visible: false,
+  loading: false,
+  submitting: false,
+  orderId: null,
+  postingNumber: "",
+  items: [],
+  packages: []
+});
+
+const splitOrderValidation = computed(() => {
+  if (splitOrderDialog.packages.length < 2) return "至少需要两个包裹";
+  if (splitOrderDialog.packages.some((pkg) => !Object.values(pkg.quantities || {}).some((value) => Number(value) > 0))) {
+    return "每个包裹至少需要分配一件商品";
+  }
+  for (const item of splitOrderDialog.items) {
+    const assigned = splitOrderDialog.packages.reduce(
+      (sum, pkg) => sum + Number(pkg.quantities?.[item.id] || 0),
+      0
+    );
+    if (assigned !== Number(item.quantity || 0)) {
+      return `${item.sku} 已分配 ${assigned} 件，应分配 ${item.quantity} 件`;
+    }
+  }
+  return "";
 });
 
 const printDialog = reactive({
@@ -169,6 +208,33 @@ const colorOptions = [
   { label: "黑白", value: "monochrome" }
 ];
 
+const QUALITY_CHECK_ORDER_PREFIXES = ["02090", "02131", "02478"];
+
+function isQualityCheckOrderRow(row = {}) {
+  if (Number(row.is_quality_order || 0) !== 0 || String(row.order_nature || "") === "quality_check") return true;
+  const postingNumber = String(row.posting_number || row.order_number || "").trim();
+  return QUALITY_CHECK_ORDER_PREFIXES.some((prefix) => postingNumber.startsWith(prefix));
+}
+
+const procurementSourceOptions = [
+  { label: "1688", value: "1688" },
+  { label: "拼多多", value: "pdd" },
+  { label: "淘宝", value: "taobao" },
+  { label: "供应商", value: "supplier" },
+  { label: "微信", value: "wechat" },
+  { label: "线下", value: "offline" },
+  { label: "其他", value: "other" }
+];
+
+function procurementChannelLabel(value) {
+  return procurementSourceOptions.find((item) => item.value === String(value || ""))?.label || "其他";
+}
+
+const procurementUrgencyOptions = [
+  { label: "普通", value: "normal" },
+  { label: "加急", value: "urgent" }
+];
+
 const selectedPrintPreset = computed(() => (
   printPresetOptions.find((item) => item.value === printDialog.preset) || printPresetOptions[0]
 ));
@@ -208,9 +274,32 @@ const inventoryOptions = reactive({
 });
 
 const bindForm = reactive({
+  mode: "single",
   productId: "",
-  personId: ""
+  personId: "",
+  recipeItems: [],
+  componentSelectId: "",
+  componentQuery: ""
 });
+const bindRecipeOptions = ref([]);
+const bindRecipeLoading = ref(false);
+const createComponentOptions = ref([]);
+const createComponentLoading = ref(false);
+const createSimilarProducts = ref([]);
+const createSimilarProductsLoading = ref(false);
+let createSimilarProductsTimer = null;
+const createCompositionDialogVisible = ref(false);
+const createdInventoryProductId = ref(null);
+const createComponentCategory = ref("single");
+const createComponentListPage = ref(1);
+const createComponentListPageSize = ref(INVENTORY_LIST_PAGE_SIZE);
+const createComponentProductTotal = ref(0);
+
+const createComponentCategoryOptions = [
+  { label: "单品", value: "single" },
+  { label: "组合", value: "combo" },
+  { label: "配件", value: "accessory" }
+];
 
 const createForm = reactive({
   personId: "",
@@ -230,13 +319,42 @@ const createForm = reactive({
   shippingMethod: "",
   logisticsRuleId: "",
   urgency: "normal",
-  neededBy: ""
+  neededBy: "",
+  stockUnit: "个",
+  structureType: "single",
+  isAccessory: 0,
+  compositionItems: [],
+  componentSelectId: "",
+  componentQuery: ""
 });
 
 
 
 const bindProductQuery = ref("");
+const bindProductCategory = ref("");
+const bindProductSearchMode = ref("fuzzy");
+const bindProductStructuredFilters = reactive({
+  inventoryCategory: "",
+  productName: "",
+  vehicleBrand: "",
+  fitmentType: "",
+  vehicleModel: [],
+  accessoryName: "",
+  color: "",
+  material: [],
+  process: ""
+});
 const inventoryListPage = ref(1);
+const inventoryListPageSize = ref(INVENTORY_LIST_PAGE_SIZE);
+const inventoryProductEditorVisible = ref(false);
+const inventoryProductEditorValue = ref(null);
+const inventoryProductEditorLoadingId = ref(0);
+const inventoryProductEditorMode = ref("edit");
+const inventoryProductEditorCreateContext = ref(null);
+const compositionDialogVisible = ref(false);
+const compositionDialogReadOnly = ref(false);
+const compositionDialogProduct = ref(null);
+const compositionDialogRefreshKey = ref(0);
 const inventoryProductSearchTimer = ref(null);
 const orderRouteBootstrapDone = ref(false);
 
@@ -252,6 +370,23 @@ const detailProfit = computed(() => buildOrderProfitDetail(
   detailProfitSnapshot.value,
   { formatMoney, formatSignedMoney, formatPercent }
 ));
+const detailLossRows = computed(() => (detailProfit.value?.rows || []).filter((row) => (
+  ["purchase", "domestic", "international", "packaging", "commission", "collecting", "service", "aftersale", "other"].includes(row.key)
+  && (Math.abs(Number(row.estimated || 0)) > 0.005 || Math.abs(Number(row.actual || 0)) > 0.005)
+)));
+const detailLossCostTotal = computed(() => {
+  const summary = detailProfit.value?.summary || {};
+  return summary.actualCostTotal !== null && summary.actualCostTotal !== undefined
+    ? Number(summary.actualCostTotal || 0)
+    : Number(summary.estimatedCostTotal || 0);
+});
+const detailFinalLoss = computed(() => {
+  const summary = detailProfit.value?.summary || {};
+  const profit = summary.actualProfitReady && summary.actualProfit !== null && summary.actualProfit !== undefined
+    ? Number(summary.actualProfit || 0)
+    : Number(summary.estimatedProfit || 0);
+  return Math.max(0, -profit);
+});
 const detailProfitItemCards = computed(() => detailItems.value.map((item, index) => ({
   id: item.id || `${item.ozon_sku || "item"}-${index}`,
   index: index + 1,
@@ -261,14 +396,18 @@ const detailProfitItemCards = computed(() => detailItems.value.map((item, index)
   imageUrl: detailItemImageUrl(item),
   saleAmount: detailItemSaleAmount(item),
   estimatedProfit: Number(item.estimated_profit || item.net_profit_cny || 0),
-  actualProfit: item.settlement_state === "accrued" || item.profit_status === "accrued"
+  actualProfit: item.settlement_state === "accrued" && item.profit_status === "accrued"
     ? Number(item.actual_profit || item.net_profit_cny || 0)
     : null,
-  statusText: item.settlement_state === "accrued" || item.profit_status === "accrued" ? "已结算" : "预估中"
+  statusText: item.settlement_state === "accrued" && item.profit_status === "accrued" ? "已结算" : "预估中"
 })));
 const selectedInventoryProduct = computed(() => (
   inventoryOptions.products.find((row) => Number(row.id) === Number(bindForm.productId)) || null
 ));
+const bindRecipeAvailable = computed(() => {
+  const values = bindForm.recipeItems.map((item) => recipeItemAvailable(item));
+  return values.length ? Math.min(...values) : null;
+});
 const inventoryProductTotal = computed(() => inventoryOptions.productTotal);
 const filteredInventoryProducts = computed(() => ({ length: inventoryOptions.productTotal }));
 const pagedInventoryProducts = computed(() => inventoryOptions.products);
@@ -289,6 +428,16 @@ const createChargeableWeightG = computed(() => (
   createWeightG.value <= 500
     ? createWeightG.value
     : Math.max(createWeightG.value, createVolumetricWeightG.value)
+));
+const createCompositionAvailable = computed(() => {
+  const values = createForm.compositionItems.map((item) => recipeItemAvailable(item));
+  return values.length ? Math.min(...values) : null;
+});
+const createProductStructureLabel = computed(() => (
+  createForm.structureType === "kit" ? `套装产品 / ${createForm.compositionItems.length} 个组成` : "单品产品"
+));
+const createProductAvailableLabel = computed(() => (
+  createForm.structureType === "kit" ? String(createCompositionAvailable.value ?? "-") : "-"
 ));
 const sortedInventoryLogisticsRules = computed(() => (
   [...(inventoryOptions.logisticsRules || [])]
@@ -338,8 +487,39 @@ function inventoryProductSkuText(row) {
   return row?.mapped_skus || "未绑定 SKU";
 }
 
+function inventoryProductSkuPreviews(row) {
+  return Array.isArray(row?.bound_mappings) ? row.bound_mappings.slice(0, 3) : [];
+}
+
+function inventoryProductSkuImage(item) {
+  return item?.online_image_url || "";
+}
+
 function inventoryProductOwner(row) {
   return row?.owner_name || "未分配负责人";
+}
+
+function inventoryProductBasicLines(row) {
+  const lines = [];
+  const cost = Number(row?.purchase_cost || 0);
+  const weight = Number(row?.package_weight_g || 0);
+  const size = [row?.length_cm, row?.width_cm, row?.height_cm].map((value) => Number(value || 0));
+  lines.push(`${inventoryProductTypeText(row)} / 单位 ${row?.stock_unit || "个"}`);
+  if (row?.ozon_category_name) lines.push(`类目 ${row.ozon_category_name}`);
+  if (cost) lines.push(`成本 ¥${cost.toFixed(1)}`);
+  if (weight) lines.push(`重量 ${Math.round(weight)}g`);
+  if (size.every((value) => value > 0)) lines.push(`规格 ${size.map((value) => Math.round(value)).join(" x ")}cm`);
+  return lines.length ? lines : ["未完善基础信息"];
+}
+
+function inventoryProductTypeText(row) {
+  return Number(row?.is_accessory || 0) ? "配件库存" : "库存产品";
+}
+
+function inventoryProductCategoryText(row) {
+  if (Number(row?.is_accessory || 0)) return "配件";
+  if (Number(row?.component_count || 0) > 0) return "组合";
+  return "单品";
 }
 
 function supplierName(id) {
@@ -357,6 +537,28 @@ function inventoryProductImage(row) {
   return row?.product_image_url || row?.image_url || "";
 }
 
+function inventoryProductLocalStock(row) {
+  return Number(row?.local_stock ?? row?.stock ?? row?.available_stock ?? row?.quantity ?? 0) || 0;
+}
+
+function recipeItemLabel(item) {
+  return item?.product_name || item?.name || item?.inventory_id || item?.code || `#${item?.product_id || item?.id || "-"}`;
+}
+
+function recipeItemCode(item) {
+  return item?.inventory_id || item?.code || `#${item?.product_id || item?.id || "-"}`;
+}
+
+function recipeItemImage(item) {
+  return item?.product_image_url || item?.image_url || "";
+}
+
+function recipeItemAvailable(item) {
+  const quantity = Number(item?.quantity || 0);
+  if (!quantity) return 0;
+  return Math.floor(Number(item?.local_stock || 0) / quantity);
+}
+
 function preferredPersonId() {
   return String(inventoryOptions.people[0]?.id || "");
 }
@@ -366,17 +568,29 @@ function normalizePagedRows(payload) {
   return Array.isArray(payload?.rows) ? payload.rows : [];
 }
 
-watch(bindProductQuery, () => {
+watch([bindProductQuery, bindProductCategory, bindProductSearchMode, bindProductStructuredFilters], () => {
   if (!inventoryDialog.visible || inventoryDialog.mode !== "bind") return;
-  inventoryListPage.value = 1;
   if (inventoryProductSearchTimer.value) window.clearTimeout(inventoryProductSearchTimer.value);
   inventoryProductSearchTimer.value = window.setTimeout(() => {
+    if (inventoryListPage.value !== 1) {
+      inventoryListPage.value = 1;
+      return;
+    }
     loadInventoryProductOptions();
   }, 250);
-});
+}, { deep: true });
 
 watch(inventoryListPage, () => {
   if (!inventoryDialog.visible || inventoryDialog.mode !== "bind") return;
+  loadInventoryProductOptions();
+});
+
+watch(inventoryListPageSize, () => {
+  if (!inventoryDialog.visible || inventoryDialog.mode !== "bind") return;
+  if (inventoryListPage.value !== 1) {
+    inventoryListPage.value = 1;
+    return;
+  }
   loadInventoryProductOptions();
 });
 
@@ -449,6 +663,8 @@ function rowStateLabel(row) {
   const logisticsStatus = String(row?.logistics_status || "").toLowerCase();
   const text = `${status} ${stage} ${logisticsStatus}`.trim();
 
+  if (text.includes("return")) return "已退货";
+  if (text.includes("reject") || text.includes("not_accepted") || text.includes("unclaimed")) return "拒收/未领取";
   if (["awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service", "posting_transferring", "posting_in_carriage", "posting_transferring_to_delivery"].some((value) => text.includes(value))) {
     return "等待发货";
   }
@@ -471,6 +687,8 @@ function rowDisplayStateKey(row) {
   const logisticsStatus = String(row?.logistics_status || "").toLowerCase();
   const text = `${status} ${stage} ${logisticsStatus}`.trim();
 
+  if (text.includes("return")) return "returned";
+  if (text.includes("reject") || text.includes("not_accepted") || text.includes("unclaimed")) return "rejected";
   if (["awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service", "posting_transferring", "posting_in_carriage", "posting_transferring_to_delivery"].some((value) => text.includes(value))) {
     return "awaiting_deliver";
   }
@@ -521,12 +739,11 @@ function rowAvailableActions(row) {
     || logisticsText.includes("娣峰窛");
   const isAwaitingPackaging = ["awaiting_packaging", "unbound", "stock_issue"].includes(displayStateKey);
   const beforeTransit = !isCancelled && !isDelivered && !isDispute && !isDelivering;
-  const procurementTotal = Number(row?.procurement_total_item_count || 0);
-  const procurementHandledCount = Number(row?.procurement_handled_item_count || 0);
-  const procurementHandled = procurementTotal > 0 && procurementHandledCount >= procurementTotal;
   const apiActions = row?.availableActions && typeof row.availableActions === "object" ? row.availableActions : {};
   const showPrepare = beforeTransit && !isFbp && isAwaitingPackaging && apiActions.prepare !== false;
-  const showPurchase = beforeTransit && (isAwaitingDeliver || isAwaitingPackaging) && !procurementHandled && apiActions.purchase !== false;
+  const quantitySummary = Number(row?.total_quantity || row?.quantity_total || row?.quantity || row?.item_count || 1);
+  const showSplitPrepare = beforeTransit && !isFbp && quantitySummary > 1 && (isAwaitingPackaging || isAwaitingDeliver);
+  const showPurchase = beforeTransit && (isAwaitingDeliver || isAwaitingPackaging) && apiActions.purchase !== false;
   const showPrint = beforeTransit && isAwaitingDeliver && apiActions.print !== false;
   const canPrint = showPrint && !isFbp && (Boolean(apiActions.print) || printed || isAwaitingDeliver);
   return {
@@ -536,6 +753,8 @@ function rowAvailableActions(row) {
     purchase: showPurchase,
     showPrint,
     showPrepare,
+    splitPrepare: showPrepare,
+    showSplitPrepare,
     showPurchase,
     profit: apiActions.profit !== false
   };
@@ -577,17 +796,34 @@ function detailItemImageUrl(item = {}) {
 }
 
 function detailItemSaleAmount(item = {}) {
+  const outcome = String(detailOrder.value?.outcome_type || "");
+  if (outcome === "cancelled_pre_fulfillment") return 0;
+  if (["rejected_unclaimed", "after_delivery_return"].includes(outcome)) {
+    const hasRetainedSale = detailFinance.value.some((row) => Math.abs(Number(row.accruals_for_sale_cny || row.accruals_for_sale || 0)) > 0.005);
+    if (!hasRetainedSale) return 0;
+    return Number(item.sale_amount_cny || 0);
+  }
   return Number(item.sale_amount_cny || 0) || (Number(item.sale_price || 0) * Number(item.quantity || 0));
 }
 
 function buildProfitSummary(row) {
   const estimated = Number(row.estimated_profit || 0);
   const actual = Number(row.actual_profit || 0);
+  const settlementStates = splitCsv(row.settlement_states).map((value) => value.toLowerCase());
+  const profitStatuses = splitCsv(row.profit_statuses).map((value) => value.toLowerCase());
+  const fullyAccrued = settlementStates.length > 0
+    && profitStatuses.length > 0
+    && settlementStates.every((value) => value === "accrued")
+    && profitStatuses.every((value) => value === "accrued");
+  const effective = fullyAccrued ? actual : estimated;
   return {
     revenue: Number(row.revenue || 0),
     estimated,
     actual,
-    hasActual: Math.abs(actual) > 0.000001 || String(row.status || "").toLowerCase() === "delivered"
+    hasActual: fullyAccrued,
+    effective,
+    effectiveType: fullyAccrued ? "actual" : "estimated",
+    alertLevel: effective < 0 ? "loss" : effective < 1 ? "low" : ""
   };
 }
 
@@ -603,7 +839,9 @@ function buildLogisticsSummary(row) {
     hasSeparateTrackingNumber: Boolean(trackingNumber && shipmentNumber && trackingNumber !== shipmentNumber),
     deliveryMethod: row.delivery_method_name || row.delivery_method || row.shipping_method || "",
     deliveryMethodLabel: row.fulfillment_type_label || "FBS",
-    resolvedRuleName: row.resolved_logistics_rule_name || "--",
+    ozonMethodName: row.delivery_method_name || row.logistics_channel || "--",
+    resolvedRuleName: row.billing_logistics_rule_name || row.resolved_logistics_rule_name || "--",
+    ruleSourceLabel: row.billing_logistics_rule_name ? "利润计费" : "物流识别",
     warehouse: row.warehouse_name || "",
     channel: row.logistics_channel || "",
     deadline: row.shipment_deadline_at || "",
@@ -628,12 +866,17 @@ function buildProcurementState(row = {}) {
   if (!total || !handled) return { handled: false, label: "", detail: "" };
   const types = splitCsv(row.procurement_handling_types);
   const stockCount = types.includes("stock_available");
+  const incomingCount = types.includes("incoming_available");
   const requestCount = types.includes("procurement_request");
-  const detail = stockCount && requestCount
-    ? "库存可满足/已提交采购"
-    : stockCount
-      ? "库存可满足"
-      : "已提交采购";
+  const detail = incomingCount && requestCount
+    ? "采购在途可满足/已提交采购"
+      : incomingCount
+      ? "采购在途可满足"
+      : stockCount && requestCount
+        ? "库存可满足/已提交采购"
+        : stockCount
+          ? "库存可满足"
+          : "已提交采购";
   return {
     handled: handled >= total,
     partial: handled > 0 && handled < total,
@@ -652,36 +895,54 @@ function buildTableRow(row) {
   const orderNo = String(row?.posting_number || row?.order_number || "").trim();
   const stockSummary = productDisplayRows.reduce((summary, item) => ({
     fbs: summary.fbs + Number(item.stock?.fbs || 0),
-    fbp: summary.fbp + Number(item.stock?.fbp || 0)
-  }), { fbs: 0, fbp: 0 });
+    fbp: summary.fbp + Number(item.stock?.fbp || 0),
+    local: summary.local + Number(item.stock?.local || 0)
+  }), { fbs: 0, fbp: 0, local: 0 });
   const quantitySummary = Number(row.total_quantity || row.quantity_total || row.quantity || row.item_count || 1);
   const productIds = splitCsv(row.product_ids).map((item) => Number(item)).filter(Boolean);
   const productNames = splitCsv(row.product_names);
   const seenProductIds = new Set();
   const inventorySummaries = productDisplayRows
-    .filter((item) => Number(item.productId || 0) > 0)
+    .filter((item) => Number(item.productId || 0) > 0 || item.inventoryMode === "combo")
     .map((item) => {
       const productId = Number(item.productId || 0);
       const fallbackIndex = productIds.findIndex((id) => Number(id) === productId);
       return {
         productId,
+        inventoryKey: productId ? `product-${productId}` : `combo-${item.sku || item.orderItemId || "sku"}`,
+        inventoryMode: item.inventoryMode || (productId ? "single" : "unbound"),
         orderItemId: Number(item.orderItemId || 0) || null,
         sku: item.sku || "",
-        productName: fallbackIndex >= 0 ? (productNames[fallbackIndex] || item.name) : (item.name || productNames[0] || "库存商品"),
+        quantity: Number(item.quantity || 0),
+        productName: item.inventoryMode === "combo"
+          ? `组合库存方案 / ${item.name || item.sku || "SKU"}`
+          : (item.inventoryName || (fallbackIndex >= 0 ? (productNames[fallbackIndex] || item.name) : (item.name || productNames[0] || "库存商品"))),
         saleAmount: Number(item.saleAmount || 0),
         estimatedProfit: Number(item.estimatedProfit || 0),
         actualProfit: Number(item.actualProfit || 0),
         actualProfitReady: Boolean(item.actualProfitReady),
         amountText: `CNY ${formatMoney(item.saleAmount || 0)}`,
-        stock: item.stock || { fbs: 0, fbp: 0 }
+        stock: item.stock || { fbs: 0, fbp: 0, local: 0 },
+        incoming: Number(item.incoming || 0),
+        componentCount: Number(item.componentCount || 0)
       };
     })
     .filter((item) => {
-      if (seenProductIds.has(item.productId)) return false;
-      seenProductIds.add(item.productId);
+      const dedupeKey = item.inventoryKey || String(item.productId || "");
+      if (seenProductIds.has(dedupeKey)) return false;
+      seenProductIds.add(dedupeKey);
       return true;
     });
-  const cancelReasonText = displayStateKey === "cancelled" ? row?.cancel_reason_label || "--" : "--";
+  const terminalOutcome = ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(String(row?.outcome_type || ""));
+  const cancelReasonText = terminalOutcome || ["cancelled", "returned", "rejected"].includes(displayStateKey)
+    ? row?.cancel_reason_label || "取消原因待同步"
+    : "--";
+  const cancelReasonMeta = cancelReasonText === "--"
+    ? ""
+    : [
+        row?.aftersale_bucket_label ? `归类：${row.aftersale_bucket_label}` : "",
+        row?.loss_profile_label ? `损失口径：${row.loss_profile_label}` : ""
+      ].filter(Boolean).join(" · ");
   const unboundItems = productDisplayRows.filter((item) => item.unbound);
   const inventoryBoundCount = inventorySummaries.length;
   const inventoryPendingCount = unboundItems.length;
@@ -702,10 +963,14 @@ function buildTableRow(row) {
     profitSummary,
     logisticsSummary,
     cancelReasonText,
+    cancelReasonMeta,
+    cancelCategoryText: terminalOutcome ? row?.aftersale_bucket_label || "原因待归类" : "--",
+    cancelInitiatorText: cancelReasonText !== "--" && row?.cancel_initiator_label ? `发起方：${row.cancel_initiator_label}` : "",
     amountText: `CNY ${formatMoney(profitSummary.revenue)}`,
     statusLabel: rowStateLabel(row),
     statusColor: rowStateColor(row),
     statusDeadlineHint: buildStatusDeadlineHint(displayStateKey, logisticsSummary),
+    qualityCheckOrder: isQualityCheckOrderRow(row),
     procurementState: buildProcurementState(row),
     availableActions: rowAvailableActions(row)
   };
@@ -744,7 +1009,11 @@ function resolveOrderInventoryContext(orderId, sku) {
     itemName,
     imageUrl: displayItem?.imageUrl || firstCsvValue(row.order_image_urls) || firstCsvValue(row.image_urls) || "",
     sourceUrl,
-    baseWeightG
+    baseWeightG,
+    lengthCm: Number(displayItem?.length_cm || displayItem?.length || row.length_cm || 0) || "",
+    widthCm: Number(displayItem?.width_cm || displayItem?.width || row.width_cm || 0) || "",
+    heightCm: Number(displayItem?.height_cm || displayItem?.height || row.height_cm || 0) || "",
+    listingPriceRub: Number(displayItem?.salePrice || displayItem?.sale_price || row.sale_price || 0) || 0
   };
 }
 
@@ -778,10 +1047,19 @@ function inventoryProductQueryString() {
   const params = new URLSearchParams({
     paged: "1",
     page: String(inventoryListPage.value),
-    pageSize: String(INVENTORY_LIST_PAGE_SIZE)
+    pageSize: String(inventoryListPageSize.value || INVENTORY_LIST_PAGE_SIZE)
   });
   const query = String(bindProductQuery.value || "").trim();
-  if (query) params.set("query", query);
+  if (bindProductSearchMode.value === "fuzzy") {
+    if (query) params.set("query", query);
+    const category = String(bindProductCategory.value || "").trim();
+    if (category) params.set("category", category);
+  } else {
+    for (const [key, rawValue] of Object.entries(bindProductStructuredFilters)) {
+      const value = Array.isArray(rawValue) ? rawValue.join(",") : String(rawValue || "").trim();
+      if (value) params.set(key, value);
+    }
+  }
   return params.toString();
 }
 
@@ -799,6 +1077,162 @@ async function loadInventoryProductOptions() {
   }
 }
 
+function createComponentProductQueryString() {
+  const params = new URLSearchParams({
+    paged: "1",
+    page: String(createComponentListPage.value),
+    pageSize: String(createComponentListPageSize.value || INVENTORY_LIST_PAGE_SIZE),
+    inventoryType: createComponentCategory.value
+  });
+  const query = String(createForm.componentQuery || "").trim();
+  if (query) params.set("query", query);
+  return params.toString();
+}
+
+async function loadCreateComponentProducts() {
+  createComponentLoading.value = true;
+  try {
+    const result = await apiClient.get(`/api/products?${createComponentProductQueryString()}`);
+    createComponentOptions.value = normalizePagedRows(result).filter((item) => Number(item.active ?? 1) !== 0);
+    createComponentProductTotal.value = Array.isArray(result) ? createComponentOptions.value.length : Number(result?.total || 0);
+  } catch (error) {
+    ElMessage.error(error.message || "加载组件商品失败");
+  } finally {
+    createComponentLoading.value = false;
+  }
+}
+
+async function searchCreateComponentProducts(query = "") {
+  createForm.componentQuery = String(query || "").trim();
+  createComponentListPage.value = 1;
+  await loadCreateComponentProducts();
+}
+
+async function changeCreateComponentCategory(category) {
+  createComponentCategory.value = category || "single";
+  createComponentListPage.value = 1;
+  await loadCreateComponentProducts();
+}
+
+async function handleCreateComponentPageChange(page) {
+  createComponentListPage.value = Number(page || 1);
+  await loadCreateComponentProducts();
+}
+
+async function handleCreateComponentPageSizeChange(pageSize) {
+  createComponentListPageSize.value = Number(pageSize || INVENTORY_LIST_PAGE_SIZE);
+  createComponentListPage.value = 1;
+  await loadCreateComponentProducts();
+}
+
+function addCreateCompositionItem(productId) {
+  const row = createComponentOptions.value.find((item) => Number(item.id) === Number(productId));
+  if (!row) return;
+  const existing = createForm.compositionItems.find((item) => Number(item.product_id) === Number(row.id));
+  if (existing) {
+    existing.quantity = Number(existing.quantity || 0) + 1;
+  } else {
+    createForm.compositionItems.push({
+      product_id: Number(row.id),
+      product_name: inventoryProductLabel(row),
+      code: row?.code || "",
+      inventory_id: row?.inventory_id || "",
+      image_url: inventoryProductImage(row),
+      stock_unit: row?.stock_unit || "个",
+      local_stock: inventoryProductLocalStock(row),
+      quantity: 1
+    });
+  }
+  createForm.structureType = "kit";
+}
+
+function createCompositionItemSelected(productId) {
+  return createForm.compositionItems.some((item) => Number(item.product_id) === Number(productId));
+}
+
+function removeCreateCompositionItem(productId) {
+  createForm.compositionItems = createForm.compositionItems.filter((item) => Number(item.product_id) !== Number(productId));
+}
+
+async function loadSkuInventoryRecipe() {
+  bindForm.mode = "single";
+  bindForm.recipeItems = [];
+  if (!inventoryDialog.onlineProductId) return;
+  try {
+    const params = new URLSearchParams({
+      online_product_id: String(inventoryDialog.onlineProductId),
+      ozon_sku: String(inventoryDialog.sku || "")
+    });
+    const result = await apiClient.get(`/api/sku-inventory-recipes?${params.toString()}`);
+    const items = Array.isArray(result?.items) ? result.items : [];
+    if (String(result?.mode || "") === "combo" && items.length) {
+      bindForm.mode = "combo";
+      bindForm.productId = "";
+      bindForm.recipeItems = items.map((item) => ({
+        product_id: Number(item.product_id),
+        product_name: item.product_name || "",
+        code: item.code || "",
+        inventory_id: item.inventory_id || "",
+        image_url: item.image_url || "",
+        stock_unit: item.stock_unit || "个",
+        local_stock: Number(item.local_stock || 0),
+        quantity: Number(item.quantity || 1)
+      }));
+    }
+  } catch (error) {
+    ElMessage.error(error.message || "加载组合方案失败");
+  }
+}
+
+async function searchBindRecipeProducts(query = "") {
+  bindForm.componentQuery = String(query || "").trim();
+  if (!bindForm.componentQuery) {
+    bindRecipeOptions.value = [];
+    return;
+  }
+  bindRecipeLoading.value = true;
+  try {
+    const params = new URLSearchParams({
+      paged: "1",
+      page: "1",
+      pageSize: "20",
+      query: bindForm.componentQuery
+    });
+    const result = await apiClient.get(`/api/products?${params.toString()}`);
+    bindRecipeOptions.value = normalizePagedRows(result).filter((item) => Number(item.active ?? 1) !== 0);
+  } catch (error) {
+    ElMessage.error(error.message || "加载组件商品失败");
+  } finally {
+    bindRecipeLoading.value = false;
+  }
+}
+
+function addBindRecipeItem(productId) {
+  const row = bindRecipeOptions.value.find((item) => Number(item.id) === Number(productId));
+  if (!row) return;
+  const existing = bindForm.recipeItems.find((item) => Number(item.product_id) === Number(row.id));
+  if (existing) {
+    existing.quantity = Number(existing.quantity || 0) + 1;
+  } else {
+    bindForm.recipeItems.push({
+      product_id: Number(row.id),
+      product_name: inventoryProductLabel(row),
+      code: row?.code || "",
+      inventory_id: row?.inventory_id || "",
+      image_url: inventoryProductImage(row),
+      stock_unit: row?.stock_unit || "个",
+      local_stock: inventoryProductLocalStock(row),
+      quantity: 1
+    });
+  }
+  bindForm.componentSelectId = "";
+  bindForm.componentQuery = "";
+}
+
+function removeBindRecipeItem(productId) {
+  bindForm.recipeItems = bindForm.recipeItems.filter((item) => Number(item.product_id) !== Number(productId));
+}
+
 async function handleInventoryProductSearch() {
   inventoryListPage.value = 1;
   await loadInventoryProductOptions();
@@ -809,8 +1243,98 @@ async function handleInventoryProductPageChange(page) {
   await loadInventoryProductOptions();
 }
 
+async function openInventoryProductEditor(row) {
+  const productId = Number(row?.id || 0);
+  if (!productId) return;
+  inventoryProductEditorLoadingId.value = productId;
+  inventoryProductEditorMode.value = "edit";
+  try {
+    inventoryProductEditorValue.value = await apiClient.get(`/api/products/${productId}`, { noCache: true });
+    inventoryProductEditorVisible.value = true;
+  } catch (error) {
+    ElMessage.error(error.message || "加载库存商品详情失败");
+  } finally {
+    inventoryProductEditorLoadingId.value = 0;
+  }
+}
+
+async function openProductCompositionDialog(productId) {
+  const id = Number(productId || 0);
+  if (!id) return;
+  await ensureInventoryOptionsLoaded();
+  compositionDialogProduct.value = { id };
+  compositionDialogReadOnly.value = false;
+  compositionDialogVisible.value = true;
+}
+
+async function viewProductCompositionDialog(productId) {
+  const id = Number(productId || 0);
+  if (!id) return;
+  compositionDialogProduct.value = { id };
+  compositionDialogReadOnly.value = true;
+  compositionDialogVisible.value = true;
+}
+
+function openQuickCreateFromComposition() {
+  inventoryProductEditorMode.value = "create";
+  inventoryProductEditorValue.value = null;
+  inventoryProductEditorVisible.value = true;
+}
+
+async function handleProductCompositionSaved() {
+  compositionDialogVisible.value = false;
+  compositionDialogProduct.value = null;
+  await Promise.all([loadInventoryProductOptions(), loadOrders({ forceRefresh: true, includeCounts: true })]);
+}
+
+async function handleInventoryProductEditorSaved({ mode, product } = {}) {
+  const createdFromOrder = mode === "create" && Boolean(inventoryProductEditorCreateContext.value?.online_product_id);
+  inventoryProductEditorVisible.value = false;
+  inventoryProductEditorValue.value = null;
+  inventoryProductEditorCreateContext.value = null;
+  ElMessage.success(createdFromOrder ? "库存商品已创建并绑定当前订单 SKU" : (mode === "create" ? "库存商品已创建" : "库存商品已更新"));
+  await Promise.all([
+    loadInventoryProductOptions(),
+    loadOrders(createdFromOrder ? { forceRefresh: true, includeCounts: true } : {})
+  ]);
+  if (inventoryDialog.visible && inventoryDialog.mode === "bind") {
+    await loadSkuInventoryRecipe();
+  }
+  if (compositionDialogVisible.value && mode === "create") {
+    compositionDialogRefreshKey.value += 1;
+  }
+  if (createdFromOrder) emit("inventory-completed", { mode: "create", product });
+}
+
+async function handleInventoryProductEditorExistingSelected(row) {
+  const context = inventoryProductEditorCreateContext.value;
+  if (!context?.online_product_id) {
+    inventoryProductEditorVisible.value = false;
+    inventoryProductEditorValue.value = null;
+    await openInventoryProductEditor(row);
+    return;
+  }
+  try {
+    await apiClient.post("/api/online-products/bind", {
+      ...context,
+      product_id: Number(row.id),
+      person_id: context.person_id || null,
+      inventory_recipe: { mode: "single", items: [] }
+    });
+    ElMessage.success("已使用现有库存商品并绑定当前订单 SKU");
+    inventoryProductEditorVisible.value = false;
+    inventoryProductEditorValue.value = null;
+    inventoryProductEditorCreateContext.value = null;
+    await loadOrders({ silent: true, forceRefresh: true, includeCounts: true });
+    emit("inventory-completed", { mode: "bind", product: row });
+  } catch (error) {
+    ElMessage.error(error.message || "绑定已有库存商品失败");
+  }
+}
+
 function resetInventoryDialog() {
   inventoryDialog.visible = false;
+  createCompositionDialogVisible.value = false;
   inventoryDialog.mode = "bind";
   inventoryDialog.submitting = false;
   inventoryDialog.orderId = null;
@@ -825,8 +1349,20 @@ function resetInventoryDialog() {
   inventoryDialog.baseName = "";
   inventoryDialog.baseWeightG = "";
   inventoryDialog.purchaseUrl = "";
+  bindForm.mode = "single";
   bindForm.productId = "";
   bindForm.personId = "";
+  bindForm.recipeItems = [];
+  bindForm.componentSelectId = "";
+  bindForm.componentQuery = "";
+  bindRecipeOptions.value = [];
+  bindRecipeLoading.value = false;
+  createComponentOptions.value = [];
+  createComponentLoading.value = false;
+  createComponentCategory.value = "single";
+  createComponentListPage.value = 1;
+  createComponentListPageSize.value = INVENTORY_LIST_PAGE_SIZE;
+  createComponentProductTotal.value = 0;
   createForm.personId = "";
   createForm.name = "";
   createForm.purchaseUrl = "";
@@ -844,8 +1380,30 @@ function resetInventoryDialog() {
   createForm.shippingMethod = "";
   createForm.urgency = "normal";
   createForm.neededBy = "";
+  createForm.stockUnit = "个";
+  createForm.structureType = "single";
+  createForm.isAccessory = 0;
+  createForm.compositionItems = [];
+  createdInventoryProductId.value = null;
+  createForm.componentSelectId = "";
+  createForm.componentQuery = "";
   bindProductQuery.value = "";
+  bindProductCategory.value = "";
+  bindProductSearchMode.value = "fuzzy";
+  Object.assign(bindProductStructuredFilters, { inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [], accessoryName: "", color: "", material: [], process: "" });
   inventoryListPage.value = 1;
+  inventoryListPageSize.value = INVENTORY_LIST_PAGE_SIZE;
+  inventoryProductEditorVisible.value = false;
+  inventoryProductEditorValue.value = null;
+  inventoryProductEditorLoadingId.value = 0;
+  inventoryProductEditorMode.value = "edit";
+  inventoryProductEditorCreateContext.value = null;
+  createSimilarProducts.value = [];
+  createSimilarProductsLoading.value = false;
+  if (createSimilarProductsTimer) {
+    window.clearTimeout(createSimilarProductsTimer);
+    createSimilarProductsTimer = null;
+  }
   inventoryOptions.products = [];
   inventoryOptions.productTotal = 0;
   if (inventoryProductSearchTimer.value) {
@@ -903,21 +1461,18 @@ async function previewPrintLabels() {
   if (!ids.length) return;
   printDialog.previewing = true;
   try {
-    const response = await apiClient.blobResponse("/api/orders/package-label", {
-      method: "POST",
-      body: JSON.stringify({
-        order_ids: ids,
-        require_all: true,
-        printer: selectedPrintPreset.value.printer,
-        print_settings: buildPrintSettings(),
-        preset: selectedPrintPreset.value.value,
-        paper_size: selectedPrintPreset.value.value,
-        orientation: printDialog.orientation
-      })
+    const result = await previewOrderLabels(ids, {
+      printer: selectedPrintPreset.value.printer,
+      printSettings: buildPrintSettings(),
+      preset: selectedPrintPreset.value.value,
+      paperSize: selectedPrintPreset.value.value,
+      orientation: printDialog.orientation
     });
-    const url = URL.createObjectURL(response.blob);
-    window.open(url, "_blank", "noopener");
-    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    if (result?.confirmed) {
+      orderDetailCache.clear();
+      await loadOrders({ includeCounts: true });
+      ElMessage.success("已记录面单打印时间");
+    }
   } catch (error) {
     ElMessage.error(`预览失败：${error?.message || "未知错误"}`);
   } finally {
@@ -1004,8 +1559,9 @@ function hasAftersalesReturnContext() {
 
 function backToAftersales() {
   router.push({
-    path: "/profit/aftersales",
+    path: "/profit/monthly-billing",
     query: {
+      tab: "aftersales",
       from: String(route.query.returnFrom || ""),
       to: String(route.query.returnTo || ""),
       shopId: String(route.query.returnShopId || "all"),
@@ -1026,6 +1582,16 @@ async function bootstrapFromRoute() {
   vm.filters.searchQuery = String(orderId);
   vm.filters.page = 1;
   await submitFilters();
+  const routeAction = String(route.query.action || "").trim();
+  const routeSku = String(route.query.sku || "").trim();
+  if (routeAction === "bind" && routeSku) {
+    await handleOpenBindProductFromOrder(orderId, routeSku);
+    return;
+  }
+  if (routeAction === "create" && routeSku) {
+    await handleOpenCreateProductFromOrder(orderId, routeSku);
+    return;
+  }
   await openProfitDetail(orderId);
 }
 
@@ -1058,6 +1624,100 @@ async function handlePrepareOrder(orderId) {
   orderDetailCache.delete(Number(orderId));
 }
 
+function splitPackageQuantity(pkg, itemId) {
+  return Number(pkg?.quantities?.[itemId] || 0);
+}
+
+function updateSplitPackageQuantity(pkg, item, value) {
+  const next = Math.max(0, Math.min(Number(item.quantity || 0), Math.floor(Number(value || 0))));
+  pkg.quantities[item.id] = next;
+}
+
+function distributeSplitPackages() {
+  const packages = [{ quantities: {} }, { quantities: {} }];
+  splitOrderDialog.items.forEach((item, index) => {
+    const quantity = Number(item.quantity || 0);
+    if (quantity > 1) {
+      packages[0].quantities[item.id] = Math.ceil(quantity / 2);
+      packages[1].quantities[item.id] = Math.floor(quantity / 2);
+    } else {
+      packages[index % 2].quantities[item.id] = quantity;
+      packages[(index + 1) % 2].quantities[item.id] = 0;
+    }
+  });
+  splitOrderDialog.packages = packages;
+}
+
+function addSplitPackage() {
+  splitOrderDialog.packages.push({ quantities: {} });
+}
+
+function removeSplitPackage(index) {
+  if (splitOrderDialog.packages.length <= 2) return;
+  const removed = splitOrderDialog.packages[index];
+  const targetIndex = index === 0 ? 1 : 0;
+  const target = splitOrderDialog.packages[targetIndex];
+  for (const item of splitOrderDialog.items) {
+    target.quantities[item.id] = splitPackageQuantity(target, item.id) + splitPackageQuantity(removed, item.id);
+  }
+  splitOrderDialog.packages.splice(index, 1);
+}
+
+async function openSplitOrderDialog(orderId) {
+  splitOrderDialog.visible = true;
+  splitOrderDialog.loading = true;
+  splitOrderDialog.orderId = Number(orderId);
+  splitOrderDialog.items = [];
+  splitOrderDialog.packages = [];
+  try {
+    const detail = await fetchOrderDetail(orderId);
+    const items = (detail?.items || []).map((item) => ({
+      id: Number(item.id),
+      sku: String(item.ozon_sku || item.mapped_ozon_sku || "-"),
+      name: String(item.product_name || item.online_product_name || item.ozon_name || item.ozon_sku || "商品"),
+      quantity: Number(item.quantity || 0)
+    })).filter((item) => item.id && item.quantity > 0);
+    const totalQuantity = items.reduce((sum, item) => sum + item.quantity, 0);
+    if (totalQuantity < 2) {
+      splitOrderDialog.visible = false;
+      ElMessage.warning("该订单只有 1 件商品，无需拆分包裹");
+      return;
+    }
+    splitOrderDialog.postingNumber = String(detail?.order?.posting_number || orderId);
+    splitOrderDialog.items = items;
+    distributeSplitPackages();
+  } catch (error) {
+    splitOrderDialog.visible = false;
+    ElMessage.error(error?.message || "订单商品加载失败");
+  } finally {
+    splitOrderDialog.loading = false;
+  }
+}
+
+async function submitSplitOrder() {
+  if (splitOrderValidation.value || splitOrderDialog.submitting) return;
+  splitOrderDialog.submitting = true;
+  try {
+    const packages = splitOrderDialog.packages.map((pkg) => ({
+      products: splitOrderDialog.items
+        .map((item) => ({
+          order_item_id: item.id,
+          quantity: splitPackageQuantity(pkg, item.id)
+        }))
+        .filter((item) => item.quantity > 0)
+    }));
+    const result = await prepareSplitOrder(splitOrderDialog.orderId, packages);
+    orderDetailCache.delete(Number(splitOrderDialog.orderId));
+    splitOrderDialog.visible = false;
+    await loadOrders({ includeCounts: true });
+    ElMessage.success(`已拆分为 ${Number(result?.package_count || packages.length)} 个包裹并完成备货`);
+  } catch (error) {
+    ElMessage.error(error?.message || "拆分备货失败");
+  } finally {
+    splitOrderDialog.submitting = false;
+  }
+}
+
 async function handlePrintOrder(orderId) {
   openPrintDialog([orderId]);
 }
@@ -1069,7 +1729,7 @@ async function showQualityRules() {
     const rules = await openQualityRules();
     const list = Array.isArray(rules) ? rules : [];
     qualityDialog.prefixesText = list.map((item) => item.prefix).filter(Boolean).join("\n");
-    qualityDialog.note = list[0]?.note || "命中这些前缀的订单会标记为质检单。";
+    qualityDialog.note = list[0]?.note || "订单号命中这些前缀时会标记为质检单。";
   } finally {
     qualityDialog.loading = false;
   }
@@ -1115,7 +1775,10 @@ async function handleOpenOrderProcurement(orderId) {
   try {
     orderProcurementDialog.preview = await previewOrderProcurement(orderProcurementDialog.orderId);
     initializeProcurementPurchaseInputs();
-    orderProcurementDialog.selectedItemIds = orderProcurementItems.value.map((item) => Number(item.order_item_id)).filter(Boolean);
+    orderProcurementDialog.selectedItemIds = orderProcurementItems.value
+      .filter((item) => !item.already_handled)
+      .map((item) => Number(item.order_item_id))
+      .filter(Boolean);
   } catch (error) {
     ElMessage.error(error.message || "采购预览加载失败");
     orderProcurementDialog.visible = false;
@@ -1133,7 +1796,109 @@ function initializeProcurementPurchaseInputs() {
     product.purchase_quantity = shortage;
     product.purchase_amount = Number((unitAmount * shortage).toFixed(2));
     product.purchase_shipping = Number((unitShipping * shortage).toFixed(2));
+    const recentPurchase = product.cost_history?.[0] || null;
+    product.purchase_url = product.purchase_url || recentPurchase?.purchase_url || "";
+    product.purchase_note = product.supplier_note || "";
+    product.purchase_source_type = recentPurchase?.source_type && recentPurchase.source_type !== "other"
+      ? recentPurchase.source_type
+      : product.source_type || "1688";
+    product.purchase_urgency = product.urgency || "normal";
   }
+}
+
+function procurementTrendType(product) {
+  return {
+    rising: "danger",
+    stable: "success",
+    declining: "info",
+    accelerated: "warning",
+    dormant: "info",
+    sporadic: "warning",
+    none: "info"
+  }[product?.sales_trend] || "info";
+}
+
+function procurementModeType(product) {
+  return {
+    bulk: "danger",
+    single: "warning",
+    hold: "success"
+  }[product?.purchase_mode] || "info";
+}
+
+function procurementCoverageText(product) {
+  const days = Number(product?.coverage_days);
+  return Number.isFinite(days) ? `${days.toFixed(1)} 天` : "暂无销量";
+}
+
+function procurementCurrentUnitCost(product) {
+  const quantity = Number(product?.purchase_quantity || 0);
+  return quantity > 0 ? Number(product?.purchase_amount || 0) / quantity : 0;
+}
+
+function procurementPreviousUnitCost(product) {
+  return Number(product?.cost_history?.[0]?.unit_cost || 0);
+}
+
+function procurementCostVariance(product) {
+  const current = procurementCurrentUnitCost(product);
+  const previous = procurementPreviousUnitCost(product);
+  if (!(current > 0) || !(previous > 0)) return null;
+  const amount = current - previous;
+  return {
+    amount,
+    ratio: amount / previous,
+    abnormal: Math.abs(amount) >= 2 && Math.abs(amount / previous) >= 0.25
+  };
+}
+
+function procurementCostVarianceText(product) {
+  const variance = procurementCostVariance(product);
+  if (!variance) return "暂无可比历史";
+  const sign = variance.ratio > 0 ? "+" : "";
+  return `较上批 ${sign}${formatPercent(variance.ratio * 100)}`;
+}
+
+function procurementCostTrendType(product) {
+  const variance = procurementCostVariance(product);
+  if (!variance) return "info";
+  if (variance.abnormal) return "danger";
+  return Math.abs(variance.ratio) >= 0.1 ? "warning" : "success";
+}
+
+function procurementCostHistoryDate(value) {
+  return value ? formatDateTime(value) : "-";
+}
+
+function procurementCostHistorySummary(product) {
+  const rows = Array.isArray(product?.cost_history) ? product.cost_history : [];
+  if (!rows.length) return null;
+  const costs = rows.map((row) => Number(row.unit_cost || 0)).filter((value) => value > 0);
+  const quantity = rows.reduce((sum, row) => sum + Number(row.quantity || 0), 0);
+  const amount = rows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  return {
+    count: rows.length,
+    min: costs.length ? Math.min(...costs) : 0,
+    max: costs.length ? Math.max(...costs) : 0,
+    weighted: quantity > 0 ? amount / quantity : 0
+  };
+}
+
+function applyProcurementQuantity(product, mode) {
+  if (!product) return;
+  const previousQuantity = Math.max(0, Number(product.purchase_quantity || 0));
+  const nextQuantity = Math.max(0, Math.round(Number(
+    mode === "suggested" ? product.suggested_purchase_qty : product.shortage_quantity
+  ) || 0));
+  const unitAmount = previousQuantity > 0
+    ? Number(product.purchase_amount || 0) / previousQuantity
+    : Number(product.estimated_amount || 0) / Math.max(1, Number(product.total_quantity || 1));
+  const unitShipping = previousQuantity > 0
+    ? Number(product.purchase_shipping || 0) / previousQuantity
+    : Number(product.estimated_shipping || 0) / Math.max(1, Number(product.total_quantity || 1));
+  product.purchase_quantity = nextQuantity;
+  product.purchase_amount = Number((unitAmount * nextQuantity).toFixed(2));
+  product.purchase_shipping = Number((unitShipping * nextQuantity).toFixed(2));
 }
 
 function selectedProcurementProductIds() {
@@ -1152,12 +1917,35 @@ function procurementPurchasePayload() {
       product_id: Number(product.product_id),
       quantity: Number(product.purchase_quantity || 0),
       amount: Number(product.purchase_amount || 0),
-      shipping_amount: Number(product.purchase_shipping || 0)
+      shipping_amount: Number(product.purchase_shipping || 0),
+      purchase_url: String(product.purchase_url || "").trim(),
+      note: String(product.purchase_note || "").trim(),
+      source_type: product.purchase_source_type || "1688",
+      urgency: product.purchase_urgency || "normal",
+      supplier_id: product.supplier_id || null
     }));
 }
 
-function validateProcurementPurchaseInputs() {
-  return true;
+async function validateProcurementPurchaseInputs() {
+  const selectedProducts = selectedProcurementProductIds();
+  const abnormalProducts = orderProcurementProducts.value.filter((product) => (
+    selectedProducts.has(Number(product.product_id)) && procurementCostVariance(product)?.abnormal
+  ));
+  if (!abnormalProducts.length) return true;
+  const details = abnormalProducts.map((product) => {
+    const variance = procurementCostVariance(product);
+    return `「${product.product_name || product.product_code}」本次 ¥${formatMoney(procurementCurrentUnitCost(product))}/件，上一批 ¥${formatMoney(procurementPreviousUnitCost(product))}/件，变动 ${variance.ratio > 0 ? "+" : ""}${formatPercent(variance.ratio * 100)}`;
+  }).join("\n");
+  try {
+    await ElMessageBox.confirm(
+      `${details}\n\n采购单价波动较大，请确认采购数量和货款没有填错。`,
+      "采购成本异常确认",
+      { type: "warning", confirmButtonText: "数据无误，继续生成", cancelButtonText: "返回检查" }
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function handleProcurementQuantityChange(product) {
@@ -1188,7 +1976,7 @@ async function handleAdjustStockDebt(product) {
     initializeProcurementPurchaseInputs();
     const availableIds = new Set(orderProcurementItems.value.map((item) => Number(item.order_item_id)).filter(Boolean));
     orderProcurementDialog.selectedItemIds = selectedIds.filter((id) => availableIds.has(Number(id)));
-    await loadOrders();
+    await loadOrders({ forceRefresh: true, includeCounts: true });
   } catch (error) {
     if (error !== "cancel") ElMessage.error(error.message || "历史欠账冲正失败");
   } finally {
@@ -1202,7 +1990,7 @@ async function submitOrderProcurement() {
     ElMessage.warning("请至少选择一条关联订单");
     return;
   }
-  if (!validateProcurementPurchaseInputs()) return;
+  if (!await validateProcurementPurchaseInputs()) return;
   orderProcurementDialog.submitting = true;
   try {
     const result = await createOrderProcurementRequests(orderProcurementDialog.orderId, {
@@ -1218,7 +2006,7 @@ async function submitOrderProcurement() {
       ElMessage.info("当前没有新的待采购订单明细");
     }
     orderProcurementDialog.visible = false;
-    await loadOrders();
+    await loadOrders({ forceRefresh: true, includeCounts: true });
   } catch (error) {
     ElMessage.error(error.message || "生成采购建议失败");
   } finally {
@@ -1276,9 +2064,19 @@ async function handleOpenBindProductFromOrder(orderId, sku) {
   inventoryDialog.imageUrl = context.imageUrl;
   bindForm.productId = context.currentProductId ? String(context.currentProductId) : "";
   bindForm.personId = preferredPersonId();
+  bindForm.mode = context.currentProductId ? "single" : "single";
+  bindForm.recipeItems = [];
+  bindForm.componentSelectId = "";
+  bindForm.componentQuery = "";
+  bindRecipeOptions.value = [];
   bindProductQuery.value = "";
+  bindProductCategory.value = "";
+  bindProductSearchMode.value = "fuzzy";
+  Object.assign(bindProductStructuredFilters, { inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [], accessoryName: "", color: "", material: [], process: "" });
   inventoryListPage.value = 1;
+  inventoryListPageSize.value = INVENTORY_LIST_PAGE_SIZE;
   await loadInventoryProductOptions();
+  await loadSkuInventoryRecipe();
 }
 
 async function handleOpenCreateProductFromOrder(orderId, sku) {
@@ -1288,53 +2086,122 @@ async function handleOpenCreateProductFromOrder(orderId, sku) {
     return;
   }
   await ensureInventoryOptionsLoaded();
-  inventoryDialog.mode = "create";
-  inventoryDialog.visible = true;
-  inventoryDialog.orderId = Number(orderId);
-  inventoryDialog.orderItemId = context.orderItemId;
-  inventoryDialog.sku = context.sku;
-  inventoryDialog.onlineProductId = context.onlineProductId;
-  inventoryDialog.currentProductId = context.currentProductId;
-  inventoryDialog.currentProductName = context.currentProductName;
-  inventoryDialog.itemName = context.itemName;
-  inventoryDialog.imageUrl = context.imageUrl;
-  inventoryDialog.sourceUrl = context.sourceUrl;
-  inventoryDialog.baseName = context.itemName;
-  inventoryDialog.baseWeightG = context.baseWeightG;
-  inventoryDialog.purchaseUrl = context.sourceUrl;
-  createForm.personId = preferredPersonId();
-  createForm.name = context.itemName;
-  createForm.purchaseUrl = context.sourceUrl;
-  createForm.packageWeightG = context.baseWeightG || "";
-  createForm.lengthCm = "15";
-  createForm.widthCm = "10";
-  createForm.heightCm = "5";
-  createForm.supplierNote = `From Ozon SKU ${context.sku}${context.currentProductName ? ` / ${context.currentProductName}` : ""}`;
-  createForm.note = "";
-  createForm.amount = "";
-  createForm.shippingAmount = "";
-  createForm.quantity = 1;
-  createForm.supplierId = "";
-  createForm.sourcePlatform = "1688";
-  createForm.shippingMethod = "";
-  createForm.logisticsRuleId = "";
-  createForm.urgency = "normal";
-  createForm.neededBy = "";
+  const personId = preferredPersonId();
   const defaultRule = defaultLogisticsRule();
-  if (defaultRule) {
-    createForm.logisticsRuleId = String(defaultRule.id);
-    createForm.shippingMethod = defaultRule.channel || defaultRule.name || "";
+  inventoryProductEditorCreateContext.value = {
+    online_product_id: context.onlineProductId,
+    order_item_id: context.orderItemId,
+    ozon_sku: context.sku,
+    person_id: personId ? Number(personId) : null,
+    owner_person_id: personId ? Number(personId) : null
+  };
+  inventoryProductEditorMode.value = "create";
+  inventoryProductEditorValue.value = {
+    name: context.itemName,
+    image_url: context.imageUrl,
+    purchase_url: context.sourceUrl,
+    package_weight_g: context.baseWeightG || 0,
+    length_cm: context.lengthCm || 30,
+    width_cm: context.widthCm || 20,
+    height_cm: context.heightCm || 10,
+    listing_price_rub: context.listingPriceRub || 0,
+    owner_person_id: personId || "",
+    source_platform: "1688",
+    supplier_note: `来自订单 ${orderId} / Ozon SKU ${context.sku}`,
+    stock_unit: "个",
+    logistics_rule_id: defaultRule?.id || "",
+    shipping_method: defaultRule?.channel || "air_land",
+    return_rate: 0.05,
+    product_type: "main",
+    selection_status: "listed"
+  };
+  inventoryProductEditorVisible.value = true;
+}
+
+async function loadCreateSimilarProducts() {
+  if (!inventoryDialog.visible || inventoryDialog.mode !== "create" || createdInventoryProductId.value) return;
+  const query = String(createForm.name || "").trim();
+  if (query.length < 2) {
+    createSimilarProducts.value = [];
+    return;
+  }
+  createSimilarProductsLoading.value = true;
+  try {
+    const exactParams = new URLSearchParams({ paged: "1", page: "1", pageSize: "20", query });
+    const broadParams = new URLSearchParams({ paged: "1", page: "1", pageSize: "30", query, matchMode: "any" });
+    const coreQuery = inventoryProductNameGroup(query)?.[0] || query;
+    const coreParams = new URLSearchParams({ paged: "1", page: "1", pageSize: "30", query: coreQuery });
+    const [coreResult, exactResult, broadResult] = await Promise.all([
+      apiClient.get(`/api/products?${coreParams.toString()}`, { noCache: true }),
+      apiClient.get(`/api/products?${exactParams.toString()}`, { noCache: true }),
+      apiClient.get(`/api/products?${broadParams.toString()}`, { noCache: true })
+    ]);
+    const candidates = [...(coreResult?.rows || []), ...(exactResult?.rows || []), ...(broadResult?.rows || [])]
+      .filter((row, index, rows) => rows.findIndex((item) => Number(item.id) === Number(row.id)) === index);
+    createSimilarProducts.value = candidates
+      .map((row) => ({ ...row, similarity: scoreInventorySimilarity(row, { coreName: createForm.name }) }))
+      .filter((row) => row.similarity && row.similarity.score >= 45)
+      .sort((left, right) => right.similarity.score - left.similarity.score)
+      .slice(0, 5);
+  } catch {
+    createSimilarProducts.value = [];
+  } finally {
+    createSimilarProductsLoading.value = false;
   }
 }
+
+function scheduleCreateSimilarProducts() {
+  if (createSimilarProductsTimer) window.clearTimeout(createSimilarProductsTimer);
+  createSimilarProductsTimer = window.setTimeout(loadCreateSimilarProducts, 320);
+}
+
+async function bindExistingProductDuringCreate(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确认不再创建新商品，直接把当前 SKU 绑定到“${row.name}”？`,
+      "使用已有库存商品",
+      { type: "warning", confirmButtonText: "直接绑定", cancelButtonText: "继续创建" }
+    );
+  } catch {
+    return;
+  }
+  inventoryDialog.submitting = true;
+  try {
+    await apiClient.post("/api/online-products/bind", {
+      online_product_id: inventoryDialog.onlineProductId,
+      order_item_id: inventoryDialog.orderItemId,
+      ozon_sku: inventoryDialog.sku,
+      product_id: Number(row.id),
+      person_id: createForm.personId ? Number(createForm.personId) : null,
+      inventory_recipe: { mode: "single", items: [] }
+    });
+    ElMessage.success("已使用现有库存商品并完成绑定");
+    resetInventoryDialog();
+    await loadOrders({ silent: true, forceRefresh: true, includeCounts: true });
+    emit("inventory-completed", { mode: "bind", product: row });
+  } catch (error) {
+    ElMessage.error(error.message || "绑定已有库存商品失败");
+  } finally {
+    inventoryDialog.submitting = false;
+  }
+}
+
+watch(() => createForm.name, scheduleCreateSimilarProducts);
 
 async function submitInventoryDialog() {
   if (!inventoryDialog.onlineProductId) {
     ElMessage.warning("当前订单缺少在线商品 ID");
     return;
   }
-  if (inventoryDialog.mode === "bind" && !bindForm.productId) {
-    ElMessage.warning("请先选择库存商品");
-    return;
+  if (inventoryDialog.mode === "bind") {
+    if (bindForm.mode === "single" && !bindForm.productId) {
+      ElMessage.warning("请先选择库存商品");
+      return;
+    }
+    if (bindForm.mode === "combo" && !bindForm.recipeItems.length) {
+      ElMessage.warning("请先添加组合方案的组成商品");
+      return;
+    }
   }
   if (inventoryDialog.mode !== "bind") {
     if (!String(createForm.name || "").trim()) {
@@ -1357,12 +2224,37 @@ async function submitInventoryDialog() {
         online_product_id: inventoryDialog.onlineProductId,
         order_item_id: inventoryDialog.orderItemId,
         ozon_sku: inventoryDialog.sku,
-        product_id: Number(bindForm.productId),
-        person_id: bindForm.personId ? Number(bindForm.personId) : null
+        product_id: bindForm.mode === "combo" ? null : Number(bindForm.productId),
+        person_id: bindForm.personId ? Number(bindForm.personId) : null,
+        inventory_recipe: {
+          mode: bindForm.mode === "combo" ? "combo" : "single",
+          items: bindForm.mode === "combo"
+            ? bindForm.recipeItems.map((item) => ({
+              product_id: Number(item.product_id),
+              quantity: Number(item.quantity || 1)
+            }))
+            : []
+        }
       });
       ElMessage.success("库存绑定已更新");
+      resetInventoryDialog();
+      await loadOrders({ silent: true, forceRefresh: true, includeCounts: true });
+      ElMessage.success("采购状态已重新计算");
+      emit("inventory-completed", { mode: "bind", product_id: Number(bindForm.productId || 0) });
     } else {
-      await apiClient.post("/api/online-products/create-product", {
+      if (createdInventoryProductId.value) {
+        await apiClient.put(`/api/products/${createdInventoryProductId.value}/components`, {
+          composition_items: createForm.compositionItems.map((item) => ({
+            component_product_id: Number(item.product_id),
+            quantity: Number(item.quantity || 1)
+          })).filter((item) => item.component_product_id && item.quantity > 0)
+        });
+        ElMessage.success("产品组成已保存");
+        resetInventoryDialog();
+        await loadOrders();
+        return;
+      }
+      const created = await apiClient.post("/api/online-products/create-product", {
         online_product_id: inventoryDialog.onlineProductId,
         order_item_id: inventoryDialog.orderItemId,
         ozon_sku: inventoryDialog.sku,
@@ -1374,7 +2266,7 @@ async function submitInventoryDialog() {
         length_cm: createForm.lengthCm ? Number(createForm.lengthCm) : null,
         width_cm: createForm.widthCm ? Number(createForm.widthCm) : null,
         height_cm: createForm.heightCm ? Number(createForm.heightCm) : null,
-        supplier_note: createForm.supplierNote || "",
+        supplier_note: createForm.note || createForm.supplierNote || "",
         note: createForm.note || createForm.supplierNote || "",
         purchase_total_amount: createForm.amount ? Number(createForm.amount) : 0,
         domestic_shipping_total: createForm.shippingAmount ? Number(createForm.shippingAmount) : 0,
@@ -1385,12 +2277,16 @@ async function submitInventoryDialog() {
         shipping_method: createForm.shippingMethod || "cel_air_land",
         logistics_rule_id: createForm.logisticsRuleId ? Number(createForm.logisticsRuleId) : null,
         urgency: createForm.urgency || "normal",
-        needed_by: createForm.neededBy || null
+        needed_by: createForm.neededBy || null,
+        stock_unit: createForm.stockUnit || "个",
+        is_accessory: Number(createForm.isAccessory || 0) ? 1 : 0,
+        composition_items: []
       });
-      ElMessage.success("库存商品已创建");
+      createdInventoryProductId.value = Number(created?.id || 0) || null;
+      if (!createdInventoryProductId.value) throw new Error("库存商品创建后未返回产品 ID");
+      createCompositionDialogVisible.value = true;
+      ElMessage.success("基础库存已创建，请按需添加子产品");
     }
-    resetInventoryDialog();
-    await loadOrders();
   } catch (error) {
     ElMessage.error(error.message || (inventoryDialog.mode === "bind" ? "库存绑定失败" : "创建库存失败"));
   } finally {
@@ -1398,7 +2294,19 @@ async function submitInventoryDialog() {
   }
 }
 
-defineExpose({ loadOrders });
+async function openInventoryDialogFromOutside({ orderId, sku, action = "bind" } = {}) {
+  const numericOrderId = Number(orderId || 0);
+  const skuText = String(sku || "").trim();
+  if (!numericOrderId || !skuText) return;
+  vm.filters.searchType = "order";
+  vm.filters.searchQuery = String(numericOrderId);
+  vm.filters.page = 1;
+  await submitFilters();
+  if (action === "create") await handleOpenCreateProductFromOrder(numericOrderId, skuText);
+  else await handleOpenBindProductFromOrder(numericOrderId, skuText);
+}
+
+defineExpose({ loadOrders, openInventoryDialog: openInventoryDialogFromOutside });
 
 watch(() => route.query.orderId, async () => {
   orderRouteBootstrapDone.value = false;
@@ -1406,7 +2314,10 @@ watch(() => route.query.orderId, async () => {
 });
 
 onMounted(async () => {
-  await loadStatusTabPreference();
+  await Promise.all([loadStatusTabPreference(), loadLatestOrderSyncStatus()]);
+  latestOrderSyncTimer = window.setInterval(() => {
+    void loadLatestOrderSyncStatus();
+  }, 60 * 1000);
   if (route.query.orderId) {
     await bootstrapFromRoute();
     return;
@@ -1415,6 +2326,10 @@ onMounted(async () => {
   if (vm.filters.logisticsMethod && vm.filters.logisticsMethod !== "all") {
     void loadLogisticsOptions().catch(() => {});
   }
+});
+
+onBeforeUnmount(() => {
+  window.clearInterval(latestOrderSyncTimer);
 });
 </script>
 
@@ -1428,10 +2343,12 @@ onMounted(async () => {
     <OrdersToolbar
       :filters="vm.filters"
       :shops="vm.shops"
+      :logistics-carrier-options="vm.logisticsCarrierOptions"
       :logistics-method-options="vm.logisticsMethodOptions"
       :search-type-options="SEARCH_TYPE_OPTIONS"
       :sync-status="vm.syncStatus"
       :sync-running="vm.syncRunning"
+      :last-sync-text="vm.lastSyncText"
       :more-actions="vm.moreActions"
       @update:filters="vm.filters = $event"
       @submit="submitFilters"
@@ -1446,12 +2363,15 @@ onMounted(async () => {
       <OrdersStatusTabs
         :status-tabs="vm.statusTabs"
         :active-status="vm.filters.status"
+        :fulfillment-type-options="vm.fulfillmentTypeOptions"
+        :active-fulfillment-type="vm.filters.fulfillmentType"
         :print-views="vm.printViews"
         :active-print-view="vm.filters.printView"
         :mark-options="vm.markOptions"
         :active-mark-filter="vm.filters.markFilter"
         :selected-count="selectedCount"
         @change-status="changeStatus"
+        @change-fulfillment-type="changeFulfillmentType"
         @change-print-view="changePrintView"
         @change-mark-filter="changeMarkFilter"
         @configure-status-tabs="openStatusPreferenceDialog"
@@ -1470,9 +2390,13 @@ onMounted(async () => {
         @toggle-row="toggleRow"
         @open-profit="openProfitDetail"
         @prepare-order="handlePrepareOrder"
+        @split-order="openSplitOrderDialog"
         @print-order="handlePrintOrder"
         @save-mark="handleSaveMark"
         @open-bind-product-from-order="handleOpenBindProductFromOrder"
+        @edit-inventory-product="(productId) => openInventoryProductEditor({ id: productId })"
+        @open-product-components="openProductCompositionDialog"
+        @view-product-components="viewProductCompositionDialog"
         @open-create-product-from-order="handleOpenCreateProductFromOrder"
         @open-order-procurement="handleOpenOrderProcurement"
       />
@@ -1518,6 +2442,95 @@ onMounted(async () => {
           <el-button class="erp-btn erp-btn-secondary" @click="statusPreferenceDialog.visible = false">取消</el-button>
           <el-button class="erp-btn erp-btn-primary" type="primary" :loading="statusPreferenceDialog.saving" @click="saveStatusPreference">保存</el-button>
         </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="splitOrderDialog.visible"
+      title="拆分包裹并备货"
+      width="920px"
+      align-center
+      class="erp-centered-dialog orders-split-dialog"
+      destroy-on-close
+    >
+      <div v-loading="splitOrderDialog.loading" class="orders-split-dialog-body">
+        <div class="orders-split-summary">
+          <div>
+            <span>货件号</span>
+            <strong>{{ splitOrderDialog.postingNumber || "-" }}</strong>
+          </div>
+          <div>
+            <span>包裹数量</span>
+            <strong>{{ splitOrderDialog.packages.length }}</strong>
+          </div>
+          <el-button :icon="Plus" @click="addSplitPackage">新增包裹</el-button>
+          <el-button @click="distributeSplitPackages">重新均分</el-button>
+        </div>
+
+        <div class="orders-split-packages">
+          <section
+            v-for="(pkg, packageIndex) in splitOrderDialog.packages"
+            :key="packageIndex"
+            class="orders-split-package"
+          >
+            <header>
+              <strong>包裹 {{ packageIndex + 1 }}</strong>
+              <el-tooltip content="删除包裹并把数量合并到第一个包裹" placement="top">
+                <el-button
+                  :icon="Delete"
+                  circle
+                  plain
+                  type="danger"
+                  :disabled="splitOrderDialog.packages.length <= 2"
+                  aria-label="删除包裹"
+                  @click="removeSplitPackage(packageIndex)"
+                />
+              </el-tooltip>
+            </header>
+            <div v-for="item in splitOrderDialog.items" :key="item.id" class="orders-split-item-row">
+              <div class="orders-split-item-main">
+                <strong>{{ item.name }}</strong>
+                <span>SKU {{ item.sku }} · 订单 {{ item.quantity }} 件</span>
+              </div>
+              <el-input-number
+                :model-value="splitPackageQuantity(pkg, item.id)"
+                :min="0"
+                :max="item.quantity"
+                :step="1"
+                step-strictly
+                controls-position="right"
+                aria-label="包裹商品数量"
+                @update:model-value="updateSplitPackageQuantity(pkg, item, $event)"
+              />
+            </div>
+          </section>
+        </div>
+
+        <el-alert
+          v-if="splitOrderValidation"
+          :title="splitOrderValidation"
+          type="warning"
+          :closable="false"
+          show-icon
+        />
+        <el-alert
+          v-else
+          title="商品数量已全部分配，提交后 Ozon 将按这些包裹完成备货。"
+          type="success"
+          :closable="false"
+          show-icon
+        />
+      </div>
+      <template #footer>
+        <el-button @click="splitOrderDialog.visible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="splitOrderDialog.submitting"
+          :disabled="Boolean(splitOrderValidation) || splitOrderDialog.loading"
+          @click="submitSplitOrder"
+        >
+          确认拆分并备货
+        </el-button>
       </template>
     </el-dialog>
 
@@ -1601,6 +2614,28 @@ onMounted(async () => {
         </div>
 
         <div v-if="detailDialog.mode === 'profit'" class="orders-profit-detail-shell">
+          <div
+            v-if="['cancelled_pre_fulfillment', 'rejected_unclaimed', 'after_delivery_return'].includes(detailOrder.outcome_type)"
+            class="orders-profit-attribution"
+          >
+            <div>
+              <span>一级归类</span>
+              <strong>{{ detailOrder.aftersale_bucket_label || "原因待归类" }}</strong>
+            </div>
+            <div>
+              <span>具体原因</span>
+              <strong>{{ detailOrder.cancel_reason_label || "取消原因待同步" }}</strong>
+              <small v-if="detailOrder.cancel_reason_original && !detailOrder.cancel_reason_translated">
+                Ozon原文：{{ detailOrder.cancel_reason_original }}
+              </small>
+            </div>
+            <div>
+              <span>损失公式</span>
+              <strong>{{ detailOrder.loss_profile_label || "损失口径待确认" }}</strong>
+              <small>{{ detailOrder.loss_formula_text }}</small>
+            </div>
+          </div>
+
           <div v-if="detailProfitItemCards.length" class="orders-profit-item-grid">
             <article
               v-for="card in detailProfitItemCards"
@@ -1674,6 +2709,28 @@ onMounted(async () => {
             </div>
           </div>
 
+          <div v-if="detailLossRows.length" class="orders-profit-loss-breakdown">
+            <div class="orders-profit-loss-breakdown__title">
+              <strong>各项成本损失</strong>
+              <span>按照当前归类与既有损失公式展示</span>
+            </div>
+            <div v-for="row in detailLossRows" :key="row.key" class="orders-profit-loss-row">
+              <div>
+                <strong>{{ row.label }}</strong>
+                <small>{{ row.note }}</small>
+              </div>
+              <b>CNY {{ formatMoney(row.actual ?? row.estimated) }}</b>
+            </div>
+            <div class="orders-profit-loss-total">
+              <span>成本/费用合计</span>
+              <strong>CNY {{ formatMoney(detailLossCostTotal) }}</strong>
+            </div>
+            <div class="orders-profit-loss-total is-final">
+              <span>最终总损失</span>
+              <strong>CNY {{ formatMoney(detailFinalLoss) }}</strong>
+            </div>
+          </div>
+
           <el-table
             :data="detailProfit.rows"
             stripe
@@ -1719,7 +2776,8 @@ onMounted(async () => {
             <el-descriptions-item label="下单时间">{{ formatDateTime(detailOrder.ordered_at) }}</el-descriptions-item>
             <el-descriptions-item label="跟踪号">{{ detailOrder.tracking_number || "-" }}</el-descriptions-item>
             <el-descriptions-item label="物流方式">{{ detailOrder.fulfillment_type_label || "FBS" }}</el-descriptions-item>
-            <el-descriptions-item label="物流规则">{{ detailOrder.resolved_logistics_rule_name || "--" }}</el-descriptions-item>
+            <el-descriptions-item label="Ozon 履约渠道">{{ detailOrder.delivery_method_name || detailOrder.logistics_channel || "--" }}</el-descriptions-item>
+            <el-descriptions-item label="利润计费规则">{{ detailOrder.billing_logistics_rule_name || detailOrder.resolved_logistics_rule_name || "--" }}</el-descriptions-item>
           </el-descriptions>
         </template>
 
@@ -1765,7 +2823,7 @@ onMounted(async () => {
               v-model="qualityDialog.prefixesText"
               type="textarea"
               :rows="8"
-              placeholder="每行一个前缀，也可以用空格或逗号分隔"
+              placeholder="每行一个订单号前缀，也可以用空格或逗号分隔"
             />
           </el-form-item>
           <el-form-item label="规则说明">
@@ -1780,7 +2838,7 @@ onMounted(async () => {
         <el-alert
           type="info"
           :closable="false"
-          title="命中这些规则的订单会按质检单识别，用于过滤和人工处理提醒。"
+          title="订单号开头命中这些规则时会按质检单识别，用于过滤和人工处理提醒。"
         />
       </div>
       <template #footer>
@@ -1792,9 +2850,9 @@ onMounted(async () => {
     <el-dialog
       v-model="inventoryDialog.visible"
       :title="inventoryDialog.mode === 'bind' ? '修改库存绑定' : '创建库存商品'"
-      width="1080px"
+      width="92vw"
       align-center
-      class="erp-centered-dialog"
+      class="erp-centered-dialog order-inventory-modal"
       destroy-on-close
       @closed="resetInventoryDialog"
     >
@@ -1803,7 +2861,7 @@ onMounted(async () => {
           <div class="selected-product-card">
             <div class="dialog-search-head">
               <strong>{{ inventoryDialog.mode === "bind" ? "当前订单 SKU" : "创建库存前确认" }}</strong>
-              <span>{{ inventoryDialog.mode === "bind" ? "先确认订单上下文，再在右侧选择要绑定的库存商品。" : "会按当前在线商品资料创建库存商品，并自动把这个 SKU 绑定过去。" }}</span>
+              <span>{{ inventoryDialog.mode === "bind" ? "订单上下文与库存绑定目标。" : "来源商品、库存主档与 SKU 绑定结果。" }}</span>
             </div>
 
             <div class="selected-product-main selected-product-main-order">
@@ -1831,11 +2889,30 @@ onMounted(async () => {
                   </div>
                   <div class="order-inventory-info-row">
                     <span>当前绑定</span>
-                    <strong>{{ inventoryDialog.currentProductName || "未绑定库存商品" }}</strong>
+                    <div class="order-inventory-current-binding">
+                      <strong>{{ inventoryDialog.currentProductName || "未绑定库存商品" }}</strong>
+                      <el-button
+                        v-if="inventoryDialog.currentProductId"
+                        link
+                        type="primary"
+                        :loading="inventoryProductEditorLoadingId === Number(inventoryDialog.currentProductId)"
+                        @click="openInventoryProductEditor({ id: inventoryDialog.currentProductId })"
+                      >
+                        配置子产品
+                      </el-button>
+                    </div>
                   </div>
                   <div class="order-inventory-info-row">
                     <span>新绑定目标</span>
-                    <strong>{{ selectedInventoryProduct ? inventoryProductLabel(selectedInventoryProduct) : (inventoryDialog.mode === "bind" ? "请选择右侧库存商品" : "提交后自动创建") }}</strong>
+                    <strong>
+                      {{
+                        inventoryDialog.mode === "bind"
+                          ? (bindForm.mode === "combo"
+                            ? `组合方案 / ${bindForm.recipeItems.length} 个组成`
+                            : (selectedInventoryProduct ? `${inventoryProductLabel(selectedInventoryProduct)} / ${inventoryProductTypeText(selectedInventoryProduct)}` : "请选择右侧库存商品"))
+                          : createProductStructureLabel
+                      }}
+                    </strong>
                   </div>
                   <div class="order-inventory-info-row">
                     <span>在线商品 ID</span>
@@ -1869,17 +2946,41 @@ onMounted(async () => {
         <div v-if="inventoryDialog.mode === 'bind'" class="order-inventory-dialog-right">
           <div class="inventory-picker-panel">
             <div class="dialog-search-head">
-              <strong>选择库存商品</strong>
-              <span>按商品名称、库存编码、SKU、负责人筛选。表格可滚动，表头固定。</span>
+              <strong>配置 SKU 库存方案</strong>
+              <span>单个库存品用于一对一绑定；组合方案只记录组成部分，不创建独立库存产品。</span>
             </div>
-            <el-input v-model="bindProductQuery" placeholder="搜索商品名称、库存编码、SKU 或负责人" clearable />
-            <div class="order-inventory-result-meta">
-              <span>库存商品 {{ inventoryProductTotal }}</span>
-              <span>命中 {{ filteredInventoryProducts.length }}</span>
-            </div>
+            <el-segmented
+              v-model="bindForm.mode"
+              :options="[{ label: '单个库存品', value: 'single' }, { label: '组合方案', value: 'combo' }]"
+              class="inventory-binding-mode-switch"
+            />
+            <div v-if="bindForm.mode === 'single'" class="inventory-single-binding-panel">
+              <div class="inventory-search-mode-row">
+                <el-segmented v-model="bindProductSearchMode" :options="[{ label: '模糊搜索', value: 'fuzzy' }, { label: '精确搜索', value: 'exact' }]" />
+                <span>{{ bindProductSearchMode === 'fuzzy' ? '输入多个关键词快速匹配' : '按库存标准名称字段组合筛选' }}</span>
+              </div>
+              <div v-if="bindProductSearchMode === 'fuzzy'" class="inventory-search-row">
+                <el-input v-model="bindProductQuery" placeholder="搜索名称、编码、SKU，可输入多个关键词" clearable />
+                <OzonCategorySelect
+                  v-model="bindProductCategory"
+                  :show-sync="false"
+                  placeholder="选择或搜索 Ozon 类目"
+                  class="inventory-category-input"
+                />
+              </div>
+              <InventoryStructuredSearch
+                v-else
+                compact
+                :model-value="bindProductStructuredFilters"
+                @update:model-value="Object.assign(bindProductStructuredFilters, $event)"
+              />
+              <div class="order-inventory-result-meta">
+                <span>库存商品 {{ inventoryProductTotal }}</span>
+                <span>命中 {{ filteredInventoryProducts.length }}</span>
+              </div>
             <el-table
               :data="pagedInventoryProducts"
-              height="420"
+              height="100%"
               border
               stripe
               highlight-current-row
@@ -1909,11 +3010,52 @@ onMounted(async () => {
               </el-table-column>
               <el-table-column label="SKU" min-width="210">
                 <template #default="{ row }">
-                  <span class="inventory-picker-table-text">{{ inventoryProductSkuText(row) }}</span>
+                  <div v-if="inventoryProductSkuPreviews(row).length" class="inventory-sku-preview-list">
+                    <div v-for="item in inventoryProductSkuPreviews(row)" :key="item.id || `${item.shop_id}-${item.ozon_sku}`" class="inventory-sku-preview-item">
+                      <el-image
+                        v-if="inventoryProductSkuImage(item)"
+                        :src="inventoryProductSkuImage(item)"
+                        fit="cover"
+                        class="inventory-sku-preview-thumb"
+                        :preview-src-list="[inventoryProductSkuImage(item)]"
+                        preview-teleported
+                        @click.stop
+                      />
+                      <div v-else class="inventory-sku-preview-thumb inventory-sku-preview-empty">SKU</div>
+                      <div class="inventory-sku-preview-meta">
+                        <strong>{{ item.ozon_sku || item.offer_id || "-" }}</strong>
+                        <span>{{ item.shop_name || item.online_name || "已绑定在线商品" }}</span>
+                      </div>
+                    </div>
+                    <span v-if="Number(row.sku_preview_extra || 0) > 0" class="inventory-sku-preview-more">
+                      另有 {{ row.sku_preview_extra }} 个 SKU
+                    </span>
+                  </div>
+                  <span v-else class="inventory-picker-table-text">{{ inventoryProductSkuText(row) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="基础信息" min-width="190">
+                <template #default="{ row }">
+                  <div class="inventory-picker-basic-cell">
+                    <span v-for="line in inventoryProductBasicLines(row)" :key="line">{{ line }}</span>
+                  </div>
                 </template>
               </el-table-column>
               <el-table-column label="负责人" width="120">
                 <template #default="{ row }">{{ inventoryProductOwner(row) }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="120" fixed="right">
+                <template #default="{ row }">
+                  <el-button
+                    class="erp-btn-link"
+                    link
+                    type="primary"
+                    :loading="inventoryProductEditorLoadingId === Number(row.id)"
+                    @click.stop="openInventoryProductEditor(row)"
+                  >
+                    编辑
+                  </el-button>
+                </template>
               </el-table-column>
             </el-table>
             <PageFooterPagination
@@ -1921,10 +3063,87 @@ onMounted(async () => {
                page-size-label="每页"
               :total="filteredInventoryProducts.length"
               :page="inventoryListPage"
-              :page-size="INVENTORY_LIST_PAGE_SIZE"
-              :page-sizes="[10]"
+              :page-size="inventoryListPageSize"
               @update:page="inventoryListPage = $event"
+              @update:pageSize="inventoryListPageSize = $event"
             />
+            </div>
+            <div v-else class="inventory-combo-binding-panel">
+              <el-alert
+                type="info"
+                :closable="false"
+                title="组合方案挂在当前店铺 SKU 上，真正库存只来自下面的组成商品。"
+              />
+              <el-select
+                v-model="bindForm.componentSelectId"
+                filterable
+                remote
+                clearable
+                reserve-keyword
+                :remote-method="searchBindRecipeProducts"
+                :loading="bindRecipeLoading"
+                placeholder="搜索已有库存商品作为组成部分"
+                style="width: 100%"
+                @change="addBindRecipeItem"
+              >
+                <el-option
+                  v-for="item in bindRecipeOptions"
+                  :key="item.id"
+                  :label="`${item.name} / ${item.inventory_id || item.code || item.id}`"
+                  :value="item.id"
+                />
+              </el-select>
+              <el-table
+                :data="bindForm.recipeItems"
+                border
+                stripe
+                class="inventory-picker-table inventory-combo-table"
+                empty-text="还没有组成商品，请搜索后加入"
+              >
+                <el-table-column label="组成商品" min-width="300">
+                  <template #default="{ row }">
+                    <div class="inventory-recipe-product">
+                      <el-image
+                        v-if="recipeItemImage(row)"
+                        :src="recipeItemImage(row)"
+                        fit="contain"
+                        class="inventory-recipe-thumb"
+                        :preview-src-list="[recipeItemImage(row)]"
+                        preview-teleported
+                      />
+                      <div v-else class="inventory-recipe-thumb inventory-recipe-thumb-empty">库存</div>
+                      <div class="inventory-recipe-meta">
+                        <strong>{{ recipeItemLabel(row) }}</strong>
+                        <span>{{ recipeItemCode(row) }}</span>
+                      </div>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="本地库存" width="120" align="right">
+                  <template #default="{ row }">{{ Number(row.local_stock || 0) }} {{ row.stock_unit || "个" }}</template>
+                </el-table-column>
+                <el-table-column label="单件用量" width="190">
+                  <template #default="{ row }">
+                    <div class="create-composition-qty">
+                      <el-input-number v-model="row.quantity" :min="0.0001" :precision="4" :step="1" controls-position="right" />
+                      <span>{{ row.stock_unit || "个" }}</span>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="本地可组" width="110" align="right">
+                  <template #default="{ row }">{{ recipeItemAvailable(row) }}</template>
+                </el-table-column>
+                <el-table-column label="操作" width="90" align="center">
+                  <template #default="{ row }">
+                    <el-button link type="danger" @click="removeBindRecipeItem(row.product_id)">删除</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <div class="inventory-recipe-summary">
+                <span>当前 SKU 本地可发</span>
+                <strong>{{ bindRecipeAvailable ?? "-" }}</strong>
+              </div>
+            </div>
           </div>
 
         </div>
@@ -1933,27 +3152,250 @@ onMounted(async () => {
           <div class="create-workbench">
             <div class="dialog-search-head create-workbench-head">
               <strong>创建库存工作台</strong>
-              <span>先保留来源信息，再补全商品主数据、规格和成本信息，提交后会创建库存并自动绑定当前 SKU。</span>
+              <span>{{ createProductStructureLabel }} · SKU {{ inventoryDialog.sku || "-" }}</span>
             </div>
 
+            <section class="create-similar-panel" v-loading="createSimilarProductsLoading">
+              <div class="create-section-title">
+                <strong>已有相似库存</strong>
+                <span>名称输入后自动检索，确认是同一商品可直接绑定，避免重复建品。</span>
+              </div>
+              <div v-if="createSimilarProducts.length" class="create-similar-list">
+                <article v-for="row in createSimilarProducts" :key="row.id" class="create-similar-card">
+                  <el-image
+                    v-if="inventoryProductImage(row)"
+                    :src="inventoryProductImage(row)"
+                    fit="contain"
+                    class="inventory-recipe-thumb"
+                    :preview-src-list="[inventoryProductImage(row)]"
+                    preview-teleported
+                  />
+                  <div v-else class="inventory-recipe-thumb inventory-recipe-thumb-empty">库存</div>
+                  <div class="create-similar-card__body">
+                    <div class="create-similar-card__title">
+                      <el-tag :type="row.similarity.level === 'duplicate' ? 'danger' : 'warning'" size="small" effect="light">
+                        {{ row.similarity.levelLabel }} {{ row.similarity.score }}分
+                      </el-tag>
+                      <strong>{{ row.name }}</strong>
+                    </div>
+                    <span>{{ inventoryProductCode(row) }} · 库存 {{ inventoryProductLocalStock(row) }} {{ row.stock_unit || "个" }}</span>
+                    <div>
+                      <el-tag v-for="reason in row.similarity.matches" :key="reason" size="small" type="success" effect="light">{{ reason }}相同</el-tag>
+                    </div>
+                    <span v-if="row.similarity.differences.length">差异：{{ row.similarity.differences.join("、") }}</span>
+                  </div>
+                  <el-button type="primary" plain :loading="inventoryDialog.submitting" @click="bindExistingProductDuringCreate(row)">直接绑定</el-button>
+                </article>
+              </div>
+              <el-empty v-else :description="createForm.name ? '暂未发现相似库存' : '输入商品名称后开始检索'" :image-size="58" />
+            </section>
+
             <el-form label-position="top" class="order-inventory-form create-inventory-form">
-              <div class="create-form-section">
+              <div class="create-form-section create-product-section">
                 <div class="create-section-title">
-                  <strong>基础信息</strong>
-                  <span>决定库存主档和负责人归属。</span>
+                  <strong>库存商品</strong>
+                  <span>{{ createProductStructureLabel }}</span>
                 </div>
-                <div class="create-grid create-grid--base">
+                <div class="create-grid create-grid--product">
                   <el-form-item label="商品名称">
                     <el-input v-model="createForm.name" placeholder="请输入库存商品名称" />
                   </el-form-item>
-                  <el-form-item label="负责人">
-                    <el-select v-model="createForm.personId" clearable filterable placeholder="请选择负责人" style="width: 100%">
-                      <el-option
-                        v-for="person in inventoryOptions.people"
-                        :key="person.id"
-                        :label="person.name"
-                        :value="String(person.id)"
-                      />
+                  <el-form-item label="库存单位">
+                    <el-select v-model="createForm.stockUnit" filterable allow-create default-first-option style="width: 100%">
+                      <el-option v-for="unit in ['个', '件', '套', '对', '双', '条', '米', '卷', '包', '片']" :key="unit" :label="unit" :value="unit" />
+                    </el-select>
+                  </el-form-item>
+                  <el-form-item label="产品属性">
+                    <div class="create-type-row">
+                      <el-checkbox v-model="createForm.isAccessory" :true-label="1" :false-label="0">配件产品</el-checkbox>
+                    </div>
+                  </el-form-item>
+                  <el-form-item label="采购链接" class="create-grid-span-2">
+                    <el-input v-model="createForm.purchaseUrl" clearable placeholder="可填写 1688、供应商或其他采购链接" />
+                  </el-form-item>
+                  <el-form-item label="备注" class="create-grid-span-2">
+                    <el-input v-model="createForm.note" type="textarea" :rows="2" placeholder="记录产品材质、适配车型、采购说明等" />
+                  </el-form-item>
+                </div>
+              </div>
+
+              <div class="create-form-section create-composition-launcher">
+                <div class="create-section-title">
+                  <strong>产品组成</strong>
+                  <span>{{ createForm.compositionItems.length ? `已添加 ${createForm.compositionItems.length} 个子产品` : "基础信息保存后再添加" }}</span>
+                </div>
+                <el-button class="erp-btn erp-btn-secondary" :disabled="!createdInventoryProductId" @click="createCompositionDialogVisible = true">
+                  {{ createForm.compositionItems.length ? "编辑子产品" : "添加子产品" }}
+                </el-button>
+              </div>
+
+              <el-dialog
+                v-model="createCompositionDialogVisible"
+                title="添加子产品"
+                width="86vw"
+                append-to-body
+                destroy-on-close
+                class="erp-centered-dialog create-composition-modal"
+              >
+              <div class="create-form-section create-composition-section">
+                <div class="create-section-title">
+                  <strong>产品组成</strong>
+                  <span>{{ createForm.structureType === "kit" ? (createForm.compositionItems.length ? `本地可组 ${createProductAvailableLabel}` : "等待添加组成") : "单品库存" }}</span>
+                </div>
+                <div class="create-composition-box">
+                  <div class="create-composition-toolbar">
+                    <el-segmented
+                      v-model="createComponentCategory"
+                      :options="createComponentCategoryOptions"
+                      @change="changeCreateComponentCategory"
+                    />
+                    <el-input
+                      v-model="createForm.componentQuery"
+                      clearable
+                      placeholder="搜索商品名称、库存编码、SKU 或负责人"
+                      @input="searchCreateComponentProducts"
+                      @clear="searchCreateComponentProducts('')"
+                    />
+                    <div class="order-inventory-result-meta">
+                      <span>商品 {{ createComponentProductTotal }}</span>
+                      <span>已加入 {{ createForm.compositionItems.length }}</span>
+                    </div>
+                  </div>
+                  <el-table
+                    v-loading="createComponentLoading"
+                    :data="createComponentOptions"
+                    border
+                    stripe
+                    height="420"
+                    class="inventory-picker-table create-composition-search-table"
+                    empty-text="没有匹配到库存商品"
+                  >
+                    <el-table-column label="库存商品" min-width="320">
+                      <template #default="{ row }">
+                        <div class="inventory-recipe-product">
+                          <el-image
+                            v-if="inventoryProductImage(row)"
+                            :src="inventoryProductImage(row)"
+                            fit="contain"
+                            class="inventory-recipe-thumb"
+                            :preview-src-list="[inventoryProductImage(row)]"
+                            preview-teleported
+                          />
+                          <div v-else class="inventory-recipe-thumb inventory-recipe-thumb-empty">库存</div>
+                          <div class="inventory-recipe-meta">
+                            <strong>{{ inventoryProductLabel(row) }}</strong>
+                            <span>{{ inventoryProductCode(row) }}</span>
+                          </div>
+                        </div>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="分类" width="86">
+                      <template #default="{ row }">{{ inventoryProductCategoryText(row) }}</template>
+                    </el-table-column>
+                    <el-table-column label="SKU" min-width="180">
+                      <template #default="{ row }">
+                        <span class="inventory-picker-table-text">{{ inventoryProductSkuText(row) }}</span>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="明细" min-width="230">
+                      <template #default="{ row }">
+                        <div class="inventory-picker-basic-cell">
+                          <span v-for="line in inventoryProductBasicLines(row)" :key="line">{{ line }}</span>
+                          <span>本地库存 {{ inventoryProductLocalStock(row) }} {{ row.stock_unit || "个" }}</span>
+                        </div>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="" width="64" align="center" fixed="right">
+                      <template #default="{ row }">
+                        <el-button
+                          circle
+                          type="primary"
+                          :icon="Plus"
+                          :disabled="createCompositionItemSelected(row.id)"
+                          @click="addCreateCompositionItem(row.id)"
+                        />
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                  <PageFooterPagination
+                    compact
+                    page-size-label="每页"
+                    :total="createComponentProductTotal"
+                    :page="createComponentListPage"
+                    :page-size="createComponentListPageSize"
+                    @update:page="handleCreateComponentPageChange"
+                    @update:pageSize="handleCreateComponentPageSizeChange"
+                  />
+                  <el-table
+                    :data="createForm.compositionItems"
+                    border
+                    stripe
+                    class="inventory-picker-table create-composition-table"
+                    empty-text="未添加组成商品，当前按单品库存创建"
+                  >
+                    <el-table-column label="已加入组成" min-width="300">
+                      <template #default="{ row }">
+                        <div class="inventory-recipe-product">
+                          <el-image
+                            v-if="recipeItemImage(row)"
+                            :src="recipeItemImage(row)"
+                            fit="contain"
+                            class="inventory-recipe-thumb"
+                            :preview-src-list="[recipeItemImage(row)]"
+                            preview-teleported
+                          />
+                          <div v-else class="inventory-recipe-thumb inventory-recipe-thumb-empty">库存</div>
+                          <div class="inventory-recipe-meta">
+                            <strong>{{ recipeItemLabel(row) }}</strong>
+                            <span>{{ recipeItemCode(row) }}</span>
+                          </div>
+                        </div>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="本地库存" width="120" align="right">
+                      <template #default="{ row }">{{ Number(row.local_stock || 0) }} {{ row.stock_unit || "个" }}</template>
+                    </el-table-column>
+                    <el-table-column label="单件用量" width="190">
+                      <template #default="{ row }">
+                        <div class="create-composition-qty">
+                          <el-input-number v-model="row.quantity" :min="0.0001" :precision="4" :step="1" controls-position="right" />
+                          <span>{{ row.stock_unit || "个" }}</span>
+                        </div>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="本地可组" width="110" align="right">
+                      <template #default="{ row }">{{ recipeItemAvailable(row) }}</template>
+                    </el-table-column>
+                    <el-table-column label="操作" width="72" align="center">
+                      <template #default="{ row }">
+                        <el-button link type="danger" :icon="Delete" @click="removeCreateCompositionItem(row.product_id)" />
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                </div>
+              </div>
+              <template #footer>
+                <div class="create-composition-dialog-footer">
+                  <span>已选择 {{ createForm.compositionItems.length }} 个子产品</span>
+                  <el-button type="primary" @click="createCompositionDialogVisible = false">
+                    确认选择
+                  </el-button>
+                </div>
+              </template>
+              </el-dialog>
+
+              <div class="create-form-section">
+                <div class="create-section-title">
+                  <strong>采购信息</strong>
+                  <span>{{ supplierName(createForm.supplierId) || "未指定供应商" }}</span>
+                </div>
+                <div class="create-grid create-grid--purchase">
+                  <el-form-item label="来源">
+                    <el-select v-model="createForm.sourcePlatform" style="width: 100%">
+                      <el-option label="1688" value="1688" />
+                      <el-option label="淘宝" value="taobao" />
+                      <el-option label="拼多多" value="pdd" />
+                      <el-option label="手工采购" value="manual" />
                     </el-select>
                   </el-form-item>
                   <el-form-item label="供应商">
@@ -1966,47 +3408,47 @@ onMounted(async () => {
                       />
                     </el-select>
                   </el-form-item>
-                  <el-form-item label="来源平台">
-                    <el-select v-model="createForm.sourcePlatform" style="width: 100%">
-                      <el-option label="1688" value="1688" />
-                      <el-option label="淘宝" value="taobao" />
-                      <el-option label="拼多多" value="pdd" />
-                      <el-option label="手工采购" value="manual" />
+                  <el-form-item label="采购人">
+                    <el-select v-model="createForm.personId" clearable filterable placeholder="请选择采购人" style="width: 100%">
+                      <el-option
+                        v-for="person in inventoryOptions.people"
+                        :key="person.id"
+                        :label="person.name"
+                        :value="String(person.id)"
+                      />
                     </el-select>
                   </el-form-item>
-                  <el-form-item label="原链接" class="create-grid-span-2">
-                    <el-input v-model="createForm.purchaseUrl" placeholder="来源链接或商品链接" />
+                  <el-form-item label="采购金额">
+                    <el-input-number v-model="createForm.amount" :min="0" :precision="2" :step="1" controls-position="right" style="width: 100%" />
+                  </el-form-item>
+                  <el-form-item label="采购数量">
+                    <el-input-number v-model="createForm.quantity" :min="1" :step="1" controls-position="right" style="width: 100%" />
+                  </el-form-item>
+                  <el-form-item label="国内运费">
+                    <el-input-number v-model="createForm.shippingAmount" :min="0" :precision="2" :step="1" controls-position="right" style="width: 100%" />
                   </el-form-item>
                 </div>
               </div>
               <div class="create-form-section">
                 <div class="create-section-title">
-                  <strong>成本与规格</strong>
-                  <span>用于采购成本、物流规则和计费克重计算。</span>
+                  <strong>物流信息</strong>
+                  <span>计费克重 {{ createChargeableWeightG }}g</span>
                 </div>
-                <div class="create-grid create-grid--spec">
-                  <el-form-item label="本次采购数量">
-                    <el-input-number v-model="createForm.quantity" :min="1" :step="1" controls-position="right" style="width: 100%" />
+                <div class="create-grid create-grid--logistics">
+                  <el-form-item label="长宽高(cm)">
+                    <div class="create-dimension-combo">
+                      <el-input-number v-model="createForm.lengthCm" :min="0" :precision="0" :step="1" controls-position="right" />
+                      <span>*</span>
+                      <el-input-number v-model="createForm.widthCm" :min="0" :precision="0" :step="1" controls-position="right" />
+                      <span>*</span>
+                      <el-input-number v-model="createForm.heightCm" :min="0" :precision="0" :step="1" controls-position="right" />
+                      <em>cm</em>
+                    </div>
                   </el-form-item>
-                  <el-form-item label="货款金额">
-                    <el-input-number v-model="createForm.amount" :min="0" :precision="2" :step="1" controls-position="right" style="width: 100%" />
-                  </el-form-item>
-                  <el-form-item label="国内运费">
-                    <el-input-number v-model="createForm.shippingAmount" :min="0" :precision="2" :step="1" controls-position="right" style="width: 100%" />
-                  </el-form-item>
-                  <el-form-item label="实重(g)">
+                  <el-form-item label="克重(g)">
                     <el-input-number v-model="createForm.packageWeightG" :min="0" :precision="0" :step="1" controls-position="right" style="width: 100%" />
                   </el-form-item>
-                  <el-form-item label="长(cm)">
-                    <el-input-number v-model="createForm.lengthCm" :min="0" :precision="0" :step="1" controls-position="right" style="width: 100%" />
-                  </el-form-item>
-                  <el-form-item label="宽(cm)">
-                    <el-input-number v-model="createForm.widthCm" :min="0" :precision="0" :step="1" controls-position="right" style="width: 100%" />
-                  </el-form-item>
-                  <el-form-item label="高(cm)">
-                    <el-input-number v-model="createForm.heightCm" :min="0" :precision="0" :step="1" controls-position="right" style="width: 100%" />
-                  </el-form-item>
-                  <el-form-item label="物流方式" class="create-grid-span-2">
+                  <el-form-item label="物流方式">
                     <el-select v-model="createForm.logisticsRuleId" filterable placeholder="请选择物流规则" style="width: 100%">
                       <el-option
                         v-for="rule in sortedInventoryLogisticsRules"
@@ -2036,27 +3478,6 @@ onMounted(async () => {
                   </div>
                 </div>
               </div>
-
-              <div class="create-form-section">
-                <div class="create-section-title">
-                  <strong>补充说明</strong>
-                  <span>用于记录来源备注、供应提示和交接信息，不会自动生成采购请求。</span>
-                </div>
-                <div class="create-grid create-grid--proc">
-                  <el-form-item label="紧急程度">
-                    <el-segmented v-model="createForm.urgency" :options="[{ label: '普通', value: 'normal' }, { label: '加急', value: 'urgent' }]" />
-                  </el-form-item>
-                  <el-form-item label="需求日期">
-                    <el-input v-model="createForm.neededBy" placeholder="例如 2026-05-20" />
-                  </el-form-item>
-                  <el-form-item label="库存备注" class="create-grid-span-2">
-                    <el-input v-model="createForm.note" type="textarea" :rows="3" placeholder="记录当前订单的补货说明、时效要求或交接备注" />
-                  </el-form-item>
-                  <el-form-item label="供应备注" class="create-grid-span-2">
-                    <el-input v-model="createForm.supplierNote" type="textarea" :rows="3" placeholder="补充来源说明、采购提醒或人工备注" />
-                  </el-form-item>
-                </div>
-              </div>
             </el-form>
           </div>
         </div>
@@ -2076,21 +3497,13 @@ onMounted(async () => {
           </el-form>
           <div class="order-inventory-bind-target">
             <span>将绑定到</span>
-            <strong>{{ selectedInventoryProduct ? inventoryProductLabel(selectedInventoryProduct) : "请选择库存商品" }}</strong>
-          </div>
-        </div>
-        <div v-else class="order-inventory-footer-bar create-footer-bar">
-          <div class="create-footer-summary">
-            <span>将创建</span>
-            <strong>{{ createForm.name || inventoryDialog.itemName || "新库存商品" }}</strong>
-          </div>
-          <div class="create-footer-summary">
-            <span>绑定 SKU</span>
-            <strong>{{ inventoryDialog.sku || "-" }}</strong>
-          </div>
-          <div class="create-footer-summary">
-            <span>供应商</span>
-            <strong>{{ supplierName(createForm.supplierId) || "未指定" }}</strong>
+            <strong>
+              {{
+                bindForm.mode === "combo"
+                  ? `组合方案 / ${bindForm.recipeItems.length} 个组成 / 本地可发 ${bindRecipeAvailable ?? "-"}`
+                  : (selectedInventoryProduct ? `${inventoryProductLabel(selectedInventoryProduct)} / ${inventoryProductTypeText(selectedInventoryProduct)}` : "请选择库存商品")
+              }}
+            </strong>
           </div>
         </div>
       </div>
@@ -2098,17 +3511,41 @@ onMounted(async () => {
       <template #footer>
         <el-button @click="resetInventoryDialog">取消</el-button>
         <el-button type="primary" :loading="inventoryDialog.submitting" @click="submitInventoryDialog">
-          {{ inventoryDialog.mode === "bind" ? "确认绑定" : "创建库存" }}
+          {{ inventoryDialog.mode === "bind" ? "确认绑定" : (createdInventoryProductId ? "保存子产品" : "创建基础库存") }}
         </el-button>
       </template>
     </el-dialog>
 
+    <ProductCreateEditDialog
+      v-model:visible="inventoryProductEditorVisible"
+      :mode="inventoryProductEditorMode"
+      target="inventory"
+      :people="inventoryOptions.people"
+      :suppliers="inventoryOptions.suppliers"
+      :logistics-rules="inventoryOptions.logisticsRules"
+      :value="inventoryProductEditorValue"
+      :create-endpoint="inventoryProductEditorCreateContext ? '/api/online-products/create-product' : '/api/products'"
+      :create-context="inventoryProductEditorCreateContext || {}"
+      @saved="handleInventoryProductEditorSaved"
+      @existing-selected="handleInventoryProductEditorExistingSelected"
+      @manage-components="(product) => openProductCompositionDialog(product.id)"
+    />
+
+    <ProductCompositionDialog
+      v-model:visible="compositionDialogVisible"
+      :product="compositionDialogProduct"
+      :refresh-key="compositionDialogRefreshKey"
+      :read-only="compositionDialogReadOnly"
+      @saved="handleProductCompositionSaved"
+      @quick-create="openQuickCreateFromComposition"
+    />
+
     <el-dialog
       v-model="orderProcurementDialog.visible"
       title="采购处理确认"
-      width="1120px"
+      width="min(1480px, 96vw)"
       align-center
-      class="erp-centered-dialog"
+      class="erp-centered-dialog order-procurement-dialog"
       destroy-on-close
     >
       <div v-loading="orderProcurementDialog.loading" class="order-procurement-preview">
@@ -2193,35 +3630,150 @@ onMounted(async () => {
                 <strong>{{ product.shortage_quantity }}</strong>
               </div>
             </div>
+            <div class="order-procurement-sales-panel">
+              <div class="order-procurement-sales-heading">
+                <div>
+                  <span>智能采购建议</span>
+                  <strong>建议采购 {{ product.suggested_purchase_qty || 0 }} 件</strong>
+                </div>
+                <div class="order-procurement-sales-tags">
+                  <el-tag :type="procurementTrendType(product)" effect="light">
+                    {{ product.sales_trend_text || "暂无趋势" }}
+                  </el-tag>
+                  <el-tag :type="procurementModeType(product)" effect="dark">
+                    {{ product.purchase_mode_text || "按单采购" }}
+                  </el-tag>
+                </div>
+              </div>
+              <div class="order-procurement-decision-row">
+                <p>{{ product.purchase_reason }}</p>
+                <div class="order-procurement-signal-list">
+                  <span>近7天 <strong>{{ product.recent_7d_qty || 0 }}</strong></span>
+                  <span>近30天 <strong>{{ product.recent_30d_qty || 0 }}</strong></span>
+                  <span>三周 <strong>{{ product.week3_qty || 0 }} → {{ product.week2_qty || 0 }} → {{ product.week1_qty || 0 }}</strong></span>
+                  <span>库存覆盖 <strong>{{ procurementCoverageText(product) }}</strong></span>
+                  <span>订单缺口 <strong>{{ product.shortage_quantity || 0 }}</strong></span>
+                  <span v-if="Number(product.extra_stock_qty || 0) > 0">其中备货 <strong>{{ product.extra_stock_qty }}</strong></span>
+                </div>
+              </div>
+              <div class="order-procurement-quantity-actions">
+                <span>采购数量由你确认，系统不会自动扩大订单采购量。</span>
+                <el-button size="small" plain @click="applyProcurementQuantity(product, 'shortage')">
+                  按订单缺口 {{ product.shortage_quantity || 0 }}
+                </el-button>
+                <el-button
+                  size="small"
+                  type="primary"
+                  plain
+                  @click="applyProcurementQuantity(product, 'suggested')"
+                >
+                  采用建议 {{ product.suggested_purchase_qty || 0 }}
+                </el-button>
+              </div>
+            </div>
+            <div class="order-procurement-cost-panel">
+              <div class="order-procurement-cost-heading">
+                <div>
+                  <span>采购成本校验</span>
+                  <div class="order-procurement-cost-summary">
+                    <strong>本次 ¥{{ formatMoney(procurementCurrentUnitCost(product)) }}/件</strong>
+                    <span>渠道 {{ procurementChannelLabel(product.purchase_source_type) }}</span>
+                    <span v-if="procurementPreviousUnitCost(product)">上批 ¥{{ formatMoney(procurementPreviousUnitCost(product)) }}</span>
+                    <span v-if="procurementCostHistorySummary(product)">近{{ procurementCostHistorySummary(product).count }}批均价 ¥{{ formatMoney(procurementCostHistorySummary(product).weighted) }}</span>
+                    <span v-if="procurementCostHistorySummary(product)">区间 ¥{{ formatMoney(procurementCostHistorySummary(product).min) }}–{{ formatMoney(procurementCostHistorySummary(product).max) }}</span>
+                  </div>
+                </div>
+                <div class="order-procurement-cost-actions">
+                  <el-tag :type="procurementCostTrendType(product)" effect="light">
+                    {{ procurementCostVarianceText(product) }}
+                  </el-tag>
+                  <el-popover v-if="product.cost_history?.length" placement="bottom-end" :width="480" trigger="click">
+                    <template #reference>
+                      <el-button size="small" plain>查看历史 {{ product.cost_history.length }} 批</el-button>
+                    </template>
+                    <div class="order-procurement-cost-popover">
+                      <strong>历史采购成本</strong>
+                      <div v-for="history in product.cost_history" :key="`${history.batch_no}-${history.recorded_at}`">
+                        <span>{{ procurementCostHistoryDate(history.recorded_at) }}</span>
+                        <strong>¥{{ formatMoney(history.unit_cost) }}/件</strong>
+                        <span>{{ procurementChannelLabel(history.source_type) }}</span>
+                        <span>{{ history.quantity }} 件 · ¥{{ formatMoney(history.amount) }}</span>
+                        <span>{{ history.supplier_name || history.batch_no || "历史采购" }}</span>
+                      </div>
+                    </div>
+                  </el-popover>
+                </div>
+              </div>
+              <p v-if="procurementCostVariance(product)?.abnormal" class="order-procurement-cost-warning">
+                本次单价波动较大，请核对采购数量和货款后再生成。
+              </p>
+              <p v-else-if="!product.cost_history?.length" class="order-procurement-cost-empty">
+                暂无已确认历史，本次将作为首个参考价格。
+              </p>
+            </div>
             <div class="order-procurement-purchase-form">
-              <el-form-item label="采购数量">
-                <el-input-number
-                  v-model="product.purchase_quantity"
-                  :min="0"
-                  :precision="0"
-                  :step="1"
-                  controls-position="right"
-                  @change="handleProcurementQuantityChange(product)"
-                />
-              </el-form-item>
-              <el-form-item label="货款">
-                <el-input-number
-                  v-model="product.purchase_amount"
-                  :min="0"
-                  :precision="2"
-                  :step="1"
-                  controls-position="right"
-                />
-              </el-form-item>
-              <el-form-item label="运费">
-                <el-input-number
-                  v-model="product.purchase_shipping"
-                  :min="0"
-                  :precision="2"
-                  :step="1"
-                  controls-position="right"
-                />
-              </el-form-item>
+              <div class="order-procurement-form-section">
+                <span class="order-procurement-form-title">采购决策</span>
+                <div class="order-procurement-form-grid order-procurement-form-grid-compact">
+                  <el-form-item label="采购数量">
+                    <el-input-number
+                      v-model="product.purchase_quantity"
+                      :min="0"
+                      :precision="0"
+                      :step="1"
+                      controls-position="right"
+                      @change="handleProcurementQuantityChange(product)"
+                    />
+                  </el-form-item>
+                  <el-form-item label="货款">
+                    <el-input-number
+                      v-model="product.purchase_amount"
+                      :min="0"
+                      :precision="2"
+                      :step="1"
+                      controls-position="right"
+                    />
+                  </el-form-item>
+                  <el-form-item label="运费">
+                    <el-input-number
+                      v-model="product.purchase_shipping"
+                      :min="0"
+                      :precision="2"
+                      :step="1"
+                      controls-position="right"
+                    />
+                  </el-form-item>
+                  <el-form-item label="紧急程度">
+                    <el-segmented v-model="product.purchase_urgency" :options="procurementUrgencyOptions" />
+                  </el-form-item>
+                </div>
+              </div>
+              <div class="order-procurement-form-section">
+                <span class="order-procurement-form-title">来源备注</span>
+                <div class="order-procurement-form-grid">
+                  <el-form-item label="采购来源">
+                    <el-select v-model="product.purchase_source_type" style="width: 100%">
+                      <el-option
+                        v-for="option in procurementSourceOptions"
+                        :key="option.value"
+                        :label="option.label"
+                        :value="option.value"
+                      />
+                    </el-select>
+                  </el-form-item>
+                  <el-form-item label="采购链接" class="order-procurement-form-span-2">
+                    <el-input v-model="product.purchase_url" placeholder="https://detail.1688.com/..." clearable />
+                  </el-form-item>
+                  <el-form-item label="采购备注" class="order-procurement-form-span-3">
+                    <el-input
+                      v-model="product.purchase_note"
+                      type="textarea"
+                      :rows="2"
+                      placeholder="颜色、规格、供应商沟通、采购注意事项"
+                    />
+                  </el-form-item>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -2236,6 +3788,7 @@ onMounted(async () => {
               <template #default="{ row }">
                 <el-checkbox
                   :model-value="procurementItemSelected(row)"
+                  :disabled="row.already_handled"
                   @change="setProcurementItemSelected(row, $event)"
                 />
               </template>
@@ -2263,8 +3816,11 @@ onMounted(async () => {
             </el-table-column>
             <el-table-column label="处理建议" width="150">
               <template #default="{ row }">
-                <el-tag :type="Number(row.product?.current_stock || 0) >= Number(row.product?.total_quantity || 0) ? 'success' : 'warning'" effect="light">
-                  {{ Number(row.product?.current_stock || 0) >= Number(row.product?.total_quantity || 0) ? "库存可满足" : "生成采购建议" }}
+                <el-tag
+                  :type="row.already_handled || Number(row.product?.current_stock || 0) >= Number(row.product?.total_quantity || 0) ? 'success' : 'warning'"
+                  effect="light"
+                >
+                  {{ row.already_handled ? "已采购处理" : Number(row.product?.current_stock || 0) >= Number(row.product?.total_quantity || 0) ? "库存可满足" : "生成采购建议" }}
                 </el-tag>
               </template>
             </el-table-column>

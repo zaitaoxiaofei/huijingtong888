@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "爆单ERP 商品信息采集插件",
   "description": "采集 Ozon 前台商品信息、同步采集箱并打开后台工作台",
-  "version": "1.4.1",
-  "permissions": ["activeTab", "alarms", "scripting", "storage", "tabs"],
+  "version": "1.4.21",
+  "permissions": ["activeTab", "alarms", "cookies", "scripting", "storage", "tabs"],
   "host_permissions": [
     "http://localhost/*",
     "http://127.0.0.1/*",
@@ -100,6 +100,11 @@
     {
       "matches": ["https://seller.ozon.ru/*"],
       "js": ["seller-bridge-content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["http://localhost/*", "http://127.0.0.1/*", "https://erp.hjt888.xyz/*"],
+      "js": ["erp-bridge-content.js"],
       "run_at": "document_idle"
     }
   ]

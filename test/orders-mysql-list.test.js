@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { config } from "../src/config.js";
@@ -28,13 +29,27 @@ function logisticsRuleFilterValue(row = {}) {
   }) || `logistics_rule_${row.id}`;
 }
 
+test("pending purchase filter excludes every supported inventory source", async () => {
+  const service = await readFile(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
+  const pendingFilter = service.slice(
+    service.indexOf('if (status === "pending_purchase")'),
+    service.indexOf('if (status === "unbound")')
+  );
+
+  assert.match(pendingFilter, /purchase_fbp\.stock_type = 'fbp_real'/);
+  assert.match(pendingFilter, /FROM sku_inventory_recipes purchase_recipe/);
+  assert.match(pendingFilter, /FROM product_components purchase_component/);
+  assert.match(pendingFilter, /FROM inventory_movements purchase_im/);
+  assert.match(pendingFilter, /FROM inbound_records purchase_ir/);
+});
+
 mysqlTest("MySQL order list supports status tabs, print filters, inventory sorting, and purchase search", async () => {
   const all = await ordersPagedMysql({ paged: "1", page: 1, pageSize: 5, status: "all" });
   assert.ok(all.total > 0);
   assert.equal(all.rows.length, Math.min(5, all.total));
   assert.ok(all.counts.all >= all.total);
 
-  for (const status of ["awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled", "unbound"]) {
+  for (const status of ["awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled", "unbound", "pending_purchase"]) {
     const result = await ordersPagedMysql({ paged: "1", page: 1, pageSize: 5, status });
     assert.equal(result.total, result.counts[status]);
     assert.ok(result.rows.length <= 5);
@@ -52,6 +67,30 @@ mysqlTest("MySQL order list supports status tabs, print filters, inventory sorti
   });
   assert.ok(unprintedInventory.rows.every((row) => !row.printed_at));
   assert.ok(unprintedInventory.rows.every((row) => row.inventory_ids || row.product_codes || row.skus));
+
+  for (const fulfillmentType of ["fbs", "fbp"]) {
+    const fulfillmentInventory = await ordersPagedMysql({
+      paged: "1",
+      page: 1,
+      pageSize: 5,
+      fulfillmentType,
+      sortMode: "inventory"
+    });
+    assert.ok(fulfillmentInventory.rows.every((row) => row.fulfillment_type_key === fulfillmentType));
+  }
+
+  const packagingFbsUnprintedInventory = await ordersPagedMysql({
+    paged: "1",
+    page: 1,
+    pageSize: 5,
+    status: "awaiting_packaging",
+    fulfillmentType: "fbs",
+    printFilter: "unprinted",
+    sortMode: "inventory"
+  });
+  assert.ok(packagingFbsUnprintedInventory.total > 0);
+  assert.ok(packagingFbsUnprintedInventory.rows.every((row) => row.fulfillment_type_key === "fbs"));
+  assert.ok(packagingFbsUnprintedInventory.rows.every((row) => !row.printed_at));
 
   const purchaseSearch = await ordersPagedMysql({
     paged: "1",
@@ -116,8 +155,11 @@ mysqlTest("MySQL order list rows expose fields required by the frontend table", 
     assert.notEqual(row.skus, undefined);
     assert.notEqual(row.sku_quantities, undefined);
     assert.notEqual(row.sku_names, undefined);
+    assert.notEqual(row.sku_inventory_names, undefined);
     assert.notEqual(row.sku_images, undefined);
     assert.notEqual(row.sku_stock_summaries, undefined);
+    assert.notEqual(row.sku_incoming_summaries, undefined);
+    assert.notEqual(row.sku_component_counts, undefined);
     assert.notEqual(row.product_codes, undefined);
     assert.notEqual(row.product_names, undefined);
     assert.notEqual(row.mark_type, undefined);

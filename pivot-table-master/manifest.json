@@ -1,7 +1,7 @@
 {
   "name": "爆单ERP 店铺数据分析插件",
   "description": "采集 Ozon Seller 后台分析数据并同步到爆单ERP",
-  "version": "1.0.23",
+  "version": "1.0.33",
   "manifest_version": 3,
   "permissions": ["storage", "webRequest", "scripting", "cookies"],
   "host_permissions": [
@@ -17,6 +17,11 @@
     "default_popup": "popup.html"
   },
   "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://erp.hjt888.xyz/*"],
+      "js": ["content/erp-instance.js"],
+      "run_at": "document_start"
+    },
     {
       "matches": [
         "https://seller.ozon.ru/*"

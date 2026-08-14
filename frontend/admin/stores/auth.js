@@ -3,8 +3,8 @@ import { defineStore } from "pinia";
 import { apiClient, clearAuthToken, getAuthToken, setAuthToken } from "../utils/api";
 
 const AUTH_USER_CACHE_KEY = "baodanAuthUser";
-const BOOTSTRAP_TIMEOUT_MS = 3000;
-const BACKGROUND_VERIFY_TIMEOUT_MS = 2500;
+const BOOTSTRAP_TIMEOUT_MS = 8000;
+const BACKGROUND_VERIFY_TIMEOUT_MS = 5000;
 
 function readCachedUser() {
   try {
@@ -61,8 +61,8 @@ export const useAuthStore = defineStore("auth", () => {
       });
       user.value = currentUser;
       writeCachedUser(currentUser);
-    } catch {
-      clearSession();
+    } catch (error) {
+      if (Number(error?.status || 0) === 401) clearSession();
     } finally {
       window.clearTimeout(timeoutId);
       bootstrapped.value = true;

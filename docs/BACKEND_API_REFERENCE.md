@@ -260,7 +260,9 @@ ERP shop configuration row.
 | --- | --- | --- | --- |
 | `id` | `number` | No | Shop identifier. |
 | `name` | `string` | No | Shop display name. |
-| `legal_entity` | `string` | No | Legal entity or company name. |
+| `legal_entity` | `string` | No | Legacy legal entity or company name. |
+| `user_id` | `number` | No | Bound shop manager person identifier. |
+| `user_name` | `string` | No | Bound shop manager display name. |
 | `ozon_client_id` | `string` | No | Ozon client identifier. |
 | `api_key_hint` | `string` | No | Non-sensitive API key hint. |
 | `status` | `string` | No | Shop status. |
@@ -276,7 +278,8 @@ Create or update shop payload.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | `string` | Yes | Shop display name. |
-| `legal_entity` | `string` | No | Legal entity or company name. |
+| `legal_entity` | `string` | No | Legacy legal entity or company name. |
+| `user_id` | `number` | No | Required shop manager person identifier. |
 | `ozon_client_id` | `string` | No | Ozon client identifier. |
 | `api_key_hint` | `string` | No | Displayed API key hint only. |
 | `status` | `string` | No | Shop status such as active or inactive. |
@@ -309,6 +312,54 @@ Create or update person payload.
 | `role` | `string` | No | Authorization role such as operator or admin. |
 | `avatar_url` | `string` | No | Optional avatar URL. |
 | `active` | `number` | No | Whether the person is active. |
+
+### TeamTaskRecord
+
+Team planning task row.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | `number` | No | Task identifier. |
+| `title` | `string` | No | Task title. |
+| `type` | `string` | No | Work type such as collection, selection, fission, draft, listing, vehicle_sales, order_review, procurement, or optimization. Legacy values advertising, finance_tax, and warehouse are still accepted. |
+| `owner_person_id` | `number` | No | Responsible person identifier. |
+| `owner_name` | `string` | No | Responsible person display name. |
+| `owner_avatar_url` | `string` | No | Responsible person avatar URL. |
+| `collaborator_person_ids` | `array<number>` | No | Collaborator person identifiers. |
+| `period` | `string` | No | Planning period such as week, month, quarter, or year. |
+| `status` | `string` | No | Task status. |
+| `priority` | `string` | No | Task priority. |
+| `target` | `number` | No | Target quantity. |
+| `done` | `number` | No | Completed quantity. |
+| `unit` | `string` | No | Quantity unit. |
+| `start_at` | `string` | No | Start date. |
+| `due_at` | `string` | No | Due date. |
+| `related` | `string` | No | Related shop, product line, SKU, purchase order, or warehouse. |
+| `result` | `string` | No | Operator progress note. |
+| `quality` | `number` | No | Quality score from 0 to 100. |
+
+### TeamTaskMutationRequest
+
+Create or update team planning task payload.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `title` | `string` | Yes | Task title. |
+| `type` | `string` | No | Work type. |
+| `owner_person_id` | `number` | No | Responsible person identifier. |
+| `collaborator_person_ids` | `array<number>` | No | Collaborator person identifiers. |
+| `period` | `string` | No | Planning period. |
+| `status` | `string` | No | Task status. |
+| `priority` | `string` | No | Task priority. |
+| `target` | `number` | No | Target quantity. |
+| `done` | `number` | No | Completed quantity. |
+| `unit` | `string` | No | Quantity unit. |
+| `start_at` | `string` | No | Start date in YYYY-MM-DD. |
+| `due_at` | `string` | No | Due date in YYYY-MM-DD. |
+| `related` | `string` | No | Related business object. |
+| `result` | `string` | No | Progress note. |
 
 ### SupplierRecord
 
@@ -703,6 +754,7 @@ Order list query model.
 | `status` | `string` | No | Status tab key. |
 | `markFilter` | `string` | No | Mark filter key. |
 | `printFilter` | `string` | No | Print-state filter key. |
+| `fulfillmentType` | `string` | No | Fulfillment-type filter: all, fbs, or fbp. |
 | `searchType` | `string` | No | Search type such as order, tracking, sku, offer, product. |
 | `searchQuery` | `string` | No | Search text. |
 | `sortMode` | `string` | No | Sort mode key. |
@@ -1104,6 +1156,9 @@ Logistics fee rule row.
 | `per_gram_cny` | `number` | No | Per-gram fee in CNY. |
 | `per_ticket_cny` | `number` | No | Per-ticket fee in CNY. |
 | `enabled` | `number` | No | Whether the rule is active. |
+| `version_group_id` | `number` | No | Stable identifier shared by versions of one rule. |
+| `effective_from` | `string` | No | Version effective timestamp. |
+| `effective_to` | `string` | No | Version expiration timestamp. |
 | `note` | `string` | No | Operator note. |
 
 ### LogisticsRuleMutationRequest
@@ -1122,6 +1177,8 @@ Create or update a logistics fee rule.
 | `max_weight_g` | `number` | No | Upper weight bound in grams. |
 | `min_price_rub` | `number` | No | Lower listing-price bound in RUB. |
 | `max_price_rub` | `number` | No | Upper listing-price bound in RUB. |
+| `source_rule_id` | `number` | No | Source version identifier when creating a new version. |
+| `effective_from` | `string` | No | New version effective time in Beijing time. |
 | `base_fee_cny` | `number` | No | Base fee in CNY. |
 | `per_gram_cny` | `number` | No | Per-gram fee in CNY. |
 | `per_ticket_cny` | `number` | No | Per-ticket fee in CNY. |
@@ -1513,6 +1570,23 @@ Return ranking rows for the selected profit dimension.
 - Responses:
   - `200` `application/json` -> `array<object>`
 
+#### `GET /api/profit-reconciliation`
+
+Compare estimated and finance-accrued profit and identify inventory-data risks.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `from` (`string`, optional): Inclusive start date.
+  - `to` (`string`, optional): Inclusive end date.
+  - `refresh` (`boolean`, optional): Whether to force snapshot refresh.
+  - `shopId` (`string`, optional): Optional shop filter.
+  - `groupBy` (`string`, optional): Optional grouping key.
+  - `metric` (`string`, optional): Optional metric selector.
+  - `page` (`number`, optional): Optional page number.
+  - `pageSize` (`number`, optional): Optional page size.
+- Responses:
+  - `200` `application/json` -> `object`
+
 #### `GET /api/profit-details`
 
 Return detailed profit rows for drill-down views.
@@ -1650,6 +1724,7 @@ Return the full order list or paged order list depending on the paged query flag
   - `status` (`string`, optional): Status tab key.
   - `markFilter` (`string`, optional): Mark filter key.
   - `printFilter` (`string`, optional): Print-state filter key.
+  - `fulfillmentType` (`string`, optional): Fulfillment-type filter: all, fbs, or fbp.
   - `searchType` (`string`, optional): Search type such as order, tracking, sku, offer, product.
   - `searchQuery` (`string`, optional): Search text.
   - `sortMode` (`string`, optional): Sort mode key.
@@ -2425,6 +2500,61 @@ Recommend AI category strategy bundles from product context.
 - Responses:
   - `200` `application/json` -> `AiStrategyBundleMatchResponse`
 
+#### `GET /api/team/tasks`
+
+Return team planning tasks.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `period` (`string`, optional): Optional period filter.
+  - `type` (`string`, optional): Optional work-type filter.
+  - `owner_person_id` (`number`, optional): Optional owner filter.
+  - `status` (`string`, optional): Optional status filter.
+- Responses:
+  - `200` `application/json` -> `array<TeamTaskRecord>`
+
+#### `POST /api/team/tasks`
+
+Create a team planning task.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `TeamTaskMutationRequest`
+- Responses:
+  - `200` `application/json` -> `IdResponse`
+
+#### `POST /api/team/attachments`
+
+Upload an attachment for a product-development candidate.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `PUT /api/team/tasks/:id`
+
+Update a team planning task.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Task identifier.
+- Request body: required
+  - Schema: `TeamTaskMutationRequest`
+- Responses:
+  - `200` `application/json` -> `MutationOk`
+
+#### `DELETE /api/team/tasks/:id`
+
+Delete a team planning task.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Task identifier.
+- Responses:
+  - `200` `application/json` -> `MutationOk`
+
 #### `GET /api/shops`
 
 Return shop master data.
@@ -2579,7 +2709,7 @@ Update a logistics fee rule.
 
 #### `DELETE /api/logistics-rules/:id`
 
-Disable a logistics fee rule.
+Delete an unreferenced logistics fee rule.
 
 - Auth: `authenticated`
 - Path parameters:

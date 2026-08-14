@@ -10,19 +10,20 @@ const listingRecordsSource = readFileSync(new URL("../frontend/admin/views/listi
 const onlineProductsSource = readFileSync(new URL("../frontend/admin/views/inventory/OnlineProductsView.vue", import.meta.url), "utf8");
 const selectionSource = readFileSync(new URL("../frontend/admin/views/selection/SelectionView.vue", import.meta.url), "utf8");
 
-test("asset variant route uses the dedicated variant workbench", () => {
+test("legacy asset variant wizard route redirects to the AI variant lab", () => {
   assert.match(routerSource, /asset-variant-center\/create/);
-  assert.match(routerSource, /redirect: \(to\) => \(\{ name: "asset-variant-center-wizard", query: to\.query \}\)/);
+  assert.match(routerSource, /redirect: \(to\) => \(\{ name: "ai-variant-lab", query: to\.query \}\)/);
   assert.match(routerSource, /asset-variant-center\/wizard/);
-  assert.match(routerSource, /AiProductVariantWizardView/);
+  assert.doesNotMatch(routerSource, /AiProductVariantWizardView/);
   assert.match(routerSource, /ai-optimization-workbench-v2/);
   assert.match(routerSource, /PromptLibraryView\.vue/);
 });
 
-test("AI variant buttons and navigation open the wizard workbench", () => {
-  assert.match(navigationSource, /label: "AI裂变", route: "\/asset-variant-center\/wizard"/);
+test("AI variant buttons and navigation open the AI variant lab", () => {
+  assert.match(navigationSource, /label: "AI裂变实验室", route: "\/ai-variant-lab"/);
+  assert.doesNotMatch(navigationSource, /label: "AI裂变", route: "\/asset-variant-center\/wizard"/);
   for (const pageSource of [collectorBoxSource, listingRecordsSource, onlineProductsSource, selectionSource]) {
-    assert.match(pageSource, /asset-variant-center-wizard/);
+    assert.match(pageSource, /ai-variant-lab/);
     assert.doesNotMatch(pageSource, /name: "asset-variant-center-create"/);
   }
 });

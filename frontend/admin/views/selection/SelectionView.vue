@@ -2203,7 +2203,7 @@ async function openEditDialog(row) {
   manualPackagingFee.value = true;
   dialogDetailLoading.value = true;
   try {
-    const detail = await apiClient.get(`/api/products/${productId}`, { noCache: true });
+    const detail = await apiClient.get(`/api/products/${productId}?includeOperations=0`, { noCache: true });
     if (seq !== editDetailRequestSeq) return;
     dialog.currentRow = { ...row, ...detail };
     dialog.form = buildEditDialogForm(detail);

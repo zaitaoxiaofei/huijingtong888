@@ -1,8 +1,9 @@
 ﻿<script setup>
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
@@ -16,10 +17,10 @@ const route = useRoute();
 const router = useRouter();
 let syncingRoute = false;
 const listRequestGate = createLatestRequestGate();
-let shopsLoaded = false;
 
 const loading = ref(false);
 const syncLoading = ref(false);
+const rowActionLoading = ref("");
 const state = reactive({
   rows: [],
   total: 0,
@@ -66,9 +67,8 @@ function coverageText(row) {
   if (row.coverage_days !== null && row.coverage_days !== undefined) {
     return `${Number(row.coverage_days || 0).toFixed(1)} 天`;
   }
-  const recent30d = Number(row.recent_30d_qty || 0);
-  if (recent30d <= 0) return Number(row.fbp_available || 0) > 0 ? "30天无销量" : "暂无销量";
-  const daily = recent30d / 30;
+  const daily = Number(row.dynamic_daily_sales || row.daily_sales_14d || 0);
+  if (daily <= 0) return Number(row.fbp_available || 0) > 0 ? "近两周无销量" : "暂无销量";
   const days = daily > 0 ? Number(row.fbp_available || 0) / daily : 0;
   return `${days.toFixed(1)} 天`;
 }
@@ -76,23 +76,18 @@ function coverageText(row) {
 function adviceText(row) {
   if (row.suggestion) return row.suggestion;
   const available = Number(row.fbp_available || 0);
-  const recent30d = Number(row.recent_30d_qty || 0);
-  const daily = recent30d > 0 ? recent30d / 30 : 0;
+  const daily = Number(row.dynamic_daily_sales || row.daily_sales_14d || 0);
   const days = daily > 0 ? available / daily : null;
   if (available <= 0) return "FBP已断货，优先补仓或调整库存策略。";
   if (days !== null && days <= 7) return "预计7天内断货，建议立即补仓。";
-  if (days !== null && days <= 30) return "预计30天内断货，建议排入补货计划。";
-  if (days !== null && days >= 60) return "预计库存超过60天，关注资金占用和滞缓风险。";
-  if (!recent30d && available > 0) return "30天无销量但有FBP库存，检查是否需要促销或减少补仓。";
+  if (days !== null && days <= 15) return "预计15天内断货，建议排入补货计划。";
   return "库存相对充足";
 }
 
 function fbpAlertTag(row) {
   if (row.alert_type === "out_of_stock") return "断货";
   if (row.alert_type === "within_7_days") return "7天";
-  if (row.alert_type === "within_30_days") return "30天";
-  if (row.alert_type === "over_60_days") return "60天滞缓";
-  if (row.alert_type === "no_sales") return "30天无销量";
+  if (row.alert_type === "within_15_days") return "15天";
   return "";
 }
 
@@ -109,6 +104,15 @@ function paidStorageDateText(row) {
   if (Number.isNaN(date.getTime())) return value;
   const days = Math.ceil((date.getTime() - Date.now()) / 86400000);
   return days > 0 ? `${value} / ${days}天` : value;
+}
+
+function suggestedQty(row) {
+  const direct = Number(row.suggested_qty || 0);
+  if (direct > 0) return Math.round(direct);
+  const daily = Number(row.dynamic_daily_sales || row.daily_sales_14d || 0);
+  const available = Number(row.fbp_available || 0);
+  if (daily <= 0) return 0;
+  return Math.max(0, Math.ceil(daily * 30 - available));
 }
 
 function setSort(sortKey) {
@@ -157,12 +161,70 @@ function openMappings() {
   router.push("/inventory/mappings");
 }
 
-function openProcurement(row) {
-  router.push({ path: "/purchase-list", query: { productId: String(row.product_id), from: "inventory-fbp" } });
-}
-
 function ozonBuyerProductLinkFor(row) {
   return ozonBuyerProductLinkFromRow(row);
+}
+
+async function offerOpenReplenishmentPage(message = "FBP 备货单草稿已创建。") {
+  try {
+    await ElMessageBox.confirm(message, "备货单已创建", {
+      type: "success",
+      confirmButtonText: "去备货单页面",
+      cancelButtonText: "继续当前页",
+      distinguishCancelAndClose: true
+    });
+    router.push("/inventory/fbp-replenishment");
+  } catch {
+    // Operator chose to stay on the current recommendation page.
+  }
+}
+
+async function createReplenishmentOrder(row) {
+  const defaultQty = Math.max(1, suggestedQty(row) || 1);
+  let requestedQty = defaultQty;
+  try {
+    const result = await ElMessageBox.prompt("填写这次要备货到 FBP 的数量", "创建FBP备货单", {
+      confirmButtonText: "创建",
+      cancelButtonText: "取消",
+      inputValue: String(defaultQty),
+      inputPattern: /^[1-9]\d*$/,
+      inputErrorMessage: "请输入大于0的整数"
+    });
+    requestedQty = Math.max(1, Math.round(Number(result.value || defaultQty)));
+  } catch {
+    return;
+  }
+  rowActionLoading.value = `order-${row.shop_id}-${row.ozon_sku}`;
+  try {
+    await apiClient.post("/api/fbp-replenishment-orders", {
+      rows: [{ ...row, requested_qty: requestedQty, approved_qty: requestedQty }]
+    });
+    ElMessage.success("已加入 FBP 备货单草稿");
+    await offerOpenReplenishmentPage("已加入 FBP 备货单草稿。");
+  } catch (error) {
+    ElMessage.error(error.message || "创建备货单失败");
+  } finally {
+    rowActionLoading.value = "";
+  }
+}
+
+async function ignoreReplenishment(row) {
+  rowActionLoading.value = `ignore-${row.shop_id}-${row.ozon_sku}`;
+  try {
+    await apiClient.post("/api/fbp-replenishment-ignore", {
+      shop_id: row.shop_id,
+      ozon_sku: row.ozon_sku,
+      product_id: row.product_id,
+      mapping_id: row.mapping_id,
+      reason: "不再备货 FBP"
+    });
+    ElMessage.success("已忽略该 FBP SKU");
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "忽略失败");
+  } finally {
+    rowActionLoading.value = "";
+  }
 }
 
 async function refreshStocks() {
@@ -209,16 +271,12 @@ async function loadPageData() {
     });
     const query = String(state.filters.query || "").trim();
     if (query) params.set("query", query);
-    const requests = [apiClient.get(`/api/stock-alerts?${params.toString()}`)];
-    if (!shopsLoaded) requests.push(apiClient.get("/api/shops"));
+    const requests = [apiClient.get(`/api/stock-alerts?${params.toString()}`), loadShopDictionary()];
     const [payload, shops] = await Promise.all(requests);
     if (!listRequestGate.isLatest(requestToken)) return;
     state.rows = Array.isArray(payload?.rows) ? payload.rows : [];
     state.total = Number(payload?.total || 0);
-    if (!shopsLoaded) {
-      state.shops = Array.isArray(shops) ? shops : [];
-      shopsLoaded = true;
-    }
+    state.shops = Array.isArray(shops) ? shops : [];
   } catch (error) {
     if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "FBP 库存表加载失败");
@@ -338,12 +396,25 @@ onMounted(async () => {
         <el-table-column label="最后同步" width="170">
           <template #default="{ row }">{{ dateText(row.last_synced_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="220" fixed="right">
+        <el-table-column label="操作" width="300" fixed="right">
           <template #default="{ row }">
             <el-space wrap>
+              <el-button
+                class="erp-btn-link"
+                link
+                type="success"
+                :loading="rowActionLoading === `order-${row.shop_id}-${row.ozon_sku}`"
+                @click="createReplenishmentOrder(row)"
+              >创建备货单</el-button>
+              <el-button
+                class="erp-btn-link"
+                link
+                type="warning"
+                :loading="rowActionLoading === `ignore-${row.shop_id}-${row.ozon_sku}`"
+                @click="ignoreReplenishment(row)"
+              >忽略备货</el-button>
               <el-button class="erp-btn-link" link type="primary" @click="syncSingleProduct(row)">同步库存</el-button>
               <el-button class="erp-btn-link" link @click="openMappings()">编辑绑定</el-button>
-              <el-button class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
             </el-space>
           </template>
         </el-table-column>

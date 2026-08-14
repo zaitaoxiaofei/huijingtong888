@@ -1,6 +1,18 @@
 # Local runtime logs
 .workbuddy/
+.codex-chrome-*/
+.codex-logs/
+.server-logs/
+.work-backups/
+.work-logs/
+.deploy-artifacts/
+.verification/
+deploy-oss-optimized-output/
+output/
+outputs/
+ozon-erp-ecs-oss-optimized-*.zip
 node_modules/
+.npm-cache/
 dist/
 *.log
 __pycache__/
@@ -28,8 +40,9 @@ uploads/ai-generated/
 uploads/ai-cropped/
 uploads/temp/
 tmp/
+tmp-*.png
+tmp-*.mjs
 runtime/
-.work-backups/
 tmp-*.pdf
 
 # Local environment secrets

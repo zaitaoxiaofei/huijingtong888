@@ -164,6 +164,11 @@ function createEmptyForm() {
     description: "",
     positive_prompt: "",
     negative_prompt: "",
+    main_image_prompt: "",
+    detail_image_prompt_json: "{}",
+    title_prompt: "",
+    tags_prompt: "",
+    description_prompt: "",
     variables: [...defaultVariables],
     default_ratio: "3:4",
     default_count: 1,
@@ -189,6 +194,9 @@ function resetForm(payload = createEmptyForm()) {
     is_default: Number(payload.is_default || payload.isDefault || 0),
     enabled: Number(payload.enabled ?? 1),
     sort_order: Number(payload.sort_order || payload.sortOrder || 0),
+    detail_image_prompt_json: typeof (payload.detail_image_prompt_json ?? payload.detailImagePromptJson) === "string"
+      ? ((payload.detail_image_prompt_json ?? payload.detailImagePromptJson) || "{}")
+      : JSON.stringify(payload.detailImagePrompts || payload.detail_image_prompts || {}, null, 2),
     updatedAt: payload.updated_at || payload.updatedAt || ""
   });
 }
@@ -236,6 +244,7 @@ function normalizePayload() {
   return {
     ...form,
     variables: [...form.variables],
+    detail_image_prompt_json: String(form.detail_image_prompt_json || "{}").trim() || "{}",
     default_count: Number(form.default_count || 1),
     is_default: Number(form.is_default || 0),
     enabled: Number(form.enabled || 0),
@@ -340,7 +349,8 @@ async function previewTemplate() {
   try {
     const result = await renderAiPromptTemplate({
       template: normalizePayload(),
-      variables: createPreviewVariables()
+      variables: createPreviewVariables(),
+      assetKind: resolvePreviewAssetKind()
     });
     preview.positive = result.finalPositivePrompt || "";
     preview.negative = result.finalNegativePrompt || "";
@@ -356,6 +366,15 @@ watch(() => form.scene, (scene) => {
   const sceneConfig = sceneMap.value.get(scene);
   if (sceneConfig?.mode && !form.id) form.mode = sceneConfig.mode;
 });
+
+function resolvePreviewAssetKind() {
+  const scene = String(form.scene || "");
+  if (scene === "detail_image") return "detail_image";
+  if (scene === "title_generation") return "title";
+  if (scene === "tag_generation") return "tags";
+  if (scene === "description_generation") return "description";
+  return "main_image";
+}
 
 onMounted(loadTemplates);
 </script>
@@ -512,6 +531,46 @@ onMounted(loadTemplates);
                 :rows="18"
                 placeholder="例如：No watermark. No fake certification. No distorted product shape. No unreadable text."
               />
+            </div>
+
+            <div class="prompt-block">
+              <div>
+                <strong>Main Image Prompt</strong>
+                <span>Optional. Falls back to the shared positive prompt when empty.</span>
+              </div>
+              <el-input v-model="form.main_image_prompt" type="textarea" :rows="6" placeholder="Main image prompt" />
+            </div>
+
+            <div class="prompt-block">
+              <div>
+                <strong>Detail Image Prompt</strong>
+                <span>JSON map. Suggested keys: `default`, `selling_points`, `material_detail`, `installation_steps`, `size_info`.</span>
+              </div>
+              <el-input v-model="form.detail_image_prompt_json" type="textarea" :rows="8" placeholder='{"default":"","selling_points":"","installation_steps":"","size_info":""}' />
+            </div>
+
+            <div class="prompt-block">
+              <div>
+                <strong>Title Prompt</strong>
+                <span>Optional. Falls back to the existing title generation logic.</span>
+              </div>
+              <el-input v-model="form.title_prompt" type="textarea" :rows="5" placeholder="Title prompt" />
+            </div>
+
+            <div class="prompt-block">
+              <div>
+                <strong>Tags Prompt</strong>
+                <span>Optional. Falls back to the existing tags generation logic.</span>
+              </div>
+              <el-input v-model="form.tags_prompt" type="textarea" :rows="5" placeholder="Tags prompt" />
+            </div>
+
+            <div class="prompt-block">
+              <div>
+                <strong>Description Prompt</strong>
+                <span>Optional. Falls back to the existing description generation logic.</span>
+              </div>
+              <el-input v-model="form.description_prompt" type="textarea" :rows="6" placeholder="Description prompt" />
             </div>
 
             <div class="prompt-block variable-row">

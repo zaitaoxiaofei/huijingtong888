@@ -291,32 +291,12 @@ function writePrintPreviewPageSafe(printWindow, { url }) {
     </div>
   </header>
   <iframe id="labelFrame" src="${url}" title="PDF"></iframe>
-  <script>
-    document.getElementById("confirmPrinted").addEventListener("click", function () {
-      document.body.dataset.printDecision = "confirmed";
-      this.disabled = true;
-      this.textContent = "\\u6b63\\u5728\\u786e\\u8ba4...";
-    });
-    document.getElementById("cancelPrint").addEventListener("click", function () {
-      document.body.dataset.printDecision = "cancelled";
-      this.disabled = true;
-    });
-    document.getElementById("printNow").addEventListener("click", function () {
-      var frame = document.getElementById("labelFrame");
-      try {
-        frame.contentWindow.focus();
-        frame.contentWindow.print();
-      } catch (error) {
-        window.open("${url}", "_blank", "noopener");
-      }
-    });
-  <\/script>
 </body>
 </html>`);
   printWindow.document.close();
 }
 
-function waitForPrintConfirmation(printWindow, { url, count }) {
+function waitForPrintConfirmation(printWindow, { url, count, orderIds }) {
   writePrintPreviewPageSafe(printWindow, { url, count });
   return new Promise((resolve) => {
     let settled = false;
@@ -335,15 +315,29 @@ function waitForPrintConfirmation(printWindow, { url, count }) {
     const confirmButton = printWindow.document.getElementById("confirmPrinted");
     const cancelButton = printWindow.document.getElementById("cancelPrint");
     const printButton = printWindow.document.getElementById("printNow");
-    confirmButton?.addEventListener("click", () => finish(true));
+    confirmButton?.addEventListener("click", async () => {
+      confirmButton.disabled = true;
+      try {
+        await apiClient.post("/api/orders/package-label-printed", { order_ids: orderIds });
+        finish(true);
+      } catch (error) {
+        confirmButton.disabled = false;
+        confirmButton.textContent = "确认已打印";
+        printWindow.alert(`记录打印时间失败：${error?.message || "未知错误"}`);
+      }
+    });
     cancelButton?.addEventListener("click", () => finish(false));
-    printButton?.addEventListener("click", () => {
+    printButton?.addEventListener("click", async () => {
+      printButton.disabled = true;
       const frame = printWindow.document.getElementById("labelFrame");
       try {
+        await apiClient.post("/api/orders/package-label-printed", { order_ids: orderIds });
+        finish(true);
         frame?.contentWindow?.focus();
         frame?.contentWindow?.print();
-      } catch {
-        printWindow.open(url, "_blank", "noopener");
+      } catch (error) {
+        printButton.disabled = false;
+        printWindow.alert(`记录打印时间失败：${error?.message || "未知错误"}`);
       }
     });
   });
@@ -388,6 +382,43 @@ export async function bulkPrintOrders(orderIds = [], options = {}) {
   });
 }
 
+export async function previewOrderLabels(orderIds = [], options = {}) {
+  const ids = Array.isArray(orderIds) ? orderIds.map(Number).filter(Boolean) : [];
+  if (!ids.length) return null;
+  const printWindow = window.open("", "_blank");
+  if (!printWindow) throw new Error("浏览器阻止了预览窗口，请允许本站打开弹窗后重试");
+  writePrintLoadingPage(printWindow, ids.length);
+  let url = "";
+  try {
+    const response = await apiClient.blobResponse("/api/orders/package-label", {
+      method: "POST",
+      body: JSON.stringify({
+        order_ids: ids,
+        require_all: true,
+        browser_preview: true,
+        printer: options.printer || "label",
+        print_settings: options.printSettings || options.print_settings || "fit",
+        preset: options.preset || options.paperSize || options.paper_size || "",
+        paper_size: options.paperSize || options.paper_size || options.preset || "",
+        orientation: options.orientation || "auto"
+      })
+    });
+    const printedIds = printedIdsFromHeader(response.headers);
+    url = URL.createObjectURL(response.blob);
+    const confirmed = await waitForPrintConfirmation(printWindow, {
+      url,
+      count: printedIds.length || ids.length,
+      orderIds: printedIds.length ? printedIds : ids
+    });
+    return { ok: true, confirmed, printed_ids: printedIds.length ? printedIds : ids, failures: failedLabelsFromHeader(response.headers) };
+  } catch (error) {
+    if (!printWindow.closed) writePrintErrorPage(printWindow, "面单预览失败", error?.message || "未知错误");
+    throw error;
+  } finally {
+    if (url) window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+}
+
 export async function bulkPrepareOrders(orderIds = []) {
   const ids = Array.isArray(orderIds) ? orderIds.map(Number).filter(Boolean) : [];
   if (!ids.length) return null;
@@ -408,6 +439,12 @@ export async function fetchOrderDetail(orderId) {
 
 export async function prepareSingleOrder(orderId) {
   return bulkPrepareOrders([orderId]);
+}
+
+export async function prepareSplitOrder(orderId, packages = []) {
+  const id = Number(orderId || 0);
+  if (!id) return null;
+  return apiClient.post("/api/orders/ship", { order_ids: [id], packages });
 }
 
 export async function previewOrderProcurement(orderId) {

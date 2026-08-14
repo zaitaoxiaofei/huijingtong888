@@ -40,7 +40,8 @@ watch(
   () => props.visible,
   (visible) => {
     if (visible) loadFromJson(props.modelValue);
-  }
+  },
+  { immediate: true }
 );
 
 watch(

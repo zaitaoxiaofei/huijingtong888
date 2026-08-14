@@ -10,12 +10,13 @@ const rootDir = process.cwd();
 const publicDir = path.resolve(rootDir, "public");
 const viteOutputDir = path.join(publicDir, "vue-apps");
 const viteAssetsDir = path.join(viteOutputDir, "assets");
-const viteManifestPath = path.join(viteOutputDir, ".vite", "manifest.json");
+const viteManifestPath = path.resolve(process.env.OZON_VITE_MANIFEST_PATH || path.join(viteOutputDir, ".vite", "manifest.json"));
 const compressExts = new Set([".html", ".css", ".js", ".json", ".svg", ".txt", ".md"]);
 const sidecarExts = [".br", ".gz"];
 const brotliQuality = clampInt(process.env.OZON_PRECOMPRESS_BROTLI_QUALITY, 6, 1, 11);
 const gzipLevel = clampInt(process.env.OZON_PRECOMPRESS_GZIP_LEVEL, 6, 1, 9);
 const concurrency = clampInt(process.env.OZON_PRECOMPRESS_CONCURRENCY, Math.max(2, Math.min(8, (await import("node:os")).cpus().length)), 1, 16);
+const transientCompressErrors = new Set(["EPERM", "EBUSY", "EACCES"]);
 
 function clampInt(value, fallback, min, max) {
   const number = Number(value);
@@ -69,8 +70,12 @@ async function pruneStaleViteAssets() {
       ? file.slice(0, file.endsWith(".br") ? -3 : -3)
       : file;
     if (keep.has(path.resolve(sourceFile))) return;
-    await fs.rm(file, { force: true, maxRetries: 10, retryDelay: 250 });
-    removed += 1;
+    try {
+      await fs.rm(file, { force: true, maxRetries: 10, retryDelay: 250 });
+      removed += 1;
+    } catch (error) {
+      if (!transientCompressErrors.has(error?.code)) throw error;
+    }
   }));
   return removed;
 }
@@ -125,8 +130,14 @@ async function mapLimit(items, limit, mapper) {
 const removed = await pruneStaleViteAssets();
 const files = await walk(publicDir);
 let count = 0;
+let skipped = 0;
 await mapLimit(files, concurrency, async (file) => {
-  if (await writeCompressed(file)) count += 1;
+  try {
+    if (await writeCompressed(file)) count += 1;
+  } catch (error) {
+    if (!transientCompressErrors.has(error?.code)) throw error;
+    skipped += 1;
+  }
 });
 
-console.log(`Precompressed ${count} static assets. Removed ${removed} stale Vite assets.`);
+console.log(`Precompressed ${count} static assets. Removed ${removed} stale Vite assets. Skipped ${skipped} locked files.`);

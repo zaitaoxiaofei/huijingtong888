@@ -63,7 +63,6 @@ const endpoints = [
   ["/api/procurement/requests?grouped=1&paged=1&page=1&pageSize=30", "procurement_grouped_paged"],
   ["/api/procurement/purchase-orders?paged=1&page=1&pageSize=30", "purchase_orders_paged"],
   ["/api/orders?paged=1&page=1&pageSize=30&status=all&shopId=all&dateFrom=&dateTo=&searchType=order&searchQuery=&markFilter=all&printFilter=all&printView=all&sortMode=ordered", "orders_paged"],
-  ["/api/profit-dashboard", "profit_dashboard"],
   ["/api/profit-ranking?dimension=sku&page=1&pageSize=10", "profit_ranking_sku"],
   ["/api/profit-ranking?dimension=shop&page=1&pageSize=10", "profit_ranking_shop"],
   ["/api/profits/historical-review?limit=10", "historical_profit_review"]

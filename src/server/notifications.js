@@ -3,9 +3,20 @@ import path from "node:path";
 
 const runtimeDir = path.resolve("data");
 const statusFile = path.join(runtimeDir, "global-update-status.json");
-const defaultPluginVersion = process.env.COLLECTOR_PLUGIN_VERSION || "1.4.1";
+const collectorPluginManifestPath = path.resolve("ozon-erp-collector-plugin", "manifest.json");
+const analyticsPluginManifestPath = path.resolve("pivot-table-master", "manifest.json");
+function readPluginManifestVersion(manifestPath) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    const version = String(manifest?.version || "").trim();
+    return version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+const defaultPluginVersion = process.env.COLLECTOR_PLUGIN_VERSION || readPluginManifestVersion(collectorPluginManifestPath);
 const defaultPluginPackageName = `ozon-baodan-erp-plugin-${defaultPluginVersion}.rar`;
-const defaultAnalyticsPluginVersion = process.env.ANALYTICS_PLUGIN_VERSION || "1.0.23";
+const defaultAnalyticsPluginVersion = process.env.ANALYTICS_PLUGIN_VERSION || readPluginManifestVersion(analyticsPluginManifestPath);
 const defaultAnalyticsPluginPackageName = `ozon-seller-analytics-plugin-${defaultAnalyticsPluginVersion}.rar`;
 const updateSubscribers = new Set();
 const defaultStatus = {
@@ -91,6 +102,7 @@ function sendUpdateEvent(res, eventName, payload) {
 export function subscribeGlobalUpdateEvents(res, query = {}) {
   const client = {
     res,
+    personId: Number(query.person_id || query.personId || 0) || 0,
     appVersion: String(query.app_version || query.appVersion || "").trim(),
     pluginVersion: String(query.plugin_version || query.pluginVersion || "").trim()
   };
@@ -125,6 +137,15 @@ export function broadcastGlobalUpdateStatus(status = readUpdateStatusFile()) {
       plugin_version: client.pluginVersion
     });
     if (!sendUpdateEvent(client.res, "update", payload)) updateSubscribers.delete(client);
+  }
+}
+
+// Reuse the authenticated application event stream for short-lived operational events.
+export function broadcastGlobalEvent(eventName, payload = {}, options = {}) {
+  const personId = Number(options.personId || 0) || 0;
+  for (const client of [...updateSubscribers]) {
+    if (personId && Number(client.personId || 0) !== personId) continue;
+    if (!sendUpdateEvent(client.res, eventName, payload)) updateSubscribers.delete(client);
   }
 }
 

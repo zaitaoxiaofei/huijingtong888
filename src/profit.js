@@ -57,6 +57,7 @@ export function estimateItemProfit({ salePrice, quantity, product, mapping }) {
     length_cm: product.length_cm,
     width_cm: product.width_cm,
     height_cm: product.height_cm,
+    pricing_effective_at: product.pricing_effective_at,
     return_rate: product.return_rate ?? 0.05,
     withdrawal_fee_rate: product.withdrawal_fee_rate ?? 0.012,
     advertising_rate: product.advertising_rate ?? 0

@@ -63,14 +63,39 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## 5. Protected Ports and Local Verification
 
-**Use `8788` for Codex local work. Never auto-operate protected ports.**
+**Use `8788` for Codex local work and ECS for production.**
 
 - Codex may use `8788` for local editing, debugging, temporary deployment, service restart, and verification. This is the dedicated local testing environment.
-- Codex must never start, restart, deploy, bind, stop, replace, or otherwise operate services on `8087` unless the user explicitly authorizes that exact action.
-- Treat `8787` as a protected production-equivalent port as well. Do not operate services on `8787` unless the user explicitly authorizes that exact action.
-- Packaging and deployment to protected ports are manual release actions controlled by the user. Do not perform them as part of automatic debugging or verification.
-- If a protected port is already running, leave it alone unless the user explicitly asks for that exact protected-port action.
+- Ports `8787` and `8087` and their former environments have been permanently removed. Do not use, deploy to, probe, restart, or describe them as available environments.
+- The Ubuntu ECS environment is the production deployment target. Use the checked-in ECS deployment workflow when the user authorizes an ECS deployment.
 - When reporting a local verification URL, prefer the dedicated test URL format: `http://localhost:8788/admin.html#/[route]`.
+
+## 5.0 Plugin Versioning
+
+**Browser plugin code changes must be reflected in `manifest.json`.**
+
+- When changing collector/plugin source files or packaged-plugin contents, bump the corresponding `manifest.json` version before completion.
+- For the Baodan/Ozon collector plugin, keep `../ozon-erp-collector-plugin/manifest.json` and `ozon-erp-collector-plugin/manifest.json` at the same version when both copies exist.
+- After bumping a plugin version, state the expected package name in the final response, such as `ozon-baodan-erp-plugin-1.4.5.rar`.
+- A plugin release is complete only after ECS contains the versioned package, update-status metadata names that same version/package, and the production download URL is successfully tested.
+- For every ECS deployment containing plugin changes, inspect the downloaded production archive and verify its `manifest.json` version exactly matches both source manifests. Any mismatch blocks completion.
+
+## 5.1 User-Facing Time Display
+
+**Show operators Beijing time consistently.**
+
+- User-facing pages, tables, filters, exports, and operational copy must display date/time values in Beijing time (`Asia/Shanghai`) with one consistent readable format.
+- Frontend display code should use the shared Beijing-time formatter instead of slicing ISO strings or showing raw `T`/`Z` timestamps.
+- Backend storage and API internals may keep UTC/standard timestamps where appropriate, but user-facing filtering semantics should match Beijing-calendar days unless a feature explicitly documents another timezone.
+
+## 5.2 Blocking Validation Messages
+
+**When a workflow is blocked by missing fields, say exactly what is missing and where to fix it.**
+
+- Blocking errors must not only show raw database/API field names.
+- Include the business field name, relevant database/API field names, why the workflow is blocked, and the operator's next step.
+- For Ozon publish/category blockers, explicitly say whether the missing field belongs to the product/selection, shop, draft, variant, media, price, package, or attribute layer.
+- Example: if `ozon_description_category_id`, `ozon_type_id`, or `ozon_category_id` is missing, say it is the product's Ozon category/classification field, not a shop field, and that Ozon required attributes cannot be validated until it is filled.
 
 ## 6. Product Image Display
 
@@ -83,6 +108,18 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Empty image states should keep the same thumbnail box size and show a short neutral label such as `无图`.
 - Compact thumbnails are acceptable only in dense side lists, rankings, task cards, or secondary panels where the image is not the main inspection target.
 
+## 6.1 Listing Draft Media Authority
+
+**Current draft images must win over historical collected-product images.**
+
+- Treat `template_payload.editable_payload.variants[0].images` as authoritative when the first variant owns its image set.
+- A variant owns its image set when it has images or carries `images_manually_edited` / `image_edit_intent = "manual"`. An explicitly emptied manual image set must not fall back to historical images.
+- Otherwise use draft editable images, then draft template images, and only then `source_images_json` as a legacy fallback.
+- Consumers must use the backend `effective_images` result instead of independently merging draft, template, and collector image fields.
+- Image normalizers must accept both URL strings and media objects. Backend `effective_images` is a URL-string array; converting it as object-only data silently produces empty image rows.
+- AI fission drafts may replace the first image with the generated target main image, but their remaining detail images must be revalidated against the source draft's current effective image set on the backend.
+- Historical collector payloads under `source_raw` are provenance only. They must never overwrite or be appended behind a current draft-owned image set.
+
 ## 7. Listing Automation Protected Workflow
 
 **The product listing page is a protected operational workflow, not a disposable UI surface.**
@@ -92,6 +129,9 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Drag-and-drop sorting in the selected SKU image area is a protected behavior. If this area is changed, keep `draggable`, `dragstart`, `dragover`, `drop`, and order persistence behavior covered by tests.
 - Publish payloads must include only selected dictionary values. Do not send the full option candidate list, raw Ozon attribute JSON, or unknown dictionary placeholders as selected values.
 - Routed entry points from drafts, publish records, online products, or collector data must not restore stale local listing drafts.
+- When `/listing-automation` is opened with an explicit route context such as `draftId`, `recordId`, `recordDraft`, or `templateId`, that route context must take priority over any saved local workbench draft. Do not let local cached draft state replace the active route target, or saves may create duplicate drafts and roll edited images back to older cached state.
+- Batch draft editing must map exactly one selected draft to one editor variant row. Keep the original draft ID and template ID as non-editable row metadata, reject mixed `description_category_id + type_id` categories, and save all rows through one transactional batch update. Never collapse the rows into one draft or write every row back to the first draft.
+- In batch draft editing, each row keeps its own authoritative effective image set. Common-field synchronization may change values intentionally, but loading or saving must not replace row images with the first draft, template defaults, or collected-product history.
 - Ozon dictionary attributes and variant attributes must show human-readable labels where available; raw dictionary IDs should not be shown as normal operator-facing values.
 - Keep Ozon optional attributes paged in small batches, and keep variant dictionary editing lazy through a focused editor/drawer instead of rendering every option in every table cell.
 - Heavy listing overlays such as attribute details, variant attribute editors, import drawers, API debug drawers, publish validation, and publish result drawers should mount lazily with `v-if`.

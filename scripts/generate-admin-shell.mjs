@@ -1,8 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
+import { spawn } from "node:child_process";
 
 const rootDir = process.cwd();
-const manifestPath = path.resolve(rootDir, "public", "vue-apps", ".vite", "manifest.json");
+const manifestPath = path.resolve(process.env.OZON_VITE_MANIFEST_PATH || path.resolve(rootDir, "public", "vue-apps", ".vite", "manifest.json"));
 const adminHtmlPath = path.resolve(rootDir, "public", "admin.html");
 
 const text = {
@@ -265,7 +267,41 @@ ${modulePreloadTags}
 </html>
 `;
 
-  await fs.writeFile(adminHtmlPath, html, "utf8");
+  await writeAdminHtml(html);
+}
+
+async function runPowerShell(command) {
+  await new Promise((resolve, reject) => {
+    const child = spawn("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      `${command}; exit 0`
+    ], {
+      stdio: "ignore",
+      windowsHide: true
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`PowerShell command failed with code ${code}`));
+    });
+  });
+}
+
+async function writeAdminHtml(html) {
+  try {
+    await fs.writeFile(adminHtmlPath, html, "utf8");
+  } catch (error) {
+    if (process.platform !== "win32" || !["EPERM", "EACCES"].includes(error?.code)) throw error;
+    const tempHtmlPath = path.join(os.tmpdir(), `ozon-admin-${Date.now()}.html`);
+    await fs.writeFile(tempHtmlPath, html, "utf8");
+    const escapedSourcePath = tempHtmlPath.replaceAll("'", "''");
+    const escapedTargetPath = adminHtmlPath.replaceAll("'", "''");
+    await runPowerShell(`Copy-Item -LiteralPath '${escapedSourcePath}' -Destination '${escapedTargetPath}' -Force`);
+    await fs.rm(tempHtmlPath, { force: true }).catch(() => {});
+  }
 }
 
 main().catch((error) => {

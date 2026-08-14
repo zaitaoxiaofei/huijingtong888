@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const source = readFileSync(new URL("../frontend/admin/views/listing/ListingAutomationView.vue", import.meta.url), "utf8");
+const serviceSource = readFileSync(new URL("../src/services/listing-automation.js", import.meta.url), "utf8");
 
 function functionBody(name) {
   const start = source.indexOf(`function ${name}`);
@@ -30,6 +31,31 @@ test("dictionary selects display Chinese labels without changing Ozon values", (
   assert.match(functionBody("attributeOptionLabel"), /candidates\.find\(hasChineseText\)/);
   assert.match(source, /:label="attributeOptionLabel\(option\)" :value="option\.value"/);
   assert.doesNotMatch(source, /:value="attributeOptionLabel\(option\)"/);
+});
+
+test("attribute dictionaries reuse a seven-day category cache and refresh from Ozon on demand", () => {
+  assert.match(serviceSource, /OZON_ATTRIBUTE_VALUE_PERSISTENT_CACHE_TTL_MS = 7 \* 24 \* 60 \* 60 \* 1000/);
+  assert.match(serviceSource, /async function refreshOzonAttributeValuesIfNeeded/);
+  assert.match(serviceSource, /localization_attempt_count/);
+  assert.match(serviceSource, /attributeValueRefreshRequests/);
+  assert.match(serviceSource, /language: "ZH_HANS"/);
+  assert.match(serviceSource, /auto_refresh: false/);
+  assert.match(serviceSource, /OZON_ATTRIBUTE_VALUE_CACHE_VERSION = 2/);
+  assert.match(serviceSource, /current_version_count/);
+});
+
+test("dictionary attributes stay clickable without eager values and failed loads can retry", () => {
+  assert.match(functionBody("normalizeAttributeType"), /Number\(item\?\.dictionary_id \|\| 0\)/);
+  assert.doesNotMatch(functionBody("ensureAttributeValuesLoaded"), /attributeValueLoadTried\[cacheKey\].*renderedAttributeOptions/);
+  assert.match(functionBody("ensureAttributeValuesLoaded"), /delete attributeValueLoadTried\[cacheKey\]/);
+  assert.match(functionBody("ensureAttributeValuesLoaded"), /属性选项加载失败，可重新打开下拉重试/);
+});
+
+test("localized dictionary labels keep official Ozon values and ids for saving", () => {
+  assert.match(functionBody("attributeOptionModelValue"), /option\?\.value/);
+  assert.match(functionBody("updateVariantAttributeSelectValue"), /entry\.selected_values = dedupeAttributeOptions\(selectedOptions\)/);
+  assert.match(functionBody("normalizeAttributeForPayload"), /selectedPayloadValues/);
+  assert.match(functionBody("normalizeAttributeForPayload"), /dictionary_value_id/);
 });
 
 test("variant titles can copy the first row from row and batch actions", () => {

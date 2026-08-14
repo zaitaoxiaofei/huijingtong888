@@ -1,29 +1,36 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Refresh, Search, VideoPlay } from "@element-plus/icons-vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
+import ErpFilterBar from "../../components/ErpFilterBar.vue";
+import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import { useAuthStore } from "../../stores/auth";
 import {
   createSellerAnalyticsCollectRun,
+  confirmSellerAnalyticsBrowserProfile,
   deleteSellerAnalyticsCollectRun,
   getSellerAnalyticsAnalysis,
   getSellerAnalyticsAuthBindingStatus,
+  getSellerAnalyticsBrowserProfileStatus,
   getSellerAnalyticsCollectRuns,
   getSellerAnalyticsPluginStatus,
   getSellerAnalyticsSnapshots,
   prepareSellerAnalyticsPlugin,
+  prepareSellerAnalyticsBrowserProfile,
   refreshSellerAnalyticsOperationTodos,
   retrySellerAnalyticsCollectRun,
-  startSellerAnalyticsDirectCollect,
   validateSellerAnalyticsPluginStatus
 } from "../../api/sellerAnalytics";
 import { apiClient } from "../../utils/api";
+import { getAnalyticsPeriodDateRange } from "../../utils/analytics-date-range";
+import { loadShopDictionary } from "../../utils/shop-dictionary";
 
 const route = useRoute();
-const ANALYTICS_PAGE_SIZE = 30;
+const DEFAULT_ANALYTICS_PAGE_SIZE = 30;
+const ANALYTICS_PAGE_SIZE_OPTIONS = [20, 30, 50, 100];
 const FILTER_CACHE_KEY_PREFIX = "ozon-erp:seller-analytics:filters";
 const DAILY_SYNC_PERIOD_KEYS = ["7d", "28d"];
 const sourceTabs = [
@@ -203,9 +210,9 @@ const compactMetricColumns = [
 const tableMetricColumns = [
   { key: "searchPosition", label: "位置", width: 84, sortProp: "metric:searchPosition", item: { key: "searchPosition", lowerIsBetter: true, dynamicsKey: "searchPositionDynamics", help: "搜索/目录平均展示位置，数字越小越靠前。" } },
   { key: "exposure", label: "曝光", width: 104, sortProp: "metric:totalViews", item: { keys: ["totalViews", "searchViews"], type: "int", dynamicsKey: "totalViewsDynamics", help: "买家看到商品的总次数，优先展示总曝光，没有总曝光时用搜索曝光。" } },
-  { key: "pdpViews", label: "进卡", width: 96, sortProp: "metric:pdpViews", item: { key: "pdpViews", type: "int", dynamicsKey: "pdpViewsDynamics", help: "买家打开商品卡片的次数。" } },
-  { key: "totalAddToCart", label: "加购", width: 96, sortProp: "metric:totalAddToCart", item: { keys: ["totalAddToCart", "pdpAddToCart", "searchAddToCart"], type: "int", dynamicsKey: "totalAddToCartDynamics", help: "所有入口加购总次数。" } },
-  { key: "orderedUnits", label: "下单", width: 92, sortProp: "metric:orderedUnits", item: { key: "orderedUnits", type: "int", dynamicsKey: "orderedUnitsDynamics", help: "买家已下单的商品件数。" } },
+  { key: "pdpViews", label: "进卡", width: 112, sortProp: "metric:pdpViews", item: { key: "pdpViews", type: "int", dynamicsKey: "pdpViewsDynamics", rateKey: "convSearchViewsToPdp", rateLabel: "点击率", help: "买家打开商品卡片的次数；下方显示搜索曝光进入商品卡片的点击率。" } },
+  { key: "totalAddToCart", label: "加购", width: 112, sortProp: "metric:totalAddToCart", item: { keys: ["totalAddToCart", "pdpAddToCart", "searchAddToCart"], type: "int", dynamicsKey: "totalAddToCartDynamics", rateKey: "convPdpViewsToCart", rateLabel: "加购率", help: "所有入口加购总次数；下方显示商品卡访问转为卡片加购的比例。" } },
+  { key: "orderedUnits", label: "下单", width: 118, sortProp: "metric:orderedUnits", item: { key: "orderedUnits", type: "int", dynamicsKey: "orderedUnitsDynamics", rateKey: "convPdpViewsToOrder", rateLabel: "转化率", help: "买家已下单的商品件数；下方显示商品访问转为下单的比例。" } },
   { key: "convHitsToCartToOrder", label: "成交率", width: 96, sortProp: "metric:convHitsToCartToOrder", item: { key: "convHitsToCartToOrder", type: "percent", dynamicsKey: "convHitsToCartToOrderDynamics", hideWhenEmpty: true, help: "加购后最终下单的比例。" } },
   { key: "revenue", label: "金额", width: 112, sortProp: "metric:revenue", item: { key: "revenue", type: "money", dynamicsKey: "revenueDynamics", help: "当前周期已订购商品金额。" } },
   { key: "acceptedUnits", label: "成交", width: 92, sortProp: "metric:acceptedUnits", item: { key: "acceptedUnits", type: "int", dynamicsKey: "acceptedUnitsDynamics", help: "最终认购/有效成交件数。" } },
@@ -229,8 +236,16 @@ const analysis = ref({ summary: {}, products: [], focusProducts: [], recommendat
 const snapshots = ref([]);
 const collectRuns = ref([]);
 const pluginStatus = ref(null);
+const pluginInstanceId = ref("");
+const recognizingPlugin = ref(false);
 const pluginValidation = ref(null);
 const authBindingStatus = ref(null);
+const browserProfileStatus = ref(null);
+const syncOverviewVisible = ref(false);
+const syncOverviewLoading = ref(false);
+const shopSyncOverview = ref([]);
+const analyticsScheduledJobs = ref([]);
+const browserProfilePreparing = ref(false);
 const selectedSnapshotIds = ref([]);
 const metaLoaded = reactive({ snapshots: false, runs: false });
 const rawDialog = reactive({ visible: false, title: "", content: "" });
@@ -243,6 +258,7 @@ const prepareFlow = reactive({
 });
 const state = reactive({
   page: 1,
+  pageSize: DEFAULT_ANALYTICS_PAGE_SIZE,
   sortKey: "metric:revenue",
   sortOrder: "desc",
   filters: {
@@ -250,9 +266,79 @@ const state = reactive({
     tabKey: "",
     periodKey: "7d",
     dateRange: [],
-    keyword: ""
+    keyword: "",
+    rateFilterKey: "click_rate",
+    rateMin: null,
+    rateMax: null
   }
 });
+const rateFilterOptions = [
+  { label: "点击率", value: "click_rate" },
+  { label: "加购率", value: "cart_rate" },
+  { label: "转化率", value: "conversion_rate" }
+];
+const rateSortOptions = [
+  { label: "点击率", value: "metric:convSearchViewsToPdp" },
+  { label: "加购率", value: "metric:convPdpViewsToCart" },
+  { label: "转化率", value: "metric:convPdpViewsToOrder" }
+];
+
+function runForPeriod(runs, periodKey) {
+  return (runs || []).find((run) => run?.period_key === periodKey) || null;
+}
+
+function syncRunStatus(run) {
+  if (!run) return { label: "从未同步", type: "info" };
+  if (run.status === "success" && Number(run.failed_count || 0) === 0) return { label: "完整", type: "success" };
+  if (["pending", "running"].includes(run.status)) return { label: "同步中", type: "warning" };
+  if (Number(run.completed_count || 0) > 0) return { label: "部分完成", type: "warning" };
+  return { label: "失败", type: "danger" };
+}
+
+function runCompleteness(run) {
+  if (!run) return "—";
+  return `${Number(run.completed_count || 0)}/${Number(run.request_count || 0)}${Number(run.failed_count || 0) ? `，失败 ${Number(run.failed_count || 0)}` : ""}`;
+}
+
+function runPeriodText(run) {
+  const period = run?.current_period || {};
+  return period.date_from && period.date_to ? `${period.date_from} ~ ${period.date_to}` : "—";
+}
+
+function runTriggerLabel(run) {
+  const source = String(run?.trigger_source || run?.source || run?.created_by || "").toLowerCase();
+  if (source.includes("scheduled") || source.includes("background")) return "ERP 自动同步";
+  return run ? "手动/即时同步" : "—";
+}
+
+async function loadShopSyncOverview() {
+  syncOverviewLoading.value = true;
+  try {
+    const jobs = await apiClient.get("/api/scheduled-jobs?run_limit=3", { noCache: true }).catch(() => []);
+    analyticsScheduledJobs.value = (Array.isArray(jobs) ? jobs : []).filter((job) => ["seller_analytics_daily_sync", "seller_analytics_28d_sync"].includes(job.key));
+    shopSyncOverview.value = await Promise.all(shops.value.map(async (shop) => {
+      const storeId = getShopSellerStoreId(shop) || String(shop.id || "");
+      const [binding, runs] = await Promise.all([
+        getSellerAnalyticsAuthBindingStatus({ shop_id: shop.id, store_id: storeId, company_id: storeId }).catch(() => null),
+        getSellerAnalyticsCollectRuns({ store_id: storeId, limit: 100 }).catch(() => [])
+      ]);
+      return { shop, storeId, binding, run7d: runForPeriod(runs, "7d"), run28d: runForPeriod(runs, "28d") };
+    }));
+  } finally {
+    syncOverviewLoading.value = false;
+  }
+}
+
+async function openSyncOverview() {
+  syncOverviewVisible.value = true;
+  await loadShopSyncOverview();
+}
+
+function handleRateSort(sortKey) {
+  state.sortKey = sortKey;
+  state.sortOrder = "desc";
+  handleSearch();
+}
 let pollTimer = 0;
 let pluginPollTimer = 0;
 let lastNotifiedRunId = "";
@@ -365,25 +451,17 @@ const selectedStoreId = computed(() => getShopSellerStoreId(selectedShop.value) 
 const selectedShopLabel = computed(() => selectedShop.value?.name || "未选择店铺");
 const pluginCompanyLabel = computed(() => pluginStatus.value?.current_company_id || pluginValidation.value?.current_company_id || "待识别");
 const directSyncStatus = computed(() => {
-  const binding = authBindingStatus.value || {};
-  if (binding.bound && !binding.stale) {
+  if (pluginValidation.value?.ok) {
     return {
       tone: "success",
-      title: "后端直连已绑定",
-      detail: binding.last_ok_at ? `最近直连成功 ${formatDateTime(binding.last_ok_at)}` : "后端可直接用店铺授权采集"
-    };
-  }
-  if (binding.bound && binding.stale) {
-    return {
-      tone: "warning",
-      title: "后端授权已过期",
-      detail: "请打开 Ozon 分析页，插件会自动续授权"
+      title: "插件采集可用",
+      detail: "使用当前浏览器的 Ozon 登录状态采集"
     };
   }
   return {
     tone: "warning",
-    title: "需要首次绑定授权",
-    detail: "点击首次绑定后，插件会自动打开 Ozon 并绑定当前店铺 Cookie"
+    title: "等待插件就绪",
+    detail: "请保持 Ozon 分析页和店铺分析插件在线"
   };
 });
 const currentErpBaseUrl = computed(() => {
@@ -418,17 +496,6 @@ const recommendationRows = computed(() => (
 const pluginSyncStatus = computed(() => {
   const validation = pluginValidation.value || {};
   const status = pluginStatus.value || {};
-  const binding = authBindingStatus.value || {};
-  if (binding.bound && !binding.stale) {
-    return {
-      tone: "success",
-      title: "后端直连可用",
-      detail: status.current_company_id && String(status.current_company_id) !== String(selectedStoreId.value || "")
-        ? `Ozon 页面当前是 ${status.current_company_id}，但本店铺已绑定授权，同步无需切换页面。`
-        : "本店铺已绑定授权，同步无需打开或切换 Ozon 页面。",
-      blocked: false
-    };
-  }
   if (validation.ok) {
     return {
       tone: "success",
@@ -484,8 +551,9 @@ const periodHint = computed(() => {
 const overviewMetrics = computed(() => analysis.value?.totalsRow?.metrics || {});
 const productFooterSummary = computed(() => {
   const total = totalProductCount.value;
-  const start = total ? ((state.page - 1) * ANALYTICS_PAGE_SIZE) + 1 : 0;
-  const end = total ? Math.min(total, (state.page - 1) * ANALYTICS_PAGE_SIZE + products.value.length) : 0;
+  const pageSize = Math.max(1, Number(state.pageSize || DEFAULT_ANALYTICS_PAGE_SIZE));
+  const start = total ? ((state.page - 1) * pageSize) + 1 : 0;
+  const end = total ? Math.min(total, (state.page - 1) * pageSize + products.value.length) : 0;
   const source = state.filters.tabKey ? sourceTabs.find((item) => item.value === state.filters.tabKey)?.label : "全部页签";
   return `${source || "全部页签"} · 第 ${state.page} 页 · 当前 ${start}-${end} / ${total} 个商品`;
 });
@@ -664,12 +732,6 @@ const quadrantStats = computed(() => {
   return result;
 });
 
-function todayKey(offset = 0) {
-  const date = new Date();
-  date.setDate(date.getDate() + offset);
-  return date.toISOString().slice(0, 10);
-}
-
 function median(values) {
   const list = values.filter((item) => Number.isFinite(item)).sort((a, b) => a - b);
   if (!list.length) return 0;
@@ -727,9 +789,13 @@ function loadCachedFilter() {
     if (cached.periodKey) state.filters.periodKey = cached.periodKey;
     if (Array.isArray(cached.dateRange)) state.filters.dateRange = cached.dateRange;
     if (cached.keyword !== undefined) state.filters.keyword = String(cached.keyword || "");
+    if (rateFilterOptions.some((item) => item.value === cached.rateFilterKey)) state.filters.rateFilterKey = cached.rateFilterKey;
+    state.filters.rateMin = cached.rateMin ?? null;
+    state.filters.rateMax = cached.rateMax ?? null;
     if (cached.sortKey) state.sortKey = String(cached.sortKey);
     if (cached.sortOrder) state.sortOrder = String(cached.sortOrder) === "asc" ? "asc" : "desc";
     if (Number(cached.page) > 0) state.page = Math.max(1, Number(cached.page));
+    if (ANALYTICS_PAGE_SIZE_OPTIONS.includes(Number(cached.pageSize))) state.pageSize = Number(cached.pageSize);
     if (cached.activePane) activePane.value = String(cached.activePane);
   } catch {}
 }
@@ -752,7 +818,11 @@ function cacheFilter() {
     periodKey: state.filters.periodKey,
     dateRange: state.filters.dateRange,
     keyword: state.filters.keyword,
+    rateFilterKey: state.filters.rateFilterKey,
+    rateMin: state.filters.rateMin,
+    rateMax: state.filters.rateMax,
     page: state.page,
+    pageSize: state.pageSize,
     sortKey: state.sortKey,
     sortOrder: state.sortOrder,
     activePane: activePane.value
@@ -772,7 +842,7 @@ function markMetaStale() {
 }
 
 async function loadShops() {
-  shops.value = (await apiClient.get("/api/shops"))
+  shops.value = (await loadShopDictionary())
     .filter((shop) => shop && shop.status !== "deleted")
     .map((shop) => normalizeShopOption(shop));
   if (state.filters.shopId && !shops.value.some((shop) => String(shop.id) === String(state.filters.shopId))) {
@@ -789,25 +859,29 @@ function buildAnalysisQueryParams(overrides = {}) {
     keyword: state.filters.keyword,
     store_id: selectedStoreId.value,
     page: state.page,
-    product_limit: ANALYTICS_PAGE_SIZE,
+    product_limit: state.pageSize,
     focus_limit: 200,
     sort_key: state.sortKey,
     sort_order: state.sortOrder,
+    [`${state.filters.rateFilterKey}_min`]: state.filters.rateMin,
+    [`${state.filters.rateFilterKey}_max`]: state.filters.rateMax,
     limit: 1000,
     ...overrides
   };
 }
 
-async function refreshData(silent = false) {
+async function refreshData(silent = false, options = {}) {
   if (!silent) loading.value = true;
   try {
     cacheFilter();
-    markMetaStale();
+    if (options.refreshMeta !== false) markMetaStale();
     const params = buildAnalysisQueryParams();
     const nextAnalysis = await getSellerAnalyticsAnalysis(params);
     analysis.value = nextAnalysis || analysis.value;
-    await loadRunsMeta(true);
-    await loadActiveMetaPane(true);
+    if (options.refreshMeta !== false) {
+      await loadRunsMeta(true);
+      await loadActiveMetaPane(true);
+    }
   } finally {
     loading.value = false;
   }
@@ -844,7 +918,7 @@ async function loadSnapshotsMeta(silent = false) {
 async function loadRunsMeta(silent = false) {
   if (!silent) metaLoading.value = true;
   try {
-    const nextRuns = await getSellerAnalyticsCollectRuns({ store_id: selectedStoreId.value, limit: 30 });
+    const nextRuns = await getSellerAnalyticsCollectRuns({ store_id: selectedStoreId.value, limit: 30, summary: 1 });
     collectRuns.value = Array.isArray(nextRuns) ? nextRuns : [];
     metaLoaded.runs = true;
   } finally {
@@ -853,7 +927,7 @@ async function loadRunsMeta(silent = false) {
 }
 
 async function loadPluginStatus() {
-  pluginStatus.value = await getSellerAnalyticsPluginStatus().catch(() => pluginStatus.value);
+  pluginStatus.value = await getSellerAnalyticsPluginStatus({ plugin_instance_id: pluginInstanceId.value }).catch(() => pluginStatus.value);
   return pluginStatus.value;
 }
 
@@ -866,12 +940,48 @@ async function loadAuthBindingStatus() {
   return authBindingStatus.value;
 }
 
+async function loadBrowserProfileStatus() {
+  browserProfileStatus.value = await getSellerAnalyticsBrowserProfileStatus({
+    store_id: selectedStoreId.value,
+    company_id: selectedStoreId.value
+  }).catch(() => browserProfileStatus.value);
+  return browserProfileStatus.value;
+}
+
+async function openPersistentBrowserLogin() {
+  if (!selectedStoreId.value) return;
+  browserProfilePreparing.value = true;
+  try {
+    await prepareSellerAnalyticsBrowserProfile({ store_id: selectedStoreId.value });
+    ElMessage.info("已打开该店铺的独立 Ozon 登录窗口。登录完成后点击“确认长期绑定”。");
+    await loadBrowserProfileStatus();
+  } catch (error) {
+    ElMessage.error(error?.message || "打开独立登录窗口失败");
+  } finally {
+    browserProfilePreparing.value = false;
+  }
+}
+
+async function confirmPersistentBrowserLogin() {
+  if (!selectedStoreId.value) return;
+  browserProfilePreparing.value = true;
+  try {
+    browserProfileStatus.value = await confirmSellerAnalyticsBrowserProfile({ store_id: selectedStoreId.value });
+    ElMessage.success("当前店铺已完成持久化浏览器绑定，服务重启后仍可恢复。");
+  } catch (error) {
+    ElMessage.error(error?.message || "确认长期绑定失败");
+  } finally {
+    browserProfilePreparing.value = false;
+  }
+}
+
 async function loadPluginValidation() {
   pluginValidation.value = await validateSellerAnalyticsPluginStatus({
     shop_id: state.filters.shopId,
     store_id: selectedStoreId.value,
     company_id: selectedStoreId.value,
-    shop_name: selectedShop.value?.name || ""
+    shop_name: selectedShop.value?.name || "",
+    plugin_instance_id: pluginInstanceId.value
   }).catch(() => pluginValidation.value);
   return pluginValidation.value;
 }
@@ -884,13 +994,13 @@ async function loadActiveMetaPane(silent = false) {
 
 function handleSearch() {
   state.page = 1;
-  Promise.all([refreshData(), loadPluginStatus(), loadPluginValidation(), loadAuthBindingStatus()]).catch(() => {});
+  Promise.all([refreshData(), loadPluginStatus(), loadPluginValidation(), loadAuthBindingStatus(), loadBrowserProfileStatus()]).catch(() => {});
 }
 
 function handlePeriodChange() {
-  if (state.filters.periodKey === "custom" && !state.filters.dateRange?.length) {
-    state.filters.dateRange = [todayKey(-6), todayKey(-1)];
-  }
+  const presetRange = getAnalyticsPeriodDateRange(state.filters.periodKey);
+  if (presetRange) state.filters.dateRange = presetRange;
+  else if (!state.filters.dateRange?.length) state.filters.dateRange = getAnalyticsPeriodDateRange("7d");
   handleSearch();
 }
 
@@ -903,7 +1013,15 @@ function handleCustomDateRangeChange() {
 
 function handlePageChange(page) {
   state.page = Math.max(1, Number(page || 1));
-  refreshData();
+  refreshData(false, { refreshMeta: false });
+}
+
+function handlePageSizeChange(size) {
+  const nextSize = ANALYTICS_PAGE_SIZE_OPTIONS.includes(Number(size)) ? Number(size) : DEFAULT_ANALYTICS_PAGE_SIZE;
+  if (state.pageSize === nextSize && state.page === 1) return;
+  state.pageSize = nextSize;
+  state.page = 1;
+  refreshData(false, { refreshMeta: false });
 }
 
 function metricSortProp(metric) {
@@ -936,36 +1054,27 @@ function buildCollectPayload(overrides = {}) {
   };
 }
 
-async function createCollectRunAndStartDirect(payload = {}) {
+async function createPluginCollectRun(payload = {}) {
   const result = await createSellerAnalyticsCollectRun(payload);
-  const direct = await startSellerAnalyticsDirectCollect(payload).catch((error) => ({
-    started: false,
-    reason: error?.message || String(error)
-  }));
-  return { result, direct };
+  wakeAnalyticsPlugin();
+  return { result };
+}
+
+function wakeAnalyticsPlugin() {
+  window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_WAKE" }, window.location.origin);
 }
 
 async function ensureCollectReady() {
   try {
-    const binding = await loadAuthBindingStatus();
-    const bindingStoreId = String(binding?.store_id || binding?.company_id || "");
-    const selectedId = String(selectedStoreId.value || "");
-    const pluginStatusNow = await loadPluginStatus().catch(() => pluginStatus.value);
-    if (binding?.bound && !binding.stale && bindingStoreId && bindingStoreId === selectedId && pluginStatusNow?.plugin_online !== false) {
+    if (!(await requireAnalyticsPluginInstance())) return false;
+    if (skipPluginValidation.value) return true;
+    const currentValidation = await loadPluginValidation();
+    if (currentValidation?.ok) {
       prepareFlow.tone = "success";
-      prepareFlow.title = "插件跨店采集已就绪";
-      prepareFlow.detail = binding.last_ok_at
-        ? `系统将用已登录 Ozon 页面按目标店铺同步，最近成功 ${formatDateTime(binding.last_ok_at)}。`
-        : "系统将用已登录 Ozon 页面按目标店铺同步，不要求当前后台切到同一店铺。";
+      prepareFlow.title = "Ozon 店铺已对齐";
+      prepareFlow.detail = "使用当前浏览器插件创建同步任务。";
       return true;
     }
-    if (!binding?.bound || binding.stale) {
-      bindCurrentShopAuth().catch(() => null);
-      prepareFlow.tone = "warning";
-      prepareFlow.title = "需要建立授权池";
-      prepareFlow.detail = "当前店铺还没有可用后端直连授权，插件会打开 Ozon 绑定 Cookie，完成后后续同步不再跳转。";
-    }
-    if (skipPluginValidation.value) return true;
     prepareFlow.tone = "warning";
     prepareFlow.title = "正在准备 Ozon 分析页";
     prepareFlow.detail = "插件会自动打开 seller.ozon.ru/app/analytics/graphs，并识别当前 Ozon 店铺。";
@@ -973,7 +1082,8 @@ async function ensureCollectReady() {
       shop_id: state.filters.shopId,
       store_id: selectedStoreId.value,
       company_id: selectedStoreId.value,
-      shop_name: selectedShop.value?.name || ""
+      shop_name: selectedShop.value?.name || "",
+      plugin_instance_id: pluginInstanceId.value
     }).catch(() => null);
     ElMessage.info("正在自动打开 Ozon 分析页并校验店铺，请稍候");
     let validation = null;
@@ -1025,6 +1135,7 @@ async function ensureCollectReady() {
 }
 
 async function bindCurrentShopAuth() {
+  if (!(await requireAnalyticsPluginInstance())) return false;
   bindingAuth.value = true;
   prepareFlow.tone = "warning";
   prepareFlow.title = "正在绑定店铺授权";
@@ -1035,6 +1146,7 @@ async function bindCurrentShopAuth() {
       store_id: selectedStoreId.value,
       company_id: selectedStoreId.value,
       shop_name: selectedShop.value?.name || "",
+      plugin_instance_id: pluginInstanceId.value,
       bind_auth_only: true
     }).catch(() => null);
     ElMessage.info("正在打开 Ozon 完成首次授权绑定，请确认当前 Ozon 店铺和 ERP 选择店铺一致");
@@ -1061,12 +1173,24 @@ async function bindCurrentShopAuth() {
         });
         return false;
       }
+      if (validation?.prepare_request?.status === "failed") {
+        const prepareError = validation.prepare_request.error || "AUTH_BINDING_FAILED";
+        prepareFlow.tone = "danger";
+        prepareFlow.title = "授权校验失败";
+        prepareFlow.detail = `插件已识别到正确店铺，但服务器授权校验失败：${prepareError}`;
+        await ElMessageBox.alert(
+          `${prepareFlow.detail}\n\n请保持 Ozon 已登录；如果提示 HTTP 403，通常是当前 Cookie 已失效，需要刷新 Ozon 后台后重试。`,
+          "授权绑定失败",
+          { type: "error", confirmButtonText: "知道了" }
+        );
+        return false;
+      }
       prepareFlow.detail = validation?.detail || "正在等待插件回传当前店铺授权，请保持 Ozon 页面打开。";
       await wait(3000);
     }
     prepareFlow.tone = "warning";
     prepareFlow.title = "授权绑定未完成";
-    prepareFlow.detail = "没有收到当前店铺授权，请确认店铺数据分析插件已更新到 1.0.23，且 Ozon 已登录并切到该店铺。";
+    prepareFlow.detail = "没有收到当前店铺授权，请确认店铺数据分析插件已更新到 1.0.29，且 Ozon 已登录并切到该店铺。";
     await ElMessageBox.alert(prepareFlow.detail, "首次绑定未完成", {
       type: "warning",
       confirmButtonText: "知道了"
@@ -1074,6 +1198,48 @@ async function bindCurrentShopAuth() {
     return false;
   } finally {
     bindingAuth.value = false;
+  }
+}
+
+async function requireAnalyticsPluginInstance() {
+  if (pluginInstanceId.value) return true;
+  requestPluginInstance();
+  await wait(700);
+  if (pluginInstanceId.value) return true;
+  requestPluginInstance();
+  await wait(700);
+  if (pluginInstanceId.value) return true;
+  await ElMessageBox.alert(
+    "当前浏览器没有检测到“爆单ERP 店铺数据分析插件 1.0.29”。\n\n“商品信息采集插件 1.4.18”是另一个插件，不能执行店铺分析识别。请下载并安装 1.0.29 后刷新本页面。",
+    "未检测到店铺数据分析插件",
+    {
+      type: "warning",
+      confirmButtonText: "下载 1.0.29"
+    }
+  );
+  window.open("/downloads/ozon-seller-analytics-plugin.rar", "_blank", "noopener");
+  return false;
+}
+
+async function recognizeCurrentShop() {
+  if (recognizingPlugin.value) return;
+  recognizingPlugin.value = true;
+  try {
+    if (!(await requireAnalyticsPluginInstance())) return;
+    await prepareSellerAnalyticsPlugin({
+      shop_id: state.filters.shopId,
+      store_id: selectedStoreId.value,
+      company_id: selectedStoreId.value,
+      shop_name: selectedShop.value?.name || "",
+      plugin_instance_id: pluginInstanceId.value
+    });
+    ElMessage.info("已通知当前浏览器的分析插件重新识别店铺");
+    await wait(1500);
+    await Promise.all([loadPluginStatus(), loadPluginValidation()]);
+  } catch (error) {
+    ElMessage.error(error?.message || "重新识别店铺失败");
+  } finally {
+    recognizingPlugin.value = false;
   }
 }
 
@@ -1086,14 +1252,10 @@ async function handleCollect(page = nextCollectPage.value) {
   const targetPage = Math.max(1, Number(page || nextCollectPage.value || 1));
   collecting.value = true;
   try {
-    const { result, direct } = await createCollectRunAndStartDirect(buildCollectPayload({
+    const { result } = await createPluginCollectRun(buildCollectPayload({
       page: targetPage,
     }));
-    if (direct?.started === false) {
-      ElMessage.warning("已创建采集批次，但后端直连暂未启动，请重新绑定当前店铺授权");
-    } else {
-      ElMessage.success(result?.data?.reused ? "已存在进行中的采集批次，后端会继续同步" : "已创建采集批次，后端将按目标店铺直连同步");
-    }
+    ElMessage.success(result?.data?.reused ? "已存在进行中的采集批次，插件会继续同步" : "已创建采集批次，在线插件将开始同步");
     await Promise.all([refreshData(true), loadRunsMeta(true)]);
   } finally {
     collecting.value = false;
@@ -1112,15 +1274,11 @@ async function collectFullStore() {
   if (!(await ensureCollectReady())) return;
   collecting.value = true;
   try {
-    const { result, direct } = await createCollectRunAndStartDirect(buildCollectPayload({
+    const { result } = await createPluginCollectRun(buildCollectPayload({
       auto_all_pages: true,
       full_store: true
     }));
-    if (direct?.started === false) {
-      ElMessage.warning("已创建全店采集批次，但后端直连暂未启动，请重新绑定当前店铺授权");
-    } else {
-      ElMessage.success(result?.data?.reused ? "已存在进行中的全店采集批次，后端会继续同步" : "已创建全店自动采集，后端将按目标店铺直连同步");
-    }
+    ElMessage.success(result?.data?.reused ? "已存在进行中的全店采集批次，插件会继续同步" : "已创建全店自动采集，在线插件将开始同步");
     await Promise.all([refreshData(true), loadRunsMeta(true)]);
   } finally {
     collecting.value = false;
@@ -1137,21 +1295,16 @@ async function collectDailyDefaultPeriods() {
   try {
     const results = [];
     for (const periodKey of DAILY_SYNC_PERIOD_KEYS) {
-      results.push(await createCollectRunAndStartDirect(buildCollectPayload({
+      results.push(await createPluginCollectRun(buildCollectPayload({
         period_key: periodKey,
         auto_all_pages: true,
         full_store: true
       })));
     }
     const reusedCount = results.filter((item) => item?.result?.data?.reused).length;
-    const directFailed = results.some((item) => item?.direct?.started === false);
-    if (directFailed) {
-      ElMessage.warning("已创建日常同步批次，但有店铺后端直连暂未启动，请重新绑定授权");
-    } else {
-      ElMessage.success(reusedCount
-        ? `已创建/复用 ${DAILY_SYNC_PERIOD_KEYS.length} 个日常同步批次，其中 ${reusedCount} 个已在进行中`
-        : "已创建近 7 天和近 28 天全店同步批次，后端将按目标店铺直连同步");
-    }
+    ElMessage.success(reusedCount
+      ? `已创建/复用 ${DAILY_SYNC_PERIOD_KEYS.length} 个日常同步批次，其中 ${reusedCount} 个已在进行中`
+      : "已创建近 7 天和近 28 天全店同步批次，在线插件将开始同步");
     await Promise.all([refreshData(true), loadRunsMeta(true)]);
   } finally {
     collecting.value = false;
@@ -1160,6 +1313,7 @@ async function collectDailyDefaultPeriods() {
 
 async function retryRun(row) {
   const result = await retrySellerAnalyticsCollectRun(row.id);
+  wakeAnalyticsPlugin();
   ElMessage.success(`已重置 ${result?.data?.resetCount || 0} 个请求`);
   await Promise.all([refreshData(true), loadRunsMeta(true)]);
 }
@@ -1510,9 +1664,14 @@ function tableRowClassName({ row }) {
 
 function startPolling() {
   stopPolling();
-  pollTimer = window.setInterval(() => {
-    if (runningRun.value) refreshData(true).catch(() => {});
-  }, 2500);
+  pollTimer = window.setInterval(async () => {
+    if (!runningRun.value) return;
+    const runningId = runningRun.value.id;
+    await loadRunsMeta(true).catch(() => {});
+    if (!collectRuns.value.some((run) => run.id === runningId && ["pending", "running"].includes(run.status))) {
+      await refreshData(true, { refreshMeta: false }).catch(() => {});
+    }
+  }, 5000);
 }
 
 function stopPolling() {
@@ -1523,13 +1682,26 @@ function stopPolling() {
 function startPluginPolling() {
   stopPluginPolling();
   pluginPollTimer = window.setInterval(() => {
-    Promise.all([loadPluginStatus(), loadPluginValidation(), loadAuthBindingStatus()]).catch(() => {});
+    Promise.all([loadPluginStatus(), loadPluginValidation(), loadAuthBindingStatus(), loadBrowserProfileStatus()]).catch(() => {});
   }, 5000);
 }
 
 function stopPluginPolling() {
   window.clearInterval(pluginPollTimer);
   pluginPollTimer = 0;
+}
+
+function handlePluginInstanceMessage(event) {
+  if (event.source !== window || event.origin !== window.location.origin) return;
+  if (event.data?.type !== "BAODAN_ANALYTICS_PLUGIN_INSTANCE") return;
+  const nextId = String(event.data?.pluginInstanceId || "").trim();
+  if (!nextId || pluginInstanceId.value) return;
+  pluginInstanceId.value = nextId;
+  Promise.all([loadPluginStatus(), loadPluginValidation()]).catch(() => {});
+}
+
+function requestPluginInstance() {
+  window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_INSTANCE_REQUEST" }, window.location.origin);
 }
 
 watch(() => runningRun.value?.id, startPolling);
@@ -1543,16 +1715,31 @@ watch(activePane, () => {
   loadActiveMetaPane().catch(() => {});
 });
 onMounted(async () => {
+  window.addEventListener("message", handlePluginInstanceMessage);
+  requestPluginInstance();
   loadCachedFilter();
-  if (!state.filters.dateRange?.length) state.filters.dateRange = [todayKey(-6), todayKey(-1)];
+  const presetRange = getAnalyticsPeriodDateRange(state.filters.periodKey);
+  if (presetRange) state.filters.dateRange = presetRange;
+  else if (!state.filters.dateRange?.length) state.filters.dateRange = getAnalyticsPeriodDateRange("7d");
   await loadShops();
   applyRouteFilters();
   await refreshData();
-  await Promise.all([loadPluginStatus().catch(() => {}), loadPluginValidation().catch(() => {}), loadAuthBindingStatus().catch(() => {})]);
+  await Promise.all([loadPluginStatus().catch(() => {}), loadPluginValidation().catch(() => {}), loadAuthBindingStatus().catch(() => {}), loadBrowserProfileStatus().catch(() => {})]);
   startPolling();
   startPluginPolling();
 });
 onBeforeUnmount(() => {
+  window.removeEventListener("message", handlePluginInstanceMessage);
+  stopPolling();
+  stopPluginPolling();
+});
+
+onActivated(() => {
+  startPolling();
+  startPluginPolling();
+});
+
+onDeactivated(() => {
   stopPolling();
   stopPluginPolling();
 });
@@ -1561,7 +1748,9 @@ onBeforeUnmount(() => {
 <template>
   <div class="seller-analytics-page">
     <div class="seller-sticky-head">
-      <section class="seller-toolbar">
+      <ErpPageHeader compact title="数据分析" description="店铺经营指标、商品表现与运营行动建议。">
+        <template #actions>
+          <ErpFilterBar class="seller-toolbar">
         <div class="seller-toolbar__filters">
           <el-select v-model="state.filters.shopId" class="seller-filter seller-filter--shop" placeholder="店铺" @change="handleSearch">
             <el-option v-for="shop in shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
@@ -1581,10 +1770,20 @@ onBeforeUnmount(() => {
           <el-input v-model="state.filters.keyword" clearable class="seller-filter seller-filter--keyword" placeholder="商品、SKU、建议" @keyup.enter="handleSearch">
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
+          <el-select v-model="state.filters.rateFilterKey" class="seller-filter seller-filter--rate" placeholder="转化指标">
+            <el-option v-for="item in rateFilterOptions" :key="item.value" :label="item.label" :value="item.value" />
+          </el-select>
+          <el-input-number v-model="state.filters.rateMin" :min="0" :max="100" :precision="1" :step="1" controls-position="right" class="seller-filter seller-filter--rate-value" placeholder="最低%" />
+          <span class="seller-rate-range-separator">至</span>
+          <el-input-number v-model="state.filters.rateMax" :min="0" :max="100" :precision="1" :step="1" controls-position="right" class="seller-filter seller-filter--rate-value" placeholder="最高%" />
+          <el-select :model-value="rateSortOptions.some((item) => item.value === state.sortKey) ? state.sortKey : ''" clearable class="seller-filter seller-filter--rate-sort" placeholder="转化率排序" @change="handleRateSort">
+            <el-option v-for="item in rateSortOptions" :key="item.value" :label="`${item.label}（高到低）`" :value="item.value" />
+          </el-select>
         </div>
         <div class="seller-toolbar__query">
           <el-button :icon="Search" @click="handleSearch">查询</el-button>
-          <el-button :icon="Refresh" @click="refreshData()">刷新</el-button>
+          <el-button :icon="Refresh" @click="refreshData()">刷新本地数据</el-button>
+          <el-button @click="openSyncOverview">全店同步状态</el-button>
           <el-button type="success" :loading="generatingTodos" @click="generateOperationTodos">生成行动项</el-button>
         </div>
         <el-select
@@ -1600,7 +1799,9 @@ onBeforeUnmount(() => {
         <div class="seller-toolbar__collect">
           <el-button type="primary" :icon="VideoPlay" :loading="collecting" @click="collectFullStore">同步当前区间</el-button>
         </div>
-      </section>
+          </ErpFilterBar>
+        </template>
+      </ErpPageHeader>
 
       <section class="seller-sync-assistant" :class="`seller-sync-assistant--${pluginSyncStatus.tone}`">
         <div class="seller-sync-assistant__copy">
@@ -1619,10 +1820,14 @@ onBeforeUnmount(() => {
             <em>Ozon 店铺 {{ pluginCompanyLabel }}</em>
           </div>
           <div>
-            <span>后端直连</span>
+            <span>采集通道</span>
             <strong>{{ directSyncStatus.title }}</strong>
             <em>{{ directSyncStatus.detail }}</em>
           </div>
+          <div><span>数据来源</span><strong>ERP 本地快照</strong><em>刷新不请求 Ozon</em></div>
+          <div><span>最新入库</span><strong>{{ latestText || "暂无数据" }}</strong><em>北京时间</em></div>
+          <div><span>数据区间</span><strong>{{ runPeriodText(latestCurrentPeriodRun) }}</strong><em>{{ periodHint }}</em></div>
+          <div><span>完整度</span><strong>{{ runCompleteness(latestCurrentPeriodRun) }}</strong><em>{{ runTriggerLabel(latestCurrentPeriodRun) }}</em></div>
         </div>
         <div class="seller-sync-assistant__progress">
           <div class="seller-sync-assistant__progress-row" :class="`seller-sync-assistant__progress-row--${prepareFlow.tone}`">
@@ -1641,16 +1846,12 @@ onBeforeUnmount(() => {
           <el-progress v-if="runningRun" :percentage="progressPercent" :show-text="false" :stroke-width="6" class="seller-sync-assistant__progress-bar" />
         </div>
         <div class="seller-sync-assistant__actions">
-          <el-button
-            v-if="!authBindingStatus?.bound || authBindingStatus?.stale"
-            type="warning"
-            size="large"
-            :loading="bindingAuth"
-            @click="bindCurrentShopAuth"
-          >
-            首次绑定授权
-          </el-button>
-          <el-button size="large" :loading="metaLoading" @click="loadPluginValidation">重新识别店铺</el-button>
+          <el-tag :type="browserProfileStatus?.configured ? 'success' : 'info'" effect="light">
+            {{ browserProfileStatus?.configured ? "长期登录已配置" : "长期登录未配置" }}
+          </el-tag>
+          <el-button size="large" :loading="browserProfilePreparing" @click="openPersistentBrowserLogin">打开独立登录窗口</el-button>
+          <el-button size="large" type="primary" plain :loading="browserProfilePreparing" @click="confirmPersistentBrowserLogin">确认长期绑定</el-button>
+          <el-button size="large" :loading="recognizingPlugin" @click="recognizeCurrentShop">重新识别店铺</el-button>
         </div>
       </section>
 
@@ -1673,7 +1874,7 @@ onBeforeUnmount(() => {
 
     <div class="seller-workspace-scroll">
     <el-tabs v-model="activePane" class="seller-tabs seller-tabs--workbench">
-      <el-tab-pane label="商品诊断" name="diagnosis">
+      <el-tab-pane label="商品诊断" name="diagnosis" lazy>
         <el-table v-loading="loading" :data="tableProducts" :row-key="rowKey" :row-class-name="tableRowClassName" height="100%" class="seller-product-table seller-product-table--compact" @sort-change="handleSortChange">
           <el-table-column label="商品" min-width="320" fixed>
             <template #default="{ row }">
@@ -1721,7 +1922,7 @@ onBeforeUnmount(() => {
         </el-table>
       </el-tab-pane>
 
-      <el-tab-pane label="行动项" name="actions">
+      <el-tab-pane label="行动项" name="actions" lazy>
         <section class="seller-insights seller-insights--workbench">
           <div class="seller-insight">
             <header>
@@ -1774,7 +1975,7 @@ onBeforeUnmount(() => {
         </section>
       </el-tab-pane>
 
-      <el-tab-pane label="指标明细" name="metrics">
+      <el-tab-pane label="指标明细" name="metrics" lazy>
         <el-table
           v-loading="loading"
           :data="tableProducts"
@@ -1811,6 +2012,9 @@ onBeforeUnmount(() => {
               <el-tooltip :content="compactMetricHelp(column.item)" placement="top" popper-class="seller-compact-tooltip">
                 <div class="seller-flat-metric">
                   <strong :class="compactMetricValueClass(row, column.item)">{{ formatCompactMetric(row, column.item) }}</strong>
+                  <span v-if="column.item.rateKey && row.metrics?.[column.item.rateKey] !== undefined && row.metrics?.[column.item.rateKey] !== null" class="seller-flat-metric__rate">
+                    {{ column.item.rateLabel }} {{ formatPercent(row.metrics[column.item.rateKey], { precision: 1 }) }}
+                  </span>
                   <em v-if="column.item.dynamicsKey && row.metrics?.[column.item.dynamicsKey] !== undefined && row.metrics?.[column.item.dynamicsKey] !== null" :class="metricDynamicsClass(row, column.item)">
                     {{ formatPercent(row.metrics?.[column.item.dynamicsKey], { precision: 0, sign: true }) }}
                   </em>
@@ -1851,7 +2055,7 @@ onBeforeUnmount(() => {
         </el-table>
       </el-tab-pane>
 
-      <el-tab-pane label="优化建议" name="recommendations">
+      <el-tab-pane label="优化建议" name="recommendations" lazy>
         <el-table :data="recommendationRows" height="100%">
           <el-table-column label="商品" min-width="260">
             <template #default="{ row }">
@@ -1877,14 +2081,47 @@ onBeforeUnmount(() => {
       compact
       :total="totalProductCount"
       :page="state.page"
-      :page-size="ANALYTICS_PAGE_SIZE"
-      :page-sizes="[ANALYTICS_PAGE_SIZE]"
+      :page-size="state.pageSize"
+      :page-sizes="ANALYTICS_PAGE_SIZE_OPTIONS"
       :summary="productFooterSummary"
       @update:page="handlePageChange"
+      @update:pageSize="handlePageSizeChange"
     />
 
     <el-dialog v-model="rawDialog.visible" :title="rawDialog.title" width="760px">
       <pre class="seller-raw">{{ rawDialog.content }}</pre>
+    </el-dialog>
+
+    <el-dialog v-model="syncOverviewVisible" title="全店数据同步状态" width="min(1180px, 96vw)" destroy-on-close>
+      <div class="seller-sync-overview" v-loading="syncOverviewLoading">
+        <section class="seller-sync-schedules">
+          <div v-for="job in analyticsScheduledJobs" :key="job.key">
+            <strong>{{ job.name }}</strong>
+            <span>{{ job.enabled ? `每天 ${job.dailyTime} 自动执行` : "任务已停用" }}</span>
+            <em>上次成功：{{ formatDateTime(job.lastSuccessAt) || "暂无" }} · 下次：{{ formatDateTime(job.nextRunAt) || "待调度" }}</em>
+          </div>
+        </section>
+        <el-table :data="shopSyncOverview" max-height="560" stripe>
+          <el-table-column label="店铺" min-width="180">
+            <template #default="{ row }"><strong>{{ row.shop.name || row.shop.id }}</strong><div class="seller-sync-cell-muted">Ozon ID {{ row.storeId || "未配置" }}</div></template>
+          </el-table-column>
+          <el-table-column label="后台授权" width="130">
+            <template #default="{ row }"><el-tag :type="row.binding?.bound && !row.binding?.stale ? 'success' : 'danger'">{{ row.binding?.bound && !row.binding?.stale ? "可后台同步" : row.binding?.bound ? "授权失效" : "未绑定" }}</el-tag></template>
+          </el-table-column>
+          <el-table-column v-for="period in [{ key: 'run7d', label: '近 7 天' }, { key: 'run28d', label: '近 28 天' }]" :key="period.key" :label="period.label" min-width="285">
+            <template #default="{ row }">
+              <div class="seller-sync-period-cell">
+                <el-tag :type="syncRunStatus(row[period.key]).type">{{ syncRunStatus(row[period.key]).label }}</el-tag>
+                <strong>{{ formatDateTime(row[period.key]?.updated_at) || "从未同步" }}</strong>
+                <span>{{ runPeriodText(row[period.key]) }}</span>
+                <em>{{ runCompleteness(row[period.key]) }} · {{ runTriggerLabel(row[period.key]) }}</em>
+                <small v-if="row[period.key]?.error_message">{{ row[period.key].error_message }}</small>
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <template #footer><el-button @click="syncOverviewVisible = false">关闭</el-button><el-button type="primary" :loading="syncOverviewLoading" @click="loadShopSyncOverview">重新检查</el-button></template>
     </el-dialog>
 
     <el-dialog
@@ -2009,35 +2246,46 @@ onBeforeUnmount(() => {
 <style scoped>
 .seller-analytics-page { display: flex; flex-direction: column; gap: 8px; height: calc(100dvh - 96px); min-height: 0; overflow: hidden; }
 .seller-sticky-head { position: sticky; top: 0; z-index: 20; display: flex; flex: 0 0 auto; flex-direction: column; gap: 6px; padding-bottom: 2px; background: var(--el-bg-color); }
-.seller-toolbar { display: flex; gap: 10px; align-items: center; min-width: 0; overflow-x: auto; scrollbar-width: none; white-space: nowrap; }
-.seller-toolbar::-webkit-scrollbar { display: none; }
+.seller-sticky-head :deep(.erp-page-header) { align-items: flex-start; }
+.seller-sticky-head :deep(.erp-page-header__copy) { flex: 0 0 155px; padding-top: 5px; }
+.seller-sticky-head :deep(.erp-page-header__actions) { flex: 1 1 auto; width: auto; }
+.seller-toolbar { display: flex; flex: 1 1 auto; gap: 8px; align-items: center; min-width: 0; overflow: visible; white-space: nowrap; flex-wrap: wrap; }
 .seller-toolbar__filters, .seller-toolbar__query, .seller-toolbar__collect { display: flex; gap: 8px; align-items: center; min-width: 0; flex-wrap: nowrap; }
-.seller-toolbar__filters { flex: 0 0 auto; }
+.seller-toolbar__filters { flex: 1 1 1220px; }
 .seller-toolbar__query, .seller-toolbar__collect { flex: 0 0 auto; }
 .seller-toolbar__divider { width: 1px; height: 24px; background: var(--el-border-color); flex: 0 0 auto; }
 .seller-filter { width: 132px; }
 .seller-filter--shop { width: 180px; }
 .seller-filter--date { width: 250px; }
 .seller-filter--keyword { width: 260px; }
+.seller-filter--rate { width: 132px; }
+.seller-filter--rate-value { width: 112px; }
+.seller-filter--rate-sort { width: 180px; }
+.seller-rate-range-separator { color: #64748b; font-size: 12px; }
 .seller-filter--source { width: 156px; }
+@media (max-width: 1760px) {
+  .seller-sticky-head :deep(.erp-page-header) { display: grid; grid-template-columns: 155px minmax(0, 1fr); }
+  .seller-sticky-head :deep(.erp-page-header__actions) { width: 100%; }
+  .seller-toolbar__filters { flex-wrap: wrap; }
+}
 .seller-source-tabs { display: flex; gap: 6px; min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; flex: 0 1 auto; }
 .seller-source-tabs::-webkit-scrollbar { display: none; }
 .seller-source-tabs--inline { align-self: center; align-items: center; height: 32px; }
 .seller-source-tabs button { flex: 0 0 auto; height: 32px; border: 1px solid var(--el-border-color); background: var(--el-bg-color); border-radius: 6px; padding: 0 11px; cursor: pointer; color: var(--el-text-color-regular); font-size: 14px; line-height: 30px; white-space: nowrap; }
 .seller-source-tabs button.is-active { border-color: var(--el-color-primary); color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
-.seller-sync-assistant { display: grid; grid-template-columns: minmax(190px, 240px) minmax(520px, 1.15fr) minmax(430px, 1fr) max-content; gap: 10px; align-items: stretch; padding: 9px 12px; border: 1px solid rgba(37, 99, 235, 0.18); border-radius: 12px; background: radial-gradient(circle at 0% 0%, rgba(59, 130, 246, 0.14), transparent 30%), linear-gradient(135deg, #eff6ff 0%, #f8fafc 52%, #ecfeff 100%); box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06); }
+.seller-sync-assistant { display: grid; grid-template-columns: minmax(170px, 210px) minmax(0, 1fr) minmax(330px, .7fr); gap: 8px; align-items: center; padding: 7px 10px; border: 1px solid rgba(37, 99, 235, 0.18); border-radius: 12px; background: radial-gradient(circle at 0% 0%, rgba(59, 130, 246, 0.14), transparent 30%), linear-gradient(135deg, #eff6ff 0%, #f8fafc 52%, #ecfeff 100%); box-shadow: 0 8px 18px rgba(15, 23, 42, 0.05); }
 .seller-sync-assistant--success { border-color: rgba(34, 197, 94, 0.3); background: radial-gradient(circle at 0% 0%, rgba(34, 197, 94, 0.16), transparent 30%), linear-gradient(135deg, #f0fdf4 0%, #f8fafc 52%, #ecfeff 100%); }
 .seller-sync-assistant--warning { border-color: rgba(245, 158, 11, 0.32); background: radial-gradient(circle at 0% 0%, rgba(245, 158, 11, 0.18), transparent 30%), linear-gradient(135deg, #fffbeb 0%, #f8fafc 52%, #eff6ff 100%); }
 .seller-sync-assistant--danger { border-color: rgba(239, 68, 68, 0.28); background: radial-gradient(circle at 0% 0%, rgba(239, 68, 68, 0.16), transparent 30%), linear-gradient(135deg, #fef2f2 0%, #f8fafc 52%, #eff6ff 100%); }
 .seller-sync-assistant__copy { display: grid; gap: 3px; align-content: center; min-width: 0; }
 .seller-sync-assistant__copy strong { color: #0f172a; font-size: 16px; letter-spacing: .01em; }
 .seller-sync-assistant__copy span { color: #475569; font-size: 12px; line-height: 1.35; white-space: normal; }
-.seller-sync-assistant__steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; min-width: 0; }
+.seller-sync-assistant__steps { display: grid; grid-template-columns: repeat(7, minmax(110px, 1fr)); gap: 5px; min-width: 0; }
 .seller-sync-assistant__steps > div { display: grid; gap: 2px; align-content: center; min-width: 0; padding: 6px 8px; border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 9px; background: rgba(255, 255, 255, 0.72); backdrop-filter: blur(6px); }
 .seller-sync-assistant__steps span { color: #64748b; font-size: 12px; }
 .seller-sync-assistant__steps strong { color: #0f172a; font-size: 13px; line-height: 1.25; white-space: normal; }
 .seller-sync-assistant__steps em { color: #64748b; font-size: 12px; font-style: normal; line-height: 1.25; white-space: normal; }
-.seller-sync-assistant__actions { display: flex; flex-direction: column; gap: 8px; align-items: stretch; justify-content: center; white-space: nowrap; }
+.seller-sync-assistant__actions { grid-column: 1 / -1; display: flex; flex-direction: row; gap: 6px; align-items: center; justify-content: flex-end; white-space: nowrap; }
 .seller-sync-assistant__actions .el-button { margin-left: 0; }
 .seller-sync-assistant__progress { display: grid; gap: 5px; min-width: 0; padding: 7px 9px; border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 10px; background: rgba(255, 255, 255, 0.66); }
 .seller-sync-assistant__progress-row { display: flex; gap: 6px; align-items: center; min-width: 0; color: #64748b; font-size: 12px; }
@@ -2048,6 +2296,13 @@ onBeforeUnmount(() => {
 .seller-sync-assistant__progress-row--warning span { color: var(--el-color-warning); }
 .seller-sync-assistant__progress-row--danger span { color: var(--el-color-danger); }
 .seller-sync-assistant__progress-bar { width: 100%; }
+.seller-sync-overview { display: grid; gap: 12px; min-height: 180px; }
+.seller-sync-schedules { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.seller-sync-schedules > div { display: grid; gap: 3px; padding: 10px 12px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: #f8fafc; }
+.seller-sync-schedules span, .seller-sync-schedules em, .seller-sync-cell-muted, .seller-sync-period-cell span, .seller-sync-period-cell em { color: #64748b; font-size: 12px; font-style: normal; }
+.seller-sync-period-cell { display: grid; grid-template-columns: max-content 1fr; gap: 3px 8px; align-items: center; }
+.seller-sync-period-cell span, .seller-sync-period-cell em, .seller-sync-period-cell small { grid-column: 1 / -1; }
+.seller-sync-period-cell small { color: var(--el-color-danger); line-height: 1.35; }
 .seller-ozon-overview { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 6px; align-items: stretch; overflow: hidden; flex: 0 0 auto; padding: 5px 7px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-bg-color); }
 .seller-ozon-overview__head { display: flex; min-width: 0; color: var(--el-text-color-secondary); }
 .seller-ozon-overview__summary { display: grid; gap: 2px; align-content: center; min-width: 0; }
@@ -2156,6 +2411,7 @@ onBeforeUnmount(() => {
 .seller-flat-metric em { overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }
 .seller-flat-metric strong { color: #111827; font-size: 14px; font-weight: 750; }
 .seller-flat-metric em { color: #7b8797; font-size: 12px; font-style: normal; }
+.seller-flat-metric__rate { color: #2563eb; font-size: 11px; line-height: 14px; white-space: nowrap; }
 .seller-diagnosis-chip { display: inline-grid; gap: 4px; cursor: help; }
 .seller-tone--success { color: #43845a !important; }
 .seller-tone--warning { color: #9a6a18 !important; }

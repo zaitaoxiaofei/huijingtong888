@@ -1,7 +1,8 @@
 import { computed, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { apiClient } from "../../admin/utils/api.js";
-import { shanghaiDateDaysAgo, shanghaiDateKey } from "../../admin/utils/shanghai-date.js";
+import { loadShopDictionary } from "../../admin/utils/shop-dictionary.js";
+import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateTimeText } from "../../admin/utils/shanghai-date.js";
 import {
   bulkPrepareOrders,
   bulkPrintOrders,
@@ -21,6 +22,7 @@ import {
   openOrderProfit,
   openProcurement,
   previewOrderProcurement,
+  prepareSplitOrder,
   prevOrderPage,
   recalculateOrderProfit,
   resetRecentDates,
@@ -30,20 +32,49 @@ import {
   nextOrderPage
 } from "../services/orders-service.js";
 
-const SHOPS_CACHE_TTL_MS = 5 * 60 * 1000;
 const LOGISTICS_OPTIONS_CACHE_TTL_MS = 10 * 60 * 1000;
+const ORDERS_META_CACHE_TTL_MS = 60 * 1000;
+const ORDERS_LIST_CACHE_TTL_MS = 30 * 1000;
+const ORDERS_LIST_CACHE_MAX_ENTRIES = 30;
 const ORDERS_META_DELAY_MS = 1200;
 const DEFAULT_ORDER_STATUS = "awaiting_packaging";
 const ORDER_STATUS_TAB_PREFERENCE_KEY = "orders.status_tabs";
-let shopsCache = {
-  rows: [],
-  timestamp: 0
-};
 let logisticsOptionsCache = {
   rows: [],
   timestamp: 0
 };
 let ordersMetaTimer = 0;
+const ordersMetaCache = new Map();
+const ordersListCache = new Map();
+
+function cacheOrdersList(requestUrl, result) {
+  if (ordersListCache.size >= ORDERS_LIST_CACHE_MAX_ENTRIES) {
+    const oldestKey = ordersListCache.keys().next().value;
+    if (oldestKey) ordersListCache.delete(oldestKey);
+  }
+  ordersListCache.set(requestUrl, { timestamp: Date.now(), result });
+}
+
+function ordersMetaCacheKey(filters = {}) {
+  return JSON.stringify({
+    shopId: String(filters.shopId || "all"),
+    dateFrom: String(filters.dateFrom || ""),
+    dateTo: String(filters.dateTo || ""),
+    logisticsCarrier: String(filters.logisticsCarrier || "all"),
+    logisticsMethod: String(filters.logisticsMethod || "all")
+  });
+}
+
+function readOrdersMetaCache(filters = {}) {
+  const cached = ordersMetaCache.get(ordersMetaCacheKey(filters));
+  if (!cached || Date.now() - cached.timestamp >= ORDERS_META_CACHE_TTL_MS) return null;
+  return cached.counts;
+}
+
+function writeOrdersMetaCache(filters = {}, counts = {}) {
+  if (!counts || typeof counts !== "object" || !Object.keys(counts).length) return;
+  ordersMetaCache.set(ordersMetaCacheKey(filters), { counts, timestamp: Date.now() });
+}
 
 const STATUS_TABS = [
   { value: "awaiting_packaging", label: "等待备货" },
@@ -53,7 +84,8 @@ const STATUS_TABS = [
   { value: "cancelled", label: "已取消" },
   { value: "dispute", label: "有争议" },
   { value: "all", label: "全部订单" },
-  { value: "unbound", label: "待绑定库存" }
+  { value: "unbound", label: "待绑定库存" },
+  { value: "pending_purchase", label: "待采购" }
 ];
 const DEFAULT_STATUS_TAB_ORDER = STATUS_TABS.map((item) => item.value);
 
@@ -76,6 +108,12 @@ const PRINT_VIEWS = [
   { value: "unprinted", label: "未打印" }
 ];
 
+const FULFILLMENT_TYPE_OPTIONS = [
+  { value: "all", label: "全部履约" },
+  { value: "fbs", label: "FBS" },
+  { value: "fbp", label: "FBP" }
+];
+
 const MORE_ACTIONS = [
   { value: "recalculate-profit", label: "重算利润" },
   { value: "print-selected", label: "打印所选" },
@@ -95,6 +133,14 @@ const DEFAULT_LOGISTICS_METHOD_OPTIONS = [
   { value: "guoo_light_land", label: "GUOO 超级轻小件" }
 ];
 
+const LOGISTICS_CARRIER_OPTIONS = [
+  { value: "all", label: "全部物流大类" },
+  { value: "guoo", label: "GUOO" },
+  { value: "cel", label: "CEL" },
+  { value: "postal", label: "邮政" },
+  { value: "other", label: "其他物流" }
+];
+
 const DEFAULT_PAGE_SIZE = 20;
 const AWAITING_PACKAGING_STATES = ["awaiting_registration", "acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_awaiting_registration", "posting_acceptance_in_progress"];
 const AWAITING_DELIVER_STATES = ["awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service", "posting_transferring", "posting_in_carriage", "posting_transferring_to_delivery"];
@@ -106,12 +152,14 @@ function createDefaultFilters(defaultFrom, defaultTo) {
     pageSize: DEFAULT_PAGE_SIZE,
     status: DEFAULT_ORDER_STATUS,
     shopId: "all",
+    logisticsCarrier: "all",
     logisticsMethod: "all",
     dateFrom: defaultFrom,
     dateTo: defaultTo,
     searchType: "order",
     searchQuery: "",
     markFilter: "all",
+    fulfillmentType: "all",
     printView: "all",
     printFilter: "all",
     sortMode: "ordered"
@@ -148,18 +196,6 @@ function orderTabKey(row = {}) {
   const text = [row.status, row.tracking_stage, row.logistics_status].map((value) => String(value || "").toLowerCase()).join(" ");
   if (DELIVERING_KEYWORDS.some((keyword) => text.includes(keyword))) return "delivering";
   return "all";
-}
-
-async function fetchShopsCached(force = false) {
-  if (!force && shopsCache.rows.length && Date.now() - shopsCache.timestamp < SHOPS_CACHE_TTL_MS) {
-    return shopsCache.rows;
-  }
-  const shops = await apiClient.get("/api/shops");
-  shopsCache = {
-    rows: Array.isArray(shops) ? shops : [],
-    timestamp: Date.now()
-  };
-  return shopsCache.rows;
 }
 
 export function useOrdersPage() {
@@ -231,12 +267,14 @@ export function useOrdersPage() {
       pageSize: String(filters.pageSize || DEFAULT_PAGE_SIZE),
       status: filters.status || DEFAULT_ORDER_STATUS,
       shopId: filters.shopId || "all",
+      logisticsCarrier: filters.logisticsCarrier || "all",
       logisticsMethod: filters.logisticsMethod || "all",
       dateFrom: filters.dateFrom || "",
       dateTo: filters.dateTo || "",
       searchType: filters.searchType || "order",
       searchQuery: filters.searchQuery || "",
       markFilter: filters.markFilter || "all",
+      fulfillmentType: filters.fulfillmentType || "all",
       printView: filters.printView || "all",
       printFilter: filters.printFilter || "all",
       sortMode: filters.sortMode || "ordered",
@@ -251,11 +289,14 @@ export function useOrdersPage() {
     shops: [],
     statusTabs: buildStatusTabs({}, 0),
     markOptions: MARK_OPTIONS,
+    fulfillmentTypeOptions: FULFILLMENT_TYPE_OPTIONS,
     printViews: PRINT_VIEWS,
+    logisticsCarrierOptions: LOGISTICS_CARRIER_OPTIONS,
     logisticsMethodOptions: DEFAULT_LOGISTICS_METHOD_OPTIONS,
     moreActions: MORE_ACTIONS,
     syncStatus: "",
     syncRunning: false,
+    lastSyncText: "读取中...",
     filters: createDefaultFilters(defaultFrom, defaultTo),
     meta: {
       total: 0,
@@ -276,11 +317,14 @@ export function useOrdersPage() {
     if (hasOwn("shops")) vm.shops = Array.isArray(payload.shops) ? payload.shops : [];
     if (hasOwn("statusTabs")) vm.statusTabs = Array.isArray(payload.statusTabs) ? payload.statusTabs : [];
     if (hasOwn("markOptions")) vm.markOptions = Array.isArray(payload.markOptions) ? payload.markOptions : [];
+    if (hasOwn("fulfillmentTypeOptions")) vm.fulfillmentTypeOptions = Array.isArray(payload.fulfillmentTypeOptions) ? payload.fulfillmentTypeOptions : [];
     if (hasOwn("printViews")) vm.printViews = Array.isArray(payload.printViews) ? payload.printViews : [];
+    if (hasOwn("logisticsCarrierOptions")) vm.logisticsCarrierOptions = Array.isArray(payload.logisticsCarrierOptions) ? payload.logisticsCarrierOptions : [];
     if (hasOwn("logisticsMethodOptions")) vm.logisticsMethodOptions = Array.isArray(payload.logisticsMethodOptions) ? payload.logisticsMethodOptions : [];
     if (hasOwn("moreActions")) vm.moreActions = Array.isArray(payload.moreActions) ? payload.moreActions : [];
     if (hasOwn("syncStatus")) vm.syncStatus = String(payload.syncStatus || "");
     if (hasOwn("syncRunning")) vm.syncRunning = Boolean(payload.syncRunning);
+    if (hasOwn("lastSyncText")) vm.lastSyncText = String(payload.lastSyncText || "暂无同步记录");
 
     if (hasOwn("filters")) {
       const filters = {
@@ -293,12 +337,14 @@ export function useOrdersPage() {
         pageSize: Number(filters.pageSize || DEFAULT_PAGE_SIZE),
         status: String(filters.status || DEFAULT_ORDER_STATUS),
         shopId: String(filters.shopId || "all"),
+        logisticsCarrier: String(filters.logisticsCarrier || "all"),
         logisticsMethod: String(filters.logisticsMethod || "all"),
         dateFrom: String(filters.dateFrom || defaultFrom),
         dateTo: String(filters.dateTo || defaultTo),
         searchType: String(filters.searchType || "order"),
         searchQuery: String(filters.searchQuery || ""),
         markFilter: String(filters.markFilter || "all"),
+        fulfillmentType: String(filters.fulfillmentType || "all"),
         printView: normalizedPrint.printView,
         printFilter: normalizedPrint.printFilter,
         sortMode: normalizedPrint.sortMode
@@ -316,6 +362,14 @@ export function useOrdersPage() {
 
   async function loadOrdersMeta(filtersSnapshot, requestToken) {
     window.clearTimeout(ordersMetaTimer);
+    const cachedCounts = readOrdersMetaCache(filtersSnapshot);
+    if (cachedCounts) {
+      patch({
+        statusTabs: buildStatusTabs(cachedCounts, Number(cachedCounts.all ?? vm.meta.total ?? 0)),
+        meta: { total: vm.meta.total, counts: cachedCounts }
+      });
+      return;
+    }
     ordersMetaAbort.value?.abort();
     const controller = new AbortController();
     ordersMetaAbort.value = controller;
@@ -328,6 +382,7 @@ export function useOrdersPage() {
       const result = await apiClient.get(`/api/orders?${metaParams.toString()}`, { signal: controller.signal });
       if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
       const counts = result?.counts || {};
+      writeOrdersMetaCache(filtersSnapshot, counts);
       patch({
         statusTabs: buildStatusTabs(counts, Number(counts?.all ?? vm.meta.total ?? 0)),
         meta: {
@@ -352,22 +407,44 @@ export function useOrdersPage() {
     ordersListAbort.value = controller;
     const requestToken = ordersLoadToken.value + 1;
     ordersLoadToken.value = requestToken;
-    loading.value = true;
+    const showLoading = options.silent !== true;
+    if (showLoading) loading.value = true;
     try {
       const filtersSnapshot = { ...vm.filters };
       const params = buildOrdersParams(filtersSnapshot, {
         includeCounts: options.includeCounts ? "1" : "0",
         includeLogisticsOptions: "0"
       });
-      const shopsPromise = fetchShopsCached().catch((error) => {
+      const requestUrl = `/api/orders?${params.toString()}`;
+      if (options.forceRefresh) {
+        ordersListCache.clear();
+        ordersMetaCache.clear();
+      }
+      const cached = ordersListCache.get(requestUrl);
+      const hasFreshCache = Boolean(cached && Date.now() - cached.timestamp < ORDERS_LIST_CACHE_TTL_MS);
+      if (hasFreshCache) {
+        const cachedResult = cached.result || {};
+        patch({
+          rows: Array.isArray(cachedResult.rows) ? cachedResult.rows : [],
+          meta: { total: Number(cachedResult.total || 0), counts: cachedResult.counts || vm.meta.counts }
+        });
+        if (showLoading) loading.value = false;
+      }
+      const shopsPromise = loadShopDictionary().catch((error) => {
         console.warn("fetch shops for orders failed", error);
         return vm.shops;
       });
-      const result = await apiClient.get(`/api/orders?${params.toString()}`, { signal: controller.signal });
+      const result = await apiClient.get(requestUrl, {
+        signal: controller.signal,
+        noCache: options.forceRefresh === true,
+        cache: options.forceRefresh === true ? "no-store" : undefined
+      });
       if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
+      cacheOrdersList(requestUrl, result);
 
       const total = Number(result.total || 0);
       const counts = result?.counts || vm.meta.counts || {};
+      if (options.includeCounts) writeOrdersMetaCache(filtersSnapshot, counts);
 
       patch({
         rows: Array.isArray(result.rows) ? result.rows : [],
@@ -404,8 +481,24 @@ export function useOrdersPage() {
     } finally {
       if (ordersListAbort.value === controller) {
         ordersListAbort.value = null;
-        loading.value = false;
+        if (showLoading) loading.value = false;
       }
+    }
+  }
+
+  async function loadLatestOrderSyncStatus() {
+    try {
+      const status = await apiClient.get("/api/sync/ozon/status", { noCache: true, cache: "no-store" });
+      patch({
+        lastSyncText: status?.last_synced_at
+          ? shanghaiDateTimeText(status.last_synced_at, { assumeUtcWhenNaive: true })
+          : "暂无同步记录"
+      });
+      return status;
+    } catch (error) {
+      console.warn("load latest order sync status failed", error);
+      patch({ lastSyncText: "读取失败" });
+      return null;
     }
   }
 
@@ -493,7 +586,7 @@ export function useOrdersPage() {
     });
   }
 
-  async function runOrderSync(url, body, messages) {
+  async function runOrderSync(url, body, messages, { timeoutMs = 30 * 60 * 1000 } = {}) {
     if (vm.syncRunning) {
       ElMessage.warning("当前已有订单同步任务在执行");
       return null;
@@ -506,18 +599,45 @@ export function useOrdersPage() {
     const timeout = window.setTimeout(() => {
       orderSyncCancelReason.value = "timeout";
       controller.abort();
-    }, 5 * 60 * 1000);
+    }, timeoutMs);
     try {
-      const result = await apiClient.post(url, body, { signal: controller.signal });
+      const started = await apiClient.post(url, body, { signal: controller.signal });
+      const taskId = String(started?.task_id || "");
+      let task = started;
+      while (task?.queued && task?.running) {
+        if (task.progress?.message) vm.syncStatus = task.progress.message;
+        await new Promise((resolve, reject) => {
+          const onAbort = () => {
+            window.clearTimeout(wait);
+            reject(new DOMException("Aborted", "AbortError"));
+          };
+          const wait = window.setTimeout(() => {
+            controller.signal.removeEventListener("abort", onAbort);
+            resolve();
+          }, 1000);
+          controller.signal.addEventListener("abort", onAbort, { once: true });
+        });
+        const status = await apiClient.get("/api/sync/ozon/status", {
+          signal: controller.signal,
+          noCache: true,
+          cache: "no-store"
+        });
+        if (taskId && String(status?.task_id || "") !== taskId) continue;
+        task = status;
+      }
+      if (task?.error) throw new Error(task.error);
+      const result = task?.result ? { ...task, ...task.result } : task;
       vm.syncStatus = messages.refreshing;
-      await loadOrders({ includeCounts: true });
+      await loadOrders({ includeCounts: true, forceRefresh: true });
+      await loadLatestOrderSyncStatus();
       vm.syncStatus = messages.success(result);
       ElMessage.success(messages.successToast(result));
       return result;
     } catch (error) {
       if (error?.name === "AbortError") {
+        const timeoutMinutes = Math.max(1, Math.ceil(timeoutMs / (60 * 1000)));
         vm.syncStatus = orderSyncCancelReason.value === "timeout"
-          ? "本次同步超过 5 分钟，已自动停止。建议缩小时间范围后重试。"
+          ? `本次同步超过 ${timeoutMinutes} 分钟，已自动停止。建议缩小时间范围后重试。`
           : "已取消本次订单同步。";
         ElMessage.warning(vm.syncStatus);
         return null;
@@ -670,11 +790,7 @@ export function useOrdersPage() {
       vm.filters = {
         ...vm.filters,
         status,
-        page: 1,
-        markFilter: "all",
-        printView: "all",
-        printFilter: "all",
-        sortMode: "ordered"
+        page: 1
       };
       return Promise.resolve(changeOrderStatus(status)).then(loadOrders);
     },
@@ -686,18 +802,22 @@ export function useOrdersPage() {
         printView: normalizedPrint.printView,
         printFilter: normalizedPrint.printFilter,
         sortMode: normalizedPrint.sortMode,
-        markFilter: "all",
         page: 1
       };
       return Promise.resolve(changeOrderPrintView(nextView)).then(loadOrders);
     },
+    changeFulfillmentType: (value) => {
+      vm.filters = {
+        ...vm.filters,
+        fulfillmentType: vm.filters.fulfillmentType === value ? "all" : value,
+        page: 1
+      };
+      return loadOrders();
+    },
     changeMarkFilter: (value) => {
       vm.filters = {
         ...vm.filters,
-        markFilter: vm.filters.markFilter === value ? "all" : value,
-        printView: "all",
-        printFilter: "all",
-        sortMode: "ordered",
+        markFilter: value || "all",
         page: 1
       };
       return Promise.resolve(changeOrderMarkFilter(value)).then(loadOrders);
@@ -745,15 +865,16 @@ export function useOrdersPage() {
         success: (result) => `当前范围同步完成：拉取 ${result?.fetched || 0} 单，新增 ${result?.inserted || 0} 单，更新 ${result?.updated || 0} 单。`,
         successToast: (result) => `已同步 ${result?.fetched || 0} 单订单`,
         failurePrefix: "同步当前范围失败："
-      });
+      }, { timeoutMs: 30 * 60 * 1000 });
     },
-    cancelSync: () => {
+    cancelSync: async () => {
       if (!orderSyncAbort.value) {
         ElMessage.warning("当前没有正在执行的订单同步任务");
         return null;
       }
       orderSyncCancelReason.value = "user";
       vm.syncStatus = "正在取消本次订单同步，请稍候...";
+      await apiClient.post("/api/sync/ozon/cancel", {}).catch(() => null);
       orderSyncAbort.value.abort();
       return null;
     },
@@ -771,6 +892,7 @@ export function useOrdersPage() {
     fetchOrderDetail: (orderId) => fetchOrderDetail(orderId),
     openOrderProfit: (orderId) => openOrderProfit(orderId),
     prepareSingleOrder: (orderId) => runPrepareOrders([orderId]),
+    prepareSplitOrder: (orderId, packages) => prepareSplitOrder(orderId, packages),
     previewOrderProcurement: (orderId) => previewOrderProcurement(orderId),
     createOrderProcurementRequests: (orderId, payload = {}) => createOrderProcurementRequests(orderId, payload),
     printSingleOrder: (orderId) => runPrintOrders([orderId]),
@@ -783,6 +905,7 @@ export function useOrdersPage() {
     jumpToStockProduct: (productId) => jumpToStockProduct(productId),
     openProcurement: (productId) => openProcurement(productId),
     loadStatusTabPreference,
+    loadLatestOrderSyncStatus,
     saveStatusTabPreference,
     defaultStatusTabOrder: DEFAULT_STATUS_TAB_ORDER,
     statusTabOrder,

@@ -116,6 +116,41 @@ Characteristics:
 - should become immutable by default after confirmation
 - can only be corrected through explicit historical repair tools
 
+### 3.3 Dashboard Operating Profit Layer
+
+The profit dashboard must distinguish order-level profit from operating profit.
+
+Order-level profit is the sum of order item profit facts:
+
+- accrued items use settled Ozon finance profit where available
+- pending items use estimated order profit
+- item-level advertising allocation may already be included through `order_profit_items.advertising_cost_cny`
+
+Operating profit is the business P&L view after applying the final store-level advertising spend from Ozon advertising reports.
+
+Formula:
+
+```text
+operating_profit = order_profit + order_advertising_cost - advertising_report_spend
+advertising_adjustment = advertising_report_spend - order_advertising_cost
+operating_profit_margin = operating_profit / effective_revenue
+```
+
+Definitions:
+
+- `order_profit`: the existing current profit field, suitable for order, SKU, and shop order performance.
+- `order_advertising_cost`: advertising already allocated inside order profit items.
+- `advertising_report_spend`: Ozon advertising report spend, preferred from `ozon_ad_sku_daily`.
+- `advertising_adjustment`: the correction required to move from order advertising allocation to the store-level Ozon advertising report spend.
+- `operating_profit`: the primary management profit after the final advertising report spend is applied once.
+
+Dashboard display rule:
+
+- Do not label `order_profit` as final net profit.
+- Show `order_profit` and `operating_profit` separately.
+- Replace vague reconciliation labels such as "unclassified difference" with "advertising adjustment" when the difference is caused by the advertising source mismatch.
+- If `advertising_report_spend` is missing, `operating_profit` may equal order profit plus any available fallback, but the response should keep `advertising_cost_source` so the UI can show the source.
+
 ## 4. Return and Rejection Models
 
 The system should not use one single return-loss rule for every case.
@@ -155,6 +190,28 @@ These rules should be mapped from:
 - normalized lifecycle stage
 - cancel / return reason
 - Ozon finance service lines
+
+### 4.5 Retained Revenue for Partial Refunds
+
+Returned or rejected orders must not use the original order sale price as retained revenue.
+
+Retained revenue exists only when Ozon finance explicitly reports positive settled sale accrual for the returned posting.
+
+Formula:
+
+```text
+retained_revenue = max(0, settled_sale_accrual_cny)
+return_loss = max(0, reason_based_loss_components + actual_aftersale_finance_fee - retained_revenue)
+```
+
+Reason-based loss components still come from the return/rejection profile:
+
+- `none`: no local cost loss; keep only actual finance fee if present.
+- `purchase_collecting`: product cost + international shipping + collecting fee.
+- `purchase_collecting_international`: product cost + domestic shipping + international shipping + collecting fee.
+- `commission_purchase_collecting_international`: product cost + domestic shipping + international shipping + collecting fee + commission.
+
+Do not subtract `orders.sale_price`, `order_items.sale_price`, or original order revenue from return loss unless the settled Ozon finance rows prove retained revenue.
 
 ## 5. Persistence Strategy
 
@@ -287,6 +344,13 @@ Default recalculation:
 - only `sync_state != 'final'`
 - only open / exception orders
 - only estimated layer
+- profit stage is now split conceptually into:
+  - `estimated_open`: order is still open, use estimated profit.
+  - `delivered_waiting_finance`: order is delivered or closed, but no Ozon finance rows are attached yet, so keep using estimated profit.
+  - `finance_partial`: Ozon finance rows exist, such as parent-order acquiring fee or partial fee rows, but the complete sale-accrual/commission/delivery basis is not ready yet.
+  - `finance_accrued`: Ozon finance rows include sale accrual and core fee rows and have been applied/locked, so actual profit is ready.
+- normal estimated recalculation must not write estimated values into `actual_profit`; actual profit is owned by finance application or explicit finance repair.
+- Ozon finance completeness must check both full posting number rows and parent order-number rows, because some acquiring/payment fees are attached to the parent number without the `-1` posting suffix.
 
 Explicit historical correction:
 
@@ -294,7 +358,33 @@ Explicit historical correction:
 - by one order, one product, one shop/date range, or one finance reconciliation job
 - must leave audit traces
 
-## 9. Performance Strategy
+## 9. Finance Fact Repair Workflow
+
+Historical finance-profit repair must be dry-run first.
+
+Use:
+
+```bash
+npm run repair:finance-profit -- --from 2026-03-01 --to 2026-04-30 --limit 100
+```
+
+This lists candidate orders where Ozon finance rows are complete enough for actual profit but local facts are stale, not fully locked, or need parent-order acquiring fee inclusion.
+
+To inspect one posting:
+
+```bash
+npm run repair:finance-profit -- --posting=34643432-2450-1 --limit 10
+```
+
+Only after reviewing the dry-run output, apply with:
+
+```bash
+npm run repair:finance-profit -- --from 2026-03-01 --to 2026-04-30 --limit 100 --write
+```
+
+The write path reuses the Ozon finance application logic, including parent-order acquiring fee allocation. It must not be used for orders still in `delivered_waiting_finance` or `finance_partial`.
+
+## 10. Performance Strategy
 
 ### Near-term
 
@@ -314,7 +404,7 @@ Explicit historical correction:
 - migrate this layered model to MySQL with TypeORM
 - do not migrate the current mixed recalculation model directly
 
-## 10. Implementation Order
+## 11. Implementation Order
 
 1. keep `sync_state != 'final'` as the default batch recalculation boundary
 2. add explicit force-recalculate path for historical correction

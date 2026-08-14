@@ -439,7 +439,7 @@ export function prepareListingDraftFromCollectedSource(body = {}, options = {}) 
     description_category_id: descriptionCategoryId,
     type_id: typeId,
     category_id: legacyCategoryId,
-    fallback: `frontend:${source.sku || source.productId || source.collectionId || source.id || Date.now()}`
+    fallback: `pending:${source.sku || source.productId || source.collectionId || source.id || Date.now()}`
   });
   const categoryName = String(
     options.category_name || options.categoryName ||
@@ -479,7 +479,7 @@ export function prepareListingDraftFromCollectedSource(body = {}, options = {}) 
     price: {
       value: numberValue(source.price || editPayload.price || rows[0]?.price || 0),
       old_price: numberValue(source.originalPrice || source.old_price || rows[0]?.old_price || 0),
-      currency_code: source.currency || editPayload.currency || followPayload.currecny || "RUB",
+      currency_code: source.currency || editPayload.currency || followPayload.currecny || "CNY",
       vat: String(source.vat || editPayload.vat || "0"),
       strategy_mode: resolveCollectedPriceStrategyMode(priceStrategyApplied),
       strategy_applied: priceStrategyApplied

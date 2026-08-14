@@ -6,7 +6,9 @@ export function createAssetVariantEngineRoutes({ services, readJson }) {
     "GET /api/asset-variant-engine/tail-templates": (req) => services.assetTailTemplates(req.query || {}, req._session),
     "POST /api/asset-variant-engine/tail-templates": async (req) => services.createAssetTailTemplate(await readJson(req), req._session),
     "POST /api/asset-variant-engine/generate": async (req) => services.generateAssetVariants(await readJson(req), req._session),
+    "POST /api/asset-variant-engine/generate-async": async (req) => services.enqueueGenerateAssetVariants(await readJson(req), req._session),
     "POST /api/asset-variant-engine/generate-video": async (req) => services.generateAssetVariantVideoFromImage(await readJson(req), req._session),
+    "POST /api/asset-variant-engine/register-richtext-image": async (req) => services.registerAssetVariantRichTextImage(await readJson(req), req._session),
     "POST /api/asset-variant-engine/title-preview": async (req) => services.generateAssetVariantTitlePreview(await readJson(req), req._session),
     "POST /api/asset-variant-engine/sync-ozon-categories": async (req) => services.syncAssetOzonCategories(await readJson(req), req._session),
     "POST /api/asset-variant-engine/rules": async (req) => services.saveShopVariantRule(await readJson(req), req._session),
@@ -43,7 +45,7 @@ export async function handleAssetVariantEngineRestRoute({ req, res, parts, servi
   }
 
   if (req.method === "GET" && parts[2] === "jobs" && parts[3]) {
-    const detail = await services.assetVariantJobDetail(Number(parts[3]));
+    const detail = await services.assetVariantJobDetail(Number(parts[3]), req._session);
     return detail ? json(res, detail) : notFound(res);
   }
 

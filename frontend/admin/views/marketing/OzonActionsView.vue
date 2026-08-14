@@ -6,7 +6,8 @@ import { apiClient } from "../../utils/api";
 
 const MODE_ITEMS = [
   { key: "official", label: "Ozon 官方活动" },
-  { key: "seller", label: "卖家自建促销" }
+  { key: "seller", label: "卖家自建促销" },
+  { key: "cleanup", label: "店铺删活动" }
 ];
 
 const SELLER_STATUS_OPTIONS = [
@@ -18,8 +19,8 @@ const SELLER_STATUS_OPTIONS = [
 ];
 
 const PRODUCT_PAGE_SIZE = 100;
-const AUTO_CLEANUP_ACTION_IDS = [3684628, 3702380];
-const AUTO_CLEANUP_INTERVAL_MINUTES = 60;
+const AUTO_CLEANUP_ACTION_IDS = [];
+const AUTO_CLEANUP_INTERVAL_MINUTES = 5;
 
 const SELLER_STATUS_META = {
   ACTIVE: { label: "进行中", type: "success" },
@@ -114,7 +115,9 @@ const state = reactive({
   cleanupLoading: false,
   allCleanupLoading: false,
   cleanupRunAllLoading: false,
-  cleanupSaving: false
+  cleanupSaving: false,
+  cleanupSavingStoreId: "",
+  cleanupRunningStoreId: ""
 });
 
 const selectedAction = computed(() => state.actions.find((row) => String(getActionId(row)) === String(state.selectedActionId)) || null);
@@ -151,14 +154,33 @@ const cleanupShopRows = computed(() => state.shops
   }));
 const cleanupActivityScopeText = computed(() => {
   const syncedActions = Array.isArray(state.cleanupConfig.lastSyncedActions) ? state.cleanupConfig.lastSyncedActions : [];
+  const knownActions = Array.isArray(state.cleanupConfig.knownActions) ? state.cleanupConfig.knownActions : [];
   const syncedIds = syncedActions.map((item) => Number(item?.actionId || item?.id || 0)).filter((item) => Number.isFinite(item) && item > 0);
+  const knownIds = knownActions.map((item) => Number(item?.actionId || item?.id || 0)).filter((item) => Number.isFinite(item) && item > 0);
   const syncIds = Array.isArray(state.cleanupConfig.lastResult?.actionListSync?.actionIds)
     ? state.cleanupConfig.lastResult.actionListSync.actionIds.map(Number).filter((item) => Number.isFinite(item) && item > 0)
     : [];
-  const ids = syncedIds.length ? syncedIds : syncIds;
+  const ids = knownIds.length ? knownIds : syncedIds.length ? syncedIds : syncIds;
   if (!ids.length) return "活动列表会先从 Ozon 后台实时同步；同步失败时才使用兜底活动范围。";
   const visibleIds = ids.slice(0, 6).join(" / ");
   return ids.length > 6 ? `最近同步活动：${visibleIds} 等 ${ids.length} 个。` : `最近同步活动：${visibleIds}。`;
+});
+const cleanupOverview = computed(() => {
+  const rows = cleanupShopRows.value;
+  const enabledRows = rows.filter(({ config }) => config?.enabled);
+  const runningRows = rows.filter(({ config }) => config?.taskRunning);
+  const latestRunAt = rows
+    .map(({ config }) => config?.lastRunAt)
+    .filter(Boolean)
+    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] || "";
+  return {
+    shopCount: rows.length,
+    enabledCount: enabledRows.length,
+    runningCount: runningRows.length,
+    latestRunAt,
+    knownActionCount: rows.reduce((sum, { config }) => sum + cleanupDetectedActionCount(config), 0),
+    removedCount: rows.reduce((sum, { config }) => sum + cleanupRemovedCount(config), 0)
+  };
 });
 
 function createEmptyProductPager() {
@@ -177,6 +199,7 @@ function createEmptyCleanupConfig(storeId = "") {
     storeName: "",
     enabled: false,
     actionIds: AUTO_CLEANUP_ACTION_IDS.slice(),
+    knownActions: [],
     intervalMinutes: AUTO_CLEANUP_INTERVAL_MINUTES,
     lastSyncedActions: [],
     lastActionListSyncedAt: "",
@@ -201,6 +224,7 @@ function normalizeCleanupConfig(payload, storeId = "") {
     storeName: String(raw.storeName || ""),
     enabled: raw.enabled === true,
     actionIds: actionIds.length ? actionIds : base.actionIds,
+    knownActions: Array.isArray(raw.knownActions) ? raw.knownActions : [],
     intervalMinutes: Number(raw.intervalMinutes) > 0 ? Number(raw.intervalMinutes) : base.intervalMinutes,
     lastSyncedActions: Array.isArray(raw.lastSyncedActions) ? raw.lastSyncedActions : [],
     lastActionListSyncedAt: String(raw.lastActionListSyncedAt || ""),
@@ -509,6 +533,54 @@ async function saveCleanupEnabled(enabled) {
   }
 }
 
+async function saveCleanupEnabledForStore(storeId, enabled) {
+  const normalizedStoreId = String(storeId || "").trim();
+  if (!normalizedStoreId) return;
+  const previous = state.cleanupConfigsByStore[normalizedStoreId] || createEmptyCleanupConfig(normalizedStoreId);
+  state.cleanupConfigsByStore = {
+    ...state.cleanupConfigsByStore,
+    [normalizedStoreId]: { ...previous, enabled }
+  };
+  if (String(state.storeId) === normalizedStoreId) state.cleanupConfig = state.cleanupConfigsByStore[normalizedStoreId];
+  state.cleanupSavingStoreId = normalizedStoreId;
+  try {
+    const payload = await apiClient.post("/api/ozon/actions/cleanup-config", { storeId: normalizedStoreId, enabled });
+    const next = normalizeCleanupConfig(payload?.config, normalizedStoreId);
+    state.cleanupConfigsByStore = { ...state.cleanupConfigsByStore, [normalizedStoreId]: next };
+    if (String(state.storeId) === normalizedStoreId) state.cleanupConfig = next;
+    ElMessage.success(enabled ? "已开启店铺自动删活动" : "已关闭店铺自动删活动");
+  } catch (error) {
+    state.cleanupConfigsByStore = { ...state.cleanupConfigsByStore, [normalizedStoreId]: previous };
+    if (String(state.storeId) === normalizedStoreId) state.cleanupConfig = previous;
+    ElMessage.error(`保存自动删活动配置失败：${error.message || "unknown"}`);
+  } finally {
+    state.cleanupSavingStoreId = "";
+  }
+}
+
+async function runCleanupForStore(shop, config) {
+  const storeId = String(shop?.id || config?.storeId || "").trim();
+  if (!storeId) return;
+  await ElMessageBox.confirm(`确认立即扫描「${shop?.name || config?.storeName || storeId}」并删除 Ozon 自动加入活动的商品吗？`, "立即扫描店铺", {
+    type: "warning",
+    confirmButtonText: config?.enabled ? "立即扫描" : "开启并扫描",
+    cancelButtonText: "取消",
+    confirmButtonClass: "el-button--danger"
+  });
+  state.cleanupRunningStoreId = storeId;
+  try {
+    const payload = await apiClient.post("/api/ozon/actions/cleanup-config", { storeId, enabled: true });
+    const next = normalizeCleanupConfig(payload?.config, storeId);
+    state.cleanupConfigsByStore = { ...state.cleanupConfigsByStore, [storeId]: next };
+    if (String(state.storeId) === storeId) state.cleanupConfig = next;
+    ElMessage.success("店铺自动删活动扫描完成");
+  } catch (error) {
+    ElMessage.error(`执行店铺自动删活动失败：${error.message || "unknown"}`);
+  } finally {
+    state.cleanupRunningStoreId = "";
+  }
+}
+
 async function runAllCleanupNow() {
   await ElMessageBox.confirm("确认立即扫描所有已启用店铺并删除 Ozon 自动加入活动的商品吗？手动加入的活动商品不会删除。", "立即执行自动删活动", {
     type: "warning",
@@ -799,6 +871,7 @@ function cleanupResultSummary(config) {
 function cleanupStatusLabel(config) {
   if (config?.taskRunning) return "执行中";
   if (config?.lastError) return "最近失败";
+  if (cleanupIsDelayed(config)) return "扫描延迟";
   if (config?.enabled) return config?.lastRunAt ? "运行正常" : "已启用";
   return "未启用";
 }
@@ -806,8 +879,15 @@ function cleanupStatusLabel(config) {
 function cleanupStatusType(config) {
   if (config?.taskRunning) return "warning";
   if (config?.lastError) return "danger";
+  if (cleanupIsDelayed(config)) return "warning";
   if (config?.enabled) return "success";
   return "info";
+}
+
+function cleanupIsDelayed(config) {
+  if (!config?.enabled || !config?.lastRunAt) return false;
+  const time = new Date(config.lastRunAt).getTime();
+  return Number.isFinite(time) && Date.now() - time > 12 * 60 * 1000;
 }
 
 function cleanupRemovedCount(config) {
@@ -815,7 +895,28 @@ function cleanupRemovedCount(config) {
 }
 
 function cleanupDetectedActionCount(config) {
-  return Number(config?.lastResult?.actionListSync?.actionCount || config?.lastSyncedActions?.length || 0);
+  return Number(config?.lastResult?.actionListSync?.knownActionCount || config?.knownActions?.length || config?.lastResult?.actionListSync?.actionCount || config?.lastSyncedActions?.length || 0);
+}
+
+function cleanupDetectedProductCount(config) {
+  const summaries = Array.isArray(config?.lastResult?.actionSummaries) ? config.lastResult.actionSummaries : [];
+  return summaries.reduce((sum, item) => sum + Number(item?.detectedCount || 0), 0);
+}
+
+function cleanupActionIdText(config) {
+  const ids = Array.isArray(config?.lastResult?.actionListSync?.knownActionIds)
+    ? config.lastResult.actionListSync.knownActionIds
+    : Array.isArray(config?.knownActions)
+      ? config.knownActions.map((item) => item?.actionId || item?.id)
+      : [];
+  const normalized = ids.map(Number).filter((item) => Number.isFinite(item) && item > 0);
+  if (!normalized.length) return "-";
+  const visible = normalized.slice(0, 4).join(" / ");
+  return normalized.length > 4 ? `${visible} 等 ${normalized.length} 个` : visible;
+}
+
+function cleanupDetailRows(config) {
+  return Array.isArray(config?.lastResult?.actionSummaries) ? config.lastResult.actionSummaries : [];
 }
 
 function cleanupTooltipText(shop, config) {
@@ -853,6 +954,10 @@ watch(() => state.mode, async () => {
   state.actions = [];
   state.actionView = "available";
   resetProducts();
+  if (state.mode === "cleanup") {
+    await loadAllCleanupConfigs();
+    return;
+  }
   await loadActions();
 });
 
@@ -873,6 +978,7 @@ onMounted(async () => {
         <span>管理 Ozon 官方活动和卖家自建促销商品。</span>
       </div>
       <div class="toolbar-filters">
+        <template v-if="state.mode !== 'cleanup'">
         <el-select v-model="state.storeId" filterable placeholder="选择店铺" class="store-select">
           <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
         </el-select>
@@ -883,45 +989,7 @@ onMounted(async () => {
           <template #prefix><el-icon><Search /></el-icon></template>
         </el-input>
         <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Search" :loading="state.actionsLoading" @click="loadActions">拉取活动</el-button>
-      </div>
-    </section>
-
-    <section class="ozon-actions-cleanup">
-      <div>
-        <strong>自动删活动商品</strong>
-        <span>每 {{ state.cleanupConfig.intervalMinutes }} 分钟扫描一次，仅移除 Ozon 自动添加的官方活动商品。{{ cleanupActivityScopeText }}</span>
-        <small>后台任务：{{ state.cleanupConfig.taskEnabled ? (state.cleanupConfig.taskRunning ? "正在执行" : "已启用") : "未启用" }}；最近执行：{{ state.cleanupConfig.lastRunAt ? formatDate(state.cleanupConfig.lastRunAt) : "-" }}</small>
-        <small>{{ cleanupResultSummary(state.cleanupConfig) }}</small>
-      </div>
-      <div class="cleanup-actions">
-        <el-switch
-          v-model="state.cleanupConfig.enabled"
-          :disabled="!state.storeId"
-          :loading="state.cleanupSaving"
-          active-text="开启"
-          inactive-text="关闭"
-          @change="saveCleanupEnabled"
-        />
-        <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="state.cleanupLoading" :disabled="!state.storeId" @click="loadCleanupConfig">刷新</el-button>
-        <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="state.allCleanupLoading" @click="loadAllCleanupConfigs">刷新全部店铺</el-button>
-        <el-button class="erp-btn erp-btn-danger" type="danger" :loading="state.cleanupRunAllLoading" @click="runAllCleanupNow">立即扫描全部店铺</el-button>
-      </div>
-      <div class="cleanup-shop-status">
-        <el-tooltip
-          v-for="{ shop, config } in cleanupShopRows"
-          :key="shop.id"
-          placement="top"
-          effect="light"
-          :content="cleanupTooltipText(shop, config)"
-          :popper-style="{ whiteSpace: 'pre-line', maxWidth: '420px' }"
-        >
-          <button type="button" class="cleanup-shop-card" :class="`is-${cleanupStatusType(config)}`">
-            <span class="cleanup-shop-name">{{ shop.name }}</span>
-            <el-tag :type="cleanupStatusType(config)" size="small">{{ cleanupStatusLabel(config) }}</el-tag>
-            <span>最近 {{ config.lastRunAt ? formatDate(config.lastRunAt) : "-" }}</span>
-            <span>识别活动 {{ cleanupDetectedActionCount(config) }} / 删除 {{ cleanupRemovedCount(config) }}</span>
-          </button>
-        </el-tooltip>
+        </template>
       </div>
     </section>
 
@@ -929,7 +997,134 @@ onMounted(async () => {
       <el-segmented v-model="state.mode" :options="MODE_ITEMS.map((item) => ({ label: item.label, value: item.key }))" />
     </section>
 
-    <section class="ozon-actions-table">
+    <section v-if="state.mode === 'cleanup'" class="ozon-cleanup-page">
+      <div class="cleanup-summary-bar">
+        <div class="cleanup-summary-main">
+          <strong>自动删活动商品</strong>
+          <span>每 {{ AUTO_CLEANUP_INTERVAL_MINUTES }} 分钟扫描一次，仅移除 Ozon 自动添加的官方活动商品。</span>
+          <small>{{ cleanupActivityScopeText }}</small>
+        </div>
+        <div class="cleanup-actions">
+          <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="state.allCleanupLoading" @click="loadAllCleanupConfigs">刷新全部店铺</el-button>
+          <el-button class="erp-btn erp-btn-danger" type="danger" :loading="state.cleanupRunAllLoading" @click="runAllCleanupNow">立即扫描全部店铺</el-button>
+        </div>
+      </div>
+
+      <div class="cleanup-metrics">
+        <div>
+          <span>店铺</span>
+          <strong>{{ cleanupOverview.enabledCount }} / {{ cleanupOverview.shopCount }}</strong>
+        </div>
+        <div>
+          <span>已知活动</span>
+          <strong>{{ cleanupOverview.knownActionCount }}</strong>
+        </div>
+        <div>
+          <span>最近删除</span>
+          <strong class="danger-text">{{ cleanupOverview.removedCount }}</strong>
+        </div>
+        <div>
+          <span>最近执行</span>
+          <strong>{{ cleanupOverview.latestRunAt ? formatDate(cleanupOverview.latestRunAt) : "-" }}</strong>
+        </div>
+      </div>
+
+      <el-table
+        v-loading="state.allCleanupLoading"
+        :data="cleanupShopRows"
+        border
+        class="cleanup-table"
+        empty-text="暂无店铺"
+      >
+        <el-table-column type="expand" width="36">
+          <template #default="{ row }">
+            <div class="cleanup-expand">
+              <div class="cleanup-expand-head">
+                <span>活动范围：{{ cleanupActionIdText(row.config) }}</span>
+                <span>活动列表同步：{{ formatDateTime(row.config.lastActionListSyncedAt || row.config.lastResult?.actionListSync?.syncedAt) }}</span>
+                <span v-if="row.config.lastError">错误：{{ row.config.lastError }}</span>
+              </div>
+              <el-table :data="cleanupDetailRows(row.config)" size="small" border empty-text="暂无最近扫描明细">
+                <el-table-column prop="actionId" label="活动 ID" width="130" />
+                <el-table-column label="识别 AUTO 商品" width="150">
+                  <template #default="{ row: detail }">{{ Number(detail.detectedCount || 0) }}</template>
+                </el-table-column>
+                <el-table-column label="已删除" width="110">
+                  <template #default="{ row: detail }">
+                    <span :class="{ 'danger-text': Number(detail.removedCount || 0) > 0 }">{{ Number(detail.removedCount || 0) }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="结果">
+                  <template #default="{ row: detail }">
+                    <el-tag v-if="detail.skippedUnavailable" type="info" size="small">活动已失效</el-tag>
+                    <el-tag v-else-if="detail.error" type="danger" size="small">失败</el-tag>
+                    <el-tag v-else-if="Number(detail.removedCount || 0) > 0" type="warning" size="small">已删除</el-tag>
+                    <el-tag v-else type="success" size="small">正常</el-tag>
+                    <span v-if="detail.error" class="cleanup-error-text">{{ detail.error }}</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="店铺" min-width="160">
+          <template #default="{ row }">
+            <div class="cleanup-shop-cell">
+              <strong>{{ row.shop.name || row.config.storeName || row.config.storeId }}</strong>
+              <small>ID: {{ row.shop.id }}</small>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="95">
+          <template #default="{ row }">
+            <el-tag :type="cleanupStatusType(row.config)">{{ cleanupStatusLabel(row.config) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="自动退出" width="110">
+          <template #default="{ row }">
+            <el-switch
+              :model-value="row.config.enabled"
+              :loading="state.cleanupSavingStoreId === String(row.shop.id)"
+              active-text="开"
+              inactive-text="关"
+              @change="(enabled) => saveCleanupEnabledForStore(row.shop.id, enabled)"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="最近扫描" width="145">
+          <template #default="{ row }">{{ row.config.lastRunAt ? formatDate(row.config.lastRunAt) : "-" }}</template>
+        </el-table-column>
+        <el-table-column label="已知活动" min-width="200">
+          <template #default="{ row }">{{ cleanupActionIdText(row.config) }}</template>
+        </el-table-column>
+        <el-table-column label="识别/删除" width="95">
+          <template #default="{ row }">
+            <span>{{ cleanupDetectedProductCount(row.config) }} / </span>
+            <strong :class="{ 'danger-text': cleanupRemovedCount(row.config) > 0 }">{{ cleanupRemovedCount(row.config) }}</strong>
+          </template>
+        </el-table-column>
+        <el-table-column label="最近错误" min-width="110">
+          <template #default="{ row }">
+            <span class="cleanup-error-text">{{ row.config.lastError || "-" }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="105" fixed="right">
+          <template #default="{ row }">
+            <el-button
+              class="erp-btn-link"
+              link
+              type="danger"
+              :loading="state.cleanupRunningStoreId === String(row.shop.id)"
+              @click="runCleanupForStore(row.shop, row.config)"
+            >
+              {{ row.config.enabled ? "立即扫描" : "开启并扫描" }}
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </section>
+
+    <section v-else class="ozon-actions-table">
       <div class="section-head">
         <div>
           <h2>活动列表</h2>
@@ -1130,9 +1325,9 @@ onMounted(async () => {
 }
 
 .ozon-actions-toolbar,
-.ozon-actions-cleanup,
 .ozon-actions-tabs,
-.ozon-actions-table {
+.ozon-actions-table,
+.ozon-cleanup-page {
   border: 1px solid var(--erp-border);
   border-radius: 8px;
   background: var(--erp-surface);
@@ -1159,8 +1354,8 @@ onMounted(async () => {
 .toolbar-title span,
 .section-head span,
 .dialog-head span,
-.ozon-actions-cleanup span,
-.ozon-actions-cleanup small {
+.cleanup-summary-main span,
+.cleanup-summary-main small {
   color: var(--erp-text-secondary);
   font-size: 12px;
 }
@@ -1188,83 +1383,103 @@ onMounted(async () => {
   width: 240px;
 }
 
-.ozon-actions-cleanup {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 16px;
-  padding: 12px 16px;
-}
-
-.ozon-actions-cleanup > div:first-child,
 .action-title,
 .time-cell,
-.product-meta {
+.product-meta,
+.cleanup-shop-cell,
+.cleanup-summary-main {
   display: flex;
   flex-direction: column;
   gap: 4px;
   min-width: 0;
 }
 
-.cleanup-shop-status {
-  flex: 1 0 100%;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 10px;
-}
-
-.cleanup-shop-card {
-  width: 100%;
-  min-height: 86px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-content: start;
-  gap: 6px 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--erp-border);
-  border-radius: 8px;
-  background: var(--erp-surface-alt);
-  color: var(--erp-text-secondary);
-  text-align: left;
-  cursor: help;
-}
-
-.cleanup-shop-card.is-success {
-  border-color: #b7eb8f;
-  background: #f6ffed;
-}
-
-.cleanup-shop-card.is-warning {
-  border-color: #ffe58f;
-  background: #fffbe6;
-}
-
-.cleanup-shop-card.is-danger {
-  border-color: #ffccc7;
-  background: #fff2f0;
-}
-
-.cleanup-shop-card > span:not(.cleanup-shop-name) {
-  grid-column: 1 / -1;
-  font-size: 12px;
-}
-
-.cleanup-shop-name {
-  overflow: hidden;
-  color: var(--erp-text);
-  font-size: 13px;
-  font-weight: 800;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .ozon-actions-tabs {
   padding: 10px 16px;
 }
 
-.ozon-actions-table {
+.ozon-actions-table,
+.ozon-cleanup-page {
   padding: 16px;
+}
+
+.ozon-cleanup-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.cleanup-summary-bar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.cleanup-summary-main strong {
+  color: var(--erp-text);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.cleanup-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.cleanup-metrics > div {
+  min-height: 68px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--erp-border);
+  border-radius: 8px;
+  background: var(--erp-surface-alt);
+}
+
+.cleanup-metrics span,
+.cleanup-shop-cell small,
+.cleanup-expand-head,
+.cleanup-error-text {
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+}
+
+.cleanup-metrics strong {
+  color: var(--erp-text);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.cleanup-table {
+  width: 100%;
+}
+
+.cleanup-shop-cell strong {
+  color: var(--erp-text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.cleanup-expand {
+  display: grid;
+  gap: 10px;
+  padding: 8px 12px 12px;
+  background: var(--erp-surface-alt);
+}
+
+.cleanup-expand-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.danger-text {
+  color: #d03050;
 }
 
 .section-head {
@@ -1487,8 +1702,12 @@ onMounted(async () => {
 
 @media (max-width: 980px) {
   .ozon-actions-toolbar,
-  .ozon-actions-cleanup {
+  .cleanup-summary-bar {
     flex-direction: column;
+  }
+
+  .cleanup-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .ozon-action-list {

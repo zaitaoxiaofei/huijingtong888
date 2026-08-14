@@ -1,5 +1,5 @@
 ﻿<script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
@@ -52,10 +52,21 @@ const detailDragOverIndex = ref(null);
 const detailReplaceIndex = ref(-1);
 const folderInputRef = ref(null);
 const detailReplaceInputRef = ref(null);
+const generateWorkbenchId = ref(String(route.query.workbenchId || route.query.batchWorkbenchId || "").trim() || createListingWorkbenchId());
 const titleRegenerating = reactive({});
 const videoStatus = reactive({ current: "", done: 0, total: 0 });
 const autoGenerateStarted = ref(false);
 const sourcePanelExpanded = ref(false);
+const generateJob = reactive({
+  id: 0,
+  jobNo: "",
+  status: "",
+  stage: "",
+  progress: null,
+  restoring: false,
+  hydrating: false
+});
+let generateJobPollTimer = null;
 
 const previewDialog = reactive({ visible: false, url: "", type: "image", title: "素材预览" });
 const packageDialog = reactive({ visible: false, variant: null });
@@ -127,9 +138,114 @@ const enabledShopCount = computed(() => state.selectedShopIds.length);
 const detailStatusText = computed(() => `${material.detailImages.length} 张详情图`);
 const mainUploadStatus = computed(() => (material.mainImage?.url ? "已上传" : "待上传"));
 const configuredShops = computed(() => state.shops.filter((shop) => String(shop.status || "").toLowerCase() !== "deleted"));
+const currentUserId = computed(() => Number(authStore.user?.personId || authStore.user?.id || 0) || 0);
+const generateJobStorageKey = computed(() => {
+  const scope = String(generateWorkbenchId.value || route.query.productId || route.query.baseSelectionId || "manual").trim() || "manual";
+  const userId = currentUserId.value || "anonymous";
+  return `shop-asset-variant-active-job:${userId}:${scope}`;
+});
+const isGenerateJobActive = computed(() => ["queued", "running"].includes(String(generateJob.status || "")));
+const generateJobProgressText = computed(() => {
+  const phases = Array.isArray(generateJob.progress?.phases) ? generateJob.progress.phases : [];
+  const detail = phases.length ? phases[phases.length - 1]?.detail || {} : {};
+  const stage = String(generateJob.stage || generateJob.progress?.currentStage || "").trim();
+  const stageMap = {
+    starting: "准备开始",
+    generate_text: "正在生成标题和文案",
+    generate_images: "正在生成图片素材",
+    generate_videos: "正在生成视频",
+    success: "已完成",
+    failed: "生成失败",
+    cancelled: "已取消",
+    recovered: "任务恢复中"
+  };
+  const label = stageMap[stage] || stage || "处理中";
+  const current = Number(detail.current || 0);
+  const total = Number(detail.total || 0);
+  if (current > 0 && total > 0) return `${label} (${current}/${total})`;
+  return label;
+});
 
 function createListingWorkbenchId() {
   return `liwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function currentGenerateWorkbenchId() {
+  return generateWorkbenchId.value;
+}
+
+function persistActiveGenerateJob(job) {
+  try {
+    window.localStorage?.setItem(generateJobStorageKey.value, JSON.stringify({
+      id: Number(job?.id || job?.jobId || 0) || 0,
+      jobNo: String(job?.jobNo || ""),
+      workbenchId: currentGenerateWorkbenchId(),
+      updatedAt: new Date().toISOString()
+    }));
+  } catch {
+    // Ignore local cache failures.
+  }
+}
+
+function clearPersistedGenerateJob() {
+  try {
+    window.localStorage?.removeItem(generateJobStorageKey.value);
+  } catch {
+    // Ignore local cache failures.
+  }
+}
+
+function readPersistedGenerateJob() {
+  try {
+    return JSON.parse(window.localStorage?.getItem(generateJobStorageKey.value) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function currentGenerateSourceProductId() {
+  return Number(material.sourceProductId || state.sourceProduct?.id || route.query.productId || route.query.baseSelectionId || 0) || 0;
+}
+
+function generateJobSourceProductId(job) {
+  return Number(
+    job?.request?.material?.sourceProductId
+    || job?.request?.material?.source_product_id
+    || job?.request?.sourceProductId
+    || job?.request?.source_product_id
+    || job?.productId
+    || 0
+  ) || 0;
+}
+
+function generateJobWorkbenchId(job) {
+  return String(job?.request?.workbenchId || job?.request?.workbench_id || "").trim();
+}
+
+function matchesCurrentGenerateContext(job, { allowLooseFallback = false } = {}) {
+  const currentWorkbenchId = currentGenerateWorkbenchId();
+  const currentSourceProductId = currentGenerateSourceProductId();
+  const jobWorkbenchId = generateJobWorkbenchId(job);
+  const jobSourceProductId = generateJobSourceProductId(job);
+  if (currentWorkbenchId && jobWorkbenchId && currentWorkbenchId === jobWorkbenchId) return true;
+  if (currentSourceProductId && jobSourceProductId && currentSourceProductId === jobSourceProductId) return true;
+  if (!allowLooseFallback) return false;
+  return !currentSourceProductId && !currentWorkbenchId;
+}
+
+function resetGenerateJobState({ clearPersisted = false } = {}) {
+  generateJob.id = 0;
+  generateJob.jobNo = "";
+  generateJob.status = "";
+  generateJob.stage = "";
+  generateJob.progress = null;
+  generateJob.restoring = false;
+  generateJob.hydrating = false;
+  if (generateJobPollTimer) {
+    window.clearTimeout(generateJobPollTimer);
+    generateJobPollTimer = null;
+  }
+  if (clearPersisted) clearPersistedGenerateJob();
 }
 
 async function loadBootstrap() {
@@ -215,17 +331,13 @@ async function loadMediaAssets() {
   }
 }
 
-async function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(reader.error || new Error("读取文件失败"));
-    reader.readAsDataURL(file);
-  });
-}
-
 async function imageMetaFromFile(file) {
-  const url = await fileToDataUrl(file);
+  const uploaded = await uploadListingMedia(file, {
+    source_module: "asset_variant_source",
+    role: "asset_variant_source_image"
+  });
+  const url = uploaded.publishUrl || uploaded.url || uploaded.previewUrl || "";
+  if (!url) throw new Error("图片上传成功，但未返回可保存的 OSS 地址");
   const meta = await imageSize(url).catch(() => ({ width: 0, height: 0 }));
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -234,7 +346,7 @@ async function imageMetaFromFile(file) {
     width: meta.width,
     height: meta.height,
     url,
-    status: "已上传"
+    status: "已上传 OSS"
   };
 }
 
@@ -954,6 +1066,7 @@ async function loadRouteSource() {
 function buildGeneratePayload(shopIds = state.selectedShopIds) {
   const shops = state.shops.filter((shop) => shopIds.includes(shop.id));
   return {
+    workbenchId: currentGenerateWorkbenchId(),
     material: {
       title: material.title,
       tags: material.tags,
@@ -982,6 +1095,113 @@ function buildGeneratePayload(shopIds = state.selectedShopIds) {
   };
 }
 
+function applyGenerateResult(result = {}, { autoSelectFirst = true } = {}) {
+  const nextVariants = (result.variants || []).map(normalizeVariant);
+  const nextShopIds = new Set(nextVariants.map((variant) => Number(variant.shopId)));
+  state.variants = [
+    ...state.variants.filter((variant) => !nextShopIds.has(Number(variant.shopId))),
+    ...nextVariants
+  ];
+  state.batchId = result.batchId || state.batchId;
+  state.currentBatchCreatedAt = result.createdAt || state.currentBatchCreatedAt || new Date().toISOString();
+  state.outputDir = result.outputDir || state.outputDir;
+  state.localOutputDir = result.localOutputDir || state.localOutputDir;
+  if (autoSelectFirst && nextVariants[0]) state.selectedShopId = nextVariants[0].shopId;
+  return nextVariants;
+}
+
+async function hydrateGenerateJobResult(result = {}) {
+  if (generateJob.hydrating) return;
+  generateJob.hydrating = true;
+  try {
+    const nextVariants = applyGenerateResult(result);
+    await loadMediaAssets();
+    if (nextVariants.length) scrollToResults();
+  } finally {
+    generateJob.hydrating = false;
+  }
+}
+
+function scheduleGenerateJobPoll(delay = 2500) {
+  if (generateJobPollTimer) window.clearTimeout(generateJobPollTimer);
+  generateJobPollTimer = window.setTimeout(() => {
+    pollGenerateJob().catch(() => null);
+  }, delay);
+}
+
+async function pollGenerateJob() {
+  if (!generateJob.id) return;
+  const detail = await apiClient.get(`/api/asset-variant-engine/jobs/${generateJob.id}`, { noCache: true });
+  if (!detail) {
+    resetGenerateJobState({ clearPersisted: true });
+    return;
+  }
+  generateJob.jobNo = detail.jobNo || generateJob.jobNo;
+  generateJob.status = detail.status || "";
+  generateJob.stage = detail.currentStage || detail.progress?.currentStage || "";
+  generateJob.progress = detail.progress || null;
+  if (["queued", "running"].includes(String(detail.status || ""))) {
+    generating.value = true;
+    persistActiveGenerateJob(detail);
+    scheduleGenerateJobPoll(2500);
+    return;
+  }
+  generating.value = false;
+  if (detail.status === "success") {
+    await hydrateGenerateJobResult(detail.result || {});
+    resetGenerateJobState({ clearPersisted: true });
+    ElMessage.success("已恢复后台生成结果");
+    return;
+  }
+  const errorMessage = detail.error?.message || detail.error?.raw_message || "批量生成任务失败";
+  const cancelled = detail.status === "cancelled";
+  resetGenerateJobState({ clearPersisted: true });
+  if (cancelled) {
+    ElMessage.warning("后台批量生成已取消");
+  } else {
+    ElMessage.error(errorMessage);
+  }
+}
+
+async function restoreGenerateJob() {
+  const cached = readPersistedGenerateJob();
+  generateJob.restoring = true;
+  try {
+    if (cached?.id) {
+      generateJob.id = Number(cached.id || 0) || 0;
+      generateJob.jobNo = String(cached.jobNo || "");
+      await pollGenerateJob();
+      if (generateJob.id || isGenerateJobActive.value) return;
+    }
+    const query = new URLSearchParams({
+      jobType: "generate_variants",
+      limit: "20"
+    });
+    const jobs = await apiClient.get(`/api/asset-variant-engine/jobs?${query.toString()}`, { noCache: true });
+    const rows = Array.isArray(jobs) ? jobs : [];
+    const activeJob = rows.find((job) =>
+      ["queued", "running"].includes(String(job?.status || ""))
+      && matchesCurrentGenerateContext(job)
+    ) || rows.find((job) =>
+      ["queued", "running"].includes(String(job?.status || ""))
+      && matchesCurrentGenerateContext(job, { allowLooseFallback: true })
+    );
+    if (!activeJob?.id) return;
+    generateJob.id = Number(activeJob.id || activeJob.jobId || 0) || 0;
+    generateJob.jobNo = String(activeJob.jobNo || "");
+    generateJob.status = String(activeJob.status || "");
+    generateJob.stage = String(activeJob.currentStage || activeJob.progress?.currentStage || "");
+    generateJob.progress = activeJob.progress || null;
+    persistActiveGenerateJob(activeJob);
+    await pollGenerateJob();
+  } catch (error) {
+    resetGenerateJobState();
+    console.warn("restore generate job failed", error);
+  } finally {
+    generateJob.restoring = false;
+  }
+}
+
 async function generateVariants(shopIds = state.selectedShopIds) {
   if (!material.title || !material.mainImage?.url) {
     ElMessage.warning("请先填写标题并上传主图");
@@ -994,17 +1214,7 @@ async function generateVariants(shopIds = state.selectedShopIds) {
   generating.value = true;
   try {
     const result = await apiClient.post("/api/asset-variant-engine/generate", buildGeneratePayload(shopIds));
-    const nextVariants = (result.variants || []).map(normalizeVariant);
-    const nextShopIds = new Set(nextVariants.map((variant) => Number(variant.shopId)));
-    state.variants = [
-      ...state.variants.filter((variant) => !nextShopIds.has(Number(variant.shopId))),
-      ...nextVariants
-    ];
-    state.batchId = result.batchId || state.batchId;
-    state.currentBatchCreatedAt = result.createdAt || new Date().toISOString();
-    state.outputDir = result.outputDir || state.outputDir;
-    state.localOutputDir = result.localOutputDir || state.localOutputDir;
-    if (nextVariants[0]) state.selectedShopId = nextVariants[0].shopId;
+    const nextVariants = applyGenerateResult(result);
     const variantsMissingVideo = nextVariants.filter((variant) => !Array.isArray(variant.videos) || !variant.videos.length);
     const videoResult = variantsMissingVideo.length ? await generateVideosForVariants(variantsMissingVideo, { silent: true }) : { done: 0, failures: [] };
     await loadMediaAssets();
@@ -1015,6 +1225,36 @@ async function generateVariants(shopIds = state.selectedShopIds) {
     }
   } finally {
     generating.value = false;
+  }
+}
+
+async function startGenerateAllShopsJob(shopIds = state.selectedShopIds) {
+  if (!material.title || !material.mainImage?.url) {
+    ElMessage.warning("请先填写标题并上传主图");
+    return;
+  }
+  if (!shopIds.length) {
+    ElMessage.warning("请至少启用一个店铺");
+    return;
+  }
+  if (isGenerateJobActive.value && generateJob.id) {
+    ElMessage.warning("后台批量生成仍在进行中，请稍后查看进度");
+    return;
+  }
+  generating.value = true;
+  try {
+    const job = await apiClient.post("/api/asset-variant-engine/generate-async", buildGeneratePayload(shopIds));
+    generateJob.id = Number(job.jobId || 0) || 0;
+    generateJob.jobNo = job.jobNo || "";
+    generateJob.status = job.status || "queued";
+    generateJob.stage = "starting";
+    generateJob.progress = null;
+    persistActiveGenerateJob(job);
+    ElMessage.success("已提交后台批量生成任务，离开页面后回来也会继续显示进度");
+    scheduleGenerateJobPoll(800);
+  } catch (error) {
+    generating.value = false;
+    throw error;
   }
 }
 
@@ -1111,7 +1351,7 @@ function generateCurrentShop() {
 }
 
 function generateAllShops() {
-  return generateVariants(state.selectedShopIds);
+  return startGenerateAllShopsJob(state.selectedShopIds);
 }
 
 async function generateVideosForAllShops() {
@@ -1395,10 +1635,10 @@ function buildShopVideoName(variant) {
   const ext = mimeType.includes("mp4") ? "mp4" : "webm";
   return `${base}-${shop}-video.${ext}`;
 }
-async function saveRule(shop) {
+async function saveRule(shop, { silent = false } = {}) {
   const result = await apiClient.post("/api/asset-variant-engine/rules", { shopId: shop.id, ...state.rules[shop.id] });
   if (result?.updated_at && state.rules[shop.id]) state.rules[shop.id].updated_at = result.updated_at;
-  ElMessage.success(`${shop.name} 规则已保存`);
+  if (!silent) ElMessage.success(`${shop.name} 规则已保存`);
 }
 
 async function syncOzonCategories() {
@@ -2083,6 +2323,8 @@ async function createTailTemplate() {
       state.rules[template.shopId].tailCategory = template.category;
       state.rules[template.shopId].vehicleModel = template.vehicleModel;
       state.rules[template.shopId].tailTemplateId = template.id;
+      const shop = state.shops.find((item) => Number(item.id) === Number(template.shopId));
+      if (shop) await saveRule(shop, { silent: true });
     }
     ElMessage.success("尾图模板已保存");
   } finally {
@@ -2102,6 +2344,14 @@ watch(
 onMounted(async () => {
   await loadBootstrap();
   await loadRouteSource();
+  await restoreGenerateJob();
+});
+
+onBeforeUnmount(() => {
+  if (generateJobPollTimer) {
+    window.clearTimeout(generateJobPollTimer);
+    generateJobPollTimer = null;
+  }
 });
 </script>
 
@@ -2111,6 +2361,13 @@ onMounted(async () => {
         <div>
           <h1>店铺矩阵裂变</h1>
           <p>上传一套原始商品素材，按店铺规则批量生成标题、标签、描述、水印图、详情图和 listing 素材包。</p>
+          <div v-if="generateJob.id" class="active-job-banner">
+            <span>后台批量生成任务{{ generateJob.jobNo ? `：${generateJob.jobNo}` : "" }}</span>
+            <strong>{{ generateJobProgressText }}</strong>
+            <el-tag :type="isGenerateJobActive ? 'warning' : generateJob.status === 'success' ? 'success' : 'info'" effect="light">
+              {{ generateJob.status || (generateJob.restoring ? 'restoring' : 'queued') }}
+            </el-tag>
+          </div>
           <div v-if="state.localOutputDir" class="local-output-bar">
             <span>本地输出目录</span>
             <strong>{{ state.localOutputDir }}</strong>

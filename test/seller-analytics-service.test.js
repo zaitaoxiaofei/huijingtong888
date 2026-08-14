@@ -1,19 +1,31 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  claimPluginPrepareRequest,
   claimNextCollectRequest,
+  claimNextCollectRequests,
   createCollectRun,
   finishCollectRequest,
   getAnalysis,
   getPluginStatus,
   inferSourceFromRequest,
   listOperationTodos,
+  preparePlugin,
   refreshOperationTodos,
   resolveCollectPeriod,
   savePluginStatus,
   validatePluginStatus,
   saveSnapshot
 } from "../src/services/seller-analytics.js";
+import fs from "node:fs";
+
+test("collect queue converts ISO timestamps before writing MySQL DATETIME columns", () => {
+  const source = fs.readFileSync(new URL("../src/services/seller-analytics.js", import.meta.url), "utf8");
+  assert.match(source, /mysqlDateValue\(run\.created_at\), mysqlDateValue\(run\.updated_at\)/);
+  assert.match(source, /mysqlDateValue\(request\.claimed_at\)/);
+  assert.match(source, /mysqlDateValue\(request\.finished_at\)/);
+  assert.doesNotMatch(source, /stringifyJson\(run\.previous_period \|\| \{\}\), run\.created_at, run\.updated_at/);
+});
 
 function createMemorySellerAnalyticsDb() {
   const tables = {
@@ -190,6 +202,63 @@ test("seller analytics analysis caps returned focus products while keeping total
   assert.equal(analysis.focusProducts.length, 3);
 });
 
+test("seller analytics derives funnel rates and filters before pagination", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  await saveSnapshot(db, {
+    source_button_key: "all_metrics",
+    period_key: "rate-filter-test",
+    request_body: { metrics: ["search_views", "pdp_views", "hits_pdp_to_cart", "total_hits_to_cart", "ordered_units"] },
+    response_body: {
+      items: [
+        { sku: "strong", search_views: 1000, pdp_views: 100, hits_pdp_to_cart: 20, total_hits_to_cart: 25, ordered_units: 10 },
+        { sku: "weak", search_views: 1000, pdp_views: 20, hits_pdp_to_cart: 1, total_hits_to_cart: 2, ordered_units: 1 }
+      ]
+    }
+  }, "admin");
+
+  const analysis = await getAnalysis(db, {
+    period_key: "rate-filter-test",
+    click_rate_min: 5,
+    sort_key: "metric:convPdpViewsToCart",
+    sort_order: "desc",
+    page: 1,
+    product_limit: 1
+  }, "admin");
+
+  assert.equal(analysis.summary.productCount, 1);
+  assert.equal(analysis.products[0].sku, "strong");
+  assert.equal(analysis.products[0].metrics.convSearchViewsToPdp, 10);
+  assert.equal(analysis.products[0].metrics.convPdpViewsToCart, 20);
+  assert.equal(analysis.products[0].metrics.convHitsToCartToOrder, 40);
+  assert.equal(analysis.products[0].metrics.convPdpViewsToOrder, 10);
+});
+
+test("seller analytics click rate follows the displayed exposure denominator", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  await saveSnapshot(db, {
+    source_button_key: "all_metrics",
+    period_key: "displayed-rate-test",
+    request_body: { metrics: ["total_views", "search_views", "pdp_views", "ordered_units"] },
+    response_body: { items: [{ sku: "sku-rate", total_views: 163615, search_views: 22777, pdp_views: 6947, ordered_units: 168, conv_search_views_to_pdp: 30.5 }] }
+  }, "admin");
+  const analysis = await getAnalysis(db, { period_key: "displayed-rate-test" }, "admin");
+
+  assert.equal(Number(analysis.products[0].metrics.convSearchViewsToPdp.toFixed(2)), 4.25);
+  assert.equal(Number(analysis.products[0].metrics.convPdpViewsToOrder.toFixed(2)), 2.42);
+});
+
+test("seller analytics recomputes rates after metrics from different tabs are merged", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  const base = { period_key: "merged-rate-test", request_body: { metrics: [] } };
+  await saveSnapshot(db, { ...base, source_button_key: "search", response_body: { items: [{ sku: "sku-merged", total_views: 111857 }] } }, "admin");
+  await saveSnapshot(db, { ...base, source_button_key: "card_quality", response_body: { items: [{ sku: "sku-merged", pdp_views: 5374, conv_search_views_to_pdp: 30.1 }] } }, "admin");
+  await saveSnapshot(db, { ...base, source_button_key: "hot", response_body: { items: [{ sku: "sku-merged", ordered_units: 172 }] } }, "admin");
+
+  const analysis = await getAnalysis(db, { period_key: "merged-rate-test" }, "admin");
+  assert.equal(Number(analysis.products[0].metrics.convSearchViewsToPdp.toFixed(2)), 4.8);
+  assert.equal(Number(analysis.products[0].metrics.convPdpViewsToOrder.toFixed(2)), 3.2);
+});
+
 test("seller analytics analysis cache is invalidated after saving a snapshot", async () => {
   const db = createMemorySellerAnalyticsDb();
   const query = {
@@ -325,6 +394,53 @@ test("seller analytics does not claim another store when the current store has n
   assert.equal(request, null);
 });
 
+test("seller analytics batch claim reads and writes one run only once", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  await createCollectRun(db, {
+    period_key: "7d",
+    source_keys: ["hot", "search"],
+    page: 1,
+    store_id: "111111"
+  }, "admin");
+  const requests = await claimNextCollectRequests(db, "admin", 10, { store_id: "111111" });
+
+  assert.equal(requests.length, 4);
+  const savedRun = JSON.parse(db.tables.Setting[0].value);
+  assert.equal(savedRun.requests.filter((item) => item.status === "running").length, 4);
+});
+
+test("seller analytics drops repeated batch polling during the server cooldown", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  await createCollectRun(db, {
+    period_key: "7d",
+    source_keys: ["hot"],
+    page: 1,
+    store_id: "cooldown-store"
+  }, "cooldown-tenant");
+
+  const first = await claimNextCollectRequests(db, "cooldown-tenant", 1, { store_id: "cooldown-store" });
+  const repeated = await claimNextCollectRequests(db, "cooldown-tenant", 1, { store_id: "cooldown-store" });
+
+  assert.equal(first.length, 1);
+  assert.deepEqual(repeated, []);
+});
+
+test("seller analytics shares polling cooldown across stores in one tenant", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  await createCollectRun(db, {
+    period_key: "7d",
+    source_keys: ["hot"],
+    page: 1,
+    store_id: "store-a"
+  }, "shared-cooldown-tenant");
+
+  const first = await claimNextCollectRequests(db, "shared-cooldown-tenant", 1, { store_id: "store-a" });
+  const anotherStore = await claimNextCollectRequests(db, "shared-cooldown-tenant", 1, { store_id: "store-b" });
+
+  assert.equal(first.length, 1);
+  assert.deepEqual(anotherStore, []);
+});
+
 test("seller analytics validates plugin status against selected store", async () => {
   const db = createMemorySellerAnalyticsDb();
   await savePluginStatus(db, {
@@ -342,6 +458,48 @@ test("seller analytics validates plugin status against selected store", async ()
   assert.equal(mismatch.code, "company_mismatch");
   assert.equal(ready.ok, true);
   assert.equal(ready.code, "ready");
+});
+
+test("seller analytics isolates plugin status by browser instance", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  const common = {
+    seller_missing: false,
+    seller_tab: { id: 1, url: "https://seller.ozon.ru/app/analytics", title: "Analytics" },
+    polling_enabled: true,
+    synced_at: new Date(Date.now() + 1000).toISOString()
+  };
+  await savePluginStatus(db, { ...common, plugin_instance_id: "browser-a", current_company_id: "111111" }, "admin");
+  await savePluginStatus(db, { ...common, plugin_instance_id: "browser-b", current_company_id: "222222" }, "admin");
+
+  const statusA = await getPluginStatus(db, "admin", { plugin_instance_id: "browser-a" });
+  const statusB = await getPluginStatus(db, "admin", { plugin_instance_id: "browser-b" });
+  const readyA = await validatePluginStatus(db, { plugin_instance_id: "browser-a", store_id: "111111" }, "admin");
+
+  assert.equal(statusA.current_company_id, "111111");
+  assert.equal(statusB.current_company_id, "222222");
+  assert.equal(readyA.ok, true);
+});
+
+test("seller analytics isolates prepare requests by browser instance", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  await preparePlugin(db, {
+    plugin_instance_id: "browser-a",
+    store_id: "111111",
+    shop_name: "Store A"
+  }, "admin");
+  await preparePlugin(db, {
+    plugin_instance_id: "browser-b",
+    store_id: "222222",
+    shop_name: "Store B"
+  }, "admin");
+
+  const requestA = await claimPluginPrepareRequest(db, "admin", { plugin_instance_id: "browser-a" });
+  const requestB = await claimPluginPrepareRequest(db, "admin", { plugin_instance_id: "browser-b" });
+
+  assert.equal(requestA.expected_store_id, "111111");
+  assert.equal(requestA.plugin_instance_id, "browser-a");
+  assert.equal(requestB.expected_store_id, "222222");
+  assert.equal(requestB.plugin_instance_id, "browser-b");
 });
 
 test("seller analytics marks plugin status offline when heartbeat is stale", async () => {

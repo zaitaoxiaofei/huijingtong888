@@ -2,6 +2,7 @@ import {
   listingDraftToTemplatePayload,
   prepareListingDraftFromCollectedSource
 } from "./listing-draft-preparer.js";
+import { buildCollectedProductFacts } from "./listing-collected-facts.js";
 
 function normalizeArray(value) {
   if (Array.isArray(value)) return value.filter((item) => item !== undefined && item !== null && item !== "");
@@ -204,18 +205,21 @@ function mergeAttributesByKey(...sources) {
 }
 
 function categoryNameFromResolved(resolvedCategory = {}, editPayload = {}, detail = {}, raw = {}) {
-  return resolvedCategory?.path_zh ||
-    resolvedCategory?.pathZh ||
-    resolvedCategory?.name_zh ||
-    resolvedCategory?.nameZh ||
-    editPayload.category_name ||
-    detail.category_name ||
-    raw.category_name ||
-    raw.category ||
-    "";
+  const candidates = [
+    resolvedCategory?.path_zh,
+    resolvedCategory?.pathZh,
+    resolvedCategory?.name_zh,
+    resolvedCategory?.nameZh,
+    editPayload.category_name,
+    detail.category_name,
+    raw.category_name,
+    raw.categoryName,
+    raw.category
+  ].map((item) => String(item || "").trim()).filter(Boolean);
+  return candidates.find((item) => !item.includes("frontend:")) || candidates[0] || "";
 }
 
-function buildDiagnostics({ descriptionCategoryId, typeId, categoryName, attributes = [], variants = [], images = [], draft = {} } = {}) {
+function buildDiagnostics({ descriptionCategoryId, typeId, categoryName, categorySource = "", attributes = [], variants = [], images = [], draft = {} } = {}) {
   const missingRequiredAttributes = normalizeArray(attributes)
     .filter((item) => Boolean(item.required || item.is_required) && (item.value === undefined || item.value === null || item.value === "" || (Array.isArray(item.value) && !item.value.length)))
     .map((item) => ({
@@ -233,7 +237,10 @@ function buildDiagnostics({ descriptionCategoryId, typeId, categoryName, attribu
       description_category_id: descriptionCategoryId || "",
       type_id: typeId || "",
       name: categoryName || "",
-      confidence: descriptionCategoryId && typeId ? "resolved" : "manual_needed"
+      source: categorySource || "",
+      confidence: String(categorySource || "").startsWith("collector_fallback:")
+        ? "manual_confirmation_required"
+        : (descriptionCategoryId && typeId ? "resolved" : "manual_needed")
     },
     attributes: {
       total: normalizeArray(attributes).length,
@@ -257,7 +264,13 @@ export async function normalizeCollectedListingDraft(input = {}, options = {}) {
   const raw = detail.rawPayload || detail.raw_payload || input.raw || {};
   const normalizeEditPayload = options.normalizeEditPayload || ((value) => objectValue(value));
   const editPayload = input.editPayload || normalizeEditPayload(body.editPayload || body.edit_payload || {}, detail);
-  const resolvedCategory = input.resolvedCategory || (options.resolveCategory ? await options.resolveCategory(detail, body) : null);
+  const facts = options.buildCollectedFacts
+    ? options.buildCollectedFacts({ ...input, detail, body, raw, editPayload }, options)
+    : buildCollectedProductFacts({ ...input, detail, body, raw, editPayload }, {
+      normalizeEditPayload,
+      collectVariantRows: options.collectVariantRows
+    });
+  const resolvedCategory = input.resolvedCategory || (options.resolveCategory ? await options.resolveCategory(detail, body, facts) : null);
   const resolvedDescriptionCategoryId = resolvedCategory?.description_category_id || resolvedCategory?.descriptionCategoryId || "";
   const resolvedTypeId = resolvedCategory?.type_id || resolvedCategory?.typeId || "";
   const directDescriptionCategoryId = editPayload.description_category_id || raw.description_category_id || raw.descriptionCategoryId || "";
@@ -281,7 +294,7 @@ export async function normalizeCollectedListingDraft(input = {}, options = {}) {
   ]);
   const buildAttributes = options.buildAttributes || (() => normalizeArray(raw.attributes || raw.attribute_values || raw.characteristics || editPayload.attributes));
   const mergeAttributes = options.mergeAttributeDefinitions || (async (items) => items);
-  const attributes = await mergeAttributes(buildAttributes(editPayload, raw), descriptionCategoryId, typeId);
+  const attributes = await mergeAttributes(buildAttributes(editPayload, raw, facts), descriptionCategoryId, typeId);
   const rowCollector = options.collectVariantRows || collectVariantRows;
   const variantNormalizer = options.normalizeVariant || normalizeVariant;
   const variantImagePicker = options.variantImages || ((item, productImages) => imageNormalizer(item.images || item.image_urls || item.imageUrls || productImages));
@@ -344,16 +357,26 @@ export async function normalizeCollectedListingDraft(input = {}, options = {}) {
     descriptionCategoryId,
     typeId,
     categoryName,
+    categorySource: resolvedCategory?.source || "",
     attributes: draft.attributes || attributes,
     variants: finalVariants,
     images,
     draft
   });
+  diagnostics.facts = {
+    version: facts.version || 1,
+    attribute_count: normalizeArray(facts.attributes).length,
+    variant_count: normalizeArray(facts.variants).length,
+    image_count: normalizeArray(facts.media?.images).length,
+    category_hint_ok: Boolean(facts.categoryHints?.description_category_id || facts.categoryHints?.type_id || normalizeArray(facts.categoryHints?.category_ids).length),
+    source_coverage: facts.sourceCoverage || {}
+  };
   draft.editablePayload = {
     ...draft.editablePayload,
     normalization_diagnostics: diagnostics,
     source_raw: {
       ...(draft.editablePayload?.source_raw || {}),
+      collected_facts: facts,
       normalization_diagnostics: diagnostics
     }
   };
@@ -363,6 +386,7 @@ export async function normalizeCollectedListingDraft(input = {}, options = {}) {
   });
   templatePayload.source_raw = {
     ...(templatePayload.source_raw || {}),
+    collected_facts: facts,
     normalization_diagnostics: diagnostics
   };
   templatePayload.editable_payload = {
@@ -372,6 +396,7 @@ export async function normalizeCollectedListingDraft(input = {}, options = {}) {
   return {
     editPayload,
     raw,
+    facts,
     resolvedCategory,
     payload,
     draft,

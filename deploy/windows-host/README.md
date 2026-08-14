@@ -28,6 +28,7 @@ Minimum recommended values:
 ```env
 HOST=127.0.0.1
 PORT=8787
+SCHEDULED_JOBS_ENABLED=false
 DB_CLIENT=mysql
 DB_HOST=127.0.0.1
 DB_PORT=3306
@@ -40,6 +41,7 @@ DB_POOL_QUEUE_LIMIT=100
 DB_POOL_ACQUIRE_TIMEOUT_MS=10000
 APP_BASE_URL=https://erp.hjt888.xyz
 LISTING_MEDIA_PUBLIC_BASE_URL=https://erp.hjt888.xyz
+UPLOADS_ROOT=..\..\uploads
 SITE_ACCESS_PASSWORD=replace-with-a-long-random-password
 HEALTH_CHECK_USERNAME=health-check-user
 HEALTH_CHECK_PASSWORD=replace-with-a-strong-password
@@ -54,6 +56,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy\windows-host\start-
 ```
 
 It starts `node src/server.js` from `dist/deploy` and writes logs under `dist/deploy/logs`.
+
+Hosted stdout and stderr are size-bounded by `deploy/windows-host/run-erp-server.mjs`. Each active log rotates at 20 MB and keeps 7 archives by default, so routine success output cannot grow without limit. Failures remain available in the stderr history. The defaults can be overridden for a manually managed host with `ERP_LOG_MAX_MB` and `ERP_LOG_ARCHIVES`.
+
+Scheduled-job database history uses tiered retention: ordinary scheduled success/skip details are kept for 14 days, while failures, warnings, and manual-run audit records are kept for up to 90 days. The low-priority `scheduled_history_cleanup` job runs daily in batches; it does not delete order, finance, inventory, listing, or operator audit history.
 
 ## 4. Configure Cloudflare Tunnel
 
@@ -139,6 +145,7 @@ This will:
 - stop Cloudflare Tunnel
 - rebuild `dist/deploy`
 - restore the previous hosted `.env` into the new `dist/deploy` when available
+- preserve old runtime `uploads` files, such as shop watermarks, under the persistent uploads root
 - start the ERP service again
 - start Cloudflare Tunnel again
 - run a local deployment health check against `http://127.0.0.1:8787` using `HEALTH_CHECK_USERNAME` / `HEALTH_CHECK_PASSWORD` from `dist/deploy/.env`

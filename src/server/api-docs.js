@@ -155,7 +155,9 @@ const schemas = {
   ShopRecord: objectOf("ERP shop configuration row.", [
     field("id", scalar("number", "Shop identifier.")),
     field("name", scalar("string", "Shop display name.")),
-    field("legal_entity", scalar("string", "Legal entity or company name.")),
+    field("legal_entity", scalar("string", "Legacy legal entity or company name.")),
+    field("user_id", scalar("number", "Bound shop manager person identifier.")),
+    field("user_name", scalar("string", "Bound shop manager display name.")),
     field("ozon_client_id", scalar("string", "Ozon client identifier.")),
     field("api_key_hint", scalar("string", "Non-sensitive API key hint.")),
     field("status", scalar("string", "Shop status.")),
@@ -165,7 +167,8 @@ const schemas = {
 
   ShopMutationRequest: objectOf("Create or update shop payload.", [
     field("name", scalar("string", "Shop display name."), true),
-    field("legal_entity", scalar("string", "Legal entity or company name.")),
+    field("legal_entity", scalar("string", "Legacy legal entity or company name.")),
+    field("user_id", scalar("number", "Required shop manager person identifier.")),
     field("ozon_client_id", scalar("string", "Ozon client identifier.")),
     field("api_key_hint", scalar("string", "Displayed API key hint only.")),
     field("status", scalar("string", "Shop status such as active or inactive.")),
@@ -188,6 +191,44 @@ const schemas = {
     field("role", scalar("string", "Authorization role such as operator or admin.")),
     field("avatar_url", scalar("string", "Optional avatar URL.")),
     field("active", scalar("number", "Whether the person is active."))
+  ], { additionalProperties: false }),
+
+  TeamTaskRecord: objectOf("Team planning task row.", [
+    field("id", scalar("number", "Task identifier.")),
+    field("title", scalar("string", "Task title.")),
+    field("type", scalar("string", "Work type such as collection, selection, fission, draft, listing, vehicle_sales, order_review, procurement, or optimization. Legacy values advertising, finance_tax, and warehouse are still accepted.")),
+    field("owner_person_id", scalar("number", "Responsible person identifier.")),
+    field("owner_name", scalar("string", "Responsible person display name.")),
+    field("owner_avatar_url", scalar("string", "Responsible person avatar URL.")),
+    field("collaborator_person_ids", arrayOf(scalar("number", "Person identifier."), "Collaborator person identifiers.")),
+    field("period", scalar("string", "Planning period such as week, month, quarter, or year.")),
+    field("status", scalar("string", "Task status.")),
+    field("priority", scalar("string", "Task priority.")),
+    field("target", scalar("number", "Target quantity.")),
+    field("done", scalar("number", "Completed quantity.")),
+    field("unit", scalar("string", "Quantity unit.")),
+    field("start_at", scalar("string", "Start date.", { format: "date" })),
+    field("due_at", scalar("string", "Due date.", { format: "date" })),
+    field("related", scalar("string", "Related shop, product line, SKU, purchase order, or warehouse.")),
+    field("result", scalar("string", "Operator progress note.")),
+    field("quality", scalar("number", "Quality score from 0 to 100."))
+  ]),
+
+  TeamTaskMutationRequest: objectOf("Create or update team planning task payload.", [
+    field("title", scalar("string", "Task title."), true),
+    field("type", scalar("string", "Work type.")),
+    field("owner_person_id", scalar("number", "Responsible person identifier.")),
+    field("collaborator_person_ids", arrayOf(scalar("number", "Person identifier."), "Collaborator person identifiers.")),
+    field("period", scalar("string", "Planning period.")),
+    field("status", scalar("string", "Task status.")),
+    field("priority", scalar("string", "Task priority.")),
+    field("target", scalar("number", "Target quantity.")),
+    field("done", scalar("number", "Completed quantity.")),
+    field("unit", scalar("string", "Quantity unit.")),
+    field("start_at", scalar("string", "Start date in YYYY-MM-DD.", { format: "date" })),
+    field("due_at", scalar("string", "Due date in YYYY-MM-DD.", { format: "date" })),
+    field("related", scalar("string", "Related business object.")),
+    field("result", scalar("string", "Progress note."))
   ], { additionalProperties: false }),
 
   SupplierRecord: objectOf("Supplier master-data row.", [
@@ -464,6 +505,7 @@ const schemas = {
     field("status", scalar("string", "Status tab key.")),
     field("markFilter", scalar("string", "Mark filter key.")),
     field("printFilter", scalar("string", "Print-state filter key.")),
+    field("fulfillmentType", scalar("string", "Fulfillment-type filter: all, fbs, or fbp.")),
     field("searchType", scalar("string", "Search type such as order, tracking, sku, offer, product.")),
     field("searchQuery", scalar("string", "Search text.")),
     field("sortMode", scalar("string", "Sort mode key."))
@@ -507,13 +549,6 @@ const schemas = {
     field("stockByOwner", arrayOf(scalar("object", "Stock by owner row."), "Stock grouped by product and owner."), true)
   ], { additionalProperties: false }),
 
-  ProfitSummaryResponse: objectOf("Profit aggregates by summary, shop, SKU, and product.", [
-    field("summary", scalar("object", "Overall revenue, profit, cancellation, and return metrics."), true),
-    field("byShop", arrayOf(scalar("object", "Per-shop profit rollup."), "Per-shop rows."), true),
-    field("bySku", arrayOf(scalar("object", "Per-SKU profit rollup."), "Per-SKU rows."), true),
-    field("byProduct", arrayOf(scalar("object", "Per-product profit rollup."), "Per-product rows."), true)
-  ], { additionalProperties: false }),
-
   ProfitFiltersQuery: objectOf("Common profit filter query model.", [
     field("from", scalar("string", "Inclusive start date.", { format: "date" })),
     field("to", scalar("string", "Inclusive end date.", { format: "date" })),
@@ -523,13 +558,6 @@ const schemas = {
     field("metric", scalar("string", "Optional metric selector.")),
     field("page", scalar("number", "Optional page number.")),
     field("pageSize", scalar("number", "Optional page size."))
-  ]),
-
-  ProfitDashboardResponse: objectOf("Chart-ready profit dashboard payload.", [
-    field("filters", scalar("object", "Resolved date and grouping filters.")),
-    field("summary", scalar("object", "Top-level KPI cards.")),
-    field("trend", arrayOf(scalar("object", "Time-series row."), "Chart rows.")),
-    field("ranking", arrayOf(scalar("object", "Ranking row."), "Ranking rows."))
   ]),
 
   HistoricalProfitReviewResponse: objectOf("Historical profit review workbench payload.", [
@@ -712,6 +740,9 @@ const schemas = {
     field("per_gram_cny", scalar("number", "Per-gram fee in CNY.")),
     field("per_ticket_cny", scalar("number", "Per-ticket fee in CNY.")),
     field("enabled", scalar("number", "Whether the rule is active.")),
+    field("version_group_id", scalar("number", "Stable identifier shared by versions of one rule.")),
+    field("effective_from", scalar("string", "Version effective timestamp.", { format: "date-time" })),
+    field("effective_to", scalar("string", "Version expiration timestamp.", { format: "date-time" })),
     field("note", scalar("string", "Operator note."))
   ]),
 
@@ -724,6 +755,8 @@ const schemas = {
     field("max_weight_g", scalar("number", "Upper weight bound in grams.")),
     field("min_price_rub", scalar("number", "Lower listing-price bound in RUB.")),
     field("max_price_rub", scalar("number", "Upper listing-price bound in RUB.")),
+    field("source_rule_id", scalar("number", "Source version identifier when creating a new version.")),
+    field("effective_from", scalar("string", "New version effective time in Beijing time.")),
     field("base_fee_cny", scalar("number", "Base fee in CNY.")),
     field("per_gram_cny", scalar("number", "Per-gram fee in CNY.")),
     field("per_ticket_cny", scalar("number", "Per-ticket fee in CNY.")),
@@ -962,25 +995,15 @@ const endpoints = [
       requestBody: body(ref("ExchangeRateUpdateRequest")),
       responses: [response(200, "application/json", ref("ExchangeRate"))]
     }),
-    endpoint("GET", "/api/profit-summary", "Return aggregate profit metrics by summary, shop, SKU, and product.", {
-      auth: "authenticated",
-      query: queryFieldsFromSchema("ProfitFiltersQuery", ["from", "to", "refresh"]),
-      responses: [response(200, "application/json", ref("ProfitSummaryResponse"))]
-    }),
-    endpoint("GET", "/api/profit-dashboard", "Return chart-ready profit dashboard data for the selected period.", {
-      auth: "authenticated",
-      query: queryFieldsFromSchema("ProfitFiltersQuery"),
-      responses: [response(200, "application/json", ref("ProfitDashboardResponse"))]
-    }),
     endpoint("GET", "/api/profit-ranking", "Return ranking rows for the selected profit dimension.", {
       auth: "authenticated",
       query: queryFieldsFromSchema("ProfitFiltersQuery"),
       responses: [response(200, "application/json", arrayOf(scalar("object", "Profit ranking row."), "Ranking rows."))]
     }),
-    endpoint("GET", "/api/profit-details", "Return detailed profit rows for drill-down views.", {
+    endpoint("GET", "/api/profit-reconciliation", "Compare estimated and finance-accrued profit and identify inventory-data risks.", {
       auth: "authenticated",
       query: queryFieldsFromSchema("ProfitFiltersQuery"),
-      responses: [response(200, "application/json", arrayOf(scalar("object", "Profit detail row."), "Detailed rows."))]
+      responses: [response(200, "application/json", scalar("object", "Reconciliation summary, product risks, and order-item variance rows."))]
     }),
     endpoint("GET", "/api/profits/historical-review", "Return historical profit review candidates and review state.", {
       auth: "authenticated",
@@ -1439,6 +1462,37 @@ const endpoints = [
       requestBody: body(ref("AiStrategyBundleMatchRequest")),
       responses: [response(200, "application/json", ref("AiStrategyBundleMatchResponse"))]
     }),
+    endpoint("GET", "/api/team/tasks", "Return team planning tasks.", {
+      auth: "authenticated",
+      query: [
+        param("period", scalar("string", "Optional period filter."), false),
+        param("type", scalar("string", "Optional work-type filter."), false),
+        param("owner_person_id", scalar("number", "Optional owner filter."), false),
+        param("status", scalar("string", "Optional status filter."), false)
+      ],
+      responses: [response(200, "application/json", arrayOf(ref("TeamTaskRecord"), "Team tasks."))]
+    }),
+    endpoint("POST", "/api/team/tasks", "Create a team planning task.", {
+      auth: "authenticated",
+      requestBody: body(ref("TeamTaskMutationRequest")),
+      responses: [response(200, "application/json", ref("IdResponse"))]
+    }),
+    endpoint("POST", "/api/team/attachments", "Upload an attachment for a product-development candidate.", {
+      auth: "authenticated",
+      requestBody: body(scalar("object", "multipart/form-data with file field. Supports Excel, Word, PDF, CSV, TXT, PPT and ZIP.")),
+      responses: [response(200, "application/json", scalar("object", "Uploaded attachment metadata including url, name, size and contentType."))]
+    }),
+    endpoint("PUT", "/api/team/tasks/:id", "Update a team planning task.", {
+      auth: "authenticated",
+      pathParams: [param("id", scalar("number", "Task identifier."))],
+      requestBody: body(ref("TeamTaskMutationRequest")),
+      responses: [response(200, "application/json", ref("MutationOk"))]
+    }),
+    endpoint("DELETE", "/api/team/tasks/:id", "Delete a team planning task.", {
+      auth: "authenticated",
+      pathParams: [param("id", scalar("number", "Task identifier."))],
+      responses: [response(200, "application/json", ref("MutationOk"))]
+    }),
     endpoint("GET", "/api/shops", "Return shop master data.", {
       auth: "authenticated",
       responses: [response(200, "application/json", arrayOf(ref("ShopRecord"), "Shop rows."))]
@@ -1515,7 +1569,7 @@ const endpoints = [
       requestBody: body(ref("LogisticsRuleMutationRequest")),
       responses: [response(200, "application/json", ref("MutationOk"))]
     }),
-    endpoint("DELETE", "/api/logistics-rules/:id", "Disable a logistics fee rule.", {
+    endpoint("DELETE", "/api/logistics-rules/:id", "Delete an unreferenced logistics fee rule.", {
       auth: "authenticated",
       pathParams: [param("id", scalar("number", "Logistics-rule identifier."))],
       responses: [response(200, "application/json", ref("MutationOk"))]

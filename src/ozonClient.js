@@ -48,7 +48,7 @@ export async function fetchOzonPostings(shop, options = {}) {
           const normalized = normalizeOzonPosting(item);
           if (normalized.posting_number) postingsByNumber.set(normalized.posting_number, normalized);
         }
-        if (!result.has_next || items.length < limit) break;
+        if (!result.has_next) break;
         if (!items.length) break;
         offset += limit;
       }
@@ -80,27 +80,46 @@ export async function fetchOzonPostingByNumber(shop, postingNumber, options = {}
   return normalized?.posting_number ? normalized : null;
 }
 
-export async function fetchOzonProducts(shop) {
+export async function fetchOzonProducts(shop, options = {}) {
   if (!hasRealOzonCredentials(shop)) {
     return demoOnlineProducts(shop);
   }
 
-  const productRefs = await fetchOzonProductIds(shop);
+  const productRefs = await fetchOzonProductIds(shop, options);
   const productIds = productRefs.map((item) => item.id);
   const visibilityById = new Map(productRefs.map((item) => [String(item.id), item.visibility]));
 
-  const products = [];
+  const chunks = [];
   for (let index = 0; index < productIds.length; index += 1000) {
-    const chunk = productIds.slice(index, index + 1000);
+    chunks.push(productIds.slice(index, index + 1000));
+  }
+  const chunkProducts = await mapOzonConcurrencyResults(chunks, options.detailConcurrency || 1, async (chunk) => {
     const data = await ozonRequest(shop, "/v3/product/info/list", { product_id: chunk });
     const items = data.result?.items || data.items || [];
-    for (const item of items) products.push(normalizeOzonProduct(item, visibilityById.get(String(item.id || item.product_id || ""))));
-  }
+    return items.map((item) => normalizeOzonProduct(item, visibilityById.get(String(item.id || item.product_id || ""))));
+  });
 
-  return products;
+  return chunkProducts.flat();
 }
 
-export async function fetchOzonProductsByIds(shop, productIds = []) {
+export async function fetchOzonProductRefs(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) {
+    return demoOnlineProducts(shop).map((item) => ({
+      id: Number(item.ozon_product_id || 0),
+      ozon_product_id: String(item.ozon_product_id || ""),
+      offer_id: String(item.offer_id || ""),
+      ozon_sku: String(item.ozon_sku || ""),
+      visibility: String(item.visibility || "")
+    })).filter((item) => item.id);
+  }
+  return (await fetchOzonProductIds(shop, options)).map((item) => ({
+    id: Number(item.id || 0),
+    ozon_product_id: String(item.id || ""),
+    visibility: String(item.visibility || "")
+  })).filter((item) => item.id);
+}
+
+export async function fetchOzonProductsByIds(shop, productIds = [], options = {}) {
   const ids = [...new Set((productIds || []).map((item) => Number(item)).filter(Boolean))];
   if (!ids.length) return [];
   if (!hasRealOzonCredentials(shop)) {
@@ -108,13 +127,171 @@ export async function fetchOzonProductsByIds(shop, productIds = []) {
   }
 
   const products = [];
+  const visibilityById = options.visibilityById instanceof Map
+    ? options.visibilityById
+    : new Map(Object.entries(options.visibilityById || {}).map(([id, visibility]) => [String(id), visibility]));
   for (let index = 0; index < ids.length; index += 1000) {
     const chunk = ids.slice(index, index + 1000);
     const data = await ozonRequest(shop, "/v3/product/info/list", { product_id: chunk });
     const items = data.result?.items || data.items || [];
-    for (const item of items) products.push(normalizeOzonProduct(item));
+    for (const item of items) {
+      const id = String(item.id || item.product_id || "");
+      products.push(normalizeOzonProduct(item, visibilityById.get(id) || ""));
+    }
   }
   return products;
+}
+
+export function pendingListingVisibilityFilters() {
+  return ["EMPTY_STOCK", "READY_TO_SUPPLY"];
+}
+
+export function filterPendingListingProductsWithoutFbsStock(products = [], stockRows = [], options = {}) {
+  const requireSku = options.requireSku !== false;
+  const stockKeys = new Set();
+  for (const row of stockRows || []) {
+    if (!hasPositiveFbsStock(row)) continue;
+    for (const key of stockMatchKeys(row)) stockKeys.add(key);
+  }
+  return (products || []).filter((product) => (
+    !isArchivedOzonProduct(product)
+    && (!requireSku || hasUsablePendingListingSku(product))
+    && (
+      !stockMatchKeys(product).some((key) => stockKeys.has(key))
+      && !hasPositiveProductInfoFbsStock(product)
+    )
+  ));
+}
+
+function hasUsablePendingListingSku(product = {}) {
+  const sku = String(product.ozon_sku || product.sku || product.product_sku || product.productSku || "").trim();
+  return /^\d+$/.test(sku) && sku !== "0";
+}
+
+function hasPositiveFbsStock(row = {}) {
+  if (String(row.stock_type || "").toLowerCase() !== "fbs_virtual") return false;
+  return Number(row.available || 0) > 0 || Number(row.present || 0) > 0;
+}
+
+function hasPositiveProductInfoFbsStock(product = {}) {
+  for (const entry of productInfoStockEntries(product)) {
+    if (!hasPositiveProductInfoStock(entry.stock, entry.parent)) continue;
+    if (isProductInfoFbpStock(entry.stock, entry.parent)) continue;
+    if (isProductInfoFbsStock(entry.stock, entry.parent)) return true;
+    if (hasProductInfoStockFlag(entry.stock, entry.parent)) return true;
+  }
+  return false;
+}
+
+function productInfoStockEntries(product = {}) {
+  const entries = [];
+  const pushPayload = (payload, parent = {}) => collectProductInfoStockEntries(payload, parent, entries);
+  pushPayload(parseJsonMaybe(product.stocks_json), product);
+  pushPayload(product.stocks, product);
+  pushPayload(product.stock, product);
+  pushPayload(product.sources, product);
+  pushPayload(product.warehouses, product);
+
+  const raw = parseJsonMaybe(product.raw_json);
+  if (raw && typeof raw === "object") {
+    pushPayload(raw.stocks, raw);
+    pushPayload(raw.stock, raw);
+    pushPayload(raw.sources, raw);
+    pushPayload(raw.warehouses, raw);
+  }
+  return entries;
+}
+
+function collectProductInfoStockEntries(payload, parent, entries) {
+  const value = parseJsonMaybe(payload);
+  if (!value) return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectProductInfoStockEntries(item, parent, entries);
+    return;
+  }
+  if (typeof value !== "object") return;
+
+  const nestedParent = {
+    ...parent,
+    has_stock: value.has_stock ?? parent?.has_stock,
+    visibility: value.visibility || parent?.visibility || ""
+  };
+  const nested = value.stocks ?? value.stock ?? value.sources ?? value.warehouses;
+  const hasNested = nested && nested !== value;
+  if (hasNested) {
+    collectProductInfoStockEntries(nested, nestedParent, entries);
+  }
+  if (hasStockQuantityFields(value) || (!hasNested && hasProductInfoStockFlag(value, parent))) {
+    entries.push({ stock: value, parent });
+  }
+}
+
+function parseJsonMaybe(value) {
+  if (!value) return value;
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  if (!text || !["[", "{"].includes(text[0])) return value;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return value;
+  }
+}
+
+function hasStockQuantityFields(stock = {}) {
+  return [
+    stock.available,
+    stock.present,
+    stock.stock,
+    stock.quantity,
+    stock.available_stock,
+    stock.free_to_sell_amount
+  ].some((value) => value !== undefined && value !== null && value !== "");
+}
+
+function hasPositiveProductInfoStock(stock = {}, parent = {}) {
+  const values = [
+    stock.available,
+    stock.present,
+    stock.stock,
+    stock.quantity,
+    stock.available_stock,
+    stock.free_to_sell_amount
+  ];
+  if (values.some((value) => stockNumber(value) > 0)) return true;
+  if (hasStockQuantityFields(stock)) return false;
+  return hasProductInfoStockFlag(stock, parent);
+}
+
+function hasProductInfoStockFlag(stock = {}, parent = {}) {
+  return stock.has_stock === true || parent?.has_stock === true;
+}
+
+function isProductInfoFbsStock(stock = {}, parent = {}) {
+  return classifyStockType(stock, parent) === "fbs_virtual";
+}
+
+function isProductInfoFbpStock(stock = {}, parent = {}) {
+  return classifyStockType(stock, parent) === "fbp_real";
+}
+
+function isArchivedOzonProduct(item = {}) {
+  if (Number(item.archived || 0)) return true;
+  const statusText = `${item.status || ""} ${item.visibility || ""}`.toLowerCase();
+  return statusText.includes("archive");
+}
+
+function stockMatchKeys(row = {}) {
+  return [
+    ["product", row.ozon_product_id || row.product_id || row.id],
+    ["sku", row.ozon_sku || row.sku || row.product_sku || row.productSku],
+    ["offer", row.offer_id]
+  ]
+    .map(([prefix, value]) => {
+      const text = String(value || "").trim();
+      return text ? `${prefix}:${text}` : "";
+    })
+    .filter(Boolean);
 }
 
 export async function fetchOzonProductStocks(shop, options = {}) {
@@ -122,28 +299,50 @@ export async function fetchOzonProductStocks(shop, options = {}) {
     return demoStockRows(shop);
   }
 
-  const filter = { visibility: "ALL" };
-  const offerIds = (options.offerIds || []).map(String).filter(Boolean);
-  const productIds = (options.productIds || []).map(Number).filter(Boolean);
-  if (offerIds.length) filter.offer_id = offerIds;
-  if (productIds.length) filter.product_id = productIds;
-
+  const offerIds = [...new Set((options.offerIds || []).map(String).filter(Boolean))];
+  const productIds = [...new Set((options.productIds || []).map(Number).filter(Boolean))];
+  const filterChunks = ozonStockFilterChunks({ offerIds, productIds });
   const rows = [];
-  let cursor = "";
-  do {
-    throwIfAborted(options.signal);
-    const data = await ozonRequest(shop, "/v4/product/info/stocks", {
-      cursor,
-      filter,
-      limit: Math.min(Math.max(Number(options.limit || 1000), 1), 1000)
-    }, { signal: options.signal });
-    const result = data.result || data;
-    const items = result.items || result.products || [];
-    for (const item of items) rows.push(...normalizeOzonStockItem(item));
-    cursor = result.cursor || result.last_id || "";
-  } while (cursor);
+  for (const filter of filterChunks) {
+    let cursor = "";
+    do {
+      throwIfAborted(options.signal);
+      const data = await ozonRequest(shop, "/v4/product/info/stocks", {
+        cursor,
+        filter,
+        limit: Math.min(Math.max(Number(options.limit || 1000), 1), 1000)
+      }, { signal: options.signal });
+      const result = data.result || data;
+      const items = result.items || result.products || [];
+      for (const item of items) rows.push(...normalizeOzonStockItem(item));
+      cursor = result.cursor || result.last_id || "";
+    } while (cursor);
+  }
 
   return rows;
+}
+
+function ozonStockFilterChunks({ offerIds = [], productIds = [] } = {}) {
+  const offerChunks = offerIds.length ? chunkOzonFilterValues(offerIds) : [[]];
+  const productChunks = productIds.length ? chunkOzonFilterValues(productIds) : [[]];
+  const filters = [];
+  for (const offerChunk of offerChunks) {
+    for (const productChunk of productChunks) {
+      const filter = { visibility: "ALL" };
+      if (offerChunk.length) filter.offer_id = offerChunk;
+      if (productChunk.length) filter.product_id = productChunk;
+      filters.push(filter);
+    }
+  }
+  return filters.length ? filters : [{ visibility: "ALL" }];
+}
+
+function chunkOzonFilterValues(values = [], size = 1000) {
+  const chunks = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
 }
 
 export async function fetchOzonStockTurnover(shop, options = {}) {
@@ -172,37 +371,10 @@ export async function fetchOzonStockTurnover(shop, options = {}) {
   return rows;
 }
 
-export async function fetchOzonManagedStocks(shop, options = {}) {
-  if (!hasRealOzonCredentials(shop)) return [];
-  const skus = [...new Set((options.skus || []).map((item) => Number(item)).filter(Boolean))];
-  const rows = [];
-  for (let index = 0; index < Math.max(skus.length, 1); index += 1000) {
-    const chunk = skus.length ? skus.slice(index, index + 1000) : [];
-    let offset = 0;
-    while (true) {
-      throwIfAborted(options.signal);
-      const payload = {
-        filter: {},
-        limit: Math.min(Math.max(Number(options.limit || 1000), 1), 1000),
-        offset
-      };
-      if (chunk.length) payload.filter.sku = chunk;
-      const data = await ozonRequest(shop, "/v1/analytics/manage/stocks", payload, { signal: options.signal });
-      const result = data.result || data;
-      const items = result.items || result.products || result.rows || [];
-      rows.push(...items.map(normalizeOzonManagedStockItem).filter((item) => item.ozon_sku));
-      if (chunk.length || items.length < payload.limit) break;
-      offset += payload.limit;
-    }
-    if (!skus.length) break;
-  }
-  return rows;
-}
-
 export async function fetchOzonWarehouses(shop, options = {}) {
   if (!hasRealOzonCredentials(shop)) return demoWarehouses(shop);
   const errors = [];
-  for (const path of ["/v1/warehouse/list", "/v2/warehouse/list"]) {
+  for (const path of ["/v2/warehouse/list", "/v1/warehouse/list"]) {
     try {
       const data = await ozonRequest(shop, path, {}, options);
       return normalizeOzonWarehouses(data);
@@ -212,6 +384,75 @@ export async function fetchOzonWarehouses(shop, options = {}) {
     }
   }
   throw new Error(`Ozon 仓库列表获取失败：${errors.join(" | ")}`);
+}
+
+export async function fetchOzonProductPrices(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) return [];
+  const filter = {};
+  const offerIds = [...new Set((options.offerIds || options.offer_id || []).map((item) => String(item || "").trim()).filter(Boolean))];
+  const productIds = [...new Set((options.productIds || options.product_id || []).map(Number).filter(Boolean))];
+  if (offerIds.length) filter.offer_id = offerIds;
+  if (productIds.length) filter.product_id = productIds;
+  if (options.visibility) filter.visibility = String(options.visibility);
+
+  const rows = [];
+  let cursor = String(options.cursor || "");
+  do {
+    throwIfAborted(options.signal);
+    const data = await ozonRequest(shop, "/v5/product/info/prices", {
+      cursor,
+      filter,
+      limit: Math.min(Math.max(Number(options.limit || 1000), 1), 1000)
+    }, { signal: options.signal });
+    const result = data.result || data;
+    const items = result.items || result.products || [];
+    rows.push(...items.map(normalizeOzonProductPrice).filter((item) => item.ozon_product_id || item.offer_id || item.ozon_sku));
+    cursor = result.cursor || "";
+  } while (cursor && !options.once);
+  return rows;
+}
+
+export async function fetchOzonCashFlowStatement(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) return { rows: [], fetched: 0, requests: 0, raw: null };
+  const from = normalizeIsoStart(options.from, 30);
+  const to = normalizeIsoEnd(options.to, new Date());
+  const pageSize = Math.min(Math.max(Number(options.pageSize || options.page_size || 1000), 1), 1000);
+  const rows = [];
+  let page = Math.max(1, Number(options.page || 1));
+  let requests = 0;
+  let lastRaw = null;
+  while (true) {
+    throwIfAborted(options.signal);
+    const data = await ozonRequest(shop, "/v1/finance/cash-flow-statement/list", {
+      date: { from, to },
+      page,
+      page_size: pageSize
+    }, { signal: options.signal });
+    requests += 1;
+    lastRaw = data;
+    const result = data.result || data;
+    const batch = normalizeOzonArrayPayload(result, ["items", "operations", "rows", "details", "cash_flows"]);
+    rows.push(...batch.map(normalizeOzonCashFlowRow));
+    const pageCount = Number(result.page_count || result.pages_count || result.total_pages || 0);
+    if (options.once || !batch.length || (pageCount && page >= pageCount) || batch.length < pageSize) break;
+    page += 1;
+  }
+  return { rows, fetched: rows.length, requests, raw: lastRaw };
+}
+
+export async function fetchOzonProductInfoLimit(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) return null;
+  const errors = [];
+  for (const path of ["/v4/product/info/limit", "/v3/product/info/limit"]) {
+    try {
+      const data = await ozonRequest(shop, path, {}, options);
+      return normalizeOzonProductInfoLimit(data, path);
+    } catch (error) {
+      errors.push(`${path}: ${error?.message || error}`);
+      if (options.signal?.aborted) throwIfAborted(options.signal);
+    }
+  }
+  throw new Error(`Ozon product info limit failed for ${shop.name || shop.id}: ${errors.join(" | ")}`);
 }
 
 export async function fetchOzonFboSupplyOrders(shop, options = {}) {
@@ -369,22 +610,6 @@ function normalizeOzonStockTurnoverItem(item = {}) {
     turnover_current_stock: stockNumber(item.current_stock ?? item.stock ?? item.stock_count),
     stock_days: numberFromOzon(item.idc ?? item.days_on_stock ?? item.stock_days ?? item.turnover_days),
     stock_level: String(item.idc_grade || item.stock_level || item.grade || ""),
-    raw_json: stringify(item)
-  };
-}
-
-function normalizeOzonManagedStockItem(item = {}) {
-  const sku = String(item.sku || item.ozon_sku || "");
-  return {
-    ozon_sku: sku,
-    offer_id: String(item.offer_id || ""),
-    warehouse_name: String(item.warehouse_name || ""),
-    valid_stock_count: stockNumber(item.valid_stock_count ?? item.valid_count ?? item.free_stock_count),
-    expiring_stock_count: stockNumber(item.expiring_stock_count ?? item.expiring_count ?? item.waiting_payment_stock_count),
-    waitingdocs_stock_count: stockNumber(item.waitingdocs_stock_count ?? item.waiting_docs_stock_count),
-    paid_stock_count: stockNumber(item.paid_stock_count ?? item.charged_stock_count ?? item.tariff_stock_count),
-    free_stock_count: stockNumber(item.free_stock_count ?? item.valid_stock_count),
-    paid_storage_start_at: String(item.paid_storage_start_at || item.paid_storage_start_date || item.storage_tariff_start_date || item.tariff_start_date || ""),
     raw_json: stringify(item)
   };
 }
@@ -634,23 +859,26 @@ export async function fetchOzonCategoryAttributeValues(shop, options = {}) {
 
   const values = [];
   let lastValueId = Number(options.lastValueId || options.last_value_id || 0);
-  const limit = Math.min(Math.max(Number(options.limit || 1000), 1), 5000);
-  while (true) {
+  const maxValues = Math.min(Math.max(Number(options.maxValues || options.max_values || options.limit || 1000), 1), 5000);
+  const pageSize = Math.min(maxValues, 500);
+  const visitedLastValueIds = new Set();
+  while (values.length < maxValues && !visitedLastValueIds.has(lastValueId)) {
+    visitedLastValueIds.add(lastValueId);
     const data = await ozonRequest(shop, "/v1/description-category/attribute/values", {
       attribute_id: attributeId,
       description_category_id: descriptionCategoryId,
       type_id: typeId,
-      limit,
+      limit: pageSize,
       last_value_id: lastValueId,
       language: options.language || "ZH_HANS"
     }, options);
     const batch = normalizeOzonAttributeValuesResponse(data);
     values.push(...batch);
     const nextLastValueId = Number(data?.result?.last_value_id || data?.last_value_id || 0);
-    if (!nextLastValueId || nextLastValueId === lastValueId || batch.length < limit) break;
+    if (!nextLastValueId || nextLastValueId === lastValueId || !batch.length) break;
     lastValueId = nextLastValueId;
   }
-  return values;
+  return values.slice(0, maxValues);
 }
 
 export async function searchOzonCategoryAttributeValues(shop, options = {}) {
@@ -704,7 +932,7 @@ export async function fetchOzonPackageLabel(shop, postingNumbers = [], options =
   if (!postings.length) throw new Error("请选择需要打印面单的订单");
   if (postings.length > 20) throw new Error("Ozon 单次最多生成 20 个货件面单，请分批打印");
   if (!hasRealOzonCredentials(shop)) {
-    return demoPdf(`Demo Ozon labels\\n${postings.join("\\n")}`);
+    throw new Error("店铺缺少有效的 Ozon Client ID 或 API Key，无法获取真实面单");
   }
   return ozonBinaryRequest(shop, "/v2/posting/fbs/package-label", { posting_number: postings }, options);
 }
@@ -755,10 +983,20 @@ export async function shipOzonPosting(shop, postingNumber, products = [], option
   if (!hasRealOzonCredentials(shop)) {
     return { result: true, demo: true };
   }
+  const requestedPackages = Array.isArray(options.packages) ? options.packages : [];
+  const packages = requestedPackages.length
+    ? requestedPackages.map((item) => ({
+      products: (item?.products || []).map((product) => ({
+        product_id: Number(product.product_id),
+        quantity: Number(product.quantity)
+      }))
+    }))
+    : [{ products: packageProducts }];
+  const { packages: _packages, ...requestOptions } = options;
   return ozonRequest(shop, "/v4/posting/fbs/ship", {
     posting_number: posting,
-    packages: [{ products: packageProducts }]
-  }, options);
+    packages
+  }, requestOptions);
 }
 
 export async function fetchOzonReviews(shop, options = {}) {
@@ -863,9 +1101,30 @@ export async function fetchOzonChatHistory(shop, chatId, options = {}) {
   }), options);
 }
 
-async function fetchOzonProductIds(shop) {
+export async function startOzonCustomerChat(shop, postingNumber, options = {}) {
+  const posting_number = String(postingNumber || "").trim();
+  if (!posting_number) throw new Error("Missing Ozon posting number");
+  if (!hasRealOzonCredentials(shop)) throw new Error("Ozon shop credentials are unavailable");
+  const data = await ozonRequest(shop, "/v1/chat/start", { posting_number }, options);
+  const result = data?.result || data || {};
+  const chatId = String(result?.chat_id || result?.chatId || "").trim();
+  if (!chatId) throw new Error("Ozon chat start response is missing chat_id");
+  return { chat_id: chatId, raw: data };
+}
+
+export async function sendOzonCustomerChatMessage(shop, chatId, text, options = {}) {
+  const chat_id = String(chatId || "").trim();
+  const messageText = String(text || "").trim();
+  if (!chat_id) throw new Error("Missing Ozon chat id");
+  if (!messageText) throw new Error("Missing Ozon chat message text");
+  if (!hasRealOzonCredentials(shop)) throw new Error("Ozon shop credentials are unavailable");
+  const data = await ozonRequest(shop, "/v1/chat/send/message", { chat_id, text: messageText }, options);
+  return { ok: true, result: data?.result ?? data, raw: data };
+}
+
+async function fetchOzonProductIds(shop, options = {}) {
   const productIds = new Map();
-  const visibilityFilters = [
+  const defaultVisibilityFilters = [
     "ALL",
     "VISIBLE",
     "INVISIBLE",
@@ -889,17 +1148,61 @@ async function fetchOzonProductIds(shop) {
     "QUARANTINE",
     "ARCHIVED"
   ];
+  const visibilityFilters = Array.isArray(options.visibilityFilters) && options.visibilityFilters.length
+    ? options.visibilityFilters
+    : defaultVisibilityFilters;
+  const visibilityConcurrency = Math.min(
+    Math.max(Number(options.visibilityConcurrency || 1), 1),
+    Math.min(8, visibilityFilters.length || 1)
+  );
 
-  for (const visibility of visibilityFilters) {
+  await mapOzonConcurrency(visibilityFilters, visibilityConcurrency, async (visibility) => {
     try {
       const ids = await fetchOzonProductIdsByVisibility(shop, visibility);
-      for (const id of ids) if (!productIds.has(String(id))) productIds.set(String(id), { id, visibility });
+      for (const id of ids) {
+        const key = String(id);
+        const current = productIds.get(key);
+        if (!current || ozonProductVisibilityRank(visibility) > ozonProductVisibilityRank(current.visibility)) {
+          productIds.set(key, { id, visibility });
+        }
+      }
     } catch (error) {
       if (visibility === "ALL") throw error;
     }
-  }
+  });
 
   return [...productIds.values()];
+}
+
+async function mapOzonConcurrency(items = [], limit = 1, worker) {
+  await mapOzonConcurrencyResults(items, limit, worker);
+}
+
+async function mapOzonConcurrencyResults(items = [], limit = 1, worker) {
+  const list = Array.isArray(items) ? items : [];
+  const concurrency = Math.min(Math.max(Number(limit || 1), 1), list.length || 1);
+  const results = new Array(list.length);
+  let cursor = 0;
+  const runners = Array.from({ length: concurrency }, async () => {
+    while (cursor < list.length) {
+      const index = cursor++;
+      results[index] = await worker(list[index], index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
+function ozonProductVisibilityRank(value = "") {
+  const visibility = String(value || "").toUpperCase();
+  if (visibility === "ALL") return 0;
+  if (["VISIBLE", "MODERATED", "IN_SALE"].includes(visibility)) return 10;
+  if (["NOT_MODERATED", "VALIDATION_STATE_PENDING", "VALIDATION_STATE_SUCCESS"].includes(visibility)) return 20;
+  if (["INVISIBLE", "DISABLED", "REMOVED_FROM_SALE"].includes(visibility)) return 30;
+  if (["STATE_FAILED", "VALIDATION_STATE_FAIL", "BANNED", "OVERPRICED", "CRITICALLY_OVERPRICED"].includes(visibility)) return 40;
+  if (["EMPTY_STOCK", "READY_TO_SUPPLY", "TO_SUPPLY"].includes(visibility)) return 60;
+  if (visibility === "ARCHIVED") return 100;
+  return 5;
 }
 
 async function fetchOzonProductIdsByVisibility(shop, visibility) {
@@ -934,7 +1237,7 @@ async function ozonRequest(shop, path, payload, options = {}) {
       if (options.signal?.aborted) throwIfAborted(options.signal);
       lastError = error;
       if (!isRetryableOzonError(error) || attempt >= OZON_REQUEST_RETRIES) break;
-      await sleep(400 * (attempt + 1));
+      await sleep(Math.max(400 * (attempt + 1), Number(error.retryAfterMs || 0)));
     }
   }
   throw lastError;
@@ -978,6 +1281,7 @@ async function ozonRequestOnce(shop, path, payload, options = {}) {
     const error = new Error(`Ozon ${path} failed: ${message}`);
     error.statusCode = response.status;
     error.path = path;
+    error.retryAfterMs = retryAfterMs(response.headers?.get?.("retry-after"));
     throw error;
   }
   return data;
@@ -986,6 +1290,8 @@ async function ozonRequestOnce(shop, path, payload, options = {}) {
 function isRetryableOzonError(error) {
   const message = String(error?.message || "").toLowerCase();
   return (
+    Number(error?.statusCode || 0) === 429 ||
+    Number(error?.statusCode || 0) >= 500 ||
     error?.name === "TypeError" ||
     message.includes("fetch failed") ||
     message.includes("timeout") ||
@@ -1127,6 +1433,15 @@ function resolvedOzonSku(item = {}) {
   );
 }
 
+function retryAfterMs(value) {
+  const text = String(value || "").trim();
+  if (!text) return 0;
+  const seconds = Number(text);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const timestamp = Date.parse(text);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : 0;
+}
+
 function normalizeOzonProduct(item, listVisibility = "") {
   const images = productImages(item);
   const primaryImage = imageUrl(item.primary_image || item.primary_image_url || item.image || item.main_image || item.color_image || images[0] || "");
@@ -1135,7 +1450,7 @@ function normalizeOzonProduct(item, listVisibility = "") {
   const oldPrice = numberFromOzon(item.old_price);
   const sku = resolvedOzonSku(item);
   const archived = Boolean(item.archived || item.is_archived || item.is_autoarchived || listVisibility === "ARCHIVED");
-  const visibility = item.visibility || listVisibility || (item.visibility_details?.has_price === false ? "limited" : (item.visible === false ? "hidden" : "visible"));
+  const visibility = archived ? "ARCHIVED" : (item.visibility || listVisibility || (item.visibility_details?.has_price === false ? "limited" : (item.visible === false ? "hidden" : "visible")));
   const attributes = {
     type_id: item.type_id,
     category_id: item.category_id,
@@ -1292,6 +1607,73 @@ function normalizeFinanceOperation(item) {
     })),
     raw_json: stringify(item)
   };
+}
+
+function normalizeOzonProductPrice(item = {}) {
+  const price = item.price || {};
+  const marketingPrice = item.marketing_price || {};
+  const oldPrice = item.old_price || {};
+  const commissions = item.commissions || item.commission || [];
+  return {
+    ozon_product_id: String(item.product_id || item.id || ""),
+    offer_id: String(item.offer_id || ""),
+    ozon_sku: String(item.sku || item.ozon_sku || ""),
+    price: numberFromOzon(price.price ?? price.value ?? item.price),
+    marketing_price: numberFromOzon(marketingPrice.price ?? marketingPrice.value ?? item.marketing_price),
+    old_price: numberFromOzon(oldPrice.price ?? oldPrice.value ?? item.old_price),
+    min_price: numberFromOzon(item.min_price),
+    currency_code: String(item.currency_code || price.currency_code || price.currency || ""),
+    price_index: String(item.price_index || item.color_index || item.price_index_value || ""),
+    commissions_json: stringify(commissions),
+    raw_json: stringify(item)
+  };
+}
+
+function normalizeOzonCashFlowRow(item = {}) {
+  const posting = item.posting || item.posting_number || {};
+  return {
+    operation_id: String(item.operation_id || item.id || item.operation_number || item.cash_flow_id || ""),
+    operation_type: String(item.operation_type || item.type || item.operation_kind || ""),
+    operation_type_name: String(item.operation_type_name || item.name || item.title || ""),
+    operation_date: item.operation_date || item.date || item.created_at || item.period || "",
+    posting_number: String(posting.posting_number || posting || item.posting || ""),
+    order_number: String(posting.order_number || item.order_number || ""),
+    amount: numberFromOzon(item.amount || item.total || item.price || 0),
+    currency_code: String(item.currency_code || item.currency || ""),
+    raw_json: stringify(item)
+  };
+}
+
+function normalizeOzonProductInfoLimit(data = {}, endpoint = "") {
+  const result = data.result || data || {};
+  return {
+    endpoint,
+    daily_create: normalizeOzonLimitBucket(result.daily_create || result.dailyCreate || result.create || {}),
+    daily_update: normalizeOzonLimitBucket(result.daily_update || result.dailyUpdate || result.update || {}),
+    total: normalizeOzonLimitBucket(result.total || result.products || {}),
+    operation_limits: normalizeArray(result.operation_limits || result.operationLimits).map((item) => ({
+      operation: String(item.operation || item.type || item.name || ""),
+      usage: nullableLimitNumber(item.usage ?? item.used ?? item.current),
+      limit: nullableLimitNumber(item.limit ?? item.max),
+      reset_at: String(item.reset_at || item.resetAt || "")
+    })),
+    raw_json: stringify(result)
+  };
+}
+
+function normalizeOzonLimitBucket(bucket = {}) {
+  return {
+    usage: nullableLimitNumber(bucket.usage ?? bucket.used ?? bucket.current),
+    limit: nullableLimitNumber(bucket.limit ?? bucket.max),
+    reset_at: String(bucket.reset_at || bucket.resetAt || ""),
+    raw: bucket
+  };
+}
+
+function nullableLimitNumber(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function productImages(item) {

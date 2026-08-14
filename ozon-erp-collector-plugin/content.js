@@ -23,6 +23,7 @@
     previewFetchedAtBySku: new Map(),
     lookupCacheBySku: new Map(),
     collectLoadingSkus: new Set(),
+    fullDetailBackfillBySku: new Map(),
     manualCollectedSkus: new Set(),
     actionLoadingKeys: new Set(),
     detailUiRow: null,
@@ -51,6 +52,19 @@
   const LIST_SCAN_LIMIT_MANUAL = 120;
   const LIST_AUTO_REFRESH_LIMIT = 12;
   const LIST_MANUAL_CONTINUE_COLLECT_LIMIT = 24;
+  const COLLECTOR_BOX_BACKFILL_TIMEOUT_MS = 90000;
+
+  function withTimeoutReject(promise, ms, message) {
+    let timer = null;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message || `Operation timed out after ${ms}ms`)), Math.max(1, Number(ms || 1)));
+      })
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  }
 
   async function loadSettings() {
     const stored = await chrome.storage.local.get([
@@ -359,16 +373,12 @@
         descriptionCategoryId = item.description_category_id || item.descriptionCategoryId || '';
       }
       if (!hasFilledValue(typeId)) {
-        typeId = item.type_id || item.typeId || '';
+        typeId = item.description_type_dict_value || item.descriptionTypeDictValue || item.type_id || item.typeId || '';
       }
     }
-    if (categoryIds.length > 0) {
-      if (!hasFilledValue(descriptionCategoryId) && categoryIds.length >= 2) {
-        descriptionCategoryId = String(categoryIds[categoryIds.length - 2]);
-      }
-      if (!hasFilledValue(typeId)) {
-        typeId = String(categoryIds[categoryIds.length - 1]);
-      }
+    if (categoryIds.length >= 2) {
+      descriptionCategoryId = String(categoryIds[categoryIds.length - 2]);
+      typeId = String(categoryIds[categoryIds.length - 1]);
     }
     return {
       categoryIds,
@@ -430,6 +440,8 @@
 
   function canReuseCollectedDetail(detail) {
     if (!(detail?.savedCollectionId || detail?.collectionId)) return false;
+    const source = String(detail?.cachedProductLookup?.product?.data_source || detail?.data_source || '').trim();
+    if (source === 'ozon_plugin_fast_add_to_box') return false;
     if (detail?.cachedProductLookup?.needsRefresh === false) return true;
     const categoryMeta = deriveCollectedCategoryMeta(detail);
     const logisticsMeta = deriveCollectedLogisticsMeta(detail);
@@ -510,7 +522,7 @@
       : {
           scene: 'plugin',
           sku: normalizedSku,
-          currecny: product.currency || 'RUB',
+          currecny: 'CNY',
           attributes: productDetail.attributes,
           rows: [row],
           json_content: product.json_content || product.jsonContent || null
@@ -894,14 +906,13 @@
       delete sellerPatch[key];
     }
     const categoryIds = normalizeCategoryIds(sellerPatch.category_ids || sellerPatch.categoryIds);
-    const descriptionCategoryId =
-      sellerPatch.description_category_id ||
-      sellerPatch.descriptionCategoryId ||
-      (categoryIds.length >= 2 ? String(categoryIds[categoryIds.length - 2]) : '');
-    const typeId =
-      sellerPatch.type_id ||
-      sellerPatch.typeId ||
-      (categoryIds.length > 0 ? String(categoryIds[categoryIds.length - 1]) : '');
+    const hasCategoryPair = categoryIds.length >= 2;
+    const descriptionCategoryId = hasCategoryPair
+      ? String(categoryIds[categoryIds.length - 2])
+      : sellerPatch.description_category_id || sellerPatch.descriptionCategoryId || '';
+    const typeId = hasCategoryPair
+      ? String(categoryIds[categoryIds.length - 1])
+      : sellerPatch.description_type_dict_value || sellerPatch.descriptionTypeDictValue || sellerPatch.type_id || sellerPatch.typeId || '';
     return {
       ...sellerPatch,
       category: sellerPatch.category || '',
@@ -1173,7 +1184,7 @@
         productUrl: sourcePayload.productUrl || sourcePayload.productLink || location.href,
         title: sourcePayload.productTitle || sourcePayload.name || '',
         price: sourcePayload.price ?? '',
-        currency: sourcePayload.currency || 'RUB',
+        currency: 'CNY',
         category: sourcePayload.category || '',
         description_category_id: sourcePayload.description_category_id || sourcePayload.descriptionCategoryId || '',
         type_id: sourcePayload.type_id || sourcePayload.typeId || '',
@@ -1207,12 +1218,39 @@
     return json?.data?.id || json?.data?.detail?.id || sourcePayload.collectionId;
   }
 
+  function isCollectorPayloadMediaField(key = '') {
+    return /^(?:images?|image_urls?|imageUrls|source_images?|sourceImages|detail_images?|detailImageUrls|main_images?|mainImage|productImage|primary_image|photo|gallery|videos?|video_urls?|videoUrls|video_cover_urls?|cover_video_urls?)$/i.test(String(key || ''));
+  }
+
+  function normalizeCollectorPayloadMedia(value) {
+    if (typeof value === 'string') {
+      const source = value.trim();
+      return /^(?:https?:\/\/|\/?uploads\/|\/?public\/uploads\/|\/?api\/)/i.test(source) ? source : '';
+    }
+    if (Array.isArray(value)) {
+      return value.map((item) => normalizeCollectorPayloadMedia(item)).filter((item) => Array.isArray(item) ? item.length : Boolean(item));
+    }
+    if (!value || typeof value !== 'object') return '';
+    const direct = value.url || value.src || value.source_url || value.sourceUrl || value.path || '';
+    return normalizeCollectorPayloadMedia(direct);
+  }
+
+  function buildUrlOnlyCollectorPayload(value) {
+    if (Array.isArray(value)) return value.map((item) => buildUrlOnlyCollectorPayload(item));
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+      key,
+      isCollectorPayloadMediaField(key) ? normalizeCollectorPayloadMedia(child) : buildUrlOnlyCollectorPayload(child)
+    ]));
+  }
+
   async function syncCollectedProductToCollectorBox(productPayload, requestContext = null) {
-    const payload = productPayload && typeof productPayload === 'object' ? productPayload : {};
+    const payload = buildUrlOnlyCollectorPayload(productPayload && typeof productPayload === 'object' ? productPayload : {});
     const sku = String(payload.sku || payload.product_id || payload.productId || '').trim();
     if (!sku) throw new Error('采集数据缺少 SKU');
     const response = await localPluginFetch(`${resolveLocalPluginApiBaseUrlFor(requestContext?.erpBaseUrl)}/collected-products/sync`, {
       method: 'POST',
+      timeoutMs: 30000,
       headers: {
         'Content-Type': 'application/json'
       },
@@ -1224,6 +1262,7 @@
           productUrl: payload.productUrl || payload.productLink || location.href,
           productLink: payload.productLink || payload.productUrl || location.href,
           data_source: payload.data_source || 'ozon_plugin_preview_collect',
+          media_storage_mode: 'remote_url_reference',
           process_status: payload.process_status || 'pending',
           collectedAt: payload.collectedAt || new Date().toISOString()
         }]
@@ -1293,6 +1332,41 @@
     result.savedCollectionId = collectionId;
     result.collectionId = collectionId;
     return { collectionId, sourcePayload };
+  }
+
+  async function persistCollectedResultUpdate(result, requestContext = null) {
+    if (!result || typeof result !== 'object') return null;
+    const sourcePayload = buildCollectedProductListPayload(result);
+    const normalizedCollectionId = String(result.savedCollectionId || result.collectionId || sourcePayload.collectionId || '').trim();
+    if (normalizedCollectionId) sourcePayload.collectionId = normalizedCollectionId;
+    const saved = await syncCollectedProductToCollectorBox(sourcePayload, requestContext || await resolveLocalPluginRequestContext());
+    const collectionId = saved.collectionId || sourcePayload.collectionId || sourcePayload.sku;
+    result.savedCollectionId = collectionId;
+    result.collectionId = collectionId;
+    return { collectionId, sourcePayload, saved };
+  }
+
+  function scheduleSellerFallbackBackfill(result, options = {}) {
+    if (!result || typeof result !== 'object') return Promise.resolve(null);
+    const shouldPersist = options.persist !== false;
+    const backgroundTask = enrichDetailWithSellerFallback(result)
+      .then(async (enriched) => {
+        if (!shouldPersist) return enriched;
+        try {
+          await persistCollectedResultUpdate(enriched);
+        } catch (error) {
+          const stages = Array.isArray(enriched?.stages) ? enriched.stages : [];
+          stages.push({ name: 'seller_fallback_persist', status: 'warning', detail: error?.message || String(error), at: new Date().toISOString() });
+          enriched.stages = stages;
+        }
+        return enriched;
+      })
+      .catch((error) => {
+        console.warn('[爆单ERP] seller fallback backfill failed', error);
+        return null;
+      });
+    result.sellerFallbackBackfillTask = backgroundTask;
+    return backgroundTask;
   }
 
   function ensureRoot() {
@@ -1460,8 +1534,8 @@
       sell_price: price,
       cardPrice: price,
       originalPrice: product.originalPrice ?? '',
-      priceCurrency: product.priceCurrency || product.currency || '',
-      currency: product.priceCurrency || product.currency || '',
+      priceCurrency: 'CNY',
+      currency: 'CNY',
       ozonEntrypointPriceLoaded: true,
       productImage: product.coverImage || images[0] || '',
       mainImage: product.coverImage || images[0] || '',
@@ -1499,7 +1573,7 @@
             sell_price: liveDetail.productDetail.sell_price ?? cachedDetail.productDetail.sell_price,
             cardPrice: liveDetail.productDetail.cardPrice ?? cachedDetail.productDetail.cardPrice,
             originalPrice: liveDetail.productDetail.originalPrice ?? cachedDetail.productDetail.originalPrice,
-            currency: liveDetail.productDetail.currency || cachedDetail.productDetail.currency
+            currency: 'CNY'
           };
         }
         window.__ozonErpLastDetailCollect = cachedDetail;
@@ -1537,8 +1611,8 @@
       sell_price: productDetail.cardPrice ?? productDetail.price ?? cacheProduct.sell_price ?? cacheProduct.price ?? '',
       cardPrice: productDetail.cardPrice ?? productDetail.price ?? cacheProduct.cardPrice ?? cacheProduct.price ?? '',
       originalPrice: productDetail.originalPrice ?? cacheProduct.originalPrice ?? '',
-      priceCurrency: productDetail.priceCurrency || productDetail.currency || cacheProduct.priceCurrency || cacheProduct.currency || '',
-      currency: productDetail.priceCurrency || productDetail.currency || cacheProduct.priceCurrency || cacheProduct.currency || '',
+      priceCurrency: 'CNY',
+      currency: 'CNY',
       productImage: cacheProduct.productImage || cacheProduct.mainImage || productDetail.coverImage || (Array.isArray(productDetail.images) ? productDetail.images[0] : ''),
       mainImage: cacheProduct.mainImage || cacheProduct.productImage || productDetail.coverImage || (Array.isArray(productDetail.images) ? productDetail.images[0] : ''),
       images: Array.isArray(cacheProduct.images) && cacheProduct.images.length > 0
@@ -1547,6 +1621,152 @@
       productLink: location.href,
       productUrl: location.href
     };
+  }
+
+  function compactString(value) {
+    return String(value || '').trim();
+  }
+
+  function firstNonEmpty(...values) {
+    for (const value of values) {
+      const text = compactString(value);
+      if (text) return text;
+    }
+    return '';
+  }
+
+  function firstArrayItem(value) {
+    return Array.isArray(value) ? value.find((item) => compactString(item)) || '' : '';
+  }
+
+  function currentPageCategoryText() {
+    const selectors = [
+      '[data-widget*="bread"] a',
+      '[data-widget*="Bread"] a',
+      '[data-widget*="breadcrumb"] a',
+      '[data-widget*="Breadcrumb"] a',
+      'nav[aria-label*="breadcrumb"] a',
+      'nav[aria-label*="Breadcrumb"] a',
+      'a[href*="/category/"]'
+    ];
+    const names = [];
+    for (const selector of selectors) {
+      document.querySelectorAll(selector).forEach((node) => {
+        const text = compactString(node.textContent);
+        if (text && !names.includes(text)) names.push(text);
+      });
+      if (names.length >= 2) break;
+    }
+    return names.join('/');
+  }
+
+  function buildFastCollectorBoxPayload(sku, product = {}) {
+    const normalizedSku = compactString(sku || product.sku || product.product_id || product.productId);
+    const intelligence = product.ozonProductIntelligence || {};
+    const basic = intelligence.basic || {};
+    const price = intelligence.price || {};
+    const logistics = intelligence.logistics || {};
+    const category = basic.category || {};
+    const images = [
+      product.productImage,
+      product.mainImage,
+      product.coverImage,
+      firstArrayItem(product.images),
+      firstArrayItem(basic.images)
+    ].map((item) => compactString(item)).filter(Boolean);
+    const title = firstNonEmpty(
+      product.productTitle,
+      product.title,
+      product.name,
+      basic.title,
+      document.querySelector('h1')?.textContent
+    );
+    const pageCategory = currentPageCategoryText();
+    const categoryName = firstNonEmpty(product.category, product.categoryName, category.name, pageCategory);
+    const currentPrice = product.cardPrice ?? product.price ?? product.productPrice ?? price.ozonCardRub ?? price.currentRub ?? '';
+    const mainImage = firstNonEmpty(product.productImage, product.mainImage, product.coverImage, images[0]);
+    return {
+      sku: normalizedSku,
+      product_id: compactString(product.product_id || product.productId || normalizedSku),
+      productTitle: title,
+      title,
+      name: firstNonEmpty(product.name, title),
+      category: categoryName,
+      categoryName,
+      category_path: firstNonEmpty(product.category_path, product.categoryPath, pageCategory, categoryName),
+      category_id: firstNonEmpty(product.category_id, product.categoryId, category.id),
+      brand: firstNonEmpty(product.brand, basic.brand),
+      price: currentPrice,
+      productPrice: product.productPrice ?? currentPrice,
+      sell_price: product.sell_price ?? currentPrice,
+      cardPrice: product.cardPrice ?? price.ozonCardRub ?? currentPrice,
+      originalPrice: product.originalPrice ?? price.originalRub ?? '',
+      priceCurrency: 'CNY',
+      currency: 'CNY',
+      productImage: mainImage,
+      mainImage,
+      images: mainImage ? [mainImage] : [],
+      productLink: firstNonEmpty(product.productLink, product.productUrl, location.href),
+      productUrl: firstNonEmpty(product.productUrl, product.productLink, location.href),
+      soldCount: product.soldCount ?? product.orders ?? '',
+      qtyViewPdp: product.qtyViewPdp ?? product.views ?? '',
+      custom_click_rate: product.custom_click_rate ?? product.clickRate ?? '',
+      convViewToOrder: product.convViewToOrder ?? product.conversionRate ?? '',
+      stock: product.stock ?? product.availableStock ?? product.totalStock ?? '',
+      commission_rate: product.commission_rate ?? product.commissionRate ?? '',
+      salesSchema: firstNonEmpty(product.salesSchema, product.sales_schema, logistics.salesSchema),
+      weight_g: product.weight_g ?? logistics.weightG ?? '',
+      depth: product.depth ?? logistics.lengthMm ?? '',
+      width: product.width ?? logistics.widthMm ?? '',
+      height: product.height ?? logistics.heightMm ?? '',
+      data_source: 'ozon_plugin_fast_add_to_box',
+      process_status: 'pending',
+      collectedAt: new Date().toISOString()
+    };
+  }
+
+  function refreshCollectorBoxCacheAfterSync(sku, payload, reason = 'fresh') {
+    const normalizedSku = compactString(sku || payload?.sku);
+    if (!normalizedSku) return null;
+    const cacheData = {
+      found: true,
+      needsRefresh: false,
+      reason,
+      sku: normalizedSku,
+      collectDate: new Date().toISOString().slice(0, 10),
+      product: payload
+    };
+    state.lookupCacheBySku.set(normalizedSku, { success: true, data: cacheData });
+    return cacheData;
+  }
+
+  function scheduleFullCollectorBoxBackfill(sku, requestContext = null) {
+    const normalizedSku = compactString(sku);
+    if (!normalizedSku) return null;
+    const existing = state.fullDetailBackfillBySku.get(normalizedSku);
+    if (existing) return existing;
+    const task = withTimeoutReject(
+      collectFullDetailPayloadForCollectorBox(normalizedSku),
+      COLLECTOR_BOX_BACKFILL_TIMEOUT_MS,
+      `Full detail collector-box backfill timed out for ${normalizedSku}`
+    )
+      .then(async ({ result, payload }) => {
+        const saved = await syncCollectedProductToCollectorBox(payload, requestContext);
+        const cacheData = refreshCollectorBoxCacheAfterSync(payload.sku || normalizedSku, payload, 'full_detail_backfill');
+        result.savedCollectionId = saved.collectionId || payload.collectionId || payload.sku || normalizedSku;
+        result.collectionId = result.savedCollectionId;
+        if (pageSku() === normalizedSku && cacheData) {
+          renderDetailProductPanel(buildDetailDisplayRow(payload.sku || normalizedSku, '已采集，详情已补齐', null, cacheData));
+        }
+      })
+      .catch((error) => {
+        console.warn('Background full detail collector-box backfill failed:', error?.message || error);
+      })
+      .finally(() => {
+        state.fullDetailBackfillBySku.delete(normalizedSku);
+      });
+    state.fullDetailBackfillBySku.set(normalizedSku, task);
+    return task;
   }
 
   function buildEditorSourcePayload(result) {
@@ -1580,10 +1800,16 @@
       categoryMeta.description_category_id ||
       '';
     const typeId =
+      result?.description_type_dict_value ||
+      result?.descriptionTypeDictValue ||
       result?.type_id ||
       result?.typeId ||
+      detail.description_type_dict_value ||
+      detail.descriptionTypeDictValue ||
       detail.type_id ||
       detail.typeId ||
+      result?.normalized?.description_type_dict_value ||
+      result?.normalized?.descriptionTypeDictValue ||
       result?.normalized?.type_id ||
       result?.normalized?.typeId ||
       categoryMeta.type_id ||
@@ -1652,7 +1878,7 @@
       productTitle: detail.title || result?.normalized?.title || '',
       name: detail.title || result?.normalized?.title || '',
       description: detail.description || '',
-      currency: detail.priceCurrency || detail.currency || result?.followEditPayload?.currecny || 'RUB',
+      currency: 'CNY',
       brand: pickValue(['brand'], '无品牌'),
       brandId: pickValue(['brandId', 'brand_id']),
       category: result?.category || detail.category || result?.normalized?.category || '',
@@ -1676,7 +1902,7 @@
       productPrice: detail.cardPrice ?? detail.price ?? '',
       cardPrice: detail.cardPrice ?? '',
       originalPrice: detail.originalPrice ?? '',
-      priceCurrency: detail.priceCurrency || detail.currency || '',
+      priceCurrency: 'CNY',
       productLink: result?.normalized?.productUrl || location.href,
       productUrl: result?.normalized?.productUrl || location.href,
       sku: result?.sku || detail.sku || pageSku() || '',
@@ -1806,6 +2032,7 @@
       'commissions',
       'description_category_id',
       'new_description_category_id',
+      'type_id',
       'variantName',
       'origin_variant_id',
       'bundle_id',
@@ -1942,15 +2169,15 @@
 
   async function collectListPayloadFromDetail() {
     const result = await collector.runDetailAutoFeature({ concurrency: 4 });
-    await enrichDetailWithSellerFallback(result);
     window.__ozonErpLastDetailCollect = result;
+    scheduleSellerFallbackBackfill(result, { persist: false });
     return buildCollectedProductListPayload(result);
   }
 
   async function collectFullDetailPayloadForCollectorBox(expectedSku = '') {
     const result = await collector.runDetailAutoFeature({ concurrency: 4 });
-    await enrichDetailWithSellerFallback(result);
     window.__ozonErpLastDetailCollect = result;
+    scheduleSellerFallbackBackfill(result, { persist: false });
     const payload = buildCollectedProductListPayload(result);
     const normalizedExpectedSku = String(expectedSku || '').trim();
     if (normalizedExpectedSku && String(payload.sku || '').trim() && String(payload.sku || '').trim() !== normalizedExpectedSku) {
@@ -3824,52 +4051,16 @@
     const cached = sku ? state.lookupCacheBySku.get(sku)?.data : null;
     const product = {
       ...(cached?.product && typeof cached.product === 'object' ? cached.product : {}),
+      ...(state.detailUiRow?.sku === sku && typeof state.detailUiRow === 'object' ? state.detailUiRow : {}),
       ...(row && typeof row === 'object' ? row : {})
     };
     const requestContext = await resolveLocalPluginRequestContext();
-    try {
-      const { result, payload } = await collectFullDetailPayloadForCollectorBox(sku);
-      const saved = await syncCollectedProductToCollectorBox(payload, requestContext);
-      const cacheData = {
-        found: true,
-        needsRefresh: false,
-        reason: 'fresh',
-        sku: payload.sku || sku,
-        collectDate: new Date().toISOString().slice(0, 10),
-        product: payload
-      };
-      state.lookupCacheBySku.set(payload.sku || sku, { success: true, data: cacheData });
-      result.savedCollectionId = saved.collectionId || payload.collectionId || payload.sku || sku;
-      result.collectionId = result.savedCollectionId;
-      renderDetailProductPanel(buildDetailDisplayRow(payload.sku || sku, '已采集', null, cacheData));
-      if (options.openCollectorBox !== false) {
-        await openCollectorBox(payload.sku || sku);
-      }
-      return saved;
-    } catch (error) {
-      console.warn('Full detail collector-box sync failed, falling back to preview payload:', error?.message || error);
-    }
     if (sku && product && Object.keys(product).length > 0) {
-      const payload = {
-        ...product,
-        sku,
-        product_id: String(product.product_id || product.productId || sku).trim(),
-        productUrl: product.productUrl || product.productLink || location.href,
-        productLink: product.productLink || product.productUrl || location.href,
-        data_source: 'ozon_plugin_preview_add_to_box',
-        collectedAt: new Date().toISOString()
-      };
+      const payload = buildFastCollectorBoxPayload(sku, product);
       const saved = await syncCollectedProductToCollectorBox(payload, requestContext);
-      const cacheData = {
-        found: true,
-        needsRefresh: false,
-        reason: 'fresh',
-        sku,
-        collectDate: new Date().toISOString().slice(0, 10),
-        product: payload
-      };
-      state.lookupCacheBySku.set(sku, { success: true, data: cacheData });
-      renderDetailProductPanel(buildDetailDisplayRow(sku, '已采集', null, cacheData));
+      const cacheData = refreshCollectorBoxCacheAfterSync(sku, payload, 'fast_collect');
+      renderDetailProductPanel(buildDetailDisplayRow(sku, '已采集，正在后台补齐详情', null, cacheData));
+      scheduleFullCollectorBoxBackfill(sku, requestContext);
       if (options.openCollectorBox !== false) {
         await openCollectorBox(sku);
       }
@@ -3950,6 +4141,20 @@
     const lookup = row.erpLookup || {};
     const statusText = lookup.statusText || '查询中';
     const statusClass = lookup.status || 'pending';
+    const collectionRoute = lookup.collectionRoute && typeof lookup.collectionRoute === 'object' ? lookup.collectionRoute : null;
+    const routeDuration = Number(collectionRoute?.durationMs || 0) > 0
+      ? `${(Number(collectionRoute.durationMs) / 1000).toFixed(1)}秒`
+      : '';
+    const routeIsPool = collectionRoute?.mode === 'pool';
+    const routeText = routeIsPool
+      ? [`号池 ${collectionRoute.workerCount || 1}`, collectionRoute.shopName || collectionRoute.companyId, routeDuration].filter(Boolean).join(' · ')
+      : collectionRoute?.mode === 'browser_fallback'
+        ? [`浏览器回退`, collectionRoute.workerCount ? `号池 ${collectionRoute.workerCount}` : '', collectionRoute.status ? `HTTP ${collectionRoute.status}` : '', routeDuration].filter(Boolean).join(' · ')
+        : '';
+    const routeTitle = collectionRoute?.warning || (routeIsPool ? `本次由 ${collectionRoute.shopName || collectionRoute.companyId || '号池店铺'} 完成采集` : '');
+    const routeHtml = routeText
+      ? `<div class="ozon-erp-collection-route ${routeIsPool ? 'is-pool' : 'is-fallback'}" title="${escapeHtml(routeTitle)}">${escapeHtml(routeText)}</div>`
+      : '';
     const metrics = buildCardMetricRows(row);
     const isDetail = options.detail === true;
     const bodyHtml = renderDetailScreeningPanel(row, metrics);
@@ -3983,6 +4188,7 @@
         <span class="collect-panel__status">${escapeHtml(statusText)}</span>
         ${detailToolsHtml}
       </div>
+      ${routeHtml}
       ${detailCollapsed ? '' : `<div class="ozon-erp-card-groups collect-panel__body">${bodyHtml}</div>`}
       ${detailCollapsed ? '' : actionsHtml}
       ${detailCollapsed ? '' : statusBarHtml}
@@ -4068,8 +4274,8 @@
       sell_price: detailProduct.cardPrice ?? detailProduct.price ?? lookupProduct.sell_price ?? lookupProduct.price ?? '',
       cardPrice: detailProduct.cardPrice ?? detailProduct.price ?? lookupProduct.cardPrice ?? lookupProduct.price ?? '',
       originalPrice: detailProduct.originalPrice ?? lookupProduct.originalPrice ?? '',
-      priceCurrency: detailProduct.priceCurrency || detailProduct.currency || lookupProduct.priceCurrency || lookupProduct.currency || '',
-      currency: detailProduct.priceCurrency || detailProduct.currency || lookupProduct.priceCurrency || lookupProduct.currency || '',
+      priceCurrency: 'CNY',
+      currency: 'CNY',
       productImage: lookupProduct.productImage || lookupProduct.mainImage || detailProduct.coverImage || (Array.isArray(detailProduct.images) ? detailProduct.images[0] : ''),
       mainImage: lookupProduct.mainImage || lookupProduct.productImage || detailProduct.coverImage || (Array.isArray(detailProduct.images) ? detailProduct.images[0] : ''),
       images: Array.isArray(lookupProduct.images) && lookupProduct.images.length > 0
@@ -4294,8 +4500,8 @@
     item.sell_price = price;
     item.cardPrice = price;
     item.originalPrice = detail.originalPrice ?? item.originalPrice ?? '';
-    item.priceCurrency = detail.priceCurrency || detail.currency || item.priceCurrency || item.currency || '';
-    item.currency = detail.priceCurrency || detail.currency || item.currency || item.priceCurrency || '';
+    item.priceCurrency = 'CNY';
+    item.currency = 'CNY';
     if (!item.productTitle && !item.name && detail.title) {
       item.productTitle = detail.title;
       item.name = detail.title;
@@ -4312,16 +4518,19 @@
   async function enrichBaseProductsFromOzonEntrypoint(items) {
     const list = Array.isArray(items) ? items : [];
     if (typeof collector.fetchProductDetail !== 'function') return list;
-    for (const item of list) {
-      if (!item?.sku) continue;
-      if (item.ozonEntrypointPriceLoaded) continue;
-      try {
-        const detail = await collector.fetchProductDetail(item.sku, { includeVariants: false });
-        mergeOzonEntrypointBaseProduct(item, detail);
-      } catch (error) {
-        console.warn('[爆单ERP] Ozon entrypoint 基础数据补采失败', item.sku, error?.message || error);
+    let cursor = 0;
+    await Promise.all(Array.from({ length: Math.min(6, list.length || 1) }, async () => {
+      while (cursor < list.length) {
+        const item = list[cursor++];
+        if (!item?.sku || item.ozonEntrypointPriceLoaded) continue;
+        try {
+          const detail = await collector.fetchProductDetail(item.sku, { includeVariants: false });
+          mergeOzonEntrypointBaseProduct(item, detail);
+        } catch (error) {
+          console.warn('[爆单ERP] Ozon entrypoint 基础数据补采失败', item.sku, error?.message || error);
+        }
       }
-    }
+    }));
     return list;
   }
 
@@ -4340,8 +4549,8 @@
         sell_price: item.sell_price ?? item.cardPrice ?? item.price ?? item.productPrice ?? '',
         cardPrice: item.cardPrice ?? item.price ?? item.productPrice ?? '',
         originalPrice: item.originalPrice ?? '',
-        priceCurrency: item.priceCurrency || item.currency || '',
-        currency: item.priceCurrency || item.currency || '',
+        priceCurrency: 'CNY',
+        currency: 'CNY',
         ozonEntrypointPriceLoaded: item.ozonEntrypointPriceLoaded === true,
         productImage: item.productImage || item.mainImage || item.image || (Array.isArray(item.images) ? item.images[0] : ''),
         mainImage: item.mainImage || item.productImage || item.image || (Array.isArray(item.images) ? item.images[0] : ''),
@@ -4447,7 +4656,8 @@
         statusText: row.erpLookup?.status === 'stale' ? '已补采' : '已采集',
         collectDate,
         needsRefresh: false,
-        product
+        product,
+        collectionRoute: result.collectionRoute || null
       };
       mergeCollectedProductIntoRow(row, product);
       state.lookupCacheBySku.set(sku, {
@@ -4467,7 +4677,8 @@
       ...(row.erpLookup || {}),
       status: 'error',
       statusText: result?.error || result?.message || '采集失败',
-      needsRefresh: true
+      needsRefresh: true,
+      collectionRoute: result?.collectionRoute || row.erpLookup?.collectionRoute || null
     };
     return row;
   }
@@ -4745,11 +4956,11 @@
     state.detailSku = sku;
     state.detailStatus = 'running';
     const result = await collector.runDetailAutoFeature({ concurrency: 4 });
-    await enrichDetailWithSellerFallback(result);
     window.__ozonErpLastDetailCollect = result;
     const saved = await ensureCollectedSaved(result);
     result.savedCollectionId = saved.collectionId;
     result.collectionId = saved.collectionId;
+    scheduleSellerFallbackBackfill(result, { persist: true });
     state.detailStatus = 'success';
     renderDetailPanel('已保存到 ERP 采集箱', result);
     return result;
@@ -4809,12 +5020,13 @@
 
       return await collector.runDetailAutoFeature({ concurrency: 4 })
         .then(async (result) => {
-          await enrichDetailWithSellerFallback(result);
           const variantCount = result?.followEditPayload?.rows?.length || result?.variants?.length || 1;
           window.__ozonErpLastDetailCollect = result;
           return ensureCollectedSaved(result).then(({ collectionId }) => {
             state.detailStatus = 'success';
             result.savedCollectionId = collectionId;
+            result.collectionId = collectionId;
+            scheduleSellerFallbackBackfill(result, { persist: true });
             renderDetailPanel(`采集完成：${variantCount} 个变体，已加入采集箱`, result);
             return result;
           });

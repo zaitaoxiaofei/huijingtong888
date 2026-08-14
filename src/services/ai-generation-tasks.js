@@ -1,20 +1,26 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
-import { ensureAssetVariantImagePublishUrl, generateAssetVariantVideoFromImage } from "./asset-variant-engine.js";
+import { ensureAssetVariantImagePublishUrl, generateAssetVariantVideoFromImage, generateListingVariantMediaFromImage } from "./asset-variant-engine.js";
 import { generateDeepSeekListingContent } from "./listing-automation.js";
+import { generateCommerceCopy, generateImages } from "../server/services/ai/aiWorkflowService.js";
+import { broadcastGlobalEvent } from "../server/notifications.js";
+import { aiImageRuntimePoolConfig } from "./ai-provider-settings.js";
+import { adaptiveAiImageConcurrency } from "./ai-image-runtime-limiter.js";
 
-const SUPPORTED_FIELDS = new Set(["mainImage", "detailImages", "title", "tags", "description", "richText", "video"]);
+const SUPPORTED_FIELDS = new Set(["mainImage", "detailImages", "title", "tags", "description", "richText", "video", "commerceCopy"]);
 const MAX_TASK_INPUT_JSON_BYTES = 220_000;
 const MAX_TASK_TEXT_BYTES = 24_000;
 const WORKER_LIMITS = {
-  mainImage: 1,
-  detailImages: 1,
   title: 3,
   tags: 3,
   description: 3,
   richText: 3,
   video: 1
 };
+const IMAGE_FIELDS = new Set(["mainImage", "detailImages"]);
+const AI_IMAGE_TASK_CONCURRENCY_CAP = Math.max(1, Number(process.env.AI_IMAGE_TASK_CONCURRENCY_CAP || 6));
+const AI_PROVIDER_REPOLL_DELAY_SECONDS = Math.max(5, Number(process.env.AI_PROVIDER_REPOLL_DELAY_SECONDS || 30));
+let imageWorkerLimitCache = { value: 3, expiresAt: 0 };
 
 const VEHICLE_BRANDS = [
   "TENET",
@@ -52,6 +58,7 @@ export async function ensureAiGenerationTaskSchema() {
       input_json LONGTEXT NULL,
       output_json LONGTEXT NULL,
       error_json LONGTEXT NULL,
+      provider_job_json LONGTEXT NULL,
       depends_on_task_ids VARCHAR(500) NOT NULL DEFAULT '',
       attempts INT NOT NULL DEFAULT 0,
       max_attempts INT NOT NULL DEFAULT 2,
@@ -65,6 +72,8 @@ export async function ensureAiGenerationTaskSchema() {
       INDEX idx_ai_generation_tasks_status (status, priority, created_at)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
+  const providerJobColumns = await mysqlQuery("SHOW COLUMNS FROM ai_generation_tasks LIKE 'provider_job_json'");
+  if (!providerJobColumns.length) await mysqlExecute("ALTER TABLE ai_generation_tasks ADD COLUMN provider_job_json LONGTEXT NULL AFTER error_json");
   schemaReady = true;
 }
 
@@ -123,6 +132,11 @@ export async function aiGenerationTasks(query = {}, session = null) {
   startAiGenerationTaskWorker();
   const filters = [];
   const params = [];
+  const currentPersonId = Number(session?.personId || session?.id || 0) || 0;
+  if (currentPersonId) {
+    filters.push("created_by_person_id = ?");
+    params.push(currentPersonId);
+  }
   const taskIds = parseCsv(query.taskIds || query.task_ids || query.id || query.ids);
   if (taskIds.length) {
     filters.push(`task_no IN (${taskIds.map(() => "?").join(",")})`);
@@ -143,13 +157,38 @@ export async function aiGenerationTasks(query = {}, session = null) {
     }
   }
   const limit = Math.max(1, Math.min(200, Number(query.limit || 50) || 50));
+  const includePayload = String(query.includePayload || query.include_payload || "").toLowerCase() === "1"
+    || String(query.includePayload || query.include_payload || "").toLowerCase() === "true"
+    || taskIds.length > 0;
   const rows = await mysqlQuery(`
-    SELECT * FROM ai_generation_tasks
+    SELECT id, task_no, source_module, workflow_id, result_id, source_batch_id, source_product_id,
+      field_key, status, priority, depends_on_task_ids, attempts, max_attempts, created_by_person_id,
+      started_at, finished_at, created_at, updated_at${includePayload ? ", input_json, output_json, error_json, provider_job_json" : ""}
+    FROM ai_generation_tasks
     ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
     ORDER BY created_at DESC, id DESC
     LIMIT ${limit}
   `, params);
-  return rows.map(mapTaskRow);
+  return rows.map((row) => mapTaskRow(row, { includePayload }));
+}
+
+export async function cleanupAiGenerationTaskHistory(options = {}) {
+  await ensureAiGenerationTaskSchema();
+  const retentionDays = Math.max(1, Math.min(365, Number(options.retentionDays || options.retention_days || 30) || 30));
+  const batchSize = Math.max(100, Math.min(5000, Number(options.batchSize || options.batch_size || 1000) || 1000));
+  let deleted = 0;
+  while (true) {
+    const result = await mysqlExecute(`
+      DELETE FROM ai_generation_tasks
+      WHERE status IN ('completed', 'failed', 'cancelled')
+        AND COALESCE(finished_at, updated_at, created_at) < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)
+      LIMIT ${batchSize}
+    `, [retentionDays]);
+    const affected = Number(result?.affectedRows || 0);
+    deleted += affected;
+    if (affected < batchSize) break;
+  }
+  return { ok: true, retentionDays, deleted };
 }
 
 export async function retryAiGenerationTask(taskId, session = null) {
@@ -160,20 +199,23 @@ export async function retryAiGenerationTask(taskId, session = null) {
     error.status = 400;
     throw error;
   }
+  const currentPersonId = Number(session?.personId || session?.id || 0) || 0;
+  const ownershipSql = currentPersonId ? " AND created_by_person_id = ?" : "";
+  const ownershipParams = currentPersonId ? [currentPersonId] : [];
   await mysqlExecute(`
     UPDATE ai_generation_tasks
     SET status = 'queued', error_json = NULL, output_json = NULL, started_at = NULL, finished_at = NULL
-    WHERE task_no = ? AND status IN ('failed', 'cancelled')
-  `, [taskNo]);
+    WHERE task_no = ? AND status IN ('failed', 'cancelled', 'provider_pending')${ownershipSql}
+  `, [taskNo, ...ownershipParams]);
   startAiGenerationTaskWorker();
   scheduleWorkerTick(10);
-  const rows = await mysqlQuery("SELECT * FROM ai_generation_tasks WHERE task_no = ? LIMIT 1", [taskNo]);
+  const rows = await mysqlQuery(`SELECT * FROM ai_generation_tasks WHERE task_no = ?${ownershipSql} LIMIT 1`, [taskNo, ...ownershipParams]);
   return { ok: true, task: mapTaskRow(rows[0]) };
 }
 
 export async function recoverAiGenerationTasksOnStartup() {
   await ensureAiGenerationTaskSchema();
-  await mysqlExecute("UPDATE ai_generation_tasks SET status = 'queued', started_at = NULL WHERE status = 'running'");
+  await mysqlExecute("UPDATE ai_generation_tasks SET status = 'queued', started_at = NULL WHERE status IN ('running', 'provider_pending')");
   startAiGenerationTaskWorker();
   scheduleWorkerTick(100);
   return { ok: true };
@@ -202,7 +244,23 @@ function scheduleWorkerTick(delay = 1000) {
 
 async function processQueuedTasks() {
   await ensureAiGenerationTaskSchema();
+  const imageLimit = adaptiveAiImageConcurrency(await resolveImageWorkerLimit());
+  const activeImages = Array.from(IMAGE_FIELDS).reduce((sum, key) => sum + (activeByField.get(key) || 0), 0);
+  const imageSlots = Math.max(0, imageLimit - activeImages);
+  if (imageSlots) {
+    const imageRows = await mysqlQuery(`
+      SELECT * FROM ai_generation_tasks
+      WHERE status IN ('queued', 'provider_pending')
+        AND field_key IN ('mainImage', 'detailImages')
+        AND (status = 'queued' OR updated_at <= DATE_SUB(UTC_TIMESTAMP(), INTERVAL ${AI_PROVIDER_REPOLL_DELAY_SECONDS} SECOND))
+        AND (depends_on_task_ids = '' OR depends_on_task_ids IS NULL)
+      ORDER BY priority DESC, created_at ASC, id ASC
+      LIMIT ${imageSlots}
+    `);
+    for (const row of imageRows) void claimAndRunTask(row);
+  }
   for (const fieldKey of SUPPORTED_FIELDS) {
+    if (IMAGE_FIELDS.has(fieldKey)) continue;
     const active = activeByField.get(fieldKey) || 0;
     const limit = WORKER_LIMITS[fieldKey] || 1;
     const slots = Math.max(0, limit - active);
@@ -215,14 +273,36 @@ async function processQueuedTasks() {
       ORDER BY priority DESC, created_at ASC, id ASC
       LIMIT ${slots}
     `, [fieldKey]);
-    for (const row of rows) runTaskInBackground(row);
+    for (const row of rows) void claimAndRunTask(row);
   }
 }
 
-function runTaskInBackground(row) {
+async function resolveImageWorkerLimit() {
+  if (imageWorkerLimitCache.expiresAt > Date.now()) return imageWorkerLimitCache.value;
+  try {
+    const channels = await aiImageRuntimePoolConfig();
+    const configured = channels.reduce((sum, channel) => sum + Math.max(1, Number(channel.maxConcurrency || 3)), 0);
+    const poolLimit = Math.max(1, Number(channels[0]?.poolMaxConcurrency || configured || 3));
+    imageWorkerLimitCache = {
+      value: Math.max(1, Math.min(AI_IMAGE_TASK_CONCURRENCY_CAP, configured, poolLimit)),
+      expiresAt: Date.now() + 10_000
+    };
+  } catch {
+    imageWorkerLimitCache = { value: Math.min(3, AI_IMAGE_TASK_CONCURRENCY_CAP), expiresAt: Date.now() + 10_000 };
+  }
+  return imageWorkerLimitCache.value;
+}
+
+async function claimAndRunTask(row) {
+  const claimed = await mysqlExecute(`
+    UPDATE ai_generation_tasks
+    SET status = 'running', attempts = attempts + 1, started_at = COALESCE(started_at, CURRENT_TIMESTAMP), error_json = NULL
+    WHERE id = ? AND status IN ('queued', 'provider_pending')
+  `, [row.id]);
+  if (!claimed.affectedRows) return;
   const fieldKey = row.field_key;
   activeByField.set(fieldKey, (activeByField.get(fieldKey) || 0) + 1);
-  executeTask(row)
+  executeClaimedTask(row)
     .catch((error) => console.warn("[ai-generation-task] task failed", row.task_no, error))
     .finally(() => {
       activeByField.set(fieldKey, Math.max(0, (activeByField.get(fieldKey) || 1) - 1));
@@ -230,50 +310,117 @@ function runTaskInBackground(row) {
     });
 }
 
-async function executeTask(row) {
-  const claimed = await mysqlExecute(`
-    UPDATE ai_generation_tasks
-    SET status = 'running', attempts = attempts + 1, started_at = COALESCE(started_at, CURRENT_TIMESTAMP), error_json = NULL
-    WHERE id = ? AND status = 'queued'
-  `, [row.id]);
-  if (!claimed.affectedRows) return;
+async function executeClaimedTask(row) {
+  const startedAt = Date.now();
+  broadcastTaskStatus(row, "running", { queuedMs: elapsedSince(row.created_at) });
   try {
     const input = parseJson(row.input_json, {});
-    const output = await runTaskHandler(row.field_key, input);
+    let providerJobState = parseJson(row.provider_job_json, null);
+    const output = await runTaskHandler(row.field_key, {
+      ...input,
+      providerJob: providerJobState,
+      onProviderJob: async (providerJob, index = 0) => {
+        const jobs = Array.isArray(providerJobState?.jobs) ? [...providerJobState.jobs] : [];
+        jobs[index] = providerJob;
+        providerJobState = { jobs };
+        return mysqlExecute(
+        "UPDATE ai_generation_tasks SET provider_job_json = ? WHERE id = ?",
+          [JSON.stringify(providerJobState), row.id]
+        );
+      }
+    });
     await mysqlExecute(`
       UPDATE ai_generation_tasks
       SET status = 'done', output_json = ?, error_json = NULL, finished_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `, [JSON.stringify(output || {}), row.id]);
+    broadcastTaskStatus(row, "done", { queuedMs: elapsedSince(row.created_at, startedAt), runMs: Date.now() - startedAt });
   } catch (error) {
+    const providerPending = error?.code === "provider_pending";
+    const failed = !providerPending && Number(row.attempts || 0) + 1 >= Number(row.max_attempts || 0);
     await mysqlExecute(`
       UPDATE ai_generation_tasks
-      SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
+      SET status = CASE WHEN ? = 1 THEN 'provider_pending' WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
           error_json = ?,
-          finished_at = CASE WHEN attempts >= max_attempts THEN CURRENT_TIMESTAMP ELSE NULL END
+          finished_at = CASE WHEN ? = 1 THEN NULL WHEN attempts >= max_attempts THEN CURRENT_TIMESTAMP ELSE NULL END
       WHERE id = ?
-    `, [JSON.stringify(normalizeTaskError(error)), row.id]);
+    `, [providerPending ? 1 : 0, JSON.stringify(normalizeTaskError(error)), providerPending ? 1 : 0, row.id]);
+    broadcastTaskStatus(row, providerPending ? "provider_pending" : (failed ? "failed" : "queued"), { queuedMs: elapsedSince(row.created_at, startedAt), runMs: Date.now() - startedAt });
   }
 }
 
+function broadcastTaskStatus(row, status, timing = {}) {
+  broadcastGlobalEvent("ai-task", {
+    taskId: row.task_no || "",
+    fieldKey: row.field_key || "",
+    status,
+    queuedMs: Number(timing.queuedMs || 0),
+    runMs: Number(timing.runMs || 0),
+    updatedAt: new Date().toISOString()
+  }, { personId: row.created_by_person_id });
+}
+
+function elapsedSince(value, fallback = Date.now()) {
+  const at = new Date(value || "").getTime();
+  return Number.isFinite(at) ? Math.max(0, fallback - at) : 0;
+}
+
 async function runTaskHandler(fieldKey, input) {
+  if (["mainImage", "detailImages"].includes(fieldKey)) {
+    const output = await generateImages(input);
+    return persistGeneratedImageOutput(output, input, fieldKey);
+  }
+  if (fieldKey === "commerceCopy") return generateCommerceCopy(input);
   if (["title", "tags", "description"].includes(fieldKey)) return generateTextFieldOutput(fieldKey, input);
   if (fieldKey === "richText") return generateRichTextOutput(input);
   if (fieldKey === "video") {
     const imageUrl = cleanText(input.imageUrl || input.image_url || input.mainImageUrl || input.main_image_url || input.row?.generatedMainImageUrl);
     if (!imageUrl) throw new Error("视频生成缺少新主图，不能使用母素材参考图");
-    const videoResult = await generateAssetVariantVideoFromImage({
+    const videoPayload = {
       imageUrl,
       title: input.title || input.row?.title || input.row?.originalTitle || input.row?.product?.title || input.row?.product?.name,
       productName: input.productName || input.product_name || input.row?.product?.name,
       categoryName: input.categoryName || input.category_name || input.row?.product?.category,
       sourceId: input.sourceId || input.source_id || input.row?.sourceProductId || input.row?.product?.sourceId || input.row?.id
-    });
+    };
+    if (input.listingVariantMedia) return generateListingVariantMediaFromImage(videoPayload);
+    const videoResult = await generateAssetVariantVideoFromImage(videoPayload);
     return { video: videoResult?.video || videoResult };
   }
   const error = new Error(`字段 ${fieldKey} 的异步生成处理器尚未接入`);
   error.status = 400;
   throw error;
+}
+
+async function persistGeneratedImageOutput(output = {}, input = {}, fieldKey = "mainImage") {
+  const context = {
+    sourceId: input.sourceId || input.source_id || input.row?.sourceProductId || input.row?.id || "",
+    batchId: input.sourceBatchId || input.source_batch_id || input.row?.batchId || input.row?.batch_id || "",
+    shopId: input.shopId ?? input.shop_id ?? input.row?.shopId ?? input.row?.shop_id ?? null,
+    resultId: input.resultId || input.result_id || input.row?.id || "",
+    workflowId: input.workflowId || input.workflow_id || "",
+    sourceModule: "ai_product_material_optimizer",
+    role: fieldKey === "mainImage" ? "generated_main" : "generated_detail"
+  };
+  const persist = async (item, index) => {
+    const sourceUrl = cleanText(item?.publishUrl || item?.publish_url || item?.url || item?.previewUrl || item?.preview_url);
+    if (!sourceUrl) return item;
+    const asset = await ensureAssetVariantImagePublishUrl(sourceUrl, { ...context, sortOrder: index + 1 });
+    const stableUrl = cleanText(asset.publishUrl || asset.previewUrl || asset.url || sourceUrl);
+    return {
+      ...item,
+      url: stableUrl,
+      publishUrl: cleanText(asset.publishUrl || stableUrl),
+      previewUrl: cleanText(asset.previewUrl || stableUrl),
+      assetId: asset.assetId || null,
+      assetStatus: asset.status || ""
+    };
+  };
+  return {
+    ...output,
+    generatedImages: await Promise.all((output.generatedImages || []).map(persist)),
+    croppedImages: await Promise.all((output.croppedImages || []).map(persist))
+  };
 }
 
 async function generateTextFieldOutput(fieldKey, input = {}) {
@@ -434,7 +581,8 @@ function assertVariantTextMatchesTarget(fieldKey, output, context = {}) {
   if (!targetModel || !["title", "tags", "description", "richText"].includes(fieldKey)) return;
   const text = String(output || "");
   const target = normalizeVehicleText(targetModel);
-  if (target && !vehicleTextContainsModelInText(text, target)) {
+  const hasTargetModel = target && vehicleTextContainsModelInText(text, target);
+  if (target && !hasTargetModel) {
     const error = new Error(`生成结果未匹配目标车型 ${targetModel}，请重试`);
     error.status = 422;
     error.code = "target_model_mismatch";
@@ -442,7 +590,8 @@ function assertVariantTextMatchesTarget(fieldKey, output, context = {}) {
   }
   const sourceModel = resolveSourceVehicleModel(context);
   const source = normalizeVehicleText(sourceModel);
-  if (source && source !== target && vehicleTextContainsModelInText(text, source)) {
+  const sourceIsTargetPrefix = source && target && target.includes(source);
+  if (source && source !== target && vehicleTextContainsModelInText(text, source) && !(hasTargetModel && sourceIsTargetPrefix)) {
     const error = new Error(`生成结果混入母素材车型 ${sourceModel}，请重试`);
     error.status = 422;
     error.code = "source_model_contamination";
@@ -450,7 +599,8 @@ function assertVariantTextMatchesTarget(fieldKey, output, context = {}) {
   }
   const otherModels = extractVehicleModels(text)
     .map((model) => normalizeVehicleText(model))
-    .filter((model) => model && model !== target);
+    .filter((model) => model && model !== target)
+    .filter((model) => !(hasTargetModel && target && target.includes(model)));
   if (otherModels.length) {
     const error = new Error("生成结果混入非目标车型，请重试");
     error.status = 422;
@@ -630,15 +780,30 @@ async function generateRichTextOutput(input = {}) {
   if (!description) throw new Error("富文本生成缺少新描述");
   const targetContext = buildTextGenerationContext("description", input);
   assertVariantTextMatchesTarget("description", description, targetContext);
-  const text = [title, description, tags.slice(0, 8).join(", ")].filter(Boolean).join("\n\n");
   const richText = JSON.stringify({
-    content: [{
-      widgetName: "raShowcase",
-      blocks: [
-        ...(mainImage ? [{ img: { src: mainImage, alt: title } }] : []),
-        { text: { size: "size3", align: "left", items: [{ type: "text", content: text || title || description }] } }
-      ]
-    }]
+    content: [
+      {
+        widgetName: "raShowcase",
+        type: "billboard",
+        blocks: [
+          {
+            imgLink: "",
+            img: {
+              src: mainImage,
+              srcMobile: mainImage,
+              alt: title,
+              position: "width_full",
+              positionMobile: "width_full",
+              widthMobile: 1024,
+              heightMobile: 1536
+            },
+            title: { items: [{ type: "text", content: title }], size: "size4", align: "left", color: "color1" },
+            text: { size: "size2", align: "left", color: "color1", items: [{ type: "text", content: description }] }
+          }
+        ]
+      }
+    ],
+    version: 0.3
   }, null, 2);
   return {
     richText,
@@ -659,7 +824,7 @@ function normalizeTextList(value) {
     const parsed = JSON.parse(text);
     if (Array.isArray(parsed)) return normalizeTextList(parsed);
   } catch {}
-  return text.split(/\r?\n|[,，、;；|]/).map(cleanText).filter(Boolean);
+  return text.split(/\s+|[,，、;；|]/).map(cleanText).filter(Boolean);
 }
 
 function normalizeTaskPayloads(body = {}) {
@@ -668,9 +833,21 @@ function normalizeTaskPayloads(body = {}) {
 }
 
 function compactAiGenerationTaskInput(input = {}, fieldKey = "") {
+  if (fieldKey === "commerceCopy") return fitJsonBytes(pruneEmpty(input), MAX_TASK_INPUT_JSON_BYTES);
   const sourceContext = input.sourceContext || input.source_context || {};
   const row = input.row || {};
   let compact = {
+    finalPrompt: limitText(input.finalPrompt || input.prompt || "", 24000),
+    ratio: cleanText(input.ratio || ""),
+    imageCount: Math.max(1, Math.min(8, Number(input.imageCount || input.count || 1) || 1)),
+    autoCrop: input.autoCrop !== false,
+    cropMode: cleanText(input.cropMode || input.crop_mode || "auto"),
+    sourceImageUrl: cleanText(input.sourceImageUrl || input.source_image_url || ""),
+    sourceImageUrls: normalizeTextList(input.sourceImageUrls || input.source_image_urls).slice(0, 8),
+    productImageCount: Math.max(0, Math.min(8, Number(input.productImageCount || input.product_image_count || 0) || 0)),
+    fallbackSourceImageUrl: cleanText(input.fallbackSourceImageUrl || input.fallback_source_image_url || ""),
+    mode: cleanText(input.mode || ""),
+    listingVariantMedia: Boolean(input.listingVariantMedia || input.listing_variant_media),
     productName: limitText(input.productName || input.product_name || ""),
     categoryName: limitText(input.categoryName || input.category_name || ""),
     brand: limitText(input.brand || ""),
@@ -806,6 +983,15 @@ function fitJsonBytes(value, maxBytes) {
   json = JSON.stringify(pruneEmpty(trimmed));
   if (Buffer.byteLength(json, "utf8") <= maxBytes) return pruneEmpty(trimmed);
   return pruneEmpty({
+    finalPrompt: value.finalPrompt,
+    ratio: value.ratio,
+    imageCount: value.imageCount,
+    autoCrop: value.autoCrop,
+    cropMode: value.cropMode,
+    sourceImageUrl: value.sourceImageUrl,
+    fallbackSourceImageUrl: value.fallbackSourceImageUrl,
+    mode: value.mode,
+    listingVariantMedia: value.listingVariantMedia,
     productName: value.productName,
     categoryName: value.categoryName,
     brand: value.brand,
@@ -870,8 +1056,9 @@ function buildTaskNo(fieldKey, task, input) {
   return `aitask-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
 }
 
-function mapTaskRow(row = null) {
+function mapTaskRow(row = null, options = {}) {
   if (!row) return null;
+  const includePayload = options.includePayload !== false;
   return {
     id: Number(row.id || 0),
     taskId: row.task_no || "",
@@ -884,9 +1071,10 @@ function mapTaskRow(row = null) {
     fieldKey: row.field_key || "",
     status: row.status || "",
     priority: Number(row.priority || 0),
-    input: parseJson(row.input_json, null),
-    output: parseJson(row.output_json, null),
-    error: parseJson(row.error_json, null),
+    input: includePayload ? parseJson(row.input_json, null) : null,
+    output: includePayload ? parseJson(row.output_json, null) : null,
+    error: includePayload ? parseJson(row.error_json, null) : null,
+    providerJob: includePayload ? parseJson(row.provider_job_json, null) : null,
     dependsOnTaskIds: parseCsv(row.depends_on_task_ids),
     attempts: Number(row.attempts || 0),
     maxAttempts: Number(row.max_attempts || 0),

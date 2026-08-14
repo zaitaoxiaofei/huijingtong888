@@ -9,14 +9,18 @@ export function createListingAutomationRoutes({ services, readJson }) {
       const body = await readJson(req);
       return services.createListingTemplateFromOnlineProduct(Number(body?.online_product_id || body?.onlineProductId || body?.id || 0), body, req._session);
     },
+    "POST /api/listing/templates/category-diagnostics": async (req) => services.listingCategoryPublishDiagnostics(await readJson(req), req._session),
     "POST /api/listing/templates/validate-publish": async (req) => services.validateListingTemplatePublish(await readJson(req), req._session),
     "POST /api/listing/templates/publish-to-ozon": async (req) => services.publishListingTemplateToOzon(await readJson(req), req._session),
     "POST /api/listing/variant-media/generate": async (req) => services.generateListingVariantMediaFromImage(await readJson(req), req._session),
     "GET /api/listing/template-health-check": (req) => services.listingTemplateHealthCheck(req.query || {}, req._session),
     "GET /api/listing/draft-projects": (req, url) => services.listingDraftProjects(Object.fromEntries(url.searchParams.entries()), req._session),
     "GET /api/listing/publish-records": (req) => services.listingPublishRecords(req.query || {}, req._session),
+    "GET /api/listing/publish-tasks": (req) => services.listingPublishTasks(req.query || {}, req._session),
     "POST /api/listing/publish-records/batch-delete": async (req) => services.deleteListingPublishRecords(await readJson(req), req._session),
     "GET /api/listing/media/assets": (req) => services.listingMediaAssets(req.query || {}, req._session),
+    "GET /api/listing/media/ozon-upload-jobs": (req) => services.listOzonSellerMediaUploadJobs(req.query || {}),
+    "POST /api/listing/media/ozon-upload-jobs": async (req) => services.createOzonSellerMediaUploadJobs(await readJson(req), req._session),
     "GET /api/material-packages/search": (req) => services.searchMaterialPackages(req.query || {}, req._session),
     "POST /api/ai/deepseek/generate": async (req) => services.generateDeepSeekListingContent(await readJson(req), req._session),
     "POST /api/listing/generate-offer-id": async (req) => services.generateListingOfferId(await readJson(req), req._session),
@@ -32,12 +36,17 @@ export function createListingAutomationRoutes({ services, readJson }) {
     "GET /api/listing/copy-jobs": (req) => services.listingCopyJobs(req._session),
     "POST /api/listing/copy-from-sku": async (req) => services.copyListingTemplateFromOzonSku(await readJson(req), req._session),
     "POST /api/listing/media/upload": (req) => services.uploadListingMedia(req),
+    "POST /api/listing/media/repair": async (req) => services.repairListingEditorMedia(await readJson(req), req._session),
     "POST /api/listing/media/watermark": async (req) => services.watermarkListingMedia(await readJson(req), req._session),
     "GET /api/listing/drafts": (req, url) => services.listingDrafts(Object.fromEntries(url.searchParams.entries()), req._session),
+    "POST /api/listing/drafts/batch-update": async (req) => services.updateListingDraftsBatch(await readJson(req), req._session),
     "POST /api/listing/drafts/batch-publish": async (req) => services.publishListingDraftsToOzon(await readJson(req), req._session),
     "POST /api/listing/drafts/repair-media-contamination": async (req) => services.repairListingDraftMediaContamination(await readJson(req), req._session),
     "GET /api/listing/ai-variant-assets": (req, url) => services.listingAiVariantAssets(Object.fromEntries(url.searchParams.entries()), req._session),
     "POST /api/listing/ai-variant-assets": async (req) => services.saveListingAiVariantAsset(await readJson(req), req._session),
+    "POST /api/listing/ai-variant-assets/batch-delete": async (req) => services.deleteListingAiVariantAssets(await readJson(req), req._session),
+    "GET /api/listing/variant-workbench-drafts": (req, url) => services.listingVariantWorkbenchDrafts(Object.fromEntries(url.searchParams.entries()), req._session),
+    "POST /api/listing/variant-workbench-drafts": async (req) => services.saveListingVariantWorkbenchDraft(await readJson(req), req._session),
     "POST /api/listing/drafts/ai-variant-lightweight": async (req) => services.createAiVariantListingDraftLightweight(await readJson(req), req._session),
     "POST /api/listing/drafts": async (req) => services.createListingDraft(await readJson(req), req._session)
   };
@@ -77,6 +86,9 @@ export async function handleListingAutomationRestRoute({ req, res, parts, servic
     if (req.method === "PUT" && parts[4] === "edit") {
       return json(res, await services.saveCollectorBoxEdit(sku, await readJson(req), req._session));
     }
+    if (req.method === "PUT" && parts[4] === "development-meta") {
+      return json(res, await services.updateCollectorBoxDevelopmentMeta(sku, await readJson(req), req._session));
+    }
     if (req.method === "POST" && parts[4] === "create-listing-template") {
       return json(res, await services.createListingTemplateFromCollectorBox(sku, await readJson(req), req._session));
     }
@@ -97,6 +109,10 @@ export async function handleListingAutomationRestRoute({ req, res, parts, servic
     return json(res, await services.listingDraftDetail(Number(parts[3]), req._session));
   }
 
+  if (req.method === "PUT" && parts[2] === "drafts" && parts[3] && parts[4] === "development-meta") {
+    return json(res, await services.updateListingDraftDevelopmentMeta(Number(parts[3]), await readJson(req), req._session));
+  }
+
   if (req.method === "PUT" && parts[2] === "drafts" && parts[3]) {
     return json(res, await services.updateListingDraft(Number(parts[3]), await readJson(req), req._session));
   }
@@ -105,12 +121,24 @@ export async function handleListingAutomationRestRoute({ req, res, parts, servic
     return json(res, await services.deleteListingDraft(Number(parts[3]), req._session));
   }
 
+  if (req.method === "DELETE" && parts[2] === "variant-workbench-drafts" && parts[3]) {
+    return json(res, await services.deleteListingVariantWorkbenchDraft(decodeURIComponent(parts[3]), req._session, req.query?.route_name || req.query?.routeName || "asset-variant-center-wizard"));
+  }
+
   if (req.method === "POST" && parts[2] === "copy-jobs" && parts[3] && parts[4] === "refresh") {
     return json(res, await services.refreshListingCopyJob(Number(parts[3]), req._session));
   }
 
   if (req.method === "POST" && parts[2] === "publish-records" && parts[3] && parts[4] === "refresh") {
     return json(res, await services.refreshListingPublishRecord(Number(parts[3]), req._session));
+  }
+
+  if (req.method === "GET" && parts[2] === "publish-tasks" && parts[3]) {
+    return json(res, await services.listingPublishTaskDetail(Number(parts[3]), req._session));
+  }
+
+  if (req.method === "POST" && parts[2] === "publish-tasks" && parts[3] && parts[4] === "retry") {
+    return json(res, await services.retryListingPublishTask(Number(parts[3]), await readJson(req), req._session));
   }
 
   if (req.method === "GET" && parts[2] === "publish-records" && parts[3]) {

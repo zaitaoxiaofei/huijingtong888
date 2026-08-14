@@ -35,12 +35,30 @@ export function authorizeApiRequest(req, parts = []) {
     return hasRole(session, ["admin"]) ? { allowed: true } : deny("仅管理员可以管理人员账号");
   }
 
+  if (parts[1] === "onboarding" && methodIsMutation(method)) {
+    return hasMinimumRole(session, "manager") ? { allowed: true } : deny("仅管理员或经理可以编辑入职知识库");
+  }
+
   if (["shops", "ai-provider", "scheduled-jobs"].includes(parts[1]) && methodIsMutation(method)) {
     return hasRole(session, ["admin"]) ? { allowed: true } : deny("仅管理员可以修改系统配置");
   }
 
+  if (parts[1] === "inventory-product-naming" && methodIsMutation(method)) {
+    if (method === "POST") return { allowed: true };
+    const isNamedMaintainer = String(session?.name || "").trim() === "核动力牛马";
+    return isNamedMaintainer ? { allowed: true } : deny("仅核动力牛马可以审核、修改或停用核心品名");
+  }
+
   if (parts[1] === "exchange-rate" && methodIsMutation(method)) {
     return hasMinimumRole(session, "manager") ? { allowed: true } : deny("仅管理员或经理可以维护汇率");
+  }
+
+  if (parts[1] === "finance-center" && methodIsMutation(method)) {
+    return hasMinimumRole(session, "manager") ? { allowed: true } : deny("仅管理员或经理可以维护财务数据");
+  }
+
+  if (parts[1] === "payroll" && methodIsMutation(method)) {
+    return hasMinimumRole(session, "manager") ? { allowed: true } : deny("仅管理员或经理可以维护工资数据");
   }
 
   const managerMutationResources = new Set([

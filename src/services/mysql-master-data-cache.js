@@ -1,4 +1,5 @@
 const DEFAULT_MASTER_DATA_CACHE_TTL_MS = 30_000;
+const MASTER_DATA_CACHE_MAX_ENTRIES = 120;
 const masterDataCache = new Map();
 const masterDataInflight = new Map();
 
@@ -35,10 +36,19 @@ export async function getCachedMasterData(key, loader, ttlMs = DEFAULT_MASTER_DA
   const promise = Promise.resolve()
     .then(loader)
     .then((value) => {
+      const now = Date.now();
+      for (const [cacheKey, entry] of masterDataCache) {
+        if (entry.expiresAt <= now) masterDataCache.delete(cacheKey);
+      }
       masterDataCache.set(key, {
         value,
-        expiresAt: Date.now() + ttlMs
+        expiresAt: now + ttlMs
       });
+      while (masterDataCache.size > MASTER_DATA_CACHE_MAX_ENTRIES) {
+        const oldestKey = masterDataCache.keys().next().value;
+        if (!oldestKey) break;
+        masterDataCache.delete(oldestKey);
+      }
       return value;
     })
     .finally(() => {

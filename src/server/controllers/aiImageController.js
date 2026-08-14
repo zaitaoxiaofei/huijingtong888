@@ -6,7 +6,8 @@ import {
   getAiStatus,
   getAiTaskFile,
   optimizePrompt,
-  streamAiFile
+  streamAiFile,
+  testCopyGeneration
 } from "../services/ai/aiWorkflowService.js";
 
 export function status() {
@@ -27,6 +28,10 @@ export async function generateWorkflowAction(req, readJson) {
 
 export async function generateCommerceCopyAction(req, readJson) {
   return generateCommerceCopy(await readJson(req));
+}
+
+export async function testCopyGenerationAction(req, readJson) {
+  return testCopyGeneration(await readJson(req));
 }
 
 export async function sendAiTaskImage({ res, writeHead, taskId, scope, filename }) {

@@ -1,12 +1,21 @@
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, MagicStick, Refresh, Search } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
+import { prepareBrowserWatermarkBatch } from "../../utils/browser-watermark-batch";
+import { openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../../utils/ai-variant-lab-window";
+import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
+import {
+  developmentTypeOptions,
+  developmentTypeTagType,
+  normalizeDevelopmentType,
+  vehicleModelText
+} from "../../utils/product-development-meta";
 
 const route = useRoute();
 const router = useRouter();
@@ -15,10 +24,6 @@ let collectorWorkbenchSaveTimer = 0;
 const COLLECTOR_WORKBENCH_STORAGE_PREFIX = "collectorBoxWorkbenchState:";
 const collectorWorkbenchId = computed(() => String(route.query.workbenchId || "").trim());
 const collectorWorkbenchStorageKey = computed(() => `${COLLECTOR_WORKBENCH_STORAGE_PREFIX}${collectorWorkbenchId.value || "default"}`);
-
-function createAiWorkbenchId() {
-  return `aiwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
 
 function createListingWorkbenchId() {
   return `liwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -101,6 +106,7 @@ const creatingSku = ref("");
 const creatingTemplateSku = ref("");
 const deletingSku = ref("");
 const batchDeleting = ref(false);
+const developmentSavingSku = ref("");
 const detailVisible = ref(false);
 const detail = ref(null);
 const detailDiagnostics = ref(null);
@@ -113,6 +119,19 @@ const selectionDialogRow = ref(null);
 const selectionVariantRows = ref([]);
 const selectedSelectionVariants = ref([]);
 const selectionVariantTable = ref(null);
+const collectorPublishingSku = ref("");
+const browserPublishActive = ref(false);
+const browserPublishProgress = reactive({ completed: 0, total: 0 });
+const publishDialog = reactive({
+  visible: false,
+  loading: false,
+  submitting: false,
+  row: null,
+  product: null,
+  productMedia: { mainImage: "", detailImages: [] },
+  shops: [],
+  selectedShopIds: []
+});
 
 const state = reactive({
   rows: [],
@@ -156,12 +175,21 @@ const detailImages = computed(() => {
   return [...new Set(values.map(imageUrlValue).filter(Boolean))].slice(0, 12);
 });
 const detailDimensions = computed(() => {
-  const dimensions = detailPayload.value.dimensions || rawPayload.value.dimensions || {};
+  const editPayload = detail.value?.editPayload || detail.value?.edit_payload || {};
+  const dimensions = detailPayload.value.dimensions || rawPayload.value.dimensions || editPayload.dimensions || {};
+  const parsedVolume = parseCollectedVolume(firstFilled([
+    detailPayload.value.custom_volume,
+    detailPayload.value.real_dimensions,
+    editPayload.custom_volume,
+    editPayload.real_dimensions,
+    rawPayload.value.custom_volume,
+    rawPayload.value.real_dimensions
+  ]));
   return {
-    length: firstFilled([dimensions.length, dimensions.length_cm, rawPayload.value.length, rawPayload.value.length_cm]),
-    width: firstFilled([dimensions.width, dimensions.width_cm, rawPayload.value.width, rawPayload.value.width_cm]),
-    height: firstFilled([dimensions.height, dimensions.height_cm, rawPayload.value.height, rawPayload.value.height_cm]),
-    weight: firstFilled([dimensions.weight, dimensions.weight_g, rawPayload.value.weight, rawPayload.value.weight_g])
+    length: dimensionCmValue(firstFilled([dimensions.length_cm, editPayload.length_cm, rawPayload.value.length_cm, detailPayload.value.length_cm]), firstFilled([dimensions.length_mm, dimensions.length, dimensions.depth, editPayload.length_mm, editPayload.length, editPayload.depth, rawPayload.value.length_mm, rawPayload.value.length, rawPayload.value.depth, detailPayload.value.depth, parsedVolume.length]), dimensions.unit),
+    width: dimensionCmValue(firstFilled([dimensions.width_cm, editPayload.width_cm, rawPayload.value.width_cm, detailPayload.value.width_cm]), firstFilled([dimensions.width_mm, dimensions.width, editPayload.width_mm, editPayload.width, rawPayload.value.width_mm, rawPayload.value.width, detailPayload.value.width, parsedVolume.width]), dimensions.unit),
+    height: dimensionCmValue(firstFilled([dimensions.height_cm, editPayload.height_cm, rawPayload.value.height_cm, detailPayload.value.height_cm]), firstFilled([dimensions.height_mm, dimensions.height, editPayload.height_mm, editPayload.height, rawPayload.value.height_mm, rawPayload.value.height, detailPayload.value.height, parsedVolume.height]), dimensions.unit),
+    weight: firstFilled([dimensions.weight, dimensions.weight_g, editPayload.weight, editPayload.weight_g, editPayload.custom_weight, detailPayload.value.weight, detailPayload.value.weight_g, detailPayload.value.custom_weight, rawPayload.value.weight, rawPayload.value.weight_g, rawPayload.value.custom_weight])
   };
 });
 const listingPreviewFields = computed(() => [
@@ -182,6 +210,28 @@ function loadRawPayloadPreview() {
 
 function firstFilled(values) {
   return values.find((value) => value !== null && value !== undefined && value !== "") ?? "";
+}
+
+function parseCollectedVolume(value) {
+  if (!value) return {};
+  const match = String(value).replace(/,/g, ".").match(/(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)/);
+  if (!match) return {};
+  return {
+    length: Number(match[1]) || "",
+    width: Number(match[2]) || "",
+    height: Number(match[3]) || ""
+  };
+}
+
+function dimensionCmValue(cmValue, mmValue, unit = "") {
+  const cm = Number(cmValue);
+  if (Number.isFinite(cm) && cm > 0) return cm;
+  const fallback = Number(mmValue);
+  if (!Number.isFinite(fallback) || fallback <= 0) return "";
+  const normalizedUnit = String(unit || "").toLowerCase();
+  if (normalizedUnit.includes("cm")) return fallback;
+  if (normalizedUnit === "m") return Number((fallback * 100).toFixed(2));
+  return Number((fallback / 10).toFixed(2));
 }
 
 function normalizeImageValues(value) {
@@ -213,10 +263,33 @@ function formatDimension(value, unit) {
   return `${formatNumber(number)} ${unit}`;
 }
 
+function formatCurrency() {
+  return "人民币";
+}
+
+function rowDimensions(row = {}) {
+  const dimensions = row.dimensions || {};
+  return {
+    length: firstFilled([row.length_cm, dimensions.length_cm]),
+    width: firstFilled([row.width_cm, dimensions.width_cm]),
+    height: firstFilled([row.height_cm, dimensions.height_cm]),
+    weight: firstFilled([row.weight_g, dimensions.weight_g])
+  };
+}
+
+function formatRowDimensions(row = {}) {
+  if (row.__rowDimensionsText) return row.__rowDimensionsText;
+  const dimensions = rowDimensions(row);
+  const length = formatDimension(dimensions.length, "cm");
+  const width = formatDimension(dimensions.width, "cm");
+  const height = formatDimension(dimensions.height, "cm");
+  const weight = formatDimension(dimensions.weight, "g");
+  const size = [length, width, height].every((item) => item !== "-") ? `${length} x ${width} x ${height}` : "尺寸 -";
+  return `${size} / 重 ${weight}`;
+}
+
 function formatDateTime(value) {
-  if (!value) return "-";
-  const text = String(value);
-  return text.length > 16 ? text.slice(0, 16) : text;
+  return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
 }
 
 function skuCount(row) {
@@ -226,6 +299,7 @@ function skuCount(row) {
 const selectedSkus = computed(() => state.selectedRows.map((row) => String(row?.sku || "").trim()).filter(Boolean));
 
 function collectorCategoryLabel(row = {}) {
+  if (row.__categoryLabel) return row.__categoryLabel;
   return String(
     row?.category_name
     || row?.category_hint
@@ -235,6 +309,48 @@ function collectorCategoryLabel(row = {}) {
     || row?.editPayload?.category
     || ""
   ).trim() || "未识别类目";
+}
+
+function collectorDataQualityIssues(row = {}) {
+  if (Array.isArray(row?.__qualityIssues)) return row.__qualityIssues;
+  if (Array.isArray(row?.quality_issues) && row.quality_issues.length) {
+    return row.quality_issues.map((item) => String(item || "").trim()).filter(Boolean);
+  }
+  const editPayload = row?.editPayload || row?.edit_payload || {};
+  const sku = String(row?.sku || editPayload.sku || "").trim();
+  const title = String(row?.title || editPayload.title || editPayload.productTitle || "").trim();
+  const categoryId = String(editPayload.category_id || editPayload.ozon_category_id || "").trim();
+  const categoryName = collectorCategoryLabel(row);
+  const images = normalizeImageValues([
+    row?.image_url,
+    editPayload.primary_image,
+    editPayload.productImage,
+    editPayload.mainImage,
+    ...normalizeArray(editPayload.images)
+  ]);
+  const issues = [];
+  if (!title || (sku && title === `Ozon ${sku}`)) issues.push("标题未采集");
+  if (!images.length) issues.push("图片未采集");
+  if (!categoryName || categoryName === "未识别类目" || categoryId.startsWith("frontend:") || categoryId.startsWith("pending:") || categoryName.includes("frontend:")) {
+    issues.push("Ozon 类目未识别");
+  }
+  return issues;
+}
+
+function collectorDataQualityOk(row = {}) {
+  if (typeof row?.__qualityOk === "boolean") return row.__qualityOk;
+  return collectorDataQualityIssues(row).length === 0;
+}
+
+function prepareCollectorRows(rows = []) {
+  return rows.map((row) => {
+    const prepared = { ...row };
+    prepared.__categoryLabel = collectorCategoryLabel(prepared);
+    prepared.__qualityIssues = collectorDataQualityIssues(prepared);
+    prepared.__qualityOk = prepared.__qualityIssues.length === 0;
+    prepared.__rowDimensionsText = formatRowDimensions(prepared);
+    return prepared;
+  });
 }
 
 function productTitle(row) {
@@ -259,6 +375,28 @@ function statusType(row) {
   if (row?.status === "selection_created" || row?.status === "listing_template_created") return "success";
   if (row?.status === "edited") return "primary";
   return "warning";
+}
+
+function publishStatusText(row) {
+  const total = Number(row?.publish_record_count || 0);
+  const success = Number(row?.publish_success_count || 0);
+  const failed = Number(row?.publish_failed_count || 0);
+  if (success > 0 && success < total) return "部分上架";
+  if (success > 0) return "上架成功";
+  const status = String(row?.publish_status || "");
+  if (failed > 0 && failed >= total) return "上架失败";
+  if (["submitted", "processing", "resubmitting", "ozon_status_pending"].includes(status)) return "上架处理中";
+  return "未上架";
+}
+
+function publishStatusType(row) {
+  if (Number(row?.publish_success_count || 0) > 0 && Number(row?.publish_success_count || 0) < Number(row?.publish_record_count || 0)) return "warning";
+  if (Number(row?.publish_success_count || 0) > 0) return "success";
+  const status = String(row?.publish_status || "");
+  if (["imported", "published", "success"].includes(status)) return "success";
+  if (["failed", "ozon_status_error"].includes(status)) return "danger";
+  if (status) return "warning";
+  return "info";
 }
 
 function diagnosticsType(result = {}) {
@@ -298,6 +436,7 @@ function buildQuery(options = {}) {
   params.set("page", String(state.filters.page));
   params.set("pageSize", String(state.filters.pageSize));
   if (options.summaryMode) params.set("summaryMode", String(options.summaryMode));
+  if (options.countMode) params.set("countMode", String(options.countMode));
   if (state.filters.query.trim()) params.set("query", state.filters.query.trim());
   if (state.filters.status !== "all") params.set("status", state.filters.status);
   return params;
@@ -306,10 +445,13 @@ function buildQuery(options = {}) {
 async function loadRows(options = {}) {
   loading.value = true;
   try {
-    const result = await apiClient.get(`/api/listing/collector-box?${buildQuery(options).toString()}`, { noCache: true });
-    state.rows = result.rows || [];
+    const result = await apiClient.get(`/api/listing/collector-box?${buildQuery(options).toString()}`, {
+      noCache: true,
+      routeScoped: false
+    });
+    state.rows = prepareCollectorRows(result.rows || []);
     state.selectedRows = [];
-    state.total = Number(result.total || 0);
+    if (result.total !== undefined && result.total !== null) state.total = Number(result.total || 0);
     if (result.summary) state.summary = result.summary;
   } catch (error) {
     ElMessage.error(error.message || "采集箱加载失败");
@@ -328,6 +470,28 @@ function resetFilters() {
   state.filters.status = "all";
   state.filters.page = 1;
   loadRows();
+}
+
+async function updateCollectorDevelopmentType(row, value) {
+  if (!row?.sku) return;
+  const previous = normalizeDevelopmentType(row.development_type);
+  row.development_type = normalizeDevelopmentType(value, previous);
+  developmentSavingSku.value = row.sku;
+  try {
+    const updated = await apiClient.put(`/api/listing/collector-box/${encodeURIComponent(row.sku)}/development-meta`, {
+      development_type: row.development_type,
+      vehicle_brand: row.vehicle_brand || "",
+      vehicle_model: row.vehicle_model || ""
+    });
+    Object.assign(row, updated || {});
+    if (detail.value?.sku === row.sku) Object.assign(detail.value, updated || {});
+    ElMessage.success("开发类型已更新");
+  } catch (error) {
+    row.development_type = previous;
+    ElMessage.error(error.message || "开发类型保存失败");
+  } finally {
+    developmentSavingSku.value = "";
+  }
 }
 
 async function openDetail(row) {
@@ -444,14 +608,22 @@ async function openEdit(row) {
 
 function openAiWorkbench(row, mode = "optimization") {
   if (!row?.sku) return;
-  router.push({
-    name: mode === "variant" ? "asset-variant-center-wizard" : "ai-optimization-workbench-v2",
-    query: {
-      workbenchId: createAiWorkbenchId(),
+  if (mode === "variant") {
+    openAiVariantLabWindow({
+      tabTitle: `AI裂变 · ${row.sku}`,
       collectorSku: String(row.sku),
       source: "collector_box",
-      autoImport: "1"
-    }
+      autoImport: "1",
+      importAt: String(Date.now())
+    });
+    return;
+  }
+  openAiProductMaterialOptimizerWindow({
+    tabTitle: `AI优化 · ${row.sku}`,
+    collectorSku: String(row.sku),
+    source: "collector_box",
+    autoImport: "1",
+    importAt: String(Date.now())
   });
 }
 
@@ -466,6 +638,10 @@ function openOzon(row) {
 
 async function createListingTemplate(row) {
   if (!row?.sku) return;
+  const qualityIssues = collectorDataQualityIssues(row);
+  if (qualityIssues.length) {
+    ElMessage.warning(`采集数据不完整：${qualityIssues.join("、")}。请重新采集详情或先手动补齐。`);
+  }
   creatingTemplateSku.value = row.sku;
   try {
     if (row.listing_template_id) {
@@ -474,14 +650,26 @@ async function createListingTemplate(row) {
     }
     const result = await apiClient.post(`/api/listing/collector-box/${encodeURIComponent(row.sku)}/create-listing-template`, {
       openMode: "listing_editor",
-      compact: true
+      compact: true,
+      allowIncomplete: true
     });
-    ElMessage.success(result?.reused ? "已载入已有上架模板" : "已生成上架编辑模板");
+    if (result?.media_archive_warning) {
+      ElMessage({
+        type: "warning",
+        message: "已进入编辑页，但部分 Ozon 图片暂未归档；请在发布前检查并重新上传失效图片。",
+        duration: 6000
+      });
+    } else {
+      ElMessage.success(result?.reused ? "已载入已有上架模板" : "已生成上架编辑模板");
+    }
     const templateId = result?.template?.id;
     if (templateId) router.push({ path: "/listing-automation", query: { workbenchId: createListingWorkbenchId(), templateId, collectorSku: row.sku } });
     loadRows().catch(() => {});
   } catch (error) {
-    ElMessage.error(error.message || "创建上架模板失败");
+    const issues = error?.payload?.validation?.issues;
+    ElMessage.error(Array.isArray(issues) && issues.length
+      ? `采集数据不完整：${issues.join("、")}。请重新采集详情或先手动补齐。`
+      : (error.message || "创建上架模板失败"));
   } finally {
     creatingTemplateSku.value = "";
   }
@@ -526,6 +714,111 @@ async function createSelection(row) {
   }
 }
 
+function uniqueNumbers(values = []) {
+  return [...new Set((values || []).map((value) => Number(value)).filter(Boolean))];
+}
+
+async function openCollectorPublishDialog(row) {
+  if (!row?.sku || collectorPublishingSku.value) return;
+  collectorPublishingSku.value = String(row.sku);
+  publishDialog.visible = true;
+  publishDialog.loading = true;
+  publishDialog.row = row;
+  publishDialog.product = null;
+  publishDialog.shops = [];
+  publishDialog.selectedShopIds = [];
+  try {
+    const selection = await apiClient.post(`/api/listing/collector-box/${encodeURIComponent(row.sku)}/create-selection`, {
+      variantCount: 1
+    });
+    const product = selection?.product || selection?.products?.[0] || {};
+    const productId = Number(product.id || selection?.id || 0);
+    if (!productId) throw new Error("采集商品未能同步为标准上架记录");
+    const data = await apiClient.get(`/api/asset-variant-engine/selection-publish-shops?productId=${encodeURIComponent(productId)}`, { noCache: true });
+    publishDialog.product = { ...product, id: productId };
+    publishDialog.productMedia = {
+      mainImage: String(data?.productMedia?.mainImage || product.image_url || row.image_url || ""),
+      detailImages: normalizeImageValues(data?.productMedia?.detailImages || product.detail_image_urls).map(imageUrlValue).filter(Boolean)
+    };
+    publishDialog.shops = (Array.isArray(data?.shops) ? data.shops : [])
+      .filter((shop) => String(shop.status || "").toLowerCase() !== "deleted")
+      .map((shop) => ({
+        id: Number(shop.id),
+        name: String(shop.name || `店铺 ${shop.id}`),
+        legalEntity: String(shop.legal_entity || shop.legalEntity || ""),
+        status: String(shop.status || "active"),
+        watermarkPath: String(shop.watermarkPath || ""),
+        watermarkPosition: String(shop.watermarkPosition || "bottom-right"),
+        watermarkXPercent: Number(shop.watermarkXPercent ?? 75),
+        watermarkYPercent: Number(shop.watermarkYPercent ?? 75),
+        watermarkScalePercent: Number(shop.watermarkScalePercent ?? 22),
+        watermarkOpacityPercent: Number(shop.watermarkOpacityPercent ?? 82)
+      }))
+      .filter((shop) => shop.id);
+    publishDialog.selectedShopIds = publishDialog.shops.map((shop) => shop.id);
+  } catch (error) {
+    publishDialog.visible = false;
+    ElMessage.error(error.message || "加载多店铺上架配置失败");
+  } finally {
+    publishDialog.loading = false;
+    collectorPublishingSku.value = "";
+  }
+}
+
+function closeCollectorPublishDialog() {
+  if (publishDialog.submitting) return;
+  publishDialog.visible = false;
+  publishDialog.row = null;
+  publishDialog.product = null;
+  publishDialog.shops = [];
+  publishDialog.selectedShopIds = [];
+}
+
+async function submitCollectorPublish() {
+  const product = publishDialog.product;
+  const shopIds = uniqueNumbers(publishDialog.selectedShopIds);
+  if (!product?.id || !shopIds.length || publishDialog.submitting) return;
+  publishDialog.submitting = true;
+  browserPublishActive.value = true;
+  Object.assign(browserPublishProgress, { completed: 0, total: 0 });
+  try {
+    const selectedShops = publishDialog.shops.filter((shop) => shopIds.includes(shop.id));
+    const images = [...new Set([
+      publishDialog.productMedia.mainImage,
+      ...normalizeImageValues(publishDialog.productMedia.detailImages).map(imageUrlValue)
+    ].map((value) => String(value || "").trim()).filter(Boolean))];
+    if (!images.length) throw new Error("采集商品没有可处理的图片");
+    const preparedMediaByShop = await prepareBrowserWatermarkBatch({
+      productId: product.id,
+      images,
+      shops: selectedShops,
+      onProgress(progress) {
+        Object.assign(browserPublishProgress, progress);
+      }
+    });
+    const result = await apiClient.post("/api/asset-variant-engine/publish-selection", {
+      productId: product.id,
+      shopIds,
+      preparedMediaByShop
+    });
+    if (!result?.accepted && !result?.ok) throw new Error(result?.note || "多店铺上架任务创建失败");
+    ElMessage.success(result.note || `多店铺上架任务已创建：${result.jobNo || result.jobId || ""}`);
+    publishDialog.visible = false;
+    await loadRows({ summaryMode: "skip" });
+  } catch (error) {
+    ElMessage.error(error.message || "采集箱多店铺上架失败");
+  } finally {
+    browserPublishActive.value = false;
+    publishDialog.submitting = false;
+  }
+}
+
+function guardBrowserPublishClose(event) {
+  if (!browserPublishActive.value) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
+
 async function deleteRow(row) {
   if (!row?.sku) return;
   await ElMessageBox.confirm(`确认删除采集商品 ${row.sku}？删除后列表不再显示。`, "删除采集商品", {
@@ -566,7 +859,7 @@ async function batchDeleteRows() {
     batchDeleting.value = false;
   }
 }
-watch(() => [state.filters.page, state.filters.pageSize], loadRows);
+watch(() => [state.filters.page, state.filters.pageSize], () => loadRows({ summaryMode: "skip", countMode: "skip" }));
 
 watch(
   [
@@ -592,6 +885,7 @@ watch(
 );
 
 onMounted(() => {
+  window.addEventListener("beforeunload", guardBrowserPublishClose);
   ensureCollectorWorkbenchRouteId();
   const restoredDetailSku = restoreCollectorWorkbenchState();
   if (route.query.sku) state.filters.query = String(route.query.sku);
@@ -605,6 +899,8 @@ onMounted(() => {
   if (!collectorWorkbenchReady.value) collectorWorkbenchReady.value = true;
   syncCollectorWorkbenchTabTitle();
 });
+
+onBeforeUnmount(() => window.removeEventListener("beforeunload", guardBrowserPublishClose));
 </script>
 
 <template>
@@ -652,11 +948,38 @@ onMounted(() => {
             <div class="product-main table-title-cell">
               <ProductTitleLink :title="productTitle(row)" :href="productBuyerLink(row)" :lines="2" />
               <span>{{ collectorCategoryLabel(row) }}</span>
+              <span v-if="vehicleModelText(row)" class="muted-text">{{ vehicleModelText(row) }}</span>
+              <el-tag v-if="!collectorDataQualityOk(row)" type="warning" effect="plain" size="small">
+                采集不完整：{{ collectorDataQualityIssues(row).join("、") }}
+              </el-tag>
             </div>
           </template>
         </el-table-column>
+        <el-table-column label="开发类型" width="116" align="center">
+          <template #default="{ row }">
+            <el-select
+              :model-value="normalizeDevelopmentType(row.development_type)"
+              size="small"
+              class="development-type-select"
+              :loading="developmentSavingSku === row.sku"
+              @change="(value) => updateCollectorDevelopmentType(row, value)"
+            >
+              <el-option
+                v-for="option in developmentTypeOptions"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+              >
+                <el-tag :type="developmentTypeTagType(option.value)" effect="plain" size="small">{{ option.label }}</el-tag>
+              </el-option>
+            </el-select>
+          </template>
+        </el-table-column>
         <el-table-column label="价格" width="130" align="center">
-          <template #default="{ row }">{{ formatNumber(row.price, 2) }} {{ row.currency }}</template>
+          <template #default="{ row }">{{ formatNumber(row.price, 2) }} {{ formatCurrency(row.currency) }}</template>
+        </el-table-column>
+        <el-table-column label="尺寸/重量" width="190" align="center">
+          <template #default="{ row }">{{ formatRowDimensions(row) }}</template>
         </el-table-column>
         <el-table-column label="SKU数量" width="100" align="center">
           <template #default="{ row }">{{ skuCount(row) }}</template>
@@ -669,9 +992,16 @@ onMounted(() => {
             <span>{{ formatNumber(row.sold_count) }} / {{ formatNumber(row.view_count) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="120" align="center">
+        <el-table-column label="处理状态" width="120" align="center">
           <template #default="{ row }">
             <el-tag :type="statusType(row)" effect="plain">{{ statusText(row) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="上架状态" width="128" align="center">
+          <template #default="{ row }">
+            <el-tooltip :content="row.publish_record_count ? `关联 ${row.publish_record_count} 条上架记录` : '尚未提交到 Ozon'" placement="top">
+              <el-tag :type="publishStatusType(row)" effect="plain">{{ publishStatusText(row) }}</el-tag>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column label="创建时间" width="150" align="center">
@@ -680,7 +1010,7 @@ onMounted(() => {
         <el-table-column label="更新时间" width="150" align="center">
           <template #default="{ row }">{{ formatDateTime(row.updated_at || row.edited_at || row.collected_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="580" fixed="right" align="center">
+        <el-table-column label="操作" width="700" fixed="right" align="center">
           <template #default="{ row }">
             <div class="row-actions">
               <el-button
@@ -712,6 +1042,14 @@ onMounted(() => {
               </el-button>
               <el-button size="small" plain @click="openDetail(row)">查看详情</el-button>
               <el-button size="small" plain @click="openOzon(row)">打开 Ozon</el-button>
+              <el-button
+                size="small"
+                type="primary"
+                :loading="collectorPublishingSku === row.sku"
+                @click="openCollectorPublishDialog(row)"
+              >
+                浏览器多店上架
+              </el-button>
               <el-button
                 size="small"
                 type="warning"
@@ -822,7 +1160,7 @@ onMounted(() => {
             <div class="metric-grid">
               <div class="metric-card">
                 <span>价格</span>
-                <strong>{{ formatNumber(detail.price, 2) }} {{ detail.currency || "RUB" }}</strong>
+                <strong>{{ formatNumber(detail.price, 2) }} {{ formatCurrency(detail.currency) }}</strong>
               </div>
               <div class="metric-card">
                 <span>销量</span>
@@ -877,6 +1215,51 @@ onMounted(() => {
         </template>
       </div>
     </el-drawer>
+
+    <el-dialog
+      v-model="publishDialog.visible"
+      title="采集箱 · 浏览器多店上架"
+      width="720px"
+      align-center
+      destroy-on-close
+      @closed="closeCollectorPublishDialog"
+    >
+      <div class="collector-publish-dialog" v-loading="publishDialog.loading">
+        <el-alert
+          v-if="browserPublishActive"
+          type="info"
+          :closable="false"
+          show-icon
+          :title="`浏览器正在以并发 10 处理图片：${browserPublishProgress.completed}/${browserPublishProgress.total}`"
+        />
+        <div class="collector-publish-summary">
+          <strong>{{ publishDialog.row?.title || publishDialog.row?.sku || "-" }}</strong>
+          <span>已选择 {{ publishDialog.selectedShopIds.length }} / {{ publishDialog.shops.length }} 个店铺</span>
+        </div>
+        <div class="collector-publish-tools">
+          <el-button size="small" @click="publishDialog.selectedShopIds = publishDialog.shops.map((shop) => shop.id)">全选</el-button>
+          <el-button size="small" @click="publishDialog.selectedShopIds = []">清空</el-button>
+        </div>
+        <el-checkbox-group v-model="publishDialog.selectedShopIds" class="collector-publish-shops">
+          <el-checkbox v-for="shop in publishDialog.shops" :key="shop.id" :value="shop.id" border>
+            <span class="collector-publish-shop-name">{{ shop.name }}</span>
+            <small>{{ shop.legalEntity || shop.status }}</small>
+          </el-checkbox>
+        </el-checkbox-group>
+        <el-empty v-if="!publishDialog.loading && !publishDialog.shops.length" description="暂无可上架店铺" />
+      </div>
+      <template #footer>
+        <el-button :disabled="publishDialog.submitting" @click="closeCollectorPublishDialog">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="publishDialog.submitting"
+          :disabled="publishDialog.loading || !publishDialog.selectedShopIds.length"
+          @click="submitCollectorPublish"
+        >
+          {{ browserPublishActive ? `处理中 ${browserPublishProgress.completed}/${browserPublishProgress.total}` : "确认多店上架" }}
+        </el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="selectionDialogVisible"
@@ -1177,6 +1560,68 @@ onMounted(() => {
   color: var(--el-text-color-secondary);
 }
 
+.collector-publish-dialog {
+  display: grid;
+  gap: 14px;
+  min-height: 220px;
+}
+
+.collector-publish-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-light);
+}
+
+.collector-publish-summary strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collector-publish-summary span,
+.collector-publish-shops small {
+  color: var(--el-text-color-secondary);
+}
+
+.collector-publish-tools {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.collector-publish-shops {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.collector-publish-shops :deep(.el-checkbox) {
+  width: 100%;
+  height: auto;
+  min-height: 56px;
+  margin: 0;
+  padding: 10px 12px;
+}
+
+.collector-publish-shops :deep(.el-checkbox__label) {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.collector-publish-shop-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .selection-dialog-summary strong {
   color: var(--el-text-color-primary);
   font-size: 15px;
@@ -1216,6 +1661,10 @@ onMounted(() => {
   background: var(--el-fill-color-light);
   font-size: 12px;
   line-height: 1.55;
+}
+
+.development-type-select {
+  width: 92px;
 }
 
 @media (max-width: 760px) {

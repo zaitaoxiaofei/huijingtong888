@@ -5,10 +5,12 @@ import { ArrowDown, Calendar, Refresh, Search } from "@element-plus/icons-vue";
 const props = defineProps({
   filters: { type: Object, default: () => ({}) },
   shops: { type: Array, default: () => [] },
+  logisticsCarrierOptions: { type: Array, default: () => [] },
   logisticsMethodOptions: { type: Array, default: () => [] },
   searchTypeOptions: { type: Array, default: () => [] },
   syncStatus: { type: String, default: "" },
   syncRunning: { type: Boolean, default: false },
+  lastSyncText: { type: String, default: "暂无同步记录" },
   moreActions: { type: Array, default: () => [] }
 });
 
@@ -55,6 +57,12 @@ function changeLogisticsMethod(value) {
   emit("submit", nextFilters);
 }
 
+function changeLogisticsCarrier(value) {
+  const nextFilters = { ...props.filters, logisticsCarrier: value, page: 1 };
+  emit("update:filters", nextFilters);
+  emit("submit", nextFilters);
+}
+
 function handleCommand(command) {
   emit("more-action", command);
 }
@@ -72,6 +80,19 @@ function handleCommand(command) {
           >
             <el-option label="全部店铺" value="all" />
             <el-option v-for="shop in shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
+          </el-select>
+
+          <el-select
+            :model-value="filters.logisticsCarrier"
+            class="orders-toolbar-select"
+            @change="changeLogisticsCarrier"
+          >
+            <el-option
+              v-for="option in logisticsCarrierOptions"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
           </el-select>
 
           <el-select
@@ -107,6 +128,10 @@ function handleCommand(command) {
             />
           </div>
 
+          <div class="orders-toolbar-last-sync" title="最近一次成功写入订单同步日志的北京时间">
+            最近同步：{{ lastSyncText }}
+          </div>
+
           <el-date-picker
             v-model="dateRange"
             type="daterange"
@@ -123,7 +148,7 @@ function handleCommand(command) {
             <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="Calendar" :disabled="syncRunning" @click="emit('reset-dates')">近 90 天</el-button>
 
             <div class="orders-toolbar-sync-group" aria-label="订单同步操作">
-              <el-tooltip content="从本地最新订单之后拉取，自动重叠 15 分钟防漏单" placement="top">
+              <el-tooltip content="只拉各店本地最新订单之后的新单，会忽略上方日期；补历史漏单请用“同步当前范围”。" placement="top">
                 <el-button
                   class="orders-toolbar-btn orders-toolbar-btn-primary orders-toolbar-action-accent"
                   :icon="Refresh"
@@ -134,7 +159,7 @@ function handleCommand(command) {
                   拉取新单
                 </el-button>
               </el-tooltip>
-              <el-tooltip content="按当前店铺和日期范围重新拉取，用于补历史或校正状态" placement="top">
+              <el-tooltip content="按上方店铺和日期范围重新同步，适合补历史漏单、找旧日期订单或校正状态。" placement="top">
                 <el-button
                   class="orders-toolbar-btn orders-toolbar-btn-secondary"
                   type="primary"

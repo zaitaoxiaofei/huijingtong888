@@ -11,6 +11,7 @@ test.after(async () => {
 
 const selectionProductList = selectionProductsMysql;
 const selectionViewSource = readFileSync(new URL("../frontend/admin/views/selection/SelectionView.vue", import.meta.url), "utf8");
+const serviceSource = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 
 test("selection products support paged list contract", async () => {
   const result = await selectionProductList({ paged: "1", page: 1, pageSize: 5 });
@@ -73,8 +74,38 @@ test("selection view keeps full summary scans out of normal page loads", () => {
   assert.doesNotMatch(selectionViewSource, /refreshSelectionSummary\(\);\s*\n\s*if \(dialogVisible\.value/);
 });
 
+test("selection list keeps long detail fields out of the first-page payload", () => {
+  assert.match(serviceSource, /LEFT\(COALESCE\(p\.selling_points, ''\), 500\) AS selling_points/);
+  assert.match(serviceSource, /THEN '\[\\"present\\"\]' ELSE '\[\]'/);
+  assert.match(serviceSource, /'' AS listing_description_ru/);
+  assert.match(selectionViewSource, /:preview="false"\s+proxy-remote/);
+});
+
+test("failed publish status exposes a lightweight hover reason in the selection list", () => {
+  assert.match(serviceSource, /JSON_EXTRACT\(aj\.result_json, '\$\.results\[0\]\.precheck\.errors\[0\]'\)/);
+  assert.match(selectionViewSource, /function selectionStatusTooltipText\(row = \{\}\)/);
+  assert.match(selectionViewSource, /listingJobStatus\(row\) === "failed"/);
+  assert.match(selectionViewSource, /:content="selectionStatusTooltipText\(row\)"/);
+});
+
 test("selection edit dialog waits for full detail before showing the form", () => {
   const body = selectionViewSource.match(/async function openEditDialog\(row\) \{[\s\S]*?\n\}/)?.[0] || "";
   assert.doesNotMatch(body, /dialog\.form = buildEditDialogForm\(\{ \.\.\.row, id: productId \}\);/);
   assert.ok(body.indexOf("apiClient.get(`/api/products/${productId}`") < body.indexOf("dialogVisible.value = true"));
+});
+
+test("selection edit skips operational payloads that are not needed by the form", () => {
+  assert.match(selectionViewSource, /\/api\/products\/\$\{productId\}\?includeOperations=0/);
+  assert.match(serviceSource, /const includeOperations = String\(query\.includeOperations/);
+  assert.match(serviceSource, /includeOperations \? await productComponentRowsMysql/);
+});
+
+test("selection media uploads are registered as URLs before product save", () => {
+  assert.match(selectionViewSource, /import \{ uploadListingMedia \} from "\.\.\/\.\.\/api\/tools\/imageCropper"/);
+  assert.match(selectionViewSource, /async function uploadSelectionImage\(file, role = "selection_image"\)/);
+  assert.match(selectionViewSource, /source_module: "selection_pool"/);
+  assert.doesNotMatch(selectionViewSource, /skip_public_sync: "1"/);
+  assert.match(selectionViewSource, /dialog\.form\.image_url = imageUrl/);
+  assert.match(selectionViewSource, /dialog\.form\.detail_image_urls = \[\.\.\.normalizeDetailImages\(dialog\.form\.detail_image_urls\), imageUrl\]/);
+  assert.doesNotMatch(selectionViewSource, /readAsDataURL/);
 });

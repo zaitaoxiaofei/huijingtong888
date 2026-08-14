@@ -8,7 +8,7 @@ $deployDir = Join-Path $distDir "deploy"
 $backupDir = Join-Path $distDir "deploy-prev"
 $lockPath = Join-Path $distDir "deploy.lock"
 $skipPreflight = @("1", "true", "yes", "on") -contains [string]$env:SKIP_DEPLOY_PREFLIGHT
-$skipDbBackup = @("1", "true", "yes", "on") -contains [string]$env:SKIP_DEPLOY_DB_BACKUP
+$enableDbBackup = @("1", "true", "yes", "on") -contains [string]$env:ENABLE_DEPLOY_DB_BACKUP
 $skipPublicHealthCheck = @("1", "true", "yes", "on") -contains [string]$env:SKIP_DEPLOY_PUBLIC_HEALTH_CHECK
 $stopScript = Join-Path $PSScriptRoot "stop-host-stack.ps1"
 $startScript = Join-Path $PSScriptRoot "start-host-stack.ps1"
@@ -99,6 +99,44 @@ function Copy-DeployEnvIfPresent {
   }
 }
 
+function Resolve-PersistentUploadsRoot {
+  param([Parameter(Mandatory = $true)][string]$EnvPath)
+
+  $configuredRoot = Get-EnvFileValue -EnvPath $EnvPath -Key "UPLOADS_ROOT"
+  if (-not $configuredRoot) {
+    $configuredRoot = Get-EnvFileValue -EnvPath $EnvPath -Key "PERSISTENT_UPLOADS_DIR"
+  }
+  if ($configuredRoot) {
+    if ([System.IO.Path]::IsPathRooted($configuredRoot)) {
+      return [System.IO.Path]::GetFullPath($configuredRoot)
+    }
+    $envDir = Split-Path -Parent $EnvPath
+    return [System.IO.Path]::GetFullPath((Join-Path $envDir $configuredRoot))
+  }
+  return [System.IO.Path]::GetFullPath((Join-Path $root "uploads"))
+}
+
+function Copy-DeployUploadsIfPresent {
+  param([Parameter(Mandatory = $true)][string]$SourceDir)
+
+  $sourceUploads = Join-Path $SourceDir "uploads"
+  if (-not (Test-Path $sourceUploads)) {
+    return
+  }
+
+  $targetUploads = Resolve-PersistentUploadsRoot -EnvPath (Join-Path $SourceDir ".env")
+  $sourceFull = [System.IO.Path]::GetFullPath($sourceUploads)
+  if ($sourceFull -eq $targetUploads) {
+    return
+  }
+
+  New-Item -ItemType Directory -Force -Path $targetUploads | Out-Null
+  foreach ($item in Get-ChildItem -LiteralPath $sourceUploads -Force) {
+    Copy-Item -LiteralPath $item.FullName -Destination $targetUploads -Recurse -Force
+  }
+  Write-Host "Preserved runtime uploads from $SourceDir to $targetUploads"
+}
+
 function Invoke-DeployHealthCheck {
   param(
     [Parameter(Mandatory = $true)][string]$DeployPath,
@@ -142,8 +180,8 @@ function Invoke-DeployPreflightChecks {
 }
 
 function Invoke-DeployDatabaseBackup {
-  if ($skipDbBackup) {
-    Write-Warning "Skipping deployment MySQL backup because SKIP_DEPLOY_DB_BACKUP is enabled."
+  if (-not $enableDbBackup) {
+    Write-Host "Skipping deployment MySQL backup. Set ENABLE_DEPLOY_DB_BACKUP=1 to create one explicitly."
     return
   }
 
@@ -211,6 +249,7 @@ try {
   if ($hadPreviousDeploy) {
     Rename-Item -LiteralPath $deployDir -NewName (Split-Path $backupDir -Leaf)
     Write-Host "Backed up current deployment to $backupDir"
+    Copy-DeployUploadsIfPresent -SourceDir $backupDir
   }
 
   try {

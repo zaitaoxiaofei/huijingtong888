@@ -5,6 +5,7 @@ const root = process.cwd();
 const skippedDirectories = new Set([
   ".git",
   ".codex-run",
+  ".deploy-artifacts",
   ".server-logs",
   ".work-backups",
   ".work-logs",

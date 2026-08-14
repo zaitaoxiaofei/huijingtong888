@@ -49,6 +49,32 @@ test("asset variant content check blocks non-key product with key-case terms", (
   assert.match(result.errors.join("\n"), /Non-key product content contains key-case related terms/);
 });
 
+test("asset variant content check does not treat Cyrillic substrings as key-case terms", () => {
+  const result = inspectAssetVariantListingContent({
+    title: "Накладки на пороги TENET T4, комплект 8 шт.",
+    categoryName: "Автомобильные декоративные накладки",
+    tags: ["#TENET_T4", "#накладки_на_пороги"],
+    description: "Прочие материалы, в другом месте не поименованные и не включенные.",
+    richContent: ""
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.errors, []);
+});
+
+test("asset variant content check still blocks explicit key cover wording on non-key products", () => {
+  const result = inspectAssetVariantListingContent({
+    title: "Накладки на пороги TENET T4",
+    categoryName: "Автомобильные декоративные накладки",
+    tags: ["#TENET_T4", "#key_cover", "#накладки_на_пороги"],
+    description: "Накладки для защиты порогов.",
+    richContent: ""
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join("\n"), /Non-key product content contains key-case related terms/);
+});
+
 test("asset variant content check allows Cyrillic key products to use key-case terms", () => {
   const result = inspectAssetVariantListingContent({
     title: "Защитный чехол для ключей TENET T4/T4L",
@@ -81,6 +107,8 @@ test("selection listing generation keeps key lanyards separate from key cases", 
 test("selection listing generation respects manual listing tags without appending shop tag", () => {
   assert.match(assetVariantSource, /const manualTags = normalizeTags\(cleanRussianListingText\(material\.listingTagsRu, 800\)\);/);
   assert.match(assetVariantSource, /if \(manualTags\.length\) \{\s+return normalizeListingTags\(manualTags, 40\);/);
+  assert.match(assetVariantSource, /const manualShopTags = normalizeTags\(cleanRussianListingText\(material\.listingTagsRu, 800\)\);/);
+  assert.match(assetVariantSource, /const shopTags = manualShopTags\.length \? normalizeListingTags\(manualShopTags, 40\) : \(copyPack\?\.tags\?\.length \? copyPack\.tags : generateShopTags\(material, shop, mergedRule, title\)\);/);
   assert.doesNotMatch(assetVariantSource, /return normalizeListingTags\(\[\.\.\.manualTags, generatedShopTag\], 40\);/);
 });
 
@@ -109,9 +137,13 @@ test("asset variant template reuses generated videos as video covers", () => {
   assert.match(assetVariantSource, /video_cover_urls: videoUrls/);
 });
 
-test("asset variant job errors distinguish missing tail templates from product images", () => {
+test("asset variant generation warns and skips missing tail templates", () => {
   assert.match(assetVariantSource, /lower\.includes\("asset-tail-templates"\)/);
-  assert.match(assetVariantSource, /code: "tail_template_missing"/);
+  assert.match(assetVariantSource, /function tailImageSkipWarning/);
+  assert.match(assetVariantSource, /const warning = tailImageSkipWarning\(error, tailImageUrl\);/);
+  assert.match(assetVariantSource, /warnings\.push\(warning\);/);
+  assert.match(assetVariantSource, /return \{ images, warnings: uniqueValues\(warnings\) \};/);
+  assert.match(assetVariantSource, /warnings: imageWarnings/);
   assert.match(assetVariantSource, /message: "店铺尾图模板文件不存在，无法生成上架素材"/);
 });
 
@@ -172,6 +204,11 @@ test("asset variant on-demand video reports unreadable source images as validati
   assert.match(videoSection, /normalized\.status = 400/);
   assert.match(videoSection, /normalized\.validation = payload/);
   assert.match(assetVariantSource, /远程图片下载失败：\$\{response\.status\}/);
+});
+
+test("listing variant media reuses the generated MP4 for video cover and video", () => {
+  const mediaSection = assetVariantSource.match(/export async function generateListingVariantMediaFromImage[\s\S]*?export async function ensureAssetVariantImagePublishUrl/)?.[0] || "";
+  assert.match(mediaSection, /cover: video/);
 });
 
 test("asset variant on-demand video accepts public preview images without public sync", () => {

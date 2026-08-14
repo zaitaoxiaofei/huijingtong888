@@ -1,10 +1,35 @@
 import { createMysqlConnection, closeMysqlConnection } from "./mysql-runtime.mjs";
 
 const mysqlSchemaSql = `
+CREATE TABLE IF NOT EXISTS media_migration_map (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  source_fingerprint CHAR(64) NOT NULL,
+  source_url TEXT NOT NULL,
+  source_module VARCHAR(64) NOT NULL DEFAULT '',
+  source_table VARCHAR(128) NOT NULL DEFAULT '',
+  source_record_id VARCHAR(128) NOT NULL DEFAULT '',
+  source_field VARCHAR(128) NOT NULL DEFAULT '',
+  media_kind VARCHAR(16) NOT NULL DEFAULT 'other',
+  content_hash_sha256 CHAR(64) NULL,
+  byte_size BIGINT UNSIGNED NULL,
+  oss_bucket VARCHAR(255) NULL,
+  oss_object_key VARCHAR(1024) NULL,
+  oss_url TEXT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'pending',
+  verification_error VARCHAR(1000) NULL,
+  verified_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_media_migration_source (source_fingerprint),
+  KEY idx_media_migration_status (status, updated_at),
+  KEY idx_media_migration_content_hash (content_hash_sha256)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS shops (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(255) NOT NULL,
   legal_entity VARCHAR(255) NULL,
+  user_id BIGINT UNSIGNED NULL,
   ozon_client_id VARCHAR(128) NULL,
   api_key_hint VARCHAR(255) NULL,
   performance_client_id VARCHAR(128) NULL,
@@ -19,7 +44,8 @@ CREATE TABLE IF NOT EXISTS shops (
   watermark_opacity_percent DECIMAL(8,4) NOT NULL DEFAULT 82.0000,
   status VARCHAR(32) NOT NULL DEFAULT 'active',
   payout_rate DECIMAL(8,4) NOT NULL DEFAULT 0.3300,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_shops_user_id (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS people (
@@ -30,8 +56,187 @@ CREATE TABLE IF NOT EXISTS people (
   avatar_url TEXT NULL,
   active TINYINT(1) NOT NULL DEFAULT 1,
   password_hash TEXT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uk_people_name (name),
   UNIQUE KEY uk_people_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS finance_companies (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  tax_number VARCHAR(64) NULL,
+  taxpayer_type VARCHAR(32) NOT NULL DEFAULT 'unknown',
+  bank_name VARCHAR(255) NULL,
+  bank_account VARCHAR(128) NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_finance_company_name (name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS finance_shop_company_assignments (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  shop_id BIGINT UNSIGNED NOT NULL,
+  company_id BIGINT UNSIGNED NOT NULL,
+  effective_from DATE NOT NULL,
+  effective_to DATE NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_finance_shop_company_period (shop_id, effective_from),
+  KEY idx_finance_assignment_company_period (company_id, effective_from, effective_to)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS finance_expenses (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  company_id BIGINT UNSIGNED NOT NULL,
+  shop_id BIGINT UNSIGNED NULL,
+  expense_date DATE NOT NULL,
+  category VARCHAR(64) NOT NULL,
+  counterparty VARCHAR(255) NULL,
+  description VARCHAR(500) NULL,
+  currency_code VARCHAR(16) NOT NULL DEFAULT 'CNY',
+  original_amount DECIMAL(18,4) NOT NULL DEFAULT 0,
+  exchange_rate DECIMAL(18,8) NOT NULL DEFAULT 1,
+  amount_cny DECIMAL(18,4) NOT NULL DEFAULT 0,
+  payment_reference VARCHAR(255) NULL,
+  voucher_status VARCHAR(32) NOT NULL DEFAULT 'missing',
+  source_type VARCHAR(64) NULL,
+  source_id BIGINT UNSIGNED NULL,
+  created_by BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_finance_expense_company_date (company_id, expense_date),
+  UNIQUE KEY uk_finance_expense_source (source_type, source_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS payroll_contribution_schemes (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  city_code VARCHAR(32) NOT NULL,
+  city_name VARCHAR(64) NOT NULL,
+  social_base_min DECIMAL(18,4) NOT NULL DEFAULT 0,
+  housing_base_min DECIMAL(18,4) NOT NULL DEFAULT 0,
+  employer_rates_json JSON NOT NULL,
+  employee_rates_json JSON NOT NULL,
+  effective_from DATE NOT NULL,
+  effective_to DATE NULL,
+  source_note VARCHAR(500) NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_payroll_scheme_city_period (city_code, effective_from),
+  KEY idx_payroll_scheme_effective (city_code, effective_from, effective_to)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS payroll_policies (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  version_no INT NOT NULL DEFAULT 1,
+  components_json JSON NOT NULL,
+  effective_from DATE NOT NULL,
+  effective_to DATE NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_payroll_policy_name_version (name, version_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS payroll_profiles (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  person_id BIGINT UNSIGNED NOT NULL,
+  company_id BIGINT UNSIGNED NOT NULL,
+  department VARCHAR(128) NULL,
+  employment_city_code VARCHAR(32) NOT NULL,
+  contribution_scheme_id BIGINT UNSIGNED NOT NULL,
+  policy_id BIGINT UNSIGNED NOT NULL,
+  base_salary DECIMAL(18,4) NOT NULL DEFAULT 0,
+  effective_from DATE NOT NULL,
+  effective_to DATE NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_payroll_profile_person_period (person_id, effective_from),
+  KEY idx_payroll_profile_company (company_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS payroll_periods (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  company_id BIGINT UNSIGNED NOT NULL,
+  month_key CHAR(7) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'draft',
+  calculated_by BIGINT UNSIGNED NULL,
+  calculated_at DATETIME NULL,
+  approved_by BIGINT UNSIGNED NULL,
+  approved_at DATETIME NULL,
+  locked_by BIGINT UNSIGNED NULL,
+  locked_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_payroll_period_company_month (company_id, month_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS payroll_statements (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  period_id BIGINT UNSIGNED NOT NULL,
+  person_id BIGINT UNSIGNED NOT NULL,
+  profile_id BIGINT UNSIGNED NOT NULL,
+  policy_id BIGINT UNSIGNED NOT NULL,
+  contribution_scheme_id BIGINT UNSIGNED NOT NULL,
+  base_salary DECIMAL(18,4) NOT NULL DEFAULT 0,
+  fixed_earnings DECIMAL(18,4) NOT NULL DEFAULT 0,
+  variable_earnings DECIMAL(18,4) NOT NULL DEFAULT 0,
+  gross_salary DECIMAL(18,4) NOT NULL DEFAULT 0,
+  employee_contribution DECIMAL(18,4) NOT NULL DEFAULT 0,
+  employer_contribution DECIMAL(18,4) NOT NULL DEFAULT 0,
+  income_tax DECIMAL(18,4) NOT NULL DEFAULT 0,
+  other_deductions DECIMAL(18,4) NOT NULL DEFAULT 0,
+  net_salary DECIMAL(18,4) NOT NULL DEFAULT 0,
+  employer_total_cost DECIMAL(18,4) NOT NULL DEFAULT 0,
+  calculation_json JSON NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'draft',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_payroll_statement_period_person (period_id, person_id),
+  KEY idx_payroll_statement_person (person_id, period_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS finance_vouchers (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  company_id BIGINT UNSIGNED NOT NULL,
+  expense_id BIGINT UNSIGNED NULL,
+  finance_item_id BIGINT UNSIGNED NULL,
+  voucher_type VARCHAR(64) NOT NULL,
+  voucher_number VARCHAR(128) NULL,
+  issue_date DATE NULL,
+  seller_name VARCHAR(255) NULL,
+  buyer_name VARCHAR(255) NULL,
+  seller_tax_number VARCHAR(64) NULL,
+  buyer_tax_number VARCHAR(64) NULL,
+  currency_code VARCHAR(16) NOT NULL DEFAULT 'CNY',
+  total_amount DECIMAL(18,4) NOT NULL DEFAULT 0,
+  tax_amount DECIMAL(18,4) NOT NULL DEFAULT 0,
+  attachment_url TEXT NULL,
+  deduction_candidate VARCHAR(32) NOT NULL DEFAULT 'review',
+  review_status VARCHAR(32) NOT NULL DEFAULT 'pending',
+  review_note VARCHAR(500) NULL,
+  created_by BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_finance_voucher_company_date (company_id, issue_date),
+  KEY idx_finance_voucher_expense (expense_id),
+  KEY idx_finance_voucher_item (finance_item_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS finance_periods (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  company_id BIGINT UNSIGNED NOT NULL,
+  month_key CHAR(7) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'preparing',
+  close_note VARCHAR(500) NULL,
+  closed_by BIGINT UNSIGNED NULL,
+  closed_at DATETIME NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_finance_period (company_id, month_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS suppliers (
@@ -57,7 +262,35 @@ CREATE TABLE IF NOT EXISTS system_setting_changes (
   old_value_json LONGTEXT NULL,
   new_value_json LONGTEXT NOT NULL,
   updated_by_person_id BIGINT UNSIGNED NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_system_setting_changes_person (updated_by_person_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS team_tasks (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  title VARCHAR(255) NOT NULL,
+  work_type VARCHAR(64) NOT NULL,
+  owner_person_id BIGINT UNSIGNED NULL,
+  collaborator_person_ids_json LONGTEXT NULL,
+  period VARCHAR(32) NOT NULL DEFAULT 'week',
+  status VARCHAR(32) NOT NULL DEFAULT 'todo',
+  priority VARCHAR(32) NOT NULL DEFAULT 'medium',
+  target_count DECIMAL(18,4) NOT NULL DEFAULT 1,
+  done_count DECIMAL(18,4) NOT NULL DEFAULT 0,
+  unit VARCHAR(32) NOT NULL DEFAULT '项',
+  start_at DATE NULL,
+  due_at DATE NULL,
+  related_object TEXT NULL,
+  result_note TEXT NULL,
+  quality_score DECIMAL(8,2) NOT NULL DEFAULT 0,
+  created_by_person_id BIGINT UNSIGNED NULL,
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_team_tasks_period_status (period, status, active),
+  KEY idx_team_tasks_type_period (work_type, period, active),
+  KEY idx_team_tasks_owner_period (owner_person_id, period, active),
+  KEY idx_team_tasks_due (due_at, active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS exchange_rates (
@@ -81,6 +314,9 @@ CREATE TABLE IF NOT EXISTS products (
   material VARCHAR(255) NULL,
   color VARCHAR(255) NULL,
   selling_points TEXT NULL,
+  selection_has_main_image TINYINT(1) GENERATED ALWAYS AS (CASE WHEN COALESCE(OCTET_LENGTH(TRIM(image_url)), 0) > 0 THEN 1 ELSE 0 END) STORED,
+  selection_has_detail_images TINYINT(1) GENERATED ALWAYS AS (CASE WHEN TRIM(COALESCE(detail_image_urls, '')) NOT IN ('', '[]') THEN 1 ELSE 0 END) STORED,
+  selection_has_selling_points TINYINT(1) GENERATED ALWAYS AS (CASE WHEN COALESCE(OCTET_LENGTH(TRIM(selling_points)), 0) > 0 THEN 1 ELSE 0 END) STORED,
   listing_title_ru TEXT NULL,
   listing_tags_ru TEXT NULL,
   listing_description_ru TEXT NULL,
@@ -124,7 +360,8 @@ CREATE TABLE IF NOT EXISTS products (
   UNIQUE KEY uk_products_code (code),
   KEY idx_products_owner (owner_person_id),
   KEY idx_products_parent (parent_product_id),
-  KEY idx_products_active_id (active, id)
+  KEY idx_products_active_id (active, id),
+  KEY idx_products_selection_readiness (active, selection_has_main_image, selection_has_detail_images, selection_has_selling_points)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS online_products (
@@ -150,6 +387,7 @@ CREATE TABLE IF NOT EXISTS online_products (
   commissions_json LONGTEXT NULL,
   attributes_json LONGTEXT NULL,
   raw_json LONGTEXT NULL,
+  published_at DATETIME NULL,
   ozon_updated_at DATETIME NULL,
   product_id BIGINT UNSIGNED NULL,
   synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -158,6 +396,7 @@ CREATE TABLE IF NOT EXISTS online_products (
   KEY idx_online_products_shop_status (shop_id, status),
   KEY idx_online_products_shop_offer (shop_id, offer_id),
   KEY idx_online_products_product (product_id),
+  KEY idx_online_products_published (published_at, id),
   KEY idx_online_products_synced (synced_at, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
@@ -241,6 +480,43 @@ CREATE TABLE IF NOT EXISTS purchase_order_items (
   KEY idx_purchase_order_items_order (purchase_order_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE IF NOT EXISTS purchase_cost_versions (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  product_id BIGINT UNSIGNED NOT NULL,
+  version_no INT NOT NULL,
+  source_key VARCHAR(160) NOT NULL,
+  stage VARCHAR(32) NOT NULL DEFAULT 'purchased',
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  source_type VARCHAR(32) NOT NULL DEFAULT 'other',
+  supplier_id BIGINT UNSIGNED NULL,
+  supplier_name_snapshot VARCHAR(255) NULL,
+  purchase_url TEXT NULL,
+  purchase_order_id BIGINT UNSIGNED NULL,
+  purchase_order_item_id BIGINT UNSIGNED NULL,
+  inbound_record_id BIGINT UNSIGNED NULL,
+  procurement_request_id BIGINT UNSIGNED NULL,
+  quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
+  amount DECIMAL(18,4) NOT NULL DEFAULT 0,
+  shipping_amount DECIMAL(18,4) NOT NULL DEFAULT 0,
+  goods_unit_cost DECIMAL(18,4) NOT NULL DEFAULT 0,
+  landed_unit_cost DECIMAL(18,4) NOT NULL DEFAULT 0,
+  previous_unit_cost DECIMAL(18,4) NULL,
+  change_ratio DECIMAL(18,6) NULL,
+  anomaly_level VARCHAR(32) NOT NULL DEFAULT 'normal',
+  anomaly_reason TEXT NULL,
+  review_status VARCHAR(32) NOT NULL DEFAULT 'not_required',
+  reviewed_by_person_id BIGINT UNSIGNED NULL,
+  reviewed_at DATETIME NULL,
+  created_by_person_id BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  revised_at DATETIME NULL,
+  UNIQUE KEY uk_purchase_cost_product_version (product_id, version_no),
+  KEY idx_purchase_cost_product_active (product_id, status, created_at),
+  KEY idx_purchase_cost_source (source_key, status),
+  KEY idx_purchase_cost_channel (product_id, source_type, status, created_at),
+  KEY idx_purchase_cost_review (review_status, anomaly_level, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS order_item_procurement_marks (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   order_item_id BIGINT UNSIGNED NOT NULL,
@@ -270,10 +546,13 @@ CREATE TABLE IF NOT EXISTS inbound_records (
   note TEXT NULL,
   purchase_order_id BIGINT UNSIGNED NULL,
   purchase_order_item_id BIGINT UNSIGNED NULL,
+  procurement_request_id BIGINT UNSIGNED NULL,
   qc_status VARCHAR(32) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   approved_at DATETIME NULL,
   KEY idx_inbound_purchase_item (purchase_order_item_id, status),
+  KEY idx_inbound_procurement_request (procurement_request_id),
   KEY idx_inbound_product_status (product_id, status),
   KEY idx_inbound_status_created (status, created_at),
   KEY idx_inbound_product_purchase (product_id, purchase_order_id)
@@ -776,6 +1055,23 @@ CREATE TABLE IF NOT EXISTS scheduled_job_runs (
   KEY idx_scheduled_job_runs_status (status, started_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE IF NOT EXISTS scheduled_job_run_events (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  run_id BIGINT UNSIGNED NOT NULL,
+  job_key VARCHAR(128) NOT NULL,
+  step_key VARCHAR(64) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'info',
+  shop_id BIGINT NULL,
+  shop_name VARCHAR(255) NULL,
+  attempt INT NOT NULL DEFAULT 0,
+  message TEXT NULL,
+  detail_json LONGTEXT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_scheduled_job_run_events_run (run_id, created_at),
+  KEY idx_scheduled_job_run_events_job (job_key, created_at),
+  KEY idx_scheduled_job_run_events_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS sessions (
   token VARCHAR(191) NOT NULL PRIMARY KEY,
   person_id BIGINT UNSIGNED NOT NULL,
@@ -797,7 +1093,7 @@ CREATE TABLE IF NOT EXISTS logistics_fee_rules (
   min_price_rub DECIMAL(18,4) NOT NULL DEFAULT 0,
   max_price_rub DECIMAL(18,4) NOT NULL DEFAULT 999999999,
   base_fee_cny DECIMAL(18,4) NOT NULL DEFAULT 0,
-  per_gram_cny DECIMAL(18,4) NOT NULL DEFAULT 0,
+  per_gram_cny DECIMAL(18,6) NOT NULL DEFAULT 0,
   per_ticket_cny DECIMAL(18,4) NOT NULL DEFAULT 0,
   enabled TINYINT(1) NOT NULL DEFAULT 1,
   filter_keywords TEXT NULL,
@@ -832,7 +1128,6 @@ CREATE TABLE IF NOT EXISTS ozon_stock_snapshots (
   synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_stock_snapshot_scope (shop_id, ozon_sku, warehouse_id, stock_type),
   KEY idx_ozon_stock_sku (shop_id, ozon_sku, stock_type),
-  KEY idx_ozon_stock_sku_type (shop_id, ozon_sku, stock_type),
   KEY idx_ozon_stock_product (product_id, synced_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
@@ -881,6 +1176,8 @@ try {
     "ALTER TABLE shops ADD COLUMN watermark_scale_percent DECIMAL(8,4) NOT NULL DEFAULT 22.0000",
     "ALTER TABLE shops ADD COLUMN watermark_opacity_percent DECIMAL(8,4) NOT NULL DEFAULT 82.0000",
     "ALTER TABLE people ADD COLUMN password_hash TEXT NULL",
+    "ALTER TABLE people ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    "ALTER TABLE people ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
     "ALTER TABLE products ADD COLUMN supplier_id BIGINT UNSIGNED NULL",
     "ALTER TABLE products ADD COLUMN listing_title_ru TEXT NULL",
     "ALTER TABLE products ADD COLUMN listing_tags_ru TEXT NULL",
@@ -896,7 +1193,9 @@ try {
     "ALTER TABLE outbound_records ADD COLUMN stock_location VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'",
     "ALTER TABLE outbound_records ADD COLUMN stock_location_source VARCHAR(64) NOT NULL DEFAULT 'legacy_unknown'",
     "ALTER TABLE order_label_prints ADD COLUMN print_batch_id VARCHAR(64) NULL",
-    "ALTER TABLE order_label_prints ADD COLUMN print_sequence INT NULL"
+    "ALTER TABLE order_label_prints ADD COLUMN print_sequence INT NULL",
+    "ALTER TABLE online_products ADD COLUMN published_at DATETIME NULL",
+    "ALTER TABLE inbound_records ADD COLUMN procurement_request_id BIGINT UNSIGNED NULL"
   ];
   for (const sql of alterStatements) {
     try {
@@ -915,7 +1214,13 @@ try {
     "CREATE INDEX idx_outbound_shop_created ON outbound_records (shop_id, created_at)",
     "CREATE INDEX idx_outbound_stock_location ON outbound_records (stock_location, status, created_at)",
     "CREATE INDEX idx_inventory_stock_location ON inventory_movements (stock_location, status, created_at)",
-    "CREATE INDEX idx_order_label_prints_sequence ON order_label_prints (printed_at, print_batch_id, print_sequence, order_id)"
+    "CREATE INDEX idx_sku_mappings_sku_active_product ON sku_mappings (ozon_sku, active, product_id)",
+    "CREATE INDEX idx_sku_mappings_offer_active_product ON sku_mappings (offer_id, active, product_id)",
+    "CREATE INDEX idx_outbound_product_status_item ON outbound_records (product_id, status, order_item_id)",
+    "CREATE INDEX idx_fbp_transfer_product_status ON fbp_transfer_records (product_id, status)",
+    "CREATE INDEX idx_order_label_prints_sequence ON order_label_prints (printed_at, print_batch_id, print_sequence, order_id)",
+    "CREATE INDEX idx_online_products_published ON online_products (published_at, id)",
+    "CREATE INDEX idx_inbound_procurement_request ON inbound_records (procurement_request_id)"
   ];
   for (const sql of indexStatements) {
     try {

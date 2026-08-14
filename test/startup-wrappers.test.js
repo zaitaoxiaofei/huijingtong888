@@ -34,3 +34,18 @@ test("start:all skips Electron unless explicitly enabled", () => {
   assert.match(startAll, /npmBin,\s*\["exec",\s*"electron",\s*"--",\s*"\."\]/);
   assert.doesNotMatch(windowsStart, /Electron/i);
 });
+
+test("startup scripts refuse protected ERP ports unless explicitly authorized", () => {
+  const startAll = fs.readFileSync("scripts/start-all.mjs", "utf8");
+  const startWithBuild = fs.readFileSync("scripts/start-with-build.mjs", "utf8");
+  const mysqlHelper = fs.readFileSync("scripts/start-local-mysql.ps1", "utf8");
+
+  for (const source of [startAll, startWithBuild]) {
+    assert.match(source, /protectedPorts\s*=\s*new Set\(\[8787,\s*8087\]\)/);
+    assert.match(source, /ALLOW_PROTECTED_PORT_OPERATION/);
+    assert.match(source, /Use PORT=8788 for local verification/);
+  }
+
+  assert.match(mysqlHelper, /\$env:PORT\s*=\s*"8788"/);
+  assert.doesNotMatch(mysqlHelper, /\$env:PORT\s*=\s*if\s*\(\$StartTunnel\)\s*\{\s*"8787"\s*\}/);
+});

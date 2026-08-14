@@ -207,7 +207,7 @@
         currentRub: price,
         originalRub: numberOrNull(pick(product, ['originalPrice'])),
         ozonCardRub: numberOrNull(pick(product, ['cardPrice'])),
-        currency: product.priceCurrency || product.currency || 'RUB',
+        currency: 'CNY',
         priceHistoryStatus: ''
       },
       sales: {

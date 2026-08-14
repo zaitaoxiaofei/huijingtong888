@@ -123,8 +123,40 @@ function checkVueTemplates() {
   }
 }
 
+function checkRuntimeProxySafety() {
+  const scriptDir = join(root, "scripts");
+  if (!existsSync(scriptDir)) return;
+  walk(scriptDir, (fullPath) => {
+    if (!fullPath.endsWith(".mjs") && !fullPath.endsWith(".js")) return;
+    const file = relative(root, fullPath).replaceAll("\\", "/");
+    const text = readFileSync(fullPath, "utf8");
+    const writesRuntimeProxy = /writeFileSync\([^)]*(?:ai-workbench-proxy|public[\\/]+vue-apps|public[\\/]+ai-workbench-proxy)/s.test(text)
+      || (/writeFileSync\(/.test(text) && /public[\\/]+ai-workbench-proxy|ai-workbench-proxy[\\/]+assets/.test(text));
+    if (!writesRuntimeProxy) return;
+    if (!text.includes("LEGACY_RUNTIME_PROXY_PATCH") || !text.includes("ALLOW_RUNTIME_PROXY_PATCH")) {
+      addFailure(
+        file,
+        1,
+        "scripts that edit built frontend/runtime proxy assets must require explicit ALLOW_RUNTIME_PROXY_PATCH approval"
+      );
+    }
+  });
+
+  const aiWorkbenchWrapper = "frontend/admin/views/listing/AiOptimizationWorkbenchV2.vue";
+  if (existsSync(join(root, aiWorkbenchWrapper))) {
+    const text = readText(aiWorkbenchWrapper);
+    if (text.includes("ai-workbench-proxy") || text.includes("/* @vite-ignore */")) {
+      warnings.push(`${aiWorkbenchWrapper}:1 AI workbench still uses runtime proxy assets; migrate to source-owned Vue/CSS before large UI or API changes.`);
+    }
+    if (text.includes("MutationObserver") || text.includes("innerHTML")) {
+      addFailure(aiWorkbenchWrapper, 1, "AI workbench wrapper must not add DOM patching; implement UI behavior in source-owned Vue/runtime code instead.");
+    }
+  }
+}
+
 checkAdminShell();
 checkVueTemplates();
+checkRuntimeProxySafety();
 
 for (const warning of warnings.slice(0, 30)) {
   console.warn(`[frontend-safety] warning ${warning}`);

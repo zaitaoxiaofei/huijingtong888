@@ -1,9 +1,8 @@
 import { shanghaiDateDaysAgo } from "../shanghai-time.js";
 
 const FBS_VIRTUAL_STOCK_WARNING_THRESHOLD = 10;
-const FBP_COVERAGE_DAYS_SHORTAGE = 30;
+const FBP_COVERAGE_DAYS_SHORTAGE = 15;
 const FBP_COVERAGE_DAYS_URGENT = 7;
-const FBP_COVERAGE_DAYS_SLOW = 60;
 
 export function applyStockAlertQuery(rows, query = {}) {
   const mode = String(query.mode || "alerts");
@@ -97,8 +96,9 @@ function matchesFbpAlertType(row = {}, alertType = "all") {
   if (!alertType || alertType === "all") return true;
   if (alertType === "out_of_stock") return row.alert_type === "out_of_stock";
   if (alertType === "within_7_days") return row.alert_type === "within_7_days";
-  if (alertType === "within_30_days") return row.alert_type === "within_30_days";
-  if (alertType === "slow") return ["over_60_days", "no_sales"].includes(row.alert_type);
+  if (alertType === "within_15_days") return row.alert_type === "within_15_days";
+  if (alertType === "within_30_days") return row.alert_type === "within_15_days";
+  if (alertType === "slow") return false;
   return row.alert_type === alertType;
 }
 
@@ -121,9 +121,7 @@ function fbpAlertPriority(row = {}) {
   const order = {
     out_of_stock: 0,
     within_7_days: 1,
-    within_30_days: 2,
-    no_sales: 3,
-    over_60_days: 4
+    within_15_days: 2
   };
   return order[row.alert_type] ?? 99;
 }
@@ -168,8 +166,7 @@ export function withStockAlertStatus(product) {
 
 function withFbpAlertStatus(row) {
   const available = Number(row.fbp_available || 0);
-  const recent30d = Number(row.recent_30d_qty || 0);
-  const dailySales = recent30d > 0 ? recent30d / 30 : 0;
+  const dailySales = dynamicFbpDailySales(row);
   const coverageDays = dailySales > 0 ? available / dailySales : null;
   const warnings = [];
   let alertType = "";
@@ -185,24 +182,19 @@ function withFbpAlertStatus(row) {
     alertLevel = "danger";
     alertText = `预计${coverageDays.toFixed(1)}天内断货`;
   } else if (coverageDays !== null && coverageDays <= FBP_COVERAGE_DAYS_SHORTAGE) {
-    alertType = "within_30_days";
+    alertType = "within_15_days";
     alertLevel = "warning";
     alertText = `预计${coverageDays.toFixed(1)}天内断货`;
-  } else if (coverageDays !== null && coverageDays >= FBP_COVERAGE_DAYS_SLOW) {
-    alertType = "over_60_days";
-    alertLevel = "warning";
-    alertText = `预计库存${coverageDays.toFixed(1)}天`;
-  } else if (!recent30d && available > 0) {
-    alertType = "no_sales";
-    alertLevel = "warning";
-    alertText = "30天无销量但有FBP库存";
   }
 
   if (alertType) warnings.push({ type: alertType, level: alertLevel, text: alertText });
   return {
     ...row,
     daily_sales_30d: dailySales,
+    daily_sales_14d: dailySales,
+    dynamic_daily_sales: dailySales,
     coverage_days: coverageDays,
+    suggested_qty: suggestedFbpReplenishmentQty(available, dailySales),
     alert_type: alertType || "ok",
     alert_level: alertLevel,
     warnings,
@@ -210,12 +202,26 @@ function withFbpAlertStatus(row) {
   };
 }
 
+function suggestedFbpReplenishmentQty(available, dailySales) {
+  if (dailySales <= 0) return 0;
+  const targetQty = Math.ceil(dailySales * 30);
+  const shortage = targetQty - Number(available || 0);
+  return shortage > 0 ? Math.max(1, Math.ceil(shortage)) : 0;
+}
+
+function dynamicFbpDailySales(row = {}) {
+  const recent7d = Number(row.recent_7d_qty || 0);
+  const prev7d = Number(row.prev_7d_qty || 0);
+  if (recent7d <= 0 && prev7d <= 0) return 0;
+  if (prev7d <= 0) return recent7d / 7;
+  if (recent7d > prev7d) return recent7d / 7;
+  return ((recent7d * 0.7) + (prev7d * 0.3)) / 7;
+}
+
 function fbpAlertSuggestion(alertType, coverageDays) {
   if (alertType === "out_of_stock") return "FBP已断货，优先补仓或调整库存策略。";
   if (alertType === "within_7_days") return "预计7天内断货，建议立即补仓。";
-  if (alertType === "within_30_days") return "预计30天内断货，建议排入补货计划。";
-  if (alertType === "over_60_days") return `预计库存${Number(coverageDays || 0).toFixed(1)}天，关注资金占用和滞缓风险。`;
-  if (alertType === "no_sales") return "30天无销量但有FBP库存，检查是否需要促销或减少补仓。";
+  if (alertType === "within_15_days") return `预计${Number(coverageDays || 0).toFixed(1)}天内断货，建议排入补货计划。`;
   return "FBP库存状态正常。";
 }
 

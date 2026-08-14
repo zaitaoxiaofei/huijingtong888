@@ -8,6 +8,7 @@ import path from "node:path";
 const buildStamp = process.env.OZON_BUILD_STAMP || String(Date.now());
 const releaseVersion = process.env.OZON_RELEASE_VERSION || process.env.APP_RELEASE_VERSION || "local";
 const releaseChannel = process.env.OZON_RELEASE_CHANNEL || "local";
+const frontendOutDir = path.resolve(process.env.OZON_VITE_OUT_DIR || "public/vue-apps");
 
 export default defineConfig({
   base: "/vue-apps/",
@@ -24,7 +25,7 @@ export default defineConfig({
   ],
   publicDir: false,
   build: {
-    outDir: path.resolve("public/vue-apps"),
+    outDir: frontendOutDir,
     emptyOutDir: false,
     assetsDir: "assets",
     cssCodeSplit: true,

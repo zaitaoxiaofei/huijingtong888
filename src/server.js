@@ -1,11 +1,12 @@
 import http from "node:http";
 import { Buffer } from "node:buffer";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import sharp from "sharp";
 import { config } from "./config.js";
+import { resolveUploadSubdirRoots } from "./runtime-uploads.js";
 import { calculateCelFbsPricing } from "./celRates.js";
 import { mysqlRuntimeServices } from "./services/mysql-runtime-services.js";
 import { readForm, readJson, isRequestCancelledError } from "./http/request.js";
@@ -18,8 +19,11 @@ import { createCatalogRoutes, handleCatalogRestRoute } from "./server/routes/cat
 import { createOrderRoutes, handleOrderRestRoute } from "./server/routes/orders.js";
 import { createPrintRoutes } from "./server/routes/print.js";
 import { createOperationsRoutes, handleOperationsRestRoute } from "./server/routes/operations.js";
+import { createTeamRoutes, handleTeamRestRoute } from "./server/routes/team.js";
 import { createProfitRoutes } from "./server/routes/profit.js";
 import { createAdvertisingRoutes } from "./server/routes/advertising.js";
+import { createFinanceCenterRoutes, handleFinanceCenterRestRoute } from "./server/routes/financeCenter.js";
+import { createPayrollRoutes } from "./server/routes/payroll.js";
 import { createSellerAnalyticsRoutes, handleSellerAnalyticsRestRoute } from "./server/routes/sellerAnalytics.js";
 import { createOzonActionRoutes } from "./server/routes/ozonActions.js";
 import { createSyncRoutes } from "./server/routes/sync.js";
@@ -27,16 +31,22 @@ import { createReviewRoutes, handleReviewRestRoute } from "./server/routes/revie
 import { createListingAutomationRoutes, handleListingAutomationRestRoute, handleMaterialPackageRestRoute } from "./server/routes/listingAutomation.js";
 import { createAssetVariantEngineRoutes, handleAssetVariantEngineRestRoute } from "./server/routes/assetVariantEngine.js";
 import { createAiGenerationTaskRoutes, handleAiGenerationTaskRestRoute } from "./server/routes/aiGenerationTasks.js";
+import { cleanupAiGenerationTaskHistory } from "./services/ai-generation-tasks.js";
+import { collectSkusWithSellerPool, collectorSellerPoolStatus } from "./services/collector-seller-pool.js";
 import { createAiPromptTemplateRoutes, handleAiPromptTemplateRestRoute } from "./server/routes/aiPromptTemplates.js";
 import { createAiStrategyRoutes, handleAiStrategyRestRoute } from "./server/routes/aiStrategies.js";
 import { createMaterialAssetRoutes, handleMaterialAssetRestRoute } from "./server/routes/materialAssets.js";
 import { createAiImageRoutes, handleAiImageRestRoute } from "./server/routes/aiImageRoutes.js";
+import { createAiVariantLabRoutes, handleAiVariantLabRestRoute } from "./server/routes/aiVariantLab.js";
 import { getAiTaskFile } from "./server/services/ai/aiWorkflowService.js";
 import { createImageCropperRoutes, handleImageCropperRestRoute } from "./server/routes/tools/imageCropper.js";
+import { createOnboardingKnowledgeRoutes, handleOnboardingKnowledgeRestRoute } from "./server/routes/onboardingKnowledge.js";
 import {
+  cleanupScheduledJobHistory,
   ScheduledJobScheduler,
   listScheduledJobs,
   logScheduledJobEvent,
+  recoverInterruptedScheduledJobRuns,
   registerScheduledJobs,
   runScheduledJobNow,
   scheduledJobRunEvents,
@@ -65,16 +75,28 @@ import {
 import { systemInfo } from "./server/maintenance.js";
 import { checkDailyPurchaseNotification, globalUpdateStatus, subscribeGlobalUpdateEvents, updateGlobalUpdateStatus } from "./server/notifications.js";
 import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
-import { mysqlExecute, mysqlQuery } from "./mysql-pool.js";
+import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
 
 const services = mysqlRuntimeServices;
+const runtimeReadiness = {
+  ready: false,
+  startedAt: new Date().toISOString(),
+  readyAt: "",
+  error: ""
+};
 
 const publicDir = path.resolve("public");
 const serveStatic = createStaticHandler(publicDir, {
-  extraRouteRoots: [{
-    prefix: "/uploads/listing-media/",
-    roots: resolveListingMediaStaticRoots()
-  }]
+  extraRouteRoots: [
+    {
+      prefix: "/uploads/listing-media/",
+      roots: resolveListingMediaStaticRoots()
+    },
+    {
+      prefix: "/uploads/team-attachments/",
+      roots: resolveTeamAttachmentStaticRoots()
+    }
+  ]
 });
 const handleAuth = createAuthHandler(readJson);
 const imageProxyCacheDir = path.resolve("runtime", "image-proxy-cache");
@@ -92,17 +114,55 @@ async function resolveDownloadArtifactPath(filename) {
     error.statusCode = 400;
     throw error;
   }
+  const aliasNames = normalized === "ozon-erp-collector-plugin.rar"
+    ? ["ozon-erp-collector-plugin.rar", "ozon-baodan-erp-plugin.rar"]
+    : [normalized];
+  const versionedNames = normalized === "ozon-erp-collector-plugin.rar" || normalized === "ozon-baodan-erp-plugin.rar"
+    ? ["ozon-baodan-erp-plugin-*.rar"]
+    : normalized === "ozon-seller-analytics-plugin.rar"
+      ? ["ozon-seller-analytics-plugin-*.rar"]
+      : [];
   const candidates = Array.from(new Set([
-    path.resolve("dist", normalized),
-    path.resolve("..", normalized),
-    path.resolve("..", "dist", normalized),
-    path.resolve(normalized)
+    ...aliasNames.flatMap((name) => [
+      path.resolve("dist", name),
+      path.resolve("..", name),
+      path.resolve("..", "dist", name),
+      path.resolve("..", "..", name),
+      path.resolve("..", "..", "dist", name),
+      path.resolve(name)
+    ])
   ]));
   for (const candidate of candidates) {
     try {
       await fs.access(candidate);
       return candidate;
     } catch {}
+  }
+  for (const pattern of versionedNames) {
+    const searchDirs = Array.from(new Set([
+      path.resolve("dist"),
+      path.resolve(".."),
+      path.resolve("..", "dist"),
+      path.resolve("..", ".."),
+      path.resolve("..", "..", "dist")
+    ]));
+    const prefix = pattern.replace("*", "");
+    const suffix = ".rar";
+    const matches = [];
+    for (const dir of searchDirs) {
+      try {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isFile() && entry.name.startsWith(prefix) && entry.name.endsWith(suffix)) {
+            const fullPath = path.join(dir, entry.name);
+            const stat = await fs.stat(fullPath);
+            matches.push({ path: fullPath, mtimeMs: stat.mtimeMs });
+          }
+        }
+      } catch {}
+    }
+    matches.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    if (matches[0]) return matches[0].path;
   }
   const error = new Error(`Download artifact not found for ${normalized}. Checked: ${candidates.join(" | ")}`);
   error.statusCode = 404;
@@ -112,8 +172,11 @@ async function resolveDownloadArtifactPath(filename) {
 const routeModules = {
   ...createCatalogRoutes({ services, readJson }),
   ...createOperationsRoutes({ services, readJson }),
+  ...createTeamRoutes({ services, readJson }),
   ...createProfitRoutes({ services, readJson }),
   ...createAdvertisingRoutes({ services, readJson }),
+  ...createFinanceCenterRoutes({ readJson, services }),
+  ...createPayrollRoutes({ readJson }),
   ...createSellerAnalyticsRoutes({ services, readJson }),
   ...createOzonActionRoutes({ services, readJson }),
   ...createReviewRoutes({ services, readJson }),
@@ -127,7 +190,9 @@ const routeModules = {
   ...createAiStrategyRoutes({ services, readJson }),
   ...createMaterialAssetRoutes({ services, readJson }),
   ...createAiImageRoutes({ readJson }),
-  ...createImageCropperRoutes({ readJson })
+  ...createAiVariantLabRoutes({ services, readJson }),
+  ...createImageCropperRoutes({ readJson }),
+  ...createOnboardingKnowledgeRoutes({ readJson })
 };
 
 // 保持现有 API 不变，但把“简单直连型接口”集中成一个表；
@@ -143,6 +208,7 @@ const routes = {
   "GET /api/ai-provider/presets": () => services.aiProviderPresets(),
   "POST /api/ai-provider/config": async (req) => services.updateAiProviderConfig(await readJson(req), req._session?.personId),
   "POST /api/ai-provider/test": async (req) => services.testAiProviderConfig(await readJson(req)),
+  "POST /api/ai-provider/test-image-channel": async (req) => services.testAiImageProviderChannel(await readJson(req)),
   "POST /api/ai-provider/chat": async (req) => services.chatWithAiProvider(await readJson(req)),
   "GET /api/dashboard": (req) => services.dashboard(req.query || {}),
   "GET /api/scheduled-jobs": (req) => listScheduledJobs(req.query || {}),
@@ -159,6 +225,7 @@ const routes = {
   "GET /api/inventory": (req) => services.inventory(req.query || {}),
   "GET /api/stock-alerts": (req) => services.stockAlerts(req.query || {}),
   "GET /api/fbp-opportunities": (req) => services.fbpOpportunities(req.query || {}),
+  "GET /api/fbp-replenishment-orders": (req) => services.fbpReplenishmentOrders(req.query || {}),
   "GET /api/fbp-transfer-records": (req) => services.fbpTransferRecords(req.query || {}),
   "GET /api/stock-warehouse-rules": () => services.stockWarehouseRules(),
   "GET /api/erp/inventory-current": () => services.inventoryCurrent(),
@@ -166,6 +233,20 @@ const routes = {
   "GET /api/erp/profit-items": () => services.profitItems(),
   "GET /api/erp/order-exceptions": () => services.orderExceptions(),
   "POST /api/exchange-rate": async (req) => services.updateExchangeRate(await readJson(req)),
+  "POST /api/fbp-replenishment-ignore": async (req) => services.ignoreFbpReplenishment(await readJson(req), req._session?.personId),
+  "POST /api/fbp-replenishment-restore": async (req) => services.restoreFbpReplenishment(await readJson(req)),
+  "POST /api/fbp-replenishment-orders": async (req) => services.createFbpReplenishmentOrders(await readJson(req), req._session?.personId),
+  "POST /api/fbp-replenishment-orders/merge": async (req) => services.mergeFbpReplenishmentOrders(await readJson(req), req._session?.personId),
+  "POST /api/fbp-replenishment-orders/link": async (req) => services.linkFbpReplenishmentOrders(await readJson(req), req._session?.personId),
+  "POST /api/fbp-replenishment-orders/unlink": async (req) => services.unlinkFbpReplenishmentOrder(await readJson(req), req._session?.personId),
+  "GET /api/fbp-replenishment-batches/fill-preview": (req) => services.fbpReplenishmentBatchFillPreview(req.query || {}),
+  "POST /api/fbp-replenishment-batches/fill-results": async (req) => services.recordFbpReplenishmentBatchFill(await readJson(req), req._session?.personId),
+  "POST /api/fbp-replenishment-orders/items/adjustments": async (req) => services.addFbpReplenishmentItemAdjustment(await readJson(req), req._session?.personId),
+  "POST /api/fbp-replenishment-orders/delete": async (req) => services.deleteFbpReplenishmentOrder(await readJson(req), req._session?.personId),
+  "POST /api/fbp-replenishment-orders/items": async (req) => services.updateFbpReplenishmentOrderItems(await readJson(req)),
+  "POST /api/fbp-replenishment-orders/items/barcode-printed": async (req) => services.markFbpReplenishmentItemBarcodePrinted(await readJson(req), req._session?.personId),
+  "POST /api/fbp-replenishment-orders/items/delete": async (req) => services.deleteFbpReplenishmentOrderItem(await readJson(req), req._session?.personId),
+  "POST /api/fbp-replenishment-orders/status": async (req) => services.updateFbpReplenishmentOrderStatus(await readJson(req), req._session?.personId),
   "POST /api/fbp-transfer-records": async (req) => services.createFbpTransferRecord(await readJson(req), req._session?.personId),
   "POST /api/fbp-transfer-records/confirm-received": async (req) => services.confirmFbpTransferReceived(await readJson(req), req._session?.personId),
   "POST /api/fbp-transfer-records/pdf-preview": async (req) => services.previewFbpSupplyPdf(await readJson(req)),
@@ -183,7 +264,9 @@ function logSlowApiRequest({ req, res, url, startedAt }) {
   const level = elapsedMs >= API_ERROR_ELAPSED_MS ? "error" : "warn";
   const status = res?.statusCode || 0;
   const query = url.search || "";
-  const message = `[api-performance] ${req.method} ${url.pathname}${query} status=${status} elapsed=${elapsedMs}ms`;
+  const pool = getMysqlPoolMetrics();
+  const memory = process.memoryUsage();
+  const message = `[api-performance] ${req.method} ${url.pathname}${query} status=${status} elapsed=${elapsedMs}ms db_active=${pool.activeConnections}/${pool.connectionLimit} db_wait=${pool.lastAcquireWaitMs.toFixed(1)}ms rss_mb=${(memory.rss / 1024 / 1024).toFixed(1)} heap_mb=${(memory.heapUsed / 1024 / 1024).toFixed(1)}`;
   console[level](message);
   if (req._timingMarks?.length) {
     const segments = [];
@@ -202,6 +285,84 @@ function markRequestTiming(req, label) {
   req._timingMarks.push({ label, at: performance.now() });
 }
 
+function isForegroundApiRequest(parts = []) {
+  if (parts[0] !== "api") return false;
+  if (parts[1] === "local-plugin") return false;
+  if (parts[1] === "system" && parts[2] === "events") return false;
+  return true;
+}
+
+function trackForegroundApiRequest(req, res, parts = []) {
+  if (!isForegroundApiRequest(parts)) return;
+  activeForegroundApiRequests += 1;
+  lastForegroundApiAt = Date.now();
+  let settled = false;
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    activeForegroundApiRequests = Math.max(0, activeForegroundApiRequests - 1);
+    lastForegroundApiAt = Date.now();
+  };
+  res.once("finish", settle);
+  res.once("close", settle);
+}
+
+function foregroundApiDeferral(jobKey, context = {}) {
+  if (String(context?.mode || "") === "manual") return null;
+  if (BACKGROUND_TASK_FOREGROUND_IDLE_MS <= 0) return null;
+  if (criticalJobForegroundDeferralExpired(jobKey, context)) return null;
+  if (activeForegroundApiRequests > 0) {
+    return {
+      skipped: true,
+      reason: "foreground_api_active",
+      retryDelaySeconds: Math.max(15, Math.ceil(BACKGROUND_TASK_FOREGROUND_IDLE_MS / 1000)),
+      foregroundApiRequests: activeForegroundApiRequests,
+      jobKey
+    };
+  }
+  const idleForMs = Date.now() - lastForegroundApiAt;
+  if (lastForegroundApiAt > 0 && idleForMs < BACKGROUND_TASK_FOREGROUND_IDLE_MS) {
+    return {
+      skipped: true,
+      reason: "foreground_api_recent",
+      retryDelaySeconds: Math.max(15, Math.ceil((BACKGROUND_TASK_FOREGROUND_IDLE_MS - idleForMs) / 1000)),
+      idleForMs,
+      jobKey
+    };
+  }
+  return null;
+}
+
+function databasePoolDeferral(jobKey, context = {}) {
+  if (String(context?.mode || "") === "manual") return null;
+  const pool = getMysqlPoolMetrics();
+  const backgroundCeiling = Math.max(1, pool.connectionLimit - 2);
+  if (pool.activeConnections < backgroundCeiling) return null;
+  return {
+    skipped: true,
+    reason: "database_pool_pressure",
+    retryDelaySeconds: 30,
+    activeConnections: pool.activeConnections,
+    connectionLimit: pool.connectionLimit,
+    jobKey
+  };
+}
+
+function backgroundJobDeferral(jobKey, context = {}) {
+  return foregroundApiDeferral(jobKey, context) || databasePoolDeferral(jobKey, context);
+}
+
+function withForegroundApiDeferral(jobKey, handler) {
+  return async (context = {}) => {
+    const deferred = backgroundJobDeferral(jobKey, context);
+    if (deferred) {
+      console.log(`background job ${jobKey} deferred: ${deferred.reason}`);
+      return deferred;
+    }
+    return handler(context);
+  };
+}
+
 cleanExpiredSessions();
 setInterval(cleanExpiredSessions, 3600 * 1000);
 let backgroundOrderSyncRunning = false;
@@ -214,8 +375,74 @@ let backgroundAdvertisingTodaySyncRunning = false;
 let backgroundSellerAnalyticsSyncRunning = false;
 let backgroundOzonStockSyncRunning = false;
 let backgroundOzonCategorySyncRunning = false;
-let backgroundHeavyTaskRunning = "";
-const BACKGROUND_ORDER_SYNC_INTERVAL_MS = Math.max(1, Number(config.backgroundOrderSyncIntervalMinutes || 30)) * 60 * 1000;
+let backgroundCustomerMessageRunning = false;
+const backgroundModuleLanes = new Map();
+
+function claimBackgroundModuleLane(moduleKey, jobKey) {
+  const runningJob = backgroundModuleLanes.get(moduleKey) || "";
+  if (runningJob) return runningJob;
+  backgroundModuleLanes.set(moduleKey, jobKey);
+  return "";
+}
+
+function releaseBackgroundModuleLane(moduleKey, jobKey) {
+  if (backgroundModuleLanes.get(moduleKey) === jobKey) backgroundModuleLanes.delete(moduleKey);
+}
+
+function backgroundModuleLaneStatus() {
+  if (!backgroundModuleLanes.size) return "idle";
+  return Array.from(backgroundModuleLanes.entries()).map(([moduleKey, jobKey]) => `${moduleKey}:${jobKey}`).join(",");
+}
+let activeForegroundApiRequests = 0;
+let lastForegroundApiAt = 0;
+let resourceMonitorExpectedAt = Date.now() + 30_000;
+let lastReportedSlowAcquisitions = 0;
+setInterval(() => {
+  const now = Date.now();
+  const eventLoopLagMs = Math.max(0, now - resourceMonitorExpectedAt);
+  resourceMonitorExpectedAt = now + 30_000;
+  const pool = getMysqlPoolMetrics();
+  const memory = process.memoryUsage();
+  const rssMb = memory.rss / 1024 / 1024;
+  const poolPressure = pool.activeConnections >= Math.max(1, pool.connectionLimit - 1);
+  const newSlowAcquisitions = pool.slowAcquisitions > lastReportedSlowAcquisitions;
+  if (eventLoopLagMs >= 200 || rssMb >= 512 || poolPressure || newSlowAcquisitions) {
+    console.warn(`[runtime-health] event_loop_lag=${eventLoopLagMs}ms rss_mb=${rssMb.toFixed(1)} heap_mb=${(memory.heapUsed / 1024 / 1024).toFixed(1)} db_active=${pool.activeConnections}/${pool.connectionLimit} db_wait_avg=${pool.averageAcquireWaitMs.toFixed(1)}ms db_wait_slow=${pool.slowAcquisitions} foreground=${activeForegroundApiRequests} module_lanes=${backgroundModuleLaneStatus()}`);
+  }
+  lastReportedSlowAcquisitions = pool.slowAcquisitions;
+}, 30_000).unref();
+const BACKGROUND_TASK_FOREGROUND_IDLE_MS = Math.max(0, Number(config.backgroundTaskForegroundIdleSeconds || 20)) * 1000;
+const BACKGROUND_CRITICAL_JOB_MAX_DEFERRAL_MS = Math.max(0, Number(config.backgroundCriticalJobMaxDeferralSeconds || 300)) * 1000;
+const FOREGROUND_DEFERRAL_BOUNDED_JOBS = new Set([
+  "customer_message_dispatch",
+  "order_status_sync",
+  "cancelled_order_sync",
+  "posting_detail_sync",
+  "ozon_action_cleanup",
+  "advertising_sync",
+  "advertising_today_sync"
+]);
+
+function criticalJobForegroundDeferralExpired(jobKey, context = {}) {
+  if (!FOREGROUND_DEFERRAL_BOUNDED_JOBS.has(String(jobKey || ""))) return false;
+  const maxDeferralMs = jobKey === "order_status_sync"
+    ? Math.min(BACKGROUND_CRITICAL_JOB_MAX_DEFERRAL_MS, 60_000)
+    : BACKGROUND_CRITICAL_JOB_MAX_DEFERRAL_MS;
+  if (maxDeferralMs <= 0) return true;
+  const lastSuccessAt = context?.lastSuccessAt instanceof Date
+    ? context.lastSuccessAt
+    : new Date(context?.lastSuccessAt || "");
+  const intervalMs = Math.max(0, Number(context?.intervalMinutes || 0)) * 60 * 1000;
+  if (Number.isFinite(lastSuccessAt.getTime()) && intervalMs > 0) {
+    return Date.now() - (lastSuccessAt.getTime() + intervalMs) >= maxDeferralMs;
+  }
+  const plannedFor = context?.plannedFor instanceof Date
+    ? context.plannedFor
+    : new Date(context?.plannedFor || "");
+  if (!Number.isFinite(plannedFor.getTime())) return false;
+  return Date.now() - plannedFor.getTime() >= maxDeferralMs;
+}
+const BACKGROUND_ORDER_SYNC_INTERVAL_MS = Math.max(1, Number(config.backgroundOrderSyncIntervalMinutes || 10)) * 60 * 1000;
 const BACKGROUND_ORDER_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundOrderSyncInitialDelaySeconds || 180)) * 1000;
 const BACKGROUND_ORDER_SYNC_DAYS = Math.max(1, Number(config.backgroundOrderSyncDays || 90));
 const BACKGROUND_CANCELLED_ORDER_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundCancelledOrderSyncIntervalMinutes || 60)) * 60 * 1000;
@@ -224,6 +451,7 @@ const BACKGROUND_CANCELLED_ORDER_SYNC_DAYS = Math.max(1, Number(config.backgroun
 const BACKGROUND_POSTING_DETAIL_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundPostingDetailSyncIntervalMinutes || 60)) * 60 * 1000;
 const BACKGROUND_POSTING_DETAIL_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundPostingDetailSyncInitialDelaySeconds || 600)) * 1000;
 const BACKGROUND_POSTING_DETAIL_SYNC_DAYS = Math.max(1, Number(config.backgroundPostingDetailSyncDays || 30));
+const BACKGROUND_POSTING_DETAIL_RECONCILIATION_DAYS = Math.min(Math.max(1, Number(config.backgroundPostingDetailReconciliationDays || 2)), 7);
 const BACKGROUND_POSTING_DETAIL_SYNC_LIMIT = Math.max(1, Number(config.backgroundPostingDetailSyncLimit || 200));
 const BACKGROUND_POSTING_DETAIL_SYNC_CONCURRENCY = Math.min(Math.max(Number(config.backgroundPostingDetailSyncConcurrency || 2), 1), 5);
 const BACKGROUND_POSTING_DETAIL_DEEP_SYNC_DAYS = Math.max(1, Number(config.backgroundPostingDetailDeepSyncDays || 90));
@@ -232,18 +460,18 @@ const BACKGROUND_ANALYTICS_REFRESH_INTERVAL_MS = Math.max(1, Number(config.backg
 const BACKGROUND_ANALYTICS_REFRESH_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAnalyticsRefreshInitialDelaySeconds || 240)) * 1000;
 const BACKGROUND_DASHBOARD_SNAPSHOT_INTERVAL_MS = Math.max(1, Number(config.backgroundDashboardSnapshotIntervalMinutes || 3)) * 60 * 1000;
 const BACKGROUND_DASHBOARD_SNAPSHOT_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundDashboardSnapshotInitialDelaySeconds || 20)) * 1000;
-const BACKGROUND_ADVERTISING_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundAdvertisingSyncIntervalMinutes || 60)) * 60 * 1000;
+const BACKGROUND_ADVERTISING_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundAdvertisingSyncIntervalMinutes || 15)) * 60 * 1000;
 const BACKGROUND_ADVERTISING_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAdvertisingSyncInitialDelaySeconds || 420)) * 1000;
 const BACKGROUND_ADVERTISING_SYNC_DAYS = Math.max(1, Number(config.backgroundAdvertisingSyncDays || 7));
 const BACKGROUND_ADVERTISING_SYNC_TIMEOUT_MS = Math.max(1, Number(config.backgroundAdvertisingSyncTimeoutMinutes || 25)) * 60 * 1000;
 const BACKGROUND_ADVERTISING_TODAY_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundAdvertisingTodaySyncIntervalMinutes || 15)) * 60 * 1000;
 const BACKGROUND_ADVERTISING_TODAY_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAdvertisingTodaySyncInitialDelaySeconds || 120)) * 1000;
-const BACKGROUND_ADVERTISING_TODAY_SYNC_TIMEOUT_MS = Math.max(1, Number(config.backgroundAdvertisingTodaySyncTimeoutMinutes || 12)) * 60 * 1000;
+const BACKGROUND_ADVERTISING_TODAY_SYNC_TIMEOUT_MS = Math.max(1, Number(config.backgroundAdvertisingTodaySyncTimeoutMinutes || 25)) * 60 * 1000;
 const BACKGROUND_SELLER_ANALYTICS_SYNC_DAYS = Math.max(1, Number(config.backgroundSellerAnalyticsSyncDays || 7));
 const BACKGROUND_SELLER_ANALYTICS_SYNC_TIMEOUT_MS = Math.max(1, Number(config.backgroundSellerAnalyticsSyncTimeoutMinutes || 45)) * 60 * 1000;
 const BACKGROUND_OZON_STOCK_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundOzonStockSyncIntervalMinutes || 30)) * 60 * 1000;
 const BACKGROUND_OZON_STOCK_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundOzonStockSyncInitialDelaySeconds || 480)) * 1000;
-const OZON_ACTION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+const OZON_ACTION_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
 const scheduledJobDefinitions = [
   {
@@ -253,6 +481,16 @@ const scheduledJobDefinitions = [
     priority: "critical",
     intervalMinutes: Math.round(BACKGROUND_ORDER_SYNC_INTERVAL_MS / 60000),
     initialDelaySeconds: Math.round(BACKGROUND_ORDER_SYNC_INITIAL_DELAY_MS / 1000),
+    catchupEnabled: true,
+    maxCatchupRuns: 1
+  },
+  {
+    key: "customer_message_dispatch",
+    name: "Ozon 客户消息任务扫描",
+    category: "orders",
+    priority: "high",
+    intervalMinutes: 10,
+    initialDelaySeconds: 300,
     catchupEnabled: true,
     maxCatchupRuns: 1
   },
@@ -298,11 +536,12 @@ const scheduledJobDefinitions = [
   },
   {
     key: "dashboard_snapshot_refresh",
-    name: "经营首页快照刷新",
+    name: "经营首页快照刷新（已合并到订单同步）",
     category: "analytics",
     priority: "normal",
     intervalMinutes: Math.round(BACKGROUND_DASHBOARD_SNAPSHOT_INTERVAL_MS / 60000),
     initialDelaySeconds: Math.round(BACKGROUND_DASHBOARD_SNAPSHOT_INITIAL_DELAY_MS / 1000),
+    enabled: false,
     catchupEnabled: false,
     maxCatchupRuns: 0
   },
@@ -334,30 +573,47 @@ const scheduledJobDefinitions = [
     catchupEnabled: true,
     maxCatchupRuns: 1,
     config: {
-      scope: "today_only",
+      scope: "rolling_recent",
+      rollingDays: 3,
       timeoutMinutes: Math.round(BACKGROUND_ADVERTISING_TODAY_SYNC_TIMEOUT_MS / 60000),
       campaignChunkSize: 1,
-      reportRetryDelayMs: 15000
+      reportRetryDelayMs: 15000,
+      maxShopsPerRun: 1,
+      maxCampaignsPerRun: 3,
+      shopConcurrency: 1
     }
   },
   {
     key: "seller_analytics_daily_sync",
-    name: "Ozon 店铺分析每日同步",
+    name: "Ozon 店铺分析 7 天同步",
     category: "analytics",
     priority: "high",
     scheduleType: "daily",
-    dailyTime: `${String(config.backgroundSellerAnalyticsSyncHour || 8).padStart(2, "0")}:${String(config.backgroundSellerAnalyticsSyncMinute || 0).padStart(2, "0")}`,
+    dailyTime: "02:00",
     catchupEnabled: true,
     maxCatchupRuns: 1,
     config: {
       scope: "recent_window",
-      days: BACKGROUND_SELLER_ANALYTICS_SYNC_DAYS,
+      days: 7,
       timeoutMinutes: Math.round(BACKGROUND_SELLER_ANALYTICS_SYNC_TIMEOUT_MS / 60000),
       maxShopsPerRun: 50,
       maxPages: 500,
       requestLimit: 30,
-      waitPollMs: 2000
+      waitPollMs: 2000,
+      shopConcurrency: 3,
+      retentionDays: 15
     }
+  },
+  {
+    key: "seller_analytics_28d_sync",
+    name: "Ozon 店铺分析 28 天同步",
+    category: "analytics",
+    priority: "high",
+    scheduleType: "daily",
+    dailyTime: "03:00",
+    catchupEnabled: true,
+    maxCatchupRuns: 1,
+    config: { scope: "recent_window", days: 28, timeoutMinutes: Math.round(BACKGROUND_SELLER_ANALYTICS_SYNC_TIMEOUT_MS / 60000), maxShopsPerRun: 50, maxPages: 500, requestLimit: 30, waitPollMs: 2000, shopConcurrency: 3, retentionDays: 15 }
   },
   {
     key: "ozon_stock_sync",
@@ -369,6 +625,16 @@ const scheduledJobDefinitions = [
     initialDelaySeconds: Math.round(BACKGROUND_OZON_STOCK_SYNC_INITIAL_DELAY_MS / 1000),
     catchupEnabled: true,
     maxCatchupRuns: 1
+  },
+  {
+    key: "inventory_alert_snapshot_refresh",
+    name: "库存告警快照预热",
+    category: "inventory",
+    priority: "low",
+    intervalMinutes: 10,
+    initialDelaySeconds: 90,
+    catchupEnabled: false,
+    maxCatchupRuns: 0
   },
   {
     key: "ozon_category_sync",
@@ -386,48 +652,104 @@ const scheduledJobDefinitions = [
     name: "上架记录状态和评分同步",
     category: "listing",
     priority: "high",
-    intervalMinutes: 10,
-    initialDelaySeconds: 300,
+    intervalMinutes: 2,
+    initialDelaySeconds: 60,
     catchupEnabled: true,
     maxCatchupRuns: 1,
     config: {
-      limit: 30,
-      minAgeMinutes: 5,
+      limit: 100,
+      minAgeMinutes: 1,
       maxAgeDays: 7
     }
   },
   {
     key: "ozon_action_cleanup",
     name: "Ozon 营销动作清理",
-    category: "maintenance",
-    priority: "normal",
+    category: "profit_guard",
+    priority: "critical",
     intervalMinutes: Math.round(OZON_ACTION_CLEANUP_INTERVAL_MS / 60000),
     initialDelaySeconds: 5,
     catchupEnabled: true,
     maxCatchupRuns: 1
+  },
+  {
+    key: "listing_publish_summary_backfill",
+    name: "上架记录列表摘要回填",
+    category: "maintenance",
+    priority: "low",
+    intervalMinutes: 15,
+    initialDelaySeconds: 180,
+    catchupEnabled: false,
+    maxCatchupRuns: 0,
+    config: { limit: 5 }
+  },
+  {
+    key: "scheduled_history_cleanup",
+    name: "定时任务日志分级清理",
+    category: "maintenance",
+    priority: "low",
+    scheduleType: "daily",
+    dailyTime: "03:40",
+    catchupEnabled: true,
+    maxCatchupRuns: 1,
+    config: {
+      successDays: 7,
+      detailDays: 7,
+      batchSize: 5000
+    }
+  },
+  {
+    key: "ai_generation_history_cleanup",
+    name: "AI generation history cleanup",
+    category: "maintenance",
+    priority: "low",
+    scheduleType: "daily",
+    dailyTime: "03:55",
+    catchupEnabled: true,
+    maxCatchupRuns: 1,
+    config: { retentionDays: 30, batchSize: 1000 }
   }
 ];
 
 const scheduledJobHandlers = {
-  order_status_sync: runBackgroundOrderStatusSync,
-  cancelled_order_sync: runBackgroundCancelledOrderSync,
-  posting_detail_sync: runBackgroundPostingDetailSync,
-  posting_detail_deep_sync: runBackgroundPostingDetailDeepSync,
-  analytics_refresh: runBackgroundAnalyticsRefresh,
-  dashboard_snapshot_refresh: runBackgroundDashboardSnapshotRefresh,
-  advertising_sync: runBackgroundAdvertisingSync,
-  advertising_today_sync: runBackgroundAdvertisingTodaySync,
-  seller_analytics_daily_sync: runBackgroundSellerAnalyticsDailySync,
-  ozon_stock_sync: runBackgroundOzonStockSync,
-  ozon_category_sync: runBackgroundOzonCategorySync,
-  listing_publish_record_sync: (job) => services.autoSyncListingPublishRecords(job?.config || {}),
-  ozon_action_cleanup: runOzonActionCleanupSweep
+  order_status_sync: withForegroundApiDeferral("order_status_sync", runBackgroundOrderStatusSync),
+  customer_message_dispatch: withForegroundApiDeferral("customer_message_dispatch", runBackgroundCustomerMessageDispatch),
+  cancelled_order_sync: withForegroundApiDeferral("cancelled_order_sync", runBackgroundCancelledOrderSync),
+  posting_detail_sync: withForegroundApiDeferral("posting_detail_sync", runBackgroundPostingDetailSync),
+  posting_detail_deep_sync: withForegroundApiDeferral("posting_detail_deep_sync", runBackgroundPostingDetailDeepSync),
+  analytics_refresh: withForegroundApiDeferral("analytics_refresh", runBackgroundAnalyticsRefresh),
+  dashboard_snapshot_refresh: withForegroundApiDeferral("dashboard_snapshot_refresh", runBackgroundDashboardSnapshotRefresh),
+  advertising_sync: withForegroundApiDeferral("advertising_sync", runBackgroundAdvertisingSync),
+  advertising_today_sync: withForegroundApiDeferral("advertising_today_sync", runBackgroundAdvertisingTodaySync),
+  seller_analytics_daily_sync: withForegroundApiDeferral("seller_analytics_daily_sync", runBackgroundSellerAnalyticsDailySync),
+  seller_analytics_28d_sync: withForegroundApiDeferral("seller_analytics_28d_sync", runBackgroundSellerAnalyticsDailySync),
+  ozon_stock_sync: withForegroundApiDeferral("ozon_stock_sync", runBackgroundOzonStockSync),
+  inventory_alert_snapshot_refresh: withForegroundApiDeferral("inventory_alert_snapshot_refresh", () => services.stockAlerts({
+    mode: "alerts",
+    paged: "1",
+    page: 1,
+    pageSize: 1,
+    refresh: "1"
+  })),
+  ozon_category_sync: withForegroundApiDeferral("ozon_category_sync", runBackgroundOzonCategorySync),
+  listing_publish_record_sync: withForegroundApiDeferral("listing_publish_record_sync", (job) => services.autoSyncListingPublishRecords(job?.config || {})),
+  listing_publish_summary_backfill: withForegroundApiDeferral("listing_publish_summary_backfill", (job) => services.backfillListingPublishRecordListSummaries(job?.config || {})),
+  ozon_action_cleanup: withForegroundApiDeferral("ozon_action_cleanup", runOzonActionCleanupSweep),
+  scheduled_history_cleanup: withForegroundApiDeferral("scheduled_history_cleanup", (job) => cleanupScheduledJobHistory(job?.config || {})),
+  ai_generation_history_cleanup: withForegroundApiDeferral("ai_generation_history_cleanup", (job) => cleanupAiGenerationTaskHistory(job?.config || {}))
 };
 
 const scheduledJobScheduler = new ScheduledJobScheduler({
   handlers: scheduledJobHandlers,
+  beforeRun: ({ key, mode, plannedFor, lastSuccessAt, intervalMinutes, config: jobConfig }) => backgroundJobDeferral(key, {
+    mode,
+    plannedFor,
+    lastSuccessAt,
+    intervalMinutes,
+    config: jobConfig
+  }),
   pollIntervalMs: 60 * 1000,
-  maxConcurrent: 1
+  maxConcurrent: Math.max(5, Number(config.scheduledJobsMaxConcurrent || 5))
 });
 
 async function handleSiteAccess(req, res, url) {
@@ -455,7 +777,7 @@ async function handleSiteAccess(req, res, url) {
     clearCookie(res, getSiteAccessCookieName(), {
       path: "/",
       sameSite: "Lax",
-      secure: siteAccessUsesSecureCookie()
+      secure: siteAccessUsesSecureCookie(req)
     });
     writeHead(res, 302, { Location: SITE_ACCESS_SESSION_PATH });
     res.end();
@@ -484,7 +806,7 @@ async function handleSiteAccess(req, res, url) {
     setCookie(res, getSiteAccessCookieName(), createSiteAccessCookieValue(), {
       path: "/",
       sameSite: "Lax",
-      secure: siteAccessUsesSecureCookie(),
+      secure: siteAccessUsesSecureCookie(req),
       maxAge: getSiteAccessCookieMaxAgeSeconds()
     });
     writeHead(res, 302, { Location: formNext });
@@ -496,6 +818,65 @@ async function handleSiteAccess(req, res, url) {
 }
 
 async function handleRestRoute(req, res, url, parts) {
+  const onboardingHandled = await handleOnboardingKnowledgeRestRoute({ req, res, parts, json, notFound });
+  if (onboardingHandled !== false) return onboardingHandled;
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "ai-provider" && parts[2] === "stream") {
+    const body = await readJson(req);
+    const streamRequestId = randomUUID();
+    const streamStartedAt = Date.now();
+    console.info("[ai-provider-stream] start", {
+      requestId: streamRequestId,
+      route: body?.route || "text",
+      messageCount: Array.isArray(body?.messages) ? body.messages.length : 0,
+      personId: req._session?.personId || req._session?.id || 0
+    });
+    const controller = new AbortController();
+    req.on("aborted", () => controller.abort());
+    res.on("close", () => {
+      if (!res.writableEnded) controller.abort();
+      if (!res.writableEnded) {
+        console.warn("[ai-provider-stream] client closed", {
+          requestId: streamRequestId,
+          elapsedMs: Date.now() - streamStartedAt
+        });
+      }
+    });
+    writeHead(res, 200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no"
+    });
+    const send = (event, payload) => {
+      if (res.destroyed || res.writableEnded) return;
+      res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+    };
+    try {
+      const result = await services.streamAiProviderResponse(body, {
+        signal: controller.signal,
+        onDelta: (delta) => send("delta", { delta })
+      });
+      send("done", result);
+      console.info("[ai-provider-stream] done", {
+        requestId: streamRequestId,
+        elapsedMs: Date.now() - streamStartedAt,
+        provider: result?.provider || "",
+        model: result?.model || ""
+      });
+    } catch (error) {
+      console.error("[ai-provider-stream] failed", {
+        requestId: streamRequestId,
+        elapsedMs: Date.now() - streamStartedAt,
+        status: error?.status || 502,
+        name: error?.name || "Error",
+        message: error?.message || String(error)
+      });
+      if (!controller.signal.aborted) send("error", { error: error?.message || "AI 流式请求失败", status: error?.status || 502 });
+    }
+    res.end();
+    return true;
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "system" && parts[2] === "events") {
     writeHead(res, 200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -503,7 +884,10 @@ async function handleRestRoute(req, res, url, parts) {
       "Connection": "keep-alive",
       "X-Accel-Buffering": "no"
     });
-    const unsubscribe = subscribeGlobalUpdateEvents(res, Object.fromEntries(url.searchParams.entries()));
+    const unsubscribe = subscribeGlobalUpdateEvents(res, {
+      ...Object.fromEntries(url.searchParams.entries()),
+      personId: req._session?.personId || req._session?.id || 0
+    });
     req.on("close", unsubscribe);
     return true;
   }
@@ -515,14 +899,7 @@ async function handleRestRoute(req, res, url, parts) {
     parts[1] === "ozon-erp-collector-plugin.rar" ||
     parts[1] === "ozon-seller-analytics-plugin.rar"
   )) {
-    let filename = parts[1];
-    if (filename === "ozon-baodan-erp-plugin.rar" || filename === "ozon-erp-collector-plugin.rar") {
-      const status = globalUpdateStatus();
-      filename = status.plugin.package_name || `ozon-baodan-erp-plugin-${status.plugin.version}.rar`;
-    } else if (filename === "ozon-seller-analytics-plugin.rar") {
-      const status = globalUpdateStatus();
-      filename = status.analytics_plugin.package_name || `ozon-seller-analytics-plugin-${status.analytics_plugin.version}.rar`;
-    }
+    const filename = parts[1];
     const filePath = await resolveDownloadArtifactPath(filename);
     const buffer = await fs.readFile(filePath);
     writeHead(res, 200, {
@@ -577,6 +954,9 @@ async function handleRestRoute(req, res, url, parts) {
     return orderRestHandled;
   }
 
+  const financeCenterHandled = await handleFinanceCenterRestRoute({ req, res, url, parts, json, writeHead });
+  if (financeCenterHandled !== false) return financeCenterHandled;
+
   const catalogRestHandled = await handleCatalogRestRoute({
     req,
     res,
@@ -604,6 +984,18 @@ async function handleRestRoute(req, res, url, parts) {
   });
   if (operationsRestHandled !== false) {
     return operationsRestHandled;
+  }
+
+  const teamRestHandled = await handleTeamRestRoute({
+    req,
+    res,
+    parts,
+    services,
+    readJson,
+    json
+  });
+  if (teamRestHandled !== false) {
+    return teamRestHandled;
   }
 
   const materialPackageRestHandled = await handleMaterialPackageRestRoute({
@@ -702,6 +1094,17 @@ async function handleRestRoute(req, res, url, parts) {
   });
   if (aiImageRestHandled !== false) {
     return aiImageRestHandled;
+  }
+
+  const aiVariantLabRestHandled = await handleAiVariantLabRestRoute({
+    req,
+    res,
+    parts,
+    services,
+    json
+  });
+  if (aiVariantLabRestHandled !== false) {
+    return aiVariantLabRestHandled;
   }
 
   const aiPromptTemplateRestHandled = await handleAiPromptTemplateRestRoute({
@@ -857,6 +1260,18 @@ async function handleLocalPluginRoute(req, res, parts) {
     });
   }
 
+  if (parts[2] === "server-publish" && parts[3] === "media-upload-jobs" && parts[4] === "claim" && req.method === "POST") {
+    const body = await readJson(req);
+    const result = await services.claimServerPublishMediaUploadJobs(body || {});
+    return localPluginJson(req, res, { success: result.success !== false, data: result, ...result });
+  }
+
+  if (parts[2] === "server-publish" && parts[3] === "media-upload-jobs" && parts[4] && parts[5] && req.method === "POST") {
+    const body = await readJson(req);
+    const result = await services.completeServerPublishMediaUploadJob(parts[4], parts[5], body || {});
+    return localPluginJson(req, res, { success: result.success !== false, data: result, ...result });
+  }
+
   if (parts[2] === "collected-products" && parts[3] === "sync" && req.method === "POST") {
     const body = await readJson(req);
     const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim();
@@ -869,6 +1284,42 @@ async function handleLocalPluginRoute(req, res, parts) {
     const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim();
     const result = await services.lookupCollectedProductFromPlugin(url.searchParams.get("sku") || "", tenantId);
     return localPluginJson(req, res, { success: true, data: result });
+  }
+
+  if (parts[2] === "collected-products" && parts[3] === "lookup-batch" && req.method === "POST") {
+    const body = await readJson(req);
+    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim();
+    const skus = [...new Set((Array.isArray(body?.skus) ? body.skus : [])
+      .map((sku) => String(sku || "").trim())
+      .filter(Boolean))].slice(0, 120);
+    const results = new Array(skus.length);
+    let cursor = 0;
+    await Promise.all(Array.from({ length: Math.min(8, skus.length || 1) }, async () => {
+      while (cursor < skus.length) {
+        const index = cursor++;
+        const sku = skus[index];
+        try {
+          results[index] = { sku, success: true, data: await services.lookupCollectedProductFromPlugin(sku, tenantId) };
+        } catch (error) {
+          results[index] = { sku, success: false, error: error?.message || String(error) };
+        }
+      }
+    }));
+    return localPluginJson(req, res, { success: true, total: skus.length, results });
+  }
+
+  if (parts[2] === "collector-seller-pool" && parts[3] === "status" && req.method === "GET") {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim();
+    const result = await collectorSellerPoolStatus(tenantId);
+    return localPluginJson(req, res, { success: true, data: result, ...result });
+  }
+
+  if (parts[2] === "collector-seller-pool" && parts[3] === "collect" && req.method === "POST") {
+    const body = await readJson(req);
+    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim();
+    const result = await collectSkusWithSellerPool(body?.skus || [], tenantId);
+    return localPluginJson(req, res, { success: result.success !== false, data: result, ...result });
   }
 
   if (parts[2] === "collected-product-details" && req.method === "POST") {
@@ -939,7 +1390,7 @@ async function handleLocalPluginRoute(req, res, parts) {
   if (parts[2] === "seller-analytics" && parts[3] === "plugin-prepare" && parts[4] === "next" && req.method === "GET") {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim() || "admin";
-    const request = await services.sellerAnalyticsClaimPluginPrepare(tenantId);
+    const request = await services.sellerAnalyticsClaimPluginPrepare(tenantId, Object.fromEntries(url.searchParams.entries()));
     return localPluginJson(req, res, { success: true, data: request, request });
   }
 
@@ -995,7 +1446,11 @@ async function handleLocalPluginRoute(req, res, parts) {
 
 async function sendProductImage(res, productId, imageLoader = null, options = {}) {
   try {
-    const image = imageLoader ? await imageLoader(productId) : await services.productImage(productId);
+    const loadImage = () => imageLoader ? imageLoader(productId) : services.productImage(productId);
+    let image = await loadImage();
+    if (!image && services.refreshProductImageUrl) {
+      image = await services.refreshProductImageUrl(productId).catch(() => "");
+    }
     if (!image) return notFound(res);
     const thumbnail = Boolean(options.thumbnail);
     const thumbnailWidth = Math.min(Math.max(Number(options.width || 180), 80), 360);
@@ -1010,6 +1465,27 @@ async function sendProductImage(res, productId, imageLoader = null, options = {}
         "Content-Length": imageBody.buffer.length,
         "Cache-Control": imageBody.cacheControl,
         ...(thumbnail ? { "X-Product-Image-Variant": "thumbnail" } : { "Pragma": "no-cache" })
+      });
+      return res.end(imageBody.buffer);
+    }
+    if (/^https?:\/\//i.test(String(image))) {
+      let payload = await fetchRemoteImagePayload(String(image)).catch(() => null);
+      if (!payload && services.refreshProductImageUrl) {
+        const refreshedImage = await services.refreshProductImageUrl(productId).catch(() => "");
+        if (refreshedImage) {
+          image = refreshedImage;
+          payload = await fetchRemoteImagePayload(String(refreshedImage)).catch(() => null);
+        }
+      }
+      if (!payload) return sendImagePlaceholder(res);
+      const imageBody = thumbnail
+        ? await productThumbnailBuffer(payload.buffer, `${productId}:${options.version || ""}:${image}`, thumbnailWidth)
+        : { buffer: payload.buffer, contentType: payload.contentType, cacheControl: "private, max-age=86400" };
+      writeHead(res, 200, {
+        "Content-Type": imageBody.contentType,
+        "Content-Length": imageBody.buffer.length,
+        "Cache-Control": imageBody.cacheControl,
+        ...(thumbnail ? { "X-Product-Image-Variant": "thumbnail" } : {})
       });
       return res.end(imageBody.buffer);
     }
@@ -1081,6 +1557,16 @@ function sendImagePlaceholder(res) {
     "X-Image-Proxy-Cache": "PLACEHOLDER"
   });
   return res.end(buffer);
+}
+
+function sendImageProxyUnavailable(res) {
+  writeHead(res, 502, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Content-Length": 0,
+    "Cache-Control": "no-store, must-revalidate",
+    "X-Image-Proxy-Cache": "UNAVAILABLE"
+  });
+  return res.end();
 }
 
 function imageProxyCacheKey(target) {
@@ -1182,14 +1668,14 @@ async function sendRemoteImage(req, res, url) {
     }
     const payload = await payloadPromise;
     if (res.writableEnded || res.destroyed) return;
-    if (!payload) return sendImagePlaceholder(res);
+    if (!payload) return sendImageProxyUnavailable(res);
     writeCachedRemoteImage(target, payload).catch((error) => {
       console.warn("image proxy cache write failed:", error?.message || error);
     });
     return sendRemoteImageBuffer(res, payload, "MISS");
   } catch (error) {
     if (res.writableEnded || res.destroyed) return;
-    return sendImagePlaceholder(res);
+    return sendImageProxyUnavailable(res);
   } finally {
     imageProxyInflight.delete(target);
     req.off("aborted", onClose);
@@ -1211,6 +1697,16 @@ const server = http.createServer(async (req, res) => {
 
     const url = new URL(req.url, `http://${req.headers.host}`);
     const parts = url.pathname.split("/").filter(Boolean);
+    if (req.method === "GET" && url.pathname === "/api/ready") {
+      return json(res, {
+        ok: runtimeReadiness.ready,
+        status: runtimeReadiness.ready ? "ready" : "starting",
+        started_at: runtimeReadiness.startedAt,
+        ready_at: runtimeReadiness.readyAt || null,
+        error: runtimeReadiness.error || null
+      }, runtimeReadiness.ready ? 200 : 503);
+    }
+    trackForegroundApiRequest(req, res, parts);
     if (parts[0] === "api") {
       req._timingMarks = [];
       res._serverTimingStartedAt = startedAt;
@@ -1246,6 +1742,15 @@ const server = http.createServer(async (req, res) => {
         return json(res, { error: "素材公网同步未授权" }, 403);
       }
       return json(res, await services.uploadListingMedia(req, { skipPublicSync: true, publicUpload: true }));
+    }
+
+    if (parts[0] === "api" && parts[1] === "webhooks" && parts[2] === "ozon") {
+      if (req.method !== "POST" || parts.length !== 3) return json(res, { error: "仅支持Ozon POST通知" }, 405);
+      const contentType = String(req.headers["content-type"] || "").toLowerCase();
+      if (!contentType.includes("application/json")) return json(res, { error: "Ozon通知必须使用application/json" }, 415);
+      const contentLength = Number(req.headers["content-length"] || 0);
+      if (contentLength > 256 * 1024) return json(res, { error: "Ozon通知请求体过大" }, 413);
+      return json(res, await services.receiveOzonWebhook(await readJson(req)));
     }
 
     if (url.pathname === SITE_ACCESS_SESSION_PATH || url.pathname === SITE_ACCESS_LOGIN_PATH || url.pathname === SITE_ACCESS_LOGOUT_PATH || url.pathname === SITE_ACCESS_API_LOGIN_PATH) {
@@ -1374,24 +1879,69 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+async function prepareRuntimeBeforeListen() {
+  try {
+    await warmMysqlPool();
+    await services.warmCoreInventoryRuntime?.();
+    await services.ensureListingAutomationSchema?.();
+    console.log("listing automation schema warmup completed");
+    runtimeReadiness.ready = true;
+    runtimeReadiness.readyAt = new Date().toISOString();
+    console.log("database and core runtime warmup completed");
+  } catch (error) {
+    runtimeReadiness.error = error?.message || String(error);
+    console.error("database and core runtime warmup failed", error);
+    throw error;
+  }
+}
+
+await prepareRuntimeBeforeListen();
+
 server.listen(config.port, config.host || undefined, () => {
   const bindHost = config.host || "0.0.0.0";
   console.log(`ozon ERP running at ${config.appBaseUrl} (bind ${bindHost}:${config.port})`);
   setInterval(() => checkDailyPurchaseNotification(services.all), 60000);
-  registerScheduledJobs(scheduledJobDefinitions)
-    .then(() => {
-      scheduledJobScheduler.start();
-      console.log(`scheduled job scheduler started with ${scheduledJobDefinitions.length} job(s)`);
-    })
-    .catch((error) => console.error("scheduled job scheduler startup failed", error));
+  void (async () => {
+    if (config.scheduledJobsEnabled) {
+      registerScheduledJobs(scheduledJobDefinitions)
+        .then(() => recoverInterruptedScheduledJobRuns())
+        .then((recovery) => {
+          scheduledJobScheduler.start();
+          console.log(`scheduled job scheduler started with ${scheduledJobDefinitions.length} job(s); recovered ${recovery.interruptedRuns} interrupted run(s)`);
+        })
+        .catch((error) => console.error("scheduled job scheduler startup failed", error));
+    } else {
+      console.log("scheduled job scheduler disabled for this server; manual runs remain available");
+    }
+  })();
   setTimeout(recoverGenerationJobs, 3000);
 });
 
 async function recoverGenerationJobs() {
   await Promise.allSettled([
     recoverAssetVariantJobs(),
-    recoverAiGenerationTasks()
+    recoverAiGenerationTasks(),
+    recoverDirectListingPublishes(),
+    recoverInterruptedListingPublishTasks()
   ]);
+}
+
+async function recoverInterruptedListingPublishTasks() {
+  try {
+    const result = await services.recoverInterruptedListingPublishTasksOnStartup?.();
+    if (result?.tasks) console.log("listing publish task recovery", result);
+  } catch (error) {
+    console.error("listing publish task recovery failed", error);
+  }
+}
+
+async function recoverDirectListingPublishes() {
+  try {
+    const result = await services.recoverDirectListingPublishesOnStartup?.();
+    if (result?.scanned) console.log("direct listing publish recovery", result);
+  } catch (error) {
+    console.error("direct listing publish recovery failed", error);
+  }
 }
 
 async function recoverAssetVariantJobs() {
@@ -1410,44 +1960,86 @@ async function recoverAiGenerationTasks() {
   } catch (error) {
     console.error("ai generation task recovery failed", error);
   }
+  try {
+    const result = await services.recoverAiVariantLabImageBatchesOnStartup?.();
+    if (result?.ok) console.log(`AI variant image batch worker recovered ${result.resumed || 0} batch(es)`);
+  } catch (error) {
+    console.warn("AI variant image batch recovery skipped:", error?.message || error);
+  }
+  try {
+    const result = await services.recoverAiMaterialOptimizationBatchesOnStartup?.();
+    if (result?.ok) console.log("AI material optimization batch worker ready");
+  } catch (error) {
+    console.warn("AI material optimization batch recovery skipped:", error?.message || error);
+  }
+  try {
+    const result = await services.recoverAiVariantDraftSaveBatchesOnStartup?.();
+    if (result?.ok) console.log("AI variant draft save batch worker ready");
+  } catch (error) {
+    console.warn("AI variant draft save batch recovery skipped:", error?.message || error);
+  }
+}
+
+async function runBackgroundCustomerMessageDispatch() {
+  if (backgroundCustomerMessageRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 60 };
+  const laneBusy = claimBackgroundModuleLane("customer_messages", "customer_message_dispatch");
+  if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 60 };
+  backgroundCustomerMessageRunning = true;
+  try {
+    const result = await services.processCustomerMessageTasks({ limit: 30 });
+    const webhookResult = await services.processOzonWebhookEvents({ limit: 10 });
+    console.log(`background customer message dispatch ok: webhooks ${webhookResult.processed || 0}, recovered ${webhookResult.recovered || 0}, tasks ${result.processed || 0}, sending_disabled=${Boolean(result.sending_disabled)}`);
+    return { ...result, webhooks_processed: webhookResult.processed || 0, webhooks_recovered: webhookResult.recovered || 0 };
+  } finally {
+    backgroundCustomerMessageRunning = false;
+    releaseBackgroundModuleLane("customer_messages", "customer_message_dispatch");
+  }
 }
 
 async function runBackgroundOrderStatusSync() {
-  if (backgroundOrderSyncRunning) return { skipped: true, reason: "already_running" };
-  if (backgroundHeavyTaskRunning) {
-    console.log(`background order status sync skipped: ${backgroundHeavyTaskRunning} is running`);
-    return { skipped: true, reason: backgroundHeavyTaskRunning };
-  }
+  if (backgroundOrderSyncRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 30 };
+  const laneBusy = claimBackgroundModuleLane("orders", "order_status_sync");
+  if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 30 };
   backgroundOrderSyncRunning = true;
-  backgroundHeavyTaskRunning = "order_status_sync";
   try {
     const result = await services.syncOzonIncrementalOrders({
       mode: "new",
       fallback_days: BACKGROUND_ORDER_SYNC_DAYS,
-      overlap_minutes: 60
+      overlap_minutes: 60,
+      skip_post_processing: true
     });
+    const dashboard = await services.refreshDashboardSnapshot({ forceRefresh: true });
     console.log(`background order status sync ok: fetched ${result.fetched || 0}, updated ${result.updated || 0}, requests ${result.requests || 0}`);
-    return result;
+    console.log(`dashboard snapshot refreshed after order sync: ${dashboard?.commerce?.date_key || ""} ${dashboard?.snapshot?.refreshed_at || ""}`);
+    return {
+      ...result,
+      dashboard_refresh: {
+        date_key: dashboard?.commerce?.date_key || "",
+        refreshed_at: dashboard?.snapshot?.refreshed_at || ""
+      }
+    };
   } catch (error) {
     console.error("background order status sync failed", error);
     throw error;
   } finally {
     backgroundOrderSyncRunning = false;
-    if (backgroundHeavyTaskRunning === "order_status_sync") backgroundHeavyTaskRunning = "";
+    releaseBackgroundModuleLane("orders", "order_status_sync");
   }
 }
 
 async function runBackgroundCancelledOrderSync() {
-  if (backgroundCancelledOrderSyncRunning) return { skipped: true, reason: "already_running" };
-  if (backgroundHeavyTaskRunning) {
-    console.log(`background cancelled order sync skipped: ${backgroundHeavyTaskRunning} is running`);
-    return { skipped: true, reason: backgroundHeavyTaskRunning };
-  }
+  if (backgroundCancelledOrderSyncRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 60 };
+  const laneBusy = claimBackgroundModuleLane("orders", "cancelled_order_sync");
+  if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 60 };
   backgroundCancelledOrderSyncRunning = true;
-  backgroundHeavyTaskRunning = "cancelled_order_sync";
   try {
     const window = rollingOrderSyncWindow(BACKGROUND_CANCELLED_ORDER_SYNC_DAYS);
-    const result = await services.syncDemoOrders({ from: window.from, to: window.to, statuses: ["cancelled"] });
+    const result = await services.syncDemoOrders({
+      from: window.from,
+      to: window.to,
+      statuses: ["cancelled"],
+      skip_post_processing: true
+    });
     console.log(`background cancelled order sync ok: ${window.from}~${window.to}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
     return { window, ...result };
   } catch (error) {
@@ -1455,45 +2047,45 @@ async function runBackgroundCancelledOrderSync() {
     throw error;
   } finally {
     backgroundCancelledOrderSyncRunning = false;
-    if (backgroundHeavyTaskRunning === "cancelled_order_sync") backgroundHeavyTaskRunning = "";
+    releaseBackgroundModuleLane("orders", "cancelled_order_sync");
   }
 }
 
 async function runBackgroundPostingDetailSync() {
-  if (backgroundPostingDetailSyncRunning) return { skipped: true, reason: "already_running" };
-  if (backgroundHeavyTaskRunning) {
-    console.log(`background posting detail sync skipped: ${backgroundHeavyTaskRunning} is running`);
-    return { skipped: true, reason: backgroundHeavyTaskRunning };
-  }
+  if (backgroundPostingDetailSyncRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 60 };
+  const laneBusy = claimBackgroundModuleLane("orders", "posting_detail_sync");
+  if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 60 };
   backgroundPostingDetailSyncRunning = true;
-  backgroundHeavyTaskRunning = "posting_detail_sync";
   try {
+    const reconciliationWindow = rollingOrderSyncWindow(BACKGROUND_POSTING_DETAIL_RECONCILIATION_DAYS);
+    const reconciliation = await services.syncDemoOrders({
+      from: reconciliationWindow.from,
+      to: reconciliationWindow.to,
+      skip_post_processing: true
+    });
     const result = await services.syncKnownOzonPostingDetails({
       mode: "scheduled_hourly",
       days: BACKGROUND_POSTING_DETAIL_SYNC_DAYS,
       limit: BACKGROUND_POSTING_DETAIL_SYNC_LIMIT,
       concurrency: BACKGROUND_POSTING_DETAIL_SYNC_CONCURRENCY
     });
-    console.log(`background posting detail sync ok: candidates ${result.candidate_orders || 0}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
-    return result;
+    console.log(`background posting detail sync ok: reconciled ${reconciliation.fetched || 0}, candidates ${result.candidate_orders || 0}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
+    return { ...result, reconciliation: { window: reconciliationWindow, ...reconciliation } };
   } catch (error) {
     console.error("background posting detail sync failed", error);
     throw error;
   } finally {
     backgroundPostingDetailSyncRunning = false;
-    if (backgroundHeavyTaskRunning === "posting_detail_sync") backgroundHeavyTaskRunning = "";
+    releaseBackgroundModuleLane("orders", "posting_detail_sync");
   }
 }
 
 async function runBackgroundPostingDetailDeepSync() {
-  if (backgroundPostingDetailSyncRunning) return { skipped: true, reason: "already_running" };
-  if (backgroundHeavyTaskRunning) {
-    console.log(`background posting detail deep sync skipped: ${backgroundHeavyTaskRunning} is running`);
-    return { skipped: true, reason: backgroundHeavyTaskRunning };
-  }
+  if (backgroundPostingDetailSyncRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 120 };
+  const laneBusy = claimBackgroundModuleLane("orders", "posting_detail_deep_sync");
+  if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 120 };
 
   backgroundPostingDetailSyncRunning = true;
-  backgroundHeavyTaskRunning = "posting_detail_deep_sync";
   try {
     const result = await services.syncKnownOzonPostingDetails({
       mode: "scheduled_nightly",
@@ -1508,18 +2100,15 @@ async function runBackgroundPostingDetailDeepSync() {
     throw error;
   } finally {
     backgroundPostingDetailSyncRunning = false;
-    if (backgroundHeavyTaskRunning === "posting_detail_deep_sync") backgroundHeavyTaskRunning = "";
+    releaseBackgroundModuleLane("orders", "posting_detail_deep_sync");
   }
 }
 
 async function runBackgroundAnalyticsRefresh() {
-  if (backgroundAnalyticsRefreshRunning) return { skipped: true, reason: "already_running" };
-  if (backgroundHeavyTaskRunning) {
-    console.log(`background analytics refresh skipped: ${backgroundHeavyTaskRunning} is running`);
-    return { skipped: true, reason: backgroundHeavyTaskRunning };
-  }
+  if (backgroundAnalyticsRefreshRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 60 };
+  const laneBusy = claimBackgroundModuleLane("analytics", "analytics_refresh");
+  if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 60 };
   backgroundAnalyticsRefreshRunning = true;
-  backgroundHeavyTaskRunning = "analytics_refresh";
   try {
     const result = await services.refreshProfitAnalyticsSnapshots({});
     console.log(`background analytics refresh ok: product rows ${result.product_rows || 0}, sku rows ${result.sku_rows || 0}`);
@@ -1529,12 +2118,12 @@ async function runBackgroundAnalyticsRefresh() {
     throw error;
   } finally {
     backgroundAnalyticsRefreshRunning = false;
-    if (backgroundHeavyTaskRunning === "analytics_refresh") backgroundHeavyTaskRunning = "";
+    releaseBackgroundModuleLane("analytics", "analytics_refresh");
   }
 }
 
 async function runBackgroundDashboardSnapshotRefresh() {
-  if (backgroundDashboardSnapshotRefreshRunning) return { skipped: true, reason: "already_running" };
+  if (backgroundDashboardSnapshotRefreshRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 30 };
   backgroundDashboardSnapshotRefreshRunning = true;
   try {
     const result = await services.refreshDashboardSnapshot({});
@@ -1663,13 +2252,10 @@ async function runConcurrentAdvertisingShopSyncs(shopIds = [], buildBody, option
 }
 
 async function runBackgroundAdvertisingSync(context = {}) {
-  if (backgroundAdvertisingSyncRunning) return { skipped: true, reason: "already_running" };
-  if (backgroundHeavyTaskRunning) {
-    console.log(`background advertising sync skipped: ${backgroundHeavyTaskRunning} is running`);
-    return { skipped: true, reason: backgroundHeavyTaskRunning, retryDelaySeconds: 90 };
-  }
+  if (backgroundAdvertisingSyncRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 90 };
+  const laneBusy = claimBackgroundModuleLane("advertising", "advertising_sync");
+  if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 90 };
   backgroundAdvertisingSyncRunning = true;
-  backgroundHeavyTaskRunning = "advertising_sync";
   const timeoutMinutes = Math.max(1, Number(context?.config?.timeoutMinutes || BACKGROUND_ADVERTISING_SYNC_TIMEOUT_MS / 60000));
   const syncDays = Math.max(1, Number(context?.config?.days || BACKGROUND_ADVERTISING_SYNC_DAYS));
   const campaignChunkSize = Math.max(1, Math.min(3, Number(context?.config?.campaignChunkSize || 1)));
@@ -1687,10 +2273,10 @@ async function runBackgroundAdvertisingSync(context = {}) {
       message: "Starting background advertising sync",
       detail: { config: context?.config || {} }
     }).catch(() => {});
-    const window = rollingOrderSyncWindow(syncDays);
     const activeShopIds = await listActiveAdvertisingShopIds();
     const { selectedShopIds, nextCursor } = rotateShopIds(activeShopIds, context?.config?.shopCursor || 0, maxShopsPerRun);
     if (!selectedShopIds.length) return { skipped: true, reason: "no_active_performance_shops", retryDelaySeconds: 300 };
+    const window = await advertisingBackfillWindow(selectedShopIds, syncDays);
     const result = await services.syncAdvertisingDailyFromOzon({
       from: window.from,
       to: window.to,
@@ -1748,27 +2334,45 @@ async function runBackgroundAdvertisingSync(context = {}) {
   } finally {
     taskSignal.cleanup();
     backgroundAdvertisingSyncRunning = false;
-    if (backgroundHeavyTaskRunning === "advertising_sync") backgroundHeavyTaskRunning = "";
+    releaseBackgroundModuleLane("advertising", "advertising_sync");
   }
 }
 
+async function advertisingBackfillWindow(shopIds = [], syncDays = BACKGROUND_ADVERTISING_SYNC_DAYS) {
+  const recentWindow = rollingOrderSyncWindow(syncDays);
+  const ids = shopIds.map((item) => Number(item || 0)).filter((item) => item > 0);
+  if (!ids.length) return recentWindow;
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = await mysqlQuery(`
+    SELECT MIN(date_key) AS earliest_pending_date
+    FROM ozon_ad_sku_daily
+    WHERE source = 'ozon_performance_pending'
+      AND shop_id IN (${placeholders})
+      AND date_key >= DATE_SUB(DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00')), INTERVAL 89 DAY)
+      AND date_key <= DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00'))
+  `, ids);
+  const earliestPending = String(rows?.[0]?.earliest_pending_date || "").slice(0, 10);
+  return {
+    from: earliestPending && earliestPending < recentWindow.from ? earliestPending : recentWindow.from,
+    to: recentWindow.to
+  };
+}
+
 async function runBackgroundAdvertisingTodaySync(context = {}) {
-  if (backgroundAdvertisingTodaySyncRunning || backgroundAdvertisingSyncRunning) return { skipped: true, reason: "already_running" };
-  if (backgroundHeavyTaskRunning) {
-    console.log(`background advertising today sync skipped: ${backgroundHeavyTaskRunning} is running`);
-    return { skipped: true, reason: backgroundHeavyTaskRunning, retryDelaySeconds: 60 };
-  }
+  if (backgroundAdvertisingTodaySyncRunning || backgroundAdvertisingSyncRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 60 };
+  const laneBusy = claimBackgroundModuleLane("advertising", "advertising_today_sync");
+  if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 60 };
   backgroundAdvertisingTodaySyncRunning = true;
-  backgroundHeavyTaskRunning = "advertising_today_sync";
-  const timeoutMinutes = Math.max(1, Number(context?.config?.timeoutMinutes || BACKGROUND_ADVERTISING_TODAY_SYNC_TIMEOUT_MS / 60000));
+  const timeoutMinutes = Math.max(25, Number(context?.config?.timeoutMinutes || BACKGROUND_ADVERTISING_TODAY_SYNC_TIMEOUT_MS / 60000));
   const campaignChunkSize = Math.max(1, Math.min(3, Number(context?.config?.campaignChunkSize || 1)));
   const reportRetryDelayMs = Math.max(5000, Number(context?.config?.reportRetryDelayMs || 15000));
   const maxShopsPerRunConfig = Number(context?.config?.maxShopsPerRun || 0);
   const maxShopsPerRun = Number.isFinite(maxShopsPerRunConfig) && maxShopsPerRunConfig > 0
-    ? Math.max(1, Math.min(6, maxShopsPerRunConfig))
-    : 6;
-  const maxCampaignsPerRun = Math.max(2, Math.min(20, Number(context?.config?.maxCampaignsPerRun || 10)));
-  const shopConcurrency = Math.max(1, Math.min(6, Number(context?.config?.shopConcurrency || 3)));
+    ? Math.max(1, Math.min(1, maxShopsPerRunConfig))
+    : 1;
+  const maxCampaignsPerRun = Math.max(1, Math.min(3, Number(context?.config?.maxCampaignsPerRun || 3)));
+  const shopConcurrency = 1;
+  const rollingDays = Math.max(1, Math.min(3, Number(context?.config?.rollingDays || 3)));
   const campaignCursor = Math.max(0, Number(context?.config?.campaignCursor || 0));
   const taskSignal = createBackgroundTaskSignal(timeoutMinutes * 60 * 1000, "background advertising today sync");
   try {
@@ -1781,11 +2385,12 @@ async function runBackgroundAdvertisingTodaySync(context = {}) {
       detail: { config: context?.config || {} }
     }).catch(() => {});
     const today = shanghaiDateKey();
+    const fromDate = shanghaiDateDaysAgo(rollingDays - 1);
     const activeShopIds = await listActiveAdvertisingShopIds();
     const { selectedShopIds, nextCursor } = rotateShopIds(activeShopIds, context?.config?.shopCursor || 0, maxShopsPerRun);
     if (!selectedShopIds.length) return { skipped: true, reason: "no_active_performance_shops", retryDelaySeconds: 300 };
     const result = await runConcurrentAdvertisingShopSyncs(selectedShopIds, (shopId) => ({
-      from: today,
+      from: fromDate,
       to: today,
       shop_ids: [shopId],
       campaign_chunk_size: campaignChunkSize,
@@ -1800,6 +2405,7 @@ async function runBackgroundAdvertisingTodaySync(context = {}) {
       maxShopsPerRun,
       maxCampaignsPerRun,
       shopConcurrency,
+      rollingDays,
       campaignCursor: campaignCursor + maxCampaignsPerRun
     });
     const okShops = (result.results || []).filter((item) => item.status === "ok").length;
@@ -1829,7 +2435,8 @@ async function runBackgroundAdvertisingTodaySync(context = {}) {
         imported: result.imported || 0,
         placeholderRows: result.placeholder_rows || 0,
         retryLaterCampaigns,
-        date: today
+        from: fromDate,
+        to: today
       }
     }).catch(() => {});
     return {
@@ -1841,8 +2448,9 @@ async function runBackgroundAdvertisingTodaySync(context = {}) {
       nonOkShops,
       hardErrors,
       retryLaterCampaigns,
-      retryDelaySeconds: retryLaterCampaigns > 0 ? 300 : undefined,
-      date: today,
+      retryDelaySeconds: hardErrors > 0 ? 900 : retryLaterCampaigns > 0 ? 300 : undefined,
+      from: fromDate,
+      to: today,
       ...result
     };
   } catch (error) {
@@ -1858,7 +2466,7 @@ async function runBackgroundAdvertisingTodaySync(context = {}) {
   } finally {
     taskSignal.cleanup();
     backgroundAdvertisingTodaySyncRunning = false;
-    if (backgroundHeavyTaskRunning === "advertising_today_sync") backgroundHeavyTaskRunning = "";
+    releaseBackgroundModuleLane("advertising", "advertising_today_sync");
   }
 }
 
@@ -1891,6 +2499,24 @@ async function waitForSellerAnalyticsCollectRun(runId, tenantId = "admin", optio
   return { run, timedOut: true };
 }
 
+function withBackgroundOperationTimeout(promise, timeoutMs, label = "background operation") {
+  const normalizedTimeoutMs = Math.max(1000, Number(timeoutMs || 1000));
+  let timeoutId = null;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        const error = new Error(`${label} timed out after ${normalizedTimeoutMs}ms`);
+        error.code = "BACKGROUND_OPERATION_TIMEOUT";
+        reject(error);
+      }, normalizedTimeoutMs);
+      timeoutId.unref?.();
+    })
+  ]).finally(() => {
+    if (timeoutId) clearTimeout(timeoutId);
+  });
+}
+
 async function syncOneSellerAnalyticsShop(shop, context, options) {
   const tenantId = options.tenantId || "admin";
   const periodKey = options.periodKey || "7d";
@@ -1907,7 +2533,11 @@ async function syncOneSellerAnalyticsShop(shop, context, options) {
     shop_id: shop.id,
     company_id: shop.storeId
   }, tenantId);
-  if (!binding?.bound || binding?.stale) {
+  const browserProfile = await services.sellerAnalyticsBrowserProfileStatus({
+    store_id: shop.storeId,
+    company_id: shop.storeId
+  }, tenantId);
+  if (!browserProfile?.configured && (!binding?.bound || binding?.stale)) {
     return {
       ...baseResult,
       status: "skipped",
@@ -1927,7 +2557,7 @@ async function syncOneSellerAnalyticsShop(shop, context, options) {
   }, tenantId);
   await logScheduledJobEvent({
     runId: context?.runId,
-    jobKey: "seller_analytics_daily_sync",
+    jobKey: options.jobKey || "seller_analytics_daily_sync",
     stepKey: "shop_run_created",
     status: "info",
     shopId: shop.id,
@@ -1981,13 +2611,11 @@ async function syncOneSellerAnalyticsShop(shop, context, options) {
 }
 
 async function runBackgroundSellerAnalyticsDailySync(context = {}) {
-  if (backgroundSellerAnalyticsSyncRunning) return { skipped: true, reason: "already_running" };
-  if (backgroundHeavyTaskRunning) {
-    console.log(`background seller analytics sync skipped: ${backgroundHeavyTaskRunning} is running`);
-    return { skipped: true, reason: backgroundHeavyTaskRunning, retryDelaySeconds: 180 };
-  }
+  const jobKey = String(context?.key || "seller_analytics_daily_sync");
+  if (backgroundSellerAnalyticsSyncRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 180 };
+  const laneBusy = claimBackgroundModuleLane("analytics", jobKey);
+  if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 180 };
   backgroundSellerAnalyticsSyncRunning = true;
-  backgroundHeavyTaskRunning = "seller_analytics_daily_sync";
   const tenantId = "admin";
   const days = Math.max(1, Number(context?.config?.days || BACKGROUND_SELLER_ANALYTICS_SYNC_DAYS));
   const periodPayload = sellerAnalyticsPeriodPayload(days);
@@ -1999,10 +2627,11 @@ async function runBackgroundSellerAnalyticsDailySync(context = {}) {
   const maxPages = Math.max(1, Math.min(1000, Number(context?.config?.maxPages || 500)));
   const requestLimit = Math.max(1, Math.min(100, Number(context?.config?.requestLimit || 30)));
   const waitPollMs = Math.max(500, Number(context?.config?.waitPollMs || 2000));
+  const shopConcurrency = Math.max(1, Math.min(6, Number(context?.config?.shopConcurrency || 3)));
   try {
     await logScheduledJobEvent({
       runId: context?.runId,
-      jobKey: "seller_analytics_daily_sync",
+      jobKey,
       stepKey: "job_start",
       status: "info",
       message: "Starting seller analytics daily sync",
@@ -2014,7 +2643,9 @@ async function runBackgroundSellerAnalyticsDailySync(context = {}) {
     if (!selected.length) return { skipped: true, reason: "no_configured_seller_analytics_shops", retryDelaySeconds: 300 };
 
     const results = [];
-    for (const shop of selected) {
+    for (let batchStart = 0; batchStart < selected.length; batchStart += shopConcurrency) {
+      const batch = selected.slice(batchStart, batchStart + shopConcurrency);
+      await Promise.all(batch.map(async (shop) => {
       const remainingMs = totalTimeoutAt - Date.now();
       if (remainingMs <= 0) {
         results.push({
@@ -2025,11 +2656,11 @@ async function runBackgroundSellerAnalyticsDailySync(context = {}) {
           error_code: "job_timeout",
           error: "定时任务总超时，剩余店铺未执行。"
         });
-        continue;
+        return;
       }
       await logScheduledJobEvent({
         runId: context?.runId,
-        jobKey: "seller_analytics_daily_sync",
+        jobKey,
         stepKey: "shop_start",
         status: "info",
         shopId: shop.id,
@@ -2037,26 +2668,32 @@ async function runBackgroundSellerAnalyticsDailySync(context = {}) {
         message: `Starting seller analytics sync for ${shop.name || shop.id}`,
         detail: { storeId: shop.storeId, periodKey }
       }).catch(() => {});
-      const result = await syncOneSellerAnalyticsShop(shop, context, {
+      const shopTimeoutMs = Math.min(
+        remainingMs,
+        5 * 60 * 1000,
+        Math.max(60_000, Math.floor((timeoutMinutes * 60_000) / Math.max(1, selected.length)))
+      );
+      const result = await withBackgroundOperationTimeout(syncOneSellerAnalyticsShop(shop, context, {
+        jobKey,
         tenantId,
         periodKey,
         periodPayload,
         maxPages,
         requestLimit,
         waitPollMs,
-        shopTimeoutMs: Math.min(remainingMs, Math.max(60_000, Math.floor((timeoutMinutes * 60_000) / Math.max(1, selected.length))))
-      }).catch((error) => ({
+        shopTimeoutMs
+      }), shopTimeoutMs + 5000, `seller analytics shop ${shop.name || shop.id}`).catch((error) => ({
         shop_id: shop.id,
         shop_name: shop.name,
         store_id: shop.storeId,
-        status: "error",
-        error_code: "unhandled_error",
+        status: error?.code === "BACKGROUND_OPERATION_TIMEOUT" ? "timeout" : "error",
+        error_code: error?.code === "BACKGROUND_OPERATION_TIMEOUT" ? "shop_operation_timeout" : "unhandled_error",
         error: error?.message || String(error)
       }));
       results.push(result);
       await logScheduledJobEvent({
         runId: context?.runId,
-        jobKey: "seller_analytics_daily_sync",
+        jobKey,
         stepKey: "shop_finish",
         status: result.status === "success" ? "success" : result.status === "skipped" ? "warning" : "error",
         shopId: shop.id,
@@ -2064,9 +2701,13 @@ async function runBackgroundSellerAnalyticsDailySync(context = {}) {
         message: `Seller analytics sync ${result.status} for ${shop.name || shop.id}`,
         detail: result
       }).catch(() => {});
+      }));
     }
 
-    await persistScheduledJobConfigPatch("seller_analytics_daily_sync", { shopCursor: nextCursor, maxShopsPerRun });
+    await persistScheduledJobConfigPatch(jobKey, { shopCursor: nextCursor, maxShopsPerRun });
+    const retentionDays = Math.max(1, Number(context?.config?.retentionDays || 15));
+    await mysqlExecute("DELETE FROM seller_analytics_product_metrics WHERE captured_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)", [retentionDays]);
+    await mysqlExecute("DELETE FROM seller_analytics_snapshots WHERE captured_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)", [retentionDays]);
     const okShops = results.filter((item) => item.status === "success").length;
     const nonOkShops = results.length - okShops;
     const skippedNoAuth = results.filter((item) => ["missing_auth_binding", "auth_binding_stale"].includes(item.error_code)).length;
@@ -2076,11 +2717,11 @@ async function runBackgroundSellerAnalyticsDailySync(context = {}) {
     const status = nonOkShops > 0 ? "partial" : "success";
     await logScheduledJobEvent({
       runId: context?.runId,
-      jobKey: "seller_analytics_daily_sync",
+      jobKey,
       stepKey: "job_finish",
       status: status === "success" ? "success" : "warning",
       message: warning || "Seller analytics daily sync finished",
-      detail: { okShops, nonOkShops, skippedNoAuth, timeoutShops, nextCursor, periodKey }
+      detail: { okShops, nonOkShops, skippedNoAuth, timeoutShops, nextCursor, periodKey, shopConcurrency }
     }).catch(() => {});
     return {
       status,
@@ -2094,6 +2735,7 @@ async function runBackgroundSellerAnalyticsDailySync(context = {}) {
       createdRuns: results.filter((item) => item.run_id).length,
       skippedNoAuth,
       timeoutShops,
+      shopConcurrency,
       nextCursor,
       results,
       errors
@@ -2101,7 +2743,7 @@ async function runBackgroundSellerAnalyticsDailySync(context = {}) {
   } catch (error) {
     await logScheduledJobEvent({
       runId: context?.runId,
-      jobKey: "seller_analytics_daily_sync",
+      jobKey,
       stepKey: "job_error",
       status: "error",
       message: error?.message || "Seller analytics daily sync failed"
@@ -2110,18 +2752,15 @@ async function runBackgroundSellerAnalyticsDailySync(context = {}) {
     throw error;
   } finally {
     backgroundSellerAnalyticsSyncRunning = false;
-    if (backgroundHeavyTaskRunning === "seller_analytics_daily_sync") backgroundHeavyTaskRunning = "";
+    releaseBackgroundModuleLane("analytics", jobKey);
   }
 }
 
 async function runBackgroundOzonStockSync() {
-  if (backgroundOzonStockSyncRunning) return { skipped: true, reason: "already_running" };
-  if (backgroundHeavyTaskRunning) {
-    console.log(`background Ozon stock sync skipped: ${backgroundHeavyTaskRunning} is running`);
-    return { skipped: true, reason: backgroundHeavyTaskRunning };
-  }
+  if (backgroundOzonStockSyncRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 60 };
+  const laneBusy = claimBackgroundModuleLane("inventory", "ozon_stock_sync");
+  if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 60 };
   backgroundOzonStockSyncRunning = true;
-  backgroundHeavyTaskRunning = "ozon_stock_sync";
   try {
     const result = await services.syncOzonStocks({ mode: "scheduled_fbp" });
     console.log(`background Ozon stock sync ok: fetched ${result.fetched || 0}, upserted ${result.upserted || 0}, status ${result.status || "ok"}`);
@@ -2132,19 +2771,16 @@ async function runBackgroundOzonStockSync() {
     throw error;
   } finally {
     backgroundOzonStockSyncRunning = false;
-    if (backgroundHeavyTaskRunning === "ozon_stock_sync") backgroundHeavyTaskRunning = "";
+    releaseBackgroundModuleLane("inventory", "ozon_stock_sync");
   }
 }
 
 async function runBackgroundOzonCategorySync() {
-  if (backgroundOzonCategorySyncRunning) return { skipped: true, reason: "already_running" };
-  if (backgroundHeavyTaskRunning) {
-    console.log(`background Ozon category sync skipped: ${backgroundHeavyTaskRunning} is running`);
-    return { skipped: true, reason: backgroundHeavyTaskRunning };
-  }
+  if (backgroundOzonCategorySyncRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 120 };
+  const laneBusy = claimBackgroundModuleLane("listing", "ozon_category_sync");
+  if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 120 };
 
   backgroundOzonCategorySyncRunning = true;
-  backgroundHeavyTaskRunning = "ozon_category_sync";
   try {
     const result = await services.refreshOzonCategoryCache({
       mode: "scheduled_nightly",
@@ -2159,7 +2795,7 @@ async function runBackgroundOzonCategorySync() {
     throw error;
   } finally {
     backgroundOzonCategorySyncRunning = false;
-    if (backgroundHeavyTaskRunning === "ozon_category_sync") backgroundHeavyTaskRunning = "";
+    releaseBackgroundModuleLane("listing", "ozon_category_sync");
   }
 }
 
@@ -2215,6 +2851,7 @@ async function runOzonActionCleanupSweep(context = {}) {
     console.log(`ozon action cleanup sweep ok: stores ${results.length}, removed ${removed}, failed ${failed}`);
     return {
       status: failed > 0 ? "partial" : "success",
+      retryDelaySeconds: removed > 0 || failed > 0 ? 120 : undefined,
       stores: results.length,
       removed,
       failed,
@@ -2290,14 +2927,26 @@ function resolveListingMediaStaticRoots() {
     const resolved = path.resolve(target);
     if (!roots.includes(resolved)) roots.push(resolved);
   };
+  for (const root of resolveUploadSubdirRoots("listing-media")) add(root);
   add(path.resolve("public", "uploads", "listing-media"));
   add(path.resolve("..", "..", "public", "uploads", "listing-media"));
   add(path.resolve(process.env.LISTING_MEDIA_ROOT || "public/uploads/listing-media"));
   return roots;
 }
 
+function resolveTeamAttachmentStaticRoots() {
+  const roots = [];
+  const add = (target) => {
+    const resolved = path.resolve(target);
+    if (!roots.includes(resolved)) roots.push(resolved);
+  };
+  for (const root of resolveUploadSubdirRoots("team-attachments")) add(root);
+  add(path.resolve("public", "uploads", "team-attachments"));
+  return roots;
+}
+
 function isVersionedVueAssetPath(pathname = "") {
-  return /^\/vue-apps\/assets\/[^/]+-[A-Za-z0-9_-]{6,}(?:-\d{12,})?\.(?:js|css)$/i.test(String(pathname || ""));
+  return /^\/vue-apps\/assets\/[^/]+-[A-Za-z0-9_-]{6,}(?:-\d{12,13})?\.(?:js|css)$/i.test(String(pathname || ""));
 }
 
 function isPublicAuthCallbackPath(req, parts = []) {

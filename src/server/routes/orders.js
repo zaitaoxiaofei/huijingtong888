@@ -5,9 +5,18 @@ export function createOrderRoutes({ services, readJson, notFound, writeHead, jso
     "GET /api/orders": (req, url) => url?.searchParams?.get("paged")
       ? services.ordersPaged(Object.fromEntries(url.searchParams.entries()))
       : services.orders(),
+    "GET /api/sku-order-tracking": (req, url) => services.skuOrderTrackingList(Object.fromEntries(url.searchParams.entries())),
+    "POST /api/sku-order-tracking": async (req) => services.saveSkuOrderTracker(await readJson(req), req._session?.personId),
+    "GET /api/order-car-heatmap/models": (req, url) => services.orderCarHeatmapModels(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/order-car-heatmap/products": (req, url) => services.orderCarHeatmapProducts(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/order-car-heatmap/skus": (req, url) => services.orderCarHeatmapSkus(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/order-car-heatmap/unmatched": (req, url) => services.orderCarHeatmapUnmatched(Object.fromEntries(url.searchParams.entries())),
+    "POST /api/order-car-heatmap/ai-classify": async (req) => services.orderCarHeatmapAiClassify(await readJson(req)),
+    "POST /api/order-car-heatmap/confirm-tag": async (req) => services.orderCarHeatmapConfirmTag(await readJson(req), req._session?.personId),
     "GET /api/orders/status-history/summary": () => services.orderStatusHistorySummary?.() || { total_history_rows: 0, open_orders: 0 },
     "GET /api/order-quality-rules": () => services.orderQualityRules(),
-    "POST /api/orders/recalculate-profits": async () => services.recalculateAllMappedOrderProfits()
+    "POST /api/orders/repair-outbound": async () => services.repairOrderOutbound(),
+    "POST /api/orders/recalculate-profits": async (req) => services.recalculateAllMappedOrderProfits(await readJson(req))
   };
 }
 
@@ -45,7 +54,11 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "package-label") {
     const body = await readJson(req);
     const label = await services.orderPackageLabel(body, req._session?.personId);
-    const buffer = await serverTransformPdfForPaper(label.buffer, body);
+    // Browser preview should preserve the ordered PDF pages returned by
+    // orderPackageLabel and must not depend on a server-side rasterizer.
+    const buffer = body.browser_preview === true
+      ? label.buffer
+      : await serverTransformPdfForPaper(label.buffer, body);
     writeHead(res, 200, {
       "Content-Type": "application/pdf",
       "Content-Disposition": `attachment; filename="${label.filename}"`,
@@ -75,7 +88,7 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "recalculate-profit") {
-    return json(res, services.recalculateOrderProfit(Number(parts[2])));
+    return json(res, await services.recalculateOrderProfit(Number(parts[2])));
   }
 
   return false;

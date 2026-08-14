@@ -11,6 +11,7 @@ const props = defineProps({
   preview: { type: Boolean, default: true },
   lazy: { type: Boolean, default: true },
   proxyRemote: { type: Boolean, default: false },
+  maxInlineImageLength: { type: Number, default: 262144 },
   initialIndex: { type: Number, default: 0 }
 });
 
@@ -76,7 +77,10 @@ function normalizeImageSrc(src, options = {}) {
     if (isLocalProtectedUrl(absoluteUrl)) return withImageToken(absoluteUrl);
     return options.forceProxy ? proxiedRemoteImageSrc(absoluteUrl) : absoluteUrl;
   }
-  if (/^data:image\//i.test(value)) return value;
+  if (/^data:image\//i.test(value)) {
+    const maxLength = Math.max(Number(props.maxInlineImageLength || 0), 0);
+    return maxLength > 0 && value.length <= maxLength ? value : "";
+  }
   if (/^(\/api\/|\/uploads\/)/i.test(value)) return withImageToken(value);
   return "";
 }
@@ -118,7 +122,7 @@ const previewInitialIndex = computed(() => {
 
 function handleImageError() {
   const value = firstImageValue(props.src);
-  if (/^(https?:)?\/\//i.test(value) && !useProxyFallback.value) {
+  if (/^(https?:)?\/\//i.test(value) && !props.proxyRemote && !useProxyFallback.value) {
     useProxyFallback.value = true;
     return;
   }

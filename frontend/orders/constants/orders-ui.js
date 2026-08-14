@@ -8,7 +8,7 @@ export const SEARCH_TYPE_OPTIONS = [
 ];
 
 export const ORDER_DETAIL_CACHE_TTL_MS = 60 * 1000;
-export const INVENTORY_LIST_PAGE_SIZE = 10;
+export const INVENTORY_LIST_PAGE_SIZE = 20;
 
 export const STATE_META = {
   all: { label: "全部订单", color: "slate" },
@@ -19,5 +19,6 @@ export const STATE_META = {
   delivered: { label: "已签收", color: "green" },
   cancelled: { label: "已取消", color: "slate" },
   unbound: { label: "待绑定库存", color: "amber" },
+  pending_purchase: { label: "待采购", color: "red" },
   stock_issue: { label: "库存异常", color: "red" }
 };

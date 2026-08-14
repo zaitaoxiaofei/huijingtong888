@@ -4,8 +4,10 @@ import { useRoute, useRouter } from "vue-router";
 import { InfoFilled } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
+import { useAuthStore } from "../../stores/auth.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
@@ -14,14 +16,15 @@ import { applyFilterQuery, dateText, integer } from "./inventory-utils.js";
 
 const route = useRoute();
 const router = useRouter();
+const authStore = useAuthStore();
 const listRequestGate = createLatestRequestGate();
 let syncingRoute = false;
-let shopsLoaded = false;
 let routeReady = false;
 
 const loading = ref(false);
 const exportLoading = ref(false);
 const supplySyncLoading = ref(false);
+const rowActionLoading = ref("");
 const pdfImportVisible = ref(false);
 const pdfPreviewLoading = ref(false);
 const pdfImportSubmitting = ref(false);
@@ -31,6 +34,10 @@ const previewFrameRef = ref(null);
 const fbpTableWrapRef = ref(null);
 const procurementCreateVisible = ref(false);
 const procurementCreateProductId = ref(null);
+const replenishmentCreateVisible = ref(false);
+const replenishmentCreateSubmitting = ref(false);
+const replenishmentCreateRows = ref([]);
+const replenishmentCreateMode = ref("single");
 const fbpTransferVisible = ref(false);
 const fbpTransferSubmitting = ref(false);
 const fbpTransferRow = ref(null);
@@ -39,9 +46,13 @@ const fbpReceiveLoading = ref(false);
 const fbpReceiveSubmittingId = ref(0);
 const fbpReceiveRow = ref(null);
 const fbpReceiveRecords = ref([]);
+const selectedRows = ref([]);
 const fbpReceiveForm = reactive({
   recordId: 0,
   receivedQuantity: 0,
+  note: ""
+});
+const replenishmentCreateForm = reactive({
   note: ""
 });
 const fbpTransferForm = reactive({
@@ -115,6 +126,14 @@ const summaryCards = computed(() => [
   { label: "推荐", value: integer(state.summary.total) },
   { label: "建议入库", value: `${integer(state.summary.suggested_total_qty)} 件` }
 ]);
+
+const currentSubmitterName = computed(() => authStore.user?.name || authStore.user?.username || "当前登录用户");
+const replenishmentDialogTitle = computed(() => (
+  replenishmentCreateMode.value === "batch" ? "批量创建备货单" : "创建备货单"
+));
+const replenishmentTotalQuantity = computed(() => replenishmentCreateRows.value.reduce((sum, row) => (
+  sum + Math.max(0, Math.round(Number(row.requested_qty || 0)))
+), 0));
 
 function priorityType(priority) {
   if (priority === "high") return "danger";
@@ -324,6 +343,154 @@ function handleFbpTableWheel(event) {
 function openProcurement(row) {
   procurementCreateProductId.value = Number(row.product_id || 0) || null;
   procurementCreateVisible.value = Boolean(procurementCreateProductId.value);
+}
+
+function defaultReplenishmentQuantity(row) {
+  const suggestedPurchaseQty = Math.round(Number(row?.suggested_purchase_qty || row?.suggestedPurchaseQty || 0));
+  if (suggestedPurchaseQty > 0) return suggestedPurchaseQty;
+  const suggestedQty = Math.round(Number(row?.suggested_qty || row?.suggestedQty || 0));
+  return Math.max(1, suggestedQty || 1);
+}
+
+function createReplenishmentDraftRow(row) {
+  return {
+    ...row,
+    requested_qty: defaultReplenishmentQuantity(row),
+    note: ""
+  };
+}
+
+function openReplenishmentCreateDialog(rows, mode = "single") {
+  const sourceRows = Array.isArray(rows) ? rows : [rows];
+  const nextRows = sourceRows.filter(Boolean).map(createReplenishmentDraftRow);
+  if (!nextRows.length) {
+    ElMessage.warning("请先选择要创建备货单的 SKU");
+    return;
+  }
+  replenishmentCreateRows.value = nextRows;
+  replenishmentCreateMode.value = mode;
+  replenishmentCreateForm.note = "";
+  replenishmentCreateVisible.value = true;
+}
+
+function openSelectedReplenishmentCreateDialog() {
+  if (!selectedRows.value.length) {
+    ElMessage.warning("请先选择要创建备货单的 SKU");
+    return;
+  }
+  openReplenishmentCreateDialog(selectedRows.value, "batch");
+}
+
+function closeReplenishmentCreateDialog() {
+  replenishmentCreateVisible.value = false;
+  replenishmentCreateRows.value = [];
+  replenishmentCreateForm.note = "";
+  replenishmentCreateMode.value = "single";
+}
+
+async function offerOpenReplenishmentPage(message = "FBP 备货单草稿已创建。") {
+  try {
+    await ElMessageBox.confirm(message, "备货单已创建", {
+      type: "success",
+      confirmButtonText: "去备货单页面",
+      cancelButtonText: "继续当前页",
+      distinguishCancelAndClose: true
+    });
+    router.push("/inventory/fbp-replenishment");
+  } catch {
+    // Stay on the current recommendation page so operators can keep creating requests.
+  }
+}
+
+async function submitReplenishmentCreate() {
+  if (!replenishmentCreateRows.value.length) {
+    ElMessage.warning("请先选择要创建备货单的 SKU");
+    return;
+  }
+  const invalidRow = replenishmentCreateRows.value.find((row) => Math.round(Number(row.requested_qty || 0)) <= 0);
+  if (invalidRow) {
+    ElMessage.warning(`请填写 ${invalidRow.shop_name || "-"} / SKU ${invalidRow.ozon_sku || "-"} 的提交数量`);
+    return;
+  }
+  const isBatch = replenishmentCreateMode.value === "batch";
+  rowActionLoading.value = isBatch ? "batch-order" : `order-${replenishmentCreateRows.value[0]?.shop_id}-${replenishmentCreateRows.value[0]?.ozon_sku}`;
+  replenishmentCreateSubmitting.value = true;
+  try {
+    const rows = replenishmentCreateRows.value.map((row) => ({
+      ...row,
+      requested_qty: Math.max(1, Math.round(Number(row.requested_qty || 1))),
+      note: String(row.note || "").trim()
+    }));
+    const payload = await apiClient.post("/api/fbp-replenishment-orders", {
+      rows,
+      note: String(replenishmentCreateForm.note || "").trim()
+    });
+    const count = Array.isArray(payload?.rows) ? payload.rows.length : 0;
+    const message = isBatch ? `已按店铺创建 ${count || 1} 张 FBP 备货单草稿` : "已加入 FBP 备货单草稿";
+    ElMessage.success(message);
+    closeReplenishmentCreateDialog();
+    await offerOpenReplenishmentPage(message);
+  } catch (error) {
+    ElMessage.error(error.message || "创建备货单失败");
+  } finally {
+    replenishmentCreateSubmitting.value = false;
+    rowActionLoading.value = "";
+  }
+}
+
+async function createReplenishmentOrder(row) {
+  rowActionLoading.value = `order-${row.shop_id}-${row.ozon_sku}`;
+  try {
+    await apiClient.post("/api/fbp-replenishment-orders", { rows: [row] });
+    ElMessage.success("已加入 FBP 备货单草稿");
+    await offerOpenReplenishmentPage("已加入 FBP 备货单草稿。");
+  } catch (error) {
+    ElMessage.error(error.message || "创建备货单失败");
+  } finally {
+    rowActionLoading.value = "";
+  }
+}
+
+async function createSelectedReplenishmentOrders() {
+  if (!selectedRows.value.length) {
+    ElMessage.warning("请先选择要创建备货单的 SKU");
+    return;
+  }
+  rowActionLoading.value = "batch-order";
+  try {
+    const payload = await apiClient.post("/api/fbp-replenishment-orders", { rows: selectedRows.value });
+    const count = Array.isArray(payload?.rows) ? payload.rows.length : 0;
+    const message = `已按店铺创建 ${count || 1} 张 FBP 备货单草稿`;
+    ElMessage.success(message);
+    await offerOpenReplenishmentPage(message);
+  } catch (error) {
+    ElMessage.error(error.message || "批量创建备货单失败");
+  } finally {
+    rowActionLoading.value = "";
+  }
+}
+
+async function ignoreReplenishment(row) {
+  rowActionLoading.value = `ignore-${row.shop_id}-${row.ozon_sku}`;
+  try {
+    await apiClient.post("/api/fbp-replenishment-ignore", {
+      shop_id: row.shop_id,
+      ozon_sku: row.ozon_sku,
+      product_id: row.product_id,
+      mapping_id: row.mapping_id,
+      reason: "不再备货 FBP"
+    });
+    ElMessage.success("已忽略该 FBP SKU，备货建议不再显示");
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "忽略失败");
+  } finally {
+    rowActionLoading.value = "";
+  }
+}
+
+function handleSelectionChange(rows) {
+  selectedRows.value = Array.isArray(rows) ? rows : [];
 }
 
 async function handleProcurementCreated() {
@@ -859,17 +1026,13 @@ async function loadPageData() {
   loading.value = true;
   try {
     const params = buildListParams();
-    const requests = [apiClient.get(`/api/fbp-opportunities?${params.toString()}`)];
-    if (!shopsLoaded) requests.push(apiClient.get("/api/shops"));
+    const requests = [apiClient.get(`/api/fbp-opportunities?${params.toString()}`), loadShopDictionary()];
     const [payload, shops] = await Promise.all(requests);
     if (!listRequestGate.isLatest(requestToken)) return;
     state.rows = Array.isArray(payload?.rows) ? payload.rows : [];
     state.total = Number(payload?.total || 0);
     state.summary = payload?.summary || {};
-    if (!shopsLoaded) {
-      state.shops = Array.isArray(shops) ? shops : [];
-      shopsLoaded = true;
-    }
+    state.shops = Array.isArray(shops) ? shops : [];
   } catch (error) {
     if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "FBP 备货机会加载失败");
@@ -935,6 +1098,15 @@ onMounted(async () => {
         <el-input v-model="state.filters.minSales" placeholder="最低" style="width: 90px" @keyup.enter="handleSearch" />
       </el-form-item>
       <template #actions>
+        <el-button
+          class="erp-btn erp-btn-primary"
+          type="primary"
+          :disabled="!selectedRows.length"
+          :loading="rowActionLoading === 'batch-order'"
+          @click="openSelectedReplenishmentCreateDialog"
+        >
+          批量创建备货单
+        </el-button>
         <el-button class="erp-btn erp-btn-secondary" @click="openPdfImportDialog">
           导入PDF
         </el-button>
@@ -951,7 +1123,8 @@ onMounted(async () => {
     </InventoryPageToolbar>
 
     <div ref="fbpTableWrapRef" class="inventory-table-wrap" @wheel.capture="handleFbpTableWheel">
-      <el-table v-loading="loading" :data="state.rows" stripe border class="erp-data-table">
+      <el-table v-loading="loading" :data="state.rows" stripe border class="erp-data-table" @selection-change="handleSelectionChange">
+        <el-table-column type="selection" width="48" fixed="left" />
         <el-table-column label="店铺" width="130" fixed="left">
           <template #default="{ row }">
             <div class="fbp-cell-stack">
@@ -1122,12 +1295,28 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="130" fixed="right">
+        <el-table-column label="操作" width="150" fixed="right">
           <template #default="{ row }">
             <div class="fbp-actions-cell">
               <el-button
                 size="small"
                 class="fbp-inline-button fbp-inline-button-primary"
+                :loading="rowActionLoading === `order-${row.shop_id}-${row.ozon_sku}`"
+                @click="openReplenishmentCreateDialog(row, 'single')"
+              >
+                创建备货单
+              </el-button>
+              <el-button
+                size="small"
+                class="fbp-inline-button fbp-inline-button-secondary"
+                :loading="rowActionLoading === `ignore-${row.shop_id}-${row.ozon_sku}`"
+                @click="ignoreReplenishment(row)"
+              >
+                忽略
+              </el-button>
+              <el-button
+                size="small"
+                class="fbp-inline-button fbp-inline-button-secondary"
                 :disabled="Number(row.suggested_transfer_qty || 0) <= 0 && Number(row.local_stock || 0) <= 0"
                 @click="openFbpTransfer(row)"
               >
@@ -1162,6 +1351,110 @@ onMounted(async () => {
       :lock-product="true"
       @created="handleProcurementCreated"
     />
+
+    <el-dialog
+      v-model="replenishmentCreateVisible"
+      :title="replenishmentDialogTitle"
+      width="min(1080px, 96vw)"
+      top="6vh"
+      destroy-on-close
+      @closed="closeReplenishmentCreateDialog"
+    >
+      <div class="fbp-create-dialog">
+        <div class="fbp-create-summary">
+          <article>
+            <span>提交人</span>
+            <strong>{{ currentSubmitterName }}</strong>
+          </article>
+          <article>
+            <span>SKU 数</span>
+            <strong>{{ integer(replenishmentCreateRows.length) }}</strong>
+          </article>
+          <article>
+            <span>提交数量</span>
+            <strong>{{ integer(replenishmentTotalQuantity) }}</strong>
+          </article>
+        </div>
+
+        <el-table :data="replenishmentCreateRows" border stripe class="erp-data-table fbp-create-table">
+          <el-table-column label="店铺" width="130">
+            <template #default="{ row }">
+              <div class="fbp-cell-stack">
+                <strong class="fbp-cell-title">{{ row.shop_name || "-" }}</strong>
+                <span class="fbp-cell-meta-line">{{ row.offer_id || "-" }}</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="SKU" min-width="250">
+            <template #default="{ row }">
+              <div class="fbp-create-product">
+                <ProductImagePreview :src="row.image_url" />
+                <div>
+                  <strong>{{ row.product_name || row.name || row.online_name || "-" }}</strong>
+                  <span>SKU ID：{{ row.ozon_sku || "-" }}</span>
+                  <span>库存编码：{{ row.inventory_id || "-" }}</span>
+                </div>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="库存参考" min-width="240" align="center">
+            <template #default="{ row }">
+              <div class="fbp-create-stock-grid">
+                <span><em>产品库存</em><strong>{{ integer(localInventoryTotal(row)) }}</strong></span>
+                <span><em>本地现货</em><strong>{{ integer(row.local_stock) }}</strong></span>
+                <span><em>采购在途</em><strong>{{ integer(row.pending_procurement_qty) }}</strong></span>
+                <span><em>FBP</em><strong>{{ integer(row.fbp_available) }}</strong></span>
+                <span><em>FBS</em><strong>{{ integer(row.fbs_available) }}</strong></span>
+                <span><em>发仓在途</em><strong>{{ integer(row.fbp_transfer_in_transit_qty) }}</strong></span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="建议参考" width="150" align="center">
+            <template #default="{ row }">
+              <div class="fbp-cell-stack fbp-cell-center">
+                <span class="fbp-cell-meta-line">建议采购 {{ integer(row.suggested_purchase_qty) }}</span>
+                <span class="fbp-cell-meta-line">建议入库 {{ integer(row.suggested_qty) }}</span>
+                <el-tag :type="row.suggested_action === 'transfer' ? 'success' : 'warning'" effect="light">
+                  {{ row.suggested_action_text || "观察" }}
+                </el-tag>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="提交数量" width="190" align="center">
+            <template #default="{ row }">
+              <el-input-number
+                v-model="row.requested_qty"
+                :min="1"
+                :step="1"
+                :precision="0"
+                controls-position="right"
+                style="width: 150px"
+              />
+            </template>
+          </el-table-column>
+          <el-table-column label="备注" min-width="180">
+            <template #default="{ row }">
+              <el-input v-model="row.note" placeholder="可选，写规格或备货原因" maxlength="120" />
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <el-input
+          v-model="replenishmentCreateForm.note"
+          type="textarea"
+          :rows="2"
+          maxlength="200"
+          show-word-limit
+          placeholder="整单备注，可选"
+        />
+      </div>
+      <template #footer>
+        <el-button @click="closeReplenishmentCreateDialog">取消</el-button>
+        <el-button type="primary" :loading="replenishmentCreateSubmitting" @click="submitReplenishmentCreate">
+          提交创建
+        </el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="fbpReceiveVisible"
@@ -1721,6 +2014,101 @@ onMounted(async () => {
   justify-content: center;
 }
 
+.fbp-create-dialog {
+  display: grid;
+  gap: 14px;
+}
+
+.fbp-create-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.fbp-create-summary article {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.fbp-create-summary span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.fbp-create-summary strong {
+  min-width: 0;
+  color: #0f172a;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.fbp-create-table {
+  width: 100%;
+  max-height: 54vh;
+}
+
+.fbp-create-product {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.fbp-create-product strong,
+.fbp-create-product span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fbp-create-product strong {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.fbp-create-product span {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.fbp-create-stock-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(58px, 1fr));
+  gap: 8px;
+}
+
+.fbp-create-stock-grid span {
+  display: grid;
+  gap: 2px;
+  justify-items: center;
+  min-width: 0;
+}
+
+.fbp-create-stock-grid em {
+  color: #64748b;
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.fbp-create-stock-grid strong {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
 .fbp-transfer-product {
   display: grid;
   grid-template-columns: 56px minmax(0, 1fr);
@@ -1877,6 +2265,10 @@ onMounted(async () => {
   .fbp-toolbar-summary {
     width: 100%;
     justify-content: flex-end;
+  }
+
+  .fbp-create-summary {
+    grid-template-columns: 1fr;
   }
 }
 </style>

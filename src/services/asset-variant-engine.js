@@ -7,14 +7,17 @@ import { createHash } from "node:crypto";
 import sharp from "sharp";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { config } from "../config.js";
+import { resolveUploadSubdirRoots } from "../runtime-uploads.js";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { fetchOzonDescriptionCategoryTree } from "../ozonClient.js";
 import { chatWithAiProvider } from "./ai-provider-settings.js";
 import { editOpenAiImage } from "../server/services/openai/imageGenerationService.js";
+import { archiveRemoteMediaObjectUrl, isManagedOssObjectUrl, putContentAddressedObject } from "./object-storage.js";
 import {
   ensureListingAutomationSchema,
   generateUniqueListingOfferId,
   listingCategoryTemplateDetail,
+  materializeListingMediaAssetUrl,
   publishListingTemplateToOzon,
   registerListingMediaAssetFromFile,
   standardizeListingTemplateForAutomation,
@@ -27,6 +30,7 @@ const LOCAL_ASSET_ROOTS = localAssetRootCandidates(ROOT_DIR);
 const VARIANT_ROOT = path.resolve(ROOT_DIR, "uploads", "shop-variants");
 const TAIL_TEMPLATE_ROOT = path.resolve(ROOT_DIR, "public", "uploads", "asset-tail-templates");
 const LISTING_MEDIA_ROOT = path.resolve(ROOT_DIR, "public", "uploads", "listing-media");
+const SHOP_WATERMARK_ROOTS = resolveUploadSubdirRoots("shop-watermarks");
 const AI_GENERATED_ROOT = path.resolve(ROOT_DIR, process.env.AI_IMAGE_OUTPUT_DIR || "uploads/ai-generated");
 const AI_CROPPED_ROOT = path.resolve(ROOT_DIR, process.env.AI_CROP_OUTPUT_DIR || "uploads/ai-cropped");
 const ASSET_SHOP_CONCURRENCY = envInt("ASSET_SHOP_CONCURRENCY", 2, 1, 4);
@@ -39,7 +43,7 @@ const ASSET_FAST_VIDEO = String(process.env.ASSET_FAST_VIDEO || "1").trim() !== 
 const SERVER_VIDEO_WIDTH = 900;
 const SERVER_VIDEO_HEIGHT = 1200;
 const SERVER_VIDEO_FPS = 24;
-const SERVER_VIDEO_DURATION_SECONDS = 6;
+const SERVER_VIDEO_DURATION_SECONDS = 10;
 const SERVER_VIDEO_GENERATION_TIMEOUT_MS = envInt("SERVER_VIDEO_GENERATION_TIMEOUT_MS", 70000, 15000, 180000);
 const assetVideoLimiter = createConcurrencyLimiter(ASSET_VIDEO_CONCURRENCY);
 const assetVideoInflight = new Map();
@@ -200,9 +204,10 @@ export async function selectionPublishShops(query = {}) {
   const productId = Number(query.productId || query.product_id || query.selectionId || query.selection_id || 0);
   let ownerPersonId = 0;
   let ownerName = "";
+  let productMedia = { mainImage: "", detailImages: [] };
   if (productId) {
     const productRows = await mysqlQuery(`
-      SELECT p.owner_person_id, pe.name AS owner_name
+      SELECT p.owner_person_id, p.image_url, p.detail_image_urls, pe.name AS owner_name
       FROM products p
       LEFT JOIN people pe ON pe.id = p.owner_person_id
       WHERE p.id = ? AND p.active = 1
@@ -210,9 +215,15 @@ export async function selectionPublishShops(query = {}) {
     `, [productId]);
     ownerPersonId = Number(productRows[0]?.owner_person_id || 0) || 0;
     ownerName = String(productRows[0]?.owner_name || "").trim();
+    productMedia = {
+      mainImage: String(productRows[0]?.image_url || "").trim(),
+      detailImages: normalizeProductImageList(productRows[0]?.detail_image_urls)
+    };
   }
   const shops = await mysqlQuery(`
-    SELECT s.id, s.name, s.status, s.legal_entity,
+    SELECT s.id, s.name, s.status, s.legal_entity, s.watermark_path,
+      s.watermark_position, s.watermark_x_percent, s.watermark_y_percent,
+      s.watermark_scale_percent, s.watermark_opacity_percent,
       r.price_role, r.price_index
     FROM shops s
     LEFT JOIN shop_variant_rules r ON r.shop_id = s.id
@@ -223,12 +234,20 @@ export async function selectionPublishShops(query = {}) {
     productId,
     ownerPersonId,
     ownerName,
+    productMedia,
     shops: shops.map((row) => ({
       id: Number(row.id),
       name: row.name || "",
       status: row.status || "",
       legalEntity: row.legal_entity || "",
       legal_entity: row.legal_entity || "",
+      watermarkPath: row.watermark_path ? `/api/tools/image-cropper/shop-watermark/${encodeURIComponent(row.id)}/file` : "",
+      watermark_path: row.watermark_path || "",
+      watermarkPosition: row.watermark_position || "bottom-right",
+      watermarkXPercent: Number(row.watermark_x_percent ?? 75),
+      watermarkYPercent: Number(row.watermark_y_percent ?? 75),
+      watermarkScalePercent: Number(row.watermark_scale_percent ?? 22),
+      watermarkOpacityPercent: Number(row.watermark_opacity_percent ?? 82),
       rule: normalizeRule({
         priceRole: row.price_role,
         priceIndex: row.price_index
@@ -248,6 +267,10 @@ export async function saveShopVariantRule(body = {}, session = null) {
     error.status = 409;
     throw error;
   }
+  const tailImageUrl = await publishTailTemplateImageForOzon(
+    body.tailImageUrl || body.tail_image_url || "",
+    { shopId, name: `shop-${shopId}-tail-rule`, session }
+  );
   await mysqlExecute(`
     INSERT INTO shop_variant_rules
     (shop_id, title_style, tag_style, price_index, price_role, watermark_template_id, tail_image_url, main_image_plan,
@@ -273,7 +296,7 @@ export async function saveShopVariantRule(body = {}, session = null) {
     normalizePriceIndex(body.priceIndex || body.price_index),
     normalizePriceRole(body.priceRole || body.price_role),
     String(body.watermarkTemplateId || body.watermark_template_id || ""),
-    String(body.tailImageUrl || body.tail_image_url || ""),
+    tailImageUrl,
     String(body.mainImagePlan || body.main_image_plan || "watermarked"),
     cleanText(body.tailCategory || body.tail_category || DEFAULT_TAIL_CATEGORY, 128),
     cleanText(body.vehicleModel || body.vehicle_model || DEFAULT_TAIL_MODEL, 128),
@@ -290,6 +313,7 @@ export async function generateAssetVariants(body = {}, session = null, context =
   const material = normalizeMaterialPayload(body.material || body);
   const shopIds = uniqueNumbers(body.shopIds || body.shop_ids);
   const rulesInput = Array.isArray(body.rules) ? body.rules : [];
+  const preparedMediaByShop = body.preparedMediaByShop || body.prepared_media_by_shop || {};
   if (!material.title) throw new Error("Missing source title");
   if (!material.mainImage) throw new Error("Missing main image");
   if (!shopIds.length) throw new Error("Please select shops");
@@ -328,7 +352,8 @@ export async function generateAssetVariants(body = {}, session = null, context =
     const internalPrice = roundMoney(material.basePriceRmb * priceIndex);
     const ozonPrice = roundMoney(internalPrice);
     const ozonOldPrice = 0;
-    const shopTags = copyPack?.tags?.length ? copyPack.tags : generateShopTags(material, shop, mergedRule, title);
+    const manualShopTags = normalizeTags(cleanRussianListingText(material.listingTagsRu, 800));
+    const shopTags = manualShopTags.length ? normalizeListingTags(manualShopTags, 40) : (copyPack?.tags?.length ? copyPack.tags : generateShopTags(material, shop, mergedRule, title));
     const descriptionText = copyPack?.description || listingDescriptionText(material);
     const shopSlug = sanitizeFilename(`shop-${shop.id}-${shop.name}`);
     return {
@@ -358,7 +383,7 @@ export async function generateAssetVariants(body = {}, session = null, context =
 
     const watermark = templateMap.get(String(mergedRule.watermarkTemplateId)) || defaultShopWatermark(shop);
     const tailTemplate = resolveTailTemplate(mergedRule, shop, bootstrap.tailTemplates, tailTemplateMap);
-    const generatedImages = await generateVariantImages({
+    const imageGeneration = await generateVariantImages({
       material,
       shopDir,
       watermark,
@@ -368,11 +393,14 @@ export async function generateAssetVariants(body = {}, session = null, context =
       shopId: shop.id,
       sourceTitle: material.title,
       variantTitle: title,
+      preparedImages: preparedMediaByShop[String(shop.id)] || preparedMediaByShop[shop.id] || [],
       throwIfCancelled: context.throwIfCancelled
     });
+    const generatedImages = imageGeneration.images;
+    const imageWarnings = imageGeneration.warnings;
     await context.throwIfCancelled?.();
 
-    const productInfo = buildProductInfo({ shop, title, titleZh, material: { ...material, description: descriptionText, tags: shopTags }, images: generatedImages, rule: { ...mergedRule, priceIndex, internalPrice, ozonPrice, ozonOldPrice }, tailTemplate });
+    const productInfo = buildProductInfo({ shop, title, titleZh, material: { ...material, description: descriptionText, tags: shopTags }, images: generatedImages, rule: { ...mergedRule, priceIndex, internalPrice, ozonPrice, ozonOldPrice }, tailTemplate, warnings: imageWarnings });
     await writeText(path.join(infoDir, "title.txt"), title);
     await writeText(path.join(infoDir, "tags.txt"), shopTags.join(" "));
     await writeText(path.join(infoDir, "description.txt"), descriptionText);
@@ -444,6 +472,7 @@ export async function generateAssetVariants(body = {}, session = null, context =
       description: material.description,
       productInfo,
       images: generatedImages,
+      warnings: imageWarnings,
       videos,
       tailTemplate,
       previewUrl: generatedImages[0]?.previewUrl || "",
@@ -690,6 +719,23 @@ export async function generateListingVariantMediaFromImage(body = {}, session = 
 export async function ensureAssetVariantImagePublishUrl(source = "", context = {}) {
   const sourceUrl = cleanText(source, 2000);
   if (!sourceUrl) return { url: "", publishUrl: "", previewUrl: "", status: "empty" };
+  if (isManagedOssObjectUrl(sourceUrl, { prefix: "ai-unused" })) {
+    const persisted = await materializeListingMediaAssetUrl(sourceUrl, {
+      source_module: context.sourceModule || context.source_module || "ai_variant_rich_text",
+      source_id: context.sourceId || context.source_id || sourceUrl,
+      batch_id: context.batchId || context.batch_id || "",
+      shop_id: context.shopId ?? context.shop_id ?? null,
+      role: context.role || "rich_text_image",
+      sort_order: context.sortOrder || context.sort_order || 1
+    });
+    return {
+      url: persisted.finalUrl || persisted.publishUrl || persisted.localUrl || sourceUrl,
+      publishUrl: persisted.publishUrl || persisted.finalUrl || "",
+      previewUrl: persisted.localUrl || persisted.finalUrl || sourceUrl,
+      assetId: persisted.assetId || null,
+      status: persisted.status || "promoted_oss_media"
+    };
+  }
   if (/^https?:\/\//i.test(sourceUrl) && !isLocalFileApiSource(sourceUrl)) {
     return { url: sourceUrl, publishUrl: sourceUrl, previewUrl: sourceUrl, status: "remote" };
   }
@@ -727,6 +773,24 @@ export async function ensureAssetVariantImagePublishUrl(source = "", context = {
     previewUrl,
     assetId: asset.id,
     status: publishUrl ? "public_ready" : "local_ready"
+  };
+}
+
+export async function registerAssetVariantRichTextImage(body = {}, session = null) {
+  const source = body.source || body.url || body.imageUrl || body.image_url || "";
+  const result = await ensureAssetVariantImagePublishUrl(source, {
+    sourceModule: body.sourceModule || body.source_module || "ai_variant_workbench",
+    sourceId: body.sourceId || body.source_id || source,
+    batchId: body.batchId || body.batch_id || "",
+    shopId: body.shopId ?? body.shop_id ?? null,
+    role: body.role || "rich_text_image",
+    sortOrder: body.sortOrder || body.sort_order || 1,
+    resultId: body.resultId || body.result_id || "",
+    workflowId: body.workflowId || body.workflow_id || ""
+  });
+  return {
+    ok: true,
+    ...result
   };
 }
 
@@ -906,11 +970,15 @@ async function validateAssetVariantPublishPrecheck({ template, shopId = 0, varia
   const payload = validation.payload || {};
   const items = Array.isArray(payload.items) ? payload.items : [];
   const firstItem = items[0] || {};
-  const media = firstItem.images || payload.images || [];
+  const media = assetVariantPayloadMediaUrls(firstItem, payload);
   const videos = extractAssetVariantVideosForCheck(firstItem, payload);
   const richContent = extractAssetVariantRichContentForCheck(firstItem, payload, template);
   const errors = [...(validation.errors || [])];
   const warnings = [...(validation.warnings || [])];
+  const localMedia = media.filter(isLocalOzonMediaUrl);
+  if (localMedia.length) {
+    warnings.push(`Selection publish payload still has ${localMedia.length} local or preview media URL(s); continuing without selection media blocking.`);
+  }
 
   const title = String(firstItem.name || payload.name || template?.title || template?.template_name || "").trim();
   const shop = shopId ? await mysqlQuery("SELECT name, legal_entity FROM shops WHERE id = ? LIMIT 1", [Number(shopId)]).then((rows) => rows[0] || null).catch(() => null) : null;
@@ -973,7 +1041,7 @@ export function inspectAssetVariantListingContent({
   if (String(description || "").split(/\s+/).filter(Boolean).length < 50) warnings.push("Description is short; Ozon SEO text may be weak");
 
   const looksLikeKeyProduct = /key|fob|\u94a5\u5319|钥匙|遥控器|брелок|ключ/i.test(factsText);
-  const hasKeyCaseTerms = /key[\s_-]*(case|cover|protection)|car[\s_-]*key|брелок|ключ/i.test(`${tagText} ${bodyText}`);
+  const hasKeyCaseTerms = /key[\s_-]*(case|cover|protection|shell)|fob[\s_-]*(case|cover|shell)|car[\s_-]*key[\s_-]*(case|cover|shell)|чехол\s+(?:для\s+)?ключ|корпус\s+(?:для\s+)?ключ|накладк[аи]\s+на\s+ключ/i.test(`${tagText} ${bodyText}`);
   if (!looksLikeKeyProduct && hasKeyCaseTerms) {
     errors.push("Non-key product content contains key-case related terms");
   }
@@ -1041,6 +1109,37 @@ function extractAssetVariantComplexAttributeValues(source = {}, attributeId = 0)
     .flatMap((attr) => normalizeArray(attr?.values))
     .map((value) => String(value?.value || value || "").trim())
     .filter(Boolean);
+}
+
+function assetVariantPayloadMediaUrls(firstItem = {}, payload = {}) {
+  const images = [
+    firstItem.primary_image,
+    firstItem.primaryImage,
+    firstItem.image_url,
+    firstItem.imageUrl,
+    payload.primary_image,
+    payload.primaryImage,
+    payload.image_url,
+    payload.imageUrl,
+    ...normalizeArray(firstItem.images),
+    ...normalizeArray(firstItem.image_urls || firstItem.imageUrls),
+    ...normalizeArray(payload.images),
+    ...normalizeArray(payload.image_urls || payload.imageUrls),
+    ...extractAssetVariantComplexAttributeValues(firstItem, 4191),
+    ...extractAssetVariantComplexAttributeValues(payload, 4191)
+  ].map((item) => {
+    if (typeof item === "string") return item.trim();
+    return String(item?.url || item?.value || item?.publishUrl || item?.publish_url || item?.previewUrl || item?.preview_url || "").trim();
+  }).filter(Boolean);
+  return uniqueValues(images);
+}
+
+function isLocalOzonMediaUrl(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  if (text.startsWith("/")) return true;
+  if (/^https?:\/\/(?:localhost|127(?:\.\d{1,3}){3}|\[?::1\]?)(?::\d+)?(?:\/|$)/i.test(text)) return true;
+  return /\/api\/(?:asset-variant-engine|ai|listing-media|tools\/image-cropper)\//i.test(text);
 }
 
 function attributeValueForCheck(attributes = [], attributeId = 0) {
@@ -1134,6 +1233,7 @@ export async function publishSelectionProductToOzon(body = {}, session = null, c
       detailImages
     },
     shopIds,
+    preparedMediaByShop: body.preparedMediaByShop || body.prepared_media_by_shop || {},
     rules: bootstrap.shops
       .filter((shop) => shopIds.includes(Number(shop.id)))
       .map((shop) => ({
@@ -1189,28 +1289,98 @@ export async function enqueuePublishSelectionProductToOzon(body = {}, session = 
   };
 }
 
-export async function assetVariantJobs(query = {}) {
+export async function enqueueGenerateAssetVariants(body = {}, session = null) {
+  await ensureAssetVariantSchema();
+  const shopIds = uniqueNumbers(body.shopIds || body.shop_ids);
+  if (!shopIds.length) throw new Error("请至少选择一个店铺");
+  const material = normalizeMaterialPayload(body.material || body);
+  if (!material.title) throw new Error("请先填写标题");
+  if (!material.mainImage) throw new Error("请先上传主图");
+  const requestBody = {
+    ...body,
+    shopIds,
+    material,
+    workbenchId: cleanText(body.workbenchId || body.workbench_id || "", 128)
+  };
+  const productId = Number(material.sourceProductId || material.source_product_id || body.productId || body.product_id || 0) || null;
+  const jobNo = `AVG-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Date.now().toString(36).toUpperCase()}`;
+  const insertResult = await mysqlExecute(`
+    INSERT INTO asset_variant_jobs
+    (job_no, job_type, status, product_id, request_json, created_by_person_id)
+    VALUES (?, 'generate_variants', 'queued', ?, ?, ?)
+  `, [
+    jobNo,
+    productId,
+    JSON.stringify(requestBody),
+    personId(session)
+  ]);
+  const jobId = Number(insertResult.insertId || 0);
+  enqueueAssetVariantJob({ id: jobId, session: { personId: personId(session) } });
+  return {
+    ok: true,
+    accepted: true,
+    jobId,
+    jobNo,
+    productId,
+    status: "queued",
+    note: `后台素材裂变任务已创建：${jobNo}`
+  };
+}
+
+export async function assetVariantJobs(query = {}, session = null) {
   await ensureAssetVariantSchema();
   const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+  const where = [];
+  const params = [];
+  const createdByPersonId = Number(query.createdByPersonId || query.created_by_person_id || 0) || 0;
+  const personScope = createdByPersonId || Number(personId(session) || 0) || 0;
+  const jobType = cleanText(query.jobType || query.job_type || "", 64);
+  const workbenchId = cleanText(query.workbenchId || query.workbench_id || "", 128);
+  const status = cleanText(query.status || "", 32);
+  const productId = Number(query.productId || query.product_id || 0) || 0;
+  if (personScope) {
+    where.push("j.created_by_person_id = ?");
+    params.push(personScope);
+  }
+  if (jobType) {
+    where.push("j.job_type = ?");
+    params.push(jobType);
+  }
+  if (status) {
+    where.push("j.status = ?");
+    params.push(status);
+  }
+  if (productId) {
+    where.push("j.product_id = ?");
+    params.push(productId);
+  }
+  if (workbenchId) {
+    where.push("JSON_UNQUOTE(JSON_EXTRACT(j.request_json, '$.workbenchId')) = ?");
+    params.push(workbenchId);
+  }
   const rows = await mysqlQuery(`
     SELECT j.*, p.name AS product_name, p.selection_id
     FROM asset_variant_jobs j
     LEFT JOIN products p ON p.id = j.product_id
+    ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
     ORDER BY j.id DESC
     LIMIT ?
-  `, [limit]);
+  `, [...params, limit]);
   return rows.map(normalizeAssetVariantJobRow);
 }
 
-export async function assetVariantJobDetail(id) {
+export async function assetVariantJobDetail(id, session = null) {
   await ensureAssetVariantSchema();
+  const jobId = Number(id || 0);
+  if (!jobId) return null;
   const rows = await mysqlQuery(`
     SELECT j.*, p.name AS product_name, p.selection_id
     FROM asset_variant_jobs j
     LEFT JOIN products p ON p.id = j.product_id
     WHERE j.id = ?
+      AND (? = 0 OR j.created_by_person_id = ?)
     LIMIT 1
-  `, [Number(id)]);
+  `, [jobId, Number(personId(session) || 0) || 0, Number(personId(session) || 0) || 0]);
   return rows[0] ? normalizeAssetVariantJobRow(rows[0]) : null;
 }
 
@@ -1344,6 +1514,45 @@ async function runAssetVariantJob(job) {
         markStage: (stage, detail = {}) => updateAssetVariantJobStage(row.id, progress, stage, detail),
         throwIfCancelled: () => throwIfAssetVariantJobCancelled(row.id)
       });
+    } else if (row.job_type === "generate_variants") {
+      result = await generateAssetVariants(request, job.session || null, {
+        jobId: row.id,
+        markStage: (stage, detail = {}) => updateAssetVariantJobStage(row.id, progress, stage, detail),
+        throwIfCancelled: () => throwIfAssetVariantJobCancelled(row.id)
+      });
+      const variants = Array.isArray(result?.variants) ? result.variants : [];
+      const variantsWithVideo = [];
+      for (let index = 0; index < variants.length; index += 1) {
+        const variant = variants[index];
+        await updateAssetVariantJobStage(row.id, progress, "generate_videos", {
+          current: index + 1,
+          total: variants.length,
+          shopId: Number(variant?.shopId || 0) || null
+        });
+        await throwIfAssetVariantJobCancelled(row.id);
+        const videos = Array.isArray(variant?.videos) ? variant.videos : [];
+        if (!videos.length) {
+          const generatedVideo = await ensureAssetVariantVideoFromImages(null, {
+            id: Number(variant?.id || 0) || 0,
+            batch_id: variant?.batchId || result?.batchId || "",
+            shop_id: Number(variant?.shopId || 0) || 0,
+            output_dir: variant?.localOutputDir || ""
+          }, variant?.images || [], {
+            throwIfCancelled: () => throwIfAssetVariantJobCancelled(row.id)
+          }).catch(() => null);
+          variantsWithVideo.push({
+            ...variant,
+            videos: generatedVideo ? [normalizeGeneratedVideoForResponse(generatedVideo)] : videos
+          });
+        } else {
+          variantsWithVideo.push(variant);
+        }
+      }
+      result = {
+        ...result,
+        generated: variantsWithVideo.length,
+        variants: variantsWithVideo
+      };
     } else {
       throw new Error(`不支持的素材裂变任务类型：${row.job_type}`);
     }
@@ -1559,7 +1768,7 @@ export async function syncAssetOzonCategories(body = {}) {
   const rows = flattenOzonCategoryTree(tree);
   let saved = 0;
   for (const row of rows) {
-    if (!row.descriptionCategoryId && !row.typeId) continue;
+    if (!row.descriptionCategoryId || !row.typeId) continue;
     await mysqlExecute(`
       INSERT INTO ozon_category_mappings
       (description_category_id, type_id, name_ru, name_zh, path_ru, path_zh, parent_description_category_id,
@@ -1601,7 +1810,8 @@ export async function createAssetTailTemplate(body = {}, session = null) {
   const vehicleModel = cleanText(body.vehicleModel || body.vehicle_model || DEFAULT_TAIL_MODEL, 128);
   const name = cleanText(body.name || `${category}-${vehicleModel}-image`, 255);
   const isDefault = Boolean(body.isDefault ?? body.is_default);
-  const imagePath = await storeTailTemplateImage(body.image || body.imageData || body.image_data || body.imagePath || body.image_path, name);
+  const storedImagePath = await storeTailTemplateImage(body.image || body.imageData || body.image_data || body.imagePath || body.image_path, name);
+  const imagePath = await publishTailTemplateImageForOzon(storedImagePath, { shopId, name, session });
   if (!imagePath) throw new Error("Missing image path");
 
   if (isDefault) {
@@ -1979,9 +2189,10 @@ async function ensureVehicleSeedData() {
   }
 }
 
-async function generateVariantImages({ material, shopDir, watermark, tailImageUrl, mainImagePlan, batchId, shopId, sourceTitle = "", variantTitle = "", throwIfCancelled = null }) {
+async function generateVariantImages({ material, shopDir, watermark, tailImageUrl, mainImagePlan, batchId, shopId, sourceTitle = "", variantTitle = "", preparedImages = [], throwIfCancelled = null }) {
   await throwIfCancelled?.();
   const images = [];
+  const warnings = [];
   const mainDir = path.join(shopDir, "images", "main");
   const detailDir = path.join(shopDir, "images", "details");
   const tailDir = path.join(shopDir, "images", "tail");
@@ -1989,31 +2200,32 @@ async function generateVariantImages({ material, shopDir, watermark, tailImageUr
   await fs.mkdir(detailDir, { recursive: true });
   await fs.mkdir(tailDir, { recursive: true });
 
-  const mainOutput = path.join(mainDir, "main-01.jpg");
-  const mainBuffer = await readImageBuffer(material.mainImage);
-  await throwIfCancelled?.();
-  if (mainImagePlan === "original") {
-    await sharp(mainBuffer).rotate().jpeg({ quality: 92 }).toFile(mainOutput);
-  } else if (mainImagePlan === "ai_similar") {
-    const edited = await generateAiSimilarMainImage({
-      mainBuffer,
-      material,
-      sourceTitle,
-      variantTitle
-    });
-    await sharp(edited).rotate().jpeg({ quality: 92 }).toFile(mainOutput);
+  const prepared = normalizeArray(preparedImages).map((item, index) => reusablePermanentMediaResult(item, index === 0 ? "main" : "detail", index + 1)).filter(Boolean);
+  const expectedPreparedCount = 1 + (material.detailImages.length || 1);
+  if (prepared.length >= expectedPreparedCount) {
+    images.push(...prepared);
   } else {
-    const mainImage = await applyWatermark(mainBuffer, watermark);
-    await mainImage.jpeg({ quality: 92 }).toFile(mainOutput);
-  }
-  images.push(await imageResult(mainOutput, "main", 1, { batchId, shopId, sourceTitle, variantTitle }));
-  await throwIfCancelled?.();
+    const mainOutput = path.join(mainDir, "main-01.jpg");
+    const mainBuffer = await readImageBuffer(material.mainImage);
+    await throwIfCancelled?.();
+    if (mainImagePlan === "original") {
+      await sharp(mainBuffer).rotate().jpeg({ quality: 92 }).toFile(mainOutput);
+    } else if (mainImagePlan === "ai_similar") {
+      const edited = await generateAiSimilarMainImage({ mainBuffer, material, sourceTitle, variantTitle });
+      await sharp(edited).rotate().jpeg({ quality: 92 }).toFile(mainOutput);
+    } else {
+      const mainImage = await applyWatermark(mainBuffer, watermark);
+      await mainImage.jpeg({ quality: 92 }).toFile(mainOutput);
+    }
+    images.push(await imageResult(mainOutput, "main", 1, { batchId, shopId, sourceTitle, variantTitle }));
+    await throwIfCancelled?.();
 
-  const detailSources = material.detailImages.length ? [...material.detailImages] : [material.mainImage].filter(Boolean);
-
-  const detailImages = await mapWithConcurrency(detailSources, ASSET_IMAGE_CONCURRENCY, async (source, index) => {
+    const detailSources = material.detailImages.length ? [...material.detailImages] : [material.mainImage].filter(Boolean);
+    const detailImages = await mapWithConcurrency(detailSources, ASSET_IMAGE_CONCURRENCY, async (source, index) => {
     await throwIfCancelled?.();
     try {
+      const reusableDetail = reusablePermanentMediaResult(source, "detail", index + 1);
+      if (reusableDetail) return reusableDetail;
       const output = path.join(detailDir, `detail-${String(index + 1).padStart(2, "0")}.jpg`);
       const buffer = await readImageBuffer(source);
       await throwIfCancelled?.();
@@ -2025,19 +2237,58 @@ async function generateVariantImages({ material, shopDir, watermark, tailImageUr
       console.warn(`skip unavailable detail image ${index + 1}:`, error?.message || error);
       return null;
     }
-  });
-  images.push(...detailImages.filter(Boolean));
+    });
+    images.push(...detailImages.filter(Boolean));
+  }
   await throwIfCancelled?.();
 
   if (tailImageUrl) {
-    const output = path.join(tailDir, `tail-01.jpg`);
-    const buffer = await readImageBuffer(tailImageUrl);
-    await throwIfCancelled?.();
-    const tailImage = await applyWatermark(buffer, watermark);
-    await tailImage.jpeg({ quality: 92 }).toFile(output);
-    images.push(await imageResult(output, "tail", 1, { batchId, shopId, sourceTitle, variantTitle }));
+    try {
+      const reusableTail = reusablePermanentMediaResult(tailImageUrl, "tail", 1);
+      if (reusableTail) {
+        images.push(reusableTail);
+      } else {
+        const output = path.join(tailDir, `tail-01.jpg`);
+        const buffer = await readImageBuffer(tailImageUrl);
+        await throwIfCancelled?.();
+        const tailImage = await applyWatermark(buffer, watermark);
+        await tailImage.jpeg({ quality: 92 }).toFile(output);
+        images.push(await imageResult(output, "tail", 1, { batchId, shopId, sourceTitle, variantTitle }));
+      }
+    } catch (error) {
+      const warning = tailImageSkipWarning(error, tailImageUrl);
+      warnings.push(warning);
+      console.warn(warning, error?.message || error);
+    }
   }
-  return images;
+  return { images, warnings: uniqueValues(warnings) };
+}
+
+function reusablePermanentMediaResult(source, type, sortOrder = 1) {
+  const url = String(source?.publishUrl || source?.publish_url || source?.url || source || "").trim();
+  if (!isManagedOssObjectUrl(url)) return null;
+  return {
+    type,
+    sortOrder,
+    sort_order: sortOrder,
+    previewUrl: url,
+    publishUrl: url,
+    url,
+    outputPath: "",
+    localListingPath: "",
+    reused: true
+  };
+}
+
+function tailImageSkipWarning(error, tailImageUrl = "") {
+  const rawMessage = String(error?.message || error || "").trim();
+  const assetPath = String(error?.assetPath || "").trim();
+  const source = String(error?.source || tailImageUrl || "").trim();
+  const lower = `${rawMessage} ${assetPath} ${source}`.toLowerCase();
+  if (lower.includes("asset-tail-templates")) {
+    return "店铺尾图模板文件不存在，已跳过尾图，不影响继续上架";
+  }
+  return "店铺尾图生成失败，已跳过尾图，不影响继续上架";
 }
 
 async function generateAiSimilarMainImage({ mainBuffer, material, sourceTitle = "", variantTitle = "" }) {
@@ -2066,16 +2317,54 @@ async function storeTailTemplateImage(source, name) {
   const text = String(source || "").trim();
   if (!text) return "";
   if (/^data:image\//i.test(text)) {
-    await fs.mkdir(TAIL_TEMPLATE_ROOT, { recursive: true });
     const match = text.match(/^data:image\/([a-zA-Z0-9.+-]+);base64,(.+)$/);
     if (!match) throw new Error("Invalid asset variant file URL");
     const ext = imageExtension(match[1]);
+    const buffer = Buffer.from(match[2], "base64");
+    const stored = await putContentAddressedObject(buffer, {
+      prefix: "listing-media",
+      extension: `.${ext}`,
+      contentType: ext === "jpg" ? "image/jpeg" : `image/${ext}`
+    });
+    if (stored) return stored.url;
+    await fs.mkdir(TAIL_TEMPLATE_ROOT, { recursive: true });
     const filename = `${Date.now().toString(36)}-${sanitizeFilename(name).slice(0, 40)}.${ext}`;
     const filePath = path.join(TAIL_TEMPLATE_ROOT, filename);
-    await fs.writeFile(filePath, Buffer.from(match[2], "base64"));
-    return path.relative(ROOT_DIR, filePath).replace(/\\/g, "/");
+    await fs.writeFile(filePath, buffer);
+    return `/uploads/asset-tail-templates/${filename}`;
   }
   return text;
+}
+
+async function publishTailTemplateImageForOzon(source, { shopId = null, name = "tail-template", session = null } = {}) {
+  const text = String(source || "").trim();
+  if (!text) return "";
+  if (isManagedOssObjectUrl(text)) return text;
+  if (/^http:\/\//i.test(text)) throw new Error("尾图模板地址必须是 Ozon 可访问的 HTTPS 图片地址。");
+  const localPath = resolveLocalAssetPath(text);
+  if (!localPath || !fsSync.existsSync(localPath)) {
+    if (/^https:\/\//i.test(text)) {
+      return archiveRemoteMediaObjectUrl(text, { prefix: "listing-media" });
+    }
+    throw new Error("尾图模板文件不存在，无法归档到 OSS");
+  }
+  const asset = await registerListingMediaAssetFromFile({
+    filePath: localPath,
+    source_module: "asset_tail_template",
+    source_id: String(name || text),
+    shop_id: shopId,
+    media_type: "image",
+    role: "tail_template",
+    original_name: `${sanitizeFilename(name).slice(0, 80) || "tail-template"}${path.extname(localPath) || ".jpg"}`,
+    metadata: {
+      sourceUrl: text,
+      tailTemplateName: name,
+      shopId
+    }
+  }, session);
+  const publishUrl = String(asset.publishUrl || asset.publish_url || "").trim();
+  if (/^https:\/\//i.test(publishUrl)) return publishUrl;
+  throw new Error("尾图模板未获得 Ozon 可访问的公网地址，请先配置 LISTING_MEDIA_PUBLIC_BASE_URL 和公网素材同步后再上传尾图。");
 }
 
 function imageExtension(mimePart) {
@@ -2489,12 +2778,18 @@ async function ensureAssetVariantVideoFromImagesUnsafe(connection, variant = {},
     images.find((image) => assetMediaUrl(image));
   if (!sourceImage) return null;
 
-  const sourcePath = resolveLocalAssetPath(sourceImage.localListingPath || sourceImage.local_path || sourceImage.outputPath || sourceImage.output_path || sourceImage.url);
-  if (!sourcePath || !fsSync.existsSync(sourcePath)) return null;
-  await context.throwIfCancelled?.();
-
   const variantDir = resolveLocalAssetPath(variant.output_dir || "");
   if (!variantDir) return null;
+  let sourcePath = resolveLocalAssetPath(sourceImage.localListingPath || sourceImage.local_path || sourceImage.outputPath || sourceImage.output_path || sourceImage.url);
+  if (!sourcePath || !fsSync.existsSync(sourcePath)) {
+    const sourceUrl = assetMediaUrl(sourceImage);
+    if (!sourceUrl) return null;
+    const sourceDir = path.join(variantDir, "videos");
+    await fs.mkdir(sourceDir, { recursive: true });
+    sourcePath = path.join(sourceDir, "video-source.jpg");
+    await fs.writeFile(sourcePath, await readImageBuffer(sourceUrl));
+  }
+  await context.throwIfCancelled?.();
   const recipe = serverVideoRecipe();
   const sourceHash = await fileSha256(sourcePath).catch(() => "");
   if (sourceHash) {
@@ -3115,8 +3410,8 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
       WHERE id = ?
     `, [
       templatePayload.category_name || ozonCategoryName,
-      JSON.stringify(templatePayload.source_raw || sourceRaw),
-      JSON.stringify(templatePayload.editable_payload || editablePayload),
+      JSON.stringify(compactAssetVariantSourceProvenance(templatePayload.source_raw || sourceRaw)),
+      JSON.stringify(compactAssetVariantPersistencePayload(templatePayload.editable_payload || editablePayload)),
       templatePayload.title || editablePayload.title,
       templatePayload.description || editablePayload.description,
       JSON.stringify(templatePayload.attributes || attributes),
@@ -3135,8 +3430,8 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
     templatePayload.ozon_category_id || ozonCategoryId,
     templatePayload.category_name || ozonCategoryName,
     name,
-    JSON.stringify(templatePayload.source_raw || sourceRaw),
-    JSON.stringify(templatePayload.editable_payload || editablePayload),
+    JSON.stringify(compactAssetVariantSourceProvenance(templatePayload.source_raw || sourceRaw)),
+    JSON.stringify(compactAssetVariantPersistencePayload(templatePayload.editable_payload || editablePayload)),
     templatePayload.title || editablePayload.title,
     templatePayload.description || editablePayload.description,
     JSON.stringify(templatePayload.attributes || attributes),
@@ -3225,6 +3520,26 @@ async function insertListingShopCopyFromPackage(connection, draftId, variant, im
     JSON.stringify(validation),
     personId(session)
   ]);
+}
+
+function compactAssetVariantSourceProvenance(value = {}) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const keys = [
+    "source", "source_type", "shop_id", "store_id", "company_id", "product_id",
+    "sku", "ozon_sku", "offer_id", "url", "page_url", "collected_at", "captured_at",
+    "from_selection_product", "selection_product_id"
+  ];
+  return Object.fromEntries(keys
+    .filter((key) => source[key] !== undefined && source[key] !== null && source[key] !== "")
+    .map((key) => [key, source[key]]));
+}
+
+function compactAssetVariantPersistencePayload(value) {
+  if (Array.isArray(value)) return value.map((item) => compactAssetVariantPersistencePayload(item));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => key !== "source_raw" && key !== "sourceRaw")
+    .map(([key, item]) => [key, compactAssetVariantPersistencePayload(item)]));
 }
 
 async function updateAssetVariantPublishState({ variantId = 0, draftId = 0, shopId = 0, status = "", publishResult = null } = {}) {
@@ -4009,6 +4324,10 @@ function resolveLocalAssetPath(value = "") {
       candidates.push(path.resolve(root, withoutLeadingSlash));
     }
     if (withoutLeadingSlash.startsWith("shop-watermarks/")) {
+      const filename = path.basename(withoutLeadingSlash);
+      if (filename && filename === withoutLeadingSlash.slice("shop-watermarks/".length)) {
+        for (const root of SHOP_WATERMARK_ROOTS) candidates.push(path.resolve(root, filename));
+      }
       candidates.push(path.resolve(root, "uploads", withoutLeadingSlash));
       candidates.push(path.resolve(root, "public", "uploads", withoutLeadingSlash));
     }
@@ -4071,9 +4390,10 @@ function buildListingWorkbook({ shop, title, titleZh, material, images, rule, ta
   ];
   return createMinimalXlsx("listing", rows);
 }
-function buildProductInfo({ shop, title, titleZh, material, images, rule, tailTemplate }) {
+function buildProductInfo({ shop, title, titleZh, material, images, rule, tailTemplate, warnings = [] }) {
   return {
     shop: { id: shop.id, name: shop.name },
+    warnings: normalizeArray(warnings),
     category: rule?.tailCategory || "",
     ozonCategory: {
       id: material.ozonCategoryId || "",

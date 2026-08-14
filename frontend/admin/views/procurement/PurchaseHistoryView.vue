@@ -4,6 +4,8 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { createLatestRequestGate } from "../../utils/request-gate";
+import ErpFilterBar from "../../components/ErpFilterBar.vue";
+import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 
@@ -60,7 +62,8 @@ function dateText(value) {
 }
 
 function productImage(row) {
-  return row?.product_image_url || row?.image_url || "";
+  const productId = Number(row?.product_id || 0);
+  return productId ? `/api/products/${productId}/image?thumb=1&w=180` : "";
 }
 
 function productCode(row) {
@@ -231,40 +234,38 @@ onMounted(loadPageData);
 
 <template>
   <div class="page-stack procurement-history-page procurement-workspace-page">
-    <section class="page-hero">
-      <div class="procurement-hero-copy">
-        <h2>入库记录</h2>
-        <p class="hero-tip">这里按每笔独立入库流水展示，不再按采购单聚合。</p>
-      </div>
-      <div class="page-card-actions">
+    <ErpPageHeader title="入库记录" description="这里按每笔独立入库流水展示，不再按采购单聚合。">
+      <template #actions>
         <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
-      </div>
-    </section>
+      </template>
+    </ErpPageHeader>
 
     <el-card shadow="never" class="page-card procurement-history-card procurement-workspace-card">
       <div class="procurement-toolbar procurement-toolbar-sticky procurement-filter-panel procurement-workspace-filter">
-        <el-form inline>
-          <el-form-item label="关键词">
-            <el-input
-              v-model="state.filters.query"
-              placeholder="采购单号 / 商品名称 / 编码 / 申请人 / 备注"
-              clearable
-              style="width: 340px"
-              @keyup.enter="handleSearch"
-            />
-          </el-form-item>
-          <el-form-item label="状态">
-            <el-select v-model="state.filters.status" style="width: 140px">
-              <el-option label="已入库" value="approved" />
-              <el-option label="全部" value="all" />
-              <el-option label="待入库" value="pending_arrival" />
-            </el-select>
-          </el-form-item>
-          <el-form-item>
+        <ErpFilterBar>
+          <el-form inline>
+            <el-form-item label="关键词">
+              <el-input
+                v-model="state.filters.query"
+                placeholder="采购单号 / 商品名称 / 编码 / 申请人 / 备注"
+                clearable
+                style="width: 340px"
+                @keyup.enter="handleSearch"
+              />
+            </el-form-item>
+            <el-form-item label="状态">
+              <el-select v-model="state.filters.status" style="width: 140px">
+                <el-option label="已入库" value="approved" />
+                <el-option label="全部" value="all" />
+                <el-option label="待入库" value="pending_arrival" />
+              </el-select>
+            </el-form-item>
+          </el-form>
+          <template #actions>
             <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
             <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
-          </el-form-item>
-        </el-form>
+          </template>
+        </ErpFilterBar>
       </div>
 
       <div class="list-wrap">
@@ -409,17 +410,6 @@ onMounted(loadPageData);
 <style scoped>
 .procurement-history-page {
   min-height: 100%;
-}
-
-.procurement-hero-copy {
-  display: grid;
-  gap: 8px;
-}
-
-.hero-tip {
-  margin: 0;
-  color: var(--erp-text-secondary);
-  font-size: 13px;
 }
 
 .procurement-history-card {

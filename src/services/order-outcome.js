@@ -184,25 +184,25 @@ function lossProfileMeta(code = LOSS_PROFILE_NONE) {
   if (code === LOSS_PROFILE_PURCHASE_COLLECTING) {
     return {
       code,
-      label: "货值+收单费",
-      formulaText: "损失 = 货物成本 + 收单费",
-      components: ["purchase", "collecting"]
+      label: "货值+国际运费+收单费",
+      formulaText: "损失 = 货物成本 + 国际运费 + 收单费",
+      components: ["purchase", "international", "collecting"]
     };
   }
   if (code === LOSS_PROFILE_PURCHASE_COLLECTING_INTERNATIONAL) {
     return {
       code,
-      label: "货值+收单费+国际运费",
-      formulaText: "损失 = 货物成本 + 收单费 + 国际运费",
-      components: ["purchase", "collecting", "international"]
+      label: "货值+国内运费+国际运费+收单费",
+      formulaText: "损失 = 货物成本 + 国内运费 + 国际运费 + 收单费",
+      components: ["purchase", "domestic", "international", "collecting"]
     };
   }
   if (code === LOSS_PROFILE_COMMISSION_PURCHASE_COLLECTING_INTERNATIONAL) {
     return {
       code,
-      label: "佣金+货值+收单费+国际运费",
-      formulaText: "损失 = 佣金 + 货物成本 + 收单费 + 国际运费",
-      components: ["commission", "purchase", "collecting", "international"]
+      label: "佣金+货值+国内运费+国际运费+收单费",
+      formulaText: "损失 = 佣金 + 货物成本 + 国内运费 + 国际运费 + 收单费",
+      components: ["commission", "purchase", "domestic", "international", "collecting"]
     };
   }
   return {
@@ -386,6 +386,67 @@ export function isTerminalOutcome(row = {}) {
   return classifyOrderOutcome(row) !== "active";
 }
 
+export function resolveReturnLossCostPolicy({ outcome = "active", lossProfileCode = "" } = {}) {
+  const profile = String(lossProfileCode || "").trim().toLowerCase();
+  if (profile === LOSS_PROFILE_NONE) {
+    return {
+      purchase: false,
+      domestic: false,
+      international: false,
+      packaging: false,
+      commission: false,
+      service: false,
+      collecting: false,
+      aftersaleFinance: true
+    };
+  }
+  if (profile === LOSS_PROFILE_PURCHASE_COLLECTING) {
+    return {
+      purchase: true,
+      domestic: false,
+      international: true,
+      packaging: false,
+      commission: false,
+      service: false,
+      collecting: true,
+      aftersaleFinance: true
+    };
+  }
+  if (profile === LOSS_PROFILE_PURCHASE_COLLECTING_INTERNATIONAL) {
+    return {
+      purchase: true,
+      domestic: true,
+      international: true,
+      packaging: false,
+      commission: false,
+      service: false,
+      collecting: true,
+      aftersaleFinance: true
+    };
+  }
+  if (profile === LOSS_PROFILE_COMMISSION_PURCHASE_COLLECTING_INTERNATIONAL) {
+    return {
+      purchase: true,
+      domestic: true,
+      international: true,
+      packaging: false,
+      commission: true,
+      service: false,
+      collecting: true,
+      aftersaleFinance: true
+    };
+  }
+
+  const normalizedOutcome = String(outcome || "").trim().toLowerCase();
+  if (normalizedOutcome === "rejected_unclaimed") {
+    return resolveReturnLossCostPolicy({ lossProfileCode: LOSS_PROFILE_PURCHASE_COLLECTING });
+  }
+  if (normalizedOutcome === "after_delivery_return") {
+    return resolveReturnLossCostPolicy({ lossProfileCode: LOSS_PROFILE_PURCHASE_COLLECTING_INTERNATIONAL });
+  }
+  return resolveReturnLossCostPolicy({ lossProfileCode: LOSS_PROFILE_NONE });
+}
+
 export function buildOrderOutcomeSql(alias = "o", dialect = "mysql") {
   const concatText = (...parts) => {
     if (String(dialect || "").toLowerCase() === "mysql") {
@@ -452,29 +513,59 @@ export function estimateOutcomeReturnLoss({
   if (profile === LOSS_PROFILE_NONE) {
     return 0;
   }
-  if (profile === LOSS_PROFILE_PURCHASE_COLLECTING) {
-    return roundMoney(purchaseTotal + collectingTotal);
-  }
-  if (profile === LOSS_PROFILE_PURCHASE_COLLECTING_INTERNATIONAL) {
-    return roundMoney(purchaseTotal + collectingTotal + internationalTotal);
-  }
-  if (profile === LOSS_PROFILE_COMMISSION_PURCHASE_COLLECTING_INTERNATIONAL) {
-    return roundMoney(purchaseTotal + collectingTotal + internationalTotal + commissionTotal);
+  if (
+    profile === LOSS_PROFILE_PURCHASE_COLLECTING
+    || profile === LOSS_PROFILE_PURCHASE_COLLECTING_INTERNATIONAL
+    || profile === LOSS_PROFILE_COMMISSION_PURCHASE_COLLECTING_INTERNATIONAL
+  ) {
+    const policy = resolveReturnLossCostPolicy({ outcome, lossProfileCode: profile });
+    return roundMoney(
+      (policy.purchase ? purchaseTotal : 0)
+      + (policy.domestic ? domesticTotal : 0)
+      + (policy.international ? internationalTotal : 0)
+      + (policy.packaging ? packagingTotal : 0)
+      + (policy.commission ? commissionTotal : 0)
+      + (policy.service ? serviceTotal : 0)
+      + (policy.collecting ? collectingTotal : 0)
+    );
   }
 
   if (outcome === "cancelled_pre_fulfillment" || outcome === "delivered_signed" || outcome === "active") {
     return 0;
   }
   if (outcome === "rejected_unclaimed") {
-    return roundMoney(purchaseTotal + collectingTotal);
+    return estimateOutcomeReturnLoss({
+      outcome,
+      lossProfileCode: LOSS_PROFILE_PURCHASE_COLLECTING,
+      quantity,
+      purchaseCostPerUnit,
+      domesticShippingPerUnit,
+      internationalShippingPerUnit,
+      packagingCostTotal,
+      commissionFeeTotal,
+      collectingFeeTotal,
+      finalMileFeeTotal,
+      serviceFeeTotal,
+      returnRateLossTotal
+    });
   }
   if (outcome === "after_delivery_return") {
-    return roundMoney(purchaseTotal + collectingTotal + internationalTotal);
+    return estimateOutcomeReturnLoss({
+      outcome,
+      lossProfileCode: LOSS_PROFILE_PURCHASE_COLLECTING_INTERNATIONAL,
+      quantity,
+      purchaseCostPerUnit,
+      domesticShippingPerUnit,
+      internationalShippingPerUnit,
+      packagingCostTotal,
+      commissionFeeTotal,
+      collectingFeeTotal,
+      finalMileFeeTotal,
+      serviceFeeTotal,
+      returnRateLossTotal
+    });
   }
-  void domesticTotal;
-  void packagingTotal;
   void finalMileTotal;
-  void serviceTotal;
   return roundMoney(fallbackTotal);
 }
 

@@ -1,17 +1,18 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import {
   AlertTriangle,
   ArrowDownRight,
   ArrowUpRight,
   Boxes,
+  CalendarDays,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   CircleDollarSign,
-  Copy,
   ClipboardList,
-  ExternalLink,
   Flame,
   PackageCheck,
   RefreshCw,
@@ -21,19 +22,24 @@ import {
   Zap
 } from "lucide-vue-next";
 import { apiClient } from "../utils/api";
+import { openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../utils/ai-variant-lab-window";
+import { shanghaiDateKey } from "../utils/shanghai-date.js";
 
+const route = useRoute();
 const router = useRouter();
 const loading = ref(false);
 const refreshing = ref(false);
+const snapshotBuilding = ref(false);
 const hasDashboardLoaded = ref(false);
-const operationTodos = ref([]);
-const selectedOperationShopId = ref("all");
+const overviewPanelsLoading = ref(false);
+const shopProductLimits = ref([]);
+const topSkus = ref([]);
+const selectedDate = ref(/^\d{4}-\d{2}-\d{2}$/.test(String(route.query.date || "")) ? String(route.query.date) : shanghaiDateKey());
 let dashboardSnapshotRefreshTimer = null;
-const COMMAND_PANEL_LIMIT = 5;
+let dashboardSnapshotRefreshAttempts = 0;
+let dashboardRequestSeq = 0;
+const DASHBOARD_SESSION_CACHE_PREFIX = "erp:dashboard:last-success:";
 
-function createAiWorkbenchId() {
-  return `aiwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
 const dashboard = ref({
   summary: {},
   commerce: {
@@ -64,33 +70,141 @@ const commerceShops = computed(() => Array.isArray(commerce.value.shops) ? comme
 const adShops = computed(() => Array.isArray(adToday.value.shops) ? adToday.value.shops : []);
 const adMonthShops = computed(() => Array.isArray(adMonth.value.shops) ? adMonth.value.shops : []);
 const fbpAlerts = computed(() => Array.isArray(dashboard.value.alerts?.fbp) ? dashboard.value.alerts.fbp : []);
-const fbpShortageAlerts = computed(() => fbpAlerts.value.filter((item) => ["out_of_stock", "within_7_days", "within_30_days"].includes(item.alert_type)));
-const fbpSlowAlerts = computed(() => fbpAlerts.value.filter((item) => ["over_60_days", "no_sales"].includes(item.alert_type)));
+const fbpShortageAlerts = computed(() => fbpAlerts.value.filter((item) => ["out_of_stock", "within_7_days", "within_15_days"].includes(item.alert_type)));
 const fbpOutOfStockCount = computed(() => fbpAlerts.value.filter((item) => item.alert_type === "out_of_stock").length);
 const fbpWithin7Count = computed(() => fbpAlerts.value.filter((item) => item.alert_type === "within_7_days").length);
-const fbpWithin30Count = computed(() => fbpAlerts.value.filter((item) => item.alert_type === "within_30_days").length);
+const fbpWithin15Count = computed(() => fbpAlerts.value.filter((item) => item.alert_type === "within_15_days").length);
 const procurementRows = computed(() => Array.isArray(dashboard.value.alerts?.procurement) ? dashboard.value.alerts.procurement : []);
-const operationTodoRows = computed(() => Array.isArray(operationTodos.value) ? operationTodos.value : []);
-const operationShopOptions = computed(() => {
-  const map = new Map();
-  operationTodoRows.value.forEach((row) => {
-    const id = String(row.shop_id || row.shopId || "").trim();
-    if (!id) return;
-    map.set(id, row.shop_name || row.shopName || `店铺 ${id}`);
-  });
-  return Array.from(map, ([id, name]) => ({ id, name }));
+const dashboardUpdating = computed(() => (refreshing.value || snapshotBuilding.value) && hasDashboardLoaded.value);
+const todayDateKey = computed(() => shanghaiDateKey());
+const isTodaySelected = computed(() => selectedDate.value === todayDateKey.value);
+const availableLimitRows = computed(() => shopProductLimits.value.map((row) => {
+  const total = row?.limit?.total || {};
+  const dailyCreate = row?.limit?.daily_create || {};
+  return {
+    shop_id: row.shop_id,
+    shop_name: row.shop_name || `店铺 ${row.shop_id || ""}`.trim(),
+    total_available: Number(total.remaining || 0),
+    total_limit: Number(total.limit || 0),
+    today_available: Number(dailyCreate.remaining || 0),
+    today_limit: Number(dailyCreate.limit || 0),
+    today_usage: Number(dailyCreate.usage || 0),
+    ok: row.ok !== false && dailyCreate.remaining !== null && dailyCreate.remaining !== undefined
+  };
+}));
+const maxAvailableLimit = computed(() => Math.max(1, ...availableLimitRows.value.map((row) => row.today_available)));
+const selectedDateText = computed(() => {
+  const [year, month, day] = selectedDate.value.split("-");
+  return `${year}年${Number(month)}月${Number(day)}日`;
 });
-const todoRows = computed(() => {
-  if (selectedOperationShopId.value === "all") return operationTodoRows.value;
-  return operationTodoRows.value.filter((row) => String(row.shop_id || row.shopId || "") === String(selectedOperationShopId.value));
-});
-const initialDashboardLoading = computed(() => loading.value && !hasDashboardLoaded.value);
-const dashboardUpdating = computed(() => refreshing.value && hasDashboardLoaded.value);
+
+function clearDashboardSnapshotReload() {
+  if (!dashboardSnapshotRefreshTimer) return;
+  window.clearTimeout(dashboardSnapshotRefreshTimer);
+  dashboardSnapshotRefreshTimer = null;
+}
+
+function readDashboardSessionCache(dateKey) {
+  try {
+    const cached = JSON.parse(window.sessionStorage?.getItem(`${DASHBOARD_SESSION_CACHE_PREFIX}${dateKey}`) || "null");
+    return cached && typeof cached === "object" ? cached : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeDashboardSessionCache(dateKey, payload) {
+  try {
+    window.sessionStorage?.setItem(`${DASHBOARD_SESSION_CACHE_PREFIX}${dateKey}`, JSON.stringify(payload));
+  } catch {
+    // Storage may be unavailable in privacy mode; live requests still work.
+  }
+}
+
+function waitForDashboardRetry(delay) {
+  return new Promise((resolve) => window.setTimeout(resolve, delay));
+}
+
+async function getDashboardWithRetry(url, options = {}, retries = 2) {
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await apiClient.get(url, {
+        ...options,
+        dedupe: false
+      });
+    } catch (error) {
+      lastError = error;
+      const transientNetworkError = error instanceof TypeError || /fetch|network|connection|socket/i.test(String(error?.message || ""));
+      if (!transientNetworkError || attempt >= retries) throw error;
+      await waitForDashboardRetry(350 * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
+function mergeDashboardPayload(payload) {
+  dashboard.value = {
+    ...dashboard.value,
+    ...(payload || {}),
+    summary: {
+      ...dashboard.value.summary,
+      ...(payload?.summary || {})
+    },
+    commerce: {
+      ...dashboard.value.commerce,
+      ...(payload?.commerce || {}),
+      advertising: {
+        ...dashboard.value.commerce.advertising,
+        ...(payload?.commerce?.advertising || {})
+      }
+    },
+    alerts: {
+      ...dashboard.value.alerts,
+      ...(payload?.alerts || {})
+    }
+  };
+}
+
+async function applyDashboardDate(value) {
+  const next = String(value || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(next) || next > todayDateKey.value) return;
+  selectedDate.value = next;
+  refreshing.value = hasDashboardLoaded.value;
+  snapshotBuilding.value = false;
+  dashboard.value = {
+    summary: {},
+    commerce: { today: {}, yesterday: {}, advertising: { today: {}, yesterday: {}, month: {} } },
+    alerts: { fbp: [], fbs: [], procurement: [] }
+  };
+  topSkus.value = [];
+  clearDashboardSnapshotReload();
+  dashboardSnapshotRefreshAttempts = 0;
+  await router.replace({ path: route.path, query: { ...route.query, date: next } });
+  if (selectedDate.value !== next) return;
+  await loadDashboard({ dateKey: next });
+}
+
+function disableFutureDashboardDate(value) {
+  return shanghaiDateKey(value) > todayDateKey.value;
+}
+
+function shiftDashboardDate(offset) {
+  const cursor = new Date(`${selectedDate.value}T12:00:00+08:00`);
+  cursor.setUTCDate(cursor.getUTCDate() + Number(offset || 0));
+  const next = shanghaiDateKey(cursor);
+  if (!next || next > todayDateKey.value) return;
+  applyDashboardDate(next);
+}
+
+function resetDashboardDate() {
+  if (isTodaySelected.value) return;
+  applyDashboardDate(todayDateKey.value);
+}
 
 const urgentCount = computed(() => Number(summary.value.urgent_count || 0));
 const stockWarningCount = computed(() => Number(summary.value.warning_count || 0));
 const fbpShortageCount = computed(() => fbpShortageAlerts.value.length);
-const fbpSlowCount = computed(() => fbpSlowAlerts.value.length);
 const procurementCount = computed(() => Number(summary.value.procurement_count || 0));
 const firstStockAlert = computed(() => fbpAlerts.value[0] || {});
 const firstProcurement = computed(() => procurementRows.value[0] || {});
@@ -115,10 +229,6 @@ function metricNumber(value, suffix = "") {
   return hasValue(value) ? `${numberText(value)}${suffix}` : "待接入";
 }
 
-function compactNumber(value, suffix = "") {
-  return hasValue(value) ? `${numberText(value)}${suffix}` : "0";
-}
-
 function decimalText(value, digits = 2) {
   return hasValue(value) ? Number(value || 0).toFixed(digits) : "待接入";
 }
@@ -129,6 +239,14 @@ function percentText(value) {
 
 function ratioText(value) {
   return hasValue(value) ? `${Number(value || 0).toFixed(2)}x` : "待接入";
+}
+
+function limitBarWidth(value) {
+  return `${Math.max(3, (Number(value || 0) / maxAvailableLimit.value) * 100)}%`;
+}
+
+function skuImageList(row) {
+  return row?.image_url ? [row.image_url] : [];
 }
 
 function firstMetricNumber(...values) {
@@ -195,140 +313,15 @@ function open(path, query = {}) {
     router.push({ path: "/inventory/fbp", query: fbpAlertQuery(null, query.alertType || query.alert_type || "all") });
     return;
   }
-  if (path === "/asset-variant-center/create" || path === "/asset-variant-center/wizard") {
-    router.push({
-      path: "/asset-variant-center/wizard",
-      query: {
-        ...query,
-        workbenchId: createAiWorkbenchId()
-      }
-    });
+  if (path === "/asset-variant-center/create" || path === "/asset-variant-center/wizard" || path === "/ai-variant-lab") {
+    openAiVariantLabWindow(query);
+    return;
+  }
+  if (path === "/ai-product-material-optimizer") {
+    openAiProductMaterialOptimizerWindow(query);
     return;
   }
   router.push({ path, query });
-}
-
-function todoEvidence(row = {}) {
-  const raw = row.evidence_json || row.evidenceJson || row.evidence || "";
-  if (!raw) return {};
-  if (typeof raw === "object") return raw;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
-}
-
-function todoTitle(row = {}) {
-  return row.product_name || row.productName || row.offer_id || row.offerId || row.sku || "未命名商品";
-}
-
-function todoProductCode(row = {}) {
-  return row.offer_id || row.offerId || row.sku || row.product_id || row.productId || "";
-}
-
-function todoSku(row = {}) {
-  return row.sku || row.offer_id || row.offerId || row.product_id || row.productId || "";
-}
-
-function todoOfferId(row = {}) {
-  return row.offer_id || row.offerId || "";
-}
-
-function todoImage(row = {}) {
-  return row.image_url || row.imageUrl || row.primary_image || row.primaryImage || "";
-}
-
-function todoReason(row = {}) {
-  const evidence = todoEvidence(row);
-  return row.recommended_action || row.recommendedAction || evidence.reason || evidence.evidence || row.problem_type || row.problemType || "查看商品诊断";
-}
-
-function todoScore(row = {}) {
-  return Number(row.score || 0);
-}
-
-function todoMatches(row = {}, segments = [], keywords = []) {
-  const segment = String(row.segment || "").toLowerCase();
-  const type = String(row.problem_type || row.problemType || "").toLowerCase();
-  const text = `${segment} ${type} ${row.recommended_action || row.recommendedAction || ""}`;
-  return segments.includes(segment) || keywords.some((keyword) => text.includes(keyword.toLowerCase()));
-}
-
-function uniqueTodos(rows = []) {
-  const seen = new Set();
-  return rows.filter((row) => {
-    const key = todoIdentity(row);
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function todoIdentity(row = {}) {
-  return [row.sku, row.offer_id || row.offerId, row.product_id || row.productId, row.product_name || row.productName]
-    .filter(Boolean)
-    .join("|") || row.id || "";
-}
-
-function topTodos(filter, limit = 3) {
-  return uniqueTodos(todoRows.value.filter(filter))
-    .sort((a, b) => todoScore(b) - todoScore(a))
-    .slice(0, limit);
-}
-
-function claimTodos(rows = [], used = new Set(), limit = COMMAND_PANEL_LIMIT) {
-  const claimed = [];
-  for (const row of rows) {
-    const key = todoIdentity(row);
-    if (!key || used.has(key)) continue;
-    used.add(key);
-    claimed.push(row);
-    if (claimed.length >= limit) break;
-  }
-  return claimed;
-}
-
-function commandProductRows(rows = [], options = {}) {
-  const fallbackRoute = options.route || "/seller-analytics";
-  const moduleLabel = options.moduleLabel || "店铺分析";
-  const actionText = options.actionText || "去处理";
-  return rows.map((row) => ({
-    key: row.id || `${todoProductCode(row)}-${row.problem_type || row.problemType || row.recommended_action || row.recommendedAction}`,
-    title: todoTitle(row),
-    code: todoProductCode(row),
-    sku: todoSku(row),
-    offerId: todoOfferId(row),
-    image: todoImage(row),
-    reason: todoReason(row),
-    tag: row.problem_type || row.problemType || row.segment || "建议",
-    shopId: row.shop_id || row.shopId || "",
-    shopName: row.shop_name || row.shopName || "",
-    moduleLabel,
-    actionText,
-    route: row.route || fallbackRoute,
-    query: row.isFallback ? {} : {
-      keyword: todoProductCode(row) || todoTitle(row),
-      ...(row.shop_id || row.shopId ? { shopId: String(row.shop_id || row.shopId) } : {}),
-      periodKey: row.period_key || row.periodKey || "7d"
-    }
-  }));
-}
-
-async function copyCommandProduct(row = {}) {
-  const text = row.sku || row.offerId || row.code || row.title || "";
-  if (!text) return;
-  try {
-    await navigator.clipboard.writeText(text);
-    ElMessage.success("已复制 SKU/货号");
-  } catch {
-    ElMessage.error("复制失败，请手动复制 SKU");
-  }
-}
-
-async function openCommandProduct(row = {}) {
-  await copyCommandProduct(row);
-  open(row.route, row.query);
 }
 
 function fbpAlertQuery(row = firstStockAlert.value, alertType = "all") {
@@ -346,8 +339,7 @@ function fbpRiskRows() {
   return [
     { label: "严重断货", value: metricNumber(fbpOutOfStockCount.value, "个"), alertType: "out_of_stock" },
     { label: "即将断货", value: metricNumber(fbpWithin7Count.value, "个"), alertType: "within_7_days" },
-    { label: "断货风险", value: metricNumber(fbpWithin30Count.value, "个"), alertType: "within_30_days" },
-    { label: "库存滞缓", value: metricNumber(fbpSlowCount.value, "个"), alertType: "slow" },
+    { label: "15天风险", value: metricNumber(fbpWithin15Count.value, "个"), alertType: "within_15_days" },
     {
       label: "推荐备货FBP",
       value: metricNumber(fbpOpportunitySummary.value.total, "个"),
@@ -358,7 +350,10 @@ function fbpRiskRows() {
 }
 
 function aftersalesQuery(bucket = "all", openDetail = false) {
+  const period = billingPeriodQuery();
   const query = {
+    ...period,
+    tab: "aftersales",
     from: aftersalesLoss.value.from || commerce.value.date_key || "",
     to: aftersalesLoss.value.to || commerce.value.date_key || "",
     shopId: "all",
@@ -371,6 +366,8 @@ function aftersalesQuery(bucket = "all", openDetail = false) {
 function todayAftersalesQuery(bucket) {
   const dateKey = commerce.value.date_key || "";
   return {
+    ...billingPeriodQuery(),
+    tab: "aftersales",
     from: dateKey,
     to: dateKey,
     shopId: "all",
@@ -379,30 +376,35 @@ function todayAftersalesQuery(bucket) {
   };
 }
 
+function billingPeriodQuery(extra = {}) {
+  const [year, month] = selectedDate.value.split("-");
+  return { year, month: String(Number(month)), ...extra };
+}
+
 function aftersalesLossRows() {
   return [
     {
       label: "本月总损失",
       value: metricMoney(aftersalesLoss.value.total_estimated_loss_cny),
-      route: "/profit/aftersales",
+      route: "/profit/monthly-billing",
       query: aftersalesQuery("all")
     },
     {
       label: "拒收/未取",
       value: metricMoney(aftersalesLoss.value.rejected_unclaimed_loss_cny),
-      route: "/profit/aftersales",
+      route: "/profit/monthly-billing",
       query: aftersalesQuery("rejected_unclaimed", true)
     },
     {
       label: "不合适/错发/破损",
       value: metricMoney(aftersalesLoss.value.unsuitable_wrong_damaged_loss_cny),
-      route: "/profit/aftersales",
+      route: "/profit/monthly-billing",
       query: aftersalesQuery("unsuitable_wrong_damaged", true)
     },
     {
       label: "质量问题",
       value: metricMoney(aftersalesLoss.value.quality_issue_loss_cny),
-      route: "/profit/aftersales",
+      route: "/profit/monthly-billing",
       query: aftersalesQuery("quality_issue", true)
     }
   ];
@@ -505,6 +507,34 @@ const adMonthSpendBreakdownRows = computed(() => {
     });
   });
   return rows;
+});
+const adMonthPendingDates = computed(() => Array.isArray(adMonth.value.pending_dates) ? adMonth.value.pending_dates : []);
+const adMonthQuality = computed(() => {
+  const pendingRows = Number(adMonth.value.pending_rows || 0);
+  const pendingDateCount = Number(adMonth.value.pending_date_count || adMonthPendingDates.value.length || 0);
+  if (pendingRows > 0) {
+    return {
+      text: `报表未齐 ${pendingDateCount}天/${pendingRows}行`,
+      tone: "danger",
+      detail: `Ozon广告报表仍有待返回行，当前展示为已返回值 ${metricMoney(adMonth.value.returned_spend_cny ?? adMonth.value.spend_cny)}，不可当最终月累计。`
+    };
+  }
+  if (String(adMonth.value.to || "") === String(commerce.value.date_key || "")) {
+    return {
+      text: "含今日数据",
+      tone: "warning",
+      detail: "今日广告报表可能仍在沉淀，最终值以Ozon返回为准。"
+    };
+  }
+  return {
+    text: "报表完整",
+    tone: "success",
+    detail: "当前范围内未发现待返回广告报表行。"
+  };
+});
+const adMonthSpendDisplay = computed(() => {
+  const value = adMonth.value.returned_spend_cny ?? adMonth.value.spend_cny;
+  return Number(adMonth.value.pending_rows || 0) > 0 ? `${metricMoney(value)}*` : metricMoney(value);
 });
 const adTooltipPopperOptions = {
   modifiers: [
@@ -634,16 +664,15 @@ const roiState = computed(() => {
 });
 
 const businessTone = computed(() => {
-  if (Number(today.value.profit || 0) < 0 || Number(adToday.value.roi || 0) < 1) return "danger";
+  if (Number(today.value.profit || 0) < 0 || (hasValue(adToday.value.roi) && Number(adToday.value.roi || 0) < 1)) return "danger";
   if (urgentCount.value || stockWarningCount.value > 0 || adCostJump.value) return "warning";
   return "success";
 });
 
 const operationReminder = computed(() => {
   const parts = [];
-  if (Number(adToday.value.roi || 0) < 1) parts.push("广告ROI偏低");
+  if (hasValue(adToday.value.roi) && Number(adToday.value.roi || 0) < 1) parts.push("广告ROI偏低");
   if (fbpShortageCount.value > 0) parts.push("FBP断货风险");
-  if (fbpSlowCount.value > 0) parts.push("FBP库存滞缓");
   if (Number(today.value.cancelled_orders || 0) > 0) parts.push("退款待处理");
   if (!parts.length) return "经营状态稳定，继续关注可放量商品";
   return parts.join(" + ");
@@ -656,7 +685,7 @@ const secondaryMetrics = computed(() => [
     note: `较昨日 ${salesDelta.value.text}`,
     direction: salesDelta.value.direction,
     icon: CircleDollarSign,
-    path: "/profit",
+    path: "/profit/monthly-billing",
     breakdownTitle: "今日销售额构成",
     breakdown: todaySalesBreakdown()
   },
@@ -676,7 +705,7 @@ const secondaryMetrics = computed(() => [
     note: `${metricNumber(today.value.cancelled_orders, " 单")} / ${metricMoney(today.value.cancelled_revenue)}`,
     direction: Number(today.value.cancelled_quantity || 0) > 0 ? "down" : "flat",
     icon: RefreshCw,
-    path: "/profit/aftersales",
+    path: "/profit/monthly-billing",
     query: todayAftersalesQuery("pre_fulfillment_cancel"),
     breakdownTitle: "各店铺今日取消",
     breakdown: shopOutcomeBreakdown(commerceShops.value, "cancelled")
@@ -687,7 +716,7 @@ const secondaryMetrics = computed(() => [
     note: `${metricNumber(today.value.return_orders, " 单")} / ${metricMoney(today.value.return_revenue)}`,
     direction: Number(today.value.return_quantity || 0) > 0 ? "down" : "flat",
     icon: AlertTriangle,
-    path: "/profit/aftersales",
+    path: "/profit/monthly-billing",
     query: todayAftersalesQuery("rejected_unclaimed"),
     breakdownTitle: "各店铺今日退货",
     breakdown: shopOutcomeBreakdown(commerceShops.value, "return")
@@ -708,7 +737,7 @@ const secondaryMetrics = computed(() => [
     note: monthShippingCostState.value,
     direction: Number(monthShippingCost.value.purchase_cost_ratio || 0) <= 0.45 ? "up" : "down",
     icon: PackageCheck,
-    path: "/profit",
+    path: "/profit/monthly-billing",
     breakdownTitle: "当月采购成本构成",
     breakdown: [
       { shop_name: "有效销售订单", text: metricNumber(monthShippingCost.value.order_count, " 单") },
@@ -772,7 +801,8 @@ const anomalyCards = computed(() => [
     action: "去处理",
     tone: "amber",
     icon: RefreshCw,
-    path: "/profit/aftersales"
+    path: "/profit/monthly-billing",
+    query: { tab: "aftersales" }
   }
 ]);
 
@@ -785,7 +815,7 @@ const opportunityCards = computed(() => [
     primary: "去放量",
     secondary: "AI优化",
     primaryPath: "/advertising/daily",
-    secondaryPath: "/asset-variant-center/wizard"
+    secondaryPath: "/ai-variant-lab"
   },
   {
     product: "高加购低成交商品",
@@ -824,14 +854,14 @@ const healthCards = computed(() => [
   },
   {
     title: "售后损失",
-    route: "/profit/aftersales",
+    route: "/profit/monthly-billing",
     query: aftersalesQuery("all"),
     icon: RefreshCw,
     items: aftersalesLossRows()
   },
   {
     title: "利润趋势",
-    route: "/profit",
+    route: "/profit/monthly-billing",
     icon: CircleDollarSign,
     items: [
       profitTrendRow("昨日利润", yesterday.value.profit),
@@ -878,128 +908,20 @@ const dashboardInsightCards = computed(() => [
   }
 ]);
 
-const mustHandleTodos = computed(() => topTodos((row) => todoMatches(row, [
-  "inventory_risk",
-  "profit_risk",
-  "ad_efficiency_risk",
-  "aftersales_risk"
-], ["库存", "补货", "利润", "广告", "售后", "退货", "取消"]), 3));
-
-const optimizeTodos = computed(() => topTodos((row) => todoMatches(row, [
-  "click_gap",
-  "detail_gap",
-  "order_gap",
-  "traffic_gap",
-  "diagnosis_followup"
-], ["主图", "详情", "标题", "转化", "点击", "加购", "曝光"]), 5));
-
-const adCandidateTodos = computed(() => topTodos((row) => todoMatches(row, [
-  "scale_candidate"
-], ["放量", "已有成交", "测试"]), 3));
-
-const noInvestTodos = computed(() => topTodos((row) => todoMatches(row, [
-  "profit_risk",
-  "ad_efficiency_risk",
-  "inventory_risk",
-  "aftersales_risk"
-], ["不建议", "利润", "库存", "售后", "DRR", "低效"]), 3));
-
-const reviewTodos = computed(() => uniqueTodos(todoRows.value.filter((row) => row.status && row.status !== "open"))
-  .sort((a, b) => String(b.updated_at || b.updatedAt || "").localeCompare(String(a.updated_at || a.updatedAt || "")))
-  .slice(0, 3));
-
-const commandPanels = computed(() => {
-  const used = new Set();
-  const mustRows = claimTodos(mustHandleTodos.value, used);
-  const potentialRows = claimTodos(adCandidateTodos.value, used);
-  const optimizeRows = claimTodos(optimizeTodos.value, used);
-  const adRows = claimTodos(adCandidateTodos.value, used);
-  const avoidRows = claimTodos(noInvestTodos.value, used);
-  const reviewRows = claimTodos(reviewTodos.value, used);
-
-  return [
-    {
-      key: "must",
-      title: "今日必处理",
-      subtitle: "先保交付和止损",
-      tone: "danger",
-      route: "/seller-analytics",
-      empty: "暂无高优先级风险",
-      moduleLabel: "店铺分析",
-      rows: commandProductRows(mustRows, { route: "/seller-analytics", moduleLabel: "店铺分析", actionText: "看风险" })
-    },
-    {
-      key: "potential",
-      title: "潜力商品",
-      subtitle: "少数值得盯的机会",
-      tone: "success",
-      route: "/advertising/daily",
-      empty: "暂无明确放量信号",
-      moduleLabel: "广告分析",
-      rows: commandProductRows(potentialRows, { route: "/advertising/daily", moduleLabel: "广告分析", actionText: "看放量" })
-    },
-    {
-      key: "optimize",
-      title: "待优化商品",
-      subtitle: "有信号但还没成交",
-      tone: "warning",
-      route: "/seller-analytics",
-      empty: "暂无待优化商品",
-      moduleLabel: "店铺分析",
-      rows: commandProductRows(optimizeRows, { route: "/seller-analytics", moduleLabel: "店铺分析", actionText: "看诊断" })
-    },
-    {
-      key: "ad",
-      title: "可投广告",
-      subtitle: "只从可放量里挑",
-      tone: "primary",
-      route: "/advertising/daily",
-      empty: "暂无可投广告商品",
-      moduleLabel: "广告分析",
-      rows: commandProductRows(adRows, { route: "/advertising/daily", moduleLabel: "广告分析", actionText: "去投放" })
-    },
-    {
-      key: "avoid",
-      title: "不建议投入",
-      subtitle: "先别浪费预算",
-      tone: "muted",
-      route: "/seller-analytics",
-      empty: "暂无禁止投入项",
-      moduleLabel: "店铺分析",
-      rows: commandProductRows(avoidRows, { route: "/seller-analytics", moduleLabel: "店铺分析", actionText: "看原因" })
-    },
-    {
-      key: "review",
-      title: "昨日行动回看",
-      subtitle: "看动作有没有结果",
-      tone: "review",
-      route: "/seller-analytics",
-      empty: "暂无已完成动作",
-      moduleLabel: "店铺分析",
-      rows: commandProductRows(reviewRows, { route: "/seller-analytics", moduleLabel: "店铺分析", actionText: "看回看" })
-    }
-  ];
-});
-
-const commandSummary = computed(() => ({
-  must: commandPanels.value.find((panel) => panel.key === "must")?.rows.length || 0,
-  optimize: commandPanels.value.find((panel) => panel.key === "optimize")?.rows.length || 0,
-  ad: commandPanels.value.find((panel) => panel.key === "ad")?.rows.length || 0,
-  avoid: commandPanels.value.find((panel) => panel.key === "avoid")?.rows.length || 0
-}));
-
-async function loadOperationTodos() {
-  try {
-    const rows = await apiClient.get("/api/db/seller-analytics/operation-todos?status=all&limit=80", { noCache: true });
-    operationTodos.value = Array.isArray(rows) ? rows : [];
-  } catch (error) {
-    console.warn("load dashboard operation todos failed", error);
-  }
-}
-
 async function loadDashboard(options = {}) {
+  const requestSeq = ++dashboardRequestSeq;
+  const dateKey = String(options?.dateKey || selectedDate.value).slice(0, 10);
   const forceRefresh = options === true || options?.refresh === true;
   const snapshotOnly = options?.snapshotOnly === true;
+  if (!hasDashboardLoaded.value) {
+    const cached = readDashboardSessionCache(dateKey);
+    if (cached) {
+      mergeDashboardPayload(cached);
+      hasDashboardLoaded.value = true;
+    }
+  }
+  if (!snapshotOnly) loadOverviewPanels(dateKey);
+  if (!snapshotOnly) dashboardSnapshotRefreshAttempts = 0;
   const showInitialLoading = !hasDashboardLoaded.value;
   if (showInitialLoading) {
     loading.value = true;
@@ -1007,35 +929,38 @@ async function loadDashboard(options = {}) {
     refreshing.value = true;
   }
   try {
+    const dateParam = `date=${encodeURIComponent(dateKey)}`;
     const url = forceRefresh
-      ? `/api/dashboard?refresh=1&_=${Date.now()}`
+      ? `/api/dashboard?${dateParam}&refresh=1&_=${Date.now()}`
       : snapshotOnly
-        ? `/api/dashboard?snapshotOnly=1&_=${Date.now()}`
-        : "/api/dashboard";
-    const res = await apiClient.get(url, forceRefresh ? { noCache: true, cache: "no-store" } : {});
-    dashboard.value = {
-      ...dashboard.value,
-      ...(res || {}),
-      commerce: {
-        ...dashboard.value.commerce,
-        ...(res?.commerce || {}),
-        advertising: {
-          ...dashboard.value.commerce.advertising,
-          ...(res?.commerce?.advertising || {})
-        }
-      },
-      alerts: {
-        ...dashboard.value.alerts,
-        ...(res?.alerts || {})
-      }
-    };
+        ? `/api/dashboard?${dateParam}&snapshotOnly=1&_=${Date.now()}`
+        : `/api/dashboard?${dateParam}`;
+    const res = await getDashboardWithRetry(url, {
+      ...(forceRefresh ? { noCache: true, cache: "no-store" } : {}),
+      routeScoped: false
+    });
+    if (requestSeq !== dashboardRequestSeq || dateKey !== selectedDate.value) return;
+    snapshotBuilding.value = res?.snapshot?.status === "building";
+    mergeDashboardPayload(res);
     hasDashboardLoaded.value = true;
-    if (!forceRefresh && !snapshotOnly) scheduleDashboardSnapshotReload();
+    if (res?.snapshot?.status !== "building") writeDashboardSessionCache(dateKey, res);
+    if (res?.snapshot?.status === "building" && dashboardSnapshotRefreshAttempts < 20) {
+      dashboardSnapshotRefreshAttempts += 1;
+      scheduleDashboardSnapshotReload(1500);
+    } else if (!forceRefresh && !snapshotOnly) {
+      dashboardSnapshotRefreshAttempts = 1;
+      scheduleDashboardSnapshotReload(2500);
+    }
   } catch (error) {
     console.error(error);
-    if (!showInitialLoading && !forceRefresh) return;
+    if (requestSeq === dashboardRequestSeq && !forceRefresh && dashboardSnapshotRefreshAttempts < 20) {
+      dashboardSnapshotRefreshAttempts += 1;
+      scheduleDashboardSnapshotReload(Math.min(1500 * dashboardSnapshotRefreshAttempts, 6000));
+    }
+    if (hasDashboardLoaded.value || (!showInitialLoading && !forceRefresh)) return;
     ElMessage.error("首页摘要加载失败");
   } finally {
+    if (requestSeq !== dashboardRequestSeq) return;
     if (showInitialLoading) {
       loading.value = false;
     } else {
@@ -1044,38 +969,92 @@ async function loadDashboard(options = {}) {
   }
 }
 
-function scheduleDashboardSnapshotReload() {
-  if (dashboardSnapshotRefreshTimer) window.clearTimeout(dashboardSnapshotRefreshTimer);
+async function loadOverviewPanels(dateKey = selectedDate.value) {
+  overviewPanelsLoading.value = true;
+  try {
+    const rankingParams = new URLSearchParams({
+      dimension: "sku",
+      from: dateKey,
+      to: dateKey,
+      page: "1",
+      pageSize: "10",
+      sortBy: "revenue",
+      sortOrder: "desc",
+      fast: "1"
+    });
+    const limitsRequest = getDashboardWithRetry("/api/online-products/limits", { noCache: true, routeScoped: false }).then((result) => {
+      if (dateKey !== selectedDate.value) return;
+      shopProductLimits.value = Array.isArray(result?.rows) ? result.rows : [];
+    });
+    const rankingRequest = getDashboardWithRetry(`/api/profit-ranking?${rankingParams.toString()}`, { routeScoped: false }).then((result) => {
+      if (dateKey !== selectedDate.value) return;
+      topSkus.value = Array.isArray(result?.rows) ? result.rows.slice(0, 10) : [];
+    });
+    const fbpOpportunityRequest = getDashboardWithRetry("/api/fbp-opportunities?page=1&pageSize=1", { routeScoped: false }).then((result) => {
+      if (dateKey !== selectedDate.value) return;
+      dashboard.value.summary = {
+        ...dashboard.value.summary,
+        fbp_opportunities: result?.summary || {}
+      };
+    });
+    await Promise.allSettled([limitsRequest, rankingRequest, fbpOpportunityRequest]);
+  } finally {
+    if (dateKey === selectedDate.value) overviewPanelsLoading.value = false;
+  }
+}
+
+function scheduleDashboardSnapshotReload(delay = 2500) {
+  clearDashboardSnapshotReload();
   dashboardSnapshotRefreshTimer = window.setTimeout(() => {
     dashboardSnapshotRefreshTimer = null;
     loadDashboard({ snapshotOnly: true });
-  }, 2500);
+  }, delay);
 }
 
 function refreshDashboard() {
   loadDashboard({ refresh: true });
-  loadOperationTodos();
 }
 
 onMounted(() => {
   loadDashboard();
-  loadOperationTodos();
 });
 
 onBeforeUnmount(() => {
-  if (dashboardSnapshotRefreshTimer) window.clearTimeout(dashboardSnapshotRefreshTimer);
+  clearDashboardSnapshotReload();
 });
 </script>
 
 <template>
-  <section v-loading="initialDashboardLoading" class="commerce-dashboard" :class="{ 'is-updating': dashboardUpdating }">
+  <section class="commerce-dashboard" :class="{ 'is-updating': loading || dashboardUpdating }">
     <div class="hero-grid">
       <div class="operating-card" :class="`is-${businessTone}`">
         <div class="operating-card__top">
           <div>
-            <h1>今日经营总览</h1>
+            <h1>经营总览</h1>
           </div>
-          <span v-if="dashboardUpdating" class="refresh-status">
+          <div class="dashboard-date-control" aria-label="经营日期选择">
+            <span class="dashboard-date-control__label"><CalendarDays :size="14" />数据日期</span>
+            <el-button class="dashboard-date-control__arrow" text aria-label="前一天" @click="shiftDashboardDate(-1)">
+              <ChevronLeft :size="16" />
+            </el-button>
+            <el-date-picker
+              v-model="selectedDate"
+              class="dashboard-date-picker"
+              type="date"
+              format="YYYY年MM月DD日"
+              value-format="YYYY-MM-DD"
+              :clearable="false"
+              :editable="false"
+              :disabled-date="disableFutureDashboardDate"
+              aria-label="选择经营日期"
+              @change="applyDashboardDate"
+            />
+            <el-button class="dashboard-date-control__arrow" text aria-label="后一天" :disabled="isTodaySelected" @click="shiftDashboardDate(1)">
+              <ChevronRight :size="16" />
+            </el-button>
+            <el-button class="dashboard-date-control__today" text :disabled="isTodaySelected" @click="resetDashboardDate">今天</el-button>
+          </div>
+          <span v-if="loading || dashboardUpdating" class="refresh-status">
             <RefreshCw :size="13" />
             更新中
           </span>
@@ -1086,7 +1065,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="hero-core-grid today-core-grid">
-          <article class="primary-metric profit-card" @click="open('/profit')">
+          <article class="primary-metric profit-card" @click="open('/profit/monthly-billing', billingPeriodQuery())">
             <div class="metric-label">
               <CircleDollarSign :size="16" />
               今日利润
@@ -1112,7 +1091,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </template>
-            <article class="primary-metric today-sales-card" @click="open('/profit')">
+            <article class="primary-metric today-sales-card" @click="open('/profit/monthly-billing', billingPeriodQuery())">
               <div class="metric-label">
                 <CircleDollarSign :size="16" />
                 今日有效营业额
@@ -1166,7 +1145,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </template>
-            <article class="primary-metric today-cancel-card" @click="open('/profit/aftersales', todayAftersalesQuery('pre_fulfillment_cancel'))">
+            <article class="primary-metric today-cancel-card" @click="open('/profit/monthly-billing', todayAftersalesQuery('pre_fulfillment_cancel'))">
               <div class="metric-label">
                 <RefreshCw :size="16" />
                 今日取消
@@ -1189,7 +1168,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </template>
-            <article class="primary-metric today-return-card" @click="open('/profit/aftersales', todayAftersalesQuery('rejected_unclaimed'))">
+            <article class="primary-metric today-return-card" @click="open('/profit/monthly-billing', todayAftersalesQuery('rejected_unclaimed'))">
               <div class="metric-label">
                 <AlertTriangle :size="16" />
                 退货件数
@@ -1255,7 +1234,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="hero-core-grid month-core-grid compact-month-grid">
-          <article class="primary-metric today-sales-card" @click="open('/profit')">
+          <article class="primary-metric today-sales-card" @click="open('/profit/monthly-billing', billingPeriodQuery())">
             <div class="metric-label">
               <CircleDollarSign :size="16" />
               当月销售额
@@ -1271,7 +1250,7 @@ onBeforeUnmount(() => {
             </div>
           </article>
 
-          <article class="primary-metric month-profit-card" @click="open('/profit')">
+          <article class="primary-metric month-profit-card" @click="open('/profit/monthly-billing', billingPeriodQuery())">
             <div class="metric-label">
               <CircleDollarSign :size="16" />
               当月利润
@@ -1291,6 +1270,12 @@ onBeforeUnmount(() => {
             <template #content>
               <div class="shop-breakdown month-ad-spend-breakdown">
                 <h4>当月各店铺广告花费</h4>
+                <p class="ad-quality-note" :class="`is-${adMonthQuality.tone}`">{{ adMonthQuality.detail }}</p>
+                <div v-if="adMonthPendingDates.length" class="ad-quality-dates">
+                  <span v-for="item in adMonthPendingDates.slice(-6)" :key="item.date_key">
+                    {{ item.date_key }}：{{ item.pending_rows }}行待返回
+                  </span>
+                </div>
                 <div class="month-ad-spend-table">
                   <div class="month-ad-spend-row month-ad-spend-head">
                     <span>店铺</span>
@@ -1310,11 +1295,11 @@ onBeforeUnmount(() => {
             <article class="primary-metric roi-card month-ad-spend-card" @click="open('/advertising/daily')">
               <div class="metric-label">
                 <Target :size="16" />
-                总广告花费
+                当月广告花费
               </div>
-              <strong>{{ metricMoney(adMonth.spend_cny) }}</strong>
+              <strong>{{ adMonthSpendDisplay }}</strong>
               <div class="metric-footer">
-                <span class="delta is-flat">当月累计</span>
+                <span :class="`delta is-${adMonthQuality.tone === 'danger' ? 'down' : adMonthQuality.tone === 'success' ? 'up' : 'flat'}`">{{ adMonthQuality.text }}</span>
                 <em>{{ metricNumber(adMonth.shop_count, " 店") }}</em>
               </div>
             </article>
@@ -1342,7 +1327,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </template>
-            <article class="primary-metric inventory-ratio-card" @click="open('/profit')">
+            <article class="primary-metric inventory-ratio-card" @click="open('/profit/monthly-billing', billingPeriodQuery())">
               <div class="metric-label">
                 <PackageCheck :size="16" />
                 当月采购成本
@@ -1377,7 +1362,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </template>
-            <article class="primary-metric shipping-cost-card" @click="open('/profit')">
+            <article class="primary-metric shipping-cost-card" @click="open('/profit/monthly-billing', billingPeriodQuery())">
               <div class="metric-label">
                 <Truck :size="16" />
                 当月运费
@@ -1418,7 +1403,7 @@ onBeforeUnmount(() => {
             </div>
           </article>
 
-          <article class="primary-metric today-cancel-card" @click="open('/profit/aftersales', todayAftersalesQuery('pre_fulfillment_cancel'))">
+          <article class="primary-metric today-cancel-card" @click="open('/profit/monthly-billing', todayAftersalesQuery('pre_fulfillment_cancel'))">
             <div class="metric-label">
               <RefreshCw :size="16" />
               当月取消订单
@@ -1430,7 +1415,7 @@ onBeforeUnmount(() => {
             </div>
           </article>
 
-          <article class="primary-metric today-return-card" @click="open('/profit/aftersales', todayAftersalesQuery('rejected_unclaimed'))">
+          <article class="primary-metric today-return-card" @click="open('/profit/monthly-billing', todayAftersalesQuery('rejected_unclaimed'))">
             <div class="metric-label">
               <AlertTriangle :size="16" />
               当月退货订单
@@ -1448,7 +1433,75 @@ onBeforeUnmount(() => {
           <span>今日提醒：{{ operationReminder }}</span>
         </div>
 
-        <div class="hero-insight-grid">
+        <div class="dashboard-overview-grid">
+          <section class="overview-panel top-sku-panel">
+            <div class="overview-panel-heading">
+              <div>
+                <span>Top Products</span>
+                <h2>Top 10 SKU</h2>
+              </div>
+              <small>{{ selectedDateText }} · 按销售额排序</small>
+            </div>
+            <div v-if="topSkus.length" class="top-sku-list">
+              <article v-for="(row, index) in topSkus" :key="`${row.shop_id}-${row.ozon_sku}`" class="top-sku-item">
+                <b class="sku-rank">{{ index + 1 }}</b>
+                <el-image
+                  class="sku-image"
+                  :src="row.image_url"
+                  fit="cover"
+                  :preview-src-list="skuImageList(row)"
+                  :initial-index="0"
+                  preview-teleported
+                >
+                  <template #error><span>无图</span></template>
+                </el-image>
+                <div class="sku-copy">
+                  <strong :title="row.product_name || row.ozon_sku">{{ row.product_name || row.ozon_sku || "未命名商品" }}</strong>
+                  <small>{{ row.shop_name }} · SKU {{ row.ozon_sku || "--" }}</small>
+                </div>
+                <div class="sku-sales">
+                  <span>销量<strong>{{ numberText(row.item_quantity) }} 件</strong></span>
+                  <span>销售额<strong>{{ metricMoney(row.revenue) }}</strong></span>
+                </div>
+              </article>
+            </div>
+            <el-skeleton v-else-if="overviewPanelsLoading" :rows="6" animated />
+            <el-empty v-else description="所选日期暂无 SKU 销售数据" :image-size="72" />
+          </section>
+
+          <section class="overview-panel shop-limit-panel">
+            <div class="overview-panel-heading">
+              <div>
+                <span>Listing Capacity</span>
+                <h2>店铺上架额度</h2>
+              </div>
+              <small>今日额度优先</small>
+            </div>
+            <div v-if="availableLimitRows.length" class="limit-chart">
+              <article v-for="row in availableLimitRows" :key="row.shop_id" class="limit-chart-row">
+                <div class="limit-chart-label">
+                  <strong>{{ row.shop_name }}</strong>
+                  <span v-if="row.ok">今日已用 {{ numberText(row.today_usage) }}</span>
+                  <span v-else>额度暂不可用</span>
+                </div>
+                <div class="limit-chart-value">
+                  <div class="limit-chart-track">
+                    <i v-if="row.ok" :style="{ width: limitBarWidth(row.today_available) }"></i>
+                  </div>
+                  <strong>{{ row.ok ? numberText(row.today_available) : "--" }}</strong>
+                </div>
+                <div v-if="row.ok" class="limit-chart-meta">
+                  <span>今日可用 / {{ numberText(row.today_limit) }}</span>
+                  <span>总可用 {{ numberText(row.total_available) }} / {{ numberText(row.total_limit) }}</span>
+                </div>
+              </article>
+            </div>
+            <el-skeleton v-else-if="overviewPanelsLoading" :rows="5" animated />
+            <el-empty v-else description="暂无店铺额度数据" :image-size="72" />
+          </section>
+        </div>
+
+        <div class="hero-insight-grid is-summary-only">
           <section class="health-panel hero-health-panel hero-health-panel--compact">
             <div class="section-heading">
               <span>Business Health</span>
@@ -1496,73 +1549,6 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
-          <section class="command-center-panel">
-            <div class="section-heading command-heading">
-              <div>
-                <span>运营动作中心</span>
-                <h2>今日运营动作</h2>
-              </div>
-              <div class="command-heading__tools">
-                <el-select v-model="selectedOperationShopId" class="command-shop-select" size="small" placeholder="店铺">
-                  <el-option label="全部店铺" value="all" />
-                  <el-option
-                    v-for="shop in operationShopOptions"
-                    :key="shop.id"
-                    :label="shop.name"
-                    :value="shop.id"
-                  />
-                </el-select>
-                <div class="command-summary">
-                  <b>{{ compactNumber(commandSummary.must, "项") }}</b><span>必处理</span>
-                  <b>{{ compactNumber(commandSummary.optimize, "项") }}</b><span>待优化</span>
-                  <b>{{ compactNumber(commandSummary.ad, "项") }}</b><span>可投广告</span>
-                </div>
-              </div>
-            </div>
-            <div class="command-grid">
-              <article
-                v-for="panel in commandPanels"
-                :key="panel.key"
-                :class="`command-card command-card--${panel.tone}`"
-              >
-                <button type="button" class="command-card__head" @click="open(panel.route)">
-                  <span>{{ panel.subtitle }}</span>
-                  <strong>{{ panel.title }}</strong>
-                </button>
-                <div class="command-card__list">
-                  <article
-                    v-for="row in panel.rows.slice(0, COMMAND_PANEL_LIMIT)"
-                    :key="row.key"
-                    class="command-row"
-                  >
-                    <button type="button" class="command-product" @click="openCommandProduct(row)">
-                      <img v-if="row.image" :src="row.image" :alt="row.title" loading="lazy" />
-                      <span v-else class="command-product__placeholder">{{ (row.sku || row.title || "?").slice(0, 1) }}</span>
-                      <span class="command-product__info">
-                        <strong>{{ row.title }}</strong>
-                        <small>SKU：{{ row.sku || "待补充" }}</small>
-                        <small v-if="row.offerId && row.offerId !== row.sku">货号：{{ row.offerId }}</small>
-                      </span>
-                    </button>
-                    <div class="command-reason">
-                      <span>{{ row.reason }}</span>
-                    </div>
-                    <div class="command-row__actions">
-                      <span class="command-module">{{ row.moduleLabel }}</span>
-                      <button type="button" class="command-icon-button" title="复制 SKU/货号" @click.stop="copyCommandProduct(row)">
-                        <Copy :size="13" />
-                      </button>
-                      <button type="button" class="command-action-button" @click="openCommandProduct(row)">
-                        <ExternalLink :size="13" />
-                        {{ row.actionText }}
-                      </button>
-                    </div>
-                  </article>
-                  <div v-if="!panel.rows.length" class="command-empty">{{ panel.empty }}</div>
-                </div>
-              </article>
-            </div>
-          </section>
         </div>
       </div>
     </div>
@@ -1594,7 +1580,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   min-height: 100%;
   height: 100%;
-  padding: 12px;
+  padding: 24px;
   background:
     radial-gradient(circle at 10% 0%, rgba(37, 99, 235, 0.08) 0, rgba(37, 99, 235, 0) 30%),
     linear-gradient(180deg, #f8fafd 0%, var(--dashboard-bg) 100%) !important;
@@ -1626,6 +1612,210 @@ onBeforeUnmount(() => {
 
 button {
   font: inherit;
+}
+
+.dashboard-overview-grid {
+  display: grid;
+  grid-template-columns: minmax(720px, 8fr) minmax(300px, 2fr);
+  gap: 24px;
+  margin-top: 24px;
+}
+
+.overview-panel {
+  min-width: 0;
+  padding: 24px;
+  border: 1px solid var(--dashboard-border);
+  border-radius: 18px;
+  background: var(--dashboard-surface);
+  box-shadow: var(--dashboard-card-shadow);
+}
+
+.overview-panel-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 22px;
+}
+
+.overview-panel-heading span {
+  color: #2563eb;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.overview-panel-heading h2 {
+  margin: 5px 0 0;
+  font-size: 20px;
+}
+
+.overview-panel-heading small {
+  color: var(--dashboard-muted);
+  text-align: right;
+}
+
+.limit-chart {
+  display: grid;
+  gap: 16px;
+}
+
+.limit-chart-row {
+  display: grid;
+  gap: 7px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #edf1f7;
+}
+
+.limit-chart-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.limit-chart-label,
+.limit-chart-value {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.limit-chart-label strong {
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.limit-chart-label span {
+  flex: none;
+  color: var(--dashboard-muted);
+  font-size: 12px;
+}
+
+.limit-chart-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--dashboard-muted);
+  font-size: 11px;
+}
+
+.limit-chart-track {
+  flex: 1;
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e9eef7;
+}
+
+.limit-chart-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2563eb, #60a5fa);
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.24);
+}
+
+.limit-chart-value > strong {
+  width: 66px;
+  color: #1d4ed8;
+  font-size: 18px;
+  text-align: right;
+}
+
+.top-sku-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(5, auto);
+  grid-auto-flow: column;
+  gap: 10px;
+}
+
+.top-sku-item {
+  display: grid;
+  grid-template-columns: 28px 64px minmax(0, 1fr) 88px;
+  align-items: center;
+  gap: 12px;
+  min-height: 84px;
+  padding: 6px 12px;
+  border: 1px solid #edf1f7;
+  border-radius: 14px;
+  background: #fbfcfe;
+  box-sizing: content-box;
+}
+
+.sku-rank {
+  color: #94a3b8;
+  font-size: 15px;
+  text-align: center;
+}
+
+.top-sku-item:nth-child(-n + 3) .sku-rank {
+  color: #2563eb;
+  font-size: 20px;
+}
+
+.sku-image {
+  width: 64px;
+  height: 84px;
+  border-radius: 10px;
+  background: #eef2f7;
+}
+
+.sku-image :deep(.el-image__error) {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.sku-copy {
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  gap: 6px;
+}
+
+.sku-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sku-copy strong {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--dashboard-text);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.sku-copy small {
+  color: var(--dashboard-muted);
+  font-size: 12px;
+}
+
+.sku-sales {
+  display: grid;
+  align-content: center;
+  gap: 12px;
+  padding-left: 12px;
+  border-left: 1px solid #e5eaf2;
+}
+
+.sku-sales span {
+  display: grid;
+  gap: 3px;
+  color: var(--dashboard-muted);
+  font-size: 11px;
+  text-align: right;
+}
+
+.sku-sales strong {
+  color: var(--dashboard-text);
+  font-size: 14px;
 }
 
 .ai-floating-entry {
@@ -1703,6 +1893,10 @@ button {
   z-index: 1;
 }
 
+.hero-insight-grid.is-summary-only {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .operating-card__top {
   display: flex;
   align-items: flex-start;
@@ -1715,6 +1909,70 @@ button {
 .operating-card__top > div:first-child {
   flex: 1 1 360px;
   min-width: 0;
+}
+
+.dashboard-date-control {
+  display: inline-flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 5px 0 10px;
+  overflow: hidden;
+  border: 1px solid var(--dashboard-border);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 3px 10px rgba(15, 23, 42, 0.05);
+}
+
+.dashboard-date-control__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding-right: 8px;
+  color: var(--dashboard-muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.dashboard-date-control__arrow,
+.dashboard-date-control__today {
+  height: 28px;
+  margin: 0;
+  border-radius: 7px;
+  color: #475569;
+}
+
+.dashboard-date-control__arrow {
+  width: 28px;
+  padding: 0;
+}
+
+.dashboard-date-control__today {
+  padding: 0 8px;
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.dashboard-date-picker {
+  width: 148px !important;
+}
+
+.dashboard-date-picker :deep(.el-input__wrapper) {
+  padding: 0 7px;
+  box-shadow: none !important;
+  background: transparent;
+}
+
+.dashboard-date-picker :deep(.el-input__prefix) {
+  display: none;
+}
+
+.dashboard-date-picker :deep(.el-input__inner) {
+  color: var(--dashboard-text);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
 }
 
 .operating-card h1 {
@@ -1778,16 +2036,16 @@ button {
   display: grid;
   grid-template-columns: repeat(5, minmax(150px, 1fr));
   gap: 10px;
-  align-items: start;
+  align-items: stretch;
   margin-bottom: 10px;
 }
 
 .today-core-grid {
-  grid-template-columns: repeat(6, minmax(136px, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
 .month-core-grid {
-  grid-template-columns: repeat(8, minmax(108px, 1fr));
+  grid-template-columns: repeat(9, minmax(0, 1fr));
   grid-auto-rows: 82px;
   margin-bottom: 12px;
 }
@@ -1804,6 +2062,7 @@ button {
 .primary-metric {
   position: relative;
   overflow: hidden;
+  min-width: 0;
   min-height: 104px;
   padding: 13px 15px;
   cursor: pointer;
@@ -1834,19 +2093,18 @@ button {
 }
 
 .compact-month-grid .month-ad-spend-card {
-  grid-row: span 2;
-  height: 174px;
-  min-height: 174px;
-  padding: 13px 14px;
+  height: 82px;
+  min-height: 82px;
+  padding: 9px 11px;
 }
 
 .compact-month-grid .month-ad-spend-card strong {
-  margin-top: 18px;
-  font-size: 26px;
+  margin-top: 7px;
+  font-size: 21px;
 }
 
 .compact-month-grid .month-ad-spend-card .metric-footer {
-  margin-top: 18px;
+  margin-top: 8px;
 }
 
 .compact-month-grid .metric-label {
@@ -2355,6 +2613,45 @@ button {
   display: block !important;
   width: 100%;
   gap: 0;
+}
+
+:global(.ad-quality-note) {
+  margin: -4px 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #64748b;
+}
+
+:global(.ad-quality-note.is-danger) {
+  color: #b91c1c;
+}
+
+:global(.ad-quality-note.is-warning) {
+  color: #b45309;
+}
+
+:global(.ad-quality-note.is-success) {
+  color: #047857;
+}
+
+:global(.ad-quality-dates) {
+  display: flex !important;
+  flex-wrap: wrap;
+  justify-content: flex-start !important;
+  gap: 6px !important;
+  margin: 0 0 10px;
+  padding: 0 !important;
+  border-top: 0 !important;
+}
+
+:global(.ad-quality-dates span) {
+  padding: 4px 7px;
+  border: 1px solid rgba(248, 113, 113, 0.28);
+  border-radius: 6px;
+  background: rgba(254, 242, 242, 0.9);
+  color: #991b1b;
+  font-size: 12px;
+  line-height: 1.2;
 }
 
 :global(.ad-breakdown-row) {
@@ -3274,7 +3571,8 @@ button {
 
 @media (max-width: 1280px) {
   .hero-grid,
-  .ops-grid {
+  .ops-grid,
+  .dashboard-overview-grid {
     grid-template-columns: 1fr;
   }
 
@@ -3302,11 +3600,47 @@ button {
   .pressure-grid {
     grid-template-columns: 1fr;
   }
+
+  .top-sku-list {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    grid-auto-flow: row;
+  }
 }
 
 @media (max-width: 640px) {
   .commerce-dashboard {
     padding: 12px;
+  }
+
+  .overview-panel {
+    padding: 18px;
+  }
+
+  .overview-panel-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .overview-panel-heading small {
+    text-align: left;
+  }
+
+  .top-sku-item {
+    grid-template-columns: 24px 54px minmax(0, 1fr) 76px;
+    gap: 9px;
+    min-height: 72px;
+    padding-inline: 8px;
+  }
+
+  .sku-image {
+    width: 54px;
+    height: 72px;
+  }
+
+  .sku-sales {
+    gap: 8px;
+    padding-left: 8px;
   }
 
   .operating-card {

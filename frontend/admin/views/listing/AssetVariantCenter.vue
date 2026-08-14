@@ -1,10 +1,12 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { Search } from "@element-plus/icons-vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
+import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import { apiClient } from "../../utils/api";
+import { useAuthStore } from "../../stores/auth";
 import VariantTaskHeader from "../../components/listing/variant-workbench/VariantTaskHeader.vue";
 import VariantTypeSelector from "../../components/listing/variant-workbench/VariantTypeSelector.vue";
 import VariantTargetManager from "../../components/listing/variant-workbench/VariantTargetManager.vue";
@@ -12,13 +14,28 @@ import VariantStrategyPanel from "../../components/listing/variant-workbench/Var
 import VariantPromptTemplatePanel from "../../components/listing/variant-workbench/VariantPromptTemplatePanel.vue";
 import VariantPreviewPanel from "../../components/listing/variant-workbench/VariantPreviewPanel.vue";
 import VariantResultPool from "../../components/listing/variant-workbench/VariantResultPool.vue";
-import { listAiPromptTemplates, renderAiPromptTemplate } from "../../api/settings/aiPromptTemplates";
+import { listAiPromptTemplates, renderAiPromptTemplate, updateAiPromptTemplate } from "../../api/settings/aiPromptTemplates";
 
 const route = useRoute();
 const router = useRouter();
+const authStore = useAuthStore();
 const loading = ref(false);
 const generating = ref(false);
 const writingBack = ref(false);
+const workbenchId = computed(() => String(route.query.workbenchId || "").trim());
+const currentUserDraftScope = computed(() => String(
+  authStore.user?.id
+  || authStore.user?.person_id
+  || authStore.user?.username
+  || authStore.user?.name
+  || "anonymous"
+).trim() || "anonymous");
+const variantWorkbenchDraftStorageKey = computed(() =>
+  `ozon-ai-product-variant-workbench-draft:${workbenchId.value || "default"}:${currentUserDraftScope.value}`
+);
+let variantDraftSaveTimer = null;
+let restoringVariantWorkbenchDraft = false;
+let variantWorkbenchReady = false;
 
 const variantTypes = [
   {
@@ -89,18 +106,28 @@ const writeBackDialog = reactive({
   rows: []
 });
 
+const draftRestoreState = reactive({
+  restored: false,
+  savedAt: ""
+});
+
 const importDialog = reactive({
   visible: false,
   source: "collector",
   loading: false,
   keyword: "",
   rows: [],
-  selectedIds: []
+  selectedIds: [],
+  page: 1,
+  pageSize: 20,
+  total: 0,
+  totalPages: 1
 });
 
 const promptDialog = reactive({
   visible: false,
   loading: false,
+  saving: false,
   target: null,
   positivePrompt: "",
   negativePrompt: "",
@@ -134,6 +161,10 @@ const activeTargets = computed(() => {
 function normalizeRows(payload) {
   if (Array.isArray(payload)) return payload;
   return Array.isArray(payload?.rows) ? payload.rows : [];
+}
+
+function isDeletedDraftRow(row = {}) {
+  return String(row?.status || "").trim().toLowerCase() === "deleted";
 }
 
 function normalizeImageList(value) {
@@ -388,6 +419,20 @@ function money(value) {
   return Number(value || 0).toFixed(1);
 }
 
+function normalizeOzonTagToken(value = "") {
+  let text = String(value || "").trim();
+  if (!text) return "";
+  text = text.replace(/^#+/, "");
+  text = text.replace(/[^\p{L}\p{N}_-]+/gu, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "");
+  if (!text || /[\u3400-\u9fff]/u.test(text)) return "";
+  if (!/[\p{L}\p{N}]/u.test(text)) return "";
+  return `#${text}`.slice(0, 80);
+}
+
+function normalizeOzonTags(value, limit = 20) {
+  return Array.from(new Set(splitTags(value).map(normalizeOzonTagToken).filter(Boolean))).slice(0, limit);
+}
+
 function inferBrand(text) {
   const match = String(text || "").match(/\b(TENET|BELGEE|HAVAL|CHERY|JAECOO|GEELY|OMODA|EXEED|CHANGAN|TOYOTA|HONDA|BMW|MERCEDES|LADA|KIA|HYUNDAI)\b/i);
   return match ? match[1].toUpperCase() : "";
@@ -512,7 +557,7 @@ function normalizeProduct(row = {}, source = "collector", index = 0) {
       ? editedAssetImages
     : payloadImages(payloads, ["detail_image_urls", "detailImageUrls", "detail_images", "detailImages", "rich_content_images", "images", "image_urls", "imageUrls", "images_json", "media_assets"]);
   const detailImages = allImages.filter((image, imageIndex) => imageIndex > 0 || image !== imageList[0]);
-  const tags = splitTags(rawTags).length ? splitTags(rawTags) : [brand, model, inferCategory(row)].filter(Boolean);
+  const tags = normalizeOzonTags(rawTags).length ? normalizeOzonTags(rawTags) : normalizeOzonTags([brand, model, inferCategory(row)]);
   const material = firstFilled(
     row.material,
     payloadValue(payloads, ["material", "material_name", "materialName"]),
@@ -659,19 +704,247 @@ function createPreviewShell(target) {
   };
 }
 
+function createWorkbenchId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function ensureVariantWorkbenchRouteId() {
+  if (workbenchId.value) return;
+  await router.replace({
+    query: {
+      ...route.query,
+      workbenchId: createWorkbenchId()
+    }
+  }).catch(() => {});
+}
+
+function createVariantWorkbenchDraftSnapshot() {
+  return {
+    version: 1,
+    taskId: state.taskId,
+    taskStatus: state.taskStatus,
+    variantType: state.variantType,
+    products: plainClone(state.products, []),
+    selectedBase: plainClone(state.selectedBase, null),
+    targets: plainClone(state.targets, []),
+    mainImagePlans: plainClone(state.mainImagePlans, []),
+    previews: plainClone(state.previews, []),
+    results: plainClone(state.results, []),
+    strategy: plainClone(state.strategy, {}),
+    promptConfig: plainClone(state.promptConfig, {}),
+    savedAt: new Date().toISOString()
+  };
+}
+
+function variantWorkbenchDraftApiPayload(snapshot = createVariantWorkbenchDraftSnapshot()) {
+  return {
+    sourceModule: "ai_variant_workbench",
+    workbenchId: workbenchId.value,
+    routeName: "asset-variant-center-wizard",
+    taskId: snapshot.taskId || state.taskId,
+    draftScope: "user_workbench",
+    sourceBatchId: state.selectedBase?.sourceBatchId || "",
+    sourceProductId: state.selectedBase?.sourceId || state.selectedBase?.id || "",
+    productName: state.selectedBase?.name || "",
+    snapshotVersion: snapshot.version || 1,
+    snapshot
+  };
+}
+
+function resetDraftRestoreState() {
+  draftRestoreState.restored = false;
+  draftRestoreState.savedAt = "";
+}
+
+function draftRestoreTimeText(value = "") {
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return parsed.toLocaleString("zh-CN", { hour12: false });
+}
+
+function hasMeaningfulVariantWorkbenchDraft(snapshot = createVariantWorkbenchDraftSnapshot()) {
+  return Boolean(
+    snapshot.selectedBase?.id
+    || snapshot.selectedBase?.sourceId
+    || snapshot.products?.length
+    || snapshot.targets?.length
+    || snapshot.mainImagePlans?.length
+    || snapshot.results?.length
+    || snapshot.previews?.some((item) => item.status !== "pending" || item.title || item.mainImageUrl)
+  );
+}
+
+function applyVariantWorkbenchDraftSnapshot(parsed = {}) {
+  if (!parsed || parsed.version !== 1) return false;
+  restoringVariantWorkbenchDraft = true;
+  try {
+    state.taskId = parsed.taskId || `VT-${Date.now().toString(36).toUpperCase()}`;
+    state.taskStatus = parsed.taskStatus || "draft";
+    state.variantType = parsed.variantType || "multi_model";
+    state.products = Array.isArray(parsed.products) ? parsed.products : [];
+    state.selectedBase = parsed.selectedBase || null;
+    state.targets = Array.isArray(parsed.targets) ? parsed.targets : [];
+    state.mainImagePlans = Array.isArray(parsed.mainImagePlans) ? parsed.mainImagePlans : [];
+    state.previews = Array.isArray(parsed.previews) ? parsed.previews : [];
+    state.results = Array.isArray(parsed.results) ? parsed.results : [];
+    Object.assign(state.strategy, parsed.strategy || {});
+    Object.assign(state.promptConfig, parsed.promptConfig || {});
+    draftRestoreState.restored = true;
+    draftRestoreState.savedAt = draftRestoreTimeText(parsed.savedAt || "");
+    syncPreviewShells();
+    return true;
+  } finally {
+    restoringVariantWorkbenchDraft = false;
+  }
+}
+
+function restoreVariantWorkbenchDraftFromLocal() {
+  let parsed = null;
+  try {
+    const raw = localStorage.getItem(variantWorkbenchDraftStorageKey.value);
+    if (!raw) return false;
+    parsed = JSON.parse(raw);
+  } catch {
+    localStorage.removeItem(variantWorkbenchDraftStorageKey.value);
+    return false;
+  }
+  return applyVariantWorkbenchDraftSnapshot(parsed);
+}
+
+async function restoreVariantWorkbenchDraft() {
+  if (!workbenchId.value) return restoreVariantWorkbenchDraftFromLocal();
+  try {
+    const rows = await apiClient.get(`/api/listing/variant-workbench-drafts?workbenchId=${encodeURIComponent(workbenchId.value)}&routeName=asset-variant-center-wizard&limit=1`, { noCache: true });
+    const record = Array.isArray(rows) ? rows[0] : rows?.rows?.[0];
+    if (record?.snapshot) {
+      try {
+        localStorage.setItem(variantWorkbenchDraftStorageKey.value, JSON.stringify(record.snapshot));
+      } catch {
+        // Keep backend restore working even if local cache write fails.
+      }
+      draftRestoreState.savedAt = draftRestoreTimeText(record.updatedAt || record.updated_at || record.snapshot?.savedAt || "");
+      return applyVariantWorkbenchDraftSnapshot(record.snapshot);
+    }
+  } catch {
+    // Fall back to local draft when backend restore is unavailable.
+  }
+  return restoreVariantWorkbenchDraftFromLocal();
+}
+
+async function saveVariantWorkbenchDraft() {
+  if (!variantWorkbenchReady || restoringVariantWorkbenchDraft || !workbenchId.value) return;
+  const snapshot = createVariantWorkbenchDraftSnapshot();
+  try {
+    if (!hasMeaningfulVariantWorkbenchDraft(snapshot)) {
+      try {
+        await apiClient.delete(`/api/listing/variant-workbench-drafts/${encodeURIComponent(workbenchId.value)}?routeName=asset-variant-center-wizard`);
+      } catch {
+        // Keep local cleanup even if backend cleanup fails.
+      }
+      localStorage.removeItem(variantWorkbenchDraftStorageKey.value);
+      return;
+    }
+    localStorage.setItem(variantWorkbenchDraftStorageKey.value, JSON.stringify(snapshot));
+    await apiClient.post("/api/listing/variant-workbench-drafts", variantWorkbenchDraftApiPayload(snapshot));
+  } catch {
+    // Keep editing available even if storage is unavailable.
+  }
+}
+
+async function clearVariantWorkbenchDraft({ keepWorkbenchId = true } = {}) {
+  try {
+    if (workbenchId.value) {
+      await apiClient.delete(`/api/listing/variant-workbench-drafts/${encodeURIComponent(workbenchId.value)}?routeName=asset-variant-center-wizard`);
+    }
+  } catch {
+    // Local reset should still work even if backend cleanup fails.
+  }
+  try {
+    localStorage.removeItem(variantWorkbenchDraftStorageKey.value);
+  } catch {
+    // Ignore storage cleanup failures.
+  }
+  state.products = [];
+  state.selectedBase = null;
+  state.taskId = `VT-${Date.now().toString(36).toUpperCase()}`;
+  state.taskStatus = "draft";
+  state.variantType = "multi_model";
+  state.targets = [];
+  state.mainImagePlans = [];
+  state.previews = [];
+  state.results = [];
+  Object.assign(state.strategy, {
+    mainImageStyle: "高级原厂风",
+    customPrompt: "",
+    detailImageStrategy: "inherit",
+    copyStrategy: {
+      title: true,
+      tags: true,
+      description: true
+    },
+    writeBackMode: "auto",
+    generateVideo: false
+  });
+  Object.assign(state.promptConfig, {
+    templateId: null,
+    ratio: "3:4",
+    imageCount: 1,
+    userPrompt: "",
+    positivePromptOverride: "",
+    negativePromptOverride: ""
+  });
+  resetDraftRestoreState();
+  applyDefaultPromptTemplate();
+  if (!keepWorkbenchId) {
+    await router.replace({
+      query: {
+        ...route.query,
+        workbenchId: createWorkbenchId()
+      }
+    }).catch(() => {});
+  }
+  ensureStarterTargets();
+}
+
+async function startFreshTask() {
+  await clearVariantWorkbenchDraft({ keepWorkbenchId: false });
+  ElMessage.success("已新建裂变任务");
+}
+
+async function discardCurrentDraft() {
+  await clearVariantWorkbenchDraft({ keepWorkbenchId: true });
+  ElMessage.success("已放弃当前草稿");
+}
+
+function scheduleVariantWorkbenchDraftSave() {
+  if (!variantWorkbenchReady || restoringVariantWorkbenchDraft || !workbenchId.value) return;
+  if (variantDraftSaveTimer) window.clearTimeout(variantDraftSaveTimer);
+  variantDraftSaveTimer = window.setTimeout(() => {
+    variantDraftSaveTimer = null;
+    void saveVariantWorkbenchDraft();
+  }, 250);
+}
+
 async function loadBootstrap() {
   loading.value = true;
   try {
+    resetDraftRestoreState();
+    await ensureVariantWorkbenchRouteId();
     const promptTemplates = await listAiPromptTemplates();
     state.promptTemplates = Array.isArray(promptTemplates) ? promptTemplates : [];
-    applyDefaultPromptTemplate();
+    const restored = await restoreVariantWorkbenchDraft();
+    if (!restored) applyDefaultPromptTemplate();
     const baseId = Number(route.query.baseSelectionId || route.query.productId || 0);
-    if (baseId) {
+    if (!restored && baseId) {
       const row = await apiClient.get(`/api/products/${baseId}`, { noCache: true });
       state.selectedBase = normalizeProduct(row, "selection", 0);
     }
-    state.taskId = `VT-${Date.now().toString(36).toUpperCase()}`;
-    ensureStarterTargets();
+    if (!state.taskId) state.taskId = `VT-${Date.now().toString(36).toUpperCase()}`;
+    if (!state.promptConfig.templateId) applyDefaultPromptTemplate();
+    if (!state.previews.length) syncPreviewShells();
+    if (!state.targets.length && !state.mainImagePlans.length) ensureStarterTargets();
+    variantWorkbenchReady = true;
   } catch (error) {
     ElMessage.error(error.message || "商品裂变工作台加载失败");
   } finally {
@@ -683,6 +956,7 @@ async function openImportDialog(source) {
   importDialog.source = source;
   importDialog.visible = true;
   importDialog.selectedIds = [];
+  importDialog.page = 1;
   await loadImportCandidates();
 }
 
@@ -690,7 +964,12 @@ async function loadImportCandidates() {
   const source = importDialog.source;
   importDialog.loading = true;
   try {
-    const params = new URLSearchParams({ paged: "1", page: "1", pageSize: "12" });
+    const params = new URLSearchParams({
+      paged: "1",
+      page: String(importDialog.page || 1),
+      pageSize: String(importDialog.pageSize || 20)
+    });
+    if (source === "draft") params.set("lightweight", "1");
     if (importDialog.keyword.trim()) params.set("query", importDialog.keyword.trim());
     const url = source === "collector"
       ? `/api/listing/collector-box?${params.toString()}`
@@ -698,15 +977,38 @@ async function loadImportCandidates() {
         ? `/api/listing/drafts?${params.toString()}`
         : `/api/online-products?${params.toString()}`;
     const payload = await apiClient.get(url, { noCache: true });
-    const rows = normalizeRows(payload);
+    const rows = normalizeRows(payload).filter((row) => !(source === "draft" && isDeletedDraftRow(row)));
     importDialog.rows = rows.map((row, index) => normalizeProduct(row, source, index)).filter((item) => item.name);
+    importDialog.total = Number(payload?.total || importDialog.rows.length || 0);
+    importDialog.totalPages = Number(payload?.totalPages || Math.max(1, Math.ceil(importDialog.total / Math.max(1, importDialog.pageSize))) || 1);
     if (!importDialog.rows.length) ElMessage.warning(`${sourceText(source)}暂无可导入的数据`);
   } catch (error) {
     importDialog.rows = [];
+    importDialog.total = 0;
+    importDialog.totalPages = 1;
     ElMessage.error(error.message || `${sourceText(source)}加载失败`);
   } finally {
     importDialog.loading = false;
   }
+}
+
+function searchImportCandidates() {
+  importDialog.page = 1;
+  importDialog.selectedIds = [];
+  void loadImportCandidates();
+}
+
+function changeImportPage(page) {
+  importDialog.page = Number(page || 1);
+  importDialog.selectedIds = [];
+  void loadImportCandidates();
+}
+
+function changeImportPageSize(pageSize) {
+  importDialog.pageSize = Number(pageSize || 20);
+  importDialog.page = 1;
+  importDialog.selectedIds = [];
+  void loadImportCandidates();
 }
 
 function toggleImportCandidate(id) {
@@ -728,6 +1030,7 @@ async function hydrateImportProduct(product, index) {
           : Promise.resolve(null),
         apiClient.get(`/api/listing/templates/${encodeURIComponent(product.raw.template_id)}`, { noCache: true }).catch(() => null)
       ]);
+      if (draftDetail && isDeletedDraftRow(draftDetail)) return null;
       return normalizeProduct({
         ...product.raw,
         ...(draftDetail || {}),
@@ -753,11 +1056,16 @@ async function confirmImport() {
   importDialog.loading = true;
   const hydrated = await Promise.all(selected.map(hydrateImportProduct));
   importDialog.loading = false;
-  state.products = hydrated;
-  state.selectedBase = hydrated[0] || null;
+  const visibleProducts = hydrated.filter((item) => item && !(item.source === "draft" && isDeletedDraftRow(item.raw)));
+  if (!visibleProducts.length) {
+    ElMessage.warning("选中的草稿已删除，无法继续导入");
+    return;
+  }
+  state.products = visibleProducts;
+  state.selectedBase = visibleProducts[0] || null;
   importDialog.visible = false;
   syncPreviewShells();
-  ElMessage.success(`已导入 ${hydrated.length} 个商品，当前母商品已切换为第一条`);
+  ElMessage.success(`已导入 ${visibleProducts.length} 个商品，当前母商品已切换为第一条`);
 }
 
 function visualText(product = {}) {
@@ -826,15 +1134,7 @@ function reorderTargets(ids) {
 }
 
 function saveDraft() {
-  localStorage.setItem("mainImageVariantDraft", JSON.stringify({
-    taskId: state.taskId,
-    variantType: state.variantType,
-    targets: state.targets,
-    mainImagePlans: state.mainImagePlans,
-    strategy: state.strategy,
-    promptConfig: state.promptConfig,
-    savedAt: new Date().toISOString()
-  }));
+  saveVariantWorkbenchDraft();
   ElMessage.success("草稿已保存");
 }
 
@@ -1090,7 +1390,7 @@ function buildSelectionPayloadFromResult(result) {
     is_variant_generated: 1,
     material_asset_status: materialAssetStatusForResult(result),
     generated_title: result.title || productName,
-    generated_tags: result.tags || [],
+    generated_tags: normalizeOzonTags(result.tags || []),
     generated_description: result.description || replaceVehicleWords(base.selling_points || "", target)
   };
 }
@@ -1117,7 +1417,7 @@ function buildFallbackListingTemplatePayload(result = {}) {
     base.material ? { name: "material", value: base.material } : null,
     base.color ? { name: "color", value: base.color } : null,
     targetDisplayName(target) ? { name: "vehicle_model", value: targetDisplayName(target) } : null,
-    result.tags?.length ? { name: "tags", values: result.tags } : null
+    normalizeOzonTags(result.tags || []).length ? { name: "tags", values: normalizeOzonTags(result.tags || []) } : null
   ].filter(Boolean);
   const editablePayload = {
     title,
@@ -1131,7 +1431,7 @@ function buildFallbackListingTemplatePayload(result = {}) {
       name: title,
       images,
       price: base.raw?.price || base.raw?.sale_price || base.sale_price_rmb || base.air_sale_price_rmb || 0,
-      hashtags: result.tags || []
+      hashtags: normalizeOzonTags(result.tags || [])
     }],
     ai_variant: {
       result_id: result.id,
@@ -1200,7 +1500,7 @@ function mergeTemplateWithVariantResult(result = {}) {
           title: title || variant.title || variant.name || "",
           name: title || variant.name || variant.title || "",
           images: images.length ? images : variant.images,
-          hashtags: result.tags?.length ? result.tags : variant.hashtags
+          hashtags: normalizeOzonTags(result.tags || []).length ? normalizeOzonTags(result.tags || []) : normalizeOzonTags(variant.hashtags || [])
         }
       : variant)
     : [{
@@ -1209,7 +1509,7 @@ function mergeTemplateWithVariantResult(result = {}) {
         name: title,
         images,
         price: base.raw?.price || base.raw?.sale_price || 0,
-        hashtags: result.tags || []
+        hashtags: normalizeOzonTags(result.tags || [])
       }];
   const aiVariant = {
     result_id: result.id,
@@ -1455,6 +1755,31 @@ function savePromptOverrideForTask() {
   ElMessage.success("已应用到本次裂变任务");
 }
 
+async function savePromptOverrideToTemplate() {
+  const template = selectedPromptTemplate.value;
+  if (!template?.id) {
+    ElMessage.warning("请先选择要覆盖的提示词模板");
+    return;
+  }
+  promptDialog.saving = true;
+  try {
+    const saved = await updateAiPromptTemplate(template.id, {
+      positive_prompt: promptDialog.positivePrompt,
+      negative_prompt: promptDialog.negativePrompt,
+      updated_at: template.updated_at || template.updatedAt || ""
+    });
+    state.promptTemplates = state.promptTemplates.map((item) => (Number(item.id) === Number(saved.id) ? saved : item));
+    state.promptConfig.positivePromptOverride = "";
+    state.promptConfig.negativePromptOverride = "";
+    promptDialog.visible = false;
+    ElMessage.success("已覆盖当前模板");
+  } catch (error) {
+    ElMessage.error(error.message || "覆盖模板失败");
+  } finally {
+    promptDialog.saving = false;
+  }
+}
+
 function openPromptLibrary() {
   router.push("/settings/prompts");
 }
@@ -1470,6 +1795,31 @@ function backToSelection() {
 }
 
 onMounted(loadBootstrap);
+
+watch(
+  () => [
+    state.taskId,
+    state.taskStatus,
+    state.variantType,
+    state.selectedBase,
+    state.products,
+    state.targets,
+    state.mainImagePlans,
+    state.previews,
+    state.results,
+    state.strategy,
+    state.promptConfig
+  ],
+  () => {
+    scheduleVariantWorkbenchDraftSave();
+  },
+  { deep: true }
+);
+
+onBeforeUnmount(() => {
+  if (variantDraftSaveTimer) window.clearTimeout(variantDraftSaveTimer);
+  void saveVariantWorkbenchDraft();
+});
 </script>
 
 <template>
@@ -1482,7 +1832,11 @@ onMounted(loadBootstrap);
       :written-back-count="writtenBackCount"
       :generating="generating"
       :writing-back="writingBack"
+      :restored-from-draft="draftRestoreState.restored"
+      :restored-draft-time="draftRestoreState.savedAt"
       @save-draft="saveDraft"
+      @reset-task="startFreshTask"
+      @discard-draft="discardCurrentDraft"
       @start-generate="startGenerate"
       @pause-task="pauseTask"
       @write-back-all="requestWriteBackAll"
@@ -1559,9 +1913,9 @@ onMounted(loadBootstrap);
             v-model="importDialog.keyword"
             clearable
             placeholder="按商品名、SKU、车型搜索"
-            @keyup.enter="loadImportCandidates"
+            @keyup.enter="searchImportCandidates"
           />
-          <el-button :icon="Search" :loading="importDialog.loading" @click="loadImportCandidates">查询</el-button>
+          <el-button :icon="Search" :loading="importDialog.loading" @click="searchImportCandidates">查询</el-button>
           <el-button
             :disabled="!importDialog.rows.length"
             @click="importDialog.selectedIds = importDialog.rows.map((item) => item.id)"
@@ -1595,6 +1949,15 @@ onMounted(loadBootstrap);
           </button>
           <el-empty v-if="!importDialog.loading && !importDialog.rows.length" description="暂无可选择记录" />
         </div>
+        <PageFooterPagination
+          :total="importDialog.total"
+          :page="importDialog.page"
+          :page-size="importDialog.pageSize"
+          :total-pages="importDialog.totalPages"
+          compact
+          @update:page="changeImportPage"
+          @update:page-size="changeImportPageSize"
+        />
       </div>
       <template #footer>
         <span class="import-footer-text">已选择 {{ importDialog.selectedIds.length }} 条记录</span>
@@ -1624,7 +1987,8 @@ onMounted(loadBootstrap);
       <template #footer>
         <el-button @click="promptDialog.visible = false">取消</el-button>
         <el-button @click="state.promptConfig.positivePromptOverride = ''; state.promptConfig.negativePromptOverride = ''; promptDialog.visible = false">恢复模板默认</el-button>
-        <el-button type="primary" @click="savePromptOverrideForTask">应用到本次任务</el-button>
+        <el-button @click="savePromptOverrideForTask">仅本次生效</el-button>
+        <el-button type="primary" :loading="promptDialog.saving" @click="savePromptOverrideToTemplate">覆盖当前模板</el-button>
       </template>
     </el-dialog>
 

@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { mysqlExecute, mysqlQuery } from "../../../mysql-pool.js";
 import { invalidateMasterDataCache } from "../../../services/mysql-cutover.js";
+import { resolveUploadSubdir, resolveUploadSubdirRoots } from "../../../runtime-uploads.js";
 
 const ROOT_DIR = process.cwd();
 const TEMP_ROOT = path.resolve(ROOT_DIR, "uploads", "temp", "image-cropper");
@@ -12,11 +13,8 @@ const PYTHON_SCRIPT = path.resolve(ROOT_DIR, "src", "server", "python", "image_c
 const PYTHON_ENHANCER_SCRIPT = path.resolve(ROOT_DIR, "src", "server", "python", "image_enhancer.py");
 const PYTHON_RATIO_CANVAS_SCRIPT = path.resolve(ROOT_DIR, "src", "server", "python", "image_ratio_canvas.py");
 const PYTHON_WATERMARK_SCRIPT = path.resolve(ROOT_DIR, "src", "server", "python", "image_watermarker.py");
-const SHOP_WATERMARK_ROOT = path.resolve(ROOT_DIR, "uploads", "shop-watermarks");
-const SHOP_WATERMARK_ROOTS = Array.from(new Set([
-  SHOP_WATERMARK_ROOT,
-  path.resolve(ROOT_DIR, "..", "..", "uploads", "shop-watermarks")
-]));
+const SHOP_WATERMARK_ROOT = resolveUploadSubdir("shop-watermarks");
+const SHOP_WATERMARK_ROOTS = resolveUploadSubdirRoots("shop-watermarks");
 const ALLOWED_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;

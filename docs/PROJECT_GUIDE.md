@@ -69,10 +69,8 @@
 - [src/services.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/services.js)
 - [src/services/index.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/services/index.js)
 - [src/services/analytics.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/services/analytics.js)
-- [src/services/catalog.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/services/catalog.js)
 - [src/services/configuration.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/services/configuration.js)
 - [src/services/orders.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/services/orders.js)
-- [src/services/procurement.js](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/src/services/procurement.js)
 
 ## 4. 当前前端结构
 

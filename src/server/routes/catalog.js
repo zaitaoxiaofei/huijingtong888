@@ -1,13 +1,23 @@
+const PRODUCT_SAVE_BODY_LIMIT_BYTES = 128 * 1024 * 1024;
+
+function readProductSaveJson(readJson, req) {
+  return readJson(req, { limitBytes: PRODUCT_SAVE_BODY_LIMIT_BYTES });
+}
+
 export function createCatalogRoutes({ services, readJson }) {
   return {
     "GET /api/products": (req, url) => services.products(Object.fromEntries(url.searchParams.entries())),
     "GET /api/products/selection": (req, url) => services.selectionProducts(Object.fromEntries(url.searchParams.entries())),
     "GET /api/products/hidden": (req, url) => services.hiddenProducts(Object.fromEntries(url.searchParams.entries())),
     "GET /api/online-products": (req, url) => services.onlineProducts(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/online-products/limits": (req, url) => services.onlineProductLimits(Object.fromEntries(url.searchParams.entries())),
     "GET /api/online-products/warehouses": (req, url) => services.onlineProductWarehouses(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/sku-inventory-recipes": (req, url) => services.skuInventoryRecipe(Object.fromEntries(url.searchParams.entries())),
     "GET /api/mappings": (req, url) => services.mappings(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/inventory-product-naming/options": (req, url) => services.inventoryProductNamingOptions(Object.fromEntries(url.searchParams.entries())),
+    "POST /api/inventory-product-naming/options": async (req) => services.createInventoryProductNamingOption(await readJson(req), req._session),
     "POST /api/products": async (req) => {
-      const body = await readJson(req);
+      const body = await readProductSaveJson(readJson, req);
       const sessionPersonId = req._session?.personId || null;
       const created = await services.createProduct({
         ...body,
@@ -24,6 +34,7 @@ export function createCatalogRoutes({ services, readJson }) {
     "POST /api/products/import-commit": async (req) => services.commitProductCsvImport(await readJson(req)),
     "POST /api/online-products": async (req) => services.createOnlineProduct(await readJson(req)) || { ok: true },
     "POST /api/online-products/bind": async (req) => services.bindOnlineProduct(await readJson(req)) || { ok: true },
+    "POST /api/sku-inventory-recipes": async (req) => services.saveSkuInventoryRecipe(await readJson(req)) || { ok: true },
     "POST /api/online-products/batch-stock": async (req) => services.batchUpdateOnlineProductStocks(await readJson(req), req._session?.personId),
     "POST /api/online-products/action": async (req) => services.performOnlineProductAction(await readJson(req), req._session?.personId),
     "POST /api/online-products/create-product": async (req) => services.createProductFromOnlineProduct(await readJson(req))
@@ -31,6 +42,14 @@ export function createCatalogRoutes({ services, readJson }) {
 }
 
 export async function handleCatalogRestRoute({ req, res, url, parts, services, readJson, json, notFound, sendProductImage }) {
+  if (req.method === "PUT" && parts[0] === "api" && parts[1] === "inventory-product-naming" && parts[2] === "options" && /^\d+$/.test(parts[3] || "")) {
+    return json(res, await services.updateInventoryProductNamingOption(Number(parts[3]), await readJson(req), req._session));
+  }
+
+  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "inventory-product-naming" && parts[2] === "options" && /^\d+$/.test(parts[3] || "")) {
+    return json(res, await services.deleteInventoryProductNamingOption(Number(parts[3]), req._session));
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "order-profit-details") {
     return json(res, await services.productOrderProfitDetails(Number(parts[2]), Object.fromEntries(url.searchParams.entries())));
   }
@@ -62,12 +81,19 @@ export async function handleCatalogRestRoute({ req, res, url, parts, services, r
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "products" && parts[2]) {
     const productId = Number(parts[2]);
-    await services.updateProduct(productId, await readJson(req));
+    if (parts[3] === "development-meta") {
+      return json(res, await services.updateProductDevelopmentMeta(productId, await readJson(req)));
+    }
+    if (parts[3] === "components") {
+      await services.updateProductComponents(productId, await readJson(req));
+      return json(res, { ok: true, product: await services.selectionProduct(productId, { includeDetails: 0 }) });
+    }
+    await services.updateProduct(productId, await readProductSaveJson(readJson, req));
     return json(res, { ok: true, product: await services.selectionProduct(productId, { includeDetails: 0 }) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "recalculate-profits") {
-    return json(res, services.recalculateOrderProfitsForProduct(Number(parts[2])));
+    return json(res, await services.recalculateOrderProfitsForProduct(Number(parts[2]), await readJson(req)));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "force-recalculate-profits") {

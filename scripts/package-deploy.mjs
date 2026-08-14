@@ -1,23 +1,58 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
 const rootDir = process.cwd();
-const outputDir = path.resolve(process.env.DEPLOY_OUTPUT_DIR || path.join(rootDir, "dist", "deploy"));
+const finalOutputDir = path.resolve(process.env.DEPLOY_OUTPUT_DIR || path.join(rootDir, "dist", "deploy"));
+const outputDir = process.platform === "win32"
+  ? path.resolve(process.env.OZON_DEPLOY_WORK_DIR || path.join(os.tmpdir(), "ozon-erp-deploy-build"))
+  : finalOutputDir;
 const releaseVersion = process.env.OZON_RELEASE_VERSION || process.env.APP_RELEASE_VERSION || "local";
 const releaseChannel = process.env.OZON_RELEASE_CHANNEL || "production";
 const includeUploads = process.env.OZON_DEPLOY_INCLUDE_UPLOADS === "1";
+const includeEnv = process.env.OZON_DEPLOY_INCLUDE_ENV === "1";
 
 const filesToCopy = [
-  ".env",
   ".env.example",
   "package-lock.json",
   "start.bat"
 ];
+if (includeEnv) filesToCopy.unshift(".env");
 
 const directoriesToCopy = [
   "public",
+  "ozon-erp-collector-plugin",
+  "pivot-table-master",
   "src",
+  "scripts",
+  "deploy",
+  "tools"
+];
+
+const managedDeployPaths = [
+  ".env",
+  "package.json",
+  "package-lock.json",
+  ".env.example",
+  "start.bat",
+  "deploy-manifest.json",
+  path.join("public", "admin.html"),
+  path.join("public", "admin.html.br"),
+  path.join("public", "admin.html.gz"),
+  path.join("public", "release.json"),
+  path.join("public", "release.json.br"),
+  path.join("public", "release.json.gz"),
+  path.join("public", "vue-apps"),
+  path.join("public", "ai-workbench-proxy"),
+  path.join("public", "preview-assets"),
+  path.join("public", "media"),
+  path.join("public", "uploads"),
+  "uploads",
+  "backups",
+  "logs",
+  "src",
+  "scripts",
   "deploy",
   "tools"
 ];
@@ -35,6 +70,25 @@ const pluginPackageRules = [
     versionPattern: /^ozon-seller-analytics-plugin-([0-9][0-9A-Za-z.-]*)\.rar$/
   }
 ];
+
+async function mkdirWithRetry(target, attempts = 6) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await fs.mkdir(target, { recursive: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!['EPERM', 'EACCES', 'ENOENT'].includes(error?.code) || attempt === attempts) break;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 250));
+    }
+  }
+  throw lastError;
+}
+
+function isPluginPackageName(name) {
+  return /^(ozon-baodan-erp-plugin|ozon-erp-collector-plugin|ozon-seller-analytics-plugin)(-[0-9][0-9A-Za-z.-]*)?\.rar$/.test(String(name || ""));
+}
 
 function run(command, args, label) {
   return new Promise((resolve, reject) => {
@@ -110,8 +164,10 @@ async function copyPluginPackages() {
     if (!entry.isFile() || !selectedNames.has(entry.name)) continue;
     const source = path.join(packageSourceDir, entry.name);
     const target = path.join(packageTargetDir, entry.name);
+    const deployTarget = path.join(outputDir, entry.name);
     await fs.mkdir(packageTargetDir, { recursive: true });
     await fs.copyFile(source, target);
+    await fs.copyFile(source, deployTarget);
     copied.push(entry.name);
   }
   return copied;
@@ -130,6 +186,60 @@ async function writeDeployPackageJson() {
     JSON.stringify(packageJson, null, 2) + "\n",
     "utf8"
   );
+}
+
+async function cleanManagedDeployOutput() {
+  await mkdirWithRetry(finalOutputDir);
+  const relative = path.relative(rootDir, finalOutputDir);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`Refusing to clean deploy output outside project root: ${finalOutputDir}`);
+  }
+
+  for (const relativePath of managedDeployPaths) {
+    const target = path.join(finalOutputDir, relativePath);
+    const stat = await fs.stat(target).catch(() => null);
+    if (!stat) continue;
+    await fs.rm(target, {
+      recursive: stat.isDirectory(),
+      force: true,
+      maxRetries: 10,
+      retryDelay: 250
+    });
+  }
+
+  const entries = await fs.readdir(finalOutputDir, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isFile() || !isPluginPackageName(entry.name)) continue;
+    await fs.rm(path.join(finalOutputDir, entry.name), {
+      force: true,
+      maxRetries: 10,
+      retryDelay: 250
+    });
+  }
+}
+
+async function promoteDeployOutput() {
+  if (outputDir === finalOutputDir) return;
+  await mkdirWithRetry(path.dirname(finalOutputDir));
+  await cleanManagedDeployOutput();
+  const sourceManifestPath = path.join(outputDir, "deploy-manifest.json");
+  const targetManifestPath = path.join(finalOutputDir, "deploy-manifest.json");
+  if (process.platform === "win32") {
+    const escapedSourceDir = outputDir.replaceAll("'", "''");
+    const escapedTargetDir = finalOutputDir.replaceAll("'", "''");
+    const escapedSourceManifestPath = sourceManifestPath.replaceAll("'", "''");
+    const escapedTargetManifestPath = targetManifestPath.replaceAll("'", "''");
+    await run("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      `$ErrorActionPreference='SilentlyContinue'; New-Item -ItemType Directory -Path '${escapedTargetDir}' -Force | Out-Null; Get-ChildItem -LiteralPath '${escapedSourceDir}' -Force | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination '${escapedTargetDir}' -Recurse -Force }; Copy-Item -LiteralPath '${escapedSourceManifestPath}' -Destination '${escapedTargetManifestPath}' -Force; exit 0`
+    ], "Deploy artifact promote");
+  } else {
+    await mkdirWithRetry(finalOutputDir);
+    await fs.cp(outputDir, finalOutputDir, { recursive: true, force: true });
+  }
 }
 
 async function rewriteDeployEnv() {
@@ -200,6 +310,9 @@ async function rewriteDeployStartBat() {
   await fs.writeFile(startBatPath, content, "utf8");
 }
 
+await runNpmScript("check:deploy-preflight", "Deploy preflight");
+await runNpmScript("check:encoding", "Encoding check");
+await runNpmScript("check:sql-bindings", "SQL binding check");
 await runNpmScript("build:frontend", "Frontend build");
 await runNpmScript("package:plugin", "Plugin packaging");
 
@@ -229,6 +342,7 @@ const manifest = {
   includedFiles: filesToCopy,
   includedDirectories: directoriesToCopy,
   includedUploads: includeUploads,
+  includedEnv: includeEnv,
   includedPluginPackages
 };
 
@@ -238,4 +352,6 @@ await fs.writeFile(
   "utf8"
 );
 
-console.log(`Deployment artifact generated at ${outputDir}`);
+await promoteDeployOutput();
+
+console.log(`Deployment artifact generated at ${finalOutputDir}`);

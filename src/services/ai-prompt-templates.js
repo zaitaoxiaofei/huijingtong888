@@ -145,7 +145,7 @@ const DEFAULT_TEMPLATES = [
       "Seed keywords: {{tags_keywords}}.",
       "Selling points: {{selling_points}}.",
       "Group tags by brand/model, category, material, function, and usage scenario.",
-      "Return concise tags only, without unrelated words.",
+      "Return concise tags only, separated by spaces. Do not use comma-separated tag text.",
       "User extra instruction: {{user_prompt}}."
     ].join("\n"),
     negative_prompt: "No unrelated brands. No duplicate tags. No fake certification terms. No misleading compatibility claims.",
@@ -251,8 +251,9 @@ export async function createAiPromptTemplate(body = {}, personId = null) {
   const result = await mysqlExecute(`
     INSERT INTO ai_prompt_templates (
       name, scene, mode, keywords, description, positive_prompt, negative_prompt, variables_json, prompt_payload_json,
+      main_image_prompt, detail_image_prompt_json, title_prompt, tags_prompt, description_prompt,
       default_ratio, default_count, is_default, enabled, sort_order, created_by
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, [
     payload.name,
     payload.scene,
@@ -263,6 +264,11 @@ export async function createAiPromptTemplate(body = {}, personId = null) {
     payload.negative_prompt,
     payload.variables_json,
     payload.prompt_payload_json,
+    payload.main_image_prompt,
+    payload.detail_image_prompt_json,
+    payload.title_prompt,
+    payload.tags_prompt,
+    payload.description_prompt,
     payload.default_ratio,
     payload.default_count,
     payload.is_default,
@@ -292,6 +298,11 @@ export async function updateAiPromptTemplate(id, body = {}) {
         negative_prompt = ?,
         variables_json = ?,
         prompt_payload_json = ?,
+        main_image_prompt = ?,
+        detail_image_prompt_json = ?,
+        title_prompt = ?,
+        tags_prompt = ?,
+        description_prompt = ?,
         default_ratio = ?,
         default_count = ?,
         is_default = ?,
@@ -309,6 +320,11 @@ export async function updateAiPromptTemplate(id, body = {}) {
     payload.negative_prompt,
     payload.variables_json,
     payload.prompt_payload_json,
+    payload.main_image_prompt,
+    payload.detail_image_prompt_json,
+    payload.title_prompt,
+    payload.tags_prompt,
+    payload.description_prompt,
     payload.default_ratio,
     payload.default_count,
     payload.is_default,
@@ -346,7 +362,7 @@ export async function renderAiPromptTemplate(body = {}) {
   await ensureAiPromptTemplateTable();
   const template = body.templateId ? await aiPromptTemplateDetail(body.templateId) : normalizeTemplatePayload(body.template || {});
   const variables = normalizeVariables(body.variables || {});
-  const positiveSource = String(body.positive_prompt ?? body.positivePrompt ?? template.positive_prompt ?? "");
+  const positiveSource = resolvePositivePromptSource(body, template);
   const negativeSource = String(body.negative_prompt ?? body.negativePrompt ?? template.negative_prompt ?? "");
   const finalPositivePrompt = renderTemplateText(positiveSource, variables);
   const finalNegativePrompt = renderTemplateText(negativeSource, variables);
@@ -373,6 +389,11 @@ export async function ensureAiPromptTemplateTable() {
       negative_prompt LONGTEXT NULL,
       variables_json LONGTEXT NULL,
       prompt_payload_json LONGTEXT NULL,
+      main_image_prompt LONGTEXT NULL,
+      detail_image_prompt_json LONGTEXT NULL,
+      title_prompt LONGTEXT NULL,
+      tags_prompt LONGTEXT NULL,
+      description_prompt LONGTEXT NULL,
       default_ratio VARCHAR(16) NOT NULL DEFAULT '3:4',
       default_count INT NOT NULL DEFAULT 1,
       is_default TINYINT NOT NULL DEFAULT 0,
@@ -387,6 +408,11 @@ export async function ensureAiPromptTemplateTable() {
   `);
   await addAiPromptTemplateColumn("keywords", "TEXT NULL");
   await addAiPromptTemplateColumn("prompt_payload_json", "LONGTEXT NULL");
+  await addAiPromptTemplateColumn("main_image_prompt", "LONGTEXT NULL");
+  await addAiPromptTemplateColumn("detail_image_prompt_json", "LONGTEXT NULL");
+  await addAiPromptTemplateColumn("title_prompt", "LONGTEXT NULL");
+  await addAiPromptTemplateColumn("tags_prompt", "LONGTEXT NULL");
+  await addAiPromptTemplateColumn("description_prompt", "LONGTEXT NULL");
   await ensureDefaultPromptTemplates();
   await ensureGlobalNegativeNoChineseRule();
 }
@@ -460,6 +486,11 @@ function normalizeTemplatePayload(body = {}) {
     description: cleanLongText(body.description),
     positive_prompt: cleanLongText(body.positive_prompt ?? body.positivePrompt),
     negative_prompt: cleanLongText(body.negative_prompt ?? body.negativePrompt),
+    main_image_prompt: cleanLongText(body.main_image_prompt ?? body.mainImagePrompt),
+    detail_image_prompt_json: normalizeDetailImagePromptJson(body.detail_image_prompt_json ?? body.detailImagePromptJson ?? body.detail_image_prompts ?? body.detailImagePrompts),
+    title_prompt: cleanLongText(body.title_prompt ?? body.titlePrompt),
+    tags_prompt: cleanLongText(body.tags_prompt ?? body.tagsPrompt),
+    description_prompt: cleanLongText(body.description_prompt ?? body.descriptionPrompt),
     variables_json: normalizeVariablesJson(body.variables_json ?? body.variablesJson ?? body.variables),
     prompt_payload_json: normalizeJsonText(body.prompt_payload_json ?? body.promptPayloadJson ?? body.promptPayload),
     default_ratio: cleanText(body.default_ratio ?? body.defaultRatio ?? "3:4") || "3:4",
@@ -482,8 +513,39 @@ function normalizeTemplateRow(row = {}) {
     keywords: String(row.keywords || ""),
     keywordList: splitKeywords(row.keywords),
     variables: parseJsonArray(row.variables_json),
-    promptPayload: parseJsonObject(row.prompt_payload_json)
+    promptPayload: parseJsonObject(row.prompt_payload_json),
+    detailImagePrompts: parseJsonObject(row.detail_image_prompt_json)
   };
+}
+
+function resolvePositivePromptSource(body = {}, template = {}) {
+  const direct = body.positive_prompt ?? body.positivePrompt;
+  if (direct != null && direct !== "") return String(direct);
+  const assetKind = cleanText(body.asset_kind ?? body.assetKind ?? body.output_type ?? body.outputType).toLowerCase();
+  if (assetKind === "main_image") return String(template.main_image_prompt || template.positive_prompt || "");
+  if (assetKind === "title") return String(template.title_prompt || template.positive_prompt || "");
+  if (assetKind === "tags") return String(template.tags_prompt || template.positive_prompt || "");
+  if (assetKind === "description") return String(template.description_prompt || template.positive_prompt || "");
+  if (assetKind === "detail_image") {
+    const detailType = cleanText(body.detail_image_type ?? body.detailImageType).toLowerCase();
+    const detailPrompts = parseJsonObject(template.detail_image_prompt_json);
+    const matched = detailPrompts[detailType] || detailPrompts.default || "";
+    return String(matched || template.positive_prompt || "");
+  }
+  return String(template.positive_prompt || "");
+}
+
+function normalizeDetailImagePromptJson(value) {
+  if (value == null || value === "") return "{}";
+  if (typeof value === "object") return JSON.stringify(value);
+  const text = String(value || "").trim();
+  if (!text) return "{}";
+  try {
+    const parsed = JSON.parse(text);
+    return JSON.stringify(parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {});
+  } catch {
+    return "{}";
+  }
 }
 
 function normalizeVariablesJson(value) {

@@ -32,8 +32,6 @@ export function ozonBuyerProductKeyFromRow(row = {}) {
     || realSkuValue(raw.ozon_sku)
     || realSkuValue(row.ozon_sku)
     || realSkuValue(row.ozonSku)
-    || realSkuValue(row.ozon_product_id)
-    || realSkuValue(row.ozonProductId)
     || ""
   );
 }

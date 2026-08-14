@@ -12,5 +12,6 @@
   "previewHealthUrl": "http://127.0.0.1:8788/admin.html",
   "localHealthUrl": "http://127.0.0.1:8787/admin.html",
   "publicHealthUrl": "https://erp.hjt888.xyz/admin.html",
+  "releaseRetention": 2,
   "channel": "production"
 }

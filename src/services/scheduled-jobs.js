@@ -18,7 +18,8 @@ function fromSqlDate(value) {
 }
 
 function addMinutes(date, minutes) {
-  return new Date(date.getTime() + Math.max(1, Number(minutes || 1)) * 60 * 1000);
+  const normalizedMinutes = Number(minutes);
+  return new Date(date.getTime() + (Number.isFinite(normalizedMinutes) ? normalizedMinutes : 0) * 60 * 1000);
 }
 
 function parseJson(value, fallback = {}) {
@@ -97,7 +98,7 @@ function summarizeScheduledJobResult(jobKey, resultPayload = {}) {
       summaryTruncated: true
     };
   }
-  if (jobKey === "seller_analytics_daily_sync") {
+  if (jobKey === "seller_analytics_daily_sync" || jobKey === "seller_analytics_28d_sync") {
     return {
       status: String(payload.status || "success"),
       warning: truncateText(payload.warning || "", 1000),
@@ -333,6 +334,85 @@ export async function ensureScheduledJobTables() {
   if (!startedAtIndex[0]) {
     await mysqlExecute("CREATE INDEX idx_scheduled_job_runs_started_at ON scheduled_job_runs (started_at)");
   }
+
+  const eventCreatedAtIndex = await mysqlQuery(`
+    SELECT 1
+    FROM information_schema.statistics
+    WHERE table_schema = DATABASE()
+      AND table_name = 'scheduled_job_run_events'
+      AND index_name = 'idx_scheduled_job_run_events_created_at'
+    LIMIT 1
+  `);
+  if (!eventCreatedAtIndex[0]) {
+    await mysqlExecute("CREATE INDEX idx_scheduled_job_run_events_created_at ON scheduled_job_run_events (created_at)");
+  }
+}
+
+async function deleteScheduledHistoryInBatches(sql, params, batchSize) {
+  let deleted = 0;
+  while (true) {
+    let result;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        result = await mysqlExecute(`${sql} LIMIT ${batchSize}`, params);
+        break;
+      } catch (error) {
+        if (error?.code !== "ER_LOCK_DEADLOCK" || attempt === 3) throw error;
+        await new Promise((resolve) => setTimeout(resolve, attempt * 100));
+      }
+    }
+    const affectedRows = Number(result.affectedRows || 0);
+    deleted += affectedRows;
+    if (affectedRows < batchSize) return deleted;
+  }
+}
+
+export async function cleanupScheduledJobHistory(options = {}) {
+  await ensureScheduledJobTables();
+  const successDays = Math.max(1, Number(options.successDays || 7));
+  const detailDays = Math.max(successDays, Number(options.detailDays || 7));
+  const batchSize = Math.min(10_000, Math.max(100, Number(options.batchSize || 5000)));
+  const successCutoff = sqlDate(new Date(Date.now() - successDays * 24 * 60 * 60 * 1000));
+  const detailCutoff = sqlDate(new Date(Date.now() - detailDays * 24 * 60 * 60 * 1000));
+  const jobKey = String(options.jobKey || options.job_key || "").trim();
+  const jobFilter = jobKey ? " AND job_key = ?" : "";
+  const jobParams = jobKey ? [jobKey] : [];
+  const ordinaryStatuses = ["info", "ok", "success", "completed", "skipped"];
+  const ordinaryPlaceholders = ordinaryStatuses.map(() => "?").join(", ");
+
+  const ordinaryEventsDeleted = await deleteScheduledHistoryInBatches(`
+    DELETE FROM scheduled_job_run_events
+    WHERE created_at < ?
+      AND LOWER(status) IN (${ordinaryPlaceholders})
+      ${jobFilter}
+  `, [successCutoff, ...ordinaryStatuses, ...jobParams], batchSize);
+  const expiredEventsDeleted = await deleteScheduledHistoryInBatches(`
+    DELETE FROM scheduled_job_run_events
+    WHERE created_at < ?
+      ${jobFilter}
+  `, [detailCutoff, ...jobParams], batchSize);
+  const scheduledSuccessRunsDeleted = await deleteScheduledHistoryInBatches(`
+    DELETE FROM scheduled_job_runs
+    WHERE started_at < ?
+      AND mode = 'scheduled'
+      AND status IN ('success', 'skipped')
+      ${jobFilter}
+  `, [successCutoff, ...jobParams], batchSize);
+  const expiredRunsDeleted = await deleteScheduledHistoryInBatches(`
+    DELETE FROM scheduled_job_runs
+    WHERE started_at < ?
+      ${jobFilter}
+  `, [detailCutoff, ...jobParams], batchSize);
+
+  return {
+    successDays,
+    detailDays,
+    jobKey: jobKey || null,
+    ordinaryEventsDeleted,
+    expiredEventsDeleted,
+    scheduledSuccessRunsDeleted,
+    expiredRunsDeleted
+  };
 }
 
 export async function registerScheduledJobs(definitions = []) {
@@ -381,6 +461,33 @@ export async function registerScheduledJobs(definitions = []) {
       JSON.stringify(definition.config || {})
     ]);
   }
+}
+
+export async function recoverInterruptedScheduledJobRuns() {
+  await ensureScheduledJobTables();
+  return withMysqlTransaction(async (connection) => {
+    const [runsResult] = await connection.execute(`
+      UPDATE scheduled_job_runs
+      SET status = 'failed',
+          finished_at = COALESCE(finished_at, UTC_TIMESTAMP()),
+          error_message = COALESCE(NULLIF(error_message, ''), 'scheduled job interrupted by service restart')
+      WHERE status = 'running'
+    `);
+    const [jobsResult] = await connection.execute(`
+      UPDATE scheduled_jobs
+      SET locked_at = NULL,
+          locked_by = NULL,
+          next_run_at = CASE
+            WHEN next_run_at IS NULL OR next_run_at > UTC_TIMESTAMP() THEN UTC_TIMESTAMP()
+            ELSE next_run_at
+          END
+      WHERE locked_at IS NOT NULL OR locked_by IS NOT NULL
+    `);
+    return {
+      interruptedRuns: Number(runsResult.affectedRows || 0),
+      releasedJobs: Number(jobsResult.affectedRows || 0)
+    };
+  });
 }
 
 export async function listScheduledJobs(query = {}) {
@@ -630,12 +737,39 @@ async function claimDueJobs({ limit = 5, includeCatchup = true } = {}) {
           AND recent_runs.started_at >= ?
       )
       ${includeCatchup ? "" : "AND (last_attempt_at IS NULL OR next_run_at >= DATE_SUB(?, INTERVAL interval_minutes + 2 MINUTE))"}
-    ORDER BY FIELD(priority, 'critical', 'high', 'normal', 'low'), next_run_at ASC
+    ORDER BY
+      CASE
+        WHEN next_run_at <= DATE_SUB(?, INTERVAL 120 MINUTE) THEN 0
+        ELSE 1
+      END,
+      FIELD(priority, 'critical', 'high', 'normal', 'low'),
+      next_run_at ASC
     LIMIT ?
-  `, includeCatchup ? [nowSql, staleLockSql, staleLockSql, limit] : [nowSql, staleLockSql, staleLockSql, nowSql, limit]);
+  `, includeCatchup
+    ? [nowSql, staleLockSql, staleLockSql, nowSql, Math.max(limit, limit * 4)]
+    : [nowSql, staleLockSql, staleLockSql, nowSql, nowSql, Math.max(limit, limit * 4)]);
+
+  const selectedRows = [];
+  const selectedIds = new Set();
+  const selectedCategories = new Set();
+  for (const row of rows) {
+    const category = String(row.category || "maintenance");
+    if (selectedCategories.has(category)) continue;
+    selectedRows.push(row);
+    selectedIds.add(row.id);
+    selectedCategories.add(category);
+    if (selectedRows.length >= limit) break;
+  }
+  if (selectedRows.length < limit) {
+    for (const row of rows) {
+      if (selectedIds.has(row.id)) continue;
+      selectedRows.push(row);
+      if (selectedRows.length >= limit) break;
+    }
+  }
 
   const claimed = [];
-  for (const row of rows) {
+  for (const row of selectedRows) {
     const lockId = randomUUID();
     const result = await mysqlExecute(`
       UPDATE scheduled_jobs
@@ -750,9 +884,23 @@ async function finishRunSkipped(job, runId, reason, options = {}) {
   });
 }
 
+async function deferClaimedJob(job, reason, options = {}) {
+  const now = new Date();
+  const retryDelaySeconds = Math.max(0, Number(options.retryDelaySeconds || 0));
+  const nextRun = retryDelaySeconds
+    ? new Date(now.getTime() + retryDelaySeconds * 1000)
+    : computeNextRun(job, now);
+  await mysqlExecute(`
+    UPDATE scheduled_jobs
+    SET next_run_at = ?, locked_at = NULL, locked_by = NULL
+    WHERE id = ? AND locked_by = ?
+  `, [sqlDate(nextRun), job.id, job.locked_by]);
+}
+
 export class ScheduledJobScheduler {
-  constructor({ handlers = {}, pollIntervalMs = 60_000, maxConcurrent = 1 } = {}) {
+  constructor({ handlers = {}, beforeRun = null, pollIntervalMs = 60_000, maxConcurrent = 1 } = {}) {
     this.handlers = handlers;
+    this.beforeRun = typeof beforeRun === "function" ? beforeRun : null;
     this.pollIntervalMs = Math.max(10_000, Number(pollIntervalMs || 60_000));
     this.maxConcurrent = Math.max(1, Number(maxConcurrent || 1));
     this.running = 0;
@@ -763,7 +911,7 @@ export class ScheduledJobScheduler {
   start() {
     if (!this.stopped) return;
     this.stopped = false;
-    this.scheduleNext(1000);
+    void this.tick("startup").catch((error) => console.error("scheduled job startup tick failed", error));
   }
 
   stop() {
@@ -786,7 +934,11 @@ export class ScheduledJobScheduler {
       const capacity = this.maxConcurrent - this.running;
       if (capacity <= 0) return;
       const jobs = await claimDueJobs({ limit: capacity, includeCatchup: true });
-      await Promise.all(jobs.map((job) => this.runClaimedJob(job, mode)));
+      for (const job of jobs) {
+        void this.runClaimedJob(job, mode).catch((error) => {
+          console.error(`scheduled job ${job.job_key} execution failed`, error);
+        });
+      }
     } finally {
       this.scheduleNext();
     }
@@ -794,6 +946,20 @@ export class ScheduledJobScheduler {
 
   async runClaimedJob(job, mode = "scheduled") {
     const handler = this.handlers[job.job_key];
+    const preflight = this.beforeRun
+      ? await this.beforeRun({
+        key: job.job_key,
+        mode,
+        plannedFor: fromSqlDate(job.next_run_at),
+        lastSuccessAt: fromSqlDate(job.last_success_at),
+        intervalMinutes: Number(job.interval_minutes || 0),
+        config: parseJson(job.config_json, {})
+      })
+      : null;
+    if (preflight?.skipped) {
+      await deferClaimedJob(job, preflight.reason || "deferred", { retryDelaySeconds: preflight.retryDelaySeconds });
+      return;
+    }
     let runId = 0;
     try {
       runId = await startRun(job, mode);
@@ -825,6 +991,8 @@ export class ScheduledJobScheduler {
         runId,
         mode,
         plannedFor: fromSqlDate(job.next_run_at),
+        lastSuccessAt: fromSqlDate(job.last_success_at),
+        intervalMinutes: Number(job.interval_minutes || 0),
         config: parseJson(job.config_json, {})
       });
       if (result?.skipped) {

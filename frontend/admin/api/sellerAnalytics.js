@@ -26,12 +26,24 @@ export function getSellerAnalyticsOperationTodos(params = {}) {
   return apiClient.get(`/api/db/seller-analytics/operation-todos${queryString(params)}`, { noCache: true });
 }
 
-export function getSellerAnalyticsPluginStatus() {
-  return apiClient.get("/api/db/seller-analytics/plugin-status", { noCache: true });
+export function getSellerAnalyticsPluginStatus(params = {}) {
+  return apiClient.get(`/api/db/seller-analytics/plugin-status${queryString(params)}`, { noCache: true });
 }
 
 export function getSellerAnalyticsAuthBindingStatus(params = {}) {
   return apiClient.get(`/api/db/seller-analytics/auth-binding${queryString(params)}`, { noCache: true });
+}
+
+export function getSellerAnalyticsBrowserProfileStatus(params = {}) {
+  return apiClient.get(`/api/db/seller-analytics/browser-profile${queryString(params)}`, { noCache: true });
+}
+
+export function prepareSellerAnalyticsBrowserProfile(payload = {}) {
+  return apiClient.post("/api/db/seller-analytics/browser-profile/prepare", payload);
+}
+
+export function confirmSellerAnalyticsBrowserProfile(payload = {}) {
+  return apiClient.post("/api/db/seller-analytics/browser-profile/confirm", payload);
 }
 
 export function validateSellerAnalyticsPluginStatus(params = {}) {

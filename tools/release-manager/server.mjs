@@ -44,7 +44,8 @@ async function readConfig() {
     previewHealthUrl: process.env.OZON_RELEASE_PREVIEW_HEALTH_URL || raw.previewHealthUrl || `http://127.0.0.1:${previewPort}/admin.html`,
     localHealthUrl: process.env.OZON_RELEASE_LOCAL_HEALTH_URL || raw.localHealthUrl || "http://127.0.0.1:8787/admin.html",
     publicHealthUrl: process.env.OZON_RELEASE_PUBLIC_HEALTH_URL || raw.publicHealthUrl || "https://erp.hjt888.xyz/admin.html",
-    channel: process.env.OZON_RELEASE_CHANNEL || raw.channel || "production"
+    channel: process.env.OZON_RELEASE_CHANNEL || raw.channel || "production",
+    releaseRetention: Math.max(2, Number(process.env.OZON_RELEASE_RETENTION || raw.releaseRetention || 2))
   };
 }
 
@@ -227,8 +228,21 @@ async function workspaceStatus(config) {
 
 async function copyDir(source, target) {
   await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.rm(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
-  await fs.cp(source, target, { recursive: true });
+  try {
+    await fs.rm(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+    await fs.cp(source, target, { recursive: true });
+    return;
+  } catch (error) {
+    if (process.platform !== "win32" || !["EPERM", "EACCES", "ENOENT"].includes(error?.code)) throw error;
+  }
+  const escapedSource = source.replaceAll("'", "''");
+  const escapedTarget = target.replaceAll("'", "''");
+  await runCommand(
+    `powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; if (Test-Path -LiteralPath '${escapedTarget}') { Remove-Item -LiteralPath '${escapedTarget}' -Recurse -Force }; New-Item -ItemType Directory -Path '${escapedTarget}' -Force | Out-Null; Get-ChildItem -LiteralPath '${escapedSource}' -Force | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path '${escapedTarget}' $_.Name) -Recurse -Force -ErrorAction Stop }"`,
+    process.cwd(),
+    process.env
+  );
+  await fs.access(path.join(target, "deploy-manifest.json"));
 }
 
 function pathSegmentsForMatch(value) {
@@ -268,16 +282,18 @@ async function replaceDirFromRelease(source, target) {
   await fs.mkdir(target, { recursive: true });
   const parent = path.dirname(target);
   const base = path.basename(target);
-  const uploadRoots = [
+  const runtimeRoots = [
+    [".env"],
+    ["logs"],
     ["public", "uploads"],
     ["uploads"]
   ];
-  const preservedUploadRoots = [];
-  for (const parts of uploadRoots) {
-    const sourceUploads = path.join(source, ...parts);
-    const targetUploads = path.join(target, ...parts);
-    if (!await pathExists(sourceUploads) && await pathExists(targetUploads)) {
-      preservedUploadRoots.push(parts);
+  const preservedRuntimeRoots = [];
+  for (const parts of runtimeRoots) {
+    const sourcePath = path.join(source, ...parts);
+    const targetPath = path.join(target, ...parts);
+    if (!await pathExists(sourcePath) && await pathExists(targetPath)) {
+      preservedRuntimeRoots.push(parts);
     }
   }
   const leftovers = await fs.readdir(parent, { withFileTypes: true }).catch(() => []);
@@ -286,8 +302,126 @@ async function replaceDirFromRelease(source, target) {
       await fs.rm(path.join(parent, entry.name), { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     }
   }
-  await removeDirContentsExcept(target, preservedUploadRoots);
+  await removeDirContentsExcept(target, preservedRuntimeRoots);
   await fs.cp(source, target, { recursive: true, force: true });
+}
+
+async function ensurePreviewRuntimeEnv(config) {
+  const previewEnv = path.join(config.previewDir, ".env");
+  if (await pathExists(previewEnv)) return previewEnv;
+  const candidates = [
+    path.join(config.projectDir, ".env"),
+    path.join(config.liveDir, ".env")
+  ];
+  const sourceEnv = await firstExistingPath(candidates);
+  if (!sourceEnv) {
+    throw new Error("Preview runtime .env is missing. Create the project .env before deploying to 8788.");
+  }
+  await fs.copyFile(sourceEnv, previewEnv);
+  return previewEnv;
+}
+
+async function firstExistingPath(candidates = []) {
+  for (const candidate of candidates) {
+    if (await pathExists(candidate)) return candidate;
+  }
+  return "";
+}
+
+function elapsedText(startedAt) {
+  return `${((Date.now() - startedAt) / 1000).toFixed(1)} 秒`;
+}
+
+async function accessWithRetry(target, attempts = 4) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await fs.access(target);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 150));
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function copyRuntimeEnvWithRetry(candidates, destination, attempts = 4) {
+  const uniqueCandidates = [...new Set(candidates.filter(Boolean))];
+  let lastError = null;
+  for (const candidate of uniqueCandidates) {
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        await fs.copyFile(candidate, destination);
+        await accessWithRetry(destination, attempts);
+        return candidate;
+      } catch (error) {
+        lastError = error;
+        if (attempt < attempts) {
+          await new Promise((resolve) => setTimeout(resolve, attempt * 150));
+        }
+      }
+    }
+  }
+  const error = new Error(`Unable to prepare runtime .env. Tried: ${uniqueCandidates.join(", ")}`);
+  error.cause = lastError;
+  throw error;
+}
+
+async function prepareReleaseSwap(source, target, projectDir) {
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const parent = path.dirname(target);
+  const base = path.basename(target);
+  const suffix = `${Date.now()}-${process.pid}`;
+  const stagedDir = path.join(parent, `${base}.next-${suffix}`);
+  const previousDir = path.join(parent, `${base}.previous-${suffix}`);
+  const uploadRoots = [
+    ["public", "uploads"],
+    ["uploads"]
+  ];
+  const runtimeEnv = [[".env"]];
+
+  try {
+    await copyDir(source, stagedDir);
+    for (const parts of runtimeEnv) {
+      const targetRuntimePath = path.join(target, ...parts);
+      const stagedRuntimePath = path.join(stagedDir, ...parts);
+      if (!await pathExists(stagedRuntimePath)) {
+        await copyRuntimeEnvWithRetry([
+          targetRuntimePath,
+          path.join(projectDir, ...parts)
+        ], stagedRuntimePath);
+      }
+    }
+    for (const parts of uploadRoots) {
+      const sourceUploads = path.join(source, ...parts);
+      const targetUploads = path.join(target, ...parts);
+      if (!await pathExists(sourceUploads) && await pathExists(targetUploads)) {
+        await fs.cp(targetUploads, path.join(stagedDir, ...parts), { recursive: true, force: true });
+      }
+    }
+    await fs.access(path.join(stagedDir, "deploy-manifest.json"));
+    await accessWithRetry(path.join(stagedDir, ".env"));
+    return { stagedDir, previousDir };
+  } catch (error) {
+    await fs.rm(stagedDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }).catch(() => {});
+    throw error;
+  }
+}
+
+async function activatePreparedRelease(target, prepared) {
+  const targetExists = await pathExists(target);
+  if (targetExists) await fs.rename(target, prepared.previousDir);
+  try {
+    await fs.rename(prepared.stagedDir, target);
+  } catch (error) {
+    if (targetExists && await pathExists(prepared.previousDir) && !await pathExists(target)) {
+      await fs.rename(prepared.previousDir, target).catch(() => {});
+    }
+    throw error;
+  }
 }
 
 function runCommand(command, cwd, env) {
@@ -315,6 +449,36 @@ function runCommand(command, cwd, env) {
         const tail = lines.slice(-8).join("\n");
         const error = new Error(`${command} 执行失败，退出码 ${code}`);
         error.detail = tail;
+        reject(error);
+      }
+    });
+  });
+}
+
+function runProcess(file, args, cwd, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(file, args, {
+      cwd,
+      env,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let output = "";
+    child.stdout.on("data", (chunk) => {
+      output += chunk.toString();
+      process.stdout.write(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      output += chunk.toString();
+      process.stderr.write(chunk);
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) resolve(output);
+      else {
+        const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+        const error = new Error(`${file} 执行失败，退出码 ${code}`);
+        error.detail = lines.slice(-8).join("\n");
         reject(error);
       }
     });
@@ -364,10 +528,16 @@ async function httpCheck(url, options = {}) {
 
 async function restartErpServer(config, deployDir, port, options = {}) {
   const script = path.join(config.projectDir, "deploy", "windows-host", "start-erp-server.ps1");
-  const hostArg = options.host ? ` -BindHost "${options.host}"` : "";
-  const appBaseUrlArg = options.appBaseUrl ? ` -AppBaseUrl "${options.appBaseUrl}"` : "";
-  const command = `powershell -NoProfile -ExecutionPolicy Bypass -File "${script}" -DeployDir "${deployDir}" -Port ${Number(port)}${hostArg}${appBaseUrlArg}`;
-  return await runCommand(command, config.projectDir, process.env);
+  const args = [
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", script,
+    "-DeployDir", deployDir,
+    "-Port", String(Number(port))
+  ];
+  if (options.host) args.push("-BindHost", String(options.host));
+  if (options.appBaseUrl) args.push("-AppBaseUrl", String(options.appBaseUrl));
+  return await runProcess("powershell.exe", args, config.projectDir, process.env);
 }
 
 async function restartLiveServer(config) {
@@ -407,6 +577,36 @@ async function listReleases(config) {
   return rows;
 }
 
+async function pruneReleaseHistory(config) {
+  const releases = await listReleases(config);
+  const current = await readJsonFile(config.currentFile, {});
+  const preview = await readJsonFile(config.previewFile, {});
+  const keepVersions = new Set([current.version, preview.version].filter(Boolean));
+  for (const release of releases) {
+    if (keepVersions.size >= config.releaseRetention) break;
+    keepVersions.add(release.version);
+  }
+
+  const removedVersions = [];
+  for (const release of releases) {
+    if (keepVersions.has(release.version)) continue;
+    try {
+      assertReleasePathInside(config, release.path);
+      await fs.rm(release.path, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+      removedVersions.push(release.version);
+    } catch (error) {
+      console.warn(`Release retention cleanup skipped ${release.version}: ${error.message}`);
+    }
+  }
+
+  if (removedVersions.length) {
+    const removed = new Set(removedVersions);
+    const publishedRecords = await readPublishedRecords(config);
+    await savePublishedRecords(config, publishedRecords.filter((record) => !removed.has(record.version)));
+  }
+  return removedVersions;
+}
+
 async function applyPreviewRelease(config, version, releaseDir) {
   updateOperationStep("停止本地试运行服务", "running", `127.0.0.1:${config.previewPort}`);
   const stopLog = await stopErpServerOnPort(config, config.previewPort);
@@ -414,6 +614,7 @@ async function applyPreviewRelease(config, version, releaseDir) {
 
   updateOperationStep("应用到本地试运行目录", "running", config.previewDir);
   await replaceDirFromRelease(releaseDir, config.previewDir);
+  await ensurePreviewRuntimeEnv(config);
   updateOperationStep("本地试运行目录已更新", "done", config.previewDir);
 
   const previewedAt = new Date().toISOString();
@@ -456,6 +657,11 @@ async function applyPreviewRelease(config, version, releaseDir) {
     error.status = 502;
     error.validation = { detail: error.detail || error.message };
     throw error;
+  }
+
+  const removedVersions = await pruneReleaseHistory(config);
+  if (removedVersions.length) {
+    updateOperationStep("清理历史版本", "done", removedVersions.join(", "));
   }
 
   return {
@@ -562,7 +768,7 @@ async function buildRelease(body = {}) {
   const builtAt = new Date().toISOString();
   const env = {
     ...process.env,
-    DEPLOY_OUTPUT_DIR: config.deployOutputDir,
+    DEPLOY_OUTPUT_DIR: releaseDir,
     OZON_RELEASE_VERSION: version,
     APP_RELEASE_VERSION: version,
     VITE_APP_RELEASE_VERSION: version,
@@ -583,8 +789,8 @@ async function buildRelease(body = {}) {
     };
     throw error;
   }
-  updateOperationStep("复制版本包到发布历史", "running", releaseDir);
-  await copyDir(config.deployOutputDir, releaseDir);
+  updateOperationStep("确认版本包目录", "running", releaseDir);
+  await fs.access(path.join(releaseDir, "deploy-manifest.json"));
 
   const deployManifestPath = path.join(releaseDir, "deploy-manifest.json");
   const manifest = await readJsonFile(deployManifestPath, {});
@@ -660,13 +866,19 @@ async function publishRelease(body = {}) {
     throw error;
   }
 
+  const prepareStartedAt = Date.now();
+  updateOperationStep("预复制版本文件", "running", "服务保持运行，完成后再切换线上目录");
+  const prepared = await prepareReleaseSwap(releaseDir, config.liveDir, config.projectDir);
+  updateOperationStep("版本文件预复制完成", "done", elapsedText(prepareStartedAt));
+
+  const switchStartedAt = Date.now();
   updateOperationStep("停止正式本地服务", "running", "127.0.0.1:8787");
   const stopLog = await stopErpServerOnPort(config, 8787);
   updateOperationStep("正式本地服务已停止", "done", stopLog.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-3).join(" | "));
 
-  updateOperationStep("复制版本到线上目录", "running", config.liveDir);
-  await replaceDirFromRelease(releaseDir, config.liveDir);
-  updateOperationStep("线上目录已更新", "done", config.liveDir);
+  updateOperationStep("切换线上目录", "running", config.liveDir);
+  await activatePreparedRelease(config.liveDir, prepared);
+  updateOperationStep("线上目录已切换", "done", `${config.liveDir} | 停服后切换用时 ${elapsedText(switchStartedAt)}`);
   const publishedAt = new Date().toISOString();
   const manifest = await readJsonFile(path.join(releaseDir, "deploy-manifest.json"), {});
   const releaseStatus = {
@@ -737,6 +949,7 @@ async function publishRelease(body = {}) {
     throw error;
   }
   updateOperationStep("线上域名访问正常", "done", `HTTP ${publicHealth.status}`);
+  await fs.rm(prepared.previousDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }).catch(() => {});
   updateOperationStep("发布完成", "done", version);
   return {
     version,
@@ -2530,7 +2743,8 @@ function pageV4() {
           const text = operationText(state.activeOperation);
           setOperationPanels(text);
           setStatus(text, "\u4e3a\u907f\u514d\u91cd\u590d\u6253\u5305\u6216\u8986\u76d6\u53d1\u5e03\u76ee\u5f55\uff0c\u5f53\u524d\u4efb\u52a1\u7ed3\u675f\u524d\u6309\u94ae\u5df2\u9501\u5b9a\u3002");
-        } else if (!localBusy) {
+        } else {
+          stopProgressPolling();
           setOperationPanels("");
           setBusy(false);
         }

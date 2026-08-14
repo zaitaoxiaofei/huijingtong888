@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { loadShopDictionary } from "../../utils/shop-dictionary";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import { shanghaiDateKey, shanghaiMonthStart } from "../../utils/shanghai-date";
@@ -231,7 +232,7 @@ async function loadPageData() {
   try {
     const [result, shops] = await Promise.all([
       apiClient.get(`/api/outbound-records?${outboundQueryString()}`),
-      apiClient.get("/api/shops")
+      loadShopDictionary()
     ]);
     applyOutboundResult(result);
     state.shops = Array.isArray(shops) ? shops : [];

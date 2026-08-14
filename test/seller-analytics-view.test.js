@@ -81,7 +81,8 @@ test("seller analytics workbench keeps filters tabs and table headers fixed", ()
   assert.match(source, /\.seller-analytics-page \{[^}]*overflow: hidden/);
   assert.match(source, /\.seller-workspace-scroll \{[^}]*overflow: hidden/);
   assert.match(source, /\.seller-toolbar \{[^}]*display: flex/);
-  assert.match(source, /\.seller-toolbar \{[^}]*overflow-x: auto/);
+  assert.match(source, /\.seller-toolbar \{[^}]*overflow: visible/);
+  assert.match(source, /\.seller-toolbar \{[^}]*flex-wrap: wrap/);
   assert.match(source, /\.seller-toolbar__divider \{[^}]*width: 1px/);
   assert.match(source, /\.seller-source-tabs \{[^}]*overflow-x: auto/);
   assert.match(source, /\.seller-source-tabs--inline \{[^}]*height: 32px/);
@@ -114,6 +115,15 @@ test("seller analytics shop filter refreshes and is sent to analysis APIs", () =
   assert.match(source, /getSellerAnalyticsCollectRuns\(\{[\s\S]*store_id:\s*selectedStoreId\.value/);
   assert.match(source, /shop_id:\s*state\.filters\.shopId/);
   assert.match(source, /company_id:\s*selectedStoreId\.value/);
+});
+
+test("seller analytics period presets stay synchronized with the visible date range", () => {
+  const source = viewSource();
+
+  assert.match(source, /import \{ getAnalyticsPeriodDateRange \}/);
+  assert.match(source, /const presetRange = getAnalyticsPeriodDateRange\(state\.filters\.periodKey\)/);
+  assert.match(source, /if \(presetRange\) state\.filters\.dateRange = presetRange/);
+  assert.match(source, /@change="handlePeriodChange"/);
 });
 
 test("seller analytics recommendation table normalizes sparse rows before rendering", () => {

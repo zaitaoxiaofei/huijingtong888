@@ -15,8 +15,33 @@ const cachedGetPrefixes = [
 let authRedirecting = false;
 const getCache = new Map();
 const getInflightCache = new Map();
+const getInflightRequests = new Map();
+let getCacheRevision = 0;
 const routeScopedControllers = new Set();
 const routeAbortedSignals = new WeakSet();
+const GET_NETWORK_RETRY_DELAY_MS = 350;
+
+function waitForRetry(delayMs, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(resolve, delayMs);
+    signal?.addEventListener("abort", () => {
+      window.clearTimeout(timer);
+      reject(signal.reason || new DOMException("Aborted", "AbortError"));
+    }, { once: true });
+  });
+}
+
+async function fetchWithSafeGetRetry(url, options = {}) {
+  try {
+    return await fetch(url, options);
+  } catch (error) {
+    const isSafeGet = String(options.method || "GET").toUpperCase() === "GET";
+    const isNetworkFailure = error?.name === "TypeError";
+    if (!isSafeGet || !isNetworkFailure || options.signal?.aborted) throw error;
+    await waitForRetry(GET_NETWORK_RETRY_DELAY_MS, options.signal);
+    return await fetch(url, options);
+  }
+}
 
 function currentRedirectPath() {
   const hash = String(window.location.hash || "");
@@ -78,13 +103,45 @@ function writePersistedGetCache(key, data) {
   }
 }
 
+function clearPersistedGetCacheForPrefix(prefix) {
+  try {
+    const storage = window.sessionStorage;
+    if (!storage) return;
+    const keys = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (!key || !key.startsWith(PERSISTED_GET_CACHE_PREFIX)) continue;
+      const cachedUrl = key.slice(PERSISTED_GET_CACHE_PREFIX.length);
+      const cachedPath = String(cachedUrl || "").split("?")[0];
+      if (cachedPath === prefix || cachedPath.startsWith(`${prefix}/`)) keys.push(key);
+    }
+    keys.forEach((key) => storage.removeItem(key));
+  } catch {
+    // Ignore storage access failures.
+  }
+}
+
 function clearGetCacheForMutation(url = "") {
-  if (!getCache.size) return;
   const path = String(url || "").split("?")[0];
   for (const prefix of cachedGetPrefixes) {
     if (path === prefix || path.startsWith(`${prefix}/`)) {
+      getCacheRevision += 1;
       getCache.clear();
+      getInflightCache.clear();
+      clearPersistedGetCacheForPrefix(prefix);
       return;
+    }
+  }
+}
+
+function notifyGetCacheMutation(url = "") {
+  const path = String(url || "").split("?")[0];
+  if (path === "/api/shops" || path.startsWith("/api/shops/")) {
+    window.dispatchEvent(new CustomEvent("erp:shops-changed"));
+    try {
+      window.localStorage?.setItem("erp:shops-changed", String(Date.now()));
+    } catch {
+      // Cross-tab refresh is best effort only.
     }
   }
 }
@@ -123,7 +180,7 @@ async function request(url, options = {}) {
   const trace = beginApiPerf(url, options);
   let response;
   try {
-    response = await fetch(url, {
+    response = await fetchWithSafeGetRetry(url, {
       ...options,
       headers: buildHeaders(options.headers)
     });
@@ -192,6 +249,52 @@ async function blobRequest(url, options = {}) {
   };
 }
 
+export async function streamApiResponse(url, body, options = {}) {
+  const controller = options.signal ? null : new AbortController();
+  const signal = options.signal || controller.signal;
+  const response = await fetch(url, {
+    method: "POST",
+    signal,
+    headers: buildHeaders(options.headers),
+    body: JSON.stringify(body == null ? {} : body)
+  });
+  if (!response.ok || !response.body) {
+    const payload = await response.json().catch(() => ({}));
+    const error = new Error(payload?.error || `Request failed with status ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  let completed = null;
+  const handleFrame = (frame) => {
+    const event = frame.match(/^event:\s*(.+)$/m)?.[1]?.trim() || "message";
+    const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
+    if (!data) return;
+    let payload;
+    try { payload = JSON.parse(data); } catch { return; }
+    if (event === "delta") options.onDelta?.(payload?.delta || "");
+    else if (event === "done") completed = payload;
+    else if (event === "error") {
+      const error = new Error(payload?.error || "AI 流式请求失败");
+      error.status = payload?.status || 502;
+      throw error;
+    }
+  };
+  while (true) {
+    const { value, done } = await reader.read();
+    pending += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const frames = pending.split(/\r?\n\r?\n/);
+    pending = frames.pop() || "";
+    frames.forEach(handleFrame);
+    if (done) break;
+  }
+  if (pending.trim()) handleFrame(pending);
+  if (!completed) throw new Error("AI 流式请求未返回完成结果");
+  return completed;
+}
+
 export const apiClient = {
   get(url, options = {}) {
     if (!isCacheableGet(url, options)) return routeScopedGet(url, options);
@@ -207,9 +310,12 @@ export const apiClient = {
     if (inflight) return inflight;
     const requestOptions = { ...options };
     delete requestOptions.routeScoped;
+    const revision = getCacheRevision;
     const requestPromise = request(url, { method: "GET", ...requestOptions }).then((data) => {
-      getCache.set(key, { data, expiresAt: Date.now() + GET_CACHE_TTL_MS });
-      writePersistedGetCache(key, data);
+      if (revision === getCacheRevision) {
+        getCache.set(key, { data, expiresAt: Date.now() + GET_CACHE_TTL_MS });
+        writePersistedGetCache(key, data);
+      }
       return data;
     }).finally(() => {
       getInflightCache.delete(key);
@@ -223,6 +329,9 @@ export const apiClient = {
       method: "POST",
       body: body == null ? undefined : JSON.stringify(body),
       ...options
+    }).then((data) => {
+      notifyGetCacheMutation(url);
+      return data;
     });
   },
   put(url, body, options = {}) {
@@ -231,6 +340,9 @@ export const apiClient = {
       method: "PUT",
       body: body == null ? undefined : JSON.stringify(body),
       ...options
+    }).then((data) => {
+      notifyGetCacheMutation(url);
+      return data;
     });
   },
   delete(url, options = {}) {
@@ -238,6 +350,9 @@ export const apiClient = {
     return request(url, {
       method: "DELETE",
       ...options
+    }).then((data) => {
+      notifyGetCacheMutation(url);
+      return data;
     });
   },
   blob(url, options = {}) {
@@ -249,19 +364,33 @@ export const apiClient = {
 };
 
 function routeScopedGet(url, options = {}) {
-  if (options.signal || options.routeScoped === false) {
-    const { routeScoped, ...requestOptions } = options;
+  if (options.signal || options.dedupe === false) {
+    const { routeScoped, dedupe, ...requestOptions } = options;
     return request(url, { method: "GET", ...requestOptions });
   }
-  const controller = new AbortController();
-  routeScopedControllers.add(controller);
-  return request(url, {
+  const routeScoped = options.routeScoped !== false;
+  const key = `${routeScoped ? "route" : "global"}:${String(url)}`;
+  const inflight = getInflightRequests.get(key);
+  if (inflight) return inflight;
+  const controller = routeScoped ? new AbortController() : null;
+  if (controller) routeScopedControllers.add(controller);
+  const { routeScoped: _routeScoped, dedupe: _dedupe, ...requestOptions } = options;
+  const requestPromise = request(url, {
     method: "GET",
-    ...options,
-    signal: controller.signal
+    ...requestOptions,
+    signal: controller?.signal
   }).finally(() => {
-    routeScopedControllers.delete(controller);
+    if (getInflightRequests.get(key) === requestPromise) getInflightRequests.delete(key);
+    if (controller) routeScopedControllers.delete(controller);
   });
+  if (controller) {
+    controller.signal.addEventListener("abort", () => {
+      if (getInflightRequests.get(key) === requestPromise) getInflightRequests.delete(key);
+      routeScopedControllers.delete(controller);
+    }, { once: true });
+  }
+  getInflightRequests.set(key, requestPromise);
+  return requestPromise;
 }
 
 export function getAuthToken() {

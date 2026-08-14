@@ -2,7 +2,8 @@ param(
   [string]$DeployDir = "",
   [int]$Port = 8787,
   [string]$BindHost = "127.0.0.1",
-  [string]$AppBaseUrl = ""
+  [string]$AppBaseUrl = "",
+  [int]$StartupTimeoutSeconds = 90
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,11 +62,12 @@ if ($existing) {
   Start-Sleep -Seconds 2
 }
 
-$startCommand = "set PORT=$Port&& set HOST=$BindHost"
+$scheduledJobsEnabled = if ($Port -eq 8788) { "true" } else { "false" }
+$startCommand = "set PORT=$Port&& set HOST=$BindHost&& set SCHEDULED_JOBS_ENABLED=$scheduledJobsEnabled"
 if (-not [string]::IsNullOrWhiteSpace($AppBaseUrl)) {
   $startCommand = "$startCommand&& set APP_BASE_URL=$AppBaseUrl"
 }
-$startCommand = "$startCommand&& node src/server.js 1>> `"$outLog`" 2>> `"$errLog`""
+$startCommand = "$startCommand&& node deploy/windows-host/run-erp-server.mjs"
 
 Write-Host "Starting ERP server from $deployDir on ${BindHost}:$Port"
 Start-Process `
@@ -74,10 +76,22 @@ Start-Process `
   -WorkingDirectory $deployDir `
   -WindowStyle Hidden
 
-Start-Sleep -Seconds 3
-$started = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($StartupTimeoutSeconds -lt 1) {
+  throw "StartupTimeoutSeconds must be at least 1."
+}
+
+$deadline = (Get-Date).AddSeconds($StartupTimeoutSeconds)
+$started = $null
+do {
+  $started = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($started) {
+    break
+  }
+  Start-Sleep -Seconds 1
+} while ((Get-Date) -lt $deadline)
+
 if (-not $started) {
-  throw "ERP server did not start on port $Port. Check $outLog and $errLog"
+  throw "ERP server did not start on port $Port within $StartupTimeoutSeconds seconds. Check $outLog and $errLog"
 }
 
 Write-Host "ERP server is listening on ${BindHost}:$Port"

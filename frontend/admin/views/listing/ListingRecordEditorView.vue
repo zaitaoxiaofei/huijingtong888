@@ -38,7 +38,7 @@ const state = reactive({
     offer_id: "",
     price: "",
     old_price: "",
-    currency_code: "RUB",
+    currency_code: "CNY",
     primary_image: "",
     imagesText: "",
     videoUrlsText: "",
@@ -183,7 +183,7 @@ function applyDraft(draft) {
     offer_id: item.offer_id || editable.sku || "",
     price: item.price || editable.price?.value || "",
     old_price: item.old_price || editable.price?.old_price || "",
-    currency_code: item.currency_code || editable.price?.currency_code || "RUB",
+    currency_code: item.currency_code || editable.price?.currency_code || "CNY",
     primary_image: item.primary_image || "",
     imagesText: (item.images || []).join("\n"),
     videoUrlsText: extractVideoUrls(item).join("\n"),
@@ -209,7 +209,7 @@ function applyFormToPayload() {
   item.offer_id = state.form.offer_id;
   item.price = String(state.form.price || "");
   item.old_price = String(state.form.old_price || state.form.price || "");
-  item.currency_code = state.form.currency_code || "RUB";
+  item.currency_code = state.form.currency_code || "CNY";
   item.primary_image = state.form.primary_image;
   item.images = splitLines(state.form.imagesText);
   item.description_category_id = state.form.description_category_id;
@@ -386,7 +386,7 @@ function buildAiContext(type) {
       "Use fluent, natural Russian for Ozon buyers.",
       "Do not invent unsupported compatibility, material grade, certification, or brand.",
       "Tags must start with # and be deduplicated.",
-      "Summary must be 150-250 Russian words in coherent buyer-facing prose.",
+      "Summary must be 350-500 Russian characters in coherent buyer-facing prose.",
       "The summary must read like a real product description with smooth sentence flow, not a stitched mix of title words and tags.",
       "Use only a few relevant search phrases when they fit naturally. Do not force every tag into the summary and do not write a keyword block."
     ]
@@ -396,8 +396,8 @@ function buildAiContext(type) {
 function aiOutputContract(type) {
   if (type === "title") return { content: "Russian title", fields: { title: "Russian Ozon title" } };
   if (type === "tags" || type === "keywords") return { content: "tags", fields: { tags: ["#tag"] } };
-  if (type === "shortDescription") return { content: "Russian description", fields: { summary: "150-250 fluent Russian words, coherent product description, not keyword stuffing" } };
-  if (type === "description") return { content: "rich content", fields: { summary: "150-250 fluent Russian words, coherent product description", richJson: "Ozon rich-content JSON string" } };
+  if (type === "shortDescription") return { content: "Russian description", fields: { summary: "350-500 Russian characters, coherent product description, not keyword stuffing" } };
+  if (type === "description") return { content: "rich content", fields: { summary: "350-500 Russian characters, coherent product description", richJson: "Ozon rich-content JSON string" } };
   return { content: "result", fields: {} };
 }
 
