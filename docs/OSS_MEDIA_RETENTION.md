@@ -30,3 +30,15 @@ Bucket 采用“公共读、禁止公共写”；上传密钥仅保存在服务�
 - 新主图、确实经过编辑的图片和成品视频才创建新的内容寻址对象。
 - 尾图模板保存在 `listing-media/` 并永久保留；多个店铺、草稿和商品引用同一个模板地址。
 - 历史外部地址和本地地址在迁移完成前保持兼容，迁移时按文件哈希归并为一个 OSS 对象。
+
+## ECS 本地副本保留
+
+- `uploads/ai-generated` 和 `uploads/shop-variants` 默认保留 7 天，供生成过程、预览和短期重试使用。
+- 只有当内容 SHA-256 对应的 `ai-unused/` 或 `listing-media/` OSS 对象存在，且 OSS `Content-Length` 与本地文件大小一致时，才允许删除本地副本。
+- 清理器默认 dry-run；写入模式仍必须小批、可重跑，并输出本地路径、OSS 对象 key、URL、哈希和字节数清单。
+- OSS 对象缺失、大小不一致、校验超时或鉴权失败时，本地文件必须保留。
+
+```bash
+npm run cleanup:verified-local-media
+npm run cleanup:verified-local-media:write -- --days 7 --limit 200
+```

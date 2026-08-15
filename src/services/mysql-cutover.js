@@ -21969,22 +21969,23 @@ async function buildDashboardPayloadMysql({ forceRefresh = false, dateKey = toda
   const adCurrentDate = adLatestDate || selectedDate;
   const adPreviousDate = adLatestDate ? dateKeyMysql(addDaysMysql(new Date(`${adLatestDate}T00:00:00+08:00`), -1)) : previousDate;
   const adMonthFrom = `${selectedDate.slice(0, 7)}-01`;
-  const [stock, procurement, recentCommerce, profitTrend, adToday, adYesterday, adMonth, fbpInventoryValue, monthShippingCost, aftersalesLoss, scheduledJobs] = await Promise.all([
-    stockAlertsMysql({ mode: "fbp-alerts", paged: "1", page: 1, pageSize: 100 }),
-    procurementRequestsMysql({ grouped: "1", paged: "1", compact: "1", page: 1, pageSize: 8 }),
+  const dashboardSections = await mapWithConcurrencyMysql([
+    () => stockAlertsMysql({ mode: "fbp-alerts", paged: "1", page: 1, pageSize: 100 }),
+    () => procurementRequestsMysql({ grouped: "1", paged: "1", compact: "1", page: 1, pageSize: 8 }),
     // Today's operating dashboard must reflect orders that have already landed in MySQL.
     // The analytics snapshot is refreshed less frequently, so using it here makes both the
     // periodic dashboard rebuild and the explicit Refresh button return stale order counts.
-    dashboardRecentCommerceMysql(selectedDate, previousDate),
-    dashboardProfitTrendSummaryMysql(selectedDate),
-    dashboardAdSummaryMysql(adCurrentDate),
-    dashboardAdSummaryMysql(adPreviousDate),
-    dashboardAdSummaryMysql(adMonthFrom, selectedDate),
-    dashboardFbpInventoryValueMysql(),
-    dashboardMonthShippingCostSummaryMysql(selectedDate),
-    dashboardAftersalesLossSummaryMysql(selectedDate),
-    scheduledJobSummary()
-  ]);
+    () => dashboardRecentCommerceMysql(selectedDate, previousDate),
+    () => dashboardProfitTrendSummaryMysql(selectedDate),
+    () => dashboardAdSummaryMysql(adCurrentDate),
+    () => dashboardAdSummaryMysql(adPreviousDate),
+    () => dashboardAdSummaryMysql(adMonthFrom, selectedDate),
+    () => dashboardFbpInventoryValueMysql(),
+    () => dashboardMonthShippingCostSummaryMysql(selectedDate),
+    () => dashboardAftersalesLossSummaryMysql(selectedDate),
+    () => scheduledJobSummary()
+  ], 3, (loadSection) => loadSection());
+  const [stock, procurement, recentCommerce, profitTrend, adToday, adYesterday, adMonth, fbpInventoryValue, monthShippingCost, aftersalesLoss, scheduledJobs] = dashboardSections;
   const todayProfit = recentCommerce.today;
   const yesterdayProfit = recentCommerce.yesterday;
   const shopBreakdown = recentCommerce.shops;
@@ -23976,7 +23977,9 @@ function customerMessageIsPickup(row = {}) {
 
 function customerMessageIsDelivered(row = {}) {
   const text = `${row.status || ""} ${row.tracking_stage || ""} ${row.logistics_status || ""}`.toLowerCase();
-  return text.includes("delivered") || text.includes("签收");
+  return Boolean(row.delivered_at)
+    || /(^|\s)(delivered|posting_received|received)(\s|$)/.test(text)
+    || text.includes("签收");
 }
 
 function customerMessageIsDelayed(row = {}) {
@@ -24654,6 +24657,13 @@ async function ensureCustomerMessageTablesMysql() {
   await addCustomerMessageColumnMysql("customer_message_templates", "enabled_defaults_version", "INT NOT NULL DEFAULT 0");
   await mysqlExecute("UPDATE customer_message_templates SET enabled=0, enabled_defaults_version=1 WHERE enabled_defaults_version=0");
   await mysqlExecute(`UPDATE customer_message_templates
+    SET template_text=?, template_translation=?
+    WHERE scenario='pickup_notice' AND template_text=?`, [
+    defaultCustomerMessageTemplatesMysql().find((item) => item.scenario === "pickup_notice")?.template_text || "",
+    defaultCustomerMessageTemplatesMysql().find((item) => item.scenario === "pickup_notice")?.template_translation || "",
+    "Здравствуйте!\n\nВаш заказ №{{posting_number}} уже прибыл в пункт выдачи.\n\nВ заказе: {{product_summary}}.\n\nПожалуйста, заберите заказ до окончания срока хранения. Для получения может понадобиться паспорт или код получения — актуальная информация указана в приложении Ozon.\n\nСпасибо, что выбрали {{shop_name}}!"
+  ]);
+  await mysqlExecute(`UPDATE customer_message_templates
     SET trigger_condition = CASE scenario
         WHEN 'pickup_notice' THEN 'pickup_ready'
         WHEN 'review_request' THEN 'delivered'
@@ -24824,6 +24834,24 @@ function ozonWebhookValue(payload = {}, ...keys) {
   return "";
 }
 
+let ozonWebhookDrainScheduledMysql = false;
+let ozonWebhookProcessorPromiseMysql = null;
+
+function scheduleOzonWebhookDrainMysql(delayMs = 0) {
+  if (ozonWebhookDrainScheduledMysql) return;
+  ozonWebhookDrainScheduledMysql = true;
+  setTimeout(async () => {
+    ozonWebhookDrainScheduledMysql = false;
+    try {
+      const result = await processOzonWebhookEventsMysql({ limit: 10 });
+      if (result?.skipped) scheduleOzonWebhookDrainMysql(1000);
+      else if (Number(result?.processed || 0) >= 10) scheduleOzonWebhookDrainMysql();
+    } catch (error) {
+      console.error("ozon webhook processing failed", error);
+    }
+  }, Math.max(0, Number(delayMs || 0)));
+}
+
 export async function receiveOzonWebhookMysql(payload = {}) {
   ensureMysqlCutoverEnabled();
   await ensureCustomerMessageTablesMysql();
@@ -24861,13 +24889,23 @@ export async function receiveOzonWebhookMysql(payload = {}) {
       VALUES (?,NOW(),?) ON DUPLICATE KEY UPDATE webhook_last_received_at=NOW(), webhook_last_event_type=VALUES(webhook_last_event_type)`, [shop.id, eventType]);
   }
   const inserted = Number(result?.affectedRows || 0) > 0;
-  if (inserted && shop?.id) {
-    setTimeout(() => processOzonWebhookEventsMysql({ limit: 1, event_key: eventKey }).catch((error) => console.error("ozon webhook processing failed", error)), 0);
-  }
+  if (inserted && shop?.id) scheduleOzonWebhookDrainMysql();
   return { result: true };
 }
 
 export async function processOzonWebhookEventsMysql(body = {}) {
+  if (ozonWebhookProcessorPromiseMysql) {
+    return { ok: true, skipped: true, reason: "already_processing", recovered: 0, processed: 0, results: [] };
+  }
+  ozonWebhookProcessorPromiseMysql = processOzonWebhookEventsBatchMysql(body);
+  try {
+    return await ozonWebhookProcessorPromiseMysql;
+  } finally {
+    ozonWebhookProcessorPromiseMysql = null;
+  }
+}
+
+async function processOzonWebhookEventsBatchMysql(body = {}) {
   ensureMysqlCutoverEnabled();
   await ensureCustomerMessageTablesMysql();
   const limit = Math.min(Math.max(Number(body.limit || 20), 1), 100);
@@ -24977,8 +25015,8 @@ function defaultCustomerMessageTemplatesMysql() {
       enabled: false,
       trigger_condition: "pickup_ready",
       delay_hours: 1,
-      template_text: "Здравствуйте!\n\nВаш заказ №{{posting_number}} уже прибыл в пункт выдачи.\n\nВ заказе: {{product_summary}}.\n\nПожалуйста, заберите заказ до окончания срока хранения. Для получения может понадобиться паспорт или код получения — актуальная информация указана в приложении Ozon.\n\nСпасибо, что выбрали {{shop_name}}!",
-      template_translation: "您好！\n\n您的订单 №{{posting_number}} 已到达取货点。\n\n订单商品：{{product_summary}}。\n\n请在保管期限结束前领取。取货时可能需要护照或取件码，具体请以 Ozon 应用中显示的信息为准。\n\n感谢您选择 {{shop_name}}！"
+      template_text: "Здравствуйте!\n\nПо данным Ozon, заказ №{{posting_number}} прибыл в пункт выдачи.\n\nВ заказе: {{product_summary}}.\n\nПожалуйста, проверьте актуальный статус в приложении Ozon и заберите заказ до окончания срока хранения. Данные о доставке иногда обновляются с задержкой. Если вы уже получили этот заказ, пожалуйста, не обращайте внимания на это сообщение. Это напоминание относится только к указанному заказу; другого отправления или подарка нет.\n\nДля получения может понадобиться паспорт или код получения.\n\nСпасибо, что выбрали {{shop_name}}!",
+      template_translation: "您好！\n\n根据 Ozon 当前信息，您的订单 №{{posting_number}} 已到达取货点。\n\n订单商品：{{product_summary}}。\n\n请在 Ozon 应用中查看最新状态，并在保管期限结束前领取。物流信息偶尔会延迟更新；如果您已经领取了这个订单，请忽略本消息。本提醒仅针对上述订单，没有另一个包裹或赠品。\n\n取货时可能需要护照或取件码。\n\n感谢您选择 {{shop_name}}！"
     },
     {
       scenario: "review_request",
@@ -25977,7 +26015,7 @@ async function cancelIneligibleCustomerMessageTasksMysql() {
       t.cancel_reason=CASE
         WHEN LOWER(CONCAT_WS(' ',o.status,o.tracking_stage,o.logistics_status)) REGEXP 'cancel|return|reject'
           THEN '订单已取消、拒收或进入退货流程'
-        WHEN t.scenario='pickup_notice' AND LOWER(CONCAT_WS(' ',o.status,o.tracking_stage,o.logistics_status)) LIKE '%delivered%'
+        WHEN t.scenario='pickup_notice' AND (o.delivered_at IS NOT NULL OR LOWER(CONCAT_WS(' ',o.status,o.tracking_stage,o.logistics_status)) REGEXP 'delivered|posting_received|(^| )received( |$)')
           THEN '订单已经签收'
         WHEN t.scenario='pickup_notice' THEN '订单已离开待取货状态'
         WHEN t.scenario='review_request' THEN '订单当前不是已签收状态'
@@ -25988,7 +26026,8 @@ async function cancelIneligibleCustomerMessageTasksMysql() {
       AND (
         LOWER(CONCAT_WS(' ',o.status,o.tracking_stage,o.logistics_status)) REGEXP 'cancel|return|reject'
         OR (t.scenario='pickup_notice' AND (
-          LOWER(CONCAT_WS(' ',o.status,o.tracking_stage,o.logistics_status)) LIKE '%delivered%'
+          o.delivered_at IS NOT NULL
+          OR LOWER(CONCAT_WS(' ',o.status,o.tracking_stage,o.logistics_status)) REGEXP 'delivered|posting_received|(^| )received( |$)'
           OR LOWER(CONCAT_WS(' ',o.status,o.tracking_stage,o.logistics_status)) NOT LIKE '%pickup%'
         ))
         OR (t.scenario='review_request' AND LOWER(CONCAT_WS(' ',o.status,o.tracking_stage,o.logistics_status)) NOT LIKE '%delivered%')
@@ -26099,12 +26138,12 @@ async function customerMessageTaskCancellationReasonMysql(task, order) {
   const scheduledAgeHours = Math.max(0, (Date.now() - new Date(task.scheduled_at || 0).getTime()) / 3600000);
   const orderAgeHours = Math.max(0, (Date.now() - new Date(order.ordered_at || 0).getTime()) / 3600000);
   const deliveredAgeHours = Math.max(0, (Date.now() - new Date(order.delivered_at || order.last_status_changed_at || 0).getTime()) / 3600000);
-  if (task.scenario === "pickup_notice" && state.includes("delivered")) return "订单已经签收";
+  if (task.scenario === "pickup_notice" && customerMessageIsDelivered(order)) return "订单已经签收";
   if (task.scenario === "pickup_notice" && scheduledAgeHours > 1) return "本次取货提醒已经超过安全发送窗口";
   if (task.scenario === "review_request" && deliveredAgeHours > 72) return "签收时间过久，为避免打扰不再发送";
   if (task.scenario === "passport_reminder" && orderAgeHours > 24) return "下单已超过24小时，不再发送护照资料提醒";
   if (/cancel|return|reject/.test(state)) return "订单已取消、拒收或进入退货流程";
-  if (task.scenario === "pickup_notice" && !state.includes("pickup")) return state.includes("delivered") ? "订单已经签收" : "订单已离开待取货状态";
+  if (task.scenario === "pickup_notice" && !state.includes("pickup")) return customerMessageIsDelivered(order) ? "订单已经签收" : "订单已离开待取货状态";
   if (task.scenario === "review_request" && !state.includes("delivered")) return "订单当前不是已签收状态";
   if (task.scenario === "passport_reminder" && !/awaiting_registration|posting_awaiting_registration/.test(state)) return "订单当前已不需要补充护照资料";
   if (task.scenario === "review_request") {
@@ -26223,12 +26262,18 @@ export async function sendCustomerMessageMysql(body = {}) {
   await ensureCustomerMessageTablesMysql();
   if (process.env.OZON_CUSTOMER_MESSAGE_SEND_ENABLED !== "1") return { ok: false, __status: 409, error: "真实发送环境开关未开启，当前不会联系客户。" };
   const orderId = Number(body.order_id || body.orderId || 0);
-  const order = await mysqlQueryOne("SELECT * FROM orders WHERE id=? LIMIT 1", [orderId]);
+  let order = await mysqlQueryOne("SELECT * FROM orders WHERE id=? LIMIT 1", [orderId]);
   if (!order) return { ok: false, __status: 404, error: "未找到订单" };
   const shop = (await shopsMysql()).find((item) => Number(item.id) === Number(order.shop_id));
+  if (!shop) return { ok: false, __status: 404, error: "未找到订单所属店铺" };
   const setting = await mysqlQueryOne("SELECT * FROM customer_message_shop_settings WHERE shop_id=? LIMIT 1", [order.shop_id]);
   if (setting?.chat_capability !== "available") return { ok: false, __status: 409, error: "店铺聊天能力尚未检测通过，请先执行聊天能力检测。" };
   try {
+    if (String(body.scenario || "") === "pickup_notice") {
+      order = await refreshCustomerMessageOrderFromOzonMysql(shop, order);
+      if (customerMessageIsDelivered(order)) return { ok: false, __status: 409, error: "Ozon 最新状态显示订单已签收，已阻止发送取货提醒。" };
+      if (!customerMessageIsPickup(order)) return { ok: false, __status: 409, error: "Ozon 最新状态已不是待取货，已阻止发送取货提醒。" };
+    }
     const result = await sendCustomerMessageForOrderMysql({ shop, order, scenario: body.scenario || "order_update", messageText: body.message_text });
     return { ok: true, chat_id: result.chat_id };
   } catch (error) {

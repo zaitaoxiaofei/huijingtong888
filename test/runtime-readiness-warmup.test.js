@@ -23,3 +23,10 @@ test("deployment waits for readiness and safe GET requests retry once", () => {
   assert.match(authSource, /BOOTSTRAP_TIMEOUT_MS = 8000/);
   assert.match(authSource, /if \(Number\(error\?\.status \|\| 0\) === 401\) clearSession\(\)/);
 });
+
+test("deployment candidates do not start background workers and shutdown drains connections", () => {
+  assert.match(serverSource, /process\.env\.DEPLOYMENT_CANDIDATE === "1"/);
+  assert.match(serverSource, /if \(!deploymentCandidate\) setTimeout\(recoverGenerationJobs, 3000\)/);
+  assert.match(serverSource, /server\.close\(\(error\) =>/);
+  assert.match(serverSource, /process\.once\("SIGTERM"/);
+});

@@ -56,10 +56,14 @@ test("automatic sending revalidates Ozon status and records scenarios consistent
   assert.match(serviceSource, /customerMessageTaskAlreadySentMysql/);
   assert.match(serviceSource, /同一订单的本次消息已经人工或自动发送/);
   assert.match(serviceSource, /OZON_CUSTOMER_MESSAGE_AUTO_BATCH_LIMIT \|\| 10/);
+  assert.match(serviceSource, /posting_received\|received/);
+  assert.match(serviceSource, /Boolean\(row\.delivered_at\)/);
 });
 
 test("three priority templates use safer natural copy and remain opt-in by default", () => {
   assert.match(serviceSource, /Для получения может понадобиться паспорт или код получения/);
+  assert.match(serviceSource, /Если вы уже получили этот заказ/);
+  assert.match(serviceSource, /другого отправления или подарка нет/);
   assert.match(serviceSource, /Не отправляйте паспортные данные в чате/);
   assert.match(serviceSource, /поделитесь, пожалуйста, впечатлением в отзыве на Ozon/);
   assert.match(serviceSource, /scenario: "pickup_notice"[\s\S]*?enabled: false/);
@@ -117,6 +121,10 @@ test("one public Ozon webhook identifies shops and stores idempotent events", ()
   assert.match(serviceSource, /ozon_seller_id=\?/);
   assert.match(serviceSource, /syncOzonPostingsByNumberMysql/);
   assert.match(serviceSource, /TYPE_POSTING_CANCELLED/);
+  assert.match(serviceSource, /function scheduleOzonWebhookDrainMysql\(delayMs = 0\)/);
+  assert.match(serviceSource, /processOzonWebhookEventsMysql\(\{ limit: 10 \}\)/);
+  assert.match(serviceSource, /reason: "already_processing"/);
+  assert.doesNotMatch(serviceSource, /processOzonWebhookEventsMysql\(\{ limit: 1, event_key: eventKey \}\)/);
   assert.doesNotMatch(settingsViewSource, /https:\/\/erp\.hjt888\.xyz\/api\/webhooks\/ozon/);
 });
 
@@ -184,4 +192,5 @@ test("upcoming customer messages are limited to three safe workflows and push-en
   assert.match(serviceSource, /发送前无法从 Ozon 复核订单状态/);
   assert.match(manualSendSource, /refreshCustomerMessageOrderFromOzonMysql\(shop, order\)/);
   assert.doesNotMatch(manualSendSource, /syncOzonPostingsByNumberMysql/);
+  assert.match(serviceSource, /Ozon 最新状态显示订单已签收，已阻止发送取货提醒/);
 });

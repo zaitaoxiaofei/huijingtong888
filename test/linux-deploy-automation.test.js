@@ -27,7 +27,17 @@ test("ECS deployment preserves server secrets and shared uploads", () => {
 test("ECS deployment validates the service before accepting the release", () => {
   assert.match(remote, /systemctl restart ozon-erp/);
   assert.match(remote, /http:\/\/127\.0\.0\.1:3000\//);
-  assert.match(remote, /status" == "200" \|\| "\$status" == "401"/);
+  assert.match(remote, /status" == "200"/);
+});
+
+test("ECS deployment warms a backup candidate before restarting the primary", () => {
+  assert.match(remote, /candidate_port="3001"/);
+  assert.match(remote, /DEPLOYMENT_CANDIDATE='1'/);
+  assert.ok(remote.indexOf("\nstart_candidate\n") < remote.lastIndexOf("systemctl restart ozon-erp"));
+  assert.match(remote, /server 127\.0\.0\.1:3001 backup/);
+  assert.match(remote, /nginx -t/);
+  assert.match(remote, /candidate_pid_file="\/tmp\/ozon-erp-candidate\.pid"/);
+  assert.match(remote, /Keep the validated candidate alive as Nginx's hot backup/);
 });
 
 test("one-click launcher runs deployment hidden and keeps a durable log", () => {

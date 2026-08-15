@@ -8,7 +8,8 @@ test("dashboard rebuilds a persisted snapshot when analytics are newer", async (
 
   assert.match(dashboard, /MAX\(refreshed_at\) AS refreshed_at[\s\S]*FROM analytics_shop_daily/);
   assert.match(dashboard, /if \(await dashboardSnapshotIsStaleMysql\(snapshot, dateKey\)\)/);
-  assert.match(dashboard, /return rebuildDashboardSnapshotMysql\(\{ forceRefresh: true, dateKey \}\)/);
+  assert.match(dashboard, /queueDashboardSnapshotRefreshMysql\(\{ forceRefresh: true, dateKey \}\)/);
+  assert.match(dashboard, /status: "building"/);
 });
 
 test("dashboard calculates today's order metrics from live orders", async () => {
@@ -18,6 +19,15 @@ test("dashboard calculates today's order metrics from live orders", async () => 
   assert.match(builder, /dashboardRecentCommerceMysql\(selectedDate, previousDate\)/);
   assert.doesNotMatch(builder, /profitSummaryOverviewMysql\(selectedDate, selectedDate\)/);
   assert.doesNotMatch(builder, /profitSummaryOverviewMysql\(previousDate, previousDate\)/);
+});
+
+test("dashboard snapshot refresh leaves database capacity for foreground requests", async () => {
+  const source = await readFile(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
+  const builder = source.match(/async function buildDashboardPayloadMysql[\s\S]*?async function rebuildDashboardSnapshotMysql/)?.[0] || "";
+
+  assert.match(builder, /mapWithConcurrencyMysql\(\[/);
+  assert.match(builder, /\], 3, \(loadSection\) => loadSection\(\)\)/);
+  assert.doesNotMatch(builder, /await Promise\.all\(\[/);
 });
 
 test("dashboard consolidates repeated commerce ranges into bounded aggregate queries", async () => {

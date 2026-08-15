@@ -11,7 +11,16 @@ test("remote image proxy reports a failed upstream as an image load error", () =
   assert.match(serverSource, /writeHead\(res, 502/);
   const proxyHandler = serverSource.slice(serverSource.indexOf("async function sendRemoteImage(req, res, url)"), serverSource.indexOf("const server = http.createServer"));
   assert.doesNotMatch(proxyHandler, /sendImagePlaceholder\(res\)/);
-  assert.equal((proxyHandler.match(/sendImageProxyUnavailable\(res\)/g) || []).length, 2);
+  assert.equal((proxyHandler.match(/sendImageProxyUnavailable\(res\)/g) || []).length, 3);
+});
+
+test("remote image proxy limits upstream pressure and briefly caches failures", () => {
+  assert.match(serverSource, /IMAGE_PROXY_FETCH_CONCURRENCY/);
+  assert.match(serverSource, /acquireImageProxyFetchSlot\(\)/);
+  assert.match(serverSource, /receivedBytes > IMAGE_PROXY_MAX_RESPONSE_BYTES/);
+  assert.match(serverSource, /imageProxyFailureCache\.set\(target, Date\.now\(\) \+ IMAGE_PROXY_FAILURE_TTL_MS\)/);
+  assert.match(serverSource, /isManagedOssObjectUrl\(target\)/);
+  assert.match(serverSource, /readManagedOssObject\(target/);
 });
 
 test("order tracking keeps online and inventory images as fallback candidates", () => {

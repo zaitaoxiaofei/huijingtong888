@@ -6,10 +6,40 @@ import {
   mediaObjectPrefixForRetention,
   ossStorageConfig,
   publicOssObjectUrl,
+  readManagedOssObject,
   promoteManagedOssObjectUrl,
   putContentAddressedObject,
   putContentAddressedFile
 } from "../src/services/object-storage.js";
+
+test("private managed OSS objects are read with the configured server client", async () => {
+  const requested = [];
+  const result = await readManagedOssObject(
+    "https://example-bucket.oss-cn-heyuan.aliyuncs.com/listing-media/ab/file.png",
+    {
+      env: {
+        OSS_ENABLED: "true",
+        OSS_REGION: "oss-cn-heyuan",
+        OSS_BUCKET: "example-bucket",
+        OSS_ACCESS_KEY_ID: "id",
+        OSS_ACCESS_KEY_SECRET: "secret"
+      },
+      client: {
+        async head(key) {
+          requested.push(["head", key]);
+          return { res: { headers: { "content-length": "5", "content-type": "image/png" } } };
+        },
+        async get(key) {
+          requested.push(["get", key]);
+          return { content: Buffer.from("image"), res: { headers: { "content-type": "image/png" } } };
+        }
+      }
+    }
+  );
+  assert.deepEqual(requested, [["head", "listing-media/ab/file.png"], ["get", "listing-media/ab/file.png"]]);
+  assert.equal(result.contentType, "image/png");
+  assert.equal(result.buffer.toString(), "image");
+});
 
 test("temporary AI OSS images are promoted with a server-side copy", async () => {
   const calls = [];

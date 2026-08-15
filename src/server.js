@@ -76,6 +76,7 @@ import { systemInfo } from "./server/maintenance.js";
 import { checkDailyPurchaseNotification, globalUpdateStatus, subscribeGlobalUpdateEvents, updateGlobalUpdateStatus } from "./server/notifications.js";
 import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
+import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
 
 const services = mysqlRuntimeServices;
 const runtimeReadiness = {
@@ -102,10 +103,16 @@ const handleAuth = createAuthHandler(readJson);
 const imageProxyCacheDir = path.resolve("runtime", "image-proxy-cache");
 const productThumbnailCacheDir = path.resolve("runtime", "product-thumbnail-cache");
 const imageProxyInflight = new Map();
+const imageProxyFailureCache = new Map();
+const imageProxyFetchWaiters = [];
+let activeImageProxyFetches = 0;
 const IMAGE_PROXY_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const IMAGE_PROXY_BROWSER_CACHE_SECONDS = 24 * 60 * 60;
-const IMAGE_PROXY_FETCH_TIMEOUT_MS = 12000;
+const IMAGE_PROXY_FETCH_TIMEOUT_MS = Math.max(3000, Math.min(12000, Number(process.env.IMAGE_PROXY_FETCH_TIMEOUT_MS || 6000)));
+const IMAGE_PROXY_FETCH_CONCURRENCY = Math.max(1, Math.min(24, Number(process.env.IMAGE_PROXY_FETCH_CONCURRENCY || 8)));
+const IMAGE_PROXY_FAILURE_TTL_MS = Math.max(5000, Math.min(5 * 60 * 1000, Number(process.env.IMAGE_PROXY_FAILURE_TTL_MS || 30000)));
 const IMAGE_PROXY_MAX_CACHE_BYTES = 8 * 1024 * 1024;
+const IMAGE_PROXY_MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
 
 async function resolveDownloadArtifactPath(filename) {
   const normalized = String(filename || "").trim();
@@ -1625,9 +1632,18 @@ function sendRemoteImageBuffer(res, payload, cacheState) {
 }
 
 async function fetchRemoteImagePayload(target) {
+  await acquireImageProxyFetchSlot();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), IMAGE_PROXY_FETCH_TIMEOUT_MS);
   try {
+    if (isManagedOssObjectUrl(target)) {
+      const managed = await readManagedOssObject(target, {
+        maxBytes: IMAGE_PROXY_MAX_RESPONSE_BYTES,
+        timeoutMs: IMAGE_PROXY_FETCH_TIMEOUT_MS
+      });
+      if (!managed?.contentType?.startsWith("image/")) return null;
+      return { buffer: managed.buffer, contentType: managed.contentType };
+    }
     const upstream = await fetch(target, {
       signal: controller.signal,
       headers: {
@@ -1640,11 +1656,38 @@ async function fetchRemoteImagePayload(target) {
     if (!upstream.ok) return null;
     const contentType = String(upstream.headers.get("content-type") || "").toLowerCase();
     if (!contentType.startsWith("image/")) return null;
-    const buffer = Buffer.from(await upstream.arrayBuffer());
+    const declaredBytes = Number(upstream.headers.get("content-length") || 0);
+    if (declaredBytes > IMAGE_PROXY_MAX_RESPONSE_BYTES) return null;
+    const chunks = [];
+    let receivedBytes = 0;
+    for await (const chunk of upstream.body) {
+      receivedBytes += chunk.length;
+      if (receivedBytes > IMAGE_PROXY_MAX_RESPONSE_BYTES) {
+        await upstream.body.cancel().catch(() => null);
+        return null;
+      }
+      chunks.push(chunk);
+    }
+    const buffer = Buffer.concat(chunks, receivedBytes);
     return { buffer, contentType };
   } finally {
     clearTimeout(timeout);
+    releaseImageProxyFetchSlot();
   }
+}
+
+function acquireImageProxyFetchSlot() {
+  if (activeImageProxyFetches < IMAGE_PROXY_FETCH_CONCURRENCY) {
+    activeImageProxyFetches += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => imageProxyFetchWaiters.push(resolve));
+}
+
+function releaseImageProxyFetchSlot() {
+  const next = imageProxyFetchWaiters.shift();
+  if (next) return next();
+  activeImageProxyFetches = Math.max(0, activeImageProxyFetches - 1);
 }
 
 async function sendRemoteImage(req, res, url) {
@@ -1653,6 +1696,9 @@ async function sendRemoteImage(req, res, url) {
 
   const cached = await readCachedRemoteImage(target);
   if (cached) return sendRemoteImageBuffer(res, cached, "HIT");
+  const failedUntil = Number(imageProxyFailureCache.get(target) || 0);
+  if (failedUntil > Date.now()) return sendImageProxyUnavailable(res);
+  if (failedUntil) imageProxyFailureCache.delete(target);
 
   const onClose = () => {
     // The shared upstream fetch may still populate cache for another row.
@@ -1668,13 +1714,18 @@ async function sendRemoteImage(req, res, url) {
     }
     const payload = await payloadPromise;
     if (res.writableEnded || res.destroyed) return;
-    if (!payload) return sendImageProxyUnavailable(res);
+    if (!payload) {
+      imageProxyFailureCache.set(target, Date.now() + IMAGE_PROXY_FAILURE_TTL_MS);
+      return sendImageProxyUnavailable(res);
+    }
+    imageProxyFailureCache.delete(target);
     writeCachedRemoteImage(target, payload).catch((error) => {
       console.warn("image proxy cache write failed:", error?.message || error);
     });
     return sendRemoteImageBuffer(res, payload, "MISS");
   } catch (error) {
     if (res.writableEnded || res.destroyed) return;
+    imageProxyFailureCache.set(target, Date.now() + IMAGE_PROXY_FAILURE_TTL_MS);
     return sendImageProxyUnavailable(res);
   } finally {
     imageProxyInflight.delete(target);
@@ -1900,7 +1951,8 @@ await prepareRuntimeBeforeListen();
 server.listen(config.port, config.host || undefined, () => {
   const bindHost = config.host || "0.0.0.0";
   console.log(`ozon ERP running at ${config.appBaseUrl} (bind ${bindHost}:${config.port})`);
-  setInterval(() => checkDailyPurchaseNotification(services.all), 60000);
+  const deploymentCandidate = process.env.DEPLOYMENT_CANDIDATE === "1";
+  if (!deploymentCandidate) setInterval(() => checkDailyPurchaseNotification(services.all), 60000);
   void (async () => {
     if (config.scheduledJobsEnabled) {
       registerScheduledJobs(scheduledJobDefinitions)
@@ -1914,8 +1966,31 @@ server.listen(config.port, config.host || undefined, () => {
       console.log("scheduled job scheduler disabled for this server; manual runs remain available");
     }
   })();
-  setTimeout(recoverGenerationJobs, 3000);
+  if (!deploymentCandidate) setTimeout(recoverGenerationJobs, 3000);
 });
+
+let gracefulShutdownStarted = false;
+function gracefulShutdown(signal) {
+  if (gracefulShutdownStarted) return;
+  gracefulShutdownStarted = true;
+  runtimeReadiness.ready = false;
+  console.log(`received ${signal}; draining HTTP connections`);
+  const forceTimer = setTimeout(() => {
+    server.closeAllConnections?.();
+    process.exit(1);
+  }, 25000);
+  forceTimer.unref();
+  server.close((error) => {
+    if (error) {
+      console.error("HTTP shutdown failed", error);
+      process.exitCode = 1;
+    }
+    process.exit();
+  });
+}
+
+process.once("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.once("SIGINT", () => gracefulShutdown("SIGINT"));
 
 async function recoverGenerationJobs() {
   await Promise.allSettled([

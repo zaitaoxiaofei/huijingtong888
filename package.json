@@ -47,6 +47,8 @@
     "audit:code-health": "node scripts/audit-code-health.mjs",
     "audit:storage": "node scripts/audit-storage-baseline.mjs",
     "audit:storage:deep": "node scripts/audit-storage-baseline.mjs --deep",
+    "cleanup:verified-local-media": "node scripts/cleanup-verified-local-media.mjs",
+    "cleanup:verified-local-media:write": "node scripts/cleanup-verified-local-media.mjs --write",
     "archive:ai-draft-payloads": "node scripts/archive-ai-draft-save-payloads.mjs",
     "archive:ai-draft-payloads:write": "node scripts/archive-ai-draft-save-payloads.mjs --write",
     "compact:ai-draft-payloads": "node scripts/compact-archived-ai-draft-payloads.mjs",

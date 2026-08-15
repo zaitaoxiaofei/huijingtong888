@@ -100,6 +100,34 @@ export function isManagedOssObjectUrl(url, {
   }
 }
 
+export async function readManagedOssObject(url, {
+  maxBytes = 20 * 1024 * 1024,
+  timeoutMs = 10000,
+  env = process.env,
+  client = null
+} = {}) {
+  const storage = ossStorageConfig(env);
+  if (!storage.enabled) return null;
+  const objectKey = managedOssObjectKeyFromUrl(url, storage);
+  if (!objectKey) return null;
+  const byteLimit = Math.max(1, Number(maxBytes) || 20 * 1024 * 1024);
+  const ossClient = createOssClient(storage, timeoutMs, client);
+  const head = await ossClient.head(objectKey);
+  const headHeaders = head?.res?.headers || {};
+  const declaredBytes = Number(headHeaders["content-length"] || 0);
+  if (declaredBytes > byteLimit) throw new Error(`OSS object exceeds ${byteLimit} bytes`);
+  const result = await ossClient.get(objectKey);
+  const buffer = Buffer.isBuffer(result?.content) ? result.content : Buffer.from(result?.content || []);
+  if (!buffer.length) throw new Error("OSS object is empty");
+  if (buffer.length > byteLimit) throw new Error(`OSS object exceeds ${byteLimit} bytes`);
+  const headers = result?.res?.headers || headHeaders;
+  return {
+    buffer,
+    contentType: String(headers["content-type"] || "application/octet-stream").split(";")[0].trim().toLowerCase(),
+    objectKey
+  };
+}
+
 export function mediaObjectPrefixForRetention({
   sourceModule = "",
   role = "",
