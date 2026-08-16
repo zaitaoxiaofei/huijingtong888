@@ -1691,6 +1691,7 @@ watch(() => route.query.taskId, () => {
       </div>
     </section>
 
+    <div class="mobile-landscape-hint">草稿和上架字段较多，横屏查看更完整；表格可左右滑动。</div>
     <div class="publish-table-wrap erp-table-scroll">
       <el-table
         v-loading="loading"
@@ -2408,5 +2409,34 @@ watch(() => route.query.taskId, () => {
   .toolbar-filters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+@media (max-width: 760px) {
+  .publish-records-page { padding: 8px; }
+  .toolbar-panel { gap: 10px; padding: 10px; }
+  .toolbar-filters,
+  .task-toolbar-filters { grid-template-columns: 1fr; flex-basis: auto; width: 100%; }
+  .toolbar-actions {
+    justify-content: flex-start;
+    width: 100%;
+    padding-bottom: 2px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .toolbar-actions :deep(.el-button) { flex: 0 0 auto; margin-left: 0; }
+  .selection-count { align-self: center; }
+  .publish-table,
+  .publish-task-table { min-width: 1080px; }
+  .publish-table-wrap { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .batch-material-fact-row { grid-template-columns: 1fr; }
+  .batch-material-fact-row strong,
+  .batch-material-fact-row .el-checkbox { grid-column: 1; }
+  .batch-text-variant-main,
+  .batch-text-variant-row,
+  .batch-text-variant-shop,
+  .task-drawer-summary { align-items: stretch; flex-direction: column; }
+  .batch-text-variant-row .el-select,
+  .batch-text-variant-shop .el-select { width: 100%; }
+  .drawer-actions { justify-content: stretch; }
+  .drawer-actions :deep(.el-button) { flex: 1; margin-left: 0; }
 }
 </style>

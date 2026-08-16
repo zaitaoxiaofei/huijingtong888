@@ -831,19 +831,6 @@ Dashboard overview for first-page business monitoring.
 | `orderStages` | `array<object>` | Yes | Order counts by tracking stage. |
 | `stockByOwner` | `array<object>` | Yes | Stock grouped by product and owner. |
 
-### ProfitSummaryResponse
-
-Profit aggregates by summary, shop, SKU, and product.
-
-`additionalProperties: false`
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `summary` | `object` | Yes | Overall revenue, profit, cancellation, and return metrics. |
-| `byShop` | `array<object>` | Yes | Per-shop rows. |
-| `bySku` | `array<object>` | Yes | Per-SKU rows. |
-| `byProduct` | `array<object>` | Yes | Per-product rows. |
-
 ### ProfitFiltersQuery
 
 Common profit filter query model.
@@ -858,17 +845,6 @@ Common profit filter query model.
 | `metric` | `string` | No | Optional metric selector. |
 | `page` | `number` | No | Optional page number. |
 | `pageSize` | `number` | No | Optional page size. |
-
-### ProfitDashboardResponse
-
-Chart-ready profit dashboard payload.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `filters` | `object` | No | Resolved date and grouping filters. |
-| `summary` | `object` | No | Top-level KPI cards. |
-| `trend` | `array<object>` | No | Chart rows. |
-| `ranking` | `array<object>` | No | Ranking rows. |
 
 ### HistoricalProfitReviewResponse
 
@@ -990,7 +966,11 @@ Procurement request row.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `id` | `number` | No | Request identifier. |
+| `request_group_no` | `string` | No | Purchase batch number. |
 | `product_id` | `number` | No | Target product identifier. |
+| `raw_name` | `string` | No | Free-form procurement name entered by the buyer. |
+| `raw_spec` | `string` | No | Free-form procurement specification. |
+| `binding_status` | `string` | No | Inventory binding status. |
 | `person_id` | `number` | No | Requester or owner identifier. |
 | `quantity` | `number` | No | Requested quantity. |
 | `amount` | `number` | No | Merchandise amount. |
@@ -1010,9 +990,11 @@ Create or update a procurement request.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `product_id` | `number` | Yes | Target product identifier. |
+| `product_id` | `number` | No | Optional target product identifier. |
+| `raw_name` | `string` | No | Free-form procurement name; required when product_id is absent. |
+| `raw_spec` | `string` | No | Free-form procurement specification. |
 | `person_id` | `number` | No | Requester or owner identifier. |
-| `quantity` | `number` | Yes | Requested quantity. |
+| `quantity` | `number` | No | Requested quantity. |
 | `amount` | `number` | No | Merchandise amount. |
 | `shipping_amount` | `number` | No | Estimated shipping amount. |
 | `purchase_url` | `string` | No | Procurement link. |
@@ -1524,35 +1506,6 @@ Create a new manual exchange-rate record.
 - Responses:
   - `200` `application/json` -> `ExchangeRate`
 
-#### `GET /api/profit-summary`
-
-Return aggregate profit metrics by summary, shop, SKU, and product.
-
-- Auth: `authenticated`
-- Query parameters:
-  - `from` (`string`, optional): Inclusive start date.
-  - `to` (`string`, optional): Inclusive end date.
-  - `refresh` (`boolean`, optional): Whether to force snapshot refresh.
-- Responses:
-  - `200` `application/json` -> `ProfitSummaryResponse`
-
-#### `GET /api/profit-dashboard`
-
-Return chart-ready profit dashboard data for the selected period.
-
-- Auth: `authenticated`
-- Query parameters:
-  - `from` (`string`, optional): Inclusive start date.
-  - `to` (`string`, optional): Inclusive end date.
-  - `refresh` (`boolean`, optional): Whether to force snapshot refresh.
-  - `shopId` (`string`, optional): Optional shop filter.
-  - `groupBy` (`string`, optional): Optional grouping key.
-  - `metric` (`string`, optional): Optional metric selector.
-  - `page` (`number`, optional): Optional page number.
-  - `pageSize` (`number`, optional): Optional page size.
-- Responses:
-  - `200` `application/json` -> `ProfitDashboardResponse`
-
 #### `GET /api/profit-ranking`
 
 Return ranking rows for the selected profit dimension.
@@ -1586,23 +1539,6 @@ Compare estimated and finance-accrued profit and identify inventory-data risks.
   - `pageSize` (`number`, optional): Optional page size.
 - Responses:
   - `200` `application/json` -> `object`
-
-#### `GET /api/profit-details`
-
-Return detailed profit rows for drill-down views.
-
-- Auth: `authenticated`
-- Query parameters:
-  - `from` (`string`, optional): Inclusive start date.
-  - `to` (`string`, optional): Inclusive end date.
-  - `refresh` (`boolean`, optional): Whether to force snapshot refresh.
-  - `shopId` (`string`, optional): Optional shop filter.
-  - `groupBy` (`string`, optional): Optional grouping key.
-  - `metric` (`string`, optional): Optional metric selector.
-  - `page` (`number`, optional): Optional page number.
-  - `pageSize` (`number`, optional): Optional page size.
-- Responses:
-  - `200` `application/json` -> `array<object>`
 
 #### `GET /api/profits/historical-review`
 
@@ -2398,6 +2334,14 @@ Return AI strategy atoms used by prompt plans.
 - Responses:
   - `200` `application/json` -> `array<object>`
 
+#### `GET /api/procurement/binding-suggestions`
+
+Suggest inventory products from confirmed procurement-name history and product names.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `array<object>`
+
 #### `POST /api/ai-strategies/resolve`
 
 Resolve an AI prompt strategy plan from goal, category context, selected strategies, and optional bundle.
@@ -2542,6 +2486,46 @@ Update a team planning task.
   - `id` (`number`, required): Task identifier.
 - Request body: required
   - Schema: `TeamTaskMutationRequest`
+- Responses:
+  - `200` `application/json` -> `MutationOk`
+
+#### `GET /api/procurement/platform-orders`
+
+Return imported Pinduoduo or 1688 platform orders.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/procurement/platform-orders/import`
+
+Import platform orders from normalized CSV or JSON rows.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/procurement/platform-orders/:id/candidates`
+
+Suggest procurement records for one platform order.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Platform-order identifier.
+- Responses:
+  - `200` `application/json` -> `array<object>`
+
+#### `POST /api/procurement/platform-orders/:id/link`
+
+Bind one platform order to one or more procurement records.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Platform-order identifier.
+- Request body: required
+  - Schema: `object`
 - Responses:
   - `200` `application/json` -> `MutationOk`
 

@@ -157,7 +157,7 @@ const state = reactive({
   logisticsRules: [],
   shops: [],
   filters: {
-    searchMode: "fuzzy",
+    searchMode: "exact",
     query: "",
     inventoryCategory: "",
     productName: "",
@@ -180,7 +180,7 @@ const state = reactive({
 });
 
 const filterDefaults = {
-  searchMode: "fuzzy",
+  searchMode: "exact",
   query: "",
   inventoryCategory: "",
   productName: "",
@@ -1832,6 +1832,7 @@ onMounted(async () => {
       @update:model-value="Object.assign(state.filters, $event)"
     />
 
+    <div class="mobile-landscape-hint">库存字段较多，横屏查看更完整；表格可左右滑动。</div>
     <div class="inventory-table-wrap">
       <el-table
         v-loading="loading"

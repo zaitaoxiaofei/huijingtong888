@@ -6,6 +6,7 @@ const service = readFileSync(new URL("../src/services/mysql-cutover.js", import.
 const inventoryPage = readFileSync(new URL("../frontend/admin/views/inventory/InventoryProductsPage.vue", import.meta.url), "utf8");
 const ordersPage = readFileSync(new URL("../frontend/orders/OrdersPage.vue", import.meta.url), "utf8");
 const component = readFileSync(new URL("../frontend/admin/components/inventory/InventoryStructuredSearch.vue", import.meta.url), "utf8");
+const optionCache = readFileSync(new URL("../frontend/admin/utils/inventory-naming-options.js", import.meta.url), "utf8");
 
 test("product API combines structured inventory filters", () => {
   for (const field of ["inventoryCategory", "productName", "vehicleBrand", "vehicleModel", "accessoryName", "color", "material", "process"]) {
@@ -23,11 +24,15 @@ test("inventory and order binding searches share fuzzy and exact modes", () => {
     assert.match(source, /模糊搜索/);
     assert.match(source, /精确搜索/);
   }
+  assert.match(inventoryPage, /searchMode:\s*"exact"/);
+  assert.match(ordersPage, /bindProductSearchMode = ref\("exact"\)/);
 });
 
 test("structured search reuses controlled naming options and the AI vehicle catalog", () => {
-  assert.match(component, /\/api\/inventory-product-naming\/options/);
-  assert.match(component, /\/api\/ai-variant-lab\/vehicle-catalog/);
+  assert.match(optionCache, /\/api\/inventory-product-naming\/options/);
+  assert.match(optionCache, /\/api\/ai-variant-lab\/vehicle-catalog/);
+  assert.match(optionCache, /inflightRequests/);
+  assert.match(optionCache, /CACHE_TTL_MS = 5 \* 60 \* 1000/);
   assert.match(component, /选择核心品名/);
   assert.match(component, /inventoryCategory/);
   assert.match(component, /vehicleBrand/);
@@ -35,7 +40,7 @@ test("structured search reuses controlled naming options and the AI vehicle cata
   assert.match(component, /accessoryName/);
   assert.match(component, /optionTypes = \["category", "accessory", "color", "material", "process"\]/);
   assert.match(component, /Promise\.allSettled/);
-  assert.match(component, /routeScoped:\s*false/);
+  assert.match(optionCache, /routeScoped:\s*false/);
   assert.match(component, /params\.set\("brand", brand\)/);
   assert.match(component, /params\.set\("fitment_type", fitmentType\)/);
   assert.match(component, /params\.set\("vehicle_model", vehicleModels\[0\]\)/);

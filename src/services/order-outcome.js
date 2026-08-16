@@ -145,7 +145,6 @@ const PASSPORT_REASON_KEYWORDS = [
 
 const QUALITY_ORDER_REASON_CODES = new Set([
   "quality_inspection",
-  "missing_passport",
   "shipment_registration_failed",
   "992",
   "994"
@@ -250,7 +249,13 @@ export function isQualityCheckOrder(row = {}, options = {}) {
   if (QUALITY_ORDER_REASON_CODES.has(reasonCode)) return true;
 
   const reasonText = normalizedReasonText(row);
-  return includesAny(reasonText, QUALITY_ORDER_REASON_KEYWORDS) || includesAny(reasonText, PASSPORT_REASON_KEYWORDS);
+  return includesAny(reasonText, QUALITY_ORDER_REASON_KEYWORDS);
+}
+
+export function isPassportMissingOrder(row = {}) {
+  return normalizedReasonCode(row) === "missing_passport"
+    || String(row.cancel_reason_id || "").trim().toLowerCase() === "missing_passport"
+    || includesAny(normalizedReasonText(row), PASSPORT_REASON_KEYWORDS);
 }
 
 function sqlLikeAny(expr, keywords) {
@@ -325,10 +330,10 @@ export function classifyAftersaleBucket(row = {}, options = {}) {
   const reasonText = normalizedReasonText(row);
 
   if (isQualityCheckOrder(row, options)) return AFTERSALE_BUCKET_PLATFORM;
-  if (outcome === "cancelled_pre_fulfillment") return AFTERSALE_BUCKET_PRE_FULFILLMENT;
-  if (QUALITY_ORDER_REASON_CODES.has(reasonCode) || includesAny(reasonText, QUALITY_ORDER_REASON_KEYWORDS) || includesAny(reasonText, PASSPORT_REASON_KEYWORDS)) {
+  if (QUALITY_ORDER_REASON_CODES.has(reasonCode) || reasonCode === "missing_passport" || includesAny(reasonText, QUALITY_ORDER_REASON_KEYWORDS) || includesAny(reasonText, PASSPORT_REASON_KEYWORDS)) {
     return AFTERSALE_BUCKET_PLATFORM;
   }
+  if (outcome === "cancelled_pre_fulfillment") return AFTERSALE_BUCKET_PRE_FULFILLMENT;
   if (reasonCode === "aftersale_quality_issue" || profile === LOSS_PROFILE_COMMISSION_PURCHASE_COLLECTING_INTERNATIONAL || includesAny(reasonText, QUALITY_ISSUE_REASON_KEYWORDS)) {
     return AFTERSALE_BUCKET_QUALITY;
   }
@@ -348,6 +353,7 @@ export function classifyAftersaleBucket(row = {}, options = {}) {
 export function classifyOrderAccounting(row = {}, options = {}) {
   const outcomeType = classifyOrderOutcome(row);
   const qualityCheck = isQualityCheckOrder(row, options);
+  const passportMissing = isPassportMissingOrder(row);
   const lossProfile = qualityCheck
     ? lossProfileMeta(LOSS_PROFILE_NONE)
     : resolveOrderLossProfile({ ...row, outcome_type: outcomeType });
@@ -358,8 +364,9 @@ export function classifyOrderAccounting(row = {}, options = {}) {
   }, options);
 
   return {
-    order_nature: qualityCheck ? "quality_check" : "normal_sale",
+    order_nature: qualityCheck ? "quality_check" : passportMissing ? "passport_missing" : "normal_sale",
     is_quality_order: qualityCheck,
+    is_passport_missing_order: passportMissing,
     outcome_type: outcomeType,
     loss_profile_code: lossProfile.code,
     loss_profile_label: lossProfile.label,

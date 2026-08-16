@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const dialogSource = readFileSync(new URL("../frontend/admin/components/inventory/ProductCreateEditDialog.vue", import.meta.url), "utf8");
+const namingOptionCacheSource = readFileSync(new URL("../frontend/admin/utils/inventory-naming-options.js", import.meta.url), "utf8");
 const namingServiceSource = readFileSync(new URL("../src/services/inventory-product-naming.js", import.meta.url), "utf8");
 const vehicleCatalogSource = readFileSync(new URL("../src/services/ai-vehicle-catalog.js", import.meta.url), "utf8");
 
 test("inventory creation reuses the AI vehicle catalog instead of a product brand dictionary", () => {
-  assert.match(dialogSource, /\/api\/ai-variant-lab\/vehicle-catalog/);
+  assert.match(dialogSource, /loadInventoryVehicleCatalog/);
+  assert.match(namingOptionCacheSource, /\/api\/ai-variant-lab\/vehicle-catalog/);
   assert.match(dialogSource, /vehicle_brand/);
   assert.match(dialogSource, /vehicle_models/);
   assert.match(vehicleCatalogSource, /VEHICLE_BRAND_ZH/);

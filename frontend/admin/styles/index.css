@@ -348,6 +348,14 @@ body {
   overflow: hidden;
 }
 
+.erp-mobile-navigation-mask {
+  display: none;
+}
+
+.mobile-landscape-hint {
+  display: none;
+}
+
 .erp-sidebar {
   height: 100vh;
   overflow: hidden;
@@ -1002,6 +1010,222 @@ body {
   height: 100%;
   min-height: 0;
   overflow: auto;
+}
+
+@media (max-width: 760px) {
+  .erp-shell {
+    position: relative;
+    height: 100dvh;
+  }
+
+  .erp-sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 2200;
+    width: min(82vw, 280px) !important;
+    max-width: 280px;
+    transform: translateX(-102%);
+    transition: transform 0.2s ease;
+    box-shadow: 18px 0 40px rgba(15, 23, 42, 0.22);
+  }
+
+  .erp-shell.is-mobile-navigation-open .erp-sidebar {
+    transform: translateX(0);
+  }
+
+  .erp-mobile-navigation-mask {
+    position: fixed;
+    inset: 0;
+    z-index: 2100;
+    display: block;
+    padding: 0;
+    border: 0;
+    background: rgba(15, 23, 42, 0.38);
+  }
+
+  .erp-main-shell {
+    width: 100%;
+  }
+
+  .erp-header {
+    height: 46px;
+    padding: 0 8px;
+  }
+
+  .erp-page-meta .el-breadcrumb,
+  .erp-user-meta,
+  .erp-header-right > .erp-header-badge,
+  .erp-header-right > .erp-theme-toggle {
+    display: none;
+  }
+
+  .erp-page-meta strong {
+    max-width: 42vw;
+  }
+
+  .erp-user-card {
+    padding-left: 4px;
+    border-left: 0;
+  }
+
+  .erp-content {
+    padding: 0;
+  }
+
+  .erp-content-inner,
+  .erp-workspace-panels {
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .erp-workspace-tabs {
+    min-height: 40px;
+    padding: 5px 6px 0;
+    border-radius: 0;
+  }
+
+  .erp-workspace-tab {
+    max-width: 156px;
+    height: 30px;
+    padding: 0 9px;
+  }
+
+  .erp-workspace-panel {
+    overscroll-behavior: contain;
+  }
+
+  .page-stack {
+    gap: 10px;
+  }
+
+  .erp-paged-page {
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+  }
+
+  .erp-paged-card,
+  .erp-paged-card > .el-card__body {
+    overflow: visible;
+  }
+
+  .erp-table-scroll,
+  .inventory-table-wrap,
+  .selection-table-wrap,
+  .procurement-table-wrap,
+  .list-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: visible;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .el-overlay .el-dialog {
+    width: calc(100vw - 20px) !important;
+    max-width: calc(100vw - 20px) !important;
+    margin: 10px auto !important;
+  }
+
+  .el-overlay .el-dialog__header,
+  .el-overlay .el-dialog__body,
+  .el-overlay .el-dialog__footer {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  .el-overlay .el-dialog__body {
+    max-height: calc(100dvh - 132px);
+    overflow: auto;
+  }
+
+  .el-drawer {
+    max-width: 100vw !important;
+  }
+
+  .el-message-box {
+    width: calc(100vw - 28px) !important;
+    max-width: 420px;
+  }
+
+  .inventory-page-shell,
+  .inventory-card,
+  .inventory-module-card,
+  .online-products-card {
+    gap: 10px;
+    overflow: visible;
+  }
+
+  .inventory-card {
+    padding: 8px;
+  }
+
+  .inventory-page-shell .erp-data-table,
+  .inventory-card .erp-data-table,
+  .online-products-card .erp-data-table {
+    min-width: 980px;
+    height: auto;
+  }
+
+  .erp-data-table .el-table-fixed-column--left,
+  .erp-data-table .el-table-fixed-column--right,
+  .orders-table .el-table-fixed-column--left,
+  .orders-table .el-table-fixed-column--right {
+    position: static !important;
+    right: auto !important;
+    left: auto !important;
+    box-shadow: none !important;
+  }
+
+  .erp-data-table .el-table__fixed,
+  .erp-data-table .el-table__fixed-right,
+  .orders-table .el-table__fixed,
+  .orders-table .el-table__fixed-right {
+    display: none !important;
+  }
+
+  .mobile-landscape-hint {
+    display: block;
+    padding: 8px 10px;
+    border: 1px solid #bfdbfe;
+    border-radius: 8px;
+    background: #eff6ff;
+    color: #1d4ed8;
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
+  .inventory-page-shell .erp-data-table .el-table__body-wrapper,
+  .inventory-card .erp-data-table .el-table__body-wrapper,
+  .online-products-card .erp-data-table .el-table__body-wrapper {
+    height: auto;
+  }
+
+  .table-footer,
+  .page-card-header,
+  .page-card-actions {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 960px) and (orientation: landscape) {
+  .erp-header {
+    height: 42px;
+  }
+
+  .erp-workspace-tabs {
+    min-height: 36px;
+    padding-top: 3px;
+  }
+
+  .erp-workspace-tab {
+    height: 28px;
+  }
+
+  .mobile-landscape-hint {
+    display: none;
+  }
 }
 
 .page-stack {

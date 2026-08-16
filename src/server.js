@@ -77,6 +77,7 @@ import { checkDailyPurchaseNotification, globalUpdateStatus, subscribeGlobalUpda
 import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
 import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
+import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
 
 const services = mysqlRuntimeServices;
 const runtimeReadiness = {
@@ -210,6 +211,7 @@ const routes = {
   ...routeModules,
   "GET /api/system/info": () => systemInfo(),
   "GET /api/system/update-status": (req) => globalUpdateStatus(req.query || {}),
+  "GET /api/system-monitoring": (req) => systemMonitoringOverview(req.query || {}),
   "POST /api/system/update-status": async (req) => updateGlobalUpdateStatus(await readJson(req)),
   "GET /api/ai-provider/config": () => services.aiProviderConfig(),
   "GET /api/ai-provider/presets": () => services.aiProviderPresets(),
@@ -715,6 +717,16 @@ const scheduledJobDefinitions = [
     catchupEnabled: true,
     maxCatchupRuns: 1,
     config: { retentionDays: 30, batchSize: 1000 }
+  },
+  {
+    key: "system_monitor_snapshot",
+    name: "系统磁盘监控快照",
+    category: "maintenance",
+    priority: "low",
+    scheduleType: "daily",
+    dailyTime: "04:20",
+    catchupEnabled: true,
+    maxCatchupRuns: 1
   }
 ];
 
@@ -743,7 +755,8 @@ const scheduledJobHandlers = {
   listing_publish_summary_backfill: withForegroundApiDeferral("listing_publish_summary_backfill", (job) => services.backfillListingPublishRecordListSummaries(job?.config || {})),
   ozon_action_cleanup: withForegroundApiDeferral("ozon_action_cleanup", runOzonActionCleanupSweep),
   scheduled_history_cleanup: withForegroundApiDeferral("scheduled_history_cleanup", (job) => cleanupScheduledJobHistory(job?.config || {})),
-  ai_generation_history_cleanup: withForegroundApiDeferral("ai_generation_history_cleanup", (job) => cleanupAiGenerationTaskHistory(job?.config || {}))
+  ai_generation_history_cleanup: withForegroundApiDeferral("ai_generation_history_cleanup", (job) => cleanupAiGenerationTaskHistory(job?.config || {})),
+  system_monitor_snapshot: withForegroundApiDeferral("system_monitor_snapshot", captureSystemMonitorSnapshot)
 };
 
 const scheduledJobScheduler = new ScheduledJobScheduler({
@@ -1775,7 +1788,7 @@ const server = http.createServer(async (req, res) => {
           success: false,
           error: error?.message || String(error),
           validation: error?.validation
-        }, error?.status || 500);
+        }, error?.status || error?.statusCode || 500);
       }
       throw error;
     }
@@ -1926,7 +1939,7 @@ const server = http.createServer(async (req, res) => {
   } catch (error) {
     if (!isRequestCancelledError(error)) console.error(error);
     if (res.writableEnded || res.destroyed) return;
-    json(res, { error: error.message, validation: error.validation }, error.status || 500);
+    json(res, { error: error.message, validation: error.validation }, error.status || error.statusCode || 500);
   }
 });
 
@@ -1977,7 +1990,7 @@ function gracefulShutdown(signal) {
   console.log(`received ${signal}; draining HTTP connections`);
   const forceTimer = setTimeout(() => {
     server.closeAllConnections?.();
-    process.exit(1);
+    process.exit(0);
   }, 25000);
   forceTimer.unref();
   server.close((error) => {

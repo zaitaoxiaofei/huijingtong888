@@ -3286,7 +3286,7 @@
 }
 
 .order-inventory-modal .el-dialog__body {
-  max-height: 80vh;
+  max-height: calc(100vh - 150px);
   overflow: hidden;
 }
 
@@ -3901,9 +3901,9 @@
 .order-inventory-dialog {
   display: grid;
   grid-template-columns: clamp(220px, 21vw, 280px) minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
   gap: 16px 18px;
-  height: min(76vh, 820px);
+  height: min(calc(100vh - 190px), 920px);
   min-height: 0;
   max-height: 100%;
   overflow: hidden;
@@ -3975,33 +3975,38 @@
 
 .order-inventory-dialog .inventory-picker-panel {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  gap: 12px;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  padding: 16px;
+  padding: 14px;
   border: 1px solid rgba(203, 213, 225, 0.9);
   border-radius: 8px;
   background: #fff;
 }
 
-.inventory-binding-mode-switch {
-  justify-self: start;
+.inventory-picker-head {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }
 
-.inventory-combo-binding-panel {
+.inventory-picker-head > div {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
-  gap: 12px;
-  min-height: 0;
-  overflow: hidden;
+  gap: 3px;
+  min-width: 0;
+}
+
+.inventory-picker-head .el-segmented {
+  flex: 0 0 auto;
 }
 
 .inventory-single-binding-panel {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
-  gap: 12px;
+  gap: 8px;
   min-height: 0;
   overflow: hidden;
 }
@@ -4012,23 +4017,10 @@
   gap: 8px;
 }
 
-.inventory-search-mode-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 10px;
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
-}
-
 @media (max-width: 760px) {
   .inventory-search-row {
     grid-template-columns: 1fr;
   }
-}
-
-.inventory-combo-table {
-  min-height: 260px;
 }
 
 .order-inventory-dialog .inventory-picker-table {
@@ -4066,6 +4058,31 @@
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+.order-inventory-dialog .inventory-structured-search.is-compact {
+  gap: 8px;
+  padding: 8px;
+}
+
+.order-inventory-dialog .inventory-structured-search.is-compact .search-group {
+  gap: 8px 12px;
+  padding: 9px 12px 10px;
+}
+
+.order-inventory-dialog .inventory-structured-search.is-compact .search-group__title {
+  min-height: 20px;
+  padding-bottom: 6px;
+}
+
+.order-inventory-dialog .inventory-structured-search.is-compact .el-form-item__label {
+  margin-bottom: 3px;
+  line-height: 18px;
+}
+
+.order-inventory-dialog .inventory-structured-search.is-compact .el-select__wrapper,
+.order-inventory-dialog .inventory-structured-search.is-compact .el-input__wrapper {
+  min-height: 32px;
 }
 
 .inventory-sku-preview-list {
@@ -4574,47 +4591,6 @@
   font-size: 11px;
 }
 
-.order-inventory-footer-bar {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: minmax(260px, 0.45fr) minmax(0, 0.55fr);
-  align-items: center;
-  gap: 14px;
-  min-width: 0;
-  padding: 12px 14px;
-  border: 1px solid rgba(203, 213, 225, 0.9);
-  border-radius: 8px;
-  background: #fff;
-}
-
-.order-inventory-footer-form .el-form-item {
-  margin-bottom: 0;
-}
-
-.order-inventory-bind-target {
-  display: grid;
-  grid-template-columns: 72px minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-  min-height: 32px;
-  padding: 0 12px;
-  border: 1px solid rgba(226, 232, 240, 0.95);
-  border-radius: 8px;
-  background: #f8fafc;
-}
-
-.order-inventory-bind-target span {
-  color: #66758c;
-  font-size: 12px;
-}
-
-.order-inventory-bind-target strong {
-  color: #162742;
-  font-size: 13px;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
 .order-inventory-info-row span {
   color: #66758c;
   font-size: 11px;
@@ -5082,6 +5058,30 @@
 .orders-quality-check-tag {
   align-self: flex-start;
   font-weight: 700;
+}
+
+@media (max-width: 760px) {
+  .orders-table-card .el-card__body {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .orders-table {
+    min-width: 1480px;
+  }
+
+  .orders-table .el-table-fixed-column--left,
+  .orders-table .el-table-fixed-column--right {
+    position: static !important;
+    right: auto !important;
+    left: auto !important;
+    box-shadow: none !important;
+  }
+
+  .orders-table .el-table__fixed,
+  .orders-table .el-table__fixed-right {
+    display: none !important;
+  }
 }
 .orders-split-dialog-body {
   display: grid;

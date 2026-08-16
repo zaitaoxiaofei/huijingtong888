@@ -41,6 +41,18 @@ test("pending purchase filter excludes every supported inventory source", async 
   assert.match(pendingFilter, /FROM product_components purchase_component/);
   assert.match(pendingFilter, /FROM inventory_movements purchase_im/);
   assert.match(pendingFilter, /FROM inbound_records purchase_ir/);
+  assert.doesNotMatch(pendingFilter, /FROM procurement_requests purchase_pr/);
+});
+
+test("pending purchase action labels use current stock instead of stale handling history", async () => {
+  const table = await readFile(new URL("../frontend/orders/components/OrdersTable.vue", import.meta.url), "utf8");
+  const labelBlock = table.slice(
+    table.indexOf("function procurementActionLabel"),
+    table.indexOf("function procurementActionClass")
+  );
+
+  assert.match(labelBlock, /detail\.includes\("已提交采购"\)\) return "已提交采购"/);
+  assert.doesNotMatch(labelBlock, /detail\.includes\("库存可满足"\)\) return "有库存"/);
 });
 
 mysqlTest("MySQL order list supports status tabs, print filters, inventory sorting, and purchase search", async () => {

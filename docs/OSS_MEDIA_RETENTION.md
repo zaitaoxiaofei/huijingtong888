@@ -42,3 +42,5 @@ Bucket 采用“公共读、禁止公共写”；上传密钥仅保存在服务�
 npm run cleanup:verified-local-media
 npm run cleanup:verified-local-media:write -- --days 7 --limit 200
 ```
+
+ECS 通过 `ozon-erp-media-cleanup.timer` 每天北京时间 03:30 后随机延迟最多 15 分钟执行，单次最多处理 200 个超过 7 天的文件。

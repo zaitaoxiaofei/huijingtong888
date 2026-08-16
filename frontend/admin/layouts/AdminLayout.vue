@@ -18,6 +18,9 @@ const tabsStore = useWorkspaceTabsStore();
 tabsStore.restoreTabs(router);
 const DYNAMIC_IMPORT_INTENDED_ROUTE = "ozon-admin-dynamic-import-intended-route";
 const menuRef = ref(null);
+const isMobileViewport = ref(false);
+const mobileNavigationOpen = ref(false);
+let mobileViewportQuery = null;
 
 const activeMenu = computed(() => route.path);
 const standaloneMode = computed(() => String(route.query.standalone || "") === "1");
@@ -75,6 +78,7 @@ function rememberIntendedRoute(target) {
 function handleMenuSelect(index) {
   const target = String(index || "").trim();
   if (!target.startsWith("/")) return;
+  mobileNavigationOpen.value = false;
   if (target === AI_VARIANT_LAB_ROUTE) {
     openAiVariantLabWindow({ source: "menu" });
     return;
@@ -106,6 +110,19 @@ function handleMenuSelect(index) {
   if (target === route.path && !Object.keys(route.query || {}).length) return;
   showRouteSwitching();
   router.push({ path: target }).catch(() => {});
+}
+
+function handleNavigationToggle() {
+  if (isMobileViewport.value) {
+    mobileNavigationOpen.value = !mobileNavigationOpen.value;
+    return;
+  }
+  appStore.toggleSidebar();
+}
+
+function syncMobileViewport(event) {
+  isMobileViewport.value = Boolean(event?.matches ?? mobileViewportQuery?.matches);
+  if (!isMobileViewport.value) mobileNavigationOpen.value = false;
 }
 
 function showRouteSwitching() {
@@ -474,6 +491,9 @@ watch(
 );
 
 onMounted(() => {
+  mobileViewportQuery = window.matchMedia("(max-width: 760px)");
+  syncMobileViewport(mobileViewportQuery);
+  mobileViewportQuery.addEventListener("change", syncMobileViewport);
   window.addEventListener("pointerdown", handleGlobalPointerDown);
   window.addEventListener("blur", handleWindowBlur);
   window.addEventListener("app:plugin-update", handlePluginUpdate);
@@ -481,6 +501,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  mobileViewportQuery?.removeEventListener("change", syncMobileViewport);
   window.removeEventListener("pointerdown", handleGlobalPointerDown);
   window.removeEventListener("blur", handleWindowBlur);
   window.removeEventListener("app:plugin-update", handlePluginUpdate);
@@ -490,8 +511,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <el-container class="erp-shell" :class="{ 'is-standalone': standaloneMode }">
-    <el-aside v-if="!standaloneMode" :width="appStore.sidebarCollapsed ? '52px' : '180px'" class="erp-sidebar">
+  <el-container class="erp-shell" :class="{ 'is-standalone': standaloneMode, 'is-mobile-navigation-open': mobileNavigationOpen }">
+    <button v-if="!standaloneMode && isMobileViewport && mobileNavigationOpen" type="button" class="erp-mobile-navigation-mask" aria-label="关闭导航" @click="mobileNavigationOpen = false"></button>
+    <el-aside v-if="!standaloneMode" :width="isMobileViewport ? '280px' : (appStore.sidebarCollapsed ? '52px' : '180px')" class="erp-sidebar">
       <div class="erp-sidebar-inner">
         <button type="button" class="erp-logo" aria-label="爆单单单" @click="openDashboard">
           <span class="brand-logo-sticker">
@@ -546,8 +568,8 @@ onBeforeUnmount(() => {
     <el-container class="erp-main-shell">
       <el-header v-if="!standaloneMode" class="erp-header">
         <div class="erp-header-left">
-          <el-button text @click="appStore.toggleSidebar()">
-            <el-icon size="18"><component :is="appStore.sidebarCollapsed ? Expand : Fold" /></el-icon>
+          <el-button text :aria-label="isMobileViewport ? '打开导航' : '折叠导航'" @click="handleNavigationToggle">
+            <el-icon size="18"><component :is="isMobileViewport ? Expand : (appStore.sidebarCollapsed ? Expand : Fold)" /></el-icon>
           </el-button>
           <div class="erp-page-meta">
             <strong>{{ currentPageTitle }}</strong>

@@ -51,3 +51,18 @@ defineEmits(["search", "reset"]);
     </ErpFilterBar>
   </div>
 </template>
+
+<style scoped>
+@media (max-width: 760px) {
+  .inventory-toolbar { position: static; padding: 10px; border-radius: 12px; }
+  .inventory-toolbar-form { display: grid; grid-template-columns: 1fr; width: 100%; }
+  .inventory-toolbar-form :deep(.el-form-item) { display: block; width: 100%; margin: 0; }
+  .inventory-toolbar-form :deep(.el-form-item__label) { display: block; height: auto; margin-bottom: 4px; line-height: 20px; text-align: left; }
+  .inventory-toolbar-form :deep(.el-form-item__content),
+  .inventory-toolbar-form :deep(.el-input),
+  .inventory-toolbar-form :deep(.el-select),
+  .inventory-toolbar-form :deep(.el-date-editor) { width: 100% !important; }
+  .inventory-toolbar-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; width: 100%; }
+  .inventory-toolbar-actions :deep(.el-button) { width: 100%; margin: 0; }
+}
+</style>

@@ -3610,7 +3610,36 @@ button {
 
 @media (max-width: 640px) {
   .commerce-dashboard {
+    width: 100%;
+    max-width: 100%;
     padding: 12px;
+    overflow-x: hidden;
+  }
+
+  .commerce-dashboard > *,
+  .operating-card__top,
+  .operating-card__top > div:first-child {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .dashboard-date-control {
+    display: grid;
+    grid-template-columns: 32px minmax(0, 1fr) 32px;
+    width: 100%;
+    max-width: 100%;
+    height: 38px;
+    padding: 0 4px;
+  }
+
+  .dashboard-date-control__label,
+  .dashboard-date-control__today {
+    display: none;
+  }
+
+  .dashboard-date-picker {
+    width: 100% !important;
+    min-width: 0;
   }
 
   .overview-panel {

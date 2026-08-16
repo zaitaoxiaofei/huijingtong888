@@ -21,5 +21,7 @@ test("order list exposes and renders the automatic quality-check classification"
   assert.match(mysqlService, /is_quality_order: accounting\.is_quality_order \? 1 : 0/);
   assert.match(mysqlService, /order_nature: accounting\.order_nature/);
   assert.match(ordersPage, /qualityCheckOrder: isQualityCheckOrderRow\(row\)/);
+  assert.match(ordersPage, /passportMissingOrder: isPassportMissingOrderRow\(row\)/);
   assert.match(ordersTable, /v-if="row\.qualityCheckOrder"[^>]*>质检单<\/el-tag>/);
+  assert.match(ordersTable, /v-else-if="row\.passportMissingOrder"[^>]*>未提供护照<\/el-tag>/);
 });

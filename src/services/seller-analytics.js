@@ -1351,7 +1351,7 @@ async function probeCollectorPoolAuth(payload = {}) {
       filter: { stock: 'any_stock', period: 'monthly', categories: [], sku: '' },
       sort: { key: 'sum_gmv_desc' }
     }),
-    signal: AbortSignal.timeout(20000)
+    signal: AbortSignal.timeout(4000)
   })
   return {
     ok: response.ok,

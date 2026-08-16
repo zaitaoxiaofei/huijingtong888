@@ -404,7 +404,6 @@ CREATE TABLE IF NOT EXISTS sku_mappings (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   shop_id BIGINT UNSIGNED NOT NULL,
   product_id BIGINT UNSIGNED NOT NULL,
-  person_id BIGINT UNSIGNED NULL,
   online_product_id BIGINT UNSIGNED NULL,
   ozon_sku VARCHAR(128) NOT NULL,
   offer_id VARCHAR(255) NULL,
@@ -422,8 +421,13 @@ CREATE TABLE IF NOT EXISTS sku_mappings (
 
 CREATE TABLE IF NOT EXISTS procurement_requests (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-  product_id BIGINT UNSIGNED NOT NULL,
+  request_group_no VARCHAR(64) NULL,
+  product_id BIGINT UNSIGNED NULL,
+  raw_name VARCHAR(255) NULL,
+  raw_spec VARCHAR(255) NULL,
+  binding_status VARCHAR(32) NOT NULL DEFAULT 'bound',
   person_id BIGINT UNSIGNED NULL,
+  created_by_person_id BIGINT UNSIGNED NULL,
   quantity INT NOT NULL,
   amount DECIMAL(18,4) NOT NULL DEFAULT 0,
   shipping_amount DECIMAL(18,4) NOT NULL DEFAULT 0,
@@ -447,7 +451,9 @@ CREATE TABLE IF NOT EXISTS procurement_requests (
   KEY idx_procurement_status_created (status, created_at),
   KEY idx_procurement_product_status (product_id, status),
   KEY idx_procurement_source_order_item (source_order_item_id),
-  KEY idx_procurement_source_order (source_order_id)
+  KEY idx_procurement_source_order (source_order_id),
+  KEY idx_procurement_request_group (request_group_no),
+  KEY idx_procurement_binding_status (binding_status, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS purchase_orders (
@@ -462,6 +468,43 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
   purchased_at DATETIME NULL,
   cancelled_at DATETIME NULL,
   UNIQUE KEY uk_purchase_orders_order_no (order_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS procurement_platform_orders (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  platform VARCHAR(32) NOT NULL,
+  platform_order_no VARCHAR(128) NOT NULL,
+  order_time DATETIME NULL,
+  shop_name VARCHAR(255) NULL,
+  platform_status VARCHAR(64) NULL,
+  product_name TEXT NULL,
+  raw_spec TEXT NULL,
+  quantity INT NOT NULL DEFAULT 1,
+  paid_amount DECIMAL(18,4) NOT NULL DEFAULT 0,
+  payment_type VARCHAR(128) NULL,
+  goods_ids TEXT NULL,
+  sku_ids TEXT NULL,
+  purchase_urls TEXT NULL,
+  raw_json JSON NULL,
+  binding_status VARCHAR(32) NOT NULL DEFAULT 'unbound',
+  imported_by_person_id BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_procurement_platform_order (platform, platform_order_no),
+  KEY idx_procurement_platform_order_binding (binding_status, order_time),
+  KEY idx_procurement_platform_order_time (platform, order_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS procurement_platform_order_links (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  platform_order_id BIGINT UNSIGNED NOT NULL,
+  procurement_request_id BIGINT UNSIGNED NOT NULL,
+  allocated_quantity INT NOT NULL DEFAULT 0,
+  allocated_amount DECIMAL(18,4) NOT NULL DEFAULT 0,
+  created_by_person_id BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_procurement_platform_order_link (platform_order_id, procurement_request_id),
+  KEY idx_procurement_platform_order_link_request (procurement_request_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS purchase_order_items (

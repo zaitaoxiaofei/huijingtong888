@@ -1,0 +1,21 @@
+[Unit]
+Description=Ozon ERP verified local media cleanup
+After=network-online.target mysql.service ozon-erp.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ozon-erp
+Group=ozon-erp
+WorkingDirectory=/opt/ozon-erp/current
+EnvironmentFile=/etc/ozon-erp/ozon-erp.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node scripts/cleanup-verified-local-media.mjs --write --days 7 --limit 200
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/ozon-erp/shared
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ozon-erp-media-cleanup

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   classifyOrderAccounting,
   estimateOutcomeReturnLoss,
+  isPassportMissingOrder,
   isQualityCheckOrder
 } from "../src/services/order-outcome.js";
 
@@ -50,6 +51,25 @@ test("Ozon description inspection reasons are treated as platform checks", () =>
 
   const accounting = classifyOrderAccounting(row);
   assert.equal(accounting.order_nature, "quality_check");
+  assert.equal(accounting.aftersale_bucket, "platform_document_issue");
+  assert.equal(accounting.loss_profile_code, "none");
+});
+
+test("missing passport is displayed separately and is not a quality-check order", () => {
+  const row = {
+    posting_number: "43622553-0081-1",
+    status: "cancelled",
+    reason_code: "missing_passport",
+    cancel_reason: "\u041f\u043e\u043a\u0443\u043f\u0430\u0442\u0435\u043b\u044c \u043d\u0435 \u043f\u0440\u0435\u0434\u043e\u0441\u0442\u0430\u0432\u0438\u043b \u043f\u0430\u0441\u043f\u043e\u0440\u0442\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435"
+  };
+
+  assert.equal(isQualityCheckOrder(row), false);
+  assert.equal(isPassportMissingOrder(row), true);
+
+  const accounting = classifyOrderAccounting(row);
+  assert.equal(accounting.is_quality_order, false);
+  assert.equal(accounting.is_passport_missing_order, true);
+  assert.equal(accounting.order_nature, "passport_missing");
   assert.equal(accounting.aftersale_bucket, "platform_document_issue");
   assert.equal(accounting.loss_profile_code, "none");
 });

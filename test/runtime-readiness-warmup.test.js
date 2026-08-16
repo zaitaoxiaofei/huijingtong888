@@ -28,5 +28,10 @@ test("deployment candidates do not start background workers and shutdown drains 
   assert.match(serverSource, /process\.env\.DEPLOYMENT_CANDIDATE === "1"/);
   assert.match(serverSource, /if \(!deploymentCandidate\) setTimeout\(recoverGenerationJobs, 3000\)/);
   assert.match(serverSource, /server\.close\(\(error\) =>/);
+  assert.match(serverSource, /server\.closeAllConnections\?\.\(\);\s*process\.exit\(0\)/);
   assert.match(serverSource, /process\.once\("SIGTERM"/);
+});
+
+test("API errors preserve explicit statusCode values", () => {
+  assert.equal((serverSource.match(/error\??\.status \|\| error\??\.statusCode \|\| 500/g) || []).length, 2);
 });

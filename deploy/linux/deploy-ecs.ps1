@@ -83,7 +83,18 @@ $remoteCommand = "mv /tmp/remote-release.sh '$remoteScript' && chmod 700 '$remot
 & ssh @sshOptions $remoteTarget $remoteCommand
 if ($LASTEXITCODE -ne 0) { throw "Remote deployment failed with exit code $LASTEXITCODE." }
 
-$hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
+  $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+} else {
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  $archiveStream = [System.IO.File]::OpenRead($archivePath)
+  try {
+    $hash = ([System.BitConverter]::ToString($sha256.ComputeHash($archiveStream))).Replace("-", "")
+  } finally {
+    $archiveStream.Dispose()
+    $sha256.Dispose()
+  }
+}
 Write-Host "Deployment completed."
 Write-Host "Release: $Version"
 Write-Host "Archive: $archivePath"

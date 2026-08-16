@@ -32,6 +32,9 @@ export function filterProcurementRequestsMysql(rows = [], query = {}) {
     if (!searchText) return true;
     return [
       row.product_name,
+      row.raw_name,
+      row.raw_spec,
+      row.request_group_no,
       row.product_code,
       row.person_name,
       row.supplier_name,

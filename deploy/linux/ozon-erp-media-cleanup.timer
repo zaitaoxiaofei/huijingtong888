@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Ozon ERP verified local media cleanup daily
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Shanghai
+RandomizedDelaySec=15m
+Persistent=true
+Unit=ozon-erp-media-cleanup.service
+
+[Install]
+WantedBy=timers.target

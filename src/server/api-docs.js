@@ -626,7 +626,11 @@ const schemas = {
 
   ProcurementRequestRecord: objectOf("Procurement request row.", [
     field("id", scalar("number", "Request identifier.")),
+    field("request_group_no", scalar("string", "Purchase batch number.")),
     field("product_id", scalar("number", "Target product identifier.")),
+    field("raw_name", scalar("string", "Free-form procurement name entered by the buyer.")),
+    field("raw_spec", scalar("string", "Free-form procurement specification.")),
+    field("binding_status", scalar("string", "Inventory binding status.")),
     field("person_id", scalar("number", "Requester or owner identifier.")),
     field("quantity", scalar("number", "Requested quantity.")),
     field("amount", scalar("number", "Merchandise amount.")),
@@ -640,9 +644,11 @@ const schemas = {
   ]),
 
   ProcurementRequestMutationRequest: objectOf("Create or update a procurement request.", [
-    field("product_id", scalar("number", "Target product identifier."), true),
+    field("product_id", scalar("number", "Optional target product identifier.")),
+    field("raw_name", scalar("string", "Free-form procurement name; required when product_id is absent.")),
+    field("raw_spec", scalar("string", "Free-form procurement specification.")),
     field("person_id", scalar("number", "Requester or owner identifier.")),
-    field("quantity", scalar("number", "Requested quantity."), true),
+    field("quantity", scalar("number", "Requested quantity.")),
     field("amount", scalar("number", "Merchandise amount.")),
     field("shipping_amount", scalar("number", "Estimated shipping amount.")),
     field("purchase_url", scalar("string", "Procurement link.")),
@@ -1412,6 +1418,11 @@ const endpoints = [
       auth: "authenticated",
       responses: [response(200, "application/json", arrayOf(scalar("object", "AI strategy row."), "AI strategy rows."))]
     }),
+    endpoint("GET", "/api/procurement/binding-suggestions", "Suggest inventory products from confirmed procurement-name history and product names.", {
+      auth: "authenticated",
+      queryParams: [param("query", scalar("string", "Free-form procurement name."))],
+      responses: [response(200, "application/json", arrayOf(scalar("object", "Inventory binding suggestion."), "Inventory binding suggestions."))]
+    }),
     endpoint("POST", "/api/ai-strategies/resolve", "Resolve an AI prompt strategy plan from goal, category context, selected strategies, and optional bundle.", {
       auth: "authenticated",
       requestBody: body(ref("AiStrategyPlanRequest")),
@@ -1486,6 +1497,26 @@ const endpoints = [
       auth: "authenticated",
       pathParams: [param("id", scalar("number", "Task identifier."))],
       requestBody: body(ref("TeamTaskMutationRequest")),
+      responses: [response(200, "application/json", ref("MutationOk"))]
+    }),
+    endpoint("GET", "/api/procurement/platform-orders", "Return imported Pinduoduo or 1688 platform orders.", {
+      auth: "authenticated",
+      responses: [response(200, "application/json", scalar("object", "Paged platform-order rows."))]
+    }),
+    endpoint("POST", "/api/procurement/platform-orders/import", "Import platform orders from normalized CSV or JSON rows.", {
+      auth: "authenticated",
+      requestBody: body(scalar("object", "Platform and exported order rows.")),
+      responses: [response(200, "application/json", scalar("object", "Import counters."))]
+    }),
+    endpoint("GET", "/api/procurement/platform-orders/:id/candidates", "Suggest procurement records for one platform order.", {
+      auth: "authenticated",
+      pathParams: [param("id", scalar("number", "Platform-order identifier."))],
+      responses: [response(200, "application/json", arrayOf(scalar("object", "Procurement candidate."), "Candidate rows."))]
+    }),
+    endpoint("POST", "/api/procurement/platform-orders/:id/link", "Bind one platform order to one or more procurement records.", {
+      auth: "authenticated",
+      pathParams: [param("id", scalar("number", "Platform-order identifier."))],
+      requestBody: body(scalar("object", "Selected procurement records and allocated amounts.")),
       responses: [response(200, "application/json", ref("MutationOk"))]
     }),
     endpoint("DELETE", "/api/team/tasks/:id", "Delete a team planning task.", {

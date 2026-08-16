@@ -216,6 +216,10 @@ function isQualityCheckOrderRow(row = {}) {
   return QUALITY_CHECK_ORDER_PREFIXES.some((prefix) => postingNumber.startsWith(prefix));
 }
 
+function isPassportMissingOrderRow(row = {}) {
+  return Number(row.is_passport_missing_order || 0) !== 0 || String(row.order_nature || "") === "passport_missing";
+}
+
 const procurementSourceOptions = [
   { label: "1688", value: "1688" },
   { label: "拼多多", value: "pdd" },
@@ -274,15 +278,9 @@ const inventoryOptions = reactive({
 });
 
 const bindForm = reactive({
-  mode: "single",
   productId: "",
-  personId: "",
-  recipeItems: [],
-  componentSelectId: "",
-  componentQuery: ""
+  personId: ""
 });
-const bindRecipeOptions = ref([]);
-const bindRecipeLoading = ref(false);
 const createComponentOptions = ref([]);
 const createComponentLoading = ref(false);
 const createSimilarProducts = ref([]);
@@ -332,7 +330,7 @@ const createForm = reactive({
 
 const bindProductQuery = ref("");
 const bindProductCategory = ref("");
-const bindProductSearchMode = ref("fuzzy");
+const bindProductSearchMode = ref("exact");
 const bindProductStructuredFilters = reactive({
   inventoryCategory: "",
   productName: "",
@@ -404,10 +402,6 @@ const detailProfitItemCards = computed(() => detailItems.value.map((item, index)
 const selectedInventoryProduct = computed(() => (
   inventoryOptions.products.find((row) => Number(row.id) === Number(bindForm.productId)) || null
 ));
-const bindRecipeAvailable = computed(() => {
-  const values = bindForm.recipeItems.map((item) => recipeItemAvailable(item));
-  return values.length ? Math.min(...values) : null;
-});
 const inventoryProductTotal = computed(() => inventoryOptions.productTotal);
 const filteredInventoryProducts = computed(() => ({ length: inventoryOptions.productTotal }));
 const pagedInventoryProducts = computed(() => inventoryOptions.products);
@@ -971,6 +965,7 @@ function buildTableRow(row) {
     statusColor: rowStateColor(row),
     statusDeadlineHint: buildStatusDeadlineHint(displayStateKey, logisticsSummary),
     qualityCheckOrder: isQualityCheckOrderRow(row),
+    passportMissingOrder: isPassportMissingOrderRow(row),
     procurementState: buildProcurementState(row),
     availableActions: rowAvailableActions(row)
   };
@@ -1154,85 +1149,6 @@ function removeCreateCompositionItem(productId) {
   createForm.compositionItems = createForm.compositionItems.filter((item) => Number(item.product_id) !== Number(productId));
 }
 
-async function loadSkuInventoryRecipe() {
-  bindForm.mode = "single";
-  bindForm.recipeItems = [];
-  if (!inventoryDialog.onlineProductId) return;
-  try {
-    const params = new URLSearchParams({
-      online_product_id: String(inventoryDialog.onlineProductId),
-      ozon_sku: String(inventoryDialog.sku || "")
-    });
-    const result = await apiClient.get(`/api/sku-inventory-recipes?${params.toString()}`);
-    const items = Array.isArray(result?.items) ? result.items : [];
-    if (String(result?.mode || "") === "combo" && items.length) {
-      bindForm.mode = "combo";
-      bindForm.productId = "";
-      bindForm.recipeItems = items.map((item) => ({
-        product_id: Number(item.product_id),
-        product_name: item.product_name || "",
-        code: item.code || "",
-        inventory_id: item.inventory_id || "",
-        image_url: item.image_url || "",
-        stock_unit: item.stock_unit || "个",
-        local_stock: Number(item.local_stock || 0),
-        quantity: Number(item.quantity || 1)
-      }));
-    }
-  } catch (error) {
-    ElMessage.error(error.message || "加载组合方案失败");
-  }
-}
-
-async function searchBindRecipeProducts(query = "") {
-  bindForm.componentQuery = String(query || "").trim();
-  if (!bindForm.componentQuery) {
-    bindRecipeOptions.value = [];
-    return;
-  }
-  bindRecipeLoading.value = true;
-  try {
-    const params = new URLSearchParams({
-      paged: "1",
-      page: "1",
-      pageSize: "20",
-      query: bindForm.componentQuery
-    });
-    const result = await apiClient.get(`/api/products?${params.toString()}`);
-    bindRecipeOptions.value = normalizePagedRows(result).filter((item) => Number(item.active ?? 1) !== 0);
-  } catch (error) {
-    ElMessage.error(error.message || "加载组件商品失败");
-  } finally {
-    bindRecipeLoading.value = false;
-  }
-}
-
-function addBindRecipeItem(productId) {
-  const row = bindRecipeOptions.value.find((item) => Number(item.id) === Number(productId));
-  if (!row) return;
-  const existing = bindForm.recipeItems.find((item) => Number(item.product_id) === Number(row.id));
-  if (existing) {
-    existing.quantity = Number(existing.quantity || 0) + 1;
-  } else {
-    bindForm.recipeItems.push({
-      product_id: Number(row.id),
-      product_name: inventoryProductLabel(row),
-      code: row?.code || "",
-      inventory_id: row?.inventory_id || "",
-      image_url: inventoryProductImage(row),
-      stock_unit: row?.stock_unit || "个",
-      local_stock: inventoryProductLocalStock(row),
-      quantity: 1
-    });
-  }
-  bindForm.componentSelectId = "";
-  bindForm.componentQuery = "";
-}
-
-function removeBindRecipeItem(productId) {
-  bindForm.recipeItems = bindForm.recipeItems.filter((item) => Number(item.product_id) !== Number(productId));
-}
-
 async function handleInventoryProductSearch() {
   inventoryListPage.value = 1;
   await loadInventoryProductOptions();
@@ -1297,9 +1213,6 @@ async function handleInventoryProductEditorSaved({ mode, product } = {}) {
     loadInventoryProductOptions(),
     loadOrders(createdFromOrder ? { forceRefresh: true, includeCounts: true } : {})
   ]);
-  if (inventoryDialog.visible && inventoryDialog.mode === "bind") {
-    await loadSkuInventoryRecipe();
-  }
   if (compositionDialogVisible.value && mode === "create") {
     compositionDialogRefreshKey.value += 1;
   }
@@ -1349,14 +1262,8 @@ function resetInventoryDialog() {
   inventoryDialog.baseName = "";
   inventoryDialog.baseWeightG = "";
   inventoryDialog.purchaseUrl = "";
-  bindForm.mode = "single";
   bindForm.productId = "";
   bindForm.personId = "";
-  bindForm.recipeItems = [];
-  bindForm.componentSelectId = "";
-  bindForm.componentQuery = "";
-  bindRecipeOptions.value = [];
-  bindRecipeLoading.value = false;
   createComponentOptions.value = [];
   createComponentLoading.value = false;
   createComponentCategory.value = "single";
@@ -1389,7 +1296,7 @@ function resetInventoryDialog() {
   createForm.componentQuery = "";
   bindProductQuery.value = "";
   bindProductCategory.value = "";
-  bindProductSearchMode.value = "fuzzy";
+  bindProductSearchMode.value = "exact";
   Object.assign(bindProductStructuredFilters, { inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [], accessoryName: "", color: "", material: [], process: "" });
   inventoryListPage.value = 1;
   inventoryListPageSize.value = INVENTORY_LIST_PAGE_SIZE;
@@ -2064,19 +1971,13 @@ async function handleOpenBindProductFromOrder(orderId, sku) {
   inventoryDialog.imageUrl = context.imageUrl;
   bindForm.productId = context.currentProductId ? String(context.currentProductId) : "";
   bindForm.personId = preferredPersonId();
-  bindForm.mode = context.currentProductId ? "single" : "single";
-  bindForm.recipeItems = [];
-  bindForm.componentSelectId = "";
-  bindForm.componentQuery = "";
-  bindRecipeOptions.value = [];
   bindProductQuery.value = "";
   bindProductCategory.value = "";
-  bindProductSearchMode.value = "fuzzy";
+  bindProductSearchMode.value = "exact";
   Object.assign(bindProductStructuredFilters, { inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [], accessoryName: "", color: "", material: [], process: "" });
   inventoryListPage.value = 1;
   inventoryListPageSize.value = INVENTORY_LIST_PAGE_SIZE;
   await loadInventoryProductOptions();
-  await loadSkuInventoryRecipe();
 }
 
 async function handleOpenCreateProductFromOrder(orderId, sku) {
@@ -2194,12 +2095,8 @@ async function submitInventoryDialog() {
     return;
   }
   if (inventoryDialog.mode === "bind") {
-    if (bindForm.mode === "single" && !bindForm.productId) {
+    if (!bindForm.productId) {
       ElMessage.warning("请先选择库存商品");
-      return;
-    }
-    if (bindForm.mode === "combo" && !bindForm.recipeItems.length) {
-      ElMessage.warning("请先添加组合方案的组成商品");
       return;
     }
   }
@@ -2224,16 +2121,11 @@ async function submitInventoryDialog() {
         online_product_id: inventoryDialog.onlineProductId,
         order_item_id: inventoryDialog.orderItemId,
         ozon_sku: inventoryDialog.sku,
-        product_id: bindForm.mode === "combo" ? null : Number(bindForm.productId),
+        product_id: Number(bindForm.productId),
         person_id: bindForm.personId ? Number(bindForm.personId) : null,
         inventory_recipe: {
-          mode: bindForm.mode === "combo" ? "combo" : "single",
-          items: bindForm.mode === "combo"
-            ? bindForm.recipeItems.map((item) => ({
-              product_id: Number(item.product_id),
-              quantity: Number(item.quantity || 1)
-            }))
-            : []
+          mode: "single",
+          items: []
         }
       });
       ElMessage.success("库存绑定已更新");
@@ -2907,9 +2799,7 @@ onBeforeUnmount(() => {
                     <strong>
                       {{
                         inventoryDialog.mode === "bind"
-                          ? (bindForm.mode === "combo"
-                            ? `组合方案 / ${bindForm.recipeItems.length} 个组成`
-                            : (selectedInventoryProduct ? `${inventoryProductLabel(selectedInventoryProduct)} / ${inventoryProductTypeText(selectedInventoryProduct)}` : "请选择右侧库存商品"))
+                          ? (selectedInventoryProduct ? `${inventoryProductLabel(selectedInventoryProduct)} / ${inventoryProductTypeText(selectedInventoryProduct)}` : "请选择右侧库存商品")
                           : createProductStructureLabel
                       }}
                     </strong>
@@ -2945,20 +2835,17 @@ onBeforeUnmount(() => {
 
         <div v-if="inventoryDialog.mode === 'bind'" class="order-inventory-dialog-right">
           <div class="inventory-picker-panel">
-            <div class="dialog-search-head">
-              <strong>配置 SKU 库存方案</strong>
-              <span>单个库存品用于一对一绑定；组合方案只记录组成部分，不创建独立库存产品。</span>
-            </div>
-            <el-segmented
-              v-model="bindForm.mode"
-              :options="[{ label: '单个库存品', value: 'single' }, { label: '组合方案', value: 'combo' }]"
-              class="inventory-binding-mode-switch"
-            />
-            <div v-if="bindForm.mode === 'single'" class="inventory-single-binding-panel">
-              <div class="inventory-search-mode-row">
-                <el-segmented v-model="bindProductSearchMode" :options="[{ label: '模糊搜索', value: 'fuzzy' }, { label: '精确搜索', value: 'exact' }]" />
+            <div class="dialog-search-head inventory-picker-head">
+              <div>
+                <strong>选择库存商品</strong>
                 <span>{{ bindProductSearchMode === 'fuzzy' ? '输入多个关键词快速匹配' : '按库存标准名称字段组合筛选' }}</span>
               </div>
+              <el-segmented
+                v-model="bindProductSearchMode"
+                :options="[{ label: '模糊搜索', value: 'fuzzy' }, { label: '精确搜索', value: 'exact' }]"
+              />
+            </div>
+            <div class="inventory-single-binding-panel">
               <div v-if="bindProductSearchMode === 'fuzzy'" class="inventory-search-row">
                 <el-input v-model="bindProductQuery" placeholder="搜索名称、编码、SKU，可输入多个关键词" clearable />
                 <OzonCategorySelect
@@ -3067,82 +2954,6 @@ onBeforeUnmount(() => {
               @update:page="inventoryListPage = $event"
               @update:pageSize="inventoryListPageSize = $event"
             />
-            </div>
-            <div v-else class="inventory-combo-binding-panel">
-              <el-alert
-                type="info"
-                :closable="false"
-                title="组合方案挂在当前店铺 SKU 上，真正库存只来自下面的组成商品。"
-              />
-              <el-select
-                v-model="bindForm.componentSelectId"
-                filterable
-                remote
-                clearable
-                reserve-keyword
-                :remote-method="searchBindRecipeProducts"
-                :loading="bindRecipeLoading"
-                placeholder="搜索已有库存商品作为组成部分"
-                style="width: 100%"
-                @change="addBindRecipeItem"
-              >
-                <el-option
-                  v-for="item in bindRecipeOptions"
-                  :key="item.id"
-                  :label="`${item.name} / ${item.inventory_id || item.code || item.id}`"
-                  :value="item.id"
-                />
-              </el-select>
-              <el-table
-                :data="bindForm.recipeItems"
-                border
-                stripe
-                class="inventory-picker-table inventory-combo-table"
-                empty-text="还没有组成商品，请搜索后加入"
-              >
-                <el-table-column label="组成商品" min-width="300">
-                  <template #default="{ row }">
-                    <div class="inventory-recipe-product">
-                      <el-image
-                        v-if="recipeItemImage(row)"
-                        :src="recipeItemImage(row)"
-                        fit="contain"
-                        class="inventory-recipe-thumb"
-                        :preview-src-list="[recipeItemImage(row)]"
-                        preview-teleported
-                      />
-                      <div v-else class="inventory-recipe-thumb inventory-recipe-thumb-empty">库存</div>
-                      <div class="inventory-recipe-meta">
-                        <strong>{{ recipeItemLabel(row) }}</strong>
-                        <span>{{ recipeItemCode(row) }}</span>
-                      </div>
-                    </div>
-                  </template>
-                </el-table-column>
-                <el-table-column label="本地库存" width="120" align="right">
-                  <template #default="{ row }">{{ Number(row.local_stock || 0) }} {{ row.stock_unit || "个" }}</template>
-                </el-table-column>
-                <el-table-column label="单件用量" width="190">
-                  <template #default="{ row }">
-                    <div class="create-composition-qty">
-                      <el-input-number v-model="row.quantity" :min="0.0001" :precision="4" :step="1" controls-position="right" />
-                      <span>{{ row.stock_unit || "个" }}</span>
-                    </div>
-                  </template>
-                </el-table-column>
-                <el-table-column label="本地可组" width="110" align="right">
-                  <template #default="{ row }">{{ recipeItemAvailable(row) }}</template>
-                </el-table-column>
-                <el-table-column label="操作" width="90" align="center">
-                  <template #default="{ row }">
-                    <el-button link type="danger" @click="removeBindRecipeItem(row.product_id)">删除</el-button>
-                  </template>
-                </el-table-column>
-              </el-table>
-              <div class="inventory-recipe-summary">
-                <span>当前 SKU 本地可发</span>
-                <strong>{{ bindRecipeAvailable ?? "-" }}</strong>
-              </div>
             </div>
           </div>
 
@@ -3482,30 +3293,6 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div v-if="inventoryDialog.mode === 'bind'" class="order-inventory-footer-bar">
-          <el-form label-width="76px" class="order-inventory-footer-form">
-            <el-form-item label="负责人">
-              <el-select v-model="bindForm.personId" clearable filterable placeholder="可选，覆盖绑定负责人" style="width: 100%">
-                <el-option
-                  v-for="person in inventoryOptions.people"
-                  :key="person.id"
-                  :label="person.name"
-                  :value="String(person.id)"
-                />
-              </el-select>
-            </el-form-item>
-          </el-form>
-          <div class="order-inventory-bind-target">
-            <span>将绑定到</span>
-            <strong>
-              {{
-                bindForm.mode === "combo"
-                  ? `组合方案 / ${bindForm.recipeItems.length} 个组成 / 本地可发 ${bindRecipeAvailable ?? "-"}`
-                  : (selectedInventoryProduct ? `${inventoryProductLabel(selectedInventoryProduct)} / ${inventoryProductTypeText(selectedInventoryProduct)}` : "请选择库存商品")
-              }}
-            </strong>
-          </div>
-        </div>
       </div>
 
       <template #footer>

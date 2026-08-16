@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { invalidateInventoryNamingOptions, loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../utils/inventory-naming-options";
 import { uploadListingMedia } from "../../api/tools/imageCropper";
 import { currentEffectiveLogisticsRules, resolveCurrentLogisticsRule } from "../../utils/effective-logistics-rules";
 import { buildShortInventoryName, scoreInventorySimilarity } from "../../utils/inventory-similarity";
@@ -515,8 +516,7 @@ async function loadNamingOption(type) {
   if (brand) params.set("brand", brand);
   if (item.fitment_type) params.set("fitment_type", item.fitment_type);
   if (item.vehicle_model) params.set("vehicle_model", item.vehicle_model);
-  const result = await apiClient.get(`/api/inventory-product-naming/options?${params.toString()}`, { noCache: true });
-  const rows = Array.isArray(result?.rows) ? result.rows : [];
+  const rows = [...await loadInventoryNamingOptions(params)];
   const currentValue = type === "accessory"
         ? item.accessory
         : type === "material"
@@ -540,8 +540,7 @@ async function loadNamingOption(type) {
 }
 
 async function loadVehicleCatalog() {
-  const result = await apiClient.get("/api/ai-variant-lab/vehicle-catalog", { noCache: true });
-  vehicleCatalog.value = Array.isArray(result?.brands) ? result.brands : [];
+  vehicleCatalog.value = await loadInventoryVehicleCatalog();
 }
 
 async function handleCategoryChange(value) {
@@ -600,6 +599,7 @@ async function createNamingOption(type, value) {
     : text;
   try {
     await apiClient.post("/api/inventory-product-naming/options", { option_type: type, value: text, label: label || "无品牌" });
+    invalidateInventoryNamingOptions();
     await loadNamingOption(type);
   } catch (error) {
     ElMessage.error(error.message || "新增选项失败");
@@ -626,6 +626,7 @@ async function applyCoreName() {
   } catch { return; }
   try {
     const response = await apiClient.post("/api/inventory-product-naming/options", { option_type: "category", value: result.value, label: result.value });
+    invalidateInventoryNamingOptions();
     ElMessage.success(response.status === "active" ? "核心品名已创建" : "申请已提交，审核通过后可使用");
     await loadNamingOption("category");
   } catch (error) {
@@ -657,6 +658,7 @@ async function editCoreNameOption(option) {
   }
   try {
     const response = await apiClient.put(`/api/inventory-product-naming/options/${option.id}`, { value: result.value });
+    invalidateInventoryNamingOptions();
     if (form.structured_naming.category === option.value) form.structured_naming.category = response.value;
     await loadNamingOptions();
     scheduleSimilarProducts();
@@ -684,6 +686,7 @@ async function deleteCoreNameOption(option) {
   }
   try {
     await apiClient.delete(`/api/inventory-product-naming/options/${option.id}`);
+    invalidateInventoryNamingOptions();
     if (form.structured_naming.category === option.value) form.structured_naming.category = "";
     await loadNamingOptions();
     ElMessage.success("核心品名已删除");

@@ -9,6 +9,8 @@ export function createOperationsRoutes({ services, readJson }) {
     "GET /api/fbp-transfer-records": (req, url) => services.fbpTransferRecords(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/summary": () => services.procurementSummary(),
     "GET /api/procurement/requests": (req, url) => services.procurementRequests(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/procurement/binding-suggestions": (req, url) => services.procurementBindingSuggestions(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/procurement/platform-orders": (req, url) => services.procurementPlatformOrders(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/purchase-orders": (req, url) => services.purchaseOrders(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/cost-versions": (req, url) => services.purchaseCostVersions(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/cost-versions/backfill-preview": () => services.previewPurchaseCostBackfill(),
@@ -23,7 +25,8 @@ export function createOperationsRoutes({ services, readJson }) {
     "GET /api/people": () => services.people(),
     "POST /api/people": async (req) => services.createPerson(await readJson(req)) || { ok: true },
     "POST /api/shops": async (req) => services.createShop(await readJson(req)) || { ok: true },
-    "POST /api/procurement/requests": async (req) => services.createProcurementRequest(await readJson(req)) || { ok: true },
+    "POST /api/procurement/requests": async (req) => services.createProcurementRequest(await readJson(req), req._session?.personId) || { ok: true },
+    "POST /api/procurement/platform-orders/import": async (req) => services.importProcurementPlatformOrders(await readJson(req), req._session?.personId),
     "POST /api/procurement/purchase-orders/confirm-from-requests-async": async (req) => services.startConfirmProcurementRequestsPurchased(await readJson(req)),
     "POST /api/procurement/purchase-orders": async (req) => services.mergeProcurementRequests(await readJson(req)),
     "POST /api/procurement/cost-versions/backfill": async (req) => services.initializePurchaseCostBackfill(await readJson(req), req._session?.personId),
@@ -56,6 +59,14 @@ export function createOperationsRoutes({ services, readJson }) {
 }
 
 export async function handleOperationsRestRoute({ req, res, url, parts, services, readJson, json, notFound }) {
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "platform-orders" && parts[3] && parts[4] === "candidates") {
+    return json(res, await services.procurementPlatformOrderCandidates(Number(parts[3])));
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "platform-orders" && parts[3] && parts[4] === "link") {
+    return json(res, await services.linkProcurementPlatformOrder(Number(parts[3]), await readJson(req), req._session?.personId));
+  }
+
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "customer-message-settings" && parts[2] === "template" && parts[3]) {
     return json(res, await services.deleteCustomerMessageTemplate(decodeURIComponent(parts[3])));
   }

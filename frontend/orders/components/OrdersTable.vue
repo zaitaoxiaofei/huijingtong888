@@ -247,8 +247,7 @@ function procurementActionLabel(row) {
   if (hasEnoughProcurementSupply(row)) return "在途可满足";
   if (isFbpOrder(row)) return "有库存";
   const detail = String(row?.procurementState?.detail || "");
-  if (detail.includes("库存可满足")) return "有库存";
-  if (detail.includes("已提交采购")) return "有库存";
+  if (detail.includes("已提交采购")) return "已提交采购";
   return "待采购";
 }
 
@@ -263,6 +262,7 @@ function procurementActionClass(row) {
 
 <template>
   <el-card shadow="never" class="orders-table-card">
+    <div class="mobile-landscape-hint">订单信息较多，横屏查看更完整；表格可左右滑动。</div>
     <el-table
       :data="rows"
       :height="tableHeight"
@@ -341,6 +341,7 @@ function procurementActionClass(row) {
               </template>
             </div>
             <el-tag v-if="row.qualityCheckOrder" class="orders-quality-check-tag" type="danger" size="small" effect="light">质检单</el-tag>
+            <el-tag v-else-if="row.passportMissingOrder" class="orders-quality-check-tag" type="warning" size="small" effect="light">未提供护照</el-tag>
             <div class="orders-order-quantity">
               <span>数量</span>
               <span class="orders-item-quantity" :class="{ 'is-multi': Number(row.quantitySummary || 0) > 1 }">

@@ -47,6 +47,8 @@ const OrderTrackingView = () => import("../views/orders/OrderTrackingView.vue");
 const OutboundView = () => import("../views/orders/OutboundView.vue");
 const CustomerMessagesView = () => import("../views/orders/CustomerMessagesView.vue");
 const PurchaseListView = () => import("../views/procurement/PurchaseListView.vue");
+const ProcurementWorkspaceView = () => import("../views/procurement/ProcurementWorkspaceView.vue");
+const ProcurementPlatformOrdersView = () => import("../views/procurement/ProcurementPlatformOrdersView.vue");
 const PurchaseHistoryView = () => import("../views/procurement/PurchaseHistoryView.vue");
 const PurchaseCostCenterView = () => import("../views/procurement/PurchaseCostCenterView.vue");
 const SettingsView = () => import("../views/settings/SettingsView.vue");
@@ -54,6 +56,7 @@ const AiProviderSettingsView = () => import("../views/settings/AiProviderSetting
 const MaterialCenterView = () => import("../views/settings/MaterialCenterView.vue");
 const AiPromptLibraryView = () => import("../views/settings/AiPromptLibraryView.vue");
 const ScheduledJobsView = () => import("../views/settings/ScheduledJobsView.vue");
+const SystemMonitoringView = () => import("../views/settings/SystemMonitoringView.vue");
 const ImageCropperView = () => import("../views/tools/ImageCropper.vue");
 const EcommerceImageSplitterView = () => import("../views/tools/EcommerceImageSplitterV3.vue");
 const ProductVideoGeneratorView = () => import("../views/tools/ProductVideoGenerator.vue");
@@ -173,13 +176,16 @@ export const router = createRouter({
         { path: "order-tracking", name: "order-tracking", component: OrderTrackingView, meta: { title: "单量追踪", breadcrumb: ["订单履约", "单量追踪"] } },
         { path: "outbound", name: "outbound", component: OutboundView, meta: { title: "出库记录", breadcrumb: ["订单履约", "出库记录"] } },
         { path: "customer-messages", name: "customer-messages", component: CustomerMessagesView, meta: { title: "客户消息", breadcrumb: ["订单履约", "客户消息"] } },
-        { path: "procurement", redirect: "/purchase-list" },
+        { path: "procurement", redirect: "/procurement/workspace" },
+        { path: "procurement/workspace", name: "procurement-workspace", component: ProcurementWorkspaceView, meta: { title: "采购工作台", breadcrumb: ["采购", "采购工作台"] } },
+        { path: "procurement/platform-orders", name: "procurement-platform-orders", component: ProcurementPlatformOrdersView, meta: { title: "平台订单", breadcrumb: ["采购", "平台订单"] } },
         { path: "purchase-list", name: "purchase-list", component: PurchaseListView, meta: { title: "待入库清单", breadcrumb: ["采购入库", "待入库清单"] } },
         { path: "purchase-history", name: "purchase-history", component: PurchaseHistoryView, meta: { title: "入库记录", breadcrumb: ["采购入库", "入库记录"] } },
         { path: "purchase-cost-center", name: "purchase-cost-center", component: PurchaseCostCenterView, meta: { title: "成本与异常", breadcrumb: ["采购入库", "成本与异常"] } },
         { path: "inbound", redirect: "/purchase-list" },
         { path: "settings", name: "settings", component: SettingsView, meta: { title: "基础资料", breadcrumb: ["系统管理", "基础资料"] } },
         { path: "settings/scheduled-jobs", name: "settings-scheduled-jobs", component: ScheduledJobsView, meta: { title: "自动任务", breadcrumb: ["系统管理", "自动任务"] } },
+        { path: "settings/system-monitoring", name: "settings-system-monitoring", component: SystemMonitoringView, meta: { title: "系统监控", breadcrumb: ["系统管理", "系统监控"] } },
         { path: "settings/ai", name: "settings-ai", component: AiProviderSettingsView, meta: { title: "AI 设置", breadcrumb: ["系统管理", "AI 设置"] } },
         { path: "settings/materials", name: "settings-materials", component: MaterialCenterView, meta: { title: "素材库", breadcrumb: ["系统管理", "素材库"] } },
         { path: "settings/prompts", name: "settings-prompts", component: AiPromptLibraryView, meta: { title: "AI提示词库", breadcrumb: ["系统管理", "AI提示词库"] } },
