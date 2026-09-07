@@ -27,6 +27,7 @@
     "build:frontend": "node scripts/build-frontend-pipeline.mjs",
     "package:deploy": "node scripts/package-deploy.mjs",
     "deploy:ecs": "powershell -NoProfile -ExecutionPolicy Bypass -File ./deploy/linux/deploy-ecs.ps1",
+    "deploy:ecs:unix": "bash ./deploy/linux/deploy-ecs.sh",
     "release:tool": "node tools/release-manager/server.mjs",
     "package:plugin": "node ../scripts/package-baodan-plugin.mjs",
     "docs:api": "node scripts/generate-api-docs.mjs",

@@ -83,6 +83,41 @@ npm run deploy:ecs -- -SkipDatabaseInit
 
 构建产物保存在 `.deploy-artifacts`，该目录已被 Git 忽略。服务器真实配置始终保留在 `/etc/ozon-erp/ozon-erp.env`，不会跟随发布包上传。
 
+## macOS / Linux 命令行入口
+
+macOS 和 Linux 使用 Bash 3.2+，并安装 Node.js/npm、OpenSSH 的 `ssh`/`scp` 与 `zip`。入口复用 Windows 流程所调用的 `npm run package:deploy` 和同一个 `deploy/linux/remote-release.sh`，不会维护另一套服务器发布规则。
+
+只验证参数和本机配置、不构建、不联网、不发布：
+
+```bash
+npm run deploy:ecs:unix -- --dry-run
+```
+
+指定版本发布（必须先取得生产发布授权）：
+
+```bash
+npm run deploy:ecs:unix -- --version 2026.09.07-001
+```
+
+Mac 独立密钥可通过以下环境变量指定：
+
+```bash
+export OZON_ECS_IDENTITY_FILE="$HOME/.ssh/ozon-erp-mac-deploy"
+```
+
+不要复制 Windows 私钥，也不要禁用 SSH 主机身份校验。正式执行前，应先使用 `BatchMode=yes` 做只读 SSH 连通性验证，并通过可信渠道核对首次出现的主机指纹。
+
+关键步骤对照：
+
+| Windows PowerShell 入口 | macOS/Linux Bash 入口 | 共同验证点 |
+| --- | --- | --- |
+| `npm.cmd run package:deploy` | `npm run package:deploy` | 部署预检、编码、SQL、前端构建、插件打包和部署清单 |
+| `tar.exe -a ...` | `zip -r ...` | 单个版本化 ZIP 发布包 |
+| `scp` 上传 ZIP 和远端脚本 | `scp` 上传同样两项 | 不上传 `.env` 和历史 uploads |
+| SSH 调用 `remote-release.sh` | SSH 调用同一文件 | 发布目录、数据库初始化、候选实例、切换、重启、健康检查、回滚、清理 |
+
+DryRun 在创建产物目录、构建、压缩、上传和任何 SSH 命令之前退出，因此不会触碰生产文件、数据库或服务。
+
 ## 本地验证
 
 本地测试继续使用受控端口 `8788`：

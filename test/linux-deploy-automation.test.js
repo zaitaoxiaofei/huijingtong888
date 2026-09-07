@@ -3,6 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 
 const client = fs.readFileSync(new URL("../deploy/linux/deploy-ecs.ps1", import.meta.url), "utf8");
+const unixClient = fs.readFileSync(new URL("../deploy/linux/deploy-ecs.sh", import.meta.url), "utf8");
 const remote = fs.readFileSync(new URL("../deploy/linux/remote-release.sh", import.meta.url), "utf8");
 const oneClick = fs.readFileSync(new URL("../deploy/linux/deploy-ecs-one-click.ps1", import.meta.url), "utf8");
 const launcher = fs.readFileSync(new URL("../一键部署到阿里云.vbs", import.meta.url), "utf8");
@@ -15,6 +16,24 @@ test("ECS deployment uploads one artifact and delegates atomic release activatio
   assert.match(remote, /previous_target="\$\(readlink -f/);
   assert.match(remote, /ln -sfn "\$release_dir" "\$current_link"/);
   assert.match(remote, /Release failed; attempting rollback/);
+});
+
+test("Mac/Linux deployment reuses the shared build and atomic release implementation", () => {
+  assert.match(unixClient, /npm run package:deploy/);
+  assert.match(unixClient, /remote-release\.sh/);
+  assert.match(unixClient, /scp "\$\{scp_options\[@\]\}"/);
+  assert.match(unixClient, /bash '\$remote_script'/);
+  assert.match(unixClient, /--skip-database-init/);
+});
+
+test("Mac/Linux DryRun exits before every mutating or remote deployment step", () => {
+  const dryRunExit = unixClient.indexOf("if ((dry_run));");
+  assert.ok(dryRunExit >= 0);
+  for (const marker of ["mkdir -p", "npm run package:deploy", "zip -q -r", "scp ", "ssh "]) {
+    assert.ok(unixClient.indexOf(marker) > dryRunExit, `${marker} must stay after DryRun`);
+  }
+  assert.match(unixClient, /no build, upload, SSH command, database change, release switch, restart, or rollback/);
+  assert.doesNotMatch(unixClient, /StrictHostKeyChecking=no/);
 });
 
 test("ECS deployment preserves server secrets and shared uploads", () => {
