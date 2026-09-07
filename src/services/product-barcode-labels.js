@@ -2,6 +2,7 @@ import bwipjs from "bwip-js";
 import fs from "node:fs/promises";
 import fontkit from "@pdf-lib/fontkit";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import sharp from "sharp";
 import {
   fetchOzonProductStocks,
   fetchOzonProductsByIds,
@@ -10,11 +11,26 @@ import {
 import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 
 const MM_TO_PT = 72 / 25.4;
-const LABEL_LAYOUT_TYPE = "ozon_70x30_vector_v2";
+const LABEL_LAYOUT_TYPE = "ozon_70x30_inventory_name_v8";
 const THERMAL_LABEL = {
   width: 70 * MM_TO_PT,
   height: 30 * MM_TO_PT
 };
+const BARCODE_LABEL_FONT_PATHS = [
+  process.env.BARCODE_LABEL_FONT_PATH,
+  "C:\\Windows\\Fonts\\Deng.ttf",
+  "C:\\Windows\\Fonts\\arial.ttf",
+  "/usr/local/share/fonts/ozon/NotoSansCJKsc-Regular.otf",
+  "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+  "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
+  "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+  "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+].filter(Boolean);
 
 let productBarcodeLabelCacheReady = false;
 
@@ -129,12 +145,23 @@ async function resolveOnlineProductsForBarcodeLabels(inputItems = []) {
       op.primary_image,
       op.image_url,
       op.barcodes_json,
+      p.name AS inventory_name,
       s.name AS shop_name,
       s.ozon_client_id,
       s.api_key_hint,
       s.ozon_api_key
     FROM online_products op
     JOIN shops s ON s.id = op.shop_id
+    LEFT JOIN products p ON p.id = COALESCE(op.product_id, (
+      SELECT sm.product_id
+      FROM sku_mappings sm
+      WHERE sm.active = 1
+        AND sm.shop_id = op.shop_id
+        AND sm.product_id IS NOT NULL
+        AND (sm.online_product_id = op.id OR sm.ozon_sku = op.ozon_sku)
+      ORDER BY CASE WHEN sm.online_product_id = op.id THEN 0 ELSE 1 END, sm.id DESC
+      LIMIT 1
+    ))
     WHERE op.id IN (${ids.map(() => "?").join(",")})
   `, ids) : [];
   const rowsById = new Map(directRows.map((row) => [String(row.online_product_id), row]));
@@ -153,12 +180,23 @@ async function resolveOnlineProductsForBarcodeLabels(inputItems = []) {
           op.primary_image,
           op.image_url,
           op.barcodes_json,
+          p.name AS inventory_name,
           s.name AS shop_name,
           s.ozon_client_id,
           s.api_key_hint,
           s.ozon_api_key
         FROM online_products op
         JOIN shops s ON s.id = op.shop_id
+        LEFT JOIN products p ON p.id = COALESCE(op.product_id, (
+          SELECT sm.product_id
+          FROM sku_mappings sm
+          WHERE sm.active = 1
+            AND sm.shop_id = op.shop_id
+            AND sm.product_id IS NOT NULL
+            AND (sm.online_product_id = op.id OR sm.ozon_sku = op.ozon_sku)
+          ORDER BY CASE WHEN sm.online_product_id = op.id THEN 0 ELSE 1 END, sm.id DESC
+          LIMIT 1
+        ))
         WHERE op.shop_id = ?
           AND (op.ozon_sku = ? OR op.offer_id = ?)
         ORDER BY CASE WHEN op.ozon_sku = ? THEN 0 WHEN op.offer_id = ? THEN 1 ELSE 2 END, op.id DESC
@@ -270,18 +308,19 @@ async function ensureProductBarcode(row, options = {}) {
   return { row: syncedRow, barcode: nextBarcode, generated: true };
 }
 
-async function renderThermalBarcodeLabelPdf(row, barcode) {
+export async function renderThermalBarcodeLabelPdf(row, barcode) {
   const svg = bwipjs.toSVG({
     bcid: "code128",
     text: String(barcode || "").trim(),
     height: 22,
     includetext: false,
-    paddingwidth: 12,
+    paddingwidth: 0,
     backgroundcolor: "FFFFFF"
   });
   const pdf = await PDFDocument.create();
   pdf.registerFontkit(fontkit);
-  const font = await embedBarcodeLabelFont(pdf);
+  const rawTitle = barcodeLabelTitle(row);
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
   const page = pdf.addPage([THERMAL_LABEL.width, THERMAL_LABEL.height]);
   const marginX = 4;
   const barcodeWidth = THERMAL_LABEL.width - marginX * 2;
@@ -293,26 +332,38 @@ async function renderThermalBarcodeLabelPdf(row, barcode) {
     width: barcodeWidth,
     height: barcodeHeight
   });
-  const barcodeText = String(barcode || "").trim();
+  const barcodeText = safePdfText(barcode, "barcode");
   const barcodeTextSize = 11.5;
   page.drawText(barcodeText, {
     x: marginX,
-    y: 15.5,
+    y: 30.5,
     size: barcodeTextSize,
     font,
     color: rgb(0.08, 0.1, 0.14)
   });
-  const printableName = barcodeLabelTitle(row);
-  const titleLines = wrapText(printableName, font, 5.3, THERMAL_LABEL.width - 8, 2);
-  titleLines.forEach((line, index) => {
-    page.drawText(line, {
+  const titleSize = barcodeTextSize;
+  const titleImage = await renderBarcodeLabelTitleImage(rawTitle, titleSize, THERMAL_LABEL.width - 8);
+  if (titleImage) {
+    const embeddedTitle = await pdf.embedPng(titleImage.buffer);
+    page.drawImage(embeddedTitle, {
       x: 4,
-      y: 7.2 - index * 5.3,
-      size: 5.3,
-      font,
-      color: rgb(0.08, 0.1, 0.14)
+      y: 1,
+      width: titleImage.width,
+      height: titleImage.height
     });
-  });
+  } else {
+    const fallbackTitle = safePdfText(rawTitle, row.offer_id || row.ozon_sku || "Ozon barcode");
+    const fallbackLines = wrapText(fallbackTitle, font, titleSize, THERMAL_LABEL.width - 8, 2);
+    fallbackLines.forEach((line, index) => {
+      page.drawText(line, {
+        x: 4,
+        y: 13 - index * 12,
+        size: titleSize,
+        font,
+        color: rgb(0.08, 0.1, 0.14)
+      });
+    });
+  }
   return Buffer.from(await pdf.save());
 }
 
@@ -343,16 +394,74 @@ function drawBwipSvgBarcode(page, svg, box) {
 }
 
 function barcodeLabelTitle(row) {
-  return String(row.name || row.offer_id || row.ozon_sku || "Ozon barcode").replace(/\s+/g, " ").trim();
+  return String(row.inventory_name || row.name || row.offer_id || row.ozon_sku || "Ozon barcode").replace(/\s+/g, " ").trim();
 }
 
-async function embedBarcodeLabelFont(pdf) {
-  try {
-    const bytes = await fs.readFile("C:\\Windows\\Fonts\\arial.ttf");
-    return pdf.embedFont(bytes, { subset: true });
-  } catch {
-    return pdf.embedFont(StandardFonts.Helvetica);
+async function resolveBarcodeLabelTitleFont(requiredText = "") {
+  for (const fontPath of BARCODE_LABEL_FONT_PATHS) {
+    try {
+      const bytes = await fs.readFile(fontPath);
+      const parsedFont = fontkit.create(bytes);
+      const supportedCharacters = new Set(parsedFont.characterSet || []);
+      const supportsRequiredText = [...String(requiredText || "")]
+        .every((character) => /\s/.test(character) || supportedCharacters.has(character.codePointAt(0)));
+      if (supportsRequiredText) {
+        return {
+          path: fontPath,
+          family: String(parsedFont.familyName || parsedFont.fullName || "sans").trim(),
+          font: parsedFont
+        };
+      }
+    } catch {
+      // Try the next known Windows/Linux Unicode font location.
+    }
   }
+  return null;
+}
+
+function escapePangoText(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+async function renderBarcodeLabelTitleImage(text, size, maxWidth) {
+  const font = await resolveBarcodeLabelTitleFont(text);
+  if (!font) return null;
+  const dpi = 300;
+  const lines = [];
+  let current = "";
+  for (const character of String(text || "").trim()) {
+    const candidate = `${current}${character}`;
+    const width = Number(font.font.layout(candidate).advanceWidth || 0) / Number(font.font.unitsPerEm || 1000) * size;
+    if (current && width > maxWidth) {
+      lines.push(current.trimEnd());
+      if (lines.length >= 2) break;
+      current = character.trimStart();
+    } else {
+      current = candidate;
+    }
+  }
+  if (current && lines.length < 2) lines.push(current.trimEnd());
+  if (!lines.length) return null;
+  const buffer = await sharp({
+    text: {
+      text: escapePangoText(lines.slice(0, 2).join("\n")),
+      font: `${font.family} ${size}`,
+      fontfile: font.path,
+      rgba: true,
+      dpi,
+      spacing: 0,
+      wrap: "none"
+    }
+  }).png().toBuffer();
+  const metadata = await sharp(buffer).metadata();
+  return {
+    buffer,
+    width: Math.min(maxWidth, Number(metadata.width || 0) * 72 / dpi),
+    height: Number(metadata.height || 0) * 72 / dpi
+  };
 }
 
 function centerTextX(text, font, size, width) {
@@ -441,7 +550,7 @@ async function cacheBarcodeLabel(row, barcode, buffer, source = "render") {
     String(row.ozon_product_id || ""),
     String(barcode || ""),
     LABEL_LAYOUT_TYPE,
-    String(row.name || ""),
+    barcodeLabelTitle(row),
     buffer,
     buffer.length,
     source
@@ -454,7 +563,7 @@ async function singleBarcodeLabelBuffer(row, barcode, options = {}) {
     cached?.buffer?.length &&
     cached.barcode_value === String(barcode || "") &&
     cached.layout_type === LABEL_LAYOUT_TYPE &&
-    cached.product_name === String(row.name || "")
+    cached.product_name === barcodeLabelTitle(row)
   ) {
     return { buffer: cached.buffer, cached: true };
   }

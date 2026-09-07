@@ -2515,6 +2515,19 @@ function resultImageUrl(row) {
   return firstGeneratedImage(row.imageResult)?.url || "";
 }
 
+function resultThumbnailUrl(row) {
+  const sourceUrl = resultImageUrl(row);
+  if (!sourceUrl) return "";
+  try {
+    const url = new URL(sourceUrl, window.location.origin);
+    if (!/\.aliyuncs\.com$/i.test(url.hostname)) return sourceUrl;
+    url.searchParams.set("x-oss-process", "image/resize,m_fill,w_240,h_320/quality,q_75/format,webp");
+    return url.toString();
+  } catch {
+    return sourceUrl;
+  }
+}
+
 function rowMainImageDraftUrl(row) {
   const asset = row.assets?.main_image || {};
   return asset.publishUrl || asset.url || asset.localUrl || asset.downloadUrl || resultImageUrl(row) || "";
@@ -3244,9 +3257,10 @@ function uploadRowMainImageRequest(row) {
                 <el-image
                   v-if="resultImageUrl(row)"
                   class="result-thumb"
-                  :src="resultImageUrl(row)"
+                  :src="resultThumbnailUrl(row)"
                   :preview-src-list="[resultImageUrl(row)]"
                   preview-teleported
+                  lazy
                   fit="cover"
                 />
                 <el-tag v-else :type="statusTagType(row.status)">{{ rowStatusText(row) }}</el-tag>

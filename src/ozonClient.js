@@ -322,6 +322,43 @@ export async function fetchOzonProductStocks(shop, options = {}) {
   return rows;
 }
 
+export async function fetchOzonFbsStocksByWarehouse(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) return demoStockRows(shop);
+  const skus = [...new Set((options.skus || options.sku || []).map((item) => String(item || "").trim()).filter(Boolean))];
+  const offerIds = [...new Set((options.offerIds || options.offer_id || []).map((item) => String(item || "").trim()).filter(Boolean))];
+  if (!skus.length && !offerIds.length) throw new Error("按仓库读取 Ozon 库存需要 SKU 或 offer_id");
+  const filterName = skus.length ? "sku" : "offer_id";
+  const filterValues = skus.length ? skus : offerIds;
+  const rows = [];
+  for (const values of chunkOzonFilterValues(filterValues)) {
+    let cursor = "";
+    do {
+      throwIfAborted(options.signal);
+      const data = await ozonRequest(shop, "/v2/product/info/stocks-by-warehouse/fbs", {
+        [filterName]: values,
+        cursor,
+        limit: Math.min(Math.max(Number(options.limit || 1000), 1), 1000)
+      }, { signal: options.signal });
+      const items = data.products || data.result?.products || data.result || [];
+      rows.push(...(Array.isArray(items) ? items : []).map((item) => ({
+        ozon_product_id: String(item.product_id || ""),
+        offer_id: String(item.offer_id || ""),
+        ozon_sku: String(item.sku || ""),
+        warehouse_id: String(item.warehouse_id || ""),
+        warehouse_name: String(item.warehouse_name || ""),
+        stock_type: "fbs_virtual",
+        present: stockNumber(item.present),
+        reserved: stockNumber(item.reserved),
+        available: stockNumber(item.free_stock ?? item.available ?? item.present),
+        raw_json: stringify(item)
+      })).filter((item) => item.warehouse_id && (item.ozon_sku || item.offer_id || item.ozon_product_id)));
+      cursor = data.cursor || data.result?.cursor || "";
+      if (!data.has_next && !data.result?.has_next) cursor = "";
+    } while (cursor);
+  }
+  return rows;
+}
+
 function ozonStockFilterChunks({ offerIds = [], productIds = [] } = {}) {
   const offerChunks = offerIds.length ? chunkOzonFilterValues(offerIds) : [[]];
   const productChunks = productIds.length ? chunkOzonFilterValues(productIds) : [[]];

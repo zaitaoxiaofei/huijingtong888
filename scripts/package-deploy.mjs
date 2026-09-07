@@ -234,11 +234,27 @@ async function promoteDeployOutput() {
       "-ExecutionPolicy",
       "Bypass",
       "-Command",
-      `$ErrorActionPreference='SilentlyContinue'; New-Item -ItemType Directory -Path '${escapedTargetDir}' -Force | Out-Null; Get-ChildItem -LiteralPath '${escapedSourceDir}' -Force | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination '${escapedTargetDir}' -Recurse -Force }; Copy-Item -LiteralPath '${escapedSourceManifestPath}' -Destination '${escapedTargetManifestPath}' -Force; exit 0`
+      `$ErrorActionPreference='Stop'; New-Item -ItemType Directory -Path '${escapedTargetDir}' -Force | Out-Null; Get-ChildItem -LiteralPath '${escapedSourceDir}' -Force | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination '${escapedTargetDir}' -Recurse -Force }; Copy-Item -LiteralPath '${escapedSourceManifestPath}' -Destination '${escapedTargetManifestPath}' -Force`
     ], "Deploy artifact promote");
   } else {
     await mkdirWithRetry(finalOutputDir);
     await fs.cp(outputDir, finalOutputDir, { recursive: true, force: true });
+  }
+}
+
+async function verifyDeployEntrypoints() {
+  const requiredPaths = [
+    "deploy-manifest.json",
+    path.join("public", "admin.html"),
+    path.join("public", "vue-apps", ".vite", "manifest.json")
+  ];
+
+  for (const relativePath of requiredPaths) {
+    const target = path.join(finalOutputDir, relativePath);
+    const stat = await fs.stat(target).catch(() => null);
+    if (!stat?.isFile() || stat.size <= 0) {
+      throw new Error(`Deployment artifact is missing required entrypoint: ${relativePath}`);
+    }
   }
 }
 
@@ -353,5 +369,6 @@ await fs.writeFile(
 );
 
 await promoteDeployOutput();
+await verifyDeployEntrypoints();
 
 console.log(`Deployment artifact generated at ${finalOutputDir}`);

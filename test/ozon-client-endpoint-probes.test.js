@@ -8,6 +8,7 @@ import {
   fetchOzonProductInfoLimit,
   fetchOzonProductPrices,
   fetchOzonProductStocks,
+  fetchOzonFbsStocksByWarehouse,
   fetchOzonWarehouses
 } from "../src/ozonClient.js";
 
@@ -142,6 +143,40 @@ test("fetchOzonProductStocks chunks product_id filters at Ozon limit", async (t)
   assert.deepEqual(calls.map((call) => call.body.filter.product_id.length), [1000, 1]);
   assert.ok(calls.every((call) => call.body.filter.product_id.length <= 1000));
   assert.equal(rows.length, 2);
+});
+
+test("fetchOzonFbsStocksByWarehouse returns warehouse-specific stock rows", async (t) => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url) });
+    const body = JSON.parse(options.body);
+    assert.deepEqual(body.sku, ["10001"]);
+    assert.equal(body.limit, 1000);
+    return jsonResponse({
+      products: [{ sku: 10001, offer_id: "offer-1", product_id: 1, warehouse_id: 9001, warehouse_name: "GUOO", present: 8, reserved: 2, free_stock: 6 }],
+      has_next: false,
+      cursor: ""
+    });
+  };
+  const rows = await fetchOzonFbsStocksByWarehouse(REAL_SHOP, { skus: ["10001"] });
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.endsWith("/v2/product/info/stocks-by-warehouse/fbs"));
+  assert.deepEqual(rows[0], {
+    ozon_product_id: "1",
+    offer_id: "offer-1",
+    ozon_sku: "10001",
+    warehouse_id: "9001",
+    warehouse_name: "GUOO",
+    stock_type: "fbs_virtual",
+    present: 8,
+    reserved: 2,
+    available: 6,
+    raw_json: JSON.stringify({ sku: 10001, offer_id: "offer-1", product_id: 1, warehouse_id: 9001, warehouse_name: "GUOO", present: 8, reserved: 2, free_stock: 6 })
+  });
 });
 
 test("fetchOzonProductStocks retries Ozon rate limits", async (t) => {

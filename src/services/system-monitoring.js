@@ -6,10 +6,12 @@ import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 
 const execFileAsync = promisify(execFile);
 const SNAPSHOT_RETENTION_DAYS = 180;
-const WARNING_USAGE_PERCENT = 75;
-const CRITICAL_USAGE_PERCENT = 85;
-const WARNING_DAILY_GROWTH_BYTES = 1024 ** 3;
-const CRITICAL_DAILY_GROWTH_BYTES = 2 * 1024 ** 3;
+const WARNING_USAGE_PERCENT = 65;
+const CRITICAL_USAGE_PERCENT = 80;
+const WARNING_AVAILABLE_BYTES = 10 * 1024 ** 3;
+const CRITICAL_AVAILABLE_BYTES = 5 * 1024 ** 3;
+const WARNING_DAILY_GROWTH_BYTES = 512 * 1024 ** 2;
+const CRITICAL_DAILY_GROWTH_BYTES = 1024 ** 3;
 const MONITORED_PATHS = Object.freeze({
   mysql: "/var/lib/mysql",
   uploads: "/opt/ozon-erp/shared/uploads",
@@ -102,9 +104,9 @@ async function topDatabaseTables(limit = 12) {
   }));
 }
 
-function severityFor(usagePercent, dailyGrowthBytes) {
-  if (usagePercent >= CRITICAL_USAGE_PERCENT || dailyGrowthBytes >= CRITICAL_DAILY_GROWTH_BYTES) return "critical";
-  if (usagePercent >= WARNING_USAGE_PERCENT || dailyGrowthBytes >= WARNING_DAILY_GROWTH_BYTES) return "warning";
+function severityFor(usagePercent, availableBytes, dailyGrowthBytes) {
+  if (usagePercent >= CRITICAL_USAGE_PERCENT || availableBytes <= CRITICAL_AVAILABLE_BYTES || dailyGrowthBytes >= CRITICAL_DAILY_GROWTH_BYTES) return "critical";
+  if (usagePercent >= WARNING_USAGE_PERCENT || availableBytes <= WARNING_AVAILABLE_BYTES || dailyGrowthBytes >= WARNING_DAILY_GROWTH_BYTES) return "warning";
   return "normal";
 }
 
@@ -127,7 +129,7 @@ export async function captureSystemMonitorSnapshot() {
   const usagePercent = totalBytes > 0 ? Math.round((usedBytes / totalBytes) * 10000) / 100 : 0;
   const previousUsedBytes = previousRows[0] ? numberValue(previousRows[0].disk_used_bytes) : usedBytes;
   const dailyGrowthBytes = usedBytes - previousUsedBytes;
-  const severity = severityFor(usagePercent, dailyGrowthBytes);
+  const severity = severityFor(usagePercent, availableBytes, dailyGrowthBytes);
   const memory = process.memoryUsage();
   const capturedAt = new Date();
 
@@ -191,6 +193,8 @@ export async function systemMonitoringOverview(query = {}) {
     thresholds: {
       warningUsagePercent: WARNING_USAGE_PERCENT,
       criticalUsagePercent: CRITICAL_USAGE_PERCENT,
+      warningAvailableBytes: WARNING_AVAILABLE_BYTES,
+      criticalAvailableBytes: CRITICAL_AVAILABLE_BYTES,
       warningDailyGrowthBytes: WARNING_DAILY_GROWTH_BYTES,
       criticalDailyGrowthBytes: CRITICAL_DAILY_GROWTH_BYTES
     },

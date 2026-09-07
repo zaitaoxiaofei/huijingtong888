@@ -37,9 +37,20 @@ test("dashboard consolidates repeated commerce ranges into bounded aggregate que
 
   assert.match(recentCommerce, /\$\{chinaDateKeySqlMysql\("o\.ordered_at"\)\} AS date_key/);
   assert.match(recentCommerce, /GROUP BY \$\{chinaDateKeySqlMysql\("o\.ordered_at"\)\}, o\.shop_id, s\.name/);
-  assert.match(recentCommerce, /today: summarize\(selectedDateRows\)/);
-  assert.match(recentCommerce, /yesterday: summarize/);
+  assert.match(recentCommerce, /today: withEventReturns\(summarize\(selectedDateRows\), selectedReturnRows\)/);
+  assert.match(recentCommerce, /yesterday: withEventReturns/);
+  assert.match(recentCommerce, /o\.last_status_changed_at/);
+  assert.match(recentCommerce, /eventReturnRows/);
+  assert.match(recentCommerce, /return_quantity: Number\(eventSummary\.return_quantity/);
   assert.equal((trend.match(/FROM analytics_shop_daily/g) || []).length, 1);
   assert.match(trend, /SUM\(CASE WHEN date_key >= \? AND date_key <= \? THEN current_profit/);
   assert.doesNotMatch(trend, /profitSummaryOverviewMysql\(/);
+});
+
+test("dashboard return card opens all return outcomes by status-change date", async () => {
+  const source = await readFile(new URL("../frontend/admin/views/DashboardView.vue", import.meta.url), "utf8");
+
+  assert.match(source, /tab: "orders"/);
+  assert.match(source, /outcomeType: "returns"/);
+  assert.match(source, /dateBasis: "status_changed"/);
 });

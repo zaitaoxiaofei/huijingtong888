@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted } from "vue";
 import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
-import { ArrowLeft, House, Monitor, Refresh, ShoppingCart, Tickets } from "@element-plus/icons-vue";
+import { ArrowLeft, Box, House, Monitor, Refresh, ShoppingCart, Tickets } from "@element-plus/icons-vue";
 import { useAuthStore } from "../stores/auth";
 
 const route = useRoute();
@@ -9,7 +9,7 @@ const router = useRouter();
 const authStore = useAuthStore();
 
 const title = computed(() => route.meta?.title || "手机工作台");
-const canGoBack = computed(() => !["mobile-home", "mobile-orders", "mobile-procurement"].includes(route.name));
+const canGoBack = computed(() => !["mobile-home", "mobile-orders", "mobile-inventory", "mobile-procurement"].includes(route.name));
 
 function setMobileViewportState(enabled) {
   document.documentElement.classList.toggle("admin-mobile-open", enabled);
@@ -26,7 +26,8 @@ function goBack() {
 
 function openDesktop() {
   window.localStorage?.setItem("baodanMobileMode", "desktop");
-  router.push("/orders");
+  const desktopTarget = String(route.query.desktopTarget || "").trim();
+  router.push(desktopTarget.startsWith("/") && !desktopTarget.startsWith("/mobile") ? desktopTarget : "/orders");
 }
 
 function refreshPage() {
@@ -65,13 +66,17 @@ onBeforeUnmount(() => setMobileViewportState(false));
     </section>
 
     <nav class="mobile-tabbar" aria-label="手机导航">
+      <RouterLink to="/mobile" class="mobile-tabbar__item">
+        <el-icon><House /></el-icon>
+        <span>首页</span>
+      </RouterLink>
       <RouterLink to="/mobile/orders" class="mobile-tabbar__item">
         <el-icon><Tickets /></el-icon>
         <span>订单</span>
       </RouterLink>
-      <RouterLink to="/mobile/orders?status=unbound" class="mobile-tabbar__item">
-        <span class="mobile-tabbar__dot"></span>
-        <span>待绑定</span>
+      <RouterLink to="/mobile/inventory" class="mobile-tabbar__item">
+        <el-icon><Box /></el-icon>
+        <span>库存</span>
       </RouterLink>
       <RouterLink to="/mobile/procurement" class="mobile-tabbar__item">
         <el-icon><ShoppingCart /></el-icon>
@@ -165,7 +170,7 @@ onBeforeUnmount(() => setMobileViewportState(false));
   bottom: 0;
   z-index: 20;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
   padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
   border-top: 1px solid #dbe3ef;

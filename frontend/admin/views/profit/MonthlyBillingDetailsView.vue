@@ -51,8 +51,16 @@ const expenseForm = reactive({
 
 const selectedPeriodTitle = computed(() => `${state.dateRange?.[0] || "-"} 至 ${state.dateRange?.[1] || "-"}`);
 const selectedSummary = computed(() => state.month?.summary || {});
+const procurementInventory = computed(() => state.month?.procurement_inventory || {});
+const aiUsage = computed(() => state.month?.ai_usage || {});
+const aiUsagePeople = computed(() => Array.isArray(aiUsage.value.people) ? aiUsage.value.people : []);
 const shopRows = computed(() => state.month?.shops || []);
 const expenseRows = computed(() => state.month?.expenses || []);
+
+function formatAiMoney(value) {
+  const amount = Number(value || 0);
+  return Number.isFinite(amount) ? amount.toFixed(3) : "0.000";
+}
 
 function formatRatio(value) {
   const number = Number(value || 0);
@@ -65,13 +73,14 @@ function formatShare(value) {
 }
 
 const summaryCards = computed(() => [
+  { label: "订单数", display: formatInteger(selectedSummary.value.order_count), suffix: "单", tone: "normal" },
   { label: "总收益", value: selectedSummary.value.revenue, suffix: "CNY", tone: "income" },
   { label: "净利润", value: selectedSummary.value.net_profit, suffix: "CNY", tone: Number(selectedSummary.value.net_profit || 0) >= 0 ? "profit" : "loss" },
   { label: "净利润率", display: formatRatio(selectedSummary.value.net_profit_margin), tone: "ratio" },
   { label: "订单利润", value: selectedSummary.value.profit, suffix: "未扣广告与人工", tone: "normal" },
   { label: "已结算利润", value: selectedSummary.value.accrued_profit, suffix: `${formatInteger(selectedSummary.value.accrued_order_count)} 单`, tone: "settled" },
   { label: "待结算利润", value: selectedSummary.value.pending_profit, suffix: `${formatInteger(selectedSummary.value.pending_order_count)} 单`, tone: "pending" },
-  { label: "订单数", display: formatInteger(selectedSummary.value.order_count), suffix: "单", tone: "normal" }
+  { label: "AI 消耗", display: `${formatAiMoney(aiUsage.value.cost)} RMB`, suffix: `${formatInteger(aiUsage.value.request_count)} 次调用`, tone: "ai" }
 ]);
 
 const formulaRows = computed(() => {
@@ -93,6 +102,27 @@ const formulaRows = computed(() => {
 });
 
 const formulaText = computed(() => formulaRows.value.map((item) => item.label).join(" − ").replace("总收益 −", "总收益 −"));
+
+const procurementCards = computed(() => {
+  const row = procurementInventory.value;
+  return [
+    { label: "销售消耗采购成本", value: selectedSummary.value.purchase_cost, hint: "随本期有效订单计入利润" },
+    { label: "真实采购支出", value: row.purchase_total_amount, hint: `${formatInteger(row.purchase_order_count)} 张已确认采购单` },
+    { label: "采购商品金额", value: row.purchase_goods_amount, hint: `${formatInteger(row.purchase_quantity)} 件` },
+    { label: "采购运费", value: row.purchase_shipping_amount, hint: "已计入真实采购支出" },
+    { label: "本期已入库金额", value: row.inbound_amount, hint: `${formatInteger(row.inbound_quantity)} 件` }
+  ];
+});
+
+const inventoryCards = computed(() => {
+  const row = procurementInventory.value;
+  return [
+    { label: "当前库存占用总额", value: row.inventory_total_value, quantity: null, total: true },
+    { label: "国内库存", value: row.local_inventory_value, quantity: row.local_inventory_quantity },
+    { label: "FBP 库存", value: row.fbp_inventory_value, quantity: row.fbp_inventory_quantity },
+    { label: "采购在途", value: row.in_transit_value, quantity: row.in_transit_quantity }
+  ];
+});
 
 function shiftMonth(offset) {
   const [from, to] = state.dateRange || [];
@@ -396,6 +426,46 @@ onBeforeUnmount(() => abortController?.abort());
       </div>
     </section>
 
+    <section v-loading="state.loading" class="capital-section">
+      <div class="section-head">
+        <div>
+          <strong>采购支出与库存资金</strong>
+          <span>采购支出按北京时间确认采购日期统计；库存占用为当前快照，不参与上方订单利润的重复扣减。</span>
+        </div>
+      </div>
+      <div class="capital-workspace">
+        <div class="capital-panel">
+          <div class="capital-panel__title">
+            <strong>本期采购</strong>
+            <span>区分“卖掉多少成本”和“实际采购花了多少”</span>
+          </div>
+          <div class="capital-metric-grid procurement-metric-grid">
+            <article v-for="item in procurementCards" :key="item.label" class="capital-metric">
+              <span>{{ item.label }}</span>
+              <strong>¥{{ formatMoney(item.value) }}</strong>
+              <small>{{ item.hint }}</small>
+            </article>
+          </div>
+        </div>
+        <div class="capital-panel">
+          <div class="capital-panel__title">
+            <strong>当前库存占用</strong>
+            <span>采用最新采购落地成本，缺失时回退商品采购成本</span>
+          </div>
+          <div class="capital-metric-grid inventory-metric-grid">
+            <article v-for="item in inventoryCards" :key="item.label" class="capital-metric" :class="{ 'is-total': item.total }">
+              <span>{{ item.label }}</span>
+              <strong>¥{{ formatMoney(item.value) }}</strong>
+              <small>{{ item.quantity == null ? '国内 + FBP + 在途' : `${formatInteger(item.quantity)} 件` }}</small>
+            </article>
+          </div>
+        </div>
+      </div>
+      <el-alert type="warning" :closable="false" show-icon class="capital-alert">
+        <template #title>未经过采购确认或平台订单尚未关联到采购单的支出不会进入真实采购金额，请及时在采购工作台补录或关联。</template>
+      </el-alert>
+    </section>
+
     <section v-loading="state.loading" class="shop-section">
       <div class="section-head">
         <div>
@@ -438,6 +508,34 @@ onBeforeUnmount(() => abortController?.abort());
           </template>
         </el-table-column>
       </el-table>
+    </section>
+
+    <section v-loading="state.loading" class="ai-usage-section">
+      <div class="section-head">
+        <div>
+          <strong>{{ selectedPeriodTitle }} 人员 AI 消耗</strong>
+          <span>按操作人员统计，不按店铺分摊，也不受上方店铺筛选影响。</span>
+        </div>
+      </div>
+      <div class="ai-usage-summary">
+        <article><span>AI 消耗</span><strong>{{ formatAiMoney(aiUsage.cost) }} RMB</strong></article>
+        <article><span>实际调用</span><strong>{{ formatInteger(aiUsage.request_count) }} 次</strong></article>
+        <article><span>成功生图</span><strong>{{ formatInteger(aiUsage.generated_count) }} 张</strong></article>
+        <article><span>失败 / 未完成</span><strong>{{ formatInteger(aiUsage.unresolved_count) }} 次</strong></article>
+      </div>
+      <el-table :data="aiUsagePeople" stripe border class="erp-data-table ai-usage-table" table-layout="fixed" empty-text="本期暂无 AI 生图调用">
+        <el-table-column prop="person_name" label="操作人员" min-width="150" fixed="left" />
+        <el-table-column prop="request_count" label="调用次数" min-width="110" align="right" />
+        <el-table-column prop="generated_count" label="成功生图" min-width="110" align="right" />
+        <el-table-column prop="unresolved_count" label="失败 / 未完成" min-width="130" align="right" />
+        <el-table-column prop="task_count" label="任务数" min-width="100" align="right" />
+        <el-table-column label="AI 消耗" min-width="130" align="right">
+          <template #default="{ row }"><strong class="ai-money">{{ formatAiMoney(row.cost) }} RMB</strong></template>
+        </el-table-column>
+      </el-table>
+      <el-alert type="info" :closable="false" show-icon class="ai-usage-alert">
+        <template #title>按实际提交生图请求次数 × 0.038 RMB 计算，成功和失败均计费；统计日期按北京时间，历史流水启用前仅能回溯成功结果。</template>
+      </el-alert>
     </section>
 
     <el-drawer v-model="expenseDrawer" title="人工账单与工资明细" size="860px">
@@ -540,10 +638,32 @@ onBeforeUnmount(() => abortController?.abort());
 .billing-filters :deep(.el-form-item) { margin-right: 14px; margin-bottom: 0; }
 .billing-filters :deep(.el-form-item__label) { padding-right: 7px; color: #64748b; font-size: 12px; }
 .billing-filters .billing-filter-actions { margin-right: 0; margin-left: 2px; }
-.billing-overview, .shop-section { border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; overflow: hidden; }
+.billing-overview, .ai-usage-section, .capital-section, .shop-section { border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; overflow: hidden; }
+.ai-usage-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 16px 18px; }
+.ai-usage-summary article { padding: 13px 15px; border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; }
+.ai-usage-summary span { display: block; color: #64748b; font-size: 12px; }
+.ai-usage-summary strong { display: block; margin-top: 7px; color: #0f172a; font-size: 19px; }
+.ai-usage-summary article:first-child { border-color: #ddd6fe; background: #f5f3ff; }
+.ai-usage-summary article:first-child strong, .summary-card.is-ai strong, .ai-money { color: #7c3aed; }
+.ai-usage-table { border-top: 1px solid #e2e8f0; }
+.ai-usage-alert { margin: 14px 18px 16px; }
+.capital-workspace { display: grid; grid-template-columns: 1.25fr 1fr; gap: 14px; padding: 16px 18px 10px; }
+.capital-panel { min-width: 0; padding: 15px; border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; }
+.capital-panel__title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 13px; }
+.capital-panel__title strong { color: #0f172a; font-size: 15px; }
+.capital-panel__title span, .capital-metric span, .capital-metric small { color: #64748b; font-size: 12px; }
+.capital-metric-grid { display: grid; gap: 10px; }
+.procurement-metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.inventory-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.capital-metric { min-width: 0; padding: 12px; border: 1px solid #e2e8f0; border-radius: 9px; background: #fff; }
+.capital-metric span, .capital-metric small { display: block; }
+.capital-metric strong { display: block; margin: 7px 0 5px; color: #0f172a; font-size: 18px; }
+.capital-metric.is-total { border-color: #bfdbfe; background: #eff6ff; }
+.capital-metric.is-total strong { color: #1d4ed8; }
+.capital-alert { margin: 0 18px 16px; }
 .section-head { padding: 15px 18px; border-bottom: 1px solid #e2e8f0; }
 .section-head strong { display: block; color: #0f172a; font-size: 15px; }
-.summary-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 12px; padding: 16px 18px; }
+.summary-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 10px; padding: 16px 18px; }
 .summary-card { min-height: 88px; padding: 13px 15px; border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; }
 .summary-card span, .summary-card small { display: block; color: #64748b; font-size: 12px; }
 .summary-card strong { display: block; margin: 8px 0 3px; color: #0f172a; font-size: 20px; }
@@ -592,11 +712,12 @@ onBeforeUnmount(() => abortController?.abort());
 .expense-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 16px; }
 .expense-form-grid .wide-field { grid-column: 1 / -1; }
 .expense-form-grid :deep(.el-input-number), .expense-form-grid :deep(.el-date-editor), .expense-form-grid :deep(.el-select) { width: 100%; }
-:global(:root[data-theme="dark"] .billing-overview), :global(:root[data-theme="dark"] .shop-section), :global(:root[data-theme="dark"] .formula-card), :global(:root[data-theme="dark"] .settlement-card), :global(:root[data-theme="dark"] .summary-card) { border-color: rgba(148, 163, 184, .24); background: rgba(15, 23, 42, .72); }
+:global(:root[data-theme="dark"] .billing-overview), :global(:root[data-theme="dark"] .ai-usage-section), :global(:root[data-theme="dark"] .capital-section), :global(:root[data-theme="dark"] .shop-section), :global(:root[data-theme="dark"] .formula-card), :global(:root[data-theme="dark"] .settlement-card), :global(:root[data-theme="dark"] .summary-card), :global(:root[data-theme="dark"] .ai-usage-summary article), :global(:root[data-theme="dark"] .capital-panel), :global(:root[data-theme="dark"] .capital-metric) { border-color: rgba(148, 163, 184, .24); background: rgba(15, 23, 42, .72); }
 :global(:root[data-theme="dark"] .formula-heading) { background: rgba(30, 41, 59, .84); }
-:global(:root[data-theme="dark"] .formula-label), :global(:root[data-theme="dark"] .formula-row > strong), :global(:root[data-theme="dark"] .section-head strong), :global(:root[data-theme="dark"] .billing-toolbar-row h2), :global(:root[data-theme="dark"] .summary-card strong) { color: #e2e8f0; }
-@media (max-width: 1280px) {
-  .summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+:global(:root[data-theme="dark"] .formula-label), :global(:root[data-theme="dark"] .formula-row > strong), :global(:root[data-theme="dark"] .section-head strong), :global(:root[data-theme="dark"] .billing-toolbar-row h2), :global(:root[data-theme="dark"] .summary-card strong), :global(:root[data-theme="dark"] .capital-panel__title strong), :global(:root[data-theme="dark"] .capital-metric strong) { color: #e2e8f0; }
+@media (max-width: 1280px), (max-width: 1366px) and (any-pointer: coarse) {
+  .summary-grid, .ai-usage-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .capital-workspace { grid-template-columns: 1fr; }
   .profit-workspace { grid-template-columns: 1fr; }
   .billing-filters { flex-wrap: wrap; }
 }
@@ -604,7 +725,7 @@ onBeforeUnmount(() => abortController?.abort());
   .section-head, .formula-heading { align-items: stretch; flex-direction: column; }
   .billing-filters { align-items: stretch; flex-direction: column; }
   .billing-filters :deep(.el-form-item) { margin: 0 0 10px; }
-  .summary-grid, .formula-list, .expense-form-grid { grid-template-columns: 1fr; }
+  .summary-grid, .ai-usage-summary, .formula-list, .expense-form-grid, .procurement-metric-grid, .inventory-metric-grid { grid-template-columns: 1fr; }
   .formula-row:nth-child(odd) { border-right: 0; }
   .profit-workspace { padding: 0 12px 12px; }
 }

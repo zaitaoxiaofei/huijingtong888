@@ -165,20 +165,30 @@ async function submit() {
     ElMessage.warning("请先选择商品");
     return;
   }
+  if (!(Number(form.amount || 0) > 0)) {
+    ElMessage.warning("请填写实际采购货款；提交即表示已经完成下单");
+    return;
+  }
   submitting.value = true;
   try {
-    await apiClient.post("/api/procurement/requests", {
-      ...form,
-      quantity: Number(form.quantity || 1),
-      amount: Number(form.amount || 0),
-      shipping_amount: Number(form.shipping_amount || 0),
+    await apiClient.post("/api/procurement/purchases", {
       person_id: Number(form.person_id || 0) || null,
+      source_type: form.source_type,
       supplier_id: form.supplier_id || null,
-      source_order_id: Number(props.sourceOrderContext?.orderId || 0) || null,
-      source_order_item_id: Number(props.sourceOrderContext?.orderItemId || 0) || null,
-      source_ozon_sku: props.sourceOrderContext?.ozonSku || null
+      note: form.note,
+      items: [{
+        ...form,
+        quantity: Number(form.quantity || 1),
+        amount: Number(form.amount || 0),
+        shipping_amount: Number(form.shipping_amount || 0),
+        person_id: Number(form.person_id || 0) || null,
+        supplier_id: form.supplier_id || null,
+        source_order_id: Number(props.sourceOrderContext?.orderId || 0) || null,
+        source_order_item_id: Number(props.sourceOrderContext?.orderItemId || 0) || null,
+        source_ozon_sku: props.sourceOrderContext?.ozonSku || null
+      }]
     });
-    ElMessage.success("采购请求已创建");
+    ElMessage.success("采购已登记，商品已进入采购在途");
     emit("created");
     emit("update:modelValue", false);
     resetForm();
@@ -213,7 +223,7 @@ watch(currentUserPersonId, () => {
 <template>
   <el-dialog
     :model-value="modelValue"
-    title="新建采购请求"
+    title="登记已下单采购"
     width="1040px"
     align-center
     class="erp-centered-dialog"
@@ -286,7 +296,7 @@ watch(currentUserPersonId, () => {
           </div>
           <el-row :gutter="16">
             <el-col :span="12">
-              <el-form-item label="申请人">
+                <el-form-item label="采购人">
                 <el-select v-model="form.person_id">
                   <el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="person.id" />
                 </el-select>
@@ -351,7 +361,7 @@ watch(currentUserPersonId, () => {
     <template #footer>
       <div class="erp-dialog-footer">
         <el-button class="erp-btn erp-btn-secondary" @click="emit('update:modelValue', false)">取消</el-button>
-        <el-button class="erp-btn erp-btn-primary" type="primary" :loading="submitting" @click="submit">提交请求</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" :loading="submitting" @click="submit">确认已下单并进入在途</el-button>
       </div>
     </template>
   </el-dialog>

@@ -6,6 +6,15 @@ let schemaReadyPromise = null;
 let productCoreNameSchemaReadyPromise = null;
 const CORE_PRODUCT_NAME_MAX_LENGTH = 7;
 
+function bindableInventoryProductPredicate(alias = "products") {
+  return `(
+    COALESCE(${alias}.product_type, 'main') != 'selection'
+    OR COALESCE(${alias}.selection_status, 'draft') = 'listed'
+    OR EXISTS (SELECT 1 FROM sku_mappings naming_sm WHERE naming_sm.product_id = ${alias}.id AND naming_sm.active = 1)
+    OR EXISTS (SELECT 1 FROM inventory_movements naming_im WHERE naming_im.product_id = ${alias}.id)
+  )`;
+}
+
 function isNamingMaintainer(session = {}) {
   return String(session?.name || "").trim() === "核动力牛马";
 }
@@ -19,15 +28,47 @@ function validateCoreProductName(value) {
   return text;
 }
 
-export async function inventoryProductNamingOptions(query = {}) {
+export function validateVehicleBrand(value) {
+  const rawText = clean(value, 128)
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/gu, "");
+  const legacyParts = rawText.split("|").map((part) => part.trim()).filter(Boolean);
+  const text = (legacyParts.find((part) => /^[\x20-\x7E]+$/.test(part)) || rawText).toUpperCase();
+  if (!text) throw new Error("汽车品牌不能为空");
+  if (!/[A-Z]/.test(text) || !/^[A-Z0-9][A-Z0-9 &/().+'-]*$/.test(text)) {
+    throw new Error("汽车品牌请填写俄罗斯市场使用的英文名称，例如 TOYOTA");
+  }
+  return text;
+}
+
+export async function inventoryProductNamingOptions(query = {}, session = {}) {
   await ensureSchema();
   await ensureProductCoreNameSchema();
   const type = String(query.type || "").trim();
+  const status = String(query.status || "").trim();
   const search = String(query.q || query.query || "").trim().toLowerCase();
   const category = clean(query.category, 255);
-  const brand = clean(query.brand, 255).replace("|", " ").trim();
+  const brand = clean(query.brand, 255).replace(/\|/g, " ").replace(/\s+/g, " ").trim();
   const fitmentType = query.fitment_type === "specific" ? "specific" : (query.fitment_type === "universal" ? "universal" : "");
   const vehicleModel = clean(query.vehicle_model, 255);
+
+  if (status === "pending") {
+    if (!isNamingMaintainer(session)) throw new Error("仅核动力牛马可以查看待审核核心品名和汽车品牌");
+    const params = [];
+    const where = ["o.option_type IN ('category', 'brand')", "o.status = 'pending'"];
+    if (search) {
+      where.push("LOWER(CONCAT(o.value, ' ', o.label)) LIKE ?");
+      params.push(`%${search}%`);
+    }
+    const rows = await mysqlQuery(`
+      SELECT o.id, o.option_type, o.value, o.label, o.status, o.created_at, o.updated_at
+      FROM inventory_product_naming_options o
+      WHERE ${where.join(" AND ")}
+      ORDER BY o.created_at ASC, o.id ASC
+      LIMIT 120
+    `, params);
+    return { rows };
+  }
 
   const fieldByType = {
     category: "inventory_category",
@@ -45,7 +86,7 @@ export async function inventoryProductNamingOptions(query = {}) {
     if (type === "accessory" && !category) {
       return { rows: [] };
     }
-    const where = ["active = 1", `${productField} IS NOT NULL`, `TRIM(CAST(${productField} AS CHAR)) <> ''`];
+    const where = ["products.active = 1", bindableInventoryProductPredicate("products"), `${productField} IS NOT NULL`, `TRIM(CAST(${productField} AS CHAR)) <> ''`];
     const params = [];
     if (category && type !== "category") {
       where.push("inventory_category = ?");
@@ -82,9 +123,7 @@ export async function inventoryProductNamingOptions(query = {}) {
         : type === "material"
           ? rawText.split(/[，,/、]+/u)
           : [rawText];
-      return rawValues.map((rawValue, colorIndex) => {
-        const text = rawValue.trim();
-        if (!text) return null;
+      return [...new Set(rawValues.map((rawValue) => rawValue.trim()).filter(Boolean))].map((text, colorIndex) => {
         let value = text;
         let label = text;
         if (type === "brand") {
@@ -104,10 +143,11 @@ export async function inventoryProductNamingOptions(query = {}) {
           linked_product_count: Number(row.usage_count || 0),
           last_used_at: row.last_used_at
         };
-      }).filter(Boolean);
+      });
     });
     const dictionaryRows = await mysqlQuery(`
-      SELECT o.id, o.option_type, o.value, o.label, o.status, o.usage_count, o.updated_at AS last_used_at
+      SELECT o.id, o.option_type, o.value, o.label, o.status, o.usage_count,
+        0 AS linked_product_count, o.updated_at AS last_used_at
       FROM inventory_product_naming_options o
       WHERE o.option_type = ? AND o.status = 'active'
         AND (? <> 'accessory' OR NOT EXISTS (
@@ -120,26 +160,44 @@ export async function inventoryProductNamingOptions(query = {}) {
       LIMIT 120
     `, [type, type, category]);
     const merged = new Map();
-    for (const row of [...rows, ...dictionaryRows]) {
+    for (const row of rows) {
+      const existing = merged.get(row.value);
+      if (existing) {
+        existing.usage_count += Number(row.usage_count || 0);
+        existing.linked_product_count += Number(row.linked_product_count || 0);
+        if (String(row.last_used_at || "") > String(existing.last_used_at || "")) existing.last_used_at = row.last_used_at;
+      } else {
+        merged.set(row.value, {
+          ...row,
+          usage_count: Number(row.usage_count || 0),
+          linked_product_count: Number(row.linked_product_count || 0)
+        });
+      }
+    }
+    for (const row of dictionaryRows) {
       const existing = merged.get(row.value);
       if (existing) {
         existing.usage_count = Math.max(Number(existing.usage_count || 0), Number(row.usage_count || 0));
         existing.linked_product_count = Math.max(Number(existing.linked_product_count || 0), Number(row.linked_product_count || 0));
         if (!existing.id || String(existing.id).startsWith("actual-")) existing.id = row.id || existing.id;
       } else {
-        merged.set(row.value, { ...row, usage_count: Number(row.usage_count || 0) });
+        merged.set(row.value, {
+          ...row,
+          usage_count: Number(row.usage_count || 0),
+          linked_product_count: Number(row.linked_product_count || 0)
+        });
       }
     }
     return {
       rows: [...merged.values()]
         .filter((row) => !search || `${row.value} ${row.label}`.toLowerCase().includes(search))
-        .sort((left, right) => right.usage_count - left.usage_count || String(left.label).localeCompare(String(right.label), "zh-CN"))
+        .sort((left, right) => right.linked_product_count - left.linked_product_count || right.usage_count - left.usage_count || String(left.label).localeCompare(String(right.label), "zh-CN"))
     };
   }
   const rows = await mysqlQuery(`
     SELECT o.id, o.option_type, o.value, o.label, o.status, o.usage_count,
       CASE WHEN o.option_type = 'category'
-        THEN (SELECT COUNT(*) FROM products p WHERE p.active = 1 AND p.inventory_category = o.value)
+        THEN (SELECT COUNT(*) FROM products p WHERE p.active = 1 AND ${bindableInventoryProductPredicate("p")} AND p.inventory_category = o.value)
         ELSE o.usage_count END AS linked_product_count
     FROM inventory_product_naming_options o
     WHERE (? = '' OR o.option_type = ?)
@@ -154,10 +212,13 @@ export async function inventoryProductNamingOptions(query = {}) {
 export async function createInventoryProductNamingOption(body = {}, session = {}) {
   await ensureSchema();
   const optionType = String(body.option_type || "").trim();
-  const value = optionType === "category" ? validateCoreProductName(body.value) : clean(body.value, 255);
+  const value = optionType === "category" ? validateCoreProductName(body.value)
+    : optionType === "brand"
+      ? validateVehicleBrand(body.value)
+      : clean(body.value, 255);
   const label = clean(body.label || value, 255);
-  if (!['category', 'accessory', 'color', 'material', 'process', 'quantity'].includes(optionType)) throw new Error('该选项不允许快速新增');
-  if (optionType !== 'category' && !isNamingMaintainer(session)) throw new Error('仅核动力牛马可以维护款式、材质、工艺和颜色选项');
+  if (!['category', 'brand', 'accessory', 'color', 'material', 'process', 'quantity'].includes(optionType)) throw new Error('该选项不允许快速新增');
+  if (!['category', 'brand'].includes(optionType) && !isNamingMaintainer(session)) throw new Error('仅核动力牛马可以维护款式、材质、工艺和颜色选项');
   if (!value) throw new Error('选项内容不能为空');
   if (optionType === 'quantity' && !/^\d+$/.test(value)) throw new Error('数量只能使用阿拉伯数字');
   const status = isNamingMaintainer(session) ? 'active' : 'pending';
@@ -173,10 +234,9 @@ export async function createInventoryProductNamingOption(body = {}, session = {}
 export async function updateInventoryProductNamingOption(id, body = {}, session = {}) {
   await ensureSchema();
   await ensureProductCoreNameSchema();
-  if (!isNamingMaintainer(session)) throw new Error("仅核动力牛马可以审核或修改核心品名");
+  if (!isNamingMaintainer(session)) throw new Error("仅核动力牛马可以审核或修改标准选项");
   const optionId = Number(id);
-  const nextValue = validateCoreProductName(body.value || body.label);
-  if (!optionId) throw new Error("核心品名不存在");
+  if (!optionId) throw new Error("标准选项不存在");
 
   return withMysqlTransaction(async (connection) => {
     const [options] = await connection.query(`
@@ -186,16 +246,29 @@ export async function updateInventoryProductNamingOption(id, body = {}, session 
       FOR UPDATE
     `, [optionId]);
     const option = options[0];
-    if (!option) throw new Error("核心品名不存在或已删除");
-    if (option.option_type !== "category") throw new Error("当前只支持维护核心品名");
+    if (!option) throw new Error("标准选项不存在或已删除");
+    if (!["category", "brand"].includes(option.option_type)) throw new Error("当前只支持维护核心品名和汽车品牌");
+    const nextValue = option.option_type === "brand"
+      ? validateVehicleBrand(body.value || body.label)
+      : validateCoreProductName(body.value || body.label);
 
     const [duplicates] = await connection.query(`
       SELECT id
       FROM inventory_product_naming_options
-      WHERE option_type = 'category' AND value = ? AND id <> ? AND status <> 'archived'
+      WHERE option_type = ? AND value = ? AND id <> ? AND status <> 'archived'
       LIMIT 1
-    `, [nextValue, optionId]);
-    if (duplicates.length) throw new Error(`核心品名“${nextValue}”已存在`);
+    `, [option.option_type, nextValue, optionId]);
+    if (duplicates.length) throw new Error(`标准选项“${nextValue}”已存在`);
+
+    if (option.option_type === "brand") {
+      await connection.execute(`
+        UPDATE inventory_product_naming_options
+        SET value = ?, label = ?, status = 'active', reviewed_by_person_id = ?, reviewed_at = CURRENT_TIMESTAMP,
+          review_note = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `, [nextValue, nextValue, Number(session?.personId || 0) || null, clean(body.review_note || body.reviewNote, 500), optionId]);
+      return { ok: true, id: optionId, value: nextValue, label: nextValue, affected_products: 0 };
+    }
 
     const [products] = await connection.query(`
       SELECT id, vehicle_brand, vehicle_model, fitment_type, accessory_name, color,
@@ -227,9 +300,9 @@ export async function updateInventoryProductNamingOption(id, body = {}, session 
 export async function deleteInventoryProductNamingOption(id, session = {}) {
   await ensureSchema();
   await ensureProductCoreNameSchema();
-  if (!isNamingMaintainer(session)) throw new Error("仅核动力牛马可以停用核心品名");
+  if (!isNamingMaintainer(session)) throw new Error("仅核动力牛马可以停用标准选项");
   const optionId = Number(id);
-  if (!optionId) throw new Error("核心品名不存在");
+  if (!optionId) throw new Error("标准选项不存在");
   const rows = await mysqlQuery(`
     SELECT o.id, o.option_type, o.value,
       (SELECT COUNT(*) FROM products p WHERE p.active = 1 AND p.inventory_category = o.value) AS linked_product_count
@@ -238,8 +311,12 @@ export async function deleteInventoryProductNamingOption(id, session = {}) {
     LIMIT 1
   `, [optionId]);
   const option = rows[0];
-  if (!option) throw new Error("核心品名不存在或已删除");
-  if (option.option_type !== "category") throw new Error("当前只支持维护核心品名");
+  if (!option) throw new Error("标准选项不存在或已删除");
+  if (!["category", "brand"].includes(option.option_type)) throw new Error("当前只支持维护核心品名和汽车品牌");
+  if (option.option_type === "brand") {
+    await mysqlExecute(`UPDATE inventory_product_naming_options SET status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [optionId]);
+    return { ok: true, id: optionId, value: option.value };
+  }
   if (Number(option.linked_product_count || 0) > 0) {
     throw new Error(`核心品名“${option.value}”已绑定 ${option.linked_product_count} 个商品，请先编辑合并，不能直接删除`);
   }

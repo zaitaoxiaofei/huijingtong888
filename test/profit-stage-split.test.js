@@ -41,14 +41,15 @@ test("finance-accrued detail prefers locked net profit over stale item actual pr
   assert.match(backend, /resolvedActualProfitMysql\(row\) \?\? roundMoneyMysql\(saleAmount - costTotal\)/);
 });
 
-test("finance application includes parent posting acquiring fee once", () => {
-  assert.match(backend, /function orderFinanceRowsWithParentAcquiringMysql/);
+test("finance application allocates parent posting finance rows once", () => {
+  assert.match(backend, /function orderFinanceRowsWithParentAllocationMysql/);
   assert.match(backend, /function parentOrderNumberMysql/);
   assert.match(backend, /parentOrderNumberMysql\(order\)/);
   assert.match(backend, /marketplaceredistributionofacquiringoperation/);
-  assert.match(backend, /SUM\(CASE WHEN amount_cny < 0 THEN amount_cny ELSE 0 END\)/);
+  assert.match(backend, /GREATEST\(0, -COALESCE\(SUM\(amount_cny\), 0\)\) AS fee_amount_cny/);
   assert.match(backend, /scaleFinanceRowMysql\(row, share\)/);
-  assert.match(backend, /const otherFee = actualCollectingFee > 0 \? actualCollectingFee : \(returnedNoRevenue \? 0 : Number\(item\.other_fee_cny \|\| 0\)\);/);
+  assert.match(backend, /GROUP BY operation_type, operation_type_name, service_type, service_name/);
+  assert.match(backend, /const otherFee = hasCollectingFinance \? actualCollectingFee : \(returnedNoRevenue \? 0 : Number\(item\.other_fee_cny \|\| 0\)\);/);
   assert.doesNotMatch(backend, /Number\(item\.other_fee_cny \|\| 0\) \+ collectingFee/);
 });
 
@@ -58,12 +59,13 @@ test("pre-fulfillment cancellations keep only actual parent acquiring fee", () =
   assert.match(backend, /if \(cancelOnlyCollectingFee \|\| \(returnPolicy && !returnPolicy\.commission\)\) commissionFeeCny = 0;/);
   assert.match(backend, /const advertisingCost = cancelOnlyCollectingFee \? 0 : Number\(item\.advertising_cost_cny \|\| 0\);/);
   assert.match(backend, /Number\(financeRow\.derived_from_parent_posting \|\| 0\) === 1/);
+  assert.match(backend, /ozonFinanceCategoryMysql\(financeRow\) === "collecting_fee"/);
   assert.match(backend, /cancelOnlyCollectingFee \? parentAllocatedCollectingFee : Number\(categoryTotals\.collecting_fee \|\| 0\)/);
   assert.match(backend, /pre_fulfillment_cancel_cost_formula/);
 });
 
 test("estimated terminal losses are componentized once instead of double-counted as aftersale loss", () => {
-  const saveProfitItemSource = backend.match(/async function saveProfitItemMysql[\s\S]*?\n}\n\nasync function syncOrderItemProfitFromBreakdownMysql/)?.[0] || "";
+  const saveProfitItemSource = backend.match(/async function saveProfitItemMysql[\s\S]*?\r?\n}\r?\n\r?\nasync function syncOrderItemProfitFromBreakdownMysql/)?.[0] || "";
   assert.match(saveProfitItemSource, /const terminalPolicy = terminalNoRevenue/);
   assert.match(saveProfitItemSource, /const returnLoss = terminalNoRevenue\s*\?\s*0/);
   assert.match(saveProfitItemSource, /const otherFee = terminalPolicy\?\.collecting \? rawCollectingFee : 0/);

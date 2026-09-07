@@ -2651,4 +2651,18 @@ onMounted(bootstrap);
     grid-template-columns: 1fr;
   }
 }
+
+@media (max-width: 767px) {
+  .compact-metrics,
+  .rank-grid,
+  .task-columns,
+  .health-metrics,
+  .todo-module-grid { grid-template-columns: minmax(0, 1fr) !important; }
+  .ad-dashboard-page :where(.toolbar, .filter-row, .panel-head) {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .campaign-table-wrap,
+  .product-table-wrap { overflow-x: auto; overscroll-behavior-x: contain; }
+}
 </style>

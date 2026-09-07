@@ -309,7 +309,7 @@ onMounted(async () => {
       </template>
     </InventoryPageToolbar>
 
-    <div class="inventory-table-wrap">
+    <div class="inventory-table-wrap erp-responsive-table" role="region" aria-label="FBP 库存表格" tabindex="0">
       <el-table v-loading="loading || syncLoading" :data="pagedRows" stripe border class="erp-data-table">
         <el-table-column label="店铺" width="130" fixed="left">
           <template #default="{ row }"><strong>{{ row.shop_name || "-" }}</strong></template>

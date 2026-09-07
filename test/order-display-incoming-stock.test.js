@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { buildProductDisplayRows } from "../frontend/orders/utils/order-display.js";
@@ -15,6 +16,12 @@ test("order display rows retain pending inbound quantity per SKU", () => {
   assert.equal(row.quantity, 3);
   assert.equal(row.stock.local, 0);
   assert.equal(row.incoming, 30);
+});
+
+test("order list projects component purchase transit into the parent SKU", async () => {
+  const service = await readFile(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
+  assert.match(service, /parent_component_stock\.incoming_stock/);
+  assert.match(service, /WHERE status = 'pending_arrival'[\s\S]*\) incoming ON incoming\.product_id = pc\.component_product_id/);
 });
 
 test("order display rows retain the bound product component count", () => {

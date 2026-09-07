@@ -44,3 +44,7 @@ export function invalidateInventoryNamingOptions() {
     if (key.startsWith("naming:")) responseCache.delete(key);
   }
 }
+
+export function invalidateInventoryVehicleCatalog() {
+  responseCache.delete("vehicle-catalog");
+}

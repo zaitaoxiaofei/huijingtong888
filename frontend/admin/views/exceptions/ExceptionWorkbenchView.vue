@@ -6,6 +6,7 @@ import { apiClient } from "../../utils/api";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ExceptionModuleTabs from "../../components/exceptions/ExceptionModuleTabs.vue";
+import ProductCreateEditDialog from "../../components/inventory/ProductCreateEditDialog.vue";
 import { formatInteger } from "../profit/profit-utils.js";
 
 const props = defineProps({ view: { type: String, default: "profit" } });
@@ -16,6 +17,11 @@ const actionLoading = ref(false);
 const rowActionKey = ref("");
 const profitDetailVisible = ref(false);
 const profitDetailRow = ref(null);
+const bindDialog = reactive({ visible: false, loading: false, submitting: false, row: null, query: "", productId: "", personId: "", products: [] });
+const createDialogVisible = ref(false);
+const createDialogValue = ref(null);
+const createDialogContext = ref(null);
+const inventoryOptions = reactive({ people: [], suppliers: [], logisticsRules: [] });
 
 const state = reactive({
   selectedIds: [],
@@ -262,8 +268,79 @@ function openInventory(row) {
 }
 
 function openBinding(row) {
-  if (!row.onlineProductId) return ElMessage.warning("当前异常未关联在线商品");
-  router.push({ path: "/online-products", query: { onlineProductId: String(row.onlineProductId), action: "bind" } });
+  openBindingDialog(row);
+}
+
+function openCreateInventory(row) {
+  openCreateInventoryDialog(row);
+}
+
+function inventoryActionContext(row) {
+  if (!row.orderId) return ElMessage.warning("当前异常未关联订单");
+  const sku = String(row.sku_text || "").split(",").map((item) => item.trim()).find(Boolean) || "";
+  if (!sku) { ElMessage.warning("当前异常缺少待处理 SKU"); return null; }
+  if (!row.onlineProductId || !row.orderItemId) { ElMessage.warning("当前异常缺少在线商品或订单明细，暂时无法处理"); return null; }
+  return { online_product_id: Number(row.onlineProductId), order_item_id: Number(row.orderItemId), ozon_sku: sku, order_id: Number(row.orderId) };
+}
+
+async function loadInventoryOptions() {
+  const [people, suppliers, logisticsRules] = await Promise.all([apiClient.get("/api/people"), apiClient.get("/api/suppliers?paged=1&page=1&pageSize=100"), apiClient.get("/api/logistics-rules")]);
+  inventoryOptions.people = Array.isArray(people) ? people.filter((item) => Number(item.active ?? 1) !== 0) : [];
+  inventoryOptions.suppliers = suppliers?.rows || [];
+  inventoryOptions.logisticsRules = Array.isArray(logisticsRules) ? logisticsRules : [];
+}
+
+async function loadBindProducts() {
+  bindDialog.loading = true;
+  try {
+    const params = new URLSearchParams({ paged: "1", page: "1", pageSize: "100", query: bindDialog.query || "" });
+    const result = await apiClient.get(`/api/products?${params}`);
+    bindDialog.products = result?.rows || (Array.isArray(result) ? result : []);
+  } finally { bindDialog.loading = false; }
+}
+
+async function openBindingDialog(row) {
+  if (!inventoryActionContext(row)) return;
+  bindDialog.row = row; bindDialog.visible = true; bindDialog.productId = ""; bindDialog.query = row.product_name || "";
+  await Promise.all([loadInventoryOptions(), loadBindProducts()]);
+  bindDialog.personId = inventoryOptions.people[0]?.id ? String(inventoryOptions.people[0].id) : "";
+}
+
+async function openCreateInventoryDialog(row) {
+  const context = inventoryActionContext(row); if (!context) return;
+  await loadInventoryOptions();
+  createDialogContext.value = { ...context, person_id: inventoryOptions.people[0]?.id || null, owner_person_id: inventoryOptions.people[0]?.id || null };
+  createDialogValue.value = { name: row.product_name || row.subject || "", image_url: row.image_url || "", owner_person_id: inventoryOptions.people[0]?.id || "", product_type: "main", selection_status: "listed" };
+  createDialogVisible.value = true;
+}
+
+async function refreshAfterInventoryAction(orderId, message) {
+  await apiClient.post(`/api/orders/${orderId}/recalculate-profit`, {});
+  ElMessage.success(message);
+  await loadRows(true);
+}
+
+async function submitBinding() {
+  const context = inventoryActionContext(bindDialog.row); if (!context || !bindDialog.productId) return ElMessage.warning("请先选择库存商品");
+  bindDialog.submitting = true;
+  try {
+    await apiClient.post("/api/online-products/bind", { ...context, product_id: Number(bindDialog.productId), person_id: bindDialog.personId ? Number(bindDialog.personId) : null, inventory_recipe: { mode: "single", items: [] } });
+    bindDialog.visible = false;
+    await refreshAfterInventoryAction(context.order_id, "库存绑定已更新，订单利润已重新计算");
+  } catch (error) { ElMessage.error(actionErrorMessage(error, "库存绑定失败")); } finally { bindDialog.submitting = false; }
+}
+
+async function handleCreatedInventory() {
+  const context = createDialogContext.value; createDialogVisible.value = false;
+  await refreshAfterInventoryAction(context.order_id, "库存商品已创建并绑定，订单利润已重新计算");
+  createDialogContext.value = null; createDialogValue.value = null;
+}
+
+async function handleExistingInventorySelected(product) {
+  const context = createDialogContext.value; if (!context) return;
+  await apiClient.post("/api/online-products/bind", { ...context, product_id: Number(product.id), person_id: context.person_id || null, inventory_recipe: { mode: "single", items: [] } });
+  createDialogVisible.value = false;
+  await refreshAfterInventoryAction(context.order_id, "已绑定已有库存商品，订单利润已重新计算");
 }
 
 function onSelect(rows) {
@@ -462,6 +539,7 @@ onMounted(() => loadRows());
               <el-button class="exception-action-button erp-btn-link" size="small" plain @click="saveStates([row.id], 'handled')">已处理</el-button>
               <el-button class="exception-action-button erp-btn-link" size="small" plain type="warning" @click="saveStates([row.id], 'ignored')">忽略</el-button>
               <el-button v-if="props.view === 'binding'" class="exception-action-button erp-btn-link" size="small" plain type="primary" @click="openBinding(row)">去绑定</el-button>
+              <el-button v-if="props.view === 'binding'" class="exception-action-button erp-btn-link" size="small" plain type="success" @click="openCreateInventory(row)">创建库存</el-button>
 
               <el-button
                 v-if="props.view === 'profit' && row.onlineProductId"
@@ -490,6 +568,38 @@ onMounted(() => loadRows());
         @update:page-size="sizeChange"
       />
     </el-card>
+
+    <el-dialog v-model="bindDialog.visible" title="绑定库存商品" width="min(980px, 94vw)" append-to-body destroy-on-close>
+      <div v-loading="bindDialog.loading">
+        <el-input v-model="bindDialog.query" clearable placeholder="搜索库存商品名称或货号" @keyup.enter="loadBindProducts">
+          <template #append><el-button @click="loadBindProducts">搜索</el-button></template>
+        </el-input>
+        <el-table :data="bindDialog.products" height="430" highlight-current-row @current-change="(row) => bindDialog.productId = row?.id ? String(row.id) : ''">
+          <el-table-column width="56"><template #default="{ row }"><el-radio v-model="bindDialog.productId" :value="String(row.id)" /></template></el-table-column>
+          <el-table-column label="库存商品" min-width="360"><template #default="{ row }"><strong>{{ row.name }}</strong><div class="exception-meta-line"><span>{{ row.code || row.inventory_id || '-' }}</span></div></template></el-table-column>
+          <el-table-column prop="purchase_cost" label="采购成本" width="120" />
+          <el-table-column prop="local_stock" label="本地库存" width="110" />
+        </el-table>
+        <el-select v-model="bindDialog.personId" filterable clearable placeholder="负责人（可选）" style="width: 240px; margin-top: 14px">
+          <el-option v-for="person in inventoryOptions.people" :key="person.id" :label="person.name" :value="String(person.id)" />
+        </el-select>
+      </div>
+      <template #footer><el-button @click="bindDialog.visible = false">取消</el-button><el-button type="primary" :loading="bindDialog.submitting" @click="submitBinding">确认绑定</el-button></template>
+    </el-dialog>
+
+    <ProductCreateEditDialog
+      v-model:visible="createDialogVisible"
+      mode="create"
+      target="inventory"
+      :people="inventoryOptions.people"
+      :suppliers="inventoryOptions.suppliers"
+      :logistics-rules="inventoryOptions.logisticsRules"
+      :value="createDialogValue"
+      create-endpoint="/api/online-products/create-product"
+      :create-context="createDialogContext || {}"
+      @saved="handleCreatedInventory"
+      @existing-selected="handleExistingInventorySelected"
+    />
 
     <el-drawer v-model="profitDetailVisible" title="利润计算明细" size="620px" append-to-body>
       <div v-if="profitDetailRow" class="profit-detail-drawer">

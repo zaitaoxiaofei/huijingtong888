@@ -29,19 +29,33 @@ function logisticsRuleFilterValue(row = {}) {
   }) || `logistics_rule_${row.id}`;
 }
 
-test("pending purchase filter excludes every supported inventory source", async () => {
+test("pending purchase filter is quantity-based and does not hide shortages merely because a request exists", async () => {
   const service = await readFile(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
   const pendingFilter = service.slice(
     service.indexOf('if (status === "pending_purchase")'),
     service.indexOf('if (status === "unbound")')
   );
 
-  assert.match(pendingFilter, /purchase_fbp\.stock_type = 'fbp_real'/);
+  assert.doesNotMatch(pendingFilter, /purchase_fbp\.stock_type = 'fbp_real'/);
   assert.match(pendingFilter, /FROM sku_inventory_recipes purchase_recipe/);
   assert.match(pendingFilter, /FROM product_components purchase_component/);
   assert.match(pendingFilter, /FROM inventory_movements purchase_im/);
   assert.match(pendingFilter, /FROM inbound_records purchase_ir/);
+  assert.match(pendingFilter, /component_incoming\.status = 'pending_arrival'/);
+  assert.match(pendingFilter, /purchase_component_stock\.local_stock[\s\S]*purchase_component_incoming\.incoming_stock/);
   assert.doesNotMatch(pendingFilter, /FROM procurement_requests purchase_pr/);
+  assert.doesNotMatch(pendingFilter, /FROM order_item_procurement_marks purchase_mark/);
+});
+
+test("order procurement preview does not let stale handled marks block a current shortage", async () => {
+  const service = await readFile(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
+  const previewSelection = service.slice(
+    service.indexOf("SELECT mi.*,"),
+    service.indexOf("ORDER BY mi.product_id, mi.ordered_at ASC")
+  );
+
+  assert.match(previewSelection, /AS already_handled/);
+  assert.doesNotMatch(previewSelection, /OR EXISTS \(\s*SELECT 1 FROM order_item_procurement_marks oipm/);
 });
 
 test("pending purchase action labels use current stock instead of stale handling history", async () => {
@@ -51,8 +65,29 @@ test("pending purchase action labels use current stock instead of stale handling
     table.indexOf("function procurementActionClass")
   );
 
-  assert.match(labelBlock, /detail\.includes\("已提交采购"\)\) return "已提交采购"/);
-  assert.doesNotMatch(labelBlock, /detail\.includes\("库存可满足"\)\) return "有库存"/);
+  assert.match(labelBlock, /hasProcurementIncoming\(row\)\) return "采购在途"/);
+  assert.match(labelBlock, /handled && detail\.includes\("库存可满足"\)\) return "有库存"/);
+  assert.doesNotMatch(labelBlock, /已提交采购|采购已处理/);
+});
+
+test("purchase-in-transit status requires a real pending inbound quantity", async () => {
+  const table = await readFile(new URL("../frontend/orders/components/OrdersTable.vue", import.meta.url), "utf8");
+  const incomingBlock = table.slice(
+    table.indexOf("function hasProcurementIncoming"),
+    table.indexOf("function isFbpOrder")
+  );
+
+  assert.match(incomingBlock, /state\?\.hasOrderIncoming/);
+  assert.match(incomingBlock, /inboundDetails\?\.quantity/);
+  assert.doesNotMatch(incomingBlock, /product\.incoming/);
+  assert.doesNotMatch(incomingBlock, /hasProductIncoming/);
+});
+
+test("order procurement card is shown only for procurement assigned to that order", async () => {
+  const table = await readFile(new URL("../frontend/orders/components/OrdersTable.vue", import.meta.url), "utf8");
+
+  assert.match(table, /v-if="hasProcurementIncoming\(row\)"/);
+  assert.doesNotMatch(table, /v-if="row\.procurementState\?\.latestPurchaseAt \|\| hasProcurementIncoming\(row\)"/);
 });
 
 mysqlTest("MySQL order list supports status tabs, print filters, inventory sorting, and purchase search", async () => {

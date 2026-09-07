@@ -20,6 +20,7 @@ const shops = ref([]);
 const detailActionLoading = ref(false);
 const detailRowActionKey = ref("");
 const detailRouteRestoreDone = ref(false);
+const skuRankingMode = ref("rate");
 
 function todayText() {
   return shanghaiDateKey();
@@ -41,6 +42,9 @@ function defaultFilters() {
 const state = reactive({
   buckets: [],
   totals: {},
+  operationalTotals: {},
+  shopOverview: [],
+  skuOverview: [],
   missingAlert: {},
   filters: defaultFilters()
 });
@@ -92,6 +96,30 @@ const currentShopName = computed(() => {
 });
 
 const rangeSummary = computed(() => `${state.filters.from || "--"} 至 ${state.filters.to || "--"}`);
+const rankedSkus = computed(() => [...(state.skuOverview || [])].sort((a, b) => {
+  if (skuRankingMode.value === "quantity") return Number(b.return_quantity || 0) - Number(a.return_quantity || 0);
+  if (skuRankingMode.value === "loss") return Number(b.return_loss_cny || 0) - Number(a.return_loss_cny || 0);
+  if (Boolean(a.sample_sufficient) !== Boolean(b.sample_sufficient)) return a.sample_sufficient ? -1 : 1;
+  return Number(b.return_rate || 0) - Number(a.return_rate || 0);
+}));
+
+function formatPercent(value, digits = 1) {
+  return `${(Number(value || 0) * 100).toFixed(digits)}%`;
+}
+
+function riskLabel(row = {}) {
+  if (!row.sample_sufficient) return "样本不足";
+  if (row.risk_level === "high") return "高风险";
+  if (row.risk_level === "medium") return "需关注";
+  return "正常";
+}
+
+function riskTagType(row = {}) {
+  if (!row.sample_sufficient) return "info";
+  if (row.risk_level === "high") return "danger";
+  if (row.risk_level === "medium") return "warning";
+  return "success";
+}
 
 function formatDate(value) {
   return shanghaiDateText(value, { assumeUtcWhenNaive: true });
@@ -273,6 +301,9 @@ async function loadAftersales() {
     const payload = await apiClient.get(`/api/profit-aftersales?${params.toString()}`);
     state.buckets = Array.isArray(payload?.buckets) ? payload.buckets : [];
     state.totals = payload?.totals || {};
+    state.operationalTotals = payload?.operational_totals || {};
+    state.shopOverview = Array.isArray(payload?.shop_overview) ? payload.shop_overview : [];
+    state.skuOverview = Array.isArray(payload?.sku_overview) ? payload.sku_overview : [];
     state.missingAlert = payload?.missing_alert || {};
   } catch (error) {
     ElMessage.error(error.message || "售后损失加载失败");
@@ -294,6 +325,7 @@ async function loadDetail(row, { resetPage = false } = {}) {
       to: state.filters.to || "",
       shopId: state.filters.shopId || "all",
       bucket: row.key,
+      sku: row.sku || "",
       page: String(detail.page),
       pageSize: String(detail.pageSize)
     });
@@ -316,6 +348,11 @@ async function openDetail(row) {
 async function refreshDetail() {
   if (!detail.row) return;
   await loadDetail(detail.row);
+}
+
+async function openSkuDetail(row) {
+  if (!row?.sku) return;
+  await loadDetail({ key: "all", label: `SKU ${row.sku}`, sku: row.sku }, { resetPage: true });
 }
 
 function csvValue(value) {
@@ -344,6 +381,7 @@ async function exportDetailRows() {
       to: state.filters.to || "",
       shopId: state.filters.shopId || "all",
       bucket: detail.row.key || "all",
+      sku: detail.row.sku || "",
       page: "1",
       pageSize: "10000",
       export: "1"
@@ -506,28 +544,34 @@ onMounted(async () => {
 
       <div class="aftersales-summary">
         <div class="aftersales-summary__item">
-          <span>时间段</span>
-          <strong>{{ rangeSummary }}</strong>
+          <span>退货率</span>
+          <strong>{{ formatPercent(state.operationalTotals?.return_rate) }}</strong>
+          <small>退货件数 / 最终履约销售件数</small>
         </div>
         <div class="aftersales-summary__item">
-          <span>店铺</span>
-          <strong>{{ currentShopName }}</strong>
+          <span>退货订单</span>
+          <strong>{{ formatInteger(state.operationalTotals?.return_orders) }} 单</strong>
+          <small>{{ formatInteger(state.operationalTotals?.return_quantity) }} 件商品</small>
         </div>
         <div class="aftersales-summary__item">
-          <span>订单数</span>
-          <strong>{{ formatInteger(state.totals?.order_count) }}</strong>
+          <span>退货损失</span>
+          <strong>{{ formatMoney(state.operationalTotals?.return_loss_cny) }}</strong>
+          <small>不含履约前取消与待核实项</small>
         </div>
         <div class="aftersales-summary__item">
-          <span>涉及销售额</span>
-          <strong>{{ formatMoney(state.totals?.sale_amount_cny) }}</strong>
+          <span>单均退货损失</span>
+          <strong>{{ formatMoney(state.operationalTotals?.average_return_loss_cny) }}</strong>
+          <small>每笔退货订单</small>
         </div>
         <div class="aftersales-summary__item">
-          <span>估算损失</span>
-          <strong>{{ formatMoney(state.totals?.estimated_loss_cny) }}</strong>
+          <span>高风险 SKU</span>
+          <strong>{{ formatInteger(state.operationalTotals?.risky_sku_count) }}</strong>
+          <small>达到退货率风险阈值</small>
         </div>
         <div class="aftersales-summary__item">
           <span>待核实</span>
           <strong>{{ formatInteger(state.totals?.needs_review_count) }}</strong>
+          <small>{{ currentShopName }} · {{ rangeSummary }}</small>
         </div>
       </div>
 
@@ -583,6 +627,81 @@ onMounted(async () => {
           </el-table-column>
         </el-table>
       </div>
+
+      <section class="aftersales-overview-section">
+        <div class="aftersales-section-heading">
+          <div>
+            <h3>各店铺退货表现</h3>
+            <p>横向比较店铺退货率、退货损失和风险商品数量。</p>
+          </div>
+        </div>
+        <el-table :data="state.shopOverview" stripe class="erp-data-table" empty-text="当前范围暂无店铺退货数据">
+          <el-table-column prop="shop_name" label="店铺" min-width="170" />
+          <el-table-column prop="sales_quantity" label="最终销售件数" width="120">
+            <template #default="{ row }">{{ formatInteger(row.sales_quantity) }}</template>
+          </el-table-column>
+          <el-table-column prop="return_orders" label="退货订单" width="100">
+            <template #default="{ row }">{{ formatInteger(row.return_orders) }}</template>
+          </el-table-column>
+          <el-table-column prop="return_quantity" label="退货件数" width="100">
+            <template #default="{ row }">{{ formatInteger(row.return_quantity) }}</template>
+          </el-table-column>
+          <el-table-column prop="return_rate" label="退货率" width="110" sortable>
+            <template #default="{ row }"><strong :class="{ 'rate-danger': Number(row.return_rate) >= 0.15, 'rate-warning': Number(row.return_rate) >= 0.08 && Number(row.return_rate) < 0.15 }">{{ formatPercent(row.return_rate) }}</strong></template>
+          </el-table-column>
+          <el-table-column prop="return_loss_cny" label="退货损失" width="130" sortable>
+            <template #default="{ row }">{{ formatMoney(row.return_loss_cny) }}</template>
+          </el-table-column>
+          <el-table-column prop="loss_rate" label="损失率" width="100" sortable>
+            <template #default="{ row }">{{ formatPercent(row.loss_rate, 2) }}</template>
+          </el-table-column>
+          <el-table-column prop="risky_sku_count" label="风险 SKU" width="100">
+            <template #default="{ row }">{{ formatInteger(row.risky_sku_count) }}</template>
+          </el-table-column>
+        </el-table>
+      </section>
+
+      <section class="aftersales-overview-section">
+        <div class="aftersales-section-heading">
+          <div>
+            <h3>高退货风险 SKU</h3>
+            <p>默认优先展示样本充足的高退货率商品；销售少于 10 件且退货少于 3 件会标记为样本不足。</p>
+          </div>
+          <el-radio-group v-model="skuRankingMode" size="small">
+            <el-radio-button value="rate">高退货率</el-radio-button>
+            <el-radio-button value="quantity">退货件数最多</el-radio-button>
+            <el-radio-button value="loss">退货损失最高</el-radio-button>
+          </el-radio-group>
+        </div>
+        <el-table :data="rankedSkus" stripe class="erp-data-table aftersales-sku-table" empty-text="当前范围暂无 SKU 退货数据">
+          <el-table-column label="商品" min-width="300">
+            <template #default="{ row }">
+              <div class="aftersales-product-cell">
+                <el-image v-if="detailItemImageUrl(row)" :src="detailItemImageUrl(row)" fit="cover" class="aftersales-ranking-thumb" :preview-src-list="[detailItemImageUrl(row)]" preview-teleported />
+                <div v-else class="aftersales-ranking-thumb aftersales-item-thumb-empty">无图</div>
+                <div><strong>{{ row.item_name || "未命名商品" }}</strong><span>SKU：{{ row.sku || "-" }}</span><span>{{ row.shop_name || "-" }}</span></div>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="sales_quantity" label="销售件数" width="100" sortable />
+          <el-table-column prop="return_quantity" label="退货件数" width="100" sortable />
+          <el-table-column prop="return_rate" label="退货率" width="110" sortable>
+            <template #default="{ row }"><strong>{{ formatPercent(row.return_rate) }}</strong></template>
+          </el-table-column>
+          <el-table-column prop="return_loss_cny" label="退货损失" width="130" sortable>
+            <template #default="{ row }">{{ formatMoney(row.return_loss_cny) }}</template>
+          </el-table-column>
+          <el-table-column label="主要原因" min-width="150">
+            <template #default="{ row }">{{ row.primary_reason }} <span class="muted-text">{{ formatPercent(row.primary_reason_share) }}</span></template>
+          </el-table-column>
+          <el-table-column label="风险" width="100">
+            <template #default="{ row }"><el-tag :type="riskTagType(row)" effect="light">{{ riskLabel(row) }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="操作" width="90" fixed="right">
+            <template #default="{ row }"><el-button link type="primary" @click="openSkuDetail(row)">订单明细</el-button></template>
+          </el-table-column>
+        </el-table>
+      </section>
     </el-card>
 
     <el-dialog
@@ -812,8 +931,56 @@ onMounted(async () => {
   color: #0f172a;
 }
 
+.aftersales-summary__item small {
+  display: block;
+  margin-top: 5px;
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .aftersales-table-wrap {
   margin-bottom: 12px;
+}
+
+.aftersales-overview-section {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.aftersales-section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.aftersales-section-heading h3 { margin: 0; color: #0f172a; font-size: 16px; }
+.aftersales-section-heading p { margin: 5px 0 0; color: #64748b; font-size: 12px; }
+.rate-danger { color: #dc2626; }
+.rate-warning { color: #d97706; }
+
+.aftersales-product-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.aftersales-product-cell > div:last-child { display: grid; gap: 3px; min-width: 0; }
+.aftersales-product-cell strong,
+.aftersales-product-cell span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aftersales-product-cell span { color: #64748b; font-size: 12px; }
+
+.aftersales-ranking-thumb {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 58px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  overflow: hidden;
 }
 
 .aftersales-cell-hint {
@@ -1039,5 +1206,7 @@ onMounted(async () => {
   .aftersales-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .aftersales-section-heading { align-items: flex-start; flex-direction: column; }
 }
 </style>

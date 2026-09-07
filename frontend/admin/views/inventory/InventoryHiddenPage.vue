@@ -140,7 +140,7 @@ onMounted(async () => {
       @reset="handleReset"
     />
 
-    <div class="inventory-table-wrap">
+    <div class="inventory-table-wrap erp-responsive-table" role="region" aria-label="已隐藏商品表格" tabindex="0">
       <el-table v-loading="loading" :data="pagedRows" stripe border class="erp-data-table">
         <el-table-column label="隐藏产品" min-width="280" fixed="left">
           <template #default="{ row }">

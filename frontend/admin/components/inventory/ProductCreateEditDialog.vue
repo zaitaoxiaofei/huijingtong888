@@ -2,11 +2,12 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
-import { invalidateInventoryNamingOptions, loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../utils/inventory-naming-options";
+import { invalidateInventoryNamingOptions, invalidateInventoryVehicleCatalog, loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../utils/inventory-naming-options";
 import { uploadListingMedia } from "../../api/tools/imageCropper";
 import { currentEffectiveLogisticsRules, resolveCurrentLogisticsRule } from "../../utils/effective-logistics-rules";
 import { buildShortInventoryName, scoreInventorySimilarity } from "../../utils/inventory-similarity";
 import { useAuthStore } from "../../stores/auth";
+import { useRouter } from "vue-router";
 import ProductImagePreview from "../ProductImagePreview.vue";
 
 const props = defineProps({
@@ -24,10 +25,12 @@ const props = defineProps({
 
 const emit = defineEmits(["update:visible", "saved", "existing-selected", "quick-create-component", "manage-components"]);
 const authStore = useAuthStore();
+const router = useRouter();
 
 const formRef = ref();
 const imageUploadLoading = ref(false);
 const submitting = ref(false);
+const creatingDraft = ref(false);
 const manualLogisticsRule = ref(false);
 const manualPackagingFee = ref(false);
 const componentQuery = ref("");
@@ -47,7 +50,13 @@ const componentDirectory = reactive({
   color: "",
   quantity: ""
 });
-const namingOptions = reactive({ category: [], accessory: [], color: [], material: [], process: [], quantity: [] });
+const componentDirectoryOptions = reactive({
+  brand: [], fitment_type: [], vehicle_model: [], accessory: [], color: [], quantity: []
+});
+const namingOptions = reactive({ category: [], brand: [], accessory: [], color: [], material: [], process: [], quantity: [] });
+const pendingCoreNames = ref([]);
+const pendingCoreNamesLoading = ref(false);
+const pendingCoreNameActionId = ref(0);
 const vehicleCatalog = ref([]);
 const similarProducts = ref([]);
 const similarProductsLoading = ref(false);
@@ -67,7 +76,13 @@ const form = reactive(createDefaultForm());
 const isInventoryTarget = computed(() => props.target === "inventory");
 const isEditMode = computed(() => props.mode === "edit");
 const canMaintainNamingOptions = computed(() => String(authStore.user?.name || "").trim() === "核动力牛马");
-const vehicleBrandOptions = computed(() => vehicleCatalog.value.map((brand) => ({ value: brand.name, label: brand.label || [brand.nameZh, brand.name].filter(Boolean).join(" ") })));
+const vehicleBrandOptions = computed(() => {
+  const merged = new Map(vehicleCatalog.value.map((brand) => [brand.name, { value: brand.name, label: brand.label || [brand.nameZh, brand.name].filter(Boolean).join(" ") }]));
+  for (const brand of namingOptions.brand) {
+    if (!merged.has(brand.value)) merged.set(brand.value, { value: brand.value, label: brand.label || brand.value });
+  }
+  return [...merged.values()];
+});
 const vehicleModelOptions = computed(() => {
   const brand = vehicleCatalog.value.find((item) => item.name === form.structured_naming.vehicle_brand);
   return Array.isArray(brand?.models) ? brand.models : [];
@@ -255,7 +270,7 @@ watch(
 
 watch(() => props.visible, async (visible) => {
   if (visible) {
-    await Promise.all([loadNamingOptions(), loadVehicleCatalog(), loadFallbackLogisticsRules()]);
+    await Promise.all([loadNamingOptions(), loadVehicleCatalog(), loadFallbackLogisticsRules(), loadPendingCoreNames()]);
     await hydrateLegacyStructuredNaming();
   }
 }, { immediate: true });
@@ -390,6 +405,22 @@ function selectExistingProduct(row) {
   emit("update:visible", false);
 }
 
+async function createDraftForProduct(product, { reusedInventory = false } = {}) {
+  const productId = Number(product?.id || product?.product_id || 0);
+  if (!productId) throw new Error("缺少库存商品 ID，无法创建草稿");
+  creatingDraft.value = true;
+  const createdDraft = await apiClient.post("/api/listing/drafts/from-inventory-product", { product_id: productId });
+  emit("saved", { mode: props.mode, target: props.target, product, draft: createdDraft || null, reusedInventory });
+  emit("update:visible", false);
+  if (createdDraft?.id) {
+    const message = createdDraft.reused
+      ? "已打开该库存商品现有草稿"
+      : reusedInventory ? "已使用现有库存并创建草稿" : "库存商品和上架草稿已创建并关联";
+    ElMessage.success(message);
+    await router.push({ path: "/listing-records", query: { draftId: String(createdDraft.id), sourceProductId: String(productId) } });
+  }
+}
+
 watch(similarProductQuery, scheduleSimilarProducts);
 
 onBeforeUnmount(() => {
@@ -401,6 +432,66 @@ async function loadNamingOptions() {
     await Promise.all(Object.keys(namingOptions).map((type) => loadNamingOption(type)));
   } catch (error) {
     ElMessage.error(error.message || "加载标准选项失败");
+  }
+}
+
+async function loadPendingCoreNames() {
+  if (!canMaintainNamingOptions.value) {
+    pendingCoreNames.value = [];
+    return;
+  }
+  pendingCoreNamesLoading.value = true;
+  try {
+    const result = await apiClient.get("/api/inventory-product-naming/options?status=pending", { noCache: true, routeScoped: false });
+    pendingCoreNames.value = Array.isArray(result?.rows) ? result.rows : [];
+  } catch (error) {
+    pendingCoreNames.value = [];
+    ElMessage.error(error.message || "待审核核心品名加载失败");
+  } finally {
+    pendingCoreNamesLoading.value = false;
+  }
+}
+
+async function approveCoreName(option) {
+  if (!option?.id) return;
+  pendingCoreNameActionId.value = Number(option.id);
+  try {
+    await apiClient.put(`/api/inventory-product-naming/options/${option.id}`, {
+      value: option.value,
+      review_note: "审核通过"
+    });
+    invalidateInventoryNamingOptions();
+    await Promise.all([loadPendingCoreNames(), loadNamingOption(option.option_type)]);
+    ElMessage.success(`${option.option_type === "brand" ? "汽车品牌" : "核心品名"}“${option.value}”已通过审核`);
+  } catch (error) {
+    ElMessage.error(error.message || "标准选项审核失败");
+  } finally {
+    pendingCoreNameActionId.value = 0;
+  }
+}
+
+async function rejectCoreName(option) {
+  if (!option?.id) return;
+  const optionLabel = option.option_type === "brand" ? "汽车品牌" : "核心品名";
+  try {
+    await ElMessageBox.confirm(
+      `确认驳回${optionLabel}“${option.value}”？该申请不会进入正式下拉。`,
+      `驳回${optionLabel}申请`,
+      { type: "warning", confirmButtonText: "确认驳回", cancelButtonText: "取消" }
+    );
+  } catch {
+    return;
+  }
+  pendingCoreNameActionId.value = Number(option.id);
+  try {
+    await apiClient.delete(`/api/inventory-product-naming/options/${option.id}`);
+    invalidateInventoryNamingOptions();
+    await loadPendingCoreNames();
+    ElMessage.success(`${optionLabel}“${option.value}”已驳回`);
+  } catch (error) {
+    ElMessage.error(error.message || "标准选项驳回失败");
+  } finally {
+    pendingCoreNameActionId.value = 0;
   }
 }
 
@@ -562,10 +653,54 @@ async function handleVehicleBrandChange() {
   form.structured_naming.fitment_type = form.structured_naming.vehicle_brand ? "specific" : "universal";
 }
 
-function handleVehicleModelsChange(values) {
+async function handleVehicleModelsChange(values) {
   form.structured_naming.vehicle_models = Array.isArray(values) ? values : [];
   form.structured_naming.vehicle_model = form.structured_naming.vehicle_models.join("/");
   form.structured_naming.fitment_type = form.structured_naming.vehicle_brand ? "specific" : "universal";
+  const knownModels = new Set(vehicleModelOptions.value.map((model) => model.name));
+  const newModels = form.structured_naming.vehicle_models.filter((model) => !knownModels.has(model));
+  for (const model of newModels) {
+    try {
+      await apiClient.post("/api/ai-variant-lab/vehicle-catalog", { brand: form.structured_naming.vehicle_brand, model });
+    } catch (error) {
+      ElMessage.error(error.message || `车型“${model}”添加失败`);
+      form.structured_naming.vehicle_models = form.structured_naming.vehicle_models.filter((item) => item !== model);
+    }
+  }
+  if (newModels.length) {
+    invalidateInventoryVehicleCatalog();
+    await loadVehicleCatalog();
+    form.structured_naming.vehicle_model = form.structured_naming.vehicle_models.join("/");
+  }
+}
+
+async function applyVehicleBrand() {
+  let result;
+  try {
+    result = await ElMessageBox.prompt(
+      "品牌不能直接新增。请填写俄罗斯市场使用的英文品牌名，提交后由核动力牛马审核。",
+      "申请汽车品牌",
+      {
+        inputPlaceholder: "例如：TOYOTA",
+        confirmButtonText: "提交申请",
+        cancelButtonText: "取消",
+        inputValidator: (value) => {
+          const text = String(value || "").trim().toUpperCase();
+          if (!text) return "请输入汽车品牌";
+          return (/[A-Z]/.test(text) && /^[A-Z0-9][A-Z0-9 &/().+'-]*$/.test(text)) || "请填写英文品牌名";
+        }
+      }
+    );
+  } catch { return; }
+  try {
+    const brand = String(result.value || "").trim().toUpperCase();
+    const response = await apiClient.post("/api/inventory-product-naming/options", { option_type: "brand", value: brand, label: brand });
+    invalidateInventoryNamingOptions();
+    ElMessage.success(response.status === "active" ? "汽车品牌已创建" : "品牌申请已提交，审核通过后可使用");
+    await loadNamingOption("brand");
+  } catch (error) {
+    ElMessage.error(error.message || "汽车品牌申请失败");
+  }
 }
 
 async function handleColorsChange(values) {
@@ -767,13 +902,18 @@ function namingOptionValues(type) {
   });
 }
 
-function uniqueDirectoryValues(field, predicate = () => true, fallbackType = "") {
+function normalizeComponentBrand(value) {
+  const parts = String(value || "").split("|").map((item) => item.trim()).filter(Boolean);
+  return parts.at(-1) || "";
+}
+
+function uniqueDirectoryValues(field, predicate = () => true, fallbackType = "", extraValues = []) {
   const counts = new Map();
   const rows = componentDirectoryRows.value.filter(predicate);
   for (const row of rows) {
     const raw = field === "color" ? String(row[field] || "").split(",") : [String(row[field] || "")];
     for (const item of raw) {
-      const value = item.trim();
+      const value = field === "vehicle_brand" ? normalizeComponentBrand(item) : item.trim();
       if (value) counts.set(value, Number(counts.get(value) || 0) + 1);
     }
   }
@@ -783,15 +923,30 @@ function uniqueDirectoryValues(field, predicate = () => true, fallbackType = "")
       if (matchedCount && !counts.has(value)) counts.set(value, matchedCount);
     }
   }
+  for (const item of extraValues) {
+    const rawValue = String((item?.value ?? item?.name ?? item) || "").trim();
+    const value = field === "vehicle_brand" ? normalizeComponentBrand(rawValue) : rawValue;
+    if (value && !counts.has(value)) counts.set(value, Number(item?.linked_product_count ?? item?.usage_count ?? 0));
+  }
   return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "zh-CN")).map(([value]) => value);
 }
 
-const componentDirectoryBrands = computed(() => uniqueDirectoryValues("vehicle_brand", undefined, "brand"));
-const componentDirectoryFitments = computed(() => uniqueDirectoryValues("fitment_type"));
-const componentDirectoryModels = computed(() => uniqueDirectoryValues("vehicle_model", undefined, "vehicle_model"));
-const componentDirectoryAccessories = computed(() => uniqueDirectoryValues("accessory_name", undefined, "accessory"));
-const componentDirectoryColors = computed(() => uniqueDirectoryValues("color", undefined, "color"));
-const componentDirectoryQuantities = computed(() => uniqueDirectoryValues("product_quantity", undefined, "quantity"));
+const componentDirectoryBrands = computed(() => uniqueDirectoryValues("vehicle_brand", undefined, "brand", [
+  ...componentDirectoryOptions.brand,
+  ...vehicleCatalog.value.map((brand) => brand.name)
+]));
+const componentDirectoryFitments = computed(() => uniqueDirectoryValues("fitment_type", undefined, "", componentDirectoryOptions.fitment_type));
+const componentDirectoryModels = computed(() => {
+  const selectedBrand = normalizeComponentBrand(componentDirectory.brand);
+  const catalogBrand = vehicleCatalog.value.find((brand) => normalizeComponentBrand(brand.name) === selectedBrand);
+  return uniqueDirectoryValues("vehicle_model", undefined, "vehicle_model", [
+    ...componentDirectoryOptions.vehicle_model,
+    ...(catalogBrand?.models || []).map((model) => model.name)
+  ]);
+});
+const componentDirectoryAccessories = computed(() => uniqueDirectoryValues("accessory_name", undefined, "accessory", componentDirectoryOptions.accessory));
+const componentDirectoryColors = computed(() => uniqueDirectoryValues("color", undefined, "color", componentDirectoryOptions.color));
+const componentDirectoryQuantities = computed(() => uniqueDirectoryValues("product_quantity", undefined, "quantity", componentDirectoryOptions.quantity));
 const pagedComponentOptions = computed(() => componentOptions.value.slice(
   (componentPage.value - 1) * componentPageSize,
   componentPage.value * componentPageSize
@@ -800,7 +955,7 @@ const componentSearchActive = computed(() => Boolean(String(componentQuery.value
 
 function componentFieldMatches(row, field, expected) {
   if (expected === "" || expected === null || expected === undefined) return true;
-  const target = String(expected).trim().toLowerCase();
+  const target = (field === "vehicle_brand" ? normalizeComponentBrand(expected) : String(expected || "").trim()).toLowerCase();
   const name = String(row.name || "").toLowerCase();
   if (field === "color") {
     const colors = String(row.color || "").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
@@ -810,7 +965,7 @@ function componentFieldMatches(row, field, expected) {
     const quantity = Number(row.product_quantity || 0);
     return quantity === Number(expected) || (!quantity && new RegExp(`${Number(expected)}\\s*(个|件|套|对|双|条|片|张|盒)`).test(name));
   }
-  const value = String(row[field] || "").trim().toLowerCase();
+  const value = (field === "vehicle_brand" ? normalizeComponentBrand(row[field]) : String(row[field] || "").trim()).toLowerCase();
   if (value) return value.includes(target);
   const fallback = field === "fitment_type"
     ? (target === "specific" ? "专用" : "通用")
@@ -898,12 +1053,29 @@ async function searchComponentProducts() {
         return String(item.name || "").toLowerCase().includes(componentDirectory.category.toLowerCase());
       })
       .filter((item) => Number(item.id) !== Number(form.id || 0));
+    await loadComponentDirectoryOptions();
     filterComponentDirectoryProducts();
   } catch (error) {
     ElMessage.error(error.message || "加载组件商品失败");
   } finally {
     componentLoading.value = false;
   }
+}
+
+async function loadComponentDirectoryOptions() {
+  const category = String(componentDirectory.category || "").trim();
+  const types = ["brand", "fitment_type", "vehicle_model", "accessory", "color", "quantity"];
+  const results = await Promise.allSettled(types.map(async (type) => {
+    const params = new URLSearchParams({ type });
+    if (category) params.set("category", category);
+    if (componentDirectory.brand) params.set("brand", normalizeComponentBrand(componentDirectory.brand));
+    if (componentDirectory.fitment_type) params.set("fitment_type", componentDirectory.fitment_type);
+    if (componentDirectory.vehicle_model) params.set("vehicle_model", componentDirectory.vehicle_model);
+    componentDirectoryOptions[type] = await loadInventoryNamingOptions(params);
+  }));
+  results.forEach((result, index) => {
+    if (result.status === "rejected") componentDirectoryOptions[types[index]] = [];
+  });
 }
 
 function filterComponentDirectoryProducts() {
@@ -921,9 +1093,27 @@ function filterComponentDirectoryProducts() {
   componentPage.value = 1;
 }
 
-function handleComponentFilterChange() {
+async function handleComponentFilterChange(field = "") {
   componentSelectId.value = "";
+  if (field === "brand") {
+    componentDirectory.brand = normalizeComponentBrand(componentDirectory.brand);
+    componentDirectory.vehicle_model = "";
+  }
+  if (["brand", "fitment_type", "vehicle_model"].includes(field)) await loadComponentDirectoryOptions();
   filterComponentDirectoryProducts();
+}
+
+function handleComponentCategoryChange(value) {
+  componentQuery.value = String(value || "").trim();
+  componentSelectId.value = "";
+  if (componentQuery.value) {
+    searchComponentProducts();
+    return;
+  }
+  componentOptions.value = [];
+  componentDirectoryRows.value = [];
+  componentPage.value = 1;
+  Object.assign(componentDirectory, { category: "", brand: "", fitment_type: "", vehicle_model: "", accessory: "", color: "", quantity: "" });
 }
 
 function addComponentProduct(row) {
@@ -1241,7 +1431,7 @@ function closeDialog() {
   emit("update:visible", false);
 }
 
-async function submitDialog() {
+async function submitDialog(options = {}) {
   if (!formRef.value) return;
   form.name = generatedProductName.value || form.name;
   await formRef.value.validate();
@@ -1288,11 +1478,27 @@ async function submitDialog() {
     const savedProduct = isEditMode.value
       ? await apiClient.put(`/api/products/${editProductId}`, payload)
       : await apiClient.post(props.createEndpoint || "/api/products", { ...payload, ...(props.createContext || {}) });
+    if (options?.createDraft === true) {
+      await createDraftForProduct(savedProduct || { id: editProductId });
+      return;
+    }
     emit("saved", { mode: props.mode, target: props.target, product: savedProduct || null });
     emit("update:visible", false);
   } catch (error) {
     const message = String(error?.message || "");
-    if (/Duplicate entry .*uk_products_selection_id/i.test(message)) {
+    const duplicateProductId = Number(message.match(/（#(\d+)）/)?.[1] || 0);
+    if (options?.createDraft === true && duplicateProductId && /已存在相同标准产品/.test(message)) {
+      try {
+        await ElMessageBox.confirm(
+          `系统已找到相同库存商品 #${duplicateProductId}，是否直接使用它创建草稿？`,
+          "已有相同库存",
+          { confirmButtonText: "使用并建草稿", cancelButtonText: "返回修改", type: "warning" }
+        );
+        await createDraftForProduct({ id: duplicateProductId }, { reusedInventory: true });
+      } catch (confirmError) {
+        if (confirmError !== "cancel" && confirmError !== "close") ElMessage.error(confirmError?.message || "使用现有库存创建草稿失败");
+      }
+    } else if (/Duplicate entry .*uk_products_selection_id/i.test(message)) {
       ElMessage.error("当前选品编号已被其他库存商品使用，请关闭弹窗后重新新增；系统将自动生成新编号");
     } else if (/Duplicate entry .*uk_products_code/i.test(message)) {
       ElMessage.error("当前库存编码已被其他商品使用，请关闭弹窗后重新新增；系统将自动生成新编码");
@@ -1301,7 +1507,12 @@ async function submitDialog() {
     }
   } finally {
     submitting.value = false;
+    creatingDraft.value = false;
   }
+}
+
+function submitAndCreateDraft() {
+  return submitDialog({ createDraft: true });
 }
 </script>
 
@@ -1317,6 +1528,16 @@ async function submitDialog() {
     @closed="formRef?.clearValidate?.()"
     @update:model-value="emit('update:visible', $event)"
   >
+    <template #header>
+      <div class="inventory-dialog-header">
+        <strong>{{ dialogTitle }}</strong>
+        <div class="inventory-dialog-header__actions">
+          <el-tooltip content="关闭弹窗，不保存本次修改" placement="bottom"><el-button class="erp-btn erp-btn-secondary" :disabled="submitting" @click="closeDialog">取消</el-button></el-tooltip>
+          <el-tooltip content="仅保存库存商品，暂不创建上架草稿" placement="bottom"><el-button class="erp-btn erp-btn-primary" type="primary" :loading="submitting && !creatingDraft" :disabled="submitting" @click="submitDialog">保存</el-button></el-tooltip>
+          <el-tooltip v-if="isInventoryTarget" content="保存库存商品并创建关联的上架草稿；如已有相同库存，可直接选用" placement="bottom"><el-button class="erp-btn" type="success" :loading="creatingDraft" :disabled="submitting && !creatingDraft" @click="submitAndCreateDraft">建草稿</el-button></el-tooltip>
+        </div>
+      </div>
+    </template>
     <el-form ref="formRef" :model="form" :rules="formRules" label-width="96px">
       <div class="selection-workbench has-similar-products">
         <div class="selection-workbench-main">
@@ -1326,6 +1547,25 @@ async function submitDialog() {
                 <div class="form-section-title">标准库存建品</div>
                 <span class="form-section-subtitle">按产品身份、规格属性和库存计量填写，系统自动生成统一库存名称。</span>
               </div>
+            </div>
+            <div v-if="canMaintainNamingOptions" class="core-name-review-panel" v-loading="pendingCoreNamesLoading">
+              <div class="core-name-review-head">
+                <div>
+                  <strong>核心品名审批 / 汽车品牌审批</strong>
+                  <span>待审核 {{ pendingCoreNames.length }} 项</span>
+                </div>
+                <el-button link type="primary" @click="loadPendingCoreNames">刷新</el-button>
+              </div>
+              <div v-if="pendingCoreNames.length" class="core-name-review-list">
+                <div v-for="item in pendingCoreNames" :key="item.id" class="core-name-review-item">
+                  <span><el-tag size="small" type="info">{{ item.option_type === 'brand' ? '汽车品牌' : '核心品名' }}</el-tag> {{ item.label || item.value }}</span>
+                  <div>
+                    <el-button size="small" type="success" :loading="pendingCoreNameActionId === Number(item.id)" @click="approveCoreName(item)">通过</el-button>
+                    <el-button size="small" type="danger" plain :disabled="pendingCoreNameActionId === Number(item.id)" @click="rejectCoreName(item)">驳回</el-button>
+                  </div>
+                </div>
+              </div>
+              <el-empty v-else :image-size="40" description="暂无待审核申请" />
             </div>
             <div class="standard-name-preview standard-name-preview--top">
               <span>最终标准名称</span>
@@ -1359,11 +1599,12 @@ async function submitDialog() {
                   <el-select v-model="form.structured_naming.vehicle_brand" filterable clearable placeholder="不选择则为通用" @change="handleVehicleBrandChange">
                     <el-option v-for="brand in vehicleBrandOptions" :key="brand.value" :label="brand.label" :value="brand.value" />
                   </el-select>
+                  <el-button class="core-name-apply-button" link type="primary" @click="applyVehicleBrand">申请汽车品牌</el-button>
                 </el-form-item>
               </el-col>
               <el-col :span="8" class="naming-field naming-field--identity">
                 <el-form-item label="车型">
-                  <el-select v-model="form.structured_naming.vehicle_models" multiple filterable clearable collapse-tags :disabled="!form.structured_naming.vehicle_brand" placeholder="可多选；不选择为品牌全系" @change="handleVehicleModelsChange">
+                  <el-select v-model="form.structured_naming.vehicle_models" multiple filterable allow-create default-first-option clearable collapse-tags :disabled="!form.structured_naming.vehicle_brand" placeholder="可选择或输入车型；不选择为品牌全系" @change="handleVehicleModelsChange">
                     <el-option v-for="model in vehicleModelOptions" :key="model.id || model.name" :label="model.label || model.name" :value="model.name" />
                   </el-select>
                 </el-form-item>
@@ -1604,37 +1845,28 @@ async function submitDialog() {
               <span>建品时即可从已有库存选择子产品；固定组成和固定赠品会随主商品一起保存，并参与出库扣减。</span>
               <strong>{{ form.composition_items.length ? `可组 ${compositionAvailable() ?? 0} 件` : productAutoTypeLabel() }}</strong>
             </div>
-            <div class="component-picker-row">
+            <div class="component-quick-search">
               <el-select v-model="componentRole" class="component-role-select">
                 <el-option label="固定组成" value="included" />
                 <el-option label="固定赠品" value="gift" />
               </el-select>
-              <el-input
-                v-model="componentQuery"
+              <el-select
+                :model-value="componentDirectory.category"
+                filterable
                 clearable
-                placeholder="输入核心品名，例如：雨刷、钥匙壳"
-                @keyup.enter="searchComponentProducts"
-                @clear="componentOptions = []; componentDirectoryRows = []; componentPage = 1; Object.assign(componentDirectory, { category: '', brand: '', fitment_type: '', vehicle_model: '', accessory: '', color: '', quantity: '' })"
+                :loading="componentLoading"
+                placeholder="核心品名"
+                @change="handleComponentCategoryChange"
               >
-                <template #append>
-                  <el-button :loading="componentLoading" @click="searchComponentProducts">搜索</el-button>
-                </template>
-              </el-input>
-              <el-button @click="requestQuickCreateComponent">快速创建配件</el-button>
-            </div>
-            <div v-if="componentDirectoryRows.length" class="component-directory">
-              <div class="component-directory-path">
-                <strong>{{ componentDirectory.category }}</strong>
-                <span>条件可按任意顺序输入或选择，组合条件实时筛选</span>
-              </div>
-              <div class="component-directory-selects">
-                <el-select v-model="componentDirectory.brand" filterable allow-create default-first-option clearable placeholder="品牌" @change="handleComponentFilterChange">
+                <el-option v-for="item in namingOptions.category" :key="item.id || item.value" :label="item.label || item.value" :value="item.value" />
+              </el-select>
+                <el-select v-model="componentDirectory.brand" filterable allow-create default-first-option clearable placeholder="品牌" @change="handleComponentFilterChange('brand')">
                   <el-option v-for="value in componentDirectoryBrands" :key="value" :label="value" :value="value" />
                 </el-select>
-                <el-select v-model="componentDirectory.fitment_type" filterable allow-create default-first-option clearable placeholder="适配" @change="handleComponentFilterChange">
+                <el-select v-model="componentDirectory.fitment_type" filterable allow-create default-first-option clearable placeholder="适配" @change="handleComponentFilterChange('fitment_type')">
                   <el-option v-for="value in componentDirectoryFitments" :key="value" :label="value === 'specific' ? '专用' : '通用'" :value="value" />
                 </el-select>
-                <el-select v-model="componentDirectory.vehicle_model" filterable allow-create default-first-option clearable placeholder="车型" @change="handleComponentFilterChange">
+                <el-select v-model="componentDirectory.vehicle_model" filterable allow-create default-first-option clearable placeholder="车型" @change="handleComponentFilterChange('vehicle_model')">
                   <el-option v-for="value in componentDirectoryModels" :key="value" :label="value" :value="value" />
                 </el-select>
                 <el-select v-model="componentDirectory.accessory" filterable allow-create default-first-option clearable placeholder="款式/特征" @change="handleComponentFilterChange">
@@ -1646,7 +1878,9 @@ async function submitDialog() {
                 <el-select v-model="componentDirectory.quantity" filterable allow-create default-first-option clearable placeholder="包装" @change="handleComponentFilterChange">
                   <el-option v-for="value in componentDirectoryQuantities" :key="value" :label="`${value}件`" :value="value" />
                 </el-select>
-              </div>
+              <el-button @click="requestQuickCreateComponent">快速创建配件</el-button>
+            </div>
+            <div v-if="componentDirectoryRows.length" class="component-result-picker">
               <el-select
                 v-model="componentSelectId"
                 filterable
@@ -1662,6 +1896,7 @@ async function submitDialog() {
                   :value="item.id"
                 />
               </el-select>
+              <span>共 {{ componentOptions.length }} 个匹配商品，选择后直接添加</span>
             </div>
             <el-table
               v-if="form.composition_items.length"
@@ -1802,7 +2037,7 @@ async function submitDialog() {
                 <span v-if="row.similarity.differences.length" class="similar-product-differences">
                   差异：{{ row.similarity.differences.join("、") }}
                 </span>
-                <el-button type="primary" plain size="small" @click="selectExistingProduct(row)">使用已有商品</el-button>
+                <el-tooltip content="不重复创建库存商品，直接选用这条库存主档" placement="left"><el-button type="primary" plain size="small" @click="selectExistingProduct(row)">选用</el-button></el-tooltip>
               </div>
             </article>
           </div>
@@ -1811,12 +2046,6 @@ async function submitDialog() {
       </div>
     </el-form>
 
-    <template #footer>
-      <div class="erp-dialog-footer">
-        <el-button class="erp-btn erp-btn-secondary" @click="closeDialog">取消</el-button>
-        <el-button class="erp-btn erp-btn-primary" type="primary" :loading="submitting" @click="submitDialog">保存</el-button>
-      </div>
-    </template>
   </el-dialog>
 </template>
 
@@ -1839,6 +2068,17 @@ async function submitDialog() {
   padding-top: 10px;
   overflow: auto;
 }
+
+.inventory-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-right: 34px;
+}
+
+.inventory-dialog-header > strong { font-size: 18px; }
+.inventory-dialog-header__actions { display: flex; align-items: center; gap: 8px; }
 
 .standard-naming-section {
   border-color: #b8d3ee;
@@ -2306,46 +2546,45 @@ async function submitDialog() {
   white-space: nowrap;
 }
 
-.component-picker-row {
-  margin-bottom: 12px;
-}
-
-.component-picker-row {
+.component-quick-search {
   display: grid;
-  grid-template-columns: 130px minmax(280px, 1fr) auto;
-  gap: 10px;
+  grid-template-columns: 120px repeat(7, minmax(118px, 1fr)) auto;
+  gap: 8px;
+  margin-bottom: 10px;
+  overflow-x: auto;
 }
 
-.component-directory {
-  display: grid;
-  gap: 10px;
-  margin-bottom: 12px;
-  padding: 10px;
-  border: 1px solid #cfe0f2;
-  border-radius: 10px;
-  background: #f8fbff;
+.component-quick-search :deep(.el-select) {
+  width: 100%;
 }
 
-.component-directory-path {
+.component-result-picker {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
-.component-directory-path span {
+.component-result-picker .component-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.component-result-picker span {
   color: var(--erp-text-secondary);
   font-size: 12px;
-}
-
-.component-directory-selects {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 8px;
+  white-space: nowrap;
 }
 
 @media (max-width: 760px) {
-  .component-picker-row {
+  .component-quick-search {
     grid-template-columns: 1fr;
+    overflow: visible;
+  }
+
+  .component-result-picker {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 
@@ -2461,6 +2700,51 @@ async function submitDialog() {
 
 .selection-form-dialog :deep(.el-input-number) {
   width: 100%;
+}
+
+.core-name-review-panel {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  background: #fffbeb;
+}
+
+.core-name-review-head,
+.core-name-review-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.core-name-review-head > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.core-name-review-head span {
+  color: #92400e;
+  font-size: 12px;
+}
+
+.core-name-review-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.core-name-review-item {
+  padding: 8px 10px;
+  border: 1px solid #fef3c7;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.core-name-review-panel :deep(.el-empty) {
+  padding: 4px 0 0;
 }
 
 .dialog-footer {

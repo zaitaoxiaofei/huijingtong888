@@ -5,13 +5,14 @@ import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "..");
 const pageSource = fs.readFileSync(path.join(root, "frontend/admin/views/inventory/InventoryFbpReplenishmentPage.vue"), "utf8");
+const inventoryLayoutSource = fs.readFileSync(path.join(root, "frontend/admin/views/inventory/InventoryView.vue"), "utf8");
 const serviceSource = fs.readFileSync(path.join(root, "src/services/mysql-cutover.js"), "utf8");
 
 test("approved FBP replenishment orders expose a cancel action", () => {
   assert.match(pageSource, /function canCancelOrder[\s\S]{0,160}status \|\| ""\) === "approved"/);
   assert.match(pageSource, /@click="cancelOrder\(row\.order\)"/);
   assert.match(pageSource, /status: "cancelled"/);
-  assert.match(pageSource, /label: "已取消", value: "cancelled"/);
+  assert.match(inventoryLayoutSource, /label: "已取消", value: "cancelled"/);
 });
 
 test("cancelling an approved FBP order reverses its generated transfer", () => {

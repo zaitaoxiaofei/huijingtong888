@@ -89,6 +89,16 @@ test("monthly billing pending settlement uses profit item accrual status", () =>
   assert.doesNotMatch(monthlyBillingPendingSource, /COALESCE\(oi\.settlement_state, ''\) != 'accrued' THEN COALESCE\(oi\.estimated_profit, 0\)/);
 });
 
+test("monthly billing derives accrued profit directly from accrued order items", () => {
+  assert.match(profitRankingSource, /AS accrued_profit/);
+  assert.match(profitRankingSource, /AS accrued_order_count/);
+  assert.match(profitRankingSource, /COALESCE\(opi\.profit_status, oi\.settlement_state, ''\) = 'accrued'/);
+  assert.match(serviceSource, /const accruedProfit = Number\(row\.accrued_profit \?\? 0\)/);
+  assert.match(serviceSource, /accrued_profit: roundMoneyMysql\(accruedProfit\)/);
+  assert.match(serviceSource, /settlement_rate: profit \? accruedProfit \/ profit : 0/);
+  assert.doesNotMatch(serviceSource, /row\.accrued_profit \|\| profit - pendingProfit/);
+});
+
 test("monthly billing net profit includes manual expenses and salary without changing pending settlement", () => {
   assert.match(serviceSource, /async function monthlyBillingExpensesMysql/);
   assert.match(serviceSource, /String\(row\.category \|\| ""\) === "salary"/);
@@ -97,4 +107,19 @@ test("monthly billing net profit includes manual expenses and salary without cha
   assert.match(monthlyBillingViewSource, /净利润计算公式/);
   assert.match(monthlyBillingViewSource, /待结算单独展示，不作为成本再次扣除/);
   assert.match(monthlyBillingViewSource, /由人员先行替付/);
+});
+
+test("monthly billing separates order consumption from real procurement and inventory capital", () => {
+  assert.match(serviceSource, /async function monthlyProcurementInventorySummaryMysql/);
+  assert.match(serviceSource, /po\.purchased_at >= CONVERT_TZ\(\?, '\+08:00', '\+00:00'\)/);
+  assert.match(serviceSource, /purchase_goods_amount: roundMoneyMysql\(goodsAmount\)/);
+  assert.match(serviceSource, /purchase_total_amount: roundMoneyMysql\(goodsAmount \+ shippingAmount\)/);
+  assert.match(serviceSource, /local_inventory_value: roundMoneyMysql\(localValue\)/);
+  assert.match(serviceSource, /fbp_inventory_value: roundMoneyMysql\(fbpValue\)/);
+  assert.match(serviceSource, /in_transit_value: roundMoneyMysql\(inTransitValue\)/);
+  assert.match(serviceSource, /procurement_inventory: procurementInventory/);
+  assert.match(monthlyBillingViewSource, /销售消耗采购成本/);
+  assert.match(monthlyBillingViewSource, /真实采购支出/);
+  assert.match(monthlyBillingViewSource, /当前库存占用总额/);
+  assert.match(monthlyBillingViewSource, /库存占用为当前快照，不参与上方订单利润的重复扣减/);
 });

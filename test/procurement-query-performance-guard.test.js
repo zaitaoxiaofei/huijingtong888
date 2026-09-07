@@ -10,6 +10,10 @@ test("grouped procurement pages select product ids before loading detail joins",
   assert.match(source, /MAX\(pr\.created_at\) AS latest_created_at/);
   assert.match(source, /ORDER BY latest_created_at DESC, product_id DESC LIMIT \? OFFSET \?/);
   assert.match(source, /SELECT COUNT\(\*\) AS total FROM \(\$\{groupedSql\}\) grouped_procurement/);
+  assert.match(source, /groupedProductFilter\("sales_mapping\.product_id"\)/);
+  assert.match(source, /groupedProductFilter\("poi\.product_id"\)/);
+  assert.match(source, /groupedProductFilter\("product_id"\)/);
+  assert.match(source, /Array\.from\(\{ length: 6 \}, \(\) => groupedPage\.productIds\)\.flat\(\)/);
 });
 
 test("dashboard procurement alerts use the compact request projection", () => {

@@ -836,4 +836,11 @@ onMounted(loadJobs);
     min-height: 520px;
   }
 }
+
+@media (max-width: 600px) {
+  .scheduled-metrics { grid-template-columns: minmax(0, 1fr); }
+  .scheduled-toolbar__actions { width: 100%; flex-wrap: wrap; }
+  .scheduled-toolbar__actions .el-button { margin-left: 0; }
+  .scheduled-table-card { overflow-x: auto; }
+}
 </style>

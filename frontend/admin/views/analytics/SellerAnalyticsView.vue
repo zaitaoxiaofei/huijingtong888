@@ -2568,4 +2568,53 @@ onDeactivated(() => {
   .seller-collect-panel { min-width: 0; }
   .seller-insights { grid-template-columns: 1fr; }
 }
+
+@media (max-width: 1100px), (max-width: 1366px) and (any-pointer: coarse) {
+  .seller-analytics-page { height: auto; min-height: 100%; overflow: visible; }
+  .seller-sticky-head { position: static; }
+  .seller-sticky-head :deep(.erp-page-header) { grid-template-columns: minmax(0, 1fr); }
+  .seller-sticky-head :deep(.erp-page-header__copy) { flex-basis: auto; }
+  .seller-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; white-space: normal; }
+  .seller-toolbar__filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    flex: none;
+  }
+  .seller-filter,
+  .seller-filter--shop,
+  .seller-filter--date,
+  .seller-filter--keyword,
+  .seller-filter--rate,
+  .seller-filter--rate-value,
+  .seller-filter--rate-sort,
+  .seller-filter--source { width: 100%; }
+  .seller-filter--date,
+  .seller-filter--keyword { grid-column: 1 / -1; }
+  .seller-toolbar__query,
+  .seller-toolbar__collect { width: 100%; flex-wrap: wrap; }
+  .seller-toolbar__divider { display: none; }
+}
+
+@media (max-width: 767px) {
+  .seller-toolbar__filters { grid-template-columns: minmax(0, 1fr); }
+  .seller-filter--date,
+  .seller-filter--keyword { grid-column: auto; }
+  .seller-sync-assistant__steps {
+    grid-template-columns: repeat(7, 110px);
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+  .seller-sync-schedules,
+  .seller-ozon-metrics,
+  .seller-quadrants,
+  .seller-focus-modal-product {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .seller-conversion-chain { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .seller-funnel { overflow-x: auto; }
+  .seller-funnel-flow { min-width: 560px; }
+  .seller-bar,
+  .seller-action-bar { grid-template-columns: 76px minmax(0, 1fr) 34px; gap: 6px; }
+}
 </style>

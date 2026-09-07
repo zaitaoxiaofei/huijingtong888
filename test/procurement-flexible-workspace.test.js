@@ -21,6 +21,6 @@ test("procurement workspace keeps owner, free names, multi-item creation and lat
   assert.match(page, /采购名称/);
   assert.match(page, /添加商品/);
   assert.match(page, /建议绑定库存/);
-  assert.match(page, /采购已保留，等待绑定规范库存/);
+  assert.match(page, /已登记.*采购，现已进入采购在途/);
   assert.match(page, /系统会把这次确认用于后续推荐/);
 });

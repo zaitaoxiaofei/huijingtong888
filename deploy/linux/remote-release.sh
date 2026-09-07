@@ -114,7 +114,7 @@ start_candidate() {
   set +a
   runuser -u ozon-erp -- bash -lc "
     cd '$release_dir'
-    nohup env PORT='$candidate_port' HOST='127.0.0.1' SCHEDULED_JOBS_ENABLED='false' DEPLOYMENT_CANDIDATE='1' NODE_ENV='production' NODE_OPTIONS='--max-old-space-size=1024' /usr/bin/node src/server.js >'$candidate_log' 2>&1 &
+    nohup env PORT='$candidate_port' HOST='127.0.0.1' SCHEDULED_JOBS_ENABLED='false' DEPLOYMENT_CANDIDATE='1' NODE_ENV='production' NODE_OPTIONS='--max-old-space-size=384' /usr/bin/node src/server.js >'$candidate_log' 2>&1 &
     echo \$! >'$candidate_pid_file'
   "
   candidate_pid="$(cat "$candidate_pid_file")"

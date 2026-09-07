@@ -1,8 +1,9 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, inject, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { useAuthStore } from "../../stores/auth.js";
 import { apiClient } from "../../utils/api";
+import { copyToClipboard } from "../../utils/clipboard.js";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
@@ -10,33 +11,17 @@ import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import { dateText, integer } from "./inventory-utils.js";
 
 const authStore = useAuthStore();
+const sharedReplenishmentStatus = inject("inventoryFbpReplenishmentStatus", ref("applying"));
 const listRequestGate = createLatestRequestGate();
 const loading = ref(false);
 const actionLoadingId = ref("");
 const selectedOrderIds = ref([]);
 const adjustmentDialog = reactive({ visible: false, item: null, quantity: 0, reason: "", submitting: false });
 const batchDetailDialog = reactive({ visible: false, loading: false, batch: null, orders: [] });
-const previewFrameRef = ref(null);
+const barcodePrintDialog = reactive({ visible: false, row: null, quantity: 1, recommended: 1, submitting: false });
+const barcodePrintResultDialog = reactive({ visible: false, row: null, quantity: 0, confirming: false });
+const fbpFillResultDialog = reactive({ visible: false, summary: "", successCount: 0, durationSeconds: 0, failures: [], requiresReload: false });
 const barcodeLoadingKeys = reactive({});
-const barcodePrintPresets = [
-  { label: "标签面单 30mm x 70mm", value: "barcode_70x30", printer: "label", printSettings: "noscale,portrait,monochrome,paper=70mm*30mm" },
-  { label: "FBP 面单 72mm x 130mm", value: "fbp_label_72x130", printer: "label", printSettings: "noscale,portrait,monochrome,paper=72mm x 130mm" },
-  { label: "订单面单 72mm x 130mm", value: "order_label_72x130", printer: "label", printSettings: "noscale,portrait,monochrome,paper=72mm x 130mm" }
-];
-const barcodePreview = reactive({
-  visible: false,
-  loading: false,
-  url: "",
-  filename: "",
-  pdfBase64: "",
-  count: 0,
-  activeRow: null,
-  printer: "",
-  printers: barcodePrintPresets,
-  helperAvailable: false,
-  helperStatus: "",
-  directPrinting: false
-});
 
 const state = reactive({
   rows: [],
@@ -50,15 +35,6 @@ const state = reactive({
     pageSize: 10
   }
 });
-
-const statusTabs = [
-  { label: "申请中", value: "applying" },
-  { label: "已通过", value: "approved" },
-  { label: "待发货", value: "waiting_shipment" },
-  { label: "已完成", value: "completed" },
-  { label: "已取消", value: "cancelled" },
-  { label: "全部", value: "all" }
-];
 
 const currentUserId = computed(() => Number(authStore.user?.id || authStore.user?.person_id || 0) || 0);
 function aggregateBatchOrder(orders) {
@@ -207,6 +183,12 @@ function canMarkSent(row) {
   return String(row.status || "") === "approved";
 }
 
+function canMarkBatchSent(row) {
+  return Boolean(row?._isBatchSummary)
+    && Array.isArray(row._sourceOrders)
+    && row._sourceOrders.some((order) => canMarkSent(order));
+}
+
 function canCancelOrder(row) {
   return String(row.status || "") === "approved";
 }
@@ -217,6 +199,12 @@ function canFillOzon(row) {
 
 function canMarkCompleted(row) {
   return ["sent", "ozon_created"].includes(String(row.status || ""));
+}
+
+function canMarkBatchCompleted(row) {
+  return Boolean(row?._isBatchSummary)
+    && Array.isArray(row._sourceOrders)
+    && row._sourceOrders.some((order) => canMarkCompleted(order));
 }
 
 function canDeleteOrder(row) {
@@ -291,6 +279,37 @@ async function unlinkOrder(row) {
   } finally { actionLoadingId.value = ""; }
 }
 
+function openFbpFillResultDialog(result, itemResults = []) {
+  const failures = itemResults.filter((item) => !item.success).map((item) => ({
+    sku: String(item.sku || ""),
+    offerId: String(item.offerId || item.offer_id || ""),
+    quantity: integer(item.quantity),
+    message: String(item.message || "填写失败")
+  }));
+  if (result?.success === false && !failures.length) {
+    failures.push({ sku: "任务", offerId: "-", quantity: 0, message: String(result?.message || "插件执行失败") });
+  }
+  fbpFillResultDialog.summary = String(result?.message || "填写任务已结束");
+  fbpFillResultDialog.successCount = itemResults.length - failures.length;
+  fbpFillResultDialog.durationSeconds = integer(result?.durationSeconds);
+  fbpFillResultDialog.failures = failures;
+  fbpFillResultDialog.requiresReload = ["PLUGIN_CONTEXT_INVALIDATED", "PLUGIN_RUNTIME_ERROR"].includes(String(result?.error || ""))
+    || /Extension context invalidated/i.test(String(result?.message || ""));
+  fbpFillResultDialog.visible = true;
+}
+
+function reloadAfterPluginUpdate() {
+  window.location.reload();
+}
+
+async function copyFailedFbpItems() {
+  const lines = ["Ozon SKU\t数量\t商家货号\t失败原因"];
+  lines.push(...fbpFillResultDialog.failures.map((item) => `${item.sku}\t${item.quantity}\t${item.offerId}\t${item.message}`));
+  const copied = await copyToClipboard(lines.join("\n"));
+  if (copied) ElMessage.success(`已复制 ${fbpFillResultDialog.failures.length} 个失败项目`);
+  else ElMessage.error("复制失败，请在表格中手工选择失败项目");
+}
+
 async function fillBatchToOzon(row) {
   actionLoadingId.value = `fill-batch-${row.batch_id}`;
   try {
@@ -305,6 +324,7 @@ async function fillBatchToOzon(row) {
     }
     const requested = (alreadyImported ? items : items.filter((item) => Number(item.pending_qty) > 0)).map((item) => ({
       sku: String(item.sku),
+      offerId: String(item.offer_id || ""),
       quantity: integer(alreadyImported ? item.final_qty : item.pending_qty)
     })).filter((item) => item.quantity > 0);
     if (!requested.length) return ElMessage.info("该关联单没有可导入的 SKU 和数量");
@@ -314,7 +334,8 @@ async function fillBatchToOzon(row) {
     } catch { return; }
     const result = await requestPluginFbpFill({
       batchId: Number(row.batch_id), batchNo: row.batch_no,
-      shopId: Number(row.shop_id), shopName: String(row.shop_name || ""), items: requested
+      shopId: Number(row.shop_id), shopName: String(row.shop_name || ""),
+      ozonCompanyId: String(preview.batch?.ozon_company_id || row.ozon_company_id || ""), items: requested
     });
     const resultBySku = new Map((result.results || []).map((item) => [String(item.sku || ""), item]));
     const recordedResults = requested.map((item) => {
@@ -322,8 +343,7 @@ async function fillBatchToOzon(row) {
       return { ...pluginResult, sku: item.sku, quantity: item.quantity };
     });
     await apiClient.post("/api/fbp-replenishment-batches/fill-results", { batch_id: row.batch_id, repeat_import: alreadyImported, results: recordedResults });
-    const failed = recordedResults.filter((item) => !item.success);
-    await ElMessageBox.alert(failed.length ? `成功 ${recordedResults.length - failed.length}，失败 ${failed.length}。` : `成功导入 ${recordedResults.length} 个 SKU，执行记录已保存。`, "Ozon 导入结果", { type: failed.length ? "warning" : "success" });
+    openFbpFillResultDialog(result, recordedResults);
     await loadPageData();
   } catch (error) {
     ElMessage.error(error.message || "关联批次填入 Ozon 失败");
@@ -358,15 +378,11 @@ async function submitAdjustment() {
 }
 
 function barcodePrintQuantity(row) {
-  return Math.max(1, Math.round(Number(row?.final_qty || row?.approved_qty || row?.requested_qty || 0) + 2));
+  return Math.max(1, Math.round(Number(row?.final_qty ?? row?.approved_qty ?? row?.requested_qty ?? 0)));
 }
 
 function rowBarcodeLoadingKey(row) {
   return `${String(row?.order_id || row?.order?.id || 0)}:${String(row?.id || 0)}`;
-}
-
-function barcodePreviewLoading(row) {
-  return Boolean(barcodeLoadingKeys[`${rowBarcodeLoadingKey(row)}:preview`]);
 }
 
 function barcodeGenerateLoading(row) {
@@ -456,6 +472,48 @@ async function updateStatus(row, status) {
   }
 }
 
+async function markBatchSent(row) {
+  const approvedOrders = (row?._sourceOrders || []).filter((order) => canMarkSent(order));
+  if (!approvedOrders.length) {
+    ElMessage.info("该关联汇总中没有待标记发送的已通过备货单");
+    return;
+  }
+  actionLoadingId.value = `batch-sent-${row.batch_id}`;
+  try {
+    await Promise.all(approvedOrders.map((order) => apiClient.post("/api/fbp-replenishment-orders/status", {
+      id: order.id,
+      status: "sent"
+    })));
+    ElMessage.success(`已将关联汇总中的 ${approvedOrders.length} 张备货单标记为已发送`);
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "关联汇总标记发送失败");
+  } finally {
+    actionLoadingId.value = "";
+  }
+}
+
+async function markBatchCompleted(row) {
+  const waitingOrders = (row?._sourceOrders || []).filter((order) => canMarkCompleted(order));
+  if (!waitingOrders.length) {
+    ElMessage.info("该关联汇总中没有待完成的备货单");
+    return;
+  }
+  actionLoadingId.value = `batch-completed-${row.batch_id}`;
+  try {
+    await Promise.all(waitingOrders.map((order) => apiClient.post("/api/fbp-replenishment-orders/status", {
+      id: order.id,
+      status: "completed"
+    })));
+    ElMessage.success(`已完成关联汇总中的 ${waitingOrders.length} 张备货单`);
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "关联汇总标记完成失败");
+  } finally {
+    actionLoadingId.value = "";
+  }
+}
+
 async function cancelOrder(row) {
   try {
     await ElMessageBox.confirm(
@@ -487,8 +545,7 @@ async function saveOrderItems(row) {
       order_id: row.id,
       items: (row.items || []).map((item) => ({
         id: item.id,
-        requested_qty: item.requested_qty,
-        approved_qty: item.approved_qty
+        requested_qty: item.requested_qty
       }))
     });
     ElMessage.success("备货数量已保存");
@@ -503,14 +560,27 @@ async function saveOrderItems(row) {
 function requestPluginFbpFill(payload) {
   const requestId = `fbp-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   return new Promise((resolve, reject) => {
+    const connectionTimeoutId = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("未检测到插件连接。请确认已启用最新版插件，然后刷新当前 ERP 页面再试。"));
+    }, 5_000);
     const timeoutId = window.setTimeout(() => {
-      window.removeEventListener("message", handleResponse);
+      cleanup();
       reject(new Error("插件填写超时，请检查 Ozon 页面上的执行进度"));
     }, 10 * 60 * 1000);
-    function handleResponse(event) {
-      if (event.source !== window || event.data?.type !== "OZON_ERP_FBP_FILL_RESPONSE" || event.data?.requestId !== requestId) return;
+    function cleanup() {
+      window.clearTimeout(connectionTimeoutId);
       window.clearTimeout(timeoutId);
       window.removeEventListener("message", handleResponse);
+    }
+    function handleResponse(event) {
+      if (event.source !== window || event.data?.requestId !== requestId) return;
+      if (event.data?.type === "OZON_ERP_FBP_BRIDGE_ACCEPTED") {
+        window.clearTimeout(connectionTimeoutId);
+        return;
+      }
+      if (event.data?.type !== "OZON_ERP_FBP_FILL_RESPONSE") return;
+      cleanup();
       resolve(event.data.response || { success: false, message: "插件没有返回执行结果" });
     }
     window.addEventListener("message", handleResponse);
@@ -519,13 +589,21 @@ function requestPluginFbpFill(payload) {
 }
 
 async function fillOrderToOzon(row) {
+  const alreadyImported = (row.items || []).some((item) => Number(item.filled_qty || 0) > 0)
+    || Number(row.filled_qty || 0) > 0;
   const items = (row.items || []).map((item) => ({
     sku: String(item.ozon_sku || "").trim(),
+    offerId: String(item.offer_id || "").trim(),
     quantity: Math.max(1, Math.round(Number(item.final_qty || item.approved_qty || item.requested_qty || 0)))
   })).filter((item) => item.sku && item.quantity > 0);
   if (!items.length) {
     ElMessage.error("该备货单没有可填写的 Ozon SKU 和数量");
     return;
+  }
+  if (alreadyImported) {
+    try {
+      await ElMessageBox.confirm("该备货单已经填入过 Ozon。若你已删除原商品或需要覆盖数量，可以再次按当前最终数量整单填入。", "确认再次填入", { type: "warning", confirmButtonText: "再次填入", cancelButtonText: "取消" });
+    } catch { return; }
   }
   actionLoadingId.value = actionKey(row, "fill-ozon");
   try {
@@ -534,15 +612,10 @@ async function fillOrderToOzon(row) {
       orderNo: String(row.order_no || ""),
       shopId: Number(row.shop_id || 0),
       shopName: String(row.shop_name || ""),
+      ozonCompanyId: String(row.ozon_company_id || ""),
       items
     });
-    const failed = Array.isArray(result?.results) ? result.results.filter((item) => !item.success) : [];
-    const lines = [result?.message || "填写任务已结束"];
-    if (failed.length) lines.push(...failed.slice(0, 12).map((item) => `${item.sku || "未知SKU"}：${item.message || "填写失败"}`));
-    await ElMessageBox.alert(lines.join("\n"), result?.success ? "Ozon 填写完成" : "Ozon 填写结果", {
-      confirmButtonText: "知道了",
-      type: result?.success ? "success" : "warning"
-    });
+    openFbpFillResultDialog(result, Array.isArray(result?.results) ? result.results : []);
   } catch (error) {
     ElMessage.error(error.message || "调用浏览器插件失败，请确认已安装最新版插件并刷新 ERP 页面");
   } finally {
@@ -623,89 +696,6 @@ function barcodeRequestItem(row, quantity = 1) {
   };
 }
 
-function resetBarcodePreview() {
-  if (barcodePreview.url) URL.revokeObjectURL(barcodePreview.url);
-  barcodePreview.visible = false;
-  barcodePreview.loading = false;
-  barcodePreview.url = "";
-  barcodePreview.filename = "";
-  barcodePreview.pdfBase64 = "";
-  barcodePreview.count = 0;
-  barcodePreview.activeRow = null;
-  barcodePreview.printer = "";
-  barcodePreview.printers = barcodePrintPresets;
-  barcodePreview.helperAvailable = false;
-  barcodePreview.helperStatus = "";
-  barcodePreview.directPrinting = false;
-}
-
-function openBarcodePreviewDialog(count, row) {
-  if (barcodePreview.url) URL.revokeObjectURL(barcodePreview.url);
-  barcodePreview.visible = true;
-  barcodePreview.loading = true;
-  barcodePreview.url = "";
-  barcodePreview.filename = "";
-  barcodePreview.pdfBase64 = "";
-  barcodePreview.count = count;
-  barcodePreview.activeRow = row || null;
-  barcodePreview.printer = "barcode_70x30";
-  barcodePreview.printers = barcodePrintPresets;
-  barcodePreview.helperAvailable = false;
-  barcodePreview.helperStatus = "正在生成条码 PDF...";
-  barcodePreview.directPrinting = false;
-}
-
-function filenameFromDisposition(value, fallback = "ozon-barcodes.pdf") {
-  const raw = String(value || "");
-  const utf8 = raw.match(/filename\*=UTF-8''([^;]+)/i);
-  if (utf8?.[1]) {
-    try {
-      return decodeURIComponent(utf8[1]);
-    } catch {}
-  }
-  const plain = raw.match(/filename="?([^"]+)"?/i);
-  return plain?.[1] || fallback;
-}
-
-async function blobToBase64(blob) {
-  const buffer = await blob.arrayBuffer();
-  let binary = "";
-  const bytes = new Uint8Array(buffer);
-  const chunkSize = 0x8000;
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    const chunk = bytes.subarray(index, index + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
-}
-
-async function openBarcodePreviewFromResponse(response, count, row) {
-  if (barcodePreview.url) URL.revokeObjectURL(barcodePreview.url);
-  barcodePreview.url = URL.createObjectURL(response.blob);
-  barcodePreview.pdfBase64 = await blobToBase64(response.blob);
-  barcodePreview.filename = filenameFromDisposition(response.headers.get("Content-Disposition"), "ozon-barcodes.pdf");
-  barcodePreview.count = count;
-  barcodePreview.loading = false;
-  barcodePreview.activeRow = row || null;
-  await loadLocalPrinters();
-}
-
-async function loadLocalPrinters() {
-  barcodePreview.helperAvailable = false;
-  barcodePreview.printers = barcodePrintPresets;
-  barcodePreview.printer = barcodePreview.printer || "barcode_70x30";
-  barcodePreview.helperStatus = "正在检测服务器打印服务...";
-  try {
-    const payload = await apiClient.get("/api/print/printers");
-    if (!payload?.ok || payload?.roles?.label?.installed === false) throw new Error("printers failed");
-    barcodePreview.helperStatus = "服务器打印服务已连接";
-    barcodePreview.helperAvailable = true;
-  } catch {
-    barcodePreview.helperAvailable = false;
-    barcodePreview.helperStatus = "服务器打印服务不可用，可先预览或下载 PDF";
-  }
-}
-
 async function markBarcodePrinted(row, quantity) {
   const itemId = Number(row?.id || 0);
   const orderId = Number(row?.order_id || row?.order?.id || 0);
@@ -724,67 +714,52 @@ async function markBarcodePrinted(row, quantity) {
 async function recordBarcodePrinted(row, quantity) {
   try {
     await markBarcodePrinted(row, quantity);
+    return true;
   } catch (error) {
     ElMessage.warning(error.message || "条码已发起打印，但打印记录保存失败，请刷新后重试");
+    return false;
   }
 }
 
-async function printBarcodePreviewInBrowser() {
-  const target = previewFrameRef.value?.contentWindow;
-  if (!target) {
-    ElMessage.warning("PDF 预览还没准备好，请稍后再试");
-    return;
-  }
+async function printBarcodePdfInWindows(response, row, quantity) {
+  const url = URL.createObjectURL(response.blob);
+  const frame = document.createElement("iframe");
+  frame.setAttribute("aria-hidden", "true");
+  frame.style.position = "fixed";
+  frame.style.width = "1px";
+  frame.style.height = "1px";
+  frame.style.right = "0";
+  frame.style.bottom = "0";
+  frame.style.border = "0";
+  frame.style.opacity = "0";
+  frame.style.pointerEvents = "none";
+  document.body.appendChild(frame);
+
   try {
+    await new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => reject(new Error("打印文件加载超时")), 20_000);
+      frame.onload = () => {
+        window.clearTimeout(timer);
+        resolve();
+      };
+      frame.onerror = () => {
+        window.clearTimeout(timer);
+        reject(new Error("打印文件加载失败"));
+      };
+      frame.src = url;
+    });
+    const target = frame.contentWindow;
+    if (!target) throw new Error("无法调用 Windows 打印窗口");
     target.focus();
     target.print();
-    await recordBarcodePrinted(barcodePreview.activeRow, barcodePreview.count);
-  } catch {
-    window.open(barcodePreview.url, "_blank", "noopener");
-    ElMessage.warning("浏览器未能确认打印，已在新窗口打开 PDF，暂未标记为已打印");
-  }
-}
-
-function downloadBarcodePreviewFile() {
-  if (!barcodePreview.url) return;
-  const link = document.createElement("a");
-  link.href = barcodePreview.url;
-  link.download = barcodePreview.filename || "ozon-barcodes.pdf";
-  link.click();
-}
-
-function openBarcodePreviewInNewWindow() {
-  if (!barcodePreview.url) return;
-  window.open(barcodePreview.url, "_blank", "noopener");
-}
-
-async function directPrintBarcodePreview() {
-  if (!barcodePreview.pdfBase64) {
-    ElMessage.error("当前没有可打印的 PDF");
-    return;
-  }
-  barcodePreview.directPrinting = true;
-  barcodePreview.helperStatus = "正在发送到服务器打印机...";
-  try {
-    const preset = barcodePrintPresets.find((item) => item.value === barcodePreview.printer) || barcodePrintPresets[0];
-    await apiClient.post("/api/print/jobs", {
-      pdf_base64: barcodePreview.pdfBase64,
-      filename: barcodePreview.filename || "ozon-barcodes.pdf",
-      printer: preset.printer,
-      print_settings: preset.printSettings,
-      preset: preset.value,
-      paper_size: preset.value,
-      source: "fbp-replenishment-barcode-preview"
-    });
-    await recordBarcodePrinted(barcodePreview.activeRow, barcodePreview.count);
-    barcodePreview.helperStatus = "已发送到打印机";
-    ElMessage.success("条码已发送到服务器标签打印机");
-  } catch (error) {
-    barcodePreview.helperStatus = "直接打印失败，已回退到浏览器打印";
-    ElMessage.warning(error.message || "直接打印失败，已回退到浏览器打印");
-    printBarcodePreviewInBrowser();
+    barcodePrintResultDialog.row = row;
+    barcodePrintResultDialog.quantity = quantity;
+    barcodePrintResultDialog.visible = true;
   } finally {
-    barcodePreview.directPrinting = false;
+    window.setTimeout(() => {
+      frame.remove();
+      URL.revokeObjectURL(url);
+    }, 1_000);
   }
 }
 
@@ -808,52 +783,27 @@ async function generateBarcode(row, options = {}) {
   }
 }
 
-async function previewBarcodeLabel(row) {
-  if (!ensureBarcodeTarget(row, "预览条码")) return;
-  const quantity = barcodePrintQuantity(row);
-  const key = `${rowBarcodeLoadingKey(row)}:preview`;
-  barcodeLoadingKeys[key] = true;
-  openBarcodePreviewDialog(quantity, row);
-  try {
-    const response = await apiClient.blobResponse("/api/products/barcode-label", {
-      method: "POST",
-      body: JSON.stringify({
-        items: [barcodeRequestItem(row, quantity)]
-      })
-    });
-    await openBarcodePreviewFromResponse(response, quantity, row);
-  } catch (error) {
-    resetBarcodePreview();
-    ElMessage.error(error.message || "预览条码失败");
-  } finally {
-    delete barcodeLoadingKeys[key];
-  }
-}
-
 async function regenerateBarcodeLabel(row) {
   await generateBarcode(row, { refreshCache: true, forceGenerate: true });
 }
 
 async function printBarcodeLabel(row) {
   if (!ensureBarcodeTarget(row, "打印条码")) return;
-  let promptValue = String(barcodePrintQuantity(row));
-  try {
-    const result = await ElMessageBox.prompt("请输入这次要打印的条码数量", "打印条码 PDF", {
-      confirmButtonText: "继续",
-      cancelButtonText: "取消",
-      inputValue: promptValue,
-      inputPattern: /^[1-9]\d{0,2}$/,
-      inputErrorMessage: "请输入 1-999 的整数"
-    });
-    promptValue = String(result?.value || promptValue).trim();
-  } catch {
-    return;
-  }
+  const recommended = barcodePrintQuantity(row);
+  barcodePrintDialog.row = row;
+  barcodePrintDialog.recommended = recommended;
+  barcodePrintDialog.quantity = recommended;
+  barcodePrintDialog.visible = true;
+}
 
-  const quantity = Math.max(1, Math.min(999, Math.round(Number(promptValue || 1))));
+async function confirmBarcodePrint() {
+  const row = barcodePrintDialog.row;
+  if (!row || barcodePrintDialog.submitting) return;
+  const quantity = Math.max(1, Math.min(999, Math.round(Number(barcodePrintDialog.quantity || 1))));
   const key = `${rowBarcodeLoadingKey(row)}:print`;
+  barcodePrintDialog.quantity = quantity;
+  barcodePrintDialog.submitting = true;
   barcodeLoadingKeys[key] = true;
-  openBarcodePreviewDialog(quantity, row);
   try {
     const response = await apiClient.blobResponse("/api/products/barcode-label", {
       method: "POST",
@@ -861,19 +811,34 @@ async function printBarcodeLabel(row) {
         items: [barcodeRequestItem(row, quantity)]
       })
     });
-    await openBarcodePreviewFromResponse(response, quantity, row);
+    barcodePrintDialog.visible = false;
+    await printBarcodePdfInWindows(response, row, quantity);
   } catch (error) {
-    resetBarcodePreview();
     ElMessage.error(error.message || "打印条码失败");
   } finally {
+    barcodePrintDialog.submitting = false;
     delete barcodeLoadingKeys[key];
   }
 }
 
-function handleStatusTab(tabName) {
-  state.filters.status = tabName;
-  state.filters.page = 1;
-  loadPageData();
+async function confirmBarcodePrintCompleted() {
+  const row = barcodePrintResultDialog.row;
+  if (!row || barcodePrintResultDialog.confirming) return;
+  barcodePrintResultDialog.confirming = true;
+  try {
+    const recorded = await recordBarcodePrinted(row, barcodePrintResultDialog.quantity);
+    if (!recorded) return;
+    barcodePrintResultDialog.visible = false;
+    ElMessage.success(`已记录打印 ${barcodePrintResultDialog.quantity} 张`);
+  } finally {
+    barcodePrintResultDialog.confirming = false;
+  }
+}
+
+function retryBarcodePrint() {
+  const row = barcodePrintResultDialog.row;
+  barcodePrintResultDialog.visible = false;
+  if (row) printBarcodeLabel(row);
 }
 
 function handleSearch() {
@@ -885,6 +850,7 @@ function handleReset() {
   state.filters.query = "";
   state.filters.shopId = "all";
   state.filters.status = "applying";
+  sharedReplenishmentStatus.value = "applying";
   state.filters.page = 1;
   loadPageData();
 }
@@ -905,34 +871,31 @@ watch(() => state.filters.shopId, () => {
   loadPageData();
 });
 
+watch(sharedReplenishmentStatus, (status) => {
+  if (state.filters.status === status) return;
+  state.filters.status = status;
+  state.filters.page = 1;
+  loadPageData();
+});
+
 onMounted(loadPageData);
 </script>
 
 <template>
   <div class="inventory-page-shell inventory-card">
     <div class="replenishment-command-bar">
-      <div class="replenishment-command-main">
-        <div class="replenishment-status-nav">
-          <span class="command-eyebrow">备货进度</span>
-          <div class="replenishment-tabs">
-            <el-tabs :model-value="state.filters.status" @tab-change="handleStatusTab">
-              <el-tab-pane v-for="tab in statusTabs" :key="tab.value" :label="tab.label" :name="tab.value" />
-            </el-tabs>
-          </div>
-        </div>
-        <div class="replenishment-selection">
-          <span class="selection-count">已选 <strong>{{ selectedOrderIds.length }}</strong> 张</span>
-          <el-button type="primary" :disabled="selectedOrderIds.length < 2" :loading="actionLoadingId === 'link-orders'" @click="linkSelectedOrders">
-            创建关联汇总
-          </el-button>
-        </div>
-      </div>
       <div class="replenishment-filter-row">
         <div class="replenishment-filter-heading">
           <strong>筛选备货单</strong>
           <span>按单号、商品或店铺快速定位</span>
         </div>
         <div class="replenishment-filter-controls">
+          <div class="replenishment-selection">
+            <span class="selection-count">已选 <strong>{{ selectedOrderIds.length }}</strong> 张</span>
+            <el-button type="primary" :disabled="selectedOrderIds.length < 2" :loading="actionLoadingId === 'link-orders'" @click="linkSelectedOrders">
+              创建关联汇总
+            </el-button>
+          </div>
           <el-input
             v-model="state.filters.query"
             clearable
@@ -1032,6 +995,20 @@ onMounted(loadPageData);
                     @click="fillBatchToOzon(row.order)"
                   >导入 Ozon</el-button>
                   <el-button v-if="row.order._isBatchSummary" size="default" type="primary" plain @click="openBatchDetails(row.order)">查看关联明细</el-button>
+                  <el-button
+                    v-if="canMarkBatchSent(row.order)"
+                    size="default"
+                    type="warning"
+                    :loading="actionLoadingId === `batch-sent-${row.order.batch_id}`"
+                    @click="markBatchSent(row.order)"
+                  >标记已发送</el-button>
+                  <el-button
+                    v-if="canMarkBatchCompleted(row.order)"
+                    size="default"
+                    type="success"
+                    :loading="actionLoadingId === `batch-completed-${row.order.batch_id}`"
+                    @click="markBatchCompleted(row.order)"
+                  >完成</el-button>
                   <el-button
                     v-if="row.order.batch_id && !row.order._isBatchSummary"
                     size="default"
@@ -1180,15 +1157,6 @@ onMounted(loadPageData);
                 <el-button
                   class="erp-btn-link"
                   link
-                  type="primary"
-                  :loading="barcodePreviewLoading(row)"
-                  @click="previewBarcodeLabel(row)"
-                >
-                  预览
-                </el-button>
-                <el-button
-                  class="erp-btn-link"
-                  link
                   type="warning"
                   :loading="barcodeGenerateLoading(row)"
                   @click="regenerateBarcodeLabel(row)"
@@ -1235,59 +1203,80 @@ onMounted(loadPageData);
     </div>
 
     <el-dialog
-      v-model="barcodePreview.visible"
-      title="条码 PDF 预览"
-      width="min(1120px, 96vw)"
-      top="4vh"
+      v-model="barcodePrintDialog.visible"
+      title="确认打印条码"
+      width="520px"
+      class="barcode-print-dialog"
+      :close-on-click-modal="!barcodePrintDialog.submitting"
+      :close-on-press-escape="!barcodePrintDialog.submitting"
+      :show-close="!barcodePrintDialog.submitting"
       destroy-on-close
-      @closed="resetBarcodePreview"
     >
-      <div class="barcode-preview-shell">
-        <div class="barcode-preview-toolbar">
-          <div class="cell-stack">
-            <strong>{{ barcodePreview.count > 1 ? `条码打印预览（${barcodePreview.count} 张）` : "条码打印预览" }}</strong>
-            <span class="muted-text">{{ barcodePreview.helperStatus || "先预览，确认无误后再打印" }}</span>
-          </div>
-          <div class="barcode-preview-actions">
-            <el-select
-              v-model="barcodePreview.printer"
-              placeholder="打印尺寸"
-              filterable
-              style="width: 220px"
-              :disabled="!barcodePreview.helperAvailable || barcodePreview.directPrinting"
-            >
-              <el-option
-                v-for="preset in barcodePreview.printers"
-                :key="preset.value"
-                :label="preset.label"
-                :value="preset.value"
-              />
-            </el-select>
-            <el-button
-              type="primary"
-              :disabled="!barcodePreview.helperAvailable || barcodePreview.loading"
-              :loading="barcodePreview.directPrinting"
-              @click="directPrintBarcodePreview"
-            >
-              直接打印
-            </el-button>
-            <el-button :disabled="barcodePreview.loading || !barcodePreview.url" @click="printBarcodePreviewInBrowser">浏览器打印</el-button>
-            <el-button :disabled="barcodePreview.loading || !barcodePreview.url" @click="downloadBarcodePreviewFile">下载 PDF</el-button>
-            <el-button :disabled="barcodePreview.loading || !barcodePreview.url" @click="openBarcodePreviewInNewWindow">新窗口打开</el-button>
+      <div class="barcode-print-confirmation">
+        <div class="barcode-print-product">
+          <ProductImagePreview :src="barcodePrintDialog.row?.image_url" />
+          <div>
+            <strong>{{ barcodePrintDialog.row?.product_name || "未命名商品" }}</strong>
+            <span>SKU {{ barcodePrintDialog.row?.ozon_sku || "-" }}</span>
+            <span>Offer {{ barcodePrintDialog.row?.offer_id || "-" }}</span>
           </div>
         </div>
-
-        <div v-if="barcodePreview.loading" class="barcode-preview-loading">
-          <el-skeleton :rows="8" animated />
+        <div class="barcode-print-rule">
+          <span>推荐规则</span>
+          <strong>最新保存的最终备货数量</strong>
+          <b>推荐 {{ integer(barcodePrintDialog.recommended) }} 张</b>
         </div>
-        <iframe
-          v-else
-          ref="previewFrameRef"
-          class="barcode-preview-frame"
-          :src="barcodePreview.url"
-          title="条码 PDF 预览"
+        <el-form label-position="top">
+          <el-form-item label="本次打印数量">
+            <el-input-number
+              v-model="barcodePrintDialog.quantity"
+              :min="1"
+              :max="999"
+              :step="1"
+              step-strictly
+              controls-position="right"
+            />
+          </el-form-item>
+        </el-form>
+        <el-alert
+          title="确认后将生成 PDF，并打开 Windows 系统打印窗口。"
+          type="info"
+          :closable="false"
+          show-icon
         />
       </div>
+      <template #footer>
+        <el-button :disabled="barcodePrintDialog.submitting" @click="barcodePrintDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="barcodePrintDialog.submitting" @click="confirmBarcodePrint">
+          确认并打开打印
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="barcodePrintResultDialog.visible"
+      title="打印结果确认"
+      width="460px"
+      class="barcode-print-result-dialog"
+      :close-on-click-modal="false"
+      :close-on-press-escape="false"
+      :show-close="false"
+    >
+      <div class="barcode-print-result">
+        <div class="barcode-print-result-icon">✓</div>
+        <div>
+          <strong>条码是否已正常打印？</strong>
+          <p>本次共 {{ integer(barcodePrintResultDialog.quantity) }} 张。点击“打印完成”后记录打印数量、时间和操作人。</p>
+        </div>
+      </div>
+      <template #footer>
+        <el-button type="danger" plain :disabled="barcodePrintResultDialog.confirming" @click="retryBarcodePrint">
+          打印失败，重新打印
+        </el-button>
+        <el-button type="primary" :loading="barcodePrintResultDialog.confirming" @click="confirmBarcodePrintCompleted">
+          打印完成
+        </el-button>
+      </template>
     </el-dialog>
 
     <el-dialog v-model="adjustmentDialog.visible" title="添加人工数量调整" width="480px" destroy-on-close>
@@ -1306,6 +1295,35 @@ onMounted(loadPageData);
       </template>
     </el-dialog>
 
+    <el-dialog v-model="fbpFillResultDialog.visible" title="Ozon 填写结果" width="760px" destroy-on-close>
+      <div class="fbp-fill-result">
+        <el-alert
+          :title="fbpFillResultDialog.summary"
+          :type="fbpFillResultDialog.failures.length ? 'warning' : 'success'"
+          :closable="false"
+          show-icon
+        />
+        <template v-if="fbpFillResultDialog.failures.length">
+          <div class="fbp-failure-heading">
+            <strong>需要人工补录 {{ fbpFillResultDialog.failures.length }} 项</strong>
+            <span>成功项目已经保留，不需要重新执行整单。</span>
+          </div>
+          <el-table :data="fbpFillResultDialog.failures" border max-height="420" class="fbp-failure-table">
+            <el-table-column prop="sku" label="Ozon SKU" width="150" />
+            <el-table-column prop="quantity" label="补录数量" width="100" align="center" />
+            <el-table-column prop="offerId" label="商家货号" min-width="180" show-overflow-tooltip />
+            <el-table-column prop="message" label="失败原因" min-width="250" show-overflow-tooltip />
+          </el-table>
+        </template>
+        <el-result v-else icon="success" title="全部填写成功" sub-title="请在 Ozon 页面复核商品和货位数量后继续。" />
+      </div>
+      <template #footer>
+        <el-button @click="fbpFillResultDialog.visible = false">关闭</el-button>
+        <el-button v-if="fbpFillResultDialog.requiresReload" type="primary" @click="reloadAfterPluginUpdate">刷新 ERP 页面</el-button>
+        <el-button v-if="fbpFillResultDialog.failures.length" type="primary" @click="copyFailedFbpItems">复制失败清单</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="batchDetailDialog.visible" :title="`关联明细 · ${batchDetailDialog.batch?.batch_no || ''}`" width="96vw" top="4vh" destroy-on-close>
       <div v-loading="batchDetailDialog.loading" class="batch-detail-list">
         <el-table v-if="batchDetailRows.length" :data="batchDetailRows" :span-method="tableSpanMethod" border class="erp-data-table replenishment-table batch-detail-table">
@@ -1320,7 +1338,6 @@ onMounted(loadPageData);
             <el-table-column label="打印" width="220" align="center">
               <template #default="{ row }">
                 <el-space wrap :size="6" class="barcode-actions">
-                  <el-button link type="primary" :loading="barcodePreviewLoading(row)" @click="previewBarcodeLabel(row)">预览</el-button>
                   <el-button link type="warning" :loading="barcodeGenerateLoading(row)" @click="regenerateBarcodeLabel(row)">重新生成</el-button>
                   <el-button link type="success" :loading="barcodePrintLoading(row)" @click="printBarcodeLabel(row)">打印</el-button>
                 </el-space>
@@ -1345,6 +1362,7 @@ onMounted(loadPageData);
 <style scoped>
 .replenishment-command-bar {
   display: grid;
+  flex: 0 0 auto;
   gap: 0;
   margin-bottom: 18px;
   overflow: hidden;
@@ -1354,37 +1372,12 @@ onMounted(loadPageData);
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
 }
 
-.replenishment-command-main {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 18px 20px 0;
-  background: linear-gradient(135deg, #f8faff 0%, #ffffff 58%, #f5f3ff 100%);
-}
-
-.replenishment-status-nav {
-  min-width: 0;
-}
-
-.command-eyebrow {
-  display: block;
-  margin-bottom: 9px;
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
-
-.replenishment-tabs {
-  min-width: 0;
-}
-
 .replenishment-selection {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding-bottom: 14px;
+  padding-right: 10px;
+  border-right: 1px solid #e2e8f0;
   flex: 0 0 auto;
 }
 
@@ -1398,39 +1391,12 @@ onMounted(loadPageData);
   font-size: 16px;
 }
 
-.replenishment-tabs :deep(.el-tabs__header) {
-  margin-bottom: 0;
-}
-
-.replenishment-tabs :deep(.el-tabs__nav-wrap::after) {
-  height: 1px;
-  background: #dbe3ef;
-}
-
-.replenishment-tabs :deep(.el-tabs__item) {
-  height: 42px;
-  padding: 0 20px;
-  color: #475569;
-  font-weight: 600;
-}
-
-.replenishment-tabs :deep(.el-tabs__item.is-active) {
-  color: #4f46e5;
-}
-
-.replenishment-tabs :deep(.el-tabs__active-bar) {
-  height: 3px;
-  border-radius: 999px 999px 0 0;
-  background: #635bff;
-}
-
 .replenishment-filter-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 24px;
   padding: 14px 20px;
-  border-top: 1px solid #edf1f7;
 }
 
 .replenishment-filter-heading {
@@ -1479,7 +1445,17 @@ onMounted(loadPageData);
 }
 
 .replenishment-table-wrap {
-  min-height: 360px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.replenishment-table-wrap :deep(.replenishment-table) {
+  height: 100%;
+}
+
+.inventory-page-shell > :deep(.page-footer-pagination) {
+  flex: 0 0 auto;
 }
 
 .replenishment-table :deep(.el-table__cell) {
@@ -1583,20 +1559,22 @@ onMounted(loadPageData);
 
 .adjustment-form { margin-top: 16px; }
 
+.fbp-fill-result { display: grid; gap: 16px; }
+.fbp-failure-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.fbp-failure-heading strong { color: #b45309; }
+.fbp-failure-heading span { color: #64748b; font-size: 12px; }
+.fbp-failure-table { width: 100%; }
+
 @media (max-width: 1280px) {
-  .replenishment-command-main,
   .replenishment-filter-row { align-items: stretch; flex-direction: column; gap: 12px; }
-  .replenishment-selection { justify-content: space-between; padding-bottom: 16px; }
   .replenishment-filter-controls { justify-content: flex-start; flex-wrap: wrap; }
   .replenishment-search { width: min(100%, 420px); }
 }
 
 @media (max-width: 720px) {
-  .replenishment-command-main,
   .replenishment-filter-row { padding-inline: 14px; }
-  .replenishment-tabs { overflow-x: auto; }
-  .replenishment-tabs :deep(.el-tabs__item) { padding: 0 13px; }
   .replenishment-filter-controls { display: grid; grid-template-columns: 1fr 1fr; }
+  .replenishment-selection { grid-column: 1 / -1; justify-content: space-between; padding-right: 0; padding-bottom: 10px; border-right: 0; border-bottom: 1px solid #e2e8f0; }
   .replenishment-search,
   .replenishment-shop-select { width: 100%; grid-column: 1 / -1; }
 }
@@ -1636,40 +1614,83 @@ onMounted(loadPageData);
   color: #15803d;
 }
 
-.barcode-preview-shell {
+.barcode-print-confirmation {
   display: grid;
-  gap: 12px;
+  gap: 18px;
 }
 
-.barcode-preview-toolbar {
-  display: flex;
+.barcode-print-product {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.barcode-preview-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.barcode-preview-loading {
-  min-height: 520px;
-  padding: 18px;
+  gap: 14px;
+  padding: 14px;
   border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  background: #fff;
-}
-
-.barcode-preview-frame {
-  width: 100%;
-  height: 72vh;
-  border: 1px solid #dbe3ef;
-  border-radius: 10px;
+  border-radius: 12px;
   background: #f8fafc;
 }
+
+.barcode-print-product > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.barcode-print-product strong {
+  color: #0f172a;
+  line-height: 1.45;
+}
+
+.barcode-print-product span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.barcode-print-rule {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  color: #4338ca;
+  background: #eef2ff;
+}
+
+.barcode-print-rule span { font-size: 12px; }
+.barcode-print-rule strong { font-size: 14px; }
+.barcode-print-rule b { font-size: 16px; }
+.barcode-print-confirmation :deep(.el-form-item) { margin-bottom: 0; }
+.barcode-print-confirmation :deep(.el-input-number) { width: 100%; }
+
+.barcode-print-result {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+}
+
+.barcode-print-result-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  color: #fff;
+  background: #16a34a;
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.barcode-print-result strong {
+  color: #0f172a;
+  font-size: 17px;
+}
+
+.barcode-print-result p {
+  margin: 8px 0 0;
+  color: #64748b;
+  line-height: 1.65;
+}
+
 </style>

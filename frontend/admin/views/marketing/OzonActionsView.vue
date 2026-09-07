@@ -1726,4 +1726,9 @@ onMounted(async () => {
     justify-content: start;
   }
 }
+
+@media (max-width: 420px) {
+  .cleanup-metrics { grid-template-columns: minmax(0, 1fr); }
+  .ozon-actions-toolbar :where(.el-button, .el-select) { width: 100%; margin-left: 0; }
+}
 </style>

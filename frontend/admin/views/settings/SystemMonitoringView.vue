@@ -88,11 +88,11 @@ onMounted(loadOverview);
         </article>
         <article class="metric-card">
           <span>可用空间</span><strong>{{ bytesText(state.latest.diskAvailableBytes) }}</strong>
-          <small>75% 提醒，85% 严重告警</small>
+          <small>使用率 65% 提醒、80% 严重；剩余 10 GB 提醒、5 GB 严重</small>
         </article>
         <article class="metric-card">
           <span>较上次快照增长</span><strong :class="{ danger: state.latest.dailyGrowthBytes >= state.thresholds.warningDailyGrowthBytes }">{{ growthText(state.latest.dailyGrowthBytes) }}</strong>
-          <small>单日增长超过 1 GB 时提醒</small>
+          <small>单日增长超过 512 MB 时提醒，超过 1 GB 严重告警</small>
         </article>
         <article class="metric-card">
           <span>应用内存 RSS</span><strong>{{ bytesText(state.latest.appRssBytes) }}</strong>

@@ -91,6 +91,8 @@ const collectorRows = ref([]);
 const selectionRows = ref([]);
 const draftRows = ref([]);
 const heatmapModels = ref([]);
+const developmentProjects = ref([]);
+const developmentCandidates = ref([]);
 
 function addDays(value, days) {
   const date = new Date(`${value || shanghaiDateKey()}T00:00:00+08:00`);
@@ -149,7 +151,12 @@ const emptyTaskForm = () => {
     image_url: "",
     attachments: [],
     candidate_note: "",
-    result: ""
+    result: "",
+    project_id: null,
+    candidate_id: null,
+    stage: "",
+    deliverable: "",
+    reviewer_person_id: null
   };
 };
 
@@ -384,19 +391,25 @@ async function loadData() {
       taskPayloadRows,
       selectionPayload,
       collectorPayload,
-      draftPayload
+      draftPayload,
+      developmentProjectPayload,
+      developmentCandidatePayload
     ] = await Promise.all([
       safeGet("/api/people", [], { timeoutMs: 5000 }),
       safeGet("/api/team/tasks", [], { timeoutMs: 5000 }),
       safeGet("/api/products/selection?paged=1&page=1&pageSize=100&summaryMode=skip", { rows: [] }, { timeoutMs: 8000 }),
       safeGet("/api/listing/collector-box?page=1&pageSize=100&summaryMode=skip", { rows: [] }, { timeoutMs: 8000 }),
-      safeGet("/api/listing/drafts?paged=1&lightweight=1&projectOnly=1&page=1&pageSize=100", { rows: [] }, { timeoutMs: 8000 })
+      safeGet("/api/listing/drafts?paged=1&lightweight=1&projectOnly=1&page=1&pageSize=100", { rows: [] }, { timeoutMs: 8000 }),
+      safeGet("/api/team/development-projects", [], { timeoutMs: 5000 }),
+      safeGet("/api/team/development-candidates", [], { timeoutMs: 5000 })
     ]);
     people.value = safeRows(peoplePayload);
     tasks.value = safeRows(taskPayloadRows).filter((task) => typeByValue.value.has(task.type));
     selectionRows.value = safeRows(selectionPayload);
     collectorRows.value = safeRows(collectorPayload);
     draftRows.value = safeRows(draftPayload);
+    developmentProjects.value = safeRows(developmentProjectPayload);
+    developmentCandidates.value = safeRows(developmentCandidatePayload);
     if (!taskForm.owner_person_id) taskForm.owner_person_id = activePeople.value[0]?.id || null;
     loadHeatmapData();
   } catch (error) {
@@ -779,7 +792,12 @@ function taskPayload(source, options = {}) {
     start_at: source.start_at,
     due_at: source.due_at,
     related,
-    result: source.result || source.candidate_note || "待开发"
+    result: source.result || source.candidate_note || "待开发",
+    project_id: source.project_id || null,
+    candidate_id: source.candidate_id || null,
+    stage: source.stage || "",
+    deliverable: source.deliverable || "",
+    reviewer_person_id: source.reviewer_person_id || null
   };
 }
 
@@ -836,7 +854,12 @@ function openEditDialog(task) {
     image_url: relation.image_url || "",
     attachments: normalizeAttachments(relation.attachments),
     candidate_note: relation.note || "",
-    result: task.result || ""
+    result: task.result || "",
+    project_id: task.project_id || null,
+    candidate_id: task.candidate_id || null,
+    stage: task.stage || "",
+    deliverable: task.deliverable || "",
+    reviewer_person_id: task.reviewer_person_id || null
   });
   taskDialogVisible.value = true;
 }
@@ -1195,6 +1218,18 @@ onMounted(loadData);
           </div>
         </el-form-item>
         <div class="form-grid">
+          <el-form-item label="所属产品项目">
+            <el-select v-model="taskForm.project_id" filterable clearable placeholder="可选">
+              <el-option v-for="project in developmentProjects" :key="project.id" :label="project.name" :value="project.id" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="关联开发产品">
+            <el-select v-model="taskForm.candidate_id" filterable clearable placeholder="可选">
+              <el-option v-for="candidate in developmentCandidates.filter((item) => !taskForm.project_id || Number(item.project_id) === Number(taskForm.project_id))" :key="candidate.id" :label="candidate.title" :value="candidate.id" />
+            </el-select>
+          </el-form-item>
+        </div>
+        <div class="form-grid">
           <el-form-item label="开发节点">
             <el-select v-model="taskForm.type" filterable>
               <el-option v-for="item in workTypes" :key="item.value" :label="item.label" :value="item.value" />
@@ -1261,6 +1296,16 @@ onMounted(loadData);
         <el-form-item label="执行记录">
           <el-input v-model="taskForm.result" type="textarea" :rows="3" placeholder="记录当前进展、阻塞点或复核结果" />
         </el-form-item>
+        <div class="form-grid">
+          <el-form-item label="交付标准">
+            <el-input v-model="taskForm.deliverable" type="textarea" :rows="2" placeholder="说清什么结果才算完成" />
+          </el-form-item>
+          <el-form-item label="验收人">
+            <el-select v-model="taskForm.reviewer_person_id" filterable clearable placeholder="可选">
+              <el-option v-for="person in activePeople" :key="person.id" :label="person.name" :value="person.id" />
+            </el-select>
+          </el-form-item>
+        </div>
       </el-form>
       <template #footer>
         <el-button @click="taskDialogVisible = false">取消</el-button>

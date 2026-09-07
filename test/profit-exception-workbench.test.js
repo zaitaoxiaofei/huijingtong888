@@ -5,6 +5,16 @@ import test from "node:test";
 const backendSource = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 const pageSource = readFileSync(new URL("../frontend/admin/views/exceptions/ExceptionWorkbenchView.vue", import.meta.url), "utf8");
 
+test("binding exceptions reuse order inventory bind and create workflows", () => {
+  assert.doesNotMatch(pageSource, /path:\s*"\/orders"[\s\S]{0,200}action/);
+  assert.match(pageSource, /<el-dialog v-model="bindDialog\.visible"/);
+  assert.match(pageSource, /<ProductCreateEditDialog/);
+  assert.match(pageSource, /create-endpoint="\/api\/online-products\/create-product"/);
+  assert.match(pageSource, /apiClient\.post\("\/api\/online-products\/bind"/);
+  assert.match(pageSource, /apiClient\.post\(`\/api\/orders\/\$\{orderId\}\/recalculate-profit`/);
+  assert.match(pageSource, />创建库存<\/el-button>/);
+});
+
 test("profit exceptions expose unified business order and profit model labels", () => {
   assert.match(backendSource, /function exceptionOrderBusinessStatusMysql/);
   assert.match(backendSource, /label: "已签收"/);

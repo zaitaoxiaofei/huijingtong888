@@ -33,11 +33,13 @@ defineProps({
 .erp-page-header__actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 0; margin-left: auto; }
 .erp-page-header.is-compact { min-height: 54px; padding-top: 8px; padding-bottom: 8px; }
 .erp-page-header.is-compact h1 { font-size: 17px; }
-@media (max-width: 1280px) {
+@media (max-width: 1100px), (max-width: 1366px) and (any-pointer: coarse) {
   .erp-page-header { align-items: flex-start; flex-direction: column; }
   .erp-page-header__actions { width: 100%; flex-wrap: wrap; margin-left: 0; }
 }
-@media (max-width: 780px) {
+@media (max-width: 767px) {
+  .erp-page-header { min-height: 0; gap: 12px; padding: 12px; }
   .erp-page-header__actions { align-items: stretch; flex-direction: column; }
+  .erp-page-header__actions :deep(.el-button) { width: 100%; margin-left: 0; }
 }
 </style>

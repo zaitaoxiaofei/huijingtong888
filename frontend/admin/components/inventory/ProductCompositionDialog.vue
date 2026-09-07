@@ -1,9 +1,10 @@
 <script setup>
-import { computed, ref, watch } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { Delete, Plus, Search } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
 import ProductImagePreview from "../ProductImagePreview.vue";
+import InventoryStructuredSearch from "./InventoryStructuredSearch.vue";
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -25,6 +26,11 @@ const optionPage = ref(1);
 const optionPageSize = ref(20);
 const activeInventoryType = ref("single");
 const searchQuery = ref("");
+const searchMode = ref("exact");
+const structuredFilters = reactive({
+  inventoryCategory: "", productName: "", vehicleBrand: "", fitmentType: "",
+  vehicleModel: [], accessoryName: "", color: "", material: [], process: ""
+});
 let optionRequestSeq = 0;
 
 const inventoryTypeTabs = [
@@ -108,6 +114,8 @@ function normalizeComponentItem(item = {}) {
     image_url: item.image_url || item.product_image_url || "",
     stock_unit: item.stock_unit || "个",
     local_stock: Number(item.local_stock ?? productLocalStock(item) ?? 0),
+    fbp_stock: Number(item.fbp_stock || item.fbp_available || 0),
+    incoming_stock: Number(item.incoming_stock || 0),
     purchase_cost: Number(item.purchase_cost || 0),
     quantity: Number(item.quantity || 1) || 1
   };
@@ -164,7 +172,14 @@ async function loadOptions() {
       inventoryType: activeInventoryType.value
     });
     const query = String(searchQuery.value || "").trim();
-    if (query) params.set("query", query);
+    if (searchMode.value === "fuzzy") {
+      if (query) params.set("query", query);
+    } else {
+      for (const [key, rawValue] of Object.entries(structuredFilters)) {
+        const value = Array.isArray(rawValue) ? rawValue.join(",") : String(rawValue || "").trim();
+        if (value) params.set(key, value);
+      }
+    }
     const result = await apiClient.get(`/api/products?${params.toString()}`);
     if (requestSeq !== optionRequestSeq) return;
     optionRows.value = (Array.isArray(result?.rows) ? result.rows : [])
@@ -254,6 +269,8 @@ watch(
     detailProduct.value = props.product || null;
     componentRows.value = [];
     searchQuery.value = "";
+    searchMode.value = "exact";
+    Object.assign(structuredFilters, { inventoryCategory: "", productName: "", vehicleBrand: "", fitmentType: "", vehicleModel: [], accessoryName: "", color: "", material: [], process: "" });
     activeInventoryType.value = "single";
     optionPage.value = 1;
     if (props.readOnly) await loadProductDetail();
@@ -345,8 +362,10 @@ watch(
                 />
               </div>
               <div class="composition-component-stock">
-                <span>本地 {{ integer(row.local_stock) }} {{ row.stock_unit || "个" }}</span>
-                <strong>可组 {{ integer(componentAvailable(row)) }}</strong>
+                <span><em>本地</em><strong>{{ integer(row.local_stock) }}</strong></span>
+                <span><em>FBP</em><strong>{{ integer(row.fbp_stock) }}</strong></span>
+                <span><em>采购在途</em><strong>{{ integer(row.incoming_stock) }}</strong></span>
+                <span class="composition-component-buildable"><em>本地可组</em><strong>{{ integer(componentAvailable(row)) }}</strong></span>
               </div>
               <el-tooltip content="移除子产品" placement="top">
                 <el-button
@@ -381,15 +400,24 @@ watch(
             />
           </el-tabs>
           <div class="composition-search">
+            <el-segmented v-model="searchMode" :options="[{ label: '模糊搜索', value: 'fuzzy' }, { label: '精确搜索', value: 'exact' }]" @change="handleSearch" />
             <el-input
+              v-if="searchMode === 'fuzzy'"
               v-model="searchQuery"
               clearable
               placeholder="搜索商品名称 / SKU / 库存编号"
               @keyup.enter="handleSearch"
               @clear="handleSearch"
             />
-            <el-button type="primary" :icon="Search" @click="handleSearch">搜索</el-button>
+            <el-button v-if="searchMode === 'fuzzy'" type="primary" :icon="Search" @click="handleSearch">搜索</el-button>
           </div>
+          <InventoryStructuredSearch
+            v-if="searchMode === 'exact'"
+            compact
+            :model-value="structuredFilters"
+            @update:model-value="Object.assign(structuredFilters, $event)"
+            @change="handleSearch"
+          />
 
           <div v-loading="optionLoading" class="composition-option-list">
             <div v-for="row in optionRows" :key="row.id" class="composition-option-row">
@@ -583,7 +611,7 @@ watch(
 
 .composition-component-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) 132px 120px 28px;
+  grid-template-columns: auto minmax(0, 1fr) 132px 210px 28px;
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
@@ -615,8 +643,37 @@ watch(
 }
 
 .composition-component-stock strong {
-  color: #1d4ed8;
+  color: #0f172a;
   font-size: 13px;
+}
+
+.composition-component-stock {
+  grid-template-columns: repeat(2, minmax(78px, 1fr));
+  gap: 5px 8px;
+}
+
+.composition-component-stock span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  background: #f8fafc;
+}
+
+.composition-component-stock em {
+  color: #64748b;
+  font-size: 11px;
+  font-style: normal;
+}
+
+.composition-component-stock .composition-component-buildable {
+  background: #eff6ff;
+}
+
+.composition-component-stock .composition-component-buildable strong {
+  color: #1d4ed8;
 }
 
 .composition-icon-button.el-button {

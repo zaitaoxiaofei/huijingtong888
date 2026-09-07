@@ -11,6 +11,7 @@ import {
   findPersonForLoginMysql,
   getSessionMysql,
   updatePersonWechatIdentityMysql,
+  updateOwnProfileMysql,
   updatePersonPasswordMysql
 } from "../services/mysql-auth-session.js";
 import { clearRateLimit, consumeRateLimit, getClientIp } from "./access.js";
@@ -67,7 +68,7 @@ export function extractToken(req) {
 }
 
 function authUser(row) {
-  return { id: row.id, name: row.name, role: row.role, username: row.username };
+  return { id: row.id, name: row.name, role: row.role, username: row.username, avatar_url: row.avatar_url || "" };
 }
 
 export function createAuthHandler(readJson, overrides = {}) {
@@ -79,6 +80,7 @@ export function createAuthHandler(readJson, overrides = {}) {
     findPersonForLogin: findPersonForLoginMysql,
     findPersonByWechatIdentity: findPersonByWechatIdentityMysql,
     updatePersonPassword: updatePersonPasswordMysql,
+    updateOwnProfile: updateOwnProfileMysql,
     updatePersonWechatIdentity: updatePersonWechatIdentityMysql,
     hashPassword,
     verifyPassword,
@@ -252,6 +254,15 @@ export function createAuthHandler(readJson, overrides = {}) {
         if (!session) return { error: "未登录", __status: 401 };
         const row = await deps.findPersonById(session.personId);
         if (!row || !row.active) return { error: "未登录", __status: 401 };
+        return authUser(row);
+      };
+    }
+
+    if (key === "PUT /api/auth/profile") {
+      return async () => {
+        const session = await deps.getSession(extractToken(req));
+        if (!session) return { error: "未登录", __status: 401 };
+        const row = await deps.updateOwnProfile(session.personId, await readJson(req));
         return authUser(row);
       };
     }

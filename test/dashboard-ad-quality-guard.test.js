@@ -23,7 +23,12 @@ test("dashboard month ad spend warns when report rows are pending", () => {
 });
 
 test("dashboard overview keeps today and month metrics in stable rows", () => {
-  assert.match(dashboardViewSource, /\.today-core-grid\s*\{\s*grid-template-columns:\s*repeat\(6,\s*minmax\(0,\s*1fr\)\);/);
+  assert.match(dashboardViewSource, /\.today-core-grid\s*\{\s*grid-template-columns:\s*repeat\(7,\s*minmax\(0,\s*1fr\)\);/);
+  assert.match(dashboardViewSource, /AI 消耗/);
+  assert.match(dashboardViewSource, /当前余额/);
+  assert.match(dashboardViewSource, /ERP 本地调用次数 × 0\.038 RMB/);
+  assert.match(dashboardViewSource, /amount\.toFixed\(3\)/);
+  assert.match(dashboardViewSource, /费用查询失败/);
   assert.match(dashboardViewSource, /\.month-core-grid\s*\{\s*grid-template-columns:\s*repeat\(9,\s*minmax\(0,\s*1fr\)\);/);
   assert.doesNotMatch(dashboardViewSource, /month-ad-spend-card[\s\S]{0,160}grid-row:\s*span\s+2/);
 });

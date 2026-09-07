@@ -683,6 +683,12 @@ async function runBatchImageRow(jobNo, row, options = {}, runtimeChannels = [], 
             JSON.stringify(providerJobState),
             row.item_no
           ]);
+        },
+        usageContext: {
+          requestKey: `${jobNo}:${row.item_no}:${started}`,
+          jobNo,
+          itemNo: row.item_no,
+          personId: options.sessionPersonId || null
         }
       }, runtimeChannels, rowIndex, attempts, preferredChannel);
       const durableImageResult = await persistAiVariantImageResult(imageResult, {
@@ -806,17 +812,88 @@ async function generateImagesWithChannelRetry(payload, runtimeChannels = [], row
       provider: channel.provider,
       model: channel.imageModel
     };
+    const usageId = await startAiImageUsageAttempt(payload.usageContext, channel, savedProviderJob?.jobId ? "poll" : "submit");
     try {
       const result = await generateImages({ ...payload, imageRuntimeConfig: channel });
       attempts.push({ ...attempt, ok: true });
+      await finishAiImageUsageAttempt(usageId, "success");
       return result;
     } catch (error) {
       lastError = error;
       attempts.push({ ...attempt, ok: false, error: cleanText(error?.message || error).slice(0, 500) });
+      await finishAiImageUsageAttempt(usageId, error?.code === "provider_pending" ? "pending" : "failed", error);
+      if (savedProviderJob?.jobId && isProviderJobTerminalUnavailable(error)) {
+        await payload.onProviderJob?.(null, 0);
+        const resubmitUsageId = await startAiImageUsageAttempt(payload.usageContext, channel, "resubmit");
+        try {
+          const result = await generateImages({
+            ...payload,
+            providerJob: null,
+            imageRuntimeConfig: channel
+          });
+          attempts.push({ ...attempt, operation: "resubmit", ok: true });
+          await finishAiImageUsageAttempt(resubmitUsageId, "success");
+          return result;
+        } catch (resubmitError) {
+          lastError = resubmitError;
+          attempts.push({
+            ...attempt,
+            operation: "resubmit",
+            ok: false,
+            error: cleanText(resubmitError?.message || resubmitError).slice(0, 500)
+          });
+          await finishAiImageUsageAttempt(
+            resubmitUsageId,
+            resubmitError?.code === "provider_pending" ? "pending" : "failed",
+            resubmitError
+          );
+          throw resubmitError;
+        }
+      }
       if (error?.code === "provider_pending" || savedProviderJob?.jobId) throw error;
     }
   }
   throw lastError || statusError("No image provider channel is available", 400);
+}
+
+function isProviderJobTerminalUnavailable(error) {
+  return ["provider_job_terminal_failed", "provider_job_terminal_unavailable"].includes(cleanText(error?.code));
+}
+
+async function startAiImageUsageAttempt(context = {}, channel = {}, operation = "submit") {
+  if (!context?.requestKey) return null;
+  try {
+    const result = await mysqlExecute(`
+    INSERT INTO ai_image_usage_events
+    (request_key, job_no, item_no, person_id, channel_id, channel_name, provider, model, operation, status, requested_count, started_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', 1, UTC_TIMESTAMP())
+  `, [
+    `${context.requestKey}:${channel.channelId || channel.provider || "default"}:${operation}`,
+    context.jobNo || "",
+    context.itemNo || "",
+    context.personId || null,
+    channel.channelId || "",
+    channel.channelName || channel.name || "",
+    channel.provider || "",
+    channel.imageModel || "",
+    operation
+  ]);
+    return Number(result.insertId || 0) || null;
+  } catch (error) {
+    console.warn("[ai-image-usage] failed to record request", error?.message || error);
+    return null;
+  }
+}
+
+async function finishAiImageUsageAttempt(id, status, error = null) {
+  if (!id) return;
+  await mysqlExecute(`
+    UPDATE ai_image_usage_events
+    SET status = ?, error_message = ?, completed_at = UTC_TIMESTAMP()
+    WHERE id = ?
+  `, [status, cleanText(error?.message || "").slice(0, 1000), id]).catch((updateError) => {
+    console.warn("[ai-image-usage] failed to finish request", updateError?.message || updateError);
+  });
 }
 
 function orderedRuntimeChannels(runtimeChannels = [], rowIndex = 0, preferredChannel = null) {
@@ -2081,6 +2158,31 @@ async function ensureAiVariantLabSchema() {
       UNIQUE KEY uniq_ai_variant_lab_batch_items_no (item_no),
       KEY idx_ai_variant_lab_batch_items_job (job_no),
       KEY idx_ai_variant_lab_batch_items_status (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS ai_image_usage_events (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      request_key VARCHAR(255) NOT NULL,
+      job_no VARCHAR(64) NOT NULL DEFAULT '',
+      item_no VARCHAR(64) NOT NULL DEFAULT '',
+      person_id BIGINT UNSIGNED NULL,
+      channel_id VARCHAR(128) NOT NULL DEFAULT '',
+      channel_name VARCHAR(255) NOT NULL DEFAULT '',
+      provider VARCHAR(128) NOT NULL DEFAULT '',
+      model VARCHAR(255) NOT NULL DEFAULT '',
+      operation VARCHAR(32) NOT NULL DEFAULT 'submit',
+      status VARCHAR(32) NOT NULL DEFAULT 'started',
+      requested_count INT NOT NULL DEFAULT 1,
+      provider_cost DECIMAL(18,6) NULL,
+      provider_request_id VARCHAR(255) NOT NULL DEFAULT '',
+      error_message TEXT NULL,
+      started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completed_at TIMESTAMP NULL,
+      UNIQUE KEY uniq_ai_image_usage_request (request_key),
+      KEY idx_ai_image_usage_started (started_at),
+      KEY idx_ai_image_usage_person (person_id, started_at),
+      KEY idx_ai_image_usage_job (job_no, item_no)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
   await mysqlExecute("ALTER TABLE ai_variant_lab_batch_items ADD COLUMN provider_job_json LONGTEXT NULL AFTER image_result_json")

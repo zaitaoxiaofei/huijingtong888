@@ -10,6 +10,7 @@ import ErpFilterBar from "../../components/ErpFilterBar.vue";
 import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
+import InventoryStructuredSearch from "../../components/inventory/InventoryStructuredSearch.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -40,8 +41,22 @@ const urgencyOptions = [
 const state = reactive({
   rows: [],
   total: 0,
+  people: [],
+  suppliers: [],
   filters: {
     query: "",
+    demandType: "all",
+    personId: "all",
+    supplierId: "all",
+    sourceType: "all",
+    inventoryCategory: "",
+    productName: "",
+    vehicleBrand: "",
+    vehicleModel: [],
+    accessoryName: "",
+    color: "",
+    material: [],
+    process: "",
     page: 1,
     pageSize: 20
   },
@@ -127,25 +142,66 @@ function asPositiveInt(value, fallback) {
 
 function procurementQueryString() {
   const params = new URLSearchParams({
-    grouped: "1",
     paged: "1",
     page: String(state.filters.page),
-    pageSize: String(state.filters.pageSize)
+    pageSize: String(state.filters.pageSize),
+    status: "pending_arrival"
   });
   const query = String(state.filters.query || "").trim();
   if (query) params.set("query", query);
+  for (const [key, value] of Object.entries({
+    demandType: state.filters.demandType,
+    personId: state.filters.personId,
+    supplierId: state.filters.supplierId,
+    sourceType: state.filters.sourceType,
+    inventoryCategory: state.filters.inventoryCategory,
+    productName: state.filters.productName,
+    vehicleBrand: state.filters.vehicleBrand,
+    vehicleModel: state.filters.vehicleModel,
+    accessoryName: state.filters.accessoryName,
+    color: state.filters.color,
+    material: state.filters.material,
+    process: state.filters.process
+  })) {
+    const normalized = Array.isArray(value) ? value.join(",") : String(value || "").trim();
+    if (normalized && normalized !== "all") params.set(key, normalized);
+  }
   return params.toString();
+}
+
+function normalizeInboundRow(record = {}) {
+  const purchasedAt = record.purchased_at || record.created_at || "";
+  const detail = {
+    ...record,
+    quantity: Number(record.quantity || 0),
+    amount: Number(record.amount || 0),
+    shipping_amount: Number(record.shipping_amount || 0)
+  };
+  return {
+    ...record,
+    row_key: `inbound-${record.id}`,
+    total_quantity: detail.quantity,
+    total_amount: detail.amount,
+    total_shipping: detail.shipping_amount,
+    request_count: 1,
+    requester_names: record.person_name ? [record.person_name] : [],
+    supplier_names: record.supplier_name ? [record.supplier_name] : [],
+    purchase_links: record.purchase_url ? [record.purchase_url] : [],
+    earliest_created_at: purchasedAt,
+    latest_created_at: purchasedAt,
+    requests: [detail]
+  };
 }
 
 async function loadPageData() {
   const requestToken = listRequestGate.next();
   loading.value = true;
   try {
-    const result = await apiClient.get(`/api/procurement/requests?${procurementQueryString()}`);
+    const result = await apiClient.get(`/api/inbound-records?${procurementQueryString()}`, { routeScoped: false });
     if (!listRequestGate.isLatest(requestToken)) return;
-    state.rows = Array.isArray(result?.rows) ? result.rows : [];
+    state.rows = Array.isArray(result?.rows) ? result.rows.map(normalizeInboundRow) : [];
     state.total = Number(result?.total || 0);
-    const availableKeys = new Set(state.rows.map((row) => `purchase-${row.product_id}`));
+    const availableKeys = new Set(state.rows.map((row) => String(row.row_key || "")));
     state.selectedRows = state.selectedRows.filter((row) => availableKeys.has(String(row.row_key || "")));
   } catch (error) {
     if (!listRequestGate.isLatest(requestToken)) return;
@@ -162,8 +218,11 @@ function handleSearch() {
 }
 
 function handleReset() {
-  state.filters.query = "";
-  state.filters.page = 1;
+  Object.assign(state.filters, {
+    query: "", demandType: "all", personId: "all", supplierId: "all", sourceType: "all",
+    inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [],
+    accessoryName: "", color: "", material: [], process: "", page: 1, pageSize: 20
+  });
   syncRouteQuery("manual");
   loadPageData();
 }
@@ -225,7 +284,7 @@ function rowStatusType(row) {
 function flowTimes(row) {
   return [
     { label: "最早创建", value: row.earliest_created_at || "" },
-    { label: "最近创建", value: row.latest_created_at || "" }
+    { label: "最新采购", value: row.latest_created_at || "" }
   ];
 }
 
@@ -278,9 +337,15 @@ function normalizeRequestForSave(row = {}) {
 async function saveRequestRow(row) {
   const requestId = Number(row?.id || 0);
   if (!requestId || requestSaving(row)) return;
+  if (!(Number(row.quantity || 0) > 0)) return ElMessage.warning("采购数量必须大于 0");
+  if (!(Number(row.amount || 0) > 0)) return ElMessage.warning("请填写采购金额，货款必须大于 0");
   savingRequestIds.value = [...new Set([...savingRequestIds.value, requestId])];
   try {
-    await apiClient.put(`/api/procurement/requests/${requestId}`, normalizeRequestForSave(row));
+    await apiClient.put(`/api/inbound-records/${requestId}`, {
+      ...normalizeRequestForSave(row),
+      status: "pending_arrival",
+      qc_status: row.qc_status || "pending"
+    });
     await recalculateProductProfits([row.product_id]);
     ElMessage.success("采购明细已保存");
     await loadPageData();
@@ -329,11 +394,17 @@ async function recalculateProductProfits(productIds = []) {
 
 async function saveDetailRows() {
   if (!detailDialog.rows.length) return;
+  const invalid = detailDialog.rows.find((row) => !(Number(row.quantity || 0) > 0) || !(Number(row.amount || 0) > 0));
+  if (invalid) return ElMessage.warning("每条采购明细都必须填写大于 0 的采购数量和采购金额");
 
   detailSaving.value = true;
   try {
     for (const row of detailDialog.rows) {
-      await apiClient.put(`/api/procurement/requests/${row.id}`, normalizeRequestForSave(row));
+      await apiClient.put(`/api/inbound-records/${row.id}`, {
+        ...normalizeRequestForSave(row),
+        status: "pending_arrival",
+        qc_status: row.qc_status || "pending"
+      });
     }
     await recalculateProductProfits(detailDialog.rows.map((row) => row.product_id));
     ElMessage.success("采购明细已更新");
@@ -347,13 +418,18 @@ async function saveDetailRows() {
   }
 }
 
-function collectRequestIds(rows = []) {
+function collectInboundIds(rows = []) {
   return rows.flatMap((row) => (row.requests || []).map((item) => Number(item.id))).filter(Boolean);
 }
 
 async function directInboundRequests(rows, label) {
-  const requestIds = collectRequestIds(rows);
-  if (!requestIds.length) return;
+  const inboundIds = collectInboundIds(rows);
+  if (!inboundIds.length) return;
+  const missingCost = rows.flatMap((row) => row.requests || []).find((item) => !(Number(item.amount || 0) > 0));
+  if (missingCost) {
+    ElMessage.warning("存在未填写采购金额的明细，请先展开商品补录实际货款并保存，再执行入库");
+    return;
+  }
 
   try {
     await ElMessageBox.confirm(`确认将${label}直接入库吗？确认后会增加库存。`, "确认入库", {
@@ -363,7 +439,16 @@ async function directInboundRequests(rows, label) {
     });
 
     inboundSubmitting.value = true;
-    await apiClient.post("/api/procurement/requests/direct-inbound", { request_ids: requestIds });
+    await apiClient.post("/api/inbound-records/batch-update", {
+      records: rows.flatMap((row) => (row.requests || []).map((item) => ({
+        id: Number(item.id),
+        payload: {
+          ...normalizeRequestForSave(item),
+          status: "approved",
+          qc_status: item.qc_status || "pending"
+        }
+      })))
+    });
     ElMessage.success("采购记录已入库");
     state.selectedRows = [];
     await loadPageData();
@@ -397,10 +482,11 @@ async function cancelRequests(rows, label) {
 
     cancelSubmitting.value = true;
     for (const item of requests) {
-      await apiClient.put(`/api/procurement/requests/${item.id}`, {
+      await apiClient.put(`/api/inbound-records/${item.id}`, {
         updated_at: item.updated_at || undefined,
+        ...normalizeRequestForSave(item),
         status: "cancelled",
-        approval_status: "cancelled"
+        qc_status: item.qc_status || "pending"
       });
     }
     ElMessage.success("采购记录已取消");
@@ -428,40 +514,29 @@ watch(() => [state.filters.page, state.filters.pageSize], syncRouteQuery);
 
 onMounted(async () => {
   applyRouteState();
+  const [peopleResult, suppliersResult] = await Promise.allSettled([
+    apiClient.get("/api/people"),
+    apiClient.get("/api/suppliers")
+  ]);
+  const people = peopleResult.status === "fulfilled" ? peopleResult.value : [];
+  const suppliers = suppliersResult.status === "fulfilled" ? suppliersResult.value : [];
+  state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
+  state.suppliers = Array.isArray(suppliers) ? suppliers : [];
   await loadPageData();
 });
 </script>
 
 <template>
   <div class="page-stack procurement-list-page procurement-workspace-page">
-    <ErpPageHeader title="待入库清单" description="采购流程统一收口到这里处理，只保留编辑、入库和取消。">
-      <template #actions>
-        <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
-        <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!state.selectedRows.length" :loading="inboundSubmitting" @click="inboundSelectedRows">
-          批量入库
-        </el-button>
-        <el-button class="erp-btn erp-btn-danger" :disabled="!state.selectedRows.length" :loading="cancelSubmitting" @click="cancelSelectedRows">
-          选中取消
-        </el-button>
-      </template>
-    </ErpPageHeader>
+    <ErpPageHeader title="待入库清单" description="采购流程统一收口到这里处理，只保留编辑、入库和取消。" />
 
     <el-card shadow="never" class="page-card procurement-list-card procurement-workspace-card">
-      <template #header>
-        <div class="page-card-header">
-          <div>
-            <strong>待入库商品</strong>
-            <span class="muted-text">共 {{ totalRows }} 种，已选 {{ state.selectedRows.length }} 种</span>
-          </div>
-          <div class="page-card-actions">
-            <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!state.selectedRows.length" :loading="inboundSubmitting" @click="inboundSelectedRows">
-              批量入库（{{ state.selectedRows.length }}）
-            </el-button>
-          </div>
-        </div>
-      </template>
-
       <div class="procurement-toolbar procurement-toolbar-sticky procurement-workspace-filter">
+        <div class="procurement-list-summary">
+          <strong>待入库商品</strong>
+          <span>共 {{ totalRows }} 条</span>
+          <span>已选 {{ state.selectedRows.length }} 条</span>
+        </div>
         <ErpFilterBar>
           <el-form inline>
             <el-form-item label="关键词">
@@ -473,15 +548,55 @@ onMounted(async () => {
                 @keyup.enter="handleSearch"
               />
             </el-form-item>
+            <el-form-item label="需求类型">
+              <el-select v-model="state.filters.demandType" style="width: 150px">
+                <el-option label="全部需求" value="all" />
+                <el-option label="真实订单需求" value="real_order" />
+                <el-option label="库存预警需求" value="inventory_warning" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="采购负责人">
+              <el-select v-model="state.filters.personId" filterable style="width: 140px">
+                <el-option label="全部" value="all" />
+                <el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="String(person.id)" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="供应商">
+              <el-select v-model="state.filters.supplierId" filterable style="width: 150px">
+                <el-option label="全部供应商" value="all" />
+                <el-option v-for="supplier in state.suppliers" :key="supplier.id" :label="supplier.name" :value="String(supplier.id)" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="采购平台">
+              <el-select v-model="state.filters.sourceType" style="width: 130px">
+                <el-option label="全部平台" value="all" />
+                <el-option v-for="option in sourceTypeOptions" :key="option.value" :label="option.label" :value="option.value" />
+              </el-select>
+            </el-form-item>
           </el-form>
           <template #actions>
             <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
             <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
+            <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!state.selectedRows.length" :loading="inboundSubmitting" @click="inboundSelectedRows">
+              批量入库（{{ state.selectedRows.length }}）
+            </el-button>
+            <el-button class="erp-btn erp-btn-danger" :disabled="!state.selectedRows.length" :loading="cancelSubmitting" @click="cancelSelectedRows">
+              选中取消
+            </el-button>
           </template>
         </ErpFilterBar>
       </div>
 
-      <div class="list-wrap">
+      <InventoryStructuredSearch
+        compact
+        class="procurement-structured-search"
+        :model-value="state.filters"
+        @update:model-value="Object.assign(state.filters, $event)"
+        @change="handleSearch"
+      />
+
+      <div class="list-wrap erp-responsive-table" role="region" aria-label="待入库采购表格" tabindex="0">
         <el-table
           v-loading="loading"
           :data="tableRows"
@@ -755,10 +870,37 @@ onMounted(async () => {
 
 .procurement-toolbar {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 8px 0;
+}
+
+.procurement-list-summary {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.procurement-list-summary strong {
+  color: var(--erp-text-primary);
+  font-size: 14px;
+}
+
+.procurement-list-summary span {
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+}
+
+.procurement-structured-search {
+  flex: none;
+}
+
+.procurement-structured-search:deep(.inventory-structured-search.is-compact) {
+  grid-template-columns: repeat(7, minmax(110px, 1fr)) minmax(180px, 1.35fr);
+  overflow-x: visible;
 }
 
 .procurement-toolbar-sticky {
@@ -852,5 +994,41 @@ onMounted(async () => {
 
 .profit-sync-alert {
   margin-bottom: 12px;
+}
+
+@media (max-width: 767px) {
+  .procurement-toolbar,
+  .page-card-header,
+  .purchase-inline-editor__header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .page-card-actions,
+  .page-card-actions .el-button {
+    width: 100%;
+  }
+
+  .purchase-inline-editor {
+    min-width: 920px;
+    padding: 10px;
+  }
+
+  .row-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+}
+
+@media (max-width: 1500px) {
+  .procurement-toolbar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .procurement-structured-search:deep(.inventory-structured-search.is-compact) {
+    grid-template-columns: repeat(4, minmax(140px, 1fr));
+  }
 }
 </style>

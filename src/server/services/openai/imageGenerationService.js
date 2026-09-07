@@ -65,7 +65,9 @@ export async function editOpenAiImage({ imageBuffer, imageFilePath = "", prompt,
 
 export async function testOpenAiImageProvider({ runtimeConfig, mode = "generate" }) {
   const action = mode === "edit" ? "edits" : "generations";
-  const endpoints = usesResponsesImage(runtimeConfig)
+  const endpoints = uses65535TasksImage(runtimeConfig)
+    ? [tasks65535Endpoint(runtimeConfig.baseUrl)]
+    : usesResponsesImage(runtimeConfig)
     ? [responsesEndpoint(runtimeConfig.baseUrl)]
     : usesChatCompletionsImage(runtimeConfig)
       ? [chatCompletionsEndpoint(runtimeConfig.baseUrl)]
@@ -106,6 +108,9 @@ export async function testOpenAiImageProvider({ runtimeConfig, mode = "generate"
 }
 
 async function requestCompatibleImage({ runtimeConfig, prompt, size, providerJob = null, onProviderJob = null }) {
+  if (uses65535TasksImage(runtimeConfig)) {
+    return request65535TaskImage({ runtimeConfig, prompt, size, providerJob, onProviderJob });
+  }
   if (usesResponsesImage(runtimeConfig)) {
     return withAiImageRuntimeSlot(runtimeConfig, async () => requestResponsesImage({
       runtimeConfig,
@@ -137,6 +142,20 @@ async function requestCompatibleImage({ runtimeConfig, prompt, size, providerJob
 }
 
 async function requestCompatibleImageEdit({ runtimeConfig, imageBuffer, imageFilePath = "", filename, contentType, prompt, size, providerJob = null, onProviderJob = null }) {
+  if (uses65535TasksImage(runtimeConfig)) {
+    const resolvedImageBuffer = providerJob?.jobId
+      ? null
+      : imageBuffer || (imageFilePath ? await fs.readFile(imageFilePath) : null);
+    return request65535TaskImage({
+      runtimeConfig,
+      prompt,
+      size,
+      imageBuffer: resolvedImageBuffer,
+      contentType,
+      providerJob,
+      onProviderJob
+    });
+  }
   if (providerJob?.jobId) {
     return requestImageFromEndpoints({
       runtimeConfig,
@@ -183,6 +202,56 @@ async function requestCompatibleImageEdit({ runtimeConfig, imageBuffer, imageFil
     providerJob,
     onProviderJob
   });
+}
+
+async function request65535TaskImage({ runtimeConfig, prompt, size, imageBuffer = null, contentType = "image/png", providerJob = null, onProviderJob = null }) {
+  const endpoint = tasks65535Endpoint(runtimeConfig.baseUrl);
+  if (providerJob?.jobId) {
+    return pollAsync65535ImageJob({
+      runtimeConfig,
+      endpoint,
+      job: { id: providerJob.jobId, status_url: providerJob.statusUrl || "" }
+    });
+  }
+  const input = { prompt, size, n: 1, response_format: "url" };
+  if (imageBuffer) input.image = `data:${contentType};base64,${Buffer.from(imageBuffer).toString("base64")}`;
+  const response = await withAiImageRuntimeSlot(runtimeConfig, async () => fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${runtimeConfig.apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      kind: "image",
+      model: runtimeConfig.imageModel,
+      input
+    }),
+    signal: AbortSignal.timeout(AI_IMAGE_PROVIDER_TIMEOUT_MS)
+  }));
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = data?.error?.message || data?.message || `65535 task submission failed: ${response.status}`;
+    const error = new Error(`${message} (${endpoint})`);
+    error.status = response.status >= 400 && response.status < 500 ? 400 : 502;
+    throw error;
+  }
+  const jobId = String(data.id || data.job_id || "").trim();
+  if (!jobId) {
+    const error = new Error(`65535 task submission did not return id (${endpoint})`);
+    error.status = 502;
+    throw error;
+  }
+  const statusUrl = async65535StatusUrl(runtimeConfig, endpoint, data);
+  await onProviderJob?.({
+    provider: runtimeConfig.provider || "",
+    channelId: runtimeConfig.channelId || "",
+    channelName: runtimeConfig.channelName || runtimeConfig.name || "",
+    jobId,
+    statusUrl,
+    endpoint,
+    submittedAt: new Date().toISOString()
+  });
+  return pollAsync65535ImageJob({ runtimeConfig, endpoint, job: data });
 }
 
 async function requestResponsesImage({ runtimeConfig, prompt, size, imageBuffer = null, contentType = "image/png" }) {
@@ -357,6 +426,7 @@ async function pollAsync65535ImageJob({ runtimeConfig, endpoint, job }) {
       const message = payload?.error?.message || payload?.message || `Async image status failed: ${response.status}`;
       const error = new Error(`${message} (${statusUrl})`);
       error.status = response.status >= 400 && response.status < 500 ? 400 : 502;
+      if ([404, 410].includes(response.status)) error.code = "provider_job_terminal_unavailable";
       throw error;
     }
     const data = payload?.data || payload;
@@ -370,6 +440,7 @@ async function pollAsync65535ImageJob({ runtimeConfig, endpoint, job }) {
     if (status === "failed" || status === "error") {
       const error = new Error(`${data.error_message || payload?.message || "Async image generation failed"} (${statusUrl})`);
       error.status = 502;
+      error.code = "provider_job_terminal_failed";
       throw error;
     }
   }
@@ -391,6 +462,8 @@ function async65535StatusUrl(runtimeConfig = {}, endpoint = "", job = {}) {
   if (/^https?:\/\//i.test(statusUrl)) return statusUrl;
   const base = async65535ApiBase(runtimeConfig.baseUrl || endpoint);
   if (statusUrl.startsWith("/")) return `${base.origin}${statusUrl}`;
+  const jobId = String(job.id || job.job_id || "").trim();
+  if (uses65535TasksImage(runtimeConfig)) return `${base.apiBase}/tasks/${encodeURIComponent(jobId)}`;
   return `${base.apiBase}/images/async-generations/${encodeURIComponent(job.job_id)}`;
 }
 
@@ -531,6 +604,17 @@ function usesChatCompletionsImage(runtimeConfig = {}) {
 
 function usesResponsesImage(runtimeConfig = {}) {
   return String(runtimeConfig.apiMode || "").toLowerCase() === "responses";
+}
+
+function uses65535TasksImage(runtimeConfig = {}) {
+  return String(runtimeConfig.apiMode || "").toLowerCase().replace(/-/g, "_") === "tasks_65535";
+}
+
+function tasks65535Endpoint(baseUrl) {
+  const base = String(baseUrl || "").replace(/\/+$/, "");
+  if (base.toLowerCase().endsWith("/v1/tasks")) return base;
+  if (base.toLowerCase().endsWith("/v1")) return `${base}/tasks`;
+  return `${base}/v1/tasks`;
 }
 
 function responsesEndpoint(baseUrl) {

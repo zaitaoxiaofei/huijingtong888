@@ -6,7 +6,7 @@ import { useAuthStore } from "../stores/auth";
 import { markRouteReadyPerf, startRoutePerf } from "../utils/performance-monitor";
 
 const DashboardView = () => import("../views/DashboardView.vue");
-const TeamPlanView = () => import("../views/team/TeamPlanView.vue");
+const TeamPlanView = () => import("../views/team/ProductDevelopmentCenterView.vue");
 const ProfitExceptionView = () => import("../views/exceptions/ProfitExceptionView.vue");
 const DeadlineExceptionView = () => import("../views/exceptions/DeadlineExceptionView.vue");
 const DeadlineWarningExceptionView = () => import("../views/exceptions/DeadlineWarningExceptionView.vue");
@@ -49,6 +49,7 @@ const CustomerMessagesView = () => import("../views/orders/CustomerMessagesView.
 const PurchaseListView = () => import("../views/procurement/PurchaseListView.vue");
 const ProcurementWorkspaceView = () => import("../views/procurement/ProcurementWorkspaceView.vue");
 const ProcurementPlatformOrdersView = () => import("../views/procurement/ProcurementPlatformOrdersView.vue");
+const ProcurementReconciliationView = () => import("../views/procurement/ProcurementReconciliationView.vue");
 const PurchaseHistoryView = () => import("../views/procurement/PurchaseHistoryView.vue");
 const PurchaseCostCenterView = () => import("../views/procurement/PurchaseCostCenterView.vue");
 const SettingsView = () => import("../views/settings/SettingsView.vue");
@@ -60,9 +61,13 @@ const SystemMonitoringView = () => import("../views/settings/SystemMonitoringVie
 const ImageCropperView = () => import("../views/tools/ImageCropper.vue");
 const EcommerceImageSplitterView = () => import("../views/tools/EcommerceImageSplitterV3.vue");
 const ProductVideoGeneratorView = () => import("../views/tools/ProductVideoGenerator.vue");
+const MobileHomeView = () => import("../views/mobile/MobileHomeView.vue");
 const MobileOrdersView = () => import("../views/mobile/MobileOrdersView.vue");
 const MobileOrderDetailView = () => import("../views/mobile/MobileOrderDetailView.vue");
 const MobileProcurementView = () => import("../views/mobile/MobileProcurementView.vue");
+const MobileInventoryView = () => import("../views/mobile/MobileInventoryView.vue");
+const MobileStockAlertsView = () => import("../views/mobile/MobileStockAlertsView.vue");
+const MobileOnlineProductsView = () => import("../views/mobile/MobileOnlineProductsView.vue");
 const OnboardingKnowledgeView = () => import("../views/onboarding/OnboardingKnowledgeView.vue");
 
 const MOBILE_MODE_STORAGE_KEY = "baodanMobileMode";
@@ -92,9 +97,12 @@ export const router = createRouter({
       component: MobileLayout,
       meta: { mobile: true },
       children: [
-        { path: "", name: "mobile-home", redirect: "/mobile/orders", meta: { title: "手机工作台", mobile: true } },
+        { path: "", name: "mobile-home", component: MobileHomeView, meta: { title: "手机工作台", mobile: true } },
         { path: "orders", name: "mobile-orders", component: MobileOrdersView, meta: { title: "手机订单", mobile: true } },
         { path: "orders/:id", name: "mobile-order-detail", component: MobileOrderDetailView, meta: { title: "订单详情", mobile: true } },
+        { path: "inventory", name: "mobile-inventory", component: MobileInventoryView, meta: { title: "库存查询", mobile: true } },
+        { path: "stock-alerts", name: "mobile-stock-alerts", component: MobileStockAlertsView, meta: { title: "库存预警", mobile: true } },
+        { path: "online-products", name: "mobile-online-products", component: MobileOnlineProductsView, meta: { title: "在线商品", mobile: true } },
         { path: "procurement", name: "mobile-procurement", component: MobileProcurementView, meta: { title: "手机采购", mobile: true } }
       ]
     },
@@ -103,7 +111,7 @@ export const router = createRouter({
       component: AdminLayout,
       children: [
         { path: "", redirect: "/dashboard" },
-        { path: "team-plan", name: "team-plan", component: TeamPlanView, meta: { title: "产品开发", breadcrumb: ["产品开发"] } },
+        { path: "team-plan", name: "team-plan", component: TeamPlanView, meta: { title: "任务系统", breadcrumb: ["任务系统"] } },
         { path: "dashboard", name: "dashboard", component: DashboardView, meta: { title: "经营首页", breadcrumb: ["经营首页"] } },
         { path: "onboarding", name: "onboarding", component: OnboardingKnowledgeView, meta: { title: "入职须知", breadcrumb: ["入职须知"] } },
         { path: "exceptions", redirect: "/exceptions/profit", meta: { title: "待处理异常", breadcrumb: ["待处理异常"] } },
@@ -179,6 +187,7 @@ export const router = createRouter({
         { path: "procurement", redirect: "/procurement/workspace" },
         { path: "procurement/workspace", name: "procurement-workspace", component: ProcurementWorkspaceView, meta: { title: "采购工作台", breadcrumb: ["采购", "采购工作台"] } },
         { path: "procurement/platform-orders", name: "procurement-platform-orders", component: ProcurementPlatformOrdersView, meta: { title: "平台订单", breadcrumb: ["采购", "平台订单"] } },
+        { path: "procurement/reconciliation", name: "procurement-reconciliation", component: ProcurementReconciliationView, meta: { title: "采购对账", breadcrumb: ["采购", "采购对账"] } },
         { path: "purchase-list", name: "purchase-list", component: PurchaseListView, meta: { title: "待入库清单", breadcrumb: ["采购入库", "待入库清单"] } },
         { path: "purchase-history", name: "purchase-history", component: PurchaseHistoryView, meta: { title: "入库记录", breadcrumb: ["采购入库", "入库记录"] } },
         { path: "purchase-cost-center", name: "purchase-cost-center", component: PurchaseCostCenterView, meta: { title: "成本与异常", breadcrumb: ["采购入库", "成本与异常"] } },
@@ -215,6 +224,19 @@ function safeRedirectTarget(target = "/dashboard") {
   return value;
 }
 
+function isAdminOnlyRoute(path = "") {
+  const value = String(path || "");
+  return value === "/finance-center"
+    || value.startsWith("/finance/")
+    || value === "/exceptions/profit"
+    || value === "/profit"
+    || value.startsWith("/profit/")
+    || value === "/settings"
+    || value.startsWith("/settings/")
+    || value === "/asset-variant-center"
+    || value.startsWith("/asset-variant-center/");
+}
+
 router.beforeEach(async (to) => {
   startRoutePerf(to);
   document.title = to.meta?.title ? `${to.meta.title} - 爆单ERP` : "爆单ERP";
@@ -227,11 +249,17 @@ router.beforeEach(async (to) => {
   if (!to.meta?.public) {
     await auth.bootstrap();
     if (!auth.isAuthenticated) return { name: "login", query: { redirect: to.fullPath } };
+    if (isAdminOnlyRoute(to.path) && String(auth.user?.role || "").toLowerCase() !== "admin") {
+      return { path: "/dashboard", query: { denied: "admin" } };
+    }
   }
   if (!to.meta?.mobile && isMobileBrowser() && !prefersDesktopMode()) {
     return {
       path: "/mobile/orders",
-      query: to.name === "orders" ? to.query : {}
+      query: {
+        ...(to.name === "orders" ? to.query : {}),
+        desktopTarget: to.fullPath
+      }
     };
   }
   return true;

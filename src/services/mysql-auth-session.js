@@ -101,7 +101,7 @@ export async function findPersonForLoginMysql(username) {
 export async function findPersonByIdMysql(personId) {
   ensureMysqlAuthSessionEnabled();
   return await mysqlQueryOne(
-    "SELECT id, name, username, role, active, password_hash FROM people WHERE id = ?",
+    "SELECT id, name, username, role, avatar_url, active, password_hash FROM people WHERE id = ?",
     [personId]
   );
 }
@@ -109,6 +109,20 @@ export async function findPersonByIdMysql(personId) {
 export async function updatePersonPasswordMysql(personId, passwordHash) {
   ensureMysqlAuthSessionEnabled();
   await mysqlExecute("UPDATE people SET password_hash = ? WHERE id = ?", [passwordHash, personId]);
+}
+
+export async function updateOwnProfileMysql(personId, body = {}) {
+  ensureMysqlAuthSessionEnabled();
+  const name = String(body.name || "").trim();
+  if (!name) throw new Error("姓名不能为空");
+  if (name.length > 100) throw new Error("姓名不能超过 100 个字符");
+  const avatarUrl = String(body.avatar_url || body.avatarUrl || "").trim();
+  await mysqlExecute(
+    "UPDATE people SET name = ?, avatar_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    [name, avatarUrl, Number(personId)]
+  );
+  await mysqlExecute("UPDATE sessions SET name = ? WHERE person_id = ?", [name, Number(personId)]);
+  return findPersonByIdMysql(personId);
 }
 
 export async function findPersonByWechatIdentityMysql(identity = {}) {

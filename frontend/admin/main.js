@@ -78,7 +78,9 @@ app.use(pinia);
 app.use(ElLoading);
 app.use(router);
 
-useAppStore(pinia).initTheme();
+const appStore = useAppStore(pinia);
+appStore.initTheme();
+appStore.initLayoutPreferences();
 
 app.config.errorHandler = (error) => {
   if (shouldReloadForDynamicImportError(error) && reloadForDynamicImportError(router.currentRoute.value?.fullPath)) {

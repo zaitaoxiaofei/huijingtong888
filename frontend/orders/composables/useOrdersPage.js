@@ -3,6 +3,7 @@ import { ElMessage } from "element-plus";
 import { apiClient } from "../../admin/utils/api.js";
 import { loadShopDictionary } from "../../admin/utils/shop-dictionary.js";
 import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateTimeText } from "../../admin/utils/shanghai-date.js";
+import { normalizePrintState, togglePrintViewState } from "../utils/order-print-filters.js";
 import {
   bulkPrepareOrders,
   bulkPrintOrders,
@@ -164,17 +165,6 @@ function createDefaultFilters(defaultFrom, defaultTo) {
     printFilter: "all",
     sortMode: "ordered"
   };
-}
-
-function normalizePrintState(filters = {}) {
-  const printView = String(filters.printView || "all");
-  const printFilter = printView === "printed"
-    ? "printed"
-    : printView === "unprinted"
-      ? "unprinted"
-      : "all";
-  const sortMode = printView === "inventory" ? "inventory" : "ordered";
-  return { printView, printFilter, sortMode };
 }
 
 function friendlyPrepareError(error) {
@@ -795,8 +785,7 @@ export function useOrdersPage() {
       return Promise.resolve(changeOrderStatus(status)).then(loadOrders);
     },
     changePrintView: (view) => {
-      const nextView = vm.filters.printView === view ? "all" : view;
-      const normalizedPrint = normalizePrintState({ printView: nextView });
+      const normalizedPrint = togglePrintViewState(vm.filters, view);
       vm.filters = {
         ...vm.filters,
         printView: normalizedPrint.printView,
@@ -804,7 +793,7 @@ export function useOrdersPage() {
         sortMode: normalizedPrint.sortMode,
         page: 1
       };
-      return Promise.resolve(changeOrderPrintView(nextView)).then(loadOrders);
+      return Promise.resolve(changeOrderPrintView(view)).then(loadOrders);
     },
     changeFulfillmentType: (value) => {
       vm.filters = {

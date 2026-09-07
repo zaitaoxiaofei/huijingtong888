@@ -31,3 +31,11 @@ test("AI image generation concurrency has process-wide adaptive memory caps", ()
   assert.match(runtimeLimiter, /rssMb >= 1400[\s\S]*limit = Math\.min\(limit, 1\)/);
   assert.match(runtimeLimiter, /state\.activeTotal >= adaptivePoolLimit/);
 });
+
+test("AI variant result table lazy-loads OSS thumbnails and previews the original image", () => {
+  assert.match(view, /function resultThumbnailUrl\(row\)/);
+  assert.match(view, /x-oss-process/);
+  assert.match(view, /image\/resize,m_fill,w_240,h_320\/quality,q_75\/format,webp/);
+  assert.match(view, /:src="resultThumbnailUrl\(row\)"/);
+  assert.match(view, /:preview-src-list="\[resultImageUrl\(row\)\]"[\s\S]{0,100}lazy/);
+});

@@ -1,5 +1,5 @@
 ﻿<script setup>
-import { computed, defineExpose, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, defineExpose, h, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, Plus } from "@element-plus/icons-vue";
@@ -53,7 +53,6 @@ const {
   syncRecent,
   syncAll,
   cancelSync,
-  bulkPrint,
   bulkPrepare,
   openQualityRules,
   saveQualityRules,
@@ -139,74 +138,11 @@ const splitOrderValidation = computed(() => {
   return "";
 });
 
-const printDialog = reactive({
-  visible: false,
-  submitting: false,
-  previewing: false,
-  orderIds: [],
-  preset: "order_label_72x130",
-  copies: 1,
-  scale: "noscale",
-  orientation: "auto",
-  color: "monochrome"
-});
-
 const statusPreferenceDialog = reactive({
   visible: false,
   saving: false,
   order: []
 });
-
-const printPresetOptions = [
-  {
-    label: "订单面单 72mm x 130mm",
-    value: "order_label_72x130",
-    printer: "label",
-    paper: "72mm x 130mm",
-    scale: "noscale",
-    orientation: "auto",
-    color: "monochrome"
-  },
-  {
-    label: "FBP 面单 72mm x 130mm",
-    value: "fbp_label_72x130",
-    printer: "label",
-    paper: "72mm x 130mm",
-    scale: "noscale",
-    orientation: "auto",
-    color: "monochrome"
-  },
-  {
-    label: "标签面单 30mm x 70mm",
-    value: "barcode_70x30",
-    printer: "label",
-    paper: "70mm*30mm",
-    scale: "noscale",
-    orientation: "auto",
-    color: "monochrome"
-  },
-  {
-    label: "A4 PDF / FBP 申请文件",
-    value: "a4_document",
-    printer: "document",
-    paper: "A4",
-    scale: "fit",
-    orientation: "portrait",
-    color: ""
-  }
-];
-
-const orientationOptions = [
-  { label: "自动", value: "auto" },
-  { label: "纵向", value: "portrait" },
-  { label: "横向", value: "landscape" }
-];
-
-const colorOptions = [
-  { label: "打印机默认", value: "" },
-  { label: "彩色", value: "color" },
-  { label: "黑白", value: "monochrome" }
-];
 
 const QUALITY_CHECK_ORDER_PREFIXES = ["02090", "02131", "02478"];
 
@@ -238,10 +174,6 @@ const procurementUrgencyOptions = [
   { label: "普通", value: "normal" },
   { label: "加急", value: "urgent" }
 ];
-
-const selectedPrintPreset = computed(() => (
-  printPresetOptions.find((item) => item.value === printDialog.preset) || printPresetOptions[0]
-));
 
 const statusTabLabelMap = computed(() => new Map((vm.statusTabs || []).map((item) => [item.value, item.label])));
 
@@ -289,6 +221,11 @@ let createSimilarProductsTimer = null;
 const createCompositionDialogVisible = ref(false);
 const createdInventoryProductId = ref(null);
 const createComponentCategory = ref("single");
+const createComponentSearchMode = ref("exact");
+const createComponentStructuredFilters = reactive({
+  inventoryCategory: "", productName: "", vehicleBrand: "", fitmentType: "",
+  vehicleModel: [], accessoryName: "", color: "", material: [], process: ""
+});
 const createComponentListPage = ref(1);
 const createComponentListPageSize = ref(INVENTORY_LIST_PAGE_SIZE);
 const createComponentProductTotal = ref(0);
@@ -345,10 +282,14 @@ const bindProductStructuredFilters = reactive({
 const inventoryListPage = ref(1);
 const inventoryListPageSize = ref(INVENTORY_LIST_PAGE_SIZE);
 const inventoryProductEditorVisible = ref(false);
+const inventoryProductEditorRef = ref(null);
 const inventoryProductEditorValue = ref(null);
 const inventoryProductEditorLoadingId = ref(0);
+const confirmingInboundRecordId = ref(0);
 const inventoryProductEditorMode = ref("edit");
 const inventoryProductEditorCreateContext = ref(null);
+const quickComponentCreateVisible = ref(false);
+const quickComponentRole = ref("included");
 const compositionDialogVisible = ref(false);
 const compositionDialogReadOnly = ref(false);
 const compositionDialogProduct = ref(null);
@@ -453,13 +394,21 @@ const createShippingMethodLabel = computed(() => (
 const orderProcurementProducts = computed(() => (
   Array.isArray(orderProcurementDialog.preview?.products) ? orderProcurementDialog.preview.products : []
 ));
-const orderProcurementItems = computed(() => (
+const orderProcurementProductItems = computed(() => (
   orderProcurementProducts.value.flatMap((product) => (
     Array.isArray(product.items)
       ? product.items.map((item) => ({ ...item, product }))
       : []
   ))
 ));
+const orderProcurementItems = computed(() => {
+  const uniqueItems = new Map();
+  for (const item of orderProcurementProductItems.value) {
+    const key = Number(item.order_item_id || 0);
+    if (key && !uniqueItems.has(key)) uniqueItems.set(key, item);
+  }
+  return [...uniqueItems.values()];
+});
 const orderProcurementSelectedCount = computed(() => orderProcurementDialog.selectedItemIds.length);
 const orderProcurementSelectedQuantity = computed(() => {
   const selected = new Set(orderProcurementDialog.selectedItemIds.map(Number));
@@ -857,26 +806,141 @@ function buildStatusDeadlineHint(displayStateKey, logisticsSummary) {
 function buildProcurementState(row = {}) {
   const total = Number(row.procurement_total_item_count || 0);
   const handled = Number(row.procurement_handled_item_count || 0);
-  if (!total || !handled) return { handled: false, label: "", detail: "" };
+  const allocatedQuantity = Number(row.procurement_allocated_quantity || 0);
+  const latestPurchaseAt = row.procurement_latest_purchase_at || "";
+  const inTransitDays = Math.max(0, Number(row.procurement_in_transit_days || 0));
+  const overdue = Number(row.procurement_overdue || 0) > 0;
+  const requestUnallocatedQuantity = Math.max(0, Number(row.procurement_request_unallocated_quantity || 0));
+  const hasAllocation = Number(row.procurement_has_allocation || 0) > 0;
+  const hasOrderIncoming = Number(row.procurement_has_order_incoming || 0) > 0;
+  const hasProductIncoming = Number(row.procurement_has_product_incoming || 0) > 0;
+  const productIncomingQuantity = Math.max(0, Number(row.procurement_product_incoming_quantity || 0));
+  const inboundRecordIds = [...new Set(splitCsv(row.procurement_inbound_record_ids).map(Number).filter(Boolean))];
+  const inboundRecordId = inboundRecordIds.length === 1 ? inboundRecordIds[0] : null;
+  const inboundDetails = {
+    personName: row.procurement_person_name || "未记录",
+    purchaseOrderNo: row.procurement_purchase_order_no || "未记录",
+    productName: row.procurement_product_name || "未记录",
+    quantity: Math.max(0, Number(row.procurement_inbound_quantity || productIncomingQuantity || 0)),
+    amount: Math.max(0, Number(row.procurement_inbound_amount || 0)),
+    shippingAmount: Math.max(0, Number(row.procurement_inbound_shipping_amount || 0)),
+    purchasedAt: latestPurchaseAt
+  };
+  if (!total || !handled) return {
+    handled: false,
+    label: "",
+    detail: "",
+    allocatedQuantity,
+    latestPurchaseAt,
+    inTransitDays,
+    overdue,
+    requestUnallocatedQuantity,
+    hasAllocation,
+    hasOrderIncoming,
+    hasProductIncoming,
+    productIncomingQuantity,
+    inboundRecordId,
+    inboundRecordCount: inboundRecordIds.length,
+    inboundDetails
+  };
   const types = splitCsv(row.procurement_handling_types);
   const stockCount = types.includes("stock_available");
   const incomingCount = types.includes("incoming_available");
   const requestCount = types.includes("procurement_request");
   const detail = incomingCount && requestCount
-    ? "采购在途可满足/已提交采购"
+    ? "采购在途"
       : incomingCount
-      ? "采购在途可满足"
+      ? "采购在途"
       : stockCount && requestCount
-        ? "库存可满足/已提交采购"
+        ? "库存可满足/采购在途"
         : stockCount
           ? "库存可满足"
-          : "已提交采购";
+          : "采购在途";
   return {
     handled: handled >= total,
     partial: handled > 0 && handled < total,
-    label: handled >= total ? "采购已处理" : "部分处理",
-    detail
+    label: handled >= total ? (requestCount || incomingCount ? "采购在途" : "库存可满足") : "部分待采购",
+    detail,
+    allocatedQuantity,
+    latestPurchaseAt,
+    inTransitDays,
+    overdue,
+    requestUnallocatedQuantity,
+    hasAllocation,
+    hasOrderIncoming,
+    hasProductIncoming,
+    productIncomingQuantity,
+    inboundRecordId,
+    inboundRecordCount: inboundRecordIds.length,
+    inboundDetails
   };
+}
+
+function procurementDetailRows(row) {
+  const details = row?.procurementState?.inboundDetails || {};
+  const totalAmount = Number(details.amount || 0) + Number(details.shippingAmount || 0);
+  return [
+    ["采购人员", details.personName || "未记录"],
+    ["采购时间", formatDateTime(details.purchasedAt)],
+    ["采购单号", details.purchaseOrderNo || "未记录"],
+    ["商品名称", details.productName || "未记录"],
+    ["采购数量", `${Number(details.quantity || 0)} 件`],
+    ["商品金额", `¥${formatMoney(details.amount || 0)}`],
+    ["采购运费", `¥${formatMoney(details.shippingAmount || 0)}`],
+    ["采购合计", `¥${formatMoney(totalAmount)}`]
+  ];
+}
+
+function procurementDetailContent(row, intro) {
+  return h("div", { class: "orders-inbound-confirm" }, [
+    h("p", intro),
+    h("div", { class: "orders-inbound-confirm-grid" }, procurementDetailRows(row).flatMap(([label, value]) => [
+      h("span", { class: "orders-inbound-confirm-label" }, label),
+      h("strong", value)
+    ]))
+  ]);
+}
+
+async function handleViewProcurementDetails(row) {
+  await ElMessageBox.alert(
+    procurementDetailContent(row, "该订单关联的具体采购内容如下："),
+    "采购内容",
+    { customClass: "orders-inbound-confirm-dialog", confirmButtonText: "知道了" }
+  );
+}
+
+async function handleConfirmProcurementInbound(row) {
+  const inboundRecordId = Number(row?.procurementState?.inboundRecordId || 0);
+  if (!inboundRecordId) {
+    ElMessage.warning("该商品存在多个待入库批次，请到采购待入库页面逐条核对");
+    return;
+  }
+  if (confirmingInboundRecordId.value === inboundRecordId) return;
+  try {
+    await ElMessageBox.confirm(
+      procurementDetailContent(row, "请核对以下采购信息。确认后将增加本地库存，并记录当前操作人："),
+      "确认入库",
+      {
+        customClass: "orders-inbound-confirm-dialog",
+        confirmButtonText: "确认入库",
+        cancelButtonText: "取消"
+      }
+    );
+    confirmingInboundRecordId.value = inboundRecordId;
+    await apiClient.post("/api/inbound-records/batch-update", {
+      records: [{ id: inboundRecordId, payload: { status: "approved", qc_status: "approved" } }]
+    });
+    ElMessage.success("确认入库成功");
+    void loadOrders({ forceRefresh: true, silent: true })
+      .catch((error) => ElMessage.warning(error?.message || "入库成功，订单状态刷新失败，请手动刷新"))
+      .finally(() => {
+        if (confirmingInboundRecordId.value === inboundRecordId) confirmingInboundRecordId.value = 0;
+      });
+  } catch (error) {
+    confirmingInboundRecordId.value = 0;
+    if (error === "cancel" || error === "close" || error?.message === "cancel") return;
+    ElMessage.error(error.message || "确认入库失败");
+  }
 }
 
 function buildTableRow(row) {
@@ -1008,7 +1072,10 @@ function resolveOrderInventoryContext(orderId, sku) {
     lengthCm: Number(displayItem?.length_cm || displayItem?.length || row.length_cm || 0) || "",
     widthCm: Number(displayItem?.width_cm || displayItem?.width || row.width_cm || 0) || "",
     heightCm: Number(displayItem?.height_cm || displayItem?.height || row.height_cm || 0) || "",
-    listingPriceRub: Number(displayItem?.salePrice || displayItem?.sale_price || row.sale_price || 0) || 0
+    salePriceRmb: Number(displayItem?.saleAmount || 0) > 0
+      ? Number(displayItem.saleAmount) / Math.max(1, Number(displayItem.quantity || 1))
+      : Number(row.sale_price || 0) || 0,
+    logisticsRuleId: Number(displayItem?.logisticsRuleId || 0) || null
   };
 }
 
@@ -1079,8 +1146,15 @@ function createComponentProductQueryString() {
     pageSize: String(createComponentListPageSize.value || INVENTORY_LIST_PAGE_SIZE),
     inventoryType: createComponentCategory.value
   });
-  const query = String(createForm.componentQuery || "").trim();
-  if (query) params.set("query", query);
+  if (createComponentSearchMode.value === "fuzzy") {
+    const query = String(createForm.componentQuery || "").trim();
+    if (query) params.set("query", query);
+  } else {
+    for (const [key, rawValue] of Object.entries(createComponentStructuredFilters)) {
+      const value = Array.isArray(rawValue) ? rawValue.join(",") : String(rawValue || "").trim();
+      if (value) params.set(key, value);
+    }
+  }
   return params.toString();
 }
 
@@ -1219,6 +1293,32 @@ async function handleInventoryProductEditorSaved({ mode, product } = {}) {
   if (createdFromOrder) emit("inventory-completed", { mode: "create", product });
 }
 
+function openQuickComponentCreate({ role = "included" } = {}) {
+  quickComponentRole.value = role === "gift" ? "gift" : "included";
+  quickComponentCreateVisible.value = true;
+}
+
+async function addQuickComponentToInventoryEditor(product = {}) {
+  let resolvedProduct = product;
+  const productId = Number(product?.id || product?.product_id || 0);
+  if (productId && (!product?.name || !product?.stock_unit)) {
+    resolvedProduct = await apiClient.get(`/api/products/${productId}`, { noCache: true });
+  }
+  inventoryProductEditorRef.value?.addExternalComponentProduct?.(resolvedProduct, quickComponentRole.value);
+}
+
+async function handleQuickComponentCreated({ product } = {}) {
+  quickComponentCreateVisible.value = false;
+  await addQuickComponentToInventoryEditor(product || {});
+  ElMessage.success("配件库存已创建并加入当前商品");
+}
+
+async function handleQuickComponentExistingSelected(row) {
+  quickComponentCreateVisible.value = false;
+  await addQuickComponentToInventoryEditor(row || {});
+  ElMessage.success("已有配件已加入当前商品");
+}
+
 async function handleInventoryProductEditorExistingSelected(row) {
   const context = inventoryProductEditorCreateContext.value;
   if (!context?.online_product_id) {
@@ -1334,76 +1434,22 @@ async function syncAllOrdersAction() {
   await syncAll();
 }
 
-function openPrintDialog(orderIds = []) {
+async function openPrintDialog(orderIds = []) {
   const ids = Array.isArray(orderIds) ? orderIds.map(Number).filter(Boolean) : [];
   if (!ids.length) return ElMessage.warning("请选择需要打印的订单");
-  printDialog.orderIds = ids;
-  printDialog.preset = "order_label_72x130";
-  printDialog.copies = 1;
-  printDialog.scale = "noscale";
-  printDialog.orientation = "auto";
-  printDialog.color = "monochrome";
-  printDialog.visible = true;
-}
-
-function buildPrintSettings() {
-  const preset = selectedPrintPreset.value;
-  return [
-    printDialog.scale,
-    printDialog.orientation === "auto" ? "" : printDialog.orientation,
-    printDialog.color,
-    preset.paper ? `paper=${preset.paper}` : ""
-  ].filter(Boolean).join(",");
-}
-
-function applyPrintPreset() {
-  const preset = selectedPrintPreset.value;
-  printDialog.scale = preset.scale || "fit";
-  printDialog.orientation = preset.orientation || "auto";
-  printDialog.color = preset.color || "";
-}
-
-async function previewPrintLabels() {
-  const ids = printDialog.orderIds.map(Number).filter(Boolean);
-  if (!ids.length) return;
-  printDialog.previewing = true;
   try {
-    const result = await previewOrderLabels(ids, {
-      printer: selectedPrintPreset.value.printer,
-      printSettings: buildPrintSettings(),
-      preset: selectedPrintPreset.value.value,
-      paperSize: selectedPrintPreset.value.value,
-      orientation: printDialog.orientation
-    });
-    if (result?.confirmed) {
+    const result = await previewOrderLabels(ids);
+    if (result?.printed) {
       orderDetailCache.clear();
       await loadOrders({ includeCounts: true });
-      ElMessage.success("已记录面单打印时间");
+      ElMessage.success("已记录面单打印时间；如打印失败，请在确认窗口选择“失败”");
+    } else if (result?.failed) {
+      orderDetailCache.clear();
+      await loadOrders({ includeCounts: true });
+      ElMessage.warning("已撤销本批面单的打印记录");
     }
   } catch (error) {
-    ElMessage.error(`预览失败：${error?.message || "未知错误"}`);
-  } finally {
-    printDialog.previewing = false;
-  }
-}
-
-async function submitPrintDialog() {
-  const ids = printDialog.orderIds.map(Number).filter(Boolean);
-  if (!ids.length) return;
-  printDialog.submitting = true;
-  try {
-    await bulkPrint(ids, {
-      printer: selectedPrintPreset.value.printer,
-      printSettings: buildPrintSettings(),
-      preset: selectedPrintPreset.value.value,
-      paperSize: selectedPrintPreset.value.value,
-      orientation: printDialog.orientation,
-      copies: printDialog.copies
-    });
-    printDialog.visible = false;
-    orderDetailCache.clear();
-  } finally {
-    printDialog.submitting = false;
+    ElMessage.error(`打开面单失败：${error?.message || "未知错误"}`);
   }
 }
 
@@ -1810,7 +1856,7 @@ function applyProcurementQuantity(product, mode) {
 
 function selectedProcurementProductIds() {
   const selected = new Set(orderProcurementDialog.selectedItemIds.map(Number));
-  return new Set(orderProcurementItems.value
+  return new Set(orderProcurementProductItems.value
     .filter((item) => selected.has(Number(item.order_item_id)))
     .map((item) => Number(item.product?.product_id || 0))
     .filter(Boolean));
@@ -1835,6 +1881,15 @@ function procurementPurchasePayload() {
 
 async function validateProcurementPurchaseInputs() {
   const selectedProducts = selectedProcurementProductIds();
+  const missingAmount = orderProcurementProducts.value.find((product) => (
+    selectedProducts.has(Number(product.product_id))
+      && Number(product.purchase_quantity || 0) > 0
+      && !(Number(product.purchase_amount || 0) > 0)
+  ));
+  if (missingAmount) {
+    ElMessage.warning(`「${missingAmount.product_name || missingAmount.product_code || missingAmount.product_id}」的采购金额必须大于 0，请填写实际货款后再提交`);
+    return false;
+  }
   const abnormalProducts = orderProcurementProducts.value.filter((product) => (
     selectedProducts.has(Number(product.product_id)) && procurementCostVariance(product)?.abnormal
   ));
@@ -1908,14 +1963,15 @@ async function submitOrderProcurement() {
     const stockCount = Number(result?.stock_satisfied_count || 0);
     const markedCount = Number(result?.marked_count || 0);
     if (markedCount > 0) {
-      ElMessage.success(`采购建议已处理：${stockCount} 条库存可满足，${createdCount} 条已生成采购建议`);
+      const orderNo = String(result?.purchase_order_no || "").trim();
+      ElMessage.success(`采购已提交：${stockCount} 条库存可满足，${createdCount} 条已完成采购${orderNo ? `（${orderNo}）` : ""}`);
     } else {
       ElMessage.info("当前没有新的待采购订单明细");
     }
     orderProcurementDialog.visible = false;
     await loadOrders({ forceRefresh: true, includeCounts: true });
   } catch (error) {
-    ElMessage.error(error.message || "生成采购建议失败");
+    ElMessage.error(error.message || "提交采购失败");
   } finally {
     orderProcurementDialog.submitting = false;
   }
@@ -1989,6 +2045,7 @@ async function handleOpenCreateProductFromOrder(orderId, sku) {
   await ensureInventoryOptionsLoaded();
   const personId = preferredPersonId();
   const defaultRule = defaultLogisticsRule();
+  const orderRule = inventoryOptions.logisticsRules.find((rule) => Number(rule.id) === Number(context.logisticsRuleId)) || defaultRule;
   inventoryProductEditorCreateContext.value = {
     online_product_id: context.onlineProductId,
     order_item_id: context.orderItemId,
@@ -2005,13 +2062,14 @@ async function handleOpenCreateProductFromOrder(orderId, sku) {
     length_cm: context.lengthCm || 30,
     width_cm: context.widthCm || 20,
     height_cm: context.heightCm || 10,
-    listing_price_rub: context.listingPriceRub || 0,
+    sale_price_rmb: context.salePriceRmb || 0,
+    air_sale_price_rmb: context.salePriceRmb || 0,
     owner_person_id: personId || "",
     source_platform: "1688",
     supplier_note: `来自订单 ${orderId} / Ozon SKU ${context.sku}`,
     stock_unit: "个",
-    logistics_rule_id: defaultRule?.id || "",
-    shipping_method: defaultRule?.channel || "air_land",
+    logistics_rule_id: orderRule?.id || "",
+    shipping_method: orderRule?.channel || "air_land",
     return_rate: 0.05,
     product_type: "main",
     selection_status: "listed"
@@ -2258,7 +2316,7 @@ onBeforeUnmount(() => {
         :fulfillment-type-options="vm.fulfillmentTypeOptions"
         :active-fulfillment-type="vm.filters.fulfillmentType"
         :print-views="vm.printViews"
-        :active-print-view="vm.filters.printView"
+        :active-print-views="[vm.filters.sortMode === 'inventory' ? 'inventory' : '', vm.filters.printFilter !== 'all' ? vm.filters.printFilter : ''].filter(Boolean)"
         :mark-options="vm.markOptions"
         :active-mark-filter="vm.filters.markFilter"
         :selected-count="selectedCount"
@@ -2277,6 +2335,7 @@ onBeforeUnmount(() => {
         :selected-ids="selectedOrderIds"
         :all-selected="allRowsSelected"
         :some-selected="someRowsSelected"
+        :confirming-inbound-record-id="confirmingInboundRecordId"
         table-height="100%"
         @toggle-all="toggleAll"
         @toggle-row="toggleRow"
@@ -2291,6 +2350,8 @@ onBeforeUnmount(() => {
         @view-product-components="viewProductCompositionDialog"
         @open-create-product-from-order="handleOpenCreateProductFromOrder"
         @open-order-procurement="handleOpenOrderProcurement"
+        @view-procurement-details="handleViewProcurementDetails"
+        @confirm-procurement-inbound="handleConfirmProcurementInbound"
       />
 
       <div class="orders-page-footer">
@@ -2423,55 +2484,6 @@ onBeforeUnmount(() => {
         >
           确认拆分并备货
         </el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog
-      v-model="printDialog.visible"
-      title="面单打印设置"
-      width="560px"
-      align-center
-      class="erp-centered-dialog"
-      destroy-on-close
-    >
-      <el-form label-position="top" class="orders-print-settings-form">
-        <el-form-item label="打印用途 / 尺寸">
-          <el-select v-model="printDialog.preset" class="w-full" @change="applyPrintPreset">
-            <el-option v-for="item in printPresetOptions" :key="item.value" :label="item.label" :value="item.value" />
-          </el-select>
-        </el-form-item>
-        <div class="orders-print-target-line">
-          <span>打印机</span>
-          <strong>{{ selectedPrintPreset.printer === "document" ? "Canon MG2500 series Printer" : "Gprinter GP-1324D" }}</strong>
-        </div>
-        <div class="orders-print-settings-grid">
-          <el-form-item label="纸张尺寸">
-            <el-input :model-value="selectedPrintPreset.paper" disabled />
-          </el-form-item>
-          <el-form-item label="份数 / 张数">
-            <el-input-number v-model="printDialog.copies" :min="1" :max="999" :step="1" controls-position="right" />
-          </el-form-item>
-          <el-form-item label="方向">
-            <el-select v-model="printDialog.orientation">
-              <el-option v-for="item in orientationOptions" :key="item.value" :label="item.label" :value="item.value" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="颜色">
-            <el-select v-model="printDialog.color">
-              <el-option v-for="item in colorOptions" :key="item.value" :label="item.label" :value="item.value" />
-            </el-select>
-          </el-form-item>
-        </div>
-      </el-form>
-      <template #footer>
-        <div class="orders-print-dialog-footer">
-          <span>{{ printDialog.orderIds.length }} 个面单 × {{ printDialog.copies }} 份</span>
-          <div>
-            <el-button @click="printDialog.visible = false">取消</el-button>
-            <el-button :loading="printDialog.previewing" @click="previewPrintLabels">预览 PDF</el-button>
-            <el-button type="primary" :loading="printDialog.submitting" @click="submitPrintDialog">确认打印</el-button>
-          </div>
-        </div>
       </template>
     </el-dialog>
 
@@ -2695,7 +2707,9 @@ onBeforeUnmount(() => {
             <el-table-column prop="ozon_sku" label="SKU" min-width="150" />
             <el-table-column prop="offer_id" label="货号" min-width="130" />
             <el-table-column prop="product_name" label="商品" min-width="260" />
-            <el-table-column prop="quantity" label="数量" width="80" align="center" />
+              <el-table-column label="数量" width="80" align="center">
+                <template #default="{ row }">{{ row.order_quantity ?? row.quantity }}</template>
+              </el-table-column>
             <el-table-column label="销售额" width="120" align="right">
               <template #default="{ row }">CNY {{ formatMoney(row.sale_amount_cny || Number(row.sale_price || 0) * Number(row.quantity || 0)) }}</template>
             </el-table-column>
@@ -3061,17 +3075,30 @@ onBeforeUnmount(() => {
                       @change="changeCreateComponentCategory"
                     />
                     <el-input
+                      v-if="createComponentSearchMode === 'fuzzy'"
                       v-model="createForm.componentQuery"
                       clearable
                       placeholder="搜索商品名称、库存编码、SKU 或负责人"
                       @input="searchCreateComponentProducts"
                       @clear="searchCreateComponentProducts('')"
                     />
+                    <el-segmented
+                      v-model="createComponentSearchMode"
+                      :options="[{ label: '模糊搜索', value: 'fuzzy' }, { label: '精确搜索', value: 'exact' }]"
+                      @change="searchCreateComponentProducts('')"
+                    />
                     <div class="order-inventory-result-meta">
                       <span>商品 {{ createComponentProductTotal }}</span>
                       <span>已加入 {{ createForm.compositionItems.length }}</span>
                     </div>
                   </div>
+                  <InventoryStructuredSearch
+                    v-if="createComponentSearchMode === 'exact'"
+                    compact
+                    :model-value="createComponentStructuredFilters"
+                    @update:model-value="Object.assign(createComponentStructuredFilters, $event)"
+                    @change="searchCreateComponentProducts('')"
+                  />
                   <el-table
                     v-loading="createComponentLoading"
                     :data="createComponentOptions"
@@ -3304,6 +3331,7 @@ onBeforeUnmount(() => {
     </el-dialog>
 
     <ProductCreateEditDialog
+      ref="inventoryProductEditorRef"
       v-model:visible="inventoryProductEditorVisible"
       :mode="inventoryProductEditorMode"
       target="inventory"
@@ -3315,7 +3343,20 @@ onBeforeUnmount(() => {
       :create-context="inventoryProductEditorCreateContext || {}"
       @saved="handleInventoryProductEditorSaved"
       @existing-selected="handleInventoryProductEditorExistingSelected"
+      @quick-create-component="openQuickComponentCreate"
       @manage-components="(product) => openProductCompositionDialog(product.id)"
+    />
+
+    <ProductCreateEditDialog
+      v-model:visible="quickComponentCreateVisible"
+      mode="create"
+      target="inventory"
+      :people="inventoryOptions.people"
+      :suppliers="inventoryOptions.suppliers"
+      :logistics-rules="inventoryOptions.logisticsRules"
+      :create-context="{ is_accessory: 1 }"
+      @saved="handleQuickComponentCreated"
+      @existing-selected="handleQuickComponentExistingSelected"
     />
 
     <ProductCompositionDialog
@@ -3329,7 +3370,7 @@ onBeforeUnmount(() => {
 
     <el-dialog
       v-model="orderProcurementDialog.visible"
-      title="采购处理确认"
+      title="登记已下单采购"
       width="min(1480px, 96vw)"
       align-center
       class="erp-centered-dialog order-procurement-dialog"
@@ -3650,7 +3691,7 @@ onBeforeUnmount(() => {
           :loading="orderProcurementDialog.submitting"
           @click="submitOrderProcurement"
         >
-          生成采购建议
+          确认已下单并进入在途
         </el-button>
       </template>
     </el-dialog>

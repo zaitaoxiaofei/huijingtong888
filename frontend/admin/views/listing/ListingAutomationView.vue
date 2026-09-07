@@ -7082,4 +7082,33 @@ onBeforeUnmount(() => {
   .compact-result { grid-template-columns: 86px minmax(0, 1fr); }
   .template-name-box { grid-column: 1 / -1; min-width: 0; }
 }
+
+@media (max-width: 767px) {
+  .progress-row { grid-template-columns: 1fr; }
+  .section-line,
+  .variants-block > .section-line,
+  .variant-video-card,
+  .variant-video-entry,
+  .product-result,
+  .compact-result,
+  .text-variant-shop-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .section-line { align-items: stretch; }
+  .field-with-tools,
+  .field-with-tools.wide-tools,
+  .shop-select-box,
+  .template-name-box {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .variant-image-workbench {
+    grid-template-columns: minmax(0, 1fr);
+    height: min(760px, calc(100dvh - 130px));
+    overflow-y: auto;
+  }
+  .variant-video-entry > video,
+  .variant-editor-video,
+  .variant-video-empty { width: 100%; }
+  .result-actions { align-items: stretch; }
+}
 </style>

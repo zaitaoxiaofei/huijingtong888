@@ -1833,7 +1833,7 @@ onMounted(async () => {
     />
 
     <div class="mobile-landscape-hint">库存字段较多，横屏查看更完整；表格可左右滑动。</div>
-    <div class="inventory-table-wrap">
+    <div class="inventory-table-wrap erp-responsive-table" role="region" aria-label="库存商品表格" tabindex="0">
       <el-table
         v-loading="loading"
         :data="pagedRows"
@@ -2332,6 +2332,7 @@ onMounted(async () => {
       :people="state.people"
       :suppliers="state.suppliers"
       :logistics-rules="state.logisticsRules"
+      :create-context="{ is_accessory: 1 }"
       @saved="handleQuickComponentCreated"
       @existing-selected="handleQuickComponentExistingSelected"
     />

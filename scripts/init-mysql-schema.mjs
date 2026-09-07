@@ -283,10 +283,12 @@ CREATE TABLE IF NOT EXISTS team_tasks (
   related_object TEXT NULL,
   result_note TEXT NULL,
   quality_score DECIMAL(8,2) NOT NULL DEFAULT 0,
+  automation_key VARCHAR(128) NULL,
   created_by_person_id BIGINT UNSIGNED NULL,
   active TINYINT(1) NOT NULL DEFAULT 1,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_team_tasks_automation_key (automation_key),
   KEY idx_team_tasks_period_status (period, status, active),
   KEY idx_team_tasks_type_period (work_type, period, active),
   KEY idx_team_tasks_owner_period (owner_person_id, period, active),
@@ -442,7 +444,9 @@ CREATE TABLE IF NOT EXISTS procurement_requests (
   source_order_id BIGINT UNSIGNED NULL,
   source_order_item_id BIGINT UNSIGNED NULL,
   source_ozon_sku VARCHAR(128) NULL,
+  demand_type VARCHAR(32) NOT NULL DEFAULT 'advance_stock',
   merged_at DATETIME NULL,
+  purchased_at DATETIME NULL,
   cancelled_at DATETIME NULL,
   urgency VARCHAR(32) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -452,6 +456,7 @@ CREATE TABLE IF NOT EXISTS procurement_requests (
   KEY idx_procurement_product_status (product_id, status),
   KEY idx_procurement_source_order_item (source_order_item_id),
   KEY idx_procurement_source_order (source_order_id),
+  KEY idx_procurement_demand_stage (demand_type, status, created_at),
   KEY idx_procurement_request_group (request_group_no),
   KEY idx_procurement_binding_status (binding_status, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -468,6 +473,27 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
   purchased_at DATETIME NULL,
   cancelled_at DATETIME NULL,
   UNIQUE KEY uk_purchase_orders_order_no (order_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS procurement_purchase_groups (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  source_type VARCHAR(64) NOT NULL DEFAULT 'other',
+  supplier_id BIGINT UNSIGNED NULL,
+  active TINYINT NOT NULL DEFAULT 1,
+  created_by_person_id BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_procurement_purchase_group_source (source_type, supplier_id, active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS procurement_purchase_group_items (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  group_id BIGINT UNSIGNED NOT NULL,
+  product_id BIGINT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_procurement_purchase_group_item (group_id, product_id),
+  KEY idx_procurement_purchase_group_item_product (product_id, group_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS procurement_platform_orders (
@@ -505,6 +531,45 @@ CREATE TABLE IF NOT EXISTS procurement_platform_order_links (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_procurement_platform_order_link (platform_order_id, procurement_request_id),
   KEY idx_procurement_platform_order_link_request (procurement_request_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS procurement_payment_transactions (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  provider VARCHAR(32) NOT NULL,
+  external_no VARCHAR(160) NOT NULL,
+  transaction_time DATETIME NULL,
+  direction VARCHAR(32) NOT NULL DEFAULT 'expense',
+  amount DECIMAL(18,4) NOT NULL DEFAULT 0,
+  counterparty VARCHAR(255) NULL,
+  item_description TEXT NULL,
+  payment_method VARCHAR(255) NULL,
+  transaction_status VARCHAR(64) NULL,
+  merchant_order_no VARCHAR(180) NULL,
+  raw_json JSON NULL,
+  imported_by_person_id BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_procurement_payment_transaction (provider, external_no),
+  KEY idx_procurement_payment_time_amount (transaction_time, amount),
+  KEY idx_procurement_payment_counterparty (counterparty)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS procurement_payment_matches (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  platform_order_id BIGINT UNSIGNED NOT NULL,
+  payment_transaction_id BIGINT UNSIGNED NOT NULL,
+  match_status VARCHAR(32) NOT NULL DEFAULT 'suggested',
+  confidence INT NOT NULL DEFAULT 0,
+  amount_difference DECIMAL(18,4) NOT NULL DEFAULT 0,
+  time_difference_seconds BIGINT NULL,
+  match_reason VARCHAR(255) NULL,
+  confirmed_by_person_id BIGINT UNSIGNED NULL,
+  confirmed_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_procurement_payment_match_order (platform_order_id),
+  KEY idx_procurement_payment_match_payment (payment_transaction_id),
+  KEY idx_procurement_payment_match_status (match_status, confidence)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS purchase_order_items (
@@ -576,6 +641,26 @@ CREATE TABLE IF NOT EXISTS order_item_procurement_marks (
   KEY idx_order_item_procurement_marks_product (product_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE IF NOT EXISTS procurement_order_allocations (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  procurement_request_id BIGINT UNSIGNED NOT NULL,
+  order_item_id BIGINT UNSIGNED NOT NULL,
+  order_id BIGINT UNSIGNED NOT NULL,
+  product_id BIGINT UNSIGNED NOT NULL,
+  allocated_quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
+  status VARCHAR(32) NOT NULL DEFAULT 'allocated',
+  allocated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  released_at DATETIME NULL,
+  release_reason VARCHAR(255) NULL,
+  created_by_person_id BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_procurement_order_allocation (procurement_request_id, order_item_id),
+  KEY idx_procurement_allocation_order (order_id, status),
+  KEY idx_procurement_allocation_item (order_item_id, status),
+  KEY idx_procurement_allocation_product (product_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS inbound_records (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   product_id BIGINT UNSIGNED NOT NULL,
@@ -594,7 +679,9 @@ CREATE TABLE IF NOT EXISTS inbound_records (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   approved_at DATETIME NULL,
+  approved_by_person_id BIGINT UNSIGNED NULL,
   KEY idx_inbound_purchase_item (purchase_order_item_id, status),
+  KEY idx_inbound_approved_by_person (approved_by_person_id),
   KEY idx_inbound_procurement_request (procurement_request_id),
   KEY idx_inbound_product_status (product_id, status),
   KEY idx_inbound_status_created (status, created_at),
@@ -1204,6 +1291,98 @@ CREATE TABLE IF NOT EXISTS order_cancellation_rules (
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_order_cancellation_rules_enabled (enabled, priority)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS product_development_projects (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  code VARCHAR(64) NOT NULL DEFAULT '',
+  category VARCHAR(128) NOT NULL DEFAULT '',
+  owner_person_id BIGINT UNSIGNED NULL,
+  participant_person_ids_json LONGTEXT NULL,
+  market VARCHAR(128) NOT NULL DEFAULT 'Ozon 俄罗斯',
+  status VARCHAR(32) NOT NULL DEFAULT 'planning',
+  priority VARCHAR(32) NOT NULL DEFAULT 'medium',
+  start_at DATE NULL,
+  due_at DATE NULL,
+  target_development_count INT NOT NULL DEFAULT 0,
+  target_listing_count INT NOT NULL DEFAULT 0,
+  target_success_count INT NOT NULL DEFAULT 0,
+  target_revenue DECIMAL(18,2) NOT NULL DEFAULT 0,
+  description TEXT NULL,
+  risk_note TEXT NULL,
+  created_by_person_id BIGINT UNSIGNED NULL,
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_dev_projects_status (status, active),
+  KEY idx_dev_projects_owner (owner_person_id, active),
+  KEY idx_dev_projects_due (due_at, active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS product_development_candidates (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  product_id BIGINT UNSIGNED NULL,
+  project_id BIGINT UNSIGNED NULL,
+  title VARCHAR(255) NOT NULL,
+  category VARCHAR(128) NOT NULL DEFAULT '',
+  brand VARCHAR(128) NOT NULL DEFAULT '',
+  vehicle_model VARCHAR(255) NOT NULL DEFAULT '',
+  owner_person_id BIGINT UNSIGNED NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'idea',
+  priority VARCHAR(32) NOT NULL DEFAULT 'medium',
+  image_url TEXT NULL,
+  source_url TEXT NULL,
+  source_kind VARCHAR(32) NOT NULL DEFAULT 'manual',
+  source_id VARCHAR(128) NOT NULL DEFAULT '',
+  supplier_url TEXT NULL,
+  expected_price DECIMAL(18,2) NOT NULL DEFAULT 0,
+  expected_cost DECIMAL(18,2) NOT NULL DEFAULT 0,
+  expected_margin_rate DECIMAL(8,2) NOT NULL DEFAULT 0,
+  ip_risk VARCHAR(32) NOT NULL DEFAULT 'unknown',
+  planned_listing_at DATE NULL,
+  note TEXT NULL,
+  decision_note TEXT NULL,
+  created_by_person_id BIGINT UNSIGNED NULL,
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_dev_candidates_project (project_id, status, active),
+  KEY idx_dev_candidates_product (product_id, active),
+  KEY idx_dev_candidates_owner (owner_person_id, status, active),
+  KEY idx_dev_candidates_status (status, active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS product_development_ideas (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  title VARCHAR(255) NOT NULL, image_url TEXT NULL, source_url TEXT NULL, note TEXT NULL,
+  urgency TINYINT UNSIGNED NOT NULL DEFAULT 5, importance TINYINT UNSIGNED NOT NULL DEFAULT 5,
+  created_by_person_id BIGINT UNSIGNED NULL, product_id BIGINT UNSIGNED NULL, candidate_id BIGINT UNSIGNED NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'idea', active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_dev_ideas_status (status, active), KEY idx_dev_ideas_product (product_id, active),
+  KEY idx_dev_ideas_priority (urgency, importance, active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS product_development_idea_drafts (
+  idea_id BIGINT UNSIGNED NOT NULL,
+  draft_id BIGINT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (idea_id, draft_id),
+  KEY idx_dev_idea_drafts_draft (draft_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS product_development_task_links (
+  task_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+  project_id BIGINT UNSIGNED NULL,
+  candidate_id BIGINT UNSIGNED NULL,
+  stage VARCHAR(32) NOT NULL DEFAULT '',
+  deliverable TEXT NULL,
+  reviewer_person_id BIGINT UNSIGNED NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_dev_task_links_project (project_id),
+  KEY idx_dev_task_links_candidate (candidate_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 `;
 
 const connection = await createMysqlConnection();
@@ -1221,6 +1400,7 @@ try {
     "ALTER TABLE people ADD COLUMN password_hash TEXT NULL",
     "ALTER TABLE people ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
     "ALTER TABLE people ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+    "ALTER TABLE team_tasks ADD COLUMN automation_key VARCHAR(128) NULL",
     "ALTER TABLE products ADD COLUMN supplier_id BIGINT UNSIGNED NULL",
     "ALTER TABLE products ADD COLUMN listing_title_ru TEXT NULL",
     "ALTER TABLE products ADD COLUMN listing_tags_ru TEXT NULL",
@@ -1263,7 +1443,8 @@ try {
     "CREATE INDEX idx_fbp_transfer_product_status ON fbp_transfer_records (product_id, status)",
     "CREATE INDEX idx_order_label_prints_sequence ON order_label_prints (printed_at, print_batch_id, print_sequence, order_id)",
     "CREATE INDEX idx_online_products_published ON online_products (published_at, id)",
-    "CREATE INDEX idx_inbound_procurement_request ON inbound_records (procurement_request_id)"
+    "CREATE INDEX idx_inbound_procurement_request ON inbound_records (procurement_request_id)",
+    "CREATE UNIQUE INDEX uk_team_tasks_automation_key ON team_tasks (automation_key)"
   ];
   for (const sql of indexStatements) {
     try {

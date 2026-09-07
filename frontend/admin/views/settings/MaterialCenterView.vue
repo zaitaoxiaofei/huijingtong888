@@ -888,4 +888,18 @@ onMounted(loadAssets);
     width: 100%;
   }
 }
+
+@media (max-width: 767px) {
+  .summary-strip,
+  .asset-type-tabs,
+  .material-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .material-center-actions { width: 100%; flex-wrap: wrap; }
+  .material-center-actions .el-button { margin-left: 0; }
+}
+
+@media (max-width: 420px) {
+  .summary-strip,
+  .asset-type-tabs,
+  .material-grid { grid-template-columns: minmax(0, 1fr); }
+}
 </style>

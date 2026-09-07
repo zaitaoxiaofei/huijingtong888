@@ -18,6 +18,10 @@ test("bound order inventory products expose the child-product editor beside bind
   assert.match(pageSource, /@view-product-components="viewProductCompositionDialog"/);
   assert.match(pageSource, /:read-only="compositionDialogReadOnly"/);
   assert.match(pageSource, /<ProductCompositionDialog[\s\S]*@saved="handleProductCompositionSaved"[\s\S]*@quick-create="openQuickCreateFromComposition"/);
+  assert.match(compositionSource, /InventoryStructuredSearch/);
+  assert.match(compositionSource, /searchMode = ref\("exact"\)/);
+  assert.match(pageSource, /createComponentSearchMode = ref\("exact"\)/);
+  assert.match(pageSource, /createComponentStructuredFilters/);
   assert.match(compositionSource, /ProductImagePreview :src="row\.image_url" size="small"/);
   assert.match(compositionSource, /:preview-src-list|ProductImagePreview/);
   assert.match(serviceSource, /p\.image_url,[\s\S]*image_url:\s*compactProductImageUrlForListMysql/);

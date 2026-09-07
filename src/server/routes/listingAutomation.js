@@ -16,6 +16,9 @@ export function createListingAutomationRoutes({ services, readJson }) {
     "GET /api/listing/template-health-check": (req) => services.listingTemplateHealthCheck(req.query || {}, req._session),
     "GET /api/listing/draft-projects": (req, url) => services.listingDraftProjects(Object.fromEntries(url.searchParams.entries()), req._session),
     "GET /api/listing/publish-records": (req) => services.listingPublishRecords(req.query || {}, req._session),
+    "GET /api/listing/inventory-bindings": (req) => services.listingInventoryBindings(req.query || {}, req._session),
+    "POST /api/listing/inventory-bindings/retry": async (req) => services.retryListingInventoryBindings(await readJson(req), req._session),
+    "POST /api/listing/inventory-bindings/bind": async (req) => services.bindListingRecordToInventory(await readJson(req), req._session),
     "GET /api/listing/publish-tasks": (req) => services.listingPublishTasks(req.query || {}, req._session),
     "POST /api/listing/publish-records/batch-delete": async (req) => services.deleteListingPublishRecords(await readJson(req), req._session),
     "GET /api/listing/media/assets": (req) => services.listingMediaAssets(req.query || {}, req._session),
@@ -48,6 +51,7 @@ export function createListingAutomationRoutes({ services, readJson }) {
     "GET /api/listing/variant-workbench-drafts": (req, url) => services.listingVariantWorkbenchDrafts(Object.fromEntries(url.searchParams.entries()), req._session),
     "POST /api/listing/variant-workbench-drafts": async (req) => services.saveListingVariantWorkbenchDraft(await readJson(req), req._session),
     "POST /api/listing/drafts/ai-variant-lightweight": async (req) => services.createAiVariantListingDraftLightweight(await readJson(req), req._session),
+    "POST /api/listing/drafts/from-inventory-product": async (req) => services.createInventoryProductListingDraft(await readJson(req), req._session),
     "POST /api/listing/drafts": async (req) => services.createListingDraft(await readJson(req), req._session)
   };
 }

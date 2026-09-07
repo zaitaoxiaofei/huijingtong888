@@ -14,7 +14,7 @@ export function createCatalogRoutes({ services, readJson }) {
     "GET /api/online-products/warehouses": (req, url) => services.onlineProductWarehouses(Object.fromEntries(url.searchParams.entries())),
     "GET /api/sku-inventory-recipes": (req, url) => services.skuInventoryRecipe(Object.fromEntries(url.searchParams.entries())),
     "GET /api/mappings": (req, url) => services.mappings(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/inventory-product-naming/options": (req, url) => services.inventoryProductNamingOptions(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/inventory-product-naming/options": (req, url) => services.inventoryProductNamingOptions(Object.fromEntries(url.searchParams.entries()), req._session),
     "POST /api/inventory-product-naming/options": async (req) => services.createInventoryProductNamingOption(await readJson(req), req._session),
     "POST /api/products": async (req) => {
       const body = await readProductSaveJson(readJson, req);

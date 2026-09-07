@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue"
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
-import { uploadShopWatermark } from "../../api/tools/imageCropper";
+import { uploadListingMedia, uploadShopWatermark } from "../../api/tools/imageCropper";
 import AuthenticatedImage from "../../components/AuthenticatedImage.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText, shanghaiDateTimeText } from "../../utils/shanghai-date";
@@ -20,6 +20,7 @@ const shopFormRef = ref();
 
 const personDialogVisible = ref(false);
 const personDialogSubmitting = ref(false);
+const personAvatarUploading = ref(false);
 const personFormRef = ref();
 
 const rateDialogVisible = ref(false);
@@ -829,6 +830,7 @@ async function submitPersonDialog() {
   personDialogSubmitting.value = true;
   try {
     const payload = { ...personDialog.form, active: Number(personDialog.form.active ?? 1) };
+    if (personDialog.mode === "edit" && !String(payload.password || "").trim()) delete payload.password;
     if (personDialog.mode === "create") {
       await apiClient.post("/api/people", payload);
       ElMessage.success("人员已新增");
@@ -842,6 +844,51 @@ async function submitPersonDialog() {
     ElMessage.error(error.message || "人员保存失败");
   } finally {
     personDialogSubmitting.value = false;
+  }
+}
+
+async function cropAvatarToSquare(file) {
+  if (!file?.type?.startsWith("image/")) throw new Error("请选择图片文件");
+  if (file.size > 5 * 1024 * 1024) throw new Error("头像图片不能超过 5MB");
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = objectUrl;
+    await image.decode();
+    const sourceSize = Math.min(image.naturalWidth, image.naturalHeight);
+    const sourceX = Math.floor((image.naturalWidth - sourceSize) / 2);
+    const sourceY = Math.floor((image.naturalHeight - sourceSize) / 2);
+    const outputSize = Math.min(1024, sourceSize);
+    const canvas = document.createElement("canvas");
+    canvas.width = outputSize;
+    canvas.height = outputSize;
+    canvas.getContext("2d").drawImage(image, sourceX, sourceY, sourceSize, sourceSize, 0, 0, outputSize, outputSize);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/webp", 0.9));
+    if (!blob) throw new Error("头像裁切失败，请更换图片后重试");
+    const baseName = String(file.name || "avatar").replace(/\.[^.]+$/, "");
+    return new File([blob], `${baseName}-avatar.webp`, { type: "image/webp" });
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function uploadPersonAvatar(options) {
+  personAvatarUploading.value = true;
+  try {
+    const squareFile = await cropAvatarToSquare(options.file);
+    const result = await uploadListingMedia(squareFile, {
+      source_module: "person_avatar",
+      role: "avatar"
+    });
+    personDialog.form.avatar_url = result.publishUrl || result.url || result.previewUrl || "";
+    if (!personDialog.form.avatar_url) throw new Error("头像上传后未返回可用地址");
+    ElMessage.success("头像已上传");
+    options.onSuccess?.(result);
+  } catch (error) {
+    options.onError?.(error);
+    ElMessage.error(error.message || "头像上传失败");
+  } finally {
+    personAvatarUploading.value = false;
   }
 }
 
@@ -984,17 +1031,17 @@ async function handleDeleteShop(row) {
 
 async function handleDeletePerson(row) {
   try {
-    await ElMessageBox.confirm(`确认停用人员「${row.name || row.id}」吗？`, "停用确认", {
+    await ElMessageBox.confirm(`确认删除人员「${row.name || row.id}」吗？删除后账号将无法登录，人员资料也无法恢复。`, "删除确认", {
       type: "warning",
-      confirmButtonText: "确认停用",
+      confirmButtonText: "确认删除",
       cancelButtonText: "取消"
     });
-    await apiClient.delete(`/api/people/${row.id}`);
-    ElMessage.success("人员已停用");
+    await apiClient.delete(`/api/people/${row.id}?hard=1`);
+    ElMessage.success("人员已删除");
     await refreshSettingsData();
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
-    ElMessage.error(error.message || "停用失败");
+    ElMessage.error(error.message || "删除失败");
   }
 }
 
@@ -1283,9 +1330,12 @@ onBeforeUnmount(() => {
             <el-table v-loading="loading" :data="pagedPeople" stripe border class="erp-data-table">
               <el-table-column label="人员信息" min-width="240">
                 <template #default="{ row }">
-                  <div class="settings-cell-stack">
-                    <strong>{{ row.name || "-" }}</strong>
-                    <span class="muted-text">登录名：{{ row.username || "-" }}</span>
+                  <div class="person-info-cell">
+                    <el-avatar :src="row.avatar_url" :size="44">{{ String(row.name || "?").slice(0, 1) }}</el-avatar>
+                    <div class="settings-cell-stack">
+                      <strong>{{ row.name || "-" }}</strong>
+                      <span class="muted-text">登录名：{{ row.username || "-" }}</span>
+                    </div>
                   </div>
                 </template>
               </el-table-column>
@@ -1302,7 +1352,7 @@ onBeforeUnmount(() => {
                 <template #default="{ row }">
                   <div class="table-actions">
                     <el-button class="erp-btn-link" link type="primary" @click="openEditPersonDialog(row)">编辑</el-button>
-                    <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="handleDeletePerson(row)">停用</el-button>
+                    <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="handleDeletePerson(row)">删除</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -1813,7 +1863,20 @@ onBeforeUnmount(() => {
         <el-row :gutter="18">
           <el-col :span="12"><el-form-item label="人员姓名" prop="name"><el-input v-model="personDialog.form.name" placeholder="请输入人员姓名" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="登录名"><el-input v-model="personDialog.form.username" placeholder="可选" /></el-form-item></el-col>
-          <el-col :span="24"><el-form-item label="头像链接"><el-input v-model="personDialog.form.avatar_url" placeholder="https://..." clearable /></el-form-item></el-col>
+          <el-col :span="24">
+            <el-form-item label="人员头像">
+              <div class="person-avatar-editor">
+                <el-avatar :src="personDialog.form.avatar_url" :size="88">{{ String(personDialog.form.name || "头像").slice(0, 1) }}</el-avatar>
+                <div class="person-avatar-actions">
+                  <el-upload action="#" :show-file-list="false" :http-request="uploadPersonAvatar" accept=".jpg,.jpeg,.png,.webp">
+                    <el-button :loading="personAvatarUploading">{{ personDialog.form.avatar_url ? "更换头像" : "上传头像" }}</el-button>
+                  </el-upload>
+                  <el-button v-if="personDialog.form.avatar_url" link type="danger" @click="personDialog.form.avatar_url = ''">移除头像</el-button>
+                  <span class="muted-text">支持任意尺寸 JPG、PNG、WebP，上传后自动居中裁成 1:1，最大 5MB</span>
+                </div>
+              </div>
+            </el-form-item>
+          </el-col>
           <el-col :span="12"><el-form-item label="角色"><el-select v-model="personDialog.form.role"><el-option label="operator" value="operator" /><el-option label="admin" value="admin" /><el-option label="manager" value="manager" /></el-select></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="状态"><el-select v-model="personDialog.form.active"><el-option label="启用" :value="1" /><el-option label="停用" :value="0" /></el-select></el-form-item></el-col>
           <el-col :span="24"><el-form-item label="密码"><el-input v-model="personDialog.form.password" type="password" show-password placeholder="编辑时留空表示不修改密码" /></el-form-item></el-col>
@@ -1914,6 +1977,11 @@ onBeforeUnmount(() => {
 .settings-header-actions, .dialog-footer { align-items: center; gap: 12px; }
 .dialog-footer { justify-content: flex-end; }
 .settings-cell-stack { flex-direction: column; gap: 4px; }
+.person-info-cell { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.person-info-cell :deep(.el-avatar), .person-avatar-editor :deep(.el-avatar) { flex: none; background: #e8eef8; color: #52637a; }
+.person-avatar-editor { display: flex; align-items: center; gap: 16px; }
+.person-avatar-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.person-avatar-actions .muted-text { flex-basis: 100%; }
 .logistics-rule-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .logistics-rule-title strong { min-width: 0; overflow-wrap: anywhere; }
 .rate-delta { margin-left: 4px; color: #dc2626; font-size: 12px; font-weight: 600; }
@@ -1953,5 +2021,17 @@ onBeforeUnmount(() => {
   .settings-list-card .filter-panel :deep(.el-select) { width: 100%; }
   .shop-watermark-config { grid-template-columns: 1fr; }
   .shop-watermark-control-actions { padding-left: 0; }
+}
+@media (max-width: 767px) {
+  .settings-page { gap: 8px; }
+  .settings-nav-card :deep(.el-card__body) { padding: 0 8px; }
+  .settings-list-card :deep(.el-card__header) { padding: 12px; }
+  .settings-list-card :deep(.el-card__body) { padding: 12px; }
+  .settings-header-actions { align-items: stretch; flex-direction: column; width: 100%; }
+  .settings-header-actions :deep(.el-button) { width: 100%; margin-left: 0; }
+  .settings-list-card :deep(.el-form-item) { display: block; }
+  .settings-list-card :deep(.el-form-item__label) { width: auto !important; height: auto; margin-bottom: 6px; line-height: 1.4; text-align: left; }
+  .settings-list-card :deep(.el-form-item__content) { margin-left: 0 !important; }
+  .shop-watermark-preview-box { height: min(360px, 92vw); }
 }
 </style>

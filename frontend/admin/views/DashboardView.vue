@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
+import { useAuthStore } from "../stores/auth";
 import {
   AlertTriangle,
   ArrowDownRight,
@@ -27,6 +28,8 @@ import { shanghaiDateKey } from "../utils/shanghai-date.js";
 
 const route = useRoute();
 const router = useRouter();
+const authStore = useAuthStore();
+const isAdmin = computed(() => String(authStore.user?.role || "").toLowerCase() === "admin");
 const loading = ref(false);
 const refreshing = ref(false);
 const snapshotBuilding = ref(false);
@@ -65,6 +68,7 @@ const profitTrend = computed(() => commerce.value.profit_trend || {});
 const aftersalesLoss = computed(() => summary.value.aftersales_loss || {});
 const monthShippingCost = computed(() => summary.value.month_shipping_cost || {});
 const monthOrderOutcomes = computed(() => summary.value.month_order_outcomes || {});
+const aiUsage = computed(() => summary.value.ai_usage || {});
 const fbpOpportunitySummary = computed(() => summary.value.fbp_opportunities || {});
 const commerceShops = computed(() => Array.isArray(commerce.value.shops) ? commerce.value.shops : []);
 const adShops = computed(() => Array.isArray(adToday.value.shops) ? adToday.value.shops : []);
@@ -123,6 +127,11 @@ function writeDashboardSessionCache(dateKey, payload) {
 
 function waitForDashboardRetry(delay) {
   return new Promise((resolve) => window.setTimeout(resolve, delay));
+}
+
+function aiMoney(value) {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? `${amount.toFixed(3)} ${aiUsage.value.unit || "RMB"}` : "—";
 }
 
 async function getDashboardWithRetry(url, options = {}, retries = 2) {
@@ -222,7 +231,7 @@ function moneyText(value) {
 }
 
 function metricMoney(value) {
-  return hasValue(value) ? `¥ ${moneyText(value)}` : "待接入";
+  return hasValue(value) ? `CNY ${moneyText(value)}` : "待接入";
 }
 
 function metricNumber(value, suffix = "") {
@@ -365,6 +374,17 @@ function aftersalesQuery(bucket = "all", openDetail = false) {
 
 function todayAftersalesQuery(bucket) {
   const dateKey = commerce.value.date_key || "";
+  if (bucket === "returns") {
+    return {
+      ...billingPeriodQuery(),
+      tab: "orders",
+      from: dateKey,
+      to: dateKey,
+      shopId: "all",
+      outcomeType: "returns",
+      dateBasis: "status_changed"
+    };
+  }
   return {
     ...billingPeriodQuery(),
     tab: "aftersales",
@@ -559,6 +579,9 @@ const monthCancelledQuantity = computed(() => firstMetricNumber(profitTrend.valu
 const monthReturnOrders = computed(() => firstMetricNumber(profitTrend.value.month_return_orders, monthOrderOutcomes.value.return_orders));
 const previousMonthReturnOrders = computed(() => firstMetricNumber(profitTrend.value.previous_month_return_orders));
 const monthReturnQuantity = computed(() => firstMetricNumber(profitTrend.value.month_return_quantity, monthOrderOutcomes.value.return_quantity));
+const monthReturnRate = computed(() => Number(aftersalesLoss.value.return_rate || 0));
+const monthReturnLoss = computed(() => firstMetricNumber(aftersalesLoss.value.return_loss_cny, aftersalesLoss.value.total_estimated_loss_cny));
+const monthReturnShops = computed(() => Array.isArray(aftersalesLoss.value.shops) ? aftersalesLoss.value.shops : []);
 const monthEffectiveOrderDelta = computed(() => delta(monthEffectiveOrders.value, previousMonthEffectiveOrders.value));
 const monthCancelledOrderDelta = computed(() => delta(monthCancelledOrders.value, previousMonthCancelledOrders.value));
 const monthReturnOrderDelta = computed(() => delta(monthReturnOrders.value, previousMonthReturnOrders.value));
@@ -717,7 +740,7 @@ const secondaryMetrics = computed(() => [
     direction: Number(today.value.return_quantity || 0) > 0 ? "down" : "flat",
     icon: AlertTriangle,
     path: "/profit/monthly-billing",
-    query: todayAftersalesQuery("rejected_unclaimed"),
+    query: todayAftersalesQuery("returns"),
     breakdownTitle: "各店铺今日退货",
     breakdown: shopOutcomeBreakdown(commerceShops.value, "return")
   },
@@ -883,7 +906,7 @@ const healthCards = computed(() => [
 const dashboardInsightCards = computed(() => [
   ...["利润趋势", "广告健康", "售后损失", "FBP库存风险"]
     .map((title) => healthCards.value.find((card) => card.title === title))
-    .filter(Boolean),
+    .filter((card) => Boolean(card) && (isAdmin.value || card.title !== "利润趋势")),
   {
     title: "AI异常",
     route: anomalyCards.value.find((item) => Number(item.count || 0) > 0)?.path || "/advertising/daily",
@@ -1065,7 +1088,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="hero-core-grid today-core-grid">
-          <article class="primary-metric profit-card" @click="open('/profit/monthly-billing', billingPeriodQuery())">
+          <article v-if="isAdmin" class="primary-metric profit-card" @click="open('/profit/monthly-billing', billingPeriodQuery())">
             <div class="metric-label">
               <CircleDollarSign :size="16" />
               今日利润
@@ -1168,7 +1191,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </template>
-            <article class="primary-metric today-return-card" @click="open('/profit/monthly-billing', todayAftersalesQuery('rejected_unclaimed'))">
+            <article class="primary-metric today-return-card" @click="open('/profit/monthly-billing', todayAftersalesQuery('returns'))">
               <div class="metric-label">
                 <AlertTriangle :size="16" />
                 退货件数
@@ -1231,6 +1254,34 @@ onBeforeUnmount(() => {
               </div>
             </article>
           </el-tooltip>
+
+          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip">
+            <template #content>
+              <div class="shop-breakdown ai-usage-breakdown">
+                <h4>今日人员 AI 生图消耗</h4>
+                <div v-for="row in aiUsage.people || []" :key="`ai-person-${row.person_id || row.person_name}`">
+                  <span>{{ row.person_name }} · {{ row.request_count }} 次调用 / {{ row.generated_count }} 张成功 / {{ row.task_count }} 个任务</span>
+                  <strong>{{ aiMoney(row.allocated_cost) }}</strong>
+                </div>
+                <div v-if="!(aiUsage.people || []).length"><span>今日暂无成功生图记录</span><strong>—</strong></div>
+                <small>{{ aiUsage.cost_source || "ERP 本地调用次数 × 0.038 RMB" }}；成功和失败均计费</small>
+                <small>数量口径：{{ aiUsage.count_basis || '调用流水' }}；日期按北京时间 00:00–24:00</small>
+                <small v-if="!aiUsage.available && (aiUsage.errors || []).length" class="ai-usage-error">费用查询失败：{{ aiUsage.errors[0] }}</small>
+              </div>
+            </template>
+            <article class="primary-metric ai-usage-card" @click="open('/settings/ai')">
+              <div class="metric-label"><Sparkles :size="16" />AI 消耗</div>
+              <strong>{{ aiMoney(aiUsage.cost) }}</strong>
+              <div class="metric-subline">
+                <span>当前余额</span>
+                <div class="metric-subline-value"><b>{{ aiMoney(aiUsage.available ? aiUsage.balance : null) }}</b></div>
+              </div>
+              <div class="metric-footer">
+                <span class="delta is-flat">{{ metricNumber(aiUsage.request_count, " 次调用") }}</span>
+                <em>{{ metricNumber((aiUsage.people || []).length, " 人") }}</em>
+              </div>
+            </article>
+          </el-tooltip>
         </div>
 
         <div class="hero-core-grid month-core-grid compact-month-grid">
@@ -1250,7 +1301,7 @@ onBeforeUnmount(() => {
             </div>
           </article>
 
-          <article class="primary-metric month-profit-card" @click="open('/profit/monthly-billing', billingPeriodQuery())">
+          <article v-if="isAdmin" class="primary-metric month-profit-card" @click="open('/profit/monthly-billing', billingPeriodQuery())">
             <div class="metric-label">
               <CircleDollarSign :size="16" />
               当月利润
@@ -1415,17 +1466,28 @@ onBeforeUnmount(() => {
             </div>
           </article>
 
-          <article class="primary-metric today-return-card" @click="open('/profit/monthly-billing', todayAftersalesQuery('rejected_unclaimed'))">
-            <div class="metric-label">
-              <AlertTriangle :size="16" />
-              当月退货订单
-            </div>
-            <strong>{{ metricNumber(monthReturnOrders, " 单") }}</strong>
-            <div class="metric-footer">
-              <span :class="`delta is-${monthReturnOrderDelta.direction}`">较上月 {{ monthReturnOrderDelta.text }}</span>
-              <em>{{ metricNumber(monthReturnQuantity, " 件") }}</em>
-            </div>
-          </article>
+          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip">
+            <template #content>
+              <div class="shop-breakdown">
+                <h4>各店铺本月退货表现</h4>
+                <div v-for="row in monthReturnShops" :key="`month-return-${row.shop_id}`">
+                  <span>{{ row.shop_name }}</span>
+                  <strong>{{ (Number(row.return_rate || 0) * 100).toFixed(1) }}% · {{ metricNumber(row.return_quantity, " 件") }} · {{ metricMoney(row.return_loss_cny) }}</strong>
+                </div>
+              </div>
+            </template>
+            <article class="primary-metric today-return-card" @click="open('/profit/monthly-billing', todayAftersalesQuery('returns'))">
+              <div class="metric-label">
+                <AlertTriangle :size="16" />
+                本月退货率
+              </div>
+              <strong>{{ (monthReturnRate * 100).toFixed(1) }}%</strong>
+              <div class="metric-footer">
+                <span class="delta is-flat">{{ metricNumber(monthReturnQuantity, " 件") }}</span>
+                <em>损失 {{ metricMoney(monthReturnLoss) }}</em>
+              </div>
+            </article>
+          </el-tooltip>
         </div>
 
         <div class="business-reminder">
@@ -2041,8 +2103,12 @@ button {
 }
 
 .today-core-grid {
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
 }
+
+.today-core-grid .ai-usage-card strong { color: #7c3aed !important; }
+.ai-usage-breakdown small { display: block; margin-top: 8px; color: #667085; }
+.ai-usage-breakdown .ai-usage-error { color: #b42318; }
 
 .month-core-grid {
   grid-template-columns: repeat(9, minmax(0, 1fr));
@@ -3569,7 +3635,7 @@ button {
   margin-top: 12px;
 }
 
-@media (max-width: 1280px) {
+@media (max-width: 1280px), (max-width: 1366px) and (any-pointer: coarse) {
   .hero-grid,
   .ops-grid,
   .dashboard-overview-grid {
@@ -3582,7 +3648,7 @@ button {
 
 }
 
-@media (max-width: 980px) {
+@media (max-width: 980px), (max-width: 1366px) and (any-pointer: coarse) {
   .hero-core-grid,
   .secondary-metric-grid,
   .ai-advice-strip,

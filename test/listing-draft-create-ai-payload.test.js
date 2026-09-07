@@ -19,7 +19,7 @@ function assertInsertColumnValueAlignment(sources, table, expectedCount) {
 
 test("create listing draft writes required ai_payload_json", () => {
   assert.match(source, /ai_payload_json,\s*\n\s*created_by_person_id/);
-  assert.match(source, /JSON\.stringify\(aiPayload\)/);
+  assert.match(source, /JSON\.stringify\(compactListingPersistencePayload\(aiPayload\)\)/);
   assert.match(source, /ai_payload:\s*objectValue\(body\.ai_payload \|\| body\.aiPayload\)/);
 });
 
@@ -27,7 +27,7 @@ test("listing draft inserts keep explicit columns and values aligned", () => {
   const listingDraftWriters = [source, assetVariantSource].join("\n");
   const insertStatements = [...listingDraftWriters.matchAll(/INSERT INTO listing_drafts\b[\s\S]*?VALUES\s*\(([^)]+)\)/g)];
   const inserts = [...listingDraftWriters.matchAll(/INSERT INTO listing_drafts\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)/g)];
-  assert.equal(insertStatements.length, 4, "all listing_drafts INSERT paths must be covered");
+  assert.equal(insertStatements.length, 5, "all listing_drafts INSERT paths must be covered");
   assert.equal(inserts.length, insertStatements.length, "listing_drafts INSERT must use an explicit column list");
   for (const [, columnsSql, valuesSql] of inserts) {
     const columns = columnsSql.split(",").map((item) => item.trim()).filter(Boolean);

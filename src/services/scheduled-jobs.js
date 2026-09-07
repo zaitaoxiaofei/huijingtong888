@@ -98,6 +98,31 @@ function summarizeScheduledJobResult(jobKey, resultPayload = {}) {
       summaryTruncated: true
     };
   }
+  if (jobKey === "ozon_finance_sync") {
+    return {
+      status: String(payload.status || "success"),
+      from: String(payload.from || ""),
+      to: String(payload.to || ""),
+      fetched: Number(payload.fetched || 0),
+      upserted: Number(payload.upserted || 0),
+      appliedOrders: Number(payload.applied?.orders || 0),
+      appliedItems: Number(payload.applied?.items || 0),
+      errorCount: Array.isArray(payload.errors) ? payload.errors.length : 0,
+      errors: Array.isArray(payload.errors) ? payload.errors.slice(0, MAX_RESULT_ERRORS).map((item) => truncateText(item, 300)) : []
+    };
+  }
+  if (jobKey === "historical_finance_profit_repair") {
+    return {
+      status: String(payload.status || "success"),
+      ageDays: Number(payload.ageDays || 0),
+      to: String(payload.to || ""),
+      selectedOrders: Number(payload.selected_orders || 0),
+      selectedItems: Number(payload.selected_items || 0),
+      appliedOrders: Number(payload.applied?.orders || 0),
+      appliedItems: Number(payload.applied?.items || 0),
+      reasons: payload.reasons && typeof payload.reasons === "object" ? payload.reasons : {}
+    };
+  }
   if (jobKey === "seller_analytics_daily_sync" || jobKey === "seller_analytics_28d_sync") {
     return {
       status: String(payload.status || "success"),
@@ -443,6 +468,9 @@ export async function registerScheduledJobs(definitions = []) {
         max_catchup_runs = VALUES(max_catchup_runs),
         config_json = CASE
           WHEN config_json IS NULL OR config_json = '' THEN VALUES(config_json)
+          WHEN VALUES(job_key) = 'listing_publish_record_sync'
+            AND COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(config_json, '$.maxAgeDays')) AS UNSIGNED), 7) <= 7
+            THEN VALUES(config_json)
           ELSE config_json
         END,
         next_run_at = COALESCE(next_run_at, VALUES(next_run_at))

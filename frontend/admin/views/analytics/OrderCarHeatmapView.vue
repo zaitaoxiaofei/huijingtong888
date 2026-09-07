@@ -1376,4 +1376,11 @@ onMounted(async () => {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+@media (max-width: 420px) {
+  .car-heatmap-summary,
+  .car-sku-summary { grid-template-columns: minmax(0, 1fr); }
+  .car-heatmap-grid,
+  .car-model-grid { overflow-x: auto; overscroll-behavior-x: contain; }
+}
 </style>

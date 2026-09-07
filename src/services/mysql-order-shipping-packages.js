@@ -29,3 +29,17 @@ export function buildSplitShippingPackagesMysql(items = [], packages = []) {
   }
   return result;
 }
+
+export function buildLiveShippingProductsMysql(livePosting = null) {
+  const combined = new Map();
+  for (const item of Array.isArray(livePosting?.items) ? livePosting.items : []) {
+    const productId = Number(item?.ozon_product_id || 0);
+    const quantity = Number(item?.quantity || 0);
+    if (!Number.isInteger(productId) || productId <= 0 || !Number.isInteger(quantity) || quantity <= 0) continue;
+    combined.set(productId, Number(combined.get(productId) || 0) + quantity);
+  }
+  return [...combined.entries()].map(([productId, quantity]) => ({
+    product_id: productId,
+    quantity
+  }));
+}

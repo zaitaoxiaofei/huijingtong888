@@ -1,14 +1,15 @@
 <script setup>
 import { KeepAlive, computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
-import { Bell, Close, Download, Expand, Fold, MoonNight, Paperclip, RefreshRight, Sunny } from "@element-plus/icons-vue";
+import { Bell, Camera, Close, Download, Expand, Fold, Lock, MoonNight, Paperclip, RefreshRight, Sunny, User } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { navigationMenus } from "../constants/navigation.js";
+import { navigationMenus, navigationMenusForRole } from "../constants/navigation.js";
 import { prefetchRouteComponent } from "../router";
 import { useAuthStore } from "../stores/auth";
 import { useAppStore } from "../stores/app";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { openAiEcommerceSuiteWindow, openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../utils/ai-variant-lab-window";
+import { uploadListingMedia } from "../api/tools/imageCropper";
 
 const route = useRoute();
 const router = useRouter();
@@ -20,9 +21,14 @@ const DYNAMIC_IMPORT_INTENDED_ROUTE = "ozon-admin-dynamic-import-intended-route"
 const menuRef = ref(null);
 const isMobileViewport = ref(false);
 const mobileNavigationOpen = ref(false);
+const profileDialogVisible = ref(false);
+const profileSaving = ref(false);
+const profileAvatarUploading = ref(false);
+const profileForm = ref({ name: "", avatar_url: "", old_password: "", new_password: "", confirm_password: "" });
 let mobileViewportQuery = null;
 
 const activeMenu = computed(() => route.path);
+const visibleNavigationMenus = computed(() => navigationMenusForRole(authStore.user?.role));
 const standaloneMode = computed(() => String(route.query.standalone || "") === "1");
 const breadcrumbs = computed(() => route.meta.breadcrumb || ["ERP Admin"]);
 const breadcrumbItems = computed(() => {
@@ -33,6 +39,12 @@ const breadcrumbItems = computed(() => {
 const currentPageTitle = computed(() => breadcrumbItems.value[breadcrumbItems.value.length - 1] || "ERP Admin");
 const themeIcon = computed(() => (appStore.theme === "dark" ? Sunny : MoonNight));
 const themeTitle = computed(() => (appStore.theme === "dark" ? "Switch to light theme" : "Switch to dark theme"));
+const densityLabel = computed(() => ({
+  auto: "自动密度",
+  comfortable: "舒适密度",
+  standard: "标准密度",
+  compact: "紧凑密度"
+}[appStore.densityMode] || "自动密度"));
 const workspaceTabs = computed(() => tabsStore.tabs);
 const activeTabKey = computed(() => tabsStore.activeKey);
 const contextMenu = ref({
@@ -120,6 +132,10 @@ function handleNavigationToggle() {
   appStore.toggleSidebar();
 }
 
+function handleDensityCommand(command) {
+  appStore.setDensityMode(command);
+}
+
 function syncMobileViewport(event) {
   isMobileViewport.value = Boolean(event?.matches ?? mobileViewportQuery?.matches);
   if (!isMobileViewport.value) mobileNavigationOpen.value = false;
@@ -149,6 +165,73 @@ async function handleLogout() {
   await authStore.logout();
   ElMessage.success("Logged out");
   router.push("/login");
+}
+
+function openProfileDialog() {
+  profileForm.value = {
+    name: authStore.user?.name || "",
+    avatar_url: authStore.user?.avatar_url || "",
+    old_password: "",
+    new_password: "",
+    confirm_password: ""
+  };
+  profileDialogVisible.value = true;
+}
+
+async function cropProfileAvatar(file) {
+  if (!file?.type?.startsWith("image/")) throw new Error("请选择图片文件");
+  if (file.size > 5 * 1024 * 1024) throw new Error("头像图片不能超过 5MB");
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = objectUrl;
+    await image.decode();
+    const sourceSize = Math.min(image.naturalWidth, image.naturalHeight);
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = Math.min(1024, sourceSize);
+    canvas.getContext("2d").drawImage(image, Math.floor((image.naturalWidth - sourceSize) / 2), Math.floor((image.naturalHeight - sourceSize) / 2), sourceSize, sourceSize, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/webp", 0.9));
+    if (!blob) throw new Error("头像裁切失败");
+    return new File([blob], "profile-avatar.webp", { type: "image/webp" });
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function uploadProfileAvatar(options) {
+  profileAvatarUploading.value = true;
+  try {
+    const file = await cropProfileAvatar(options.file);
+    const result = await uploadListingMedia(file, { source_module: "person_avatar", role: "avatar" });
+    profileForm.value.avatar_url = result.publishUrl || result.url || result.previewUrl || "";
+    options.onSuccess?.(result);
+  } catch (error) {
+    options.onError?.(error);
+    ElMessage.error(error.message || "头像上传失败");
+  } finally {
+    profileAvatarUploading.value = false;
+  }
+}
+
+async function saveProfile() {
+  const form = profileForm.value;
+  if (!String(form.name || "").trim()) return ElMessage.warning("请输入姓名");
+  if (form.new_password && form.new_password !== form.confirm_password) return ElMessage.warning("两次输入的新密码不一致");
+  if (form.new_password && !form.old_password) return ElMessage.warning("请输入当前密码");
+  profileSaving.value = true;
+  try {
+    await apiClient.put("/api/auth/profile", { name: form.name, avatar_url: form.avatar_url });
+    if (form.new_password) {
+      await apiClient.post("/api/auth/change-password", { old_password: form.old_password, new_password: form.new_password });
+    }
+    await authStore.verifySession();
+    profileDialogVisible.value = false;
+    ElMessage.success(form.new_password ? "个人资料和密码已更新" : "个人资料已更新");
+  } catch (error) {
+    ElMessage.error(error.message || "个人资料保存失败");
+  } finally {
+    profileSaving.value = false;
+  }
 }
 
 function openDashboard() {
@@ -491,7 +574,7 @@ watch(
 );
 
 onMounted(() => {
-  mobileViewportQuery = window.matchMedia("(max-width: 760px)");
+  mobileViewportQuery = window.matchMedia("(max-width: 1100px), (max-width: 1366px) and (any-pointer: coarse)");
   syncMobileViewport(mobileViewportQuery);
   mobileViewportQuery.addEventListener("change", syncMobileViewport);
   window.addEventListener("pointerdown", handleGlobalPointerDown);
@@ -534,7 +617,7 @@ onBeforeUnmount(() => {
             class="erp-menu"
             @select="handleMenuSelect"
           >
-            <template v-for="menu in navigationMenus" :key="menu.key">
+            <template v-for="menu in visibleNavigationMenus" :key="menu.key">
               <el-sub-menu v-if="menu.children?.length" :index="menu.key">
                 <template #title>
                   <el-icon><component :is="menu.icon" /></el-icon>
@@ -580,6 +663,19 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="erp-header-right">
+          <el-dropdown class="erp-density-control" trigger="click" @command="handleDensityCommand">
+            <el-button text :title="`界面密度：${densityLabel}`">
+              {{ densityLabel }}
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="auto">自动（推荐）</el-dropdown-item>
+                <el-dropdown-item command="comfortable">舒适</el-dropdown-item>
+                <el-dropdown-item command="standard">标准</el-dropdown-item>
+                <el-dropdown-item command="compact">紧凑</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <el-dropdown trigger="click" @command="handlePluginDownloadCommand">
             <el-button circle title="插件下载">
               <el-icon><Download /></el-icon>
@@ -605,6 +701,9 @@ onBeforeUnmount(() => {
             <el-icon><component :is="themeIcon" /></el-icon>
           </el-button>
           <div class="erp-user-card">
+            <el-avatar :src="authStore.user?.avatar_url" :size="30" class="erp-user-avatar" title="查看和编辑个人资料" @click="openProfileDialog">
+              {{ String(authStore.user?.name || authStore.user?.username || "?").slice(0, 1) }}
+            </el-avatar>
             <div class="erp-user-meta">
               <strong>{{ authStore.user?.name || authStore.user?.username || "Unknown" }}</strong>
             </div>
@@ -676,6 +775,50 @@ onBeforeUnmount(() => {
       </el-main>
     </el-container>
   </el-container>
+
+  <el-dialog v-model="profileDialogVisible" width="620px" align-center destroy-on-close class="erp-profile-dialog">
+    <template #header>
+      <div class="erp-profile-dialog-title">
+        <span><el-icon><User /></el-icon></span>
+        <div><strong>个人资料</strong><small>管理头像、显示名称和账户密码</small></div>
+      </div>
+    </template>
+
+    <section class="erp-profile-summary">
+      <div class="erp-profile-avatar-shell">
+        <el-image v-if="profileForm.avatar_url" :src="profileForm.avatar_url" :preview-src-list="[profileForm.avatar_url]" preview-teleported fit="cover" class="erp-profile-avatar-preview" />
+        <el-avatar v-else :size="104">{{ String(profileForm.name || "?").slice(0, 1) }}</el-avatar>
+        <el-upload action="#" :show-file-list="false" :http-request="uploadProfileAvatar" accept=".jpg,.jpeg,.png,.webp" class="erp-profile-avatar-upload">
+          <button type="button" :disabled="profileAvatarUploading" title="更换头像"><el-icon><Camera /></el-icon></button>
+        </el-upload>
+      </div>
+      <div class="erp-profile-summary-text">
+        <strong>{{ profileForm.name || "未填写姓名" }}</strong>
+        <span>@{{ authStore.user?.username || "-" }}</span>
+        <small>点击头像可查看大图；点击相机按钮可重新上传，图片会自动裁成 1:1</small>
+      </div>
+    </section>
+
+    <el-form label-position="top" class="erp-profile-form">
+      <section class="erp-profile-section">
+        <header><span><el-icon><User /></el-icon></span><div><strong>基本信息</strong><small>用于系统内人员识别和协作展示</small></div></header>
+        <div class="erp-profile-form-grid">
+          <el-form-item label="登录账号"><el-input :model-value="authStore.user?.username" disabled /></el-form-item>
+          <el-form-item label="显示名称"><el-input v-model="profileForm.name" maxlength="100" placeholder="请输入姓名" /></el-form-item>
+        </div>
+      </section>
+
+      <section class="erp-profile-section">
+        <header><span class="is-security"><el-icon><Lock /></el-icon></span><div><strong>账户安全</strong><small>如不修改密码，以下三项保持为空即可</small></div></header>
+        <el-form-item label="当前密码"><el-input v-model="profileForm.old_password" type="password" show-password autocomplete="current-password" placeholder="修改密码时请输入当前密码" /></el-form-item>
+        <div class="erp-profile-form-grid">
+          <el-form-item label="新密码"><el-input v-model="profileForm.new_password" type="password" show-password autocomplete="new-password" placeholder="至少 8 位，不能为纯数字" /></el-form-item>
+          <el-form-item label="确认新密码"><el-input v-model="profileForm.confirm_password" type="password" show-password autocomplete="new-password" placeholder="再次输入新密码" /></el-form-item>
+        </div>
+      </section>
+    </el-form>
+    <template #footer><div class="erp-profile-footer"><span>修改后将立即同步到系统人员信息</span><div><el-button @click="profileDialogVisible = false">取消</el-button><el-button type="primary" :loading="profileSaving" @click="saveProfile">保存修改</el-button></div></div></template>
+  </el-dialog>
 
   <teleport to="body">
     <div

@@ -11,6 +11,7 @@ test("platform-order import recognizes the Pinduoduo collector export", () => {
     assert.match(service, new RegExp(header));
   }
   assert.match(service, /ON DUPLICATE KEY UPDATE/);
+  assert.match(service, /INSERT IGNORE INTO procurement_platform_order_links/);
   assert.match(service, /Number\(match\[4\]\) - 8/);
 });
 
@@ -19,6 +20,7 @@ test("platform orders expose import, candidate and multi-link endpoints", () => 
   assert.match(routes, /POST \/api\/procurement\/platform-orders\/import/);
   assert.match(routes, /platform-orders.*candidates/s);
   assert.match(routes, /platform-orders.*link/s);
-  assert.match(page, /parseCsv/);
+  assert.match(page, /parsePddFile/);
+  assert.match(page, /parse1688File/);
   assert.match(page, /multiple procurement records|一条或多条采购记录/);
 });

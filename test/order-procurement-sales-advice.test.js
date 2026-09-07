@@ -16,6 +16,24 @@ test("order procurement preview uses trend-specific stock targets", async () => 
   assert.match(service, /Math\.min\(recent30d, Math\.ceil\(recent7d \* 2\)\)/);
 });
 
+test("order procurement expands combo recipes into purchasable child products", async () => {
+  const service = await readFile(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
+  const candidateQuery = service.slice(
+    service.indexOf("async function orderProcurementCandidateRowsMysql"),
+    service.indexOf("async function orderProcurementMissingItemsMysql")
+  );
+  const page = await readFile(new URL("../frontend/orders/OrdersPage.vue", import.meta.url), "utf8");
+
+  assert.match(candidateQuery, /LEFT JOIN sku_inventory_recipes recipe/);
+  assert.match(candidateQuery, /LEFT JOIN sku_inventory_recipe_items recipe_item/);
+  assert.match(candidateQuery, /COALESCE\(recipe_item\.product_id, pc\.component_product_id, p\.id\)/);
+  assert.match(candidateQuery, /oi\.quantity \* COALESCE\(recipe_item\.quantity, pc\.quantity, 1\) AS quantity/);
+  assert.match(candidateQuery, /sales\.recent_30d_qty, 0\) \* COALESCE\(recipe_item\.quantity, pc\.quantity, 1\) AS recent_30d_qty/);
+  assert.match(candidateQuery, /oi\.quantity AS order_quantity/);
+  assert.match(page, /const orderProcurementProductItems = computed/);
+  assert.match(page, /row\.order_quantity \?\? row\.quantity/);
+});
+
 test("order procurement dialog presents one compact intelligent recommendation", async () => {
   const page = await readFile(new URL("../frontend/orders/OrdersPage.vue", import.meta.url), "utf8");
   const styles = await readFile(new URL("../frontend/orders/orders-view.css", import.meta.url), "utf8");

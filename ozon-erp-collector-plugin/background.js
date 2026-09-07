@@ -755,8 +755,18 @@ async function crossTabOzonMediaUpload(message, sender) {
 
 async function runFbpFillTask(message) {
   const tabs = await queryTabs({ url: '*://seller.ozon.ru/app/fbp-supply/create-order/*' });
-  const tab = tabs.find((item) => item.status === 'complete' && /\/app\/fbp-supply\/create-order\/\d+/i.test(String(item.url || '')));
+  const candidates = tabs.filter((item) => item.status === 'complete' && /\/app\/fbp-supply\/create-order\/\d+/i.test(String(item.url || '')));
+  const expectedCompanyId = String(message?.payload?.ozonCompanyId || '').trim();
+  let tab = null;
+  for (const candidate of candidates.sort((left, right) => Number(right.active) - Number(left.active) || Number(right.lastAccessed || 0) - Number(left.lastAccessed || 0))) {
+    const context = await sendMessageToSellerTab(candidate.id, { type: 'OZON_ERP_FBP_CONTEXT' });
+    if (String(context?.companyId || '').trim() === expectedCompanyId) {
+      tab = candidate;
+      break;
+    }
+  }
   if (!tab?.id) {
+    if (candidates.length) return { success: false, error: 'FBP_COMPANY_MISMATCH', message: `没有找到目标店铺（${expectedCompanyId || '未配置Ozon Client ID'}）的FBP申请页面，请切换到正确店铺后重试` };
     return { success: false, error: 'FBP_PAGE_REQUIRED', message: '请先打开Ozon FBP申请的“商品和货位”页面，然后重试' };
   }
   await chrome.tabs.update(tab.id, { active: true }).catch(() => {});

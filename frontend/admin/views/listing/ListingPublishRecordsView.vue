@@ -2409,6 +2409,12 @@ watch(() => route.query.taskId, () => {
   .toolbar-filters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .toolbar-actions {
+    justify-content: flex-start;
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .toolbar-actions :deep(.el-button) { margin-left: 0; }
 }
 @media (max-width: 760px) {
   .publish-records-page { padding: 8px; }

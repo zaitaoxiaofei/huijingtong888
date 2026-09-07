@@ -38,6 +38,9 @@ const replenishmentCreateVisible = ref(false);
 const replenishmentCreateSubmitting = ref(false);
 const replenishmentCreateRows = ref([]);
 const replenishmentCreateMode = ref("single");
+const manualSkuVisible = ref(false);
+const manualSkuLoading = ref(false);
+const manualSku = ref("");
 const fbpTransferVisible = ref(false);
 const fbpTransferSubmitting = ref(false);
 const fbpTransferRow = ref(null);
@@ -379,6 +382,42 @@ function openSelectedReplenishmentCreateDialog() {
     return;
   }
   openReplenishmentCreateDialog(selectedRows.value, "batch");
+}
+
+function openManualSkuDialog() {
+  manualSku.value = "";
+  manualSkuVisible.value = true;
+}
+
+async function addManualSku() {
+  const sku = String(manualSku.value || "").trim();
+  if (!sku) return ElMessage.warning("请输入 Ozon SKU ID");
+  manualSkuLoading.value = true;
+  try {
+    const params = new URLSearchParams({
+      manualSku: sku,
+      shopId: String(state.filters.shopId || "all"),
+      page: "1",
+      pageSize: "20"
+    });
+    const payload = await apiClient.get(`/api/fbp-opportunities?${params.toString()}`);
+    const matches = Array.isArray(payload?.rows) ? payload.rows : [];
+    if (!matches.length) {
+      ElMessage.warning("未找到该 SKU，或该 SKU 尚未绑定店铺和本地库存商品");
+      return;
+    }
+    if (matches.length > 1) {
+      ElMessage.warning("该 SKU 属于多个店铺，请先在页面上选择店铺后再添加");
+      return;
+    }
+    const row = matches[0];
+    manualSkuVisible.value = false;
+    openReplenishmentCreateDialog([{ ...row, suggested_qty: Math.max(1, Number(row.suggested_qty || 0)) }], "single");
+  } catch (error) {
+    ElMessage.error(error.message || "查询 SKU 失败");
+  } finally {
+    manualSkuLoading.value = false;
+  }
 }
 
 function closeReplenishmentCreateDialog() {
@@ -1098,6 +1137,9 @@ onMounted(async () => {
         <el-input v-model="state.filters.minSales" placeholder="最低" style="width: 90px" @keyup.enter="handleSearch" />
       </el-form-item>
       <template #actions>
+        <el-button class="erp-btn erp-btn-secondary" @click="openManualSkuDialog">
+          手工添加 SKU
+        </el-button>
         <el-button
           class="erp-btn erp-btn-primary"
           type="primary"
@@ -1121,6 +1163,19 @@ onMounted(async () => {
         </div>
       </template>
     </InventoryPageToolbar>
+
+    <el-dialog v-model="manualSkuVisible" title="手工添加到备货建议" width="460px" destroy-on-close>
+      <el-form label-position="top" @submit.prevent="addManualSku">
+        <el-form-item label="Ozon SKU ID">
+          <el-input v-model="manualSku" autofocus clearable placeholder="请输入完整 SKU ID" @keyup.enter="addManualSku" />
+        </el-form-item>
+      </el-form>
+      <el-alert title="可添加未命中系统推荐规则的测试商品；SKU 必须已绑定店铺和本地库存商品。" type="info" :closable="false" show-icon />
+      <template #footer>
+        <el-button :disabled="manualSkuLoading" @click="manualSkuVisible = false">取消</el-button>
+        <el-button type="primary" :loading="manualSkuLoading" @click="addManualSku">添加并填写数量</el-button>
+      </template>
+    </el-dialog>
 
     <div ref="fbpTableWrapRef" class="inventory-table-wrap" @wheel.capture="handleFbpTableWheel">
       <el-table v-loading="loading" :data="state.rows" stripe border class="erp-data-table" @selection-change="handleSelectionChange">

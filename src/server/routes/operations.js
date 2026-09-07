@@ -9,9 +9,13 @@ export function createOperationsRoutes({ services, readJson }) {
     "GET /api/fbp-transfer-records": (req, url) => services.fbpTransferRecords(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/summary": () => services.procurementSummary(),
     "GET /api/procurement/requests": (req, url) => services.procurementRequests(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/procurement/order-history": (req, url) => services.procurementProductOrderHistory(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/procurement/purchase-history": (req, url) => services.procurementProductPurchaseHistory(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/binding-suggestions": (req, url) => services.procurementBindingSuggestions(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/platform-orders": (req, url) => services.procurementPlatformOrders(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/procurement/reconciliation": (req, url) => services.procurementReconciliation(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/purchase-orders": (req, url) => services.purchaseOrders(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/procurement/purchase-group-recommendations": (req, url) => services.procurementPurchaseGroupRecommendations(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/cost-versions": (req, url) => services.purchaseCostVersions(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/cost-versions/backfill-preview": () => services.previewPurchaseCostBackfill(),
     "GET /api/procurement/pending-inbound": () => services.pendingInboundItems(),
@@ -26,14 +30,20 @@ export function createOperationsRoutes({ services, readJson }) {
     "POST /api/people": async (req) => services.createPerson(await readJson(req)) || { ok: true },
     "POST /api/shops": async (req) => services.createShop(await readJson(req)) || { ok: true },
     "POST /api/procurement/requests": async (req) => services.createProcurementRequest(await readJson(req), req._session?.personId) || { ok: true },
+    "POST /api/procurement/purchases": async (req) => services.recordProcurementPurchase(await readJson(req), req._session?.personId),
     "POST /api/procurement/platform-orders/import": async (req) => services.importProcurementPlatformOrders(await readJson(req), req._session?.personId),
-    "POST /api/procurement/purchase-orders/confirm-from-requests-async": async (req) => services.startConfirmProcurementRequestsPurchased(await readJson(req)),
-    "POST /api/procurement/purchase-orders": async (req) => services.mergeProcurementRequests(await readJson(req)),
+    "POST /api/procurement/payments/import": async (req) => services.importProcurementPayments(await readJson(req), req._session?.personId),
+    "POST /api/procurement/reconciliation/auto-match": async () => services.autoMatchProcurementPayments(),
+    "POST /api/procurement/reconciliation/apply-costs": async (req) => services.applyProcurementActualCosts(await readJson(req)),
+    "POST /api/procurement/purchase-orders/confirm-from-requests-async": async (req) => services.startConfirmProcurementRequestsPurchased(await readJson(req), req._session?.personId),
+    "POST /api/procurement/purchase-orders/confirm-from-requests": async (req) => services.confirmProcurementRequestsPurchased(await readJson(req), req._session?.personId),
+    "POST /api/procurement/refresh-demand": () => services.refreshProcurementDemand(),
+    "POST /api/procurement/purchase-orders": async (req) => services.mergeProcurementRequests(await readJson(req), req._session?.personId),
     "POST /api/procurement/cost-versions/backfill": async (req) => services.initializePurchaseCostBackfill(await readJson(req), req._session?.personId),
     "POST /api/inbound-records": async (req) => services.createInboundRecord(await readJson(req)) || { ok: true },
     "POST /api/fbp-transfer-records": async (req) => services.createFbpTransferRecord(await readJson(req), req._session?.personId) || { ok: true },
-    "POST /api/inbound-records/batch-update-async": async (req) => services.startBatchUpdateInboundRecords(await readJson(req)),
-    "POST /api/inbound-records/batch-update": async (req) => services.batchUpdateInboundRecords(await readJson(req)),
+    "POST /api/inbound-records/batch-update-async": async (req) => services.startBatchUpdateInboundRecords(await readJson(req), req._session?.personId),
+    "POST /api/inbound-records/batch-update": async (req) => services.batchUpdateInboundRecords(await readJson(req), req._session?.personId),
     "POST /api/inventory/movements": async (req) => services.createInventoryMovement(await readJson(req), req._session?.personId) || { ok: true },
     "GET /api/inventory/stock-debts": (req, url) => services.inventoryStockDebts(Object.fromEntries(url.searchParams.entries())),
     "POST /api/inventory/stock-debts/adjust": async (req) => services.adjustInventoryStockDebt(await readJson(req), req._session?.personId),
@@ -59,6 +69,17 @@ export function createOperationsRoutes({ services, readJson }) {
 }
 
 export async function handleOperationsRestRoute({ req, res, url, parts, services, readJson, json, notFound }) {
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "reconciliation" && parts[3] && parts[4] === "confirm") {
+    return json(res, await services.confirmProcurementPaymentMatch(Number(parts[3]), await readJson(req), req._session?.personId));
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "reconciliation" && parts[3] && parts[4] === "payment-candidates") {
+    return json(res, await services.procurementPaymentCandidates(Number(parts[3])));
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "reconciliation" && parts[3] && parts[4] === "payment-match") {
+    return json(res, await services.setProcurementPaymentMatch(Number(parts[3]), await readJson(req), req._session?.personId));
+  }
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "platform-orders" && parts[3] && parts[4] === "candidates") {
     return json(res, await services.procurementPlatformOrderCandidates(Number(parts[3])));
   }
@@ -134,7 +155,7 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "purchase-orders" && parts[3] && parts[4] === "confirm-purchased") {
-    return json(res, await services.confirmPurchaseOrder(Number(parts[3]), await readJson(req)));
+    return json(res, await services.confirmPurchaseOrder(Number(parts[3]), await readJson(req), req._session?.personId));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "cost-versions" && parts[3] && parts[4] === "review") {
@@ -155,7 +176,7 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "inbound-records" && parts[2]) {
-    await services.updateInboundRecord(Number(parts[2]), await readJson(req));
+    await services.updateInboundRecord(Number(parts[2]), await readJson(req), req._session?.personId);
     return json(res, { ok: true });
   }
 

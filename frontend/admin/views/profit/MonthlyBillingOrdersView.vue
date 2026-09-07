@@ -29,6 +29,7 @@ const state = reactive({
     keyword: String(route.query.keyword || ""),
     outcomeType: String(route.query.outcomeType || ""),
     settlementState: String(route.query.settlementState || ""),
+    dateBasis: String(route.query.dateBasis || "ordered_at"),
     page: Math.max(Number(route.query.page || 1), 1),
     pageSize: Math.max(Number(route.query.pageSize || 50), 1)
   }
@@ -38,6 +39,7 @@ const outcomeOptions = [
   { label: "全部结果", value: "" },
   { label: "进行中", value: "active" },
   { label: "已签收", value: "delivered_signed" },
+  { label: "全部退货/拒收", value: "returns" },
   { label: "拒收/未取", value: "rejected_unclaimed" },
   { label: "签收后退货", value: "after_delivery_return" },
   { label: "取消", value: "cancelled_pre_fulfillment" }
@@ -122,6 +124,7 @@ function syncRouteQuery() {
       keyword: state.filters.keyword || undefined,
       outcomeType: state.filters.outcomeType || undefined,
       settlementState: state.filters.settlementState || undefined,
+      dateBasis: state.filters.dateBasis !== "ordered_at" ? state.filters.dateBasis : undefined,
       page: state.filters.page > 1 ? String(state.filters.page) : undefined,
       pageSize: state.filters.pageSize !== 50 ? String(state.filters.pageSize) : undefined
     }
@@ -144,6 +147,7 @@ async function loadRows() {
     if (state.filters.keyword.trim()) params.set("keyword", state.filters.keyword.trim());
     if (state.filters.outcomeType) params.set("outcomeType", state.filters.outcomeType);
     if (state.filters.settlementState) params.set("settlementState", state.filters.settlementState);
+    if (state.filters.dateBasis !== "ordered_at") params.set("dateBasis", state.filters.dateBasis);
     const payload = await apiClient.get(`/api/monthly-billing-orders?${params.toString()}`, { signal });
     if (signal.aborted) return;
     state.rows = Array.isArray(payload?.rows) ? payload.rows : [];
@@ -175,6 +179,7 @@ function handleReset() {
   state.filters.keyword = "";
   state.filters.outcomeType = "";
   state.filters.settlementState = "";
+  state.filters.dateBasis = "ordered_at";
   state.filters.page = 1;
   state.filters.pageSize = 50;
   loadRows();
@@ -271,12 +276,31 @@ onBeforeUnmount(() => {
           class="erp-data-table monthly-orders-table"
           table-layout="fixed"
         >
-          <el-table-column label="订单" min-width="190" fixed="left">
+          <el-table-column label="订单 / 商品" min-width="310" fixed="left">
             <template #default="{ row }">
-              <div class="order-cell">
-                <strong>{{ row.posting_number || row.order_number || "-" }}</strong>
-                <span>{{ row.order_number && row.order_number !== row.posting_number ? row.order_number : row.shop_name }}</span>
+              <div class="order-product-cell">
+                <el-image
+                  v-if="row.image_url"
+                  class="order-product-image"
+                  :src="row.image_url"
+                  :preview-src-list="[row.image_url]"
+                  :initial-index="0"
+                  fit="cover"
+                  preview-teleported
+                />
+                <div v-else class="order-product-image order-product-image-empty">无图</div>
+                <div class="order-cell">
+                  <strong>{{ row.product_name || "商品名称待同步" }}</strong>
+                  <span>订单：{{ row.posting_number || row.order_number || "-" }}</span>
+                  <span v-if="row.ozon_skus">SKU：{{ row.ozon_skus }}</span>
+                </div>
               </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="库存名称" min-width="190">
+            <template #default="{ row }">
+              <span v-if="row.inventory_name" class="inventory-name">{{ row.inventory_name }}</span>
+              <span v-else class="inventory-name is-missing">未关联库存商品</span>
             </template>
           </el-table-column>
           <el-table-column prop="shop_name" label="店铺" min-width="140" />
@@ -286,9 +310,12 @@ onBeforeUnmount(() => {
           <el-table-column v-if="false" prop="terminal_at" label="签收/拒收/取消时间" min-width="178">
             <template #default="{ row }">{{ formatDateTime(row.terminal_at) }}</template>
           </el-table-column>
-          <el-table-column prop="outcome_type" label="结果" width="112">
+          <el-table-column prop="outcome_type" label="结果 / 最终原因" min-width="180">
             <template #default="{ row }">
-              <el-tag size="small" :type="outcomeTone(row.outcome_type)">{{ outcomeLabel(row.outcome_type) }}</el-tag>
+              <div class="outcome-cell">
+                <el-tag size="small" :type="outcomeTone(row.outcome_type)">{{ outcomeLabel(row.outcome_type) }}</el-tag>
+                <strong v-if="row.outcome_type !== 'active'">{{ row.outcome_reason_label || "原因待同步" }}</strong>
+              </div>
             </template>
           </el-table-column>
           <el-table-column prop="settlement_state" label="结算口径" width="116">
@@ -366,6 +393,31 @@ onBeforeUnmount(() => {
 
     <el-drawer v-model="detailDrawerVisible" title="订单费用明细" size="620px" destroy-on-close>
       <div v-if="detailRow" class="page-stack">
+        <div class="detail-product-summary">
+          <el-image
+            v-if="detailRow.image_url"
+            class="detail-product-image"
+            :src="detailRow.image_url"
+            :preview-src-list="[detailRow.image_url]"
+            fit="cover"
+            preview-teleported
+          />
+          <div v-else class="detail-product-image order-product-image-empty">无图</div>
+          <div>
+            <strong>{{ detailRow.product_name || "商品名称待同步" }}</strong>
+            <p>库存名称：{{ detailRow.inventory_name || "未关联库存商品" }}</p>
+            <p v-if="detailRow.ozon_skus">Ozon SKU：{{ detailRow.ozon_skus }}</p>
+          </div>
+        </div>
+        <div v-if="detailRow.outcome_type !== 'active'" class="outcome-explanation">
+          <span>最终结果</span>
+          <strong>{{ outcomeLabel(detailRow.outcome_type) }} · {{ detailRow.outcome_reason_label || "原因待同步" }}</strong>
+          <p v-if="detailRow.outcome_initiator_label">发起方：{{ detailRow.outcome_initiator_label }}</p>
+          <p v-if="detailRow.outcome_reason_original && detailRow.outcome_reason_original !== detailRow.outcome_reason_label">
+            Ozon 原始原因：{{ detailRow.outcome_reason_original }}
+          </p>
+          <p v-if="!detailRow.outcome_reason_original">当前 Ozon 数据未包含更具体的终态原因，请以后续同步结果为准。</p>
+        </div>
         <el-descriptions :column="2" border>
           <el-descriptions-item label="订单号" :span="2">{{ detailRow.posting_number || detailRow.order_number || "-" }}</el-descriptions-item>
           <el-descriptions-item label="店铺">{{ detailRow.shop_name || "-" }}</el-descriptions-item>
@@ -485,6 +537,103 @@ onBeforeUnmount(() => {
   font-size: 11px;
 }
 
+.order-product-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 4px 0;
+}
+
+.order-product-image {
+  width: 64px;
+  height: 84px;
+  flex: 0 0 64px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  overflow: hidden;
+}
+
+.order-product-image-empty {
+  display: grid;
+  place-items: center;
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.inventory-name {
+  color: #334155;
+  line-height: 1.5;
+}
+
+.inventory-name.is-missing {
+  color: #b45309;
+}
+
+.outcome-cell {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+}
+
+.outcome-cell strong {
+  color: #9f1239;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+.detail-product-summary {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.detail-product-image {
+  width: 96px;
+  height: 128px;
+  flex: 0 0 96px;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.detail-product-summary strong {
+  color: #0f172a;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.detail-product-summary p,
+.outcome-explanation p {
+  margin: 6px 0 0;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.outcome-explanation {
+  display: grid;
+  gap: 5px;
+  padding: 14px 16px;
+  border: 1px solid #fecdd3;
+  border-radius: 12px;
+  background: #fff1f2;
+}
+
+.outcome-explanation > span {
+  color: #9f1239;
+  font-size: 12px;
+}
+
+.outcome-explanation > strong {
+  color: #881337;
+  font-size: 16px;
+}
+
 .is-profit-positive {
   color: #0f766e;
 }
@@ -494,7 +643,8 @@ onBeforeUnmount(() => {
 }
 
 :global(:root[data-theme="dark"] .monthly-orders-head h2),
-:global(:root[data-theme="dark"] .order-cell strong) {
+:global(:root[data-theme="dark"] .order-cell strong),
+:global(:root[data-theme="dark"] .detail-product-summary strong) {
   color: #e5e7eb;
 }
 

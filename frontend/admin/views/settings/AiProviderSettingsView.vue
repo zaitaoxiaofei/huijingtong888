@@ -1,16 +1,22 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from "vue";
-import { ElMessage } from "element-plus";
-import { CircleCheck, Connection, MagicStick, Refresh, SwitchButton } from "@element-plus/icons-vue";
+import { ElMessage, ElMessageBox } from "element-plus";
+import { CircleCheck, MagicStick, Refresh, SwitchButton } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
 
 const loading = ref(false);
 const saving = ref(false);
-const testing = ref(false);
 const testingImageChannelId = ref("");
-const testResult = ref(null);
+const checkingImageUsageChannelId = ref("");
 const imageTestResult = ref(null);
+const imageUsageResults = reactive({});
 const configUpdatedAt = ref("");
+const workspaceTab = ref("routing");
+const providerDialogVisible = ref(false);
+const providerPage = ref(1);
+const providerPageSize = 10;
+const capabilityTestingKey = ref("");
+const capabilityResult = ref(null);
 
 const form = reactive({
   provider: "deepseek",
@@ -36,6 +42,7 @@ const routes = reactive({
 });
 
 const savedProviders = ref({});
+const hiddenProviders = ref([]);
 const imageProviderPool = reactive({
   enabled: false,
   mode: "speed",
@@ -115,7 +122,7 @@ const imageEffectiveConcurrency = computed(() => Math.min(
   Math.max(1, imageChannelCapacity.value || 1)
 ));
 const providerOptions = computed(() => {
-  const options = presetOptions.map((option) => ({
+  const options = presetOptions.filter((option) => !hiddenProviders.value.includes(option.value)).map((option) => ({
     ...option,
     label: savedProviders.value?.[option.value]?.name || option.label
   }));
@@ -131,6 +138,23 @@ const providerOptions = computed(() => {
   return options;
 });
 
+const providerNavItems = computed(() => providerOptions.value.map((option) => {
+  const saved = savedProviders.value?.[option.value] || providerProfileFromImageChannel(option.value) || {};
+  const modelCount = [saved.textModel, saved.visionModel, saved.imageModel, saved.videoModel].filter(Boolean).length;
+  return {
+    ...option,
+    enabled: Boolean(saved.enabled),
+    hasApiKey: Boolean(saved.hasApiKey),
+    modelCount,
+    removable: true
+  };
+}));
+const deletedPresetOptions = computed(() => presetOptions.filter((option) => hiddenProviders.value.includes(option.value)));
+const pagedProviderNavItems = computed(() => {
+  const start = (providerPage.value - 1) * providerPageSize;
+  return providerNavItems.value.slice(start, start + providerPageSize);
+});
+
 watch(() => form.provider, (provider) => {
   if (loading.value) return;
   applyProviderToForm(provider);
@@ -144,6 +168,7 @@ async function loadConfig() {
     const data = await apiClient.get("/api/ai-provider/config", { noCache: true });
     configUpdatedAt.value = data.updated_at || "";
     savedProviders.value = data.providers || {};
+    hiddenProviders.value = data.hiddenProviders || [];
     Object.assign(routes, normalizeRoutes(data.routes || data.globalRoutes || {}, data));
     applyImageProviderPool(data.imageProviderPool || data.image_provider_pool || {});
     applyConfigToForm(data.provider || "deepseek", data);
@@ -157,7 +182,6 @@ async function loadConfig() {
 async function saveConfig(options = {}) {
   const includeImageProviderPool = options.includeImageProviderPool === true;
   saving.value = true;
-  testResult.value = null;
   imageTestResult.value = null;
   try {
     const payload = {
@@ -181,9 +205,11 @@ async function saveConfig(options = {}) {
     const data = await apiClient.post("/api/ai-provider/config", payload);
     configUpdatedAt.value = data.updated_at || "";
     savedProviders.value = data.providers || {};
+    hiddenProviders.value = data.hiddenProviders || [];
     Object.assign(routes, normalizeRoutes(data.routes || {}, data));
     applyImageProviderPool(data.imageProviderPool || {});
     applyConfigToForm(data.provider || form.provider, data);
+    if (options.closeProviderDialog === true) providerDialogVisible.value = false;
     ElMessage.success("AI 配置已保存");
   } catch (error) {
     ElMessage.error(error.message || "AI 配置保存失败");
@@ -195,52 +221,6 @@ async function saveConfig(options = {}) {
 async function setEnabledAndSave(enabled) {
   form.enabled = Boolean(enabled);
   await saveConfig({ includeImageProviderPool: false });
-}
-
-async function testConnection() {
-  testing.value = true;
-  testResult.value = null;
-  try {
-    const data = await apiClient.post("/api/ai-provider/test", {
-      provider: form.provider,
-      apiKey: form.apiKey,
-      baseUrl: form.baseUrl,
-      textModel: form.textModel,
-      visionModel: form.visionModel,
-      imageModel: form.imageModel,
-      videoModel: form.videoModel,
-      apiMode: form.apiMode
-    });
-    testResult.value = data;
-    ElMessage.success("AI 连接测试成功");
-  } catch (error) {
-    ElMessage.error(error.message || "AI 连接测试失败");
-  } finally {
-    testing.value = false;
-  }
-}
-
-async function testCurrentImageProvider() {
-  testingImageChannelId.value = "__current__";
-  imageTestResult.value = null;
-  try {
-    const data = await apiClient.post("/api/ai-provider/test-image-channel", {
-      provider: form.provider,
-      name: form.name,
-      apiKey: form.apiKey,
-      baseUrl: form.baseUrl,
-      imageModel: form.imageModel,
-      apiMode: form.apiMode,
-      mode: "generate"
-    });
-    imageTestResult.value = { ...data, scope: "current" };
-    data.ok ? ElMessage.success("生图通道测试成功") : ElMessage.error(data.message || "生图通道测试失败");
-  } catch (error) {
-    imageTestResult.value = { ok: false, scope: "current", message: error.message || "生图通道测试失败" };
-    ElMessage.error(error.message || "生图通道测试失败");
-  } finally {
-    testingImageChannelId.value = "";
-  }
 }
 
 async function testImagePoolChannel(channel) {
@@ -260,6 +240,69 @@ async function testImagePoolChannel(channel) {
   } finally {
     testingImageChannelId.value = "";
   }
+}
+
+async function loadImageChannelUsage(channel) {
+  checkingImageUsageChannelId.value = channel.id;
+  try {
+    const data = await apiClient.post("/api/ai-provider/image-channel-usage", {
+      channelId: channel.id,
+      apiKey: channel.apiKey,
+      usageApiKey: channel.usageApiKey
+    });
+    imageUsageResults[channel.id] = data;
+    data.supported ? ElMessage.success("65535 余额与用量已更新") : ElMessage.warning(data.message || "当前通道不支持余额查询");
+  } catch (error) {
+    imageUsageResults[channel.id] = { ok: false, message: error.message || "65535 余额查询失败" };
+    ElMessage.error(error.message || "65535 余额查询失败");
+  } finally {
+    checkingImageUsageChannelId.value = "";
+  }
+}
+
+function formatUsageAmount(value, unit = "RMB") {
+  if (value === null || value === undefined || value === "") return "—";
+  const amount = Number(value);
+  return Number.isFinite(amount) ? `${amount.toFixed(3)} ${unit || "RMB"}` : "—";
+}
+
+async function testCapability(type, scope = "provider") {
+  const key = `${scope}:${type}`;
+  capabilityTestingKey.value = key;
+  capabilityResult.value = null;
+  const route = routes[type] || {};
+  const payload = scope === "route"
+    ? { type, provider: route.provider, model: route.model }
+    : {
+        type,
+        provider: form.provider,
+        apiKey: form.apiKey,
+        baseUrl: form.baseUrl,
+        textModel: form.textModel,
+        visionModel: form.visionModel,
+        imageModel: form.imageModel,
+        videoModel: form.videoModel,
+        apiMode: form.apiMode
+      };
+  try {
+    const data = await apiClient.post("/api/ai-provider/test-capability", payload);
+    capabilityResult.value = { ...data, scope };
+    if (data.ok) ElMessage.success(`${capabilityTypeLabel(type)}测试成功`);
+    else ElMessage.warning(data.message || `${capabilityTypeLabel(type)}暂不可测试`);
+  } catch (error) {
+    capabilityResult.value = { ok: false, supported: true, type, scope, message: error.message || "测试失败" };
+    ElMessage.error(error.message || `${capabilityTypeLabel(type)}测试失败`);
+  } finally {
+    capabilityTestingKey.value = "";
+  }
+}
+
+function capabilityTypeLabel(type) {
+  return { text: "文本模型", vision: "视觉模型", image: "生图模型", video: "视频模型" }[type] || "模型";
+}
+
+function providerModelFor(type) {
+  return form[`${type}Model`] || "";
 }
 
 function applyConfigToForm(provider, data) {
@@ -332,6 +375,48 @@ function createProviderProfile() {
     }
   };
   applyConfigToForm(id, { providers: savedProviders.value });
+  providerDialogVisible.value = true;
+}
+
+function restorePresetProvider(provider) {
+  hiddenProviders.value = hiddenProviders.value.filter((key) => key !== provider);
+  applyProviderToForm(provider);
+  providerDialogVisible.value = true;
+}
+
+function handleAddProvider(command) {
+  if (command === "custom") createProviderProfile();
+  else restorePresetProvider(command);
+}
+
+function editProviderProfile(provider) {
+  applyProviderToForm(provider);
+  providerDialogVisible.value = true;
+}
+
+async function deleteProviderProfile(item) {
+  if (!item.removable) return;
+  try {
+    await ElMessageBox.confirm(
+      `确定删除服务商“${item.label}”吗？已保存的密钥和模型配置将一并删除。`,
+      "删除服务商",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" }
+    );
+    const data = await apiClient.post("/api/ai-provider/delete", { provider: item.value });
+    configUpdatedAt.value = data.updated_at || "";
+    savedProviders.value = data.providers || {};
+    hiddenProviders.value = data.hiddenProviders || [];
+    Object.assign(routes, normalizeRoutes(data.routes || {}, data));
+    applyImageProviderPool(data.imageProviderPool || {});
+    applyConfigToForm(data.provider || "deepseek", data);
+    const pageCount = Math.max(1, Math.ceil(providerNavItems.value.length / providerPageSize));
+    providerPage.value = Math.min(providerPage.value, pageCount);
+    ElMessage.success("服务商已删除");
+  } catch (error) {
+    const action = typeof error === "string" ? error : error?.message;
+    if (action === "cancel" || action === "close") return;
+    ElMessage.error(error.message || "删除服务商失败");
+  }
 }
 
 function isCustomProviderKey(provider) {
@@ -406,6 +491,8 @@ function imageProviderPoolPayload() {
       baseUrl: channel.baseUrl,
       apiKey: channel.apiKey,
       clearApiKey: channel.clearApiKey,
+      usageApiKey: channel.usageApiKey,
+      clearUsageApiKey: channel.clearUsageApiKey,
       imageModel: channel.imageModel,
       apiMode: channel.apiMode,
       enabled: channel.enabled,
@@ -413,25 +500,6 @@ function imageProviderPoolPayload() {
       maxConcurrency: channel.maxConcurrency
     }))
   };
-}
-
-function addImagePoolChannel() {
-  addImagePoolChannelByProvider("cctq-image2");
-}
-
-function addImagePoolChannelByProvider(provider = "cctq-image2") {
-  const defaults = defaultModels(provider);
-  imageProviderPool.channels.push(normalizeImagePoolChannel({
-    id: `img_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
-    name: `${providerLabel(provider)} ${imageProviderPool.channels.length + 1}`,
-    provider,
-    baseUrl: providerTips[provider]?.baseUrl || "",
-    imageModel: defaults.imageModel || "",
-    enabled: true,
-    weight: 1,
-    maxConcurrency: 20
-  }));
-  imageProviderPool.enabled = true;
 }
 
 function addCurrentProviderAsImageChannel() {
@@ -467,6 +535,10 @@ function normalizeImagePoolChannel(channel = {}) {
     clearApiKey: false,
     hasApiKey: Boolean(channel.hasApiKey),
     apiKeyHint: channel.apiKeyHint || "",
+    usageApiKey: "",
+    clearUsageApiKey: false,
+    hasUsageApiKey: Boolean(channel.hasUsageApiKey),
+    usageApiKeyHint: channel.usageApiKeyHint || "",
     imageModel: normalizeProviderImageModel(provider, channel.imageModel || defaults.imageModel || "", channel.baseUrl, channel.name),
     apiMode: normalizeProviderApiMode(provider, channel.apiMode || defaultApiMode(provider), channel.baseUrl, channel.name),
     enabled: channel.enabled !== false,
@@ -611,13 +683,67 @@ function formatApiKeyHint(value) {
           title="这里是全局默认服务商；要新增多个生图账号，请添加到图片生成通道池。"
         />
 
-        <el-form label-position="top" class="provider-form">
+        <div class="provider-switcher">
+          <div class="provider-switcher-head">
+            <strong>服务商账号</strong>
+            <el-dropdown trigger="click" class="provider-add-menu" @command="handleAddProvider">
+              <el-button class="erp-btn erp-btn-secondary" size="small">新增服务商</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="custom">新增自定义服务商</el-dropdown-item>
+                  <el-dropdown-item v-for="item in deletedPresetOptions" :key="item.value" :command="item.value">
+                    恢复 {{ item.label }} 预设
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
+          <div
+            v-for="item in pagedProviderNavItems"
+            :key="item.value"
+            class="provider-switch-item"
+            :class="{ active: form.provider === item.value }"
+          >
+            <span class="provider-switch-status" :class="{ enabled: item.enabled }" />
+            <button type="button" class="provider-switch-copy" @click="editProviderProfile(item.value)">
+              <strong>{{ item.label }}</strong>
+              <small>
+                {{ item.hasApiKey ? "密钥已保存" : "未配置密钥" }} ·
+                {{ item.modelCount ? `${item.modelCount} 个模型` : "未配置模型" }}
+              </small>
+            </button>
+            <span class="provider-switch-actions">
+              <el-button text type="primary" size="small" @click="editProviderProfile(item.value)">编辑</el-button>
+              <el-button v-if="item.removable" text type="danger" size="small" @click="deleteProviderProfile(item)">删除</el-button>
+              <el-tag v-else size="small" :type="item.enabled ? 'success' : 'info'">{{ item.enabled ? "启用" : "预设" }}</el-tag>
+            </span>
+          </div>
+          <el-pagination
+            v-if="providerNavItems.length > providerPageSize"
+            v-model:current-page="providerPage"
+            small
+            background
+            layout="prev, pager, next"
+            :page-size="providerPageSize"
+            :total="providerNavItems.length"
+          />
+        </div>
+
+        <el-dialog v-model="providerDialogVisible" width="820px" class="provider-dialog" append-to-body align-center destroy-on-close>
+          <template #header>
+            <div class="provider-dialog-title">
+              <div><span>Provider</span><h3>{{ form.name || selectedProviderLabel }}</h3></div>
+              <el-tag :type="form.enabled ? 'success' : 'info'">{{ form.enabled ? "已启用" : "未启用" }}</el-tag>
+            </div>
+          </template>
+          <el-form label-position="top" class="provider-form">
+          <section class="provider-dialog-section">
+            <div class="provider-dialog-section-head"><strong>基础接入</strong><span>账号、密钥和接口协议</span></div>
           <el-form-item label="服务商">
             <div class="provider-select-row">
               <el-select v-model="form.provider" class="full-control">
                 <el-option v-for="item in providerOptions" :key="item.value" :label="item.label" :value="item.value" />
               </el-select>
-              <el-button class="erp-btn erp-btn-secondary" @click="createProviderProfile">新增自定义</el-button>
             </div>
           </el-form-item>
 
@@ -625,7 +751,7 @@ function formatApiKeyHint(value) {
             <el-input v-model="form.name" placeholder="例如 DeepSeek / Kimi / OpenAI" />
           </el-form-item>
 
-          <el-form-item label="API Key">
+          <el-form-item class="span-2" label="API Key">
             <el-input v-model="form.apiKey" type="password" show-password :placeholder="apiKeyPlaceholder" />
             <div class="saved-key-row" :class="{ empty: !form.hasApiKey }">
               <span>{{ form.hasApiKey ? "密钥已保存" : "未保存密钥" }}</span>
@@ -634,7 +760,7 @@ function formatApiKeyHint(value) {
             <div class="field-tip">{{ currentTip.token }}</div>
           </el-form-item>
 
-          <el-form-item v-if="form.hasApiKey" label="清空密钥">
+          <el-form-item v-if="form.hasApiKey" class="span-2 compact-danger-row" label="清空密钥">
             <el-checkbox v-model="form.clearApiKey">保存时删除 {{ selectedProviderLabel }} 已保存的 API Key</el-checkbox>
           </el-form-item>
 
@@ -648,11 +774,15 @@ function formatApiKeyHint(value) {
               <el-radio-button label="chat_completions">Chat Completions</el-radio-button>
               <el-radio-button label="images">Images API</el-radio-button>
               <el-radio-button label="responses">Responses API</el-radio-button>
+              <el-radio-button label="tasks_65535">65535 Tasks API</el-radio-button>
             </el-radio-group>
-            <div class="field-tip">图片服务商文档写 /v1/images 时请选择 Images API；文档写 wire_api = responses 时请选择 Responses API。</div>
+            <div class="field-tip">图片服务商文档写 /v1/images 时请选择 Images API；文档写 wire_api = responses 时请选择 Responses API；新 65535 图片池请选择 65535 Tasks API。</div>
           </el-form-item>
+          </section>
 
-          <div class="model-grid">
+          <section class="provider-dialog-section">
+            <div class="provider-dialog-section-head"><strong>模型能力</strong><span>只填写该服务商实际支持的模型</span></div>
+            <div class="model-grid">
             <el-form-item label="文本模型">
               <el-input v-model="form.textModel" placeholder="例如 deepseek-v4-flash" />
             </el-form-item>
@@ -665,7 +795,42 @@ function formatApiKeyHint(value) {
             <el-form-item label="视频模型">
               <el-input v-model="form.videoModel" placeholder="预留，服务商支持时填写" />
             </el-form-item>
-          </div>
+            </div>
+          </section>
+
+          <section class="capability-test-panel">
+            <div class="capability-test-head">
+              <div><strong>模型能力测试</strong><span>分别验证真实请求，不再用一次连接代表全部模型</span></div>
+              <small>生图测试可能产生费用</small>
+            </div>
+            <div class="capability-test-actions">
+              <el-button
+                v-for="item in routeCards"
+                :key="item.key"
+                class="erp-btn erp-btn-secondary"
+                :loading="capabilityTestingKey === `provider:${item.key}`"
+                :disabled="item.key !== 'video' && !providerModelFor(item.key)"
+                @click="testCapability(item.key, 'provider')"
+              >
+                测试{{ item.key === "image" ? "生图" : item.key === "vision" ? "识图" : item.key === "video" ? "视频" : "文本" }}
+              </el-button>
+            </div>
+            <el-alert
+              v-if="capabilityResult?.scope === 'provider'"
+              :type="capabilityResult.ok ? 'success' : capabilityResult.supported === false ? 'warning' : 'error'"
+              :closable="false"
+              show-icon
+              :title="`${capabilityTypeLabel(capabilityResult.type)}${capabilityResult.ok ? '测试成功' : '测试未通过'}`"
+              :description="[
+                capabilityResult.provider ? `服务商：${capabilityResult.provider}` : '',
+                capabilityResult.model ? `模型：${capabilityResult.model}` : '',
+                capabilityResult.apiMode ? `协议：${capabilityResult.apiMode}` : '',
+                Number.isFinite(capabilityResult.elapsedMs) ? `耗时：${capabilityResult.elapsedMs} ms` : '',
+                capabilityResult.reply || capabilityResult.message || '',
+                capabilityResult.bytes ? `图片大小：${capabilityResult.bytes} bytes` : ''
+              ].filter(Boolean).join('；')"
+            />
+          </section>
 
           <div class="provider-state-card">
             <div>
@@ -674,10 +839,9 @@ function formatApiKeyHint(value) {
             </div>
             <el-switch v-model="form.enabled" />
           </div>
-
+          </el-form>
+          <template #footer>
           <div class="panel-actions">
-            <el-button class="erp-btn erp-btn-secondary" :icon="Connection" :loading="testing" @click="testConnection">测试连接</el-button>
-            <el-button class="erp-btn erp-btn-secondary" :loading="testingImageChannelId === '__current__'" @click="testCurrentImageProvider">测试生图</el-button>
             <el-button class="erp-btn erp-btn-secondary" @click="addCurrentProviderAsImageChannel">添加到图片通道池</el-button>
             <el-button
               class="erp-btn erp-btn-secondary"
@@ -702,12 +866,25 @@ function formatApiKeyHint(value) {
             >
               停用并保存
             </el-button>
+            <el-button class="erp-btn erp-btn-primary" type="primary" :loading="saving" @click="saveConfig({ includeImageProviderPool: false, closeProviderDialog: true })">保存服务商</el-button>
           </div>
-        </el-form>
+          </template>
+        </el-dialog>
       </aside>
 
       <main class="route-panel">
-        <section class="workbench-card route-card">
+        <nav class="workspace-tabs" aria-label="AI 配置区域">
+          <button type="button" :class="{ active: workspaceTab === 'routing' }" @click="workspaceTab = 'routing'">
+            <span>模型路由</span>
+            <small>文本、视觉、生图、视频</small>
+          </button>
+          <button type="button" :class="{ active: workspaceTab === 'image-pool' }" @click="workspaceTab = 'image-pool'">
+            <span>图片通道池</span>
+            <small>{{ imageChannelCount }} 个启用通道 · 并发 {{ imageEffectiveConcurrency }}</small>
+          </button>
+        </nav>
+
+        <section v-if="workspaceTab === 'routing'" class="workbench-card route-card">
           <div class="panel-head">
             <div>
               <span>Routing</span>
@@ -746,12 +923,33 @@ function formatApiKeyHint(value) {
                   {{ item.desc }}
                 </span>
                 <em>{{ routeStatus(item.key).ready ? "系统调用已就绪" : "保存服务商密钥后可用" }}</em>
+                <el-button
+                  text
+                  type="primary"
+                  size="small"
+                  :disabled="!routes[item.key].provider || !routes[item.key].model"
+                  :loading="capabilityTestingKey === `route:${item.key}`"
+                  @click="testCapability(item.key, 'route')"
+                >测试</el-button>
               </div>
             </article>
           </div>
+          <el-alert
+            v-if="capabilityResult?.scope === 'route'"
+            :type="capabilityResult.ok ? 'success' : capabilityResult.supported === false ? 'warning' : 'error'"
+            :closable="false"
+            show-icon
+            :title="`${capabilityTypeLabel(capabilityResult.type)}路由${capabilityResult.ok ? '测试成功' : '测试未通过'}`"
+            :description="[
+              capabilityResult.provider ? `服务商：${capabilityResult.provider}` : '',
+              capabilityResult.model ? `模型：${capabilityResult.model}` : '',
+              Number.isFinite(capabilityResult.elapsedMs) ? `耗时：${capabilityResult.elapsedMs} ms` : '',
+              capabilityResult.reply || capabilityResult.message || ''
+            ].filter(Boolean).join('；')"
+          />
         </section>
 
-        <section class="workbench-card image-pool-card">
+        <section v-else class="workbench-card image-pool-card">
           <div class="panel-head">
             <div>
               <span>Image Pool</span>
@@ -759,9 +957,6 @@ function formatApiKeyHint(value) {
             </div>
             <div class="pool-actions">
               <el-switch v-model="imageProviderPool.enabled" active-text="启用" inactive-text="停用" />
-              <el-button class="erp-btn erp-btn-secondary" @click="addImagePoolChannelByProvider('cctq-image2')">新增 CCTQ</el-button>
-              <el-button class="erp-btn erp-btn-secondary" @click="addImagePoolChannelByProvider('change2pro-image2')">新增 Change2Pro</el-button>
-              <el-button class="erp-btn erp-btn-secondary" @click="addCurrentProviderAsImageChannel">复制左侧配置</el-button>
               <el-button class="erp-btn erp-btn-primary" type="primary" :loading="saving" @click="saveConfig({ includeImageProviderPool: true })">保存通道池</el-button>
             </div>
           </div>
@@ -795,6 +990,8 @@ function formatApiKeyHint(value) {
                 <el-input v-model="channel.name" placeholder="通道名称" />
                 <el-switch v-model="channel.enabled" />
                 <el-button text type="primary" :loading="testingImageChannelId === channel.id" @click="testImagePoolChannel(channel)">测试生图</el-button>
+                <el-button v-if="channel.apiMode === 'tasks_65535'" text type="primary" :loading="checkingImageUsageChannelId === channel.id" @click="loadImageChannelUsage(channel)">余额/用量</el-button>
+                <el-button v-if="channel.apiMode === 'tasks_65535'" text type="success" tag="a" href="https://my.65535.space/" target="_blank" rel="noopener noreferrer">前往充值</el-button>
                 <el-button text type="danger" @click="removeImagePoolChannel(index)">删除</el-button>
               </div>
               <div class="channel-grid">
@@ -819,6 +1016,7 @@ function formatApiKeyHint(value) {
                     <el-option label="Chat Completions" value="chat_completions" />
                     <el-option label="Images API" value="images" />
                     <el-option label="Responses API" value="responses" />
+                    <el-option label="65535 Tasks API" value="tasks_65535" />
                   </el-select>
                 </el-form-item>
                 <el-form-item label="API Key">
@@ -829,12 +1027,31 @@ function formatApiKeyHint(value) {
                   </div>
                   <el-checkbox v-if="channel.hasApiKey" v-model="channel.clearApiKey">保存时清空该通道密钥</el-checkbox>
                 </el-form-item>
+                <el-form-item v-if="channel.apiMode === 'tasks_65535'" label="余额查询 Key">
+                  <el-input v-model="channel.usageApiKey" type="password" show-password :placeholder="channel.hasUsageApiKey ? '留空保持已保存的查询 Key' : '可选：填写非任务专用分组 Key'" />
+                  <div class="saved-key-row" :class="{ empty: !channel.hasUsageApiKey }">
+                    <span>{{ channel.hasUsageApiKey ? "查询 Key 已保存" : "未单独配置时复用生图 Key" }}</span>
+                    <code v-if="channel.hasUsageApiKey">{{ formatApiKeyHint(channel.usageApiKeyHint) }}</code>
+                  </div>
+                  <el-checkbox v-if="channel.hasUsageApiKey" v-model="channel.clearUsageApiKey">保存时清空余额查询 Key</el-checkbox>
+                </el-form-item>
                 <el-form-item label="权重 / 单通道并发">
                   <div class="channel-number-row">
                     <el-input-number v-model="channel.weight" :min="1" :max="20" controls-position="right" />
                     <el-input-number v-model="channel.maxConcurrency" :min="1" controls-position="right" />
                   </div>
                 </el-form-item>
+              </div>
+              <div v-if="imageUsageResults[channel.id]" class="channel-usage" :class="{ danger: imageUsageResults[channel.id].balance !== null && imageUsageResults[channel.id].balance <= 0, warning: imageUsageResults[channel.id].balance > 0 && imageUsageResults[channel.id].balance <= 1 }">
+                <template v-if="imageUsageResults[channel.id].ok && imageUsageResults[channel.id].supported">
+                  <strong>余额 {{ formatUsageAmount(imageUsageResults[channel.id].balance, imageUsageResults[channel.id].unit) }}</strong>
+                  <span>今日消费 {{ formatUsageAmount(imageUsageResults[channel.id].todayCost, imageUsageResults[channel.id].unit) }}</span>
+                  <span>今日请求 {{ imageUsageResults[channel.id].todayRequests ?? '—' }}</span>
+                  <span>累计消费 {{ formatUsageAmount(imageUsageResults[channel.id].totalCost, imageUsageResults[channel.id].unit) }}</span>
+                  <em v-if="imageUsageResults[channel.id].balance !== null && imageUsageResults[channel.id].balance <= 0">余额不足，可能导致生图失败</em>
+                  <em v-else-if="imageUsageResults[channel.id].balance > 0 && imageUsageResults[channel.id].balance <= 1">余额偏低，建议尽快充值</em>
+                </template>
+                <span v-else>{{ imageUsageResults[channel.id].message }}</span>
               </div>
             </article>
           </div>
@@ -853,14 +1070,6 @@ function formatApiKeyHint(value) {
             <p><span>Base URL</span><strong>填写 OpenAI 兼容根地址，不要带具体 endpoint。</strong></p>
             <p><span>全局路由</span><strong>系统按请求类型取模型：文本、视觉、生图、视频互不影响。</strong></p>
           </div>
-          <el-alert
-            v-if="testResult"
-            type="success"
-            :closable="false"
-            show-icon
-            :title="`连接成功：${testResult.provider} / ${testResult.model}`"
-            :description="testResult.reply"
-          />
           <el-alert
             v-if="imageTestResult"
             :type="imageTestResult.ok ? 'success' : 'error'"
@@ -883,7 +1092,7 @@ function formatApiKeyHint(value) {
 
 <style scoped>
 .ai-settings-workbench {
-  min-height: 100%;
+  min-height: calc(100vh - 96px);
   padding: 16px 18px 24px;
   background:
     radial-gradient(circle at 12% 0%, rgba(64, 158, 255, 0.10), transparent 34%),
@@ -951,7 +1160,8 @@ function formatApiKeyHint(value) {
   display: grid;
   grid-template-columns: minmax(360px, 42%) minmax(0, 58%);
   gap: 16px;
-  align-items: stretch;
+  align-items: start;
+  min-height: 640px;
 }
 
 .workbench-card {
@@ -967,15 +1177,128 @@ function formatApiKeyHint(value) {
 .provider-panel {
   position: sticky;
   top: 84px;
+  align-self: start;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: 640px;
+  overflow: hidden;
 }
 
 .route-panel {
   display: grid;
-  grid-template-rows: auto auto minmax(190px, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 14px;
   min-width: 0;
-  min-height: 100%;
+  height: 640px;
 }
+
+.route-card,
+.image-pool-card { min-height: 0; overflow: auto; }
+
+.provider-switcher {
+  display: grid;
+  grid-template-rows: 32px repeat(10, 36px) minmax(0, 1fr) 30px;
+  gap: 4px;
+  height: 100%;
+  min-height: 0;
+  padding: 10px;
+  border: 1px solid #e4eaf3;
+  border-radius: 14px;
+  background: #f8fafc;
+}
+
+.provider-switcher-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px 4px;
+}
+
+.provider-switcher-head strong { font-size: 13px; }
+.provider-switcher-head span { color: #8492a6; font-size: 12px; }
+
+.provider-switch-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.provider-switch-item:hover { border-color: #cddafd; background: #fff; }
+.provider-switch-item.active { border-color: #9fb6ff; background: #fff; box-shadow: 0 6px 18px rgba(79, 104, 230, 0.10); }
+.provider-switch-status { width: 8px; height: 8px; border-radius: 50%; background: #c0c8d4; }
+.provider-switch-status.enabled { background: #36b37e; box-shadow: 0 0 0 4px rgba(54, 179, 126, 0.12); }
+.provider-switch-copy { display: grid; gap: 2px; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.provider-switch-copy strong,
+.provider-switch-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-switch-copy strong { font-size: 12px; line-height: 1.15; }
+.provider-switch-copy small { color: #7a8798; font-size: 10px; line-height: 1.15; }
+.provider-switch-actions { display: flex; align-items: center; justify-content: flex-end; }
+.provider-switch-actions :deep(.el-button) { height: 24px; padding: 2px 5px; }
+.provider-switcher :deep(.el-pagination) { justify-content: center; height: 30px; padding: 0; }
+.provider-switcher > :deep(.el-pagination) { grid-row: 13; align-self: center; }
+.provider-add-menu :deep(.el-button) { height: 26px; padding: 4px 10px; }
+
+.provider-dialog-title { display: flex; align-items: center; justify-content: space-between; padding-right: 28px; }
+.provider-dialog-title span { color: #5570e8; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+.provider-dialog-title h3 { margin: 2px 0 0; font-size: 20px; }
+.provider-dialog :deep(.el-dialog__header) { padding: 18px 22px 14px; border-bottom: 1px solid #e8edf5; }
+.provider-dialog :deep(.el-dialog__body) { max-height: calc(100vh - 220px); overflow-y: auto; padding: 16px 22px; background: #f6f8fc; }
+.provider-dialog :deep(.el-dialog__footer) { padding: 12px 22px 16px; border-top: 1px solid #e8edf5; background: #fff; }
+.provider-dialog :deep(.el-dialog__footer .panel-actions) { justify-content: flex-end; }
+
+.provider-dialog-section { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 14px; padding: 14px; border: 1px solid #e1e7f0; border-radius: 14px; background: #fff; }
+.provider-dialog-section-head { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.provider-dialog-section-head strong { font-size: 14px; }
+.provider-dialog-section-head span { color: #7a8798; font-size: 11px; }
+.provider-dialog-section .saved-key-row,
+.provider-dialog-section .field-tip { grid-column: 1 / -1; }
+.provider-dialog-section .model-grid { grid-column: 1 / -1; width: 100%; }
+.provider-dialog-section .span-2 { grid-column: 1 / -1; }
+.provider-dialog-section .compact-danger-row { margin-top: -8px; }
+
+.capability-test-panel { display: grid; gap: 10px; padding: 12px; border: 1px solid #dbe5ef; border-radius: 13px; background: #f8fbff; }
+.capability-test-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.capability-test-head > div { display: grid; gap: 3px; }
+.capability-test-head strong { font-size: 13px; }
+.capability-test-head span,
+.capability-test-head small { color: #7a8798; font-size: 11px; }
+.capability-test-head small { color: #d97706; }
+.capability-test-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+
+.workspace-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
+}
+
+.workspace-tabs button {
+  display: grid;
+  gap: 3px;
+  padding: 11px 14px;
+  border: 0;
+  border-radius: 11px;
+  background: transparent;
+  color: #64748b;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-tabs button.active { background: #eef2ff; color: #3448c5; box-shadow: inset 0 0 0 1px #cbd5ff; }
+.workspace-tabs span { font-size: 14px; font-weight: 800; }
+.workspace-tabs small { color: #8492a6; font-size: 11px; }
 
 .panel-head {
   display: flex;
@@ -1002,7 +1325,7 @@ function formatApiKeyHint(value) {
 
 .provider-form {
   display: grid;
-  gap: 2px;
+  gap: 12px;
 }
 
 .full-control {
@@ -1227,6 +1550,21 @@ function formatApiKeyHint(value) {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 12px;
 }
+
+.channel-usage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  color: #344054;
+  background: #f0f9ff;
+  font-size: 13px;
+}
+
+.channel-usage.warning { background: #fffaeb; }
+.channel-usage.danger { background: #fef3f2; }
+.channel-usage em { color: #b42318; font-style: normal; font-weight: 600; }
 
 .channel-number-row {
   width: 100%;

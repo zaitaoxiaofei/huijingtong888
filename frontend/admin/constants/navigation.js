@@ -1,13 +1,14 @@
-import { ChatDotRound, Coin, DataAnalysis, Document, Goods, House, MagicStick, Setting, ShoppingCart, Tools, WarningFilled } from "@element-plus/icons-vue";
+import { ChatDotRound, Coin, DataAnalysis, Document, Finished, Goods, House, MagicStick, Setting, ShoppingCart, Tools, WarningFilled } from "@element-plus/icons-vue";
 
 export const navigationMenus = [
-  { key: "onboarding", label: "入职须知", route: "/onboarding", icon: Document },
-  { key: "team-plan", label: "产品开发", route: "/team-plan", icon: Document },
   { key: "dashboard", label: "首页", route: "/dashboard", icon: House },
+  { key: "team-plan", label: "任务系统", route: "/team-plan", icon: Finished },
+  { key: "onboarding", label: "入职须知", route: "/onboarding", icon: Document },
   {
     key: "finance",
     label: "财务中心",
     icon: Coin,
+    adminOnly: true,
     children: [
       { key: "finance-center", label: "财务总览", route: "/finance-center" },
       { key: "profit-monthly-billing", label: "月度账单", route: "/profit/monthly-billing" },
@@ -81,9 +82,11 @@ export const navigationMenus = [
     icon: ShoppingCart,
     children: [
       { key: "procurement-workspace", label: "采购工作台", route: "/procurement/workspace" },
-      { key: "procurement-platform-orders", label: "平台订单", route: "/procurement/platform-orders" },
       { key: "purchase-list", label: "待入库清单", route: "/purchase-list" },
       { key: "purchase-history", label: "入库记录", route: "/purchase-history" },
+      { key: "purchase-cost-center", label: "成本预警", route: "/purchase-cost-center" },
+      { key: "procurement-reconciliation", label: "采购对账", route: "/procurement/reconciliation" },
+      { key: "procurement-platform-orders", label: "平台订单", route: "/procurement/platform-orders" },
       { key: "inventory-suppliers", label: "供应商", route: "/inventory/suppliers" }
     ]
   },
@@ -92,14 +95,14 @@ export const navigationMenus = [
     label: "异常",
     icon: WarningFilled,
     children: [
-      { key: "exceptions-profit", label: "利润异常", route: "/exceptions/profit" },
+      { key: "exceptions-profit", label: "利润异常", route: "/exceptions/profit", adminOnly: true },
       { key: "exceptions-deadline", label: "订单超时", route: "/exceptions/deadline" },
       { key: "exceptions-deadline-warning", label: "超时预警", route: "/exceptions/deadline-warning" },
       { key: "exceptions-stock", label: "库存异常", route: "/exceptions/stock" },
       { key: "exceptions-binding", label: "未绑定 SKU", route: "/exceptions/binding" },
-      { key: "profit-inventory-risks", label: "库存利润风险", route: "/profit/inventory-risks" },
-      { key: "pending-settlement-costs", label: "待结算成本", route: "/profit/pending-settlement-costs" },
-      { key: "profit-order-item-variances", label: "订单商品行差异", route: "/profit/order-item-variances" }
+      { key: "profit-inventory-risks", label: "库存利润风险", route: "/profit/inventory-risks", adminOnly: true },
+      { key: "pending-settlement-costs", label: "待结算成本", route: "/profit/pending-settlement-costs", adminOnly: true },
+      { key: "profit-order-item-variances", label: "订单商品行差异", route: "/profit/order-item-variances", adminOnly: true }
     ]
   },
   {
@@ -115,6 +118,7 @@ export const navigationMenus = [
     key: "settings",
     label: "系统",
     icon: Setting,
+    adminOnly: true,
     children: [
       { key: "settings", label: "基础资料", route: "/settings" },
       { key: "settings-scheduled-jobs", label: "自动任务", route: "/settings/scheduled-jobs" },
@@ -127,13 +131,14 @@ export const navigationMenus = [
   }
 ];
 
-const procurementNavigation = navigationMenus.find((menu) => menu.key === "procurement");
-if (procurementNavigation && !procurementNavigation.children.some((item) => item.key === "purchase-cost-center")) {
-  procurementNavigation.children.splice(2, 0, {
-    key: "purchase-cost-center",
-    label: "成本与异常",
-    route: "/purchase-cost-center"
-  });
+export function navigationMenusForRole(role) {
+  const isAdmin = String(role || "").trim().toLowerCase() === "admin";
+  return navigationMenus
+    .filter((menu) => !menu.adminOnly || isAdmin)
+    .map((menu) => menu.children
+      ? { ...menu, children: menu.children.filter((child) => !child.adminOnly || isAdmin) }
+      : menu)
+    .filter((menu) => !menu.children || menu.children.length > 0);
 }
 
 export const navigationIconByRoute = navigationMenus.reduce((map, menu) => {

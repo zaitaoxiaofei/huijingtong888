@@ -20,6 +20,9 @@ const DEFAULT_PROVIDER_CONFIG = {
 
 const ROUTE_TYPES = ["text", "vision", "image", "video"];
 const IMAGE_POOL_MODES = new Set(["speed", "stable", "cost"]);
+const VISION_TEST_IMAGE_DATA_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFElEQVR4nGP4z8Dwn4ECwESJ5lEDAJVfH+Gf5N8AAAAASUVORK5CYII=";
+const TASKS_65535_USAGE_URL = "https://api2.65535.space/v1/usage";
+const TASKS_65535_RECHARGE_URL = "https://my.65535.space/";
 
 const PROVIDER_PRESETS = {
   deepseek: {
@@ -135,6 +138,7 @@ export async function updateAiProviderConfig(body = {}, personId = null) {
   const next = {
     ...previous,
     provider,
+    hiddenProviders: (previous.hiddenProviders || []).filter((key) => key !== provider),
     providers: {
       ...previous.providers,
       [provider]: nextProvider
@@ -143,6 +147,39 @@ export async function updateAiProviderConfig(body = {}, personId = null) {
     imageProviderPool: normalizeImageProviderPoolForSave(body.imageProviderPool ?? body.image_provider_pool ?? previous.imageProviderPool, previous.imageProviderPool)
   };
 
+  await writeStoredConfig(next, previous, personId);
+  return sanitizeConfig(next);
+}
+
+export async function deleteAiProviderConfig(body = {}, personId = null) {
+  const previous = await readStoredConfig();
+  const provider = normalizeProvider(body.provider);
+  if (!previous.providers[provider]) {
+    throw statusError("要删除的服务商不存在，请刷新后重试", 404);
+  }
+
+  const routeNames = ROUTE_TYPES.filter((type) => previous.routes?.[type]?.provider === provider);
+  if (routeNames.length) {
+    throw statusError(`该服务商仍被全局${routeNames.join("、")}模型路由使用，请先更换对应路由`, 409);
+  }
+  const channelNames = previous.imageProviderPool?.channels
+    ?.filter((channel) => channel.provider === provider)
+    .map((channel) => channel.name || channel.id)
+    .filter(Boolean) || [];
+  if (channelNames.length) {
+    throw statusError(`该服务商仍被图片通道池使用：${channelNames.join("、")}，请先删除或更换这些通道`, 409);
+  }
+
+  const providers = { ...previous.providers };
+  delete providers[provider];
+  const hiddenProviders = PROVIDER_PRESETS[provider]
+    ? [...new Set([...(previous.hiddenProviders || []), provider])]
+    : previous.hiddenProviders || [];
+  const fallbackProvider = providers[DEFAULT_PROVIDER_CONFIG.provider]
+    ? DEFAULT_PROVIDER_CONFIG.provider
+    : Object.keys(providers)[0] || DEFAULT_PROVIDER_CONFIG.provider;
+  const nextProvider = previous.provider === provider ? fallbackProvider : previous.provider;
+  const next = { ...previous, provider: nextProvider, providers, hiddenProviders };
   await writeStoredConfig(next, previous, personId);
   return sanitizeConfig(next);
 }
@@ -172,6 +209,69 @@ export async function testAiProviderConfig(payload = {}) {
     ok: true,
     provider: configToTest.provider,
     model: configToTest.textModel,
+    reply: result.content,
+    usage: result.usage || null
+  };
+}
+
+export async function testAiProviderCapability(payload = {}) {
+  const type = ROUTE_TYPES.includes(payload.type) ? payload.type : "text";
+  const startedAt = Date.now();
+  if (type === "video") {
+    return {
+      ok: false,
+      supported: false,
+      type,
+      provider: cleanText(payload.provider),
+      model: cleanText(payload.videoModel || payload.model),
+      elapsedMs: 0,
+      message: "当前系统尚未接入视频服务商的异步任务协议，暂不能执行真实视频测试"
+    };
+  }
+
+  const override = { ...payload };
+  if (type === "vision") override.textModel = payload.visionModel || payload.model;
+  if (type === "image") override.imageModel = payload.imageModel || payload.model;
+  const runtimeConfig = await resolveRuntimeConfig(override, {
+    requireEnabled: false,
+    allowImageOnly: type === "image",
+    route: type
+  });
+
+  if (type === "image") {
+    const result = await testOpenAiImageProvider({ runtimeConfig, mode: "generate" });
+    return {
+      ...result,
+      type,
+      supported: true,
+      provider: runtimeConfig.provider,
+      model: runtimeConfig.imageModel,
+      apiMode: runtimeConfig.apiMode,
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+
+  const messages = type === "vision"
+    ? [{
+        role: "user",
+        content: [
+          { type: "text", text: "请确认你能看到这张测试图片，并用一句中文描述图片的主要颜色。" },
+          { type: "image_url", image_url: { url: VISION_TEST_IMAGE_DATA_URL } }
+        ]
+      }]
+    : [
+        { role: "system", content: "你是连接测试端点，只需简短确认。" },
+        { role: "user", content: "请只回复：文本模型连接成功" }
+      ];
+  const result = await callOpenAiCompatibleChat(runtimeConfig, { messages, temperature: 0, maxTokens: 80, timeoutMs: 60_000 });
+  return {
+    ok: true,
+    supported: true,
+    type,
+    provider: runtimeConfig.provider,
+    model: runtimeConfig.textModel,
+    apiMode: runtimeConfig.apiMode,
+    elapsedMs: Date.now() - startedAt,
     reply: result.content,
     usage: result.usage || null
   };
@@ -217,6 +317,93 @@ export async function testAiImageProviderChannel(payload = {}) {
     baseUrl: runtimeConfig.baseUrl,
     imageModel: runtimeConfig.imageModel,
     apiMode: runtimeConfig.apiMode
+  };
+}
+
+export async function getAiImageProviderUsage(payload = {}) {
+  const stored = await readStoredConfig();
+  const pool = normalizeImageProviderPool(stored.imageProviderPool);
+  const channelId = cleanText(payload.channelId || payload.channel_id);
+  const channel = channelId ? pool.channels.find((item) => item.id === channelId) : null;
+  if (!channel) throw statusError("图片通道不存在，请刷新 AI 设置后重试", 404);
+  if (channel.apiMode !== "tasks_65535") {
+    return { ok: true, supported: false, channelId, name: channel.name, message: "当前仅支持查询 65535 Tasks API 通道的余额与用量" };
+  }
+  const apiKey = cleanText(payload.usageApiKey) || decryptSecret(channel.usageApiKeyEncrypted) || cleanText(payload.apiKey) || decryptSecret(channel.apiKeyEncrypted);
+  if (!apiKey) throw statusError("图片通道 API Key 不能为空，请先填写并保存", 400);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(TASKS_65535_USAGE_URL, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+      signal: controller.signal
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const upstreamMessage = cleanText(data?.error?.message || data?.message);
+      const permissionHint = response.status === 401 || response.status === 403
+        ? "该 Key 可能属于任务专用分组；65535 余额接口要求使用非任务专用分组 Key"
+        : "";
+      throw statusError([upstreamMessage || `65535 余额查询失败：${response.status}`, permissionHint].filter(Boolean).join("；"), response.status || 502);
+    }
+    const balance = usageNumber(data.balance ?? data.remaining);
+    const today = data?.usage?.today || {};
+    const total = data?.usage?.total || {};
+    return {
+      ok: true, supported: true, channelId, name: channel.name, balance,
+      remaining: usageNumber(data.remaining ?? data.balance),
+      unit: "RMB",
+      isValid: data.isValid !== false,
+      mode: cleanText(data.mode),
+      planName: cleanText(data.planName),
+      todayCost: usageNumber(today.actual_cost ?? today.cost),
+      todayRequests: usageNumber(today.requests),
+      totalCost: usageNumber(total.actual_cost ?? total.cost),
+      totalRequests: usageNumber(total.requests),
+      dailyStats: Array.isArray(data.daily_stats) ? data.daily_stats.slice(-7) : [],
+      rechargeUrl: TASKS_65535_RECHARGE_URL
+    };
+  } catch (error) {
+    if (error?.name === "AbortError") throw statusError("65535 余额查询超时，请稍后重试", 504);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function getAiImageUsageOverview(dateKey = "") {
+  const stored = await readStoredConfig();
+  const channels = normalizeImageProviderPool(stored.imageProviderPool).channels
+    .filter((channel) => channel.enabled !== false && channel.apiMode === "tasks_65535");
+  const seenKeys = new Set();
+  const results = [];
+  for (const channel of channels) {
+    const key = decryptSecret(channel.usageApiKeyEncrypted) || decryptSecret(channel.apiKeyEncrypted);
+    if (!key) continue;
+    const fingerprint = crypto.createHash("sha256").update(key).digest("hex");
+    if (seenKeys.has(fingerprint)) continue;
+    seenKeys.add(fingerprint);
+    try {
+      results.push(await getAiImageProviderUsage({ channelId: channel.id, usageApiKey: key }));
+    } catch (error) {
+      results.push({ ok: false, channelId: channel.id, name: channel.name, message: error?.message || "余额查询失败" });
+    }
+  }
+  const targetDate = cleanText(dateKey).slice(0, 10);
+  const todayInShanghai = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const dailyCost = results.reduce((sum, item) => {
+    const daily = item.dailyStats?.find((row) => String(row?.date || "").slice(0, 10) === targetDate);
+    const value = daily ? usageNumber(daily.actual_cost ?? daily.cost) : (targetDate === todayInShanghai ? item.todayCost : 0);
+    return sum + Number(value || 0);
+  }, 0);
+  return {
+    cost: Number(dailyCost.toFixed(6)),
+    balance: Number(results.reduce((sum, item) => sum + Number(item.balance || 0), 0).toFixed(6)),
+    unit: "RMB",
+    accounts: results.length,
+    available: results.some((item) => item.ok),
+    errors: results.filter((item) => !item.ok).map((item) => item.message).filter(Boolean)
   };
 }
 
@@ -775,6 +962,7 @@ function sanitizeConfig(value = {}) {
     hasApiKey: Boolean(selected.apiKeyEncrypted),
     apiKeyHint: selected.apiKeyHint || "",
     providers: Object.fromEntries(Object.entries(settings.providers).map(([key, item]) => [key, sanitizeProvider(item)])),
+    hiddenProviders: settings.hiddenProviders,
     routes: settings.routes,
     imageProviderPool: sanitizeImageProviderPool(settings.imageProviderPool),
     presets: PROVIDER_PRESETS
@@ -803,6 +991,7 @@ function defaultSettings() {
   return {
     provider,
     providers,
+    hiddenProviders: [],
     routes: normalizeRoutes({}, provider, providers[provider]),
     imageProviderPool: normalizeImageProviderPool()
   };
@@ -810,15 +999,19 @@ function defaultSettings() {
 
 function normalizeStoredSettings(value = {}) {
   if (value.providers && typeof value.providers === "object") {
-    const provider = normalizeProvider(value.provider || DEFAULT_PROVIDER_CONFIG.provider);
-    const providers = { ...defaultSettings().providers };
+    const hiddenProviders = [...new Set((Array.isArray(value.hiddenProviders) ? value.hiddenProviders : []).map(normalizeProvider))];
+    const providers = Object.fromEntries(Object.entries(defaultSettings().providers).filter(([key]) => !hiddenProviders.includes(key)));
     for (const [key, providerValue] of Object.entries(value.providers)) {
       const normalizedKey = normalizeProvider(key);
+      if (hiddenProviders.includes(normalizedKey)) continue;
       providers[normalizedKey] = normalizeProviderConfig({ ...providerValue, provider: normalizedKey });
     }
+    const requestedProvider = normalizeProvider(value.provider || DEFAULT_PROVIDER_CONFIG.provider);
+    const provider = providers[requestedProvider] ? requestedProvider : Object.keys(providers)[0] || DEFAULT_PROVIDER_CONFIG.provider;
     return {
       provider,
       providers,
+      hiddenProviders,
       routes: normalizeRoutes(value.routes || value.globalRoutes || {}, provider, providers[provider]),
       imageProviderPool: normalizeImageProviderPool(value.imageProviderPool || value.image_provider_pool)
     };
@@ -837,6 +1030,7 @@ function normalizeStoredSettings(value = {}) {
       ...defaults.providers,
       [provider]: legacyProvider
     },
+    hiddenProviders: [],
     routes: normalizeRoutes({
       text: { provider, model: value.textModel },
       image: { provider, model: value.imageModel }
@@ -892,19 +1086,32 @@ function normalizeImageProviderPoolForSave(value = {}, previous = {}) {
       const previousChannel = previousChannels.get(channel.id) || {};
       const apiKey = cleanText(channel.apiKey);
       const clearApiKey = channel.clearApiKey === true;
+      const usageApiKey = cleanText(channel.usageApiKey);
+      const clearUsageApiKey = channel.clearUsageApiKey === true;
       const next = {
         ...channel,
         apiKeyEncrypted: previousChannel.apiKeyEncrypted || channel.apiKeyEncrypted || "",
-        apiKeyHint: previousChannel.apiKeyHint || channel.apiKeyHint || ""
+        apiKeyHint: previousChannel.apiKeyHint || channel.apiKeyHint || "",
+        usageApiKeyEncrypted: previousChannel.usageApiKeyEncrypted || channel.usageApiKeyEncrypted || "",
+        usageApiKeyHint: previousChannel.usageApiKeyHint || channel.usageApiKeyHint || ""
       };
       delete next.apiKey;
       delete next.clearApiKey;
+      delete next.usageApiKey;
+      delete next.clearUsageApiKey;
       if (apiKey) {
         next.apiKeyEncrypted = encryptSecret(apiKey);
         next.apiKeyHint = maskSecret(apiKey);
       } else if (clearApiKey) {
         next.apiKeyEncrypted = "";
         next.apiKeyHint = "";
+      }
+      if (usageApiKey) {
+        next.usageApiKeyEncrypted = encryptSecret(usageApiKey);
+        next.usageApiKeyHint = maskSecret(usageApiKey);
+      } else if (clearUsageApiKey) {
+        next.usageApiKeyEncrypted = "";
+        next.usageApiKeyHint = "";
       }
       return next;
     })
@@ -938,6 +1145,10 @@ function normalizeImageProviderChannel(value = {}) {
     apiKeyHint: String(value.apiKeyHint || ""),
     apiKey: String(value.apiKey || ""),
     clearApiKey: value.clearApiKey === true,
+    usageApiKeyEncrypted: String(value.usageApiKeyEncrypted || ""),
+    usageApiKeyHint: String(value.usageApiKeyHint || ""),
+    usageApiKey: String(value.usageApiKey || ""),
+    clearUsageApiKey: value.clearUsageApiKey === true,
     imageModel: normalizeImageProviderModel(provider, value.imageModel ?? value.image_model ?? preset.imageModel, value.baseUrl ?? value.base_url ?? preset.baseUrl, value.name ?? preset.name),
     apiMode: normalizeProviderApiMode(provider, value.apiMode ?? value.api_mode ?? value.wireApi ?? preset.apiMode, value.baseUrl ?? value.base_url ?? preset.baseUrl, value.name ?? preset.name),
     enabled: value.enabled !== false,
@@ -963,7 +1174,9 @@ function sanitizeImageProviderPool(value = {}) {
       weight: channel.weight,
       maxConcurrency: channel.maxConcurrency,
       hasApiKey: Boolean(channel.apiKeyEncrypted),
-      apiKeyHint: channel.apiKeyHint
+      apiKeyHint: channel.apiKeyHint,
+      hasUsageApiKey: Boolean(channel.usageApiKeyEncrypted),
+      usageApiKeyHint: channel.usageApiKeyHint
     }))
   };
 }
@@ -1078,6 +1291,11 @@ function decryptSecret(value) {
   return "";
 }
 
+function usageNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function primaryEncryptionKey() {
   return encryptionKeyFromSeed(process.env.AI_CONFIG_SECRET || config.siteAccessPassword || "ozon-erp-local-ai-config");
 }
@@ -1138,6 +1356,7 @@ function normalizeApiMode(value) {
   const mode = String(value || "").trim().toLowerCase().replace(/-/g, "_");
   if (mode === "responses" || mode === "response") return "responses";
   if (mode === "images" || mode === "image") return "images";
+  if (mode === "tasks_65535" || mode === "65535_tasks") return "tasks_65535";
   return "chat_completions";
 }
 

@@ -26,8 +26,8 @@ test("FBP batch detail filtering is applied inside the replenishment list query"
 
 test("FBP linked summaries and source-order details both retain barcode printing", () => {
   assert.doesNotMatch(source, /row\.order\._isBatchSummary[^\n]*请在关联明细中操作/);
-  assert.match(source, /batch-detail-table[\s\S]*previewBarcodeLabel\(row\)/);
   assert.match(source, /batch-detail-table[\s\S]*printBarcodeLabel\(row\)/);
+  assert.doesNotMatch(source, /previewBarcodeLabel\(row\)/);
   assert.match(source, /Number\.isInteger\(itemId\)/);
 });
 

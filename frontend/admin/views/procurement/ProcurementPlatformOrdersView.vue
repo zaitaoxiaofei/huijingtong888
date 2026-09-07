@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { apiClient } from "../../utils/api.js";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
+import { parse1688File, parsePddFile } from "../../utils/procurement-file-parsers.js";
 import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import ErpFilterBar from "../../components/ErpFilterBar.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
@@ -16,28 +17,6 @@ const selectedIds = ref([]);
 const currentOrder = ref(null);
 const state = reactive({ rows: [], total: 0, filters: { platform: "pdd", bindingStatus: "all", query: "", page: 1, pageSize: 20 } });
 const selectedCandidates = computed(() => candidates.value.filter((item) => selectedIds.value.includes(Number(item.id))));
-
-function parseCsv(text) {
-  const rows = [];
-  let row = [], field = "", quoted = false;
-  const source = String(text || "").replace(/^\uFEFF/, "");
-  for (let index = 0; index < source.length; index += 1) {
-    const char = source[index];
-    if (quoted && char === '"' && source[index + 1] === '"') { field += '"'; index += 1; }
-    else if (char === '"') quoted = !quoted;
-    else if (char === "," && !quoted) { row.push(field); field = ""; }
-    else if ((char === "\n" || char === "\r") && !quoted) {
-      if (char === "\r" && source[index + 1] === "\n") index += 1;
-      row.push(field); field = "";
-      if (row.some((value) => String(value).trim())) rows.push(row);
-      row = [];
-    } else field += char;
-  }
-  row.push(field);
-  if (row.some((value) => String(value).trim())) rows.push(row);
-  const headers = rows.shift()?.map((value) => String(value).trim()) || [];
-  return rows.map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""])));
-}
 
 async function load() {
   loading.value = true;
@@ -57,13 +36,12 @@ async function importFile(event) {
   if (!file) return;
   importing.value = true;
   try {
-    const text = await file.text();
-    const rows = file.name.toLowerCase().endsWith(".json") ? JSON.parse(text) : parseCsv(text);
-    const result = await apiClient.post("/api/procurement/platform-orders/import", { platform: state.filters.platform, rows: Array.isArray(rows) ? rows : rows.rows });
+    const rows = state.filters.platform === "1688" ? await parse1688File(file) : await parsePddFile(file);
+    const result = await apiClient.post("/api/procurement/platform-orders/import", { platform: state.filters.platform, rows });
     ElMessage.success(`导入 ${result.total} 单：新增 ${result.inserted}，更新 ${result.updated}`);
     state.filters.page = 1;
     await load();
-  } catch (error) { ElMessage.error(error.message || "导入失败，请确认是拼多多插件导出的 CSV/JSON"); }
+  } catch (error) { ElMessage.error(error.message || "导入失败，请确认文件来自当前选择的平台"); }
   finally { importing.value = false; }
 }
 
@@ -102,8 +80,8 @@ onMounted(load);
   <div class="page-shell">
     <ErpPageHeader title="平台订单" description="导入拼多多或 1688 平台订单，再与采购工作台记录绑定。">
       <template #actions>
-        <input ref="fileInput" type="file" accept=".csv,.json" hidden @change="importFile">
-        <el-button type="primary" :loading="importing" @click="chooseFile">导入拼多多 CSV / JSON</el-button>
+        <input ref="fileInput" type="file" :accept="state.filters.platform === '1688' ? '.xlsx' : '.csv,.json'" hidden @change="importFile">
+        <el-button type="primary" :loading="importing" @click="chooseFile">导入{{ state.filters.platform === '1688' ? '1688 Excel' : '拼多多 CSV / JSON' }}</el-button>
       </template>
     </ErpPageHeader>
     <ErpFilterBar>
@@ -113,6 +91,7 @@ onMounted(load);
       <el-button @click="search">查询</el-button>
     </ErpFilterBar>
     <el-card shadow="never">
+      <div class="platform-orders-table erp-responsive-table" role="region" aria-label="平台采购订单表格" tabindex="0">
       <el-table v-loading="loading" :data="state.rows" border>
         <el-table-column prop="platform_order_no" label="平台订单号" width="190" />
         <el-table-column label="下单时间" width="170"><template #default="{ row }">{{ timeText(row.order_time) }}</template></el-table-column>
@@ -124,6 +103,7 @@ onMounted(load);
         <el-table-column label="采购绑定" min-width="180"><template #default="{ row }"><el-tag :type="row.binding_status === 'bound' ? 'success' : 'warning'">{{ row.binding_status === 'bound' ? '已绑定' : '待绑定' }}</el-tag><span v-if="row.linked_request_names" class="linked">{{ row.linked_request_names }}</span></template></el-table-column>
         <el-table-column label="操作" width="110" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="openBinding(row)">{{ row.binding_status === 'bound' ? '重新绑定' : '绑定采购' }}</el-button></template></el-table-column>
       </el-table>
+      </div>
       <PageFooterPagination v-model:page="state.filters.page" v-model:page-size="state.filters.pageSize" :total="state.total" @change="load" />
     </el-card>
 
@@ -146,4 +126,7 @@ onMounted(load);
 <style scoped>
 .page-shell { display: flex; flex-direction: column; gap: 14px; }
 .linked { margin-left: 8px; color: var(--el-text-color-secondary); }
+@media (max-width: 767px) {
+  .linked { display: block; margin: 5px 0 0; }
+}
 </style>

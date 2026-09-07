@@ -25,6 +25,15 @@ test("vehicle models depend on the selected car brand and style defaults to ordi
   assert.match(namingServiceSource, /if \(type === "accessory" && !category\)/);
 });
 
+test("vehicle models can be added manually while new brands require approval", () => {
+  assert.match(dialogSource, /multiple filterable allow-create default-first-option/);
+  assert.match(dialogSource, /\/api\/ai-variant-lab\/vehicle-catalog/);
+  assert.match(dialogSource, />申请汽车品牌<\/el-button>/);
+  assert.doesNotMatch(dialogSource, /vehicle_brand[^\n]*allow-create/);
+  assert.match(namingServiceSource, /option_type IN \('category', 'brand'\)/);
+  assert.match(namingServiceSource, /\['category', 'brand'\]\.includes\(optionType\)/);
+});
+
 test("main image controls live in the standard naming header", () => {
   assert.match(dialogSource, /class="naming-main-image"/);
   assert.match(dialogSource, /size="portrait" fit="cover"/);

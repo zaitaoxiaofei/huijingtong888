@@ -8,6 +8,7 @@ export function normalizeFbpReplenishmentOrder(row = {}, items = []) {
     order_no: row.order_no || "",
     shop_id: Number(row.shop_id || 0),
     shop_name: row.shop_name || "",
+    ozon_company_id: String(row.ozon_company_id || row.ozon_client_id || "").trim(),
     batch_id: row.batch_id == null ? null : Number(row.batch_id || 0),
     batch_no: row.batch_no || "",
     order_date: row.order_date || "",

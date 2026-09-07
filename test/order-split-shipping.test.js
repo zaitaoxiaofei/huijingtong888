@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { buildSplitShippingPackagesMysql as legacyBuildSplitShippingPackagesMysql } from "../src/services/mysql-cutover.js";
-import { buildSplitShippingPackagesMysql } from "../src/services/mysql-order-shipping-packages.js";
+import { buildLiveShippingProductsMysql, buildSplitShippingPackagesMysql } from "../src/services/mysql-order-shipping-packages.js";
 
 const items = [
   { id: 11, ozon_sku: "SKU-A", product_id: 101, quantity: 3 },
@@ -36,6 +36,20 @@ test("split shipping rejects incomplete, empty and foreign allocations", () => {
     { products: [{ order_item_id: 99, quantity: 1 }] },
     { products: [{ order_item_id: 11, quantity: 3 }, { order_item_id: 12, quantity: 1 }] }
   ]), /不属于当前订单/);
+});
+
+test("normal shipping uses authoritative live Ozon product quantities", () => {
+  assert.deepEqual(buildLiveShippingProductsMysql({
+    items: [
+      { ozon_product_id: "101", quantity: 2 },
+      { ozon_product_id: "101", quantity: 1 },
+      { ozon_product_id: "202", quantity: 4 }
+    ]
+  }), [
+    { product_id: 101, quantity: 3 },
+    { product_id: 202, quantity: 4 }
+  ]);
+  assert.deepEqual(buildLiveShippingProductsMysql({ items: [{ ozon_product_id: "", quantity: 1 }] }), []);
 });
 
 test("orders page exposes split-package preparation without replacing normal preparation", async () => {

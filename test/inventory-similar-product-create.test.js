@@ -30,6 +30,11 @@ test("order inventory creation can bind an existing similar product", () => {
   assert.match(ordersPage, /inventoryProductEditorCreateContext\.value = \{/);
   assert.match(ordersPage, /image_url:\s*context\.imageUrl/);
   assert.match(ordersPage, /package_weight_g:\s*context\.baseWeightG/);
+  assert.match(ordersPage, /sale_price_rmb:\s*context\.salePriceRmb/);
+  assert.match(ordersPage, /air_sale_price_rmb:\s*context\.salePriceRmb/);
+  assert.match(ordersPage, /Number\(displayItem\.saleAmount\) \/ Math\.max\(1, Number\(displayItem\.quantity \|\| 1\)\)/);
+  assert.match(ordersPage, /Number\(rule\.id\) === Number\(context\.logisticsRuleId\)/);
+  assert.match(service, /AS sku_logistics_rule_ids/);
   assert.match(ordersPage, /:create-endpoint="inventoryProductEditorCreateContext \? '\/api\/online-products\/create-product'/);
   assert.match(ordersPage, /@existing-selected="handleInventoryProductEditorExistingSelected"/);
   assert.match(ordersPage, /\/api\/online-products\/bind/);
@@ -195,13 +200,23 @@ test("fixed components use a structured inventory directory and restore bound pa
   const dialog = read("frontend/admin/components/inventory/ProductCreateEditDialog.vue");
   const service = read("src/services/mysql-cutover.js");
 
-  assert.match(dialog, /输入核心品名，例如：雨刷、钥匙壳/);
-  assert.match(dialog, /class="component-directory"/);
+  assert.match(dialog, /class="component-quick-search"/);
+  assert.match(dialog, /v-for="item in namingOptions\.category"/);
+  assert.match(dialog, /@change="handleComponentCategoryChange"/);
+  assert.match(dialog, /class="component-result-picker"/);
   assert.match(dialog, /componentDirectoryBrands/);
   assert.match(dialog, /componentDirectoryModels/);
   assert.match(dialog, /componentDirectoryAccessories/);
+  assert.match(dialog, /loadComponentDirectoryOptions/);
+  assert.match(dialog, /componentDirectoryOptions = reactive/);
+  assert.match(dialog, /vehicleCatalog\.value\.map\(\(brand\) => brand\.name\)/);
+  assert.match(dialog, /catalogBrand\?\.models/);
+  assert.match(dialog, /function normalizeComponentBrand/);
+  assert.match(dialog, /parts\.at\(-1\)/);
+  assert.match(dialog, /field === "vehicle_brand" \? normalizeComponentBrand/);
+  assert.match(dialog, /\["brand", "fitment_type", "vehicle_model", "accessory", "color", "quantity"\]/);
   assert.match(dialog, /namingOptionValues/);
-  assert.match(dialog, /条件可按任意顺序输入或选择，组合条件实时筛选/);
+  assert.match(dialog, /共 \{\{ componentOptions\.length \}\} 个匹配商品，选择后直接添加/);
   assert.match(dialog, /allow-create default-first-option clearable placeholder="品牌"/);
   assert.match(dialog, /allow-create default-first-option clearable placeholder="颜色"/);
   assert.match(dialog, /componentSearchActive \? '高匹配子产品' : '已有相似库存'/);
@@ -237,6 +252,26 @@ test("inventory creation can add child products before the main product is saved
   assert.match(composition, /\.composition-picker\s*\{\s*grid-area:\s*picker/);
   assert.match(composition, /\.composition-current\s*\{\s*grid-area:\s*current/);
   assert.match(composition, /const optionPageSize = ref\(20\)/);
+});
+
+test("quick component creation works from inventory, procurement, and order editors", () => {
+  const inventoryPage = read("frontend/admin/views/inventory/InventoryProductsPage.vue");
+  const procurementPage = read("frontend/admin/views/procurement/ProcurementWorkspaceView.vue");
+  const ordersPage = read("frontend/orders/OrdersPage.vue");
+
+  assert.match(inventoryPage, /:create-context="\{ is_accessory: 1 \}"/);
+  assert.match(procurementPage, /@quick-create-component="openQuickComponentCreate"/);
+  assert.match(procurementPage, /ref="inventoryEditorRef"/);
+  assert.match(procurementPage, /inventoryEditorRef\.value\?\.addExternalComponentProduct/);
+  assert.match(procurementPage, /:create-context="\{ is_accessory: 1 \}"/);
+  assert.match(procurementPage, /@saved="handleQuickComponentCreated"/);
+  assert.match(procurementPage, /@existing-selected="handleQuickComponentExistingSelected"/);
+  assert.match(ordersPage, /@quick-create-component="openQuickComponentCreate"/);
+  assert.match(ordersPage, /ref="inventoryProductEditorRef"/);
+  assert.match(ordersPage, /inventoryProductEditorRef\.value\?\.addExternalComponentProduct/);
+  assert.match(ordersPage, /:create-context="\{ is_accessory: 1 \}"/);
+  assert.match(ordersPage, /@saved="handleQuickComponentCreated"/);
+  assert.match(ordersPage, /@existing-selected="handleQuickComponentExistingSelected"/);
 });
 
 test("switching from edit to create clears identifiers owned by the previous product", () => {

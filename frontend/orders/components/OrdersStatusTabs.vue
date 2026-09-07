@@ -8,7 +8,7 @@ const props = defineProps({
   fulfillmentTypeOptions: { type: Array, default: () => [] },
   activeFulfillmentType: { type: String, default: "all" },
   printViews: { type: Array, default: () => [] },
-  activePrintView: { type: String, default: "all" },
+  activePrintViews: { type: Array, default: () => [] },
   markOptions: { type: Array, default: () => [] },
   activeMarkFilter: { type: String, default: "all" },
   selectedCount: { type: Number, default: 0 }
@@ -106,7 +106,7 @@ function tabTone(value) {
             :key="`print-${item.value}`"
             type="button"
             class="orders-chip-button orders-chip-button-print-slot"
-            :class="{ active: activePrintView === item.value }"
+            :class="{ active: activePrintViews.includes(item.value) }"
             @click="emit('change-print-view', item.value)"
           >
             {{ item.label }}

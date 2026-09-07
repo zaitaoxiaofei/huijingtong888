@@ -52,6 +52,7 @@ export function buildProductDisplayRows(row = {}) {
   const skuQuantities = parseSkuMap(row, "sku_quantities", (value) => Number(value || 0));
   const orderItemIds = parseSkuMap(row, "sku_order_item_ids", (value) => Number(value || 0));
   const saleAmounts = parseSkuMap(row, "sku_sale_amounts", (value) => Number(value || 0));
+  const logisticsRuleIds = parseSkuMap(row, "sku_logistics_rule_ids", (value) => Number(value || 0));
   const estimatedProfits = parseSkuMap(row, "sku_estimated_profits", (value) => Number(value || 0));
   const actualProfits = parseSkuMap(row, "sku_actual_profits", (value) => Number(value || 0));
   const actualProfitReadyMap = parseSkuMap(row, "sku_actual_profit_ready", (value) => String(value || "") === "1");
@@ -107,6 +108,7 @@ export function buildProductDisplayRows(row = {}) {
       orderItemId: orderItemIds.get(sku) || 0,
       imageUrl: hasSkuImage ? (skuImages.get(sku) || "") : (fallbackImage || inventoryImages[0] || ""),
       saleAmount: saleAmounts.get(sku) || 0,
+      logisticsRuleId: logisticsRuleIds.get(sku) || 0,
       estimatedProfit: estimatedProfits.get(sku) || 0,
       actualProfit: actualProfits.get(sku) || 0,
       actualProfitReady: actualProfitReadyMap.get(sku) || false,

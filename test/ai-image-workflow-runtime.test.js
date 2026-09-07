@@ -9,6 +9,7 @@ const imageRuntimeLimiterSource = readFileSync(new URL("../src/services/ai-image
 const aiVariantLabSource = readFileSync(new URL("../src/services/ai-variant-lab.js", import.meta.url), "utf8");
 const listingAutomationSource = readFileSync(new URL("../src/services/listing-automation.js", import.meta.url), "utf8");
 const serverSource = readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
+const runtimeServicesSource = readFileSync(new URL("../src/services/mysql-runtime-services.js", import.meta.url), "utf8");
 
 test("AI image workflow resolves relative source images from APP_BASE_URL", () => {
   assert.match(workflowSource, /import \{ config \} from "\.\.\/\.\.\/\.\.\/config\.js"/);
@@ -68,6 +69,15 @@ test("AI variant provider jobs can resume without source-image access or resubmi
   assert.match(aiVariantLabSource, /recoverAiVariantLabImageBatchesOnStartup/);
 });
 
+test("AI variant retry resubmits when the saved provider job is terminally failed or missing", () => {
+  assert.match(imageGenerationSource, /error\.code = "provider_job_terminal_unavailable"/);
+  assert.match(imageGenerationSource, /error\.code = "provider_job_terminal_failed"/);
+  assert.match(aiVariantLabSource, /isProviderJobTerminalUnavailable\(error\)/);
+  assert.match(aiVariantLabSource, /await payload\.onProviderJob\?\.\(null, 0\)/);
+  assert.match(aiVariantLabSource, /providerJob: null/);
+  assert.match(aiVariantLabSource, /operation: "resubmit"/);
+});
+
 test("temporary AI OSS media is promoted without downloading through ECS", () => {
   assert.match(listingAutomationSource, /promoteManagedOssObjectUrl\(sourceUrl/);
   const promotionBranch = listingAutomationSource.match(/if \(isManagedOssObjectUrl\(sourceUrl, \{ prefix: "ai-unused"[\s\S]*?status: "promoted_oss_media"/)?.[0] || "";
@@ -111,11 +121,59 @@ test("65535 image provider uses v1 async images endpoints", () => {
   assert.match(imageGenerationSource, /response\.status === 429 \|\| response\.status >= 500/);
 });
 
+test("65535 task provider uses the native v1 tasks protocol", () => {
+  const providerSettingsSource = readFileSync(new URL("../src/services/ai-provider-settings.js", import.meta.url), "utf8");
+  const settingsViewSource = readFileSync(new URL("../frontend/admin/views/settings/AiProviderSettingsView.vue", import.meta.url), "utf8");
+  assert.match(providerSettingsSource, /tasks_65535/);
+  assert.match(settingsViewSource, /65535 Tasks API/);
+  assert.match(imageGenerationSource, /function tasks65535Endpoint/);
+  assert.match(imageGenerationSource, /kind: "image"/);
+  assert.match(imageGenerationSource, /jobId = String\(data\.id \|\| data\.job_id/);
+  assert.match(imageGenerationSource, /\/tasks\/\$\{encodeURIComponent\(jobId\)\}/);
+  assert.match(imageGenerationSource, /result_urls/);
+});
+
 test("AI settings exposes a real image channel test endpoint", () => {
   const providerSettingsSource = readFileSync(new URL("../src/services/ai-provider-settings.js", import.meta.url), "utf8");
   assert.match(imageGenerationSource, /export async function testOpenAiImageProvider/);
   assert.match(providerSettingsSource, /export async function testAiImageProviderChannel/);
   assert.match(serverSource, /POST \/api\/ai-provider\/test-image-channel/);
+});
+
+test("AI settings exposes 65535 balance, usage, and recharge controls", () => {
+  const providerSettingsSource = readFileSync(new URL("../src/services/ai-provider-settings.js", import.meta.url), "utf8");
+  const settingsViewSource = readFileSync(new URL("../frontend/admin/views/settings/AiProviderSettingsView.vue", import.meta.url), "utf8");
+  assert.match(providerSettingsSource, /export async function getAiImageProviderUsage/);
+  assert.match(providerSettingsSource, /https:\/\/api2\.65535\.space\/v1\/usage/);
+  assert.match(providerSettingsSource, /unit: "RMB"/);
+  assert.match(serverSource, /POST \/api\/ai-provider\/image-channel-usage/);
+  assert.match(runtimeServicesSource, /getAiImageProviderUsage/);
+  assert.match(settingsViewSource, /余额\/用量/);
+  assert.match(settingsViewSource, /前往充值/);
+});
+
+test("AI settings tests text, vision, image, and video capabilities separately", () => {
+  const providerSettingsSource = readFileSync(new URL("../src/services/ai-provider-settings.js", import.meta.url), "utf8");
+  const aiSettingsViewSource = readFileSync(new URL("../frontend/admin/views/settings/AiProviderSettingsView.vue", import.meta.url), "utf8");
+  assert.match(providerSettingsSource, /export async function testAiProviderCapability/);
+  assert.match(providerSettingsSource, /VISION_TEST_IMAGE_DATA_URL/);
+  assert.match(providerSettingsSource, /testOpenAiImageProvider\(\{ runtimeConfig, mode: "generate" \}\)/);
+  assert.match(providerSettingsSource, /尚未接入视频服务商的异步任务协议/);
+  assert.match(serverSource, /POST \/api\/ai-provider\/test-capability/);
+  assert.match(aiSettingsViewSource, /function testCapability\(type, scope = "provider"\)/);
+  assert.match(aiSettingsViewSource, /item\.key === "vision" \? "识图"/);
+});
+
+test("AI settings supports deleting and restoring preset providers without affecting routes or image channels", () => {
+  const providerSettingsSource = readFileSync(new URL("../src/services/ai-provider-settings.js", import.meta.url), "utf8");
+  const aiSettingsViewSource = readFileSync(new URL("../frontend/admin/views/settings/AiProviderSettingsView.vue", import.meta.url), "utf8");
+  assert.match(providerSettingsSource, /hiddenProviders/);
+  assert.match(providerSettingsSource, /仍被全局.*模型路由使用/);
+  assert.match(providerSettingsSource, /仍被图片通道池使用/);
+  assert.match(aiSettingsViewSource, /function restorePresetProvider/);
+  assert.match(aiSettingsViewSource, /恢复 \{\{ item\.label \}\} 预设/);
+  assert.match(aiSettingsViewSource, /append-to-body align-center destroy-on-close/);
+  assert.match(aiSettingsViewSource, /grid-template-rows: 32px repeat\(10, 36px\) minmax\(0, 1fr\) 30px/);
 });
 
 test("AI image pool concurrency follows operator configuration without a fixed ceiling", () => {

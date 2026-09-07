@@ -10,6 +10,7 @@ const props = defineProps({
   selectedIds: { type: Object, default: () => new Set() },
   allSelected: { type: Boolean, default: false },
   someSelected: { type: Boolean, default: false },
+  confirmingInboundRecordId: { type: Number, default: 0 },
   // Keep the table height tied to the flex layout instead of a viewport
   // max-height so the last row does not slide under the footer pagination.
   tableHeight: { type: [String, Number], default: "100%" }
@@ -28,7 +29,9 @@ const emit = defineEmits([
   "open-product-components",
   "view-product-components",
   "open-create-product-from-order",
-  "open-order-procurement"
+  "open-order-procurement",
+  "view-procurement-details",
+  "confirm-procurement-inbound"
 ]);
 
 const markChoices = computed(() => (
@@ -93,10 +96,6 @@ function formatPrintDateParts(value) {
 function formatMoney(value) {
   const amount = Number(value || 0);
   return Number.isFinite(amount) ? amount.toFixed(2) : "0.00";
-}
-
-function hasActualProfit(item) {
-  return Boolean(item?.actualProfitReady);
 }
 
 async function copyText(value) {
@@ -215,13 +214,10 @@ function hasEnoughLocalStock(row) {
   return products.every((product) => Number(product.stock?.local || 0) >= Math.max(1, Number(product.quantity || 1)));
 }
 
-function hasEnoughProcurementSupply(row) {
-  const products = Array.isArray(row?.inventorySummaries) ? row.inventorySummaries : [];
-  if (!products.length) return false;
-  return products.every((product) => (
-    Number(product.stock?.local || 0) + Number(product.incoming || 0)
-      >= Math.max(1, Number(product.quantity || 1))
-  ));
+function hasProcurementIncoming(row) {
+  const state = row?.procurementState;
+  return Boolean(state?.hasOrderIncoming)
+    && Number(state?.inboundDetails?.quantity || 0) > 0;
 }
 
 function isFbpOrder(row) {
@@ -243,20 +239,27 @@ function isFbpOrder(row) {
 }
 
 function procurementActionLabel(row) {
-  if (hasEnoughLocalStock(row)) return "有库存";
-  if (hasEnoughProcurementSupply(row)) return "在途可满足";
-  if (isFbpOrder(row)) return "有库存";
   const detail = String(row?.procurementState?.detail || "");
-  if (detail.includes("已提交采购")) return "已提交采购";
+  if (hasEnoughLocalStock(row)) return "有库存";
+  if (row?.procurementState?.overdue && hasProcurementIncoming(row)) return `在途超${Math.max(3, Number(row.procurementState.inTransitDays || 0))}天`;
+  if (hasProcurementIncoming(row)) return "采购在途";
+  if (isFbpOrder(row)) return "有库存";
+  if (row?.procurementState?.handled && detail.includes("库存可满足")) return "有库存";
   return "待采购";
 }
 
 function procurementActionClass(row) {
+  if (row?.procurementState?.overdue && hasProcurementIncoming(row)) return "orders-inline-accent-button-danger-soft";
   const label = procurementActionLabel(row);
   return label === "有库存"
-    || label === "在途可满足"
+    || label === "采购在途"
     ? "orders-inline-accent-button-success"
     : "orders-inline-accent-button-danger-soft";
+}
+
+function procurementTimeText(row) {
+  const value = row?.procurementState?.latestPurchaseAt;
+  return value ? formatDateTime(value, { assumeUtcWhenNaive: true }) : "";
 }
 </script>
 
@@ -524,13 +527,9 @@ function procurementActionClass(row) {
             >
               <small class="orders-stock-product-name orders-product-name">{{ product.productName }}</small>
               <div class="orders-stock-inline-facts">
-                <span>金额: {{ product.amountText }}</span>
-                <span>预计: CNY {{ formatMoney(product.estimatedProfit) }}</span>
-                <span>真实: {{ hasActualProfit(product) ? `CNY ${formatMoney(product.actualProfit)}` : '--' }}</span>
-              </div>
-              <div class="orders-stock-inline-facts">
                 <span>FBP: {{ product.stock?.fbp || 0 }}</span>
                 <span>{{ product.inventoryMode === "combo" || Number(product.componentCount || 0) > 0 ? "子产品可组" : "本地" }}: {{ product.stock?.local || 0 }}</span>
+                <span>在途: {{ Number(product.incoming || 0) }}</span>
               </div>
               <div class="orders-inline-actions orders-inline-actions-compact">
                 <el-button
@@ -592,6 +591,37 @@ function procurementActionClass(row) {
                 >
                   创建库存
                 </el-button>
+              </div>
+            </div>
+            <div
+              v-if="hasProcurementIncoming(row)"
+              class="orders-procurement-transparency"
+              :class="{ 'is-overdue': row.procurementState.overdue }"
+            >
+              <strong>
+                {{ row.procurementState.inboundDetails?.personName || "未记录" }}
+                采购{{ Number(row.procurementState.inboundDetails?.quantity || 0) > 0 ? Number(row.procurementState.inboundDetails.quantity) : "数量未记录" }}
+                · 等待{{ Number(row.procurementState.inTransitDays || 0) }}天
+              </strong>
+              <small>下单时间：{{ procurementTimeText(row) || "待补充" }}</small>
+              <div class="orders-procurement-actions">
+                <el-button size="small" link type="primary" @click="emit('view-procurement-details', row)">
+                  查看采购内容
+                </el-button>
+                <el-button
+                  v-if="row.procurementState.inboundRecordId"
+                  size="small"
+                  :type="row.procurementState.overdue ? 'danger' : 'success'"
+                  plain
+                  :loading="Number(confirmingInboundRecordId || 0) === Number(row.procurementState.inboundRecordId || 0)"
+                  :disabled="Number(confirmingInboundRecordId || 0) === Number(row.procurementState.inboundRecordId || 0)"
+                  @click="emit('confirm-procurement-inbound', row)"
+                >
+                  确认入库
+                </el-button>
+                <small v-else-if="Number(row.procurementState.inboundRecordCount || 0) > 1">
+                  多个批次，请到采购页确认
+                </small>
               </div>
             </div>
           </div>

@@ -207,6 +207,22 @@ const routeModules = {
 // server.js 只负责分发、鉴权和极少量路径参数解析。
 // Keep straightforward routes in a single lookup table so server.js stays
 // focused on request dispatch, authentication, and transport concerns.
+function dashboardForSession(payload = {}, session = {}) {
+  if (String(session?.role || "").trim().toLowerCase() === "admin") return payload;
+  const withoutProfitFields = (source = {}) => Object.fromEntries(
+    Object.entries(source || {}).filter(([key]) => !String(key).toLowerCase().includes("profit"))
+  );
+  return {
+    ...payload,
+    commerce: {
+      ...(payload?.commerce || {}),
+      today: withoutProfitFields(payload?.commerce?.today),
+      yesterday: withoutProfitFields(payload?.commerce?.yesterday),
+      profit_trend: withoutProfitFields(payload?.commerce?.profit_trend)
+    }
+  };
+}
+
 const routes = {
   ...routeModules,
   "GET /api/system/info": () => systemInfo(),
@@ -216,10 +232,13 @@ const routes = {
   "GET /api/ai-provider/config": () => services.aiProviderConfig(),
   "GET /api/ai-provider/presets": () => services.aiProviderPresets(),
   "POST /api/ai-provider/config": async (req) => services.updateAiProviderConfig(await readJson(req), req._session?.personId),
+  "POST /api/ai-provider/delete": async (req) => services.deleteAiProviderConfig(await readJson(req), req._session?.personId),
   "POST /api/ai-provider/test": async (req) => services.testAiProviderConfig(await readJson(req)),
+  "POST /api/ai-provider/test-capability": async (req) => services.testAiProviderCapability(await readJson(req)),
   "POST /api/ai-provider/test-image-channel": async (req) => services.testAiImageProviderChannel(await readJson(req)),
+  "POST /api/ai-provider/image-channel-usage": async (req) => services.getAiImageProviderUsage(await readJson(req)),
   "POST /api/ai-provider/chat": async (req) => services.chatWithAiProvider(await readJson(req)),
-  "GET /api/dashboard": (req) => services.dashboard(req.query || {}),
+  "GET /api/dashboard": async (req) => dashboardForSession(await services.dashboard(req.query || {}), req._session),
   "GET /api/scheduled-jobs": (req) => listScheduledJobs(req.query || {}),
   "GET /api/scheduled-job-runs": (req) => scheduledJobRuns(req.query || {}),
   "GET /api/scheduled-job-run-events": (req) => scheduledJobRunEvents(req.query || {}),
@@ -381,6 +400,8 @@ let backgroundAnalyticsRefreshRunning = false;
 let backgroundDashboardSnapshotRefreshRunning = false;
 let backgroundAdvertisingSyncRunning = false;
 let backgroundAdvertisingTodaySyncRunning = false;
+let backgroundOzonFinanceSyncRunning = false;
+let backgroundHistoricalFinanceRepairRunning = false;
 let backgroundSellerAnalyticsSyncRunning = false;
 let backgroundOzonStockSyncRunning = false;
 let backgroundOzonCategorySyncRunning = false;
@@ -429,7 +450,9 @@ const FOREGROUND_DEFERRAL_BOUNDED_JOBS = new Set([
   "posting_detail_sync",
   "ozon_action_cleanup",
   "advertising_sync",
-  "advertising_today_sync"
+  "advertising_today_sync",
+  "ozon_finance_sync",
+  "historical_finance_profit_repair"
 ]);
 
 function criticalJobForegroundDeferralExpired(jobKey, context = {}) {
@@ -476,6 +499,9 @@ const BACKGROUND_ADVERTISING_SYNC_TIMEOUT_MS = Math.max(1, Number(config.backgro
 const BACKGROUND_ADVERTISING_TODAY_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundAdvertisingTodaySyncIntervalMinutes || 15)) * 60 * 1000;
 const BACKGROUND_ADVERTISING_TODAY_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundAdvertisingTodaySyncInitialDelaySeconds || 120)) * 1000;
 const BACKGROUND_ADVERTISING_TODAY_SYNC_TIMEOUT_MS = Math.max(1, Number(config.backgroundAdvertisingTodaySyncTimeoutMinutes || 25)) * 60 * 1000;
+const BACKGROUND_OZON_FINANCE_SYNC_INTERVAL_MS = Math.max(30, Number(config.backgroundOzonFinanceSyncIntervalMinutes || 360)) * 60 * 1000;
+const BACKGROUND_OZON_FINANCE_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.backgroundOzonFinanceSyncInitialDelaySeconds || 900)) * 1000;
+const BACKGROUND_OZON_FINANCE_SYNC_DAYS = Math.max(3, Number(config.backgroundOzonFinanceSyncDays || 14));
 const BACKGROUND_SELLER_ANALYTICS_SYNC_DAYS = Math.max(1, Number(config.backgroundSellerAnalyticsSyncDays || 7));
 const BACKGROUND_SELLER_ANALYTICS_SYNC_TIMEOUT_MS = Math.max(1, Number(config.backgroundSellerAnalyticsSyncTimeoutMinutes || 45)) * 60 * 1000;
 const BACKGROUND_OZON_STOCK_SYNC_INTERVAL_MS = Math.max(5, Number(config.backgroundOzonStockSyncIntervalMinutes || 30)) * 60 * 1000;
@@ -614,6 +640,28 @@ const scheduledJobDefinitions = [
     }
   },
   {
+    key: "ozon_finance_sync",
+    name: "Ozon 财务流水与结算同步",
+    category: "finance",
+    priority: "critical",
+    intervalMinutes: Math.round(BACKGROUND_OZON_FINANCE_SYNC_INTERVAL_MS / 60000),
+    initialDelaySeconds: Math.round(BACKGROUND_OZON_FINANCE_SYNC_INITIAL_DELAY_MS / 1000),
+    catchupEnabled: true,
+    maxCatchupRuns: 1,
+    config: { days: BACKGROUND_OZON_FINANCE_SYNC_DAYS }
+  },
+  {
+    key: "historical_finance_profit_repair",
+    name: "历史未结算订单与真实利润巡检",
+    category: "finance",
+    priority: "critical",
+    scheduleType: "daily",
+    dailyTime: "04:10",
+    catchupEnabled: true,
+    maxCatchupRuns: 1,
+    config: { ageDays: 60, limit: 5000 }
+  },
+  {
     key: "seller_analytics_28d_sync",
     name: "Ozon 店铺分析 28 天同步",
     category: "analytics",
@@ -666,9 +714,9 @@ const scheduledJobDefinitions = [
     catchupEnabled: true,
     maxCatchupRuns: 1,
     config: {
-      limit: 100,
+      limit: 20,
       minAgeMinutes: 1,
-      maxAgeDays: 7
+      maxAgeDays: 60
     }
   },
   {
@@ -719,6 +767,17 @@ const scheduledJobDefinitions = [
     config: { retentionDays: 30, batchSize: 1000 }
   },
   {
+    key: "listing_publish_storage_compaction",
+    name: "上架记录快照瘦身",
+    category: "maintenance",
+    priority: "low",
+    intervalMinutes: 60,
+    initialDelaySeconds: 300,
+    catchupEnabled: false,
+    maxCatchupRuns: 0,
+    config: { snapshotRetentionDays: 7, limit: 500 }
+  },
+  {
     key: "system_monitor_snapshot",
     name: "系统磁盘监控快照",
     category: "maintenance",
@@ -740,6 +799,8 @@ const scheduledJobHandlers = {
   dashboard_snapshot_refresh: withForegroundApiDeferral("dashboard_snapshot_refresh", runBackgroundDashboardSnapshotRefresh),
   advertising_sync: withForegroundApiDeferral("advertising_sync", runBackgroundAdvertisingSync),
   advertising_today_sync: withForegroundApiDeferral("advertising_today_sync", runBackgroundAdvertisingTodaySync),
+  ozon_finance_sync: withForegroundApiDeferral("ozon_finance_sync", runBackgroundOzonFinanceSync),
+  historical_finance_profit_repair: withForegroundApiDeferral("historical_finance_profit_repair", runBackgroundHistoricalFinanceProfitRepair),
   seller_analytics_daily_sync: withForegroundApiDeferral("seller_analytics_daily_sync", runBackgroundSellerAnalyticsDailySync),
   seller_analytics_28d_sync: withForegroundApiDeferral("seller_analytics_28d_sync", runBackgroundSellerAnalyticsDailySync),
   ozon_stock_sync: withForegroundApiDeferral("ozon_stock_sync", runBackgroundOzonStockSync),
@@ -756,6 +817,7 @@ const scheduledJobHandlers = {
   ozon_action_cleanup: withForegroundApiDeferral("ozon_action_cleanup", runOzonActionCleanupSweep),
   scheduled_history_cleanup: withForegroundApiDeferral("scheduled_history_cleanup", (job) => cleanupScheduledJobHistory(job?.config || {})),
   ai_generation_history_cleanup: withForegroundApiDeferral("ai_generation_history_cleanup", (job) => cleanupAiGenerationTaskHistory(job?.config || {})),
+  listing_publish_storage_compaction: withForegroundApiDeferral("listing_publish_storage_compaction", (job) => services.compactListingPublishRecordStorage(job?.config || {})),
   system_monitor_snapshot: withForegroundApiDeferral("system_monitor_snapshot", captureSystemMonitorSnapshot)
 };
 
@@ -1489,6 +1551,20 @@ async function sendProductImage(res, productId, imageLoader = null, options = {}
       return res.end(imageBody.buffer);
     }
     if (/^https?:\/\//i.test(String(image))) {
+      const thumbnailCacheSeed = `${productId}:${options.version || ""}:${image}`;
+      const cachedThumbnail = thumbnail
+        ? await readProductThumbnailCache(thumbnailCacheSeed, thumbnailWidth)
+        : null;
+      if (cachedThumbnail) {
+        writeHead(res, 200, {
+          "Content-Type": cachedThumbnail.contentType,
+          "Content-Length": cachedThumbnail.buffer.length,
+          "Cache-Control": cachedThumbnail.cacheControl,
+          "X-Product-Image-Variant": "thumbnail",
+          "X-Product-Thumbnail-Cache": "hit"
+        });
+        return res.end(cachedThumbnail.buffer);
+      }
       let payload = await fetchRemoteImagePayload(String(image)).catch(() => null);
       if (!payload && services.refreshProductImageUrl) {
         const refreshedImage = await services.refreshProductImageUrl(productId).catch(() => "");
@@ -1499,7 +1575,7 @@ async function sendProductImage(res, productId, imageLoader = null, options = {}
       }
       if (!payload) return sendImagePlaceholder(res);
       const imageBody = thumbnail
-        ? await productThumbnailBuffer(payload.buffer, `${productId}:${options.version || ""}:${image}`, thumbnailWidth)
+        ? await productThumbnailBuffer(payload.buffer, thumbnailCacheSeed, thumbnailWidth)
         : { buffer: payload.buffer, contentType: payload.contentType, cacheControl: "private, max-age=86400" };
       writeHead(res, 200, {
         "Content-Type": imageBody.contentType,
@@ -1529,10 +1605,14 @@ async function sendProductImage(res, productId, imageLoader = null, options = {}
   }
 }
 
-async function productThumbnailBuffer(buffer, cacheSeed, width) {
+function productThumbnailCachePath(cacheSeed, width) {
   const height = Math.round(width * 1.32);
   const cacheKey = createHash("sha256").update(`${cacheSeed}:${width}:${height}:webp72`).digest("hex");
-  const cachePath = path.join(productThumbnailCacheDir, `${cacheKey}.webp`);
+  return path.join(productThumbnailCacheDir, `${cacheKey}.webp`);
+}
+
+async function readProductThumbnailCache(cacheSeed, width) {
+  const cachePath = productThumbnailCachePath(cacheSeed, width);
   try {
     const cached = await fs.readFile(cachePath);
     return {
@@ -1541,8 +1621,15 @@ async function productThumbnailBuffer(buffer, cacheSeed, width) {
       cacheControl: "private, max-age=86400"
     };
   } catch {
-    // Cache miss.
+    return null;
   }
+}
+
+async function productThumbnailBuffer(buffer, cacheSeed, width) {
+  const cached = await readProductThumbnailCache(cacheSeed, width);
+  if (cached) return cached;
+  const height = Math.round(width * 1.32);
+  const cachePath = productThumbnailCachePath(cacheSeed, width);
   const resized = await sharp(buffer)
     .rotate()
     .resize({ width, height, fit: "cover", withoutEnlargement: true })
@@ -1579,16 +1666,6 @@ function sendImagePlaceholder(res) {
   return res.end(buffer);
 }
 
-function sendImageProxyUnavailable(res) {
-  writeHead(res, 502, {
-    "Content-Type": "text/plain; charset=utf-8",
-    "Content-Length": 0,
-    "Cache-Control": "no-store, must-revalidate",
-    "X-Image-Proxy-Cache": "UNAVAILABLE"
-  });
-  return res.end();
-}
-
 function imageProxyCacheKey(target) {
   return createHash("sha256").update(target).digest("hex");
 }
@@ -1601,14 +1678,14 @@ function imageProxyCachePaths(target) {
   };
 }
 
-async function readCachedRemoteImage(target) {
+async function readCachedRemoteImage(target, { allowStale = false } = {}) {
   const { dataPath, metaPath } = imageProxyCachePaths(target);
   try {
     const [metaRaw, dataStat] = await Promise.all([
       fs.readFile(metaPath, "utf8"),
       fs.stat(dataPath)
     ]);
-    if (Date.now() - dataStat.mtimeMs > IMAGE_PROXY_CACHE_TTL_MS) return null;
+    if (!allowStale && Date.now() - dataStat.mtimeMs > IMAGE_PROXY_CACHE_TTL_MS) return null;
     const meta = JSON.parse(metaRaw);
     const contentType = String(meta.contentType || "").toLowerCase();
     if (!contentType.startsWith("image/")) return null;
@@ -1710,7 +1787,10 @@ async function sendRemoteImage(req, res, url) {
   const cached = await readCachedRemoteImage(target);
   if (cached) return sendRemoteImageBuffer(res, cached, "HIT");
   const failedUntil = Number(imageProxyFailureCache.get(target) || 0);
-  if (failedUntil > Date.now()) return sendImageProxyUnavailable(res);
+  if (failedUntil > Date.now()) {
+    const stale = await readCachedRemoteImage(target, { allowStale: true });
+    return stale ? sendRemoteImageBuffer(res, stale, "STALE") : sendImagePlaceholder(res);
+  }
   if (failedUntil) imageProxyFailureCache.delete(target);
 
   const onClose = () => {
@@ -1729,7 +1809,8 @@ async function sendRemoteImage(req, res, url) {
     if (res.writableEnded || res.destroyed) return;
     if (!payload) {
       imageProxyFailureCache.set(target, Date.now() + IMAGE_PROXY_FAILURE_TTL_MS);
-      return sendImageProxyUnavailable(res);
+      const stale = await readCachedRemoteImage(target, { allowStale: true });
+      return stale ? sendRemoteImageBuffer(res, stale, "STALE") : sendImagePlaceholder(res);
     }
     imageProxyFailureCache.delete(target);
     writeCachedRemoteImage(target, payload).catch((error) => {
@@ -1739,7 +1820,8 @@ async function sendRemoteImage(req, res, url) {
   } catch (error) {
     if (res.writableEnded || res.destroyed) return;
     imageProxyFailureCache.set(target, Date.now() + IMAGE_PROXY_FAILURE_TTL_MS);
-    return sendImageProxyUnavailable(res);
+    const stale = await readCachedRemoteImage(target, { allowStale: true });
+    return stale ? sendRemoteImageBuffer(res, stale, "STALE") : sendImagePlaceholder(res);
   } finally {
     imageProxyInflight.delete(target);
     req.off("aborted", onClose);
@@ -2841,6 +2923,95 @@ async function runBackgroundSellerAnalyticsDailySync(context = {}) {
   } finally {
     backgroundSellerAnalyticsSyncRunning = false;
     releaseBackgroundModuleLane("analytics", jobKey);
+  }
+}
+
+async function runBackgroundOzonFinanceSync(context = {}) {
+  if (backgroundOzonFinanceSyncRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 120 };
+  const laneBusy = claimBackgroundModuleLane("finance", "ozon_finance_sync");
+  if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 120 };
+  backgroundOzonFinanceSyncRunning = true;
+  const days = Math.max(3, Number(context?.config?.days || BACKGROUND_OZON_FINANCE_SYNC_DAYS));
+  const window = rollingOrderSyncWindow(days);
+  try {
+    await logScheduledJobEvent({
+      runId: context?.runId,
+      jobKey: "ozon_finance_sync",
+      stepKey: "job_start",
+      status: "info",
+      message: `Starting Ozon finance sync for ${window.from}~${window.to}`
+    }).catch(() => {});
+    const result = await services.syncOzonFinance({ from: window.from, to: window.to }, { signal: context?.signal });
+    const errors = Array.isArray(result?.errors) ? result.errors : [];
+    const status = errors.length ? "partial_error" : "success";
+    await logScheduledJobEvent({
+      runId: context?.runId,
+      jobKey: "ozon_finance_sync",
+      stepKey: "job_finish",
+      status: errors.length ? "warning" : "success",
+      message: errors.length ? errors.join("; ") : "Ozon finance sync finished",
+      detail: {
+        window,
+        fetched: Number(result?.fetched || 0),
+        upserted: Number(result?.upserted || 0),
+        appliedOrders: Number(result?.applied?.orders || 0),
+        appliedItems: Number(result?.applied?.items || 0)
+      }
+    }).catch(() => {});
+    console.log(`background Ozon finance sync ${status}: ${window.from}~${window.to}, fetched ${result?.fetched || 0}, applied ${result?.applied?.items || 0}`);
+    return { ...result, status, from: window.from, to: window.to };
+  } catch (error) {
+    await logScheduledJobEvent({
+      runId: context?.runId,
+      jobKey: "ozon_finance_sync",
+      stepKey: "job_error",
+      status: "error",
+      message: error?.message || "Ozon finance sync failed"
+    }).catch(() => {});
+    console.error("background Ozon finance sync failed", error);
+    throw error;
+  } finally {
+    backgroundOzonFinanceSyncRunning = false;
+    releaseBackgroundModuleLane("finance", "ozon_finance_sync");
+  }
+}
+
+async function runBackgroundHistoricalFinanceProfitRepair(context = {}) {
+  if (backgroundHistoricalFinanceRepairRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 300 };
+  const jobKey = "historical_finance_profit_repair";
+  const laneBusy = claimBackgroundModuleLane("finance", jobKey);
+  if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 300 };
+  backgroundHistoricalFinanceRepairRunning = true;
+  const ageDays = Math.max(30, Number(context?.config?.ageDays || 60));
+  const limit = Math.min(Math.max(Number(context?.config?.limit || 5000), 100), 5000);
+  const to = shanghaiDateDaysAgo(ageDays);
+  try {
+    const result = await services.repairHistoricalFinanceProfitFacts({
+      to,
+      limit,
+      only_issues: "1",
+      write: true
+    });
+    await logScheduledJobEvent({
+      runId: context?.runId,
+      jobKey,
+      stepKey: "job_finish",
+      status: "success",
+      message: `Historical finance repair finished through ${to}`,
+      detail: {
+        ageDays,
+        to,
+        selectedOrders: Number(result?.selected_orders || 0),
+        selectedItems: Number(result?.selected_items || 0),
+        appliedOrders: Number(result?.applied?.orders || 0),
+        appliedItems: Number(result?.applied?.items || 0),
+        reasons: result?.reasons || {}
+      }
+    }).catch(() => {});
+    return { ...result, status: "success", ageDays, to };
+  } finally {
+    backgroundHistoricalFinanceRepairRunning = false;
+    releaseBackgroundModuleLane("finance", jobKey);
   }
 }
 

@@ -216,7 +216,7 @@ onMounted(async () => {
       </template>
     </InventoryPageToolbar>
 
-    <div class="inventory-table-wrap">
+    <div class="inventory-table-wrap erp-responsive-table" role="region" aria-label="供应商表格" tabindex="0">
       <el-table v-loading="loading" :data="pagedRows" row-key="id" stripe border class="erp-data-table">
         <el-table-column prop="name" label="供应商名称" min-width="220" fixed="left" />
         <el-table-column prop="contact_person" label="联系人" min-width="120" />

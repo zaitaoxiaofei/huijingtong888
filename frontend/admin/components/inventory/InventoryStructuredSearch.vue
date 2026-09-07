@@ -8,17 +8,36 @@ const props = defineProps({
   compact: { type: Boolean, default: false }
 });
 const emit = defineEmits(["update:modelValue", "change"]);
-const optionTypes = ["category", "accessory", "color", "material", "process"];
-const dependentOptionTypes = optionTypes.filter((type) => type !== "category");
+const optionTypes = ["category", "brand", "vehicle_model", "accessory", "color", "material", "process"];
+const dependentOptionTypes = ["brand", "accessory", "color", "material", "process"];
 const options = reactive(Object.fromEntries(optionTypes.map((type) => [type, []])));
 const optionState = reactive(Object.fromEntries(optionTypes.map((type) => [type, { loading: false, failed: false }])));
 const vehicleCatalog = reactive({ brands: [] });
 const vehicleState = reactive({ loading: false, failed: false });
 
-const vehicleBrandOptions = computed(() => vehicleCatalog.brands.map((brand) => ({ value: brand.name, label: brand.label || [brand.nameZh, brand.name].filter(Boolean).join(" ") })));
+function normalizeVehicleBrandValue(value) {
+  return String(value || "").replace(/\|/g, " ").replace(/\s+/g, " ").trim();
+}
+
+const vehicleBrandOptions = computed(() => {
+  const merged = new Map(options.brand.map((item) => {
+    const value = normalizeVehicleBrandValue(item.value);
+    return [value, { value, label: optionLabel(item) }];
+  }).filter(([value]) => value));
+  for (const brand of vehicleCatalog.brands) {
+    const value = normalizeVehicleBrandValue(brand.name);
+    if (value && !merged.has(value)) merged.set(value, { value, label: brand.label || [brand.nameZh, brand.name].filter(Boolean).join(" ") });
+  }
+  return [...merged.values()];
+});
 const vehicleModelOptions = computed(() => {
-  const brand = vehicleCatalog.brands.find((item) => item.name === props.modelValue.vehicleBrand);
-  return Array.isArray(brand?.models) ? brand.models : [];
+  const merged = new Map(options.vehicle_model.map((item) => [item.value, { name: item.value, label: optionLabel(item) }]));
+  const selectedBrand = normalizeVehicleBrandValue(props.modelValue.vehicleBrand);
+  const brand = vehicleCatalog.brands.find((item) => item.name === props.modelValue.vehicleBrand || item.name === selectedBrand);
+  for (const model of Array.isArray(brand?.models) ? brand.models : []) {
+    if (!merged.has(model.name)) merged.set(model.name, model);
+  }
+  return [...merged.values()];
 });
 
 function update(key, value) {
@@ -26,7 +45,8 @@ function update(key, value) {
     ElMessage.warning("核心品名最多 7 个字");
     return;
   }
-  const next = { ...props.modelValue, [key]: value ?? "" };
+  const nextValue = key === "vehicleBrand" ? normalizeVehicleBrandValue(value) : value;
+  const next = { ...props.modelValue, [key]: nextValue ?? "" };
   if (key === "vehicleBrand") next.vehicleModel = [];
   emit("update:modelValue", next);
   emit("change");
@@ -47,7 +67,7 @@ async function loadOption(type) {
     const brand = String(props.modelValue.vehicleBrand || "").trim();
     const fitmentType = String(props.modelValue.fitmentType || "").trim();
     const vehicleModels = Array.isArray(props.modelValue.vehicleModel) ? props.modelValue.vehicleModel : [];
-    if (brand) params.set("brand", brand);
+    if (brand) params.set("brand", normalizeVehicleBrandValue(brand));
     if (fitmentType) params.set("fitment_type", fitmentType);
     if (vehicleModels.length === 1) params.set("vehicle_model", vehicleModels[0]);
     options[type] = await loadInventoryNamingOptions(params);
@@ -101,6 +121,11 @@ watch(() => props.modelValue.inventoryCategory, async (category, previousCategor
   if (category === previousCategory) return;
   if (props.modelValue.accessoryName) update("accessoryName", "");
   await Promise.allSettled(dependentOptionTypes.map(loadOption));
+});
+
+watch(() => props.modelValue.vehicleBrand, async (brand, previousBrand) => {
+  if (brand === previousBrand) return;
+  await loadOption("vehicle_model");
 });
 
 watch(
@@ -221,7 +246,19 @@ watch(
 .inventory-structured-search :deep(.el-select), .inventory-structured-search :deep(.el-input) { width: 100%; }
 .inventory-structured-search :deep(.el-select__wrapper),
 .inventory-structured-search :deep(.el-input__wrapper) { min-height: 34px; border-radius: 7px; }
-.inventory-structured-search.is-compact { grid-template-columns: 1fr; }
+.inventory-structured-search.is-compact {
+  grid-template-columns: repeat(8, minmax(132px, 1fr));
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+.inventory-structured-search.is-compact .search-group { display: contents; }
+.inventory-structured-search.is-compact .search-group__title { display: none; }
+.inventory-structured-search.is-compact :deep(.el-form-item__label) { margin-bottom: 3px; line-height: 16px; }
+.inventory-structured-search.is-compact :deep(.el-select__wrapper),
+.inventory-structured-search.is-compact :deep(.el-input__wrapper) { min-height: 30px; }
 @media (max-width: 1360px) {
   .inventory-structured-search { grid-template-columns: 1fr; }
 }

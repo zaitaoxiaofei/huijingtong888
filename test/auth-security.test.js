@@ -25,10 +25,14 @@ test("operator cannot mutate people or system configuration", () => {
   assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "scheduled-jobs", "run"]).allowed, false);
 });
 
-test("manager can maintain rules but cannot mutate admin-only resources", () => {
+test("manager cannot access finance or system resources", () => {
   const session = { role: "manager" };
-  assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "logistics-rules"]).allowed, true);
-  assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "exchange-rate"]).allowed, true);
+  assert.equal(authorizeApiRequest({ method: "GET", _session: session }, ["api", "dashboard"]).allowed, true);
+  assert.equal(authorizeApiRequest({ method: "GET", _session: session }, ["api", "profit-ranking"]).allowed, true);
+  assert.equal(authorizeApiRequest({ method: "GET", _session: session }, ["api", "finance-center", "report"]).allowed, false);
+  assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "logistics-rules"]).allowed, false);
+  assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "exchange-rate"]).allowed, false);
+  assert.equal(authorizeApiRequest({ method: "GET", _session: session }, ["api", "shops"]).allowed, true);
   assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "people"]).allowed, false);
 });
 

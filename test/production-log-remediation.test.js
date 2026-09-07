@@ -15,6 +15,16 @@ test("repeat shipping is idempotent and Ozon already-shipped responses are recon
   assert.doesNotMatch(block, /This order may already be shipped/);
 });
 
+test("normal shipping submits the authoritative live Ozon quantities", () => {
+  const start = mysqlSource.indexOf("export async function shipOrdersMysql");
+  const end = mysqlSource.indexOf("export async function", start + 30);
+  const block = mysqlSource.slice(start, end);
+
+  assert.match(block, /const liveProducts = buildLiveShippingProductsMysql\(livePosting\)/);
+  assert.match(block, /const shippingItems = splitPackages \|\| !liveProducts\.length \? items : liveProducts/);
+  assert.match(block, /shipOzonPosting\(shop, order\.posting_number, shippingItems/);
+});
+
 test("expected inventory and procurement conflicts carry HTTP 409 metadata", () => {
   assert.match(mysqlSource, /Inventory product not found or archived"\), \{ statusCode: 409 \}/);
   assert.match(mysqlSource, /Only open procurement requests can be directly inbounded"\), \{[\s\S]*statusCode: 409,[\s\S]*procurement_request\.status/);

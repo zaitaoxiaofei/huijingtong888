@@ -1100,6 +1100,11 @@ const endpoints = [
       requestBody: body(ref("OrderIdsRequest")),
       responses: [response(200, "application/json", scalar("object", "Mutation result with count."))]
     }),
+    endpoint("POST", "/api/orders/package-label-print-failed", "Remove the current operator's failed label-print batch.", {
+      auth: "authenticated",
+      requestBody: body(scalar("object", "Print batch identifier returned by the printed endpoint.")),
+      responses: [response(200, "application/json", scalar("object", "Mutation result with removed count."))]
+    }),
     endpoint("POST", "/api/orders/ship", "Submit shipment confirmation to Ozon for selected orders.", {
       auth: "authenticated",
       requestBody: body(ref("ShipOrdersRequest")),
@@ -1518,6 +1523,41 @@ const endpoints = [
       pathParams: [param("id", scalar("number", "Platform-order identifier."))],
       requestBody: body(scalar("object", "Selected procurement records and allocated amounts.")),
       responses: [response(200, "application/json", ref("MutationOk"))]
+    }),
+    endpoint("POST", "/api/procurement/payments/import", "Import WeChat or Alipay payment statement rows.", {
+      auth: "authenticated",
+      requestBody: body(scalar("object", "Payment provider and normalized statement rows.")),
+      responses: [response(200, "application/json", scalar("object", "Payment import counters."))]
+    }),
+    endpoint("GET", "/api/procurement/reconciliation", "Return platform-order and payment reconciliation rows and totals.", {
+      auth: "authenticated",
+      responses: [response(200, "application/json", scalar("object", "Paged reconciliation result."))]
+    }),
+    endpoint("POST", "/api/procurement/reconciliation/auto-match", "Match platform orders to payment transactions by amount, time, and counterparty.", {
+      auth: "authenticated",
+      responses: [response(200, "application/json", scalar("object", "Automatic matching counters."))]
+    }),
+    endpoint("POST", "/api/procurement/reconciliation/:id/confirm", "Confirm or reject a suggested payment match.", {
+      auth: "authenticated",
+      pathParams: [param("id", scalar("number", "Payment-match identifier."))],
+      requestBody: body(scalar("object", "Confirmation decision.")),
+      responses: [response(200, "application/json", ref("MutationOk"))]
+    }),
+    endpoint("GET", "/api/procurement/reconciliation/:id/payment-candidates", "Return nearby WeChat and Alipay payment candidates for manual matching.", {
+      auth: "authenticated",
+      pathParams: [param("id", scalar("number", "Platform-order identifier."))],
+      responses: [response(200, "application/json", arrayOf(scalar("object", "Payment candidate."), "Payment candidate rows."))]
+    }),
+    endpoint("POST", "/api/procurement/reconciliation/:id/payment-match", "Manually bind a platform order to one payment transaction.", {
+      auth: "authenticated",
+      pathParams: [param("id", scalar("number", "Platform-order identifier."))],
+      requestBody: body(scalar("object", "Selected payment transaction identifier.")),
+      responses: [response(200, "application/json", ref("MutationOk"))]
+    }),
+    endpoint("POST", "/api/procurement/reconciliation/apply-costs", "Apply confirmed payment allocations to procurement records and bound inventory cost.", {
+      auth: "authenticated",
+      requestBody: body(scalar("object", "Optional platform-order identifiers."), false),
+      responses: [response(200, "application/json", scalar("object", "Updated procurement cost count."))]
     }),
     endpoint("DELETE", "/api/team/tasks/:id", "Delete a team planning task.", {
       auth: "authenticated",

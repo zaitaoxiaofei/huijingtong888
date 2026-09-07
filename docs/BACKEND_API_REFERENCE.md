@@ -1711,6 +1711,16 @@ Mark one or more orders as label printed.
 - Responses:
   - `200` `application/json` -> `object`
 
+#### `POST /api/orders/package-label-print-failed`
+
+Remove the current operator's failed label-print batch.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
 #### `POST /api/orders/ship`
 
 Submit shipment confirmation to Ozon for selected orders.
@@ -2528,6 +2538,76 @@ Bind one platform order to one or more procurement records.
   - Schema: `object`
 - Responses:
   - `200` `application/json` -> `MutationOk`
+
+#### `POST /api/procurement/payments/import`
+
+Import WeChat or Alipay payment statement rows.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/procurement/reconciliation`
+
+Return platform-order and payment reconciliation rows and totals.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/procurement/reconciliation/auto-match`
+
+Match platform orders to payment transactions by amount, time, and counterparty.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/procurement/reconciliation/:id/confirm`
+
+Confirm or reject a suggested payment match.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Payment-match identifier.
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `MutationOk`
+
+#### `GET /api/procurement/reconciliation/:id/payment-candidates`
+
+Return nearby WeChat and Alipay payment candidates for manual matching.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Platform-order identifier.
+- Responses:
+  - `200` `application/json` -> `array<object>`
+
+#### `POST /api/procurement/reconciliation/:id/payment-match`
+
+Manually bind a platform order to one payment transaction.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Platform-order identifier.
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `MutationOk`
+
+#### `POST /api/procurement/reconciliation/apply-costs`
+
+Apply confirmed payment allocations to procurement records and bound inventory cost.
+
+- Auth: `authenticated`
+- Request body: optional
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
 
 #### `DELETE /api/team/tasks/:id`
 

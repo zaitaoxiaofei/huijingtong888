@@ -272,25 +272,67 @@ function writePrintPreviewPageSafe(printWindow, { url }) {
       cursor: pointer;
     }
     button.primary { border-color: #2563eb; color: #fff; background: #2563eb; }
-    button.danger { color: #991b1b; border-color: #fecaca; background: #fff; }
+    button.danger { color: #fff; border-color: #dc2626; background: #dc2626; }
     button:disabled { opacity: 0.7; cursor: wait; }
     iframe { width: 100%; height: 100%; border: 0; background: #e5e7eb; }
+    .result-mask {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: none;
+      place-items: center;
+      padding: 24px;
+      background: rgba(15, 23, 42, 0.42);
+    }
+    .result-mask.visible { display: grid; }
+    .result-dialog {
+      position: relative;
+      width: min(420px, calc(100vw - 48px));
+      padding: 26px;
+      border-radius: 12px;
+      background: #fff;
+      box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
+    }
+    .result-dialog h2 { margin: 0 0 10px; font-size: 18px; }
+    .result-dialog p { font-size: 13px; line-height: 1.6; }
+    .result-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+    .result-close {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      width: 32px;
+      padding: 0;
+      border: 0;
+      color: #64748b;
+      background: transparent;
+      font-size: 22px;
+    }
   </style>
 </head>
 <body>
   <header class="bar">
     <div class="title">
       <h1>&#38754;&#21333;&#25171;&#21360;&#30830;&#35748;</h1>
-      <p>&#35831;&#20808;&#23436;&#25104; PDF &#25171;&#21360;&#12290;&#30830;&#35748;&#38754;&#21333;&#24050;&#32463;&#23454;&#38469;&#25171;&#21360;&#21518;&#65292;&#20877;&#28857;&#20987;&#8220;&#30830;&#35748;&#24050;&#25171;&#21360;&#8221;&#12290;</p>
+      <p>&#30830;&#35748;&#38754;&#21333;&#20869;&#23481;&#21518;&#65292;&#28857;&#20987;&#8220;&#25171;&#21360;&#8221;&#35843;&#29992;&#27983;&#35272;&#22120;&#25171;&#21360;&#12290;</p>
     </div>
     <div class="actions">
-      <button type="button" id="printNow">&#25171;&#21360;</button>
+      <button type="button" id="printNow" class="primary">&#25171;&#21360;</button>
       <a href="${url}" target="_blank" rel="noopener">&#25171;&#24320; PDF</a>
-      <button type="button" id="cancelPrint" class="danger">&#21462;&#28040;</button>
-      <button type="button" id="confirmPrinted" class="primary">&#30830;&#35748;&#24050;&#25171;&#21360;</button>
+      <button type="button" id="closePage">&#20851;&#38381;</button>
     </div>
   </header>
   <iframe id="labelFrame" src="${url}" title="PDF"></iframe>
+  <div id="printResultMask" class="result-mask">
+    <section class="result-dialog" role="dialog" aria-modal="true" aria-labelledby="printResultTitle">
+      <button type="button" id="closeResult" class="result-close" aria-label="Close">&times;</button>
+      <h2 id="printResultTitle">&#25171;&#21360;&#32467;&#26524;&#30830;&#35748;</h2>
+      <p>&#22914;&#26524;&#38754;&#21333;&#24050;&#27491;&#24120;&#25171;&#20986;&#65292;&#28857;&#20987;&#8220;&#23436;&#25104;&#8221;&#12290;&#22914;&#26524;&#25171;&#21360;&#22833;&#36133;&#65292;&#28857;&#20987;&#8220;&#22833;&#36133;&#8221;&#25764;&#38144;&#26412;&#25209;&#25171;&#21360;&#35760;&#24405;&#12290;</p>
+      <div class="result-actions">
+        <button type="button" id="printFailed" class="danger">&#22833;&#36133;</button>
+        <button type="button" id="printCompleted" class="primary">&#23436;&#25104;</button>
+      </div>
+    </section>
+  </div>
 </body>
 </html>`);
   printWindow.document.close();
@@ -300,41 +342,55 @@ function waitForPrintConfirmation(printWindow, { url, count, orderIds }) {
   writePrintPreviewPageSafe(printWindow, { url, count });
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (confirmed) => {
+    let printBatchId = "";
+    let printTriggered = false;
+    const finish = (result) => {
       if (settled) return;
       settled = true;
       window.clearInterval(closeTimer);
-      resolve(Boolean(confirmed));
+      resolve(result);
     };
     const closeTimer = window.setInterval(() => {
-      if (printWindow.closed) finish(false);
-      const decision = printWindow.document?.body?.dataset?.printDecision;
-      if (decision === "confirmed") finish(true);
-      if (decision === "cancelled") finish(false);
+      if (printWindow.closed) finish({ printed: printTriggered, failed: false });
     }, 600);
-    const confirmButton = printWindow.document.getElementById("confirmPrinted");
-    const cancelButton = printWindow.document.getElementById("cancelPrint");
     const printButton = printWindow.document.getElementById("printNow");
-    confirmButton?.addEventListener("click", async () => {
-      confirmButton.disabled = true;
+    const closePageButton = printWindow.document.getElementById("closePage");
+    const resultMask = printWindow.document.getElementById("printResultMask");
+    const completedButton = printWindow.document.getElementById("printCompleted");
+    const failedButton = printWindow.document.getElementById("printFailed");
+    const closeResultButton = printWindow.document.getElementById("closeResult");
+    const acceptDefault = () => {
+      resultMask?.classList.remove("visible");
+      finish({ printed: printTriggered, failed: false });
+    };
+    closePageButton?.addEventListener("click", () => printWindow.close());
+    completedButton?.addEventListener("click", acceptDefault);
+    closeResultButton?.addEventListener("click", acceptDefault);
+    resultMask?.addEventListener("click", (event) => {
+      if (event.target === resultMask) acceptDefault();
+    });
+    failedButton?.addEventListener("click", async () => {
+      if (!printBatchId) return;
+      failedButton.disabled = true;
       try {
-        await apiClient.post("/api/orders/package-label-printed", { order_ids: orderIds });
-        finish(true);
+        await apiClient.post("/api/orders/package-label-print-failed", { print_batch_id: printBatchId });
+        resultMask?.classList.remove("visible");
+        finish({ printed: false, failed: true });
       } catch (error) {
-        confirmButton.disabled = false;
-        confirmButton.textContent = "确认已打印";
-        printWindow.alert(`记录打印时间失败：${error?.message || "未知错误"}`);
+        failedButton.disabled = false;
+        printWindow.alert(`撤销打印记录失败：${error?.message || "未知错误"}`);
       }
     });
-    cancelButton?.addEventListener("click", () => finish(false));
     printButton?.addEventListener("click", async () => {
       printButton.disabled = true;
       const frame = printWindow.document.getElementById("labelFrame");
       try {
-        await apiClient.post("/api/orders/package-label-printed", { order_ids: orderIds });
-        finish(true);
+        const record = await apiClient.post("/api/orders/package-label-printed", { order_ids: orderIds });
+        printBatchId = String(record?.print_batch_id || "");
+        printTriggered = true;
         frame?.contentWindow?.focus();
         frame?.contentWindow?.print();
+        resultMask?.classList.add("visible");
       } catch (error) {
         printButton.disabled = false;
         printWindow.alert(`记录打印时间失败：${error?.message || "未知错误"}`);
@@ -385,6 +441,7 @@ export async function bulkPrintOrders(orderIds = [], options = {}) {
 export async function previewOrderLabels(orderIds = [], options = {}) {
   const ids = Array.isArray(orderIds) ? orderIds.map(Number).filter(Boolean) : [];
   if (!ids.length) return null;
+  const printIds = ids.length > 1 ? [...ids].reverse() : ids;
   const printWindow = window.open("", "_blank");
   if (!printWindow) throw new Error("浏览器阻止了预览窗口，请允许本站打开弹窗后重试");
   writePrintLoadingPage(printWindow, ids.length);
@@ -393,7 +450,7 @@ export async function previewOrderLabels(orderIds = [], options = {}) {
     const response = await apiClient.blobResponse("/api/orders/package-label", {
       method: "POST",
       body: JSON.stringify({
-        order_ids: ids,
+        order_ids: printIds,
         require_all: true,
         browser_preview: true,
         printer: options.printer || "label",
@@ -405,12 +462,12 @@ export async function previewOrderLabels(orderIds = [], options = {}) {
     });
     const printedIds = printedIdsFromHeader(response.headers);
     url = URL.createObjectURL(response.blob);
-    const confirmed = await waitForPrintConfirmation(printWindow, {
+    const printResult = await waitForPrintConfirmation(printWindow, {
       url,
       count: printedIds.length || ids.length,
-      orderIds: printedIds.length ? printedIds : ids
+      orderIds: printedIds.length ? printedIds : printIds
     });
-    return { ok: true, confirmed, printed_ids: printedIds.length ? printedIds : ids, failures: failedLabelsFromHeader(response.headers) };
+    return { ok: true, ...printResult, printed_ids: printedIds.length ? printedIds : printIds, failures: failedLabelsFromHeader(response.headers) };
   } catch (error) {
     if (!printWindow.closed) writePrintErrorPage(printWindow, "面单预览失败", error?.message || "未知错误");
     throw error;

@@ -63,7 +63,9 @@ test("automatic sending revalidates Ozon status and records scenarios consistent
 test("three priority templates use safer natural copy and remain opt-in by default", () => {
   assert.match(serviceSource, /Для получения может понадобиться паспорт или код получения/);
   assert.match(serviceSource, /Если вы уже получили этот заказ/);
-  assert.match(serviceSource, /другого отправления или подарка нет/);
+  assert.match(serviceSource, /Состав заказа указан выше и в приложении Ozon/);
+  const pickupDefault = serviceSource.match(/scenario: "pickup_notice"[\s\S]*?template_text: "([\s\S]*?)",\n\s+template_translation:/)?.[1] || "";
+  assert.doesNotMatch(pickupDefault, /подар|другого отправления/i);
   assert.match(serviceSource, /Не отправляйте паспортные данные в чате/);
   assert.match(serviceSource, /поделитесь, пожалуйста, впечатлением в отзыве на Ozon/);
   assert.match(serviceSource, /scenario: "pickup_notice"[\s\S]*?enabled: false/);

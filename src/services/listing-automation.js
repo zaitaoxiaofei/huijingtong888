@@ -9022,18 +9022,10 @@ async function preparePublishRecordForSubmit({
   assertNoEmbeddedMediaForPersistence(shopPayload, "listing publish request");
   const requestJson = JSON.stringify(shopPayload);
   const listSummaryJson = JSON.stringify(buildPublishRecordListSummary(shopPayload));
-  const standardizedSnapshot = templateSnapshot
-    ? compactListingPublishSnapshot(compactTemplateForEditor(await standardizeListingTemplatePayload(normalizeTemplatePayload(templateSnapshot), listingTemplateStandardizerOptions({
-      sourceType: "listing_publish_record",
-      sourceId: String(sourceRecordId || firstOfferId(shopPayload) || ""),
-      shopId: shop?.id,
-      autoSync: false,
-      syncValues: false,
-      diagnostics: false
-    }))))
-    : null;
-  if (standardizedSnapshot) assertNoEmbeddedMediaForPersistence(standardizedSnapshot, "listing publish snapshot");
-  const templateSnapshotJson = standardizedSnapshot ? JSON.stringify(standardizedSnapshot) : null;
+  // The Ozon request is the authoritative, retryable publish snapshot. A full
+  // editor template can be rebuilt from it on demand, so duplicating the much
+  // larger template payload on every publish record is intentionally avoided.
+  const templateSnapshotJson = null;
   const offerId = firstOfferId(shopPayload);
   if (sourceRecordId && updateExisting) {
     const current = await row("SELECT id, shop_id FROM listing_publish_records WHERE id = ? AND status <> 'deleted'", [sourceRecordId]);
@@ -9044,7 +9036,7 @@ async function preparePublishRecordForSubmit({
       SET shop_id = ?, offer_id = ?, status = ?, request_json = ?,
           list_summary_json = ?,
           response_json = NULL, error_json = NULL, task_id = '', source_product_id = COALESCE(NULLIF(?, 0), source_product_id),
-          template_snapshot_json = COALESCE(?, template_snapshot_json),
+          template_snapshot_json = ?,
           offer_source = ?, draft_id = COALESCE(NULLIF(?, 0), draft_id),
           source_collector_sku = COALESCE(NULLIF(?, ''), source_collector_sku),
           publish_task_id = COALESCE(NULLIF(?, 0), publish_task_id),
@@ -9136,15 +9128,41 @@ async function backfillPublishRecordSnapshots(rows = []) {
   for (const item of pending) {
     const snapshot = await buildTemplateSnapshotFromPublishRecord(item, { diagnostics: false });
     if (!snapshot) continue;
-    const snapshotJson = JSON.stringify(compactListingPublishSnapshot(compactTemplateForEditor(snapshot)));
-    await run(`
-      UPDATE listing_publish_records
-      SET template_snapshot_json = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND (template_snapshot_json IS NULL OR template_snapshot_json = '')
-    `, [snapshotJson, Number(item.id)]).catch(() => null);
-    item.template_snapshot_json = snapshotJson;
+    item.template_snapshot_json = JSON.stringify(compactListingPublishSnapshot(compactTemplateForEditor(snapshot)));
   }
   return rows;
+}
+
+export async function compactListingPublishRecordStorage(options = {}) {
+  await ensureListingAutomationSchema();
+  const limit = Math.max(10, Math.min(1000, Number(options.limit || 500) || 500));
+  const snapshotRetentionDays = Math.max(1, Math.min(90, Number(options.snapshotRetentionDays || options.snapshot_retention_days || 7) || 7));
+  const candidates = await all(`
+    SELECT id
+    FROM listing_publish_records
+    WHERE template_snapshot_json IS NOT NULL
+      AND template_snapshot_json <> ''
+      AND updated_at < DATE_SUB(NOW(), INTERVAL ? DAY)
+      AND status NOT IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending')
+      AND request_json IS NOT NULL
+      AND JSON_LENGTH(JSON_EXTRACT(request_json, '$.items')) > 0
+    ORDER BY id ASC
+    LIMIT ?
+  `, [snapshotRetentionDays, limit]);
+  const ids = candidates.map((item) => Number(item.id || 0)).filter(Boolean);
+  if (!ids.length) return { scanned: 0, compacted: 0, remaining: false, snapshotRetentionDays };
+  const result = await run(`
+    UPDATE listing_publish_records
+    SET template_snapshot_json = NULL
+    WHERE id IN (${ids.map(() => "?").join(",")})
+      AND request_json IS NOT NULL
+  `, ids);
+  return {
+    scanned: ids.length,
+    compacted: Number(result?.affectedRows || 0),
+    remaining: ids.length === limit,
+    snapshotRetentionDays
+  };
 }
 
 export async function listingPublishRecords(query = {}, session = null) {
@@ -9541,11 +9559,6 @@ export async function listingPublishRecordDetail(id, session = null) {
     const fallbackSnapshot = await buildTemplateSnapshotFromPublishRecord(record);
     if (fallbackSnapshot) {
       const snapshotJson = JSON.stringify(compactListingPublishSnapshot(compactTemplateForEditor(fallbackSnapshot)));
-      await run(`
-        UPDATE listing_publish_records
-        SET template_snapshot_json = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `, [snapshotJson, Number(id)]).catch(() => null);
       record.template_snapshot_json = snapshotJson;
     }
   } else if (!currentSnapshot?.source_raw_omitted && !currentSnapshot?.source_raw?.listing_template_standardizer) {
@@ -9557,11 +9570,6 @@ export async function listingPublishRecordDetail(id, session = null) {
       syncValues: false
     }));
     const snapshotJson = JSON.stringify(compactListingPublishSnapshot(compactTemplateForEditor(standardizedSnapshot)));
-    await run(`
-      UPDATE listing_publish_records
-      SET template_snapshot_json = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `, [snapshotJson, Number(id)]).catch(() => null);
     record.template_snapshot_json = snapshotJson;
   }
   const enriched = await enrichPublishRecordRowFromOzon(record).catch((error) => ({
@@ -9581,7 +9589,54 @@ export async function refreshListingPublishRecord(id, session = null) {
   `, [Number(id)]);
   if (!record) throw listingPublishRecordNotFoundError();
   if (!record.task_id) return normalizePublishRecordRow(record);
-  const importInfo = await fetchOzonProductImportInfo(record, record.task_id);
+  let importInfo;
+  try {
+    importInfo = await fetchOzonProductImportInfo(record, record.task_id);
+  } catch (error) {
+    const ageMs = Date.now() - new Date(record.created_at || record.updated_at || 0).getTime();
+    const taskNotFound = /task not found/i.test(String(error?.message || error));
+    if (!taskNotFound || !Number.isFinite(ageMs) || ageMs < 24 * 60 * 60 * 1000) throw error;
+    const request = parseJson(record.request_json, {});
+    const offerId = String(record.offer_id || firstOfferId(request) || "").trim();
+    const matches = offerId
+      ? await fetchOzonProductInfoAttributes(record, { offerIds: [offerId], limit: 1 })
+      : [];
+    const detail = normalizeArray(matches)[0] || null;
+    if (detail) {
+      const source = unwrapOzonProductDetail(detail);
+      const mergedRequest = mergePublishRequestWithOzonDetail(request, detail, record);
+      await run(`
+        UPDATE listing_publish_records
+        SET status = 'imported', request_json = ?, response_json = ?, error_json = NULL,
+          ozon_product_id = ?, ozon_sku = ?, published_at = COALESCE(published_at, CURRENT_TIMESTAMP),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending')
+      `, [
+        JSON.stringify(mergedRequest),
+        JSON.stringify({ recovery: { expired_task_discovered_on_ozon: true, detail } }),
+        String(source.id || source.product_id || source.productId || ""),
+        String(source.sku || source.ozon_sku || source.fbo_sku || source.fbs_sku || ""),
+        Number(id)
+      ]);
+    } else {
+      await run(`
+        UPDATE listing_publish_records
+        SET status = 'failed', error_json = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending')
+      `, [JSON.stringify({
+        code: "OZON_IMPORT_TASK_EXPIRED",
+        message: "Ozon 上架任务已过期或不存在，且当前店铺未查询到对应商品",
+        fix_tip: "可检查商品编号后重新提交；系统不会自动重复上架"
+      }), Number(id)]);
+    }
+    const recovered = await row(`
+      SELECT r.*, s.name AS shop_name
+      FROM listing_publish_records r
+      LEFT JOIN shops s ON s.id = r.shop_id
+      WHERE r.id = ?
+    `, [Number(id)]);
+    return normalizePublishRecordRow(recovered);
+  }
   await updatePublishRecordAfterSubmit(Number(id), {
     taskId: record.task_id,
     response: parseJson(record.response_json, {}),
@@ -9602,7 +9657,7 @@ export async function autoSyncListingPublishRecords(options = {}) {
   await ensureListingAutomationSchema();
   const limit = Math.min(Math.max(Number(options.limit || 20), 1), 100);
   const minAgeMinutes = Math.min(Math.max(Number(options.minAgeMinutes || 5), 1), 120);
-  const maxAgeDays = Math.min(Math.max(Number(options.maxAgeDays || 7), 1), 60);
+  const maxAgeDays = Math.min(Math.max(Number(options.maxAgeDays || 60), 1), 60);
   const rows = await all(`
     SELECT id, status, quality_source, quality_checked_at
     FROM listing_publish_records
@@ -9702,6 +9757,9 @@ export async function recoverDirectListingPublishesOnStartup(options = {}) {
       console.warn(`[listing-automation] direct publish recovery ${record.id} failed:`, error?.message || error);
     }
   }
+  const binding = await retryListingInventoryBindings({}).catch((error) => ({ total: 0, bound: 0, error: String(error?.message || error) }));
+  stats.binding_scanned = Number(binding.total || 0);
+  stats.binding_completed = Number(binding.bound || 0);
   return stats;
 }
 
@@ -9734,6 +9792,18 @@ export async function recoverInterruptedListingPublishTasksOnStartup(options = {
         AND (i.record_id IS NULL OR (COALESCE(r.task_id, '') = '' AND r.response_json IS NULL))
     `, [taskId]);
     interruptedItems += Number(result?.affectedRows || 0);
+    await run(`
+      UPDATE listing_publish_records r
+      JOIN listing_publish_task_items i ON i.record_id = r.id
+      SET r.status = 'failed',
+          r.error_json = COALESCE(i.error_json, JSON_OBJECT('message', '上架准备任务中断，尚未提交到 Ozon，可安全重试')),
+          r.updated_at = CURRENT_TIMESTAMP
+      WHERE i.publish_task_id = ?
+        AND i.status = 'interrupted'
+        AND r.status IN ('submitted', 'processing', 'resubmitting')
+        AND COALESCE(r.task_id, '') = ''
+        AND r.response_json IS NULL
+    `, [taskId]);
     await refreshListingPublishTaskStats(taskId).catch(() => null);
   }
   return { tasks: taskIds.length, interruptedItems };
@@ -9793,7 +9863,7 @@ function mergePublishRequestWithOzonDetail(request = {}, detail = {}, record = {
     currency_code: current.currency_code || parsed.editable_payload?.price?.currency_code || record.currency_code || "CNY",
     vat: current.vat || parsed.editable_payload?.price?.vat || "0",
     primary_image: primaryImage,
-    images: uniqueValues([...(images.slice(1)), ...normalizeStringList(current.images)]),
+    images: uniqueStringValues([...(images.slice(1)), ...normalizeStringList(current.images)]),
     weight: current.weight || parsed.editable_payload?.dimensions?.weight_g || "",
     depth: current.depth || parsed.editable_payload?.dimensions?.length_cm || "",
     width: current.width || parsed.editable_payload?.dimensions?.width_cm || "",
@@ -10007,15 +10077,11 @@ export async function retryListingPublishRecord(id, body = {}, session = null) {
       sourceId: String(id || "")
     });
     shopPayload = mediaRepair.payload;
-    const templateSnapshot = await buildTemplateSnapshotFromPublishRecord({
-      ...record,
-      request_json: JSON.stringify(shopPayload)
-    }, { diagnostics: false });
     await run(`
       UPDATE listing_publish_records
-      SET request_json = ?, template_snapshot_json = COALESCE(?, template_snapshot_json), updated_at = CURRENT_TIMESTAMP
+      SET request_json = ?, template_snapshot_json = NULL, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `, [JSON.stringify(shopPayload), templateSnapshot ? JSON.stringify(templateSnapshot) : null, Number(id)]);
+    `, [JSON.stringify(shopPayload), Number(id)]);
     const response = await importOzonProducts(record, shopPayload);
     const taskId = response?.result?.task_id || response?.task_id || response?.result?.taskId || "";
     let importInfo = null;
@@ -10085,20 +10151,20 @@ export async function saveListingPublishRecordDraft(id, body = {}, session = nul
   const validation = await validateListingTemplatePublish(template, session);
   const requestPayload = validation.payload || parseJson(record.request_json, {});
   if (!normalizeArray(requestPayload.items).length) throw new Error("Publish record has no savable Ozon payload");
-  const standardizedSnapshot = await standardizeListingTemplatePayload(template, listingTemplateStandardizerOptions({
+  const editorSnapshot = compactListingPublishSnapshot(compactTemplateForEditor(await standardizeListingTemplatePayload(template, listingTemplateStandardizerOptions({
     sourceType: "listing_publish_record",
     sourceId: String(id),
     shopId: record.shop_id,
     autoSync: false,
     syncValues: false,
     diagnostics: false
-  }));
+  }))));
   const offerId = firstOfferId(requestPayload) || record.offer_id || "";
   await run(`
     UPDATE listing_publish_records
-    SET offer_id = ?, request_json = ?, template_snapshot_json = ?, updated_at = CURRENT_TIMESTAMP
+    SET offer_id = ?, request_json = ?, template_snapshot_json = NULL, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `, [offerId, JSON.stringify(requestPayload), JSON.stringify(standardizedSnapshot), Number(id)]);
+  `, [offerId, JSON.stringify(requestPayload), Number(id)]);
 
   const updated = await row(`
     SELECT r.*, s.name AS shop_name
@@ -10106,6 +10172,7 @@ export async function saveListingPublishRecordDraft(id, body = {}, session = nul
     LEFT JOIN shops s ON s.id = r.shop_id
     WHERE r.id = ?
   `, [Number(id)]);
+  updated.template_snapshot_json = JSON.stringify(editorSnapshot);
   return normalizePublishRecordRow(updated);
 }
 
@@ -10281,6 +10348,7 @@ export async function listingDrafts(query = {}, session) {
     ? "created_at"
     : "updated_at";
   const sortColumn = sortBy === "created_at" ? "d.created_at" : "d.updated_at";
+  const dateFilterColumn = sortBy === "created_at" ? "d.created_at" : "d.updated_at";
   const startDate = String(query.startDate || query.start_date || "").trim();
   const endDate = String(query.endDate || query.end_date || "").trim();
   const status = String(query.status || "").trim().toLowerCase();
@@ -10302,11 +10370,14 @@ export async function listingDrafts(query = {}, session) {
     where.push(`(
       LOWER(COALESCE(d.product_name, '')) LIKE ? OR
       LOWER(COALESCE(d.internal_code, '')) LIKE ? OR
+      LOWER(COALESCE(d.vehicle_brand, '')) LIKE ? OR
+      LOWER(COALESCE(d.vehicle_model, '')) LIKE ? OR
+      CAST(d.id AS CHAR) LIKE ? OR
       LOWER(COALESCE(t.category_name, '')) LIKE ? OR
       LOWER(COALESCE(t.template_name, '')) LIKE ?
     )`);
-    params.push(...Array(4).fill(`%${keyword}%`));
-    countParams.push(...Array(4).fill(`%${keyword}%`));
+    params.push(...Array(7).fill(`%${keyword}%`));
+    countParams.push(...Array(7).fill(`%${keyword}%`));
   }
   if (sku) {
     where.push("LOWER(COALESCE(d.internal_code, '')) LIKE ?");
@@ -10329,12 +10400,12 @@ export async function listingDrafts(query = {}, session) {
     countParams.push(developmentType);
   }
   if (startDate) {
-    where.push("d.updated_at >= ?");
+    where.push(`${dateFilterColumn} >= ?`);
     params.push(`${startDate} 00:00:00`);
     countParams.push(`${startDate} 00:00:00`);
   }
   if (endDate) {
-    where.push("d.updated_at < DATE_ADD(?, INTERVAL 1 DAY)");
+    where.push(`${dateFilterColumn} < DATE_ADD(?, INTERVAL 1 DAY)`);
     params.push(endDate);
     countParams.push(endDate);
   }
@@ -10907,6 +10978,9 @@ export async function createListingDraft(body, session) {
   if (!payload.template_id) throw new Error("请先选择类目模板");
   if (!payload.product_name) throw new Error("商品名称不能为空");
   const developmentMeta = resolveDevelopmentMeta(payload, "new");
+  const sourceProductId = draftSourceProductId(body, payload);
+  const parentDraftId = draftParentDraftId(body, payload);
+  const creationMethod = draftCreationMethod(body, payload, developmentMeta.development_type);
 
   stageStarted = Date.now();
   const template = await row("SELECT * FROM listing_category_templates WHERE id = ? AND status <> 'deleted'", [payload.template_id]);
@@ -10942,8 +11016,9 @@ export async function createListingDraft(body, session) {
     INSERT INTO listing_drafts
     (template_id, product_name, internal_code, source_urls_json, source_images_json, cost_price, sale_price,
      length_cm, width_cm, height_cm, weight_g, color, spec, quantity, template_payload_json, manual_facts_json, ai_payload_json,
-     created_by_person_id, development_type, vehicle_brand, vehicle_model, vehicle_model_key, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     created_by_person_id, development_type, vehicle_brand, vehicle_model, vehicle_model_key,
+     source_product_id, parent_draft_id, creation_method, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `, [
     payload.template_id,
     payload.product_name,
@@ -10966,7 +11041,10 @@ export async function createListingDraft(body, session) {
     developmentMeta.development_type,
     developmentMeta.vehicle_brand,
     developmentMeta.vehicle_model,
-    developmentMeta.vehicle_model_key
+    developmentMeta.vehicle_model_key,
+    sourceProductId || null,
+    parentDraftId || null,
+    creationMethod
   ]);
   logAiVariantSavePerf(traceId, "backend.draft.insert", stageStarted, { draftId: id, templateId: payload.template_id });
   stageStarted = Date.now();
@@ -11023,6 +11101,9 @@ async function prepareListingDraftUpdate(id, body = {}, session = null) {
     ...existing,
     ...payload
   }, existing.development_type || "new");
+  const sourceProductId = draftSourceProductId(body, payload) || Number(existing.source_product_id || 0);
+  const parentDraftId = draftParentDraftId(body, payload) || Number(existing.parent_draft_id || 0);
+  const creationMethod = draftCreationMethod(body, payload, developmentMeta.development_type, existing.creation_method);
   return {
     draftId,
     existing,
@@ -11030,18 +11111,22 @@ async function prepareListingDraftUpdate(id, body = {}, session = null) {
     templatePayload,
     manualFacts,
     aiPayload,
-    developmentMeta
+    developmentMeta,
+    sourceProductId,
+    parentDraftId,
+    creationMethod
   };
 }
 
 async function writeListingDraftUpdate(prepared, execute = mysqlExecute) {
-  const { draftId, payload, templatePayload, manualFacts, aiPayload, developmentMeta } = prepared;
+  const { draftId, payload, templatePayload, manualFacts, aiPayload, developmentMeta, sourceProductId, parentDraftId, creationMethod } = prepared;
   await execute(`
     UPDATE listing_drafts
     SET template_id = ?, product_name = ?, internal_code = ?, source_urls_json = ?, source_images_json = ?,
         cost_price = ?, sale_price = ?, length_cm = ?, width_cm = ?, height_cm = ?, weight_g = ?,
         color = ?, spec = ?, quantity = ?, template_payload_json = ?, manual_facts_json = ?, ai_payload_json = ?,
-        development_type = ?, vehicle_brand = ?, vehicle_model = ?, vehicle_model_key = ?, updated_at = CURRENT_TIMESTAMP
+        development_type = ?, vehicle_brand = ?, vehicle_model = ?, vehicle_model_key = ?,
+        source_product_id = ?, parent_draft_id = ?, creation_method = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ? AND status <> 'deleted'
   `, [
     payload.template_id,
@@ -11065,6 +11150,9 @@ async function writeListingDraftUpdate(prepared, execute = mysqlExecute) {
     developmentMeta.vehicle_brand,
     developmentMeta.vehicle_model,
     developmentMeta.vehicle_model_key,
+    sourceProductId || null,
+    parentDraftId || null,
+    creationMethod,
     draftId
   ]);
 }
@@ -11642,6 +11730,9 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
   // An explicit material-optimizer type must win over the generic AI-* code heuristic.
   if (optimizationSource === "ai_product_material_optimizer") developmentMeta.development_type = "copy";
   if (optimizationSource === "ai_ecommerce_suite_workbench") developmentMeta.development_type = "new";
+  const sourceProductId = draftSourceProductId(body, payload) || Number(sourceDraftMediaRow?.source_product_id || 0);
+  const parentDraftId = sourceDraftId || Number(sourceDraftMediaRow?.parent_draft_id || 0);
+  const creationMethod = "ai_fission";
   const params = [
     payload.template_id,
     payload.product_name,
@@ -11664,7 +11755,10 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
     developmentType,
     developmentMeta.vehicle_brand,
     developmentMeta.vehicle_model,
-    developmentMeta.vehicle_model_key
+    developmentMeta.vehicle_model_key,
+    sourceProductId || null,
+    parentDraftId || null,
+    creationMethod
   ];
   if (draftId) {
     await mysqlExecute(`
@@ -11674,6 +11768,7 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
           color = ?, spec = ?, quantity = ?, template_payload_json = ?, manual_facts_json = ?, ai_payload_json = ?,
           created_by_person_id = COALESCE(created_by_person_id, ?),
           development_type = ?, vehicle_brand = ?, vehicle_model = ?, vehicle_model_key = ?,
+          source_product_id = ?, parent_draft_id = ?, creation_method = ?,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND status <> 'deleted'
     `, [...params, draftId]);
@@ -11682,8 +11777,9 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
       INSERT INTO listing_drafts
       (template_id, product_name, internal_code, source_urls_json, source_images_json, cost_price, sale_price,
        length_cm, width_cm, height_cm, weight_g, color, spec, quantity, template_payload_json, manual_facts_json, ai_payload_json,
-       created_by_person_id, development_type, vehicle_brand, vehicle_model, vehicle_model_key, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+       created_by_person_id, development_type, vehicle_brand, vehicle_model, vehicle_model_key,
+       source_product_id, parent_draft_id, creation_method, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     `, params);
   }
   logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.upsert", stageStarted, { draftId, mode: existing ? "update" : "insert" });
@@ -11718,6 +11814,76 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
   logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.detail", stageStarted, { draftId });
   logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.done", totalStarted, { draftId, templateId });
   return detail;
+}
+
+export async function createInventoryProductListingDraft(body = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const productId = Number(body.product_id || body.productId || 0);
+  if (!productId) throw new Error("缺少库存商品 ID，无法创建草稿");
+  const product = await row(`
+    SELECT id, code, name, image_url, purchase_url, purchase_cost, listing_price_rub,
+      length_cm, width_cm, height_cm, package_weight_g, color, accessory_name,
+      product_quantity, stock_unit, vehicle_brand, vehicle_model
+    FROM products
+    WHERE id = ? AND active = 1
+    LIMIT 1
+  `, [productId]);
+  if (!product) throw new Error("库存商品不存在或已停用");
+
+  const existing = await row(`
+    SELECT id FROM listing_drafts
+    WHERE source_product_id = ? AND status = 'draft'
+    ORDER BY updated_at DESC, id DESC
+    LIMIT 1
+  `, [productId]);
+  if (existing?.id) return { ...(await listingDraft(existing.id, session)), reused: true };
+
+  const images = [String(product.image_url || "").trim()].filter(Boolean);
+  const sourceUrls = [String(product.purchase_url || "").trim()].filter(Boolean);
+  const manualFacts = {
+    source: "inventory_quick_draft",
+    source_product_id: productId,
+    title: product.name || "",
+    name: product.name || "",
+    images,
+    color: product.color || "",
+    spec: product.accessory_name || "",
+    quantity: Number(product.product_quantity || 1),
+    vehicle_brand: product.vehicle_brand || "",
+    vehicle_model: product.vehicle_model || ""
+  };
+  const draftId = await insert(`
+    INSERT INTO listing_drafts
+      (template_id, product_name, internal_code, source_urls_json, source_images_json,
+       cost_price, sale_price, length_cm, width_cm, height_cm, weight_g, color, spec, quantity,
+       template_payload_json, manual_facts_json, ai_payload_json, created_by_person_id,
+       development_type, vehicle_brand, vehicle_model, vehicle_model_key,
+       source_product_id, parent_draft_id, creation_method, updated_at)
+    VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?,
+      'new', ?, ?, ?, ?, NULL, 'inventory_quick_draft', CURRENT_TIMESTAMP)
+  `, [
+    product.name || "",
+    product.code || `P-${productId}`,
+    JSON.stringify(sourceUrls),
+    JSON.stringify(images),
+    Number(product.purchase_cost || 0),
+    Number(product.listing_price_rub || 0),
+    Number(product.length_cm || 0),
+    Number(product.width_cm || 0),
+    Number(product.height_cm || 0),
+    Number(product.package_weight_g || 0),
+    product.color || "",
+    product.accessory_name || "",
+    Math.max(1, Number(product.product_quantity || 1)),
+    JSON.stringify(manualFacts),
+    JSON.stringify({ source: "inventory_quick_draft", source_product_id: productId }),
+    personId(session),
+    product.vehicle_brand || "",
+    product.vehicle_model || "",
+    normalizeVehicleModelKey(product.vehicle_brand || "", product.vehicle_model || ""),
+    productId
+  ]);
+  return { ...(await listingDraft(draftId, session)), reused: false };
 }
 
 function assertAiVariantDraftTitleTarget(title = "", manualFacts = {}, aiOptimization = {}) {
@@ -13414,6 +13580,9 @@ async function initializeListingAutomationSchema() {
         ai_payload_json LONGTEXT NOT NULL,
         status VARCHAR(32) NOT NULL DEFAULT 'draft',
         development_type VARCHAR(32) NOT NULL DEFAULT 'new',
+        source_product_id BIGINT NULL,
+        parent_draft_id BIGINT NULL,
+        creation_method VARCHAR(32) NOT NULL DEFAULT 'manual',
         vehicle_brand VARCHAR(128) NOT NULL DEFAULT '',
         vehicle_model VARCHAR(128) NOT NULL DEFAULT '',
         vehicle_model_key VARCHAR(255) NOT NULL DEFAULT '',
@@ -13461,6 +13630,9 @@ async function initializeListingAutomationSchema() {
     )) STORED`
     }]);
     await ensureMysqlColumn("listing_drafts", "development_type", "VARCHAR(32) NOT NULL DEFAULT 'new'");
+    await ensureMysqlColumn("listing_drafts", "source_product_id", "BIGINT NULL");
+    await ensureMysqlColumn("listing_drafts", "parent_draft_id", "BIGINT NULL");
+    await ensureMysqlColumn("listing_drafts", "creation_method", "VARCHAR(32) NOT NULL DEFAULT 'manual'");
     await ensureMysqlColumn("listing_drafts", "vehicle_brand", "VARCHAR(128) NOT NULL DEFAULT ''");
     await ensureMysqlColumn("listing_drafts", "vehicle_model", "VARCHAR(128) NOT NULL DEFAULT ''");
     await ensureMysqlColumn("listing_drafts", "vehicle_model_key", "VARCHAR(255) NOT NULL DEFAULT ''");
@@ -13594,6 +13766,12 @@ async function initializeListingAutomationSchema() {
     await ensureMysqlColumn("listing_publish_records", "quality_json", "LONGTEXT NULL");
     await ensureMysqlColumn("listing_publish_records", "quality_checked_at", "TIMESTAMP NULL");
     await ensureMysqlColumn("listing_publish_records", "source_product_id", "BIGINT NULL");
+    await ensureMysqlColumn("listing_publish_records", "binding_status", "VARCHAR(32) NOT NULL DEFAULT 'pending'");
+    await ensureMysqlColumn("listing_publish_records", "binding_source", "VARCHAR(32) NOT NULL DEFAULT ''");
+    await ensureMysqlColumn("listing_publish_records", "binding_attempt_count", "INT NOT NULL DEFAULT 0");
+    await ensureMysqlColumn("listing_publish_records", "binding_error", "TEXT NULL");
+    await ensureMysqlColumn("listing_publish_records", "binding_checked_at", "TIMESTAMP NULL");
+    await ensureMysqlColumn("listing_publish_records", "binding_completed_at", "TIMESTAMP NULL");
     await ensureMysqlColumn("listing_publish_records", "offer_source", "VARCHAR(64) NOT NULL DEFAULT ''");
     await ensureMysqlColumn("listing_publish_records", "source_collector_sku", "VARCHAR(160) NOT NULL DEFAULT ''");
     await ensureMysqlColumn("listing_publish_records", "template_snapshot_json", "LONGTEXT NULL");
@@ -15943,6 +16121,19 @@ async function resolveListingSourceProductId(template = {}, payload = {}) {
     || 0
   );
   if (direct) return direct;
+  const draftId = Number(
+    template.draft_id
+    || template.draftId
+    || template.listing_draft_id
+    || template.listingDraftId
+    || sourceRaw.listing_draft_id
+    || sourceRaw.listingDraftId
+    || 0
+  );
+  if (draftId) {
+    const draft = await row("SELECT source_product_id FROM listing_drafts WHERE id = ? AND status <> 'deleted' LIMIT 1", [draftId]).catch(() => null);
+    if (Number(draft?.source_product_id || 0)) return Number(draft.source_product_id);
+  }
   const offerId = firstOfferId(payload);
   if (offerId) {
     const mapping = await row("SELECT product_id FROM sku_mappings WHERE offer_id = ? AND active = 1 ORDER BY updated_at DESC LIMIT 1", [offerId]).catch(() => null);
@@ -17165,6 +17356,33 @@ function normalizeDraftPayload(body = {}) {
   };
 }
 
+function draftSourceProductId(body = {}, payload = {}) {
+  const template = objectValue(payload.template_payload || body.template_payload || body.templatePayload || body.template);
+  const editable = objectValue(template.editable_payload || template.editablePayload);
+  const sourceRaw = objectValue(template.source_raw || template.sourceRaw || editable.source_raw || editable.sourceRaw);
+  const value = Number(
+    body.source_product_id || body.sourceProductId || body.product_id || body.productId
+    || payload.source_product_id || payload.sourceProductId
+    || template.source_product_id || template.sourceProductId
+    || sourceRaw.source_product_id || sourceRaw.sourceProductId
+    || sourceRaw.selection_product_id || sourceRaw.selectionProductId || 0
+  );
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function draftParentDraftId(body = {}, payload = {}) {
+  const value = Number(body.parent_draft_id || body.parentDraftId || body.source_draft_id || body.sourceDraftId
+    || payload.parent_draft_id || payload.parentDraftId || 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function draftCreationMethod(body = {}, payload = {}, developmentType = "new", fallback = "") {
+  const explicit = String(body.creation_method || body.creationMethod || payload.creation_method || payload.creationMethod || fallback || "").trim();
+  if (explicit) return explicit === "ai" || explicit === "fission" ? "ai_fission" : explicit;
+  const aiSource = String(payload.ai_payload?.source || body.ai_payload?.source || body.aiPayload?.source || "").toLowerCase();
+  return developmentType === "fission" || aiSource.includes("ai_") ? "ai_fission" : "manual";
+}
+
 function draftIdFromPayload(body = {}) {
   const templatePayload = objectValue(body.template_payload || body.templatePayload || body.template || body.canonical_payload || body.canonicalPayload);
   const editable = objectValue(templatePayload.editable_payload || templatePayload.editablePayload);
@@ -18375,30 +18593,53 @@ async function updatePublishRecordAfterSubmit(recordId, { taskId = "", response 
 
 async function autoBindPublishRecordInventory(recordId) {
   const record = await row(`
-    SELECT id, shop_id, offer_id, ozon_product_id, source_product_id
+    SELECT id, shop_id, offer_id, ozon_product_id, ozon_sku, source_product_id
     FROM listing_publish_records
     WHERE id = ? AND status <> 'deleted'
   `, [Number(recordId)]);
-  const sourceProductId = Number(record?.source_product_id || 0);
+  let sourceProductId = Number(record?.source_product_id || 0);
   const shopId = Number(record?.shop_id || 0);
-  if (!sourceProductId || !shopId) return null;
-  const product = await row("SELECT id FROM products WHERE id = ? AND active = 1 LIMIT 1", [sourceProductId]).catch(() => null);
-  if (!product) return null;
+  if (!shopId) return null;
   const offerId = String(record.offer_id || "").trim();
   const ozonProductId = String(record.ozon_product_id || "").trim();
-  if (!offerId && !ozonProductId) return null;
+  const recordSku = String(record.ozon_sku || "").trim();
+  if (!offerId && !ozonProductId && !recordSku) {
+    await run("UPDATE listing_publish_records SET binding_status='waiting_online', binding_attempt_count=binding_attempt_count+1, binding_error='等待 Ozon 商品标识', binding_checked_at=CURRENT_TIMESTAMP WHERE id=?", [Number(recordId)]);
+    return { ok: false, status: "waiting_online" };
+  }
   const online = await row(`
-    SELECT id, shop_id, ozon_sku, offer_id, name
+    SELECT id, shop_id, product_id, ozon_sku, offer_id, name
     FROM online_products
     WHERE shop_id = ?
       AND (
         (? <> '' AND offer_id = ?)
         OR (? <> '' AND ozon_product_id = ?)
+        OR (? <> '' AND ozon_sku = ?)
       )
     ORDER BY updated_at DESC, id DESC
     LIMIT 1
-  `, [shopId, offerId, offerId, ozonProductId, ozonProductId]).catch(() => null);
-  if (!online) return null;
+  `, [shopId, offerId, offerId, ozonProductId, ozonProductId, recordSku, recordSku]).catch(() => null);
+  let bindingSource = sourceProductId ? "draft_source" : "";
+  if (!sourceProductId && online) {
+    const inferred = await inferHistoricalInventoryBinding(online);
+    if (inferred.conflict) {
+      await run("UPDATE listing_publish_records SET binding_status='conflict',binding_source='history_conflict',binding_attempt_count=binding_attempt_count+1,binding_error=?,binding_checked_at=CURRENT_TIMESTAMP WHERE id=?", [inferred.error, Number(recordId)]);
+      return { ok: false, status: "conflict", candidates: inferred.product_ids };
+    }
+    sourceProductId = Number(inferred.product_id || 0);
+    bindingSource = inferred.source || "";
+    if (sourceProductId) await run("UPDATE listing_publish_records SET source_product_id=?,binding_source=? WHERE id=?", [sourceProductId, bindingSource, Number(recordId)]);
+  }
+  if (!sourceProductId) {
+    await run("UPDATE listing_publish_records SET binding_status='unbound', binding_source='',binding_attempt_count=binding_attempt_count+1, binding_error='缺少库存产品', binding_checked_at=CURRENT_TIMESTAMP WHERE id=?", [Number(recordId)]);
+    return { ok: false, status: "unbound" };
+  }
+  const product = await row("SELECT id FROM products WHERE id = ? AND active = 1 LIMIT 1", [sourceProductId]).catch(() => null);
+  if (!product) return null;
+  if (!online) {
+    await run("UPDATE listing_publish_records SET binding_status='waiting_online', binding_attempt_count=binding_attempt_count+1, binding_error='等待在线商品同步', binding_checked_at=CURRENT_TIMESTAMP WHERE id=?", [Number(recordId)]);
+    return { ok: false, status: "waiting_online" };
+  }
   await run("UPDATE online_products SET product_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [
     sourceProductId,
     Number(online.id)
@@ -18413,19 +18654,26 @@ async function autoBindPublishRecordInventory(recordId) {
         WHERE id = ?
       `, [sourceProductId, String(online.offer_id || offerId), String(online.name || ""), Number(existingByOnline.id)]);
     }
-    return { ok: true, online_product_id: Number(online.id), mapping_id: existingByOnline?.id || null };
+    await run("UPDATE listing_publish_records SET binding_status='waiting_sku', binding_attempt_count=binding_attempt_count+1, binding_error='等待 Ozon SKU', binding_checked_at=CURRENT_TIMESTAMP WHERE id=?", [Number(recordId)]);
+    return { ok: false, status: "waiting_sku", online_product_id: Number(online.id), mapping_id: existingByOnline?.id || null };
   }
-  const existing = await row("SELECT id FROM sku_mappings WHERE shop_id = ? AND ozon_sku = ? LIMIT 1", [
+  const existing = await row("SELECT id,product_id FROM sku_mappings WHERE shop_id = ? AND ozon_sku = ? LIMIT 1", [
     shopId,
     ozonSku
   ]).catch(() => null);
   if (existing) {
+    if (Number(existing.product_id || 0) && Number(existing.product_id) !== sourceProductId) {
+      const error = `现有 SKU 映射指向库存 #${existing.product_id}，开发来源指向库存 #${sourceProductId}`;
+      await run("UPDATE listing_publish_records SET binding_status='conflict',binding_source='history_conflict',binding_attempt_count=binding_attempt_count+1,binding_error=?,binding_checked_at=CURRENT_TIMESTAMP WHERE id=?", [error, Number(recordId)]);
+      return { ok: false, status: "conflict", error };
+    }
     await run(`
       UPDATE sku_mappings
       SET product_id = ?, online_product_id = ?, offer_id = ?, display_name = ?, active = 1, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `, [sourceProductId, Number(online.id), String(online.offer_id || offerId), String(online.name || ""), Number(existing.id)]);
-    return { ok: true, online_product_id: Number(online.id), mapping_id: Number(existing.id) };
+    await markPublishRecordInventoryBound(recordId, bindingSource);
+    return { ok: true, status: "bound", online_product_id: Number(online.id), mapping_id: Number(existing.id) };
   }
   const result = await run(`
     INSERT INTO sku_mappings
@@ -18439,7 +18687,168 @@ async function autoBindPublishRecordInventory(recordId) {
     String(online.offer_id || offerId),
     String(online.name || "")
   ]);
-  return { ok: true, online_product_id: Number(online.id), mapping_id: Number(result?.insertId || 0) || null };
+  await markPublishRecordInventoryBound(recordId, bindingSource);
+  return { ok: true, status: "bound", online_product_id: Number(online.id), mapping_id: Number(result?.insertId || 0) || null };
+}
+
+async function markPublishRecordInventoryBound(recordId, bindingSource = "") {
+  await run(`UPDATE listing_publish_records SET binding_status='bound', binding_attempt_count=binding_attempt_count+1,
+    binding_source=COALESCE(NULLIF(?,''),NULLIF(binding_source,''),'draft_source'),binding_error=NULL,
+    binding_checked_at=CURRENT_TIMESTAMP, binding_completed_at=CURRENT_TIMESTAMP WHERE id=?`, [bindingSource, Number(recordId)]);
+}
+
+async function inferHistoricalInventoryBinding(online = {}) {
+  const shopId = Number(online.shop_id || 0);
+  const onlineId = Number(online.id || 0);
+  const sku = String(online.ozon_sku || "").trim();
+  const offerId = String(online.offer_id || "").trim();
+  const candidates = await all(`
+    SELECT product_id,'online_product' source FROM online_products WHERE id=? AND product_id IS NOT NULL
+    UNION ALL SELECT product_id,'mapping_online' FROM sku_mappings WHERE online_product_id=? AND active=1 AND product_id IS NOT NULL
+    UNION ALL SELECT product_id,'mapping_sku' FROM sku_mappings WHERE shop_id=? AND ozon_sku=? AND ?<>'' AND active=1 AND product_id IS NOT NULL
+    UNION ALL SELECT product_id,'mapping_offer' FROM sku_mappings WHERE shop_id=? AND offer_id=? AND ?<>'' AND active=1 AND product_id IS NOT NULL
+  `, [onlineId, onlineId, shopId, sku, sku, shopId, offerId, offerId]);
+  const productIds = [...new Set(candidates.map((item) => Number(item.product_id || 0)).filter(Boolean))];
+  if (productIds.length > 1) return { conflict: true, product_ids: productIds, error: `历史关系匹配到多个库存产品：${productIds.join(", ")}` };
+  if (!productIds.length) return { product_id: 0, source: "" };
+  const winner = candidates.find((item) => Number(item.product_id) === productIds[0]);
+  return { product_id: productIds[0], source: String(winner?.source || "history_mapping") };
+}
+
+export async function listingInventoryBindings(query = {}, session = null) {
+  await ensureListingAutomationSchema();
+  const limit = Math.min(Math.max(Number(query.limit || 100), 1), 200);
+  const status = String(query.status || "all").trim();
+  const params = [];
+  const where = ["status <> 'deleted'"];
+  if (status !== "all") { where.push("COALESCE(NULLIF(binding_status,''),'pending')=?"); params.push(status); }
+  params.push(limit);
+  const rows = await all(`
+    WITH recent_records AS (
+      SELECT * FROM listing_publish_records
+      WHERE ${where.join(" AND ")}
+      ORDER BY CASE COALESCE(NULLIF(binding_status,''),'pending') WHEN 'unbound' THEN 1 WHEN 'waiting_online' THEN 2 WHEN 'waiting_sku' THEN 3 WHEN 'pending' THEN 4 ELSE 5 END,
+        updated_at DESC,id DESC LIMIT ?
+    )
+    SELECT r.id record_id,r.draft_id,r.shop_id,r.offer_id,r.ozon_product_id,r.ozon_sku,r.status publish_status,
+      r.source_product_id,r.binding_status,r.binding_source,r.binding_attempt_count,r.binding_error,r.binding_checked_at,r.binding_completed_at,
+      r.offer_source,r.created_at,r.updated_at,s.name shop_name,COALESCE(p.name,pm.name) inventory_product_name,COALESCE(p.code,pm.code) inventory_product_code,
+      d.product_name draft_name,d.development_type,d.parent_draft_id,
+      COALESCE(NULLIF(d.creation_method,''),CASE WHEN d.development_type='fission' OR r.offer_source LIKE '%variant%' THEN 'ai_fission' ELSE 'manual' END) creation_method,
+      op.id online_product_id,op.ozon_sku online_ozon_sku,
+      COALESCE(sm.id,sm_sku.id,sm_offer.id) mapping_id,
+      COALESCE(sm.product_id,sm_sku.product_id,sm_offer.product_id,op.product_id) mapped_product_id,
+      0 order_count,0 sales_quantity,0 sales_amount
+    FROM recent_records r
+    LEFT JOIN shops s ON s.id=r.shop_id
+    LEFT JOIN products p ON p.id=r.source_product_id
+    LEFT JOIN listing_drafts d ON d.id=r.draft_id
+    LEFT JOIN online_products op ON op.shop_id=r.shop_id AND ((r.offer_id<>'' AND CONVERT(op.offer_id USING utf8mb4) COLLATE utf8mb4_unicode_ci=CONVERT(r.offer_id USING utf8mb4) COLLATE utf8mb4_unicode_ci) OR (r.ozon_product_id<>'' AND CONVERT(op.ozon_product_id USING utf8mb4) COLLATE utf8mb4_unicode_ci=CONVERT(r.ozon_product_id USING utf8mb4) COLLATE utf8mb4_unicode_ci))
+    LEFT JOIN sku_mappings sm ON sm.online_product_id=op.id AND sm.active=1
+    LEFT JOIN sku_mappings sm_sku ON sm.id IS NULL AND sm_sku.shop_id=op.shop_id AND sm_sku.ozon_sku=op.ozon_sku AND sm_sku.active=1
+    LEFT JOIN sku_mappings sm_offer ON sm.id IS NULL AND sm_sku.id IS NULL AND sm_offer.shop_id=op.shop_id AND sm_offer.offer_id=op.offer_id AND sm_offer.active=1
+    LEFT JOIN products pm ON pm.id=COALESCE(sm.product_id,sm_sku.product_id,sm_offer.product_id,op.product_id)
+    ORDER BY CASE COALESCE(NULLIF(r.binding_status,''),'pending') WHEN 'unbound' THEN 1 WHEN 'waiting_online' THEN 2 WHEN 'waiting_sku' THEN 3 WHEN 'pending' THEN 4 ELSE 5 END,r.updated_at DESC,r.id DESC
+  `, params);
+  const representedOnlineIds = new Set(rows.map((item) => Number(item.online_product_id || 0)).filter(Boolean));
+  const unboundOnline = await all(`
+    WITH recent_online AS (
+      SELECT * FROM online_products
+      WHERE ozon_sku IS NOT NULL AND ozon_sku<>'' AND ozon_sku<>'0'
+      ORDER BY updated_at DESC LIMIT ?
+    )
+    SELECT 0 record_id,NULL draft_id,op.shop_id,op.offer_id,op.ozon_product_id,op.ozon_sku,'online' publish_status,
+      NULL source_product_id,'unbound' binding_status,'' binding_source,0 binding_attempt_count,'该 Ozon SKU 尚未绑定库存产品' binding_error,
+      NULL binding_checked_at,NULL binding_completed_at,'online_sync' offer_source,op.updated_at created_at,op.updated_at,
+      s.name shop_name,NULL inventory_product_name,NULL inventory_product_code,NULL draft_name,NULL development_type,
+      NULL parent_draft_id,'manual' creation_method,op.id online_product_id,op.ozon_sku online_ozon_sku,
+      NULL mapping_id,NULL mapped_product_id,0 order_count,0 sales_quantity,0 sales_amount
+    FROM recent_online op
+    LEFT JOIN shops s ON s.id=op.shop_id
+    WHERE op.product_id IS NULL AND NOT EXISTS (
+      SELECT 1 FROM sku_mappings sm WHERE sm.active=1 AND sm.product_id IS NOT NULL AND
+        (sm.online_product_id=op.id OR (sm.shop_id=op.shop_id AND sm.ozon_sku=op.ozon_sku) OR (sm.shop_id=op.shop_id AND sm.offer_id=op.offer_id))
+    )
+    ORDER BY op.updated_at DESC LIMIT ?
+  `, [Math.min(limit * 10, 1000), limit]);
+  for (const item of unboundOnline) {
+    if (!representedOnlineIds.has(Number(item.online_product_id || 0))) rows.push(item);
+  }
+  const mappingIds = [...new Set(rows.map((item) => Number(item.mapping_id || 0)).filter(Boolean))];
+  if (mappingIds.length) {
+    const salesRows = await all(`
+      SELECT sku_mapping_id,COUNT(DISTINCT order_id) order_count,
+        COALESCE(SUM(quantity),0) sales_quantity,COALESCE(SUM(sale_price*quantity),0) sales_amount
+      FROM order_items WHERE sku_mapping_id IN (${mappingIds.map(() => "?").join(",")}) GROUP BY sku_mapping_id
+    `, mappingIds);
+    const salesByMapping = new Map(salesRows.map((item) => [Number(item.sku_mapping_id), item]));
+    for (const item of rows) {
+      const sales = salesByMapping.get(Number(item.mapping_id || 0));
+      if (!sales) continue;
+      item.order_count = Number(sales.order_count || 0);
+      item.sales_quantity = Number(sales.sales_quantity || 0);
+      item.sales_amount = Number(sales.sales_amount || 0);
+    }
+  }
+  const summary = { total: rows.length, bound: 0, unbound: 0, waiting: 0, conflict: 0, ai_fission: 0, manual: 0 };
+  for (const item of rows) {
+    if (!Number(item.source_product_id || 0) && Number(item.mapped_product_id || 0)) {
+      item.source_product_id = Number(item.mapped_product_id);
+      item.inventory_product_name = item.inventory_product_name || "历史已绑定库存";
+      item.binding_source = item.binding_source || "history_mapping";
+    }
+    const effective = Number(item.mapped_product_id || 0) && Number(item.mapped_product_id) === Number(item.source_product_id) ? "bound" : (item.binding_status || (item.source_product_id ? "pending" : "unbound"));
+    item.binding_status = effective;
+    if (effective === "bound") summary.bound += 1;
+    else if (effective === "unbound") summary.unbound += 1;
+    else if (effective === "conflict") summary.conflict += 1;
+    else summary.waiting += 1;
+    summary[item.creation_method === "ai_fission" ? "ai_fission" : "manual"] += 1;
+  }
+  return { rows, summary };
+}
+
+export async function retryListingInventoryBindings(body = {}) {
+  await ensureListingAutomationSchema();
+  let ids = normalizeArray(body.record_ids || body.recordIds || body.ids).map(Number).filter(Boolean);
+  if (!ids.length) {
+    const pending = await all(`SELECT id FROM listing_publish_records WHERE status<>'deleted' AND COALESCE(binding_status,'pending')<>'bound' ORDER BY updated_at ASC LIMIT 100`);
+    ids = pending.map((item) => Number(item.id));
+  }
+  const results = [];
+  for (const id of [...new Set(ids)].slice(0, 100)) {
+    try { results.push({ id, ...(await autoBindPublishRecordInventory(id) || { ok: false, status: "pending" }) }); }
+    catch (error) { await run("UPDATE listing_publish_records SET binding_status='conflict',binding_attempt_count=binding_attempt_count+1,binding_error=?,binding_checked_at=CURRENT_TIMESTAMP WHERE id=?", [String(error?.message || error).slice(0,1000), id]); results.push({ id, ok: false, status: "conflict", error: String(error?.message || error) }); }
+  }
+  return { ok: true, total: results.length, bound: results.filter((item) => item.ok).length, results };
+}
+
+export async function bindListingRecordToInventory(body = {}) {
+  await ensureListingAutomationSchema();
+  const recordId = Number(body.record_id || body.recordId || 0);
+  const productId = Number(body.product_id || body.productId || 0);
+  const onlineProductId = Number(body.online_product_id || body.onlineProductId || 0);
+  if ((!recordId && !onlineProductId) || !productId) throw new Error("请选择 SKU 和库存产品");
+  const product = await row("SELECT id FROM products WHERE id=? AND active=1", [productId]);
+  if (!product) throw new Error("库存产品不存在或已停用");
+  if (recordId) {
+    await run("UPDATE listing_publish_records SET source_product_id=?,binding_status='pending',binding_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'deleted'", [productId, recordId]);
+    return { ok: true, ...(await autoBindPublishRecordInventory(recordId) || {}) };
+  }
+  const online = await row("SELECT * FROM online_products WHERE id=?", [onlineProductId]);
+  if (!online) throw new Error("Ozon SKU 不存在");
+  const sku = String(online.ozon_sku || "").trim();
+  if (!sku) throw new Error("Ozon SKU 尚未生成");
+  const existing = await row("SELECT id FROM sku_mappings WHERE shop_id=? AND ozon_sku=? LIMIT 1", [Number(online.shop_id), sku]);
+  let mappingId = Number(existing?.id || 0);
+  if (mappingId) {
+    await run("UPDATE sku_mappings SET product_id=?,online_product_id=?,offer_id=?,display_name=?,active=1,updated_at=CURRENT_TIMESTAMP WHERE id=?", [productId, onlineProductId, String(online.offer_id || ""), String(online.name || ""), mappingId]);
+  } else {
+    mappingId = await insert("INSERT INTO sku_mappings (shop_id,product_id,online_product_id,ozon_sku,offer_id,display_name,active) VALUES (?,?,?,?,?,?,1)", [Number(online.shop_id), productId, onlineProductId, sku, String(online.offer_id || ""), String(online.name || "")]);
+  }
+  await run("UPDATE online_products SET product_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", [productId, onlineProductId]);
+  await run("UPDATE order_items oi JOIN orders o ON o.id=oi.order_id SET oi.sku_mapping_id=? WHERE o.shop_id=? AND TRIM(oi.ozon_sku)=?", [mappingId, Number(online.shop_id), sku]);
+  return { ok: true, status: "bound", mapping_id: mappingId, online_product_id: onlineProductId, product_id: productId };
 }
 
 function buildOzonPublishErrorPayload(error, context = {}) {

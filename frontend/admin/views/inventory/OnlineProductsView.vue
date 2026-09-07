@@ -863,7 +863,7 @@ onDeactivated(stopOnlineProductSyncPolling);
         </div>
       </div>
 
-      <div class="online-table-wrap erp-table-scroll">
+      <div class="online-table-wrap erp-table-scroll erp-responsive-table" role="region" aria-label="在线商品表格" tabindex="0">
         <el-table v-loading="loading" :data="pagedRows" stripe border class="erp-data-table" @selection-change="selectionChanged">
           <el-table-column type="selection" width="48" fixed="left" />
           <el-table-column label="店铺 / 状态" min-width="160" fixed="left">

@@ -37,7 +37,7 @@ import {
   resolveDevelopmentMeta
 } from "./product-development-meta.js";
 import { normalizePurchasePlanMysql } from "./mysql-procurement-plan.js";
-import { buildSplitShippingPackagesMysql } from "./mysql-order-shipping-packages.js";
+import { buildLiveShippingProductsMysql, buildSplitShippingPackagesMysql } from "./mysql-order-shipping-packages.js";
 import {
   orderProfitDetailSnapshotMysqlService,
   refreshOrderProfitDetailSnapshotsMysqlService
@@ -52,6 +52,7 @@ import {
   onlineStatusKeySqlMysql
 } from "./mysql-online-product-status.js";
 import { refreshInventoryAlertSkuDailyMysqlService } from "./mysql-inventory-alert-snapshots.js";
+import { getAiImageUsageOverview } from "./ai-provider-settings.js";
 import {
   missingOnlineProductSkuMarker,
   normalizedOzonSkuCandidateMysql,
@@ -74,7 +75,8 @@ import {
 } from "./mysql-order-label-utils.js";
 import {
   filterProcurementRequestsMysql,
-  groupProcurementRequestsMysql
+  groupProcurementRequestsMysql,
+  procurementOrderActionClassMysql
 } from "./mysql-procurement-list.js";
 export { normalizePurchasePlanMysql } from "./mysql-procurement-plan.js";
 export { buildSplitShippingPackagesMysql } from "./mysql-order-shipping-packages.js";
@@ -429,6 +431,25 @@ async function ensureProcurementOrderSourceSchemaMysql() {
       if (!["ER_DUP_FIELDNAME", "ER_DUP_KEYNAME"].includes(error?.code)) throw error;
     }
   }
+  await mysqlExecute(`
+    INSERT IGNORE INTO procurement_order_allocations
+    (procurement_request_id, order_item_id, order_id, product_id, allocated_quantity, status,
+      allocated_at, created_by_person_id)
+    SELECT request.id, item.id, item.order_id, request.product_id,
+      LEAST(GREATEST(request.quantity, 0), GREATEST(item.quantity, 0)),
+      'allocated', request.created_at, request.person_id
+    FROM procurement_requests request
+    JOIN order_items item ON item.id = request.source_order_item_id
+    JOIN orders source_order ON source_order.id = item.order_id
+    LEFT JOIN order_item_procurement_marks mark ON mark.order_item_id = item.id
+    WHERE request.source_order_item_id IS NOT NULL
+      AND request.product_id IS NOT NULL
+      AND request.status != 'cancelled'
+      AND COALESCE(mark.handling_type, 'procurement_request') = 'procurement_request'
+      AND LOWER(COALESCE(source_order.status, '')) NOT LIKE '%cancel%'
+      AND LOWER(COALESCE(source_order.tracking_stage, '')) NOT LIKE '%cancel%'
+      AND LEAST(GREATEST(request.quantity, 0), GREATEST(item.quantity, 0)) > 0
+  `);
   procurementOrderSourceSchemaReadyMysql = true;
 }
 
@@ -443,7 +464,9 @@ async function ensureProcurementRequestTimestampSchemaMysql() {
 async function ensureInboundRecordTimestampSchemaMysql() {
   if (inboundRecordTimestampSchemaReadyMysql) return;
   await ensureMysqlColumns("inbound_records", [
-    "ALTER TABLE inbound_records ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at"
+    "ALTER TABLE inbound_records ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at",
+    "ALTER TABLE inbound_records ADD COLUMN approved_by_person_id BIGINT UNSIGNED NULL AFTER approved_at",
+    "CREATE INDEX idx_inbound_approved_by_person ON inbound_records (approved_by_person_id)"
   ]);
   inboundRecordTimestampSchemaReadyMysql = true;
 }
@@ -748,13 +771,34 @@ async function ensureProcurementFlexibleRequestSchemaMysql() {
     "ALTER TABLE procurement_requests ADD COLUMN raw_spec VARCHAR(255) NULL AFTER raw_name",
     "ALTER TABLE procurement_requests ADD COLUMN binding_status VARCHAR(32) NOT NULL DEFAULT 'bound' AFTER raw_spec",
     "ALTER TABLE procurement_requests ADD COLUMN created_by_person_id BIGINT UNSIGNED NULL AFTER person_id",
+    "ALTER TABLE procurement_requests ADD COLUMN automation_exception_code VARCHAR(64) NULL AFTER approval_status",
+    "ALTER TABLE procurement_requests ADD COLUMN automation_exception_message VARCHAR(500) NULL AFTER automation_exception_code",
+    "ALTER TABLE procurement_requests ADD COLUMN price_exception_reason VARCHAR(64) NULL AFTER automation_exception_message",
+    "ALTER TABLE procurement_requests ADD COLUMN price_exception_note TEXT NULL AFTER price_exception_reason",
+    "ALTER TABLE procurement_requests ADD COLUMN price_reference_unit_cost DECIMAL(18,4) NULL AFTER price_exception_note",
+    "ALTER TABLE procurement_requests ADD COLUMN price_actual_unit_cost DECIMAL(18,4) NULL AFTER price_reference_unit_cost",
+    "ALTER TABLE procurement_requests ADD COLUMN price_exception_confirmed_by_person_id BIGINT UNSIGNED NULL AFTER price_actual_unit_cost",
+    "ALTER TABLE procurement_requests ADD COLUMN price_exception_confirmed_at DATETIME NULL AFTER price_exception_confirmed_by_person_id",
+    "ALTER TABLE procurement_requests ADD COLUMN auto_completed_at DATETIME NULL AFTER price_exception_confirmed_at",
+    "ALTER TABLE procurement_requests ADD COLUMN demand_type VARCHAR(32) NOT NULL DEFAULT 'advance_stock' AFTER source_ozon_sku",
+    "ALTER TABLE procurement_requests ADD COLUMN purchased_at DATETIME NULL AFTER merged_at",
     "CREATE INDEX idx_procurement_request_group ON procurement_requests (request_group_no)",
-    "CREATE INDEX idx_procurement_binding_status ON procurement_requests (binding_status, status)"
+    "CREATE INDEX idx_procurement_binding_status ON procurement_requests (binding_status, status)",
+    "CREATE INDEX idx_procurement_demand_stage ON procurement_requests (demand_type, status, created_at)"
   ]);
   await mysqlExecute(`
     UPDATE procurement_requests
     SET binding_status = CASE WHEN product_id IS NULL THEN 'unbound' ELSE 'bound' END
     WHERE binding_status IS NULL OR binding_status = ''
+  `);
+  await mysqlExecute(`
+    UPDATE procurement_requests
+    SET demand_type = CASE
+      WHEN COALESCE(source_order_id, 0) > 0 OR COALESCE(source_order_item_id, 0) > 0 THEN 'real_order'
+      ELSE 'advance_stock'
+    END
+    WHERE demand_type IS NULL OR demand_type = ''
+      OR (COALESCE(source_order_id, 0) > 0 AND demand_type != 'real_order')
   `);
   procurementFlexibleRequestSchemaReadyMysql = true;
 }
@@ -785,6 +829,27 @@ async function ensureProcurementPlatformOrderSchemaMysql() {
       UNIQUE KEY uk_procurement_platform_order (platform, platform_order_no),
       KEY idx_procurement_platform_order_binding (binding_status, order_time),
       KEY idx_procurement_platform_order_time (platform, order_time)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `);
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS procurement_order_allocations (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      procurement_request_id BIGINT UNSIGNED NOT NULL,
+      order_item_id BIGINT UNSIGNED NOT NULL,
+      order_id BIGINT UNSIGNED NOT NULL,
+      product_id BIGINT UNSIGNED NOT NULL,
+      allocated_quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
+      status VARCHAR(32) NOT NULL DEFAULT 'allocated',
+      allocated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      released_at DATETIME NULL,
+      release_reason VARCHAR(255) NULL,
+      created_by_person_id BIGINT UNSIGNED NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_procurement_order_allocation (procurement_request_id, order_item_id),
+      KEY idx_procurement_allocation_order (order_id, status),
+      KEY idx_procurement_allocation_item (order_item_id, status),
+      KEY idx_procurement_allocation_product (product_id, status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   `);
   await mysqlExecute(`
@@ -1473,7 +1538,9 @@ async function productComponentRowsMysql(productId) {
       p.product_quantity,
       p.package_mode,
       p.package_contents,
-      COALESCE(stock.local_stock, 0) AS local_stock
+      COALESCE(stock.local_stock, 0) AS local_stock,
+      COALESCE(fbp.fbp_stock, 0) AS fbp_stock,
+      COALESCE(incoming.incoming_stock, 0) AS incoming_stock
     FROM product_components pc
     JOIN products p ON p.id = pc.component_product_id AND p.active = 1
     LEFT JOIN (
@@ -1483,6 +1550,18 @@ async function productComponentRowsMysql(productId) {
         AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'
       GROUP BY product_id
     ) stock ON stock.product_id = pc.component_product_id
+    LEFT JOIN (
+      SELECT product_id, SUM(present) AS fbp_stock
+      FROM ozon_stock_snapshots
+      WHERE stock_type = 'fbp_real'
+      GROUP BY product_id
+    ) fbp ON fbp.product_id = pc.component_product_id
+    LEFT JOIN (
+      SELECT product_id, SUM(quantity) AS incoming_stock
+      FROM inbound_records
+      WHERE status = 'pending_arrival'
+      GROUP BY product_id
+    ) incoming ON incoming.product_id = pc.component_product_id
     WHERE pc.product_id = ?
     ORDER BY pc.id
   `, [Number(productId)]);
@@ -1515,6 +1594,8 @@ async function productComponentRowsMysql(productId) {
       package_mode: row.package_mode === "set" ? "set" : "single",
       package_contents: row.package_contents || "",
       local_stock: localStock,
+      fbp_stock: Number(row.fbp_stock || 0),
+      incoming_stock: Number(row.incoming_stock || 0),
       available_quantity: quantity > 0 ? Math.floor(localStock / quantity) : 0
     };
   });
@@ -2136,7 +2217,7 @@ function hasRequiredFinanceBasisMysql(rows = [], orderOutcome = "", items = []) 
     && (Number(totals.platform_delivery || 0) + Number(totals.international_transport || 0)) > 0.005;
 }
 
-async function orderFinanceRowsWithParentAcquiringMysql(order = {}, items = [], { from = "", to = "" } = {}) {
+async function orderFinanceRowsWithParentAllocationMysql(order = {}, items = [], { from = "", to = "" } = {}) {
   const directRows = await mysqlQuery(`
     SELECT operation_type, operation_type_name, service_type, service_name,
       COALESCE(MAX(CASE WHEN ABS(COALESCE(accruals_for_sale_cny, 0)) > 0 THEN ABS(accruals_for_sale_cny) ELSE 0 END), 0) AS accruals_for_sale_cny,
@@ -2154,17 +2235,16 @@ async function orderFinanceRowsWithParentAcquiringMysql(order = {}, items = [], 
   if (!parentPosting || parentPosting === order.posting_number) return directRows;
 
   const parentRows = await mysqlQuery(`
-    SELECT service_type, service_name,
-      0 AS accruals_for_sale_cny,
+    SELECT operation_type, operation_type_name, service_type, service_name,
+      COALESCE(MAX(CASE WHEN ABS(COALESCE(accruals_for_sale_cny, 0)) > 0 THEN ABS(accruals_for_sale_cny) ELSE 0 END), 0) AS accruals_for_sale_cny,
       COALESCE(SUM(amount_cny), 0) AS amount_cny,
       GREATEST(0, -COALESCE(SUM(amount_cny), 0)) AS fee_amount_cny
     FROM ozon_finance_items
     WHERE shop_id = ?
       AND posting_number = ?
-      AND LOWER(COALESCE(service_name, '')) LIKE '%marketplaceredistributionofacquiringoperation%'
       AND (NULLIF(?, '') IS NULL OR DATE(operation_date) >= NULLIF(?, ''))
       AND (NULLIF(?, '') IS NULL OR DATE(operation_date) <= NULLIF(?, ''))
-    GROUP BY service_type, service_name
+    GROUP BY operation_type, operation_type_name, service_type, service_name
   `, [order.shop_id, parentPosting, from, from, to, to]);
   if (!parentRows.length) return directRows;
 
@@ -3972,9 +4052,12 @@ function applyFbpOpportunityQuery(rows, query = {}) {
   const minSales = Number(query.minSales || 0);
   const sortKey = String(query.sortKey || "score");
   const sortDir = String(query.sortDir || "desc").toLowerCase() === "asc" ? "asc" : "desc";
+  const manualSku = String(query.manualSku || query.manual_sku || "").trim().toLowerCase();
   const sortable = new Set(["score", "suggested_qty", "suggested_transfer_qty", "suggested_purchase_qty", "recent_30d_qty", "recent_7d_qty", "coverage_days", "fbp_available", "fbp_transfer_in_transit_qty"]);
 
-  let filtered = rows.filter((row) => row.score >= 50 && row.suggested_qty > 0);
+  let filtered = manualSku
+    ? rows.filter((row) => String(row.ozon_sku || "").trim().toLowerCase() === manualSku)
+    : rows.filter((row) => row.score >= 50 && row.suggested_qty > 0);
   if (text) {
     filtered = filtered.filter((row) => [
       row.shop_name,
@@ -4230,7 +4313,8 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
   const rows = await mysqlQuery(`
     SELECT o.*, DATE_FORMAT(o.order_date, '%Y-%m-%d') AS order_date,
       batch.id AS batch_id, batch.batch_no,
-      s.name AS shop_name, creator.name AS created_by_name, reviewer.name AS reviewed_by_name,
+      s.name AS shop_name, s.ozon_client_id AS ozon_company_id,
+      creator.name AS created_by_name, reviewer.name AS reviewed_by_name,
       COUNT(i.id) AS item_count,
       COALESCE(SUM(i.requested_qty), 0) AS total_requested_qty,
       COALESCE(SUM(i.approved_qty), 0) AS total_approved_qty,
@@ -4249,7 +4333,7 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
       GROUP BY item_id
     ) adj ON adj.item_id = i.id
     ${whereSql}
-    GROUP BY o.id, s.name, creator.name, reviewer.name, batch.id, batch.batch_no
+    GROUP BY o.id, s.name, s.ozon_client_id, creator.name, reviewer.name, batch.id, batch.batch_no
     ORDER BY o.created_at DESC, o.id DESC
     LIMIT ? OFFSET ?
   `, [...params, pageSize, (page - 1) * pageSize]);
@@ -4467,15 +4551,24 @@ export async function updateFbpReplenishmentOrderItemsMysql(body = {}) {
     const itemId = Number(item.id || 0);
     if (!itemId) continue;
     const requestedQty = Math.max(1, Math.round(Number(item.requested_qty || item.requestedQty || 0)));
-    const approvedQty = Math.max(0, Math.round(Number(item.approved_qty || item.approvedQty || requestedQty)));
     await mysqlExecute(`
       UPDATE fbp_replenishment_order_items
       SET requested_qty = ?, approved_qty = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND order_id = ?
-    `, [requestedQty, approvedQty, itemId, orderId]);
+    `, [requestedQty, requestedQty, itemId, orderId]);
   }
   await mysqlExecute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [orderId]);
   return { ok: true, id: orderId };
+}
+
+async function requireSessionPersonIdMysql(personId, connection = null) {
+  const resolved = nullableInteger(personId);
+  if (!resolved) throw Object.assign(new Error("当前登录人员无效，请重新登录后再提交采购"), { statusCode: 401 });
+  const row = connection
+    ? await mysqlConnectionQueryOne(connection, "SELECT id FROM people WHERE id = ? AND active != 0", [resolved])
+    : await mysqlQueryOne("SELECT id FROM people WHERE id = ? AND active != 0", [resolved]);
+  if (!row) throw Object.assign(new Error("当前登录人员不存在或已停用，请重新登录后再提交采购"), { statusCode: 403 });
+  return resolved;
 }
 
 export async function addFbpReplenishmentItemAdjustmentMysql(body = {}, userId = null) {
@@ -4607,16 +4700,16 @@ export async function fbpReplenishmentBatchFillPreviewMysql(query = {}) {
   const batchId = Number(query.batchId || query.batch_id || query.id || 0);
   if (!batchId) throw new Error("缺少关联汇总批次。");
   const batch = await mysqlQueryOne(`
-    SELECT b.*, s.name AS shop_name, COUNT(bm.order_id) AS order_count
+    SELECT b.*, s.name AS shop_name, s.ozon_client_id AS ozon_company_id, COUNT(bm.order_id) AS order_count
     FROM fbp_replenishment_batches b
     LEFT JOIN shops s ON s.id = b.shop_id
     LEFT JOIN fbp_replenishment_batch_members bm ON bm.batch_id = b.id
     WHERE b.id = ?
-    GROUP BY b.id, s.name
+    GROUP BY b.id, s.name, s.ozon_client_id
   `, [batchId]);
   if (!batch) throw new Error("关联汇总批次不存在。");
   const rows = await mysqlQuery(`
-    SELECT i.ozon_sku,
+    SELECT i.ozon_sku, MAX(i.offer_id) AS offer_id,
       SUM(i.approved_qty + COALESCE(adj.adjustment_qty, 0)) AS final_qty,
       COUNT(DISTINCT o.id) AS source_order_count,
       GROUP_CONCAT(DISTINCT o.order_no ORDER BY o.id SEPARATOR '、') AS source_order_nos,
@@ -4635,12 +4728,12 @@ export async function fbpReplenishmentBatchFillPreviewMysql(query = {}) {
     const finalQty = Math.max(0, Number(row.final_qty || 0));
     const filledQty = Math.max(0, Number(row.filled_qty || 0));
     return {
-      sku: String(row.ozon_sku || ""), final_qty: finalQty, filled_qty: filledQty,
+      sku: String(row.ozon_sku || ""), offer_id: String(row.offer_id || ""), final_qty: finalQty, filled_qty: filledQty,
       pending_qty: Math.max(0, finalQty - filledQty), overfilled_qty: Math.max(0, filledQty - finalQty),
       source_order_count: Number(row.source_order_count || 0), source_order_nos: row.source_order_nos || ""
     };
   });
-  return { ok: true, batch: { id: batchId, batch_no: batch.batch_no, shop_id: Number(batch.shop_id), shop_name: batch.shop_name || "", order_count: Number(batch.order_count || 0) }, items };
+  return { ok: true, batch: { id: batchId, batch_no: batch.batch_no, shop_id: Number(batch.shop_id), shop_name: batch.shop_name || "", ozon_company_id: String(batch.ozon_company_id || "").trim(), order_count: Number(batch.order_count || 0) }, items };
 }
 
 export async function recordFbpReplenishmentBatchFillMysql(body = {}, userId = null) {
@@ -4806,7 +4899,7 @@ export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId =
       approvalResult = await createFbpReplenishmentApprovedTransfersMysql(connection, id, userId);
     }
   });
-  if (approvalResult.outboundQuantity > 0) invalidateFbpPlanningCachesMysql();
+  invalidateFbpPlanningCachesMysql();
   return { ok: true, id, status, ...approvalResult };
 }
 
@@ -5952,6 +6045,24 @@ export async function markOrderLabelsPrintedMysql(body = {}, userId = null) {
   return { ok: true, count: orderedRows.length, print_batch_id: batchId };
 }
 
+export async function removeFailedOrderLabelPrintBatchMysql(body = {}, userId = null) {
+  ensureMysqlCutoverEnabled();
+  await ensureOrderLabelPrintSchemaMysql();
+  const batchId = String(body.print_batch_id || "").trim();
+  if (!batchId) throw new Error("Print batch is required");
+  const personId = await resolveExistingPersonId(userId);
+  const result = personId
+    ? await mysqlExecute(
+      "DELETE FROM order_label_prints WHERE print_batch_id = ? AND printed_by_person_id = ?",
+      [batchId, personId]
+    )
+    : await mysqlExecute(
+      "DELETE FROM order_label_prints WHERE print_batch_id = ? AND printed_by_person_id IS NULL",
+      [batchId]
+    );
+  return { ok: true, count: Number(result?.affectedRows || 0), print_batch_id: batchId };
+}
+
 function sortRowsByInputMysql(rows, values, key) {
   const order = new Map(values.map((value, index) => [String(value), index]));
   return [...rows].sort((a, b) => (order.get(String(a[key])) ?? 0) - (order.get(String(b[key])) ?? 0));
@@ -6363,8 +6474,10 @@ export async function shipOrdersMysql(body = {}, userId = null) {
     if (Array.isArray(body.packages)) {
       splitPackages = buildSplitShippingPackagesMysql(items, body.packages);
     }
+    const liveProducts = buildLiveShippingProductsMysql(livePosting);
+    const shippingItems = splitPackages || !liveProducts.length ? items : liveProducts;
     try {
-      await shipOzonPosting(shop, order.posting_number, items, splitPackages ? { packages: splitPackages } : {});
+      await shipOzonPosting(shop, order.posting_number, shippingItems, splitPackages ? { packages: splitPackages } : {});
     } catch (error) {
       const rawMessage = String(error?.message || error || "");
       if (rawMessage.includes("UNKNOWN_PRODUCT_DEFINED")) {
@@ -6386,6 +6499,10 @@ export async function shipOrdersMysql(body = {}, userId = null) {
           });
           continue;
         }
+      }
+      if (rawMessage.includes("HAS_INCORRECT_PRODUCT_QUANTITY")) {
+        const submittedProducts = shippingItems.map((item) => `${item.product_id}:${item.quantity}`).join(", ");
+        throw new Error(`Order ${order.posting_number} shipping failed: Ozon product quantity changed. Submitted ${submittedProducts}. Refresh the order and retry. Original error: ${rawMessage}`);
       }
       throw error;
     }
@@ -6552,10 +6669,11 @@ function exceptionOrderContextMysql(row = {}) {
   return {
     image_url: firstDelimitedValueMysql(row.image_urls) || firstMappedValueMysql(row.sku_images),
     product_name: productName === "Unbound product" ? "Unbound inventory product" : productName,
-    sku_text: firstDelimitedValueMysql(row.skus || row.unbound_skus),
+    sku_text: firstDelimitedValueMysql(row.unbound_skus || row.skus),
     inventory_id: firstDelimitedValueMysql(row.inventory_ids || row.product_codes),
     productId: Number(firstDelimitedValueMysql(row.product_ids)) || undefined,
-    onlineProductId: Number(firstMappedValueMysql(row.sku_online_product_ids)) || undefined
+    orderItemId: Number(firstDelimitedValueMysql(row.unbound_order_item_ids)) || undefined,
+    onlineProductId: Number(firstMappedValueMysql(row.unbound_sku_online_product_ids || row.sku_online_product_ids)) || undefined
   };
 }
 
@@ -6861,10 +6979,12 @@ async function exceptionOrderCandidateRowsMysql(view = "profit", query = {}) {
       0 AS local_stock_shortage_count,
       GROUP_CONCAT(DISTINCT oi.ozon_sku) AS skus,
       GROUP_CONCAT(DISTINCT CASE WHEN oi.id IS NOT NULL AND p.id IS NULL THEN oi.ozon_sku END) AS unbound_skus,
+      GROUP_CONCAT(DISTINCT CASE WHEN oi.id IS NOT NULL AND p.id IS NULL THEN oi.id END) AS unbound_order_item_ids,
       GROUP_CONCAT(CONCAT(oi.ozon_sku, ':', COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), '')) SEPARATOR '||') AS sku_names,
       GROUP_CONCAT(CONCAT(oi.ozon_sku, ':', COALESCE(NULLIF(oi.ozon_image_url, ''), NULLIF(op.primary_image, ''), NULLIF(op.image_url, ''), '')) SEPARATOR '||') AS sku_images,
       GROUP_CONCAT(DISTINCT CASE WHEN p.id IS NOT NULL THEN p.id END) AS product_ids,
       GROUP_CONCAT(DISTINCT CASE WHEN op.id IS NOT NULL THEN CONCAT(oi.ozon_sku, ':', op.id) END) AS sku_online_product_ids,
+      GROUP_CONCAT(DISTINCT CASE WHEN oi.id IS NOT NULL AND p.id IS NULL AND op.id IS NOT NULL THEN CONCAT(oi.ozon_sku, ':', op.id) END) AS unbound_sku_online_product_ids,
       GROUP_CONCAT(DISTINCT CASE
         WHEN p.id IS NOT NULL AND p.code LIKE 'P-%' THEN p.code
         WHEN p.id IS NOT NULL THEN CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
@@ -7620,7 +7740,7 @@ export async function syncOzonFinanceRawMysql(body = {}, options = {}) {
   return { fetched, upserted, requests, from, to, shops, errors, db: "mysql" };
 }
 
-async function applyOzonFinanceToOrdersMysql({ from = "", to = "" } = {}) {
+async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedCollectingRates = null } = {}) {
   from = normalizeSyncDateMysql(from);
   to = normalizeSyncDateMysql(to);
   const orderIds = Array.isArray(arguments[0]?.orderIds) ? arguments[0].orderIds.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0) : [];
@@ -7660,7 +7780,6 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "" } = {}) {
         WHERE parent_ofi.shop_id = o.shop_id
           AND parent_ofi.posting_number = COALESCE(NULLIF(o.order_number, ''), REGEXP_REPLACE(o.posting_number, '-[0-9]+$', ''))
           AND parent_ofi.posting_number != o.posting_number
-          AND LOWER(COALESCE(parent_ofi.service_name, '')) LIKE '%marketplaceredistributionofacquiringoperation%'
           AND (NULLIF(?, '') IS NULL OR DATE(parent_ofi.operation_date) >= NULLIF(?, ''))
           AND (NULLIF(?, '') IS NULL OR DATE(parent_ofi.operation_date) <= NULLIF(?, ''))
       )
@@ -7679,11 +7798,19 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "" } = {}) {
       LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
       WHERE oi.order_id = ?
     `, [row.order_id]);
-    const financeRows = await orderFinanceRowsWithParentAcquiringMysql(row, items, { from, to });
-    const categoryTotals = financeCategoryTotalsMysql(financeRows);
+    const financeRows = await orderFinanceRowsWithParentAllocationMysql(row, items, { from, to });
+    let categoryTotals = financeCategoryTotalsMysql(financeRows);
     const localTotalSale = items.reduce((sum, item) => sum + Number(item.sale_amount_cny || (Number(item.sale_price || 0) * Number(item.quantity || 1))), 0);
     const ozonSaleAccrual = financeRows.reduce((max, item) => Math.max(max, Math.abs(Number(item.accruals_for_sale_cny || 0))), 0);
     const actualTotalSale = ozonSaleAccrual > 0 ? ozonSaleAccrual : localTotalSale;
+    const estimatedCollectingRate = Number(estimatedCollectingRates?.get(Number(row.order_id)) || 0);
+    const usesEstimatedCollecting = Number(categoryTotals.collecting_fee || 0) <= 0.005 && estimatedCollectingRate > 0;
+    if (usesEstimatedCollecting) {
+      categoryTotals = {
+        ...categoryTotals,
+        collecting_fee: roundMoneyMysql(actualTotalSale * estimatedCollectingRate)
+      };
+    }
     const actualCommissionFeeTotal = Number(categoryTotals.commission || 0);
     const commissionRate = Number(row.sale_accrual_cny || 0) > 0
       ? actualCommissionFeeTotal / Number(row.sale_accrual_cny || 0)
@@ -7706,7 +7833,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "" } = {}) {
     const cancellation = describeCancellation({ ...row, outcome_type: orderOutcome });
     const orderLossProfile = { ...cancellation, code: orderAccounting.loss_profile_code };
     const hasFinalFinanceBasis = Number(row.sale_accrual_cny || 0) > 0.005 || orderOutcome !== "active";
-    if (!hasFinalFinanceBasis || !hasRequiredFinanceBasisMysql(financeRows, orderOutcome, items)) continue;
+    if (!hasFinalFinanceBasis || (!usesEstimatedCollecting && !hasRequiredFinanceBasisMysql(financeRows, orderOutcome, items))) continue;
     if (orderOutcome === "delivered_signed") {
       const hasCompleteDeliveredCosts = items.every((item) => (
         (Number(item.purchase_cost_cny || 0) > 0.005 || Number(item.frozen_purchase_cost || 0) * Math.max(Number(item.quantity || 1), 1) > 0.005)
@@ -7727,6 +7854,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "" } = {}) {
       const serviceFeeCny = roundMoneyMysql(Number(categoryTotals.other || 0) * share);
       const parentAllocatedCollectingFee = financeRows.reduce((sum, financeRow) => (
         Number(financeRow.derived_from_parent_posting || 0) === 1
+          && ozonFinanceCategoryMysql(financeRow) === "collecting_fee"
           ? sum + Number(financeRow.fee_amount_cny || 0)
           : sum
       ), 0);
@@ -7767,7 +7895,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "" } = {}) {
         });
       }
       const advertisingCost = cancelOnlyCollectingFee ? 0 : Number(item.advertising_cost_cny || 0);
-      const hasCollectingFinance = Object.prototype.hasOwnProperty.call(categoryTotals, "collecting_fee");
+      const hasCollectingFinance = usesEstimatedCollecting || Object.prototype.hasOwnProperty.call(categoryTotals, "collecting_fee");
       const otherFee = hasCollectingFinance ? actualCollectingFee : (returnedNoRevenue ? 0 : Number(item.other_fee_cny || 0));
       const terminalLoss = purchaseCost + domesticShipping + actualInternationalShipping + packagingCost + commissionFeeCny + actualServiceFeeCny + returnLoss + advertisingCost + otherFee;
       const actualProfit = roundMoneyMysql(terminalNoRevenue ? -terminalLoss : itemSale - terminalLoss);
@@ -7796,7 +7924,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "" } = {}) {
           profit_status = 'accrued',
           updated_at = CURRENT_TIMESTAMP
       `, [item.id, itemSale, purchaseCost, domesticShipping, actualInternationalShipping, packagingCost, commissionFeeCny, commissionRate, actualServiceFeeCny, returnLoss, advertisingCost, otherFee, grossProfit, actualProfit]);
-      await lockProfitItemMysql(item.id, "finance_accrued");
+      await lockProfitItemMysql(item.id, usesEstimatedCollecting ? "finance_accrued_estimated_collecting" : "finance_accrued");
       updated += 1;
       appliedOrderIds.add(Number(row.order_id));
     }
@@ -8277,6 +8405,13 @@ export async function bindOnlineProductMysql(body = {}) {
         AND order_id IN (SELECT id FROM orders WHERE shop_id = ?)
     `, updateOrderItemPayload);
 
+    await mysqlExecute(`
+      UPDATE procurement_requests
+      SET product_id = ?, binding_status = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE source_order_item_id = ?
+        AND status IN ('pending', 'suggested', 'submitted')
+        AND COALESCE(purchase_order_id, 0) = 0
+    `, [productId, productId ? "bound" : "unbound", orderItemId]);
   }
 
   const inventoryRecipe = body.inventory_recipe || body.inventoryRecipe;
@@ -9588,7 +9723,7 @@ export async function productsMysql(query = {}) {
   const categoryText = String(query.category || query.category_name || "").trim().toLowerCase();
   const structuredProductName = String(query.productName || query.product_name || "").trim();
   const structuredInventoryCategory = String(query.inventoryCategory || query.inventory_category || "").trim();
-  const structuredVehicleBrand = String(query.vehicleBrand || query.vehicle_brand || "").trim().replace("|", " ");
+  const structuredVehicleBrand = String(query.vehicleBrand || query.vehicle_brand || "").replace(/\|/g, " ").replace(/\s+/g, " ").trim();
   const structuredFitmentType = String(query.fitmentType || query.fitment_type || "").trim();
   const structuredVehicleModels = String(query.vehicleModel || query.vehicle_model || "").split(",").map((item) => item.trim()).filter(Boolean);
   const structuredAccessoryName = String(query.accessoryName || query.accessory_name || "").trim();
@@ -10343,11 +10478,8 @@ export async function productsMysql(query = {}) {
     ) proc ON proc.product_id = p.id
     LEFT JOIN (
       SELECT product_id, SUM(quantity) AS incoming_stock
-      FROM (
-        SELECT product_id, quantity FROM inbound_records WHERE status = 'pending_arrival'
-        UNION ALL
-        SELECT product_id, quantity FROM procurement_requests WHERE status IN ('submitted', 'merged')
-      ) incoming_rows
+      FROM inbound_records
+      WHERE status = 'pending_arrival'
       GROUP BY product_id
     ) incoming ON incoming.product_id = p.id
     LEFT JOIN (
@@ -11518,7 +11650,7 @@ async function maybeCreateProcurementForProductMysql(connection, productId, body
     plan.quantity,
     plan.amount,
     plan.shippingAmount,
-    body.purchase_url || "",
+    body.purchase_url ?? existing.purchase_url ?? "",
     body.needed_by || null,
     body.note || body.supplier_note || "Created from product creation",
     body.urgency || "normal",
@@ -12119,6 +12251,112 @@ function mergeCountsSummaryMysql(affectedCounts = {}, targetProductId = 0) {
       total
     }];
   }));
+}
+
+function medianMysql(values = []) {
+  const sorted = values.map(Number).filter((value) => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+export async function forceSettleStaleDeliveredOrdersMysql(body = {}) {
+  ensureMysqlCutoverEnabled();
+  const write = Boolean(body.write || body.apply);
+  const ageDays = Math.min(Math.max(Number(body.age_days || body.ageDays || 30), 30), 365);
+  const limit = Math.min(Math.max(Number(body.limit || 5000), 1), 20000);
+  const samples = await mysqlQuery(`
+    SELECT o.shop_id,
+      DATE_FORMAT(COALESCE(o.delivered_at, o.ordered_at), '%Y-%m') AS delivery_month,
+      (SELECT GREATEST(0, -SUM(af.amount_cny)) FROM ozon_finance_items af
+        WHERE af.shop_id = o.shop_id
+          AND af.posting_number = COALESCE(NULLIF(o.order_number, ''), REGEXP_REPLACE(o.posting_number, '-[0-9]+$', ''))
+          AND (LOWER(CONCAT_WS(' ', af.operation_type, af.operation_type_name, af.service_type, af.service_name)) LIKE '%marketplaceredistributionofacquiringoperation%'
+            OR LOWER(CONCAT_WS(' ', af.operation_type, af.operation_type_name, af.service_type, af.service_name)) LIKE '%acquiring%')) AS collecting_fee_cny,
+      MAX(ABS(COALESCE(f.accruals_for_sale_cny, 0))) AS sale_amount_cny
+    FROM orders o
+    JOIN ozon_finance_items f ON f.shop_id = o.shop_id AND f.posting_number = o.posting_number
+    WHERE (LOWER(COALESCE(o.status, '')) = 'delivered' OR COALESCE(o.delivered_at, '') != '')
+    GROUP BY o.id, o.shop_id, o.order_number, o.posting_number, delivery_month
+    HAVING collecting_fee_cny > 0.005 AND sale_amount_cny > 0.005
+  `);
+  const monthRates = new Map();
+  const shopRates = new Map();
+  for (const sample of samples) {
+    const rate = Number(sample.collecting_fee_cny || 0) / Number(sample.sale_amount_cny || 0);
+    if (!(rate > 0 && rate < 0.1)) continue;
+    const monthKey = `${Number(sample.shop_id)}:${sample.delivery_month}`;
+    if (!monthRates.has(monthKey)) monthRates.set(monthKey, []);
+    monthRates.get(monthKey).push(rate);
+    if (!shopRates.has(Number(sample.shop_id))) shopRates.set(Number(sample.shop_id), []);
+    shopRates.get(Number(sample.shop_id)).push(rate);
+  }
+  const candidates = await mysqlQuery(`
+    SELECT o.id AS order_id, o.shop_id, o.posting_number,
+      DATE_FORMAT(COALESCE(o.delivered_at, o.ordered_at), '%Y-%m') AS delivery_month,
+      DATEDIFF(CURRENT_DATE(), DATE(COALESCE(o.delivered_at, o.ordered_at))) AS age_days,
+      MAX(ABS(COALESCE(f.accruals_for_sale_cny, 0))) AS sale_amount_cny,
+      SUM(CASE WHEN f.service_type = 'sale_commission' OR LOWER(COALESCE(f.service_name, '')) LIKE '%commission%' THEN 1 ELSE 0 END) AS commission_rows,
+      SUM(CASE WHEN LOWER(CONCAT_WS(' ', f.operation_type, f.operation_type_name, f.service_type, f.service_name)) LIKE '%delivery%'
+        OR LOWER(CONCAT_WS(' ', f.operation_type, f.operation_type_name, f.service_type, f.service_name)) LIKE '%достав%'
+        OR LOWER(CONCAT_WS(' ', f.operation_type, f.operation_type_name, f.service_type, f.service_name)) LIKE '%транспорт%'
+        THEN 1 ELSE 0 END) AS delivery_rows
+    FROM orders o
+    JOIN ozon_finance_items f ON f.shop_id = o.shop_id AND f.posting_number = o.posting_number
+    WHERE (LOWER(COALESCE(o.status, '')) = 'delivered' OR LOWER(COALESCE(o.tracking_stage, '')) = 'posting_received'
+      OR LOWER(COALESCE(o.logistics_status, '')) = 'delivered' OR COALESCE(o.delivered_at, '') != '')
+      AND DATE(COALESCE(o.delivered_at, o.ordered_at)) <= DATE_SUB(CURRENT_DATE(), INTERVAL ? DAY)
+      AND NOT EXISTS (
+        SELECT 1 FROM ozon_finance_items af
+        WHERE af.shop_id = o.shop_id
+          AND af.posting_number = COALESCE(NULLIF(o.order_number, ''), REGEXP_REPLACE(o.posting_number, '-[0-9]+$', ''))
+          AND (LOWER(CONCAT_WS(' ', af.operation_type, af.operation_type_name, af.service_type, af.service_name)) LIKE '%marketplaceredistributionofacquiringoperation%'
+            OR LOWER(CONCAT_WS(' ', af.operation_type, af.operation_type_name, af.service_type, af.service_name)) LIKE '%acquiring%')
+      )
+    GROUP BY o.id, o.shop_id, o.posting_number, delivery_month
+    HAVING sale_amount_cny > 0.005 AND commission_rows > 0 AND delivery_rows > 0
+    ORDER BY COALESCE(o.delivered_at, o.ordered_at), o.id
+    LIMIT ?
+  `, [ageDays, limit]);
+  const rates = new Map();
+  const rows = candidates.map((row) => {
+    const monthlySamples = monthRates.get(`${Number(row.shop_id)}:${row.delivery_month}`) || [];
+    const sourceSamples = monthlySamples.length >= 5 ? monthlySamples : (shopRates.get(Number(row.shop_id)) || []);
+    const rate = medianMysql(sourceSamples);
+    if (rate > 0) rates.set(Number(row.order_id), rate);
+    return { ...row, median_rate: rate, sample_scope: monthlySamples.length >= 5 ? "shop_month" : "shop_all", sample_count: sourceSamples.length };
+  }).filter((row) => row.median_rate > 0);
+  const applied = write && rows.length
+    ? await applyOzonFinanceToOrdersMysql({ orderIds: rows.map((row) => Number(row.order_id)), estimatedCollectingRates: rates })
+    : { orders: 0, items: 0 };
+  let verification = { settled_orders: 0, unsettled_orders: rows.length, unresolved: [] };
+  if (write && rows.length) {
+    const ids = rows.map((row) => Number(row.order_id));
+    const verified = await mysqlQueryOne(`
+      SELECT COUNT(DISTINCT CASE WHEN COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN o.id END) AS settled_orders
+      FROM orders o
+      JOIN order_items oi ON oi.order_id = o.id
+      LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
+      WHERE o.id IN (${ids.map(() => "?").join(",")})
+    `, ids);
+    const unresolved = await mysqlQuery(`
+      SELECT o.id AS order_id, o.posting_number,
+        SUM(CASE WHEN COALESCE(opi.profit_status, oi.settlement_state, '') != 'accrued' THEN 1 ELSE 0 END) AS unsettled_items,
+        SUM(CASE WHEN COALESCE(opi.purchase_cost_cny, 0) <= 0.005 AND COALESCE(oi.frozen_purchase_cost, 0) * GREATEST(COALESCE(oi.quantity, 1), 1) <= 0.005 THEN 1 ELSE 0 END) AS missing_purchase_items
+      FROM orders o
+      JOIN order_items oi ON oi.order_id = o.id
+      LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
+      WHERE o.id IN (${ids.map(() => "?").join(",")})
+      GROUP BY o.id, o.posting_number
+      HAVING unsettled_items > 0
+    `, ids);
+    verification = {
+      settled_orders: Number(verified?.settled_orders || 0),
+      unsettled_orders: Math.max(0, rows.length - Number(verified?.settled_orders || 0)),
+      unresolved
+    };
+  }
+  return { ok: true, mode: write ? "write" : "dry_run", age_days: ageDays, selected_orders: rows.length, applied, verification, rows: rows.slice(0, 100) };
 }
 
 function compactProductMergeUndoSnapshotMysql(product = {}) {
@@ -13106,18 +13344,41 @@ export async function inboundRecordsMysql(query = {}) {
   const { whereSql, params } = inboundRecordsWhereMysql(query);
   const selectSql = `
     SELECT ir.*, p.code AS product_code, p.name AS product_name, p.image_url AS product_image_url,
-      pe.name AS person_name, po.order_no AS purchase_order_no
+      pe.name AS person_name, approver.name AS approved_by_person_name, po.order_no AS purchase_order_no, po.purchased_at,
+      COALESCE(direct_request.source_type, order_request.source_type, p.source_platform, 'other') AS source_type,
+      COALESCE(direct_supplier.name, order_request.supplier_names, product_supplier.name, '') AS supplier_name,
+      COALESCE(skus.mapped_skus, '') AS mapped_skus
     FROM inbound_records ir
     JOIN products p ON p.id = ir.product_id
     LEFT JOIN people pe ON pe.id = ir.person_id
+    LEFT JOIN people approver ON approver.id = ir.approved_by_person_id
     LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
+    LEFT JOIN procurement_requests direct_request ON direct_request.id = ir.procurement_request_id
+    LEFT JOIN suppliers direct_supplier ON direct_supplier.id = direct_request.supplier_id
+    LEFT JOIN suppliers product_supplier ON product_supplier.id = p.supplier_id
+    LEFT JOIN (
+      SELECT pr.purchase_order_id, pr.product_id,
+        MAX(NULLIF(pr.source_type, '')) AS source_type,
+        GROUP_CONCAT(DISTINCT s.name ORDER BY s.name SEPARATOR ', ') AS supplier_names
+      FROM procurement_requests pr
+      LEFT JOIN suppliers s ON s.id = pr.supplier_id
+      WHERE pr.purchase_order_id IS NOT NULL
+      GROUP BY pr.purchase_order_id, pr.product_id
+    ) order_request ON order_request.purchase_order_id = ir.purchase_order_id
+      AND order_request.product_id = ir.product_id
+    LEFT JOIN (
+      SELECT product_id, GROUP_CONCAT(DISTINCT ozon_sku ORDER BY ozon_sku SEPARATOR ', ') AS mapped_skus
+      FROM sku_mappings
+      WHERE active = 1
+      GROUP BY product_id
+    ) skus ON skus.product_id = ir.product_id
     ${whereSql}
   `;
 
   if (!paged) {
     return await mysqlQuery(`
       ${selectSql}
-      ORDER BY COALESCE(ir.updated_at, ir.created_at) DESC, ir.created_at DESC, ir.id DESC
+      ORDER BY COALESCE(po.purchased_at, ir.created_at) DESC, ir.id DESC
     `, params);
   }
 
@@ -13133,7 +13394,7 @@ export async function inboundRecordsMysql(query = {}) {
     `, params),
     mysqlQuery(`
       ${selectSql}
-      ORDER BY COALESCE(ir.updated_at, ir.created_at) DESC, ir.created_at DESC, ir.id DESC
+      ORDER BY COALESCE(po.purchased_at, ir.created_at) DESC, ir.id DESC
       LIMIT ? OFFSET ?
     `, [...params, pageSize, offset])
   ]);
@@ -13150,6 +13411,18 @@ export async function inboundRecordsMysql(query = {}) {
 function inboundRecordsWhereMysql(query = {}) {
   const status = String(query.status || "all");
   const searchText = String(query.query || query.search || "").trim();
+  const demandType = String(query.demandType || query.demand_type || "all");
+  const personId = String(query.personId || query.person_id || "all");
+  const supplierId = String(query.supplierId || query.supplier_id || "all");
+  const sourceType = String(query.sourceType || query.source_type || "all").trim().toLowerCase();
+  const inventoryCategory = String(query.inventoryCategory || query.inventory_category || "").trim();
+  const productName = String(query.productName || query.product_name || "").trim();
+  const vehicleBrand = String(query.vehicleBrand || query.vehicle_brand || "").replace(/\|/g, " ").replace(/\s+/g, " ").trim();
+  const vehicleModels = String(query.vehicleModel || query.vehicle_model || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const accessoryName = String(query.accessoryName || query.accessory_name || "").trim();
+  const color = String(query.color || "").trim();
+  const materials = String(query.material || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const process = String(query.process || query.surface_process || "").trim();
   const params = [];
   const where = [];
 
@@ -13160,20 +13433,56 @@ function inboundRecordsWhereMysql(query = {}) {
   if (searchText) {
     const like = `%${searchText.toLowerCase()}%`;
     where.push(`(
-      LOWER(COALESCE(po.order_no, '')) LIKE ?
-      OR LOWER(COALESCE(p.name, '')) LIKE ?
-      OR LOWER(COALESCE(p.code, '')) LIKE ?
-      OR LOWER(COALESCE(pe.name, '')) LIKE ?
-      OR LOWER(COALESCE(ir.note, '')) LIKE ?
-      OR LOWER(COALESCE(ir.purchase_url, '')) LIKE ?
+      LOWER(COALESCE(po.order_no, '')) LIKE ? OR LOWER(COALESCE(p.name, '')) LIKE ?
+      OR LOWER(COALESCE(p.code, '')) LIKE ? OR LOWER(COALESCE(pe.name, '')) LIKE ?
+      OR LOWER(COALESCE(ir.note, '')) LIKE ? OR LOWER(COALESCE(ir.purchase_url, '')) LIKE ?
     )`);
     params.push(like, like, like, like, like, like);
   }
+  if (personId !== "all" && personId) {
+    where.push("ir.person_id = ?");
+    params.push(Number(personId));
+  }
+  if (supplierId !== "all" && supplierId) {
+    where.push(`(
+      EXISTS (SELECT 1 FROM procurement_requests inbound_direct_supplier WHERE inbound_direct_supplier.id = ir.procurement_request_id AND inbound_direct_supplier.supplier_id = ?)
+      OR EXISTS (SELECT 1 FROM procurement_requests inbound_order_supplier WHERE inbound_order_supplier.purchase_order_id = ir.purchase_order_id AND inbound_order_supplier.product_id = ir.product_id AND inbound_order_supplier.supplier_id = ?)
+      OR p.supplier_id = ?
+    )`);
+    params.push(Number(supplierId), Number(supplierId), Number(supplierId));
+  }
+  if (sourceType !== "all" && sourceType) {
+    where.push(`LOWER(COALESCE(
+      (SELECT NULLIF(inbound_direct_source.source_type, '') FROM procurement_requests inbound_direct_source WHERE inbound_direct_source.id = ir.procurement_request_id LIMIT 1),
+      (SELECT MAX(NULLIF(inbound_order_source.source_type, '')) FROM procurement_requests inbound_order_source WHERE inbound_order_source.purchase_order_id = ir.purchase_order_id AND inbound_order_source.product_id = ir.product_id),
+      NULLIF(p.source_platform, ''), 'other')) = ?`);
+    params.push(sourceType);
+  }
+  if (demandType === "real_order") {
+    where.push(`(
+      EXISTS (SELECT 1 FROM procurement_requests inbound_direct_order WHERE inbound_direct_order.id = ir.procurement_request_id AND (COALESCE(inbound_direct_order.source_order_id, 0) > 0 OR COALESCE(inbound_direct_order.source_order_item_id, 0) > 0))
+      OR EXISTS (SELECT 1 FROM procurement_requests inbound_purchase_order WHERE inbound_purchase_order.purchase_order_id = ir.purchase_order_id AND inbound_purchase_order.product_id = ir.product_id AND (COALESCE(inbound_purchase_order.source_order_id, 0) > 0 OR COALESCE(inbound_purchase_order.source_order_item_id, 0) > 0))
+    )`);
+  } else if (demandType === "inventory_warning") {
+    where.push(`(
+      EXISTS (SELECT 1 FROM procurement_requests inbound_direct_warning WHERE inbound_direct_warning.id = ir.procurement_request_id AND inbound_direct_warning.request_group_no LIKE 'AUTO-STOCK-%')
+      OR EXISTS (SELECT 1 FROM procurement_requests inbound_order_warning WHERE inbound_order_warning.purchase_order_id = ir.purchase_order_id AND inbound_order_warning.product_id = ir.product_id AND inbound_order_warning.request_group_no LIKE 'AUTO-STOCK-%')
+    )`);
+  }
+  if (inventoryCategory) { where.push("p.inventory_category = ?"); params.push(inventoryCategory); }
+  if (productName) { where.push("p.name LIKE ?"); params.push(`%${productName}%`); }
+  if (vehicleBrand) {
+    const brandTokens = [...new Set(vehicleBrand.split(/\s+/).filter(Boolean))];
+    where.push(`(REPLACE(COALESCE(p.vehicle_brand, ''), '|', ' ') = ? OR ${brandTokens.map(() => "p.vehicle_brand LIKE ?").join(" OR ")})`);
+    params.push(vehicleBrand, ...brandTokens.map((token) => `%${token}%`));
+  }
+  if (vehicleModels.length) { where.push(`(${vehicleModels.map(() => "CONCAT('/', COALESCE(p.vehicle_model, ''), '/') LIKE ?").join(" OR ")})`); params.push(...vehicleModels.map((model) => `%/${model}/%`)); }
+  if (accessoryName) { where.push("p.accessory_name = ?"); params.push(accessoryName); }
+  if (color) { where.push("CONCAT(',', REPLACE(COALESCE(p.color, ''), '/', ','), ',') LIKE ?"); params.push(`%,${color},%`); }
+  if (materials.length) { where.push(`(${materials.map(() => "CONCAT('/', COALESCE(p.material, ''), '/') LIKE ?").join(" OR ")})`); params.push(...materials.map((material) => `%/${material}/%`)); }
+  if (process) { where.push("p.surface_process = ?"); params.push(process); }
 
-  return {
-    whereSql: where.length ? `WHERE ${where.join(" AND ")}` : "",
-    params
-  };
+  return { whereSql: where.length ? `WHERE ${where.join(" AND ")}` : "", params };
 }
 
 export async function procurementSummaryMysql() {
@@ -13200,17 +13509,318 @@ export async function procurementSummaryMysql() {
   `);
 }
 
+function procurementInventoryWarningJoinsMysql() {
+  return `
+    LEFT JOIN (
+      SELECT product_id, SUM(quantity_delta) AS stock
+      FROM inventory_movements
+      WHERE status = 'posted' AND ${localStockLocationPredicateMysql()}
+      GROUP BY product_id
+    ) warning_stock ON warning_stock.product_id = p.id
+    LEFT JOIN (
+      SELECT product_id, SUM(quantity) AS incoming_stock
+      FROM inbound_records
+      WHERE status = 'pending_arrival'
+      GROUP BY product_id
+    ) warning_incoming ON warning_incoming.product_id = p.id
+    LEFT JOIN (
+      SELECT pc.product_id,
+        COUNT(*) AS component_count,
+        MIN(FLOOR(GREATEST(COALESCE(component_stock.stock, 0), 0) / NULLIF(pc.quantity, 0))) AS local_stock,
+        GREATEST(0,
+          MIN(FLOOR((GREATEST(COALESCE(component_stock.stock, 0), 0) + GREATEST(COALESCE(component_incoming.incoming_stock, 0), 0)) / NULLIF(pc.quantity, 0)))
+          - MIN(FLOOR(GREATEST(COALESCE(component_stock.stock, 0), 0) / NULLIF(pc.quantity, 0)))
+        ) AS incoming_stock
+      FROM product_components pc
+      JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.active = 1
+      LEFT JOIN (
+        SELECT product_id, SUM(quantity_delta) AS stock
+        FROM inventory_movements
+        WHERE status = 'posted' AND ${localStockLocationPredicateMysql()}
+        GROUP BY product_id
+      ) component_stock ON component_stock.product_id = pc.component_product_id
+      LEFT JOIN (
+        SELECT product_id, SUM(quantity) AS incoming_stock
+        FROM inbound_records
+        WHERE status = 'pending_arrival'
+        GROUP BY product_id
+      ) component_incoming ON component_incoming.product_id = pc.component_product_id
+      GROUP BY pc.product_id
+    ) warning_component_supply ON warning_component_supply.product_id = p.id
+    JOIN (
+      SELECT warning_mapping.product_id,
+        SUM(CASE WHEN ${chinaDateSqlMysql("warning_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 6 DAY) THEN warning_item.quantity ELSE 0 END) AS recent_7d_qty,
+        SUM(CASE WHEN ${chinaDateSqlMysql("warning_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 29 DAY) THEN warning_item.quantity ELSE 0 END) AS recent_30d_qty,
+        SUM(CASE WHEN ${chinaDateSqlMysql("warning_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 6 DAY) THEN warning_item.quantity ELSE 0 END) AS week1_qty,
+        SUM(CASE WHEN ${chinaDateSqlMysql("warning_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 13 DAY) AND ${chinaDateSqlMysql("warning_order.ordered_at")} < DATE_SUB(CURRENT_DATE, INTERVAL 6 DAY) THEN warning_item.quantity ELSE 0 END) AS week2_qty,
+        SUM(CASE WHEN ${chinaDateSqlMysql("warning_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 20 DAY) AND ${chinaDateSqlMysql("warning_order.ordered_at")} < DATE_SUB(CURRENT_DATE, INTERVAL 13 DAY) THEN warning_item.quantity ELSE 0 END) AS week3_qty
+      FROM order_items warning_item
+      JOIN orders warning_order ON warning_order.id = warning_item.order_id
+      JOIN sku_mappings warning_mapping ON (
+        (warning_mapping.id = warning_item.sku_mapping_id
+          OR (warning_mapping.shop_id = warning_order.shop_id AND warning_mapping.ozon_sku = warning_item.ozon_sku))
+        AND warning_mapping.active = 1
+      )
+      WHERE LOWER(warning_order.status) NOT LIKE '%cancel%'
+        AND LOWER(COALESCE(warning_order.tracking_stage, '')) NOT LIKE '%cancel%'
+        AND ${chinaDateSqlMysql("warning_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 29 DAY)
+      GROUP BY warning_mapping.product_id
+    ) warning_sales ON warning_sales.product_id = p.id
+    LEFT JOIN (
+      SELECT product_id, COUNT(*) AS fbp_snapshot_count,
+        SUM(CASE WHEN stock_type = 'fbp_real' THEN available ELSE 0 END) AS fbp_available
+      FROM ozon_stock_snapshots
+      WHERE stock_type = 'fbp_real'
+      GROUP BY product_id
+    ) warning_fbp ON warning_fbp.product_id = p.id
+  `;
+}
+
+function procurementInventoryWarningStockMysql() {
+  return `CASE WHEN COALESCE(warning_component_supply.component_count, 0) > 0
+    THEN GREATEST(COALESCE(warning_component_supply.local_stock, 0), 0)
+    ELSE COALESCE(warning_stock.stock, 0) END`;
+}
+
+function procurementInventoryWarningIncomingMysql() {
+  return `CASE WHEN COALESCE(warning_component_supply.component_count, 0) > 0
+    THEN GREATEST(COALESCE(warning_component_supply.incoming_stock, 0), 0)
+    ELSE GREATEST(COALESCE(warning_incoming.incoming_stock, 0), 0) END`;
+}
+
+function procurementInventoryWarningConditionMysql() {
+  return `warning_sales.recent_30d_qty > 0
+    AND ((${procurementInventoryWarningStockMysql()}) + (${procurementInventoryWarningIncomingMysql()}))
+      < (warning_sales.recent_30d_qty / 30 * 21)
+    AND (
+      warning_sales.recent_7d_qty >= 5
+      OR (warning_sales.week1_qty > warning_sales.week2_qty AND warning_sales.week2_qty > warning_sales.week3_qty AND warning_sales.week1_qty > 0)
+      OR (COALESCE(warning_fbp.fbp_snapshot_count, 0) > 0
+        AND GREATEST(COALESCE(warning_fbp.fbp_available, 0), 0)
+          + (${procurementInventoryWarningStockMysql()})
+          + (${procurementInventoryWarningIncomingMysql()}) < warning_sales.recent_7d_qty)
+    )`;
+}
+
+async function ensureInventoryWarningProcurementRequestsMysql() {
+  await mysqlExecute(`
+    UPDATE procurement_requests stale
+    JOIN products p ON p.id = stale.product_id
+    ${procurementInventoryWarningJoinsMysql()}
+    SET stale.status = 'cancelled', stale.approval_status = 'cancelled', stale.cancelled_at = CURRENT_TIMESTAMP,
+      stale.note = CONCAT(COALESCE(stale.note, ''), '；预警规则复核后不再满足持续销量条件')
+    WHERE stale.request_group_no LIKE 'AUTO-STOCK-%'
+      AND stale.status IN ('pending', 'suggested', 'submitted')
+      AND NOT (${procurementInventoryWarningConditionMysql()})
+  `);
+  await mysqlExecute(`
+    UPDATE procurement_requests active_warning
+    JOIN products p ON p.id=active_warning.product_id
+    ${procurementInventoryWarningJoinsMysql()}
+    SET active_warning.quantity=GREATEST(1, CEIL(warning_sales.recent_30d_qty / 30 * 21
+      - (${procurementInventoryWarningStockMysql()})
+      - (${procurementInventoryWarningIncomingMysql()}))),
+      active_warning.updated_at=CURRENT_TIMESTAMP
+    WHERE active_warning.request_group_no LIKE 'AUTO-STOCK-%'
+      AND active_warning.status IN ('pending','suggested','submitted')
+      AND ${procurementInventoryWarningConditionMysql()}
+  `);
+  await mysqlExecute(`
+    INSERT INTO procurement_requests
+    (request_group_no, product_id, raw_name, binding_status, person_id, created_by_person_id,
+      quantity, amount, shipping_amount, purchase_url, approval_status, status, note, urgency,
+      source_type, supplier_id)
+    SELECT
+      CONCAT('AUTO-STOCK-', DATE_FORMAT(CURRENT_DATE, '%Y%m%d'), '-', p.id),
+      p.id,
+      p.name,
+      'bound',
+      COALESCE(p.owner_person_id, (SELECT id FROM people WHERE active = 1 ORDER BY id LIMIT 1)),
+      COALESCE(p.owner_person_id, (SELECT id FROM people WHERE active = 1 ORDER BY id LIMIT 1)),
+      GREATEST(1, CEIL(warning_sales.recent_30d_qty / 30 * 21
+        - (${procurementInventoryWarningStockMysql()})
+        - (${procurementInventoryWarningIncomingMysql()}))),
+      0,
+      0,
+      COALESCE(p.purchase_url, ''),
+      'suggested',
+      'suggested',
+      '系统库存预警：稳定销量商品的现货和在途不足21天，且满足近7天销量≥5、连续三周增长或FBP库存不足之一',
+      'normal',
+      COALESCE(NULLIF(p.source_platform, ''), '1688'),
+      p.supplier_id
+    FROM products p
+    ${procurementInventoryWarningJoinsMysql()}
+    WHERE p.active = 1
+      AND ${procurementInventoryWarningConditionMysql()}
+      AND COALESCE(p.owner_person_id, (SELECT id FROM people WHERE active = 1 ORDER BY id LIMIT 1)) IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM procurement_requests existing_request
+        LEFT JOIN purchase_orders existing_order ON existing_order.id = existing_request.purchase_order_id
+        WHERE existing_request.product_id = p.id
+          AND existing_request.demand_type = 'advance_stock'
+          AND existing_request.status IN ('pending', 'suggested', 'submitted', 'merged')
+          AND COALESCE(existing_order.status, '') NOT IN ('purchased', 'partial_inbound', 'inbound_done')
+      )
+  `);
+}
+
+let pendingOrderProcurementReconcilePromise = null;
+
+async function ensurePendingOrderProcurementRequestsMysql() {
+  if (pendingOrderProcurementReconcilePromise) return await pendingOrderProcurementReconcilePromise;
+  pendingOrderProcurementReconcilePromise = (async () => {
+    await ensureProcurementOrderSourceSchemaMysql();
+    return await withMysqlTransaction(async (connection) => {
+      await connection.execute(`
+        UPDATE procurement_requests request
+        JOIN orders o ON o.id=request.source_order_id
+        SET request.status='cancelled', request.approval_status='cancelled', request.cancelled_at=CURRENT_TIMESTAMP,
+          request.note=CONCAT(COALESCE(request.note,''),'；系统按最新现货、在途和优先级重新计算')
+        WHERE request.demand_type='real_order' AND request.status='suggested'
+          AND (${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")})
+      `);
+      await connection.execute(`
+        UPDATE order_item_procurement_marks marks
+        JOIN orders o ON o.id=marks.order_id
+        SET marks.status='pending', marks.updated_at=CURRENT_TIMESTAMP
+        WHERE marks.handling_type IN ('stock_available','incoming_available')
+          AND (${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")})
+      `);
+      const rows = await orderProcurementCandidateRowsMysql(null, connection, { allOrders: true });
+      if (!rows.length) return { created_count: 0, marked_count: 0, unresolved_count: 0 };
+
+      const personId = await resolvePersonIdOrFirstMysql(null, connection);
+      const remainingStockByProduct = new Map();
+      const remainingIncomingByProduct = new Map();
+      let createdCount = 0;
+      let markedCount = 0;
+      let unresolvedCount = 0;
+      for (const row of rows) {
+        const productId = Number(row.product_id);
+        const quantity = Math.max(1, Number(row.quantity || 1));
+        if (!remainingStockByProduct.has(productId)) {
+          const currentStock = Number(row.current_stock || 0);
+          const incomingStock = Math.max(0, Number(row.incoming_stock || 0));
+          remainingStockByProduct.set(productId, Math.max(0, currentStock));
+          remainingIncomingByProduct.set(productId, Math.max(0, incomingStock - Math.max(0, -currentStock)));
+        }
+        const remainingStock = Number(remainingStockByProduct.get(productId) || 0);
+        const remainingIncoming = Number(remainingIncomingByProduct.get(productId) || 0);
+        let handlingType = "stock_available";
+        let note = `库存可满足：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
+
+        if (remainingStock >= quantity) {
+          remainingStockByProduct.set(productId, remainingStock - quantity);
+        } else if (remainingStock + remainingIncoming >= quantity) {
+          remainingStockByProduct.set(productId, 0);
+          remainingIncomingByProduct.set(productId, remainingIncoming - (quantity - remainingStock));
+          handlingType = "incoming_available";
+          note = `采购在途可满足：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
+        } else {
+          const requestQuantity = Math.max(1, quantity - remainingStock - remainingIncoming);
+          const amount = Number(row.purchase_cost || 0) * requestQuantity;
+          if (!(amount > 0)) {
+            unresolvedCount += 1;
+            continue;
+          }
+          remainingStockByProduct.set(productId, 0);
+          remainingIncomingByProduct.set(productId, 0);
+          handlingType = "procurement_request";
+          note = `系统按真实订单缺口自动生成：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
+          await connection.execute(`
+            INSERT INTO procurement_requests
+            (product_id, person_id, quantity, amount, shipping_amount, purchase_url, approval_status, status,
+              needed_by, note, urgency, source_type, supplier_id, source_order_id, source_order_item_id, source_ozon_sku, demand_type)
+            VALUES (?, ?, ?, ?, ?, ?, 'suggested', 'suggested', NULL, ?, 'normal', ?, ?, ?, ?, ?, 'real_order')
+          `, [productId, personId, requestQuantity, amount,
+            Number(row.domestic_shipping || 0) * requestQuantity, row.purchase_url || "", note,
+            row.source_platform || "1688", nullableInteger(row.supplier_id), Number(row.order_id),
+            Number(row.order_item_id), row.ozon_sku || null]);
+          createdCount += 1;
+        }
+
+        const markStatus = handlingType === "procurement_request" ? "pending" : "handled";
+        await connection.execute(`
+          INSERT INTO order_item_procurement_marks
+          (order_item_id, order_id, product_id, status, handling_type, note, created_by_person_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE product_id = VALUES(product_id), status = VALUES(status),
+            handling_type = VALUES(handling_type), note = VALUES(note),
+            created_by_person_id = VALUES(created_by_person_id), updated_at = CURRENT_TIMESTAMP
+        `, [Number(row.order_item_id), Number(row.order_id), productId, markStatus, handlingType, note, personId]);
+        if (markStatus === "handled") markedCount += 1;
+      }
+      return { created_count: createdCount, marked_count: markedCount, unresolved_count: unresolvedCount };
+    });
+  })();
+  try {
+    return await pendingOrderProcurementReconcilePromise;
+  } finally {
+    pendingOrderProcurementReconcilePromise = null;
+  }
+}
+
+export async function refreshProcurementDemandMysql() {
+  ensureMysqlCutoverEnabled();
+  const orders = await ensurePendingOrderProcurementRequestsMysql();
+  await ensureInventoryWarningProcurementRequestsMysql();
+  const inventory = { ok: true };
+  return { ok: true, orders, inventory };
+}
+
+async function reconcileFailedOrderProcurementSubmissionsMysql() {
+  return await withMysqlTransaction(async (connection) => {
+    const [failedRequests] = await connection.query(`
+      SELECT id, source_order_item_id, product_id
+      FROM procurement_requests
+      WHERE purchase_order_id IS NULL
+        AND status = 'submitted'
+      FOR UPDATE
+    `);
+    if (!failedRequests.length) return { repaired_count: 0 };
+
+    const ids = failedRequests.map((row) => Number(row.id));
+    const placeholders = ids.map(() => "?").join(",");
+    await connection.execute(`
+      UPDATE procurement_requests
+      SET status = 'suggested', approval_status = 'suggested',
+        note = CONCAT(COALESCE(note, ''), '；未形成采购单或待入库记录，已恢复为待采购')
+      WHERE id IN (${placeholders})
+    `, ids);
+    for (const request of failedRequests.filter((request) => Number(request.source_order_item_id || 0))) {
+      await connection.execute(`
+        UPDATE order_item_procurement_marks
+        SET status = 'pending', updated_at = CURRENT_TIMESTAMP
+        WHERE order_item_id = ? AND product_id = ?
+          AND handling_type = 'procurement_request'
+      `, [Number(request.source_order_item_id), Number(request.product_id)]);
+    }
+    return { repaired_count: failedRequests.length };
+  });
+}
+
 export async function procurementRequestsMysql(query = {}) {
   ensureMysqlCutoverEnabled();
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementFlexibleRequestSchemaMysql();
   await ensureStockLocationSchemaMysql();
+  const groupedFirstPage = String(query.grouped || "") === "1"
+    && Math.max(Number(query.page || 1), 1) === 1
+    && !String(query.query || query.search || "").trim();
+  if (groupedFirstPage) await reconcileFailedOrderProcurementSubmissionsMysql();
+  if (groupedFirstPage) await reconcileTransportedProcurementBacklogMysql();
   const compact = String(query.compact || "") === "1";
   const requestColumns = compact
     ? `pr.id, pr.request_group_no, pr.product_id, pr.raw_name, pr.raw_spec, pr.binding_status,
       pr.person_id, pr.created_by_person_id, pr.supplier_id, pr.purchase_order_id,
+      pr.source_order_id, pr.source_order_item_id, pr.source_ozon_sku,
       pr.quantity, pr.amount, pr.shipping_amount, pr.status, pr.purchase_url,
-      pr.source_type, pr.created_at, pr.updated_at`
+      pr.source_type, pr.automation_exception_code, pr.automation_exception_message,
+      pr.price_exception_reason, pr.price_exception_note, pr.price_reference_unit_cost,
+      pr.price_actual_unit_cost, pr.price_exception_confirmed_at, pr.auto_completed_at,
+      pr.created_at, pr.updated_at`
     : "pr.*";
   const groupedPage = String(query.grouped || "") === "1"
     ? await procurementGroupedPageIdsMysql(query)
@@ -13227,6 +13837,15 @@ export async function procurementRequestsMysql(query = {}) {
   const groupedWhereSql = groupedPage
     ? `WHERE pr.product_id IN (${groupedPage.productIds.map(() => "?").join(", ")})`
     : "";
+  const groupedProductPlaceholders = groupedPage
+    ? groupedPage.productIds.map(() => "?").join(", ")
+    : "";
+  const groupedProductFilter = (column) => groupedPage
+    ? `AND ${column} IN (${groupedProductPlaceholders})`
+    : "";
+  const groupedQueryParams = groupedPage
+    ? Array.from({ length: 8 }, () => groupedPage.productIds).flat()
+    : [];
   const rows = await mysqlQuery(`
     SELECT ${requestColumns},
       CASE
@@ -13234,15 +13853,51 @@ export async function procurementRequestsMysql(query = {}) {
         ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
       END AS product_code,
       COALESCE(NULLIF(p.name, ''), NULLIF(pr.raw_name, ''), '未命名采购商品') AS product_name,
-      ${compact ? "''" : "COALESCE(p.image_url, '')"} AS product_image_url, COALESCE(p.alert_stock, 0) AS alert_stock,
+      ${compact ? "''" : "p.image_url"} AS product_image_url, COALESCE(p.alert_stock, 0) AS alert_stock,
       COALESCE(stock.stock, 0) AS stock,
+      COALESCE(stock.purchase_inbound_quantity, 0) AS historical_purchase_inbound_quantity,
+      COALESCE(stock.order_outbound_quantity, 0) AS historical_inventory_order_outbound_quantity,
+      COALESCE(stock.return_in_quantity, 0) AS historical_return_in_quantity,
+      COALESCE(stock.fbp_transfer_outbound_quantity, 0) AS historical_fbp_transfer_outbound_quantity,
+      COALESCE(stock.other_quantity, 0) AS historical_other_inventory_quantity,
       COALESCE(incoming.incoming_stock, 0) AS incoming_stock,
+      COALESCE(component_supply.component_count, 0) AS component_count,
+      COALESCE(component_supply.local_stock, 0) AS component_local_stock,
+      COALESCE(component_supply.incoming_stock, 0) AS component_incoming_stock,
+      COALESCE(sales.recent_7d_qty, 0) AS recent_7d_qty,
+      COALESCE(sales.recent_15d_qty, 0) AS recent_15d_qty,
+      COALESCE(sales.recent_30d_qty, 0) AS recent_30d_qty,
+      COALESCE(sales.week1_qty, 0) AS week1_qty,
+      COALESCE(sales.week2_qty, 0) AS week2_qty,
+      COALESCE(sales.week3_qty, 0) AS week3_qty,
+      COALESCE(fbp_stock.fbp_available, 0) AS fbp_available,
+      COALESCE(fbp_stock.fbp_snapshot_count, 0) AS fbp_snapshot_count,
+      COALESCE(purchase_history.historical_avg_unit_cost, 0) AS historical_avg_unit_cost,
+      COALESCE(purchase_history.historical_purchase_count, 0) AS historical_purchase_count,
+      COALESCE(purchase_history.historical_purchased_quantity, 0) AS historical_purchased_quantity,
+      COALESCE(outbound_history.historical_order_count, 0) AS historical_order_count,
+      COALESCE(outbound_history.historical_outbound_quantity, 0) AS historical_outbound_quantity,
+      COALESCE(order_history.historical_total_order_count, 0) AS historical_total_order_count,
+      COALESCE(order_history.historical_total_quantity, 0) AS historical_total_quantity,
+      COALESCE(order_history.historical_cancelled_quantity, 0) AS historical_cancelled_quantity,
+      COALESCE(order_history.historical_returned_quantity, 0) AS historical_returned_quantity,
       COALESCE(skus.skus, '') AS mapped_skus,
       COALESCE(p.purchase_url, '') AS product_purchase_url, p.source_platform AS product_source_platform,
       pe.name AS person_name, creator.name AS created_by_person_name,
       COALESCE(s.name, ps.name, '') AS supplier_name,
       po.order_no AS purchase_order_no,
       po.status AS purchase_order_status,
+      source_order.posting_number AS source_posting_number,
+      source_order.order_number AS source_order_number,
+      source_order.status AS source_order_status,
+      source_order.tracking_stage AS source_order_tracking_stage,
+      source_order.logistics_status AS source_order_logistics_status,
+      source_order.ordered_at AS source_order_ordered_at,
+      source_shop.name AS source_shop_name,
+      source_order_item.ozon_name AS source_order_product_name,
+      source_order_item.ozon_image_url AS source_order_image_url,
+      COALESCE(active_real_demand.order_demand_quantity, 0) AS all_order_demand_quantity,
+      source_online_product.id AS source_online_product_id,
       CASE WHEN pr.status IN ('pending', 'suggested', 'submitted', 'merged') AND TIMESTAMPDIFF(DAY, pr.created_at, CURRENT_TIMESTAMP) >= 3 THEN 1 ELSE 0 END AS overdue
     FROM procurement_requests pr
     LEFT JOIN products p ON p.id = pr.product_id
@@ -13251,31 +13906,144 @@ export async function procurementRequestsMysql(query = {}) {
     LEFT JOIN suppliers s ON s.id = pr.supplier_id
     LEFT JOIN suppliers ps ON ps.id = p.supplier_id
     LEFT JOIN purchase_orders po ON po.id = pr.purchase_order_id
+    LEFT JOIN orders source_order ON source_order.id = pr.source_order_id
+    LEFT JOIN shops source_shop ON source_shop.id = source_order.shop_id
+    LEFT JOIN order_items source_order_item ON source_order_item.id = pr.source_order_item_id
     LEFT JOIN (
-      SELECT product_id, SUM(quantity_delta) AS stock
+      SELECT product_id, SUM(quantity) AS order_demand_quantity
+      FROM procurement_requests
+      WHERE status IN ('pending','suggested','submitted') AND demand_type='real_order'
+      GROUP BY product_id
+    ) active_real_demand ON active_real_demand.product_id=pr.product_id
+    LEFT JOIN online_products source_online_product
+      ON source_online_product.shop_id = source_order.shop_id
+      AND source_online_product.ozon_sku = source_order_item.ozon_sku
+    LEFT JOIN (
+      SELECT product_id, SUM(quantity_delta) AS stock,
+        SUM(CASE WHEN source_type = 'purchase_inbound' AND quantity_delta > 0 THEN quantity_delta ELSE 0 END) AS purchase_inbound_quantity,
+        SUM(CASE WHEN source_type = 'order_outbound' AND quantity_delta < 0 THEN ABS(quantity_delta) ELSE 0 END) AS order_outbound_quantity,
+        SUM(CASE WHEN source_type = 'return_in' AND quantity_delta > 0 THEN quantity_delta ELSE 0 END) AS return_in_quantity,
+        SUM(CASE WHEN source_type = 'fbp_transfer_outbound' AND quantity_delta < 0 THEN ABS(quantity_delta) ELSE 0 END) AS fbp_transfer_outbound_quantity,
+        SUM(CASE WHEN source_type NOT IN ('purchase_inbound', 'order_outbound', 'return_in', 'fbp_transfer_outbound') THEN quantity_delta ELSE 0 END) AS other_quantity
       FROM inventory_movements
       WHERE status = 'posted'
         AND ${localStockLocationPredicateMysql()}
+        ${groupedProductFilter("product_id")}
       GROUP BY product_id
     ) stock ON stock.product_id = p.id
     LEFT JOIN (
       SELECT product_id, SUM(quantity) AS incoming_stock
-      FROM (
-        SELECT product_id, quantity FROM inbound_records WHERE status = 'pending_arrival'
-        UNION ALL
-        SELECT product_id, quantity FROM procurement_requests WHERE status IN ('submitted', 'merged')
-      ) incoming_rows
+      FROM inbound_records
+      WHERE status = 'pending_arrival'
+        ${groupedProductFilter("product_id")}
       GROUP BY product_id
     ) incoming ON incoming.product_id = p.id
+    LEFT JOIN (
+      SELECT pc.product_id,
+        COUNT(*) AS component_count,
+        MIN(FLOOR(COALESCE(component_stock.local_stock, 0) / NULLIF(pc.quantity, 0))) AS local_stock,
+        GREATEST(0,
+          MIN(FLOOR((COALESCE(component_stock.local_stock, 0) + COALESCE(component_incoming.incoming_stock, 0)) / NULLIF(pc.quantity, 0)))
+          - MIN(FLOOR(COALESCE(component_stock.local_stock, 0) / NULLIF(pc.quantity, 0)))
+        ) AS incoming_stock
+      FROM product_components pc
+      JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.active = 1
+      LEFT JOIN (
+        SELECT product_id, SUM(quantity_delta) AS local_stock
+        FROM inventory_movements
+        WHERE status = 'posted'
+          AND ${localStockLocationPredicateMysql()}
+        GROUP BY product_id
+      ) component_stock ON component_stock.product_id = pc.component_product_id
+      LEFT JOIN (
+        SELECT product_id, SUM(quantity) AS incoming_stock
+        FROM inbound_records
+        WHERE status = 'pending_arrival'
+        GROUP BY product_id
+      ) component_incoming ON component_incoming.product_id = pc.component_product_id
+      GROUP BY pc.product_id
+    ) component_supply ON component_supply.product_id = p.id
+    LEFT JOIN (
+      SELECT sales_mapping.product_id,
+        SUM(CASE WHEN ${chinaDateSqlMysql("sales_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 6 DAY) THEN sales_item.quantity ELSE 0 END) AS recent_7d_qty,
+        SUM(CASE WHEN ${chinaDateSqlMysql("sales_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 14 DAY) THEN sales_item.quantity ELSE 0 END) AS recent_15d_qty,
+        SUM(CASE WHEN ${chinaDateSqlMysql("sales_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 29 DAY) THEN sales_item.quantity ELSE 0 END) AS recent_30d_qty,
+        SUM(CASE WHEN ${chinaDateSqlMysql("sales_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 6 DAY) THEN sales_item.quantity ELSE 0 END) AS week1_qty,
+        SUM(CASE WHEN ${chinaDateSqlMysql("sales_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 13 DAY) AND ${chinaDateSqlMysql("sales_order.ordered_at")} < DATE_SUB(CURRENT_DATE, INTERVAL 6 DAY) THEN sales_item.quantity ELSE 0 END) AS week2_qty,
+        SUM(CASE WHEN ${chinaDateSqlMysql("sales_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 20 DAY) AND ${chinaDateSqlMysql("sales_order.ordered_at")} < DATE_SUB(CURRENT_DATE, INTERVAL 13 DAY) THEN sales_item.quantity ELSE 0 END) AS week3_qty
+      FROM order_items sales_item
+      JOIN orders sales_order ON sales_order.id = sales_item.order_id
+      JOIN sku_mappings sales_mapping ON (
+        (sales_mapping.id = sales_item.sku_mapping_id OR (sales_mapping.shop_id = sales_order.shop_id AND sales_mapping.ozon_sku = sales_item.ozon_sku))
+        AND sales_mapping.active = 1
+      )
+      WHERE LOWER(sales_order.status) NOT LIKE '%cancel%'
+        AND LOWER(COALESCE(sales_order.tracking_stage, '')) NOT LIKE '%cancel%'
+        ${groupedProductFilter("sales_mapping.product_id")}
+      GROUP BY sales_mapping.product_id
+    ) sales ON sales.product_id = p.id
+    LEFT JOIN (
+      SELECT product_id, COUNT(*) AS fbp_snapshot_count,
+        SUM(CASE WHEN stock_type = 'fbp_real' THEN available ELSE 0 END) AS fbp_available
+      FROM ozon_stock_snapshots
+      WHERE stock_type = 'fbp_real'
+      GROUP BY product_id
+    ) fbp_stock ON fbp_stock.product_id = p.id
+    LEFT JOIN (
+      SELECT poi.product_id,
+        SUM(poi.amount) / NULLIF(SUM(COALESCE(NULLIF(poi.actual_quantity, 0), poi.requested_quantity)), 0) AS historical_avg_unit_cost,
+        COUNT(*) AS historical_purchase_count,
+        SUM(COALESCE(NULLIF(poi.actual_quantity, 0), poi.requested_quantity)) AS historical_purchased_quantity
+      FROM purchase_order_items poi
+      JOIN purchase_orders history_order ON history_order.id = poi.purchase_order_id
+      WHERE poi.amount > 0
+        AND COALESCE(NULLIF(poi.actual_quantity, 0), poi.requested_quantity) > 0
+        AND history_order.status IN ('purchased', 'partial_inbound', 'inbound_done')
+        ${groupedProductFilter("poi.product_id")}
+      GROUP BY poi.product_id
+    ) purchase_history ON purchase_history.product_id = p.id
+    LEFT JOIN (
+      SELECT im.product_id,
+        COUNT(DISTINCT sales_order.id) AS historical_order_count,
+        SUM(ABS(im.quantity_delta)) AS historical_outbound_quantity
+      FROM inventory_movements im
+      JOIN order_items sales_item ON sales_item.id = im.related_order_item_id
+      JOIN orders sales_order ON sales_order.id = sales_item.order_id
+      WHERE im.status = 'posted'
+        AND im.source_type = 'order_outbound'
+        AND im.quantity_delta < 0
+        AND ${localStockLocationPredicateMysql("im")}
+        AND LOWER(COALESCE(sales_order.status, '')) NOT LIKE '%cancel%'
+        AND LOWER(COALESCE(sales_order.tracking_stage, '')) NOT LIKE '%cancel%'
+        ${groupedProductFilter("im.product_id")}
+      GROUP BY im.product_id
+    ) outbound_history ON outbound_history.product_id = p.id
+    LEFT JOIN (
+      SELECT history_mapping.product_id,
+        COUNT(DISTINCT history_order.id) AS historical_total_order_count,
+        SUM(history_item.quantity) AS historical_total_quantity,
+        SUM(CASE WHEN ${buildOrderOutcomeSql("history_order", "mysql").cancelledPreFulfillment} THEN history_item.quantity ELSE 0 END) AS historical_cancelled_quantity,
+        SUM(CASE WHEN ${buildOrderOutcomeSql("history_order", "mysql").rejectedUnclaimed} OR ${buildOrderOutcomeSql("history_order", "mysql").afterDeliveryReturn} THEN history_item.quantity ELSE 0 END) AS historical_returned_quantity
+      FROM order_items history_item
+      JOIN orders history_order ON history_order.id = history_item.order_id
+      JOIN sku_mappings history_mapping ON (
+        (history_mapping.id = history_item.sku_mapping_id OR (history_mapping.shop_id = history_order.shop_id AND history_mapping.ozon_sku = history_item.ozon_sku))
+        AND history_mapping.active = 1
+      )
+      WHERE 1 = 1
+        ${groupedProductFilter("history_mapping.product_id")}
+      GROUP BY history_mapping.product_id
+    ) order_history ON order_history.product_id = p.id
     LEFT JOIN (
       SELECT product_id, GROUP_CONCAT(ozon_sku SEPARATOR ', ') AS skus
       FROM sku_mappings
       WHERE active = 1
+        ${groupedProductFilter("product_id")}
       GROUP BY product_id
     ) skus ON skus.product_id = p.id
     ${groupedWhereSql}
     ORDER BY COALESCE(pr.updated_at, pr.created_at) DESC, pr.created_at DESC, pr.id DESC
-  `, groupedPage ? groupedPage.productIds : []);
+  `, groupedQueryParams);
   if (String(query.grouped || "") !== "1") {
     const bindingStatus = String(query.bindingStatus || query.binding_status || "all");
     const scopedRows = bindingStatus === "all"
@@ -13283,12 +14051,73 @@ export async function procurementRequestsMysql(query = {}) {
       : rows.filter((row) => String(row.binding_status || (row.product_id ? "bound" : "unbound")) === bindingStatus);
     return filterProcurementRequestsMysql(scopedRows, query);
   }
-  const grouped = groupProcurementRequestsMysql(rows, { ...query, page: 1, pageSize: groupedPage.pageSize });
+  const grouped = groupProcurementRequestsMysql(rows, { ...query, page: groupedPage.page, pageSize: groupedPage.pageSize });
+  const negativeProductRows = grouped.rows.filter((row) => Number(row.stock || 0) < 0);
+  if (negativeProductRows.length) {
+    const negativeProductIds = negativeProductRows.map((row) => Number(row.product_id)).filter(Boolean);
+    const placeholders = negativeProductIds.map(() => "?").join(", ");
+    const gapRows = await mysqlQuery(`
+      SELECT im.product_id,
+        product.name AS product_name,
+        oi.id AS source_order_item_id,
+        o.id AS source_order_id,
+        o.posting_number AS source_posting_number,
+        o.order_number AS source_order_number,
+        o.status AS source_order_status,
+        o.tracking_stage AS source_order_tracking_stage,
+        o.logistics_status AS source_order_logistics_status,
+        o.ordered_at AS source_order_ordered_at,
+        shop.name AS source_shop_name,
+        oi.ozon_sku AS source_ozon_sku,
+        oi.ozon_name AS source_order_product_name,
+        oi.ozon_image_url AS source_order_image_url,
+        source_online_product.id AS source_online_product_id,
+        SUM(ABS(im.quantity_delta)) AS gap_quantity,
+        MAX(im.created_at) AS outbound_at
+      FROM inventory_movements im
+      JOIN order_items oi ON oi.id = im.related_order_item_id
+      JOIN orders o ON o.id = oi.order_id
+      JOIN products product ON product.id = im.product_id
+      LEFT JOIN shops shop ON shop.id = o.shop_id
+      LEFT JOIN online_products source_online_product
+        ON source_online_product.shop_id = o.shop_id
+        AND source_online_product.ozon_sku = oi.ozon_sku
+      WHERE im.product_id IN (${placeholders})
+        AND im.status = 'posted'
+        AND im.source_type = 'order_outbound'
+        AND im.quantity_delta < 0
+        AND ${localStockLocationPredicateMysql("im")}
+        AND LOWER(COALESCE(o.status, '')) NOT LIKE '%cancel%'
+        AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%'
+      GROUP BY im.product_id, product.name, oi.id, o.id, o.posting_number, o.order_number, o.status,
+        o.tracking_stage, o.logistics_status, o.ordered_at, shop.name,
+        oi.ozon_sku, oi.ozon_name, oi.ozon_image_url, source_online_product.id
+      ORDER BY outbound_at DESC, oi.id DESC
+    `, negativeProductIds);
+    const gapRowsByProduct = new Map();
+    for (const gapRow of gapRows) {
+      const productId = Number(gapRow.product_id || 0);
+      if (!gapRowsByProduct.has(productId)) gapRowsByProduct.set(productId, []);
+      gapRowsByProduct.get(productId).push(gapRow);
+    }
+    for (const row of negativeProductRows) {
+      const expectedGap = Math.abs(Number(row.stock || 0));
+      let remainingGap = expectedGap;
+      const resolvedRows = [];
+      for (const gapRow of gapRowsByProduct.get(Number(row.product_id)) || []) {
+        if (remainingGap <= 0) break;
+        const movementQuantity = Math.max(1, Number(gapRow.gap_quantity || 0));
+        const allocatedQuantity = Math.min(remainingGap, movementQuantity);
+        resolvedRows.push({ ...gapRow, gap_quantity: allocatedQuantity });
+        remainingGap -= allocatedQuantity;
+      }
+      row.stock_gap_orders = resolvedRows;
+      row.stock_gap_quantity = expectedGap;
+      row.stock_gap_unresolved_quantity = Math.max(0, remainingGap);
+    }
+  }
   return {
-    ...grouped,
-    total: groupedPage.total,
-    page: groupedPage.page,
-    pageSize: groupedPage.pageSize
+    ...grouped
   };
 }
 
@@ -13296,6 +14125,18 @@ async function procurementGroupedPageIdsMysql(query = {}) {
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
   const searchText = String(query.query || query.search || "").trim();
+  const demandType = String(query.demandType || query.demand_type || "all");
+  const personId = String(query.personId || query.person_id || "all");
+  const supplierId = String(query.supplierId || query.supplier_id || "all");
+  const sourceType = String(query.sourceType || query.source_type || "all").trim().toLowerCase();
+  const inventoryCategory = String(query.inventoryCategory || query.inventory_category || "").trim();
+  const productName = String(query.productName || query.product_name || "").trim();
+  const vehicleBrand = String(query.vehicleBrand || query.vehicle_brand || "").replace(/\|/g, " ").replace(/\s+/g, " ").trim();
+  const vehicleModels = String(query.vehicleModel || query.vehicle_model || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const accessoryName = String(query.accessoryName || query.accessory_name || "").trim();
+  const color = String(query.color || "").trim();
+  const materials = String(query.material || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const process = String(query.process || query.surface_process || "").trim();
   const params = [];
   const where = [
     "pr.status IN ('pending', 'suggested', 'submitted')",
@@ -13318,6 +14159,65 @@ async function procurementGroupedPageIdsMysql(query = {}) {
     )`);
     params.push(like, like, like, like, like, like);
   }
+  if (personId !== "all") {
+    where.push("pr.person_id = ?");
+    params.push(Number(personId));
+  }
+  if (supplierId !== "all" && supplierId) {
+    where.push("COALESCE(pr.supplier_id, p.supplier_id) = ?");
+    params.push(Number(supplierId));
+  }
+  if (sourceType !== "all" && sourceType) {
+    where.push("LOWER(COALESCE(NULLIF(pr.source_type, ''), NULLIF(p.source_platform, ''), 'other')) = ?");
+    params.push(sourceType);
+  }
+  if (inventoryCategory) {
+    where.push("p.inventory_category = ?");
+    params.push(inventoryCategory);
+  }
+  if (productName) {
+    where.push("p.name LIKE ?");
+    params.push(`%${productName}%`);
+  }
+  if (vehicleBrand) {
+    const brandTokens = [...new Set(vehicleBrand.split(/\s+/).map((item) => item.trim()).filter(Boolean))];
+    where.push(`(
+      REPLACE(COALESCE(p.vehicle_brand, ''), '|', ' ') = ?
+      OR ${brandTokens.map(() => "COALESCE(p.vehicle_brand, '') LIKE ?").join(" OR ")}
+      OR ${brandTokens.map(() => "p.name LIKE ?").join(" OR ")}
+    )`);
+    params.push(
+      vehicleBrand,
+      ...brandTokens.map((token) => `%${token}%`),
+      ...brandTokens.map((token) => `%${token}%`)
+    );
+  }
+  if (vehicleModels.length) {
+    where.push(`(${vehicleModels.map(() => "CONCAT('/', COALESCE(p.vehicle_model, ''), '/') LIKE ?").join(" OR ")})`);
+    params.push(...vehicleModels.map((model) => `%/${model}/%`));
+  }
+  if (accessoryName) {
+    where.push("p.accessory_name = ?");
+    params.push(accessoryName);
+  }
+  if (color) {
+    where.push("CONCAT(',', REPLACE(COALESCE(p.color, ''), '/', ','), ',') LIKE ?");
+    params.push(`%,${color},%`);
+  }
+  if (materials.length) {
+    where.push(`(${materials.map(() => "CONCAT('/', COALESCE(p.material, ''), '/') LIKE ?").join(" OR ")})`);
+    params.push(...materials.map((material) => `%/${material}/%`));
+  }
+  if (process) {
+    where.push("p.surface_process = ?");
+    params.push(process);
+  }
+  if (demandType === "real_order") {
+    where.push("pr.demand_type = 'real_order'");
+  } else if (["advance_stock", "inventory_warning"].includes(demandType)) {
+    where.push("pr.demand_type = 'advance_stock'");
+  }
+  const warningJoins = "";
   const groupedSql = `
     SELECT pr.product_id, MAX(pr.created_at) AS latest_created_at
     FROM procurement_requests pr
@@ -13326,20 +14226,17 @@ async function procurementGroupedPageIdsMysql(query = {}) {
     LEFT JOIN suppliers s ON s.id = pr.supplier_id
     LEFT JOIN suppliers ps ON ps.id = p.supplier_id
     LEFT JOIN purchase_orders po ON po.id = pr.purchase_order_id
+    ${warningJoins}
     WHERE ${where.join(" AND ")}
     GROUP BY pr.product_id
   `;
-  const [countRow, idRows] = await Promise.all([
-    mysqlQueryOne(`SELECT COUNT(*) AS total FROM (${groupedSql}) grouped_procurement`, params),
-    mysqlQuery(`${groupedSql} ORDER BY latest_created_at DESC, product_id DESC LIMIT ? OFFSET ?`, [
-      ...params,
-      pageSize,
-      (page - 1) * pageSize
-    ])
-  ]);
+  const idRows = await mysqlQuery(
+    `${groupedSql} ORDER BY latest_created_at DESC, product_id DESC`,
+    params
+  );
   return {
     productIds: idRows.map((row) => Number(row.product_id || 0)).filter(Boolean),
-    total: Number(countRow?.total || 0),
+    total: idRows.length,
     page,
     pageSize
   };
@@ -13476,7 +14373,7 @@ async function postInventoryMysql(connection, body = {}) {
     Number(body.unit_cost || 0),
     Number(body.amount || 0),
     body.status || "posted",
-    body.note || "",
+    body.note ?? "",
     movementType,
     body.related_posting_number || body.source_ref || null,
     nullableInteger(body.related_order_item_id),
@@ -14266,6 +15163,154 @@ function orderStatusHistoryPayloadMysql(shop, posting = {}, orderId, lifecycle =
   };
 }
 
+export async function procurementProductOrderHistoryMysql(query = {}) {
+  ensureMysqlCutoverEnabled();
+  const productId = Number(query.productId || query.product_id || 0);
+  if (!productId) throw new Error("缺少库存商品ID（productId），无法查询历史订单");
+  const page = Math.max(1, Number(query.page || 1));
+  const pageSize = Math.min(1000, Math.max(1, Number(query.pageSize || query.page_size || 20)));
+  const offset = (page - 1) * pageSize;
+  const outcome = buildOrderOutcomeSql("history_order", "mysql");
+  const mappingExists = `EXISTS (
+    SELECT 1 FROM sku_mappings history_mapping
+    WHERE history_mapping.product_id = ? AND history_mapping.active = 1
+      AND (history_mapping.id = history_item.sku_mapping_id
+        OR (history_mapping.shop_id = history_order.shop_id AND history_mapping.ozon_sku = history_item.ozon_sku))
+  )`;
+  const [countRow, rows] = await Promise.all([
+    mysqlQueryOne(`SELECT COUNT(*) AS total FROM order_items history_item JOIN orders history_order ON history_order.id = history_item.order_id WHERE ${mappingExists}`, [productId]),
+    mysqlQuery(`
+      SELECT history_item.id AS order_item_id, history_order.id AS order_id,
+        history_order.posting_number, history_order.order_number,
+        history_order.status, history_order.tracking_stage, history_order.logistics_status,
+        history_order.ordered_at, shop.name AS shop_name,
+        history_item.ozon_sku, history_item.ozon_name AS product_name,
+        history_item.ozon_image_url AS image_url, history_item.quantity,
+        CASE WHEN ${outcome.cancelledPreFulfillment} THEN 1 ELSE 0 END AS is_cancelled,
+        CASE WHEN ${outcome.rejectedUnclaimed} THEN 1 ELSE 0 END AS is_rejected,
+        CASE WHEN ${outcome.afterDeliveryReturn} THEN 1 ELSE 0 END AS is_returned,
+        COALESCE(allocation.allocated_quantity, 0) AS allocated_quantity,
+        COALESCE(allocation.in_transit_quantity, 0) AS in_transit_quantity,
+        COALESCE(allocation.completed_quantity, 0) AS completed_quantity,
+        COALESCE(mark.handling_type, '') AS handling_type,
+        COALESCE(mark.status, '') AS procurement_mark_status
+      FROM order_items history_item
+      JOIN orders history_order ON history_order.id = history_item.order_id
+      LEFT JOIN shops shop ON shop.id = history_order.shop_id
+      LEFT JOIN (
+        SELECT allocation.order_item_id,
+          SUM(allocation.allocated_quantity) AS allocated_quantity,
+          SUM(CASE WHEN pending_inbound.procurement_request_id IS NOT NULL THEN allocation.allocated_quantity ELSE 0 END) AS in_transit_quantity,
+          SUM(CASE WHEN pending_inbound.procurement_request_id IS NULL THEN allocation.allocated_quantity ELSE 0 END) AS completed_quantity
+        FROM procurement_order_allocations allocation
+        LEFT JOIN (
+          SELECT DISTINCT procurement_request_id
+          FROM inbound_records
+          WHERE status = 'pending_arrival' AND procurement_request_id IS NOT NULL
+        ) pending_inbound ON pending_inbound.procurement_request_id = allocation.procurement_request_id
+        WHERE allocation.status = 'allocated'
+        GROUP BY allocation.order_item_id
+      ) allocation ON allocation.order_item_id = history_item.id
+      LEFT JOIN order_item_procurement_marks mark ON mark.order_item_id = history_item.id
+      WHERE ${mappingExists}
+      ORDER BY history_order.ordered_at DESC, history_item.id DESC
+      LIMIT ? OFFSET ?
+    `, [productId, pageSize, offset])
+  ]);
+  const normalizedRows = rows.map((row) => {
+      const handlingType = String(row.handling_type || "");
+      const quantity = Number(row.quantity || 0);
+      const inactive = Boolean(row.is_cancelled || row.is_returned);
+      const handledByStock = String(row.procurement_mark_status || "") === "handled" && ["stock_available", "no_procurement_needed"].includes(handlingType);
+      const markedInTransit = String(row.procurement_mark_status || "") === "handled" && handlingType === "incoming_available";
+      const explicitInTransit = Math.min(quantity, Number(row.in_transit_quantity || 0));
+      const explicitCovered = Math.min(Math.max(0, quantity - explicitInTransit), Number(row.completed_quantity || 0));
+      const inTransitQuantity = inactive ? 0 : Math.min(quantity, explicitInTransit + (markedInTransit ? Math.max(0, quantity - explicitInTransit) : 0));
+      const coveredQuantity = inactive ? quantity : Math.min(quantity - inTransitQuantity, explicitCovered + (handledByStock ? quantity : 0));
+      const shortageQuantity = inactive ? 0 : Math.max(0, quantity - inTransitQuantity - coveredQuantity);
+      const statusText = [row.status, row.tracking_stage, row.logistics_status].map((value) => String(value || "").toLowerCase()).join(" ");
+      const orderActionClass = procurementOrderActionClassMysql(row);
+      const procurementPriority = inactive
+        ? "P2"
+        : shortageQuantity > 0 && orderActionClass === "p0_purchase"
+          ? "P0"
+          : shortageQuantity > 0
+            ? "P1"
+            : "normal";
+      const advancedWithoutPurchase = procurementPriority === "P1";
+      const covered = shortageQuantity <= 0;
+      const allocatedForOrder = Math.min(quantity, Number(row.allocated_quantity || 0));
+      const coverageLabel = row.is_cancelled ? "订单已取消，不计采购缺口"
+        : row.is_returned ? "订单已退货，不计采购缺口"
+          : allocatedForOrder > 0 ? `本订单已由采购覆盖 ${allocatedForOrder} 件`
+        : handlingType === "stock_available" ? `本订单已由本地库存覆盖 ${quantity} 件`
+          : handlingType === "incoming_available" ? `本订单已由采购在途覆盖 ${quantity} 件`
+            : handlingType === "no_procurement_needed" ? "无需采购"
+              : covered ? "已处理" : "未被采购覆盖";
+      const coverage_bucket = shortageQuantity > 0 ? "shortage" : inTransitQuantity > 0 ? "in_transit" : "covered";
+      return { ...row, procurement_covered: covered, procurement_coverage_label: coverageLabel, coverage_bucket,
+        shortage_quantity: shortageQuantity, coverage_in_transit_quantity: inTransitQuantity,
+        coverage_completed_quantity: coveredQuantity, advanced_without_purchase: advancedWithoutPurchase,
+        procurement_priority: procurementPriority, procurement_action_class: orderActionClass };
+    });
+  const summary = normalizedRows.reduce((result, row) => {
+    result.total_quantity += Number(row.quantity || 0);
+    result.shortage_quantity += Number(row.shortage_quantity || 0);
+    result.in_transit_quantity += Number(row.coverage_in_transit_quantity || 0);
+    result.covered_quantity += Number(row.coverage_completed_quantity || 0);
+    result.cancelled_quantity += row.is_cancelled ? Number(row.quantity || 0) : 0;
+    result.returned_quantity += row.is_returned ? Number(row.quantity || 0) : 0;
+    result.advanced_uncovered_quantity += row.advanced_without_purchase ? Number(row.shortage_quantity || 0) : 0;
+    return result;
+  }, { total_quantity: 0, shortage_quantity: 0, in_transit_quantity: 0, covered_quantity: 0, cancelled_quantity: 0, returned_quantity: 0, advanced_uncovered_quantity: 0 });
+  return {
+    rows: normalizedRows,
+    summary,
+    total: Number(countRow?.total || 0), page, pageSize
+  };
+}
+
+export async function procurementProductPurchaseHistoryMysql(query = {}) {
+  ensureMysqlCutoverEnabled();
+  const productId = Number(query.productId || query.product_id || 0);
+  if (!productId) throw new Error("缺少库存商品ID（productId），无法查询采购记录");
+  return await mysqlQuery(`
+    SELECT poi.id, poi.product_id, poi.purchase_order_id,
+      po.order_no AS purchase_order_no, po.status, po.status AS purchase_order_status,
+      COALESCE(NULLIF(poi.actual_quantity, 0), poi.requested_quantity) AS quantity,
+      poi.amount, poi.shipping_amount, poi.unit_cost AS purchase_unit_price,
+      COALESCE(po.purchased_at, po.created_at) AS created_at,
+      po.created_by_person_id AS person_id, creator.name AS person_name,
+      COALESCE(MAX(request.supplier_id), product.supplier_id) AS supplier_id,
+      COALESCE(MAX(request_supplier.name), product_supplier.name, '') AS supplier_name,
+      COALESCE(NULLIF(MAX(request.source_type), ''), NULLIF(product.source_platform, ''), 'other') AS source_type,
+      COALESCE(NULLIF(MAX(request.purchase_url), ''), NULLIF(poi.purchase_url, ''), NULLIF(product.purchase_url, ''), '') AS purchase_url,
+      COALESCE(NULLIF(MAX(request.note), ''), NULLIF(po.note, ''), '') AS note,
+      product.name AS product_name, product.image_url AS product_image_url,
+      'purchase_order_item' AS history_source
+    FROM purchase_order_items poi
+    JOIN purchase_orders po ON po.id = poi.purchase_order_id
+    JOIN products product ON product.id = poi.product_id
+    LEFT JOIN people creator ON creator.id = po.created_by_person_id
+    LEFT JOIN procurement_requests request
+      ON request.purchase_order_id = po.id
+      AND request.product_id = poi.product_id
+      AND request.status != 'cancelled'
+    LEFT JOIN suppliers request_supplier ON request_supplier.id = request.supplier_id
+    LEFT JOIN suppliers product_supplier ON product_supplier.id = product.supplier_id
+    WHERE poi.product_id = ?
+      AND poi.amount > 0
+      AND COALESCE(NULLIF(poi.actual_quantity, 0), poi.requested_quantity) > 0
+      AND po.status IN ('purchased', 'partial_inbound', 'inbound_done')
+    GROUP BY poi.id, poi.product_id, poi.purchase_order_id, po.order_no, po.status,
+      poi.actual_quantity, poi.requested_quantity, poi.amount, poi.shipping_amount, poi.unit_cost,
+      po.purchased_at, po.created_at, po.created_by_person_id, creator.name,
+      product.supplier_id, product_supplier.name, product.source_platform,
+      poi.purchase_url, product.purchase_url, po.note, product.name, product.image_url
+    ORDER BY COALESCE(po.purchased_at, po.created_at) DESC, poi.id DESC
+  `, [productId]);
+}
+
 function orderStatusHistoryBusinessFingerprintMysql(payload = {}) {
   return JSON.stringify([
     payload.status || "",
@@ -14696,6 +15741,91 @@ async function saveRawPostingMysql(shop, posting) {
   ]);
 }
 
+function isOrderInTransportMysql(order = {}) {
+  const state = [order.status, order.logistics_status, order.tracking_stage, order.substatus]
+    .map((value) => String(value || "").toLowerCase())
+    .join(" ");
+  if (!state || /(cancel|return|reject|awaiting_packaging|awaiting_deliver)/.test(state)) return false;
+  return /(deliver|transport|transferr|carriage|shipped|sent_by_seller|pickup|posting_transferred)/.test(state);
+}
+
+async function historicalPurchasedUnitCostMysql(productId) {
+  const row = await mysqlQueryOne(`
+    SELECT SUM(poi.amount) / NULLIF(SUM(COALESCE(NULLIF(poi.actual_quantity, 0), poi.requested_quantity)), 0) AS unit_cost
+    FROM purchase_order_items poi
+    JOIN purchase_orders po ON po.id = poi.purchase_order_id
+    WHERE poi.product_id = ? AND poi.amount > 0
+      AND COALESCE(NULLIF(poi.actual_quantity, 0), poi.requested_quantity) > 0
+      AND po.status IN ('purchased', 'partial_inbound', 'inbound_done')
+  `, [Number(productId)]);
+  return Number(row?.unit_cost || 0);
+}
+
+async function reconcileTransportedOrderProcurementMysql(orderId) {
+  if (!Number(orderId || 0)) return;
+  await ensureProcurementFlexibleRequestSchemaMysql();
+  const order = await mysqlQueryOne("SELECT status, logistics_status, tracking_stage FROM orders WHERE id = ?", [Number(orderId)]);
+  if (!isOrderInTransportMysql(order)) return;
+  const requests = await mysqlQuery(`
+    SELECT id, product_id, quantity, amount, shipping_amount, person_id,
+      price_exception_reason, price_exception_confirmed_at
+    FROM procurement_requests
+    WHERE source_order_id = ? AND source_order_item_id IS NOT NULL AND product_id IS NOT NULL
+      AND purchase_order_id IS NULL AND status IN ('pending', 'suggested', 'submitted')
+  `, [Number(orderId)]);
+  for (const request of requests) {
+    const quantity = Number(request.quantity || 0);
+    const amount = Number(request.amount || 0);
+    if (!(quantity > 0) || !(amount > 0)) {
+      await mysqlExecute(`
+        UPDATE procurement_requests
+        SET automation_exception_code = ?, automation_exception_message = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `, [
+        quantity > 0 ? "transported_purchase_amount_missing" : "transported_purchase_quantity_missing",
+        quantity > 0
+          ? "订单已进入运输状态，但采购金额缺失，请补录实际货款后确认采购"
+          : "订单已进入运输状态，但采购数量缺失，请补录实际采购数量和货款",
+        Number(request.id)
+      ]);
+      continue;
+    }
+    const historicalUnitCost = await historicalPurchasedUnitCostMysql(request.product_id);
+    const actualUnitCost = amount / quantity;
+    if (historicalUnitCost > 0 && actualUnitCost > historicalUnitCost * 1.1 && !request.price_exception_confirmed_at) {
+      await mysqlExecute(`
+        UPDATE procurement_requests
+        SET automation_exception_code = 'purchase_price_increase_unconfirmed',
+          automation_exception_message = '本次采购单价较历史均价上涨超过10%，请选择原因并人工确认',
+          price_reference_unit_cost = ?, price_actual_unit_cost = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `, [historicalUnitCost, actualUnitCost, Number(request.id)]);
+      continue;
+    }
+    await directInboundProcurementRequestsMysql({
+      request_ids: [Number(request.id)],
+      note: "订单进入运输状态，系统自动确认采购并入库",
+      anomaly_reason: request.price_exception_reason || null,
+      auto_completed: true
+    });
+  }
+}
+
+async function reconcileTransportedProcurementBacklogMysql() {
+  const orders = await mysqlQuery(`
+    SELECT DISTINCT o.id, o.status, o.logistics_status, o.tracking_stage
+    FROM orders o
+    JOIN procurement_requests pr ON pr.source_order_id = o.id
+    WHERE pr.source_order_item_id IS NOT NULL AND pr.product_id IS NOT NULL
+      AND pr.purchase_order_id IS NULL AND pr.status IN ('pending', 'suggested', 'submitted')
+    ORDER BY o.id DESC
+    LIMIT 200
+  `);
+  for (const order of orders) {
+    if (isOrderInTransportMysql(order)) await reconcileTransportedOrderProcurementMysql(order.id);
+  }
+}
+
 async function upsertPostingMysql(shop, posting) {
   await saveRawPostingMysql(shop, posting);
   const exists = await mysqlQueryOne("SELECT * FROM orders WHERE shop_id = ? AND posting_number = ?", [shop.id, posting.posting_number])
@@ -14918,6 +16048,13 @@ async function upsertPostingMysql(shop, posting) {
     insertedItems += 1;
   }
   await accrueDeliveredItemsMysql(orderId);
+  if (isOrderInTransportMysql(posting)) {
+    try {
+      await reconcileTransportedOrderProcurementMysql(orderId);
+    } catch (error) {
+      console.error(`[procurement] failed to reconcile transported order ${orderId}`, error);
+    }
+  }
   return { inserted, updated, insertedItems };
 }
 
@@ -17358,7 +18495,7 @@ export async function createProcurementRequestMysql(body = {}, sessionPersonId =
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementOrderSourceSchemaMysql();
   await ensureProcurementFlexibleRequestSchemaMysql();
-  const personId = await resolvePersonIdOrFirstMysql(body.person_id);
+  const personId = await requireSessionPersonIdMysql(sessionPersonId);
   const creatorId = nullableInteger(sessionPersonId) || personId;
   const items = Array.isArray(body.items) && body.items.length ? body.items : [body];
   const groupNo = String(body.request_group_no || procurementRequestGroupNoMysql());
@@ -17368,12 +18505,14 @@ export async function createProcurementRequestMysql(body = {}, sessionPersonId =
       const productId = nullableInteger(item.product_id);
       const rawName = String(item.raw_name || item.name || "").trim();
       if (!productId && !rawName) throw new Error("采购商品名称和库存商品至少填写一项");
+      if (!(Number(item.quantity || 0) > 0)) throw new Error("采购数量（quantity）必须大于 0");
+      if (!(Number(item.amount || 0) > 0)) throw new Error("采购金额（amount）必须大于 0；请填写实际货款后再提交采购");
       const result = await connection.execute(`
         INSERT INTO procurement_requests
         (request_group_no, product_id, raw_name, raw_spec, binding_status, person_id, created_by_person_id,
           quantity, amount, shipping_amount, purchase_url, approval_status, status, needed_by, note, urgency,
-          source_type, supplier_id, source_order_id, source_order_item_id, source_ozon_sku)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, ?, ?, ?, ?, ?, ?)
+          source_type, supplier_id, source_order_id, source_order_item_id, source_ozon_sku, demand_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         groupNo, productId, rawName || null, String(item.raw_spec || "").trim() || null,
         productId ? "bound" : "unbound", personId, creatorId,
@@ -17383,7 +18522,8 @@ export async function createProcurementRequestMysql(body = {}, sessionPersonId =
         item.source_type || body.source_type || "1688", nullableInteger(item.supplier_id ?? body.supplier_id),
         nullableInteger(item.source_order_id ?? body.source_order_id),
         nullableInteger(item.source_order_item_id ?? body.source_order_item_id),
-        item.source_ozon_sku || body.source_ozon_sku || null
+        item.source_ozon_sku || body.source_ozon_sku || null,
+        Number(item.source_order_item_id ?? body.source_order_item_id ?? 0) ? "real_order" : "advance_stock"
       ]);
       ids.push(Number(result[0].insertId));
     }
@@ -17449,23 +18589,23 @@ function procurementPlatformOrderTimeMysql(value) {
 
 function normalizeProcurementPlatformOrderMysql(row = {}, defaultPlatform = "pdd") {
   const platform = String(procurementPlatformOrderValueMysql(row, ["platform", "平台"]) || defaultPlatform).trim().toLowerCase();
-  const orderNo = String(procurementPlatformOrderValueMysql(row, ["order_no", "platform_order_no", "订单号"])).trim();
+  const orderNo = String(procurementPlatformOrderValueMysql(row, ["order_no", "platform_order_no", "订单号", "订单编号"])).trim();
   if (!orderNo) return null;
-  const orderTime = procurementPlatformOrderTimeMysql(procurementPlatformOrderValueMysql(row, ["order_time", "下单时间（北京时间）", "下单时间"]));
+  const orderTime = procurementPlatformOrderTimeMysql(procurementPlatformOrderValueMysql(row, ["order_time", "下单时间（北京时间）", "下单时间", "订单创建时间"]));
   const rawQuantity = Number(procurementPlatformOrderValueMysql(row, ["quantity", "商品总数量", "数量"]) || 1);
-  const rawPaidAmount = Number(procurementPlatformOrderValueMysql(row, ["paid_amount", "订单实付金额", "实付金额", "订单金额"]) || 0);
+  const rawPaidAmount = Number(procurementPlatformOrderValueMysql(row, ["paid_amount", "订单实付金额", "实付金额", "实付款(元)", "订单金额"]) || 0);
   return {
     platform,
     orderNo,
     orderTime,
-    shopName: String(procurementPlatformOrderValueMysql(row, ["shop_name", "店铺", "卖家公司名称", "供应商"])).trim(),
-    status: String(procurementPlatformOrderValueMysql(row, ["status", "状态", "订单状态"])).trim(),
+    shopName: String(procurementPlatformOrderValueMysql(row, ["shop_name", "店铺", "卖家公司名", "卖家公司名称", "供应商"])).trim(),
+    status: String(procurementPlatformOrderValueMysql(row, ["status", "状态", "订单状态", "订单当前状态"])).trim(),
     productName: String(procurementPlatformOrderValueMysql(row, ["product_name", "商品名称", "货品名称"])).trim(),
     rawSpec: String(procurementPlatformOrderValueMysql(row, ["sku_spec", "规格", "规格型号"])).trim(),
     quantity: Number.isFinite(rawQuantity) ? Math.max(1, rawQuantity) : 1,
     paidAmount: Number.isFinite(rawPaidAmount) ? Math.max(0, rawPaidAmount) : 0,
     paymentType: String(procurementPlatformOrderValueMysql(row, ["payment_type", "支付方式"])).trim(),
-    goodsIds: String(procurementPlatformOrderValueMysql(row, ["goods_ids", "Goods ID", "商品ID"])).trim(),
+    goodsIds: String(procurementPlatformOrderValueMysql(row, ["goods_ids", "Goods ID", "Offer ID", "商品ID"])).trim(),
     skuIds: String(procurementPlatformOrderValueMysql(row, ["sku_ids", "SKU ID"])).trim(),
     purchaseUrls: String(procurementPlatformOrderValueMysql(row, ["goods_urls", "采购链接", "商品链接"])).trim(),
     raw: row
@@ -17502,6 +18642,29 @@ export async function importProcurementPlatformOrdersMysql(body = {}, sessionPer
         row.rawSpec || null, row.quantity, row.paidAmount, row.paymentType || null, row.goodsIds || null,
         row.skuIds || null, row.purchaseUrls || null, JSON.stringify(row.raw), personId
       ]);
+      const saved = await mysqlConnectionQueryOne(connection, "SELECT id,binding_status FROM procurement_platform_orders WHERE platform=? AND platform_order_no=?", [row.platform, row.orderNo]);
+      if (saved?.binding_status === "unbound" && (row.purchaseUrls || row.goodsIds)) {
+        const goodsToken = String(row.goodsIds || "").split(/[；,\s]+/).find(Boolean) || "";
+        const [candidates] = await connection.query(`SELECT id,quantity,amount,shipping_amount,purchase_url FROM procurement_requests
+          WHERE status IN ('pending','suggested','submitted','merged') AND purchase_url IS NOT NULL AND purchase_url!=''
+            AND (? LIKE CONCAT('%',purchase_url,'%') OR purchase_url LIKE CONCAT('%',?,'%') OR (?!='' AND purchase_url LIKE CONCAT('%',?,'%')))
+          ORDER BY created_at DESC LIMIT 20`, [row.purchaseUrls || "", row.purchaseUrls || "", goodsToken, goodsToken]);
+        if (candidates.length) {
+          const requestedTotal = candidates.reduce((sum, item) => sum + Number(item.amount || 0) + Number(item.shipping_amount || 0), 0);
+          let allocated = 0;
+          for (let index = 0; index < candidates.length; index += 1) {
+            const candidate = candidates[index];
+            const amount = index === candidates.length - 1
+              ? Number(row.paidAmount || 0) - allocated
+              : Number(row.paidAmount || 0) * (requestedTotal > 0 ? (Number(candidate.amount || 0) + Number(candidate.shipping_amount || 0)) / requestedTotal : 1 / candidates.length);
+            allocated += amount;
+            await connection.execute(`INSERT IGNORE INTO procurement_platform_order_links
+              (platform_order_id,procurement_request_id,allocated_quantity,allocated_amount,created_by_person_id) VALUES (?,?,?,?,?)`,
+            [saved.id, candidate.id, Number(candidate.quantity || 0), amount, personId]);
+          }
+          await connection.execute("UPDATE procurement_platform_orders SET binding_status='bound' WHERE id=?", [saved.id]);
+        }
+      }
       if (existing) updated += 1;
       else inserted += 1;
     }
@@ -17602,6 +18765,7 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
   await ensureStockLocationSchemaMysql();
   await ensureProductCompositionSchemaMysql();
   const includeHandledSourceOrder = options.includeHandledSourceOrder === true;
+  const allOrders = options.allOrders === true;
   const query = connection
     ? (sql, params) => connection.query(sql, params).then(([rows]) => rows)
     : mysqlQuery;
@@ -17615,22 +18779,27 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
         AND sm.active = 1
       )
       JOIN products p ON p.id = sm.product_id AND p.active = 1
-      WHERE o.id = ?
+      ${allOrders ? "" : "WHERE o.id = ?"}
     ),
     mapped_items AS (
-      SELECT oi.id AS order_item_id, oi.order_id, oi.ozon_sku, oi.ozon_name, oi.quantity,
-        oi.sale_price, COALESCE(NULLIF(oi.ozon_image_url, ''), NULLIF(op.primary_image, ''), NULLIF(op.image_url, ''), p.image_url, '') AS image_url,
+      SELECT oi.id AS order_item_id, oi.order_id, oi.ozon_sku, oi.ozon_name,
+        oi.quantity AS order_quantity,
+        oi.quantity * COALESCE(recipe_item.quantity, pc.quantity, 1) AS quantity,
+        oi.sale_price, COALESCE(NULLIF(procurement_product.image_url, ''), NULLIF(oi.ozon_image_url, ''), NULLIF(op.primary_image, ''), NULLIF(op.image_url, ''), '') AS image_url,
         o.posting_number, o.order_number, o.ordered_at, o.status, o.tracking_stage, o.logistics_status,
-        sm.product_id, p.name AS product_name, p.code AS product_code, p.image_url AS product_image_url, p.purchase_url,
-        p.supplier_note, p.purchase_cost, p.domestic_shipping, p.source_platform, p.supplier_id,
-        COALESCE(component_stock.current_stock, stock.current_stock, 0) AS current_stock,
+        procurement_product.id AS product_id, procurement_product.name AS product_name,
+        procurement_product.code AS product_code, procurement_product.image_url AS product_image_url, procurement_product.purchase_url,
+        procurement_product.supplier_note, procurement_product.purchase_cost, procurement_product.domestic_shipping,
+        procurement_product.source_platform, procurement_product.supplier_id,
+        CASE WHEN recipe_item.product_id IS NOT NULL OR pc.component_product_id IS NOT NULL THEN 1 ELSE 0 END AS is_component,
+        COALESCE(stock.current_stock, 0) AS current_stock,
         COALESCE(incoming.incoming_stock, 0) AS incoming_stock,
-        COALESCE(sales.recent_7d_qty, 0) AS recent_7d_qty,
-        COALESCE(sales.recent_30d_qty, 0) AS recent_30d_qty,
-        COALESCE(sales.week1_qty, 0) AS week1_qty,
-        COALESCE(sales.week2_qty, 0) AS week2_qty,
-        COALESCE(sales.week3_qty, 0) AS week3_qty,
-        ROW_NUMBER() OVER (PARTITION BY oi.id ORDER BY CASE WHEN sm.id = oi.sku_mapping_id THEN 0 ELSE 1 END, sm.id DESC) AS rn
+        COALESCE(sales.recent_7d_qty, 0) * COALESCE(recipe_item.quantity, pc.quantity, 1) AS recent_7d_qty,
+        COALESCE(sales.recent_30d_qty, 0) * COALESCE(recipe_item.quantity, pc.quantity, 1) AS recent_30d_qty,
+        COALESCE(sales.week1_qty, 0) * COALESCE(recipe_item.quantity, pc.quantity, 1) AS week1_qty,
+        COALESCE(sales.week2_qty, 0) * COALESCE(recipe_item.quantity, pc.quantity, 1) AS week2_qty,
+        COALESCE(sales.week3_qty, 0) * COALESCE(recipe_item.quantity, pc.quantity, 1) AS week3_qty,
+        ROW_NUMBER() OVER (PARTITION BY oi.id, procurement_product.id ORDER BY CASE WHEN sm.id = oi.sku_mapping_id THEN 0 ELSE 1 END, sm.id DESC) AS rn
       FROM order_items oi
       JOIN orders o ON o.id = oi.order_id
       JOIN sku_mappings sm ON (
@@ -17639,6 +18808,12 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
       )
       JOIN source_products sp ON sp.product_id = sm.product_id
       JOIN products p ON p.id = sm.product_id AND p.active = 1
+      LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id = o.shop_id
+        AND recipe.ozon_sku = oi.ozon_sku AND recipe.mode = 'combo' AND recipe.active = 1
+      LEFT JOIN sku_inventory_recipe_items recipe_item ON recipe_item.recipe_id = recipe.id
+      LEFT JOIN product_components pc ON pc.product_id = p.id AND recipe.id IS NULL
+      JOIN products procurement_product ON procurement_product.id = COALESCE(recipe_item.product_id, pc.component_product_id, p.id)
+        AND procurement_product.active = 1
       LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku
       LEFT JOIN (
         SELECT product_id, SUM(quantity_delta) AS current_stock
@@ -17646,7 +18821,7 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
         WHERE status = 'posted'
           AND ${localStockLocationPredicateMysql()}
         GROUP BY product_id
-      ) stock ON stock.product_id = p.id
+      ) stock ON stock.product_id = procurement_product.id
       LEFT JOIN (
         SELECT pc.product_id,
           MIN(FLOOR(COALESCE(component_inventory.current_stock, 0) / NULLIF(pc.quantity, 0))) AS current_stock
@@ -17669,7 +18844,7 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
           SELECT product_id, quantity FROM procurement_requests WHERE status IN ('submitted', 'merged')
         ) incoming_rows
         GROUP BY product_id
-      ) incoming ON incoming.product_id = p.id
+      ) incoming ON incoming.product_id = procurement_product.id
       LEFT JOIN (
         SELECT sales_mapping.product_id,
           SUM(CASE
@@ -17713,17 +18888,17 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
         )
         GROUP BY sales_mapping.product_id
       ) sales ON sales.product_id = p.id
-      WHERE (${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")})
+      WHERE ${allOrders
+        ? orderStatusSqlMysql("pending_purchase")
+        : `(${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")})`}
     )
     SELECT mi.*,
       CASE WHEN (
         EXISTS (
           SELECT 1 FROM procurement_requests pr
-          WHERE pr.source_order_item_id = mi.order_item_id AND pr.status NOT IN ('cancelled')
-        )
-        OR EXISTS (
-          SELECT 1 FROM order_item_procurement_marks oipm
-          WHERE oipm.order_item_id = mi.order_item_id AND oipm.status = 'handled'
+          WHERE pr.source_order_item_id = mi.order_item_id
+            AND pr.product_id = mi.product_id
+            AND pr.status NOT IN ('cancelled')
         )
       ) THEN 1 ELSE 0 END AS already_handled
     FROM mapped_items mi
@@ -17732,17 +18907,19 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
         (
           NOT EXISTS (
             SELECT 1 FROM procurement_requests pr
-            WHERE pr.source_order_item_id = mi.order_item_id AND pr.status NOT IN ('cancelled')
+            WHERE pr.source_order_item_id = mi.order_item_id
+              AND pr.product_id = mi.product_id
+              AND pr.status NOT IN ('cancelled')
           )
           AND NOT EXISTS (
             SELECT 1 FROM order_item_procurement_marks oipm
-            WHERE oipm.order_item_id = mi.order_item_id AND oipm.status = 'handled'
+            WHERE mi.is_component = 0 AND oipm.order_item_id = mi.order_item_id AND oipm.status = 'handled'
           )
         )
         ${includeHandledSourceOrder ? "OR mi.order_id = ?" : ""}
       )
     ORDER BY mi.product_id, mi.ordered_at ASC, mi.order_id, mi.order_item_id
-  `, includeHandledSourceOrder ? [Number(orderId), Number(orderId)] : [Number(orderId)]);
+  `, allOrders ? [] : (includeHandledSourceOrder ? [Number(orderId), Number(orderId)] : [Number(orderId)]));
   return rows;
 }
 
@@ -17849,8 +19026,8 @@ async function recordPurchaseCostVersionMysql(connection, input = {}) {
     (product_id, version_no, source_key, stage, status, source_type, supplier_id, supplier_name_snapshot,
       purchase_url, purchase_order_id, purchase_order_item_id, inbound_record_id, procurement_request_id,
       quantity, amount, shipping_amount, goods_unit_cost, landed_unit_cost, previous_unit_cost, change_ratio,
-      anomaly_level, anomaly_reason, review_status, created_by_person_id)
-    VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      anomaly_level, anomaly_reason, review_status, reviewed_by_person_id, reviewed_at, created_by_person_id)
+    VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, [
     productId,
     Number(version?.next_version || 1),
@@ -17873,7 +19050,9 @@ async function recordPurchaseCostVersionMysql(connection, input = {}) {
     changeRatio,
     anomalyLevel,
     input.anomaly_reason || null,
-    ["abnormal", "critical"].includes(anomalyLevel) ? "pending" : "not_required",
+    changeRatio > 0.1 && input.anomaly_reason ? "reviewed" : (["abnormal", "critical"].includes(anomalyLevel) ? "pending" : "not_required"),
+    changeRatio > 0.1 && input.anomaly_reason ? nullableInteger(input.person_id) : null,
+    changeRatio > 0.1 && input.anomaly_reason ? normalizeMysqlDateTime(new Date()) : null,
     nullableInteger(input.person_id)
   ]);
   return Number(result.insertId);
@@ -18278,7 +19457,8 @@ function summarizeOrderProcurementCandidatesMysql(rows = [], missingItems = [], 
       ozon_name: row.ozon_name || "",
       image_url: row.image_url || row.product_image_url || "",
       quantity,
-      sale_amount: roundMoneyMysql(Number(row.sale_price || 0) * quantity),
+      order_quantity: Math.max(1, Number(row.order_quantity || row.quantity || 1)),
+      sale_amount: roundMoneyMysql(Number(row.sale_price || 0) * Math.max(1, Number(row.order_quantity || row.quantity || 1))),
       already_handled: Boolean(row.already_handled)
     });
   }
@@ -18421,27 +19601,75 @@ export async function previewOrderProcurementMysql(orderId) {
 export async function createOrderProcurementRequestsMysql(orderId, body = {}, userId = null) {
   ensureMysqlCutoverEnabled();
   await ensureProcurementOrderSourceSchemaMysql();
-  return await withMysqlTransaction(async (connection) => {
+  const creation = await withMysqlTransaction(async (connection) => {
     const selectedIds = Array.isArray(body.order_item_ids)
       ? new Set(body.order_item_ids.map(Number).filter(Boolean))
       : null;
-    const rows = (await orderProcurementCandidateRowsMysql(orderId, connection))
+    const selectedItemIds = selectedIds ? [...selectedIds] : [];
+    const selectedSql = selectedItemIds.length
+      ? ` AND source_order_item_id IN (${selectedItemIds.map(() => "?").join(",")})`
+      : "";
+    const staleSuggestions = await connection.query(`
+      SELECT id, source_order_item_id
+      FROM procurement_requests
+      WHERE source_order_id = ? AND status = 'suggested'${selectedSql}
+      FOR UPDATE
+    `, [Number(orderId), ...selectedItemIds]).then(([items]) => items);
+    if (staleSuggestions.length) {
+      const suggestionIds = staleSuggestions.map((item) => Number(item.id));
+      await connection.execute(`
+        UPDATE procurement_requests
+        SET status = 'cancelled', approval_status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP,
+          note = CONCAT(COALESCE(note, ''), '；订单页确认采购时由正式采购记录替代')
+        WHERE id IN (${suggestionIds.map(() => "?").join(",")})
+      `, suggestionIds);
+      const suggestionItemIds = [...new Set(staleSuggestions.map((item) => Number(item.source_order_item_id)).filter(Boolean))];
+      if (suggestionItemIds.length) {
+        await connection.execute(`
+          UPDATE order_item_procurement_marks
+          SET status = 'pending', updated_at = CURRENT_TIMESTAMP
+          WHERE order_item_id IN (${suggestionItemIds.map(() => "?").join(",")})
+            AND handling_type = 'procurement_request'
+        `, suggestionItemIds);
+      }
+    }
+    const rows = (await orderProcurementCandidateRowsMysql(orderId, connection, { includeHandledSourceOrder: true }))
       .filter((row) => !selectedIds || selectedIds.has(Number(row.order_item_id)));
     const missingItems = await orderProcurementMissingItemsMysql(orderId);
     const summary = summarizeOrderProcurementCandidatesMysql(rows, missingItems);
     if (!rows.length) {
       return { ...summary, created_count: 0, stock_satisfied_count: 0, marked_count: 0, request_ids: [] };
     }
-    const personId = await resolvePersonIdOrFirstMysql(body.person_id || userId, connection);
+    const personId = await requireSessionPersonIdMysql(userId, connection);
     const purchaseOverrides = new Map((Array.isArray(body.product_purchases) ? body.product_purchases : [])
       .map((item) => [Number(item.product_id || 0), item])
       .filter(([productId]) => productId));
     const requestIds = [];
     let stockSatisfiedCount = 0;
     let markedCount = 0;
+    const [reservedRows] = await connection.query(`
+      SELECT marks.product_id, marks.handling_type, SUM(order_item.quantity) AS reserved_quantity
+      FROM order_item_procurement_marks marks
+      JOIN order_items order_item ON order_item.id = marks.order_item_id
+      JOIN orders o ON o.id = order_item.order_id
+      WHERE marks.status = 'handled'
+        AND marks.handling_type IN ('stock_available', 'incoming_available')
+        AND o.id != ?
+        AND (${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")})
+      GROUP BY marks.product_id, marks.handling_type
+    `, [Number(orderId)]);
+    const reservedStockByProduct = new Map();
+    const reservedIncomingByProduct = new Map();
+    for (const reserved of reservedRows) {
+      const target = reserved.handling_type === "incoming_available"
+        ? reservedIncomingByProduct
+        : reservedStockByProduct;
+      target.set(Number(reserved.product_id), Math.max(0, Number(reserved.reserved_quantity || 0)));
+    }
     const remainingStockByProduct = new Map();
     const remainingIncomingByProduct = new Map();
     const createdRequestProductIds = new Set();
+    const requestAllocationByProduct = new Map();
     const sortedRows = [...rows].sort((a, b) => {
       const productDiff = Number(a.product_id || 0) - Number(b.product_id || 0);
       if (productDiff) return productDiff;
@@ -18453,12 +19681,15 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
       const quantity = Math.max(1, Number(row.quantity || 1));
       const productId = Number(row.product_id);
       if (!remainingStockByProduct.has(productId)) {
-        remainingStockByProduct.set(productId, Math.max(0, Number(row.current_stock || 0)));
-        remainingIncomingByProduct.set(productId, Math.max(0, Number(row.incoming_stock || 0)));
+        remainingStockByProduct.set(productId, Math.max(0,
+          Number(row.current_stock || 0) - Number(reservedStockByProduct.get(productId) || 0)));
+        remainingIncomingByProduct.set(productId, Math.max(0,
+          Number(row.incoming_stock || 0) - Number(reservedIncomingByProduct.get(productId) || 0)));
       }
       const remainingStock = Number(remainingStockByProduct.get(productId) || 0);
       const remainingIncoming = Number(remainingIncomingByProduct.get(productId) || 0);
       let handlingType = "stock_available";
+      let markStatus = "handled";
       let note = `库存可满足：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
       const override = purchaseOverrides.get(productId);
       const overrideQuantity = Math.max(0, Number(override?.quantity || 0));
@@ -18467,12 +19698,15 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
         note = `无需采购，已确认处理：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
         stockSatisfiedCount += 1;
       } else if (overrideQuantity > 0 && !createdRequestProductIds.has(productId)) {
+        if (!(Number(override?.amount || 0) > 0)) {
+          throw new Error(`「${row.product_name || row.product_code || productId}」的采购金额（amount）必须大于 0；请填写实际货款后再提交采购`);
+        }
         handlingType = "procurement_request";
         note = `订单采购：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
         const [result] = await connection.execute(`
           INSERT INTO procurement_requests
-          (product_id, person_id, quantity, amount, shipping_amount, purchase_url, approval_status, status, needed_by, note, urgency, source_type, supplier_id, source_order_id, source_order_item_id, source_ozon_sku)
-          VALUES (?, ?, ?, ?, ?, ?, 'submitted', 'submitted', NULL, ?, ?, ?, ?, ?, ?, ?)
+          (product_id, person_id, quantity, amount, shipping_amount, purchase_url, approval_status, status, needed_by, note, urgency, source_type, supplier_id, source_order_id, source_order_item_id, source_ozon_sku, demand_type)
+          VALUES (?, ?, ?, ?, ?, ?, 'submitted', 'submitted', NULL, ?, ?, ?, ?, ?, ?, ?, 'real_order')
         `, [
           productId,
           personId,
@@ -18490,6 +19724,10 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
         ]);
         requestIds.push(Number(result.insertId));
         createdRequestProductIds.add(productId);
+        requestAllocationByProduct.set(productId, {
+          requestId: Number(result.insertId),
+          remaining: overrideQuantity
+        });
       } else if (createdRequestProductIds.has(productId)) {
         handlingType = "procurement_request";
         note = `订单采购已合并：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
@@ -18505,19 +19743,23 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
         stockSatisfiedCount += 1;
       } else {
         const requestQuantity = Math.max(1, quantity - Math.max(0, remainingStock) - Math.max(0, remainingIncoming));
+        const requestAmount = Number(row.purchase_cost || 0) * requestQuantity;
+        if (!(requestAmount > 0)) {
+          throw new Error(`「${row.product_name || row.product_code || productId}」的采购金额（amount）必须大于 0；请填写实际货款后再提交采购`);
+        }
         remainingStockByProduct.set(productId, 0);
         remainingIncomingByProduct.set(productId, 0);
         handlingType = "procurement_request";
         note = `订单采购：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
         const [result] = await connection.execute(`
           INSERT INTO procurement_requests
-          (product_id, person_id, quantity, amount, shipping_amount, purchase_url, approval_status, status, needed_by, note, urgency, source_type, supplier_id, source_order_id, source_order_item_id, source_ozon_sku)
-          VALUES (?, ?, ?, ?, ?, ?, 'submitted', 'submitted', NULL, ?, ?, ?, ?, ?, ?, ?)
+          (product_id, person_id, quantity, amount, shipping_amount, purchase_url, approval_status, status, needed_by, note, urgency, source_type, supplier_id, source_order_id, source_order_item_id, source_ozon_sku, demand_type)
+          VALUES (?, ?, ?, ?, ?, ?, 'submitted', 'submitted', NULL, ?, ?, ?, ?, ?, ?, ?, 'real_order')
         `, [
           productId,
           personId,
           requestQuantity,
-          Number(row.purchase_cost || 0) * requestQuantity,
+          requestAmount,
           Number(row.domestic_shipping || 0) * requestQuantity,
           override?.purchase_url ?? row.purchase_url ?? "",
           override?.note || note,
@@ -18529,11 +19771,35 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
           row.ozon_sku || null
         ]);
         requestIds.push(Number(result.insertId));
+        requestAllocationByProduct.set(productId, {
+          requestId: Number(result.insertId),
+          remaining: requestQuantity
+        });
+      }
+      const allocation = requestAllocationByProduct.get(productId);
+      if (handlingType === "procurement_request" && allocation?.requestId && allocation.remaining > 0) {
+        const allocatedQuantity = Math.min(quantity, Number(allocation.remaining || 0));
+        await connection.execute(`
+          INSERT INTO procurement_order_allocations
+          (procurement_request_id, order_item_id, order_id, product_id, allocated_quantity, status, created_by_person_id)
+          VALUES (?, ?, ?, ?, ?, 'allocated', ?)
+          ON DUPLICATE KEY UPDATE
+            allocated_quantity = VALUES(allocated_quantity),
+            status = 'allocated',
+            released_at = NULL,
+            release_reason = NULL,
+            created_by_person_id = VALUES(created_by_person_id),
+            updated_at = CURRENT_TIMESTAMP
+        `, [allocation.requestId, Number(row.order_item_id), Number(row.order_id), productId, allocatedQuantity, personId]);
+        allocation.remaining = Math.max(0, Number(allocation.remaining || 0) - allocatedQuantity);
+        if (allocatedQuantity < quantity) markStatus = "partial";
+      } else if (handlingType === "procurement_request") {
+        markStatus = "pending";
       }
       await connection.execute(`
         INSERT INTO order_item_procurement_marks
         (order_item_id, order_id, product_id, status, handling_type, note, created_by_person_id)
-        VALUES (?, ?, ?, 'handled', ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           product_id = VALUES(product_id),
           status = VALUES(status),
@@ -18541,8 +19807,8 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
           note = VALUES(note),
           created_by_person_id = VALUES(created_by_person_id),
           updated_at = CURRENT_TIMESTAMP
-      `, [Number(row.order_item_id), Number(row.order_id), productId, handlingType, note, personId]);
-      markedCount += 1;
+      `, [Number(row.order_item_id), Number(row.order_id), productId, markStatus, handlingType, note, personId]);
+      if (markStatus === "handled") markedCount += 1;
     }
     return {
       ...summary,
@@ -18552,6 +19818,28 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
       request_ids: requestIds
     };
   });
+  if (!creation.request_ids.length) return creation;
+
+  const purchaseNote = `订单页确认已完成采购：订单 #${Number(orderId)}`;
+  const purchaseOrder = await mergeProcurementRequestsMysql({
+    request_ids: creation.request_ids,
+    note: purchaseNote
+  }, userId);
+  try {
+    await confirmPurchaseOrderMysql(purchaseOrder.id, {
+      note: purchaseNote,
+      anomaly_reason: "订单页已确认实际采购价格"
+    }, userId);
+  } catch (error) {
+    await cancelPurchaseOrderMysql(purchaseOrder.id);
+    throw error;
+  }
+  return {
+    ...creation,
+    purchase_order_id: Number(purchaseOrder.id),
+    purchase_order_no: purchaseOrder.order_no || "",
+    purchased_count: creation.request_ids.length
+  };
 }
 
 export async function updateProcurementRequestMysql(id, body = {}) {
@@ -18590,6 +19878,10 @@ export async function updateProcurementRequestMysql(id, body = {}) {
     const nextUrgency = body.urgency ?? existing.urgency ?? "normal";
     const nextSourceType = body.source_type ?? existing.source_type ?? "1688";
     const nextSupplierId = body.supplier_id !== undefined ? nullableInteger(body.supplier_id) : nullableInteger(existing.supplier_id);
+    if (!['cancelled'].includes(String(nextStatus || ''))) {
+      if (!(nextQuantity > 0)) throw new Error("采购数量（quantity）必须大于 0");
+      if (!(nextAmount > 0)) throw new Error("采购金额（amount）必须大于 0；请填写实际货款后再保存");
+    }
 
     await connection.execute(`
       UPDATE procurement_requests SET product_id = ?, raw_name = ?, raw_spec = ?, binding_status = ?, person_id = ?, quantity = ?, amount = ?,
@@ -18621,6 +19913,14 @@ export async function updateProcurementRequestMysql(id, body = {}) {
       nextStatus,
       requestId
     ]);
+
+    if (body.remember_purchase_link === true && nextProductId && String(nextPurchaseUrl || "").trim()) {
+      await connection.execute(`
+        UPDATE products
+        SET purchase_url = ?, source_platform = ?, supplier_id = COALESCE(?, supplier_id)
+        WHERE id = ?
+      `, [String(nextPurchaseUrl).trim(), nextSourceType, nextSupplierId, nextProductId]);
+    }
 
     if (existingStatus === "merged" && canRefreshMergedOrderItems) {
       const orderId = Number(existing.purchase_order_id || 0);
@@ -18921,6 +20221,8 @@ export async function directInboundProcurementRequestsMysql(body = {}) {
   ensureMysqlCutoverEnabled();
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementInboundLinkSchemaMysql();
+  await ensureProcurementFlexibleRequestSchemaMysql();
+  await ensurePurchaseCostVersionSchemaMysql();
   const ids = [...new Set((body.request_ids || []).map(Number).filter(Boolean))];
   if (!ids.length) throw new Error("Please select procurement requests to inbound");
   return await withMysqlTransaction(async (connection) => {
@@ -18939,6 +20241,17 @@ export async function directInboundProcurementRequestsMysql(body = {}) {
         validation: {
           field: "procurement_request.status",
           message: "采购请求已完成或已取消，请刷新采购工作台后重新选择待处理请求"
+        }
+      });
+    }
+    const invalidQuantity = requests.filter((row) => !(Number(row.quantity || 0) > 0));
+    const missingCost = requests.filter((row) => !(Number(row.amount || 0) > 0));
+    if (invalidQuantity.length || missingCost.length) {
+      throw Object.assign(new Error("存在采购数量或采购金额异常的明细，不能入库"), {
+        statusCode: 409,
+        validation: {
+          field: "procurement_request.quantity, procurement_request.amount",
+          message: `采购数量（quantity）和采购金额（amount）都必须大于 0；请修正后再确认入库。异常记录：${[...new Set([...invalidQuantity, ...missingCost].map((row) => `#${row.id}`))].join("、")}`
         }
       });
     }
@@ -18961,7 +20274,7 @@ export async function directInboundProcurementRequestsMysql(body = {}) {
         unitCost,
         shippingAmount,
         request.purchase_url || "",
-        request.note || `采购请求 #${request.id} 直接入库`,
+        body.note || request.note || `采购请求 #${request.id} 直接入库`,
         normalizeMysqlDateTime(new Date()),
         Number(request.id)
       ]);
@@ -18975,15 +20288,28 @@ export async function directInboundProcurementRequestsMysql(body = {}) {
         quantity_delta: quantity,
         unit_cost: unitCost,
         amount: amount + shippingAmount,
-        note: request.note || `采购请求 #${request.id} 直接入库`
+        note: body.note || request.note || `采购请求 #${request.id} 直接入库`
       });
+      await recordInboundCostVersionMysql(connection, {
+        id: inboundId,
+        product_id: request.product_id,
+        procurement_request_id: request.id,
+        quantity,
+        amount,
+        shipping_amount: shippingAmount,
+        purchase_url: request.purchase_url,
+        person_id: personId
+      }, body);
       await connection.execute(`
         UPDATE procurement_requests
         SET status = 'done',
           approval_status = 'done',
+          automation_exception_code = NULL,
+          automation_exception_message = NULL,
+          auto_completed_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE auto_completed_at END,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-      `, [Number(request.id)]);
+      `, [body.auto_completed ? 1 : 0, Number(request.id)]);
       if (request.purchase_order_id) {
         await refreshPurchaseOrderStatusMysql(connection, request.purchase_order_id);
       }
@@ -18992,7 +20318,41 @@ export async function directInboundProcurementRequestsMysql(body = {}) {
   });
 }
 
-export async function mergeProcurementRequestsMysql(body = {}) {
+export async function procurementPurchaseGroupRecommendationsMysql(query = {}) {
+  ensureMysqlCutoverEnabled();
+  const productIds = [...new Set(String(query.productIds || query.product_ids || "")
+    .split(",").map(Number).filter(Boolean))];
+  if (!productIds.length) return [];
+  const placeholders = productIds.map(() => "?").join(",");
+  return await mysqlQuery(`
+    SELECT DISTINCT p.id AS product_id, p.name AS product_name, p.code AS product_code, p.image_url,
+      pg.id AS group_id, pg.name AS group_name, pg.source_type, pg.supplier_id,
+      s.name AS supplier_name,
+      COALESCE(stock.current_stock, 0) AS current_stock,
+      COALESCE(costs.historical_avg_unit_cost, 0) AS historical_avg_unit_cost
+    FROM procurement_purchase_group_items selected
+    JOIN procurement_purchase_groups pg ON pg.id = selected.group_id AND pg.active = 1
+    JOIN procurement_purchase_group_items related ON related.group_id = pg.id
+    JOIN products p ON p.id = related.product_id AND p.active = 1
+    LEFT JOIN suppliers s ON s.id = pg.supplier_id
+    LEFT JOIN (
+      SELECT product_id, COALESCE(SUM(quantity_delta), 0) AS current_stock
+      FROM inventory_movements WHERE status = 'posted' GROUP BY product_id
+    ) stock ON stock.product_id = p.id
+    LEFT JOIN (
+      SELECT product_id, SUM(amount) / NULLIF(SUM(quantity), 0) AS historical_avg_unit_cost
+      FROM purchase_cost_versions
+      WHERE status = 'active' AND stage IN ('purchased', 'inbound')
+      GROUP BY product_id
+    ) costs ON costs.product_id = p.id
+    WHERE selected.product_id IN (${placeholders})
+      AND related.product_id NOT IN (${placeholders})
+    ORDER BY pg.updated_at DESC, p.name ASC
+    LIMIT 60
+  `, [...productIds, ...productIds]);
+}
+
+export async function mergeProcurementRequestsMysql(body = {}, sessionPersonId = null) {
   ensureMysqlCutoverEnabled();
   const ids = [...new Set((body.request_ids || []).map(Number).filter(Boolean))];
   if (!ids.length) throw new Error("Please select procurement requests to merge");
@@ -19000,12 +20360,26 @@ export async function mergeProcurementRequestsMysql(body = {}) {
   return await withMysqlTransaction(async (connection) => {
     const [requests] = await connection.query(`
       SELECT * FROM procurement_requests
-      WHERE id IN (${placeholders}) AND status IN ('pending', 'submitted')
+      WHERE id IN (${placeholders}) AND status IN ('pending', 'suggested', 'submitted')
       FOR UPDATE
     `, ids);
     if (requests.length !== ids.length) throw new Error("Some procurement requests were already processed. Please refresh and try again.");
     const orderNo = await nextPurchaseOrderNoMysql(connection);
-    const personId = await resolvePersonIdOrFirstMysql(body.person_id, connection);
+    const personId = await requireSessionPersonIdMysql(sessionPersonId, connection);
+    const sourceType = String(body.source_type || "").trim();
+    const supplierId = nullableInteger(body.supplier_id);
+    if (sourceType || supplierId) {
+      await connection.execute(`
+        UPDATE procurement_requests
+        SET source_type = COALESCE(NULLIF(?, ''), source_type),
+          supplier_id = COALESCE(?, supplier_id)
+        WHERE id IN (${placeholders})
+      `, [sourceType, supplierId, ...ids]);
+      for (const request of requests) {
+        if (sourceType) request.source_type = sourceType;
+        if (supplierId) request.supplier_id = supplierId;
+      }
+    }
     const grouped = new Map();
     for (const request of requests) {
       const productId = Number(request.product_id);
@@ -19026,10 +20400,14 @@ export async function mergeProcurementRequestsMysql(body = {}) {
     }
     const totalQuantity = [...grouped.values()].reduce((sum, item) => sum + item.requested_quantity, 0);
     const totalAmount = [...grouped.values()].reduce((sum, item) => sum + item.amount + item.shipping_amount, 0);
+    const receiptUrls = (Array.isArray(body.receipts) ? body.receipts : [])
+      .map((item) => String(item?.url || item || "").trim()).filter(Boolean);
+    const orderNote = [String(body.note || "").trim(), receiptUrls.length ? `采购凭证：${receiptUrls.join("，")}` : ""]
+      .filter(Boolean).join("\n");
     const [orderResult] = await connection.execute(`
       INSERT INTO purchase_orders (order_no, created_by_person_id, status, total_quantity, total_amount, note)
       VALUES (?, ?, 'pending_purchase', ?, ?, ?)
-    `, [orderNo, personId, totalQuantity, totalAmount, body.note || ""]);
+    `, [orderNo, personId, totalQuantity, totalAmount, orderNote]);
     const orderId = Number(orderResult.insertId);
     for (const item of grouped.values()) {
       await connection.execute(`
@@ -19053,11 +20431,27 @@ export async function mergeProcurementRequestsMysql(body = {}) {
       SET status = 'merged', approval_status = 'merged', purchase_order_id = ?, merged_at = CURRENT_TIMESTAMP
       WHERE id IN (${placeholders})
     `, [orderId, ...ids]);
-    return { id: orderId, order_no: orderNo };
+    let purchaseGroupId = null;
+    if (body.remember_group === true) {
+      const groupName = String(body.group_name || "").trim() || `${sourceType || "采购"}常购组合`;
+      const [groupResult] = await connection.execute(`
+        INSERT INTO procurement_purchase_groups
+        (name, source_type, supplier_id, active, created_by_person_id)
+        VALUES (?, ?, ?, 1, ?)
+      `, [groupName, sourceType || "other", supplierId, personId]);
+      purchaseGroupId = Number(groupResult.insertId);
+      for (const productId of grouped.keys()) {
+        await connection.execute(`
+          INSERT IGNORE INTO procurement_purchase_group_items (group_id, product_id)
+          VALUES (?, ?)
+        `, [purchaseGroupId, productId]);
+      }
+    }
+    return { id: orderId, order_no: orderNo, purchase_group_id: purchaseGroupId };
   });
 }
 
-export async function confirmPurchaseOrderMysql(id, body = {}) {
+export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId = null) {
   ensureMysqlCutoverEnabled();
   await ensurePurchaseCostVersionSchemaMysql();
   const orderId = Number(id);
@@ -19066,18 +20460,33 @@ export async function confirmPurchaseOrderMysql(id, body = {}) {
     if (!order) throw new Error("Purchase order not found");
     if (!["pending_purchase", "purchased"].includes(order.status)) throw new Error("Current purchase order status cannot be confirmed as purchased");
     const [items] = await connection.query("SELECT * FROM purchase_order_items WHERE purchase_order_id = ? FOR UPDATE", [orderId]);
-    const personId = await resolvePersonIdOrFirstMysql(body.person_id, connection);
-    const overrides = new Map((body.items || []).map((item) => [Number(item.id), item]));
+    const personId = await requireSessionPersonIdMysql(sessionPersonId, connection);
+    const overrides = new Map((body.items || []).map((item) => [Number(item.id), item]).filter(([id]) => id));
+    const overridesByProduct = new Map((body.items || []).map((item) => [Number(item.product_id), item]).filter(([productId]) => productId));
     let totalQuantity = 0;
     let totalAmount = 0;
     for (const item of items) {
-      const input = overrides.get(Number(item.id)) || {};
+      const input = overrides.get(Number(item.id)) || overridesByProduct.get(Number(item.product_id)) || {};
       const actualQuantity = Math.max(0, Number(input.actual_quantity ?? item.actual_quantity ?? item.requested_quantity));
       const amount = Number(input.amount ?? (input.unit_cost != null ? Number(input.unit_cost) * actualQuantity : item.amount));
       const shippingAmount = Number(input.shipping_amount ?? item.shipping_amount ?? 0);
       const unitCost = actualQuantity ? (amount + shippingAmount) / actualQuantity : 0;
+      const goodsUnitCost = actualQuantity ? amount / actualQuantity : 0;
       const purchaseUrl = input.purchase_url ?? item.purchase_url ?? "";
       const note = input.note ?? item.note ?? "";
+      const anomalyReason = String(input.anomaly_reason || body.anomaly_reason || "").trim();
+      if (!(actualQuantity > 0)) throw new Error(`商品 #${item.product_id} 的采购数量（actual_quantity）必须大于 0`);
+      if (!(amount > 0)) throw new Error(`商品 #${item.product_id} 的采购金额（amount）必须大于 0；请填写实际货款后再确认采购`);
+      const historicalUnitCost = await historicalPurchasedUnitCostMysql(item.product_id);
+      if (historicalUnitCost > 0 && goodsUnitCost > historicalUnitCost * 1.1 && !anomalyReason) {
+        throw Object.assign(new Error("本次采购单价较历史均价上涨超过10%，请先选择价格异常原因"), {
+          statusCode: 409,
+          validation: {
+            field: "items.anomaly_reason",
+            message: `商品 #${item.product_id} 本次单价 ¥${goodsUnitCost.toFixed(2)}，历史均价 ¥${historicalUnitCost.toFixed(2)}，请在批量采购确认页选择涨价原因`
+          }
+        });
+      }
       await connection.execute(`
         UPDATE purchase_order_items
         SET actual_quantity = ?, unit_cost = ?, amount = ?, shipping_amount = ?, purchase_url = ?, note = ?, status = 'purchased'
@@ -19099,7 +20508,7 @@ export async function confirmPurchaseOrderMysql(id, body = {}) {
         amount,
         shipping_amount: shippingAmount,
         person_id: channel?.person_id || personId,
-        anomaly_reason: input.anomaly_reason || body.anomaly_reason || null
+        anomaly_reason: anomalyReason || null
       });
       const exists = await mysqlConnectionQueryOne(
         connection,
@@ -19123,22 +20532,37 @@ export async function confirmPurchaseOrderMysql(id, body = {}) {
     `, [totalQuantity, totalAmount, body.note || "", orderId]);
     await connection.execute(`
       UPDATE procurement_requests
-      SET status = 'purchased', approval_status = 'purchased'
+      SET status = 'purchased', approval_status = 'purchased', purchased_at = CURRENT_TIMESTAMP
       WHERE purchase_order_id = ? AND status = 'merged'
     `, [orderId]);
+    await connection.execute(`
+      INSERT INTO procurement_order_allocations
+      (procurement_request_id, order_item_id, order_id, product_id, allocated_quantity, status, created_by_person_id)
+      SELECT request.id, request.source_order_item_id, request.source_order_id, request.product_id,
+        LEAST(request.quantity, order_item.quantity), 'allocated', COALESCE(request.person_id, request.created_by_person_id, ?)
+      FROM procurement_requests request
+      JOIN order_items order_item ON order_item.id = request.source_order_item_id
+      WHERE request.purchase_order_id = ?
+        AND request.status = 'purchased'
+        AND request.source_order_id IS NOT NULL
+        AND request.source_order_item_id IS NOT NULL
+      ON DUPLICATE KEY UPDATE
+        allocated_quantity = VALUES(allocated_quantity), status = 'allocated', released_at = NULL,
+        release_reason = NULL, updated_at = CURRENT_TIMESTAMP
+    `, [personId, orderId]);
     return { ok: true };
   });
 }
 
-export function startConfirmProcurementRequestsPurchasedMysql(body = {}) {
+export function startConfirmProcurementRequestsPurchasedMysql(body = {}, sessionPersonId = null) {
   ensureMysqlCutoverEnabled();
   const requestIds = [...new Set((body.request_ids || []).map(Number).filter(Boolean))];
   if (!requestIds.length) throw new Error("Please select procurement requests to merge");
   const queuedBody = { ...body, request_ids: requestIds };
   setTimeout(async () => {
     try {
-      const result = await mergeProcurementRequestsMysql(queuedBody);
-      if (result?.id) await confirmPurchaseOrderMysql(result.id, queuedBody);
+      const result = await mergeProcurementRequestsMysql(queuedBody, sessionPersonId);
+      if (result?.id) await confirmPurchaseOrderMysql(result.id, queuedBody, sessionPersonId);
     } catch (error) {
       console.error("[procurement] async purchase confirmation failed", error);
     }
@@ -19321,6 +20745,9 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
   const shippingAmount = Number(body.shipping_amount ?? existing.shipping_amount ?? 0);
   const unitCost = quantity ? (amount + shippingAmount) / quantity : Number(body.unit_cost ?? existing.unit_cost ?? 0);
   const status = body.status || "pending_arrival";
+  const approvedByPersonId = status === "approved"
+    ? await resolvePersonIdOrFirstMysql(options.sessionPersonId || body.approved_by_person_id, connection)
+    : null;
   const markPurchaseOrderChanged = async () => {
     if (!existing.purchase_order_id) return;
     if (options.changedPurchaseOrderIds) {
@@ -19333,7 +20760,8 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
   await connection.execute(`
     UPDATE inbound_records SET product_id = ?, person_id = ?, quantity = ?, amount = ?, unit_cost = ?,
       shipping_amount = ?, purchase_url = ?, status = ?, note = ?, qc_status = ?,
-      approved_at = CASE WHEN ? = 'approved' THEN COALESCE(approved_at, ?) ELSE approved_at END
+      approved_at = CASE WHEN ? = 'approved' THEN COALESCE(approved_at, ?) ELSE approved_at END,
+      approved_by_person_id = CASE WHEN ? = 'approved' THEN COALESCE(approved_by_person_id, ?) ELSE approved_by_person_id END
     WHERE id = ?
   `, [
     productId,
@@ -19348,6 +20776,8 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
     body.qc_status || existing.qc_status || "pending",
     status,
     normalizeMysqlDateTime(new Date()),
+    status,
+    approvedByPersonId,
     inboundId
   ]);
 
@@ -19417,16 +20847,161 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
   return { ok: true };
 }
 
-export async function updateInboundRecordMysql(id, body = {}) {
+export async function updateInboundRecordMysql(id, body = {}, sessionPersonId = null) {
   ensureMysqlCutoverEnabled();
+  await ensureInboundRecordTimestampSchemaMysql();
   await ensurePurchaseCostVersionSchemaMysql();
   return await withMysqlTransaction(async (connection) => {
-    return await applyInboundRecordUpdateMysql(connection, id, body);
+    return await applyInboundRecordUpdateMysql(connection, id, body, { sessionPersonId });
   });
 }
 
-export async function batchUpdateInboundRecordsMysql(body = {}) {
+async function prepareProcurementRequestPurchaseQuantitiesMysql(body = {}) {
+  const ids = [...new Set((body.request_ids || []).map(Number).filter(Boolean))];
+  const quantityByProduct = new Map((body.items || [])
+    .map((item) => [Number(item.product_id || 0), Number(item.actual_quantity ?? item.quantity ?? 0)])
+    .filter(([productId, quantity]) => productId && quantity >= 0));
+  if (!ids.length || !quantityByProduct.size) return ids;
+  return await withMysqlTransaction(async (connection) => {
+    const [requests] = await connection.query(`
+      SELECT * FROM procurement_requests
+      WHERE id IN (${ids.map(() => "?").join(",")})
+        AND status IN ('pending', 'suggested', 'submitted')
+      ORDER BY CASE WHEN source_order_item_id IS NOT NULL THEN 0 ELSE 1 END, created_at ASC, id ASC
+      FOR UPDATE
+    `, ids);
+    const activeRequestIds = new Set(requests.map((request) => Number(request.id)));
+    const staleProductIds = [...quantityByProduct.keys()].filter((productId) => {
+      return !requests.some((request) => Number(request.product_id) === productId);
+    });
+    if (staleProductIds.length) {
+      const [replacementRequests] = await connection.query(`
+        SELECT * FROM procurement_requests
+        WHERE product_id IN (${staleProductIds.map(() => "?").join(",")})
+          AND status IN ('pending', 'suggested', 'submitted')
+        ORDER BY CASE WHEN source_order_item_id IS NOT NULL THEN 0 ELSE 1 END, created_at ASC, id ASC
+        FOR UPDATE
+      `, staleProductIds);
+      for (const request of replacementRequests) {
+        if (activeRequestIds.has(Number(request.id))) continue;
+        requests.push(request);
+        activeRequestIds.add(Number(request.id));
+      }
+    }
+    const selectedIds = [];
+    for (const [productId, actualQuantity] of quantityByProduct) {
+      const productRequests = requests.filter((request) => Number(request.product_id) === productId);
+      if (!productRequests.length) continue;
+      let remaining = Math.max(0, actualQuantity);
+      let requestedTotal = 0;
+      for (const request of productRequests) {
+        const requestQuantity = Math.max(0, Number(request.quantity || 0));
+        requestedTotal += requestQuantity;
+        if (remaining <= 0) continue;
+        if (remaining >= requestQuantity) {
+          selectedIds.push(Number(request.id));
+          remaining -= requestQuantity;
+          continue;
+        }
+        const purchasedQuantity = remaining;
+        const unmetQuantity = requestQuantity - purchasedQuantity;
+        const ratio = requestQuantity > 0 ? purchasedQuantity / requestQuantity : 0;
+        await connection.execute(`
+          UPDATE procurement_requests
+          SET quantity = ?, amount = amount * ?, shipping_amount = shipping_amount * ?,
+            status = 'suggested', approval_status = 'suggested', updated_at = CURRENT_TIMESTAMP,
+            note = CONCAT(COALESCE(note, ''), '；本次采购数量不足，剩余 ', ?, ' 件继续待采购')
+          WHERE id = ?
+        `, [unmetQuantity, 1 - ratio, 1 - ratio, unmetQuantity, Number(request.id)]);
+        const [inserted] = await connection.execute(`
+          INSERT INTO procurement_requests
+          (request_group_no, product_id, raw_name, raw_spec, binding_status, person_id, created_by_person_id,
+            quantity, amount, shipping_amount, purchase_url, source_type, supplier_id, approval_status, status,
+            needed_by, note, urgency, source_order_id, source_order_item_id, source_ozon_sku, demand_type)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, ?, ?, ?, ?, ?)
+        `, [request.request_group_no, request.product_id, request.raw_name, request.raw_spec, request.binding_status,
+          request.person_id, request.created_by_person_id, purchasedQuantity, Number(request.amount || 0) * ratio,
+          Number(request.shipping_amount || 0) * ratio, request.purchase_url, request.source_type, request.supplier_id,
+          request.needed_by, `${request.note || ""}；本次实际采购 ${purchasedQuantity} 件`, request.urgency,
+          request.source_order_id, request.source_order_item_id, request.source_ozon_sku,
+          request.demand_type || (request.source_order_item_id ? "real_order" : "advance_stock")]);
+        selectedIds.push(Number(inserted.insertId));
+        remaining = 0;
+      }
+      if (remaining > 0) {
+        const source = productRequests[0];
+        const ratio = actualQuantity > 0 ? remaining / actualQuantity : 0;
+        const input = (body.items || []).find((item) => Number(item.product_id) === productId) || {};
+        const [inserted] = await connection.execute(`
+          INSERT INTO procurement_requests
+          (request_group_no, product_id, binding_status, person_id, created_by_person_id, quantity, amount,
+            shipping_amount, purchase_url, source_type, supplier_id, approval_status, status, note, urgency, demand_type)
+          VALUES (?, ?, 'bound', ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, 'advance_stock')
+        `, [source.request_group_no, productId, body.person_id || source.person_id, source.created_by_person_id,
+          remaining, Number(input.amount || 0) * ratio, Number(input.shipping_amount || 0) * ratio,
+          input.purchase_url || source.purchase_url, body.source_type || source.source_type,
+          body.supplier_id || source.supplier_id, `实际采购超出当前订单需求 ${remaining} 件，转为提前采购库存`, source.urgency]);
+        selectedIds.push(Number(inserted.insertId));
+      }
+    }
+    const untouchedIds = requests
+      .filter((request) => !quantityByProduct.has(Number(request.product_id)))
+      .map((request) => Number(request.id));
+    return [...new Set([...selectedIds, ...untouchedIds])];
+  });
+}
+
+export async function confirmProcurementRequestsPurchasedMysql(body = {}, sessionPersonId = null) {
+  const requestIds = await prepareProcurementRequestPurchaseQuantitiesMysql(body);
+  if (!requestIds.length) throw new Error("本次实际采购数量没有覆盖任何待采购需求");
+  const purchaseBody = { ...body, request_ids: requestIds };
+  const purchaseOrder = await mergeProcurementRequestsMysql(purchaseBody, sessionPersonId);
+  try {
+    await confirmPurchaseOrderMysql(purchaseOrder.id, purchaseBody, sessionPersonId);
+  } catch (error) {
+    await cancelPurchaseOrderMysql(purchaseOrder.id);
+    throw error;
+  }
+  return {
+    ok: true,
+    purchase_order_id: Number(purchaseOrder.id),
+    purchase_order_no: purchaseOrder.order_no || "",
+    stage: "in_transit"
+  };
+}
+
+export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId = null) {
+  const items = Array.isArray(body.items) ? body.items : [];
+  if (!items.length) throw new Error("请至少填写一条采购商品");
+  const unbound = items.find((item) => !Number(item.product_id || 0));
+  if (unbound) throw new Error(`「${unbound.raw_name || unbound.name || "采购商品"}」尚未绑定库存商品，无法生成采购在途记录`);
+  const created = await createProcurementRequestMysql(body, sessionPersonId);
+  try {
+    return {
+      ...created,
+      ...await confirmProcurementRequestsPurchasedMysql({
+        ...body,
+        request_ids: created.ids,
+        note: body.note || "采购工作台登记采购"
+      }, sessionPersonId)
+    };
+  } catch (error) {
+    const ids = (created.ids || []).map(Number).filter(Boolean);
+    if (ids.length) {
+      await mysqlExecute(`
+        UPDATE procurement_requests
+        SET status = 'cancelled', approval_status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP,
+          note = CONCAT(COALESCE(note, ''), '；采购登记失败，系统已取消本次记录')
+        WHERE id IN (${ids.map(() => "?").join(",")}) AND purchase_order_id IS NULL
+      `, ids);
+    }
+    throw error;
+  }
+}
+
+export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId = null) {
   ensureMysqlCutoverEnabled();
+  await ensureInboundRecordTimestampSchemaMysql();
   await ensurePurchaseCostVersionSchemaMysql();
   const records = Array.isArray(body.records) ? body.records : [];
   if (!records.length) throw new Error("Please select inbound records to update");
@@ -19437,7 +21012,7 @@ export async function batchUpdateInboundRecordsMysql(body = {}) {
       const inboundId = Number(record.id ?? record.inbound_record_id);
       if (!inboundId) continue;
       const payload = record.payload && typeof record.payload === "object" ? record.payload : record;
-      await applyInboundRecordUpdateMysql(connection, inboundId, payload, { changedPurchaseOrderIds });
+      await applyInboundRecordUpdateMysql(connection, inboundId, payload, { changedPurchaseOrderIds, sessionPersonId });
       ids.push(inboundId);
     }
     for (const orderId of changedPurchaseOrderIds) {
@@ -19447,7 +21022,7 @@ export async function batchUpdateInboundRecordsMysql(body = {}) {
   });
 }
 
-export function startBatchUpdateInboundRecordsMysql(body = {}) {
+export function startBatchUpdateInboundRecordsMysql(body = {}, sessionPersonId = null) {
   ensureMysqlCutoverEnabled();
   const records = Array.isArray(body.records) ? body.records : [];
   if (!records.length) throw new Error("Please select inbound records to update");
@@ -19456,7 +21031,7 @@ export function startBatchUpdateInboundRecordsMysql(body = {}) {
     payload: record.payload && typeof record.payload === "object" ? { ...record.payload } : { ...record }
   }));
   setTimeout(() => {
-    batchUpdateInboundRecordsMysql({ records: queuedRecords }).catch((error) => {
+    batchUpdateInboundRecordsMysql({ records: queuedRecords }, sessionPersonId).catch((error) => {
       console.error("[procurement] async inbound batch update failed", error);
     });
   }, 0);
@@ -19747,16 +21322,20 @@ function shanghaiDateKeyToUtcDateTimeMysql(dateKey = "", addDays = 0) {
 }
 
 function profitOrderedAtUtcRangeMysql(alias = "o", from = "", to = "") {
+  return profitTimestampUtcRangeMysql(`${alias}.ordered_at`, from, to);
+}
+
+function profitTimestampUtcRangeMysql(timestampSql, from = "", to = "") {
   const where = [];
   const params = [];
   const fromUtc = shanghaiDateKeyToUtcDateTimeMysql(from, 0);
   const toUtcExclusive = shanghaiDateKeyToUtcDateTimeMysql(to, 1);
   if (fromUtc) {
-    where.push(`${alias}.ordered_at >= ?`);
+    where.push(`${timestampSql} >= ?`);
     params.push(fromUtc);
   }
   if (toUtcExclusive) {
-    where.push(`${alias}.ordered_at < ?`);
+    where.push(`${timestampSql} < ?`);
     params.push(toUtcExclusive);
   }
   return {
@@ -20187,6 +21766,7 @@ async function aftersaleBaseRowsMysql(query = {}) {
   const from = String(query.from || query.dateFrom || "").slice(0, 10);
   const to = String(query.to || query.dateTo || "").slice(0, 10);
   const shopId = String(query.shopId || query.shop_id || "");
+  const sku = String(query.sku || query.ozon_sku || "").trim();
   const where = ["1=1"];
   const params = [];
   if (from) {
@@ -20280,9 +21860,148 @@ async function aftersaleBaseRowsMysql(query = {}) {
   return { rows, from, to, shopId };
 }
 
+async function aftersaleSalesBaseRowsMysql({ from = "", to = "", shopId = "all" } = {}) {
+  const dateFilter = profitOrderedAtUtcRangeMysql("o", from, to);
+  const outcome = buildOrderOutcomeSql("o", "mysql");
+  const eligibleSale = `((${outcome.effectiveSale} AND NOT ${outcome.afterDeliveryReturn}) OR ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn})`;
+  const shopWhere = shopId && shopId !== "all" && Number.isFinite(Number(shopId)) ? " AND o.shop_id = ?" : "";
+  const params = [...dateFilter.params];
+  if (shopWhere) params.push(Number(shopId));
+  return mysqlQuery(`
+    SELECT
+      o.shop_id,
+      COALESCE(s.name, CONCAT('店铺 ', o.shop_id)) AS shop_name,
+      COALESCE(NULLIF(oi.ozon_sku, ''), CONCAT('ITEM-', oi.id)) AS sku,
+      COALESCE(oi.ozon_name, op.name, op_by_product.name, p.name, oi.ozon_sku, '未命名商品') AS item_name,
+      COALESCE(
+        NULLIF(oi.ozon_image_url, ''), NULLIF(op.primary_image, ''), NULLIF(op.image_url, ''),
+        NULLIF(op_by_product.primary_image, ''), NULLIF(op_by_product.image_url, ''), NULLIF(p.image_url, ''), ''
+      ) AS image_url,
+      COALESCE(SUM(CASE WHEN ${eligibleSale} THEN oi.quantity ELSE 0 END), 0) AS sales_quantity,
+      COALESCE(SUM(CASE WHEN ${eligibleSale} THEN oi.sale_price * oi.quantity ELSE 0 END), 0) AS sales_amount_cny
+    FROM orders o
+    JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN shops s ON s.id = o.shop_id
+    LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id
+    LEFT JOIN products p ON p.id = sm.product_id
+    LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku
+    LEFT JOIN online_products op_by_product ON op_by_product.shop_id = o.shop_id AND op_by_product.ozon_product_id = oi.ozon_product_id
+    WHERE 1=1 ${dateFilter.whereSql}${shopWhere}
+    GROUP BY o.shop_id, s.name, oi.ozon_sku, oi.id, oi.ozon_name, op.name, op_by_product.name, p.name,
+      oi.ozon_image_url, op.primary_image, op.image_url, op_by_product.primary_image, op_by_product.image_url, p.image_url
+    HAVING sales_quantity > 0
+  `, params);
+}
+
+function buildAftersaleOperationalOverviewMysql(salesRows = [], aftersaleRows = []) {
+  const returnRows = aftersaleRows.filter((row) => !["pre_fulfillment_cancel", "platform_document_issue"].includes(String(row.bucket || "")));
+  const shops = new Map();
+  const skus = new Map();
+  const ensureShop = (row) => {
+    const key = String(row.shop_id ?? "");
+    if (!shops.has(key)) shops.set(key, {
+      shop_id: row.shop_id,
+      shop_name: row.shop_name || `店铺 ${row.shop_id || ""}`.trim(),
+      sales_quantity: 0,
+      sales_amount_cny: 0,
+      returnOrderIds: new Set(),
+      return_quantity: 0,
+      return_loss_cny: 0,
+      risky_sku_count: 0
+    });
+    return shops.get(key);
+  };
+  const ensureSku = (row) => {
+    const sku = String(row.sku || row.ozon_sku || "").trim();
+    const key = `${row.shop_id ?? ""}:${sku}`;
+    if (!skus.has(key)) skus.set(key, {
+      shop_id: row.shop_id,
+      shop_name: row.shop_name || `店铺 ${row.shop_id || ""}`.trim(),
+      sku,
+      item_name: row.item_name || "未命名商品",
+      image_url: row.image_url || "",
+      sales_quantity: 0,
+      sales_amount_cny: 0,
+      returnOrderIds: new Set(),
+      return_quantity: 0,
+      return_loss_cny: 0,
+      reasons: new Map()
+    });
+    return skus.get(key);
+  };
+  for (const row of salesRows) {
+    const shop = ensureShop(row);
+    shop.sales_quantity += Number(row.sales_quantity || 0);
+    shop.sales_amount_cny += Number(row.sales_amount_cny || 0);
+    const sku = ensureSku(row);
+    sku.sales_quantity += Number(row.sales_quantity || 0);
+    sku.sales_amount_cny += Number(row.sales_amount_cny || 0);
+  }
+  if (sku) {
+    where.push("oi.ozon_sku = ?");
+    params.push(sku);
+  }
+  for (const row of returnRows) {
+    const normalizedRow = { ...row, sku: row.ozon_sku };
+    const shop = ensureShop(normalizedRow);
+    shop.returnOrderIds.add(Number(row.order_id));
+    shop.return_quantity += Number(row.quantity || 0);
+    shop.return_loss_cny += Number(row.estimated_loss_cny || 0);
+    const sku = ensureSku(normalizedRow);
+    sku.returnOrderIds.add(Number(row.order_id));
+    sku.return_quantity += Number(row.quantity || 0);
+    sku.return_loss_cny += Number(row.estimated_loss_cny || 0);
+    if (!sku.image_url && row.image_url) sku.image_url = row.image_url;
+    if ((!sku.item_name || sku.item_name === "未命名商品") && row.item_name) sku.item_name = row.item_name;
+    const reason = row.reason_label || row.bucket_label || "其他";
+    sku.reasons.set(reason, Number(sku.reasons.get(reason) || 0) + Number(row.quantity || 0));
+  }
+  const skuRows = [...skus.values()].map((row) => {
+    const returnRate = row.sales_quantity > 0 ? row.return_quantity / row.sales_quantity : 0;
+    const topReason = [...row.reasons.entries()].sort((a, b) => b[1] - a[1])[0];
+    return {
+      shop_id: row.shop_id,
+      shop_name: row.shop_name,
+      sku: row.sku,
+      item_name: row.item_name,
+      image_url: row.image_url,
+      sales_quantity: row.sales_quantity,
+      return_orders: row.returnOrderIds.size,
+      return_quantity: row.return_quantity,
+      return_rate: Number(returnRate.toFixed(6)),
+      return_loss_cny: roundMoneyMysql(row.return_loss_cny),
+      primary_reason: topReason?.[0] || "-",
+      primary_reason_share: row.return_quantity > 0 ? Number(((topReason?.[1] || 0) / row.return_quantity).toFixed(6)) : 0,
+      sample_sufficient: row.sales_quantity >= 10 || row.return_quantity >= 3,
+      risk_level: (row.sales_quantity >= 10 || row.return_quantity >= 3) && returnRate >= 0.15 ? "high"
+        : (row.sales_quantity >= 10 || row.return_quantity >= 3) && returnRate >= 0.08 ? "medium" : "normal"
+    };
+  }).filter((row) => row.return_quantity > 0)
+    .sort((a, b) => Number(b.return_rate) - Number(a.return_rate) || Number(b.return_loss_cny) - Number(a.return_loss_cny));
+  const riskyByShop = new Map();
+  for (const row of skuRows) {
+    if (row.risk_level === "normal") continue;
+    const key = String(row.shop_id ?? "");
+    riskyByShop.set(key, Number(riskyByShop.get(key) || 0) + 1);
+  }
+  const shopRows = [...shops.values()].map((row) => ({
+    shop_id: row.shop_id,
+    shop_name: row.shop_name,
+    sales_quantity: row.sales_quantity,
+    return_orders: row.returnOrderIds.size,
+    return_quantity: row.return_quantity,
+    return_rate: row.sales_quantity > 0 ? Number((row.return_quantity / row.sales_quantity).toFixed(6)) : 0,
+    return_loss_cny: roundMoneyMysql(row.return_loss_cny),
+    loss_rate: row.sales_amount_cny > 0 ? Number((row.return_loss_cny / row.sales_amount_cny).toFixed(6)) : 0,
+    risky_sku_count: Number(riskyByShop.get(String(row.shop_id ?? "")) || 0)
+  })).sort((a, b) => Number(b.return_loss_cny) - Number(a.return_loss_cny));
+  return { shops: shopRows, skus: skuRows.slice(0, 100) };
+}
+
 export async function profitAftersalesMysql(query = {}) {
   ensureMysqlCutoverEnabled();
   const { rows, from, to, shopId } = await aftersaleBaseRowsMysql(query);
+  const salesRows = await aftersaleSalesBaseRowsMysql({ from, to, shopId });
   const qualityPrefixes = await orderQualityPrefixesMysql();
   const normalized = rows.map((row) => normalizeAftersaleRowMysql(row, qualityPrefixes)).filter(aftersaleRelevantMysql);
   const buckets = new Map(AFTERSALE_BUCKETS_MYSQL.map((bucket) => [bucket.key, {
@@ -20339,6 +22058,12 @@ export async function profitAftersalesMysql(query = {}) {
     acc.needs_review_count += Number(row.needs_review_count || 0);
     return acc;
   }, { order_count: 0, item_quantity: 0, sale_amount_cny: 0, estimated_loss_cny: 0, actual_loss_cny: 0, missing_cost_count: 0, missing_shipping_count: 0, needs_review_count: 0 });
+  const operational = buildAftersaleOperationalOverviewMysql(salesRows, normalized);
+  const returnQuantity = operational.shops.reduce((sum, row) => sum + Number(row.return_quantity || 0), 0);
+  const salesQuantity = operational.shops.reduce((sum, row) => sum + Number(row.sales_quantity || 0), 0);
+  const returnOrders = new Set(normalized
+    .filter((row) => !["pre_fulfillment_cancel", "platform_document_issue"].includes(String(row.bucket || "")))
+    .map((row) => Number(row.order_id))).size;
   return {
     from,
     to,
@@ -20350,6 +22075,19 @@ export async function profitAftersalesMysql(query = {}) {
       estimated_loss_cny: roundMoneyMysql(totals.estimated_loss_cny),
       actual_loss_cny: roundMoneyMysql(totals.actual_loss_cny)
     },
+    operational_totals: {
+      sales_quantity: salesQuantity,
+      return_orders: returnOrders,
+      return_quantity: returnQuantity,
+      return_rate: salesQuantity > 0 ? Number((returnQuantity / salesQuantity).toFixed(6)) : 0,
+      return_loss_cny: roundMoneyMysql(operational.shops.reduce((sum, row) => sum + Number(row.return_loss_cny || 0), 0)),
+      average_return_loss_cny: returnOrders > 0
+        ? roundMoneyMysql(operational.shops.reduce((sum, row) => sum + Number(row.return_loss_cny || 0), 0) / returnOrders)
+        : 0,
+      risky_sku_count: operational.skus.filter((row) => row.risk_level !== "normal").length
+    },
+    shop_overview: operational.shops,
+    sku_overview: operational.skus,
     missing_alert: {
       count: totals.missing_cost_count + totals.missing_shipping_count,
       cost_count: totals.missing_cost_count,
@@ -20518,6 +22256,9 @@ export async function profitRankingMysql(query = {}) {
         WHEN opi.order_item_id IS NOT NULL THEN COALESCE(opi.net_profit_cny, 0)
         ELSE COALESCE(NULLIF(oi.actual_profit, 0), oi.estimated_profit, 0)
       END ELSE -${nonEffectiveLoss} END), 0) AS profit,
+      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN
+        COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE 0 END), 0) AS accrued_profit,
+      COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN o.id END) AS accrued_order_count,
       COALESCE(SUM(COALESCE(opi.purchase_cost_cny, oi.frozen_purchase_cost * oi.quantity, 0)), 0) AS purchase_cost,
       COALESCE(SUM(COALESCE(opi.domestic_shipping_cny, oi.frozen_domestic_shipping * oi.quantity, 0)), 0) AS domestic_shipping_cost,
       COALESCE(SUM(COALESCE(opi.international_shipping_cny, oi.frozen_international_shipping * oi.quantity, 0)), 0) AS international_shipping_cost,
@@ -20631,6 +22372,8 @@ export async function profitRankingMysql(query = {}) {
       item_quantity: Number(row.item_quantity || row.quantity || 0),
       revenue: roundMoneyMysql(row.revenue),
       profit: roundMoneyMysql(row.profit),
+      accrued_profit: roundMoneyMysql(row.accrued_profit),
+      accrued_order_count: Number(row.accrued_order_count || 0),
       purchase_cost: roundMoneyMysql(row.purchase_cost),
       domestic_shipping_cost: roundMoneyMysql(row.domestic_shipping_cost),
       international_shipping_cost: roundMoneyMysql(row.international_shipping_cost),
@@ -20778,13 +22521,14 @@ function sumMonthlyBillingRowsMysql(rows = []) {
 function enrichMonthlyBillingShopRowMysql(row = {}) {
   const pendingProfit = Number(row.pending_profit || 0);
   const profit = Number(row.profit || 0);
+  const accruedProfit = Number(row.accrued_profit ?? 0);
   return {
     ...row,
-    accrued_profit: roundMoneyMysql(Number(row.accrued_profit || profit - pendingProfit)),
+    accrued_profit: roundMoneyMysql(accruedProfit),
     accrued_order_count: Number(row.accrued_order_count || 0),
     pending_profit: roundMoneyMysql(pendingProfit),
     pending_order_count: Number(row.pending_order_count || 0),
-    settlement_rate: profit ? (profit - pendingProfit) / profit : 0
+    settlement_rate: profit ? accruedProfit / profit : 0
   };
 }
 
@@ -20901,6 +22645,7 @@ function monthlyBillingOrderFilterMysql({ shopId = "", keyword = "", outcomeType
   if (normalizedOutcome === "delivered_signed") where.push(outcome.deliveredSigned);
   if (normalizedOutcome === "rejected_unclaimed") where.push(outcome.rejectedUnclaimed);
   if (normalizedOutcome === "after_delivery_return") where.push(outcome.afterDeliveryReturn);
+  if (normalizedOutcome === "returns") where.push(`(${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn})`);
   if (normalizedOutcome === "cancelled_pre_fulfillment") where.push(outcome.cancelledPreFulfillment);
   return { where, params };
 }
@@ -20916,7 +22661,9 @@ function monthlyBillingOrderSettlementHavingMysql(settlementState = "") {
 }
 
 async function monthlyBillingOrderRowsMysql(from = "", to = "", shopId = "", options = {}) {
-  const dateFilter = profitOrderedAtUtcRangeMysql("o", from, to);
+  const dateFilter = options.dateBasis === "status_changed"
+    ? profitTimestampUtcRangeMysql("o.last_status_changed_at", from, to)
+    : profitOrderedAtUtcRangeMysql("o", from, to);
   const extraFilter = monthlyBillingOrderFilterMysql({
     shopId,
     keyword: options.keyword || options.search,
@@ -20943,6 +22690,10 @@ async function monthlyBillingOrderRowsMysql(from = "", to = "", shopId = "", opt
       MAX(o.tracking_stage) AS tracking_stage,
       MAX(o.logistics_status) AS logistics_status,
       MAX(o.sync_state) AS sync_state,
+      MAX(o.cancel_reason_id) AS cancel_reason_id,
+      MAX(o.cancel_reason) AS cancel_reason,
+      MAX(o.cancel_initiator) AS cancel_initiator,
+      MAX(o.cancel_type) AS cancel_type,
       MAX(o.ordered_at) AS ordered_at,
       MAX(o.delivered_at) AS delivered_at,
       MAX(o.accrued_at) AS accrued_at,
@@ -20963,6 +22714,10 @@ async function monthlyBillingOrderRowsMysql(from = "", to = "", shopId = "", opt
       COUNT(oi.id) AS item_count,
       COALESCE(SUM(oi.quantity), 0) AS item_quantity,
       COALESCE(SUM(oi.sale_price * oi.quantity), 0) AS order_amount,
+      MAX(COALESCE(NULLIF(oi.ozon_image_url, ''), NULLIF(op.primary_image, ''), NULLIF(op.image_url, ''), NULLIF(p.image_url, ''))) AS image_url,
+      GROUP_CONCAT(DISTINCT NULLIF(oi.ozon_name, '') SEPARATOR '、') AS ozon_names,
+      GROUP_CONCAT(DISTINCT NULLIF(p.name, '') SEPARATOR '、') AS inventory_names,
+      GROUP_CONCAT(DISTINCT NULLIF(oi.ozon_sku, '') SEPARATOR '、') AS ozon_skus,
       SUM(CASE WHEN COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN 1 ELSE 0 END) AS accrued_items,
       COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS revenue,
       COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN COALESCE(oi.estimated_profit, 0) ELSE 0 END), 0) AS estimated_profit,
@@ -20987,6 +22742,12 @@ async function monthlyBillingOrderRowsMysql(from = "", to = "", shopId = "", opt
     JOIN order_items oi ON oi.order_id = o.id
     JOIN shops s ON s.id = o.shop_id
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
+    LEFT JOIN sku_mappings sm ON (
+      sm.id = oi.sku_mapping_id
+      OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku AND sm.active = 1)
+    )
+    LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku
+    LEFT JOIN products p ON p.id = COALESCE(sm.product_id, op.product_id)
     WHERE 1=1 ${dateFilter.whereSql} ${where.length ? `AND ${where.join(" AND ")}` : ""}
     GROUP BY o.id, o.shop_id
     ${settlementHaving ? `HAVING ${settlementHaving}` : ""}
@@ -20994,6 +22755,10 @@ async function monthlyBillingOrderRowsMysql(from = "", to = "", shopId = "", opt
     LIMIT ? OFFSET ?
   `, [...params, pageSize, offset]);
   return rows.map((row) => {
+    const cancellation = cancellationDisplay(row);
+    const outcomeReasonLabel = row.outcome_type === "rejected_unclaimed" && !cancellation.reason_original
+      ? "未同步到拒收/未取的具体原因"
+      : cancellation.reason_label;
     const settlement_state = monthlyBillingOrderSettlementMysql(row);
     const isTerminal = ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(String(row.outcome_type || ""));
     const componentCost = Number(row.purchase_cost || 0)
@@ -21017,6 +22782,14 @@ async function monthlyBillingOrderRowsMysql(from = "", to = "", shopId = "", opt
       tracking_stage: row.tracking_stage || "",
       logistics_status: row.logistics_status || "",
       sync_state: row.sync_state || "",
+      image_url: row.image_url || "",
+      product_name: row.ozon_names || "",
+      inventory_name: row.inventory_names || "",
+      ozon_skus: row.ozon_skus || "",
+      outcome_reason_label: outcomeReasonLabel,
+      outcome_reason_original: cancellation.reason_original,
+      outcome_reason_code: cancellation.reason_code,
+      outcome_initiator_label: cancellation.initiator_label,
       outcome_type: row.outcome_type || "active",
       settlement_state,
       ordered_at: mysqlDateTimeIso(row.ordered_at),
@@ -21047,7 +22820,9 @@ async function monthlyBillingOrderRowsMysql(from = "", to = "", shopId = "", opt
 }
 
 async function monthlyBillingOrderTotalMysql(from = "", to = "", shopId = "", options = {}) {
-  const dateFilter = profitOrderedAtUtcRangeMysql("o", from, to);
+  const dateFilter = options.dateBasis === "status_changed"
+    ? profitTimestampUtcRangeMysql("o.last_status_changed_at", from, to)
+    : profitOrderedAtUtcRangeMysql("o", from, to);
   const extraFilter = monthlyBillingOrderFilterMysql({
     shopId,
     keyword: options.keyword || options.search,
@@ -21105,6 +22880,7 @@ export async function monthlyBillingOrderDetailsMysql(query = {}) {
     keyword: query.keyword || query.search || "",
     outcomeType: query.outcomeType || query.outcome_type || "",
     settlementState: query.settlementState || query.settlement_state || "",
+    dateBasis: query.dateBasis || query.date_basis || "ordered_at",
     pageSize,
     offset: (page - 1) * pageSize
   };
@@ -21142,10 +22918,12 @@ export async function monthlyBillingDetailsMysql(query = {}) {
   const shops = await shopsMysql();
   const explicitRange = billingDateRangeMysql(query);
   if (explicitRange) {
-    const [ranking, pendingByShop, expenses] = await Promise.all([
+    const [ranking, pendingByShop, expenses, procurementInventory, aiUsage] = await Promise.all([
       profitRankingMysql({ dimension: "shop", from: explicitRange.from, to: explicitRange.to, shopId, page: 1, pageSize: 200, sortBy: "profit", sortOrder: "desc", fast: "1" }),
       monthlyBillingPendingByShopMysql(explicitRange.from, explicitRange.to, shopId),
-      monthlyBillingExpensesMysql(explicitRange.from, explicitRange.to, shopId)
+      monthlyBillingExpensesMysql(explicitRange.from, explicitRange.to, shopId),
+      monthlyProcurementInventorySummaryMysql(explicitRange.from, explicitRange.to),
+      billingAiUsageMysql(explicitRange.from, explicitRange.to)
     ]);
     const shopRows = (ranking.rows || []).map((row) => {
       const expense = expenses.byShop.get(String(row.shop_id)) || {};
@@ -21170,6 +22948,8 @@ export async function monthlyBillingDetailsMysql(query = {}) {
       summary,
       shops: shopRows,
       expenses: expenses.rows,
+      procurement_inventory: procurementInventory,
+      ai_usage: aiUsage,
       shared_expenses: { manual_expense: expenses.shared_manual_expense, salary_expense: expenses.shared_salary_expense },
       orders: []
     };
@@ -21190,11 +22970,13 @@ export async function monthlyBillingDetailsMysql(query = {}) {
 
   const monthRows = await Promise.all(monthRanges.map(async (range) => {
     const includeOrders = (query.includeOrders === "1" || query.include_orders === "1") && range.month_key === selectedMonthKey;
-    const [ranking, pendingByShop, expenses, orders] = await Promise.all([
+    const [ranking, pendingByShop, expenses, orders, procurementInventory, aiUsage] = await Promise.all([
       profitRankingMysql({ dimension: "shop", from: range.from, to: range.to, shopId, page: 1, pageSize: 200, sortBy: "profit", sortOrder: "desc", fast: "1" }),
       monthlyBillingPendingByShopMysql(range.from, range.to, shopId),
       monthlyBillingExpensesMysql(range.from, range.to, shopId),
-      includeOrders ? monthlyBillingOrderRowsMysql(range.from, range.to, shopId) : Promise.resolve([])
+      includeOrders ? monthlyBillingOrderRowsMysql(range.from, range.to, shopId) : Promise.resolve([]),
+      monthlyProcurementInventorySummaryMysql(range.from, range.to),
+      billingAiUsageMysql(range.from, range.to)
     ]);
     const shopRows = (ranking.rows || []).map((row) => {
       const expense = expenses.byShop.get(String(row.shop_id)) || {};
@@ -21219,6 +23001,8 @@ export async function monthlyBillingDetailsMysql(query = {}) {
       summary,
       shops: shopRows,
       expenses: expenses.rows,
+      procurement_inventory: procurementInventory,
+      ai_usage: aiUsage,
       shared_expenses: {
         manual_expense: expenses.shared_manual_expense,
         salary_expense: expenses.shared_salary_expense
@@ -21434,7 +23218,12 @@ export async function ozonFinanceSummaryMysql() {
       COUNT(*) AS rows,
       COUNT(DISTINCT posting_number) AS postings,
       COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS fees,
-      MAX(synced_at) AS last_synced_at
+      MAX(synced_at) AS last_synced_at,
+      MAX(operation_date) AS latest_operation_at,
+      DATEDIFF(
+        DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00')),
+        DATE(CONVERT_TZ(MAX(operation_date), '+00:00', '+08:00'))
+      ) AS operation_lag_days
     FROM ozon_finance_items
   `);
   const recent = await mysqlQuery(`
@@ -21449,7 +23238,14 @@ export async function ozonFinanceSummaryMysql() {
     ORDER BY operation_date DESC
     LIMIT 12
   `);
-  return { summary, recent };
+  return {
+    summary: {
+      ...summary,
+      operation_lag_days: Number(summary?.operation_lag_days || 0),
+      data_stale: Number(summary?.operation_lag_days || 0) > 3
+    },
+    recent
+  };
 }
 
 function emptyDashboardAdSummaryMysql(dateKey = "", reason = "no_data") {
@@ -21701,9 +23497,10 @@ async function dashboardAdSummaryMysql(fromDateKey, toDateKey = fromDateKey) {
 async function dashboardRecentCommerceMysql(dateKey, previousDateKey) {
   try {
     const dateFilter = profitOrderedAtUtcRangeMysql("o", previousDateKey, dateKey);
+    const returnEventDateFilter = profitTimestampUtcRangeMysql("o.last_status_changed_at", previousDateKey, dateKey);
     const outcome = buildOrderOutcomeSql("o", "mysql");
     const effectiveBusinessSale = `(${outcome.effectiveSale} AND NOT ${outcome.afterDeliveryReturn})`;
-    const rows = await mysqlQuery(`
+    const [rows, eventReturnRows] = await Promise.all([mysqlQuery(`
       SELECT
         ${chinaDateKeySqlMysql("o.ordered_at")} AS date_key,
         o.shop_id,
@@ -21741,9 +23538,27 @@ async function dashboardRecentCommerceMysql(dateKey, previousDateKey) {
       WHERE 1=1 ${dateFilter.whereSql}
       GROUP BY ${chinaDateKeySqlMysql("o.ordered_at")}, o.shop_id, s.name
       ORDER BY date_key DESC, effective_revenue DESC, order_count DESC
-    `, dateFilter.params);
+    `, dateFilter.params), mysqlQuery(`
+      SELECT
+        ${chinaDateKeySqlMysql("o.last_status_changed_at")} AS date_key,
+        o.shop_id,
+        COALESCE(s.name, CONCAT('店铺 ', o.shop_id)) AS shop_name,
+        COUNT(DISTINCT o.id) AS return_orders,
+        COALESCE(SUM(oi.quantity), 0) AS return_quantity,
+        COALESCE(SUM(oi.sale_price * oi.quantity), 0) AS return_revenue,
+        COALESCE(SUM(${returnLossTotalSqlMysql()}), 0) AS return_loss
+      FROM orders o
+      JOIN order_items oi ON oi.order_id = o.id
+      LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
+      LEFT JOIN shops s ON s.id = o.shop_id
+      WHERE (${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn})
+        ${returnEventDateFilter.whereSql}
+      GROUP BY ${chinaDateKeySqlMysql("o.last_status_changed_at")}, o.shop_id, s.name
+      ORDER BY date_key DESC, return_quantity DESC
+    `, returnEventDateFilter.params)]);
     const selectedDateRows = rows.filter((row) => String(row.date_key || "").slice(0, 10) === dateKey);
-    const shops = selectedDateRows.map((row) => ({
+    const selectedReturnRows = eventReturnRows.filter((row) => String(row.date_key || "").slice(0, 10) === dateKey);
+    const shopsById = new Map(selectedDateRows.map((row) => [Number(row.shop_id), {
       shop_id: row.shop_id,
       shop_name: row.shop_name || `店铺 ${row.shop_id}`,
       order_count: Number(row.order_count || 0),
@@ -21756,10 +23571,32 @@ async function dashboardRecentCommerceMysql(dateKey, previousDateKey) {
       cancelled_orders: Number(row.cancelled_orders || 0),
       cancelled_quantity: Number(row.cancelled_quantity || 0),
       cancelled_revenue: roundMoneyMysql(row.cancelled_revenue || 0),
-      return_orders: Number(row.return_orders || 0),
-      return_quantity: Number(row.return_quantity || 0),
-      return_revenue: roundMoneyMysql(row.return_revenue || 0)
-    }));
+      return_orders: 0,
+      return_quantity: 0,
+      return_revenue: 0
+    }]));
+    for (const row of selectedReturnRows) {
+      const shopId = Number(row.shop_id);
+      const shop = shopsById.get(shopId) || {
+        shop_id: row.shop_id,
+        shop_name: row.shop_name || `店铺 ${row.shop_id}`,
+        order_count: 0,
+        effective_orders: 0,
+        item_quantity: 0,
+        total_revenue: 0,
+        revenue: 0,
+        effective_revenue: 0,
+        pending_profit: 0,
+        cancelled_orders: 0,
+        cancelled_quantity: 0,
+        cancelled_revenue: 0
+      };
+      shop.return_orders = Number(row.return_orders || 0);
+      shop.return_quantity = Number(row.return_quantity || 0);
+      shop.return_revenue = roundMoneyMysql(row.return_revenue || 0);
+      shopsById.set(shopId, shop);
+    }
+    const shops = [...shopsById.values()];
     const summarize = (summaryRows) => normalizeProfitSummaryMysql(summaryRows.reduce((acc, row) => {
       for (const key of [
         "order_count", "effective_orders", "item_quantity", "total_revenue", "effective_revenue",
@@ -21771,9 +23608,27 @@ async function dashboardRecentCommerceMysql(dateKey, previousDateKey) {
       ]) acc[key] = Number(acc[key] || 0) + Number(row[key] || 0);
       return acc;
     }, {}));
+    const withEventReturns = (summary, eventRows) => {
+      const eventSummary = eventRows.reduce((acc, row) => {
+        for (const key of ["return_orders", "return_quantity", "return_revenue", "return_loss"]) {
+          acc[key] = Number(acc[key] || 0) + Number(row[key] || 0);
+        }
+        return acc;
+      }, {});
+      return {
+        ...summary,
+        return_orders: Number(eventSummary.return_orders || 0),
+        return_quantity: Number(eventSummary.return_quantity || 0),
+        return_revenue: roundMoneyMysql(eventSummary.return_revenue || 0),
+        return_loss: roundMoneyMysql(eventSummary.return_loss || 0)
+      };
+    };
     return {
-      today: summarize(selectedDateRows),
-      yesterday: summarize(rows.filter((row) => String(row.date_key || "").slice(0, 10) === previousDateKey)),
+      today: withEventReturns(summarize(selectedDateRows), selectedReturnRows),
+      yesterday: withEventReturns(
+        summarize(rows.filter((row) => String(row.date_key || "").slice(0, 10) === previousDateKey)),
+        eventReturnRows.filter((row) => String(row.date_key || "").slice(0, 10) === previousDateKey)
+      ),
       shops
     };
   } catch (error) {
@@ -22006,6 +23861,11 @@ async function dashboardAftersalesLossSummaryMysql(today) {
       from,
       to,
       total_estimated_loss_cny: roundMoneyMysql(payload.totals?.estimated_loss_cny || 0),
+      return_rate: Number(payload.operational_totals?.return_rate || 0),
+      return_orders: Number(payload.operational_totals?.return_orders || 0),
+      return_quantity: Number(payload.operational_totals?.return_quantity || 0),
+      return_loss_cny: roundMoneyMysql(payload.operational_totals?.return_loss_cny || 0),
+      shops: Array.isArray(payload.shop_overview) ? payload.shop_overview : [],
       rejected_unclaimed_loss_cny: amount("rejected_unclaimed"),
       unsuitable_wrong_damaged_loss_cny: amount("unsuitable_wrong_damaged"),
       quality_issue_loss_cny: amount("quality_issue")
@@ -22016,6 +23876,11 @@ async function dashboardAftersalesLossSummaryMysql(today) {
       from,
       to,
       total_estimated_loss_cny: null,
+      return_rate: null,
+      return_orders: null,
+      return_quantity: null,
+      return_loss_cny: null,
+      shops: [],
       rejected_unclaimed_loss_cny: null,
       unsuitable_wrong_damaged_loss_cny: null,
       quality_issue_loss_cny: null
@@ -22308,9 +24173,10 @@ async function buildDashboardPayloadMysql({ forceRefresh = false, dateKey = toda
     () => dashboardFbpInventoryValueMysql(),
     () => dashboardMonthShippingCostSummaryMysql(selectedDate),
     () => dashboardAftersalesLossSummaryMysql(selectedDate),
-    () => scheduledJobSummary()
+    () => scheduledJobSummary(),
+    () => dashboardAiUsageMysql(selectedDate)
   ], 3, (loadSection) => loadSection());
-  const [stock, procurement, recentCommerce, profitTrend, adToday, adYesterday, adMonth, fbpInventoryValue, monthShippingCost, aftersalesLoss, scheduledJobs] = dashboardSections;
+  const [stock, procurement, recentCommerce, profitTrend, adToday, adYesterday, adMonth, fbpInventoryValue, monthShippingCost, aftersalesLoss, scheduledJobs, aiUsage] = dashboardSections;
   const todayProfit = recentCommerce.today;
   const yesterdayProfit = recentCommerce.yesterday;
   const shopBreakdown = recentCommerce.shops;
@@ -22350,6 +24216,7 @@ async function buildDashboardPayloadMysql({ forceRefresh = false, dateKey = toda
         return_revenue: roundMoneyMysql(profitTrend?.month_return_revenue || 0)
       },
       aftersales_loss: aftersalesLoss,
+      ai_usage: aiUsage,
       scheduled_jobs: scheduledJobs
     },
     commerce: {
@@ -22922,8 +24789,9 @@ export async function ordersMysql() {
       GROUP_CONCAT(DISTINCT opi.profit_status) AS profit_statuses,
       GROUP_CONCAT(DISTINCT oi.ozon_sku) AS skus,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', oi.id) SEPARATOR '||') AS sku_order_item_ids,
-      GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', oi.quantity) SEPARATOR '||') AS sku_quantities,
-      GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', oi.sale_price, ':', oi.quantity) SEPARATOR '||') AS sku_prices,
+       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', oi.quantity) SEPARATOR '||') AS sku_quantities,
+       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', COALESCE(oi.frozen_logistics_rule_id, '')) SEPARATOR '||') AS sku_logistics_rule_ids,
+       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', oi.sale_price, ':', oi.quantity) SEPARATOR '||') AS sku_prices,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0)) SEPARATOR '||') AS sku_sale_amounts,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', COALESCE(oi.estimated_profit, opi.net_profit_cny, 0)) SEPARATOR '||') AS sku_estimated_profits,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', CASE
@@ -22980,9 +24848,53 @@ export async function ordersMysql() {
         )
       )) AS sku_stock_summaries,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', COALESCE(parent_component_stock.component_count, 0))) AS sku_component_counts,
-      GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', COALESCE(purchase_info.pending_incoming_quantity, 0))) AS sku_incoming_summaries,
+      GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', GREATEST(COALESCE(purchase_info.pending_incoming_quantity, 0), COALESCE(parent_component_stock.incoming_stock, 0)))) AS sku_incoming_summaries,
       GROUP_CONCAT(DISTINCT purchase_info.purchase_order_numbers) AS purchase_order_numbers,
       GROUP_CONCAT(DISTINCT purchase_info.purchase_tracking_numbers) AS purchase_tracking_numbers,
+      COALESCE(SUM(procurement_allocation.allocated_quantity), 0) AS procurement_allocated_quantity,
+      COALESCE(
+        MAX(procurement_allocation.latest_purchase_at),
+        MAX(CASE WHEN oipm.handling_type = 'procurement_request' THEN COALESCE(pr_source.created_at, oipm.created_at) END),
+        MAX(purchase_info.latest_incoming_purchase_at),
+        MAX(parent_component_stock.latest_purchase_at)
+      ) AS procurement_latest_purchase_at,
+      COALESCE(
+        MAX(procurement_allocation.in_transit_days),
+        MAX(CASE WHEN oipm.handling_type = 'procurement_request' THEN TIMESTAMPDIFF(DAY, COALESCE(pr_source.created_at, oipm.created_at), CURRENT_TIMESTAMP) END),
+        MAX(TIMESTAMPDIFF(DAY, purchase_info.latest_incoming_purchase_at, CURRENT_TIMESTAMP)),
+        MAX(TIMESTAMPDIFF(DAY, parent_component_stock.latest_purchase_at, CURRENT_TIMESTAMP))
+      ) AS procurement_in_transit_days,
+      GREATEST(
+        COALESCE(MAX(procurement_allocation.overdue), 0),
+        COALESCE(MAX(CASE
+          WHEN oipm.handling_type = 'procurement_request'
+            AND TIMESTAMPDIFF(HOUR, COALESCE(pr_source.created_at, oipm.created_at), CURRENT_TIMESTAMP) >= 72 THEN 1
+          ELSE 0
+        END), 0),
+        COALESCE(MAX(CASE
+          WHEN purchase_info.pending_incoming_quantity > 0
+            AND TIMESTAMPDIFF(HOUR, purchase_info.latest_incoming_purchase_at, CURRENT_TIMESTAMP) >= 72 THEN 1
+          ELSE 0
+        END), 0),
+        COALESCE(MAX(CASE
+          WHEN parent_component_stock.incoming_stock > 0
+            AND TIMESTAMPDIFF(HOUR, parent_component_stock.latest_purchase_at, CURRENT_TIMESTAMP) >= 72 THEN 1
+          ELSE 0
+        END), 0)
+      ) AS procurement_overdue,
+      MAX(CASE WHEN procurement_allocation.order_item_id IS NOT NULL THEN 1 ELSE 0 END) AS procurement_has_allocation,
+      MAX(CASE WHEN COALESCE(procurement_allocation.pending_incoming_quantity, 0) > 0 THEN 1 ELSE 0 END) AS procurement_has_order_incoming,
+      MAX(CASE WHEN COALESCE(purchase_info.pending_incoming_quantity, 0) > 0 OR parent_component_stock.inbound_record_ids IS NOT NULL THEN 1 ELSE 0 END) AS procurement_has_product_incoming,
+      MAX(GREATEST(COALESCE(purchase_info.pending_incoming_quantity, 0), COALESCE(parent_component_stock.component_incoming_quantity, 0))) AS procurement_product_incoming_quantity,
+      GROUP_CONCAT(DISTINCT procurement_allocation.pending_inbound_record_ids) AS procurement_inbound_record_ids,
+      COALESCE(MAX(procurement_allocation.person_name), MAX(NULLIF(pr_person.name, '')), MAX(NULLIF(pr_creator.name, '')), MAX(NULLIF(mark_creator.name, '')), '未记录') AS procurement_person_name,
+      MAX(procurement_allocation.purchase_order_no) AS procurement_purchase_order_no,
+      MAX(procurement_allocation.product_name) AS procurement_product_name,
+      COALESCE(MAX(procurement_allocation.pending_incoming_quantity), 0) AS procurement_inbound_quantity,
+      COALESCE(MAX(procurement_allocation.amount), 0) AS procurement_inbound_amount,
+      COALESCE(MAX(procurement_allocation.shipping_amount), 0) AS procurement_inbound_shipping_amount,
+      GROUP_CONCAT(DISTINCT procurement_allocation.request_ids) AS procurement_request_ids,
+      MIN(procurement_allocation.request_unallocated_quantity) AS procurement_request_unallocated_quantity,
       COUNT(DISTINCT oi.id) AS procurement_total_item_count,
       COUNT(DISTINCT CASE WHEN oipm.id IS NOT NULL OR pr_source.id IS NOT NULL THEN oi.id END) AS procurement_handled_item_count,
       GROUP_CONCAT(DISTINCT COALESCE(oipm.handling_type, CASE WHEN pr_source.id IS NOT NULL THEN 'procurement_request' END)) AS procurement_handling_types,
@@ -23043,7 +24955,19 @@ export async function ordersMysql() {
     LEFT JOIN (
       SELECT pc.product_id,
         COUNT(*) AS component_count,
-        MIN(FLOOR(COALESCE(stock.local_stock, 0) / NULLIF(pc.quantity, 0))) AS local_stock
+        MIN(FLOOR(COALESCE(stock.local_stock, 0) / NULLIF(pc.quantity, 0))) AS local_stock,
+        GREATEST(0,
+          MIN(FLOOR((COALESCE(stock.local_stock, 0) + COALESCE(incoming.incoming_stock, 0)) / NULLIF(pc.quantity, 0)))
+          - MIN(FLOOR(COALESCE(stock.local_stock, 0) / NULLIF(pc.quantity, 0)))
+        ) AS incoming_stock,
+        SUM(COALESCE(incoming.incoming_stock, 0)) AS component_incoming_quantity,
+        MAX(incoming.latest_purchase_at) AS latest_purchase_at,
+        GROUP_CONCAT(DISTINCT incoming.inbound_record_ids) AS inbound_record_ids,
+        MAX(incoming.person_name) AS person_name,
+        MAX(incoming.purchase_order_no) AS purchase_order_no,
+        MAX(incoming.product_name) AS product_name,
+        MAX(incoming.amount) AS amount,
+        MAX(incoming.shipping_amount) AS shipping_amount
       FROM product_components pc
       JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.active = 1
       LEFT JOIN (
@@ -23053,20 +24977,94 @@ export async function ordersMysql() {
           AND ${localStockLocationPredicateMysql()}
         GROUP BY product_id
       ) stock ON stock.product_id = pc.component_product_id
+      LEFT JOIN (
+        SELECT ir.product_id,
+          SUM(ir.quantity) AS incoming_stock,
+          MAX(COALESCE(po.purchased_at, ir.created_at)) AS latest_purchase_at,
+          GROUP_CONCAT(DISTINCT ir.id ORDER BY ir.id) AS inbound_record_ids,
+          MAX(COALESCE(NULLIF(pe.name, ''), NULLIF(creator.name, ''), '未记录')) AS person_name,
+          MAX(po.order_no) AS purchase_order_no,
+          MAX(product.name) AS product_name,
+          MAX(ir.amount) AS amount,
+          MAX(ir.shipping_amount) AS shipping_amount
+        FROM inbound_records ir
+        LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
+        LEFT JOIN people pe ON pe.id = ir.person_id
+        LEFT JOIN people creator ON creator.id = po.created_by_person_id
+        LEFT JOIN products product ON product.id = ir.product_id
+        WHERE ir.status = 'pending_arrival'
+        GROUP BY ir.product_id
+      ) incoming ON incoming.product_id = pc.component_product_id
       GROUP BY pc.product_id
     ) parent_component_stock ON parent_component_stock.product_id = p.id
     LEFT JOIN (
       SELECT ir.product_id,
         GROUP_CONCAT(DISTINCT po.order_no ORDER BY po.order_no SEPARATOR ',') AS purchase_order_numbers,
         GROUP_CONCAT(DISTINCT COALESCE(NULLIF(ir.note, ''), NULLIF(ir.purchase_url, ''), po.order_no) ORDER BY ir.id SEPARATOR ',') AS purchase_tracking_numbers,
-        SUM(CASE WHEN ir.status = 'pending_arrival' THEN ir.quantity ELSE 0 END) AS pending_incoming_quantity
+        SUM(CASE WHEN ir.status = 'pending_arrival' THEN ir.quantity ELSE 0 END) AS pending_incoming_quantity,
+        GROUP_CONCAT(DISTINCT CASE WHEN ir.status = 'pending_arrival' THEN ir.id END ORDER BY ir.id SEPARATOR ',') AS pending_inbound_record_ids,
+        MAX(CASE WHEN ir.status = 'pending_arrival' THEN COALESCE(NULLIF(pe.name, ''), NULLIF(creator.name, ''), '未记录') END) AS pending_person_name,
+        MAX(CASE WHEN ir.status = 'pending_arrival' THEN po.order_no END) AS pending_purchase_order_no,
+        MAX(CASE WHEN ir.status = 'pending_arrival' THEN product.name END) AS pending_product_name,
+        MAX(CASE WHEN ir.status = 'pending_arrival' THEN ir.quantity END) AS pending_quantity,
+        MAX(CASE WHEN ir.status = 'pending_arrival' THEN ir.amount END) AS pending_amount,
+        MAX(CASE WHEN ir.status = 'pending_arrival' THEN ir.shipping_amount END) AS pending_shipping_amount,
+        MAX(CASE WHEN ir.status = 'pending_arrival' THEN COALESCE(po.purchased_at, ir.created_at) END) AS latest_incoming_purchase_at
       FROM inbound_records ir
       LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
+      LEFT JOIN people pe ON pe.id = ir.person_id
+      LEFT JOIN people creator ON creator.id = po.created_by_person_id
+      LEFT JOIN products product ON product.id = ir.product_id
       WHERE ir.purchase_order_id IS NOT NULL
       GROUP BY ir.product_id
     ) purchase_info ON purchase_info.product_id = p.id
-    LEFT JOIN procurement_requests pr_source ON pr_source.source_order_item_id = oi.id AND pr_source.status NOT IN ('cancelled')
+    LEFT JOIN (
+      SELECT allocation.order_item_id,
+        SUM(allocation.allocated_quantity) AS allocated_quantity,
+        MAX(CASE WHEN allocation_inbound.id IS NOT NULL THEN allocation.allocated_quantity ELSE 0 END) AS pending_incoming_quantity,
+        GROUP_CONCAT(DISTINCT allocation_inbound.id ORDER BY allocation_inbound.id) AS pending_inbound_record_ids,
+        MAX(request.created_at) AS latest_purchase_at,
+        MAX(TIMESTAMPDIFF(DAY, request.created_at, CURRENT_TIMESTAMP)) AS in_transit_days,
+        MAX(request.quantity) AS purchase_quantity,
+        MAX(allocation_purchase.order_no) AS purchase_order_no,
+        MAX(allocation_product.name) AS product_name,
+        MAX(request.amount) AS amount,
+        MAX(request.shipping_amount) AS shipping_amount,
+        MAX(COALESCE(NULLIF(request_person.name, ''), NULLIF(request_creator.name, ''), '未记录')) AS person_name,
+        MAX(CASE
+          WHEN request.status NOT IN ('done', 'cancelled', 'inbound_done')
+            AND TIMESTAMPDIFF(HOUR, request.created_at, CURRENT_TIMESTAMP) >= 72 THEN 1
+          ELSE 0
+        END) AS overdue,
+        GROUP_CONCAT(DISTINCT request.id ORDER BY request.id) AS request_ids,
+        MIN(GREATEST(0, request.quantity - COALESCE(request_allocated.allocated_quantity, 0))) AS request_unallocated_quantity
+      FROM procurement_order_allocations allocation
+      JOIN procurement_requests request ON request.id = allocation.procurement_request_id
+        AND request.status != 'cancelled'
+      LEFT JOIN people request_person ON request_person.id = request.person_id
+      LEFT JOIN people request_creator ON request_creator.id = request.created_by_person_id
+      LEFT JOIN purchase_orders allocation_purchase ON allocation_purchase.id = request.purchase_order_id
+      LEFT JOIN products allocation_product ON allocation_product.id = request.product_id
+      LEFT JOIN inbound_records allocation_inbound ON allocation_inbound.purchase_order_id = request.purchase_order_id
+        AND allocation_inbound.product_id = request.product_id
+        AND allocation_inbound.status = 'pending_arrival'
+      LEFT JOIN (
+        SELECT active_allocation.procurement_request_id, SUM(active_allocation.allocated_quantity) AS allocated_quantity
+        FROM procurement_order_allocations active_allocation
+        JOIN orders allocated_order ON allocated_order.id = active_allocation.order_id
+        WHERE active_allocation.status = 'allocated'
+          AND LOWER(COALESCE(allocated_order.status, '')) NOT LIKE '%cancel%'
+          AND LOWER(COALESCE(allocated_order.tracking_stage, '')) NOT LIKE '%cancel%'
+        GROUP BY active_allocation.procurement_request_id
+      ) request_allocated ON request_allocated.procurement_request_id = request.id
+      WHERE allocation.status = 'allocated'
+      GROUP BY allocation.order_item_id
+    ) procurement_allocation ON procurement_allocation.order_item_id = oi.id
+    LEFT JOIN procurement_requests pr_source ON pr_source.source_order_item_id = oi.id AND pr_source.status NOT IN ('cancelled', 'pending', 'suggested')
     LEFT JOIN order_item_procurement_marks oipm ON oipm.order_item_id = oi.id AND oipm.status = 'handled'
+    LEFT JOIN people pr_person ON pr_person.id = pr_source.person_id
+    LEFT JOIN people pr_creator ON pr_creator.id = pr_source.created_by_person_id
+    LEFT JOIN people mark_creator ON mark_creator.id = oipm.created_by_person_id
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
     LEFT JOIN order_marks om ON om.order_id = o.id
     LEFT JOIN order_label_prints olp ON olp.order_id = o.id
@@ -23103,8 +25101,9 @@ async function orderRowsByIdsMysql(ids = []) {
       GROUP_CONCAT(DISTINCT opi.profit_status) AS profit_statuses,
       GROUP_CONCAT(DISTINCT oi.ozon_sku) AS skus,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', oi.id) SEPARATOR '||') AS sku_order_item_ids,
-      GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', oi.quantity) SEPARATOR '||') AS sku_quantities,
-      GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', oi.sale_price, ':', oi.quantity) SEPARATOR '||') AS sku_prices,
+       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', oi.quantity) SEPARATOR '||') AS sku_quantities,
+       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', COALESCE(oi.frozen_logistics_rule_id, '')) SEPARATOR '||') AS sku_logistics_rule_ids,
+       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', oi.sale_price, ':', oi.quantity) SEPARATOR '||') AS sku_prices,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0)) SEPARATOR '||') AS sku_sale_amounts,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', COALESCE(oi.estimated_profit, opi.net_profit_cny, 0)) SEPARATOR '||') AS sku_estimated_profits,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', CASE
@@ -23130,9 +25129,53 @@ async function orderRowsByIdsMysql(ids = []) {
       END) AS sku_inventory_modes,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', COALESCE(stock.fbs_present, 0), ':', COALESCE(stock.fbp_present, 0), ':', COALESCE(sku_recipe_stock.local_stock, parent_component_stock.local_stock, local_stock.local_stock, 0))) AS sku_stock_summaries,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', COALESCE(parent_component_stock.component_count, 0))) AS sku_component_counts,
-      GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', COALESCE(purchase_info.pending_incoming_quantity, 0))) AS sku_incoming_summaries,
+      GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', GREATEST(COALESCE(purchase_info.pending_incoming_quantity, 0), COALESCE(parent_component_stock.incoming_stock, 0)))) AS sku_incoming_summaries,
       GROUP_CONCAT(DISTINCT purchase_info.purchase_order_numbers) AS purchase_order_numbers,
       GROUP_CONCAT(DISTINCT purchase_info.purchase_tracking_numbers) AS purchase_tracking_numbers,
+      COALESCE(SUM(procurement_allocation.allocated_quantity), 0) AS procurement_allocated_quantity,
+      COALESCE(
+        MAX(procurement_allocation.latest_purchase_at),
+        MAX(CASE WHEN oipm.handling_type = 'procurement_request' THEN COALESCE(pr_source.created_at, oipm.created_at) END),
+        MAX(purchase_info.latest_incoming_purchase_at),
+        MAX(parent_component_stock.latest_purchase_at)
+      ) AS procurement_latest_purchase_at,
+      COALESCE(
+        MAX(procurement_allocation.in_transit_days),
+        MAX(CASE WHEN oipm.handling_type = 'procurement_request' THEN TIMESTAMPDIFF(DAY, COALESCE(pr_source.created_at, oipm.created_at), CURRENT_TIMESTAMP) END),
+        MAX(TIMESTAMPDIFF(DAY, purchase_info.latest_incoming_purchase_at, CURRENT_TIMESTAMP)),
+        MAX(TIMESTAMPDIFF(DAY, parent_component_stock.latest_purchase_at, CURRENT_TIMESTAMP))
+      ) AS procurement_in_transit_days,
+      GREATEST(
+        COALESCE(MAX(procurement_allocation.overdue), 0),
+        COALESCE(MAX(CASE
+          WHEN oipm.handling_type = 'procurement_request'
+            AND TIMESTAMPDIFF(HOUR, COALESCE(pr_source.created_at, oipm.created_at), CURRENT_TIMESTAMP) >= 72 THEN 1
+          ELSE 0
+        END), 0),
+        COALESCE(MAX(CASE
+          WHEN purchase_info.pending_incoming_quantity > 0
+            AND TIMESTAMPDIFF(HOUR, purchase_info.latest_incoming_purchase_at, CURRENT_TIMESTAMP) >= 72 THEN 1
+          ELSE 0
+        END), 0),
+        COALESCE(MAX(CASE
+          WHEN parent_component_stock.incoming_stock > 0
+            AND TIMESTAMPDIFF(HOUR, parent_component_stock.latest_purchase_at, CURRENT_TIMESTAMP) >= 72 THEN 1
+          ELSE 0
+        END), 0)
+      ) AS procurement_overdue,
+      MAX(CASE WHEN procurement_allocation.order_item_id IS NOT NULL THEN 1 ELSE 0 END) AS procurement_has_allocation,
+      MAX(CASE WHEN COALESCE(procurement_allocation.pending_incoming_quantity, 0) > 0 THEN 1 ELSE 0 END) AS procurement_has_order_incoming,
+      MAX(CASE WHEN COALESCE(purchase_info.pending_incoming_quantity, 0) > 0 OR parent_component_stock.inbound_record_ids IS NOT NULL THEN 1 ELSE 0 END) AS procurement_has_product_incoming,
+      MAX(GREATEST(COALESCE(purchase_info.pending_incoming_quantity, 0), COALESCE(parent_component_stock.component_incoming_quantity, 0))) AS procurement_product_incoming_quantity,
+      GROUP_CONCAT(DISTINCT procurement_allocation.pending_inbound_record_ids) AS procurement_inbound_record_ids,
+      COALESCE(MAX(procurement_allocation.person_name), MAX(NULLIF(pr_person.name, '')), MAX(NULLIF(pr_creator.name, '')), MAX(NULLIF(mark_creator.name, '')), '未记录') AS procurement_person_name,
+      MAX(procurement_allocation.purchase_order_no) AS procurement_purchase_order_no,
+      MAX(procurement_allocation.product_name) AS procurement_product_name,
+      COALESCE(MAX(procurement_allocation.pending_incoming_quantity), 0) AS procurement_inbound_quantity,
+      COALESCE(MAX(procurement_allocation.amount), 0) AS procurement_inbound_amount,
+      COALESCE(MAX(procurement_allocation.shipping_amount), 0) AS procurement_inbound_shipping_amount,
+      GROUP_CONCAT(DISTINCT procurement_allocation.request_ids) AS procurement_request_ids,
+      MIN(procurement_allocation.request_unallocated_quantity) AS procurement_request_unallocated_quantity,
       COUNT(DISTINCT oi.id) AS procurement_total_item_count,
       COUNT(DISTINCT CASE WHEN oipm.id IS NOT NULL OR pr_source.id IS NOT NULL THEN oi.id END) AS procurement_handled_item_count,
       GROUP_CONCAT(DISTINCT COALESCE(oipm.handling_type, CASE WHEN pr_source.id IS NOT NULL THEN 'procurement_request' END)) AS procurement_handling_types,
@@ -23207,7 +25250,19 @@ async function orderRowsByIdsMysql(ids = []) {
     LEFT JOIN (
       SELECT pc.product_id,
         COUNT(*) AS component_count,
-        MIN(FLOOR(COALESCE(stock.local_stock, 0) / NULLIF(pc.quantity, 0))) AS local_stock
+        MIN(FLOOR(COALESCE(stock.local_stock, 0) / NULLIF(pc.quantity, 0))) AS local_stock,
+        GREATEST(0,
+          MIN(FLOOR((COALESCE(stock.local_stock, 0) + COALESCE(incoming.incoming_stock, 0)) / NULLIF(pc.quantity, 0)))
+          - MIN(FLOOR(COALESCE(stock.local_stock, 0) / NULLIF(pc.quantity, 0)))
+        ) AS incoming_stock,
+        SUM(COALESCE(incoming.incoming_stock, 0)) AS component_incoming_quantity,
+        MAX(incoming.latest_purchase_at) AS latest_purchase_at,
+        GROUP_CONCAT(DISTINCT incoming.inbound_record_ids) AS inbound_record_ids,
+        MAX(incoming.person_name) AS person_name,
+        MAX(incoming.purchase_order_no) AS purchase_order_no,
+        MAX(incoming.product_name) AS product_name,
+        MAX(incoming.amount) AS amount,
+        MAX(incoming.shipping_amount) AS shipping_amount
       FROM product_components pc
       JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.active = 1
       LEFT JOIN (
@@ -23217,20 +25272,94 @@ async function orderRowsByIdsMysql(ids = []) {
           AND ${localStockLocationPredicateMysql()}
         GROUP BY product_id
       ) stock ON stock.product_id = pc.component_product_id
+      LEFT JOIN (
+        SELECT ir.product_id,
+          SUM(ir.quantity) AS incoming_stock,
+          MAX(COALESCE(po.purchased_at, ir.created_at)) AS latest_purchase_at,
+          GROUP_CONCAT(DISTINCT ir.id ORDER BY ir.id) AS inbound_record_ids,
+          MAX(COALESCE(NULLIF(pe.name, ''), NULLIF(creator.name, ''), '未记录')) AS person_name,
+          MAX(po.order_no) AS purchase_order_no,
+          MAX(product.name) AS product_name,
+          MAX(ir.amount) AS amount,
+          MAX(ir.shipping_amount) AS shipping_amount
+        FROM inbound_records ir
+        LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
+        LEFT JOIN people pe ON pe.id = ir.person_id
+        LEFT JOIN people creator ON creator.id = po.created_by_person_id
+        LEFT JOIN products product ON product.id = ir.product_id
+        WHERE ir.status = 'pending_arrival'
+        GROUP BY ir.product_id
+      ) incoming ON incoming.product_id = pc.component_product_id
       GROUP BY pc.product_id
     ) parent_component_stock ON parent_component_stock.product_id = p.id
     LEFT JOIN (
       SELECT ir.product_id,
         GROUP_CONCAT(DISTINCT po.order_no ORDER BY po.order_no SEPARATOR ',') AS purchase_order_numbers,
         GROUP_CONCAT(DISTINCT COALESCE(NULLIF(ir.note, ''), NULLIF(ir.purchase_url, ''), po.order_no) ORDER BY ir.id SEPARATOR ',') AS purchase_tracking_numbers,
-        SUM(CASE WHEN ir.status = 'pending_arrival' THEN ir.quantity ELSE 0 END) AS pending_incoming_quantity
+        SUM(CASE WHEN ir.status = 'pending_arrival' THEN ir.quantity ELSE 0 END) AS pending_incoming_quantity,
+        GROUP_CONCAT(DISTINCT CASE WHEN ir.status = 'pending_arrival' THEN ir.id END ORDER BY ir.id SEPARATOR ',') AS pending_inbound_record_ids,
+        MAX(CASE WHEN ir.status = 'pending_arrival' THEN COALESCE(NULLIF(pe.name, ''), NULLIF(creator.name, ''), '未记录') END) AS pending_person_name,
+        MAX(CASE WHEN ir.status = 'pending_arrival' THEN po.order_no END) AS pending_purchase_order_no,
+        MAX(CASE WHEN ir.status = 'pending_arrival' THEN product.name END) AS pending_product_name,
+        MAX(CASE WHEN ir.status = 'pending_arrival' THEN ir.quantity END) AS pending_quantity,
+        MAX(CASE WHEN ir.status = 'pending_arrival' THEN ir.amount END) AS pending_amount,
+        MAX(CASE WHEN ir.status = 'pending_arrival' THEN ir.shipping_amount END) AS pending_shipping_amount,
+        MAX(CASE WHEN ir.status = 'pending_arrival' THEN COALESCE(po.purchased_at, ir.created_at) END) AS latest_incoming_purchase_at
       FROM inbound_records ir
       LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
+      LEFT JOIN people pe ON pe.id = ir.person_id
+      LEFT JOIN people creator ON creator.id = po.created_by_person_id
+      LEFT JOIN products product ON product.id = ir.product_id
       WHERE ir.purchase_order_id IS NOT NULL
       GROUP BY ir.product_id
     ) purchase_info ON purchase_info.product_id = p.id
-    LEFT JOIN procurement_requests pr_source ON pr_source.source_order_item_id = oi.id AND pr_source.status NOT IN ('cancelled')
+    LEFT JOIN (
+      SELECT allocation.order_item_id,
+        SUM(allocation.allocated_quantity) AS allocated_quantity,
+        MAX(CASE WHEN allocation_inbound.id IS NOT NULL THEN allocation.allocated_quantity ELSE 0 END) AS pending_incoming_quantity,
+        GROUP_CONCAT(DISTINCT allocation_inbound.id ORDER BY allocation_inbound.id) AS pending_inbound_record_ids,
+        MAX(request.created_at) AS latest_purchase_at,
+        MAX(TIMESTAMPDIFF(DAY, request.created_at, CURRENT_TIMESTAMP)) AS in_transit_days,
+        MAX(request.quantity) AS purchase_quantity,
+        MAX(allocation_purchase.order_no) AS purchase_order_no,
+        MAX(allocation_product.name) AS product_name,
+        MAX(request.amount) AS amount,
+        MAX(request.shipping_amount) AS shipping_amount,
+        MAX(COALESCE(NULLIF(request_person.name, ''), NULLIF(request_creator.name, ''), '未记录')) AS person_name,
+        MAX(CASE
+          WHEN request.status NOT IN ('done', 'cancelled', 'inbound_done')
+            AND TIMESTAMPDIFF(HOUR, request.created_at, CURRENT_TIMESTAMP) >= 72 THEN 1
+          ELSE 0
+        END) AS overdue,
+        GROUP_CONCAT(DISTINCT request.id ORDER BY request.id) AS request_ids,
+        MIN(GREATEST(0, request.quantity - COALESCE(request_allocated.allocated_quantity, 0))) AS request_unallocated_quantity
+      FROM procurement_order_allocations allocation
+      JOIN procurement_requests request ON request.id = allocation.procurement_request_id
+        AND request.status != 'cancelled'
+      LEFT JOIN people request_person ON request_person.id = request.person_id
+      LEFT JOIN people request_creator ON request_creator.id = request.created_by_person_id
+      LEFT JOIN purchase_orders allocation_purchase ON allocation_purchase.id = request.purchase_order_id
+      LEFT JOIN products allocation_product ON allocation_product.id = request.product_id
+      LEFT JOIN inbound_records allocation_inbound ON allocation_inbound.purchase_order_id = request.purchase_order_id
+        AND allocation_inbound.product_id = request.product_id
+        AND allocation_inbound.status = 'pending_arrival'
+      LEFT JOIN (
+        SELECT active_allocation.procurement_request_id, SUM(active_allocation.allocated_quantity) AS allocated_quantity
+        FROM procurement_order_allocations active_allocation
+        JOIN orders allocated_order ON allocated_order.id = active_allocation.order_id
+        WHERE active_allocation.status = 'allocated'
+          AND LOWER(COALESCE(allocated_order.status, '')) NOT LIKE '%cancel%'
+          AND LOWER(COALESCE(allocated_order.tracking_stage, '')) NOT LIKE '%cancel%'
+        GROUP BY active_allocation.procurement_request_id
+      ) request_allocated ON request_allocated.procurement_request_id = request.id
+      WHERE allocation.status = 'allocated'
+      GROUP BY allocation.order_item_id
+    ) procurement_allocation ON procurement_allocation.order_item_id = oi.id
+    LEFT JOIN procurement_requests pr_source ON pr_source.source_order_item_id = oi.id AND pr_source.status NOT IN ('cancelled', 'pending', 'suggested')
     LEFT JOIN order_item_procurement_marks oipm ON oipm.order_item_id = oi.id AND oipm.status = 'handled'
+    LEFT JOIN people pr_person ON pr_person.id = pr_source.person_id
+    LEFT JOIN people pr_creator ON pr_creator.id = pr_source.created_by_person_id
+    LEFT JOIN people mark_creator ON mark_creator.id = oipm.created_by_person_id
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
     LEFT JOIN order_marks om ON om.order_id = o.id
     LEFT JOIN order_label_prints olp ON olp.order_id = o.id
@@ -23500,6 +25629,237 @@ function filterOrderIdsByLogisticsMethodMysql(rows = [], method) {
     .filter(Boolean);
 }
 
+async function dashboardAiUsageMysql(dateKey) {
+  const unitCost = 0.038;
+  const [usage, usageEventRows, legacyRows] = await Promise.all([
+    getAiImageUsageOverview(dateKey),
+    mysqlQuery(`
+      SELECT COALESCE(p.name, CONCAT('用户 ', e.person_id), '未识别用户') AS person_name,
+             e.person_id,
+             SUM(CASE WHEN e.operation = 'submit' THEN e.requested_count ELSE 0 END) AS request_count,
+             SUM(CASE WHEN e.operation = 'submit' AND e.status = 'success' THEN e.requested_count ELSE 0 END) AS generated_count,
+             SUM(CASE WHEN e.operation = 'submit' AND e.status IN ('failed', 'pending') THEN e.requested_count ELSE 0 END) AS unresolved_count,
+             COUNT(DISTINCT e.job_no) AS task_count
+      FROM ai_image_usage_events e
+      LEFT JOIN people p ON p.id = e.person_id
+      WHERE DATE(CONVERT_TZ(e.started_at, '+00:00', '+08:00')) = ?
+      GROUP BY e.person_id, p.name
+      ORDER BY request_count DESC
+    `, [dateKey]).catch(() => []),
+    mysqlQuery(`
+      SELECT COALESCE(p.name, CONCAT('用户 ', j.created_by_person_id), '未识别用户') AS person_name,
+             j.created_by_person_id AS person_id,
+             COUNT(*) AS request_count,
+             COUNT(*) AS generated_count,
+             0 AS unresolved_count,
+             COUNT(DISTINCT j.job_no) AS task_count
+      FROM ai_variant_lab_batch_items i
+      JOIN ai_variant_lab_batch_jobs j ON j.job_no = i.job_no
+      LEFT JOIN people p ON p.id = j.created_by_person_id
+      WHERE i.status = 'image_done'
+        AND DATE(CONVERT_TZ(i.updated_at, '+00:00', '+08:00')) = ?
+      GROUP BY j.created_by_person_id, p.name
+      ORDER BY generated_count DESC
+    `, [dateKey]).catch(() => [])
+  ]);
+  const eventRequestCount = usageEventRows.reduce((sum, row) => sum + Number(row.request_count || 0), 0);
+  const peopleRows = eventRequestCount > 0 ? usageEventRows : legacyRows;
+  const totalRequests = peopleRows.reduce((sum, row) => sum + Number(row.request_count || 0), 0);
+  const totalGenerated = peopleRows.reduce((sum, row) => sum + Number(row.generated_count || 0), 0);
+  return {
+    ...usage,
+    cost: Number((totalRequests * unitCost).toFixed(3)),
+    request_count: totalRequests,
+    generated_count: totalGenerated,
+    cost_pending: false,
+    unit_cost: unitCost,
+    cost_source: "ERP 本地调用次数 × 0.038 RMB",
+    count_basis: eventRequestCount > 0 ? "调用流水" : "历史完成结果（流水启用前）",
+    task_count: peopleRows.reduce((sum, row) => sum + Number(row.task_count || 0), 0),
+    allocation_method: "按实际调用次数计费，成功和失败均计费",
+    people: peopleRows.map((row) => ({
+      person_id: Number(row.person_id || 0) || null,
+      person_name: row.person_name,
+      generated_count: Number(row.generated_count || 0),
+      request_count: Number(row.request_count || 0),
+      unresolved_count: Number(row.unresolved_count || 0),
+      task_count: Number(row.task_count || 0),
+      allocated_cost: Number((Number(row.request_count || 0) * unitCost).toFixed(3))
+    }))
+  };
+}
+
+async function billingAiUsageMysql(from, to) {
+  const unitCost = 0.038;
+  const [eventRows, legacyRows] = await Promise.all([mysqlQuery(`
+    SELECT COALESCE(p.name, CONCAT('用户 ', e.person_id), '未识别用户') AS person_name,
+           e.person_id,
+           SUM(e.requested_count) AS request_count,
+           SUM(CASE WHEN e.status = 'success' THEN e.requested_count ELSE 0 END) AS generated_count,
+           SUM(CASE WHEN e.status IN ('failed', 'pending', 'started') THEN e.requested_count ELSE 0 END) AS unresolved_count,
+           COUNT(DISTINCT e.job_no) AS task_count
+    FROM ai_image_usage_events e
+    LEFT JOIN people p ON p.id = e.person_id
+    WHERE DATE(CONVERT_TZ(e.started_at, '+00:00', '+08:00')) BETWEEN ? AND ?
+      AND e.operation = 'submit'
+    GROUP BY e.person_id, p.name
+    ORDER BY request_count DESC
+  `, [from, to]).catch(() => []), mysqlQuery(`
+    SELECT COALESCE(p.name, CONCAT('用户 ', j.created_by_person_id), '未识别用户') AS person_name,
+           j.created_by_person_id AS person_id,
+           COUNT(*) AS request_count,
+           COUNT(*) AS generated_count,
+           0 AS unresolved_count,
+           COUNT(DISTINCT i.job_no) AS task_count
+    FROM ai_variant_lab_batch_items i
+    JOIN ai_variant_lab_batch_jobs j ON j.job_no = i.job_no
+    LEFT JOIN people p ON p.id = j.created_by_person_id
+    WHERE DATE(CONVERT_TZ(i.updated_at, '+00:00', '+08:00')) BETWEEN ? AND ?
+      AND i.status = 'image_done'
+      AND NOT EXISTS (
+        SELECT 1 FROM ai_image_usage_events e
+        WHERE e.item_no = i.item_no AND e.operation = 'submit'
+      )
+    GROUP BY j.created_by_person_id, p.name
+  `, [from, to]).catch(() => [])]);
+  const peopleMap = new Map();
+  for (const row of [...eventRows, ...legacyRows]) {
+    const key = String(row.person_id || 0);
+    const current = peopleMap.get(key) || {
+      person_id: Number(row.person_id || 0) || null,
+      person_name: row.person_name,
+      request_count: 0,
+      generated_count: 0,
+      unresolved_count: 0,
+      task_count: 0
+    };
+    current.request_count += Number(row.request_count || 0);
+    current.generated_count += Number(row.generated_count || 0);
+    current.unresolved_count += Number(row.unresolved_count || 0);
+    current.task_count += Number(row.task_count || 0);
+    peopleMap.set(key, current);
+  }
+  const peopleRows = [...peopleMap.values()].sort((a, b) => b.request_count - a.request_count);
+  const requestCount = peopleRows.reduce((sum, row) => sum + Number(row.request_count || 0), 0);
+  return {
+    from,
+    to,
+    unit: "RMB",
+    unit_cost: unitCost,
+    request_count: requestCount,
+    generated_count: peopleRows.reduce((sum, row) => sum + Number(row.generated_count || 0), 0),
+    unresolved_count: peopleRows.reduce((sum, row) => sum + Number(row.unresolved_count || 0), 0),
+    task_count: peopleRows.reduce((sum, row) => sum + Number(row.task_count || 0), 0),
+    cost: Number((requestCount * unitCost).toFixed(3)),
+    cost_source: "ERP 本地调用次数 × 0.038 RMB",
+    count_basis: legacyRows.length ? "调用流水 + 流水启用前成功结果" : "调用流水",
+    people: peopleRows.map((row) => ({
+      person_id: Number(row.person_id || 0) || null,
+      person_name: row.person_name,
+      request_count: Number(row.request_count || 0),
+      generated_count: Number(row.generated_count || 0),
+      unresolved_count: Number(row.unresolved_count || 0),
+      task_count: Number(row.task_count || 0),
+      cost: Number((Number(row.request_count || 0) * unitCost).toFixed(3))
+    }))
+  };
+}
+
+async function monthlyProcurementInventorySummaryMysql(from = "", to = "") {
+  await ensureStockLocationSchemaMysql();
+  const periodStartUtc = `${from} 00:00:00`;
+  const periodEndUtc = `${to} 23:59:59`;
+  const [purchase, inbound, localInventory, fbpInventory, inTransit] = await Promise.all([
+    mysqlQueryOne(`
+      SELECT
+        COUNT(DISTINCT po.id) AS purchase_order_count,
+        COALESCE(SUM(poi.actual_quantity), 0) AS purchase_quantity,
+        COALESCE(SUM(poi.amount), 0) AS goods_amount,
+        COALESCE(SUM(poi.shipping_amount), 0) AS shipping_amount
+      FROM purchase_orders po
+      JOIN purchase_order_items poi ON poi.purchase_order_id = po.id
+      WHERE po.status IN ('purchased', 'partial_inbound', 'inbound_done')
+        AND po.purchased_at >= CONVERT_TZ(?, '+08:00', '+00:00')
+        AND po.purchased_at <= CONVERT_TZ(?, '+08:00', '+00:00')
+        AND poi.status != 'cancelled'
+    `, [periodStartUtc, periodEndUtc]),
+    mysqlQueryOne(`
+      SELECT
+        COALESCE(SUM(quantity), 0) AS inbound_quantity,
+        COALESCE(SUM(amount + shipping_amount), 0) AS inbound_amount
+      FROM inbound_records
+      WHERE status = 'approved'
+        AND approved_at >= CONVERT_TZ(?, '+08:00', '+00:00')
+        AND approved_at <= CONVERT_TZ(?, '+08:00', '+00:00')
+    `, [periodStartUtc, periodEndUtc]),
+    mysqlQueryOne(`
+      SELECT
+        COALESCE(SUM(stock.quantity * COALESCE(NULLIF(latest_cost.landed_unit_cost, 0), p.purchase_cost, 0)), 0) AS inventory_value,
+        COALESCE(SUM(stock.quantity), 0) AS inventory_quantity
+      FROM (
+        SELECT im.product_id, GREATEST(SUM(im.quantity_delta), 0) AS quantity
+        FROM inventory_movements im
+        WHERE im.status = 'posted' AND ${localStockLocationPredicateMysql("im")}
+        GROUP BY im.product_id
+      ) stock
+      JOIN products p ON p.id = stock.product_id
+      LEFT JOIN purchase_cost_versions latest_cost ON latest_cost.id = (
+        SELECT pcv.id
+        FROM purchase_cost_versions pcv
+        WHERE pcv.product_id = stock.product_id AND pcv.status = 'active'
+        ORDER BY pcv.version_no DESC, pcv.id DESC
+        LIMIT 1
+      )
+    `),
+    mysqlQueryOne(`
+      SELECT
+        COALESCE(SUM(GREATEST(COALESCE(oss.present, 0), 0) * COALESCE(NULLIF(latest_cost.landed_unit_cost, 0), p.purchase_cost, 0)), 0) AS inventory_value,
+        COALESCE(SUM(GREATEST(COALESCE(oss.present, 0), 0)), 0) AS inventory_quantity
+      FROM ozon_stock_snapshots oss
+      LEFT JOIN sku_mappings sm ON sm.shop_id = oss.shop_id AND sm.ozon_sku = oss.ozon_sku AND sm.active = 1
+      LEFT JOIN products p ON p.id = COALESCE(oss.product_id, sm.product_id)
+      LEFT JOIN purchase_cost_versions latest_cost ON latest_cost.id = (
+        SELECT pcv.id
+        FROM purchase_cost_versions pcv
+        WHERE pcv.product_id = p.id AND pcv.status = 'active'
+        ORDER BY pcv.version_no DESC, pcv.id DESC
+        LIMIT 1
+      )
+      WHERE oss.stock_type = 'fbp_real'
+    `),
+    mysqlQueryOne(`
+      SELECT
+        COALESCE(SUM(quantity), 0) AS inventory_quantity,
+        COALESCE(SUM(amount + shipping_amount), 0) AS inventory_value
+      FROM inbound_records
+      WHERE status = 'pending_arrival'
+    `)
+  ]);
+  const goodsAmount = Number(purchase?.goods_amount || 0);
+  const shippingAmount = Number(purchase?.shipping_amount || 0);
+  const localValue = Number(localInventory?.inventory_value || 0);
+  const fbpValue = Number(fbpInventory?.inventory_value || 0);
+  const inTransitValue = Number(inTransit?.inventory_value || 0);
+  return {
+    period_basis: "purchased_at",
+    snapshot_basis: "current",
+    purchase_order_count: Number(purchase?.purchase_order_count || 0),
+    purchase_quantity: Number(purchase?.purchase_quantity || 0),
+    purchase_goods_amount: roundMoneyMysql(goodsAmount),
+    purchase_shipping_amount: roundMoneyMysql(shippingAmount),
+    purchase_total_amount: roundMoneyMysql(goodsAmount + shippingAmount),
+    inbound_quantity: Number(inbound?.inbound_quantity || 0),
+    inbound_amount: roundMoneyMysql(inbound?.inbound_amount || 0),
+    local_inventory_quantity: Number(localInventory?.inventory_quantity || 0),
+    local_inventory_value: roundMoneyMysql(localValue),
+    fbp_inventory_quantity: Number(fbpInventory?.inventory_quantity || 0),
+    fbp_inventory_value: roundMoneyMysql(fbpValue),
+    in_transit_quantity: Number(inTransit?.inventory_quantity || 0),
+    in_transit_value: roundMoneyMysql(inTransitValue),
+    inventory_total_value: roundMoneyMysql(localValue + fbpValue + inTransitValue)
+  };
+}
+
 function orderLogisticsCarrierMysql(row = {}) {
   const explicitCarrier = String(row.logistics_carrier || "").trim().toLowerCase();
   if (explicitCarrier) return explicitCarrier;
@@ -23743,13 +26103,6 @@ function orderStatusSqlMysql(status) {
                 AND bound_recipe.active = 1
             )
           )
-          AND COALESCE((
-            SELECT SUM(purchase_fbp.present)
-            FROM ozon_stock_snapshots purchase_fbp
-            WHERE purchase_fbp.shop_id = o.shop_id
-              AND purchase_fbp.ozon_sku = purchase_oi.ozon_sku
-              AND purchase_fbp.stock_type = 'fbp_real'
-          ), 0) < GREATEST(1, purchase_oi.quantity)
           AND NOT EXISTS (
             SELECT 1
             FROM sku_inventory_recipes purchase_recipe
@@ -23781,9 +26134,15 @@ function orderStatusSqlMysql(status) {
                 AND COALESCE(NULLIF(component_stock.stock_location, ''), 'LOCAL') != 'FBP'
               GROUP BY component_stock.product_id
             ) purchase_component_stock ON purchase_component_stock.product_id = purchase_component.component_product_id
+            LEFT JOIN (
+              SELECT component_incoming.product_id, SUM(component_incoming.quantity) AS incoming_stock
+              FROM inbound_records component_incoming
+              WHERE component_incoming.status = 'pending_arrival'
+              GROUP BY component_incoming.product_id
+            ) purchase_component_incoming ON purchase_component_incoming.product_id = purchase_component.component_product_id
             WHERE purchase_component.product_id = purchase_p.id
             GROUP BY purchase_component.product_id
-            HAVING MIN(FLOOR(COALESCE(purchase_component_stock.local_stock, 0) / NULLIF(purchase_component.quantity, 0)))
+            HAVING MIN(FLOOR((COALESCE(purchase_component_stock.local_stock, 0) + COALESCE(purchase_component_incoming.incoming_stock, 0)) / NULLIF(purchase_component.quantity, 0)))
               >= GREATEST(1, purchase_oi.quantity)
           )
           AND (
@@ -24984,6 +27343,13 @@ async function ensureCustomerMessageTablesMysql() {
     "Здравствуйте!\n\nВаш заказ №{{posting_number}} уже прибыл в пункт выдачи.\n\nВ заказе: {{product_summary}}.\n\nПожалуйста, заберите заказ до окончания срока хранения. Для получения может понадобиться паспорт или код получения — актуальная информация указана в приложении Ozon.\n\nСпасибо, что выбрали {{shop_name}}!"
   ]);
   await mysqlExecute(`UPDATE customer_message_templates
+    SET template_text=?, template_translation=?
+    WHERE scenario='pickup_notice' AND template_text=?`, [
+    defaultCustomerMessageTemplatesMysql().find((item) => item.scenario === "pickup_notice")?.template_text || "",
+    defaultCustomerMessageTemplatesMysql().find((item) => item.scenario === "pickup_notice")?.template_translation || "",
+    "Здравствуйте!\n\nПо данным Ozon, заказ №{{posting_number}} прибыл в пункт выдачи.\n\nВ заказе: {{product_summary}}.\n\nПожалуйста, проверьте актуальный статус в приложении Ozon и заберите заказ до окончания срока хранения. Данные о доставке иногда обновляются с задержкой. Если вы уже получили этот заказ, пожалуйста, не обращайте внимания на это сообщение. Это напоминание относится только к указанному заказу; другого отправления или подарка нет.\n\nДля получения может понадобиться паспорт или код получения.\n\nСпасибо, что выбрали {{shop_name}}!"
+  ]);
+  await mysqlExecute(`UPDATE customer_message_templates
     SET trigger_condition = CASE scenario
         WHEN 'pickup_notice' THEN 'pickup_ready'
         WHEN 'review_request' THEN 'delivered'
@@ -25335,8 +27701,8 @@ function defaultCustomerMessageTemplatesMysql() {
       enabled: false,
       trigger_condition: "pickup_ready",
       delay_hours: 1,
-      template_text: "Здравствуйте!\n\nПо данным Ozon, заказ №{{posting_number}} прибыл в пункт выдачи.\n\nВ заказе: {{product_summary}}.\n\nПожалуйста, проверьте актуальный статус в приложении Ozon и заберите заказ до окончания срока хранения. Данные о доставке иногда обновляются с задержкой. Если вы уже получили этот заказ, пожалуйста, не обращайте внимания на это сообщение. Это напоминание относится только к указанному заказу; другого отправления или подарка нет.\n\nДля получения может понадобиться паспорт или код получения.\n\nСпасибо, что выбрали {{shop_name}}!",
-      template_translation: "您好！\n\n根据 Ozon 当前信息，您的订单 №{{posting_number}} 已到达取货点。\n\n订单商品：{{product_summary}}。\n\n请在 Ozon 应用中查看最新状态，并在保管期限结束前领取。物流信息偶尔会延迟更新；如果您已经领取了这个订单，请忽略本消息。本提醒仅针对上述订单，没有另一个包裹或赠品。\n\n取货时可能需要护照或取件码。\n\n感谢您选择 {{shop_name}}！"
+      template_text: "Здравствуйте!\n\nПо данным Ozon, заказ №{{posting_number}} прибыл в пункт выдачи.\n\nВ заказе: {{product_summary}}.\n\nПожалуйста, проверьте актуальный статус в приложении Ozon и заберите заказ до окончания срока хранения. Данные о доставке иногда обновляются с задержкой. Если вы уже получили этот заказ, пожалуйста, не обращайте внимания на это сообщение. Состав заказа указан выше и в приложении Ozon.\n\nДля получения может понадобиться паспорт или код получения.\n\nСпасибо, что выбрали {{shop_name}}!",
+      template_translation: "您好！\n\n根据 Ozon 当前信息，您的订单 №{{posting_number}} 已到达取货点。\n\n订单商品：{{product_summary}}。\n\n请在 Ozon 应用中查看最新状态，并在保管期限结束前领取。物流信息偶尔会延迟更新；如果您已经领取了这个订单，请忽略本消息。订单内容请以上方信息及 Ozon 应用中的商品清单为准。\n\n取货时可能需要护照或取件码。\n\n感谢您选择 {{shop_name}}！"
     },
     {
       scenario: "review_request",
