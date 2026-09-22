@@ -61,6 +61,7 @@ const COLOR_ATTRIBUTE_EXCLUDED_NAME_KEYWORDS = [
 const attributeValueLoading = reactive({});
 const attributeValueLoadTried = reactive({});
 const attributeValueCache = reactive({});
+const flatSkuAttributeOptionsCache = new Map();
 const recordDraftApplied = ref(false);
 const templateKeyword = ref("");
 const selectedVariantRows = ref([]);
@@ -1704,6 +1705,7 @@ function updateVariantAttributeSelectValue(row = {}, field = {}, value) {
     row.color_values = normalizeColorValuesForField(normalizedValue, field);
     row.color = normalizeColorForPayload(row);
   }
+  flatSkuAttributeOptionsCache.delete(flatSkuAttributeOptionsCacheKey(row, field));
 }
 
 function attributeOptionModelValue(option = {}) {
@@ -1826,6 +1828,9 @@ function updateRichEditorVisible(visible) {
 }
 
 function flatSkuAttributeOptions(row = {}, field = {}) {
+  const cacheKey = flatSkuAttributeOptionsCacheKey(row, field);
+  const cached = flatSkuAttributeOptionsCache.get(cacheKey);
+  if (cached) return cached;
   const dictionaryOptions = attributeValueLoading[attributeFieldKey(field)]
     ? selectedAttributeOptions(field)
     : renderedAttributeOptions(field);
@@ -1837,10 +1842,25 @@ function flatSkuAttributeOptions(row = {}, field = {}) {
     .filter(Boolean)
     .filter((option) => !isColorAttributeField(field) || isUsableColorOption(option, field))
     .filter((option) => !dictionaryOptions.includes(option));
-  return dedupeAttributeOptions([
+  const options = dedupeAttributeOptions([
     ...dictionaryOptions.filter((option) => !isColorAttributeField(field) || isUsableColorOption(option, field)),
     ...currentValues
   ]);
+  flatSkuAttributeOptionsCache.set(cacheKey, options);
+  return options;
+}
+
+function flatSkuAttributeOptionsCacheKey(row = {}, field = {}) {
+  const rowKey = row.id || row.draft_id || row.source_sku || row.sku || "row";
+  const value = getVariantAttributeValue(row, field);
+  return `${rowKey}:${attributeFieldKey(field)}:${JSON.stringify(value)}`;
+}
+
+function clearFlatSkuAttributeOptionsCache(field = {}) {
+  const suffix = `:${attributeFieldKey(field)}:`;
+  for (const key of flatSkuAttributeOptionsCache.keys()) {
+    if (key.includes(suffix)) flatSkuAttributeOptionsCache.delete(key);
+  }
 }
 
 function attributeCellKey(row = {}, field = {}) {
@@ -2695,6 +2715,7 @@ async function ensureAttributeValuesLoaded(field = {}, visible = true) {
   const cacheKey = attributeValueCacheKey(field);
   if (Array.isArray(attributeValueCache[cacheKey])) {
     if (attributeValueCache[cacheKey].length) field.values = mergeAttributeOptions(field.values || [], attributeValueCache[cacheKey]);
+    clearFlatSkuAttributeOptionsCache(field);
     if (attributeValueCache[cacheKey].length) return;
   }
   if (attributeValueLoading[key]) return;
@@ -2710,6 +2731,7 @@ async function ensureAttributeValuesLoaded(field = {}, visible = true) {
     if (colorField) params.set("cache_hint", "color");
     const values = await apiClient.get(`/api/listing/ozon-attribute-values?${params.toString()}`, { noCache: true });
     attributeValueCache[cacheKey] = Array.isArray(values) ? values : [];
+    clearFlatSkuAttributeOptionsCache(field);
     if (Array.isArray(values) && values.length) field.values = mergeAttributeOptions(field.values || [], values);
   } catch (error) {
     delete attributeValueLoadTried[cacheKey];
