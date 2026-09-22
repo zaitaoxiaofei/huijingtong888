@@ -208,9 +208,10 @@ test('order procurement endpoints reject FBP before changing purchase records', 
   const source = readFileSync(new URL('../src/services/mysql-cutover.js', import.meta.url), 'utf8');
   for (const name of ['previewOrderProcurementMysql', 'createOrderProcurementRequestsMysql']) {
     const block = source.match(new RegExp(`async function ${name}\\([^]*?\\n}`))[0];
-    const fn = vm.runInNewContext(`${block};${name}`, {
+    const stockCheck = source.match(/async function orderUsesFbpStockMysql\([^]*?\n}/)[0];
+    const fn = vm.runInNewContext(`${stockCheck};${block};${name}`, {
       ensureMysqlCutoverEnabled() {},
-      orderProcurementCoverageMysql: async () => new Map([[1, { stock_location: 'FBP' }]])
+      mysqlQueryOne: async () => ({ stock_location: 'FBP' })
     });
     await assert.rejects(fn(1), /官方仓库存直接履约/);
   }

@@ -412,10 +412,17 @@ let backgroundOzonStockSyncRunning = false;
 let backgroundOzonCategorySyncRunning = false;
 let backgroundCustomerMessageRunning = false;
 const backgroundModuleLanes = new Map();
+// Leave room for interactive queries; order sync and customer dispatch retain
+// their dedicated lanes instead of waiting behind finance/analytics backfills.
+const BACKGROUND_NON_ORDER_MAX_CONCURRENT = Math.max(1, Math.floor(Number(process.env.BACKGROUND_NON_ORDER_MAX_CONCURRENT) || 1));
 
 function claimBackgroundModuleLane(moduleKey, jobKey) {
   const runningJob = backgroundModuleLanes.get(moduleKey) || "";
   if (runningJob) return runningJob;
+  if (!["orders", "customer_messages"].includes(moduleKey)) {
+    const heavyLanes = [...backgroundModuleLanes.keys()].filter(key => !["orders", "customer_messages"].includes(key));
+    if (heavyLanes.length >= BACKGROUND_NON_ORDER_MAX_CONCURRENT) return "background_capacity";
+  }
   backgroundModuleLanes.set(moduleKey, jobKey);
   return "";
 }

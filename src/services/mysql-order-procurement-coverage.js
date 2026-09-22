@@ -42,7 +42,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
   const work = (async () => {
     const [demands, stocks, allocations, inbounds, requests, marks, deductions, sources, stockSources] = await Promise.all([
       loadDemands(query, `SELECT o.id AS order_id, oi.id AS order_item_id, o.ordered_at, o.posting_number,
-        COALESCE((SELECT MIN(h.last_status_changed_at) FROM order_status_history h WHERE h.order_id = o.id AND h.status IN ('delivering','delivered','posting_delivered','posting_in_transit')), o.delivered_at, o.ordered_at) AS transport_at,
+        COALESCE(transport.transport_at, o.delivered_at, o.ordered_at) AS transport_at,
         COALESCE(ri.product_id, pc.component_product_id, p.id, 0) AS product_id,
         cp.name AS product_name, cp.stock_unit,
         oi.quantity * COALESCE(ri.quantity, pc.quantity, 1) AS quantity,
@@ -53,13 +53,15 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         CASE WHEN COALESCE(o.cancelled_after_ship, 0) > 0 OR o.delivered_at IS NOT NULL
           OR LOWER(CONCAT_WS(' ', o.status, o.tracking_stage, o.logistics_status)) REGEXP '(^| )(delivering|delivered|posting_delivered|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way)( |$)'
           OR (LOWER(CONCAT_WS(' ', o.status, o.tracking_stage)) REGEXP 'cancel|return|reject'
-            AND EXISTS (SELECT 1 FROM order_status_history h WHERE h.order_id = o.id
-              AND h.status IN ('delivering', 'delivered', 'posting_delivered', 'posting_in_transit') LIMIT 1)) THEN 1 ELSE 0 END AS entered_transport,
-        CASE WHEN LOWER(CONCAT_WS(' ', COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw_fields.nested_delivery, '$.name')), JSON_UNQUOTE(JSON_EXTRACT(raw_fields.delivery, '$.name'))),
-          COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw_fields.nested_delivery, '$.warehouse')), JSON_UNQUOTE(JSON_EXTRACT(raw_fields.delivery, '$.warehouse'))),
-          COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw_fields.nested_analytics, '$.warehouse')), JSON_UNQUOTE(JSON_EXTRACT(raw_fields.analytics, '$.warehouse'))),
-          COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw_fields.nested_analytics, '$.tpl_provider')), JSON_UNQUOTE(JSON_EXTRACT(raw_fields.analytics, '$.tpl_provider'))))) REGEXP 'fbp|fbo|hunchun|hun chun|hch-pd|hch-cr|珲春|混春|混川' THEN 'FBP' ELSE 'LOCAL' END AS stock_location
+            AND transport.has_history = 1) THEN 1 ELSE 0 END AS entered_transport,
+        COALESCE(raw.query_stock_location, 'LOCAL') AS stock_location
         FROM orders o JOIN order_items oi ON oi.order_id = o.id
+        LEFT JOIN (
+          SELECT order_id, 1 AS has_history, MIN(last_status_changed_at) AS transport_at
+          FROM order_status_history
+          WHERE status IN ('delivering','delivered','posting_delivered','posting_in_transit')
+          GROUP BY order_id
+        ) transport ON transport.order_id = o.id
         LEFT JOIN sku_mappings direct_mapping ON direct_mapping.id = oi.sku_mapping_id AND direct_mapping.active = 1
         LEFT JOIN (SELECT shop_id, ozon_sku, MIN(id) AS id FROM sku_mappings WHERE active = 1 GROUP BY shop_id, ozon_sku) fallback_mapping
           ON fallback_mapping.shop_id = o.shop_id AND fallback_mapping.ozon_sku = oi.ozon_sku
@@ -70,13 +72,6 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         LEFT JOIN product_components pc ON pc.product_id = p.id AND recipe.id IS NULL
         LEFT JOIN products cp ON cp.id = COALESCE(ri.product_id, pc.component_product_id, p.id)
         LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
-        -- Parse the large raw payload once; retain nested/root fallback and JSON-null semantics.
-        LEFT JOIN JSON_TABLE(raw.raw_json, '$' COLUMNS (
-          nested_delivery JSON PATH '$.raw.delivery_method',
-          delivery JSON PATH '$.delivery_method',
-          nested_analytics JSON PATH '$.raw.analytics_data',
-          analytics JSON PATH '$.analytics_data'
-        )) raw_fields ON TRUE
         ${scopedIds.length ? `WHERE (COALESCE(ri.product_id, pc.component_product_id, p.id, 0) IN (${scopedIdSql})
           OR oi.id IN (SELECT related_order_item_id FROM inventory_movements WHERE product_id IN (${scopedIdSql})
             AND status = 'posted' AND source_type = 'order_outbound'))` : ''}

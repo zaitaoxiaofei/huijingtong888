@@ -184,6 +184,13 @@ if [[ -f "$staging_dir/scripts/init-inventory-numbering.mjs" ]]; then
 fi
 
 install -d -o ozon-erp -g ozon-erp "$staging_dir/public"
+if [[ -f "$staging_dir/scripts/init-order-query-facts.mjs" ]]; then
+  set -a
+  source "$env_file"
+  set +a
+  (cd "$staging_dir" && node scripts/init-order-query-facts.mjs --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+fi
+
 rm -rf "$staging_dir/public/uploads" "$staging_dir/uploads"
 ln -s "$shared_root/uploads/public" "$staging_dir/public/uploads"
 ln -s "$shared_root/uploads/runtime" "$staging_dir/uploads"

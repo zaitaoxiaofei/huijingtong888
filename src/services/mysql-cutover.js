@@ -19123,7 +19123,7 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
   const query = connection
     ? (sql, params) => connection.query(sql, params).then(([rows]) => rows)
     : mysqlQuery;
-  const coverage = await orderProcurementCoverageMysql();
+  let coverage = allOrders ? await orderProcurementCoverageMysql() : null;
   const rows = await query(`
     WITH source_products AS (
       SELECT DISTINCT sm.product_id
@@ -19241,6 +19241,8 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
             OR (sales_mapping.shop_id = sales_order.shop_id AND sales_mapping.ozon_sku = sales_item.ozon_sku))
           AND sales_mapping.active = 1
         )
+        WHERE sales_mapping.product_id IN (SELECT product_id FROM source_products)
+          AND sales_order.ordered_at >= CONVERT_TZ(DATE_SUB(CURRENT_DATE, INTERVAL 29 DAY), '+08:00', '+00:00')
         GROUP BY sales_mapping.product_id
       ) sales ON sales.product_id = p.id
       WHERE ${allOrders
@@ -19275,6 +19277,10 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
       )
     ORDER BY mi.product_id, mi.ordered_at ASC, mi.order_id, mi.order_item_id
   `, allOrders ? [] : (includeHandledSourceOrder ? [Number(orderId), Number(orderId)] : [Number(orderId)]));
+  if (!coverage) {
+    const productIds = [...new Set(rows.map(row => Number(row.product_id)).filter(id => id > 0))];
+    coverage = productIds.length ? await orderProcurementCoverageMysql({ productIds }) : new Map();
+  }
   return rows.filter(row => coverage.get(Number(row.order_id))?.stock_location !== 'FBP').map(row => {
     const item = coverage.get(Number(row.order_id))?.items.find(item => item.order_item_id === Number(row.order_item_id) && item.product_id === Number(row.product_id));
     return item ? { ...row, ledger_stock: row.current_stock, current_stock: item.stock_quantity,
@@ -19948,9 +19954,17 @@ function summarizeOrderProcurementCandidatesMysql(rows = [], missingItems = [], 
   };
 }
 
+async function orderUsesFbpStockMysql(orderId) {
+  const row = await mysqlQueryOne(`SELECT raw.query_stock_location AS stock_location
+    FROM orders o LEFT JOIN ozon_orders_raw raw
+      ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
+    WHERE o.id = ?`, [Number(orderId)]);
+  return row?.stock_location === 'FBP';
+}
+
 export async function previewOrderProcurementMysql(orderId) {
   ensureMysqlCutoverEnabled();
-  if ((await orderProcurementCoverageMysql()).get(Number(orderId))?.stock_location === 'FBP') {
+  if (await orderUsesFbpStockMysql(orderId)) {
     throw new Error('FBP 订单由官方仓库存直接履约，无需按订单采购；官方仓补货请使用 FBP 补货功能');
   }
   await ensureProcurementOrderSourceSchemaMysql();
@@ -19964,7 +19978,7 @@ export async function previewOrderProcurementMysql(orderId) {
 
 export async function createOrderProcurementRequestsMysql(orderId, body = {}, userId = null) {
   ensureMysqlCutoverEnabled();
-  if ((await orderProcurementCoverageMysql()).get(Number(orderId))?.stock_location === 'FBP') {
+  if (await orderUsesFbpStockMysql(orderId)) {
     throw new Error('FBP 订单由官方仓库存直接履约，无需按订单采购；官方仓补货请使用 FBP 补货功能');
   }
   await ensureProcurementOrderSourceSchemaMysql();
@@ -22677,7 +22691,7 @@ export async function profitRankingMysql(query = {}) {
   const sortBy = String(query.sortBy || query.sort_by || "profit");
   const sortOrder = String(query.sortOrder || query.sort_order || "desc").toLowerCase() === "asc" ? "ASC" : "DESC";
   const fastMode = ["1", "true", "yes"].includes(String(query.fast || query.noCount || "").toLowerCase());
-  const dateFilter = profitDateWhereMysql("o", from, to);
+  const dateFilter = profitOrderedAtUtcRangeMysql("o", from, to);
   const whereParams = [];
   const where = [];
   let selectFields = "";
@@ -22695,6 +22709,7 @@ export async function profitRankingMysql(query = {}) {
         CASE WHEN ${outcome.rejectedUnclaimed} THEN 1 ELSE 0 END AS rejected_unclaimed,
         CASE WHEN ${outcome.afterDeliveryReturn} THEN 1 ELSE 0 END AS after_delivery_return
       FROM orders o
+      WHERE 1=1 ${dateFilter.whereSql}
       GROUP BY o.id
     )
   `;
@@ -22759,7 +22774,7 @@ export async function profitRankingMysql(query = {}) {
     }
   }
   const whereSql = where.length ? `AND ${where.join(" AND ")}` : "";
-  const params = [...dateFilter.params, ...whereParams];
+  const params = [...dateFilter.params, ...dateFilter.params, ...whereParams];
   const baseSql = `
     SELECT ${selectFields},
       COUNT(DISTINCT o.id) AS order_count,

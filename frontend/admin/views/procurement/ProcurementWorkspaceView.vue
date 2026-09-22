@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, onBeforeUnmount, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { useRoute } from "vue-router";
 const route = useRoute();
@@ -18,6 +18,10 @@ import PageFooterPagination from "../../components/PageFooterPagination.vue";
 
 const authStore = useAuthStore();
 const loading = ref(false);
+const demandRefreshing = ref(false);
+let rowsController;
+let disposed = false;
+onBeforeUnmount(() => { disposed = true; rowsController?.abort(); });
 const submitting = ref(false);
 const createVisible = ref(false);
 const bindVisible = ref(false);
@@ -974,22 +978,35 @@ async function saveBulkPurchase() {
 }
 
 async function loadRows(options = {}) {
-  const { silent = false, refreshDemand = false } = options || {};
+  const { silent = false } = options || {};
+  if (disposed) return;
+  rowsController?.abort();
+  const controller = new AbortController();
+  rowsController = controller;
   if (!silent) loading.value = true;
   try {
-    if (refreshDemand) await apiClient.post("/api/procurement/refresh-demand");
-    const result = await apiClient.get(`/api/procurement/requests?${queryString()}`);
+    const result = await apiClient.get(`/api/procurement/requests?${queryString()}`, { signal: controller.signal });
+    if (controller.signal.aborted || disposed) return;
     state.rows = Array.isArray(result?.rows) ? result.rows : [];
     state.total = Number(result?.total || 0);
   } catch (error) {
-    ElMessage.error(error.message || "采购工作台加载失败");
+    if (!controller.signal.aborted && !disposed) ElMessage.error(error.message || "采购工作台加载失败");
   } finally {
-    if (!silent) loading.value = false;
+    if (rowsController === controller) loading.value = false;
   }
 }
 
 async function refreshWorkbench() {
-  await loadRows({ refreshDemand: true });
+  if (demandRefreshing.value || disposed) return;
+  demandRefreshing.value = true;
+  try {
+    await apiClient.post("/api/procurement/refresh-demand");
+    await loadRows({ silent: true });
+  } catch (error) {
+    if (!disposed) ElMessage.warning(error.message || "采购需求更新失败，当前显示已有记录，请点击刷新重试");
+  } finally {
+    demandRefreshing.value = false;
+  }
 }
 
 async function loadOptions() {
@@ -1237,9 +1254,10 @@ async function saveBinding() {
 
 onMounted(async () => {
   await Promise.all([
-    loadRows({ refreshDemand: true }),
+    loadRows(),
     loadOptions().then(resetCreateForm).catch((error) => ElMessage.error(error.message || "采购基础资料加载失败"))
   ]);
+  void refreshWorkbench();
   if (Number(route.query.review_product_id) > 0) {
     await openOrderHistory({ product_id: Number(route.query.review_product_id), product_name: `核对订单 ${route.query.review_order_no || ''} 的库存来源` });
     if (orderHistoryTabs.value.some(tab => tab.key === 'missing' && tab.rows.length)) orderHistoryActiveTab.value = 'missing';
@@ -1256,7 +1274,7 @@ onMounted(async () => {
         <el-button @click="openLedger()">采购与库存对账</el-button>
         <el-button type="primary" plain>系统任务采购（{{ state.total }}）</el-button>
         <el-button type="primary" @click="openCreate">＋ 自由采购</el-button>
-        <el-button class="erp-btn erp-btn-secondary" @click="refreshWorkbench">刷新</el-button>
+        <el-button class="erp-btn erp-btn-secondary" :loading="demandRefreshing" @click="refreshWorkbench">{{ demandRefreshing ? '需求更新中' : '刷新' }}</el-button>
       </template>
     </ErpPageHeader>
 
