@@ -3933,9 +3933,16 @@ function applyFirstVariantAttribute(field = {}) {
   const first = templateEditor.variants[0];
   if (!first) return;
   const value = cloneVariantValue(getVariantAttributeValue(first, field));
+  updateVariantAttributeSelectValue(first, field, cloneVariantValue(value));
+  const sourceEntry = variantAttributeEntry(first, field);
   templateEditor.variants.forEach((row, index) => {
     if (index === 0) return;
-    setVariantAttributeValue(row, field, cloneVariantValue(value));
+    updateVariantAttributeSelectValue(row, field, cloneVariantValue(value));
+    const targetEntry = variantAttributeEntry(row, field);
+    targetEntry.selected_values = clonePlain(sourceEntry.selected_values || sourceEntry.selectedValues || [], []);
+    targetEntry.label = sourceEntry.label || "";
+    targetEntry.display_value_zh = sourceEntry.display_value_zh || sourceEntry.label || "";
+    delete targetEntry.selectedValues;
     if (isColorAttributeField(field)) {
       row.color_values = normalizeColorValuesForField(value, field);
       row.color = normalizeColorForPayload(row);
