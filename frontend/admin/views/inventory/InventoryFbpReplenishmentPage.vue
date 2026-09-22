@@ -173,7 +173,7 @@ const inventoryRows = computed(() => {
 
 const allocationTotal = computed(() => allocationDialog.items.reduce((sum, item) => sum + Math.max(0, Number(item.final_qty || 0)), 0));
 function canInventoryItemEdit(item) {
-  return ["draft", "pending_review", "rejected"].includes(String(item?.order?.status || ""));
+  return true;
 }
 
 const allocationHasEditable = computed(() => allocationDialog.items.some(canInventoryItemEdit));
@@ -186,7 +186,7 @@ function openAllocationDialog(inventory) {
 }
 
 async function saveInventoryAllocation() {
-  if (!allocationHasEditable.value) return ElMessage.warning("该库存下没有可直接调整的草稿、待审核或已驳回明细。");
+  if (!allocationHasEditable.value) return ElMessage.warning("没有可调整的店铺明细。");
   if (allocationTotal.value > Number(allocationDialog.inventory?.local_stock || 0)) {
     return ElMessage.warning(`分配总数 ${allocationTotal.value} 超过本地可用库存 ${integer(allocationDialog.inventory?.local_stock)}`);
   }
@@ -826,7 +826,14 @@ async function deleteOrderItem(row) {
 }
 
 async function deleteInventoryItem(item) {
-  await deleteOrderItem({ ...item, order: item.order });
+  const inventory = inventoryRows.value.find((row) => row.items.some((candidate) => Number(candidate.id) === Number(item.id)));
+  if (!inventory) return;
+  try { await ElMessageBox.confirm(`确认不再为 ${item.order.shop_name} 的 ${item.ozon_sku} 备货？系统会保留数量变动记录。`, "取消该店铺备货", { type: "warning" }); } catch { return; }
+  allocationDialog.inventory = inventory;
+  allocationDialog.items = inventory.items.map((candidate) => ({ ...candidate, final_qty: Number(candidate.id) === Number(item.id) ? 0 : Number(candidate.final_qty || 0) }));
+  allocationDialog.reason = "取消该店铺 SKU 备货";
+  allocationDialog.saving = true;
+  try { await saveInventoryAllocation(); } finally { allocationDialog.saving = false; }
 }
 
 function ensureBarcodeTarget(row, actionText) {
@@ -1076,7 +1083,7 @@ onMounted(loadPageData);
 
     <div v-if="viewMode === 'inventory'" class="inventory-table-wrap replenishment-table-wrap">
       <el-table :data="inventoryRows" row-key="inventory_key" border class="erp-data-table replenishment-table">
-        <el-table-column type="expand"><template #default="{ row }"><el-table :data="row.items" size="small"><el-table-column prop="order.shop_name" label="店铺" /><el-table-column prop="ozon_sku" label="Ozon SKU" /><el-table-column prop="offer_id" label="Offer ID" /><el-table-column prop="final_qty" label="最终备货" /><el-table-column label="状态"><template #default="{ row: item }">{{ statusTagText(item.order.status, item.order.received_quantity) }}</template></el-table-column><el-table-column label="操作" width="150"><template #default="{ row: item }"><el-button v-if="canInventoryItemEdit(item)" link type="primary" @click="openAllocationDialog(row)">修改数量</el-button><el-button v-if="canInventoryItemEdit(item)" link type="danger" @click="deleteInventoryItem(item)">删除</el-button><span v-else class="muted-text">已锁定</span></template></el-table-column></el-table></template></el-table-column>
+        <el-table-column type="expand"><template #default="{ row }"><el-table :data="row.items" size="small"><el-table-column prop="order.shop_name" label="店铺" /><el-table-column prop="ozon_sku" label="Ozon SKU" /><el-table-column prop="offer_id" label="Offer ID" /><el-table-column prop="final_qty" label="最终备货" /><el-table-column label="状态"><template #default="{ row: item }">{{ statusTagText(item.order.status, item.order.received_quantity) }}</template></el-table-column><el-table-column label="操作" width="210"><template #default="{ row: item }"><el-button link type="primary" @click="openAllocationDialog(row)">修改数量</el-button><el-button link type="primary" @click="printBarcodeLabel(item)">打印面单</el-button><el-button link type="danger" @click="deleteInventoryItem(item)">删除</el-button></template></el-table-column></el-table></template></el-table-column>
         <el-table-column label="库存" min-width="300"><template #default="{ row }"><div class="product-cell"><ProductImagePreview :src="row.image_url" /><div class="cell-stack"><strong>{{ row.product_name }}</strong><span class="inventory-id-display">库存 ID：{{ row.inventory_id }}</span></div></div></template></el-table-column>
         <el-table-column label="本地可用" prop="local_stock" width="130" align="center" />
         <el-table-column label="总需求" prop="final_qty" width="130" align="center" />
@@ -1354,7 +1361,7 @@ onMounted(loadPageData);
 
     <el-dialog v-model="allocationDialog.visible" title="按店铺分配备货数量" width="860px" destroy-on-close>
       <div v-if="allocationDialog.inventory" class="allocation-summary"><span>库存 ID：{{ allocationDialog.inventory.inventory_id }}</span><span>本地可用：{{ integer(allocationDialog.inventory.local_stock) }}</span><span>分配总数：<strong>{{ integer(allocationTotal) }}</strong></span></div>
-      <el-alert type="info" :closable="false" show-icon title="可直接修改草稿、待审核、已驳回的店铺明细；已通过及后续状态会锁定，避免破坏出入库流水。" />
+      <el-alert type="info" :closable="false" show-icon title="所有店铺明细均可调整；系统会记录调整原因与数量变动，已进入出入库流程的变动以调整记录留痕。" />
       <el-table :data="allocationDialog.items" border size="small" class="allocation-table"><el-table-column prop="order.shop_name" label="店铺" min-width="130" /><el-table-column prop="ozon_sku" label="Ozon SKU" min-width="150" /><el-table-column prop="offer_id" label="Offer ID" min-width="150" /><el-table-column label="状态" width="110"><template #default="{ row }">{{ statusTagText(row.order.status, row.order.received_quantity) }}</template></el-table-column><el-table-column label="分配数量" width="150"><template #default="{ row }"><el-input-number v-model="row.final_qty" :min="0" :step="1" :precision="0" :disabled="!canInventoryItemEdit(row)" /></template></el-table-column></el-table>
       <el-form label-width="90px" class="allocation-reason"><el-form-item label="调整说明"><el-input v-model="allocationDialog.reason" maxlength="500" show-word-limit placeholder="例如：本地库存不足，按店铺优先级重新分配" /></el-form-item></el-form>
       <template #footer><el-button @click="allocationDialog.visible = false">取消</el-button><el-button type="primary" :loading="allocationDialog.saving" :disabled="!allocationHasEditable" @click="saveInventoryAllocation">确认保存</el-button></template>

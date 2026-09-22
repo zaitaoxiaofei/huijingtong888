@@ -4737,16 +4737,19 @@ export async function saveFbpReplenishmentInventoryAllocationMysql(body = {}, us
       const requested = requestedById.get(Number(row.id));
       if (Number(row.order_id) !== requested.orderId) throw new Error("备货单与明细不匹配，请刷新后重试。");
       const currentFinalQty = Number(row.approved_qty || 0) + Number(row.adjustment_qty || 0);
-      if (!["draft", "pending_review", "rejected"].includes(String(row.status || "")) && requested.finalQty !== currentFinalQty) {
-        throw new Error("已通过、待发货、待入仓或已入仓的明细不能直接修改，请先撤销对应流程。");
-      }
     }
     const available = Math.max(...rows.map((row) => Number(row.local_stock || 0)), 0);
     const total = [...requestedById.values()].reduce((sum, item) => sum + item.finalQty, 0);
     if (total > available) throw new Error(`分配总数 ${total} 超过本地可用库存 ${available}，请重新调整各店铺数量。`);
     for (const row of rows) {
       const quantity = requestedById.get(Number(row.id)).finalQty;
-      if (quantity === Number(row.approved_qty || 0)) continue;
+      const currentFinalQty = Number(row.approved_qty || 0) + Number(row.adjustment_qty || 0);
+      if (quantity === currentFinalQty) continue;
+      if (!["draft", "pending_review", "rejected"].includes(String(row.status || ""))) {
+        await connection.execute("INSERT INTO fbp_replenishment_item_adjustments (order_id, item_id, adjustment_qty, reason, created_by) VALUES (?, ?, ?, ?, ?)", [row.order_id, row.id, quantity - currentFinalQty, `库存视角分配：${reason}`, userId || null]);
+        await connection.execute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [row.order_id]);
+        continue;
+      }
       await connection.execute(`
         UPDATE fbp_replenishment_order_items
         SET requested_qty = ?, approved_qty = ?,
