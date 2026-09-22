@@ -23,6 +23,7 @@ const barcodePrintResultDialog = reactive({ visible: false, row: null, quantity:
 const fbpFillResultDialog = reactive({ visible: false, summary: "", successCount: 0, durationSeconds: 0, failures: [], requiresReload: false });
 const barcodeLoadingKeys = reactive({});
 const receiptDialog = reactive({ visible: false, loading: false, submitting: false, orders: [], rows: [] });
+const allocationDialog = reactive({ visible: false, saving: false, inventory: null, items: [], reason: "" });
 
 async function loadReceiptRows() {
   const rows = [];
@@ -92,6 +93,7 @@ const state = reactive({
     pageSize: 10
   }
 });
+const viewMode = ref("operations");
 
 const currentUserId = computed(() => Number(authStore.user?.id || authStore.user?.person_id || 0) || 0);
 function aggregateBatchOrder(orders) {
@@ -139,6 +141,85 @@ const displayOrders = computed(() => {
   for (const orders of batchGroups.values()) displayed.push(aggregateBatchOrder(orders));
   return displayed.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
 });
+
+const inventoryRows = computed(() => {
+  const grouped = new Map();
+  for (const order of state.rows) {
+    for (const item of order.items || []) {
+      const key = String(item.product_id || item.inventory_id || item.inventory_number || `unmapped:${item.id}`);
+      if (!grouped.has(key)) grouped.set(key, {
+        inventory_key: key,
+        inventory_id: item.inventory_number || item.inventory_id || "未映射库存",
+        product_name: item.product_name || "-",
+        image_url: item.image_url || "",
+        local_stock: Number(item.local_stock || 0),
+        requested_qty: 0,
+        final_qty: 0,
+        pending_dispatch_qty: 0,
+        pending_receipt_qty: 0,
+        items: []
+      });
+      const total = grouped.get(key);
+      total.local_stock = Math.max(total.local_stock, Number(item.local_stock || 0));
+      total.requested_qty += Number(item.requested_qty || 0);
+      total.final_qty += Number(item.final_qty || item.approved_qty || 0);
+      if (["approved", "ozon_created"].includes(order.status)) total.pending_dispatch_qty += Number(item.final_qty || item.approved_qty || 0);
+      if (order.status === "sent") total.pending_receipt_qty += Number(item.final_qty || item.approved_qty || 0);
+      total.items.push({ ...item, order });
+    }
+  }
+  return [...grouped.values()].sort((a, b) => String(a.inventory_id).localeCompare(String(b.inventory_id)));
+});
+
+const allocationTotal = computed(() => allocationDialog.items.reduce((sum, item) => sum + Math.max(0, Number(item.final_qty || 0)), 0));
+const allocationEditable = computed(() => allocationDialog.items.every((item) => ["draft", "pending_review", "rejected"].includes(String(item.order.status || ""))));
+
+function openAllocationDialog(inventory) {
+  allocationDialog.inventory = inventory;
+  allocationDialog.items = inventory.items.map((item) => ({ ...item, final_qty: Number(item.final_qty || 0) }));
+  allocationDialog.reason = "";
+  allocationDialog.visible = true;
+}
+
+async function saveInventoryAllocation() {
+  if (!allocationEditable.value) return ElMessage.warning("仅草稿、待审核或已驳回的备货单可在库存视角调整；已通过后的数量需先撤销后重新调整。");
+  if (allocationTotal.value > Number(allocationDialog.inventory?.local_stock || 0)) {
+    return ElMessage.warning(`分配总数 ${allocationTotal.value} 超过本地可用库存 ${integer(allocationDialog.inventory?.local_stock)}`);
+  }
+  if (allocationDialog.items.some((item) => !Number.isInteger(Number(item.final_qty)) || Number(item.final_qty) < 0)) {
+    return ElMessage.warning("各店铺分配数量必须是非负整数");
+  }
+  allocationDialog.saving = true;
+  try {
+    await apiClient.post("/api/fbp-replenishment-orders/inventory-allocation", {
+      inventory_key: allocationDialog.inventory.inventory_key,
+      reason: allocationDialog.reason,
+      items: allocationDialog.items.map((item) => ({ order_id: item.order_id, item_id: item.id, final_qty: Number(item.final_qty) }))
+    });
+    ElMessage.success("各店铺备货数量已保存，运营视角会同步显示最新数量");
+    allocationDialog.visible = false;
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "库存分配保存失败");
+  } finally { allocationDialog.saving = false; }
+}
+
+function exportInventorySummary() {
+  const lines = [["库存 ID", "商品", "本地可用", "总需求", "待发货", "待入仓", "店铺", "Ozon SKU", "Offer ID", "店铺最终备货", "备货单状态"]];
+  for (const inventory of inventoryRows.value) {
+    for (const item of inventory.items) lines.push([
+      inventory.inventory_id, inventory.product_name, inventory.local_stock, inventory.final_qty, inventory.pending_dispatch_qty, inventory.pending_receipt_qty,
+      item.order.shop_name || "", item.ozon_sku || "", item.offer_id || "", item.final_qty, statusTagText(item.order.status, item.order.received_quantity)
+    ]);
+  }
+  const content = `\ufeff${lines.map((line) => line.map((value) => String(value ?? "").replace(/[\t\r\n]/g, " ")).join("\t")).join("\n")}`;
+  const blob = new Blob([content], { type: "application/vnd.ms-excel;charset=utf-8" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `FBP库存备货汇总-${new Date().toISOString().slice(0, 10)}.xls`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
 
 function flattenOrderRows(orders) {
   const rows = [];
@@ -489,8 +570,8 @@ function tableRowClassName({ row }) {
 
 function buildParams() {
   const params = new URLSearchParams({
-    page: String(state.filters.page),
-    pageSize: String(state.filters.pageSize),
+    page: String(viewMode.value === "inventory" ? 1 : state.filters.page),
+    pageSize: String(viewMode.value === "inventory" ? 100 : state.filters.pageSize),
     shopId: String(state.filters.shopId || "all"),
     status: String(state.filters.status || "all")
   });
@@ -506,7 +587,18 @@ async function loadPageData() {
     const requests = [apiClient.get(`/api/fbp-replenishment-orders?${buildParams().toString()}`), loadShopDictionary()];
     const [payload, shops] = await Promise.all(requests);
     if (!listRequestGate.isLatest(requestToken)) return;
-    const rawPageRows = Array.isArray(payload?.rows) ? payload.rows : [];
+    let rawPageRows = Array.isArray(payload?.rows) ? payload.rows : [];
+    if (viewMode.value === "inventory" && Number(payload?.total || 0) > rawPageRows.length) {
+      const pageSize = 100;
+      const pageCount = Math.ceil(Number(payload.total) / pageSize);
+      const pages = await Promise.all(Array.from({ length: Math.max(0, pageCount - 1) }, (_, index) => {
+        const params = buildParams();
+        params.set("page", String(index + 2));
+        return apiClient.get(`/api/fbp-replenishment-orders?${params.toString()}`);
+      }));
+      if (!listRequestGate.isLatest(requestToken)) return;
+      rawPageRows = rawPageRows.concat(...pages.flatMap((page) => Array.isArray(page?.rows) ? page.rows : []));
+    }
     const pageRows = [...new Map(rawPageRows.map((row) => [Number(row.id), row])).values()];
     const batchIds = [...new Set(pageRows.map((row) => Number(row.batch_id || 0)).filter(Boolean))];
     state.rows = pageRows;
@@ -922,6 +1014,11 @@ watch(() => state.filters.shopId, () => {
   loadPageData();
 });
 
+watch(viewMode, () => {
+  state.filters.page = 1;
+  loadPageData();
+});
+
 watch(sharedReplenishmentStatus, (status) => {
   if (state.filters.status === status) return;
   state.filters.status = status;
@@ -941,6 +1038,11 @@ onMounted(loadPageData);
           <span>按单号、商品或店铺快速定位</span>
         </div>
         <div class="replenishment-filter-controls">
+          <el-radio-group v-model="viewMode" size="small">
+            <el-radio-button value="operations">运营视角</el-radio-button>
+            <el-radio-button value="inventory">库存视角</el-radio-button>
+          </el-radio-group>
+          <el-button v-if="viewMode === 'inventory'" @click="exportInventorySummary">导出库存汇总</el-button>
           <div class="replenishment-selection">
             <span class="selection-count">已选 <strong>{{ selectedOrderIds.length }}</strong> 张</span>
             <el-button type="primary" :disabled="selectedOrderIds.length < 2" :loading="actionLoadingId === 'link-orders'" @click="linkSelectedOrders">
@@ -964,7 +1066,19 @@ onMounted(loadPageData);
       </div>
     </div>
 
-    <div class="inventory-table-wrap replenishment-table-wrap">
+    <div v-if="viewMode === 'inventory'" class="inventory-table-wrap replenishment-table-wrap">
+      <el-table :data="inventoryRows" row-key="inventory_key" border class="erp-data-table replenishment-table">
+        <el-table-column type="expand"><template #default="{ row }"><el-table :data="row.items" size="small"><el-table-column prop="order.shop_name" label="店铺" /><el-table-column prop="ozon_sku" label="Ozon SKU" /><el-table-column prop="offer_id" label="Offer ID" /><el-table-column prop="final_qty" label="最终备货" /><el-table-column label="状态"><template #default="{ row: item }">{{ statusTagText(item.order.status, item.order.received_quantity) }}</template></el-table-column></el-table></template></el-table-column>
+        <el-table-column label="库存" min-width="300"><template #default="{ row }"><div class="product-cell"><ProductImagePreview :src="row.image_url" /><div class="cell-stack"><strong>{{ row.product_name }}</strong><span class="inventory-id-display">库存 ID：{{ row.inventory_id }}</span></div></div></template></el-table-column>
+        <el-table-column label="本地可用" prop="local_stock" width="130" align="center" />
+        <el-table-column label="总需求" prop="final_qty" width="130" align="center" />
+        <el-table-column label="待发货" prop="pending_dispatch_qty" width="130" align="center" />
+        <el-table-column label="待入仓" prop="pending_receipt_qty" width="130" align="center" />
+        <el-table-column label="操作" width="120" fixed="right" align="center"><template #default="{ row }"><el-button link type="primary" @click="openAllocationDialog(row)">分配店铺数量</el-button></template></el-table-column>
+      </el-table>
+    </div>
+
+    <div v-else class="inventory-table-wrap replenishment-table-wrap">
       <el-table
         v-loading="loading"
         :data="tableRows"
@@ -1229,6 +1343,14 @@ onMounted(loadPageData);
 
       </el-table>
     </div>
+
+    <el-dialog v-model="allocationDialog.visible" title="按店铺分配备货数量" width="860px" destroy-on-close>
+      <div v-if="allocationDialog.inventory" class="allocation-summary"><span>库存 ID：{{ allocationDialog.inventory.inventory_id }}</span><span>本地可用：{{ integer(allocationDialog.inventory.local_stock) }}</span><span>分配总数：<strong>{{ integer(allocationTotal) }}</strong></span></div>
+      <el-alert v-if="!allocationEditable" type="warning" :closable="false" show-icon title="当前分组包含已通过或后续状态的备货单。为保证出入库流水一致，该分组不能在此直接修改。" />
+      <el-table :data="allocationDialog.items" border size="small" class="allocation-table"><el-table-column prop="order.shop_name" label="店铺" min-width="130" /><el-table-column prop="ozon_sku" label="Ozon SKU" min-width="150" /><el-table-column prop="offer_id" label="Offer ID" min-width="150" /><el-table-column label="状态" width="110"><template #default="{ row }">{{ statusTagText(row.order.status, row.order.received_quantity) }}</template></el-table-column><el-table-column label="分配数量" width="150"><template #default="{ row }"><el-input-number v-model="row.final_qty" :min="0" :step="1" :precision="0" :disabled="!allocationEditable" /></template></el-table-column></el-table>
+      <el-form label-width="90px" class="allocation-reason"><el-form-item label="调整说明"><el-input v-model="allocationDialog.reason" maxlength="500" show-word-limit placeholder="例如：本地库存不足，按店铺优先级重新分配" /></el-form-item></el-form>
+      <template #footer><el-button @click="allocationDialog.visible = false">取消</el-button><el-button type="primary" :loading="allocationDialog.saving" :disabled="!allocationEditable" @click="saveInventoryAllocation">确认保存</el-button></template>
+    </el-dialog>
 
     <el-dialog v-model="receiptDialog.visible" title="确认入仓" width="min(1000px, 94vw)" append-to-body :close-on-click-modal="false" :show-close="!receiptDialog.submitting" :close-on-press-escape="!receiptDialog.submitting">
       <div v-loading="receiptDialog.loading" class="receipt-content">

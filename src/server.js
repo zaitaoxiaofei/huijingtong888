@@ -275,6 +275,7 @@ const routes = {
   "POST /api/fbp-replenishment-orders/items/adjustments": async (req) => services.addFbpReplenishmentItemAdjustment(await readJson(req), req._session?.personId),
   "POST /api/fbp-replenishment-orders/delete": async (req) => services.deleteFbpReplenishmentOrder(await readJson(req), req._session?.personId),
   "POST /api/fbp-replenishment-orders/items": async (req) => services.updateFbpReplenishmentOrderItems(await readJson(req)),
+  "POST /api/fbp-replenishment-orders/inventory-allocation": async (req) => services.saveFbpReplenishmentInventoryAllocation(await readJson(req), req._session?.personId),
   "POST /api/fbp-replenishment-orders/items/barcode-printed": async (req) => services.markFbpReplenishmentItemBarcodePrinted(await readJson(req), req._session?.personId),
   "POST /api/fbp-replenishment-orders/items/delete": async (req) => services.deleteFbpReplenishmentOrderItem(await readJson(req), req._session?.personId),
   "POST /api/fbp-replenishment-orders/status": async (req) => services.updateFbpReplenishmentOrderStatus(await readJson(req), req._session?.personId),

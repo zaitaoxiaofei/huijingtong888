@@ -4703,6 +4703,60 @@ export async function updateFbpReplenishmentOrderItemsMysql(body = {}) {
   return { ok: true, id: orderId };
 }
 
+export async function saveFbpReplenishmentInventoryAllocationMysql(body = {}, userId = null) {
+  ensureMysqlCutoverEnabled();
+  await ensureFbpReplenishmentSchemaMysql();
+  const requestedKey = String(body.inventory_key || body.inventoryKey || "").trim();
+  const requestedItems = Array.isArray(body.items) ? body.items : [];
+  const reason = String(body.reason || "").trim().slice(0, 500);
+  if (!requestedKey || !requestedItems.length) throw new Error("缺少库存分组或店铺明细，无法保存分配。");
+  if (!reason) throw new Error("请填写调整说明，方便运营追溯库存分配原因。");
+  const itemIds = [...new Set(requestedItems.map((item) => Number(item.item_id || item.itemId || item.id || 0)).filter(Boolean))];
+  if (itemIds.length !== requestedItems.length) throw new Error("店铺明细不完整，请刷新后重新分配。");
+  const requestedById = new Map(requestedItems.map((item) => [Number(item.item_id || item.itemId || item.id), {
+    orderId: Number(item.order_id || item.orderId || 0),
+    finalQty: Number(item.final_qty ?? item.finalQty)
+  }]));
+  if ([...requestedById.values()].some((item) => !item.orderId || !Number.isInteger(item.finalQty) || item.finalQty < 0)) {
+    throw new Error("分配数量必须是非负整数，且每条记录必须属于对应备货单。");
+  }
+  return withMysqlTransaction(async (connection) => {
+    const placeholders = itemIds.map(() => "?").join(",");
+    const [rows] = await connection.execute(`
+      SELECT i.id, i.order_id, i.product_id, i.inventory_id, i.local_stock, o.status,
+        CASE WHEN i.product_id IS NOT NULL THEN CAST(i.product_id AS CHAR) ELSE COALESCE(NULLIF(i.inventory_id, ''), CONCAT('unmapped:', i.id)) END AS inventory_key
+      FROM fbp_replenishment_order_items i
+      JOIN fbp_replenishment_orders o ON o.id = i.order_id
+      WHERE i.id IN (${placeholders})
+      FOR UPDATE
+    `, itemIds);
+    if (rows.length !== itemIds.length) throw new Error("部分备货明细已不存在，请刷新后重试。");
+    if (rows.some((row) => String(row.inventory_key) !== requestedKey)) throw new Error("所选明细不属于同一库存商品，已拒绝保存以避免串货。");
+    if (rows.some((row) => !["draft", "pending_review", "rejected"].includes(String(row.status || "")))) {
+      throw new Error("已通过、待发货、待入仓或已入仓的备货单不能直接重分配；请先撤销对应流程。");
+    }
+    for (const row of rows) {
+      const requested = requestedById.get(Number(row.id));
+      if (Number(row.order_id) !== requested.orderId) throw new Error("备货单与明细不匹配，请刷新后重试。");
+    }
+    const available = Math.max(...rows.map((row) => Number(row.local_stock || 0)), 0);
+    const total = [...requestedById.values()].reduce((sum, item) => sum + item.finalQty, 0);
+    if (total > available) throw new Error(`分配总数 ${total} 超过本地可用库存 ${available}，请重新调整各店铺数量。`);
+    for (const row of rows) {
+      const quantity = requestedById.get(Number(row.id)).finalQty;
+      await connection.execute(`
+        UPDATE fbp_replenishment_order_items
+        SET requested_qty = ?, approved_qty = ?,
+          note = CONCAT(IFNULL(note, ''), CASE WHEN IFNULL(note, '') = '' THEN '' ELSE '\\n' END, '库存视角分配：', ?, '；数量=', ?),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND order_id = ?
+      `, [quantity, quantity, reason, quantity, row.id, row.order_id]);
+      await connection.execute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [row.order_id]);
+    }
+    return { ok: true, inventory_key: requestedKey, available_qty: available, final_qty: total, updated_count: rows.length, updated_by: userId || null };
+  });
+}
+
 async function requireSessionPersonIdMysql(personId, connection = null) {
   const resolved = nullableInteger(personId);
   if (!resolved) throw Object.assign(new Error("当前登录人员无效，请重新登录后再提交采购"), { statusCode: 401 });
