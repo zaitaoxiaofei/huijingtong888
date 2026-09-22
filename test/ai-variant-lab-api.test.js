@@ -376,6 +376,7 @@ test("ai variant case library saves template snapshots and has frontend entry", 
   assert.match(service, /sample_assets/);
   assert.match(routes, /parts\[2\] === "cases"/);
   assert.match(routes, /services\.aiVariantLabDeleteCase/);
+  assert.match(routes, /aiVariantLabDeleteCases/);
   assert.match(labView, /apiClient\.post\("\/api\/ai-variant-lab\/cases"/);
   assert.match(labView, /function verifySavedCase/);
   assert.match(labView, /\/api\/ai-variant-lab\/cases\/\$\{encodeURIComponent\(key\)\}/);
@@ -406,6 +407,11 @@ test("ai variant case library saves template snapshots and has frontend entry", 
   assert.match(caseView, /\/api\/ai-variant-lab\/cases/);
   assert.match(caseView, /apiClient\.delete\(`\/api\/ai-variant-lab\/cases\/\$\{encodeURIComponent\(caseNo\)\}`\)/);
   assert.match(caseView, /function deleteCase/);
+  assert.match(caseView, /function deleteSelectedCases/);
+  assert.match(caseView, /cases\/batch-delete/);
+  assert.match(caseView, /@selection-change="onCaseSelectionChange"/);
+  assert.match(caseView, /type="selection"/);
+  assert.match(caseView, /\slazy\s/);
   assert.match(caseView, /shanghaiDateTimeText/);
   assert.match(caseView, /快速裂变/);
   assert.match(caseView, /加载失败/);
@@ -1375,5 +1381,4 @@ test("AI variant lab can select failed rows and avoids overlapping heavy polling
   const regenerateBlock = view.slice(view.indexOf("async function regenerateRowMainImage"), view.indexOf("function uploadRowMainImageRequest"));
   assert.doesNotMatch(regenerateBlock, /await loadBatchJobDetail/);
 });
-
 

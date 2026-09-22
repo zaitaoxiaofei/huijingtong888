@@ -18,6 +18,7 @@ const AI_VARIANT_IMAGE_TIMEOUT_MS = 300_000;
 const runningBatchImageJobs = new Set();
 const pendingBatchImageJobWakeups = new Set();
 const pendingBatchImageResumeTimers = new Map();
+let aiVariantLabSchemaPromise = null;
 const UNKNOWN_FACT_RE = /(^|[\s,;:()[\]{}"'`|/\\-])(uncertain|unknown|not\s+sure|not\s+visible|unclear|n\/a|na|null|undefined|未识别|不确定|未知|无法判断|看不清|不清楚)(?=$|[\s,;:()[\]{}"'`|/\\-])/i;
 const INTERNAL_COPY_LEAK_RE = /(исходн(?:ого|ому|ой|ую)|проверенн(?:ые|ых)\s+факт|только\s+целевая\s+модель|меняется\s+только|source\s+(?:product|item|card)|original\s+(?:product|item|card)|verified\s+facts|only\s+the\s+target\s+model|原商品|原始商品|原卡片|源商品|已验证事实|只改(?:变)?车型|仅改变车型)/i;
 const GLOBAL_IMAGE_BASELINE_NEGATIVE_RULES = [
@@ -1944,7 +1945,23 @@ export async function aiVariantLabCases(query = {}) {
   `, params);
   const rows = await mysqlQuery(`
     SELECT case_no, case_name, product_subject_key, product_subject_name, variant_type, variable_slot, source_value,
-      success_target_value, status, usage_count, success_score, case_json, created_at, updated_at
+      success_target_value, status, usage_count, success_score, created_at, updated_at,
+      COALESCE(
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(case_json, '$.sample_assets.source_image_url')), ''),
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(case_json, '$.listing_template_snapshot.media_context.images[0]')), ''),
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(case_json, '$.sample_rows[0].row_snapshot.source_main_image_url')), '')
+      ) AS source_image_url,
+      COALESCE(
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(case_json, '$.sample_rows[0].assets.main_image.publishUrl')), ''),
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(case_json, '$.sample_rows[0].assets.main_image.url')), ''),
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(case_json, '$.sample_rows[0].assets.main_image.localUrl')), ''),
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(case_json, '$.sample_rows[0].assets.main_image.downloadUrl')), ''),
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(case_json, '$.sample_assets.generated_main_image_asset_url')), ''),
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(case_json, '$.sample_assets.generated_main_image_url')), ''),
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(case_json, '$.sample_rows[0].generated_main_image_url')), ''),
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(case_json, '$.sample_rows[0].generated_main_image_original_url')), '')
+      ) AS generated_image_url,
+      JSON_CONTAINS_PATH(case_json, 'one', '$.listing_template_snapshot.template_payload') AS has_listing_template
     FROM ai_variant_case_templates
     ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
     ORDER BY updated_at DESC
@@ -1959,7 +1976,7 @@ export async function aiVariantLabCases(query = {}) {
       ...row,
       usage_count: Number(row.usage_count || 0),
       success_score: row.success_score == null ? null : Number(row.success_score),
-      case_json: parseStoredJson(row.case_json, {})
+      has_listing_template: Boolean(row.has_listing_template)
     }))
   };
 }
@@ -2001,7 +2018,31 @@ export async function aiVariantLabDeleteCase(caseNo) {
   return { ok: true, deleted: 1, case_no: key };
 }
 
+export async function aiVariantLabDeleteCases(body = {}) {
+  await ensureAiVariantLabSchema();
+  const caseNos = [...new Set(arrayValue(body.caseNos || body.case_nos)
+    .map((value) => cleanText(value))
+    .filter(Boolean))].slice(0, 100);
+  if (!caseNos.length) throw statusError("至少选择一个案例后才能批量删除。", 400);
+  const result = await mysqlExecute(`
+    UPDATE ai_variant_case_templates
+    SET status = 'deleted', updated_at = CURRENT_TIMESTAMP
+    WHERE case_no IN (${caseNos.map(() => "?").join(", ")}) AND status <> 'deleted'
+  `, caseNos);
+  return { ok: true, deleted: Number(result.affectedRows || 0), case_nos: caseNos };
+}
+
 async function ensureAiVariantLabSchema() {
+  if (!aiVariantLabSchemaPromise) {
+    aiVariantLabSchemaPromise = ensureAiVariantLabSchemaNow().catch((error) => {
+      aiVariantLabSchemaPromise = null;
+      throw error;
+    });
+  }
+  return aiVariantLabSchemaPromise;
+}
+
+async function ensureAiVariantLabSchemaNow() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS ai_variant_lab_analyses (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -2206,6 +2247,16 @@ async function ensureAiVariantLabSchema() {
       KEY idx_ai_image_optimizer_jobs_status (status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
+  await ensureAiVariantLabIndex("idx_ai_variant_case_templates_status_updated", "(status, updated_at)");
+  await ensureAiVariantLabIndex("idx_ai_variant_case_templates_variant_status_updated", "(variant_type, status, updated_at)");
+}
+
+async function ensureAiVariantLabIndex(indexName, definition) {
+  try {
+    await mysqlExecute(`ALTER TABLE ai_variant_case_templates ADD INDEX ${indexName} ${definition}`);
+  } catch (error) {
+    if (error?.code !== "ER_DUP_KEYNAME") throw error;
+  }
 }
 
 async function resolveAnalysis(body = {}) {

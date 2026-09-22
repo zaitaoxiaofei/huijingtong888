@@ -12,8 +12,10 @@ const detailLoading = ref(false);
 const detailVisible = ref(false);
 const detailTab = ref("reuse");
 const cases = ref([]);
+const selectedCases = ref([]);
 const activeCase = ref(null);
 const deletingCaseNo = ref("");
+const batchDeleting = ref(false);
 const viewportHeight = ref(typeof window === "undefined" ? 900 : window.innerHeight);
 
 const filters = reactive({
@@ -68,6 +70,7 @@ async function loadCases() {
     if (filters.variantType) params.set("variantType", filters.variantType);
     const result = await apiClient.get(`/api/ai-variant-lab/cases?${params.toString()}`, { noCache: true });
     cases.value = result.cases || [];
+    selectedCases.value = [];
     pagination.total = Number(result.total ?? cases.value.length);
     pagination.page = Number(result.page || pagination.page);
     pagination.pageSize = Number(result.pageSize || pagination.pageSize);
@@ -165,6 +168,37 @@ async function deleteCase(row) {
   }
 }
 
+async function deleteSelectedCases() {
+  const caseNos = selectedCases.value.map((row) => String(row?.case_no || "").trim()).filter(Boolean);
+  if (!caseNos.length) return;
+  const confirmed = await ElMessageBox.confirm(
+    `确定删除选中的 ${caseNos.length} 个案例吗？删除后将不再出现在案例库列表中。`,
+    "批量删除案例",
+    { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" }
+  ).then(() => true).catch(() => false);
+  if (!confirmed) return;
+  batchDeleting.value = true;
+  try {
+    const result = await apiClient.post("/api/ai-variant-lab/cases/batch-delete", { caseNos });
+    const deleted = Number(result.deleted || 0);
+    ElMessage.success(`已删除 ${deleted} 个案例`);
+    if (activeCase.value && caseNos.includes(activeCase.value.case_no)) {
+      detailVisible.value = false;
+      activeCase.value = null;
+    }
+    if (cases.value.length === caseNos.length && pagination.page > 1) pagination.page -= 1;
+    await loadCases();
+  } catch (error) {
+    ElMessage.error(error.message || "批量删除案例失败");
+  } finally {
+    batchDeleting.value = false;
+  }
+}
+
+function onCaseSelectionChange(rows) {
+  selectedCases.value = rows || [];
+}
+
 function parseTargetValues(value) {
   const seen = new Set();
   return String(value || "")
@@ -179,6 +213,8 @@ function parseTargetValues(value) {
 }
 
 function imageFromCase(row, key) {
+  if (key === "source" && row?.source_image_url) return String(row.source_image_url).trim();
+  if (key === "generated" && row?.generated_image_url) return firstStableUrl(row.generated_image_url);
   const payload = row?.case_json || {};
   const assets = payload.sample_assets || {};
   const sampleRows = Array.isArray(payload.sample_rows) ? payload.sample_rows : [];
@@ -215,11 +251,6 @@ function firstStableUrl(...values) {
   return urls.find((value) => !isTemporaryAiImageUrl(value)) || urls[0] || "";
 }
 
-function templateHealthText(snapshot = {}) {
-  if (snapshot.template_payload) return "可关联草稿模板";
-  return "缺少草稿模板";
-}
-
 function variantTypeText(value) {
   return {
     vehicle_model_swap: "车型裂变",
@@ -246,10 +277,13 @@ function tagsText(value) {
   <div class="case-library-page">
     <header class="page-header">
       <div>
-        <h1>裂变案例</h1>
+        <h1>AI裂变案例库</h1>
         <p>沉淀可复用的成功案例，后续直接填写新型号进入 AI 裂变生成队列。</p>
       </div>
-      <el-button :icon="Refresh" :loading="loading" @click="loadCases">刷新</el-button>
+      <div class="header-actions">
+        <el-button type="danger" plain :icon="Delete" :loading="batchDeleting" :disabled="!selectedCases.length" @click="deleteSelectedCases">批量删除{{ selectedCases.length ? ` (${selectedCases.length})` : "" }}</el-button>
+        <el-button :icon="Refresh" :loading="loading" @click="loadCases">刷新</el-button>
+      </div>
     </header>
 
     <section class="filter-panel">
@@ -270,15 +304,16 @@ function tagsText(value) {
     </section>
 
     <section class="table-panel">
-      <el-table v-loading="loading" :data="cases" border class="case-table" row-key="case_no" :height="tableHeight">
+      <el-table v-loading="loading" :data="cases" border class="case-table" row-key="case_no" :height="tableHeight" @selection-change="onCaseSelectionChange">
+        <el-table-column type="selection" width="48" fixed />
         <el-table-column label="参考图" width="156" fixed>
           <template #default="{ row }">
             <div class="image-pair">
-              <el-image v-if="imageFromCase(row, 'source')" :src="imageFromCase(row, 'source')" fit="cover" preview-teleported :preview-src-list="[imageFromCase(row, 'source')]">
+              <el-image v-if="imageFromCase(row, 'source')" :src="imageFromCase(row, 'source')" fit="cover" lazy preview-teleported :preview-src-list="[imageFromCase(row, 'source')]">
                 <template #error><span class="image-fallback">加载失败</span></template>
               </el-image>
               <span v-else>无图</span>
-              <el-image v-if="imageFromCase(row, 'generated')" :src="imageFromCase(row, 'generated')" fit="cover" preview-teleported :preview-src-list="[imageFromCase(row, 'generated')]">
+              <el-image v-if="imageFromCase(row, 'generated')" :src="imageFromCase(row, 'generated')" fit="cover" lazy preview-teleported :preview-src-list="[imageFromCase(row, 'generated')]">
                 <template #error><span class="image-fallback">加载失败</span></template>
               </el-image>
               <span v-else>未生成</span>
@@ -294,8 +329,8 @@ function tagsText(value) {
         <el-table-column prop="success_target_value" label="成功目标" width="130" />
         <el-table-column label="模板状态" width="140">
           <template #default="{ row }">
-            <el-tag :type="row.case_json?.listing_template_snapshot?.template_payload ? 'success' : 'warning'" effect="light">
-              {{ templateHealthText(row.case_json?.listing_template_snapshot || {}) }}
+            <el-tag :type="row.has_listing_template ? 'success' : 'warning'" effect="light">
+              {{ row.has_listing_template ? "可关联草稿模板" : "缺少草稿模板" }}
             </el-tag>
           </template>
         </el-table-column>
@@ -432,7 +467,7 @@ function tagsText(value) {
 
 <style scoped>
 .case-library-page { display: flex; flex-direction: column; gap: 14px; min-height: calc(100dvh - 124px); padding: 18px; color: #172033; }
-.page-header { display: flex; justify-content: space-between; align-items: center; gap: 18px; }
+.page-header, .header-actions { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .page-header h1 { margin: 0 0 4px; font-size: 22px; font-weight: 700; letter-spacing: 0; }
 .page-header p { margin: 0; color: #64748b; line-height: 1.5; }
 .filter-panel, .table-panel { background: #fff; border: 1px solid #d9e2ef; border-radius: 8px; }

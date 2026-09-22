@@ -45,7 +45,7 @@ export const navigationMenus = [
     icon: MagicStick,
     children: [
       { key: "ai-variant-lab", label: "AI裂变", route: "/ai-variant-lab" },
-      { key: "ai-variant-cases", label: "裂变案例", route: "/ai-variant-cases" },
+      { key: "ai-variant-cases", label: "AI裂变案例库", route: "/ai-variant-cases" },
       { key: "ai-product-material-optimizer", label: "AI优化", route: "/ai-product-material-optimizer" },
       { key: "ai-ecommerce-suite", label: "AI电商套图", route: "/ai-ecommerce-suite" },
       { key: "ai-material-optimization-records", label: "素材优化记录", route: "/ai-material-optimization-records" }

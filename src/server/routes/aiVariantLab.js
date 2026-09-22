@@ -25,6 +25,7 @@ export function createAiVariantLabRoutes({ services, readJson }) {
     "POST /api/ai-variant-draft-save/batches": async (req) => services.createAiVariantDraftSaveBatch(await readJson(req), req._session),
     "POST /api/ai-variant-lab/save-template": async (req) => services.aiVariantLabSaveTemplate(await readJson(req), req._session),
     "POST /api/ai-variant-lab/cases": async (req) => services.aiVariantLabSaveCase(await readJson(req), req._session),
+    "POST /api/ai-variant-lab/cases/batch-delete": async (req) => services.aiVariantLabDeleteCases(await readJson(req), req._session),
     "GET /api/ai-variant-lab/cases": (req) => services.aiVariantLabCases(req.query || {}, req._session),
     "GET /api/ai-variant-lab/templates": (req) => services.aiVariantLabTemplates(req.query || {}, req._session),
     "GET /api/ai-variant-lab/vehicle-catalog": (req) => services.aiVehicleCatalog(req.query || {}, req._session),
