@@ -208,6 +208,14 @@ async function saveInventoryAllocation() {
   } finally { allocationDialog.saving = false; }
 }
 
+async function createInventoryProcurement(row) {
+  try {
+    const { value } = await ElMessageBox.prompt(`为“${row.product_name}”创建采购需求`, "创建采购需求", { inputValue: String(Math.max(1, Number(row.final_qty || 1))), inputPattern: /^[1-9]\\d*$/, inputErrorMessage: "请输入大于 0 的整数", confirmButtonText: "提交采购工作台" });
+    await apiClient.post("/api/fbp-replenishment-orders/inventory-procurement", { product_id: Number(row.items?.[0]?.product_id || 0), quantity: Number(value), reason_code: "fbp_stock_shortage", reason_note: "FBP备货库存不足" });
+    ElMessage.success("采购需求已提交到采购工作台");
+  } catch (error) { if (error !== "cancel") ElMessage.error(error.message || "采购需求提交失败"); }
+}
+
 function exportInventorySummary() {
   const lines = [["库存 ID", "商品", "本地可用", "总需求", "待发货", "待入仓", "店铺", "Ozon SKU", "Offer ID", "店铺最终备货", "备货单状态"]];
   for (const inventory of inventoryRows.value) {
@@ -1089,7 +1097,7 @@ onMounted(loadPageData);
         <el-table-column label="总需求" prop="final_qty" width="130" align="center" />
         <el-table-column label="待发货" prop="pending_dispatch_qty" width="130" align="center" />
         <el-table-column label="待入仓" prop="pending_receipt_qty" width="130" align="center" />
-        <el-table-column label="操作" width="120" fixed="right" align="center"><template #default="{ row }"><el-button link type="primary" @click="openAllocationDialog(row)">分配店铺数量</el-button></template></el-table-column>
+        <el-table-column label="操作" width="210" fixed="right" align="center"><template #default="{ row }"><el-button link type="primary" @click="openAllocationDialog(row)">分配店铺数量</el-button><el-button link type="warning" @click="createInventoryProcurement(row)">创建采购需求</el-button></template></el-table-column>
       </el-table>
     </div>
 

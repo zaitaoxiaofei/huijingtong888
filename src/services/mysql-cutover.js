@@ -18849,7 +18849,7 @@ export async function createProcurementRequestMysql(body = {}, sessionPersonId =
 
 const WAREHOUSE_PROCUREMENT_REASON_CODES = new Set([
   "accessory_shortage", "hot_product_replenishment", "shipping_shortage",
-  "safety_stock_shortage", "seasonal_replenishment", "other"
+  "safety_stock_shortage", "seasonal_replenishment", "fbp_stock_shortage", "other"
 ]);
 
 export async function createWarehouseProcurementRequestsMysql(body = {}, sessionPersonId = null) {
