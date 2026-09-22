@@ -20881,17 +20881,26 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
         person_id: channel?.person_id || personId,
         anomaly_reason: anomalyReason || null
       });
-      const exists = await mysqlConnectionQueryOne(
+      const existingInbound = await mysqlConnectionQueryOne(
         connection,
-        "SELECT id FROM inbound_records WHERE purchase_order_item_id = ? AND status = 'pending_arrival' LIMIT 1",
+        "SELECT id, status FROM inbound_records WHERE purchase_order_item_id = ? ORDER BY id DESC LIMIT 1 FOR UPDATE",
         [item.id]
       );
-      if (!exists && actualQuantity > 0) {
+      if (existingInbound && actualQuantity > Number(item.inbound_quantity || 0)) {
+        await connection.execute(`
+          UPDATE inbound_records
+          SET product_id = ?, person_id = ?, quantity = ?, amount = ?, unit_cost = ?, shipping_amount = ?,
+            purchase_url = ?, status = 'pending_arrival', note = ?, procurement_request_id = COALESCE(procurement_request_id, ?),
+            received_at = NULL, approved_at = NULL, approved_by_person_id = NULL
+          WHERE id = ?
+        `, [item.product_id, personId, actualQuantity - Number(item.inbound_quantity || 0), amount, unitCost,
+          shippingAmount, purchaseUrl, note, channel?.procurement_request_id || null, existingInbound.id]);
+      } else if (!existingInbound && actualQuantity > 0) {
         await connection.execute(`
           INSERT INTO inbound_records
-          (product_id, person_id, quantity, amount, unit_cost, shipping_amount, purchase_url, status, note, purchase_order_id, purchase_order_item_id, qc_status)
-          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_arrival', ?, ?, ?, 'pending')
-        `, [item.product_id, personId, actualQuantity, amount, unitCost, shippingAmount, purchaseUrl, note, orderId, item.id]);
+          (product_id, person_id, quantity, amount, unit_cost, shipping_amount, purchase_url, status, note, purchase_order_id, purchase_order_item_id, procurement_request_id, qc_status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_arrival', ?, ?, ?, ?, 'pending')
+        `, [item.product_id, personId, actualQuantity, amount, unitCost, shippingAmount, purchaseUrl, note, orderId, item.id, channel?.procurement_request_id || null]);
       }
       totalQuantity += actualQuantity;
       totalAmount += amount + shippingAmount;
