@@ -4723,7 +4723,8 @@ export async function saveFbpReplenishmentInventoryAllocationMysql(body = {}, us
   return withMysqlTransaction(async (connection) => {
     const placeholders = itemIds.map(() => "?").join(",");
     const [rows] = await connection.execute(`
-      SELECT i.id, i.order_id, i.product_id, i.inventory_id, i.local_stock, o.status,
+      SELECT i.id, i.order_id, i.product_id, i.inventory_id, i.local_stock, i.approved_qty, o.status,
+        COALESCE((SELECT SUM(a.adjustment_qty) FROM fbp_replenishment_item_adjustments a WHERE a.item_id = i.id), 0) AS adjustment_qty,
         CASE WHEN i.product_id IS NOT NULL THEN CAST(i.product_id AS CHAR) ELSE COALESCE(NULLIF(i.inventory_id, ''), CONCAT('unmapped:', i.id)) END AS inventory_key
       FROM fbp_replenishment_order_items i
       JOIN fbp_replenishment_orders o ON o.id = i.order_id
@@ -4732,18 +4733,20 @@ export async function saveFbpReplenishmentInventoryAllocationMysql(body = {}, us
     `, itemIds);
     if (rows.length !== itemIds.length) throw new Error("部分备货明细已不存在，请刷新后重试。");
     if (rows.some((row) => String(row.inventory_key) !== requestedKey)) throw new Error("所选明细不属于同一库存商品，已拒绝保存以避免串货。");
-    if (rows.some((row) => !["draft", "pending_review", "rejected"].includes(String(row.status || "")))) {
-      throw new Error("已通过、待发货、待入仓或已入仓的备货单不能直接重分配；请先撤销对应流程。");
-    }
     for (const row of rows) {
       const requested = requestedById.get(Number(row.id));
       if (Number(row.order_id) !== requested.orderId) throw new Error("备货单与明细不匹配，请刷新后重试。");
+      const currentFinalQty = Number(row.approved_qty || 0) + Number(row.adjustment_qty || 0);
+      if (!["draft", "pending_review", "rejected"].includes(String(row.status || "")) && requested.finalQty !== currentFinalQty) {
+        throw new Error("已通过、待发货、待入仓或已入仓的明细不能直接修改，请先撤销对应流程。");
+      }
     }
     const available = Math.max(...rows.map((row) => Number(row.local_stock || 0)), 0);
     const total = [...requestedById.values()].reduce((sum, item) => sum + item.finalQty, 0);
     if (total > available) throw new Error(`分配总数 ${total} 超过本地可用库存 ${available}，请重新调整各店铺数量。`);
     for (const row of rows) {
       const quantity = requestedById.get(Number(row.id)).finalQty;
+      if (quantity === Number(row.approved_qty || 0)) continue;
       await connection.execute(`
         UPDATE fbp_replenishment_order_items
         SET requested_qty = ?, approved_qty = ?,
