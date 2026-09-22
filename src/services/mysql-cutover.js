@@ -25952,12 +25952,12 @@ async function orderBaseSqlMysql(query = {}) {
   const from = normalizeSyncDateMysql(query.dateFrom || query.date_from);
   const to = normalizeSyncDateMysql(query.dateTo || query.date_to);
   if (from) {
-    where.push(`${chinaDateSqlMysql("o.ordered_at")} >= ?`);
-    params.push(from);
+    where.push("o.ordered_at >= ?");
+    params.push(shanghaiDateKeyToUtcDateTimeMysql(from));
   }
   if (to) {
-    where.push(`${chinaDateSqlMysql("o.ordered_at")} <= ?`);
-    params.push(to);
+    where.push("o.ordered_at < ?");
+    params.push(shanghaiDateKeyToUtcDateTimeMysql(to, 1));
   }
   return { where: where.join(" AND "), params };
 }

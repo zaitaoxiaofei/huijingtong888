@@ -15,7 +15,7 @@ try {
   const started = performance.now();
   const coverage = await loadOrderProcurementCoverage(async sql => {
     const start = performance.now();
-    const [rows] = await connection.query(sql);
+    const [rows] = await getMysqlPool().query(sql);
     timings.push({ query: timings.length + 1, rows: rows.length, ms: Math.round(performance.now() - start) });
     return rows;
   }, '', { fresh: true });

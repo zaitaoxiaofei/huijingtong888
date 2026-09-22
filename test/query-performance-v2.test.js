@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
+import { loadOrderProcurementCoverage } from '../src/services/mysql-order-procurement-coverage.js';
 
 const service = readFileSync(new URL('../src/services/mysql-cutover.js', import.meta.url), 'utf8');
 const view = readFileSync(new URL('../frontend/admin/views/procurement/ProcurementWorkspaceView.vue', import.meta.url), 'utf8');
@@ -126,4 +127,35 @@ test('single-order procurement reconciles only related products but keeps cross-
   const save = service.slice(service.indexOf('export async function createOrderProcurementRequestsMysql('), service.indexOf('export async function updateProcurementRequestMysql('));
   assert.doesNotMatch(save, /await orderProcurementCoverageMysql\(\)/);
   assert.match(save, /await orderUsesFbpStockMysql\(orderId\)/);
+});
+
+test('small product scopes do not aggregate unrelated history and use the covering warehouse index', async () => {
+  for (const productIds of [[], [10]]) {
+    let demandSql;
+    await loadOrderProcurementCoverage(async sql => {
+      if (sql.startsWith('SELECT o.id AS order_id')) demandSql = sql;
+      return [];
+    }, '', { fresh: true, productIds });
+    assert.match(demandSql, /raw FORCE INDEX \(idx_order_query_stock_location\)/);
+    if (productIds.length) {
+      assert.doesNotMatch(demandSql, /GROUP BY order_id/);
+      assert.match(demandSql, /h\.last_status_changed_at IS NOT NULL/);
+      assert.match(demandSql, /EXISTS \(SELECT 1 FROM order_status_history/);
+    } else {
+      assert.match(demandSql, /GROUP BY order_id/);
+      assert.doesNotMatch(demandSql, /SELECT MIN\(h\./);
+    }
+  }
+});
+
+test('order date filters remain Beijing calendar days without wrapping the indexed timestamp', async () => {
+  const context = vm.createContext({
+    normalizeSyncDateMysql: value => value || '',
+    normalizeMysqlDateTime: date => date.toISOString().slice(0, 19).replace('T', ' ')
+  });
+  vm.runInContext(service.slice(service.indexOf('function shanghaiDateKeyToUtcDateTimeMysql('), service.indexOf('function profitOrderedAtUtcRangeMysql('))
+    + service.slice(service.indexOf('async function orderBaseSqlMysql('), service.indexOf('async function orderFilteredSqlMysql(')), context);
+  const filter = await context.orderBaseSqlMysql({ shopId: '2', dateFrom: '2026-09-22', dateTo: '2026-09-22' });
+  assert.equal(filter.where, '1 = 1 AND o.shop_id = ? AND o.ordered_at >= ? AND o.ordered_at < ?');
+  assert.deepEqual(Array.from(filter.params), [2, '2026-09-21 16:00:00', '2026-09-22 16:00:00']);
 });
