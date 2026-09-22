@@ -15,8 +15,8 @@ test("onboarding mutations require manager role and record session identity", ()
   const authorization = fs.readFileSync(new URL("../src/server/authorization.js", import.meta.url), "utf8");
   const routes = fs.readFileSync(new URL("../src/server/routes/onboardingKnowledge.js", import.meta.url), "utf8");
   const service = fs.readFileSync(new URL("../src/services/onboarding-knowledge.js", import.meta.url), "utf8");
-  assert.match(authorization, /parts\[1\] === "onboarding"/);
-  assert.match(authorization, /hasMinimumRole\(session, "manager"\)/);
+  assert.match(authorization, /resource === "onboarding"/);
+  assert.match(authorization, /require\("onboarding.edit"\)/);
   assert.match(routes, /req\._session/);
   assert.match(service, /onboarding_article_versions/);
   assert.match(service, /changed_by_person_id/);

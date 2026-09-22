@@ -86,7 +86,9 @@ const STATUS_TABS = [
   { value: "dispute", label: "有争议" },
   { value: "all", label: "全部订单" },
   { value: "unbound", label: "待绑定库存" },
-  { value: "pending_purchase", label: "待采购" }
+  { value: "pending_purchase", label: "待采购" },
+  { value: "purchase_in_transit", label: "采购在途" },
+  { value: "purchase_records_missing", label: "待补采购记录" }
 ];
 const DEFAULT_STATUS_TAB_ORDER = STATUS_TABS.map((item) => item.value);
 
@@ -143,8 +145,8 @@ const LOGISTICS_CARRIER_OPTIONS = [
 ];
 
 const DEFAULT_PAGE_SIZE = 20;
-const AWAITING_PACKAGING_STATES = ["awaiting_registration", "acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_awaiting_registration", "posting_acceptance_in_progress"];
-const AWAITING_DELIVER_STATES = ["awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service", "posting_transferring", "posting_in_carriage", "posting_transferring_to_delivery"];
+const AWAITING_PACKAGING_STATES = ["acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_acceptance_in_progress"];
+const AWAITING_DELIVER_STATES = ["awaiting_registration", "posting_awaiting_registration", "posting_registration_error", "awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service", "posting_transferring", "posting_in_carriage", "posting_transferring_to_delivery"];
 const DELIVERING_KEYWORDS = ["delivering", "transferring", "carriage", "pickup", "sorting", "customs", "shipped", "sent", "on_way", "posting_in_carriage", "posting_transferring", "发往", "已上网", "发走"];
 
 function createDefaultFilters(defaultFrom, defaultTo) {
@@ -195,6 +197,7 @@ export function useOrdersPage() {
   const orderSyncCancelReason = ref("");
   const ordersListAbort = ref(null);
   const ordersMetaAbort = ref(null);
+  const ordersMetaRequestKey = ref("");
   const logisticsOptionsAbort = ref(null);
   const logisticsOptionsPromise = ref(null);
   const ordersLoadToken = ref(0);
@@ -350,8 +353,9 @@ export function useOrdersPage() {
     }
   }
 
-  async function loadOrdersMeta(filtersSnapshot, requestToken) {
+  async function loadOrdersMeta(filtersSnapshot) {
     window.clearTimeout(ordersMetaTimer);
+    const requestKey = ordersMetaCacheKey(filtersSnapshot);
     const cachedCounts = readOrdersMetaCache(filtersSnapshot);
     if (cachedCounts) {
       patch({
@@ -360,9 +364,11 @@ export function useOrdersPage() {
       });
       return;
     }
+    if (ordersMetaAbort.value && ordersMetaRequestKey.value === requestKey) return;
     ordersMetaAbort.value?.abort();
     const controller = new AbortController();
     ordersMetaAbort.value = controller;
+    ordersMetaRequestKey.value = requestKey;
     try {
       const metaParams = buildOrdersParams(filtersSnapshot, {
         includeRows: "0",
@@ -370,12 +376,14 @@ export function useOrdersPage() {
         includeLogisticsOptions: "0"
       });
       const result = await apiClient.get(`/api/orders?${metaParams.toString()}`, { signal: controller.signal });
-      if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
+      if (controller.signal.aborted || ordersMetaCacheKey(vm.filters) !== requestKey) return;
       const counts = result?.counts || {};
       writeOrdersMetaCache(filtersSnapshot, counts);
       patch({
         statusTabs: buildStatusTabs(counts, Number(counts?.all ?? vm.meta.total ?? 0)),
         meta: {
+          // Status counts describe their own tabs; the list response owns the
+          // exact total for the active filter and therefore its pagination.
           total: vm.meta.total,
           counts
         }
@@ -386,13 +394,13 @@ export function useOrdersPage() {
     } finally {
       if (ordersMetaAbort.value === controller) {
         ordersMetaAbort.value = null;
+        ordersMetaRequestKey.value = "";
       }
     }
   }
 
   async function loadOrders(options = {}) {
     ordersListAbort.value?.abort();
-    ordersMetaAbort.value?.abort();
     const controller = new AbortController();
     ordersListAbort.value = controller;
     const requestToken = ordersLoadToken.value + 1;
@@ -401,6 +409,8 @@ export function useOrdersPage() {
     if (showLoading) loading.value = true;
     try {
       const filtersSnapshot = { ...vm.filters };
+      const metaKey = ordersMetaCacheKey(filtersSnapshot);
+      if (ordersMetaAbort.value && ordersMetaRequestKey.value !== metaKey) ordersMetaAbort.value.abort();
       const params = buildOrdersParams(filtersSnapshot, {
         includeCounts: options.includeCounts ? "1" : "0",
         includeLogisticsOptions: "0"
@@ -460,7 +470,7 @@ export function useOrdersPage() {
       window.clearTimeout(ordersMetaTimer);
       if (!options.includeCounts) {
         ordersMetaTimer = window.setTimeout(() => {
-          void loadOrdersMeta(filtersSnapshot, requestToken);
+          void loadOrdersMeta(filtersSnapshot);
         }, ORDERS_META_DELAY_MS);
       }
     } catch (error) {
@@ -533,6 +543,7 @@ export function useOrdersPage() {
         status: incoming.status || "awaiting_deliver",
         tracking_stage: incoming.tracking_stage || incoming.status || "awaiting_deliver",
         logistics_status: incoming.logistics_status || incoming.tracking_stage || incoming.status || "awaiting_deliver",
+        ozon_available_actions: incoming.ozon_available_actions ?? row.ozon_available_actions ?? [],
         tracking_number: incoming.tracking_number || row?.tracking_number || row?.posting_number || row?.order_number || ""
       };
       const nextTabKey = orderTabKey(updatedRow);

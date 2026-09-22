@@ -5211,14 +5211,9 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
-.orders-inbound-confirm > p {
-  margin: 0 0 14px;
-  color: var(--erp-text-secondary, #606266);
-}
-
 .orders-inbound-confirm-grid {
   display: grid;
-  grid-template-columns: 76px minmax(0, 1fr);
+  grid-template-columns: 112px minmax(0, 1fr);
   gap: 8px 12px;
   padding: 14px 16px;
   border: 1px solid #e5eaf2;
@@ -5231,19 +5226,46 @@
   color: var(--erp-text-primary, #303133);
 }
 
+.orders-inbound-confirm-grid strong.is-primary {
+  color: #2563eb;
+  font-size: 16px;
+}
+
+.orders-inbound-confirm-grid strong.is-muted {
+  color: var(--erp-text-secondary, #606266);
+  font-weight: 500;
+}
+
 .orders-inbound-confirm-label {
   color: var(--erp-text-secondary, #606266);
 }
 
 .orders-inbound-confirm-dialog {
-  width: min(480px, calc(100vw - 32px));
+  width: min(680px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
   border-radius: 12px;
 }
 
 .orders-inbound-confirm-dialog .el-message-box__content {
   padding: 10px 20px 16px;
+  max-height: 70vh;
+  overflow-y: auto;
 }
+
+.orders-procurement-compact-card + .orders-procurement-compact-card { margin-top: 14px; }
+.orders-procurement-compact-header { display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px; }
+.orders-procurement-compact-header strong { color: var(--erp-text-primary, #303133); font-size: 16px; }
+.orders-procurement-compact-header small { color: var(--erp-text-secondary, #606266); }
 
 .orders-inbound-confirm-dialog .el-message-box__btns {
   padding: 0 20px 18px;
+}
+
+.orders-coverage-summary { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; color: #66758c; line-height: 1.45; }
+.orders-coverage-summary small { font-size: 11px; }
+
+.order-procurement-receipt-hint {
+  margin: 0 0 14px;
+  color: var(--erp-text-secondary, #606266);
+  line-height: 1.6;
 }

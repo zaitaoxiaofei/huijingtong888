@@ -6,6 +6,7 @@ function readProductSaveJson(readJson, req) {
 
 export function createCatalogRoutes({ services, readJson }) {
   return {
+    "GET /api/inventory-product-requests": (req, url) => services.inventoryProductRequests(Object.fromEntries(url.searchParams.entries()), req._session),
     "GET /api/products": (req, url) => services.products(Object.fromEntries(url.searchParams.entries())),
     "GET /api/products/selection": (req, url) => services.selectionProducts(Object.fromEntries(url.searchParams.entries())),
     "GET /api/products/hidden": (req, url) => services.hiddenProducts(Object.fromEntries(url.searchParams.entries())),
@@ -19,11 +20,27 @@ export function createCatalogRoutes({ services, readJson }) {
     "POST /api/products": async (req) => {
       const body = await readProductSaveJson(readJson, req);
       const sessionPersonId = req._session?.personId || null;
-      const created = await services.createProduct({
+      const isInventoryCreation = Boolean((body.structured_naming || body.structuredNaming) && body.product_type !== "selection");
+      const create = isInventoryCreation
+        ? (payload) => services.submitInventoryProductRequest(payload, req._session)
+        : services.createProduct;
+      const created = await create({
         ...body,
         owner_person_id: body.owner_person_id || sessionPersonId,
         created_by_person_id: body.created_by_person_id || sessionPersonId
       });
+      if (created.request_id) return created;
+      if (isInventoryCreation) {
+        return {
+          ...created,
+          product: {
+            id: created.id,
+            code: created.code || "",
+            name: String(body.name || "").trim(),
+            stock_unit: String(body.structured_naming?.stock_unit || body.structuredNaming?.stock_unit || body.stock_unit || "个")
+          }
+        };
+      }
       return { ...created, product: await services.selectionProduct(created.id, { includeDetails: 0 }) };
     },
     "POST /api/products/merge-preview": async (req) => services.previewMergeProducts(await readJson(req)),
@@ -37,11 +54,21 @@ export function createCatalogRoutes({ services, readJson }) {
     "POST /api/sku-inventory-recipes": async (req) => services.saveSkuInventoryRecipe(await readJson(req)) || { ok: true },
     "POST /api/online-products/batch-stock": async (req) => services.batchUpdateOnlineProductStocks(await readJson(req), req._session?.personId),
     "POST /api/online-products/action": async (req) => services.performOnlineProductAction(await readJson(req), req._session?.personId),
-    "POST /api/online-products/create-product": async (req) => services.createProductFromOnlineProduct(await readJson(req))
+    "POST /api/online-products/create-product": async (req) => {
+      const body = await readProductSaveJson(readJson, req);
+      return (body.structured_naming || body.structuredNaming)
+        ? services.submitInventoryProductRequest(body, req._session)
+        : services.createProductFromOnlineProduct(body);
+    }
   };
 }
 
 export async function handleCatalogRestRoute({ req, res, url, parts, services, readJson, json, notFound, sendProductImage }) {
+  if (parts[0] === "api" && parts[1] === "inventory-product-requests" && /^\d+$/.test(parts[2] || "") && !parts[3]) {
+    if (req.method === "GET") return json(res, await services.inventoryProductRequestDetail(Number(parts[2]), req._session));
+    if (req.method === "PUT") return json(res, await services.reviewInventoryProductRequest(Number(parts[2]), await readProductSaveJson(readJson, req), req._session));
+  }
+
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "inventory-product-naming" && parts[2] === "options" && /^\d+$/.test(parts[3] || "")) {
     return json(res, await services.updateInventoryProductNamingOption(Number(parts[3]), await readJson(req), req._session));
   }

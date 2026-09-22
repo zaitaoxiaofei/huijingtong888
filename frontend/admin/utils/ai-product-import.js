@@ -7,7 +7,7 @@ export function normalizeImportRows(payload) {
 }
 
 export function normalizeImportCandidate(row = {}, source = "collector", index = 0) {
-  const payload = parseMaybeJson(row.template_payload_json) || parseMaybeJson(row.template_payload) || parseMaybeJson(row.templatePayload) || parseMaybeJson(row.template_snapshot) || parseMaybeJson(row.templateSnapshot) || parseMaybeJson(row.listing_template) || parseMaybeJson(row.listingTemplate) || parseMaybeJson(row.editable_payload) || parseMaybeJson(row.editablePayload) || parseMaybeJson(row.payload) || {};
+  const payload = parseMaybeJson(row.template_payload) || parseMaybeJson(row.template_payload_json) || parseMaybeJson(row.templatePayload) || parseMaybeJson(row.template_snapshot) || parseMaybeJson(row.templateSnapshot) || parseMaybeJson(row.listing_template) || parseMaybeJson(row.listingTemplate) || parseMaybeJson(row.editable_payload) || parseMaybeJson(row.editablePayload) || parseMaybeJson(row.payload) || {};
   const editable = payload.editable_payload || payload.editablePayload || parseMaybeJson(row.editable_payload_json) || parseMaybeJson(row.editable_payload) || parseMaybeJson(row.editablePayload) || {};
   const normalized = row.normalized || payload.normalized || {};
   const normalizedPayload = normalized.payload || {};
@@ -15,7 +15,7 @@ export function normalizeImportCandidate(row = {}, source = "collector", index =
   const manualFacts = parseMaybeJson(row.manual_facts_json) || parseMaybeJson(row.manual_facts) || row.manualFacts || {};
   const productDetail = row.productDetail || row.product_detail || normalized.productDetail || normalized.product_detail || {};
   const firstVariant = Array.isArray(editable.variants) ? editable.variants[0] : (Array.isArray(payload.variants) ? payload.variants[0] : {});
-  const images = uniqueList(normalizeImageList([
+  const images = source === "draft" ? uniqueList(normalizeImageList(row.effective_images)) : uniqueList(normalizeImageList([
     row.draft_variant_primary_image,
     row.list_image_url,
     row.listImageUrl,
@@ -44,7 +44,7 @@ export function normalizeImportCandidate(row = {}, source = "collector", index =
     normalized.images,
     normalizedPayload.images
   ]));
-  const details = uniqueList(normalizeImageList([
+  const details = source === "draft" ? images.slice(1) : uniqueList(normalizeImageList([
     row.detail_image_urls, row.detailImageUrls, row.detail_images, row.detailImages,
     payload.detail_image_urls, payload.detailImageUrls, payload.detail_images, payload.detailImages,
     editable.detail_image_urls, editable.detailImageUrls, editable.detail_images, editable.detailImages,

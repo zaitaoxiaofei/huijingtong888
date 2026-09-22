@@ -96,7 +96,7 @@ mysqlTest("MySQL order list supports status tabs, print filters, inventory sorti
   assert.equal(all.rows.length, Math.min(5, all.total));
   assert.ok(all.counts.all >= all.total);
 
-  for (const status of ["awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled", "unbound", "pending_purchase"]) {
+  for (const status of ["awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled", "unbound", "pending_purchase", "purchase_in_transit"]) {
     const result = await ordersPagedMysql({ paged: "1", page: 1, pageSize: 5, status });
     assert.equal(result.total, result.counts[status]);
     assert.ok(result.rows.length <= 5);

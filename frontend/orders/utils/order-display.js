@@ -58,6 +58,7 @@ export function buildProductDisplayRows(row = {}) {
   const actualProfitReadyMap = parseSkuMap(row, "sku_actual_profit_ready", (value) => String(value || "") === "1");
   const ozonProductIds = parseSkuMap(row, "sku_ozon_product_ids");
   const productIds = parseSkuMap(row, "sku_product_ids", (value) => Number(value || 0));
+  const inventoryNumbers = parseSkuMap(row, "sku_inventory_numbers");
   const inventoryNames = parseSkuMap(row, "sku_inventory_names");
   const onlineIds = parseSkuMap(row, "sku_online_product_ids", (value) => Number(value || 0));
   const inventoryModes = parseSkuMap(row, "sku_inventory_modes");
@@ -117,6 +118,7 @@ export function buildProductDisplayRows(row = {}) {
       componentCount: componentCountMap.get(sku) || 0,
       productId: productIds.get(sku) || 0,
       inventoryName: inventoryNames.get(sku) || "",
+      inventoryNumber: inventoryNumbers.get(sku) || "",
       onlineId,
       inventoryMode: inventoryModes.get(sku) || (productIds.get(sku) ? "single" : "unbound"),
       ozonProductId,
@@ -124,4 +126,18 @@ export function buildProductDisplayRows(row = {}) {
       productLink: ozonBuyerProductLinkFor(ozonProductId)
     };
   });
+}
+
+export function buildInventoryPickingSummary(rows = [], summary = {}) {
+  const result = [];
+  for (const part of rows) {
+    const matches = summary.inventoryMode === "combo"
+      ? part.sku === summary.sku
+      : Number(part.parent_product_id) === Number(summary.productId);
+    if (!matches) continue;
+    const existing = result.find((item) => Number(item.product_id) === Number(part.product_id));
+    if (existing) existing.required_quantity += Number(part.required_quantity || 0);
+    else result.push({ ...part, required_quantity: Number(part.required_quantity || 0) });
+  }
+  return result;
 }

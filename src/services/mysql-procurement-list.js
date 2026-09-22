@@ -112,8 +112,10 @@ export function groupProcurementRequestsMysql(rows = [], query = {}) {
         total_quantity: 0,
         total_amount: 0,
         total_shipping: 0,
+        operational_shortage: row.operational_shortage,
         stock: Number(row.stock || 0),
         incoming_stock: Number(row.incoming_stock || 0),
+        fbp_transfer_in_transit_qty: Number(row.fbp_transfer_in_transit_qty || 0),
         component_count: Number(row.component_count || 0),
         component_local_stock: Number(row.component_local_stock || 0),
         component_incoming_stock: Number(row.component_incoming_stock || 0),
@@ -127,6 +129,7 @@ export function groupProcurementRequestsMysql(rows = [], query = {}) {
         fbp_snapshot_count: Number(row.fbp_snapshot_count || 0),
         historical_avg_unit_cost: Number(row.historical_avg_unit_cost || 0),
         historical_purchase_count: Number(row.historical_purchase_count || 0),
+        historical_purchase_amount: Number(row.historical_purchase_amount || 0),
         historical_purchased_quantity: Number(row.historical_purchased_quantity || 0),
         historical_order_count: Number(row.historical_order_count || 0),
         historical_outbound_quantity: Number(row.historical_outbound_quantity || 0),
@@ -227,11 +230,13 @@ export function procurementPriorityBreakdownMysql(row = {}, targetStock = 0) {
   const incomingSupply = hasComponents ? Number(row.component_incoming_stock || 0) : Number(row.incoming_stock || 0);
   const inventoryDebt = Math.max(0, -localSupply);
   const incoming = Math.max(0, incomingSupply);
-  const inventoryDebtShortage = Math.max(0, inventoryDebt - incoming);
-  const incomingAfterDebt = Math.max(0, incoming - inventoryDebt);
+  const inventoryDebtShortage = inventoryDebt;
+  const incomingAfterDebt = incoming; // Historical discrepancies are reconciled separately.
   const stockAfterDebt = Math.max(0, localSupply);
   const orderDemand = Math.max(0, Number(row.order_demand_quantity || 0));
-  const realOrderShortage = Math.max(0, orderDemand - stockAfterDebt - incomingAfterDebt);
+  const realOrderShortage = row.operational_shortage == null
+    ? Math.max(0, orderDemand - stockAfterDebt - incomingAfterDebt)
+    : Math.max(0, Number(row.operational_shortage));
   const surplusAfterOrders = Math.max(0, stockAfterDebt + incomingAfterDebt - orderDemand);
   const safetyStockShortage = Math.max(0, Math.ceil(Number(targetStock || 0) - surplusAfterOrders));
   return {
@@ -239,7 +244,7 @@ export function procurementPriorityBreakdownMysql(row = {}, targetStock = 0) {
     inventory_debt_shortage: inventoryDebtShortage, incoming_after_debt: incomingAfterDebt,
     order_demand: orderDemand, real_order_shortage: realOrderShortage,
     safety_stock_shortage: safetyStockShortage,
-    total_priority_shortage: inventoryDebtShortage + realOrderShortage + safetyStockShortage
+    total_priority_shortage: realOrderShortage + safetyStockShortage
   };
 }
 
@@ -249,7 +254,7 @@ function addProcurementDecisionMysql(row, query = {}) {
   const hasComponents = Number(row.component_count || 0) > 0;
   const localSupply = hasComponents ? Number(row.component_local_stock || 0) : Number(row.stock || 0);
   const incomingSupply = hasComponents ? Number(row.component_incoming_stock || 0) : Number(row.incoming_stock || 0);
-  const availableSupply = Math.max(0, localSupply + Math.max(0, incomingSupply));
+  const availableSupply = Math.max(0, localSupply) + Math.max(0, incomingSupply);
   row.effective_stock = localSupply;
   row.effective_incoming_stock = Math.max(0, incomingSupply);
   const available = Math.max(0, availableSupply);
@@ -267,9 +272,13 @@ function addProcurementDecisionMysql(row, query = {}) {
   const replenishmentQty = dailySales > 0 ? Math.max(0, Math.ceil(dailySales * targetDays - available)) : 0;
   const priority = procurementPriorityBreakdownMysql(row, dailySales * targetDays);
   const realOrderShortage = priority.real_order_shortage;
+  const warehouseRequests = (row.requests || []).filter((request) => request.demand_type === "warehouse_request");
+  const warehouseDemandQuantity = warehouseRequests.reduce((sum, request) => sum + Number(request.quantity || 0), 0);
   const manualDemandQuantity = Math.max(0, Number(row.total_quantity || 0) - Number(row.order_demand_quantity || 0));
   const onlyRealOrderRequests = Number(row.order_request_count || 0) > 0
     && Number(row.order_request_count || 0) === Number(row.request_count || 0);
+  const advancePurchaseQty = Math.max(manualDemandQuantity, priority.safety_stock_shortage);
+  const inventoryWarningQty = inventoryWarningQualified ? replenishmentQty : 0;
   row.coverage_days = coverageDays === null ? null : Number(coverageDays.toFixed(1));
   row.target_days = targetDays;
   row.inventory_warning_qualified = inventoryWarningQualified;
@@ -280,11 +289,61 @@ function addProcurementDecisionMysql(row, query = {}) {
   row.incoming_after_debt = priority.incoming_after_debt;
   row.safety_stock_shortage = priority.safety_stock_shortage;
   row.priority_level = realOrderShortage > 0 ? "P0" : priority.inventory_debt_shortage > 0 ? "P1" : "P2";
-  row.priority_label = realOrderShortage > 0 ? "订单履约优先" : priority.inventory_debt_shortage > 0 ? "负库存恢复" : "安全库存补货";
+  row.priority_label = realOrderShortage > 0 ? "订单履约优先" : priority.inventory_debt_shortage > 0 ? "历史库存待核" : "安全库存补货";
   const realOrderOnlyView = String(query.demandType || query.demand_type || "all") === "real_order";
   row.suggested_purchase_qty = realOrderOnlyView
     ? realOrderShortage
     : Math.max(manualDemandQuantity, priority.total_priority_shortage, inventoryWarningQualified ? replenishmentQty : 0);
+  row.suggestion_reasons = [];
+  if (realOrderShortage > 0) {
+    row.suggestion_reasons.push({
+      type: "real_order",
+      label: "真实订单需求",
+      quantity: realOrderShortage,
+      text: `真实订单：${row.order_request_count} 个待发订单需采购 ${realOrderShortage} 件`
+    });
+  }
+  if (!realOrderOnlyView && inventoryWarningQty > 0) {
+    row.suggestion_reasons.push({
+      type: "inventory_warning",
+      label: "库存不足7天",
+      quantity: inventoryWarningQty,
+      text: `库存不足7天：按近30天日均销量覆盖 ${targetDays} 天日常备货，建议 ${inventoryWarningQty} 件`
+    });
+  }
+  if (!realOrderOnlyView && advancePurchaseQty > 0) {
+    const coverageText = dailySales > 0
+      ? `按近30天日均销量覆盖 ${targetDays} 天日常备货`
+      : "补足提前采购需求";
+    row.suggestion_reasons.push({
+      type: "advance_stock",
+      label: "提前采购",
+      quantity: advancePurchaseQty,
+      text: `提前采购：${coverageText}，建议 ${advancePurchaseQty} 件`
+    });
+  }
+  if (warehouseDemandQuantity > 0) {
+    row.suggestion_reasons.push({
+      type: "warehouse_request",
+      label: "库存采购申请",
+      quantity: warehouseDemandQuantity,
+      text: `库存采购申请：${warehouseRequests.length} 条，共建议 ${warehouseDemandQuantity} 件`
+    });
+  }
+  if (!realOrderOnlyView && inventoryWarningQualified && fbpShortage) {
+    row.suggestion_reasons.push({
+      type: "fbp",
+      label: "FBP备货需求",
+      text: "FBP备货联动：FBP 与本地可用库存不足近7天销量；各 SKU 的备货和建议采购数量以 FBP 备货建议为准"
+    });
+  }
+  const primarySuggestionTypes = ["real_order", "warehouse_request", "inventory_warning", "advance_stock"];
+  row.primary_suggestion_reason = primarySuggestionTypes
+    .map((type) => row.suggestion_reasons.find((reason) => reason.type === type))
+    .find(Boolean) || null;
+  row.primary_suggested_purchase_qty = Number(
+    row.primary_suggestion_reason?.quantity || row.suggested_purchase_qty || 0
+  );
   row.procurement_required = realOrderOnlyView
     ? realOrderShortage > 0
     : Boolean(row.automation_exceptions?.length) || !onlyRealOrderRequests || realOrderShortage > 0;
@@ -294,8 +353,10 @@ function addProcurementDecisionMysql(row, query = {}) {
   }
   row.demand_reason = [
     realOrderShortage > 0 ? `待发订单缺口 ${realOrderShortage} 件` : "",
-    priority.inventory_debt_shortage > 0 ? `在途抵扣后仍欠库存 ${priority.inventory_debt_shortage} 件` : "",
-    priority.safety_stock_shortage > 0 ? `安全库存缺口 ${priority.safety_stock_shortage} 件` : ""
+    inventoryWarningQty > 0 ? `库存不足7天，建议日常备货 ${inventoryWarningQty} 件` : "",
+    priority.inventory_debt_shortage > 0 ? `历史库存差异 ${priority.inventory_debt_shortage} 件，单独核对，不计本次采购` : "",
+    priority.safety_stock_shortage > 0 ? `安全库存缺口 ${priority.safety_stock_shortage} 件` : "",
+    !realOrderOnlyView && inventoryWarningQualified && fbpShortage ? "FBP备货与本地库存联动不足，具体备货以 FBP 备货建议为准" : ""
   ].filter(Boolean).join("；") || "现货与在途可以覆盖当前需求";
   return row;
 }

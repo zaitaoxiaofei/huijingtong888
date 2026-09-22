@@ -25,9 +25,10 @@ test("AI variant lab defaults draft imports to the current user and exposes comm
   assert.match(importDialogSource, /apiClient\.get\("\/api\/shops"/);
 });
 
-test("draft import prefers edited variant image before template and source images", () => {
+test("draft import uses backend effective images without appending template or source images", () => {
   const candidate = normalizeImportCandidate({
     id: 940,
+    effective_images: ["/uploads/listing-media/edited.jpg", "/uploads/listing-media/detail.jpg"],
     product_name: "Draft product",
     draft_variant_primary_image: "/uploads/listing-media/edited.jpg",
     draft_template_primary_image: "/uploads/listing-media/template.jpg",
@@ -36,16 +37,16 @@ test("draft import prefers edited variant image before template and source image
 
   assert.equal(candidate.imageUrl, "/uploads/listing-media/edited.jpg");
   assert.deepEqual(candidate.detailImages, [
-    "/uploads/listing-media/template.jpg",
-    "/uploads/listing-media/source.jpg"
+    "/uploads/listing-media/detail.jpg"
   ]);
 });
 
-test("draft import uses the current draft list thumbnail before stale source images", () => {
+test("draft import accepts media objects and ignores stale list thumbnails", () => {
   const candidate = normalizeImportCandidate({
     id: 1713,
+    effective_images: [{ url: "/uploads/listing-media/current-draft.png" }],
     product_name: "Current draft product",
-    list_image_url: "/uploads/listing-media/current-draft.png",
+    list_image_url: "/uploads/listing-media/stale.png",
     source_images_json: JSON.stringify([
       "https://collector.example/oldest.jpg",
       "https://collector.example/second.jpg"
@@ -53,10 +54,7 @@ test("draft import uses the current draft list thumbnail before stale source ima
   }, "draft");
 
   assert.equal(candidate.imageUrl, "/uploads/listing-media/current-draft.png");
-  assert.deepEqual(candidate.detailImages, [
-    "https://collector.example/oldest.jpg",
-    "https://collector.example/second.jpg"
-  ]);
+  assert.deepEqual(candidate.detailImages, []);
 });
 
 test("draft import prefers editable title over stale list product name", () => {
@@ -374,4 +372,31 @@ test("AI material optimizer recovers interrupted generation and hides prompts be
   assert.match(optimizerSource, /v-model="promptReviewDialog\.visible"/);
   assert.match(optimizerSource, /按当前提示词重新生成/);
   assert.doesNotMatch(optimizerSource, /:model-value="\['prompts'\]"/);
+});
+
+
+test("draft import preserves a manually emptied effective image set", () => {
+  const candidate = normalizeImportCandidate({
+    id: 1740,
+    effective_images: [],
+    list_image_url: "/old-list.jpg",
+    source_images_json: '["/old-source.jpg"]',
+    detail_images: ["/old-detail.jpg"],
+    template_payload: {
+      images: ["/old-template.jpg"],
+      editable_payload: { variants: [{ images: [], images_manually_edited: true }] }
+    }
+  }, "draft");
+  assert.equal(candidate.imageUrl, "");
+  assert.deepEqual(candidate.detailImages, []);
+});
+
+test("draft import prefers the normalized current payload to a raw snapshot", () => {
+  const candidate = normalizeImportCandidate({
+    id: 1741,
+    template_payload_json: JSON.stringify({ editable_payload: { title: "Old title" } }),
+    template_payload: { editable_payload: { title: "Current title" } },
+    effective_images: ["/current.jpg"]
+  }, "draft");
+  assert.equal(candidate.title, "Current title");
 });

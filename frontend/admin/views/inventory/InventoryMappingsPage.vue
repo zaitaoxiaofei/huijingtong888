@@ -61,7 +61,7 @@ const returnTo = computed(() => String(route.query.returnTo || ""));
 const cameFromProducts = computed(() => String(route.query.from || "") === "inventory-products");
 
 const pagedRows = computed(() => state.rows);
-const productOptions = computed(() => state.products.map((item) => ({ label: `${item.name} / ${item.inventory_id || item.code || item.id}`, value: item.id })));
+const productOptions = computed(() => state.products.map((item) => ({ label: `${item.name} / ${item.inventory_number || item.inventory_id || item.code || item.id}`, value: item.id })));
 const pagedProductSpans = computed(() => {
   const spans = [];
   let index = 0;
@@ -267,7 +267,7 @@ onMounted(async () => {
     <div v-if="focusProductId" class="mapping-focus-banner">
       <div class="mapping-focus-copy">
         <strong>{{ focusedProduct?.name || "当前产品" }}</strong>
-        <span>{{ focusedProduct?.inventory_id || focusedProduct?.code || `产品ID ${focusProductId}` }}</span>
+        <span class="inventory-id-display">库存 ID：{{ focusedProduct?.inventory_number || focusedProduct?.inventory_id || focusedProduct?.code || `产品ID ${focusProductId}` }}</span>
         <span>当前只显示这个产品对应的 SKU 绑定。</span>
       </div>
       <div class="mapping-focus-actions">
@@ -297,7 +297,7 @@ onMounted(async () => {
               <ProductImagePreview :src="row.product_image_url" />
               <div class="cell-stack">
                 <ProductTitleLink :title="row.product_name || '-'" :lines="2" />
-                <span class="muted-text">{{ row.inventory_id || row.product_code || "-" }}</span>
+                <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || row.product_code || "-" }}</span>
                 <span class="muted-text">已绑定 {{ productBindingCount(row) }} 个 SKU</span>
               </div>
             </div>
@@ -389,7 +389,7 @@ onMounted(async () => {
   font-size: 15px;
 }
 
-.mapping-focus-copy span {
+.mapping-focus-copy span:not(.inventory-id-display) {
   color: var(--el-text-color-secondary);
   font-size: 13px;
 }

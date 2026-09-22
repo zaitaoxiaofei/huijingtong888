@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS people (
   name VARCHAR(255) NOT NULL,
   username VARCHAR(255) NULL,
   role VARCHAR(64) NOT NULL DEFAULT 'operator',
+  roles_json JSON NULL,
   avatar_url TEXT NULL,
   active TINYINT(1) NOT NULL DEFAULT 1,
   password_hash TEXT NULL,
@@ -266,11 +267,20 @@ CREATE TABLE IF NOT EXISTS system_setting_changes (
   KEY idx_system_setting_changes_person (updated_by_person_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE IF NOT EXISTS team_operational_owners (
+      work_type VARCHAR(64) NOT NULL PRIMARY KEY,
+      owner_person_id BIGINT UNSIGNED NULL,
+      term_until DATE NULL,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+INSERT IGNORE INTO team_operational_owners (work_type) VALUES ('procurement_daily'), ('shipping_daily');
+
 CREATE TABLE IF NOT EXISTS team_tasks (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   title VARCHAR(255) NOT NULL,
   work_type VARCHAR(64) NOT NULL,
   owner_person_id BIGINT UNSIGNED NULL,
+  owner_manually_assigned TINYINT(1) NOT NULL DEFAULT 0,
   collaborator_person_ids_json LONGTEXT NULL,
   period VARCHAR(32) NOT NULL DEFAULT 'week',
   status VARCHAR(32) NOT NULL DEFAULT 'todo',
@@ -460,6 +470,22 @@ CREATE TABLE IF NOT EXISTS procurement_requests (
   KEY idx_procurement_request_group (request_group_no),
   KEY idx_procurement_binding_status (binding_status, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS procurement_ledger_actions (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    request_key VARCHAR(80) NOT NULL, product_id BIGINT UNSIGNED NOT NULL,
+    action_type VARCHAR(40) NOT NULL, person_id BIGINT UNSIGNED NOT NULL,
+    reason TEXT NOT NULL, before_json JSON NOT NULL, result_json JSON NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_ledger_request (request_key), KEY idx_ledger_product (product_id, id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS procurement_history_sources (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    action_id BIGINT UNSIGNED NOT NULL, order_item_id BIGINT UNSIGNED NOT NULL,
+    product_id BIGINT UNSIGNED NOT NULL, quantity INT NOT NULL, inbound_record_id BIGINT UNSIGNED NULL,
+    UNIQUE KEY uk_history_source (action_id, order_item_id, product_id),
+    KEY idx_history_source_item (order_item_id, product_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS purchase_orders (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -676,6 +702,10 @@ CREATE TABLE IF NOT EXISTS inbound_records (
   purchase_order_item_id BIGINT UNSIGNED NULL,
   procurement_request_id BIGINT UNSIGNED NULL,
   qc_status VARCHAR(32) NULL,
+  courier_company VARCHAR(128) NULL,
+  tracking_number VARCHAR(128) NULL,
+  receipt_images_json JSON NULL,
+  received_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   approved_at DATETIME NULL,
@@ -1355,6 +1385,8 @@ CREATE TABLE IF NOT EXISTS product_development_candidates (
 CREATE TABLE IF NOT EXISTS product_development_ideas (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   title VARCHAR(255) NOT NULL, image_url TEXT NULL, source_url TEXT NULL, note TEXT NULL,
+  development_brand VARCHAR(255) NOT NULL DEFAULT '', development_category VARCHAR(255) NOT NULL DEFAULT '',
+  development_matrix_enabled TINYINT(1) NOT NULL DEFAULT 0,
   urgency TINYINT UNSIGNED NOT NULL DEFAULT 5, importance TINYINT UNSIGNED NOT NULL DEFAULT 5,
   created_by_person_id BIGINT UNSIGNED NULL, product_id BIGINT UNSIGNED NULL, candidate_id BIGINT UNSIGNED NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'idea', active TINYINT(1) NOT NULL DEFAULT 1,
@@ -1398,8 +1430,10 @@ try {
     "ALTER TABLE shops ADD COLUMN watermark_scale_percent DECIMAL(8,4) NOT NULL DEFAULT 22.0000",
     "ALTER TABLE shops ADD COLUMN watermark_opacity_percent DECIMAL(8,4) NOT NULL DEFAULT 82.0000",
     "ALTER TABLE people ADD COLUMN password_hash TEXT NULL",
+    "ALTER TABLE people ADD COLUMN roles_json JSON NULL",
     "ALTER TABLE people ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
     "ALTER TABLE people ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+    "ALTER TABLE team_operational_owners ADD COLUMN term_until DATE NULL",
     "ALTER TABLE team_tasks ADD COLUMN automation_key VARCHAR(128) NULL",
     "ALTER TABLE products ADD COLUMN supplier_id BIGINT UNSIGNED NULL",
     "ALTER TABLE products ADD COLUMN listing_title_ru TEXT NULL",

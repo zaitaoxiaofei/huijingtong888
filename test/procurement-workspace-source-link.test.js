@@ -42,6 +42,12 @@ test("procurement workspace supports inventory demand decisions and batch purcha
   assert.match(page, /apiClient\.get\(`\/api\/products\/\$\{productId\}`/);
   assert.match(page, /:value="inventoryEditorValue"/);
   assert.match(page, /个关联订单/);
+  assert.match(page, /purchase-suggestion-reason/);
+  assert.match(page, /查看 FBP 备货建议/);
+  assert.match(page, /建议采购 \{\{ Number\(row\.suggested_purchase_qty/);
+  assert.match(listService, /suggestion_reasons/);
+  assert.match(listService, /FBP备货联动/);
+  assert.match(service, /COALESCE\(NULLIF\(p\.inventory_number, ''\)/);
   assert.match(page, /height="calc\(100vh - 350px\)"/);
   assert.match(page, /height="calc\(100vh - 300px\)"/);
   assert.match(page, /source_order_image_url/);

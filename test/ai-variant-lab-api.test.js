@@ -84,6 +84,9 @@ test("vehicle presets produce distinct enforceable image contracts", () => {
   });
   assert.ok(full.replace_zones.includes("background_vehicle_cues"));
   assert.ok(full.replace_zones.includes("editable_brand_text"));
+  const fullContractPrompt = read("src/services/ai-variant-lab.js");
+  assert.match(fullContractPrompt, /The background vehicle is editable semantic content, not a preserved layout element/);
+  assert.match(fullContractPrompt, /independently identify the real Russia-market exterior/);
 
   const sameBrand = buildImageEditContract({
     variantType: "vehicle_model_swap",
@@ -120,6 +123,15 @@ test("vehicle presets produce distinct enforceable image contracts", () => {
   assert.ok(brandLogoWithProtectedModelText.replace_zones.includes("editable_brand_text"));
   assert.ok(!brandLogoWithProtectedModelText.replace_zones.includes("logo_or_badge_text"));
   assert.equal(brandLogoWithProtectedModelText.logo_policy.preserve_product_printed_logo, false);
+
+  const modelOnly = buildImageEditContract({ variantType: "model_only_vehicle_fission", source: "TENET T4", target: "BELGEE X50" });
+  assert.ok(modelOnly.replace_zones.includes("editable_model_text"));
+  assert.ok(modelOnly.preserve_zones.includes("product_brand_text"));
+  assert.equal(modelOnly.logo_policy.target_model_on_product, "model_only");
+
+  const titleOnlyContract = buildImageEditContract({ variantType: "title_only_vehicle_fission", source: "TENET T4", target: "TENET T8" });
+  assert.deepEqual(titleOnlyContract.replace_zones, ["large_title_text", "model_text"]);
+  assert.ok(titleOnlyContract.preserve_zones.includes("background_vehicle_cues"));
 });
 
 test("AI variant generation is disconnected from brand assets and forbids official logo graphics", () => {
@@ -132,8 +144,8 @@ test("AI variant generation is disconnected from brand assets and forbids offici
   assert.doesNotMatch(runtimeServices, /ai-brand-assets|aiBrandAssets|registerAiBrandAsset/);
   assert.match(service, /plain_text_only/);
   assert.match(service, /never generate, copy, reconstruct, imitate, or use a reference image for an official automotive logo/);
-  assert.match(view, /跨品牌文字替换/);
-  assert.match(view, /只使用清晰文本/);
+  assert.match(view, /跨品牌品牌适配/);
+  assert.match(view, /品牌纯文本/);
 });
 
 test("same-brand operator rule removes product logo from variable recognition facts", () => {
@@ -376,7 +388,6 @@ test("ai variant case library saves template snapshots and has frontend entry", 
   assert.match(service, /sample_assets/);
   assert.match(routes, /parts\[2\] === "cases"/);
   assert.match(routes, /services\.aiVariantLabDeleteCase/);
-  assert.match(routes, /aiVariantLabDeleteCases/);
   assert.match(labView, /apiClient\.post\("\/api\/ai-variant-lab\/cases"/);
   assert.match(labView, /function verifySavedCase/);
   assert.match(labView, /\/api\/ai-variant-lab\/cases\/\$\{encodeURIComponent\(key\)\}/);
@@ -407,11 +418,6 @@ test("ai variant case library saves template snapshots and has frontend entry", 
   assert.match(caseView, /\/api\/ai-variant-lab\/cases/);
   assert.match(caseView, /apiClient\.delete\(`\/api\/ai-variant-lab\/cases\/\$\{encodeURIComponent\(caseNo\)\}`\)/);
   assert.match(caseView, /function deleteCase/);
-  assert.match(caseView, /function deleteSelectedCases/);
-  assert.match(caseView, /cases\/batch-delete/);
-  assert.match(caseView, /@selection-change="onCaseSelectionChange"/);
-  assert.match(caseView, /type="selection"/);
-  assert.match(caseView, /\slazy\s/);
   assert.match(caseView, /shanghaiDateTimeText/);
   assert.match(caseView, /快速裂变/);
   assert.match(caseView, /加载失败/);
@@ -1381,4 +1387,3 @@ test("AI variant lab can select failed rows and avoids overlapping heavy polling
   const regenerateBlock = view.slice(view.indexOf("async function regenerateRowMainImage"), view.indexOf("function uploadRowMainImageRequest"));
   assert.doesNotMatch(regenerateBlock, /await loadBatchJobDetail/);
 });
-

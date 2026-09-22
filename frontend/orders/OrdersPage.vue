@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, Plus } from "@element-plus/icons-vue";
 import zhCn from "element-plus/es/locale/lang/zh-cn";
 import OrdersStatusTabs from "./components/OrdersStatusTabs.vue";
+import ShippedReceiptDialog from "./components/ShippedReceiptDialog.vue";
 import OrdersTable from "./components/OrdersTable.vue";
 import OrdersToolbar from "./components/OrdersToolbar.vue";
 import PageFooterPagination from "../admin/components/PageFooterPagination.vue";
@@ -20,9 +21,10 @@ import {
   SEARCH_TYPE_OPTIONS,
   STATE_META
 } from "./constants/orders-ui.js";
-import { buildProductDisplayRows, firstCsvValue, splitCsv } from "./utils/order-display.js";
+import { buildInventoryPickingSummary, buildProductDisplayRows, firstCsvValue, splitCsv } from "./utils/order-display.js";
 import { formatDateTime, formatLogisticsRuleLabel, formatMoney, formatPercent, formatSignedMoney, moneyValueClass } from "./utils/order-format.js";
 import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order-profit-detail.js";
+import { orderPurchaseDetails } from "./utils/order-procurement-detail.js";
 import { inventoryProductNameGroup, scoreInventorySimilarity } from "../admin/utils/inventory-similarity.js";
 import { previewOrderLabels } from "./services/orders-service.js";
 import "./orders-view.css";
@@ -419,11 +421,11 @@ const orderProcurementSelectedQuantity = computed(() => {
 
 function inventoryProductLabel(row) {
   if (!row) return "";
-  return row.name || row.inventory_id || row.code || `#${row.id}`;
+  return row.name || row.inventory_number || row.inventory_id || row.code || `#${row.id}`;
 }
 
 function inventoryProductCode(row) {
-  return row?.inventory_id || row?.code || row?.selection_id || `#${row?.id || "-"}`;
+  return row?.inventory_number || row?.inventory_id || row?.code || row?.selection_id || `#${row?.id || "-"}`;
 }
 
 function inventoryProductSkuText(row) {
@@ -485,11 +487,11 @@ function inventoryProductLocalStock(row) {
 }
 
 function recipeItemLabel(item) {
-  return item?.product_name || item?.name || item?.inventory_id || item?.code || `#${item?.product_id || item?.id || "-"}`;
+  return item?.product_name || item?.name || item?.inventory_number || item?.inventory_id || item?.code || `#${item?.product_id || item?.id || "-"}`;
 }
 
 function recipeItemCode(item) {
-  return item?.inventory_id || item?.code || `#${item?.product_id || item?.id || "-"}`;
+  return item?.inventory_number || item?.inventory_id || item?.code || `#${item?.product_id || item?.id || "-"}`;
 }
 
 function recipeItemImage(item) {
@@ -608,13 +610,13 @@ function rowStateLabel(row) {
 
   if (text.includes("return")) return "已退货";
   if (text.includes("reject") || text.includes("not_accepted") || text.includes("unclaimed")) return "拒收/未领取";
-  if (["awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service", "posting_transferring", "posting_in_carriage", "posting_transferring_to_delivery"].some((value) => text.includes(value))) {
+  if (["awaiting_registration", "posting_registration_error", "awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service", "posting_transferring", "posting_in_carriage", "posting_transferring_to_delivery"].some((value) => text.includes(value))) {
     return "等待发货";
   }
   if (["delivering", "transferring", "carriage", "pickup", "sorting", "customs", "shipped", "sent", "on_way", "发往", "已上网", "发走"].some((value) => text.includes(value))) {
     return "运输中";
   }
-  if (["awaiting_registration", "acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_awaiting_registration", "posting_acceptance_in_progress"].some((value) => text.includes(value))) {
+  if (["acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_acceptance_in_progress"].some((value) => text.includes(value))) {
     return "等待备货";
   }
   if (text.includes("delivered")) return "已签收";
@@ -632,13 +634,13 @@ function rowDisplayStateKey(row) {
 
   if (text.includes("return")) return "returned";
   if (text.includes("reject") || text.includes("not_accepted") || text.includes("unclaimed")) return "rejected";
-  if (["awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service", "posting_transferring", "posting_in_carriage", "posting_transferring_to_delivery"].some((value) => text.includes(value))) {
+  if (["awaiting_registration", "posting_registration_error", "awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service", "posting_transferring", "posting_in_carriage", "posting_transferring_to_delivery"].some((value) => text.includes(value))) {
     return "awaiting_deliver";
   }
   if (["delivering", "transferring", "carriage", "pickup", "sorting", "customs", "shipped", "sent", "on_way", "发往", "已上网", "发走"].some((value) => text.includes(value))) {
     return "delivering";
   }
-  if (["awaiting_registration", "acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_awaiting_registration", "posting_acceptance_in_progress"].some((value) => text.includes(value))) {
+  if (["acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_acceptance_in_progress"].some((value) => text.includes(value))) {
     return "awaiting_packaging";
   }
   if (text.includes("delivered")) return "delivered";
@@ -650,6 +652,13 @@ function rowDisplayStateKey(row) {
 function rowStateColor(row) {
   const key = rowDisplayStateKey(row);
   return STATE_META[key]?.color || "slate";
+}
+
+function rowRegistrationHint(row) {
+  const text = [row?.status, row?.tracking_stage, row?.logistics_status].join(" ").toLowerCase();
+  if (text.includes("posting_registration_error")) return "Ozon 配送注册子状态：注册异常。此状态本身不代表面单下载或发货失败。";
+  if (text.includes("awaiting_registration")) return "已备货，正在安排配送";
+  return "";
 }
 
 function rowAvailableActions(row) {
@@ -674,7 +683,7 @@ function rowAvailableActions(row) {
     row?.logistics_channel,
     row?.delivery_schema
   ].map((item) => String(item || "").toLowerCase()).join(" ");
-  const isFbp = logisticsText.includes("fbp")
+  const isFbp = row.procurement_coverage?.stock_location === "FBP" || row.fulfillment_type_key === "fbp" || logisticsText.includes("fbp")
     || logisticsText.includes("hunchun")
     || logisticsText.includes("hun chun")
     || logisticsText.includes("鐝叉槬")
@@ -686,9 +695,12 @@ function rowAvailableActions(row) {
   const showPrepare = beforeTransit && !isFbp && isAwaitingPackaging && apiActions.prepare !== false;
   const quantitySummary = Number(row?.total_quantity || row?.quantity_total || row?.quantity || row?.item_count || 1);
   const showSplitPrepare = beforeTransit && !isFbp && quantitySummary > 1 && (isAwaitingPackaging || isAwaitingDeliver);
-  const showPurchase = beforeTransit && (isAwaitingDeliver || isAwaitingPackaging) && apiActions.purchase !== false;
+  const showPurchase = beforeTransit && !isFbp && (isAwaitingDeliver || isAwaitingPackaging) && apiActions.purchase !== false;
   const showPrint = beforeTransit && isAwaitingDeliver && apiActions.print !== false;
-  const canPrint = showPrint && !isFbp && (Boolean(apiActions.print) || printed || isAwaitingDeliver);
+  const isRegistering = statusText.includes("awaiting_registration") || statusText.includes("posting_registration_error");
+  const ozonActions = Array.isArray(row?.ozon_available_actions) ? row.ozon_available_actions : [];
+  const labelReady = ozonActions.some((action) => ["label_download", "label_download_small"].includes(action));
+  const canPrint = showPrint && !isFbp && (!isRegistering || labelReady) && (Boolean(apiActions.print) || printed || isAwaitingDeliver);
   return {
     ...apiActions,
     print: canPrint,
@@ -804,6 +816,26 @@ function buildStatusDeadlineHint(displayStateKey, logisticsSummary) {
 }
 
 function buildProcurementState(row = {}) {
+  const coverage = row.procurement_coverage;
+  if (coverage?.stock_location === 'FBP' || row.fulfillment_type_key === 'fbp') {
+    return { handled: true, detail: '官方仓履约，无需采购', hasOrderIncoming: false, inboundRecordCount: 0 };
+  }
+  if (coverage) {
+    const batches = (coverage.batches || []).filter(batch => batch.status === 'pending_arrival');
+    const first = batches[0] || {};
+    const purchases = orderPurchaseDetails(coverage.batches);
+    const days = first.created_at ? Math.max(0, Math.floor((Date.now() - new Date(first.created_at).getTime()) / 86400000)) : 0;
+    return { ...coverage, handled: !coverage.shortage_quantity && !coverage.quantity_needs_review,
+      detail: coverage.incoming_quantity > 0 ? '采购在途' : '库存可满足', hasOrderIncoming: coverage.incoming_quantity > 0,
+      inTransitDays: days, overdue: !coverage.entered_transport && days >= 3, latestPurchaseAt: first.created_at || '',
+      inboundRecordId: batches.length === 1 ? Number(first.id) : null, inboundRecordCount: batches.length,
+      canRegisterOrderReceipt: batches.length > 0,
+      purchaseSummary: purchases.map(item => `${item.quantity} ${item.unit}`).join(' / '),
+      inboundDetails: { personName: first.person_name || '未记录', purchaseOrderNo: first.purchase_order_no || '未记录',
+        productName: first.product_name || '', quantity: Number(first.purchase_quantity ?? first.quantity ?? 0),
+        amount: Number(first.amount || 0), shippingAmount: Number(first.shipping_amount || 0), purchasedAt: first.created_at || '' }
+    };
+  }
   const total = Number(row.procurement_total_item_count || 0);
   const handled = Number(row.procurement_handled_item_count || 0);
   const allocatedQuantity = Number(row.procurement_allocated_quantity || 0);
@@ -841,6 +873,7 @@ function buildProcurementState(row = {}) {
     productIncomingQuantity,
     inboundRecordId,
     inboundRecordCount: inboundRecordIds.length,
+    canRegisterOrderReceipt: inboundRecordIds.length > 0 && hasOrderIncoming,
     inboundDetails
   };
   const types = splitCsv(row.procurement_handling_types);
@@ -872,74 +905,164 @@ function buildProcurementState(row = {}) {
     productIncomingQuantity,
     inboundRecordId,
     inboundRecordCount: inboundRecordIds.length,
+    canRegisterOrderReceipt: inboundRecordIds.length > 0 && hasOrderIncoming,
     inboundDetails
   };
 }
 
-function procurementDetailRows(row) {
-  const details = row?.procurementState?.inboundDetails || {};
-  const totalAmount = Number(details.amount || 0) + Number(details.shippingAmount || 0);
-  return [
-    ["采购人员", details.personName || "未记录"],
-    ["采购时间", formatDateTime(details.purchasedAt)],
-    ["采购单号", details.purchaseOrderNo || "未记录"],
-    ["商品名称", details.productName || "未记录"],
-    ["采购数量", `${Number(details.quantity || 0)} 件`],
-    ["商品金额", `¥${formatMoney(details.amount || 0)}`],
-    ["采购运费", `¥${formatMoney(details.shippingAmount || 0)}`],
-    ["采购合计", `¥${formatMoney(totalAmount)}`]
-  ];
-}
-
-function procurementDetailContent(row, intro) {
-  return h("div", { class: "orders-inbound-confirm" }, [
-    h("p", intro),
-    h("div", { class: "orders-inbound-confirm-grid" }, procurementDetailRows(row).flatMap(([label, value]) => [
-      h("span", { class: "orders-inbound-confirm-label" }, label),
-      h("strong", value)
-    ]))
-  ]);
+function procurementDetailContent(row) {
+  const purchases = orderPurchaseDetails(row.procurement_coverage?.batches).filter((purchase) => purchase.pending > 0);
+  const coverage = row.procurement_coverage;
+  return h("div", { class: "orders-inbound-confirm" }, purchases.map((purchase) => {
+    const inventory = (row.inventorySummaries || []).find((item) => Number(item.productId) === purchase.productId) || {};
+    const itemCoverage = (coverage?.items || []).find((item) => Number(item.product_id) === purchase.productId) || {};
+    const inventoryName = inventory.productName || purchase.productName;
+    const inventoryNumber = inventory.inventoryNumber || '';
+    const orderNeed = Number(itemCoverage.quantity || 0);
+    const incoming = Number(itemCoverage.incoming_quantity || 0);
+    const status = purchase.received > 0 ? '部分收货，在途' : '采购在途';
+    const unitPrice = purchase.quantity > 0 ? `¥${formatMoney(purchase.amount / purchase.quantity)} / ${purchase.unit}` : '数量待核';
+    const infoRows = [
+      ['采购人员', purchase.personName || '未记录'],
+      ['采购时间', `${formatDateTime(purchase.purchasedAt)}（北京时间）`],
+      ['采购总量', `${purchase.quantity} ${purchase.unit}`, 'is-primary'],
+      ...(orderNeed > 0 ? [['本单需求', `本单 ${orderNeed} ${purchase.unit}，在途覆盖 ${incoming} ${purchase.unit}`, 'is-muted']] : []),
+      ['收货状态', status],
+      ['采购单价', unitPrice]
+    ];
+    return h('section', { class: 'orders-procurement-compact-card', key: purchase.key }, [
+      h('header', { class: 'orders-procurement-compact-header' }, [
+        h('strong', inventoryName),
+        inventoryNumber ? h('small', `库存号：${inventoryNumber}`) : null
+      ]),
+      h('div', { class: 'orders-inbound-confirm-grid' }, infoRows.flatMap(([label, value, className]) => [
+        h('span', { class: 'orders-inbound-confirm-label' }, label),
+        h('strong', { class: className || '' }, value)
+      ]))
+    ]);
+  }));
 }
 
 async function handleViewProcurementDetails(row) {
+  const procurement = await loadOrderProcurementBatches(row);
   await ElMessageBox.alert(
-    procurementDetailContent(row, "该订单关联的具体采购内容如下："),
+    procurementDetailContent(procurement),
     "采购内容",
     { customClass: "orders-inbound-confirm-dialog", confirmButtonText: "知道了" }
   );
 }
 
-async function handleConfirmProcurementInbound(row) {
-  const inboundRecordId = Number(row?.procurementState?.inboundRecordId || 0);
-  if (!inboundRecordId) {
-    ElMessage.warning("该商品存在多个待入库批次，请到采购待入库页面逐条核对");
+async function openOrderProcurementRecords(row) {
+  const item = (row?.procurement_coverage?.items || []).find((entry) => Number(entry.product_id || 0) > 0);
+  if (!item) {
+    ElMessage.warning("该订单尚未绑定库存商品，无法打开采购明细");
     return;
   }
-  if (confirmingInboundRecordId.value === inboundRecordId) return;
+  const inventory = (row.inventorySummaries || []).find((entry) => Number(entry.productId) === Number(item.product_id)) || {};
+  await router.push({
+    path: "/purchase-list",
+    query: {
+      productId: String(item.product_id),
+      orderId: String(row.id),
+      orderItemId: item.order_item_id ? String(item.order_item_id) : undefined,
+      quantity: String(Math.max(1, Number(row.procurement_coverage?.missing_record_quantity || item.shortage_quantity || item.quantity || 1))),
+      productName: inventory.productName || item.product_name || undefined,
+      orderNo: row.orderTitle || undefined
+    }
+  });
+}
+
+async function loadOrderProcurementBatches(row) {
+  const result = await apiClient.get(`/api/orders/${Number(row.id)}/procurement-batches`, { noCache: true });
+  return {
+    ...row,
+    procurement_coverage: {
+      ...(row.procurement_coverage || {}),
+      batches: Array.isArray(result?.batches) ? result.batches : [],
+      items: Array.isArray(result?.items) ? result.items : []
+    }
+  };
+}
+
+const shippedReceiptDialog = reactive({ visible: false, loading: false, saving: false, orderIds: [], records: [], skipped: [], sourceOrderId: null });
+const procurementReceiptDialog = reactive({ visible: false, saving: false, orderId: null, batches: [] });
+async function previewShippedReceipts(orderIds = [...selectedOrderIds.value]) {
+  if (shippedReceiptDialog.loading || shippedReceiptDialog.saving) return;
+  if (!orderIds.length) { ElMessage.warning('请先勾选需要核对的已运输订单'); return; }
+  shippedReceiptDialog.loading = true;
   try {
-    await ElMessageBox.confirm(
-      procurementDetailContent(row, "请核对以下采购信息。确认后将增加本地库存，并记录当前操作人："),
-      "确认入库",
-      {
-        customClass: "orders-inbound-confirm-dialog",
-        confirmButtonText: "确认入库",
-        cancelButtonText: "取消"
-      }
-    );
-    confirmingInboundRecordId.value = inboundRecordId;
-    await apiClient.post("/api/inbound-records/batch-update", {
-      records: [{ id: inboundRecordId, payload: { status: "approved", qc_status: "approved" } }]
-    });
-    ElMessage.success("确认入库成功");
-    void loadOrders({ forceRefresh: true, silent: true })
-      .catch((error) => ElMessage.warning(error?.message || "入库成功，订单状态刷新失败，请手动刷新"))
-      .finally(() => {
-        if (confirmingInboundRecordId.value === inboundRecordId) confirmingInboundRecordId.value = 0;
-      });
+    const result = await apiClient.post('/api/inbound-records/shipped-receipts/preview', { order_ids: orderIds });
+    Object.assign(shippedReceiptDialog, { visible: true, orderIds: [...orderIds], records: result.records, skipped: result.skipped,
+      sourceOrderId: orderIds.length === 1 ? Number(orderIds[0]) : null });
+  } catch (error) { ElMessage.error(error.message || '预览失败，请稍后重试'); }
+  finally { shippedReceiptDialog.loading = false; }
+}
+async function reviewShippedProcurementRecords() {
+  const row = tableRows.value.find(item => Number(item.id) === Number(shippedReceiptDialog.sourceOrderId));
+  if (!row) { ElMessage.warning('请关闭弹窗后在订单行中打开采购明细'); return; }
+  shippedReceiptDialog.visible = false;
+  await openOrderProcurementRecords(row);
+}
+async function confirmShippedReceipts() {
+  if (shippedReceiptDialog.saving) return;
+  const records = shippedReceiptDialog.records.filter(row => Number(row.quantity) > 0);
+  if (!records.length) { ElMessage.warning('请至少保留一个补登批次'); return; }
+  shippedReceiptDialog.saving = true;
+  try {
+    await apiClient.post('/api/inbound-records/shipped-receipts/confirm', { confirmed: true, order_ids: shippedReceiptDialog.orderIds, records });
+    shippedReceiptDialog.visible = false;
+    ElMessage.success('已补登记实收，批次剩余数量继续在途');
+    await loadOrders({ forceRefresh: true, silent: true });
+  } catch (error) { ElMessage.error(`${error.message || '提交未确认成功'}；请重新预览核对后再操作`); }
+  finally { shippedReceiptDialog.saving = false; }
+}
+
+async function handleConfirmProcurementInbound(row) {
+  if (row.procurement_coverage?.entered_transport) return previewShippedReceipts([Number(row.id)]);
+  let procurement;
+  try {
+    procurement = await loadOrderProcurementBatches(row);
   } catch (error) {
+    ElMessage.error(error.message || '采购批次加载失败，请稍后重试');
+    return;
+  }
+  const batches = (procurement.procurement_coverage?.batches || []).filter(batch => batch.status === 'pending_arrival');
+  if (!batches.length) { ElMessage.warning('该订单没有关联的待收采购批次；提前采购请到“每日采购与收货台账”登记到货并入库。'); return; }
+  Object.assign(procurementReceiptDialog, {
+    visible: true,
+    saving: false,
+    orderId: Number(row.id),
+    batches: batches.map(batch => ({ ...batch, selected: false, receive_quantity: Number(batch.quantity || 0) }))
+  });
+}
+
+async function confirmProcurementReceipt() {
+  if (procurementReceiptDialog.saving) return;
+  const records = procurementReceiptDialog.batches.filter(batch => batch.selected);
+  if (!records.length) { ElMessage.warning('请至少勾选一个实际到货批次'); return; }
+  for (const batch of records) {
+    const quantity = Number(batch.receive_quantity);
+    if (!Number.isInteger(quantity) || quantity <= 0 || quantity > Number(batch.quantity)) {
+      ElMessage.warning(`批次 #${batch.id} 的实收数量应为 1 至 ${batch.quantity} 的整数`);
+      return;
+    }
+  }
+  procurementReceiptDialog.saving = true;
+  confirmingInboundRecordId.value = Number(records[0].id);
+  try {
+    await apiClient.post('/api/inbound-records/batch-update', { records: records.map(batch => ({ id: batch.id, payload: {
+      receive_quantity: Number(batch.receive_quantity), expected_remaining_quantity: Number(batch.quantity),
+      version_updated_at: batch.updated_at, status: 'approved', qc_status: 'approved',
+      receipt_context: `订单 #${procurementReceiptDialog.orderId} 登记实收`
+    }})) });
+    procurementReceiptDialog.visible = false;
+    ElMessage.success('已按所选批次登记实收，未选或未收部分继续在途');
+    await loadOrders({ forceRefresh: true, silent: true });
+  } catch (error) {
+    ElMessage.error(error.message || '收货失败，请刷新后核对');
+  } finally {
+    procurementReceiptDialog.saving = false;
     confirmingInboundRecordId.value = 0;
-    if (error === "cancel" || error === "close" || error?.message === "cancel") return;
-    ElMessage.error(error.message || "确认入库失败");
   }
 }
 
@@ -967,6 +1090,8 @@ function buildTableRow(row) {
       const fallbackIndex = productIds.findIndex((id) => Number(id) === productId);
       return {
         productId,
+        inventoryNumber: item.inventoryNumber || "",
+        pickingItems: buildInventoryPickingSummary(row.inventory_picking_items, { ...item, productId }),
         inventoryKey: productId ? `product-${productId}` : `combo-${item.sku || item.orderItemId || "sku"}`,
         inventoryMode: item.inventoryMode || (productId ? "single" : "unbound"),
         orderItemId: Number(item.orderItemId || 0) || null,
@@ -1205,7 +1330,7 @@ function addCreateCompositionItem(productId) {
       product_id: Number(row.id),
       product_name: inventoryProductLabel(row),
       code: row?.code || "",
-      inventory_id: row?.inventory_id || "",
+      inventory_id: row?.inventory_number || row?.inventory_id || "",
       image_url: inventoryProductImage(row),
       stock_unit: row?.stock_unit || "个",
       local_stock: inventoryProductLocalStock(row),
@@ -1719,6 +1844,12 @@ async function handleSaveMark(orderId, markType) {
 }
 
 async function handleOpenOrderProcurement(orderId) {
+  const order = tableRows.value.find(row => Number(row.id) === Number(orderId));
+  if (order?.procurement_coverage?.quantity_needs_review && !order.procurement_coverage.shortage_quantity) {
+    ElMessage.warning('已登记采购但数量待核，请先在采购工作台补齐实际数量，避免重复购买');
+    await router.push({ path: '/procurement/workspace', query: { review_product_id: order.procurement_coverage.items.find(item => item.product_id > 0)?.product_id || '' } });
+    return;
+  }
   orderProcurementDialog.orderId = Number(orderId || 0) || null;
   if (!orderProcurementDialog.orderId) return;
   orderProcurementDialog.visible = true;
@@ -1884,10 +2015,10 @@ async function validateProcurementPurchaseInputs() {
   const missingAmount = orderProcurementProducts.value.find((product) => (
     selectedProducts.has(Number(product.product_id))
       && Number(product.purchase_quantity || 0) > 0
-      && !(Number(product.purchase_amount || 0) > 0)
+      && Number(product.purchase_amount || 0) < 0
   ));
   if (missingAmount) {
-    ElMessage.warning(`「${missingAmount.product_name || missingAmount.product_code || missingAmount.product_id}」的采购金额必须大于 0，请填写实际货款后再提交`);
+    ElMessage.warning(`「${missingAmount.product_name || missingAmount.product_code || missingAmount.product_id}」的采购金额不能为负数；暂缺金额可先登记，后续补齐`);
     return false;
   }
   const abnormalProducts = orderProcurementProducts.value.filter((product) => (
@@ -2272,7 +2403,9 @@ onMounted(async () => {
     await bootstrapFromRoute();
     return;
   }
-  await loadOrders({ includeCounts: true });
+  // Render rows immediately. Procurement counts are loaded in the background
+  // so a cold full-ledger reconciliation cannot block opening this module.
+  await loadOrders();
   if (vm.filters.logisticsMethod && vm.filters.logisticsMethod !== "all") {
     void loadLogisticsOptions().catch(() => {});
   }
@@ -2328,6 +2461,41 @@ onBeforeUnmount(() => {
       />
     </OrdersToolbar>
 
+    <div v-if="vm.filters.status === 'purchase_in_transit' || selectedCount > 0" class="orders-inline-actions">
+      <el-button type="primary" plain :disabled="!selectedCount" :loading="shippedReceiptDialog.loading" @click="previewShippedReceipts()">批量补登记实收（已选 {{ selectedCount }} 单）</el-button>
+      <span>仅预览明确关联的已运输订单，确认后才入库。</span>
+    </div>
+    <ShippedReceiptDialog :shipped-receipt-dialog="shippedReceiptDialog" @preview="previewShippedReceipts(shippedReceiptDialog.orderIds)" @confirm="confirmShippedReceipts" @review="reviewShippedProcurementRecords" />
+    <el-dialog v-model="procurementReceiptDialog.visible" title="登记实际收货" width="920px" destroy-on-close>
+      <p class="order-procurement-receipt-hint">勾选本次实际到货的采购批次并填写实收数量。未勾选的批次、以及部分收货的剩余数量，都会继续保留在途。</p>
+      <el-table :data="procurementReceiptDialog.batches" border max-height="420">
+        <el-table-column label="本次到货" width="96" align="center">
+          <template #default="{ row }"><el-checkbox v-model="row.selected" /></template>
+        </el-table-column>
+        <el-table-column label="采购批次" width="100" align="center">
+          <template #default="{ row }">#{{ row.id }}</template>
+        </el-table-column>
+        <el-table-column prop="product_name" label="库存商品" min-width="230" />
+        <el-table-column label="采购时间" width="170">
+          <template #default="{ row }">{{ formatDateTime(row.purchased_at || row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column label="采购人" width="120">
+          <template #default="{ row }">{{ row.person_name || '未记录' }}</template>
+        </el-table-column>
+        <el-table-column label="待收数量" width="110" align="right">
+          <template #default="{ row }">{{ row.quantity }} {{ row.stock_unit || '件' }}</template>
+        </el-table-column>
+        <el-table-column label="本次实收" width="160">
+          <template #default="{ row }">
+            <el-input-number v-model="row.receive_quantity" :min="1" :max="Number(row.quantity)" :precision="0" :disabled="!row.selected" controls-position="right" style="width: 132px" />
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button :disabled="procurementReceiptDialog.saving" @click="procurementReceiptDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="procurementReceiptDialog.saving" @click="confirmProcurementReceipt">确认实收入库</el-button>
+      </template>
+    </el-dialog>
     <div class="orders-table-section">
       <OrdersTable
         :rows="tableRows"
@@ -2351,6 +2519,7 @@ onBeforeUnmount(() => {
         @open-create-product-from-order="handleOpenCreateProductFromOrder"
         @open-order-procurement="handleOpenOrderProcurement"
         @view-procurement-details="handleViewProcurementDetails"
+        @review-procurement-records="openOrderProcurementRecords"
         @confirm-procurement-inbound="handleConfirmProcurementInbound"
       />
 
@@ -2677,6 +2846,7 @@ onBeforeUnmount(() => {
             <el-descriptions-item label="订单号">{{ detailOrder.posting_number || detailDialog.orderId || "-" }}</el-descriptions-item>
             <el-descriptions-item label="店铺">{{ detailOrder.shop_name || "-" }}</el-descriptions-item>
             <el-descriptions-item label="状态">{{ rowStateLabel(detailOrder) }}</el-descriptions-item>
+            <el-descriptions-item v-if="rowRegistrationHint(detailOrder)" label="配送注册信息">{{ rowRegistrationHint(detailOrder) }}</el-descriptions-item>
             <el-descriptions-item label="下单时间">{{ formatDateTime(detailOrder.ordered_at) }}</el-descriptions-item>
             <el-descriptions-item label="跟踪号">{{ detailOrder.tracking_number || "-" }}</el-descriptions-item>
             <el-descriptions-item label="物流方式">{{ detailOrder.fulfillment_type_label || "FBS" }}</el-descriptions-item>
@@ -3423,7 +3593,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="order-procurement-stock-grid">
               <div>
-                <span>可用库存</span>
+                <span>本次分配现货</span>
                 <strong>{{ product.current_stock }}</strong>
               </div>
               <div>
@@ -3431,19 +3601,9 @@ onBeforeUnmount(() => {
                 <strong>{{ product.ledger_stock ?? product.current_stock }}</strong>
               </div>
               <div :class="{ 'is-shortage': Number(product.stock_debt || 0) > 0 }">
-                <span>历史欠账</span>
+                <span>账面差额待核</span>
                 <strong>{{ product.stock_debt || 0 }}</strong>
-                <el-button
-                  v-if="Number(product.stock_debt || 0) > 0"
-                  class="order-procurement-stock-action"
-                  size="small"
-                  type="warning"
-                  plain
-                  :loading="stockDebtAdjustingProductId === Number(product.product_id)"
-                  @click="handleAdjustStockDebt(product)"
-                >
-                  冲正旧账
-                </el-button>
+                <small v-if="Number(product.stock_debt || 0) > 0">仅供核对，不计入本次采购</small>
               </div>
               <div>
                 <span>采购在途</span>

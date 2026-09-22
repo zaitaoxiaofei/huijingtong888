@@ -31,6 +31,7 @@ const emit = defineEmits([
   "open-create-product-from-order",
   "open-order-procurement",
   "view-procurement-details",
+  "review-procurement-records",
   "confirm-procurement-inbound"
 ]);
 
@@ -214,13 +215,20 @@ function hasEnoughLocalStock(row) {
   return products.every((product) => Number(product.stock?.local || 0) >= Math.max(1, Number(product.quantity || 1)));
 }
 
+function isInboundReceiptPending(row) {
+  const id = Number(props.confirmingInboundRecordId || 0);
+  return id > 0 && (Number(row?.procurementState?.inboundRecordId || 0) === id
+    || (row?.procurement_coverage?.batches || []).some(batch => Number(batch.id) === id));
+}
+
 function hasProcurementIncoming(row) {
   const state = row?.procurementState;
-  return Boolean(state?.hasOrderIncoming)
+  return !isFbpOrder(row) && Boolean(state?.hasOrderIncoming)
     && Number(state?.inboundDetails?.quantity || 0) > 0;
 }
 
 function isFbpOrder(row) {
+  if (row?.procurement_coverage?.stock_location === "FBP" || row?.fulfillment_type_key === "fbp") return true;
   const text = [
     row?.logisticsSummary?.deliveryMethodLabel,
     row?.logisticsSummary?.resolvedRuleName,
@@ -239,6 +247,11 @@ function isFbpOrder(row) {
 }
 
 function procurementActionLabel(row) {
+  const coverage = row.procurement_coverage;
+  if (coverage?.quantity_needs_review) return '已采购 · 数量待核';
+  if (coverage?.shortage_quantity > 0) return `待采购（缺 ${coverage.shortage_quantity}）`;
+  if (coverage?.incoming_quantity > 0) return '采购在途';
+  if (coverage?.needs_fulfillment) return '账面可覆盖';
   const detail = String(row?.procurementState?.detail || "");
   if (hasEnoughLocalStock(row)) return "有库存";
   if (row?.procurementState?.overdue && hasProcurementIncoming(row)) return `在途超${Math.max(3, Number(row.procurementState.inTransitDays || 0))}天`;
@@ -253,6 +266,7 @@ function procurementActionClass(row) {
   const label = procurementActionLabel(row);
   return label === "有库存"
     || label === "采购在途"
+    || label === "账面可覆盖"
     ? "orders-inline-accent-button-success"
     : "orders-inline-accent-button-danger-soft";
 }
@@ -517,7 +531,19 @@ function procurementTimeText(row) {
         </template>
       </el-table-column>
 
-      <el-table-column label="库存信息" min-width="220">
+      <el-table-column label="库存信息" min-width="240">
+        <template #header>
+          <span>库存信息</span>
+          <el-popover trigger="click" placement="bottom" :width="340">
+            <template #reference><el-button link type="primary" size="small">数量说明</el-button></template>
+            <p><strong>本单需求</strong>只表示这一笔订单。同一商品两单各需 1 件，合计需求是 2 件。</p>
+            <p><strong>账面余额</strong>是系统已记账出入库后的余额，包含已记账的订单扣减。同一商品会在多行重复展示这一余额，不能相加，也不要再减一次已扣订单的需求。</p>
+            <p><strong>商品总在途</strong>是商品全部待入库数量；<strong>已占用</strong>是已按时间分给更早订单的数量；<strong>当前可分配</strong>才是还能给新订单使用的在途数量。</p>
+            <p><strong>账面分配</strong>是系统分配给本单的数量；<strong>在途分配</strong>是已采购未入库、分配给本单的数量。它们与账面余额的口径不同。</p>
+            <p>例如，两单各扣 1 件后账面还剩 1 件，这个 1 是扣后余额，不能再算成 1 − 2。</p>
+            <p><strong>账面可覆盖不等于实物已核实。</strong>若实际找不到货，请核对入库、退货和盘点记录。组合商品按子产品数量换算。</p>
+          </el-popover>
+        </template>
         <template #default="{ row }">
           <div class="orders-stock-list">
             <div
@@ -526,10 +552,14 @@ function procurementTimeText(row) {
               class="orders-inventory-item orders-inventory-item-plain"
             >
               <small class="orders-stock-product-name orders-product-name">{{ product.productName }}</small>
+              <strong v-if="product.inventoryMode !== 'combo'">库存编号：{{ product.inventoryNumber || "待补核心品名" }}</strong>
+              <small v-else>库存编号：见子产品明细</small>
               <div class="orders-stock-inline-facts">
                 <span>FBP: {{ product.stock?.fbp || 0 }}</span>
-                <span>{{ product.inventoryMode === "combo" || Number(product.componentCount || 0) > 0 ? "子产品可组" : "本地" }}: {{ product.stock?.local || 0 }}</span>
-                <span>在途: {{ Number(product.incoming || 0) }}</span>
+                <el-tooltip content="已计入已记账的出入库和订单扣减，不是实物盘点数；详见表头“数量说明”。" placement="top">
+                  <span>{{ product.inventoryMode === "combo" || Number(product.componentCount || 0) > 0 ? "账面可组余量" : "本地账面余额" }}: {{ product.stock?.local || 0 }}</span>
+                </el-tooltip>
+                <span>商品总在途: {{ Number(product.incoming || 0) }}</span>
               </div>
               <div class="orders-inline-actions orders-inline-actions-compact">
                 <el-button
@@ -556,14 +586,25 @@ function procurementTimeText(row) {
                 >
                   绑定子产品
                 </el-button>
-                <el-button
-                  v-if="product.inventoryMode === 'single' && Number(product.productId || 0) > 0 && Number(product.componentCount || 0) > 0"
-                  size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
-                  @click="emit('view-product-components', product.productId)"
-                >
-                  查看子产品（{{ product.componentCount }}）
-                </el-button>
+                <el-popover v-if="product.pickingItems?.length" trigger="click" placement="left" :width="560">
+                  <template #reference>
+                    <el-button size="small" class="orders-inline-accent-button orders-inline-accent-button-secondary">
+                      查看子产品（{{ product.pickingItems.length }}）
+                    </el-button>
+                  </template>
+                  <strong>子产品拣货明细</strong>
+                  <el-table :data="product.pickingItems" size="small">
+                    <el-table-column prop="product_name" label="库存产品名称" min-width="180" />
+                    <el-table-column label="库存编号" width="110">
+                      <template #default="{ row: part }"><strong>{{ part.inventory_number || '待补核心品名' }}</strong></template>
+                    </el-table-column>
+                    <el-table-column prop="per_set_quantity" label="每套数量" width="85" />
+                    <el-table-column label="本单需拣" width="100">
+                      <template #default="{ row: part }">{{ part.required_quantity }} {{ part.stock_unit }}</template>
+                    </el-table-column>
+                  </el-table>
+                  <el-button v-if="product.inventoryMode === 'single'" link type="primary" @click="emit('view-product-components', product.productId)">查看子产品库存详情</el-button>
+                </el-popover>
               </div>
             </div>
             <div
@@ -593,6 +634,18 @@ function procurementTimeText(row) {
                 </el-button>
               </div>
             </div>
+            <div v-if="row.procurement_coverage && !isFbpOrder(row)" class="orders-coverage-summary">
+              <small v-for="item in row.procurement_coverage.items" :key="`${item.order_item_id}-${item.product_id}`">
+                <template v-if="row.procurement_coverage.items.length > 1">{{ item.product_name || '未绑定商品' }}：</template>本单需求 {{ item.quantity }} {{ item.unit }}
+                <template v-if="row.procurement_coverage.needs_fulfillment && row.procurement_coverage.stock_location !== 'FBP'"><br />商品总在途 {{ item.product_total_incoming_quantity }} · 已占用 {{ item.product_reserved_incoming_quantity }} · 当前可分配 {{ item.product_available_incoming_quantity }}<br />账面分配 {{ item.stock_quantity }} · 在途分配 {{ item.incoming_quantity }} · {{ item.quantity_needs_review ? '数量待核' : `待采购 ${item.shortage_quantity}` }}</template>
+              </small>
+
+              <small v-if="row.procurement_coverage.inventory_needs_review">账面差额待核，不计入本次采购缺口。</small>
+              <small v-if="row.procurement_coverage.quantity_needs_review">已采购但数量待核，请先核对采购凭据，避免重复购买。</small>
+              <small v-if="row.procurement_coverage.missing_amount">采购金额待补，成本记录尚不完整。</small>
+              <small v-if="row.procurement_coverage.missing_record_quantity > 0">已发订单有 {{ row.procurement_coverage.missing_record_quantity }} 件历史库存来源待核对，不新增采购需求。</small>
+              <el-button v-if="row.procurement_coverage.missing_record_quantity > 0 || row.procurement_coverage.missing_amount || row.procurement_coverage.quantity_needs_review" size="small" link type="warning" @click="emit('review-procurement-records', row)">采购明细</el-button>
+            </div>
             <div
               v-if="hasProcurementIncoming(row)"
               class="orders-procurement-transparency"
@@ -600,8 +653,9 @@ function procurementTimeText(row) {
             >
               <strong>
                 {{ row.procurementState.inboundDetails?.personName || "未记录" }}
-                采购{{ Number(row.procurementState.inboundDetails?.quantity || 0) > 0 ? Number(row.procurementState.inboundDetails.quantity) : "数量未记录" }}
-                · 等待{{ Number(row.procurementState.inTransitDays || 0) }}天
+                · 关联采购总量 {{ row.procurementState.purchaseSummary || '待核对' }}
+                <template v-if="row.procurement_coverage?.entered_transport"> · 历史库存来源待核对</template>
+                <template v-else> · 等待{{ Number(row.procurementState.inTransitDays || 0) }}天</template>
               </strong>
               <small>下单时间：{{ procurementTimeText(row) || "待补充" }}</small>
               <div class="orders-procurement-actions">
@@ -609,15 +663,15 @@ function procurementTimeText(row) {
                   查看采购内容
                 </el-button>
                 <el-button
-                  v-if="row.procurementState.inboundRecordId"
+                  v-if="row.procurementState.canRegisterOrderReceipt"
                   size="small"
                   :type="row.procurementState.overdue ? 'danger' : 'success'"
                   plain
-                  :loading="Number(confirmingInboundRecordId || 0) === Number(row.procurementState.inboundRecordId || 0)"
-                  :disabled="Number(confirmingInboundRecordId || 0) === Number(row.procurementState.inboundRecordId || 0)"
+                  :loading="isInboundReceiptPending(row)"
+                  :disabled="Number(confirmingInboundRecordId || 0) > 0"
                   @click="emit('confirm-procurement-inbound', row)"
                 >
-                  确认入库
+                  {{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记实收' }}
                 </el-button>
                 <small v-else-if="Number(row.procurementState.inboundRecordCount || 0) > 1">
                   多个批次，请到采购页确认
@@ -643,8 +697,9 @@ function procurementTimeText(row) {
       <el-table-column label="操作" min-width="210" fixed="right">
         <template #default="{ row }">
           <div class="orders-actions-cell orders-actions-cell-vertical">
+            <el-tag v-if="isFbpOrder(row)" type="success" size="small">官方仓履约 · 无需采购</el-tag>
             <el-button
-              v-if="row.availableActions.showPurchase"
+              v-if="row.availableActions.showPurchase && !isFbpOrder(row)"
               size="small"
               class="orders-inline-accent-button"
               :class="procurementActionClass(row)"
@@ -681,6 +736,7 @@ function procurementTimeText(row) {
               size="small"
               class="orders-inline-accent-button orders-inline-accent-button-secondary"
               :disabled="row.availableActions.print === false"
+              :title="row.availableActions.print === false ? 'Ozon 尚未提供面单，请稍后同步订单或到 Ozon 后台检查配送注册情况' : ''"
               @click="emit('print-order', row.id)"
             >
               打印标签

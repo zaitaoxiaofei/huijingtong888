@@ -3695,14 +3695,17 @@ async function generateWatermarkedListingImages(images = [], shop = {}, session 
       sort_order: index + 1
     }));
   }
-  const watermarked = await watermarkListingMedia({
+  const watermarkBody = {
     shop_id: shop.id,
     images: normalized,
     source_module: options.source_module || "listing_shop_copy",
     source_id: options.source_id || "",
     batch_id: options.batch_id || "",
     role: options.role || "shop_copy_watermark"
-  }, session);
+  };
+  const watermarked = options.watermarkCache
+    ? await watermarkListingMediaForSaveBatch(watermarkBody, shop, session, options.watermarkCache)
+    : await watermarkListingMedia(watermarkBody, session);
   return normalized.map((item, index) => {
     const next = watermarked.images?.[index] || {};
     return {
@@ -3716,6 +3719,25 @@ async function generateWatermarkedListingImages(images = [], shop = {}, session 
       asset_id: Number(next.assetId || next.asset?.id || 0) || null
     };
   });
+}
+
+async function watermarkListingMediaForSaveBatch(body, shop, session, cache) {
+  const images = await Promise.all(body.images.map((image) => {
+    // Cache only within this persisted save batch; never across later operator edits.
+    const key = JSON.stringify([shop.id, shop.watermark_path, image.url]);
+    if (!cache.has(key)) {
+      const task = watermarkListingMedia({ ...body, images: [image] }, session)
+        .then((result) => {
+          const output = result.images?.[0];
+          if (!output?.publishUrl) cache.delete(key);
+          return output || {};
+        });
+      cache.set(key, task);
+      void task.catch(() => { if (cache.get(key) === task) cache.delete(key); });
+    }
+    return cache.get(key);
+  }));
+  return { images };
 }
 
 async function resolveOriginalWatermarkSources(images = []) {
@@ -5542,12 +5564,11 @@ function syncAiOptimizationTemplateImages(payload = {}) {
   };
 }
 
-async function materializeAiOptimizationTemplateMedia(payload = {}, session = null) {
+async function materializeAiOptimizationTemplateMedia(payload = {}, session = null, urlMap = new Map()) {
   if (!isAiOptimizationMediaPayload(payload)) return payload;
   const traceId = aiVariantSaveTraceId(payload);
   const totalStarted = Date.now();
   logAiVariantSavePerf(traceId, "backend.template.media.start", totalStarted);
-  const urlMap = new Map();
   const sourceRaw = objectValue(payload.source_raw || payload.sourceRaw);
   const editable = objectValue(payload.editable_payload || payload.editablePayload);
   const ai = objectValue(sourceRaw.ai_optimization || sourceRaw.aiOptimization || editable.ai_optimization || editable.aiOptimization);
@@ -5618,7 +5639,7 @@ async function materializeAiOptimizationDraftMedia(payload = {}, session = null)
     role: "draft_source_image"
   }, session, urlMap);
   const materializedTemplatePayload = Object.keys(objectValue(payload.template_payload || payload.templatePayload || {})).length
-    ? await materializeAiOptimizationTemplateMedia(payload.template_payload || payload.templatePayload || {}, session)
+    ? await materializeAiOptimizationTemplateMedia(payload.template_payload || payload.templatePayload || {}, session, urlMap)
     : objectValue(payload.template_payload || payload.templatePayload || {});
   const templatePayload = sourceImages.length
     ? forceDraftTemplateImages(materializedTemplatePayload, sourceImages)
@@ -10340,10 +10361,14 @@ export async function listingDrafts(query = {}, session) {
   const pageSize = Math.min(Math.max(1, Number(query.pageSize || query.page_size || 20)), 100);
   const offset = (page - 1) * pageSize;
   const keyword = String(query.query || query.keyword || query.name || "").trim().toLowerCase();
+  const nameQuery = String(query.nameQuery || query.name_query || "").trim().toLowerCase();
   const sku = String(query.sku || query.offer || query.offerId || "").trim().toLowerCase();
   const shopId = Number(query.shopId || query.shop_id || 0);
   const creatorId = Number(query.creatorId || query.creator_id || 0);
   const developmentType = String(query.developmentType || query.development_type || "").trim().toLowerCase();
+  const category = String(query.category || query.categoryName || query.category_name || "").trim().toLowerCase();
+  const vehicleBrand = String(query.vehicleBrand || query.vehicle_brand || "").trim().toLowerCase();
+  const vehicleModel = String(query.vehicleModel || query.vehicle_model || "").trim().toLowerCase();
   const sortBy = String(query.sortBy || query.sort_by || "updated_at").trim().toLowerCase() === "created_at"
     ? "created_at"
     : "updated_at";
@@ -10379,6 +10404,15 @@ export async function listingDrafts(query = {}, session) {
     params.push(...Array(7).fill(`%${keyword}%`));
     countParams.push(...Array(7).fill(`%${keyword}%`));
   }
+  if (nameQuery) {
+    where.push(`(
+      LOWER(COALESCE(d.product_name, '')) LIKE ? OR
+      LOWER(COALESCE(d.internal_code, '')) LIKE ? OR
+      CAST(d.id AS CHAR) LIKE ?
+    )`);
+    params.push(...Array(3).fill(`%${nameQuery}%`));
+    countParams.push(...Array(3).fill(`%${nameQuery}%`));
+  }
   if (sku) {
     where.push("LOWER(COALESCE(d.internal_code, '')) LIKE ?");
     params.push(`%${sku}%`);
@@ -10398,6 +10432,21 @@ export async function listingDrafts(query = {}, session) {
     where.push("COALESCE(d.development_type, '') = ?");
     params.push(developmentType);
     countParams.push(developmentType);
+  }
+  if (category) {
+    where.push("LOWER(COALESCE(t.category_name, '')) LIKE ?");
+    params.push(`%${category}%`);
+    countParams.push(`%${category}%`);
+  }
+  if (vehicleBrand) {
+    where.push("LOWER(COALESCE(d.vehicle_brand, '')) LIKE ?");
+    params.push(`%${vehicleBrand}%`);
+    countParams.push(`%${vehicleBrand}%`);
+  }
+  if (vehicleModel) {
+    where.push("LOWER(COALESCE(d.vehicle_model, '')) LIKE ?");
+    params.push(`%${vehicleModel}%`);
+    countParams.push(`%${vehicleModel}%`);
   }
   if (startDate) {
     where.push(`${dateFilterColumn} >= ?`);
@@ -11174,6 +11223,7 @@ function listingDraftPayloadCategoryKey(payload = {}) {
 
 export async function updateListingDraftsBatch(body = {}, session = null) {
   const items = normalizeArray(body.items);
+  const retryAfterVersionRefresh = body?.retry_after_version_refresh === true;
   if (items.length < 2) throw new Error("Batch draft update requires at least two drafts");
   if (items.length > 100) throw new Error("Batch draft update supports at most 100 drafts");
   const ids = items.map((item) => draftIdFromPayload(item));
@@ -11187,7 +11237,7 @@ export async function updateListingDraftsBatch(body = {}, session = null) {
   prepared.forEach((item, index) => {
     const expected = items[index]?.updated_at || items[index]?.updatedAt;
     const current = item.existing?.updated_at;
-    if (expected && current && !sameTimestamp(expected, current)) {
+    if (!retryAfterVersionRefresh && expected && current && !sameTimestamp(expected, current)) {
       const error = new Error(`Draft ${item.draftId} was changed by another user; refresh before saving`);
       error.status = 409;
       throw error;
@@ -11518,7 +11568,7 @@ function normalizeAiVariantTemplateLogisticsPayload(templatePayload = {}) {
   };
 }
 
-export async function createAiVariantListingDraftLightweight(body = {}, session = null) {
+export async function createAiVariantListingDraftLightweight(body = {}, session = null, options = {}) {
   const totalStarted = Date.now();
   const traceId = aiVariantSaveTraceId(body);
   logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.start", totalStarted, {
@@ -11542,7 +11592,13 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
     ? await row("SELECT * FROM listing_drafts WHERE id = ? AND status <> 'deleted'", [sourceDraftId])
     : null;
   const sourceDraftRow = cloneSourceDraft ? sourceDraftMediaRow : null;
-  const sourceDraftTemplatePayload = parseJson(sourceDraftRow?.template_payload_json, {});
+  const useCurrentSourceSnapshot = String(body.ai_optimization?.source || body.aiOptimization?.source || "") === "ai_variant_lab"
+    && sourceDraftId > 0 && !body.template_payload && !body.templatePayload;
+  if (useCurrentSourceSnapshot && !sourceDraftMediaRow) {
+    throw new Error("母草稿已不存在，无法继承上架信息。请从草稿箱重新导入母商品后保存。");
+  }
+  const sourceDraftTemplatePayload = parseJson((useCurrentSourceSnapshot ? sourceDraftMediaRow : sourceDraftRow)?.template_payload_json, {});
+  if (useCurrentSourceSnapshot) body = { ...body, template_payload: sourceDraftTemplatePayload };
   const templateId = Number(body.template_id || body.templateId || body.base_template_id || body.baseTemplateId || sourceDraftRow?.template_id || 0);
   stageStarted = Date.now();
   const templateRow = templateId
@@ -11556,7 +11612,7 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
     const snapshotTemplate = normalizeAiVariantSourceTemplateSnapshot(body, templateId);
     template = mergeAiVariantTemplateSnapshot(template, snapshotTemplate);
   }
-  if (sourceDraftRow && Object.keys(sourceDraftTemplatePayload).length) {
+  if ((sourceDraftRow || useCurrentSourceSnapshot) && Object.keys(sourceDraftTemplatePayload).length) {
     const sourceSnapshot = normalizeAiVariantSourceTemplateSnapshot({ template_payload: sourceDraftTemplatePayload }, templateId);
     template = mergeAiVariantTemplateSnapshot(template || sourceSnapshot, sourceSnapshot);
   }
@@ -11585,7 +11641,9 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
     };
   }
 
+  stageStarted = Date.now();
   const rawPatch = await ensureAiVariantDraftVideoMedia(body, objectValue(body.patch || body.patches || {}), session);
+  logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.video_media", stageStarted);
   const offerId = normalizeListingOfferId(body.offer_id || body.offerId || rawPatch.offer_id || rawPatch.offerId);
   if (!offerId) {
     const error = new Error("AI 裂变草稿缺少货号 offer_id，请先点击“一键生成货号”或手动填写。");
@@ -11654,6 +11712,7 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
     spec: String(body.spec || sourceDraftRow?.spec || "").trim(),
     quantity: body.quantity || sourceDraftRow?.quantity || inheritedQuantity
   });
+  stageStarted = Date.now();
   payload = sanitizeDraftMediaPayload(await rewriteDraftPayloadToRegisteredPublicMedia(
     await materializeAiOptimizationDraftMedia({
     ...payload,
@@ -11669,6 +11728,7 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
     }
     }, session)
   ));
+  logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.materialize_media", stageStarted);
   manualFacts = objectValue(payload.manual_facts || manualFacts);
   editable = objectValue(payload.template_payload?.editable_payload || editable);
   assertAiVariantDraftHasNoTemporaryImages(payload);
@@ -11789,7 +11849,7 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
   if (shopIds.length) {
     stageStarted = Date.now();
     try {
-      shopCopies = await generateListingShopCopies(draftId, { shop_ids: shopIds }, session);
+      shopCopies = await generateListingShopCopies(draftId, { shop_ids: shopIds }, session, options);
       logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.shop_copies", stageStarted, {
         draftId,
         shopCopyCount: shopCopies.length
@@ -11803,6 +11863,10 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
     }
   }
   stageStarted = Date.now();
+  if (options.summaryOnly) {
+    logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.done", totalStarted, { draftId, templateId });
+    return { id: draftId, template_id: payload.template_id, shop_copy_count: shopCopies.length, shop_copy_error: shopCopyError };
+  }
   const detail = await listingDraft(draftId, session);
   if (shopCopies.length) {
     detail.shop_copies = shopCopies;
@@ -12958,7 +13022,7 @@ export async function deleteListingDraft(id, session = null) {
   return { ok: true, id: draftId };
 }
 
-export async function generateListingShopCopies(draftId, body, session) {
+export async function generateListingShopCopies(draftId, body, session, options = {}) {
   await ensureListingAutomationSchema();
   const draft = await assertDraftAccess(draftId, session);
   const shopIds = [...new Set((body?.shop_ids || body?.shopIds || []).map((id) => Number(id)).filter(Boolean))];
@@ -12970,7 +13034,7 @@ export async function generateListingShopCopies(draftId, body, session) {
   );
   if (!shops.length) throw new Error("No available target shops");
 
-  const copies = await Promise.all(shops.map((shop) => buildShopCopy(draft, shop, session)));
+  const copies = await Promise.all(shops.map((shop) => buildShopCopy(draft, shop, session, options)));
   await withMysqlTransaction(async (connection) => {
     for (const copy of copies) {
       await connection.execute(`
@@ -13335,14 +13399,15 @@ async function findCollectorTemplateForAiVariantDraft(draft = {}, session = null
     : null;
 }
 
-async function buildShopCopy(draft, shop, session) {
+async function buildShopCopy(draft, shop, session, options = {}) {
   const prefix = String(shop.name || `SHOP${shop.id}`).replace(/\s+/g, "").slice(0, 8).toUpperCase();
   const code = draft.internal_code || `DRAFT${draft.id}`;
   const offerId = `${prefix}-${code}`.replace(/[^A-Z0-9_-]/gi, "-").slice(0, 64);
   const baseImages = await generateWatermarkedListingImages(draft.source_images || [], shop, session, {
     source_module: "listing_shop_copy",
     source_id: `${draft.id}:${shop.id}`,
-    role: "shop_copy_watermark"
+    role: "shop_copy_watermark",
+    watermarkCache: options.watermarkCache
   });
   const tailImageUrl = await resolveShopTailImageUrl(shop, session);
   const tailResult = appendTailImageToCopyImages(baseImages, tailImageUrl);
@@ -13949,6 +14014,7 @@ async function initializeListingAutomationSchema() {
         INDEX idx_listing_media_updated (updated_at)
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
+    await ensureMysqlIndex("listing_media_assets", "idx_listing_media_template", "(template_id)");
     await mysqlExecute(`
       CREATE TABLE IF NOT EXISTS listing_ozon_seller_media_upload_jobs (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,

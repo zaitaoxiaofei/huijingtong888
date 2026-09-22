@@ -90,10 +90,13 @@ app.config.errorHandler = (error) => {
   throw error;
 };
 
-router.beforeEach((to) => {
-  window.dispatchEvent(new CustomEvent("admin:route-changing", {
-    detail: { to: to.fullPath }
-  }));
+router.beforeEach((to, from) => {
+  // Updating filters on the same page must not abort that page's new query.
+  if (to.path !== from.path) {
+    window.dispatchEvent(new CustomEvent("admin:route-changing", {
+      detail: { to: to.fullPath }
+    }));
+  }
   if (!to.meta?.public) rememberIntendedRoute(to.fullPath);
   return true;
 });

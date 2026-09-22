@@ -9,6 +9,7 @@ let workerStarted = false;
 let workerTimer = null;
 let activeWorkers = 0;
 const pendingBatchRefreshes = new Map();
+const batchWatermarkCaches = new Map();
 
 export async function ensureAiVariantDraftSaveBatchSchema() {
   if (schemaReady) return;
@@ -180,7 +181,11 @@ async function executeClaimedItem(item) {
   const session = { personId: Number(item.created_by_person_id || 0) || null };
   try {
     const payload = JSON.parse(item.payload_json || "{}");
-    const draft = await createWithOfferRetry(payload, session);
+    if (!batchWatermarkCaches.has(item.batch_no)) batchWatermarkCaches.set(item.batch_no, new Map());
+    const draft = await createWithOfferRetry({ ...payload, save_trace_id: payload.save_trace_id || item.item_no }, session, {
+      summaryOnly: true,
+      watermarkCache: batchWatermarkCaches.get(item.batch_no)
+    });
     const draftId = Number(draft.id || draft.draft_id || 0) || null;
     await mysqlExecute("UPDATE ai_variant_draft_save_items SET status = 'completed', stage = 'completed', progress_percent = 100, result_draft_id = ?, shop_copy_count = ?, payload_json = '{}', finished_at = CURRENT_TIMESTAMP WHERE id = ?", [draftId, Number(draft.shop_copy_count || draft.shop_copies?.length || 0), item.id]);
   } catch (error) {
@@ -201,21 +206,22 @@ function scheduleBatchRefresh(batchNo, delay = 150) {
   pendingBatchRefreshes.set(key, timer);
 }
 
-async function createWithOfferRetry(payload, session) {
+async function createWithOfferRetry(payload, session, options = {}) {
   try {
-    return await createAiVariantListingDraftLightweight(payload, session);
+    return await createAiVariantListingDraftLightweight(payload, session, options);
   } catch (error) {
     if (!/offer[_\s-]*id|货号/i.test(error?.message || "") || !/已存在|重复|exist|duplicate|used|not unique/i.test(error?.message || "")) throw error;
     const generated = await generateListingOfferId({ prefix: String(payload.offer_prefix || "VAR").trim() || "VAR", existingIds: [] }, session);
     const offerId = generated.offerId;
     const retryPayload = { ...payload, offer_id: offerId, internal_code: offerId, patch: { ...(payload.patch || {}), offer_id: offerId, internal_code: offerId } };
-    return createAiVariantListingDraftLightweight(retryPayload, session);
+    return createAiVariantListingDraftLightweight(retryPayload, session, options);
   }
 }
 
 async function refreshBatch(batchNo) {
   const rows = await mysqlQuery(`SELECT COUNT(*) total_count, SUM(status = 'completed') success_count, SUM(status = 'failed') failed_count, SUM(status IN ('queued', 'running')) active_count FROM ai_variant_draft_save_items WHERE batch_no = ?`, [batchNo]);
   const stats = rows[0] || {};
+  if (!Number(stats.active_count || 0)) batchWatermarkCaches.delete(batchNo);
   const status = Number(stats.active_count || 0) ? "running" : Number(stats.failed_count || 0) && Number(stats.success_count || 0) ? "partial" : Number(stats.failed_count || 0) ? "failed" : "completed";
   await mysqlExecute("UPDATE ai_variant_draft_save_batches SET status = ?, total_count = ?, success_count = ?, failed_count = ? WHERE batch_no = ?", [status, Number(stats.total_count || 0), Number(stats.success_count || 0), Number(stats.failed_count || 0), batchNo]);
 }

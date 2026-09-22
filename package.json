@@ -29,7 +29,7 @@
     "deploy:ecs": "powershell -NoProfile -ExecutionPolicy Bypass -File ./deploy/linux/deploy-ecs.ps1",
     "deploy:ecs:unix": "bash ./deploy/linux/deploy-ecs.sh",
     "release:tool": "node tools/release-manager/server.mjs",
-    "package:plugin": "node ../scripts/package-baodan-plugin.mjs",
+    "package:plugin": "node scripts/package-baodan-plugin.mjs",
     "docs:api": "node scripts/generate-api-docs.mjs",
     "docs:api:check": "node scripts/check-api-docs.mjs",
     "check:health": "node scripts/health-check.mjs",

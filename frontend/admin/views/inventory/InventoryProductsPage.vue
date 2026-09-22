@@ -1,4 +1,6 @@
-﻿<script setup>
+<script setup>
+import { hasPermission } from "../../../../src/shared/permissions.js";
+import { useAuthStore } from "../../stores/auth";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -10,11 +12,14 @@ import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
-import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
+import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import InventoryStructuredSearch from "../../components/inventory/InventoryStructuredSearch.vue";
 import ProductCompositionDialog from "../../components/inventory/ProductCompositionDialog.vue";
+import InventoryProductRequestsDialog from "../../components/inventory/InventoryProductRequestsDialog.vue";
+import ProcurementLedgerDialog from "../../components/procurement/ProcurementLedgerDialog.vue";
 import ProductCreateEditDialog from "../../components/inventory/ProductCreateEditDialog.vue";
 import ProcurementRequestCreateDialog from "../../components/procurement/ProcurementRequestCreateDialog.vue";
+import WarehouseProcurementRequestDialog from "../../components/procurement/WarehouseProcurementRequestDialog.vue";
 import {
   applyFilterQuery,
   dateText,
@@ -35,6 +40,11 @@ function cacheInventoryList(requestUrl, result) {
   inventoryListCache.set(requestUrl, { timestamp: Date.now(), result });
 }
 
+const authStore = useAuthStore();
+const canWriteInventory = computed(() => hasPermission(authStore.user, "inventory.write"));
+const canProcure = computed(() => hasPermission(authStore.user, "procurement"));
+const canSubmitProcurementRequest = computed(() => hasPermission(authStore.user, "procurement.request.submit"));
+const canOutbound = computed(() => hasPermission(authStore.user, "packing") || canWriteInventory.value);
 const route = useRoute();
 const router = useRouter();
 let syncingRoute = false;
@@ -44,6 +54,11 @@ const listRequestGate = createLatestRequestGate();
 const loading = ref(false);
 const detailLoading = ref(false);
 const dialogVisible = ref(false);
+const productRequestsVisible = ref(false);
+function refreshAfterProductRequest() {
+  inventoryListCache.clear();
+  return loadPageData();
+}
 const productCreateDialogRef = ref(null);
 const quickComponentCreateVisible = ref(false);
 const quickComponentRole = ref("included");
@@ -61,6 +76,7 @@ const profitPreviewRows = ref([]);
 const profitPreviewSummary = ref(null);
 const procurementCreateVisible = ref(false);
 const procurementCreateProductId = ref(null);
+const warehouseProcurementRequestVisible = ref(false);
 const productSalesDialogVisible = ref(false);
 const productSalesDialogTitle = ref("");
 const productSalesLoading = ref(false);
@@ -82,6 +98,8 @@ const compositionDialogVisible = ref(false);
 const compositionDialogProduct = ref(null);
 const compositionDialogRefreshKey = ref(0);
 const selectedRows = ref([]);
+const ledgerVisible = ref(false);
+const ledgerProductId = ref(0);
 const manualOutboundVisible = ref(false);
 const manualOutboundSubmitting = ref(false);
 const manualOutboundProduct = ref(null);
@@ -157,7 +175,7 @@ const state = reactive({
   logisticsRules: [],
   shops: [],
   filters: {
-    searchMode: "exact",
+    searchMode: "inventory_id",
     query: "",
     inventoryCategory: "",
     productName: "",
@@ -180,7 +198,7 @@ const state = reactive({
 });
 
 const filterDefaults = {
-  searchMode: "exact",
+  searchMode: "inventory_id",
   query: "",
   inventoryCategory: "",
   productName: "",
@@ -348,7 +366,7 @@ function mergeProductName(product = {}) {
 }
 
 function mergeProductCode(product = {}) {
-  return product.inventory_id || product.code || `ID ${product.id}`;
+  return product.inventory_number || product.inventory_id || product.code || `ID ${product.id}`;
 }
 
 function mergeFieldForProduct(fieldKey, productId) {
@@ -816,6 +834,12 @@ function applyRouteState() {
   syncingRoute = true;
   try {
     applyFilterQuery(route, state.filters, filterDefaults);
+    for (const key of ["vehicleModel", "material"]) {
+      state.filters[key] = String(route.query[key] || "").split(",").filter(Boolean);
+    }
+    if (state.filters.searchMode === "fuzzy") state.filters.searchMode = "name";
+    if (state.filters.searchMode === "exact") state.filters.query = "";
+    if (!["inventory_id", "name", "sku"].includes(state.filters.searchMode)) state.filters.searchMode = "inventory_id";
     if (route.query.productId && !state.filters.query) state.filters.query = String(route.query.productId);
   } finally {
     syncingRoute = false;
@@ -829,6 +853,40 @@ const syncRouteQuery = createDefaultRouteQuerySync({
   defaults: filterDefaults,
   isSyncingRoute: () => syncingRoute
 });
+
+const deletingProducts = ref(false);
+const searchDateRange = computed({
+  get: () => state.filters.dateFrom && state.filters.dateTo ? [state.filters.dateFrom, state.filters.dateTo] : [],
+  set: (value) => {
+    state.filters.dateFrom = value?.[0] || "";
+    state.filters.dateTo = value?.[1] || "";
+  }
+});
+
+async function removeSelectedProducts() {
+  const rows = [...selectedRows.value];
+  if (!rows.length || deletingProducts.value) return;
+  try {
+    await ElMessageBox.confirm(`确认将选中的 ${rows.length} 个库存商品移入已删除商品吗？`, "批量删除", {
+      type: "warning", confirmButtonText: "删除", cancelButtonText: "取消"
+    });
+  } catch { return; }
+  deletingProducts.value = true;
+  let removed = 0;
+  const failed = [];
+  try {
+    for (const row of rows) {
+      try {
+        await apiClient.post(`/api/products/${row.id}/remove-from-inventory`, {});
+        removed += 1;
+      } catch (error) { failed.push(`${row.inventory_number || row.name || row.id}：${error.message || "删除失败"}`); }
+    }
+    inventoryListCache.clear();
+    await loadPageData();
+    if (failed.length) ElMessage.error(`已删除 ${removed} 个，${failed.length} 个失败：${failed.join("；")}`);
+    else ElMessage.success(`已将 ${removed} 个商品移入已删除商品`);
+  } finally { deletingProducts.value = false; }
+}
 
 function handleSearch() {
   state.filters.page = 1;
@@ -925,7 +983,7 @@ async function handleDialogSaved({ mode }) {
   dialogVisible.value = false;
   dialogProduct.value = null;
   ElMessage.success(mode === "edit" ? "库存产品已更新" : "库存产品已创建");
-  await loadPageData();
+  void loadPageData({ silent: true });
   if (mode === "edit" && route.query.recalculateAfterSave === "1" && editedProduct?.id) {
     try {
       await ElMessageBox.confirm(
@@ -1126,7 +1184,8 @@ async function removeFromInventory(row) {
       }
     );
     await apiClient.post(`/api/products/${row.id}/remove-from-inventory`, {});
-    ElMessage.success("已删除库存产品");
+    inventoryListCache.clear();
+    ElMessage.success("已移入已删除商品");
     await loadPageData();
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
@@ -1324,6 +1383,15 @@ async function openCancelDetails(row) {
 function openProcurement(row) {
   procurementCreateProductId.value = Number(row.id || 0) || null;
   procurementCreateVisible.value = Boolean(procurementCreateProductId.value);
+}
+
+function openWarehouseProcurementRequest() {
+  if (!selectedRows.value.length) return;
+  warehouseProcurementRequestVisible.value = true;
+}
+
+function handleWarehouseProcurementRequestSubmitted() {
+  selectedRows.value = [];
 }
 
 function openManualOutbound(row) {
@@ -1711,9 +1779,9 @@ function openMappingDetails(row) {
   });
 }
 
-async function loadPageData() {
+async function loadPageData({ silent = false } = {}) {
   const requestToken = listRequestGate.next();
-  loading.value = true;
+  if (!silent) loading.value = true;
   try {
     const params = new URLSearchParams({
       paged: "1",
@@ -1727,12 +1795,13 @@ async function loadPageData() {
       sortDir: String(state.filters.sortDir || "")
     });
     const query = String(state.filters.query || "").trim();
-    if (state.filters.searchMode === "fuzzy" && query) params.set("query", query);
-    if (state.filters.searchMode === "exact") {
-      for (const key of ["inventoryCategory", "productName", "vehicleBrand", "vehicleModel", "accessoryName", "color", "material", "process"]) {
-        const value = Array.isArray(state.filters[key]) ? state.filters[key].join(",") : String(state.filters[key] || "").trim();
-        if (value) params.set(key, value);
-      }
+    if (query) {
+      params.set("query", query);
+      params.set("searchMode", state.filters.searchMode);
+    }
+    for (const key of ["inventoryCategory", "productName", "vehicleBrand", "fitmentType", "vehicleModel", "accessoryName", "color", "material", "process"]) {
+      const value = Array.isArray(state.filters[key]) ? state.filters[key].join(",") : String(state.filters[key] || "").trim();
+      if (value) params.set(key, value);
     }
     const requestUrl = `/api/products?${params.toString()}`;
     const cached = inventoryListCache.get(requestUrl);
@@ -1743,7 +1812,7 @@ async function loadPageData() {
       selectedRows.value = [];
       loading.value = false;
     }
-    const requests = [apiClient.get(requestUrl), loadShopDictionary()];
+    const requests = [apiClient.get(requestUrl), dictionaryLoaded ? Promise.resolve(state.shops) : loadShopDictionary()];
     if (!dictionaryLoaded) {
       requests.push(
         apiClient.get("/api/people"),
@@ -1774,15 +1843,11 @@ async function loadPageData() {
     if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "加载库存产品列表失败");
   } finally {
-    if (listRequestGate.isLatest(requestToken)) loading.value = false;
+    if (!silent && listRequestGate.isLatest(requestToken)) loading.value = false;
   }
 }
 
 watch(() => route.query, applyRouteState, { deep: true });
-watch(
-  () => [state.filters.searchMode, state.filters.shopId, state.filters.inventoryType, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize, state.filters.sortKey, state.filters.sortDir, state.filters.inventoryCategory, state.filters.productName, state.filters.vehicleBrand, state.filters.vehicleModel, state.filters.accessoryName, state.filters.color, state.filters.material, state.filters.process],
-  syncRouteQuery
-);
 watch(() => mergePreview.targetProductId, () => {
   updateMergeCountSummary();
   selectDefaultMergeCompositionSource();
@@ -1799,35 +1864,53 @@ onMounted(async () => {
 
 <template>
   <div class="inventory-page-shell inventory-card">
-    <InventoryPageToolbar
-      :filters="state.filters"
-      :shops="state.shops"
-      :show-query="state.filters.searchMode === 'fuzzy'"
-      query-label="产品搜索"
-      query-placeholder="产品名称 / SKU / 库存编码 / 负责人"
-      @search="handleSearch"
-      @reset="handleReset"
-    >
+    <ErpPageHeader title="商品库存" description="维护商品库存、成本、供应商与采购资料。" compact>
+      <template #actions>
+        <div class="product-header-actions">
+          <el-button class="product-main-action" type="primary" :loading="loading" @click="handleSearch">查询</el-button>
+          <el-button v-if="canWriteInventory" class="product-main-action" type="primary" plain @click="openCreateDialog">新增库存</el-button>
+          <el-button v-if="canWriteInventory" plain @click="productRequestsVisible = true">建品申请 / 待审核</el-button>
+          <el-button v-if="canSubmitProcurementRequest" class="product-main-action" type="primary" plain :disabled="!selectedRows.length" @click="openWarehouseProcurementRequest">提交采购需求{{ selectedRows.length ? `（${selectedRows.length}）` : '' }}</el-button>
+          <el-button v-if="canWriteInventory" class="product-main-action" type="danger" plain :disabled="!selectedRows.length" :loading="deletingProducts" @click="removeSelectedProducts">批量删除{{ selectedRows.length ? `（${selectedRows.length}）` : '' }}</el-button>
+          <span class="product-action-divider" />
+          <el-button plain @click="handleReset">重置</el-button>
+          <el-button plain @click="openMergeHistoryDialog">合并历史</el-button>
+          <el-button v-if="canWriteInventory" plain :disabled="!canMergeProducts" @click="openMergeDialog">合并库存</el-button>
+        </div>
+      </template>
+    </ErpPageHeader>
+    <el-form class="product-search-row" label-position="top" @submit.prevent="handleSearch">
       <el-form-item label="搜索方式">
-        <el-segmented v-model="state.filters.searchMode" :options="[{ label: '模糊搜索', value: 'fuzzy' }, { label: '精确搜索', value: 'exact' }]" />
+        <el-select v-model="state.filters.searchMode">
+          <el-option label="库存 ID 精确搜索" value="inventory_id" />
+          <el-option label="产品名称模糊搜索" value="name" />
+          <el-option label="SKU／货号精确搜索" value="sku" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="搜索内容">
+        <el-input v-model="state.filters.query" clearable :placeholder="state.filters.searchMode === 'inventory_id' ? '完整新编号或旧编码，如 1-23' : state.filters.searchMode === 'sku' ? '完整 Ozon SKU 或货号' : '名称关键词，多个词用空格分隔'" @keyup.enter="handleSearch" />
+      </el-form-item>
+      <el-form-item label="店铺">
+        <el-select v-model="state.filters.shopId" filterable>
+          <el-option label="全部店铺" value="all" />
+          <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="创建时间区间">
+        <el-date-picker v-model="searchDateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" />
       </el-form-item>
       <el-form-item label="产品类型">
-        <el-select v-model="state.filters.inventoryType" style="width: 140px">
+        <el-select v-model="state.filters.inventoryType">
           <el-option label="全部库存" value="all" />
           <el-option label="单品" value="single" />
           <el-option label="套装" value="combo" />
           <el-option label="配件" value="accessory" />
         </el-select>
       </el-form-item>
-      <template #actions>
-        <el-button class="erp-btn erp-btn-secondary" @click="openMergeHistoryDialog">合并历史</el-button>
-        <el-button class="erp-btn erp-btn-secondary" :disabled="!canMergeProducts" @click="openMergeDialog">合并库存产品</el-button>
-        <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新增库存产品</el-button>
-      </template>
-    </InventoryPageToolbar>
+    </el-form>
 
     <InventoryStructuredSearch
-      v-if="state.filters.searchMode === 'exact'"
+      compact
       :model-value="state.filters"
       @update:model-value="Object.assign(state.filters, $event)"
     />
@@ -1844,13 +1927,16 @@ onMounted(async () => {
         @sort-change="handleTableSortChange"
       >
         <el-table-column type="selection" width="48" fixed="left" />
+        <el-table-column label="库存编号" prop="inventory_number" width="125" sortable="custom">
+          <template #default="{ row }"><strong :title="row.inventory_number ? '库存编号生成后保持不变' : '缺少产品身份中的核心品名（inventory_category），请打开编辑库存补齐，保存后自动生成编号'">{{ row.inventory_number || "待补核心品名" }}</strong></template>
+        </el-table-column>
         <el-table-column label="产品信息" prop="product" min-width="340" fixed="left" sortable="custom">
           <template #default="{ row }">
             <div class="product-cell">
               <ProductImagePreview :src="row.image_url" />
               <div class="cell-stack">
                 <ProductTitleLink :title="row.name || '-'" :lines="2" />
-                <span class="muted-text">{{ row.inventory_id || row.code || "-" }}</span>
+                <span class="muted-text">{{ row.inventory_number || row.inventory_id || row.code || "-" }}</span>
                 <div class="product-type-tags">
                   <el-tag size="small" :type="productAutoTypeTag(row)" effect="light">{{ productAutoType(row) }}</el-tag>
                   <span class="muted-text">单位：{{ productUnit(row) }}</span>
@@ -1896,8 +1982,8 @@ onMounted(async () => {
                       <div v-if="componentDetailRows(row).length" class="component-stock-list">
                         <div v-for="component in componentDetailRows(row)" :key="component.component_product_id" class="component-stock-row">
                           <div>
-                            <strong>{{ component.component_name || component.inventory_id || "-" }}</strong>
-                            <span>{{ component.inventory_id || component.code || "-" }}</span>
+                            <strong>{{ component.component_name || component.inventory_number || component.inventory_id || "-" }}</strong>
+                            <span>{{ component.inventory_number || component.inventory_id || component.code || "-" }}</span>
                           </div>
                           <div>
                             <span>本地 {{ integer(component.local_stock) }} {{ component.stock_unit || "个" }}</span>
@@ -1923,7 +2009,7 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="FBP发仓" prop="fbp_transfer_in_transit_qty" width="120" align="center" sortable="custom">
+        <el-table-column label="FBP在途" prop="fbp_transfer_in_transit_qty" width="120" align="center" sortable="custom">
           <template #default="{ row }">
             <div class="cell-stack cell-center">
               <strong>{{ integer(fbpTransferStock(row)) }}</strong>
@@ -1997,14 +2083,15 @@ onMounted(async () => {
         <el-table-column label="操作" width="132" fixed="right">
           <template #default="{ row }">
             <div class="inventory-actions">
-              <el-button class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
-              <el-button class="erp-btn-link" link type="primary" @click="openCompositionDialog(row)">添加子产品</el-button>
-              <el-button class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
-              <el-button class="erp-btn-link" link type="warning" @click="openManualOutbound(row)">手动出库</el-button>
+              <el-button v-if="canWriteInventory" class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
+              <el-button v-if="canWriteInventory" class="erp-btn-link" link type="primary" @click="openCompositionDialog(row)">添加子产品</el-button>
+              <el-button v-if="canProcure" class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
+              <el-button v-if="canProcure" class="erp-btn-link" link @click="ledgerProductId = Number(row.id); ledgerVisible = true">采购库存对账</el-button>
+              <el-button v-if="canOutbound" class="erp-btn-link" link type="warning" @click="openManualOutbound(row)">手动出库</el-button>
               <el-button class="erp-btn-link" link @click="openManualOutboundRecords(row)">出库记录</el-button>
-              <el-button class="erp-btn-link" link type="success" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'estimated'" @click="recalculateProfits(row)">重算预估</el-button>
-              <el-button class="erp-btn-link" link type="primary" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'actual'" @click="recalculateActualProfits(row)">重算真实</el-button>
-              <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="removeFromInventory(row)">删除</el-button>
+              <el-button v-if="canWriteInventory" class="erp-btn-link" link type="success" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'estimated'" @click="recalculateProfits(row)">重算预估</el-button>
+              <el-button v-if="canWriteInventory" class="erp-btn-link" link type="primary" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'actual'" @click="recalculateActualProfits(row)">重算真实</el-button>
+              <el-button v-if="canWriteInventory" class="erp-btn-link erp-btn-link-danger" link type="danger" @click="removeFromInventory(row)">删除</el-button>
             </div>
           </template>
         </el-table-column>
@@ -2189,7 +2276,7 @@ onMounted(async () => {
         <el-form-item label="库存产品">
           <div class="manual-outbound-product">
             <strong>{{ manualOutboundProduct?.name || "-" }}</strong>
-            <span>{{ manualOutboundProduct?.inventory_id || manualOutboundProduct?.code || "-" }}</span>
+            <span>{{ manualOutboundProduct?.inventory_number || manualOutboundProduct?.inventory_id || manualOutboundProduct?.code || "-" }}</span>
           </div>
         </el-form-item>
         <el-form-item label="出库位置">
@@ -2239,7 +2326,7 @@ onMounted(async () => {
       <div class="manual-outbound-record-head">
         <div class="manual-outbound-product">
           <strong>{{ manualOutboundRecordsProduct?.name || "-" }}</strong>
-          <span>{{ manualOutboundRecordsProduct?.inventory_id || manualOutboundRecordsProduct?.code || "-" }}</span>
+          <span>{{ manualOutboundRecordsProduct?.inventory_number || manualOutboundRecordsProduct?.inventory_id || manualOutboundRecordsProduct?.code || "-" }}</span>
         </div>
         <el-button type="warning" @click="openManualOutbound(manualOutboundRecordsProduct)">新增手动出库</el-button>
       </div>
@@ -2258,7 +2345,7 @@ onMounted(async () => {
           <template #default="{ row }">
             <div class="manual-outbound-note">
               <strong>{{ row.product_name || "-" }}</strong>
-              <span>{{ row.product_code || "-" }}</span>
+              <span>{{ row.inventory_number || row.product_code || "-" }}</span>
             </div>
           </template>
         </el-table-column>
@@ -2309,6 +2396,9 @@ onMounted(async () => {
       />
     </el-dialog>
 
+    <InventoryProductRequestsDialog v-if="productRequestsVisible" :people="state.people" :suppliers="state.suppliers" :logistics-rules="state.logisticsRules" @close="productRequestsVisible = false" @changed="refreshAfterProductRequest" />
+
+    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" @saved="loadPageData" />
     <ProductCreateEditDialog
       ref="productCreateDialogRef"
       v-model:visible="dialogVisible"
@@ -2350,6 +2440,12 @@ onMounted(async () => {
       :initial-product-id="procurementCreateProductId"
       :lock-product="true"
       @created="handleProcurementCreated"
+    />
+
+    <WarehouseProcurementRequestDialog
+      v-model="warehouseProcurementRequestVisible"
+      :products="selectedRows"
+      @submitted="handleWarehouseProcurementRequestSubmitted"
     />
 
     <el-dialog v-model="productSalesDialogVisible" :title="productSalesDialogTitle" width="1380px" top="4vh" align-center class="erp-centered-dialog inventory-detail-dialog inventory-detail-dialog--wide">
@@ -2775,6 +2871,21 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.product-header-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.product-header-actions .el-button { margin-left: 0; height: 38px; min-width: 80px; font-size: 14px; }
+.product-header-actions .product-main-action { width: 128px; font-weight: 600; }
+.inventory-page-shell > .erp-page-header, .inventory-page-shell > .product-search-row, .inventory-page-shell > .inventory-structured-search { flex: 0 0 auto; }
+.inventory-page-shell > .inventory-structured-search { width: auto; overflow: visible; grid-template-columns: repeat(8, minmax(0, 1fr)); padding: 14px 18px; gap: 12px; }
+@media (max-width: 1200px) { .inventory-page-shell > .inventory-structured-search { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .inventory-page-shell > .inventory-structured-search { grid-template-columns: repeat(2, minmax(0, 1fr)); } .inventory-page-shell.inventory-card { overflow-y: auto; } .inventory-page-shell > .inventory-table-wrap { flex-shrink: 0; min-height: 280px; } }
+.product-action-divider { height: 22px; width: 1px; background: #e2e8f0; margin: 0 4px; }
+.product-search-row { display: grid; grid-template-columns: minmax(170px, 1fr) minmax(220px, 1.8fr) minmax(140px, 1fr) minmax(270px, 1.5fr) minmax(120px, .8fr); gap: 16px; padding: 16px 18px; border: 1px solid #e8edf5; border-radius: 12px; background: #f8fafc; }
+.product-search-row :deep(.el-form-item) { margin: 0; min-width: 0; }
+.product-search-row :deep(.el-form-item__label) { margin-bottom: 6px; font-size: 12px; color: #64748b; }
+.product-search-row :deep(.el-select), .product-search-row :deep(.el-date-editor) { width: 100%; min-width: 0; }
+@media (max-width: 1100px) { .product-search-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .product-search-row { grid-template-columns: 1fr; } .product-action-divider { display: none; } }
+
 .sku-summary-cell {
   display: flex;
   flex-direction: column;
@@ -3569,4 +3680,3 @@ onMounted(async () => {
   }
 }
 </style>
-

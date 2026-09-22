@@ -30,3 +30,21 @@ test("procurement grouping aggregates quantities and unique people", () => {
   assert.deepEqual(grouped.rows[0].requester_names, ["A", "B", "C"]);
   assert.deepEqual(grouped.rows[0].supplier_names, ["S"]);
 });
+
+test("FBP transit is shown once per product and never covers local procurement demand", () => {
+  const requests = rows.map((row) => ({ ...row, incoming_stock: 3, fbp_transfer_in_transit_qty: "200" }));
+  const result = groupProcurementRequestsMysql(requests).rows[0];
+  const withoutTransit = groupProcurementRequestsMysql(requests.map((row) => ({ ...row, fbp_transfer_in_transit_qty: 0 }))).rows[0];
+  assert.equal(result.fbp_transfer_in_transit_qty, 200);
+  assert.equal(result.incoming_stock, 3);
+  assert.deepEqual({ ...result, fbp_transfer_in_transit_qty: 0, requests: [] }, { ...withoutTransit, requests: [] });
+});
+
+test("historical procurement totals belong to a product and are not multiplied by its demand rows", () => {
+  const input = rows.map(row => ({ ...row, historical_purchase_amount: "219.00", historical_purchased_quantity: 90, historical_purchase_count: 2 }));
+  const grouped = groupProcurementRequestsMysql(input).rows[0];
+  assert.equal(grouped.historical_purchase_amount, 219);
+  assert.equal(grouped.historical_purchased_quantity, 90);
+  assert.equal(grouped.historical_purchase_count, 2);
+  assert.equal(groupProcurementRequestsMysql(rows).rows[0].historical_purchase_amount, 0);
+});

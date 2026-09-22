@@ -1,3 +1,4 @@
+import { hasPermission } from "../../shared/permissions.js";
 export function createOperationsRoutes({ services, readJson }) {
   return {
     "GET /api/settings/packaging-fee-rule": () => services.packagingFeeRule(),
@@ -8,7 +9,17 @@ export function createOperationsRoutes({ services, readJson }) {
     "GET /api/outbound-records": (req, url) => services.outboundRecords(Object.fromEntries(url.searchParams.entries())),
     "GET /api/fbp-transfer-records": (req, url) => services.fbpTransferRecords(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/summary": () => services.procurementSummary(),
+    "GET /api/procurement/daily-report": (req, url) => services.procurementDailyReport(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/requests": (req, url) => services.procurementRequests(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/procurement/ledger": (req, url) => services.procurementLedger(Object.fromEntries(url.searchParams.entries())),
+    "POST /api/procurement/ledger/preview": async (req) => services.previewProcurementLedger(await readJson(req)),
+    "POST /api/procurement/ledger": async (req) => {
+      const body = await readJson(req);
+      if (['convert', 'substitute', 'damage', 'loss', 'stocktake'].includes(body.action_type) && !hasPermission(req._session, 'inventory.write')) {
+        throw Object.assign(new Error('库存替代、转换及盘点调整需要库存管理权限'), { status: 403 });
+      }
+      return services.applyProcurementLedger(body, req._session?.personId);
+    },
     "GET /api/procurement/order-history": (req, url) => services.procurementProductOrderHistory(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/purchase-history": (req, url) => services.procurementProductPurchaseHistory(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/binding-suggestions": (req, url) => services.procurementBindingSuggestions(Object.fromEntries(url.searchParams.entries())),
@@ -30,6 +41,7 @@ export function createOperationsRoutes({ services, readJson }) {
     "POST /api/people": async (req) => services.createPerson(await readJson(req)) || { ok: true },
     "POST /api/shops": async (req) => services.createShop(await readJson(req)) || { ok: true },
     "POST /api/procurement/requests": async (req) => services.createProcurementRequest(await readJson(req), req._session?.personId) || { ok: true },
+    "POST /api/procurement/warehouse-requests": async (req) => services.createWarehouseProcurementRequests(await readJson(req), req._session?.personId),
     "POST /api/procurement/purchases": async (req) => services.recordProcurementPurchase(await readJson(req), req._session?.personId),
     "POST /api/procurement/platform-orders/import": async (req) => services.importProcurementPlatformOrders(await readJson(req), req._session?.personId),
     "POST /api/procurement/payments/import": async (req) => services.importProcurementPayments(await readJson(req), req._session?.personId),
@@ -43,8 +55,18 @@ export function createOperationsRoutes({ services, readJson }) {
     "POST /api/inbound-records": async (req) => services.createInboundRecord(await readJson(req)) || { ok: true },
     "POST /api/fbp-transfer-records": async (req) => services.createFbpTransferRecord(await readJson(req), req._session?.personId) || { ok: true },
     "POST /api/inbound-records/batch-update-async": async (req) => services.startBatchUpdateInboundRecords(await readJson(req), req._session?.personId),
+    "POST /api/inbound-records/shipped-receipts/preview": async (req) => services.previewShippedProcurementReceipts(await readJson(req)),
+    "POST /api/inbound-records/shipped-receipts/confirm": async (req) => services.confirmShippedProcurementReceipts(await readJson(req), req._session?.personId),
     "POST /api/inbound-records/batch-update": async (req) => services.batchUpdateInboundRecords(await readJson(req), req._session?.personId),
-    "POST /api/inventory/movements": async (req) => services.createInventoryMovement(await readJson(req), req._session?.personId) || { ok: true },
+    "POST /api/inventory/movements": async (req) => {
+      const body = await readJson(req);
+      if (!hasPermission(req._session, "inventory.write") && !(hasPermission(req._session, "packing") && String(body.source_type || body.sourceType || "").trim() === "manual_outbound")) {
+        const error = new Error("打包角色仅可登记手动出库；调整其他库存流水需要库存管理权限");
+        error.status = 403;
+        throw error;
+      }
+      return services.createInventoryMovement(body, req._session?.personId) || { ok: true };
+    },
     "GET /api/inventory/stock-debts": (req, url) => services.inventoryStockDebts(Object.fromEntries(url.searchParams.entries())),
     "POST /api/inventory/stock-debts/adjust": async (req) => services.adjustInventoryStockDebt(await readJson(req), req._session?.personId),
     "POST /api/customer-messages/preview": async (req) => services.previewCustomerMessage(await readJson(req)),

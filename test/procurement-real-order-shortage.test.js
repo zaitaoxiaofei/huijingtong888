@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { groupProcurementRequestsMysql, procurementOrderActionClassMysql, procurementPriorityBreakdownMysql, procurementRealOrderShortageMysql } from "../src/services/mysql-procurement-list.js";
@@ -23,7 +24,7 @@ function requestRow(overrides = {}) {
   };
 }
 
-test("negative inventory debt is restored before real-order and safety-stock demand", () => {
+test("historical inventory debt remains visible separately from current purchasing", () => {
   const result = groupProcurementRequestsMysql([requestRow({ recent_7d_qty: 8, recent_30d_qty: 20 })], { page: 1, pageSize: 20, demandType: "real_order" });
   assert.equal(result.total, 1);
   assert.equal(result.rows[0].order_demand_quantity, 1);
@@ -31,6 +32,14 @@ test("negative inventory debt is restored before real-order and safety-stock dem
   assert.equal(result.rows[0].suggested_purchase_qty, 1);
   assert.equal(result.rows[0].inventory_debt_shortage, 3);
   assert.equal(result.rows[0].priority_level, "P0");
+  assert.deepEqual(result.rows[0].suggestion_reasons, [{
+    type: "real_order",
+    label: "真实订单需求",
+    quantity: 1,
+    text: "真实订单：1 个待发订单需采购 1 件"
+  }]);
+  assert.deepEqual(result.rows[0].primary_suggestion_reason, result.rows[0].suggestion_reasons[0]);
+  assert.equal(result.rows[0].primary_suggested_purchase_qty, 1);
 });
 
 test("only pre-shipment real orders remain actionable procurement demand", () => {
@@ -57,6 +66,11 @@ test("newly available stock can cover an existing real-order request", () => {
   assert.equal(result.total, 0);
 });
 
+test("deferred coverage keeps real-order shortage calculation on current stock", async () => {
+  const service = await readFile(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
+  assert.match(service, /row\.operational_shortage = deferCoverage\s*\? null\s*:\s*operationalByProduct\.get\(Number\(row\.product_id\)\) \|\| 0/);
+});
+
 test("component stock and incoming supply cover a combination-product request", () => {
   assert.equal(procurementRealOrderShortageMysql({
     order_demand_quantity: 1,
@@ -72,7 +86,7 @@ test("a submitted request without a purchase order remains visible as waiting de
   assert.equal(result.total, 1);
 });
 
-test("advance-stock recommendations restore net debt before safety stock", () => {
+test("advance-stock recommendations do not repurchase historical discrepancies", () => {
   const result = groupProcurementRequestsMysql([requestRow({
     source_order_id: null,
     source_order_item_id: null,
@@ -88,22 +102,36 @@ test("advance-stock recommendations restore net debt before safety stock", () =>
   })], { page: 1, pageSize: 20 });
 
   assert.equal(result.total, 1);
-  assert.equal(result.rows[0].suggested_purchase_qty, 88);
-  assert.equal(result.rows[0].coverage_days, 0);
-  assert.equal(result.rows[0].inventory_debt_shortage, 28);
-  assert.equal(result.rows[0].safety_stock_shortage, 60);
+  assert.equal(result.rows[0].suggested_purchase_qty, 10);
+  assert.equal(result.rows[0].coverage_days, 17.6);
+  assert.equal(result.rows[0].inventory_debt_shortage, 78);
+  assert.equal(result.rows[0].safety_stock_shortage, 10);
+  assert.match(result.rows[0].suggestion_reasons.find((reason) => reason.type === "advance_stock").text, /提前采购：按近30天日均销量覆盖 21 天日常备货，建议 10 件/);
+  assert.equal(result.rows[0].primary_suggestion_reason.type, "advance_stock");
+  assert.equal(result.rows[0].primary_suggested_purchase_qty, 10);
 });
 
-test("incoming stock pays negative inventory debt before it can cover orders", () => {
+test("the display suggestion prioritizes real orders over additional replenishment", () => {
+  const result = groupProcurementRequestsMysql([
+    requestRow({ id: 1, quantity: 2, stock: 0 }),
+    requestRow({ id: 2, source_order_id: null, source_order_item_id: null, demand_type: "advance_stock", quantity: 10, stock: 0 })
+  ], { page: 1, pageSize: 20 });
+
+  assert.equal(result.rows[0].suggested_purchase_qty, 10);
+  assert.equal(result.rows[0].primary_suggestion_reason.type, "real_order");
+  assert.equal(result.rows[0].primary_suggested_purchase_qty, 2);
+});
+
+test("incoming supply covers current orders without erasing historical debt", () => {
   assert.deepEqual(procurementPriorityBreakdownMysql({ stock: -79, incoming_stock: 50, order_demand_quantity: 20 }, 60), {
     local_supply: -79,
     incoming_supply: 50,
     inventory_debt: 79,
-    inventory_debt_shortage: 29,
-    incoming_after_debt: 0,
+    inventory_debt_shortage: 79,
+    incoming_after_debt: 50,
     order_demand: 20,
-    real_order_shortage: 20,
-    safety_stock_shortage: 60,
-    total_priority_shortage: 109
+    real_order_shortage: 0,
+    safety_stock_shortage: 30,
+    total_priority_shortage: 30
   });
 });

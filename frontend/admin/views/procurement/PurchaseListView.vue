@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
+import ProcurementLedgerDialog from "../../components/procurement/ProcurementLedgerDialog.vue";
 import { apiClient } from "../../utils/api";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { createLatestRequestGate } from "../../utils/request-gate";
@@ -11,8 +12,11 @@ import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import InventoryStructuredSearch from "../../components/inventory/InventoryStructuredSearch.vue";
+import { uploadTeamAttachment } from "../../api/tools/imageCropper.js";
 
 const route = useRoute();
+const ledgerVisible = ref(false);
+const ledgerProductId = ref(0);
 const router = useRouter();
 const listRequestGate = createLatestRequestGate();
 let syncingRoute = false;
@@ -24,6 +28,13 @@ const detailVisible = ref(false);
 const detailSaving = ref(false);
 const expandedRowKeys = ref([]);
 const savingRequestIds = ref([]);
+const receiptVisible = ref(false);
+const receiptSubmitting = ref(false);
+const receiptRows = ref([]);
+const receiptForm = reactive({ courier_company: "", tracking_number: "", received_at: "", images: [], note: "" });
+const newPurchaseVisible = ref(false);
+const newPurchaseSaving = ref(false);
+const newPurchaseForm = reactive({ quantity: 1, amount: 0, shipping_amount: 0, purchase_url: "", note: "" });
 
 const sourceTypeOptions = [
   { label: "1688", value: "1688" },
@@ -57,6 +68,7 @@ const state = reactive({
     color: "",
     material: [],
     process: "",
+    productId: "",
     page: 1,
     pageSize: 20
   },
@@ -149,6 +161,7 @@ function procurementQueryString() {
   });
   const query = String(state.filters.query || "").trim();
   if (query) params.set("query", query);
+  if (state.filters.productId) params.set("productId", String(state.filters.productId));
   for (const [key, value] of Object.entries({
     demandType: state.filters.demandType,
     personId: state.filters.personId,
@@ -193,6 +206,42 @@ function normalizeInboundRow(record = {}) {
   };
 }
 
+function receiptImages(row = {}) {
+  const value = row.receipt_images_json;
+  if (Array.isArray(value)) return value;
+  try { return JSON.parse(value || "[]"); } catch { return []; }
+}
+
+function openReceiptDialog(rows) {
+  receiptRows.value = rows.flatMap((row) => row.requests || []).map((row) => ({ ...row, receive_quantity: Number(row.quantity || 0) }));
+  Object.assign(receiptForm, { courier_company: "", tracking_number: "", received_at: new Date().toISOString().slice(0, 19).replace("T", " "), images: [], note: "" });
+  receiptVisible.value = true;
+}
+
+async function uploadReceiptImage(file) {
+  try {
+    const result = await uploadTeamAttachment(file.raw || file);
+    receiptForm.images.push(result.url || result.path || result);
+  } catch (error) { ElMessage.error(error.message || "到货照片上传失败"); }
+}
+
+async function confirmReceipt() {
+  if (!receiptRows.value.length) return;
+  receiptSubmitting.value = true;
+  try {
+    await apiClient.post("/api/inbound-records/batch-update", { records: receiptRows.value.map((row) => ({ id: row.id, payload: {
+      ...normalizeRequestForSave(row), receive_quantity: Number(row.receive_quantity || 0),
+      expected_remaining_quantity: Number(row.quantity || 0),
+      courier_company: receiptForm.courier_company, tracking_number: receiptForm.tracking_number,
+      receipt_images_json: receiptForm.images, received_at: receiptForm.received_at,
+      receipt_context: receiptForm.note, qc_status: row.qc_status || "pending"
+    }})) });
+    ElMessage.success("收货批次已登记，已同步快递单号和到货照片");
+    receiptVisible.value = false; state.selectedRows = []; await loadPageData();
+  } catch (error) { ElMessage.error(error.message || "批量收货失败"); }
+  finally { receiptSubmitting.value = false; }
+}
+
 async function loadPageData() {
   const requestToken = listRequestGate.next();
   loading.value = true;
@@ -221,7 +270,7 @@ function handleReset() {
   Object.assign(state.filters, {
     query: "", demandType: "all", personId: "all", supplierId: "all", sourceType: "all",
     inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [],
-    accessoryName: "", color: "", material: [], process: "", page: 1, pageSize: 20
+    accessoryName: "", color: "", material: [], process: "", productId: "", page: 1, pageSize: 20
   });
   syncRouteQuery("manual");
   loadPageData();
@@ -243,7 +292,8 @@ function applyRouteState() {
   try {
     const query = String(route.query.query || "");
     const productId = String(route.query.productId || "").trim();
-    state.filters.query = query || productId;
+    state.filters.query = query;
+    state.filters.productId = productId;
     state.filters.page = asPositiveInt(route.query.page, 1);
     state.filters.pageSize = asPositiveInt(route.query.pageSize, 20);
   } finally {
@@ -259,11 +309,56 @@ const syncRouteQuery = createRouteQuerySync({
     const includeTextFilters = mode === "manual";
     return {
       query: includeTextFilters ? state.filters.query || undefined : undefined,
+      productId: state.filters.productId || undefined,
       page: state.filters.page > 1 ? String(state.filters.page) : undefined,
       pageSize: state.filters.pageSize !== 20 ? String(state.filters.pageSize) : undefined
     };
   }
 });
+
+const orderProcurementContext = computed(() => Number(route.query.orderId || 0) > 0 ? {
+  orderId: Number(route.query.orderId),
+  orderItemId: Number(route.query.orderItemId || 0) || null,
+  orderNo: String(route.query.orderNo || ""),
+  productName: String(route.query.productName || "")
+} : null);
+
+function openNewPurchaseDialog() {
+  const quantity = Math.max(1, Number(route.query.quantity || 1));
+  Object.assign(newPurchaseForm, { quantity, amount: 0, shipping_amount: 0, purchase_url: "", note: "" });
+  newPurchaseVisible.value = true;
+}
+
+async function saveNewPurchaseRecord() {
+  const productId = Number(state.filters.productId || 0);
+  if (!productId) return ElMessage.warning("缺少库存商品，无法新增采购记录");
+  if (!(Number(newPurchaseForm.quantity || 0) > 0)) return ElMessage.warning("采购数量必须大于 0");
+  if (Number(newPurchaseForm.amount || 0) < 0 || Number(newPurchaseForm.shipping_amount || 0) < 0) return ElMessage.warning("采购金额和运费不能为负数");
+  newPurchaseSaving.value = true;
+  try {
+    const context = orderProcurementContext.value;
+    await apiClient.post("/api/procurement/purchases", {
+      items: [{
+        product_id: productId,
+        quantity: Number(newPurchaseForm.quantity),
+        amount: Number(newPurchaseForm.amount || 0),
+        shipping_amount: Number(newPurchaseForm.shipping_amount || 0),
+        purchase_url: newPurchaseForm.purchase_url,
+        note: newPurchaseForm.note,
+        source_order_id: context?.orderId || null,
+        source_order_item_id: context?.orderItemId || null
+      }],
+      note: context?.orderNo ? `订单 ${context.orderNo} 补录采购` : "采购明细新增采购"
+    });
+    ElMessage.success("采购已登记并进入待到货明细");
+    newPurchaseVisible.value = false;
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "新增采购记录失败");
+  } finally {
+    newPurchaseSaving.value = false;
+  }
+}
 
 function handleSelectionChange(rows) {
   state.selectedRows = Array.isArray(rows) ? rows : [];
@@ -338,7 +433,7 @@ async function saveRequestRow(row) {
   const requestId = Number(row?.id || 0);
   if (!requestId || requestSaving(row)) return;
   if (!(Number(row.quantity || 0) > 0)) return ElMessage.warning("采购数量必须大于 0");
-  if (!(Number(row.amount || 0) > 0)) return ElMessage.warning("请填写采购金额，货款必须大于 0");
+  if (Number(row.amount || 0) < 0) return ElMessage.warning("采购金额不能为负数，未知金额可稍后补齐");
   savingRequestIds.value = [...new Set([...savingRequestIds.value, requestId])];
   try {
     await apiClient.put(`/api/inbound-records/${requestId}`, {
@@ -394,8 +489,8 @@ async function recalculateProductProfits(productIds = []) {
 
 async function saveDetailRows() {
   if (!detailDialog.rows.length) return;
-  const invalid = detailDialog.rows.find((row) => !(Number(row.quantity || 0) > 0) || !(Number(row.amount || 0) > 0));
-  if (invalid) return ElMessage.warning("每条采购明细都必须填写大于 0 的采购数量和采购金额");
+  const invalid = detailDialog.rows.find((row) => !(Number(row.quantity || 0) > 0) || Number(row.amount || 0) < 0);
+  if (invalid) return ElMessage.warning("每条采购明细必须有实际数量，金额不能为负数；未知金额可稍后补齐");
 
   detailSaving.value = true;
   try {
@@ -425,12 +520,6 @@ function collectInboundIds(rows = []) {
 async function directInboundRequests(rows, label) {
   const inboundIds = collectInboundIds(rows);
   if (!inboundIds.length) return;
-  const missingCost = rows.flatMap((row) => row.requests || []).find((item) => !(Number(item.amount || 0) > 0));
-  if (missingCost) {
-    ElMessage.warning("存在未填写采购金额的明细，请先展开商品补录实际货款并保存，再执行入库");
-    return;
-  }
-
   try {
     await ElMessageBox.confirm(`确认将${label}直接入库吗？确认后会增加库存。`, "确认入库", {
       type: "warning",
@@ -462,11 +551,11 @@ async function directInboundRequests(rows, label) {
 
 async function handleInboundAction(row) {
   if (actionDisabled(row, "inbound")) return;
-  await directInboundRequests([row], `产品「${row.product_name || row.product_code || row.product_id}」`);
+  openReceiptDialog([row]);
 }
 
 async function inboundSelectedRows() {
-  await directInboundRequests(state.selectedRows, `选中的 ${state.selectedRows.length} 个商品`);
+  openReceiptDialog(state.selectedRows);
 }
 
 async function cancelRequests(rows, label) {
@@ -528,12 +617,26 @@ onMounted(async () => {
 
 <template>
   <div class="page-stack procurement-list-page procurement-workspace-page">
-    <ErpPageHeader title="待入库清单" description="采购流程统一收口到这里处理，只保留编辑、入库和取消。" />
+    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" @saved="loadPageData" />
+    <ErpPageHeader title="每日采购与收货台账" description="按采购日期和核心品名排序，集中核货、登记快递与到货留痕。" />
+
+    <el-alert
+      v-if="orderProcurementContext"
+      type="warning"
+      :closable="false"
+      class="procurement-order-context"
+      show-icon
+    >
+      <template #title>
+        订单 {{ orderProcurementContext.orderNo || orderProcurementContext.orderId }} 的采购明细
+      </template>
+      当前仅展示「{{ orderProcurementContext.productName || `库存商品 #${state.filters.productId}` }}」的待到货采购记录；可直接展开修改，或新增一笔并自动关联当前订单。
+    </el-alert>
 
     <el-card shadow="never" class="page-card procurement-list-card procurement-workspace-card">
       <div class="procurement-toolbar procurement-toolbar-sticky procurement-workspace-filter">
         <div class="procurement-list-summary">
-          <strong>待入库商品</strong>
+          <strong>采购与收货明细</strong>
           <span>共 {{ totalRows }} 条</span>
           <span>已选 {{ state.selectedRows.length }} 条</span>
         </div>
@@ -578,8 +681,11 @@ onMounted(async () => {
             <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
             <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
             <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
+            <el-button v-if="orderProcurementContext" class="erp-btn erp-btn-primary" type="primary" @click="openNewPurchaseDialog">
+              新增该订单采购记录
+            </el-button>
             <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!state.selectedRows.length" :loading="inboundSubmitting" @click="inboundSelectedRows">
-              批量入库（{{ state.selectedRows.length }}）
+              批量登记到货（{{ state.selectedRows.length }}）
             </el-button>
             <el-button class="erp-btn erp-btn-danger" :disabled="!state.selectedRows.length" :loading="cancelSubmitting" @click="cancelSelectedRows">
               选中取消
@@ -695,12 +801,20 @@ onMounted(async () => {
                 />
                 <div class="product-cell-meta">
                   <strong>{{ row.product_name || "-" }}</strong>
-                  <span>编码：{{ row.product_code || "-" }}</span>
+                  <span>库存 ID：{{ row.inventory_number || row.product_code || "-" }}</span>
+                  <span>核心品名：{{ row.inventory_category || "未分类" }}</span>
                   <span>SKU：{{ row.mapped_skus || "未绑定 SKU" }}</span>
                   <span>申请人：{{ arrayText(row.requester_names) || "-" }}</span>
                 </div>
               </div>
             </template>
+          </el-table-column>
+
+          <el-table-column label="采购信息" width="190">
+            <template #default="{ row }"><div class="time-cell"><span>采购人：{{ row.person_name || "未记录" }}</span><span>采购时间：{{ dateText(row.purchased_at || row.created_at) }}</span></div></template>
+          </el-table-column>
+          <el-table-column label="快递 / 留痕" min-width="200">
+            <template #default="{ row }"><div class="time-cell"><span>{{ row.courier_company || "未填快递公司" }} {{ row.tracking_number || "" }}</span><span>{{ receiptImages(row).length ? `到货照片 ${receiptImages(row).length} 张` : "未上传到货照片" }}</span></div></template>
           </el-table-column>
 
           <el-table-column label="明细数" width="90" align="center">
@@ -783,8 +897,9 @@ onMounted(async () => {
           <el-table-column label="操作" width="280" fixed="right" align="center">
             <template #default="{ row }">
               <div class="row-actions erp-inline-actions">
+                <el-button class="erp-btn-link" link @click="ledgerProductId = Number(row.product_id); ledgerVisible = true">数量纠正／对账</el-button>
                 <el-button class="erp-btn-link" link type="primary" :disabled="actionDisabled(row, 'edit')" @click="handleEditAction(row)">展开编辑</el-button>
-                <el-button class="erp-btn-link" link type="success" :disabled="actionDisabled(row, 'inbound')" :loading="inboundSubmitting" @click="handleInboundAction(row)">入库</el-button>
+                <el-button class="erp-btn-link" link type="success" :disabled="actionDisabled(row, 'inbound')" :loading="inboundSubmitting" @click="handleInboundAction(row)">登记到货</el-button>
                 <el-button class="erp-btn-link" link type="danger" :disabled="actionDisabled(row, 'cancel')" :loading="cancelSubmitting" @click="handleCancelAction(row)">取消</el-button>
               </div>
             </template>
@@ -802,6 +917,34 @@ onMounted(async () => {
         @update:pageSize="handlePageSizeChange"
       />
     </el-card>
+
+    <el-dialog v-model="newPurchaseVisible" title="新增采购记录" width="620px" destroy-on-close>
+      <el-alert type="info" :closable="false" title="保存后会生成采购在途，并关联当前订单；到货后请在本页登记实收。" />
+      <el-form label-width="92px" class="receipt-form">
+        <el-form-item label="采购数量"><el-input-number v-model="newPurchaseForm.quantity" :min="1" :precision="0" /></el-form-item>
+        <el-form-item label="货款"><el-input-number v-model="newPurchaseForm.amount" :min="0" :precision="2" /></el-form-item>
+        <el-form-item label="运费"><el-input-number v-model="newPurchaseForm.shipping_amount" :min="0" :precision="2" /></el-form-item>
+        <el-form-item label="采购链接"><el-input v-model="newPurchaseForm.purchase_url" placeholder="https://..." /></el-form-item>
+        <el-form-item label="备注"><el-input v-model="newPurchaseForm.note" type="textarea" placeholder="颜色、规格、供应商等" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="newPurchaseVisible = false">取消</el-button>
+        <el-button type="primary" :loading="newPurchaseSaving" @click="saveNewPurchaseRecord">保存并进入在途</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-if="receiptVisible" v-model="receiptVisible" title="批量登记到货" width="820px" destroy-on-close>
+      <el-alert title="同一批到货可共用快递单号和照片；每条明细仍可分别填写实收数量。" type="info" :closable="false" />
+      <el-form label-width="92px" class="receipt-form">
+        <el-form-item label="快递公司"><el-input v-model="receiptForm.courier_company" placeholder="例如：中通" /></el-form-item>
+        <el-form-item label="快递单号"><el-input v-model="receiptForm.tracking_number" placeholder="填写本批次快递单号" /></el-form-item>
+        <el-form-item label="到货时间"><el-date-picker v-model="receiptForm.received_at" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" /></el-form-item>
+        <el-form-item label="到货照片"><el-upload :auto-upload="false" accept="image/*" multiple :on-change="uploadReceiptImage"><el-button>上传照片</el-button></el-upload><span class="muted-text">已上传 {{ receiptForm.images.length }} 张</span></el-form-item>
+        <el-form-item label="收货备注"><el-input v-model="receiptForm.note" type="textarea" /></el-form-item>
+      </el-form>
+      <el-table :data="receiptRows" border max-height="280"><el-table-column prop="product_name" label="库存名称" min-width="300" /><el-table-column prop="quantity" label="采购数" width="100" /><el-table-column label="实收数" width="160"><template #default="{row}"><el-input-number v-model="row.receive_quantity" :min="0" :max="row.quantity" :precision="0" /></template></el-table-column></el-table>
+      <template #footer><el-button @click="receiptVisible=false">取消</el-button><el-button type="primary" :loading="receiptSubmitting" @click="confirmReceipt">确认收货并入库</el-button></template>
+    </el-dialog>
 
     <el-dialog
       v-model="detailVisible"

@@ -8,6 +8,7 @@ import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { uploadListingMedia, withImageToken } from "../../api/tools/imageCropper";
 import { generateAiVideo } from "../../api/tools/aiImageGenerator.js";
 import OzonCategorySelect from "../../components/listing/OzonCategorySelect.vue";
+import AiProductImportDialog from "../../components/listing/AiProductImportDialog.vue";
 const OzonRichContentEditor = defineAsyncComponent(() => import("../../components/listing/OzonRichContentEditor.vue"));
 
 const loading = ref(false);
@@ -28,12 +29,14 @@ const publishingToOzon = ref(false);
 const collectorTemplateApplied = ref(false);
 const showApiDebug = ref(false);
 const richEditorVisible = ref(false);
+const quickDraftImportRef = ref(null);
 const richEditorContext = reactive({
   row: null,
   field: null
 });
 const sourceRawOmitted = ref(false);
 const draftImagesManuallyEdited = ref(false);
+const activeAttributeCellKey = ref("");
 const ATTRIBUTE_OPTION_LOAD_LIMIT = 2000;
 const COLOR_ATTRIBUTE_OPTION_LOAD_LIMIT = 2000;
 const COLOR_ATTRIBUTE_IDS = new Set(["10096", "22814"]);
@@ -621,6 +624,39 @@ async function applyListingDraftFromRoute(routeDraft = null) {
   draftImagesManuallyEdited.value = draftForm.source_images.length > 0;
   state.step = "shops";
   ElMessage.success("已载入草稿，可继续选择店铺并上架");
+}
+
+function openQuickDraftImport() {
+  quickDraftImportRef.value?.open("draft", { defaultDraftScope: "all" });
+}
+
+async function importDraftAsCopy(row) {
+  const sourceDraftId = Number(row?.sourceDraftId || row?.sourceId || 0);
+  if (!sourceDraftId) return;
+  const source = await apiClient.get(`/api/listing/drafts/${sourceDraftId}`, { noCache: true });
+  if (!source?.id) throw new Error("草稿不存在或已被删除");
+  fillTemplateEditor(source.template_payload || source.templatePayload || {}, { safeOpen: true });
+  Object.assign(draftForm, {
+    id: "", template_id: source.template_id || "", product_name: source.product_name || "", internal_code: "",
+    source_urls: Array.isArray(source.source_urls) ? source.source_urls.join("\n") : "",
+    source_images: (source.source_images || []).map((item) => ({ name: typeof item === "string" ? item : item?.name || item?.url, url: typeof item === "string" ? item : item?.url })).filter((item) => item.url),
+    cost_price: Number(source.cost_price || 0), sale_price: Number(source.sale_price || 0), length_cm: Number(source.length_cm || 0), width_cm: Number(source.width_cm || 0), height_cm: Number(source.height_cm || 0), weight_g: Number(source.weight_g || 0), color: source.color || "", spec: source.spec || "", quantity: Number(source.quantity || 0)
+  });
+  draftForm.shop_ids = [];
+  state.selectedDraftId = null;
+  await router.replace({
+    query: {
+      ...route.query,
+      draftId: undefined,
+      templateId: undefined,
+      recordId: undefined,
+      recordDraft: undefined
+    }
+  });
+  state.step = "edit";
+  draftImagesManuallyEdited.value = draftForm.source_images.length > 0;
+  await hydrateLoadedCategorySchema();
+  ElMessage.success(`已复制「${source.product_name || sourceDraftId}」，保存后会创建新草稿`);
 }
 
 function draftCategoryKey(draft = {}) {
@@ -1805,6 +1841,43 @@ function flatSkuAttributeOptions(row = {}, field = {}) {
     ...dictionaryOptions.filter((option) => !isColorAttributeField(field) || isUsableColorOption(option, field)),
     ...currentValues
   ]);
+}
+
+function attributeCellKey(row = {}, field = {}) {
+  return `${row.id || row._draft_id || "row"}:${attributeFieldKey(field)}`;
+}
+
+function inactiveAttributeCellOptions(row = {}, field = {}) {
+  const entry = findVariantDynamicAttributeEntry(row, field) || {};
+  const selected = normalizeArray(entry.selected_values || entry.selectedValues).filter((option) => option && typeof option === "object");
+  if (selected.length) return dedupeAttributeOptions(selected);
+  return normalizeArray(variantAttributeSelectModelValue(row, field))
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean)
+    .map((value) => ({
+      value,
+      label: /^\d+$/.test(value) ? "待同步字典值" : localizeAttributeDisplayText(value, field)
+    }));
+}
+
+function flatSkuAttributeCellOptions(row = {}, field = {}) {
+  return activeAttributeCellKey.value === attributeCellKey(row, field)
+    ? flatSkuAttributeOptions(row, field)
+    : inactiveAttributeCellOptions(row, field);
+}
+
+function variantColorCellOptions(row = {}, field = {}) {
+  if (activeAttributeCellKey.value === attributeCellKey(row, field)) return variantColorOptions(row, field);
+  return normalizeColorValues(variantAttributeSelectModelValue(row, field)).map((value) => ({
+    value,
+    label: translateColorValue(value) || value
+  }));
+}
+
+function toggleAttributeCellOptions(row = {}, field = {}, visible) {
+  const key = attributeCellKey(row, field);
+  activeAttributeCellKey.value = visible ? key : activeAttributeCellKey.value === key ? "" : activeAttributeCellKey.value;
+  ensureAttributeValuesLoaded(field, visible);
 }
 
 function applyCleanRecordAttributeFallbacks(editable = {}, logistics = {}) {
@@ -3309,6 +3382,7 @@ function addVariantRow() {
     ElMessage.warning("批量草稿编辑中，每一行固定对应一个草稿，不能新增行");
     return;
   }
+  const firstVariant = templateEditor.variants[0] || {};
   const row = {
     id: `variant-${Date.now().toString(36)}-${templateEditor.variants.length}`,
     sku: "",
@@ -3333,7 +3407,10 @@ function addVariantRow() {
     width_mm: cmToMm(templateEditor.width_cm),
     height_mm: cmToMm(templateEditor.height_cm),
     stock: Number(templateEditor.quantity || 0),
-    dynamic_attributes: {},
+    // New variants start with the same selected Ozon dictionary values as the
+    // first row. Keeping the selected objects also preserves their localized
+    // labels instead of falling back to raw Ozon dictionary text.
+    dynamic_attributes: clonePlain(firstVariant.dynamic_attributes || {}, {}),
     sort_order: templateEditor.variants.length + 1
   };
   seedVariantModelValue(row, {}, "");
@@ -5264,7 +5341,26 @@ async function saveBatchListingDrafts() {
   if (items.some((item) => !item.template_id || !item.product_name)) {
     throw new Error("每个草稿都必须保留模板、标题和 SKU 信息");
   }
-  const result = await apiClient.post("/api/listing/drafts/batch-update", { items });
+  let result;
+  try {
+    result = await apiClient.post("/api/listing/drafts/batch-update", { items, retry_after_version_refresh: true });
+  } catch (error) {
+    if (Number(error?.status) !== 409) throw error;
+
+    // Keep the operator's rows in memory, but refresh only their version tokens
+    // before retrying. A background draft touch must not discard the batch edit.
+    const latestDrafts = await Promise.all(items.map((item) => (
+      apiClient.get(`/api/listing/drafts/${item.id}`, { noCache: true })
+    )));
+    const latestById = new Map(latestDrafts.map((draft) => [Number(draft?.id), draft]));
+    const missingDraftId = items.find((item) => !latestById.get(Number(item.id)))?.id;
+    if (missingDraftId) throw new Error(`草稿 ${missingDraftId} 已不存在，当前编辑内容仍保留在页面中`);
+    items.forEach((item) => {
+      item.updated_at = latestById.get(Number(item.id))?.updated_at || "";
+    });
+    result = await apiClient.post("/api/listing/drafts/batch-update", { items });
+    ElMessage.warning("草稿版本已刷新，已保留当前批量编辑内容并完成保存");
+  }
   const savedRows = Array.isArray(result?.items) ? result.items : [];
   const savedById = new Map(savedRows.map((draft) => [Number(draft.id), draft]));
   templateEditor.variants = templateEditor.variants.map((row, index) => {
@@ -5582,11 +5678,14 @@ onBeforeUnmount(() => {
         <el-button size="small" @click="backToCollectorBox">返回采集箱</el-button>
       </div>
       <div class="header-actions">
+        <el-button @click="openQuickDraftImport">快速导入草稿</el-button>
         <el-button type="success" :loading="aiGenerating" @click="runFieldAi({ name: 'all', type: 'attributeFill' })">AI 一键生成文案</el-button>
         <el-button :loading="creatingDraft" @click="createDraft">保存草稿</el-button>
         <el-button type="danger" :loading="publishingToOzon" @click="publishTemplateToOzon">提交 Ozon</el-button>
       </div>
     </section>
+
+    <AiProductImportDialog ref="quickDraftImportRef" confirm-text="复制为新草稿" @import="importDraftAsCopy" />
 
     <div class="copy-layout">
       <main class="main-column">
@@ -5978,10 +6077,10 @@ onBeforeUnmount(() => {
                       collapse-tags
                       collapse-tags-tooltip
                       :loading="isAttributeOptionLoading(variantColorAttribute || {})"
-                      @visible-change="ensureVariantDictionaryOptions(variantColorAttribute, $event)"
+                      @visible-change="toggleAttributeCellOptions(row, variantColorAttribute, $event)"
                       @update:model-value="updateVariantColorAttribute(row, variantColorAttribute, $event)"
                     >
-                      <el-option v-for="option in variantColorOptions(row, variantColorAttribute)" :key="option.value" :label="option.label" :value="option.value" />
+                      <el-option v-for="option in variantColorCellOptions(row, variantColorAttribute)" :key="option.value" :label="option.label" :value="option.value" />
                     </el-select>
                     <el-select
                       v-else
@@ -6016,10 +6115,10 @@ onBeforeUnmount(() => {
                       clearable
                       size="small"
                       :loading="isAttributeOptionLoading(field)"
-                      @visible-change="ensureAttributeValuesLoaded(field, $event)"
+                      @visible-change="toggleAttributeCellOptions(row, field, $event)"
                       @update:model-value="updateVariantAttributeSelectValue(row, field, $event)"
                     >
-                      <el-option v-for="option in flatSkuAttributeOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
+                      <el-option v-for="option in flatSkuAttributeCellOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
                     </el-select>
                     <el-select
                       v-else-if="field.type === 'multiselect' || field.is_collection"
@@ -6032,10 +6131,10 @@ onBeforeUnmount(() => {
                       collapse-tags-tooltip
                       size="small"
                       :loading="isAttributeOptionLoading(field)"
-                      @visible-change="ensureAttributeValuesLoaded(field, $event)"
+                      @visible-change="toggleAttributeCellOptions(row, field, $event)"
                       @update:model-value="updateVariantAttributeSelectValue(row, field, $event)"
                     >
-                      <el-option v-for="option in flatSkuAttributeOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
+                      <el-option v-for="option in flatSkuAttributeCellOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
                     </el-select>
                     <el-input-number v-else-if="field.type === 'number'" :model-value="Number(variantAttributeSelectModelValue(row, field) || 0)" class="flat-attribute-control" :controls="false" size="small" @update:model-value="updateVariantAttributeSelectValue(row, field, $event)" />
                     <el-switch v-else-if="field.type === 'boolean'" :model-value="Boolean(variantAttributeSelectModelValue(row, field))" @update:model-value="updateVariantAttributeSelectValue(row, field, $event)" />
@@ -6242,10 +6341,10 @@ onBeforeUnmount(() => {
                       clearable
                       size="small"
                       :loading="isAttributeOptionLoading(field)"
-                      @visible-change="ensureAttributeValuesLoaded(field, $event)"
+                      @visible-change="toggleAttributeCellOptions(row, field, $event)"
                       @update:model-value="updateVariantAttributeSelectValue(row, field, $event)"
                     >
-                      <el-option v-for="option in flatSkuAttributeOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
+                      <el-option v-for="option in flatSkuAttributeCellOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
                     </el-select>
                     <el-select
                       v-else-if="field.type === 'multiselect' || field.is_collection"
@@ -6258,10 +6357,10 @@ onBeforeUnmount(() => {
                       collapse-tags-tooltip
                       size="small"
                       :loading="isAttributeOptionLoading(field)"
-                      @visible-change="ensureAttributeValuesLoaded(field, $event)"
+                      @visible-change="toggleAttributeCellOptions(row, field, $event)"
                       @update:model-value="updateVariantAttributeSelectValue(row, field, $event)"
                     >
-                      <el-option v-for="option in flatSkuAttributeOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
+                      <el-option v-for="option in flatSkuAttributeCellOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
                     </el-select>
                     <el-input-number v-else-if="field.type === 'number'" :model-value="Number(variantAttributeSelectModelValue(row, field) || 0)" class="flat-attribute-control" :controls="false" size="small" @update:model-value="updateVariantAttributeSelectValue(row, field, $event)" />
                     <el-switch v-else-if="field.type === 'boolean'" :model-value="Boolean(variantAttributeSelectModelValue(row, field))" @update:model-value="updateVariantAttributeSelectValue(row, field, $event)" />
@@ -6293,10 +6392,10 @@ onBeforeUnmount(() => {
                       clearable
                       size="small"
                       :loading="isAttributeOptionLoading(field)"
-                      @visible-change="ensureAttributeValuesLoaded(field, $event)"
+                      @visible-change="toggleAttributeCellOptions(row, field, $event)"
                       @update:model-value="updateVariantAttributeSelectValue(row, field, $event)"
                     >
-                      <el-option v-for="option in flatSkuAttributeOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
+                      <el-option v-for="option in flatSkuAttributeCellOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
                     </el-select>
                     <el-select
                       v-else-if="field.type === 'multiselect' || field.is_collection"
@@ -6309,10 +6408,10 @@ onBeforeUnmount(() => {
                       collapse-tags-tooltip
                       size="small"
                       :loading="isAttributeOptionLoading(field)"
-                      @visible-change="ensureAttributeValuesLoaded(field, $event)"
+                      @visible-change="toggleAttributeCellOptions(row, field, $event)"
                       @update:model-value="updateVariantAttributeSelectValue(row, field, $event)"
                     >
-                      <el-option v-for="option in flatSkuAttributeOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
+                      <el-option v-for="option in flatSkuAttributeCellOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
                     </el-select>
                     <el-input-number v-else-if="field.type === 'number'" :model-value="Number(variantAttributeSelectModelValue(row, field) || 0)" class="flat-attribute-control" :controls="false" size="small" @update:model-value="updateVariantAttributeSelectValue(row, field, $event)" />
                     <el-switch v-else-if="field.type === 'boolean'" :model-value="Boolean(variantAttributeSelectModelValue(row, field))" @update:model-value="updateVariantAttributeSelectValue(row, field, $event)" />
@@ -6344,10 +6443,10 @@ onBeforeUnmount(() => {
                       clearable
                       size="small"
                       :loading="isAttributeOptionLoading(field)"
-                      @visible-change="ensureAttributeValuesLoaded(field, $event)"
+                      @visible-change="toggleAttributeCellOptions(row, field, $event)"
                       @update:model-value="updateVariantAttributeSelectValue(row, field, $event)"
                     >
-                      <el-option v-for="option in flatSkuAttributeOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
+                      <el-option v-for="option in flatSkuAttributeCellOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
                     </el-select>
                     <el-select
                       v-else-if="field.type === 'multiselect' || field.is_collection"
@@ -6360,10 +6459,10 @@ onBeforeUnmount(() => {
                       collapse-tags-tooltip
                       size="small"
                       :loading="isAttributeOptionLoading(field)"
-                      @visible-change="ensureAttributeValuesLoaded(field, $event)"
+                      @visible-change="toggleAttributeCellOptions(row, field, $event)"
                       @update:model-value="updateVariantAttributeSelectValue(row, field, $event)"
                     >
-                      <el-option v-for="option in flatSkuAttributeOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
+                      <el-option v-for="option in flatSkuAttributeCellOptions(row, field)" :key="option.id || option.value" :label="displayAttributeOptionLabel(option, field)" :value="attributeOptionModelValue(option)" />
                     </el-select>
                     <el-input-number v-else-if="field.type === 'number'" :model-value="Number(variantAttributeSelectModelValue(row, field) || 0)" class="flat-attribute-control" :controls="false" size="small" @update:model-value="updateVariantAttributeSelectValue(row, field, $event)" />
                     <el-switch v-else-if="field.type === 'boolean'" :model-value="Boolean(variantAttributeSelectModelValue(row, field))" @update:model-value="updateVariantAttributeSelectValue(row, field, $event)" />

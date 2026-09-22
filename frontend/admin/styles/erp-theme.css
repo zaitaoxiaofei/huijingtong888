@@ -534,7 +534,7 @@ body,
 }
 
 .muted-text,
-.cell-stack span,
+.cell-stack span:not(.inventory-id-display),
 .product-cell-meta span,
 .orders-cell-meta-line,
 .orders-order-quantity,
@@ -836,4 +836,14 @@ body,
   --erp-text-regular: #d6deec;
   --erp-text-secondary: #a7b3c7;
   --erp-shadow-card: 0 10px 24px rgba(0, 0, 0, 0.18);
+}
+
+.inventory-id-display {
+  display: block;
+  color: var(--erp-text-main);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 24px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }

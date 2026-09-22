@@ -144,7 +144,8 @@ test("listing automation renders all synced Ozon attributes without optional pag
 test("listing automation edits variant dictionary attributes lazily", () => {
   assert.match(listingAutomationViewSource, /function variantAttributeDisplayText\(row = \{\}, field = \{\}\)/);
   assert.match(listingAutomationViewSource, /function flatSkuAttributeOptions\(row = \{\}, field = \{\}\)/);
-  assert.match(listingAutomationViewSource, /@visible-change="ensureAttributeValuesLoaded\(field, \$event\)"/);
+  assert.match(listingAutomationViewSource, /function toggleAttributeCellOptions\(row = \{\}, field = \{\}, visible\)/);
+  assert.match(listingAutomationViewSource, /@visible-change="toggleAttributeCellOptions\(row, field, \$event\)"/);
   assert.doesNotMatch(listingAutomationViewSource, /SKU属性编辑/);
   assert.doesNotMatch(listingAutomationViewSource, /variantAttributeDrawer/);
   assert.match(listingAutomationViewSource, /const ATTRIBUTE_OPTION_LOAD_LIMIT = 2000/);
@@ -153,6 +154,13 @@ test("listing automation edits variant dictionary attributes lazily", () => {
   assert.doesNotMatch(listingAutomationViewSource, /\.slice\(0, ATTRIBUTE_OPTION_RENDER_LIMIT\)/);
   assert.doesNotMatch(listingAutomationViewSource, /仅显示前 \$\{ATTRIBUTE_OPTION_RENDER_LIMIT\}/);
   assert.doesNotMatch(listingAutomationViewSource, /<el-option v-for="option in variantAttributeOptions\(row, field\)"/);
+});
+
+test("listing automation renders large dictionary option lists only for the open attribute cell", () => {
+  assert.match(listingAutomationViewSource, /const activeAttributeCellKey = ref\(""\)/);
+  assert.match(listingAutomationViewSource, /function flatSkuAttributeCellOptions\(row = \{\}, field = \{\}\)/);
+  assert.match(listingAutomationViewSource, /function variantColorCellOptions\(row = \{\}, field = \{\}\)/);
+  assert.match(listingAutomationViewSource, /flatSkuAttributeCellOptions\(row, field\)/);
 });
 
 test("listing Ozon attribute values API allows large dictionary dropdowns", () => {

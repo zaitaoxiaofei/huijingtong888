@@ -188,7 +188,48 @@ export async function cleanupAiGenerationTaskHistory(options = {}) {
     deleted += affected;
     if (affected < batchSize) break;
   }
-  return { ok: true, retentionDays, deleted };
+  let variantItemsDeleted = 0;
+  while (true) {
+    const result = await mysqlExecute(`
+      DELETE FROM ai_variant_lab_batch_items
+      WHERE job_no IN (
+        SELECT job_no FROM (
+          SELECT job_no FROM ai_variant_lab_batch_jobs
+          WHERE status IN ('image_done', 'image_dry_run', 'partially_failed', 'partially_generated', 'failed')
+            AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)
+          LIMIT ${batchSize}
+        ) expired
+      )
+      LIMIT ${batchSize}
+    `, [retentionDays]);
+    const affected = Number(result?.affectedRows || 0);
+    variantItemsDeleted += affected;
+    if (affected < batchSize) break;
+  }
+  let variantJobsDeleted = 0;
+  while (true) {
+    const result = await mysqlExecute(`
+      DELETE FROM ai_variant_lab_batch_jobs
+      WHERE status IN ('image_done', 'image_dry_run', 'partially_failed', 'partially_generated', 'failed')
+        AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)
+      LIMIT ${batchSize}
+    `, [retentionDays]);
+    const affected = Number(result?.affectedRows || 0);
+    variantJobsDeleted += affected;
+    if (affected < batchSize) break;
+  }
+  let variantAssetsDeleted = 0;
+  while (true) {
+    const result = await mysqlExecute(`
+      DELETE FROM listing_ai_variant_assets
+      WHERE created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)
+      LIMIT ${batchSize}
+    `, [retentionDays]);
+    const affected = Number(result?.affectedRows || 0);
+    variantAssetsDeleted += affected;
+    if (affected < batchSize) break;
+  }
+  return { ok: true, retentionDays, deleted, variantItemsDeleted, variantJobsDeleted, variantAssetsDeleted };
 }
 
 export async function retryAiGenerationTask(taskId, session = null) {

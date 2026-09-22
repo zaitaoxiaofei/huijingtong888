@@ -300,7 +300,7 @@ onMounted(async () => {
       :filters="state.filters"
       :shops="state.shops"
       query-label="FBP搜索"
-      query-placeholder="店铺 / SKU / Offer / 产品名称"
+      query-placeholder="完整库存编号 / SKU / Offer / 名称关键词"
       @search="handleSearch"
       @reset="handleReset"
     >
@@ -354,7 +354,7 @@ onMounted(async () => {
           <template #default="{ row }">
             <div class="cell-stack">
               <strong>{{ row.product_name || "未绑定库存" }}</strong>
-              <span class="muted-text">{{ row.inventory_id || "-" }}</span>
+              <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || "-" }}</span>
               <span class="muted-text">本地库存 {{ integer(row.local_stock) }} / 预警 {{ integer(row.alert_stock) }}</span>
             </div>
           </template>

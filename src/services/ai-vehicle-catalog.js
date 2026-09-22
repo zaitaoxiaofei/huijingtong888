@@ -1,3 +1,4 @@
+import { normalizeVehicleBrand, VEHICLE_BRAND_CHINESE } from "../shared/vehicle-brand.js";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 
 const TAGS = [
@@ -9,16 +10,7 @@ const TAGS = [
   { key: "top_priority_model", label: "最优先车型" }
 ];
 
-const VEHICLE_BRAND_ZH = {
-  LADA: "拉达", HAVAL: "哈弗", TENET: "特耐", GEELY: "吉利", BELGEE: "贝尔吉",
-  CHANGAN: "长安", CHERY: "奇瑞", OMODA: "欧萌达", JETOUR: "捷途", JAECOO: "杰酷",
-  EXEED: "星途", TANK: "坦克", GAC: "广汽", MOSKVICH: "莫斯科人", SOLARIS: "索拉里斯",
-  UAZ: "瓦滋", VOYAH: "岚图", HONGQI: "红旗", "LI AUTO / LIXIANG": "理想",
-  EVOLUTE: "埃沃拉特", "LYNK & CO": "领克", BMW: "宝马", TOYOTA: "丰田", KIA: "起亚",
-  HYUNDAI: "现代", NISSAN: "日产", VOLKSWAGEN: "大众", RENAULT: "雷诺", FORD: "福特",
-  SKODA: "斯柯达", CHEVROLET: "雪佛兰", MITSUBISHI: "三菱", MAZDA: "马自达",
-  HONDA: "本田", SUBARU: "斯巴鲁", LEXUS: "雷克萨斯", "MERCEDES-BENZ": "奔驰"
-};
+const VEHICLE_BRAND_ZH = VEHICLE_BRAND_CHINESE;
 
 const NEW_VEHICLES = [
   ["LADA", ["Granta", "Vesta", "Niva Travel", "Niva Legend", "Iskra", "Largus"]],
@@ -98,7 +90,7 @@ let schemaReady = false;
 export async function aiVehicleCatalog() {
   await ensureVehicleCatalogSchema();
   const rows = await mysqlQuery(`
-    SELECT id, brand_name, model_name, tags_json, aliases_json, supply_anchor, search_keywords_json,
+    SELECT id, brand_name, model_name, tags_json, aliases_json, supply_anchor, search_keywords_json, vehicle_reference_image_url,
       recommended_products_json, ozon_competition, user_priority, source
     FROM ai_vehicle_catalog
     WHERE enabled = 1
@@ -110,7 +102,7 @@ export async function aiVehicleCatalog() {
     const brand = brands.get(row.brand_name) || {
       name: row.brand_name,
       nameZh: brandZh,
-      label: [brandZh, row.brand_name].filter(Boolean).join(" "),
+      label: row.brand_name,
       tags: [],
       models: [],
       source: row.source
@@ -130,6 +122,7 @@ export async function aiVehicleCatalog() {
         recommendedProducts: parseJsonArray(row.recommended_products_json),
         ozonCompetition: row.ozon_competition || "",
         priority: row.user_priority || "",
+        vehicleReferenceImageUrl: row.vehicle_reference_image_url || "",
         tags,
         source: row.source
       });
@@ -141,23 +134,24 @@ export async function aiVehicleCatalog() {
 
 export async function addAiVehicleCatalogEntry(body = {}, session = {}) {
   await ensureVehicleCatalogSchema();
-  const brand = cleanName(body.brand || body.brandName).toUpperCase();
+  const brand = normalizeVehicleBrand(body.brand || body.brandName);
   const model = cleanName(body.model || body.modelName);
   const tags = unique((Array.isArray(body.tags) ? body.tags : []).map(String).filter((tag) => TAGS.some((item) => item.key === tag)));
+  const vehicleReferenceImageUrl = cleanReferenceImageUrl(body.vehicleReferenceImageUrl || body.vehicle_reference_image_url);
   if (!brand) throw statusError("汽车品牌不能为空", 400);
+  if (brand.length > 128) throw statusError("汽车品牌（brand）最多 128 个字符，请缩短后再保存。", 400);
   if (!isLatinVehicleBrand(brand)) throw statusError("汽车品牌必须使用俄罗斯市场可识别的英文名称，不能填写中文或俄文字母", 400);
   const result = await mysqlExecute(`
     INSERT INTO ai_vehicle_catalog
-      (brand_key, brand_name, model_key, model_name, tags_json, source, created_by_person_id)
-    VALUES (?, ?, ?, ?, ?, 'user', ?)
+      (brand_key, brand_name, model_key, model_name, tags_json, vehicle_reference_image_url, source, created_by_person_id)
+    VALUES (?, ?, ?, ?, ?, ?, 'user', ?)
     ON DUPLICATE KEY UPDATE
-      brand_name = VALUES(brand_name),
-      model_name = VALUES(model_name),
-      tags_json = VALUES(tags_json),
-      enabled = 1,
-      updated_at = CURRENT_TIMESTAMP
-  `, [keyOf(brand), brand, model ? keyOf(model) : "__brand__", model, JSON.stringify(tags), personId(session)]);
-  return { ok: true, id: Number(result.insertId || 0), brand, model, tags };
+      vehicle_reference_image_url = IF(VALUES(vehicle_reference_image_url) <> '', VALUES(vehicle_reference_image_url), vehicle_reference_image_url),
+      id = LAST_INSERT_ID(id)
+  `, [keyOf(brand), brand, model ? keyOf(model) : "__brand__", model, JSON.stringify(tags), vehicleReferenceImageUrl, personId(session)]);
+  const [saved] = await mysqlQuery("SELECT id,brand_name,model_name,tags_json,vehicle_reference_image_url,enabled FROM ai_vehicle_catalog WHERE id=?", [Number(result.insertId)]);
+  if (!saved?.enabled) throw statusError("该品牌或车型（brand/model）已停用，请联系目录管理员核对后恢复，不能通过重复新增覆盖原记录。", 409);
+  return { ok: true, id: Number(saved.id), brand: saved.brand_name, model: saved.model_name, tags: parseTags(saved.tags_json), vehicleReferenceImageUrl: saved.vehicle_reference_image_url || "" };
 }
 
 async function ensureVehicleCatalogSchema() {
@@ -213,7 +207,8 @@ async function ensureCatalogMetadataColumns() {
     ["search_keywords_json", "JSON NULL"],
     ["recommended_products_json", "JSON NULL"],
     ["ozon_competition", "VARCHAR(128) NOT NULL DEFAULT ''"],
-    ["user_priority", "VARCHAR(128) NOT NULL DEFAULT ''"]
+    ["user_priority", "VARCHAR(128) NOT NULL DEFAULT ''"],
+    ["vehicle_reference_image_url", "VARCHAR(2000) NOT NULL DEFAULT ''"]
   ];
   for (const [column, definition] of columns) {
     const rows = await mysqlQuery(`SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ai_vehicle_catalog' AND COLUMN_NAME = ? LIMIT 1`, [column]);
@@ -261,6 +256,13 @@ function unique(values) {
 
 function cleanName(value) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, 191);
+}
+
+function cleanReferenceImageUrl(value) {
+  const url = String(value || "").trim();
+  if (!url) return "";
+  if (!/^https?:\/\//i.test(url)) throw statusError("车型参考图必须是 http 或 https 图片链接", 400);
+  return url.slice(0, 2000);
 }
 
 function isLatinVehicleBrand(value) {

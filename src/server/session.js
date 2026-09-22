@@ -1,3 +1,4 @@
+import { getRoles, primaryRole } from "../shared/permissions.js";
 import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { hashPassword, verifyPassword, isLegacyHash, validatePasswordStrength } from "../auth-password.js";
@@ -68,7 +69,7 @@ export function extractToken(req) {
 }
 
 function authUser(row) {
-  return { id: row.id, name: row.name, role: row.role, username: row.username, avatar_url: row.avatar_url || "" };
+  return { id: row.id, name: row.name, role: primaryRole(row), roles: getRoles(row), username: row.username, avatar_url: row.avatar_url || "" };
 }
 
 export function createAuthHandler(readJson, overrides = {}) {
@@ -126,7 +127,7 @@ export function createAuthHandler(readJson, overrides = {}) {
         }
 
         deps.clearRateLimit(loginKey);
-        const token = await deps.createSession(row.id, row.name, row.role, row.username);
+        const token = await deps.createSession(row.id, row.name, primaryRole(row), row.username);
         return { ok: true, token, user: authUser(row) };
       };
     }
@@ -144,7 +145,7 @@ export function createAuthHandler(readJson, overrides = {}) {
           const { identity, redirect } = await deps.resolveWechatIdentityFromCallback(url);
           const row = await deps.findPersonByWechatIdentity(identity);
           if (row?.active) {
-            const token = await deps.createSession(row.id, row.name, row.role, row.username);
+            const token = await deps.createSession(row.id, row.name, primaryRole(row), row.username);
             const ticket = deps.createWechatLoginTicket({ token, redirect, user: authUser(row) });
             return { __redirect: deps.createWechatRedirectUrl({ wechatTicket: ticket, redirect }) };
           }
@@ -222,7 +223,7 @@ export function createAuthHandler(readJson, overrides = {}) {
             return { error: "用户名或密码错误", __status: 401 };
           }
         }
-        const token = await deps.createSession(row.id, row.name, row.role, row.username);
+        const token = await deps.createSession(row.id, row.name, primaryRole(row), row.username);
         const result = deps.confirmQrLoginSession({
           sid: body.sid,
           secret: body.secret,

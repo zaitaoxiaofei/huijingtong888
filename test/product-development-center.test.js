@@ -6,6 +6,7 @@ const serviceSource = fs.readFileSync(new URL("../src/services/team-tasks.js", i
 const routeSource = fs.readFileSync(new URL("../src/server/routes/team.js", import.meta.url), "utf8");
 const runtimeSource = fs.readFileSync(new URL("../src/services/mysql-runtime-services.js", import.meta.url), "utf8");
 const viewSource = fs.readFileSync(new URL("../frontend/admin/views/team/ProductDevelopmentCenterView.vue", import.meta.url), "utf8");
+const taskCreationDialogSource = fs.readFileSync(new URL("../frontend/admin/components/team/TaskCreationDialog.vue", import.meta.url), "utf8");
 const taskViewSource = fs.readFileSync(new URL("../frontend/admin/views/team/TeamPlanView.vue", import.meta.url), "utf8");
 const schemaSource = fs.readFileSync(new URL("../scripts/init-mysql-schema.mjs", import.meta.url), "utf8");
 const procurementListSource = fs.readFileSync(new URL("../src/services/mysql-procurement-list.js", import.meta.url), "utf8");
@@ -85,6 +86,19 @@ test("product development center covers the inventory-driven management views", 
   assert.match(viewSource, /deleteTask/);
   assert.match(viewSource, /任务时间轴/);
   assert.match(viewSource, /taskRangeOptions/);
+  assert.match(viewSource, /const taskOwnerFilter = ref\("all"\)/);
+  assert.match(viewSource, /label="全部人员" value="all"/);
+  assert.match(viewSource, /label="未分配" value="unassigned"/);
+  assert.match(viewSource, /taskPeopleTitle/);
+  assert.match(viewSource, /const taskListVisible = ref\(false\)/);
+  assert.match(viewSource, /const taskPageSize = ref\(20\)/);
+  assert.match(viewSource, /taskListRows = computed\(\(\) => audienceTasks\.value\)/);
+  assert.match(viewSource, /查看任务清单/);
+  assert.match(viewSource, /class="task-list-dialog"/);
+  assert.match(viewSource, /const taskListSummary = computed/);
+  assert.match(viewSource, /class="task-list-tooltip"/);
+  assert.match(viewSource, /bottom:`\$\{group\.timelineY\}%`/);
+  assert.match(viewSource, /Math\.max\(-12, Math\.min\(96, progress \+ offset\)\)/);
   assert.match(viewSource, /按时完成/);
   assert.match(viewSource, /有风险/);
   assert.match(viewSource, /已超时/);
@@ -117,7 +131,7 @@ test("product development center covers the inventory-driven management views", 
   assert.match(viewSource, /北京时间范围/);
   assert.match(viewSource, /保存负责人/);
   assert.match(viewSource, /listingDraftRows/);
-  assert.match(viewSource, /goDashboardTarget/);
+  assert.match(viewSource, /DevelopmentHeatmap/);
   assert.match(viewSource, /bindingRowKey/);
   assert.match(viewSource, /SKU库存关联/);
   assert.match(viewSource, /loadCategories/);
@@ -163,6 +177,9 @@ test("development ideas require the assigned person to claim before product crea
 test("daily procurement details use the same live shortage rule as the procurement workspace", () => {
   assert.match(procurementListSource, /export function procurementRealOrderShortageMysql/);
   assert.match(serviceSource, /procurementRealOrderShortageMysql\(item\) > 0/);
+  assert.match(serviceSource, /UPDATE team_tasks SET done_count=\?,status=\?,updated_at=CURRENT_TIMESTAMP/);
+  assert.match(serviceSource, /progress: \{ done, status \}/);
+  assert.match(viewSource, /if \(details\.progress\) \{ Object\.assign\(row, details\.progress\)/);
   assert.match(serviceSource, /component_supply\.component_local_stock/);
   assert.match(serviceSource, /active_demand\.order_demand_quantity/);
 });
@@ -172,4 +189,20 @@ test("team tasks can bind a structured project, candidate, deliverable, and revi
   assert.match(taskViewSource, /v-model="taskForm\.candidate_id"/);
   assert.match(taskViewSource, /v-model="taskForm\.deliverable"/);
   assert.match(taskViewSource, /v-model="taskForm\.reviewer_person_id"/);
+});
+
+test("legacy development tasks remain editable and configuration loading cannot hang forever", () => {
+  assert.match(serviceSource, /allowedLegacyCategoryKeys/);
+  assert.match(serviceSource, /legacyCategoryAllowed/);
+  assert.match(taskCreationDialogSource, /车型或核心品名目录加载超时，请检查网络后重试。/);
+  assert.match(taskCreationDialogSource, /if \(loadError\.value\) return;/);
+  assert.match(taskCreationDialogSource, /重新加载/);
+});
+
+test("pending development tasks open the draft creator instead of the SKU detail dialog", () => {
+  assert.match(viewSource, /if \(row\.status === "todo"\) return createTaskDraft/);
+  assert.match(viewSource, /path: "\/listing-automation"/);
+  assert.match(viewSource, /quickCreate: "1"/);
+  assert.match(viewSource, /关联已有草稿/);
+  assert.doesNotMatch(viewSource, />编辑 SKU 配置</);
 });

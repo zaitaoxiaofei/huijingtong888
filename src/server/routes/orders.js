@@ -37,6 +37,12 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
       : { ok: true, purchasable_count: 0, total_quantity: 0, product_count: 0, missing_count: 0, products: [], missing_items: [] });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "procurement-batches") {
+    return json(res, services.orderProcurementBatches
+      ? await services.orderProcurementBatches(Number(parts[2]))
+      : { batches: [], items: [] });
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2]) {
     const detail = await services.orderDetail(Number(parts[2]));
     if (detail && !detail.profit_detail_snapshot) {

@@ -28,7 +28,7 @@ const profileForm = ref({ name: "", avatar_url: "", old_password: "", new_passwo
 let mobileViewportQuery = null;
 
 const activeMenu = computed(() => route.path);
-const visibleNavigationMenus = computed(() => navigationMenusForRole(authStore.user?.role));
+const visibleNavigationMenus = computed(() => navigationMenusForRole(authStore.user));
 const standaloneMode = computed(() => String(route.query.standalone || "") === "1");
 const breadcrumbs = computed(() => route.meta.breadcrumb || ["ERP Admin"]);
 const breadcrumbItems = computed(() => {

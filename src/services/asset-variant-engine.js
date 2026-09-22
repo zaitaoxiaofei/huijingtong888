@@ -1,3 +1,4 @@
+import { normalizeVehicleBrand } from "../shared/vehicle-brand.js";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
@@ -3751,7 +3752,7 @@ function normalizeMaterialPayload(raw = {}) {
     ozonDescriptionCategoryId: Number(raw.ozonDescriptionCategoryId || raw.ozon_description_category_id || 0) || 0,
     ozonTypeId: Number(raw.ozonTypeId || raw.ozon_type_id || 0) || 0,
     ozonCategoryName: cleanText(raw.ozonCategoryName || raw.ozon_category_name || "", 500),
-    vehicleBrand: cleanText(raw.vehicleBrand || raw.vehicle_brand || raw.carBrand || raw.car_brand || "", 128),
+    vehicleBrand: normalizeVehicleBrand(raw.vehicleBrand || raw.vehicle_brand || raw.carBrand || raw.car_brand || "", { strict: false }),
     vehicleModel: cleanText(raw.vehicleModel || raw.vehicle_model || raw.carModel || raw.car_model || "", 128),
     basePriceRmb: numberValue(raw.basePriceRmb || raw.base_price_rmb || raw.salePriceRmb || raw.sale_price_rmb || raw.airSalePriceRmb || raw.air_sale_price_rmb),
     quantity: cleanText(raw.quantity || raw.quantityText || raw.quantity_text || "", 64),

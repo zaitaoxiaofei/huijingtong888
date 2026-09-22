@@ -118,7 +118,7 @@ onMounted(() => loadProducts());
           <div v-else class="mobile-inventory-card__placeholder">无图</div>
           <div class="mobile-inventory-card__copy">
             <h2>{{ row.name || "未命名商品" }}</h2>
-            <p>{{ row.inventory_id || row.code || `ID ${row.id}` }}</p>
+            <p>{{ row.inventory_number || row.inventory_id || row.code || `ID ${row.id}` }}</p>
             <span>{{ skuText(row) }}</span>
           </div>
         </div>
@@ -127,6 +127,7 @@ onMounted(() => loadProducts());
           <span><small>本地</small><strong>{{ number(localStock(row)) }}</strong></span>
           <span><small>FBP</small><strong>{{ number(fbpStock(row)) }}</strong></span>
           <span><small>采购在途</small><strong>{{ number(row.incoming_stock) }}</strong></span>
+          <span><small>FBP在途</small><strong>{{ number(row.fbp_transfer_in_transit_qty) }}</strong></span>
         </div>
         <div class="mobile-inventory-card__foot">
           <span>{{ row.owner_name ? `负责人：${row.owner_name}` : "未设置负责人" }}</span>

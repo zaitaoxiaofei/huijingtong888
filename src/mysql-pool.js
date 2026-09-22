@@ -15,6 +15,11 @@ const mysqlPoolMetrics = {
 };
 const MYSQL_SLOW_ACQUIRE_MS = Math.max(50, Number(process.env.DB_POOL_SLOW_ACQUIRE_MS || 250));
 
+function effectiveMysqlConnectionLimit() {
+  const configured = Math.max(1, Number(config.dbPoolMax || 10));
+  return process.env.DEPLOYMENT_CANDIDATE === "1" ? Math.min(configured, 4) : configured;
+}
+
 export function isMysqlPrimaryEnabled() {
   return String(config.dbClient || "").toLowerCase() === "mysql";
 }
@@ -24,6 +29,7 @@ export function getMysqlPool() {
     throw new Error("MySQL primary mode is not enabled");
   }
   if (!mysqlPool) {
+    const connectionLimit = effectiveMysqlConnectionLimit();
     mysqlPool = mysql.createPool({
       host: config.dbHost,
       port: config.dbPort,
@@ -33,9 +39,10 @@ export function getMysqlPool() {
       charset: "utf8mb4",
       timezone: "Z",
       waitForConnections: true,
-      connectionLimit: Math.max(1, Number(config.dbPoolMax || 10)),
-      maxIdle: Math.max(1, Number(config.dbPoolMax || 10)),
+      connectionLimit,
+      maxIdle: connectionLimit,
       idleTimeout: 60000,
+      maxPreparedStatements: Math.max(8, Number(process.env.DB_MAX_PREPARED_STATEMENTS || 32)),
       queueLimit: Math.max(0, Number(config.dbPoolQueueLimit ?? 100)),
       multipleStatements: false
     });
@@ -96,7 +103,7 @@ async function getMysqlConnection() {
     mysqlPoolMetrics.peakActiveConnections = Math.max(mysqlPoolMetrics.peakActiveConnections, mysqlPoolMetrics.activeConnections);
     if (waitMs >= MYSQL_SLOW_ACQUIRE_MS) {
       mysqlPoolMetrics.slowAcquisitions += 1;
-      console.warn(`[mysql-pool] slow acquire wait=${waitMs.toFixed(1)}ms active=${mysqlPoolMetrics.activeConnections} limit=${config.dbPoolMax || 10}`);
+      console.warn(`[mysql-pool] slow acquire wait=${waitMs.toFixed(1)}ms active=${mysqlPoolMetrics.activeConnections} limit=${effectiveMysqlConnectionLimit()}`);
     }
     return connection;
   } finally {
@@ -113,7 +120,7 @@ export function getMysqlPoolMetrics() {
   const acquisitions = Number(mysqlPoolMetrics.acquisitions || 0);
   return {
     ...mysqlPoolMetrics,
-    connectionLimit: Math.max(1, Number(config.dbPoolMax || 10)),
+    connectionLimit: effectiveMysqlConnectionLimit(),
     averageAcquireWaitMs: acquisitions ? mysqlPoolMetrics.acquireWaitMsTotal / acquisitions : 0
   };
 }
@@ -121,7 +128,7 @@ export function getMysqlPoolMetrics() {
 export async function warmMysqlPool() {
   const connectionCount = Math.max(1, Math.min(
     Number(config.dbPoolMin || 0) || 2,
-    Number(config.dbPoolMax || 10)
+    effectiveMysqlConnectionLimit()
   ));
   await Promise.all(Array.from({ length: connectionCount }, async () => {
     const connection = await getMysqlConnection();

@@ -197,3 +197,19 @@ test("qr confirm can use remembered mobile account without password", async () =
   assert.equal(result.ok, true);
   assert.equal(result.__cookies[0].value, "mobile-token");
 });
+
+test("login and auth me expose the complete role combination", async () => {
+  const createAuthHandler = await loadCreateAuthHandler();
+  const row = { id: 7, name: "兼岗员工", username: "worker", role: "packing", roles_json: '["packing","manager"]', active: 1, password_hash: "hash" };
+  const handler = createAuthHandler(async () => ({ username: "worker", password: "valid" }), {
+    ...createNoSessionOverrides(), verifyPassword: () => true,
+    findPersonForLogin: async () => row, findPersonById: async () => row,
+    getSession: async () => ({ personId: 7 }),
+    createSession: async (_id, _name, role) => { assert.equal(role, "manager"); return "combined-token"; }
+  });
+  const login = await handler({ method: "POST", headers: {} }, new URL("http://localhost/api/auth/login"))();
+  assert.deepEqual(login.user.roles, ["packing", "manager"]);
+  assert.equal(login.user.role, "manager");
+  const me = await handler({ method: "GET", headers: {authorization:"Bearer combined-token"} }, new URL("http://localhost/api/auth/me"))();
+  assert.deepEqual(me.roles, ["packing", "manager"]);
+});

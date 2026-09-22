@@ -1,3 +1,5 @@
+import { normalizeVehicleBrand, vehicleBrandAliases } from "../shared/vehicle-brand.js";
+import { hasPermission } from "../shared/permissions.js";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 
 let schemaReady = false;
@@ -16,7 +18,7 @@ function bindableInventoryProductPredicate(alias = "products") {
 }
 
 function isNamingMaintainer(session = {}) {
-  return String(session?.name || "").trim() === "核动力牛马";
+  return hasPermission(session, "inventory.review");
 }
 
 function validateCoreProductName(value) {
@@ -29,15 +31,8 @@ function validateCoreProductName(value) {
 }
 
 export function validateVehicleBrand(value) {
-  const rawText = clean(value, 128)
-    .normalize("NFKC")
-    .replace(/[\u200B-\u200D\u2060\uFEFF]/gu, "");
-  const legacyParts = rawText.split("|").map((part) => part.trim()).filter(Boolean);
-  const text = (legacyParts.find((part) => /^[\x20-\x7E]+$/.test(part)) || rawText).toUpperCase();
-  if (!text) throw new Error("汽车品牌不能为空");
-  if (!/[A-Z]/.test(text) || !/^[A-Z0-9][A-Z0-9 &/().+'-]*$/.test(text)) {
-    throw new Error("汽车品牌请填写俄罗斯市场使用的英文名称，例如 TOYOTA");
-  }
+  const text = normalizeVehicleBrand(value);
+  if (!text) throw new Error("汽车品牌不能为空；通用产品请选择通用适配，不要创建“无品牌”品牌选项。");
   return text;
 }
 
@@ -48,12 +43,12 @@ export async function inventoryProductNamingOptions(query = {}, session = {}) {
   const status = String(query.status || "").trim();
   const search = String(query.q || query.query || "").trim().toLowerCase();
   const category = clean(query.category, 255);
-  const brand = clean(query.brand, 255).replace(/\|/g, " ").replace(/\s+/g, " ").trim();
+  const brand = normalizeVehicleBrand(query.brand, { strict: false });
   const fitmentType = query.fitment_type === "specific" ? "specific" : (query.fitment_type === "universal" ? "universal" : "");
   const vehicleModel = clean(query.vehicle_model, 255);
 
   if (status === "pending") {
-    if (!isNamingMaintainer(session)) throw new Error("仅核动力牛马可以查看待审核核心品名和汽车品牌");
+    if (!isNamingMaintainer(session)) throw new Error("仅经理或管理员可以查看待审核核心品名和汽车品牌");
     const params = [];
     const where = ["o.option_type IN ('category', 'brand')", "o.status = 'pending'"];
     if (search) {
@@ -93,8 +88,9 @@ export async function inventoryProductNamingOptions(query = {}, session = {}) {
       params.push(category);
     }
     if (brand && !["category", "brand", "accessory"].includes(type)) {
-      where.push("vehicle_brand = ?");
-      params.push(brand);
+      const aliases = vehicleBrandAliases(brand);
+      where.push(`vehicle_brand IN (${aliases.map(() => "?").join(",")})`);
+      params.push(...aliases);
     }
     if (fitmentType && ["vehicle_model", "color", "material", "process", "quantity"].includes(type)) {
       where.push("fitment_type = ?");
@@ -127,11 +123,9 @@ export async function inventoryProductNamingOptions(query = {}, session = {}) {
         let value = text;
         let label = text;
         if (type === "brand") {
-          const parts = text.split(/\s+/).filter(Boolean);
-          const en = parts.filter((part) => /^[\x20-\x7E]+$/.test(part)).join(" ");
-          const zh = parts.filter((part) => !/^[\x20-\x7E]+$/.test(part)).join(" ");
-          value = `${zh}|${en}`;
-          label = [zh, en].filter(Boolean).join(" ") || "无品牌";
+          value = normalizeVehicleBrand(text, { strict: false });
+          label = value;
+          if (!value) return null;
         }
         return {
           id: `actual-${type}-${index}-${colorIndex}`,
@@ -143,7 +137,7 @@ export async function inventoryProductNamingOptions(query = {}, session = {}) {
           linked_product_count: Number(row.usage_count || 0),
           last_used_at: row.last_used_at
         };
-      });
+      }).filter(Boolean);
     });
     const dictionaryRows = await mysqlQuery(`
       SELECT o.id, o.option_type, o.value, o.label, o.status, o.usage_count,
@@ -174,7 +168,9 @@ export async function inventoryProductNamingOptions(query = {}, session = {}) {
         });
       }
     }
-    for (const row of dictionaryRows) {
+    for (const sourceRow of dictionaryRows) {
+      const row = type === "brand" ? { ...sourceRow, value: normalizeVehicleBrand(sourceRow.value, { strict: false }), label: normalizeVehicleBrand(sourceRow.value, { strict: false }) } : sourceRow;
+      if (type === "brand" && !row.value) continue;
       const existing = merged.get(row.value);
       if (existing) {
         existing.usage_count = Math.max(Number(existing.usage_count || 0), Number(row.usage_count || 0));
@@ -190,7 +186,7 @@ export async function inventoryProductNamingOptions(query = {}, session = {}) {
     }
     return {
       rows: [...merged.values()]
-        .filter((row) => !search || `${row.value} ${row.label}`.toLowerCase().includes(search))
+        .filter((row) => !search || `${row.value} ${row.label} ${type === "brand" ? vehicleBrandAliases(row.value).join(" ") : ""}`.toLowerCase().includes(search))
         .sort((left, right) => right.linked_product_count - left.linked_product_count || right.usage_count - left.usage_count || String(left.label).localeCompare(String(right.label), "zh-CN"))
     };
   }
@@ -216,9 +212,9 @@ export async function createInventoryProductNamingOption(body = {}, session = {}
     : optionType === "brand"
       ? validateVehicleBrand(body.value)
       : clean(body.value, 255);
-  const label = clean(body.label || value, 255);
+  const label = optionType === "brand" ? value : clean(body.label || value, 255);
   if (!['category', 'brand', 'accessory', 'color', 'material', 'process', 'quantity'].includes(optionType)) throw new Error('该选项不允许快速新增');
-  if (!['category', 'brand'].includes(optionType) && !isNamingMaintainer(session)) throw new Error('仅核动力牛马可以维护款式、材质、工艺和颜色选项');
+  if (!['category', 'brand'].includes(optionType) && !isNamingMaintainer(session)) throw new Error('仅经理或管理员可以维护款式、材质、工艺和颜色选项');
   if (!value) throw new Error('选项内容不能为空');
   if (optionType === 'quantity' && !/^\d+$/.test(value)) throw new Error('数量只能使用阿拉伯数字');
   const status = isNamingMaintainer(session) ? 'active' : 'pending';
@@ -226,15 +222,17 @@ export async function createInventoryProductNamingOption(body = {}, session = {}
     INSERT INTO inventory_product_naming_options
       (option_type, value, label, status, created_by_person_id)
     VALUES (?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE label = VALUES(label), updated_at = CURRENT_TIMESTAMP
+    ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)
   `, [optionType, value, label, status, Number(session?.personId || 0) || null]);
-  return { ok: true, option_type: optionType, value, label, status };
+  const [saved] = await mysqlQuery("SELECT id,option_type,value,label,status FROM inventory_product_naming_options WHERE option_type=? AND value=?", [optionType, value]);
+  if (!saved || saved.status === "archived") throw new Error("该标准选项已归档（status），请联系经理或管理员在标准选项中审核恢复，不能通过重复新增覆盖原记录。");
+  return { ok: true, ...saved };
 }
 
 export async function updateInventoryProductNamingOption(id, body = {}, session = {}) {
   await ensureSchema();
   await ensureProductCoreNameSchema();
-  if (!isNamingMaintainer(session)) throw new Error("仅核动力牛马可以审核或修改标准选项");
+  if (!isNamingMaintainer(session)) throw new Error("仅经理或管理员可以审核或修改标准选项");
   const optionId = Number(id);
   if (!optionId) throw new Error("标准选项不存在");
 
@@ -300,7 +298,7 @@ export async function updateInventoryProductNamingOption(id, body = {}, session 
 export async function deleteInventoryProductNamingOption(id, session = {}) {
   await ensureSchema();
   await ensureProductCoreNameSchema();
-  if (!isNamingMaintainer(session)) throw new Error("仅核动力牛马可以停用标准选项");
+  if (!isNamingMaintainer(session)) throw new Error("仅经理或管理员可以停用标准选项");
   const optionId = Number(id);
   if (!optionId) throw new Error("标准选项不存在");
   const rows = await mysqlQuery(`
@@ -332,8 +330,8 @@ export async function recordInventoryProductNamingUsage(entries = []) {
   await ensureSchema();
   for (const entry of entries) {
     const optionType = clean(entry?.option_type, 32);
-    const value = clean(entry?.value, 255);
-    const label = clean(entry?.label || value, 255);
+    const value = optionType === "brand" ? normalizeVehicleBrand(entry?.value) : clean(entry?.value, 255);
+    const label = optionType === "brand" ? value : clean(entry?.label || value, 255);
     if (!optionType || !value) continue;
     await mysqlExecute(`
       INSERT INTO inventory_product_naming_options (option_type, value, label, status, usage_count)
@@ -405,10 +403,12 @@ async function initializeSchema() {
     ['brand', '福特|Ford', '福特 Ford'], ['brand', '吉利|Geely', '吉利 Geely'], ['brand', '长安|Changan', '长安 Changan'],
     ['quantity', '1', '1'], ['quantity', '2', '2'], ['quantity', '3', '3'], ['quantity', '4', '4'], ['quantity', '5', '5'], ['quantity', '6', '6'], ['quantity', '8', '8'], ['quantity', '10', '10']
   ]) {
+    const canonical = optionType === "brand" ? normalizeVehicleBrand(value) : value;
+    if (!canonical) continue;
     await mysqlExecute(`
       INSERT INTO inventory_product_naming_options (option_type, value, label, status)
       VALUES (?, ?, ?, 'active') ON DUPLICATE KEY UPDATE label = VALUES(label)
-    `, [optionType, value, label]);
+    `, [optionType, canonical, optionType === "brand" ? canonical : label]);
   }
   schemaReady = true;
 }

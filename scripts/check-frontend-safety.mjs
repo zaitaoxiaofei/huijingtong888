@@ -93,7 +93,7 @@ function checkVueTemplates() {
       message: "avoid dl/dt/dd inside button; this can corrupt Vue patch anchors"
     },
     {
-      regex: /<table\b[\s\S]*?<button\b[\s\S]*?<\/table>/gi,
+      regex: /<(?:table|thead|tbody|tfoot|tr)\b[^>]*>\s*<button\b/gi,
       message: "check button placement inside table; invalid table children are browser-reparented"
     }
   ];

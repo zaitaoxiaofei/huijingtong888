@@ -40,6 +40,14 @@ test("profit dashboard advertising cost prefers Ozon ad report spend", () => {
   assert.match(serviceSource, /advertising_acos/);
 });
 
+test("profit ranking loads advertising totals only for the ranked page", () => {
+  assert.match(profitRankingSource, /const adByShop = new Map/);
+  assert.match(profitRankingSource, /shop_id IN \(\$\{shopIds\.map/);
+  assert.match(profitRankingSource, /const pairWhere = skuPairs\.map/);
+  assert.match(profitRankingSource, /GROUP BY shop_id, ozon_sku/);
+  assert.doesNotMatch(profitRankingSource, /LEFT JOIN \(\s*SELECT shop_id, ozon_sku, COALESCE\(SUM\(spend_cny\)/);
+});
+
 test("profit dashboard return loss uses reason-applied costs and settled retained revenue only", () => {
   assert.match(returnLossFormulaSource, /function returnLossTotalSqlMysql/);
   assert.match(returnLossFormulaSource, /opi\.purchase_cost_cny/);
@@ -58,7 +66,8 @@ test("profit dashboard return loss uses reason-applied costs and settled retaine
 
 test("profit ranking and monthly billing use the same terminal return loss formula", () => {
   assert.match(profitRankingSource, /const returnLossTotal = returnLossTotalSqlMysql\(\);[\s\S]*?AS return_loss/);
-  assert.match(profitRankingSource, /CASE WHEN \$\{outcome\.rejectedUnclaimed\} OR \$\{outcome\.afterDeliveryReturn\} THEN \$\{returnLossTotal\} ELSE 0 END\), 0\) AS return_loss/);
+  assert.match(profitRankingSource, /CASE WHEN \$\{outcome\.rejectedUnclaimed\} THEN 1 ELSE 0 END AS rejected_unclaimed/);
+  assert.match(profitRankingSource, /CASE WHEN outcomes\.rejected_unclaimed = 1 OR outcomes\.after_delivery_return = 1 THEN \$\{returnLossTotal\} ELSE 0 END\), 0\) AS return_loss/);
   assert.doesNotMatch(profitRankingSource, /COALESCE\(SUM\(COALESCE\(opi\.return_loss_cny, oi\.aftersale_loss, 0\)\), 0\) AS return_loss/);
   assert.match(serviceSource, /profitRankingMysql\(\{ dimension: "shop"[\s\S]*?monthlyBillingPendingByShopMysql/);
 });

@@ -22,6 +22,63 @@ const barcodePrintDialog = reactive({ visible: false, row: null, quantity: 1, re
 const barcodePrintResultDialog = reactive({ visible: false, row: null, quantity: 0, confirming: false });
 const fbpFillResultDialog = reactive({ visible: false, summary: "", successCount: 0, durationSeconds: 0, failures: [], requiresReload: false });
 const barcodeLoadingKeys = reactive({});
+const receiptDialog = reactive({ visible: false, loading: false, submitting: false, orders: [], rows: [] });
+
+async function loadReceiptRows() {
+  const rows = [];
+  for (const order of receiptDialog.orders) {
+    let page = 1;
+    let count = 0;
+    while (true) {
+      const payload = await apiClient.get(`/api/fbp-transfer-records?order_id=${Number(order.id)}&page=${page}&pageSize=200`);
+      for (const record of payload.rows || []) {
+        if (["draft", "cancelled", "closed"].includes(record.status)) continue;
+        rows.push({ ...record, order_no: order.order_no, remaining: Math.max(0, Number(record.quantity) - Number(record.listed_quantity)), receive_now: 0 });
+      }
+      count += (payload.rows || []).length;
+      if (count >= Number(payload.total || 0) || !(payload.rows || []).length) break;
+      page += 1;
+    }
+  }
+  receiptDialog.rows = rows;
+}
+
+async function openReceiptDialog(order) {
+  receiptDialog.orders = order._isBatchSummary ? order._sourceOrders.filter(canMarkCompleted) : [order];
+  receiptDialog.rows = [];
+  receiptDialog.visible = true;
+  receiptDialog.loading = true;
+  try { await loadReceiptRows(); }
+  catch (error) { ElMessage.error(error.message || "入仓明细加载失败"); }
+  finally { receiptDialog.loading = false; }
+}
+
+async function submitReceipt() {
+  if (receiptDialog.submitting || receiptDialog.loading) return;
+  const rows = receiptDialog.rows.filter((row) => Number(row.receive_now) > 0);
+  if (!rows.length) { ElMessage.warning("请填写至少一条本次入仓数量"); return; }
+  if (rows.some((row) => !Number.isInteger(Number(row.receive_now)) || Number(row.receive_now) > row.remaining)) {
+    ElMessage.warning("本次入仓数量必须为整数，且不能超过剩余数量"); return;
+  }
+  receiptDialog.submitting = true;
+  let saved = 0;
+  try {
+    for (const row of rows) {
+      await apiClient.post("/api/fbp-transfer-records/confirm-received", {
+        id: row.id, received_quantity: Number(row.receive_now), expected_listed_quantity: Number(row.listed_quantity)
+      });
+      row.receive_now = 0;
+      saved += 1;
+    }
+    ElMessage.success(`已保存 ${saved} 条入仓记录；全部收齐的备货单自动转为已入仓`);
+  } catch (error) {
+    ElMessage.error(`已保存 ${saved} 条，其他记录未完成：${error.message || "请重试"}`);
+  } finally {
+    try { await loadReceiptRows(); await loadPageData(); }
+    catch (error) { receiptDialog.rows = []; ElMessage.error("入仓明细刷新失败，请关闭弹窗后重新打开"); }
+    receiptDialog.submitting = false;
+  }
+}
 
 const state = reactive({
   rows: [],
@@ -48,11 +105,11 @@ function aggregateBatchOrder(orders) {
       total.requested_qty += Number(item.requested_qty || 0);
       total.approved_qty += Number(item.approved_qty || 0);
       total.adjustment_qty += Number(item.adjustment_qty || 0);
-      total.final_qty += Number(item.final_qty || item.approved_qty || item.requested_qty || 0);
+      total.final_qty += Number(item.final_qty ?? item.approved_qty ?? item.requested_qty ?? 0);
       total.source_order_count += 1;
     }
   }
-  const statuses = [...new Set(orders.map((order) => statusText(order.status)))];
+  const statuses = [...new Set(orders.map((order) => statusTagText(order.status, order.received_quantity)))];
   return {
     ...first,
     id: `batch-${first.batch_id}`,
@@ -104,16 +161,17 @@ const batchDetailRows = computed(() => flattenOrderRows(batchDetailDialog.orders
 function statusText(status) {
   if (status === "batch_summary") return "关联汇总";
   if (status === "draft") return "草稿";
-  if (status === "pending_review") return "待通过";
-  if (status === "approved") return "已通过";
-  if (status === "sent" || status === "ozon_created") return "等待发货";
-  if (status === "completed") return "已完成";
+  if (status === "pending_review") return "待审核";
+  if (status === "approved" || status === "ozon_created") return "待发货";
+  if (status === "sent") return "运输中";
+  if (status === "completed") return "已入仓";
   if (status === "cancelled") return "已取消";
   if (status === "rejected") return "已驳回";
   return status || "-";
 }
 
-function statusTagText(status) {
+function statusTagText(status, receivedQuantity = 0) {
+  if (status === "sent" && Number(receivedQuantity) > 0) return "部分入仓";
   return statusText(status);
 }
 
@@ -180,7 +238,7 @@ function canEditQuantities(row) {
 }
 
 function canMarkSent(row) {
-  return String(row.status || "") === "approved";
+  return ["approved", "ozon_created"].includes(String(row.status || ""));
 }
 
 function canMarkBatchSent(row) {
@@ -198,7 +256,7 @@ function canFillOzon(row) {
 }
 
 function canMarkCompleted(row) {
-  return ["sent", "ozon_created"].includes(String(row.status || ""));
+  return String(row.status || "") === "sent";
 }
 
 function canMarkBatchCompleted(row) {
@@ -232,6 +290,15 @@ async function openBatchDetails(row) {
   } catch (error) {
     ElMessage.error(error.message || "关联明细加载失败");
   } finally { batchDetailDialog.loading = false; }
+}
+
+async function refreshOrderViews(order) {
+  await loadPageData();
+  if (!batchDetailDialog.visible || Number(batchDetailDialog.batch?.batch_id) !== Number(order.batch_id)) return;
+  const params = new URLSearchParams({ batchId: String(order.batch_id), status: "all", page: "1", pageSize: "100" });
+  const payload = await apiClient.get(`/api/fbp-replenishment-orders?${params.toString()}`);
+  const updatedOrder = (payload?.rows || []).find((item) => Number(item.id) === Number(order.id));
+  batchDetailDialog.orders = batchDetailDialog.orders.map((item) => Number(item.id) === Number(order.id) ? (updatedOrder || item) : item);
 }
 
 function isOrderSelected(order) {
@@ -371,7 +438,7 @@ async function submitAdjustment() {
     });
     ElMessage.success("人工数量调整已记录");
     adjustmentDialog.visible = false;
-    await loadPageData();
+    await refreshOrderViews(row.order);
   } catch (error) {
     ElMessage.error(error.message || "保存人工调整失败");
   } finally { adjustmentDialog.submitting = false; }
@@ -455,6 +522,7 @@ async function loadPageData() {
 }
 
 async function updateStatus(row, status) {
+  if (status === "completed") return openReceiptDialog(row);
   const disabledReason = status === "approved" ? approveDisabledReason(row) : "";
   if (disabledReason) {
     ElMessage.warning(disabledReason);
@@ -464,7 +532,7 @@ async function updateStatus(row, status) {
   try {
     await apiClient.post("/api/fbp-replenishment-orders/status", { id: row.id, status });
     ElMessage.success("备货单状态已更新");
-    await loadPageData();
+    await refreshOrderViews(row);
   } catch (error) {
     ElMessage.error(error.message || "状态更新失败");
   } finally {
@@ -484,7 +552,7 @@ async function markBatchSent(row) {
       id: order.id,
       status: "sent"
     })));
-    ElMessage.success(`已将关联汇总中的 ${approvedOrders.length} 张备货单标记为已发送`);
+    ElMessage.success(`已将关联汇总中的 ${approvedOrders.length} 张备货单确认发货`);
     await loadPageData();
   } catch (error) {
     ElMessage.error(error.message || "关联汇总标记发送失败");
@@ -494,30 +562,13 @@ async function markBatchSent(row) {
 }
 
 async function markBatchCompleted(row) {
-  const waitingOrders = (row?._sourceOrders || []).filter((order) => canMarkCompleted(order));
-  if (!waitingOrders.length) {
-    ElMessage.info("该关联汇总中没有待完成的备货单");
-    return;
-  }
-  actionLoadingId.value = `batch-completed-${row.batch_id}`;
-  try {
-    await Promise.all(waitingOrders.map((order) => apiClient.post("/api/fbp-replenishment-orders/status", {
-      id: order.id,
-      status: "completed"
-    })));
-    ElMessage.success(`已完成关联汇总中的 ${waitingOrders.length} 张备货单`);
-    await loadPageData();
-  } catch (error) {
-    ElMessage.error(error.message || "关联汇总标记完成失败");
-  } finally {
-    actionLoadingId.value = "";
-  }
+  return openReceiptDialog(row);
 }
 
 async function cancelOrder(row) {
   try {
     await ElMessageBox.confirm(
-      `确认取消 ${orderDisplayName(row)}？\n取消后会保留备货单记录，并撤销审核生成的发仓记录、退回已扣减的本地库存。`,
+      `确认取消 ${orderDisplayName(row)}？\n取消后会保留备货单记录，并释放审核时预留的本地库存；已确认发货的记录不能直接取消。`,
       "取消已通过备货单",
       { type: "warning", confirmButtonText: "确认取消", cancelButtonText: "暂不取消" }
     );
@@ -530,7 +581,7 @@ async function cancelOrder(row) {
       note: "人工取消已通过备货单"
     });
     ElMessage.success("备货单已取消，本地库存已退回");
-    await loadPageData();
+    await refreshOrderViews(row);
   } catch (error) {
     ElMessage.error(error.message || "取消备货单失败");
   } finally {
@@ -549,7 +600,7 @@ async function saveOrderItems(row) {
       }))
     });
     ElMessage.success("备货数量已保存");
-    await loadPageData();
+    await refreshOrderViews(row);
   } catch (error) {
     ElMessage.error(error.message || "保存备货数量失败");
   } finally {
@@ -939,7 +990,7 @@ onMounted(loadPageData);
               <div class="order-line">
                 <span class="order-label">状态</span>
                 <el-tag :type="statusType(row.order.status)" effect="light">
-                  {{ row.order._isBatchSummary ? row.order.status_summary : statusTagText(row.order.status) }}
+                  {{ row.order._isBatchSummary ? row.order.status_summary : statusTagText(row.order.status, row.order.received_quantity) }}
                 </el-tag>
               </div>
               <div class="order-line">
@@ -960,16 +1011,16 @@ onMounted(loadPageData);
                       <el-button
                         v-if="!row.order._isBatchSummary && canApprove(row.order)"
                         size="default"
-                        type="success"
+                        type="primary"
                         :disabled="Boolean(approveDisabledReason(row.order))"
                         :loading="actionLoadingId === actionKey(row.order, 'approved')"
                         @click="updateStatus(row.order, 'approved')"
                       >
-                        通过
+                        审核通过
                       </el-button>
                     </span>
                   </el-tooltip>
-                  <el-button
+                  <el-button plain
                     v-if="!row.order._isBatchSummary && canEditQuantities(row.order)"
                     size="default"
                     type="primary"
@@ -978,7 +1029,7 @@ onMounted(loadPageData);
                   >
                     保存
                   </el-button>
-                  <el-button
+                  <el-button plain
                     v-if="!row.order._isBatchSummary && canFillOzon(row.order) && !row.order.batch_id"
                     size="default"
                     type="primary"
@@ -987,72 +1038,57 @@ onMounted(loadPageData);
                   >
                     填入 Ozon
                   </el-button>
-                  <el-button
+                  <el-button plain
                     v-if="row.order._isBatchSummary"
                     size="default"
                     type="primary"
                     :loading="actionLoadingId === `fill-batch-${row.order.batch_id}`"
                     @click="fillBatchToOzon(row.order)"
                   >导入 Ozon</el-button>
-                  <el-button v-if="row.order._isBatchSummary" size="default" type="primary" plain @click="openBatchDetails(row.order)">查看关联明细</el-button>
+                  <el-button v-if="row.order._isBatchSummary" size="default" type="primary" plain @click="openBatchDetails(row.order)">关联明细 / 修改审批</el-button>
                   <el-button
                     v-if="canMarkBatchSent(row.order)"
                     size="default"
-                    type="warning"
+                    type="primary"
                     :loading="actionLoadingId === `batch-sent-${row.order.batch_id}`"
                     @click="markBatchSent(row.order)"
-                  >标记已发送</el-button>
+                  >确认发货</el-button>
                   <el-button
                     v-if="canMarkBatchCompleted(row.order)"
                     size="default"
-                    type="success"
+                    type="primary"
                     :loading="actionLoadingId === `batch-completed-${row.order.batch_id}`"
                     @click="markBatchCompleted(row.order)"
-                  >完成</el-button>
-                  <el-button
-                    v-if="row.order.batch_id && !row.order._isBatchSummary"
-                    size="default"
-                    type="info"
-                    plain
-                    :loading="actionLoadingId === actionKey(row.order, 'unlink')"
-                    @click="unlinkOrder(row.order)"
-                  >解除关联</el-button>
+                  >确认入仓</el-button>
+                  
                   <el-button
                     v-if="!row.order._isBatchSummary && canMarkSent(row.order)"
                     size="default"
-                    type="warning"
+                    type="primary"
                     :loading="actionLoadingId === actionKey(row.order, 'sent')"
                     @click="updateStatus(row.order, 'sent')"
                   >
-                    标记已发送
+                    确认发货
                   </el-button>
-                  <el-button
-                    v-if="!row.order._isBatchSummary && canCancelOrder(row.order)"
-                    size="default"
-                    type="danger"
-                    plain
-                    :loading="actionLoadingId === actionKey(row.order, 'cancelled')"
-                    @click="cancelOrder(row.order)"
-                  >取消</el-button>
+                  
                   <el-button
                     v-if="!row.order._isBatchSummary && canMarkCompleted(row.order)"
                     size="default"
-                    type="success"
+                    type="primary"
                     :loading="actionLoadingId === actionKey(row.order, 'completed')"
                     @click="updateStatus(row.order, 'completed')"
                   >
-                    完成
+                    确认入仓
                   </el-button>
-                  <el-button
-                    v-if="!row.order._isBatchSummary && canDeleteOrder(row.order)"
-                    size="default"
-                    type="danger"
-                    :loading="actionLoadingId === actionKey(row.order, 'delete')"
-                    @click="deleteOrder(row.order)"
-                  >
-                    删除备货单
-                  </el-button>
-                </el-space>
+                  
+                <el-dropdown v-if="!row.order._isBatchSummary && (canCancelOrder(row.order) || row.order.batch_id || canDeleteOrder(row.order))" trigger="click">
+  <el-button :disabled="Boolean(actionLoadingId)">更多 <span aria-hidden="true">⌄</span></el-button>
+  <template #dropdown><el-dropdown-menu>
+    <el-dropdown-item v-if="row.order.batch_id" @click="unlinkOrder(row.order)">解除关联</el-dropdown-item>
+    <el-dropdown-item v-if="canCancelOrder(row.order)" @click="cancelOrder(row.order)">取消备货单</el-dropdown-item>
+    <el-dropdown-item v-if="canDeleteOrder(row.order)" @click="deleteOrder(row.order)">删除备货单</el-dropdown-item>
+  </el-dropdown-menu></template>
+</el-dropdown></el-space>
               </div>
             </div>
           </template>
@@ -1063,7 +1099,7 @@ onMounted(loadPageData);
             <div class="product-cell">
               <ProductImagePreview :src="row.image_url" />
               <div class="cell-stack">
-                <strong>{{ row.product_name || "-" }}</strong>
+                <strong>{{ row.product_name || "-" }}</strong><span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || "-" }}</span>
                 <span class="muted-text">SKU {{ row.ozon_sku || "-" }}</span>
                 <span class="muted-text">Offer {{ row.offer_id || "-" }}</span>
                 <span v-if="row.order._isBatchSummary" class="batch-source-count">来自 {{ integer(row.source_order_count) }} 张关联原单</span>
@@ -1154,19 +1190,11 @@ onMounted(loadPageData);
           <template #default="{ row }">
             <div class="barcode-cell">
               <el-space wrap :size="6" class="barcode-actions">
+                <el-dropdown trigger="click"><el-button link :loading="barcodeGenerateLoading(row)">更多</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="regenerateBarcodeLabel(row)">重新生成条码</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
                 <el-button
                   class="erp-btn-link"
                   link
-                  type="warning"
-                  :loading="barcodeGenerateLoading(row)"
-                  @click="regenerateBarcodeLabel(row)"
-                >
-                  重新生成
-                </el-button>
-                <el-button
-                  class="erp-btn-link"
-                  link
-                  type="success"
+                  type="primary"
                   :loading="barcodePrintLoading(row)"
                   @click="printBarcodeLabel(row)"
                 >
@@ -1201,6 +1229,25 @@ onMounted(loadPageData);
 
       </el-table>
     </div>
+
+    <el-dialog v-model="receiptDialog.visible" title="确认入仓" width="min(1000px, 94vw)" append-to-body :close-on-click-modal="false" :show-close="!receiptDialog.submitting" :close-on-press-escape="!receiptDialog.submitting">
+      <div v-loading="receiptDialog.loading" class="receipt-content">
+        <p class="receipt-hint">按实际收到的数量填写；未收到的商品留为 0，剩余数量继续显示在途。</p>
+        <el-table :data="receiptDialog.rows" max-height="460" border>
+          <el-table-column prop="order_no" label="备货单" min-width="180" />
+          <el-table-column label="商品 / SKU" min-width="220"><template #default="{ row }"><strong>{{ row.product_name }}</strong><div class="muted-text">{{ row.ozon_sku }}</div></template></el-table-column>
+          <el-table-column prop="quantity" label="已发" width="70" />
+          <el-table-column prop="listed_quantity" label="已入仓" width="80" />
+          <el-table-column prop="remaining" label="剩余" width="70" />
+          <el-table-column label="本次入仓" width="170"><template #default="{ row }"><el-input-number v-model="row.receive_now" :min="0" :max="row.remaining" :precision="0" controls-position="right" :disabled="receiptDialog.submitting || !row.remaining" style="width: 140px" /></template></el-table-column>
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button :disabled="receiptDialog.submitting" @click="receiptDialog.visible = false">关闭</el-button>
+        <el-button :disabled="receiptDialog.loading || receiptDialog.submitting" @click="receiptDialog.rows.forEach(row => row.receive_now = row.remaining)">填入全部剩余数量</el-button>
+        <el-button type="primary" :disabled="receiptDialog.loading || !receiptDialog.rows.length" :loading="receiptDialog.submitting" @click="submitReceipt">保存入仓数量</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="barcodePrintDialog.visible"
@@ -1325,21 +1372,60 @@ onMounted(loadPageData);
     </el-dialog>
 
     <el-dialog v-model="batchDetailDialog.visible" :title="`关联明细 · ${batchDetailDialog.batch?.batch_no || ''}`" width="96vw" top="4vh" destroy-on-close>
+      <el-alert title="关联后仍按原单审批：审核前修改数量后点击保存，再由非申请人审核通过；审核后使用人工调整并填写原因。" type="info" :closable="false" show-icon />
       <div v-loading="batchDetailDialog.loading" class="batch-detail-list">
         <el-table v-if="batchDetailRows.length" :data="batchDetailRows" :span-method="tableSpanMethod" border class="erp-data-table replenishment-table batch-detail-table">
           <el-table-column label="备货单" min-width="260">
-            <template #default="{ row }"><div class="order-cell"><div class="shop-banner">{{ row.order.shop_name || "未命名店铺" }}</div><div class="order-line"><span class="order-label">备货单号</span><strong class="order-title">{{ orderDisplayName(row.order) }}</strong></div><div class="order-line"><span class="order-label">创建时间</span><span class="order-value">{{ dateText(row.order.created_at) }}</span></div><div class="order-line"><span class="order-label">状态</span><el-tag :type="statusType(row.order.status)" effect="light">{{ statusTagText(row.order.status) }}</el-tag></div><div class="order-line"><span class="order-label">总览</span><div class="order-summary"><span>SKU {{ integer(row.order.item_count) }}</span><span>申请 {{ integer(row.order.total_requested_qty) }}</span><span>通过 {{ integer(row.order.total_approved_qty) }}</span><span>最终 {{ integer(row.order.total_final_qty) }}</span></div></div><div class="order-line"><span class="order-label">操作</span><el-button type="info" plain size="default" @click="unlinkOrder(row.order)">解除关联</el-button></div></div></template>
+            <template #default="{ row }"><div class="order-cell"><div class="shop-banner">{{ row.order.shop_name || "未命名店铺" }}</div><div class="order-line"><span class="order-label">备货单号</span><strong class="order-title">{{ orderDisplayName(row.order) }}</strong></div><div class="order-line"><span class="order-label">创建时间</span><span class="order-value">{{ dateText(row.order.created_at) }}</span></div><div class="order-line"><span class="order-label">状态</span><el-tag :type="statusType(row.order.status)" effect="light">{{ statusTagText(row.order.status, row.order.received_quantity) }}</el-tag></div><div class="order-line"><span class="order-label">总览</span><div class="order-summary"><span>SKU {{ integer(row.order.item_count) }}</span><span>申请 {{ integer(row.order.total_requested_qty) }}</span><span>通过 {{ integer(row.order.total_approved_qty) }}</span><span>最终 {{ integer(row.order.total_final_qty) }}</span></div></div><div class="order-line"><span class="order-label">操作</span><el-space wrap class="order-actions" :size="8">
+                  <el-button plain v-if="canEditQuantities(row.order)" type="primary" :loading="actionLoadingId === actionKey(row.order, 'save')" @click="saveOrderItems(row.order)">保存数量</el-button>
+                  <el-tooltip v-if="canApprove(row.order)" :disabled="!approveDisabledReason(row.order)" :content="approveDisabledReason(row.order)" placement="top">
+                    <span><el-button type="primary" :disabled="Boolean(approveDisabledReason(row.order))" :loading="actionLoadingId === actionKey(row.order, 'approved')" @click="updateStatus(row.order, 'approved')">审核通过</el-button></span>
+                  </el-tooltip>
+                  <el-button v-if="canMarkSent(row.order)" type="primary" :loading="actionLoadingId === actionKey(row.order, 'sent')" @click="updateStatus(row.order, 'sent')">确认发货</el-button>
+                  <el-button v-if="canMarkCompleted(row.order)" type="primary" :loading="actionLoadingId === actionKey(row.order, 'completed')" @click="updateStatus(row.order, 'completed')">确认入仓</el-button>
+                  
+                  
+                <el-dropdown v-if="!row.order._isBatchSummary && (canCancelOrder(row.order) || row.order.batch_id || canDeleteOrder(row.order))" trigger="click">
+  <el-button :disabled="Boolean(actionLoadingId)">更多 <span aria-hidden="true">⌄</span></el-button>
+  <template #dropdown><el-dropdown-menu>
+    <el-dropdown-item v-if="row.order.batch_id" @click="unlinkOrder(row.order)">解除关联</el-dropdown-item>
+    <el-dropdown-item v-if="canCancelOrder(row.order)" @click="cancelOrder(row.order)">取消备货单</el-dropdown-item>
+    <el-dropdown-item v-if="canDeleteOrder(row.order)" @click="deleteOrder(row.order)">删除备货单</el-dropdown-item>
+  </el-dropdown-menu></template>
+</el-dropdown></el-space></div></div></template>
           </el-table-column>
-          <el-table-column label="产品信息" min-width="330"><template #default="{ row }"><div class="product-cell"><ProductImagePreview :src="row.image_url" /><div class="cell-stack"><strong>{{ row.product_name || "-" }}</strong><span class="muted-text">SKU {{ row.ozon_sku || "-" }}</span><span class="muted-text">Offer {{ row.offer_id || "-" }}</span></div></div></template></el-table-column>
+          <el-table-column label="产品信息" min-width="330"><template #default="{ row }"><div class="product-cell"><ProductImagePreview :src="row.image_url" /><div class="cell-stack"><strong>{{ row.product_name || "-" }}</strong><span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || "-" }}</span><span class="muted-text">SKU {{ row.ozon_sku || "-" }}</span><span class="muted-text">Offer {{ row.offer_id || "-" }}</span></div></div></template></el-table-column>
           <el-table-column label="销量" width="145" align="center"><template #default="{ row }"><div class="metric-stack"><strong>30天 {{ integer(row.recent_30d_qty) }}</strong><span>7天 {{ integer(row.recent_7d_qty) }}</span><span>三周 {{ salesText(row) }}</span></div></template></el-table-column>
           <el-table-column label="FBP库存" width="125" align="center"><template #default="{ row }"><div class="metric-stack"><strong>当前 {{ integer(row.fbp_stock) }}</strong><span>在途 {{ integer(row.fbp_in_transit) }}</span><span>有效 {{ integer(row.fbp_effective_stock) }}</span></div></template></el-table-column>
           <el-table-column label="本地库存" width="130" align="center"><template #default="{ row }"><div class="metric-stack"><strong>本地 {{ integer(row.local_stock) }}</strong><span>FBS {{ integer(row.fbs_stock) }}</span><span>采购中 {{ integer(row.purchase_pending_qty) }}</span></div></template></el-table-column>
-          <el-table-column label="备货数量（原始 / 调整 / 最终）" width="210" align="center"><template #default="{ row }"><div class="quantity-audit"><span>原始 {{ integer(row.approved_qty || row.requested_qty) }}</span><strong :class="Number(row.adjustment_qty) < 0 ? 'is-negative' : 'is-positive'">调整 {{ Number(row.adjustment_qty) > 0 ? '+' : '' }}{{ integer(row.adjustment_qty) }}</strong><b>最终 {{ integer(row.final_qty) }}</b><span v-if="row.adjustment_summary" class="adjustment-history">{{ row.adjustment_summary }}</span></div></template></el-table-column>
+        <el-table-column label="备货数量（原始 / 调整 / 最终）" width="210" align="center">
+          <template #default="{ row }">
+            <el-input-number
+              v-if="canEditQuantities(row.order)"
+              v-model="row.requested_qty"
+              :disabled="!canEditQuantities(row.order)"
+              :min="1"
+              :step="1"
+              controls-position="right"
+              size="small"
+              class="qty-input"
+            />
+            <div v-else class="quantity-audit">
+              <span>原始 {{ integer(row.approved_qty || row.requested_qty) }}</span>
+              <strong :class="Number(row.adjustment_qty) < 0 ? 'is-negative' : 'is-positive'">调整 {{ Number(row.adjustment_qty) > 0 ? '+' : '' }}{{ integer(row.adjustment_qty) }}</strong>
+              <b>最终 {{ integer(row.final_qty) }}</b>
+              <el-tooltip v-if="row.adjustment_summary" :content="row.adjustment_summary" placement="top">
+                <span class="adjustment-history">查看调整记录</span>
+              </el-tooltip>
+              <el-button v-if="canAdjustQuantity(row.order)" link type="primary" @click="openAdjustmentDialog(row)">添加人工调整</el-button>
+            </div>
+          </template>
+        </el-table-column>
             <el-table-column label="打印" width="220" align="center">
               <template #default="{ row }">
                 <el-space wrap :size="6" class="barcode-actions">
-                  <el-button link type="warning" :loading="barcodeGenerateLoading(row)" @click="regenerateBarcodeLabel(row)">重新生成</el-button>
-                  <el-button link type="success" :loading="barcodePrintLoading(row)" @click="printBarcodeLabel(row)">打印</el-button>
+                  <el-dropdown trigger="click"><el-button link :loading="barcodeGenerateLoading(row)">更多</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="regenerateBarcodeLabel(row)">重新生成条码</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
+                  <el-button link type="primary" :loading="barcodePrintLoading(row)" @click="printBarcodeLabel(row)">打印</el-button>
                 </el-space>
                 <div class="barcode-status muted-text">默认 {{ integer(barcodePrintQuantity(row)) }} 张</div>
               </template>
@@ -1485,11 +1571,9 @@ onMounted(loadPageData);
 }
 
 .shop-banner {
-  padding: 9px 12px;
-  border-left: 4px solid #635bff;
-  border-radius: 7px;
-  background: #eef2ff;
-  color: #312e81;
+  padding: 2px 0 6px;
+  border-bottom: 1px solid #e2e8f0;
+  color: #0f172a;
   font-size: 15px;
   font-weight: 800;
 }
@@ -1505,7 +1589,7 @@ onMounted(loadPageData);
 
 .order-line {
   display: grid;
-  grid-template-columns: 68px minmax(0, 1fr);
+  grid-template-columns: 56px minmax(0, 1fr);
   align-items: start;
   gap: 8px;
   min-width: 0;
@@ -1611,7 +1695,7 @@ onMounted(loadPageData);
 }
 
 .barcode-status.is-printed {
-  color: #15803d;
+  color: #64748b;
 }
 
 .barcode-print-confirmation {
@@ -1693,4 +1777,11 @@ onMounted(loadPageData);
   line-height: 1.65;
 }
 
+
+.order-line:has(.order-actions) { display: block; padding-top: 6px; }
+.order-line:has(.order-actions) > .order-label { display: none; }
+.order-line > .el-tag { justify-self: start; }
+.order-actions :deep(.el-button) { height: 32px; padding: 0 12px; border-radius: 6px; font-weight: 500; box-shadow: none; }
+.order-actions :deep(.el-button--primary) { --el-color-primary: #2563eb; --el-color-primary-light-3: #60a5fa; --el-color-primary-light-9: #eff6ff; --el-color-primary-dark-2: #1d4ed8; }
+.receipt-hint { margin: 0 0 16px; color: #64748b; line-height: 1.6; }
 </style>

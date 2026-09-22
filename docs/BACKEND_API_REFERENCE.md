@@ -96,7 +96,8 @@ Authenticated ERP user.
 | --- | --- | --- | --- |
 | `id` | `number` | Yes | Internal person identifier. |
 | `name` | `string` | Yes | Display name. |
-| `role` | `string` | Yes | Authorization role such as admin or operator. |
+| `role` | `string` | Yes | Primary role retained for compatibility. |
+| `roles` | `array<string>` | No | Assigned roles; permissions are combined. |
 | `username` | `string` | Yes | Login username. |
 
 ### AuthSession
@@ -294,7 +295,8 @@ ERP person or operator record.
 | `id` | `number` | No | Person identifier. |
 | `name` | `string` | No | Display name. |
 | `username` | `string` | No | Login username. |
-| `role` | `string` | No | Authorization role. |
+| `role` | `string` | No | Primary role retained for compatibility. |
+| `roles` | `array<string>` | No | Assigned roles; permissions are combined. |
 | `avatar_url` | `string` | No | Optional avatar URL. |
 | `active` | `number` | No | Whether the person is active. |
 
@@ -309,7 +311,8 @@ Create or update person payload.
 | `name` | `string` | Yes | Display name. |
 | `username` | `string` | No | Login username. |
 | `password` | `string` | No | Optional initial password for creation or reset. |
-| `role` | `string` | No | Authorization role such as operator or admin. |
+| `role` | `string` | No | Legacy single-role input. Use roles for new clients. |
+| `roles` | `array<string>` | No | Nonempty role list: admin, manager, packing, procurement, operations, technical, operator. |
 | `avatar_url` | `string` | No | Optional avatar URL. |
 | `active` | `number` | No | Whether the person is active. |
 
@@ -2453,6 +2456,24 @@ Recommend AI category strategy bundles from product context.
   - Schema: `AiStrategyBundleMatchRequest`
 - Responses:
   - `200` `application/json` -> `AiStrategyBundleMatchResponse`
+
+#### `GET /api/team/operational-owners`
+
+Return persistent owners for daily procurement and shipping tasks.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `PUT /api/team/operational-owners`
+
+Set a persistent daily task owner; update today and future tasks in Beijing time, preserving history.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `MutationOk`
 
 #### `GET /api/team/tasks`
 

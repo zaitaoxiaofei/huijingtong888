@@ -18,7 +18,7 @@ test("people settings uploads and displays square avatars", () => {
 });
 
 test("current user avatar is returned and displayed in the admin header", () => {
-  assert.match(authSessionSource, /SELECT id, name, username, role, avatar_url, active, password_hash FROM people/);
+  assert.match(authSessionSource, /SELECT id, name, username, role, roles_json, avatar_url, active, password_hash FROM people/);
   assert.match(sessionSource, /avatar_url: row\.avatar_url \|\| ""/);
   assert.match(adminLayoutSource, /<el-avatar :src="authStore\.user\?\.avatar_url"/);
   assert.match(adminLayoutSource, /@click="openProfileDialog"/);

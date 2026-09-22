@@ -6,10 +6,10 @@ import ErpPageHeader from "../../components/ErpPageHeader.vue";
 const route = useRoute();
 const replenishmentStatus = ref("applying");
 const replenishmentStatusTabs = [
-  { label: "申请中", value: "applying" },
-  { label: "已通过", value: "approved" },
-  { label: "待发货", value: "waiting_shipment" },
-  { label: "已完成", value: "completed" },
+  { label: "待审核", value: "applying" },
+  { label: "待发货", value: "pending_dispatch" },
+  { label: "待入仓", value: "pending_receipt" },
+  { label: "已入仓", value: "completed" },
   { label: "已取消", value: "cancelled" },
   { label: "全部", value: "all" }
 ];
@@ -35,7 +35,7 @@ const isFbpReplenishment = computed(() => route.name === "inventory-fbp-replenis
 <template>
   <div class="page-stack inventory-module-page">
     <el-card shadow="never" class="page-card inventory-module-card">
-      <ErpPageHeader :title="pageTitle" :description="pageDescription" compact>
+      <ErpPageHeader v-if="route.name !== 'inventory-products'" :title="pageTitle" :description="pageDescription" compact>
         <template v-if="isFbpReplenishment" #actions>
           <div class="inventory-header-status" role="tablist" aria-label="备货进度">
             <button
@@ -62,15 +62,18 @@ const isFbpReplenishment = computed(() => route.name === "inventory-fbp-replenis
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 8px;
+  background: #f1f5f9;
 }
 
 .inventory-header-status button {
   min-height: 32px;
   padding: 0 14px;
-  border: 1px solid #dbe3ef;
-  border-radius: 9px;
-  background: #fff;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
   color: #475569;
   cursor: pointer;
   font: inherit;
@@ -79,20 +82,20 @@ const isFbpReplenishment = computed(() => route.name === "inventory-fbp-replenis
 }
 
 .inventory-header-status button:hover {
-  border-color: #a5b4fc;
-  color: #4338ca;
+  border-color: #bfdbfe;
+  color: #2563eb;
 }
 
 .inventory-header-status button:focus-visible {
-  outline: 3px solid rgba(99, 91, 255, 0.2);
+  outline: 3px solid rgba(37, 99, 235, 0.2);
   outline-offset: 2px;
 }
 
 .inventory-header-status button.is-active {
-  border-color: #635bff;
-  background: #635bff;
+  border-color: #2563eb;
+  background: #2563eb;
   color: #fff;
-  box-shadow: 0 4px 10px rgba(99, 91, 255, 0.2);
+  box-shadow: none;
 }
 
 @media (max-width: 720px) {

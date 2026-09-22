@@ -204,7 +204,7 @@ test("AI variant lightweight draft save inherits shop copies from selected or so
   assert.match(serviceSource, /body\.source_draft_id \|\| body\.sourceDraftId/);
   assert.match(serviceSource, /FROM listing_shop_copies/);
   assert.match(lightweightSource, /await resolveAiVariantDraftShopIds\(body\)/);
-  assert.match(lightweightSource, /await generateListingShopCopies\(draftId, \{ shop_ids: shopIds \}, session\)/);
+  assert.match(lightweightSource, /await generateListingShopCopies\(draftId, \{ shop_ids: shopIds \}, session, options\)/);
   assert.match(lightweightSource, /detail\.shop_copy_count = shopCopies\.length/);
   assert.match(lightweightSource, /detail\.shop_copy_error = shopCopyError/);
 });

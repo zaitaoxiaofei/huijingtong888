@@ -4,6 +4,7 @@ import { ElMessage } from "element-plus";
 import { Refresh } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
 import { useAuthStore } from "../../stores/auth";
+import { shanghaiDateTimeText } from "../../utils/shanghai-date";
 import ProductImagePreview from "../ProductImagePreview.vue";
 import { isImportCandidateVisible, normalizeImportCandidate, normalizeImportRows, sourceLabel } from "../../utils/ai-product-import";
 
@@ -29,9 +30,14 @@ const state = reactive({
   shops: []
 });
 const currentPersonId = computed(() => Number(authStore.user?.id || authStore.user?.person_id || 0) || 0);
+let rowsRequestId = 0;
 const isDraftSource = computed(() => state.source === "draft");
 
 async function open(source, options = {}) {
+  ++rowsRequestId;
+  state.rows = [];
+  state.total = 0;
+  state.loading = true;
   state.source = source;
   state.visible = true;
   state.selected = null;
@@ -53,12 +59,15 @@ async function loadDraftFilterOptions() {
 }
 
 async function loadRows() {
+  const requestId = ++rowsRequestId;
+  const source = state.source;
+  state.selected = null;
   state.loading = true;
   try {
     const params = new URLSearchParams({ paged: "1", page: String(state.page), pageSize: String(state.pageSize) });
     if (state.keyword.trim()) params.set("query", state.keyword.trim());
     if (state.source === "draft") {
-      params.set("lightweight", "1");
+      params.set("sortBy", "created_at");
       params.set("status", "draft");
       if (state.creatorId) params.set("creatorId", state.creatorId);
       if (state.shopId) params.set("shopId", state.shopId);
@@ -68,14 +77,16 @@ async function loadRows() {
     }
     const endpoint = state.source === "collector" ? "/api/listing/collector-box" : state.source === "draft" ? "/api/listing/drafts" : "/api/online-products";
     const payload = await apiClient.get(`${endpoint}?${params.toString()}`, { noCache: true });
-    state.rows = normalizeImportRows(payload).map((row, index) => normalizeImportCandidate(row, state.source, index)).filter(isImportCandidateVisible);
+    if (requestId !== rowsRequestId) return;
+    state.rows = normalizeImportRows(payload).map((row, index) => normalizeImportCandidate(row, source, index)).filter(isImportCandidateVisible);
     state.total = Number(payload?.total || state.rows.length || 0);
   } catch (error) {
+    if (requestId !== rowsRequestId) return;
     state.rows = [];
     state.total = 0;
     ElMessage.error(error.message || "导入列表加载失败");
   } finally {
-    state.loading = false;
+    if (requestId === rowsRequestId) state.loading = false;
   }
 }
 
@@ -97,24 +108,22 @@ async function confirm() {
     const candidate = await hydrate(state.selected);
     emit("import", candidate);
     state.visible = false;
+  } catch (error) {
+    ElMessage.error(error.message || "无法读取商品最新详情，请刷新后重试");
   } finally {
     state.loading = false;
   }
 }
 
 async function hydrate(row) {
-  try {
-    const endpoint = row.source === "collector"
-      ? `/api/listing/collector-box/${encodeURIComponent(row.sourceId)}`
-      : row.source === "draft"
-        ? `/api/listing/drafts/${encodeURIComponent(row.sourceId)}`
-        : `/api/online-products/${encodeURIComponent(row.sourceId)}/edit-draft`;
-    const detail = await apiClient.get(endpoint, { noCache: true }).catch(() => null);
-    return normalizeImportCandidate({ ...row.raw, ...(detail || {}) }, row.source, row.index);
-  } catch (error) {
-    ElMessage.warning(error.message || "详情加载失败，已使用列表数据导入");
-    return row;
-  }
+  const endpoint = row.source === "collector"
+    ? `/api/listing/collector-box/${encodeURIComponent(row.sourceId)}`
+    : row.source === "draft"
+      ? `/api/listing/drafts/${encodeURIComponent(row.sourceId)}`
+      : `/api/online-products/${encodeURIComponent(row.sourceId)}/edit-draft`;
+  const detail = await apiClient.get(endpoint, { noCache: true });
+  if (!detail) throw new Error("无法读取商品最新详情，请刷新后重试");
+  return normalizeImportCandidate(detail, row.source, row.index);
 }
 
 defineExpose({ open });
@@ -143,20 +152,21 @@ defineExpose({ open });
           <el-option label="AI 裂变" value="fission" />
           <el-option label="常规开发" value="normal" />
         </el-select>
-        <el-date-picker v-model="state.startDate" type="date" value-format="YYYY-MM-DD" placeholder="更新开始" @change="search" />
-        <el-date-picker v-model="state.endDate" type="date" value-format="YYYY-MM-DD" placeholder="更新结束" @change="search" />
+        <el-date-picker v-model="state.startDate" type="date" value-format="YYYY-MM-DD" placeholder="创建开始" @change="search" />
+        <el-date-picker v-model="state.endDate" type="date" value-format="YYYY-MM-DD" placeholder="创建结束" @change="search" />
         <el-button @click="resetDraftFilters">重置</el-button>
       </div>
       <el-table v-loading="state.loading" :data="state.rows" border height="460" highlight-current-row @current-change="(row) => { state.selected = row; }">
         <el-table-column label="图片" width="92" align="center">
           <template #default="{ row }">
             <ProductImagePreview v-if="row.imageUrl" class="import-thumb" :src="row.imageUrl" :preview-src-list="[row.imageUrl]" fit="cover" />
-            <span v-else>无图</span>
+            <span v-else class="import-thumb import-empty">无图</span>
           </template>
         </el-table-column>
         <el-table-column label="商品信息" min-width="360">
           <template #default="{ row }"><div class="import-meta"><strong>{{ row.title }}</strong><span>{{ row.sourceSku || row.sourceId }}</span><em>{{ row.tags.join(" ") }}</em></div></template>
         </el-table-column>
+        <el-table-column v-if="isDraftSource" label="创建时间（北京）" width="175"><template #default="{ row }">{{ shanghaiDateTimeText(row.raw.created_at) }}</template></el-table-column>
         <el-table-column label="详情图" width="90" align="center"><template #default="{ row }">{{ row.detailImages.length }}</template></el-table-column>
         <el-table-column label="来源" width="100"><template #default="{ row }">{{ sourceLabel(row.source) }}</template></el-table-column>
       </el-table>
@@ -164,7 +174,7 @@ defineExpose({ open });
     </div>
     <template #footer>
       <el-button @click="state.visible = false">取消</el-button>
-      <el-button type="primary" :loading="state.loading" @click="confirm">{{ props.confirmText }}</el-button>
+      <el-button type="primary" :loading="state.loading" :disabled="state.loading || !state.selected" @click="confirm">{{ props.confirmText }}</el-button>
     </template>
   </el-dialog>
 </template>
@@ -174,6 +184,7 @@ defineExpose({ open });
 .import-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; }
 .import-filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) repeat(2, 150px) auto; gap: 8px; }
 .import-thumb { width: 64px; height: 84px; border-radius: 6px; overflow: hidden; }
+.import-empty { display: inline-flex; align-items: center; justify-content: center; background: #f5f7fa; color: #909399; }
 .import-meta { min-width: 0; display: grid; gap: 5px; }
 .import-meta strong, .import-meta span, .import-meta em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .import-meta em { color: #64748b; font-size: 12px; font-style: normal; }

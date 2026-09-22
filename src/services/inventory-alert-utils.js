@@ -1,4 +1,7 @@
+import { searchInventoryRows } from "./inventory-search.js";
 import { shanghaiDateDaysAgo } from "../shanghai-time.js";
+
+const flattenedSnapshots = new WeakMap();
 
 const FBS_VIRTUAL_STOCK_WARNING_THRESHOLD = 10;
 const FBP_COVERAGE_DAYS_SHORTAGE = 15;
@@ -17,7 +20,7 @@ export function applyStockAlertQuery(rows, query = {}) {
 
   const fbpAlertMode = mode === "fbp-alerts";
   const sourceRows = mode === "fbp" || fbpAlertMode ? flattenFbpRows(rows) : rows;
-  const filtered = sourceRows.filter((row) => {
+  const filtered = searchInventoryRows(sourceRows, searchText).filter((row) => {
     if (fbpAlertMode && row.alert_level === "ok") return false;
     if (mode === "fbp" || fbpAlertMode) {
       if (!matchesFbpAlertType(row, alertType)) return false;
@@ -33,12 +36,7 @@ export function applyStockAlertQuery(rows, query = {}) {
     const dateKey = String(row.created_at || "").slice(0, 10);
     if (dateFrom && (!dateKey || dateKey < dateFrom)) return false;
     if (dateTo && (!dateKey || dateKey > dateTo)) return false;
-    if (!searchText) return true;
-    const skuText = mode === "fbp" || fbpAlertMode
-      ? [row.shop_name, row.name, row.ozon_sku, row.offer_id].join(" ")
-      : (Array.isArray(row.skus) ? row.skus.map((sku) => `${sku.shop_name || ""} ${sku.ozon_sku || ""} ${sku.offer_id || ""}`).join(" ") : "");
-    const haystack = [row.product_name, row.inventory_id, row.suggestion, skuText].map((item) => String(item || "").toLowerCase()).join(" ");
-    return haystack.includes(searchText);
+    return true;
   });
 
   if (mode === "fbp" || fbpAlertMode) sortFbpRows(filtered, query, fbpAlertMode);
@@ -59,6 +57,7 @@ export function applyStockAlertQuery(rows, query = {}) {
 }
 
 function flattenFbpRows(rows) {
+  if (flattenedSnapshots.has(rows)) return flattenedSnapshots.get(rows);
   const result = [];
   for (const product of rows) {
     const skus = Array.isArray(product.skus) ? product.skus : [];
@@ -69,6 +68,7 @@ function flattenFbpRows(rows) {
         product_name: product.product_name,
         product_image_url: product.image_url,
         inventory_id: product.inventory_id,
+        inventory_number: product.inventory_number || "",
         alert_stock: product.alert_stock,
         local_stock: product.local_stock,
         created_at: product.created_at,
@@ -89,6 +89,7 @@ function flattenFbpRows(rows) {
       }));
     }
   }
+  flattenedSnapshots.set(rows, result);
   return result;
 }
 

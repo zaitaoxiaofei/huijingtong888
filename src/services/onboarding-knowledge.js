@@ -1,3 +1,4 @@
+import { hasPermission } from "../shared/permissions.js";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 
 const SEED_ARTICLES = [
@@ -316,7 +317,7 @@ const articleSelect = `SELECT a.*, creator.name AS created_by_name, updater.name
 
 export async function listOnboardingArticles(query = {}, session = {}) {
   await ensureOnboardingKnowledgeSchema();
-  const canEdit = ["admin", "manager"].includes(String(session.role || "").toLowerCase());
+  const canEdit = hasPermission(session, "onboarding.edit");
   const params = [];
   const where = [];
   if (!canEdit) where.push("a.status = 'published'");

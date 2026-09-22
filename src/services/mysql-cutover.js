@@ -1,3 +1,14 @@
+import { normalizeVehicleBrand } from "../shared/vehicle-brand.js";
+import { ensureProcurementLedgerSchema, createProcurementLedgerService } from "./procurement-ledger.js";
+import { ensurePeopleRolesSchemaMysql, personRoleFields } from "./people-roles.js";
+import { getRoles } from "../shared/permissions.js";
+import { inventoryIdentifierSearch, isInventoryIdentifier, inventoryNamePattern, searchInventoryRows } from "./inventory-search.js";
+import { ensureInventoryNumberingMysql } from "./inventory-numbering.js";
+import { orderInventoryPickingMysql } from "./order-inventory-picking.js";
+import { selectedReceiptOrderIds, planShippedProcurementReceipts, validateShippedReceiptSubmission } from "./shipped-procurement-receipts.js";
+import { loadOrderProcurementCoverage, invalidateOrderProcurementCoverage, procurementQueueSql } from "./mysql-order-procurement-coverage.js";
+import { planPartialReceipt } from "./order-procurement-coverage.js";
+import { orderTransportEvidenceSql, automaticCancellationReturnSql } from "./order-transport-evidence.js";
 import { PDFDocument } from "pdf-lib";
 import { createHash } from "node:crypto";
 import { config } from "../config.js";
@@ -319,6 +330,8 @@ const DEFAULT_ORDER_LOGISTICS_OPTIONS_MYSQL = FALLBACK_ORDER_LOGISTICS_METHODS_M
 function isAwaitingDeliverLikeStatusMysql(statusText = "") {
   const text = String(statusText || "").toLowerCase();
   return [
+    "awaiting_registration",
+    "posting_registration_error",
     "awaiting_deliver",
     "posting_registered",
     "sent_by_seller",
@@ -332,6 +345,7 @@ function isAwaitingDeliverLikeStatusMysql(statusText = "") {
 
 function normalizeSyncedShippingStateMysql(posting = {}) {
   const text = `${posting.status || ""} ${posting.tracking_stage || ""} ${posting.logistics_status || ""}`.toLowerCase();
+  const registering = text.includes("awaiting_registration") || text.includes("posting_registration_error");
   const inTransit = [
     "posting_in_carriage",
     "posting_transferring",
@@ -339,7 +353,7 @@ function normalizeSyncedShippingStateMysql(posting = {}) {
     "delivering"
   ].some((value) => text.includes(value));
   return {
-    status: inTransit ? "delivering" : "awaiting_deliver",
+    status: inTransit ? "delivering" : registering ? "awaiting_registration" : "awaiting_deliver",
     trackingStage: posting.tracking_stage || posting.status || (inTransit ? "delivering" : "awaiting_deliver"),
     logisticsStatus: posting.logistics_status || posting.tracking_stage || posting.status || (inTransit ? "delivering" : "awaiting_deliver")
   };
@@ -467,6 +481,10 @@ async function ensureInboundRecordTimestampSchemaMysql() {
     "ALTER TABLE inbound_records ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at",
     "ALTER TABLE inbound_records ADD COLUMN approved_by_person_id BIGINT UNSIGNED NULL AFTER approved_at",
     "CREATE INDEX idx_inbound_approved_by_person ON inbound_records (approved_by_person_id)"
+    ,"ALTER TABLE inbound_records ADD COLUMN courier_company VARCHAR(128) NULL"
+    ,"ALTER TABLE inbound_records ADD COLUMN tracking_number VARCHAR(128) NULL"
+    ,"ALTER TABLE inbound_records ADD COLUMN receipt_images_json JSON NULL"
+    ,"ALTER TABLE inbound_records ADD COLUMN received_at DATETIME NULL"
   ]);
   inboundRecordTimestampSchemaReadyMysql = true;
 }
@@ -764,6 +782,11 @@ function structuredInventoryProductNameSqlMysql(alias = "products") {
 
 async function ensureProcurementFlexibleRequestSchemaMysql() {
   if (procurementFlexibleRequestSchemaReadyMysql) return;
+  // Backfills are needed only when these legacy columns are first introduced.
+  // Running them on every process start scans the entire request table and
+  // makes both ECS rollouts and the first workbench visit wait unnecessarily.
+  const needsBindingStatusBackfill = !await mysqlSchemaColumnExists("procurement_requests", "binding_status");
+  const needsDemandTypeBackfill = !await mysqlSchemaColumnExists("procurement_requests", "demand_type");
   await ensureMysqlColumns("procurement_requests", [
     "ALTER TABLE procurement_requests MODIFY COLUMN product_id BIGINT UNSIGNED NULL",
     "ALTER TABLE procurement_requests ADD COLUMN request_group_no VARCHAR(64) NULL AFTER id",
@@ -781,26 +804,44 @@ async function ensureProcurementFlexibleRequestSchemaMysql() {
     "ALTER TABLE procurement_requests ADD COLUMN price_exception_confirmed_at DATETIME NULL AFTER price_exception_confirmed_by_person_id",
     "ALTER TABLE procurement_requests ADD COLUMN auto_completed_at DATETIME NULL AFTER price_exception_confirmed_at",
     "ALTER TABLE procurement_requests ADD COLUMN demand_type VARCHAR(32) NOT NULL DEFAULT 'advance_stock' AFTER source_ozon_sku",
+    "ALTER TABLE procurement_requests ADD COLUMN request_reason_code VARCHAR(64) NULL AFTER demand_type",
+    "ALTER TABLE procurement_requests ADD COLUMN request_reason_note TEXT NULL AFTER request_reason_code",
     "ALTER TABLE procurement_requests ADD COLUMN purchased_at DATETIME NULL AFTER merged_at",
     "CREATE INDEX idx_procurement_request_group ON procurement_requests (request_group_no)",
     "CREATE INDEX idx_procurement_binding_status ON procurement_requests (binding_status, status)",
-    "CREATE INDEX idx_procurement_demand_stage ON procurement_requests (demand_type, status, created_at)"
+    "CREATE INDEX idx_procurement_demand_stage ON procurement_requests (demand_type, status, created_at)",
+    "CREATE INDEX idx_procurement_workspace_status_product_created ON procurement_requests (status, product_id, created_at)"
   ]);
-  await mysqlExecute(`
-    UPDATE procurement_requests
-    SET binding_status = CASE WHEN product_id IS NULL THEN 'unbound' ELSE 'bound' END
-    WHERE binding_status IS NULL OR binding_status = ''
-  `);
-  await mysqlExecute(`
-    UPDATE procurement_requests
-    SET demand_type = CASE
-      WHEN COALESCE(source_order_id, 0) > 0 OR COALESCE(source_order_item_id, 0) > 0 THEN 'real_order'
-      ELSE 'advance_stock'
-    END
-    WHERE demand_type IS NULL OR demand_type = ''
-      OR (COALESCE(source_order_id, 0) > 0 AND demand_type != 'real_order')
-  `);
+  if (needsBindingStatusBackfill) {
+    await mysqlExecute(`
+      UPDATE procurement_requests
+      SET binding_status = CASE WHEN product_id IS NULL THEN 'unbound' ELSE 'bound' END
+      WHERE binding_status IS NULL OR binding_status = ''
+    `);
+  }
+  if (needsDemandTypeBackfill) {
+    await mysqlExecute(`
+      UPDATE procurement_requests
+      SET demand_type = CASE
+        WHEN COALESCE(source_order_id, 0) > 0 OR COALESCE(source_order_item_id, 0) > 0 THEN 'real_order'
+        ELSE 'advance_stock'
+      END
+      WHERE demand_type IS NULL OR demand_type = ''
+        OR (COALESCE(source_order_id, 0) > 0 AND demand_type != 'real_order')
+    `);
+  }
   procurementFlexibleRequestSchemaReadyMysql = true;
+}
+
+// Procurement workbench reads join several schema-evolving tables. Warm these
+// guards before the HTTP server becomes ready so the first operator request
+// cannot be held behind DDL checks or compatibility backfills.
+export async function ensureProcurementWorkspaceSchemaMysql() {
+  ensureMysqlCutoverEnabled();
+  await ensureProcurementRequestTimestampSchemaMysql();
+  await ensureProcurementFlexibleRequestSchemaMysql();
+  await ensureStockLocationSchemaMysql();
+  await ensureFbpTransferRecordsSchemaMysql();
 }
 
 async function ensureProcurementPlatformOrderSchemaMysql() {
@@ -943,6 +984,8 @@ async function ensureProductNamingSchemaMysql() {
     "ALTER TABLE products ADD COLUMN vehicle_models_json JSON NULL",
     "CREATE INDEX idx_products_inventory_naming ON products (inventory_category(128), vehicle_brand(128), vehicle_model(128), accessory_name(128))"
   ]);
+  await ensureInventoryNumberingMysql();
+  await ensureInventoryProductSearchSchemaMysql();
   await syncStructuredInventoryProductNamesMysql();
   productNamingSchemaReadyMysql = true;
 }
@@ -957,15 +1000,16 @@ export async function warmCoreInventoryRuntimeMysql() {
   await ensureProcurementOrderSourceSchemaMysql();
   await ensureOrderLabelPrintSchemaMysql();
   await mysqlQuery("SELECT 1 AS ready");
+  await orderProcurementCoverageMysql();
   return { ok: true };
 }
 
-function normalizeStructuredNamingMysql(body = {}) {
+export function normalizeStructuredNamingMysql(body = {}) {
   const source = body.structured_naming || body.structuredNaming;
   if (!source || typeof source !== "object") return null;
   const clean = (value, max = 255) => String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
   const category = clean(source.category);
-  const vehicleBrand = clean(source.vehicle_brand || source.vehicleBrand || source.brand_en || source.brandEn).replace(/^无品牌$/u, "");
+  const vehicleBrand = normalizeVehicleBrand(source.vehicle_brand || source.vehicleBrand || source.brand_en || source.brandEn);
   const rawModels = Array.isArray(source.vehicle_models || source.vehicleModels)
     ? (source.vehicle_models || source.vehicleModels)
     : String(source.vehicle_model || source.vehicleModel || "").split(/[，,、/]+/u);
@@ -1431,6 +1475,7 @@ function compactProductListRowMysql(row) {
     selection_id: row.selection_id,
     code: row.code,
     inventory_id: row.inventory_id,
+    inventory_number: row.inventory_number || "",
     name: row.name,
     image_url: shouldServeProductImageThroughEndpointMysql(imageUrl) ? productImageEndpointMysql(row, { thumbnail: true }) : imageUrl,
     owner_person_id: row.owner_person_id,
@@ -1521,6 +1566,7 @@ async function productComponentRowsMysql(productId) {
   const rows = await mysqlQuery(`
     SELECT pc.id, pc.product_id, pc.component_product_id, pc.quantity, pc.component_role,
       p.name AS component_name,
+      p.inventory_number,
       p.code,
       CASE
         WHEN p.code LIKE 'P-%' THEN p.code
@@ -1544,11 +1590,11 @@ async function productComponentRowsMysql(productId) {
     FROM product_components pc
     JOIN products p ON p.id = pc.component_product_id AND p.active = 1
     LEFT JOIN (
-      SELECT product_id, SUM(quantity_delta) AS local_stock
+      SELECT inventory_movements.product_id, SUM(inventory_movements.quantity_delta) AS local_stock
       FROM inventory_movements
       WHERE status = 'posted'
         AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'
-      GROUP BY product_id
+      GROUP BY inventory_movements.product_id
     ) stock ON stock.product_id = pc.component_product_id
     LEFT JOIN (
       SELECT product_id, SUM(present) AS fbp_stock
@@ -1575,6 +1621,7 @@ async function productComponentRowsMysql(productId) {
       quantity,
       component_role: row.component_role === "gift" ? "gift" : "included",
       component_name: row.component_name || "",
+      inventory_number: row.inventory_number || "",
       code: row.code || "",
       inventory_id: row.inventory_id || "",
       image_url: compactProductImageUrlForListMysql({
@@ -2349,6 +2396,7 @@ async function enrichOrderLogisticsMysql(row) {
     raw_json: undefined,
     raw_status: raw.status || "",
     raw_substatus: raw.substatus || "",
+    ozon_available_actions: Array.isArray(raw.available_actions) ? raw.available_actions : [],
     raw_tracking_stage: raw.tracking_stage || "",
     raw_cancellation_reason: raw.cancellation?.cancel_reason || raw.cancellation?.cancellation_type || "",
     cancel_initiator_label: cancellation.initiator_label,
@@ -2476,7 +2524,88 @@ async function classifyOrderAccountingMysql(row = {}) {
   return classifyOrderAccounting(row, { qualityPrefixes: await orderQualityPrefixesMysql() });
 }
 
-async function enrichOrderRowsForListMysql(rows = []) {
+async function orderProcurementCoverageMysql(options = {}) {
+  await ensureProcurementLedgerSchema(mysqlExecute);
+  const openSql = `(${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")})
+    AND NOT (${orderStatusSqlMysql("cancelled")}) AND NOT (${orderStatusSqlMysql("delivered")})`;
+  return await loadOrderProcurementCoverage(mysqlQuery, openSql, options);
+}
+
+export async function orderProcurementBatchesMysql(orderId) {
+  ensureMysqlCutoverEnabled();
+  const id = Number(orderId);
+  if (!Number.isSafeInteger(id) || id <= 0) return { batches: [], items: [] };
+  await ensureProcurementLedgerSchema(mysqlExecute);
+  const [batches, items] = await Promise.all([
+    mysqlQuery(`
+      SELECT DISTINCT ir.id, ir.product_id, ir.procurement_request_id, ir.purchase_order_id,
+        ir.purchase_order_item_id, ir.quantity, ir.amount, ir.shipping_amount, ir.status,
+        ir.updated_at, ir.created_at, ir.approved_at, p.name AS product_name, p.stock_unit,
+        pe.name AS person_name, po.order_no AS purchase_order_no,
+        poi.actual_quantity AS purchase_quantity, poi.inbound_quantity AS purchase_received_quantity,
+        poi.amount AS purchase_amount, poi.shipping_amount AS purchase_shipping_amount,
+        COALESCE(poi.purchase_url, ir.purchase_url) AS purchase_url,
+        COALESCE(poi.note, ir.note) AS purchase_note, po.note AS order_note,
+        COALESCE(po.purchased_at, ir.created_at) AS purchased_at
+      FROM inbound_records ir
+      LEFT JOIN products p ON p.id = ir.product_id
+      LEFT JOIN people pe ON pe.id = ir.person_id
+      LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
+      LEFT JOIN purchase_order_items poi ON poi.id = ir.purchase_order_item_id
+      WHERE ir.status IN ('pending_arrival', 'approved')
+        AND ir.product_id IN (
+          SELECT allocation.product_id FROM procurement_order_allocations allocation
+          JOIN procurement_requests request ON request.id = allocation.procurement_request_id
+            AND request.status != 'cancelled'
+          WHERE allocation.order_id = ? AND allocation.status = 'allocated'
+          UNION
+          SELECT DISTINCT COALESCE(recipe_item.product_id, component.component_product_id, sm.product_id)
+          FROM order_items oi
+          JOIN orders o ON o.id = oi.order_id
+          JOIN sku_mappings sm ON sm.active = 1
+            AND (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
+          LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id = o.shop_id
+            AND recipe.ozon_sku = oi.ozon_sku AND recipe.active = 1 AND recipe.mode = 'combo'
+          LEFT JOIN sku_inventory_recipe_items recipe_item ON recipe_item.recipe_id = recipe.id
+          LEFT JOIN product_components component ON component.product_id = sm.product_id AND recipe.id IS NULL
+          WHERE oi.order_id = ?
+            AND COALESCE(recipe_item.product_id, component.component_product_id, sm.product_id) IS NOT NULL
+        )
+        AND COALESCE(po.status, '') != 'cancelled'
+      ORDER BY ir.created_at DESC, ir.id DESC
+    `, [id, id]),
+    mysqlQuery(`
+      SELECT allocation.order_item_id, allocation.product_id,
+        SUM(allocation.allocated_quantity) AS incoming_quantity,
+        MAX(p.name) AS product_name, MAX(p.stock_unit) AS unit
+      FROM procurement_order_allocations allocation
+      JOIN procurement_requests request ON request.id = allocation.procurement_request_id
+        AND request.status != 'cancelled'
+      LEFT JOIN products p ON p.id = allocation.product_id
+      WHERE allocation.order_id = ? AND allocation.status = 'allocated'
+      GROUP BY allocation.order_item_id, allocation.product_id
+      ORDER BY allocation.order_item_id, allocation.product_id
+    `, [id])
+  ]);
+  return {
+    batches,
+    items: items.map((item) => ({
+      ...item,
+      quantity: Number(item.incoming_quantity || 0),
+      stock_quantity: 0,
+      incoming_quantity: Number(item.incoming_quantity || 0),
+      shortage_quantity: 0,
+      quantity_needs_review: false
+    }))
+  };
+}
+
+async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefined) {
+  // Procurement coverage reconciles the full order and inventory ledger. Do
+  // not let a cold reconciliation block the ordinary order-list first paint.
+  const coverage = coveragePromise === null
+    ? new Map()
+    : await (coveragePromise || orderProcurementCoverageMysql());
   const qualityPrefixes = await orderQualityPrefixesMysql();
   const orderIds = [...new Set(rows.map((row) => Number(row.id)).filter(Boolean))];
   const billingRows = orderIds.length ? await mysqlQuery(`
@@ -2489,10 +2618,12 @@ async function enrichOrderRowsForListMysql(rows = []) {
     WHERE oi.order_id IN (${orderIds.map(() => "?").join(",")})
     GROUP BY oi.order_id
   `, orderIds) : [];
+  const pickingByOrderId = await orderInventoryPickingMysql(orderIds);
   const billingByOrderId = new Map(billingRows.map((row) => [Number(row.order_id), row]));
-  return await Promise.all(rows.map(async (row) => {
+  if (rows.length) await activeOrderLogisticsFilterMethodsMysql();
+  return await mapWithConcurrencyMysql(rows, 3, async (row) => {
     const billing = billingByOrderId.get(Number(row.id)) || {};
-    const enriched = await enrichOrderLogisticsMysql({ ...row, ...billing });
+    const enriched = await enrichOrderLogisticsMysql({ ...row, ...billing, inventory_picking_items: pickingByOrderId.get(Number(row.id)) || [], procurement_coverage: coverage.get(Number(row.id)) || null });
     const accounting = classifyOrderAccounting(enriched, { qualityPrefixes });
     const cancellation = cancellationDisplay({
       ...enriched,
@@ -2519,7 +2650,7 @@ async function enrichOrderRowsForListMysql(rows = []) {
       loss_profile_label: cancellation.loss_profile_label,
       loss_formula_text: cancellation.loss_formula_text
     };
-  }));
+  });
 }
 
 function buildOnlineProductPayload(shopId, item = {}) {
@@ -3541,11 +3672,13 @@ export async function shopsMysql() {
 export async function peopleMysql() {
   ensureMysqlCutoverEnabled();
   await ensurePeopleTimestampSchemaMysql();
-  return getCachedMasterData("people", () => mysqlQuery("SELECT * FROM people ORDER BY active DESC, id"));
+  await ensurePeopleRolesSchemaMysql();
+  return getCachedMasterData("people", async () => (await mysqlQuery("SELECT * FROM people ORDER BY active DESC, id")).map(({ password_hash, ...row }) => ({ ...row, roles: getRoles(row) })));
 }
 
 export async function stockAlertsMysql(query = {}) {
   ensureMysqlCutoverEnabled();
+  await ensureProductNamingSchemaMysql();
   await ensureOzonStockStorageSchemaMysql();
   await ensureStockLocationSchemaMysql();
   await ensureProfitAnalyticsSchemaMysql();
@@ -3553,27 +3686,28 @@ export async function stockAlertsMysql(query = {}) {
   const forceRefresh = ["1", "true", "yes", "force"].includes(String(query.refresh || query.forceRefresh || "").toLowerCase());
   if (mode === "fbp-alerts") {
     await ensureFbpReplenishmentSchemaMysql();
+    if (forceRefresh) invalidateMasterDataCache("stock-alerts:fbp-base:v1");
     const products = await getCachedMasterData("stock-alerts:fbp-base:v1", loadFbpStockAlertBaseMysql, STOCK_ALERT_BASE_CACHE_TTL_MS);
     return applyStockAlertQuery(products, query);
   }
   if (forceRefresh) invalidateMasterDataCache("stock-alerts:base:v2");
-  const persistedBase = forceRefresh ? null : await mysqlQueryOne(`
-    SELECT payload_json
-    FROM inventory_alert_base_snapshots
-    WHERE cache_key = 'alerts-v3' AND refreshed_at >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)
-    LIMIT 1
-  `);
-  const persistedProducts = parseJsonFallback(persistedBase?.payload_json, null);
-  if (Array.isArray(persistedProducts)) return applyStockAlertQuery(persistedProducts, query);
-  const summaryCount = await mysqlQueryOne("SELECT COUNT(*) AS count FROM inventory_alert_sku_daily");
-  if (!Number(summaryCount?.count || 0)) {
-    const orderCount = await mysqlQueryOne("SELECT COUNT(*) AS count FROM orders");
-    if (Number(orderCount?.count || 0)) await refreshInventoryAlertSkuDailyMysql({ from: "2000-01-01", to: todayDateKeyMysql() });
-  }
   const products = await getCachedMasterData("stock-alerts:base:v2", async () => {
+    const persistedBase = forceRefresh ? null : await mysqlQueryOne(`
+      SELECT payload_json
+      FROM inventory_alert_base_snapshots
+      WHERE cache_key = 'alerts-v4' AND refreshed_at >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)
+      LIMIT 1
+    `);
+    const persistedProducts = parseJsonFallback(persistedBase?.payload_json, null);
+    if (Array.isArray(persistedProducts)) return persistedProducts;
+    const summaryCount = await mysqlQueryOne("SELECT COUNT(*) AS count FROM inventory_alert_sku_daily");
+    if (!Number(summaryCount?.count || 0)) {
+      const orderCount = await mysqlQueryOne("SELECT COUNT(*) AS count FROM orders");
+      if (Number(orderCount?.count || 0)) await refreshInventoryAlertSkuDailyMysql({ from: "2000-01-01", to: todayDateKeyMysql() });
+    }
     const rows = await mysqlQuery(`
     SELECT p.id AS product_id,
-      CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id,
+      CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id, p.inventory_number,
       p.name AS product_name, p.image_url, p.alert_stock, p.created_at,
       COALESCE(local_stock.local_stock, 0) AS local_stock,
       sm.id AS mapping_id, sm.shop_id, sm.ozon_sku, sm.offer_id, sm.display_name, sm.active,
@@ -3657,6 +3791,7 @@ export async function stockAlertsMysql(query = {}) {
         productsMap.set(productId, {
           product_id: productId,
           inventory_id: row.inventory_id,
+          inventory_number: row.inventory_number || "",
           product_name: row.product_name,
           image_url: compactProductImageUrlForListMysql({
             id: productId,
@@ -3760,7 +3895,7 @@ export async function stockAlertsMysql(query = {}) {
     const prepared = [...productsMap.values()].map((product) => withStockAlertStatus(product));
     await mysqlExecute(`
       INSERT INTO inventory_alert_base_snapshots (cache_key, payload_json, refreshed_at)
-      VALUES ('alerts-v3', ?, CURRENT_TIMESTAMP)
+      VALUES ('alerts-v4', ?, CURRENT_TIMESTAMP)
       ON DUPLICATE KEY UPDATE payload_json = VALUES(payload_json), refreshed_at = VALUES(refreshed_at)
     `, [JSON.stringify(prepared)]);
     return prepared;
@@ -3772,7 +3907,7 @@ export async function stockAlertsMysql(query = {}) {
 async function loadFbpStockAlertBaseMysql() {
   const rows = await mysqlQuery(`
     SELECT p.id AS product_id,
-      CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id,
+      CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id, p.inventory_number,
       p.name AS product_name, p.image_url, p.alert_stock, p.created_at,
       COALESCE(local_stock.local_stock, 0) AS local_stock,
       sm.id AS mapping_id, sm.shop_id, sm.ozon_sku, sm.offer_id, sm.display_name, sm.active,
@@ -3859,6 +3994,7 @@ async function loadFbpStockAlertBaseMysql() {
       productsMap.set(productId, {
         product_id: productId,
         inventory_id: row.inventory_id,
+        inventory_number: row.inventory_number || "",
         product_name: row.product_name,
         image_url: compactProductImageUrlForListMysql({
           id: productId,
@@ -3997,6 +4133,7 @@ function normalizeFbpOpportunityRow(row) {
     shop_name: row.shop_name || "",
     product_id: row.product_id,
     inventory_id: row.inventory_id || "",
+    inventory_number: row.inventory_number || "",
     product_name: row.product_name || row.online_name || row.display_name || row.ozon_sku || "",
     online_product_id: row.online_product_id,
     ozon_product_id: row.ozon_product_id || "",
@@ -4055,19 +4192,11 @@ function applyFbpOpportunityQuery(rows, query = {}) {
   const manualSku = String(query.manualSku || query.manual_sku || "").trim().toLowerCase();
   const sortable = new Set(["score", "suggested_qty", "suggested_transfer_qty", "suggested_purchase_qty", "recent_30d_qty", "recent_7d_qty", "coverage_days", "fbp_available", "fbp_transfer_in_transit_qty"]);
 
+  const searchRows = searchInventoryRows(rows, text);
   let filtered = manualSku
-    ? rows.filter((row) => String(row.ozon_sku || "").trim().toLowerCase() === manualSku)
-    : rows.filter((row) => row.score >= 50 && row.suggested_qty > 0);
-  if (text) {
-    filtered = filtered.filter((row) => [
-      row.shop_name,
-      row.ozon_sku,
-      row.offer_id,
-      row.name,
-      row.product_name,
-      row.inventory_id
-    ].some((value) => String(value || "").toLowerCase().includes(text)));
-  }
+    ? searchRows.filter((row) => String(row.ozon_sku || "").trim().toLowerCase() === manualSku)
+    : searchRows.filter((row) => row.score >= 50 && row.suggested_qty > 0);
+  if (productId) filtered = filtered.filter((row) => Number(row.product_id) === productId);
   if (shopId !== "all") filtered = filtered.filter((row) => String(row.shop_id || "") === shopId);
   if (priority !== "all") filtered = filtered.filter((row) => row.priority === priority);
   if (minSales > 0) filtered = filtered.filter((row) => Number(row.recent_30d_qty || 0) >= minSales);
@@ -4101,6 +4230,7 @@ function applyFbpOpportunityQuery(rows, query = {}) {
 
 export async function fbpOpportunitiesMysql(query = {}) {
   ensureMysqlCutoverEnabled();
+  await ensureProductNamingSchemaMysql();
   await ensureOzonStockStorageSchemaMysql();
   await ensureStockLocationSchemaMysql();
   await ensureProductBarcodeLabelCacheReadyMysql();
@@ -4112,7 +4242,7 @@ export async function fbpOpportunitiesMysql(query = {}) {
       sm.id AS mapping_id, sm.shop_id, sm.ozon_sku, sm.offer_id, sm.display_name,
       s.name AS shop_name,
       p.id AS product_id,
-      CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id,
+      CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id, p.inventory_number,
       p.name AS product_name, p.image_url AS product_image_url,
       COALESCE(local_stock.local_stock, 0) AS local_stock,
       COALESCE(op_by_id.id, op_by_sku.id) AS online_product_id,
@@ -4255,7 +4385,9 @@ function fbpReplenishmentOrderNo(id, dateKey = todayDateKeyMysql()) {
 
 export async function fbpReplenishmentOrdersMysql(query = {}) {
   ensureMysqlCutoverEnabled();
+  await ensureProductNamingSchemaMysql();
   await ensureFbpReplenishmentSchemaMysql();
+  await ensureFbpTransferRecordsSchemaMysql();
   const status = String(query.status || "all");
   const shopId = String(query.shopId || query.shop_id || "all");
   const batchId = Number(query.batchId || query.batch_id || 0);
@@ -4268,6 +4400,10 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
     where.push("o.status IN ('draft', 'pending_review')");
   } else if (status === "replenishment") {
     where.push("o.status IN ('draft', 'pending_review', 'approved', 'rejected')");
+  } else if (status === "pending_dispatch") {
+    where.push("o.status IN ('approved', 'ozon_created')");
+  } else if (status === "pending_receipt") {
+    where.push("o.status = 'sent'");
   } else if (status === "waiting_shipment") {
     where.push("o.status IN ('sent', 'ozon_created')");
   } else if (status === "completed") {
@@ -4291,7 +4427,7 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
          SELECT 1 FROM fbp_replenishment_order_items si
          LEFT JOIN products current_product ON current_product.id = si.product_id
          WHERE si.order_id = o.id
-           AND (si.ozon_sku LIKE ? OR si.product_name LIKE ? OR current_product.name LIKE ? OR si.offer_id LIKE ?)
+           AND (si.ozon_sku LIKE ? OR si.product_name LIKE ? OR current_product.name LIKE ? OR si.offer_id LIKE ? OR current_product.inventory_number = ? OR current_product.code = ? OR si.inventory_id = ?)
        )
       OR EXISTS (
         SELECT 1 FROM people p
@@ -4306,12 +4442,17 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
       )
     )`);
     const pattern = `%${text}%`;
-    params.push(pattern, pattern, pattern, pattern, pattern, pattern, pattern);
+    params.push(pattern, pattern, pattern, pattern, pattern, text, text, text, pattern, pattern);
   }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const countRow = await mysqlQueryOne(`SELECT COUNT(*) AS total FROM fbp_replenishment_orders o ${whereSql}`, params);
   const rows = await mysqlQuery(`
-    SELECT o.*, DATE_FORMAT(o.order_date, '%Y-%m-%d') AS order_date,
+    SELECT o.*,
+      (SELECT COALESCE(SUM(ftr.listed_quantity), 0) FROM fbp_transfer_records ftr
+        WHERE ftr.source_type = 'fbp_replenishment'
+          AND ftr.source_ref LIKE CONCAT('fbp_replenishment:', o.id, ':%')
+          AND ftr.status <> 'cancelled') AS received_quantity,
+      DATE_FORMAT(o.order_date, '%Y-%m-%d') AS order_date,
       batch.id AS batch_id, batch.batch_no,
       s.name AS shop_name, s.ozon_client_id AS ozon_company_id,
       creator.name AS created_by_name, reviewer.name AS reviewed_by_name,
@@ -4349,6 +4490,7 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
           WHEN current_product.code LIKE 'P-%' THEN current_product.code
           ELSE CONCAT('P-', DATE_FORMAT(current_product.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(current_product.id, 3, '0'))
         END AS inventory_id,
+        current_product.inventory_number,
         requester.name AS requested_by_name, printer.name AS barcode_printed_by_name
       FROM fbp_replenishment_order_items i
       LEFT JOIN products current_product ON current_product.id = i.product_id
@@ -4875,7 +5017,7 @@ export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId =
     const order = await mysqlConnectionQueryOne(connection, "SELECT * FROM fbp_replenishment_orders WHERE id = ? LIMIT 1 FOR UPDATE", [id]);
     if (!order) throw new Error("备货单不存在。");
     if (String(order.status || "") === "approved" && ["draft", "pending_review", "rejected"].includes(status)) {
-      throw new Error("备货单已通过并生成发仓在途记录，不能退回为未审核状态。");
+      throw new Error("备货单已通过并预留本地库存，不能退回为未审核状态。");
     }
     if (status === "cancelled" && ["sent", "ozon_created", "completed"].includes(String(order.status || ""))) {
       throw new Error("备货单已经发送、创建 Ozon 申请或完成，不能取消。");
@@ -4891,11 +5033,20 @@ export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId =
       if (order.created_by != null) applicantIds.add(Number(order.created_by || 0));
       if (applicantIds.has(Number(userId))) throw new Error("申请人不能审核通过自己的 FBP 备货单，请由其他同事审核。");
     }
-    if (status === "cancelled" && String(order.status || "") === "approved") {
+    const currentStatus = String(order.status || "");
+    if (status === "completed") {
+      const completion = await fbpReplenishmentCompletionStateMysql(connection, id);
+      if (!completion.transferCount) throw new Error("备货单还没有确认发货，不能确认入仓。");
+      if (completion.remainingQuantity > 0) throw new Error(`还有 ${completion.remainingQuantity} 件 FBP 发仓在途，请先在发仓记录中确认入仓。`);
+    }
+    if (status === "cancelled" && currentStatus === "approved") {
       approvalResult = await cancelFbpReplenishmentApprovedTransfersMysql(connection, id, userId);
     }
     await connection.execute(`UPDATE fbp_replenishment_orders SET ${fields.join(", ")} WHERE id = ?`, params);
     if (status === "approved") {
+      approvalResult = await reserveFbpReplenishmentApprovedStockMysql(connection, id, userId);
+    }
+    if (status === "sent" && ["approved", "ozon_created"].includes(currentStatus)) {
       approvalResult = await createFbpReplenishmentApprovedTransfersMysql(connection, id, userId);
     }
   });
@@ -4907,6 +5058,7 @@ const FBP_TRANSFER_STATUSES = new Set(["draft", "sent", "in_transit", "received"
 
 export async function fbpTransferRecordsMysql(query = {}) {
   ensureMysqlCutoverEnabled();
+  await ensureProductNamingSchemaMysql();
   await ensureFbpTransferRecordsSchemaMysql();
   const where = [];
   const params = [];
@@ -4920,6 +5072,12 @@ export async function fbpTransferRecordsMysql(query = {}) {
   const page = Math.max(1, Number(query.page || 1));
   const pageSize = Math.min(200, Math.max(1, Number(query.pageSize || 20)));
 
+  if (query.order_id) {
+    const orderId = Number(query.order_id);
+    if (!Number.isSafeInteger(orderId) || orderId <= 0) throw new Error("备货单编号不正确");
+    where.push("ftr.source_type = 'fbp_replenishment' AND ftr.source_ref LIKE ?");
+    params.push(`fbp_replenishment:${orderId}:%`);
+  }
   if (productId) {
     where.push("ftr.product_id = ?");
     params.push(productId);
@@ -4943,9 +5101,9 @@ export async function fbpTransferRecordsMysql(query = {}) {
     where.push("ftr.status IN ('draft', 'sent', 'in_transit', 'received')");
   }
   if (text) {
-    where.push("(p.name LIKE ? OR ftr.ozon_sku LIKE ? OR ftr.tracking_no LIKE ? OR ftr.box_no LIKE ?)");
+    where.push("(p.name LIKE ? OR ftr.ozon_sku LIKE ? OR ftr.tracking_no LIKE ? OR ftr.box_no LIKE ? OR p.inventory_number = ? OR p.code = ?)");
     const like = `%${text}%`;
-    params.push(like, like, like, like);
+    params.push(like, like, like, like, text, text);
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -4953,7 +5111,7 @@ export async function fbpTransferRecordsMysql(query = {}) {
   const rows = await mysqlQuery(`
     SELECT ftr.*,
       p.name AS product_name, p.image_url AS product_image_url,
-      CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id,
+      CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id, p.inventory_number,
       s.name AS shop_name,
       pe.name AS person_name
     FROM fbp_transfer_records ftr
@@ -4995,6 +5153,101 @@ async function postFbpTransferInventoryMovementMysql(connection, record = {}, qu
     amount: Math.abs(qty) * unitCost,
     note
   });
+}
+
+async function reserveFbpReplenishmentApprovedStockMysql(connection, orderId, userId = null) {
+  const personId = await resolvePersonIdOrFirstMysql(userId, connection);
+  const [itemRows] = await connection.execute(`
+    SELECT i.*
+    FROM fbp_replenishment_order_items i
+    WHERE i.order_id = ? AND i.approved_qty > 0
+    ORDER BY i.id
+    FOR UPDATE
+  `, [Number(orderId)]);
+  const unboundItems = itemRows.filter((row) => !Number(row.product_id || 0));
+  if (unboundItems.length) {
+    const skus = unboundItems.map((row) => row.ozon_sku).filter(Boolean).join(", ");
+    throw new Error(`FBP备货单存在未绑定本地商品的明细，无法预留本地库存：${skus || "未知SKU"}`);
+  }
+  let reservedQuantity = 0;
+  for (const item of itemRows) {
+    const quantity = Math.max(0, Math.round(Number(item.approved_qty || 0)));
+    if (!quantity) continue;
+    const sourceRef = `fbp_replenishment:${orderId}:${item.id}:reserve`;
+    const exists = await mysqlConnectionQueryOne(connection, `
+      SELECT id FROM inventory_movements
+      WHERE source_type = 'fbp_replenishment_reserve' AND source_ref = ? AND status = 'posted'
+      LIMIT 1 FOR UPDATE
+    `, [sourceRef]);
+    if (exists?.id) continue;
+    const product = await mysqlConnectionQueryOne(connection, "SELECT purchase_cost FROM products WHERE id = ?", [Number(item.product_id)]);
+    await postInventoryMysql(connection, {
+      product_id: Number(item.product_id),
+      shop_id: nullableInteger(item.shop_id),
+      sku_mapping_id: nullableInteger(item.mapping_id),
+      owner_person_id: personId,
+      source_type: "fbp_replenishment_reserve",
+      source_ref: sourceRef,
+      quantity_delta: quantity,
+      stock_location: "LOCAL",
+      stock_location_source: "fbp_replenishment",
+      movement_type: "ORDER_RESERVED",
+      unit_cost: Number(product?.purchase_cost || 0),
+      amount: quantity * Number(product?.purchase_cost || 0),
+      note: `FBP备货单审核通过，预留本地库存 ${quantity} 件`
+    });
+    reservedQuantity += quantity;
+  }
+  return { transferCount: 0, outboundQuantity: 0, reservedQuantity };
+}
+
+async function fbpReplenishmentCompletionStateMysql(connection, orderId) {
+  const row = await mysqlConnectionQueryOne(connection, `
+    SELECT COUNT(*) AS transfer_count,
+      COALESCE(SUM(GREATEST(quantity - COALESCE(listed_quantity, 0), 0)), 0) AS remaining_quantity
+    FROM fbp_transfer_records
+    WHERE source_type = 'fbp_replenishment' AND source_ref LIKE ?
+      AND status <> 'cancelled'
+  `, [`fbp_replenishment:${Number(orderId)}:%`]);
+  return {
+    transferCount: Number(row?.transfer_count || 0),
+    remainingQuantity: Math.max(0, Number(row?.remaining_quantity || 0))
+  };
+}
+
+async function releaseFbpReplenishmentReservationMysql(connection, orderId, itemId, userId = null) {
+  const sourceRef = `fbp_replenishment:${Number(orderId)}:${Number(itemId)}:reserve`;
+  const reservation = await mysqlConnectionQueryOne(connection, `
+    SELECT * FROM inventory_movements
+    WHERE source_type = 'fbp_replenishment_reserve' AND source_ref = ? AND status = 'posted'
+    LIMIT 1 FOR UPDATE
+  `, [sourceRef]);
+  if (!reservation?.id) return 0;
+  const releaseRef = `${sourceRef}:sent`;
+  const exists = await mysqlConnectionQueryOne(connection, `
+    SELECT id FROM inventory_movements
+    WHERE source_type = 'fbp_replenishment_reserve_release' AND source_ref = ?
+    LIMIT 1 FOR UPDATE
+  `, [releaseRef]);
+  if (exists?.id) return 0;
+  const qty = Math.max(0, Number(reservation.quantity_delta || 0));
+  if (!qty) return 0;
+  await postInventoryMysql(connection, {
+    product_id: Number(reservation.product_id),
+    shop_id: nullableInteger(reservation.shop_id),
+    sku_mapping_id: nullableInteger(reservation.sku_mapping_id),
+    owner_person_id: nullableInteger(reservation.owner_person_id) || await resolvePersonIdOrFirstMysql(userId, connection),
+    source_type: 'fbp_replenishment_reserve_release',
+    source_ref: releaseRef,
+    quantity_delta: qty,
+    stock_location: 'LOCAL',
+    stock_location_source: 'fbp_replenishment',
+    movement_type: 'CANCEL_RESTORE',
+    unit_cost: Number(reservation.unit_cost || 0),
+    amount: qty * Number(reservation.unit_cost || 0),
+    note: `FBP备货单确认发货，释放预留 ${qty} 件并转为实际发仓`
+  });
+  return qty;
 }
 
 async function createFbpReplenishmentApprovedTransfersMysql(connection, orderId, userId = null) {
@@ -5040,7 +5293,7 @@ async function createFbpReplenishmentApprovedTransfersMysql(connection, orderId,
         String(item.ozon_sku || ""),
         quantity,
         sourceRef,
-        `FBP备货单审核通过，转为发仓在途 ${quantity} 件`,
+        `FBP备货单确认发货，转为发仓在途 ${quantity} 件`,
         personId
       ]);
       transfer = {
@@ -5053,6 +5306,7 @@ async function createFbpReplenishmentApprovedTransfersMysql(connection, orderId,
       transferCount += 1;
     }
 
+    await releaseFbpReplenishmentReservationMysql(connection, orderId, item.id, userId);
     const movementRef = `${sourceRef}:outbound`;
     const movement = await mysqlConnectionQueryOne(connection, `
       SELECT id
@@ -5068,7 +5322,7 @@ async function createFbpReplenishmentApprovedTransfersMysql(connection, orderId,
       { ...transfer, movement_source_ref: movementRef },
       -quantity,
       "LOCAL",
-      `FBP备货单审核通过，本地转发仓 ${quantity} 件`
+      `FBP备货单确认发货，本地转发仓 ${quantity} 件`
     );
     outboundQuantity += quantity;
   }
@@ -5136,11 +5390,18 @@ export async function confirmFbpTransferReceivedMysql(body = {}, userId = null) 
   const id = Number(body.id || body.record_id || body.recordId || 0);
   if (!id) throw new Error("缺少 FBP 发仓记录");
   const result = await withMysqlTransaction(async (connection) => {
+    const source = await mysqlConnectionQueryOne(connection, "SELECT source_type, source_ref FROM fbp_transfer_records WHERE id = ?", [id]);
+    const orderId = source?.source_type === "fbp_replenishment" ? Number(String(source.source_ref || "").split(":")[1]) : 0;
+    if (orderId) await mysqlConnectionQueryOne(connection, "SELECT id FROM fbp_replenishment_orders WHERE id = ? FOR UPDATE", [orderId]);
     const record = await mysqlConnectionQueryOne(connection, "SELECT * FROM fbp_transfer_records WHERE id = ? LIMIT 1 FOR UPDATE", [id]);
     if (!record) throw new Error("FBP 发仓记录不存在");
     if (["cancelled", "closed"].includes(String(record.status || ""))) throw new Error("这条发仓记录已关闭，不能确认入仓");
     const quantity = Math.max(0, Number(record.quantity || 0));
     const listedQuantity = Math.max(0, Number(record.listed_quantity || 0));
+    if (["draft"].includes(String(record.status || ""))) throw new Error("发仓记录尚未确认发货，不能入仓");
+    if (body.expected_listed_quantity !== undefined && Number(body.expected_listed_quantity) !== listedQuantity) {
+      throw new Error("入仓数量已更新，请刷新明细后再提交，避免重复入仓。");
+    }
     const remaining = Math.max(0, quantity - listedQuantity);
     if (remaining <= 0) {
       return { record, receivedQuantity: 0, remainingQuantity: 0 };
@@ -5182,6 +5443,12 @@ export async function confirmFbpTransferReceivedMysql(body = {}, userId = null) 
       "FBP",
       `FBP确认入仓 ${receivedQuantity} 件`
     );
+    if (orderId) {
+      const completion = await fbpReplenishmentCompletionStateMysql(connection, orderId);
+      if (completion.transferCount > 0 && completion.remainingQuantity === 0) {
+        await connection.execute("UPDATE fbp_replenishment_orders SET status = 'completed', closed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('sent', 'ozon_created')", [orderId]);
+      }
+    }
     return { receivedQuantity, remainingQuantity: Math.max(0, quantity - nextListedQuantity) };
   });
   invalidateFbpPlanningCachesMysql();
@@ -5353,18 +5620,21 @@ export async function syncOzonFboSupplyOrdersMysql(body = {}, options = {}) {
 export async function createPersonMysql(body = {}, hashPassword, validatePasswordStrength) {
   ensureMysqlCutoverEnabled();
   await ensurePeopleTimestampSchemaMysql();
+  await ensurePeopleRolesSchemaMysql();
+  const roleFields = personRoleFields(body);
   validatePasswordStrength?.(body.password, body);
   const payload = [
     body.name,
     body.username || null,
-    body.role || "operator",
+    roleFields.role,
+    roleFields.roles_json,
     String(body.avatar_url || body.avatarUrl || "").trim(),
     Number(body.active ?? 1),
     hashPassword(body.password)
   ];
 
   const result = await mysqlExecute(
-    "INSERT INTO people (name, username, role, avatar_url, active, password_hash) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO people (name, username, role, roles_json, avatar_url, active, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
     payload
   );
 
@@ -5377,24 +5647,28 @@ export async function createPersonMysql(body = {}, hashPassword, validatePasswor
 export async function updatePersonMysql(id, body = {}, hashPassword, validatePasswordStrength) {
   ensureMysqlCutoverEnabled();
   await ensurePeopleTimestampSchemaMysql();
+  await ensurePeopleRolesSchemaMysql();
   const personId = Number(id);
-  const existing = await mysqlQueryOne("SELECT id, updated_at FROM people WHERE id = ?", [personId]);
+  const existing = await mysqlQueryOne("SELECT id, updated_at, role, roles_json FROM people WHERE id = ?", [personId]);
   if (!existing) throw new Error("Person not found");
+  const roleFields = personRoleFields(body, existing);
   assertFreshRecord(body, existing, "人员资料已被其他用户保存，请刷新后再继续编辑");
+  const password = String(body.password || "").trim();
+  if (password) validatePasswordStrength?.(body.password, body);
   const payload = [
     body.name,
     body.username || null,
-    body.role || "operator",
+    roleFields.role,
+    roleFields.roles_json,
     String(body.avatar_url || body.avatarUrl || "").trim(),
     Number(body.active ?? 1),
     personId
   ];
 
-  await mysqlExecute("UPDATE people SET name = ?, username = ?, role = ?, avatar_url = ?, active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", payload);
+  await mysqlExecute("UPDATE people SET name = ?, username = ?, role = ?, roles_json = ?, avatar_url = ?, active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", payload);
 
 
-  if (String(body.password || "").trim()) {
-    validatePasswordStrength?.(body.password, body);
+  if (password) {
     const passwordHash = hashPassword(String(body.password));
     await mysqlExecute("UPDATE people SET password_hash = ? WHERE id = ?", [passwordHash, personId]);
 
@@ -5835,77 +6109,6 @@ async function fetchOzonStockAnalyticsSafeMysql(shop, rows = [], options = {}) {
   }
 }
 
-function fbpStockDeltaKey(row = {}) {
-  return `${Number(row.shop_id || 0)}::${String(row.ozon_sku || "").trim()}`;
-}
-
-async function currentFbpStockQuantityMapMysql(shopId, productId = null) {
-  const where = ["shop_id = ?", "stock_type = 'fbp_real'"];
-  const params = [Number(shopId)];
-  if (productId) {
-    where.push("product_id = ?");
-    params.push(Number(productId));
-  }
-  const rows = await mysqlQuery(`
-    SELECT shop_id, product_id, ozon_sku, SUM(present) AS fbp_quantity
-    FROM ozon_stock_snapshots
-    WHERE ${where.join(" AND ")}
-    GROUP BY shop_id, product_id, ozon_sku
-  `, params);
-  return new Map(rows.map((row) => [fbpStockDeltaKey(row), {
-    shop_id: Number(row.shop_id || 0),
-    product_id: Number(row.product_id || 0),
-    ozon_sku: String(row.ozon_sku || ""),
-    fbp_quantity: Number(row.fbp_quantity || 0)
-  }]));
-}
-
-async function autoConfirmFbpTransfersFromStockDeltaMysql(beforeByShop = new Map(), { productId = null } = {}) {
-  let confirmedQuantity = 0;
-  let confirmedRecords = 0;
-  const details = [];
-  for (const [shopId, beforeMap] of beforeByShop.entries()) {
-    const afterMap = await currentFbpStockQuantityMapMysql(shopId, productId);
-    for (const [key, after] of afterMap.entries()) {
-      const beforeQuantity = Number(beforeMap.get(key)?.fbp_quantity || 0);
-      let delta = Math.max(0, Number(after.fbp_quantity || 0) - beforeQuantity);
-      if (delta <= 0) continue;
-      const records = await mysqlQuery(`
-        SELECT id, quantity, listed_quantity
-        FROM fbp_transfer_records
-        WHERE shop_id = ?
-          AND ozon_sku = ?
-          AND status IN ('sent', 'in_transit', 'received')
-          AND GREATEST(quantity - COALESCE(listed_quantity, 0), 0) > 0
-          ${productId ? "AND product_id = ?" : ""}
-        ORDER BY COALESCE(shipped_at, created_at) ASC, id ASC
-      `, productId ? [Number(shopId), after.ozon_sku, Number(productId)] : [Number(shopId), after.ozon_sku]);
-      for (const record of records) {
-        if (delta <= 0) break;
-        const remaining = Math.max(0, Number(record.quantity || 0) - Number(record.listed_quantity || 0));
-        if (remaining <= 0) continue;
-        const receivedQuantity = Math.min(delta, remaining);
-        await confirmFbpTransferReceivedMysql({
-          id: Number(record.id),
-          received_quantity: receivedQuantity,
-          note: `库存同步自动确认：FBP库存从 ${beforeQuantity} 增至 ${Number(after.fbp_quantity || 0)}`
-        });
-        delta -= receivedQuantity;
-        confirmedQuantity += receivedQuantity;
-        confirmedRecords += 1;
-        details.push({
-          shop_id: Number(shopId),
-          product_id: Number(after.product_id || 0),
-          ozon_sku: after.ozon_sku,
-          record_id: Number(record.id),
-          received_quantity: receivedQuantity
-        });
-      }
-    }
-  }
-  return { confirmedQuantity, confirmedRecords, details };
-}
-
 export async function syncOzonStocksMysql(body = {}, options = {}) {
   ensureMysqlCutoverEnabled();
   await ensureOzonStockStorageSchemaMysql();
@@ -5915,10 +6118,8 @@ export async function syncOzonStocksMysql(body = {}, options = {}) {
   let fetched = 0;
   let upserted = 0;
   const errors = [];
-  const beforeFbpByShop = new Map();
   for (const shop of activeShops) {
     try {
-      beforeFbpByShop.set(Number(shop.id), await currentFbpStockQuantityMapMysql(shop.id, productId));
       const filters = await stockSyncFiltersMysql(shop.id, productId);
       let rows = await fetchOzonProductStocks(shop, { ...filters, signal: options.signal });
       const analytics = await fetchOzonStockAnalyticsSafeMysql(shop, rows, options);
@@ -5946,13 +6147,13 @@ export async function syncOzonStocksMysql(body = {}, options = {}) {
     }
   }
   await reclassifyStockSnapshotsMysql();
-  const autoFbpReceive = await autoConfirmFbpTransfersFromStockDeltaMysql(beforeFbpByShop, { productId });
+  // Stock changes do not identify a received shipment. Keep receipts explicit.
+  const autoFbpReceive = { confirmedQuantity: 0, confirmedRecords: 0, details: [] };
   invalidateMasterDataCache("stock-alerts:base");
   invalidateMasterDataCache("stock-alerts:base:v2");
   invalidateMasterDataCache("stock-alerts:fbp-base:v1");
   const status = errors.length ? "partial_error" : "ok";
-  const autoMessage = autoFbpReceive.confirmedQuantity ? `; auto confirmed FBP received ${autoFbpReceive.confirmedQuantity}` : "";
-  const message = `Fetched ${fetched}, upserted ${upserted}${autoMessage}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
+  const message = `Fetched ${fetched}, upserted ${upserted}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
   return { status, fetched, upserted, errors, message, auto_fbp_receive: autoFbpReceive, alerts: await stockAlertsMysql() };
 }
 
@@ -6079,6 +6280,11 @@ function clearOrderPackageLabelPrefetchTimerMysql(orderId) {
 async function cacheOrderPackageLabelMysql(row, buffer, source = "ozon") {
   const normalized = normalizePackageLabelBufferMysql(buffer);
   if (!row?.id || !row?.shop_id || !row?.posting_number || !normalized?.length) return;
+  if (isOrderInTransportMysql(row)) {
+    await mysqlExecute("DELETE FROM order_package_label_cache WHERE order_id = ?", [row.id]);
+    clearOrderPackageLabelPrefetchTimerMysql(row.id);
+    return;
+  }
   await mysqlExecute(`
     INSERT INTO order_package_label_cache
       (order_id, shop_id, posting_number, label_pdf, label_size, fetched_at, fetch_source)
@@ -6226,13 +6432,15 @@ export async function orderPackageLabelMysql(body = {}, userId = null) {
   const requireAll = body.require_all !== false && body.allow_partial !== true;
   if (!ids.length && !postingNumbers.length) throw new Error("Select orders to print labels");
   const rawRows = ids.length ? await mysqlQuery(`
-    SELECT o.id, o.shop_id, o.posting_number, s.name AS shop_name, s.ozon_client_id,
+    SELECT o.id, o.shop_id, o.posting_number, o.status, o.tracking_stage, o.logistics_status,
+      s.name AS shop_name, s.ozon_client_id,
       COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS ozon_api_key, s.api_key_hint
     FROM orders o
     JOIN shops s ON s.id = o.shop_id
     WHERE o.id IN (${ids.map(() => "?").join(",")})
   `, ids) : await mysqlQuery(`
-    SELECT o.id, o.shop_id, o.posting_number, s.name AS shop_name, s.ozon_client_id,
+    SELECT o.id, o.shop_id, o.posting_number, o.status, o.tracking_stage, o.logistics_status,
+      s.name AS shop_name, s.ozon_client_id,
       COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS ozon_api_key, s.api_key_hint
     FROM orders o
     JOIN shops s ON s.id = o.shop_id
@@ -6465,6 +6673,7 @@ export async function shipOrdersMysql(body = {}, userId = null) {
           status: syncResult.posting?.status || "awaiting_deliver",
           tracking_stage: syncResult.posting?.tracking_stage || syncResult.posting?.status || "awaiting_deliver",
           logistics_status: syncResult.posting?.logistics_status || syncResult.posting?.tracking_stage || syncResult.posting?.status || "awaiting_deliver",
+          ozon_available_actions: syncResult.posting?.raw?.available_actions || [],
           tracking_number: syncResult.posting?.tracking_number || order.posting_number || ""
         });
         continue;
@@ -6495,6 +6704,7 @@ export async function shipOrdersMysql(body = {}, userId = null) {
             status: syncResult.posting?.status || "awaiting_deliver",
             tracking_stage: syncResult.posting?.tracking_stage || syncResult.posting?.status || "awaiting_deliver",
             logistics_status: syncResult.posting?.logistics_status || syncResult.posting?.tracking_stage || syncResult.posting?.status || "awaiting_deliver",
+            ozon_available_actions: syncResult.posting?.raw?.available_actions || [],
             tracking_number: syncResult.posting?.tracking_number || order.posting_number || ""
           });
           continue;
@@ -8034,6 +8244,7 @@ export async function backfillOzonFinanceMysql(body = {}, options = {}) {
 
 export async function onlineProductsMysql(query = {}) {
   ensureMysqlCutoverEnabled();
+  await ensureProductNamingSchemaMysql();
   await ensureOnlineProductsPublishedAtSchemaMysql();
   await ensureOzonStockStorageSchemaMysql();
   await repairMissingOnlineProductSkusMysql();
@@ -8089,7 +8300,7 @@ export async function onlineProductsMysql(query = {}) {
         WHEN p.code LIKE 'P-%' THEN p.code
         WHEN p.id IS NOT NULL THEN CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
         ELSE NULL
-      END AS product_code,
+      END AS product_code, p.inventory_number,
       p.name AS product_name
     FROM online_products op
     JOIN shops s ON s.id = op.shop_id
@@ -9531,6 +9742,7 @@ export async function performOnlineProductActionMysql(body = {}, userId = null) 
 
 export async function mappingsMysql(query = {}) {
   ensureMysqlCutoverEnabled();
+  await ensureProductNamingSchemaMysql();
   const paged = String(query.paged || "") === "1";
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
@@ -9557,7 +9769,11 @@ export async function mappingsMysql(query = {}) {
     where.push("DATE(COALESCE(sm.created_at, sm.updated_at)) <= ?");
     params.push(dateTo);
   }
-  if (searchText) {
+  if (searchText && isInventoryIdentifier(searchText)) {
+    const identifierSearch = inventoryIdentifierSearch(searchText);
+    where.push(`p.id IN (${identifierSearch.sql})`);
+    params.push(...identifierSearch.params);
+  } else if (searchText) {
     const like = `%${searchText}%`;
     where.push(`(
       LOWER(COALESCE(p.name, '')) LIKE ?
@@ -9581,7 +9797,7 @@ export async function mappingsMysql(query = {}) {
       CASE
         WHEN p.code LIKE 'P-%' THEN p.code
         ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
-      END AS inventory_id,
+      END AS inventory_id, p.inventory_number,
       pe.name AS person_name,
       op.name AS online_name,
       op.primary_image AS online_primary_image,
@@ -9630,30 +9846,7 @@ export async function mappingsMysql(query = {}) {
   };
 }
 
-async function exactInventoryProductSearchIdsMysql(searchText) {
-  const exact = String(searchText || "").trim();
-  if (!exact || /[\s,，;；]/.test(exact)) return [];
-  const numericId = /^\d+$/.test(exact) ? Number(exact) : 0;
-  const rows = await mysqlQuery(`
-    SELECT DISTINCT exact_matches.product_id
-    FROM (
-      SELECT p.id AS product_id
-      FROM products p
-      WHERE (${numericId > 0 ? "p.id = ? OR" : ""} p.code = ? OR p.selection_id = ?)
-      UNION ALL
-      SELECT sm.product_id
-      FROM sku_mappings sm
-      WHERE sm.active = 1 AND (sm.ozon_sku = ? OR sm.offer_id = ?)
-    ) exact_matches
-    WHERE exact_matches.product_id IS NOT NULL
-    LIMIT 200
-  `, [
-    ...(numericId > 0 ? [numericId] : []),
-    exact,
-    exact,
-    exact,
-    exact
-  ]);
+async function ensureInventoryProductSearchSchemaMysql() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS product_name_aliases (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -9668,6 +9861,12 @@ async function exactInventoryProductSearchIdsMysql(searchText) {
       CONSTRAINT fk_product_name_alias_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   `);
+  await ensureMysqlColumns("products", ["CREATE INDEX idx_products_inventory_search_created ON products (created_at)"]);
+}
+
+async function exactInventoryProductSearchIdsMysql(searchText, mode = "auto") {
+  const { sql, params } = inventoryIdentifierSearch(searchText, mode);
+  const rows = await mysqlQuery(sql, params);
   return rows.map((row) => Number(row.product_id || 0)).filter(Boolean);
 }
 
@@ -9719,11 +9918,13 @@ export async function productsMysql(query = {}) {
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
   const searchText = String(query.query || query.search || "").trim().toLowerCase();
+  const searchMode = ["inventory_id", "name", "sku"].includes(query.searchMode) ? query.searchMode : "auto";
+  const identifierOnly = ["inventory_id", "sku"].includes(searchMode) || (searchMode === "auto" && isInventoryIdentifier(searchText));
   const searchMatchMode = String(query.matchMode || query.match_mode || "").trim().toLowerCase();
   const categoryText = String(query.category || query.category_name || "").trim().toLowerCase();
   const structuredProductName = String(query.productName || query.product_name || "").trim();
   const structuredInventoryCategory = String(query.inventoryCategory || query.inventory_category || "").trim();
-  const structuredVehicleBrand = String(query.vehicleBrand || query.vehicle_brand || "").replace(/\|/g, " ").replace(/\s+/g, " ").trim();
+  const structuredVehicleBrand = normalizeVehicleBrand(query.vehicleBrand || query.vehicle_brand, { strict: false });
   const structuredFitmentType = String(query.fitmentType || query.fitment_type || "").trim();
   const structuredVehicleModels = String(query.vehicleModel || query.vehicle_model || "").split(",").map((item) => item.trim()).filter(Boolean);
   const structuredAccessoryName = String(query.accessoryName || query.accessory_name || "").trim();
@@ -9753,9 +9954,9 @@ export async function productsMysql(query = {}) {
     profit_rate: "profit_rate",
     inventory_value: "inventory_value"
   };
-  const productSortSql = sortSqlMap[sortKey] ? `${sortSqlMap[sortKey]} ${sortDir}, p.id DESC` : "p.id DESC";
+  const productSortSql = sortKey === "inventory_number" ? `p.inventory_number IS NULL ASC, p.inventory_number_category ${sortDir}, p.inventory_number_sequence ${sortDir}, p.id DESC` : sortSqlMap[sortKey] ? `${sortSqlMap[sortKey]} ${sortDir}, p.id DESC` : "p.id DESC";
   const productListFieldsSql = `
-        p.id, p.selection_id, p.code, p.name, p.image_url,
+        p.id, p.selection_id, p.code, p.inventory_number, p.name, p.image_url,
         p.owner_person_id, p.created_by_person_id, p.supplier_id,
         p.purchase_url, p.source_platform, p.shipping_method,
         p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
@@ -9771,10 +9972,10 @@ export async function productsMysql(query = {}) {
   const where = ["p.active = 1", inventoryProductPredicateMysql("p")];
   const params = [];
   const searchTerms = inventoryProductSearchTermsMysql(searchText);
-  const exactSearchProductIds = searchText
-    ? await exactInventoryProductSearchIdsMysql(searchText)
+  const exactSearchProductIds = searchText && searchMode !== "name"
+    ? await exactInventoryProductSearchIdsMysql(searchText, searchMode)
     : [];
-  const structuredSearch = searchText && !exactSearchProductIds.length
+  const structuredSearch = searchText && searchMode === "auto" && !identifierOnly && !exactSearchProductIds.length
     ? await structuredInventoryProductSearchIdsMysql(searchTerms)
     : { ids: [], complete: true };
 
@@ -9844,6 +10045,17 @@ export async function productsMysql(query = {}) {
   } else if (structuredSearch.complete && structuredSearch.ids.length) {
     where.push(`p.id IN (${structuredSearch.ids.map(() => "?").join(", ")})`);
     params.push(...structuredSearch.ids);
+  } else if (searchText && identifierOnly) {
+    where.push("0=1");
+  } else if (searchText && searchMode === "name") {
+    for (const term of searchTerms) {
+      where.push(`(p.name LIKE ? ESCAPE '=' OR EXISTS (
+        SELECT 1 FROM product_name_aliases name_alias
+        WHERE name_alias.product_id = p.id AND name_alias.active = 1 AND name_alias.alias_name LIKE ? ESCAPE '='
+      ))`);
+      const pattern = inventoryNamePattern(term);
+      params.push(pattern, pattern);
+    }
   } else if (searchText) {
     const terms = searchTerms;
     const searchClauses = [];
@@ -9931,7 +10143,7 @@ export async function productsMysql(query = {}) {
         FROM products p
         LEFT JOIN people pe ON pe.id = p.owner_person_id
         ${whereSql}
-        ORDER BY p.id DESC
+        ORDER BY ${productSortSql}
         LIMIT ? OFFSET ?
       `, [...params, pageSize, offset])
     ]);
@@ -10105,7 +10317,6 @@ export async function productsMysql(query = {}) {
     const needsIncomingSort = sortKey === "incoming_stock";
     const needsFbpTransferSort = sortKey === "fbp_transfer_in_transit_qty";
     const needsSalesSort = ["total_sales_quantity", "total_sales_amount", "order_count", "estimated_profit_total", "actual_profit_total", "profit_rate"].includes(sortKey);
-    const needsFbpSort = ["stock", "inventory_value"].includes(sortKey);
     const sortJoins = [];
     if (needsStockSort || needsProcSort) {
       sortJoins.push(`
@@ -10173,23 +10384,6 @@ export async function productsMysql(query = {}) {
         ) fbp_transfer ON fbp_transfer.product_id = p.id
       `);
     }
-    if (needsFbpSort) {
-      sortJoins.push(`
-        LEFT JOIN (
-          SELECT sm.product_id,
-            SUM(COALESCE(stock_snapshot.fbp_stock, 0)) AS fbp_stock
-          FROM sku_mappings sm
-          LEFT JOIN (
-            SELECT shop_id, ozon_sku,
-              SUM(CASE WHEN stock_type = 'fbp_real' THEN present ELSE 0 END) AS fbp_stock
-            FROM ozon_stock_snapshots
-            GROUP BY shop_id, ozon_sku
-          ) stock_snapshot ON stock_snapshot.shop_id = sm.shop_id AND stock_snapshot.ozon_sku = sm.ozon_sku
-          WHERE sm.active = 1
-          GROUP BY sm.product_id
-        ) fbp ON fbp.product_id = p.id
-      `);
-    }
     if (needsSalesSort) {
       sortJoins.push(`
         LEFT JOIN (
@@ -10222,7 +10416,8 @@ export async function productsMysql(query = {}) {
       profit_rate: "CASE WHEN COALESCE(sales.total_sales_amount, 0) > 0 THEN COALESCE(sales.estimated_profit_total, 0) / sales.total_sales_amount ELSE 0 END",
       inventory_value: "(COALESCE(stock.stock, 0) * COALESCE(proc.avg_unit_cost, stock.avg_unit_cost, p.purchase_cost, 0))"
     };
-    const sortedPageRows = await mysqlQuery(`
+    const [sortedPageRows, totalRow] = await Promise.all([
+      mysqlQuery(`
       SELECT p.id
       FROM products p
       LEFT JOIN people pe ON pe.id = p.owner_person_id
@@ -10230,14 +10425,15 @@ export async function productsMysql(query = {}) {
       ${whereSql}
       ORDER BY ${sortExpressions[sortKey]} ${sortDir}, p.id DESC
       LIMIT ? OFFSET ?
-    `, [...params, pageSize, offset]);
-    const pageIds = sortedPageRows.map((row) => Number(row.id || 0)).filter(Boolean);
-    const totalRow = await mysqlQueryOne(`
+      `, [...params, pageSize, offset]),
+      mysqlQueryOne(`
       SELECT COUNT(*) AS total
       FROM products p
       LEFT JOIN people pe ON pe.id = p.owner_person_id
       ${whereSql}
-    `, params);
+      `, params)
+    ]);
+    const pageIds = sortedPageRows.map((row) => Number(row.id || 0)).filter(Boolean);
     if (!pageIds.length) {
       return {
         rows: [],
@@ -10342,14 +10538,10 @@ export async function productsMysql(query = {}) {
       ) skus ON skus.product_id = p.id
       LEFT JOIN (
         SELECT sm.product_id,
-          SUM(COALESCE(stock_snapshot.fbp_stock, 0)) AS fbp_stock
+          SUM(COALESCE(stock_snapshot.present, 0)) AS fbp_stock
         FROM sku_mappings sm
-        LEFT JOIN (
-          SELECT shop_id, ozon_sku,
-            SUM(CASE WHEN stock_type = 'fbp_real' THEN present ELSE 0 END) AS fbp_stock
-          FROM ozon_stock_snapshots
-          GROUP BY shop_id, ozon_sku
-        ) stock_snapshot ON stock_snapshot.shop_id = sm.shop_id AND stock_snapshot.ozon_sku = sm.ozon_sku
+        LEFT JOIN ozon_stock_snapshots stock_snapshot ON stock_snapshot.shop_id = sm.shop_id
+          AND stock_snapshot.ozon_sku = sm.ozon_sku AND stock_snapshot.stock_type = 'fbp_real'
         WHERE sm.active = 1 AND sm.product_id IN (${pagePlaceholders})
         GROUP BY sm.product_id
       ) fbp ON fbp.product_id = p.id
@@ -10572,6 +10764,7 @@ export async function productsMysql(query = {}) {
 
 export async function hiddenProductsMysql(query = {}) {
   ensureMysqlCutoverEnabled();
+  await ensureProductNamingSchemaMysql();
   const paged = String(query.paged || "") === "1";
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
@@ -10593,7 +10786,11 @@ export async function hiddenProductsMysql(query = {}) {
     where.push("EXISTS (SELECT 1 FROM sku_mappings sm_filter WHERE sm_filter.product_id = p.id AND sm_filter.active = 1 AND sm_filter.shop_id = ?)");
     params.push(Number(shopId));
   }
-  if (searchText) {
+  if (searchText && isInventoryIdentifier(searchText)) {
+    const identifierSearch = inventoryIdentifierSearch(searchText);
+    where.push(`p.id IN (${identifierSearch.sql})`);
+    params.push(...identifierSearch.params);
+  } else if (searchText) {
     const like = `%${searchText}%`;
     where.push(`(
       LOWER(COALESCE(p.name, '')) LIKE ?
@@ -10623,7 +10820,7 @@ export async function hiddenProductsMysql(query = {}) {
       CASE
         WHEN p.code LIKE 'P-%' THEN p.code
         ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
-      END AS inventory_id,
+      END AS inventory_id, p.inventory_number,
       CASE WHEN p.active = 0 THEN 'deleted' ELSE 'removed_from_inventory' END AS hidden_reason,
       p.name, p.image_url, p.purchase_url, p.supplier_note, p.source_platform, p.supplier_id, p.shipping_method,
       p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
@@ -10966,7 +11163,7 @@ export async function selectionProductMysql(id, query = {}) {
   const includeDetails = String(query.includeDetails ?? query.include_details ?? "1") !== "0";
   const includeOperations = String(query.includeOperations ?? query.include_operations ?? "1") !== "0";
   const row = await mysqlQueryOne(`
-    SELECT p.id, p.selection_id, p.code,
+    SELECT p.id, p.selection_id, p.code, p.inventory_number,
       CASE
         WHEN p.code LIKE 'P-%' THEN p.code
         ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
@@ -11673,16 +11870,20 @@ async function incrementLogisticsRuleUsageMysqlTx(connection, ruleId) {
 
 }
 
-export async function createProductMysql(body = {}) {
+export async function prepareInventoryProductCreationMysql() {
   ensureMysqlCutoverEnabled();
   await ensureSelectionCreativeSchemaMysql();
   await ensureProductCompositionSchemaMysql();
   await ensureProductNamingSchemaMysql();
+}
+
+export async function createProductMysql(body = {}, transactionConnection = null) {
+  await prepareInventoryProductCreationMysql();
   const structuredNaming = normalizeStructuredNamingMysql(body);
   const name = structuredNaming?.name || String(body.name || "").trim();
   if (!name) throw new Error("Product name is required");
   const exchangeRate = Number(body.exchange_rate || await currentExchangeRateValueMysql() || 11.32);
-  return await withMysqlTransaction(async (connection) => {
+  const create = async (connection) => {
     const shouldCreateProcurement = ["1", "true", "yes"].includes(String(body.create_procurement_request || "").toLowerCase());
     const purchasePlan = shouldCreateProcurement ? normalizePurchasePlanMysql(body) : null;
     const selectionId = body.selection_id || await nextSelectionCodeMysql(connection, "SEL");
@@ -11720,7 +11921,7 @@ export async function createProductMysql(body = {}) {
       body.material || "",
       body.color || "",
       developmentMeta.development_type,
-      developmentMeta.vehicle_brand || body.vehicle_brand || body.vehicleBrand || "",
+      normalizeVehicleBrand(developmentMeta.vehicle_brand || body.vehicle_brand || body.vehicleBrand || "", { strict: false }),
       developmentMeta.vehicle_model || body.vehicle_model || body.vehicleModel || "",
       developmentMeta.vehicle_model_key || normalizeVehicleModelKey(developmentMeta.vehicle_brand || body.vehicle_brand || body.vehicleBrand, developmentMeta.vehicle_model || body.vehicle_model || body.vehicleModel),
       body.selling_points || "",
@@ -11772,7 +11973,8 @@ export async function createProductMysql(body = {}) {
     if (logisticsRuleId) await incrementLogisticsRuleUsageMysqlTx(connection, logisticsRuleId);
     const procurement = await maybeCreateProcurementForProductMysql(connection, productId, body, purchasePlan || normalizePurchasePlanMysql(body));
     return { id: productId, code, procurement_request_id: procurement?.id || null };
-  });
+  };
+  return transactionConnection ? create(transactionConnection) : withMysqlTransaction(create);
 }
 
 export async function addSelectionToInventoryMysql(id) {
@@ -13110,12 +13312,7 @@ export async function removeProductFromInventoryMysql(id) {
   const productId = Number(id);
   const existing = await mysqlQueryOne("SELECT id FROM products WHERE id = ? AND active = 1", [productId]);
   if (!existing) throw new Error("产品不存在或已隐藏");
-  await mysqlExecute(`
-    UPDATE products
-    SET product_type = 'selection', selection_status = 'draft', updated_at = CURRENT_TIMESTAMP
-    WHERE id = ? AND active = 1
-  `, [productId]);
-  invalidateMasterDataCache();
+  await deleteProductMysql(productId);
   return { ok: true, id: productId };
 }
 
@@ -13344,6 +13541,7 @@ export async function inboundRecordsMysql(query = {}) {
   const { whereSql, params } = inboundRecordsWhereMysql(query);
   const selectSql = `
     SELECT ir.*, p.code AS product_code, p.name AS product_name, p.image_url AS product_image_url,
+      p.inventory_number, p.inventory_category,
       pe.name AS person_name, approver.name AS approved_by_person_name, po.order_no AS purchase_order_no, po.purchased_at,
       COALESCE(direct_request.source_type, order_request.source_type, p.source_platform, 'other') AS source_type,
       COALESCE(direct_supplier.name, order_request.supplier_names, product_supplier.name, '') AS supplier_name,
@@ -13378,7 +13576,7 @@ export async function inboundRecordsMysql(query = {}) {
   if (!paged) {
     return await mysqlQuery(`
       ${selectSql}
-      ORDER BY COALESCE(po.purchased_at, ir.created_at) DESC, ir.id DESC
+      ORDER BY DATE(COALESCE(po.purchased_at, ir.created_at)) DESC, p.inventory_category ASC, COALESCE(po.purchased_at, ir.created_at) DESC, ir.id DESC
     `, params);
   }
 
@@ -13394,7 +13592,7 @@ export async function inboundRecordsMysql(query = {}) {
     `, params),
     mysqlQuery(`
       ${selectSql}
-      ORDER BY COALESCE(po.purchased_at, ir.created_at) DESC, ir.id DESC
+      ORDER BY DATE(COALESCE(po.purchased_at, ir.created_at)) DESC, p.inventory_category ASC, COALESCE(po.purchased_at, ir.created_at) DESC, ir.id DESC
       LIMIT ? OFFSET ?
     `, [...params, pageSize, offset])
   ]);
@@ -13410,6 +13608,7 @@ export async function inboundRecordsMysql(query = {}) {
 
 function inboundRecordsWhereMysql(query = {}) {
   const status = String(query.status || "all");
+  const productId = nullableInteger(query.productId || query.product_id);
   const searchText = String(query.query || query.search || "").trim();
   const demandType = String(query.demandType || query.demand_type || "all");
   const personId = String(query.personId || query.person_id || "all");
@@ -13417,7 +13616,7 @@ function inboundRecordsWhereMysql(query = {}) {
   const sourceType = String(query.sourceType || query.source_type || "all").trim().toLowerCase();
   const inventoryCategory = String(query.inventoryCategory || query.inventory_category || "").trim();
   const productName = String(query.productName || query.product_name || "").trim();
-  const vehicleBrand = String(query.vehicleBrand || query.vehicle_brand || "").replace(/\|/g, " ").replace(/\s+/g, " ").trim();
+  const vehicleBrand = normalizeVehicleBrand(query.vehicleBrand || query.vehicle_brand, { strict: false });
   const vehicleModels = String(query.vehicleModel || query.vehicle_model || "").split(",").map((item) => item.trim()).filter(Boolean);
   const accessoryName = String(query.accessoryName || query.accessory_name || "").trim();
   const color = String(query.color || "").trim();
@@ -13426,6 +13625,10 @@ function inboundRecordsWhereMysql(query = {}) {
   const params = [];
   const where = [];
 
+  if (productId) {
+    where.push("ir.product_id = ?");
+    params.push(productId);
+  }
   if (status !== "all") {
     where.push("ir.status = ?");
     params.push(status);
@@ -13579,7 +13782,7 @@ function procurementInventoryWarningJoinsMysql() {
 function procurementInventoryWarningStockMysql() {
   return `CASE WHEN COALESCE(warning_component_supply.component_count, 0) > 0
     THEN GREATEST(COALESCE(warning_component_supply.local_stock, 0), 0)
-    ELSE COALESCE(warning_stock.stock, 0) END`;
+    ELSE GREATEST(COALESCE(warning_stock.stock, 0), 0) END`;
 }
 
 function procurementInventoryWarningIncomingMysql() {
@@ -13679,7 +13882,7 @@ async function ensurePendingOrderProcurementRequestsMysql() {
         SET request.status='cancelled', request.approval_status='cancelled', request.cancelled_at=CURRENT_TIMESTAMP,
           request.note=CONCAT(COALESCE(request.note,''),'；系统按最新现货、在途和优先级重新计算')
         WHERE request.demand_type='real_order' AND request.status='suggested'
-          AND (${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")})
+          AND NOT (${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")})
       `);
       await connection.execute(`
         UPDATE order_item_procurement_marks marks
@@ -13692,43 +13895,25 @@ async function ensurePendingOrderProcurementRequestsMysql() {
       if (!rows.length) return { created_count: 0, marked_count: 0, unresolved_count: 0 };
 
       const personId = await resolvePersonIdOrFirstMysql(null, connection);
-      const remainingStockByProduct = new Map();
-      const remainingIncomingByProduct = new Map();
       let createdCount = 0;
       let markedCount = 0;
       let unresolvedCount = 0;
       for (const row of rows) {
         const productId = Number(row.product_id);
         const quantity = Math.max(1, Number(row.quantity || 1));
-        if (!remainingStockByProduct.has(productId)) {
-          const currentStock = Number(row.current_stock || 0);
-          const incomingStock = Math.max(0, Number(row.incoming_stock || 0));
-          remainingStockByProduct.set(productId, Math.max(0, currentStock));
-          remainingIncomingByProduct.set(productId, Math.max(0, incomingStock - Math.max(0, -currentStock)));
-        }
-        const remainingStock = Number(remainingStockByProduct.get(productId) || 0);
-        const remainingIncoming = Number(remainingIncomingByProduct.get(productId) || 0);
+        const remainingStock = Math.max(0, Number(row.current_stock || 0));
+        const remainingIncoming = Math.max(0, Number(row.incoming_stock || 0));
         let handlingType = "stock_available";
         let note = `库存可满足：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
 
-        if (remainingStock >= quantity) {
-          remainingStockByProduct.set(productId, remainingStock - quantity);
-        } else if (remainingStock + remainingIncoming >= quantity) {
-          remainingStockByProduct.set(productId, 0);
-          remainingIncomingByProduct.set(productId, remainingIncoming - (quantity - remainingStock));
+        if (remainingStock < quantity && remainingStock + remainingIncoming >= quantity) {
           handlingType = "incoming_available";
           note = `采购在途可满足：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
-        } else {
+        } else if (remainingStock + remainingIncoming < quantity) {
           const requestQuantity = Math.max(1, quantity - remainingStock - remainingIncoming);
           const amount = Number(row.purchase_cost || 0) * requestQuantity;
-          if (!(amount > 0)) {
-            unresolvedCount += 1;
-            continue;
-          }
-          remainingStockByProduct.set(productId, 0);
-          remainingIncomingByProduct.set(productId, 0);
           handlingType = "procurement_request";
-          note = `系统按真实订单缺口自动生成：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
+          note = `系统按真实订单缺口自动生成：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}${amount > 0 ? "" : "；采购金额待补"}`;
           await connection.execute(`
             INSERT INTO procurement_requests
             (product_id, person_id, quantity, amount, shipping_amount, purchase_url, approval_status, status,
@@ -13770,47 +13955,13 @@ export async function refreshProcurementDemandMysql() {
   return { ok: true, orders, inventory };
 }
 
-async function reconcileFailedOrderProcurementSubmissionsMysql() {
-  return await withMysqlTransaction(async (connection) => {
-    const [failedRequests] = await connection.query(`
-      SELECT id, source_order_item_id, product_id
-      FROM procurement_requests
-      WHERE purchase_order_id IS NULL
-        AND status = 'submitted'
-      FOR UPDATE
-    `);
-    if (!failedRequests.length) return { repaired_count: 0 };
-
-    const ids = failedRequests.map((row) => Number(row.id));
-    const placeholders = ids.map(() => "?").join(",");
-    await connection.execute(`
-      UPDATE procurement_requests
-      SET status = 'suggested', approval_status = 'suggested',
-        note = CONCAT(COALESCE(note, ''), '；未形成采购单或待入库记录，已恢复为待采购')
-      WHERE id IN (${placeholders})
-    `, ids);
-    for (const request of failedRequests.filter((request) => Number(request.source_order_item_id || 0))) {
-      await connection.execute(`
-        UPDATE order_item_procurement_marks
-        SET status = 'pending', updated_at = CURRENT_TIMESTAMP
-        WHERE order_item_id = ? AND product_id = ?
-          AND handling_type = 'procurement_request'
-      `, [Number(request.source_order_item_id), Number(request.product_id)]);
-    }
-    return { repaired_count: failedRequests.length };
-  });
-}
-
 export async function procurementRequestsMysql(query = {}) {
   ensureMysqlCutoverEnabled();
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementFlexibleRequestSchemaMysql();
   await ensureStockLocationSchemaMysql();
-  const groupedFirstPage = String(query.grouped || "") === "1"
-    && Math.max(Number(query.page || 1), 1) === 1
-    && !String(query.query || query.search || "").trim();
-  if (groupedFirstPage) await reconcileFailedOrderProcurementSubmissionsMysql();
-  if (groupedFirstPage) await reconcileTransportedProcurementBacklogMysql();
+  await ensureFbpTransferRecordsSchemaMysql();
+  // Listing must not infer a receipt from transport status.
   const compact = String(query.compact || "") === "1";
   const requestColumns = compact
     ? `pr.id, pr.request_group_no, pr.product_id, pr.raw_name, pr.raw_spec, pr.binding_status,
@@ -13844,14 +13995,14 @@ export async function procurementRequestsMysql(query = {}) {
     ? `AND ${column} IN (${groupedProductPlaceholders})`
     : "";
   const groupedQueryParams = groupedPage
-    ? Array.from({ length: 8 }, () => groupedPage.productIds).flat()
+    ? Array.from({ length: 11 }, () => groupedPage.productIds).flat()
     : [];
   const rows = await mysqlQuery(`
     SELECT ${requestColumns},
-      CASE
-        WHEN p.code LIKE 'P-%' THEN p.code
-        ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
-      END AS product_code,
+      COALESCE(NULLIF(p.inventory_number, ''),
+        CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END
+      ) AS product_code,
+      p.inventory_number,
       COALESCE(NULLIF(p.name, ''), NULLIF(pr.raw_name, ''), '未命名采购商品') AS product_name,
       ${compact ? "''" : "p.image_url"} AS product_image_url, COALESCE(p.alert_stock, 0) AS alert_stock,
       COALESCE(stock.stock, 0) AS stock,
@@ -13861,6 +14012,10 @@ export async function procurementRequestsMysql(query = {}) {
       COALESCE(stock.fbp_transfer_outbound_quantity, 0) AS historical_fbp_transfer_outbound_quantity,
       COALESCE(stock.other_quantity, 0) AS historical_other_inventory_quantity,
       COALESCE(incoming.incoming_stock, 0) AS incoming_stock,
+      (SELECT COALESCE(SUM(GREATEST(ftr.quantity - COALESCE(ftr.listed_quantity, 0), 0)), 0)
+        FROM fbp_transfer_records ftr
+        WHERE ftr.product_id = p.id AND ftr.status IN ('sent', 'in_transit', 'received')
+      ) AS fbp_transfer_in_transit_qty,
       COALESCE(component_supply.component_count, 0) AS component_count,
       COALESCE(component_supply.local_stock, 0) AS component_local_stock,
       COALESCE(component_supply.incoming_stock, 0) AS component_incoming_stock,
@@ -13875,6 +14030,7 @@ export async function procurementRequestsMysql(query = {}) {
       COALESCE(purchase_history.historical_avg_unit_cost, 0) AS historical_avg_unit_cost,
       COALESCE(purchase_history.historical_purchase_count, 0) AS historical_purchase_count,
       COALESCE(purchase_history.historical_purchased_quantity, 0) AS historical_purchased_quantity,
+      COALESCE(purchase_history.historical_purchase_amount, 0) AS historical_purchase_amount,
       COALESCE(outbound_history.historical_order_count, 0) AS historical_order_count,
       COALESCE(outbound_history.historical_outbound_quantity, 0) AS historical_outbound_quantity,
       COALESCE(order_history.historical_total_order_count, 0) AS historical_total_order_count,
@@ -13913,6 +14069,7 @@ export async function procurementRequestsMysql(query = {}) {
       SELECT product_id, SUM(quantity) AS order_demand_quantity
       FROM procurement_requests
       WHERE status IN ('pending','suggested','submitted') AND demand_type='real_order'
+        ${groupedProductFilter("product_id")}
       GROUP BY product_id
     ) active_real_demand ON active_real_demand.product_id=pr.product_id
     LEFT JOIN online_products source_online_product
@@ -13949,11 +14106,11 @@ export async function procurementRequestsMysql(query = {}) {
       FROM product_components pc
       JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.active = 1
       LEFT JOIN (
-        SELECT product_id, SUM(quantity_delta) AS local_stock
+        SELECT inventory_movements.product_id, SUM(inventory_movements.quantity_delta) AS local_stock
         FROM inventory_movements
         WHERE status = 'posted'
           AND ${localStockLocationPredicateMysql()}
-        GROUP BY product_id
+        GROUP BY inventory_movements.product_id
       ) component_stock ON component_stock.product_id = pc.component_product_id
       LEFT JOIN (
         SELECT product_id, SUM(quantity) AS incoming_stock
@@ -13961,6 +14118,8 @@ export async function procurementRequestsMysql(query = {}) {
         WHERE status = 'pending_arrival'
         GROUP BY product_id
       ) component_incoming ON component_incoming.product_id = pc.component_product_id
+      WHERE ${compact ? "0 = 1" : "1 = 1"}
+        ${groupedProductFilter("pc.product_id")}
       GROUP BY pc.product_id
     ) component_supply ON component_supply.product_id = p.id
     LEFT JOIN (
@@ -13987,11 +14146,13 @@ export async function procurementRequestsMysql(query = {}) {
         SUM(CASE WHEN stock_type = 'fbp_real' THEN available ELSE 0 END) AS fbp_available
       FROM ozon_stock_snapshots
       WHERE stock_type = 'fbp_real'
+        ${groupedProductFilter("product_id")}
       GROUP BY product_id
     ) fbp_stock ON fbp_stock.product_id = p.id
     LEFT JOIN (
       SELECT poi.product_id,
         SUM(poi.amount) / NULLIF(SUM(COALESCE(NULLIF(poi.actual_quantity, 0), poi.requested_quantity)), 0) AS historical_avg_unit_cost,
+        SUM(poi.amount) AS historical_purchase_amount,
         COUNT(*) AS historical_purchase_count,
         SUM(COALESCE(NULLIF(poi.actual_quantity, 0), poi.requested_quantity)) AS historical_purchased_quantity
       FROM purchase_order_items poi
@@ -14050,6 +14211,39 @@ export async function procurementRequestsMysql(query = {}) {
       ? rows
       : rows.filter((row) => String(row.binding_status || (row.product_id ? "bound" : "unbound")) === bindingStatus);
     return filterProcurementRequestsMysql(scopedRows, query);
+  }
+  // The full coverage audit joins orders, SKU mappings and raw Ozon payloads.
+  // The workbench opens that audit on demand, so do not make the table's first
+  // page wait for it.
+  const deferCoverage = String(query.deferCoverage || "") === "1";
+  const coverage = deferCoverage
+    ? new Map()
+    : await orderProcurementCoverageMysql({ productIds: groupedPage?.productIds || [] });
+  const operationalByProduct = new Map();
+  const historicalIncomingByProduct = new Map();
+  const historicalMissingByProduct = new Map();
+  for (const order of coverage.values()) {
+    if (order.stock_location === 'FBP') continue;
+    for (const item of order.items) {
+      if (order.needs_fulfillment) operationalByProduct.set(item.product_id,
+        (operationalByProduct.get(item.product_id) || 0) + item.shortage_quantity);
+      if (order.entered_transport) historicalIncomingByProduct.set(item.product_id,
+        (historicalIncomingByProduct.get(item.product_id) || 0) + item.missing_receipt_quantity);
+      if (order.entered_transport && (item.missing_record_quantity > 0 || order.missing_amount)) {
+        historicalMissingByProduct.set(item.product_id,
+          (historicalMissingByProduct.get(item.product_id) || 0) + item.missing_record_quantity);
+      }
+    }
+  }
+  for (const row of rows) {
+    // The compact workbench defers the full coverage audit. Preserve null here
+    // so the grouped decision falls back to current stock/in-transit quantities
+    // instead of treating every real-order shortage as zero.
+    row.operational_shortage = deferCoverage
+      ? null
+      : operationalByProduct.get(Number(row.product_id)) || 0;
+    row.historical_purchase_record_missing_quantity = historicalMissingByProduct.get(Number(row.product_id)) || 0;
+    row.incoming_stock = Math.max(0, Number(row.incoming_stock || 0) - (historicalIncomingByProduct.get(Number(row.product_id)) || 0));
   }
   const grouped = groupProcurementRequestsMysql(rows, { ...query, page: groupedPage.page, pageSize: groupedPage.pageSize });
   const negativeProductRows = grouped.rows.filter((row) => Number(row.stock || 0) < 0);
@@ -14131,7 +14325,7 @@ async function procurementGroupedPageIdsMysql(query = {}) {
   const sourceType = String(query.sourceType || query.source_type || "all").trim().toLowerCase();
   const inventoryCategory = String(query.inventoryCategory || query.inventory_category || "").trim();
   const productName = String(query.productName || query.product_name || "").trim();
-  const vehicleBrand = String(query.vehicleBrand || query.vehicle_brand || "").replace(/\|/g, " ").replace(/\s+/g, " ").trim();
+  const vehicleBrand = normalizeVehicleBrand(query.vehicleBrand || query.vehicle_brand, { strict: false });
   const vehicleModels = String(query.vehicleModel || query.vehicle_model || "").split(",").map((item) => item.trim()).filter(Boolean);
   const accessoryName = String(query.accessoryName || query.accessory_name || "").trim();
   const color = String(query.color || "").trim();
@@ -14216,6 +14410,8 @@ async function procurementGroupedPageIdsMysql(query = {}) {
     where.push("pr.demand_type = 'real_order'");
   } else if (["advance_stock", "inventory_warning"].includes(demandType)) {
     where.push("pr.demand_type = 'advance_stock'");
+  } else if (demandType === "warehouse_request") {
+    where.push("pr.demand_type = 'warehouse_request'");
   }
   const warningJoins = "";
   const groupedSql = `
@@ -14230,13 +14426,20 @@ async function procurementGroupedPageIdsMysql(query = {}) {
     WHERE ${where.join(" AND ")}
     GROUP BY pr.product_id
   `;
-  const idRows = await mysqlQuery(
-    `${groupedSql} ORDER BY latest_created_at DESC, product_id DESC`,
-    params
-  );
+  const [idRows, countRows] = await Promise.all([
+    mysqlQuery(
+      `${groupedSql} ORDER BY latest_created_at DESC, product_id DESC LIMIT ? OFFSET ?`,
+      [...params, pageSize, (page - 1) * pageSize]
+    ),
+    mysqlQuery(
+      `SELECT COUNT(*) AS total FROM (${groupedSql}) grouped_procurement`,
+      params
+    )
+  ]);
+  const productIds = idRows.map((row) => Number(row.product_id || 0)).filter(Boolean);
   return {
-    productIds: idRows.map((row) => Number(row.product_id || 0)).filter(Boolean),
-    total: idRows.length,
+    productIds,
+    total: Number(countRows[0]?.total || 0),
     page,
     pageSize
   };
@@ -14673,10 +14876,34 @@ function orderOutboundSyncScopeMysql(options = {}) {
   };
 }
 
+export async function revokeShippedCancellationReturnsMysql(orderItemId) {
+  return await withMysqlTransaction(async (connection) => {
+    const order = await mysqlConnectionQueryOne(connection, `
+      SELECT o.id FROM orders o JOIN order_items oi ON oi.order_id = o.id
+      WHERE oi.id = ? AND ${orderTransportEvidenceSql('o')}
+    `, [Number(orderItemId)]);
+    if (!order) return 0;
+    const [returns] = await connection.query(`SELECT id, product_id FROM inventory_movements
+      WHERE related_order_item_id = ? AND status = 'posted' AND quantity_delta > 0
+        AND ${automaticCancellationReturnSql} FOR UPDATE`, [Number(orderItemId)]);
+    if (!returns.length) return 0;
+    await connection.execute(`UPDATE inventory_movements SET status = 'void',
+      note = CONCAT(COALESCE(note, ''), ' | 运输后取消不返仓：撤销自动库存回补，保留原始出库')
+      WHERE id IN (${returns.map(() => '?').join(',')}) AND status = 'posted'`, returns.map(row => row.id));
+    for (const productId of new Set(returns.map(row => Number(row.product_id)))) {
+      await rebuildInventoryCurrentForProductMysql(connection, productId);
+    }
+    invalidateOrderProcurementCoverage();
+    invalidateMasterDataCache();
+    return returns.length;
+  });
+}
+
 async function syncOutboundForOpenOrdersMysql(options = {}) {
   const scope = orderOutboundSyncScopeMysql(options);
   const cancelledRows = options.open_only ? [] : await mysqlQuery(`
     SELECT oi.id AS order_item_id, oi.quantity, o.posting_number, o.shop_id,
+      ${orderTransportEvidenceSql('o')} AS entered_transport,
       o.tracking_number,
       COALESCE(osh.warehouse_name, JSON_UNQUOTE(JSON_EXTRACT(raw.raw_json, '$.delivery_method.warehouse'))) AS warehouse_name,
       COALESCE(osh.tpl_provider, JSON_UNQUOTE(JSON_EXTRACT(raw.raw_json, '$.delivery_method.tpl_provider'))) AS logistics_channel,
@@ -14708,10 +14935,15 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
        ${scope.sql}
   `, scope.params);
   for (const row of cancelledRows) {
+    if (Number(row.entered_transport)) {
+      await revokeShippedCancellationReturnsMysql(row.order_item_id);
+      continue;
+    }
     const outboundMovements = await mysqlQuery(`
       SELECT id, product_id, shop_id, sku_mapping_id, owner_person_id, quantity_delta, unit_cost, status, stock_location, stock_location_source
       FROM inventory_movements
       WHERE related_order_item_id = ? AND source_type = 'order_outbound'
+        AND status = 'posted' AND quantity_delta < 0
     `, [row.order_item_id]);
     if (!outboundMovements.length) continue;
     const resolvedStockLocation = resolveOrderStockLocationMysql(row);
@@ -14730,6 +14962,7 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
         stock_location_source = ?,
         note = 'Cancelled order outbound, restored by return movement'
       WHERE related_order_item_id = ? AND source_type = 'order_outbound'
+        AND status = 'posted' AND quantity_delta < 0
     `, [resolvedStockLocation.stockLocation, resolvedStockLocation.stockLocationSource, row.order_item_id]);
     for (const outboundMovement of outboundMovements) {
       const restoreProductId = outboundMovement.product_id || row.product_id;
@@ -14820,7 +15053,7 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
     LEFT JOIN products p ON p.id = sm.product_id
     WHERE LOWER(o.status) NOT LIKE '%cancel%'
       AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%'
-      ${options.open_only ? `AND NOT (${orderStatusSqlMysql("delivered")})` : ""}
+      ${options.open_only ? `AND (${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")}) AND NOT (${orderStatusSqlMysql("cancelled")})` : ""}
       ${scope.sql}
   `, scope.params);
   let deducted = 0;
@@ -14850,6 +15083,7 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
       WHERE related_order_item_id = ? AND source_type = 'order_outbound'
     `, [row.id]);
     if (existingOutboundMovements.length) {
+      if (isOrderInTransportMysql({ status: row.order_status, tracking_stage: row.tracking_stage })) continue;
       const desiredMovements = await desiredProductInventoryMovementRowsMysql({
         product_id: row.product_id,
         quantity_delta: -Math.abs(Number(row.quantity || 1)),
@@ -15217,7 +15451,25 @@ export async function procurementProductOrderHistoryMysql(query = {}) {
       LIMIT ? OFFSET ?
     `, [productId, pageSize, offset])
   ]);
+  const operationalCoverage = await orderProcurementCoverageMysql();
   const normalizedRows = rows.map((row) => {
+      const orderCoverage = operationalCoverage.get(Number(row.order_id));
+      const coverage = orderCoverage?.items.find(item => item.order_item_id === Number(row.order_item_id) && item.product_id === productId);
+      if (coverage) {
+        const historicalMissing = orderCoverage.entered_transport && (coverage.missing_record_quantity > 0 || orderCoverage.missing_amount);
+        const shortage = orderCoverage.needs_fulfillment ? coverage.shortage_quantity : coverage.missing_record_quantity;
+        return { ...row, quantity: coverage.quantity, missing_purchase_quantity: coverage.missing_purchase_quantity,
+          missing_receipt_quantity: coverage.missing_receipt_quantity, missing_amount: coverage.missing_amount,
+          is_cancelled: !orderCoverage.entered_transport && Boolean(row.is_cancelled || row.is_returned || row.is_rejected),
+          procurement_priority: orderCoverage.needs_fulfillment && shortage > 0 ? 'P0' : historicalMissing ? 'P1' : 'normal',
+          shortage_quantity: shortage, coverage_in_transit_quantity: coverage.incoming_quantity,
+          coverage_completed_quantity: Math.max(0, coverage.quantity - shortage - coverage.incoming_quantity),
+          coverage_bucket: shortage > 0 ? 'shortage' : coverage.incoming_quantity > 0 ? 'in_transit' : 'covered',
+          procurement_covered: shortage <= 0 && !historicalMissing,
+          advanced_without_purchase: Boolean(historicalMissing),
+          procurement_coverage_label: orderCoverage.missing_amount ? '采购金额待补' : historicalMissing ? '历史来源记录待核，不新增采购需求' : '按本订单分配数量计算'
+        };
+      }
       const handlingType = String(row.handling_type || "");
       const quantity = Number(row.quantity || 0);
       const inactive = Boolean(row.is_cancelled || row.is_returned);
@@ -15802,12 +16054,10 @@ async function reconcileTransportedOrderProcurementMysql(orderId) {
       `, [historicalUnitCost, actualUnitCost, Number(request.id)]);
       continue;
     }
-    await directInboundProcurementRequestsMysql({
-      request_ids: [Number(request.id)],
-      note: "订单进入运输状态，系统自动确认采购并入库",
-      anomaly_reason: request.price_exception_reason || null,
-      auto_completed: true
-    });
+    await mysqlExecute(`UPDATE procurement_requests
+      SET automation_exception_code = 'transported_source_needs_review',
+        automation_exception_message = '订单已发货，请核对采购或库存来源；系统不会自动确认收货', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?`, [Number(request.id)]);
   }
 }
 
@@ -16049,6 +16299,8 @@ async function upsertPostingMysql(shop, posting) {
   }
   await accrueDeliveredItemsMysql(orderId);
   if (isOrderInTransportMysql(posting)) {
+    await mysqlExecute("DELETE FROM order_package_label_cache WHERE order_id = ?", [orderId]);
+    clearOrderPackageLabelPrefetchTimerMysql(orderId);
     try {
       await reconcileTransportedOrderProcurementMysql(orderId);
     } catch (error) {
@@ -17957,6 +18209,8 @@ export async function applyHistoricalProfitReviewActionMysql(body = {}, userId =
 
 async function upsertInboundInventoryMovementMysql(connection, inboundId, body = {}) {
   const sourceRef = `inbound_${inboundId}`;
+  const audited = await mysqlConnectionQueryOne(connection, 'SELECT note FROM inbound_records WHERE id = ?', [inboundId]);
+  if (/对账 #\d+/.test(audited?.note || '')) throw new Error('该入库已有对账记录，请通过“采购与库存对账”纠正，不能覆盖原库存流水');
   const existingMovement = await mysqlConnectionQueryOne(connection, `
     SELECT id, product_id FROM inventory_movements
     WHERE source_type = 'purchase_inbound' AND source_ref = ?
@@ -17995,6 +18249,8 @@ async function upsertInboundInventoryMovementMysql(connection, inboundId, body =
 }
 
 async function deleteInboundInventoryMovementMysql(connection, inboundId, productId) {
+  const audited = await mysqlConnectionQueryOne(connection, 'SELECT note FROM inbound_records WHERE id = ?', [inboundId]);
+  if (/对账 #\d+/.test(audited?.note || '')) throw new Error('该采购入库已有对账记录，请通过“采购与库存对账”纠正数量，不能删除历史流水');
   await connection.execute(`
     DELETE FROM inventory_movements
     WHERE source_type = 'purchase_inbound' AND source_ref = ?
@@ -18506,7 +18762,7 @@ export async function createProcurementRequestMysql(body = {}, sessionPersonId =
       const rawName = String(item.raw_name || item.name || "").trim();
       if (!productId && !rawName) throw new Error("采购商品名称和库存商品至少填写一项");
       if (!(Number(item.quantity || 0) > 0)) throw new Error("采购数量（quantity）必须大于 0");
-      if (!(Number(item.amount || 0) > 0)) throw new Error("采购金额（amount）必须大于 0；请填写实际货款后再提交采购");
+      if (Number(item.amount || 0) < 0) throw new Error("采购金额不能为负数；未知金额可稍后补齐");
       const result = await connection.execute(`
         INSERT INTO procurement_requests
         (request_group_no, product_id, raw_name, raw_spec, binding_status, person_id, created_by_person_id,
@@ -18528,6 +18784,44 @@ export async function createProcurementRequestMysql(body = {}, sessionPersonId =
       ids.push(Number(result[0].insertId));
     }
     return { id: ids[0], ids, request_group_no: groupNo };
+  });
+}
+
+const WAREHOUSE_PROCUREMENT_REASON_CODES = new Set([
+  "accessory_shortage", "hot_product_replenishment", "shipping_shortage",
+  "safety_stock_shortage", "seasonal_replenishment", "other"
+]);
+
+export async function createWarehouseProcurementRequestsMysql(body = {}, sessionPersonId = null) {
+  ensureMysqlCutoverEnabled();
+  await ensureProcurementRequestTimestampSchemaMysql();
+  await ensureProcurementFlexibleRequestSchemaMysql();
+  const personId = await requireSessionPersonIdMysql(sessionPersonId);
+  const items = Array.isArray(body.items) ? body.items : [];
+  if (!items.length) throw new Error("请至少选择一个库存商品");
+  const groupNo = procurementRequestGroupNoMysql();
+  return await withMysqlTransaction(async (connection) => {
+    const ids = [];
+    for (const item of items) {
+      const productId = nullableInteger(item.product_id);
+      const quantity = Number(item.quantity || 0);
+      const reasonCode = String(item.reason_code || "").trim();
+      const reasonNote = String(item.reason_note || "").trim();
+      if (!productId) throw new Error("仓库采购申请必须关联库存商品");
+      if (!(quantity > 0) || !Number.isInteger(quantity)) throw new Error("建议采购数量必须是大于 0 的整数");
+      if (!WAREHOUSE_PROCUREMENT_REASON_CODES.has(reasonCode)) throw new Error("请选择有效的申请原因");
+      if (reasonCode === "other" && !reasonNote) throw new Error("选择其他原因时，请填写具体原因");
+      const [result] = await connection.execute(`
+        INSERT INTO procurement_requests
+        (request_group_no, product_id, binding_status, person_id, created_by_person_id,
+          quantity, amount, shipping_amount, approval_status, status, note, urgency,
+          source_type, demand_type, request_reason_code, request_reason_note)
+        VALUES (?, ?, 'bound', ?, ?, ?, 0, 0, 'submitted', 'submitted', '', 'normal',
+          'warehouse', 'warehouse_request', ?, ?)
+      `, [groupNo, productId, personId, personId, quantity, reasonCode, reasonNote || null]);
+      ids.push(Number(result.insertId));
+    }
+    return { ok: true, ids, request_group_no: groupNo };
   });
 }
 
@@ -18769,6 +19063,7 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
   const query = connection
     ? (sql, params) => connection.query(sql, params).then(([rows]) => rows)
     : mysqlQuery;
+  const coverage = await orderProcurementCoverageMysql();
   const rows = await query(`
     WITH source_products AS (
       SELECT DISTINCT sm.product_id
@@ -18889,7 +19184,7 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
         GROUP BY sales_mapping.product_id
       ) sales ON sales.product_id = p.id
       WHERE ${allOrders
-        ? orderStatusSqlMysql("pending_purchase")
+        ? orderStatusSqlMysql("pending_purchase", coverage)
         : `(${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")})`}
     )
     SELECT mi.*,
@@ -18920,7 +19215,12 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
       )
     ORDER BY mi.product_id, mi.ordered_at ASC, mi.order_id, mi.order_item_id
   `, allOrders ? [] : (includeHandledSourceOrder ? [Number(orderId), Number(orderId)] : [Number(orderId)]));
-  return rows;
+  return rows.filter(row => coverage.get(Number(row.order_id))?.stock_location !== 'FBP').map(row => {
+    const item = coverage.get(Number(row.order_id))?.items.find(item => item.order_item_id === Number(row.order_item_id) && item.product_id === Number(row.product_id));
+    return item ? { ...row, ledger_stock: row.current_stock, current_stock: item.stock_quantity,
+      incoming_stock: item.incoming_quantity, operational_shortage: item.shortage_quantity,
+      already_handled: item.shortage_quantity <= 0 ? 1 : 0 } : row;
+  });
 }
 
 async function orderProcurementMissingItemsMysql(orderId) {
@@ -19421,16 +19721,17 @@ function summarizeOrderProcurementCandidatesMysql(rows = [], missingItems = [], 
         source_type: row.source_platform || "1688",
         supplier_id: row.supplier_id || null,
         total_quantity: 0,
-        ledger_stock: Number(row.current_stock || 0),
-        current_stock: Math.max(0, Number(row.current_stock || 0)),
-        stock_debt: Math.max(0, -Number(row.current_stock || 0)),
-        incoming_stock: Number(row.incoming_stock || 0),
+        ledger_stock: Number(row.ledger_stock ?? row.current_stock ?? 0),
+        current_stock: 0,
+        stock_debt: Math.max(0, -Number(row.ledger_stock ?? row.current_stock ?? 0)),
+        incoming_stock: 0,
         recent_7d_qty: Number(row.recent_7d_qty || 0),
         recent_30d_qty: Number(row.recent_30d_qty || 0),
         week1_qty: Number(row.week1_qty || 0),
         week2_qty: Number(row.week2_qty || 0),
         week3_qty: Number(row.week3_qty || 0),
         shortage_quantity: 0,
+        operational_shortage_quantity: 0,
         order_count: 0,
         sku_count: 0,
         estimated_amount: 0,
@@ -19444,6 +19745,9 @@ function summarizeOrderProcurementCandidatesMysql(rows = [], missingItems = [], 
     const target = grouped.get(productId);
     const quantity = Math.max(1, Number(row.quantity || 1));
     target.total_quantity += quantity;
+    target.operational_shortage_quantity += Number(row.operational_shortage ?? Math.max(0, quantity - Number(row.current_stock || 0) - Number(row.incoming_stock || 0)));
+    target.current_stock += Math.max(0, Number(row.current_stock || 0));
+    target.incoming_stock += Math.max(0, Number(row.incoming_stock || 0));
     target.estimated_amount += Number(row.purchase_cost || 0) * quantity;
     target.estimated_shipping += Number(row.domestic_shipping || 0) * quantity;
     target.orders.add(Number(row.order_id));
@@ -19463,7 +19767,7 @@ function summarizeOrderProcurementCandidatesMysql(rows = [], missingItems = [], 
     });
   }
   for (const item of grouped.values()) {
-    item.shortage_quantity = Math.max(0, Number(item.total_quantity || 0) - Number(item.current_stock || 0) - Number(item.incoming_stock || 0));
+    item.shortage_quantity = Math.max(0, item.operational_shortage_quantity);
     const recent7d = Number(item.recent_7d_qty || 0);
     const recent30d = Number(item.recent_30d_qty || 0);
     const week1 = Number(item.week1_qty || 0);
@@ -19526,10 +19830,7 @@ function summarizeOrderProcurementCandidatesMysql(rows = [], missingItems = [], 
     } else {
       strategyText = "无有效销量，按订单缺口采购";
     }
-    const suggestedPurchaseQty = Math.max(
-      Number(item.shortage_quantity || 0),
-      targetStock - availableSupply
-    );
+    const suggestedPurchaseQty = Number(item.shortage_quantity || 0);
     const extraStockQty = Math.max(0, suggestedPurchaseQty - Number(item.shortage_quantity || 0));
     let purchaseMode = "single";
     let purchaseModeText = "按单采购";
@@ -19589,6 +19890,9 @@ function summarizeOrderProcurementCandidatesMysql(rows = [], missingItems = [], 
 
 export async function previewOrderProcurementMysql(orderId) {
   ensureMysqlCutoverEnabled();
+  if ((await orderProcurementCoverageMysql()).get(Number(orderId))?.stock_location === 'FBP') {
+    throw new Error('FBP 订单由官方仓库存直接履约，无需按订单采购；官方仓补货请使用 FBP 补货功能');
+  }
   await ensureProcurementOrderSourceSchemaMysql();
   const [rows, missingItems] = await Promise.all([
     orderProcurementCandidateRowsMysql(orderId, null, { includeHandledSourceOrder: true }),
@@ -19600,6 +19904,9 @@ export async function previewOrderProcurementMysql(orderId) {
 
 export async function createOrderProcurementRequestsMysql(orderId, body = {}, userId = null) {
   ensureMysqlCutoverEnabled();
+  if ((await orderProcurementCoverageMysql()).get(Number(orderId))?.stock_location === 'FBP') {
+    throw new Error('FBP 订单由官方仓库存直接履约，无需按订单采购；官方仓补货请使用 FBP 补货功能');
+  }
   await ensureProcurementOrderSourceSchemaMysql();
   const creation = await withMysqlTransaction(async (connection) => {
     const selectedIds = Array.isArray(body.order_item_ids)
@@ -19682,9 +19989,9 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
       const productId = Number(row.product_id);
       if (!remainingStockByProduct.has(productId)) {
         remainingStockByProduct.set(productId, Math.max(0,
-          Number(row.current_stock || 0) - Number(reservedStockByProduct.get(productId) || 0)));
+          rows.filter(item => Number(item.product_id) === productId).reduce((sum, item) => sum + Number(item.current_stock || 0), 0)));
         remainingIncomingByProduct.set(productId, Math.max(0,
-          Number(row.incoming_stock || 0) - Number(reservedIncomingByProduct.get(productId) || 0)));
+          rows.filter(item => Number(item.product_id) === productId).reduce((sum, item) => sum + Number(item.incoming_stock || 0), 0)));
       }
       const remainingStock = Number(remainingStockByProduct.get(productId) || 0);
       const remainingIncoming = Number(remainingIncomingByProduct.get(productId) || 0);
@@ -19698,9 +20005,7 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
         note = `无需采购，已确认处理：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
         stockSatisfiedCount += 1;
       } else if (overrideQuantity > 0 && !createdRequestProductIds.has(productId)) {
-        if (!(Number(override?.amount || 0) > 0)) {
-          throw new Error(`「${row.product_name || row.product_code || productId}」的采购金额（amount）必须大于 0；请填写实际货款后再提交采购`);
-        }
+        if (Number(override?.amount || 0) < 0) throw new Error("采购金额不能为负数；暂未填写时将标记待补金额");
         handlingType = "procurement_request";
         note = `订单采购：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
         const [result] = await connection.execute(`
@@ -19744,9 +20049,7 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
       } else {
         const requestQuantity = Math.max(1, quantity - Math.max(0, remainingStock) - Math.max(0, remainingIncoming));
         const requestAmount = Number(row.purchase_cost || 0) * requestQuantity;
-        if (!(requestAmount > 0)) {
-          throw new Error(`「${row.product_name || row.product_code || productId}」的采购金额（amount）必须大于 0；请填写实际货款后再提交采购`);
-        }
+        if (requestAmount < 0) throw new Error("采购金额不能为负数");
         remainingStockByProduct.set(productId, 0);
         remainingIncomingByProduct.set(productId, 0);
         handlingType = "procurement_request";
@@ -19834,6 +20137,7 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
     await cancelPurchaseOrderMysql(purchaseOrder.id);
     throw error;
   }
+  invalidateOrderProcurementCoverage();
   return {
     ...creation,
     purchase_order_id: Number(purchaseOrder.id),
@@ -19848,7 +20152,7 @@ export async function updateProcurementRequestMysql(id, body = {}) {
   await ensureProcurementInboundLinkSchemaMysql();
   await ensureProcurementFlexibleRequestSchemaMysql();
   const requestId = Number(id);
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     const existing = await mysqlConnectionQueryOne(connection, "SELECT * FROM procurement_requests WHERE id = ? FOR UPDATE", [requestId]);
     if (!existing) throw new Error("Procurement request not found");
     assertFreshRecord(body, existing, "采购请求已被其他用户保存，请刷新后再继续编辑");
@@ -19870,6 +20174,9 @@ export async function updateProcurementRequestMysql(id, body = {}) {
     const nextRawSpec = body.raw_spec !== undefined ? String(body.raw_spec || "").trim() : String(existing.raw_spec || "").trim();
     if (!nextProductId && !nextRawName) throw new Error("采购商品名称和库存商品至少保留一项");
     const nextQuantity = Number(body.quantity ?? existing.quantity ?? 1);
+    if (existing.purchase_order_id && ['purchased', 'done', 'partial_inbound', 'inbound_done'].includes(existingStatus) && nextQuantity !== Number(existing.quantity)) {
+      throw new Error('正式采购数量（quantity）需要同步收货和订单分配，请在“采购与库存对账 → 采购数量与金额纠正”中操作；本地库存为 0 也可纠正');
+    }
     const nextAmount = Number(body.amount ?? existing.amount ?? 0);
     const nextShippingAmount = Number(body.shipping_amount ?? existing.shipping_amount ?? 0);
     const nextPurchaseUrl = body.purchase_url ?? existing.purchase_url ?? "";
@@ -19880,7 +20187,7 @@ export async function updateProcurementRequestMysql(id, body = {}) {
     const nextSupplierId = body.supplier_id !== undefined ? nullableInteger(body.supplier_id) : nullableInteger(existing.supplier_id);
     if (!['cancelled'].includes(String(nextStatus || ''))) {
       if (!(nextQuantity > 0)) throw new Error("采购数量（quantity）必须大于 0");
-      if (!(nextAmount > 0)) throw new Error("采购金额（amount）必须大于 0；请填写实际货款后再保存");
+      if (!Number.isFinite(nextAmount) || nextAmount < 0) throw new Error("采购金额不能为负数；未知金额可稍后补齐");
     }
 
     await connection.execute(`
@@ -19950,6 +20257,8 @@ export async function updateProcurementRequestMysql(id, body = {}) {
 
     return { ok: true };
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 async function syncFinalizedPurchaseFactsFromProcurementRequestsMysql(connection, orderId, productId) {
@@ -20218,6 +20527,7 @@ export async function repairDirectProcurementInboundLinksMysql(options = {}) {
 }
 
 export async function directInboundProcurementRequestsMysql(body = {}) {
+  invalidateOrderProcurementCoverage();
   ensureMysqlCutoverEnabled();
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementInboundLinkSchemaMysql();
@@ -20225,7 +20535,7 @@ export async function directInboundProcurementRequestsMysql(body = {}) {
   await ensurePurchaseCostVersionSchemaMysql();
   const ids = [...new Set((body.request_ids || []).map(Number).filter(Boolean))];
   if (!ids.length) throw new Error("Please select procurement requests to inbound");
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     const placeholders = ids.map(() => "?").join(",");
     const requests = await mysqlConnectionQuery(connection, `
       SELECT *
@@ -20245,13 +20555,12 @@ export async function directInboundProcurementRequestsMysql(body = {}) {
       });
     }
     const invalidQuantity = requests.filter((row) => !(Number(row.quantity || 0) > 0));
-    const missingCost = requests.filter((row) => !(Number(row.amount || 0) > 0));
-    if (invalidQuantity.length || missingCost.length) {
-      throw Object.assign(new Error("存在采购数量或采购金额异常的明细，不能入库"), {
+    if (invalidQuantity.length) {
+      throw Object.assign(new Error("存在采购数量异常的明细，不能入库"), {
         statusCode: 409,
         validation: {
-          field: "procurement_request.quantity, procurement_request.amount",
-          message: `采购数量（quantity）和采购金额（amount）都必须大于 0；请修正后再确认入库。异常记录：${[...new Set([...invalidQuantity, ...missingCost].map((row) => `#${row.id}`))].join("、")}`
+          field: "procurement_request.quantity",
+          message: `采购数量（quantity）必须大于 0；请核对实际收到的数量后再确认入库。异常记录：${invalidQuantity.map((row) => `#${row.id}`).join("、")}`
         }
       });
     }
@@ -20316,6 +20625,8 @@ export async function directInboundProcurementRequestsMysql(body = {}) {
     }
     return { ok: true, count: inboundIds.length, inbound_ids: inboundIds, request_ids: ids };
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export async function procurementPurchaseGroupRecommendationsMysql(query = {}) {
@@ -20455,7 +20766,7 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
   ensureMysqlCutoverEnabled();
   await ensurePurchaseCostVersionSchemaMysql();
   const orderId = Number(id);
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     const order = await mysqlConnectionQueryOne(connection, "SELECT * FROM purchase_orders WHERE id = ? FOR UPDATE", [orderId]);
     if (!order) throw new Error("Purchase order not found");
     if (!["pending_purchase", "purchased"].includes(order.status)) throw new Error("Current purchase order status cannot be confirmed as purchased");
@@ -20476,7 +20787,7 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
       const note = input.note ?? item.note ?? "";
       const anomalyReason = String(input.anomaly_reason || body.anomaly_reason || "").trim();
       if (!(actualQuantity > 0)) throw new Error(`商品 #${item.product_id} 的采购数量（actual_quantity）必须大于 0`);
-      if (!(amount > 0)) throw new Error(`商品 #${item.product_id} 的采购金额（amount）必须大于 0；请填写实际货款后再确认采购`);
+      if (!Number.isFinite(amount) || amount < 0) throw new Error(`商品 #${item.product_id} 的采购金额不能为负数；未知金额可稍后补齐`);
       const historicalUnitCost = await historicalPurchasedUnitCostMysql(item.product_id);
       if (historicalUnitCost > 0 && goodsUnitCost > historicalUnitCost * 1.1 && !anomalyReason) {
         throw Object.assign(new Error("本次采购单价较历史均价上涨超过10%，请先选择价格异常原因"), {
@@ -20552,6 +20863,8 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
     `, [personId, orderId]);
     return { ok: true };
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export function startConfirmProcurementRequestsPurchasedMysql(body = {}, sessionPersonId = null) {
@@ -20607,6 +20920,9 @@ export async function updatePurchaseOrderMysql(id, body = {}) {
         );
         if (!existingItem) continue;
         const actualQty = Number(item.actual_quantity ?? existingItem.actual_quantity ?? 0);
+        if (order.status !== 'pending_purchase' && actualQty !== Number(existingItem.actual_quantity)) {
+          throw new Error('正式采购数量（actual_quantity）不能单独覆盖，请到“采购与库存对账 → 采购数量与金额纠正”同步调整收货和关联订单');
+        }
         const amount = Number(item.amount ?? existingItem.amount ?? 0);
         const shippingAmount = Number(item.shipping_amount ?? existingItem.shipping_amount ?? 0);
         const unitCost = actualQty ? (amount + shippingAmount) / actualQty : 0;
@@ -20738,6 +21054,29 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
   const existing = await mysqlConnectionQueryOne(connection, "SELECT * FROM inbound_records WHERE id = ? FOR UPDATE", [inboundId]);
   if (!existing) throw new Error("Inbound record not found");
   assertFreshRecord(body, existing, "入库记录已被其他用户保存，请刷新后再继续编辑");
+  if (body.receive_quantity === undefined && existing.purchase_order_item_id && body.quantity !== undefined && Number(body.quantity) !== Number(existing.quantity)) {
+    throw new Error('该批次属于正式采购，收货数量（quantity）不能单独改账。实际部分收货请使用实收数量；纠正录入错误请打开“数量纠正／对账”');
+  }
+  if (existing.status === 'approved' && /对账 #\d+/.test(existing.note || '')) {
+    throw new Error('该收货记录已有对账历史，请通过“采购与库存对账”继续纠正，避免重复改变本地库存');
+  }
+  if (body.receive_quantity !== undefined) {
+    const receipt = planPartialReceipt(existing, body.receive_quantity, body.expected_remaining_quantity);
+    if (receipt.remaining > 0) {
+      await connection.execute(`INSERT INTO inbound_records
+        (product_id, person_id, quantity, amount, unit_cost, shipping_amount, purchase_url, status, note,
+         purchase_order_id, purchase_order_item_id, procurement_request_id, qc_status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_arrival', ?, ?, ?, ?, 'pending', ?)`, [
+        existing.product_id, existing.person_id, receipt.remaining, receipt.remainingAmount,
+        (receipt.remainingAmount + receipt.remainingShipping) / receipt.remaining, receipt.remainingShipping,
+        existing.purchase_url || '', `${existing.note || ''}；批次 #${inboundId} 部分收货后剩余`,
+        existing.purchase_order_id, existing.purchase_order_item_id, existing.procurement_request_id, existing.created_at
+      ]);
+    }
+    body = { ...body, product_id: existing.product_id, person_id: existing.person_id, status: 'approved', quantity: receipt.received, amount: receipt.amount,
+      shipping_amount: receipt.shippingAmount, purchase_url: existing.purchase_url || '',
+      note: `${existing.note || ''}${body.receipt_context ? `；${body.receipt_context}` : ''}；本次实收 ${receipt.received}，原待收 ${existing.quantity}` };
+  }
   const productId = Number(body.product_id ?? existing.product_id);
   const personId = await resolvePersonIdOrFirstMysql(body.person_id ?? existing.person_id, connection);
   const quantity = Number(body.quantity ?? existing.quantity ?? 0);
@@ -20759,7 +21098,8 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
 
   await connection.execute(`
     UPDATE inbound_records SET product_id = ?, person_id = ?, quantity = ?, amount = ?, unit_cost = ?,
-      shipping_amount = ?, purchase_url = ?, status = ?, note = ?, qc_status = ?,
+      shipping_amount = ?, purchase_url = ?, status = ?, note = ?, qc_status = ?, courier_company = ?, tracking_number = ?,
+      receipt_images_json = ?, received_at = ?,
       approved_at = CASE WHEN ? = 'approved' THEN COALESCE(approved_at, ?) ELSE approved_at END,
       approved_by_person_id = CASE WHEN ? = 'approved' THEN COALESCE(approved_by_person_id, ?) ELSE approved_by_person_id END
     WHERE id = ?
@@ -20770,10 +21110,14 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
     amount,
     unitCost,
     shippingAmount,
-    body.purchase_url || "",
+    body.purchase_url ?? existing.purchase_url ?? "",
     status,
-    body.note || "",
+    body.note ?? existing.note ?? "",
     body.qc_status || existing.qc_status || "pending",
+    body.courier_company ?? existing.courier_company ?? null,
+    body.tracking_number ?? existing.tracking_number ?? null,
+    body.receipt_images_json === undefined ? existing.receipt_images_json : JSON.stringify(Array.isArray(body.receipt_images_json) ? body.receipt_images_json : []),
+    body.received_at ?? existing.received_at ?? null,
     status,
     normalizeMysqlDateTime(new Date()),
     status,
@@ -20848,12 +21192,15 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
 }
 
 export async function updateInboundRecordMysql(id, body = {}, sessionPersonId = null) {
+  invalidateOrderProcurementCoverage();
   ensureMysqlCutoverEnabled();
   await ensureInboundRecordTimestampSchemaMysql();
   await ensurePurchaseCostVersionSchemaMysql();
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     return await applyInboundRecordUpdateMysql(connection, id, body, { sessionPersonId });
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 async function prepareProcurementRequestPurchaseQuantitiesMysql(body = {}) {
@@ -20952,6 +21299,7 @@ async function prepareProcurementRequestPurchaseQuantitiesMysql(body = {}) {
 }
 
 export async function confirmProcurementRequestsPurchasedMysql(body = {}, sessionPersonId = null) {
+  invalidateOrderProcurementCoverage();
   const requestIds = await prepareProcurementRequestPurchaseQuantitiesMysql(body);
   if (!requestIds.length) throw new Error("本次实际采购数量没有覆盖任何待采购需求");
   const purchaseBody = { ...body, request_ids: requestIds };
@@ -20999,13 +21347,53 @@ export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId 
   }
 }
 
+export async function previewShippedProcurementReceiptsMysql(body = {}) {
+  ensureMysqlCutoverEnabled();
+  await ensureProcurementLedgerSchema(mysqlExecute);
+  const ids = selectedReceiptOrderIds(body.order_ids);
+  const coverage = await loadOrderProcurementCoverage(mysqlQuery, '', { fresh: true });
+  return planShippedProcurementReceipts(coverage, ids);
+}
+
+export async function confirmShippedProcurementReceiptsMysql(body = {}, sessionPersonId = null) {
+  ensureMysqlCutoverEnabled();
+  await ensureProcurementLedgerSchema(mysqlExecute);
+  if (body.confirmed !== true) throw new Error('请核对实际收货数量并确认后补登');
+  const ids = selectedReceiptOrderIds(body.order_ids);
+  const records = Array.isArray(body.records) ? body.records : [];
+  if (!records.length || records.length > 200) throw new Error('请选择 1 至 200 个收货批次');
+  const batchIds = [...new Set(records.map(row => Number(row.id)))].sort((a,b) => a-b);
+  if (batchIds.some(id => !Number.isSafeInteger(id) || id <= 0)) throw new Error('采购批次编号无效');
+  await ensureInboundRecordTimestampSchemaMysql();
+  await ensurePurchaseCostVersionSchemaMysql();
+  const result = await withMysqlTransaction(async connection => {
+    await connection.query(`SELECT id FROM orders WHERE id IN (${ids.map(() => '?').join(',')}) ORDER BY id FOR UPDATE`, ids);
+    await connection.query(`SELECT id FROM inbound_records WHERE id IN (${batchIds.map(() => '?').join(',')}) ORDER BY id FOR UPDATE`, batchIds);
+    const coverage = await loadOrderProcurementCoverage(sql => connection.query(sql).then(([rows]) => rows), '', { fresh: true });
+    const plan = planShippedProcurementReceipts(coverage, ids);
+    const checked = validateShippedReceiptSubmission(plan, records);
+    const changedPurchaseOrderIds = new Set();
+    for (const row of checked) {
+      await applyInboundRecordUpdateMysql(connection, row.id, {
+        receive_quantity: row.quantity, expected_remaining_quantity: row.remaining_quantity,
+        version_updated_at: row.version_updated_at, status: 'approved', qc_status: 'approved',
+        receipt_context: `已运输订单人工确认补登：${row.orders.map(order => order.posting_number).join('、')}`
+      }, { changedPurchaseOrderIds, sessionPersonId });
+    }
+    for (const id of changedPurchaseOrderIds) await refreshPurchaseOrderStatusMysql(connection, id);
+    return { ok: true, count: checked.length };
+  });
+  invalidateOrderProcurementCoverage();
+  return result;
+}
+
 export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId = null) {
   ensureMysqlCutoverEnabled();
   await ensureInboundRecordTimestampSchemaMysql();
   await ensurePurchaseCostVersionSchemaMysql();
   const records = Array.isArray(body.records) ? body.records : [];
   if (!records.length) throw new Error("Please select inbound records to update");
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     const changedPurchaseOrderIds = new Set();
     const ids = [];
     for (const record of records) {
@@ -21020,6 +21408,8 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
     }
     return { ok: true, count: ids.length, ids };
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export function startBatchUpdateInboundRecordsMysql(body = {}, sessionPersonId = null) {
@@ -22243,30 +22633,38 @@ export async function profitRankingMysql(query = {}) {
   let selectFields = "";
   let groupFields = "";
   let joinSql = "";
-  let adJoinSql = "";
-  let adSpendField = "0";
-  let adRevenueField = "0";
   const outcome = buildOrderOutcomeSql("o", "mysql");
   const effectiveBusinessSale = `(${outcome.effectiveSale} AND NOT ${outcome.afterDeliveryReturn})`;
   const nonEffectiveLoss = terminalOrderLossSqlMysql();
   const returnLossTotal = returnLossTotalSqlMysql();
+  const outcomeCteSql = `
+    WITH order_outcomes AS (
+      SELECT
+        o.id,
+        CASE WHEN ${effectiveBusinessSale} THEN 1 ELSE 0 END AS effective_business_sale,
+        CASE WHEN ${outcome.rejectedUnclaimed} THEN 1 ELSE 0 END AS rejected_unclaimed,
+        CASE WHEN ${outcome.afterDeliveryReturn} THEN 1 ELSE 0 END AS after_delivery_return
+      FROM orders o
+      GROUP BY o.id
+    )
+  `;
   const costFields = `
-      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS revenue,
-      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN CASE
+      COALESCE(SUM(CASE WHEN outcomes.effective_business_sale = 1 THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS revenue,
+      COALESCE(SUM(CASE WHEN outcomes.effective_business_sale = 1 THEN CASE
         WHEN opi.order_item_id IS NOT NULL THEN COALESCE(opi.net_profit_cny, 0)
         ELSE COALESCE(NULLIF(oi.actual_profit, 0), oi.estimated_profit, 0)
       END ELSE -${nonEffectiveLoss} END), 0) AS profit,
-      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN
+      COALESCE(SUM(CASE WHEN outcomes.effective_business_sale = 1 AND COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN
         COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE 0 END), 0) AS accrued_profit,
-      COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN o.id END) AS accrued_order_count,
+      COUNT(DISTINCT CASE WHEN outcomes.effective_business_sale = 1 AND COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN o.id END) AS accrued_order_count,
       COALESCE(SUM(COALESCE(opi.purchase_cost_cny, oi.frozen_purchase_cost * oi.quantity, 0)), 0) AS purchase_cost,
       COALESCE(SUM(COALESCE(opi.domestic_shipping_cny, oi.frozen_domestic_shipping * oi.quantity, 0)), 0) AS domestic_shipping_cost,
       COALESCE(SUM(COALESCE(opi.international_shipping_cny, oi.frozen_international_shipping * oi.quantity, 0)), 0) AS international_shipping_cost,
       COALESCE(SUM(COALESCE(opi.packaging_cost_cny, oi.frozen_handling_fee * oi.quantity, 0)), 0) AS packaging_cost,
       COALESCE(SUM(COALESCE(opi.commission_fee_cny, oi.estimated_commission, 0)), 0) AS commission_fee,
       COALESCE(SUM(COALESCE(opi.ozon_service_fee_cny, oi.platform_fee_actual, 0)), 0) AS ozon_service_fee,
-      COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN ${returnLossTotal} ELSE 0 END), 0) AS return_loss,
-      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN COALESCE(opi.advertising_cost_cny, 0) ELSE 0 END), 0) AS order_advertising_cost,
+      COALESCE(SUM(CASE WHEN outcomes.rejected_unclaimed = 1 OR outcomes.after_delivery_return = 1 THEN ${returnLossTotal} ELSE 0 END), 0) AS return_loss,
+      COALESCE(SUM(CASE WHEN outcomes.effective_business_sale = 1 THEN COALESCE(opi.advertising_cost_cny, 0) ELSE 0 END), 0) AS order_advertising_cost,
       COALESCE(SUM(COALESCE(opi.other_fee_cny, 0)), 0) AS other_fee
   `;
   const adWhere = [];
@@ -22284,16 +22682,6 @@ export async function profitRankingMysql(query = {}) {
     selectFields = "s.id AS shop_id, s.name AS shop_name";
     groupFields = "s.id, s.name";
     joinSql = "JOIN shops s ON s.id = o.shop_id";
-    adJoinSql = `
-      LEFT JOIN (
-        SELECT shop_id, COALESCE(SUM(spend_cny), 0) AS spend_cny, COALESCE(SUM(revenue_cny), 0) AS revenue_cny
-        FROM ozon_ad_sku_daily
-        WHERE ${adWhereSql}
-        GROUP BY shop_id
-      ) ad ON ad.shop_id = s.id
-    `;
-    adSpendField = "COALESCE(MAX(ad.spend_cny), 0)";
-    adRevenueField = "COALESCE(MAX(ad.revenue_cny), 0)";
     if (keyword) {
       where.push("LOWER(COALESCE(s.name, '')) LIKE ?");
       whereParams.push(`%${keyword}%`);
@@ -22315,36 +22703,26 @@ export async function profitRankingMysql(query = {}) {
     selectFields = "o.shop_id, MAX(s.name) AS shop_name, oi.ozon_sku, MAX(COALESCE(NULLIF(oi.ozon_product_id, ''), NULLIF(op.ozon_product_id, ''), '')) AS ozon_product_id, MAX(COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), NULLIF(sm.display_name, ''), NULLIF(p.name, ''), '')) AS product_name, MAX(COALESCE(NULLIF(p.image_url, ''), NULLIF(op.primary_image, ''), NULLIF(op.image_url, ''), '')) AS image_url";
     groupFields = "o.shop_id, oi.ozon_sku";
     joinSql = "JOIN shops s ON s.id = o.shop_id LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id LEFT JOIN products p ON p.id = sm.product_id LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku";
-    adJoinSql = `
-      LEFT JOIN (
-        SELECT shop_id, ozon_sku, COALESCE(SUM(spend_cny), 0) AS spend_cny, COALESCE(SUM(revenue_cny), 0) AS revenue_cny
-        FROM ozon_ad_sku_daily
-        WHERE ${adWhereSql}
-        GROUP BY shop_id, ozon_sku
-      ) ad ON ad.shop_id = o.shop_id AND ad.ozon_sku = oi.ozon_sku
-    `;
-    adSpendField = "COALESCE(MAX(ad.spend_cny), 0)";
-    adRevenueField = "COALESCE(MAX(ad.revenue_cny), 0)";
     if (keyword) {
       where.push("(LOWER(COALESCE(oi.ozon_sku, '')) LIKE ? OR LOWER(COALESCE(oi.ozon_name, '')) LIKE ? OR LOWER(COALESCE(p.name, '')) LIKE ? OR LOWER(COALESCE(s.name, '')) LIKE ?)");
       whereParams.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
     }
   }
   const whereSql = where.length ? `AND ${where.join(" AND ")}` : "";
-  const params = [...(adJoinSql ? adParams : []), ...dateFilter.params, ...whereParams];
+  const params = [...dateFilter.params, ...whereParams];
   const baseSql = `
     SELECT ${selectFields},
       COUNT(DISTINCT o.id) AS order_count,
       COALESCE(SUM(oi.quantity), 0) AS item_quantity,
       ${costFields},
-      ${adSpendField} AS advertising_report_spend,
-      ${adRevenueField} AS advertising_report_revenue,
+      0 AS advertising_report_spend,
+      0 AS advertising_report_revenue,
       0 AS cancelled_revenue
     FROM order_items oi
     JOIN orders o ON o.id = oi.order_id
+    JOIN order_outcomes outcomes ON outcomes.id = o.id
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
     ${joinSql}
-    ${adJoinSql}
     WHERE 1=1 ${dateFilter.whereSql} ${whereSql}
     GROUP BY ${groupFields}
   `;
@@ -22353,17 +22731,39 @@ export async function profitRankingMysql(query = {}) {
   let total = 0;
   let rows = [];
   if (fastMode) {
-    const fastRows = await mysqlQuery(`${baseSql} ORDER BY ${orderField} ${sortOrder} LIMIT ? OFFSET ?`, [...params, pageSize + 1, offset]);
+    const fastRows = await mysqlQuery(`${outcomeCteSql} ${baseSql} ORDER BY ${orderField} ${sortOrder} LIMIT ? OFFSET ?`, [...params, pageSize + 1, offset]);
     const hasMore = fastRows.length > pageSize;
     rows = hasMore ? fastRows.slice(0, pageSize) : fastRows;
     total = offset + rows.length + (hasMore ? 1 : 0);
   } else {
     const [totalRow, resultRows] = await Promise.all([
-      mysqlQueryOne(`SELECT COUNT(*) AS total FROM (${baseSql}) ranking_rows`, params),
-      mysqlQuery(`${baseSql} ORDER BY ${orderField} ${sortOrder} LIMIT ? OFFSET ?`, [...params, pageSize, offset])
+      mysqlQueryOne(`${outcomeCteSql} SELECT COUNT(*) AS total FROM (${baseSql}) ranking_rows`, params),
+      mysqlQuery(`${outcomeCteSql} ${baseSql} ORDER BY ${orderField} ${sortOrder} LIMIT ? OFFSET ?`, [...params, pageSize, offset])
     ]);
     total = Number(totalRow?.total || 0);
     rows = resultRows;
+  }
+  if (dimension === "shop" && rows.length) {
+    const shopIds = [...new Set(rows.map((row) => Number(row.shop_id || 0)).filter(Boolean))];
+    if (shopIds.length) {
+      const adRows = await mysqlQuery(`SELECT shop_id, COALESCE(SUM(spend_cny), 0) AS spend_cny, COALESCE(SUM(revenue_cny), 0) AS revenue_cny
+        FROM ozon_ad_sku_daily WHERE ${adWhereSql} AND shop_id IN (${shopIds.map(() => "?").join(", ")}) GROUP BY shop_id`, [...adParams, ...shopIds]);
+      const adByShop = new Map(adRows.map((row) => [Number(row.shop_id), row]));
+      rows = rows.map((row) => ({ ...row, advertising_report_spend: Number(adByShop.get(Number(row.shop_id))?.spend_cny || 0), advertising_report_revenue: Number(adByShop.get(Number(row.shop_id))?.revenue_cny || 0) }));
+    }
+  }
+  if (dimension === "sku" && rows.length) {
+    const skuPairs = rows.map((row) => [Number(row.shop_id || 0), String(row.ozon_sku || "").trim()]).filter(([shopId, sku]) => shopId && sku);
+    if (skuPairs.length) {
+      const pairWhere = skuPairs.map(() => "(shop_id = ? AND ozon_sku = ?)").join(" OR ");
+      const adRows = await mysqlQuery(`SELECT shop_id, ozon_sku, COALESCE(SUM(spend_cny), 0) AS spend_cny, COALESCE(SUM(revenue_cny), 0) AS revenue_cny
+        FROM ozon_ad_sku_daily WHERE ${adWhereSql} AND (${pairWhere}) GROUP BY shop_id, ozon_sku`, [...adParams, ...skuPairs.flat()]);
+      const adBySku = new Map(adRows.map((row) => [`${Number(row.shop_id)}:${row.ozon_sku}`, row]));
+      rows = rows.map((row) => {
+        const ad = adBySku.get(`${Number(row.shop_id)}:${row.ozon_sku}`);
+        return { ...row, advertising_report_spend: Number(ad?.spend_cny || 0), advertising_report_revenue: Number(ad?.revenue_cny || 0) };
+      });
+    }
   }
   return {
     dimension,
@@ -24448,6 +24848,7 @@ export async function inventoryMysql(query = {}) {
 
 export async function outboundRecordsMysql(query = {}) {
   ensureMysqlCutoverEnabled();
+  await ensureProductNamingSchemaMysql();
   await ensureStockLocationSchemaMysql();
   const paged = String(query.paged || "") === "1";
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
@@ -24559,7 +24960,7 @@ function outboundRecordsWhereMysql(query = {}) {
 
 function outboundRecordsSelectMysql(whereSql = "") {
   return `
-    SELECT obr.*, p.code AS product_code, p.name AS product_name, p.image_url AS product_image_url,
+    SELECT obr.*, p.code AS product_code, p.inventory_number, p.name AS product_name, p.image_url AS product_image_url,
       s.name AS shop_name, COALESCE(obr.ozon_sku, op.ozon_sku) AS ozon_sku, pe.name AS person_name,
       COALESCE(op.image_url, op.primary_image, p.image_url, '') AS image_urls,
       COALESCE(obr.order_item_id, im.related_order_item_id) AS order_item_id, 'deducted' AS row_kind,
@@ -24809,6 +25210,7 @@ export async function ordersMysql() {
       GROUP_CONCAT(DISTINCT CASE WHEN p.id IS NOT NULL THEN COALESCE(p.image_url, '') END) AS inventory_image_urls,
       GROUP_CONCAT(DISTINCT CASE WHEN p.id IS NOT NULL THEN CONCAT(oi.ozon_sku, ':', p.id) END) AS sku_product_ids,
       GROUP_CONCAT(DISTINCT CASE WHEN p.id IS NOT NULL THEN CONCAT(oi.ozon_sku, ':', p.name) END SEPARATOR '||') AS sku_inventory_names,
+      GROUP_CONCAT(DISTINCT CASE WHEN p.inventory_number IS NOT NULL THEN CONCAT(oi.ozon_sku, ':', p.inventory_number) END SEPARATOR '||') AS sku_inventory_numbers,
       GROUP_CONCAT(DISTINCT CASE WHEN op.id IS NOT NULL THEN CONCAT(oi.ozon_sku, ':', op.id) END) AS sku_online_product_ids,
       GROUP_CONCAT(DISTINCT CASE WHEN sm.id IS NOT NULL THEN CONCAT(oi.ozon_sku, ':', sm.id) END) AS sku_mapping_ids,
       GROUP_CONCAT(DISTINCT CASE
@@ -25077,13 +25479,53 @@ export async function ordersMysql() {
   return await enrichOrderRowsForListMysql(rows);
 }
 
-async function orderRowsByIdsMysql(ids = []) {
+async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined) {
   const cleanIds = [...new Set(ids.map(Number).filter(Boolean))];
   if (!cleanIds.length) return [];
   await ensureProcurementOrderSourceSchemaMysql();
   await ensureSkuInventoryRecipeSchemaMysql();
   await ensureProductCompositionSchemaMysql();
+  // Existing detail callers stay fully enriched. Paged ordinary lists pass
+  // null so their initial rows are not held by the full-ledger calculation.
+  if (coveragePromise === undefined) {
+    coveragePromise = orderProcurementCoverageMysql();
+    coveragePromise.catch(() => {});
+  }
   const rows = await mysqlQuery(`
+    WITH scoped_order_items AS (
+      SELECT oi.id AS order_item_id, oi.order_id, oi.ozon_sku, o.shop_id, sm.product_id
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      LEFT JOIN sku_mappings sm ON (
+        (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
+        AND sm.active = 1
+      )
+      WHERE oi.order_id IN (${cleanIds.map(() => "?").join(",")})
+    ),
+    scoped_product_ids AS (
+      SELECT DISTINCT product_id FROM scoped_order_items WHERE product_id IS NOT NULL
+    ),
+    scoped_recipe_product_ids AS (
+      SELECT DISTINCT ri.product_id
+      FROM sku_inventory_recipes recipe
+      JOIN scoped_order_items scoped_item
+        ON scoped_item.shop_id = recipe.shop_id AND scoped_item.ozon_sku = recipe.ozon_sku
+      JOIN sku_inventory_recipe_items ri ON ri.recipe_id = recipe.id
+      WHERE recipe.active = 1
+    ),
+    scoped_component_product_ids AS (
+      SELECT DISTINCT pc.component_product_id AS product_id
+      FROM product_components pc
+      JOIN scoped_product_ids scoped_product ON scoped_product.product_id = pc.product_id
+      UNION
+      SELECT product_id FROM scoped_recipe_product_ids
+    ),
+    scoped_procurement_request_ids AS (
+      SELECT DISTINCT allocation.procurement_request_id
+      FROM procurement_order_allocations allocation
+      JOIN scoped_order_items scoped_item ON scoped_item.order_item_id = allocation.order_item_id
+      WHERE allocation.status = 'allocated'
+    )
     SELECT o.*, s.name AS shop_name,
       (SELECT COUNT(*) FROM order_items item_count_oi WHERE item_count_oi.order_id = o.id) AS item_count,
       (SELECT COALESCE(SUM(total_oi.quantity), 0) FROM order_items total_oi WHERE total_oi.order_id = o.id) AS total_quantity,
@@ -25121,6 +25563,7 @@ async function orderRowsByIdsMysql(ids = []) {
       GROUP_CONCAT(DISTINCT CASE WHEN p.id IS NOT NULL THEN COALESCE(p.image_url, '') END) AS inventory_image_urls,
       GROUP_CONCAT(DISTINCT CASE WHEN p.id IS NOT NULL THEN CONCAT(oi.ozon_sku, ':', p.id) END) AS sku_product_ids,
       GROUP_CONCAT(DISTINCT CASE WHEN p.id IS NOT NULL THEN CONCAT(oi.ozon_sku, ':', p.name) END SEPARATOR '||') AS sku_inventory_names,
+      GROUP_CONCAT(DISTINCT CASE WHEN p.inventory_number IS NOT NULL THEN CONCAT(oi.ozon_sku, ':', p.inventory_number) END SEPARATOR '||') AS sku_inventory_numbers,
       GROUP_CONCAT(DISTINCT CASE WHEN op.id IS NOT NULL THEN CONCAT(oi.ozon_sku, ':', op.id) END) AS sku_online_product_ids,
       GROUP_CONCAT(DISTINCT CASE WHEN sm.id IS NOT NULL THEN CONCAT(oi.ozon_sku, ':', sm.id) END) AS sku_mapping_ids,
       GROUP_CONCAT(DISTINCT CASE
@@ -25218,18 +25661,21 @@ async function orderRowsByIdsMysql(ids = []) {
     LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1
     LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku
     LEFT JOIN (
-      SELECT shop_id, ozon_sku,
-        SUM(CASE WHEN stock_type = 'fbs_virtual' THEN present ELSE 0 END) AS fbs_present,
-        SUM(CASE WHEN stock_type = 'fbp_real' THEN present ELSE 0 END) AS fbp_present
-      FROM ozon_stock_snapshots
-      GROUP BY shop_id, ozon_sku
+      SELECT snapshot.shop_id, snapshot.ozon_sku,
+        SUM(CASE WHEN snapshot.stock_type = 'fbs_virtual' THEN snapshot.present ELSE 0 END) AS fbs_present,
+        SUM(CASE WHEN snapshot.stock_type = 'fbp_real' THEN snapshot.present ELSE 0 END) AS fbp_present
+      FROM ozon_stock_snapshots snapshot
+      JOIN (SELECT DISTINCT shop_id, ozon_sku FROM scoped_order_items) scoped_sku
+        ON scoped_sku.shop_id = snapshot.shop_id AND scoped_sku.ozon_sku = snapshot.ozon_sku
+      GROUP BY snapshot.shop_id, snapshot.ozon_sku
     ) stock ON stock.shop_id = o.shop_id AND stock.ozon_sku = oi.ozon_sku
     LEFT JOIN (
-      SELECT product_id, SUM(quantity_delta) AS local_stock
+      SELECT inventory_movements.product_id, SUM(inventory_movements.quantity_delta) AS local_stock
       FROM inventory_movements
+      JOIN scoped_product_ids scoped_product ON scoped_product.product_id = inventory_movements.product_id
       WHERE status = 'posted'
         AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'
-      GROUP BY product_id
+      GROUP BY inventory_movements.product_id
     ) local_stock ON local_stock.product_id = p.id
     LEFT JOIN sku_inventory_recipes sku_recipe ON sku_recipe.shop_id = o.shop_id
       AND sku_recipe.ozon_sku = oi.ozon_sku
@@ -25238,6 +25684,7 @@ async function orderRowsByIdsMysql(ids = []) {
       SELECT ri.recipe_id,
         MIN(FLOOR(COALESCE(stock.local_stock, 0) / NULLIF(ri.quantity, 0))) AS local_stock
       FROM sku_inventory_recipe_items ri
+      JOIN scoped_component_product_ids scoped_component ON scoped_component.product_id = ri.product_id
       LEFT JOIN (
         SELECT product_id, SUM(quantity_delta) AS local_stock
         FROM inventory_movements
@@ -25264,13 +25711,15 @@ async function orderRowsByIdsMysql(ids = []) {
         MAX(incoming.amount) AS amount,
         MAX(incoming.shipping_amount) AS shipping_amount
       FROM product_components pc
+      JOIN scoped_product_ids scoped_product ON scoped_product.product_id = pc.product_id
       JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.active = 1
       LEFT JOIN (
-        SELECT product_id, SUM(quantity_delta) AS local_stock
+        SELECT inventory_movements.product_id, SUM(inventory_movements.quantity_delta) AS local_stock
         FROM inventory_movements
+        JOIN scoped_component_product_ids scoped_component ON scoped_component.product_id = inventory_movements.product_id
         WHERE status = 'posted'
           AND ${localStockLocationPredicateMysql()}
-        GROUP BY product_id
+        GROUP BY inventory_movements.product_id
       ) stock ON stock.product_id = pc.component_product_id
       LEFT JOIN (
         SELECT ir.product_id,
@@ -25283,6 +25732,7 @@ async function orderRowsByIdsMysql(ids = []) {
           MAX(ir.amount) AS amount,
           MAX(ir.shipping_amount) AS shipping_amount
         FROM inbound_records ir
+        JOIN scoped_component_product_ids scoped_component ON scoped_component.product_id = ir.product_id
         LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
         LEFT JOIN people pe ON pe.id = ir.person_id
         LEFT JOIN people creator ON creator.id = po.created_by_person_id
@@ -25306,6 +25756,7 @@ async function orderRowsByIdsMysql(ids = []) {
         MAX(CASE WHEN ir.status = 'pending_arrival' THEN ir.shipping_amount END) AS pending_shipping_amount,
         MAX(CASE WHEN ir.status = 'pending_arrival' THEN COALESCE(po.purchased_at, ir.created_at) END) AS latest_incoming_purchase_at
       FROM inbound_records ir
+      JOIN scoped_product_ids scoped_product ON scoped_product.product_id = ir.product_id
       LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
       LEFT JOIN people pe ON pe.id = ir.person_id
       LEFT JOIN people creator ON creator.id = po.created_by_person_id
@@ -25334,6 +25785,7 @@ async function orderRowsByIdsMysql(ids = []) {
         GROUP_CONCAT(DISTINCT request.id ORDER BY request.id) AS request_ids,
         MIN(GREATEST(0, request.quantity - COALESCE(request_allocated.allocated_quantity, 0))) AS request_unallocated_quantity
       FROM procurement_order_allocations allocation
+      JOIN scoped_order_items scoped_item ON scoped_item.order_item_id = allocation.order_item_id
       JOIN procurement_requests request ON request.id = allocation.procurement_request_id
         AND request.status != 'cancelled'
       LEFT JOIN people request_person ON request_person.id = request.person_id
@@ -25346,6 +25798,8 @@ async function orderRowsByIdsMysql(ids = []) {
       LEFT JOIN (
         SELECT active_allocation.procurement_request_id, SUM(active_allocation.allocated_quantity) AS allocated_quantity
         FROM procurement_order_allocations active_allocation
+        JOIN scoped_procurement_request_ids scoped_request
+          ON scoped_request.procurement_request_id = active_allocation.procurement_request_id
         JOIN orders allocated_order ON allocated_order.id = active_allocation.order_id
         WHERE active_allocation.status = 'allocated'
           AND LOWER(COALESCE(allocated_order.status, '')) NOT LIKE '%cancel%'
@@ -25366,9 +25820,60 @@ async function orderRowsByIdsMysql(ids = []) {
     LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
     WHERE o.id IN (${cleanIds.map(() => "?").join(",")})
     GROUP BY o.id
-  `, cleanIds);
+  `, [...cleanIds, ...cleanIds]);
   const ordering = new Map(cleanIds.map((value, index) => [String(value), index]));
-  return (await enrichOrderRowsForListMysql(rows)).sort((a, b) => (ordering.get(String(a.id)) ?? 0) - (ordering.get(String(b.id)) ?? 0));
+  return (await enrichOrderRowsForListMysql(rows, coveragePromise)).sort((a, b) => (ordering.get(String(a.id)) ?? 0) - (ordering.get(String(b.id)) ?? 0));
+}
+
+async function orderInventorySortRowsMysql(ids = []) {
+  const cleanIds = [...new Set(ids.map(Number).filter(Boolean))];
+  if (!cleanIds.length) return [];
+  // Only fields consumed by sortPagedOrdersMysql. Keep the same mapping and
+  // fallback semantics as the detail query, without its inventory/profit joins.
+  const rows = await mysqlQuery(`
+    SELECT o.id, o.ordered_at, o.created_at, o.updated_at, o.tracking_number,
+      GROUP_CONCAT(DISTINCT oi.ozon_sku) AS skus,
+      GROUP_CONCAT(DISTINCT COALESCE(CASE
+        WHEN p.code LIKE 'P-%' THEN p.code
+        WHEN p.id IS NOT NULL THEN CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
+        ELSE NULL
+      END, 'UNBOUND')) AS product_codes,
+      GROUP_CONCAT(DISTINCT CASE
+        WHEN p.inventory_number IS NOT NULL THEN p.inventory_number
+        WHEN p.id IS NOT NULL AND p.code LIKE 'P-%' THEN p.code
+        WHEN p.id IS NOT NULL THEN CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
+        ELSE NULL
+      END) AS inventory_ids,
+      GROUP_CONCAT(DISTINCT COALESCE(p.name, CASE WHEN sku_recipe.id IS NOT NULL THEN '组合库存方案' ELSE 'Unbound product' END)) AS product_names,
+      olp.printed_at, olp.print_batch_id, olp.print_sequence, raw.raw_json
+    FROM orders o
+    JOIN shops s ON s.id = o.shop_id
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN sku_mappings sm ON (
+      (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku)) AND sm.active = 1
+    )
+    LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1
+    LEFT JOIN sku_inventory_recipes sku_recipe ON sku_recipe.shop_id = o.shop_id
+      AND sku_recipe.ozon_sku = oi.ozon_sku AND sku_recipe.active = 1
+    LEFT JOIN order_label_prints olp ON olp.order_id = o.id
+    LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
+    WHERE o.id IN (${cleanIds.map(() => "?").join(",")})
+    GROUP BY o.id
+  `, cleanIds);
+  const ordering = new Map(cleanIds.map((id, index) => [Number(id), index]));
+  return rows.map((row) => {
+    const payload = parseJsonOrNull(row.raw_json) || {};
+    const raw = payload.raw || payload;
+    const method = raw.delivery_method || {};
+    const analytics = raw.analytics_data || {};
+    return {
+      ...row,
+      raw_json: undefined,
+      warehouse_name: method.warehouse || analytics.warehouse || "",
+      delivery_method_name: method.name || "",
+      logistics_channel: method.tpl_provider || analytics.tpl_provider || row.tracking_number || ""
+    };
+  }).sort((a, b) => ordering.get(Number(a.id)) - ordering.get(Number(b.id)));
 }
 
 async function orderBaseSqlMysql(query = {}) {
@@ -25392,11 +25897,11 @@ async function orderBaseSqlMysql(query = {}) {
   return { where: where.join(" AND "), params };
 }
 
-async function orderFilteredSqlMysql(query, base) {
+async function orderFilteredSqlMysql(query, base, coverage = null) {
   const where = [base.where];
   const params = [...base.params];
   addOrderSearchSqlMysql(where, params, query);
-  where.push(orderStatusSqlMysql(String(query.status || "all")));
+  where.push(orderStatusSqlMysql(String(query.status || "all"), coverage));
 
   const mark = String(query.markFilter || query.mark_filter || "all");
   if (mark === "quality") {
@@ -25418,14 +25923,18 @@ async function orderFilteredSqlMysql(query, base) {
   if (print === "unprinted") where.push("NOT EXISTS (SELECT 1 FROM order_label_prints olp WHERE olp.order_id = o.id)");
 
   const fulfillmentType = String(query.fulfillmentType || query.fulfillment_type || "all").trim().toLowerCase();
-  const fbpOrder = `EXISTS (
-    SELECT 1 FROM ozon_orders_raw fulfillment_raw
+  // The unique (store_id, posting_number) key guarantees at most one raw row.
+  // A scalar lookup avoids materializing and regexp-scanning all raw orders.
+  const fbpOrder = `COALESCE((
+    SELECT CASE WHEN LOWER(COALESCE(fulfillment_raw.raw_json, ''))
+      REGEXP 'fbp|fbo|hunchun|hun chun|hch-pd|hch-cr|cel fbp|fbp standard|珲春|混春|混川'
+      THEN 1 ELSE 0 END
+    FROM ozon_orders_raw fulfillment_raw
     WHERE fulfillment_raw.store_id = o.shop_id
       AND fulfillment_raw.posting_number = o.posting_number
-      AND LOWER(COALESCE(fulfillment_raw.raw_json, '')) REGEXP 'fbp|fbo|hunchun|hun chun|hch-pd|hch-cr|cel fbp|fbp standard|珲春|混春|混川'
-  )`;
-  if (fulfillmentType === "fbp") where.push(fbpOrder);
-  if (fulfillmentType === "fbs") where.push(`NOT ${fbpOrder}`);
+  ), 0)`;
+  if (fulfillmentType === "fbp") where.push(`${fbpOrder} = 1`);
+  if (fulfillmentType === "fbs") where.push(`${fbpOrder} = 0`);
   return { joins: "", where: where.filter(Boolean).join(" AND "), params };
 }
 
@@ -25907,7 +26416,7 @@ function withRestrictedOrderIdsMysql(base, ids) {
   };
 }
 
-async function orderPagedSqlCountsMysql(base) {
+async function orderPagedSqlCountsMysql(base, coverage) {
   const row = await mysqlQueryOne(`
     SELECT
       COUNT(*) AS all_count,
@@ -25918,7 +26427,9 @@ async function orderPagedSqlCountsMysql(base) {
       SUM(CASE WHEN ${orderStatusSqlMysql("delivered")} THEN 1 ELSE 0 END) AS delivered,
       SUM(CASE WHEN ${orderStatusSqlMysql("cancelled")} THEN 1 ELSE 0 END) AS cancelled,
       SUM(CASE WHEN ${orderStatusSqlMysql("unbound")} THEN 1 ELSE 0 END) AS unbound,
-      SUM(CASE WHEN ${orderStatusSqlMysql("pending_purchase")} THEN 1 ELSE 0 END) AS pending_purchase
+      SUM(CASE WHEN ${orderStatusSqlMysql("pending_purchase", coverage)} THEN 1 ELSE 0 END) AS pending_purchase,
+      SUM(CASE WHEN ${orderStatusSqlMysql("purchase_in_transit", coverage)} THEN 1 ELSE 0 END) AS purchase_in_transit,
+      SUM(CASE WHEN ${orderStatusSqlMysql("purchase_records_missing", coverage)} THEN 1 ELSE 0 END) AS purchase_records_missing
     FROM orders o
     WHERE ${base.where}
   `, base.params);
@@ -25931,7 +26442,9 @@ async function orderPagedSqlCountsMysql(base) {
     delivered: Number(row?.delivered || 0),
     cancelled: Number(row?.cancelled || 0),
     unbound: Number(row?.unbound || 0),
-    pending_purchase: Number(row?.pending_purchase || 0)
+    pending_purchase: Number(row?.pending_purchase || 0),
+    purchase_in_transit: Number(row?.purchase_in_transit || 0),
+    purchase_records_missing: Number(row?.purchase_records_missing || 0)
   };
 }
 
@@ -25964,13 +26477,23 @@ export async function ordersPagedMysql(query = {}) {
   const logisticsMethodOptionsPromise = includeLogisticsOptions && optionsBase
     ? orderLogisticsMethodOptionsMysql(optionsBase, logisticsSummaryRows)
     : Promise.resolve([]);
-  const countsPromise = includeCounts ? orderPagedSqlCountsMysql(base) : Promise.resolve({});
-  const filtered = await orderFilteredSqlMysql(query, base);
-  const totalPromise = includeRows
-    ? mysqlQueryOne(`SELECT COUNT(*) AS total FROM orders o ${filtered.joins} WHERE ${filtered.where}`, filtered.params)
-    : Promise.resolve(null);
-  const start = (page - 1) * pageSize;
+  const needsCoverageForFilter = ["pending_purchase", "purchase_in_transit", "purchase_records_missing"]
+    .includes(String(query.status || "all"));
+  const coverage = includeCounts || needsCoverageForFilter ? await orderProcurementCoverageMysql() : null;
+  const countsPromise = includeCounts ? orderPagedSqlCountsMysql(base, coverage) : Promise.resolve({});
+  const filtered = await orderFilteredSqlMysql(query, base, coverage);
   const sortMode = String(query.sortMode || query.sort_mode || "ordered");
+  // Pagination must use the active filter, not the all-status tab count.
+  // Status counts deliberately omit filters such as the selected status,
+  // search, mark, fulfillment type, and print state.
+  const totalPromise = mysqlQueryOne(`
+    SELECT COUNT(DISTINCT o.id) AS total
+    FROM orders o
+    ${filtered.joins}
+    WHERE ${filtered.where}
+  `, filtered.params);
+  const start = (page - 1) * pageSize;
+  let inventoryTotal = null;
   let rows = [];
   if (includeRows) {
     if (sortMode === "inventory") {
@@ -25982,7 +26505,10 @@ export async function ordersPagedMysql(query = {}) {
         GROUP BY o.id
         ORDER BY o.ordered_at DESC
       `, filtered.params);
-      rows = sortPagedOrdersMysql(await orderRowsByIdsMysql(idRows.map((row) => row.id)), query).slice(start, start + pageSize);
+      inventoryTotal = idRows.length;
+      const sortRows = await orderInventorySortRowsMysql(idRows.map((row) => row.id));
+      const pageIds = sortPagedOrdersMysql(sortRows, query).slice(start, start + pageSize).map((row) => row.id);
+      rows = await orderRowsByIdsMysql(pageIds, needsCoverageForFilter || includeCounts ? coverage : null);
     } else {
       const idRows = await mysqlQuery(`
         SELECT o.id
@@ -25993,7 +26519,10 @@ export async function ordersPagedMysql(query = {}) {
         ORDER BY o.ordered_at DESC
         LIMIT ? OFFSET ?
       `, [...filtered.params, pageSize, start]);
-      rows = sortPagedOrdersMysql(await orderRowsByIdsMysql(idRows.map((row) => row.id)), query);
+      rows = sortPagedOrdersMysql(await orderRowsByIdsMysql(
+        idRows.map((row) => row.id),
+        needsCoverageForFilter || includeCounts ? coverage : null
+      ), query);
     }
   }
   const [counts, logisticsMethodOptions, totalRow] = await Promise.all([
@@ -26001,7 +26530,7 @@ export async function ordersPagedMysql(query = {}) {
     logisticsMethodOptionsPromise,
     totalPromise
   ]);
-  const total = Number(totalRow?.total ?? counts?.all ?? rows.length ?? 0);
+  const total = Number(inventoryTotal ?? totalRow?.total ?? counts?.all ?? rows.length ?? 0);
   return {
     rows,
     total,
@@ -26040,13 +26569,21 @@ function addOrderSearchSqlMysql(where, params, query) {
     return;
   }
   if (type === "product") {
+    // Keep both mapping matches, including inactive/missing product fallback.
+    // Separate equality joins use the primary and shop/SKU unique indexes.
     where.push(`EXISTS (
       SELECT 1 FROM order_items oi
-      LEFT JOIN sku_mappings sm ON (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku)) AND sm.active = 1
-      LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1
-      WHERE oi.order_id = o.id AND LOWER(CONCAT(COALESCE(p.name, ''), ' ', COALESCE(p.code, ''), ' ', COALESCE(p.selection_id, ''), ' ', oi.ozon_sku)) LIKE ?
+      LEFT JOIN sku_mappings direct_sm ON direct_sm.id = oi.sku_mapping_id AND direct_sm.active = 1
+      LEFT JOIN sku_mappings fallback_sm ON fallback_sm.shop_id = o.shop_id AND fallback_sm.ozon_sku = oi.ozon_sku AND fallback_sm.active = 1
+      LEFT JOIN products direct_p ON direct_p.id = direct_sm.product_id AND direct_p.active = 1
+      LEFT JOIN products fallback_p ON fallback_p.id = fallback_sm.product_id AND fallback_p.active = 1
+      WHERE oi.order_id = o.id AND (
+        (direct_sm.id IS NOT NULL AND LOWER(CONCAT(COALESCE(direct_p.name, ''), ' ', COALESCE(direct_p.code, ''), ' ', COALESCE(direct_p.inventory_number, ''), ' ', COALESCE(direct_p.selection_id, ''), ' ', oi.ozon_sku)) LIKE ?)
+        OR (fallback_sm.id IS NOT NULL AND LOWER(CONCAT(COALESCE(fallback_p.name, ''), ' ', COALESCE(fallback_p.code, ''), ' ', COALESCE(fallback_p.inventory_number, ''), ' ', COALESCE(fallback_p.selection_id, ''), ' ', oi.ozon_sku)) LIKE ?)
+        OR (direct_sm.id IS NULL AND fallback_sm.id IS NULL AND LOWER(CONCAT('   ', oi.ozon_sku)) LIKE ?)
+      )
     )`);
-    params.push(like);
+    params.push(like, like, like);
     return;
   }
   if (type === "purchaseTracking") {
@@ -26071,7 +26608,8 @@ async function addOrderLogisticsMethodSqlMysql(where, params, query) {
   if (clause) where.push(clause);
 }
 
-function orderStatusSqlMysql(status) {
+function orderStatusSqlMysql(status, coverage = null) {
+  if (coverage && ["pending_purchase", "purchase_in_transit", "purchase_records_missing"].includes(status)) return procurementQueueSql(coverage, status);
   if (status === "all") return "1 = 1";
   if (status === "pending_purchase") {
     return `(
@@ -26190,8 +26728,8 @@ function orderStatusSqlMysql(status) {
   const stage = "LOWER(COALESCE(o.tracking_stage, ''))";
   const value = `LOWER(CONCAT(COALESCE(o.status, ''), ' ', COALESCE(o.tracking_stage, ''), ' ', COALESCE(o.logistics_status, ''), ' ', COALESCE(o.tracking_number, '')))`;
   if (status === "awaiting_packaging") {
-    return `((${state} IN ('awaiting_registration','acceptance_in_progress','awaiting_approve','awaiting_packaging','posting_created','posting_awaiting_registration','posting_acceptance_in_progress')
-      OR ${stage} IN ('awaiting_registration','acceptance_in_progress','awaiting_approve','awaiting_packaging','posting_created','posting_awaiting_registration','posting_acceptance_in_progress'))
+    return `((${state} IN ('acceptance_in_progress','awaiting_approve','awaiting_packaging','posting_created','posting_acceptance_in_progress')
+      OR ${stage} IN ('acceptance_in_progress','awaiting_approve','awaiting_packaging','posting_created','posting_acceptance_in_progress'))
       AND NOT (${orderStatusSqlMysql("awaiting_deliver")})
       AND NOT (${orderStatusSqlMysql("delivering")})
       AND NOT (${orderStatusSqlMysql("delivered")})
@@ -26199,8 +26737,8 @@ function orderStatusSqlMysql(status) {
       AND NOT (${orderStatusSqlMysql("dispute")}))`;
   }
   if (status === "awaiting_deliver") {
-    return `(${state} IN ('awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery')
-      OR ${stage} IN ('awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery'))`;
+    return `(${state} IN ('awaiting_registration','posting_awaiting_registration','posting_registration_error','awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery')
+      OR ${stage} IN ('awaiting_registration','posting_awaiting_registration','posting_registration_error','awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery'))`;
   }
   if (status === "dispute") return `(${value} LIKE '%arbitration%' OR ${value} LIKE '%dispute%')`;
   if (status === "cancelled") return `(${value} LIKE '%cancel%' OR ${value} LIKE '%return%' OR ${value} LIKE '%not_accepted%')`;
@@ -27461,52 +27999,79 @@ export async function testCustomerMessageTemplateMysql(body = {}) {
 }
 
 async function cancelFbpReplenishmentApprovedTransfersMysql(connection, orderId, userId = null) {
+  const orderNo = Number(orderId);
+  const [reservationRows] = await connection.execute(`
+    SELECT * FROM inventory_movements
+    WHERE source_type = 'fbp_replenishment_reserve'
+      AND source_ref LIKE ? AND status = 'posted'
+    ORDER BY id FOR UPDATE
+  `, [`fbp_replenishment:${orderNo}:%:reserve`]);
   const [transfers] = await connection.execute(`
-    SELECT *
-    FROM fbp_transfer_records
+    SELECT * FROM fbp_transfer_records
     WHERE source_type = 'fbp_replenishment'
       AND source_ref LIKE ?
-    ORDER BY id
-    FOR UPDATE
-  `, [`fbp_replenishment:${Number(orderId)}:%`]);
-  const invalid = transfers.filter((row) => String(row.status || "") !== "sent" || Number(row.listed_quantity || 0) > 0);
+    ORDER BY id FOR UPDATE
+  `, [`fbp_replenishment:${orderNo}:%`]);
+  const invalid = transfers.filter((row) => String(row.status || '') !== 'sent' || Number(row.listed_quantity || 0) > 0);
   if (invalid.length) {
-    throw new Error("备货单关联的发仓记录已经进入后续流程，不能取消；请先核对 Ozon 申请和发货状态。");
+    throw new Error('备货单关联的发仓记录已经进入后续流程，不能取消；请先核对 Ozon 申请和发货状态。');
   }
 
   let transferCount = 0;
-  let outboundQuantity = 0;
+  let restoredQuantity = 0;
+  for (const reservation of reservationRows) {
+    const movementRef = `${reservation.source_ref}:cancelled`;
+    const existing = await mysqlConnectionQueryOne(connection, `
+      SELECT id FROM inventory_movements
+      WHERE source_type = 'fbp_replenishment_reserve_release' AND source_ref = ?
+      LIMIT 1 FOR UPDATE
+    `, [movementRef]);
+    if (existing?.id) continue;
+    await postInventoryMysql(connection, {
+      product_id: Number(reservation.product_id),
+      shop_id: nullableInteger(reservation.shop_id),
+      sku_mapping_id: nullableInteger(reservation.sku_mapping_id),
+      owner_person_id: nullableInteger(reservation.owner_person_id) || await resolvePersonIdOrFirstMysql(userId, connection),
+      source_type: 'fbp_replenishment_reserve_release',
+      source_ref: movementRef,
+      quantity_delta: Number(reservation.quantity_delta || 0),
+      stock_location: 'LOCAL',
+      stock_location_source: 'fbp_replenishment',
+      movement_type: 'CANCEL_RESTORE',
+      unit_cost: Number(reservation.unit_cost || 0),
+      amount: Math.abs(Number(reservation.quantity_delta || 0)) * Number(reservation.unit_cost || 0),
+      note: `FBP备货单取消，释放本地预留 ${Number(reservation.quantity_delta || 0)} 件`
+    });
+    restoredQuantity += Math.max(0, Number(reservation.quantity_delta || 0));
+  }
   for (const transfer of transfers) {
     const quantity = Math.max(0, Math.round(Number(transfer.quantity || 0)));
     const movementRef = `${transfer.source_ref}:cancelled_return`;
     const existingReturn = await mysqlConnectionQueryOne(connection, `
-      SELECT id
-      FROM inventory_movements
-      WHERE source_type = 'fbp_transfer_received'
-        AND source_ref = ?
-      LIMIT 1
-      FOR UPDATE
+      SELECT id FROM inventory_movements
+      WHERE source_type = 'fbp_transfer_received' AND source_ref = ?
+      LIMIT 1 FOR UPDATE
     `, [movementRef]);
     if (!existingReturn?.id && quantity > 0) {
       await postFbpTransferInventoryMovementMysql(
         connection,
         { ...transfer, movement_source_ref: movementRef, person_id: transfer.person_id || userId || null },
         quantity,
-        "LOCAL",
+        'LOCAL',
         `FBP备货单取消，本地库存退回 ${quantity} 件`
       );
-      outboundQuantity += quantity;
+      restoredQuantity += quantity;
     }
     await connection.execute(`
       UPDATE fbp_transfer_records
       SET status = 'cancelled', closed_at = CURRENT_TIMESTAMP,
-        note = CONCAT(COALESCE(note, ''), CASE WHEN COALESCE(note, '') = '' THEN '' ELSE '\n' END, ?),
+        note = CONCAT(COALESCE(note, ''), CASE WHEN COALESCE(note, '') = '' THEN '' ELSE '\\n' END, ?),
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `, [`FBP备货单取消，本地库存已退回 ${quantity} 件`, Number(transfer.id)]);
     transferCount += 1;
   }
-  return { transferCount, outboundQuantity };
+  return { transferCount, outboundQuantity: restoredQuantity, reservedQuantity: 0 };
 }
 
 function ozonWebhookValue(payload = {}, ...keys) {
@@ -29169,3 +29734,24 @@ export async function deleteSkuMappingMysql(id) {
   ensureMysqlCutoverEnabled();
   return await updateSkuMappingMysql(id, { active: 0 });
 }
+
+
+const procurementLedgerService = createProcurementLedgerService({
+  query: mysqlQuery, transaction: withMysqlTransaction,
+  coverage: (query, productId) => loadOrderProcurementCoverage(query, '', { fresh: true, productId }),
+  postMovement: postInventoryMysql, receive: applyInboundRecordUpdateMysql,
+  recordCost: recordPurchaseCostVersionMysql, refreshPurchase: refreshPurchaseOrderStatusMysql,
+  requirePerson: requireSessionPersonIdMysql, invalidate: invalidateOrderProcurementCoverage,
+  prepare: async () => {
+    ensureMysqlCutoverEnabled();
+    await ensureProcurementLedgerSchema(mysqlExecute);
+    await ensureStockLocationSchemaMysql();
+    await ensureProductCompositionSchemaMysql();
+    await ensureProcurementOrderSourceSchemaMysql();
+    await ensurePurchaseCostVersionSchemaMysql();
+  }
+});
+export const procurementLedgerMysql = (query) => procurementLedgerService.read(query);
+export const applyProcurementLedgerMysql = (body, personId) => procurementLedgerService.apply(body, personId);
+
+export const previewProcurementLedgerMysql = (body) => procurementLedgerService.preview(body);

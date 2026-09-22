@@ -14,10 +14,20 @@ test("AI variant import keeps template material while excluding source-draft ima
   assert.match(normalizeImportCandidate, /const templateOnlyImages = templateImageList\.filter\(\(url\) => !sourceImageList\.includes\(url\)\)/);
   assert.match(normalizeImportCandidate, /const fallbackImageList = templateOnlyImages\.length \? templateOnlyImages/);
   assert.match(normalizeImportCandidate, /const imageList = draftCurrentImageList\.length/);
+  assert.match(normalizeImportCandidate, /const sourceDraftId = String\(firstValue\(/);
+  assert.match(normalizeImportCandidate, /row\.draft_id/);
+  assert.match(normalizeImportCandidate, /sourceRaw\.listing_draft_id/);
   assert.doesNotMatch(normalizeImportCandidate, /uniqueList\(normalizeImageList\(\[/);
 });
 
 test("AI variant import does not append duplicate detail snapshots behind the selected material", () => {
   assert.match(source, /detailImages: uniqueList\(imageList\.length > 1 \? imageList\.slice\(1\) : explicitDetailImages\)/);
   assert.match(source, /function firstNonEmptyImageList\(values = \[\]\)/);
+});
+
+test("AI variant record import prefers first SKU variant images over a one-image template summary", () => {
+  const normalizeImportCandidate = source.match(/function normalizeImportCandidate\([\s\S]*?\n\}/)?.[0] || "";
+  assert.match(normalizeImportCandidate, /const variantImageList = firstNonEmptyImageList\(\[/);
+  assert.match(normalizeImportCandidate, /firstVariant\?\.images/);
+  assert.match(normalizeImportCandidate, /variantImageList\.length \? variantImageList : fallbackImageList/);
 });

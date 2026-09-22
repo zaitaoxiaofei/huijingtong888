@@ -89,7 +89,7 @@ onMounted(() => loadAlerts());
 <template>
   <div class="mobile-alerts-page" v-loading="loading">
     <section class="mobile-alerts-search">
-      <el-input v-model="query" clearable placeholder="店铺 / SKU / 商品名" @keyup.enter="loadAlerts()">
+      <el-input v-model="query" clearable placeholder="库存编号 / 店铺 / SKU / 商品名" @keyup.enter="loadAlerts()">
         <template #prefix><el-icon><Search /></el-icon></template>
       </el-input>
       <el-button type="primary" @click="loadAlerts()">查询</el-button>
@@ -117,6 +117,7 @@ onMounted(() => loadAlerts());
           <div v-else class="mobile-alert-card__placeholder">无图</div>
           <div>
             <h2>{{ row.name || row.product_name || "未命名商品" }}</h2>
+            <p>库存编号 {{ row.inventory_number || row.inventory_id || "-" }}</p>
             <p>SKU {{ row.ozon_sku || "-" }}</p>
             <span>{{ warningText(row) }}</span>
           </div>

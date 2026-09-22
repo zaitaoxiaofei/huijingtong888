@@ -13,6 +13,7 @@ candidate_port="3001"
 candidate_pid=""
 candidate_log="/tmp/ozon-erp-candidate-${release_version}.log"
 candidate_pid_file="/tmp/ozon-erp-candidate.pid"
+release_lock_file="/var/lock/ozon-erp-release.lock"
 
 if [[ -z "$archive_path" || -z "$release_version" ]]; then
   echo "Usage: remote-release.sh <archive.zip> <version> [run-db-init:1|0]" >&2
@@ -29,6 +30,15 @@ fi
 if [[ ! "$release_version" =~ ^[0-9A-Za-z._-]+$ ]]; then
   echo "Invalid release version: $release_version" >&2
   exit 2
+fi
+
+# ECS has one shared current release link and one blue/green candidate port.
+# A second release must fail before touching either, rather than racing a live
+# database initialization or rolling another release back.
+exec 9>"$release_lock_file"
+if ! flock -n 9; then
+  echo "Another ECS release is already active; wait for it to finish before deploying." >&2
+  exit 75
 fi
 
 release_dir="$releases_root/$release_version"
@@ -114,13 +124,15 @@ start_candidate() {
   set +a
   runuser -u ozon-erp -- bash -lc "
     cd '$release_dir'
+    exec 9>&-
     nohup env PORT='$candidate_port' HOST='127.0.0.1' SCHEDULED_JOBS_ENABLED='false' DEPLOYMENT_CANDIDATE='1' NODE_ENV='production' NODE_OPTIONS='--max-old-space-size=384' /usr/bin/node src/server.js >'$candidate_log' 2>&1 &
     echo \$! >'$candidate_pid_file'
   "
   candidate_pid="$(cat "$candidate_pid_file")"
 
   local candidate_ok=0
-  for _ in {1..60}; do
+  # Allow schema warmup to finish while the primary is serving traffic.
+  for _ in {1..180}; do
     if ! kill -0 "$candidate_pid" 2>/dev/null; then
       cat "$candidate_log" >&2 || true
       echo "Candidate process exited before readiness." >&2
@@ -128,7 +140,9 @@ start_candidate() {
     fi
     local status
     status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${candidate_port}/api/ready" || true)"
-    if [[ "$status" == "200" ]]; then
+    local candidate_version
+    candidate_version="$(curl -fsS --max-time 5 "http://127.0.0.1:${candidate_port}/release.json" | node -e 'let text="";process.stdin.on("data", c => text+=c);process.stdin.on("end", () => { try { process.stdout.write(JSON.parse(text).version || ""); } catch {} });' || true)"
+    if [[ "$status" == "200" && "$candidate_version" == "$release_version" ]]; then
       candidate_ok=1
       break
     fi
@@ -152,7 +166,7 @@ if [[ ! -f "$staging_dir/package.json" || ! -f "$staging_dir/src/server.js" ]]; 
 fi
 
 chown -R ozon-erp:ozon-erp "$staging_dir"
-runuser -u ozon-erp -- bash -lc "cd '$staging_dir' && npm ci --omit=dev"
+runuser -u ozon-erp -- bash -lc "cd '$staging_dir' && npm ci --omit=dev --include=optional"
 
 if [[ "$run_db_init" == "1" ]]; then
   set -a
@@ -160,6 +174,13 @@ if [[ "$run_db_init" == "1" ]]; then
   source "$env_file"
   set +a
   (cd "$staging_dir" && npm run db:init:mysql)
+fi
+
+if [[ -f "$staging_dir/scripts/init-inventory-numbering.mjs" ]]; then
+  set -a
+  source "$env_file"
+  set +a
+  (cd "$staging_dir" && node scripts/init-inventory-numbering.mjs --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
 fi
 
 install -d -o ozon-erp -g ozon-erp "$staging_dir/public"
@@ -179,9 +200,10 @@ ln -sfn "$release_dir" "$current_link"
 systemctl restart ozon-erp
 
 health_ok=0
-for _ in {1..60}; do
+for _ in {1..180}; do
   status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3000/api/ready || true)"
-  if [[ "$status" == "200" ]]; then
+  primary_version="$(curl -fsS --max-time 5 http://127.0.0.1:3000/release.json | node -e 'let text="";process.stdin.on("data", c => text+=c);process.stdin.on("end", () => { try { process.stdout.write(JSON.parse(text).version || ""); } catch {} });' || true)"
+  if [[ "$status" == "200" && "$primary_version" == "$release_version" ]]; then
     health_ok=1
     break
   fi
@@ -197,14 +219,25 @@ fi
 candidate_pid=""
 
 trap - ERR
+release_retention_minutes=$((7 * 24 * 60))
+while IFS= read -r -d '' old_release; do
+  [[ "$old_release" != "$release_dir" && "$old_release" != "$previous_target" ]] || continue
+  rm -rf -- "$old_release"
+done < <(find "$releases_root" -mindepth 1 -maxdepth 1 -type d -mmin "+$release_retention_minutes" -print0)
+
 find "$releases_root" -mindepth 1 -maxdepth 1 -type d -not -name '.*.staging' -printf '%T@ %p\n' \
   | sort -nr \
-  | tail -n +4 \
+  | tail -n +3 \
   | cut -d' ' -f2- \
   | while IFS= read -r old_release; do
       [[ -n "$old_release" && "$old_release" != "$release_dir" && "$old_release" != "$previous_target" ]] || continue
-      rm -rf "$old_release"
+      rm -rf -- "$old_release"
     done
+
+if [[ -d "$shared_root/rollback" ]]; then
+  find "$shared_root/rollback" -mindepth 1 -maxdepth 1 -type d -mmin "+$release_retention_minutes" -exec rm -rf -- {} +
+fi
+find /tmp -maxdepth 1 -type f -name 'ozon-erp-*.zip' -mmin +60 -delete
 
 rm -f "$archive_path"
 echo "Release active: $release_dir"

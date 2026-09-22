@@ -1,3 +1,4 @@
+import { canAccessPage } from "../../../src/shared/permissions.js";
 import { ChatDotRound, Coin, DataAnalysis, Document, Finished, Goods, House, MagicStick, Setting, ShoppingCart, Tools, WarningFilled } from "@element-plus/icons-vue";
 
 export const navigationMenus = [
@@ -68,6 +69,7 @@ export const navigationMenus = [
     icon: Goods,
     children: [
       { key: "inventory-products", label: "商品库存", route: "/inventory/products" },
+      { key: "purchase-list", label: "采购清单 / 待入库", route: "/purchase-list" },
       { key: "inventory-fbp", label: "FBP库存", route: "/inventory/fbp" },
       { key: "inventory-alerts", label: "库存预警", route: "/inventory/alerts" },
       { key: "inventory-fbp-opportunities", label: "备货建议", route: "/inventory/fbp-opportunities" },
@@ -82,7 +84,6 @@ export const navigationMenus = [
     icon: ShoppingCart,
     children: [
       { key: "procurement-workspace", label: "采购工作台", route: "/procurement/workspace" },
-      { key: "purchase-list", label: "待入库清单", route: "/purchase-list" },
       { key: "purchase-history", label: "入库记录", route: "/purchase-history" },
       { key: "purchase-cost-center", label: "成本预警", route: "/purchase-cost-center" },
       { key: "procurement-reconciliation", label: "采购对账", route: "/procurement/reconciliation" },
@@ -131,14 +132,12 @@ export const navigationMenus = [
   }
 ];
 
-export function navigationMenusForRole(role) {
-  const isAdmin = String(role || "").trim().toLowerCase() === "admin";
+export function navigationMenusForRole(subject) {
   return navigationMenus
-    .filter((menu) => !menu.adminOnly || isAdmin)
-    .map((menu) => menu.children
-      ? { ...menu, children: menu.children.filter((child) => !child.adminOnly || isAdmin) }
+    .map(menu => menu.children
+      ? { ...menu, children: menu.children.filter(child => canAccessPage(subject, child.route)) }
       : menu)
-    .filter((menu) => !menu.children || menu.children.length > 0);
+    .filter(menu => menu.children ? menu.children.length > 0 : canAccessPage(subject, menu.route));
 }
 
 export const navigationIconByRoute = navigationMenus.reduce((map, menu) => {

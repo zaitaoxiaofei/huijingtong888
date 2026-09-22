@@ -172,7 +172,7 @@ function transferActionTooltip(row) {
 function inventoryTooltipCn(row) {
   return [
     `本地：库存 ${integer(row.local_stock)} + 采购在途 ${integer(row.pending_procurement_qty)} = ${integer(localInventoryTotal(row))} 件`,
-    `FBP发仓：${integer(row.fbp_transfer_in_transit_qty)} 件`,
+    `FBP在途：${integer(row.fbp_transfer_in_transit_qty)} 件`,
     `FBP可售：${integer(row.fbp_available)} 件`,
     `FBS可售：${integer(row.fbs_available)} 件`,
     `覆盖天数：${coverageText(row)}`,
@@ -195,7 +195,7 @@ function trendTooltip(row) {
 function inventoryTooltip(row) {
   return [
     `本地：在库 ${integer(row.local_stock)} + 采购在途 ${integer(row.pending_procurement_qty)} = ${integer(localInventoryTotal(row))} 件`,
-    `FBP发仓：${integer(row.fbp_transfer_in_transit_qty)} 件`,
+    `FBP在途：${integer(row.fbp_transfer_in_transit_qty)} 件`,
     `FBP：${integer(row.fbp_available)} 件`,
     `FBS：${integer(row.fbs_available)} 件`,
     `覆盖：${coverageText(row)}`,
@@ -1113,7 +1113,7 @@ onMounted(async () => {
       :shops="state.shops"
       :show-date-range="false"
       query-label="机会搜索"
-      query-placeholder="店铺 / SKU / Offer / 产品名称"
+      query-placeholder="完整库存编号 / SKU / Offer / 名称关键词"
       @search="handleSearch"
       @reset="handleReset"
     >
@@ -1231,6 +1231,7 @@ onMounted(async () => {
             </button>
           </template>
           <template #default="{ row }">
+            <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || "-" }}</span>
             <el-tooltip placement="top" effect="light" :content="inventoryTooltipCn(row)" :popper-style="{ whiteSpace: 'pre-line', maxWidth: '280px' }">
               <div class="inventory-summary-cell">
                 <span><strong>本地+采购</strong><em>{{ integer(localInventoryTotal(row)) }}</em></span>
@@ -1240,7 +1241,7 @@ onMounted(async () => {
                   :disabled="Number(row.fbp_transfer_in_transit_qty || 0) <= 0"
                   @click.stop="openFbpReceiveDialog(row)"
                 >
-                  <strong>FBP发仓</strong><em>{{ integer(row.fbp_transfer_in_transit_qty) }}</em>
+                  <strong>FBP在途</strong><em>{{ integer(row.fbp_transfer_in_transit_qty) }}</em>
                 </button>
                 <span><strong>FBP</strong><em>{{ integer(row.fbp_available) }}</em></span>
                 <span><strong>FBS</strong><em>{{ integer(row.fbs_available) }}</em></span>
@@ -1447,7 +1448,7 @@ onMounted(async () => {
                 <div>
                   <strong>{{ row.product_name || row.name || row.online_name || "-" }}</strong>
                   <span>SKU ID：{{ row.ozon_sku || "-" }}</span>
-                  <span>库存编码：{{ row.inventory_id || "-" }}</span>
+                  <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || "-" }}</span>
                 </div>
               </div>
             </template>
@@ -2115,7 +2116,7 @@ onMounted(async () => {
 }
 
 .fbp-create-product strong,
-.fbp-create-product span {
+.fbp-create-product span:not(.inventory-id-display) {
   display: block;
   min-width: 0;
   overflow: hidden;
@@ -2129,7 +2130,7 @@ onMounted(async () => {
   font-weight: 700;
 }
 
-.fbp-create-product span {
+.fbp-create-product span:not(.inventory-id-display) {
   color: #64748b;
   font-size: 12px;
   line-height: 1.4;

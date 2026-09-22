@@ -7,7 +7,7 @@ const optimizerSource = readFileSync(new URL("../scripts/optimize-mysql-indexes.
 
 test("inventory product search resolves exact identifiers before broad contains search", () => {
   assert.match(serviceSource, /async function exactInventoryProductSearchIdsMysql/);
-  assert.match(serviceSource, /sm\.active = 1 AND \(sm\.ozon_sku = \? OR sm\.offer_id = \?\)/);
+  assert.match(serviceSource, /inventoryIdentifierSearch\(searchText, mode\)/);
   assert.match(serviceSource, /if \(exactSearchProductIds\.length\)/);
 });
 

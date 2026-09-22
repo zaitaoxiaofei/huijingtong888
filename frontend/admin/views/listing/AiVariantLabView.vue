@@ -124,7 +124,7 @@ const vehicleCatalog = reactive({
   activeBrand: "",
   addVisible: false,
   addSaving: false,
-  addForm: { brand: "", model: "", tags: [] }
+  addForm: { brand: "", model: "", vehicleReferenceImageUrl: "", tags: [] }
 });
 const recognitionEditing = reactive({ fixed: false, variable: false, forbidden: false });
 const manualTargetExpanded = ref(false);
@@ -138,27 +138,38 @@ const workflowSteps = [
 const operatorRulePresets = [
   {
     key: "vehicle_full",
-    label: "车型完整裂变",
-    hint: "汽车品牌、车型型号、背景车辆和产品上的品牌/车型标识都可以随目标车型变化；产品主体、材质、数量、结构不变，商品标题、标签、描述重新生成。",
+    variantType: "vehicle_model_swap",
+    label: "品牌+型号完整适配",
+    hint: "适合产品本身需要印完整品牌+型号的场景，例如门槛条。产品主体、材质、数量、结构不变；产品上的品牌+型号、背景车辆和主图标题都改为每个目标品牌+型号。可同时选择多个品牌和型号，每个目标独立生成。",
     note: "背景车辆、主图车型标题、产品上的车型或品牌标识允许随目标车型变化；商品标题、标签、描述重新生成；产品主体、材质、数量、结构不变。"
   },
   {
     key: "vehicle_same_brand",
-    label: "同品牌车型裂变",
-    hint: "锁定整个产品本体以及产品表面的 Logo、品牌标识、车型字样、印刷文字和图案；只允许修改产品外部的主图标题/型号文本；允许修改背景车辆车型。",
+    variantType: "same_brand_model_fission",
+    label: "同品牌型号适配",
+    hint: "仅适用于同一汽车品牌。例如 TENET T4 适配到 TENET T8。产品主体和产品上的原品牌/Logo/车型印字全部保留；只改背景车辆、主图标题和商品文案中的目标型号。选择其他品牌会被阻止。",
     note: "锁定整个产品本体，产品上的 Logo、品牌标识、车型字样、印刷文字和图案一律不变；只允许修改产品外部的主图标题/型号文本；允许修改背景车辆车型；商品标题、标签、描述重新生成。"
   },
   {
-    key: "image_title_only",
-    label: "只换主图车型标题",
-    hint: "只修改图片里的车型标题/型号文字；产品主体、汽车品牌 Logo、背景和商品图片不变，但商品标题、标签、描述重新生成。",
-    note: "主图只改车型标题，产品主体、产品品牌标识和背景不变；商品标题、标签、描述重新生成。"
+    key: "cross_brand_brand_text",
+    variantType: "brand_logo_only_vehicle_fission",
+    label: "跨品牌品牌适配",
+    hint: "适合跨品牌铺货。产品主体、材质、数量、结构和产品上的型号文字不变；产品上的可编辑品牌区域只换成目标品牌文字，例如 TENET 改为 BELGEE，且不把目标型号印到产品上。背景车、主图标题和文案使用完整目标品牌+型号。",
+    note: "跨品牌车型裂变：产品主体、材质、数量、结构和产品上的型号文字不变；可编辑品牌区域只写目标品牌纯文本，禁止生成、复制或仿制官方 Logo、车标、徽章、符号或商标图形；目标型号不得印到产品上；主图标题和背景车辆改为目标完整车型；商品标题、标签、描述重新生成。"
   },
   {
-    key: "brand_logo_only_vehicle_fission",
-    label: "跨品牌文字替换",
-    hint: "支持 HAVAL、CHERY 等混合目标车型；品牌和车型只使用清晰文本，不生成或仿制官方 Logo、车标、徽章或商标图形；目标型号不印到产品上。",
-    note: "跨品牌车型裂变：产品主体、材质、数量、结构和产品上的型号文字不变；可编辑品牌区域只写目标品牌纯文本，禁止生成、复制或仿制官方 Logo、车标、徽章、符号或商标图形；目标型号不得印到产品上；主图标题和背景车辆改为目标完整车型；商品标题、标签、描述重新生成。"
+    key: "model_only",
+    variantType: "model_only_vehicle_fission",
+    label: "仅型号适配",
+    hint: "适合产品印字区域只放型号的版式。产品主体不变，产品上只替换目标型号，例如 T4 改为 T8、X50 改为 X70，不展示品牌；背景车、主图标题和文案仍使用完整目标品牌+型号。",
+    note: "产品主体、材质、数量、结构和产品布局不变；产品上的可编辑车型文字只替换为目标型号，不得在产品上添加品牌文字；背景车辆和主图标题改为目标完整品牌加型号；商品标题、标签、描述重新生成。"
+  },
+  {
+    key: "image_title_only",
+    variantType: "title_only_vehicle_fission",
+    label: "仅主图标题适配",
+    hint: "最严格模式。产品主体、产品印字、背景车辆和场景全部保留，只替换主图中的品牌+型号标题；商品标题、标签和描述按目标品牌+型号重新生成。",
+    note: "主图只改车型标题，产品主体、产品品牌标识和背景不变；商品标题、标签、描述重新生成。"
   }
 ];
 
@@ -287,7 +298,7 @@ function recognitionSummary(key) {
 }
 
 function openAddVehicleCatalog() {
-  vehicleCatalog.addForm = { brand: vehicleCatalog.activeBrand || "", model: "", tags: [...vehicleCatalog.activeTags] };
+  vehicleCatalog.addForm = { brand: vehicleCatalog.activeBrand || "", model: "", vehicleReferenceImageUrl: "", tags: [...vehicleCatalog.activeTags] };
   vehicleCatalog.addVisible = true;
 }
 
@@ -469,6 +480,12 @@ function normalizeImportCandidate(row = {}, source = "collector", index = 0) {
   const normalizedEditable = normalized.editPayload || normalized.edit_payload || normalized.editable_payload || {};
   const manualFacts = parseMaybeJson(row.manual_facts_json) || parseMaybeJson(row.manual_facts) || row.manualFacts || {};
   const firstVariant = Array.isArray(editablePayload.variants) ? editablePayload.variants[0] : (Array.isArray(payload.variants) ? payload.variants[0] : null);
+  const variantImageList = firstNonEmptyImageList([
+    firstVariant?.images,
+    firstVariant?.primary_image,
+    firstVariant?.cover_image,
+    firstVariant?.main_image
+  ]);
   const draftCurrentImageList = source === "draft" ? firstNonEmptyImageList([
     row.effective_images,
     row.effectiveImages,
@@ -506,7 +523,7 @@ function normalizeImportCandidate(row = {}, source = "collector", index = 0) {
   ]);
   const templateOnlyImages = templateImageList.filter((url) => !sourceImageList.includes(url));
   const fallbackImageList = templateOnlyImages.length ? templateOnlyImages : (templateImageList.length ? templateImageList : sourceImageList);
-  const imageList = draftCurrentImageList.length ? draftCurrentImageList : fallbackImageList;
+  const imageList = draftCurrentImageList.length ? draftCurrentImageList : (variantImageList.length ? variantImageList : fallbackImageList);
   const explicitDetailImages = firstNonEmptyImageList([
     row.detail_image_urls,
     row.detailImageUrls,
@@ -584,6 +601,15 @@ function normalizeImportCandidate(row = {}, source = "collector", index = 0) {
     sourceRaw.ai_variant_draft?.source_template_id,
     sourceRaw.ai_variant_draft?.sourceTemplateId
   ) || "").trim();
+  const sourceDraftId = String(firstValue(
+    source === "draft" ? row.id : "",
+    row.draft_id,
+    row.draftId,
+    row.listing_draft_id,
+    row.listingDraftId,
+    sourceRaw.listing_draft_id,
+    sourceRaw.listingDraftId
+  ) || "").trim();
   const richContentJson = String(firstValue(
     row.rich_content_json,
     row.richContentJson,
@@ -615,7 +641,7 @@ function normalizeImportCandidate(row = {}, source = "collector", index = 0) {
     index,
     source,
     sourceId: source === "draft" ? String(row.id || "").trim() : sourceSku || row.id || "",
-    sourceDraftId: source === "draft" ? String(row.id || sourceSku || "").trim() : "",
+    sourceDraftId,
     sourceShopIds,
     sourceSku,
     title: title || `商品 ${index + 1}`,
@@ -1924,7 +1950,7 @@ function buildListingDraftPayload(row) {
   const offerId = String(row.offerId || "").trim();
   return {
     template_id: material.templateId,
-    template_payload: material.templatePayload || null,
+    template_payload: material.sourceDraftId ? null : material.templatePayload || null,
     source_draft_id: material.sourceDraftId || "",
     shop_ids: normalizeShopIds(material.sourceShopIds || []),
     product_name: title,
@@ -2315,7 +2341,7 @@ function buildOperatorRulePreview() {
 }
 
 function applyOperatorRulePreset(preset) {
-  if (preset.key === "brand_logo_only_vehicle_fission") material.variantGoal = preset.key;
+  material.variantGoal = preset.variantType;
   material.operatorNote = preset.note;
   reconcileRecognitionFactsWithOperatorRule();
 }
@@ -2702,6 +2728,7 @@ async function generateRowRichContent(row, options = {}) {
     row.richContentStatus = "failed";
     row.errorMessage = error.message || row.errorMessage || "富文本保存失败";
     if (!options.silent) ElMessage.error(row.errorMessage);
+    if (options.throwOnError) throw error;
   }
 }
 
@@ -2755,25 +2782,30 @@ async function generateRowVideo(row, options = {}) {
 async function prepareGeneratedRowForDraft(row, options = {}) {
   if (!row || !resultImageUrl(row)) return;
   const key = rowResultId(row);
-  if (rowPreparationTasks.has(key)) return rowPreparationTasks.get(key);
-  const task = (async () => {
-    await persistGeneratedRowAssets(row);
-    if (!row.assets?.rich_content?.json && !row.assets?.rich_content?.richContentJson) {
-      await generateRowRichContent(row, options);
-    }
-    if (options.generateVideo !== false && (!rowVideoUrls(row).length || !rowVideoUsesCurrentMainImage(row))) {
-      await generateRowVideo(row, options);
-    }
-  })();
-  rowPreparationTasks.set(key, task);
-  try {
-    return await task;
-  } finally {
-    rowPreparationTasks.delete(key);
+  let task = rowPreparationTasks.get(key);
+  if (!task) {
+    task = (async () => {
+      await persistGeneratedRowAssets(row);
+      if (!row.assets?.rich_content?.json && !row.assets?.rich_content?.richContentJson) {
+        await generateRowRichContent(row, { ...options, throwOnError: true });
+      }
+    })();
+    rowPreparationTasks.set(key, task);
+    void task.finally(() => {
+      if (rowPreparationTasks.get(key) === task) rowPreparationTasks.delete(key);
+    }).catch(() => {});
+  }
+  await task;
+  if (options.generateVideo !== false && (!rowVideoUrls(row).length || !rowVideoUsesCurrentMainImage(row))) {
+    await generateRowVideo(row, options);
   }
 }
 
 async function prepareGeneratedRowsForDraft(rows = [], options = {}) {
+  if (options.generateVideo === false) {
+    await runWithConcurrency(rows, BACKGROUND_DRAFT_PREPARATION_CONCURRENCY, (row) => prepareGeneratedRowForDraft(row, options));
+    return;
+  }
   await Promise.all(rows.map((row) => queueGeneratedRowPreparation(row, options)));
 }
 
@@ -3088,7 +3120,7 @@ function uploadRowMainImageRequest(row) {
               </div>
               <div class="rule-preset-actions segmented">
                 <el-tooltip v-for="preset in operatorRulePresets" :key="preset.key" :content="preset.hint" placement="top" :show-after="250">
-                <button type="button" :class="{ active: activeOperatorRulePresetKey === preset.key }" @click="applyOperatorRulePreset(preset)"><strong>{{ preset.label }}</strong><span>{{ preset.key === 'vehicle_full' ? '品牌与型号都变' : preset.key === 'vehicle_same_brand' ? '产品全锁，只换标题与背景车' : preset.key === 'brand_logo_only_vehicle_fission' ? '只写品牌文字，型号不上产品' : '产品与背景不变' }}</span></button>
+                <button type="button" :class="{ active: activeOperatorRulePresetKey === preset.key }" @click="applyOperatorRulePreset(preset)"><strong>{{ preset.label }}</strong><span>{{ preset.key === 'vehicle_full' ? '产品、背景、标题都换完整目标' : preset.key === 'vehicle_same_brand' ? '保留产品标识，只换型号与背景' : preset.key === 'cross_brand_brand_text' ? '产品只换品牌文字' : preset.key === 'model_only' ? '产品只换型号文字' : '仅换主图标题' }}</span></button>
                 </el-tooltip>
               </div>
               <div class="rule-preview-heading">
@@ -3128,7 +3160,7 @@ function uploadRowMainImageRequest(row) {
                 </div>
                 <div class="vehicle-model-options">
                   <el-checkbox v-for="model in activeVehicleBrand?.models || []" :key="model.id" :disabled="isSourceVehicleModel(model.fullName)" :model-value="targetIsSelected(model.fullName)" @change="toggleVehicleModel(model)">
-                    <span>{{ model.label || model.name }}<em v-if="isSourceVehicleModel(model.fullName)">母车型</em></span><small>{{ isSourceVehicleModel(model.fullName) ? "当前母车型，不重复生成" : [model.priority, model.ozonCompetition ? `Ozon竞争：${model.ozonCompetition}` : "", ...model.tags.map((tag) => vehicleCatalog.tags.find((item) => item.key === tag)?.label)].filter(Boolean).join(" · ") }}</small>
+                    <span>{{ model.label || model.name }}<em v-if="isSourceVehicleModel(model.fullName)">母车型</em></span><small>{{ isSourceVehicleModel(model.fullName) ? "当前母车型，不重复生成" : [model.vehicleReferenceImageUrl ? "已配置真实车型参考图" : "Image2 自动匹配俄罗斯市场车型外观", model.priority, model.ozonCompetition ? `Ozon竞争：${model.ozonCompetition}` : "", ...model.tags.map((tag) => vehicleCatalog.tags.find((item) => item.key === tag)?.label)].filter(Boolean).join(" · ") }}</small>
                   </el-checkbox>
                 </div>
               </div>
@@ -3353,6 +3385,7 @@ function uploadRowMainImageRequest(row) {
       <el-form label-position="top">
         <el-form-item label="汽车品牌"><el-input v-model="vehicleCatalog.addForm.brand" placeholder="例如 HAVAL" /></el-form-item>
         <el-form-item label="具体型号"><el-input v-model="vehicleCatalog.addForm.model" placeholder="例如 Jolion；留空时只新增品牌" /></el-form-item>
+        <el-form-item label="真实车型参考图链接"><el-input v-model="vehicleCatalog.addForm.vehicleReferenceImageUrl" placeholder="建议使用清晰的官方车型外观图；用于背景车准确生成" /></el-form-item>
         <el-form-item label="车型标签">
           <el-checkbox-group v-model="vehicleCatalog.addForm.tags">
             <el-checkbox v-for="tag in vehicleCatalog.tags" :key="tag.key" :value="tag.key">{{ tag.label }}</el-checkbox>
@@ -3462,7 +3495,7 @@ ul { margin: 0; padding-left: 18px; color: #35435a; font-size: 13px; line-height
 .variant-rule-toolbar > div { display: grid; gap: 3px; }
 .variant-rule-toolbar span { color: #64748b; font-size: 12px; }
 .rule-preview-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.rule-preset-actions.segmented { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin-top: 12px; border: 1px solid #cfd9e7; border-radius: 6px; overflow: hidden; }
+.rule-preset-actions.segmented { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; margin-top: 12px; border: 1px solid #cfd9e7; border-radius: 6px; overflow: hidden; }
 .rule-preset-actions.segmented button { display: grid; gap: 3px; min-height: 52px; padding: 8px 10px; border: 0; border-right: 1px solid #cfd9e7; background: #fff; color: #334155; cursor: pointer; text-align: left; }
 .rule-preset-actions.segmented button:last-child { border-right: 0; }
 .rule-preset-actions.segmented button.active { background: #eaf4ff; color: #1267c4; box-shadow: inset 0 -2px #1677ff; }
@@ -3553,4 +3586,3 @@ pre { max-height: 320px; overflow: auto; margin: 0; white-space: pre-wrap; font-
   .plan-action { justify-items: start; margin-left: 0; max-width: none; text-align: left; }
 }
 </style>
-

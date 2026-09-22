@@ -11,7 +11,7 @@ test("people management ensures timestamp columns before reading or mutating peo
   assert.match(mysqlCutoverSource, /export async function peopleMysql\(\) \{[\s\S]*?await ensurePeopleTimestampSchemaMysql\(\);/);
   assert.match(mysqlCutoverSource, /export async function createPersonMysql[\s\S]*?await ensurePeopleTimestampSchemaMysql\(\);/);
   assert.match(mysqlCutoverSource, /export async function updatePersonMysql[\s\S]*?await ensurePeopleTimestampSchemaMysql\(\);/);
-  assert.match(mysqlCutoverSource, /UPDATE people SET name = \?, username = \?, role = \?, avatar_url = \?, active = \?, updated_at = CURRENT_TIMESTAMP WHERE id = \?/);
+  assert.match(mysqlCutoverSource, /UPDATE people SET name = \?, username = \?, role = \?, roles_json = \?, avatar_url = \?, active = \?, updated_at = CURRENT_TIMESTAMP WHERE id = \?/);
 });
 
 test("fresh MySQL schema creates people.updated_at", () => {

@@ -1,3 +1,4 @@
+import { canAccessPage, hasPermission } from "../../../src/shared/permissions.js";
 import { createRouter, createWebHashHistory } from "vue-router";
 import AdminLayout from "../layouts/AdminLayout.vue";
 import MobileLayout from "../layouts/MobileLayout.vue";
@@ -188,7 +189,7 @@ export const router = createRouter({
         { path: "procurement/workspace", name: "procurement-workspace", component: ProcurementWorkspaceView, meta: { title: "采购工作台", breadcrumb: ["采购", "采购工作台"] } },
         { path: "procurement/platform-orders", name: "procurement-platform-orders", component: ProcurementPlatformOrdersView, meta: { title: "平台订单", breadcrumb: ["采购", "平台订单"] } },
         { path: "procurement/reconciliation", name: "procurement-reconciliation", component: ProcurementReconciliationView, meta: { title: "采购对账", breadcrumb: ["采购", "采购对账"] } },
-        { path: "purchase-list", name: "purchase-list", component: PurchaseListView, meta: { title: "待入库清单", breadcrumb: ["采购入库", "待入库清单"] } },
+        { path: "purchase-list", name: "purchase-list", component: PurchaseListView, meta: { title: "采购清单 / 待入库", breadcrumb: ["库存", "采购清单 / 待入库"] } },
         { path: "purchase-history", name: "purchase-history", component: PurchaseHistoryView, meta: { title: "入库记录", breadcrumb: ["采购入库", "入库记录"] } },
         { path: "purchase-cost-center", name: "purchase-cost-center", component: PurchaseCostCenterView, meta: { title: "成本与异常", breadcrumb: ["采购入库", "成本与异常"] } },
         { path: "inbound", redirect: "/purchase-list" },
@@ -224,18 +225,6 @@ function safeRedirectTarget(target = "/dashboard") {
   return value;
 }
 
-function isAdminOnlyRoute(path = "") {
-  const value = String(path || "");
-  return value === "/finance-center"
-    || value.startsWith("/finance/")
-    || value === "/exceptions/profit"
-    || value === "/profit"
-    || value.startsWith("/profit/")
-    || value === "/settings"
-    || value.startsWith("/settings/")
-    || value === "/asset-variant-center"
-    || value.startsWith("/asset-variant-center/");
-}
 
 router.beforeEach(async (to) => {
   startRoutePerf(to);
@@ -249,11 +238,11 @@ router.beforeEach(async (to) => {
   if (!to.meta?.public) {
     await auth.bootstrap();
     if (!auth.isAuthenticated) return { name: "login", query: { redirect: to.fullPath } };
-    if (isAdminOnlyRoute(to.path) && String(auth.user?.role || "").toLowerCase() !== "admin") {
-      return { path: "/dashboard", query: { denied: "admin" } };
+    if (!canAccessPage(auth.user, to.path)) {
+      return { path: "/dashboard", query: { denied: "permission" } };
     }
   }
-  if (!to.meta?.mobile && isMobileBrowser() && !prefersDesktopMode()) {
+  if (!to.meta?.mobile && isMobileBrowser() && !prefersDesktopMode() && hasPermission(auth.user, "orders.read")) {
     return {
       path: "/mobile/orders",
       query: {

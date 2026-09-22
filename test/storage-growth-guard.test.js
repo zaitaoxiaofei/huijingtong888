@@ -12,6 +12,9 @@ const assetVariantSource = fs.readFileSync(new URL("../src/services/asset-varian
 const aiVariantDraftSaveSource = fs.readFileSync(new URL("../src/services/ai-variant-draft-save-batches.js", import.meta.url), "utf8");
 const remoteReleaseSource = fs.readFileSync(new URL("../deploy/linux/remote-release.sh", import.meta.url), "utf8");
 const memoryTuningSource = fs.readFileSync(new URL("../deploy/linux/apply-ecs-memory-tuning.sh", import.meta.url), "utf8");
+const listingPublishCleanupSource = fs.readFileSync(new URL("../src/services/listing-publish-history-cleanup.js", import.meta.url), "utf8");
+const mysqlPoolSource = fs.readFileSync(new URL("../src/mysql-pool.js", import.meta.url), "utf8");
+const orderLabelCleanupSource = fs.readFileSync(new URL("../src/services/order-label-cache-cleanup.js", import.meta.url), "utf8");
 
 test("listing persistence blocks embedded image and video base64 after OSS materialization", () => {
   assert.match(listingSource, /function assertNoEmbeddedMediaForPersistence/);
@@ -75,6 +78,49 @@ test("AI terminal task history is deleted in bounded batches after 30 days", () 
   assert.match(aiTaskSource, /retentionDays \|\| options\.retention_days \|\| 30/);
   assert.match(serverSource, /key: "ai_generation_history_cleanup"/);
   assert.match(serverSource, /config: \{ retentionDays: 30, batchSize: 1000 \}/);
+  assert.match(aiTaskSource, /DELETE FROM ai_variant_lab_batch_items/);
+  assert.match(aiTaskSource, /DELETE FROM ai_variant_lab_batch_jobs/);
+  assert.match(aiTaskSource, /DELETE FROM listing_ai_variant_assets/);
+});
+
+test("package labels are deleted after the order enters transport", () => {
+  assert.match(orderLabelCleanupSource, /DELETE FROM order_package_label_cache/);
+  assert.match(orderLabelCleanupSource, /orderTransportEvidenceSql\("o"\)/);
+  assert.match(orderLabelCleanupSource, /NOT REGEXP 'awaiting_packaging\|awaiting_deliver\|awaiting_registration/);
+  assert.match(serverSource, /key: "transported_order_label_cleanup"/);
+  assert.match(serverSource, /config: \{ batchSize: 500 \}/);
+  assert.match(mysqlCutoverSource, /if \(isOrderInTransportMysql\(row\)\) \{[\s\S]{0,220}DELETE FROM order_package_label_cache WHERE order_id = \?/);
+  assert.match(mysqlCutoverSource, /if \(isOrderInTransportMysql\(posting\)\) \{[\s\S]{0,220}DELETE FROM order_package_label_cache WHERE order_id = \?/);
+});
+
+test("listing publish tasks keep seven days and publish records keep thirty days", () => {
+  assert.match(listingPublishCleanupSource, /taskRetentionDays[^\n]+\|\| 7/);
+  assert.match(listingPublishCleanupSource, /recordRetentionDays[^\n]+\|\| 30/);
+  assert.match(listingPublishCleanupSource, /DELETE FROM listing_publish_task_items/);
+  assert.match(listingPublishCleanupSource, /NOT EXISTS \([\s\S]*listing_publish_task_items/);
+  assert.match(serverSource, /key: "listing_publish_history_cleanup"[\s\S]*taskRetentionDays: 7, recordRetentionDays: 30/);
+});
+
+test("unreferenced lightweight AI templates are removed only after a safety window", () => {
+  assert.match(listingPublishCleanupSource, /source_type = 'ai_optimization_v2_lightweight'/);
+  assert.match(listingPublishCleanupSource, /orphanTemplateRetentionDays[^\n]+\|\| 7/);
+  for (const reference of [
+    "listing_drafts", "listing_ai_variant_assets", "listing_collected_product_details",
+    "listing_media_assets", "listing_ozon_copy_jobs", "ozon_plugin_collected_products"
+  ]) assert.match(listingPublishCleanupSource, new RegExp(`NOT EXISTS \\(SELECT 1 FROM ${reference}`));
+  assert.match(serverSource, /orphanTemplateRetentionDays: 7/);
+});
+
+test("candidate deployment keeps a small MySQL pool and bounds prepared statement caches", () => {
+  assert.match(mysqlPoolSource, /DEPLOYMENT_CANDIDATE === "1" \? Math\.min\(configured, 4\)/);
+  assert.match(mysqlPoolSource, /maxPreparedStatements: Math\.max\(8, Number\(process\.env\.DB_MAX_PREPARED_STATEMENTS \|\| 32\)\)/);
+});
+
+test("ECS deployment artifacts use a seven day retention window", () => {
+  assert.match(remoteReleaseSource, /release_retention_minutes=\$\(\(7 \* 24 \* 60\)\)/);
+  assert.match(remoteReleaseSource, /tail -n \+3/);
+  assert.match(remoteReleaseSource, /shared_root\/rollback/);
+  assert.match(remoteReleaseSource, /name 'ozon-erp-\*\.zip'/);
 });
 
 test("scheduled job logs default to seven day retention", () => {

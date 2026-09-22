@@ -81,6 +81,9 @@ const state = reactive({
   shopId: "all",
   creatorId: currentPersonId.value,
   developmentType: "all",
+  category: "",
+  vehicleBrand: "",
+  vehicleModel: "",
   status: "all",
   quality: "all",
   page: 1,
@@ -260,6 +263,9 @@ async function loadRecords() {
     if (creatorId) params.set("creatorId", creatorId);
   }
   if (isDraftMode.value && state.developmentType !== "all") params.set("developmentType", String(state.developmentType));
+  if (isDraftMode.value && state.category.trim()) params.set("category", state.category.trim());
+  if (isDraftMode.value && state.vehicleBrand.trim()) params.set("vehicleBrand", state.vehicleBrand.trim());
+  if (isDraftMode.value && state.vehicleModel.trim()) params.set("vehicleModel", state.vehicleModel.trim());
   const requestUrl = `${endpoint}?${params.toString()}`;
   const cacheKey = requestUrl;
   const cached = cacheKey ? draftListCache.get(cacheKey) : null;
@@ -562,6 +568,9 @@ function resetFilters() {
   state.shopId = "all";
   state.creatorId = currentPersonId.value || "all";
   state.developmentType = "all";
+  state.category = "";
+  state.vehicleBrand = "";
+  state.vehicleModel = "";
   state.status = "all";
   state.quality = "all";
   state.developmentType = "all";
@@ -574,6 +583,9 @@ function resetModeFilters() {
   state.quality = "all";
   state.creatorId = currentPersonId.value || "all";
   state.developmentType = "all";
+  state.category = "";
+  state.vehicleBrand = "";
+  state.vehicleModel = "";
   state.page = 1;
   selectedRows.value = [];
   loadRecords();
@@ -583,6 +595,10 @@ function resetModeFiltersFromRoute() {
   if (isPublishMode.value) publishView.value = route.query.tab === "tasks" ? "tasks" : "records";
   state.status = "all";
   state.quality = "all";
+  state.developmentType = "all";
+  state.category = "";
+  state.vehicleBrand = "";
+  state.vehicleModel = "";
   state.page = 1;
   selectedRows.value = [];
   applyRouteStatusFilter();
@@ -1664,6 +1680,9 @@ watch(() => route.query.taskId, () => {
           <el-option label="全部类型" value="all" />
           <el-option v-for="option in developmentTypeOptions" :key="option.value" :label="option.label" :value="option.value" />
         </el-select>
+        <el-input v-if="isDraftMode" v-model="state.category" clearable placeholder="Ozon 类目" @keyup.enter="searchRecords" @clear="searchRecords" />
+        <el-input v-if="isDraftMode" v-model="state.vehicleBrand" clearable placeholder="车型品牌" @keyup.enter="searchRecords" @clear="searchRecords" />
+        <el-input v-if="isDraftMode" v-model="state.vehicleModel" clearable placeholder="车型 / 产品信息" @keyup.enter="searchRecords" @clear="searchRecords" />
         <el-input v-model="state.query" clearable placeholder="offer / product id / 类目" @keyup.enter="searchRecords" @clear="searchRecords" />
         <el-select v-model="state.status" placeholder="状态" @change="searchRecords">
           <el-option v-for="option in statusOptions" :key="option.value" :label="option.label" :value="option.value" />
@@ -1741,6 +1760,9 @@ watch(() => route.query.taskId, () => {
             </el-option>
           </el-select>
         </template>
+      </el-table-column>
+      <el-table-column v-if="isDraftMode" label="Ozon 类目" min-width="156" prop="category_name" show-overflow-tooltip>
+        <template #default="{ row }">{{ row.category_name || "未分类" }}</template>
       </el-table-column>
       <el-table-column label="人员" min-width="116" prop="creator_name" show-overflow-tooltip />
       <el-table-column label="店铺" min-width="136" prop="shop_name" show-overflow-tooltip />

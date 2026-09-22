@@ -1,3 +1,4 @@
+import { normalizeVehicleBrand } from "../shared/vehicle-brand.js";
 export const DEVELOPMENT_TYPES = ["new", "copy", "fission"];
 
 const TYPE_ALIASES = new Map([
@@ -88,7 +89,7 @@ export function resolveDevelopmentMeta(source = {}, fallbackType = "new") {
   const parsed = inferredType === "fission"
     ? parseVehicleModelFromCode(code)
     : { vehicle_brand: "", vehicle_model: "", vehicle_model_key: "" };
-  const vehicle_brand = firstText([source.vehicle_brand, source.vehicleBrand, source.brand, parsed.vehicle_brand]);
+  const vehicle_brand = normalizeVehicleBrand(firstText([source.vehicle_brand, source.vehicleBrand, source.brand, parsed.vehicle_brand]), { strict: false });
   const vehicle_model = firstText([source.vehicle_model, source.vehicleModel, source.model, parsed.vehicle_model]);
   const vehicle_model_key = firstText([
     source.vehicle_model_key,

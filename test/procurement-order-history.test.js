@@ -18,9 +18,12 @@ test("procurement workspace exposes historical order summary and detail", async 
   assert.match(view, /historical_total_order_count/);
   assert.match(view, /historical_cancelled_quantity/);
   assert.match(view, /historical_returned_quantity/);
-  assert.match(view, /缺货待采购/);
+  assert.match(view, /采购记录缺失/);
   assert.match(view, /采购在途/);
-  assert.match(view, /按缺口补采购/);
+  assert.match(view, /FBP在途/);
+  assert.match(view, /查看明细/);
+  assert.match(view, /查看采购明细/);
+  assert.match(view, /historical_purchase_record_missing_quantity/);
   assert.match(view, /openOrderHistory\(row\.source_row \|\| row\)/);
   assert.match(view, /width:72px[^\n]+height:96px/);
   assert.match(service, /export async function procurementProductOrderHistoryMysql/);

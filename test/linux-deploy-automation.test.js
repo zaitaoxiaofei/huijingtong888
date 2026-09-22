@@ -26,6 +26,12 @@ test("Mac/Linux deployment reuses the shared build and atomic release implementa
   assert.match(unixClient, /--skip-database-init/);
 });
 
+test("Mac/Linux activation passes the archive before the version as required by the remote script", () => {
+  assert.match(remote, /archive_path="\$\{1:-\}"/);
+  assert.match(remote, /release_version="\$\{2:-\}"/);
+  assert.ok(unixClient.includes("bash '$remote_script' '$remote_archive' '$version' '$db_init_flag'"));
+});
+
 test("Mac/Linux DryRun exits before every mutating or remote deployment step", () => {
   const dryRunExit = unixClient.indexOf("if ((dry_run));");
   assert.ok(dryRunExit >= 0);
@@ -73,4 +79,10 @@ test("first-time setup stores only a local key path and verifies passwordless SS
   assert.match(keySetup, /ecs-deploy\.json/);
   assert.match(keySetup, /BatchMode=yes/);
   assert.doesNotMatch(keySetup, /AccessKey|DB_PASSWORD|OSS_ACCESS/);
+});
+
+test("ECS release installs inventory triggers as administrator and checks the served release version", () => {
+  assert.ok(remote.indexOf("node scripts/init-inventory-numbering.mjs") < remote.indexOf("\nstart_candidate\n"));
+  assert.match(remote, /candidate_version" == "\$release_version"/);
+  assert.match(remote, /primary_version" == "\$release_version"/);
 });

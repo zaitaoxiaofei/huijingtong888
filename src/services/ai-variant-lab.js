@@ -242,6 +242,8 @@ export async function aiVariantLabBatchPlan(body = {}, session = {}) {
   const sourceVariantValue = cleanText(body.sourceVariantValue || body.source_variant_value || analysis.source_variant_value || "");
   const sourceTitle = sourceListingTitle(body);
   const variantType = normalizeImageVariantType(body.variantType || body.variant_type || body.variantGoal || body.variant_goal || analysis.recommended_variant_mode || "vehicle_model_swap");
+  validateVariantTargets({ variantType, sourceVariantValue, targets });
+  const vehicleReferenceImages = await vehicleReferenceImagesByTarget(targets);
   const template = await findTemplate(body.templateKey || body.template_key || analysis.recommended_template_key || DEFAULT_TEMPLATE_KEY);
   let result;
   let parsed;
@@ -293,7 +295,10 @@ export async function aiVariantLabBatchPlan(body = {}, session = {}) {
     targets,
     operatorNote,
     variantType,
-  });
+  }).map((item) => ({
+    ...item,
+    target_vehicle_reference_image_url: vehicleReferenceImages.get(cleanText(item.target_variant_value).toLowerCase()) || ""
+  }));
   const jobNo = body.jobNo || body.job_no || makeNo("AVL-B");
   const budget = normalizeBudget(body.budget || body.budget_cny || body.budgetCny);
   const jobPayload = {
@@ -672,6 +677,8 @@ async function runBatchImageRow(jobNo, row, options = {}, runtimeChannels = [], 
       const imageResult = await generateImagesWithChannelRetry({
         finalPrompt: [prompt, negative ? `Negative constraints: ${negative}` : ""].filter(Boolean).join("\n\n"),
         sourceImageUrl: options.sourceImageUrl,
+        sourceImageUrls: [options.sourceImageUrl, cleanText(item.target_vehicle_reference_image_url || item.targetVehicleReferenceImageUrl || "")].filter(Boolean),
+        productImageCount: 1,
         ratio: options.ratio || "3:4",
         imageCount: 1,
         autoCrop: options.autoCrop === true,
@@ -1072,7 +1079,8 @@ async function finalizeBatchImageItemForRun(item = {}) {
       imageEditContract,
       templateGuidance: item.image_template_guidance,
       productTruthRules: item.image_product_truth_en,
-      priorityContract: item.image_prompt_priority
+      priorityContract: item.image_prompt_priority,
+      targetVehicleReferenceImageUrl: item.target_vehicle_reference_image_url || item.targetVehicleReferenceImageUrl || ""
     }),
     negative_prompt_en: reviewedNegativePrompt ? normalizeReviewedNegativePromptEn(reviewedNegativePrompt) : normalizeImageNegativePromptEn(item.negative_prompt_en || item.negativePrompt || "", source, operatorNote, imageEditContract)
   };
@@ -3745,6 +3753,9 @@ function shouldPreserveProductLogo(operatorNote = "", variantType = "") {
 function normalizeImageVariantType(value = "") {
   const key = cleanKey(value);
   if (["brand_logo_only_vehicle_fission", "brand_logo_vehicle_fission", "cross_brand_logo_only"].includes(key)) return "brand_logo_only_vehicle_fission";
+  if (["same_brand_model_fission", "same_brand_model_swap"].includes(key)) return "same_brand_model_fission";
+  if (["model_only_vehicle_fission", "model_only_swap"].includes(key)) return "model_only_vehicle_fission";
+  if (["title_only_vehicle_fission", "image_title_only"].includes(key)) return "title_only_vehicle_fission";
   if (["vehicle_model_swap", "model_swap", "vehicle_variant", "vehicle_model_variant"].includes(key)) return "vehicle_model_swap";
   if (["logo_swap", "brand_swap", "badge_swap"].includes(key)) return "logo_swap";
   if (["color_swap", "material_color_swap"].includes(key)) return "color_swap";
@@ -3761,6 +3772,9 @@ export function buildImageEditContract({ variantType = "", source = "", target =
   const stableFacts = englishImageKeepFacts(keepFacts, analysis, fallback);
   const replaceZonesByType = {
     brand_logo_only_vehicle_fission: ["large_title_text", "model_text", "license_plate_text", "background_vehicle_cues", "editable_brand_text"],
+    same_brand_model_fission: ["large_title_text", "model_text", "license_plate_text", "background_vehicle_cues"],
+    model_only_vehicle_fission: ["large_title_text", "model_text", "license_plate_text", "background_vehicle_cues", "editable_model_text"],
+    title_only_vehicle_fission: ["large_title_text", "model_text"],
     vehicle_model_swap: preserveProductLogo
       ? ["large_title_text", "model_text", "license_plate_text", "background_vehicle_cues"]
       : ["large_title_text", "model_text", "license_plate_text", "background_vehicle_cues", "editable_brand_text"],
@@ -3774,6 +3788,9 @@ export function buildImageEditContract({ variantType = "", source = "", target =
   };
   const preserveZonesByType = {
     brand_logo_only_vehicle_fission: ["product_body", "shape", "material", "quantity", "product_model_text", "product_printed_model_text", "layout", "lighting_style", "full_canvas", "title_area", "selling_point_text_blocks", "icons", "badges", "text_modules", "margins"],
+    same_brand_model_fission: ["product_body", "shape", "material", "quantity", "color_scheme", "product_identity", "product_printed_text", "layout", "lighting_style", "full_canvas", "title_area", "selling_point_text_blocks", "icons", "badges", "text_modules", "margins"],
+    model_only_vehicle_fission: ["product_body", "shape", "material", "quantity", "color_scheme", "product_brand_text", "layout", "lighting_style", "full_canvas", "title_area", "selling_point_text_blocks", "icons", "badges", "text_modules", "margins"],
+    title_only_vehicle_fission: ["product_body", "shape", "material", "quantity", "color_scheme", "product_identity", "product_printed_text", "background", "background_vehicle_cues", "background_scene", "layout", "lighting_style", "full_canvas", "selling_point_text_blocks", "icons", "badges", "text_modules", "margins"],
     vehicle_model_swap: ["product_body", "shape", "material", "quantity", "color_scheme", "layout", "lighting_style", "full_canvas", "title_area", "selling_point_text_blocks", "icons", "badges", "text_modules", "margins"],
     logo_swap: ["product_body", "shape", "material", "quantity", "layout", "title_structure", "non_brand_text", "selling_point_text_blocks", "icons", "badges", "margins"],
     color_swap: ["logo", "title", "model_text", "shape", "quantity", "layout", "printed_text", "selling_point_text_blocks", "icons", "badges", "margins"],
@@ -3812,7 +3829,7 @@ export function buildImageEditContract({ variantType = "", source = "", target =
     text_policy: {
       keep_existing_title_area: normalizedType !== "image_optimization",
       keep_existing_layout_text_and_icons: normalizedType !== "image_optimization",
-      require_target_text_visible: Boolean(target) && ["vehicle_model_swap", "logo_swap", "brand_logo_only_vehicle_fission", "generic_variant"].includes(normalizedType),
+      require_target_text_visible: Boolean(target) && ["vehicle_model_swap", "same_brand_model_fission", "model_only_vehicle_fission", "title_only_vehicle_fission", "logo_swap", "brand_logo_only_vehicle_fission", "generic_variant"].includes(normalizedType),
       allowed_new_text: target && normalizedType !== "image_optimization" ? [target] : [],
       forbid_new_marketing_text: true,
       forbid_random_text: true,
@@ -3822,7 +3839,7 @@ export function buildImageEditContract({ variantType = "", source = "", target =
     logo_policy: {
       mode: preserveProductLogo ? "preserve_existing_marks" : "plain_text_only",
       preserve_product_printed_logo: preserveProductLogo,
-      target_model_on_product: normalizedType === "brand_logo_only_vehicle_fission" ? "forbid" : "allow",
+      target_model_on_product: normalizedType === "brand_logo_only_vehicle_fission" ? "forbid" : (normalizedType === "model_only_vehicle_fission" ? "model_only" : "allow"),
       official_logo_graphics: "forbid",
       brand_asset_reference: "forbid"
     }
@@ -3862,11 +3879,19 @@ function buildContractReplacementRule({ variantType, source, target, replaceZone
     const logoRule = logoPolicy.preserve_product_printed_logo
       ? "Keep product sticker logos, decals, brand marks, and printed marks unchanged."
       : "Replace only editable brand or model words with plain readable text. Do not generate or imitate any logo, emblem, badge, symbol, or trademark graphic.";
-    return `Replace every visible source vehicle identity ${from} with ${to}.${zones} ${logoRule}`;
+    return `Replace every visible source vehicle identity ${from} with ${to}.${zones} The background vehicle is editable semantic content, not a preserved layout element: remove the source vehicle body, silhouette, grille, headlights, badge, plate, and model cues, then render a background vehicle that visibly represents ${to}. Do not reuse the source vehicle as the background car. ${logoRule}`;
   }
+  if (variantType === "same_brand_model_fission") return `This is a same-brand model adaptation. Keep all physical product text, brand marks, logos, decals, and printed model text exactly unchanged. Replace only the external headline, license plate text, and background vehicle from ${from} to ${to}.${zones} The background vehicle is editable semantic content, not a preserved layout element; do not reuse the source vehicle.`;
+  if (variantType === "model_only_vehicle_fission") {
+    const sourceIdentity = vehicleIdentityParts(source);
+    const targetIdentity = vehicleIdentityParts(target);
+    return `Replace the product's editable model-only text from "${sourceIdentity.model || source}" to "${targetIdentity.model || target}". Do not print the target brand "${targetIdentity.brand}" on the physical product. Replace the external headline and background vehicle with the complete target ${to}.${zones} The background vehicle is editable semantic content, not a preserved layout element; do not reuse the source vehicle.`;
+  }
+  if (variantType === "title_only_vehicle_fission") return `Replace only the source identity words in the existing external main-image title from ${from} to ${to}.${zones} Keep the physical product, every product mark, background vehicle, background scene, lighting, and composition exactly unchanged.`;
   if (variantType === "logo_swap") return `Replace only editable source brand text ${from} with plain readable target text ${to}.${zones} Do not generate, copy, reconstruct, or imitate any official logo, emblem, badge, symbol, or trademark graphic.`;
   if (variantType === "brand_logo_only_vehicle_fission") {
-    return `Replace only editable brand wording with the target brand name as plain readable text; never generate, copy, reconstruct, or imitate an official logo, emblem, badge, symbol, or trademark graphic. Never print, add, or alter the target model on the physical product. Update the external headline and background vehicle to ${to}.${zones}`;
+    const targetBrand = vehicleIdentityParts(target).brand || target;
+    return `Replace only editable brand wording on the physical product with the target brand name "${targetBrand}" as plain readable text; never generate, copy, reconstruct, or imitate an official logo, emblem, badge, symbol, or trademark graphic. Never print, add, or alter the target model on the physical product. Update the external headline and background vehicle to ${to}.${zones}`;
   }
   if (variantType === "color_swap") return `Change only the configured product color or finish from ${from} to ${to}.${zones} Do not change logos, title text, model text, printed text, shape, or quantity.`;
   if (variantType === "image_optimization") return "Do not replace vehicle model, logo, title, readable text, or product identity. Optimize only clarity, lighting, background cleanliness, and product prominence.";
@@ -3948,7 +3973,7 @@ function splitPromptSentences(value = "") {
     .filter(Boolean);
 }
 
-function composeFinalImagePromptForRun(prompt, { source = "", target = "", keepFacts = [], mainImagePlan = "", operatorNote = "", imageEditContract = null, templateGuidance = null, productTruthRules = [], priorityContract = null } = {}) {
+function composeFinalImagePromptForRun(prompt, { source = "", target = "", keepFacts = [], mainImagePlan = "", operatorNote = "", imageEditContract = null, templateGuidance = null, productTruthRules = [], priorityContract = null, targetVehicleReferenceImageUrl = "" } = {}) {
   const brandLogoOnly = isBrandLogoOnlyFission("", imageEditContract);
   const cleanPrompt = brandLogoOnly || containsChinese(prompt) ? "" : cleanText(prompt);
   if (!brandLogoOnly && isFinalizedImagePrompt(cleanPrompt)) {
@@ -3966,6 +3991,12 @@ function composeFinalImagePromptForRun(prompt, { source = "", target = "", keepF
     ? normalizeImageRuleList(priorityContract?.priority_rules || priorityContract)
     : imagePromptPriorityContract().priority_rules;
   const contractPrompt = buildImageEditContractPrompt(imageEditContract);
+  const vehicleBackgroundModes = new Set(["vehicle_model_swap", "same_brand_model_fission", "model_only_vehicle_fission", "brand_logo_only_vehicle_fission"]);
+  const vehicleBackgroundRequirement = vehicleBackgroundModes.has(normalizeImageVariantType(imageEditContract?.variant_type || imageEditContract?.variantType || "")) && target
+    ? (targetVehicleReferenceImageUrl
+      ? `Hard vehicle-fission acceptance requirement: the second reference image is the authoritative exterior reference for ${target}. Match its real body silhouette, grille, headlamps, roofline, window shape, and proportions for the background car; do not use the source car's appearance. Preserve only the poster composition, product placement, lighting, and spacing.`
+      : `Hard vehicle-fission requirement: independently identify the real Russia-market exterior of ${target} using Image2's vehicle knowledge, then render that exact target vehicle in the background. The vehicle must visibly match ${target}'s authentic body silhouette, grille, headlamps, roofline, window shape, wheel arches, and proportions. Completely remove the source vehicle and never use a generic SUV, a source-like lookalike, a substituted model, or a target-name-only license plate as a shortcut.`)
+    : "";
   const baseline = [
     "Global baseline constraints: generated image must be marketplace-safe, factual, and free of Chinese text.",
     "Do not add watermark, platform logos, fake certification badges, fake authorization marks, sensitive marketplace names, gibberish text, random text, or extra accessories.",
@@ -3978,6 +4009,7 @@ function composeFinalImagePromptForRun(prompt, { source = "", target = "", keepF
     productTruth.length ? `Recognized product facts are authoritative: ${productTruth.join("; ")}.` : "",
     templateRules.length ? `Matched visual template guidance, layout only: ${templateRules.join(" ")}` : "",
     contractPrompt || cleanPrompt || buildFallbackImagePrompt(source, target, keepFacts, {}, { operatorNote }),
+    vehicleBackgroundRequirement,
     contractPrompt && cleanPrompt ? `Draft AI prompt for secondary detail only: ${cleanPrompt}` : "",
     mainImagePlan || operatorNote ? "Final operator-reviewed instructions below have higher priority than the draft prompt." : "",
     ...userConstraints,
@@ -4552,6 +4584,41 @@ function normalizeTargetValues(value) {
     targets.push(text);
   }
   return targets.slice(0, 100);
+}
+
+async function vehicleReferenceImagesByTarget(targets = []) {
+  const identities = targets.map(vehicleIdentityParts).filter((item) => item.brand && item.model);
+  if (!identities.length) return new Map();
+  const clauses = identities.map(() => "(brand_name = ? AND model_name = ?)").join(" OR ");
+  try {
+    const rows = await mysqlQuery(`
+      SELECT brand_name, model_name, vehicle_reference_image_url
+      FROM ai_vehicle_catalog
+      WHERE enabled = 1 AND vehicle_reference_image_url <> '' AND (${clauses})
+    `, identities.flatMap((item) => [item.brand, item.model]));
+    return new Map(rows.map((row) => [`${row.brand_name} ${row.model_name}`.trim().toLowerCase(), cleanText(row.vehicle_reference_image_url)]));
+  } catch (error) {
+    console.warn("[ai-variant-lab] target vehicle reference lookup skipped", error?.message || error);
+    return new Map();
+  }
+}
+
+function vehicleIdentityParts(value = "") {
+  const words = cleanText(value).split(/\s+/).filter(Boolean);
+  return { brand: words.shift() || "", model: words.join(" ") };
+}
+
+function validateVariantTargets({ variantType = "", sourceVariantValue = "", targets = [] } = {}) {
+  if (variantType !== "same_brand_model_fission") return;
+  const sourceBrand = vehicleIdentityParts(sourceVariantValue).brand.toLowerCase();
+  if (!sourceBrand) return;
+  const mismatched = targets.find((target) => {
+    const targetBrand = vehicleIdentityParts(target).brand.toLowerCase();
+    return targetBrand && targetBrand !== sourceBrand;
+  });
+  if (mismatched) {
+    throw statusError(`同品牌型号适配仅允许品牌一致：母车型为 ${sourceVariantValue}，目标车型 ${mismatched} 属于其他品牌。请改用“跨品牌品牌适配”或“品牌+型号完整适配”。`, 400);
+  }
 }
 
 function normalizeBudget(value) {

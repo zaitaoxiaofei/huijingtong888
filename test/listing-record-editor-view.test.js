@@ -91,6 +91,30 @@ test("listing draft box offers a direct quick-create entry", () => {
   assert.match(publishRecordsSource, /快速创建草稿/);
 });
 
+test("listing draft box supports structured category and vehicle filters", () => {
+  assert.match(publishRecordsSource, /category:\s*""/);
+  assert.match(publishRecordsSource, /vehicleBrand:\s*""/);
+  assert.match(publishRecordsSource, /vehicleModel:\s*""/);
+  assert.match(publishRecordsSource, /params\.set\("category", state\.category\.trim\(\)\)/);
+  assert.match(publishRecordsSource, /placeholder="Ozon 类目"/);
+  assert.match(publishRecordsSource, /label="Ozon 类目"/);
+  assert.match(listingAutomationServiceSource, /const nameQuery = String\(query\.nameQuery \|\| query\.name_query \|\| ""\)/);
+  assert.match(listingAutomationServiceSource, /LOWER\(COALESCE\(t\.category_name, ''\)\) LIKE \?/);
+  assert.match(listingAutomationServiceSource, /LOWER\(COALESCE\(d\.vehicle_brand, ''\)\) LIKE \?/);
+  assert.match(listingAutomationServiceSource, /LOWER\(COALESCE\(d\.vehicle_model, ''\)\) LIKE \?/);
+});
+
+test("quick listing imports a draft as a new draft instead of editing its source", () => {
+  assert.match(listingAutomationSource, /import AiProductImportDialog/);
+  assert.match(listingAutomationSource, /快速导入草稿/);
+  assert.match(listingAutomationSource, /confirm-text="复制为新草稿"/);
+  assert.match(listingAutomationSource, /async function importDraftAsCopy\(row\)/);
+  assert.match(listingAutomationSource, /id: "", template_id: source\.template_id \|\| ""/);
+  assert.match(listingAutomationSource, /draftForm\.shop_ids = \[\]/);
+  assert.match(listingAutomationSource, /await router\.replace\(\{/);
+  assert.match(listingAutomationSource, /draftId: undefined/);
+});
+
 test("listing quick-create loads shops before initializing a blank draft", () => {
   const blankDraftSource = listingAutomationSource.match(/if \(!hasBootstrap && !hasLocalDraft\) \{[\s\S]*?return;\s*\}/)?.[0] || "";
   assert.match(blankDraftSource, /const shops = await loadShopDictionary\(\)/);

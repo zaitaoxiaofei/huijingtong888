@@ -8,7 +8,7 @@ const dialog = readFileSync(new URL("../frontend/admin/components/inventory/Prod
 
 test("pending core-name applications are restricted to the naming maintainer", () => {
   assert.match(service, /status === "pending"/);
-  assert.match(service, /仅核动力牛马可以查看待审核核心品名/);
+  assert.match(service, /仅经理或管理员可以查看待审核核心品名/);
   assert.match(service, /o\.status = 'pending'/);
   assert.match(route, /inventoryProductNamingOptions\([\s\S]*req\._session/);
 });

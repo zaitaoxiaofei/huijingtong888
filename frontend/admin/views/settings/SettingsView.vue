@@ -1,4 +1,5 @@
 <script setup>
+import { ROLE_DEFINITIONS, getRoles, roleLabels } from "../../../../src/shared/permissions.js";
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
@@ -127,7 +128,8 @@ const shopFormRules = {
 };
 
 const personFormRules = {
-  name: [{ required: true, message: "请输入人员姓名", trigger: "blur" }]
+  name: [{ required: true, message: "请输入人员姓名", trigger: "blur" }],
+  roles: [{ type: "array", required: true, min: 1, message: "请至少选择一个角色", trigger: "change" }]
 };
 
 const rateFormRules = {
@@ -184,7 +186,7 @@ function createDefaultPersonForm() {
     name: "",
     username: "",
     avatar_url: "",
-    role: "operator",
+    roles: [],
     active: 1,
     password: ""
   };
@@ -280,7 +282,7 @@ const filteredPeople = computed(() => {
     if (status === "active" && Number(row.active) === 0) return false;
     if (status === "inactive" && Number(row.active) !== 0) return false;
     if (!query) return true;
-    const haystack = [row.name, row.username, row.role].map((item) => String(item || "").toLowerCase()).join(" ");
+    const haystack = [row.name, row.username, roleLabels(row), ...getRoles(row)].map((item) => String(item || "").toLowerCase()).join(" ");
     return haystack.includes(query);
   });
 });
@@ -643,7 +645,7 @@ function openEditPersonDialog(row) {
     name: row.name || "",
     username: row.username || "",
     avatar_url: row.avatar_url || "",
-    role: row.role || "operator",
+    roles: getRoles(row),
     active: Number(row.active ?? 1),
     password: ""
   };
@@ -826,7 +828,8 @@ async function submitShopDialog() {
 }
 
 async function submitPersonDialog() {
-  await personFormRef.value?.validate();
+  const valid = await personFormRef.value?.validate().catch(() => false);
+  if (!valid) return;
   personDialogSubmitting.value = true;
   try {
     const payload = { ...personDialog.form, active: Number(personDialog.form.active ?? 1) };
@@ -1339,7 +1342,7 @@ onBeforeUnmount(() => {
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column prop="role" label="角色" width="120" />
+              <el-table-column label="角色" min-width="190"><template #default="{ row }">{{ roleLabels(row) }}</template></el-table-column>
               <el-table-column label="状态" width="100" align="center">
                 <template #default="{ row }">
                   <el-tag :type="Number(row.active) !== 0 ? 'success' : 'info'" effect="light">{{ Number(row.active) !== 0 ? "启用" : "停用" }}</el-tag>
@@ -1877,7 +1880,13 @@ onBeforeUnmount(() => {
               </div>
             </el-form-item>
           </el-col>
-          <el-col :span="12"><el-form-item label="角色"><el-select v-model="personDialog.form.role"><el-option label="operator" value="operator" /><el-option label="admin" value="admin" /><el-option label="manager" value="manager" /></el-select></el-form-item></el-col>
+          <el-col :span="24"><el-form-item label="角色权限" prop="roles">
+            <el-checkbox-group v-model="personDialog.form.roles">
+              <el-checkbox v-for="role in ROLE_DEFINITIONS" :key="role.value" :value="role.value">{{ role.label }}（{{ role.value }}）</el-checkbox>
+            </el-checkbox-group>
+            <div style="width: 100%; color: var(--el-text-color-secondary); font-size: 12px">可同时选择多个角色，权限合并生效；管理员拥有全部权限。细分岗位无需额外勾选“通用业务”。</div>
+            <div v-for="role in ROLE_DEFINITIONS.filter(item => personDialog.form.roles.includes(item.value))" :key="role.value" style="width: 100%; font-size: 12px">{{ role.label }}：{{ role.description }}</div>
+          </el-form-item></el-col>
           <el-col :span="12"><el-form-item label="状态"><el-select v-model="personDialog.form.active"><el-option label="启用" :value="1" /><el-option label="停用" :value="0" /></el-select></el-form-item></el-col>
           <el-col :span="24"><el-form-item label="密码"><el-input v-model="personDialog.form.password" type="password" show-password placeholder="编辑时留空表示不修改密码" /></el-form-item></el-col>
         </el-row>

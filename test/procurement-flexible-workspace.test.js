@@ -20,7 +20,15 @@ test("procurement workspace keeps owner, free names, multi-item creation and lat
   assert.match(page, /采购负责人/);
   assert.match(page, /采购名称/);
   assert.match(page, /添加商品/);
-  assert.match(page, /建议绑定库存/);
+  assert.match(page, /快速选择库存/);
+  assert.match(page, /输入库存 ID 精确查找/);
+  assert.match(page, /输入商品名称模糊搜索/);
+  assert.match(page, /searchMode: mode/);
+  assert.match(page, /快速创建库存/);
+  assert.match(page, /库存已创建并绑定到当前采购明细/);
+  assert.match(page, /已选用已有库存并绑定到当前采购明细/);
+  assert.match(page, /function productPreviewImage/);
+  assert.match(page, /:preview-list="\[productPreviewImage\(row\)\]"/);
   assert.match(page, /已登记.*采购，现已进入采购在途/);
   assert.match(page, /系统会把这次确认用于后续推荐/);
 });

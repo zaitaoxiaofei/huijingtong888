@@ -13,7 +13,17 @@ test("grouped procurement pages select product ids before loading detail joins",
   assert.match(source, /groupedProductFilter\("sales_mapping\.product_id"\)/);
   assert.match(source, /groupedProductFilter\("poi\.product_id"\)/);
   assert.match(source, /groupedProductFilter\("product_id"\)/);
-  assert.match(source, /Array\.from\(\{ length: 6 \}, \(\) => groupedPage\.productIds\)\.flat\(\)/);
+  assert.match(source, /orderProcurementCoverageMysql\(\{ productIds: groupedPage\?\.productIds \|\| \[\] \}\)/);
+});
+
+test("ordinary order pages reconcile only the displayed products", () => {
+  assert.match(source, /coveragePromise = productIds\.length \? orderProcurementCoverageMysql\(\{ productIds \}\) : Promise\.resolve\(new Map\(\)\)/);
+  assert.match(source, /orderProcurementCoverageMysql\(\{ productIds: groupedPage\?\.productIds \|\| \[\] \}\)/);
+});
+
+test("direct inbound clears the order procurement coverage before and after posting stock", () => {
+  const block = source.slice(source.indexOf("export async function directInboundProcurementRequestsMysql"), source.indexOf("export async function procurementPurchaseGroupRecommendationsMysql"));
+  assert.equal((block.match(/invalidateOrderProcurementCoverage\(\)/g) || []).length, 2);
 });
 
 test("dashboard procurement alerts use the compact request projection", () => {

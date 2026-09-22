@@ -148,7 +148,7 @@ onMounted(async () => {
               <ProductImagePreview :src="row.image_url" />
               <div class="cell-stack">
                 <strong>{{ row.name }}</strong>
-                <span class="muted-text">{{ row.inventory_id || row.code || "-" }}</span>
+                <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || row.code || "-" }}</span>
                 <span class="muted-text">负责人：{{ row.owner_name || "-" }}</span>
               </div>
             </div>

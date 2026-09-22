@@ -39,6 +39,16 @@ test("batch draft updates use optimistic checks and one database transaction", (
   assert.match(serviceSource, /connection\.execute\(sql, params\)/);
 });
 
+test("batch draft save refreshes a stale version without discarding the editor rows", () => {
+  assert.match(automationSource, /Number\(error\?\.status\) !== 409/);
+  assert.match(automationSource, /apiClient\.get\(`\/api\/listing\/drafts\/\$\{item\.id\}`, \{ noCache: true \}\)/);
+  assert.match(automationSource, /item\.updated_at = latestById\.get\(Number\(item\.id\)\)\?\.updated_at/);
+  assert.match(automationSource, /retry_after_version_refresh: true/);
+  assert.match(automationSource, /已保留当前批量编辑内容并完成保存/);
+  assert.match(serviceSource, /const retryAfterVersionRefresh = body\?\.retry_after_version_refresh === true/);
+  assert.match(serviceSource, /!retryAfterVersionRefresh && expected && current && !sameTimestamp\(expected, current\)/);
+});
+
 test("batch rows preserve their own effective images and save one variant per draft", () => {
   assert.match(automationSource, /draft\.effective_images/);
   assert.match(automationSource, /typeof item === "string" \? \{ url: item \}/);

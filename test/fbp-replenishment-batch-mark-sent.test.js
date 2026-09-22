@@ -14,12 +14,8 @@ test("FBP batch summary can mark all approved source orders as sent", () => {
   assert.match(source, /@click="markBatchSent\(row\.order\)"/);
 });
 
-test("FBP batch summary can complete all waiting source orders", () => {
-  assert.match(source, /function canMarkBatchCompleted\(row\)/);
-  assert.match(source, /row\._sourceOrders\.some\(\(order\) => canMarkCompleted\(order\)\)/);
-  assert.match(source, /async function markBatchCompleted\(row\)/);
-  assert.match(source, /const waitingOrders = .*filter\(\(order\) => canMarkCompleted\(order\)\)/);
-  assert.match(source, /status: "completed"/);
-  assert.match(source, /v-if="canMarkBatchCompleted\(row\.order\)"/);
+test("FBP batch summary opens the quantity receipt dialog instead of completing without receipt", () => {
+  assert.match(source, /async function markBatchCompleted\(row\) \{\s+return openReceiptDialog\(row\);/);
+  assert.match(source, /order\._sourceOrders\.filter\(canMarkCompleted\)/);
   assert.match(source, /@click="markBatchCompleted\(row\.order\)"/);
 });

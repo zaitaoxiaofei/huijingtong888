@@ -1,3 +1,4 @@
+import { hasPermission } from "./shared/permissions.js";
 import http from "node:http";
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
@@ -32,6 +33,8 @@ import { createListingAutomationRoutes, handleListingAutomationRestRoute, handle
 import { createAssetVariantEngineRoutes, handleAssetVariantEngineRestRoute } from "./server/routes/assetVariantEngine.js";
 import { createAiGenerationTaskRoutes, handleAiGenerationTaskRestRoute } from "./server/routes/aiGenerationTasks.js";
 import { cleanupAiGenerationTaskHistory } from "./services/ai-generation-tasks.js";
+import { cleanupTransportedOrderLabelCache } from "./services/order-label-cache-cleanup.js";
+import { cleanupListingPublishHistory } from "./services/listing-publish-history-cleanup.js";
 import { collectSkusWithSellerPool, collectorSellerPoolStatus } from "./services/collector-seller-pool.js";
 import { createAiPromptTemplateRoutes, handleAiPromptTemplateRestRoute } from "./server/routes/aiPromptTemplates.js";
 import { createAiStrategyRoutes, handleAiStrategyRestRoute } from "./server/routes/aiStrategies.js";
@@ -208,7 +211,7 @@ const routeModules = {
 // Keep straightforward routes in a single lookup table so server.js stays
 // focused on request dispatch, authentication, and transport concerns.
 function dashboardForSession(payload = {}, session = {}) {
-  if (String(session?.role || "").trim().toLowerCase() === "admin") return payload;
+  if (hasPermission(session, "admin")) return payload;
   const withoutProfitFields = (source = {}) => Object.fromEntries(
     Object.entries(source || {}).filter(([key]) => !String(key).toLowerCase().includes("profit"))
   );
@@ -767,6 +770,28 @@ const scheduledJobDefinitions = [
     config: { retentionDays: 30, batchSize: 1000 }
   },
   {
+    key: "listing_publish_history_cleanup",
+    name: "上架任务和发布状态清理",
+    category: "maintenance",
+    priority: "low",
+    scheduleType: "daily",
+    dailyTime: "04:05",
+    catchupEnabled: true,
+    maxCatchupRuns: 1,
+    config: { taskRetentionDays: 7, recordRetentionDays: 30, orphanTemplateRetentionDays: 7, batchSize: 500 }
+  },
+  {
+    key: "transported_order_label_cleanup",
+    name: "运输中订单面单缓存清理",
+    category: "maintenance",
+    priority: "low",
+    scheduleType: "daily",
+    dailyTime: "04:10",
+    catchupEnabled: true,
+    maxCatchupRuns: 1,
+    config: { batchSize: 500 }
+  },
+  {
     key: "listing_publish_storage_compaction",
     name: "上架记录快照瘦身",
     category: "maintenance",
@@ -817,6 +842,8 @@ const scheduledJobHandlers = {
   ozon_action_cleanup: withForegroundApiDeferral("ozon_action_cleanup", runOzonActionCleanupSweep),
   scheduled_history_cleanup: withForegroundApiDeferral("scheduled_history_cleanup", (job) => cleanupScheduledJobHistory(job?.config || {})),
   ai_generation_history_cleanup: withForegroundApiDeferral("ai_generation_history_cleanup", (job) => cleanupAiGenerationTaskHistory(job?.config || {})),
+  transported_order_label_cleanup: withForegroundApiDeferral("transported_order_label_cleanup", (job) => cleanupTransportedOrderLabelCache(job?.config || {})),
+  listing_publish_history_cleanup: withForegroundApiDeferral("listing_publish_history_cleanup", (job) => cleanupListingPublishHistory(job?.config || {})),
   listing_publish_storage_compaction: withForegroundApiDeferral("listing_publish_storage_compaction", (job) => services.compactListingPublishRecordStorage(job?.config || {})),
   system_monitor_snapshot: withForegroundApiDeferral("system_monitor_snapshot", captureSystemMonitorSnapshot)
 };
@@ -2029,6 +2056,8 @@ async function prepareRuntimeBeforeListen() {
   try {
     await warmMysqlPool();
     await services.warmCoreInventoryRuntime?.();
+    await services.ensureProcurementWorkspaceSchema?.();
+    console.log("procurement workspace schema warmup completed");
     await services.ensureListingAutomationSchema?.();
     console.log("listing automation schema warmup completed");
     runtimeReadiness.ready = true;

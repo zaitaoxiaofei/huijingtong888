@@ -13,7 +13,7 @@ test("inventory creation reuses the AI vehicle catalog instead of a product bran
   assert.match(dialogSource, /vehicle_brand/);
   assert.match(dialogSource, /vehicle_models/);
   assert.match(vehicleCatalogSource, /VEHICLE_BRAND_ZH/);
-  assert.match(vehicleCatalogSource, /label:\s*\[brandZh, row\.brand_name\]/);
+  assert.match(vehicleCatalogSource, /label:\s*row\.brand_name/);
   assert.doesNotMatch(dialogSource, /brand_zh/);
   assert.doesNotMatch(dialogSource, /brand_en/);
 });
@@ -29,7 +29,7 @@ test("vehicle models can be added manually while new brands require approval", (
   assert.match(dialogSource, /multiple filterable allow-create default-first-option/);
   assert.match(dialogSource, /\/api\/ai-variant-lab\/vehicle-catalog/);
   assert.match(dialogSource, />申请汽车品牌<\/el-button>/);
-  assert.doesNotMatch(dialogSource, /vehicle_brand[^\n]*allow-create/);
+  assert.match(dialogSource, /vehicle_brand[^\n]*:allow-create="inlineInventoryRequest"/);
   assert.match(namingServiceSource, /option_type IN \('category', 'brand'\)/);
   assert.match(namingServiceSource, /\['category', 'brand'\]\.includes\(optionType\)/);
 });

@@ -13,6 +13,7 @@ Options:
   --identity-file PATH        SSH private key (or OZON_ECS_IDENTITY_FILE)
   --version VERSION           Release version (default: local timestamp)
   --skip-build                Reuse an existing deployment artifact
+  --allow-dirty               Emergency override for a dirty/non-release worktree
   --skip-database-init        Do not run the compatible database initializer
   --dry-run                   Validate local inputs only; never build or connect
   -h, --help                  Show this help
@@ -70,6 +71,7 @@ version=""
 skip_build=0
 skip_database_init=0
 dry_run=0
+allow_dirty=0
 
 while (($#)); do
   case "$1" in
@@ -85,6 +87,7 @@ while (($#)); do
       shift 2
       ;;
     --skip-build) skip_build=1; shift ;;
+    --allow-dirty) allow_dirty=1; shift ;;
     --skip-database-init) skip_database_init=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -129,6 +132,10 @@ require_command npm
 require_command ssh
 require_command scp
 require_command zip
+
+if (( !allow_dirty )); then
+  node "$project_root/scripts/verify-release-worktree.mjs"
+fi
 
 [[ -n "$identity_file" ]] || fail "SSH identity file is required; set --identity-file or OZON_ECS_IDENTITY_FILE"
 identity_file="$(expand_home_path "$identity_file")"

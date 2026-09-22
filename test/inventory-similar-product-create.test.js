@@ -164,7 +164,7 @@ test("editing an inventory product restores every structured naming field", () =
   assert.match(dialog, /const commonColors = \["黑色", "白色", "灰色", "银色"/);
   assert.match(dialog, /type === "color"\s*\?\s*\(Array\.isArray\(item\.colors\)/);
   assert.match(dialog, /type === "quantity"\s*\?\s*\[Number\(item\.quantity \|\| 1\)\]/);
-  assert.match(dialog, /:allow-create="canMaintainNamingOptions"/);
+  assert.match(dialog, /:allow-create="canMaintainNamingOptions \|\| inlineInventoryRequest"/);
 });
 
 test("inventory editor loads logistics rules independently and hides merged recommendations", () => {

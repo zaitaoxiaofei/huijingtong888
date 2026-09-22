@@ -107,6 +107,7 @@ function productTypeTag(row = {}) {
 
 function normalizeComponentItem(item = {}) {
   return {
+    inventory_number: item.inventory_number || "",
     component_product_id: Number(item.component_product_id || item.product_id || item.id || 0),
     component_name: item.component_name || item.product_name || item.name || "",
     inventory_id: item.inventory_id || item.code || "",
@@ -122,11 +123,11 @@ function normalizeComponentItem(item = {}) {
 }
 
 function componentName(row = {}) {
-  return row.component_name || row.name || row.inventory_id || row.code || `#${row.component_product_id || row.id || "-"}`;
+  return row.component_name || row.name || row.inventory_number || row.inventory_id || row.code || `#${row.component_product_id || row.id || "-"}`;
 }
 
 function componentCode(row = {}) {
-  return row.inventory_id || row.code || `#${row.component_product_id || row.id || "-"}`;
+  return row.inventory_number || row.inventory_id || row.code || `#${row.component_product_id || row.id || "-"}`;
 }
 
 function componentAvailable(row = {}) {
@@ -310,7 +311,7 @@ watch(
         <ProductImagePreview :src="parentProduct.image_url" size="small" />
         <div>
           <strong>{{ parentProduct.name || "-" }}</strong>
-          <span>{{ parentProduct.inventory_id || parentProduct.code || "-" }}</span>
+          <span>{{ parentProduct.inventory_number || parentProduct.inventory_id || parentProduct.code || "-" }}</span>
         </div>
         <div class="composition-parent-stock">
           <span>本地可组</span>
@@ -424,7 +425,7 @@ watch(
               <ProductImagePreview :src="row.image_url" size="portrait" />
               <div class="composition-option-info">
                 <strong>{{ row.name || "-" }}</strong>
-                <span>{{ row.inventory_id || row.code || "-" }}</span>
+                <span>{{ row.inventory_number || row.inventory_id || row.code || "-" }}</span>
                 <div>
                   <el-tag size="small" :type="productTypeTag(row)" effect="plain">{{ productTypeLabel(row) }}</el-tag>
                   <span>本地 {{ integer(productLocalStock(row)) }} {{ row.stock_unit || "个" }}</span>

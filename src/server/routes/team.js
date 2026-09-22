@@ -1,5 +1,7 @@
 export function createTeamRoutes({ services, readJson }) {
   return {
+    "GET /api/team/operational-owners": () => services.teamOperationalOwners(),
+    "PUT /api/team/operational-owners": async (req) => services.setTeamOperationalOwner(await readJson(req)),
     "GET /api/team/tasks": (req, url) => services.teamTasks(Object.fromEntries(url.searchParams.entries())),
     "GET /api/team/development-projects": () => services.developmentProjects(),
     "GET /api/team/development-candidates": (req, url) => services.developmentCandidates(Object.fromEntries(url.searchParams.entries())),

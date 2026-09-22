@@ -1,4 +1,5 @@
 <script setup>
+import { hasPermission } from "../../../src/shared/permissions.js";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
@@ -29,7 +30,7 @@ import { shanghaiDateKey } from "../utils/shanghai-date.js";
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
-const isAdmin = computed(() => String(authStore.user?.role || "").toLowerCase() === "admin");
+const isAdmin = computed(() => hasPermission(authStore.user, "admin"));
 const loading = ref(false);
 const refreshing = ref(false);
 const snapshotBuilding = ref(false);

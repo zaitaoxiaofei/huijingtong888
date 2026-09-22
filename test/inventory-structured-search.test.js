@@ -22,13 +22,13 @@ test("product API combines structured inventory filters", () => {
   assert.match(service, /p\.accessory_name = \?/);
 });
 
-test("inventory and order binding searches share fuzzy and exact modes", () => {
+test("inventory exposes dedicated modes and preserves structured order binding", () => {
   for (const source of [inventoryPage, ordersPage]) {
     assert.match(source, /InventoryStructuredSearch/);
     assert.match(source, /模糊搜索/);
     assert.match(source, /精确搜索/);
   }
-  assert.match(inventoryPage, /searchMode:\s*"exact"/);
+  assert.match(inventoryPage, /searchMode:\s*"inventory_id"/);
   assert.match(ordersPage, /bindProductSearchMode = ref\("exact"\)/);
 });
 

@@ -927,7 +927,7 @@ onDeactivated(stopOnlineProductSyncPolling);
             <template #default="{ row }">
               <div v-if="row.product_id" class="cell-stack">
                 <strong>{{ row.product_name || "-" }}</strong>
-                <span class="muted-text">{{ row.product_code || "-" }}</span>
+                <span class="muted-text">{{ row.inventory_number || row.product_code || "-" }}</span>
               </div>
               <span v-else class="muted-text">未绑定库存产品</span>
             </template>
@@ -970,7 +970,7 @@ onDeactivated(stopOnlineProductSyncPolling);
             <el-option
               v-for="product in state.products"
               :key="product.id"
-              :label="`${product.name} / ${product.inventory_id || product.code || product.id}`"
+              :label="`${product.name} / ${product.inventory_number || product.inventory_id || product.code || product.id}`"
               :value="String(product.id)"
             />
           </el-select>

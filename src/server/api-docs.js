@@ -48,7 +48,8 @@ const schemas = {
   AuthUser: objectOf("Authenticated ERP user.", [
     field("id", scalar("number", "Internal person identifier."), true),
     field("name", scalar("string", "Display name."), true),
-    field("role", scalar("string", "Authorization role such as admin or operator."), true),
+    field("role", scalar("string", "Primary role retained for compatibility."), true),
+    field("roles", arrayOf(scalar("string"), "Assigned roles; permissions are combined.")),
     field("username", scalar("string", "Login username."), true)
   ], { additionalProperties: false }),
 
@@ -179,7 +180,8 @@ const schemas = {
     field("id", scalar("number", "Person identifier.")),
     field("name", scalar("string", "Display name.")),
     field("username", scalar("string", "Login username.")),
-    field("role", scalar("string", "Authorization role.")),
+    field("role", scalar("string", "Primary role retained for compatibility.")),
+    field("roles", arrayOf(scalar("string"), "Assigned roles; permissions are combined.")),
     field("avatar_url", scalar("string", "Optional avatar URL.")),
     field("active", scalar("number", "Whether the person is active."))
   ]),
@@ -188,7 +190,8 @@ const schemas = {
     field("name", scalar("string", "Display name."), true),
     field("username", scalar("string", "Login username.")),
     field("password", scalar("string", "Optional initial password for creation or reset.")),
-    field("role", scalar("string", "Authorization role such as operator or admin.")),
+    field("role", scalar("string", "Legacy single-role input. Use roles for new clients.")),
+    field("roles", arrayOf(scalar("string"), "Nonempty role list: admin, manager, packing, procurement, operations, technical, operator.")),
     field("avatar_url", scalar("string", "Optional avatar URL.")),
     field("active", scalar("number", "Whether the person is active."))
   ], { additionalProperties: false }),
@@ -1477,6 +1480,15 @@ const endpoints = [
       auth: "authenticated",
       requestBody: body(ref("AiStrategyBundleMatchRequest")),
       responses: [response(200, "application/json", ref("AiStrategyBundleMatchResponse"))]
+    }),
+    endpoint("GET", "/api/team/operational-owners", "Return persistent owners for daily procurement and shipping tasks.", {
+      auth: "authenticated",
+      responses: [response(200, "application/json", scalar("object", "Rows containing type, owner_person_id, owner_name, term_until (Beijing date, inclusive) and term_expired. Expired assignments continue using the previous owner."))]
+    }),
+    endpoint("PUT", "/api/team/operational-owners", "Set a persistent daily task owner; update today and future tasks in Beijing time, preserving history.", {
+      auth: "authenticated",
+      requestBody: body(scalar("object", "Required type (procurement_daily or shipping_daily) and active owner_person_id. Optional term_until: YYYY-MM-DD, today or later in Beijing time; null clears the deadline, omission preserves it. Expiry prompts reconfirmation without stopping assignment.")),
+      responses: [response(200, "application/json", ref("MutationOk"))]
     }),
     endpoint("GET", "/api/team/tasks", "Return team planning tasks.", {
       auth: "authenticated",

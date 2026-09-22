@@ -20,11 +20,11 @@ test("order procurement records quantity allocations instead of reusing one in-t
   assert.match(service, /AND o\.id != \?/);
 });
 
-test("procurement workspace reconciles signed stock with purchase in transit", async () => {
+test("procurement workspace shows historical debt without consuming current incoming supply", async () => {
   const workspace = await readFile(new URL("../frontend/admin/views/procurement/ProcurementWorkspaceView.vue", import.meta.url), "utf8");
 
-  assert.match(workspace, /return currentStock \+ incomingStock/);
-  assert.match(workspace, /综合供给欠账/);
+  assert.match(workspace, /return Math\.max\(0, currentStock\) \+ incomingStock/);
+  assert.match(workspace, /历史库存待核/);
   assert.match(workspace, /剩余总供给/);
   assert.match(workspace, /当前供给/);
   assert.match(workspace, /现货/);
@@ -46,8 +46,8 @@ test("order-side procurement confirmation creates the same purchased and in-tran
   assert.match(block, /purchase_order_id: Number\(purchaseOrder\.id\)/);
   assert.match(block, /purchase_order_no: purchaseOrder\.order_no/);
   assert.match(page, /已完成采购/);
-  assert.match(page, /采购金额必须大于 0/);
-  assert.match(block, /采购金额（amount）必须大于 0/);
+  assert.match(page, /采购金额不能为负数/);
+  assert.match(block, /采购金额不能为负数/);
   assert.doesNotMatch(page, /已生成采购建议/);
 });
 
@@ -128,6 +128,8 @@ test("procurement workspace refreshes persisted demand using the same 21-day sta
   assert.match(service, /recent_30d_qty \/ 30 \* 21/);
   assert.match(routes, /POST \/api\/procurement\/refresh-demand/);
   assert.match(workspace, /api\/procurement\/refresh-demand/);
+  assert.match(workspace, /async function refreshWorkbench\(\)/);
+  assert.match(workspace, /loadRows\(\{ refreshDemand: true \}\)/);
 });
 
 test("cancelled orders stop consuming procurement batch availability", async () => {
@@ -152,19 +154,21 @@ test("orders show purchase time, allocated quantity, remaining batch and overdue
   assert.match(page, /procurement_has_allocation/);
   assert.match(page, /procurement_has_product_incoming/);
   assert.match(page, /procurement_inbound_record_ids/);
-  assert.match(page, /\/api\/inbound-records\/batch-update"/);
+  assert.match(page, /\/api\/inbound-records\/batch-update['"]/);
   assert.doesNotMatch(page, /\/api\/inbound-records\/batch-update-async/);
   assert.match(page, /loadOrders\(\{ forceRefresh: true, silent: true \}\)/);
   assert.match(table, /confirmingInboundRecordId/);
   assert.match(page, /采购人员/);
-  assert.match(page, /采购单号/);
-  assert.match(page, /采购合计/);
+  assert.match(page, /采购总量/);
+  assert.match(page, /采购单价/);
+  assert.doesNotMatch(page, /采购单号/);
+  assert.doesNotMatch(page, /采购合计/);
   assert.match(page, /procurement_request_unallocated_quantity/);
   assert.match(table, /下单时间：\{\{ procurementTimeText\(row\) \|\| "待补充" \}\}/);
   assert.match(table, /在途: \{\{ Number\(product\.incoming \|\| 0\) \}\}/);
-  assert.match(table, /确认入库/);
+  assert.match(table, /登记实收/);
   assert.match(table, /查看采购内容/);
-  assert.match(table, /v-if="row\.procurementState\.inboundRecordId"/);
+  assert.match(table, /v-if="row\.procurementState\.canRegisterOrderReceipt"/);
   assert.doesNotMatch(table, /row\.procurementState\.overdue && row\.procurementState\.inboundRecordId/);
   const inventoryColumn = table.slice(
     table.indexOf('label="库存信息"'),

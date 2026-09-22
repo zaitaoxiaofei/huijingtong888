@@ -1,3 +1,5 @@
+import { ensurePeopleRolesSchemaMysql } from "./people-roles.js";
+import { getRoles, primaryRole } from "../shared/permissions.js";
 import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 
 function ensureMysqlAuthSessionEnabled() {
@@ -52,7 +54,9 @@ export async function createSessionMysql(session) {
 
 export async function getSessionMysql(token) {
   ensureMysqlAuthSessionEnabled();
-  const row = await mysqlQueryOne("SELECT * FROM sessions WHERE token = ?", [token]);
+  await ensurePeopleRolesSchemaMysql();
+  const row = await mysqlQueryOne(`SELECT s.*, p.name AS current_name, p.role AS current_role, p.roles_json
+    FROM sessions s JOIN people p ON p.id = s.person_id AND p.active = 1 WHERE s.token = ?`, [token]);
   if (!row) return null;
 
   if (new Date(row.expires_at) < new Date()) {
@@ -62,8 +66,9 @@ export async function getSessionMysql(token) {
 
   return {
     personId: row.person_id,
-    name: row.name,
-    role: row.role,
+    name: row.current_name,
+    role: primaryRole({ role: row.current_role, roles_json: row.roles_json }),
+    roles: getRoles({ role: row.current_role, roles_json: row.roles_json }),
     username: row.username,
     createdAt: new Date(row.created_at).getTime()
   };
@@ -92,16 +97,18 @@ export async function cleanExpiredSessionsMysql() {
 
 export async function findPersonForLoginMysql(username) {
   ensureMysqlAuthSessionEnabled();
+  await ensurePeopleRolesSchemaMysql();
   return await mysqlQueryOne(
-    "SELECT id, name, username, role, password_hash, active FROM people WHERE username = ?",
+    "SELECT id, name, username, role, roles_json, password_hash, active FROM people WHERE username = ?",
     [username]
   );
 }
 
 export async function findPersonByIdMysql(personId) {
   ensureMysqlAuthSessionEnabled();
+  await ensurePeopleRolesSchemaMysql();
   return await mysqlQueryOne(
-    "SELECT id, name, username, role, avatar_url, active, password_hash FROM people WHERE id = ?",
+    "SELECT id, name, username, role, roles_json, avatar_url, active, password_hash FROM people WHERE id = ?",
     [personId]
   );
 }
@@ -127,18 +134,19 @@ export async function updateOwnProfileMysql(personId, body = {}) {
 
 export async function findPersonByWechatIdentityMysql(identity = {}) {
   await ensureWechatAuthColumnsMysql();
+  await ensurePeopleRolesSchemaMysql();
   const unionid = String(identity.unionid || "").trim();
   const openid = String(identity.openid || "").trim();
   if (unionid) {
     const row = await mysqlQueryOne(
-      "SELECT id, name, username, role, active FROM people WHERE wechat_unionid = ? LIMIT 1",
+      "SELECT id, name, username, role, roles_json, active FROM people WHERE wechat_unionid = ? LIMIT 1",
       [unionid]
     );
     if (row) return row;
   }
   if (!openid) return null;
   return await mysqlQueryOne(
-    "SELECT id, name, username, role, active FROM people WHERE wechat_openid = ? LIMIT 1",
+    "SELECT id, name, username, role, roles_json, active FROM people WHERE wechat_openid = ? LIMIT 1",
     [openid]
   );
 }

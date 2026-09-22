@@ -20,6 +20,14 @@
 16. Automatic payment matching requires equal amounts and prioritizes the matching platform counterparty plus the closest payment time. High-confidence matches may be confirmed automatically; ambiguous matches must remain `suggested` for review.
 17. Manual matching remains available for unmatched or rejected rows. Never force a low-confidence payment onto a platform order merely to improve the match rate.
 18. Applying actual costs is an explicit operator action. It writes confirmed allocated amounts into procurement requests and updates bound product purchase cost per allocated quantity.
+19. The workspace daily purchase export selects a Beijing calendar day and includes all formal purchased order items for that day, regardless of workspace filters or pagination. Cancelled and unconfirmed orders are excluded; historical orders without `purchased_at` use order creation time.
+20. The daily `.xlsx` embeds inventory thumbnails and includes quantities, goods amounts, freight, Beijing purchase times, purchaser, inbound status, order number, and a copyable WeChat summary. It counts each purchase item once, independent of inbound splits and request allocations; unavailable images are explicitly marked.
+
+## Inventory Numbering
+
+- A product keeps its inventory number when details inside the same inventory category change.
+- Changing `inventory_category` assigns the next unused number from the target category. Numbers are never reused, and the product ID and SKU bindings remain unchanged.
+- Numbering initialization repairs only products whose saved number category differs from their current `inventory_category`; it is safe to run repeatedly.
 
 ## Three Business Stages
 
@@ -35,11 +43,11 @@ If actual purchased quantity is below selected demand, the fulfilled quantity mo
 
 The workspace uses one supply waterfall for automatic order demand and inventory replenishment:
 
-1. `P0 订单履约优先`: local stock and inbound supply must cover active fulfillable orders first after inventory debt is accounted for.
-2. `P1 负库存恢复`: negative local stock is an inventory debt. Inbound quantity pays this debt before it can be allocated to a new order.
+1. `P0 订单履约优先`: local stock and confirmed inbound supply cover active fulfillable orders. Explicit order allocations take precedence.
+2. `P1 历史库存待核`: negative local stock is a reconciliation discrepancy, not new procurement demand. New order purchases never pay down this discrepancy automatically.
 3. `P2 安全库存补货`: remaining supply is compared with the shared stable-sales coverage target, normally 21 days.
 
-The operator-facing recommendation exposes all three shortage quantities. The total recommendation must be at least the sum of uncovered inventory debt, uncovered active-order demand, and the safety-stock shortage. `real_order` and `advance_stock` describe request provenance; they do not override this priority. A product may carry both sources and is grouped into one purchasing row.
+The operator-facing recommendation exposes all three shortage quantities. The total recommendation covers uncovered active-order demand and safety-stock shortage; historical inventory discrepancies are shown separately and excluded from the quantity to buy. `real_order` and `advance_stock` describe request provenance; they do not override this priority. A product may carry both sources and is grouped into one purchasing row.
 
 Automatic refresh may cancel and recreate unconfirmed `suggested` real-order requests from current facts. It must never rewrite purchased history or confirmed inbound records.
 
@@ -62,3 +70,17 @@ Automatic refresh may cancel and recreate unconfirmed `suggested` real-order req
 - Keep purchase recording fast: there is no approval flow. Actual purchase requires a bound inventory product, quantity, amount, and purchaser; supplier and channel remain optional metadata.
 - The procurement workspace does not confirm inbound. Inbound confirmation belongs to the order module shortcut and the pending-inbound list.
 - The purchase order drawer must always close on explicit close and when switching pages.
+
+
+## Historical source reconciliation and inventory corrections
+
+- Entry points: procurement workspace, pending purchase list, and inventory product actions → 采购与库存对账. Product search works even when the product has no open procurement task.
+- `GET /api/procurement/ledger` returns the full product source/stock snapshot and its revision; `POST /api/procurement/ledger/preview` validates a proposed correction; `POST /api/procurement/ledger` applies it atomically with a client request key. Replaying the same request returns the saved result; a changed payload cannot reuse its key.
+- Transported local orders keep historical missing-source quantities. Explicit purchases allocated to new orders never erase these quantities, including after their receipt. Unallocated receipts later than the historical transport cutoff are not automatically used as proof of old sources.
+- Historical shortages distinguish missing purchase sources from recorded purchases whose receipt still needs confirmation. Actual local returns may supply a later shipment once; return/cancellation statuses alone do not add supply. FBP orders do not consume local supply.
+- Historical purchase backfill creates a dated formal purchase and approved receipt tied to the selected order. The operator must distinguish a missing local inbound movement from an already-recorded/externally fulfilled source. Only the former adds local stock. Unknown amounts stay zero and remain visibly incomplete.
+- Existing batch receipt/link operations cannot consume another order's allocation. Suggested historical matches require explicit source linking, rather than the older bulk receipt shortcut.
+- A purchase correction adjusts pending batches, confirmed receipt quantities when explicitly requested, request allocations, header totals, and cost versions together. Current order allocations take priority over historical ones. Corrections may expose negative stock; they do not silently create replacement purchases. Original movement entries remain with corrective movements and an audit snapshot.
+- Inventory conversion records both product movements in one transaction. Order substitution restores the nominal product's deduction and records consumption of the actual product; an explicit source link keeps the selected current order covered even with historical stock debt. Operators use physical child products for combinations.
+- Damage/loss deduct local stock; stocktake records the actual local count and a required reason, including a documented pending investigation. Missing FBP transfers use the existing FBP transfer workflow.
+- Stock transformations and stocktakes require `inventory.write` in addition to procurement access. Every action records the actor, reason, original snapshot, and resulting inventory changes. User-facing dates use Beijing time.

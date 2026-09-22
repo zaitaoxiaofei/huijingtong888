@@ -1,4 +1,7 @@
-import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery } from "../mysql-pool.js";
+import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
+import { aiVehicleCatalog } from "./ai-vehicle-catalog.js";
+import { inventoryProductNamingOptions } from "./inventory-product-naming.js";
+import { readDevelopmentPlan, normalizeDevelopmentPlan, developmentPlanProgress, developmentPlanDeliverable } from "./development-task-plan.js";
 import { procurementRealOrderShortageMysql } from "./mysql-procurement-list.js";
 
 const VALID_TYPES = new Set([
@@ -72,7 +75,16 @@ async function ensureTeamTasksSchema() {
       KEY idx_team_tasks_due (due_at, active)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   `);
+  await mysqlExecute(`CREATE TABLE IF NOT EXISTS team_operational_owners (
+      work_type VARCHAR(64) NOT NULL PRIMARY KEY,
+      owner_person_id BIGINT UNSIGNED NULL,
+      term_until DATE NULL,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+  await mysqlExecute("INSERT IGNORE INTO team_operational_owners (work_type) VALUES ('procurement_daily'), ('shipping_daily')");
   for (const sql of [
+    "ALTER TABLE team_operational_owners ADD COLUMN term_until DATE NULL",
+    "ALTER TABLE team_tasks ADD COLUMN owner_manually_assigned TINYINT(1) NOT NULL DEFAULT 0",
     "ALTER TABLE team_tasks ADD COLUMN automation_key VARCHAR(128) NULL AFTER quality_score",
     "CREATE UNIQUE INDEX uk_team_tasks_automation_key ON team_tasks (automation_key)"
   ]) {
@@ -154,6 +166,14 @@ async function ensureTeamTasksSchema() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   `);
   const ideaColumns = await mysqlQuery("SHOW COLUMNS FROM product_development_ideas");
+  for (const field of ["development_brand", "development_category"]) {
+    if (!ideaColumns.some((column) => column.Field === field)) {
+      await mysqlExecute(`ALTER TABLE product_development_ideas ADD COLUMN ${field} VARCHAR(255) NOT NULL DEFAULT ''`);
+    }
+  }
+  if (!ideaColumns.some((column) => column.Field === "development_matrix_enabled")) {
+    await mysqlExecute("ALTER TABLE product_development_ideas ADD COLUMN development_matrix_enabled TINYINT(1) NOT NULL DEFAULT 0");
+  }
   if (!ideaColumns.some((column) => column.Field === "assignee_person_id")) {
     await mysqlExecute(`ALTER TABLE product_development_ideas
       ADD COLUMN assignee_person_id BIGINT UNSIGNED NULL AFTER created_by_person_id,
@@ -301,7 +321,7 @@ function normalizeTeamTaskRow(row = {}) {
     candidate_id: row.candidate_id ? Number(row.candidate_id) : null,
     candidate_title: row.candidate_title || "",
     stage: row.development_stage || "",
-    deliverable: row.deliverable || "",
+    deliverable: readDevelopmentPlan(row.related_object) ? developmentPlanDeliverable(readDevelopmentPlan(row.related_object)) : row.deliverable || "",
     reviewer_person_id: row.reviewer_person_id ? Number(row.reviewer_person_id) : null,
     created_at: row.created_at || "",
     updated_at: row.updated_at || ""
@@ -338,6 +358,43 @@ function buildPayload(body = {}, sessionPersonId = null) {
   };
 }
 
+async function loadDevelopmentPlanDrafts(ids) {
+  if (!ids.length) return [];
+  return mysqlQuery(`SELECT id, product_name, created_by_person_id, created_at, status,
+    GREATEST(1, COALESCE(
+      CASE WHEN JSON_VALID(template_payload_json) THEN JSON_LENGTH(JSON_EXTRACT(template_payload_json,'$.editable_payload.variants')) END,
+      CASE WHEN JSON_VALID(template_payload_json) THEN JSON_LENGTH(JSON_EXTRACT(template_payload_json,'$.variants')) END,
+      CASE WHEN JSON_VALID(manual_facts_json) THEN JSON_LENGTH(JSON_EXTRACT(manual_facts_json,'$.variants')) END, 1
+    )) AS sku_count
+    FROM listing_drafts WHERE id IN (${ids.map(() => "?").join(",")}) AND status<>'deleted'`, ids);
+}
+
+async function applyDevelopmentPlanPayload(payload, body, options = {}) {
+  const plan = normalizeDevelopmentPlan(body.related ?? body.related_object, body, options);
+  if (!plan) return false;
+  const [catalog, categories] = options.catalogs || await Promise.all([aiVehicleCatalog(), inventoryProductNamingOptions({ type: "category" })]);
+  for (const row of plan.models) {
+    const rowBrand = row.brand || plan.brand; const rowCategory = row.category || plan.category;
+    const brand = catalog.brands.find((item) => item.name === rowBrand);
+    if (!brand && (row.scope || plan.scope) !== "non_automotive") throw new Error("任务品牌（brand）不在当前车型目录中，请返回表格重新选择品牌。");
+    const categoryAvailable = categories.rows.some((item) => item.value === rowCategory);
+    const legacyCategoryAllowed = options.allowedLegacyCategoryKeys?.has(`${rowBrand}\n${rowCategory}`);
+    if (!categoryAvailable && !legacyCategoryAllowed) throw new Error("任务核心品名（category）不可用，请返回表格选择已审核的核心品名。");
+    if ((row.scope || plan.scope) === "non_automotive") continue;
+    const model = brand.models.find((item) => Number(item.id) === row.model_id);
+    if (!model) throw new Error("任务车型（model_id）不属于所选品牌，请在车型明细中重新选择。");
+    row.model = model.name;
+  }
+  const ids = [...plan.models.flatMap((row) => row.draft_ids), ...(plan.unallocated_draft_ids || [])];
+  const drafts = await loadDevelopmentPlanDrafts(ids);
+  if (!options.preserveHistoricalDrafts && ids.some(id => !drafts.some(row => Number(row.id) === id) && !options.historicalDraftIds?.has(id))) throw new Error("关联草稿（draft_ids）已删除或不存在，请在车型明细中移除后重新关联。");
+  if (!options.preserveHistoricalDrafts && drafts.some((row) => Number(row.created_by_person_id) !== payload.ownerPersonId && !options.historicalDraftIds?.has(Number(row.id)))) throw new Error("只能关联任务负责人创建的草稿（created_by_person_id），请检查负责人或移除不属于该人员的草稿。");
+  const progress = developmentPlanProgress(plan, drafts);
+  Object.assign(payload, { related: JSON.stringify(plan), target: progress.target, done: progress.done,
+    status: progress.status, unit: "SKU", deliverable: developmentPlanDeliverable(plan) });
+  return true;
+}
+
 async function saveTaskLink(taskId, payload) {
   await mysqlExecute(`
     INSERT INTO product_development_task_links
@@ -362,30 +419,65 @@ async function assertCollaborators(collaboratorIds = []) {
   if (rows.length !== collaboratorIds.length) throw new Error("协作人包含不存在或已停用的人员");
 }
 
+export async function teamOperationalOwnersMysql() {
+  ensureMysqlEnabled();
+  await ensureTeamTasksSchema();
+  return { rows: await mysqlQuery(`SELECT settings.work_type AS type, settings.owner_person_id, person.name AS owner_name,
+      DATE_FORMAT(settings.term_until, '%Y-%m-%d') AS term_until,
+      COALESCE(settings.term_until < DATE(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 8 HOUR)), 0) AS term_expired
+    FROM team_operational_owners settings LEFT JOIN people person ON person.id=settings.owner_person_id`) };
+}
+
+export async function setTeamOperationalOwnerMysql(body = {}) {
+  ensureMysqlEnabled();
+  await ensureTeamTasksSchema();
+  if (!["procurement_daily", "shipping_daily"].includes(body.type)) throw new Error("请选择采购任务或每日发货任务类型");
+  const ownerId = normalizePersonId(body.owner_person_id);
+  if (!ownerId) throw new Error("缺少固定负责人（owner_person_id），无法自动分配每日任务。请在新增任务中选择该类任务的负责人后保存。");
+  const termUntil = body.term_until == null || body.term_until === "" ? null : body.term_until;
+  if (termUntil !== null) {
+    const parsed = typeof termUntil === "string" && /^\d{4}-\d{2}-\d{2}$/.test(termUntil) ? new Date(`${termUntil}T00:00:00Z`) : null;
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+    if (!parsed || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== termUntil || termUntil < today) {
+      throw new Error("负责截止日期（term_until）必须是今天或之后的有效日期。请在固定负责人设置中重新选择截止日期（北京时间），或清空日期以长期沿用。");
+    }
+  }
+  await assertActivePerson(ownerId, "固定负责人");
+  await withMysqlTransaction(async (connection) => {
+    await connection.execute("UPDATE team_operational_owners SET owner_person_id=?, term_until=IF(?, ?, term_until) WHERE work_type=?", [ownerId, body.term_until !== undefined, termUntil, body.type]);
+    await connection.execute(`UPDATE team_tasks SET owner_person_id=?, updated_at=CURRENT_TIMESTAMP
+      WHERE work_type=? AND automation_key LIKE CONCAT(?, ':%') AND active=1 AND owner_manually_assigned=0
+        AND due_at >= DATE(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 8 HOUR))`, [ownerId, body.type, body.type]);
+  });
+  return { ok: true };
+}
+
 async function upsertAutomatedTask({ key, title, type, ownerId = null, target = 0, done = 0, unit = "单", date, status = "doing", related = "" }) {
-  await mysqlExecute(`
+  await withMysqlTransaction(async (connection) => {
+    const [owners] = await connection.execute("SELECT owner_person_id FROM team_operational_owners WHERE work_type=? FOR UPDATE", [type]);
+    await connection.execute(`
     INSERT INTO team_tasks
       (title, work_type, owner_person_id, period, status, priority, target_count, done_count, unit, start_at, due_at, related_object, result_note, automation_key)
     VALUES (?, ?, ?, 'week', ?, 'medium', ?, ?, ?, ?, ?, ?, '系统按业务数据自动更新', ?)
     ON DUPLICATE KEY UPDATE title=VALUES(title), status=VALUES(status),
+      owner_person_id=IF(owner_manually_assigned=1 OR ? IS NULL, owner_person_id, VALUES(owner_person_id)),
       target_count=VALUES(target_count), done_count=VALUES(done_count), unit=VALUES(unit), start_at=VALUES(start_at),
       due_at=VALUES(due_at), related_object=VALUES(related_object), active=1, updated_at=CURRENT_TIMESTAMP
-  `, [title, type, ownerId, status, target, done, unit, date, date, related, key]);
+  `, [title, type, owners[0]?.owner_person_id ?? ownerId, status, target, done, unit, date, date, related, key, owners[0]?.owner_person_id ?? null]);
+  });
 }
 
-async function ensureOperationalTeamTasks() {
-  const [{ beijing_date: beijingDate, statistics_date: statisticsDate }] = await mysqlQuery(`SELECT
-    DATE_FORMAT(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 8 HOUR), '%Y-%m-%d') AS beijing_date,
-    DATE_FORMAT(DATE_SUB(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 8 HOUR), INTERVAL 1 DAY), '%Y-%m-%d') AS statistics_date`);
+async function syncDevelopmentIdeaTasks() {
   await mysqlExecute(`
     INSERT INTO team_tasks
       (title, work_type, owner_person_id, period, status, priority, target_count, done_count, unit, start_at, due_at, related_object, result_note, automation_key)
     SELECT idea.title, 'product_development', idea.assignee_person_id, 'week',
-      CASE WHEN COALESCE(MAX(draft_stats.output_count),0) >= idea.target_product_count THEN 'done'
-        WHEN DATE(idea.development_due_at) < ? THEN 'delayed' ELSE 'doing' END,
+      CASE WHEN idea.target_product_count>0 AND COALESCE(MAX(draft_stats.output_count),0) >= idea.target_product_count THEN 'done'
+        WHEN idea.status='idea' OR idea.assignee_person_id IS NULL THEN 'todo'
+        WHEN DATE(idea.development_due_at) < DATE(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 8 HOUR)) THEN 'delayed' ELSE 'doing' END,
       'medium', idea.target_product_count, COALESCE(MAX(draft_stats.output_count),0), '个产品',
-      DATE(COALESCE(idea.development_started_at, idea.updated_at)), DATE(idea.development_due_at),
-      JSON_OBJECT('kind','product_development','idea_id',idea.id,'route','/team-plan'), '按任务关联草稿内的变体数量自动计算，店铺副本不重复计数',
+      DATE(COALESCE(idea.development_started_at, idea.created_at)), DATE(idea.development_due_at),
+      JSON_OBJECT('kind','product_development','idea_id',idea.id,'brand',idea.development_brand,'category',idea.development_category,'route','/team-plan'), '按任务关联草稿内的变体数量自动计算，店铺副本不重复计数',
       CONCAT('development_idea:', idea.id)
     FROM product_development_ideas idea
     LEFT JOIN product_development_idea_products idea_product ON idea_product.idea_id=idea.id
@@ -401,17 +493,26 @@ async function ensureOperationalTeamTasks() {
       JOIN listing_drafts draft ON draft.id=idea_draft.draft_id AND draft.status<>'deleted'
       GROUP BY idea_draft.idea_id
     ) draft_stats ON draft_stats.idea_id=idea.id
-    WHERE idea.active=1
-      AND idea.target_product_count>0
-      AND (
-        idea.development_started_at IS NOT NULL
-        OR (idea.status<>'idea' AND idea.assignee_person_id IS NOT NULL AND idea.development_due_at IS NOT NULL)
-      )
+    WHERE idea.active=1 AND idea.development_matrix_enabled=0
     GROUP BY idea.id
     ON DUPLICATE KEY UPDATE title=VALUES(title), owner_person_id=VALUES(owner_person_id), status=VALUES(status),
       target_count=VALUES(target_count), done_count=VALUES(done_count), start_at=VALUES(start_at), due_at=VALUES(due_at),
       related_object=VALUES(related_object), active=1, updated_at=CURRENT_TIMESTAMP
-  `, [beijingDate]);
+  `);
+  await mysqlExecute(`UPDATE team_tasks task JOIN product_development_ideas idea
+    ON task.automation_key=CONCAT('development_idea:',idea.id)
+    SET task.active=0 WHERE (idea.active=0 OR idea.development_matrix_enabled=1) AND task.active=1`);
+  await mysqlExecute(`UPDATE team_tasks task JOIN product_development_ideas idea
+    ON task.automation_key LIKE CONCAT('idea_scope:',idea.id,':%')
+    SET task.active=0 WHERE idea.active=0 AND task.active=1`);
+}
+
+async function ensureOperationalTeamTasks() {
+  await syncDevelopmentIdeaTasks();
+  const [{ beijing_date: beijingDate, statistics_date: statisticsDate }] = await mysqlQuery(`SELECT
+    DATE_FORMAT(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 8 HOUR), '%Y-%m-%d') AS beijing_date,
+    DATE_FORMAT(DATE_SUB(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 8 HOUR), INTERVAL 1 DAY), '%Y-%m-%d') AS statistics_date`);
+
 
   const [procurement] = await mysqlQuery(`SELECT COUNT(*) AS target_count, COALESCE(SUM(order_request.completed),0) AS done_count
     FROM (SELECT request.source_order_id,
@@ -475,10 +576,6 @@ export async function teamTasksMysql(query = {}) {
     where.push("t.owner_person_id = ?");
     params.push(ownerId);
   }
-  if (VALID_STATUSES.has(status)) {
-    where.push("t.status = ?");
-    params.push(status);
-  }
   const rows = await mysqlQuery(`
     SELECT t.*, p.name AS owner_name, p.avatar_url AS owner_avatar_url,
       link.project_id, project.name AS project_name, link.candidate_id, candidate.title AS candidate_title,
@@ -501,14 +598,51 @@ export async function teamTasksMysql(query = {}) {
       t.updated_at DESC,
       t.id DESC
   `, params);
-  return rows.map(normalizeTeamTaskRow);
+  const plans = rows.map((row) => readDevelopmentPlan(row.related_object)).filter(Boolean);
+  const ideaIds = rows.flatMap((row) => {
+    try { const related = JSON.parse(row.related_object || "{}"); return related.kind === "product_development" && Number(related.idea_id) > 0 ? [Number(related.idea_id)] : []; } catch { return []; }
+  });
+  const ideaDraftLinks = ideaIds.length ? await mysqlQuery(`SELECT link.idea_id, link.draft_id, idea.created_at AS idea_created_at
+    FROM product_development_ideas idea LEFT JOIN product_development_idea_drafts link ON link.idea_id=idea.id
+    WHERE idea.id IN (${ideaIds.map(() => "?").join(",")})`, ideaIds) : [];
+  const draftIds = [...new Set([...plans.flatMap((plan) => [...plan.models.flatMap((row) => row.draft_ids), ...(plan.unallocated_draft_ids || [])]), ...ideaDraftLinks.map(row => Number(row.draft_id)).filter(Boolean)])];
+  const drafts = await loadDevelopmentPlanDrafts(draftIds);
+  const draftsById = new Map(drafts.map(row => [Number(row.id), row]));
+  return rows.map((row) => {
+    const task = normalizeTeamTaskRow(row);
+    try {
+      const related = JSON.parse(row.related_object || "{}");
+      if (["development_matrix", "product_development"].includes(related.kind)) {
+        task.development_brand = related.brand || "";
+        task.development_category = related.category || "";
+        task.idea_id = Number(related.idea_id || 0) || null;
+        if (task.idea_id) {
+          const links = ideaDraftLinks.filter(link => Number(link.idea_id) === task.idea_id);
+          task.development_created_at = links[0]?.idea_created_at || task.created_at;
+          task.development_drafts = links.map(link => draftsById.get(Number(link.draft_id))).filter(Boolean)
+            .map(draft => ({ id: Number(draft.id), title: draft.product_name, count: Number(draft.sku_count), created_at: draft.created_at }));
+        }
+      }
+    } catch {}
+    const plan = readDevelopmentPlan(row.related_object);
+    if (plan) {
+      const progress = developmentPlanProgress(plan, drafts);
+      task.development_brand = [...new Set(plan.models.map(model => model.brand || plan.brand))].join('、');
+      task.development_category = [...new Set(plan.models.map(model => model.category || plan.category))].join('、');
+      Object.assign(task, { target: progress.target, done: progress.done, status: progress.status,
+        source_idea_id: plan.source_idea_id || null,
+        development_scopes: plan.models.map(model => ({ brand: model.brand || plan.brand, category: model.category || plan.category })),
+        development_plan: { ...plan, models: progress.models, unallocated_drafts: progress.unallocated_drafts } });
+    }
+    return task;
+  }).filter((row) => !VALID_STATUSES.has(status) || row.status === status);
 }
 
 export async function teamTaskOperationalDetailsMysql(id) {
   ensureMysqlEnabled();
   await ensureTeamTasksSchema();
   const taskId = Number(id);
-  const [task] = await mysqlQuery("SELECT id, work_type, related_object FROM team_tasks WHERE id = ? AND active = 1 LIMIT 1", [taskId]);
+  const [task] = await mysqlQuery("SELECT id, work_type, related_object, target_count FROM team_tasks WHERE id = ? AND active = 1 LIMIT 1", [taskId]);
   if (!task) throw new Error("任务不存在");
   let related = {};
   try { related = JSON.parse(task.related_object || "{}"); } catch {}
@@ -585,8 +719,11 @@ export async function teamTaskOperationalDetailsMysql(id) {
       existing.procurement_status = [...new Set(`${existing.procurement_status || ""},${row.procurement_status || ""}`.split(",").filter(Boolean))].join(",");
     }
     const actionableRows = [...actionableByOrder.values()];
+    const done = Math.max(0, Number(task.target_count || 0) - actionableRows.length);
+    const status = done >= Number(task.target_count || 0) ? "done" : "doing";
+    await mysqlExecute("UPDATE team_tasks SET done_count=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND active=1", [done, status, taskId]);
     return { rows: actionableRows.map((row) => ({ ...row, reason: "not_procured", reason_label: "尚未采购", warning: true })),
-      summary: { total: actionableRows.length, not_procured: actionableRows.length } };
+      summary: { total: actionableRows.length, not_procured: actionableRows.length }, progress: { done, status } };
   }
 
   const rows = await mysqlQuery(`SELECT o.id AS row_id, o.id AS order_id, o.posting_number AS order_number, shop.name AS shop_name,
@@ -622,13 +759,17 @@ export async function teamTaskOperationalDetailsMysql(id) {
     return { ...row, reason, reason_label: labels[reason], warning: ["stock_ready_unprinted", "printed_not_transported"].includes(reason) };
   });
   const summary = normalized.reduce((result, row) => { result.total += 1; result[row.reason] = (result[row.reason] || 0) + 1; if (row.warning) result.warning += 1; return result; }, { total: 0, warning: 0 });
-  return { rows: normalized, summary };
+  const done = Math.max(0, Number(task.target_count || 0) - normalized.length);
+  const status = done >= Number(task.target_count || 0) ? "done" : "doing";
+  await mysqlExecute("UPDATE team_tasks SET done_count=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND active=1", [done, status, taskId]);
+  return { rows: normalized, summary, progress: { done, status } };
 }
 
 export async function createTeamTaskMysql(body = {}, sessionPersonId = null) {
   ensureMysqlEnabled();
   await ensureTeamTasksSchema();
   const payload = buildPayload(body, sessionPersonId);
+  const isDevelopmentPlan = await applyDevelopmentPlanPayload(payload, body);
   await assertActivePerson(payload.ownerPersonId, "负责人");
   await assertCollaborators(payload.collaboratorIds);
   const result = await mysqlExecute(`
@@ -655,7 +796,7 @@ export async function createTeamTaskMysql(body = {}, sessionPersonId = null) {
     payload.quality,
     payload.createdByPersonId
   ]);
-  await saveTaskLink(Number(result.insertId), payload);
+  if (!isDevelopmentPlan) await saveTaskLink(Number(result.insertId), payload);
   return { ok: true, id: Number(result.insertId) };
 }
 
@@ -668,10 +809,33 @@ export async function updateTeamTaskMysql(id, body = {}) {
   if (!existing[0]) throw new Error("任务不存在");
   const payload = buildPayload(body);
   await assertActivePerson(payload.ownerPersonId, "负责人");
-  if (existing[0].automation_key) {
+  if (String(existing[0].automation_key || "").startsWith("development_idea:")) {
+    const ideaId = Number(existing[0].automation_key.split(":")[1]);
+    await mysqlExecute("UPDATE product_development_ideas SET claimed_at=IF(assignee_person_id <=> ?,claimed_at,NULL),assignee_person_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND active=1", [payload.ownerPersonId, payload.ownerPersonId, ideaId]);
+    await syncDevelopmentIdeaTasks();
+    return { ok: true };
+  }
+  if (/^(procurement_daily|shipping_daily):/.test(String(existing[0].automation_key || ""))) {
+    if (!payload.ownerPersonId) throw new Error("缺少当前任务负责人（owner_person_id），请在任务详情中选择人员后点击“保存负责人”。");
+    await mysqlExecute("UPDATE team_tasks SET owner_person_id=?,owner_manually_assigned=1,updated_at=CURRENT_TIMESTAMP WHERE id=? AND active=1", [payload.ownerPersonId, taskId]);
+    return { ok: true };
+  }
+  if (existing[0].automation_key && !String(existing[0].automation_key).startsWith("idea_scope:")) {
     await mysqlExecute("UPDATE team_tasks SET owner_person_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND active = 1", [payload.ownerPersonId, taskId]);
     return { ok: true };
   }
+  const storedRows = await mysqlQuery("SELECT related_object FROM team_tasks WHERE id = ? AND active = 1", [taskId]);
+  if (readDevelopmentPlan(storedRows[0]?.related_object) && !readDevelopmentPlan(body.related ?? body.related_object)) {
+    throw new Error("车型开发任务缺少车型明细（related.models），请从任务中心打开任务后编辑，不能覆盖为普通任务。");
+  }
+  const storedPlan = readDevelopmentPlan(storedRows[0]?.related_object);
+  if (storedPlan?.source_idea_id) {
+    const incoming = readDevelopmentPlan(body.related ?? body.related_object);
+    body = { ...body, related: { ...incoming, source_idea_id: storedPlan.source_idea_id, group_key: storedPlan.group_key } };
+  }
+  const historicalDraftIds = new Set(storedPlan ? [...storedPlan.models.flatMap(row => row.draft_ids), ...(storedPlan.unallocated_draft_ids || [])] : []);
+  const allowedLegacyCategoryKeys = new Set((storedPlan?.models || []).map((row) => `${row.brand || storedPlan.brand}\n${row.category || storedPlan.category}`));
+  const isDevelopmentPlan = await applyDevelopmentPlanPayload(payload, body, { historicalDraftIds, allowedLegacyCategoryKeys });
   await assertCollaborators(payload.collaboratorIds);
   await mysqlExecute(`
     UPDATE team_tasks SET
@@ -710,7 +874,7 @@ export async function updateTeamTaskMysql(id, body = {}) {
     payload.quality,
     taskId
   ]);
-  await saveTaskLink(taskId, payload);
+  if (!isDevelopmentPlan) await saveTaskLink(taskId, payload);
   return { ok: true };
 }
 
@@ -803,7 +967,7 @@ export async function developmentIdeasMysql() {
       GROUP BY idea_draft.idea_id
     ) draft_stats ON draft_stats.idea_id=idea.id
     WHERE idea.active=1 GROUP BY idea.id
-    ORDER BY idea.urgency DESC, idea.importance DESC, idea.created_at DESC, idea.id DESC`);
+    ORDER BY idea.created_at DESC, idea.id DESC`);
   const ideaIds = rows.map((row) => Number(row.id)).filter(Boolean);
   const draftRows = ideaIds.length ? await mysqlQuery(`SELECT idea_draft.idea_id, draft.id, draft.product_name, draft.status,
       draft.development_type, draft.parent_draft_id, draft.updated_at
@@ -817,13 +981,34 @@ export async function developmentIdeasMysql() {
     if (list.length < 5) list.push({ ...draft, id: Number(draft.id), parent_draft_id: draft.parent_draft_id ? Number(draft.parent_draft_id) : null });
     draftsByIdea.set(key, list);
   }
-  return rows.map((row) => ({ ...row, id: Number(row.id), urgency: Number(row.urgency), importance: Number(row.importance),
+  const ideaRows = rows.map((row) => ({ ...row, id: Number(row.id), urgency: Number(row.urgency), importance: Number(row.importance),
     product_id: row.product_id ? Number(row.product_id) : null, candidate_id: row.candidate_id ? Number(row.candidate_id) : null,
     created_by_person_id: row.created_by_person_id ? Number(row.created_by_person_id) : null,
     assignee_person_id: row.assignee_person_id ? Number(row.assignee_person_id) : null,
     target_product_count: Number(row.target_product_count || 0), linked_product_count: Number(row.linked_product_count || 0),
     development_started_at: row.effective_development_started_at || row.development_started_at || null,
     draft_count: Number(row.draft_count || 0), output_count: Number(row.output_count || 0), drafts: draftsByIdea.get(Number(row.id)) || [], order_count: 0 }));
+  const tasks = await teamTasksMysql({ type: "product_development" });
+  for (const idea of ideaRows) {
+    const children = tasks.filter(task => task.source_idea_id === idea.id);
+    if (!children.length) continue;
+    idea.development_tasks = children.map(task => ({ key: task.development_plan.group_key, task_id: task.id, models: task.development_plan.models }));
+    idea.tasks = children;
+    idea.development_scopes = children.flatMap(task => task.development_scopes);
+    idea.development_brand = [...new Set(idea.development_scopes.map(row => row.brand))].join('、');
+    idea.development_category = [...new Set(idea.development_scopes.map(row => row.category))].join('、');
+    idea.target_product_count = children.reduce((sum, task) => sum + task.target, 0);
+    idea.output_count = children.reduce((sum, task) => sum + task.done, 0);
+  }
+  const taskIdeas = tasks.filter((task) => task.development_plan && !task.source_idea_id).map((task) => ({
+    id: `task:${task.id}`, task_id: task.id, task, title: task.title, note: task.development_plan.notes,
+    development_scopes: task.development_scopes, development_brand: task.development_plan.brand, development_category: task.development_plan.category,
+    assignee_person_id: task.owner_person_id, assignee_name: task.owner_name,
+    target_product_count: task.target, output_count: task.done, development_due_at: task.due_at,
+    created_at: task.created_at, status: task.status, urgency: 5, importance: 5
+  }));
+  return [...ideaRows, ...taskIdeas].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)
+    || Number(b.task_id || b.id) - Number(a.task_id || a.id));
 }
 
 export async function linkDevelopmentIdeaDraftMysql(id, body = {}) {
@@ -845,6 +1030,7 @@ export async function linkDevelopmentIdeaDraftMysql(id, body = {}) {
   const values = draftIds.map(() => "(?,?)").join(",");
   await mysqlExecute(`INSERT IGNORE INTO product_development_idea_drafts (idea_id,draft_id) VALUES ${values}`,
     draftIds.flatMap((draftId) => [ideaId, draftId]));
+  operationalTasksRefreshedAt = 0;
   return { ok: true, idea_id: ideaId, draft_id: draftIds.length === 1 ? draftIds[0] : null, draft_ids: draftIds, linked_count: draftIds.length };
 }
 
@@ -866,31 +1052,139 @@ export async function developmentInventoryCategoriesMysql() {
     brand_count: Number(row.brand_count || 0), listed_count: Number(row.listed_count || 0) }));
 }
 
+// Coordinates survive regrouping; task keys survive ordinary edits.
+async function saveDevelopmentIdeaMatrix(ideaId, body, sessionPersonId = null) {
+  const groups = body.development_tasks;
+  if (!groups.length || groups.length > 100) throw new Error("请选择 1–100 个开发任务（development_tasks），在开发坐标表中选择品牌、类目和车型。");
+  const owner = normalizePersonId(body.assignee_person_id);
+  await assertActivePerson(owner, "开发负责人");
+  const keys = new Set(); const coordinates = new Set(); const cells = new Map();
+  const coordinate = (row, plan) => JSON.stringify([row.brand || plan.brand, row.category || plan.category, Number(row.model_id)]);
+  const prepared = [];
+  const catalogs = await Promise.all([aiVehicleCatalog(), inventoryProductNamingOptions({ type: "category" })]);
+  for (const group of groups) {
+    if (!/^[a-zA-Z0-9-]{1,64}$/.test(group.key || "") || keys.has(group.key)) throw new Error("任务分组标识（key）无效或重复，请重新打开灵感编辑。");
+    keys.add(group.key);
+    const first = group.models?.[0];
+    const related = { kind: "development_matrix", brand: first?.brand, category: first?.category, scope: first?.scope,
+      group_key: group.key, notes: normalizeText(body.note, 2000), models: (group.models || []).map(row => ({ ...row, draft_ids: [] })) };
+    const payload = { ownerPersonId: owner };
+    await applyDevelopmentPlanPayload(payload, { type: "product_development", owner_person_id: owner, due_at: body.development_due_at || "", related }, { allowUnassigned: true, catalogs });
+    const plan = JSON.parse(payload.related);
+    for (const row of plan.models) {
+      const key = coordinate(row, plan); const cell = JSON.stringify([row.brand || plan.brand, row.category || plan.category]);
+      if (coordinates.has(key) || (cells.has(cell) && cells.get(cell) !== group.key)) throw new Error("同一品牌＋类目（brand/category）不能拆进多个任务，请在坐标表合并该交叉格的车型。");
+      coordinates.add(key); cells.set(cell, group.key);
+    }
+    prepared.push(plan);
+  }
+  const total = prepared.reduce((sum, plan) => sum + plan.models.reduce((n, row) => n + row.target, 0), 0);
+  const values = [normalizeText(body.title, 255), normalizeImageUrl(body.image_url), normalizeHttpUrl(body.source_url, "参考链接"), normalizeText(body.note, 5000),
+    normalizeScore(body.urgency), normalizeScore(body.importance), owner, total, normalizeDate(body.development_due_at), prepared[0].brand, prepared[0].category];
+  await withMysqlTransaction(async connection => {
+    let previousIdea = null;
+    if (ideaId) {
+      const [ideas] = await connection.execute("SELECT id,development_matrix_enabled,assignee_person_id,development_due_at,created_by_person_id FROM product_development_ideas WHERE id=? AND active=1 FOR UPDATE", [ideaId]);
+      if (!ideas.length) throw new Error("灵感不存在或已停用");
+      previousIdea = ideas[0];
+    } else {
+      const [result] = await connection.execute("INSERT INTO product_development_ideas (title,created_by_person_id) VALUES (?,?)", [values[0], normalizePersonId(sessionPersonId)]);
+      ideaId = Number(result.insertId);
+    }
+    const [existing] = await connection.execute(`SELECT id,automation_key,related_object,active,owner_person_id,due_at FROM team_tasks
+      WHERE automation_key LIKE CONCAT('idea_scope:',?,':%') OR automation_key=CONCAT('development_idea:',?) FOR UPDATE`, [ideaId, ideaId]);
+    const byCoordinate = new Map(); const pending = new Set();
+    for (const task of existing) {
+      if (Number(task.active) === 0) continue;
+      const plan = readDevelopmentPlan(task.related_object);
+      if (!plan) continue;
+      for (const row of plan.models) byCoordinate.set(coordinate(row, plan), row.draft_ids || []);
+      for (const id of plan.unallocated_draft_ids || []) pending.add(id);
+    }
+    const [legacyDrafts] = previousIdea?.development_matrix_enabled ? [[]] : await connection.execute("SELECT draft_id FROM product_development_idea_drafts WHERE idea_id=?", [ideaId]);
+    for (const draft of legacyDrafts) pending.add(Number(draft.draft_id));
+    const allocated = new Set();
+    for (const plan of prepared) {
+      plan.source_idea_id = ideaId;
+      for (const row of plan.models) {
+        row.draft_ids = byCoordinate.get(coordinate(row, plan)) || [];
+        for (const id of row.draft_ids) allocated.add(id);
+      }
+    }
+    // Removed coordinates retain their results in the explicit allocation tray.
+    for (const ids of byCoordinate.values()) for (const id of ids) if (!allocated.has(id)) pending.add(id);
+    for (const id of allocated) pending.delete(id);
+    if (pending.size) prepared[0].unallocated_draft_ids = [...pending];
+    const retained = new Set();
+    for (const [index, plan] of prepared.entries()) {
+      const key = `idea_scope:${ideaId}:${plan.group_key}`;
+      const previous = existing.find(task => task.automation_key === key)
+        || (index === 0 ? existing.find(task => task.automation_key === `development_idea:${ideaId}`) : null);
+      const taskOwner = previous && normalizePersonId(previousIdea?.assignee_person_id) === owner ? normalizePersonId(previous.owner_person_id) : owner;
+      const taskDue = previous && (dateOnly(previousIdea?.development_due_at) || null) === values[8] ? (dateOnly(previous.due_at) || null) : values[8];
+      const payload = { ownerPersonId: taskOwner };
+      await applyDevelopmentPlanPayload(payload, { type: "product_development", owner_person_id: taskOwner, due_at: taskDue || "", related: plan }, { allowUnassigned: true, preserveHistoricalDrafts: true, catalogs });
+      const scopes = [...new Set(plan.models.map(row => `${row.brand || plan.brand} · ${row.category || plan.category}`))];
+      const title = normalizeText(`${values[0]} · ${scopes.join(' / ')}`, 255);
+      const params = [title, taskOwner, payload.target, payload.done, payload.status, taskDue, payload.related, payload.deliverable, key];
+      if (previous) {
+        await connection.execute(`UPDATE team_tasks SET title=?,owner_person_id=?,target_count=?,done_count=?,status=?,due_at=?,related_object=?,result_note=?,automation_key=?,unit='SKU',active=1,updated_at=CURRENT_TIMESTAMP WHERE id=?`, [...params, previous.id]);
+        retained.add(Number(previous.id));
+      } else {
+        const [result] = await connection.execute(`INSERT INTO team_tasks (title,owner_person_id,target_count,done_count,status,due_at,related_object,result_note,automation_key,work_type,unit,period,created_by_person_id)
+          VALUES (?,?,?,?,?,?,?,?,?,'product_development','SKU','week',?)`, [...params, normalizePersonId(previousIdea?.created_by_person_id || sessionPersonId)]);
+        retained.add(Number(result.insertId));
+      }
+    }
+    for (const task of existing) if (!retained.has(Number(task.id))) await connection.execute("UPDATE team_tasks SET active=0 WHERE id=?", [task.id]);
+    await connection.execute(`UPDATE product_development_ideas SET title=?,image_url=?,source_url=?,note=?,urgency=?,importance=?,
+      assignee_person_id=?,target_product_count=?,development_due_at=?,development_brand=?,development_category=?,development_matrix_enabled=1,updated_at=CURRENT_TIMESTAMP WHERE id=?`, [...values, ideaId]);
+  });
+  operationalTasksRefreshedAt = 0;
+  return { ok: true, id: ideaId, task_count: prepared.length };
+}
+
+async function developmentIdeaScope(body) {
+  const brand = normalizeText(body.development_brand, 255);
+  const category = normalizeText(body.development_category, 255);
+  if (!brand || !category) throw new Error("灵感开发任务缺少汽车品牌或开发类目（development_brand/development_category），请在灵感编辑中选择品牌和类目后保存；非汽车产品请选择“非汽车”。");
+  const [catalog, categories] = await Promise.all([aiVehicleCatalog(), inventoryProductNamingOptions({ type: "category" })]);
+  if (brand !== "非汽车" && !catalog.brands.some((row) => row.name === brand)) throw new Error("灵感汽车品牌（development_brand）不在车型目录中，请在灵感编辑中重新选择。");
+  if (!categories.rows.some((row) => row.value === category)) throw new Error("灵感开发类目（development_category）不在已审核核心品名中，请在灵感编辑中重新选择。");
+  return { brand, category };
+}
+
 export async function createDevelopmentIdeaMysql(body = {}, sessionPersonId = null) {
   ensureMysqlEnabled(); await ensureTeamTasksSchema(); const title = normalizeText(body.title, 255);
   if (!title) throw new Error("请填写灵感标题");
+  if (Array.isArray(body.development_tasks)) return saveDevelopmentIdeaMatrix(null, body, sessionPersonId);
+  const scope = await developmentIdeaScope(body);
   const assigneePersonId = normalizePersonId(body.assignee_person_id);
   if (assigneePersonId) await assertActivePerson(assigneePersonId, "开发负责人");
   const targetProductCount = Math.max(0, Math.floor(Number(body.target_product_count || 0)));
   const developmentDueAt = normalizeDate(body.development_due_at);
   const result = await mysqlExecute(`INSERT INTO product_development_ideas
-    (title,image_url,source_url,note,urgency,importance,created_by_person_id,assignee_person_id,target_product_count,development_due_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    (title,image_url,source_url,note,urgency,importance,created_by_person_id,assignee_person_id,target_product_count,development_due_at,development_brand,development_category) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
   [title, normalizeImageUrl(body.image_url), normalizeHttpUrl(body.source_url, "参考链接"), normalizeText(body.note, 5000),
-    normalizeScore(body.urgency), normalizeScore(body.importance), normalizePersonId(sessionPersonId), assigneePersonId, targetProductCount, developmentDueAt]);
+    normalizeScore(body.urgency), normalizeScore(body.importance), normalizePersonId(sessionPersonId), assigneePersonId, targetProductCount, developmentDueAt, scope.brand, scope.category]);
+  operationalTasksRefreshedAt = 0;
   return { ok: true, id: Number(result.insertId) };
 }
 
 export async function updateDevelopmentIdeaMysql(id, body = {}) {
   ensureMysqlEnabled(); await ensureTeamTasksSchema(); const ideaId = normalizePersonId(id);
   const title = normalizeText(body.title, 255); if (!ideaId) throw new Error("灵感不存在"); if (!title) throw new Error("请填写灵感标题");
+  if (Array.isArray(body.development_tasks)) return saveDevelopmentIdeaMatrix(ideaId, body);
+  const scope = await developmentIdeaScope(body);
   const assigneePersonId = normalizePersonId(body.assignee_person_id);
   if (assigneePersonId) await assertActivePerson(assigneePersonId, "开发负责人");
   const targetProductCount = Math.max(0, Math.floor(Number(body.target_product_count || 0)));
   const developmentDueAt = normalizeDate(body.development_due_at);
   await mysqlExecute(`UPDATE product_development_ideas SET title=?,image_url=?,source_url=?,note=?,urgency=?,importance=?,
-      assignee_person_id=?,target_product_count=?,development_due_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND active=1`,
+      assignee_person_id=?,target_product_count=?,development_due_at=?,development_brand=?,development_category=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND active=1`,
     [title, normalizeImageUrl(body.image_url), normalizeHttpUrl(body.source_url, "参考链接"), normalizeText(body.note, 5000), normalizeScore(body.urgency), normalizeScore(body.importance),
-      assigneePersonId, targetProductCount, developmentDueAt, ideaId]);
+      assigneePersonId, targetProductCount, developmentDueAt, scope.brand, scope.category, ideaId]);
+  operationalTasksRefreshedAt = 0;
   return { ok: true };
 }
 
@@ -903,7 +1197,8 @@ export async function startDevelopmentIdeaMysql(id) {
   if (Number(idea.target_product_count || 0) < 1) missing.push("产品数量");
   if (!idea.development_due_at) missing.push("截止时间");
   if (missing.length) throw new Error(`请先填写${missing.join("、")}，再进入产品开发`);
-  await mysqlExecute("UPDATE product_development_ideas SET status='assigned',development_started_at=COALESCE(development_started_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=?", [ideaId]);
+  await mysqlExecute("UPDATE product_development_ideas SET status=CASE WHEN claimed_at IS NOT NULL THEN 'developing' ELSE 'assigned' END,development_started_at=COALESCE(development_started_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=?", [ideaId]);
+  operationalTasksRefreshedAt = 0;
   return { ok: true, id: ideaId };
 }
 
@@ -912,9 +1207,18 @@ export async function claimDevelopmentIdeaMysql(id, sessionPersonId = null) {
   if (!personId) throw new Error("当前登录账号未关联人员，无法认领任务");
   const rows = await mysqlQuery("SELECT assignee_person_id,status FROM product_development_ideas WHERE id=? AND active=1 LIMIT 1", [ideaId]);
   const idea = rows[0];
-  if (!idea || !["assigned", "developing"].includes(String(idea.status || ""))) throw new Error("开发任务不存在或尚未派发");
-  if (Number(idea.assignee_person_id || 0) !== personId) throw new Error("该任务已指定给其他人员，只有指定负责人本人可以认领");
-  await mysqlExecute("UPDATE product_development_ideas SET status='developing',claimed_at=COALESCE(claimed_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=?", [ideaId]);
+  if (!idea || !["idea", "assigned", "developing"].includes(String(idea.status || ""))) throw new Error("灵感任务不存在或当前状态不支持认领");
+  if (idea.assignee_person_id && Number(idea.assignee_person_id) !== personId) throw new Error("该任务已指定给其他人员，只有指定负责人本人可以认领");
+  await withMysqlTransaction(async connection => {
+    const [result] = await connection.execute(`UPDATE product_development_ideas
+    SET assignee_person_id=?,status=CASE WHEN status='idea' THEN 'idea' ELSE 'developing' END,
+      claimed_at=COALESCE(claimed_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP
+    WHERE id=? AND active=1 AND status IN ('idea','assigned','developing')
+      AND (assignee_person_id IS NULL OR assignee_person_id=?)`, [personId, ideaId, personId]);
+    if (!result.affectedRows) throw new Error("任务已被其他人员认领或状态已变化，请刷新灵感列表");
+    await connection.execute("UPDATE team_tasks SET owner_person_id=? WHERE automation_key LIKE CONCAT('idea_scope:',?,':%') AND active=1 AND owner_person_id IS NULL", [personId, ideaId]);
+  });
+  operationalTasksRefreshedAt = 0;
   return { ok: true, id: ideaId };
 }
 
@@ -935,6 +1239,7 @@ export async function linkDevelopmentIdeaMysql(id, body = {}, sessionPersonId = 
 export async function deleteDevelopmentIdeaMysql(id) {
   ensureMysqlEnabled(); await ensureTeamTasksSchema();
   await mysqlExecute("UPDATE product_development_ideas SET active=0,updated_at=CURRENT_TIMESTAMP WHERE id=?", [Number(id)]);
+  operationalTasksRefreshedAt = 0;
   return { ok: true };
 }
 
