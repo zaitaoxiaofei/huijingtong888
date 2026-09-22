@@ -6080,11 +6080,12 @@ onBeforeUnmount(() => {
                 </el-table-column>
                 <el-table-column v-if="mediaRichContentAttribute" width="260">
                   <template #header>
-                    <div class="variant-col-header">
+                    <div class="variant-col-header rich-content-header">
                       <span>JSON富内容</span>
-                      <el-button link size="small" @click="applyFirstVariantAttribute(mediaRichContentAttribute)">同首行</el-button>
-                      <el-button link size="small" @click="generateAllVariantRichContentJson(mediaRichContentAttribute, 'first')">批量首图生成</el-button>
-                      <el-button link size="small" @click="generateAllVariantRichContentJson(mediaRichContentAttribute, 'last')">批量尾图生成</el-button>
+                      <div class="rich-content-header-actions">
+                        <el-button link size="small" @click="generateAllVariantRichContentJson(mediaRichContentAttribute, 'first')">批量首图</el-button>
+                        <el-button link size="small" @click="generateAllVariantRichContentJson(mediaRichContentAttribute, 'last')">批量尾图</el-button>
+                      </div>
                     </div>
                   </template>
                   <template #default="{ row }">
@@ -7089,6 +7090,7 @@ onBeforeUnmount(() => {
 .variant-col-header { min-height: 44px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; line-height: 1.2; text-align: center; font-weight: 700; }
 .variant-col-header em { color: var(--el-color-danger); font-style: normal; margin-right: 2px; }
 .variant-col-header .el-button { height: 18px; padding: 0; font-size: 12px; }
+.rich-content-header-actions { display: flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; }
 .flat-attribute-header { min-height: 44px; display: grid; place-items: center; text-align: center; line-height: 1.2; font-weight: 700; }
 .flat-attribute-value { width: 100%; min-height: 30px; border: 0; border-radius: 6px; padding: 4px 8px; background: transparent; color: #1f2937; text-align: center; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .flat-attribute-value:hover { background: #f4f7fb; color: var(--el-color-primary); }
