@@ -4275,27 +4275,27 @@ function removeVariantVideoLink(index) {
 }
 
 function richContentImageUrl(position = "last", row = null) {
-  const rowImages = row && Array.isArray(row.images) ? row.images.filter((item) => item?.url) : [];
-  const variantImages = templateEditor.variants
-    .flatMap((row) => Array.isArray(row.images) ? row.images : [])
-    .filter((item) => item?.url);
-  const templateImages = templateEditor.images.filter((item) => item?.url);
-  const images = [...rowImages, ...variantImages, ...templateImages];
+  const ownsImages = row && (Array.isArray(row.images) && row.images.length
+    || row.images_manually_edited
+    || row.image_edit_intent === "manual");
+  const images = ownsImages
+    ? normalizeEditorImages(row.images)
+    : normalizeEditorImages(templateEditor.images);
   const picked = position === "first" ? images[0] : images.at(-1);
   return picked?.url || "";
 }
 
-function generateRichContentJson(position = "last", row = null, field = null) {
+function generateRichContentJson(position = "last", row = null, field = null, { silent = false } = {}) {
   const imageUrl = richContentImageUrl(position, row);
   const rowSummary = row && mediaSummaryAttribute.value ? getVariantAttributeValue(row, mediaSummaryAttribute.value) : "";
   const text = String(row?.description || rowSummary || fixedForm.value.summary || templateEditor.description || "").trim();
   if (!imageUrl) {
-    ElMessage.warning(position === "first" ? "请先准备首图或商品图片" : "请先准备尾图或商品图片");
-    return "";
+    if (!silent) ElMessage.warning(position === "first" ? "请先准备首图或商品图片" : "请先准备尾图或商品图片");
+    return { json: "", reason: "缺少图片" };
   }
   if (!text) {
-    ElMessage.warning("请先填写俄语简介");
-    return "";
+    if (!silent) ElMessage.warning("请先填写俄语简介");
+    return { json: "", reason: "缺少俄语简介" };
   }
   const rich = {
     content: [
@@ -4335,12 +4335,25 @@ function generateRichContentJson(position = "last", row = null, field = null) {
   const json = JSON.stringify(rich, null, 2);
   if (row && field) updateVariantAttributeSelectValue(row, field, json);
   else updateRichEditorModelValue(json);
-  ElMessage.success(position === "first" ? "已用首图生成 JSON 富内容" : "已用尾图生成 JSON 富内容");
-  return json;
+  if (!silent) ElMessage.success(position === "first" ? "已用首图生成 JSON 富内容" : "已用尾图生成 JSON 富内容");
+  return { json, reason: "" };
 }
 
 function generateVariantRichContentJson(row = {}, field = {}, position = "last") {
   generateRichContentJson(position, row, field);
+}
+
+function generateAllVariantRichContentJson(field = {}, position = "last") {
+  const results = templateEditor.variants.map((row) => generateRichContentJson(position, row, field, { silent: true }));
+  const generated = results.filter((result) => result.json).length;
+  const missingImages = results.filter((result) => result.reason === "缺少图片").length;
+  const missingSummaries = results.filter((result) => result.reason === "缺少俄语简介").length;
+  if (!generated) {
+    ElMessage.warning(`未生成 JSON 富内容：${missingImages} 个变体缺少图片，${missingSummaries} 个变体缺少俄语简介`);
+    return;
+  }
+  const skipped = results.length - generated;
+  ElMessage.success(`已按各变体${position === "first" ? "首图" : "尾图"}和详情生成 ${generated} 条 JSON 富内容${skipped ? `；跳过 ${skipped} 条（缺少图片或俄语简介）` : ""}`);
 }
 
 function handleRichEditorSave(value) {
@@ -6070,6 +6083,8 @@ onBeforeUnmount(() => {
                     <div class="variant-col-header">
                       <span>JSON富内容</span>
                       <el-button link size="small" @click="applyFirstVariantAttribute(mediaRichContentAttribute)">同首行</el-button>
+                      <el-button link size="small" @click="generateAllVariantRichContentJson(mediaRichContentAttribute, 'first')">批量首图生成</el-button>
+                      <el-button link size="small" @click="generateAllVariantRichContentJson(mediaRichContentAttribute, 'last')">批量尾图生成</el-button>
                     </div>
                   </template>
                   <template #default="{ row }">
@@ -6350,6 +6365,10 @@ onBeforeUnmount(() => {
                     <div class="variant-col-header">
                       <span>{{ flatSkuAttributeGroupLabel(field) }} · {{ field.name || "属性" }}</span>
                       <el-button link size="small" @click="applyFirstVariantAttribute(field)">同首行</el-button>
+                      <template v-if="isRichContentAttributeField(field)">
+                        <el-button link size="small" @click="generateAllVariantRichContentJson(field, 'first')">批量首图生成</el-button>
+                        <el-button link size="small" @click="generateAllVariantRichContentJson(field, 'last')">批量尾图生成</el-button>
+                      </template>
                     </div>
                   </template>
                   <template #default="{ row }">
@@ -6401,6 +6420,10 @@ onBeforeUnmount(() => {
                     <div class="variant-col-header">
                       <span>{{ flatSkuAttributeGroupLabel(field) }} · {{ field.name || "属性" }}</span>
                       <el-button link size="small" @click="applyFirstVariantAttribute(field)">同首行</el-button>
+                      <template v-if="isRichContentAttributeField(field)">
+                        <el-button link size="small" @click="generateAllVariantRichContentJson(field, 'first')">批量首图生成</el-button>
+                        <el-button link size="small" @click="generateAllVariantRichContentJson(field, 'last')">批量尾图生成</el-button>
+                      </template>
                     </div>
                   </template>
                   <template #default="{ row }">
@@ -6452,6 +6475,10 @@ onBeforeUnmount(() => {
                     <div class="variant-col-header">
                       <span>{{ flatSkuAttributeGroupLabel(field) }} · {{ field.name || "属性" }}</span>
                       <el-button link size="small" @click="applyFirstVariantAttribute(field)">同首行</el-button>
+                      <template v-if="isRichContentAttributeField(field)">
+                        <el-button link size="small" @click="generateAllVariantRichContentJson(field, 'first')">批量首图生成</el-button>
+                        <el-button link size="small" @click="generateAllVariantRichContentJson(field, 'last')">批量尾图生成</el-button>
+                      </template>
                     </div>
                   </template>
                   <template #default="{ row }">

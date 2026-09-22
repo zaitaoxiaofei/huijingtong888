@@ -211,6 +211,10 @@ test("listing automation renders SKU variants in an Ozon-like flat table", () =>
   assert.match(listingAutomationViewSource, /class="flat-attribute-control"/);
   assert.match(listingAutomationViewSource, /@update:model-value="updateVariantAttributeSelectValue\(row, field, \$event\)"/);
   assert.match(listingAutomationViewSource, /function generateVariantRichContentJson\(row = \{\}, field = \{\}, position = "last"\)/);
+  assert.match(listingAutomationViewSource, /function generateAllVariantRichContentJson\(field = \{\}, position = "last"\)/);
+  assert.match(listingAutomationViewSource, /generateAllVariantRichContentJson\(field, 'first'\)">批量首图生成/);
+  assert.match(listingAutomationViewSource, /generateAllVariantRichContentJson\(field, 'last'\)">批量尾图生成/);
+  assert.match(listingAutomationViewSource, /row\.images_manually_edited/);
   assert.match(listingAutomationViewSource, /@click="generateVariantRichContentJson\(row, field, 'first'\)">首图生成/);
   assert.match(listingAutomationViewSource, /@click="generateVariantRichContentJson\(row, field, 'last'\)">尾图生成/);
   assert.match(listingAutomationViewSource, /const fixedVariantAttributeDefinitions = \{/);
