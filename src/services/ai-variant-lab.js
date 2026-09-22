@@ -2882,7 +2882,8 @@ function buildFallbackBatchItems(targets, analysis, fallback) {
 function enforceCopyItemProductFacts(item, target, analysis = {}, fallback = {}) {
   const next = { ...item };
   const titleOk = isCopyTextAlignedWithProductFacts(next.title_ru, target, analysis, fallback, { minLength: 10 });
-  const tagsOk = isCopyTextAlignedWithProductFacts(toArray(next.tags_ru).join(" "), target, analysis, fallback, { minLength: 10 });
+  const tagsOk = isCopyTextAlignedWithProductFacts(toArray(next.tags_ru).join(" "), target, analysis, fallback, { minLength: 10 })
+    && hasTargetVariantTag(next.tags_ru, target);
   const descriptionOk = isCopyTextAlignedWithProductFacts(next.description_ru, target, analysis, fallback, { minLength: 80 })
     && isValidOzonVariantDescription(next.description_ru, target, analysis, fallback);
   const richOk = !next.rich_content_ru || isCopyTextAlignedWithProductFacts(next.rich_content_ru, target, analysis, fallback, { minLength: 10 });
@@ -2924,8 +2925,16 @@ function normalizeOzonVariantTags(value, target, analysis = {}, fallback = {}) {
     .filter((tag) => tag && !containsChinese(tag))
     .filter((tag) => isBuyerFacingCopyText(tag))
     .filter((tag) => !hasForbiddenCategoryLeak(tag, analysis));
-  const merged = uniqueStrings([...normalized, ...buildOzonVariantTags(target, analysis, fallback)]);
+  // Preserve target-model tags before generic AI tags are capped at 25.
+  const merged = uniqueStrings([...buildOzonVariantTags(target, analysis, fallback), ...normalized]);
   return merged.slice(0, 25);
+}
+
+function hasTargetVariantTag(tags, target) {
+  const tokens = cleanText(target).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((token) => token.length >= 2);
+  if (!tokens.length) return true;
+  const text = toArray(tags).join(" ").toLowerCase();
+  return tokens.every((token) => text.includes(token));
 }
 
 function normalizeOzonVariantTitle(value, target, analysis = {}, fallback = {}) {
