@@ -164,7 +164,7 @@ db_init_flag=1
 ((skip_database_init)) && db_init_flag=0
 printf 'Activating release on ECS...\n'
 ssh "${ssh_options[@]}" "$remote_target" \
-  "bash '$remote_script' '$version' '$remote_archive' '$db_init_flag'"
+  "bash '$remote_script' '$remote_archive' '$version' '$db_init_flag'"
 
 if command -v shasum >/dev/null 2>&1; then
   archive_hash="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
