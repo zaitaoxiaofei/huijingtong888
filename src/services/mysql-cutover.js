@@ -2603,12 +2603,12 @@ export async function orderProcurementBatchesMysql(orderId) {
 async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefined) {
   // Procurement coverage reconciles the full order and inventory ledger. Do
   // not let a cold reconciliation block the ordinary order-list first paint.
-  const coverage = coveragePromise === null
-    ? new Map()
-    : await (coveragePromise || orderProcurementCoverageMysql());
-  const qualityPrefixes = await orderQualityPrefixesMysql();
   const orderIds = [...new Set(rows.map((row) => Number(row.id)).filter(Boolean))];
-  const billingRows = orderIds.length ? await mysqlQuery(`
+  const [coverage, qualityPrefixes, pickingByOrderId, billingRows] = await Promise.all([
+    coveragePromise === null ? new Map() : (coveragePromise || orderProcurementCoverageMysql()),
+    orderQualityPrefixesMysql(),
+    orderInventoryPickingMysql(orderIds),
+    orderIds.length ? mysqlQuery(`
     SELECT oi.order_id,
       GROUP_CONCAT(DISTINCT rule.name ORDER BY rule.name SEPARATOR ' / ') AS billing_logistics_rule_name,
       GROUP_CONCAT(DISTINCT rule.channel ORDER BY rule.channel SEPARATOR ' / ') AS billing_logistics_rule_channel,
@@ -2617,10 +2617,10 @@ async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefine
     JOIN logistics_fee_rules rule ON rule.id = oi.frozen_logistics_rule_id
     WHERE oi.order_id IN (${orderIds.map(() => "?").join(",")})
     GROUP BY oi.order_id
-  `, orderIds) : [];
-  const pickingByOrderId = await orderInventoryPickingMysql(orderIds);
+    `, orderIds) : [],
+    rows.length ? activeOrderLogisticsFilterMethodsMysql() : undefined
+  ]);
   const billingByOrderId = new Map(billingRows.map((row) => [Number(row.order_id), row]));
-  if (rows.length) await activeOrderLogisticsFilterMethodsMysql();
   return await mapWithConcurrencyMysql(rows, 3, async (row) => {
     const billing = billingByOrderId.get(Number(row.id)) || {};
     const enriched = await enrichOrderLogisticsMysql({ ...row, ...billing, inventory_picking_items: pickingByOrderId.get(Number(row.id)) || [], procurement_coverage: coverage.get(Number(row.id)) || null });
@@ -20014,25 +20014,6 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
     const requestIds = [];
     let stockSatisfiedCount = 0;
     let markedCount = 0;
-    const [reservedRows] = await connection.query(`
-      SELECT marks.product_id, marks.handling_type, SUM(order_item.quantity) AS reserved_quantity
-      FROM order_item_procurement_marks marks
-      JOIN order_items order_item ON order_item.id = marks.order_item_id
-      JOIN orders o ON o.id = order_item.order_id
-      WHERE marks.status = 'handled'
-        AND marks.handling_type IN ('stock_available', 'incoming_available')
-        AND o.id != ?
-        AND (${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")})
-      GROUP BY marks.product_id, marks.handling_type
-    `, [Number(orderId)]);
-    const reservedStockByProduct = new Map();
-    const reservedIncomingByProduct = new Map();
-    for (const reserved of reservedRows) {
-      const target = reserved.handling_type === "incoming_available"
-        ? reservedIncomingByProduct
-        : reservedStockByProduct;
-      target.set(Number(reserved.product_id), Math.max(0, Number(reserved.reserved_quantity || 0)));
-    }
     const remainingStockByProduct = new Map();
     const remainingIncomingByProduct = new Map();
     const createdRequestProductIds = new Set();
@@ -20848,7 +20829,7 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
       const anomalyReason = String(input.anomaly_reason || body.anomaly_reason || "").trim();
       if (!(actualQuantity > 0)) throw new Error(`商品 #${item.product_id} 的采购数量（actual_quantity）必须大于 0`);
       if (!Number.isFinite(amount) || amount < 0) throw new Error(`商品 #${item.product_id} 的采购金额不能为负数；未知金额可稍后补齐`);
-      const historicalUnitCost = await historicalPurchasedUnitCostMysql(item.product_id);
+      const historicalUnitCost = anomalyReason ? 0 : await historicalPurchasedUnitCostMysql(item.product_id);
       if (historicalUnitCost > 0 && goodsUnitCost > historicalUnitCost * 1.1 && !anomalyReason) {
         throw Object.assign(new Error("本次采购单价较历史均价上涨超过10%，请先选择价格异常原因"), {
           statusCode: 409,

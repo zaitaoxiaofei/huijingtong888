@@ -2100,7 +2100,9 @@ async function submitOrderProcurement() {
       ElMessage.info("当前没有新的待采购订单明细");
     }
     orderProcurementDialog.visible = false;
-    await loadOrders({ forceRefresh: true, includeCounts: true });
+    // The purchase is committed. Refresh separately so a slow/failed list
+    // request cannot keep Save busy or report a successful purchase as failed.
+    void loadOrders({ forceRefresh: true, includeCounts: true }).catch(() => {});
   } catch (error) {
     ElMessage.error(error.message || "提交采购失败");
   } finally {

@@ -14,7 +14,8 @@ test("order status metadata is reused across pagination changes", () => {
   assert.match(keySource, /logisticsMethod/);
   assert.doesNotMatch(keySource, /pageSize|page:/);
   assert.match(source, /const cachedCounts = readOrdersMetaCache\(filtersSnapshot\)/);
-  assert.match(source, /if \(options\.includeCounts\) writeOrdersMetaCache\(filtersSnapshot, counts\)/);
+  assert.match(source, /writeOrdersMetaCache\(filtersSnapshot, counts\)/);
+  assert.match(source, /includeCounts: "0"/);
 });
 
 test("completed order sync bypasses cached rows and status metadata", () => {

@@ -878,6 +878,7 @@ CREATE TABLE IF NOT EXISTS order_status_history (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_order_status_history_hour_state (order_id, observed_hour, status, logistics_status, tracking_stage, sync_state),
   KEY idx_order_status_history_order_time (order_id, observed_at DESC),
+  KEY idx_order_history_transport (order_id, status, last_status_changed_at),
   KEY idx_order_status_history_shop_time (shop_id, observed_at DESC),
   KEY idx_order_status_history_status_time (status, observed_at DESC),
   KEY idx_order_status_history_region_time (buyer_region, buyer_city, observed_at DESC),
@@ -1468,6 +1469,7 @@ try {
     await connection.query(sql);
   }
   const indexStatements = [
+    "CREATE INDEX idx_order_history_transport ON order_status_history (order_id, status, last_status_changed_at) ALGORITHM=INPLACE LOCK=NONE",
     "CREATE INDEX idx_outbound_shop_created ON outbound_records (shop_id, created_at)",
     "CREATE INDEX idx_outbound_stock_location ON outbound_records (stock_location, status, created_at)",
     "CREATE INDEX idx_inventory_stock_location ON inventory_movements (stock_location, status, created_at)",

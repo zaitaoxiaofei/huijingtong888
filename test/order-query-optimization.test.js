@@ -28,6 +28,7 @@ test('large inventory lists warm logistics once and bound enrichment concurrency
   const enrich = vm.runInNewContext(`(${source.match(/async function enrichOrderRowsForListMysql\([\s\S]*?\n}/)[0]})`, {
     orderProcurementCoverageMysql: async () => new Map(),
     orderQualityPrefixesMysql: async () => [],
+    orderInventoryPickingMysql: async () => new Map(),
     mysqlQuery: async () => [],
     activeOrderLogisticsFilterMethodsMysql: async () => { warmed++; },
     mapWithConcurrencyMysql: map,

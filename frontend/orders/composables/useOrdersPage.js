@@ -400,6 +400,7 @@ export function useOrdersPage() {
   }
 
   async function loadOrders(options = {}) {
+    window.clearTimeout(ordersMetaTimer);
     ordersListAbort.value?.abort();
     const controller = new AbortController();
     ordersListAbort.value = controller;
@@ -412,13 +413,18 @@ export function useOrdersPage() {
       const metaKey = ordersMetaCacheKey(filtersSnapshot);
       if (ordersMetaAbort.value && ordersMetaRequestKey.value !== metaKey) ordersMetaAbort.value.abort();
       const params = buildOrdersParams(filtersSnapshot, {
-        includeCounts: options.includeCounts ? "1" : "0",
+        includeCounts: "0",
         includeLogisticsOptions: "0"
       });
       const requestUrl = `/api/orders?${params.toString()}`;
       if (options.forceRefresh) {
         ordersListCache.clear();
+      }
+      if (options.forceRefresh || options.includeCounts) {
         ordersMetaCache.clear();
+        ordersMetaAbort.value?.abort();
+        ordersMetaAbort.value = null;
+        ordersMetaRequestKey.value = "";
       }
       const cached = ordersListCache.get(requestUrl);
       const hasFreshCache = Boolean(cached && Date.now() - cached.timestamp < ORDERS_LIST_CACHE_TTL_MS);
@@ -426,7 +432,7 @@ export function useOrdersPage() {
         const cachedResult = cached.result || {};
         patch({
           rows: Array.isArray(cachedResult.rows) ? cachedResult.rows : [],
-          meta: { total: Number(cachedResult.total || 0), counts: cachedResult.counts || vm.meta.counts }
+          meta: { total: Number(cachedResult.total || 0), counts: vm.meta.counts }
         });
         if (showLoading) loading.value = false;
       }
@@ -443,8 +449,7 @@ export function useOrdersPage() {
       cacheOrdersList(requestUrl, result);
 
       const total = Number(result.total || 0);
-      const counts = result?.counts || vm.meta.counts || {};
-      if (options.includeCounts) writeOrdersMetaCache(filtersSnapshot, counts);
+      const counts = vm.meta.counts || {};
 
       patch({
         rows: Array.isArray(result.rows) ? result.rows : [],
@@ -468,11 +473,10 @@ export function useOrdersPage() {
         if (Array.isArray(shops)) patch({ shops });
       });
       window.clearTimeout(ordersMetaTimer);
-      if (!options.includeCounts) {
-        ordersMetaTimer = window.setTimeout(() => {
-          void loadOrdersMeta(filtersSnapshot);
-        }, ORDERS_META_DELAY_MS);
-      }
+      // Counts reconcile every status and must not block the active page.
+      ordersMetaTimer = window.setTimeout(() => {
+        void loadOrdersMeta(filtersSnapshot);
+      }, options.includeCounts ? 0 : ORDERS_META_DELAY_MS);
     } catch (error) {
       if (error?.name === "AbortError") return;
       if (error?.status === 401) ElMessage.error("登录已失效，请重新登录");
