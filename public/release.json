@@ -1,7 +1,7 @@
 {
   "app": "ozon-erp",
-  "version": "local",
-  "channel": "local",
+  "version": "2026.09.22-release-case-library-batch-3da2066",
+  "channel": "production",
   "build_stamp": "",
-  "built_at": "2026-09-22T03:05:53.512Z"
+  "built_at": "2026-09-22T03:17:06.774Z"
 }

@@ -173,6 +173,14 @@ async function copyPluginPackages() {
   return copied;
 }
 
+async function hasReusablePluginPackages() {
+  const packageSourceDir = path.resolve(rootDir, "..");
+  const entries = await fs.readdir(packageSourceDir, { withFileTypes: true }).catch(() => []);
+  return pluginPackageRules.every((rule) => entries.some((entry) => (
+    entry.isFile() && rule.aliasPattern.test(entry.name)
+  )));
+}
+
 async function writeDeployPackageJson() {
   const packageJsonPath = path.resolve(rootDir, "package.json");
   const packageJson = JSON.parse(await fs.readFile(packageJsonPath, "utf8"));
@@ -330,7 +338,11 @@ await runNpmScript("check:deploy-preflight", "Deploy preflight");
 await runNpmScript("check:encoding", "Encoding check");
 await runNpmScript("check:sql-bindings", "SQL binding check");
 await runNpmScript("build:frontend", "Frontend build");
-await runNpmScript("package:plugin", "Plugin packaging");
+if (await hasReusablePluginPackages()) {
+  console.log("[package:deploy] Reusing existing plugin packages.");
+} else {
+  await runNpmScript("package:plugin", "Plugin packaging");
+}
 
 await fs.rm(outputDir, { recursive: true, force: true });
 await fs.mkdir(outputDir, { recursive: true });
