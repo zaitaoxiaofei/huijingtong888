@@ -517,6 +517,14 @@ onMounted(loadPageData);
   min-width: 1720px;
 }
 
+.procurement-structured-search {
+  flex: none;
+}
+
+.procurement-history-card .list-wrap {
+  min-height: 0;
+}
+
 .procurement-footer {
   margin-top: auto;
 }
