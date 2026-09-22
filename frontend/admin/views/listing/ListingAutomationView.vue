@@ -3410,7 +3410,7 @@ function addVariantRow() {
     // New variants start with the same selected Ozon dictionary values as the
     // first row. Keeping the selected objects also preserves their localized
     // labels instead of falling back to raw Ozon dictionary text.
-    dynamic_attributes: clonePlain(firstVariant.dynamic_attributes || {}, {}),
+    dynamic_attributes: clonePlain(firstVariant.dynamic_attributes || firstVariant.dynamicAttributes || {}, {}),
     sort_order: templateEditor.variants.length + 1
   };
   seedVariantModelValue(row, {}, "");

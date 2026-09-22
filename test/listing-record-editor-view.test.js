@@ -778,6 +778,12 @@ test("material center shows AI variant generated main images", () => {
   assert.match(listingAutomationServiceSource, /export async function deleteListingAiVariantAssets/);
 });
 
+test("new listing variants inherit the first row's resolved dictionary attributes", () => {
+  const addVariantSource = listingAutomationSource.match(/function addVariantRow\(\)[\s\S]*?function removeVariantRow/)?.[0] || "";
+  assert.match(addVariantSource, /const firstVariant = templateEditor\.variants\[0\] \|\| \{\};/);
+  assert.match(addVariantSource, /dynamic_attributes: clonePlain\(firstVariant\.dynamic_attributes \|\| firstVariant\.dynamicAttributes \|\| \{\}, \{\}\)/);
+});
+
 test("listing automation publish media preview applies shop watermark and tail templates", () => {
   assert.match(listingAutomationServiceSource, /const LISTING_PUBLISH_SHOP_SELECT/);
   assert.match(listingAutomationServiceSource, /watermark_path, watermark_name, watermark_position/);
