@@ -195,7 +195,9 @@ export function summarizeLedger(product, movements, purchases, orders) {
 export function createProcurementLedgerService(hooks) {
   const { query, transaction, coverage, postMovement, receive, recordCost, refreshPurchase, requirePerson, prepare } = hooks;
   async function snapshot(productId, run = query) {
-    const products = await run('SELECT id, name, code, purchase_cost FROM products WHERE id = ? AND active = 1', [productId]);
+    const products = await run(`SELECT id, name, code, inventory_number, purchase_cost,
+      CASE WHEN COALESCE(image_url, '') != '' THEN CONCAT('/api/products/', id, '/image') ELSE '' END AS image_url
+      FROM products WHERE id = ? AND active = 1`, [productId]);
     if (!products[0]) throw new Error('库存商品不存在或已停用，请重新选择');
     const movements = await run(`SELECT source_type, stock_location, SUM(quantity_delta) AS quantity_delta,
       MAX(id) AS last_id, COUNT(*) AS record_count FROM inventory_movements

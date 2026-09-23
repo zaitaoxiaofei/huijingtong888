@@ -720,8 +720,8 @@ function procurementTimeText(row) {
       <el-table-column label="操作" min-width="210" fixed="right">
         <template #default="{ row }">
           <div class="orders-actions-cell orders-actions-cell-vertical">
-            <el-button v-for="product in historyPurchaseProducts(row)" :key="`quick-history-${product.id}`" size="small" type="warning" plain @click="emit('quick-history-purchase', product.id)">
-              补齐采购记录{{ historyPurchaseProducts(row).length > 1 ? ' · ' + product.name : '' }}
+            <el-button v-if="historyPurchaseProducts(row).length" size="small" type="warning" plain @click="emit('quick-history-purchase', historyPurchaseProducts(row))">
+              补齐采购记录
             </el-button>
             <template v-if="row.procurement_coverage?.entered_transport && !isFbpOrder(row)">
               <template v-for="item in row.procurement_coverage.items" :key="`history-${item.order_item_id}-${item.product_id}`">

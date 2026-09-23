@@ -37,7 +37,7 @@ const router = useRouter();
 const emit = defineEmits(["inventory-completed"]);
 const elementLocale = zhCn;
 const inventoryDetail = reactive({ visible: false, productId: 0, orderId: 0 });
-const historicalPurchaseProductId = ref(0);
+const historicalPurchaseProducts = ref([]);
 function openInventoryDetail(row, productId) {
   inventoryDetail.productId = Number(productId);
   inventoryDetail.orderId = Number(row.id);
@@ -2478,7 +2478,7 @@ onBeforeUnmount(() => {
     </div>
     <ShippedReceiptDialog :shipped-receipt-dialog="shippedReceiptDialog" @preview="previewShippedReceipts(shippedReceiptDialog.orderIds)" @confirm="confirmShippedReceipts" @review="reviewShippedProcurementRecords" />
     <ProcurementLedgerDialog v-if="inventoryDetail.visible" v-model="inventoryDetail.visible" :product-id="inventoryDetail.productId" :order-id="inventoryDetail.orderId" @saved="loadOrders()" />
-    <HistoricalPurchaseQuickDialog v-if="historicalPurchaseProductId" :product-id="historicalPurchaseProductId" @close="historicalPurchaseProductId = 0" @saved="loadOrders()" />
+    <HistoricalPurchaseQuickDialog v-if="historicalPurchaseProducts.length" :products="historicalPurchaseProducts" @close="historicalPurchaseProducts = []" @saved="loadOrders()" />
     <el-dialog v-model="procurementReceiptDialog.visible" title="登记实际收货" width="920px" destroy-on-close>
       <p class="order-procurement-receipt-hint">勾选本次实际到货的采购批次并填写实收数量。未勾选的批次、以及部分收货的剩余数量，都会继续保留在途。</p>
       <el-table :data="procurementReceiptDialog.batches" border max-height="420">
@@ -2534,7 +2534,7 @@ onBeforeUnmount(() => {
         @view-procurement-details="handleViewProcurementDetails"
         @review-procurement-records="openOrderProcurementRecords"
         @view-inventory-detail="openInventoryDetail"
-        @quick-history-purchase="historicalPurchaseProductId = Number($event)"
+        @quick-history-purchase="historicalPurchaseProducts = $event"
         @confirm-procurement-inbound="handleConfirmProcurementInbound"
       />
 
