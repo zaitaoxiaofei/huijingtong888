@@ -7,6 +7,14 @@ import { loadOrderProcurementCoverage, invalidateOrderProcurementCoverage } from
 
 const item = (order_id = 1, extra = {}) => ({ order_id, order_item_id: order_id, product_id: 10, quantity: 1, needs_fulfillment: 1, entered_transport: 0, stock_location: 'LOCAL', ...extra });
 const calculate = (demands, extra = {}) => calculateOrderProcurementCoverage({ demands, stocks: [], allocations: [], inbounds: [], requests: [], marks: [], ...extra });
+test('current rows expose the same inventory historical purchase gap without adding it to current procurement', () => {
+  const demands = [item(1, { needs_fulfillment: 0, entered_transport: 1, quantity: 5 }), item(2)];
+  const result = calculate(demands, { stocks: [{ product_id: 10, ledger: -5 }] });
+  assert.equal(result.get(2).items[0].product_historical_missing_purchase_quantity, 5);
+  assert.equal(result.get(2).shortage_quantity, 1);
+  const filled = calculate(demands, { sources: [{ order_item_id: 1, product_id: 10, quantity: 5 }] });
+  assert.equal(filled.get(2).items[0].product_historical_missing_purchase_quantity, 0);
+});
 test('historical negative stock does not consume this order’s confirmed purchase', () => {
   const result = calculate([item()], { stocks: [{ product_id: 10, ledger: -6, open_deducted: 1 }], requests: [{ id: 3, product_id: 10, quantity: 1, amount: 10, purchase_order_id: 4, status: 'purchased' }], allocations: [{ order_item_id: 1, product_id: 10, procurement_request_id: 3, allocated_quantity: 1 }], inbounds: [{ id: 5, product_id: 10, procurement_request_id: 3, purchase_order_id: 4, quantity: 1, status: 'pending_arrival' }] });
   assert.equal(result.get(1).shortage_quantity, 0);

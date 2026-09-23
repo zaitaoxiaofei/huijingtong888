@@ -103,6 +103,7 @@ function fixture(failSecond = false, overrides = {}) {
   let state = { movements: [{ id: 1, product_id: 10, quantity_delta: 10, source_type: 'purchase_inbound', stock_location: 'LOCAL' }], actions: [] };
   let writes = 0;
   const executed = [];
+  const recordedCosts = [];
   const coverageProducts = [];
   const run = async (sql, args = []) => {
     if (sql.includes('FOR UPDATE')) {
@@ -116,19 +117,62 @@ function fixture(failSecond = false, overrides = {}) {
   };
   const connection = { query: async (...args) => [await run(...args)], execute: async (sql, args) => {
     executed.push({ sql, args });
+    if (overrides.failSecondSource && sql.includes('INSERT INTO procurement_history_sources')
+      && executed.filter(row => row.sql.includes('INSERT INTO procurement_history_sources')).length === 2) throw new Error('模拟第二个历史订单关联失败');
     if (sql.includes('INSERT INTO procurement_ledger_actions')) state.actions.push({ id: 1, request_key: args[0], product_id: args[1], person_id: args[3], before_json: args[5] });
     if (sql.includes('UPDATE procurement_ledger_actions SET result_json')) state.actions[0].result_json = args[0];
     return [{ insertId: 1 }];
   } };
   const service = createProcurementLedgerService({ prepare: async () => {}, query: run, coverage: async (_, productId) => { coverageProducts.push(productId); return overrides.coverage || new Map(); },
-    recordCost: async () => {}, refreshPurchase: async () => {},
+    recordCost: async (_, row) => { recordedCosts.push(row); }, refreshPurchase: async () => {},
     receive: async (_, id, payload) => { state.movements.push({ product_id: 10, quantity_delta: payload.receive_quantity, stock_location: 'LOCAL', source_type: 'purchase_inbound', source_ref: `inbound_${id}` }); },
     requirePerson: async () => 1, invalidate: () => {},
     transaction: async callback => { const saved = structuredClone(state); try { return await callback(connection); } catch (e) { state = saved; throw e; } },
     postMovement: async (_, row) => { writes++; if (failSecond && writes === 2) throw new Error('模拟第二条库存流水失败'); state.movements.push({ ...row, id: writes + 1 }); }
   });
-  return { service, state: () => state, executed, coverageProducts };
+  return { service, state: () => state, executed, coverageProducts, recordedCosts };
 }
+
+test('bulk history fill allocates only missing purchases in transport order and conserves both amounts', () => {
+  const state = snapshot({ orders: [
+    { order_id: 2, order_item_id: 2, entered_transport: true, transport_at: '2026-08-03T00:00:00Z', missing_purchase_quantity: 3 },
+    { order_id: 1, order_item_id: 1, entered_transport: true, transport_at: '2026-08-02T00:00:00Z', missing_purchase_quantity: 2 },
+    { order_id: 3, order_item_id: 3, entered_transport: true, missing_purchase_quantity: 0, missing_receipt_quantity: 5 },
+    { order_id: 4, order_item_id: 4, entered_transport: false, missing_purchase_quantity: 10 }
+  ] });
+  const input = body('historical_purchase_bulk', { quantity: 4, amount: 0.01, shipping_amount: 1.01, purchased_at: '2026-08-01T12:00:00+08:00', inventory_effect: 'already_accounted' });
+  const plan = planLedgerAction(state, input);
+  assert.deepEqual(plan.allocations.map(row => [row.order_item_id, row.quantity]), [[1, 2], [2, 2]]);
+  assert.equal(plan.allocations.reduce((sum, row) => sum + Math.round(row.amount * 10000), 0), 100);
+  assert.equal(plan.allocations.reduce((sum, row) => sum + Math.round(row.shipping_amount * 10000), 0), 10100);
+  assert.equal(plan.local_delta, 0);
+  for (const change of [{ quantity: 6 }, { quantity: 0 }, { quantity: 1.5 }, { amount: 0 }, { inventory_effect: 'missing_inbound' }, { purchased_at: '2026-08-04T12:00:00+08:00' }, { revision: 'old' }]) {
+    assert.throws(() => planLedgerAction(state, { ...input, ...change }));
+  }
+});
+
+test('bulk fill creates one purchase, links multiple historical orders atomically, records cost and retries once', async () => {
+  const coverage = new Map([1, 2].map(id => [id, { order_id: id, posting_number: 'H-' + id, stock_location: 'LOCAL', entered_transport: true, transport_at: '2026-08-03T00:00:00Z',
+    items: [{ product_id: 10, order_item_id: id, quantity: id, missing_purchase_quantity: id, missing_record_quantity: id }] }]));
+  const f = fixture(false, { coverage });
+  const before = await f.service.read({ product_id: 10 });
+  const input = body('historical_purchase_bulk', { revision: before.revision, product_id: 10, quantity: 3, amount: 30, shipping_amount: 3,
+    inventory_effect: 'already_accounted', purchased_at: '2026-08-01T12:00:00+08:00', request_key: 'bulk-history-fill-12345678' });
+  const result = await f.service.apply(input, 1);
+  assert.equal(result.allocations.length, 2);
+  assert.equal(result.local_delta, 0);
+  assert.equal(f.state().movements.length, 1);
+  assert.equal(f.executed.filter(row => row.sql.includes('INSERT INTO purchase_orders')).length, 1);
+  assert.deepEqual(f.executed.filter(row => row.sql.includes('INSERT INTO procurement_history_sources')).map(row => [row.args[1], row.args[3]]), [[1, 1], [2, 2]]);
+  assert.equal(f.recordedCosts[0].amount, 30);
+  assert.equal(f.recordedCosts[0].shipping_amount, 3);
+  assert.deepEqual(await f.service.apply(input, 1), result);
+  assert.equal(f.executed.filter(row => row.sql.includes('INSERT INTO purchase_orders')).length, 1);
+  const failed = fixture(false, { coverage, failSecondSource: true });
+  await assert.rejects(failed.service.apply(input, 1), /第二个历史订单/);
+  assert.equal(failed.state().actions.length, 0);
+  assert.equal(failed.state().movements.length, 1);
+});
 
 test('two-product conversion is atomic, retry is idempotent, changed payload cannot reuse key', async () => {
   const f = fixture();

@@ -173,6 +173,13 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
       .reduce((total, batch) => total + positive(batch.remaining), 0));
   }
   const result = new Map();
+  const historicalMissingByProduct = new Map();
+  for (const detail of details) {
+    if (Number(detail.entered_transport) && detail.stock_location !== 'FBP') {
+      const id = Number(detail.product_id);
+      historicalMissingByProduct.set(id, (historicalMissingByProduct.get(id) || 0) + detail.missing_purchase_quantity);
+    }
+  }
   for (const detail of details) {
     const id = Number(detail.order_id);
     if (!result.has(id)) result.set(id, { order_id: id, posting_number: detail.posting_number || String(id), transport_at: detail.transport_at || null, shortage_quantity: 0, stock_quantity: 0, incoming_quantity: 0,
@@ -184,6 +191,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
     order.items.push({ order_item_id: Number(detail.order_item_id), product_id: Number(detail.product_id), product_name: detail.product_name || '',
       receipt_claims: detail.receipt_claims, quantity_needs_review: detail.quantity_needs_review, unit: detail.stock_unit || '件', quantity: detail.quantity, stock_quantity: detail.stock_quantity, incoming_quantity: detail.incoming_quantity,
       product_total_incoming_quantity: pendingIncomingByProduct.get(Number(detail.product_id)) || 0,
+      product_historical_missing_purchase_quantity: historicalMissingByProduct.get(Number(detail.product_id)) || 0,
       product_available_incoming_quantity: availableIncomingByProduct.get(Number(detail.product_id)) || 0,
       product_reserved_incoming_quantity: positive((pendingIncomingByProduct.get(Number(detail.product_id)) || 0) - (availableIncomingByProduct.get(Number(detail.product_id)) || 0)),
       shortage_quantity: detail.shortage_quantity, missing_record_quantity: detail.missing_record_quantity,

@@ -33,12 +33,32 @@ const emit = defineEmits([
   "view-procurement-details",
   "review-procurement-records",
   "view-inventory-detail",
+  "quick-history-purchase",
   "confirm-procurement-inbound"
 ]);
 
 const markChoices = computed(() => (
   (props.markOptions || []).filter((item) => item && item.value !== undefined)
 ));
+
+function historyPurchaseProducts(row) {
+  if (isFbpOrder(row)) return [];
+  const products = new Map();
+  const knownProducts = new Set();
+  for (const item of row.procurement_coverage?.items || []) {
+    if (item.product_historical_missing_purchase_quantity !== undefined) knownProducts.add(Number(item.product_id));
+    const missing = item.product_historical_missing_purchase_quantity ?? item.missing_purchase_quantity;
+    if (item.product_id && (Number(missing) > 0 || (!knownProducts.has(Number(item.product_id)) && Number(item.ledger_stock) < 0))) {
+      products.set(Number(item.product_id), { id: Number(item.product_id), name: item.product_name || '' });
+    }
+  }
+  for (const item of row.inventorySummaries || []) {
+    if (item.productId && !knownProducts.has(Number(item.productId)) && item.inventoryMode !== 'combo' && Number(item.stock?.local) < 0) {
+      products.set(Number(item.productId), { id: Number(item.productId), name: item.productName || '' });
+    }
+  }
+  return [...products.values()];
+}
 
 const selectableMarkChoices = computed(() => (
   markChoices.value.filter((item) => item.value)
@@ -700,10 +720,13 @@ function procurementTimeText(row) {
       <el-table-column label="操作" min-width="210" fixed="right">
         <template #default="{ row }">
           <div class="orders-actions-cell orders-actions-cell-vertical">
+            <el-button v-for="product in historyPurchaseProducts(row)" :key="`quick-history-${product.id}`" size="small" type="warning" plain @click="emit('quick-history-purchase', product.id)">
+              补齐采购记录{{ historyPurchaseProducts(row).length > 1 ? ' · ' + product.name : '' }}
+            </el-button>
             <template v-if="row.procurement_coverage?.entered_transport && !isFbpOrder(row)">
               <template v-for="item in row.procurement_coverage.items" :key="`history-${item.order_item_id}-${item.product_id}`">
-                <el-button v-if="item.missing_purchase_quantity > 0 || item.missing_receipt_quantity > 0" size="small" type="warning" plain @click="emit('view-inventory-detail', row, item.product_id)">
-                  {{ item.missing_purchase_quantity > 0 ? '补采购记录' : '核对历史收货' }}{{ row.procurement_coverage.items.length > 1 ? ' · ' + item.product_name : '' }}
+                <el-button v-if="item.missing_receipt_quantity > 0" size="small" type="warning" plain @click="emit('view-inventory-detail', row, item.product_id)">
+                  核对历史收货{{ row.procurement_coverage.items.length > 1 ? ' · ' + item.product_name : '' }}
                 </el-button>
               </template>
             </template>

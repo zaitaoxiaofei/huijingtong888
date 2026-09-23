@@ -12,6 +12,7 @@ const preview = ref(null), submission = ref(null), formVisible = ref(false);
 const form = reactive({});
 let loadVersion = 0;
 const labels = {
+  historical_purchase_bulk: '批量补齐历史采购',
   historical_purchase: '补历史采购', receive: '补确认收货', link_purchase: '关联已有收货',
   historical_source: '登记其他历史来源', substitute: '登记订单实际替代用料',
   convert: '库存商品转换', damage: '货损报废', loss: '货物丢失', stocktake: '本地盘点调整', revise_purchase: '纠正采购记录'
@@ -23,6 +24,10 @@ const movementLabels = { purchase_inbound: '采购入库', purchase_inbound_corr
   reconciliation_loss: '丢失', reconciliation_stocktake: '盘点调整', manual_outbound: '手动出库' };
 const history = computed(() => (data.value?.orders || []).filter(row => row.entered_transport && (row.missing_record_quantity > 0 || row.missing_amount))
   .sort((a, b) => Number(b.order_id === props.orderId) - Number(a.order_id === props.orderId)));
+const historicalCosts = computed(() => (data.value?.actions || []).flatMap(action => {
+  const result = typeof action.result_json === 'string' ? JSON.parse(action.result_json) : action.result_json;
+  return (result?.allocations || []).map(row => ({ ...row, purchase_order_id: result.purchase_order_id, created_at: action.created_at, person_name: action.person_name }));
+}));
 const selectedOrder = computed(() => data.value?.orders.find(row => row.order_item_id === form.order_item_id));
 const needsTarget = computed(() => ['convert', 'substitute'].includes(form.action_type));
 const needsMoney = computed(() => ['historical_purchase', 'revise_purchase'].includes(form.action_type));
@@ -162,6 +167,17 @@ watch(() => props.modelValue, value => { if (value) { products.value = []; load(
           </el-tab-pane>
           <el-tab-pane label="纠正记录">
             <el-table :data="data.actions" max-height="400"><el-table-column label="北京时间" width="180"><template #default="{ row }">{{ time(row.created_at) }}</template></el-table-column><el-table-column label="操作" width="180"><template #default="{ row }">{{ labels[row.action_type] }}</template></el-table-column><el-table-column prop="person_name" label="操作人" width="110" /><el-table-column prop="reason" label="原因／凭证" /></el-table>
+          </el-tab-pane>
+          <el-tab-pane label="历史补录成本（最近50次操作）">
+            <el-table :data="historicalCosts" max-height="400" empty-text="暂无批量补齐记录">
+              <el-table-column prop="posting_number" label="历史订单" min-width="180" />
+              <el-table-column prop="purchase_order_id" label="采购单 ID" width="110" />
+              <el-table-column prop="quantity" label="补齐数量" />
+              <el-table-column prop="amount" label="分摊货款（元）" />
+              <el-table-column prop="shipping_amount" label="分摊运费（元）" />
+              <el-table-column prop="person_name" label="操作人" />
+              <el-table-column label="补录时间（北京时间）" min-width="180"><template #default="{ row }">{{ time(row.created_at) }}</template></el-table-column>
+            </el-table>
           </el-tab-pane>
         </el-tabs>
       </template>

@@ -52,7 +52,32 @@ export function planLedgerAction(snapshot, body) {
   if (!reason || reason.length > 1000) throw new Error('请在调整说明中填写真实原因或凭证编号（1～1000 字）');
   const type = String(body.action_type || '');
   const result = { type, reason, quantity: 0, local_delta: 0, target_delta: 0, amount: 0, shipping_amount: 0 };
-  if (['historical_purchase', 'historical_source', 'substitute', 'receive', 'link_purchase'].includes(type)) {
+  if (type === 'historical_purchase_bulk') {
+    result.quantity = integer(body.quantity, '本次补齐采购数量（quantity）');
+    result.amount = money(body.amount);
+    if (!(result.amount > 0)) throw new Error('请填写实际总货款（amount），须大于 0，运费单独填写，才能补齐采购成本');
+    result.shipping_amount = money(body.shipping_amount || 0);
+    result.purchased_at = historicalPurchaseTime(body.purchased_at);
+    if (body.inventory_effect !== 'already_accounted') throw new Error('历史补齐只能补记录（inventory_effect=already_accounted），不能重复增加库存');
+    const candidates = snapshot.orders.filter(row => row.entered_transport && row.stock_location !== 'FBP' && Number(row.missing_purchase_quantity) > 0)
+      .sort((a, b) => new Date(a.transport_at || 0) - new Date(b.transport_at || 0) || a.order_item_id - b.order_item_id);
+    const missing = candidates.reduce((sum, row) => sum + Number(row.missing_purchase_quantity), 0);
+    if (result.quantity > missing) throw new Error(`本库存实际缺采购记录 ${missing} 件，本次数量不能超过缺口；已有采购但缺收货的部分请核对历史收货`);
+    let left = result.quantity, assigned = 0, goodsAssigned = 0, freightAssigned = 0;
+    result.allocations = [];
+    for (const order of candidates) {
+      if (!left) break;
+      const quantity = Math.min(left, Number(order.missing_purchase_quantity));
+      if (order.transport_at && Date.parse(body.purchased_at) > new Date(order.transport_at).getTime()) throw new Error(`采购时间晚于历史订单 ${order.posting_number || order.order_id} 进入运输时间，请按实际采购批次分开补录`);
+      left -= quantity;
+      assigned += quantity;
+      const goods = Math.round(result.amount * 10000 * assigned / result.quantity);
+      const freight = Math.round(result.shipping_amount * 10000 * assigned / result.quantity);
+      result.allocations.push({ order_item_id: order.order_item_id, order_id: order.order_id, posting_number: order.posting_number,
+        quantity, amount: (goods - goodsAssigned) / 10000, shipping_amount: (freight - freightAssigned) / 10000 });
+      goodsAssigned = goods; freightAssigned = freight;
+    }
+  } else if (['historical_purchase', 'historical_source', 'substitute', 'receive', 'link_purchase'].includes(type)) {
     result.order_item_id = integer(body.order_item_id, '历史订单明细 ID');
     const order = snapshot.orders.find(row => row.order_item_id === result.order_item_id && (row.entered_transport || (type === 'substitute' && row.needs_fulfillment)));
     if (!order) throw new Error('请选择已进入运输的本地历史订单明细；FBP 订单请到 FBP 库存核对');
@@ -234,6 +259,11 @@ export function createProcurementLedgerService(hooks) {
       await run('SELECT id FROM procurement_order_allocations WHERE product_id = ? FOR UPDATE', [productId]);
       const before = await snapshot(productId, run);
       const plan = planLedgerAction(before, body);
+      if (plan.allocations?.length) {
+        const orderItems = plan.allocations.map(row => row.order_item_id);
+        await run(`SELECT oi.id FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE oi.id IN (${orderItems.map(() => '?').join(',')}) FOR UPDATE`, orderItems);
+        planLedgerAction(await snapshot(productId, run), body);
+      }
       if (plan.target_product_id) {
         const target = await snapshot(plan.target_product_id, run);
         if (body.target_revision !== target.revision) throw new Error('另一商品的库存已变化，请重新选择并核对');
@@ -256,7 +286,7 @@ export function createProcurementLedgerService(hooks) {
         (action_id, order_item_id, product_id, quantity, inbound_record_id) VALUES (?, ?, ?, ?, ?)`,
       [actionId, plan.order_item_id, productId, plan.quantity, inboundId]);
       let purchaseOrderId = null;
-      if (plan.type === 'historical_purchase' || plan.type === 'record_purchase') {
+      if (['historical_purchase', 'historical_purchase_bulk', 'record_purchase'].includes(plan.type)) {
         const cost = (plan.amount + plan.shipping_amount) / plan.quantity;
         const inTransit = plan.inventory_effect === 'in_transit';
         const status = inTransit ? 'purchased' : 'inbound_done';
@@ -277,6 +307,9 @@ export function createProcurementLedgerService(hooks) {
           purchaseOrderId, Number(item.insertId), inTransit ? null : plan.purchased_at, inTransit ? null : actor]);
         await movement(productId, plan.local_delta, 'purchase_inbound', `inbound_${inbound.insertId}`);
         if (plan.type === 'historical_purchase') await source(Number(inbound.insertId));
+        for (const allocation of plan.allocations || []) await connection.execute(`INSERT INTO procurement_history_sources
+          (action_id, order_item_id, product_id, quantity, inbound_record_id) VALUES (?, ?, ?, ?, ?)`,
+        [actionId, allocation.order_item_id, productId, allocation.quantity, Number(inbound.insertId)]);
         await recordCost(connection, { product_id: productId, source_key: `purchase_order_item:${item.insertId}:purchased`,
           stage: 'historical_backfill', purchase_order_id: purchaseOrderId, purchase_order_item_id: Number(item.insertId),
           quantity: plan.quantity, amount: plan.amount, shipping_amount: plan.shipping_amount, person_id: actor, anomaly_reason: plan.reason });
@@ -300,6 +333,7 @@ export function createProcurementLedgerService(hooks) {
         if (plan.target_product_id) await movement(plan.target_product_id, plan.target_delta, 'reconciliation_convert_in');
       }
       const response = { ok: true, action_id: actionId, action_type: plan.type, purchase_order_id: purchaseOrderId,
+        allocations: plan.allocations || [],
         local_before: before.local_stock, local_after: before.local_stock + plan.local_delta,
         local_delta: plan.local_delta, target_product_id: plan.target_product_id || null, target_delta: plan.target_delta };
       await connection.execute('UPDATE procurement_ledger_actions SET result_json = ? WHERE id = ?', [JSON.stringify(response), actionId]);

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 import { summarizeLedger, planLedgerAction, planReceiptCorrection } from '../src/services/procurement-ledger.js';
 import { calculateOrderProcurementCoverage } from '../src/services/order-procurement-coverage.js';
 
@@ -36,6 +37,19 @@ test('order inventory dialog mounts on demand and history actions are order-spec
   const table = readFileSync(new URL('../frontend/orders/components/OrdersTable.vue', import.meta.url), 'utf8');
   assert.match(page, /ProcurementLedgerDialog v-if="inventoryDetail.visible"/);
   assert.match(page, /:order-id="inventoryDetail.orderId"/);
-  assert.match(table, /item.missing_purchase_quantity > 0 \|\| item.missing_receipt_quantity > 0/);
+  assert.match(table, /item.missing_receipt_quantity > 0/);
   assert.match(table, /emit\('view-inventory-detail', row, item.product_id\)/);
+});
+
+test('quick fill is available on current orders with product history debt and disappears when the product gap is filled', () => {
+  const source = readFileSync(new URL('../frontend/orders/components/OrdersTable.vue', import.meta.url), 'utf8');
+  const fn = source.match(/function historyPurchaseProducts\(row\) \{[\s\S]*?\n\}/)[0];
+  const context = vm.createContext({ isFbpOrder: row => row.fbp === true });
+  vm.runInContext(fn, context);
+  const row = { procurement_coverage: { items: [{ product_id: 10, product_name: '库存 A', ledger_stock: -5, missing_purchase_quantity: 0, product_historical_missing_purchase_quantity: 5 }] },
+    inventorySummaries: [{ productId: 10, stock: { local: -5 } }] };
+  assert.equal(context.historyPurchaseProducts(row).length, 1);
+  row.procurement_coverage.items[0].product_historical_missing_purchase_quantity = 0;
+  assert.equal(context.historyPurchaseProducts(row).length, 0);
+  assert.equal(context.historyPurchaseProducts({ ...row, fbp: true }).length, 0);
 });
