@@ -2297,10 +2297,10 @@ export async function createListingTemplateFromCollectorBox(sku, body = {}, sess
     title: editPayload.title || normalized.templatePayload?.title || normalized.payload?.title,
     category_name: editPayload.category_name || normalized.templatePayload?.category_name || normalized.payload?.category_name
   });
-  const result = await createListingTemplateFromCollectedProduct(normalized.templatePayload, session, {
-    allowMediaArchiveFailure: true,
-    deferMediaArchive: true
-  });
+  // Collector links are commonly signed or protected by the source CDN. Do not
+  // let one reach an editable listing template: archive every image first so
+  // the operator always works with a stable managed-media URL.
+  const result = await createListingTemplateFromCollectedProduct(normalized.templatePayload, session);
   const templateId = result.template?.id || null;
   const dimensions = collectorBoxStoredDimensions(editPayload, normalized.payload || {}, detail.rawPayload || {}, detail);
   await mysqlExecute(`

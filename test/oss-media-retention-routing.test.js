@@ -19,11 +19,13 @@ test("collector box sync stores remote media references while durable detail sav
   assert.match(listingSource, /storage_prefix: "collector-media"/);
 });
 
-test("collector box editing defers unavailable Ozon image archival without weakening other durable saves", () => {
-  assert.match(listingSource, /if \(!options\.allowMediaArchiveFailure \|\| !archiveFailure\) throw error;/);
-  assert.match(listingSource, /media_archive_warning: mediaArchiveWarning/);
-  assert.match(listingSource, /createListingTemplateFromCollectedProduct\(normalized\.templatePayload, session, \{\s*allowMediaArchiveFailure: true,\s*deferMediaArchive: true\s*\}\)/);
-  assert.match(listingSource, /const payload = deferMediaArchive\s*\? collectedPayload\s*:\s*await materializeListingTemplateMediaForDraftSafety/);
+test("collector box editing archives images before creating an editable template", () => {
+  const collectorTemplateSource = listingSource.match(/export async function createListingTemplateFromCollectorBox[\s\S]*?async function repairCollectorBoxTemplateCategoryDisplay/)?.[0] || "";
+  assert.match(collectorTemplateSource, /createListingTemplateFromCollectedProduct\(normalized\.templatePayload, session\);/);
+  assert.doesNotMatch(collectorTemplateSource, /allowMediaArchiveFailure:\s*true/);
+  assert.doesNotMatch(collectorTemplateSource, /deferMediaArchive:\s*true/);
+  assert.match(listingSource, /archivedBody = await archiveCollectedProductMedia\(archivedBody, session\)/);
+  assert.match(listingSource, /await materializeListingTemplateMediaForDraftSafety\(collectedPayload, session\)/);
 });
 
 test("unused AI images use a temporary OSS prefix and selected images are promoted", () => {
