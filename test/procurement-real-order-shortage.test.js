@@ -66,9 +66,24 @@ test("newly available stock can cover an existing real-order request", () => {
   assert.equal(result.total, 0);
 });
 
-test("deferred coverage keeps real-order shortage calculation on current stock", async () => {
+test("workbench always uses allocated order shortage even for legacy deferred clients", async () => {
   const service = await readFile(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
-  assert.match(service, /row\.operational_shortage = deferCoverage\s*\? null\s*:\s*operationalByProduct\.get\(Number\(row\.product_id\)\) \|\| 0/);
+  assert.match(service, /row\.operational_shortage = operationalByProduct\.get\(Number\(row\.product_id\)\) \|\| 0/);
+  assert.doesNotMatch(service, /const deferCoverage =/);
+});
+
+test("assigned incoming stock must not hide an authoritative remaining shortage", () => {
+  const result = groupProcurementRequestsMysql([requestRow({ quantity: 1, incoming_stock: 5, operational_shortage: 1 })],
+    { page: 1, pageSize: 20, demandType: 'real_order' });
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].real_order_shortage, 1);
+  assert.equal(result.rows[0].suggested_purchase_qty, 1);
+});
+
+test("shared fulfillment classification takes priority over workbench status keywords", () => {
+  const row = requestRow({ source_order_status: 'sent_by_seller', operational_needs_fulfillment: true, operational_shortage: 2 });
+  assert.equal(groupProcurementRequestsMysql([row], { demandType: 'real_order' }).rows[0].real_order_shortage, 2);
+  assert.equal(groupProcurementRequestsMysql([{ ...row, operational_needs_fulfillment: false }], { demandType: 'real_order' }).rows.length, 0);
 });
 
 test("component stock and incoming supply cover a combination-product request", () => {

@@ -14026,15 +14026,24 @@ export async function procurementRequestsMysql(query = {}) {
   const requestColumns = compact
     ? `pr.id, pr.request_group_no, pr.product_id, pr.raw_name, pr.raw_spec, pr.binding_status,
       pr.person_id, pr.created_by_person_id, pr.supplier_id, pr.purchase_order_id,
-      pr.source_order_id, pr.source_order_item_id, pr.source_ozon_sku,
+      pr.source_order_id, pr.source_order_item_id, pr.source_ozon_sku, pr.demand_type,
       pr.quantity, pr.amount, pr.shipping_amount, pr.status, pr.purchase_url,
       pr.source_type, pr.automation_exception_code, pr.automation_exception_message,
       pr.price_exception_reason, pr.price_exception_note, pr.price_reference_unit_cost,
       pr.price_actual_unit_cost, pr.price_exception_confirmed_at, pr.auto_completed_at,
       pr.created_at, pr.updated_at`
     : "pr.*";
+  const realOrderView = String(query.grouped || "") === "1"
+    && String(query.demandType || query.demand_type || "all") === "real_order";
+  // Share the order queue projection (and its invalidation/cache) before paging.
+  // A shortage is already net of assigned stock and receipts; never subtract
+  // product-wide incoming stock from that shortage a second time.
+  const queueCoverage = realOrderView ? await orderProcurementCoverageMysql() : null;
+  const shortageProductIds = queueCoverage ? [...new Set([...queueCoverage.values()]
+    .filter(order => order.needs_fulfillment && order.stock_location !== 'FBP')
+    .flatMap(order => order.items.filter(item => item.product_id > 0 && item.shortage_quantity > 0).map(item => item.product_id)))] : null;
   const groupedPage = String(query.grouped || "") === "1"
-    ? await procurementGroupedPageIdsMysql(query)
+    ? await procurementGroupedPageIdsMysql(query, shortageProductIds)
     : null;
   if (groupedPage && !groupedPage.productIds.length) {
     return {
@@ -14272,13 +14281,8 @@ export async function procurementRequestsMysql(query = {}) {
       : rows.filter((row) => String(row.binding_status || (row.product_id ? "bound" : "unbound")) === bindingStatus);
     return filterProcurementRequestsMysql(scopedRows, query);
   }
-  // The full coverage audit joins orders, SKU mappings and raw Ozon payloads.
-  // The workbench opens that audit on demand, so do not make the table's first
-  // page wait for it.
-  const deferCoverage = String(query.deferCoverage || "") === "1";
-  const coverage = deferCoverage
-    ? new Map()
-    : await orderProcurementCoverageMysql({ productIds: groupedPage?.productIds || [] });
+  // Ignore legacy deferCoverage clients: presentation speed cannot change demand.
+  const coverage = queueCoverage || await orderProcurementCoverageMysql({ productIds: groupedPage?.productIds || [] });
   const operationalByProduct = new Map();
   const historicalIncomingByProduct = new Map();
   const historicalMissingByProduct = new Map();
@@ -14296,16 +14300,15 @@ export async function procurementRequestsMysql(query = {}) {
     }
   }
   for (const row of rows) {
-    // The compact workbench defers the full coverage audit. Preserve null here
-    // so the grouped decision falls back to current stock/in-transit quantities
-    // instead of treating every real-order shortage as zero.
-    row.operational_shortage = deferCoverage
-      ? null
-      : operationalByProduct.get(Number(row.product_id)) || 0;
+    row.operational_shortage = operationalByProduct.get(Number(row.product_id)) || 0;
+    const sourceOrder = coverage.get(Number(row.source_order_id));
+    if (sourceOrder) row.operational_needs_fulfillment = sourceOrder.needs_fulfillment && sourceOrder.stock_location !== 'FBP';
     row.historical_purchase_record_missing_quantity = historicalMissingByProduct.get(Number(row.product_id)) || 0;
     row.incoming_stock = Math.max(0, Number(row.incoming_stock || 0) - (historicalIncomingByProduct.get(Number(row.product_id)) || 0));
   }
-  const grouped = groupProcurementRequestsMysql(rows, { ...query, page: groupedPage.page, pageSize: groupedPage.pageSize });
+  // SQL already selected this page. Do not apply its offset a second time.
+  const grouped = groupProcurementRequestsMysql(rows, { ...query, page: 1, pageSize: groupedPage.pageSize });
+  Object.assign(grouped, { page: groupedPage.page, total: groupedPage.total });
   const negativeProductRows = grouped.rows.filter((row) => Number(row.stock || 0) < 0);
   if (negativeProductRows.length) {
     const negativeProductIds = negativeProductRows.map((row) => Number(row.product_id)).filter(Boolean);
@@ -14375,7 +14378,7 @@ export async function procurementRequestsMysql(query = {}) {
   };
 }
 
-async function procurementGroupedPageIdsMysql(query = {}) {
+async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = null) {
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
   const searchText = String(query.query || query.search || "").trim();
@@ -14396,6 +14399,10 @@ async function procurementGroupedPageIdsMysql(query = {}) {
     "pr.status IN ('pending', 'suggested', 'submitted')",
     "COALESCE(po.status, '') NOT IN ('purchased', 'partial_inbound', 'inbound_done')"
   ];
+  if (shortageProductIds !== null) {
+    where.push(shortageProductIds.length ? `pr.product_id IN (${shortageProductIds.map(() => '?').join(',')})` : '1 = 0');
+    params.push(...shortageProductIds);
+  }
   if (searchText) {
     const like = `%${searchText}%`;
     where.push(`(

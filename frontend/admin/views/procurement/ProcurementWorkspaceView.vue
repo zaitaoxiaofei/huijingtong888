@@ -497,7 +497,6 @@ function queryString() {
     grouped: "1",
     paged: "1",
     compact: "1",
-    deferCoverage: "1",
     page: String(state.filters.page),
     pageSize: String(state.filters.pageSize),
     demandType: state.filters.demandType,

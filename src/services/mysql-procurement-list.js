@@ -89,7 +89,9 @@ export function groupProcurementRequestsMysql(rows = [], query = {}) {
     const realOrderRequest = Number(item.source_order_id || 0) || Number(item.source_order_item_id || 0);
     return ["pending", "suggested", "submitted"].includes(rowStatus)
       && !["purchased", "partial_inbound", "inbound_done"].includes(orderStatus)
-      && (!realOrderRequest || procurementOrderActionClassMysql(item) === "p0_purchase");
+      && (!realOrderRequest || (item.operational_needs_fulfillment == null
+        ? procurementOrderActionClassMysql(item) === "p0_purchase"
+        : item.operational_needs_fulfillment));
   });
 
   for (const row of purchaseableRows) {
