@@ -33,7 +33,7 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
       if (url.pathname === '/api/procurement/ledger' && route.request().method() === 'GET') return route.fulfill({ json: url.searchParams.get('product_id') === '11' ? { ...initial, product: { id: 11, name: '替代商品 B' }, revision: 'target-v1', local_stock: 10 } : initial });
       if (url.pathname.startsWith('/api/procurement/ledger') && route.request().method() === 'POST') {
         const body = route.request().postDataJSON(); requests.push({ path: url.pathname, body });
-        return route.fulfill({ json: url.pathname.endsWith('/preview') ? { local_before: 0, local_after: 0, local_delta: 0 } : { ok: true } });
+        return route.fulfill({ json: url.pathname.endsWith('/preview') ? { local_before: 0, local_after: 0, local_delta: 0, physical_after: 0 } : { ok: true } });
       }
       const asset = url.pathname === '/style.css' ? path.join('assets', (await fs.readdir(path.join(output, 'assets'))).find(name => name.endsWith('.css'))) : url.pathname.slice(1);
       return route.fulfill({ contentType: asset.endsWith('.css') ? 'text/css' : 'text/javascript', body: await fs.readFile(path.join(output, asset)) });
@@ -67,6 +67,17 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     await conversion.getByRole('combobox').fill('替代');
     await page.getByRole('option', { name: '替代商品 B' }).click();
     await conversion.getByText('该商品本地库存 10').waitFor();
+    await conversion.getByRole('button', { name: '取消', exact: true }).click();
+    await page.getByRole('button', { name: '核对现货／修正历史账面', exact: true }).click();
+    const countDialog = page.getByRole('dialog', { name: '本地盘点调整', exact: true });
+    assert.equal(await countDialog.getByRole('spinbutton').inputValue(), '');
+    await countDialog.getByRole('spinbutton').fill('0');
+    await countDialog.getByRole('textbox').fill('历史采购已补齐，仓库实盘确认为 0，保留采购在途');
+    await countDialog.getByRole('button', { name: '预览影响' }).click();
+    await countDialog.getByText(/核对后现货 0 件/).waitFor();
+    await countDialog.getByRole('button', { name: '确认保存纠正记录' }).click();
+    assert.equal(requests.at(-1).body.action_type, 'stocktake');
+    assert.equal(requests.at(-1).body.counted_quantity, 0);
     assert.deepEqual(errors, []);
   } finally { await browser?.close(); await fs.rm(output, { recursive: true, force: true }); }
 });

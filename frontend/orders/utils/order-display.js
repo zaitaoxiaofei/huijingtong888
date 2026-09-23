@@ -47,6 +47,7 @@ function parseSkuMap(row, fieldName, transform = (value) => value) {
 }
 
 export function buildProductDisplayRows(row = {}) {
+  const coverageByProduct = new Map((row.procurement_coverage?.items || []).map(item => [Number(item.product_id), item]));
   const skuImages = parseSkuMap(row, "sku_images");
   const skuNames = parseSkuMap(row, "sku_names");
   const skuQuantities = parseSkuMap(row, "sku_quantities", (value) => Number(value || 0));
@@ -114,6 +115,7 @@ export function buildProductDisplayRows(row = {}) {
       actualProfit: actualProfits.get(sku) || 0,
       actualProfitReady: actualProfitReadyMap.get(sku) || false,
       stock: stockMap.get(sku) || { fbs: 0, fbp: 0 },
+      physicalStockEstimate: coverageByProduct.get(productIds.get(sku))?.physical_stock_estimate,
       incoming: incomingMap.get(sku) || 0,
       componentCount: componentCountMap.get(sku) || 0,
       productId: productIds.get(sku) || 0,

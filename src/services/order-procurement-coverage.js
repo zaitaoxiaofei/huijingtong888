@@ -115,6 +115,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
     const productId = Number(detail.product_id);
     const stock = stockByProduct.get(productId) || {};
     detail.ledger_stock = Number(stock.ledger || 0);
+    detail.physical_stock_estimate = detail.ledger_stock + Number(stock.open_deducted || 0);
     detail.inventory_needs_review = detail.stock_location !== 'FBP' && Number(stock.ledger || 0) + Number(stock.open_deducted || 0) < 0;
     const sourceMark = markByItem.get(`${detail.order_item_id}:${productId}`);
     if (Number(detail.needs_fulfillment) && detail.stock_location !== 'FBP') {
@@ -196,6 +197,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
       product_reserved_incoming_quantity: positive((pendingIncomingByProduct.get(Number(detail.product_id)) || 0) - (availableIncomingByProduct.get(Number(detail.product_id)) || 0)),
       shortage_quantity: detail.shortage_quantity, missing_record_quantity: detail.missing_record_quantity,
       missing_purchase_quantity: detail.missing_purchase_quantity, missing_receipt_quantity: detail.missing_receipt_quantity, missing_amount: detail.missing_amount, ledger_stock: detail.ledger_stock,
+      physical_stock_estimate: detail.physical_stock_estimate,
       inventory_needs_review: detail.inventory_needs_review });
     for (const batch of detail.batches) if (!order.batches.some(b => Number(b.id) === Number(batch.id))) {
       const { remaining, ...record } = batch;

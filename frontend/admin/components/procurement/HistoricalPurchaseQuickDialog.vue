@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { apiClient } from '../../utils/api.js';
 import { shanghaiDateKey, shanghaiDateTimeText } from '../../utils/shanghai-date.js';
 const props = defineProps({ products: { type: Array, required: true } });
@@ -24,7 +24,8 @@ async function load() {
   loading.value = true;
   rows.value = [...new Map(props.products.map(product => [Number(product.id), product])).values()].map(product => ({
     id: Number(product.id), name: product.name, data: null, quantity: 0, amount: 0, shipping_amount: 0,
-    purchased_at: `${shanghaiDateKey()}T00:00:00+08:00`, reason: '', error: '', submitted: null, saved: false
+    purchased_at: `${shanghaiDateKey()}T00:00:00+08:00`, reason: '', error: '', submitted: null, saved: false,
+    reconcile_stock: false, counted_quantity: undefined
   }));
   for (const row of rows.value) {
     try { await read(row); row.quantity = Number(row.data.missing_purchase || 0); }
@@ -46,15 +47,24 @@ async function save() {
         await read(row);
         const error = dateError(row);
         if (error) throw new Error(error);
+        if (row.reconcile_stock && (!Number.isSafeInteger(row.counted_quantity) || row.counted_quantity < 0)) throw new Error('请填写仓库当前实物数量；没有实物请明确填 0，不含采购在途。');
         const payload = { action_type: 'historical_purchase_bulk', product_id: row.id, quantity: row.quantity,
           amount: row.amount, shipping_amount: row.shipping_amount, purchased_at: row.purchased_at,
           reason: row.reason.trim() || '订单列表补齐历史采购记录', inventory_effect: 'already_accounted',
+          ...(row.reconcile_stock ? { reconcile_stock: true, counted_quantity: row.counted_quantity } : {}),
           revision: row.data.revision, request_key: crypto.randomUUID() };
-        await apiClient.post('/api/procurement/ledger/preview', payload);
+        row.stockPreview = await apiClient.post('/api/procurement/ledger/preview', payload);
         row.preview = payload;
       } catch (error) { row.error = error.message; }
     }
     if (pending.value.some(row => row.error)) { ElMessage.warning('请处理表格中标红的行，已填内容不会丢失。'); return; }
+    const counted = pending.value.filter(row => row.reconcile_stock && !row.submitted);
+    if (counted.length) {
+      try {
+        await ElMessageBox.confirm(counted.map(row => `库存 ${row.data.product.inventory_number || row.id}：实物核对为 ${row.counted_quantity} 件，账面 ${row.stockPreview.local_before} → ${row.stockPreview.local_after}`).join('；')
+          + '。仅按盘点修正账面，不新增采购在途，不清除历史收货待核。确认仓库实际数量无误？', '确认现货核对', { confirmButtonText: '确认并保存', cancelButtonText: '返回修改', type: 'warning' });
+      } catch { return; }
+    }
     for (const row of pending.value) {
       row.submitted ||= row.preview;
       try {
@@ -68,7 +78,7 @@ async function save() {
         return;
       }
     }
-    ElMessage.success('历史采购记录已保存，未增加现货或在途库存');
+    ElMessage.success('历史采购记录已保存；勾选的现货核对已按实盘修正，采购在途不变');
     emit('close');
   } finally {
     if (changed) emit('saved');
@@ -79,7 +89,7 @@ onMounted(load);
 </script>
 <template>
   <el-dialog :model-value="true" title="补齐历史采购记录" width="min(1500px, 96vw)" :close-on-click-modal="false" :close-on-press-escape="!saving" :show-close="!saving" @close="emit('close')">
-    <el-alert type="info" :closable="false" title="每行对应一个库存产品，仅补历史采购来源与成本，不增加现货或在途。日期默认今天，请按原采购凭证修改；删除子记录只移除本次填写行，不删除库存或历史记录。" />
+    <el-alert type="info" :closable="false" title="默认只补历史来源与成本。若账面与实物不符，可勾选“同时核对现货”并填写仓库实物（不含在途）；不会按补录件数盲目加库存。日期按原采购凭证填写；删除子记录只移除本次填写行。" />
     <el-table v-loading="loading" :data="rows" row-key="id" max-height="65vh" class="history-purchase-table">
       <el-table-column label="库存产品" min-width="300" fixed>
         <template #default="{ row }">
@@ -88,6 +98,8 @@ onMounted(load);
             <span v-else class="history-image history-no-image">无图</span>
             <div><strong>{{ row.data?.product.name || row.name }}</strong><p>库存 ID：{{ row.data?.product.inventory_number || row.id }}</p><small>{{ row.data?.product.code }}</small></div>
           </div>
+          <el-checkbox v-model="row.reconcile_stock" :disabled="saving || row.saved || !!row.submitted">同时核对现货</el-checkbox>
+          <template v-if="row.reconcile_stock"><el-input-number v-model="row.counted_quantity" aria-label="仓库实际数量" placeholder="实物数量" :min="0" :precision="0" :disabled="saving || row.saved || !!row.submitted" controls-position="right" /><p>填仓库全部实物，不含在途；无货填 0。</p></template>
         </template>
       </el-table-column>
       <el-table-column label="缺采购记录" width="110"><template #default="{ row }">{{ row.data?.missing_purchase ?? '—' }} 件</template></el-table-column>

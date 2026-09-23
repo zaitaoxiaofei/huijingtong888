@@ -1115,6 +1115,7 @@ function buildTableRow(row) {
         actualProfitReady: Boolean(item.actualProfitReady),
         amountText: `CNY ${formatMoney(item.saleAmount || 0)}`,
         stock: item.stock || { fbs: 0, fbp: 0, local: 0 },
+        physicalStockEstimate: item.physicalStockEstimate,
         incoming: Number(item.incoming || 0),
         componentCount: Number(item.componentCount || 0)
       };

@@ -39,6 +39,13 @@ function money(value) {
   return Math.round(number * 10000) / 10000;
 }
 
+function countedStock(snapshot, value) {
+  if (value === null || value === undefined || value === '') throw new Error('请填写本地实际盘点数量（counted_quantity），只填仓库实物，不能包含采购在途；没有实物请明确填 0');
+  const counted = integer(value, '本地实际盘点数量（counted_quantity）', 0);
+  return { counted_quantity: counted, physical_before: snapshot.physical_estimate ?? snapshot.local_stock,
+    stocktake_delta: counted - (snapshot.physical_estimate ?? snapshot.local_stock) };
+}
+
 function historicalPurchaseTime(value) {
   const date = String(value || '');
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00$/.test(date) || !Number.isFinite(Date.parse(date)) || Date.parse(date) > Date.now()) throw new Error('请填写真实采购时间（北京时间），不能晚于当前时间');
@@ -47,7 +54,7 @@ function historicalPurchaseTime(value) {
 }
 
 export function planLedgerAction(snapshot, body) {
-  if (body.revision !== snapshot.revision) throw new Error('采购、订单或库存已变化，请刷新对账后重新提交');
+  if (body.revision !== snapshot.revision) throw Object.assign(new Error('采购、订单或库存已变化，请刷新对账后重新提交'), { status: 409 });
   const reason = String(body.reason || '').trim();
   if (!reason || reason.length > 1000) throw new Error('请在调整说明中填写真实原因或凭证编号（1～1000 字）');
   const type = String(body.action_type || '');
@@ -79,6 +86,10 @@ export function planLedgerAction(snapshot, body) {
       result.allocations.push({ order_item_id: order.order_item_id, order_id: order.order_id, posting_number: order.posting_number,
         quantity, amount: (goods - goodsAssigned) / 10000, shipping_amount: (freight - freightAssigned) / 10000 });
       goodsAssigned = goods; freightAssigned = freight;
+    }
+    if (body.reconcile_stock === true) {
+      Object.assign(result, countedStock(snapshot, body.counted_quantity));
+      result.local_delta = result.stocktake_delta;
     }
   } else if (['historical_purchase', 'historical_source', 'substitute', 'receive', 'link_purchase'].includes(type)) {
     result.order_item_id = integer(body.order_item_id, '历史订单明细 ID');
@@ -134,8 +145,8 @@ export function planLedgerAction(snapshot, body) {
     if (result.quantity > snapshot.local_stock) throw new Error('转换来源的本地库存不足，请先盘点核对，不能借用 FBP 或采购在途库存');
   } else if (['damage', 'loss', 'stocktake'].includes(type)) {
     if (type === 'stocktake') {
-      result.counted_quantity = integer(body.counted_quantity, '本地实盘数量', 0);
-      result.local_delta = result.counted_quantity - (snapshot.physical_estimate ?? snapshot.local_stock);
+      Object.assign(result, countedStock(snapshot, body.counted_quantity));
+      result.local_delta = result.stocktake_delta;
       if (!result.local_delta) throw new Error('实盘数量与账面相同，无需调整');
     } else {
       result.quantity = integer(body.quantity, '损失数量');
@@ -176,7 +187,7 @@ export function summarizeLedger(product, movements, purchases, orders) {
   const physical = localStock + openDeducted;
   const reserved = sum(orders.filter(row => row.needs_fulfillment), row => row.stock_quantity);
   return {
-    product, local_stock: localStock, physical_estimate: physical,
+    product, local_stock: localStock, physical_estimate: physical, open_order_deducted: openDeducted,
     current_stock_reserved: reserved, available_estimate: Math.max(0, physical - reserved),
     purchase_quantity: sum(purchases, row => row.actual_quantity),
     received_quantity: sum(purchases, row => row.received_quantity),
@@ -308,9 +319,10 @@ export function createProcurementLedgerService(hooks) {
           (product_id, person_id, quantity, amount, shipping_amount, unit_cost, status, note,
             purchase_order_id, purchase_order_item_id, approved_at, approved_by_person_id)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [productId, actor, plan.quantity, plan.amount,
-          plan.shipping_amount, cost, inTransit ? 'pending_arrival' : 'approved', `${note}；${inTransit ? '采购仍在途' : plan.local_delta ? '补漏记本地入库' : '仅补来源，库存已记账或直发'}`,
+          plan.shipping_amount, cost, inTransit ? 'pending_arrival' : 'approved', `${note}；${inTransit ? '采购仍在途' : plan.stocktake_delta !== undefined ? '仅补历史来源与成本；库存另按实盘核对' : plan.local_delta ? '补漏记本地入库' : '仅补来源，库存已记账或直发'}`,
           purchaseOrderId, Number(item.insertId), inTransit ? null : plan.purchased_at, inTransit ? null : actor]);
-        await movement(productId, plan.local_delta, 'purchase_inbound', `inbound_${inbound.insertId}`);
+        if (plan.stocktake_delta !== undefined) await movement(productId, plan.stocktake_delta, 'reconciliation_stocktake');
+        else await movement(productId, plan.local_delta, 'purchase_inbound', `inbound_${inbound.insertId}`);
         if (plan.type === 'historical_purchase') await source(Number(inbound.insertId));
         for (const allocation of plan.allocations || []) await connection.execute(`INSERT INTO procurement_history_sources
           (action_id, order_item_id, product_id, quantity, inbound_record_id) VALUES (?, ?, ?, ?, ?)`,
@@ -339,6 +351,8 @@ export function createProcurementLedgerService(hooks) {
       }
       const response = { ok: true, action_id: actionId, action_type: plan.type, purchase_order_id: purchaseOrderId,
         allocations: plan.allocations || [],
+        ...(plan.counted_quantity !== undefined ? { counted_quantity: plan.counted_quantity, physical_before: plan.physical_before,
+          physical_after: plan.counted_quantity, stocktake_delta: plan.stocktake_delta } : {}),
         local_before: before.local_stock, local_after: before.local_stock + plan.local_delta,
         local_delta: plan.local_delta, target_product_id: plan.target_product_id || null, target_delta: plan.target_delta };
       await connection.execute('UPDATE procurement_ledger_actions SET result_json = ? WHERE id = ?', [JSON.stringify(response), actionId]);
@@ -432,6 +446,7 @@ export function createProcurementLedgerService(hooks) {
       if (target.local_stock + plan.target_delta < 0) throw new Error('替代来源商品本地库存不足');
     }
     return { ...plan, revision: before.revision, local_before: before.local_stock, local_after: before.local_stock + plan.local_delta,
+      ...(plan.counted_quantity !== undefined ? { physical_after: plan.counted_quantity } : {}),
       target_before: target?.local_stock, target_after: target ? target.local_stock + plan.target_delta : null };
   }
   return { read, apply, preview };

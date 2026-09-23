@@ -559,6 +559,7 @@ function procurementTimeText(row) {
             <template #reference><el-button link type="primary" size="small">数量说明</el-button></template>
             <p><strong>本单需求</strong>只表示这一笔订单。同一商品两单各需 1 件，合计需求是 2 件。</p>
             <p><strong>账面余额</strong>是系统已记账出入库后的余额，包含已记账的订单扣减。同一商品会在多行重复展示这一余额，不能相加，也不要再减一次已扣订单的需求。</p>
+            <p><strong>现货推算</strong>加回待发订单已提前扣账的数量，不含采购在途；负数显示为待核差异，不当成负的实物。请从“明细 → 核对现货”填写仓库实际数量。</p>
             <p><strong>商品总在途</strong>是商品全部待入库数量；<strong>已占用</strong>是已按时间分给更早订单的数量；<strong>当前可分配</strong>才是还能给新订单使用的在途数量。</p>
             <p><strong>账面分配</strong>是系统分配给本单的数量；<strong>在途分配</strong>是已采购未入库、分配给本单的数量。它们与账面余额的口径不同。</p>
             <p>例如，两单各扣 1 件后账面还剩 1 件，这个 1 是扣后余额，不能再算成 1 − 2。</p>
@@ -578,6 +579,8 @@ function procurementTimeText(row) {
               <el-button v-if="product.productId && product.inventoryMode !== 'combo'" link type="primary" size="small" @click="emit('view-inventory-detail', row, product.productId)">明细</el-button>
               <div class="orders-stock-inline-facts">
                 <span>FBP: {{ product.stock?.fbp || 0 }}</span>
+                <span v-if="product.inventoryMode !== 'combo' && !Number(product.componentCount || 0) && product.physicalStockEstimate !== undefined">现货推算: {{ Math.max(0, product.physicalStockEstimate) }}</span>
+                <span v-if="product.inventoryMode !== 'combo' && !Number(product.componentCount || 0) && product.physicalStockEstimate < 0">账面待核差异: {{ -product.physicalStockEstimate }}</span>
                 <el-tooltip content="已计入已记账的出入库和订单扣减，不是实物盘点数；详见表头“数量说明”。" placement="top">
                   <span>{{ product.inventoryMode === "combo" || Number(product.componentCount || 0) > 0 ? "账面可组余量" : "本地账面余额" }}: {{ product.stock?.local || 0 }}</span>
                 </el-tooltip>

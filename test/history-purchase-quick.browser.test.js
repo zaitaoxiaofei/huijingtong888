@@ -43,7 +43,7 @@ test('history table defaults dates, removes rows, validates and retries only uns
           failSecond = false;
           return route.fulfill({ status: 503, json: { error: '模拟响应中断' } });
         }
-        return route.fulfill({ json: { ok: true, local_delta: 0 } });
+        return route.fulfill({ json: { ok: true, local_delta: payload.reconcile_stock ? 4 : 0, local_before: -5, local_after: payload.reconcile_stock ? -1 : -5 } });
       }
       const asset = url.pathname === '/style.css' ? path.join('assets', (await fs.readdir(path.join(output, 'assets'))).find(name => name.endsWith('.css'))) : url.pathname.slice(1);
       return route.fulfill({ contentType: asset.endsWith('.css') ? 'text/css' : 'text/javascript', body: await fs.readFile(path.join(output, asset)) });
@@ -90,5 +90,28 @@ test('history table defaults dates, removes rows, validates and retries only uns
     await dialog.getByRole('button', { name: '取消', exact: true }).click();
     await page.getByText('closed', { exact: true }).waitFor();
     assert.equal(requests.length, 0, 'cancel makes no writes');
+    await page.reload();
+    await dialog.getByText('库存 12', { exact: true }).waitFor();
+    await dialog.getByRole('button', { name: '删除子记录' }).last().click();
+    await dialog.getByRole('button', { name: '删除子记录' }).last().click();
+    await dialog.getByRole('spinbutton').nth(1).fill('63');
+    const date = dialog.getByPlaceholder('请选择实际采购时间');
+    await date.fill('2026-08-01 12:00:00'); await date.press('Tab');
+    await dialog.getByText('同时核对现货', { exact: true }).click();
+    await dialog.getByRole('button', { name: '保存', exact: true }).click();
+    await dialog.getByRole('alert').filter({ hasText: '请填写仓库当前实物数量' }).waitFor();
+    assert.equal(requests.length, 0, 'checking stock never defaults an unknown count to zero');
+    await dialog.getByPlaceholder('实物数量').fill('0');
+    await dialog.getByRole('button', { name: '保存', exact: true }).click();
+    const confirmation = page.getByRole('dialog', { name: '确认现货核对' });
+    await confirmation.getByRole('button', { name: '返回修改' }).click();
+    assert.equal(requests.filter(row => row.path === '/api/procurement/ledger').length, 0);
+    await dialog.getByRole('button', { name: '保存', exact: true }).click();
+    await confirmation.getByRole('button', { name: '确认并保存' }).click();
+    await page.getByText('closed', { exact: true }).waitFor();
+    const countWrites = requests.filter(row => row.path === '/api/procurement/ledger');
+    assert.equal(countWrites.length, 1);
+    assert.equal(countWrites[0].payload.reconcile_stock, true);
+    assert.equal(countWrites[0].payload.counted_quantity, 0);
   } finally { await browser?.close(); await fs.rm(output, { recursive: true, force: true }); }
 });

@@ -100,7 +100,7 @@ test('ledger uses physical returns and FBP transfer, not order cancellation coun
 });
 
 function fixture(failSecond = false, overrides = {}) {
-  let state = { movements: [{ id: 1, product_id: 10, quantity_delta: 10, source_type: 'purchase_inbound', stock_location: 'LOCAL' }], actions: [] };
+  let state = { movements: structuredClone(overrides.movements || [{ id: 1, product_id: 10, quantity_delta: 10, source_type: 'purchase_inbound', stock_location: 'LOCAL' }]), actions: [] };
   let writes = 0;
   const executed = [];
   const recordedCosts = [];
@@ -113,6 +113,7 @@ function fixture(failSecond = false, overrides = {}) {
     if (sql.includes('FROM purchase_order_items poi')) return overrides.purchases || [];
     if (sql.includes('FROM products WHERE')) return [{ id: args[0], name: `商品${args[0]}` }];
     if (sql.includes('GROUP BY source_type, stock_location')) return state.movements.filter(row => row.product_id === args[0]);
+    if (sql.includes('GROUP BY related_order_item_id')) return overrides.outbound || [];
     return [];
   };
   const connection = { query: async (...args) => [await run(...args)], execute: async (sql, args) => {
@@ -150,6 +151,42 @@ test('bulk history fill allocates only missing purchases in transport order and 
   for (const change of [{ quantity: 6 }, { quantity: 0 }, { quantity: 1.5 }, { amount: 0 }, { inventory_effect: 'missing_inbound' }, { purchased_at: '2026-08-04T12:00:00+08:00' }, { revision: 'old' }]) {
     assert.throws(() => planLedgerAction(state, { ...input, ...change }));
   }
+});
+
+test('bulk backfill can atomically reconcile counted stock without treating purchased units as new stock', async () => {
+  const coverage = new Map([1, 2, 3].map(id => [id, { order_id: id, posting_number: `OLD-${id}`, stock_location: 'LOCAL', entered_transport: true,
+    items: [{ product_id: 10, order_item_id: id, quantity: 1, missing_purchase_quantity: 1, missing_record_quantity: 1 }] }]));
+  coverage.set(4, { order_id: 4, stock_location: 'LOCAL', needs_fulfillment: true,
+    items: [{ product_id: 10, order_item_id: 4, quantity: 1, shortage_quantity: 1, stock_quantity: 0 }] });
+  const options = { coverage, movements: [{ product_id: 10, quantity_delta: -5, stock_location: 'LOCAL', source_type: 'order_outbound' }], outbound: [{ order_item_id: 4, quantity: 1 }] };
+  const f = fixture(false, options);
+  const before = await f.service.read({ product_id: 10 });
+  assert.equal(before.physical_estimate, -4);
+  const input = body('historical_purchase_bulk', { product_id: 10, revision: before.revision, quantity: 3, amount: 63,
+    inventory_effect: 'already_accounted', purchased_at: '2026-04-16T00:00:00+08:00', reconcile_stock: true,
+    counted_quantity: 0, request_key: 'count-and-fill-12345678' });
+  for (const counted_quantity of [null, undefined, '', -1, 1.5]) {
+    assert.throws(() => planLedgerAction(before, { ...input, counted_quantity }), /盘点数量/);
+  }
+  assert.equal(planLedgerAction(before, { ...input, reconcile_stock: false }).local_delta, 0);
+  const preview = await f.service.preview(input);
+  assert.equal(preview.local_after, -1);
+  assert.equal(preview.physical_after, 0);
+  const result = await f.service.apply(input, 1);
+  assert.equal(result.stocktake_delta, 4, 'difference is four, not the three purchased units or ledger debt five');
+  assert.equal(result.physical_after, 0);
+  assert.equal(result.local_after, -1);
+  assert.deepEqual(await f.service.apply(input, 1), result, 'retry is idempotent');
+  assert.equal(f.state().movements.length, 2);
+  assert.equal(f.state().movements[1].source_type, 'reconciliation_stocktake');
+  assert.equal(f.recordedCosts.length, 1);
+  assert.equal(f.recordedCosts[0].amount, 63);
+  assert.equal((await f.service.read({ product_id: 10 })).physical_estimate, 0);
+  const failed = fixture(false, { ...options, failSecondSource: true });
+  const failedBefore = await failed.service.read({ product_id: 10 });
+  await assert.rejects(failed.service.apply({ ...input, revision: failedBefore.revision }, 1), /关联失败/);
+  assert.equal(failed.state().movements.length, 1, 'failed purchase rolls back the simultaneous stock correction');
+  assert.equal(failed.state().actions.length, 0);
 });
 
 test('bulk fill creates one purchase, links multiple historical orders atomically, records cost and retries once', async () => {

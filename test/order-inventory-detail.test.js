@@ -4,6 +4,26 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { summarizeLedger, planLedgerAction, planReceiptCorrection } from '../src/services/procurement-ledger.js';
 import { calculateOrderProcurementCoverage } from '../src/services/order-procurement-coverage.js';
+import { buildProductDisplayRows } from '../frontend/orders/utils/order-display.js';
+
+test('zero physical stock keeps historic pending receipt separate and current order still needs procurement', () => {
+  const input = { stocks: [{ product_id: 10, ledger: -1, open_deducted: 1 }],
+    demands: [{ order_id: 1, order_item_id: 1, product_id: 10, quantity: 1, stock_location: 'LOCAL', entered_transport: 1 },
+      { order_id: 2, order_item_id: 2, product_id: 10, quantity: 1, stock_location: 'LOCAL', needs_fulfillment: 1 }],
+    requests: [{ id: 1, source_order_item_id: 1, product_id: 10, quantity: 1, purchase_order_id: 1, status: 'purchased' }],
+    inbounds: [{ id: 1, product_id: 10, purchase_order_id: 1, quantity: 1, status: 'pending_arrival', amount: 21 }] };
+  const result = calculateOrderProcurementCoverage(input);
+  assert.equal(result.get(1).missing_receipt_quantity, 1);
+  assert.equal(result.get(2).shortage_quantity, 1);
+  const item = result.get(2).items[0];
+  assert.equal(item.physical_stock_estimate, 0);
+  assert.equal(item.ledger_stock, -1);
+  assert.equal(item.product_total_incoming_quantity, 1);
+  assert.equal(item.product_available_incoming_quantity, 0);
+  const display = buildProductDisplayRows({ skus: 'SKU', sku_product_ids: 'SKU:10', procurement_coverage: result.get(2) });
+  // The UI uses the existing coverage payload, not a request per product.
+  assert.equal(display[0].physicalStockEstimate, 0);
+});
 
 test('physical count restores open deductions and stocktake does not double credit them', () => {
   const state = summarizeLedger({ id: 10 }, [{ quantity_delta: -7, stock_location: 'LOCAL' }], [],
