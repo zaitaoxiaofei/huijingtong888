@@ -7,6 +7,7 @@ import zhCn from "element-plus/es/locale/lang/zh-cn";
 import OrdersStatusTabs from "./components/OrdersStatusTabs.vue";
 import ShippedReceiptDialog from "./components/ShippedReceiptDialog.vue";
 import OrdersTable from "./components/OrdersTable.vue";
+import ProcurementLedgerDialog from "../admin/components/procurement/ProcurementLedgerDialog.vue";
 import OrdersToolbar from "./components/OrdersToolbar.vue";
 import PageFooterPagination from "../admin/components/PageFooterPagination.vue";
 import OzonCategorySelect from "../admin/components/listing/OzonCategorySelect.vue";
@@ -34,6 +35,12 @@ const route = useRoute();
 const router = useRouter();
 const emit = defineEmits(["inventory-completed"]);
 const elementLocale = zhCn;
+const inventoryDetail = reactive({ visible: false, productId: 0, orderId: 0 });
+function openInventoryDetail(row, productId) {
+  inventoryDetail.productId = Number(productId);
+  inventoryDetail.orderId = Number(row.id);
+  inventoryDetail.visible = true;
+}
 
 const orderDetailCache = new Map();
 let latestOrderSyncTimer = 0;
@@ -2468,6 +2475,7 @@ onBeforeUnmount(() => {
       <span>仅预览明确关联的已运输订单，确认后才入库。</span>
     </div>
     <ShippedReceiptDialog :shipped-receipt-dialog="shippedReceiptDialog" @preview="previewShippedReceipts(shippedReceiptDialog.orderIds)" @confirm="confirmShippedReceipts" @review="reviewShippedProcurementRecords" />
+    <ProcurementLedgerDialog v-if="inventoryDetail.visible" v-model="inventoryDetail.visible" :product-id="inventoryDetail.productId" :order-id="inventoryDetail.orderId" @saved="loadOrders()" />
     <el-dialog v-model="procurementReceiptDialog.visible" title="登记实际收货" width="920px" destroy-on-close>
       <p class="order-procurement-receipt-hint">勾选本次实际到货的采购批次并填写实收数量。未勾选的批次、以及部分收货的剩余数量，都会继续保留在途。</p>
       <el-table :data="procurementReceiptDialog.batches" border max-height="420">
@@ -2522,6 +2530,7 @@ onBeforeUnmount(() => {
         @open-order-procurement="handleOpenOrderProcurement"
         @view-procurement-details="handleViewProcurementDetails"
         @review-procurement-records="openOrderProcurementRecords"
+        @view-inventory-detail="openInventoryDetail"
         @confirm-procurement-inbound="handleConfirmProcurementInbound"
       />
 

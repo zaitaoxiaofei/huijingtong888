@@ -3,7 +3,7 @@ import { computed, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { apiClient } from '../../utils/api.js';
 import { shanghaiDateTimeText } from '../../utils/shanghai-date.js';
-const props = defineProps({ modelValue: Boolean, productId: { type: Number, default: 0 } });
+const props = defineProps({ modelValue: Boolean, productId: { type: Number, default: 0 }, orderId: { type: Number, default: 0 } });
 const emit = defineEmits(['update:modelValue', 'saved']);
 const visible = computed({ get: () => props.modelValue, set: value => emit('update:modelValue', value) });
 const loading = ref(false), saving = ref(false), searching = ref(false);
@@ -17,10 +17,12 @@ const labels = {
   convert: '库存商品转换', damage: '货损报废', loss: '货物丢失', stocktake: '本地盘点调整', revise_purchase: '纠正采购记录'
 };
 const movementLabels = { purchase_inbound: '采购入库', purchase_inbound_correction: '采购入库纠正', order_outbound: '订单出库',
+  historical_receipt_offset: '历史收货已计入实物（抵消重复入库）',
   return_in: '实际退回入库', fbp_transfer_out: '转 FBP', reconciliation_convert: '转换出', reconciliation_convert_in: '转换入',
   substitution_restore: '替代用料：原商品冲回', substitution_out: '替代用料：实际消耗', reconciliation_damage: '货损报废',
   reconciliation_loss: '丢失', reconciliation_stocktake: '盘点调整', manual_outbound: '手动出库' };
-const history = computed(() => (data.value?.orders || []).filter(row => row.entered_transport && (row.missing_record_quantity > 0 || row.missing_amount)));
+const history = computed(() => (data.value?.orders || []).filter(row => row.entered_transport && (row.missing_record_quantity > 0 || row.missing_amount))
+  .sort((a, b) => Number(b.order_id === props.orderId) - Number(a.order_id === props.orderId)));
 const selectedOrder = computed(() => data.value?.orders.find(row => row.order_item_id === form.order_item_id));
 const needsTarget = computed(() => ['convert', 'substitute'].includes(form.action_type));
 const needsMoney = computed(() => ['historical_purchase', 'revise_purchase'].includes(form.action_type));
@@ -61,9 +63,9 @@ async function selectTarget(id) {
 }
 function edit(type, row = null) {
   Object.keys(form).forEach(key => delete form[key]);
-  Object.assign(form, { action_type: type, quantity: row?.missing_purchase_quantity || row?.missing_record_quantity || row?.shortage_quantity || 1,
+  Object.assign(form, { action_type: type, quantity: (type === 'receive' ? row?.missing_receipt_quantity : row?.missing_purchase_quantity) || row?.missing_record_quantity || row?.shortage_quantity || 1,
     order_item_id: row?.order_item_id || null, reason: '', amount: 0, shipping_amount: 0, purchased_at: '',
-    inventory_effect: '', target_product_id: null, target_quantity: 1, counted_quantity: Math.max(0, data.value.local_stock), correct_received: false });
+    inventory_effect: 'already_accounted', target_product_id: null, target_quantity: 1, counted_quantity: Math.max(0, data.value.physical_estimate), correct_received: false });
   if (type === 'revise_purchase') Object.assign(form, { purchase_item_id: row.id, quantity: Number(row.actual_quantity), amount: Number(row.amount), shipping_amount: Number(row.shipping_amount) });
   preview.value = null; submission.value = null; target.value = null; formVisible.value = true;
 }
@@ -95,7 +97,7 @@ watch(() => props.modelValue, value => { if (value) { products.value = []; load(
 </script>
 
 <template>
-  <el-dialog v-model="visible" title="采购与库存对账" width="min(1400px, 96vw)" align-center destroy-on-close>
+  <el-dialog v-model="visible" title="库存明细与历史核对" width="min(1400px, 96vw)" align-center destroy-on-close>
     <div class="ledger-toolbar">
       <el-select :model-value="productId || undefined" filterable remote :remote-method="search" :loading="searching" placeholder="搜索全部库存商品名称或编码" @change="load" style="width:460px">
         <el-option v-if="data && !products.some(p => Number(p.id) === productId)" :value="productId" :label="data.product.name" />
@@ -106,9 +108,11 @@ watch(() => props.modelValue, value => { if (value) { products.value = []; load(
     <div v-loading="loading">
       <template v-if="data">
         <div class="ledger-product"><el-image class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>{{ data.product.code }}</span></div>
-        <el-alert type="info" :closable="false" title="历史来源缺口单独核对，不消耗新订单的采购。采购在途不算本地现货；退货只有实际回到本地才增加本地库存。" />
+        <el-alert type="info" :closable="false" title="实物推算已加回待发订单的提前扣减，以仓库盘点为准；负数不能当成真实实物。请先盘点校准，历史补采购只补记录，不增加现货或在途。" />
         <div class="ledger-metrics">
           <div><span>本地账面库存</span><strong>{{ data.local_stock }}</strong></div>
+          <div><span>实物推算（以盘点为准）</span><strong>{{ data.physical_estimate }}</strong></div>
+          <div><span>当前订单现货覆盖 / 可用推算</span><strong>{{ data.current_stock_reserved }} / {{ data.available_estimate }}</strong></div>
           <div><span>已记录采购 / 已收货</span><strong>{{ data.purchase_quantity }} / {{ data.received_quantity }}</strong></div>
           <div><span>采购在途</span><strong>{{ data.incoming_quantity }}</strong></div>
           <div><span>当前订单待采购 / 在途覆盖</span><strong>{{ data.current_shortage }} / {{ data.current_incoming }}</strong></div>
@@ -117,14 +121,14 @@ watch(() => props.modelValue, value => { if (value) { products.value = []; load(
         <el-tabs>
           <el-tab-pane label="历史缺口与补录">
             <el-table :data="history" max-height="400" empty-text="没有历史来源缺口">
-              <el-table-column prop="posting_number" label="订单" min-width="190" />
+              <el-table-column label="订单" min-width="190"><template #default="{ row }">{{ row.posting_number }}<el-tag v-if="row.order_id === props.orderId" size="small">当前订单</el-tag></template></el-table-column>
               <el-table-column prop="quantity" label="已发件数" width="100" />
               <el-table-column prop="missing_purchase_quantity" label="缺采购来源" width="120" />
               <el-table-column prop="missing_receipt_quantity" label="收货待核" width="110" />
               <el-table-column label="处理" min-width="410"><template #default="{ row }">
                 <template v-if="row.missing_record_quantity > 0">
-                  <el-button link type="primary" @click="edit('historical_purchase', row)">补采购</el-button>
-                  <el-button link type="primary" @click="edit('receive', row)">补收货</el-button>
+                  <el-button v-if="row.missing_purchase_quantity > 0" link type="primary" @click="edit('historical_purchase', row)">补采购记录</el-button>
+                  <el-button v-if="row.missing_receipt_quantity > 0" link type="primary" @click="edit('receive', row)">核对历史收货</el-button>
                   <el-button link type="primary" @click="edit('link_purchase', row)">关联收货</el-button>
                   <el-button link type="primary" @click="edit('substitute', row)">实际用了其他商品</el-button>
                   <el-button link @click="edit('historical_source', row)">其他来源</el-button>
@@ -169,11 +173,13 @@ watch(() => props.modelValue, value => { if (value) { products.value = []; load(
         <el-form-item v-if="form.action_type !== 'stocktake'" :label="form.action_type === 'revise_purchase' ? '纠正后采购数量' : '本商品数量'"><el-input-number v-model="form.quantity" :min="form.action_type === 'revise_purchase' ? 0 : 1" :precision="0" /></el-form-item>
         <el-form-item v-if="['receive', 'link_purchase'].includes(form.action_type)" label="已有采购收货批次"><el-select v-model="form.inbound_id" style="width:100%"><el-option v-for="batch in batches" :key="batch.id" :value="Number(batch.id)" :label="`${batch.purchase_order_no || '采购批次'} #${batch.id} · 可关联 ${batch.selectable_quantity} 件`" /></el-select></el-form-item>
         <el-form-item v-if="form.action_type === 'historical_purchase'" label="实际采购时间"><el-date-picker v-model="form.purchased_at" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss+08:00" placeholder="北京时间" /></el-form-item>
-        <el-form-item v-if="form.action_type === 'historical_purchase'" label="库存影响"><el-radio-group v-model="form.inventory_effect"><el-radio value="missing_inbound">实际收过货，补漏记本地入库</el-radio><el-radio value="already_accounted">库存已记账／直发，仅补来源</el-radio></el-radio-group></el-form-item>
+        <el-form-item v-if="form.action_type === 'historical_purchase'" label="库存影响">只补历史采购来源，不增加现货或在途。实物与账面不符请单独盘点核对。</el-form-item>
+        <el-form-item v-if="form.action_type === 'receive'" label="库存影响"><el-radio-group v-model="form.inventory_effect"><el-radio value="already_accounted">实物已计入盘点／账面，只补收货记录</el-radio><el-radio value="missing_inbound">确认漏记入库，增加账面数量</el-radio></el-radio-group></el-form-item>
         <template v-if="needsMoney"><el-form-item label="实际货款"><el-input-number v-model="form.amount" :min="0" :precision="2" /><span>金额未知填 0，保留待补状态</span></el-form-item><el-form-item label="实际运费"><el-input-number v-model="form.shipping_amount" :min="0" :precision="2" /></el-form-item></template>
         <el-form-item v-if="form.action_type === 'revise_purchase'" label="入库记录"><el-checkbox v-model="form.correct_received">入库也录多了，同步纠正多记的入库</el-checkbox></el-form-item>
         <template v-if="needsTarget"><el-form-item :label="form.action_type === 'substitute' ? '实际使用来源商品' : '转换目标商品'"><el-select v-model="form.target_product_id" filterable remote :remote-method="value => search(value, true)" @change="selectTarget" style="width:100%"><el-option v-for="p in targetProducts" :key="p.id" :value="Number(p.id)" :label="`${p.name} · ${p.code || ''}`" /></el-select></el-form-item><el-form-item :label="form.action_type === 'substitute' ? '来源实际消耗数量' : '目标入库数量'"><el-input-number v-model="form.target_quantity" :min="1" :precision="0" /><span v-if="target">该商品本地库存 {{ target.local_stock }}</span></el-form-item></template>
         <el-form-item v-if="form.action_type === 'stocktake'" label="本地实际盘点数量"><el-input-number v-model="form.counted_quantity" :min="0" :precision="0" /></el-form-item>
+        <el-alert v-if="form.action_type === 'stocktake'" type="warning" :closable="false" :title="`当前实物推算 ${data.physical_estimate} 件（含待发订单提前扣减的加回）；请填写仓库全部实物，包含已经分配给待发订单的货。历史缺记录不会被清除。`" />
         <el-form-item label="原因／凭证"><el-input v-model="form.reason" type="textarea" :rows="3" maxlength="1000" placeholder="说明实际采购、来源商品、使用去向或盘点差异；暂不清楚可填原因待查及盘点依据" /></el-form-item>
       </el-form>
       <el-alert v-if="preview" type="warning" :closable="false" :title="`本地账面库存：${preview.local_before} → ${preview.local_after}${needsTarget ? `；另一商品库存：${preview.target_before} → ${preview.target_after}` : ''}`" :description="form.action_type === 'revise_purchase' ? '采购、收货及关联订单覆盖将同步重算；负库存保留为待核差异，不自动补采购。' : '历史补录只解释所选订单来源；不会新增一笔当前待采购任务。'" />

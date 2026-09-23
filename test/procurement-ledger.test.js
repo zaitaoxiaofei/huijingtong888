@@ -72,7 +72,7 @@ test('correcting a source-only historical receipt never removes physical local s
 test('history backfill declares ledger impact and rejects already-recorded purchases', () => {
   const input = body('historical_purchase', { order_item_id: 1, amount: 20, purchased_at: '2026-08-01T12:00:00+08:00', inventory_effect: 'already_accounted' });
   assert.equal(planLedgerAction(snapshot(), input).local_delta, 0);
-  assert.equal(planLedgerAction(snapshot(), { ...input, inventory_effect: 'missing_inbound' }).local_delta, 2);
+  assert.throws(() => planLedgerAction(snapshot(), { ...input, inventory_effect: 'missing_inbound' }), /仅解释历史来源/);
   assert.throws(() => planLedgerAction(snapshot({ orders: [{ ...snapshot().orders[0], missing_purchase_quantity: 0 }] }), input), /已有采购/);
   assert.throws(() => planLedgerAction(snapshot(), { ...input, quantity: 99 }), /尚未解释/);
 });
@@ -122,6 +122,7 @@ function fixture(failSecond = false, overrides = {}) {
   } };
   const service = createProcurementLedgerService({ prepare: async () => {}, query: run, coverage: async (_, productId) => { coverageProducts.push(productId); return overrides.coverage || new Map(); },
     recordCost: async () => {}, refreshPurchase: async () => {},
+    receive: async (_, id, payload) => { state.movements.push({ product_id: 10, quantity_delta: payload.receive_quantity, stock_location: 'LOCAL', source_type: 'purchase_inbound', source_ref: `inbound_${id}` }); },
     requirePerson: async () => 1, invalidate: () => {},
     transaction: async callback => { const saved = structuredClone(state); try { return await callback(connection); } catch (e) { state = saved; throw e; } },
     postMovement: async (_, row) => { writes++; if (failSecond && writes === 2) throw new Error('模拟第二条库存流水失败'); state.movements.push({ ...row, id: writes + 1 }); }
@@ -144,6 +145,24 @@ test('two-product conversion is atomic, retry is idempotent, changed payload can
   await assert.rejects(() => fail.service.apply(input, 1), /第二条/);
   assert.equal(fail.state().movements.length, 1);
   assert.equal(fail.state().actions.length, 0);
+});
+
+test('already-counted historical receipt posts a balancing offset atomically and retry does not receive twice', async () => {
+  const coverage = new Map([[1, { order_id: 1, stock_location: 'LOCAL', entered_transport: true,
+    items: [{ product_id: 10, order_item_id: 1, missing_record_quantity: 2, missing_receipt_quantity: 2 }] }]]);
+  coverage.available_batches = [{ id: 8, product_id: 10, quantity: 2, unallocated_quantity: 2, status: 'pending_arrival' }];
+  const f = fixture(false, { coverage });
+  const before = await f.service.read({ product_id: 10 });
+  const input = body('receive', { revision: before.revision, product_id: 10, order_item_id: 1, inbound_id: 8,
+    inventory_effect: 'already_accounted', request_key: 'historical-receipt-12345678' });
+  const result = await f.service.apply(input, 1);
+  assert.equal(result.local_delta, 0);
+  assert.equal(result.local_before, result.local_after);
+  const receiptMovements = f.state().movements.filter(row => row.source_ref === 'inbound_8');
+  assert.equal(receiptMovements.reduce((sum, row) => sum + row.quantity_delta, 0), 0);
+  assert.equal(receiptMovements.length, 2);
+  await f.service.apply(input, 1);
+  assert.equal(f.state().movements.filter(row => row.source_ref === 'inbound_8').length, 2);
 });
 
 test('actual local return can supply a later shipment once; return status alone cannot invent stock', () => {

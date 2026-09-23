@@ -11,6 +11,7 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
   const output = await fs.mkdtemp(path.join(os.tmpdir(), 'procurement-ledger-browser-'));
   let browser;
   const initial = { product: { id: 10, name: '测试商品 A', code: 'A-10' }, revision: 'v1', local_stock: 0,
+    physical_estimate: 2, current_stock_reserved: 2, available_estimate: 0,
     purchase_quantity: 102, received_quantity: 2, incoming_quantity: 100, current_shortage: 0, current_incoming: 2,
     missing_purchase: 98, missing_receipt: 0, movements: [], actions: [], sources: [], batches: [],
     orders: [{ order_item_id: 1, order_id: 1, posting_number: 'TEST-100', entered_transport: true, quantity: 100, missing_record_quantity: 98, missing_purchase_quantity: 98, missing_receipt_quantity: 0 }],
@@ -39,6 +40,11 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     });
     await page.goto('http://localhost:8788/admin.html');
     await page.getByText('TEST-100', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '补采购记录', exact: true }).click();
+    const historicalDialog = page.getByRole('dialog', { name: '补历史采购', exact: true });
+    await historicalDialog.getByText('只补历史采购来源，不增加现货或在途。实物与账面不符请单独盘点核对。').waitFor();
+    assert.equal(await historicalDialog.getByRole('radio').count(), 0);
+    await historicalDialog.getByRole('button', { name: 'Close this dialog' }).click();
     await page.screenshot({ path: '/tmp/procurement-ledger-overview.png' });
     await page.getByRole('tab', { name: '采购数量与金额纠正' }).click();
     await page.getByRole('button', { name: '纠正记录', exact: true }).click();

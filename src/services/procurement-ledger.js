@@ -64,8 +64,7 @@ export function planLedgerAction(snapshot, body) {
       if (result.quantity > order.missing_purchase_quantity) throw new Error('该订单已有采购记录或收货待核，请先关联采购／补收货，不能重复补采购');
       result.amount = money(body.amount);
       result.shipping_amount = money(body.shipping_amount || 0);
-      if (!['missing_inbound', 'already_accounted'].includes(body.inventory_effect)) throw new Error('请选择库存影响：补漏记入库，或库存已经记账／供应商直发');
-      result.local_delta = body.inventory_effect === 'missing_inbound' ? result.quantity : 0;
+      if (body.inventory_effect !== 'already_accounted') throw new Error('补采购记录仅解释历史来源，不增加现货；如本地实物不符，请在库存明细的盘点调整中填写实盘数量（counted_quantity）');
       result.purchased_at = historicalPurchaseTime(body.purchased_at);
       if (order.transport_at && Date.parse(body.purchased_at) > new Date(order.transport_at).getTime()) throw new Error('历史采购时间晚于订单进入运输的时间，请核对真实采购日期，不能用新采购填旧账');
     }
@@ -80,7 +79,8 @@ export function planLedgerAction(snapshot, body) {
       result.inbound = batch;
       result.already_allocated = Number(order.receipt_claims?.find(claim => Number(claim.batch_id) === Number(batch.id) && !claim.unallocated)?.quantity || 0);
       if (result.already_allocated && result.quantity > result.already_allocated) throw new Error('本次补收不能混合已关联与未关联数量，请分开处理');
-      result.local_delta = type === 'receive' ? result.quantity : 0;
+      if (type === 'receive' && !['already_accounted', 'missing_inbound'].includes(body.inventory_effect)) throw new Error('请选择历史收货的库存影响（inventory_effect）：只补记录，或确认漏记入库；已计入盘点的货物不能再次增加库存');
+      result.local_delta = type === 'receive' && body.inventory_effect === 'missing_inbound' ? result.quantity : 0;
     }
     if (type === 'substitute') {
       result.target_product_id = integer(body.target_product_id, '替代来源商品');
@@ -107,7 +107,7 @@ export function planLedgerAction(snapshot, body) {
   } else if (['damage', 'loss', 'stocktake'].includes(type)) {
     if (type === 'stocktake') {
       result.counted_quantity = integer(body.counted_quantity, '本地实盘数量', 0);
-      result.local_delta = result.counted_quantity - snapshot.local_stock;
+      result.local_delta = result.counted_quantity - (snapshot.physical_estimate ?? snapshot.local_stock);
       if (!result.local_delta) throw new Error('实盘数量与账面相同，无需调整');
     } else {
       result.quantity = integer(body.quantity, '损失数量');
@@ -141,8 +141,15 @@ export function planLedgerAction(snapshot, body) {
 export function summarizeLedger(product, movements, purchases, orders) {
   const local = movements.filter(row => row.stock_location !== 'FBP');
   const sum = (rows, fn) => rows.reduce((total, row) => total + Number(fn(row) || 0), 0);
+  // Open orders may already have posted outbound movements; those goods are
+  // still physically in the warehouse until shipment.
+  const localStock = sum(local, row => row.quantity_delta);
+  const openDeducted = sum(orders.filter(row => row.needs_fulfillment), row => row.outbound_quantity);
+  const physical = localStock + openDeducted;
+  const reserved = sum(orders.filter(row => row.needs_fulfillment), row => row.stock_quantity);
   return {
-    product, local_stock: sum(local, row => row.quantity_delta),
+    product, local_stock: localStock, physical_estimate: physical,
+    current_stock_reserved: reserved, available_estimate: Math.max(0, physical - reserved),
     purchase_quantity: sum(purchases, row => row.actual_quantity),
     received_quantity: sum(purchases, row => row.received_quantity),
     incoming_quantity: sum(purchases, row => row.pending_quantity),
@@ -184,7 +191,7 @@ export function createProcurementLedgerService(hooks) {
     const value = summarizeLedger(products[0], movements, purchases, orders);
     value.batches = (projection.available_batches || []).filter(row => Number(row.product_id) === productId);
     const posted = await run(`SELECT source_ref, SUM(quantity_delta) AS quantity FROM inventory_movements
-      WHERE product_id = ? AND status = 'posted' AND source_type IN ('purchase_inbound', 'purchase_inbound_correction')
+      WHERE product_id = ? AND status = 'posted' AND source_type IN ('purchase_inbound', 'purchase_inbound_correction', 'historical_receipt_offset')
       AND COALESCE(stock_location, 'LOCAL') != 'FBP' GROUP BY source_ref`, [productId]);
     for (const batch of value.batches) batch.local_posted_quantity = Number(posted.find(row => row.source_ref === `inbound_${batch.id}`)?.quantity || 0);
     value.requests = await run(`SELECT * FROM procurement_requests WHERE product_id = ? AND purchase_order_id IS NOT NULL AND status != 'cancelled' ORDER BY id`, [productId]);
@@ -277,6 +284,9 @@ export function createProcurementLedgerService(hooks) {
         if (plan.type === 'receive') await receive(connection, plan.inbound.id, {
           receive_quantity: plan.quantity, expected_remaining_quantity: plan.inbound.quantity, receipt_context: note
         }, { sessionPersonId: actor });
+        // The receipt hook posts inbound stock. Undo that inventory effect when
+        // the operator confirms these historical goods were already counted.
+        if (plan.type === 'receive' && !plan.local_delta) await movement(productId, -plan.quantity, 'historical_receipt_offset', `inbound_${plan.inbound.id}`);
         if (!plan.already_allocated) await source(Number(plan.inbound.id));
       } else if (plan.type === 'historical_source' || plan.type === 'substitute') {
         await source();

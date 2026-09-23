@@ -32,6 +32,7 @@ const emit = defineEmits([
   "open-order-procurement",
   "view-procurement-details",
   "review-procurement-records",
+  "view-inventory-detail",
   "confirm-procurement-inbound"
 ]);
 
@@ -554,6 +555,7 @@ function procurementTimeText(row) {
               <small class="orders-stock-product-name orders-product-name">{{ product.productName }}</small>
               <strong v-if="product.inventoryMode !== 'combo'">库存编号：{{ product.inventoryNumber || "待补核心品名" }}</strong>
               <small v-else>库存编号：见子产品明细</small>
+              <el-button v-if="product.productId && product.inventoryMode !== 'combo'" link type="primary" size="small" @click="emit('view-inventory-detail', row, product.productId)">明细</el-button>
               <div class="orders-stock-inline-facts">
                 <span>FBP: {{ product.stock?.fbp || 0 }}</span>
                 <el-tooltip content="已计入已记账的出入库和订单扣减，不是实物盘点数；详见表头“数量说明”。" placement="top">
@@ -599,6 +601,7 @@ function procurementTimeText(row) {
                       <template #default="{ row: part }"><strong>{{ part.inventory_number || '待补核心品名' }}</strong></template>
                     </el-table-column>
                     <el-table-column prop="per_set_quantity" label="每套数量" width="85" />
+                    <el-table-column label="库存明细" width="95"><template #default="{ row: part }"><el-button v-if="part.product_id" link type="primary" @click="emit('view-inventory-detail', row, part.product_id)">明细</el-button></template></el-table-column>
                     <el-table-column label="本单需拣" width="100">
                       <template #default="{ row: part }">{{ part.required_quantity }} {{ part.stock_unit }}</template>
                     </el-table-column>
@@ -697,9 +700,16 @@ function procurementTimeText(row) {
       <el-table-column label="操作" min-width="210" fixed="right">
         <template #default="{ row }">
           <div class="orders-actions-cell orders-actions-cell-vertical">
+            <template v-if="row.procurement_coverage?.entered_transport && !isFbpOrder(row)">
+              <template v-for="item in row.procurement_coverage.items" :key="`history-${item.order_item_id}-${item.product_id}`">
+                <el-button v-if="item.missing_purchase_quantity > 0 || item.missing_receipt_quantity > 0" size="small" type="warning" plain @click="emit('view-inventory-detail', row, item.product_id)">
+                  {{ item.missing_purchase_quantity > 0 ? '补采购记录' : '核对历史收货' }}{{ row.procurement_coverage.items.length > 1 ? ' · ' + item.product_name : '' }}
+                </el-button>
+              </template>
+            </template>
             <el-tag v-if="isFbpOrder(row)" type="success" size="small">官方仓履约 · 无需采购</el-tag>
             <el-button
-              v-if="row.availableActions.showPurchase && !isFbpOrder(row)"
+              v-if="row.availableActions.showPurchase && !isFbpOrder(row) && !row.procurement_coverage?.entered_transport"
               size="small"
               class="orders-inline-accent-button"
               :class="procurementActionClass(row)"
