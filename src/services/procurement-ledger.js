@@ -68,7 +68,10 @@ export function planLedgerAction(snapshot, body) {
     for (const order of candidates) {
       if (!left) break;
       const quantity = Math.min(left, Number(order.missing_purchase_quantity));
-      if (order.transport_at && Date.parse(body.purchased_at) > new Date(order.transport_at).getTime()) throw new Error(`采购时间晚于历史订单 ${order.posting_number || order.order_id} 进入运输时间，请按实际采购批次分开补录`);
+      if (order.transport_at && Date.parse(body.purchased_at) > new Date(order.transport_at).getTime()) {
+        const cutoff = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(new Date(order.transport_at));
+        throw new Error(`实际采购时间（purchased_at）晚于历史订单 ${order.posting_number || order.order_id} 进入运输时间 ${cutoff}（北京时间）。请在补录弹窗按原采购凭证填写不晚于此时间的真实采购日期，不是今天的补录日期；不同采购批次请分次填写，新采购请通过待采购操作登记`);
+      }
       left -= quantity;
       assigned += quantity;
       const goods = Math.round(result.amount * 10000 * assigned / result.quantity);

@@ -2,11 +2,32 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { apiClient } from '../../utils/api.js';
+import { shanghaiDateTimeText } from '../../utils/shanghai-date.js';
 const props = defineProps({ productId: { type: Number, required: true } });
 const emit = defineEmits(['close', 'saved']);
 const loading = ref(false), saving = ref(false), data = ref(null), preview = ref(null), submitted = ref(null), result = ref(null);
 const form = reactive({ quantity: 1, amount: 0, shipping_amount: 0, purchased_at: '', reason: '' });
 const missing = computed(() => Number(data.value?.missing_purchase || 0));
+const allocatedOrders = computed(() => {
+  let left = Number(form.quantity);
+  return (data.value?.orders || []).filter(row => row.entered_transport && row.stock_location !== 'FBP' && Number(row.missing_purchase_quantity) > 0)
+    .sort((a, b) => new Date(a.transport_at || 0) - new Date(b.transport_at || 0) || a.order_item_id - b.order_item_id)
+    .flatMap(row => {
+      const quantity = Math.min(left, Number(row.missing_purchase_quantity));
+      left -= quantity;
+      return quantity > 0 ? [{ ...row, quantity }] : [];
+    });
+});
+const earliestOrder = computed(() => allocatedOrders.value.filter(row => row.transport_at)
+  .sort((a, b) => new Date(a.transport_at) - new Date(b.transport_at))[0]);
+const dateError = computed(() => {
+  if (!form.purchased_at) return '请按采购凭证填写实际采购时间，不是今天的补录时间。';
+  if (Date.parse(form.purchased_at) > Date.now()) return '实际采购时间不能晚于当前时间。';
+  const row = earliestOrder.value;
+  if (row && Date.parse(form.purchased_at) > new Date(row.transport_at).getTime()) return `实际采购时间不能晚于历史订单 ${row.posting_number || row.order_id} 的运输时间 ${time(row.transport_at)}（北京时间）。请核对原采购凭证；若是新采购，请通过待采购操作登记。`;
+  return '';
+});
+function time(value) { return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true }); }
 watch(form, () => { preview.value = null; submitted.value = null; });
 async function load() {
   loading.value = true;
@@ -18,6 +39,7 @@ async function load() {
   finally { loading.value = false; }
 }
 async function check() {
+  if (dateError.value) { ElMessage.warning(dateError.value); return; }
   saving.value = true;
   preview.value = null; submitted.value = null;
   try {
@@ -52,7 +74,14 @@ onMounted(load);
           <el-form-item label="实际总货款（元）"><el-input-number v-model="form.amount" :min="0" :precision="2" /></el-form-item>
           <el-form-item label="总运费（元）"><el-input-number v-model="form.shipping_amount" :min="0" :precision="2" /></el-form-item>
           <el-form-item label="实际采购时间"><el-date-picker v-model="form.purchased_at" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss+08:00" placeholder="北京时间，按实际采购批次填写" /></el-form-item>
+          <el-alert v-if="dateError" type="warning" :closable="false" :title="dateError" />
+          <p v-if="earliestOrder">本次按最早历史订单开始补齐，采购日期须不晚于 {{ time(earliestOrder.transport_at) }}（北京时间）。不同采购批次请分次填写实际数量、金额与日期；不确定日期时请先核对凭证，不要随意填早。</p>
           <el-form-item label="原因／凭证"><el-input v-model="form.reason" type="textarea" maxlength="1000" placeholder="填写历史漏记原因或采购凭证编号" /></el-form-item>
+          <el-table :data="allocatedOrders" max-height="200">
+            <el-table-column prop="posting_number" label="待补历史订单" min-width="180" />
+            <el-table-column label="进入运输时间（北京时间）" min-width="200"><template #default="{ row }">{{ time(row.transport_at) }}</template></el-table-column>
+            <el-table-column prop="quantity" label="本次分配件数" width="120" />
+          </el-table>
         </el-form>
         <el-empty v-else-if="!result" description="没有可补齐的历史采购缺口。负库存不一定是缺采购记录，请在明细中核对收货、绑定及盘点。" />
         <template v-if="preview || result">

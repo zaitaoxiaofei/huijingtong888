@@ -146,6 +146,7 @@ test('bulk history fill allocates only missing purchases in transport order and 
   assert.equal(plan.allocations.reduce((sum, row) => sum + Math.round(row.amount * 10000), 0), 100);
   assert.equal(plan.allocations.reduce((sum, row) => sum + Math.round(row.shipping_amount * 10000), 0), 10100);
   assert.equal(plan.local_delta, 0);
+  assert.throws(() => planLedgerAction(state, { ...input, purchased_at: '2026-08-04T12:00:00+08:00' }), /purchased_at.*2026\/08\/02 08:00:00.*原采购凭证/);
   for (const change of [{ quantity: 6 }, { quantity: 0 }, { quantity: 1.5 }, { amount: 0 }, { inventory_effect: 'missing_inbound' }, { purchased_at: '2026-08-04T12:00:00+08:00' }, { revision: 'old' }]) {
     assert.throws(() => planLedgerAction(state, { ...input, ...change }));
   }

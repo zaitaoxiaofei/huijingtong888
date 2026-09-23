@@ -25,7 +25,9 @@ test('quick history form loads full gap, previews cost allocations and saves the
       const url = new URL(route.request().url());
       if (url.pathname === '/admin.html') return route.fulfill({ contentType: 'text/html', body: '<html><head><link rel="stylesheet" href="/style.css"></head><body><div id="app"></div><script type="module" src="/entry.js"></script></body></html>' });
       if (url.pathname === '/api/procurement/ledger' && route.request().method() === 'GET') return route.fulfill({ json: {
-        product: { id: 10, name: '库存 A', code: 'A-10' }, revision: 'v1', missing_purchase: 5, missing_receipt: 2
+        product: { id: 10, name: '库存 A', code: 'A-10' }, revision: 'v1', missing_purchase: 5, missing_receipt: 2,
+        orders: [{ order_item_id: 1, posting_number: 'OLD-A', entered_transport: true, transport_at: '2026-08-02T00:00:00Z', missing_purchase_quantity: 2 },
+          { order_item_id: 2, posting_number: 'OLD-B', entered_transport: true, transport_at: '2026-08-03T00:00:00Z', missing_purchase_quantity: 3 }]
       } });
       if (url.pathname.startsWith('/api/procurement/ledger') && route.request().method() === 'POST') {
         requests.push(route.request().postDataJSON());
@@ -41,10 +43,16 @@ test('quick history form loads full gap, previews cost allocations and saves the
     assert.equal(await inputs.nth(0).inputValue(), '5');
     await inputs.nth(1).fill('50');
     await inputs.nth(2).fill('5');
+    await dialog.getByPlaceholder('北京时间，按实际采购批次填写').fill('2026-08-04 12:00:00');
+    await dialog.getByPlaceholder('填写历史漏记原因或采购凭证编号').fill('旧单凭证 A');
+    await dialog.getByRole('button', { name: '预览分配' }).click();
+    assert.equal(requests.length, 0, 'invalid purchase date is blocked before submitting');
+    assert.match(await dialog.innerText(), /2026[/-]08[/-]02 08:00:00/);
+    assert.equal(await inputs.nth(1).inputValue(), '50.00', 'amount survives date validation');
     await dialog.getByPlaceholder('北京时间，按实际采购批次填写').fill('2026-08-01 12:00:00');
     await dialog.getByPlaceholder('填写历史漏记原因或采购凭证编号').fill('旧单凭证 A');
     await dialog.getByRole('button', { name: '预览分配' }).click();
-    await dialog.getByText('OLD-B', { exact: true }).waitFor();
+    await dialog.getByText('按历史订单先后分配数量，货款与运费按数量分摊；确认下面的订单后保存', { exact: true }).waitFor();
     await dialog.getByRole('button', { name: '确认补齐采购记录' }).click();
     await dialog.getByRole('button', { name: '完成', exact: true }).waitFor();
     assert.equal(requests.length, 2);
