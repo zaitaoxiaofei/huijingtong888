@@ -2,19 +2,15 @@
 import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { apiClient } from '../../utils/api.js';
-import { shanghaiDateKey, shanghaiDateTimeText } from '../../utils/shanghai-date.js';
+import { shanghaiDateKey } from '../../utils/shanghai-date.js';
 const props = defineProps({ products: { type: Array, required: true } });
 const emit = defineEmits(['close', 'saved']);
 const loading = ref(false), saving = ref(false), rows = ref([]);
 const pending = computed(() => rows.value.filter(row => !row.saved));
-function time(value) { return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true }); }
 function dateError(row) {
-  if (!row.purchased_at) return '请填写实际采购时间，不是补录时间。';
+  if (!row.purchased_at) return '请填写采购／补录日期。';
   const date = Date.parse(row.purchased_at);
   if (!Number.isFinite(date) || date > Date.now()) return '请填写有效采购时间，不能晚于当前时间。';
-  const order = (row.data?.orders || []).filter(order => order.entered_transport && order.stock_location !== 'FBP' && Number(order.missing_purchase_quantity) > 0 && order.transport_at)
-    .sort((a, b) => new Date(a.transport_at) - new Date(b.transport_at))[0];
-  if (order && date > new Date(order.transport_at).getTime()) return `请核对原采购日期，须不晚于 ${time(order.transport_at)}（历史订单 ${order.posting_number || order.order_id}）。`;
   return '';
 }
 async function read(row) {
@@ -89,7 +85,7 @@ onMounted(load);
 </script>
 <template>
   <el-dialog :model-value="true" title="补齐历史采购记录" width="min(1500px, 96vw)" :close-on-click-modal="false" :close-on-press-escape="!saving" :show-close="!saving" @close="emit('close')">
-    <el-alert type="info" :closable="false" title="默认只补历史来源与成本。若账面与实物不符，可勾选“同时核对现货”并填写仓库实物（不含在途）；不会按补录件数盲目加库存。日期按原采购凭证填写；删除子记录只移除本次填写行。" />
+    <el-alert type="info" :closable="false" title="默认只补历史来源与成本。若账面与实物不符，可勾选“同时核对现货”并填写仓库实物（不含在途）；不会按补录件数盲目加库存。日期默认今天，可按凭证调整，不要求早于历史订单；删除子记录只移除本次填写行。" />
     <el-table v-loading="loading" :data="rows" row-key="id" max-height="65vh" class="history-purchase-table">
       <el-table-column label="库存产品" min-width="300" fixed>
         <template #default="{ row }">
@@ -106,9 +102,9 @@ onMounted(load);
       <el-table-column label="补录数量" width="150"><template #default="{ row }"><el-input-number v-model="row.quantity" aria-label="补录数量" :min="1" :max="Number(row.data?.missing_purchase || 0)" :precision="0" :disabled="saving || row.saved || !!row.submitted" controls-position="right" /></template></el-table-column>
       <el-table-column label="总货款（元）" width="150"><template #default="{ row }"><el-input-number v-model="row.amount" aria-label="总货款" :min="0" :precision="2" :disabled="saving || row.saved || !!row.submitted" controls-position="right" /></template></el-table-column>
       <el-table-column label="运费（元）" width="140"><template #default="{ row }"><el-input-number v-model="row.shipping_amount" aria-label="运费" :min="0" :precision="2" :disabled="saving || row.saved || !!row.submitted" controls-position="right" /></template></el-table-column>
-      <el-table-column label="实际采购时间（北京时间）" width="310">
+      <el-table-column label="采购／补录日期（北京时间）" width="310">
         <template #default="{ row }">
-          <el-date-picker v-model="row.purchased_at" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss+08:00" placeholder="请选择实际采购时间" :disabled="saving || row.saved || !!row.submitted" @change="row.error = ''" />
+          <el-date-picker v-model="row.purchased_at" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss+08:00" placeholder="请选择采购／补录日期" :disabled="saving || row.saved || !!row.submitted" @change="row.error = ''" />
           <p v-if="!row.saved && dateError(row)" class="history-error">{{ dateError(row) }}</p>
           <p v-if="row.error" class="history-error" role="alert">{{ row.error }}</p>
         </template>

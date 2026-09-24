@@ -2,7 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { apiClient } from '../../utils/api.js';
-import { shanghaiDateTimeText } from '../../utils/shanghai-date.js';
+import { shanghaiDateKey, shanghaiDateTimeText } from '../../utils/shanghai-date.js';
 const props = defineProps({ modelValue: Boolean, productId: { type: Number, default: 0 }, orderId: { type: Number, default: 0 } });
 const emit = defineEmits(['update:modelValue', 'saved']);
 const visible = computed({ get: () => props.modelValue, set: value => emit('update:modelValue', value) });
@@ -69,7 +69,7 @@ async function selectTarget(id) {
 function edit(type, row = null) {
   Object.keys(form).forEach(key => delete form[key]);
   Object.assign(form, { action_type: type, quantity: (type === 'receive' ? row?.missing_receipt_quantity : row?.missing_purchase_quantity) || row?.missing_record_quantity || row?.shortage_quantity || 1,
-    order_item_id: row?.order_item_id || null, reason: '', amount: 0, shipping_amount: 0, purchased_at: '',
+    order_item_id: row?.order_item_id || null, reason: '', amount: 0, shipping_amount: 0, purchased_at: `${shanghaiDateKey()}T00:00:00+08:00`,
     inventory_effect: 'already_accounted', target_product_id: null, target_quantity: 1, counted_quantity: undefined, correct_received: false });
   if (type === 'revise_purchase') Object.assign(form, { purchase_item_id: row.id, quantity: Number(row.actual_quantity), amount: Number(row.amount), shipping_amount: Number(row.shipping_amount) });
   preview.value = null; submission.value = null; target.value = null; formVisible.value = true;
@@ -189,7 +189,7 @@ watch(() => props.modelValue, value => { if (value) { products.value = []; load(
         <el-form-item v-if="historyAction" label="关联订单">{{ selectedOrder?.posting_number }} · 待核／待覆盖 {{ selectedOrder?.entered_transport ? selectedOrder?.missing_record_quantity : selectedOrder?.shortage_quantity }} 件</el-form-item>
         <el-form-item v-if="form.action_type !== 'stocktake'" :label="form.action_type === 'revise_purchase' ? '纠正后采购数量' : '本商品数量'"><el-input-number v-model="form.quantity" :min="form.action_type === 'revise_purchase' ? 0 : 1" :precision="0" /></el-form-item>
         <el-form-item v-if="['receive', 'link_purchase'].includes(form.action_type)" label="已有采购收货批次"><el-select v-model="form.inbound_id" style="width:100%"><el-option v-for="batch in batches" :key="batch.id" :value="Number(batch.id)" :label="`${batch.purchase_order_no || '采购批次'} #${batch.id} · 可关联 ${batch.selectable_quantity} 件`" /></el-select></el-form-item>
-        <el-form-item v-if="form.action_type === 'historical_purchase'" label="实际采购时间"><el-date-picker v-model="form.purchased_at" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss+08:00" placeholder="北京时间" /></el-form-item>
+        <el-form-item v-if="form.action_type === 'historical_purchase'" label="采购／补录日期"><el-date-picker v-model="form.purchased_at" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss+08:00" placeholder="北京时间" /><small>默认今天，可按凭证修改；不要求早于历史订单，不新增现货或在途。</small></el-form-item>
         <el-form-item v-if="form.action_type === 'historical_purchase'" label="库存影响">只补历史采购来源，不增加现货或在途。实物与账面不符请单独盘点核对。</el-form-item>
         <el-form-item v-if="form.action_type === 'receive'" label="库存影响"><el-radio-group v-model="form.inventory_effect"><el-radio value="already_accounted">实物已计入盘点／账面，只补收货记录</el-radio><el-radio value="missing_inbound">确认漏记入库，增加账面数量</el-radio></el-radio-group></el-form-item>
         <template v-if="needsMoney"><el-form-item label="实际货款"><el-input-number v-model="form.amount" :min="0" :precision="2" /><span>金额未知填 0，保留待补状态</span></el-form-item><el-form-item label="实际运费"><el-input-number v-model="form.shipping_amount" :min="0" :precision="2" /></el-form-item></template>

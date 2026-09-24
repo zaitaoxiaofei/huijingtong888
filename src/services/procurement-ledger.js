@@ -48,8 +48,8 @@ function countedStock(snapshot, value) {
 
 function historicalPurchaseTime(value) {
   const date = String(value || '');
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00$/.test(date) || !Number.isFinite(Date.parse(date)) || Date.parse(date) > Date.now()) throw new Error('请填写真实采购时间（北京时间），不能晚于当前时间');
-  if (new Date(Date.parse(date) + 8 * 3600000).toISOString().slice(0, 19) !== date.slice(0, 19)) throw new Error('实际采购日期不存在，请重新填写北京时间');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00$/.test(date) || !Number.isFinite(Date.parse(date)) || Date.parse(date) > Date.now()) throw new Error('请填写有效的采购／补录日期（purchased_at，北京时间），不能晚于当前时间');
+  if (new Date(Date.parse(date) + 8 * 3600000).toISOString().slice(0, 19) !== date.slice(0, 19)) throw new Error('采购／补录日期不存在，请重新填写北京时间');
   return new Date(date).toISOString().slice(0, 19).replace('T', ' ');
 }
 
@@ -75,10 +75,7 @@ export function planLedgerAction(snapshot, body) {
     for (const order of candidates) {
       if (!left) break;
       const quantity = Math.min(left, Number(order.missing_purchase_quantity));
-      if (order.transport_at && Date.parse(body.purchased_at) > new Date(order.transport_at).getTime()) {
-        const cutoff = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(new Date(order.transport_at));
-        throw new Error(`实际采购时间（purchased_at）晚于历史订单 ${order.posting_number || order.order_id} 进入运输时间 ${cutoff}（北京时间）。请在补录弹窗按原采购凭证填写不晚于此时间的真实采购日期，不是今天的补录日期；不同采购批次请分次填写，新采购请通过待采购操作登记`);
-      }
+      // Historical backfill dates may be accounting dates; explicit links identify the old orders.
       left -= quantity;
       assigned += quantity;
       const goods = Math.round(result.amount * 10000 * assigned / result.quantity);
@@ -105,7 +102,6 @@ export function planLedgerAction(snapshot, body) {
       result.shipping_amount = money(body.shipping_amount || 0);
       if (body.inventory_effect !== 'already_accounted') throw new Error('补采购记录仅解释历史来源，不增加现货；如本地实物不符，请在库存明细的盘点调整中填写实盘数量（counted_quantity）');
       result.purchased_at = historicalPurchaseTime(body.purchased_at);
-      if (order.transport_at && Date.parse(body.purchased_at) > new Date(order.transport_at).getTime()) throw new Error('历史采购时间晚于订单进入运输的时间，请核对真实采购日期，不能用新采购填旧账');
     }
     if (type === 'receive' || type === 'link_purchase') {
       const batch = snapshot.batches.find(row => Number(row.id) === Number(body.inbound_id));

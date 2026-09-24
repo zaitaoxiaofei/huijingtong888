@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { CopyDocument, View } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
+import { inventoryOverview } from "../utils/inventory-overview.js";
 import { copyToClipboard } from "../../admin/utils/clipboard.js";
 
 const props = defineProps({
@@ -36,6 +37,11 @@ const emit = defineEmits([
   "quick-history-purchase",
   "confirm-procurement-inbound"
 ]);
+
+const inventoryRowId = ref(null);
+const inventoryRow = computed(() => props.rows.find(row => row.id === inventoryRowId.value));
+const inventoryViews = computed(() => new Map(props.rows.map(row => [row.id, inventoryOverview(row)])));
+const drawerVisible = computed({ get: () => !!inventoryRow.value, set: value => { if (!value) inventoryRowId.value = null; } });
 
 const markChoices = computed(() => (
   (props.markOptions || []).filter((item) => item && item.value !== undefined)
@@ -567,143 +573,22 @@ function procurementTimeText(row) {
           </el-popover>
         </template>
         <template #default="{ row }">
-          <div class="orders-stock-list">
-            <div
-              v-for="product in row.inventorySummaries"
-              :key="`${row.id}-inventory-${product.inventoryKey || product.productId}`"
-              class="orders-inventory-item orders-inventory-item-plain"
-            >
-              <small class="orders-stock-product-name orders-product-name">{{ product.productName }}</small>
-              <strong v-if="product.inventoryMode !== 'combo'">库存编号：{{ product.inventoryNumber || "待补核心品名" }}</strong>
-              <small v-else>库存编号：见子产品明细</small>
-              <el-button v-if="product.productId && product.inventoryMode !== 'combo'" link type="primary" size="small" @click="emit('view-inventory-detail', row, product.productId)">明细</el-button>
-              <div class="orders-stock-inline-facts">
-                <span>FBP: {{ product.stock?.fbp || 0 }}</span>
-                <span v-if="product.inventoryMode !== 'combo' && !Number(product.componentCount || 0) && product.physicalStockEstimate !== undefined">现货推算: {{ Math.max(0, product.physicalStockEstimate) }}</span>
-                <span v-if="product.inventoryMode !== 'combo' && !Number(product.componentCount || 0) && product.physicalStockEstimate < 0">账面待核差异: {{ -product.physicalStockEstimate }}</span>
-                <el-tooltip content="已计入已记账的出入库和订单扣减，不是实物盘点数；详见表头“数量说明”。" placement="top">
-                  <span>{{ product.inventoryMode === "combo" || Number(product.componentCount || 0) > 0 ? "账面可组余量" : "本地账面余额" }}: {{ product.stock?.local || 0 }}</span>
-                </el-tooltip>
-                <span>商品总在途: {{ Number(product.incoming || 0) }}</span>
-              </div>
-              <div class="orders-inline-actions orders-inline-actions-compact">
-                <el-button
-                  v-if="product.sku"
-                  size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
-                  @click="emit('open-bind-product-from-order', row.id, product.sku)"
-                >
-                  修改绑定
-                </el-button>
-                <el-button
-                  v-if="Number(product.productId || 0) > 0"
-                  size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
-                  @click="emit('edit-inventory-product', product.productId)"
-                >
-                  编辑库存
-                </el-button>
-                <el-button
-                  v-if="product.inventoryMode === 'single' && Number(product.productId || 0) > 0"
-                  size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
-                  @click="emit('open-product-components', product.productId)"
-                >
-                  绑定子产品
-                </el-button>
-                <el-popover v-if="product.pickingItems?.length" trigger="click" placement="left" :width="560">
-                  <template #reference>
-                    <el-button size="small" class="orders-inline-accent-button orders-inline-accent-button-secondary">
-                      查看子产品（{{ product.pickingItems.length }}）
-                    </el-button>
-                  </template>
-                  <strong>子产品拣货明细</strong>
-                  <el-table :data="product.pickingItems" size="small">
-                    <el-table-column prop="product_name" label="库存产品名称" min-width="180" />
-                    <el-table-column label="库存编号" width="110">
-                      <template #default="{ row: part }"><strong>{{ part.inventory_number || '待补核心品名' }}</strong></template>
-                    </el-table-column>
-                    <el-table-column prop="per_set_quantity" label="每套数量" width="85" />
-                    <el-table-column label="库存明细" width="95"><template #default="{ row: part }"><el-button v-if="part.product_id" link type="primary" @click="emit('view-inventory-detail', row, part.product_id)">明细</el-button></template></el-table-column>
-                    <el-table-column label="本单需拣" width="100">
-                      <template #default="{ row: part }">{{ part.required_quantity }} {{ part.stock_unit }}</template>
-                    </el-table-column>
-                  </el-table>
-                  <el-button v-if="product.inventoryMode === 'single'" link type="primary" @click="emit('view-product-components', product.productId)">查看子产品库存详情</el-button>
-                </el-popover>
-              </div>
+          <div class="inventory-compact">
+            <template v-if="inventoryViews.get(row.id)?.items.length === 1">
+              <strong>库存 {{ inventoryViews.get(row.id).items[0].inventory_number || '—' }}</strong>
+              <span class="inventory-compact-name" :title="inventoryViews.get(row.id).items[0].product_name">{{ inventoryViews.get(row.id).items[0].product_name }}</span>
+              <small v-if="inventoryViews.get(row.id).active">本单需 {{ inventoryViews.get(row.id).items[0].quantity }} · 现货覆盖 {{ inventoryViews.get(row.id).items[0].stock_quantity ?? '待核' }} · 在途覆盖 {{ inventoryViews.get(row.id).items[0].incoming_quantity ?? '待核' }}</small>
+            </template>
+            <template v-else-if="inventoryViews.get(row.id)?.items.length">
+              <strong>组合库存 · {{ inventoryViews.get(row.id).items.length }} 种子产品</strong>
+              <small v-if="inventoryViews.get(row.id).active">{{ inventoryViews.get(row.id).shortageCount }} 种缺货 · {{ inventoryViews.get(row.id).coveredCount }} 种已覆盖</small>
+            </template>
+            <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
+            <div>
+              <el-button link type="primary" size="small" @click="inventoryRowId = row.id">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
+              <el-tag v-if="inventoryViews.get(row.id)?.review" type="warning" size="small">待核对</el-tag>
             </div>
-            <div
-              v-for="item in row.unboundItems"
-              :key="`${row.id}-unbound-${item.sku}`"
-              class="orders-inventory-item orders-inventory-item-plain is-warning"
-            >
-              <small class="orders-stock-product-name orders-product-name">{{ item.name }}</small>
-              <div class="orders-stock-inline-facts">
-                <span>FBP: {{ item.stock?.fbp || 0 }}</span>
-                <span>本地: 未绑定</span>
-              </div>
-              <div class="orders-inline-actions orders-inline-actions-compact">
-                <el-button
-                  size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
-                  @click="emit('open-bind-product-from-order', row.id, item.sku)"
-                >
-                  绑定库存
-                </el-button>
-                <el-button
-                  size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-primary"
-                  @click="emit('open-create-product-from-order', row.id, item.sku)"
-                >
-                  创建库存
-                </el-button>
-              </div>
-            </div>
-            <div v-if="row.procurement_coverage && !isFbpOrder(row)" class="orders-coverage-summary">
-              <small v-for="item in row.procurement_coverage.items" :key="`${item.order_item_id}-${item.product_id}`">
-                <template v-if="row.procurement_coverage.items.length > 1">{{ item.product_name || '未绑定商品' }}：</template>本单需求 {{ item.quantity }} {{ item.unit }}
-                <template v-if="row.procurement_coverage.needs_fulfillment && row.procurement_coverage.stock_location !== 'FBP'"><br />商品总在途 {{ item.product_total_incoming_quantity }} · 已占用 {{ item.product_reserved_incoming_quantity }} · 当前可分配 {{ item.product_available_incoming_quantity }}<br />账面分配 {{ item.stock_quantity }} · 在途分配 {{ item.incoming_quantity }} · {{ item.quantity_needs_review ? '数量待核' : `待采购 ${item.shortage_quantity}` }}</template>
-              </small>
-
-              <small v-if="row.procurement_coverage.inventory_needs_review">账面差额待核，不计入本次采购缺口。</small>
-              <small v-if="row.procurement_coverage.quantity_needs_review">已采购但数量待核，请先核对采购凭据，避免重复购买。</small>
-              <small v-if="row.procurement_coverage.missing_amount">采购金额待补，成本记录尚不完整。</small>
-              <small v-if="row.procurement_coverage.missing_record_quantity > 0">已发订单有 {{ row.procurement_coverage.missing_record_quantity }} 件历史库存来源待核对，不新增采购需求。</small>
-              <el-button v-if="row.procurement_coverage.missing_record_quantity > 0 || row.procurement_coverage.missing_amount || row.procurement_coverage.quantity_needs_review" size="small" link type="warning" @click="emit('review-procurement-records', row)">采购明细</el-button>
-            </div>
-            <div
-              v-if="hasProcurementIncoming(row)"
-              class="orders-procurement-transparency"
-              :class="{ 'is-overdue': row.procurementState.overdue }"
-            >
-              <strong>
-                {{ row.procurementState.inboundDetails?.personName || "未记录" }}
-                · 关联采购总量 {{ row.procurementState.purchaseSummary || '待核对' }}
-                <template v-if="row.procurement_coverage?.entered_transport"> · 历史库存来源待核对</template>
-                <template v-else> · 等待{{ Number(row.procurementState.inTransitDays || 0) }}天</template>
-              </strong>
-              <small>下单时间：{{ procurementTimeText(row) || "待补充" }}</small>
-              <div class="orders-procurement-actions">
-                <el-button size="small" link type="primary" @click="emit('view-procurement-details', row)">
-                  查看采购内容
-                </el-button>
-                <el-button
-                  v-if="row.procurementState.canRegisterOrderReceipt"
-                  size="small"
-                  :type="row.procurementState.overdue ? 'danger' : 'success'"
-                  plain
-                  :loading="isInboundReceiptPending(row)"
-                  :disabled="Number(confirmingInboundRecordId || 0) > 0"
-                  @click="emit('confirm-procurement-inbound', row)"
-                >
-                  {{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记实收' }}
-                </el-button>
-                <small v-else-if="Number(row.procurementState.inboundRecordCount || 0) > 1">
-                  多个批次，请到采购页确认
-                </small>
-              </div>
-            </div>
+            <el-button v-if="hasProcurementIncoming(row) && row.procurementState.canRegisterOrderReceipt" size="small" link type="success" :loading="isInboundReceiptPending(row)" :disabled="Number(confirmingInboundRecordId || 0) > 0" @click="emit('confirm-procurement-inbound', row)">{{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记实收' }}</el-button>
           </div>
         </template>
       </el-table-column>
@@ -812,5 +697,160 @@ function procurementTimeText(row) {
       </template>
     </Teleport>
 
+    <el-drawer v-if="inventoryRow" v-model="drawerVisible" title="本单库存明细" size="min(1100px, 96vw)" append-to-body destroy-on-close>
+      <template v-for="row in [inventoryRow]" :key="row.id">
+        <p>本单覆盖数量与商品总库存分开展示；不同子产品的件数不合并相加。</p>
+        <el-table :data="inventoryViews.get(row.id).items" row-key="product_id" class="inventory-detail-table">
+          <el-table-column label="库存产品" min-width="280">
+            <template #default="{ row: item }">
+              <div class="inventory-detail-product">
+                <el-image v-if="item.product_id" :src="`/api/products/${item.product_id}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${item.product_id}/image`]" :initial-index="0" preview-teleported><template #error>无图</template></el-image>
+                <div><strong>{{ item.product_name }}</strong><p>库存 ID：{{ item.inventory_number || '—' }}</p></div>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="quantity" label="本单需求" width="95" />
+          <el-table-column label="现货覆盖" width="95"><template #default="{ row: item }">{{ inventoryViews.get(row.id).active ? item.stock_quantity ?? '待核' : '—' }}</template></el-table-column>
+          <el-table-column label="在途覆盖" width="95"><template #default="{ row: item }">{{ inventoryViews.get(row.id).active ? item.incoming_quantity ?? '待核' : '—' }}</template></el-table-column>
+          <el-table-column label="待采购" width="95"><template #default="{ row: item }"><span :class="{ 'inventory-shortage': item.shortage_quantity > 0 }">{{ inventoryViews.get(row.id).active ? (item.quantity_needs_review ? '待核' : item.shortage_quantity ?? '待核') : '—' }}</span></template></el-table-column>
+          <el-table-column label="核对与记录" width="130"><template #default="{ row: item }"><el-button v-if="item.product_id" link type="primary" @click="emit('view-inventory-detail', row, item.product_id)">库存与历史明细</el-button></template></el-table-column>
+        </el-table>
+        <h3>商品总库存与库存管理</h3>
+          <div class="orders-stock-list">
+            <div
+              v-for="product in row.inventorySummaries"
+              :key="`${row.id}-inventory-${product.inventoryKey || product.productId}`"
+              class="orders-inventory-item orders-inventory-item-plain"
+            >
+              <small class="orders-stock-product-name orders-product-name">{{ product.productName }}</small>
+              <strong v-if="product.inventoryMode !== 'combo'">库存编号：{{ product.inventoryNumber || "待补核心品名" }}</strong>
+              <small v-else>库存编号：见子产品明细</small>
+              <el-button v-if="product.productId && product.inventoryMode !== 'combo'" link type="primary" size="small" @click="emit('view-inventory-detail', row, product.productId)">明细</el-button>
+              <div class="orders-stock-inline-facts">
+                <span>FBP: {{ product.stock?.fbp || 0 }}</span>
+                <span v-if="product.inventoryMode !== 'combo' && !Number(product.componentCount || 0) && product.physicalStockEstimate !== undefined">现货推算: {{ Math.max(0, product.physicalStockEstimate) }}</span>
+                <span v-if="product.inventoryMode !== 'combo' && !Number(product.componentCount || 0) && product.physicalStockEstimate < 0">账面待核差异: {{ -product.physicalStockEstimate }}</span>
+                <el-tooltip content="已计入已记账的出入库和订单扣减，不是实物盘点数；详见表头“数量说明”。" placement="top">
+                  <span>{{ product.inventoryMode === "combo" || Number(product.componentCount || 0) > 0 ? "账面可组余量" : "本地账面余额" }}: {{ product.stock?.local || 0 }}</span>
+                </el-tooltip>
+                <span>商品总在途: {{ Number(product.incoming || 0) }}</span>
+              </div>
+              <div class="orders-inline-actions orders-inline-actions-compact">
+                <el-button
+                  v-if="product.sku"
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
+                  @click="emit('open-bind-product-from-order', row.id, product.sku)"
+                >
+                  修改绑定
+                </el-button>
+                <el-button
+                  v-if="Number(product.productId || 0) > 0"
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
+                  @click="emit('edit-inventory-product', product.productId)"
+                >
+                  编辑库存
+                </el-button>
+                <el-button
+                  v-if="product.inventoryMode === 'single' && Number(product.productId || 0) > 0"
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
+                  @click="emit('open-product-components', product.productId)"
+                >
+                  绑定子产品
+                </el-button>
+                <el-button v-if="product.inventoryMode === 'single' && product.pickingItems?.length" link type="primary" @click="emit('view-product-components', product.productId)">查看子产品库存详情</el-button>
+              </div>
+            </div>
+            <div
+              v-for="item in row.unboundItems"
+              :key="`${row.id}-unbound-${item.sku}`"
+              class="orders-inventory-item orders-inventory-item-plain is-warning"
+            >
+              <small class="orders-stock-product-name orders-product-name">{{ item.name }}</small>
+              <div class="orders-stock-inline-facts">
+                <span>FBP: {{ item.stock?.fbp || 0 }}</span>
+                <span>本地: 未绑定</span>
+              </div>
+              <div class="orders-inline-actions orders-inline-actions-compact">
+                <el-button
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
+                  @click="emit('open-bind-product-from-order', row.id, item.sku)"
+                >
+                  绑定库存
+                </el-button>
+                <el-button
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-primary"
+                  @click="emit('open-create-product-from-order', row.id, item.sku)"
+                >
+                  创建库存
+                </el-button>
+              </div>
+            </div>
+            <div v-if="row.procurement_coverage && !isFbpOrder(row)" class="orders-coverage-summary">
+
+
+              <small v-if="row.procurement_coverage.inventory_needs_review">账面差额待核，不计入本次采购缺口。</small>
+              <small v-if="row.procurement_coverage.quantity_needs_review">已采购但数量待核，请先核对采购凭据，避免重复购买。</small>
+              <small v-if="row.procurement_coverage.missing_amount">采购金额待补，成本记录尚不完整。</small>
+              <small v-if="row.procurement_coverage.missing_record_quantity > 0">已发订单有 {{ row.procurement_coverage.missing_record_quantity }} 件历史库存来源待核对，不新增采购需求。</small>
+              <el-button v-if="row.procurement_coverage.missing_record_quantity > 0 || row.procurement_coverage.missing_amount || row.procurement_coverage.quantity_needs_review" size="small" link type="warning" @click="emit('review-procurement-records', row)">采购明细</el-button>
+            </div>
+            <div
+              v-if="hasProcurementIncoming(row)"
+              class="orders-procurement-transparency"
+              :class="{ 'is-overdue': row.procurementState.overdue }"
+            >
+              <strong>
+                {{ row.procurementState.inboundDetails?.personName || "未记录" }}
+                · 关联采购总量 {{ row.procurementState.purchaseSummary || '待核对' }}
+                <template v-if="row.procurement_coverage?.entered_transport"> · 历史库存来源待核对</template>
+                <template v-else> · 等待{{ Number(row.procurementState.inTransitDays || 0) }}天</template>
+              </strong>
+              <small>下单时间：{{ procurementTimeText(row) || "待补充" }}</small>
+              <div class="orders-procurement-actions">
+                <el-button size="small" link type="primary" @click="emit('view-procurement-details', row)">
+                  查看采购内容
+                </el-button>
+                <el-button
+                  v-if="row.procurementState.canRegisterOrderReceipt"
+                  size="small"
+                  :type="row.procurementState.overdue ? 'danger' : 'success'"
+                  plain
+                  :loading="isInboundReceiptPending(row)"
+                  :disabled="Number(confirmingInboundRecordId || 0) > 0"
+                  @click="emit('confirm-procurement-inbound', row)"
+                >
+                  {{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记实收' }}
+                </el-button>
+                <small v-else-if="Number(row.procurementState.inboundRecordCount || 0) > 1">
+                  多个批次，请到采购页确认
+                </small>
+              </div>
+            </div>
+          </div>
+      </template>
+    </el-drawer>
   </el-card>
 </template>
+
+<style scoped>
+.inventory-compact { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.inventory-compact-name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.inventory-compact small { color: #606266; line-height: 1.6; }
+.inventory-detail-product { display: flex; gap: 12px; align-items: center; min-height: 92px; }
+.inventory-detail-product .el-image { width: 64px; height: 84px; flex: 0 0 64px; border-radius: 4px; }
+.inventory-detail-product p { color: #606266; margin: 8px 0 0; }
+.orders-stock-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; margin-top: 16px; }
+.orders-stock-list > div { padding: 16px; border: 1px solid #ebeef5; border-radius: 8px; }
+.orders-inventory-item { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.orders-stock-product-name { font-size: 14px; font-weight: 600; }
+.orders-coverage-summary, .orders-procurement-transparency { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 8px; }
+.orders-inline-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.orders-inline-actions .el-button { margin-left: 0; }
+.orders-stock-inline-facts { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+.inventory-shortage { color: #d03050; font-weight: 600; }
+</style>

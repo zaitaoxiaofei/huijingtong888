@@ -52,7 +52,7 @@ test('history table defaults dates, removes rows, validates and retries only uns
     const dialog = page.getByRole('dialog', { name: '补齐历史采购记录' });
     await dialog.getByText('库存 12', { exact: true }).waitFor();
     assert.equal(await dialog.getByRole('button', { name: '删除子记录' }).count(), 3);
-    assert.equal(await dialog.getByPlaceholder('请选择实际采购时间').first().inputValue(), `${shanghaiDateKey()} 00:00:00`);
+    assert.equal(await dialog.getByPlaceholder('请选择采购／补录日期').first().inputValue(), `${shanghaiDateKey()} 00:00:00`);
     assert.match(await dialog.innerText(), /库存 ID：2-10/);
     await dialog.locator('.el-image').click();
     await page.locator('.el-image-viewer__wrapper').waitFor();
@@ -62,12 +62,14 @@ test('history table defaults dates, removes rows, validates and retries only uns
     const inputs = dialog.getByRole('spinbutton');
     await inputs.nth(1).fill('50');
     await inputs.nth(4).fill('30');
+    const futureDate = dialog.getByPlaceholder('请选择采购／补录日期').first();
+    await futureDate.fill('2999-08-01 12:00:00'); await futureDate.press('Tab');
     await dialog.getByRole('button', { name: '保存', exact: true }).click();
     await page.getByText('请处理表格中标红的行，已填内容不会丢失。', { exact: true }).waitFor();
-    assert.equal(requests.length, 0);
+    assert.equal(requests.filter(row => row.path === '/api/procurement/ledger').length, 0);
     assert.equal(await inputs.nth(1).inputValue(), '50.00');
-    for (const input of await dialog.getByPlaceholder('请选择实际采购时间').all()) {
-      await input.fill('2026-08-01 12:00:00'); await input.press('Tab');
+    for (const input of await dialog.getByPlaceholder('请选择采购／补录日期').all()) {
+      await input.fill(`${shanghaiDateKey()} 00:00:00`); await input.press('Tab');
     }
     assert.equal(await dialog.locator('.history-error').count(), 0, 'date correction clears stale validation messages');
     if (process.env.HISTORY_TABLE_SCREENSHOT) await page.screenshot({ path: process.env.HISTORY_TABLE_SCREENSHOT });
@@ -82,7 +84,7 @@ test('history table defaults dates, removes rows, validates and retries only uns
     assert.equal(writes[0].amount, 50);
     assert.equal(writes[1].amount, 30);
     assert.equal(writes[0].inventory_effect, 'already_accounted');
-    assert.equal(writes[0].purchased_at, '2026-08-01T12:00:00+08:00');
+    assert.equal(writes[0].purchased_at, `${shanghaiDateKey()}T00:00:00+08:00`);
     assert.deepEqual(errors, []);
     requests.length = 0;
     await page.reload();
@@ -95,7 +97,7 @@ test('history table defaults dates, removes rows, validates and retries only uns
     await dialog.getByRole('button', { name: '删除子记录' }).last().click();
     await dialog.getByRole('button', { name: '删除子记录' }).last().click();
     await dialog.getByRole('spinbutton').nth(1).fill('63');
-    const date = dialog.getByPlaceholder('请选择实际采购时间');
+    const date = dialog.getByPlaceholder('请选择采购／补录日期');
     await date.fill('2026-08-01 12:00:00'); await date.press('Tab');
     await dialog.getByText('同时核对现货', { exact: true }).click();
     await dialog.getByRole('button', { name: '保存', exact: true }).click();

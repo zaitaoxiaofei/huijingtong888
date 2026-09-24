@@ -72,6 +72,8 @@ test('correcting a source-only historical receipt never removes physical local s
 test('history backfill declares ledger impact and rejects already-recorded purchases', () => {
   const input = body('historical_purchase', { order_item_id: 1, amount: 20, purchased_at: '2026-08-01T12:00:00+08:00', inventory_effect: 'already_accounted' });
   assert.equal(planLedgerAction(snapshot(), input).local_delta, 0);
+  const transported = snapshot({ orders: [{ ...snapshot().orders[0], transport_at: '2026-07-01T00:00:00Z' }] });
+  assert.equal(planLedgerAction(transported, input).local_delta, 0, 'single backfill also accepts a date after shipment');
   assert.throws(() => planLedgerAction(snapshot(), { ...input, inventory_effect: 'missing_inbound' }), /仅解释历史来源/);
   assert.throws(() => planLedgerAction(snapshot({ orders: [{ ...snapshot().orders[0], missing_purchase_quantity: 0 }] }), input), /已有采购/);
   assert.throws(() => planLedgerAction(snapshot(), { ...input, quantity: 99 }), /尚未解释/);
@@ -147,8 +149,10 @@ test('bulk history fill allocates only missing purchases in transport order and 
   assert.equal(plan.allocations.reduce((sum, row) => sum + Math.round(row.amount * 10000), 0), 100);
   assert.equal(plan.allocations.reduce((sum, row) => sum + Math.round(row.shipping_amount * 10000), 0), 10100);
   assert.equal(plan.local_delta, 0);
-  assert.throws(() => planLedgerAction(state, { ...input, purchased_at: '2026-08-04T12:00:00+08:00' }), /purchased_at.*2026\/08\/02 08:00:00.*原采购凭证/);
-  for (const change of [{ quantity: 6 }, { quantity: 0 }, { quantity: 1.5 }, { amount: 0 }, { inventory_effect: 'missing_inbound' }, { purchased_at: '2026-08-04T12:00:00+08:00' }, { revision: 'old' }]) {
+  const later = planLedgerAction(state, { ...input, purchased_at: '2026-08-04T12:00:00+08:00' });
+  assert.deepEqual(later.allocations, plan.allocations);
+  assert.equal(later.local_delta, 0);
+  for (const change of [{ quantity: 6 }, { quantity: 0 }, { quantity: 1.5 }, { amount: 0 }, { inventory_effect: 'missing_inbound' }, { purchased_at: '2999-08-04T12:00:00+08:00' }, { revision: 'old' }]) {
     assert.throws(() => planLedgerAction(state, { ...input, ...change }));
   }
 });
@@ -195,7 +199,7 @@ test('bulk fill creates one purchase, links multiple historical orders atomicall
   const f = fixture(false, { coverage });
   const before = await f.service.read({ product_id: 10 });
   const input = body('historical_purchase_bulk', { revision: before.revision, product_id: 10, quantity: 3, amount: 30, shipping_amount: 3,
-    inventory_effect: 'already_accounted', purchased_at: '2026-08-01T12:00:00+08:00', request_key: 'bulk-history-fill-12345678' });
+    inventory_effect: 'already_accounted', purchased_at: '2026-09-01T12:00:00+08:00', request_key: 'bulk-history-fill-12345678' });
   const result = await f.service.apply(input, 1);
   assert.equal(result.allocations.length, 2);
   assert.equal(result.local_delta, 0);
