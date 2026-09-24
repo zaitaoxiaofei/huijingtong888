@@ -17,6 +17,7 @@ const authStore = useAuthStore();
 const sharedReplenishmentStatus = inject("inventoryFbpReplenishmentStatus", ref("applying"));
 const listRequestGate = createLatestRequestGate();
 const loading = ref(false);
+const exportLoading = ref(false);
 const actionLoadingId = ref("");
 const selectedOrderIds = ref([]);
 const adjustmentDialog = reactive({ visible: false, item: null, quantity: 0, reason: "", submitting: false });
@@ -257,21 +258,37 @@ async function createInventoryProcurement(row) {
   } catch (error) { if (error !== "cancel") ElMessage.error(error.message || "采购需求提交失败"); }
 }
 
-function exportInventorySummary() {
-  const lines = [["库存 ID", "商品", "本地可用", "总需求", "待发货", "待入仓", "店铺", "Ozon SKU", "Offer ID", "店铺最终备货", "备货单状态", "采购在途", "上次发货数量", "上次发货日期", "应打标签", "已确认标签"]];
-  for (const inventory of inventoryRows.value) {
-    for (const item of inventory.items) lines.push([
-      inventory.inventory_id, inventory.product_name, inventory.local_stock, inventory.final_qty, inventory.pending_dispatch_qty, inventory.pending_receipt_qty,
-      item.order.shop_name || "", item.ozon_sku || "", item.offer_id || "", item.final_qty, statusTagText(item.order.status, item.order.received_quantity), inventory.procurement_incoming, inventory.last_shipped_qty, dateText(inventory.last_shipped_at), labelTarget(item), item.barcode_printed_qty
-    ]);
-  }
-  const content = `\ufeff${lines.map((line) => line.map((value) => String(value ?? "").replace(/[\t\r\n]/g, " ")).join("\t")).join("\n")}`;
-  const blob = new Blob([content], { type: "application/vnd.ms-excel;charset=utf-8" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = `FBP库存备货汇总-${shanghaiDateKey()}.xls`;
-  link.click();
-  URL.revokeObjectURL(link.href);
+async function exportInventorySummary() {
+  if (exportLoading.value || loading.value) return;
+  if (!inventoryRows.value.length) return ElMessage.info("当前筛选没有可导出的库存");
+  exportLoading.value = true;
+  const rows = inventoryRows.value;
+  const exportedAt = new Date();
+  try {
+    const { buildFbpSummaryWorkbook } = await import("../../utils/fbp-summary-export.js");
+    const { workbook, missingImages } = await buildFbpSummaryWorkbook(rows, async (productId) => {
+      const blob = await apiClient.blob(`/api/products/${productId}/image?thumb=1&w=180`, { signal: AbortSignal.timeout(15000) });
+      const bitmap = await createImageBitmap(blob);
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = 128;
+        canvas.height = 168;
+        const scale = Math.max(canvas.width / bitmap.width, canvas.height / bitmap.height);
+        canvas.getContext("2d").drawImage(bitmap, (canvas.width - bitmap.width * scale) / 2, (canvas.height - bitmap.height * scale) / 2, bitmap.width * scale, bitmap.height * scale);
+        return canvas.toDataURL("image/png");
+      } finally { bitmap.close(); }
+    }, exportedAt);
+    const buffer = await workbook.xlsx.writeBuffer();
+    const url = URL.createObjectURL(new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `FBP库存备货汇总-${shanghaiDateKey(exportedAt)}.xlsx`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    if (missingImages) ElMessage.warning(`汇总已导出，${missingImages} 种库存图片不可用，已在表格标注`);
+    else ElMessage.success("库存备货汇总已导出");
+  } catch (error) { ElMessage.error(error.message || "导出失败，请重试"); }
+  finally { exportLoading.value = false; }
 }
 
 function flattenOrderRows(orders) {
@@ -1082,7 +1099,7 @@ onMounted(loadPageData);
             <el-radio-button value="operations">运营视角</el-radio-button>
             <el-radio-button value="inventory">库存视角</el-radio-button>
           </el-radio-group>
-          <el-button v-if="viewMode === 'inventory'" @click="exportInventorySummary">导出库存汇总</el-button>
+          <el-button v-if="viewMode === 'inventory'" :loading="exportLoading" :disabled="loading" @click="exportInventorySummary">导出库存汇总</el-button>
           <div class="replenishment-selection">
             <span class="selection-count">已选 <strong>{{ selectedOrderIds.length }}</strong> 张</span>
             <el-button type="primary" :disabled="selectedOrderIds.length < 2" :loading="actionLoadingId === 'link-orders'" @click="linkSelectedOrders">
