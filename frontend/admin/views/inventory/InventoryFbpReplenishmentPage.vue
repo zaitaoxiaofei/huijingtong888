@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { useAuthStore } from "../../stores/auth.js";
 import { apiClient } from "../../utils/api";
 import { copyToClipboard } from "../../utils/clipboard.js";
+import { openBarcodePrintWindow } from "../../utils/barcode-print-window.js";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
@@ -887,48 +888,6 @@ async function recordBarcodePrinted(row, quantity) {
   }
 }
 
-async function printBarcodePdfInWindows(response, row, quantity) {
-  const url = URL.createObjectURL(response.blob);
-  const frame = document.createElement("iframe");
-  frame.setAttribute("aria-hidden", "true");
-  frame.style.position = "fixed";
-  frame.style.width = "1px";
-  frame.style.height = "1px";
-  frame.style.right = "0";
-  frame.style.bottom = "0";
-  frame.style.border = "0";
-  frame.style.opacity = "0";
-  frame.style.pointerEvents = "none";
-  document.body.appendChild(frame);
-
-  try {
-    await new Promise((resolve, reject) => {
-      const timer = window.setTimeout(() => reject(new Error("打印文件加载超时")), 20_000);
-      frame.onload = () => {
-        window.clearTimeout(timer);
-        resolve();
-      };
-      frame.onerror = () => {
-        window.clearTimeout(timer);
-        reject(new Error("打印文件加载失败"));
-      };
-      frame.src = url;
-    });
-    const target = frame.contentWindow;
-    if (!target) throw new Error("无法调用 Windows 打印窗口");
-    target.focus();
-    target.print();
-    barcodePrintResultDialog.row = row;
-    barcodePrintResultDialog.quantity = quantity;
-    barcodePrintResultDialog.visible = true;
-  } finally {
-    window.setTimeout(() => {
-      frame.remove();
-      URL.revokeObjectURL(url);
-    }, 1_000);
-  }
-}
-
 async function generateBarcode(row, options = {}) {
   if (!ensureBarcodeTarget(row, "生成条码")) return false;
   const key = `${rowBarcodeLoadingKey(row)}:generate`;
@@ -970,7 +929,9 @@ async function confirmBarcodePrint() {
   barcodePrintDialog.quantity = quantity;
   barcodePrintDialog.submitting = true;
   barcodeLoadingKeys[key] = true;
+  let preview;
   try {
+    preview = openBarcodePrintWindow();
     const response = await apiClient.blobResponse("/api/products/barcode-label", {
       method: "POST",
       body: JSON.stringify({
@@ -978,8 +939,13 @@ async function confirmBarcodePrint() {
       })
     });
     barcodePrintDialog.visible = false;
-    await printBarcodePdfInWindows(response, row, quantity);
+    preview.show(response.blob, () => {
+      barcodePrintResultDialog.row = row;
+      barcodePrintResultDialog.quantity = quantity;
+      barcodePrintResultDialog.visible = true;
+    });
   } catch (error) {
+    preview?.showError(error.message || "打印条码失败，请关闭此页后重试");
     ElMessage.error(error.message || "打印条码失败");
   } finally {
     barcodePrintDialog.submitting = false;
@@ -1431,7 +1397,7 @@ onMounted(loadPageData);
           </el-form-item>
         </el-form>
         <el-alert
-          title="确认后将生成 PDF，并打开 Windows 系统打印窗口。"
+          title="确认后将打开条码预览页，核对内容后点击打印；打印完成后请回此页确认结果。"
           type="info"
           :closable="false"
           show-icon

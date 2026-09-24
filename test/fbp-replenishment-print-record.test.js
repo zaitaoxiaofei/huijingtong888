@@ -17,8 +17,9 @@ test("FBP barcode print confirms quantity, calls Windows print, and records only
   assert.doesNotMatch(pageSource, /最终备货数量 \+ 2/);
   assert.match(pageSource, /最新保存的最终备货数量/);
   assert.match(pageSource, /title="确认打印条码"/);
-  assert.match(pageSource, /确认后将生成 PDF，并打开 Windows 系统打印窗口/);
-  assert.match(pageSource, /target\.print\(\);\s+barcodePrintResultDialog\.row = row/);
+  assert.match(pageSource, /确认后将打开条码预览页/);
+  assert.match(pageSource, /preview\.show\(response\.blob, \(\) => \{\s+barcodePrintResultDialog\.row = row/);
+  assert.ok(pageSource.indexOf("preview = openBarcodePrintWindow()") < pageSource.indexOf('apiClient.blobResponse("/api/products/barcode-label"'));
   assert.match(pageSource, /title="打印结果确认"/);
   assert.match(pageSource, /async function confirmBarcodePrintCompleted\(\)[\s\S]*recordBarcodePrinted\(row, barcodePrintResultDialog\.quantity\)/);
   assert.match(pageSource, /打印失败，重新打印/);
