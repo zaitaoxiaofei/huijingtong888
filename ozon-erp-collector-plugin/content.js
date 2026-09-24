@@ -23,7 +23,6 @@
     previewFetchedAtBySku: new Map(),
     lookupCacheBySku: new Map(),
     collectLoadingSkus: new Set(),
-    fullDetailBackfillBySku: new Map(),
     manualCollectedSkus: new Set(),
     actionLoadingKeys: new Set(),
     detailUiRow: null,
@@ -52,7 +51,7 @@
   const LIST_SCAN_LIMIT_MANUAL = 120;
   const LIST_AUTO_REFRESH_LIMIT = 12;
   const LIST_MANUAL_CONTINUE_COLLECT_LIMIT = 24;
-  const COLLECTOR_BOX_BACKFILL_TIMEOUT_MS = 90000;
+  const COLLECTOR_BOX_FULL_DETAIL_TIMEOUT_MS = 150000;
 
   function withTimeoutReject(promise, ms, message) {
     let timer = null;
@@ -1627,104 +1626,6 @@
     return String(value || '').trim();
   }
 
-  function firstNonEmpty(...values) {
-    for (const value of values) {
-      const text = compactString(value);
-      if (text) return text;
-    }
-    return '';
-  }
-
-  function firstArrayItem(value) {
-    return Array.isArray(value) ? value.find((item) => compactString(item)) || '' : '';
-  }
-
-  function currentPageCategoryText() {
-    const selectors = [
-      '[data-widget*="bread"] a',
-      '[data-widget*="Bread"] a',
-      '[data-widget*="breadcrumb"] a',
-      '[data-widget*="Breadcrumb"] a',
-      'nav[aria-label*="breadcrumb"] a',
-      'nav[aria-label*="Breadcrumb"] a',
-      'a[href*="/category/"]'
-    ];
-    const names = [];
-    for (const selector of selectors) {
-      document.querySelectorAll(selector).forEach((node) => {
-        const text = compactString(node.textContent);
-        if (text && !names.includes(text)) names.push(text);
-      });
-      if (names.length >= 2) break;
-    }
-    return names.join('/');
-  }
-
-  function buildFastCollectorBoxPayload(sku, product = {}) {
-    const normalizedSku = compactString(sku || product.sku || product.product_id || product.productId);
-    const intelligence = product.ozonProductIntelligence || {};
-    const basic = intelligence.basic || {};
-    const price = intelligence.price || {};
-    const logistics = intelligence.logistics || {};
-    const category = basic.category || {};
-    const images = [
-      product.productImage,
-      product.mainImage,
-      product.coverImage,
-      firstArrayItem(product.images),
-      firstArrayItem(basic.images)
-    ].map((item) => compactString(item)).filter(Boolean);
-    const title = firstNonEmpty(
-      product.productTitle,
-      product.title,
-      product.name,
-      basic.title,
-      document.querySelector('h1')?.textContent
-    );
-    const pageCategory = currentPageCategoryText();
-    const categoryName = firstNonEmpty(product.category, product.categoryName, category.name, pageCategory);
-    const currentPrice = product.cardPrice ?? product.price ?? product.productPrice ?? price.ozonCardRub ?? price.currentRub ?? '';
-    const mainImage = firstNonEmpty(product.productImage, product.mainImage, product.coverImage, images[0]);
-    return {
-      sku: normalizedSku,
-      product_id: compactString(product.product_id || product.productId || normalizedSku),
-      productTitle: title,
-      title,
-      name: firstNonEmpty(product.name, title),
-      category: categoryName,
-      categoryName,
-      category_path: firstNonEmpty(product.category_path, product.categoryPath, pageCategory, categoryName),
-      category_id: firstNonEmpty(product.category_id, product.categoryId, category.id),
-      brand: firstNonEmpty(product.brand, basic.brand),
-      price: currentPrice,
-      productPrice: product.productPrice ?? currentPrice,
-      sell_price: product.sell_price ?? currentPrice,
-      cardPrice: product.cardPrice ?? price.ozonCardRub ?? currentPrice,
-      originalPrice: product.originalPrice ?? price.originalRub ?? '',
-      priceCurrency: 'CNY',
-      currency: 'CNY',
-      productImage: mainImage,
-      mainImage,
-      images: mainImage ? [mainImage] : [],
-      productLink: firstNonEmpty(product.productLink, product.productUrl, location.href),
-      productUrl: firstNonEmpty(product.productUrl, product.productLink, location.href),
-      soldCount: product.soldCount ?? product.orders ?? '',
-      qtyViewPdp: product.qtyViewPdp ?? product.views ?? '',
-      custom_click_rate: product.custom_click_rate ?? product.clickRate ?? '',
-      convViewToOrder: product.convViewToOrder ?? product.conversionRate ?? '',
-      stock: product.stock ?? product.availableStock ?? product.totalStock ?? '',
-      commission_rate: product.commission_rate ?? product.commissionRate ?? '',
-      salesSchema: firstNonEmpty(product.salesSchema, product.sales_schema, logistics.salesSchema),
-      weight_g: product.weight_g ?? logistics.weightG ?? '',
-      depth: product.depth ?? logistics.lengthMm ?? '',
-      width: product.width ?? logistics.widthMm ?? '',
-      height: product.height ?? logistics.heightMm ?? '',
-      data_source: 'ozon_plugin_fast_add_to_box',
-      process_status: 'pending',
-      collectedAt: new Date().toISOString()
-    };
-  }
-
   function refreshCollectorBoxCacheAfterSync(sku, payload, reason = 'fresh') {
     const normalizedSku = compactString(sku || payload?.sku);
     if (!normalizedSku) return null;
@@ -1738,35 +1639,6 @@
     };
     state.lookupCacheBySku.set(normalizedSku, { success: true, data: cacheData });
     return cacheData;
-  }
-
-  function scheduleFullCollectorBoxBackfill(sku, requestContext = null) {
-    const normalizedSku = compactString(sku);
-    if (!normalizedSku) return null;
-    const existing = state.fullDetailBackfillBySku.get(normalizedSku);
-    if (existing) return existing;
-    const task = withTimeoutReject(
-      collectFullDetailPayloadForCollectorBox(normalizedSku),
-      COLLECTOR_BOX_BACKFILL_TIMEOUT_MS,
-      `Full detail collector-box backfill timed out for ${normalizedSku}`
-    )
-      .then(async ({ result, payload }) => {
-        const saved = await syncCollectedProductToCollectorBox(payload, requestContext);
-        const cacheData = refreshCollectorBoxCacheAfterSync(payload.sku || normalizedSku, payload, 'full_detail_backfill');
-        result.savedCollectionId = saved.collectionId || payload.collectionId || payload.sku || normalizedSku;
-        result.collectionId = result.savedCollectionId;
-        if (pageSku() === normalizedSku && cacheData) {
-          renderDetailProductPanel(buildDetailDisplayRow(payload.sku || normalizedSku, '已采集，详情已补齐', null, cacheData));
-        }
-      })
-      .catch((error) => {
-        console.warn('Background full detail collector-box backfill failed:', error?.message || error);
-      })
-      .finally(() => {
-        state.fullDetailBackfillBySku.delete(normalizedSku);
-      });
-    state.fullDetailBackfillBySku.set(normalizedSku, task);
-    return task;
   }
 
   function buildEditorSourcePayload(result) {
@@ -2175,7 +2047,7 @@
   }
 
   async function collectFullDetailPayloadForCollectorBox(expectedSku = '') {
-    const result = await collector.runDetailAutoFeature({ concurrency: 4 });
+    const result = await collector.runDetailAutoFeature({ concurrency: 6 });
     window.__ozonErpLastDetailCollect = result;
     scheduleSellerFallbackBackfill(result, { persist: false });
     const payload = buildCollectedProductListPayload(result);
@@ -4048,19 +3920,21 @@
 
   async function addCurrentPreviewToCollectorBox(row = null, options = {}) {
     const sku = String(pageSku() || row?.sku || '').trim();
-    const cached = sku ? state.lookupCacheBySku.get(sku)?.data : null;
-    const product = {
-      ...(cached?.product && typeof cached.product === 'object' ? cached.product : {}),
-      ...(state.detailUiRow?.sku === sku && typeof state.detailUiRow === 'object' ? state.detailUiRow : {}),
-      ...(row && typeof row === 'object' ? row : {})
-    };
     const requestContext = await resolveLocalPluginRequestContext();
-    if (sku && product && Object.keys(product).length > 0) {
-      const payload = buildFastCollectorBoxPayload(sku, product);
+    if (sku) {
+      renderDetailProductPanel(buildDetailDisplayRow(sku, '正在采集完整详情、全部变体和图片', null, null));
+      const { result, payload } = await withTimeoutReject(
+        collectFullDetailPayloadForCollectorBox(sku),
+        COLLECTOR_BOX_FULL_DETAIL_TIMEOUT_MS,
+        '完整采集超时：商品、变体或图片未全部写入采集箱，请在 Ozon 商品页重试'
+      );
       const saved = await syncCollectedProductToCollectorBox(payload, requestContext);
-      const cacheData = refreshCollectorBoxCacheAfterSync(sku, payload, 'fast_collect');
-      renderDetailProductPanel(buildDetailDisplayRow(sku, '已采集，正在后台补齐详情', null, cacheData));
-      scheduleFullCollectorBoxBackfill(sku, requestContext);
+      const cacheData = refreshCollectorBoxCacheAfterSync(sku, payload, 'full_detail_collect');
+      result.savedCollectionId = saved.collectionId || payload.collectionId || payload.sku || sku;
+      result.collectionId = result.savedCollectionId;
+      const variantCount = payload.editorVariants?.length || payload.variants?.length || 1;
+      const imageCount = Array.isArray(payload.images) ? payload.images.length : 0;
+      renderDetailProductPanel(buildDetailDisplayRow(sku, `采集完成：${variantCount} 个变体、${imageCount} 张图片`, result, cacheData));
       if (options.openCollectorBox !== false) {
         await openCollectorBox(sku);
       }

@@ -752,8 +752,10 @@
       : seedDetail.variants || [];
     if (!modalVariants.length) return [];
 
-    const detailRows = await mapWithConcurrency(modalVariants, options.concurrency || 4, async (variant) => {
-      const detail = await fetchProductDetail(String(variant.sku), { includeVariants: false });
+    const detailRows = await mapWithConcurrency(modalVariants, options.concurrency || 6, async (variant) => {
+      const detail = String(variant.sku) === String(seedDetail.sku || seedSku)
+        ? seedDetail
+        : await fetchProductDetail(String(variant.sku), { includeVariants: false });
       return {
         sku: variant.sku,
         title: variant.title,

@@ -19,7 +19,7 @@ test("FBP replenishment page sends approved quantities to the browser plugin", (
 });
 
 test("collector plugin bridges ERP FBP tasks to an open Ozon supply draft", () => {
-  assert.equal(manifest.version, "1.4.31");
+  assert.equal(manifest.version, "1.4.32");
   assert.ok(manifest.content_scripts.some((entry) => entry.js?.includes("erp-bridge-content.js")));
   assert.match(backgroundSource, /seller\.ozon\.ru\/app\/fbp-supply\/create-order/);
   assert.match(backgroundSource, /OZON_ERP_FBP_FILL_REQUEST/);

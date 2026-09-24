@@ -18,6 +18,8 @@ test("collector-box template creation blocks incomplete unresolved category data
   assert.match(serviceSource, /categoryId\.startsWith\("pending:"\)/);
   assert.match(serviceSource, /error\.validation = \{/);
   assert.match(serviceSource, /allow_incomplete/);
+  assert.match(serviceSource, /完整采集未完成：当前仅有主图预览/);
+  assert.match(serviceSource, /fast_add_to_box/);
 });
 
 test("collector-box UI flags incomplete collected rows before opening listing editor", () => {

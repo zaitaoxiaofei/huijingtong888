@@ -1062,6 +1062,9 @@ function buildCollectorBoxQualitySummary(source = {}) {
   );
   const images = collectCollectorImagesForQuality(source);
   const issues = [];
+  if (String(payload.data_source || payload.dataSource || "").includes("fast_add_to_box")) {
+    issues.push("完整采集未完成：当前仅有主图预览，产品的变体和媒体层尚未补齐；请在 Ozon 商品页重新采集并等待完整采集完成");
+  }
   if (!title || (sku && title === `Ozon ${sku}`)) issues.push("标题未采集");
   if (!images.length) issues.push("图片未采集");
   if (!categoryName || categoryId.startsWith("frontend:") || categoryName.includes("frontend:")) issues.push("Ozon 类目未识别");

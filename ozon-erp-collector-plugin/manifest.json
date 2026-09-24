@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "爆单ERP 商品信息采集插件",
   "description": "采集 Ozon 前台商品信息、同步采集箱并打开后台工作台",
-  "version": "1.4.31",
+  "version": "1.4.32",
   "permissions": ["activeTab", "alarms", "cookies", "scripting", "storage", "tabs"],
   "host_permissions": [
     "http://localhost/*",

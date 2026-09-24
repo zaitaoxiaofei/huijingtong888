@@ -7,39 +7,25 @@ const backgroundSource = readFileSync(new URL("../ozon-erp-collector-plugin/back
 const collectorSource = readFileSync(new URL("../ozon-erp-collector-plugin/collector.js", import.meta.url), "utf8");
 const sellerBridgeSource = readFileSync(new URL("../ozon-erp-collector-plugin/seller-bridge-content.js", import.meta.url), "utf8");
 
-test("manual add to collector box syncs fast payload before background full detail backfill", () => {
-  assert.match(contentSource, /function buildFastCollectorBoxPayload/);
-  assert.match(contentSource, /function scheduleFullCollectorBoxBackfill/);
-  assert.match(contentSource, /data_source: 'ozon_plugin_fast_add_to_box'/);
-  assert.match(contentSource, /已采集，正在后台补齐详情/);
-
-  const payloadStart = contentSource.indexOf("function buildFastCollectorBoxPayload");
-  const payloadEnd = contentSource.indexOf("function refreshCollectorBoxCacheAfterSync", payloadStart);
-  const payloadSource = contentSource.slice(payloadStart, payloadEnd);
-  assert.doesNotMatch(payloadSource, /\.\.\.product/);
-  assert.match(payloadSource, /images: mainImage \? \[mainImage\] : \[\]/);
-
+test("manual add to collector box waits for full detail before syncing", () => {
   const fnStart = contentSource.indexOf("async function addCurrentPreviewToCollectorBox");
   const fnEnd = contentSource.indexOf("async function ensureCurrentProductInCollectorBox", fnStart);
   const fnSource = contentSource.slice(fnStart, fnEnd);
   assert.ok(fnStart > 0 && fnEnd > fnStart);
-  assert.ok(fnSource.indexOf("buildFastCollectorBoxPayload") < fnSource.indexOf("scheduleFullCollectorBoxBackfill"));
-  assert.doesNotMatch(fnSource, /await collectFullDetailPayloadForCollectorBox/);
+  assert.match(fnSource, /正在采集完整详情、全部变体和图片/);
+  assert.match(fnSource, /await withTimeoutReject\(/);
+  assert.match(fnSource, /collectFullDetailPayloadForCollectorBox\(sku\)/);
+  assert.match(fnSource, /syncCollectedProductToCollectorBox\(payload, requestContext\)/);
+  assert.match(fnSource, /采集完成：\$\{variantCount\} 个变体、\$\{imageCount\} 张图片/);
+  assert.doesNotMatch(contentSource, /buildFastCollectorBoxPayload/);
+  assert.doesNotMatch(contentSource, /scheduleFullCollectorBoxBackfill/);
 });
 
-test("background full-detail backfill is deduped per SKU and time limited", () => {
-  assert.match(contentSource, /fullDetailBackfillBySku: new Map\(\)/);
-  assert.match(contentSource, /COLLECTOR_BOX_BACKFILL_TIMEOUT_MS = 90000/);
-  assert.match(contentSource, /function withTimeoutReject/);
-
-  const fnStart = contentSource.indexOf("function scheduleFullCollectorBoxBackfill");
-  const fnEnd = contentSource.indexOf("function buildEditorSourcePayload", fnStart);
-  const fnSource = contentSource.slice(fnStart, fnEnd);
-  assert.ok(fnStart > 0 && fnEnd > fnStart);
-  assert.match(fnSource, /state\.fullDetailBackfillBySku\.get\(normalizedSku\)/);
-  assert.match(fnSource, /withTimeoutReject\(/);
-  assert.match(fnSource, /state\.fullDetailBackfillBySku\.set\(normalizedSku, task\)/);
-  assert.match(fnSource, /state\.fullDetailBackfillBySku\.delete\(normalizedSku\)/);
+test("full collector-box collection has a bounded timeout and six concurrent variant requests", () => {
+  assert.match(contentSource, /COLLECTOR_BOX_FULL_DETAIL_TIMEOUT_MS = 150000/);
+  assert.match(contentSource, /runDetailAutoFeature\(\{ concurrency: 6 \}\)/);
+  assert.match(collectorSource, /options\.concurrency \|\| 6/);
+  assert.match(collectorSource, /String\(variant\.sku\) === String\(seedDetail\.sku \|\| seedSku\)/);
 });
 
 test("full-detail collection reuses the seed response and overlaps rich-description loading", () => {
@@ -94,14 +80,14 @@ test("collector plugin preserves official Ozon category type id through seller s
 });
 
 test("collector plugin always writes collected prices as CNY", () => {
-  const fastPayloadStart = contentSource.indexOf("function buildFastCollectorBoxPayload");
-  const fastPayloadEnd = contentSource.indexOf("function refreshCollectorBoxCacheAfterSync", fastPayloadStart);
-  const fastPayloadSource = contentSource.slice(fastPayloadStart, fastPayloadEnd);
-  assert.ok(fastPayloadStart > 0 && fastPayloadEnd > fastPayloadStart);
-  assert.match(fastPayloadSource, /priceCurrency: 'CNY'/);
-  assert.match(fastPayloadSource, /currency: 'CNY'/);
-  assert.doesNotMatch(fastPayloadSource, /priceCurrency:[\s\S]{0,120}'RUB'/);
-  assert.doesNotMatch(fastPayloadSource, /currency:[\s\S]{0,120}'RUB'/);
+  const payloadStart = contentSource.indexOf("function buildEditorSourcePayload");
+  const payloadEnd = contentSource.indexOf("function buildCollectedProductListPayload", payloadStart);
+  const payloadSource = contentSource.slice(payloadStart, payloadEnd);
+  assert.ok(payloadStart > 0 && payloadEnd > payloadStart);
+  assert.match(payloadSource, /priceCurrency: 'CNY'/);
+  assert.match(payloadSource, /currency: 'CNY'/);
+  assert.doesNotMatch(payloadSource, /priceCurrency:[\s\S]{0,120}'RUB'/);
+  assert.doesNotMatch(payloadSource, /currency:[\s\S]{0,120}'RUB'/);
   assert.match(collectorSource, /function detectCurrency\(value, fallback = 'CNY'\)/);
   assert.doesNotMatch(collectorSource, /productDetail\.currency \|\| 'RUB'/);
 });
