@@ -17,6 +17,7 @@ import { archiveOzonProducts, fetchOzonCategoryAttributes, fetchOzonChatHistory,
 import { buildOrderOutcomeSql, classifyOrderAccounting, classifyOrderOutcome, estimateOutcomeReturnLoss, resolveOrderLossProfile, resolveReturnLossCostPolicy } from "./order-outcome.js";
 import { cancellationDisplay } from "./order-cancellation-display.js";
 import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
+import { loadWarehouseFacts, appendPrintRecord } from "./fbp-warehouse.js";
 import { buildOrderProfitDetailSnapshotPayload } from "./order-profit-detail-snapshots.js";
 import { calculateSelectionPricing } from "../celRates.js";
 import { DEFAULT_ORDER_LOGISTICS_FILTER_RULES, resolveOrderLogisticsRuleValue } from "./order-logistics-filter-rules.js";
@@ -643,6 +644,19 @@ async function ensureFbpReplenishmentSchemaMysql() {
       KEY idx_fbp_replenishment_item_order (order_id),
       KEY idx_fbp_replenishment_item_shop_sku (shop_id, ozon_sku),
       KEY idx_fbp_replenishment_item_printed (barcode_printed_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `);
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS fbp_replenishment_print_records (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      request_key VARCHAR(96) NOT NULL,
+      order_id BIGINT UNSIGNED NOT NULL, item_id BIGINT UNSIGNED NOT NULL,
+      shop_id BIGINT UNSIGNED NULL, ozon_sku VARCHAR(128) NOT NULL DEFAULT '',
+      quantity INT NOT NULL, preparation_quantity INT NOT NULL DEFAULT 0,
+      print_kind VARCHAR(20) NOT NULL DEFAULT 'initial',
+      created_by BIGINT UNSIGNED NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_fbp_print_request (request_key),
+      KEY idx_fbp_print_item (item_id, id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   `);
   const schemaUpdates = [
@@ -4388,6 +4402,11 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
   await ensureProductNamingSchemaMysql();
   await ensureFbpReplenishmentSchemaMysql();
   await ensureFbpTransferRecordsSchemaMysql();
+  if (Number(query.print_item_id) > 0) {
+    const records = await mysqlQuery(`SELECT r.*, p.name AS person_name FROM fbp_replenishment_print_records r
+      LEFT JOIN people p ON p.id = r.created_by WHERE r.item_id = ? ORDER BY r.id DESC LIMIT 200`, [Number(query.print_item_id)]);
+    return { print_records: records };
+  }
   const status = String(query.status || "all");
   const shopId = String(query.shopId || query.shop_id || "all");
   const batchId = Number(query.batchId || query.batch_id || 0);
@@ -4506,8 +4525,12 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
       ORDER BY i.created_at DESC, i.id DESC
     `, ids);
   }
+  const warehouseFacts = query.inventory === '1'
+    ? await loadWarehouseFacts(mysqlQuery, itemRows.map(row => row.product_id), localStockLocationPredicateMysql())
+    : new Map();
   const itemMap = new Map();
   for (const item of itemRows.map(normalizeFbpReplenishmentItem)) {
+    if (warehouseFacts.has(item.product_id)) item.warehouse = warehouseFacts.get(item.product_id);
     if (!itemMap.has(item.order_id)) itemMap.set(item.order_id, []);
     itemMap.get(item.order_id).push(item);
   }
@@ -4715,7 +4738,8 @@ export async function saveFbpReplenishmentInventoryAllocationMysql(body = {}, us
   if (itemIds.length !== requestedItems.length) throw new Error("店铺明细不完整，请刷新后重新分配。");
   const requestedById = new Map(requestedItems.map((item) => [Number(item.item_id || item.itemId || item.id), {
     orderId: Number(item.order_id || item.orderId || 0),
-    finalQty: Number(item.final_qty ?? item.finalQty)
+    finalQty: Number(item.final_qty ?? item.finalQty),
+    expectedFinalQty: item.expected_final_qty == null ? null : Number(item.expected_final_qty)
   }]));
   if ([...requestedById.values()].some((item) => !item.orderId || !Number.isInteger(item.finalQty) || item.finalQty < 0)) {
     throw new Error("分配数量必须是非负整数，且每条记录必须属于对应备货单。");
@@ -4737,10 +4761,22 @@ export async function saveFbpReplenishmentInventoryAllocationMysql(body = {}, us
       const requested = requestedById.get(Number(row.id));
       if (Number(row.order_id) !== requested.orderId) throw new Error("备货单与明细不匹配，请刷新后重试。");
       const currentFinalQty = Number(row.approved_qty || 0) + Number(row.adjustment_qty || 0);
+      if (requested.expectedFinalQty !== null && requested.expectedFinalQty !== currentFinalQty) throw new Error('该店铺的备货数量已被其他人调整，请重新打开明细后再保存。');
     }
-    const available = Math.max(...rows.map((row) => Number(row.local_stock || 0)), 0);
+    const productId = Number(rows[0].product_id);
+    if (!productId) throw new Error('库存商品尚未映射（product_id），请先在库存模块完成绑定。');
+    await connection.execute('SELECT id FROM products WHERE id = ? FOR UPDATE', [productId]);
+    const [stockRows] = await connection.execute(`SELECT COALESCE(SUM(quantity_delta), 0) AS quantity FROM inventory_movements
+      WHERE product_id = ? AND status = 'posted' AND ${localStockLocationPredicateMysql()}
+        AND source_type NOT IN ('fbp_replenishment_reserve', 'fbp_replenishment_reserve_release')`, [productId]);
+    const [otherRows] = await connection.execute(`SELECT COALESCE(SUM(GREATEST(i.approved_qty + COALESCE(a.quantity, 0), 0)), 0) AS quantity
+      FROM fbp_replenishment_order_items i JOIN fbp_replenishment_orders o ON o.id = i.order_id
+      LEFT JOIN (SELECT item_id, SUM(adjustment_qty) AS quantity FROM fbp_replenishment_item_adjustments GROUP BY item_id) a ON a.item_id = i.id
+      WHERE i.product_id = ? AND i.id NOT IN (${placeholders}) AND o.status IN ('approved', 'ozon_created')`, [productId, ...itemIds]);
+    const available = Math.max(0, Number(stockRows[0].quantity) - Number(otherRows[0].quantity));
     const total = [...requestedById.values()].reduce((sum, item) => sum + item.finalQty, 0);
-    if (total > available) throw new Error(`分配总数 ${total} 超过本地可用库存 ${available}，请重新调整各店铺数量。`);
+    const pendingTotal = rows.filter(row => !['sent', 'completed', 'cancelled'].includes(row.status)).reduce((sum, row) => sum + requestedById.get(Number(row.id)).finalQty, 0);
+    if (pendingTotal > available && body.allow_shortage !== true) throw new Error(`待备货总数 ${pendingTotal} 超过当前本地可用 ${available}，请重新打开分配弹框确认缺货提示后保存。`);
     for (const row of rows) {
       const quantity = requestedById.get(Number(row.id)).finalQty;
       const currentFinalQty = Number(row.approved_qty || 0) + Number(row.adjustment_qty || 0);
@@ -4967,37 +5003,7 @@ export async function recordFbpReplenishmentBatchFillMysql(body = {}, userId = n
 export async function markFbpReplenishmentItemBarcodePrintedMysql(body = {}, userId = null) {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
-  const orderId = Number(body.order_id || body.orderId || 0);
-  const itemId = Number(body.item_id || body.itemId || body.id || 0);
-  const quantity = Math.max(1, Math.min(999, Math.round(Number(body.quantity || body.printed_qty || body.printedQty || 0))));
-  if (!orderId || !itemId) throw new Error("缺少备货单明细，无法标记打印。");
-  const item = await mysqlQueryOne("SELECT id FROM fbp_replenishment_order_items WHERE id = ? AND order_id = ?", [itemId, orderId]);
-  if (!item) throw new Error("备货单明细不存在。");
-  await mysqlExecute(`
-    UPDATE fbp_replenishment_order_items
-    SET barcode_printed_qty = ?,
-      barcode_printed_at = CURRENT_TIMESTAMP,
-      barcode_printed_by = ?,
-      updated_at = CURRENT_TIMESTAMP
-    WHERE id = ? AND order_id = ?
-  `, [quantity, userId || null, itemId, orderId]);
-  await mysqlExecute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [orderId]);
-  const printed = await mysqlQueryOne(`
-    SELECT i.barcode_printed_qty, i.barcode_printed_at, i.barcode_printed_by,
-      printer.name AS barcode_printed_by_name
-    FROM fbp_replenishment_order_items i
-    LEFT JOIN people printer ON printer.id = i.barcode_printed_by
-    WHERE i.id = ? AND i.order_id = ?
-  `, [itemId, orderId]);
-  return {
-    ok: true,
-    order_id: orderId,
-    item_id: itemId,
-    barcode_printed_qty: Number(printed?.barcode_printed_qty || quantity),
-    barcode_printed_at: printed?.barcode_printed_at || "",
-    barcode_printed_by: printed?.barcode_printed_by == null ? null : Number(printed.barcode_printed_by || 0),
-    barcode_printed_by_name: printed?.barcode_printed_by_name || ""
-  };
+  return withMysqlTransaction(connection => appendPrintRecord(connection, body, userId));
 }
 
 export async function deleteFbpReplenishmentOrderMysql(body = {}, userId = null) {
@@ -5313,15 +5319,14 @@ async function releaseFbpReplenishmentReservationMysql(connection, orderId, item
 async function createFbpReplenishmentApprovedTransfersMysql(connection, orderId, userId = null) {
   const personId = await resolvePersonIdOrFirstMysql(userId, connection);
   const [itemRows] = await connection.execute(`
-    SELECT i.*
+    SELECT i.*, i.approved_qty + COALESCE((SELECT SUM(a.adjustment_qty) FROM fbp_replenishment_item_adjustments a WHERE a.item_id = i.id), 0) AS final_qty
     FROM fbp_replenishment_order_items i
     WHERE i.order_id = ?
-      AND i.approved_qty > 0
     ORDER BY i.id
     FOR UPDATE
   `, [Number(orderId)]);
   if (!itemRows.length) return { transferCount: 0, outboundQuantity: 0 };
-  const unboundItems = itemRows.filter((row) => !Number(row.product_id || 0));
+  const unboundItems = itemRows.filter((row) => Number(row.final_qty) > 0 && !Number(row.product_id || 0));
   if (unboundItems.length) {
     const skus = unboundItems.map((row) => row.ozon_sku).filter(Boolean).join(", ");
     throw new Error(`FBP备货单存在未绑定本地商品的明细，无法扣减本地库存：${skus || "未知SKU"}`);
@@ -5330,8 +5335,11 @@ async function createFbpReplenishmentApprovedTransfersMysql(connection, orderId,
   let transferCount = 0;
   let outboundQuantity = 0;
   for (const item of itemRows) {
-    const quantity = Math.max(0, Math.round(Number(item.approved_qty || 0)));
-    if (!quantity) continue;
+    const quantity = Math.max(0, Math.round(Number(item.final_qty || 0)));
+    if (!quantity) {
+      await releaseFbpReplenishmentReservationMysql(connection, orderId, item.id, userId);
+      continue;
+    }
     const sourceRef = `fbp_replenishment:${orderId}:${item.id}`;
     let transfer = await mysqlConnectionQueryOne(connection, `
       SELECT *

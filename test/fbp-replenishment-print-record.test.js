@@ -13,9 +13,8 @@ test("FBP barcode print confirms quantity, calls Windows print, and records only
 
   assert.match(pageSource, /async function markBarcodePrinted\(row, quantity\)/);
   assert.match(pageSource, /items\/barcode-printed/);
-  assert.match(pageSource, /final_qty \?\? row\?\.approved_qty \?\? row\?\.requested_qty \?\? 0/);
-  assert.doesNotMatch(pageSource, /最终备货数量 \+ 2/);
-  assert.match(pageSource, /最新保存的最终备货数量/);
+  assert.match(pageSource, /remainingLabels\(row\)/);
+  assert.match(pageSource, /最终备货数量 \+ 2/);
   assert.match(pageSource, /title="确认打印条码"/);
   assert.match(pageSource, /确认后将打开条码预览页/);
   assert.match(pageSource, /preview\.show\(response\.blob, \(\) => \{\s+barcodePrintResultDialog\.row = row/);
@@ -25,8 +24,9 @@ test("FBP barcode print confirms quantity, calls Windows print, and records only
   assert.match(pageSource, /打印失败，重新打印/);
   assert.doesNotMatch(pageSource, /条码 PDF 预览|previewBarcodeLabel|directPrintBarcodePreview/);
   assert.match(pageSource, /row\.barcode_printed_at = payload\?\.barcode_printed_at/);
-  assert.match(pageSource, /已打印 \$\{integer\(row\.barcode_printed_qty\)\} 张 · \$\{dateText\(row\.barcode_printed_at\)\}/);
-  assert.match(serviceSource, /barcode_printed_at: printed\?\.barcode_printed_at/);
+  assert.match(pageSource, /已确认 \$\{integer\(row\.barcode_printed_qty\)\}/);
+  assert.match(serviceSource, /appendPrintRecord\(connection, body, userId\)/);
+  assert.match(pageSource, /request_key: barcodePrintResultDialog.request_key/);
 });
 
 test("FBP quantity save makes the latest requested quantity authoritative for approval", async () => {

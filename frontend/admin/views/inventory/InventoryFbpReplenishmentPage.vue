@@ -4,6 +4,8 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { useAuthStore } from "../../stores/auth.js";
 import { apiClient } from "../../utils/api";
 import { copyToClipboard } from "../../utils/clipboard.js";
+import { buildWarehouseRows, labelTarget, remainingLabels } from "../../utils/fbp-warehouse.js";
+import { shanghaiDateKey } from "../../utils/shanghai-date.js";
 import { openBarcodePrintWindow } from "../../utils/barcode-print-window.js";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { createLatestRequestGate } from "../../utils/request-gate";
@@ -89,7 +91,7 @@ const state = reactive({
   filters: {
     query: "",
     shopId: "all",
-    status: "applying",
+    status: sharedReplenishmentStatus.value || "applying",
     page: 1,
     pageSize: 10
   }
@@ -103,13 +105,15 @@ function aggregateBatchOrder(orders) {
   for (const order of orders) {
     for (const item of order.items || []) {
       const sku = String(item.ozon_sku || "");
-      if (!itemMap.has(sku)) itemMap.set(sku, { ...item, id: `batch-${first.batch_id}-${sku}`, requested_qty: 0, approved_qty: 0, adjustment_qty: 0, final_qty: 0, source_order_count: 0 });
+      if (!itemMap.has(sku)) itemMap.set(sku, { ...item, id: `batch-${first.batch_id}-${sku}`, requested_qty: 0, approved_qty: 0, adjustment_qty: 0, final_qty: 0, source_order_count: 0, barcode_printed_qty: 0, _sourceItems: [] });
       const total = itemMap.get(sku);
       total.requested_qty += Number(item.requested_qty || 0);
       total.approved_qty += Number(item.approved_qty || 0);
       total.adjustment_qty += Number(item.adjustment_qty || 0);
       total.final_qty += Number(item.final_qty ?? item.approved_qty ?? item.requested_qty ?? 0);
       total.source_order_count += 1;
+      total.barcode_printed_qty += Number(item.barcode_printed_qty || 0);
+      total._sourceItems.push({ ...item, order });
     }
   }
   const statuses = [...new Set(orders.map((order) => statusTagText(order.status, order.received_quantity)))];
@@ -143,34 +147,67 @@ const displayOrders = computed(() => {
   return displayed.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
 });
 
-const inventoryRows = computed(() => {
-  const grouped = new Map();
-  for (const order of state.rows) {
-    for (const item of order.items || []) {
-      const key = String(item.product_id || item.inventory_id || item.inventory_number || `unmapped:${item.id}`);
-      if (!grouped.has(key)) grouped.set(key, {
-        inventory_key: key,
-        inventory_id: item.inventory_number || item.inventory_id || "未映射库存",
-        product_name: item.product_name || "-",
-        image_url: item.image_url || "",
-        local_stock: Number(item.local_stock || 0),
-        requested_qty: 0,
-        final_qty: 0,
-        pending_dispatch_qty: 0,
-        pending_receipt_qty: 0,
-        items: []
-      });
-      const total = grouped.get(key);
-      total.local_stock = Math.max(total.local_stock, Number(item.local_stock || 0));
-      total.requested_qty += Number(item.requested_qty || 0);
-      total.final_qty += Number(item.final_qty || item.approved_qty || 0);
-      if (["approved", "ozon_created"].includes(order.status)) total.pending_dispatch_qty += Number(item.final_qty || item.approved_qty || 0);
-      if (order.status === "sent") total.pending_receipt_qty += Number(item.final_qty || item.approved_qty || 0);
-      total.items.push({ ...item, order });
+const inventoryRows = computed(() => buildWarehouseRows(state.rows));
+const inventoryPage = computed(() => inventoryRows.value.slice((state.filters.page - 1) * state.filters.pageSize, state.filters.page * state.filters.pageSize));
+const warehouseDetail = reactive({ visible: false, inventory: null });
+const groupPrint = reactive({ visible: false, rows: [], busy: false, phase: 'select' });
+const printHistory = reactive({ visible: false, loading: false, rows: [] });
+function openWarehouseDetail(row) { warehouseDetail.inventory = row; warehouseDetail.visible = true; }
+async function showPrintHistory(row) {
+  printHistory.visible = true; printHistory.loading = true; printHistory.rows = [];
+  try { printHistory.rows = (await apiClient.get(`/api/fbp-replenishment-orders?print_item_id=${row.id}`, { noCache: true })).print_records || []; }
+  catch (error) { ElMessage.error(error.message); }
+  finally { printHistory.loading = false; }
+}
+function openGroupPrint(inventory) {
+  groupPrint.rows = inventory.items.filter(row => labelTarget(row) > 0).map(row => ({
+    row, selected: remainingLabels(row) > 0, quantity: Math.min(999, remainingLabels(row)),
+    confirmed: false, request_key: crypto.randomUUID(), preparation_quantity: Number(row.final_qty || 0), error: ''
+  }));
+  groupPrint.phase = 'select'; groupPrint.visible = true;
+}
+async function generateGroupPrint() {
+  const selected = groupPrint.rows.filter(item => item.selected && item.quantity > 0);
+  if (!selected.length) return ElMessage.warning('请选择 SKU 并填写本次打印张数；已完成的标签需要手动选择补打。');
+  if (selected.some(item => !Number.isInteger(item.quantity) || item.quantity > 999 || !ensureBarcodeTarget(item.row, '打印'))) return;
+  groupPrint.busy = true;
+  let preview;
+  try {
+    preview = openBarcodePrintWindow();
+    const response = await apiClient.blobResponse('/api/products/barcode-label', {
+      method: 'POST', body: JSON.stringify({ items: selected.map(item => barcodeRequestItem(item.row, item.quantity)) })
+    });
+    // Freeze the per-SKU quantities used in this PDF; edits must not change its audit record.
+    preview.show(response.blob, () => { groupPrint.visible = true; });
+    groupPrint.rows = selected.map(item => ({ ...item, printed_quantity: item.quantity, actual_quantity: item.quantity }));
+    groupPrint.phase = 'confirm';
+  } catch (error) { preview?.showError(error.message); ElMessage.error(error.message); }
+  finally { groupPrint.busy = false; }
+}
+async function confirmGroupPrint() {
+  groupPrint.busy = true;
+  let changed = false;
+  try {
+    for (const item of groupPrint.rows.filter(item => !item.confirmed && item.selected)) {
+      if (!Number.isInteger(item.actual_quantity) || item.actual_quantity < 1 || item.actual_quantity > item.printed_quantity) {
+        item.error = '请填写不超过本次打印张数的实际成功数量；失败项取消勾选。'; continue;
+      }
+      item.error = '';
+      item.submitted ||= { order_id: item.row.order_id, item_id: item.row.id, quantity: item.actual_quantity,
+        request_key: item.request_key, preparation_quantity: item.preparation_quantity };
+      try {
+        await apiClient.post('/api/fbp-replenishment-orders/items/barcode-printed', item.submitted);
+        item.confirmed = true; changed = true;
+      } catch (error) { item.error = error.message; }
     }
+    if (groupPrint.rows.some(item => item.error)) return ElMessage.warning('未确认的行已保留，请重试；成功的行不会重复记账。');
+    ElMessage.success('已按各 SKU 记录确认成功的打印数量；未勾选的行不记为成功。');
+    groupPrint.visible = false;
+  } finally {
+    if (changed) await loadPageData();
+    groupPrint.busy = false;
   }
-  return [...grouped.values()].sort((a, b) => String(a.inventory_id).localeCompare(String(b.inventory_id)));
-});
+}
 
 const allocationTotal = computed(() => allocationDialog.items.reduce((sum, item) => sum + Math.max(0, Number(item.final_qty || 0)), 0));
 function canInventoryItemEdit(item) {
@@ -181,15 +218,17 @@ const allocationHasEditable = computed(() => allocationDialog.items.some(canInve
 
 function openAllocationDialog(inventory) {
   allocationDialog.inventory = inventory;
-  allocationDialog.items = inventory.items.map((item) => ({ ...item, final_qty: Number(item.final_qty || 0) }));
+  allocationDialog.items = inventory.items.map((item) => ({ ...item, expected_final_qty: Number(item.final_qty || 0), final_qty: Number(item.final_qty || 0) }));
   allocationDialog.reason = "";
   allocationDialog.visible = true;
 }
 
 async function saveInventoryAllocation() {
   if (!allocationHasEditable.value) return ElMessage.warning("没有可调整的店铺明细。");
-  if (allocationTotal.value > Number(allocationDialog.inventory?.local_stock || 0)) {
-    return ElMessage.warning(`分配总数 ${allocationTotal.value} 超过本地可用库存 ${integer(allocationDialog.inventory?.local_stock)}`);
+  const shortage = allocationDialog.items.filter(item => !['sent', 'completed', 'cancelled'].includes(item.order.status)).reduce((sum, item) => sum + Number(item.final_qty || 0), 0) > Number(allocationDialog.inventory?.local_stock || 0);
+  if (shortage) {
+    try { await ElMessageBox.confirm('调整后的待备货数量超过本地可用。保存只更新备货计划，不代表已具备发货条件；请采购或重新分配。', '库存不足提醒', { type: 'warning' }); }
+    catch { return; }
   }
   if (allocationDialog.items.some((item) => !Number.isInteger(Number(item.final_qty)) || Number(item.final_qty) < 0)) {
     return ElMessage.warning("各店铺分配数量必须是非负整数");
@@ -199,7 +238,8 @@ async function saveInventoryAllocation() {
     await apiClient.post("/api/fbp-replenishment-orders/inventory-allocation", {
       inventory_key: allocationDialog.inventory.inventory_key,
       reason: allocationDialog.reason,
-      items: allocationDialog.items.map((item) => ({ order_id: item.order_id, item_id: item.id, final_qty: Number(item.final_qty) }))
+      allow_shortage: shortage,
+      items: allocationDialog.items.map((item) => ({ order_id: item.order_id, item_id: item.id, final_qty: Number(item.final_qty), expected_final_qty: item.expected_final_qty }))
     });
     ElMessage.success("各店铺备货数量已保存，运营视角会同步显示最新数量");
     allocationDialog.visible = false;
@@ -211,25 +251,25 @@ async function saveInventoryAllocation() {
 
 async function createInventoryProcurement(row) {
   try {
-    const { value } = await ElMessageBox.prompt(`为“${row.product_name}”创建采购需求`, "创建采购需求", { inputValue: String(Math.max(1, Number(row.final_qty || 1))), inputPattern: /^[1-9]\\d*$/, inputErrorMessage: "请输入大于 0 的整数", confirmButtonText: "提交采购工作台" });
+    const { value } = await ElMessageBox.prompt(`为“${row.product_name}”创建采购需求`, "创建采购需求", { inputValue: String(Math.max(1, Number(row.final_qty || 0) - Number(row.local_stock || 0) - Number(row.procurement_incoming || 0))), inputPattern: /^[1-9]\d*$/, inputErrorMessage: "请输入大于 0 的整数", confirmButtonText: "提交采购工作台" });
     await apiClient.post("/api/fbp-replenishment-orders/inventory-procurement", { product_id: Number(row.items?.[0]?.product_id || 0), quantity: Number(value), reason_code: "fbp_stock_shortage", reason_note: "FBP备货库存不足" });
     ElMessage.success("采购需求已提交到采购工作台");
   } catch (error) { if (error !== "cancel") ElMessage.error(error.message || "采购需求提交失败"); }
 }
 
 function exportInventorySummary() {
-  const lines = [["库存 ID", "商品", "本地可用", "总需求", "待发货", "待入仓", "店铺", "Ozon SKU", "Offer ID", "店铺最终备货", "备货单状态"]];
+  const lines = [["库存 ID", "商品", "本地可用", "总需求", "待发货", "待入仓", "店铺", "Ozon SKU", "Offer ID", "店铺最终备货", "备货单状态", "采购在途", "上次发货数量", "上次发货日期", "应打标签", "已确认标签"]];
   for (const inventory of inventoryRows.value) {
     for (const item of inventory.items) lines.push([
       inventory.inventory_id, inventory.product_name, inventory.local_stock, inventory.final_qty, inventory.pending_dispatch_qty, inventory.pending_receipt_qty,
-      item.order.shop_name || "", item.ozon_sku || "", item.offer_id || "", item.final_qty, statusTagText(item.order.status, item.order.received_quantity)
+      item.order.shop_name || "", item.ozon_sku || "", item.offer_id || "", item.final_qty, statusTagText(item.order.status, item.order.received_quantity), inventory.procurement_incoming, inventory.last_shipped_qty, dateText(inventory.last_shipped_at), labelTarget(item), item.barcode_printed_qty
     ]);
   }
   const content = `\ufeff${lines.map((line) => line.map((value) => String(value ?? "").replace(/[\t\r\n]/g, " ")).join("\t")).join("\n")}`;
   const blob = new Blob([content], { type: "application/vnd.ms-excel;charset=utf-8" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = `FBP库存备货汇总-${new Date().toISOString().slice(0, 10)}.xls`;
+  link.download = `FBP库存备货汇总-${shanghaiDateKey()}.xls`;
   link.click();
   URL.revokeObjectURL(link.href);
 }
@@ -539,7 +579,7 @@ async function submitAdjustment() {
 }
 
 function barcodePrintQuantity(row) {
-  return Math.max(1, Math.round(Number(row?.final_qty ?? row?.approved_qty ?? row?.requested_qty ?? 0)));
+  return Math.min(999, remainingLabels(row));
 }
 
 function rowBarcodeLoadingKey(row) {
@@ -555,8 +595,8 @@ function barcodePrintLoading(row) {
 }
 
 function barcodePrintedText(row) {
-  if (!row?.barcode_printed_at) return "";
-  return `已打印 ${integer(row.barcode_printed_qty)} 张 · ${dateText(row.barcode_printed_at)}`;
+  if (!row?.barcode_printed_at && !Number(row?.barcode_printed_qty)) return "";
+  return `已确认 ${integer(row.barcode_printed_qty)} / 应打 ${integer(labelTarget(row))} 张 · ${dateText(row.barcode_printed_at)}`;
 }
 
 function actionKey(row, action) {
@@ -588,6 +628,7 @@ function buildParams() {
     shopId: String(state.filters.shopId || "all"),
     status: String(state.filters.status || "all")
   });
+  if (viewMode.value === "inventory") params.set("inventory", "1");
   const query = String(state.filters.query || "").trim();
   if (query) params.set("query", query);
   return params;
@@ -615,6 +656,7 @@ async function loadPageData() {
     const pageRows = [...new Map(rawPageRows.map((row) => [Number(row.id), row])).values()];
     const batchIds = [...new Set(pageRows.map((row) => Number(row.batch_id || 0)).filter(Boolean))];
     state.rows = pageRows;
+    if (warehouseDetail.visible) warehouseDetail.inventory = inventoryRows.value.find(row => row.inventory_key === warehouseDetail.inventory?.inventory_key) || null;
     selectedOrderIds.value = selectedOrderIds.value.filter((id) => state.rows.some((row) => Number(row.id) === id));
     state.total = Math.max(0, Number(payload?.total || 0) - pageRows.filter((row) => row.batch_id).length + batchIds.length);
     state.shops = Array.isArray(shops) ? shops : [];
@@ -870,7 +912,9 @@ async function markBarcodePrinted(row, quantity) {
   const payload = await apiClient.post("/api/fbp-replenishment-orders/items/barcode-printed", {
     order_id: orderId,
     item_id: itemId,
-    quantity: Number(quantity || 1)
+    quantity: Number(quantity || 1),
+    request_key: barcodePrintResultDialog.request_key,
+    preparation_quantity: barcodePrintResultDialog.preparation_quantity
   });
   row.barcode_printed_qty = Number(payload?.barcode_printed_qty || quantity || 1);
   row.barcode_printed_at = payload?.barcode_printed_at || new Date().toISOString();
@@ -913,11 +957,13 @@ async function regenerateBarcodeLabel(row) {
 }
 
 async function printBarcodeLabel(row) {
+  if (row._sourceItems?.length) return openGroupPrint({ items: row._sourceItems });
   if (!ensureBarcodeTarget(row, "打印条码")) return;
+  if (!labelTarget(row)) return ElMessage.warning("备货数量为 0 或已取消，无需打印。");
   const recommended = barcodePrintQuantity(row);
   barcodePrintDialog.row = row;
   barcodePrintDialog.recommended = recommended;
-  barcodePrintDialog.quantity = recommended;
+  barcodePrintDialog.quantity = recommended || 2;
   barcodePrintDialog.visible = true;
 }
 
@@ -925,6 +971,8 @@ async function confirmBarcodePrint() {
   const row = barcodePrintDialog.row;
   if (!row || barcodePrintDialog.submitting) return;
   const quantity = Math.max(1, Math.min(999, Math.round(Number(barcodePrintDialog.quantity || 1))));
+  const printRequestKey = crypto.randomUUID();
+  const preparationQuantity = Number(row.final_qty || 0);
   const key = `${rowBarcodeLoadingKey(row)}:print`;
   barcodePrintDialog.quantity = quantity;
   barcodePrintDialog.submitting = true;
@@ -941,6 +989,8 @@ async function confirmBarcodePrint() {
     barcodePrintDialog.visible = false;
     preview.show(response.blob, () => {
       barcodePrintResultDialog.row = row;
+      barcodePrintResultDialog.request_key = printRequestKey;
+      barcodePrintResultDialog.preparation_quantity = preparationQuantity;
       barcodePrintResultDialog.quantity = quantity;
       barcodePrintResultDialog.visible = true;
     });
@@ -961,6 +1011,7 @@ async function confirmBarcodePrintCompleted() {
     const recorded = await recordBarcodePrinted(row, barcodePrintResultDialog.quantity);
     if (!recorded) return;
     barcodePrintResultDialog.visible = false;
+    await loadPageData();
     ElMessage.success(`已记录打印 ${barcodePrintResultDialog.quantity} 张`);
   } finally {
     barcodePrintResultDialog.confirming = false;
@@ -989,13 +1040,13 @@ function handleReset() {
 
 function handlePageChange(page) {
   state.filters.page = page;
-  loadPageData();
+  if (viewMode.value !== 'inventory') loadPageData();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
-  loadPageData();
+  if (viewMode.value !== 'inventory') loadPageData();
 }
 
 watch(() => state.filters.shopId, () => {
@@ -1056,14 +1107,14 @@ onMounted(loadPageData);
     </div>
 
     <div v-if="viewMode === 'inventory'" class="inventory-table-wrap replenishment-table-wrap">
-      <el-table :data="inventoryRows" row-key="inventory_key" border class="erp-data-table replenishment-table">
-        <el-table-column type="expand"><template #default="{ row }"><el-table :data="row.items" size="small"><el-table-column prop="order.shop_name" label="店铺" /><el-table-column prop="ozon_sku" label="Ozon SKU" /><el-table-column prop="offer_id" label="Offer ID" /><el-table-column prop="final_qty" label="最终备货" /><el-table-column label="状态"><template #default="{ row: item }">{{ statusTagText(item.order.status, item.order.received_quantity) }}</template></el-table-column><el-table-column label="操作" width="210"><template #default="{ row: item }"><el-button link type="primary" @click="openAllocationDialog(row)">修改数量</el-button><el-button link type="primary" @click="printBarcodeLabel(item)">打印面单</el-button><el-button link type="danger" @click="deleteInventoryItem(item)">删除</el-button></template></el-table-column></el-table></template></el-table-column>
-        <el-table-column label="库存" min-width="300"><template #default="{ row }"><div class="product-cell"><ProductImagePreview :src="row.image_url" /><div class="cell-stack"><strong>{{ row.product_name }}</strong><span class="inventory-id-display">库存 ID：{{ row.inventory_id }}</span></div></div></template></el-table-column>
-        <el-table-column label="本地可用" prop="local_stock" width="130" align="center" />
-        <el-table-column label="总需求" prop="final_qty" width="130" align="center" />
-        <el-table-column label="待发货" prop="pending_dispatch_qty" width="130" align="center" />
-        <el-table-column label="待入仓" prop="pending_receipt_qty" width="130" align="center" />
-        <el-table-column label="操作" width="210" fixed="right" align="center"><template #default="{ row }"><el-button link type="primary" @click="openAllocationDialog(row)">分配店铺数量</el-button><el-button link type="warning" @click="createInventoryProcurement(row)">创建采购需求</el-button></template></el-table-column>
+      <el-table :data="inventoryPage" v-loading="loading" row-key="inventory_key" border class="erp-data-table replenishment-table">
+        <el-table-column label="库存" min-width="300"><template #default="{ row }"><div class="product-cell warehouse-product"><ProductImagePreview :src="row.image_url" /><div class="cell-stack"><strong>{{ row.product_name }}</strong><span class="inventory-id-display">库存 ID：{{ row.inventory_id }}</span></div></div></template></el-table-column>
+        <el-table-column label="本地可用" width="100" align="center"><template #default="{ row }"><el-tooltip content="当前本地账面扣除筛选范围外的待发 FBP 占用，负数按 0 展示；以实盘为准，不含采购在途。"><span>{{ row.local_stock ?? '—' }}</span></el-tooltip></template></el-table-column>
+        <el-table-column label="采购在途" width="100" align="center"><template #default="{ row }">{{ row.procurement_incoming ?? '—' }}</template></el-table-column>
+        <el-table-column label="FBP 待入仓" width="115" align="center"><template #default="{ row }">{{ row.pending_receipt_qty ?? '—' }}</template></el-table-column>
+        <el-table-column label="上次实际发货" width="160" align="center"><template #default="{ row }"><div v-if="row.last_shipped_at">{{ integer(row.last_shipped_qty) }} 件<small class="warehouse-secondary">{{ dateText(row.last_shipped_at) }}</small></div><span v-else>暂无记录</span></template></el-table-column>
+        <el-table-column :label="state.filters.status === 'pending_dispatch' ? '本次备货' : '筛选备货合计'" width="155" align="right" class-name="warehouse-quantity"><template #default="{ row }"><strong>{{ integer(row.final_qty) }}</strong> 件<small v-if="row.local_stock !== null && row.pending_dispatch_qty > row.local_stock" class="warehouse-shortage">待发货本地缺 {{ row.pending_dispatch_qty - row.local_stock }} 件</small></template></el-table-column>
+        <el-table-column label="操作" width="295" fixed="right" align="center"><template #default="{ row }"><div class="warehouse-actions"><el-button size="small" @click="openWarehouseDetail(row)">查看明细</el-button><el-button size="small" type="primary" @click="openGroupPrint(row)">打印标签</el-button><el-button size="small" type="warning" plain @click="createInventoryProcurement(row)">采购申请</el-button></div><small class="warehouse-secondary">标签已确认 {{ row.printed_qty }} / 应打 {{ row.target_labels }}</small></template></el-table-column>
       </el-table>
     </div>
 
@@ -1307,7 +1358,8 @@ onMounted(loadPageData);
               <div v-if="barcodePrintedText(row)" class="barcode-status is-printed">
                 {{ barcodePrintedText(row) }}
               </div>
-              <div v-else class="barcode-status muted-text">
+              <el-button v-if="!row._sourceItems?.length && Number(row.barcode_printed_qty)" link type="primary" @click="showPrintHistory(row)">打印记录</el-button>
+              <div v-if="!barcodePrintedText(row)" class="barcode-status muted-text">
                 默认 {{ integer(barcodePrintQuantity(row)) }} 张
               </div>
             </div>
@@ -1333,7 +1385,45 @@ onMounted(loadPageData);
       </el-table>
     </div>
 
-    <el-dialog v-model="allocationDialog.visible" title="按店铺分配备货数量" width="860px" destroy-on-close>
+    <el-dialog v-if="warehouseDetail.visible" v-model="warehouseDetail.visible" title="店铺备货明细" width="min(1300px, 96vw)" destroy-on-close>
+      <template v-if="warehouseDetail.inventory">
+        <div class="warehouse-dialog-header"><ProductImagePreview :src="warehouseDetail.inventory.image_url" /><div><h3>{{ warehouseDetail.inventory.product_name }}</h3><p>库存 ID：{{ warehouseDetail.inventory.inventory_id }} · 本地可用 {{ warehouseDetail.inventory.local_stock ?? '待核' }} · 采购在途 {{ warehouseDetail.inventory.procurement_incoming ?? '待核' }}</p></div></div>
+        <el-table :data="warehouseDetail.inventory.items" border max-height="55vh">
+          <el-table-column prop="order.shop_name" label="店铺" min-width="130" />
+          <el-table-column label="SKU / Offer ID" min-width="180"><template #default="{ row }">{{ row.ozon_sku }}<small class="warehouse-secondary">{{ row.offer_id }}</small><small class="warehouse-secondary">{{ row.order.order_no }}</small></template></el-table-column>
+          <el-table-column label="状态" width="90"><template #default="{ row }">{{ statusTagText(row.order.status, row.order.received_quantity) }}</template></el-table-column>
+          <el-table-column label="上次发货" min-width="120"><template #default="{ row }"><template v-if="row.warehouse?.sku_shipments?.[row.order.shop_id + ':' + row.ozon_sku]">{{ row.warehouse.sku_shipments[row.order.shop_id + ':' + row.ozon_sku].quantity }} 件<small class="warehouse-secondary">{{ dateText(row.warehouse.sku_shipments[row.order.shop_id + ':' + row.ozon_sku].shipped_at) }}</small></template><span v-else>暂无记录</span></template></el-table-column>
+          <el-table-column prop="final_qty" label="本次备货" width="95" align="right" />
+          <el-table-column label="已确认 / 应打" width="130"><template #default="{ row }">{{ row.barcode_printed_qty || 0 }} / {{ labelTarget(row) }}<el-button link type="primary" @click="showPrintHistory(row)">打印记录</el-button><small v-if="Number(row.barcode_printed_qty) > labelTarget(row)" class="warehouse-shortage">多余／补打 {{ row.barcode_printed_qty - labelTarget(row) }} 张</small></template></el-table-column>
+          <el-table-column label="变更记录" min-width="170"><template #default="{ row }"><span class="warehouse-note">{{ row.adjustment_summary || row.note || '暂无调整' }}</span></template></el-table-column>
+          <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><el-button size="small" type="danger" plain @click="deleteInventoryItem(row)">删除</el-button></template></el-table-column>
+        </el-table>
+      </template>
+      <template #footer><el-button @click="warehouseDetail.visible = false">关闭</el-button><el-button v-if="warehouseDetail.inventory" @click="openGroupPrint(warehouseDetail.inventory)">打印标签</el-button><el-button v-if="warehouseDetail.inventory" type="primary" @click="openAllocationDialog(warehouseDetail.inventory)">调整店铺数量</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-if="groupPrint.visible" v-model="groupPrint.visible" :title="groupPrint.phase === 'select' ? '按店铺 / SKU 打印标签' : '逐项确认打印结果'" width="min(1200px, 96vw)" append-to-body :close-on-click-modal="false" :close-on-press-escape="false" :show-close="!groupPrint.busy">
+      <el-alert :closable="false" type="info" :title="groupPrint.phase === 'select' ? '每条备货明细应打 = 备货数量 + 2。默认只打印尚未完成的数量；已打完后补打需手动勾选并填张数。每个 SKU 单次最多 999 张。' : '系统无法判断打印机是否出纸。仅勾选成功的 SKU，并填写实际成功张数；失败项不记账，重开打印时会重新计算剩余量。'" />
+      <el-table :data="groupPrint.rows" border max-height="55vh">
+        <el-table-column width="55"><template #default="{ row }"><el-checkbox v-model="row.selected" :disabled="groupPrint.busy || row.confirmed || !!row.submitted" /></template></el-table-column>
+        <el-table-column prop="row.order.shop_name" label="店铺" min-width="130" />
+        <el-table-column label="SKU / 备货单" min-width="180"><template #default="{ row }">{{ row.row.ozon_sku }}<small class="warehouse-secondary">{{ row.row.offer_id }}</small><small class="warehouse-secondary">{{ row.row.order.order_no }}</small></template></el-table-column>
+        <el-table-column prop="row.final_qty" label="备货数量" width="95" />
+        <el-table-column label="备用" width="65"><template #default>2</template></el-table-column>
+        <el-table-column label="应打" width="75"><template #default="{ row }">{{ labelTarget(row.row) }}</template></el-table-column>
+        <el-table-column label="已确认" width="90"><template #default="{ row }">{{ row.row.barcode_printed_qty || 0 }}</template></el-table-column>
+        <el-table-column :label="groupPrint.phase === 'select' ? '本次打印' : '实际成功数量'" width="160"><template #default="{ row }"><el-input-number v-if="groupPrint.phase === 'select'" v-model="row.quantity" :min="0" :max="999" :precision="0" :disabled="groupPrint.busy" controls-position="right" /><el-input-number v-else v-model="row.actual_quantity" :min="0" :max="row.printed_quantity" :precision="0" :disabled="groupPrint.busy || row.confirmed || !!row.submitted" controls-position="right" /></template></el-table-column>
+        <el-table-column label="结果" min-width="170"><template #default="{ row }"><el-tag v-if="row.confirmed" type="success">已记录</el-tag><span v-if="row.error" class="warehouse-shortage">{{ row.error }}</span><span v-if="groupPrint.phase === 'select' && row.row.barcode_printed_qty >= labelTarget(row.row)">已打齐，本次为补打</span></template></el-table-column>
+      </el-table>
+      <template #footer><el-button :disabled="groupPrint.busy" @click="groupPrint.visible = false">{{ groupPrint.phase === 'select' ? '取消' : '关闭（不记录未确认项）' }}</el-button><el-button v-if="groupPrint.phase === 'select'" type="primary" :loading="groupPrint.busy" @click="generateGroupPrint">生成并打开打印</el-button><el-button v-else type="primary" :loading="groupPrint.busy" @click="confirmGroupPrint">确认所选实际打印数量</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-if="printHistory.visible" v-model="printHistory.visible" title="打印记录（最近 200 条）" width="780px" append-to-body>
+      <el-alert title="上线前的已有打印数量保留在累计数中；旧系统未保存逐次历史，不能还原为每次打印记录。" :closable="false" type="info" />
+      <el-table v-loading="printHistory.loading" :data="printHistory.rows"><el-table-column label="确认时间" min-width="180"><template #default="{ row }">{{ dateText(row.created_at) }}</template></el-table-column><el-table-column prop="quantity" label="确认张数" /><el-table-column label="类型"><template #default="{ row }">{{ row.print_kind === 'reprint' ? '补打' : '首次／补足' }}</template></el-table-column><el-table-column prop="preparation_quantity" label="打印时备货数" /><el-table-column prop="person_name" label="操作人" /></el-table>
+    </el-dialog>
+
+    <el-dialog v-model="allocationDialog.visible" title="按店铺分配备货数量" width="min(1100px, 96vw)" append-to-body destroy-on-close>
       <div v-if="allocationDialog.inventory" class="allocation-summary"><span>库存 ID：{{ allocationDialog.inventory.inventory_id }}</span><span>本地可用：{{ integer(allocationDialog.inventory.local_stock) }}</span><span>分配总数：<strong>{{ integer(allocationTotal) }}</strong></span></div>
       <el-alert type="info" :closable="false" show-icon title="所有店铺明细均可调整；系统会记录调整原因与数量变动，已进入出入库流程的变动以调整记录留痕。" />
       <el-table :data="allocationDialog.items" border size="small" class="allocation-table"><el-table-column prop="order.shop_name" label="店铺" min-width="130" /><el-table-column prop="ozon_sku" label="Ozon SKU" min-width="150" /><el-table-column prop="offer_id" label="Offer ID" min-width="150" /><el-table-column label="状态" width="110"><template #default="{ row }">{{ statusTagText(row.order.status, row.order.received_quantity) }}</template></el-table-column><el-table-column label="分配数量" width="150"><template #default="{ row }"><el-input-number v-model="row.final_qty" :min="0" :step="1" :precision="0" :disabled="!canInventoryItemEdit(row)" /></template></el-table-column></el-table>
@@ -1381,7 +1471,7 @@ onMounted(loadPageData);
         </div>
         <div class="barcode-print-rule">
           <span>推荐规则</span>
-          <strong>最新保存的最终备货数量</strong>
+          <strong>最终备货数量 + 2，减去已确认打印数</strong>
           <b>推荐 {{ integer(barcodePrintDialog.recommended) }} 张</b>
         </div>
         <el-form label-position="top">
@@ -1547,7 +1637,7 @@ onMounted(loadPageData);
     </el-dialog>
 
     <PageFooterPagination
-      :total="state.total"
+      :total="viewMode === 'inventory' ? inventoryRows.length : state.total"
       :page="state.filters.page"
       :page-size="state.filters.pageSize"
       @update:page="handlePageChange"
@@ -1557,6 +1647,21 @@ onMounted(loadPageData);
 </template>
 
 <style scoped>
+.warehouse-product { display: flex; align-items: center; gap: 12px; min-height: 92px; }
+.warehouse-product .cell-stack { display: flex; flex-direction: column; gap: 8px; }
+.warehouse-product :deep(.erp-image-preview), .warehouse-dialog-header :deep(.erp-image-preview) { width: 64px; height: 84px; flex: 0 0 64px; border-radius: 5px; overflow: hidden; background: #f3f5f8; }
+.warehouse-product :deep(.erp-image-preview__image), .warehouse-dialog-header :deep(.erp-image-preview__image) { width: 100%; height: 100%; }
+.warehouse-product :deep(.erp-image-preview__empty), .warehouse-dialog-header :deep(.erp-image-preview__empty) { height: 100%; display: grid; place-items: center; color: #909399; }
+
+.warehouse-secondary { display: block; font-size: 12px; color: #7c8596; line-height: 1.6; }
+.warehouse-actions { display: flex; gap: 6px; justify-content: center; margin-bottom: 6px; }
+.warehouse-actions .el-button { margin: 0; }
+:deep(.warehouse-quantity) { background: #f0f6ff !important; }
+.warehouse-quantity strong { font-size: 24px; color: #245bd6; }
+.warehouse-shortage { display: block; color: #c45626; font-size: 12px; }
+.warehouse-dialog-header { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; }
+.warehouse-note { white-space: pre-line; font-size: 12px; }
+
 .replenishment-command-bar {
   display: grid;
   flex: 0 0 auto;
