@@ -114,6 +114,9 @@ function aggregateBatchOrder(orders) {
       total.final_qty += Number(item.final_qty ?? item.approved_qty ?? item.requested_qty ?? 0);
       total.source_order_count += 1;
       total.barcode_printed_qty += Number(item.barcode_printed_qty || 0);
+      if (item.barcode_printed_at && (!total.barcode_printed_at || new Date(item.barcode_printed_at) > new Date(total.barcode_printed_at))) {
+        total.barcode_printed_at = item.barcode_printed_at;
+      }
       total._sourceItems.push({ ...item, order });
     }
   }
@@ -156,7 +159,19 @@ const printHistory = reactive({ visible: false, loading: false, rows: [] });
 function openWarehouseDetail(row) { warehouseDetail.inventory = row; warehouseDetail.visible = true; }
 async function showPrintHistory(row) {
   printHistory.visible = true; printHistory.loading = true; printHistory.rows = [];
-  try { printHistory.rows = (await apiClient.get(`/api/fbp-replenishment-orders?print_item_id=${row.id}`, { noCache: true })).print_records || []; }
+  try {
+    const items = row._sourceItems?.length ? row._sourceItems : [row];
+    const records = [];
+    const pending = [...items];
+    await Promise.all(Array.from({ length: Math.min(4, pending.length) }, async () => {
+      while (pending.length) {
+        const item = pending.shift();
+        const payload = await apiClient.get(`/api/fbp-replenishment-orders?print_item_id=${item.id}`, { noCache: true });
+        records.push(...(payload.print_records || []).map(record => ({ ...record, shop_name: item.order?.shop_name || '', order_no: item.order?.order_no || '', ozon_sku: item.ozon_sku || '' })));
+      }
+    }));
+    printHistory.rows = records.sort((a, b) => Number(b.id) - Number(a.id)).slice(0, 200);
+  }
   catch (error) { ElMessage.error(error.message); }
   finally { printHistory.loading = false; }
 }
@@ -613,7 +628,7 @@ function barcodePrintLoading(row) {
 
 function barcodePrintedText(row) {
   if (!row?.barcode_printed_at && !Number(row?.barcode_printed_qty)) return "";
-  return `已确认 ${integer(row.barcode_printed_qty)} / 应打 ${integer(labelTarget(row))} 张 · ${dateText(row.barcode_printed_at)}`;
+  return `已确认 ${integer(row.barcode_printed_qty)} / 应打 ${integer(labelTarget(row))} 张 · 最近打印：${row.barcode_printed_at ? dateText(row.barcode_printed_at) : '历史时间未记录'}`;
 }
 
 function actionKey(row, action) {
@@ -925,7 +940,7 @@ function barcodeRequestItem(row, quantity = 1) {
 async function markBarcodePrinted(row, quantity) {
   const itemId = Number(row?.id || 0);
   const orderId = Number(row?.order_id || row?.order?.id || 0);
-  if (!Number.isInteger(itemId) || itemId <= 0 || !Number.isInteger(orderId) || orderId <= 0) return;
+  if (!Number.isInteger(itemId) || itemId <= 0 || !Number.isInteger(orderId) || orderId <= 0) throw new Error("缺少备货单或明细编号，无法保存打印记录，请刷新备货单后重试");
   const payload = await apiClient.post("/api/fbp-replenishment-orders/items/barcode-printed", {
     order_id: orderId,
     item_id: itemId,
@@ -1004,13 +1019,14 @@ async function confirmBarcodePrint() {
       })
     });
     barcodePrintDialog.visible = false;
-    preview.show(response.blob, () => {
-      barcodePrintResultDialog.row = row;
-      barcodePrintResultDialog.request_key = printRequestKey;
-      barcodePrintResultDialog.preparation_quantity = preparationQuantity;
-      barcodePrintResultDialog.quantity = quantity;
-      barcodePrintResultDialog.visible = true;
-    });
+    preview.show(response.blob, () => {});
+    // PDF-native printing does not reliably trigger the preview window callback.
+    // Offer confirmation immediately; only the operator's explicit confirmation writes a record.
+    barcodePrintResultDialog.row = row;
+    barcodePrintResultDialog.request_key = printRequestKey;
+    barcodePrintResultDialog.preparation_quantity = preparationQuantity;
+    barcodePrintResultDialog.quantity = quantity;
+    barcodePrintResultDialog.visible = true;
   } catch (error) {
     preview?.showError(error.message || "打印条码失败，请关闭此页后重试");
     ElMessage.error(error.message || "打印条码失败");
@@ -1375,7 +1391,7 @@ onMounted(loadPageData);
               <div v-if="barcodePrintedText(row)" class="barcode-status is-printed">
                 {{ barcodePrintedText(row) }}
               </div>
-              <el-button v-if="!row._sourceItems?.length && Number(row.barcode_printed_qty)" link type="primary" @click="showPrintHistory(row)">打印记录</el-button>
+              <el-button link type="primary" @click="showPrintHistory(row)">打印记录</el-button>
               <div v-if="!barcodePrintedText(row)" class="barcode-status muted-text">
                 默认 {{ integer(barcodePrintQuantity(row)) }} 张
               </div>
@@ -1437,7 +1453,7 @@ onMounted(loadPageData);
 
     <el-dialog v-if="printHistory.visible" v-model="printHistory.visible" title="打印记录（最近 200 条）" width="780px" append-to-body>
       <el-alert title="上线前的已有打印数量保留在累计数中；旧系统未保存逐次历史，不能还原为每次打印记录。" :closable="false" type="info" />
-      <el-table v-loading="printHistory.loading" :data="printHistory.rows"><el-table-column label="确认时间" min-width="180"><template #default="{ row }">{{ dateText(row.created_at) }}</template></el-table-column><el-table-column prop="quantity" label="确认张数" /><el-table-column label="类型"><template #default="{ row }">{{ row.print_kind === 'reprint' ? '补打' : '首次／补足' }}</template></el-table-column><el-table-column prop="preparation_quantity" label="打印时备货数" /><el-table-column prop="person_name" label="操作人" /></el-table>
+      <el-table v-loading="printHistory.loading" :data="printHistory.rows"><el-table-column label="确认时间（北京）" min-width="180"><template #default="{ row }">{{ dateText(row.created_at) }}</template></el-table-column><el-table-column prop="shop_name" label="店铺" min-width="120" /><el-table-column prop="order_no" label="备货单号" min-width="160" /><el-table-column prop="ozon_sku" label="SKU" min-width="120" /><el-table-column prop="quantity" label="确认张数" /><el-table-column label="类型"><template #default="{ row }">{{ row.print_kind === 'reprint' ? '补打' : '首次／补足' }}</template></el-table-column><el-table-column prop="preparation_quantity" label="打印时备货数" /><el-table-column prop="person_name" label="操作人" /></el-table>
     </el-dialog>
 
     <el-dialog v-model="allocationDialog.visible" title="按店铺分配备货数量" width="min(1100px, 96vw)" append-to-body destroy-on-close>
@@ -1535,6 +1551,7 @@ onMounted(loadPageData);
         </div>
       </div>
       <template #footer>
+        <el-button :disabled="barcodePrintResultDialog.confirming" @click="barcodePrintResultDialog.visible = false">未打印，不记录</el-button>
         <el-button type="danger" plain :disabled="barcodePrintResultDialog.confirming" @click="retryBarcodePrint">
           打印失败，重新打印
         </el-button>

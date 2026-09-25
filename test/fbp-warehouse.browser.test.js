@@ -27,6 +27,9 @@ test('warehouse dialogs print per SKU plus two, retain partial success and sync 
     await page.route('http://localhost:8788/**', async route => {
       const url = new URL(route.request().url());
       if (url.pathname === '/api/shops') return route.fulfill({ json: [{ id: 1, name: '店铺 1' }, { id: 2, name: '店铺 2' }] });
+      if (url.pathname === '/api/fbp-replenishment-orders' && url.searchParams.has('print_item_id')) {
+        return route.fulfill({ json: { print_records: [...printed.values()].filter(record => record.item_id === Number(url.searchParams.get('print_item_id'))).map((record, index) => ({ ...record, id: index + 1, created_at: '2026-09-25T02:30:00Z', person_name: '测试操作人' })) } });
+      }
       if (url.pathname === '/api/fbp-replenishment-orders') return route.fulfill({ json: { rows: orders, total: 2, page: 1, pageSize: 100 } });
       if (url.pathname === '/api/products/barcode-label') { requests.push(route.request().postDataJSON()); return route.fulfill({ contentType: 'application/pdf', body: '%PDF-1.4\n%%EOF' }); }
       if (url.pathname.endsWith('/barcode-printed')) {
@@ -35,6 +38,7 @@ test('warehouse dialogs print per SKU plus two, retain partial success and sync 
         if (!printed.has(body.request_key)) {
           printed.set(body.request_key, body);
           orders.find(row => row.id === body.order_id).items[0].barcode_printed_qty += body.quantity;
+          orders.find(row => row.id === body.order_id).items[0].barcode_printed_at = '2026-09-25T02:30:00Z';
         }
         return route.fulfill({ json: { ok: true } });
       }
@@ -71,6 +75,21 @@ test('warehouse dialogs print per SKU plus two, retain partial success and sync 
     if (process.env.FBP_UI_SCREENSHOT) await page.screenshot({ path: process.env.FBP_UI_SCREENSHOT });
     await page.getByText('运营视角', { exact: true }).click();
     await page.getByText(/已确认 102 \/ 应打 102 张/).waitFor();
+    await page.getByRole('button', { name: '打印记录', exact: true }).first().click();
+    const history = page.getByRole('dialog', { name: '打印记录（最近 200 条）', exact: true });
+    await history.getByText('测试操作人', { exact: true }).waitFor();
+    await history.getByText(/2026\/09\/25 10:30:00/).waitFor();
+    await history.getByRole('button', { name: 'Close this dialog' }).click();
+    // Operations printing must offer confirmation even without a popup callback.
+    await page.getByRole('button', { name: '打印', exact: true }).first().click();
+    await page.getByRole('button', { name: '确认并打开打印', exact: true }).click();
+    const confirmation = page.getByRole('dialog', { name: '打印结果确认', exact: true });
+    await confirmation.waitFor();
+    assert.equal(printed.size, 2, 'preview alone must not create an operations record');
+    await confirmation.getByRole('button', { name: '打印完成', exact: true }).click();
+    await confirmation.waitFor({ state: 'hidden' });
+    assert.equal(printed.size, 3);
+    await page.getByText(/已确认 104 \/ 应打 102 张/).waitFor();
     assert.deepEqual(errors, []);
   } finally { await browser?.close(); await fs.rm(output, { recursive: true, force: true }); }
 });
