@@ -584,8 +584,42 @@ function procurementTimeText(row) {
               <small v-if="inventoryViews.get(row.id).active">{{ inventoryViews.get(row.id).shortageCount }} 种缺货 · {{ inventoryViews.get(row.id).coveredCount }} 种已覆盖</small>
             </template>
             <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
-            <div>
+            <div class="orders-inventory-quick-actions">
               <el-button link type="primary" size="small" @click="inventoryRowId = row.id">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
+              <template v-for="product in row.inventorySummaries" :key="`quick-bound-${row.id}-${product.inventoryKey || product.productId}`">
+                <el-button
+                  v-if="product.sku"
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
+                  @click="emit('open-bind-product-from-order', row.id, product.sku)"
+                >
+                  修改绑定
+                </el-button>
+                <el-button
+                  v-if="Number(product.productId || 0) > 0"
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
+                  @click="emit('edit-inventory-product', product.productId)"
+                >
+                  修改库存
+                </el-button>
+              </template>
+              <template v-for="item in row.unboundItems" :key="`quick-unbound-${row.id}-${item.sku}`">
+                <el-button
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
+                  @click="emit('open-bind-product-from-order', row.id, item.sku)"
+                >
+                  绑定库存
+                </el-button>
+                <el-button
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-primary"
+                  @click="emit('open-create-product-from-order', row.id, item.sku)"
+                >
+                  创建库存
+                </el-button>
+              </template>
               <el-tag v-if="inventoryViews.get(row.id)?.review" type="warning" size="small">待核对</el-tag>
             </div>
             <el-button v-if="hasProcurementIncoming(row) && row.procurementState.canRegisterOrderReceipt" size="small" link type="success" :loading="isInboundReceiptPending(row)" :disabled="Number(confirmingInboundRecordId || 0) > 0" @click="emit('confirm-procurement-inbound', row)">{{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记实收' }}</el-button>
@@ -725,7 +759,6 @@ function procurementTimeText(row) {
               <small class="orders-stock-product-name orders-product-name">{{ product.productName }}</small>
               <strong v-if="product.inventoryMode !== 'combo'">库存编号：{{ product.inventoryNumber || "待补核心品名" }}</strong>
               <small v-else>库存编号：见子产品明细</small>
-              <el-button v-if="product.productId && product.inventoryMode !== 'combo'" link type="primary" size="small" @click="emit('view-inventory-detail', row, product.productId)">明细</el-button>
               <div class="orders-stock-inline-facts">
                 <span>FBP: {{ product.stock?.fbp || 0 }}</span>
                 <span v-if="product.inventoryMode !== 'combo' && !Number(product.componentCount || 0) && product.physicalStockEstimate !== undefined">现货推算: {{ Math.max(0, product.physicalStockEstimate) }}</span>
@@ -736,22 +769,6 @@ function procurementTimeText(row) {
                 <span>商品总在途: {{ Number(product.incoming || 0) }}</span>
               </div>
               <div class="orders-inline-actions orders-inline-actions-compact">
-                <el-button
-                  v-if="product.sku"
-                  size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
-                  @click="emit('open-bind-product-from-order', row.id, product.sku)"
-                >
-                  修改绑定
-                </el-button>
-                <el-button
-                  v-if="Number(product.productId || 0) > 0"
-                  size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
-                  @click="emit('edit-inventory-product', product.productId)"
-                >
-                  编辑库存
-                </el-button>
                 <el-button
                   v-if="product.inventoryMode === 'single' && Number(product.productId || 0) > 0"
                   size="small"
@@ -772,22 +789,6 @@ function procurementTimeText(row) {
               <div class="orders-stock-inline-facts">
                 <span>FBP: {{ item.stock?.fbp || 0 }}</span>
                 <span>本地: 未绑定</span>
-              </div>
-              <div class="orders-inline-actions orders-inline-actions-compact">
-                <el-button
-                  size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
-                  @click="emit('open-bind-product-from-order', row.id, item.sku)"
-                >
-                  绑定库存
-                </el-button>
-                <el-button
-                  size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-primary"
-                  @click="emit('open-create-product-from-order', row.id, item.sku)"
-                >
-                  创建库存
-                </el-button>
               </div>
             </div>
             <div v-if="row.procurement_coverage && !isFbpOrder(row)" class="orders-coverage-summary">
@@ -841,6 +842,8 @@ function procurementTimeText(row) {
 .inventory-compact { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
 .inventory-compact-name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .inventory-compact small { color: #606266; line-height: 1.6; }
+.orders-inventory-quick-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.orders-inventory-quick-actions .el-button { margin-left: 0; }
 .inventory-detail-product { display: flex; gap: 12px; align-items: center; min-height: 92px; }
 .inventory-detail-product .el-image { width: 64px; height: 84px; flex: 0 0 64px; border-radius: 4px; }
 .inventory-detail-product p { color: #606266; margin: 8px 0 0; }
