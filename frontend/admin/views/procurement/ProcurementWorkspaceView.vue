@@ -537,6 +537,21 @@ async function openBulkPurchase() {
   if (!selectedDemandRows.value.length) return ElMessage.warning("请先勾选需要采购的库存商品");
   loading.value = true;
   try {
+    // Read-only live gaps have no request ID yet. Materialize through the existing
+    // explicit demand action before building an editable purchase, never on GET.
+    const liveRows = selectedDemandRows.value.filter(row => (row.requests || []).some(item => item.live_order_demand));
+    if (liveRows.length) {
+      await apiClient.post('/api/procurement/refresh-demand');
+      for (const row of liveRows) {
+        const params = new URLSearchParams({ grouped: '1', paged: '1', compact: '1', demandType: 'real_order', query: row.product_code, page: '1', pageSize: '100' });
+        const result = await apiClient.get(`/api/procurement/requests?${params}`, { noCache: true });
+        const fresh = result.rows?.find(item => Number(item.product_id) === Number(row.product_id));
+        if (!fresh || !(fresh.requests || []).some(item => Number(item.id) > 0)) {
+          throw new Error(`${row.product_name} 的订单缺口已变化或采购需求尚未生成，请刷新工作台后重新选择`);
+        }
+        Object.assign(row, fresh);
+      }
+    }
     const expandedItems = [];
     const coveredComponents = [];
     for (const row of selectedDemandRows.value) {

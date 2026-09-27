@@ -90,6 +90,7 @@ import {
   groupProcurementRequestsMysql,
   procurementOrderActionClassMysql
 } from "./mysql-procurement-list.js";
+import { supplementLiveProcurementRows } from "./procurement-live-demand.js";
 export { normalizePurchasePlanMysql } from "./mysql-procurement-plan.js";
 export { buildSplitShippingPackagesMysql } from "./mysql-order-shipping-packages.js";
 export {
@@ -14137,7 +14138,7 @@ export async function procurementRequestsMysql(query = {}) {
       pr.created_at, pr.updated_at`
     : "pr.*";
   const realOrderView = String(query.grouped || "") === "1"
-    && String(query.demandType || query.demand_type || "all") === "real_order";
+    && ["all", "real_order"].includes(String(query.demandType || query.demand_type || "all"));
   // Share the order queue projection (and its invalidation/cache) before paging.
   // A shortage is already net of assigned stock and receipts; never subtract
   // product-wide incoming stock from that shortage a second time.
@@ -14158,7 +14159,7 @@ export async function procurementRequestsMysql(query = {}) {
     };
   }
   const groupedWhereSql = groupedPage
-    ? `WHERE pr.product_id IN (${groupedPage.productIds.map(() => "?").join(", ")})`
+    ? `WHERE p.id IN (${groupedPage.productIds.map(() => "?").join(", ")})`
     : "";
   const groupedProductPlaceholders = groupedPage
     ? groupedPage.productIds.map(() => "?").join(", ")
@@ -14170,7 +14171,7 @@ export async function procurementRequestsMysql(query = {}) {
     ? Array.from({ length: 11 }, () => groupedPage.productIds).flat()
     : [];
   const rows = await mysqlQuery(`
-    SELECT ${requestColumns},
+    SELECT ${requestColumns}, ${queueCoverage ? 'p.id' : 'pr.product_id'} AS product_id,
       COALESCE(NULLIF(p.inventory_number, ''),
         CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END
       ) AS product_code,
@@ -14227,8 +14228,7 @@ export async function procurementRequestsMysql(query = {}) {
       COALESCE(active_real_demand.order_demand_quantity, 0) AS all_order_demand_quantity,
       source_online_product.id AS source_online_product_id,
       CASE WHEN pr.status IN ('pending', 'suggested', 'submitted', 'merged') AND TIMESTAMPDIFF(DAY, pr.created_at, CURRENT_TIMESTAMP) >= 3 THEN 1 ELSE 0 END AS overdue
-    FROM procurement_requests pr
-    LEFT JOIN products p ON p.id = pr.product_id
+    ${queueCoverage ? 'FROM products p LEFT JOIN procurement_requests pr ON p.id = pr.product_id' : 'FROM procurement_requests pr LEFT JOIN products p ON p.id = pr.product_id'}
     LEFT JOIN people pe ON pe.id = pr.person_id
     LEFT JOIN people creator ON creator.id = pr.created_by_person_id
     LEFT JOIN suppliers s ON s.id = pr.supplier_id
@@ -14410,7 +14410,8 @@ export async function procurementRequestsMysql(query = {}) {
     row.incoming_stock = Math.max(0, Number(row.incoming_stock || 0) - (historicalIncomingByProduct.get(Number(row.product_id)) || 0));
   }
   // SQL already selected this page. Do not apply its offset a second time.
-  const grouped = groupProcurementRequestsMysql(rows, { ...query, page: 1, pageSize: groupedPage.pageSize });
+  const projectedRows = queueCoverage ? supplementLiveProcurementRows(rows, coverage) : rows;
+  const grouped = groupProcurementRequestsMysql(projectedRows, { ...query, page: 1, pageSize: groupedPage.pageSize });
   Object.assign(grouped, { page: groupedPage.page, total: groupedPage.total });
   const negativeProductRows = grouped.rows.filter((row) => Number(row.stock || 0) < 0);
   if (negativeProductRows.length) {
@@ -14503,20 +14504,22 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
     "COALESCE(po.status, '') NOT IN ('purchased', 'partial_inbound', 'inbound_done')"
   ];
   if (shortageProductIds !== null) {
-    where.push(shortageProductIds.length ? `pr.product_id IN (${shortageProductIds.map(() => '?').join(',')})` : '1 = 0');
+    const shortageSql = shortageProductIds.length ? `p.id IN (${shortageProductIds.map(() => '?').join(',')})` : '1 = 0';
+    const pendingSql = where.splice(0).join(' AND ');
+    where.push(demandType === 'real_order' ? shortageSql : `((${pendingSql}) OR ${shortageSql})`);
     params.push(...shortageProductIds);
   }
   if (searchText) {
     const like = `%${searchText}%`;
     where.push(`(
-      p.name LIKE ?
+      CONCAT_WS(' ', p.name, p.inventory_number) LIKE ?
       OR p.code LIKE ?
       OR pe.name LIKE ?
       OR COALESCE(s.name, ps.name, '') LIKE ?
       OR COALESCE(pr.purchase_url, p.purchase_url, '') LIKE ?
       OR EXISTS (
         SELECT 1 FROM sku_mappings search_sm
-        WHERE search_sm.product_id = pr.product_id
+        WHERE search_sm.product_id = p.id
           AND search_sm.active = 1
           AND search_sm.ozon_sku LIKE ?
       )
@@ -14576,7 +14579,7 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
     where.push("p.surface_process = ?");
     params.push(process);
   }
-  if (demandType === "real_order") {
+  if (demandType === "real_order" && shortageProductIds === null) {
     where.push("pr.demand_type = 'real_order'");
   } else if (["advance_stock", "inventory_warning"].includes(demandType)) {
     where.push("pr.demand_type = 'advance_stock'");
@@ -14585,16 +14588,16 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
   }
   const warningJoins = "";
   const groupedSql = `
-    SELECT pr.product_id, MAX(pr.created_at) AS latest_created_at
-    FROM procurement_requests pr
-    JOIN products p ON p.id = pr.product_id
+    SELECT p.id AS product_id, COALESCE(MAX(pr.created_at), p.created_at) AS latest_created_at
+    FROM products p
+    LEFT JOIN procurement_requests pr ON p.id = pr.product_id
     LEFT JOIN people pe ON pe.id = pr.person_id
     LEFT JOIN suppliers s ON s.id = pr.supplier_id
     LEFT JOIN suppliers ps ON ps.id = p.supplier_id
     LEFT JOIN purchase_orders po ON po.id = pr.purchase_order_id
     ${warningJoins}
     WHERE ${where.join(" AND ")}
-    GROUP BY pr.product_id
+    GROUP BY p.id
   `;
   const [idRows, countRows] = await Promise.all([
     mysqlQuery(

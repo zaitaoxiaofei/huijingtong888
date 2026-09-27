@@ -6,8 +6,8 @@ const source = readFileSync(new URL("../src/services/mysql-cutover.js", import.m
 
 test("grouped procurement pages select product ids before loading detail joins", () => {
   assert.match(source, /await procurementGroupedPageIdsMysql\(query, shortageProductIds\)/);
-  assert.match(source, /WHERE pr\.product_id IN \(/);
-  assert.match(source, /MAX\(pr\.created_at\) AS latest_created_at/);
+  assert.match(source, /WHERE p\.id IN \(/);
+  assert.match(source, /COALESCE\(MAX\(pr\.created_at\), p\.created_at\) AS latest_created_at/);
   assert.match(source, /ORDER BY latest_created_at DESC, product_id DESC LIMIT \? OFFSET \?/);
   assert.match(source, /SELECT COUNT\(\*\) AS total FROM \(\$\{groupedSql\}\) grouped_procurement/);
   assert.match(source, /groupedProductFilter\("sales_mapping\.product_id"\)/);
@@ -19,7 +19,7 @@ test("grouped procurement pages select product ids before loading detail joins",
 test("real-order eligibility is computed before SQL paging and SQL pages are not sliced twice", () => {
   assert.match(source, /const queueCoverage = realOrderView \? await orderProcurementCoverageMysql\(\) : null/);
   assert.match(source, /if \(shortageProductIds !== null\)/);
-  assert.match(source, /groupProcurementRequestsMysql\(rows, \{ \.\.\.query, page: 1, pageSize: groupedPage.pageSize \}\)/);
+  assert.match(source, /groupProcurementRequestsMysql\(projectedRows, \{ \.\.\.query, page: 1, pageSize: groupedPage.pageSize \}\)/);
   assert.match(source, /Object.assign\(grouped, \{ page: groupedPage.page, total: groupedPage.total \}\)/);
 });
 
