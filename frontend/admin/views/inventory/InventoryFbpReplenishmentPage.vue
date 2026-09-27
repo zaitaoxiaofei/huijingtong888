@@ -20,7 +20,16 @@ const loading = ref(false);
 const exportLoading = ref(false);
 const actionLoadingId = ref("");
 const selectedOrderIds = ref([]);
-const adjustmentDialog = reactive({ visible: false, item: null, quantity: 0, reason: "", submitting: false });
+const adjustmentReasonOptions = [
+  { value: "stock_shortage", label: "本地实物库存不足（生成采购草稿）" },
+  { value: "inventory_reserved_or_in_transit", label: "库存已占用／在途未到（仅待核）" },
+  { value: "demand_reduced", label: "销量或需求预测下调" },
+  { value: "fbp_capacity_limit", label: "FBP 仓容／可提交额度限制" },
+  { value: "product_preparation_issue", label: "商品／包装／标签不满足发仓要求" },
+  { value: "other", label: "其他" }
+];
+const adjustmentDialog = reactive({ visible: false, item: null, quantity: 0, reasonCode: "", reasonNote: "", submitting: false });
+const procurementDraftDialog = reactive({ visible: false, loading: false, submitting: false, items: [] });
 const batchDetailDialog = reactive({ visible: false, loading: false, batch: null, orders: [] });
 const barcodePrintDialog = reactive({ visible: false, row: null, quantity: 1, recommended: 1, submitting: false });
 const barcodePrintResultDialog = reactive({ visible: false, row: null, quantity: 0, confirming: false });
@@ -586,28 +595,60 @@ async function fillBatchToOzon(row) {
 function openAdjustmentDialog(row) {
   adjustmentDialog.item = row;
   adjustmentDialog.quantity = 0;
-  adjustmentDialog.reason = "";
+  adjustmentDialog.reasonCode = "";
+  adjustmentDialog.reasonNote = "";
   adjustmentDialog.visible = true;
 }
 
 async function submitAdjustment() {
   const row = adjustmentDialog.item;
   if (!Number(adjustmentDialog.quantity)) return ElMessage.warning("调整数量不能为 0");
-  if (!String(adjustmentDialog.reason || "").trim()) return ElMessage.warning("请填写调整原因");
+  if (!adjustmentDialog.reasonCode) return ElMessage.warning("请选择调整原因");
+  if (adjustmentDialog.reasonCode === "other" && !String(adjustmentDialog.reasonNote || "").trim()) return ElMessage.warning("选择其他原因时请填写补充说明");
   adjustmentDialog.submitting = true;
   try {
     await apiClient.post("/api/fbp-replenishment-orders/items/adjustments", {
       order_id: row.order.id,
       item_id: row.id,
       adjustment_qty: adjustmentDialog.quantity,
-      reason: adjustmentDialog.reason
+      reason_code: adjustmentDialog.reasonCode,
+      reason_note: adjustmentDialog.reasonNote
     });
-    ElMessage.success("人工数量调整已记录");
+    ElMessage.success(adjustmentDialog.reasonCode === "stock_shortage" && Number(adjustmentDialog.quantity) < 0 ? "数量调整已记录，已生成待复核采购草稿" : "数量调整已记录");
     adjustmentDialog.visible = false;
     await refreshOrderViews(row.order);
   } catch (error) {
     ElMessage.error(error.message || "保存人工调整失败");
   } finally { adjustmentDialog.submitting = false; }
+}
+
+async function openProcurementDrafts() {
+  procurementDraftDialog.visible = true;
+  procurementDraftDialog.loading = true;
+  try {
+    const rows = await apiClient.get("/api/fbp-replenishment-orders/procurement-drafts", { noCache: true });
+    procurementDraftDialog.items = (rows || []).map((row) => ({ ...row, quantity: Number(row.quantity || 0), note: row.request_reason_note || "" }));
+  } catch (error) {
+    ElMessage.error(error.message || "加载 FBP 采购草稿失败");
+  } finally {
+    procurementDraftDialog.loading = false;
+  }
+}
+
+async function submitProcurementDrafts() {
+  const items = procurementDraftDialog.items.filter((item) => Number(item.quantity) >= 0);
+  if (!items.some((item) => Number(item.quantity) > 0)) return ElMessage.warning("请至少保留一条采购数量大于 0 的草稿");
+  procurementDraftDialog.submitting = true;
+  try {
+    const result = await apiClient.post("/api/fbp-replenishment-orders/procurement-drafts/submit", { items: items.map((item) => ({ id: item.id, quantity: Number(item.quantity), note: item.note })) });
+    ElMessage.success(`已发送 ${result.submitted_count || 0} 条 FBP 补货采购需求到采购台`);
+    procurementDraftDialog.visible = false;
+    await loadPageData();
+  } catch (error) {
+    ElMessage.error(error.message || "发送采购需求失败");
+  } finally {
+    procurementDraftDialog.submitting = false;
+  }
 }
 
 function barcodePrintQuantity(row) {
@@ -1135,6 +1176,7 @@ onMounted(loadPageData);
           </el-select>
           <el-button type="primary" @click="handleSearch">查询</el-button>
           <el-button @click="handleReset">重置</el-button>
+          <el-button type="warning" plain @click="openProcurementDrafts">FBP 采购草稿</el-button>
         </div>
       </div>
     </div>
@@ -1561,20 +1603,38 @@ onMounted(loadPageData);
       </template>
     </el-dialog>
 
-    <el-dialog v-model="adjustmentDialog.visible" title="添加人工数量调整" width="480px" destroy-on-close>
+    <el-dialog v-model="adjustmentDialog.visible" title="调整 FBP 备货数量" width="520px" destroy-on-close>
       <el-alert title="原始审核数量不会被覆盖；本次调整和原因将作为独立记录保留。" type="info" :closable="false" show-icon />
       <el-form label-position="top" class="adjustment-form">
         <el-form-item label="调整数量（正数增加，负数减少）">
           <el-input-number v-model="adjustmentDialog.quantity" :min="-999999" :max="999999" :step="1" controls-position="right" />
         </el-form-item>
-        <el-form-item label="调整原因">
-          <el-input v-model="adjustmentDialog.reason" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="例如：装箱复核发现少 2 件" />
+        <el-form-item label="调整原因" required>
+          <el-select v-model="adjustmentDialog.reasonCode" placeholder="请选择原因" style="width: 100%">
+            <el-option v-for="option in adjustmentReasonOptions" :key="option.value" :label="option.label" :value="option.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="补充说明" :required="adjustmentDialog.reasonCode === 'other'">
+          <el-input v-model="adjustmentDialog.reasonNote" type="textarea" :rows="3" maxlength="500" show-word-limit :placeholder="adjustmentDialog.reasonCode === 'other' ? '请填写具体原因' : '可选，例如实盘数量或预计到货日期'" />
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="adjustmentDialog.visible = false">取消</el-button>
         <el-button type="primary" :loading="adjustmentDialog.submitting" @click="submitAdjustment">保存调整记录</el-button>
       </template>
+    </el-dialog>
+
+    <el-dialog v-model="procurementDraftDialog.visible" title="FBP 下次备货采购草稿" width="960px" destroy-on-close>
+      <el-alert title="仅“本地实物库存不足”产生的差额会进入这里。请由仓库管理员核对数量；将数量改为 0 即取消该项，确认后才发送给采购台。" type="info" :closable="false" show-icon />
+      <el-table v-loading="procurementDraftDialog.loading" :data="procurementDraftDialog.items" border style="margin-top: 16px">
+        <el-table-column label="来源 FBP 备货单" min-width="170"><template #default="{ row }">{{ row.order_no || `#${row.source_order_id}` }}</template></el-table-column>
+        <el-table-column prop="product_name" label="库存商品" min-width="240"><template #default="{ row }"><strong>{{ row.product_name }}</strong><small style="display:block;color:var(--el-text-color-secondary)">{{ row.inventory_number || '-' }}</small></template></el-table-column>
+        <el-table-column label="原申请 / 已通过" width="145" align="center"><template #default="{ row }">{{ integer(row.requested_qty) }} / {{ integer(row.approved_qty) }}</template></el-table-column>
+        <el-table-column label="建议采购数量" width="160"><template #default="{ row }"><el-input-number v-model="row.quantity" :min="0" :precision="0" controls-position="right" style="width:130px" /></template></el-table-column>
+        <el-table-column label="备注" min-width="220"><template #default="{ row }"><el-input v-model="row.note" maxlength="500" placeholder="可补充采购说明" /></template></el-table-column>
+      </el-table>
+      <el-empty v-if="!procurementDraftDialog.loading && !procurementDraftDialog.items.length" description="暂无待发送的 FBP 缺货采购草稿" />
+      <template #footer><el-button @click="procurementDraftDialog.visible = false">取消</el-button><el-button type="primary" :disabled="procurementDraftDialog.loading || !procurementDraftDialog.items.length" :loading="procurementDraftDialog.submitting" @click="submitProcurementDrafts">确认并发送采购台</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="fbpFillResultDialog.visible" title="Ozon 填写结果" width="760px" destroy-on-close>

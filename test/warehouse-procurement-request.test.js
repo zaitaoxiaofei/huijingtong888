@@ -6,6 +6,7 @@ const backend = await readFile(new URL("../src/services/mysql-cutover.js", impor
 const routes = await readFile(new URL("../src/server/routes/operations.js", import.meta.url), "utf8");
 const inventoryPage = await readFile(new URL("../frontend/admin/views/inventory/InventoryProductsPage.vue", import.meta.url), "utf8");
 const workspace = await readFile(new URL("../frontend/admin/views/procurement/ProcurementWorkspaceView.vue", import.meta.url), "utf8");
+const fbpPage = await readFile(new URL("../frontend/admin/views/inventory/InventoryFbpReplenishmentPage.vue", import.meta.url), "utf8");
 
 test("warehouse procurement applications retain their own type and reason without creating an inbound purchase", () => {
   assert.match(backend, /createWarehouseProcurementRequestsMysql/);
@@ -13,6 +14,16 @@ test("warehouse procurement applications retain their own type and reason withou
   assert.match(backend, /request_reason_code/);
   assert.match(backend, /amount, shipping_amount[\s\S]*0, 0/);
   assert.match(routes, /POST \/api\/procurement\/warehouse-requests/);
+});
+
+test("FBP physical shortages become reviewable procurement drafts before purchasing sees them", () => {
+  assert.match(backend, /fbpShortageProcurementDraftsMysql/);
+  assert.match(backend, /submitFbpShortageProcurementDraftsMysql/);
+  assert.match(backend, /reasonCode === "stock_shortage" && adjustmentQty < 0/);
+  assert.match(backend, /status = 'draft'/);
+  assert.match(fbpPage, /本地实物库存不足（生成采购草稿）/);
+  assert.match(fbpPage, /FBP 下次备货采购草稿/);
+  assert.match(fbpPage, /确认并发送采购台/);
 });
 
 test("inventory can submit selected products and purchasing can filter warehouse applications", () => {
