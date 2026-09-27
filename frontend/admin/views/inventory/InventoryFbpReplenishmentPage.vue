@@ -660,7 +660,7 @@ async function openProcurementDrafts() {
   procurementDraftDialog.page = 1;
   try {
     const rows = await apiClient.get("/api/fbp-replenishment-orders/procurement-drafts", { noCache: true });
-    procurementDraftDialog.items = (rows || []).map((row) => ({ ...row, quantity: Number(row.quantity || 0), note: row.request_reason_note || "" }));
+    procurementDraftDialog.items = (rows || []).map((row) => ({ ...row, quantity: Number(row.quantity || 0), original_quantity: Number(row.quantity || 0), removed: false, note: row.request_reason_note || "" }));
   } catch (error) {
     ElMessage.error(error.message || "加载 FBP 采购草稿失败");
   } finally {
@@ -668,13 +668,29 @@ async function openProcurementDrafts() {
   }
 }
 
+async function removeProcurementDraftSuggestion(row) {
+  try {
+    await ElMessageBox.confirm(`确认移除“${row.product_name}”的采购建议吗？本次发送时将取消该库存商品的 FBP 缺货草稿，不会发送给采购台。`, "移除采购建议", { type: "warning", confirmButtonText: "移除", cancelButtonText: "保留" });
+    row.quantity = 0;
+    row.removed = true;
+    ElMessage.success("已标记为移除，确认发送时将取消该采购草稿");
+  } catch (error) {
+    if (error !== "cancel" && error !== "close" && error?.message !== "cancel") ElMessage.error(error.message || "移除采购建议失败");
+  }
+}
+
+function restoreProcurementDraftSuggestion(row) {
+  row.quantity = Number(row.original_quantity || 0);
+  row.removed = false;
+}
+
 async function submitProcurementDrafts() {
   const items = procurementDraftDialog.items.filter((item) => Number(item.quantity) >= 0);
-  if (!items.some((item) => Number(item.quantity) > 0)) return ElMessage.warning("请至少保留一条采购数量大于 0 的草稿");
+  if (!items.length) return ElMessage.warning("暂无可处理的采购草稿");
   procurementDraftDialog.submitting = true;
   try {
     const result = await apiClient.post("/api/fbp-replenishment-orders/procurement-drafts/submit", { items: items.map((item) => ({ request_ids: item.request_ids, quantity: Number(item.quantity), note: item.note })) });
-    ElMessage.success(`已发送 ${result.submitted_count || 0} 条 FBP 补货采购需求到采购台`);
+    ElMessage.success(`已发送 ${result.submitted_count || 0} 条采购需求到采购台，已移除 ${result.cancelled_count || 0} 条采购建议`);
     procurementDraftDialog.visible = false;
     await loadPageData();
   } catch (error) {
@@ -1691,16 +1707,17 @@ onMounted(loadPageData);
     </el-dialog>
 
     <el-dialog v-model="procurementDraftDialog.visible" title="FBP 下次备货采购草稿" width="min(1440px, 96vw)" destroy-on-close>
-      <el-alert title="按库存商品合并展示：同一备货明细的多次缺货不会重复累计原申请或已通过数量；建议采购数量汇总全部未发送的缺货差额。将数量改为 0 即取消该库存商品的全部草稿。" type="info" :closable="false" show-icon />
+      <el-alert title="按库存商品合并展示：同一备货明细的多次缺货不会重复累计原申请或已通过数量；建议采购数量汇总全部未发送的缺货差额。已有采购在途且无需重复采购时，可使用“移除采购建议”；确认发送时系统会取消该草稿而不发送采购台。" type="info" :closable="false" show-icon />
       <el-table v-loading="procurementDraftDialog.loading" :data="procurementDraftPagedItems" border style="margin-top: 16px">
         <el-table-column label="图片" width="86" align="center"><template #default="{ row }"><ProductImagePreview :src="row.image_url" :preview-list="row.image_url ? [row.image_url] : []" size="portrait" /></template></el-table-column>
         <el-table-column label="库存商品" min-width="240"><template #default="{ row }"><strong>{{ row.product_name }}</strong><small style="display:block;color:var(--el-text-color-secondary)">库存 ID：{{ row.inventory_number || '-' }}</small></template></el-table-column>
         <el-table-column label="总原申请 / 总已通过" width="155" align="center"><template #default="{ row }">{{ integer(row.requested_qty) }} / {{ integer(row.approved_qty) }}</template></el-table-column>
         <el-table-column label="采购在途" width="135" align="center"><template #default="{ row }"><strong :class="Number(row.purchase_transit_quantity) ? 'is-positive' : ''">{{ integer(row.purchase_transit_quantity) }}</strong><el-button v-if="row.purchase_transit_records?.length" link type="primary" @click="openProcurementTransit(row)">查看明细</el-button></template></el-table-column>
-        <el-table-column label="建议采购数量" width="160"><template #default="{ row }"><el-input-number v-model="row.quantity" :min="0" :precision="0" controls-position="right" style="width:130px" /></template></el-table-column>
+        <el-table-column label="建议采购数量" width="160"><template #default="{ row }"><el-input-number v-model="row.quantity" :min="0" :precision="0" :disabled="row.removed" controls-position="right" style="width:130px" /><small v-if="row.removed" style="display:block;color:var(--el-color-warning)">已移除，不发送采购台</small></template></el-table-column>
         <el-table-column label="申请店铺" min-width="160"><template #default="{ row }"><div v-for="source in row.source_orders" :key="source.id">{{ source.shop_name || '-' }}</div></template></el-table-column>
         <el-table-column label="来源 FBP 备货单 / 申请时间" min-width="230"><template #default="{ row }"><div v-for="source in row.source_orders" :key="source.id"><strong>{{ source.order_no || `#${source.id}` }}</strong><small style="display:block;color:var(--el-text-color-secondary)">{{ dateText(source.created_at) }}</small></div></template></el-table-column>
         <el-table-column label="备注" min-width="220"><template #default="{ row }"><el-input v-model="row.note" maxlength="500" :placeholder="row.request_reason_note || '可补充采购说明'" /></template></el-table-column>
+        <el-table-column label="操作" width="125" fixed="right"><template #default="{ row }"><el-button v-if="!row.removed" link type="danger" @click="removeProcurementDraftSuggestion(row)">移除采购建议</el-button><el-button v-else link type="primary" @click="restoreProcurementDraftSuggestion(row)">恢复建议</el-button></template></el-table-column>
       </el-table>
       <PageFooterPagination v-if="procurementDraftDialog.items.length" :total="procurementDraftDialog.items.length" :page="procurementDraftDialog.page" :page-size="procurementDraftDialog.pageSize" :page-sizes="[10, 20]" style="margin-top:16px" @update:page="procurementDraftDialog.page = $event" @update:page-size="procurementDraftDialog.pageSize = $event; procurementDraftDialog.page = 1" />
       <el-empty v-if="!procurementDraftDialog.loading && !procurementDraftDialog.items.length" description="暂无待发送的 FBP 缺货采购草稿" />

@@ -56,6 +56,14 @@ test("FBP shortage drafts expose pending purchase transit and let warehouse rece
   assert.match(fbpPage, /\/api\/inbound-records\/\$\{record\.id\}/);
 });
 
+test("warehouse can remove an FBP procurement suggestion instead of sending it to purchasing", () => {
+  assert.match(backend, /cancelledCount/);
+  assert.match(backend, /cancelled_count/);
+  assert.match(fbpPage, /移除采购建议/);
+  assert.match(fbpPage, /恢复建议/);
+  assert.match(fbpPage, /不发送采购台/);
+});
+
 test("inventory can submit selected products and purchasing can filter warehouse applications", () => {
   assert.match(inventoryPage, /提交采购需求/);
   assert.match(inventoryPage, /WarehouseProcurementRequestDialog/);

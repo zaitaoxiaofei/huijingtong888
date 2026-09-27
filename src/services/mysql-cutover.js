@@ -5056,13 +5056,15 @@ export async function submitFbpShortageProcurementDraftsMysql(body = {}, userId 
   if (!items.length) throw new Error("请至少保留一条采购草稿。");
   return await withMysqlTransaction(async (connection) => {
     const ids = [];
+    let cancelledCount = 0;
     for (const item of items) {
       const requestIds = [...new Set((Array.isArray(item.request_ids) ? item.request_ids : [item.id]).map(Number).filter(Boolean))];
       const quantity = Math.max(0, Math.round(Number(item.quantity || 0)));
       if (!requestIds.length) continue;
       const placeholders = requestIds.map(() => "?").join(",");
       if (!quantity) {
-        await connection.execute(`UPDATE procurement_requests SET status = 'cancelled', approval_status = 'cancelled' WHERE id IN (${placeholders}) AND status = 'draft' AND source_type = 'fbp' AND request_reason_code = 'fbp_stock_shortage'`, requestIds);
+        const [cancelled] = await connection.execute(`UPDATE procurement_requests SET status = 'cancelled', approval_status = 'cancelled' WHERE id IN (${placeholders}) AND status = 'draft' AND source_type = 'fbp' AND request_reason_code = 'fbp_stock_shortage'`, requestIds);
+        cancelledCount += Number(cancelled.affectedRows || 0);
         continue;
       }
       const [draftRows] = await connection.execute(`SELECT id FROM procurement_requests WHERE id IN (${placeholders}) AND status = 'draft' AND source_type = 'fbp' AND request_reason_code = 'fbp_stock_shortage' ORDER BY id ASC FOR UPDATE`, requestIds);
@@ -5077,8 +5079,8 @@ export async function submitFbpShortageProcurementDraftsMysql(body = {}, userId 
       if (mergedIds.length) await connection.execute(`UPDATE procurement_requests SET status = 'cancelled', approval_status = 'cancelled' WHERE id IN (${mergedIds.map(() => "?").join(",")})`, mergedIds);
       if (updated.affectedRows) ids.push(retainedId);
     }
-    if (!ids.length) throw new Error("没有可发送的 FBP 采购草稿，请刷新后重试。");
-    return { ok: true, ids, submitted_count: ids.length };
+    if (!ids.length && !cancelledCount) throw new Error("没有可处理的 FBP 采购草稿，请刷新后重试。");
+    return { ok: true, ids, submitted_count: ids.length, cancelled_count: cancelledCount };
   });
 }
 
