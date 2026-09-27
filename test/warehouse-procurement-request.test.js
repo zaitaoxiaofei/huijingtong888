@@ -46,6 +46,16 @@ test("FBP shortage drafts group repeat adjustments by inventory product without 
   assert.match(fbpPage, /总原申请 \/ 总已通过/);
 });
 
+test("FBP shortage drafts expose pending purchase transit and let warehouse receive it before sending another request", () => {
+  assert.match(backend, /FROM inbound_records ir/);
+  assert.match(backend, /ir\.status = 'pending_arrival'/);
+  assert.match(backend, /purchase_transit_quantity/);
+  assert.match(fbpPage, /采购在途/);
+  assert.match(fbpPage, /采购在途明细/);
+  assert.match(fbpPage, /登记入库/);
+  assert.match(fbpPage, /\/api\/inbound-records\/\$\{record\.id\}/);
+});
+
 test("inventory can submit selected products and purchasing can filter warehouse applications", () => {
   assert.match(inventoryPage, /提交采购需求/);
   assert.match(inventoryPage, /WarehouseProcurementRequestDialog/);

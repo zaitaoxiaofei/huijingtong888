@@ -31,6 +31,7 @@ const adjustmentReasonOptions = [
 const adjustmentDialog = reactive({ visible: false, item: null, quantity: 0, reasonCode: "", reasonNote: "", submitting: false });
 const adjustmentHistoryDialog = reactive({ visible: false, loading: false, savingId: null, item: null, items: [] });
 const procurementDraftDialog = reactive({ visible: false, loading: false, submitting: false, items: [], page: 1, pageSize: 10 });
+const procurementTransitDialog = reactive({ visible: false, row: null, receivingId: null });
 const batchDetailDialog = reactive({ visible: false, loading: false, batch: null, orders: [] });
 const barcodePrintDialog = reactive({ visible: false, row: null, quantity: 1, recommended: 1, submitting: false });
 const barcodePrintResultDialog = reactive({ visible: false, row: null, quantity: 0, confirming: false });
@@ -681,6 +682,28 @@ async function submitProcurementDrafts() {
   } finally {
     procurementDraftDialog.submitting = false;
   }
+}
+
+function openProcurementTransit(row) {
+  procurementTransitDialog.row = row;
+  procurementTransitDialog.visible = true;
+}
+
+async function receiveProcurementTransit(record) {
+  try {
+    await ElMessageBox.confirm(`确认将 ${integer(record.quantity)} 件采购在途登记入库吗？确认后会增加本地库存。`, "登记采购入库", { type: "warning", confirmButtonText: "确认入库", cancelButtonText: "取消" });
+    procurementTransitDialog.receivingId = record.id;
+    await apiClient.put(`/api/inbound-records/${record.id}`, { status: "approved" });
+    ElMessage.success("采购在途已登记入库");
+    const productId = Number(procurementTransitDialog.row?.product_id || 0);
+    await openProcurementDrafts();
+    await loadPageData();
+    procurementTransitDialog.row = procurementDraftDialog.items.find((item) => Number(item.product_id) === productId) || null;
+    if (!procurementTransitDialog.row?.purchase_transit_records?.length) procurementTransitDialog.visible = false;
+  } catch (error) {
+    if (error === "cancel" || error === "close" || error?.message === "cancel") return;
+    ElMessage.error(error.message || "登记采购入库失败");
+  } finally { procurementTransitDialog.receivingId = null; }
 }
 
 function barcodePrintQuantity(row) {
@@ -1673,6 +1696,7 @@ onMounted(loadPageData);
         <el-table-column label="图片" width="86" align="center"><template #default="{ row }"><ProductImagePreview :src="row.image_url" :preview-list="row.image_url ? [row.image_url] : []" size="portrait" /></template></el-table-column>
         <el-table-column label="库存商品" min-width="240"><template #default="{ row }"><strong>{{ row.product_name }}</strong><small style="display:block;color:var(--el-text-color-secondary)">库存 ID：{{ row.inventory_number || '-' }}</small></template></el-table-column>
         <el-table-column label="总原申请 / 总已通过" width="155" align="center"><template #default="{ row }">{{ integer(row.requested_qty) }} / {{ integer(row.approved_qty) }}</template></el-table-column>
+        <el-table-column label="采购在途" width="135" align="center"><template #default="{ row }"><strong :class="Number(row.purchase_transit_quantity) ? 'is-positive' : ''">{{ integer(row.purchase_transit_quantity) }}</strong><el-button v-if="row.purchase_transit_records?.length" link type="primary" @click="openProcurementTransit(row)">查看明细</el-button></template></el-table-column>
         <el-table-column label="建议采购数量" width="160"><template #default="{ row }"><el-input-number v-model="row.quantity" :min="0" :precision="0" controls-position="right" style="width:130px" /></template></el-table-column>
         <el-table-column label="申请店铺" min-width="160"><template #default="{ row }"><div v-for="source in row.source_orders" :key="source.id">{{ source.shop_name || '-' }}</div></template></el-table-column>
         <el-table-column label="来源 FBP 备货单 / 申请时间" min-width="230"><template #default="{ row }"><div v-for="source in row.source_orders" :key="source.id"><strong>{{ source.order_no || `#${source.id}` }}</strong><small style="display:block;color:var(--el-text-color-secondary)">{{ dateText(source.created_at) }}</small></div></template></el-table-column>
@@ -1681,6 +1705,18 @@ onMounted(loadPageData);
       <PageFooterPagination v-if="procurementDraftDialog.items.length" :total="procurementDraftDialog.items.length" :page="procurementDraftDialog.page" :page-size="procurementDraftDialog.pageSize" :page-sizes="[10, 20]" style="margin-top:16px" @update:page="procurementDraftDialog.page = $event" @update:page-size="procurementDraftDialog.pageSize = $event; procurementDraftDialog.page = 1" />
       <el-empty v-if="!procurementDraftDialog.loading && !procurementDraftDialog.items.length" description="暂无待发送的 FBP 缺货采购草稿" />
       <template #footer><el-button @click="procurementDraftDialog.visible = false">取消</el-button><el-button type="primary" :disabled="procurementDraftDialog.loading || !procurementDraftDialog.items.length" :loading="procurementDraftDialog.submitting" @click="submitProcurementDrafts">确认并发送采购台</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="procurementTransitDialog.visible" title="采购在途明细" width="760px" destroy-on-close>
+      <el-alert title="这里展示全部尚未登记入库的采购在途，不受 FBP 备货单创建日期限制。确认实物已到仓后可逐笔登记入库；仍在途的采购可作为本次缺货判断依据。" type="info" :closable="false" show-icon />
+      <div v-if="procurementTransitDialog.row" class="procurement-transit-product"><ProductImagePreview :src="procurementTransitDialog.row.image_url" size="portrait" /><div><strong>{{ procurementTransitDialog.row.product_name }}</strong><span>库存 ID：{{ procurementTransitDialog.row.inventory_number || '-' }} · 在途合计 {{ integer(procurementTransitDialog.row.purchase_transit_quantity) }}</span></div></div>
+      <el-table :data="procurementTransitDialog.row?.purchase_transit_records || []" border style="margin-top:16px">
+        <el-table-column prop="purchase_order_no" label="采购单 / 来源" min-width="180" />
+        <el-table-column label="采购时间" width="170"><template #default="{ row }">{{ dateText(row.purchased_at) }}</template></el-table-column>
+        <el-table-column label="待入库数量" width="110" align="right"><template #default="{ row }">{{ integer(row.quantity) }}</template></el-table-column>
+        <el-table-column prop="note" label="备注" min-width="180" show-overflow-tooltip />
+        <el-table-column label="操作" width="110" fixed="right"><template #default="{ row }"><el-button link type="success" :loading="procurementTransitDialog.receivingId === row.id" @click="receiveProcurementTransit(row)">登记入库</el-button></template></el-table-column>
+      </el-table>
     </el-dialog>
 
     <el-dialog v-model="fbpFillResultDialog.visible" title="Ozon 填写结果" width="760px" destroy-on-close>

@@ -5016,8 +5016,32 @@ export async function fbpShortageProcurementDraftsMysql() {
       group.source_orders.push({ id: sourceOrderId, order_no: row.order_no, shop_name: row.shop_name, created_at: row.order_created_at });
     }
   }
+  const productIds = [...groups.keys()];
+  if (productIds.length) {
+    const transitRows = await mysqlQuery(`
+      SELECT ir.id, ir.product_id, ir.quantity, ir.created_at, ir.note,
+        COALESCE(po.purchased_at, po.created_at, ir.created_at) AS purchased_at,
+        po.order_no AS purchase_order_no, pr.request_group_no
+      FROM inbound_records ir
+      LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
+      LEFT JOIN procurement_requests pr ON pr.id = ir.procurement_request_id
+      WHERE ir.status = 'pending_arrival' AND ir.product_id IN (${productIds.map(() => "?").join(",")})
+      ORDER BY COALESCE(po.purchased_at, po.created_at, ir.created_at) DESC, ir.id DESC
+    `, productIds);
+    for (const row of transitRows) {
+      const group = groups.get(Number(row.product_id));
+      if (!group) continue;
+      group.purchase_transit_quantity = Number(group.purchase_transit_quantity || 0) + Number(row.quantity || 0);
+      (group.purchase_transit_records ||= []).push({
+        id: Number(row.id), quantity: Number(row.quantity || 0), purchased_at: row.purchased_at || row.created_at,
+        purchase_order_no: row.purchase_order_no || row.request_group_no || `入库记录 #${row.id}`, note: row.note || ""
+      });
+    }
+  }
   return [...groups.values()].map((group) => {
     group.request_reason_note = [...group._notes].join("；");
+    group.purchase_transit_quantity = Number(group.purchase_transit_quantity || 0);
+    group.purchase_transit_records ||= [];
     delete group._sourceItems;
     delete group._sourceOrders;
     delete group._notes;
