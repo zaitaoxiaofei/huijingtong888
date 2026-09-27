@@ -14,6 +14,7 @@ const activeTab = ref('current');
 const currentOrders = computed(() => (data.value?.orders || []).filter(row => row.needs_fulfillment));
 let loadVersion = 0;
 const labels = {
+  record_purchase: '补现货采购成本',
   historical_purchase_bulk: '批量补齐历史采购',
   historical_purchase: '补历史采购', receive: '补确认收货', link_purchase: '关联已有收货',
   historical_source: '登记其他历史来源', substitute: '登记订单实际替代用料',
@@ -32,7 +33,7 @@ const historicalCosts = computed(() => (data.value?.actions || []).flatMap(actio
 }));
 const selectedOrder = computed(() => data.value?.orders.find(row => row.order_item_id === form.order_item_id));
 const needsTarget = computed(() => ['convert', 'substitute'].includes(form.action_type));
-const needsMoney = computed(() => ['historical_purchase', 'revise_purchase'].includes(form.action_type));
+const needsMoney = computed(() => ['historical_purchase', 'revise_purchase', 'record_purchase'].includes(form.action_type));
 const historyAction = computed(() => ['historical_purchase', 'historical_source', 'substitute', 'receive', 'link_purchase'].includes(form.action_type));
 const batches = computed(() => (data.value?.batches || []).filter(row => row.status === (form.action_type === 'receive' ? 'pending_arrival' : 'approved'))
   .map(row => ({ ...row, selectable_quantity: Number(row.unallocated_quantity) + Number(selectedOrder.value?.receipt_claims?.find(claim => claim.batch_id === Number(row.id))?.quantity || 0) }))
@@ -121,6 +122,8 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
         <div class="ledger-metrics">
           <div><span>现货推算（以盘点为准）</span><strong>{{ Math.max(0, data.physical_estimate) }}</strong><small v-if="data.physical_estimate < 0">账面待核差异 {{ -data.physical_estimate }} 件</small></div>
           <div><span>当前订单现货覆盖</span><strong>{{ data.current_stock_reserved }}</strong></div>
+          <div><span>FBP 待发占用</span><strong>{{ data.fbp_reserved ?? '待核' }}</strong><small>审核通过占用，调减释放</small></div>
+          <div><span>扣除订单及 FBP 后可用</span><strong>{{ data.available_estimate }}</strong></div>
           <div><span>采购在途</span><strong>{{ data.incoming_quantity }}</strong></div>
           <div><span>当前订单在途覆盖</span><strong>{{ data.current_incoming }}</strong></div>
           <div class="ledger-shortage"><span>当前订单待采购</span><strong>{{ data.current_shortage }}</strong><small>历史缺记录不计入此数</small></div>
@@ -165,6 +168,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
           </el-tab-pane>
           <el-tab-pane label="采购数量与金额纠正" name="purchases" lazy>
             <p>已记录采购 {{ data.purchase_quantity }} 件 · 已收货 {{ data.received_quantity }} 件。补成本与实物入库分开处理，不重复增加现货。</p>
+            <div class="ledger-toolbar"><el-button type="primary" plain @click="edit('record_purchase')">补现货采购成本</el-button><span>仅用于实物已计入盘点、但未记录采购的货；已有记录请点“纠正记录”，避免重复补录。</span></div>
             <el-table :data="data.purchases" max-height="400">
               <el-table-column prop="order_no" label="采购单" min-width="160" />
               <el-table-column label="采购时间" width="180"><template #default="{ row }">{{ time(row.purchased_at) }}</template></el-table-column>
@@ -206,8 +210,12 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
         <el-form-item v-if="['receive', 'link_purchase'].includes(form.action_type)" label="已有采购收货批次"><el-select v-model="form.inbound_id" style="width:100%"><el-option v-for="batch in batches" :key="batch.id" :value="Number(batch.id)" :label="`${batch.purchase_order_no || '采购批次'} #${batch.id} · 可关联 ${batch.selectable_quantity} 件`" /></el-select></el-form-item>
         <el-form-item v-if="form.action_type === 'historical_purchase'" label="采购／补录日期"><el-date-picker v-model="form.purchased_at" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss+08:00" placeholder="北京时间" /><small>默认今天，可按凭证修改；不要求早于历史订单，不新增现货或在途。</small></el-form-item>
         <el-form-item v-if="form.action_type === 'historical_purchase'" label="库存影响">只补历史采购来源，不增加现货或在途。实物与账面不符请单独盘点核对。</el-form-item>
+        <template v-if="form.action_type === 'record_purchase'">
+          <el-form-item label="采购／补录日期"><el-date-picker v-model="form.purchased_at" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss+08:00" placeholder="北京时间" /><small>默认今天，可按实际凭证修改。</small></el-form-item>
+          <el-form-item label="库存影响">实物已盘点计入现货；本次只补数量与成本，不增加现货或采购在途。</el-form-item>
+        </template>
         <el-form-item v-if="form.action_type === 'receive'" label="库存影响"><el-radio-group v-model="form.inventory_effect"><el-radio value="already_accounted">实物已计入盘点／账面，只补收货记录</el-radio><el-radio value="missing_inbound">确认漏记入库，增加账面数量</el-radio></el-radio-group></el-form-item>
-        <template v-if="needsMoney"><el-form-item label="实际货款"><el-input-number v-model="form.amount" :min="0" :precision="2" /><span>金额未知填 0，保留待补状态</span></el-form-item><el-form-item label="实际运费"><el-input-number v-model="form.shipping_amount" :min="0" :precision="2" /></el-form-item></template>
+        <template v-if="needsMoney"><el-form-item label="实际货款"><el-input-number v-model="form.amount" :min="0" :precision="2" /><span>{{ form.action_type === 'record_purchase' ? '按采购凭证填写，货款须大于 0' : '金额未知填 0，保留待补状态' }}</span></el-form-item><el-form-item label="实际运费"><el-input-number v-model="form.shipping_amount" :min="0" :precision="2" /></el-form-item></template>
         <el-form-item v-if="form.action_type === 'revise_purchase'" label="入库记录"><el-checkbox v-model="form.correct_received">入库也录多了，同步纠正多记的入库</el-checkbox></el-form-item>
         <template v-if="needsTarget"><el-form-item :label="form.action_type === 'substitute' ? '实际使用来源商品' : '转换目标商品'"><el-select v-model="form.target_product_id" filterable remote :remote-method="value => search(value, true)" @change="selectTarget" style="width:100%"><el-option v-for="p in targetProducts" :key="p.id" :value="Number(p.id)" :label="`${p.name} · ${p.code || ''}`" /></el-select></el-form-item><el-form-item :label="form.action_type === 'substitute' ? '来源实际消耗数量' : '目标入库数量'"><el-input-number v-model="form.target_quantity" :min="1" :precision="0" /><span v-if="target">该商品本地库存 {{ target.local_stock }}</span></el-form-item></template>
         <el-form-item v-if="form.action_type === 'stocktake'" label="本地实际盘点数量"><el-input-number v-model="form.counted_quantity" placeholder="无实物请填 0" :min="0" :precision="0" /></el-form-item>
@@ -224,7 +232,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
 <style scoped>
 .ledger-toolbar,.ledger-product { display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap; }
 .ledger-image { width:64px;height:84px;flex:none;display:flex;align-items:center;justify-content:center;background:#f5f7fa; }
-.ledger-metrics { display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:16px 0; }
+.ledger-metrics { display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:12px;margin:16px 0; }
 .ledger-metrics > div { display:grid;gap:8px;padding:14px;background:#f5f7fa;border-radius:8px; }
 .ledger-metrics span { color:#606266;font-size:12px; }.ledger-metrics strong { font-size:22px; }.ledger-warning strong { color:#b45309; }
 .ledger-shortage { color:var(--el-color-danger); }

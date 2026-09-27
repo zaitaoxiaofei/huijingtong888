@@ -1392,7 +1392,19 @@ onMounted(async () => {
           </template>
         </el-table-column>
         <el-table-column label="库存状态" min-width="250" align="center">
-          <template #default="{ row }"><div class="inventory-metrics"><div><span>本地账面余额</span><strong>{{ Number(row.stock || 0) }}</strong></div><div><span>FBP库存</span><strong>{{ Number(row.fbp_available || 0) }}</strong></div><div><span>采购在途</span><strong>{{ Number(row.incoming_stock || 0) }}</strong></div><div><span>FBP调拨在途</span><strong>{{ Number(row.fbp_transfer_in_transit_qty || 0) }}</strong></div></div><small>账面余额不等于实物，请在明细中核对</small><div class="row-actions"><el-button size="small" type="primary" plain @click="openLedger(row)">库存明细／盘点</el-button><el-button size="small" plain @click="openLedger(row, 'purchases')">核对采购成本</el-button></div></template>
+          <template #default="{ row }">
+            <div class="inventory-metrics">
+              <div><span>现货推算</span><strong>{{ row.physical_stock_estimate == null ? '待核' : Math.max(0, row.physical_stock_estimate) }}</strong></div>
+              <div><span>未占用现货</span><strong>{{ row.unreserved_stock_estimate ?? '待核' }}</strong></div>
+              <div><span>订单现货覆盖</span><strong>{{ row.order_stock_reserved ?? '待核' }}</strong></div>
+              <div><span>FBP 待发占用</span><strong>{{ row.fbp_reserved ?? '待核' }}</strong></div>
+              <div><span>采购在途</span><strong>{{ Number(row.incoming_stock || 0) }}</strong></div>
+              <div><span>FBP调拨在途</span><strong>{{ Number(row.fbp_transfer_in_transit_qty || 0) }}</strong></div>
+              <div><span>FBP库存</span><strong>{{ Number(row.fbp_available || 0) }}</strong></div>
+            </div>
+            <small>现货以盘点为准；采购在途未计入现货</small>
+            <div class="row-actions"><el-button size="small" type="primary" plain @click="openLedger(row)">库存明细／盘点</el-button><el-button size="small" plain @click="openLedger(row, 'purchases')">核对采购成本</el-button></div>
+          </template>
         </el-table-column>
         <el-table-column label="历史订单" min-width="220" align="center">
           <template #default="{ row }"><div class="order-history-summary"><span>出单数 <strong>{{ Number(row.historical_total_order_count || 0) }}</strong></span><span>取消 <strong class="history-cancelled">{{ Number(row.historical_cancelled_quantity || 0) }}</strong></span><span>退货 <strong class="history-returned">{{ Number(row.historical_returned_quantity || 0) }}</strong></span><el-button link type="primary" @click="openOrderHistory(row)">查看明细</el-button></div></template>

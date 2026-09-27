@@ -1167,6 +1167,7 @@ async function saveStructuredNamingMysql(productId, body = {}, connection = null
 }
 
 function invalidateFbpPlanningCachesMysql() {
+  invalidateOrderProcurementCoverage();
   invalidateMasterDataCache("stock-alerts:fbp-base:v1");
   invalidateMasterDataCache("stock-alerts:base");
   invalidateMasterDataCache("stock-alerts:base:v2");
@@ -2554,6 +2555,7 @@ async function classifyOrderAccountingMysql(row = {}) {
 
 async function orderProcurementCoverageMysql(options = {}) {
   await ensureProcurementLedgerSchema(mysqlExecute);
+  await ensureFbpReplenishmentSchemaMysql();
   const openSql = `(${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")})
     AND NOT (${orderStatusSqlMysql("cancelled")}) AND NOT (${orderStatusSqlMysql("delivered")})`;
   return await loadOrderProcurementCoverage(mysqlQuery, openSql, options);
@@ -14533,11 +14535,16 @@ export async function procurementRequestsMysql(query = {}) {
   // Ignore legacy deferCoverage clients: presentation speed cannot change demand.
   const coverage = queueCoverage || await orderProcurementCoverageMysql({ productIds: groupedPage?.productIds || [] });
   const operationalByProduct = new Map();
+  const inventoryByProduct = new Map((coverage.inventory_stocks || []).map(stock => [Number(stock.product_id), {
+    ledger: Number(stock.ledger || 0), physical: Number(stock.ledger || 0) + Number(stock.open_deducted || 0),
+    fbp_reserved: Number(stock.fbp_reserved || 0), order_reserved: 0
+  }]));
   const historicalIncomingByProduct = new Map();
   const historicalMissingByProduct = new Map();
   for (const order of coverage.values()) {
     if (order.stock_location === 'FBP') continue;
     for (const item of order.items) {
+      if (order.needs_fulfillment && inventoryByProduct.has(item.product_id)) inventoryByProduct.get(item.product_id).order_reserved += Number(item.stock_quantity || 0);
       if (order.needs_fulfillment) operationalByProduct.set(item.product_id,
         (operationalByProduct.get(item.product_id) || 0) + item.shortage_quantity);
       if (order.entered_transport) historicalIncomingByProduct.set(item.product_id,
@@ -14549,6 +14556,14 @@ export async function procurementRequestsMysql(query = {}) {
     }
   }
   for (const row of rows) {
+    const inventory = inventoryByProduct.get(Number(row.product_id)) || (Number(row.product_id) > 0 ? { ledger: 0, physical: 0, fbp_reserved: 0, order_reserved: 0 } : null);
+    if (inventory) {
+      row.stock = inventory.ledger;
+      row.physical_stock_estimate = inventory.physical;
+      row.fbp_reserved = inventory.fbp_reserved;
+      row.order_stock_reserved = inventory.order_reserved;
+      row.unreserved_stock_estimate = Math.max(0, inventory.physical - inventory.fbp_reserved - inventory.order_reserved);
+    }
     row.operational_shortage = operationalByProduct.get(Number(row.product_id)) || 0;
     const sourceOrder = coverage.get(Number(row.source_order_id));
     if (sourceOrder) row.operational_needs_fulfillment = sourceOrder.needs_fulfillment && sourceOrder.stock_location !== 'FBP';
@@ -30069,6 +30084,7 @@ const procurementLedgerService = createProcurementLedgerService({
   prepare: async () => {
     ensureMysqlCutoverEnabled();
     await ensureProcurementLedgerSchema(mysqlExecute);
+    await ensureFbpReplenishmentSchemaMysql();
     await ensureStockLocationSchemaMysql();
     await ensureProductCompositionSchemaMysql();
     await ensureProcurementOrderSourceSchemaMysql();

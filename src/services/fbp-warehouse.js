@@ -15,10 +15,7 @@ export async function loadWarehouseFacts(query, productIds, localPredicate) {
       FROM fbp_transfer_records WHERE product_id IN (${marks})
         AND status NOT IN ('draft', 'cancelled') AND shipped_at IS NOT NULL
       ) shipments WHERE latest_product = 1 OR latest_sku = 1 OR status IN ('sent', 'in_transit', 'received')`, ids),
-    query(`SELECT i.product_id, SUM(GREATEST(i.approved_qty + COALESCE(a.quantity, 0), 0)) AS quantity
-      FROM fbp_replenishment_order_items i JOIN fbp_replenishment_orders o ON o.id = i.order_id
-      LEFT JOIN (SELECT item_id, SUM(adjustment_qty) AS quantity FROM fbp_replenishment_item_adjustments GROUP BY item_id) a ON a.item_id = i.id
-      WHERE i.product_id IN (${marks}) AND o.status IN ('approved', 'ozon_created') GROUP BY i.product_id`, ids)
+    loadFbpReservations(query, ids)
   ]);
   const result = new Map(ids.map(id => [id, { ledger_stock: 0, procurement_incoming: 0, fbp_pending: 0, reserved_fbp: 0, last_shipped_qty: 0, last_shipped_at: null, sku_shipments: {} }]));
   for (const row of stock) result.get(Number(row.product_id)).ledger_stock = Number(row.quantity);
@@ -69,4 +66,12 @@ export async function appendPrintRecord(connection, body, userId) {
   [quantity, userId || null, itemId, orderId]);
   await connection.execute('UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [orderId]);
   return { ok: true, barcode_printed_qty: Number(rows[0].barcode_printed_qty || 0) + quantity };
+}
+export async function loadFbpReservations(query, productIds = []) {
+  const ids = [...new Set(productIds.map(Number).filter(id => Number.isSafeInteger(id) && id > 0))];
+  return query(`SELECT i.product_id, SUM(GREATEST(i.approved_qty + COALESCE(a.quantity, 0), 0)) AS quantity
+    FROM fbp_replenishment_order_items i JOIN fbp_replenishment_orders o ON o.id = i.order_id
+    LEFT JOIN (SELECT item_id, SUM(adjustment_qty) AS quantity FROM fbp_replenishment_item_adjustments GROUP BY item_id) a ON a.item_id = i.id
+    WHERE o.status IN ('approved', 'ozon_created')${ids.length ? ` AND i.product_id IN (${ids.map(() => '?').join(',')})` : ''}
+    GROUP BY i.product_id`, ids);
 }

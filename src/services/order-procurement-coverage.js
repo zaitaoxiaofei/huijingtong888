@@ -18,7 +18,7 @@ export function planPartialReceipt(record, quantity, expectedQuantity) {
 // creates purchases from a shipping status. All quantities use physical product units.
 export function calculateOrderProcurementCoverage({ demands = [], stocks = [], allocations = [], inbounds = [], requests = [], marks = [], sources = [], stockSources = [] }) {
   const stockByProduct = new Map(stocks.map(row => [Number(row.product_id), row]));
-  const pools = new Map(stocks.map(row => [Number(row.product_id), positive(Number(row.ledger || 0) + Number(row.open_deducted || 0))]));
+  const pools = new Map(stocks.map(row => [Number(row.product_id), positive(Number(row.ledger || 0) + Number(row.open_deducted || 0) - positive(row.fbp_reserved))]));
   const requestById = new Map(requests.map(row => [Number(row.id), row]));
   const batches = [...inbounds, ...stockSources.map(row => ({ ...row, id: -Number(row.id), status: 'approved', stock_source: true }))].filter(row => ['pending_arrival', 'approved'].includes(row.status)).map(row => ({ ...row, remaining: positive(row.quantity) }));
   const batchesByProduct = new Map();
@@ -108,6 +108,10 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
   // shared stock. This prevents receipt + stock from covering two orders.
   for (const detail of details) {
     if (Number(detail.needs_fulfillment) && detail.stock_location !== 'FBP') {
+      // Once physically counted, old receipts remain cost/source evidence only.
+      // They cannot override the counted supply or preempt FIFO allocation.
+      const stock = stockByProduct.get(Number(detail.product_id));
+      if (stock?.stocktake_id || positive(stock?.fbp_reserved)) continue;
       pools.set(Number(detail.product_id), positive((pools.get(Number(detail.product_id)) || 0) - detail.received_quantity - detail.documented_quantity));
     }
   }
@@ -119,10 +123,11 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
     detail.inventory_needs_review = detail.stock_location !== 'FBP' && Number(stock.ledger || 0) + Number(stock.open_deducted || 0) < 0;
     const sourceMark = markByItem.get(`${detail.order_item_id}:${productId}`);
     if (Number(detail.needs_fulfillment) && detail.stock_location !== 'FBP') {
-      let needed = positive(detail.quantity - detail.received_quantity - detail.documented_quantity - detail.incoming_quantity);
+      const recordedSupply = stock.stocktake_id || positive(stock.fbp_reserved) ? 0 : detail.received_quantity + detail.documented_quantity;
+      let needed = positive(detail.quantity - recordedSupply - detail.incoming_quantity);
       const stockQuantity = Math.min(needed, pools.get(productId) || 0);
       pools.set(productId, positive((pools.get(productId) || 0) - stockQuantity));
-      detail.stock_quantity = detail.received_quantity + detail.documented_quantity + stockQuantity;
+      detail.stock_quantity = recordedSupply + stockQuantity;
       needed -= stockQuantity;
       for (const batch of batchesByProduct.get(productId) || []) {
         if (batch.status !== 'pending_arrival' || Number(batch.product_id) !== productId || !needed) continue;
@@ -198,6 +203,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
       shortage_quantity: detail.shortage_quantity, missing_record_quantity: detail.missing_record_quantity,
       missing_purchase_quantity: detail.missing_purchase_quantity, missing_receipt_quantity: detail.missing_receipt_quantity, missing_amount: detail.missing_amount, ledger_stock: detail.ledger_stock,
       physical_stock_estimate: detail.physical_stock_estimate,
+      product_fbp_reserved: positive(stockByProduct.get(Number(detail.product_id))?.fbp_reserved),
       inventory_needs_review: detail.inventory_needs_review });
     for (const batch of detail.batches) if (!order.batches.some(b => Number(b.id) === Number(batch.id))) {
       const { remaining, ...record } = batch;

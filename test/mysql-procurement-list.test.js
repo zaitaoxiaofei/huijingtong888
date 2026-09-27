@@ -48,3 +48,12 @@ test("historical procurement totals belong to a product and are not multiplied b
   assert.equal(grouped.historical_purchase_count, 2);
   assert.equal(groupProcurementRequestsMysql(rows).rows[0].historical_purchase_amount, 0);
 });
+test('shared physical stock and FBP reservations stay product totals, not sums of request rows', () => {
+  const rows = [1, 2].map(id => ({ id, product_id: 10, status: 'pending', demand_type: 'warehouse_request', quantity: 2,
+    stock: -5, physical_stock_estimate: 10, fbp_reserved: 4, order_stock_reserved: 3, unreserved_stock_estimate: 3 }));
+  const result = groupProcurementRequestsMysql(rows, {}).rows[0];
+  assert.equal(result.physical_stock_estimate, 10);
+  assert.equal(result.fbp_reserved, 4);
+  assert.equal(result.order_stock_reserved, 3);
+  assert.equal(result.unreserved_stock_estimate, 3);
+});

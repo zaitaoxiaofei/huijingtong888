@@ -83,6 +83,7 @@ test('conversion balances both products, and counts never borrow incoming or FBP
   const plan = planLedgerAction(snapshot({ local_stock: 10 }), body('convert', { quantity: 10, target_product_id: 11, target_quantity: 5 }));
   assert.equal(plan.local_delta, -10);
   assert.equal(plan.target_delta, 5);
+  assert.throws(() => planLedgerAction(snapshot({ local_stock: 10, available_estimate: 2 }), body('convert', { quantity: 3, target_product_id: 11, target_quantity: 3 })), /未占用现货/);
   assert.throws(() => planLedgerAction(snapshot(), body('convert', { target_product_id: 11, target_quantity: 2 })), /本地库存不足/);
   const count = planLedgerAction(snapshot({ local_stock: 10 }), body('stocktake', { counted_quantity: 0 }));
   assert.equal(count.local_delta, -10);
@@ -135,6 +136,19 @@ function fixture(failSecond = false, overrides = {}) {
   });
   return { service, state: () => state, executed, coverageProducts, recordedCosts };
 }
+
+test('matching stocktake records a zero-delta physical baseline without inventing inventory', async () => {
+  const f = fixture();
+  const before = await f.service.read({ product_id: 10 });
+  const input = { action_type: 'stocktake', product_id: 10, counted_quantity: before.physical_estimate,
+    reason: '仓库清点确认，与账面一致', revision: before.revision, request_key: 'stocktake-zero-test-001' };
+  const result = await f.service.apply(input, 1);
+  assert.equal(result.local_delta, 0);
+  assert.equal(f.state().movements.at(-1).source_type, 'reconciliation_stocktake');
+  assert.equal(f.state().movements.at(-1).quantity_delta, 0);
+  await f.service.apply(input, 1);
+  assert.equal(f.state().movements.filter(row => row.source_type === 'reconciliation_stocktake').length, 1);
+});
 
 test('bulk history fill allocates only missing purchases in transport order and conserves both amounts', () => {
   const state = snapshot({ orders: [

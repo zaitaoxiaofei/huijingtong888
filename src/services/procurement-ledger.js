@@ -138,15 +138,14 @@ export function planLedgerAction(snapshot, body) {
     result.target_product_id = integer(body.target_product_id, '转换目标商品');
     result.local_delta = -result.quantity;
     result.target_delta = integer(body.target_quantity, '转换入库数量');
-    if (result.quantity > snapshot.local_stock) throw new Error('转换来源的本地库存不足，请先盘点核对，不能借用 FBP 或采购在途库存');
+    if (result.quantity > (snapshot.available_estimate ?? snapshot.local_stock)) throw new Error('转换来源的本地库存不足，请核对未占用现货，不能借用订单占用、FBP 占用或采购在途库存');
   } else if (['damage', 'loss', 'stocktake'].includes(type)) {
     if (type === 'stocktake') {
       Object.assign(result, countedStock(snapshot, body.counted_quantity));
       result.local_delta = result.stocktake_delta;
-      if (!result.local_delta) throw new Error('实盘数量与账面相同，无需调整');
     } else {
       result.quantity = integer(body.quantity, '损失数量');
-      if (result.quantity > snapshot.local_stock) throw new Error('损失数量超过本地账面库存，请先核对盘点结果');
+      if (result.quantity > (snapshot.physical_estimate ?? snapshot.local_stock)) throw new Error('损失数量超过本地现货推算，请先核对盘点结果');
       result.local_delta = -result.quantity;
     }
   } else if (type === 'revise_purchase') {
@@ -173,8 +172,8 @@ export function planLedgerAction(snapshot, body) {
   return result;
 }
 
-export function summarizeLedger(product, movements, purchases, orders) {
-  const local = movements.filter(row => row.stock_location !== 'FBP');
+export function summarizeLedger(product, movements, purchases, orders, fbpReserved = 0) {
+  const local = movements.filter(row => row.stock_location !== 'FBP' && !['fbp_replenishment_reserve', 'fbp_replenishment_reserve_release'].includes(row.source_type));
   const sum = (rows, fn) => rows.reduce((total, row) => total + Number(fn(row) || 0), 0);
   // Open orders may already have posted outbound movements; those goods are
   // still physically in the warehouse until shipment.
@@ -184,7 +183,7 @@ export function summarizeLedger(product, movements, purchases, orders) {
   const reserved = sum(orders.filter(row => row.needs_fulfillment), row => row.stock_quantity);
   return {
     product, local_stock: localStock, physical_estimate: physical, open_order_deducted: openDeducted,
-    current_stock_reserved: reserved, available_estimate: Math.max(0, physical - reserved),
+    current_stock_reserved: reserved, fbp_reserved: fbpReserved, available_estimate: Math.max(0, physical - reserved - fbpReserved),
     purchase_quantity: sum(purchases, row => row.actual_quantity),
     received_quantity: sum(purchases, row => row.received_quantity),
     incoming_quantity: sum(purchases, row => row.pending_quantity),
@@ -225,7 +224,9 @@ export function createProcurementLedgerService(hooks) {
       FROM inventory_movements WHERE product_id = ? AND status = 'posted' AND source_type = 'order_outbound'
       AND COALESCE(stock_location, 'LOCAL') != 'FBP' GROUP BY related_order_item_id`, [productId]);
     for (const order of orders) order.outbound_quantity = Number(outbound.find(row => Number(row.order_item_id) === order.order_item_id)?.quantity || 0);
-    const value = summarizeLedger(products[0], movements, purchases, orders);
+    const fbpReserved = Number(projection.inventory_stocks?.find(row => Number(row.product_id) === productId)?.fbp_reserved || 0);
+    const value = summarizeLedger(products[0], movements, purchases, orders, fbpReserved);
+    value.stocktake_id = Number(projection.inventory_stocks?.find(row => Number(row.product_id) === productId)?.stocktake_id || 0);
     value.batches = (projection.available_batches || []).filter(row => Number(row.product_id) === productId);
     const posted = await run(`SELECT source_ref, SUM(quantity_delta) AS quantity FROM inventory_movements
       WHERE product_id = ? AND status = 'posted' AND source_type IN ('purchase_inbound', 'purchase_inbound_correction', 'historical_receipt_offset')
@@ -279,7 +280,7 @@ export function createProcurementLedgerService(hooks) {
       if (plan.target_product_id) {
         const target = await snapshot(plan.target_product_id, run);
         if (body.target_revision !== target.revision) throw new Error('另一商品的库存已变化，请重新选择并核对');
-        if (target.local_stock + plan.target_delta < 0) throw new Error('实际替代来源商品本地库存不足，请先核对');
+        if (plan.target_delta < 0 && -plan.target_delta > target.available_estimate) throw new Error('实际替代来源商品未占用现货不足，请先核对订单及 FBP 占用');
         const components = await run('SELECT product_id FROM product_components WHERE product_id IN (?, ?) LIMIT 1', ids);
         if (components.length) throw new Error('组合商品请展开到实际库存子商品后进行替代或转换，避免重复记账');
       }
@@ -289,9 +290,9 @@ export function createProcurementLedgerService(hooks) {
       const actionId = Number(action.insertId);
       const note = `对账 #${actionId}：${plan.reason}`;
       const movement = async (id, delta, sourceType = 'reconciliation_adjustment', sourceRef = `reconciliation_${actionId}`) => {
-        if (!delta) return;
+        if (!delta && sourceType !== 'reconciliation_stocktake') return;
         await postMovement(connection, { product_id: id, quantity_delta: delta, source_type: sourceType,
-          source_ref: sourceRef, stock_location: 'LOCAL', movement_type: delta > 0 ? 'MANUAL_ADJUST' : 'ORDER_SHIPPED',
+          source_ref: sourceRef, stock_location: 'LOCAL', movement_type: delta >= 0 ? 'MANUAL_ADJUST' : 'ORDER_SHIPPED',
           owner_person_id: actor, operator: String(actor), note });
       };
       const source = async (inboundId = null) => connection.execute(`INSERT INTO procurement_history_sources
@@ -439,7 +440,7 @@ export function createProcurementLedgerService(hooks) {
     if (plan.target_product_id) {
       target = await snapshot(plan.target_product_id);
       if (body.target_revision !== target.revision) throw new Error('另一商品已变化，请重新选择');
-      if (target.local_stock + plan.target_delta < 0) throw new Error('替代来源商品本地库存不足');
+      if (plan.target_delta < 0 && -plan.target_delta > target.available_estimate) throw new Error('替代来源商品未占用现货不足，请先核对订单及 FBP 占用');
     }
     return { ...plan, revision: before.revision, local_before: before.local_stock, local_after: before.local_stock + plan.local_delta,
       ...(plan.counted_quantity !== undefined ? { physical_after: plan.counted_quantity } : {}),

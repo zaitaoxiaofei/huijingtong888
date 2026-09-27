@@ -86,6 +86,20 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     await countDialog.getByRole('button', { name: '确认保存纠正记录' }).click();
     assert.equal(requests.at(-1).body.action_type, 'stocktake');
     assert.equal(requests.at(-1).body.counted_quantity, 0);
+    await page.getByRole('tab', { name: '采购数量与金额纠正' }).click();
+    await page.getByRole('button', { name: '补现货采购成本', exact: true }).click();
+    const costDialog = page.getByRole('dialog', { name: '补现货采购成本', exact: true });
+    await costDialog.getByRole('spinbutton').nth(0).fill('10');
+    await costDialog.getByRole('spinbutton').nth(1).fill('200');
+    await costDialog.locator('textarea').fill('实物已盘点，按供应商凭证补采购成本');
+    await costDialog.getByRole('button', { name: '预览影响' }).click();
+    await costDialog.getByText('本地账面库存：0 → 0').waitFor();
+    await costDialog.getByRole('button', { name: '确认保存纠正记录' }).click();
+    assert.equal(requests.at(-1).body.action_type, 'record_purchase');
+    assert.equal(requests.at(-1).body.inventory_effect, 'already_accounted');
+    assert.equal(requests.at(-1).body.amount, 200);
+    assert.equal(requests.at(-1).body.quantity, 10);
+    assert.match(requests.at(-1).body.purchased_at, /T00:00:00\+08:00$/);
     assert.deepEqual(errors, []);
   } finally { await browser?.close(); await fs.rm(output, { recursive: true, force: true }); }
 });

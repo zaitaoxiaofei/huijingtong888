@@ -15,6 +15,8 @@ test('procurement uses the displayed non-FBP ledger, including legacy warehouse 
       (5, 34, 'posted', 'LOCAL', 'return_in', NULL),
       (5, -320, 'posted', 'LOCAL', 'order_outbound', NULL),
       (5, -10, 'posted', 'LOCAL', 'fbp_transfer_outbound', NULL),
+      (5, 70, 'posted', 'LOCAL', 'fbp_replenishment_reserve', NULL),
+      (5, -20, 'posted', 'LOCAL', 'fbp_replenishment_reserve_release', NULL),
       (5, 900, 'posted', 'FBP', 'purchase_inbound', NULL),
       (5, 900, 'draft', 'UNKNOWN', 'purchase_inbound', NULL);`);
   const demands = [1, 2].map(id => ({ order_id: id, order_item_id: id, product_id: 5,
