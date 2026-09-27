@@ -4966,17 +4966,63 @@ export async function updateFbpReplenishmentItemAdjustmentReasonMysql(body = {},
 export async function fbpShortageProcurementDraftsMysql() {
   ensureMysqlCutoverEnabled();
   await ensureProcurementFlexibleRequestSchemaMysql();
-  return await mysqlQuery(`
-    SELECT pr.id, pr.quantity, pr.request_reason_note, pr.source_order_id, pr.source_order_item_id, pr.created_at,
+  const rows = await mysqlQuery(`
+    SELECT pr.id, pr.product_id, pr.quantity, pr.request_reason_note, pr.source_order_id, pr.source_order_item_id, pr.created_at,
       p.name AS product_name, p.inventory_number, p.image_url,
-      o.order_no, i.requested_qty, i.approved_qty
+      o.order_no, o.created_at AS order_created_at, s.name AS shop_name,
+      i.requested_qty, i.approved_qty
     FROM procurement_requests pr
     JOIN products p ON p.id = pr.product_id
     LEFT JOIN fbp_replenishment_orders o ON o.id = pr.source_order_id
     LEFT JOIN fbp_replenishment_order_items i ON i.id = pr.source_order_item_id
+    LEFT JOIN shops s ON s.id = o.shop_id
     WHERE pr.status = 'draft' AND pr.source_type = 'fbp' AND pr.request_reason_code = 'fbp_stock_shortage'
     ORDER BY pr.created_at DESC, pr.id DESC
   `);
+  const groups = new Map();
+  for (const row of rows) {
+    const productId = Number(row.product_id);
+    if (!groups.has(productId)) {
+      groups.set(productId, {
+        id: productId,
+        product_id: productId,
+        product_name: row.product_name,
+        inventory_number: row.inventory_number,
+        image_url: row.image_url,
+        quantity: 0,
+        request_ids: [],
+        request_reason_note: "",
+        requested_qty: 0,
+        approved_qty: 0,
+        source_orders: [],
+        _sourceItems: new Set(),
+        _sourceOrders: new Set(),
+        _notes: new Set()
+      });
+    }
+    const group = groups.get(productId);
+    group.quantity += Number(row.quantity || 0);
+    group.request_ids.push(Number(row.id));
+    if (row.request_reason_note) group._notes.add(String(row.request_reason_note));
+    const sourceItemId = Number(row.source_order_item_id || 0);
+    if (sourceItemId && !group._sourceItems.has(sourceItemId)) {
+      group._sourceItems.add(sourceItemId);
+      group.requested_qty += Number(row.requested_qty || 0);
+      group.approved_qty += Number(row.approved_qty || 0);
+    }
+    const sourceOrderId = Number(row.source_order_id || 0);
+    if (sourceOrderId && !group._sourceOrders.has(sourceOrderId)) {
+      group._sourceOrders.add(sourceOrderId);
+      group.source_orders.push({ id: sourceOrderId, order_no: row.order_no, shop_name: row.shop_name, created_at: row.order_created_at });
+    }
+  }
+  return [...groups.values()].map((group) => {
+    group.request_reason_note = [...group._notes].join("；");
+    delete group._sourceItems;
+    delete group._sourceOrders;
+    delete group._notes;
+    return group;
+  });
 }
 
 export async function submitFbpShortageProcurementDraftsMysql(body = {}, userId = null) {
@@ -4987,19 +5033,25 @@ export async function submitFbpShortageProcurementDraftsMysql(body = {}, userId 
   return await withMysqlTransaction(async (connection) => {
     const ids = [];
     for (const item of items) {
-      const id = Number(item.id || 0);
+      const requestIds = [...new Set((Array.isArray(item.request_ids) ? item.request_ids : [item.id]).map(Number).filter(Boolean))];
       const quantity = Math.max(0, Math.round(Number(item.quantity || 0)));
-      if (!id) continue;
+      if (!requestIds.length) continue;
+      const placeholders = requestIds.map(() => "?").join(",");
       if (!quantity) {
-        await connection.execute("UPDATE procurement_requests SET status = 'cancelled', approval_status = 'cancelled' WHERE id = ? AND status = 'draft' AND source_type = 'fbp'", [id]);
+        await connection.execute(`UPDATE procurement_requests SET status = 'cancelled', approval_status = 'cancelled' WHERE id IN (${placeholders}) AND status = 'draft' AND source_type = 'fbp' AND request_reason_code = 'fbp_stock_shortage'`, requestIds);
         continue;
       }
+      const [draftRows] = await connection.execute(`SELECT id FROM procurement_requests WHERE id IN (${placeholders}) AND status = 'draft' AND source_type = 'fbp' AND request_reason_code = 'fbp_stock_shortage' ORDER BY id ASC FOR UPDATE`, requestIds);
+      if (!draftRows.length) continue;
+      const retainedId = Number(draftRows[0].id);
+      const mergedIds = draftRows.slice(1).map((row) => Number(row.id));
       const [updated] = await connection.execute(`
         UPDATE procurement_requests
         SET quantity = ?, request_reason_note = ?, status = 'submitted', approval_status = 'submitted', person_id = COALESCE(person_id, ?)
         WHERE id = ? AND status = 'draft' AND source_type = 'fbp' AND request_reason_code = 'fbp_stock_shortage'
-      `, [quantity, String(item.note || "").trim().slice(0, 500) || null, userId || null, id]);
-      if (updated.affectedRows) ids.push(id);
+      `, [quantity, String(item.note || "").trim().slice(0, 500) || null, userId || null, retainedId]);
+      if (mergedIds.length) await connection.execute(`UPDATE procurement_requests SET status = 'cancelled', approval_status = 'cancelled' WHERE id IN (${mergedIds.map(() => "?").join(",")})`, mergedIds);
+      if (updated.affectedRows) ids.push(retainedId);
     }
     if (!ids.length) throw new Error("没有可发送的 FBP 采购草稿，请刷新后重试。");
     return { ok: true, ids, submitted_count: ids.length };

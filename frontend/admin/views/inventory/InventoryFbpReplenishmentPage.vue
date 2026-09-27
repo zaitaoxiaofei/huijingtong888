@@ -30,7 +30,7 @@ const adjustmentReasonOptions = [
 ];
 const adjustmentDialog = reactive({ visible: false, item: null, quantity: 0, reasonCode: "", reasonNote: "", submitting: false });
 const adjustmentHistoryDialog = reactive({ visible: false, loading: false, savingId: null, item: null, items: [] });
-const procurementDraftDialog = reactive({ visible: false, loading: false, submitting: false, items: [] });
+const procurementDraftDialog = reactive({ visible: false, loading: false, submitting: false, items: [], page: 1, pageSize: 20 });
 const batchDetailDialog = reactive({ visible: false, loading: false, batch: null, orders: [] });
 const barcodePrintDialog = reactive({ visible: false, row: null, quantity: 1, recommended: 1, submitting: false });
 const barcodePrintResultDialog = reactive({ visible: false, row: null, quantity: 0, confirming: false });
@@ -38,6 +38,10 @@ const fbpFillResultDialog = reactive({ visible: false, summary: "", successCount
 const barcodeLoadingKeys = reactive({});
 const receiptDialog = reactive({ visible: false, loading: false, submitting: false, orders: [], rows: [] });
 const allocationDialog = reactive({ visible: false, saving: false, inventory: null, items: [], reason: "" });
+const procurementDraftPagedItems = computed(() => {
+  const start = (procurementDraftDialog.page - 1) * procurementDraftDialog.pageSize;
+  return procurementDraftDialog.items.slice(start, start + procurementDraftDialog.pageSize);
+});
 
 async function loadReceiptRows() {
   const rows = [];
@@ -652,6 +656,7 @@ async function saveAdjustmentHistoryReason(item) {
 async function openProcurementDrafts() {
   procurementDraftDialog.visible = true;
   procurementDraftDialog.loading = true;
+  procurementDraftDialog.page = 1;
   try {
     const rows = await apiClient.get("/api/fbp-replenishment-orders/procurement-drafts", { noCache: true });
     procurementDraftDialog.items = (rows || []).map((row) => ({ ...row, quantity: Number(row.quantity || 0), note: row.request_reason_note || "" }));
@@ -667,7 +672,7 @@ async function submitProcurementDrafts() {
   if (!items.some((item) => Number(item.quantity) > 0)) return ElMessage.warning("请至少保留一条采购数量大于 0 的草稿");
   procurementDraftDialog.submitting = true;
   try {
-    const result = await apiClient.post("/api/fbp-replenishment-orders/procurement-drafts/submit", { items: items.map((item) => ({ id: item.id, quantity: Number(item.quantity), note: item.note })) });
+    const result = await apiClient.post("/api/fbp-replenishment-orders/procurement-drafts/submit", { items: items.map((item) => ({ request_ids: item.request_ids, quantity: Number(item.quantity), note: item.note })) });
     ElMessage.success(`已发送 ${result.submitted_count || 0} 条 FBP 补货采购需求到采购台`);
     procurementDraftDialog.visible = false;
     await loadPageData();
@@ -1662,15 +1667,18 @@ onMounted(loadPageData);
       <el-empty v-if="!adjustmentHistoryDialog.loading && !adjustmentHistoryDialog.items.length" description="暂无调整记录" />
     </el-dialog>
 
-    <el-dialog v-model="procurementDraftDialog.visible" title="FBP 下次备货采购草稿" width="960px" destroy-on-close>
-      <el-alert title="仅“本地实物库存不足”产生的差额会进入这里。请由仓库管理员核对数量；将数量改为 0 即取消该项，确认后才发送给采购台。" type="info" :closable="false" show-icon />
-      <el-table v-loading="procurementDraftDialog.loading" :data="procurementDraftDialog.items" border style="margin-top: 16px">
-        <el-table-column label="来源 FBP 备货单" min-width="170"><template #default="{ row }">{{ row.order_no || `#${row.source_order_id}` }}</template></el-table-column>
-        <el-table-column prop="product_name" label="库存商品" min-width="240"><template #default="{ row }"><strong>{{ row.product_name }}</strong><small style="display:block;color:var(--el-text-color-secondary)">{{ row.inventory_number || '-' }}</small></template></el-table-column>
-        <el-table-column label="原申请 / 已通过" width="145" align="center"><template #default="{ row }">{{ integer(row.requested_qty) }} / {{ integer(row.approved_qty) }}</template></el-table-column>
+    <el-dialog v-model="procurementDraftDialog.visible" title="FBP 下次备货采购草稿" width="min(1440px, 96vw)" destroy-on-close>
+      <el-alert title="按库存商品合并展示：同一备货明细的多次缺货不会重复累计原申请或已通过数量；建议采购数量汇总全部未发送的缺货差额。将数量改为 0 即取消该库存商品的全部草稿。" type="info" :closable="false" show-icon />
+      <el-table v-loading="procurementDraftDialog.loading" :data="procurementDraftPagedItems" border style="margin-top: 16px">
+        <el-table-column label="图片" width="86" align="center"><template #default="{ row }"><ProductImagePreview :src="row.image_url" :preview-list="row.image_url ? [row.image_url] : []" size="portrait" /></template></el-table-column>
+        <el-table-column label="库存商品" min-width="240"><template #default="{ row }"><strong>{{ row.product_name }}</strong><small style="display:block;color:var(--el-text-color-secondary)">库存 ID：{{ row.inventory_number || '-' }}</small></template></el-table-column>
+        <el-table-column label="总原申请 / 总已通过" width="155" align="center"><template #default="{ row }">{{ integer(row.requested_qty) }} / {{ integer(row.approved_qty) }}</template></el-table-column>
         <el-table-column label="建议采购数量" width="160"><template #default="{ row }"><el-input-number v-model="row.quantity" :min="0" :precision="0" controls-position="right" style="width:130px" /></template></el-table-column>
-        <el-table-column label="备注" min-width="220"><template #default="{ row }"><el-input v-model="row.note" maxlength="500" placeholder="可补充采购说明" /></template></el-table-column>
+        <el-table-column label="申请店铺" min-width="160"><template #default="{ row }"><div v-for="source in row.source_orders" :key="source.id">{{ source.shop_name || '-' }}</div></template></el-table-column>
+        <el-table-column label="来源 FBP 备货单 / 申请时间" min-width="230"><template #default="{ row }"><div v-for="source in row.source_orders" :key="source.id"><strong>{{ source.order_no || `#${source.id}` }}</strong><small style="display:block;color:var(--el-text-color-secondary)">{{ dateText(source.created_at) }}</small></div></template></el-table-column>
+        <el-table-column label="备注" min-width="220"><template #default="{ row }"><el-input v-model="row.note" maxlength="500" :placeholder="row.request_reason_note || '可补充采购说明'" /></template></el-table-column>
       </el-table>
+      <PageFooterPagination v-if="procurementDraftDialog.items.length > procurementDraftDialog.pageSize" :total="procurementDraftDialog.items.length" :page="procurementDraftDialog.page" :page-size="procurementDraftDialog.pageSize" :page-sizes="[20]" style="margin-top:16px" @update:page="procurementDraftDialog.page = $event" />
       <el-empty v-if="!procurementDraftDialog.loading && !procurementDraftDialog.items.length" description="暂无待发送的 FBP 缺货采购草稿" />
       <template #footer><el-button @click="procurementDraftDialog.visible = false">取消</el-button><el-button type="primary" :disabled="procurementDraftDialog.loading || !procurementDraftDialog.items.length" :loading="procurementDraftDialog.submitting" @click="submitProcurementDrafts">确认并发送采购台</el-button></template>
     </el-dialog>

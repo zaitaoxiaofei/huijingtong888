@@ -34,6 +34,17 @@ test("historical FBP adjustments can be backfilled with a reason and converted i
   assert.match(fbpPage, /已生成待复核采购草稿/);
 });
 
+test("FBP shortage drafts group repeat adjustments by inventory product without double-counting an order item", () => {
+  assert.match(backend, /const groups = new Map\(\)/);
+  assert.match(backend, /_sourceItems/);
+  assert.match(backend, /group\.requested_qty \+= Number\(row\.requested_qty/);
+  assert.match(backend, /request_ids/);
+  assert.match(backend, /mergedIds/);
+  assert.match(fbpPage, /procurementDraftPagedItems/);
+  assert.match(fbpPage, /申请店铺/);
+  assert.match(fbpPage, /总原申请 \/ 总已通过/);
+});
+
 test("inventory can submit selected products and purchasing can filter warehouse applications", () => {
   assert.match(inventoryPage, /提交采购需求/);
   assert.match(inventoryPage, /WarehouseProcurementRequestDialog/);
