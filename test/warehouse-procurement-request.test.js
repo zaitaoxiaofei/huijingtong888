@@ -26,6 +26,14 @@ test("FBP physical shortages become reviewable procurement drafts before purchas
   assert.match(fbpPage, /确认并发送采购台/);
 });
 
+test("historical FBP adjustments can be backfilled with a reason and converted into a procurement draft", () => {
+  assert.match(backend, /fbpReplenishmentItemAdjustmentsMysql/);
+  assert.match(backend, /updateFbpReplenishmentItemAdjustmentReasonMysql/);
+  assert.match(backend, /历史调整回补为仓库实际缺货/);
+  assert.match(fbpPage, /查看并回补调整原因/);
+  assert.match(fbpPage, /已生成待复核采购草稿/);
+});
+
 test("inventory can submit selected products and purchasing can filter warehouse applications", () => {
   assert.match(inventoryPage, /提交采购需求/);
   assert.match(inventoryPage, /WarehouseProcurementRequestDialog/);

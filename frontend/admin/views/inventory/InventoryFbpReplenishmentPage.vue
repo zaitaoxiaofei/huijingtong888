@@ -29,6 +29,7 @@ const adjustmentReasonOptions = [
   { value: "other", label: "其他" }
 ];
 const adjustmentDialog = reactive({ visible: false, item: null, quantity: 0, reasonCode: "", reasonNote: "", submitting: false });
+const adjustmentHistoryDialog = reactive({ visible: false, loading: false, savingId: null, item: null, items: [] });
 const procurementDraftDialog = reactive({ visible: false, loading: false, submitting: false, items: [] });
 const batchDetailDialog = reactive({ visible: false, loading: false, batch: null, orders: [] });
 const barcodePrintDialog = reactive({ visible: false, row: null, quantity: 1, recommended: 1, submitting: false });
@@ -620,6 +621,32 @@ async function submitAdjustment() {
   } catch (error) {
     ElMessage.error(error.message || "保存人工调整失败");
   } finally { adjustmentDialog.submitting = false; }
+}
+
+async function openAdjustmentHistory(row) {
+  adjustmentHistoryDialog.visible = true;
+  adjustmentHistoryDialog.loading = true;
+  adjustmentHistoryDialog.item = row;
+  try {
+    const items = await apiClient.get(`/api/fbp-replenishment-orders/items/adjustments?order_id=${row.order.id}&item_id=${row.id}`, { noCache: true });
+    adjustmentHistoryDialog.items = (items || []).map((item) => ({ ...item, reason_code: item.reason_code || "", reason_note: item.reason_note || "" }));
+  } catch (error) {
+    ElMessage.error(error.message || "加载调整记录失败");
+  } finally { adjustmentHistoryDialog.loading = false; }
+}
+
+async function saveAdjustmentHistoryReason(item) {
+  if (!item.reason_code) return ElMessage.warning("请选择调整原因");
+  if (item.reason_code === "other" && !String(item.reason_note || "").trim()) return ElMessage.warning("选择其他原因时请填写补充说明");
+  adjustmentHistoryDialog.savingId = item.id;
+  try {
+    const result = await apiClient.post("/api/fbp-replenishment-orders/items/adjustments/reason", { adjustment_id: item.id, reason_code: item.reason_code, reason_note: item.reason_note });
+    ElMessage.success(result.procurement_request_id && item.reason_code === "stock_shortage" ? "原因已回补，已生成待复核采购草稿" : "调整原因已保存");
+    await openAdjustmentHistory(adjustmentHistoryDialog.item);
+    await refreshOrderViews(adjustmentHistoryDialog.item.order);
+  } catch (error) {
+    ElMessage.error(error.message || "保存调整原因失败");
+  } finally { adjustmentHistoryDialog.savingId = null; }
 }
 
 async function openProcurementDrafts() {
@@ -1407,9 +1434,7 @@ onMounted(loadPageData);
               <span>原始 {{ integer(row.approved_qty || row.requested_qty) }}</span>
               <strong :class="Number(row.adjustment_qty) < 0 ? 'is-negative' : 'is-positive'">调整 {{ Number(row.adjustment_qty) > 0 ? '+' : '' }}{{ integer(row.adjustment_qty) }}</strong>
               <b>最终 {{ integer(row.final_qty) }}</b>
-              <el-tooltip v-if="row.adjustment_summary" :content="row.adjustment_summary" placement="top">
-                <span class="adjustment-history">查看调整记录</span>
-              </el-tooltip>
+              <el-button v-if="row.adjustment_summary" link type="primary" class="adjustment-history" @click="openAdjustmentHistory(row)">查看调整记录</el-button>
               <el-button v-if="canAdjustQuantity(row.order)" link type="primary" @click="openAdjustmentDialog(row)">添加人工调整</el-button>
             </div>
           </template>
@@ -1624,6 +1649,19 @@ onMounted(loadPageData);
       </template>
     </el-dialog>
 
+    <el-dialog v-model="adjustmentHistoryDialog.visible" title="查看并回补调整原因" width="min(1120px, 96vw)" destroy-on-close>
+      <el-alert title="历史自由填写的原因可在此补为规范原因。将“减少数量”回补为“本地实物库存不足”后，系统会自动生成一条待复核的 FBP 采购草稿。" type="info" :closable="false" show-icon />
+      <el-table v-loading="adjustmentHistoryDialog.loading" :data="adjustmentHistoryDialog.items" border style="margin-top:16px">
+        <el-table-column label="调整时间" width="165"><template #default="{ row }">{{ dateText(row.created_at) }}</template></el-table-column>
+        <el-table-column label="数量" width="90" align="center"><template #default="{ row }"><strong :class="Number(row.adjustment_qty) < 0 ? 'is-negative' : 'is-positive'">{{ Number(row.adjustment_qty) > 0 ? '+' : '' }}{{ integer(row.adjustment_qty) }}</strong></template></el-table-column>
+        <el-table-column prop="reason" label="原记录" min-width="180" show-overflow-tooltip />
+        <el-table-column label="规范原因" width="245"><template #default="{ row }"><el-select v-model="row.reason_code" placeholder="请选择原因" style="width:100%"><el-option v-for="option in adjustmentReasonOptions" :key="option.value" :label="option.label" :value="option.value" /></el-select></template></el-table-column>
+        <el-table-column label="补充说明" min-width="220"><template #default="{ row }"><el-input v-model="row.reason_note" maxlength="500" :placeholder="row.reason_code === 'other' ? '必填：具体原因' : '可选说明'" /></template></el-table-column>
+        <el-table-column label="操作" width="100" fixed="right"><template #default="{ row }"><el-button link type="primary" :loading="adjustmentHistoryDialog.savingId === row.id" @click="saveAdjustmentHistoryReason(row)">保存</el-button></template></el-table-column>
+      </el-table>
+      <el-empty v-if="!adjustmentHistoryDialog.loading && !adjustmentHistoryDialog.items.length" description="暂无调整记录" />
+    </el-dialog>
+
     <el-dialog v-model="procurementDraftDialog.visible" title="FBP 下次备货采购草稿" width="960px" destroy-on-close>
       <el-alert title="仅“本地实物库存不足”产生的差额会进入这里。请由仓库管理员核对数量；将数量改为 0 即取消该项，确认后才发送给采购台。" type="info" :closable="false" show-icon />
       <el-table v-loading="procurementDraftDialog.loading" :data="procurementDraftDialog.items" border style="margin-top: 16px">
@@ -1709,9 +1747,7 @@ onMounted(loadPageData);
               <span>原始 {{ integer(row.approved_qty || row.requested_qty) }}</span>
               <strong :class="Number(row.adjustment_qty) < 0 ? 'is-negative' : 'is-positive'">调整 {{ Number(row.adjustment_qty) > 0 ? '+' : '' }}{{ integer(row.adjustment_qty) }}</strong>
               <b>最终 {{ integer(row.final_qty) }}</b>
-              <el-tooltip v-if="row.adjustment_summary" :content="row.adjustment_summary" placement="top">
-                <span class="adjustment-history">查看调整记录</span>
-              </el-tooltip>
+              <el-button v-if="row.adjustment_summary" link type="primary" class="adjustment-history" @click="openAdjustmentHistory(row)">查看调整记录</el-button>
               <el-button v-if="canAdjustQuantity(row.order)" link type="primary" @click="openAdjustmentDialog(row)">添加人工调整</el-button>
             </div>
           </template>

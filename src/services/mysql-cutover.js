@@ -4893,6 +4893,76 @@ export async function addFbpReplenishmentItemAdjustmentMysql(body = {}, userId =
   return { ok: true, order_id: orderId, item_id: itemId, adjustment_qty: Number(item.adjustment_qty || 0) + adjustmentQty, final_qty: finalQty, procurement_request_id: result.procurementRequestId };
 }
 
+const fbpAdjustmentReasonLabels = {
+  stock_shortage: "本地实物库存不足",
+  inventory_reserved_or_in_transit: "库存已占用／在途未到",
+  demand_reduced: "销量或需求预测下调",
+  fbp_capacity_limit: "FBP 仓容／可提交额度限制",
+  product_preparation_issue: "商品／包装／标签不满足发仓要求",
+  other: "其他"
+};
+
+export async function fbpReplenishmentItemAdjustmentsMysql(query = {}) {
+  ensureMysqlCutoverEnabled();
+  await ensureFbpReplenishmentSchemaMysql();
+  const orderId = Number(query.order_id || query.orderId || 0);
+  const itemId = Number(query.item_id || query.itemId || 0);
+  if (!orderId || !itemId) throw new Error("缺少备货单或商品明细，无法查看调整记录。");
+  return await mysqlQuery(`
+    SELECT id, adjustment_qty, reason, reason_code, reason_note, procurement_request_id, created_at
+    FROM fbp_replenishment_item_adjustments
+    WHERE order_id = ? AND item_id = ?
+    ORDER BY created_at DESC, id DESC
+  `, [orderId, itemId]);
+}
+
+export async function updateFbpReplenishmentItemAdjustmentReasonMysql(body = {}, userId = null) {
+  ensureMysqlCutoverEnabled();
+  await ensureFbpReplenishmentSchemaMysql();
+  await ensureProcurementFlexibleRequestSchemaMysql();
+  const adjustmentId = Number(body.adjustment_id || body.adjustmentId || 0);
+  const reasonCode = String(body.reason_code || body.reasonCode || "").trim();
+  const reasonNote = String(body.reason_note || body.reasonNote || "").trim().slice(0, 500);
+  const reason = fbpAdjustmentReasonLabels[reasonCode] || "";
+  if (!adjustmentId || !reason) throw new Error("请选择规范的调整原因。");
+  if (reasonCode === "other" && !reasonNote) throw new Error("选择其他原因时，请填写补充说明。");
+  return await withMysqlTransaction(async (connection) => {
+    const [rows] = await connection.execute(`
+      SELECT a.*, i.product_id, i.inventory_id, o.order_no
+      FROM fbp_replenishment_item_adjustments a
+      JOIN fbp_replenishment_order_items i ON i.id = a.item_id
+      JOIN fbp_replenishment_orders o ON o.id = a.order_id
+      WHERE a.id = ? FOR UPDATE
+    `, [adjustmentId]);
+    const adjustment = rows[0];
+    if (!adjustment) throw new Error("调整记录不存在，请刷新后重试。");
+    await connection.execute(`
+      UPDATE fbp_replenishment_item_adjustments
+      SET reason = ?, reason_code = ?, reason_note = ?
+      WHERE id = ?
+    `, [reason, reasonCode, reasonNote || null, adjustmentId]);
+    let procurementRequestId = Number(adjustment.procurement_request_id || 0) || null;
+    if (reasonCode === "stock_shortage" && Number(adjustment.adjustment_qty) < 0 && !procurementRequestId) {
+      if (!adjustment.product_id) throw new Error("该 FBP 商品未关联库存产品，无法生成采购草稿；请先完成库存绑定。");
+      const [requestResult] = await connection.execute(`
+        INSERT INTO procurement_requests
+        (request_group_no, product_id, binding_status, person_id, created_by_person_id,
+          quantity, amount, shipping_amount, approval_status, status, note, urgency,
+          source_type, source_order_id, source_order_item_id, source_ozon_sku, demand_type, request_reason_code, request_reason_note)
+        VALUES (?, ?, 'bound', ?, ?, ?, 0, 0, 'draft', 'draft', ?, 'normal', 'fbp', ?, ?, ?, 'warehouse_request', 'fbp_stock_shortage', ?)
+      `, [
+        `FBP-SHORTAGE-${adjustment.order_id}-${adjustment.item_id}-${adjustmentId}`, Number(adjustment.product_id), userId || null, userId || null,
+        Math.abs(Number(adjustment.adjustment_qty)), `FBP 备货单 ${adjustment.order_no || `#${adjustment.order_id}`}：历史调整回补为仓库实际缺货，待采购复核`,
+        adjustment.order_id, adjustment.item_id, adjustment.inventory_id || null, reasonNote || null
+      ]);
+      procurementRequestId = Number(requestResult.insertId);
+      await connection.execute("UPDATE fbp_replenishment_item_adjustments SET procurement_request_id = ? WHERE id = ?", [procurementRequestId, adjustmentId]);
+    }
+    await connection.execute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [adjustment.order_id]);
+    return { ok: true, adjustment_id: adjustmentId, procurement_request_id: procurementRequestId };
+  });
+}
+
 export async function fbpShortageProcurementDraftsMysql() {
   ensureMysqlCutoverEnabled();
   await ensureProcurementFlexibleRequestSchemaMysql();
