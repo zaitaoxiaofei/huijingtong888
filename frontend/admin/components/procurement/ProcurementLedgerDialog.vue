@@ -3,13 +3,15 @@ import { computed, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { apiClient } from '../../utils/api.js';
 import { shanghaiDateKey, shanghaiDateTimeText } from '../../utils/shanghai-date.js';
-const props = defineProps({ modelValue: Boolean, productId: { type: Number, default: 0 }, orderId: { type: Number, default: 0 } });
+const props = defineProps({ modelValue: Boolean, productId: { type: Number, default: 0 }, orderId: { type: Number, default: 0 }, initialTab: { type: String, default: 'current' } });
 const emit = defineEmits(['update:modelValue', 'saved']);
 const visible = computed({ get: () => props.modelValue, set: value => emit('update:modelValue', value) });
 const loading = ref(false), saving = ref(false), searching = ref(false);
 const productId = ref(0), products = ref([]), targetProducts = ref([]), data = ref(null), target = ref(null);
 const preview = ref(null), submission = ref(null), formVisible = ref(false);
 const form = reactive({});
+const activeTab = ref('current');
+const currentOrders = computed(() => (data.value?.orders || []).filter(row => row.needs_fulfillment));
 let loadVersion = 0;
 const labels = {
   historical_purchase_bulk: '批量补齐历史采购',
@@ -98,7 +100,7 @@ async function save() {
   } catch (error) { ElMessage.error(error.message); }
   finally { saving.value = false; }
 }
-watch(() => props.modelValue, value => { if (value) { products.value = []; load(props.productId); search(''); } }, { immediate: true });
+watch(() => props.modelValue, value => { if (value) { activeTab.value = ['current', 'purchases', 'history'].includes(props.initialTab) ? props.initialTab : 'current'; products.value = []; load(props.productId); search(''); } }, { immediate: true });
 </script>
 
 <template>
@@ -115,17 +117,28 @@ watch(() => props.modelValue, value => { if (value) { products.value = []; load(
         <div class="ledger-product"><el-image class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>{{ data.product.code }}</span></div>
         <el-alert type="info" :closable="false" title="实物推算已加回待发订单的提前扣减，以仓库盘点为准；负数不能当成真实实物。请先盘点校准，历史补采购只补记录，不增加现货或在途。" />
         <div class="ledger-toolbar"><el-button type="primary" plain @click="edit('stocktake')">核对现货／修正历史账面</el-button><span>采购成本已补齐但账面仍为负时，无需重复补采购；按实际盘点核对，保留历史差异流水。</span></div>
+        <h3>当前供给与订单覆盖</h3>
         <div class="ledger-metrics">
-          <div><span>本地账面库存</span><strong>{{ data.local_stock }}</strong></div>
           <div><span>现货推算（以盘点为准）</span><strong>{{ Math.max(0, data.physical_estimate) }}</strong><small v-if="data.physical_estimate < 0">账面待核差异 {{ -data.physical_estimate }} 件</small></div>
-          <div><span>当前订单现货覆盖 / 可用推算</span><strong>{{ data.current_stock_reserved }} / {{ data.available_estimate }}</strong></div>
-          <div><span>已记录采购 / 已收货</span><strong>{{ data.purchase_quantity }} / {{ data.received_quantity }}</strong></div>
+          <div><span>当前订单现货覆盖</span><strong>{{ data.current_stock_reserved }}</strong></div>
           <div><span>采购在途</span><strong>{{ data.incoming_quantity }}</strong></div>
-          <div><span>当前订单待采购 / 在途覆盖</span><strong>{{ data.current_shortage }} / {{ data.current_incoming }}</strong></div>
-          <div class="ledger-warning"><span>历史缺采购来源 / 收货待核</span><strong>{{ data.missing_purchase }} / {{ data.missing_receipt }}</strong></div>
+          <div><span>当前订单在途覆盖</span><strong>{{ data.current_incoming }}</strong></div>
+          <div class="ledger-shortage"><span>当前订单待采购</span><strong>{{ data.current_shortage }}</strong><small>历史缺记录不计入此数</small></div>
         </div>
-        <el-tabs>
-          <el-tab-pane label="历史缺口与补录">
+        <el-tabs v-model="activeTab">
+          <el-tab-pane label="当前订单覆盖" name="current" lazy>
+            <p>现货覆盖表示已分配给订单的数量，不等于仓库总现货。包含已分拣、已打包但尚未进入运输的订单。</p>
+            <el-table :data="currentOrders" max-height="400" empty-text="暂无待履约的本地订单">
+              <el-table-column label="订单" min-width="190"><template #default="{ row }">{{ row.posting_number }} <el-tag v-if="row.order_id === props.orderId" size="small">当前订单</el-tag></template></el-table-column>
+              <el-table-column prop="quantity" label="需求" width="90" />
+              <el-table-column prop="stock_quantity" label="现货覆盖" width="110" />
+              <el-table-column prop="incoming_quantity" label="在途覆盖" width="110" />
+              <el-table-column label="待采购" width="110"><template #default="{ row }"><strong class="ledger-shortage">{{ row.quantity_needs_review ? '数量待核' : row.shortage_quantity }}</strong></template></el-table-column>
+              <el-table-column label="核对" min-width="200"><template #default="{ row }"><span v-if="row.quantity_needs_review">请核对已有采购数量，避免重复采购</span><span v-else-if="row.shortage_quantity > 0">返回订单或采购工作台采购</span><span v-else>已覆盖，无需重复采购</span></template></el-table-column>
+            </el-table>
+          </el-tab-pane>
+          <el-tab-pane label="历史缺口与补录" name="history" lazy>
+            <el-alert type="warning" :closable="false" :title="`历史缺采购来源 ${data.missing_purchase} 件 · 收货待核 ${data.missing_receipt} 件；仅核对已发订单，不增加当前采购需求。`" />
             <el-table :data="history" max-height="400" empty-text="没有历史来源缺口">
               <el-table-column label="订单" min-width="190"><template #default="{ row }">{{ row.posting_number }}<el-tag v-if="row.order_id === props.orderId" size="small">当前订单</el-tag></template></el-table-column>
               <el-table-column prop="quantity" label="已发件数" width="100" />
@@ -143,14 +156,15 @@ watch(() => props.modelValue, value => { if (value) { products.value = []; load(
               </template></el-table-column>
             </el-table>
           </el-tab-pane>
-          <el-tab-pane label="当前订单库存替代">
+          <el-tab-pane label="当前订单库存替代" name="substitute" lazy>
             <el-alert type="info" :closable="false" title="从其他商品的本地现货中转换，直接覆盖所选当前订单；历史缺口保持独立，不需要虚构采购。" />
             <el-table :data="data.orders.filter(row => row.needs_fulfillment && row.shortage_quantity > 0)" max-height="400" empty-text="当前订单已覆盖">
               <el-table-column prop="posting_number" label="订单" /><el-table-column prop="shortage_quantity" label="待覆盖数量" />
               <el-table-column label="操作"><template #default="{ row }"><el-button link type="primary" @click="edit('substitute', row)">选择其他商品库存替代</el-button></template></el-table-column>
             </el-table>
           </el-tab-pane>
-          <el-tab-pane label="采购数量与金额纠正">
+          <el-tab-pane label="采购数量与金额纠正" name="purchases" lazy>
+            <p>已记录采购 {{ data.purchase_quantity }} 件 · 已收货 {{ data.received_quantity }} 件。补成本与实物入库分开处理，不重复增加现货。</p>
             <el-table :data="data.purchases" max-height="400">
               <el-table-column prop="order_no" label="采购单" min-width="160" />
               <el-table-column label="采购时间" width="180"><template #default="{ row }">{{ time(row.purchased_at) }}</template></el-table-column>
@@ -161,15 +175,16 @@ watch(() => props.modelValue, value => { if (value) { products.value = []; load(
               <el-table-column label="操作"><template #default="{ row }"><el-button link type="primary" @click="edit('revise_purchase', row)">纠正记录</el-button></template></el-table-column>
             </el-table>
           </el-tab-pane>
-          <el-tab-pane label="本地库存去向">
+          <el-tab-pane label="本地库存去向" name="movements" lazy>
+            <p>本地账面余额：{{ data.local_stock }} 件。以下为按来源汇总的累计变动，不是实物盘点数量。</p>
             <div class="ledger-toolbar"><el-button @click="edit('convert')">转换为其他商品库存</el-button><el-button @click="edit('damage')">货损报废</el-button><el-button @click="edit('loss')">货物丢失</el-button><el-button @click="edit('stocktake')">盘点调整／原因待查</el-button><el-button @click="visible = false; $router.push('/inventory/fbp')">核对 FBP 调拨</el-button></div>
             <el-alert type="info" :closable="false" title="本地余额 = 期初及调整 + 采购实收 + 实际退回 + 转换入 − 订单出库 − 转 FBP − 转换出 − 损失。漏记 FBP 调拨请补调拨记录，不以盘亏代替。" />
             <el-table :data="data.movements" max-height="330"><el-table-column label="流水类型"><template #default="{ row }">{{ movementLabels[row.source_type] || row.source_type }}</template></el-table-column><el-table-column label="仓位"><template #default="{ row }">{{ row.stock_location === 'FBP' ? 'FBP（不计本地）' : '本地' }}</template></el-table-column><el-table-column prop="quantity_delta" label="累计变动数量" /></el-table>
           </el-tab-pane>
-          <el-tab-pane label="纠正记录">
+          <el-tab-pane label="纠正记录" name="actions" lazy>
             <el-table :data="data.actions" max-height="400"><el-table-column label="北京时间" width="180"><template #default="{ row }">{{ time(row.created_at) }}</template></el-table-column><el-table-column label="操作" width="180"><template #default="{ row }">{{ labels[row.action_type] }}</template></el-table-column><el-table-column prop="person_name" label="操作人" width="110" /><el-table-column prop="reason" label="原因／凭证" /></el-table>
           </el-tab-pane>
-          <el-tab-pane label="历史补录成本（最近50次操作）">
+          <el-tab-pane label="历史补录成本（最近50次操作）" name="costs" lazy>
             <el-table :data="historicalCosts" max-height="400" empty-text="暂无批量补齐记录">
               <el-table-column prop="posting_number" label="历史订单" min-width="180" />
               <el-table-column prop="purchase_order_id" label="采购单 ID" width="110" />
@@ -212,5 +227,6 @@ watch(() => props.modelValue, value => { if (value) { products.value = []; load(
 .ledger-metrics { display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:16px 0; }
 .ledger-metrics > div { display:grid;gap:8px;padding:14px;background:#f5f7fa;border-radius:8px; }
 .ledger-metrics span { color:#606266;font-size:12px; }.ledger-metrics strong { font-size:22px; }.ledger-warning strong { color:#b45309; }
+.ledger-shortage { color:var(--el-color-danger); }
 @media(max-width:900px) { .ledger-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 </style>

@@ -14,7 +14,8 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     physical_estimate: 2, current_stock_reserved: 2, available_estimate: 0,
     purchase_quantity: 102, received_quantity: 2, incoming_quantity: 100, current_shortage: 0, current_incoming: 2,
     missing_purchase: 98, missing_receipt: 0, movements: [], actions: [], sources: [], batches: [],
-    orders: [{ order_item_id: 1, order_id: 1, posting_number: 'TEST-100', entered_transport: true, quantity: 100, missing_record_quantity: 98, missing_purchase_quantity: 98, missing_receipt_quantity: 0 }],
+    orders: [{ order_item_id: 1, order_id: 1, posting_number: 'TEST-100', entered_transport: true, quantity: 100, missing_record_quantity: 98, missing_purchase_quantity: 98, missing_receipt_quantity: 0 },
+      { order_item_id: 2, order_id: 2, posting_number: 'CURRENT-200', needs_fulfillment: true, quantity: 4, stock_quantity: 2, incoming_quantity: 2, shortage_quantity: 0 }],
     purchases: [{ id: 1, order_no: 'CG-1', actual_quantity: 100, received_quantity: 0, pending_quantity: 100, amount: 1000, shipping_amount: 0, purchased_at: '2026-09-01 01:00:00' }] };
   const requests = [], errors = [];
   try {
@@ -39,13 +40,20 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
       return route.fulfill({ contentType: asset.endsWith('.css') ? 'text/css' : 'text/javascript', body: await fs.readFile(path.join(output, asset)) });
     });
     await page.goto('http://localhost:8788/admin.html');
+    await page.getByRole('tab', { name: '当前订单覆盖', exact: true }).waitFor();
+    assert.equal(await page.getByRole('tab', { name: '当前订单覆盖', exact: true }).getAttribute('aria-selected'), 'true');
+    await page.getByText('CURRENT-200', { exact: true }).waitFor();
+    await page.getByText('已覆盖，无需重复采购', { exact: true }).waitFor();
+    assert.equal(await page.getByText('TEST-100', { exact: true }).count(), 0, 'historical orders are separate from current coverage');
+    assert.equal(await page.getByRole('button', { name: '补采购记录', exact: true }).count(), 0, 'historical forms are not mounted on entry');
+    await page.screenshot({ path: '/tmp/procurement-ledger-overview.png', animations: 'disabled' });
+    await page.getByRole('tab', { name: '历史缺口与补录', exact: true }).click();
     await page.getByText('TEST-100', { exact: true }).waitFor();
     await page.getByRole('button', { name: '补采购记录', exact: true }).click();
     const historicalDialog = page.getByRole('dialog', { name: '补历史采购', exact: true });
     await historicalDialog.getByText('只补历史采购来源，不增加现货或在途。实物与账面不符请单独盘点核对。').waitFor();
     assert.equal(await historicalDialog.getByRole('radio').count(), 0);
     await historicalDialog.getByRole('button', { name: 'Close this dialog' }).click();
-    await page.screenshot({ path: '/tmp/procurement-ledger-overview.png' });
     await page.getByRole('tab', { name: '采购数量与金额纠正' }).click();
     await page.getByRole('button', { name: '纠正记录', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: '纠正采购记录', exact: true });

@@ -48,6 +48,8 @@ test('compact inventory opens lazy component table and preserves management/rece
     await page.getByText('组合库存 · 2 种子产品').waitFor();
     assert.equal(await page.getByText('1 种缺货 · 1 种已覆盖').count(), 1);
     assert.equal(await page.getByRole('button', { name: '编辑库存', exact: true }).count(), 0);
+    await page.getByRole('button', { name: '修改库存', exact: true }).click();
+    assert.equal(await page.locator('#event').innerText(), 'edit:10');
     assert.equal(requests.length, 0, 'no per-row image or ledger requests on list');
     await page.getByRole('button', { name: '登记实收', exact: true }).click();
     assert.equal(await page.locator('#event').innerText(), 'receipt:1');
@@ -56,8 +58,11 @@ test('compact inventory opens lazy component table and preserves management/rece
     await drawer.getByText('库存 ID：2-11').waitFor();
     assert.match(await drawer.innerText(), /不锈钢门槛条/);
     assert.match(await drawer.innerText(), /车标贴片/);
-    await drawer.getByRole('button', { name: '编辑库存', exact: true }).click();
-    assert.equal(await page.locator('#event').innerText(), 'edit:10');
+    const management = drawer.getByRole('button', { name: '账面参考与子产品绑定管理（不计入本单需求）' });
+    assert.equal(await management.getAttribute('aria-expanded'), 'false');
+    await management.click();
+    await drawer.getByRole('button', { name: '绑定子产品', exact: true }).waitFor();
+    await management.click();
     await drawer.getByRole('button', { name: '库存与历史明细', exact: true }).first().click();
     assert.equal(await page.locator('#event').innerText(), 'detail:11');
     assert.equal(requests.some(url => url.includes('/procurement/ledger')), false);
