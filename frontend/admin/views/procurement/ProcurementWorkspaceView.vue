@@ -49,7 +49,7 @@ function openLedger(row = {}) { ledgerProductId.value = Number(row.product_id ||
 function suggestionReasonTagType(type) {
   return ({ real_order: "danger", warehouse_request: "success", inventory_warning: "warning", advance_stock: "info" })[type] || "info";
 }
-const warehouseReasonLabels = { accessory_shortage: "配件不足", hot_product_replenishment: "热门产品备货不足", shipping_shortage: "订单发货缺货", safety_stock_shortage: "安全库存不足", seasonal_replenishment: "季节性备货", other: "其他" };
+const warehouseReasonLabels = { accessory_shortage: "配件不足", hot_product_replenishment: "热门产品备货不足", shipping_shortage: "订单发货缺货", safety_stock_shortage: "安全库存不足", seasonal_replenishment: "季节性备货", fbp_stock_shortage: "FBP 备货缺货", other: "其他" };
 function warehouseRequestDetails(row = {}) {
   return (row.requests || []).filter((request) => request.demand_type === "warehouse_request").map((request) => ({
     text: `${request.person_name || "仓库"}：${warehouseReasonLabels[request.request_reason_code] || "其他"}${request.request_reason_note ? `（${request.request_reason_note}）` : ""}`,
