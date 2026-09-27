@@ -41,6 +41,7 @@ test("FBP shortage drafts group repeat adjustments by inventory product without 
   assert.match(backend, /request_ids/);
   assert.match(backend, /mergedIds/);
   assert.match(fbpPage, /procurementDraftPagedItems/);
+  assert.match(fbpPage, /pageSize: 10/);
   assert.match(fbpPage, /申请店铺/);
   assert.match(fbpPage, /总原申请 \/ 总已通过/);
 });

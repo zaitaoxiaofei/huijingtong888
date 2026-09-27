@@ -30,7 +30,7 @@ const adjustmentReasonOptions = [
 ];
 const adjustmentDialog = reactive({ visible: false, item: null, quantity: 0, reasonCode: "", reasonNote: "", submitting: false });
 const adjustmentHistoryDialog = reactive({ visible: false, loading: false, savingId: null, item: null, items: [] });
-const procurementDraftDialog = reactive({ visible: false, loading: false, submitting: false, items: [], page: 1, pageSize: 20 });
+const procurementDraftDialog = reactive({ visible: false, loading: false, submitting: false, items: [], page: 1, pageSize: 10 });
 const batchDetailDialog = reactive({ visible: false, loading: false, batch: null, orders: [] });
 const barcodePrintDialog = reactive({ visible: false, row: null, quantity: 1, recommended: 1, submitting: false });
 const barcodePrintResultDialog = reactive({ visible: false, row: null, quantity: 0, confirming: false });
@@ -1678,7 +1678,7 @@ onMounted(loadPageData);
         <el-table-column label="来源 FBP 备货单 / 申请时间" min-width="230"><template #default="{ row }"><div v-for="source in row.source_orders" :key="source.id"><strong>{{ source.order_no || `#${source.id}` }}</strong><small style="display:block;color:var(--el-text-color-secondary)">{{ dateText(source.created_at) }}</small></div></template></el-table-column>
         <el-table-column label="备注" min-width="220"><template #default="{ row }"><el-input v-model="row.note" maxlength="500" :placeholder="row.request_reason_note || '可补充采购说明'" /></template></el-table-column>
       </el-table>
-      <PageFooterPagination v-if="procurementDraftDialog.items.length > procurementDraftDialog.pageSize" :total="procurementDraftDialog.items.length" :page="procurementDraftDialog.page" :page-size="procurementDraftDialog.pageSize" :page-sizes="[20]" style="margin-top:16px" @update:page="procurementDraftDialog.page = $event" />
+      <PageFooterPagination v-if="procurementDraftDialog.items.length" :total="procurementDraftDialog.items.length" :page="procurementDraftDialog.page" :page-size="procurementDraftDialog.pageSize" :page-sizes="[10, 20]" style="margin-top:16px" @update:page="procurementDraftDialog.page = $event" @update:page-size="procurementDraftDialog.pageSize = $event; procurementDraftDialog.page = 1" />
       <el-empty v-if="!procurementDraftDialog.loading && !procurementDraftDialog.items.length" description="暂无待发送的 FBP 缺货采购草稿" />
       <template #footer><el-button @click="procurementDraftDialog.visible = false">取消</el-button><el-button type="primary" :disabled="procurementDraftDialog.loading || !procurementDraftDialog.items.length" :loading="procurementDraftDialog.submitting" @click="submitProcurementDrafts">确认并发送采购台</el-button></template>
     </el-dialog>
