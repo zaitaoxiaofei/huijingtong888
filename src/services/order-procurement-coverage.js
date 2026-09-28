@@ -215,5 +215,12 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
     }
   }
   result.available_batches = batches.filter(batch => !batch.stock_source).map(({ remaining, ...batch }) => ({ ...batch, unallocated_quantity: remaining }));
+  const localReserved = new Map();
+  for (const order of result.values()) if (order.needs_fulfillment && order.stock_location !== 'FBP') {
+    for (const item of order.items) localReserved.set(item.product_id, (localReserved.get(item.product_id) || 0) + Number(item.stock_quantity || 0));
+  }
+  for (const order of result.values()) for (const item of order.items) {
+    item.product_local_available = positive(item.physical_stock_estimate - (localReserved.get(item.product_id) || 0) - item.product_fbp_reserved);
+  }
   return result;
 }

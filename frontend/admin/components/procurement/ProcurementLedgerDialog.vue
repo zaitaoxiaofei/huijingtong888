@@ -212,7 +212,26 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
           <div><span>在途已分配</span><strong>{{ data.current_incoming }}</strong></div>
           <div :class="{ 'ledger-shortage': data.current_shortage > 0 }"><span>全部待履约订单待采购</span><strong>{{ data.current_shortage }}</strong><small>历史缺记录不计入此数</small></div>
         </div></section></div>
+        <div class="ledger-toolbar" v-if="data.fbp_inventory">
+          <strong>FBP 库存汇总：{{ data.fbp_inventory.incomplete ? '待核对' : data.fbp_inventory.present }} {{ data.product.stock_unit || '库存单位' }}</strong>
+          <span>可售折算：{{ data.fbp_inventory.incomplete ? '待核对' : data.fbp_inventory.available }}</span>
+          <el-button type="primary" plain @click="activeTab = 'fbp'">查看各店铺 SKU 库存</el-button>
+        </div>
         <el-tabs v-model="activeTab">
+          <el-tab-pane v-if="data.fbp_inventory" label="FBP 库存" name="fbp" lazy>
+            <p>直接读取 Ozon 同步库存，不重复扣订单。汇总已按每套组成折算为当前库存的实物单位；不同店铺、SKU 库存独立，不能互相抵扣。</p>
+            <el-alert v-if="data.fbp_inventory.incomplete" type="warning" :closable="false" :title="`存在未同步或未绑定的 SKU，汇总不完整；已同步部分 ${data.fbp_inventory.present ?? 0}，请到 FBP 库存页面同步并核对绑定。`" />
+            <el-table :data="data.fbp_inventory.rows" max-height="360" empty-text="暂无已绑定的 FBP SKU" :row-class-name="({ row }) => orderOverview?.shopId === Number(row.shop_id) && orderOverview?.skus.includes(String(row.ozon_sku)) ? 'current-fbp-sku' : ''">
+              <el-table-column prop="shop_name" label="店铺" min-width="130" />
+              <el-table-column label="Ozon SKU" min-width="150"><template #default="{ row }">{{ row.ozon_sku }}<el-tag v-if="orderOverview?.shopId === Number(row.shop_id) && orderOverview?.skus.includes(String(row.ozon_sku))" size="small">本单 SKU</el-tag></template></el-table-column>
+              <el-table-column prop="product_name" label="商品规格" min-width="190" />
+              <el-table-column prop="warehouse_name" label="FBP 仓库" min-width="130" />
+              <el-table-column label="库存／可售（套）" width="140"><template #default="{ row }">{{ row.present ?? '待同步' }} / {{ row.available ?? '待同步' }}</template></el-table-column>
+              <el-table-column label="每套含当前库存" width="130"><template #default="{ row }">{{ row.per_set_quantity }}</template></el-table-column>
+              <el-table-column label="折算实物库存" width="125"><template #default="{ row }">{{ row.inventory_quantity ?? '待同步' }}</template></el-table-column>
+              <el-table-column label="同步时间（北京）" min-width="180"><template #default="{ row }">{{ row.synced_at ? time(row.synced_at) : '待同步' }}</template></el-table-column>
+            </el-table>
+          </el-tab-pane>
           <el-tab-pane label="订单分配" name="current" lazy>
             <p>现货覆盖表示已分配给订单的数量，不等于仓库总现货。包含已分拣、已打包但尚未进入运输的订单。</p>
             <el-table :data="currentOrders" max-height="400" empty-text="暂无待履约的本地订单">
@@ -363,6 +382,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
 .ledger-metric-groups section:last-child .ledger-metrics { grid-template-columns:repeat(3,minmax(0,1fr)); }
 .ledger-metrics small { color:#606266;font-size:12px;line-height:1.5; }
 .ledger-management { border:1px solid #dcdfe6;padding:16px;margin-bottom:16px;border-radius:8px; }
+:deep(.current-fbp-sku) { --el-table-tr-bg-color:var(--el-color-primary-light-9); }
 :global(.unified-inventory-dialog > .el-dialog__body) { max-height:82vh;overflow:auto; }
 @media(max-width:1000px) { .ledger-metric-groups { grid-template-columns:1fr;gap:0; } }
 @media(max-width:900px) { .ledger-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }

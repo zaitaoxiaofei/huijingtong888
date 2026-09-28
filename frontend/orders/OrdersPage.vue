@@ -1105,6 +1105,7 @@ function buildTableRow(row) {
         inventoryMode: item.inventoryMode || (productId ? "single" : "unbound"),
         orderItemId: Number(item.orderItemId || 0) || null,
         sku: item.sku || "",
+        skus: [item.sku || ''],
         quantity: Number(item.quantity || 0),
         productName: item.inventoryMode === "combo"
           ? (item.inventoryName || item.name || item.sku || '组合库存方案')
@@ -1122,7 +1123,7 @@ function buildTableRow(row) {
     })
     .filter((item) => {
       const dedupeKey = item.inventoryKey || String(item.productId || "");
-      if (seenProductIds.has(dedupeKey)) { seenProductIds.get(dedupeKey).quantity += item.quantity; return false; }
+      if (seenProductIds.has(dedupeKey)) { seenProductIds.get(dedupeKey).quantity += item.quantity; seenProductIds.get(dedupeKey).skus.push(...item.skus); return false; }
       seenProductIds.set(dedupeKey, item);
       return true;
     });

@@ -259,7 +259,7 @@ export function summarizeLedger(product, movements, purchases, orders, fbpReserv
 export function createProcurementLedgerService(hooks) {
   const { query, transaction, coverage, postMovement, receive, recordCost, refreshPurchase, requirePerson, prepare } = hooks;
   async function snapshot(productId, run = query) {
-    const products = await run(`SELECT id, name, code, inventory_number, purchase_cost,
+    const products = await run(`SELECT id, name, code, inventory_number, stock_unit, purchase_cost,
       CASE WHEN COALESCE(image_url, '') != '' THEN CONCAT('/api/products/', id, '/image') ELSE '' END AS image_url
       FROM products WHERE id = ? AND active = 1`, [productId]);
     if (!products[0]) throw new Error('库存商品不存在或已停用，请重新选择');
@@ -308,7 +308,10 @@ export function createProcurementLedgerService(hooks) {
   }
   async function read(body) {
     await prepare();
-    return snapshot(integer(body.product_id || body.productId, '库存商品 ID'));
+    const id = integer(body.product_id || body.productId, '库存商品 ID');
+    const [value, fbp] = await Promise.all([snapshot(id), hooks.fbpStocks ? hooks.fbpStocks(id) : null]);
+    if (fbp) value.fbp_inventory = fbp;
+    return value;
   }
   async function costTasks(body = {}) {
     await prepare();
