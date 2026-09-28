@@ -90,6 +90,18 @@ test("order procurement card is shown only for procurement assigned to that orde
   assert.doesNotMatch(table, /v-if="row\.procurementState\?\.latestPurchaseAt \|\| hasProcurementIncoming\(row\)"/);
 });
 
+test("order list exposes the latest related procurement time and its detail entry", async () => {
+  const [table, page] = await Promise.all([
+    readFile(new URL("../frontend/orders/components/OrdersTable.vue", import.meta.url), "utf8"),
+    readFile(new URL("../frontend/orders/OrdersPage.vue", import.meta.url), "utf8")
+  ]);
+
+  assert.match(table, /<el-table-column label="采购时间"/);
+  assert.match(table, /procurementTimeText\(row\)/);
+  assert.match(table, /查看明细/);
+  assert.match(page, /latestPurchaseAt: latestBatch\.purchased_at \|\| latestBatch\.created_at/);
+});
+
 mysqlTest("MySQL order list supports status tabs, print filters, inventory sorting, and purchase search", async () => {
   const all = await ordersPagedMysql({ paged: "1", page: 1, pageSize: 5, status: "all" });
   assert.ok(all.total > 0);

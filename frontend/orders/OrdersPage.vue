@@ -831,12 +831,15 @@ function buildProcurementState(row = {}) {
   }
   if (coverage) {
     const batches = (coverage.batches || []).filter(batch => batch.status === 'pending_arrival');
+    const batchTime = (batch) => new Date(batch?.purchased_at || batch?.created_at || 0).getTime() || 0;
     const first = batches[0] || {};
+    const latestBatch = [...batches].sort((left, right) => batchTime(right) - batchTime(left))[0] || first;
     const purchases = orderPurchaseDetails(coverage.batches);
     const days = first.created_at ? Math.max(0, Math.floor((Date.now() - new Date(first.created_at).getTime()) / 86400000)) : 0;
     return { ...coverage, handled: !coverage.shortage_quantity && !coverage.quantity_needs_review,
       detail: coverage.incoming_quantity > 0 ? '采购在途' : '库存可满足', hasOrderIncoming: coverage.incoming_quantity > 0,
-      inTransitDays: days, overdue: !coverage.entered_transport && days >= 3, latestPurchaseAt: first.created_at || '',
+      inTransitDays: days, overdue: !coverage.entered_transport && days >= 3, latestPurchaseAt: latestBatch.purchased_at || latestBatch.created_at || '',
+      pendingPurchaseCount: batches.length,
       inboundRecordId: batches.length === 1 ? Number(first.id) : null, inboundRecordCount: batches.length,
       canRegisterOrderReceipt: batches.length > 0,
       purchaseSummary: purchases.map(item => `${item.quantity} ${item.unit}`).join(' / '),

@@ -562,6 +562,20 @@ function procurementTimeText(row) {
         </template>
       </el-table-column>
 
+      <el-table-column label="采购时间" min-width="192">
+        <template #default="{ row }">
+          <div v-if="row.procurementState?.latestPurchaseAt" class="orders-cell-stack orders-procurement-time-cell">
+            <strong>{{ procurementTimeText(row) }}</strong>
+            <small>采购单：{{ row.procurementState.inboundDetails?.purchaseOrderNo || '待补充' }}</small>
+            <small v-if="Number(row.procurementState.pendingPurchaseCount || 0) > 1">关联 {{ row.procurementState.pendingPurchaseCount }} 笔在途采购</small>
+            <small v-else>在途 {{ Number(row.procurementState.inTransitDays || 0) }} 天</small>
+            <el-button size="small" link type="primary" @click="emit('view-procurement-details', row)">查看明细</el-button>
+          </div>
+          <small v-else-if="isFbpOrder(row)" class="orders-cell-meta-line">官方仓履约，无需采购</small>
+          <small v-else class="orders-cell-meta-line">暂无关联采购</small>
+        </template>
+      </el-table-column>
+
       <el-table-column label="库存信息" min-width="240">
         <template #header>
           <span>库存信息</span>

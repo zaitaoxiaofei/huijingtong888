@@ -467,6 +467,11 @@
   width: 92px;
 }
 
+.orders-procurement-time-cell strong {
+  color: #303133;
+  font-variant-numeric: tabular-nums;
+}
+
 .orders-actions-cell .orders-inline-accent-button.el-button {
   width: 98px;
 }
