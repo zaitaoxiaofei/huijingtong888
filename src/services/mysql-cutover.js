@@ -26286,6 +26286,12 @@ async function orderFilteredSqlMysql(query, base, coverage = null) {
   ), 0)`;
   if (fulfillmentType === "fbp") where.push(`${fbpOrder} = 1`);
   if (fulfillmentType === "fbs") where.push(`${fbpOrder} = 0`);
+  if (String(query.nearShipmentDeadline || query.near_shipment_deadline || "") === "1") {
+    where.push("COALESCE(o.shipment_deadline_at, DATE_ADD(o.ordered_at, INTERVAL 6 DAY)) > UTC_TIMESTAMP() AND COALESCE(o.shipment_deadline_at, DATE_ADD(o.ordered_at, INTERVAL 6 DAY)) < DATE_ADD(UTC_TIMESTAMP(), INTERVAL 3 DAY)");
+  }
+  if (String(query.procurementTransitOverdue || query.procurement_transit_overdue || "") === "1") {
+    where.push("EXISTS (SELECT 1 FROM order_items overdue_item LEFT JOIN sku_mappings overdue_mapping ON overdue_mapping.shop_id = o.shop_id AND overdue_mapping.ozon_sku = overdue_item.ozon_sku AND overdue_mapping.active = 1 JOIN inbound_records overdue_inbound ON overdue_inbound.product_id = overdue_mapping.product_id AND overdue_inbound.status = 'pending_arrival' WHERE overdue_item.order_id = o.id AND TIMESTAMPDIFF(HOUR, overdue_inbound.created_at, UTC_TIMESTAMP()) >= 48)");
+  }
   return { joins: "", where: where.filter(Boolean).join(" AND "), params };
 }
 

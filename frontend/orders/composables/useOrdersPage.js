@@ -166,6 +166,8 @@ function createDefaultFilters(defaultFrom, defaultTo) {
     printView: "all",
     printFilter: "all",
     sortMode: "ordered"
+    ,nearShipmentDeadline: false
+    ,procurementTransitOverdue: false
   };
 }
 
@@ -271,6 +273,8 @@ export function useOrdersPage() {
       printView: filters.printView || "all",
       printFilter: filters.printFilter || "all",
       sortMode: filters.sortMode || "ordered",
+      nearShipmentDeadline: filters.nearShipmentDeadline ? "1" : "0",
+      procurementTransitOverdue: filters.procurementTransitOverdue ? "1" : "0",
       ...extra
     });
   }

@@ -1845,10 +1845,13 @@ function closeQualityDialog() {
 }
 
 async function handleSaveMark(orderId, markType) {
-  await saveOrderMark(orderId, markType);
+  const row = tableRows.value.find((item) => Number(item.id) === Number(orderId));
+  const { value: note } = await ElMessageBox.prompt("可填写标记原因，方便后续跟进", "订单标记备注", { inputValue: row?.mark_note || "", inputPlaceholder: "例如：客户要求延迟发货", confirmButtonText: "保存", cancelButtonText: "取消" }).catch(() => ({ value: null }));
+  if (note === null) return;
+  await saveOrderMark(orderId, markType, note);
   vm.rows = (vm.rows || []).map((row) => (
     Number(row.id) === Number(orderId)
-      ? { ...row, mark_type: String(markType || "") }
+      ? { ...row, mark_type: String(markType || ""), mark_note: note }
       : row
   ));
   ElMessage.success("订单标记已更新");
@@ -2473,6 +2476,11 @@ onBeforeUnmount(() => {
         @configure-status-tabs="openStatusPreferenceDialog"
       />
     </OrdersToolbar>
+
+    <div class="orders-inline-actions">
+      <el-checkbox v-model="vm.filters.nearShipmentDeadline" @change="submitFilters">即将超时（剩余 &lt; 3 天）</el-checkbox>
+      <el-checkbox v-model="vm.filters.procurementTransitOverdue" @change="submitFilters">采购在途超过 2 天</el-checkbox>
+    </div>
 
     <div v-if="vm.filters.status === 'purchase_in_transit' || selectedCount > 0" class="orders-inline-actions">
       <el-button type="primary" plain :disabled="!selectedCount" :loading="shippedReceiptDialog.loading" @click="previewShippedReceipts()">批量补登记实收（已选 {{ selectedCount }} 单）</el-button>

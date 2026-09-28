@@ -520,8 +520,8 @@ export async function recalculateOrderProfit(orderId) {
   return apiClient.post(`/api/orders/${orderId}/recalculate-profit`, {});
 }
 
-export async function saveOrderMark(orderId, markType) {
-  return apiClient.put(`/api/orders/${orderId}/mark`, { mark_type: markType });
+export async function saveOrderMark(orderId, markType, note = "") {
+  return apiClient.put(`/api/orders/${orderId}/mark`, { mark_type: markType, note });
 }
 
 export async function openBindProduct(onlineId) {
