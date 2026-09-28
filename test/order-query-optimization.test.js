@@ -29,7 +29,7 @@ test('order quick filters combine and constrain their selected day thresholds', 
     procurementTransitOverdue: '1',
     procurementTransitOverdueDays: '10'
   }, { where: '1 = 1', params: [] });
-  assert.match(combined.where, /DATE_ADD\(o\.ordered_at, INTERVAL 6 DAY\).*INTERVAL 5 DAY/);
+  assert.match(combined.where, /DATE_ADD\(o\.ordered_at, INTERVAL 6 DAY\) < DATE_ADD\(UTC_TIMESTAMP\(\), INTERVAL 5 DAY\)/);
   assert.match(combined.where, /TIMESTAMPDIFF\(HOUR, overdue_inbound\.created_at, UTC_TIMESTAMP\(\)\) >= 240/);
 
   const overdue = await filtered({ nearShipmentDeadline: '1', nearShipmentDeadlineDays: '0' }, { where: '1 = 1', params: [] });
@@ -37,6 +37,9 @@ test('order quick filters combine and constrain their selected day thresholds', 
 
   const bounded = await filtered({ procurementTransitOverdue: '1', procurementTransitOverdueDays: '99' }, { where: '1 = 1', params: [] });
   assert.match(bounded.where, />= 240/);
+  const quickSort = source.match(/function orderQuickFilterOrderSqlMysql\([\s\S]*?\n}/)[0];
+  const sorter = vm.runInNewContext(`(${quickSort})`);
+  assert.match(sorter({ nearShipmentDeadline: '1', procurementTransitOverdue: '1' }), /DATE_ADD\(o\.ordered_at, INTERVAL 6 DAY\) ASC,[\s\S]*MIN\(overdue_inbound\.created_at\)[\s\S]*ASC/);
 });
 
 test('large inventory lists warm logistics once and bound enrichment concurrency without reordering', async () => {

@@ -2166,6 +2166,12 @@ function sortPagedOrdersMysql(rows, query = {}) {
   const mode = String(query.sortMode || query.sort_mode || "ordered");
   const status = String(query.status || "all");
   const print = String(query.printFilter || query.print_filter || "all");
+  const quickUrgencySort = String(query.nearShipmentDeadline || query.near_shipment_deadline || "") === "1"
+    || String(query.procurementTransitOverdue || query.procurement_transit_overdue || "") === "1";
+  // The SQL query has already sorted the full result set by deadline and/or
+  // oldest pending procurement. Do not replace that global order after rows
+  // have been hydrated for the current page.
+  if (quickUrgencySort) return [...rows];
   return [...rows].sort((a, b) => {
     if (print === "printed") {
       const printedDiff = orderPrintTimestampPagedValueMysql(b) - orderPrintTimestampPagedValueMysql(a);
@@ -26294,9 +26300,11 @@ async function orderFilteredSqlMysql(query, base, coverage = null) {
     const requestedRemainingDays = Number(query.nearShipmentDeadlineDays ?? query.near_shipment_deadline_days ?? 3);
     const remainingDays = Number.isFinite(requestedRemainingDays) ? Math.min(5, Math.max(0, requestedRemainingDays)) : 3;
     const deadlineAt = "DATE_ADD(o.ordered_at, INTERVAL 6 DAY)";
+    // The deadline queue includes overdue work. Operators must see the most
+    // overdue orders first instead of losing them once their deadline passes.
     where.push(remainingDays === 0
       ? `${deadlineAt} < UTC_TIMESTAMP()`
-      : `${deadlineAt} > UTC_TIMESTAMP() AND ${deadlineAt} < DATE_ADD(UTC_TIMESTAMP(), INTERVAL ${remainingDays} DAY)`);
+      : `${deadlineAt} < DATE_ADD(UTC_TIMESTAMP(), INTERVAL ${remainingDays} DAY)`);
   }
   if (String(query.procurementTransitOverdue || query.procurement_transit_overdue || "") === "1") {
     const requestedTransitDays = Number(query.procurementTransitOverdueDays ?? query.procurement_transit_overdue_days ?? 3);
@@ -26304,6 +26312,25 @@ async function orderFilteredSqlMysql(query, base, coverage = null) {
     where.push(`EXISTS (SELECT 1 FROM order_items overdue_item LEFT JOIN sku_mappings overdue_mapping ON overdue_mapping.shop_id = o.shop_id AND overdue_mapping.ozon_sku = overdue_item.ozon_sku AND overdue_mapping.active = 1 JOIN inbound_records overdue_inbound ON overdue_inbound.product_id = overdue_mapping.product_id AND overdue_inbound.status = 'pending_arrival' WHERE overdue_item.order_id = o.id AND TIMESTAMPDIFF(HOUR, overdue_inbound.created_at, UTC_TIMESTAMP()) >= ${transitDays * 24})`);
   }
   return { joins: "", where: where.filter(Boolean).join(" AND "), params };
+}
+
+function orderQuickFilterOrderSqlMysql(query = {}) {
+  const deadline = "DATE_ADD(o.ordered_at, INTERVAL 6 DAY)";
+  const oldestInbound = `(
+    SELECT MIN(overdue_inbound.created_at)
+    FROM order_items overdue_item
+    LEFT JOIN sku_mappings overdue_mapping ON overdue_mapping.shop_id = o.shop_id
+      AND overdue_mapping.ozon_sku = overdue_item.ozon_sku AND overdue_mapping.active = 1
+    JOIN inbound_records overdue_inbound ON overdue_inbound.product_id = overdue_mapping.product_id
+      AND overdue_inbound.status = 'pending_arrival'
+    WHERE overdue_item.order_id = o.id
+  )`;
+  const nearDeadline = String(query.nearShipmentDeadline || query.near_shipment_deadline || "") === "1";
+  const procurementTransit = String(query.procurementTransitOverdue || query.procurement_transit_overdue || "") === "1";
+  if (nearDeadline && procurementTransit) return `${deadline} ASC, ${oldestInbound} ASC, o.ordered_at DESC`;
+  if (nearDeadline) return `${deadline} ASC, o.ordered_at DESC`;
+  if (procurementTransit) return `${oldestInbound} ASC, o.ordered_at DESC`;
+  return "o.ordered_at DESC";
 }
 
 function orderProductShippingExistsSqlMysql(methods = []) {
@@ -26871,7 +26898,7 @@ export async function ordersPagedMysql(query = {}) {
         ${filtered.joins}
         WHERE ${filtered.where}
         GROUP BY o.id
-        ORDER BY o.ordered_at DESC
+        ORDER BY ${orderQuickFilterOrderSqlMysql(query)}
       `, filtered.params);
       inventoryTotal = idRows.length;
       const sortRows = await orderInventorySortRowsMysql(idRows.map((row) => row.id));
@@ -26884,7 +26911,7 @@ export async function ordersPagedMysql(query = {}) {
         ${filtered.joins}
         WHERE ${filtered.where}
         GROUP BY o.id
-        ORDER BY o.ordered_at DESC
+        ORDER BY ${orderQuickFilterOrderSqlMysql(query)}
         LIMIT ? OFFSET ?
       `, [...filtered.params, pageSize, start]);
       rows = sortPagedOrdersMysql(await orderRowsByIdsMysql(

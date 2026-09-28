@@ -830,16 +830,19 @@ function buildProcurementState(row = {}) {
     return { handled: true, detail: '官方仓履约，无需采购', hasOrderIncoming: false, inboundRecordCount: 0 };
   }
   if (coverage) {
-    const batches = (coverage.batches || []).filter(batch => batch.status === 'pending_arrival');
+    const allBatches = coverage.batches || [];
+    const batches = allBatches.filter(batch => batch.status === 'pending_arrival');
     const batchTime = (batch) => new Date(batch?.purchased_at || batch?.created_at || 0).getTime() || 0;
     const first = batches[0] || {};
-    const latestBatch = [...batches].sort((left, right) => batchTime(right) - batchTime(left))[0] || first;
-    const purchases = orderPurchaseDetails(coverage.batches);
+    const latestBatch = [...allBatches].sort((left, right) => batchTime(right) - batchTime(left))[0] || first;
+    const purchases = orderPurchaseDetails(allBatches);
     const days = first.created_at ? Math.max(0, Math.floor((Date.now() - new Date(first.created_at).getTime()) / 86400000)) : 0;
     return { ...coverage, handled: !coverage.shortage_quantity && !coverage.quantity_needs_review,
       detail: coverage.incoming_quantity > 0 ? '采购在途' : '库存可满足', hasOrderIncoming: coverage.incoming_quantity > 0,
       inTransitDays: days, overdue: !coverage.entered_transport && days > 3, latestPurchaseAt: latestBatch.purchased_at || latestBatch.created_at || '',
       pendingPurchaseCount: batches.length,
+      purchaseReceiptStatus: allBatches.length && !batches.length ? 'received' : '',
+      latestReceivedAt: latestBatch.approved_at || latestBatch.received_at || '',
       inboundRecordId: batches.length === 1 ? Number(first.id) : null, inboundRecordCount: batches.length,
       canRegisterOrderReceipt: batches.length > 0,
       purchaseSummary: purchases.map(item => `${item.quantity} ${item.unit}`).join(' / '),
@@ -888,6 +891,8 @@ function buildProcurementState(row = {}) {
     inboundRecordId,
     inboundRecordCount: inboundRecordIds.length,
     canRegisterOrderReceipt: inboundRecordIds.length > 0 && hasOrderIncoming,
+    purchaseReceiptStatus: '',
+    latestReceivedAt: '',
     inboundDetails
   };
   const types = splitCsv(row.procurement_handling_types);
@@ -920,6 +925,8 @@ function buildProcurementState(row = {}) {
     inboundRecordId,
     inboundRecordCount: inboundRecordIds.length,
     canRegisterOrderReceipt: inboundRecordIds.length > 0 && hasOrderIncoming,
+    purchaseReceiptStatus: '',
+    latestReceivedAt: '',
     inboundDetails
   };
 }

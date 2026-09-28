@@ -8,7 +8,8 @@ function definition(name) {
   return source.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`))[0];
 }
 const sorting = ['logisticsModeKeyMysql', 'orderTimestampPagedValueMysql', 'orderInventoryPagedSortKeyMysql',
-  'sortPagedOrdersMysql', 'orderPrintTimestampPagedValueMysql', 'orderPrintSequencePagedValueMysql'].map(definition).join('\n');
+  'sortPagedOrdersMysql', 'orderPrintTimestampPagedValueMysql', 'orderPrintSequencePagedValueMysql',
+  'orderQuickFilterOrderSqlMysql'].map(definition).join('\n');
 
 test('inventory pagination loads details only for the globally sorted page, including print order', async () => {
   const candidates = Array.from({ length: 243 }, (_, index) => ({

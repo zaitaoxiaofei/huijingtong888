@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import test from 'node:test';
 import { h } from 'vue';
 import { renderToString } from 'vue/server-renderer';
-import { orderPurchaseDetails } from '../frontend/orders/utils/order-procurement-detail.js';
+import { orderProcurementRecordDetails, orderPurchaseDetails } from '../frontend/orders/utils/order-procurement-detail.js';
 import { formatDateTime, formatMoney } from '../frontend/orders/utils/order-format.js';
 import { calculateOrderProcurementCoverage } from '../src/services/order-procurement-coverage.js';
 
@@ -15,7 +15,7 @@ const batch = { id: 5, product_id: 10, purchase_order_item_id: 8, quantity: 20,
   purchase_url: 'https://example.com/product', purchase_note: '银色普通款' };
 
 const page = await readFile(new URL('../frontend/orders/OrdersPage.vue', import.meta.url), 'utf8');
-const context = vm.createContext({ h, orderPurchaseDetails, formatDateTime, formatMoney });
+const context = vm.createContext({ h, orderProcurementRecordDetails, orderPurchaseDetails, formatDateTime, formatMoney });
 vm.runInContext(page.slice(page.indexOf('function buildProcurementState('), page.indexOf('async function handleViewProcurementDetails(')), context);
 
 function coverage(quantity = 1, inbounds = [batch]) {
@@ -31,13 +31,24 @@ test('20 purchased units stay separate from one unit covering the order, with ma
   assert.equal(row.procurementState.purchaseSummary, '20 件');
   const html = await renderToString(context.procurementDetailContent(row, '采购详情'));
   assert.match(html, /挡风被/);
-  assert.match(html, /采购总量<\/span><strong class="is-primary">20 件/);
-  assert.match(html, /本单需求<\/span><strong class="is-muted">本单 1 件，在途覆盖 1 件/);
-  assert.match(html, /采购单价<\/span><strong class="">¥6.58 \/ 件/);
-  assert.match(html, /2026\/09\/11 15:42:34（北京时间）/);
-  assert.doesNotMatch(html, /PO-20260911-010/);
-  assert.doesNotMatch(html, /银色普通款/);
-  assert.doesNotMatch(html, /https:\/\/example.com\/product/);
+  assert.match(html, /<table class="orders-procurement-table">/);
+  assert.match(html, /20 件/);
+  assert.match(html, /¥131.60/);
+  assert.match(html, /2026\/09\/11 15:42:34/);
+  assert.match(html, /PO-20260911-010/);
+  assert.match(html, /登记入库/);
+});
+
+test('fully received purchases retain their procurement information instead of appearing blank', () => {
+  const received = { ...batch, status: 'approved', approved_at: '2026-09-12T07:42:34Z', purchase_received_quantity: 20 };
+  const row = { procurement_coverage: {
+    batches: [received], incoming_quantity: 0, shortage_quantity: 0,
+    quantity_needs_review: false, entered_transport: false
+  } };
+  const state = context.buildProcurementState(row);
+  assert.equal(state.purchaseReceiptStatus, 'received');
+  assert.equal(state.latestReceivedAt, '2026-09-12T07:42:34Z');
+  assert.equal(state.latestPurchaseAt, batch.purchased_at);
 });
 
 test('partial receipt uses original purchase totals once, even across two receipt batches', () => {
@@ -59,7 +70,7 @@ test('multiple purchases show each product, quantity and unit price', async () =
   assert.match(html, /挡风被/);
   assert.match(html, /另一批商品/);
   assert.match(html, /3 套/);
-  assert.match(html, /¥10.00 \/ 套/);
+  assert.match(html, /¥131.60/);
 });
 
 test('legacy batches retain recorded quantity and zero costs without invented purchase totals', () => {
@@ -69,8 +80,8 @@ test('legacy batches retain recorded quantity and zero costs without invented pu
   assert.equal(result[0].pending, 7);
 });
 
-test('received purchases are omitted from the packing-facing view', async () => {
+test('received purchases are not shown in the pending procurement detail table', async () => {
   const row = { procurement_coverage: coverage(1, [{ ...batch, status: 'approved', purchase_received_quantity: 20 }]) };
   const html = await renderToString(context.procurementDetailContent(row));
-  assert.equal(html, '<div class="orders-inbound-confirm"></div>');
+  assert.equal(html, '<div class="orders-procurement-empty">没有关联的采购记录</div>');
 });

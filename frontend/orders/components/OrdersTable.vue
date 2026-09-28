@@ -638,8 +638,9 @@ function procurementTimeText(row) {
           <div v-if="row.procurementState?.latestPurchaseAt" class="orders-cell-stack orders-procurement-time-cell">
             <strong>{{ procurementTimeText(row) }}</strong>
             <small>采购单：{{ row.procurementState.inboundDetails?.purchaseOrderNo || '待补充' }}</small>
+            <small v-if="row.procurementState.purchaseReceiptStatus === 'received'">全部入库<template v-if="row.procurementState.latestReceivedAt"> · {{ formatDateTime(row.procurementState.latestReceivedAt, { assumeUtcWhenNaive: true }) }}</template></small>
             <small v-if="Number(row.procurementState.pendingPurchaseCount || 0) > 1">关联 {{ row.procurementState.pendingPurchaseCount }} 笔在途采购</small>
-            <small v-else>在途 {{ Number(row.procurementState.inTransitDays || 0) }} 天</small>
+            <small v-else-if="row.procurementState.purchaseReceiptStatus !== 'received'">在途 {{ Number(row.procurementState.inTransitDays || 0) }} 天</small>
             <el-button size="small" link type="primary" @click="emit('view-procurement-details', row)">查看明细</el-button>
             <el-button
               v-if="hasProcurementIncoming(row)"
