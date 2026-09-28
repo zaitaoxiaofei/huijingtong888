@@ -19,7 +19,28 @@
     };
   }
 
+  async function collectVisibleLogisticsLinks() {
+    const links = new Map();
+    let unchanged = 0;
+    for (let pass = 0; pass < 20 && unchanged < 3; pass += 1) {
+      for (const anchor of document.querySelectorAll('a[href*="goods_express.html"]')) {
+        const url = new URL(anchor.href, location.href).toString();
+        const orderNo = new URL(url).searchParams.get("order_sn");
+        if (orderNo) links.set(orderNo, url);
+      }
+      const before = links.size;
+      window.scrollTo(0, document.documentElement.scrollHeight);
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      unchanged = links.size === before ? unchanged + 1 : 0;
+    }
+    return [...links.entries()].map(([order_sn, url]) => ({ order_sn, url }));
+  }
+
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type === "PDD_PROCUREMENT_COLLECT_ORDER_LINKS") {
+      collectVisibleLogisticsLinks().then((links) => sendResponse({ ok: true, links }), (error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
     if (message?.type !== "PDD_PROCUREMENT_READ_LOGISTICS") return;
     const payload = readLogistics();
     if (!payload.platform_order_no || !payload.tracking_number) {

@@ -19181,6 +19181,27 @@ export async function syncPddProcurementLogisticsMysql(body = {}) {
   return { ok: true, platform_order_no: orderNo, tracking_number: trackingNumber, logistics_status: status, logistics_status_text: statusText || "运输中" };
 }
 
+export async function syncPddProcurementLogisticsBatchMysql(body = {}) {
+  ensureMysqlCutoverEnabled();
+  const orders = Array.isArray(body.orders) ? body.orders : [];
+  if (!orders.length) throw new Error("没有可同步的拼多多物流订单");
+  const results = [];
+  for (const order of orders.slice(0, 100)) {
+    try {
+      results.push({ ...(await syncPddProcurementLogisticsMysql(order)), synced: true });
+    } catch (error) {
+      results.push({
+        platform_order_no: String(order?.platform_order_no || "").trim(),
+        tracking_number: String(order?.tracking_number || "").trim(),
+        synced: false,
+        reason: error.message || "同步失败"
+      });
+    }
+  }
+  const synced = results.filter((item) => item.synced).length;
+  return { ok: true, total: results.length, synced, unmatched: results.length - synced, results };
+}
+
 export async function pendingInboundItemsMysql() {
   ensureMysqlCutoverEnabled();
   return await mysqlQuery(`

@@ -1,6 +1,7 @@
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== "PDD_PROCUREMENT_SYNC_TO_ERP") return;
-  fetch("/api/procurement/pdd-logistics/sync", {
+  const batch = message?.type === "PDD_PROCUREMENT_SYNC_BATCH_TO_ERP";
+  if (!batch && message?.type !== "PDD_PROCUREMENT_SYNC_TO_ERP") return;
+  fetch(batch ? "/api/procurement/pdd-logistics/sync-batch" : "/api/procurement/pdd-logistics/sync", {
     method: "POST",
     headers: { "content-type": "application/json" },
     credentials: "same-origin",

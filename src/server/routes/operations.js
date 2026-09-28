@@ -45,6 +45,7 @@ export function createOperationsRoutes({ services, readJson }) {
     "POST /api/procurement/warehouse-requests": async (req) => services.createWarehouseProcurementRequests(await readJson(req), req._session?.personId),
     "POST /api/procurement/purchases": async (req) => services.recordProcurementPurchase(await readJson(req), req._session?.personId),
     "POST /api/procurement/pdd-logistics/sync": async (req) => services.syncPddProcurementLogistics(await readJson(req)),
+    "POST /api/procurement/pdd-logistics/sync-batch": async (req) => services.syncPddProcurementLogisticsBatch(await readJson(req)),
     "POST /api/procurement/platform-orders/import": async (req) => services.importProcurementPlatformOrders(await readJson(req), req._session?.personId),
     "POST /api/procurement/payments/import": async (req) => services.importProcurementPayments(await readJson(req), req._session?.personId),
     "POST /api/procurement/reconciliation/auto-match": async () => services.autoMatchProcurementPayments(),
