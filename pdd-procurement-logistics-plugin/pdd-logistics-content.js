@@ -1,0 +1,31 @@
+(() => {
+  const text = () => document.body?.innerText?.replace(/\s+/g, " ").trim() || "";
+  const pick = (value, patterns) => patterns.map((pattern) => value.match(pattern)?.[1]?.trim()).find(Boolean) || "";
+
+  function readLogistics() {
+    const params = new URLSearchParams(location.search);
+    const pageText = text();
+    const trackingNumber = params.get("tracking_number") || pick(pageText, [/运单号[：:\s]*([A-Za-z0-9-]{6,})/]);
+    const orderNo = params.get("order_sn") || pick(pageText, [/订单号[：:\s]*([A-Za-z0-9-]{6,})/]);
+    const statusText = pick(pageText, [/(已签收|待取件|派送中|运输中|已揽收|物流异常|配送异常)/]);
+    const lines = pageText.split(/(?<=。)|(?<=\d{2}:\d{2})/).map((item) => item.trim()).filter(Boolean);
+    return {
+      platform_order_no: orderNo,
+      tracking_number: trackingNumber,
+      carrier_code: String(params.get("shipping_id") || ""),
+      logistics_status_text: statusText || "已读取拼多多物流页面",
+      latest_trace: lines.find((line) => /签收|取件|派送|运输|揽收|到达|异常/.test(line)) || pageText.slice(0, 500),
+      source: "pdd_mobile"
+    };
+  }
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type !== "PDD_PROCUREMENT_READ_LOGISTICS") return;
+    const payload = readLogistics();
+    if (!payload.platform_order_no || !payload.tracking_number) {
+      sendResponse({ ok: false, error: "未在当前拼多多物流页读取到订单号或快递单号" });
+      return;
+    }
+    sendResponse({ ok: true, payload });
+  });
+})();

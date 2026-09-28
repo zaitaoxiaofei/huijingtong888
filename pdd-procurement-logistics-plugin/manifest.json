@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "爆单ERP 拼多多采购物流同步",
+  "description": "同步已登录拼多多采购订单的物流状态到爆单ERP。",
+  "version": "1.0.1",
+  "permissions": ["activeTab", "storage", "tabs"],
+  "host_permissions": [
+    "https://mobile.pinduoduo.com/*",
+    "https://erp.hjt888.xyz/*",
+    "http://localhost:8788/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "同步当前拼多多采购物流" },
+  "content_scripts": [{
+    "matches": ["https://mobile.pinduoduo.com/goods_express.html*"],
+    "js": ["pdd-logistics-content.js"],
+    "run_at": "document_idle"
+  }, {
+    "matches": ["https://erp.hjt888.xyz/*", "http://localhost:8788/*"],
+    "js": ["erp-bridge.js"],
+    "run_at": "document_idle"
+  }]
+}

@@ -19160,6 +19160,27 @@ export async function refreshPurchaseOrderShipmentMysql(id) {
   return await mysqlQueryOne("SELECT * FROM purchase_order_shipments WHERE id = ?", [shipmentId]);
 }
 
+export async function syncPddProcurementLogisticsMysql(body = {}) {
+  ensureMysqlCutoverEnabled();
+  await ensurePurchaseOrderShipmentSchemaMysql();
+  const orderNo = String(body.platform_order_no || "").trim();
+  const trackingNumber = String(body.tracking_number || "").trim();
+  if (!orderNo || !trackingNumber) throw new Error("拼多多订单号和快递单号不能为空");
+  const statusText = String(body.logistics_status_text || "").trim();
+  const latestTrace = String(body.latest_trace || "").trim();
+  const status = /签收/.test(statusText) ? "signed" : /取件|派送/.test(statusText) ? "out_for_delivery" : /异常/.test(statusText) ? "problem" : "in_transit";
+  const result = await mysqlExecute(`
+    UPDATE purchase_order_shipments
+    SET platform_order_no = ?, carrier_code = COALESCE(NULLIF(?, ''), carrier_code),
+      logistics_status = ?, logistics_status_text = ?, latest_trace = ?, queried_at = CURRENT_TIMESTAMP
+    WHERE platform_order_no = ? OR tracking_number = ?
+  `, [orderNo, String(body.carrier_code || "").trim(), status, statusText || "运输中", latestTrace || null, orderNo, trackingNumber]);
+  if (!Number(result?.affectedRows || 0)) {
+    throw new Error("ERP 中未找到该采购物流记录，请先在采购单保存拼多多订单号和快递单号");
+  }
+  return { ok: true, platform_order_no: orderNo, tracking_number: trackingNumber, logistics_status: status, logistics_status_text: statusText || "运输中" };
+}
+
 export async function pendingInboundItemsMysql() {
   ensureMysqlCutoverEnabled();
   return await mysqlQuery(`
