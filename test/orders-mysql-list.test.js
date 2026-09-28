@@ -90,15 +90,18 @@ test("order procurement card is shown only for procurement assigned to that orde
   assert.doesNotMatch(table, /v-if="row\.procurementState\?\.latestPurchaseAt \|\| hasProcurementIncoming\(row\)"/);
 });
 
-test("order list exposes the latest related procurement time and its detail entry", async () => {
+test("order list places related procurement information beside inventory and keeps receipts there", async () => {
   const [table, page] = await Promise.all([
     readFile(new URL("../frontend/orders/components/OrdersTable.vue", import.meta.url), "utf8"),
     readFile(new URL("../frontend/orders/OrdersPage.vue", import.meta.url), "utf8")
   ]);
 
-  assert.match(table, /<el-table-column label="采购时间"/);
+  assert.match(table, /<el-table-column label="采购信息"/);
   assert.match(table, /procurementTimeText\(row\)/);
   assert.match(table, /查看明细/);
+  assert.ok(table.indexOf('<el-table-column label="采购信息"') > table.indexOf('<el-table-column label="库存信息"'));
+  const procurementColumn = table.slice(table.indexOf('<el-table-column label="采购信息"'), table.indexOf('<el-table-column label="归类 / 具体原因"'));
+  assert.match(procurementColumn, /confirm-procurement-inbound/);
   assert.match(page, /latestPurchaseAt: latestBatch\.purchased_at \|\| latestBatch\.created_at/);
 });
 

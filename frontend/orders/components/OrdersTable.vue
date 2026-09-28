@@ -562,20 +562,6 @@ function procurementTimeText(row) {
         </template>
       </el-table-column>
 
-      <el-table-column label="采购时间" min-width="192">
-        <template #default="{ row }">
-          <div v-if="row.procurementState?.latestPurchaseAt" class="orders-cell-stack orders-procurement-time-cell">
-            <strong>{{ procurementTimeText(row) }}</strong>
-            <small>采购单：{{ row.procurementState.inboundDetails?.purchaseOrderNo || '待补充' }}</small>
-            <small v-if="Number(row.procurementState.pendingPurchaseCount || 0) > 1">关联 {{ row.procurementState.pendingPurchaseCount }} 笔在途采购</small>
-            <small v-else>在途 {{ Number(row.procurementState.inTransitDays || 0) }} 天</small>
-            <el-button size="small" link type="primary" @click="emit('view-procurement-details', row)">查看明细</el-button>
-          </div>
-          <small v-else-if="isFbpOrder(row)" class="orders-cell-meta-line">官方仓履约，无需采购</small>
-          <small v-else class="orders-cell-meta-line">暂无关联采购</small>
-        </template>
-      </el-table-column>
-
       <el-table-column label="库存信息" min-width="240">
         <template #header>
           <span>库存信息</span>
@@ -641,8 +627,32 @@ function procurementTimeText(row) {
               </template>
               <el-tag v-if="inventoryViews.get(row.id)?.review" type="warning" size="small">待核对</el-tag>
             </div>
-            <el-button v-if="hasProcurementIncoming(row) && row.procurementState.canRegisterOrderReceipt" size="small" link type="success" :loading="isInboundReceiptPending(row)" :disabled="Number(confirmingInboundRecordId || 0) > 0" @click="emit('confirm-procurement-inbound', row)">{{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记实收' }}</el-button>
           </div>
+        </template>
+      </el-table-column>
+
+      <el-table-column label="采购信息" min-width="192">
+        <template #default="{ row }">
+          <div v-if="row.procurementState?.latestPurchaseAt" class="orders-cell-stack orders-procurement-time-cell">
+            <strong>{{ procurementTimeText(row) }}</strong>
+            <small>采购单：{{ row.procurementState.inboundDetails?.purchaseOrderNo || '待补充' }}</small>
+            <small v-if="Number(row.procurementState.pendingPurchaseCount || 0) > 1">关联 {{ row.procurementState.pendingPurchaseCount }} 笔在途采购</small>
+            <small v-else>在途 {{ Number(row.procurementState.inTransitDays || 0) }} 天</small>
+            <el-button size="small" link type="primary" @click="emit('view-procurement-details', row)">查看明细</el-button>
+            <el-button
+              v-if="hasProcurementIncoming(row) && row.procurementState.canRegisterOrderReceipt"
+              size="small"
+              :type="row.procurementState.overdue ? 'danger' : 'success'"
+              plain
+              :loading="isInboundReceiptPending(row)"
+              :disabled="Number(confirmingInboundRecordId || 0) > 0"
+              @click="emit('confirm-procurement-inbound', row)"
+            >
+              {{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记实收' }}
+            </el-button>
+          </div>
+          <small v-else-if="isFbpOrder(row)" class="orders-cell-meta-line">官方仓履约，无需采购</small>
+          <small v-else class="orders-cell-meta-line">暂无关联采购</small>
         </template>
       </el-table-column>
 
@@ -820,20 +830,6 @@ function procurementTimeText(row) {
                 <el-button size="small" link type="primary" @click="emit('view-procurement-details', row)">
                   查看采购内容
                 </el-button>
-                <el-button
-                  v-if="row.procurementState.canRegisterOrderReceipt"
-                  size="small"
-                  :type="row.procurementState.overdue ? 'danger' : 'success'"
-                  plain
-                  :loading="isInboundReceiptPending(row)"
-                  :disabled="Number(confirmingInboundRecordId || 0) > 0"
-                  @click="emit('confirm-procurement-inbound', row)"
-                >
-                  {{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记实收' }}
-                </el-button>
-                <small v-else-if="Number(row.procurementState.inboundRecordCount || 0) > 1">
-                  多个批次，请到采购页确认
-                </small>
               </div>
             </div>
           </div>
