@@ -54,6 +54,30 @@ const snapshot = (extra = {}) => ({ product: { id: 10 }, revision: 'version', lo
   orders: [{ order_item_id: 1, order_id: 1, quantity: 100, entered_transport: true, missing_record_quantity: 98, missing_purchase_quantity: 98, outbound_quantity: 100 }], ...extra });
 const body = (action_type, extra = {}) => ({ action_type, revision: 'version', reason: '盘点凭证 001', quantity: 2, ...extra });
 
+test('structured stocktake reasons allow zero and record sample losses without creating purchase costs', () => {
+  for (const reason_code of ['sample', 'damage', 'loss', 'history_error']) {
+    const plan = planLedgerAction(snapshot({ local_stock: 10, physical_estimate: 10 }), body('stocktake', { counted_quantity: 0, reason_code, reason: '' }));
+    assert.equal(plan.local_delta, -10);
+    assert.equal(plan.physical_before, 10);
+    assert.equal(plan.reason_code, reason_code);
+    assert.equal(plan.cost_task_quantity, 0);
+    assert.ok(plan.reason.length > 0);
+  }
+  assert.throws(() => planLedgerAction(snapshot(), body('stocktake', { counted_quantity: 3, reason_code: 'sample' })), /实际数量减少/);
+  assert.throws(() => planLedgerAction(snapshot(), body('stocktake', { counted_quantity: 3, reason_code: 'other' })), /补充说明/);
+  assert.throws(() => planLedgerAction(snapshot(), body('stocktake', { counted_quantity: 3, reason_code: 'invented' })), /调整原因/);
+});
+
+test('missing purchase count creates only new stock cost tasks and never adds transit', () => {
+  const plan = planLedgerAction(snapshot({ physical_estimate: 4, stocktake_id: 9, cost_tasks: [{ quantity: 4, resolved_quantity: 0 }] }),
+    body('stocktake', { counted_quantity: 7, reason_code: 'missing_purchase', reason: '' }));
+  assert.equal(plan.local_delta, 3);
+  assert.equal(plan.cost_task_quantity, 3);
+  const same = planLedgerAction(snapshot({ physical_estimate: 7, stocktake_id: 9 }), body('stocktake', { counted_quantity: 7, reason_code: 'count_confirmed', reason: '' }));
+  assert.equal(same.local_delta, 0);
+  assert.equal(same.cost_task_quantity, 0);
+});
+
 test('purchase reduction at zero stock reduces only pending quantity unless incorrect receipt explicitly confirmed', () => {
   const pending = snapshot({ purchases: [{ id: 1, actual_quantity: 10, received_quantity: 0 }] });
   assert.equal(planLedgerAction(pending, body('revise_purchase', { purchase_item_id: 1, quantity: 8, amount: 80 })).local_delta, 0);
@@ -154,6 +178,21 @@ test('last stocktake time comes from the existing product-scoped movement summar
   const result = await f.service.read({ product_id: 10 });
   assert.equal(result.last_stocktake_at, '2026-09-28 01:00:00');
   assert.equal((await fixture().service.read({ product_id: 10 })).last_stocktake_at, null);
+});
+
+test('sample loss adjustment is auditable and retries never deduct stock twice', async () => {
+  const f = fixture();
+  const before = await f.service.read({ product_id: 10 });
+  const input = { action_type: 'stocktake', product_id: 10, counted_quantity: 0,
+    reason_code: 'sample', reason_note: '展示样品领用', revision: before.revision, request_key: 'sample-loss-audit-001' };
+  const result = await f.service.apply(input, 1);
+  assert.equal(result.physical_before, 10);
+  assert.equal(result.physical_after, 0);
+  assert.equal(result.reason_code, 'sample');
+  assert.equal(result.local_delta, -10);
+  await f.service.apply(input, 1);
+  assert.equal(f.state().movements.filter(row => row.source_type === 'reconciliation_stocktake').length, 1);
+  assert.equal(f.state().costTasks.length, 0);
 });
 
 test('matching stocktake records a zero-delta physical baseline without inventing inventory', async () => {

@@ -17,7 +17,8 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     cost_tasks: [{ id: 7, quantity: 2, resolved_quantity: 0, reason: '实盘确认', created_at: '2026-09-27 00:00:00' }],
     orders: [{ order_item_id: 1, order_id: 1, posting_number: 'TEST-100', entered_transport: true, quantity: 100, missing_record_quantity: 98, missing_purchase_quantity: 98, missing_receipt_quantity: 0 },
       { order_item_id: 2, order_id: 2, posting_number: 'CURRENT-200', needs_fulfillment: true, quantity: 4, stock_quantity: 2, incoming_quantity: 2, shortage_quantity: 0 }],
-    purchases: [{ id: 1, order_no: 'CG-1', actual_quantity: 100, received_quantity: 2, pending_quantity: 98, amount: 1000, shipping_amount: 0, purchased_at: '2026-09-01 01:00:00' }] };
+    purchases: [{ id: 2, order_no: 'CG-OLD', actual_quantity: 2, received_quantity: 2, pending_quantity: 0, amount: 20, shipping_amount: 0, purchased_at: '2026-08-01 01:00:00' },
+      { id: 1, order_no: 'CG-1', actual_quantity: 100, received_quantity: 2, pending_quantity: 98, amount: 1000, shipping_amount: 0, purchased_at: '2026-09-01 01:00:00' }] };
   const requests = [], errors = [];
   try {
     await build({ configFile: false, root: process.cwd(), logLevel: 'error', plugins: [vue(), {
@@ -62,7 +63,13 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     await historicalDialog.getByRole('button', { name: 'Close this dialog' }).click();
     await page.getByRole('button', { name: '放弃修改', exact: true }).click();
     await page.getByRole('tab', { name: '采购与成本' }).click();
-    await page.getByRole('button', { name: '纠正记录', exact: true }).click();
+    const purchaseTable = page.locator('.el-table').filter({ hasText: 'CG-1' });
+    assert.match(await purchaseTable.locator('tbody tr').first().innerText(), /CG-1/);
+    await page.getByRole('button', { name: '100', exact: true }).click();
+    assert.equal(await page.getByText('CG-OLD', { exact: true }).count(), 0);
+    await page.getByText('全部采购', { exact: true }).click();
+    await page.getByText('CG-OLD', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '纠正记录', exact: true }).first().click();
     const dialog = page.getByRole('dialog', { name: '纠正采购记录', exact: true });
     assert.equal(await dialog.getByRole('button', { name: '确认保存纠正记录' }).isDisabled(), true);
     await dialog.getByRole('spinbutton').nth(0).fill('98');
@@ -84,16 +91,20 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     await conversion.getByText('该商品本地库存 10').waitFor();
     await conversion.getByRole('button', { name: '取消', exact: true }).click();
     await page.getByRole('button', { name: '放弃修改', exact: true }).click();
-    await page.getByRole('button', { name: '核对现货', exact: true }).click();
-    const countDialog = page.getByRole('dialog', { name: '本地盘点调整', exact: true });
+    await page.getByRole('button', { name: '更新本地库存', exact: true }).click();
+    const countDialog = page.getByRole('dialog', { name: '更新本地库存', exact: true });
     assert.equal(await countDialog.getByRole('spinbutton').inputValue(), '');
     await countDialog.getByRole('spinbutton').fill('0');
+    await countDialog.getByRole('button', { name: '确认更新', exact: true }).click();
+    await page.getByText('请选择更新本地库存的调整原因（reason_code）', { exact: true }).waitFor();
+    await countDialog.getByText('历史库存记错', { exact: true }).click();
     await countDialog.getByRole('textbox').fill('历史采购已补齐，仓库实盘确认为 0，保留采购在途');
-    await countDialog.getByRole('button', { name: '预览影响' }).click();
-    await countDialog.getByText(/核对后现货 0 件/).waitFor();
-    await countDialog.getByRole('button', { name: '确认保存纠正记录' }).click();
+    await page.screenshot({ path: '/tmp/inventory-update-reasons.png', animations: 'disabled' });
+    await countDialog.getByRole('button', { name: '确认更新', exact: true }).click();
+    await page.getByRole('dialog', { name: '确认更新本地库存', exact: true }).getByRole('button', { name: '确认更新', exact: true }).click();
     assert.equal(requests.at(-1).body.action_type, 'stocktake');
     assert.equal(requests.at(-1).body.counted_quantity, 0);
+    assert.equal(requests.at(-1).body.reason_code, 'history_error');
     await page.getByRole('tab', { name: '采购与成本' }).click();
     await page.getByRole('button', { name: '补现货采购成本', exact: true }).click();
     const costDialog = page.getByRole('dialog', { name: '补现货采购成本', exact: true });

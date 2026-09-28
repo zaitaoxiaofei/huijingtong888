@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { validateInventoryAdjustment } from '../inventory-adjustment-reasons.js';
 
 export const procurementLedgerSchema = [
   `CREATE TABLE IF NOT EXISTS procurement_ledger_actions (
@@ -75,7 +76,9 @@ function historicalPurchaseTime(value) {
 
 export function planLedgerAction(snapshot, body) {
   if (body.revision !== snapshot.revision) throw Object.assign(new Error('采购、订单或库存已变化，请刷新对账后重新提交'), { status: 409 });
-  const reason = String(body.reason || '').trim();
+  const reason = body.action_type === 'stocktake' && body.reason_code
+    ? validateInventoryAdjustment(body.reason_code, body.reason_note, countedStock(snapshot, body.counted_quantity).stocktake_delta)
+    : String(body.reason || '').trim();
   if (!reason || reason.length > 1000) throw new Error('请在调整说明中填写真实原因或凭证编号（1～1000 字）');
   const type = String(body.action_type || '');
   const result = { type, reason, quantity: 0, local_delta: 0, target_delta: 0, amount: 0, shipping_amount: 0 };
@@ -178,6 +181,12 @@ export function planLedgerAction(snapshot, body) {
       result.local_delta = result.stocktake_delta;
       // Initial counts need cost verification even when their ledger delta is zero.
       result.cost_task_quantity = snapshot.stocktake_id ? Math.min(result.counted_quantity, Math.max(0, result.stocktake_delta)) : result.counted_quantity;
+      if (body.reason_code) {
+        result.reason_code = body.reason_code;
+        result.cost_task_quantity = body.reason_code === 'missing_purchase'
+          ? snapshot.stocktake_id ? Math.max(0, result.stocktake_delta)
+            : Math.max(0, result.counted_quantity - (snapshot.cost_tasks || []).reduce((sum, task) => sum + Math.max(0, Number(task.quantity) - Number(task.resolved_quantity)), 0)) : 0;
+      }
     } else {
       result.quantity = integer(body.quantity, '损失数量');
       if (result.quantity > (snapshot.physical_estimate ?? snapshot.local_stock)) throw new Error('损失数量超过本地现货推算，请先核对盘点结果');
@@ -266,14 +275,15 @@ export function createProcurementLedgerService(hooks) {
     const movements = await run(`SELECT source_type, stock_location, SUM(quantity_delta) AS quantity_delta,
       MAX(id) AS last_id, MAX(created_at) AS last_created_at, COUNT(*) AS record_count FROM inventory_movements
       WHERE product_id = ? AND status = 'posted' GROUP BY source_type, stock_location ORDER BY source_type, stock_location`, [productId]);
-    const purchases = await run(`SELECT poi.*, po.order_no, po.purchased_at,
+    const purchases = await run(`SELECT poi.*, po.order_no, po.purchased_at, person.name AS person_name,
       COALESCE(ir.received_quantity, 0) AS received_quantity, COALESCE(ir.pending_quantity, 0) AS pending_quantity
       FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.purchase_order_id
+      LEFT JOIN people person ON person.id = po.created_by_person_id
       LEFT JOIN (SELECT purchase_order_item_id,
         SUM(CASE WHEN status = 'approved' THEN quantity ELSE 0 END) AS received_quantity,
         SUM(CASE WHEN status = 'pending_arrival' THEN quantity ELSE 0 END) AS pending_quantity
         FROM inbound_records WHERE product_id = ? GROUP BY purchase_order_item_id) ir ON ir.purchase_order_item_id = poi.id
-      WHERE poi.product_id = ? AND po.status NOT IN ('cancelled', 'pending_purchase') ORDER BY poi.id`, [productId, productId]);
+      WHERE poi.product_id = ? AND po.status NOT IN ('cancelled', 'pending_purchase') ORDER BY po.purchased_at DESC, poi.id DESC`, [productId, productId]);
     const projection = await coverage(run, productId);
     const orders = [...projection.values()].filter(order => order.stock_location !== 'FBP').flatMap(order => order.items
       .filter(item => item.product_id === productId).map(item => ({ ...item, order_id: order.order_id,
@@ -464,6 +474,7 @@ export function createProcurementLedgerService(hooks) {
         extra_sources: extraSources, cost_task_id: plan.cost_task_id || null,
         ...(plan.type === 'convert' ? { conversion_cost_amount: conversionAmount } : {}),
         cost_task_quantity: plan.cost_task_quantity || 0,
+        ...(plan.reason_code ? { reason_code: plan.reason_code } : {}),
         ...(plan.type === 'set_priority' ? { order_item_id: plan.order_item_id, priority: plan.priority } : {}),
         ...(plan.counted_quantity !== undefined ? { counted_quantity: plan.counted_quantity, physical_before: plan.physical_before,
           physical_after: plan.counted_quantity, stocktake_delta: plan.stocktake_delta } : {}),
