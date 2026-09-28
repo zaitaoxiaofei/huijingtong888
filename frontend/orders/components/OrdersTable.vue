@@ -254,8 +254,10 @@ function isInboundReceiptPending(row) {
 
 function hasProcurementIncoming(row) {
   const state = row?.procurementState;
-  return !isFbpOrder(row) && Boolean(state?.hasOrderIncoming)
-    && Number(state?.inboundDetails?.quantity || 0) > 0;
+  // The list response can omit a batch quantity for older purchases.  The
+  // order-level in-transit flag is still authoritative; the receipt dialog
+  // reloads the batches before it permits a receipt to be submitted.
+  return !isFbpOrder(row) && Boolean(state?.hasOrderIncoming);
 }
 
 function isFbpOrder(row) {
@@ -640,7 +642,7 @@ function procurementTimeText(row) {
             <small v-else>在途 {{ Number(row.procurementState.inTransitDays || 0) }} 天</small>
             <el-button size="small" link type="primary" @click="emit('view-procurement-details', row)">查看明细</el-button>
             <el-button
-              v-if="hasProcurementIncoming(row) && row.procurementState.canRegisterOrderReceipt"
+              v-if="hasProcurementIncoming(row)"
               size="small"
               :type="row.procurementState.overdue ? 'danger' : 'success'"
               plain

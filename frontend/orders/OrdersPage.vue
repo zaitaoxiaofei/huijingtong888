@@ -838,7 +838,7 @@ function buildProcurementState(row = {}) {
     const days = first.created_at ? Math.max(0, Math.floor((Date.now() - new Date(first.created_at).getTime()) / 86400000)) : 0;
     return { ...coverage, handled: !coverage.shortage_quantity && !coverage.quantity_needs_review,
       detail: coverage.incoming_quantity > 0 ? '采购在途' : '库存可满足', hasOrderIncoming: coverage.incoming_quantity > 0,
-      inTransitDays: days, overdue: !coverage.entered_transport && days >= 3, latestPurchaseAt: latestBatch.purchased_at || latestBatch.created_at || '',
+      inTransitDays: days, overdue: !coverage.entered_transport && days > 3, latestPurchaseAt: latestBatch.purchased_at || latestBatch.created_at || '',
       pendingPurchaseCount: batches.length,
       inboundRecordId: batches.length === 1 ? Number(first.id) : null, inboundRecordCount: batches.length,
       canRegisterOrderReceipt: batches.length > 0,
@@ -853,7 +853,9 @@ function buildProcurementState(row = {}) {
   const allocatedQuantity = Number(row.procurement_allocated_quantity || 0);
   const latestPurchaseAt = row.procurement_latest_purchase_at || "";
   const inTransitDays = Math.max(0, Number(row.procurement_in_transit_days || 0));
-  const overdue = Number(row.procurement_overdue || 0) > 0;
+  // At three full days the receipt action stays green; it turns red only
+  // after the fourth day in transit.
+  const overdue = inTransitDays > 3;
   const requestUnallocatedQuantity = Math.max(0, Number(row.procurement_request_unallocated_quantity || 0));
   const hasAllocation = Number(row.procurement_has_allocation || 0) > 0;
   const hasOrderIncoming = Number(row.procurement_has_order_incoming || 0) > 0;
