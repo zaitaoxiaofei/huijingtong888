@@ -8,7 +8,7 @@ const source = await readFile(new URL('../frontend/orders/OrdersPage.vue', impor
 test('procurement detail and receipt actions refresh order-specific batches before use', () => {
   assert.match(source, /async function loadOrderProcurementBatches\(row\)[\s\S]*?\/api\/orders\/\$\{Number\(row\.id\)\}\/procurement-batches/);
   assert.match(source, /async function handleViewProcurementDetails\(row\) \{\s+const procurement = await loadOrderProcurementBatches\(row\)/);
-  assert.match(source, /async function handleConfirmProcurementInbound\(row\)[\s\S]*?procurement = await loadOrderProcurementBatches\(row\)[\s\S]*?filter\(batch => batch\.status === 'pending_arrival'\)/);
+  assert.match(source, /async function handleConfirmProcurementInbound\(row, selectedInboundRecordId = 0\)[\s\S]*?procurement = await loadOrderProcurementBatches\(row\)[\s\S]*?filter\(batch => batch\.status === 'pending_arrival'\)/);
 });
 
 test('receipt dialog selects batches explicitly and posts only selected actual quantities', () => {
@@ -24,6 +24,7 @@ test('procurement detail preserves every inbound batch and renders each record s
   assert.match(source, /orders-procurement-table/);
   assert.match(source, /"采购单号", "快递", "快递单号"/);
   assert.match(source, /saveProcurementReferences\(record\)/);
+  assert.match(source, /handleConfirmProcurementInbound\(row, record\.id\)/);
   assert.match(source, /tracking_number: String\(record\.trackingNumber \|\| ""\)\.trim\(\)/);
   assert.match(source, /\/api\/procurement\/purchase-orders\/\$\{record\.purchaseOrderId\}/);
   assert.match(source, /isReceived \? "已入库" : "等待入库"/);
@@ -33,4 +34,11 @@ test('procurement detail preserves every inbound batch and renders each record s
     { id: 12, status: 'pending_arrival', quantity: 20, purchased_at: '2026-09-28 10:00:00' }
   ]);
   assert.deepEqual(records.map((record) => record.id), [12, 11]);
+});
+
+test('receipt dialog supports direct batch registration and wide table review', () => {
+  assert.match(source, /async function handleConfirmProcurementInbound\(row, selectedInboundRecordId = 0\)/);
+  assert.match(source, /selected: Number\(batch\.id\) === Number\(selectedInboundRecordId\)/);
+  assert.match(source, /title="登记实际收货" width="92%"/);
+  assert.match(source, /max-height="60vh"/);
 });

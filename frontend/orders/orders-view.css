@@ -5281,6 +5281,9 @@
 .orders-procurement-status.is-pending { color: #a35d00; background: #fff0d7; }
 .orders-procurement-save-button { padding: 6px 10px; color: #fff; border: 0; border-radius: 4px; background: #409eff; cursor: pointer; }
 .orders-procurement-save-button:hover { background: #66b1ff; }
+.orders-procurement-actions { display: flex; gap: 6px; }
+.orders-procurement-receipt-button { padding: 6px 10px; color: #237a3b; border: 1px solid #9ed7ac; border-radius: 4px; background: #f2fff4; cursor: pointer; }
+.orders-procurement-receipt-button:hover { color: #fff; border-color: #55af6a; background: #55af6a; }
 .orders-procurement-empty { padding: 28px 0; text-align: center; color: var(--erp-text-secondary, #606266); }
 
 .orders-inbound-confirm-dialog .el-message-box__btns {

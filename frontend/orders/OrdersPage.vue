@@ -949,7 +949,10 @@ function procurementDetailContent(row) {
         h("td", null, h("span", { class: ["orders-procurement-status", isReceived ? "is-received" : "is-pending"] }, status)),
         h("td", null, isReceived ? record.approvedByPersonName : "—"),
         h("td", null, isReceived ? formatDateTime(record.receivedAt) : "—"),
-        h("td", null, h("button", { class: "orders-procurement-save-button", type: "button", onClick: () => saveProcurementReferences(record) }, "保存"))
+        h("td", { class: "orders-procurement-actions" }, [
+          !isReceived ? h("button", { class: "orders-procurement-receipt-button", type: "button", onClick: () => handleConfirmProcurementInbound(row, record.id) }, "登记入库") : null,
+          h("button", { class: "orders-procurement-save-button", type: "button", onClick: () => saveProcurementReferences(record) }, "保存")
+        ])
       ]);
     }))
   ])]);
@@ -1049,7 +1052,7 @@ async function confirmShippedReceipts() {
   finally { shippedReceiptDialog.saving = false; }
 }
 
-async function handleConfirmProcurementInbound(row) {
+async function handleConfirmProcurementInbound(row, selectedInboundRecordId = 0) {
   if (row.procurement_coverage?.entered_transport) return previewShippedReceipts([Number(row.id)]);
   let procurement;
   try {
@@ -1064,7 +1067,11 @@ async function handleConfirmProcurementInbound(row) {
     visible: true,
     saving: false,
     orderId: Number(row.id),
-    batches: batches.map(batch => ({ ...batch, selected: false, receive_quantity: Number(batch.quantity || 0) }))
+    batches: batches.map(batch => ({
+      ...batch,
+      selected: Number(batch.id) === Number(selectedInboundRecordId),
+      receive_quantity: Number(batch.quantity || 0)
+    }))
   });
 }
 
@@ -2540,9 +2547,9 @@ onBeforeUnmount(() => {
     <ShippedReceiptDialog :shipped-receipt-dialog="shippedReceiptDialog" @preview="previewShippedReceipts(shippedReceiptDialog.orderIds)" @confirm="confirmShippedReceipts" @review="reviewShippedProcurementRecords" />
     <ProcurementLedgerDialog v-if="inventoryDetail.visible" v-model="inventoryDetail.visible" :product-id="inventoryDetail.productId" :order-id="inventoryDetail.orderId" @saved="loadOrders()" />
     <HistoricalPurchaseQuickDialog v-if="historicalPurchaseProducts.length" :products="historicalPurchaseProducts" @close="historicalPurchaseProducts = []" @saved="loadOrders()" />
-    <el-dialog v-model="procurementReceiptDialog.visible" title="登记实际收货" width="920px" destroy-on-close>
+    <el-dialog v-model="procurementReceiptDialog.visible" title="登记实际收货" width="92%" destroy-on-close>
       <p class="order-procurement-receipt-hint">勾选本次实际到货的采购批次并填写实收数量。未勾选的批次、以及部分收货的剩余数量，都会继续保留在途。</p>
-      <el-table :data="procurementReceiptDialog.batches" border max-height="420">
+      <el-table :data="procurementReceiptDialog.batches" border max-height="60vh">
         <el-table-column label="本次到货" width="96" align="center">
           <template #default="{ row }"><el-checkbox v-model="row.selected" /></template>
         </el-table-column>
