@@ -431,6 +431,42 @@
   gap: 6px;
 }
 
+.orders-quick-filter-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.orders-quick-filter-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 3px 8px 3px 4px;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  color: #606266;
+  background: #fff;
+  font-size: 13px;
+  transition: border-color .2s, background-color .2s, box-shadow .2s;
+}
+
+.orders-quick-filter-tag.is-active {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  box-shadow: 0 0 0 1px var(--el-color-primary-light-7);
+}
+
+.orders-quick-filter-tag .el-check-tag {
+  border-radius: 6px;
+}
+
+.orders-quick-filter-days {
+  width: 92px;
+}
+
 .orders-actions-cell .orders-inline-accent-button.el-button {
   width: 98px;
 }

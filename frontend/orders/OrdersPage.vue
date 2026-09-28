@@ -2477,9 +2477,37 @@ onBeforeUnmount(() => {
       />
     </OrdersToolbar>
 
-    <div class="orders-inline-actions">
-      <el-checkbox v-model="vm.filters.nearShipmentDeadline" @change="submitFilters">即将超时（剩余 &lt; 3 天）</el-checkbox>
-      <el-checkbox v-model="vm.filters.procurementTransitOverdue" @change="submitFilters">采购在途超过 2 天</el-checkbox>
+    <div class="orders-quick-filter-tags" aria-label="订单快速筛选">
+      <div class="orders-quick-filter-tag" :class="{ 'is-active': vm.filters.nearShipmentDeadline }">
+        <el-check-tag
+          :checked="vm.filters.nearShipmentDeadline"
+          @change="submitFilters({ nearShipmentDeadline: $event, page: 1 })"
+        >即将超时</el-check-tag>
+        <span>剩余 &lt;</span>
+        <el-select
+          v-model="vm.filters.nearShipmentDeadlineDays"
+          class="orders-quick-filter-days"
+          :disabled="!vm.filters.nearShipmentDeadline"
+          @change="vm.filters.nearShipmentDeadline && submitFilters({ page: 1 })"
+        >
+          <el-option v-for="day in 6" :key="day - 1" :label="`${day - 1} 天`" :value="day - 1" />
+        </el-select>
+      </div>
+      <div class="orders-quick-filter-tag" :class="{ 'is-active': vm.filters.procurementTransitOverdue }">
+        <el-check-tag
+          :checked="vm.filters.procurementTransitOverdue"
+          @change="submitFilters({ procurementTransitOverdue: $event, page: 1 })"
+        >采购在途</el-check-tag>
+        <span>超过</span>
+        <el-select
+          v-model="vm.filters.procurementTransitOverdueDays"
+          class="orders-quick-filter-days"
+          :disabled="!vm.filters.procurementTransitOverdue"
+          @change="vm.filters.procurementTransitOverdue && submitFilters({ page: 1 })"
+        >
+          <el-option v-for="day in 10" :key="day" :label="day === 10 ? '10 天及以上' : `${day} 天`" :value="day" />
+        </el-select>
+      </div>
     </div>
 
     <div v-if="vm.filters.status === 'purchase_in_transit' || selectedCount > 0" class="orders-inline-actions">

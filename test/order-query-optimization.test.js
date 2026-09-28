@@ -22,6 +22,23 @@ test('optimized order predicates bind every search parameter and retain empty se
   assert.equal(empty.length, 0);
 });
 
+test('order quick filters combine and constrain their selected day thresholds', async () => {
+  const combined = await filtered({
+    nearShipmentDeadline: '1',
+    nearShipmentDeadlineDays: '5',
+    procurementTransitOverdue: '1',
+    procurementTransitOverdueDays: '10'
+  }, { where: '1 = 1', params: [] });
+  assert.match(combined.where, /DATE_ADD\(o\.ordered_at, INTERVAL 6 DAY\).*INTERVAL 5 DAY/);
+  assert.match(combined.where, /TIMESTAMPDIFF\(HOUR, overdue_inbound\.created_at, UTC_TIMESTAMP\(\)\) >= 240/);
+
+  const overdue = await filtered({ nearShipmentDeadline: '1', nearShipmentDeadlineDays: '0' }, { where: '1 = 1', params: [] });
+  assert.match(overdue.where, /DATE_ADD\(o\.ordered_at, INTERVAL 6 DAY\) < UTC_TIMESTAMP\(\)/);
+
+  const bounded = await filtered({ procurementTransitOverdue: '1', procurementTransitOverdueDays: '99' }, { where: '1 = 1', params: [] });
+  assert.match(bounded.where, />= 240/);
+});
+
 test('large inventory lists warm logistics once and bound enrichment concurrency without reordering', async () => {
   let active = 0, peak = 0, warmed = 0;
   const map = vm.runInNewContext(`(${source.match(/async function mapWithConcurrencyMysql\([\s\S]*?\n}/)[0]})`);
@@ -29,6 +46,7 @@ test('large inventory lists warm logistics once and bound enrichment concurrency
     orderProcurementCoverageMysql: async () => new Map(),
     orderQualityPrefixesMysql: async () => [],
     orderInventoryPickingMysql: async () => new Map(),
+    loadOrderFbpStocks: async () => new Map(),
     mysqlQuery: async () => [],
     activeOrderLogisticsFilterMethodsMysql: async () => { warmed++; },
     mapWithConcurrencyMysql: map,

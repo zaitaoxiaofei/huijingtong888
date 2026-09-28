@@ -165,9 +165,11 @@ function createDefaultFilters(defaultFrom, defaultTo) {
     fulfillmentType: "all",
     printView: "all",
     printFilter: "all",
-    sortMode: "ordered"
-    ,nearShipmentDeadline: false
-    ,procurementTransitOverdue: false
+    sortMode: "ordered",
+    nearShipmentDeadline: false,
+    nearShipmentDeadlineDays: 3,
+    procurementTransitOverdue: false,
+    procurementTransitOverdueDays: 3
   };
 }
 
@@ -274,7 +276,9 @@ export function useOrdersPage() {
       printFilter: filters.printFilter || "all",
       sortMode: filters.sortMode || "ordered",
       nearShipmentDeadline: filters.nearShipmentDeadline ? "1" : "0",
+      nearShipmentDeadlineDays: String(Math.min(5, Math.max(0, Number(filters.nearShipmentDeadlineDays ?? 3)))),
       procurementTransitOverdue: filters.procurementTransitOverdue ? "1" : "0",
+      procurementTransitOverdueDays: String(Math.min(10, Math.max(1, Number(filters.procurementTransitOverdueDays ?? 3)))),
       ...extra
     });
   }
@@ -344,7 +348,11 @@ export function useOrdersPage() {
         fulfillmentType: String(filters.fulfillmentType || "all"),
         printView: normalizedPrint.printView,
         printFilter: normalizedPrint.printFilter,
-        sortMode: normalizedPrint.sortMode
+        sortMode: normalizedPrint.sortMode,
+        nearShipmentDeadline: Boolean(filters.nearShipmentDeadline),
+        nearShipmentDeadlineDays: Math.min(5, Math.max(0, Number(filters.nearShipmentDeadlineDays ?? 3))),
+        procurementTransitOverdue: Boolean(filters.procurementTransitOverdue),
+        procurementTransitOverdueDays: Math.min(10, Math.max(1, Number(filters.procurementTransitOverdueDays ?? 3)))
       };
     }
 
