@@ -17,10 +17,12 @@ test('compact inventory opens lazy component table and preserves management/rece
     availableActions: { showPurchase: true }, unboundItems: [], cancelCategoryText: '--', cancelReasonText: '--',
     procurementState: { hasOrderIncoming: true, inboundDetails: { quantity: 1 }, canRegisterOrderReceipt: true },
     inventorySummaries: [{ productId: 10, sku: 'SKU-1', inventoryMode: 'single', productName: '汽车装饰套装',
-      inventoryNumber: '2-10', componentCount: 2, stock: { local: -5, fbp: 10 }, incoming: 1,
+      inventoryNumber: '2-10', quantity: 1, componentCount: 4, stock: { local: -5, fbp: 10 }, incoming: 1,
       pickingItems: [
         { product_id: 11, product_name: '不锈钢门槛条', inventory_number: '2-11', required_quantity: 1 },
-        { product_id: 12, product_name: '车标贴片', inventory_number: '2-12', required_quantity: 1 }
+        { product_id: 12, product_name: '车标贴片', inventory_number: '2-12', required_quantity: 1 },
+        { product_id: 13, product_name: '包装礼盒', inventory_number: '2-13', required_quantity: 1 },
+        { product_id: 14, product_name: '钥匙扣', inventory_number: '2-14', required_quantity: 1 }
       ] }],
     procurement_coverage: { needs_fulfillment: true, stock_location: 'LOCAL', inventory_needs_review: true, items: [
       { product_id: 11, product_name: '不锈钢门槛条', quantity: 1, stock_quantity: 0, incoming_quantity: 0, shortage_quantity: 1 },
@@ -60,7 +62,12 @@ test('compact inventory opens lazy component table and preserves management/rece
       return route.fulfill({ contentType: asset.endsWith('.css') ? 'text/css' : 'text/javascript', body: await fs.readFile(path.join(output, asset)) });
     });
     await page.goto('http://localhost:8788/admin.html');
-    await page.getByText('组合库存 · 2 种子产品').waitFor();
+    await page.locator('.inventory-parent-name').getByText('汽车装饰套装', { exact: true }).waitFor();
+    await page.getByText('虚拟库存 ID：2-10 · 本单 1 套', { exact: true }).waitFor();
+    assert.equal(await page.getByText('子库存 2-13 · 包装礼盒', { exact: true }).count(), 0);
+    await page.getByRole('button', { name: '展开其余 2 项', exact: true }).click();
+    await page.getByText('子库存 2-13 · 包装礼盒', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '收起子产品', exact: true }).click();
     assert.equal(await page.getByText('1 种缺货 · 1 种已覆盖').count(), 1);
     assert.equal(await page.getByRole('button', { name: '编辑库存', exact: true }).count(), 0);
     await page.getByRole('button', { name: '修改库存', exact: true }).click();
