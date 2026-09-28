@@ -2571,8 +2571,9 @@ export async function orderProcurementBatchesMysql(orderId) {
     mysqlQuery(`
       SELECT DISTINCT ir.id, ir.product_id, ir.procurement_request_id, ir.purchase_order_id,
         ir.purchase_order_item_id, ir.quantity, ir.amount, ir.shipping_amount, ir.status,
-        ir.updated_at, ir.created_at, ir.approved_at, p.name AS product_name, p.stock_unit,
-        pe.name AS person_name, po.order_no AS purchase_order_no,
+        ir.courier_company, ir.tracking_number, ir.received_at, ir.updated_at, ir.created_at,
+        ir.approved_at, p.name AS product_name, p.stock_unit,
+        pe.name AS person_name, approved_person.name AS approved_by_person_name, po.order_no AS purchase_order_no,
         poi.actual_quantity AS purchase_quantity, poi.inbound_quantity AS purchase_received_quantity,
         poi.amount AS purchase_amount, poi.shipping_amount AS purchase_shipping_amount,
         COALESCE(poi.purchase_url, ir.purchase_url) AS purchase_url,
@@ -2581,6 +2582,7 @@ export async function orderProcurementBatchesMysql(orderId) {
       FROM inbound_records ir
       LEFT JOIN products p ON p.id = ir.product_id
       LEFT JOIN people pe ON pe.id = ir.person_id
+      LEFT JOIN people approved_person ON approved_person.id = ir.approved_by_person_id
       LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
       LEFT JOIN purchase_order_items poi ON poi.id = ir.purchase_order_item_id
       WHERE ir.status IN ('pending_arrival', 'approved')
@@ -2603,7 +2605,7 @@ export async function orderProcurementBatchesMysql(orderId) {
             AND COALESCE(recipe_item.product_id, component.component_product_id, sm.product_id) IS NOT NULL
         )
         AND COALESCE(po.status, '') != 'cancelled'
-      ORDER BY ir.created_at DESC, ir.id DESC
+      ORDER BY COALESCE(po.purchased_at, ir.created_at) DESC, ir.id DESC
     `, [id, id]),
     mysqlQuery(`
       SELECT allocation.order_item_id, allocation.product_id,

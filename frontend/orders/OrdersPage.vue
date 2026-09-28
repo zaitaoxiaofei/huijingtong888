@@ -26,7 +26,7 @@ import {
 import { buildInventoryPickingSummary, buildProductDisplayRows, firstCsvValue, splitCsv } from "./utils/order-display.js";
 import { formatDateTime, formatLogisticsRuleLabel, formatMoney, formatPercent, formatSignedMoney, moneyValueClass } from "./utils/order-format.js";
 import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order-profit-detail.js";
-import { orderPurchaseDetails } from "./utils/order-procurement-detail.js";
+import { orderProcurementRecordDetails, orderPurchaseDetails } from "./utils/order-procurement-detail.js";
 import { inventoryProductNameGroup, scoreInventorySimilarity } from "../admin/utils/inventory-similarity.js";
 import { previewOrderLabels } from "./services/orders-service.js";
 import "./orders-view.css";
@@ -923,29 +923,32 @@ function buildProcurementState(row = {}) {
 }
 
 function procurementDetailContent(row) {
-  const purchases = orderPurchaseDetails(row.procurement_coverage?.batches).filter((purchase) => purchase.pending > 0);
-  const coverage = row.procurement_coverage;
-  return h("div", { class: "orders-inbound-confirm" }, purchases.map((purchase) => {
-    const inventory = (row.inventorySummaries || []).find((item) => Number(item.productId) === purchase.productId) || {};
-    const itemCoverage = (coverage?.items || []).find((item) => Number(item.product_id) === purchase.productId) || {};
-    const inventoryName = inventory.productName || purchase.productName;
-    const inventoryNumber = inventory.inventoryNumber || '';
-    const orderNeed = Number(itemCoverage.quantity || 0);
-    const incoming = Number(itemCoverage.incoming_quantity || 0);
-    const status = purchase.received > 0 ? '部分收货，在途' : '采购在途';
-    const unitPrice = purchase.quantity > 0 ? `¥${formatMoney(purchase.amount / purchase.quantity)} / ${purchase.unit}` : '数量待核';
+  const records = orderProcurementRecordDetails(row.procurement_coverage?.batches);
+  if (!records.length) {
+    return h("div", { class: "orders-procurement-empty" }, "没有关联的采购记录");
+  }
+  return h("div", { class: "orders-inbound-confirm" }, records.map((record) => {
+    const inventory = (row.inventorySummaries || []).find((item) => Number(item.productId) === record.productId) || {};
+    const inventoryName = inventory.productName || record.productName;
+    const inventoryNumber = inventory.inventoryNumber || "";
+    const isReceived = record.status === "approved";
+    const status = isReceived ? "已入库" : "等待入库";
     const infoRows = [
-      ['采购人员', purchase.personName || '未记录'],
-      ['采购时间', `${formatDateTime(purchase.purchasedAt)}（北京时间）`],
-      ['采购总量', `${purchase.quantity} ${purchase.unit}`, 'is-primary'],
-      ...(orderNeed > 0 ? [['本单需求', `本单 ${orderNeed} ${purchase.unit}，在途覆盖 ${incoming} ${purchase.unit}`, 'is-muted']] : []),
-      ['收货状态', status],
-      ['采购单价', unitPrice]
+      ["采购时间", `${formatDateTime(record.purchasedAt)}（北京时间）`],
+      ["采购数量", `${record.quantity} ${record.unit}`, "is-primary"],
+      ["采购金额", `¥${formatMoney(record.amount + record.shippingAmount)}`],
+      ["采购人员", record.personName],
+      ["采购单号", record.purchaseOrderNo],
+      ["快递", record.courierCompany],
+      ["快递单号", record.trackingNumber],
+      ["入库状态", status, isReceived ? "is-received" : "is-pending"],
+      ...(isReceived ? [["入库确认人员", record.approvedByPersonName], ["确认时间", `${formatDateTime(record.receivedAt)}（北京时间）`]] : [])
     ];
-    return h('section', { class: 'orders-procurement-compact-card', key: purchase.key }, [
+    return h('section', { class: ['orders-procurement-compact-card', isReceived ? 'is-received' : 'is-pending'], key: record.id }, [
       h('header', { class: 'orders-procurement-compact-header' }, [
         h('strong', inventoryName),
-        inventoryNumber ? h('small', `库存号：${inventoryNumber}`) : null
+        inventoryNumber ? h('small', `库存号：${inventoryNumber}`) : null,
+        h('span', { class: ['orders-procurement-status', isReceived ? 'is-received' : 'is-pending'] }, status)
       ]),
       h('div', { class: 'orders-inbound-confirm-grid' }, infoRows.flatMap(([label, value, className]) => [
         h('span', { class: 'orders-inbound-confirm-label' }, label),

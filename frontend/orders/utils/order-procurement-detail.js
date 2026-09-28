@@ -19,3 +19,39 @@ export function orderPurchaseDetails(batches = []) {
   }
   return [...purchases.values()];
 }
+
+// Procurement details must preserve every inbound batch. A purchase order item
+// can be received in several deliveries, each with its own courier and inbound
+// confirmation, so it must not share the summary view's de-duplication.
+export function orderProcurementRecordDetails(batches = []) {
+  return [...batches]
+    .map((batch) => {
+      const quantity = Number(batch.quantity ?? batch.purchase_quantity ?? 0);
+      const amount = Number(batch.amount ?? batch.purchase_amount ?? 0);
+      const shippingAmount = Number(batch.shipping_amount ?? batch.purchase_shipping_amount ?? 0);
+      const received = Number(batch.purchase_received_quantity ?? (batch.status === "approved" ? quantity : 0));
+      return {
+        id: Number(batch.id || 0),
+        productId: Number(batch.product_id || 0),
+        productName: batch.product_name || "未记录商品",
+        unit: batch.stock_unit || "件",
+        personName: batch.person_name || "未记录",
+        purchaseOrderNo: batch.purchase_order_no || "未记录",
+        purchasedAt: batch.purchased_at || batch.created_at || "",
+        quantity,
+        amount,
+        shippingAmount,
+        received,
+        courierCompany: batch.courier_company || "未登记",
+        trackingNumber: batch.tracking_number || "未登记",
+        receivedAt: batch.received_at || batch.approved_at || "",
+        approvedByPersonName: batch.approved_by_person_name || "未记录",
+        status: batch.status || "pending_arrival"
+      };
+    })
+    .sort((left, right) => {
+      const rightTime = new Date(right.purchasedAt || 0).getTime() || 0;
+      const leftTime = new Date(left.purchasedAt || 0).getTime() || 0;
+      return rightTime - leftTime || right.id - left.id;
+    });
+}

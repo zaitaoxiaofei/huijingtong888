@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { orderProcurementRecordDetails } from '../frontend/orders/utils/order-procurement-detail.js';
 
 const source = await readFile(new URL('../frontend/orders/OrdersPage.vue', import.meta.url), 'utf8');
 
@@ -16,4 +17,18 @@ test('receipt dialog selects batches explicitly and posts only selected actual q
   assert.match(source, /v-model="row\.receive_quantity"/);
   assert.match(source, /const records = procurementReceiptDialog\.batches\.filter\(batch => batch\.selected\)/);
   assert.match(source, /records\.map\(batch => \(\{ id: batch\.id, payload:/);
+});
+
+test('procurement detail preserves every inbound batch and renders each record status', () => {
+  assert.match(source, /orderProcurementRecordDetails\(row\.procurement_coverage\?\.batches\)/);
+  assert.match(source, /\["采购单号", record\.purchaseOrderNo\]/);
+  assert.match(source, /\["快递单号", record\.trackingNumber\]/);
+  assert.match(source, /\["入库确认人员", record\.approvedByPersonName\]/);
+  assert.match(source, /isReceived \? "已入库" : "等待入库"/);
+
+  const records = orderProcurementRecordDetails([
+    { id: 11, status: 'approved', quantity: 10, purchased_at: '2026-09-27 10:00:00' },
+    { id: 12, status: 'pending_arrival', quantity: 20, purchased_at: '2026-09-28 10:00:00' }
+  ]);
+  assert.deepEqual(records.map((record) => record.id), [12, 11]);
 });

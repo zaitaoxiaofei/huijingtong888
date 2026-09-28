@@ -5293,10 +5293,17 @@
   overflow-y: auto;
 }
 
+.orders-procurement-compact-card { padding: 14px; border: 1px solid #e4e7ed; border-radius: 10px; background: #fff; }
 .orders-procurement-compact-card + .orders-procurement-compact-card { margin-top: 14px; }
+.orders-procurement-compact-card.is-received { border-color: #b7e1c2; background: linear-gradient(135deg, #f4fff6, #fff); box-shadow: 0 3px 12px rgba(66, 151, 86, .1); }
+.orders-procurement-compact-card.is-pending { border-color: #f3d19e; background: #fffdf8; }
 .orders-procurement-compact-header { display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px; }
 .orders-procurement-compact-header strong { color: var(--erp-text-primary, #303133); font-size: 16px; }
 .orders-procurement-compact-header small { color: var(--erp-text-secondary, #606266); }
+.orders-procurement-status { margin-left: auto; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.orders-procurement-status.is-received { color: #237a3b; background: #dff5e5; }
+.orders-procurement-status.is-pending { color: #a35d00; background: #fff0d7; }
+.orders-procurement-empty { padding: 28px 0; text-align: center; color: var(--erp-text-secondary, #606266); }
 
 .orders-inbound-confirm-dialog .el-message-box__btns {
   padding: 0 20px 18px;
