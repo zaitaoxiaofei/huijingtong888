@@ -1,5 +1,5 @@
 ﻿<script setup>
-import { computed, defineExpose, h, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, defineExpose, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, Plus } from "@element-plus/icons-vue";
@@ -980,11 +980,15 @@ async function saveProcurementReferences(record) {
 
 async function handleViewProcurementDetails(row) {
   const procurement = await loadOrderProcurementBatches(row);
-  await ElMessageBox.alert(
-    procurementDetailContent(procurement),
-    "采购内容",
-    { customClass: "orders-inbound-confirm-dialog", confirmButtonText: "知道了" }
-  );
+  try {
+    await ElMessageBox.alert(
+      procurementDetailContent(procurement),
+      "采购内容",
+      { customClass: "orders-inbound-confirm-dialog", confirmButtonText: "知道了" }
+    );
+  } catch (action) {
+    if (action !== "close") throw action;
+  }
 }
 
 async function openOrderProcurementRecords(row) {
@@ -1053,6 +1057,11 @@ async function confirmShippedReceipts() {
 }
 
 async function handleConfirmProcurementInbound(row, selectedInboundRecordId = 0) {
+  const openedFromProcurementDetail = Number(selectedInboundRecordId) > 0;
+  if (openedFromProcurementDetail) {
+    ElMessageBox.close();
+    await nextTick();
+  }
   if (row.procurement_coverage?.entered_transport) return previewShippedReceipts([Number(row.id)]);
   let procurement;
   try {
