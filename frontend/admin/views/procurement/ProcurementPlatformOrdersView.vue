@@ -12,6 +12,7 @@ const loading = ref(false);
 const importing = ref(false);
 const fileInput = ref(null);
 const bindVisible = ref(false);
+const rulesVisible = ref(false);
 const candidates = ref([]);
 const selectedIds = ref([]);
 const currentOrder = ref(null);
@@ -78,10 +79,11 @@ onMounted(load);
 
 <template>
   <div class="page-shell">
-    <ErpPageHeader title="平台订单" description="导入拼多多或 1688 平台订单，再与采购工作台记录绑定。">
+    <ErpPageHeader title="平台订单" description="同步拼多多或导入 1688 订单，再与采购工作台记录绑定。">
       <template #actions>
         <input ref="fileInput" type="file" :accept="state.filters.platform === '1688' ? '.xlsx' : '.csv,.json'" hidden @change="importFile">
         <el-button type="primary" :loading="importing" @click="chooseFile">导入{{ state.filters.platform === '1688' ? '1688 Excel' : '拼多多 CSV / JSON' }}</el-button>
+        <el-button @click="rulesVisible = true">查看匹配规则</el-button>
       </template>
     </ErpPageHeader>
     <ErpFilterBar>
@@ -116,9 +118,20 @@ onMounted(load);
         <el-table-column prop="person_name" label="负责人" width="90" />
         <el-table-column label="记录金额" width="100"><template #default="{ row }">{{ money(Number(row.amount) + Number(row.shipping_amount)) }}</template></el-table-column>
         <el-table-column label="匹配度" width="80"><template #default="{ row }">{{ row.confidence }}%</template></el-table-column>
+        <el-table-column label="匹配依据" min-width="280"><template #default="{ row }">{{ row.match_reason }}</template></el-table-column>
         <el-table-column label="创建时间" width="165"><template #default="{ row }">{{ timeText(row.created_at) }}</template></el-table-column>
       </el-table>
       <template #footer><el-button @click="bindVisible = false">取消</el-button><el-button type="primary" @click="saveBinding">确认绑定</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="rulesVisible" title="采购订单匹配规则" width="760px">
+      <el-alert type="success" :closable="false" title="订单号或快递单号一致时自动绑定；其余结果只做推荐，必须由采购人员确认。" />
+      <el-descriptions :column="1" border style="margin-top:16px">
+        <el-descriptions-item label="精确自动绑定">平台订单号一致；或已保存的快递单号一致。</el-descriptions-item>
+        <el-descriptions-item label="推荐评分">商品链接/商品 ID 一致 +30；金额一致 +30；数量一致 +20；时间差 1 小时内 +30、24 小时内 +20、3 天内 +10；采购渠道一致 +5。</el-descriptions-item>
+        <el-descriptions-item label="保护规则">时间、金额和数量即使分数很高，也不会自动绑定；同分候选由采购人员确认。</el-descriptions-item>
+        <el-descriptions-item label="审计记录">每个候选显示具体得分依据；人工确认后保存确认人、确认时间和订单绑定关系。</el-descriptions-item>
+      </el-descriptions>
     </el-dialog>
   </div>
 </template>

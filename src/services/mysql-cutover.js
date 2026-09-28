@@ -19483,22 +19483,33 @@ export async function procurementPlatformOrderCandidatesMysql(id) {
   await ensureProcurementPlatformOrderSchemaMysql();
   const order = await mysqlQueryOne("SELECT * FROM procurement_platform_orders WHERE id = ?", [Number(id)]);
   if (!order) throw new Error("平台订单不存在");
-  return await mysqlQuery(`
+  const rows = await mysqlQuery(`
     SELECT pr.id, pr.request_group_no, pr.raw_name, pr.raw_spec, pr.product_id, pr.quantity, pr.amount,
-      pr.shipping_amount, pr.purchase_url, pr.created_at, pe.name AS person_name, p.name AS product_name,
-      CASE
-        WHEN ABS((pr.amount + pr.shipping_amount) - ?) < 0.01 THEN 100
-        WHEN pr.purchase_url != '' AND ? != '' AND (pr.purchase_url LIKE CONCAT('%', ?, '%') OR ? LIKE CONCAT('%', pr.purchase_url, '%')) THEN 92
-        WHEN pr.source_type = ? THEN 70
-        ELSE 45
-      END AS confidence
+      pr.shipping_amount, pr.purchase_url, pr.source_type, pr.created_at, pe.name AS person_name, p.name AS product_name,
+      ABS((pr.amount + pr.shipping_amount) - ?) AS amount_difference,
+      ABS(TIMESTAMPDIFF(MINUTE, pr.created_at, COALESCE(?, pr.created_at))) AS time_difference_minutes,
+      CASE WHEN pr.purchase_url != '' AND ? != '' AND (pr.purchase_url LIKE CONCAT('%', ?, '%') OR ? LIKE CONCAT('%', pr.purchase_url, '%')) THEN 1 ELSE 0 END AS link_matched
     FROM procurement_requests pr
     LEFT JOIN people pe ON pe.id = pr.person_id
     LEFT JOIN products p ON p.id = pr.product_id
     WHERE pr.status IN ('pending', 'suggested', 'submitted', 'merged')
-    ORDER BY confidence DESC, ABS(TIMESTAMPDIFF(SECOND, pr.created_at, COALESCE(?, pr.created_at))) ASC, pr.id DESC
+    ORDER BY link_matched DESC, amount_difference ASC, time_difference_minutes ASC, pr.id DESC
     LIMIT 40
-  `, [Number(order.paid_amount || 0), order.purchase_urls || "", order.goods_ids || "", order.purchase_urls || "", order.platform, order.order_time]);
+  `, [Number(order.paid_amount || 0), order.order_time, order.purchase_urls || "", order.goods_ids || "", order.purchase_urls || ""]);
+  return rows.map((row) => {
+    const reasons = [];
+    let confidence = 0;
+    if (Number(row.link_matched)) { confidence += 30; reasons.push("商品链接或商品 ID 一致 +30"); }
+    if (Number(row.amount_difference) < 0.01) { confidence += 30; reasons.push("采购金额完全一致 +30"); }
+    else if (Number(row.amount_difference) <= Math.max(0.01, Number(order.paid_amount || 0) * 0.02)) { confidence += 15; reasons.push("采购金额误差不超过 2% +15"); }
+    if (Number(row.quantity || 0) === Number(order.quantity || 0)) { confidence += 20; reasons.push("采购数量一致 +20"); }
+    const minutes = Number(row.time_difference_minutes || 0);
+    if (minutes <= 60) { confidence += 30; reasons.push("下单时间相差不超过 1 小时 +30"); }
+    else if (minutes <= 1440) { confidence += 20; reasons.push("下单时间相差不超过 24 小时 +20"); }
+    else if (minutes <= 4320) { confidence += 10; reasons.push("下单时间相差不超过 3 天 +10"); }
+    if (String(row.source_type || "") === String(order.platform || "")) { confidence += 5; reasons.push("采购渠道一致 +5"); }
+    return { ...row, confidence: Math.min(100, confidence), match_reason: reasons.join("；") || "仅按待采购状态列出，尚无有效匹配依据" };
+  }).sort((a, b) => b.confidence - a.confidence || Number(a.time_difference_minutes) - Number(b.time_difference_minutes));
 }
 
 export async function linkProcurementPlatformOrderMysql(id, body = {}, sessionPersonId = null) {
