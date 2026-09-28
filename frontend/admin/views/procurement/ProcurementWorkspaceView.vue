@@ -116,7 +116,7 @@ const bulkAddPageSize = ref(20);
 const bulkAddTotal = ref(0);
 const bulkAddFilters = ref({ inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [], accessoryName: "", color: "", material: [], process: "" });
 const bulkGroupRecommendations = ref([]);
-const bulkMeta = reactive({ source_type: "1688", supplier_id: null, note: "", receipts: [], remember_group: false, group_name: "" });
+const bulkMeta = reactive({ source_type: "1688", supplier_id: null, note: "", platform_order_no: "", tracking_number: "", receipts: [], remember_group: false, group_name: "" });
 const orderDetailPages = reactive({});
 const orderHistoryVisible = ref(false);
 const orderHistoryLoading = ref(false);
@@ -622,7 +622,7 @@ async function openBulkPurchase() {
     loading.value = false;
   }
   bulkPage.value = 1;
-  Object.assign(bulkMeta, { source_type: "1688", supplier_id: null, note: "", receipts: [], remember_group: false, group_name: "" });
+  Object.assign(bulkMeta, { source_type: "1688", supplier_id: null, note: "", platform_order_no: "", tracking_number: "", receipts: [], remember_group: false, group_name: "" });
   bulkVisible.value = true;
   loadBulkGroupRecommendations();
 }
@@ -984,6 +984,7 @@ async function saveBulkPurchase() {
       source_type: bulkMeta.source_type, supplier_id: bulkMeta.supplier_id,
       receipts: bulkMeta.receipts, remember_group: bulkMeta.remember_group, group_name: bulkMeta.group_name,
       note: bulkMeta.note || "采购工作台批量采购",
+      shipments: bulkMeta.tracking_number.trim() ? [{ platform_order_no: bulkMeta.platform_order_no.trim(), tracking_number: bulkMeta.tracking_number.trim() }] : [],
       items
     });
     const replacedRequests = new Map();
@@ -1572,6 +1573,8 @@ onMounted(async () => {
       <div class="bulk-order-toolbar">
         <el-select v-model="bulkMeta.source_type" class="channel-select" placeholder="采购渠道"><el-option label="1688" value="1688" /><el-option label="拼多多" value="pdd" /><el-option label="微信" value="wechat" /><el-option label="其他" value="other" /></el-select>
         <el-select v-model="bulkMeta.supplier_id" filterable clearable placeholder="选择供应商"><el-option v-for="supplier in state.suppliers" :key="supplier.id" :label="supplier.name" :value="supplier.id" /></el-select>
+        <el-input v-model="bulkMeta.platform_order_no" clearable placeholder="平台采购单号（1688 / 拼多多）" />
+        <el-input v-model="bulkMeta.tracking_number" clearable placeholder="快递单号，如 773444085928710" />
         <el-input v-model="bulkMeta.note" clearable placeholder="整单备注" />
         <el-button type="primary" plain @click="bulkAddVisible = true; searchBulkInventory(1)">＋ 添加库存商品</el-button>
         <el-upload v-if="bulkMeta.source_type === 'wechat'" :auto-upload="false" :show-file-list="false" accept="image/*" multiple :on-change="uploadBulkReceipt"><el-button :loading="uploadingReceipt">上传微信凭证</el-button></el-upload>

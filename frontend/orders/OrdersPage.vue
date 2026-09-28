@@ -119,7 +119,9 @@ const orderProcurementDialog = reactive({
   submitting: false,
   orderId: null,
   preview: null,
-  selectedItemIds: []
+  selectedItemIds: [],
+  platformOrderNo: "",
+  trackingNumber: ""
 });
 
 const splitOrderDialog = reactive({
@@ -1952,6 +1954,8 @@ async function handleOpenOrderProcurement(orderId) {
   orderProcurementDialog.loading = true;
   orderProcurementDialog.preview = null;
   orderProcurementDialog.selectedItemIds = [];
+  orderProcurementDialog.platformOrderNo = "";
+  orderProcurementDialog.trackingNumber = "";
   try {
     orderProcurementDialog.preview = await previewOrderProcurement(orderProcurementDialog.orderId);
     initializeProcurementPurchaseInputs();
@@ -2184,7 +2188,11 @@ async function submitOrderProcurement() {
   try {
     const result = await createOrderProcurementRequests(orderProcurementDialog.orderId, {
       order_item_ids: orderProcurementDialog.selectedItemIds,
-      product_purchases: procurementPurchasePayload()
+      product_purchases: procurementPurchasePayload(),
+      shipments: orderProcurementDialog.trackingNumber.trim() ? [{
+        platform_order_no: orderProcurementDialog.platformOrderNo.trim(),
+        tracking_number: orderProcurementDialog.trackingNumber.trim()
+      }] : []
     });
     const createdCount = Number(result?.created_count || 0);
     const stockCount = Number(result?.stock_satisfied_count || 0);
@@ -3718,6 +3726,16 @@ onBeforeUnmount(() => {
             <span>库存商品</span>
             <strong>{{ orderProcurementDialog.preview.product_count }}</strong>
           </div>
+        </div>
+
+        <el-alert type="info" :closable="false" show-icon title="物流信息可稍后在采购工作台补充；填写快递单号后会作为本采购单的待跟踪包裹。" />
+        <div class="order-procurement-form-grid order-procurement-form-grid-compact">
+          <el-form-item label="平台采购单号">
+            <el-input v-model="orderProcurementDialog.platformOrderNo" placeholder="1688 / 拼多多订单号" clearable />
+          </el-form-item>
+          <el-form-item label="快递单号">
+            <el-input v-model="orderProcurementDialog.trackingNumber" placeholder="如：773444085928710" clearable />
+          </el-form-item>
         </div>
 
         <div v-if="orderProcurementProducts.length" class="order-procurement-products">

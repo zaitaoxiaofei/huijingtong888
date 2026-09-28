@@ -182,6 +182,10 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
     return json(res, await services.confirmPurchaseOrder(Number(parts[3]), await readJson(req), req._session?.personId));
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "shipments" && parts[3] && parts[4] === "refresh") {
+    return json(res, await services.refreshPurchaseOrderShipment(Number(parts[3])));
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "cost-versions" && parts[3] && parts[4] === "review") {
     return json(res, await services.reviewPurchaseCostVersion(Number(parts[3]), await readJson(req), req._session?.personId));
   }
