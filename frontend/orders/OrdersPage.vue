@@ -2535,6 +2535,7 @@ onBeforeUnmount(() => {
         @view-procurement-details="handleViewProcurementDetails"
         @review-procurement-records="openOrderProcurementRecords"
         @view-inventory-detail="openInventoryDetail"
+        @inventory-saved="loadOrders({ forceRefresh: true, silent: true, includeCounts: true })"
         @quick-history-purchase="historicalPurchaseProducts = $event"
         @confirm-procurement-inbound="handleConfirmProcurementInbound"
       />

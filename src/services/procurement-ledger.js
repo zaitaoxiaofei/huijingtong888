@@ -264,7 +264,7 @@ export function createProcurementLedgerService(hooks) {
       FROM products WHERE id = ? AND active = 1`, [productId]);
     if (!products[0]) throw new Error('库存商品不存在或已停用，请重新选择');
     const movements = await run(`SELECT source_type, stock_location, SUM(quantity_delta) AS quantity_delta,
-      MAX(id) AS last_id, COUNT(*) AS record_count FROM inventory_movements
+      MAX(id) AS last_id, MAX(created_at) AS last_created_at, COUNT(*) AS record_count FROM inventory_movements
       WHERE product_id = ? AND status = 'posted' GROUP BY source_type, stock_location ORDER BY source_type, stock_location`, [productId]);
     const purchases = await run(`SELECT poi.*, po.order_no, po.purchased_at,
       COALESCE(ir.received_quantity, 0) AS received_quantity, COALESCE(ir.pending_quantity, 0) AS pending_quantity
@@ -285,6 +285,7 @@ export function createProcurementLedgerService(hooks) {
     const fbpReserved = Number(projection.inventory_stocks?.find(row => Number(row.product_id) === productId)?.fbp_reserved || 0);
     const value = summarizeLedger(products[0], movements, purchases, orders, fbpReserved);
     value.stocktake_id = Number(projection.inventory_stocks?.find(row => Number(row.product_id) === productId)?.stocktake_id || 0);
+    value.last_stocktake_at = movements.find(row => row.source_type === 'reconciliation_stocktake' && row.stock_location !== 'FBP')?.last_created_at || null;
     value.batches = (projection.available_batches || []).filter(row => Number(row.product_id) === productId);
     const posted = await run(`SELECT source_ref, SUM(quantity_delta) AS quantity FROM inventory_movements
       WHERE product_id = ? AND status = 'posted' AND source_type IN ('purchase_inbound', 'purchase_inbound_correction', 'historical_receipt_offset')
