@@ -4,6 +4,7 @@ import { CopyDocument, View } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import { inventoryOverview } from "../utils/inventory-overview.js";
 import { copyToClipboard } from "../../admin/utils/clipboard.js";
+import ProcurementLedgerDialog from "../../admin/components/procurement/ProcurementLedgerDialog.vue";
 
 const props = defineProps({
   rows: { type: Array, default: () => [] },
@@ -34,14 +35,16 @@ const emit = defineEmits([
   "view-procurement-details",
   "review-procurement-records",
   "view-inventory-detail",
+  "inventory-saved",
   "quick-history-purchase",
   "confirm-procurement-inbound"
 ]);
 
-const inventoryRowId = ref(null);
-const inventoryRow = computed(() => props.rows.find(row => row.id === inventoryRowId.value));
+const selectedInventoryRow = ref(null);
+const inventoryRow = computed(() => props.rows.find(row => row.id === selectedInventoryRow.value?.id) || selectedInventoryRow.value);
 const inventoryViews = computed(() => new Map(props.rows.map(row => [row.id, inventoryOverview(row)])));
-const drawerVisible = computed({ get: () => !!inventoryRow.value, set: value => { if (!value) inventoryRowId.value = null; } });
+const detailVisible = computed({ get: () => !!inventoryRow.value, set: value => { if (!value) selectedInventoryRow.value = null; } });
+const selectedOverview = computed(() => inventoryRow.value ? inventoryOverview(inventoryRow.value) : null);
 
 const markChoices = computed(() => (
   (props.markOptions || []).filter((item) => item && item.value !== undefined)
@@ -585,7 +588,7 @@ function procurementTimeText(row) {
             </template>
             <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
             <div class="orders-inventory-quick-actions">
-              <el-button link type="primary" size="small" @click="inventoryRowId = row.id">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
+              <el-button link type="primary" size="small" @click="selectedInventoryRow = row">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
               <template v-for="product in row.inventorySummaries" :key="`quick-bound-${row.id}-${product.inventoryKey || product.productId}`">
                 <el-button
                   v-if="product.sku"
@@ -731,26 +734,10 @@ function procurementTimeText(row) {
       </template>
     </Teleport>
 
-    <el-drawer v-if="inventoryRow" v-model="drawerVisible" title="本单库存明细" size="min(1100px, 96vw)" append-to-body destroy-on-close>
-      <template v-for="row in [inventoryRow]" :key="row.id">
-        <p>本单覆盖数量与商品总库存分开展示；不同子产品的件数不合并相加。</p>
-        <el-table :data="inventoryViews.get(row.id).items" row-key="product_id" class="inventory-detail-table">
-          <el-table-column label="库存产品" min-width="280">
-            <template #default="{ row: item }">
-              <div class="inventory-detail-product">
-                <el-image v-if="item.product_id" :src="`/api/products/${item.product_id}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${item.product_id}/image`]" :initial-index="0" preview-teleported><template #error>无图</template></el-image>
-                <div><strong>{{ item.product_name }}</strong><p>库存 ID：{{ item.inventory_number || '—' }}</p></div>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column prop="quantity" label="本单需求" width="95" />
-          <el-table-column label="现货覆盖" width="95"><template #default="{ row: item }">{{ inventoryViews.get(row.id).active ? item.stock_quantity ?? '待核' : '—' }}</template></el-table-column>
-          <el-table-column label="在途覆盖" width="95"><template #default="{ row: item }">{{ inventoryViews.get(row.id).active ? item.incoming_quantity ?? '待核' : '—' }}</template></el-table-column>
-          <el-table-column label="待采购" width="95"><template #default="{ row: item }"><span :class="{ 'inventory-shortage': item.shortage_quantity > 0 }">{{ inventoryViews.get(row.id).active ? (item.quantity_needs_review ? '待核' : item.shortage_quantity ?? '待核') : '—' }}</span></template></el-table-column>
-          <el-table-column label="核对与记录" width="130"><template #default="{ row: item }"><el-button v-if="item.product_id" link type="primary" @click="emit('view-inventory-detail', row, item.product_id)">库存与历史明细</el-button></template></el-table-column>
-        </el-table>
-        <el-collapse>
-          <el-collapse-item title="账面参考与子产品绑定管理（不计入本单需求）" name="management">
+    <ProcurementLedgerDialog v-if="inventoryRow" v-model="detailVisible" :product-id="selectedOverview.items[0]?.product_id || 0" :order-id="inventoryRow.id" :order-overview="selectedOverview" :order-label="`${inventoryRow.postingNumber || inventoryRow.posting_number || inventoryRow.id} · ${inventoryRow.shopName || inventoryRow.shop_name || ''}`" @saved="emit('inventory-saved')">
+      <template #management>
+        <template v-for="row in [inventoryRow]" :key="row.id">
+          <p>账面参考与子产品绑定管理（不计入本单需求）</p>
           <div class="orders-stock-list">
             <div
               v-for="product in row.inventorySummaries"
@@ -834,10 +821,9 @@ function procurementTimeText(row) {
               </div>
             </div>
           </div>
-          </el-collapse-item>
-        </el-collapse>
+        </template>
       </template>
-    </el-drawer>
+    </ProcurementLedgerDialog>
   </el-card>
 </template>
 
@@ -847,9 +833,6 @@ function procurementTimeText(row) {
 .inventory-compact small { color: #606266; line-height: 1.6; }
 .orders-inventory-quick-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .orders-inventory-quick-actions .el-button { margin-left: 0; }
-.inventory-detail-product { display: flex; gap: 12px; align-items: center; min-height: 92px; }
-.inventory-detail-product .el-image { width: 64px; height: 84px; flex: 0 0 64px; border-radius: 4px; }
-.inventory-detail-product p { color: #606266; margin: 8px 0 0; }
 .orders-stock-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; margin-top: 16px; }
 .orders-stock-list > div { padding: 16px; border: 1px solid #ebeef5; border-radius: 8px; }
 .orders-inventory-item { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }

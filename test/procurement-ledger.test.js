@@ -149,6 +149,13 @@ function fixture(failSecond = false, overrides = {}) {
   return { service, state: () => state, executed, coverageProducts, recordedCosts };
 }
 
+test('last stocktake time comes from the existing product-scoped movement summary', async () => {
+  const f = fixture(false, { movements: [{ id: 1, product_id: 10, quantity_delta: 10, source_type: 'reconciliation_stocktake', stock_location: 'LOCAL', last_created_at: '2026-09-28 01:00:00' }] });
+  const result = await f.service.read({ product_id: 10 });
+  assert.equal(result.last_stocktake_at, '2026-09-28 01:00:00');
+  assert.equal((await fixture().service.read({ product_id: 10 })).last_stocktake_at, null);
+});
+
 test('matching stocktake records a zero-delta physical baseline without inventing inventory', async () => {
   const f = fixture();
   const before = await f.service.read({ product_id: 10 });
