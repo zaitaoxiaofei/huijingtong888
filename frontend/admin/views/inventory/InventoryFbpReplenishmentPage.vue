@@ -1706,12 +1706,13 @@ onMounted(loadPageData);
       <el-empty v-if="!adjustmentHistoryDialog.loading && !adjustmentHistoryDialog.items.length" description="暂无调整记录" />
     </el-dialog>
 
-    <el-dialog v-model="procurementDraftDialog.visible" title="FBP 下次备货采购草稿" width="min(1440px, 96vw)" destroy-on-close>
+    <el-dialog v-model="procurementDraftDialog.visible" title="FBP 下次备货采购草稿" width="min(1680px, 98vw)" top="4vh" destroy-on-close>
       <el-alert title="按库存商品合并展示：同一备货明细的多次缺货不会重复累计原申请或已通过数量；建议采购数量汇总全部未发送的缺货差额。已有采购在途且无需重复采购时，可使用“移除采购建议”；确认发送时系统会取消该草稿而不发送采购台。" type="info" :closable="false" show-icon />
-      <el-table v-loading="procurementDraftDialog.loading" :data="procurementDraftPagedItems" border style="margin-top: 16px">
+      <el-table v-loading="procurementDraftDialog.loading" :data="procurementDraftPagedItems" border height="calc(100vh - 360px)" style="margin-top: 16px">
         <el-table-column label="图片" width="86" align="center"><template #default="{ row }"><ProductImagePreview :src="row.image_url" :preview-list="row.image_url ? [row.image_url] : []" size="portrait" /></template></el-table-column>
         <el-table-column label="库存商品" min-width="240"><template #default="{ row }"><strong>{{ row.product_name }}</strong><small style="display:block;color:var(--el-text-color-secondary)">库存 ID：{{ row.inventory_number || '-' }}</small></template></el-table-column>
-        <el-table-column label="总原申请 / 总已通过" width="155" align="center"><template #default="{ row }">{{ integer(row.requested_qty) }} / {{ integer(row.approved_qty) }}</template></el-table-column>
+        <el-table-column label="总原申请 / 当前实际可备" width="175" align="center"><template #default="{ row }">{{ integer(row.requested_qty) }} / {{ integer(row.actual_available_qty) }}</template></el-table-column>
+        <el-table-column label="本地现货" width="100" align="right"><template #default="{ row }">{{ integer(row.local_stock_quantity) }}</template></el-table-column>
         <el-table-column label="采购在途" width="135" align="center"><template #default="{ row }"><strong :class="Number(row.purchase_transit_quantity) ? 'is-positive' : ''">{{ integer(row.purchase_transit_quantity) }}</strong><el-button v-if="row.purchase_transit_records?.length" link type="primary" @click="openProcurementTransit(row)">查看明细</el-button></template></el-table-column>
         <el-table-column label="建议采购数量" width="160"><template #default="{ row }"><el-input-number v-model="row.quantity" :min="0" :precision="0" :disabled="row.removed" controls-position="right" style="width:130px" /><small v-if="row.removed" style="display:block;color:var(--el-color-warning)">已移除，不发送采购台</small></template></el-table-column>
         <el-table-column label="申请店铺" min-width="160"><template #default="{ row }"><div v-for="source in row.source_orders" :key="source.id">{{ source.shop_name || '-' }}</div></template></el-table-column>

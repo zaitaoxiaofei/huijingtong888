@@ -43,7 +43,7 @@ test("FBP shortage drafts group repeat adjustments by inventory product without 
   assert.match(fbpPage, /procurementDraftPagedItems/);
   assert.match(fbpPage, /pageSize: 10/);
   assert.match(fbpPage, /申请店铺/);
-  assert.match(fbpPage, /总原申请 \/ 总已通过/);
+  assert.match(fbpPage, /总原申请 \/ 当前实际可备/);
 });
 
 test("FBP shortage drafts expose pending purchase transit and let warehouse receive it before sending another request", () => {

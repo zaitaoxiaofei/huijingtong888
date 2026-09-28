@@ -4972,12 +4972,14 @@ export async function fbpShortageProcurementDraftsMysql() {
     SELECT pr.id, pr.product_id, pr.quantity, pr.request_reason_note, pr.source_order_id, pr.source_order_item_id, pr.created_at,
       p.name AS product_name, p.inventory_number, p.image_url,
       o.order_no, o.created_at AS order_created_at, s.name AS shop_name,
-      i.requested_qty, i.approved_qty
+      i.requested_qty, i.approved_qty,
+      COALESCE(item_adjustments.adjustment_qty, 0) AS adjustment_qty
     FROM procurement_requests pr
     JOIN products p ON p.id = pr.product_id
     LEFT JOIN fbp_replenishment_orders o ON o.id = pr.source_order_id
     LEFT JOIN fbp_replenishment_order_items i ON i.id = pr.source_order_item_id
     LEFT JOIN shops s ON s.id = o.shop_id
+    LEFT JOIN (SELECT item_id, SUM(adjustment_qty) AS adjustment_qty FROM fbp_replenishment_item_adjustments GROUP BY item_id) item_adjustments ON item_adjustments.item_id = i.id
     WHERE pr.status = 'draft' AND pr.source_type = 'fbp' AND pr.request_reason_code = 'fbp_stock_shortage'
     ORDER BY pr.created_at DESC, pr.id DESC
   `);
@@ -4996,6 +4998,8 @@ export async function fbpShortageProcurementDraftsMysql() {
         request_reason_note: "",
         requested_qty: 0,
         approved_qty: 0,
+        actual_available_qty: 0,
+        local_stock_quantity: 0,
         source_orders: [],
         _sourceItems: new Set(),
         _sourceOrders: new Set(),
@@ -5011,6 +5015,7 @@ export async function fbpShortageProcurementDraftsMysql() {
       group._sourceItems.add(sourceItemId);
       group.requested_qty += Number(row.requested_qty || 0);
       group.approved_qty += Number(row.approved_qty || 0);
+      group.actual_available_qty += Math.max(0, Number(row.approved_qty || 0) + Number(row.adjustment_qty || 0));
     }
     const sourceOrderId = Number(row.source_order_id || 0);
     if (sourceOrderId && !group._sourceOrders.has(sourceOrderId)) {
@@ -5027,19 +5032,22 @@ export async function fbpShortageProcurementDraftsMysql() {
       FROM inbound_records ir
       LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
       LEFT JOIN procurement_requests pr ON pr.id = ir.procurement_request_id
-      WHERE ir.status = 'pending_arrival' AND ir.product_id IN (${productIds.map(() => "?").join(",")})
+      WHERE ir.status = 'pending_arrival' AND (ir.product_id IN (${productIds.map(() => "?").join(",")}) OR ir.product_id IN (SELECT component_product_id FROM product_components WHERE product_id IN (${productIds.map(() => "?").join(",")})))
       ORDER BY COALESCE(po.purchased_at, po.created_at, ir.created_at) DESC, ir.id DESC
-    `, productIds);
+    `, [...productIds, ...productIds]);
     for (const row of transitRows) {
-      const group = groups.get(Number(row.product_id));
-      if (!group) continue;
-      group.purchase_transit_quantity = Number(group.purchase_transit_quantity || 0) + Number(row.quantity || 0);
-      (group.purchase_transit_records ||= []).push({
-        id: Number(row.id), quantity: Number(row.quantity || 0), purchased_at: row.purchased_at || row.created_at,
-        purchase_order_no: row.purchase_order_no || row.request_group_no || `入库记录 #${row.id}`, note: row.note || ""
-      });
+      const targets = groups.has(Number(row.product_id)) ? [{ productId: Number(row.product_id), ratio: 1 }] : await mysqlQuery(`SELECT product_id, quantity FROM product_components WHERE component_product_id = ? AND product_id IN (${productIds.map(() => "?").join(",")})`, [Number(row.product_id), ...productIds]);
+      for (const target of targets) {
+        const group = groups.get(Number(target.productId || target.product_id));
+        if (!group) continue;
+        const quantity = Math.floor(Number(row.quantity || 0) / Number(target.ratio || target.quantity || 1));
+        group.purchase_transit_quantity = Number(group.purchase_transit_quantity || 0) + quantity;
+        (group.purchase_transit_records ||= []).push({ id: Number(row.id), quantity, purchased_at: row.purchased_at || row.created_at, purchase_order_no: row.purchase_order_no || row.request_group_no || `入库记录 #${row.id}`, note: row.note || "", component: Number(row.product_id) !== Number(group.product_id) });
+      }
     }
   }
+  const stocks = await mysqlQuery(`SELECT product_id, SUM(quantity_delta) AS quantity FROM inventory_movements WHERE status = 'posted' AND product_id IN (${productIds.map(() => "?").join(",")}) GROUP BY product_id`, productIds);
+  for (const stock of stocks) if (groups.has(Number(stock.product_id))) groups.get(Number(stock.product_id)).local_stock_quantity = Number(stock.quantity || 0);
   return [...groups.values()].map((group) => {
     group.request_reason_note = [...group._notes].join("；");
     group.purchase_transit_quantity = Number(group.purchase_transit_quantity || 0);
