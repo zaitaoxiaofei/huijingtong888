@@ -66,12 +66,14 @@ test('compact inventory opens lazy component table and preserves management/rece
     await page.goto('http://localhost:8788/admin.html');
     await page.locator('.inventory-parent-name').getByText('汽车装饰套装', { exact: true }).waitFor();
     await page.getByText('虚拟库存 ID：2-10 · 本单 1 套', { exact: true }).waitFor();
-    await page.getByText('FBP 库存：5 套', { exact: true }).waitFor();
+    await page.getByText('FBP：5 套', { exact: true }).waitFor();
+    assert.equal(await page.getByText('其中可售：', { exact: false }).count(), 0);
+    assert.equal(await page.getByText('本地实物推算：', { exact: false }).count(), 0);
     assert.equal(await page.getByText('子库存 2-13 · 包装礼盒', { exact: true }).count(), 0);
     await page.getByRole('button', { name: '展开其余 2 项', exact: true }).click();
     await page.getByText('子库存 2-13 · 包装礼盒', { exact: true }).waitFor();
     await page.getByRole('button', { name: '收起子产品', exact: true }).click();
-    assert.equal(await page.getByText('1 种缺货 · 1 种已覆盖').count(), 1);
+    assert.equal(await page.getByText('1 种缺货 · 1 种已覆盖').count(), 0);
     assert.equal(await page.getByRole('button', { name: '编辑库存', exact: true }).count(), 0);
     await page.getByRole('button', { name: '修改库存', exact: true }).click();
     assert.equal(await page.locator('#event').innerText(), 'edit:10');

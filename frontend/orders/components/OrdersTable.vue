@@ -588,7 +588,6 @@ function procurementTimeText(row) {
               <strong>组合库存 · {{ inventoryViews.get(row.id).items.length }} 种子产品</strong>
               <small v-if="inventoryViews.get(row.id).active">{{ inventoryViews.get(row.id).shortageCount }} 种缺货 · {{ inventoryViews.get(row.id).coveredCount }} 种已覆盖</small>
             </template>
-            <small v-if="inventoryViews.get(row.id)?.parents.length && inventoryViews.get(row.id).active">{{ inventoryViews.get(row.id).shortageCount }} 种缺货 · {{ inventoryViews.get(row.id).coveredCount }} 种已覆盖</small>
             <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
             <div class="orders-inventory-quick-actions">
               <el-button link type="primary" size="small" @click="selectedInventoryRow = row">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
