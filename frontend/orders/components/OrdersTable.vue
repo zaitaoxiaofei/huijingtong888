@@ -5,6 +5,7 @@ import { ElMessage } from "element-plus";
 import { inventoryOverview } from "../utils/inventory-overview.js";
 import { copyToClipboard } from "../../admin/utils/clipboard.js";
 import ProcurementLedgerDialog from "../../admin/components/procurement/ProcurementLedgerDialog.vue";
+import InventoryIdentity from './InventoryIdentity.vue';
 
 const props = defineProps({
   rows: { type: Array, default: () => [] },
@@ -577,7 +578,8 @@ function procurementTimeText(row) {
         </template>
         <template #default="{ row }">
           <div class="inventory-compact">
-            <template v-if="inventoryViews.get(row.id)?.items.length === 1">
+            <InventoryIdentity v-if="inventoryViews.get(row.id)?.parents.length" :parents="inventoryViews.get(row.id).parents" :active="inventoryViews.get(row.id).active" />
+            <template v-else-if="inventoryViews.get(row.id)?.items.length === 1">
               <strong>库存 {{ inventoryViews.get(row.id).items[0].inventory_number || '—' }}</strong>
               <span class="inventory-compact-name" :title="inventoryViews.get(row.id).items[0].product_name">{{ inventoryViews.get(row.id).items[0].product_name }}</span>
               <small v-if="inventoryViews.get(row.id).active">本单需 {{ inventoryViews.get(row.id).items[0].quantity }} · 现货覆盖 {{ inventoryViews.get(row.id).items[0].stock_quantity ?? '待核' }} · 在途覆盖 {{ inventoryViews.get(row.id).items[0].incoming_quantity ?? '待核' }}</small>
@@ -586,6 +588,7 @@ function procurementTimeText(row) {
               <strong>组合库存 · {{ inventoryViews.get(row.id).items.length }} 种子产品</strong>
               <small v-if="inventoryViews.get(row.id).active">{{ inventoryViews.get(row.id).shortageCount }} 种缺货 · {{ inventoryViews.get(row.id).coveredCount }} 种已覆盖</small>
             </template>
+            <small v-if="inventoryViews.get(row.id)?.parents.length && inventoryViews.get(row.id).active">{{ inventoryViews.get(row.id).shortageCount }} 种缺货 · {{ inventoryViews.get(row.id).coveredCount }} 种已覆盖</small>
             <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
             <div class="orders-inventory-quick-actions">
               <el-button link type="primary" size="small" @click="selectedInventoryRow = row">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>

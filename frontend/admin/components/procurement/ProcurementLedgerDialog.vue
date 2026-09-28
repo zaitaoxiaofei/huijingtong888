@@ -3,6 +3,7 @@ import { computed, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { apiClient } from '../../utils/api.js';
 import { shanghaiDateKey, shanghaiDateTimeText } from '../../utils/shanghai-date.js';
+import InventoryIdentity from '../../../orders/components/InventoryIdentity.vue';
 const props = defineProps({ modelValue: Boolean, productId: { type: Number, default: 0 }, orderId: { type: Number, default: 0 }, initialTab: { type: String, default: 'current' }, orderOverview: { type: Object, default: null }, orderLabel: { type: String, default: '' } });
 const emit = defineEmits(['update:modelValue', 'saved']);
 const visible = computed({ get: () => props.modelValue, set: value => emit('update:modelValue', value) });
@@ -164,6 +165,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
   <el-dialog v-model="visible" title="库存明细与历史核对" width="min(1400px, 96vw)" top="4vh" append-to-body destroy-on-close :before-close="closeDetail" :close-on-click-modal="false" class="unified-inventory-dialog">
     <section v-if="orderOverview" class="ledger-order-summary">
       <h3>本单需求与覆盖 <small>{{ orderLabel }}</small></h3>
+      <InventoryIdentity v-if="orderOverview.parents?.length" :parents="orderOverview.parents" />
       <p>点击库存行，下方直接切换详情；不同子产品的件数不合并相加。</p>
       <el-table :data="orderItems" row-key="product_id" max-height="290" :row-class-name="({ row }) => Number(row.product_id) === productId ? 'selected-inventory-row' : ''" @row-click="row => changeProduct(row.product_id)">
         <el-table-column label="库存产品" min-width="320"><template #default="{ row }"><div class="ledger-product ledger-order-product">

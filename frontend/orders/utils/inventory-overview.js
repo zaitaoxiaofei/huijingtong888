@@ -35,6 +35,17 @@ export function inventoryOverview(row) {
   }
   const items = [...products.values()].sort((a, b) => Number(b.shortage_quantity || 0) - Number(a.shortage_quantity || 0));
   return {
+    parents: (row.inventorySummaries || []).map(summary => ({
+      id: summary.inventoryKey || `${summary.productId}-${summary.sku || ''}`,
+      name: summary.productName, inventoryNumber: summary.inventoryNumber,
+      quantity: summary.quantity, virtual: summary.inventoryMode === 'combo' || Number(summary.componentCount) > 0 || summary.pickingItems?.some(part => Number(part.product_id) !== Number(summary.productId)),
+      children: (summary.pickingItems || []).map(part => ({
+        ...part, quantity: part.required_quantity,
+        // Coverage belongs to the product across this order, not each parent recipe.
+        shortage: products.get(Number(part.product_id))?.shortage_quantity,
+        review: products.get(Number(part.product_id))?.quantity_needs_review
+      }))
+    })),
     items, active: !!coverage?.needs_fulfillment && coverage.stock_location !== 'FBP',
     shortageCount: items.filter(item => item.shortage_quantity > 0).length,
     coveredCount: items.filter(item => item.shortage_quantity === 0 && !item.quantity_needs_review).length,

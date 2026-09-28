@@ -1091,7 +1091,7 @@ function buildTableRow(row) {
   const quantitySummary = Number(row.total_quantity || row.quantity_total || row.quantity || row.item_count || 1);
   const productIds = splitCsv(row.product_ids).map((item) => Number(item)).filter(Boolean);
   const productNames = splitCsv(row.product_names);
-  const seenProductIds = new Set();
+  const seenProductIds = new Map();
   const inventorySummaries = productDisplayRows
     .filter((item) => Number(item.productId || 0) > 0 || item.inventoryMode === "combo")
     .map((item) => {
@@ -1107,7 +1107,7 @@ function buildTableRow(row) {
         sku: item.sku || "",
         quantity: Number(item.quantity || 0),
         productName: item.inventoryMode === "combo"
-          ? `组合库存方案 / ${item.name || item.sku || "SKU"}`
+          ? (item.inventoryName || item.name || item.sku || '组合库存方案')
           : (item.inventoryName || (fallbackIndex >= 0 ? (productNames[fallbackIndex] || item.name) : (item.name || productNames[0] || "库存商品"))),
         saleAmount: Number(item.saleAmount || 0),
         estimatedProfit: Number(item.estimatedProfit || 0),
@@ -1122,8 +1122,8 @@ function buildTableRow(row) {
     })
     .filter((item) => {
       const dedupeKey = item.inventoryKey || String(item.productId || "");
-      if (seenProductIds.has(dedupeKey)) return false;
-      seenProductIds.add(dedupeKey);
+      if (seenProductIds.has(dedupeKey)) { seenProductIds.get(dedupeKey).quantity += item.quantity; return false; }
+      seenProductIds.set(dedupeKey, item);
       return true;
     });
   const terminalOutcome = ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(String(row?.outcome_type || ""));
