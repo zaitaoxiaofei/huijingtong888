@@ -254,10 +254,10 @@ function isInboundReceiptPending(row) {
 
 function hasProcurementIncoming(row) {
   const state = row?.procurementState;
-  // The list response can omit a batch quantity for older purchases.  The
-  // order-level in-transit flag is still authoritative; the receipt dialog
-  // reloads the batches before it permits a receipt to be submitted.
-  return !isFbpOrder(row) && Boolean(state?.hasOrderIncoming);
+  // A pending inbound can be matched to this product before its quantity is
+  // allocated to the current order. It is still a real receipt operators can
+  // register, and the dialog reloads the exact batches before submission.
+  return !isFbpOrder(row) && Boolean(state?.hasOrderIncoming || state?.hasProductIncoming);
 }
 
 function isFbpOrder(row) {

@@ -70,7 +70,7 @@ test("pending purchase action labels use current stock instead of stale handling
   assert.doesNotMatch(labelBlock, /已提交采购|采购已处理/);
 });
 
-test("purchase-in-transit status keeps the receipt action available for every order-level in-transit purchase", async () => {
+test("purchase-in-transit status keeps the receipt action available for order and product-level pending purchases", async () => {
   const table = await readFile(new URL("../frontend/orders/components/OrdersTable.vue", import.meta.url), "utf8");
   const incomingBlock = table.slice(
     table.indexOf("function hasProcurementIncoming"),
@@ -78,9 +78,9 @@ test("purchase-in-transit status keeps the receipt action available for every or
   );
 
   assert.match(incomingBlock, /state\?\.hasOrderIncoming/);
+  assert.match(incomingBlock, /state\?\.hasProductIncoming/);
   assert.doesNotMatch(incomingBlock, /inboundDetails\?\.quantity/);
   assert.doesNotMatch(incomingBlock, /product\.incoming/);
-  assert.doesNotMatch(incomingBlock, /hasProductIncoming/);
 });
 
 test("order procurement card is shown only for procurement assigned to that order", async () => {
