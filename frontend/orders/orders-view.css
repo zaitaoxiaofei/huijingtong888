@@ -5302,3 +5302,9 @@
 .order-procurement-receipt-impact {
   margin: 12px 0;
 }
+
+.order-procurement-receipt-section-title {
+  margin: 16px 0 8px;
+  font-size: 14px;
+  color: var(--el-text-color-primary);
+}

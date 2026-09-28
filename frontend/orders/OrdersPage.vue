@@ -1034,6 +1034,24 @@ async function loadOrderProcurementBatches(row) {
 
 const shippedReceiptDialog = reactive({ visible: false, loading: false, saving: false, orderIds: [], records: [], skipped: [], sourceOrderId: null });
 const procurementReceiptDialog = reactive({ visible: false, saving: false, loadingImpact: false, orderId: null, batches: [], impacts: [], impactConfirmed: false });
+const procurementReceiptSummary = computed(() => {
+  const summaries = new Map();
+  for (const impact of procurementReceiptDialog.impacts) {
+    const batch = procurementReceiptDialog.batches.find(item => Number(item.id) === Number(impact.id));
+    if (!batch) continue;
+    const key = Number(impact.product_id);
+    const summary = summaries.get(key) || {
+      product_id: key, product_name: impact.product_name, unit: impact.unit,
+      stock_before: Number(impact.stock_before || 0), receive_quantity: 0,
+      historical_outbound_quantity: 0
+    };
+    if (batch.selected) summary.receive_quantity += Number(batch.receive_quantity || 0);
+    summary.historical_outbound_quantity = Math.max(summary.historical_outbound_quantity, Number(impact.historical_outbound_quantity || 0));
+    summaries.set(key, summary);
+  }
+  return [...summaries.values()].map(item => ({ ...item, stock_after: item.stock_before + item.receive_quantity }));
+});
+const receiptHasHistoricalOutbound = computed(() => procurementReceiptSummary.value.some(item => item.historical_outbound_quantity > 0));
 async function previewShippedReceipts(orderIds = [...selectedOrderIds.value]) {
   if (shippedReceiptDialog.loading || shippedReceiptDialog.saving) return;
   if (!orderIds.length) { ElMessage.warning('请先勾选需要核对的已运输订单'); return; }
@@ -2583,19 +2601,20 @@ onBeforeUnmount(() => {
     <HistoricalPurchaseQuickDialog v-if="historicalPurchaseProducts.length" :products="historicalPurchaseProducts" @close="historicalPurchaseProducts = []" @saved="loadOrders()" />
     <el-dialog v-model="procurementReceiptDialog.visible" title="登记实际收货" width="92%" destroy-on-close>
       <p class="order-procurement-receipt-hint">勾选本次实际到货的采购批次并填写实收数量。未勾选的批次、以及部分收货的剩余数量，都会继续保留在途。</p>
-      <el-alert v-if="procurementReceiptDialog.impacts.some(item => Number(item.historical_outbound_quantity || 0) > 0)" type="warning" :closable="false" show-icon class="order-procurement-receipt-impact">
+      <h3 class="order-procurement-receipt-section-title">本次入库结果</h3>
+      <el-alert v-if="receiptHasHistoricalOutbound" type="warning" :closable="false" show-icon class="order-procurement-receipt-impact">
         <template #title>该商品采购后已有订单出库流水。登记实收会增加本地账面，但历史订单的出库扣减已保留，因此不会把已发货数量重复算作可用库存。</template>
       </el-alert>
-      <el-table v-if="procurementReceiptDialog.impacts.length" :data="procurementReceiptDialog.impacts" size="small" border class="order-procurement-receipt-impact" max-height="180">
+      <el-table v-if="procurementReceiptSummary.length" :data="procurementReceiptSummary" size="small" border class="order-procurement-receipt-impact" max-height="180">
         <el-table-column prop="product_name" label="库存商品" min-width="220" />
         <el-table-column label="入库前账面" width="120" align="right"><template #default="{ row }">{{ row.stock_before }} {{ row.unit }}</template></el-table-column>
         <el-table-column label="本次实收" width="110" align="right"><template #default="{ row }">+{{ row.receive_quantity }} {{ row.unit }}</template></el-table-column>
-        <el-table-column label="采购后历史订单已出库" width="180" align="right"><template #default="{ row }">-{{ row.historical_outbound_quantity }} {{ row.unit }}</template></el-table-column>
         <el-table-column label="登记后账面" width="130" align="right"><template #default="{ row }"><strong>{{ row.stock_after }} {{ row.unit }}</strong></template></el-table-column>
       </el-table>
-      <el-checkbox v-if="procurementReceiptDialog.impacts.some(item => Number(item.historical_outbound_quantity || 0) > 0)" v-model="procurementReceiptDialog.impactConfirmed" class="order-procurement-receipt-impact">
+      <el-checkbox v-if="receiptHasHistoricalOutbound" v-model="procurementReceiptDialog.impactConfirmed" class="order-procurement-receipt-impact">
         我已核对：历史订单出库已在库存账中扣减，本次仅登记实际到货。
       </el-checkbox>
+      <h3 class="order-procurement-receipt-section-title">确认采购批次</h3>
       <el-table :data="procurementReceiptDialog.batches" border max-height="60vh">
         <el-table-column label="本次到货" width="96" align="center">
           <template #default="{ row }"><el-checkbox v-model="row.selected" /></template>
