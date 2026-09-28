@@ -2,6 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { inventoryOverview } from '../frontend/orders/utils/inventory-overview.js';
 
+test('FBP SKU counts remain separate and local kit capacity uses the limiting free component', () => {
+  const row = { shop_id: 1, inventorySummaries: [{ productId: 10, sku: 'A', skus: ['A','B'], quantity: 3, componentCount: 2,
+    pickingItems: [{ product_id: 11, per_set_quantity: 2, required_quantity: 6 }, { product_id: 12, per_set_quantity: 1, required_quantity: 3 }] }],
+    fbp_inventory: [{ ozon_sku: 'A', present: 5 }, { ozon_sku: 'B', present: 3 }],
+    procurement_coverage: { items: [{ product_id: 11, product_local_available: 10, physical_stock_estimate: 20 }, { product_id: 12, product_local_available: 3, physical_stock_estimate: 7 }] } };
+  const parent = inventoryOverview(row).parents[0];
+  assert.deepEqual(parent.fbpStocks.map(stock => stock.present), [5,3]);
+  assert.equal(parent.localAvailable, 3);
+  assert.equal(parent.localPhysical, 7);
+  delete row.procurement_coverage;
+  assert.equal(inventoryOverview(row).parents[0].localAvailable, null, 'never claim ledger balance is free physical stock');
+});
+
 test('two-box virtual product retains its identity and uses already expanded order consumption', () => {
   const view = inventoryOverview({ inventorySummaries: [{ productId: 10, productName: '清洁用品 两盒装', inventoryNumber: '2-10', quantity: 3, componentCount: 1,
     pickingItems: [{ product_id: 11, product_name: '清洁用品 一盒装', inventory_number: '2-11', stock_unit: '盒', required_quantity: 6 }] }] });

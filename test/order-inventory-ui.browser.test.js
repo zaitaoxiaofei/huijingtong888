@@ -13,7 +13,8 @@ test('compact inventory opens lazy component table and preserves management/rece
   const errors = [], requests = [];
   let releaseSlow, delayAccessory = false, saved = false, failAccessory = false;
   const row = {
-    id: 1, statusLabel: '等待发货', productDisplayRows: [], logisticsSummary: {}, profitSummary: {},
+    id: 1, shop_id: 1, statusLabel: '等待发货', productDisplayRows: [], logisticsSummary: {}, profitSummary: {},
+    fbp_inventory: [{ shop_id: 1, ozon_sku: 'SKU-1', present: 5, available: 4, synced_at: '2026-09-28 01:00:00' }],
     availableActions: { showPurchase: true }, unboundItems: [], cancelCategoryText: '--', cancelReasonText: '--',
     procurementState: { hasOrderIncoming: true, inboundDetails: { quantity: 1 }, canRegisterOrderReceipt: true },
     inventorySummaries: [{ productId: 10, sku: 'SKU-1', inventoryMode: 'single', productName: '汽车装饰套装',
@@ -48,6 +49,7 @@ test('compact inventory opens lazy component table and preserves management/rece
           return route.fulfill({ json: { product: { id, name: id === 11 ? '不锈钢门槛条' : '车标贴片', code: `P-${id}` }, revision: 'v1',
             physical_estimate: saved ? 1 : 0, available_estimate: 0, current_stock_reserved: saved ? 1 : 0, incoming_quantity: 1, current_incoming: 0, current_shortage: saved ? 0 : 1,
             local_stock: -5, missing_purchase: 5, missing_receipt: 0, purchase_quantity: 0, received_quantity: 0,
+            fbp_inventory: { present: 11, available: 10, incomplete: false, rows: [{ shop_id: 1, shop_name: 'A店', ozon_sku: 'SKU-1', present: 5, available: 4, per_set_quantity: 1, inventory_quantity: 5, warehouse_name: '仓一', synced_at: '2026-09-28 01:00:00' }, { shop_id: 2, shop_name: 'B店', ozon_sku: 'SKU-2', present: 3, available: 3, per_set_quantity: 2, inventory_quantity: 6 }] },
             orders: [{ order_id: 1, order_item_id: id, posting_number: 'ORDER-1', needs_fulfillment: true, quantity: 1, stock_quantity: saved ? 1 : 0, incoming_quantity: 0, shortage_quantity: saved ? 0 : 1 }],
             movements: [], actions: [], purchases: [], cost_tasks: [], batches: [], sources: [] } });
         }
@@ -64,6 +66,7 @@ test('compact inventory opens lazy component table and preserves management/rece
     await page.goto('http://localhost:8788/admin.html');
     await page.locator('.inventory-parent-name').getByText('汽车装饰套装', { exact: true }).waitFor();
     await page.getByText('虚拟库存 ID：2-10 · 本单 1 套', { exact: true }).waitFor();
+    await page.getByText('FBP 库存：5 套', { exact: true }).waitFor();
     assert.equal(await page.getByText('子库存 2-13 · 包装礼盒', { exact: true }).count(), 0);
     await page.getByRole('button', { name: '展开其余 2 项', exact: true }).click();
     await page.getByText('子库存 2-13 · 包装礼盒', { exact: true }).waitFor();
@@ -85,7 +88,11 @@ test('compact inventory opens lazy component table and preserves management/rece
     assert.equal(await page.getByRole('dialog').count(), 1, 'viewing stock uses one overlay');
     assert.deepEqual(requests.filter(url => url.startsWith('/api/procurement/ledger')), ['/api/procurement/ledger?product_id=11'], 'only the selected shortage product loads');
     assert.equal(requests.some(url => url.startsWith('/api/products?')), false, 'order context does not search all products');
-    assert.equal(await drawer.getByRole('tab').count(), 5);
+    assert.equal(await drawer.getByRole('tab').count(), 6);
+    await drawer.getByRole('button', { name: '查看各店铺 SKU 库存', exact: true }).click();
+    await drawer.getByRole('tab', { name: 'FBP 库存', exact: true }).waitFor();
+    assert.match(await drawer.locator('.current-fbp-sku').innerText(), /A店[\s\S]*SKU-1/);
+    await drawer.getByRole('tab', { name: '订单分配', exact: true }).click();
     assert.equal(await drawer.getByRole('button', { name: '绑定子产品', exact: true }).count(), 0);
     await drawer.getByRole('button', { name: '更多操作' }).hover();
     await page.getByRole('menuitem', { name: '绑定管理' }).click();

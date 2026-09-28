@@ -5,8 +5,9 @@ import { getRoles } from "../shared/permissions.js";
 import { inventoryIdentifierSearch, isInventoryIdentifier, inventoryNamePattern, searchInventoryRows } from "./inventory-search.js";
 import { ensureInventoryNumberingMysql } from "./inventory-numbering.js";
 import { orderInventoryPickingMysql } from "./order-inventory-picking.js";
+import { loadOrderFbpStocks, loadProductFbpStocks } from './fbp-inventory-display.js';
 import { selectedReceiptOrderIds, planShippedProcurementReceipts, validateShippedReceiptSubmission } from "./shipped-procurement-receipts.js";
-import { loadOrderProcurementCoverage, invalidateOrderProcurementCoverage, procurementQueueSql } from "./mysql-order-procurement-coverage.js";
+import { loadOrderProcurementCoverage, cachedOrderProcurementCoverage, invalidateOrderProcurementCoverage, procurementQueueSql } from "./mysql-order-procurement-coverage.js";
 import { planPartialReceipt } from "./order-procurement-coverage.js";
 import { orderTransportEvidenceSql, automaticCancellationReturnSql } from "./order-transport-evidence.js";
 import { PDFDocument } from "pdf-lib";
@@ -2634,8 +2635,8 @@ async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefine
   // Procurement coverage reconciles the full order and inventory ledger. Do
   // not let a cold reconciliation block the ordinary order-list first paint.
   const orderIds = [...new Set(rows.map((row) => Number(row.id)).filter(Boolean))];
-  const [coverage, qualityPrefixes, pickingByOrderId, billingRows] = await Promise.all([
-    coveragePromise === null ? new Map() : (coveragePromise || orderProcurementCoverageMysql()),
+  const [coverage, qualityPrefixes, pickingByOrderId, billingRows, , fbpStocks] = await Promise.all([
+    coveragePromise === null ? (cachedOrderProcurementCoverage() || new Map()) : (coveragePromise || orderProcurementCoverageMysql()),
     orderQualityPrefixesMysql(),
     orderInventoryPickingMysql(orderIds),
     orderIds.length ? mysqlQuery(`
@@ -2648,12 +2649,13 @@ async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefine
     WHERE oi.order_id IN (${orderIds.map(() => "?").join(",")})
     GROUP BY oi.order_id
     `, orderIds) : [],
-    rows.length ? activeOrderLogisticsFilterMethodsMysql() : undefined
+    rows.length ? activeOrderLogisticsFilterMethodsMysql() : undefined,
+    loadOrderFbpStocks(mysqlQuery, orderIds)
   ]);
   const billingByOrderId = new Map(billingRows.map((row) => [Number(row.order_id), row]));
   return await mapWithConcurrencyMysql(rows, 3, async (row) => {
     const billing = billingByOrderId.get(Number(row.id)) || {};
-    const enriched = await enrichOrderLogisticsMysql({ ...row, ...billing, inventory_picking_items: pickingByOrderId.get(Number(row.id)) || [], procurement_coverage: coverage.get(Number(row.id)) || null });
+    const enriched = await enrichOrderLogisticsMysql({ ...row, ...billing, fbp_inventory: fbpStocks.get(Number(row.id)) || [], inventory_picking_items: pickingByOrderId.get(Number(row.id)) || [], procurement_coverage: coverage.get(Number(row.id)) || null });
     const accounting = classifyOrderAccounting(enriched, { qualityPrefixes });
     const cancellation = cancellationDisplay({
       ...enriched,
@@ -30087,6 +30089,7 @@ export async function deleteSkuMappingMysql(id) {
 
 const procurementLedgerService = createProcurementLedgerService({
   query: mysqlQuery, transaction: withMysqlTransaction,
+  fbpStocks: productId => loadProductFbpStocks(mysqlQuery, productId),
   coverage: (query, productId) => loadOrderProcurementCoverage(query, '', { fresh: true, productId }),
   postMovement: postInventoryMysql, receive: applyInboundRecordUpdateMysql,
   recordCost: recordPurchaseCostVersionMysql, refreshPurchase: refreshPurchaseOrderStatusMysql,
