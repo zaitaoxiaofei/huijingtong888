@@ -21753,6 +21753,19 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
   await ensurePurchaseCostVersionSchemaMysql();
   const records = Array.isArray(body.records) ? body.records : [];
   if (!records.length) throw new Error("Please select inbound records to update");
+  const receiptRecords = records.map((record) => ({
+    id: Number(record.id ?? record.inbound_record_id),
+    receive_quantity: record.payload?.receive_quantity ?? record.receive_quantity
+  })).filter((record) => record.id && record.receive_quantity !== undefined);
+  if (receiptRecords.length && body.receipt_impact_confirmed !== true) {
+    const impact = await previewInboundReceiptImpactMysql({ records: receiptRecords });
+    if (impact.requires_confirmation) {
+      throw Object.assign(new Error('该采购批次之后已有订单出库流水。请先在“登记实际收货”中核对库存影响，再确认入库，避免把历史已发货数量误当作可用库存。'), {
+        statusCode: 409,
+        receipt_impact: impact
+      });
+    }
+  }
   const result = await withMysqlTransaction(async (connection) => {
     const changedPurchaseOrderIds = new Set();
     const ids = [];
@@ -21770,6 +21783,44 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
   });
   invalidateOrderProcurementCoverage();
   return result;
+}
+
+export async function previewInboundReceiptImpactMysql(body = {}) {
+  ensureMysqlCutoverEnabled();
+  const records = Array.isArray(body.records) ? body.records : [];
+  const ids = [...new Set(records.map((record) => Number(record.id)).filter(Boolean))];
+  if (!ids.length || ids.length > 100) throw new Error('请选择 1 至 100 个待收采购批次');
+  const inputById = new Map(records.map((record) => [Number(record.id), Number(record.receive_quantity || record.quantity || 0)]));
+  const rows = await mysqlQuery(`
+    SELECT ir.id, ir.product_id, ir.quantity, ir.created_at, COALESCE(po.purchased_at, ir.created_at) AS purchased_at,
+      p.name AS product_name, p.stock_unit
+    FROM inbound_records ir JOIN products p ON p.id = ir.product_id
+    LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
+    WHERE ir.id IN (${ids.map(() => '?').join(',')}) AND ir.status = 'pending_arrival'
+  `, ids);
+  if (rows.length !== ids.length) throw new Error('部分采购批次已入库或已变化，请刷新后重新核对');
+  const impacts = [];
+  for (const row of rows) {
+    const receiveQuantity = Number(inputById.get(Number(row.id)) || row.quantity || 0);
+    if (!Number.isInteger(receiveQuantity) || receiveQuantity < 1 || receiveQuantity > Number(row.quantity)) {
+      throw new Error(`批次 #${row.id} 的实收数量应为 1 至 ${row.quantity} 的整数`);
+    }
+    const [balance, outbound] = await Promise.all([
+      mysqlQueryOne(`SELECT COALESCE(SUM(im.quantity_delta), 0) AS quantity
+        FROM inventory_movements im WHERE im.product_id = ? AND im.status = 'posted' AND ${localStockLocationPredicateMysql('im')}`, [row.product_id]),
+      mysqlQueryOne(`SELECT COALESCE(SUM(ABS(im.quantity_delta)), 0) AS quantity
+        FROM inventory_movements im WHERE im.product_id = ? AND im.status = 'posted'
+          AND im.source_type = 'order_outbound' AND im.quantity_delta < 0
+          AND im.created_at >= ?`, [row.product_id, row.purchased_at || row.created_at])
+    ]);
+    const stockBefore = Number(balance?.quantity || 0);
+    const historicalOutbound = Number(outbound?.quantity || 0);
+    impacts.push({ id: Number(row.id), product_id: Number(row.product_id), product_name: row.product_name || '', unit: row.stock_unit || '件',
+      receive_quantity: receiveQuantity, stock_before: stockBefore, stock_after: stockBefore + receiveQuantity,
+      historical_outbound_quantity: historicalOutbound,
+      purchase_time: row.purchased_at || row.created_at });
+  }
+  return { impacts, requires_confirmation: impacts.some((item) => item.historical_outbound_quantity > 0) };
 }
 
 export function startBatchUpdateInboundRecordsMysql(body = {}, sessionPersonId = null) {

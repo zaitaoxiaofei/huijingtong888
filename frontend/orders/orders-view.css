@@ -5298,3 +5298,7 @@
   color: var(--erp-text-secondary, #606266);
   line-height: 1.6;
 }
+
+.order-procurement-receipt-impact {
+  margin: 12px 0;
+}

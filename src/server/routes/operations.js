@@ -58,6 +58,7 @@ export function createOperationsRoutes({ services, readJson }) {
     "POST /api/inbound-records/batch-update-async": async (req) => services.startBatchUpdateInboundRecords(await readJson(req), req._session?.personId),
     "POST /api/inbound-records/shipped-receipts/preview": async (req) => services.previewShippedProcurementReceipts(await readJson(req)),
     "POST /api/inbound-records/shipped-receipts/confirm": async (req) => services.confirmShippedProcurementReceipts(await readJson(req), req._session?.personId),
+    "POST /api/inbound-records/receipt-impact-preview": async (req) => services.previewInboundReceiptImpact(await readJson(req)),
     "POST /api/inbound-records/batch-update": async (req) => services.batchUpdateInboundRecords(await readJson(req), req._session?.personId),
     "POST /api/inventory/movements": async (req) => {
       const body = await readJson(req);
