@@ -12,11 +12,12 @@ export function createOperationsRoutes({ services, readJson }) {
     "GET /api/procurement/daily-report": (req, url) => services.procurementDailyReport(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/requests": (req, url) => services.procurementRequests(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/ledger": (req, url) => services.procurementLedger(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/procurement/stock-cost-tasks": (req, url) => services.procurementStockCostTasks(Object.fromEntries(url.searchParams.entries())),
     "POST /api/procurement/ledger/preview": async (req) => services.previewProcurementLedger(await readJson(req)),
     "POST /api/procurement/ledger": async (req) => {
       const body = await readJson(req);
-      if (['convert', 'substitute', 'damage', 'loss', 'stocktake'].includes(body.action_type) && !hasPermission(req._session, 'inventory.write')) {
-        throw Object.assign(new Error('库存替代、转换及盘点调整需要库存管理权限'), { status: 403 });
+      if (['convert', 'substitute', 'damage', 'loss', 'stocktake', 'set_priority'].includes(body.action_type) && !hasPermission(req._session, 'inventory.write')) {
+        throw Object.assign(new Error('库存替代、转换、盘点及现货优先分配需要库存管理权限（inventory.write），请联系管理员授权后重试'), { status: 403 });
       }
       return services.applyProcurementLedger(body, req._session?.personId);
     },

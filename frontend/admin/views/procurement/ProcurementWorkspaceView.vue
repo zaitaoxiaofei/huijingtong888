@@ -45,7 +45,23 @@ const uploadingReceipt = ref(false);
 const imageSearchingId = ref(0);
 const ledgerVisible = ref(false);
 const ledgerProductId = ref(0);
-function openLedger(row = {}) { ledgerProductId.value = Number(row.product_id || 0); ledgerVisible.value = true; }
+const ledgerInitialTab = ref('current');
+function openLedger(row = {}, tab = 'current') { ledgerProductId.value = Number(row.product_id || 0); ledgerInitialTab.value = tab; ledgerVisible.value = true; }
+const costTasksVisible = ref(false);
+const costTasksLoading = ref(false);
+const costTasks = reactive({ rows: [], total: 0, page: 1, query: '' });
+let costTasksVersion = 0;
+async function loadCostTasks(page = 1) {
+  const version = ++costTasksVersion;
+  costTasksLoading.value = true;
+  costTasks.page = page;
+  try {
+    const result = await apiClient.get(`/api/procurement/stock-cost-tasks?${new URLSearchParams({ page: String(page), query: costTasks.query })}`, { noCache: true });
+    if (version === costTasksVersion) Object.assign(costTasks, result);
+  } catch (error) { if (version === costTasksVersion) ElMessage.error(error.message); }
+  finally { if (version === costTasksVersion) costTasksLoading.value = false; }
+}
+function openCostTasks() { costTasksVisible.value = true; loadCostTasks(); }
 function suggestionReasonTagType(type) {
   return ({ real_order: "danger", warehouse_request: "success", inventory_warning: "warning", advance_stock: "info" })[type] || "info";
 }
@@ -1281,17 +1297,31 @@ onMounted(async () => {
 
 <template>
   <div class="page-stack procurement-workspace">
-    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" @saved="loadRows(); orderHistoryVisible && openOrderHistory(orderHistoryProduct)" />
+    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-tab="ledgerInitialTab" @saved="loadRows(); costTasksVisible && loadCostTasks(costTasks.page); orderHistoryVisible && openOrderHistory(orderHistoryProduct)" />
     <ErpPageHeader title="采购工作台" description="系统自动汇总采购需求；采购人员按供应商集中下单，不再逐个订单处理。">
       <template #actions>
         <DailyPurchaseExport />
         <el-button @click="openLedger()">采购与库存对账</el-button>
+        <el-button type="warning" plain @click="openCostTasks">现货成本待核</el-button>
         <el-button type="primary" plain>系统任务采购（{{ state.total }}）</el-button>
         <el-button type="primary" @click="openCreate">＋ 自由采购</el-button>
         <el-button class="erp-btn erp-btn-secondary" :loading="demandRefreshing" @click="refreshWorkbench">{{ demandRefreshing ? '需求更新中' : '刷新' }}</el-button>
       </template>
     </ErpPageHeader>
 
+    <el-dialog v-if="costTasksVisible" v-model="costTasksVisible" title="盘点现货成本待核" width="min(1200px, 96vw)" destroy-on-close>
+      <el-alert type="info" :closable="false" title="库管已清点实物，这里只核对采购成本，不是真实采购需求。已有采购请关联；漏记的才补录，不会重复增加现货。" />
+      <div class="row-actions"><el-input v-model="costTasks.query" placeholder="库存名称／库存号" clearable @keyup.enter="loadCostTasks()" /><el-button :loading="costTasksLoading" @click="loadCostTasks()">查询</el-button></div>
+      <el-table v-loading="costTasksLoading" :data="costTasks.rows" max-height="55vh">
+        <el-table-column label="库存" min-width="300"><template #default="{ row }"><div class="demand-product-card"><ProductImagePreview :src="`/api/products/${row.product_id}/image?thumb=1&w=180`" :preview-list="[`/api/products/${row.product_id}/image`]" size="portrait" fit="cover" /><div><strong>{{ row.product_name }}</strong><span>{{ row.inventory_number || row.code }}</span></div></div></template></el-table-column>
+        <el-table-column label="待核数量" width="100"><template #default="{ row }">{{ row.quantity - row.resolved_quantity }}</template></el-table-column>
+        <el-table-column prop="person_name" label="盘点人" width="120" />
+        <el-table-column label="盘点时间" min-width="175"><template #default="{ row }">{{ shanghaiDateTimeText(row.created_at, { assumeUtcWhenNaive: true }) }}</template></el-table-column>
+        <el-table-column prop="reason" label="原因" min-width="160" />
+        <el-table-column label="操作" width="120"><template #default="{ row }"><el-button type="primary" plain size="small" @click="openLedger(row, 'purchases')">核对成本</el-button></template></el-table-column>
+      </el-table>
+      <el-pagination :current-page="costTasks.page" :page-size="30" :total="costTasks.total" layout="total, prev, pager, next" @current-change="loadCostTasks" />
+    </el-dialog>
     <el-card shadow="never" class="page-card">
       <ErpFilterBar>
         <el-form inline>
@@ -1358,7 +1388,7 @@ onMounted(async () => {
           <template #default="{ row }">
             <div class="demand-product-card">
               <ProductImagePreview :src="demandImage(row)" :preview-list="[productPreviewImage(row)]" alt="点击查看库存商品原图" size="portrait" fit="cover" />
-              <div><strong>{{ row.product_name }}</strong><span>{{ row.product_code || '-' }}</span><span>SKU：{{ row.mapped_skus || '未绑定SKU' }}</span><div class="row-actions"><el-button link type="primary" @click="openInventoryEditor(row)">编辑库存商品</el-button><el-button link type="primary" @click="openLedger(row)">库存对账／补录</el-button></div></div>
+              <div><strong>{{ row.product_name }}</strong><span>{{ row.product_code || '-' }}</span><span>SKU：{{ row.mapped_skus || '未绑定SKU' }}</span><div class="row-actions"><el-button link type="primary" @click="openInventoryEditor(row)">编辑库存商品</el-button></div></div>
             </div>
           </template>
         </el-table-column>
@@ -1391,7 +1421,19 @@ onMounted(async () => {
           </template>
         </el-table-column>
         <el-table-column label="库存状态" min-width="250" align="center">
-          <template #default="{ row }"><div class="inventory-metrics"><div><span>本地库存</span><strong>{{ Number(row.stock || 0) }}</strong></div><div><span>FBP库存</span><strong>{{ Number(row.fbp_available || 0) }}</strong></div><div><span>采购在途</span><strong>{{ Number(row.incoming_stock || 0) }}</strong></div><div><span>FBP在途</span><strong>{{ Number(row.fbp_transfer_in_transit_qty || 0) }}</strong></div></div></template>
+          <template #default="{ row }">
+            <div class="inventory-metrics">
+              <div><span>现货推算</span><strong>{{ row.physical_stock_estimate == null ? '待核' : Math.max(0, row.physical_stock_estimate) }}</strong></div>
+              <div><span>未占用现货</span><strong>{{ row.unreserved_stock_estimate ?? '待核' }}</strong></div>
+              <div><span>订单现货覆盖</span><strong>{{ row.order_stock_reserved ?? '待核' }}</strong></div>
+              <div><span>FBP 待发占用</span><strong>{{ row.fbp_reserved ?? '待核' }}</strong></div>
+              <div><span>采购在途</span><strong>{{ Number(row.incoming_stock || 0) }}</strong></div>
+              <div><span>FBP调拨在途</span><strong>{{ Number(row.fbp_transfer_in_transit_qty || 0) }}</strong></div>
+              <div><span>FBP库存</span><strong>{{ Number(row.fbp_available || 0) }}</strong></div>
+            </div>
+            <small>现货以盘点为准；采购在途未计入现货</small>
+            <div class="row-actions"><el-button size="small" type="primary" plain @click="openLedger(row)">库存明细／盘点</el-button><el-button size="small" plain @click="openLedger(row, 'purchases')">核对采购成本</el-button></div>
+          </template>
         </el-table-column>
         <el-table-column label="历史订单" min-width="220" align="center">
           <template #default="{ row }"><div class="order-history-summary"><span>出单数 <strong>{{ Number(row.historical_total_order_count || 0) }}</strong></span><span>取消 <strong class="history-cancelled">{{ Number(row.historical_cancelled_quantity || 0) }}</strong></span><span>退货 <strong class="history-returned">{{ Number(row.historical_returned_quantity || 0) }}</strong></span><el-button link type="primary" @click="openOrderHistory(row)">查看明细</el-button></div></template>
@@ -1409,7 +1451,7 @@ onMounted(async () => {
     <el-dialog v-model="orderHistoryVisible" title="历史订单与采购覆盖" width="1380px" align-center destroy-on-close class="order-history-dialog">
       <div v-loading="orderHistoryLoading" class="coverage-audit">
         <div class="coverage-product-context"><div class="coverage-product-main"><ProductImagePreview :src="demandImage(orderHistoryProduct || {})" size="portrait" fit="cover" /><div><strong>{{ orderHistoryProduct?.product_name || '库存商品' }}</strong><span>{{ orderHistoryProduct?.product_code || '-' }} · SKU {{ orderHistoryProduct?.mapped_skus || '未绑定' }}</span></div></div><div class="coverage-product-total"><span>历史订单</span><strong>{{ Number(orderHistorySummary.total_quantity || 0) }} 件</strong></div></div>
-        <el-button type="primary" plain @click="openLedger(orderHistoryProduct)">核对历史缺口／补录来源</el-button>
+        <el-button type="primary" plain @click="openLedger(orderHistoryProduct, 'history')">核对历史缺口／补录来源</el-button>
         <el-alert v-if="missingPurchaseRecordQuantity" type="warning" :closable="false" show-icon :title="`${missingPurchaseRecordQuantity} 件订单已经进入运输或签收，但系统缺少采购记录。请区分采购漏记与收货漏记，历史缺口不计入当前采购。`" />
         <div v-if="visibleOrderHistoryTabs.length" class="coverage-tab-bar"><button v-for="tab in visibleOrderHistoryTabs" :key="tab.key" type="button" :class="[`is-${tab.key}`, { active: orderHistoryActiveTab === tab.key }]" @click="orderHistoryActiveTab = tab.key"><span>{{ tab.title }}</span><strong>{{ tab.quantity }} 件</strong><small>{{ tab.rows.length }} 条订单</small></button></div>
         <section class="coverage-detail-panel"><header><div><strong>{{ activeOrderHistoryTab.title }}</strong><span v-if="activeOrderHistoryTab.key === 'purchase'">等待备货或发货且库存未覆盖，可进入采购表单</span><span v-else-if="activeOrderHistoryTab.key === 'missing'">订单已履约但缺采购记录，应先核对并补录历史采购</span><span v-else>按下单时间倒序展示</span></div><b>{{ activeOrderHistoryTab.quantity }} 件</b></header><el-table :data="activeOrderHistoryTab.rows" max-height="52vh" empty-text="暂无订单" class="coverage-history-table"><el-table-column label="订单号" min-width="180"><template #default="{ row }"><strong>{{ row.posting_number || row.order_number || row.order_id }}</strong><div class="coverage-table-sub">SKU {{ row.ozon_sku || '-' }}</div></template></el-table-column><el-table-column label="店铺" prop="shop_name" min-width="140"><template #default="{ row }">{{ row.shop_name || '未标注店铺' }}</template></el-table-column><el-table-column label="下单时间" min-width="175"><template #default="{ row }">{{ orderTimeText(row) }}</template></el-table-column><el-table-column label="订单状态" width="120"><template #default="{ row }"><el-tag size="small" effect="plain" :type="row.is_cancelled ? 'info' : row.is_returned ? 'warning' : activeOrderHistoryTab.type">{{ orderStatusLabel(row) }}</el-tag></template></el-table-column><el-table-column label="数量" width="80" align="center"><template #default="{ row }">{{ Number(row.quantity || 0) }} 件</template></el-table-column><el-table-column label="采购覆盖情况" min-width="240"><template #default="{ row }"><span :class="['coverage-result', `is-${row.procurement_priority || activeOrderHistoryTab.key}`]">{{ orderCoverageText(row) }}</span></template></el-table-column></el-table></section>

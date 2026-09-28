@@ -15,6 +15,26 @@ export const procurementLedgerSchema = [
     product_id BIGINT UNSIGNED NOT NULL, quantity INT NOT NULL, inbound_record_id BIGINT UNSIGNED NULL,
     UNIQUE KEY uk_history_source (action_id, order_item_id, product_id),
     KEY idx_history_source_item (order_item_id, product_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  `CREATE TABLE IF NOT EXISTS inventory_order_priorities (
+    product_id BIGINT UNSIGNED NOT NULL, order_item_id BIGINT UNSIGNED NOT NULL,
+    priority INT NOT NULL DEFAULT 0, action_id BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (product_id, order_item_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  `CREATE TABLE IF NOT EXISTS procurement_stock_cost_tasks (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    product_id BIGINT UNSIGNED NOT NULL, stocktake_action_id BIGINT UNSIGNED NOT NULL,
+    quantity INT NOT NULL, resolved_quantity INT NOT NULL DEFAULT 0,
+    person_id BIGINT UNSIGNED NOT NULL, reason TEXT NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_stock_cost_action (stocktake_action_id), KEY idx_stock_cost_product (product_id, id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  `CREATE TABLE IF NOT EXISTS procurement_stock_cost_links (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    task_id BIGINT UNSIGNED NOT NULL, purchase_order_item_id BIGINT UNSIGNED NOT NULL,
+    quantity INT NOT NULL, action_id BIGINT UNSIGNED NOT NULL,
+    UNIQUE KEY uk_stock_cost_link_action (action_id), KEY idx_stock_cost_purchase (purchase_order_item_id),
+    KEY idx_stock_cost_task (task_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 let schemaPromise;
@@ -59,7 +79,19 @@ export function planLedgerAction(snapshot, body) {
   if (!reason || reason.length > 1000) throw new Error('请在调整说明中填写真实原因或凭证编号（1～1000 字）');
   const type = String(body.action_type || '');
   const result = { type, reason, quantity: 0, local_delta: 0, target_delta: 0, amount: 0, shipping_amount: 0 };
-  if (type === 'historical_purchase_bulk') {
+  if (type === 'set_priority') {
+    result.order_item_id = integer(body.order_item_id, '要调整优先级的订单明细（order_item_id）');
+    if (!snapshot.orders.some(row => row.order_item_id === result.order_item_id && row.needs_fulfillment)) throw new Error('只能调整待履约本地订单的现货分配优先级，请刷新库存明细');
+    if (![0, 1].includes(body.priority)) throw new Error('请选择优先分配或恢复按下单时间分配（priority）');
+    result.priority = body.priority;
+  } else if (type === 'link_stock_cost') {
+    result.quantity = integer(body.quantity, '本次核对数量');
+    const item = snapshot.purchases.find(row => Number(row.id) === Number(body.purchase_item_id));
+    if (!item || !(Number(item.amount) > 0)) throw new Error('请选择有实际货款的本商品采购记录（purchase_item_id），未知成本不能关闭核对任务');
+    const linked = (snapshot.cost_links || []).filter(row => Number(row.purchase_order_item_id) === Number(item.id)).reduce((sum, row) => sum + Number(row.quantity), 0);
+    if (result.quantity > Math.max(0, Number(item.received_quantity) - linked)) throw new Error('该采购已收货且未用于成本核对的数量不足，请选择其他采购记录');
+    result.purchase_item_id = Number(item.id);
+  } else if (type === 'historical_purchase_bulk') {
     result.quantity = integer(body.quantity, '本次补齐采购数量（quantity）');
     result.amount = money(body.amount);
     if (!(result.amount > 0)) throw new Error('请填写实际总货款（amount），须大于 0，运费单独填写，才能补齐采购成本');
@@ -138,15 +170,17 @@ export function planLedgerAction(snapshot, body) {
     result.target_product_id = integer(body.target_product_id, '转换目标商品');
     result.local_delta = -result.quantity;
     result.target_delta = integer(body.target_quantity, '转换入库数量');
-    if (result.quantity > snapshot.local_stock) throw new Error('转换来源的本地库存不足，请先盘点核对，不能借用 FBP 或采购在途库存');
+    if (result.quantity > (snapshot.available_estimate ?? snapshot.local_stock)) throw new Error('转换来源的本地库存不足，请核对未占用现货，不能借用订单占用、FBP 占用或采购在途库存');
+    result.extra_sources = conversionSources(body, Number(snapshot.product.id));
   } else if (['damage', 'loss', 'stocktake'].includes(type)) {
     if (type === 'stocktake') {
       Object.assign(result, countedStock(snapshot, body.counted_quantity));
       result.local_delta = result.stocktake_delta;
-      if (!result.local_delta) throw new Error('实盘数量与账面相同，无需调整');
+      // Initial counts need cost verification even when their ledger delta is zero.
+      result.cost_task_quantity = snapshot.stocktake_id ? Math.min(result.counted_quantity, Math.max(0, result.stocktake_delta)) : result.counted_quantity;
     } else {
       result.quantity = integer(body.quantity, '损失数量');
-      if (result.quantity > snapshot.local_stock) throw new Error('损失数量超过本地账面库存，请先核对盘点结果');
+      if (result.quantity > (snapshot.physical_estimate ?? snapshot.local_stock)) throw new Error('损失数量超过本地现货推算，请先核对盘点结果');
       result.local_delta = -result.quantity;
     }
   } else if (type === 'revise_purchase') {
@@ -157,6 +191,8 @@ export function planLedgerAction(snapshot, body) {
     result.amount = money(body.amount);
     result.shipping_amount = money(body.shipping_amount || 0);
     const received = Number(item.received_quantity || 0);
+    const linkedCost = (snapshot.cost_links || []).filter(row => Number(row.purchase_order_item_id) === Number(item.id)).reduce((sum, row) => sum + Number(row.quantity), 0);
+    if (linkedCost && (result.quantity < linkedCost || !(result.amount > 0))) throw new Error(`该采购已有 ${linkedCost} 件用于现货成本核对，不能将数量改到该数量以下或清空货款；请先核对原成本任务`);
     result.correct_received = body.correct_received === true;
     if (result.quantity < received && !result.correct_received) throw new Error(`该采购已有 ${received} 件收货记录；请核对并勾选“入库也录多了”才能减少已收货部分`);
     result.receipt_adjustments = planReceiptCorrection(snapshot.batches.filter(row => Number(row.purchase_order_item_id) === Number(item.id)), received, result.quantity);
@@ -169,12 +205,33 @@ export function planLedgerAction(snapshot, body) {
         posting_number: snapshot.orders.find(o => o.order_item_id === Number(a.order_item_id))?.posting_number || String(a.order_id) })));
 
   } else throw new Error('不支持的对账操作');
+  if (body.cost_task_id || type === 'link_stock_cost') {
+    if (!['record_purchase', 'link_stock_cost'].includes(type) || (type === 'record_purchase' && result.inventory_effect !== 'already_accounted')) throw new Error('现货成本核对只允许关联采购或补成本，不得重复入库');
+    const task = (snapshot.cost_tasks || []).find(row => Number(row.id) === integer(body.cost_task_id, '成本核对任务（cost_task_id）'));
+    if (!task || result.quantity > Number(task.quantity) - Number(task.resolved_quantity)) throw new Error('成本核对任务已更新或本次数量超过待核数量，请刷新任务后重试');
+    result.cost_task_id = Number(task.id);
+    result.counted_at = task.created_at;
+  }
   if (result.target_product_id === Number(snapshot.product.id)) throw new Error('来源商品与目标商品不能相同');
   return result;
 }
 
-export function summarizeLedger(product, movements, purchases, orders) {
-  const local = movements.filter(row => row.stock_location !== 'FBP');
+function conversionSources(body, productId) {
+  if (body.action_type !== 'convert') return [];
+  if (body.extra_sources != null && !Array.isArray(body.extra_sources)) throw new Error('配件列表（extra_sources）格式错误，请重新添加配件');
+  const rows = body.extra_sources || [];
+  if (rows.length > 20) throw new Error('一次转换最多选择 20 种配件');
+  const ids = new Set([productId, Number(body.target_product_id)]);
+  return rows.map(row => {
+    const id = integer(row.product_id, '配件库存 ID（extra_sources.product_id）');
+    if (ids.has(id)) throw new Error('来源、目标和配件库存不能重复，请合并同一配件的消耗数量');
+    ids.add(id);
+    return { product_id: id, quantity: integer(row.quantity, '配件消耗数量（extra_sources.quantity）'), revision: String(row.revision || '') };
+  });
+}
+
+export function summarizeLedger(product, movements, purchases, orders, fbpReserved = 0) {
+  const local = movements.filter(row => row.stock_location !== 'FBP' && !['fbp_replenishment_reserve', 'fbp_replenishment_reserve_release'].includes(row.source_type));
   const sum = (rows, fn) => rows.reduce((total, row) => total + Number(fn(row) || 0), 0);
   // Open orders may already have posted outbound movements; those goods are
   // still physically in the warehouse until shipment.
@@ -184,7 +241,7 @@ export function summarizeLedger(product, movements, purchases, orders) {
   const reserved = sum(orders.filter(row => row.needs_fulfillment), row => row.stock_quantity);
   return {
     product, local_stock: localStock, physical_estimate: physical, open_order_deducted: openDeducted,
-    current_stock_reserved: reserved, available_estimate: Math.max(0, physical - reserved),
+    current_stock_reserved: reserved, fbp_reserved: fbpReserved, available_estimate: Math.max(0, physical - reserved - fbpReserved),
     purchase_quantity: sum(purchases, row => row.actual_quantity),
     received_quantity: sum(purchases, row => row.received_quantity),
     incoming_quantity: sum(purchases, row => row.pending_quantity),
@@ -220,12 +277,14 @@ export function createProcurementLedgerService(hooks) {
     const projection = await coverage(run, productId);
     const orders = [...projection.values()].filter(order => order.stock_location !== 'FBP').flatMap(order => order.items
       .filter(item => item.product_id === productId).map(item => ({ ...item, order_id: order.order_id,
-        posting_number: order.posting_number, transport_at: order.transport_at, entered_transport: order.entered_transport, needs_fulfillment: order.needs_fulfillment })));
+        posting_number: order.posting_number, ordered_at: order.ordered_at, transport_at: order.transport_at, entered_transport: order.entered_transport, needs_fulfillment: order.needs_fulfillment })));
     const outbound = await run(`SELECT related_order_item_id AS order_item_id, -SUM(quantity_delta) AS quantity
       FROM inventory_movements WHERE product_id = ? AND status = 'posted' AND source_type = 'order_outbound'
       AND COALESCE(stock_location, 'LOCAL') != 'FBP' GROUP BY related_order_item_id`, [productId]);
     for (const order of orders) order.outbound_quantity = Number(outbound.find(row => Number(row.order_item_id) === order.order_item_id)?.quantity || 0);
-    const value = summarizeLedger(products[0], movements, purchases, orders);
+    const fbpReserved = Number(projection.inventory_stocks?.find(row => Number(row.product_id) === productId)?.fbp_reserved || 0);
+    const value = summarizeLedger(products[0], movements, purchases, orders, fbpReserved);
+    value.stocktake_id = Number(projection.inventory_stocks?.find(row => Number(row.product_id) === productId)?.stocktake_id || 0);
     value.batches = (projection.available_batches || []).filter(row => Number(row.product_id) === productId);
     const posted = await run(`SELECT source_ref, SUM(quantity_delta) AS quantity FROM inventory_movements
       WHERE product_id = ? AND status = 'posted' AND source_type IN ('purchase_inbound', 'purchase_inbound_correction', 'historical_receipt_offset')
@@ -234,15 +293,34 @@ export function createProcurementLedgerService(hooks) {
     value.requests = await run(`SELECT * FROM procurement_requests WHERE product_id = ? AND purchase_order_id IS NOT NULL AND status != 'cancelled' ORDER BY id`, [productId]);
     value.allocations = await run(`SELECT * FROM procurement_order_allocations WHERE product_id = ? AND status = 'allocated' ORDER BY id`, [productId]);
     value.sources = await run('SELECT * FROM procurement_history_sources WHERE product_id = ? ORDER BY id', [productId]);
+    value.cost_tasks = await run('SELECT * FROM procurement_stock_cost_tasks WHERE product_id = ? ORDER BY id', [productId]);
+    value.cost_links = await run(`SELECT l.* FROM procurement_stock_cost_links l JOIN procurement_stock_cost_tasks t ON t.id = l.task_id
+      WHERE t.product_id = ? ORDER BY l.id`, [productId]);
+    value.priorities = await run('SELECT * FROM inventory_order_priorities WHERE product_id = ? ORDER BY order_item_id', [productId]);
     value.revision = ledgerRevision(value);
     value.actions = await run(`SELECT a.id, a.action_type, a.person_id, p.name AS person_name, a.reason, a.result_json, a.created_at FROM procurement_ledger_actions a
       LEFT JOIN people p ON p.id = a.person_id
-      WHERE a.product_id = ? OR JSON_EXTRACT(a.result_json, '$.target_product_id') = ? ORDER BY a.id DESC LIMIT 50`, [productId, productId]);
+      WHERE a.product_id = ? OR JSON_EXTRACT(a.result_json, '$.target_product_id') = ?
+        OR JSON_CONTAINS(a.result_json, JSON_OBJECT('product_id', ?), '$.extra_sources') = 1
+      ORDER BY a.id DESC LIMIT 50`, [productId, productId, productId]);
     return value;
   }
   async function read(body) {
     await prepare();
     return snapshot(integer(body.product_id || body.productId, '库存商品 ID'));
+  }
+  async function costTasks(body = {}) {
+    await prepare();
+    const page = Math.min(100000, Math.max(1, Math.floor(Number(body.page) || 1)));
+    const pageSize = 30;
+    const search = String(body.query || '').trim().slice(0, 200);
+    const where = `t.resolved_quantity < t.quantity${search ? ' AND (p.name LIKE ? OR p.inventory_number LIKE ? OR p.code LIKE ?)' : ''}`;
+    const params = search ? Array(3).fill(`%${search}%`) : [];
+    const [count] = await query(`SELECT COUNT(*) AS total FROM procurement_stock_cost_tasks t JOIN products p ON p.id = t.product_id WHERE ${where}`, params);
+    const rows = await query(`SELECT t.*, p.name AS product_name, p.inventory_number, p.code, pe.name AS person_name
+      FROM procurement_stock_cost_tasks t JOIN products p ON p.id = t.product_id LEFT JOIN people pe ON pe.id = t.person_id
+      WHERE ${where} ORDER BY t.id ASC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
+    return { rows, total: Number(count?.total || 0), page, pageSize };
   }
   async function apply(body, personId) {
     await prepare();
@@ -252,7 +330,8 @@ export function createProcurementLedgerService(hooks) {
     const result = await transaction(async connection => {
       const run = (sql, args = []) => connection.query(sql, args).then(([rows]) => rows);
       const actor = await requirePerson(personId, connection);
-      const ids = [...new Set([productId, Number(body.target_product_id || 0)].filter(Boolean))].sort((a, b) => a - b);
+      const extraSources = conversionSources(body, productId);
+      const ids = [...new Set([productId, Number(body.target_product_id || 0), ...extraSources.map(row => row.product_id)].filter(Boolean))].sort((a, b) => a - b);
       for (const id of ids) await run('SELECT id FROM products WHERE id = ? FOR UPDATE', [id]);
       const previous = await run('SELECT * FROM procurement_ledger_actions WHERE request_key = ? FOR UPDATE', [requestKey]);
       if (previous[0]) {
@@ -279,25 +358,40 @@ export function createProcurementLedgerService(hooks) {
       if (plan.target_product_id) {
         const target = await snapshot(plan.target_product_id, run);
         if (body.target_revision !== target.revision) throw new Error('另一商品的库存已变化，请重新选择并核对');
-        if (target.local_stock + plan.target_delta < 0) throw new Error('实际替代来源商品本地库存不足，请先核对');
-        const components = await run('SELECT product_id FROM product_components WHERE product_id IN (?, ?) LIMIT 1', ids);
+        if (plan.target_delta < 0 && -plan.target_delta > target.available_estimate) throw new Error('实际替代来源商品未占用现货不足，请先核对订单及 FBP 占用');
+        const components = await run(`SELECT product_id FROM product_components WHERE product_id IN (${ids.map(() => '?').join(',')}) LIMIT 1`, ids);
         if (components.length) throw new Error('组合商品请展开到实际库存子商品后进行替代或转换，避免重复记账');
+      }
+      const extraSnapshots = [];
+      for (const source of extraSources) {
+        const stock = await snapshot(source.product_id, run);
+        if (source.revision !== stock.revision) throw new Error(`配件 ${stock.product.name} 库存已变化，请重新选择配件并预览`);
+        if (source.quantity > stock.available_estimate) throw new Error(`配件 ${stock.product.name} 未占用现货不足，不能借用订单或 FBP 占用`);
+        extraSnapshots.push(stock);
       }
       const [action] = await connection.execute(`INSERT INTO procurement_ledger_actions
         (request_key, product_id, action_type, person_id, reason, before_json) VALUES (?, ?, ?, ?, ?, ?)`,
-      [requestKey, productId, plan.type, actor, plan.reason, JSON.stringify({ ...before, submitted: body })]);
+      [requestKey, productId, plan.type, actor, plan.reason, JSON.stringify({ ...before, extra_sources: extraSnapshots, submitted: body })]);
       const actionId = Number(action.insertId);
       const note = `对账 #${actionId}：${plan.reason}`;
+      const conversionCosts = plan.type === 'convert' ? [before, ...extraSnapshots] : [];
+      const conversionCostKnown = conversionCosts.length > 0 && conversionCosts.every(stock => Number(stock.product.purchase_cost) > 0);
+      const conversionAmount = conversionCostKnown ? money(Number(before.product.purchase_cost) * plan.quantity
+        + extraSources.reduce((sum, source, index) => sum + source.quantity * Number(extraSnapshots[index].product.purchase_cost), 0)) : null;
       const movement = async (id, delta, sourceType = 'reconciliation_adjustment', sourceRef = `reconciliation_${actionId}`) => {
-        if (!delta) return;
+        if (!delta && sourceType !== 'reconciliation_stocktake') return;
+        const unitCost = conversionCostKnown ? (id === plan.target_product_id ? conversionAmount / plan.target_delta
+          : Number(conversionCosts.find(stock => Number(stock.product.id) === id)?.product.purchase_cost || 0)) : 0;
         await postMovement(connection, { product_id: id, quantity_delta: delta, source_type: sourceType,
-          source_ref: sourceRef, stock_location: 'LOCAL', movement_type: delta > 0 ? 'MANUAL_ADJUST' : 'ORDER_SHIPPED',
+          source_ref: sourceRef, stock_location: 'LOCAL', movement_type: delta >= 0 ? 'MANUAL_ADJUST' : 'ORDER_SHIPPED',
+          ...(conversionCostKnown ? { unit_cost: unitCost, amount: money(Math.abs(delta) * unitCost) } : {}),
           owner_person_id: actor, operator: String(actor), note });
       };
       const source = async (inboundId = null) => connection.execute(`INSERT INTO procurement_history_sources
         (action_id, order_item_id, product_id, quantity, inbound_record_id) VALUES (?, ?, ?, ?, ?)`,
       [actionId, plan.order_item_id, productId, plan.quantity, inboundId]);
       let purchaseOrderId = null;
+      let purchaseItemId = plan.purchase_item_id || null;
       if (['historical_purchase', 'historical_purchase_bulk', 'record_purchase'].includes(plan.type)) {
         const cost = (plan.amount + plan.shipping_amount) / plan.quantity;
         const inTransit = plan.inventory_effect === 'in_transit';
@@ -311,12 +405,13 @@ export function createProcurementLedgerService(hooks) {
           (purchase_order_id, product_id, requested_quantity, actual_quantity, inbound_quantity, amount, shipping_amount, unit_cost, status, note)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [purchaseOrderId, productId, plan.quantity, plan.quantity,
           inTransit ? 0 : plan.quantity, plan.amount, plan.shipping_amount, cost, status, note]);
+        purchaseItemId = Number(item.insertId);
         const [inbound] = await connection.execute(`INSERT INTO inbound_records
           (product_id, person_id, quantity, amount, shipping_amount, unit_cost, status, note,
             purchase_order_id, purchase_order_item_id, approved_at, approved_by_person_id)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [productId, actor, plan.quantity, plan.amount,
           plan.shipping_amount, cost, inTransit ? 'pending_arrival' : 'approved', `${note}；${inTransit ? '采购仍在途' : plan.stocktake_delta !== undefined ? '仅补历史来源与成本；库存另按实盘核对' : plan.local_delta ? '补漏记本地入库' : '仅补来源，库存已记账或直发'}`,
-          purchaseOrderId, Number(item.insertId), inTransit ? null : plan.purchased_at, inTransit ? null : actor]);
+          purchaseOrderId, Number(item.insertId), inTransit ? null : (plan.counted_at || plan.purchased_at), inTransit ? null : actor]);
         if (plan.stocktake_delta !== undefined) await movement(productId, plan.stocktake_delta, 'reconciliation_stocktake');
         else await movement(productId, plan.local_delta, 'purchase_inbound', `inbound_${inbound.insertId}`);
         if (plan.type === 'historical_purchase') await source(Number(inbound.insertId));
@@ -326,6 +421,9 @@ export function createProcurementLedgerService(hooks) {
         await recordCost(connection, { product_id: productId, source_key: `purchase_order_item:${item.insertId}:purchased`,
           stage: 'historical_backfill', purchase_order_id: purchaseOrderId, purchase_order_item_id: Number(item.insertId),
           quantity: plan.quantity, amount: plan.amount, shipping_amount: plan.shipping_amount, person_id: actor, anomaly_reason: plan.reason });
+      } else if (plan.type === 'set_priority') {
+        await connection.execute(`INSERT INTO inventory_order_priorities (product_id, order_item_id, priority, action_id) VALUES (?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE priority = VALUES(priority), action_id = VALUES(action_id)`, [productId, plan.order_item_id, plan.priority, actionId]);
       } else if (plan.type === 'receive' || plan.type === 'link_purchase') {
         if (plan.type === 'receive') await receive(connection, plan.inbound.id, {
           receive_quantity: plan.quantity, expected_remaining_quantity: plan.inbound.quantity, receipt_context: note
@@ -343,10 +441,26 @@ export function createProcurementLedgerService(hooks) {
         purchaseOrderId = Number(plan.item.purchase_order_id);
       } else {
         await movement(productId, plan.local_delta, `reconciliation_${plan.type}`);
+        for (const source of extraSources) await movement(source.product_id, -source.quantity, 'reconciliation_convert');
         if (plan.target_product_id) await movement(plan.target_product_id, plan.target_delta, 'reconciliation_convert_in');
       }
+      if (plan.cost_task_quantity > 0) await connection.execute(`INSERT INTO procurement_stock_cost_tasks
+        (product_id, stocktake_action_id, quantity, person_id, reason) VALUES (?, ?, ?, ?, ?)`,
+      [productId, actionId, plan.cost_task_quantity, actor, plan.reason]);
+      if (conversionCostKnown) await recordCost(connection, { product_id: plan.target_product_id, source_key: `inventory_conversion:${actionId}`,
+        stage: 'inventory_conversion', quantity: plan.target_delta, amount: conversionAmount, shipping_amount: 0, person_id: actor, anomaly_reason: plan.reason });
+      if (plan.cost_task_id) {
+        await connection.execute(`INSERT INTO procurement_stock_cost_links (task_id, purchase_order_item_id, quantity, action_id) VALUES (?, ?, ?, ?)`,
+          [plan.cost_task_id, purchaseItemId, plan.quantity, actionId]);
+        await connection.execute('UPDATE procurement_stock_cost_tasks SET resolved_quantity = resolved_quantity + ? WHERE id = ?', [plan.quantity, plan.cost_task_id]);
+      }
       const response = { ok: true, action_id: actionId, action_type: plan.type, purchase_order_id: purchaseOrderId,
+        quantity: plan.quantity,
         allocations: plan.allocations || [],
+        extra_sources: extraSources, cost_task_id: plan.cost_task_id || null,
+        ...(plan.type === 'convert' ? { conversion_cost_amount: conversionAmount } : {}),
+        cost_task_quantity: plan.cost_task_quantity || 0,
+        ...(plan.type === 'set_priority' ? { order_item_id: plan.order_item_id, priority: plan.priority } : {}),
         ...(plan.counted_quantity !== undefined ? { counted_quantity: plan.counted_quantity, physical_before: plan.physical_before,
           physical_after: plan.counted_quantity, stocktake_delta: plan.stocktake_delta } : {}),
         local_before: before.local_stock, local_after: before.local_stock + plan.local_delta,
@@ -435,17 +549,27 @@ export function createProcurementLedgerService(hooks) {
       submitted = { ...body, revision: before.revision };
     }
     const plan = planLedgerAction(before, submitted);
+    const extraChanges = [];
+    for (const source of plan.extra_sources || []) {
+      const stock = await snapshot(source.product_id);
+      if (source.revision !== stock.revision) throw new Error(`配件 ${stock.product.name} 已变化，请重新选择并预览`);
+      if (source.quantity > stock.available_estimate) throw new Error(`配件 ${stock.product.name} 未占用现货不足`);
+      extraChanges.push({ product_id: source.product_id, product_name: stock.product.name, quantity: source.quantity, unit_cost: Number(stock.product.purchase_cost || 0),
+        available_before: stock.available_estimate, available_after: stock.available_estimate - source.quantity });
+    }
     let target = null;
     if (plan.target_product_id) {
       target = await snapshot(plan.target_product_id);
       if (body.target_revision !== target.revision) throw new Error('另一商品已变化，请重新选择');
-      if (target.local_stock + plan.target_delta < 0) throw new Error('替代来源商品本地库存不足');
+      if (plan.target_delta < 0 && -plan.target_delta > target.available_estimate) throw new Error('替代来源商品未占用现货不足，请先核对订单及 FBP 占用');
     }
-    return { ...plan, revision: before.revision, local_before: before.local_stock, local_after: before.local_stock + plan.local_delta,
+    const conversionAmount = plan.type === 'convert' && Number(before.product.purchase_cost) > 0 && extraChanges.every(row => row.unit_cost > 0)
+      ? money(Number(before.product.purchase_cost) * plan.quantity + extraChanges.reduce((sum, row) => sum + row.unit_cost * row.quantity, 0)) : null;
+    return { ...plan, extra_changes: extraChanges, conversion_cost_amount: conversionAmount, revision: before.revision, local_before: before.local_stock, local_after: before.local_stock + plan.local_delta,
       ...(plan.counted_quantity !== undefined ? { physical_after: plan.counted_quantity } : {}),
       target_before: target?.local_stock, target_after: target ? target.local_stock + plan.target_delta : null };
   }
-  return { read, apply, preview };
+  return { read, apply, preview, costTasks };
 }
 
 export function planReceiptCorrection(batches, received, quantity) {

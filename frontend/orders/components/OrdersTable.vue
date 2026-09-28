@@ -749,7 +749,8 @@ function procurementTimeText(row) {
           <el-table-column label="待采购" width="95"><template #default="{ row: item }"><span :class="{ 'inventory-shortage': item.shortage_quantity > 0 }">{{ inventoryViews.get(row.id).active ? (item.quantity_needs_review ? '待核' : item.shortage_quantity ?? '待核') : '—' }}</span></template></el-table-column>
           <el-table-column label="核对与记录" width="130"><template #default="{ row: item }"><el-button v-if="item.product_id" link type="primary" @click="emit('view-inventory-detail', row, item.product_id)">库存与历史明细</el-button></template></el-table-column>
         </el-table>
-        <h3>商品总库存与库存管理</h3>
+        <el-collapse>
+          <el-collapse-item title="账面参考与子产品绑定管理（不计入本单需求）" name="management">
           <div class="orders-stock-list">
             <div
               v-for="product in row.inventorySummaries"
@@ -833,6 +834,8 @@ function procurementTimeText(row) {
               </div>
             </div>
           </div>
+          </el-collapse-item>
+        </el-collapse>
       </template>
     </el-drawer>
   </el-card>
