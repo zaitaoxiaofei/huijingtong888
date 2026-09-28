@@ -183,7 +183,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
         <el-option v-if="data && !products.some(p => Number(p.id) === productId)" :value="productId" :label="data.product.name" />
         <el-option v-for="p in products" :key="p.id" :value="Number(p.id)" :label="`${p.name} · ${p.code || p.inventory_id || ''}`" />
       </el-select>
-      <strong v-else class="ledger-scope">所选库存全局汇总 <small>包含全部订单，不仅是本单</small></strong>
+      <strong v-else class="ledger-scope">库存汇总</strong>
       <div class="ledger-top-actions">
         <el-button type="primary" plain :disabled="!data || loading" @click="edit('stocktake')">核对现货</el-button>
         <el-button :disabled="!data || loading" @click="edit('convert')">库存转换</el-button>
@@ -200,7 +200,6 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
     <div v-loading="loading">
       <template v-if="data">
         <div class="ledger-product"><el-image v-if="!orderOverview" class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>库存 ID：{{ data.product.inventory_number || orderItems.find(item => Number(item.product_id) === productId)?.inventory_number || '—' }}</span><span>{{ data.product.code }}</span></div>
-        <p class="ledger-hint">现货包含已分拣、已打包但未发出的货物；历史补采购只补记录，不增加现货或在途。</p>
         <div class="ledger-metric-groups"><section><h3>本地实物与占用</h3>
         <div class="ledger-metrics">
           <div><span>本地现货</span><strong>{{ Math.max(0, data.physical_estimate) }}</strong><small>{{ data.last_stocktake_at ? `最近盘点：${time(data.last_stocktake_at)}，后续随流水更新` : data.stocktake_id ? '已盘点，时间待核；后续随流水更新' : '推算值，待盘点' }}</small></div>
@@ -214,7 +213,6 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
         </div></section></div>
         <div class="ledger-toolbar" v-if="data.fbp_inventory">
           <strong>FBP 库存汇总：{{ data.fbp_inventory.incomplete ? '待核对' : data.fbp_inventory.present }} {{ data.product.stock_unit || '库存单位' }}</strong>
-          <span>可售折算：{{ data.fbp_inventory.incomplete ? '待核对' : data.fbp_inventory.available }}</span>
           <el-button type="primary" plain @click="activeTab = 'fbp'">查看各店铺 SKU 库存</el-button>
         </div>
         <el-tabs v-model="activeTab">
