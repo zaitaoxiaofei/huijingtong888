@@ -103,7 +103,8 @@ test('ledger uses physical returns and FBP transfer, not order cancellation coun
 });
 
 function fixture(failSecond = false, overrides = {}) {
-  let state = { movements: structuredClone(overrides.movements || [{ id: 1, product_id: 10, quantity_delta: 10, source_type: 'purchase_inbound', stock_location: 'LOCAL' }]), actions: [] };
+  let state = { movements: structuredClone(overrides.movements || [{ id: 1, product_id: 10, quantity_delta: 10, source_type: 'purchase_inbound', stock_location: 'LOCAL' }]), actions: [],
+    costTasks: structuredClone(overrides.costTasks || []), costLinks: [], priorities: [], purchases: structuredClone(overrides.purchases || []) };
   let writes = 0;
   const executed = [];
   const recordedCosts = [];
@@ -113,7 +114,10 @@ function fixture(failSecond = false, overrides = {}) {
       if (sql.includes('procurement_ledger_actions')) return state.actions.filter(row => row.request_key === args[0]);
       return [];
     }
-    if (sql.includes('FROM purchase_order_items poi')) return overrides.purchases || [];
+    if (sql.includes('FROM purchase_order_items poi')) return state.purchases;
+    if (sql.includes('FROM procurement_stock_cost_tasks')) return state.costTasks;
+    if (sql.includes('FROM procurement_stock_cost_links')) return state.costLinks;
+    if (sql.includes('FROM inventory_order_priorities')) return state.priorities;
     if (sql.includes('FROM products WHERE')) return [{ id: args[0], name: `商品${args[0]}` }];
     if (sql.includes('GROUP BY source_type, stock_location')) return state.movements.filter(row => row.product_id === args[0]);
     if (sql.includes('GROUP BY related_order_item_id')) return overrides.outbound || [];
@@ -123,8 +127,16 @@ function fixture(failSecond = false, overrides = {}) {
     executed.push({ sql, args });
     if (overrides.failSecondSource && sql.includes('INSERT INTO procurement_history_sources')
       && executed.filter(row => row.sql.includes('INSERT INTO procurement_history_sources')).length === 2) throw new Error('模拟第二个历史订单关联失败');
-    if (sql.includes('INSERT INTO procurement_ledger_actions')) state.actions.push({ id: 1, request_key: args[0], product_id: args[1], person_id: args[3], before_json: args[5] });
-    if (sql.includes('UPDATE procurement_ledger_actions SET result_json')) state.actions[0].result_json = args[0];
+    if (sql.includes('INSERT INTO procurement_ledger_actions')) {
+      const id = state.actions.length + 1;
+      state.actions.push({ id, request_key: args[0], product_id: args[1], person_id: args[3], before_json: args[5] });
+      return [{ insertId: id }];
+    }
+    if (sql.includes('UPDATE procurement_ledger_actions SET result_json')) state.actions.find(row => row.id === args[1]).result_json = args[0];
+    if (sql.includes('INSERT INTO procurement_stock_cost_tasks')) state.costTasks.push({ id: state.costTasks.length + 1, product_id: args[0], stocktake_action_id: args[1], quantity: args[2], resolved_quantity: 0 });
+    if (sql.includes('INSERT INTO procurement_stock_cost_links')) state.costLinks.push({ task_id: args[0], purchase_order_item_id: args[1], quantity: args[2], action_id: args[3] });
+    if (sql.includes('UPDATE procurement_stock_cost_tasks SET resolved_quantity')) state.costTasks.find(row => row.id === args[1]).resolved_quantity += args[0];
+    if (sql.includes('INSERT INTO inventory_order_priorities')) state.priorities = [{ product_id: args[0], order_item_id: args[1], priority: args[2], action_id: args[3] }];
     return [{ insertId: 1 }];
   } };
   const service = createProcurementLedgerService({ prepare: async () => {}, query: run, coverage: async (_, productId) => { coverageProducts.push(productId); return overrides.coverage || new Map(); },
@@ -148,6 +160,68 @@ test('matching stocktake records a zero-delta physical baseline without inventin
   assert.equal(f.state().movements.at(-1).quantity_delta, 0);
   await f.service.apply(input, 1);
   assert.equal(f.state().movements.filter(row => row.source_type === 'reconciliation_stocktake').length, 1);
+  assert.equal(f.state().costTasks.length, 1, 'initial count creates exactly one cost verification task');
+  assert.equal(f.state().costTasks[0].quantity, 10);
+});
+
+test('multi-input conversion consumes shell and logo atomically and cannot repeat on retry', async () => {
+  for (const fail of [false, true]) {
+    const f = fixture(fail, { movements: [10, 12].map(product_id => ({ id: product_id, product_id, quantity_delta: 10, stock_location: 'LOCAL' })) });
+    const main = await f.service.read({ product_id: 10 });
+    const target = await f.service.read({ product_id: 11 });
+    const logo = await f.service.read({ product_id: 12 });
+    const input = { product_id: 10, action_type: 'convert', quantity: 2, target_product_id: 11, target_quantity: 2,
+      revision: main.revision, target_revision: target.revision, extra_sources: [{ product_id: 12, quantity: 2, revision: logo.revision }],
+      reason: '主件配车标转换为成品', request_key: 'multi-conversion-test-001' };
+    const preview = await f.service.preview(input);
+    assert.equal(preview.extra_changes[0].available_after, 8);
+    if (fail) {
+      await assert.rejects(f.service.apply(input, 1), /模拟/);
+      assert.equal(f.state().movements.length, 2);
+      assert.equal(f.state().actions.length, 0);
+    } else {
+      await f.service.apply(input, 1);
+      assert.deepEqual(f.state().movements.slice(2).map(row => [row.product_id, row.quantity_delta]), [[10, -2], [12, -2], [11, 2]]);
+      await f.service.apply(input, 1);
+      assert.equal(f.state().movements.length, 5);
+    }
+    assert.throws(() => planLedgerAction(main, { ...input, extra_sources: [{ product_id: 10, quantity: 2 }] }), /不能重复/);
+  }
+});
+
+test('cost tasks link received purchases or backfill without inventory changes and reject duplicate completion', async () => {
+  for (const type of ['link_stock_cost', 'record_purchase']) {
+    const f = fixture(false, { costTasks: [{ id: 1, product_id: 10, quantity: 10, resolved_quantity: 0 }],
+      purchases: [{ id: 1, purchase_order_id: 1, actual_quantity: 10, received_quantity: 10, amount: 100 }] });
+    const before = await f.service.read({ product_id: 10 });
+    const input = { product_id: 10, action_type: type, cost_task_id: 1, purchase_item_id: 1, quantity: 10, amount: 100,
+      inventory_effect: 'already_accounted', purchased_at: '2026-09-01T00:00:00+08:00', reason: '核对盘点现货的采购凭证', revision: before.revision, request_key: `cost-task-test-${type.replaceAll('_', '-')}` };
+    await f.service.apply(input, 1);
+    assert.equal(f.state().costTasks[0].resolved_quantity, 10);
+    assert.equal(f.state().movements.length, 1);
+    await f.service.apply(input, 1);
+    assert.equal(f.state().costLinks.length, 1);
+    const after = await f.service.read({ product_id: 10 });
+    await assert.rejects(f.service.apply({ ...input, revision: after.revision, request_key: `second-cost-task-${type.replaceAll('_', '-')}` }, 1), /超过待核数量|未用于成本核对的数量不足/);
+    if (type === 'link_stock_cost') assert.equal(f.recordedCosts.length, 0, 'linking cannot create another purchase cost');
+  }
+});
+
+test('manual priority changes are reasoned and audited, never stock movements', async () => {
+  const coverage = new Map([[1, { order_id: 1, posting_number: 'P-1', needs_fulfillment: true,
+    items: [{ order_item_id: 1, product_id: 10, quantity: 1, stock_quantity: 1 }] }]]);
+  const f = fixture(false, { coverage });
+  const before = await f.service.read({ product_id: 10 });
+  const input = { product_id: 10, action_type: 'set_priority', order_item_id: 1, priority: 1,
+    reason: '临近截止时间紧急发货', revision: before.revision, request_key: 'priority-test-0001' };
+  assert.throws(() => planLedgerAction(before, { ...input, reason: '' }), /真实原因/);
+  await f.service.apply(input, 1);
+  assert.equal(f.state().priorities[0].priority, 1);
+  assert.equal(f.state().movements.length, 1);
+  const after = await f.service.read({ product_id: 10 });
+  await f.service.apply({ ...input, revision: after.revision, priority: 0, request_key: 'priority-test-0002' }, 1);
+  assert.equal(f.state().priorities[0].priority, 0);
+  assert.equal(f.state().actions.length, 2);
 });
 
 test('bulk history fill allocates only missing purchases in transport order and conserves both amounts', () => {

@@ -51,7 +51,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
   if (!fresh && pending) return pending;
   const version = generation;
   const work = (async () => {
-    const [demands, stocks, allocations, inbounds, requests, marks, deductions, sources, stockSources, fbpReservations] = await Promise.all([
+    const [demands, stocks, allocations, inbounds, requests, marks, deductions, sources, stockSources, fbpReservations, priorities] = await Promise.all([
       loadDemands(query, `SELECT o.id AS order_id, oi.id AS order_item_id, o.ordered_at, o.posting_number,
         COALESCE(${transportAt}, o.delivered_at, o.ordered_at) AS transport_at,
         COALESCE(ri.product_id, pc.component_product_id, p.id, 0) AS product_id,
@@ -122,7 +122,8 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
           AND source_type IN ('return_in', 'initial_stock', 'opening_stock')
           AND (source_type != 'return_in' OR source_ref IS NULL OR source_ref NOT LIKE 'cancel_%')
           AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'${scope()}`),
-      loadFbpReservations(query, scopedIds)
+      loadFbpReservations(query, scopedIds),
+      query(`SELECT product_id, order_item_id, priority FROM inventory_order_priorities WHERE priority > 0${scope()}`)
     ]);
     for (const row of demands) if (Number(row.entered_transport)) row.needs_fulfillment = 0;
     const liveItems = new Set(demands.filter(d => Number(d.needs_fulfillment) && d.stock_location === 'LOCAL').map(d => Number(d.order_item_id)));
@@ -145,7 +146,9 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
       const original = historicItems.get(Number(movement.order_item_id));
       if (original && Number(movement.quantity) > 0) resolvedDemands.push({ ...original, ...movement });
     }
-    const value = calculateOrderProcurementCoverage({ demands: scopedIds.length ? resolvedDemands.filter(row => scopedIds.includes(Number(row.product_id))) : resolvedDemands, stocks: [...byProduct.values()], allocations, inbounds, requests, marks, sources, stockSources });
+    const priorityByItem = new Map(priorities.map(row => [`${row.product_id}:${row.order_item_id}`, Number(row.priority)]));
+    const prioritizedDemands = resolvedDemands.map(row => ({ ...row, allocation_priority: priorityByItem.get(`${row.product_id}:${row.order_item_id}`) || 0 }));
+    const value = calculateOrderProcurementCoverage({ demands: scopedIds.length ? prioritizedDemands.filter(row => scopedIds.includes(Number(row.product_id))) : prioritizedDemands, stocks: [...byProduct.values()], allocations, inbounds, requests, marks, sources, stockSources });
     value.inventory_stocks = [...byProduct.values()];
     if (!fresh && generation === version) cached = { value, expires: Date.now() + COVERAGE_CACHE_TTL_MS };
     return value;

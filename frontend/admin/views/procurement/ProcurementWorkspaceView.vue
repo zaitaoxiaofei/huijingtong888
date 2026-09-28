@@ -47,6 +47,21 @@ const ledgerVisible = ref(false);
 const ledgerProductId = ref(0);
 const ledgerInitialTab = ref('current');
 function openLedger(row = {}, tab = 'current') { ledgerProductId.value = Number(row.product_id || 0); ledgerInitialTab.value = tab; ledgerVisible.value = true; }
+const costTasksVisible = ref(false);
+const costTasksLoading = ref(false);
+const costTasks = reactive({ rows: [], total: 0, page: 1, query: '' });
+let costTasksVersion = 0;
+async function loadCostTasks(page = 1) {
+  const version = ++costTasksVersion;
+  costTasksLoading.value = true;
+  costTasks.page = page;
+  try {
+    const result = await apiClient.get(`/api/procurement/stock-cost-tasks?${new URLSearchParams({ page: String(page), query: costTasks.query })}`, { noCache: true });
+    if (version === costTasksVersion) Object.assign(costTasks, result);
+  } catch (error) { if (version === costTasksVersion) ElMessage.error(error.message); }
+  finally { if (version === costTasksVersion) costTasksLoading.value = false; }
+}
+function openCostTasks() { costTasksVisible.value = true; loadCostTasks(); }
 function suggestionReasonTagType(type) {
   return ({ real_order: "danger", warehouse_request: "success", inventory_warning: "warning", advance_stock: "info" })[type] || "info";
 }
@@ -1282,17 +1297,31 @@ onMounted(async () => {
 
 <template>
   <div class="page-stack procurement-workspace">
-    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-tab="ledgerInitialTab" @saved="loadRows(); orderHistoryVisible && openOrderHistory(orderHistoryProduct)" />
+    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-tab="ledgerInitialTab" @saved="loadRows(); costTasksVisible && loadCostTasks(costTasks.page); orderHistoryVisible && openOrderHistory(orderHistoryProduct)" />
     <ErpPageHeader title="采购工作台" description="系统自动汇总采购需求；采购人员按供应商集中下单，不再逐个订单处理。">
       <template #actions>
         <DailyPurchaseExport />
         <el-button @click="openLedger()">采购与库存对账</el-button>
+        <el-button type="warning" plain @click="openCostTasks">现货成本待核</el-button>
         <el-button type="primary" plain>系统任务采购（{{ state.total }}）</el-button>
         <el-button type="primary" @click="openCreate">＋ 自由采购</el-button>
         <el-button class="erp-btn erp-btn-secondary" :loading="demandRefreshing" @click="refreshWorkbench">{{ demandRefreshing ? '需求更新中' : '刷新' }}</el-button>
       </template>
     </ErpPageHeader>
 
+    <el-dialog v-if="costTasksVisible" v-model="costTasksVisible" title="盘点现货成本待核" width="min(1200px, 96vw)" destroy-on-close>
+      <el-alert type="info" :closable="false" title="库管已清点实物，这里只核对采购成本，不是真实采购需求。已有采购请关联；漏记的才补录，不会重复增加现货。" />
+      <div class="row-actions"><el-input v-model="costTasks.query" placeholder="库存名称／库存号" clearable @keyup.enter="loadCostTasks()" /><el-button :loading="costTasksLoading" @click="loadCostTasks()">查询</el-button></div>
+      <el-table v-loading="costTasksLoading" :data="costTasks.rows" max-height="55vh">
+        <el-table-column label="库存" min-width="300"><template #default="{ row }"><div class="demand-product-card"><ProductImagePreview :src="`/api/products/${row.product_id}/image?thumb=1&w=180`" :preview-list="[`/api/products/${row.product_id}/image`]" size="portrait" fit="cover" /><div><strong>{{ row.product_name }}</strong><span>{{ row.inventory_number || row.code }}</span></div></div></template></el-table-column>
+        <el-table-column label="待核数量" width="100"><template #default="{ row }">{{ row.quantity - row.resolved_quantity }}</template></el-table-column>
+        <el-table-column prop="person_name" label="盘点人" width="120" />
+        <el-table-column label="盘点时间" min-width="175"><template #default="{ row }">{{ shanghaiDateTimeText(row.created_at, { assumeUtcWhenNaive: true }) }}</template></el-table-column>
+        <el-table-column prop="reason" label="原因" min-width="160" />
+        <el-table-column label="操作" width="120"><template #default="{ row }"><el-button type="primary" plain size="small" @click="openLedger(row, 'purchases')">核对成本</el-button></template></el-table-column>
+      </el-table>
+      <el-pagination :current-page="costTasks.page" :page-size="30" :total="costTasks.total" layout="total, prev, pager, next" @current-change="loadCostTasks" />
+    </el-dialog>
     <el-card shadow="never" class="page-card">
       <ErpFilterBar>
         <el-form inline>

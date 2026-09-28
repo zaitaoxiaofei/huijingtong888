@@ -17,6 +17,7 @@ export function planPartialReceipt(record, quantity, expectedQuantity) {
 // This is an operational projection. It never repairs the inventory ledger or
 // creates purchases from a shipping status. All quantities use physical product units.
 export function calculateOrderProcurementCoverage({ demands = [], stocks = [], allocations = [], inbounds = [], requests = [], marks = [], sources = [], stockSources = [] }) {
+  const prioritizedProducts = new Set(demands.filter(row => row.needs_fulfillment && row.allocation_priority > 0).map(row => Number(row.product_id)));
   const stockByProduct = new Map(stocks.map(row => [Number(row.product_id), row]));
   const pools = new Map(stocks.map(row => [Number(row.product_id), positive(Number(row.ledger || 0) + Number(row.open_deducted || 0) - positive(row.fbp_reserved))]));
   const requestById = new Map(requests.map(row => [Number(row.id), row]));
@@ -35,7 +36,10 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
     .map(m => [`${m.order_item_id}:${m.product_id}`, m]));
   const details = demands.map(row => ({ ...row, sort_time: new Date(row.ordered_at || 0).getTime() || 0, quantity: positive(row.quantity), stock_quantity: 0, incoming_quantity: 0,
     received_quantity: 0, shortage_quantity: 0, missing_record_quantity: 0, missing_purchase_quantity: 0, missing_receipt_quantity: 0, missing_amount: false,
-    quantity_needs_review: false, documented_quantity: 0, receipt_claims: [], batches: [] })).sort((a, b) => a.sort_time - b.sort_time || Number(a.order_item_id) - Number(b.order_item_id));
+    quantity_needs_review: false, documented_quantity: 0, receipt_claims: [], batches: [] })).sort((a, b) =>
+      (prioritizedProducts.size ? Number(!!a.needs_fulfillment) - Number(!!b.needs_fulfillment) : 0)
+      || Number(!!b.needs_fulfillment && b.allocation_priority > 0) - Number(!!a.needs_fulfillment && a.allocation_priority > 0)
+      || a.sort_time - b.sort_time || Number(a.order_item_id) - Number(b.order_item_id));
   const byItem = new Map();
   for (const detail of details) {
     const key = `${detail.order_item_id}:${detail.product_id}`;
@@ -111,7 +115,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
       // Once physically counted, old receipts remain cost/source evidence only.
       // They cannot override the counted supply or preempt FIFO allocation.
       const stock = stockByProduct.get(Number(detail.product_id));
-      if (stock?.stocktake_id || positive(stock?.fbp_reserved)) continue;
+      if (stock?.stocktake_id || positive(stock?.fbp_reserved) || prioritizedProducts.has(Number(detail.product_id))) continue;
       pools.set(Number(detail.product_id), positive((pools.get(Number(detail.product_id)) || 0) - detail.received_quantity - detail.documented_quantity));
     }
   }
@@ -123,7 +127,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
     detail.inventory_needs_review = detail.stock_location !== 'FBP' && Number(stock.ledger || 0) + Number(stock.open_deducted || 0) < 0;
     const sourceMark = markByItem.get(`${detail.order_item_id}:${productId}`);
     if (Number(detail.needs_fulfillment) && detail.stock_location !== 'FBP') {
-      const recordedSupply = stock.stocktake_id || positive(stock.fbp_reserved) ? 0 : detail.received_quantity + detail.documented_quantity;
+      const recordedSupply = stock.stocktake_id || positive(stock.fbp_reserved) || prioritizedProducts.has(productId) ? 0 : detail.received_quantity + detail.documented_quantity;
       let needed = positive(detail.quantity - recordedSupply - detail.incoming_quantity);
       const stockQuantity = Math.min(needed, pools.get(productId) || 0);
       pools.set(productId, positive((pools.get(productId) || 0) - stockQuantity));
@@ -188,7 +192,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
   }
   for (const detail of details) {
     const id = Number(detail.order_id);
-    if (!result.has(id)) result.set(id, { order_id: id, posting_number: detail.posting_number || String(id), transport_at: detail.transport_at || null, shortage_quantity: 0, stock_quantity: 0, incoming_quantity: 0,
+    if (!result.has(id)) result.set(id, { order_id: id, posting_number: detail.posting_number || String(id), ordered_at: detail.ordered_at || null, transport_at: detail.transport_at || null, shortage_quantity: 0, stock_quantity: 0, incoming_quantity: 0,
       missing_record_quantity: 0, missing_purchase_quantity: 0, missing_receipt_quantity: 0, missing_amount: false, quantity_needs_review: false, inventory_needs_review: false,
       stock_location: detail.stock_location, needs_fulfillment: Boolean(Number(detail.needs_fulfillment)), entered_transport: Boolean(Number(detail.entered_transport)), items: [], batches: [] });
     const order = result.get(id);
@@ -202,7 +206,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
       product_reserved_incoming_quantity: positive((pendingIncomingByProduct.get(Number(detail.product_id)) || 0) - (availableIncomingByProduct.get(Number(detail.product_id)) || 0)),
       shortage_quantity: detail.shortage_quantity, missing_record_quantity: detail.missing_record_quantity,
       missing_purchase_quantity: detail.missing_purchase_quantity, missing_receipt_quantity: detail.missing_receipt_quantity, missing_amount: detail.missing_amount, ledger_stock: detail.ledger_stock,
-      physical_stock_estimate: detail.physical_stock_estimate,
+      physical_stock_estimate: detail.physical_stock_estimate, allocation_priority: Number(detail.allocation_priority || 0),
       product_fbp_reserved: positive(stockByProduct.get(Number(detail.product_id))?.fbp_reserved),
       inventory_needs_review: detail.inventory_needs_review });
     for (const batch of detail.batches) if (!order.batches.some(b => Number(b.id) === Number(batch.id))) {

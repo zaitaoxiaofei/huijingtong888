@@ -14,9 +14,10 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     physical_estimate: 2, current_stock_reserved: 2, available_estimate: 0,
     purchase_quantity: 102, received_quantity: 2, incoming_quantity: 100, current_shortage: 0, current_incoming: 2,
     missing_purchase: 98, missing_receipt: 0, movements: [], actions: [], sources: [], batches: [],
+    cost_tasks: [{ id: 7, quantity: 2, resolved_quantity: 0, reason: '实盘确认', created_at: '2026-09-27 00:00:00' }],
     orders: [{ order_item_id: 1, order_id: 1, posting_number: 'TEST-100', entered_transport: true, quantity: 100, missing_record_quantity: 98, missing_purchase_quantity: 98, missing_receipt_quantity: 0 },
       { order_item_id: 2, order_id: 2, posting_number: 'CURRENT-200', needs_fulfillment: true, quantity: 4, stock_quantity: 2, incoming_quantity: 2, shortage_quantity: 0 }],
-    purchases: [{ id: 1, order_no: 'CG-1', actual_quantity: 100, received_quantity: 0, pending_quantity: 100, amount: 1000, shipping_amount: 0, purchased_at: '2026-09-01 01:00:00' }] };
+    purchases: [{ id: 1, order_no: 'CG-1', actual_quantity: 100, received_quantity: 2, pending_quantity: 98, amount: 1000, shipping_amount: 0, purchased_at: '2026-09-01 01:00:00' }] };
   const requests = [], errors = [];
   try {
     await build({ configFile: false, root: process.cwd(), logLevel: 'error', plugins: [vue(), {
@@ -29,9 +30,11 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     await page.route('http://localhost:8788/**', async route => {
       const url = new URL(route.request().url());
       if (url.pathname === '/admin.html') return route.fulfill({ contentType: 'text/html', body: '<html><head><link rel="stylesheet" href="/style.css"></head><body><div id="app"></div><script type="module" src="/entry.js"></script></body></html>' });
-      if (url.pathname === '/api/products') return route.fulfill({ json: { rows: [{ id: 10, name: '测试商品 A' }, { id: 11, name: '替代商品 B' }] } });
+      if (url.pathname === '/api/products') return route.fulfill({ json: { rows: [{ id: 10, name: '测试商品 A' }, { id: 11, name: '替代商品 B' }, { id: 12, name: '车标配件' }] } });
       if (url.pathname.endsWith('/image')) return route.fulfill({ status: 404, body: '' });
-      if (url.pathname === '/api/procurement/ledger' && route.request().method() === 'GET') return route.fulfill({ json: url.searchParams.get('product_id') === '11' ? { ...initial, product: { id: 11, name: '替代商品 B' }, revision: 'target-v1', local_stock: 10 } : initial });
+      if (url.pathname === '/api/procurement/ledger' && route.request().method() === 'GET') return route.fulfill({ json: url.searchParams.get('product_id') === '12'
+        ? { ...initial, product: { id: 12, name: '车标配件' }, revision: 'logo-v1', available_estimate: 10 }
+        : url.searchParams.get('product_id') === '11' ? { ...initial, product: { id: 11, name: '替代商品 B' }, revision: 'target-v1', local_stock: 10 } : initial });
       if (url.pathname.startsWith('/api/procurement/ledger') && route.request().method() === 'POST') {
         const body = route.request().postDataJSON(); requests.push({ path: url.pathname, body });
         return route.fulfill({ json: url.pathname.endsWith('/preview') ? { local_before: 0, local_after: 0, local_delta: 0, physical_after: 0 } : { ok: true } });
@@ -100,6 +103,39 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     assert.equal(requests.at(-1).body.amount, 200);
     assert.equal(requests.at(-1).body.quantity, 10);
     assert.match(requests.at(-1).body.purchased_at, /T00:00:00\+08:00$/);
+    await page.getByRole('button', { name: '关联已有采购', exact: true }).click();
+    const linkDialog = page.getByRole('dialog', { name: '关联已有采购成本', exact: true });
+    await linkDialog.getByText('选择有金额且已收货的采购', { exact: true }).click();
+    await page.getByRole('option', { name: /CG-1/ }).click();
+    await linkDialog.locator('textarea').fill('已有采购凭证，核对完成');
+    await linkDialog.getByRole('button', { name: '预览影响' }).click();
+    await linkDialog.getByRole('button', { name: '确认保存纠正记录' }).click();
+    assert.equal(requests.at(-1).body.cost_task_id, 7);
+    assert.equal(requests.at(-1).body.purchase_item_id, 1);
+    assert.equal(requests.at(-1).body.action_type, 'link_stock_cost');
+    await page.getByRole('tab', { name: '当前订单覆盖', exact: true }).click();
+    await page.getByRole('button', { name: '优先分配', exact: true }).click();
+    const priorityDialog = page.getByRole('dialog', { name: '调整现货分配优先级', exact: true });
+    await priorityDialog.locator('textarea').fill('紧急订单优先，保留调整原因');
+    await priorityDialog.getByRole('button', { name: '预览影响' }).click();
+    await priorityDialog.getByRole('button', { name: '确认保存纠正记录' }).click();
+    assert.equal(requests.at(-1).body.action_type, 'set_priority');
+    assert.equal(requests.at(-1).body.order_item_id, 2);
+    assert.equal(requests.at(-1).body.priority, 1);
+    await page.getByRole('tab', { name: '本地库存去向' }).click();
+    await page.getByRole('button', { name: '转换为其他商品库存' }).click();
+    const multi = page.getByRole('dialog', { name: '库存商品转换', exact: true });
+    await multi.getByRole('combobox').fill('替代');
+    await page.getByRole('option', { name: '替代商品 B' }).click();
+    await multi.getByText('该商品本地库存 10').waitFor();
+    await multi.getByRole('button', { name: '添加消耗配件' }).click();
+    await multi.getByRole('combobox').nth(1).fill('车标');
+    await page.getByRole('option', { name: '车标配件', exact: true }).click();
+    await multi.getByText('未占用 10', { exact: true }).waitFor();
+    await multi.locator('textarea').fill('钥匙壳配车标组装');
+    await multi.getByRole('button', { name: '预览影响' }).click();
+    await multi.getByRole('button', { name: '确认保存纠正记录' }).click();
+    assert.deepEqual(requests.at(-1).body.extra_sources, [{ product_id: 12, quantity: 1, revision: 'logo-v1' }]);
     assert.deepEqual(errors, []);
   } finally { await browser?.close(); await fs.rm(output, { recursive: true, force: true }); }
 });

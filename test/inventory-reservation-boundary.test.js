@@ -65,3 +65,16 @@ test('old linked receipts cannot override a verified zero stocktake or FBP occup
     assert.equal(result.shortage_quantity, 10);
   }
 });
+
+test('manual urgency changes FIFO only for live stock and never consumes FBP reservations', () => {
+  const demands = [order(1, 2), { ...order(2, 2), allocation_priority: 1 },
+    { ...order(3, 5), needs_fulfillment: 0, entered_transport: 1 }];
+  const input = { demands, stocks: [{ product_id: 10, ledger: 5, stocktake_id: 1, fbp_reserved: 3 }] };
+  const prioritized = calculateOrderProcurementCoverage(input);
+  assert.equal(prioritized.get(2).stock_quantity, 2);
+  assert.equal(prioritized.get(1).shortage_quantity, 2);
+  assert.equal(prioritized.get(3).missing_record_quantity, 5);
+  const restored = calculateOrderProcurementCoverage({ ...input, demands: demands.map(row => ({ ...row, allocation_priority: 0 })) });
+  assert.equal(restored.get(1).stock_quantity, 2);
+  assert.equal(restored.get(2).shortage_quantity, 2);
+});

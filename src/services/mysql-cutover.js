@@ -30092,6 +30092,7 @@ const procurementLedgerService = createProcurementLedgerService({
   }
 });
 export const procurementLedgerMysql = (query) => procurementLedgerService.read(query);
+export const procurementStockCostTasksMysql = (query) => procurementLedgerService.costTasks(query);
 export const applyProcurementLedgerMysql = (body, personId) => procurementLedgerService.apply(body, personId);
 
 export const previewProcurementLedgerMysql = (body) => procurementLedgerService.preview(body);
