@@ -40,6 +40,22 @@ const orderItems = computed(() => (props.orderOverview?.items || []).map(item =>
     [key, matches.some(row => row[key] == null) ? undefined : matches.reduce((sum, row) => sum + Number(row[key]), 0)])),
     quantity_needs_review: matches.some(row => row.quantity_needs_review) };
 }));
+const orderCoverageSummary = computed(() => {
+  if (!props.orderOverview?.active) return null;
+  const items = orderItems.value;
+  const sum = key => items.reduce((total, item) => total + Number(item[key] || 0), 0);
+  return {
+    demand: sum('quantity'), stock: sum('stock_quantity'), incoming: sum('incoming_quantity'), shortage: sum('shortage_quantity'),
+    needsReview: items.some(item => item.quantity_needs_review)
+  };
+});
+const orderCoverageConclusion = computed(() => {
+  const summary = orderCoverageSummary.value;
+  if (!summary) return null;
+  if (summary.needsReview) return { type: 'warning', title: '库存或采购数量待核对，暂不能确认是否需要采购。' };
+  if (summary.shortage > 0) return { type: 'error', title: `本单仍缺 ${summary.shortage} 件，请采购或登记可用在途。` };
+  return { type: 'success', title: `本单已覆盖：现货 ${summary.stock} 件${summary.incoming ? `，在途 ${summary.incoming} 件` : ''}；无需重复采购。` };
+});
 const pendingCosts = computed(() => (data.value?.cost_tasks || []).filter(row => Number(row.quantity) > Number(row.resolved_quantity)));
 let loadVersion = 0;
 const labels = {
@@ -197,7 +213,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
 <template>
   <el-dialog v-model="visible" title="库存明细与历史核对" width="min(1400px, 96vw)" top="4vh" append-to-body destroy-on-close :before-close="closeDetail" :close-on-click-modal="false" class="unified-inventory-dialog">
     <section v-if="orderOverview" class="ledger-order-summary">
-      <h3>本单需求与覆盖 <small>{{ orderLabel }}</small></h3>
+      <h3>本单采购结论 <small>{{ orderLabel }}</small></h3>
       <InventoryIdentity v-if="orderOverview.parents?.length" :parents="orderOverview.parents" />
       <p>点击库存行，下方直接切换详情；不同子产品的件数不合并相加。</p>
       <el-table :data="orderItems" row-key="product_id" max-height="290" :row-class-name="({ row }) => Number(row.product_id) === productId ? 'selected-inventory-row' : ''" @row-click="row => changeProduct(row.product_id)">
@@ -206,10 +222,11 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
           <div><el-button link type="primary" class="ledger-product-select" @click.stop="changeProduct(row.product_id)">{{ row.product_name }}</el-button><p>库存 ID：{{ row.inventory_number || '—' }} <el-tag v-if="Number(row.product_id) === productId" size="small">当前查看</el-tag></p></div>
         </div></template></el-table-column>
         <el-table-column prop="quantity" label="本单需求" width="110" />
-        <el-table-column label="现货覆盖" width="110"><template #default="{ row }">{{ orderOverview.active ? row.stock_quantity ?? '待核' : '—' }}</template></el-table-column>
-        <el-table-column label="在途覆盖" width="110"><template #default="{ row }">{{ orderOverview.active ? row.incoming_quantity ?? '待核' : '—' }}</template></el-table-column>
-        <el-table-column label="还需采购" width="110"><template #default="{ row }"><strong :class="{ 'ledger-shortage': row.shortage_quantity > 0 }">{{ orderOverview.active ? (row.quantity_needs_review ? '待核' : row.shortage_quantity ?? '待核') : '—' }}</strong></template></el-table-column>
+        <el-table-column label="已分配现货" width="120"><template #default="{ row }">{{ orderOverview.active ? row.stock_quantity ?? '待核' : '—' }}</template></el-table-column>
+        <el-table-column label="已分配在途" width="120"><template #default="{ row }">{{ orderOverview.active ? row.incoming_quantity ?? '待核' : '—' }}</template></el-table-column>
+        <el-table-column label="仍需采购" width="110"><template #default="{ row }"><strong :class="{ 'ledger-shortage': row.shortage_quantity > 0 }">{{ orderOverview.active ? (row.quantity_needs_review ? '待核' : row.shortage_quantity ?? '待核') : '—' }}</strong></template></el-table-column>
       </el-table>
+      <el-alert v-if="orderCoverageConclusion" :type="orderCoverageConclusion.type" :closable="false" show-icon class="ledger-order-conclusion" :title="orderCoverageConclusion.title" />
     </section>
     <div class="ledger-toolbar">
       <el-select v-if="!orderOverview" :model-value="productId || undefined" filterable remote :remote-method="search" :loading="searching" placeholder="搜索全部库存商品名称或编码" @change="changeProduct" style="width:460px">
@@ -233,12 +250,12 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
     <div v-loading="loading">
       <template v-if="data">
         <div class="ledger-product"><el-image v-if="!orderOverview" class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>库存 ID：{{ data.product.inventory_number || orderItems.find(item => Number(item.product_id) === productId)?.inventory_number || '—' }}</span><span>{{ data.product.code }}</span></div>
-        <div class="ledger-metric-groups"><section><h3>本地实物与占用</h3>
+        <div class="ledger-metric-groups"><section><h3>仓库实物、分配与可用</h3>
         <div class="ledger-metrics">
-          <div><span>本地库存</span><strong>{{ Math.max(0, data.physical_estimate) }}</strong><small>{{ data.last_stocktake_at ? `最近核实：${time(data.last_stocktake_at)}` : data.stocktake_id ? '已盘点，时间待核' : '未盘点' }}</small></div>
-          <div><span>订单占用</span><strong>{{ data.current_stock_reserved }}</strong><small>全部待履约本地订单</small></div>
-          <div><span>FBP 待发占用</span><strong>{{ data.fbp_reserved ?? '待核' }}</strong><small>审核通过占用，调减释放</small></div>
-          <div><span>剩余可用</span><strong>{{ data.available_estimate }}</strong><small>已扣订单及 FBP 占用</small></div>
+          <div><span>仓库实物总数</span><strong>{{ Math.max(0, data.physical_estimate) }}</strong><small>{{ data.last_stocktake_at ? `最近核实：${time(data.last_stocktake_at)}` : data.stocktake_id ? '已盘点，时间待核' : '未盘点' }}</small></div>
+          <div><span>已分配给订单</span><strong>{{ data.current_stock_reserved }}</strong><small>全部待履约本地订单</small></div>
+          <div><span>其他占用（FBP）</span><strong>{{ data.fbp_reserved ?? '待核' }}</strong><small>审核通过占用，调减释放</small></div>
+          <div><span>剩余可用</span><strong>{{ data.available_estimate }}</strong><small>仓库实物扣除订单及 FBP 占用后</small></div>
         </div></section><section><h3>采购与缺口</h3><div class="ledger-metrics">
           <div><span>采购在途</span><el-button link type="primary" @click="showPurchases('incoming')"><strong>{{ data.incoming_quantity }}</strong></el-button><small>点击查看待收采购</small></div>
           <div><span>在途已分配</span><strong>{{ data.current_incoming }}</strong></div>

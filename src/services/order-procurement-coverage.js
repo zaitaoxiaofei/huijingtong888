@@ -36,7 +36,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
     .map(m => [`${m.order_item_id}:${m.product_id}`, m]));
   const details = demands.map(row => ({ ...row, sort_time: new Date(row.ordered_at || 0).getTime() || 0, quantity: positive(row.quantity), stock_quantity: 0, incoming_quantity: 0,
     received_quantity: 0, shortage_quantity: 0, missing_record_quantity: 0, missing_purchase_quantity: 0, missing_receipt_quantity: 0, missing_amount: false,
-    quantity_needs_review: false, documented_quantity: 0, receipt_claims: [], batches: [] })).sort((a, b) =>
+    quantity_needs_review: false, documented_quantity: 0, current_recorded_supply: 0, receipt_claims: [], batches: [] })).sort((a, b) =>
       (prioritizedProducts.size ? Number(!!a.needs_fulfillment) - Number(!!b.needs_fulfillment) : 0)
       || Number(!!b.needs_fulfillment && b.allocation_priority > 0) - Number(!!a.needs_fulfillment && a.allocation_priority > 0)
       || a.sort_time - b.sort_time || Number(a.order_item_id) - Number(b.order_item_id));
@@ -116,7 +116,14 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
       // They cannot override the counted supply or preempt FIFO allocation.
       const stock = stockByProduct.get(Number(detail.product_id));
       if (stock?.stocktake_id || positive(stock?.fbp_reserved) || prioritizedProducts.has(Number(detail.product_id))) continue;
-      pools.set(Number(detail.product_id), positive((pools.get(Number(detail.product_id)) || 0) - detail.received_quantity - detail.documented_quantity));
+      const productId = Number(detail.product_id);
+      const recordedSupply = positive(detail.received_quantity + detail.documented_quantity);
+      // A received-purchase record is source evidence, not extra stock.  It
+      // can cover this open order only when the current physical pool still
+      // contains that quantity. This prevents a historical receipt from
+      // masking a real zero-stock shortage after the goods were consumed.
+      detail.current_recorded_supply = Math.min(recordedSupply, pools.get(productId) || 0);
+      pools.set(productId, positive((pools.get(productId) || 0) - detail.current_recorded_supply));
     }
   }
   for (const detail of details) {
@@ -127,7 +134,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
     detail.inventory_needs_review = detail.stock_location !== 'FBP' && Number(stock.ledger || 0) + Number(stock.open_deducted || 0) < 0;
     const sourceMark = markByItem.get(`${detail.order_item_id}:${productId}`);
     if (Number(detail.needs_fulfillment) && detail.stock_location !== 'FBP') {
-      const recordedSupply = stock.stocktake_id || positive(stock.fbp_reserved) || prioritizedProducts.has(productId) ? 0 : detail.received_quantity + detail.documented_quantity;
+      const recordedSupply = stock.stocktake_id || positive(stock.fbp_reserved) || prioritizedProducts.has(productId) ? 0 : detail.current_recorded_supply;
       let needed = positive(detail.quantity - recordedSupply - detail.incoming_quantity);
       const stockQuantity = Math.min(needed, pools.get(productId) || 0);
       pools.set(productId, positive((pools.get(productId) || 0) - stockQuantity));

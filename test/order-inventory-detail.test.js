@@ -59,13 +59,19 @@ test('order inventory dialog mounts on demand and history actions are order-spec
   assert.match(page, /:order-id="inventoryDetail.orderId"/);
   assert.match(table, /item.missing_receipt_quantity > 0/);
   assert.match(table, /emit\('view-inventory-detail', row, item.product_id\)/);
+  const dialog = readFileSync(new URL('../frontend/admin/components/procurement/ProcurementLedgerDialog.vue', import.meta.url), 'utf8');
+  assert.match(dialog, /本单采购结论/);
+  assert.match(dialog, /已分配现货/);
+  assert.match(dialog, /仓库实物总数/);
+  assert.match(dialog, /仓库实物扣除订单及 FBP 占用后/);
 });
 
 test('order inventory management keeps detail with binding, creation, and inventory edit actions on the order row', () => {
   const table = readFileSync(new URL('../frontend/orders/components/OrdersTable.vue', import.meta.url), 'utf8');
-  const actions = table.match(/<div class="orders-inventory-quick-actions">[\s\S]*?<\/div>\n            <el-button v-if="hasProcurementIncoming/);
-  assert.ok(actions);
-  assert.match(actions[0], />库存明细[\s\S]*?>\s*修改绑定\s*<\/el-button>[\s\S]*?>\s*修改库存\s*<\/el-button>[\s\S]*?>\s*绑定库存\s*<\/el-button>[\s\S]*?>\s*创建库存\s*<\/el-button>/);
+  const start = table.indexOf('<div class="orders-inventory-quick-actions">');
+  const actions = table.slice(start, table.indexOf('\n            </div>', start));
+  assert.ok(start >= 0);
+  assert.match(actions, />库存明细[\s\S]*?>\s*修改绑定\s*<\/el-button>[\s\S]*?>\s*修改库存\s*<\/el-button>[\s\S]*?>\s*绑定库存\s*<\/el-button>[\s\S]*?>\s*创建库存\s*<\/el-button>/);
   assert.doesNotMatch(table, /<h3>商品总库存与库存管理<\/h3>[\s\S]*?>\s*(?:修改绑定|绑定库存|创建库存|修改库存)\s*<\/el-button>/);
 });
 
