@@ -21257,10 +21257,12 @@ export async function updatePurchaseOrderMysql(id, body = {}) {
   return await withMysqlTransaction(async (connection) => {
     const order = await mysqlConnectionQueryOne(connection, "SELECT * FROM purchase_orders WHERE id = ? FOR UPDATE", [orderId]);
     if (!order) throw new Error("Purchase order not found");
+    const orderNo = body.order_no === undefined ? order.order_no : String(body.order_no || "").trim();
+    if (!orderNo) throw new Error("采购单号不能为空");
     await connection.execute(`
-      UPDATE purchase_orders SET note = COALESCE(NULLIF(?, ''), note), total_amount = ?
+      UPDATE purchase_orders SET order_no = ?, note = COALESCE(NULLIF(?, ''), note), total_amount = ?
       WHERE id = ?
-    `, [body.note || "", Number(body.total_amount ?? order.total_amount ?? 0), orderId]);
+    `, [orderNo, body.note || "", Number(body.total_amount ?? order.total_amount ?? 0), orderId]);
 
     if (Array.isArray(body.items)) {
       for (const item of body.items) {

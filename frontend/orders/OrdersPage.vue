@@ -927,35 +927,52 @@ function procurementDetailContent(row) {
   if (!records.length) {
     return h("div", { class: "orders-procurement-empty" }, "没有关联的采购记录");
   }
-  return h("div", { class: "orders-inbound-confirm" }, records.map((record) => {
-    const inventory = (row.inventorySummaries || []).find((item) => Number(item.productId) === record.productId) || {};
-    const inventoryName = inventory.productName || record.productName;
-    const inventoryNumber = inventory.inventoryNumber || "";
-    const isReceived = record.status === "approved";
-    const status = isReceived ? "已入库" : "等待入库";
-    const infoRows = [
-      ["采购时间", `${formatDateTime(record.purchasedAt)}（北京时间）`],
-      ["采购数量", `${record.quantity} ${record.unit}`, "is-primary"],
-      ["采购金额", `¥${formatMoney(record.amount + record.shippingAmount)}`],
-      ["采购人员", record.personName],
-      ["采购单号", record.purchaseOrderNo],
-      ["快递", record.courierCompany],
-      ["快递单号", record.trackingNumber],
-      ["入库状态", status, isReceived ? "is-received" : "is-pending"],
-      ...(isReceived ? [["入库确认人员", record.approvedByPersonName], ["确认时间", `${formatDateTime(record.receivedAt)}（北京时间）`]] : [])
-    ];
-    return h('section', { class: ['orders-procurement-compact-card', isReceived ? 'is-received' : 'is-pending'], key: record.id }, [
-      h('header', { class: 'orders-procurement-compact-header' }, [
-        h('strong', inventoryName),
-        inventoryNumber ? h('small', `库存号：${inventoryNumber}`) : null,
-        h('span', { class: ['orders-procurement-status', isReceived ? 'is-received' : 'is-pending'] }, status)
-      ]),
-      h('div', { class: 'orders-inbound-confirm-grid' }, infoRows.flatMap(([label, value, className]) => [
-        h('span', { class: 'orders-inbound-confirm-label' }, label),
-        h('strong', { class: className || '' }, value)
-      ]))
-    ]);
-  }));
+  return h("div", { class: "orders-procurement-table-wrap" }, [h("table", { class: "orders-procurement-table" }, [
+    h("thead", null, [h("tr", null, [
+      "库存商品", "采购时间", "数量", "金额", "采购人员", "采购单号", "快递", "快递单号", "入库状态", "入库确认人", "确认时间", "操作"
+    ].map((label) => h("th", null, label)))]),
+    h("tbody", null, records.map((record) => {
+      const inventory = (row.inventorySummaries || []).find((item) => Number(item.productId) === record.productId) || {};
+      const inventoryName = inventory.productName || record.productName;
+      const inventoryNumber = inventory.inventoryNumber || "";
+      const isReceived = record.status === "approved";
+      const status = isReceived ? "已入库" : "等待入库";
+      return h("tr", { class: isReceived ? "is-received" : "is-pending", key: record.id }, [
+        h("td", { class: "orders-procurement-product" }, [h("strong", null, inventoryName), inventoryNumber ? h("small", null, `库存号：${inventoryNumber}`) : null]),
+        h("td", null, formatDateTime(record.purchasedAt)),
+        h("td", { class: "is-quantity" }, `${record.quantity} ${record.unit}`),
+        h("td", null, `¥${formatMoney(record.amount + record.shippingAmount)}`),
+        h("td", null, record.personName),
+        h("td", null, h("input", { class: "orders-procurement-reference-input", value: record.purchaseOrderNo, placeholder: "填写采购单号", onInput: (event) => { record.purchaseOrderNo = event.target.value; } })),
+        h("td", null, record.courierCompany || "未登记"),
+        h("td", null, h("input", { class: "orders-procurement-reference-input", value: record.trackingNumber, placeholder: "填写快递单号", onInput: (event) => { record.trackingNumber = event.target.value; } })),
+        h("td", null, h("span", { class: ["orders-procurement-status", isReceived ? "is-received" : "is-pending"] }, status)),
+        h("td", null, isReceived ? record.approvedByPersonName : "—"),
+        h("td", null, isReceived ? formatDateTime(record.receivedAt) : "—"),
+        h("td", null, h("button", { class: "orders-procurement-save-button", type: "button", onClick: () => saveProcurementReferences(record) }, "保存"))
+      ]);
+    }))
+  ])]);
+}
+
+async function saveProcurementReferences(record) {
+  const purchaseOrderNo = String(record.purchaseOrderNo || "").trim();
+  if (!purchaseOrderNo) {
+    ElMessage.warning("请填写采购单号后再保存");
+    return;
+  }
+  try {
+    await apiClient.put(`/api/inbound-records/${record.id}`, {
+      tracking_number: String(record.trackingNumber || "").trim(),
+      version_updated_at: record.updatedAt || undefined
+    });
+    if (record.purchaseOrderId) {
+      await apiClient.put(`/api/procurement/purchase-orders/${record.purchaseOrderId}`, { order_no: purchaseOrderNo });
+    }
+    ElMessage.success("采购单号和快递单号已保存");
+  } catch (error) {
+    ElMessage.error(error.message || "保存采购信息失败");
+  }
 }
 
 async function handleViewProcurementDetails(row) {

@@ -21,9 +21,11 @@ test('receipt dialog selects batches explicitly and posts only selected actual q
 
 test('procurement detail preserves every inbound batch and renders each record status', () => {
   assert.match(source, /orderProcurementRecordDetails\(row\.procurement_coverage\?\.batches\)/);
-  assert.match(source, /\["采购单号", record\.purchaseOrderNo\]/);
-  assert.match(source, /\["快递单号", record\.trackingNumber\]/);
-  assert.match(source, /\["入库确认人员", record\.approvedByPersonName\]/);
+  assert.match(source, /orders-procurement-table/);
+  assert.match(source, /"采购单号", "快递", "快递单号"/);
+  assert.match(source, /saveProcurementReferences\(record\)/);
+  assert.match(source, /tracking_number: String\(record\.trackingNumber \|\| ""\)\.trim\(\)/);
+  assert.match(source, /\/api\/procurement\/purchase-orders\/\$\{record\.purchaseOrderId\}/);
   assert.match(source, /isReceived \? "已入库" : "等待入库"/);
 
   const records = orderProcurementRecordDetails([
