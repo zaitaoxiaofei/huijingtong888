@@ -107,12 +107,14 @@ test('compact inventory opens lazy component table and preserves management/rece
     await drawer.getByText('P-11', { exact: true }).waitFor();
     releaseSlow();
     await drawer.getByRole('tab', { name: '采购与成本', exact: true }).click();
-    await drawer.getByRole('button', { name: '核对现货', exact: true }).click();
-    const form = page.getByRole('dialog', { name: '本地盘点调整', exact: true });
+    assert.equal(await drawer.getByRole('tab').nth(2).innerText(), '采购与成本');
+    await drawer.getByRole('button', { name: '更新本地库存', exact: true }).click();
+    const form = page.getByRole('dialog', { name: '更新本地库存', exact: true });
     await form.getByRole('spinbutton').fill('1');
+    await form.getByText('历史库存记错', { exact: true }).click();
     await form.getByRole('textbox').fill('库管实盘为1件');
-    await form.getByRole('button', { name: '预览影响' }).click();
-    await form.getByRole('button', { name: '确认保存纠正记录' }).click();
+    await form.getByRole('button', { name: '确认更新', exact: true }).click();
+    await page.getByRole('dialog', { name: '确认更新本地库存', exact: true }).getByRole('button', { name: '确认更新', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('#event').textContent === 'saved');
     assert.equal(await drawer.getByRole('tab', { name: '采购与成本', exact: true }).getAttribute('aria-selected'), 'true', 'save preserves tab');
     assert.equal(await drawer.getByText('P-11', { exact: true }).count(), 1, 'late accessory result cannot replace selected product');
