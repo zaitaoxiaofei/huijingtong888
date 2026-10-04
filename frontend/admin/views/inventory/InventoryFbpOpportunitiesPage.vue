@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { InfoFilled } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -1103,6 +1103,10 @@ onMounted(async () => {
   applyRouteState();
   routeReady = true;
   await loadPageData();
+});
+
+onActivated(() => {
+  if (routeReady) void loadPageData();
 });
 </script>
 

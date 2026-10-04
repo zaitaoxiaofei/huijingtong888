@@ -4,6 +4,8 @@ import test from "node:test";
 
 const source = fs.readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 const page = fs.readFileSync(new URL("../frontend/admin/views/inventory/InventoryFbpReplenishmentPage.vue", import.meta.url), "utf8");
+const opportunitiesPage = fs.readFileSync(new URL("../frontend/admin/views/inventory/InventoryFbpOpportunitiesPage.vue", import.meta.url), "utf8");
+const productsPage = fs.readFileSync(new URL("../frontend/admin/views/inventory/InventoryProductsPage.vue", import.meta.url), "utf8");
 
 test("FBP approval reserves local stock without creating a transfer or outbound movement", () => {
   assert.match(source, /reserveFbpReplenishmentApprovedStockMysql/);
@@ -32,4 +34,18 @@ test("FBP replenishment page exposes shipment and warehouse receipt stages", () 
   assert.match(page, /if \(status === "completed"\) return "已入仓"/);
   assert.match(page, />确认发货</);
   assert.match(page, />确认入仓</);
+});
+
+test("completed FBP replenishment orders do not remain in the shared transit total", () => {
+  assert.match(source, /function fbpTransferInTransitWhereMysql/);
+  assert.match(source, /completed_order\.status = 'completed'/);
+  assert.match(source, /WHERE \$\{fbpTransferInTransitWhereMysql\(\)\}/);
+  assert.match(source, /WHERE \$\{fbpTransferInTransitWhereMysql\("ftr"\)\}/);
+  assert.doesNotMatch(source, /FBP_OPPORTUNITY_CACHE_TTL_MS/);
+});
+
+test("FBP displays refresh their shared facts whenever a kept-alive page is reopened", () => {
+  assert.match(page, /onActivated\(\(\) => void loadPageData\(\)\)/);
+  assert.match(opportunitiesPage, /onActivated\(\(\) => \{[\s\S]*?void loadPageData\(\)/);
+  assert.match(productsPage, /onActivated\(\(\) => void loadPageData\(\{ silent: true \}\)\)/);
 });

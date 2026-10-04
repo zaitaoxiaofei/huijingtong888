@@ -1,7 +1,7 @@
 <script setup>
 import { hasPermission } from "../../../../src/shared/permissions.js";
 import { useAuthStore } from "../../stores/auth";
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { View } from "@element-plus/icons-vue";
@@ -1860,6 +1860,8 @@ onMounted(async () => {
     await openEditDialog({ id: Number(route.query.productId) });
   }
 });
+
+onActivated(() => void loadPageData({ silent: true }));
 </script>
 
 <template>

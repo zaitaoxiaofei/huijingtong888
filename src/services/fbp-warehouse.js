@@ -9,11 +9,16 @@ export async function loadWarehouseFacts(query, productIds, localPredicate) {
     query(`SELECT product_id, SUM(quantity) AS quantity FROM inbound_records
       WHERE product_id IN (${marks}) AND status = 'pending_arrival' GROUP BY product_id`, ids),
     query(`SELECT * FROM (
-      SELECT product_id, shop_id, ozon_sku, quantity, listed_quantity, status, shipped_at,
+      SELECT ftr.product_id, ftr.shop_id, ftr.ozon_sku, ftr.quantity, ftr.listed_quantity, ftr.status, ftr.shipped_at,
+        IF(completed_order.status = 'completed', 1, 0) AS completed_replenishment,
         DENSE_RANK() OVER (PARTITION BY product_id ORDER BY shipped_at DESC) AS latest_product,
         DENSE_RANK() OVER (PARTITION BY product_id, shop_id, ozon_sku ORDER BY shipped_at DESC) AS latest_sku
-      FROM fbp_transfer_records WHERE product_id IN (${marks})
-        AND status NOT IN ('draft', 'cancelled') AND shipped_at IS NOT NULL
+      FROM fbp_transfer_records ftr
+      LEFT JOIN fbp_replenishment_orders completed_order
+        ON ftr.source_type = 'fbp_replenishment'
+        AND ftr.source_ref LIKE CONCAT('fbp_replenishment:', completed_order.id, ':%')
+      WHERE ftr.product_id IN (${marks})
+        AND ftr.status NOT IN ('draft', 'cancelled') AND ftr.shipped_at IS NOT NULL
       ) shipments WHERE latest_product = 1 OR latest_sku = 1 OR status IN ('sent', 'in_transit', 'received')`, ids),
     loadFbpReservations(query, ids)
   ]);
@@ -23,7 +28,7 @@ export async function loadWarehouseFacts(query, productIds, localPredicate) {
   for (const row of reserved) result.get(Number(row.product_id)).reserved_fbp = Number(row.quantity);
   for (const row of transfers) {
     const fact = result.get(Number(row.product_id));
-    if (['sent', 'in_transit', 'received'].includes(row.status)) fact.fbp_pending += Math.max(0, Number(row.quantity) - Number(row.listed_quantity));
+    if (!Number(row.completed_replenishment) && ['sent', 'in_transit', 'received'].includes(row.status)) fact.fbp_pending += Math.max(0, Number(row.quantity) - Number(row.listed_quantity));
     if (Number(row.latest_product) === 1) { fact.last_shipped_qty += Number(row.quantity); fact.last_shipped_at = row.shipped_at; }
     if (Number(row.latest_sku) === 1) {
       const key = `${row.shop_id}:${row.ozon_sku}`;

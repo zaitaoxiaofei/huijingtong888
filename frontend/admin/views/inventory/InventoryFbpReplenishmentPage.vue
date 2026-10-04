@@ -1,5 +1,5 @@
 <script setup>
-import { computed, inject, onMounted, reactive, ref, watch } from "vue";
+import { computed, inject, onActivated, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { useAuthStore } from "../../stores/auth.js";
 import { apiClient } from "../../utils/api";
@@ -1212,6 +1212,7 @@ watch(sharedReplenishmentStatus, (status) => {
 });
 
 onMounted(loadPageData);
+onActivated(() => void loadPageData());
 </script>
 
 <template>

@@ -286,7 +286,17 @@ async function ensureProfitAnalyticsSchemaMysql() {
 }
 
 const STOCK_ALERT_BASE_CACHE_TTL_MS = 5 * 60_000;
-const FBP_OPPORTUNITY_CACHE_TTL_MS = 5 * 60_000;
+function fbpTransferInTransitWhereMysql(alias = "") {
+  const prefix = alias ? `${alias}.` : "";
+  return `${prefix}status IN ('sent', 'in_transit', 'received')
+    AND NOT EXISTS (
+      SELECT 1
+      FROM fbp_replenishment_orders completed_order
+      WHERE ${prefix}source_type = 'fbp_replenishment'
+        AND ${prefix}source_ref LIKE CONCAT('fbp_replenishment:', completed_order.id, ':%')
+        AND completed_order.status = 'completed'
+    )`;
+}
 const EXCEPTION_WORKBENCH_CACHE_TTL_MS = 45_000;
 const ORDER_COUNTS_CACHE_TTL_MS = 180_000;
 const ORDER_LOGISTICS_ROW_CACHE_TTL_MS = 10 * 60_000;
@@ -4276,7 +4286,7 @@ export async function fbpOpportunitiesMysql(query = {}) {
   await ensureProductBarcodeLabelCacheReadyMysql();
   await ensureFbpTransferRecordsSchemaMysql();
   await ensureFbpReplenishmentSchemaMysql();
-  const normalizedRows = await getCachedMasterData("fbp-opportunities:base:v2", async () => {
+  const normalizedRows = await (async () => {
     const rows = await mysqlQuery(`
     SELECT
       sm.id AS mapping_id, sm.shop_id, sm.ozon_sku, sm.offer_id, sm.display_name,
@@ -4352,7 +4362,7 @@ export async function fbpOpportunitiesMysql(query = {}) {
       SELECT product_id, shop_id, ozon_sku,
         SUM(GREATEST(quantity - listed_quantity, 0)) AS fbp_transfer_in_transit_qty
       FROM fbp_transfer_records
-      WHERE status IN ('sent', 'in_transit', 'received')
+      WHERE ${fbpTransferInTransitWhereMysql()}
       GROUP BY product_id, shop_id, ozon_sku
     ) fbp_transfer ON fbp_transfer.product_id = sm.product_id
       AND (fbp_transfer.shop_id IS NULL OR fbp_transfer.shop_id = sm.shop_id)
@@ -4374,7 +4384,7 @@ export async function fbpOpportunitiesMysql(query = {}) {
     dateKeyDaysAgoMysql(13)
     ]);
     return rows.map(normalizeFbpOpportunityRow);
-  }, FBP_OPPORTUNITY_CACHE_TTL_MS);
+  })();
   return applyFbpOpportunityQuery(normalizedRows, query);
 }
 
@@ -5428,7 +5438,7 @@ export async function fbpTransferRecordsMysql(query = {}) {
     where.push("ftr.status = ?");
     params.push(status);
   } else if (onlyOpen) {
-    where.push("ftr.status IN ('draft', 'sent', 'in_transit', 'received')");
+    where.push(`(ftr.status = 'draft' OR ${fbpTransferInTransitWhereMysql("ftr")})`);
   }
   if (text) {
     where.push("(p.name LIKE ? OR ftr.ozon_sku LIKE ? OR ftr.tracking_no LIKE ? OR ftr.box_no LIKE ? OR p.inventory_number = ? OR p.code = ?)");
@@ -10571,7 +10581,7 @@ export async function productsMysql(query = {}) {
         SELECT ftr.product_id,
           SUM(GREATEST(ftr.quantity - COALESCE(ftr.listed_quantity, 0), 0)) AS fbp_transfer_in_transit_qty
         FROM fbp_transfer_records ftr
-        WHERE ftr.status IN ('sent', 'in_transit', 'received') AND ftr.product_id IN (${pagePlaceholders})
+        WHERE ${fbpTransferInTransitWhereMysql("ftr")} AND ftr.product_id IN (${pagePlaceholders})
         GROUP BY ftr.product_id
       ) fbp_transfer ON fbp_transfer.product_id = p.id
       LEFT JOIN (
@@ -10711,7 +10721,7 @@ export async function productsMysql(query = {}) {
           SELECT product_id,
             SUM(GREATEST(quantity - COALESCE(listed_quantity, 0), 0)) AS fbp_transfer_in_transit_qty
           FROM fbp_transfer_records
-          WHERE status IN ('sent', 'in_transit', 'received')
+          WHERE ${fbpTransferInTransitWhereMysql()}
           GROUP BY product_id
         ) fbp_transfer ON fbp_transfer.product_id = p.id
       `);
@@ -10856,7 +10866,7 @@ export async function productsMysql(query = {}) {
         SELECT product_id,
           SUM(GREATEST(quantity - COALESCE(listed_quantity, 0), 0)) AS fbp_transfer_in_transit_qty
         FROM fbp_transfer_records
-        WHERE status IN ('sent', 'in_transit', 'received') AND product_id IN (${pagePlaceholders})
+        WHERE ${fbpTransferInTransitWhereMysql()} AND product_id IN (${pagePlaceholders})
         GROUP BY product_id
       ) fbp_transfer ON fbp_transfer.product_id = p.id
       LEFT JOIN (
@@ -11010,7 +11020,7 @@ export async function productsMysql(query = {}) {
       SELECT product_id,
         SUM(GREATEST(quantity - COALESCE(listed_quantity, 0), 0)) AS fbp_transfer_in_transit_qty
       FROM fbp_transfer_records
-      WHERE status IN ('sent', 'in_transit', 'received')
+      WHERE ${fbpTransferInTransitWhereMysql()}
       GROUP BY product_id
     ) fbp_transfer ON fbp_transfer.product_id = p.id
     LEFT JOIN (
@@ -14355,7 +14365,7 @@ export async function procurementRequestsMysql(query = {}) {
       COALESCE(incoming.incoming_stock, 0) AS incoming_stock,
       (SELECT COALESCE(SUM(GREATEST(ftr.quantity - COALESCE(ftr.listed_quantity, 0), 0)), 0)
         FROM fbp_transfer_records ftr
-        WHERE ftr.product_id = p.id AND ftr.status IN ('sent', 'in_transit', 'received')
+        WHERE ftr.product_id = p.id AND ${fbpTransferInTransitWhereMysql("ftr")}
       ) AS fbp_transfer_in_transit_qty,
       COALESCE(component_supply.component_count, 0) AS component_count,
       COALESCE(component_supply.local_stock, 0) AS component_local_stock,
