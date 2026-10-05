@@ -5,7 +5,8 @@ import { ElementPlusResolver } from "unplugin-vue-components/resolvers";
 import ElementPlus from "unplugin-element-plus/vite";
 import path from "node:path";
 
-const buildStamp = process.env.OZON_BUILD_STAMP || String(Date.now());
+// Release provenance may contain branch separators; asset names must stay flat.
+const buildStamp = (process.env.OZON_BUILD_STAMP || String(Date.now())).replace(/[^A-Za-z0-9_-]/g, "-");
 const releaseVersion = process.env.OZON_RELEASE_VERSION || process.env.APP_RELEASE_VERSION || "local";
 const releaseChannel = process.env.OZON_RELEASE_CHANNEL || "local";
 const frontendOutDir = path.resolve(process.env.OZON_VITE_OUT_DIR || "public/vue-apps");
