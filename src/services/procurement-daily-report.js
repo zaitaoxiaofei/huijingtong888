@@ -58,6 +58,7 @@ export async function procurementDailyReport(query = {}, queryRows = mysqlQuery)
   const supplierId = String(query.supplierId || query.supplier_id || "all").trim();
   const sourceType = String(query.sourceType || query.source_type || "all").trim().toLowerCase();
   const inventoryCategory = String(query.inventoryCategory || query.inventory_category || "").trim();
+  const productName = String(query.productName || query.product_name || "").trim();
   const vehicleBrand = String(query.vehicleBrand || query.vehicle_brand || "").trim();
   const vehicleModels = listValue(query.vehicleModel || query.vehicle_model);
   const accessoryName = String(query.accessoryName || query.accessory_name || "").trim();
@@ -85,6 +86,7 @@ export async function procurementDailyReport(query = {}, queryRows = mysqlQuery)
     params.push(...Array(10).fill(like));
   }
   if (inventoryCategory) { where.push("p.inventory_category = ?"); params.push(inventoryCategory); }
+  if (productName) { where.push("p.name LIKE ?"); params.push(`%${productName}%`); }
   if (vehicleBrand) {
     const brandTokens = [...new Set(vehicleBrand.split(/\s+/).filter(Boolean))];
     where.push(`(REPLACE(COALESCE(p.vehicle_brand, ''), '|', ' ') = ? OR ${brandTokens.map(() => "COALESCE(p.vehicle_brand, '') LIKE ?").join(" OR ")})`);
