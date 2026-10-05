@@ -1121,8 +1121,7 @@ function chooseSuggestion(suggestion) {
     bindForm.product_name = suggestion.product_name;
     return;
   }
-  activeItem.value.product_id = Number(suggestion.product_id);
-  activeItem.value.product_name = suggestion.product_name;
+  chooseQuickInventory(normalizeQuickInventoryProduct(suggestion));
 }
 
 function searchInventorySuggestions() {
@@ -1161,13 +1160,29 @@ function chooseQuickInventory(product) {
   if (!activeItem.value) return;
   activeItem.value.product_id = Number(product.product_id);
   activeItem.value.product_name = product.product_name;
+  activeItem.value.raw_name = product.product_name;
   state.suggestions = [];
   ElMessage.success(`已选择库存：${product.product_name}`);
 }
 
 function openQuickInventoryCreate() {
+  if (!String(activeItem.value?.raw_name || "").trim()) return ElMessage.warning("请先填写采购名称，系统会带入标准库存建品表单");
   quickInventoryCreateVisible.value = true;
 }
+
+const quickInventoryCreateValue = computed(() => {
+  const item = activeItem.value || {};
+  const quantity = Math.max(1, Number(item.quantity || 1));
+  return {
+    name: String(item.raw_name || "").trim(),
+    purchase_quantity: quantity,
+    purchase_cost: Number(item.amount || 0) / quantity,
+    domestic_shipping: Number(item.shipping_amount || 0),
+    source_platform: createForm.source_type || "pdd",
+    supplier_id: createForm.supplier_id || "",
+    owner_person_id: createForm.person_id || ""
+  };
+});
 
 async function handleQuickInventoryCreated({ product } = {}) {
   const productId = Number(product?.id || product?.product_id || 0);
@@ -1512,7 +1527,7 @@ onMounted(async () => {
 
     <ProductCreateEditDialog ref="inventoryEditorRef" v-model:visible="inventoryEditorVisible" mode="edit" target="inventory" :edit-product-id="inventoryEditorProductId" :value="inventoryEditorValue" :people="state.people" :suppliers="state.suppliers" @saved="handleInventorySaved" @quick-create-component="openQuickComponentCreate" />
 
-    <ProductCreateEditDialog v-model:visible="quickInventoryCreateVisible" mode="create" target="inventory" :people="state.people" :suppliers="state.suppliers" @saved="handleQuickInventoryCreated" @existing-selected="handleQuickInventoryExistingSelected" />
+    <ProductCreateEditDialog v-model:visible="quickInventoryCreateVisible" mode="create" target="inventory" :value="quickInventoryCreateValue" :people="state.people" :suppliers="state.suppliers" @saved="handleQuickInventoryCreated" @existing-selected="handleQuickInventoryExistingSelected" />
 
     <ProductCreateEditDialog v-model:visible="quickComponentCreateVisible" mode="create" target="inventory" :people="state.people" :suppliers="state.suppliers" :create-context="{ is_accessory: 1 }" @saved="handleQuickComponentCreated" @existing-selected="handleQuickComponentExistingSelected" />
 
@@ -1566,7 +1581,7 @@ onMounted(async () => {
       <template #footer><el-button :disabled="purchaseHistorySaving" @click="purchaseCorrection = null">返回编辑</el-button><el-button type="primary" :loading="purchaseHistorySaving" @click="savePurchaseHistoryCorrection">确认保存</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="createVisible" title="登记已下单采购" width="1180px" align-center destroy-on-close>
+    <el-dialog v-model="createVisible" title="登记已下单采购" width="min(1480px, calc(100vw - 40px))" align-center destroy-on-close class="free-purchase-dialog">
       <el-alert title="这里提交即表示已经完成下单；系统会立即记录采购人、采购时间、数量和金额，并生成采购在途。" type="info" :closable="false" show-icon />
       <el-form label-width="92px">
         <el-row :gutter="16">
@@ -1589,12 +1604,12 @@ onMounted(async () => {
         <div v-if="activeItem" class="item-editor">
           <div class="section-head"><strong>填写采购商品</strong><el-button v-if="createForm.items.length > 1" link type="danger" @click="removeItem(activeItemIndex)">删除本条</el-button></div>
           <el-form label-width="92px">
-            <el-form-item label="采购名称"><el-input v-model="activeItem.raw_name" placeholder="按采购习惯填写，例如：老王家黑色钥匙壳" @input="scheduleSuggestions" /></el-form-item>
+            <el-form-item label="采购名称"><el-input v-model="activeItem.raw_name" placeholder="输入名称后匹配标准库存；找不到可快速创建" @input="scheduleSuggestions" /></el-form-item>
             <el-form-item label="规格备注"><el-input v-model="activeItem.raw_spec" placeholder="颜色、型号、包装等" /></el-form-item>
             <el-row :gutter="12">
-              <el-col :span="8"><el-form-item label="数量"><el-input-number v-model="activeItem.quantity" :min="1" :precision="0" /></el-form-item></el-col>
-              <el-col :span="8"><el-form-item label="货款"><el-input-number v-model="activeItem.amount" :min="0" :precision="2" /></el-form-item></el-col>
-              <el-col :span="8"><el-form-item label="运费"><el-input-number v-model="activeItem.shipping_amount" :min="0" :precision="2" /></el-form-item></el-col>
+              <el-col :span="8"><el-form-item label="数量"><el-input-number v-model="activeItem.quantity" class="free-purchase-number" :min="1" :precision="0" :controls="false" inputmode="numeric" aria-label="采购数量" /></el-form-item></el-col>
+              <el-col :span="8"><el-form-item label="货款"><el-input-number v-model="activeItem.amount" class="free-purchase-number" :min="0" :precision="2" :controls="false" inputmode="decimal" aria-label="采购货款" /></el-form-item></el-col>
+              <el-col :span="8"><el-form-item label="运费"><el-input-number v-model="activeItem.shipping_amount" class="free-purchase-number" :min="0" :precision="2" :controls="false" inputmode="decimal" aria-label="采购运费" /></el-form-item></el-col>
             </el-row>
             <el-form-item label="采购链接"><el-input v-model="activeItem.purchase_url" placeholder="拼多多、1688或其他采购链接" /></el-form-item>
           </el-form>
@@ -1610,7 +1625,7 @@ onMounted(async () => {
           <div v-if="quickInventoryResults.length" v-loading="quickInventoryLoading" class="quick-inventory-results">
             <button v-for="product in quickInventoryResults" :key="product.product_id" type="button" class="suggestion-card" @click="chooseQuickInventory(product)"><ProductImagePreview :src="product.image_url" size="small" /><div><strong>{{ product.product_name }}</strong><span>库存 ID：{{ product.product_code }}</span></div></button>
           </div>
-          <el-button type="primary" plain @click="openQuickInventoryCreate">＋ 快速创建库存</el-button>
+          <el-button type="primary" plain @click="openQuickInventoryCreate">＋ 未找到？按标准命名快速创建库存</el-button>
           <el-divider content-position="left">名称推荐</el-divider>
           <button v-for="suggestion in state.suggestions" :key="suggestion.product_id" type="button" class="suggestion-card" @click="chooseSuggestion(suggestion)">
             <ProductImagePreview :src="suggestion.image_url" size="small" />
@@ -1686,4 +1701,6 @@ onMounted(async () => {
 .bulk-order-toolbar{display:grid;grid-template-columns:150px 220px minmax(220px,1fr) auto auto;gap:10px;align-items:center;margin-top:12px}.bulk-receipts,.group-recommendations{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:9px;padding:8px 10px;border-radius:9px;background:#f7f9fc;font-size:12px}.bulk-receipts span{display:flex;align-items:center;gap:4px}.group-recommendations>span{color:var(--erp-text-secondary)}.remember-group{display:flex;align-items:center;gap:8px;min-width:360px}.remember-group .el-input{width:270px}:global(.bulk-add-dialog){max-width:1600px}.bulk-add-search-panel{padding:10px;border:1px solid var(--erp-border);border-radius:12px;background:#f8fafc}.bulk-add-search-actions,.bulk-add-pagination{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:10px}.bulk-add-search-actions span,.bulk-add-pagination span{margin-right:auto;color:var(--erp-text-secondary);font-size:12px}.bulk-add-results{display:grid;grid-template-columns:1fr 1fr;gap:10px;min-height:180px;max-height:470px;margin-top:14px;overflow:auto}.bulk-add-results>button{display:grid;grid-template-columns:52px minmax(0,1fr) auto;gap:11px;align-items:center;padding:10px;border:1px solid var(--erp-border);border-radius:10px;background:#fff;text-align:left;cursor:pointer}.bulk-add-results>button:hover{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9)}.bulk-add-results>button.is-added{border-color:var(--el-color-success-light-5);background:var(--el-color-success-light-9);cursor:default;opacity:.78}.bulk-add-results>button.is-added em{color:var(--el-color-success)}.bulk-add-results>button>div{display:grid;gap:4px}.bulk-add-results span,.bulk-add-results small{color:var(--erp-text-secondary)}.bulk-add-results em{color:var(--el-color-primary);font-style:normal}.bulk-add-results :deep(.erp-image-preview--portrait){width:52px;min-width:52px;height:68px;min-height:68px}
 @media(max-width:1200px){.bulk-order-toolbar{grid-template-columns:130px 180px minmax(180px,1fr) auto}.bulk-order-toolbar .el-upload{grid-column:1/-1}.bulk-add-results{grid-template-columns:1fr}}
 @media(max-width:1100px){.create-layout{grid-template-columns:190px 1fr}.suggestion-panel{grid-column:1/-1}.bind-suggestions{grid-template-columns:1fr}}
+.free-purchase-dialog .create-layout{grid-template-columns:250px minmax(520px,1fr) 360px;gap:18px}.free-purchase-number{width:100%;min-width:118px}:deep(.free-purchase-number .el-input__wrapper){min-width:118px}.free-purchase-dialog :deep(.el-form-item__content){min-width:0}
+@media(max-width:1100px){.free-purchase-dialog .create-layout{grid-template-columns:190px minmax(0,1fr)}.free-purchase-dialog .suggestion-panel{grid-column:1/-1}}
 </style>
