@@ -141,6 +141,24 @@ function requestNotes(row) {
   return uniqueRequestValues(row, "note");
 }
 
+function shipmentStatusText(row) {
+  const status = String(row?.procurement_logistics_status || "");
+  if (status === "signed") return "已签收·待取件";
+  if (status === "out_for_delivery") return "派送中";
+  if (status === "problem") return "物流异常";
+  if (status === "pending_config") return "待同步";
+  if (status === "in_transit") return "运输中";
+  return String(row?.procurement_logistics_status_text || "待同步");
+}
+
+function shipmentStatusType(row) {
+  const status = String(row?.procurement_logistics_status || "");
+  if (status === "signed") return "warning";
+  if (status === "problem") return "danger";
+  if (status === "out_for_delivery") return "success";
+  return "info";
+}
+
 function averageUnitCost(row) {
   const quantity = Number(row.total_quantity || 0);
   if (!quantity) return "0.00";
@@ -869,6 +887,19 @@ onMounted(async () => {
             </template>
           </el-table-column>
 
+          <el-table-column label="采购物流" min-width="300">
+            <template #default="{ row }">
+              <div v-if="row.procurement_tracking_number" class="procurement-shipment-cell">
+                <el-tag size="small" :type="shipmentStatusType(row)">{{ shipmentStatusText(row) }}</el-tag>
+                <span>运单：{{ row.procurement_tracking_number }}</span>
+                <span v-if="row.procurement_platform_order_no">采购单：{{ row.procurement_platform_order_no }}</span>
+                <span class="procurement-shipment-cell__trace">{{ row.procurement_latest_trace || row.procurement_logistics_status_text || "等待物流轨迹同步" }}</span>
+                <span>更新：{{ row.procurement_latest_trace_at || row.procurement_logistics_queried_at ? dateText(row.procurement_latest_trace_at || row.procurement_logistics_queried_at) : "未同步" }}</span>
+              </div>
+              <span v-else class="empty-text">未登记快递单号</span>
+            </template>
+          </el-table-column>
+
           <el-table-column label="备注信息" min-width="260">
             <template #default="{ row }">
               <div v-if="requestNotes(row).length" class="link-note-cell">
@@ -1039,6 +1070,18 @@ onMounted(async () => {
 
 .procurement-structured-search {
   flex: none;
+}
+
+.procurement-shipment-cell {
+  display: grid;
+  gap: 4px;
+  color: var(--erp-text-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.procurement-shipment-cell__trace {
+  color: var(--erp-text-primary);
 }
 
 .procurement-structured-search:deep(.inventory-structured-search.is-compact) {

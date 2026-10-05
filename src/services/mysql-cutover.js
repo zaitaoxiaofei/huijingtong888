@@ -13878,6 +13878,7 @@ export async function inventoryCurrentMysql() {
 export async function inboundRecordsMysql(query = {}) {
   ensureMysqlCutoverEnabled();
   await ensureInboundRecordTimestampSchemaMysql();
+  await ensurePurchaseOrderShipmentSchemaMysql();
   const paged = String(query.paged || "") === "1";
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
@@ -13886,6 +13887,10 @@ export async function inboundRecordsMysql(query = {}) {
     SELECT ir.*, p.code AS product_code, p.name AS product_name, p.image_url AS product_image_url,
       p.inventory_number, p.inventory_category,
       pe.name AS person_name, approver.name AS approved_by_person_name, po.order_no AS purchase_order_no, po.purchased_at,
+      shipment.platform_order_no AS procurement_platform_order_no, shipment.tracking_number AS procurement_tracking_number,
+      shipment.carrier_name AS procurement_carrier_name, shipment.logistics_status AS procurement_logistics_status,
+      shipment.logistics_status_text AS procurement_logistics_status_text, shipment.latest_trace AS procurement_latest_trace,
+      shipment.latest_trace_at AS procurement_latest_trace_at, shipment.queried_at AS procurement_logistics_queried_at,
       COALESCE(direct_request.source_type, order_request.source_type, p.source_platform, 'other') AS source_type,
       COALESCE(direct_supplier.name, order_request.supplier_names, product_supplier.name, '') AS supplier_name,
       COALESCE(skus.mapped_skus, '') AS mapped_skus
@@ -13894,6 +13899,14 @@ export async function inboundRecordsMysql(query = {}) {
     LEFT JOIN people pe ON pe.id = ir.person_id
     LEFT JOIN people approver ON approver.id = ir.approved_by_person_id
     LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
+    LEFT JOIN purchase_order_shipments shipment ON shipment.id = (
+      SELECT latest_shipment.id
+      FROM purchase_order_shipments latest_shipment
+      WHERE latest_shipment.purchase_order_id = ir.purchase_order_id
+      ORDER BY COALESCE(latest_shipment.latest_trace_at, latest_shipment.queried_at, latest_shipment.updated_at, latest_shipment.created_at) DESC,
+        latest_shipment.id DESC
+      LIMIT 1
+    )
     LEFT JOIN procurement_requests direct_request ON direct_request.id = ir.procurement_request_id
     LEFT JOIN suppliers direct_supplier ON direct_supplier.id = direct_request.supplier_id
     LEFT JOIN suppliers product_supplier ON product_supplier.id = p.supplier_id
