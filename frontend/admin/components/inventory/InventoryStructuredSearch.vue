@@ -5,7 +5,8 @@ import { loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../u
 
 const props = defineProps({
   modelValue: { type: Object, required: true },
-  compact: { type: Boolean, default: false }
+  compact: { type: Boolean, default: false },
+  showKeyword: { type: Boolean, default: true }
 });
 const emit = defineEmits(["update:modelValue", "change"]);
 const optionTypes = ["category", "brand", "vehicle_model", "accessory", "color", "material", "process"];
@@ -183,7 +184,7 @@ watch(
           <el-option v-for="item in options.process" :key="item.value" :label="optionLabel(item)" :value="item.value" />
         </el-select>
       </el-form-item>
-      <el-form-item label="产品名称">
+      <el-form-item v-if="showKeyword" label="产品名称">
         <el-input :model-value="modelValue.productName" clearable placeholder="补充名称关键词" @update:model-value="update('productName', $event)" />
       </el-form-item>
     </div>

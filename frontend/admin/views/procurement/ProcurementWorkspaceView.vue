@@ -15,6 +15,7 @@ import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductCreateEditDialog from "../../components/inventory/ProductCreateEditDialog.vue";
 import InventoryStructuredSearch from "../../components/inventory/InventoryStructuredSearch.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import { buildShortInventoryName } from "../../utils/inventory-similarity.js";
 
 const authStore = useAuthStore();
 const loading = ref(false);
@@ -210,7 +211,10 @@ const purchaseGroups = computed(() => {
 });
 
 function defaultItem() {
-  return { raw_name: "", raw_spec: "", quantity: 1, amount: 0, shipping_amount: 0, purchase_url: "", image_url: "", product_id: null, product_name: "" };
+  return {
+    raw_name: "", raw_spec: "", quantity: 1, amount: 0, shipping_amount: 0, purchase_url: "", image_url: "", product_id: null, product_name: "",
+    structured_naming: { inventoryCategory: "", vehicleBrand: "", vehicleModel: [], accessoryName: "普通款", color: "", material: [], process: "", quantity: 1, stockUnit: "个" }
+  };
 }
 
 function defaultCreateForm() {
@@ -1083,6 +1087,39 @@ function addItem() {
   state.suggestions = [];
 }
 
+function itemStructuredName(item = {}) {
+  const naming = item.structured_naming || {};
+  return buildShortInventoryName({
+    coreName: naming.inventoryCategory,
+    vehicleBrand: naming.vehicleBrand,
+    vehicleModels: naming.vehicleModel,
+    accessory: naming.accessoryName,
+    colors: naming.color ? [naming.color] : [],
+    materials: naming.material,
+    process: naming.process,
+    quantity: naming.quantity,
+    stockUnit: naming.stockUnit
+  });
+}
+
+const activeItemNaming = computed({
+  get() { return activeItem.value?.structured_naming || defaultItem().structured_naming; },
+  set(value) {
+    if (!activeItem.value) return;
+    activeItem.value.structured_naming = { ...defaultItem().structured_naming, ...value };
+    activeItem.value.raw_name = itemStructuredName(activeItem.value);
+    scheduleSuggestions();
+  }
+});
+
+const activeItemStandardName = computed(() => itemStructuredName(activeItem.value));
+
+function syncActiveStructuredName() {
+  if (!activeItem.value) return;
+  activeItem.value.raw_name = itemStructuredName(activeItem.value);
+  scheduleSuggestions();
+}
+
 function removeItem(index) {
   if (createForm.items.length === 1) return;
   createForm.items.splice(index, 1);
@@ -1167,7 +1204,9 @@ function chooseQuickInventory(product) {
 }
 
 function openQuickInventoryCreate() {
-  if (!String(activeItem.value?.raw_name || "").trim()) return ElMessage.warning("请先填写采购名称，系统会带入标准库存建品表单");
+  const naming = activeItem.value?.structured_naming || {};
+  if (!naming.inventoryCategory || !naming.accessoryName) return ElMessage.warning("请先完成核心品名和款式，系统会按标准库存规则生成名称");
+  activeItem.value.raw_name = itemStructuredName(activeItem.value);
   quickInventoryCreateVisible.value = true;
 }
 
@@ -1198,6 +1237,18 @@ const quickInventoryCreateValue = computed(() => {
   return {
     name: String(item.raw_name || "").trim(),
     image_url: String(item.image_url || "").trim(),
+    stock_unit: item.structured_naming?.stockUnit || "个",
+    structured_naming: {
+      category: item.structured_naming?.inventoryCategory || "",
+      vehicle_brand: item.structured_naming?.vehicleBrand || "",
+      vehicle_models: item.structured_naming?.vehicleModel || [],
+      accessory: item.structured_naming?.accessoryName || "普通款",
+      colors: item.structured_naming?.color ? [item.structured_naming.color] : [],
+      materials: item.structured_naming?.material || [],
+      process: item.structured_naming?.process || "",
+      quantity: Number(item.structured_naming?.quantity || 1),
+      stock_unit: item.structured_naming?.stockUnit || "个"
+    },
     purchase_quantity: quantity,
     purchase_cost: Number(item.amount || 0) / quantity,
     domestic_shipping: Number(item.shipping_amount || 0),
@@ -1627,8 +1678,13 @@ onMounted(async () => {
         <div v-if="activeItem" class="item-editor">
           <div class="section-head"><strong>填写采购商品</strong><el-button v-if="createForm.items.length > 1" link type="danger" @click="removeItem(activeItemIndex)">删除本条</el-button></div>
           <el-form label-width="92px">
-            <el-form-item label="采购名称"><el-input v-model="activeItem.raw_name" placeholder="输入名称后匹配标准库存；找不到可快速创建" @input="scheduleSuggestions" /></el-form-item>
-            <el-form-item label="规格备注"><el-input v-model="activeItem.raw_spec" placeholder="颜色、型号、包装等" /></el-form-item>
+            <div class="free-purchase-name-preview"><span>标准库存名称</span><strong>{{ activeItemStandardName || '请按下方规则选择核心品名、规格与包装' }}</strong></div>
+            <InventoryStructuredSearch compact :show-keyword="false" v-model="activeItemNaming" class="free-purchase-structured-name" />
+            <el-row :gutter="12" class="free-purchase-package-fields">
+              <el-col :span="12"><el-form-item label="包装数量"><el-input-number v-model="activeItemNaming.quantity" :min="1" :precision="0" :controls="false" inputmode="numeric" @change="syncActiveStructuredName" /></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="库存单位"><el-select v-model="activeItemNaming.stockUnit" @change="syncActiveStructuredName"><el-option v-for="unit in ['个', '件', '套', '对', '双', '条', '米', '卷', '包', '片', '张', '盒']" :key="unit" :label="unit" :value="unit" /></el-select></el-form-item></el-col>
+            </el-row>
+            <el-form-item label="采购备注"><el-input v-model="activeItem.raw_spec" placeholder="选填：供应商原始标题、颜色或包装说明" /></el-form-item>
             <el-row :gutter="12">
               <el-col :span="8"><el-form-item label="数量"><el-input-number v-model="activeItem.quantity" class="free-purchase-number" :min="1" :precision="0" :controls="false" inputmode="numeric" aria-label="采购数量" /></el-form-item></el-col>
               <el-col :span="8"><el-form-item label="货款"><el-input-number v-model="activeItem.amount" class="free-purchase-number" :min="0" :precision="2" :controls="false" inputmode="decimal" aria-label="采购货款" /></el-form-item></el-col>
@@ -1713,6 +1769,7 @@ onMounted(async () => {
 <style scoped>
 .product-cell,.section-head,.item-list-head,.dialog-summary{display:flex;align-items:center;justify-content:space-between;gap:12px}.product-cell{justify-content:flex-start}.muted-text,.suggestion-card span,.item-card span,.section-head p{color:var(--erp-text-secondary);font-size:12px}.binding-name{margin-top:6px}.create-layout{display:grid;grid-template-columns:220px minmax(0,1fr) 310px;gap:16px;min-height:430px}.item-list,.item-editor,.suggestion-panel{padding:14px;border:1px solid var(--erp-border);border-radius:16px;background:#fff}.item-list,.suggestion-panel{display:flex;flex-direction:column;gap:10px}.item-card,.suggestion-card{border:1px solid var(--erp-border);border-radius:12px;background:#fff;text-align:left;cursor:pointer}.item-card{display:flex;justify-content:space-between;align-items:center;padding:12px}.item-card div,.suggestion-card div{display:grid;gap:4px}.item-card.active{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9)}.suggestion-card{display:grid;grid-template-columns:48px minmax(0,1fr);gap:10px;padding:10px}.suggestion-card:hover{border-color:var(--el-color-primary)}.selected-binding{margin:8px 0 12px;padding:10px 12px;border-radius:10px;background:var(--el-color-success-light-9);color:var(--el-color-success-dark-2)}.quick-inventory-search{display:grid;gap:8px}.quick-inventory-results{display:grid;gap:8px;max-height:230px;overflow:auto}.section-head p{margin:3px 0 0;font-weight:400}.create-note{margin-top:16px}.bind-suggestions{display:grid;grid-template-columns:1fr 1fr;gap:10px;max-height:360px;overflow:auto}.dialog-summary{width:100%}@media(max-width:1100px){.create-layout{grid-template-columns:190px 1fr}.suggestion-panel{grid-column:1/-1}.bind-suggestions{grid-template-columns:1fr}}
 .quick-inventory-image-upload{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.quick-inventory-image-upload :deep(.erp-image-preview){width:42px;height:42px}.quick-inventory-image-upload span{color:var(--erp-text-secondary);font-size:12px}
+.free-purchase-name-preview{display:grid;gap:4px;margin:0 0 12px;padding:11px 13px;border:1px solid var(--el-color-primary-light-5);border-radius:10px;background:var(--el-color-primary-light-9)}.free-purchase-name-preview span{color:var(--erp-text-secondary);font-size:12px}.free-purchase-name-preview strong{color:var(--erp-text-primary);line-height:1.5}.free-purchase-structured-name{margin-bottom:12px}.free-purchase-package-fields{margin-bottom:2px}.free-purchase-package-fields :deep(.el-select),.free-purchase-package-fields :deep(.el-input-number){width:100%}
 .receipt-upload-panel{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;margin-top:16px;padding:16px;border:1px dashed var(--el-color-primary-light-5);border-radius:14px;background:var(--el-color-primary-light-9)}.receipt-upload-panel p{margin:4px 0 0;color:var(--erp-text-secondary);font-size:12px}.receipt-list{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:10px}.receipt-list>div{display:grid;grid-template-columns:56px minmax(80px,160px) auto;align-items:center;gap:8px;padding:8px;border-radius:10px;background:#fff}.receipt-list .el-image{width:56px;height:56px;border-radius:8px}
 .purchase-link-actions{display:flex;align-items:center;flex-wrap:wrap;gap:2px 8px}.link-editor-product{display:grid;grid-template-columns:96px minmax(0,1fr);gap:18px;align-items:center;padding:16px;border-radius:14px;background:var(--erp-bg-page)}.link-editor-product strong{font-size:17px}.link-editor-product p{margin:7px 0 12px;color:var(--erp-text-secondary);line-height:1.65}.link-editor-form{margin-top:18px}.compact-product :deep(.erp-image-preview--portrait){width:72px;min-width:72px;max-width:72px;height:90px;min-height:90px;max-height:90px;flex-basis:72px}.compact-product{min-height:98px}
 .demand-table{min-height:420px}.demand-product-card{display:grid;grid-template-columns:64px minmax(0,1fr);gap:12px;align-items:center;min-height:88px}.demand-product-card>div{display:grid;gap:4px}.row-actions{display:flex;gap:10px}.demand-reason{margin:8px 0 4px;line-height:1.55}.metric-stack,.sales-stack{display:grid;gap:7px}.metric-stack span,.sales-stack span{display:flex;align-items:center;justify-content:space-between;gap:18px}.metric-stack em,.sales-stack em{color:var(--erp-text-secondary);font-size:12px;font-style:normal}.metric-stack strong,.sales-stack strong{color:var(--erp-text-primary);font-size:14px}.sales-stack small{padding-top:5px;border-top:1px dashed var(--erp-border);color:var(--erp-text-secondary)}.source-order-list{display:grid;gap:8px;max-height:510px;overflow:auto}.source-order-item{display:grid;grid-template-columns:64px minmax(0,1fr);gap:12px;padding:10px 12px;border:1px solid var(--erp-border);border-radius:10px}.source-order-item>div{display:grid;align-content:center;gap:3px}.source-order-item span{font-size:12px;color:var(--erp-text-secondary)}.source-order-list .el-pagination{justify-content:flex-end;padding-top:4px}

@@ -47,3 +47,13 @@ test("free purchase uses visible direct number inputs and seeds standard invento
   assert.match(page, /image_url: String\(item\.image_url \|\| ""\)\.trim\(\)/);
   assert.match(page, /activeItem\.value\.raw_name = product\.product_name/);
 });
+
+test("free purchase derives its inventory name from the standard naming fields", () => {
+  assert.match(page, /InventoryStructuredSearch compact :show-keyword="false" v-model="activeItemNaming"/);
+  assert.match(page, /标准库存名称/);
+  assert.match(page, /buildShortInventoryName/);
+  assert.match(page, /包装数量/);
+  assert.match(page, /库存单位/);
+  assert.match(page, /请先完成核心品名和款式/);
+  assert.match(page, /structured_naming: \{/);
+});
