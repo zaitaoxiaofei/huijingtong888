@@ -51,12 +51,13 @@ test("range export applies combined workspace filters with EXISTS and remains un
   const filters = {
     dateFrom: "2026-09-01", dateTo: "2026-09-30", query: "钥匙壳",
     demandType: "real_order", bindingStatus: "bound", personId: "7", supplierId: "9", sourceType: "1688",
-    inventoryCategory: "钥匙壳", vehicleBrand: "TENET", vehicleModel: "T4,T7",
+    inventoryCategory: "钥匙壳", productName: "定制钥匙壳", vehicleBrand: "TENET", vehicleModel: "T4,T7",
     accessoryName: "普通款", color: "黑色", material: "ABS,TPU", process: "碳纤纹"
   };
   const result = await procurementDailyReport(filters, async (sql, params) => {
     assert.deepEqual(params.slice(0, 2), ["2026-08-31 16:00:00", "2026-09-30 16:00:00"]);
     assert.match(sql, /p\.inventory_category = \?/);
+    assert.match(sql, /p\.name LIKE \?/);
     assert.match(sql, /p\.vehicle_brand/);
     assert.match(sql, /filtered_request\.person_id = \?/);
     assert.match(sql, /filtered_request\.supplier_id/);
@@ -68,6 +69,7 @@ test("range export applies combined workspace filters with EXISTS and remains un
     assert.ok(params.includes("%/T7/%"));
     assert.ok(params.includes("%/ABS/%"));
     assert.ok(params.includes("%/TPU/%"));
+    assert.ok(params.includes("%定制钥匙壳%"));
     assert.ok(params.includes(7));
     assert.ok(params.includes(9));
     return rows;
