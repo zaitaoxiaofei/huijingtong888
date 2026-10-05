@@ -46,7 +46,8 @@ test("structured search reuses controlled naming options and the AI vehicle cata
   assert.match(component, /options\.brand/);
   assert.match(component, /function normalizeVehicleBrandValue/);
   assert.match(component, /replace\(\/\\\|\/g, " "\)\.replace\(\/\\s\+\/g, " "\)\.trim\(\)/);
-  assert.match(component, /const value = normalizeVehicleBrandValue\(item\.value\)/);
+  assert.match(component, /function optionValue\(item\)/);
+  assert.match(component, /const value = normalizeVehicleBrandValue\(optionValue\(item\)\)/);
   assert.match(component, /options\.vehicle_model/);
   assert.match(component, /loadOption\("vehicle_model"\)/);
   assert.match(component, /Promise\.allSettled/);
@@ -62,9 +63,9 @@ test("structured search reuses controlled naming options and the AI vehicle cata
 });
 
 test("structured vehicle brand normalization removes legacy separators before exact matching", () => {
-  const normalizedQueryPattern = /String\(query\.vehicleBrand \|\| query\.vehicle_brand \|\| ""\)\.replace\(\/\\\|\/g, " "\)\.replace\(\/\\s\+\/g, " "\)\.trim\(\)/g;
+  const normalizedQueryPattern = /normalizeVehicleBrand\(query\.vehicleBrand \|\| query\.vehicle_brand, \{ strict: false \}\)/g;
   assert.equal(service.match(normalizedQueryPattern)?.length, 3);
-  assert.match(namingService, /clean\(query\.brand, 255\)\.replace\(\/\\\|\/g, " "\)\.replace\(\/\\s\+\/g, " "\)\.trim\(\)/);
+  assert.match(namingService, /normalizeVehicleBrand\(query\.brand, \{ strict: false \}\)/);
 });
 
 test("naming option API expands stored material combinations into selectable specification terms", () => {
