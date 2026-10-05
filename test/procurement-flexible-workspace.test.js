@@ -35,7 +35,7 @@ test("procurement workspace keeps owner, free names, multi-item creation and lat
 });
 
 test("free purchase uses visible direct number inputs and seeds standard inventory creation", () => {
-  assert.match(page, /width="min\(1480px, calc\(100vw - 40px\)\)"/);
+  assert.match(page, /width="min\(1920px, calc\(100vw - 24px\)\)"/);
   assert.match(page, /class="free-purchase-number"[\s\S]*?:controls="false"/);
   assert.match(page, /inputmode="numeric"/);
   assert.match(page, /inputmode="decimal"/);
@@ -49,11 +49,10 @@ test("free purchase uses visible direct number inputs and seeds standard invento
 });
 
 test("free purchase derives its inventory name from the standard naming fields", () => {
-  assert.match(page, /InventoryStructuredSearch compact :show-keyword="false" v-model="activeItemNaming"/);
+  assert.match(page, /InventoryStructuredSearch layout="inventory-form" :show-keyword="false" :show-measurement="true" v-model="activeItemNaming"/);
   assert.match(page, /标准库存名称/);
   assert.match(page, /buildShortInventoryName/);
-  assert.match(page, /包装数量/);
-  assert.match(page, /库存单位/);
+  assert.match(page, /show-measurement="true"/);
   assert.match(page, /请先完成核心品名和款式/);
   assert.match(page, /structured_naming: \{/);
 });

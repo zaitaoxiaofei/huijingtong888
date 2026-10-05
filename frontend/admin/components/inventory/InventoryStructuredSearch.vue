@@ -6,7 +6,9 @@ import { loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../u
 const props = defineProps({
   modelValue: { type: Object, required: true },
   compact: { type: Boolean, default: false },
-  showKeyword: { type: Boolean, default: true }
+  showKeyword: { type: Boolean, default: true },
+  layout: { type: String, default: "search" },
+  showMeasurement: { type: Boolean, default: false }
 });
 const emit = defineEmits(["update:modelValue", "change"]);
 const optionTypes = ["category", "brand", "vehicle_model", "accessory", "color", "material", "process"];
@@ -143,7 +145,7 @@ watch(
 </script>
 
 <template>
-  <div class="inventory-structured-search" :class="{ 'is-compact': compact }">
+  <div class="inventory-structured-search" :class="{ 'is-compact': compact, 'is-inventory-form': layout === 'inventory-form' }">
     <div class="search-group search-group--identity">
       <div class="search-group__title"><strong>产品身份</strong><span>汽车品牌和车型不选表示不限制搜索条件</span></div>
       <el-form-item label="核心品名">
@@ -188,6 +190,17 @@ watch(
         <el-input :model-value="modelValue.productName" clearable placeholder="补充名称关键词" @update:model-value="update('productName', $event)" />
       </el-form-item>
     </div>
+    <div v-if="showMeasurement" class="search-group search-group--measure">
+      <div class="search-group__title"><strong>库存计量与履约</strong><span>数量和单位用于标准库存名称及库存计数</span></div>
+      <el-form-item label="包装数量">
+        <el-input-number :model-value="modelValue.quantity" :min="1" :precision="0" :controls="false" inputmode="numeric" @update:model-value="update('quantity', $event)" />
+      </el-form-item>
+      <el-form-item label="库存单位">
+        <el-select :model-value="modelValue.stockUnit" @update:model-value="update('stockUnit', $event)">
+          <el-option v-for="unit in ['个', '件', '套', '对', '双', '条', '米', '卷', '包', '片', '张', '盒']" :key="unit" :label="unit" :value="unit" />
+        </el-select>
+      </el-form-item>
+    </div>
   </div>
 </template>
 
@@ -213,6 +226,7 @@ watch(
   box-shadow: 0 1px 2px rgb(31 45 61 / 4%);
 }
 .search-group--spec { grid-template-columns: repeat(5, minmax(120px, 1fr)); }
+.search-group--measure { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
 .search-group__title {
   grid-column: 1 / -1;
   display: flex;
@@ -245,6 +259,7 @@ watch(
 }
 .inventory-structured-search :deep(.el-form-item__content) { display: block; width: 100%; line-height: normal; }
 .inventory-structured-search :deep(.el-select), .inventory-structured-search :deep(.el-input) { width: 100%; }
+.inventory-structured-search :deep(.el-input-number) { width: 100%; }
 .inventory-structured-search :deep(.el-select__wrapper),
 .inventory-structured-search :deep(.el-input__wrapper) { min-height: 34px; border-radius: 7px; }
 .inventory-structured-search.is-compact {
@@ -255,6 +270,10 @@ watch(
   padding: 8px 10px;
   overflow-x: auto;
 }
+.inventory-structured-search.is-inventory-form { grid-template-columns: 1fr; padding: 0; border: 0; background: transparent; }
+.inventory-structured-search.is-inventory-form .search-group { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 12px 14px; }
+.inventory-structured-search.is-inventory-form .search-group--spec { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.inventory-structured-search.is-inventory-form .search-group--measure { grid-template-columns: repeat(2, minmax(180px, 1fr)); }
 .inventory-structured-search.is-compact .search-group { display: contents; }
 .inventory-structured-search.is-compact .search-group__title { display: none; }
 .inventory-structured-search.is-compact :deep(.el-form-item__label) { margin-bottom: 3px; line-height: 16px; }
