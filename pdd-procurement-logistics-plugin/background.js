@@ -1,5 +1,4 @@
-async function syncCurrentTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+async function syncDetailTab(tab) {
   if (!tab?.id || !/^https:\/\/mobile\.pinduoduo\.com\/goods_express\.html/.test(tab.url || "")) {
     throw new Error("请先打开拼多多采购订单的物流详情页");
   }
@@ -11,6 +10,11 @@ async function syncCurrentTab() {
   const result = await chrome.tabs.sendMessage(erpTab.id, { type: "PDD_PROCUREMENT_SYNC_TO_ERP", payload: response.payload });
   if (!result?.ok) throw new Error(result?.error || "ERP 同步失败");
   return result.body;
+}
+
+async function syncCurrentTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return await syncDetailTab(tab);
 }
 
 async function readLogisticsDetail(url) {
@@ -50,7 +54,7 @@ async function syncOrderList(tabId) {
 chrome.action.onClicked.addListener(async () => {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (/goods_express\.html/.test(tab?.url || "")) await syncCurrentTab();
+    if (/goods_express\.html/.test(tab?.url || "")) await syncDetailTab(tab);
     else await syncOrderList(tab?.id);
     await chrome.action.setBadgeText({ text: "✓" });
     await chrome.action.setBadgeBackgroundColor({ color: "#16a34a" });
@@ -59,4 +63,23 @@ chrome.action.onClicked.addListener(async () => {
     await chrome.action.setBadgeBackgroundColor({ color: "#dc2626" });
     console.error("[pdd-procurement-logistics]", error);
   }
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type !== "PDD_PROCUREMENT_START_SYNC" || !sender.tab?.id) return;
+  const tab = sender.tab;
+  const task = /goods_express\.html/.test(tab.url || "") ? syncDetailTab(tab) : syncOrderList(tab.id);
+  task.then(
+    async (body) => {
+      await chrome.action.setBadgeText({ text: "✓", tabId: tab.id });
+      await chrome.action.setBadgeBackgroundColor({ color: "#16a34a", tabId: tab.id });
+      sendResponse({ ok: true, body });
+    },
+    async (error) => {
+      await chrome.action.setBadgeText({ text: "!", tabId: tab.id });
+      await chrome.action.setBadgeBackgroundColor({ color: "#dc2626", tabId: tab.id });
+      sendResponse({ ok: false, error: error.message || "同步失败" });
+    }
+  );
+  return true;
 });

@@ -36,6 +36,43 @@
     return [...links.entries()].map(([order_sn, url]) => ({ order_sn, url }));
   }
 
+  function installSyncButton() {
+    if (document.getElementById("pdd-procurement-logistics-sync")) return;
+    const button = document.createElement("button");
+    button.id = "pdd-procurement-logistics-sync";
+    button.type = "button";
+    button.textContent = "同步采购物流";
+    Object.assign(button.style, {
+      position: "fixed", right: "20px", bottom: "24px", zIndex: "2147483647", border: "0",
+      borderRadius: "22px", padding: "12px 16px", background: "#e02e24", color: "#fff",
+      fontSize: "14px", fontWeight: "600", boxShadow: "0 4px 14px rgba(224,46,36,.32)", cursor: "pointer"
+    });
+    button.addEventListener("click", () => {
+      button.disabled = true;
+      button.textContent = "正在同步…";
+      button.style.opacity = "0.8";
+      chrome.runtime.sendMessage({ type: "PDD_PROCUREMENT_START_SYNC" }, (response) => {
+        const error = chrome.runtime.lastError?.message || response?.error;
+        if (error) {
+          button.textContent = "同步失败，重试";
+          button.style.background = "#b91c1c";
+        } else if (response?.body?.unmatched) {
+          button.textContent = `已同步 ${response.body.synced} 单，${response.body.unmatched} 单未匹配`;
+          button.style.background = "#b45309";
+        } else {
+          button.textContent = response?.body?.synced ? `已同步 ${response.body.synced} 单` : "同步成功";
+          button.style.background = "#16a34a";
+        }
+        button.disabled = false;
+        button.style.opacity = "1";
+        setTimeout(() => { button.textContent = "同步采购物流"; button.style.background = "#e02e24"; }, 5000);
+      });
+    });
+    document.documentElement.appendChild(button);
+  }
+
+  installSyncButton();
+
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "PDD_PROCUREMENT_COLLECT_ORDER_LINKS") {
       collectVisibleLogisticsLinks().then((links) => sendResponse({ ok: true, links }), (error) => sendResponse({ ok: false, error: error.message }));
