@@ -4,7 +4,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { useRoute } from "vue-router";
 const route = useRoute();
 import { apiClient } from "../../utils/api.js";
-import { uploadTeamAttachment, withImageToken } from "../../api/tools/imageCropper.js";
+import { uploadListingMedia, uploadTeamAttachment, withImageToken } from "../../api/tools/imageCropper.js";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { useAuthStore } from "../../stores/auth.js";
 import ErpFilterBar from "../../components/ErpFilterBar.vue";
@@ -40,6 +40,7 @@ const inventorySearch = ref("");
 const quickInventorySearch = reactive({ inventoryId: "", productName: "" });
 const quickInventoryResults = ref([]);
 const quickInventoryLoading = ref(false);
+const quickInventoryImageUploading = ref(false);
 const confirmingGroupKey = ref("");
 const uploadingReceipt = ref(false);
 const imageSearchingId = ref(0);
@@ -209,7 +210,7 @@ const purchaseGroups = computed(() => {
 });
 
 function defaultItem() {
-  return { raw_name: "", raw_spec: "", quantity: 1, amount: 0, shipping_amount: 0, purchase_url: "", product_id: null, product_name: "" };
+  return { raw_name: "", raw_spec: "", quantity: 1, amount: 0, shipping_amount: 0, purchase_url: "", image_url: "", product_id: null, product_name: "" };
 }
 
 function defaultCreateForm() {
@@ -1170,11 +1171,33 @@ function openQuickInventoryCreate() {
   quickInventoryCreateVisible.value = true;
 }
 
+async function uploadQuickInventoryImage(uploadFile) {
+  const file = uploadFile?.raw || uploadFile;
+  if (!file || !activeItem.value) return false;
+  quickInventoryImageUploading.value = true;
+  try {
+    const result = await uploadListingMedia(file, {
+      source_module: "procurement_free_purchase",
+      role: "inventory_product_image"
+    });
+    const imageUrl = result.publishUrl || result.url || result.previewUrl || "";
+    if (!imageUrl) throw new Error("图片上传成功，但未返回可保存地址");
+    activeItem.value.image_url = imageUrl;
+    ElMessage.success("主图已带入待创建库存");
+  } catch (error) {
+    ElMessage.error(error.message || "主图上传失败");
+  } finally {
+    quickInventoryImageUploading.value = false;
+  }
+  return false;
+}
+
 const quickInventoryCreateValue = computed(() => {
   const item = activeItem.value || {};
   const quantity = Math.max(1, Number(item.quantity || 1));
   return {
     name: String(item.raw_name || "").trim(),
+    image_url: String(item.image_url || "").trim(),
     purchase_quantity: quantity,
     purchase_cost: Number(item.amount || 0) / quantity,
     domestic_shipping: Number(item.shipping_amount || 0),
@@ -1612,6 +1635,16 @@ onMounted(async () => {
               <el-col :span="8"><el-form-item label="运费"><el-input-number v-model="activeItem.shipping_amount" class="free-purchase-number" :min="0" :precision="2" :controls="false" inputmode="decimal" aria-label="采购运费" /></el-form-item></el-col>
             </el-row>
             <el-form-item label="采购链接"><el-input v-model="activeItem.purchase_url" placeholder="拼多多、1688或其他采购链接" /></el-form-item>
+            <el-form-item label="库存主图">
+              <div class="quick-inventory-image-upload">
+                <ProductImagePreview :src="activeItem.image_url" size="small" />
+                <el-upload :show-file-list="false" :auto-upload="false" accept="image/*" :on-change="uploadQuickInventoryImage">
+                  <el-button :loading="quickInventoryImageUploading">上传主图</el-button>
+                </el-upload>
+                <el-button v-if="activeItem.image_url" link type="danger" @click="activeItem.image_url = ''">清除</el-button>
+                <span>创建标准库存时会自动带入此图片</span>
+              </div>
+            </el-form-item>
           </el-form>
         </div>
 
@@ -1625,7 +1658,7 @@ onMounted(async () => {
           <div v-if="quickInventoryResults.length" v-loading="quickInventoryLoading" class="quick-inventory-results">
             <button v-for="product in quickInventoryResults" :key="product.product_id" type="button" class="suggestion-card" @click="chooseQuickInventory(product)"><ProductImagePreview :src="product.image_url" size="small" /><div><strong>{{ product.product_name }}</strong><span>库存 ID：{{ product.product_code }}</span></div></button>
           </div>
-          <el-button type="primary" plain @click="openQuickInventoryCreate">＋ 未找到？按标准命名快速创建库存</el-button>
+          <el-button type="primary" plain @click="openQuickInventoryCreate">＋ 未找到？创建标准库存并绑定</el-button>
           <el-divider content-position="left">名称推荐</el-divider>
           <button v-for="suggestion in state.suggestions" :key="suggestion.product_id" type="button" class="suggestion-card" @click="chooseSuggestion(suggestion)">
             <ProductImagePreview :src="suggestion.image_url" size="small" />
@@ -1679,6 +1712,7 @@ onMounted(async () => {
 
 <style scoped>
 .product-cell,.section-head,.item-list-head,.dialog-summary{display:flex;align-items:center;justify-content:space-between;gap:12px}.product-cell{justify-content:flex-start}.muted-text,.suggestion-card span,.item-card span,.section-head p{color:var(--erp-text-secondary);font-size:12px}.binding-name{margin-top:6px}.create-layout{display:grid;grid-template-columns:220px minmax(0,1fr) 310px;gap:16px;min-height:430px}.item-list,.item-editor,.suggestion-panel{padding:14px;border:1px solid var(--erp-border);border-radius:16px;background:#fff}.item-list,.suggestion-panel{display:flex;flex-direction:column;gap:10px}.item-card,.suggestion-card{border:1px solid var(--erp-border);border-radius:12px;background:#fff;text-align:left;cursor:pointer}.item-card{display:flex;justify-content:space-between;align-items:center;padding:12px}.item-card div,.suggestion-card div{display:grid;gap:4px}.item-card.active{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9)}.suggestion-card{display:grid;grid-template-columns:48px minmax(0,1fr);gap:10px;padding:10px}.suggestion-card:hover{border-color:var(--el-color-primary)}.selected-binding{margin:8px 0 12px;padding:10px 12px;border-radius:10px;background:var(--el-color-success-light-9);color:var(--el-color-success-dark-2)}.quick-inventory-search{display:grid;gap:8px}.quick-inventory-results{display:grid;gap:8px;max-height:230px;overflow:auto}.section-head p{margin:3px 0 0;font-weight:400}.create-note{margin-top:16px}.bind-suggestions{display:grid;grid-template-columns:1fr 1fr;gap:10px;max-height:360px;overflow:auto}.dialog-summary{width:100%}@media(max-width:1100px){.create-layout{grid-template-columns:190px 1fr}.suggestion-panel{grid-column:1/-1}.bind-suggestions{grid-template-columns:1fr}}
+.quick-inventory-image-upload{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.quick-inventory-image-upload :deep(.erp-image-preview){width:42px;height:42px}.quick-inventory-image-upload span{color:var(--erp-text-secondary);font-size:12px}
 .receipt-upload-panel{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;margin-top:16px;padding:16px;border:1px dashed var(--el-color-primary-light-5);border-radius:14px;background:var(--el-color-primary-light-9)}.receipt-upload-panel p{margin:4px 0 0;color:var(--erp-text-secondary);font-size:12px}.receipt-list{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:10px}.receipt-list>div{display:grid;grid-template-columns:56px minmax(80px,160px) auto;align-items:center;gap:8px;padding:8px;border-radius:10px;background:#fff}.receipt-list .el-image{width:56px;height:56px;border-radius:8px}
 .purchase-link-actions{display:flex;align-items:center;flex-wrap:wrap;gap:2px 8px}.link-editor-product{display:grid;grid-template-columns:96px minmax(0,1fr);gap:18px;align-items:center;padding:16px;border-radius:14px;background:var(--erp-bg-page)}.link-editor-product strong{font-size:17px}.link-editor-product p{margin:7px 0 12px;color:var(--erp-text-secondary);line-height:1.65}.link-editor-form{margin-top:18px}.compact-product :deep(.erp-image-preview--portrait){width:72px;min-width:72px;max-width:72px;height:90px;min-height:90px;max-height:90px;flex-basis:72px}.compact-product{min-height:98px}
 .demand-table{min-height:420px}.demand-product-card{display:grid;grid-template-columns:64px minmax(0,1fr);gap:12px;align-items:center;min-height:88px}.demand-product-card>div{display:grid;gap:4px}.row-actions{display:flex;gap:10px}.demand-reason{margin:8px 0 4px;line-height:1.55}.metric-stack,.sales-stack{display:grid;gap:7px}.metric-stack span,.sales-stack span{display:flex;align-items:center;justify-content:space-between;gap:18px}.metric-stack em,.sales-stack em{color:var(--erp-text-secondary);font-size:12px;font-style:normal}.metric-stack strong,.sales-stack strong{color:var(--erp-text-primary);font-size:14px}.sales-stack small{padding-top:5px;border-top:1px dashed var(--erp-border);color:var(--erp-text-secondary)}.source-order-list{display:grid;gap:8px;max-height:510px;overflow:auto}.source-order-item{display:grid;grid-template-columns:64px minmax(0,1fr);gap:12px;padding:10px 12px;border:1px solid var(--erp-border);border-radius:10px}.source-order-item>div{display:grid;align-content:center;gap:3px}.source-order-item span{font-size:12px;color:var(--erp-text-secondary)}.source-order-list .el-pagination{justify-content:flex-end;padding-top:4px}

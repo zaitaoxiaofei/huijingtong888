@@ -24,8 +24,8 @@ test("procurement workspace keeps owner, free names, multi-item creation and lat
   assert.match(page, /输入库存 ID 精确查找/);
   assert.match(page, /输入商品名称模糊搜索/);
   assert.match(page, /searchMode: mode/);
-  assert.match(page, /快速创建库存/);
-  assert.match(page, /未找到？按标准命名快速创建库存/);
+  assert.match(page, /创建标准库存并绑定/);
+  assert.match(page, /未找到？创建标准库存并绑定/);
   assert.match(page, /库存已创建并绑定到当前采购明细/);
   assert.match(page, /已选用已有库存并绑定到当前采购明细/);
   assert.match(page, /function productPreviewImage/);
@@ -41,5 +41,9 @@ test("free purchase uses visible direct number inputs and seeds standard invento
   assert.match(page, /inputmode="decimal"/);
   assert.match(page, /const quickInventoryCreateValue = computed/);
   assert.match(page, /:value="quickInventoryCreateValue"/);
+  assert.match(page, /label="库存主图"/);
+  assert.match(page, /上传主图/);
+  assert.match(page, /uploadQuickInventoryImage/);
+  assert.match(page, /image_url: String\(item\.image_url \|\| ""\)\.trim\(\)/);
   assert.match(page, /activeItem\.value\.raw_name = product\.product_name/);
 });
