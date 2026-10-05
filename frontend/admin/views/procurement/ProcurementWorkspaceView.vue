@@ -213,7 +213,8 @@ const purchaseGroups = computed(() => {
 
 function defaultItem() {
   return {
-    raw_name: "", raw_spec: "", quantity: 1, amount: 0, shipping_amount: 0, purchase_url: "", image_url: "", product_id: null, product_name: "",
+    raw_name: "", raw_spec: "", quantity: 1, amount: 0, shipping_amount: 0, purchase_url: "", image_url: "", product_id: null, product_name: "", product_code: "",
+    historical_unit_cost: 0, anomaly_reason: "", anomaly_note: "",
     structured_naming: { inventoryCategory: "", vehicleBrand: "", vehicleModel: [], accessoryName: "普通款", color: "", material: [], process: "", quantity: 1, stockUnit: "个" }
   };
 }
@@ -1113,7 +1114,36 @@ const activeItemNaming = computed({
   }
 });
 
-const activeItemStandardName = computed(() => itemStructuredName(activeItem.value));
+const activeItemStandardName = computed(() => activeItem.value?.product_id
+  ? String(activeItem.value.product_name || activeItem.value.raw_name || "").trim()
+  : itemStructuredName(activeItem.value));
+const activeItemInventorySpecs = computed(() => {
+  const naming = activeItem.value?.structured_naming || {};
+  return [
+    ["核心品名", naming.inventoryCategory],
+    ["品牌车型", [naming.vehicleBrand, ...(naming.vehicleModel || [])].filter(Boolean).join(" · ")],
+    ["款式", naming.accessoryName],
+    ["颜色", naming.color],
+    ["材质工艺", [...(naming.material || []), naming.process].filter(Boolean).join(" · ")],
+    ["包装", `${Math.max(1, Number(naming.quantity || 1))}${naming.stockUnit || "个"}`]
+  ].filter(([, value]) => String(value || "").trim());
+});
+
+function currentFreePurchaseUnitCost(item) {
+  const quantity = Number(item?.quantity || 0);
+  return quantity > 0 ? Number(item?.amount || 0) / quantity : 0;
+}
+
+function freePurchasePriceChange(item) {
+  const historical = Number(item?.historical_unit_cost || 0);
+  return historical > 0 ? (currentFreePurchaseUnitCost(item) - historical) / historical : null;
+}
+
+function freePurchaseAnomalyReason(item) {
+  const reason = String(item?.anomaly_reason || "").trim();
+  const note = String(item?.anomaly_note || "").trim();
+  return reason === "其他原因" ? (note ? `其他原因：${note}` : "") : reason;
+}
 
 function syncActiveStructuredName() {
   if (!activeItem.value) return;
@@ -1188,11 +1218,36 @@ function searchInventorySuggestions() {
 
 function normalizeQuickInventoryProduct(product) {
   const productId = Number(product?.id || product?.product_id || 0);
+  const parseList = (value) => {
+    if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+    const text = String(value || "").trim();
+    if (!text) return [];
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return parsed.map((item) => String(item || "").trim()).filter(Boolean);
+    } catch { /* Legacy inventory fields use slash-separated text. */ }
+    return text.split(/[\/|,，]/).map((item) => item.trim()).filter(Boolean);
+  };
+  const existingNaming = product?.structured_naming || {};
+  const colors = parseList(product?.color || existingNaming.color);
   return {
+    ...product,
     product_id: productId,
     product_name: product?.name || product?.product_name || "未命名库存商品",
     product_code: product?.inventory_number || product?.inventory_id || product?.code || product?.product_code || "-",
-    image_url: product?.image_url || (productId ? `/api/products/${productId}/image?thumb=1&w=180` : "")
+    image_url: product?.image_url || (productId ? `/api/products/${productId}/image?thumb=1&w=180` : ""),
+    historical_unit_cost: Number(product?.historical_unit_cost || product?.avg_unit_cost || product?.historical_avg_unit_cost || product?.purchase_cost || 0),
+    structured_naming: {
+      inventoryCategory: product?.inventory_category || existingNaming.inventoryCategory || existingNaming.category || "",
+      vehicleBrand: product?.vehicle_brand || existingNaming.vehicleBrand || existingNaming.vehicle_brand || "",
+      vehicleModel: parseList(product?.vehicle_models_json || product?.vehicle_model || existingNaming.vehicleModel || existingNaming.vehicle_models),
+      accessoryName: product?.accessory_name || existingNaming.accessoryName || existingNaming.accessory || "普通款",
+      color: colors[0] || "",
+      material: parseList(product?.material || existingNaming.material || existingNaming.materials),
+      process: product?.surface_process || existingNaming.process || "",
+      quantity: Math.max(1, Number(product?.product_quantity || existingNaming.quantity || 1)),
+      stockUnit: product?.stock_unit || existingNaming.stockUnit || existingNaming.stock_unit || "个"
+    }
   };
 }
 
@@ -1218,11 +1273,22 @@ async function searchQuickInventory(mode) {
 
 function chooseQuickInventory(product) {
   if (!activeItem.value) return;
-  activeItem.value.product_id = Number(product.product_id);
-  activeItem.value.product_name = product.product_name;
-  activeItem.value.raw_name = product.product_name;
+  const selected = normalizeQuickInventoryProduct(product);
+  const changedProduct = Number(activeItem.value.product_id || 0) !== Number(selected.product_id || 0);
+  activeItem.value.product_id = Number(selected.product_id);
+  activeItem.value.product_name = selected.product_name;
+  activeItem.value.product_code = selected.product_code;
+  activeItem.value.raw_name = selected.product_name;
+  activeItem.value.structured_naming = { ...defaultItem().structured_naming, ...selected.structured_naming };
+  activeItem.value.historical_unit_cost = Number(selected.historical_unit_cost || 0);
+  if (selected.image_url) activeItem.value.image_url = selected.image_url;
+  if (changedProduct) {
+    activeItem.value.anomaly_reason = "";
+    activeItem.value.anomaly_note = "";
+  }
+  quickInventorySearch.productName = selected.product_name;
   state.suggestions = [];
-  ElMessage.success(`已选择库存：${product.product_name}`);
+  ElMessage.success(`已选择库存：${selected.product_name}`);
 }
 
 function openQuickInventoryCreate() {
@@ -1297,6 +1363,10 @@ function handleQuickInventoryExistingSelected(product = {}) {
 function clearItemBinding() {
   activeItem.value.product_id = null;
   activeItem.value.product_name = "";
+  activeItem.value.product_code = "";
+  activeItem.value.historical_unit_cost = 0;
+  activeItem.value.anomaly_reason = "";
+  activeItem.value.anomaly_note = "";
 }
 
 async function uploadReceipt(file) {
@@ -1323,6 +1393,11 @@ async function submitCreate() {
     activeItemIndex.value = invalidIndex;
     return ElMessage.warning(`第 ${invalidIndex + 1} 条采购明细尚未绑定库存商品，无法登记采购在途`);
   }
+  const anomalyIndex = createForm.items.findIndex((item) => freePurchasePriceChange(item) > 0.1 && !freePurchaseAnomalyReason(item));
+  if (anomalyIndex >= 0) {
+    activeItemIndex.value = anomalyIndex;
+    return ElMessage.warning(`第 ${anomalyIndex + 1} 条采购明细单价超过历史均价 10%，请选择价格异常原因`);
+  }
   submitting.value = true;
   try {
     const receiptNote = createForm.receipts.length
@@ -1334,7 +1409,7 @@ async function submitCreate() {
       supplier_id: createForm.supplier_id,
       urgency: createForm.urgency,
       note: [createForm.note, receiptNote].filter(Boolean).join("；"),
-      items: createForm.items.map((item) => ({ ...item, quantity: Number(item.quantity || 1), amount: Number(item.amount || 0), shipping_amount: Number(item.shipping_amount || 0) }))
+      items: createForm.items.map((item) => ({ ...item, quantity: Number(item.quantity || 1), amount: Number(item.amount || 0), shipping_amount: Number(item.shipping_amount || 0), anomaly_reason: freePurchaseAnomalyReason(item) }))
     });
     ElMessage.success(`已登记 ${createForm.items.length} 条采购，现已进入采购在途`);
     createVisible.value = false;
@@ -1697,15 +1772,40 @@ onMounted(async () => {
         <div v-if="activeItem" class="item-editor">
           <div class="section-head"><strong>填写采购商品</strong><el-button v-if="createForm.items.length > 1" link type="danger" @click="removeItem(activeItemIndex)">删除本条</el-button></div>
           <el-form label-width="92px">
-            <div class="free-purchase-name-preview"><span>标准库存名称</span><strong>{{ activeItemStandardName || '请按下方规则选择核心品名、规格与包装' }}</strong></div>
-            <InventoryStructuredSearch layout="inventory-form" :show-keyword="false" :show-measurement="true" v-model="activeItemNaming" class="free-purchase-structured-name" @change="syncActiveStructuredName" />
-            <el-form-item label="采购备注"><el-input v-model="activeItem.raw_spec" placeholder="选填：供应商原始标题、颜色或包装说明" /></el-form-item>
-            <el-row :gutter="12">
-              <el-col :span="8"><el-form-item label="数量"><el-input-number v-model="activeItem.quantity" class="free-purchase-number" :min="1" :precision="0" :controls="false" inputmode="numeric" aria-label="采购数量" /></el-form-item></el-col>
-              <el-col :span="8"><el-form-item label="货款"><el-input-number v-model="activeItem.amount" class="free-purchase-number" :min="0" :precision="2" :controls="false" inputmode="decimal" aria-label="采购货款" /></el-form-item></el-col>
-              <el-col :span="8"><el-form-item label="运费"><el-input-number v-model="activeItem.shipping_amount" class="free-purchase-number" :min="0" :precision="2" :controls="false" inputmode="decimal" aria-label="采购运费" /></el-form-item></el-col>
-            </el-row>
-            <el-form-item label="采购链接"><el-input v-model="activeItem.purchase_url" placeholder="拼多多、1688或其他采购链接" /></el-form-item>
+            <div class="free-purchase-name-preview" :class="{ 'is-bound': activeItem.product_id }">
+              <ProductImagePreview v-if="activeItem.product_id" :src="activeItem.image_url" size="small" />
+              <div><span>{{ activeItem.product_id ? '已选库存' : '标准库存名称' }}</span><strong>{{ activeItemStandardName || '请按下方规则选择核心品名、规格与包装' }}</strong><small v-if="activeItem.product_id">库存 ID：{{ activeItem.product_code || '-' }}</small></div>
+            </div>
+            <div v-if="activeItem.product_id" class="bound-inventory-specs">
+              <span v-for="spec in activeItemInventorySpecs" :key="spec[0]"><em>{{ spec[0] }}</em>{{ spec[1] }}</span>
+            </div>
+            <InventoryStructuredSearch layout="inventory-form" :show-keyword="false" :show-measurement="true" v-model="activeItemNaming" v-else class="free-purchase-structured-name" @change="syncActiveStructuredName" />
+
+            <section class="free-purchase-core-panel">
+              <div class="free-purchase-core-head"><div><strong>本次采购信息</strong><span>确认本次实际下单的数量与金额</span></div><b>合计 ¥{{ (Number(activeItem.amount || 0) + Number(activeItem.shipping_amount || 0)).toFixed(2) }}</b></div>
+              <el-row :gutter="14" class="free-purchase-core-fields">
+                <el-col :span="8"><el-form-item label="数量"><el-input-number v-model="activeItem.quantity" class="free-purchase-number" :min="1" :precision="0" :controls="false" inputmode="numeric" aria-label="采购数量" /></el-form-item></el-col>
+                <el-col :span="8"><el-form-item label="货款"><el-input-number v-model="activeItem.amount" class="free-purchase-number" :min="0" :precision="2" :controls="false" inputmode="decimal" aria-label="采购货款" /></el-form-item></el-col>
+                <el-col :span="8"><el-form-item label="运费"><el-input-number v-model="activeItem.shipping_amount" class="free-purchase-number" :min="0" :precision="2" :controls="false" inputmode="decimal" aria-label="采购运费" /></el-form-item></el-col>
+              </el-row>
+              <div v-if="Number(activeItem.historical_unit_cost || 0) > 0" class="free-purchase-price-summary" :class="{ 'is-anomaly': freePurchasePriceChange(activeItem) > 0.1 }">
+                <span>历史均价 <strong>¥{{ Number(activeItem.historical_unit_cost).toFixed(2) }}/件</strong></span>
+                <span>本次单价 <strong>¥{{ currentFreePurchaseUnitCost(activeItem).toFixed(2) }}/件</strong></span>
+                <em v-if="freePurchasePriceChange(activeItem) !== null">{{ freePurchasePriceChange(activeItem) >= 0 ? '上涨' : '下降' }} {{ Math.abs(freePurchasePriceChange(activeItem) * 100).toFixed(1) }}%</em>
+              </div>
+              <div v-if="freePurchasePriceChange(activeItem) > 0.1" class="free-purchase-price-reason">
+                <div><strong>单价超过历史均价 10%</strong><span>选择原因后可以正常提交，并保留价格审计记录。</span></div>
+                <el-select v-model="activeItem.anomaly_reason" placeholder="请选择价格异常原因"><el-option v-for="reason in priceAnomalyReasons" :key="reason" :label="reason" :value="reason" /></el-select>
+                <el-input v-if="activeItem.anomaly_reason === '其他原因'" v-model="activeItem.anomaly_note" placeholder="请填写具体原因" maxlength="120" show-word-limit />
+              </div>
+              <div v-else-if="activeItem.product_id" class="free-purchase-price-optional">
+                <span>价格异常说明（正常价格可不填）</span>
+                <el-select v-model="activeItem.anomaly_reason" clearable placeholder="如价格特殊，可提前选择原因"><el-option v-for="reason in priceAnomalyReasons" :key="reason" :label="reason" :value="reason" /></el-select>
+                <el-input v-if="activeItem.anomaly_reason === '其他原因'" v-model="activeItem.anomaly_note" placeholder="请填写具体原因" maxlength="120" show-word-limit />
+              </div>
+              <el-form-item label="采购链接"><el-input v-model="activeItem.purchase_url" placeholder="拼多多、1688或其他采购链接" /></el-form-item>
+              <el-form-item label="采购备注"><el-input v-model="activeItem.raw_spec" placeholder="选填：供应商原始标题、颜色或包装说明" /></el-form-item>
+            </section>
             <el-form-item label="库存主图">
               <div class="quick-inventory-image-upload">
                 <ProductImagePreview :src="activeItem.image_url" size="small" />
@@ -1784,7 +1884,7 @@ onMounted(async () => {
 <style scoped>
 .product-cell,.section-head,.item-list-head,.dialog-summary{display:flex;align-items:center;justify-content:space-between;gap:12px}.product-cell{justify-content:flex-start}.muted-text,.suggestion-card span,.item-card span,.section-head p{color:var(--erp-text-secondary);font-size:12px}.binding-name{margin-top:6px}.create-layout{display:grid;grid-template-columns:220px minmax(0,1fr) 310px;gap:16px;min-height:430px}.item-list,.item-editor,.suggestion-panel{padding:14px;border:1px solid var(--erp-border);border-radius:16px;background:#fff}.item-list,.suggestion-panel{display:flex;flex-direction:column;gap:10px}.item-card,.suggestion-card{border:1px solid var(--erp-border);border-radius:12px;background:#fff;text-align:left;cursor:pointer}.item-card{display:flex;justify-content:space-between;align-items:center;padding:12px}.item-card div,.suggestion-card div{display:grid;gap:4px}.item-card.active{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9)}.suggestion-card{display:grid;grid-template-columns:48px minmax(0,1fr);gap:10px;padding:10px}.suggestion-card:hover{border-color:var(--el-color-primary)}.selected-binding{margin:8px 0 12px;padding:10px 12px;border-radius:10px;background:var(--el-color-success-light-9);color:var(--el-color-success-dark-2)}.quick-inventory-search{display:grid;gap:8px}.quick-inventory-results{display:grid;gap:8px;max-height:230px;overflow:auto}.section-head p{margin:3px 0 0;font-weight:400}.create-note{margin-top:16px}.bind-suggestions{display:grid;grid-template-columns:1fr 1fr;gap:10px;max-height:360px;overflow:auto}.dialog-summary{width:100%}@media(max-width:1100px){.create-layout{grid-template-columns:190px 1fr}.suggestion-panel{grid-column:1/-1}.bind-suggestions{grid-template-columns:1fr}}
 .quick-inventory-image-upload{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.quick-inventory-image-upload :deep(.erp-image-preview){width:42px;height:42px}.quick-inventory-image-upload span{color:var(--erp-text-secondary);font-size:12px}
-.free-purchase-name-preview{display:grid;gap:4px;margin:0 0 12px;padding:11px 13px;border:1px solid var(--el-color-primary-light-5);border-radius:10px;background:var(--el-color-primary-light-9)}.free-purchase-name-preview span{color:var(--erp-text-secondary);font-size:12px}.free-purchase-name-preview strong{color:var(--erp-text-primary);line-height:1.5}.free-purchase-structured-name{margin-bottom:12px}
+.free-purchase-name-preview{display:grid;gap:4px;max-width:920px;margin:0 auto 10px;padding:11px 14px;border:1px solid var(--el-color-primary-light-5);border-radius:10px;background:var(--el-color-primary-light-9)}.free-purchase-name-preview.is-bound{grid-template-columns:48px minmax(0,1fr);align-items:center}.free-purchase-name-preview>div{display:grid;gap:3px}.free-purchase-name-preview span,.free-purchase-name-preview small{color:var(--erp-text-secondary);font-size:12px}.free-purchase-name-preview strong{color:var(--erp-text-primary);font-size:15px;line-height:1.5}.free-purchase-name-preview :deep(.erp-image-preview--portrait){width:42px;min-width:42px;max-width:42px;height:56px;min-height:56px;max-height:56px;flex-basis:42px}.free-purchase-structured-name{max-width:980px;margin:0 auto 10px}.bound-inventory-specs{display:flex;max-width:920px;margin:0 auto 12px;overflow:hidden;border:1px solid #e4eaf2;border-radius:9px;background:#fff}.bound-inventory-specs span{display:grid;flex:1 1 auto;gap:2px;min-width:92px;padding:8px 11px;border-right:1px solid #edf1f6;color:#344054;font-size:12px}.bound-inventory-specs span:last-child{border-right:0}.bound-inventory-specs em{color:#8a96a8;font-size:11px;font-style:normal}.free-purchase-core-panel{max-width:920px;margin:0 auto 12px;padding:16px 18px 8px;border:1px solid var(--el-color-primary-light-5);border-radius:14px;background:#fff;box-shadow:0 8px 24px rgba(31,82,132,.08)}.free-purchase-core-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px}.free-purchase-core-head>div{display:grid;gap:3px}.free-purchase-core-head strong{color:#1f2d42;font-size:16px}.free-purchase-core-head span{color:#8a96a8;font-size:12px}.free-purchase-core-head>b{color:var(--el-color-primary);font-size:20px;font-variant-numeric:tabular-nums}.free-purchase-core-fields :deep(.el-form-item){margin-bottom:12px}.free-purchase-price-summary{display:flex;align-items:center;justify-content:center;gap:24px;margin:0 0 12px;padding:9px 12px;border-radius:9px;background:#f5f8fc;color:#667085;font-size:12px}.free-purchase-price-summary span{display:flex;gap:6px}.free-purchase-price-summary strong{color:#344054}.free-purchase-price-summary em{padding:2px 8px;border-radius:12px;background:var(--el-color-success-light-9);color:var(--el-color-success);font-style:normal}.free-purchase-price-summary.is-anomaly{background:var(--el-color-danger-light-9)}.free-purchase-price-summary.is-anomaly em{background:#fff;color:var(--el-color-danger)}.free-purchase-price-reason{display:grid;grid-template-columns:minmax(180px,1fr) minmax(210px,280px);gap:10px 14px;align-items:center;margin:0 0 14px;padding:12px 14px;border:1px solid var(--el-color-danger-light-5);border-radius:10px;background:var(--el-color-danger-light-9)}.free-purchase-price-reason>div{display:grid;gap:3px}.free-purchase-price-reason strong{color:var(--el-color-danger);font-size:13px}.free-purchase-price-reason span{color:#8a5b5f;font-size:12px}.free-purchase-price-reason>.el-input{grid-column:2}.free-purchase-price-optional{display:grid;grid-template-columns:minmax(170px,1fr) minmax(220px,300px);align-items:center;gap:8px 14px;margin:0 0 12px;padding:8px 0;border-top:1px dashed #e4eaf2;color:#8a96a8;font-size:12px}.free-purchase-price-optional>.el-input{grid-column:2}.free-purchase-dialog .item-editor{background:#f8fafc}.free-purchase-dialog .item-editor>.section-head{margin-bottom:10px}
 .receipt-upload-panel{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;margin-top:16px;padding:16px;border:1px dashed var(--el-color-primary-light-5);border-radius:14px;background:var(--el-color-primary-light-9)}.receipt-upload-panel p{margin:4px 0 0;color:var(--erp-text-secondary);font-size:12px}.receipt-list{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:10px}.receipt-list>div{display:grid;grid-template-columns:56px minmax(80px,160px) auto;align-items:center;gap:8px;padding:8px;border-radius:10px;background:#fff}.receipt-list .el-image{width:56px;height:56px;border-radius:8px}
 .purchase-link-actions{display:flex;align-items:center;flex-wrap:wrap;gap:2px 8px}.link-editor-product{display:grid;grid-template-columns:96px minmax(0,1fr);gap:18px;align-items:center;padding:16px;border-radius:14px;background:var(--erp-bg-page)}.link-editor-product strong{font-size:17px}.link-editor-product p{margin:7px 0 12px;color:var(--erp-text-secondary);line-height:1.65}.link-editor-form{margin-top:18px}.compact-product :deep(.erp-image-preview--portrait){width:72px;min-width:72px;max-width:72px;height:90px;min-height:90px;max-height:90px;flex-basis:72px}.compact-product{min-height:98px}
 .demand-table{min-height:420px}.demand-product-card{display:grid;grid-template-columns:64px minmax(0,1fr);gap:12px;align-items:center;min-height:88px}.demand-product-card>div{display:grid;gap:4px}.row-actions{display:flex;gap:10px}.demand-reason{margin:8px 0 4px;line-height:1.55}.metric-stack,.sales-stack{display:grid;gap:7px}.metric-stack span,.sales-stack span{display:flex;align-items:center;justify-content:space-between;gap:18px}.metric-stack em,.sales-stack em{color:var(--erp-text-secondary);font-size:12px;font-style:normal}.metric-stack strong,.sales-stack strong{color:var(--erp-text-primary);font-size:14px}.sales-stack small{padding-top:5px;border-top:1px dashed var(--erp-border);color:var(--erp-text-secondary)}.source-order-list{display:grid;gap:8px;max-height:510px;overflow:auto}.source-order-item{display:grid;grid-template-columns:64px minmax(0,1fr);gap:12px;padding:10px 12px;border:1px solid var(--erp-border);border-radius:10px}.source-order-item>div{display:grid;align-content:center;gap:3px}.source-order-item span{font-size:12px;color:var(--erp-text-secondary)}.source-order-list .el-pagination{justify-content:flex-end;padding-top:4px}
@@ -1807,6 +1907,7 @@ onMounted(async () => {
 .bulk-order-toolbar{display:grid;grid-template-columns:150px 220px minmax(220px,1fr) auto auto;gap:10px;align-items:center;margin-top:12px}.bulk-receipts,.group-recommendations{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:9px;padding:8px 10px;border-radius:9px;background:#f7f9fc;font-size:12px}.bulk-receipts span{display:flex;align-items:center;gap:4px}.group-recommendations>span{color:var(--erp-text-secondary)}.remember-group{display:flex;align-items:center;gap:8px;min-width:360px}.remember-group .el-input{width:270px}:global(.bulk-add-dialog){max-width:1600px}.bulk-add-search-panel{padding:10px;border:1px solid var(--erp-border);border-radius:12px;background:#f8fafc}.bulk-add-search-actions,.bulk-add-pagination{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:10px}.bulk-add-search-actions span,.bulk-add-pagination span{margin-right:auto;color:var(--erp-text-secondary);font-size:12px}.bulk-add-results{display:grid;grid-template-columns:1fr 1fr;gap:10px;min-height:180px;max-height:470px;margin-top:14px;overflow:auto}.bulk-add-results>button{display:grid;grid-template-columns:52px minmax(0,1fr) auto;gap:11px;align-items:center;padding:10px;border:1px solid var(--erp-border);border-radius:10px;background:#fff;text-align:left;cursor:pointer}.bulk-add-results>button:hover{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9)}.bulk-add-results>button.is-added{border-color:var(--el-color-success-light-5);background:var(--el-color-success-light-9);cursor:default;opacity:.78}.bulk-add-results>button.is-added em{color:var(--el-color-success)}.bulk-add-results>button>div{display:grid;gap:4px}.bulk-add-results span,.bulk-add-results small{color:var(--erp-text-secondary)}.bulk-add-results em{color:var(--el-color-primary);font-style:normal}.bulk-add-results :deep(.erp-image-preview--portrait){width:52px;min-width:52px;height:68px;min-height:68px}
 @media(max-width:1200px){.bulk-order-toolbar{grid-template-columns:130px 180px minmax(180px,1fr) auto}.bulk-order-toolbar .el-upload{grid-column:1/-1}.bulk-add-results{grid-template-columns:1fr}}
 @media(max-width:1100px){.create-layout{grid-template-columns:190px 1fr}.suggestion-panel{grid-column:1/-1}.bind-suggestions{grid-template-columns:1fr}}
-.free-purchase-dialog .create-layout{grid-template-columns:200px minmax(0,1fr) 330px;gap:14px}.free-purchase-number{width:100%;min-width:118px}:deep(.free-purchase-number .el-input__wrapper){min-width:118px}.free-purchase-dialog :deep(.el-form-item__content){min-width:0}
+.free-purchase-dialog .create-layout{grid-template-columns:200px minmax(0,1fr) 330px;gap:14px}.free-purchase-number{width:100%;min-width:118px}:deep(.free-purchase-number .el-input__wrapper){min-width:118px}.free-purchase-dialog :deep(.el-form-item__content){min-width:0}.free-purchase-dialog :deep(.el-dialog__body){max-height:calc(96vh - 150px);overflow:auto}
 @media(max-width:1300px){.free-purchase-dialog .create-layout{grid-template-columns:190px minmax(0,1fr)}.free-purchase-dialog .suggestion-panel{grid-column:1/-1}}
+@media(max-width:760px){.bound-inventory-specs{flex-wrap:wrap}.bound-inventory-specs span{flex:1 1 45%}.free-purchase-price-reason,.free-purchase-price-optional{grid-template-columns:1fr}.free-purchase-price-reason>.el-input,.free-purchase-price-optional>.el-input{grid-column:1}.free-purchase-price-summary{align-items:flex-start;flex-direction:column;gap:6px}}
 </style>
