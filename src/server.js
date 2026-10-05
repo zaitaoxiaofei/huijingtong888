@@ -1017,6 +1017,7 @@ async function handleRestRoute(req, res, url, parts) {
   if (req.method === "GET" && parts[0] === "downloads" && (
     /^ozon-baodan-erp-plugin-[0-9][0-9A-Za-z.-]*\.rar$/.test(parts[1] || "") ||
     /^ozon-seller-analytics-plugin-[0-9][0-9A-Za-z.-]*\.rar$/.test(parts[1] || "") ||
+    /^pdd-procurement-logistics-plugin-[0-9][0-9A-Za-z.-]*\.zip$/.test(parts[1] || "") ||
     parts[1] === "ozon-baodan-erp-plugin.rar" ||
     parts[1] === "ozon-erp-collector-plugin.rar" ||
     parts[1] === "ozon-seller-analytics-plugin.rar"
@@ -1025,7 +1026,7 @@ async function handleRestRoute(req, res, url, parts) {
     const filePath = await resolveDownloadArtifactPath(filename);
     const buffer = await fs.readFile(filePath);
     writeHead(res, 200, {
-      "Content-Type": "application/vnd.rar",
+      "Content-Type": filename.endsWith(".zip") ? "application/zip" : "application/vnd.rar",
       "Content-Disposition": `attachment; filename="${filename}"`,
       "Content-Length": buffer.length,
       "Cache-Control": "no-store"

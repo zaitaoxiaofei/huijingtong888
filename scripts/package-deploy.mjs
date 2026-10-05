@@ -23,6 +23,7 @@ if (includeEnv) filesToCopy.unshift(".env");
 const directoriesToCopy = [
   "public",
   "ozon-erp-collector-plugin",
+  "pdd-procurement-logistics-plugin",
   "pivot-table-master",
   "src",
   "scripts",
@@ -179,6 +180,16 @@ async function hasReusablePluginPackages() {
   return pluginPackageRules.every((rule) => entries.some((entry) => (
     entry.isFile() && rule.aliasPattern.test(entry.name)
   )));
+}
+
+async function copyPddProcurementPluginPackage() {
+  const manifest = JSON.parse(await fs.readFile(path.resolve(rootDir, "pdd-procurement-logistics-plugin", "manifest.json"), "utf8"));
+  const version = String(manifest.version || "").trim();
+  const name = `pdd-procurement-logistics-plugin-${version}.zip`;
+  const source = path.resolve(rootDir, name);
+  await fs.access(source);
+  await fs.copyFile(source, path.resolve(outputDir, name));
+  return name;
 }
 
 async function writeDeployPackageJson() {
@@ -355,7 +366,10 @@ for (const directory of directoriesToCopy) {
   await copyEntry(directory);
 }
 
-const includedPluginPackages = await copyPluginPackages();
+const includedPluginPackages = [
+  ...(await copyPluginPackages()),
+  await copyPddProcurementPluginPackage()
+];
 
 await writeDeployPackageJson();
 await rewriteDeployEnv();
