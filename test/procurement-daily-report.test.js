@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import ExcelJS from "exceljs";
-import { procurementDayRange, procurementDailyReport } from "../src/services/procurement-daily-report.js";
+import { procurementDayRange, procurementDailyReport, procurementReportRange } from "../src/services/procurement-daily-report.js";
 import { dailyPurchaseSummary, buildDailyPurchaseWorkbook, purchaseInventoryNumber } from "../frontend/admin/utils/procurement-daily-report.js";
 import { createOperationsRoutes } from "../src/server/routes/operations.js";
 
@@ -18,6 +18,20 @@ test("daily purchase date uses Beijing midnight and rejects invalid calendar dat
   }
 });
 
+test("report range defaults to today in Beijing and accepts an inclusive date range", () => {
+  assert.deepEqual(procurementReportRange({}, new Date("2026-09-15T16:30:00.000Z")), {
+    dateFrom: "2026-09-16",
+    dateTo: "2026-09-16",
+    sqlRange: ["2026-09-15 16:00:00", "2026-09-16 16:00:00"]
+  });
+  assert.deepEqual(procurementReportRange({ dateFrom: "2026-09-01", dateTo: "2026-09-30" }), {
+    dateFrom: "2026-09-01",
+    dateTo: "2026-09-30",
+    sqlRange: ["2026-08-31 16:00:00", "2026-09-30 16:00:00"]
+  });
+  assert.throws(() => procurementReportRange({ dateFrom: "2026-09-30", dateTo: "2026-09-01" }), /开始日期不能晚于结束日期/);
+});
+
 test("daily report is unpaginated and includes only purchased facts without multiplying allocations", async () => {
   const result = await procurementDailyReport({ date: "2026-09-16" }, async (sql, params) => {
     assert.deepEqual(params, procurementDayRange("2026-09-16"));
@@ -28,9 +42,37 @@ test("daily report is unpaginated and includes only purchased facts without mult
     assert.doesNotMatch(sql, /JOIN (inbound_records|procurement_requests)|LIMIT/);
     return rows;
   });
-  assert.deepEqual(result, { date: "2026-09-16", rows });
+  assert.deepEqual(result, { date: "2026-09-16", dateFrom: "2026-09-16", dateTo: "2026-09-16", rows });
   const routes = createOperationsRoutes({ services: { procurementDailyReport: (query) => query } });
   assert.deepEqual(routes["GET /api/procurement/daily-report"]({}, new URL("http://localhost/api/procurement/daily-report?date=2026-09-16")), { date: "2026-09-16" });
+});
+
+test("range export applies combined workspace filters with EXISTS and remains unpaginated", async () => {
+  const filters = {
+    dateFrom: "2026-09-01", dateTo: "2026-09-30", query: "钥匙壳",
+    demandType: "real_order", bindingStatus: "bound", personId: "7", supplierId: "9", sourceType: "1688",
+    inventoryCategory: "钥匙壳", vehicleBrand: "TENET", vehicleModel: "T4,T7",
+    accessoryName: "普通款", color: "黑色", material: "ABS,TPU", process: "碳纤纹"
+  };
+  const result = await procurementDailyReport(filters, async (sql, params) => {
+    assert.deepEqual(params.slice(0, 2), ["2026-08-31 16:00:00", "2026-09-30 16:00:00"]);
+    assert.match(sql, /p\.inventory_category = \?/);
+    assert.match(sql, /p\.vehicle_brand/);
+    assert.match(sql, /filtered_request\.person_id = \?/);
+    assert.match(sql, /filtered_request\.supplier_id/);
+    assert.match(sql, /filtered_request\.binding_status = \?/);
+    assert.match(sql, /filtered_request\.demand_type = 'real_order'/);
+    assert.match(sql, /EXISTS \(SELECT 1 FROM procurement_requests filtered_request/);
+    assert.doesNotMatch(sql, /LIMIT|OFFSET|JOIN procurement_requests filtered_request/);
+    assert.ok(params.includes("%/T4/%"));
+    assert.ok(params.includes("%/T7/%"));
+    assert.ok(params.includes("%/ABS/%"));
+    assert.ok(params.includes("%/TPU/%"));
+    assert.ok(params.includes(7));
+    assert.ok(params.includes(9));
+    return rows;
+  });
+  assert.deepEqual(result, { date: "", dateFrom: "2026-09-01", dateTo: "2026-09-30", rows });
 });
 
 test("WeChat summary combines repeated products and separates freight from goods", () => {
