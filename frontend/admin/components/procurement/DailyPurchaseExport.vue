@@ -6,10 +6,40 @@ import { shanghaiDateKey } from "../../utils/shanghai-date.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
 import { buildDailyPurchaseWorkbook, dailyPurchaseSummary } from "../../utils/procurement-daily-report.js";
 
-const date = ref(shanghaiDateKey());
+const props = defineProps({
+  filters: { type: Object, default: () => ({}) }
+});
+
+const today = shanghaiDateKey();
+const dateRange = ref([today, today]);
 const busy = ref(false);
 const visible = ref(false);
 const summary = ref("");
+
+function reportQuery() {
+  const [dateFrom, dateTo] = Array.isArray(dateRange.value) ? dateRange.value : [];
+  const params = new URLSearchParams({ dateFrom: dateFrom || today, dateTo: dateTo || dateFrom || today });
+  for (const [key, value] of Object.entries({
+    query: props.filters.query,
+    demandType: props.filters.demandType,
+    bindingStatus: props.filters.bindingStatus,
+    personId: props.filters.personId,
+    supplierId: props.filters.supplierId,
+    sourceType: props.filters.sourceType,
+    inventoryCategory: props.filters.inventoryCategory,
+    productName: props.filters.productName,
+    vehicleBrand: props.filters.vehicleBrand,
+    vehicleModel: Array.isArray(props.filters.vehicleModel) ? props.filters.vehicleModel.join(",") : props.filters.vehicleModel,
+    accessoryName: props.filters.accessoryName,
+    color: props.filters.color,
+    material: Array.isArray(props.filters.material) ? props.filters.material.join(",") : props.filters.material,
+    process: props.filters.process
+  })) {
+    const text = String(value ?? "").trim();
+    if (text && text !== "all") params.set(key, text);
+  }
+  return params;
+}
 
 async function loadImage(productId) {
   const blob = await apiClient.blob(`/api/products/${Number(productId)}/image?thumb=1&w=180`, { signal: AbortSignal.timeout(15000) });
@@ -28,29 +58,30 @@ async function loadImage(productId) {
 }
 
 async function exportDaily() {
-  if (!date.value || busy.value) return;
+  if (!Array.isArray(dateRange.value) || dateRange.value.length !== 2 || busy.value) return;
   busy.value = true;
-  const selectedDate = date.value;
+  const [dateFrom, dateTo] = dateRange.value;
+  const dateLabel = dateFrom === dateTo ? dateFrom : `${dateFrom} 至 ${dateTo}`;
   try {
-    const result = await apiClient.get(`/api/procurement/daily-report?date=${encodeURIComponent(selectedDate)}`, { routeScoped: false });
+    const result = await apiClient.get(`/api/procurement/daily-report?${reportQuery().toString()}`, { routeScoped: false });
     if (!result.rows.length) {
-      ElMessage.info(`${selectedDate} 暂无已确认采购记录`);
+      ElMessage.info(`${dateLabel} 在当前筛选条件下暂无已确认采购记录`);
       return;
     }
-    summary.value = dailyPurchaseSummary(selectedDate, result.rows);
+    summary.value = dailyPurchaseSummary(dateLabel, result.rows);
     visible.value = true;
-    const { workbook, missingImages } = await buildDailyPurchaseWorkbook(selectedDate, result.rows, loadImage);
+    const { workbook, missingImages } = await buildDailyPurchaseWorkbook(dateLabel, result.rows, loadImage);
     const buffer = await workbook.xlsx.writeBuffer();
     const url = URL.createObjectURL(new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
     const link = document.createElement("a");
     link.href = url;
-    link.download = `每日采购清单-${selectedDate}.xlsx`;
+    link.download = `采购清单-${dateFrom}${dateFrom === dateTo ? "" : `至${dateTo}`}.xlsx`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 60000);
     if (missingImages) ElMessage.warning(`清单已导出，${missingImages} 条明细图片不可用，已在表格中标注`);
-    else ElMessage.success("每日采购清单已导出，可复制总结发到微信");
+    else ElMessage.success("当前筛选采购清单已导出，可复制总结发到微信");
   } catch (error) {
-    ElMessage.error(error.message || "每日采购清单导出失败，请重试");
+    ElMessage.error(error.message || "采购清单导出失败，请重试");
   } finally {
     busy.value = false;
   }
@@ -64,10 +95,10 @@ async function copySummary() {
 
 <template>
   <div class="daily-purchase-export">
-    <el-date-picker v-model="date" type="date" value-format="YYYY-MM-DD" :clearable="false" :disabled="busy" aria-label="每日采购清单日期" style="width: 145px" />
-    <el-button :loading="busy" :disabled="!date" @click="exportDaily">导出每日采购清单</el-button>
+    <el-date-picker v-model="dateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" :clearable="false" :disabled="busy" aria-label="采购清单时间范围" class="daily-purchase-export__range" />
+    <el-button :loading="busy" :disabled="!dateRange?.length" @click="exportDaily">导出当前筛选</el-button>
     <el-dialog v-if="visible" v-model="visible" title="微信采购总结" width="680px" append-to-body>
-      <p>按所选日期的北京时间统计全部正式采购记录，不受工作台筛选或分页影响。货款与运费分别列示。</p>
+      <p>按所选北京时间范围和工作台当前联合筛选统计全部正式采购记录，不受当前分页影响。货款与运费分别列示。</p>
       <el-input v-model="summary" type="textarea" :rows="14" readonly aria-label="微信采购总结" />
       <template #footer><el-button @click="visible = false">关闭</el-button><el-button type="primary" @click="copySummary">复制微信总结</el-button></template>
     </el-dialog>
@@ -76,4 +107,5 @@ async function copySummary() {
 
 <style scoped>
 .daily-purchase-export { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.daily-purchase-export__range { width: 245px; }
 </style>

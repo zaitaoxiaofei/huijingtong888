@@ -48,7 +48,7 @@ export function dailyPurchaseSummary(date, rows) {
     details.push(`${item.name}（${item.code}）：${item.quantity} 件，货款¥ ${summaryMoney(item.amount)} 元`);
   }
   return [
-    `【每日采购清单】${date}（北京时间）`,
+    `【采购清单】${date}（北京时间）`,
     `共采购 ${products.size} 种商品，${quantity} 件；货款 ¥${(goods / 100).toFixed(2)}，运费 ¥${(shipping / 100).toFixed(2)}，合计 ¥${((goods + shipping) / 100).toFixed(2)}。`,
     ...(unpriced ? [`其中 ${unpriced} 条货款为零或未填写，合计仅为已记录金额，请核对采购金额后重新导出。`] : []),
     ...details,
@@ -63,7 +63,7 @@ export async function buildDailyPurchaseWorkbook(date, rows, loadImage) {
   const sheet = workbook.addWorksheet("每日采购清单");
   sheet.columns = [12, 24, 38, 12, 15, 13, 15, 24, 16, 16, 27, 32].map((width) => ({ width }));
   sheet.mergeCells("A1:L1");
-  sheet.getCell("A1").value = `${date} 每日采购清单（北京时间 / 人民币）`;
+  sheet.getCell("A1").value = `${date} 采购清单（北京时间 / 人民币）`;
   sheet.getCell("A1").font = { size: 16, bold: true, color: { argb: "FFFFFFFF" } };
   sheet.getCell("A1").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF17365D" } };
   sheet.getRow(1).height = 32;

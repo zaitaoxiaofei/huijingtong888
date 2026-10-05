@@ -18,13 +18,19 @@ const optionState = reactive(Object.fromEntries(optionTypes.map((type) => [type,
 const vehicleCatalog = reactive({ brands: [] });
 const vehicleState = reactive({ loading: false, failed: false });
 
+function optionValue(item) {
+  const value = String(item?.value ?? item?.label ?? "").trim();
+  const count = Number(item?.linked_product_count ?? item?.usage_count ?? 0);
+  return count > 0 ? value.replace(new RegExp(`\\s*·\\s*${count}\\s*$`), "").trim() : value;
+}
+
 function normalizeVehicleBrandValue(value) {
   return String(value || "").replace(/\|/g, " ").replace(/\s+/g, " ").trim();
 }
 
 const vehicleBrandOptions = computed(() => {
   const merged = new Map(options.brand.map((item) => {
-    const value = normalizeVehicleBrandValue(item.value);
+    const value = normalizeVehicleBrandValue(optionValue(item));
     return [value, { value, label: optionLabel(item) }];
   }).filter(([value]) => value));
   for (const brand of vehicleCatalog.brands) {
@@ -34,7 +40,10 @@ const vehicleBrandOptions = computed(() => {
   return [...merged.values()];
 });
 const vehicleModelOptions = computed(() => {
-  const merged = new Map(options.vehicle_model.map((item) => [item.value, { name: item.value, label: optionLabel(item) }]));
+  const merged = new Map(options.vehicle_model.map((item) => {
+    const value = optionValue(item);
+    return [value, { name: value, label: optionLabel(item) }];
+  }));
   const selectedBrand = normalizeVehicleBrandValue(props.modelValue.vehicleBrand);
   const brand = vehicleCatalog.brands.find((item) => item.name === props.modelValue.vehicleBrand || item.name === selectedBrand);
   for (const model of Array.isArray(brand?.models) ? brand.models : []) {
@@ -85,7 +94,8 @@ async function loadOption(type) {
 
 function optionLabel(item) {
   const count = Number(item?.linked_product_count ?? item?.usage_count ?? 0);
-  return count > 0 ? `${item.label} · ${count}` : item.label;
+  const label = String(item?.label ?? optionValue(item)).replace(count > 0 ? new RegExp(`\\s*·\\s*${count}\\s*$`) : /$^/, "").trim();
+  return count > 0 ? `${label} · ${count}` : label;
 }
 
 function noDataText(type) {
@@ -150,7 +160,7 @@ watch(
       <div class="search-group__title"><strong>产品身份</strong><span>汽车品牌和车型不选表示不限制搜索条件</span></div>
       <el-form-item label="核心品名">
         <el-select :model-value="modelValue.inventoryCategory" filterable clearable :loading="optionState.category.loading" :no-data-text="noDataText('category')" placeholder="输入或选择核心品名" @visible-change="retryOption('category', $event)" @update:model-value="update('inventoryCategory', $event)">
-          <el-option v-for="item in options.category" :key="item.id || item.value" :label="optionLabel(item)" :value="item.value" />
+          <el-option v-for="item in options.category" :key="item.id || optionValue(item)" :label="optionLabel(item)" :value="optionValue(item)" />
         </el-select>
       </el-form-item>
       <el-form-item label="汽车品牌">
@@ -168,22 +178,22 @@ watch(
       <div class="search-group__title"><strong>规格属性</strong><span>未选择表示不限制</span></div>
       <el-form-item label="颜色">
         <el-select :model-value="modelValue.color" filterable clearable :loading="optionState.color.loading" :no-data-text="noDataText('color')" placeholder="全部颜色" @visible-change="retryOption('color', $event)" @update:model-value="update('color', $event)">
-          <el-option v-for="item in options.color" :key="item.value" :label="optionLabel(item)" :value="item.value" />
+          <el-option v-for="item in options.color" :key="optionValue(item)" :label="optionLabel(item)" :value="optionValue(item)" />
         </el-select>
       </el-form-item>
       <el-form-item label="款式">
         <el-select :model-value="modelValue.accessoryName" filterable clearable :loading="optionState.accessory.loading" :no-data-text="noDataText('accessory')" :disabled="!modelValue.inventoryCategory" placeholder="选择款式" @visible-change="retryOption('accessory', $event)" @update:model-value="update('accessoryName', $event)">
-          <el-option v-for="item in options.accessory" :key="item.value" :label="optionLabel(item)" :value="item.value" />
+          <el-option v-for="item in options.accessory" :key="optionValue(item)" :label="optionLabel(item)" :value="optionValue(item)" />
         </el-select>
       </el-form-item>
       <el-form-item label="材质">
         <el-select :model-value="modelValue.material" multiple filterable clearable collapse-tags :loading="optionState.material.loading" :no-data-text="noDataText('material')" placeholder="全部材质" @visible-change="retryOption('material', $event)" @update:model-value="update('material', $event)">
-          <el-option v-for="item in options.material" :key="item.value" :label="optionLabel(item)" :value="item.value" />
+          <el-option v-for="item in options.material" :key="optionValue(item)" :label="optionLabel(item)" :value="optionValue(item)" />
         </el-select>
       </el-form-item>
       <el-form-item label="工艺">
         <el-select :model-value="modelValue.process" filterable clearable :loading="optionState.process.loading" :no-data-text="noDataText('process')" placeholder="全部工艺" @visible-change="retryOption('process', $event)" @update:model-value="update('process', $event)">
-          <el-option v-for="item in options.process" :key="item.value" :label="optionLabel(item)" :value="item.value" />
+          <el-option v-for="item in options.process" :key="optionValue(item)" :label="optionLabel(item)" :value="optionValue(item)" />
         </el-select>
       </el-form-item>
       <el-form-item v-if="showKeyword" label="产品名称">
