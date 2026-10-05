@@ -59,6 +59,7 @@ const orderCoverageConclusion = computed(() => {
 const pendingCosts = computed(() => (data.value?.cost_tasks || []).filter(row => Number(row.quantity) > Number(row.resolved_quantity)));
 let loadVersion = 0;
 const labels = {
+  receive_and_count: '历史实收补登记与库存校准',
   set_priority: '调整现货分配优先级', link_stock_cost: '关联已有采购成本',
   record_purchase: '补现货采购成本',
   historical_purchase_bulk: '批量补齐历史采购',
