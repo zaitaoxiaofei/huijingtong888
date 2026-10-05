@@ -1162,7 +1162,10 @@ async function loadSuggestions(queryOverride = "") {
       quickInventoryResults.value = products;
     }
   } catch (error) {
-    if (requestVersion === suggestionRequestVersion) state.suggestions = [];
+    if (requestVersion === suggestionRequestVersion) {
+      state.suggestions = [];
+      if (!bindVisible.value && activeItem.value) quickInventoryResults.value = [];
+    }
   } finally {
     if (requestVersion === suggestionRequestVersion) suggestionLoading.value = false;
   }
@@ -1188,7 +1191,7 @@ function normalizeQuickInventoryProduct(product) {
   return {
     product_id: productId,
     product_name: product?.name || product?.product_name || "未命名库存商品",
-    product_code: product?.inventory_id || product?.code || product?.product_code || "-",
+    product_code: product?.inventory_number || product?.inventory_id || product?.code || product?.product_code || "-",
     image_url: product?.image_url || (productId ? `/api/products/${productId}/image?thumb=1&w=180` : "")
   };
 }

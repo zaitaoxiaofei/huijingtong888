@@ -65,4 +65,5 @@ test("procurement workspace keeps high-frequency actions together and automatica
   assert.match(page, /fetchQuickInventoryProducts\(text, "name"\)/);
   assert.match(page, /fetchQuickInventoryProducts\(coreName, "name"\)/);
   assert.match(page, /quickInventorySearch\.productName = text/);
+  assert.match(page, /product\?\.inventory_number \|\| product\?\.inventory_id/);
 });
