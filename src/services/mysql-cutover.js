@@ -21761,6 +21761,9 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
   ensureMysqlCutoverEnabled();
   await ensureInboundRecordTimestampSchemaMysql();
   await ensurePurchaseCostVersionSchemaMysql();
+  if (body.historical_receipt_groups !== undefined) {
+    return procurementLedgerService.receiveAndCount({ groups: body.historical_receipt_groups, request_key: body.request_key }, sessionPersonId);
+  }
   const records = Array.isArray(body.records) ? body.records : [];
   if (!records.length) throw new Error("Please select inbound records to update");
   const receiptRecords = records.map((record) => ({
@@ -21810,6 +21813,7 @@ export async function previewInboundReceiptImpactMysql(body = {}) {
   `, ids);
   if (rows.length !== ids.length) throw new Error('部分采购批次已入库或已变化，请刷新后重新核对');
   const impacts = [];
+  const ledgers = new Map();
   for (const row of rows) {
     const receiveQuantity = Number(inputById.get(Number(row.id)) || row.quantity || 0);
     if (!Number.isInteger(receiveQuantity) || receiveQuantity < 1 || receiveQuantity > Number(row.quantity)) {
@@ -21825,12 +21829,16 @@ export async function previewInboundReceiptImpactMysql(body = {}) {
     ]);
     const stockBefore = Number(balance?.quantity || 0);
     const historicalOutbound = Number(outbound?.quantity || 0);
+    if (!ledgers.has(Number(row.product_id))) ledgers.set(Number(row.product_id), await procurementLedgerService.read({ product_id: row.product_id, include_fbp: false }));
+    const ledger = ledgers.get(Number(row.product_id));
     impacts.push({ id: Number(row.id), product_id: Number(row.product_id), product_name: row.product_name || '', unit: row.stock_unit || '件',
+      revision: ledger.revision, physical_before: ledger.physical_estimate, has_stocktake: Boolean(ledger.stocktake_id),
       receive_quantity: receiveQuantity, stock_before: stockBefore, stock_after: stockBefore + receiveQuantity,
       historical_outbound_quantity: historicalOutbound,
       purchase_time: row.purchased_at || row.created_at });
   }
-  return { impacts, requires_confirmation: impacts.some((item) => item.historical_outbound_quantity > 0) };
+  return { impacts, requires_confirmation: impacts.some((item) => item.historical_outbound_quantity > 0),
+    suggest_historical: impacts.some(item => item.historical_outbound_quantity > 0 || item.has_stocktake) };
 }
 
 export function startBatchUpdateInboundRecordsMysql(body = {}, sessionPersonId = null) {

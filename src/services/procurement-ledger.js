@@ -82,7 +82,23 @@ export function planLedgerAction(snapshot, body) {
   if (!reason || reason.length > 1000) throw new Error('请在调整说明中填写真实原因或凭证编号（1～1000 字）');
   const type = String(body.action_type || '');
   const result = { type, reason, quantity: 0, local_delta: 0, target_delta: 0, amount: 0, shipping_amount: 0 };
-  if (type === 'set_priority') {
+  if (type === 'receive_and_count') {
+    Object.assign(result, countedStock(snapshot, body.counted_quantity));
+    if (!Array.isArray(body.receipts) || !body.receipts.length) throw new Error('请选择需要补登记的采购批次（receipts）');
+    const ids = new Set();
+    result.receipts = body.receipts.map(row => {
+      const id = integer(row.id, '采购批次 ID');
+      const batch = snapshot.batches.find(item => Number(item.id) === id && item.status === 'pending_arrival');
+      const quantity = integer(row.receive_quantity, '这批实际收到数量');
+      if (!batch || ids.has(id) || quantity > Number(batch.quantity)) throw new Error('采购批次重复、已收货或数量已变化，请重新打开补登记');
+      if (Number(row.expected_remaining_quantity) !== Number(batch.quantity)) throw new Error('待收数量已变化，请重新打开补登记');
+      ids.add(id);
+      return { id, receive_quantity: quantity, expected_remaining_quantity: Number(batch.quantity) };
+    });
+    result.quantity = result.receipts.reduce((sum, row) => sum + row.receive_quantity, 0);
+    result.local_delta = result.stocktake_delta;
+    result.receipt_count_adjustment = result.stocktake_delta - result.quantity;
+  } else if (type === 'set_priority') {
     result.order_item_id = integer(body.order_item_id, '要调整优先级的订单明细（order_item_id）');
     if (!snapshot.orders.some(row => row.order_item_id === result.order_item_id && row.needs_fulfillment)) throw new Error('只能调整待履约本地订单的现货分配优先级，请刷新库存明细');
     if (![0, 1].includes(body.priority)) throw new Error('请选择优先分配或恢复按下单时间分配（priority）');
@@ -319,7 +335,7 @@ export function createProcurementLedgerService(hooks) {
   async function read(body) {
     await prepare();
     const id = integer(body.product_id || body.productId, '库存商品 ID');
-    const [value, fbp] = await Promise.all([snapshot(id), hooks.fbpStocks ? hooks.fbpStocks(id) : null]);
+    const [value, fbp] = await Promise.all([snapshot(id), hooks.fbpStocks && body.include_fbp !== false ? hooks.fbpStocks(id) : null]);
     if (fbp) value.fbp_inventory = fbp;
     return value;
   }
@@ -336,12 +352,13 @@ export function createProcurementLedgerService(hooks) {
       WHERE ${where} ORDER BY t.id ASC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
     return { rows, total: Number(count?.total || 0), page, pageSize };
   }
-  async function apply(body, personId) {
-    await prepare();
+  async function apply(body, personId, existingConnection = null) {
+    if (!existingConnection) await prepare();
     const productId = integer(body.product_id, '库存商品 ID');
     const requestKey = String(body.request_key || '');
     if (!/^[a-zA-Z0-9-]{16,80}$/.test(requestKey)) throw new Error('本次操作标识缺失，请重新打开对账窗口');
-    const result = await transaction(async connection => {
+    const transact = existingConnection ? callback => callback(existingConnection) : transaction;
+    const result = await transact(async connection => {
       const run = (sql, args = []) => connection.query(sql, args).then(([rows]) => rows);
       const actor = await requirePerson(personId, connection);
       const extraSources = conversionSources(body, productId);
@@ -435,6 +452,11 @@ export function createProcurementLedgerService(hooks) {
         await recordCost(connection, { product_id: productId, source_key: `purchase_order_item:${item.insertId}:purchased`,
           stage: 'historical_backfill', purchase_order_id: purchaseOrderId, purchase_order_item_id: Number(item.insertId),
           quantity: plan.quantity, amount: plan.amount, shipping_amount: plan.shipping_amount, person_id: actor, anomaly_reason: plan.reason });
+      } else if (plan.type === 'receive_and_count') {
+        for (const receipt of plan.receipts) await receive(connection, receipt.id, {
+          ...receipt, status: 'approved', qc_status: 'approved', receipt_context: `${note}；历史到货补登记并按当前实物校准`
+        }, { sessionPersonId: actor });
+        await movement(productId, plan.receipt_count_adjustment, 'reconciliation_stocktake');
       } else if (plan.type === 'set_priority') {
         await connection.execute(`INSERT INTO inventory_order_priorities (product_id, order_item_id, priority, action_id) VALUES (?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE priority = VALUES(priority), action_id = VALUES(action_id)`, [productId, plan.order_item_id, plan.priority, actionId]);
@@ -470,6 +492,7 @@ export function createProcurementLedgerService(hooks) {
       }
       const response = { ok: true, action_id: actionId, action_type: plan.type, purchase_order_id: purchaseOrderId,
         quantity: plan.quantity,
+        ...(plan.receipts ? { receipts: plan.receipts, receipt_count_adjustment: plan.receipt_count_adjustment } : {}),
         allocations: plan.allocations || [],
         extra_sources: extraSources, cost_task_id: plan.cost_task_id || null,
         ...(plan.type === 'convert' ? { conversion_cost_amount: conversionAmount } : {}),
@@ -483,8 +506,26 @@ export function createProcurementLedgerService(hooks) {
       await connection.execute('UPDATE procurement_ledger_actions SET result_json = ? WHERE id = ?', [JSON.stringify(response), actionId]);
       return response;
     });
-    hooks.invalidate();
+    if (!existingConnection) hooks.invalidate();
     return result;
+  }
+  async function receiveAndCount(body, personId) {
+    await prepare();
+    if (!Array.isArray(body.groups) || !body.groups.length || body.groups.length > 100) throw new Error('请选择 1 至 100 个库存商品并填写当前实物数量');
+    const groups = [...body.groups].sort((a, b) => Number(a.product_id) - Number(b.product_id));
+    if (new Set(groups.map(row => Number(row.product_id))).size !== groups.length) throw new Error('同一库存只填写一次当前实物总数');
+    if (!/^[a-zA-Z0-9-]{16,50}$/.test(String(body.request_key || ''))) throw new Error('补登记操作标识缺失，请重新打开弹窗');
+    const results = await transaction(async connection => {
+      for (const group of groups) await connection.query('SELECT id FROM products WHERE id = ? FOR UPDATE', [integer(group.product_id, '库存商品 ID')]);
+      const results = [];
+      for (const group of groups) results.push(await apply({ product_id: group.product_id, revision: group.revision,
+        counted_quantity: group.counted_quantity, receipts: group.receipts, action_type: 'receive_and_count',
+        reason: '历史到货漏登记；按当前仓库实物校准，保留原出库记录，历史来源待核对',
+        request_key: `${body.request_key}-${group.product_id}` }, personId, connection));
+      return results;
+    });
+    hooks.invalidate();
+    return { ok: true, results };
   }
   async function revisePurchase(connection, run, before, plan, actor, note, actionId) {
     const item = plan.item;
@@ -584,7 +625,7 @@ export function createProcurementLedgerService(hooks) {
       ...(plan.counted_quantity !== undefined ? { physical_after: plan.counted_quantity } : {}),
       target_before: target?.local_stock, target_after: target ? target.local_stock + plan.target_delta : null };
   }
-  return { read, apply, preview, costTasks };
+  return { read, apply, preview, costTasks, receiveAndCount };
 }
 
 export function planReceiptCorrection(batches, received, quantity) {

@@ -1033,15 +1033,15 @@ async function loadOrderProcurementBatches(row) {
 }
 
 const shippedReceiptDialog = reactive({ visible: false, loading: false, saving: false, orderIds: [], records: [], skipped: [], sourceOrderId: null });
-const procurementReceiptDialog = reactive({ visible: false, saving: false, loadingImpact: false, orderId: null, batches: [], impacts: [], impactConfirmed: false });
+const procurementReceiptDialog = reactive({ visible: false, saving: false, loadingImpact: false, orderId: null, batches: [], impacts: [], mode: 'normal', counts: {}, requestKey: '' });
 const procurementReceiptSummary = computed(() => {
   const summaries = new Map();
   for (const impact of procurementReceiptDialog.impacts) {
     const batch = procurementReceiptDialog.batches.find(item => Number(item.id) === Number(impact.id));
-    if (!batch) continue;
+    if (!batch?.selected) continue;
     const key = Number(impact.product_id);
     const summary = summaries.get(key) || {
-      product_id: key, product_name: impact.product_name, unit: impact.unit,
+      product_id: key, product_name: impact.product_name, unit: impact.unit, revision: impact.revision,
       stock_before: Number(impact.stock_before || 0), receive_quantity: 0,
       historical_outbound_quantity: 0
     };
@@ -1109,7 +1109,7 @@ async function handleConfirmProcurementInbound(row, selectedInboundRecordId = 0)
       receive_quantity: Number(batch.quantity || 0)
     })),
     impacts: [],
-    impactConfirmed: false
+    mode: 'normal', counts: {}, requestKey: crypto.randomUUID()
   });
   procurementReceiptDialog.loadingImpact = true;
   try {
@@ -1117,6 +1117,7 @@ async function handleConfirmProcurementInbound(row, selectedInboundRecordId = 0)
       records: procurementReceiptDialog.batches.map(batch => ({ id: batch.id, receive_quantity: Number(batch.receive_quantity) }))
     });
     procurementReceiptDialog.impacts = result.impacts || [];
+    if (result.suggest_historical || result.requires_confirmation) procurementReceiptDialog.mode = 'historical';
   } catch (error) {
     ElMessage.warning(error.message || '无法读取入库影响，请刷新后重试');
   } finally { procurementReceiptDialog.loadingImpact = false; }
@@ -1133,21 +1134,28 @@ async function confirmProcurementReceipt() {
       return;
     }
   }
-  const impacts = procurementReceiptDialog.impacts.filter(impact => records.some(batch => Number(batch.id) === Number(impact.id)));
-  if (impacts.some(impact => Number(impact.historical_outbound_quantity || 0) > 0) && !procurementReceiptDialog.impactConfirmed) {
-    ElMessage.warning('请先确认历史订单出库已在账，再登记本次实收');
-    return;
+  const historical = procurementReceiptDialog.mode === 'historical';
+  if (procurementReceiptDialog.loadingImpact || records.some(batch => !procurementReceiptDialog.impacts.some(impact => Number(impact.id) === Number(batch.id)))) {
+    ElMessage.warning('库存影响尚未加载完成，请重新打开登记实收后再试'); return;
+  }
+  if (historical && procurementReceiptSummary.value.some(row => procurementReceiptDialog.counts[row.product_id] == null || !Number.isInteger(procurementReceiptDialog.counts[row.product_id]) || procurementReceiptDialog.counts[row.product_id] < 0)) {
+    ElMessage.warning('请填写每个库存商品当前仓库实物总数（counted_quantity）；没有货请填 0，不清楚请先由仓库清点'); return;
   }
   procurementReceiptDialog.saving = true;
   confirmingInboundRecordId.value = Number(records[0].id);
   try {
-    await apiClient.post('/api/inbound-records/batch-update', { records: records.map(batch => ({ id: batch.id, payload: {
+    await apiClient.post('/api/inbound-records/batch-update', historical ? {
+      request_key: procurementReceiptDialog.requestKey,
+      historical_receipt_groups: procurementReceiptSummary.value.map(row => ({ product_id: row.product_id, revision: row.revision,
+        counted_quantity: procurementReceiptDialog.counts[row.product_id], receipts: records.filter(batch => procurementReceiptDialog.impacts.some(impact => Number(impact.id) === Number(batch.id) && Number(impact.product_id) === row.product_id))
+          .map(batch => ({ id: Number(batch.id), receive_quantity: Number(batch.receive_quantity), expected_remaining_quantity: Number(batch.quantity) })) }))
+    } : { records: records.map(batch => ({ id: batch.id, payload: {
       receive_quantity: Number(batch.receive_quantity), expected_remaining_quantity: Number(batch.quantity),
       version_updated_at: batch.updated_at, status: 'approved', qc_status: 'approved',
       receipt_context: `订单 #${procurementReceiptDialog.orderId} 登记实收`
-    }})), receipt_impact_confirmed: procurementReceiptDialog.impactConfirmed });
+    }})), receipt_impact_confirmed: true });
     procurementReceiptDialog.visible = false;
-    ElMessage.success('已按所选批次登记实收，未选或未收部分继续在途');
+    ElMessage.success(historical ? '已补登记收货并按实物校准库存，原出库记录保留，未收部分继续在途' : '已按所选批次登记实收，未选或未收部分继续在途');
     await loadOrders({ forceRefresh: true, silent: true });
   } catch (error) {
     ElMessage.error(error.message || '收货失败，请刷新后核对');
@@ -2601,19 +2609,20 @@ onBeforeUnmount(() => {
     <HistoricalPurchaseQuickDialog v-if="historicalPurchaseProducts.length" :products="historicalPurchaseProducts" @close="historicalPurchaseProducts = []" @saved="loadOrders()" />
     <el-dialog v-model="procurementReceiptDialog.visible" title="登记实际收货" width="92%" destroy-on-close>
       <p class="order-procurement-receipt-hint">勾选本次实际到货的采购批次并填写实收数量。未勾选的批次、以及部分收货的剩余数量，都会继续保留在途。</p>
-      <h3 class="order-procurement-receipt-section-title">本次入库结果</h3>
-      <el-alert v-if="receiptHasHistoricalOutbound" type="warning" :closable="false" show-icon class="order-procurement-receipt-impact">
-        <template #title>该商品采购后已有订单出库流水。登记实收会增加本地账面，但历史订单的出库扣减已保留，因此不会把已发货数量重复算作可用库存。</template>
+      <el-radio-group v-model="procurementReceiptDialog.mode" :disabled="procurementReceiptDialog.saving"><el-radio-button value="normal">本次新到货</el-radio-button><el-radio-button value="historical">早已到货，补登记</el-radio-button></el-radio-group>
+      <h3 class="order-procurement-receipt-section-title">{{ procurementReceiptDialog.mode === 'historical' ? '确认当前仓库实物' : '本次入库结果' }}</h3>
+      <el-alert v-if="procurementReceiptDialog.mode === 'historical'" type="info" :closable="false" show-icon class="order-procurement-receipt-impact">
+        <template #title>填写该库存现在仓库所有批次合计的实物数量，含已打包未发货，不含采购在途。保存后本地库存以此数量为准，不会再叠加本次补登记数量；原出库记录保留。不清楚数量请先让仓库清点。</template>
+      </el-alert>
+      <el-alert v-else-if="receiptHasHistoricalOutbound" type="warning" :closable="false" title="本次新到货会增加库存；如果这批早已到货或已计入盘点，请选择“早已到货，补登记”。">
       </el-alert>
       <el-table v-if="procurementReceiptSummary.length" :data="procurementReceiptSummary" size="small" border class="order-procurement-receipt-impact" max-height="180">
         <el-table-column prop="product_name" label="库存商品" min-width="220" />
-        <el-table-column label="入库前账面" width="120" align="right"><template #default="{ row }">{{ row.stock_before }} {{ row.unit }}</template></el-table-column>
-        <el-table-column label="本次实收" width="110" align="right"><template #default="{ row }">+{{ row.receive_quantity }} {{ row.unit }}</template></el-table-column>
-        <el-table-column label="登记后账面" width="130" align="right"><template #default="{ row }"><strong>{{ row.stock_after }} {{ row.unit }}</strong></template></el-table-column>
+        <el-table-column v-if="procurementReceiptDialog.mode !== 'historical'" label="入库前账面" width="120" align="right"><template #default="{ row }">{{ row.stock_before }} {{ row.unit }}</template></el-table-column>
+        <el-table-column :label="procurementReceiptDialog.mode === 'historical' ? '补登记收货数量' : '本次实收'" width="140" align="right"><template #default="{ row }">{{ procurementReceiptDialog.mode === 'historical' ? '' : '+' }}{{ row.receive_quantity }} {{ row.unit }}</template></el-table-column>
+        <el-table-column v-if="procurementReceiptDialog.mode === 'historical'" label="当前仓库实物总数" width="230"><template #default="{ row }"><el-input-number v-model="procurementReceiptDialog.counts[row.product_id]" :min="0" :precision="0" :disabled="procurementReceiptDialog.saving" placeholder="无货填 0" /> {{ row.unit }}</template></el-table-column>
+        <el-table-column v-else label="登记后账面" width="130" align="right"><template #default="{ row }"><strong>{{ row.stock_after }} {{ row.unit }}</strong></template></el-table-column>
       </el-table>
-      <el-checkbox v-if="receiptHasHistoricalOutbound" v-model="procurementReceiptDialog.impactConfirmed" class="order-procurement-receipt-impact">
-        我已核对：历史订单出库已在库存账中扣减，本次仅登记实际到货。
-      </el-checkbox>
       <h3 class="order-procurement-receipt-section-title">确认采购批次</h3>
       <el-table :data="procurementReceiptDialog.batches" border max-height="60vh">
         <el-table-column label="本次到货" width="96" align="center">
