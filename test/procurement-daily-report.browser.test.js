@@ -35,9 +35,9 @@ test("daily export downloads embedded images and exposes copyable WeChat summary
     });
     await page.goto("http://localhost:8788/admin.html");
     const downloadPromise = page.waitForEvent("download");
-    await page.getByRole("button", { name: "导出每日采购清单" }).click();
+    await page.getByRole("button", { name: "导出当前筛选" }).click();
     const download = await downloadPromise;
-    assert.match(download.suggestedFilename(), /^每日采购清单-\d{4}-\d{2}-\d{2}\.xlsx$/);
+    assert.match(download.suggestedFilename(), /^采购清单-\d{4}-\d{2}-\d{2}\.xlsx$/);
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(await download.path());
     assert.equal(workbook.getWorksheet("每日采购清单").getImages().length, 1);
@@ -48,7 +48,7 @@ test("daily export downloads embedded images and exposes copyable WeChat summary
     await page.screenshot({ path: "/tmp/procurement-daily-export.png" });
     await page.getByRole("button", { name: "关闭", exact: true }).click();
     empty = true;
-    await page.getByRole("button", { name: "导出每日采购清单" }).click();
+    await page.getByRole("button", { name: "导出当前筛选" }).click();
     await page.getByText(/暂无已确认采购记录/).waitFor();
     assert.deepEqual(errors, []);
   } finally {

@@ -56,3 +56,13 @@ test("free purchase derives its inventory name from the standard naming fields",
   assert.match(page, /请先完成核心品名和款式/);
   assert.match(page, /structured_naming: \{/);
 });
+
+test("procurement workspace keeps high-frequency actions together and automatically searches existing inventory", () => {
+  assert.doesNotMatch(page, /<el-button[^>]*>采购与库存对账<\/el-button>/);
+  assert.doesNotMatch(page, /<el-button[^>]*>现货成本待核<\/el-button>/);
+  assert.doesNotMatch(page, /系统任务采购（/);
+  assert.match(page, /<DailyPurchaseExport :filters="state\.filters" \/>/);
+  assert.match(page, /fetchQuickInventoryProducts\(text, "name"\)/);
+  assert.match(page, /fetchQuickInventoryProducts\(coreName, "name"\)/);
+  assert.match(page, /quickInventorySearch\.productName = text/);
+});

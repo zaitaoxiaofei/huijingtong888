@@ -126,6 +126,7 @@ const orderHistorySummary = ref({ total_quantity: 0, shortage_quantity: 0, in_tr
 const orderHistoryActiveTab = ref("purchase");
 const priceAnomalyReasons = ["供应商涨价", "采购数量较少", "临时加急采购", "更换供应商", "商品规格或质量升级", "包含额外商品或服务", "历史价格不准确", "其他原因"];
 let suggestionTimer = null;
+let suggestionRequestVersion = 0;
 
 const state = reactive({
   rows: [],
@@ -1143,13 +1144,27 @@ async function loadSuggestions(queryOverride = "") {
     state.suggestions = [];
     return;
   }
+  const requestVersion = ++suggestionRequestVersion;
   suggestionLoading.value = true;
   try {
-    state.suggestions = await apiClient.get(`/api/procurement/binding-suggestions?query=${encodeURIComponent(text)}`) || [];
+    const suggestionPromise = apiClient.get(`/api/procurement/binding-suggestions?query=${encodeURIComponent(text)}`);
+    const shouldSearchProducts = !bindVisible.value && Boolean(activeItem.value);
+    let productsPromise = shouldSearchProducts ? fetchQuickInventoryProducts(text, "name") : Promise.resolve([]);
+    const [suggestionsResult, productsResult] = await Promise.allSettled([suggestionPromise, productsPromise]);
+    if (requestVersion !== suggestionRequestVersion) return;
+    state.suggestions = suggestionsResult.status === "fulfilled" && Array.isArray(suggestionsResult.value) ? suggestionsResult.value : [];
+    if (shouldSearchProducts) {
+      quickInventorySearch.productName = text;
+      let products = productsResult.status === "fulfilled" ? productsResult.value : [];
+      const coreName = String(activeItem.value?.structured_naming?.inventoryCategory || "").trim();
+      if (!products.length && coreName && coreName !== text) products = await fetchQuickInventoryProducts(coreName, "name");
+      if (requestVersion !== suggestionRequestVersion) return;
+      quickInventoryResults.value = products;
+    }
   } catch (error) {
-    state.suggestions = [];
+    if (requestVersion === suggestionRequestVersion) state.suggestions = [];
   } finally {
-    suggestionLoading.value = false;
+    if (requestVersion === suggestionRequestVersion) suggestionLoading.value = false;
   }
 }
 
@@ -1178,14 +1193,18 @@ function normalizeQuickInventoryProduct(product) {
   };
 }
 
+async function fetchQuickInventoryProducts(query, mode = "name") {
+  const params = new URLSearchParams({ paged: "1", page: "1", pageSize: "12", query, searchMode: mode });
+  const result = await apiClient.get(`/api/products?${params.toString()}`);
+  return (Array.isArray(result?.rows) ? result.rows : []).map(normalizeQuickInventoryProduct);
+}
+
 async function searchQuickInventory(mode) {
   const query = String(mode === "inventory_id" ? quickInventorySearch.inventoryId : quickInventorySearch.productName).trim();
   if (!query) return ElMessage.warning(mode === "inventory_id" ? "请输入库存 ID" : "请输入商品名称");
   quickInventoryLoading.value = true;
   try {
-    const params = new URLSearchParams({ paged: "1", page: "1", pageSize: "12", query, searchMode: mode });
-    const result = await apiClient.get(`/api/products?${params.toString()}`);
-    quickInventoryResults.value = (Array.isArray(result?.rows) ? result.rows : []).map(normalizeQuickInventoryProduct);
+    quickInventoryResults.value = await fetchQuickInventoryProducts(query, mode);
   } catch (error) {
     quickInventoryResults.value = [];
     ElMessage.error(error.message || "搜索库存商品失败");
@@ -1389,11 +1408,9 @@ onMounted(async () => {
     <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-tab="ledgerInitialTab" @saved="loadRows(); costTasksVisible && loadCostTasks(costTasks.page); orderHistoryVisible && openOrderHistory(orderHistoryProduct)" />
     <ErpPageHeader title="采购工作台" description="系统自动汇总采购需求；采购人员按供应商集中下单，不再逐个订单处理。">
       <template #actions>
-        <DailyPurchaseExport />
-        <el-button @click="openLedger()">采购与库存对账</el-button>
-        <el-button type="warning" plain @click="openCostTasks">现货成本待核</el-button>
-        <el-button type="primary" plain>系统任务采购（{{ state.total }}）</el-button>
-        <el-button type="primary" @click="openCreate">＋ 自由采购</el-button>
+        <el-button type="primary" :disabled="!selectedDemandRows.length" @click="openBulkPurchase">采购选中（{{ selectedDemandRows.length }}）</el-button>
+        <el-button type="primary" plain @click="openCreate">＋ 自由采购</el-button>
+        <DailyPurchaseExport :filters="state.filters" />
         <el-button class="erp-btn erp-btn-secondary" :loading="demandRefreshing" @click="refreshWorkbench">{{ demandRefreshing ? '需求更新中' : '刷新' }}</el-button>
       </template>
     </ErpPageHeader>
@@ -1457,7 +1474,6 @@ onMounted(async () => {
           </el-form-item>
         </el-form>
         <template #actions>
-          <el-button type="primary" :disabled="!selectedDemandRows.length" @click="openBulkPurchase">采购选中（{{ selectedDemandRows.length }}）</el-button>
           <el-button type="primary" @click="handleSearch">查询</el-button>
           <el-button @click="handleReset">重置</el-button>
         </template>
