@@ -21711,7 +21711,9 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
     throw new Error('该收货记录已有对账历史，请通过“采购与库存对账”继续纠正，避免重复改变本地库存');
   }
   if (body.receive_quantity !== undefined) {
-    const receipt = planPartialReceipt(existing, body.receive_quantity, body.expected_remaining_quantity);
+    const purchaseQuantity = Number(body.purchase_quantity ?? existing.quantity);
+    if (!Number.isInteger(purchaseQuantity) || purchaseQuantity < 1) throw new Error("采购数必须为正整数");
+    const receipt = planPartialReceipt({ ...existing, quantity: Math.max(purchaseQuantity, Number(body.receive_quantity || 0)) }, body.receive_quantity, body.expected_remaining_quantity);
     if (receipt.remaining > 0) {
       await connection.execute(`INSERT INTO inbound_records
         (product_id, person_id, quantity, amount, unit_cost, shipping_amount, purchase_url, status, note,
@@ -22108,22 +22110,11 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
   }
   const records = Array.isArray(body.records) ? body.records : [];
   if (!records.length) throw new Error("Please select inbound records to update");
-  const receiptRecords = records.map((record) => ({
-    id: Number(record.id ?? record.inbound_record_id),
-    receive_quantity: record.payload?.receive_quantity ?? record.receive_quantity
-  })).filter((record) => record.id && record.receive_quantity !== undefined);
-  if (receiptRecords.length && body.receipt_impact_confirmed !== true) {
-    const impact = await previewInboundReceiptImpactMysql({ records: receiptRecords });
-    if (impact.requires_confirmation) {
-      throw Object.assign(new Error('该采购批次之后已有订单出库流水。请先在“登记实际收货”中核对库存影响，再确认入库，避免把历史已发货数量误当作可用库存。'), {
-        statusCode: 409,
-        receipt_impact: impact
-      });
-    }
-  }
-  if (receiptRecords.length && body.receipt_impact_confirmed === true && !String(body.receipt_impact_reason || "").trim()) {
-    throw new Error("请先选择库存影响处理原因，再强制确认入库");
-  }
+  const hasQuantityDifference = records.some((record) => {
+    const payload = record.payload && typeof record.payload === "object" ? record.payload : record;
+    return payload.receive_quantity !== undefined && Number(payload.purchase_quantity ?? payload.quantity) !== Number(payload.receive_quantity);
+  });
+  if (hasQuantityDifference && !String(body.receipt_difference_reason || "").trim()) throw new Error("采购数与实收数不一致，请选择差异原因");
   const result = await withMysqlTransaction(async (connection) => {
     const changedPurchaseOrderIds = new Set();
     const ids = [];
@@ -22131,10 +22122,10 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
       const inboundId = Number(record.id ?? record.inbound_record_id);
       if (!inboundId) continue;
       const payload = record.payload && typeof record.payload === "object" ? record.payload : record;
-      if (body.receipt_impact_confirmed === true) {
-        const reason = String(body.receipt_impact_reason || "").trim();
-        const detail = String(body.receipt_impact_note || "").trim();
-        payload.note = `${payload.note || ""}；库存影响确认：${reason}${detail ? `（${detail}）` : ""}；操作人 #${sessionPersonId || "system"}；${normalizeMysqlDateTime(new Date())}`;
+      if (Number(payload.purchase_quantity ?? payload.quantity) !== Number(payload.receive_quantity)) {
+        const reason = String(body.receipt_difference_reason || "").trim();
+        const detail = String(body.receipt_difference_note || "").trim();
+        payload.note = `${payload.note || ""}；收货差异：${reason}${detail ? `（${detail}）` : ""}；操作人 #${sessionPersonId || "system"}；${normalizeMysqlDateTime(new Date())}`;
       }
       await applyInboundRecordUpdateMysql(connection, inboundId, payload, { changedPurchaseOrderIds, sessionPersonId });
       ids.push(inboundId);
