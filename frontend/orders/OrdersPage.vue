@@ -187,6 +187,14 @@ const procurementUrgencyOptions = [
   { label: "普通", value: "normal" },
   { label: "加急", value: "urgent" }
 ];
+const orderProcurementModeOptions = [
+  { value: "shortage_purchase", label: "缺货采购", description: "本地没有可用现货，采购后进入在途，到货后登记实收。" },
+  { value: "inventory_update", label: "更新实存", description: "仓库已经盘清实物，填写本地实际剩余数量和当前库存总货值；不生成采购在途。" },
+  { value: "historical_debt_backfill", label: "历史采购补记", description: "只用于已经真实出库、运输或签收的历史欠账；当前待备货订单不能使用。", disabled: true }
+];
+function orderProcurementModeDescription(mode) { return orderProcurementModeOptions.find((item) => item.value === mode)?.description || orderProcurementModeOptions[0].description; }
+function orderProcurementQuantityLabel(mode) { return mode === "inventory_update" ? "实存数量" : "采购数量"; }
+function orderProcurementAmountLabel(mode) { return mode === "inventory_update" ? "库存总货值" : "货款"; }
 
 const statusTabLabelMap = computed(() => new Map((vm.statusTabs || []).map((item) => [item.value, item.label])));
 
@@ -901,6 +909,7 @@ function buildProcurementState(row = {}) {
   const stockCount = types.includes("stock_available");
   const incomingCount = types.includes("incoming_available");
   const requestCount = types.includes("procurement_request");
+  const backfillCount = types.includes("stock_record_backfill");
   const detail = incomingCount && requestCount
     ? "采购在途"
       : incomingCount
@@ -913,8 +922,8 @@ function buildProcurementState(row = {}) {
   return {
     handled: handled >= total,
     partial: handled > 0 && handled < total,
-    label: handled >= total ? (requestCount || incomingCount ? "采购在途" : "库存可满足") : "部分待采购",
-    detail,
+    label: handled >= total ? (backfillCount && !requestCount && !incomingCount ? "补采购记录" : requestCount || incomingCount ? "采购在途" : "库存可满足") : "部分待采购",
+    detail: backfillCount && !requestCount && !incomingCount ? "补采购记录 · 已到货" : detail,
     allocatedQuantity,
     latestPurchaseAt,
     inTransitDays,
@@ -947,7 +956,8 @@ function procurementDetailContent(row) {
       const inventoryName = inventory.productName || record.productName;
       const inventoryNumber = inventory.inventoryNumber || "";
       const isReceived = record.status === "approved";
-      const status = isReceived ? "已入库" : "等待入库";
+      const isBackfill = record.purchaseMode === "stock_record_backfill";
+      const status = isBackfill ? "补采购记录 · 已到货" : isReceived ? "已入库" : "等待入库";
       return h("tr", { class: isReceived ? "is-received" : "is-pending", key: record.id }, [
         h("td", { class: "orders-procurement-product" }, [h("strong", null, inventoryName), inventoryNumber ? h("small", null, `库存号：${inventoryNumber}`) : null]),
         h("td", null, formatDateTime(record.purchasedAt)),
@@ -961,7 +971,7 @@ function procurementDetailContent(row) {
         h("td", null, isReceived ? record.approvedByPersonName : "—"),
         h("td", null, isReceived ? formatDateTime(record.receivedAt) : "—"),
         h("td", { class: "orders-procurement-actions" }, [
-          !isReceived ? h("button", { class: "orders-procurement-receipt-button", type: "button", onClick: () => handleConfirmProcurementInbound(row, record.id) }, "登记入库") : null,
+          !isReceived && !isBackfill ? h("button", { class: "orders-procurement-receipt-button", type: "button", onClick: () => handleConfirmProcurementInbound(row, record.id) }, "登记入库") : null,
           h("button", { class: "orders-procurement-save-button", type: "button", onClick: () => saveProcurementReferences(record) }, "保存")
         ])
       ]);
@@ -1035,15 +1045,15 @@ async function loadOrderProcurementBatches(row) {
 }
 
 const shippedReceiptDialog = reactive({ visible: false, loading: false, saving: false, orderIds: [], records: [], skipped: [], sourceOrderId: null });
-const procurementReceiptDialog = reactive({ visible: false, saving: false, loadingImpact: false, orderId: null, batches: [], impacts: [], impactConfirmed: false });
+const procurementReceiptDialog = reactive({ visible: false, saving: false, loadingImpact: false, orderId: null, batches: [], impacts: [], mode: 'normal', counts: {}, requestKey: '' });
 const procurementReceiptSummary = computed(() => {
   const summaries = new Map();
   for (const impact of procurementReceiptDialog.impacts) {
     const batch = procurementReceiptDialog.batches.find(item => Number(item.id) === Number(impact.id));
-    if (!batch) continue;
+    if (!batch?.selected) continue;
     const key = Number(impact.product_id);
     const summary = summaries.get(key) || {
-      product_id: key, product_name: impact.product_name, unit: impact.unit,
+      product_id: key, product_name: impact.product_name, unit: impact.unit, revision: impact.revision,
       stock_before: Number(impact.stock_before || 0), receive_quantity: 0,
       historical_outbound_quantity: 0
     };
@@ -1111,7 +1121,7 @@ async function handleConfirmProcurementInbound(row, selectedInboundRecordId = 0)
       receive_quantity: Number(batch.quantity || 0)
     })),
     impacts: [],
-    impactConfirmed: false
+    mode: 'normal', counts: {}, requestKey: crypto.randomUUID()
   });
   procurementReceiptDialog.loadingImpact = true;
   try {
@@ -1119,6 +1129,7 @@ async function handleConfirmProcurementInbound(row, selectedInboundRecordId = 0)
       records: procurementReceiptDialog.batches.map(batch => ({ id: batch.id, receive_quantity: Number(batch.receive_quantity) }))
     });
     procurementReceiptDialog.impacts = result.impacts || [];
+    if (result.suggest_historical || result.requires_confirmation) procurementReceiptDialog.mode = 'historical';
   } catch (error) {
     ElMessage.warning(error.message || '无法读取入库影响，请刷新后重试');
   } finally { procurementReceiptDialog.loadingImpact = false; }
@@ -1135,21 +1146,28 @@ async function confirmProcurementReceipt() {
       return;
     }
   }
-  const impacts = procurementReceiptDialog.impacts.filter(impact => records.some(batch => Number(batch.id) === Number(impact.id)));
-  if (impacts.some(impact => Number(impact.historical_outbound_quantity || 0) > 0) && !procurementReceiptDialog.impactConfirmed) {
-    ElMessage.warning('请先确认历史订单出库已在账，再登记本次实收');
-    return;
+  const historical = procurementReceiptDialog.mode === 'historical';
+  if (procurementReceiptDialog.loadingImpact || records.some(batch => !procurementReceiptDialog.impacts.some(impact => Number(impact.id) === Number(batch.id)))) {
+    ElMessage.warning('库存影响尚未加载完成，请重新打开登记实收后再试'); return;
+  }
+  if (historical && procurementReceiptSummary.value.some(row => procurementReceiptDialog.counts[row.product_id] == null || !Number.isInteger(procurementReceiptDialog.counts[row.product_id]) || procurementReceiptDialog.counts[row.product_id] < 0)) {
+    ElMessage.warning('请填写每个库存商品当前仓库实物总数（counted_quantity）；没有货请填 0，不清楚请先由仓库清点'); return;
   }
   procurementReceiptDialog.saving = true;
   confirmingInboundRecordId.value = Number(records[0].id);
   try {
-    await apiClient.post('/api/inbound-records/batch-update', { records: records.map(batch => ({ id: batch.id, payload: {
+    await apiClient.post('/api/inbound-records/batch-update', historical ? {
+      request_key: procurementReceiptDialog.requestKey,
+      historical_receipt_groups: procurementReceiptSummary.value.map(row => ({ product_id: row.product_id, revision: row.revision,
+        counted_quantity: procurementReceiptDialog.counts[row.product_id], receipts: records.filter(batch => procurementReceiptDialog.impacts.some(impact => Number(impact.id) === Number(batch.id) && Number(impact.product_id) === row.product_id))
+          .map(batch => ({ id: Number(batch.id), receive_quantity: Number(batch.receive_quantity), expected_remaining_quantity: Number(batch.quantity) })) }))
+    } : { records: records.map(batch => ({ id: batch.id, payload: {
       receive_quantity: Number(batch.receive_quantity), expected_remaining_quantity: Number(batch.quantity),
       version_updated_at: batch.updated_at, status: 'approved', qc_status: 'approved',
       receipt_context: `订单 #${procurementReceiptDialog.orderId} 登记实收`
-    }})), receipt_impact_confirmed: procurementReceiptDialog.impactConfirmed });
+    }})), receipt_impact_confirmed: true });
     procurementReceiptDialog.visible = false;
-    ElMessage.success('已按所选批次登记实收，未选或未收部分继续在途');
+    ElMessage.success(historical ? '已补登记收货并按实物校准库存，原出库记录保留，未收部分继续在途' : '已按所选批次登记实收，未选或未收部分继续在途');
     await loadOrders({ forceRefresh: true, silent: true });
   } catch (error) {
     ElMessage.error(error.message || '收货失败，请刷新后核对');
@@ -1987,6 +2005,7 @@ function initializeProcurementPurchaseInputs() {
       ? recentPurchase.source_type
       : product.source_type || "1688";
     product.purchase_urgency = product.urgency || "normal";
+    product.procurement_purchase_mode = "shortage_purchase";
   }
 }
 
@@ -2106,7 +2125,8 @@ function procurementPurchasePayload() {
       note: String(product.purchase_note || "").trim(),
       source_type: product.purchase_source_type || "1688",
       urgency: product.purchase_urgency || "normal",
-      supplier_id: product.supplier_id || null
+      supplier_id: product.supplier_id || null,
+      purchase_mode: product.procurement_purchase_mode || "shortage_purchase"
     }));
 }
 
@@ -2121,8 +2141,16 @@ async function validateProcurementPurchaseInputs() {
     ElMessage.warning(`「${missingAmount.product_name || missingAmount.product_code || missingAmount.product_id}」的采购金额不能为负数；暂缺金额可先登记，后续补齐`);
     return false;
   }
+  const invalidInventoryUpdate = orderProcurementProducts.value.find((product) => selectedProducts.has(Number(product.product_id))
+    && product.procurement_purchase_mode === "inventory_update"
+    && ((Number(product.purchase_quantity) === 0 && Number(product.purchase_amount) !== 0)
+      || (Number(product.purchase_quantity) > 0 && !(Number(product.purchase_amount) > 0))));
+  if (invalidInventoryUpdate) {
+    ElMessage.warning(`「${invalidInventoryUpdate.product_name || invalidInventoryUpdate.product_code}」请同时填写本地实际剩余数量和当前库存总货值`);
+    return false;
+  }
   const abnormalProducts = orderProcurementProducts.value.filter((product) => (
-    selectedProducts.has(Number(product.product_id)) && procurementCostVariance(product)?.abnormal
+    selectedProducts.has(Number(product.product_id)) && product.procurement_purchase_mode !== "inventory_update" && procurementCostVariance(product)?.abnormal
   ));
   if (!abnormalProducts.length) return true;
   const details = abnormalProducts.map((product) => {
@@ -2197,7 +2225,10 @@ async function submitOrderProcurement() {
     const createdCount = Number(result?.created_count || 0);
     const stockCount = Number(result?.stock_satisfied_count || 0);
     const markedCount = Number(result?.marked_count || 0);
-    if (markedCount > 0) {
+    const inventoryUpdatedCount = Number(result?.inventory_updated_count || 0);
+    if (inventoryUpdatedCount > 0 && !createdCount) {
+      ElMessage.success(`已更新 ${inventoryUpdatedCount} 个库存商品的实存数量与总货值，请按最新库存重新判断是否采购`);
+    } else if (markedCount > 0) {
       const orderNo = String(result?.purchase_order_no || "").trim();
       ElMessage.success(`采购已提交：${stockCount} 条库存可满足，${createdCount} 条已完成采购${orderNo ? `（${orderNo}）` : ""}`);
     } else {
@@ -2609,19 +2640,20 @@ onBeforeUnmount(() => {
     <HistoricalPurchaseQuickDialog v-if="historicalPurchaseProducts.length" :products="historicalPurchaseProducts" @close="historicalPurchaseProducts = []" @saved="loadOrders()" />
     <el-dialog v-model="procurementReceiptDialog.visible" title="登记实际收货" width="92%" destroy-on-close>
       <p class="order-procurement-receipt-hint">勾选本次实际到货的采购批次并填写实收数量。未勾选的批次、以及部分收货的剩余数量，都会继续保留在途。</p>
-      <h3 class="order-procurement-receipt-section-title">本次入库结果</h3>
-      <el-alert v-if="receiptHasHistoricalOutbound" type="warning" :closable="false" show-icon class="order-procurement-receipt-impact">
-        <template #title>该商品采购后已有订单出库流水。登记实收会增加本地账面，但历史订单的出库扣减已保留，因此不会把已发货数量重复算作可用库存。</template>
+      <el-radio-group v-model="procurementReceiptDialog.mode" :disabled="procurementReceiptDialog.saving"><el-radio-button value="normal">本次新到货</el-radio-button><el-radio-button value="historical">早已到货，补登记</el-radio-button></el-radio-group>
+      <h3 class="order-procurement-receipt-section-title">{{ procurementReceiptDialog.mode === 'historical' ? '确认当前仓库实物' : '本次入库结果' }}</h3>
+      <el-alert v-if="procurementReceiptDialog.mode === 'historical'" type="info" :closable="false" show-icon class="order-procurement-receipt-impact">
+        <template #title>填写该库存现在仓库所有批次合计的实物数量，含已打包未发货，不含采购在途。保存后本地库存以此数量为准，不会再叠加本次补登记数量；原出库记录保留。不清楚数量请先让仓库清点。</template>
+      </el-alert>
+      <el-alert v-else-if="receiptHasHistoricalOutbound" type="warning" :closable="false" title="本次新到货会增加库存；如果这批早已到货或已计入盘点，请选择“早已到货，补登记”。">
       </el-alert>
       <el-table v-if="procurementReceiptSummary.length" :data="procurementReceiptSummary" size="small" border class="order-procurement-receipt-impact" max-height="180">
         <el-table-column prop="product_name" label="库存商品" min-width="220" />
-        <el-table-column label="入库前账面" width="120" align="right"><template #default="{ row }">{{ row.stock_before }} {{ row.unit }}</template></el-table-column>
-        <el-table-column label="本次实收" width="110" align="right"><template #default="{ row }">+{{ row.receive_quantity }} {{ row.unit }}</template></el-table-column>
-        <el-table-column label="登记后账面" width="130" align="right"><template #default="{ row }"><strong>{{ row.stock_after }} {{ row.unit }}</strong></template></el-table-column>
+        <el-table-column v-if="procurementReceiptDialog.mode !== 'historical'" label="入库前账面" width="120" align="right"><template #default="{ row }">{{ row.stock_before }} {{ row.unit }}</template></el-table-column>
+        <el-table-column :label="procurementReceiptDialog.mode === 'historical' ? '补登记收货数量' : '本次实收'" width="140" align="right"><template #default="{ row }">{{ procurementReceiptDialog.mode === 'historical' ? '' : '+' }}{{ row.receive_quantity }} {{ row.unit }}</template></el-table-column>
+        <el-table-column v-if="procurementReceiptDialog.mode === 'historical'" label="当前仓库实物总数" width="230"><template #default="{ row }"><el-input-number v-model="procurementReceiptDialog.counts[row.product_id]" :min="0" :precision="0" :disabled="procurementReceiptDialog.saving" placeholder="无货填 0" /> {{ row.unit }}</template></el-table-column>
+        <el-table-column v-else label="登记后账面" width="130" align="right"><template #default="{ row }"><strong>{{ row.stock_after }} {{ row.unit }}</strong></template></el-table-column>
       </el-table>
-      <el-checkbox v-if="receiptHasHistoricalOutbound" v-model="procurementReceiptDialog.impactConfirmed" class="order-procurement-receipt-impact">
-        我已核对：历史订单出库已在库存账中扣减，本次仅登记实际到货。
-      </el-checkbox>
       <h3 class="order-procurement-receipt-section-title">确认采购批次</h3>
       <el-table :data="procurementReceiptDialog.batches" border max-height="60vh">
         <el-table-column label="本次到货" width="96" align="center">
@@ -3870,8 +3902,16 @@ onBeforeUnmount(() => {
             <div class="order-procurement-purchase-form">
               <div class="order-procurement-form-section">
                 <span class="order-procurement-form-title">采购决策</span>
+                <el-form-item label="处理类型" class="order-procurement-mode-field">
+                  <el-radio-group v-model="product.procurement_purchase_mode">
+                    <el-tooltip v-for="option in orderProcurementModeOptions" :key="option.value" :content="option.description" placement="top">
+                      <el-radio-button :value="option.value" :disabled="option.disabled">{{ option.label }}</el-radio-button>
+                    </el-tooltip>
+                  </el-radio-group>
+                  <small>{{ orderProcurementModeDescription(product.procurement_purchase_mode) }}</small>
+                </el-form-item>
                 <div class="order-procurement-form-grid order-procurement-form-grid-compact">
-                  <el-form-item label="采购数量">
+                  <el-form-item :label="orderProcurementQuantityLabel(product.procurement_purchase_mode)">
                     <el-input-number
                       v-model="product.purchase_quantity"
                       :min="0"
@@ -3881,7 +3921,7 @@ onBeforeUnmount(() => {
                       @change="handleProcurementQuantityChange(product)"
                     />
                   </el-form-item>
-                  <el-form-item label="货款">
+                  <el-form-item :label="orderProcurementAmountLabel(product.procurement_purchase_mode)">
                     <el-input-number
                       v-model="product.purchase_amount"
                       :min="0"
@@ -3890,7 +3930,7 @@ onBeforeUnmount(() => {
                       controls-position="right"
                     />
                   </el-form-item>
-                  <el-form-item label="运费">
+                  <el-form-item v-if="product.procurement_purchase_mode !== 'inventory_update'" label="运费">
                     <el-input-number
                       v-model="product.purchase_shipping"
                       :min="0"
@@ -3899,7 +3939,7 @@ onBeforeUnmount(() => {
                       controls-position="right"
                     />
                   </el-form-item>
-                  <el-form-item label="紧急程度">
+                  <el-form-item v-if="product.procurement_purchase_mode !== 'inventory_update'" label="紧急程度">
                     <el-segmented v-model="product.purchase_urgency" :options="procurementUrgencyOptions" />
                   </el-form-item>
                 </div>
@@ -4019,7 +4059,7 @@ onBeforeUnmount(() => {
           :loading="orderProcurementDialog.submitting"
           @click="submitOrderProcurement"
         >
-          确认已下单并进入在途
+          确认提交采购
         </el-button>
       </template>
     </el-dialog>

@@ -47,7 +47,19 @@ test("free purchase uses visible direct number inputs and seeds standard invento
   assert.match(page, /UploadFilled/);
   assert.match(page, /uploadQuickInventoryImage/);
   assert.match(page, /image_url: String\(item\.image_url \|\| ""\)\.trim\(\)/);
-  assert.match(page, /activeItem\.value\.raw_name = product\.product_name/);
+  assert.match(page, /activeItem\.value\.raw_name = selected\.product_name/);
+});
+
+test("free purchase hydrates selected inventory and allows price anomaly review", () => {
+  assert.match(page, /activeItem\.value\.structured_naming = \{ \.\.\.defaultItem\(\)\.structured_naming, \.\.\.selected\.structured_naming \}/);
+  assert.match(page, /activeItem\.value\.historical_unit_cost = Number\(selected\.historical_unit_cost \|\| 0\)/);
+  assert.match(page, /activeItem\.value\?\.product_id[\s\S]*?activeItem\.value\.product_name/);
+  assert.match(page, /class="bound-inventory-specs"/);
+  assert.match(page, /本次采购信息/);
+  assert.match(page, /freePurchasePriceChange\(activeItem\) > 0\.1/);
+  assert.match(page, /请选择价格异常原因/);
+  assert.match(page, /价格异常说明（正常价格可不填）/);
+  assert.match(page, /anomaly_reason: freePurchaseAnomalyReason\(item\)/);
 });
 
 test("free purchase derives its inventory name from the standard naming fields", () => {

@@ -30,7 +30,8 @@ const COVERAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 export function cachedOrderProcurementCoverage() { return cached && cached.expires > Date.now() ? cached.value : null; }
 export function invalidateOrderProcurementCoverage() { generation += 1; cached = null; pending = null; }
 
-export async function loadOrderProcurementCoverage(query, openSql, { fresh = false, productId = null, productIds = null } = {}) {
+export async function loadOrderProcurementCoverage(query, openSql, { fresh = false, productId = null, productIds = null, includeTrace = false } = {}) {
+  if (includeTrace) fresh = true;
   if (productId !== null && (!Number.isSafeInteger(Number(productId)) || Number(productId) <= 0)) throw new Error('库存商品 ID 无效');
   const scopedIds = [...new Set([
     ...(Array.isArray(productIds) ? productIds : []),
@@ -149,7 +150,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
     }
     const priorityByItem = new Map(priorities.map(row => [`${row.product_id}:${row.order_item_id}`, Number(row.priority)]));
     const prioritizedDemands = resolvedDemands.map(row => ({ ...row, allocation_priority: priorityByItem.get(`${row.product_id}:${row.order_item_id}`) || 0 }));
-    const value = calculateOrderProcurementCoverage({ demands: scopedIds.length ? prioritizedDemands.filter(row => scopedIds.includes(Number(row.product_id))) : prioritizedDemands, stocks: [...byProduct.values()], allocations, inbounds, requests, marks, sources, stockSources });
+    const value = calculateOrderProcurementCoverage({ demands: scopedIds.length ? prioritizedDemands.filter(row => scopedIds.includes(Number(row.product_id))) : prioritizedDemands, stocks: [...byProduct.values()], allocations, inbounds, requests, marks, sources, stockSources, includeTrace });
     value.inventory_stocks = [...byProduct.values()];
     if (!fresh && generation === version) cached = { value, expires: Date.now() + COVERAGE_CACHE_TTL_MS };
     return value;

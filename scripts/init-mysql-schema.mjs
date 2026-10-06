@@ -455,6 +455,7 @@ CREATE TABLE IF NOT EXISTS procurement_requests (
   source_order_item_id BIGINT UNSIGNED NULL,
   source_ozon_sku VARCHAR(128) NULL,
   demand_type VARCHAR(32) NOT NULL DEFAULT 'advance_stock',
+  purchase_mode VARCHAR(32) NOT NULL DEFAULT 'shortage_purchase',
   merged_at DATETIME NULL,
   purchased_at DATETIME NULL,
   cancelled_at DATETIME NULL,
@@ -467,6 +468,7 @@ CREATE TABLE IF NOT EXISTS procurement_requests (
   KEY idx_procurement_source_order_item (source_order_item_id),
   KEY idx_procurement_source_order (source_order_id),
   KEY idx_procurement_demand_stage (demand_type, status, created_at),
+  KEY idx_procurement_purchase_mode_status (purchase_mode, status),
   KEY idx_procurement_request_group (request_group_no),
   KEY idx_procurement_binding_status (binding_status, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -628,9 +630,11 @@ CREATE TABLE IF NOT EXISTS purchase_order_items (
   shipping_amount DECIMAL(18,4) NOT NULL DEFAULT 0,
   purchase_url TEXT NULL,
   inbound_quantity INT NOT NULL DEFAULT 0,
+  purchase_mode VARCHAR(32) NOT NULL DEFAULT 'shortage_purchase',
   status VARCHAR(32) NOT NULL DEFAULT 'pending_purchase',
   note TEXT NULL,
-  KEY idx_purchase_order_items_order (purchase_order_id)
+  KEY idx_purchase_order_items_order (purchase_order_id),
+  KEY idx_purchase_item_mode_status (purchase_mode, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS purchase_cost_versions (

@@ -20,6 +20,16 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     purchases: [{ id: 2, order_no: 'CG-OLD', actual_quantity: 2, received_quantity: 2, pending_quantity: 0, amount: 20, shipping_amount: 0, purchased_at: '2026-08-01 01:00:00' },
       { id: 1, order_no: 'CG-1', actual_quantity: 100, received_quantity: 2, pending_quantity: 98, amount: 1000, shipping_amount: 0, purchased_at: '2026-09-01 01:00:00' }] };
   const requests = [], errors = [];
+  initial.batches = [{ id: 51, purchase_order_no: 'PO-TRACE', quantity: 5, unallocated_quantity: 3, status: 'pending_arrival', purchased_at: '2026-09-01T00:00:00Z' },
+    { id: 52, purchase_order_no: 'PO-HISTORY', quantity: 2, unallocated_quantity: 0, status: 'approved', purchased_at: '2026-08-01T00:00:00Z' }];
+  initial.orders[1].coverage_trace = [{ batch_id: 51, purchase_order_no: 'PO-TRACE', quantity: 2, basis: 'fifo', purpose: 'incoming' }];
+  initial.orders.push({ order_item_id: 3, order_id: 3, posting_number: 'HISTORY-COVERED', entered_transport: true, quantity: 2,
+    missing_record_quantity: 0, missing_purchase_quantity: 0, missing_receipt_quantity: 0,
+    coverage_trace: [{ batch_id: 52, purchase_order_no: 'PO-HISTORY', quantity: 2, basis: 'recorded', purpose: 'source' }] });
+  initial.batches.push({ id: 53, purchase_order_no: 'PO-LATE', quantity: 2, unallocated_quantity: 2, status: 'approved' });
+  initial.source_inference = { current_unmatched: 0, physical_unmatched: 0, historical_unmatched: 96, unassigned_purchase_quantity: 0, reserves: [],
+    suggestions: [{ order_item_id: 1, posting_number: 'TEST-100', batch_id: 53, purchase_order_no: 'PO-LATE', quantity: 2, purpose: 'history_candidate', late_registration: true },
+      { order_item_id: 2, posting_number: 'CURRENT-200', batch_id: 52, purchase_order_no: 'PO-HISTORY', quantity: 2, purpose: 'stock_suggestion' }] };
   try {
     await build({ configFile: false, root: process.cwd(), logLevel: 'error', plugins: [vue(), {
       name: 'ledger-fixture', resolveId(id) { if (id === 'virtual:ledger') return '\0ledger'; },
@@ -48,11 +58,28 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     assert.equal(await page.getByRole('tab', { name: '订单分配', exact: true }).getAttribute('aria-selected'), 'true');
     await page.getByText('CURRENT-200', { exact: true }).waitFor();
     await page.getByText('已覆盖，无需重复采购', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'PO-HISTORY · 2 件 · 自动分配', exact: true }).waitFor();
+    assert.equal(await page.getByText('采购来源待核', { exact: true }).count(), 0);
+    await page.getByRole('button', { name: /PO-TRACE.*2 件/ }).click();
+    await page.getByText('当前筛选关联数量：2 件（1 条）。不在当前范围的关联不计入此小计。', { exact: true }).waitFor();
+    await page.getByText('自动分配（按采购／发货顺序）', { exact: true }).waitFor();
+    await page.screenshot({ path: '/tmp/procurement-batch-trace.png', animations: 'disabled' });
+    await page.getByRole('tab', { name: '订单分配', exact: true }).click();
     assert.equal(await page.getByText('TEST-100', { exact: true }).count(), 0, 'historical orders are separate from current coverage');
     assert.equal(await page.getByRole('button', { name: '补采购记录', exact: true }).count(), 0, 'historical forms are not mounted on entry');
     await page.screenshot({ path: '/tmp/procurement-ledger-overview.png', animations: 'disabled' });
     await page.getByRole('tab', { name: '历史核对', exact: true }).click();
+    await page.getByText('HISTORY-COVERED', { exact: true }).waitFor();
+    await page.getByText('仅待核对', { exact: true }).click();
+    assert.equal(await page.getByText('HISTORY-COVERED', { exact: true }).count(), 0);
     await page.getByText('TEST-100', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '核对并关联', exact: true }).click();
+    const sourceDialog = page.getByRole('dialog', { name: '关联已有收货', exact: true });
+    assert.equal(await sourceDialog.getByRole('spinbutton').inputValue(), '2');
+    assert.match(await sourceDialog.getByRole('textbox').inputValue(), /确认该批货在此订单发出前已到货/);
+    assert.equal(await sourceDialog.getByRole('button', { name: '确认保存纠正记录' }).isDisabled(), true);
+    await sourceDialog.getByRole('button', { name: '取消', exact: true }).click();
+    await page.getByRole('button', { name: '放弃修改', exact: true }).click();
     await page.getByRole('button', { name: '补采购记录', exact: true }).click();
     const historicalDialog = page.getByRole('dialog', { name: '补历史采购', exact: true });
     await historicalDialog.getByText('只补历史采购来源，不增加现货或在途。实物与账面不符请单独盘点核对。').waitFor();
@@ -152,6 +179,19 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     await multi.getByRole('button', { name: '预览影响' }).click();
     await multi.getByRole('button', { name: '确认保存纠正记录' }).click();
     assert.deepEqual(requests.at(-1).body.extra_sources, [{ product_id: 12, quantity: 1, revision: 'logo-v1' }]);
+    await page.getByRole('tab', { name: '采购批次反查', exact: true }).click();
+    const batchSelect = page.getByRole('tabpanel', { name: '采购批次反查' }).locator('.el-select__wrapper');
+    await batchSelect.click();
+    await page.getByRole('option', { name: /PO-LATE/ }).click();
+    const candidates = page.locator('.el-table').filter({ hasText: '建议数量' });
+    await candidates.locator('tbody .el-checkbox').click();
+    await page.getByRole('button', { name: '确认所选来源', exact: true }).click();
+    const confirm = page.getByRole('dialog', { name: '批量核对采购来源', exact: true });
+    await confirm.getByRole('textbox').fill('核对仓库发货记录');
+    await confirm.getByRole('button', { name: '确定', exact: true }).click();
+    await page.getByText('采购来源已关联，库存数量未改变', { exact: true }).waitFor();
+    assert.equal(requests.at(-1).body.action_type, 'link_purchase_bulk');
+    assert.deepEqual(requests.at(-1).body.allocations, [{ order_item_id: 1, quantity: 2 }]);
     assert.deepEqual(errors, []);
   } finally { await browser?.close(); await fs.rm(output, { recursive: true, force: true }); }
 });

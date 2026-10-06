@@ -54,6 +54,18 @@ const snapshot = (extra = {}) => ({ product: { id: 10 }, revision: 'version', lo
   orders: [{ order_item_id: 1, order_id: 1, quantity: 100, entered_transport: true, missing_record_quantity: 98, missing_purchase_quantity: 98, outbound_quantity: 100 }], ...extra });
 const body = (action_type, extra = {}) => ({ action_type, revision: 'version', reason: '盘点凭证 001', quantity: 2, ...extra });
 
+test('historical receipt counts remaining physical stock instead of adding it twice', () => {
+  const state = snapshot({ physical_estimate: 30, batches: [{ id: 1, quantity: 100, status: 'pending_arrival' }] });
+  const input = body('receive_and_count', { counted_quantity: 30, receipts: [{ id: 1, receive_quantity: 100, expected_remaining_quantity: 100 }] });
+  const plan = planLedgerAction(state, input);
+  assert.equal(plan.local_delta, 0);
+  assert.equal(plan.receipt_count_adjustment, -100);
+  assert.equal(30 + plan.quantity + plan.receipt_count_adjustment, 30);
+  assert.throws(() => planLedgerAction(state, { ...input, counted_quantity: undefined }), /实际盘点数量/);
+  assert.throws(() => planLedgerAction(state, { ...input, receipts: [...input.receipts, ...input.receipts] }), /重复/);
+  assert.throws(() => planLedgerAction(state, { ...input, receipts: [{ ...input.receipts[0], receive_quantity: 101 }] }), /数量已变化/);
+});
+
 test('structured stocktake reasons allow zero and record sample losses without creating purchase costs', () => {
   for (const reason_code of ['sample', 'damage', 'loss', 'history_error']) {
     const plan = planLedgerAction(snapshot({ local_stock: 10, physical_estimate: 10 }), body('stocktake', { counted_quantity: 0, reason_code, reason: '' }));
@@ -178,6 +190,36 @@ test('last stocktake time comes from the existing product-scoped movement summar
   const result = await f.service.read({ product_id: 10 });
   assert.equal(result.last_stocktake_at, '2026-09-28 01:00:00');
   assert.equal((await fixture().service.read({ product_id: 10 })).last_stocktake_at, null);
+});
+
+test('historical receipt and count commit once, retaining previous stock movements', async () => {
+  const coverage = new Map();
+  coverage.available_batches = [{ id: 1, product_id: 10, quantity: 100, status: 'pending_arrival' }];
+  const f = fixture(false, { coverage });
+  const before = await f.service.read({ product_id: 10 });
+  const input = { request_key: 'historical-receipt-001', groups: [{ product_id: 10, revision: before.revision, counted_quantity: 30,
+    receipts: [{ id: 1, receive_quantity: 100, expected_remaining_quantity: 100 }] }] };
+  const result = await f.service.receiveAndCount(input, 1);
+  assert.equal(result.results[0].physical_after, 30);
+  assert.equal(f.state().movements.reduce((sum, row) => sum + row.quantity_delta, 0), 30);
+  assert.equal(f.state().costTasks.length, 0);
+  await f.service.receiveAndCount(input, 1);
+  assert.equal(f.state().movements.filter(row => row.source_ref === 'inbound_1').length, 1);
+  assert.equal(f.state().actions.length, 1);
+  await assert.rejects(f.service.receiveAndCount({ ...input, groups: [{ ...input.groups[0], counted_quantity: 40 }] }, 1), /不同内容/);
+});
+
+test('historical receipt rolls back all earlier products when a later count is invalid', async () => {
+  const coverage = new Map();
+  coverage.available_batches = [{ id: 1, product_id: 10, quantity: 100, status: 'pending_arrival' }];
+  const f = fixture(false, { coverage });
+  const before = await f.service.read({ product_id: 10 });
+  await assert.rejects(f.service.receiveAndCount({ request_key: 'historical-rollback-001', groups: [
+    { product_id: 10, revision: before.revision, counted_quantity: 30, receipts: [{ id: 1, receive_quantity: 100, expected_remaining_quantity: 100 }] },
+    { product_id: 11, revision: 'stale', counted_quantity: 0, receipts: [] }
+  ] }, 1), /已变化/);
+  assert.equal(f.state().actions.length, 0);
+  assert.equal(f.state().movements.length, 1);
 });
 
 test('sample loss adjustment is auditable and retries never deduct stock twice', async () => {

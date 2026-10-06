@@ -31,7 +31,7 @@ const savingRequestIds = ref([]);
 const receiptVisible = ref(false);
 const receiptSubmitting = ref(false);
 const receiptRows = ref([]);
-const receiptForm = reactive({ courier_company: "", tracking_number: "", received_at: "", images: [], note: "" });
+const receiptForm = reactive({ courier_company: "", tracking_number: "", received_at: "", images: [], note: "", difference_reason: "", difference_note: "" });
 const newPurchaseVisible = ref(false);
 const newPurchaseSaving = ref(false);
 const newPurchaseForm = reactive({ quantity: 1, amount: 0, shipping_amount: 0, purchase_url: "", note: "" });
@@ -56,6 +56,8 @@ const state = reactive({
   suppliers: [],
   filters: {
     query: "",
+    status: "pending_arrival",
+    purchaseDateRange: [],
     demandType: "all",
     personId: "all",
     supplierId: "all",
@@ -175,8 +177,11 @@ function procurementQueryString() {
     paged: "1",
     page: String(state.filters.page),
     pageSize: String(state.filters.pageSize),
-    status: "pending_arrival"
+    status: state.filters.status || "pending_arrival"
   });
+  const [startDate, endDate] = Array.isArray(state.filters.purchaseDateRange) ? state.filters.purchaseDateRange : [];
+  if (startDate) params.set("startDate", startDate);
+  if (endDate) params.set("endDate", endDate);
   const query = String(state.filters.query || "").trim();
   if (query) params.set("query", query);
   if (state.filters.productId) params.set("productId", String(state.filters.productId));
@@ -231,8 +236,8 @@ function receiptImages(row = {}) {
 }
 
 function openReceiptDialog(rows) {
-  receiptRows.value = rows.flatMap((row) => row.requests || []).map((row) => ({ ...row, receive_quantity: Number(row.quantity || 0) }));
-  Object.assign(receiptForm, { courier_company: "", tracking_number: "", received_at: new Date().toISOString().slice(0, 19).replace("T", " "), images: [], note: "" });
+  receiptRows.value = rows.flatMap((row) => row.requests || []).map((row) => ({ ...row, purchase_quantity: Number(row.quantity || 0), receive_quantity: Number(row.quantity || 0) }));
+  Object.assign(receiptForm, { courier_company: "", tracking_number: "", received_at: new Date().toISOString().slice(0, 19).replace("T", " "), images: [], note: "", difference_reason: "", difference_note: "" });
   receiptVisible.value = true;
 }
 
@@ -245,11 +250,13 @@ async function uploadReceiptImage(file) {
 
 async function confirmReceipt() {
   if (!receiptRows.value.length) return;
+  const hasDifference = receiptRows.value.some((row) => Number(row.purchase_quantity) !== Number(row.receive_quantity));
+  if (hasDifference && !receiptForm.difference_reason) return ElMessage.warning("采购数与实收数不一致，请选择差异原因");
   receiptSubmitting.value = true;
   try {
-    await apiClient.post("/api/inbound-records/batch-update", { records: receiptRows.value.map((row) => ({ id: row.id, payload: {
+    await apiClient.post("/api/inbound-records/batch-update", { receipt_difference_reason: hasDifference ? receiptForm.difference_reason : "", receipt_difference_note: hasDifference ? receiptForm.difference_note : "", records: receiptRows.value.map((row) => ({ id: row.id, payload: {
       ...normalizeRequestForSave(row), receive_quantity: Number(row.receive_quantity || 0),
-      expected_remaining_quantity: Number(row.quantity || 0),
+      purchase_quantity: Number(row.purchase_quantity || 0), expected_remaining_quantity: Math.max(Number(row.purchase_quantity || 0), Number(row.receive_quantity || 0)),
       courier_company: receiptForm.courier_company, tracking_number: receiptForm.tracking_number,
       receipt_images_json: receiptForm.images, received_at: receiptForm.received_at,
       receipt_context: receiptForm.note, qc_status: row.qc_status || "pending"
@@ -286,7 +293,7 @@ function handleSearch() {
 
 function handleReset() {
   Object.assign(state.filters, {
-    query: "", demandType: "all", personId: "all", supplierId: "all", sourceType: "all",
+    query: "", status: "pending_arrival", purchaseDateRange: [], demandType: "all", personId: "all", supplierId: "all", sourceType: "all",
     inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [],
     accessoryName: "", color: "", material: [], process: "", productId: "", page: 1, pageSize: 20
   });
@@ -412,7 +419,7 @@ function actionDisabled(row, action) {
 
 function handleEditAction(row) {
   if (actionDisabled(row, "edit")) return;
-  toggleRowExpanded(row);
+  openEditDialog(row);
 }
 
 function handleExpandChange(row, expandedRows) {
@@ -658,6 +665,11 @@ onMounted(async () => {
           <span>共 {{ totalRows }} 条</span>
           <span>已选 {{ state.selectedRows.length }} 条</span>
         </div>
+        <el-radio-group v-model="state.filters.status" class="purchase-status-filter" @change="handleSearch">
+          <el-radio-button label="pending_arrival">待入库</el-radio-button>
+          <el-radio-button label="approved">已入库</el-radio-button>
+          <el-radio-button label="all">全部</el-radio-button>
+        </el-radio-group>
         <ErpFilterBar>
           <el-form inline>
             <el-form-item label="关键词">
@@ -668,6 +680,9 @@ onMounted(async () => {
                 style="width: 360px"
                 @keyup.enter="handleSearch"
               />
+            </el-form-item>
+            <el-form-item label="采购日期">
+              <el-date-picker v-model="state.filters.purchaseDateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" style="width: 250px" />
             </el-form-item>
             <el-form-item label="需求类型">
               <el-select v-model="state.filters.demandType" style="width: 150px">
@@ -734,7 +749,7 @@ onMounted(async () => {
           @expand-change="handleExpandChange"
         >
           <el-table-column type="selection" width="56" reserve-selection :selectable="canSelectRow" />
-          <el-table-column type="expand" width="48">
+          <el-table-column v-if="false" type="expand" width="48">
             <template #default="{ row }">
               <div class="purchase-inline-editor">
                 <div class="purchase-inline-editor__header">
@@ -822,7 +837,6 @@ onMounted(async () => {
                   <span>库存 ID：{{ row.inventory_number || row.product_code || "-" }}</span>
                   <span>核心品名：{{ row.inventory_category || "未分类" }}</span>
                   <span>SKU：{{ row.mapped_skus || "未绑定 SKU" }}</span>
-                  <span>申请人：{{ arrayText(row.requester_names) || "-" }}</span>
                 </div>
               </div>
             </template>
@@ -832,61 +846,18 @@ onMounted(async () => {
             <template #default="{ row }"><div class="time-cell"><span>采购人：{{ row.person_name || "未记录" }}</span><span>采购时间：{{ dateText(row.purchased_at || row.created_at) }}</span></div></template>
           </el-table-column>
           <el-table-column label="快递 / 留痕" min-width="200">
-            <template #default="{ row }"><div class="time-cell"><span>{{ row.courier_company || "未填快递公司" }} {{ row.tracking_number || "" }}</span><span>{{ receiptImages(row).length ? `到货照片 ${receiptImages(row).length} 张` : "未上传到货照片" }}</span></div></template>
+            <template #default="{ row }"><div class="time-cell"><span>{{ row.courier_company || "未填快递公司" }} {{ row.tracking_number || "" }}</span><span>{{ receiptImages(row).length ? `到货照片 ${receiptImages(row).length} 张` : "未上传到货照片" }}</span><el-button link type="primary" @click="openReceiptDialog([row])">上传照片／登记到货</el-button></div></template>
           </el-table-column>
 
-          <el-table-column label="明细数" width="90" align="center">
-            <template #default="{ row }">{{ numberText(row.request_count) }}</template>
-          </el-table-column>
           <el-table-column label="总数量" width="90" align="center">
             <template #default="{ row }">{{ numberText(row.total_quantity) }}</template>
           </el-table-column>
-          <el-table-column label="货款" width="110" align="right">
-            <template #default="{ row }">￥{{ money(row.total_amount) }}</template>
-          </el-table-column>
-          <el-table-column label="运费" width="110" align="right">
-            <template #default="{ row }">￥{{ money(row.total_shipping) }}</template>
-          </el-table-column>
-          <el-table-column label="均摊单价" width="110" align="right">
-            <template #default="{ row }">￥{{ averageUnitCost(row) }}</template>
-          </el-table-column>
 
-          <el-table-column label="采购来源" min-width="280">
+          <el-table-column label="最终来源" min-width="160">
             <template #default="{ row }">
-              <div class="source-cell">
-                <span>供应商：{{ arrayText(row.supplier_names) || row.other_source || "-" }}</span>
-                <span>
-                  1688：
-                  <a v-if="row.link_1688" :href="row.link_1688" target="_blank" rel="noreferrer">{{ row.link_1688 }}</a>
-                  <span v-else>-</span>
-                </span>
-                <span>
-                  拼多多：
-                  <a v-if="row.link_pdd" :href="row.link_pdd" target="_blank" rel="noreferrer">{{ row.link_pdd }}</a>
-                  <span v-else>-</span>
-                </span>
-                <span>来源类型：{{ requestSourceSummary(row) }}</span>
-              </div>
+              {{ row.supplier_name || row.other_source || requestSourceSummary(row) }}
             </template>
           </el-table-column>
-
-          <el-table-column label="采购链接" min-width="260">
-            <template #default="{ row }">
-              <div v-if="requestPurchaseLinks(row).length" class="link-note-cell">
-                <a
-                  v-for="link in requestPurchaseLinks(row)"
-                  :key="link"
-                  :href="link"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {{ link }}
-                </a>
-              </div>
-              <span v-else class="empty-text">-</span>
-            </template>
-          </el-table-column>
-
           <el-table-column label="采购物流" min-width="300">
             <template #default="{ row }">
               <div v-if="row.procurement_tracking_number" class="procurement-shipment-cell">
@@ -900,7 +871,7 @@ onMounted(async () => {
             </template>
           </el-table-column>
 
-          <el-table-column label="备注信息" min-width="260">
+          <el-table-column label="人工备注" min-width="200">
             <template #default="{ row }">
               <div v-if="requestNotes(row).length" class="link-note-cell">
                 <span v-for="note in requestNotes(row)" :key="note">{{ note }}</span>
@@ -929,7 +900,7 @@ onMounted(async () => {
             <template #default="{ row }">
               <div class="row-actions erp-inline-actions">
                 <el-button class="erp-btn-link" link @click="ledgerProductId = Number(row.product_id); ledgerVisible = true">数量纠正／对账</el-button>
-                <el-button class="erp-btn-link" link type="primary" :disabled="actionDisabled(row, 'edit')" @click="handleEditAction(row)">展开编辑</el-button>
+                <el-button class="erp-btn-link" link type="primary" :disabled="actionDisabled(row, 'edit')" @click="handleEditAction(row)">编辑</el-button>
                 <el-button class="erp-btn-link" link type="success" :disabled="actionDisabled(row, 'inbound')" :loading="inboundSubmitting" @click="handleInboundAction(row)">登记到货</el-button>
                 <el-button class="erp-btn-link" link type="danger" :disabled="actionDisabled(row, 'cancel')" :loading="cancelSubmitting" @click="handleCancelAction(row)">取消</el-button>
               </div>
@@ -972,8 +943,12 @@ onMounted(async () => {
         <el-form-item label="到货时间"><el-date-picker v-model="receiptForm.received_at" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" /></el-form-item>
         <el-form-item label="到货照片"><el-upload :auto-upload="false" accept="image/*" multiple :on-change="uploadReceiptImage"><el-button>上传照片</el-button></el-upload><span class="muted-text">已上传 {{ receiptForm.images.length }} 张</span></el-form-item>
         <el-form-item label="收货备注"><el-input v-model="receiptForm.note" type="textarea" /></el-form-item>
+        <template v-if="receiptRows.some(row => Number(row.purchase_quantity) !== Number(row.receive_quantity))">
+          <el-form-item label="差异原因" required><el-select v-model="receiptForm.difference_reason" placeholder="请选择"><el-option label="商家少发货" value="merchant_short" /><el-option label="商家多发货" value="merchant_over" /><el-option label="库存丢失" value="inventory_loss" /><el-option label="其他" value="other" /></el-select></el-form-item>
+          <el-form-item label="差异说明"><el-input v-model="receiptForm.difference_note" type="textarea" placeholder="请填写差异说明" /></el-form-item>
+        </template>
       </el-form>
-      <el-table :data="receiptRows" border max-height="280"><el-table-column prop="product_name" label="库存名称" min-width="300" /><el-table-column prop="quantity" label="采购数" width="100" /><el-table-column label="实收数" width="160"><template #default="{row}"><el-input-number v-model="row.receive_quantity" :min="0" :max="row.quantity" :precision="0" /></template></el-table-column></el-table>
+      <el-table :data="receiptRows" border max-height="280"><el-table-column prop="product_name" label="库存名称" min-width="300" /><el-table-column label="采购数" width="160"><template #default="{row}"><el-input-number v-model="row.purchase_quantity" :min="1" :precision="0" /></template></el-table-column><el-table-column label="实收数" width="160"><template #default="{row}"><el-input-number v-model="row.receive_quantity" :min="0" :precision="0" /></template></el-table-column></el-table>
       <template #footer><el-button @click="receiptVisible=false">取消</el-button><el-button type="primary" :loading="receiptSubmitting" @click="confirmReceipt">确认收货并入库</el-button></template>
     </el-dialog>
 
@@ -1066,6 +1041,10 @@ onMounted(async () => {
 .procurement-list-summary span {
   color: var(--erp-text-secondary);
   font-size: 12px;
+}
+
+.purchase-status-filter {
+  flex: 0 0 auto;
 }
 
 .procurement-structured-search {
