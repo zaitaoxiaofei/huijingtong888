@@ -1523,7 +1523,7 @@ async function handleInventoryProductEditorSaved({ mode, product } = {}) {
   ElMessage.success(createdFromOrder ? "库存商品已创建并绑定当前订单 SKU" : (mode === "create" ? "库存商品已创建" : "库存商品已更新"));
   await Promise.all([
     loadInventoryProductOptions(),
-    loadOrders(createdFromOrder ? { forceRefresh: true, includeCounts: true } : {})
+    loadOrders({ forceRefresh: true, includeCounts: true })
   ]);
   if (compositionDialogVisible.value && mode === "create") {
     compositionDialogRefreshKey.value += 1;
