@@ -83,7 +83,23 @@ export function planLedgerAction(snapshot, body) {
   if (!reason || reason.length > 1000) throw new Error('请在调整说明中填写真实原因或凭证编号（1～1000 字）');
   const type = String(body.action_type || '');
   const result = { type, reason, quantity: 0, local_delta: 0, target_delta: 0, amount: 0, shipping_amount: 0 };
-  if (type === 'receive_and_count') {
+  if (type === 'link_purchase_bulk') {
+    if (!Array.isArray(body.allocations) || !body.allocations.length || body.allocations.length > 500) throw new Error('请在采购批次核对中勾选 1～500 条历史订单（allocations）');
+    const seen = new Set();
+    result.allocations = body.allocations.map(row => {
+      const plan = planLedgerAction(snapshot, { ...body, action_type: 'link_purchase', order_item_id: row.order_item_id, quantity: row.quantity });
+      if (snapshot.orders.find(order => order.order_item_id === plan.order_item_id)?.stock_location === 'FBP') throw new Error('FBP 订单不能关联本地采购来源，请到 FBP 库存核对');
+      if (seen.has(plan.order_item_id)) throw new Error('核对订单重复，请取消重复明细后重试');
+      seen.add(plan.order_item_id);
+      result.inbound = plan.inbound;
+      return { order_item_id: plan.order_item_id, quantity: plan.quantity };
+    });
+    result.quantity = result.allocations.reduce((sum, row) => sum + row.quantity, 0);
+    const inference = inferProcurementSources(snapshot);
+    const protectedQuantity = [...inference.suggestions.filter(row => row.purpose === 'stock_suggestion' && !row.already_allocated), ...inference.reserves]
+      .filter(row => Number(row.batch_id) === Number(result.inbound.id)).reduce((sum, row) => sum + row.quantity, 0);
+    if (result.quantity > Math.max(0, Number(result.inbound.unallocated_quantity) - protectedQuantity)) throw new Error('本批次剩余可核对数量不足（allocations），已为当前现货保留来源；请减少勾选数量或刷新对账');
+  } else if (type === 'receive_and_count') {
     Object.assign(result, countedStock(snapshot, body.counted_quantity));
     if (!Array.isArray(body.receipts) || !body.receipts.length) throw new Error('请选择需要补登记的采购批次（receipts）');
     const ids = new Set();
@@ -461,6 +477,10 @@ export function createProcurementLedgerService(hooks) {
         await recordCost(connection, { product_id: productId, source_key: `purchase_order_item:${item.insertId}:purchased`,
           stage: 'historical_backfill', purchase_order_id: purchaseOrderId, purchase_order_item_id: Number(item.insertId),
           quantity: plan.quantity, amount: plan.amount, shipping_amount: plan.shipping_amount, person_id: actor, anomaly_reason: plan.reason });
+      } else if (plan.type === 'link_purchase_bulk') {
+        for (const allocation of plan.allocations) await connection.execute(`INSERT INTO procurement_history_sources
+          (action_id, order_item_id, product_id, quantity, inbound_record_id) VALUES (?, ?, ?, ?, ?)`,
+        [actionId, allocation.order_item_id, productId, allocation.quantity, Number(plan.inbound.id)]);
       } else if (plan.type === 'receive_and_count') {
         for (const receipt of plan.receipts) await receive(connection, receipt.id, {
           ...receipt, status: 'approved', qc_status: 'approved', receipt_context: `${note}；历史到货补登记并按当前实物校准`

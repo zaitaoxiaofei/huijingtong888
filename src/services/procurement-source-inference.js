@@ -29,7 +29,7 @@ export function inferProcurementSources(snapshot) {
       if (source.purpose !== 'source' || !source.batch_id) continue;
       const quantity = Math.min(needed, positive(source.quantity));
       if (!quantity) continue;
-      suggestions.push({ ...source, quantity, purpose: 'stock_suggestion', basis: 'suggested', order_item_id: order.order_item_id, posting_number: order.posting_number });
+      suggestions.push({ ...source, quantity, purpose: 'stock_suggestion', basis: 'suggested', already_allocated: true, order_item_id: order.order_item_id, posting_number: order.posting_number });
       needed -= quantity;
     }
     currentUnmatched += take(needed, order, 'stock_suggestion');
