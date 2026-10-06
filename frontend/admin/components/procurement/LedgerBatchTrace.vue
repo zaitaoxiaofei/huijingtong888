@@ -42,18 +42,18 @@ const purpose = row => row.purpose === 'source' ? '采购来源核对（非当�
       <el-table-column label="下单时间（北京）" min-width="170"><template #default="{ row }">{{ shanghaiDateTimeText(row.ordered_at) }}</template></el-table-column>
       <el-table-column prop="allocated_quantity" label="本批次关联数量" width="140" />
       <el-table-column label="用途" min-width="220"><template #default="{ row }">{{ purpose(row) }}</template></el-table-column>
-      <el-table-column label="依据" min-width="170"><template #default="{ row }">{{ row.basis === 'recorded' ? '已记录关联' : '按顺序推算，非出库凭证' }}</template></el-table-column>
+      <el-table-column label="依据" min-width="170"><template #default="{ row }">{{ row.basis === 'recorded' ? '已记录关联' : '自动分配（按采购／发货顺序）' }}</template></el-table-column>
     </el-table>
     <el-pagination v-if="rows.length > 30" v-model:current-page="page" :page-size="30" :total="rows.length" layout="prev, pager, next, total" />
     <template v-if="suggestions.length || reserved">
       <h4>待人工核对</h4>
       <p>尚未匹配 {{ batch.unallocated_quantity || 0 }} 件 = 当前现货保留 {{ currentReserved }} 件 + 历史订单候选 {{ candidateTotal }} 件 + 去向待核 {{ unexplained }} 件。</p>
-      <p>现货保留是来源推算，不是确认的拣货批次。勾选已核实的历史订单后一次关联；未勾选的保持待核，不改变本地库存。</p>
+      <p>自动分配用于数量核算，无需逐单确认，不代表实际拣货批次。仅有争议的历史候选需要人工核对；关联不会增加库存。</p>
       <el-table :key="`${selected}-${suggestionPage}`" :data="pagedSuggestions" max-height="300" @selection-change="checked = $event">
         <el-table-column type="selection" width="45" :selectable="row => row.purpose === 'history_candidate' && !saving" />
         <el-table-column prop="posting_number" label="订单" min-width="180" />
         <el-table-column prop="quantity" label="建议数量" width="110" />
-        <el-table-column label="说明" min-width="260"><template #default="{ row }">{{ row.purpose === 'stock_suggestion' ? '当前现货来源推算，非实际拣货批次' : row.late_registration ? '晚登记到货候选，需确认当时已到货' : '历史来源候选，待核实' }}</template></el-table-column>
+        <el-table-column label="说明" min-width="260"><template #default="{ row }">{{ row.purpose === 'stock_suggestion' ? '现货来源自动分配' : row.late_registration ? '晚登记到货候选，需确认当时已到货' : '历史来源候选，待核实' }}</template></el-table-column>
       </el-table>
       <el-pagination v-if="suggestions.length > 30" v-model:current-page="suggestionPage" :page-size="30" :total="suggestions.length" layout="prev, pager, next, total" />
       <p>本页已选 {{ checked.length }} 条，共 {{ checkedTotal }} 件。<el-button type="primary" :disabled="!checked.length" :loading="saving" @click="reconcile">确认所选来源</el-button></p>

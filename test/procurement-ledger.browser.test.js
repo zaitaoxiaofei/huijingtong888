@@ -28,7 +28,8 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     coverage_trace: [{ batch_id: 52, purchase_order_no: 'PO-HISTORY', quantity: 2, basis: 'recorded', purpose: 'source' }] });
   initial.batches.push({ id: 53, purchase_order_no: 'PO-LATE', quantity: 2, unallocated_quantity: 2, status: 'approved' });
   initial.source_inference = { current_unmatched: 0, physical_unmatched: 0, historical_unmatched: 96, unassigned_purchase_quantity: 0, reserves: [],
-    suggestions: [{ order_item_id: 1, posting_number: 'TEST-100', batch_id: 53, purchase_order_no: 'PO-LATE', quantity: 2, purpose: 'history_candidate', late_registration: true }] };
+    suggestions: [{ order_item_id: 1, posting_number: 'TEST-100', batch_id: 53, purchase_order_no: 'PO-LATE', quantity: 2, purpose: 'history_candidate', late_registration: true },
+      { order_item_id: 2, posting_number: 'CURRENT-200', batch_id: 52, purchase_order_no: 'PO-HISTORY', quantity: 2, purpose: 'stock_suggestion' }] };
   try {
     await build({ configFile: false, root: process.cwd(), logLevel: 'error', plugins: [vue(), {
       name: 'ledger-fixture', resolveId(id) { if (id === 'virtual:ledger') return '\0ledger'; },
@@ -57,9 +58,11 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     assert.equal(await page.getByRole('tab', { name: '订单分配', exact: true }).getAttribute('aria-selected'), 'true');
     await page.getByText('CURRENT-200', { exact: true }).waitFor();
     await page.getByText('已覆盖，无需重复采购', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'PO-HISTORY · 2 件 · 自动分配', exact: true }).waitFor();
+    assert.equal(await page.getByText('采购来源待核', { exact: true }).count(), 0);
     await page.getByRole('button', { name: /PO-TRACE.*2 件/ }).click();
     await page.getByText('当前筛选关联数量：2 件（1 条）。不在当前范围的关联不计入此小计。', { exact: true }).waitFor();
-    await page.getByText('按顺序推算，非出库凭证', { exact: true }).waitFor();
+    await page.getByText('自动分配（按采购／发货顺序）', { exact: true }).waitFor();
     await page.screenshot({ path: '/tmp/procurement-batch-trace.png', animations: 'disabled' });
     await page.getByRole('tab', { name: '订单分配', exact: true }).click();
     assert.equal(await page.getByText('TEST-100', { exact: true }).count(), 0, 'historical orders are separate from current coverage');
