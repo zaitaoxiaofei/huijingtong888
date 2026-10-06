@@ -21,11 +21,15 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
       { id: 1, order_no: 'CG-1', actual_quantity: 100, received_quantity: 2, pending_quantity: 98, amount: 1000, shipping_amount: 0, purchased_at: '2026-09-01 01:00:00' }] };
   const requests = [], errors = [];
   initial.batches = [{ id: 51, purchase_order_no: 'PO-TRACE', quantity: 5, unallocated_quantity: 3, status: 'pending_arrival', purchased_at: '2026-09-01T00:00:00Z' },
-    { id: 52, purchase_order_no: 'PO-HISTORY', quantity: 2, unallocated_quantity: 0, status: 'approved', purchased_at: '2026-08-01T00:00:00Z' }];
+    { id: 52, purchase_order_item_id: 2, purchase_order_no: 'PO-HISTORY', quantity: 4, unallocated_quantity: 2, status: 'approved', purchased_at: '2026-08-01T00:00:00Z' }];
+  initial.purchases[0].received_quantity = 4;
+  initial.purchases[0].actual_quantity = 4;
   initial.orders[1].coverage_trace = [{ batch_id: 51, purchase_order_no: 'PO-TRACE', quantity: 2, basis: 'fifo', purpose: 'incoming' }];
   initial.orders.push({ order_item_id: 3, order_id: 3, posting_number: 'HISTORY-COVERED', entered_transport: true, quantity: 2,
     missing_record_quantity: 0, missing_purchase_quantity: 0, missing_receipt_quantity: 0,
     coverage_trace: [{ batch_id: 52, purchase_order_no: 'PO-HISTORY', quantity: 2, basis: 'recorded', purpose: 'source' }] });
+  initial.orders.push({ order_item_id: 4, order_id: 4, posting_number: 'HISTORY-ONE', entered_transport: true, quantity: 1,
+    missing_record_quantity: 1, missing_purchase_quantity: 1, missing_receipt_quantity: 0 });
   initial.batches.push({ id: 53, purchase_order_no: 'PO-LATE', quantity: 2, unallocated_quantity: 2, status: 'approved' });
   initial.source_inference = { current_unmatched: 0, physical_unmatched: 0, historical_unmatched: 96, unassigned_purchase_quantity: 0, reserves: [],
     suggestions: [{ order_item_id: 1, posting_number: 'TEST-100', batch_id: 53, purchase_order_no: 'PO-LATE', quantity: 2, purpose: 'history_candidate', late_registration: true },
@@ -69,6 +73,8 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     assert.equal(await page.getByRole('button', { name: '补采购记录', exact: true }).count(), 0, 'historical forms are not mounted on entry');
     await page.screenshot({ path: '/tmp/procurement-ledger-overview.png', animations: 'disabled' });
     await page.getByRole('tab', { name: '历史核对', exact: true }).click();
+    assert.equal(await page.getByText('HISTORY-COVERED', { exact: true }).count(), 0, 'history defaults to unresolved records');
+    await page.getByText('全部历史订单', { exact: true }).click();
     await page.getByText('HISTORY-COVERED', { exact: true }).waitFor();
     await page.getByText('仅待核对', { exact: true }).click();
     assert.equal(await page.getByText('HISTORY-COVERED', { exact: true }).count(), 0);
@@ -80,7 +86,7 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     assert.equal(await sourceDialog.getByRole('button', { name: '确认保存纠正记录' }).isDisabled(), true);
     await sourceDialog.getByRole('button', { name: '取消', exact: true }).click();
     await page.getByRole('button', { name: '放弃修改', exact: true }).click();
-    await page.getByRole('button', { name: '补采购记录', exact: true }).click();
+    await page.getByRole('button', { name: '补采购记录', exact: true }).first().click();
     const historicalDialog = page.getByRole('dialog', { name: '补历史采购', exact: true });
     await historicalDialog.getByText('只补历史采购来源，不增加现货或在途。实物与账面不符请单独盘点核对。').waitFor();
     assert.equal(await historicalDialog.getByRole('radio').count(), 0);
@@ -96,6 +102,11 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     assert.equal(await page.getByText('CG-OLD', { exact: true }).count(), 0);
     await page.getByText('全部采购', { exact: true }).click();
     await page.getByText('CG-OLD', { exact: true }).waitFor();
+    await purchaseTable.locator('tbody tr').filter({ hasText: 'CG-OLD' }).getByRole('button', { name: '2', exact: true }).first().click();
+    const usageDialog = page.getByRole('dialog', { name: '采购使用明细', exact: true });
+    await usageDialog.getByText('HISTORY-COVERED', { exact: true }).waitFor();
+    await usageDialog.getByText('CURRENT-200', { exact: true }).waitFor();
+    await usageDialog.getByRole('button', { name: 'Close this dialog' }).click();
     await page.getByRole('button', { name: '纠正记录', exact: true }).first().click();
     const dialog = page.getByRole('dialog', { name: '纠正采购记录', exact: true });
     assert.equal(await dialog.getByRole('button', { name: '确认保存纠正记录' }).isDisabled(), true);
@@ -192,6 +203,30 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     await page.getByText('采购来源已关联，库存数量未改变', { exact: true }).waitFor();
     assert.equal(requests.at(-1).body.action_type, 'link_purchase_bulk');
     assert.deepEqual(requests.at(-1).body.allocations, [{ order_item_id: 1, quantity: 2 }]);
+    await page.getByRole('tab', { name: '历史核对', exact: true }).click();
+    const historyPanel = page.getByRole('tabpanel', { name: '历史核对', exact: true });
+    await historyPanel.locator('tbody tr').filter({ hasText: 'HISTORY-ONE' }).locator('.el-checkbox').click();
+    await historyPanel.getByRole('button', { name: '关联已有采购', exact: true }).click();
+    const historyLinkDialog = page.getByRole('dialog', { name: '批量关联已有采购', exact: true });
+    await historyLinkDialog.locator('.el-select__wrapper').click();
+    await page.getByRole('option', { name: /PO-LATE/ }).click();
+    await historyLinkDialog.getByText(/关联后剩余 1 件/).waitFor();
+    await historyLinkDialog.getByRole('button', { name: '确认关联所选订单', exact: true }).click();
+    await confirm.getByRole('textbox').fill('核对所选历史订单的采购凭证');
+    await confirm.getByRole('button', { name: '确定', exact: true }).click();
+    await page.getByText('采购来源已关联，库存数量未改变', { exact: true }).waitFor();
+    assert.deepEqual(requests.at(-1).body.allocations, [{ order_item_id: 4, quantity: 1 }]);
+    await historyPanel.locator('tbody tr').filter({ hasText: 'HISTORY-ONE' }).locator('.el-checkbox').click();
+    await historyPanel.getByRole('button', { name: '补录缺失采购', exact: true }).click();
+    const bulkDialog = page.getByRole('dialog', { name: '批量补齐历史采购', exact: true });
+    assert.equal(await bulkDialog.getByRole('spinbutton').first().isDisabled(), true);
+    await bulkDialog.getByRole('spinbutton').nth(1).fill('12');
+    await bulkDialog.locator('textarea').fill('补录所选订单遗失采购凭证');
+    await bulkDialog.getByRole('button', { name: '预览影响' }).click();
+    await bulkDialog.getByRole('button', { name: '确认保存纠正记录' }).click();
+    await page.getByText('已保存对账记录，库存和历史缺口已重新计算', { exact: true }).waitFor();
+    assert.equal(requests.at(-1).body.action_type, 'historical_purchase_bulk');
+    assert.deepEqual(requests.at(-1).body.order_item_ids, [4]);
     assert.deepEqual(errors, []);
   } finally { await browser?.close(); await fs.rm(output, { recursive: true, force: true }); }
 });
