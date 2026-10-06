@@ -899,6 +899,7 @@ function buildProcurementState(row = {}) {
   const stockCount = types.includes("stock_available");
   const incomingCount = types.includes("incoming_available");
   const requestCount = types.includes("procurement_request");
+  const backfillCount = types.includes("stock_record_backfill");
   const detail = incomingCount && requestCount
     ? "采购在途"
       : incomingCount
@@ -911,8 +912,8 @@ function buildProcurementState(row = {}) {
   return {
     handled: handled >= total,
     partial: handled > 0 && handled < total,
-    label: handled >= total ? (requestCount || incomingCount ? "采购在途" : "库存可满足") : "部分待采购",
-    detail,
+    label: handled >= total ? (backfillCount && !requestCount && !incomingCount ? "补采购记录" : requestCount || incomingCount ? "采购在途" : "库存可满足") : "部分待采购",
+    detail: backfillCount && !requestCount && !incomingCount ? "补采购记录 · 已到货" : detail,
     allocatedQuantity,
     latestPurchaseAt,
     inTransitDays,
@@ -945,7 +946,8 @@ function procurementDetailContent(row) {
       const inventoryName = inventory.productName || record.productName;
       const inventoryNumber = inventory.inventoryNumber || "";
       const isReceived = record.status === "approved";
-      const status = isReceived ? "已入库" : "等待入库";
+      const isBackfill = record.purchaseMode === "stock_record_backfill";
+      const status = isBackfill ? "补采购记录 · 已到货" : isReceived ? "已入库" : "等待入库";
       return h("tr", { class: isReceived ? "is-received" : "is-pending", key: record.id }, [
         h("td", { class: "orders-procurement-product" }, [h("strong", null, inventoryName), inventoryNumber ? h("small", null, `库存号：${inventoryNumber}`) : null]),
         h("td", null, formatDateTime(record.purchasedAt)),
@@ -959,7 +961,7 @@ function procurementDetailContent(row) {
         h("td", null, isReceived ? record.approvedByPersonName : "—"),
         h("td", null, isReceived ? formatDateTime(record.receivedAt) : "—"),
         h("td", { class: "orders-procurement-actions" }, [
-          !isReceived ? h("button", { class: "orders-procurement-receipt-button", type: "button", onClick: () => handleConfirmProcurementInbound(row, record.id) }, "登记入库") : null,
+          !isReceived && !isBackfill ? h("button", { class: "orders-procurement-receipt-button", type: "button", onClick: () => handleConfirmProcurementInbound(row, record.id) }, "登记入库") : null,
           h("button", { class: "orders-procurement-save-button", type: "button", onClick: () => saveProcurementReferences(record) }, "保存")
         ])
       ]);
@@ -1991,6 +1993,7 @@ function initializeProcurementPurchaseInputs() {
       ? recentPurchase.source_type
       : product.source_type || "1688";
     product.purchase_urgency = product.urgency || "normal";
+    product.procurement_purchase_mode = "shortage_purchase";
   }
 }
 
@@ -2110,7 +2113,8 @@ function procurementPurchasePayload() {
       note: String(product.purchase_note || "").trim(),
       source_type: product.purchase_source_type || "1688",
       urgency: product.purchase_urgency || "normal",
-      supplier_id: product.supplier_id || null
+      supplier_id: product.supplier_id || null,
+      purchase_mode: product.procurement_purchase_mode || "shortage_purchase"
     }));
 }
 
@@ -3861,6 +3865,13 @@ onBeforeUnmount(() => {
             <div class="order-procurement-purchase-form">
               <div class="order-procurement-form-section">
                 <span class="order-procurement-form-title">采购决策</span>
+                <el-form-item label="采购方式" class="order-procurement-mode-field">
+                  <el-radio-group v-model="product.procurement_purchase_mode">
+                    <el-radio-button value="shortage_purchase">缺货采购</el-radio-button>
+                    <el-radio-button value="stock_record_backfill">确认有货补采购记录</el-radio-button>
+                  </el-radio-group>
+                  <small>{{ product.procurement_purchase_mode === 'stock_record_backfill' ? '直接记为已到货，不进入在途、不重复增加库存' : '进入采购在途，到货后需要登记实收' }}</small>
+                </el-form-item>
                 <div class="order-procurement-form-grid order-procurement-form-grid-compact">
                   <el-form-item label="采购数量">
                     <el-input-number
@@ -4010,7 +4021,7 @@ onBeforeUnmount(() => {
           :loading="orderProcurementDialog.submitting"
           @click="submitOrderProcurement"
         >
-          确认已下单并进入在途
+          确认提交采购
         </el-button>
       </template>
     </el-dialog>

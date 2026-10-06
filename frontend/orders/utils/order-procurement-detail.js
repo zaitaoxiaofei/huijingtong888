@@ -48,7 +48,8 @@ export function orderProcurementRecordDetails(batches = []) {
         updatedAt: batch.updated_at || "",
         receivedAt: batch.received_at || batch.approved_at || "",
         approvedByPersonName: batch.approved_by_person_name || "未记录",
-        status: batch.status || "pending_arrival"
+        status: batch.status || "pending_arrival",
+        purchaseMode: batch.purchase_mode || "shortage_purchase"
       };
     })
     .sort((left, right) => {
