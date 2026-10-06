@@ -16,7 +16,16 @@ export function planPartialReceipt(record, quantity, expectedQuantity) {
 
 // This is an operational projection. It never repairs the inventory ledger or
 // creates purchases from a shipping status. All quantities use physical product units.
-export function calculateOrderProcurementCoverage({ demands = [], stocks = [], allocations = [], inbounds = [], requests = [], marks = [], sources = [], stockSources = [] }) {
+export function calculateOrderProcurementCoverage({ demands = [], stocks = [], allocations = [], inbounds = [], requests = [], marks = [], sources = [], stockSources = [], includeTrace = false }) {
+  const traces = new Map();
+  const trace = (detail, batch, quantity, basis, purpose) => {
+    if (!includeTrace || quantity <= 0) return;
+    if (!traces.has(detail)) traces.set(detail, []);
+    traces.get(detail).push({ batch_id: batch && !batch.stock_source ? Number(batch.id) : null,
+      purchase_order_no: batch?.purchase_order_no || '', purchase_order_id: batch?.purchase_order_id || null,
+      quantity: rounded(quantity), basis, purpose,
+      source_label: batch?.stock_source ? '期初／退回库存来源' : batch ? '采购批次' : '其他已记录来源' });
+  };
   const prioritizedProducts = new Set(demands.filter(row => row.needs_fulfillment && row.allocation_priority > 0).map(row => Number(row.product_id)));
   const stockByProduct = new Map(stocks.map(row => [Number(row.product_id), row]));
   const pools = new Map(stocks.map(row => [Number(row.product_id), positive(Number(row.ledger || 0) + Number(row.open_deducted || 0) - positive(row.fbp_reserved))]));
@@ -53,6 +62,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
     if (source.inbound_record_id && (!batch || batch.status !== 'approved')) continue;
     const quantity = Math.min(positive(source.quantity), positive(detail.quantity - detail.documented_quantity), batch ? batch.remaining : Infinity);
     detail.documented_quantity += quantity;
+    trace(detail, batch, quantity, 'recorded', 'source');
     if (batch) {
       batch.remaining = positive(batch.remaining - quantity);
       if (quantity > 0) detail.missing_amount ||= !(Number(batch.amount) > 0);
@@ -100,6 +110,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
       const covered = Math.min(take, positive(detail.quantity - detail.received_quantity - detail.documented_quantity - detail.incoming_quantity));
       if (batch.status === 'approved') detail.received_quantity += covered;
       else detail.incoming_quantity += covered;
+      trace(detail, batch, covered, 'recorded', batch.status === 'approved' ? 'source' : 'incoming');
       if (batch.status === 'pending_arrival' && (Number(batch.procurement_request_id) === Number(request.id)
         || (!Number(batch.procurement_request_id) && request.purchase_order_id && Number(batch.purchase_order_id) === Number(request.purchase_order_id))) && covered > 0) {
         detail.receipt_claims.push({ batch_id: Number(batch.id), quantity: covered });
@@ -146,6 +157,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
         if (!take) continue;
         batch.remaining -= take;
         detail.incoming_quantity += take;
+        trace(detail, batch, take, 'fifo', 'incoming');
         detail.missing_amount ||= !(Number(batch.amount) > 0);
         detail.batches.push(batch);
         needed -= take;
@@ -165,6 +177,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
         const take = Math.min(missing, batch.remaining);
         batch.remaining -= take;
         missing -= take;
+        trace(detail, batch, take, 'fifo', 'source');
         if (take > 0 && !batch.stock_source) detail.missing_amount ||= !(Number(batch.amount) > 0);
       }
       detail.missing_record_quantity = missing;
@@ -177,6 +190,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
         if (!take) continue;
         batch.remaining -= take;
         receiptGap -= take;
+        trace(detail, batch, take, 'fifo', 'receipt_pending');
         detail.receipt_claims.push({ batch_id: Number(batch.id), quantity: take, unallocated: true });
       }
       detail.missing_purchase_quantity = receiptGap;
@@ -206,6 +220,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
     for (const key of ['shortage_quantity', 'stock_quantity', 'incoming_quantity', 'missing_record_quantity', 'missing_purchase_quantity', 'missing_receipt_quantity']) order[key] = rounded(order[key] + detail[key]);
     for (const key of ['missing_amount', 'quantity_needs_review', 'inventory_needs_review']) order[key] ||= detail[key];
     order.items.push({ order_item_id: Number(detail.order_item_id), product_id: Number(detail.product_id), product_name: detail.product_name || '',
+      ...(includeTrace ? { coverage_trace: traces.get(detail) || [] } : {}),
       receipt_claims: detail.receipt_claims, quantity_needs_review: detail.quantity_needs_review, unit: detail.stock_unit || '件', quantity: detail.quantity, stock_quantity: detail.stock_quantity, incoming_quantity: detail.incoming_quantity,
       product_total_incoming_quantity: pendingIncomingByProduct.get(Number(detail.product_id)) || 0,
       product_historical_missing_purchase_quantity: historicalMissingByProduct.get(Number(detail.product_id)) || 0,

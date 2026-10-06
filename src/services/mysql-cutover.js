@@ -30213,7 +30213,7 @@ export async function deleteSkuMappingMysql(id) {
 const procurementLedgerService = createProcurementLedgerService({
   query: mysqlQuery, transaction: withMysqlTransaction,
   fbpStocks: productId => loadProductFbpStocks(mysqlQuery, productId),
-  coverage: (query, productId) => loadOrderProcurementCoverage(query, '', { fresh: true, productId }),
+  coverage: (query, productId) => loadOrderProcurementCoverage(query, '', { fresh: true, productId, includeTrace: true }),
   postMovement: postInventoryMysql, receive: applyInboundRecordUpdateMysql,
   recordCost: recordPurchaseCostVersionMysql, refreshPurchase: refreshPurchaseOrderStatusMysql,
   requirePerson: requireSessionPersonIdMysql, invalidate: invalidateOrderProcurementCoverage,
