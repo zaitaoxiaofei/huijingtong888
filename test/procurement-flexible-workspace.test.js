@@ -41,7 +41,8 @@ test("free purchase uses visible direct number inputs and seeds standard invento
   assert.match(page, /inputmode="decimal"/);
   assert.match(page, /const quickInventoryCreateValue = computed/);
   assert.match(page, /:value="quickInventoryCreateValue"/);
-  assert.match(page, /label="库存主图"/);
+  assert.match(page, /class="quick-inventory-image-upload"/);
+  assert.match(page, /库存主图/);
   assert.match(page, /上传主图/);
   assert.match(page, /uploadQuickInventoryImage/);
   assert.match(page, /image_url: String\(item\.image_url \|\| ""\)\.trim\(\)/);

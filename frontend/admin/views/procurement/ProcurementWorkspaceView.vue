@@ -219,7 +219,7 @@ function defaultItem() {
 }
 
 function defaultCreateForm() {
-  return { person_id: null, source_type: "pdd", supplier_id: null, urgency: "normal", note: "", receipts: [], items: [defaultItem()] };
+  return { person_id: null, source_type: "pdd", supplier_id: null, urgency: "normal", platform_order_no: "", tracking_number: "", note: "", receipts: [], items: [defaultItem()] };
 }
 
 function resetCreateForm() {
@@ -1335,6 +1335,10 @@ async function submitCreate() {
       supplier_id: createForm.supplier_id,
       urgency: createForm.urgency,
       note: [createForm.note, receiptNote].filter(Boolean).join("；"),
+      shipments: createForm.tracking_number.trim() ? [{
+        platform_order_no: createForm.platform_order_no.trim(),
+        tracking_number: createForm.tracking_number.trim()
+      }] : [],
       items: createForm.items.map((item) => ({ ...item, quantity: Number(item.quantity || 1), amount: Number(item.amount || 0), shipping_amount: Number(item.shipping_amount || 0) }))
     });
     ElMessage.success(`已登记 ${createForm.items.length} 条采购，现已进入采购在途`);
@@ -1686,6 +1690,10 @@ onMounted(async () => {
           <el-col :span="6"><el-form-item label="供应商"><el-select v-model="createForm.supplier_id" clearable><el-option v-for="supplier in state.suppliers" :key="supplier.id" :label="supplier.name" :value="supplier.id" /></el-select></el-form-item></el-col>
           <el-col :span="4"><el-form-item label="优先级"><el-select v-model="createForm.urgency"><el-option label="普通" value="normal" /><el-option label="加急" value="urgent" /></el-select></el-form-item></el-col>
         </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12"><el-form-item label="平台采购单号"><el-input v-model="createForm.platform_order_no" clearable placeholder="拼多多或 1688 采购订单号" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="快递单号"><el-input v-model="createForm.tracking_number" clearable placeholder="如 773444085928710；拼多多插件同步也会自动填写" /></el-form-item></el-col>
+        </el-row>
       </el-form>
 
       <div class="create-layout">
@@ -1700,7 +1708,17 @@ onMounted(async () => {
         <div v-if="activeItem" class="item-editor">
           <div class="section-head"><strong>填写采购商品</strong><el-button v-if="createForm.items.length > 1" link type="danger" @click="removeItem(activeItemIndex)">删除本条</el-button></div>
           <el-form label-width="92px">
-            <div class="free-purchase-name-preview"><span>标准库存名称</span><strong>{{ activeItemStandardName || '请按下方规则选择核心品名、规格与包装' }}</strong></div>
+            <div class="free-purchase-name-preview">
+              <div class="free-purchase-name-preview-copy"><span>标准库存名称</span><strong>{{ activeItemStandardName || '请按下方规则选择核心品名、规格与包装' }}</strong></div>
+              <div class="quick-inventory-image-upload">
+                <span class="quick-inventory-image-upload-label">库存主图</span>
+                <ProductImagePreview :src="activeItem.image_url" size="small" />
+                <el-upload :show-file-list="false" :auto-upload="false" accept="image/*" :on-change="uploadQuickInventoryImage">
+                  <el-button :loading="quickInventoryImageUploading">上传主图</el-button>
+                </el-upload>
+                <el-button v-if="activeItem.image_url" link type="danger" @click="activeItem.image_url = ''">清除</el-button>
+              </div>
+            </div>
             <InventoryStructuredSearch layout="inventory-form" :show-keyword="false" :show-measurement="true" v-model="activeItemNaming" class="free-purchase-structured-name" @change="syncActiveStructuredName" />
             <el-form-item label="采购备注"><el-input v-model="activeItem.raw_spec" placeholder="选填：供应商原始标题、颜色或包装说明" /></el-form-item>
             <el-row :gutter="12">
@@ -1709,16 +1727,6 @@ onMounted(async () => {
               <el-col :span="8"><el-form-item label="运费"><el-input-number v-model="activeItem.shipping_amount" class="free-purchase-number" :min="0" :precision="2" :controls="false" inputmode="decimal" aria-label="采购运费" /></el-form-item></el-col>
             </el-row>
             <el-form-item label="采购链接"><el-input v-model="activeItem.purchase_url" placeholder="拼多多、1688或其他采购链接" /></el-form-item>
-            <el-form-item label="库存主图">
-              <div class="quick-inventory-image-upload">
-                <ProductImagePreview :src="activeItem.image_url" size="small" />
-                <el-upload :show-file-list="false" :auto-upload="false" accept="image/*" :on-change="uploadQuickInventoryImage">
-                  <el-button :loading="quickInventoryImageUploading">上传主图</el-button>
-                </el-upload>
-                <el-button v-if="activeItem.image_url" link type="danger" @click="activeItem.image_url = ''">清除</el-button>
-                <span>创建标准库存时会自动带入此图片</span>
-              </div>
-            </el-form-item>
           </el-form>
         </div>
 
@@ -1729,16 +1737,18 @@ onMounted(async () => {
             <el-input v-model="quickInventorySearch.inventoryId" placeholder="输入库存 ID 精确查找" clearable @keyup.enter="searchQuickInventory('inventory_id')"><template #append><el-button @click="searchQuickInventory('inventory_id')">查 ID</el-button></template></el-input>
             <el-input v-model="quickInventorySearch.productName" placeholder="输入商品名称模糊搜索" clearable @keyup.enter="searchQuickInventory('name')"><template #append><el-button @click="searchQuickInventory('name')">搜名称</el-button></template></el-input>
           </div>
-          <div v-if="quickInventoryResults.length" v-loading="quickInventoryLoading" class="quick-inventory-results">
-            <button v-for="product in quickInventoryResults" :key="product.product_id" type="button" class="suggestion-card" @click="chooseQuickInventory(product)"><ProductImagePreview :src="product.image_url" size="small" /><div><strong>{{ product.product_name }}</strong><span>库存 ID：{{ product.product_code }}</span></div></button>
+          <div class="quick-inventory-scroll">
+            <div v-if="quickInventoryResults.length" v-loading="quickInventoryLoading" class="quick-inventory-results">
+              <button v-for="product in quickInventoryResults" :key="product.product_id" type="button" class="suggestion-card" @click="chooseQuickInventory(product)"><ProductImagePreview :src="product.image_url" size="small" /><div><strong>{{ product.product_name }}</strong><span>库存 ID：{{ product.product_code }}</span></div></button>
+            </div>
+            <el-divider content-position="left">名称推荐</el-divider>
+            <button v-for="suggestion in state.suggestions" :key="suggestion.product_id" type="button" class="suggestion-card" @click="chooseSuggestion(suggestion)">
+              <ProductImagePreview :src="suggestion.image_url" size="small" />
+              <div><strong>{{ suggestion.product_name }}</strong><span>{{ suggestion.product_code || '-' }}</span><span>{{ suggestion.reason }} · {{ suggestion.confidence }}%</span></div>
+            </button>
+            <el-empty v-if="!state.suggestions.length && !quickInventoryResults.length" :image-size="72" description="可用库存 ID 或名称快速搜索；填写采购名称后也会显示推荐。" />
           </div>
           <el-button type="primary" plain @click="openQuickInventoryCreate">＋ 未找到？创建标准库存并绑定</el-button>
-          <el-divider content-position="left">名称推荐</el-divider>
-          <button v-for="suggestion in state.suggestions" :key="suggestion.product_id" type="button" class="suggestion-card" @click="chooseSuggestion(suggestion)">
-            <ProductImagePreview :src="suggestion.image_url" size="small" />
-            <div><strong>{{ suggestion.product_name }}</strong><span>{{ suggestion.product_code || '-' }}</span><span>{{ suggestion.reason }} · {{ suggestion.confidence }}%</span></div>
-          </button>
-          <el-empty v-if="!state.suggestions.length && !quickInventoryResults.length" :image-size="72" description="可用库存 ID 或名称快速搜索；填写采购名称后也会显示推荐。" />
         </div>
       </div>
 
@@ -1785,9 +1795,9 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.product-cell,.section-head,.item-list-head,.dialog-summary{display:flex;align-items:center;justify-content:space-between;gap:12px}.product-cell{justify-content:flex-start}.muted-text,.suggestion-card span,.item-card span,.section-head p{color:var(--erp-text-secondary);font-size:12px}.binding-name{margin-top:6px}.create-layout{display:grid;grid-template-columns:220px minmax(0,1fr) 310px;gap:16px;min-height:430px}.item-list,.item-editor,.suggestion-panel{padding:14px;border:1px solid var(--erp-border);border-radius:16px;background:#fff}.item-list,.suggestion-panel{display:flex;flex-direction:column;gap:10px}.item-card,.suggestion-card{border:1px solid var(--erp-border);border-radius:12px;background:#fff;text-align:left;cursor:pointer}.item-card{display:flex;justify-content:space-between;align-items:center;padding:12px}.item-card div,.suggestion-card div{display:grid;gap:4px}.item-card.active{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9)}.suggestion-card{display:grid;grid-template-columns:48px minmax(0,1fr);gap:10px;padding:10px}.suggestion-card:hover{border-color:var(--el-color-primary)}.selected-binding{margin:8px 0 12px;padding:10px 12px;border-radius:10px;background:var(--el-color-success-light-9);color:var(--el-color-success-dark-2)}.quick-inventory-search{display:grid;gap:8px}.quick-inventory-results{display:grid;gap:8px;max-height:230px;overflow:auto}.section-head p{margin:3px 0 0;font-weight:400}.create-note{margin-top:16px}.bind-suggestions{display:grid;grid-template-columns:1fr 1fr;gap:10px;max-height:360px;overflow:auto}.dialog-summary{width:100%}@media(max-width:1100px){.create-layout{grid-template-columns:190px 1fr}.suggestion-panel{grid-column:1/-1}.bind-suggestions{grid-template-columns:1fr}}
-.quick-inventory-image-upload{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.quick-inventory-image-upload :deep(.erp-image-preview){width:42px;height:42px}.quick-inventory-image-upload span{color:var(--erp-text-secondary);font-size:12px}
-.free-purchase-name-preview{display:grid;gap:4px;margin:0 0 12px;padding:11px 13px;border:1px solid var(--el-color-primary-light-5);border-radius:10px;background:var(--el-color-primary-light-9)}.free-purchase-name-preview span{color:var(--erp-text-secondary);font-size:12px}.free-purchase-name-preview strong{color:var(--erp-text-primary);line-height:1.5}.free-purchase-structured-name{margin-bottom:12px}
+.product-cell,.section-head,.item-list-head,.dialog-summary{display:flex;align-items:center;justify-content:space-between;gap:12px}.product-cell{justify-content:flex-start}.muted-text,.suggestion-card span,.item-card span,.section-head p{color:var(--erp-text-secondary);font-size:12px}.binding-name{margin-top:6px}.create-layout{display:grid;grid-template-columns:220px minmax(0,1fr) 310px;gap:16px;min-height:430px}.item-list,.item-editor,.suggestion-panel{padding:14px;border:1px solid var(--erp-border);border-radius:16px;background:#fff}.item-list,.suggestion-panel{display:flex;flex-direction:column;gap:10px}.item-card,.suggestion-card{border:1px solid var(--erp-border);border-radius:12px;background:#fff;text-align:left;cursor:pointer}.item-card{display:flex;justify-content:space-between;align-items:center;padding:12px}.item-card div,.suggestion-card div{display:grid;gap:4px}.item-card.active{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9)}.suggestion-card{display:grid;grid-template-columns:48px minmax(0,1fr);gap:10px;padding:10px}.suggestion-card:hover{border-color:var(--el-color-primary)}.selected-binding{margin:8px 0 12px;padding:10px 12px;border-radius:10px;background:var(--el-color-success-light-9);color:var(--el-color-success-dark-2)}.quick-inventory-search{display:grid;gap:8px}.quick-inventory-scroll{display:grid;align-content:start;gap:8px;flex:1;min-height:340px;max-height:calc(90vh - 360px);overflow:auto;padding-right:4px}.quick-inventory-results{display:grid;gap:8px}.section-head p{margin:3px 0 0;font-weight:400}.create-note{margin-top:16px}.bind-suggestions{display:grid;grid-template-columns:1fr 1fr;gap:10px;max-height:360px;overflow:auto}.dialog-summary{width:100%}@media(max-width:1100px){.create-layout{grid-template-columns:190px 1fr}.suggestion-panel{grid-column:1/-1}.bind-suggestions{grid-template-columns:1fr}}
+.quick-inventory-image-upload{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px}.quick-inventory-image-upload :deep(.erp-image-preview){width:42px;height:42px}.quick-inventory-image-upload span{color:var(--erp-text-secondary);font-size:12px}.quick-inventory-image-upload-label{white-space:nowrap}
+.free-purchase-name-preview{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px;margin:0 0 12px;padding:11px 13px;border:1px solid var(--el-color-primary-light-5);border-radius:10px;background:var(--el-color-primary-light-9)}.free-purchase-name-preview-copy{display:grid;gap:4px;min-width:0}.free-purchase-name-preview span{color:var(--erp-text-secondary);font-size:12px}.free-purchase-name-preview strong{color:var(--erp-text-primary);line-height:1.5}.free-purchase-structured-name{margin-bottom:12px}
 .receipt-upload-panel{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;margin-top:16px;padding:16px;border:1px dashed var(--el-color-primary-light-5);border-radius:14px;background:var(--el-color-primary-light-9)}.receipt-upload-panel p{margin:4px 0 0;color:var(--erp-text-secondary);font-size:12px}.receipt-list{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:10px}.receipt-list>div{display:grid;grid-template-columns:56px minmax(80px,160px) auto;align-items:center;gap:8px;padding:8px;border-radius:10px;background:#fff}.receipt-list .el-image{width:56px;height:56px;border-radius:8px}
 .purchase-link-actions{display:flex;align-items:center;flex-wrap:wrap;gap:2px 8px}.link-editor-product{display:grid;grid-template-columns:96px minmax(0,1fr);gap:18px;align-items:center;padding:16px;border-radius:14px;background:var(--erp-bg-page)}.link-editor-product strong{font-size:17px}.link-editor-product p{margin:7px 0 12px;color:var(--erp-text-secondary);line-height:1.65}.link-editor-form{margin-top:18px}.compact-product :deep(.erp-image-preview--portrait){width:72px;min-width:72px;max-width:72px;height:90px;min-height:90px;max-height:90px;flex-basis:72px}.compact-product{min-height:98px}
 .demand-table{min-height:420px}.demand-product-card{display:grid;grid-template-columns:64px minmax(0,1fr);gap:12px;align-items:center;min-height:88px}.demand-product-card>div{display:grid;gap:4px}.row-actions{display:flex;gap:10px}.demand-reason{margin:8px 0 4px;line-height:1.55}.metric-stack,.sales-stack{display:grid;gap:7px}.metric-stack span,.sales-stack span{display:flex;align-items:center;justify-content:space-between;gap:18px}.metric-stack em,.sales-stack em{color:var(--erp-text-secondary);font-size:12px;font-style:normal}.metric-stack strong,.sales-stack strong{color:var(--erp-text-primary);font-size:14px}.sales-stack small{padding-top:5px;border-top:1px dashed var(--erp-border);color:var(--erp-text-secondary)}.source-order-list{display:grid;gap:8px;max-height:510px;overflow:auto}.source-order-item{display:grid;grid-template-columns:64px minmax(0,1fr);gap:12px;padding:10px 12px;border:1px solid var(--erp-border);border-radius:10px}.source-order-item>div{display:grid;align-content:center;gap:3px}.source-order-item span{font-size:12px;color:var(--erp-text-secondary)}.source-order-list .el-pagination{justify-content:flex-end;padding-top:4px}
@@ -1810,6 +1820,7 @@ onMounted(async () => {
 .bulk-order-toolbar{display:grid;grid-template-columns:150px 220px minmax(220px,1fr) auto auto;gap:10px;align-items:center;margin-top:12px}.bulk-receipts,.group-recommendations{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:9px;padding:8px 10px;border-radius:9px;background:#f7f9fc;font-size:12px}.bulk-receipts span{display:flex;align-items:center;gap:4px}.group-recommendations>span{color:var(--erp-text-secondary)}.remember-group{display:flex;align-items:center;gap:8px;min-width:360px}.remember-group .el-input{width:270px}:global(.bulk-add-dialog){max-width:1600px}.bulk-add-search-panel{padding:10px;border:1px solid var(--erp-border);border-radius:12px;background:#f8fafc}.bulk-add-search-actions,.bulk-add-pagination{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:10px}.bulk-add-search-actions span,.bulk-add-pagination span{margin-right:auto;color:var(--erp-text-secondary);font-size:12px}.bulk-add-results{display:grid;grid-template-columns:1fr 1fr;gap:10px;min-height:180px;max-height:470px;margin-top:14px;overflow:auto}.bulk-add-results>button{display:grid;grid-template-columns:52px minmax(0,1fr) auto;gap:11px;align-items:center;padding:10px;border:1px solid var(--erp-border);border-radius:10px;background:#fff;text-align:left;cursor:pointer}.bulk-add-results>button:hover{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9)}.bulk-add-results>button.is-added{border-color:var(--el-color-success-light-5);background:var(--el-color-success-light-9);cursor:default;opacity:.78}.bulk-add-results>button.is-added em{color:var(--el-color-success)}.bulk-add-results>button>div{display:grid;gap:4px}.bulk-add-results span,.bulk-add-results small{color:var(--erp-text-secondary)}.bulk-add-results em{color:var(--el-color-primary);font-style:normal}.bulk-add-results :deep(.erp-image-preview--portrait){width:52px;min-width:52px;height:68px;min-height:68px}
 @media(max-width:1200px){.bulk-order-toolbar{grid-template-columns:130px 180px minmax(180px,1fr) auto}.bulk-order-toolbar .el-upload{grid-column:1/-1}.bulk-add-results{grid-template-columns:1fr}}
 @media(max-width:1100px){.create-layout{grid-template-columns:190px 1fr}.suggestion-panel{grid-column:1/-1}.bind-suggestions{grid-template-columns:1fr}}
-.free-purchase-dialog .create-layout{grid-template-columns:200px minmax(0,1fr) 330px;gap:14px}.free-purchase-number{width:100%;min-width:118px}:deep(.free-purchase-number .el-input__wrapper){min-width:118px}.free-purchase-dialog :deep(.el-form-item__content){min-width:0}
+.free-purchase-dialog .create-layout{grid-template-columns:200px minmax(0,1fr) 330px;gap:14px;min-height:610px}.free-purchase-dialog .suggestion-panel{min-height:580px}.free-purchase-number{width:100%;min-width:118px}:deep(.free-purchase-number .el-input__wrapper){min-width:118px}.free-purchase-dialog :deep(.el-form-item__content){min-width:0}
 @media(max-width:1300px){.free-purchase-dialog .create-layout{grid-template-columns:190px minmax(0,1fr)}.free-purchase-dialog .suggestion-panel{grid-column:1/-1}}
+@media(max-width:720px){.free-purchase-name-preview{grid-template-columns:1fr}.quick-inventory-image-upload{justify-content:flex-start}.quick-inventory-scroll{min-height:260px;max-height:420px}}
 </style>
