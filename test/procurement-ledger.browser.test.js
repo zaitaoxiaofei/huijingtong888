@@ -176,6 +176,19 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     await multi.getByRole('button', { name: '预览影响' }).click();
     await multi.getByRole('button', { name: '确认保存纠正记录' }).click();
     assert.deepEqual(requests.at(-1).body.extra_sources, [{ product_id: 12, quantity: 1, revision: 'logo-v1' }]);
+    await page.getByRole('tab', { name: '采购批次反查', exact: true }).click();
+    const batchSelect = page.getByRole('tabpanel', { name: '采购批次反查' }).locator('.el-select__wrapper');
+    await batchSelect.click();
+    await page.getByRole('option', { name: /PO-LATE/ }).click();
+    const candidates = page.locator('.el-table').filter({ hasText: '建议数量' });
+    await candidates.locator('tbody .el-checkbox').click();
+    await page.getByRole('button', { name: '确认所选来源', exact: true }).click();
+    const confirm = page.getByRole('dialog', { name: '批量核对采购来源', exact: true });
+    await confirm.getByRole('textbox').fill('核对仓库发货记录');
+    await confirm.getByRole('button', { name: '确定', exact: true }).click();
+    await page.getByText('采购来源已关联，库存数量未改变', { exact: true }).waitFor();
+    assert.equal(requests.at(-1).body.action_type, 'link_purchase_bulk');
+    assert.deepEqual(requests.at(-1).body.allocations, [{ order_item_id: 1, quantity: 2 }]);
     assert.deepEqual(errors, []);
   } finally { await browser?.close(); await fs.rm(output, { recursive: true, force: true }); }
 });

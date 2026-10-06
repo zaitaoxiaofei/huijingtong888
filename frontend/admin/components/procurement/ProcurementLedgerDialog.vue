@@ -16,6 +16,20 @@ const form = reactive({});
 const activeTab = ref('current');
 const traceBatchId = ref(null), historyFilter = ref('all'), historyPage = ref(1);
 function showBatch(id) { traceBatchId.value = id; activeTab.value = 'batch-trace'; }
+async function reconcileBatch({ inbound_id, allocations }) {
+  if (saving.value) return;
+  saving.value = true;
+  try {
+    const quantity = allocations.reduce((sum, row) => sum + Number(row.quantity), 0);
+    const { value: reason } = await ElMessageBox.prompt(`确认 ${allocations.length} 条历史订单、共 ${quantity} 件使用了此批已到货商品。只关联采购来源，不增加库存。请填写核对依据：`, '批量核对采购来源', { confirmButtonText: '确定', cancelButtonText: '取消', inputValidator: value => !!value?.trim() || '请填写核对依据', inputPlaceholder: '例如：核对采购凭证及仓库发货记录' });
+    const payload = { action_type: 'link_purchase_bulk', product_id: productId.value, revision: data.value.revision, request_key: crypto.randomUUID(), reason, inbound_id, allocations };
+    await apiClient.post('/api/procurement/ledger/preview', payload);
+    await apiClient.post('/api/procurement/ledger', payload);
+    ElMessage.success('采购来源已关联，库存数量未改变');
+    await load(); emit('saved');
+  } catch (error) { if (error?.message) ElMessage.error(error.message); }
+  finally { saving.value = false; }
+}
 const sourceSuggestions = computed(() => {
   const byItem = new Map();
   for (const row of data.value?.source_inference?.suggestions || []) {
@@ -31,7 +45,7 @@ function confirmSuggestedSource(order, source) {
 }
 function traceLabel(source, historical = false) {
   const purpose = source.purpose === 'source' ? '来源核对' : historical ? '收货待核' : '在途覆盖';
-  return `${source.purchase_order_no || source.source_label}${source.batch_id ? ` · 批次 #${source.batch_id}` : ''}：${source.quantity} 件 · ${purpose} · ${source.basis === 'recorded' ? '已记录关联' : '按顺序推算'}`;
+  return `${source.purchase_order_no || '采购单号待核'}：${source.quantity} 件 · ${purpose} · ${source.basis === 'recorded' ? '已关联' : '待核实'}`;
 }
 const currentTotals = computed(() => ['quantity', 'stock_quantity', 'incoming_quantity', 'shortage_quantity'].map(key => currentOrders.value.reduce((sum, row) => sum + Number(row[key] || 0), 0)));
 watch([historyFilter, productId], () => { historyPage.value = 1; traceBatchId.value = null; });
@@ -81,6 +95,7 @@ const orderCoverageConclusion = computed(() => {
 const pendingCosts = computed(() => (data.value?.cost_tasks || []).filter(row => Number(row.quantity) > Number(row.resolved_quantity)));
 let loadVersion = 0;
 const labels = {
+  link_purchase_bulk: '批量核对采购来源',
   receive_and_count: '历史实收补登记与库存校准',
   set_priority: '调整现货分配优先级', link_stock_cost: '关联已有采购成本',
   record_purchase: '补现货采购成本',
@@ -97,6 +112,7 @@ const movementLabels = { purchase_inbound: '采购入库', purchase_inbound_corr
 const history = computed(() => (data.value?.orders || []).filter(row => row.entered_transport && (historyFilter.value === 'all' || row.missing_record_quantity > 0 || row.missing_amount))
   .sort((a, b) => Number(b.order_id === props.orderId) - Number(a.order_id === props.orderId)));
 const historicalCosts = computed(() => (data.value?.actions || []).flatMap(action => {
+  if (action.action_type === 'link_purchase_bulk') return [];
   const result = typeof action.result_json === 'string' ? JSON.parse(action.result_json) : action.result_json;
   return (result?.allocations || []).map(row => ({ ...row, purchase_order_id: result.purchase_order_id, created_at: action.created_at, person_name: action.person_name }));
 }));
@@ -111,6 +127,7 @@ function time(value) { return shanghaiDateTimeText(value, { assumeUtcWhenNaive: 
 function actionSummary(action) {
   const result = typeof action.result_json === 'string' ? JSON.parse(action.result_json) : action.result_json;
   if (!result) return '—';
+  if (action.action_type === 'link_purchase_bulk') return `已核对 ${result.allocations?.length || 0} 条历史订单，共 ${result.quantity} 件；库存未改变`;
   if (result.physical_before != null && result.physical_after != null) return `本地库存 ${result.physical_before} → ${result.physical_after}（${result.stocktake_delta > 0 ? '+' : ''}${result.stocktake_delta}）${result.cost_task_quantity ? `；待补采购记录 ${result.cost_task_quantity} 件` : ''}`;
   if (action.action_type === 'set_priority') return `订单明细 #${result.order_item_id}：${result.priority ? '优先分配' : '恢复默认顺序'}`;
   if (result.cost_task_id) return `成本任务 #${result.cost_task_id}：核对 ${result.quantity} 件，不增加库存`;
@@ -317,8 +334,8 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
               <el-table-column prop="stock_quantity" label="现货覆盖" width="110" />
               <el-table-column prop="incoming_quantity" label="在途覆盖" width="110" />
               <el-table-column label="覆盖来源／采购关联" min-width="310"><template #default="{ row }">
-                <div v-if="row.stock_quantity > 0">本地现货池：{{ row.stock_quantity }} 件（未追溯实物批次）</div>
-                <div v-for="(source, index) in sourceSuggestions.get(row.order_item_id) || []" :key="`suggest-${index}`"><el-button link type="primary" style="white-space: normal; text-align: left" @click="showBatch(source.batch_id)">{{ source.purchase_order_no || '无采购单号' }} · 批次 #{{ source.batch_id }}：{{ source.quantity }} 件（现货来源推算，非实际拣货批次）</el-button></div>
+                <div v-if="row.stock_quantity > 0">本地现货 · {{ row.stock_quantity }} 件</div>
+                <div v-if="row.stock_quantity > 0 && !row.coverage_trace?.some(source => source.purpose === 'source' && source.basis === 'recorded')"><small>采购来源待核</small> <el-button size="small" plain @click="showBatch(sourceSuggestions.get(row.order_item_id)?.[0]?.batch_id || null)">核对来源</el-button></div>
                 <div v-for="(source, index) in row.coverage_trace || []" :key="index"><el-button v-if="source.batch_id" link type="primary" style="white-space: normal; text-align: left" @click="showBatch(source.batch_id)">{{ traceLabel(source) }}</el-button><span v-else>{{ traceLabel(source) }}</span></div>
                 <small v-if="row.coverage_trace?.some(source => source.purpose === 'source')">采购来源记录不与现货覆盖相加，不代表实际拣货批次。</small>
               </template></el-table-column>
@@ -396,7 +413,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
             </el-collapse-item></el-collapse>
           </el-tab-pane>
           <el-tab-pane label="采购批次反查" name="batch-trace" lazy>
-            <LedgerBatchTrace :key="productId" :orders="data.orders" :batches="data.batches" :batch-id="traceBatchId" :inference="data.source_inference" />
+            <LedgerBatchTrace :key="productId" :orders="data.orders" :batches="data.batches" :batch-id="traceBatchId" :inference="data.source_inference" :saving="saving" @reconcile="reconcileBatch" @purchases="showPurchases()" />
           </el-tab-pane>
           <el-tab-pane label="库存流水" name="movements" lazy>
             <el-button link type="primary" @click="activeTab = 'actions'">查看调整明细：操作人、原因和前后数量</el-button>
