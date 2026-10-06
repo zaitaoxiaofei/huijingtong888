@@ -5308,3 +5308,12 @@
   font-size: 14px;
   color: var(--el-text-color-primary);
 }
+.order-procurement-mode-field {
+  margin-bottom: 14px;
+}
+
+.order-procurement-mode-field small {
+  display: block;
+  margin-top: 6px;
+  color: var(--el-text-color-secondary);
+}

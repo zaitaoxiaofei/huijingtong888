@@ -320,6 +320,7 @@ let shopAdvertisingCredentialSchemaReadyMysql = false;
 let procurementOrderSourceSchemaReadyMysql = false;
 let procurementRequestTimestampSchemaReadyMysql = false;
 let procurementFlexibleRequestSchemaReadyMysql = false;
+let procurementPurchaseModeSchemaReadyMysql = false;
 let procurementPlatformOrderSchemaReadyMysql = false;
 let inboundRecordTimestampSchemaReadyMysql = false;
 let procurementInboundLinkSchemaReadyMysql = false;
@@ -872,6 +873,23 @@ async function ensureProcurementFlexibleRequestSchemaMysql() {
   procurementFlexibleRequestSchemaReadyMysql = true;
 }
 
+function normalizeProcurementPurchaseMode(value) {
+  return String(value || "") === "stock_record_backfill" ? "stock_record_backfill" : "shortage_purchase";
+}
+
+async function ensureProcurementPurchaseModeSchemaMysql() {
+  if (procurementPurchaseModeSchemaReadyMysql) return;
+  await ensureMysqlColumns("procurement_requests", [
+    "ALTER TABLE procurement_requests ADD COLUMN purchase_mode VARCHAR(32) NOT NULL DEFAULT 'shortage_purchase' AFTER demand_type",
+    "CREATE INDEX idx_procurement_purchase_mode_status ON procurement_requests (purchase_mode, status)"
+  ]);
+  await ensureMysqlColumns("purchase_order_items", [
+    "ALTER TABLE purchase_order_items ADD COLUMN purchase_mode VARCHAR(32) NOT NULL DEFAULT 'shortage_purchase' AFTER inbound_quantity",
+    "CREATE INDEX idx_purchase_item_mode_status ON purchase_order_items (purchase_mode, status)"
+  ]);
+  procurementPurchaseModeSchemaReadyMysql = true;
+}
+
 // Procurement workbench reads join several schema-evolving tables. Warm these
 // guards before the HTTP server becomes ready so the first operator request
 // cannot be held behind DDL checks or compatibility backfills.
@@ -879,6 +897,7 @@ export async function ensureProcurementWorkspaceSchemaMysql() {
   ensureMysqlCutoverEnabled();
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementFlexibleRequestSchemaMysql();
+  await ensureProcurementPurchaseModeSchemaMysql();
   await ensureStockLocationSchemaMysql();
   await ensureFbpTransferRecordsSchemaMysql();
 }
@@ -2583,6 +2602,7 @@ export async function orderProcurementBatchesMysql(orderId) {
   const id = Number(orderId);
   if (!Number.isSafeInteger(id) || id <= 0) return { batches: [], items: [] };
   await ensureProcurementLedgerSchema(mysqlExecute);
+  await ensureProcurementPurchaseModeSchemaMysql();
   const [batches, items] = await Promise.all([
     mysqlQuery(`
       SELECT DISTINCT ir.id, ir.product_id, ir.procurement_request_id, ir.purchase_order_id,
@@ -2591,7 +2611,7 @@ export async function orderProcurementBatchesMysql(orderId) {
         ir.approved_at, p.name AS product_name, p.stock_unit,
         pe.name AS person_name, approved_person.name AS approved_by_person_name, po.order_no AS purchase_order_no,
         poi.actual_quantity AS purchase_quantity, poi.inbound_quantity AS purchase_received_quantity,
-        poi.amount AS purchase_amount, poi.shipping_amount AS purchase_shipping_amount,
+        poi.amount AS purchase_amount, poi.shipping_amount AS purchase_shipping_amount, poi.purchase_mode,
         COALESCE(poi.purchase_url, ir.purchase_url) AS purchase_url,
         COALESCE(poi.note, ir.note) AS purchase_note, po.note AS order_note,
         COALESCE(po.purchased_at, ir.created_at) AS purchased_at
@@ -2606,7 +2626,7 @@ export async function orderProcurementBatchesMysql(orderId) {
           SELECT allocation.product_id FROM procurement_order_allocations allocation
           JOIN procurement_requests request ON request.id = allocation.procurement_request_id
             AND request.status != 'cancelled'
-          WHERE allocation.order_id = ? AND allocation.status = 'allocated'
+          WHERE allocation.order_id = ? AND allocation.status IN ('allocated', 'satisfied')
           UNION
           SELECT DISTINCT COALESCE(recipe_item.product_id, component.component_product_id, sm.product_id)
           FROM order_items oi
@@ -15898,13 +15918,14 @@ export async function procurementProductOrderHistoryMysql(query = {}) {
 
 export async function procurementProductPurchaseHistoryMysql(query = {}) {
   ensureMysqlCutoverEnabled();
+  await ensureProcurementPurchaseModeSchemaMysql();
   const productId = Number(query.productId || query.product_id || 0);
   if (!productId) throw new Error("缺少库存商品ID（productId），无法查询采购记录");
   return await mysqlQuery(`
     SELECT poi.id, poi.product_id, poi.purchase_order_id,
       po.order_no AS purchase_order_no, po.status, po.status AS purchase_order_status,
       COALESCE(NULLIF(poi.actual_quantity, 0), poi.requested_quantity) AS quantity,
-      poi.amount, poi.shipping_amount, poi.unit_cost AS purchase_unit_price,
+      poi.amount, poi.shipping_amount, poi.unit_cost AS purchase_unit_price, poi.purchase_mode,
       COALESCE(po.purchased_at, po.created_at) AS created_at,
       po.created_by_person_id AS person_id, creator.name AS person_name,
       COALESCE(MAX(request.supplier_id), product.supplier_id) AS supplier_id,
@@ -15929,7 +15950,7 @@ export async function procurementProductPurchaseHistoryMysql(query = {}) {
       AND COALESCE(NULLIF(poi.actual_quantity, 0), poi.requested_quantity) > 0
       AND po.status IN ('purchased', 'partial_inbound', 'inbound_done')
     GROUP BY poi.id, poi.product_id, poi.purchase_order_id, po.order_no, po.status,
-      poi.actual_quantity, poi.requested_quantity, poi.amount, poi.shipping_amount, poi.unit_cost,
+      poi.actual_quantity, poi.requested_quantity, poi.amount, poi.shipping_amount, poi.unit_cost, poi.purchase_mode,
       po.purchased_at, po.created_at, po.created_by_person_id, creator.name,
       product.supplier_id, product_supplier.name, product.source_platform,
       poi.purchase_url, product.purchase_url, po.note, product.name, product.image_url
@@ -19125,6 +19146,7 @@ export async function createProcurementRequestMysql(body = {}, sessionPersonId =
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementOrderSourceSchemaMysql();
   await ensureProcurementFlexibleRequestSchemaMysql();
+  await ensureProcurementPurchaseModeSchemaMysql();
   const personId = await requireSessionPersonIdMysql(sessionPersonId);
   const creatorId = nullableInteger(sessionPersonId) || personId;
   const items = Array.isArray(body.items) && body.items.length ? body.items : [body];
@@ -19141,8 +19163,8 @@ export async function createProcurementRequestMysql(body = {}, sessionPersonId =
         INSERT INTO procurement_requests
         (request_group_no, product_id, raw_name, raw_spec, binding_status, person_id, created_by_person_id,
           quantity, amount, shipping_amount, purchase_url, approval_status, status, needed_by, note, urgency,
-          source_type, supplier_id, source_order_id, source_order_item_id, source_ozon_sku, demand_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          source_type, supplier_id, source_order_id, source_order_item_id, source_ozon_sku, demand_type, purchase_mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         groupNo, productId, rawName || null, String(item.raw_spec || "").trim() || null,
         productId ? "bound" : "unbound", personId, creatorId,
@@ -19153,7 +19175,8 @@ export async function createProcurementRequestMysql(body = {}, sessionPersonId =
         nullableInteger(item.source_order_id ?? body.source_order_id),
         nullableInteger(item.source_order_item_id ?? body.source_order_item_id),
         item.source_ozon_sku || body.source_ozon_sku || null,
-        Number(item.source_order_item_id ?? body.source_order_item_id ?? 0) ? "real_order" : "advance_stock"
+        Number(item.source_order_item_id ?? body.source_order_item_id ?? 0) ? "real_order" : "advance_stock",
+        normalizeProcurementPurchaseMode(item.purchase_mode ?? body.purchase_mode)
       ]);
       ids.push(Number(result[0].insertId));
     }
@@ -20296,6 +20319,7 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
     throw new Error('FBP 订单由官方仓库存直接履约，无需按订单采购；官方仓补货请使用 FBP 补货功能');
   }
   await ensureProcurementOrderSourceSchemaMysql();
+  await ensureProcurementPurchaseModeSchemaMysql();
   const creation = await withMysqlTransaction(async (connection) => {
     const selectedIds = Array.isArray(body.order_item_ids)
       ? new Set(body.order_item_ids.map(Number).filter(Boolean))
@@ -20379,8 +20403,8 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
         note = `订单采购：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
         const [result] = await connection.execute(`
           INSERT INTO procurement_requests
-          (product_id, person_id, quantity, amount, shipping_amount, purchase_url, approval_status, status, needed_by, note, urgency, source_type, supplier_id, source_order_id, source_order_item_id, source_ozon_sku, demand_type)
-          VALUES (?, ?, ?, ?, ?, ?, 'submitted', 'submitted', NULL, ?, ?, ?, ?, ?, ?, ?, 'real_order')
+          (product_id, person_id, quantity, amount, shipping_amount, purchase_url, approval_status, status, needed_by, note, urgency, source_type, supplier_id, source_order_id, source_order_item_id, source_ozon_sku, demand_type, purchase_mode)
+          VALUES (?, ?, ?, ?, ?, ?, 'submitted', 'submitted', NULL, ?, ?, ?, ?, ?, ?, ?, 'real_order', ?)
         `, [
           productId,
           personId,
@@ -20394,7 +20418,8 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
           override?.supplier_id !== undefined ? nullableInteger(override.supplier_id) : nullableInteger(row.supplier_id),
           Number(row.order_id),
           Number(row.order_item_id),
-          row.ozon_sku || null
+          row.ozon_sku || null,
+          normalizeProcurementPurchaseMode(override?.purchase_mode)
         ]);
         requestIds.push(Number(result.insertId));
         createdRequestProductIds.add(productId);
@@ -20425,8 +20450,8 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
         note = `订单采购：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
         const [result] = await connection.execute(`
           INSERT INTO procurement_requests
-          (product_id, person_id, quantity, amount, shipping_amount, purchase_url, approval_status, status, needed_by, note, urgency, source_type, supplier_id, source_order_id, source_order_item_id, source_ozon_sku, demand_type)
-          VALUES (?, ?, ?, ?, ?, ?, 'submitted', 'submitted', NULL, ?, ?, ?, ?, ?, ?, ?, 'real_order')
+          (product_id, person_id, quantity, amount, shipping_amount, purchase_url, approval_status, status, needed_by, note, urgency, source_type, supplier_id, source_order_id, source_order_item_id, source_ozon_sku, demand_type, purchase_mode)
+          VALUES (?, ?, ?, ?, ?, ?, 'submitted', 'submitted', NULL, ?, ?, ?, ?, ?, ?, ?, 'real_order', ?)
         `, [
           productId,
           personId,
@@ -20440,7 +20465,8 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
           override?.supplier_id !== undefined ? nullableInteger(override.supplier_id) : nullableInteger(row.supplier_id),
           Number(row.order_id),
           Number(row.order_item_id),
-          row.ozon_sku || null
+          row.ozon_sku || null,
+          normalizeProcurementPurchaseMode(override?.purchase_mode)
         ]);
         requestIds.push(Number(result.insertId));
         requestAllocationByProduct.set(productId, {
@@ -20652,6 +20678,7 @@ async function syncFinalizedPurchaseFactsFromProcurementRequestsMysql(connection
       COALESCE(SUM(amount), 0) AS amount,
       COALESCE(SUM(shipping_amount), 0) AS shipping_amount,
       MAX(NULLIF(purchase_url, '')) AS purchase_url,
+      MAX(purchase_mode) AS purchase_mode,
       GROUP_CONCAT(NULLIF(note, '') SEPARATOR '; ') AS note
     FROM procurement_requests
     WHERE purchase_order_id = ?
@@ -20668,7 +20695,7 @@ async function syncFinalizedPurchaseFactsFromProcurementRequestsMysql(connection
   await connection.execute(`
     UPDATE purchase_order_items
     SET requested_quantity = ?, actual_quantity = ?, inbound_quantity = ?,
-      unit_cost = ?, amount = ?, shipping_amount = ?, purchase_url = ?, note = ?,
+      unit_cost = ?, amount = ?, shipping_amount = ?, purchase_url = ?, note = ?, purchase_mode = ?,
       status = CASE
         WHEN ? > 0 AND inbound_quantity >= actual_quantity THEN 'inbound_done'
         WHEN inbound_quantity > 0 THEN 'partial_inbound'
@@ -20684,6 +20711,7 @@ async function syncFinalizedPurchaseFactsFromProcurementRequestsMysql(connection
     shippingAmount,
     purchaseUrl,
     note,
+    normalizeProcurementPurchaseMode(summary?.purchase_mode || item.purchase_mode),
     quantity,
     Number(item.id)
   ]);
@@ -20702,7 +20730,7 @@ async function syncFinalizedPurchaseFactsFromProcurementRequestsMysql(connection
       SET quantity = ?, amount = ?, shipping_amount = ?, unit_cost = ?, purchase_url = ?, note = ?
       WHERE id = ?
     `, [quantity, amount, shippingAmount, unitCost, purchaseUrl, note, Number(inbound.id)]);
-    if (String(inbound.status || "") === "approved") {
+    if (String(inbound.status || "") === "approved" && normalizeProcurementPurchaseMode(item.purchase_mode) !== "stock_record_backfill") {
       await upsertInboundInventoryMovementMysql(connection, Number(inbound.id), {
         product_id: normalizedProductId,
         owner_person_id: inbound.person_id,
@@ -20743,6 +20771,7 @@ async function refreshPurchaseOrderItemsFromMergedRequestsMysql(connection, orde
       COALESCE(SUM(amount), 0) AS amount,
       COALESCE(SUM(shipping_amount), 0) AS shipping_amount,
       MAX(NULLIF(purchase_url, '')) AS purchase_url,
+      MAX(purchase_mode) AS purchase_mode,
       GROUP_CONCAT(NULLIF(note, '') SEPARATOR '; ') AS note
     FROM procurement_requests
     WHERE purchase_order_id = ?
@@ -20779,15 +20808,17 @@ async function refreshPurchaseOrderItemsFromMergedRequestsMysql(connection, orde
     if (existingItem) {
       await connection.execute(`
         UPDATE purchase_order_items
-        SET requested_quantity = ?, actual_quantity = ?, unit_cost = ?, amount = ?, shipping_amount = ?, purchase_url = ?, note = ?
+        SET requested_quantity = ?, actual_quantity = ?, unit_cost = ?, amount = ?, shipping_amount = ?, purchase_url = ?, note = ?, purchase_mode = ?
         WHERE id = ?
-      `, [requestedQuantity, requestedQuantity, unitCost, amount, shippingAmount, purchaseUrl, note, Number(existingItem.id)]);
+      `, [requestedQuantity, requestedQuantity, unitCost, amount, shippingAmount, purchaseUrl, note,
+        normalizeProcurementPurchaseMode(summary.purchase_mode), Number(existingItem.id)]);
     } else {
       await connection.execute(`
         INSERT INTO purchase_order_items
-        (purchase_order_id, product_id, requested_quantity, actual_quantity, unit_cost, amount, shipping_amount, purchase_url, status, note)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending_purchase', ?)
-      `, [normalizedOrderId, productId, requestedQuantity, requestedQuantity, unitCost, amount, shippingAmount, purchaseUrl, note]);
+        (purchase_order_id, product_id, requested_quantity, actual_quantity, unit_cost, amount, shipping_amount, purchase_url, status, note, purchase_mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending_purchase', ?, ?)
+      `, [normalizedOrderId, productId, requestedQuantity, requestedQuantity, unitCost, amount, shippingAmount, purchaseUrl, note,
+        normalizeProcurementPurchaseMode(summary.purchase_mode)]);
     }
   }
 
@@ -21034,6 +21065,7 @@ export async function procurementPurchaseGroupRecommendationsMysql(query = {}) {
 
 export async function mergeProcurementRequestsMysql(body = {}, sessionPersonId = null) {
   ensureMysqlCutoverEnabled();
+  await ensureProcurementPurchaseModeSchemaMysql();
   const ids = [...new Set((body.request_ids || []).map(Number).filter(Boolean))];
   if (!ids.length) throw new Error("Please select procurement requests to merge");
   const placeholders = ids.map(() => "?").join(",");
@@ -21048,6 +21080,18 @@ export async function mergeProcurementRequestsMysql(body = {}, sessionPersonId =
     const personId = await requireSessionPersonIdMysql(sessionPersonId, connection);
     const sourceType = String(body.source_type || "").trim();
     const supplierId = nullableInteger(body.supplier_id);
+    const purchaseModeByProduct = new Map((Array.isArray(body.items) ? body.items : [])
+      .map((item) => [Number(item.product_id || 0), normalizeProcurementPurchaseMode(item.purchase_mode)])
+      .filter(([productId]) => productId));
+    if (purchaseModeByProduct.size) {
+      for (const request of requests) {
+        const mode = purchaseModeByProduct.get(Number(request.product_id));
+        if (mode) request.purchase_mode = mode;
+      }
+      for (const [productId, mode] of purchaseModeByProduct) {
+        await connection.execute(`UPDATE procurement_requests SET purchase_mode = ? WHERE id IN (${placeholders}) AND product_id = ?`, [mode, ...ids, productId]);
+      }
+    }
     if (sourceType || supplierId) {
       await connection.execute(`
         UPDATE procurement_requests
@@ -21069,8 +21113,11 @@ export async function mergeProcurementRequestsMysql(body = {}, sessionPersonId =
         amount: 0,
         shipping_amount: 0,
         purchase_url: request.purchase_url || "",
-        note: ""
+        note: "",
+        purchase_mode: normalizeProcurementPurchaseMode(request.purchase_mode)
       };
+      const requestMode = normalizeProcurementPurchaseMode(request.purchase_mode);
+      if (item.purchase_mode !== requestMode) throw new Error("同一库存商品不能把缺货采购和补采购记录合并到一条采购明细，请分开提交");
       item.requested_quantity += Number(request.quantity || 0);
       item.amount += Number(request.amount || 0);
       item.shipping_amount += Number(request.shipping_amount || 0);
@@ -21092,8 +21139,8 @@ export async function mergeProcurementRequestsMysql(body = {}, sessionPersonId =
     for (const item of grouped.values()) {
       await connection.execute(`
         INSERT INTO purchase_order_items
-        (purchase_order_id, product_id, requested_quantity, actual_quantity, unit_cost, amount, shipping_amount, purchase_url, status, note)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending_purchase', ?)
+        (purchase_order_id, product_id, requested_quantity, actual_quantity, unit_cost, amount, shipping_amount, purchase_url, status, note, purchase_mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending_purchase', ?, ?)
       `, [
         orderId,
         item.product_id,
@@ -21103,7 +21150,8 @@ export async function mergeProcurementRequestsMysql(body = {}, sessionPersonId =
         item.amount,
         item.shipping_amount,
         item.purchase_url,
-        item.note
+        item.note,
+        item.purchase_mode
       ]);
     }
     await connection.execute(`
@@ -21154,9 +21202,22 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
       const goodsUnitCost = actualQuantity ? amount / actualQuantity : 0;
       const purchaseUrl = input.purchase_url ?? item.purchase_url ?? "";
       const note = input.note ?? item.note ?? "";
+      const purchaseMode = String(input.purchase_mode ?? item.purchase_mode ?? "") === "stock_record_backfill"
+        ? "stock_record_backfill"
+        : "shortage_purchase";
       const anomalyReason = String(input.anomaly_reason || body.anomaly_reason || "").trim();
       if (!(actualQuantity > 0)) throw new Error(`商品 #${item.product_id} 的采购数量（actual_quantity）必须大于 0`);
       if (!Number.isFinite(amount) || amount < 0) throw new Error(`商品 #${item.product_id} 的采购金额不能为负数；未知金额可稍后补齐`);
+      if (purchaseMode === "stock_record_backfill") {
+        const local = await mysqlConnectionQueryOne(connection, `
+          SELECT COALESCE(SUM(quantity_delta), 0) AS quantity
+          FROM inventory_movements
+          WHERE product_id = ? AND status = 'posted'
+        `, [Number(item.product_id)]);
+        if (Number(local?.quantity || 0) < actualQuantity) {
+          throw new Error(`商品 #${item.product_id} 当前本地账面库存 ${Number(local?.quantity || 0)} 件，不足以覆盖补采购记录的 ${actualQuantity} 件；请改选“缺货采购”，或先完成库存盘点/补漏记入库`);
+        }
+      }
       const historicalUnitCost = anomalyReason ? 0 : await historicalPurchasedUnitCostMysql(item.product_id);
       if (historicalUnitCost > 0 && goodsUnitCost > historicalUnitCost * 1.1 && !anomalyReason) {
         throw Object.assign(new Error("本次采购单价较历史均价上涨超过10%，请先选择价格异常原因"), {
@@ -21169,9 +21230,12 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
       }
       await connection.execute(`
         UPDATE purchase_order_items
-        SET actual_quantity = ?, unit_cost = ?, amount = ?, shipping_amount = ?, purchase_url = ?, note = ?, status = 'purchased'
+        SET actual_quantity = ?, unit_cost = ?, amount = ?, shipping_amount = ?, purchase_url = ?, note = ?,
+          purchase_mode = ?, inbound_quantity = ?, status = ?
         WHERE id = ?
-      `, [actualQuantity, unitCost, amount, shippingAmount, purchaseUrl, note, item.id]);
+      `, [actualQuantity, unitCost, amount, shippingAmount, purchaseUrl, note, purchaseMode,
+        purchaseMode === "stock_record_backfill" ? actualQuantity : Number(item.inbound_quantity || 0),
+        purchaseMode === "stock_record_backfill" ? "inbound_done" : "purchased", item.id]);
       const channel = await purchaseChannelSnapshotMysql(connection, orderId, item.product_id);
       await recordPurchaseCostVersionMysql(connection, {
         product_id: item.product_id,
@@ -21195,7 +21259,26 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
         "SELECT id, status FROM inbound_records WHERE purchase_order_item_id = ? ORDER BY id DESC LIMIT 1 FOR UPDATE",
         [item.id]
       );
-      if (existingInbound && actualQuantity > Number(item.inbound_quantity || 0)) {
+      if (purchaseMode === "stock_record_backfill") {
+        if (existingInbound) {
+          await connection.execute(`
+            UPDATE inbound_records
+            SET product_id = ?, person_id = ?, quantity = ?, amount = ?, unit_cost = ?, shipping_amount = ?,
+              purchase_url = ?, status = 'approved', note = ?, procurement_request_id = COALESCE(procurement_request_id, ?),
+              qc_status = 'passed', received_at = CURRENT_TIMESTAMP, approved_at = CURRENT_TIMESTAMP, approved_by_person_id = ?
+            WHERE id = ?
+          `, [item.product_id, personId, actualQuantity, amount, unitCost, shippingAmount, purchaseUrl,
+            `${note}${note ? "；" : ""}确认有货补采购记录，不重复增加库存`, channel?.procurement_request_id || null, personId, existingInbound.id]);
+        } else {
+          await connection.execute(`
+            INSERT INTO inbound_records
+            (product_id, person_id, quantity, amount, unit_cost, shipping_amount, purchase_url, status, note,
+              purchase_order_id, purchase_order_item_id, procurement_request_id, qc_status, received_at, approved_at, approved_by_person_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, 'passed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+          `, [item.product_id, personId, actualQuantity, amount, unitCost, shippingAmount, purchaseUrl,
+            `${note}${note ? "；" : ""}确认有货补采购记录，不重复增加库存`, orderId, item.id, channel?.procurement_request_id || null, personId]);
+        }
+      } else if (existingInbound && actualQuantity > Number(item.inbound_quantity || 0)) {
         await connection.execute(`
           UPDATE inbound_records
           SET product_id = ?, person_id = ?, quantity = ?, amount = ?, unit_cost = ?, shipping_amount = ?,
@@ -21214,15 +21297,27 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
       totalQuantity += actualQuantity;
       totalAmount += amount + shippingAmount;
     }
+    const pendingItemCount = items.filter((item) => String((overrides.get(Number(item.id)) || overridesByProduct.get(Number(item.product_id)) || {}).purchase_mode ?? item.purchase_mode ?? "") !== "stock_record_backfill").length;
     await connection.execute(`
       UPDATE purchase_orders
-      SET status = 'purchased', total_quantity = ?, total_amount = ?, purchased_at = CURRENT_TIMESTAMP, note = COALESCE(NULLIF(?, ''), note)
+      SET status = ?, total_quantity = ?, total_amount = ?, purchased_at = CURRENT_TIMESTAMP, note = COALESCE(NULLIF(?, ''), note)
       WHERE id = ?
-    `, [totalQuantity, totalAmount, body.note || "", orderId]);
+    `, [pendingItemCount ? "purchased" : "inbound_done", totalQuantity, totalAmount, body.note || "", orderId]);
     await connection.execute(`
       UPDATE procurement_requests
-      SET status = 'purchased', approval_status = 'purchased', purchased_at = CURRENT_TIMESTAMP
+      SET status = CASE WHEN purchase_mode = 'stock_record_backfill' THEN 'inbound_done' ELSE 'purchased' END,
+        approval_status = CASE WHEN purchase_mode = 'stock_record_backfill' THEN 'inbound_done' ELSE 'purchased' END,
+        purchased_at = CURRENT_TIMESTAMP
       WHERE purchase_order_id = ? AND status = 'merged'
+    `, [orderId]);
+    await connection.execute(`
+      UPDATE order_item_procurement_marks mark
+      JOIN procurement_order_allocations allocation ON allocation.order_item_id = mark.order_item_id
+      JOIN procurement_requests request ON request.id = allocation.procurement_request_id
+      SET mark.status = 'handled', mark.handling_type = 'stock_record_backfill',
+        mark.note = CONCAT('确认有货补采购记录：', COALESCE(mark.note, '')), mark.updated_at = CURRENT_TIMESTAMP,
+        allocation.status = 'satisfied', allocation.updated_at = CURRENT_TIMESTAMP
+      WHERE request.purchase_order_id = ? AND request.purchase_mode = 'stock_record_backfill'
     `, [orderId]);
     await connection.execute(`
       INSERT INTO procurement_order_allocations
@@ -21233,6 +21328,7 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
       JOIN order_items order_item ON order_item.id = request.source_order_item_id
       WHERE request.purchase_order_id = ?
         AND request.status = 'purchased'
+        AND request.purchase_mode = 'shortage_purchase'
         AND request.source_order_id IS NOT NULL
         AND request.source_order_item_id IS NOT NULL
       ON DUPLICATE KEY UPDATE
@@ -21619,6 +21715,7 @@ async function prepareProcurementRequestPurchaseQuantitiesMysql(body = {}) {
     for (const [productId, actualQuantity] of quantityByProduct) {
       const productRequests = requests.filter((request) => Number(request.product_id) === productId);
       if (!productRequests.length) continue;
+      const input = (body.items || []).find((item) => Number(item.product_id) === productId) || {};
       let remaining = Math.max(0, actualQuantity);
       let requestedTotal = 0;
       for (const request of productRequests) {
@@ -21644,30 +21741,31 @@ async function prepareProcurementRequestPurchaseQuantitiesMysql(body = {}) {
           INSERT INTO procurement_requests
           (request_group_no, product_id, raw_name, raw_spec, binding_status, person_id, created_by_person_id,
             quantity, amount, shipping_amount, purchase_url, source_type, supplier_id, approval_status, status,
-            needed_by, note, urgency, source_order_id, source_order_item_id, source_ozon_sku, demand_type)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, ?, ?, ?, ?, ?)
+            needed_by, note, urgency, source_order_id, source_order_item_id, source_ozon_sku, demand_type, purchase_mode)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, ?, ?, ?, ?, ?, ?)
         `, [request.request_group_no, request.product_id, request.raw_name, request.raw_spec, request.binding_status,
           request.person_id, request.created_by_person_id, purchasedQuantity, Number(request.amount || 0) * ratio,
           Number(request.shipping_amount || 0) * ratio, request.purchase_url, request.source_type, request.supplier_id,
           request.needed_by, `${request.note || ""}；本次实际采购 ${purchasedQuantity} 件`, request.urgency,
           request.source_order_id, request.source_order_item_id, request.source_ozon_sku,
-          request.demand_type || (request.source_order_item_id ? "real_order" : "advance_stock")]);
+          request.demand_type || (request.source_order_item_id ? "real_order" : "advance_stock"),
+          normalizeProcurementPurchaseMode(input.purchase_mode ?? request.purchase_mode)]);
         selectedIds.push(Number(inserted.insertId));
         remaining = 0;
       }
       if (remaining > 0) {
         const source = productRequests[0];
         const ratio = actualQuantity > 0 ? remaining / actualQuantity : 0;
-        const input = (body.items || []).find((item) => Number(item.product_id) === productId) || {};
         const [inserted] = await connection.execute(`
           INSERT INTO procurement_requests
           (request_group_no, product_id, binding_status, person_id, created_by_person_id, quantity, amount,
-            shipping_amount, purchase_url, source_type, supplier_id, approval_status, status, note, urgency, demand_type)
-          VALUES (?, ?, 'bound', ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, 'advance_stock')
+            shipping_amount, purchase_url, source_type, supplier_id, approval_status, status, note, urgency, demand_type, purchase_mode)
+          VALUES (?, ?, 'bound', ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, 'advance_stock', ?)
         `, [source.request_group_no, productId, body.person_id || source.person_id, source.created_by_person_id,
           remaining, Number(input.amount || 0) * ratio, Number(input.shipping_amount || 0) * ratio,
           input.purchase_url || source.purchase_url, body.source_type || source.source_type,
-          body.supplier_id || source.supplier_id, `实际采购超出当前订单需求 ${remaining} 件，转为提前采购库存`, source.urgency]);
+          body.supplier_id || source.supplier_id, `实际采购超出当前订单需求 ${remaining} 件，转为提前采购库存`, source.urgency,
+          normalizeProcurementPurchaseMode(input.purchase_mode ?? source.purchase_mode)]);
         selectedIds.push(Number(inserted.insertId));
       }
     }
@@ -21694,7 +21792,11 @@ export async function confirmProcurementRequestsPurchasedMysql(body = {}, sessio
     ok: true,
     purchase_order_id: Number(purchaseOrder.id),
     purchase_order_no: purchaseOrder.order_no || "",
-    stage: "in_transit"
+    stage: (body.items || []).every((item) => normalizeProcurementPurchaseMode(item.purchase_mode) === "stock_record_backfill")
+      ? "stock_record_backfill"
+      : (body.items || []).some((item) => normalizeProcurementPurchaseMode(item.purchase_mode) === "stock_record_backfill")
+        ? "mixed"
+        : "in_transit"
   };
 }
 
@@ -21702,7 +21804,7 @@ export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId 
   const items = Array.isArray(body.items) ? body.items : [];
   if (!items.length) throw new Error("请至少填写一条采购商品");
   const unbound = items.find((item) => !Number(item.product_id || 0));
-  if (unbound) throw new Error(`「${unbound.raw_name || unbound.name || "采购商品"}」尚未绑定库存商品，无法生成采购在途记录`);
+  if (unbound) throw new Error(`「${unbound.raw_name || unbound.name || "采购商品"}」尚未绑定库存商品，无法登记采购记录`);
   const created = await createProcurementRequestMysql(body, sessionPersonId);
   try {
     return {
