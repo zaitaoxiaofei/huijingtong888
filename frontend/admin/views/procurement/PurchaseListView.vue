@@ -645,6 +645,11 @@ onMounted(async () => {
           <span>共 {{ totalRows }} 条</span>
           <span>已选 {{ state.selectedRows.length }} 条</span>
         </div>
+        <el-radio-group v-model="state.filters.status" class="purchase-status-filter" @change="handleSearch">
+          <el-radio-button label="pending_arrival">待入库</el-radio-button>
+          <el-radio-button label="approved">已入库</el-radio-button>
+          <el-radio-button label="all">全部</el-radio-button>
+        </el-radio-group>
         <ErpFilterBar>
           <el-form inline>
             <el-form-item label="关键词">
@@ -658,14 +663,6 @@ onMounted(async () => {
             </el-form-item>
             <el-form-item label="采购日期">
               <el-date-picker v-model="state.filters.purchaseDateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" style="width: 250px" />
-            </el-form-item>
-            <el-form-item label="状态">
-              <el-select v-model="state.filters.status" style="width: 130px">
-                <el-option label="待入库" value="pending_arrival" />
-                <el-option label="已入库" value="approved" />
-                <el-option label="已取消" value="cancelled" />
-                <el-option label="全部" value="all" />
-              </el-select>
             </el-form-item>
             <el-form-item label="需求类型">
               <el-select v-model="state.filters.demandType" style="width: 150px">
@@ -1007,6 +1004,10 @@ onMounted(async () => {
 .procurement-list-summary span {
   color: var(--erp-text-secondary);
   font-size: 12px;
+}
+
+.purchase-status-filter {
+  flex: 0 0 auto;
 }
 
 .procurement-structured-search {
