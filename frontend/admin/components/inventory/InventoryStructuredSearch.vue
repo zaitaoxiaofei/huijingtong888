@@ -6,6 +6,7 @@ import { loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../u
 const props = defineProps({
   modelValue: { type: Object, required: true },
   compact: { type: Boolean, default: false },
+  simple: { type: Boolean, default: false },
   showKeyword: { type: Boolean, default: true },
   layout: { type: String, default: "search" },
   showMeasurement: { type: Boolean, default: false }
@@ -155,9 +156,9 @@ watch(
 </script>
 
 <template>
-  <div class="inventory-structured-search" :class="{ 'is-compact': compact, 'is-inventory-form': layout === 'inventory-form' }">
+  <div class="inventory-structured-search" :class="{ 'is-compact': compact, 'is-simple': simple, 'is-inventory-form': layout === 'inventory-form' }">
     <div class="search-group search-group--identity">
-      <div class="search-group__title"><strong>产品身份</strong><span>汽车品牌和车型不选表示不限制搜索条件</span></div>
+      <div v-if="!simple" class="search-group__title"><strong>产品身份</strong><span>汽车品牌和车型不选表示不限制搜索条件</span></div>
       <el-form-item label="核心品名">
         <el-select :model-value="modelValue.inventoryCategory" filterable clearable :loading="optionState.category.loading" :no-data-text="noDataText('category')" placeholder="输入或选择核心品名" @visible-change="retryOption('category', $event)" @update:model-value="update('inventoryCategory', $event)">
           <el-option v-for="item in options.category" :key="item.id || optionValue(item)" :label="optionLabel(item)" :value="optionValue(item)" />
@@ -175,7 +176,7 @@ watch(
       </el-form-item>
     </div>
     <div class="search-group search-group--spec">
-      <div class="search-group__title"><strong>规格属性</strong><span>未选择表示不限制</span></div>
+      <div v-if="!simple" class="search-group__title"><strong>规格属性</strong><span>未选择表示不限制</span></div>
       <el-form-item label="颜色">
         <el-select :model-value="modelValue.color" filterable clearable :loading="optionState.color.loading" :no-data-text="noDataText('color')" placeholder="全部颜色" @visible-change="retryOption('color', $event)" @update:model-value="update('color', $event)">
           <el-option v-for="item in options.color" :key="optionValue(item)" :label="optionLabel(item)" :value="optionValue(item)" />
@@ -201,7 +202,7 @@ watch(
       </el-form-item>
     </div>
     <div v-if="showMeasurement" class="search-group search-group--measure">
-      <div class="search-group__title"><strong>库存计量与履约</strong><span>数量和单位用于标准库存名称及库存计数</span></div>
+      <div v-if="!simple" class="search-group__title"><strong>库存计量与履约</strong><span>数量和单位用于标准库存名称及库存计数</span></div>
       <el-form-item label="包装数量">
         <el-input-number :model-value="modelValue.quantity" :min="1" :precision="0" :controls="false" inputmode="numeric" @update:model-value="update('quantity', $event)" />
       </el-form-item>
@@ -284,6 +285,9 @@ watch(
 .inventory-structured-search.is-inventory-form .search-group { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 12px 14px; }
 .inventory-structured-search.is-inventory-form .search-group--spec { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .inventory-structured-search.is-inventory-form .search-group--measure { grid-template-columns: repeat(2, minmax(180px, 1fr)); }
+.inventory-structured-search.is-inventory-form.is-simple { gap: 0; }
+.inventory-structured-search.is-inventory-form.is-simple .search-group { padding: 10px 0; border: 0; border-radius: 0; border-bottom: 1px solid #e7ebf2; box-shadow: none; }
+.inventory-structured-search.is-inventory-form.is-simple .search-group--measure { border-bottom: 0; }
 .inventory-structured-search.is-compact .search-group { display: contents; }
 .inventory-structured-search.is-compact .search-group__title { display: none; }
 .inventory-structured-search.is-compact :deep(.el-form-item__label) { margin-bottom: 3px; line-height: 16px; }
