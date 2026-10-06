@@ -35,7 +35,7 @@ test("procurement workspace keeps owner, free names, multi-item creation and lat
 });
 
 test("free purchase uses visible direct number inputs and seeds standard inventory creation", () => {
-  assert.match(page, /width="min\(1920px, calc\(100vw - 24px\)\)"/);
+  assert.match(page, /width="min\(1760px, calc\(100vw - 32px\)\)"/);
   assert.match(page, /class="free-purchase-number"[\s\S]*?:controls="false"/);
   assert.match(page, /inputmode="numeric"/);
   assert.match(page, /inputmode="decimal"/);
@@ -43,6 +43,7 @@ test("free purchase uses visible direct number inputs and seeds standard invento
   assert.match(page, /:value="quickInventoryCreateValue"/);
   assert.match(page, /class="free-purchase-name-preview-image"/);
   assert.match(page, /title="上传库存主图"/);
+  assert.match(page, />上传主图<\/span>/);
   assert.match(page, /UploadFilled/);
   assert.match(page, /uploadQuickInventoryImage/);
   assert.match(page, /image_url: String\(item\.image_url \|\| ""\)\.trim\(\)/);
