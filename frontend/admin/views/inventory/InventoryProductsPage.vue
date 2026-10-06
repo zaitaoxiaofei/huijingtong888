@@ -1942,9 +1942,9 @@ onActivated(() => void loadPageData({ silent: true }));
           <template #default="{ row }"><strong :title="row.inventory_number ? '库存编号生成后保持不变' : '缺少产品身份中的核心品名（inventory_category），请打开编辑库存补齐，保存后自动生成编号'">{{ row.inventory_number || "待补核心品名" }}</strong></template>
         </el-table-column>
         <el-table-column label="产品信息" prop="product" min-width="340" fixed="left" sortable="custom">
-          <template #default="{ row }">
+          <template #default="{ row, $index }">
             <div class="product-cell">
-              <ProductImagePreview :src="row.image_url" />
+              <ProductImagePreview :src="row.image_url" :load-delay="Math.min($index, 12) * 120" />
               <div class="cell-stack">
                 <ProductTitleLink :title="row.name || '-'" :lines="2" />
                 <span class="muted-text">{{ row.inventory_number || row.inventory_id || row.code || "-" }}</span>

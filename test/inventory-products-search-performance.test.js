@@ -26,6 +26,10 @@ test("inventory list does not block first paint on auxiliary dictionaries", () =
   assert.match(viewSource, /const products = await apiClient\.get\(requestUrl\);/);
 });
 
+test("inventory list staggers thumbnail work instead of starting every image request together", () => {
+  assert.match(viewSource, /:load-delay="Math\.min\(\$index, 12\) \* 120"/);
+});
+
 test("component availability only aggregates movement rows for the current page", () => {
   assert.match(compositionSummarySource, /const componentIds = \[\.\.\.new Set\(components\.map/);
   assert.match(compositionSummarySource, /AND product_id IN/);

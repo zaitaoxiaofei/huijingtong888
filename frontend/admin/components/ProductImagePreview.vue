@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { getAuthToken } from "../utils/api";
 
 const props = defineProps({
@@ -11,12 +11,29 @@ const props = defineProps({
   preview: { type: Boolean, default: true },
   lazy: { type: Boolean, default: true },
   proxyRemote: { type: Boolean, default: false },
+  loadDelay: { type: Number, default: 0 },
   maxInlineImageLength: { type: Number, default: 262144 },
   initialIndex: { type: Number, default: 0 }
 });
 
 const useProxyFallback = ref(false);
 const fallbackIndex = ref(0);
+const imageReady = ref(true);
+let imageDelayTimer = null;
+
+function scheduleImageLoad() {
+  if (imageDelayTimer) clearTimeout(imageDelayTimer);
+  const delay = Math.max(Number(props.loadDelay || 0), 0);
+  if (!delay || !props.src) {
+    imageReady.value = true;
+    return;
+  }
+  imageReady.value = false;
+  imageDelayTimer = setTimeout(() => {
+    imageDelayTimer = null;
+    imageReady.value = true;
+  }, delay);
+}
 
 function firstImageValue(src) {
   if (src && typeof src === "object") {
@@ -93,12 +110,18 @@ function withImageToken(url) {
 }
 
 watch(
-  () => [props.src, props.previewList],
+  () => [props.src, props.previewList, props.loadDelay],
   () => {
     useProxyFallback.value = false;
     fallbackIndex.value = 0;
-  }
+    scheduleImageLoad();
+  },
+  { immediate: true }
 );
+
+onBeforeUnmount(() => {
+  if (imageDelayTimer) clearTimeout(imageDelayTimer);
+});
 
 const previewSrcList = computed(() => {
   const list = Array.isArray(props.previewList) && props.previewList.length ? props.previewList : [props.src];
@@ -138,7 +161,7 @@ function handleImageError() {
 <template>
   <div class="erp-image-preview" :class="`erp-image-preview--${props.size}`">
     <el-image
-      v-if="displaySrc"
+      v-if="imageReady && displaySrc"
       :src="displaySrc"
       :alt="props.alt"
       :fit="props.fit"
@@ -149,6 +172,6 @@ function handleImageError() {
       class="erp-image-preview__image"
       @error="handleImageError"
     />
-    <div v-else class="erp-image-preview__empty">无图</div>
+    <div v-else class="erp-image-preview__empty">{{ props.src ? "加载图片" : "无图" }}</div>
   </div>
 </template>
