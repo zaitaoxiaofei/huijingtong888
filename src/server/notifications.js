@@ -188,6 +188,10 @@ export function globalUpdateStatus(query = {}) {
     analytics_plugin: {
       ...status.analytics_plugin,
       update_required: Boolean(analyticsPluginVersion && analyticsPluginVersion !== status.analytics_plugin.version)
+    },
+    pdd_procurement_plugin: {
+      ...status.pdd_procurement_plugin,
+      update_required: Boolean(query.pdd_procurement_plugin_version && query.pdd_procurement_plugin_version !== status.pdd_procurement_plugin.version)
     }
   };
 }
@@ -207,6 +211,10 @@ export function updateGlobalUpdateStatus(body = {}) {
     analytics_plugin: {
       ...current.analytics_plugin,
       ...(body.analytics_plugin || body.analyticsPlugin || {})
+    },
+    pdd_procurement_plugin: {
+      ...current.pdd_procurement_plugin,
+      ...(body.pdd_procurement_plugin || body.pddProcurementPlugin || {})
     }
   };
   if (body.app) next.app.published_at = body.app.published_at || now;
