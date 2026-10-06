@@ -187,6 +187,14 @@ const procurementUrgencyOptions = [
   { label: "普通", value: "normal" },
   { label: "加急", value: "urgent" }
 ];
+const orderProcurementModeOptions = [
+  { value: "shortage_purchase", label: "缺货采购", description: "本地没有可用现货，采购后进入在途，到货后登记实收。" },
+  { value: "inventory_update", label: "更新实存", description: "仓库已经盘清实物，填写本地实际剩余数量和当前库存总货值；不生成采购在途。" },
+  { value: "historical_debt_backfill", label: "历史采购补记", description: "只用于已经真实出库、运输或签收的历史欠账；当前待备货订单不能使用。", disabled: true }
+];
+function orderProcurementModeDescription(mode) { return orderProcurementModeOptions.find((item) => item.value === mode)?.description || orderProcurementModeOptions[0].description; }
+function orderProcurementQuantityLabel(mode) { return mode === "inventory_update" ? "实存数量" : "采购数量"; }
+function orderProcurementAmountLabel(mode) { return mode === "inventory_update" ? "库存总货值" : "货款"; }
 
 const statusTabLabelMap = computed(() => new Map((vm.statusTabs || []).map((item) => [item.value, item.label])));
 
@@ -2133,8 +2141,16 @@ async function validateProcurementPurchaseInputs() {
     ElMessage.warning(`「${missingAmount.product_name || missingAmount.product_code || missingAmount.product_id}」的采购金额不能为负数；暂缺金额可先登记，后续补齐`);
     return false;
   }
+  const invalidInventoryUpdate = orderProcurementProducts.value.find((product) => selectedProducts.has(Number(product.product_id))
+    && product.procurement_purchase_mode === "inventory_update"
+    && ((Number(product.purchase_quantity) === 0 && Number(product.purchase_amount) !== 0)
+      || (Number(product.purchase_quantity) > 0 && !(Number(product.purchase_amount) > 0))));
+  if (invalidInventoryUpdate) {
+    ElMessage.warning(`「${invalidInventoryUpdate.product_name || invalidInventoryUpdate.product_code}」请同时填写本地实际剩余数量和当前库存总货值`);
+    return false;
+  }
   const abnormalProducts = orderProcurementProducts.value.filter((product) => (
-    selectedProducts.has(Number(product.product_id)) && procurementCostVariance(product)?.abnormal
+    selectedProducts.has(Number(product.product_id)) && product.procurement_purchase_mode !== "inventory_update" && procurementCostVariance(product)?.abnormal
   ));
   if (!abnormalProducts.length) return true;
   const details = abnormalProducts.map((product) => {
@@ -2209,7 +2225,10 @@ async function submitOrderProcurement() {
     const createdCount = Number(result?.created_count || 0);
     const stockCount = Number(result?.stock_satisfied_count || 0);
     const markedCount = Number(result?.marked_count || 0);
-    if (markedCount > 0) {
+    const inventoryUpdatedCount = Number(result?.inventory_updated_count || 0);
+    if (inventoryUpdatedCount > 0 && !createdCount) {
+      ElMessage.success(`已更新 ${inventoryUpdatedCount} 个库存商品的实存数量与总货值，请按最新库存重新判断是否采购`);
+    } else if (markedCount > 0) {
       const orderNo = String(result?.purchase_order_no || "").trim();
       ElMessage.success(`采购已提交：${stockCount} 条库存可满足，${createdCount} 条已完成采购${orderNo ? `（${orderNo}）` : ""}`);
     } else {
@@ -3883,15 +3902,16 @@ onBeforeUnmount(() => {
             <div class="order-procurement-purchase-form">
               <div class="order-procurement-form-section">
                 <span class="order-procurement-form-title">采购决策</span>
-                <el-form-item label="采购方式" class="order-procurement-mode-field">
+                <el-form-item label="处理类型" class="order-procurement-mode-field">
                   <el-radio-group v-model="product.procurement_purchase_mode">
-                    <el-radio-button value="shortage_purchase">缺货采购</el-radio-button>
-                    <el-radio-button value="stock_record_backfill">确认有货补采购记录</el-radio-button>
+                    <el-tooltip v-for="option in orderProcurementModeOptions" :key="option.value" :content="option.description" placement="top">
+                      <el-radio-button :value="option.value" :disabled="option.disabled">{{ option.label }}</el-radio-button>
+                    </el-tooltip>
                   </el-radio-group>
-                  <small>{{ product.procurement_purchase_mode === 'stock_record_backfill' ? '直接记为已到货，不进入在途、不重复增加库存' : '进入采购在途，到货后需要登记实收' }}</small>
+                  <small>{{ orderProcurementModeDescription(product.procurement_purchase_mode) }}</small>
                 </el-form-item>
                 <div class="order-procurement-form-grid order-procurement-form-grid-compact">
-                  <el-form-item label="采购数量">
+                  <el-form-item :label="orderProcurementQuantityLabel(product.procurement_purchase_mode)">
                     <el-input-number
                       v-model="product.purchase_quantity"
                       :min="0"
@@ -3901,7 +3921,7 @@ onBeforeUnmount(() => {
                       @change="handleProcurementQuantityChange(product)"
                     />
                   </el-form-item>
-                  <el-form-item label="货款">
+                  <el-form-item :label="orderProcurementAmountLabel(product.procurement_purchase_mode)">
                     <el-input-number
                       v-model="product.purchase_amount"
                       :min="0"
@@ -3910,7 +3930,7 @@ onBeforeUnmount(() => {
                       controls-position="right"
                     />
                   </el-form-item>
-                  <el-form-item label="运费">
+                  <el-form-item v-if="product.procurement_purchase_mode !== 'inventory_update'" label="运费">
                     <el-input-number
                       v-model="product.purchase_shipping"
                       :min="0"
@@ -3919,7 +3939,7 @@ onBeforeUnmount(() => {
                       controls-position="right"
                     />
                   </el-form-item>
-                  <el-form-item label="紧急程度">
+                  <el-form-item v-if="product.procurement_purchase_mode !== 'inventory_update'" label="紧急程度">
                     <el-segmented v-model="product.purchase_urgency" :options="procurementUrgencyOptions" />
                   </el-form-item>
                 </div>

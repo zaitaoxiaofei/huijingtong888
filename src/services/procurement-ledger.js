@@ -195,9 +195,16 @@ export function planLedgerAction(snapshot, body) {
   } else if (['damage', 'loss', 'stocktake'].includes(type)) {
     if (type === 'stocktake') {
       Object.assign(result, countedStock(snapshot, body.counted_quantity));
+      if (body.counted_amount !== undefined) {
+        result.counted_amount = money(body.counted_amount);
+        if (!result.counted_quantity && result.counted_amount) throw new Error('本地实存为 0 时，当前库存总货值必须填写 0');
+        if (result.counted_quantity > 0 && !(result.counted_amount > 0)) throw new Error('更新实存时请填写当前库存总货值（counted_amount），用于同步真实库存成本');
+        result.counted_unit_cost = result.counted_quantity ? result.counted_amount / result.counted_quantity : 0;
+      }
       result.local_delta = result.stocktake_delta;
       // Initial counts need cost verification even when their ledger delta is zero.
       result.cost_task_quantity = snapshot.stocktake_id ? Math.min(result.counted_quantity, Math.max(0, result.stocktake_delta)) : result.counted_quantity;
+      if (result.counted_amount !== undefined) result.cost_task_quantity = 0;
       if (body.reason_code) {
         result.reason_code = body.reason_code;
         result.cost_task_quantity = body.reason_code === 'missing_purchase'
@@ -482,6 +489,13 @@ export function createProcurementLedgerService(hooks) {
         for (const source of extraSources) await movement(source.product_id, -source.quantity, 'reconciliation_convert');
         if (plan.target_product_id) await movement(plan.target_product_id, plan.target_delta, 'reconciliation_convert_in');
       }
+      if (plan.type === 'stocktake' && plan.counted_amount !== undefined && plan.counted_quantity > 0) {
+        await recordCost(connection, { product_id: productId, source_key: `stocktake_valuation:${actionId}`,
+          stage: 'stocktake_valuation', quantity: plan.counted_quantity, amount: plan.counted_amount,
+          shipping_amount: 0, person_id: actor, anomaly_reason: plan.reason });
+        await connection.execute('UPDATE products SET purchase_cost = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [plan.counted_unit_cost, productId]);
+      }
       if (plan.cost_task_quantity > 0) await connection.execute(`INSERT INTO procurement_stock_cost_tasks
         (product_id, stocktake_action_id, quantity, person_id, reason) VALUES (?, ?, ?, ?, ?)`,
       [productId, actionId, plan.cost_task_quantity, actor, plan.reason]);
@@ -502,7 +516,8 @@ export function createProcurementLedgerService(hooks) {
         ...(plan.reason_code ? { reason_code: plan.reason_code } : {}),
         ...(plan.type === 'set_priority' ? { order_item_id: plan.order_item_id, priority: plan.priority } : {}),
         ...(plan.counted_quantity !== undefined ? { counted_quantity: plan.counted_quantity, physical_before: plan.physical_before,
-          physical_after: plan.counted_quantity, stocktake_delta: plan.stocktake_delta } : {}),
+          physical_after: plan.counted_quantity, stocktake_delta: plan.stocktake_delta,
+          ...(plan.counted_amount !== undefined ? { counted_amount: plan.counted_amount, counted_unit_cost: plan.counted_unit_cost } : {}) } : {}),
         local_before: before.local_stock, local_after: before.local_stock + plan.local_delta,
         local_delta: plan.local_delta, target_product_id: plan.target_product_id || null, target_delta: plan.target_delta };
       await connection.execute('UPDATE procurement_ledger_actions SET result_json = ? WHERE id = ?', [JSON.stringify(response), actionId]);
