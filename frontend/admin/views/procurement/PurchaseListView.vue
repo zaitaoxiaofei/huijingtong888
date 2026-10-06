@@ -31,7 +31,7 @@ const savingRequestIds = ref([]);
 const receiptVisible = ref(false);
 const receiptSubmitting = ref(false);
 const receiptRows = ref([]);
-const receiptForm = reactive({ courier_company: "", tracking_number: "", received_at: "", images: [], note: "" });
+const receiptForm = reactive({ courier_company: "", tracking_number: "", received_at: "", images: [], note: "", impact_reason: "", impact_note: "", impact_required: false });
 const newPurchaseVisible = ref(false);
 const newPurchaseSaving = ref(false);
 const newPurchaseForm = reactive({ quantity: 1, amount: 0, shipping_amount: 0, purchase_url: "", note: "" });
@@ -219,7 +219,7 @@ function receiptImages(row = {}) {
 
 function openReceiptDialog(rows) {
   receiptRows.value = rows.flatMap((row) => row.requests || []).map((row) => ({ ...row, receive_quantity: Number(row.quantity || 0) }));
-  Object.assign(receiptForm, { courier_company: "", tracking_number: "", received_at: new Date().toISOString().slice(0, 19).replace("T", " "), images: [], note: "" });
+  Object.assign(receiptForm, { courier_company: "", tracking_number: "", received_at: new Date().toISOString().slice(0, 19).replace("T", " "), images: [], note: "", impact_reason: "", impact_note: "", impact_required: false });
   receiptVisible.value = true;
 }
 
@@ -232,9 +232,10 @@ async function uploadReceiptImage(file) {
 
 async function confirmReceipt() {
   if (!receiptRows.value.length) return;
+  if (receiptForm.impact_required && !receiptForm.impact_reason) return ElMessage.warning("请选择库存影响处理原因后再确认入库");
   receiptSubmitting.value = true;
   try {
-    await apiClient.post("/api/inbound-records/batch-update", { records: receiptRows.value.map((row) => ({ id: row.id, payload: {
+    await apiClient.post("/api/inbound-records/batch-update", { receipt_impact_confirmed: receiptForm.impact_required, receipt_impact_reason: receiptForm.impact_reason, receipt_impact_note: receiptForm.impact_note, records: receiptRows.value.map((row) => ({ id: row.id, payload: {
       ...normalizeRequestForSave(row), receive_quantity: Number(row.receive_quantity || 0),
       expected_remaining_quantity: Number(row.quantity || 0),
       courier_company: receiptForm.courier_company, tracking_number: receiptForm.tracking_number,
@@ -243,7 +244,7 @@ async function confirmReceipt() {
     }})) });
     ElMessage.success("收货批次已登记，已同步快递单号和到货照片");
     receiptVisible.value = false; state.selectedRows = []; await loadPageData();
-  } catch (error) { ElMessage.error(error.message || "批量收货失败"); }
+  } catch (error) { if (error?.status === 409 || error?.statusCode === 409) { receiptForm.impact_required = true; ElMessage.warning("请先选择库存影响处理原因，再强制确认入库"); } else ElMessage.error(error.message || "批量收货失败"); }
   finally { receiptSubmitting.value = false; }
 }
 
@@ -910,6 +911,11 @@ onMounted(async () => {
         <el-form-item label="到货时间"><el-date-picker v-model="receiptForm.received_at" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" /></el-form-item>
         <el-form-item label="到货照片"><el-upload :auto-upload="false" accept="image/*" multiple :on-change="uploadReceiptImage"><el-button>上传照片</el-button></el-upload><span class="muted-text">已上传 {{ receiptForm.images.length }} 张</span></el-form-item>
         <el-form-item label="收货备注"><el-input v-model="receiptForm.note" type="textarea" /></el-form-item>
+        <template v-if="receiptForm.impact_required">
+          <el-alert type="warning" :closable="false" title="这批采购之后已有订单出库，请选择原因并留痕后确认入库。" />
+          <el-form-item label="处理原因" required><el-select v-model="receiptForm.impact_reason" placeholder="请选择"><el-option label="实际已收货，订单已发货导致库存为零" value="received_and_shipped" /><el-option label="历史采购补录" value="historical_backfill" /><el-option label="库存已记账，仅补齐收货记录" value="already_accounted" /></el-select></el-form-item>
+          <el-form-item label="原因说明"><el-input v-model="receiptForm.impact_note" type="textarea" placeholder="请填写核对说明" /></el-form-item>
+        </template>
       </el-form>
       <el-table :data="receiptRows" border max-height="280"><el-table-column prop="product_name" label="库存名称" min-width="300" /><el-table-column prop="quantity" label="采购数" width="100" /><el-table-column label="实收数" width="160"><template #default="{row}"><el-input-number v-model="row.receive_quantity" :min="0" :max="row.quantity" :precision="0" /></template></el-table-column></el-table>
       <template #footer><el-button @click="receiptVisible=false">取消</el-button><el-button type="primary" :loading="receiptSubmitting" @click="confirmReceipt">确认收货并入库</el-button></template>

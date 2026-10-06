@@ -21891,6 +21891,9 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
       });
     }
   }
+  if (receiptRecords.length && body.receipt_impact_confirmed === true && !String(body.receipt_impact_reason || "").trim()) {
+    throw new Error("请先选择库存影响处理原因，再强制确认入库");
+  }
   const result = await withMysqlTransaction(async (connection) => {
     const changedPurchaseOrderIds = new Set();
     const ids = [];
@@ -21898,6 +21901,11 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
       const inboundId = Number(record.id ?? record.inbound_record_id);
       if (!inboundId) continue;
       const payload = record.payload && typeof record.payload === "object" ? record.payload : record;
+      if (body.receipt_impact_confirmed === true) {
+        const reason = String(body.receipt_impact_reason || "").trim();
+        const detail = String(body.receipt_impact_note || "").trim();
+        payload.note = `${payload.note || ""}；库存影响确认：${reason}${detail ? `（${detail}）` : ""}；操作人 #${sessionPersonId || "system"}；${normalizeMysqlDateTime(new Date())}`;
+      }
       await applyInboundRecordUpdateMysql(connection, inboundId, payload, { changedPurchaseOrderIds, sessionPersonId });
       ids.push(inboundId);
     }
