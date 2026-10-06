@@ -1,7 +1,7 @@
 {
   "app": "ozon-erp",
-  "version": "local",
-  "channel": "local",
+  "version": "2026.10.06-procurement-layout-4f4df77",
+  "channel": "production",
   "build_stamp": "",
-  "built_at": "2026-10-06T10:05:51.725Z"
+  "built_at": "2026-10-06T10:06:36.442Z"
 }
