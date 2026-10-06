@@ -8,6 +8,11 @@ export function inferProcurementSources(snapshot) {
   const take = (quantity, order, purpose) => {
     let missing = positive(quantity);
     for (const batch of pools) {
+      if (purpose === 'history_candidate') {
+        const purchased = new Date(batch.purchased_at || batch.created_at || 0).getTime();
+        const shipped = new Date(order.transport_at || order.ordered_at || 0).getTime();
+        if (purchased && shipped && purchased > shipped) continue;
+      }
       const amount = Math.min(missing, batch.remaining);
       if (!amount) continue;
       batch.remaining -= amount; missing -= amount;

@@ -30,7 +30,7 @@ test('split order traces exact quantities, retains local pool, and does not alte
 
 test('historical traces distinguish explicit source, FIFO evidence, and unreceived purchases', () => {
   const result = calculateOrderProcurementCoverage({ includeTrace: true, demands: [demand(1, 7, true)],
-    inbounds: [batch(10, 2, 'approved'), batch(11, 2, 'approved'), batch(12, 2), { ...batch(13, 10, 'approved'), approved_at: '2026-10-01' }],
+    inbounds: [batch(10, 2, 'approved'), batch(11, 2, 'approved'), batch(12, 2), { ...batch(13, 10, 'approved'), purchased_at: '2026-10-01', approved_at: '2026-10-01' }],
     sources: [{ order_item_id: 1, product_id: 1, inbound_record_id: 10, quantity: 2 }] });
   const row = result.get(1).items[0];
   assert.deepEqual(row.coverage_trace.map(source => [source.batch_id, source.quantity, source.basis, source.purpose]),
