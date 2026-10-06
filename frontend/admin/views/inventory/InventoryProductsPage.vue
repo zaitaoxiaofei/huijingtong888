@@ -49,6 +49,7 @@ const route = useRoute();
 const router = useRouter();
 let syncingRoute = false;
 let dictionaryLoaded = false;
+let dictionaryLoading = null;
 const listRequestGate = createLatestRequestGate();
 
 const loading = ref(false);
@@ -58,6 +59,28 @@ const productRequestsVisible = ref(false);
 function refreshAfterProductRequest() {
   inventoryListCache.clear();
   return loadPageData();
+}
+
+function loadInventoryDictionaries() {
+  if (dictionaryLoaded) return Promise.resolve();
+  if (dictionaryLoading) return dictionaryLoading;
+  dictionaryLoading = Promise.all([
+    loadShopDictionary(),
+    apiClient.get("/api/people"),
+    apiClient.get("/api/suppliers"),
+    apiClient.get("/api/logistics-rules")
+  ]).then(([shops, people, suppliers, logisticsRules]) => {
+    state.shops = Array.isArray(shops) ? shops : [];
+    state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
+    state.suppliers = Array.isArray(suppliers) ? suppliers : [];
+    state.logisticsRules = Array.isArray(logisticsRules) ? logisticsRules.filter((item) => Number(item.enabled) !== 0) : [];
+    dictionaryLoaded = true;
+  }).catch((error) => {
+    ElMessage.warning(error.message || "库存辅助数据加载失败，请稍后重试");
+  }).finally(() => {
+    dictionaryLoading = null;
+  });
+  return dictionaryLoading;
 }
 const productCreateDialogRef = ref(null);
 const quickComponentCreateVisible = ref(false);
@@ -1812,15 +1835,8 @@ async function loadPageData({ silent = false } = {}) {
       selectedRows.value = [];
       loading.value = false;
     }
-    const requests = [apiClient.get(requestUrl), dictionaryLoaded ? Promise.resolve(state.shops) : loadShopDictionary()];
-    if (!dictionaryLoaded) {
-      requests.push(
-        apiClient.get("/api/people"),
-        apiClient.get("/api/suppliers"),
-        apiClient.get("/api/logistics-rules")
-      );
-    }
-    const [products, shops, people, suppliers, logisticsRules] = await Promise.all(requests);
+    if (!dictionaryLoaded) void loadInventoryDictionaries();
+    const products = await apiClient.get(requestUrl);
     if (!listRequestGate.isLatest(requestToken)) return;
     cacheInventoryList(requestUrl, products);
     state.products = Array.isArray(products?.rows) ? products.rows : [];
@@ -1832,13 +1848,6 @@ async function loadPageData({ silent = false } = {}) {
       return;
     }
     selectedRows.value = [];
-    state.shops = Array.isArray(shops) ? shops : [];
-    if (!dictionaryLoaded) {
-      state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
-      state.suppliers = Array.isArray(suppliers) ? suppliers : [];
-      state.logisticsRules = Array.isArray(logisticsRules) ? logisticsRules.filter((item) => Number(item.enabled) !== 0) : [];
-      dictionaryLoaded = true;
-    }
   } catch (error) {
     if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "加载库存产品列表失败");

@@ -11,7 +11,7 @@ test('query submits both search rows including multiple models and materials',as
  listRequestGate:{next:()=>1,isLatest:()=>true},inventoryListCache:new Map(),INVENTORY_LIST_CACHE_TTL_MS:30000,
  apiClient:{get:async url=>{request=url;return {rows:[],total:0};}},cacheInventoryList(){},ElMessage:{error:message=>{throw new Error(message);}}
  });
- vm.runInContext(source.slice(source.indexOf('async function loadPageData()'),source.indexOf('watch(() => route.query')),context);
+ vm.runInContext(source.slice(source.indexOf('async function loadPageData({ silent = false } = {})'),source.indexOf('watch(() => route.query')),context);
  await context.loadPageData();
  const params=new URL(request,'https://test.local').searchParams;
  for(const [key,value]of Object.entries(filters))assert.equal(params.get(key),String(value),key);

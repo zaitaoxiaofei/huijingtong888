@@ -18,3 +18,9 @@ test("inventory list restores a bounded fresh search snapshot", () => {
   assert.match(viewSource, /if \(hasFreshCache\) \{/);
   assert.match(viewSource, /cacheInventoryList\(requestUrl, products\)/);
 });
+
+test("inventory list does not block first paint on auxiliary dictionaries", () => {
+  assert.match(viewSource, /function loadInventoryDictionaries\(\)/);
+  assert.match(viewSource, /if \(!dictionaryLoaded\) void loadInventoryDictionaries\(\);/);
+  assert.match(viewSource, /const products = await apiClient\.get\(requestUrl\);/);
+});
