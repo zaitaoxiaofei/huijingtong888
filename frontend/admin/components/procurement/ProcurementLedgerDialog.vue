@@ -16,6 +16,19 @@ const form = reactive({});
 const activeTab = ref('current');
 const traceBatchId = ref(null), historyFilter = ref('all'), historyPage = ref(1);
 function showBatch(id) { traceBatchId.value = id; activeTab.value = 'batch-trace'; }
+const sourceSuggestions = computed(() => {
+  const byItem = new Map();
+  for (const row of data.value?.source_inference?.suggestions || []) {
+    if (!byItem.has(row.order_item_id)) byItem.set(row.order_item_id, []);
+    byItem.get(row.order_item_id).push(row);
+  }
+  return byItem;
+});
+function confirmSuggestedSource(order, source) {
+  edit('link_purchase', order);
+  Object.assign(form, { inbound_id: source.batch_id, quantity: source.quantity,
+    reason: `人工核对采购来源：${source.purchase_order_no || '收货批次'} #${source.batch_id}；确认该批货在此订单发出前已到货` });
+}
 function traceLabel(source, historical = false) {
   const purpose = source.purpose === 'source' ? '来源核对' : historical ? '收货待核' : '在途覆盖';
   return `${source.purchase_order_no || source.source_label}${source.batch_id ? ` · 批次 #${source.batch_id}` : ''}：${source.quantity} 件 · ${purpose} · ${source.basis === 'recorded' ? '已记录关联' : '按顺序推算'}`;
@@ -305,6 +318,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
               <el-table-column prop="incoming_quantity" label="在途覆盖" width="110" />
               <el-table-column label="覆盖来源／采购关联" min-width="310"><template #default="{ row }">
                 <div v-if="row.stock_quantity > 0">本地现货池：{{ row.stock_quantity }} 件（未追溯实物批次）</div>
+                <div v-for="(source, index) in sourceSuggestions.get(row.order_item_id) || []" :key="`suggest-${index}`"><el-button link type="primary" style="white-space: normal; text-align: left" @click="showBatch(source.batch_id)">{{ source.purchase_order_no || '无采购单号' }} · 批次 #{{ source.batch_id }}：{{ source.quantity }} 件（现货来源推算，非实际拣货批次）</el-button></div>
                 <div v-for="(source, index) in row.coverage_trace || []" :key="index"><el-button v-if="source.batch_id" link type="primary" style="white-space: normal; text-align: left" @click="showBatch(source.batch_id)">{{ traceLabel(source) }}</el-button><span v-else>{{ traceLabel(source) }}</span></div>
                 <small v-if="row.coverage_trace?.some(source => source.purpose === 'source')">采购来源记录不与现货覆盖相加，不代表实际拣货批次。</small>
               </template></el-table-column>
@@ -339,6 +353,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
             </el-table>
           </el-tab-pane>
           <el-tab-pane label="历史核对" name="history" lazy>
+            <el-alert v-if="data.source_inference" type="info" :closable="false" :title="`来源建议不改库存或缺口。当前现货尚缺来源 ${data.source_inference.current_unmatched + data.source_inference.physical_unmatched} 件；历史建议匹配后仍待核 ${data.source_inference.historical_unmatched} 件；采购余量未解释 ${data.source_inference.unassigned_purchase_quantity} 件（可能涉及损耗、转换等，不等于现货）。`" />
             <p>本地账面余额 {{ data.local_stock }} 件<span v-if="data.physical_estimate < 0"> · 账面待核差异 {{ -data.physical_estimate }} 件</span>。不等于真实现货，也不计入本次待采购；实物不符请核对现货，不要重复补采购。</p>
             <el-alert type="warning" :closable="false" :title="`历史缺采购来源 ${data.missing_purchase} 件 · 收货待核 ${data.missing_receipt} 件；仅核对已发订单，不增加当前采购需求。`" />
             <p>已记录关联保留原记录；按顺序推算仅用于核算，不是实际批次出库凭证。后续无关采购不会作为旧订单的已收来源。</p>
@@ -347,6 +362,10 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
               <el-table-column label="订单" min-width="190"><template #default="{ row }">{{ row.posting_number }}<el-tag v-if="row.order_id === props.orderId" size="small">当前订单</el-tag></template></el-table-column>
               <el-table-column prop="quantity" label="已发件数" width="100" />
               <el-table-column label="历史采购来源／核对依据" min-width="330"><template #default="{ row }">
+                <div v-for="(source, index) in sourceSuggestions.get(row.order_item_id) || []" :key="`suggest-${index}`">
+                  <el-button link type="primary" style="white-space: normal; text-align: left" @click="showBatch(source.batch_id)">{{ source.purchase_order_no || '无采购单号' }} · 批次 #{{ source.batch_id }}：{{ source.quantity }} 件（{{ source.late_registration ? '晚登记候选' : '来源候选' }}，待核实）</el-button>
+                  <el-button size="small" plain @click="confirmSuggestedSource(row, source)">核对并关联</el-button>
+                </div>
                 <div v-for="(source, index) in row.coverage_trace || []" :key="index"><el-button v-if="source.batch_id" link type="primary" style="white-space: normal; text-align: left" @click="showBatch(source.batch_id)">{{ traceLabel(source, true) }}</el-button><span v-else>{{ traceLabel(source, true) }}</span></div>
                 <span v-if="!row.coverage_trace?.length">未追溯到采购批次，请结合历史处理记录核对</span>
               </template></el-table-column>
@@ -377,7 +396,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
             </el-collapse-item></el-collapse>
           </el-tab-pane>
           <el-tab-pane label="采购批次反查" name="batch-trace" lazy>
-            <LedgerBatchTrace :key="productId" :orders="data.orders" :batches="data.batches" :batch-id="traceBatchId" />
+            <LedgerBatchTrace :key="productId" :orders="data.orders" :batches="data.batches" :batch-id="traceBatchId" :inference="data.source_inference" />
           </el-tab-pane>
           <el-tab-pane label="库存流水" name="movements" lazy>
             <el-button link type="primary" @click="activeTab = 'actions'">查看调整明细：操作人、原因和前后数量</el-button>

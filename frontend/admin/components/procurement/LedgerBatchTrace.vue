@@ -1,7 +1,10 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
 import { shanghaiDateTimeText } from '../../utils/shanghai-date.js';
-const props = defineProps({ orders: { type: Array, default: () => [] }, batches: { type: Array, default: () => [] }, batchId: Number });
+const props = defineProps({ orders: { type: Array, default: () => [] }, batches: { type: Array, default: () => [] }, batchId: Number, inference: Object });
+const suggestions = computed(() => (props.inference?.suggestions || []).filter(row => row.batch_id === selected.value));
+const reserved = computed(() => (props.inference?.reserves || []).filter(row => row.batch_id === selected.value).reduce((sum, row) => sum + row.quantity, 0));
+const suggestionPage = ref(1);
 const selected = ref(null), scope = ref('all'), page = ref(1);
 watch(() => props.batchId, value => { selected.value = value || null; }, { immediate: true });
 const batch = computed(() => props.batches.find(row => Number(row.id) === selected.value));
@@ -9,7 +12,7 @@ const rows = computed(() => props.orders.filter(order => scope.value === 'all' |
   .flatMap(order => (order.coverage_trace || []).filter(source => source.batch_id === selected.value && selected.value != null)
     .map(source => ({ ...order, ...source, allocated_quantity: source.quantity, historical: order.entered_transport }))));
 const total = computed(() => rows.value.reduce((sum, row) => sum + row.allocated_quantity, 0));
-watch([selected, scope], () => { page.value = 1; });
+watch([selected, scope], () => { page.value = 1; suggestionPage.value = 1; });
 const purpose = row => row.purpose === 'source' ? '采购来源核对（非当前现货）' : row.historical ? '历史收货待核（非现货覆盖）' : '当前采购在途覆盖';
 </script>
 <template>
@@ -32,5 +35,15 @@ const purpose = row => row.purpose === 'source' ? '采购来源核对（非当�
       <el-table-column label="依据" min-width="170"><template #default="{ row }">{{ row.basis === 'recorded' ? '已记录关联' : '按顺序推算，非出库凭证' }}</template></el-table-column>
     </el-table>
     <el-pagination v-if="rows.length > 30" v-model:current-page="page" :page-size="30" :total="rows.length" layout="prev, pager, next, total" />
+    <template v-if="suggestions.length || reserved">
+      <h4>来源推算建议（独立预览，不与上表直接相加）</h4>
+      <p>为当前未分配现货及 FBP 占用保留来源 {{ reserved }} 件。下表包含当前现货来源建议及历史候选，尚未写入关联记录；历史候选请回到历史核对确认。</p>
+      <el-table :data="suggestions.slice((suggestionPage - 1) * 30, suggestionPage * 30)" max-height="300">
+        <el-table-column prop="posting_number" label="订单" min-width="180" />
+        <el-table-column prop="quantity" label="建议数量" width="110" />
+        <el-table-column label="说明" min-width="260"><template #default="{ row }">{{ row.purpose === 'stock_suggestion' ? '当前现货来源推算，非实际拣货批次' : row.late_registration ? '晚登记到货候选，需确认当时已到货' : '历史来源候选，待核实' }}</template></el-table-column>
+      </el-table>
+      <el-pagination v-if="suggestions.length > 30" v-model:current-page="suggestionPage" :page-size="30" :total="suggestions.length" layout="prev, pager, next, total" />
+    </template>
   </template>
 </template>
