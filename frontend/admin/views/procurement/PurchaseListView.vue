@@ -258,7 +258,14 @@ async function confirmReceipt() {
     }})) });
     ElMessage.success("收货批次已登记，已同步快递单号和到货照片");
     receiptVisible.value = false; state.selectedRows = []; await loadPageData();
-  } catch (error) { ElMessage.error(error.message || "批量收货失败"); }
+  } catch (error) {
+    if (error?.status === 409 || error?.statusCode === 409) {
+      receiptVisible.value = false;
+      state.selectedRows = [];
+      await loadPageData();
+      ElMessage.warning("部分记录已被处理，列表已自动刷新；请重新选择仍待入库的记录");
+    } else ElMessage.error(error.message || "批量收货失败");
+  }
   finally { receiptSubmitting.value = false; }
 }
 
