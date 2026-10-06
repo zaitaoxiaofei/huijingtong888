@@ -1716,28 +1716,45 @@ async function productCompositionSummariesMysql(productIds = []) {
   const ids = [...new Set(productIds.map(Number).filter(Boolean))];
   if (!ids.length) return new Map();
   const placeholders = ids.map(() => "?").join(",");
-  const rows = await mysqlQuery(`
-    SELECT pc.product_id,
-      COUNT(*) AS component_count,
-      GROUP_CONCAT(CONCAT(COALESCE(p.name, ''), ' x ', TRIM(TRAILING '.' FROM TRIM(TRAILING '0' FROM pc.quantity)), COALESCE(p.stock_unit, '个')) ORDER BY pc.id SEPARATOR '；') AS component_summary,
-      MIN(FLOOR(COALESCE(stock.local_stock, 0) / NULLIF(pc.quantity, 0))) AS component_available
+  const components = await mysqlQuery(`
+    SELECT pc.id, pc.product_id, pc.component_product_id, pc.quantity,
+      p.name AS component_name, p.stock_unit
     FROM product_components pc
     JOIN products p ON p.id = pc.component_product_id AND p.active = 1
-    LEFT JOIN (
+    WHERE pc.product_id IN (${placeholders})
+    ORDER BY pc.product_id, pc.id
+  `, ids);
+  const componentIds = [...new Set(components.map((row) => Number(row.component_product_id || 0)).filter(Boolean))];
+  const stockByProduct = new Map();
+  if (componentIds.length) {
+    const componentPlaceholders = componentIds.map(() => "?").join(",");
+    const stockRows = await mysqlQuery(`
       SELECT product_id, SUM(quantity_delta) AS local_stock
       FROM inventory_movements
       WHERE status = 'posted'
         AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'
+        AND product_id IN (${componentPlaceholders})
       GROUP BY product_id
-    ) stock ON stock.product_id = pc.component_product_id
-    WHERE pc.product_id IN (${placeholders})
-    GROUP BY pc.product_id
-  `, ids);
-  return new Map(rows.map((row) => [Number(row.product_id), {
-    component_count: Number(row.component_count || 0),
-    component_summary: row.component_summary || "",
-    component_available: row.component_available == null ? null : Number(row.component_available || 0)
-  }]));
+    `, componentIds);
+    for (const row of stockRows) stockByProduct.set(Number(row.product_id), Number(row.local_stock || 0));
+  }
+  const summaries = new Map();
+  for (const component of components) {
+    const productId = Number(component.product_id || 0);
+    if (!summaries.has(productId)) summaries.set(productId, {
+      component_count: 0,
+      component_summary: [],
+      component_available: null
+    });
+    const summary = summaries.get(productId);
+    const quantity = Number(component.quantity || 0);
+    const available = quantity > 0 ? Math.floor((stockByProduct.get(Number(component.component_product_id)) || 0) / quantity) : 0;
+    summary.component_count += 1;
+    summary.component_summary.push(`${component.component_name || ""} x ${quantity}${component.stock_unit || "个"}`);
+    summary.component_available = summary.component_available == null ? available : Math.min(summary.component_available, available);
+  }
+  for (const summary of summaries.values()) summary.component_summary = summary.component_summary.join("；");
+  return summaries;
 }
 
 async function assertProductCompositionAcyclicMysql(productId, items = []) {
