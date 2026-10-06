@@ -44,6 +44,8 @@ export function createOperationsRoutes({ services, readJson }) {
     "POST /api/procurement/requests": async (req) => services.createProcurementRequest(await readJson(req), req._session?.personId) || { ok: true },
     "POST /api/procurement/warehouse-requests": async (req) => services.createWarehouseProcurementRequests(await readJson(req), req._session?.personId),
     "POST /api/procurement/purchases": async (req) => services.recordProcurementPurchase(await readJson(req), req._session?.personId),
+    "POST /api/procurement/pdd-logistics/sync": async (req) => services.syncPddProcurementLogistics(await readJson(req)),
+    "POST /api/procurement/pdd-logistics/sync-batch": async (req) => services.syncPddProcurementLogisticsBatch(await readJson(req)),
     "POST /api/procurement/platform-orders/import": async (req) => services.importProcurementPlatformOrders(await readJson(req), req._session?.personId),
     "POST /api/procurement/payments/import": async (req) => services.importProcurementPayments(await readJson(req), req._session?.personId),
     "POST /api/procurement/reconciliation/auto-match": async () => services.autoMatchProcurementPayments(),
@@ -180,6 +182,10 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "purchase-orders" && parts[3] && parts[4] === "confirm-purchased") {
     return json(res, await services.confirmPurchaseOrder(Number(parts[3]), await readJson(req), req._session?.personId));
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "shipments" && parts[3] && parts[4] === "refresh") {
+    return json(res, await services.refreshPurchaseOrderShipment(Number(parts[3])));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "cost-versions" && parts[3] && parts[4] === "review") {

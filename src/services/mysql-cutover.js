@@ -325,6 +325,7 @@ let procurementPlatformOrderSchemaReadyMysql = false;
 let inboundRecordTimestampSchemaReadyMysql = false;
 let procurementInboundLinkSchemaReadyMysql = false;
 let purchaseCostVersionSchemaReadyMysql = false;
+let purchaseOrderShipmentSchemaReadyMysql = false;
 let fbpTransferRecordsSchemaReadyMysql = false;
 let fbpReplenishmentSchemaReadyMysql = false;
 let skuInventoryRecipeSchemaReadyMysql = false;
@@ -13897,6 +13898,7 @@ export async function inventoryCurrentMysql() {
 export async function inboundRecordsMysql(query = {}) {
   ensureMysqlCutoverEnabled();
   await ensureInboundRecordTimestampSchemaMysql();
+  await ensurePurchaseOrderShipmentSchemaMysql();
   const paged = String(query.paged || "") === "1";
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
@@ -13905,6 +13907,10 @@ export async function inboundRecordsMysql(query = {}) {
     SELECT ir.*, p.code AS product_code, p.name AS product_name, p.image_url AS product_image_url,
       p.inventory_number, p.inventory_category,
       pe.name AS person_name, approver.name AS approved_by_person_name, po.order_no AS purchase_order_no, po.purchased_at,
+      shipment.platform_order_no AS procurement_platform_order_no, shipment.tracking_number AS procurement_tracking_number,
+      shipment.carrier_name AS procurement_carrier_name, shipment.logistics_status AS procurement_logistics_status,
+      shipment.logistics_status_text AS procurement_logistics_status_text, shipment.latest_trace AS procurement_latest_trace,
+      shipment.latest_trace_at AS procurement_latest_trace_at, shipment.queried_at AS procurement_logistics_queried_at,
       COALESCE(direct_request.source_type, order_request.source_type, p.source_platform, 'other') AS source_type,
       COALESCE(direct_supplier.name, order_request.supplier_names, product_supplier.name, '') AS supplier_name,
       COALESCE(skus.mapped_skus, '') AS mapped_skus
@@ -13913,6 +13919,14 @@ export async function inboundRecordsMysql(query = {}) {
     LEFT JOIN people pe ON pe.id = ir.person_id
     LEFT JOIN people approver ON approver.id = ir.approved_by_person_id
     LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
+    LEFT JOIN purchase_order_shipments shipment ON shipment.id = (
+      SELECT latest_shipment.id
+      FROM purchase_order_shipments latest_shipment
+      WHERE latest_shipment.purchase_order_id = ir.purchase_order_id
+      ORDER BY COALESCE(latest_shipment.latest_trace_at, latest_shipment.queried_at, latest_shipment.updated_at, latest_shipment.created_at) DESC,
+        latest_shipment.id DESC
+      LIMIT 1
+    )
     LEFT JOIN procurement_requests direct_request ON direct_request.id = ir.procurement_request_id
     LEFT JOIN suppliers direct_supplier ON direct_supplier.id = direct_request.supplier_id
     LEFT JOIN suppliers product_supplier ON product_supplier.id = p.supplier_id
@@ -16824,6 +16838,31 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
   return { inserted, updated, fetched, requests, from: from || "", to: to || "", shops: shopResults, errors };
 }
 
+async function ensurePurchaseOrderShipmentSchemaMysql() {
+  if (purchaseOrderShipmentSchemaReadyMysql) return;
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS purchase_order_shipments (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      purchase_order_id BIGINT UNSIGNED NOT NULL,
+      platform_order_no VARCHAR(128) NULL,
+      tracking_number VARCHAR(64) NOT NULL,
+      carrier_code VARCHAR(64) NULL,
+      carrier_name VARCHAR(128) NULL,
+      logistics_status VARCHAR(64) NOT NULL DEFAULT 'pending_query',
+      logistics_status_text VARCHAR(255) NULL,
+      latest_trace TEXT NULL,
+      latest_trace_at DATETIME NULL,
+      queried_at DATETIME NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_purchase_order_shipment (purchase_order_id, tracking_number),
+      KEY idx_purchase_order_shipment_status (logistics_status, latest_trace_at),
+      KEY idx_purchase_order_shipment_tracking (tracking_number)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  purchaseOrderShipmentSchemaReadyMysql = true;
+}
+
 async function ensurePurchaseCostVersionSchemaMysql() {
   if (purchaseCostVersionSchemaReadyMysql) return;
   await mysqlExecute(`
@@ -19061,6 +19100,7 @@ export async function purchaseOrdersMysql(query = {}) {
 
 export async function purchaseOrderDetailMysql(id) {
   ensureMysqlCutoverEnabled();
+  await ensurePurchaseOrderShipmentSchemaMysql();
   const orderId = Number(id);
   const order = await mysqlQueryOne(
     "SELECT po.*, pe.name AS creator_name FROM purchase_orders po LEFT JOIN people pe ON pe.id = po.created_by_person_id WHERE po.id = ?",
@@ -19102,7 +19142,108 @@ export async function purchaseOrderDetailMysql(id) {
     ORDER BY pr.created_at
   `, [orderId]);
 
-  return { order, items, requests };
+  const shipments = await mysqlQuery(`
+    SELECT * FROM purchase_order_shipments
+    WHERE purchase_order_id = ? ORDER BY created_at DESC, id DESC
+  `, [orderId]);
+  return { order, items, requests, shipments };
+}
+
+function normalizePurchaseShipmentInput(input = {}) {
+  const trackingNumber = String(input.tracking_number || input.trackingNumber || "").trim();
+  if (!trackingNumber) throw new Error("请填写快递单号");
+  return {
+    trackingNumber,
+    platformOrderNo: String(input.platform_order_no || input.platformOrderNo || "").trim() || null,
+    carrierCode: String(input.carrier_code || input.carrierCode || "auto").trim() || "auto",
+    carrierName: String(input.carrier_name || input.carrierName || "").trim() || null
+  };
+}
+
+async function savePurchaseOrderShipmentsMysql(connection, purchaseOrderId, shipments = []) {
+  if (!Array.isArray(shipments)) return;
+  for (const input of shipments) {
+    const shipment = normalizePurchaseShipmentInput(input);
+    await connection.execute(`
+      INSERT INTO purchase_order_shipments
+      (purchase_order_id, platform_order_no, tracking_number, carrier_code, carrier_name)
+      VALUES (?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE platform_order_no = VALUES(platform_order_no),
+        carrier_code = VALUES(carrier_code), carrier_name = COALESCE(VALUES(carrier_name), carrier_name)
+    `, [purchaseOrderId, shipment.platformOrderNo, shipment.trackingNumber, shipment.carrierCode, shipment.carrierName]);
+  }
+}
+
+export async function refreshPurchaseOrderShipmentMysql(id) {
+  ensureMysqlCutoverEnabled();
+  await ensurePurchaseOrderShipmentSchemaMysql();
+  const shipmentId = Number(id);
+  const shipment = await mysqlQueryOne("SELECT * FROM purchase_order_shipments WHERE id = ?", [shipmentId]);
+  if (!shipment) throw new Error("采购物流包裹不存在");
+  const customer = String(process.env.KUAIDI100_CUSTOMER || "").trim();
+  const key = String(process.env.KUAIDI100_KEY || "").trim();
+  if (!customer || !key) {
+    await mysqlExecute("UPDATE purchase_order_shipments SET logistics_status = 'pending_config', logistics_status_text = '物流接口尚未配置' WHERE id = ?", [shipmentId]);
+    return { ...shipment, logistics_status: "pending_config", logistics_status_text: "物流接口尚未配置" };
+  }
+  const param = JSON.stringify({ com: shipment.carrier_code === "auto" ? "auto" : shipment.carrier_code, num: shipment.tracking_number });
+  const sign = createHash("md5").update(`${param}${key}${customer}`).digest("hex").toUpperCase();
+  const response = await fetch("https://poll.kuaidi100.com/poll/query.do", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ customer, sign, param })
+  });
+  const result = await response.json();
+  if (!response.ok || result.status !== "200") throw new Error(result.message || "快递查询失败");
+  const latest = Array.isArray(result.data) ? result.data.at(-1) : null;
+  const status = String(result.state || "in_transit");
+  const statusMap = { "0": "in_transit", "1": "in_transit", "2": "in_transit", "3": "signed", "4": "problem", "5": "in_transit", "6": "in_transit", "7": "in_transit", "8": "out_for_delivery" };
+  await mysqlExecute(`UPDATE purchase_order_shipments SET carrier_name = COALESCE(?, carrier_name), logistics_status = ?, logistics_status_text = ?, latest_trace = ?, latest_trace_at = ?, queried_at = CURRENT_TIMESTAMP WHERE id = ?`, [
+    result.com || shipment.carrier_name, statusMap[status] || "in_transit", latest?.context || result.message || "运输中", latest?.context || null, latest?.ftime || null, shipmentId
+  ]);
+  return await mysqlQueryOne("SELECT * FROM purchase_order_shipments WHERE id = ?", [shipmentId]);
+}
+
+export async function syncPddProcurementLogisticsMysql(body = {}) {
+  ensureMysqlCutoverEnabled();
+  await ensurePurchaseOrderShipmentSchemaMysql();
+  const orderNo = String(body.platform_order_no || "").trim();
+  const trackingNumber = String(body.tracking_number || "").trim();
+  if (!orderNo || !trackingNumber) throw new Error("拼多多订单号和快递单号不能为空");
+  const statusText = String(body.logistics_status_text || "").trim();
+  const latestTrace = String(body.latest_trace || "").trim();
+  const status = /签收/.test(statusText) ? "signed" : /取件|派送/.test(statusText) ? "out_for_delivery" : /异常/.test(statusText) ? "problem" : "in_transit";
+  const result = await mysqlExecute(`
+    UPDATE purchase_order_shipments
+    SET platform_order_no = ?, carrier_code = COALESCE(NULLIF(?, ''), carrier_code),
+      logistics_status = ?, logistics_status_text = ?, latest_trace = ?, queried_at = CURRENT_TIMESTAMP
+    WHERE platform_order_no = ? OR tracking_number = ?
+  `, [orderNo, String(body.carrier_code || "").trim(), status, statusText || "运输中", latestTrace || null, orderNo, trackingNumber]);
+  if (!Number(result?.affectedRows || 0)) {
+    throw new Error("ERP 中未找到该采购物流记录，请先在采购单保存拼多多订单号和快递单号");
+  }
+  return { ok: true, platform_order_no: orderNo, tracking_number: trackingNumber, logistics_status: status, logistics_status_text: statusText || "运输中" };
+}
+
+export async function syncPddProcurementLogisticsBatchMysql(body = {}) {
+  ensureMysqlCutoverEnabled();
+  const orders = Array.isArray(body.orders) ? body.orders : [];
+  if (!orders.length) throw new Error("没有可同步的拼多多物流订单");
+  const results = [];
+  for (const order of orders.slice(0, 100)) {
+    try {
+      results.push({ ...(await syncPddProcurementLogisticsMysql(order)), synced: true });
+    } catch (error) {
+      results.push({
+        platform_order_no: String(order?.platform_order_no || "").trim(),
+        tracking_number: String(order?.tracking_number || "").trim(),
+        synced: false,
+        reason: error.message || "同步失败"
+      });
+    }
+  }
+  const synced = results.filter((item) => item.synced).length;
+  return { ok: true, total: results.length, synced, unmatched: results.length - synced, results };
 }
 
 export async function pendingInboundItemsMysql() {
@@ -19409,22 +19550,33 @@ export async function procurementPlatformOrderCandidatesMysql(id) {
   await ensureProcurementPlatformOrderSchemaMysql();
   const order = await mysqlQueryOne("SELECT * FROM procurement_platform_orders WHERE id = ?", [Number(id)]);
   if (!order) throw new Error("平台订单不存在");
-  return await mysqlQuery(`
+  const rows = await mysqlQuery(`
     SELECT pr.id, pr.request_group_no, pr.raw_name, pr.raw_spec, pr.product_id, pr.quantity, pr.amount,
-      pr.shipping_amount, pr.purchase_url, pr.created_at, pe.name AS person_name, p.name AS product_name,
-      CASE
-        WHEN ABS((pr.amount + pr.shipping_amount) - ?) < 0.01 THEN 100
-        WHEN pr.purchase_url != '' AND ? != '' AND (pr.purchase_url LIKE CONCAT('%', ?, '%') OR ? LIKE CONCAT('%', pr.purchase_url, '%')) THEN 92
-        WHEN pr.source_type = ? THEN 70
-        ELSE 45
-      END AS confidence
+      pr.shipping_amount, pr.purchase_url, pr.source_type, pr.created_at, pe.name AS person_name, p.name AS product_name,
+      ABS((pr.amount + pr.shipping_amount) - ?) AS amount_difference,
+      ABS(TIMESTAMPDIFF(MINUTE, pr.created_at, COALESCE(?, pr.created_at))) AS time_difference_minutes,
+      CASE WHEN pr.purchase_url != '' AND ? != '' AND (pr.purchase_url LIKE CONCAT('%', ?, '%') OR ? LIKE CONCAT('%', pr.purchase_url, '%')) THEN 1 ELSE 0 END AS link_matched
     FROM procurement_requests pr
     LEFT JOIN people pe ON pe.id = pr.person_id
     LEFT JOIN products p ON p.id = pr.product_id
     WHERE pr.status IN ('pending', 'suggested', 'submitted', 'merged')
-    ORDER BY confidence DESC, ABS(TIMESTAMPDIFF(SECOND, pr.created_at, COALESCE(?, pr.created_at))) ASC, pr.id DESC
+    ORDER BY link_matched DESC, amount_difference ASC, time_difference_minutes ASC, pr.id DESC
     LIMIT 40
-  `, [Number(order.paid_amount || 0), order.purchase_urls || "", order.goods_ids || "", order.purchase_urls || "", order.platform, order.order_time]);
+  `, [Number(order.paid_amount || 0), order.order_time, order.purchase_urls || "", order.goods_ids || "", order.purchase_urls || ""]);
+  return rows.map((row) => {
+    const reasons = [];
+    let confidence = 0;
+    if (Number(row.link_matched)) { confidence += 30; reasons.push("商品链接或商品 ID 一致 +30"); }
+    if (Number(row.amount_difference) < 0.01) { confidence += 30; reasons.push("采购金额完全一致 +30"); }
+    else if (Number(row.amount_difference) <= Math.max(0.01, Number(order.paid_amount || 0) * 0.02)) { confidence += 15; reasons.push("采购金额误差不超过 2% +15"); }
+    if (Number(row.quantity || 0) === Number(order.quantity || 0)) { confidence += 20; reasons.push("采购数量一致 +20"); }
+    const minutes = Number(row.time_difference_minutes || 0);
+    if (minutes <= 60) { confidence += 30; reasons.push("下单时间相差不超过 1 小时 +30"); }
+    else if (minutes <= 1440) { confidence += 20; reasons.push("下单时间相差不超过 24 小时 +20"); }
+    else if (minutes <= 4320) { confidence += 10; reasons.push("下单时间相差不超过 3 天 +10"); }
+    if (String(row.source_type || "") === String(order.platform || "")) { confidence += 5; reasons.push("采购渠道一致 +5"); }
+    return { ...row, confidence: Math.min(100, confidence), match_reason: reasons.join("；") || "仅按待采购状态列出，尚无有效匹配依据" };
+  }).sort((a, b) => b.confidence - a.confidence || Number(a.time_difference_minutes) - Number(b.time_difference_minutes));
 }
 
 export async function linkProcurementPlatformOrderMysql(id, body = {}, sessionPersonId = null) {
@@ -20526,7 +20678,8 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
   try {
     await confirmPurchaseOrderMysql(purchaseOrder.id, {
       note: purchaseNote,
-      anomaly_reason: "订单页已确认实际采购价格"
+      anomaly_reason: "订单页已确认实际采购价格",
+      shipments: body.shipments
     }, userId);
   } catch (error) {
     await cancelPurchaseOrderMysql(purchaseOrder.id);
@@ -21182,6 +21335,7 @@ export async function mergeProcurementRequestsMysql(body = {}, sessionPersonId =
 export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId = null) {
   ensureMysqlCutoverEnabled();
   await ensurePurchaseCostVersionSchemaMysql();
+  await ensurePurchaseOrderShipmentSchemaMysql();
   const orderId = Number(id);
   const result = await withMysqlTransaction(async (connection) => {
     const order = await mysqlConnectionQueryOne(connection, "SELECT * FROM purchase_orders WHERE id = ? FOR UPDATE", [orderId]);
@@ -21303,6 +21457,7 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
       SET status = ?, total_quantity = ?, total_amount = ?, purchased_at = CURRENT_TIMESTAMP, note = COALESCE(NULLIF(?, ''), note)
       WHERE id = ?
     `, [pendingItemCount ? "purchased" : "inbound_done", totalQuantity, totalAmount, body.note || "", orderId]);
+    await savePurchaseOrderShipmentsMysql(connection, orderId, body.shipments);
     await connection.execute(`
       UPDATE procurement_requests
       SET status = CASE WHEN purchase_mode = 'stock_record_backfill' THEN 'inbound_done' ELSE 'purchased' END,
@@ -21375,6 +21530,7 @@ export async function cancelPurchaseOrderMysql(id) {
 export async function updatePurchaseOrderMysql(id, body = {}) {
   ensureMysqlCutoverEnabled();
   await ensurePurchaseCostVersionSchemaMysql();
+  await ensurePurchaseOrderShipmentSchemaMysql();
   const orderId = Number(id);
   return await withMysqlTransaction(async (connection) => {
     const order = await mysqlConnectionQueryOne(connection, "SELECT * FROM purchase_orders WHERE id = ? FOR UPDATE", [orderId]);
@@ -21385,6 +21541,7 @@ export async function updatePurchaseOrderMysql(id, body = {}) {
       UPDATE purchase_orders SET order_no = ?, note = COALESCE(NULLIF(?, ''), note), total_amount = ?
       WHERE id = ?
     `, [orderNo, body.note || "", Number(body.total_amount ?? order.total_amount ?? 0), orderId]);
+    await savePurchaseOrderShipmentsMysql(connection, orderId, body.shipments);
 
     if (Array.isArray(body.items)) {
       for (const item of body.items) {

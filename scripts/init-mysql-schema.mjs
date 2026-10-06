@@ -503,6 +503,25 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
   UNIQUE KEY uk_purchase_orders_order_no (order_no)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE IF NOT EXISTS purchase_order_shipments (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  purchase_order_id BIGINT UNSIGNED NOT NULL,
+  platform_order_no VARCHAR(128) NULL,
+  tracking_number VARCHAR(64) NOT NULL,
+  carrier_code VARCHAR(64) NULL,
+  carrier_name VARCHAR(128) NULL,
+  logistics_status VARCHAR(64) NOT NULL DEFAULT 'pending_query',
+  logistics_status_text VARCHAR(255) NULL,
+  latest_trace TEXT NULL,
+  latest_trace_at DATETIME NULL,
+  queried_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_purchase_order_shipment (purchase_order_id, tracking_number),
+  KEY idx_purchase_order_shipment_status (logistics_status, latest_trace_at),
+  KEY idx_purchase_order_shipment_tracking (tracking_number)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS procurement_purchase_groups (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(255) NOT NULL,

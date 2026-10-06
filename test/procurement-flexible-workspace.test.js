@@ -41,8 +41,9 @@ test("free purchase uses visible direct number inputs and seeds standard invento
   assert.match(page, /inputmode="decimal"/);
   assert.match(page, /const quickInventoryCreateValue = computed/);
   assert.match(page, /:value="quickInventoryCreateValue"/);
-  assert.match(page, /label="库存主图"/);
-  assert.match(page, /上传主图/);
+  assert.match(page, /class="free-purchase-name-preview-image"/);
+  assert.match(page, /title="上传库存主图"/);
+  assert.match(page, /UploadFilled/);
   assert.match(page, /uploadQuickInventoryImage/);
   assert.match(page, /image_url: String\(item\.image_url \|\| ""\)\.trim\(\)/);
   assert.match(page, /activeItem\.value\.raw_name = selected\.product_name/);
@@ -61,7 +62,7 @@ test("free purchase hydrates selected inventory and allows price anomaly review"
 });
 
 test("free purchase derives its inventory name from the standard naming fields", () => {
-  assert.match(page, /InventoryStructuredSearch layout="inventory-form" :show-keyword="false" :show-measurement="true" v-model="activeItemNaming"/);
+  assert.match(page, /InventoryStructuredSearch layout="inventory-form" simple :show-keyword="false" :show-measurement="true" v-model="activeItemNaming"/);
   assert.match(page, /标准库存名称/);
   assert.match(page, /buildShortInventoryName/);
   assert.match(page, /show-measurement="true"/);

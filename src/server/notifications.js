@@ -5,6 +5,7 @@ const runtimeDir = path.resolve("data");
 const statusFile = path.join(runtimeDir, "global-update-status.json");
 const collectorPluginManifestPath = path.resolve("ozon-erp-collector-plugin", "manifest.json");
 const analyticsPluginManifestPath = path.resolve("pivot-table-master", "manifest.json");
+const pddProcurementPluginManifestPath = path.resolve("pdd-procurement-logistics-plugin", "manifest.json");
 function readPluginManifestVersion(manifestPath) {
   try {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
@@ -18,6 +19,8 @@ const defaultPluginVersion = process.env.COLLECTOR_PLUGIN_VERSION || readPluginM
 const defaultPluginPackageName = `ozon-baodan-erp-plugin-${defaultPluginVersion}.rar`;
 const defaultAnalyticsPluginVersion = process.env.ANALYTICS_PLUGIN_VERSION || readPluginManifestVersion(analyticsPluginManifestPath);
 const defaultAnalyticsPluginPackageName = `ozon-seller-analytics-plugin-${defaultAnalyticsPluginVersion}.rar`;
+const defaultPddProcurementPluginVersion = process.env.PDD_PROCUREMENT_PLUGIN_VERSION || readPluginManifestVersion(pddProcurementPluginManifestPath);
+const defaultPddProcurementPluginPackageName = `pdd-procurement-logistics-plugin-${defaultPddProcurementPluginVersion}.zip`;
 const updateSubscribers = new Set();
 const defaultStatus = {
   app: {
@@ -45,6 +48,15 @@ const defaultStatus = {
     package_name: defaultAnalyticsPluginPackageName,
     mandatory: true,
     published_at: new Date().toISOString()
+  },
+  pdd_procurement_plugin: {
+    version: defaultPddProcurementPluginVersion,
+    title: "拼多多采购物流插件有新版本",
+    message: "拼多多采购物流插件已经更新，请下载最新版并重新安装。",
+    download_url: process.env.PDD_PROCUREMENT_PLUGIN_DOWNLOAD_URL || `/downloads/${defaultPddProcurementPluginPackageName}`,
+    package_name: defaultPddProcurementPluginPackageName,
+    mandatory: true,
+    published_at: new Date().toISOString()
   }
 };
 
@@ -54,6 +66,9 @@ function normalizeUpdatePayload(input = {}) {
   const analyticsPlugin = input.analytics_plugin && typeof input.analytics_plugin === "object"
     ? input.analytics_plugin
     : (input.analyticsPlugin && typeof input.analyticsPlugin === "object" ? input.analyticsPlugin : {});
+  const pddProcurementPlugin = input.pdd_procurement_plugin && typeof input.pdd_procurement_plugin === "object"
+    ? input.pdd_procurement_plugin
+    : (input.pddProcurementPlugin && typeof input.pddProcurementPlugin === "object" ? input.pddProcurementPlugin : {});
   return {
     app: {
       ...defaultStatus.app,
@@ -73,6 +88,13 @@ function normalizeUpdatePayload(input = {}) {
       version: String(analyticsPlugin.version || defaultStatus.analytics_plugin.version).trim(),
       download_url: String(analyticsPlugin.download_url || analyticsPlugin.downloadUrl || defaultStatus.analytics_plugin.download_url).trim(),
       package_name: String(analyticsPlugin.package_name || analyticsPlugin.packageName || `ozon-seller-analytics-plugin-${analyticsPlugin.version || defaultStatus.analytics_plugin.version}.rar`).trim()
+    },
+    pdd_procurement_plugin: {
+      ...defaultStatus.pdd_procurement_plugin,
+      ...pddProcurementPlugin,
+      version: String(pddProcurementPlugin.version || defaultStatus.pdd_procurement_plugin.version).trim(),
+      download_url: String(pddProcurementPlugin.download_url || pddProcurementPlugin.downloadUrl || defaultStatus.pdd_procurement_plugin.download_url).trim(),
+      package_name: String(pddProcurementPlugin.package_name || pddProcurementPlugin.packageName || `pdd-procurement-logistics-plugin-${pddProcurementPlugin.version || defaultStatus.pdd_procurement_plugin.version}.zip`).trim()
     }
   };
 }
