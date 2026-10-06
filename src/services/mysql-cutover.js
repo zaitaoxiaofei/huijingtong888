@@ -13964,6 +13964,8 @@ function inboundRecordsWhereMysql(query = {}) {
   const color = String(query.color || "").trim();
   const materials = String(query.material || "").split(",").map((item) => item.trim()).filter(Boolean);
   const process = String(query.process || query.surface_process || "").trim();
+  const startDate = String(query.startDate || query.start_date || "").trim();
+  const endDate = String(query.endDate || query.end_date || "").trim();
   const params = [];
   const where = [];
 
@@ -13974,6 +13976,14 @@ function inboundRecordsWhereMysql(query = {}) {
   if (status !== "all") {
     where.push("ir.status = ?");
     params.push(status);
+  }
+  if (startDate) {
+    where.push(`${chinaDateSqlMysql("COALESCE(po.purchased_at, ir.created_at)")} >= ?`);
+    params.push(startDate);
+  }
+  if (endDate) {
+    where.push(`${chinaDateSqlMysql("COALESCE(po.purchased_at, ir.created_at)")} <= ?`);
+    params.push(endDate);
   }
   if (searchText) {
     const like = `%${searchText.toLowerCase()}%`;

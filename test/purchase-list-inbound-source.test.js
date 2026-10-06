@@ -38,12 +38,7 @@ test("pending inbound and inbound history reuse precise inventory filters", () =
   assert.match(serviceSource, /p\.surface_process = \?/);
 });
 
-test("procurement navigation follows the operational sequence", () => {
-  const labels = ["采购工作台", "待入库清单", "入库记录", "成本预警", "采购对账", "平台订单", "供应商"];
-  let previous = -1;
-  for (const label of labels) {
-    const index = navigationSource.indexOf(`label: "${label}"`, previous + 1);
-    assert.ok(index > previous, `${label} should appear after the previous procurement menu item`);
-    previous = index;
-  }
+test("purchase list stays in inventory navigation", () => {
+  assert.match(navigationSource, /key: "purchase-list", label: "采购清单 \/ 待入库", route: "\/purchase-list"/);
+  assert.ok(navigationSource.indexOf('key: "purchase-list"') < navigationSource.indexOf('key: "procurement"'));
 });

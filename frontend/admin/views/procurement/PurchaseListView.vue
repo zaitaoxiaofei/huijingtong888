@@ -56,6 +56,8 @@ const state = reactive({
   suppliers: [],
   filters: {
     query: "",
+    status: "pending_arrival",
+    purchaseDateRange: [],
     demandType: "all",
     personId: "all",
     supplierId: "all",
@@ -157,8 +159,11 @@ function procurementQueryString() {
     paged: "1",
     page: String(state.filters.page),
     pageSize: String(state.filters.pageSize),
-    status: "pending_arrival"
+    status: state.filters.status || "pending_arrival"
   });
+  const [startDate, endDate] = Array.isArray(state.filters.purchaseDateRange) ? state.filters.purchaseDateRange : [];
+  if (startDate) params.set("startDate", startDate);
+  if (endDate) params.set("endDate", endDate);
   const query = String(state.filters.query || "").trim();
   if (query) params.set("query", query);
   if (state.filters.productId) params.set("productId", String(state.filters.productId));
@@ -268,7 +273,7 @@ function handleSearch() {
 
 function handleReset() {
   Object.assign(state.filters, {
-    query: "", demandType: "all", personId: "all", supplierId: "all", sourceType: "all",
+    query: "", status: "pending_arrival", purchaseDateRange: [], demandType: "all", personId: "all", supplierId: "all", sourceType: "all",
     inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [],
     accessoryName: "", color: "", material: [], process: "", productId: "", page: 1, pageSize: 20
   });
@@ -394,7 +399,7 @@ function actionDisabled(row, action) {
 
 function handleEditAction(row) {
   if (actionDisabled(row, "edit")) return;
-  toggleRowExpanded(row);
+  openEditDialog(row);
 }
 
 function handleExpandChange(row, expandedRows) {
@@ -651,6 +656,17 @@ onMounted(async () => {
                 @keyup.enter="handleSearch"
               />
             </el-form-item>
+            <el-form-item label="采购日期">
+              <el-date-picker v-model="state.filters.purchaseDateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" style="width: 250px" />
+            </el-form-item>
+            <el-form-item label="状态">
+              <el-select v-model="state.filters.status" style="width: 130px">
+                <el-option label="待入库" value="pending_arrival" />
+                <el-option label="已入库" value="approved" />
+                <el-option label="已取消" value="cancelled" />
+                <el-option label="全部" value="all" />
+              </el-select>
+            </el-form-item>
             <el-form-item label="需求类型">
               <el-select v-model="state.filters.demandType" style="width: 150px">
                 <el-option label="全部需求" value="all" />
@@ -716,7 +732,7 @@ onMounted(async () => {
           @expand-change="handleExpandChange"
         >
           <el-table-column type="selection" width="56" reserve-selection :selectable="canSelectRow" />
-          <el-table-column type="expand" width="48">
+          <el-table-column v-if="false" type="expand" width="48">
             <template #default="{ row }">
               <div class="purchase-inline-editor">
                 <div class="purchase-inline-editor__header">
@@ -804,7 +820,6 @@ onMounted(async () => {
                   <span>库存 ID：{{ row.inventory_number || row.product_code || "-" }}</span>
                   <span>核心品名：{{ row.inventory_category || "未分类" }}</span>
                   <span>SKU：{{ row.mapped_skus || "未绑定 SKU" }}</span>
-                  <span>申请人：{{ arrayText(row.requester_names) || "-" }}</span>
                 </div>
               </div>
             </template>
@@ -814,62 +829,19 @@ onMounted(async () => {
             <template #default="{ row }"><div class="time-cell"><span>采购人：{{ row.person_name || "未记录" }}</span><span>采购时间：{{ dateText(row.purchased_at || row.created_at) }}</span></div></template>
           </el-table-column>
           <el-table-column label="快递 / 留痕" min-width="200">
-            <template #default="{ row }"><div class="time-cell"><span>{{ row.courier_company || "未填快递公司" }} {{ row.tracking_number || "" }}</span><span>{{ receiptImages(row).length ? `到货照片 ${receiptImages(row).length} 张` : "未上传到货照片" }}</span></div></template>
+            <template #default="{ row }"><div class="time-cell"><span>{{ row.courier_company || "未填快递公司" }} {{ row.tracking_number || "" }}</span><span>{{ receiptImages(row).length ? `到货照片 ${receiptImages(row).length} 张` : "未上传到货照片" }}</span><el-button link type="primary" @click="openReceiptDialog([row])">上传照片／登记到货</el-button></div></template>
           </el-table-column>
 
-          <el-table-column label="明细数" width="90" align="center">
-            <template #default="{ row }">{{ numberText(row.request_count) }}</template>
-          </el-table-column>
           <el-table-column label="总数量" width="90" align="center">
             <template #default="{ row }">{{ numberText(row.total_quantity) }}</template>
           </el-table-column>
-          <el-table-column label="货款" width="110" align="right">
-            <template #default="{ row }">￥{{ money(row.total_amount) }}</template>
-          </el-table-column>
-          <el-table-column label="运费" width="110" align="right">
-            <template #default="{ row }">￥{{ money(row.total_shipping) }}</template>
-          </el-table-column>
-          <el-table-column label="均摊单价" width="110" align="right">
-            <template #default="{ row }">￥{{ averageUnitCost(row) }}</template>
-          </el-table-column>
 
-          <el-table-column label="采购来源" min-width="280">
+          <el-table-column label="最终来源" min-width="160">
             <template #default="{ row }">
-              <div class="source-cell">
-                <span>供应商：{{ arrayText(row.supplier_names) || row.other_source || "-" }}</span>
-                <span>
-                  1688：
-                  <a v-if="row.link_1688" :href="row.link_1688" target="_blank" rel="noreferrer">{{ row.link_1688 }}</a>
-                  <span v-else>-</span>
-                </span>
-                <span>
-                  拼多多：
-                  <a v-if="row.link_pdd" :href="row.link_pdd" target="_blank" rel="noreferrer">{{ row.link_pdd }}</a>
-                  <span v-else>-</span>
-                </span>
-                <span>来源类型：{{ requestSourceSummary(row) }}</span>
-              </div>
+              {{ row.supplier_name || row.other_source || requestSourceSummary(row) }}
             </template>
           </el-table-column>
-
-          <el-table-column label="采购链接" min-width="260">
-            <template #default="{ row }">
-              <div v-if="requestPurchaseLinks(row).length" class="link-note-cell">
-                <a
-                  v-for="link in requestPurchaseLinks(row)"
-                  :key="link"
-                  :href="link"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {{ link }}
-                </a>
-              </div>
-              <span v-else class="empty-text">-</span>
-            </template>
-          </el-table-column>
-
-          <el-table-column label="备注信息" min-width="260">
+          <el-table-column label="人工备注" min-width="200">
             <template #default="{ row }">
               <div v-if="requestNotes(row).length" class="link-note-cell">
                 <span v-for="note in requestNotes(row)" :key="note">{{ note }}</span>
@@ -898,7 +870,7 @@ onMounted(async () => {
             <template #default="{ row }">
               <div class="row-actions erp-inline-actions">
                 <el-button class="erp-btn-link" link @click="ledgerProductId = Number(row.product_id); ledgerVisible = true">数量纠正／对账</el-button>
-                <el-button class="erp-btn-link" link type="primary" :disabled="actionDisabled(row, 'edit')" @click="handleEditAction(row)">展开编辑</el-button>
+                <el-button class="erp-btn-link" link type="primary" :disabled="actionDisabled(row, 'edit')" @click="handleEditAction(row)">编辑</el-button>
                 <el-button class="erp-btn-link" link type="success" :disabled="actionDisabled(row, 'inbound')" :loading="inboundSubmitting" @click="handleInboundAction(row)">登记到货</el-button>
                 <el-button class="erp-btn-link" link type="danger" :disabled="actionDisabled(row, 'cancel')" :loading="cancelSubmitting" @click="handleCancelAction(row)">取消</el-button>
               </div>
