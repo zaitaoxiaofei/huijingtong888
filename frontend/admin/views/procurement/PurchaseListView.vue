@@ -31,7 +31,7 @@ const savingRequestIds = ref([]);
 const receiptVisible = ref(false);
 const receiptSubmitting = ref(false);
 const receiptRows = ref([]);
-const receiptForm = reactive({ courier_company: "", tracking_number: "", received_at: "", images: [], note: "" });
+const receiptForm = reactive({ courier_company: "", tracking_number: "", received_at: "", images: [], note: "", difference_reason: "", difference_note: "" });
 const newPurchaseVisible = ref(false);
 const newPurchaseSaving = ref(false);
 const newPurchaseForm = reactive({ quantity: 1, amount: 0, shipping_amount: 0, purchase_url: "", note: "" });
@@ -231,8 +231,8 @@ function receiptImages(row = {}) {
 }
 
 function openReceiptDialog(rows) {
-  receiptRows.value = rows.flatMap((row) => row.requests || []).map((row) => ({ ...row, receive_quantity: Number(row.quantity || 0) }));
-  Object.assign(receiptForm, { courier_company: "", tracking_number: "", received_at: new Date().toISOString().slice(0, 19).replace("T", " "), images: [], note: "" });
+  receiptRows.value = rows.flatMap((row) => row.requests || []).map((row) => ({ ...row, purchase_quantity: Number(row.quantity || 0), receive_quantity: Number(row.quantity || 0) }));
+  Object.assign(receiptForm, { courier_company: "", tracking_number: "", received_at: new Date().toISOString().slice(0, 19).replace("T", " "), images: [], note: "", difference_reason: "", difference_note: "" });
   receiptVisible.value = true;
 }
 
@@ -245,11 +245,13 @@ async function uploadReceiptImage(file) {
 
 async function confirmReceipt() {
   if (!receiptRows.value.length) return;
+  const hasDifference = receiptRows.value.some((row) => Number(row.purchase_quantity) !== Number(row.receive_quantity));
+  if (hasDifference && !receiptForm.difference_reason) return ElMessage.warning("采购数与实收数不一致，请选择差异原因");
   receiptSubmitting.value = true;
   try {
-    await apiClient.post("/api/inbound-records/batch-update", { records: receiptRows.value.map((row) => ({ id: row.id, payload: {
+    await apiClient.post("/api/inbound-records/batch-update", { receipt_difference_reason: hasDifference ? receiptForm.difference_reason : "", receipt_difference_note: hasDifference ? receiptForm.difference_note : "", records: receiptRows.value.map((row) => ({ id: row.id, payload: {
       ...normalizeRequestForSave(row), receive_quantity: Number(row.receive_quantity || 0),
-      expected_remaining_quantity: Number(row.quantity || 0),
+      purchase_quantity: Number(row.purchase_quantity || 0), expected_remaining_quantity: Math.max(Number(row.purchase_quantity || 0), Number(row.receive_quantity || 0)),
       courier_company: receiptForm.courier_company, tracking_number: receiptForm.tracking_number,
       receipt_images_json: receiptForm.images, received_at: receiptForm.received_at,
       receipt_context: receiptForm.note, qc_status: row.qc_status || "pending"
@@ -972,8 +974,12 @@ onMounted(async () => {
         <el-form-item label="到货时间"><el-date-picker v-model="receiptForm.received_at" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" /></el-form-item>
         <el-form-item label="到货照片"><el-upload :auto-upload="false" accept="image/*" multiple :on-change="uploadReceiptImage"><el-button>上传照片</el-button></el-upload><span class="muted-text">已上传 {{ receiptForm.images.length }} 张</span></el-form-item>
         <el-form-item label="收货备注"><el-input v-model="receiptForm.note" type="textarea" /></el-form-item>
+        <template v-if="receiptRows.some(row => Number(row.purchase_quantity) !== Number(row.receive_quantity))">
+          <el-form-item label="差异原因" required><el-select v-model="receiptForm.difference_reason" placeholder="请选择"><el-option label="商家少发货" value="merchant_short" /><el-option label="商家多发货" value="merchant_over" /><el-option label="库存丢失" value="inventory_loss" /><el-option label="其他" value="other" /></el-select></el-form-item>
+          <el-form-item label="差异说明"><el-input v-model="receiptForm.difference_note" type="textarea" placeholder="请填写差异说明" /></el-form-item>
+        </template>
       </el-form>
-      <el-table :data="receiptRows" border max-height="280"><el-table-column prop="product_name" label="库存名称" min-width="300" /><el-table-column prop="quantity" label="采购数" width="100" /><el-table-column label="实收数" width="160"><template #default="{row}"><el-input-number v-model="row.receive_quantity" :min="0" :max="row.quantity" :precision="0" /></template></el-table-column></el-table>
+      <el-table :data="receiptRows" border max-height="280"><el-table-column prop="product_name" label="库存名称" min-width="300" /><el-table-column label="采购数" width="160"><template #default="{row}"><el-input-number v-model="row.purchase_quantity" :min="1" :precision="0" /></template></el-table-column><el-table-column label="实收数" width="160"><template #default="{row}"><el-input-number v-model="row.receive_quantity" :min="0" :precision="0" /></template></el-table-column></el-table>
       <template #footer><el-button @click="receiptVisible=false">取消</el-button><el-button type="primary" :loading="receiptSubmitting" @click="confirmReceipt">确认收货并入库</el-button></template>
     </el-dialog>
 
