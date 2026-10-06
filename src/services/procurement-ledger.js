@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { validateInventoryAdjustment } from '../inventory-adjustment-reasons.js';
+import { inferProcurementSources } from './procurement-source-inference.js';
 
 export const procurementLedgerSchema = [
   `CREATE TABLE IF NOT EXISTS procurement_ledger_actions (
@@ -337,6 +338,7 @@ export function createProcurementLedgerService(hooks) {
     const id = integer(body.product_id || body.productId, '库存商品 ID');
     const [value, fbp] = await Promise.all([snapshot(id), hooks.fbpStocks && body.include_fbp !== false ? hooks.fbpStocks(id) : null]);
     if (fbp) value.fbp_inventory = fbp;
+    value.source_inference = inferProcurementSources(value);
     return value;
   }
   async function costTasks(body = {}) {

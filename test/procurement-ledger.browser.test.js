@@ -26,6 +26,9 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
   initial.orders.push({ order_item_id: 3, order_id: 3, posting_number: 'HISTORY-COVERED', entered_transport: true, quantity: 2,
     missing_record_quantity: 0, missing_purchase_quantity: 0, missing_receipt_quantity: 0,
     coverage_trace: [{ batch_id: 52, purchase_order_no: 'PO-HISTORY', quantity: 2, basis: 'recorded', purpose: 'source' }] });
+  initial.batches.push({ id: 53, purchase_order_no: 'PO-LATE', quantity: 2, unallocated_quantity: 2, status: 'approved' });
+  initial.source_inference = { current_unmatched: 0, physical_unmatched: 0, historical_unmatched: 96, unassigned_purchase_quantity: 0, reserves: [],
+    suggestions: [{ order_item_id: 1, posting_number: 'TEST-100', batch_id: 53, purchase_order_no: 'PO-LATE', quantity: 2, purpose: 'history_candidate', late_registration: true }] };
   try {
     await build({ configFile: false, root: process.cwd(), logLevel: 'error', plugins: [vue(), {
       name: 'ledger-fixture', resolveId(id) { if (id === 'virtual:ledger') return '\0ledger'; },
@@ -67,6 +70,13 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     await page.getByText('仅待核对', { exact: true }).click();
     assert.equal(await page.getByText('HISTORY-COVERED', { exact: true }).count(), 0);
     await page.getByText('TEST-100', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '核对并关联', exact: true }).click();
+    const sourceDialog = page.getByRole('dialog', { name: '关联已有收货', exact: true });
+    assert.equal(await sourceDialog.getByRole('spinbutton').inputValue(), '2');
+    assert.match(await sourceDialog.getByRole('textbox').inputValue(), /确认该批货在此订单发出前已到货/);
+    assert.equal(await sourceDialog.getByRole('button', { name: '确认保存纠正记录' }).isDisabled(), true);
+    await sourceDialog.getByRole('button', { name: '取消', exact: true }).click();
+    await page.getByRole('button', { name: '放弃修改', exact: true }).click();
     await page.getByRole('button', { name: '补采购记录', exact: true }).click();
     const historicalDialog = page.getByRole('dialog', { name: '补历史采购', exact: true });
     await historicalDialog.getByText('只补历史采购来源，不增加现货或在途。实物与账面不符请单独盘点核对。').waitFor();
