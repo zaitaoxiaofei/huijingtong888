@@ -52,6 +52,19 @@ test("overproduction in T4 cannot fill the T7 shortfall; removed drafts stop con
   assert.equal(developmentPlanProgress(input, []).status, "todo");
 });
 
+test("manually configured SKUs become the progress source without draft binding", () => {
+  const input = plan();
+  input.models[0].manual_skus = ["T4-001", "T4-002", "T4-001"];
+  input.models[1].manual_skus = [];
+  const normalized = normalizeDevelopmentPlan(input, body);
+  assert.deepEqual(normalized.models[0].manual_skus, ["T4-001", "T4-002"]);
+  assert.deepEqual(normalized.models[1].manual_skus, []);
+  const progress = developmentPlanProgress(normalized, [{ id: 101, sku_count: 99 }, { id: 102, sku_count: 99 }]);
+  assert.equal(progress.done, 2);
+  assert.equal(progress.models[0].done, 2);
+  assert.equal(progress.models[1].done, 0);
+});
+
 function serviceHarness() {
   const writes = [];
   const state = { stored: [], ideaLinks: [], drafts: [{ id: 101, product_name: "T4", sku_count: 12, created_by_person_id: 7 }, { id: 102, product_name: "T7", sku_count: 5, created_by_person_id: 7 }] };

@@ -157,7 +157,7 @@ function configure(brand, category, existing = null) {
   for (const row of saved.values()) if (!models.some((model) => Number(model.id) === row.model_id)) models.push({ id: row.model_id, name: row.model });
   modelRows.value = models.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name, "en", { numeric: true })).map((model) => {
     const row = saved.get(Number(model.id));
-    return { model_id: Number(model.id), model: model.name, selected: Boolean(row) || scope.value === "non_automotive", target: row?.target || 10, done: row?.done || 0, drafts: (row?.drafts || []).map((draft) => ({ ...draft })) };
+    return { model_id: Number(model.id), model: model.name, selected: Boolean(row) || scope.value === "non_automotive", target: row?.target || 10, done: row?.done || 0, drafts: (row?.drafts || []).map((draft) => ({ ...draft })), ...(Array.isArray(row?.manual_skus) ? { manual_skus: row.manual_skus } : {}) };
   });
   configVisible.value = true;
 }
@@ -178,7 +178,7 @@ async function save() {
   try {
     const related = { kind: "development_matrix", brand: selectedBrand.value.name, scope: scope.value, category: form.category, notes: form.notes,
       unallocated_draft_ids: [...unallocatedDrafts.value.map(row => row.id), ...modelRows.value.filter(row => !row.selected).flatMap(row => row.drafts.map(draft => draft.id))],
-      models: selectedModels.value.map((row) => ({ ...(row.brand ? { brand: row.brand, category: row.category, scope: row.scope } : {}), model_id: row.model_id, model: row.model, target: row.target, draft_ids: row.drafts.map((draft) => draft.id) })) };
+      models: selectedModels.value.map((row) => ({ ...(row.brand ? { brand: row.brand, category: row.category, scope: row.scope } : {}), model_id: row.model_id, model: row.model, target: row.target, draft_ids: row.drafts.map((draft) => draft.id), ...(Array.isArray(row.manual_skus) ? { manual_skus: row.manual_skus } : {}) })) };
     const payload = { title: form.title.trim(), type: "product_development", owner_person_id: form.owner_person_id, due_at: form.due_at,
       period: props.initialTask?.period || "week", priority: props.initialTask?.priority || "medium", start_at: props.initialTask?.start_at || "", related };
     if (props.initialTask) await apiClient.put(`/api/team/tasks/${props.initialTask.id}`, payload);

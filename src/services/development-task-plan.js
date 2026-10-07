@@ -39,7 +39,20 @@ export function normalizeDevelopmentPlan(value, body, { allowUnassigned = false 
       if (!Number.isSafeInteger(id) || id <= 0 || draftIds.has(id)) fail("关联草稿（draft_ids）无效或重复，一份草稿只能分配给一个车型，请检查车型明细。");
       draftIds.add(id);
     }
-    return { ...(row.brand || row.category || row.scope ? { brand: rowBrand, category: rowCategory, scope: rowScope } : {}), model_id, model: rowNonAuto ? "非汽车" : String(row.model || "").trim(), target, draft_ids: ids };
+    const manualSkus = Array.isArray(row.manual_skus) ? [...new Set(row.manual_skus
+      .map((sku) => String(sku || "").trim())
+      .filter(Boolean))] : null;
+    if (manualSkus?.some((sku) => sku.length > 128) || (manualSkus?.length || 0) > 100000) {
+      fail("手工配置 SKU 无效，请检查每条 SKU 不超过 128 个字符。");
+    }
+    return {
+      ...(row.brand || row.category || row.scope ? { brand: rowBrand, category: rowCategory, scope: rowScope } : {}),
+      model_id,
+      model: rowNonAuto ? "非汽车" : String(row.model || "").trim(),
+      target,
+      draft_ids: ids,
+      ...(manualSkus ? { manual_skus: manualSkus } : {})
+    };
   });
   const result = { kind: "development_matrix", brand, category, models, notes: String(plan.notes || "").trim().slice(0, 2000) };
   if (plan.source_idea_id) result.source_idea_id = Number(plan.source_idea_id);
@@ -60,7 +73,9 @@ export function developmentPlanProgress(plan, drafts) {
   const byId = new Map(drafts.filter((row) => row.status !== "deleted").map((row) => [Number(row.id), row]));
   const models = plan.models.map((row) => {
     const linked = row.draft_ids.map((id) => byId.get(id)).filter(Boolean);
-    const done = linked.reduce((sum, draft) => sum + Number(draft.sku_count || 0), 0);
+    const done = Array.isArray(row.manual_skus)
+      ? row.manual_skus.length
+      : linked.reduce((sum, draft) => sum + Number(draft.sku_count || 0), 0);
     return { ...row, done, drafts: row.draft_ids.map((id) => {
       const draft = byId.get(id);
       return { id, title: draft?.product_name || `草稿 #${id}（已删除或不可用）`, count: Number(draft?.sku_count || 0), created_at: draft?.created_at || "" };
@@ -76,5 +91,5 @@ export function developmentPlanProgress(plan, drafts) {
 }
 
 export function developmentPlanDeliverable(plan) {
-  return `${plan.brand} · ${plan.category}：${plan.models.map((row) => `${row.brand || row.category ? `${row.brand || plan.brand} · ${row.category || plan.category} · ` : ""}${row.model} ${row.target} 个 SKU`).join('；')}。按关联草稿的变体数量计算，每个车型分别达标。${plan.notes ? `补充要求：${plan.notes}` : ''}`;
+  return `${plan.brand} · ${plan.category}：${plan.models.map((row) => `${row.brand || row.category ? `${row.brand || plan.brand} · ${row.category || plan.category} · ` : ""}${row.model} ${row.target} 个 SKU`).join('；')}。按手工配置 SKU 或关联草稿的变体数量计算，每个车型分别达标。${plan.notes ? `补充要求：${plan.notes}` : ''}`;
 }
