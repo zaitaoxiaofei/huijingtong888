@@ -181,9 +181,12 @@ async function save() {
   if (selectedModels.value.some((row) => !Number.isInteger(row.target) || row.target < 1)) return ElMessage.warning("请为每个勾选车型填写大于 0 的整数 SKU 目标");
   saving.value = true;
   try {
+    const selectedGroupKeys = new Set(selectedModels.value.map((row) => JSON.stringify([row.brand || selectedBrand.value.name, row.category || form.category])));
+    const manualGroups = (props.initialTask?.development_plan?.manual_groups || []).filter((row) => selectedGroupKeys.has(JSON.stringify([row.brand, row.category])));
     const related = { kind: "development_matrix", brand: selectedBrand.value.name, scope: scope.value, category: form.category, notes: form.notes,
       unallocated_draft_ids: [...unallocatedDrafts.value.map(row => row.id), ...modelRows.value.filter(row => !row.selected).flatMap(row => row.drafts.map(draft => draft.id))],
-      models: selectedModels.value.map((row) => ({ ...(row.brand ? { brand: row.brand, category: row.category, scope: row.scope } : {}), model_id: row.model_id, model: row.model, target: row.target, draft_ids: row.drafts.map((draft) => draft.id), ...(needsCoordinate.value ? { manual_skus: manualSkuValues(row.manual_sku_text) } : Array.isArray(row.manual_skus) ? { manual_skus: row.manual_skus } : {}) })) };
+      models: selectedModels.value.map((row) => ({ ...(row.brand ? { brand: row.brand, category: row.category, scope: row.scope } : {}), model_id: row.model_id, model: row.model, target: row.target, draft_ids: row.drafts.map((draft) => draft.id), ...(needsCoordinate.value ? { manual_skus: manualSkuValues(row.manual_sku_text) } : Array.isArray(row.manual_skus) ? { manual_skus: row.manual_skus } : {}) })),
+      ...(manualGroups.length ? { manual_groups: manualGroups } : {}) };
     const payload = { title: form.title.trim(), type: "product_development", owner_person_id: form.owner_person_id, due_at: form.due_at,
       period: props.initialTask?.period || "week", priority: form.priority, start_at: form.start_at || "", related };
     if (props.initialTask) await apiClient.put(`/api/team/tasks/${props.initialTask.id}`, payload);

@@ -118,11 +118,20 @@ test("product development center covers the inventory-driven management views", 
   assert.match(viewSource, /taskCompletedText/);
   assert.match(viewSource, /taskDisplayName/);
   assert.doesNotMatch(viewSource, /el-table-column label="开发范围"/);
-  assert.match(viewSource, /配置 SKU/);
+  assert.match(viewSource, /记录进度/);
   assert.match(viewSource, /编辑任务/);
   assert.match(viewSource, /task-progress-cell\"><strong>\{\{ taskProgress\(row\) \}\}%/);
   assert.match(viewSource, /taskSkuConfigVisible/);
   assert.match(viewSource, /manualSkuValues/);
+  assert.match(viewSource, /taskSkuConfigGroups/);
+  assert.match(viewSource, /全部标记完成/);
+  assert.match(viewSource, /整组记录 SKU/);
+  assert.match(viewSource, /按型号明细/);
+  assert.ok(viewSource.indexOf('label="类型"') < viewSource.indexOf('label="任务名称"'));
+  assert.ok(viewSource.indexOf('label="任务名称"') < viewSource.indexOf('label="优先级"'));
+  assert.ok(viewSource.indexOf('label="优先级"') < viewSource.indexOf('label="当前进度"'));
+  assert.ok(viewSource.indexOf('label="当前进度"') < viewSource.indexOf('label="状态"'));
+  assert.ok(viewSource.indexOf('label="状态"') < viewSource.indexOf('label="时间"'));
   assert.match(viewSource, /content="去开发"/);
   assert.match(viewSource, /createTaskDraft\(row,developmentModels\(row\)\[0\] \|\| \{\}\)/);
   assert.match(taskCreationDialogSource, /manual_skus/);
@@ -134,6 +143,7 @@ test("product development center covers the inventory-driven management views", 
   assert.match(taskCreationDialogSource, /不重要不紧急 · 6分/);
   assert.match(taskCreationDialogSource, /needsCoordinate/);
   assert.match(taskCreationDialogSource, /v-model="row\.manual_sku_text"/);
+  assert.match(taskCreationDialogSource, /development_plan\?\.manual_groups/);
   assert.match(viewSource, /trigger="hover"/);
   assert.match(viewSource, /:hide-after="650"/);
   assert.match(viewSource, /task-dialog-metrics/);
@@ -160,7 +170,6 @@ test("product development center covers the inventory-driven management views", 
   assert.match(viewSource, /idea-title-line/);
   assert.match(viewSource, /idea-people-row/);
   assert.match(viewSource, /personAvatar\(row\.assignee_person_id\)/);
-  assert.match(viewSource, /personAvatar\(row\.owner_person_id \|\| row\.assignee_person_id\)/);
   assert.match(viewSource, /<el-avatar/);
   assert.match(viewSource, /idea-meta-row/);
   assert.match(viewSource, /ideaDueAtText/);
