@@ -44,7 +44,7 @@ const uniformTarget = ref(10);
 const unallocatedDrafts = ref([]);
 const allocationTarget = ref(null);
 const modelKey = row => JSON.stringify([row.brand || selectedBrand.value?.name, row.category || form.category, row.model_id]);
-const form = reactive({ title: "", owner_person_id: null, due_at: "", category: "", notes: "" });
+const form = reactive({ title: "", owner_person_id: null, priority: "medium", start_at: "", due_at: "", category: "", notes: "" });
 const draftModel = ref(null);
 const draftQuery = ref("");
 const draftRows = ref([]);
@@ -144,6 +144,8 @@ function configure(brand, category, existing = null) {
   form.category = category;
   form.title = existing?.title || `${brand.name} ${category}开发`;
   form.owner_person_id = existing?.owner_person_id || null;
+  form.priority = existing?.priority || "medium";
+  form.start_at = existing?.start_at || "";
   form.due_at = existing?.due_at || "";
   form.notes = existing?.development_plan?.notes || "";
   unallocatedDrafts.value = (existing?.development_plan?.unallocated_drafts || []).map(row => ({ ...row }));
@@ -180,7 +182,7 @@ async function save() {
       unallocated_draft_ids: [...unallocatedDrafts.value.map(row => row.id), ...modelRows.value.filter(row => !row.selected).flatMap(row => row.drafts.map(draft => draft.id))],
       models: selectedModels.value.map((row) => ({ ...(row.brand ? { brand: row.brand, category: row.category, scope: row.scope } : {}), model_id: row.model_id, model: row.model, target: row.target, draft_ids: row.drafts.map((draft) => draft.id), ...(Array.isArray(row.manual_skus) ? { manual_skus: row.manual_skus } : {}) })) };
     const payload = { title: form.title.trim(), type: "product_development", owner_person_id: form.owner_person_id, due_at: form.due_at,
-      period: props.initialTask?.period || "week", priority: props.initialTask?.priority || "medium", start_at: props.initialTask?.start_at || "", related };
+      period: props.initialTask?.period || "week", priority: form.priority, start_at: form.start_at || "", related };
     if (props.initialTask) await apiClient.put(`/api/team/tasks/${props.initialTask.id}`, payload);
     else await apiClient.post("/api/team/tasks", payload);
     ElMessage.success(props.initialTask ? "开发任务已更新" : "开发任务已创建");
@@ -288,7 +290,7 @@ onMounted(async () => {
       <div class="model-actions"><el-checkbox :model-value="allSelected" :indeterminate="selectedModels.length > 0 && !allSelected" @change="setAll">{{ scope === 'non_automotive' ? '非汽车开发' : '全部车型' }}</el-checkbox><div><span>统一目标</span><el-input-number v-model="uniformTarget" :min="1" :max="100000" :precision="0" controls-position="right" /><el-button :disabled="!selectedModels.length" @click="applyTarget">应用到已选</el-button></div></div>
       <div class="model-table"><table><thead><tr><th>{{ scope === 'non_automotive' ? '开发范围' : '选择车型' }}</th><th>目标 SKU 数</th><th v-if="initialTask">已完成</th><th v-if="initialTask">成果草稿</th></tr></thead><tbody><tr v-for="row in modelRows" :key="modelKey(row)" :class="{ selected: row.selected }"><td><el-checkbox v-model="row.selected">{{ row.brand ? `${row.brand} · ${row.category} · ` : '' }}{{ row.model }}</el-checkbox></td><td><el-input-number v-if="row.selected" v-model="row.target" :min="1" :max="100000" :precision="0" controls-position="right" /><span v-else class="model-placeholder">勾选后设置数量</span></td><td v-if="initialTask">{{ row.done }} / {{ row.target }}</td><td v-if="initialTask"><el-button link type="primary" :disabled="!row.selected" @click="openDrafts(row)">关联草稿（{{ row.drafts.length }}）</el-button></td></tr></tbody></table></div>
       <div class="model-summary">已选 <b>{{ selectedModels.length }}</b> {{ scope === 'non_automotive' ? '个开发范围' : '个车型' }}，合计 <b>{{ totalTarget }}</b> 个 SKU</div>
-      <div class="config-fields"><el-form-item label="负责人" required><el-select v-model="form.owner_person_id" filterable placeholder="选择负责人"><el-option v-for="person in people" :key="person.id" :label="person.name" :value="person.id" /></el-select></el-form-item><el-form-item label="计划完成日期（北京时间）" required><el-date-picker v-model="form.due_at" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" /></el-form-item></div>
+      <div class="config-fields"><el-form-item label="负责人" required><el-select v-model="form.owner_person_id" filterable placeholder="重新选择负责人"><el-option v-for="person in people" :key="person.id" :label="person.name" :value="person.id" /></el-select></el-form-item><el-form-item label="优先级"><el-select v-model="form.priority"><el-option label="高优先级" value="high" /><el-option label="中优先级" value="medium" /><el-option label="低优先级" value="low" /></el-select></el-form-item><el-form-item label="开始日期（北京时间）"><el-date-picker v-model="form.start_at" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" /></el-form-item><el-form-item label="计划完成日期（北京时间）" required><el-date-picker v-model="form.due_at" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" /></el-form-item></div>
       <div class="completion-rule"><strong>完成标准</strong><p>{{ completionText || '勾选车型后自动生成完成标准' }}</p><small>按每个车型关联草稿中的变体数量计数，店铺副本不重复计数。所有车型分别达标后任务完成。{{ initialTask ? '草稿关联变更将在保存任务后生效。' : '创建后打开任务详情即可按车型关联负责人创建的草稿。' }}</small></div>
       <el-form-item label="补充要求（选填）"><el-input v-model="form.notes" type="textarea" :rows="2" maxlength="2000" placeholder="例如：颜色、材质、款式或验收要求" /></el-form-item>
     </el-form>

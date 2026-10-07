@@ -114,13 +114,18 @@ test("product development center covers the inventory-driven management views", 
   assert.match(viewSource, /计划完成/);
   assert.match(viewSource, /当前进度/);
   assert.match(viewSource, /label="优先级"/);
+  assert.match(viewSource, /label="开始时间"/);
   assert.match(viewSource, /label="创建时间"/);
   assert.match(viewSource, /配置 SKU/);
+  assert.match(viewSource, /编辑任务/);
+  assert.match(viewSource, /task-progress-cell\"><strong>\{\{ taskProgress\(row\) \}\}%/);
   assert.match(viewSource, /taskSkuConfigVisible/);
   assert.match(viewSource, /manualSkuValues/);
   assert.match(viewSource, /taskCreatedText/);
   assert.match(viewSource, /createTaskDraft\(row,developmentModels\(row\)\[0\] \|\| \{\}\)/);
   assert.match(taskCreationDialogSource, /manual_skus/);
+  assert.match(taskCreationDialogSource, /v-model="form\.priority"/);
+  assert.match(taskCreationDialogSource, /v-model="form\.start_at"/);
   assert.match(viewSource, /trigger="hover"/);
   assert.match(viewSource, /:hide-after="650"/);
   assert.match(viewSource, /task-dialog-metrics/);
