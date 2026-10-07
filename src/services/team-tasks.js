@@ -24,7 +24,10 @@ const VALID_TYPES = new Set([
 ]);
 const VALID_PERIODS = new Set(["week", "month", "quarter", "year"]);
 const VALID_STATUSES = new Set(["todo", "doing", "review", "done", "delayed"]);
-const VALID_PRIORITIES = new Set(["high", "medium", "low"]);
+const VALID_PRIORITIES = new Set([
+  "urgent_important", "urgent_unimportant", "important_not_urgent", "not_urgent_unimportant",
+  "high", "medium", "low"
+]);
 const VALID_PROJECT_STATUSES = new Set(["planning", "approved", "active", "review", "done", "paused", "cancelled"]);
 const VALID_CANDIDATE_STATUSES = new Set([
   "idea", "pending_review", "research", "costing", "approved", "supplier", "sample",

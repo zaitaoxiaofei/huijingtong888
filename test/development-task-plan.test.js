@@ -90,13 +90,14 @@ function serviceHarness() {
   return { context, state, writes };
 }
 
-test("create endpoint stores complete structured goals in one write and derives trusted progress", async () => {
+test("create endpoint stores complete structured goals, four-quadrant priority and derives trusted progress", async () => {
   const { context, writes } = serviceHarness();
-  const result = await context.createTeamTaskMysql({ ...body, related: plan(), done: 999, target: 999, status: "done" }, 7);
+  const result = await context.createTeamTaskMysql({ ...body, related: plan(), priority: "urgent_important", done: 999, target: 999, status: "done" }, 7);
   assert.equal(result.id, 55);
   assert.equal(writes.length, 1);
   const params = writes[0].params;
   assert.equal(params[5], "doing");
+  assert.equal(params[6], "urgent_important");
   assert.equal(params[7], 30);
   assert.equal(params[8], 15);
   assert.deepEqual(JSON.parse(params[12]), plan());
