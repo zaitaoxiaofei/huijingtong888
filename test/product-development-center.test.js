@@ -124,6 +124,9 @@ test("product development center covers the inventory-driven management views", 
   assert.match(viewSource, /taskSkuConfigVisible/);
   assert.match(viewSource, /manualSkuValues/);
   assert.match(viewSource, /taskSkuConfigGroups/);
+  assert.match(viewSource, /legacyNonAutomotivePlan/);
+  assert.match(viewSource, /该旧开发任务缺少车型计划/);
+  assert.match(viewSource, /model_id: 0/);
   assert.match(viewSource, /全部标记完成/);
   assert.match(viewSource, /整组记录 SKU/);
   assert.match(viewSource, /按型号明细/);
