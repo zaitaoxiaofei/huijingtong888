@@ -293,12 +293,26 @@ function bindTaskDraft(row) {
 function manualSkuValues(value = "") {
   return [...new Set(String(value || "").split(/[\n,，;；\s]+/).map((sku) => sku.trim()).filter(Boolean))];
 }
+function legacyNonAutomotivePlan(row) {
+  const category = String(row.development_category || "").trim();
+  if (row.development_brand !== "非汽车" || !category) return null;
+  return {
+    kind: "development_matrix",
+    scope: "non_automotive",
+    brand: "非汽车",
+    category,
+    models: [{ brand: "非汽车", category, scope: "non_automotive", model_id: 0, model: "非汽车", target: Math.max(1, Number(row.target || 0)), draft_ids: [] }]
+  };
+}
 function openTaskSkuConfig(row) {
   if (row.type !== "product_development") return;
   if (!row.development_plan) {
-    taskCreationInitial.value = row;
-    taskCreationVisible.value = true;
-    return;
+    const plan = legacyNonAutomotivePlan(row);
+    if (!plan) {
+      ElMessage.warning("该旧开发任务缺少车型计划，暂时无法记录进度；请先编辑任务补充开发范围。");
+      return;
+    }
+    row = { ...row, development_plan: plan };
   }
   taskSkuConfigTask.value = row;
   const groupMap = new Map();
