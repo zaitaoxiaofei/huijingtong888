@@ -6,7 +6,7 @@ import { Boxes, CalendarDays, CheckCircle2, CircleCheck, ClipboardCheck, Clock3,
 import { apiClient } from "../../utils/api";
 import { useAuthStore } from "../../stores/auth";
 import { uploadListingMedia } from "../../api/tools/imageCropper";
-import { shanghaiDateKey, shanghaiDateTimeText } from "../../utils/shanghai-date";
+import { shanghaiDateKey, shanghaiDateText, shanghaiDateTimeText } from "../../utils/shanghai-date";
 import DevelopmentHeatmap from "../../components/team/DevelopmentHeatmap.vue";
 import { loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../utils/inventory-naming-options.js";
 import IdeaDevelopmentScopeDialog from "../../components/team/IdeaDevelopmentScopeDialog.vue";
@@ -199,17 +199,20 @@ const taskTypeOptions = [
 ];
 const taskRangeOptions = [{ value: "week", label: "本周" }, { value: "month", label: "月度" }, { value: "quarter", label: "季度" }, { value: "year", label: "年度" }, { value: "custom", label: "自定义" }];
 const taskRangeDates = computed(() => {
-  if (taskRange.value === "custom" && taskCustomRange.value?.length === 2) return taskCustomRange.value.map((value) => new Date(`${value}T00:00:00+08:00`));
-  const anchor = new Date(taskAnchor.value); const year = anchor.getFullYear(); const month = anchor.getMonth();
-  if (taskRange.value === "week") { const day = anchor.getDay() || 7; const start = new Date(year, month, anchor.getDate() - day + 1); return [start, new Date(year, month, anchor.getDate() - day + 7)]; }
-  if (taskRange.value === "month") return [new Date(year, month, 1), new Date(year, month + 1, 0)];
-  if (taskRange.value === "quarter") { const startMonth = Math.floor(month / 3) * 3; return [new Date(year, startMonth, 1), new Date(year, startMonth + 3, 0)]; }
-  return [new Date(year, 0, 1), new Date(year, 11, 31)];
+  if (taskRange.value === "custom" && taskCustomRange.value?.length === 2) return taskCustomRange.value.map((value) => new Date(`${value}T00:00:00Z`));
+  const [year, month, date] = shanghaiDateKey(taskAnchor.value).split("-").map(Number);
+  const anchor = new Date(Date.UTC(year, month - 1, date));
+  const anchorYear = anchor.getUTCFullYear(); const anchorMonth = anchor.getUTCMonth(); const anchorDate = anchor.getUTCDate();
+  if (taskRange.value === "week") { const day = anchor.getUTCDay() || 7; const start = new Date(Date.UTC(anchorYear, anchorMonth, anchorDate - day + 1)); return [start, new Date(Date.UTC(anchorYear, anchorMonth, anchorDate - day + 7))]; }
+  if (taskRange.value === "month") return [new Date(Date.UTC(anchorYear, anchorMonth, 1)), new Date(Date.UTC(anchorYear, anchorMonth + 1, 0))];
+  if (taskRange.value === "quarter") { const startMonth = Math.floor(anchorMonth / 3) * 3; return [new Date(Date.UTC(anchorYear, startMonth, 1)), new Date(Date.UTC(anchorYear, startMonth + 3, 0))]; }
+  return [new Date(Date.UTC(anchorYear, 0, 1)), new Date(Date.UTC(anchorYear, 11, 31))];
 });
 const taskRangeLabel = computed(() => `${shortDate(taskRangeDates.value[0])} - ${shortDate(taskRangeDates.value[1])}`);
 const visibleTasks = computed(() => filteredTasks.value.filter((row) => {
   const point = taskDate(row); if (!point) return taskRange.value === "week";
-  return point >= dayStart(taskRangeDates.value[0]) && point <= dayEnd(taskRangeDates.value[1]);
+  const pointDate = shanghaiDateKey(point);
+  return pointDate >= shanghaiDateKey(taskRangeDates.value[0]) && pointDate <= shanghaiDateKey(taskRangeDates.value[1]);
 }));
 const currentPersonId = computed(() => Number(authStore.user?.personId || authStore.user?.id || 0));
 const audienceTasks = computed(() => visibleTasks.value.filter((row) => taskAudience.value === "all" || !currentPersonId.value
@@ -255,7 +258,7 @@ const taskDetailFilteredRows = computed(() => (taskOperationalDetails.value.rows
 const taskDetailRows = computed(() => taskDetailFilteredRows.value.slice((taskDetailPage.value - 1) * taskDetailPageSize, taskDetailPage.value * taskDetailPageSize));
 const taskAxisLabels = computed(() => {
   const [start, end] = taskRangeDates.value; const count = taskRange.value === "year" ? 12 : taskRange.value === "quarter" ? 6 : taskRange.value === "month" ? 5 : 7;
-  return Array.from({ length: count }, (_, index) => { const ratio = count === 1 ? 0 : index / (count - 1); const date = new Date(start.getTime() + (end.getTime() - start.getTime()) * ratio); return taskRange.value === "year" ? `${date.getMonth() + 1}月` : `${date.getMonth() + 1}/${date.getDate()}`; });
+  return Array.from({ length: count }, (_, index) => { const ratio = count === 1 ? 0 : index / (count - 1); const date = new Date(start.getTime() + (end.getTime() - start.getTime()) * ratio); const [, month, day] = shanghaiDateKey(date).split("-").map(Number); return taskRange.value === "year" ? `${month}月` : `${month}/${day}`; });
 });
 const sortedIdeas = computed(() => ideas.value.filter(matchesDevelopmentScope).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime() || Number(b.task_id || b.id || 0) - Number(a.task_id || a.id || 0)));
 const developmentIdeas = computed(() => sortedIdeas.value.filter((row) => row.development_started_at
@@ -267,10 +270,18 @@ function stageIndex(value) { return Math.max(0, stages.findIndex((item) => item.
 function productImage(row) { return row.image_url || (row.product_id ? `/api/products/${row.product_id}/image?thumb=1&w=240` : ""); }
 function personAvatar(personId) { return personById.value.get(Number(personId))?.avatar_url || ""; }
 function personInitial(name) { return String(name || "?").trim().slice(0, 1); }
-function dayStart(value) { const date = new Date(value); date.setHours(0, 0, 0, 0); return date; }
-function dayEnd(value) { const date = new Date(value); date.setHours(23, 59, 59, 999); return date; }
-function shortDate(value) { const date = new Date(value); return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`; }
-function taskDate(row) { const value = row.due_at || row.start_at || row.created_at; return value ? new Date(String(value).length <= 10 ? `${value}T21:00:00+08:00` : value) : null; }
+function shortDate(value) { const [year, month, date] = shanghaiDateKey(value).split("-").map(Number); return `${year}年${month}月${date}日`; }
+function taskDate(row) {
+  const value = row.due_at || row.created_at;
+  if (!value) return null;
+  const text = String(value).trim();
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(text)
+    ? `${text}T21:00:00+08:00`
+    : /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text : `${text.replace(" ", "T")}Z`;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+function taskStartDateLabel(row) { return row.start_at || shanghaiDateText(row.created_at, { assumeUtcWhenNaive: true }) || "未设置"; }
 function taskProgress(row) { const target = Number(row.target || 0); if (!target) return row.status === "done" ? 100 : 0; return Math.min(row.development_plan && row.status !== "done" ? 99 : 100, Math.round(Number(row.done || 0) / target * 100)); }
 function taskOverdue(row) { const due = taskDate({ due_at: row.due_at }); return row.status !== "done" && Boolean(due && due.getTime() < taskClock.value); }
 function taskOverdueInfo(row) {
@@ -1024,7 +1035,7 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
           <el-table-column label="优先级" width="152"><template #default="{row}"><el-tag :type="taskPriorityType(row)" effect="light">{{ taskPriorityLabel(row) }}</el-tag></template></el-table-column>
           <el-table-column label="当前进度" width="128"><template #default="{row}"><div class="task-progress-cell"><strong>{{ taskProgress(row) }}%</strong><el-progress :percentage="taskProgress(row)" :show-text="false" :stroke-width="7" :status="taskTone(row)==='overdue'?'exception':taskTone(row)==='done'?'success':undefined" /><small>{{ Number(row.done || 0) }} / {{ Number(row.target || 0) }} {{ row.unit || 'SKU' }}</small></div></template></el-table-column>
           <el-table-column label="状态" width="122"><template #default="{row}"><span class="task-status" :class="taskTone(row)"><Clock3 v-if="taskTone(row)==='overdue'" :size="13" />{{ taskToneLabel(row) }}</span></template></el-table-column>
-          <el-table-column label="时间" width="220"><template #default="{row}"><div class="task-time-cell"><span><b>开始</b>{{ row.start_at || '未设置' }}</span><span><b>{{ taskOverdue(row) ? '顺延' : '计划' }}</b>{{ taskPlanDateLabel(row) }}</span><span><b>完成</b>{{ taskCompletedText(row) }}</span></div></template></el-table-column>
+          <el-table-column label="时间" width="220"><template #default="{row}"><div class="task-time-cell"><span><b>开始</b>{{ taskStartDateLabel(row) }}</span><span><b>{{ taskOverdue(row) ? '顺延' : '计划' }}</b>{{ taskPlanDateLabel(row) }}</span><span><b>完成</b>{{ taskCompletedText(row) }}</span></div></template></el-table-column>
           <el-table-column label="操作" width="220" fixed="right" align="center"><template #default="{row}"><TaskScopeActions v-if="row.type==='product_development'" mode="task" :done="Number(row.done||0)" :target="Number(row.target||0)" :can-delete="!row.automation_key" @complete="completeTask(row)" @drafts="openTaskModelDraftPicker(row)" @edit="openTask(row)" @develop="createTaskDraft(row,developmentModels(row)[0] || {})" @delete="deleteTask(row)" /><TaskScopeActions v-else mode="task" :done="Number(row.done||0)" :target="Number(row.target||0)" :can-complete="false" :can-delete="!row.automation_key" @edit="openTask(row)" @delete="deleteTask(row)" /></template></el-table-column>
         </el-table>
         <div v-if="taskListRows.length" class="task-pagination"><span>共 {{ taskListRows.length }} 项任务</span><el-pagination v-model:current-page="taskPage" :page-size="taskPageSize" background layout="prev, pager, next" :total="taskListRows.length" /></div>
