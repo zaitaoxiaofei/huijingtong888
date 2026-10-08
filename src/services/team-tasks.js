@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { aiVehicleCatalog } from "./ai-vehicle-catalog.js";
 import { inventoryProductNamingOptions } from "./inventory-product-naming.js";
@@ -228,6 +229,18 @@ async function ensureTeamTasksSchema() {
       KEY idx_dev_task_links_candidate (candidate_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   `);
+  await mysqlExecute(`CREATE TABLE IF NOT EXISTS product_development_heatmap_orders (
+    period_key VARCHAR(64) NOT NULL,
+    dimension VARCHAR(16) NOT NULL,
+    coordinate_hash CHAR(64) NOT NULL,
+    coordinate_json TEXT NOT NULL,
+    sequence_number INT UNSIGNED NULL,
+    is_marked TINYINT(1) NOT NULL DEFAULT 0,
+    updated_by_person_id BIGINT UNSIGNED NULL,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (period_key, dimension, coordinate_hash),
+    KEY idx_dev_heatmap_period (period_key, dimension, sequence_number)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
   teamTasksSchemaReady = true;
 }
 
@@ -639,6 +652,61 @@ export async function teamTasksMysql(query = {}) {
     }
     return task;
   }).filter((row) => !VALID_STATUSES.has(status) || row.status === status);
+}
+
+function normalizeHeatmapPeriodKey(value) {
+  const periodKey = String(value || "").trim();
+  if (!/^(?:week:\d{4}-\d{2}-\d{2}|month:\d{4}-\d{2}|quarter:\d{4}-Q[1-4]|year:\d{4}|custom:\d{4}-\d{2}-\d{2}:\d{4}-\d{2}-\d{2})$/.test(periodKey)) {
+    throw new Error("开发计划周期无效，请从热力图选择本周、本月或有效自定义日期范围。");
+  }
+  return periodKey;
+}
+
+function normalizeHeatmapPlanEntry(entry = {}) {
+  const coordinateKey = String(entry.coordinate_key || "").trim();
+  let coordinate;
+  try { coordinate = JSON.parse(coordinateKey); } catch { throw new Error("热力图坐标无效，请刷新开发总览后重试。"); }
+  if (!Array.isArray(coordinate) || coordinate.length !== 4 || coordinate.some((value) => typeof value !== "string")) {
+    throw new Error("热力图坐标格式不正确，请刷新开发总览后重新选择。");
+  }
+  const sequence = entry.sequence == null || entry.sequence === "" ? null : Number(entry.sequence);
+  if (sequence !== null && (!Number.isInteger(sequence) || sequence < 1 || sequence > 9999)) throw new Error("开发顺序必须是 1 到 9999 的整数。");
+  return { coordinateKey, coordinateHash: createHash("sha256").update(coordinateKey).digest("hex"), sequence, marked: entry.marked ? 1 : 0 };
+}
+
+export async function developmentHeatmapOrdersMysql(query = {}) {
+  ensureMysqlEnabled();
+  await ensureTeamTasksSchema();
+  const periodKey = normalizeHeatmapPeriodKey(query.period_key || query.periodKey);
+  const dimension = String(query.dimension || "").trim();
+  if (dimension && !["brand", "model"].includes(dimension)) throw new Error("热力图纵向颗粒度无效，请选择品牌或车型。");
+  const rows = await mysqlQuery(`SELECT coordinate_json,sequence_number,is_marked FROM product_development_heatmap_orders
+    WHERE period_key=? ${dimension ? "AND dimension=?" : ""} ORDER BY sequence_number IS NULL,sequence_number ASC`, dimension ? [periodKey, dimension] : [periodKey]);
+  return rows.map((row) => ({ coordinate_key: row.coordinate_json, sequence: row.sequence_number == null ? null : Number(row.sequence_number), marked: Boolean(row.is_marked) }));
+}
+
+export async function saveDevelopmentHeatmapOrdersMysql(body = {}, sessionPersonId = null) {
+  ensureMysqlEnabled();
+  await ensureTeamTasksSchema();
+  const periodKey = normalizeHeatmapPeriodKey(body.period_key || body.periodKey);
+  const dimension = String(body.dimension || "").trim();
+  if (!["brand", "model"].includes(dimension)) throw new Error("热力图纵向颗粒度无效，请选择品牌或车型。");
+  const entries = Array.isArray(body.entries) ? body.entries : [];
+  if (entries.length > 500) throw new Error("一次最多保存 500 个开发坐标，请缩小选择范围后重试。");
+  const normalized = [...new Map(entries.map((entry) => {
+    const item = normalizeHeatmapPlanEntry(entry);
+    return [item.coordinateHash, item];
+  })).values()];
+  await withMysqlTransaction(async (connection) => {
+    for (const item of normalized) {
+      await connection.execute(`INSERT INTO product_development_heatmap_orders
+        (period_key,dimension,coordinate_hash,coordinate_json,sequence_number,is_marked,updated_by_person_id)
+        VALUES (?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE coordinate_json=VALUES(coordinate_json),sequence_number=VALUES(sequence_number),
+        is_marked=VALUES(is_marked),updated_by_person_id=VALUES(updated_by_person_id),updated_at=CURRENT_TIMESTAMP`,
+      [periodKey, dimension, item.coordinateHash, item.coordinateKey, item.sequence, item.marked, normalizePersonId(sessionPersonId)]);
+    }
+  });
+  return { ok: true, saved: normalized.length };
 }
 
 export async function teamTaskOperationalDetailsMysql(id) {

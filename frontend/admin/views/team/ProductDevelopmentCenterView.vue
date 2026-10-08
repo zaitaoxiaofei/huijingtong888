@@ -7,6 +7,7 @@ import { apiClient } from "../../utils/api";
 import { useAuthStore } from "../../stores/auth";
 import { uploadListingMedia } from "../../api/tools/imageCropper";
 import { shanghaiDateKey, shanghaiDateText, shanghaiDateTimeText } from "../../utils/shanghai-date";
+import { developmentCoordinateKey, developmentPlanPeriodKey } from "../../utils/development-heatmap.js";
 import DevelopmentHeatmap from "../../components/team/DevelopmentHeatmap.vue";
 import { loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../utils/inventory-naming-options.js";
 import IdeaDevelopmentScopeDialog from "../../components/team/IdeaDevelopmentScopeDialog.vue";
@@ -100,6 +101,7 @@ const taskRange = ref("week");
 const taskAnchor = ref(new Date());
 const taskCustomRange = ref([]);
 const taskListVisible = ref(false);
+const taskPlanOrderByCoordinate = ref(new Map());
 const taskPage = ref(1);
 const taskPageSize = ref(20);
 const taskVisible = ref(false);
@@ -209,6 +211,7 @@ const taskRangeDates = computed(() => {
   return [new Date(Date.UTC(anchorYear, 0, 1)), new Date(Date.UTC(anchorYear, 11, 31))];
 });
 const taskRangeLabel = computed(() => `${shortDate(taskRangeDates.value[0])} - ${shortDate(taskRangeDates.value[1])}`);
+const taskPlanningPeriodKey = computed(() => developmentPlanPeriodKey(taskRange.value, taskRangeDates.value.map(shanghaiDateKey)));
 const visibleTasks = computed(() => filteredTasks.value.filter((row) => {
   const point = taskDate(row); if (!point) return taskRange.value === "week";
   const pointDate = shanghaiDateKey(point);
@@ -289,7 +292,31 @@ function taskDate(row) {
 function taskStartDateLabel(row) { return row.start_at || shanghaiDateText(row.created_at, { assumeUtcWhenNaive: true }) || "未设置"; }
 function taskProgress(row) { const target = Number(row.target || 0); if (!target) return row.status === "done" ? 100 : 0; return Math.min(row.development_plan && row.status !== "done" ? 99 : 100, Math.round(Number(row.done || 0) / target * 100)); }
 function taskPriorityScore(row) { return ({ urgent_important: 10, high: 10, urgent_unimportant: 8, important_not_urgent: 7, medium: 7, not_urgent_unimportant: 6, low: 6 })[row?.priority] || 7; }
-function compareTaskPriorityProgress(a, b) { return taskPriorityScore(b) - taskPriorityScore(a) || taskProgress(a) - taskProgress(b); }
+function taskPlanSequence(row) {
+  const plan = row?.development_plan;
+  const models = plan?.models || [];
+  const sequences = [];
+  for (const model of models) {
+    const scope = model.scope || plan.scope || (model.brand === "非汽车" ? "non_automotive" : "automotive");
+    const brand = scope === "non_automotive" ? "非汽车" : model.brand || plan.brand || "";
+    const category = model.category || plan.category || "";
+    const keys = [developmentCoordinateKey(scope, brand, category, model.model_id || model.model), developmentCoordinateKey(scope, brand, category)];
+    for (const key of keys) {
+      const value = taskPlanOrderByCoordinate.value.get(key)?.sequence;
+      if (Number(value) > 0) sequences.push(Number(value));
+    }
+  }
+  return sequences.length ? Math.min(...sequences) : null;
+}
+function compareTaskPriorityProgress(a, b) {
+  const orderA = taskPlanSequence(a); const orderB = taskPlanSequence(b);
+  if (orderA !== null || orderB !== null) {
+    if (orderA === null) return 1;
+    if (orderB === null) return -1;
+    if (orderA !== orderB) return orderA - orderB;
+  }
+  return taskPriorityScore(b) - taskPriorityScore(a) || taskProgress(a) - taskProgress(b);
+}
 function taskOverdue(row) { const due = taskDate({ ...row, status: "done" }); return row.status !== "done" && !["closed", "cancelled"].includes(row.status) && Boolean(due && due.getTime() < taskClock.value); }
 function taskOverdueInfo(row) {
   if (!taskOverdue(row)) return null;
@@ -616,6 +643,14 @@ async function loadTaskCenterData() {
     tasks.value = Array.isArray(taskRows) ? taskRows : [];
   } catch (error) { ElMessage.error(error.message || "任务中心加载失败"); }
   finally { loading.value = false; }
+}
+async function loadTaskPlanOrders() {
+  if (!taskPlanningPeriodKey.value) { taskPlanOrderByCoordinate.value = new Map(); return; }
+  try {
+    const rows = await apiClient.get(`/api/team/development-heatmap-orders?period_key=${encodeURIComponent(taskPlanningPeriodKey.value)}`, { noCache: true });
+    const entries = Array.isArray(rows) ? rows : [];
+    taskPlanOrderByCoordinate.value = new Map(entries.map((row) => [row.coordinate_key, row]));
+  } catch { taskPlanOrderByCoordinate.value = new Map(); }
 }
 async function loadDevelopmentData() {
   if (developmentDataLoaded.value) return;
@@ -955,12 +990,14 @@ onMounted(() => {
 onBeforeUnmount(() => { if (taskClockTimer) clearInterval(taskClockTimer); });
 watch(activeTab, (value) => {
   if (value !== "tasks") loadDevelopmentData();
+  else loadTaskPlanOrders();
   if (value === "analytics" && bindingStatus.value !== "all") { bindingStatus.value = "all"; bindingsLoaded.value = false; }
   if (value === "projects") loadCategories();
   if (value === "analytics") { loadDrafts(); loadBindings(); }
   if (value === "bindings") loadBindings();
 });
 watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, taskType, developmentBrandFilter, developmentCategoryFilter], () => { taskPage.value = 1; }, { deep: true });
+watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
 </script>
 
 <template>
@@ -1037,7 +1074,7 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
         <el-table :data="paginatedTasks" :row-class-name="taskListRowClass" max-height="calc(100vh - 280px)" empty-text="当前筛选下没有任务">
           <el-table-column v-if="taskType==='product_development' || taskType==='all'" type="expand" width="42"><template #default="{row}"><el-table v-if="row.type==='product_development'" :data="taskModelRows(row)" class="task-model-detail-table" size="small" row-key="index" empty-text="暂未配置车型"><el-table-column label="车型" min-width="200"><template #default="{row:model}"><strong>{{ model.label }}</strong><small class="task-model-subtitle">{{ model.category || model.brand || '车型明细' }} · 目标 {{ model.target }} SKU</small></template></el-table-column><el-table-column label="进度" width="140"><template #default="{row:model}"><strong>{{ Math.min(Number(model.done||0),Number(model.target||0)) }} / {{ model.target }} SKU</strong><el-progress :percentage="Math.min(100,Math.round(Number(model.done||0)/Math.max(1,Number(model.target||0))*100))" :show-text="false" :stroke-width="6" /></template></el-table-column><el-table-column label="绑定草稿 / 对照" min-width="250"><template #default="{row:model}"><div v-if="model.drafts?.length" class="task-model-drafts"><el-link v-for="draft in model.drafts" :key="draft.id" type="primary" @click="router.push({path:'/listing-records',query:{draftId:draft.id}})">{{ draft.title }} · {{ draft.count }} SKU</el-link></div><span v-else class="task-model-empty">未绑定草稿</span></template></el-table-column><el-table-column label="操作" min-width="210" align="right"><template #default="{row:model}"><TaskScopeActions mode="model" :done="Number(model.done||0)" :target="Number(model.target||0)" @complete="completeTaskModel(row,model)" @drafts="openTaskModelDraftPicker(row,model)" @edit="editTaskModel(row,model)" @develop="createTaskDraft(row,model)" /></template></el-table-column></el-table></template></el-table-column>
           <el-table-column label="类型" width="64" align="center"><template #default="{row}"><el-tooltip :content="taskTypeMeta(row).label" placement="top"><span class="task-type-icon" :class="taskTypeMeta(row).value"><component :is="taskTypeMeta(row).icon" :size="17" /></span></el-tooltip></template></el-table-column>
-          <el-table-column label="任务名称" min-width="300"><template #default="{row}"><div class="task-name-cell"><strong>{{ taskDisplayName(row) }}</strong><small v-if="row.type==='product_development'">{{ taskModelSummary(row) }}</small></div></template></el-table-column>
+          <el-table-column label="任务名称" min-width="300"><template #default="{row}"><div class="task-name-cell"><strong>{{ taskDisplayName(row) }}</strong><small v-if="row.type==='product_development'">{{ taskModelSummary(row) }}</small><el-tag v-if="taskPlanSequence(row)" size="small" type="danger" effect="light">开发顺序 {{ taskPlanSequence(row) }}</el-tag></div></template></el-table-column>
           <el-table-column label="负责人" width="150"><template #default="{row}"><div class="person-inline task-list-owner"><el-avatar :src="row.owner_avatar_url || personAvatar(row.owner_person_id || row.assignee_person_id)" :size="28">{{ personInitial(row.owner_name || row.assignee_name || '未分配') }}</el-avatar><span>{{ row.owner_name || row.assignee_name || '未分配' }}</span></div></template></el-table-column>
           <el-table-column label="优先级" width="152"><template #default="{row}"><el-tag :type="taskPriorityType(row)" effect="light">{{ taskPriorityLabel(row) }}</el-tag></template></el-table-column>
           <el-table-column label="当前进度" width="128"><template #default="{row}"><div class="task-progress-cell"><strong>{{ taskProgress(row) }}%</strong><el-progress :percentage="taskProgress(row)" :show-text="false" :stroke-width="7" :status="taskTone(row)==='overdue'?'exception':taskTone(row)==='done'?'success':undefined" /><small>{{ Number(row.done || 0) }} / {{ Number(row.target || 0) }} {{ row.unit || 'SKU' }}</small></div></template></el-table-column>

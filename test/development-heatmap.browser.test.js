@@ -7,7 +7,7 @@ import path from 'node:path';
 import vue from '@vitejs/plugin-vue';
 import { chromium } from 'playwright-core';
 
-test('development heatmap supports metrics, brand aggregation, time, non-car and task details', {skip:process.env.RUN_TASK_BROWSER_TESTS!=='1'}, async()=>{
+test('development heatmap supports period-aware planning, saved ordering, metrics, brand aggregation and task details', {skip:process.env.RUN_TASK_BROWSER_TESTS!=='1'}, async()=>{
  const entry=`import {createApp,h} from 'vue';import ElementPlus from 'element-plus';import 'element-plus/dist/index.css';import Heatmap from '/frontend/admin/components/team/DevelopmentHeatmap.vue';createApp({render:()=>h(Heatmap,{onOpenTask:row=>window.openedTask=row.id})}).use(ElementPlus).mount('#app');`;
  const output = await fs.mkdtemp(path.join(os.tmpdir(), 'heatmap-browser-'));
  await build({ configFile:false, root:process.cwd(), logLevel:'error', plugins:[vue(), {
@@ -30,18 +30,22 @@ test('development heatmap supports metrics, brand aggregation, time, non-car and
   const brands=['TENET','HAVAL','CHERY','GEELY','LADA','CHANGAN','VOLGA','JELAND'];
   const categories=['汽车钥匙保护壳','门槛条','脚垫','方向盘套','后备箱垫','遮阳帘','气嘴帽','座椅保护套'];
   for(let b=0;b<brands.length;b++)for(let c=0;c<categories.length;c++){
-   const id=b*10+c+1;tasks.push({id,type:'product_development',title:`${brands[b]} ${categories[c]}开发`,owner_name:'测试负责人',created_at:today,due_at:'2026-12-31',development_plan:{brand:brands[b],category:categories[c],models:[{model_id:b+1,model:['T7','JOLION','TIGGO 7','MONJARO','VESTA','CS55','K50','J6'][b],target:30,drafts:[{id,count:Math.max(0,40-b*4-c*3),created_at:today}]}]}});
+   const id=b*10+c+1;tasks.push({id,type:'product_development',title:`${brands[b]} ${categories[c]}开发`,owner_name:'测试负责人',created_at:today,due_at:'2026-10-31',priority:b===0&&c===0?'urgent_important':'medium',development_plan:{brand:brands[b],category:categories[c],models:[{model_id:b+1,model:['T7','JOLION','TIGGO 7','MONJARO','VESTA','CS55','K50','J6'][b],target:30,drafts:[{id,count:Math.max(0,40-b*4-c*3),created_at:today}]}]}});
   }
   tasks.push({id:200,type:'product_development',title:'收纳袋开发',created_at:today,development_plan:{brand:'非汽车',scope:'non_automotive',category:'收纳袋',models:[{model_id:0,model:'非汽车',target:20,drafts:[{id:200,count:9,created_at:today}]}]}});
+  let savedPlans=[];
+  await page.route('**/api/team/development-heatmap-orders**',async route=>{if(route.request().method()==='PUT'){const body=route.request().postDataJSON();savedPlans=[...savedPlans,...body.entries];return route.fulfill({contentType:'application/json',body:JSON.stringify({ok:true,saved:body.entries.length})});}return route.fulfill({contentType:'application/json',body:JSON.stringify(savedPlans)});});
   await page.route('**/api/team/tasks',route=>route.fulfill({status:fail?500:200,contentType:'application/json',body:JSON.stringify(fail?{error:'测试加载失败'}:tasks)}));
   await page.goto('http://localhost:8788/admin.html');
-  const cell=page.getByRole('button',{name:'TENET · T7 · 汽车钥匙保护壳：40 个 SKU',exact:true});await cell.waitFor();
+  const cell=page.getByRole('button',{name:'TENET · T7 · 汽车钥匙保护壳：1 个任务',exact:true});await cell.waitFor();
+  await page.getByRole('button',{name:'人工排程'}).click();await cell.click();await page.getByRole('button',{name:'按选择顺序编号'}).click();await page.getByRole('button',{name:'保存排程'}).click();await page.locator('.cell-sequence').filter({hasText:'1'}).waitFor();assert.equal(savedPlans[0].sequence,1);
+  await page.getByRole('button',{name:'退出排程'}).click();
   await page.screenshot({path:'/tmp/development-heatmap.png',fullPage:true});
-  await cell.click();await page.getByRole('dialog').getByRole('button',{name:'查看任务'}).click();assert.equal(await page.evaluate(()=>window.openedTask),1);
-  await page.getByText('按品牌',{exact:true}).click();await page.getByRole('button',{name:'TENET · 汽车钥匙保护壳：40 个 SKU',exact:true}).waitFor();
+  const updatedCell=page.getByRole('button',{name:'TENET · T7 · 汽车钥匙保护壳：1 个任务',exact:true});await updatedCell.click();await page.getByRole('dialog').getByRole('button',{name:'查看任务'}).click();assert.equal(await page.evaluate(()=>window.openedTask),1);
+  await page.getByText('按品牌',{exact:true}).click();await page.getByRole('button',{name:'TENET · 汽车钥匙保护壳：1 个任务',exact:true}).waitFor();
   await page.locator('.el-select').filter({has:page.getByRole('combobox',{name:'开发范围',exact:true})}).click();await page.getByRole('option',{name:'非汽车',exact:true}).click();
   assert.equal(await page.locator('.heatmap-scroll tbody tr').count(),1);
-  await page.getByRole('button',{name:'非汽车 · 收纳袋：9 个 SKU',exact:true}).waitFor();
+  await page.getByRole('button',{name:'非汽车 · 收纳袋：1 个任务',exact:true}).waitFor();
   await page.locator('.el-select').filter({has:page.getByRole('combobox',{name:'统计数量'})}).click();await page.getByRole('option',{name:'计划开发 SKU',exact:true}).click();
   await page.getByRole('button',{name:'非汽车 · 收纳袋：20 个 SKU',exact:true}).waitFor();
   await page.getByText('自定义',{exact:true}).click();
