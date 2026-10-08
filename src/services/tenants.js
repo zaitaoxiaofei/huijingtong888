@@ -2,6 +2,12 @@ import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 
 const DEFAULT_TENANT_SLUG = "default";
 let schemaReady;
+const SUBSCRIPTION_PLANS = Object.freeze({
+  trial_1d: { code: "trial_1d", label: "1 天体验", days: 1, status: "trial" },
+  trial_7d: { code: "trial_7d", label: "7 天体验", days: 7, status: "trial" },
+  monthly: { code: "monthly", label: "月租", days: 30, status: "active" },
+  yearly: { code: "yearly", label: "年租", days: 365, status: "active" }
+});
 
 function text(value, max = 255) {
   return String(value || "").trim().slice(0, max);
@@ -29,13 +35,21 @@ export async function ensureTenantSchemaMysql() {
       KEY idx_tenant_members_person (person_id, active),
       KEY idx_tenant_members_tenant (tenant_id, active)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+    for (const sql of [
+      "ALTER TABLE tenants ADD COLUMN plan_code VARCHAR(32) NOT NULL DEFAULT 'trial_7d'",
+      "ALTER TABLE tenants ADD COLUMN subscription_status VARCHAR(32) NOT NULL DEFAULT 'trial'",
+      "ALTER TABLE tenants ADD COLUMN subscription_expires_at DATETIME NULL",
+      "ALTER TABLE tenants ADD COLUMN feature_flags_json JSON NULL"
+    ]) await mysqlExecute(sql).catch(error => {
+      if (error?.code !== "ER_DUP_FIELDNAME") throw error;
+    });
     await mysqlExecute("ALTER TABLE sessions ADD COLUMN active_tenant_id BIGINT UNSIGNED NULL").catch(error => {
       if (error?.code !== "ER_DUP_FIELDNAME") throw error;
     });
     await mysqlExecute("CREATE INDEX idx_sessions_active_tenant ON sessions (active_tenant_id)").catch(error => {
       if (error?.code !== "ER_DUP_KEYNAME") throw error;
     });
-    await mysqlExecute("INSERT IGNORE INTO tenants (slug, name) VALUES (?, ?)", [DEFAULT_TENANT_SLUG, "默认企业"]);
+    await mysqlExecute("INSERT IGNORE INTO tenants (slug, name, plan_code, subscription_status) VALUES (?, ?, 'yearly', 'active')", [DEFAULT_TENANT_SLUG, "默认企业"]);
     await mysqlExecute(`INSERT IGNORE INTO tenant_members (tenant_id, person_id, role)
       SELECT t.id, p.id, 'owner' FROM tenants t CROSS JOIN people p
       WHERE t.slug = ? AND p.active = 1`, [DEFAULT_TENANT_SLUG]);
@@ -48,12 +62,25 @@ export async function ensureTenantSchemaMysql() {
   await schemaReady;
 }
 
+function subscriptionState(tenant = {}) {
+  const status = text(tenant.subscription_status, 32) || "trial";
+  const expiresAt = tenant.subscription_expires_at ? new Date(tenant.subscription_expires_at) : null;
+  const expired = ["trial", "active"].includes(status) && expiresAt && expiresAt.getTime() <= Date.now();
+  const accessAllowed = tenant.status === "active" && !expired && ["trial", "active"].includes(status);
+  return { ...tenant, subscription_status: expired ? "expired" : status, access_allowed: accessAllowed };
+}
+
+export function tenantHasAccess(tenant = {}) {
+  return subscriptionState(tenant).access_allowed;
+}
+
 export async function tenantMembershipsMysql(personId) {
   await ensureTenantSchemaMysql();
-  return mysqlQuery(`SELECT t.id, t.slug, t.name, tm.role, tm.active
+  const rows = await mysqlQuery(`SELECT t.id, t.slug, t.name, t.status, t.plan_code, t.subscription_status, t.subscription_expires_at, tm.role, tm.active
     FROM tenant_members tm JOIN tenants t ON t.id = tm.tenant_id
     WHERE tm.person_id = ? AND tm.active = 1 AND t.status = 'active'
     ORDER BY t.id`, [Number(personId)]);
+  return rows.map(subscriptionState);
 }
 
 export async function resolveActiveTenantMysql(personId, requestedTenantId = null) {
@@ -65,9 +92,10 @@ export async function resolveActiveTenantMysql(personId, requestedTenantId = nul
 
 export async function listTenantsMysql() {
   await ensureTenantSchemaMysql();
-  return mysqlQuery(`SELECT t.*, COUNT(tm.person_id) AS member_count
+  const rows = await mysqlQuery(`SELECT t.*, COUNT(tm.person_id) AS member_count
     FROM tenants t LEFT JOIN tenant_members tm ON tm.tenant_id = t.id AND tm.active = 1
     GROUP BY t.id ORDER BY t.status = 'active' DESC, t.id`);
+  return rows.map(subscriptionState);
 }
 
 export async function createTenantMysql(body = {}) {
@@ -76,11 +104,31 @@ export async function createTenantMysql(body = {}) {
   const slug = text(body.slug, 80).toLowerCase();
   if (!name) throw new Error("企业名称不能为空");
   if (!/^[a-z0-9][a-z0-9-]{0,79}$/.test(slug)) throw new Error("企业标识只能使用小写字母、数字和连字符");
-  const result = await mysqlExecute("INSERT INTO tenants (slug, name, status) VALUES (?, ?, 'active')", [slug, name]);
+  const result = await mysqlExecute(`INSERT INTO tenants (slug, name, status, plan_code, subscription_status, subscription_expires_at)
+    VALUES (?, ?, 'active', 'trial_7d', 'trial', DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 7 DAY))`, [slug, name]);
   const ownerPersonId = Number(body.owner_person_id || body.ownerPersonId || 0);
   if (ownerPersonId) await mysqlExecute("INSERT INTO tenant_members (tenant_id, person_id, role) VALUES (?, ?, 'owner')", [result.insertId, ownerPersonId]);
   return { ok: true, id: Number(result.insertId) };
 }
+
+export async function setTenantSubscriptionMysql(tenantId, body = {}) {
+  await ensureTenantSchemaMysql();
+  const plan = SUBSCRIPTION_PLANS[text(body.plan_code || body.planCode, 32)];
+  const normalizedTenantId = Number(tenantId);
+  if (!normalizedTenantId) throw new Error("请选择企业");
+  if (!plan && text(body.subscription_status || body.subscriptionStatus) !== "suspended") throw new Error("不支持的套餐");
+  const tenantRows = await mysqlQuery("SELECT id FROM tenants WHERE id = ?", [normalizedTenantId]);
+  if (!tenantRows[0]) throw new Error("企业不存在");
+  if (!plan) {
+    await mysqlExecute("UPDATE tenants SET subscription_status = 'suspended', subscription_expires_at = NULL WHERE id = ?", [normalizedTenantId]);
+    return { ok: true, subscription_status: "suspended" };
+  }
+  const expiresAt = new Date(Date.now() + plan.days * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
+  await mysqlExecute("UPDATE tenants SET plan_code = ?, subscription_status = ?, subscription_expires_at = ? WHERE id = ?", [plan.code, plan.status, expiresAt, normalizedTenantId]);
+  return { ok: true, plan_code: plan.code, subscription_status: plan.status, subscription_expires_at: expiresAt };
+}
+
+export { SUBSCRIPTION_PLANS };
 
 export async function tenantMembersMysql(tenantId) {
   await ensureTenantSchemaMysql();

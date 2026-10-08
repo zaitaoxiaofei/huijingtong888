@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS shops (
   watermark_scale_percent DECIMAL(8,4) NOT NULL DEFAULT 22.0000,
   watermark_opacity_percent DECIMAL(8,4) NOT NULL DEFAULT 82.0000,
   status VARCHAR(32) NOT NULL DEFAULT 'active',
+  plan_code VARCHAR(32) NOT NULL DEFAULT 'trial_7d',
+  subscription_status VARCHAR(32) NOT NULL DEFAULT 'trial',
+  subscription_expires_at DATETIME NULL,
+  feature_flags_json JSON NULL,
   payout_rate DECIMAL(8,4) NOT NULL DEFAULT 0.3300,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_shops_user_id (user_id)

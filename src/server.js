@@ -83,7 +83,7 @@ import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
 import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
-import { createTenantMysql, listTenantsMysql, tenantMembersMysql, tenantMembershipsMysql, upsertTenantMemberMysql } from "./services/tenants.js";
+import { createTenantMysql, listTenantsMysql, setTenantSubscriptionMysql, tenantMembersMysql, tenantMembershipsMysql, upsertTenantMemberMysql } from "./services/tenants.js";
 
 const services = { ...mysqlRuntimeServices, ...systemNotificationServices };
 const runtimeReadiness = {
@@ -242,6 +242,10 @@ const routes = {
   "PUT /api/tenants/members": async (req) => {
     const body = await readJson(req);
     return upsertTenantMemberMysql(body.tenant_id || body.tenantId, body);
+  },
+  "POST /api/tenants/subscription": async (req) => {
+    const body = await readJson(req);
+    return setTenantSubscriptionMysql(body.tenant_id || body.tenantId, body);
   },
   "POST /api/system/update-status": async (req) => updateGlobalUpdateStatus(await readJson(req)),
   "GET /api/ai-provider/config": () => services.aiProviderConfig(),
@@ -2064,6 +2068,9 @@ const server = http.createServer(async (req, res) => {
       if (!authorization.allowed) {
         console.warn(`[forbidden] ${req.method} ${url.pathname} reason=authorization detail=${authorization.error || "权限不足"}`);
         return json(res, { error: authorization.error || "权限不足" }, authorization.status || 403);
+      }
+      if (!hasPermission(session, "admin") && parts[1] !== "auth" && !session.tenant?.access_allowed) {
+        return json(res, { error: "企业套餐已到期或已停用，请联系平台管理员开通或续费", code: "TENANT_SUBSCRIPTION_REQUIRED" }, 402);
       }
     }
 

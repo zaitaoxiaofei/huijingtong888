@@ -18,3 +18,14 @@ test("tenant foundation binds the active tenant to the server session", () => {
   assert.match(tenantService, /UPDATE sessions SET active_tenant_id = \? WHERE token = \? AND person_id = \?/);
   assert.match(tenantService, /企业不存在或已停用/);
 });
+
+test("tenant subscriptions support trials, paid plans, and suspended access", () => {
+  const tenantService = readFileSync(new URL("../src/services/tenants.js", import.meta.url), "utf8");
+  const serverSource = readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
+  assert.match(tenantService, /trial_1d/);
+  assert.match(tenantService, /trial_7d/);
+  assert.match(tenantService, /monthly/);
+  assert.match(tenantService, /yearly/);
+  assert.match(tenantService, /subscription_status = 'suspended'/);
+  assert.match(serverSource, /TENANT_SUBSCRIPTION_REQUIRED/);
+});
