@@ -10,6 +10,8 @@ import { useAppStore } from "../stores/app";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { openAiEcommerceSuiteWindow, openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../utils/ai-variant-lab-window";
 import { uploadListingMedia } from "../api/tools/imageCropper";
+import { apiClient } from "../utils/api";
+import { shanghaiDateTimeText } from "../utils/shanghai-date";
 
 const route = useRoute();
 const router = useRouter();
@@ -26,6 +28,12 @@ const profileSaving = ref(false);
 const profileAvatarUploading = ref(false);
 const profileForm = ref({ name: "", avatar_url: "", old_password: "", new_password: "", confirm_password: "" });
 let mobileViewportQuery = null;
+let notificationRefreshTimer = 0;
+const notificationDrawerVisible = ref(false);
+const notificationLoading = ref(false);
+const notifications = ref([]);
+const notificationUnread = ref(0);
+const notificationStatus = ref("all");
 
 const activeMenu = computed(() => route.path);
 const visibleNavigationMenus = computed(() => navigationMenusForRole(authStore.user));
@@ -165,6 +173,49 @@ async function handleLogout() {
   await authStore.logout();
   ElMessage.success("Logged out");
   router.push("/login");
+}
+
+async function loadNotifications({ quiet = false } = {}) {
+  if (!authStore.user) return;
+  if (!quiet) notificationLoading.value = true;
+  try {
+    const result = await apiClient.get(`/api/system-notifications?status=${notificationStatus.value}&pageSize=50`, {
+      routeScoped: false,
+      noCache: true
+    });
+    notifications.value = result?.rows || [];
+    notificationUnread.value = Number(result?.unread || 0);
+  } catch (error) {
+    if (!quiet) ElMessage.error(error?.message || "通知加载失败");
+  } finally {
+    notificationLoading.value = false;
+  }
+}
+
+async function openNotificationDrawer() {
+  notificationDrawerVisible.value = true;
+  await loadNotifications();
+}
+
+async function markAllNotificationsRead() {
+  await apiClient.post("/api/system-notifications/read-all", {});
+  await loadNotifications();
+}
+
+async function openNotification(item) {
+  if (item.status === "unread") await apiClient.post(`/api/system-notifications/${item.id}/read`, {});
+  notificationDrawerVisible.value = false;
+  if (item.route) router.push(item.route).catch(() => {});
+  await loadNotifications({ quiet: true });
+}
+
+async function resolveNotification(item) {
+  await apiClient.post(`/api/system-notifications/${item.id}/resolve`, {});
+  await loadNotifications();
+}
+
+function notificationTypeLabel(type) {
+  return ({ daily_procurement: "采购", pending_inbound: "入库", fbp_shortage: "库存" })[type] || "系统";
 }
 
 function openProfileDialog() {
@@ -581,6 +632,8 @@ onMounted(() => {
   window.addEventListener("blur", handleWindowBlur);
   window.addEventListener("app:plugin-update", handlePluginUpdate);
   window.addEventListener("app:plugin-update-clear", clearPluginUpdate);
+  loadNotifications({ quiet: true });
+  notificationRefreshTimer = window.setInterval(() => loadNotifications({ quiet: true }), 60000);
 });
 
 onBeforeUnmount(() => {
@@ -589,6 +642,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("blur", handleWindowBlur);
   window.removeEventListener("app:plugin-update", handlePluginUpdate);
   window.removeEventListener("app:plugin-update-clear", clearPluginUpdate);
+  window.clearInterval(notificationRefreshTimer);
   window.clearTimeout(routeSwitchTimer);
 });
 </script>
@@ -692,8 +746,8 @@ onBeforeUnmount(() => {
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <el-badge :value="activePluginUpdate ? 1 : 0" class="erp-header-badge" :hidden="!activePluginUpdate">
-            <el-button circle @click="activePluginUpdate && openPluginDownload()">
+          <el-badge :value="notificationUnread" :max="99" class="erp-header-badge" :hidden="!notificationUnread">
+            <el-button circle title="消息通知" @click="openNotificationDrawer">
               <el-icon><Bell /></el-icon>
             </el-button>
           </el-badge>
@@ -820,6 +874,39 @@ onBeforeUnmount(() => {
     <template #footer><div class="erp-profile-footer"><span>修改后将立即同步到系统人员信息</span><div><el-button @click="profileDialogVisible = false">取消</el-button><el-button type="primary" :loading="profileSaving" @click="saveProfile">保存修改</el-button></div></div></template>
   </el-dialog>
 
+  <el-drawer v-model="notificationDrawerVisible" title="消息通知" size="420px" class="erp-notification-drawer">
+    <div class="notification-toolbar">
+      <el-radio-group v-model="notificationStatus" size="small" @change="loadNotifications()">
+        <el-radio-button value="all">全部</el-radio-button>
+        <el-radio-button value="unread">未读</el-radio-button>
+        <el-radio-button value="resolved">已处理</el-radio-button>
+      </el-radio-group>
+      <el-button v-if="notificationUnread" link type="primary" @click="markAllNotificationsRead">全部已读</el-button>
+    </div>
+    <div v-loading="notificationLoading" class="notification-list">
+      <el-empty v-if="!notificationLoading && !notifications.length" description="暂无通知" />
+      <article
+        v-for="item in notifications"
+        :key="item.id"
+        class="notification-card"
+        :class="{ 'is-unread': item.status === 'unread' }"
+      >
+        <button type="button" class="notification-card-main" @click="openNotification(item)">
+          <span class="notification-card-heading">
+            <el-tag size="small" :type="item.severity === 'danger' ? 'danger' : item.severity === 'warning' ? 'warning' : 'info'">
+              {{ notificationTypeLabel(item.notification_type) }}
+            </el-tag>
+            <strong>{{ item.title }}</strong>
+            <i v-if="item.status === 'unread'"></i>
+          </span>
+          <span class="notification-card-content">{{ item.content }}</span>
+          <time>{{ shanghaiDateTimeText(item.created_at, { assumeUtcWhenNaive: true }) }}</time>
+        </button>
+        <el-button v-if="item.status !== 'resolved'" link type="primary" @click="resolveNotification(item)">标记处理</el-button>
+      </article>
+    </div>
+  </el-drawer>
+
   <teleport to="body">
     <div
       v-if="contextMenu.visible"
@@ -889,3 +976,16 @@ onBeforeUnmount(() => {
     </div>
   </teleport>
 </template>
+
+<style scoped>
+.notification-toolbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
+.notification-list { min-height:240px; display:flex; flex-direction:column; gap:10px; }
+.notification-card { display:flex; align-items:flex-end; gap:8px; padding:14px; border:1px solid var(--el-border-color-lighter); border-radius:10px; background:var(--el-fill-color-blank); }
+.notification-card.is-unread { border-color:var(--el-color-primary-light-7); background:var(--el-color-primary-light-9); }
+.notification-card-main { flex:1; min-width:0; padding:0; border:0; background:transparent; color:inherit; text-align:left; cursor:pointer; }
+.notification-card-heading { display:flex; align-items:center; gap:8px; }
+.notification-card-heading strong { flex:1; font-size:14px; }
+.notification-card-heading i { width:7px; height:7px; border-radius:50%; background:var(--el-color-primary); }
+.notification-card-content { display:block; margin:8px 0; color:var(--el-text-color-regular); line-height:1.55; }
+.notification-card time { color:var(--el-text-color-secondary); font-size:12px; }
+</style>

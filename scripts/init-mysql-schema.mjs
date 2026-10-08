@@ -63,6 +63,26 @@ CREATE TABLE IF NOT EXISTS people (
   UNIQUE KEY uk_people_username (username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE IF NOT EXISTS system_notifications (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  recipient_person_id BIGINT UNSIGNED NOT NULL,
+  notification_type VARCHAR(64) NOT NULL DEFAULT 'system',
+  title VARCHAR(255) NOT NULL,
+  content TEXT NULL,
+  severity VARCHAR(20) NOT NULL DEFAULT 'info',
+  route VARCHAR(500) NOT NULL DEFAULT '',
+  entity_type VARCHAR(64) NOT NULL DEFAULT '',
+  entity_id VARCHAR(128) NULL,
+  dedupe_key VARCHAR(255) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'unread',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  read_at DATETIME NULL,
+  resolved_at DATETIME NULL,
+  UNIQUE KEY uk_system_notifications_dedupe (dedupe_key),
+  KEY idx_system_notifications_recipient_status (recipient_person_id, status, created_at),
+  KEY idx_system_notifications_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS finance_companies (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(255) NOT NULL,

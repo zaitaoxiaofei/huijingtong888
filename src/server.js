@@ -44,6 +44,7 @@ import { createAiVariantLabRoutes, handleAiVariantLabRestRoute } from "./server/
 import { getAiTaskFile } from "./server/services/ai/aiWorkflowService.js";
 import { createImageCropperRoutes, handleImageCropperRestRoute } from "./server/routes/tools/imageCropper.js";
 import { createOnboardingKnowledgeRoutes, handleOnboardingKnowledgeRestRoute } from "./server/routes/onboardingKnowledge.js";
+import { createSystemNotificationRoutes, handleSystemNotificationRestRoute } from "./server/routes/systemNotifications.js";
 import {
   cleanupScheduledJobHistory,
   ScheduledJobScheduler,
@@ -76,13 +77,14 @@ import {
   siteAccessUsesSecureCookie
 } from "./server/access.js";
 import { systemInfo } from "./server/maintenance.js";
-import { checkDailyPurchaseNotification, globalUpdateStatus, subscribeGlobalUpdateEvents, updateGlobalUpdateStatus } from "./server/notifications.js";
+import { globalUpdateStatus, subscribeGlobalUpdateEvents, updateGlobalUpdateStatus } from "./server/notifications.js";
+import * as systemNotificationServices from "./services/system-notifications.js";
 import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
 import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
 
-const services = mysqlRuntimeServices;
+const services = { ...mysqlRuntimeServices, ...systemNotificationServices };
 const runtimeReadiness = {
   ready: false,
   startedAt: new Date().toISOString(),
@@ -203,7 +205,8 @@ const routeModules = {
   ...createAiImageRoutes({ readJson }),
   ...createAiVariantLabRoutes({ services, readJson }),
   ...createImageCropperRoutes({ readJson }),
-  ...createOnboardingKnowledgeRoutes({ readJson })
+  ...createOnboardingKnowledgeRoutes({ readJson }),
+  ...createSystemNotificationRoutes({ services })
 };
 
 // 保持现有 API 不变，但把“简单直连型接口”集中成一个表；
@@ -526,6 +529,16 @@ const OZON_ACTION_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
 const scheduledJobDefinitions = [
   {
+    key: "operational_notifications",
+    name: "业务通知生成",
+    category: "operations",
+    priority: "high",
+    intervalMinutes: 15,
+    initialDelaySeconds: 90,
+    catchupEnabled: true,
+    maxCatchupRuns: 1
+  },
+  {
     key: "order_status_sync",
     name: "Ozon 订单增量同步",
     category: "orders",
@@ -828,6 +841,7 @@ const scheduledJobDefinitions = [
 ];
 
 const scheduledJobHandlers = {
+  operational_notifications: withForegroundApiDeferral("operational_notifications", () => services.generateOperationalNotifications()),
   order_status_sync: withForegroundApiDeferral("order_status_sync", runBackgroundOrderStatusSync),
   customer_message_dispatch: withForegroundApiDeferral("customer_message_dispatch", runBackgroundCustomerMessageDispatch),
   cancelled_order_sync: withForegroundApiDeferral("cancelled_order_sync", runBackgroundCancelledOrderSync),
@@ -940,6 +954,8 @@ async function handleSiteAccess(req, res, url) {
 }
 
 async function handleRestRoute(req, res, url, parts) {
+  const systemNotificationHandled = await handleSystemNotificationRestRoute({ req, res, parts, services, json });
+  if (systemNotificationHandled !== false) return systemNotificationHandled;
   const onboardingHandled = await handleOnboardingKnowledgeRestRoute({ req, res, parts, json, notFound });
   if (onboardingHandled !== false) return onboardingHandled;
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "ai-provider" && parts[2] === "stream") {
@@ -2088,7 +2104,6 @@ server.listen(config.port, config.host || undefined, () => {
   const bindHost = config.host || "0.0.0.0";
   console.log(`ozon ERP running at ${config.appBaseUrl} (bind ${bindHost}:${config.port})`);
   const deploymentCandidate = process.env.DEPLOYMENT_CANDIDATE === "1";
-  if (!deploymentCandidate) setInterval(() => checkDailyPurchaseNotification(services.all), 60000);
   void (async () => {
     if (config.scheduledJobsEnabled) {
       registerScheduledJobs(scheduledJobDefinitions)
