@@ -121,7 +121,11 @@ const bindProductOptions = ref([]);
 const taskSkuConfigVisible = ref(false);
 const taskSkuConfigTask = ref(null);
 const taskSkuConfigGroups = ref([]);
+const taskSkuConfigModelIndex = ref(null);
 const taskSkuConfigSaving = ref(false);
+const taskModelEditorVisible = ref(false);
+const taskModelEditor = reactive({ task: null, index: null, label: "", target: 1 });
+const expandedTaskIds = ref(new Set());
 const metaForm = reactive({ project_id: null, status: "idea", priority: "medium", planned_listing_at: "", note: "", decision_note: "" });
 
 const filteredProducts = computed(() => products.value.filter((row) => {
@@ -261,9 +265,15 @@ function taskPriorityLabel(row) { return ({ urgent_important: "紧急重要 · 1
 function taskPriorityType(row) { return ({ urgent_important: "danger", urgent_unimportant: "warning", important_not_urgent: "primary", not_urgent_unimportant: "info", high: "danger", medium: "primary", low: "info" })[row?.priority] || "primary"; }
 function taskDisplayName(row) {
   if (row?.type !== "product_development") return row?.title || row?.name || "未命名任务";
-  const labels = developmentModels(row).map((model) => [model.brand || row.development_brand, model.model, model.category || row.development_category].filter(Boolean).join(" · "));
-  return [...new Set(labels.filter(Boolean))].join("、") || [row.development_brand, row.development_category].filter(Boolean).join(" · ") || row.title || "未配置品牌与类目";
+  const categories = [...new Set(developmentModels(row).map((model) => model.category || row.development_category).filter(Boolean))];
+  if (categories.length === 1) return `${categories[0]}开发任务`;
+  if (categories.length > 1) return `${categories.slice(0, 2).join("、")}等 ${categories.length} 个核心品名开发任务`;
+  return row.development_category ? `${row.development_category}开发任务` : row.title || "未配置核心品名";
 }
+function taskModelRows(row) { return developmentModels(row).map((model, index) => ({ ...model, index, label: [model.brand || row.development_brand, model.model || "未命名车型"].filter(Boolean).join(" · ") })); }
+function taskModelSummary(row) { const models = taskModelRows(row); return `${models.length} 个车型 · 共 ${Number(row.target || 0)} 个 SKU`; }
+function taskExpanded(row) { return expandedTaskIds.value.has(Number(row.id)); }
+function toggleTaskModels(row) { const next = new Set(expandedTaskIds.value); const id = Number(row.id); next.has(id) ? next.delete(id) : next.add(id); expandedTaskIds.value = next; }
 function taskCompletedText(row) { return row?.status === "done" && row?.updated_at ? shanghaiDateTimeText(row.updated_at) : "—"; }
 function taskRelated(row) { try { return JSON.parse(row?.related || "{}"); } catch { return {}; } }
 function isDailyOperationalTask(row) { return ["procurement_daily", "shipping_daily"].includes(row?.type); }
@@ -304,7 +314,7 @@ function legacyNonAutomotivePlan(row) {
     models: [{ brand: "非汽车", category, scope: "non_automotive", model_id: 0, model: "非汽车", target: Math.max(1, Number(row.target || 0)), draft_ids: [] }]
   };
 }
-function openTaskSkuConfig(row) {
+function openTaskSkuConfig(row, modelIndex = null) {
   if (row.type !== "product_development") return;
   if (!row.development_plan) {
     const plan = legacyNonAutomotivePlan(row);
@@ -315,6 +325,7 @@ function openTaskSkuConfig(row) {
     row = { ...row, development_plan: plan };
   }
   taskSkuConfigTask.value = row;
+  taskSkuConfigModelIndex.value = modelIndex;
   const groupMap = new Map();
   const overrides = new Map((row.development_plan.manual_groups || []).map((group) => [JSON.stringify([group.brand, group.category]), group]));
   developmentModels(row).forEach((model, index) => {
@@ -326,6 +337,7 @@ function openTaskSkuConfig(row) {
       groupMap.set(key, { key, brand, category, target: 0, mode: override?.mode === "completed" ? "completed" : override ? "group" : "detail", value: (override?.manual_skus || []).join("\n"), expanded: !override, models: [] });
     }
     const group = groupMap.get(key);
+    if (modelIndex === index) { group.mode = "detail"; group.expanded = true; }
     group.target += Number(model.target || 0);
     group.models.push({ index, label: model.model || "未命名型号", target: Number(model.target || 0), value: Array.isArray(model.manual_skus) ? model.manual_skus.join("\n") : "" });
   });
@@ -337,14 +349,16 @@ async function saveTaskSkuConfig() {
   const task = taskSkuConfigTask.value;
   const plan = task?.development_plan;
   if (!task?.id || !plan) return;
+  const focusedModelIndex = taskSkuConfigModelIndex.value;
   const groupsByModel = new Map(taskSkuConfigGroups.value.flatMap((group) => group.models.map((model) => [model.index, group])));
   const detailByModel = new Map(taskSkuConfigGroups.value.flatMap((group) => group.models.map((model) => [model.index, model])));
   const models = plan.models.map((model, index) => {
     const group = groupsByModel.get(index);
+    if (focusedModelIndex !== null && index !== focusedModelIndex) return model;
     const { manual_skus: _manualSkus, ...rest } = model;
     return group?.mode === "detail" ? { ...rest, manual_skus: manualSkuValues(detailByModel.get(index)?.value) } : rest;
   });
-  const manualGroups = taskSkuConfigGroups.value.filter((group) => group.mode !== "detail").map((group) => ({ brand: group.brand, category: group.category, mode: group.mode === "completed" ? "completed" : "skus", ...(group.mode === "group" ? { manual_skus: manualSkuValues(group.value) } : {}) }));
+  const manualGroups = focusedModelIndex !== null ? (plan.manual_groups || []) : taskSkuConfigGroups.value.filter((group) => group.mode !== "detail").map((group) => ({ brand: group.brand, category: group.category, mode: group.mode === "completed" ? "completed" : "skus", ...(group.mode === "group" ? { manual_skus: manualSkuValues(group.value) } : {}) }));
   taskSkuConfigSaving.value = true;
   try {
     await apiClient.put(`/api/team/tasks/${task.id}`, {
@@ -361,6 +375,29 @@ async function saveTaskSkuConfig() {
     ElMessage.success("任务进度已记录");
     await loadTaskCenterData();
   } catch (error) { ElMessage.error(error.message || "保存 SKU 配置失败"); }
+  finally { taskSkuConfigSaving.value = false; }
+}
+function editTaskModel(row, model) {
+  taskModelEditor.task = row;
+  taskModelEditor.index = model.index;
+  taskModelEditor.label = model.label;
+  taskModelEditor.target = Number(model.target || 1);
+  taskModelEditorVisible.value = true;
+}
+async function saveTaskModel() {
+  const task = taskModelEditor.task;
+  const plan = task?.development_plan;
+  if (!task?.id || !plan) return;
+  const target = Number(taskModelEditor.target || 0);
+  if (!Number.isInteger(target) || target < 1) return ElMessage.warning("车型目标 SKU 数必须至少为 1");
+  taskSkuConfigSaving.value = true;
+  try {
+    const models = plan.models.map((model, index) => index === taskModelEditor.index ? { ...model, target } : model);
+    await apiClient.put(`/api/team/tasks/${task.id}`, { title: task.title, type: task.type, owner_person_id: task.owner_person_id, period: task.period, priority: task.priority, start_at: task.start_at, due_at: task.due_at, related: { ...plan, models } });
+    taskModelEditorVisible.value = false;
+    ElMessage.success("车型目标已更新，不影响其他车型");
+    await loadTaskCenterData();
+  } catch (error) { ElMessage.error(error.message || "保存车型目标失败"); }
   finally { taskSkuConfigSaving.value = false; }
 }
 function setCustomProgress(percent) { taskForm.target = 4; taskForm.done = ({ 0: 0, 25: 1, 50: 2, 100: 4 })[percent]; taskForm.status = percent === 100 ? "done" : percent ? "doing" : "todo"; }
@@ -812,7 +849,7 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
       <el-dialog v-model="taskListVisible" :title="`${taskPeopleTitle}清单`" width="min(1440px, 94vw)" top="4vh" class="task-list-dialog" destroy-on-close>
         <el-table :data="paginatedTasks" max-height="calc(100vh - 280px)" empty-text="当前筛选下没有任务">
           <el-table-column label="类型" width="64" align="center"><template #default="{row}"><el-tooltip :content="taskTypeMeta(row).label" placement="top"><span class="task-type-icon" :class="taskTypeMeta(row).value"><component :is="taskTypeMeta(row).icon" :size="17" /></span></el-tooltip></template></el-table-column>
-          <el-table-column label="任务名称" min-width="320"><template #default="{row}"><el-tooltip :content="taskDisplayName(row)" placement="top" :show-after="400"><div class="task-name-cell"><strong>{{ taskDisplayName(row) }}</strong></div></el-tooltip></template></el-table-column>
+          <el-table-column label="任务名称" min-width="360"><template #default="{row}"><div class="task-name-cell"><button v-if="row.type==='product_development'" type="button" class="task-name-toggle" @click="toggleTaskModels(row)"><span>{{ taskExpanded(row) ? '⌄' : '›' }}</span><strong>{{ taskDisplayName(row) }}</strong></button><strong v-else>{{ taskDisplayName(row) }}</strong><small v-if="row.type==='product_development'">{{ taskModelSummary(row) }}</small><div v-if="row.type==='product_development' && taskExpanded(row)" class="task-model-list"><article v-for="model in taskModelRows(row)" :key="`${row.id}-${model.index}`"><div><strong>{{ model.label }}</strong><small>目标 {{ model.target }} SKU · 已完成 {{ model.done || 0 }} SKU</small></div><div><el-button size="small" @click="editTaskModel(row,model)">编辑目标</el-button><el-button size="small" plain @click="openTaskSkuConfig(row,model.index)">记录进度</el-button><el-button size="small" type="primary" plain @click="createTaskDraft(row,model)">去开发</el-button></div></article><el-empty v-if="!taskModelRows(row).length" :image-size="36" description="暂未配置车型" /></div></div></template></el-table-column>
           <el-table-column label="优先级" width="152"><template #default="{row}"><el-tag :type="taskPriorityType(row)" effect="light">{{ taskPriorityLabel(row) }}</el-tag></template></el-table-column>
           <el-table-column label="当前进度" width="128"><template #default="{row}"><div class="task-progress-cell"><strong>{{ taskProgress(row) }}%</strong><el-progress :percentage="taskProgress(row)" :show-text="false" :stroke-width="7" :status="taskTone(row)==='overdue'?'exception':taskTone(row)==='done'?'success':undefined" /><small>{{ Number(row.done || 0) }} / {{ Number(row.target || 0) }} {{ row.unit || 'SKU' }}</small></div></template></el-table-column>
           <el-table-column label="状态" width="105"><template #default="{row}"><span class="task-status" :class="taskTone(row)">{{ taskToneLabel(row) }}</span></template></el-table-column>
@@ -829,19 +866,20 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
     <IdeaDevelopmentScopeDialog v-if="ideaScopeVisible" :brands="ideaBrands" :categories="ideaCategories" :groups="ideaForm.development_tasks" :legacy-brand="ideaForm.development_brand" :legacy-category="ideaForm.development_category" @catalog-updated="catalog => { ideaBrands=catalog.brands; ideaCategories=catalog.categories; }" @close="ideaScopeVisible=false" @selected="groups => { ideaForm.development_tasks=groups; ideaScopeVisible=false; }" />
     <el-dialog v-model="ideaTasksVisible" title="灵感关联的开发任务" width="min(850px, 94vw)" append-to-body><el-table :data="ideaLinkedTasks"><el-table-column prop="title" label="任务" min-width="250" /><el-table-column prop="owner_name" label="负责人" /><el-table-column label="完成 / 目标"><template #default="{row}">{{ row.done }} / {{ row.target }}</template></el-table-column><el-table-column label="操作"><template #default="{row}"><el-button link type="primary" @click="openTask(row)">编辑任务</el-button></template></el-table-column></el-table></el-dialog>
     <el-dialog v-model="developmentTaskVisible" width="min(900px, 94vw)" title="开发任务 · SKU 明细" append-to-body destroy-on-close><div v-if="developmentTask" class="development-sku-dialog"><header><div><strong>{{ developmentTask.title }}</strong><small>负责人：{{ developmentTask.owner_name || '未分配' }} · 截止：{{ developmentTask.due_at || '未设置' }}</small></div><el-tag>{{ developmentTask.done }} / {{ developmentTask.target }} SKU</el-tag></header><article v-for="model in developmentModels()" :key="model.model_id || model.model"><div><strong>{{ [model.brand,model.category,model.model].filter(Boolean).join(' · ') || '未命名 SKU 分组' }}</strong><small>已配置 {{ model.done || 0 }} / 目标 {{ model.target || 0 }} SKU</small></div><el-progress :percentage="Math.min(100,Math.round(Number(model.done||0)/Math.max(1,Number(model.target||0))*100))" :show-text="false" /><div><el-button type="primary" plain @click="createTaskDraft(developmentTask,model)">创建草稿</el-button><el-button plain @click="bindTaskDraft(developmentTask)">关联已有草稿</el-button></div></article><el-empty v-if="!developmentModels().length" description="此开发任务还没有车型和 SKU 目标"><el-button plain @click="bindTaskDraft(developmentTask)">配置车型及 SKU 目标</el-button></el-empty></div><template #footer><el-button @click="developmentTaskVisible=false">关闭</el-button></template></el-dialog>
-    <el-dialog v-model="taskSkuConfigVisible" width="min(900px, 94vw)" title="记录任务进度" append-to-body destroy-on-close>
+    <el-dialog v-model="taskSkuConfigVisible" width="min(900px, 94vw)" :title="taskSkuConfigModelIndex === null ? '记录任务进度' : '记录车型进度'" append-to-body destroy-on-close>
       <div class="task-progress-entry-head"><p>默认按“品牌 × 核心品名”记录；需要区分型号时再展开明细。SKU 每行一个，也可用逗号或空格分隔。</p><el-button type="success" plain @click="completeAllTaskGroups">全部标记完成</el-button></div>
       <div class="task-progress-entry-list">
         <section v-for="group in taskSkuConfigGroups" :key="group.key">
           <header><div><strong>{{ group.brand }} × {{ group.category }}</strong><small>目标 {{ group.target }} 个 SKU · {{ group.models.length }} 个型号</small></div><el-tag :type="group.mode==='completed'?'success':'info'">{{ group.mode==='completed' ? '已完成' : group.mode==='group' ? `${manualSkuValues(group.value).length} / ${group.target}` : '按型号记录' }}</el-tag></header>
-          <el-radio-group v-model="group.mode" class="progress-entry-modes" @change="value => { if (value === 'detail') group.expanded = true; }"><el-radio-button value="completed">直接完成</el-radio-button><el-radio-button value="group">整组记录 SKU</el-radio-button><el-radio-button value="detail">按型号明细</el-radio-button></el-radio-group>
+          <el-radio-group v-if="taskSkuConfigModelIndex === null" v-model="group.mode" class="progress-entry-modes" @change="value => { if (value === 'detail') group.expanded = true; }"><el-radio-button value="completed">直接完成</el-radio-button><el-radio-button value="group">整组记录 SKU</el-radio-button><el-radio-button value="detail">按型号明细</el-radio-button></el-radio-group>
           <el-alert v-if="group.mode==='completed'" title="无需填写 SKU，保存后该品牌与核心品名将直接计为完成。" type="success" :closable="false" />
           <el-input v-else-if="group.mode==='group'" v-model="group.value" type="textarea" :rows="4" placeholder="这里填写该品牌与核心品名下的全部 SKU" />
-          <div v-else class="task-progress-models"><button type="button" @click="group.expanded=!group.expanded"><span>{{ group.expanded ? '收起型号明细' : '展开型号明细' }}</span><b>{{ group.models.length }} 个型号</b></button><div v-if="group.expanded"><article v-for="model in group.models" :key="model.index"><header><strong>{{ model.label }}</strong><el-tag size="small">{{ manualSkuValues(model.value).length }} / {{ model.target }}</el-tag></header><el-input v-model="model.value" type="textarea" :rows="3" placeholder="填写该型号的 SKU" /></article></div></div>
+          <div v-else class="task-progress-models"><button v-if="taskSkuConfigModelIndex === null" type="button" @click="group.expanded=!group.expanded"><span>{{ group.expanded ? '收起型号明细' : '展开型号明细' }}</span><b>{{ group.models.length }} 个型号</b></button><div v-if="group.expanded"><article v-for="model in group.models.filter(item => taskSkuConfigModelIndex === null || item.index === taskSkuConfigModelIndex)" :key="model.index"><header><strong>{{ model.label }}</strong><el-tag size="small">{{ manualSkuValues(model.value).length }} / {{ model.target }}</el-tag></header><el-input v-model="model.value" type="textarea" :rows="3" placeholder="填写该型号的 SKU" /></article></div></div>
         </section>
       </div>
       <template #footer><el-button @click="taskSkuConfigVisible=false">取消</el-button><el-button type="primary" :loading="taskSkuConfigSaving" @click="saveTaskSkuConfig">保存进度</el-button></template>
     </el-dialog>
+    <el-dialog v-model="taskModelEditorVisible" title="编辑车型目标" width="440px" append-to-body destroy-on-close><el-form label-position="top"><el-form-item label="车型"><strong>{{ taskModelEditor.label }}</strong></el-form-item><el-form-item label="目标 SKU 数"><el-input-number v-model="taskModelEditor.target" :min="1" :precision="0" /></el-form-item><el-alert type="info" :closable="false" title="仅修改这个车型的目标，不影响同一核心品名下的其他车型。" /></el-form><template #footer><el-button @click="taskModelEditorVisible=false">取消</el-button><el-button type="primary" :loading="taskSkuConfigSaving" @click="saveTaskModel">保存</el-button></template></el-dialog>
     <TaskCreationDialog v-if="taskCreationVisible" :people="people" :tasks="tasks" :initial-task="taskCreationInitial"
       @close="taskCreationVisible=false" @saved="taskCreationVisible=false;ideaTasksVisible=false;loadData();heatmapView?.reload()" />
     <el-dialog v-model="taskVisible" width="1040px" align-center append-to-body class="task-detail-dialog" :show-close="false"><template #header><div class="task-dialog-header"><span class="task-dialog-icon" :class="taskTypeMeta(taskForm).value"><component :is="taskTypeMeta(taskForm).icon" :size="22" /></span><div><small>{{ taskTypeMeta(taskForm).label }}</small><h2>{{ taskForm.title || (taskForm.id ? '编辑任务' : '新增自定义任务') }}</h2><p>{{ taskForm.automation_key ? '进度由业务数据自动计算，负责人可人工指定' : '设置负责人、完成日期和固定进度档位' }}</p></div><button type="button" aria-label="关闭" @click="taskVisible=false">×</button></div></template><el-form label-position="top" class="task-detail-form"><template v-if="taskForm.automation_key"><div class="task-dialog-metrics"><article><span>当前进度</span><strong>{{ taskProgress(taskForm) }}%</strong><small>{{ taskProgressText(taskForm) }}</small></article><article><span>计划完成</span><strong>{{ taskForm.due_at || '-' }}</strong><small>任务节点日期</small></article><article><span>当前状态</span><strong><i class="task-status" :class="taskTone(taskForm)">{{ taskToneLabel(taskForm) }}</i></strong><small>系统实时判断</small></article></div><div class="task-dialog-progress"><el-progress :percentage="taskProgress(taskForm)" :stroke-width="10" :show-text="false" /><span>{{ taskStatisticsText(taskForm) }}</span></div><div v-if="isDailyOperationalTask(taskForm)" class="task-statistics-scope"><div><span>统计日期</span><strong>{{ taskStatisticsDate(taskForm) }}</strong></div><div><span>北京时间范围</span><strong>{{ taskRelated(taskForm).window }}</strong></div><p>统计范围固定为前一自然日，当天新增订单不会改变本任务分母。</p></div><section v-if="isDailyOperationalTask(taskForm)" v-loading="taskDetailLoading" class="operational-detail-section"><header><div><span>{{ taskForm.type==='procurement_daily' ? '待采购订单' : '未完成订单与原因' }}</span><h3>{{ taskForm.type==='procurement_daily' ? '具体处理清单' : '发货异常诊断' }}</h3></div><b v-if="taskOperationalDetails.summary?.warning">{{ taskOperationalDetails.summary.warning }} 项需警惕</b></header><div v-if="taskForm.type==='shipping_daily'" class="reason-filter-tabs"><button v-for="item in taskReasonFilters()" :key="item.value" type="button" :class="{active:taskDetailReason===item.value}" @click="taskDetailReason=item.value;taskDetailPage=1">{{ item.label }}<b>{{ item.count }}</b></button></div><div class="operational-order-list"><article v-for="row in taskDetailRows" :key="row.row_id"><el-image class="order-alert-image" :src="row.image_url" fit="cover" :preview-src-list="row.image_url ? [row.image_url] : []" preview-teleported><template #error><div class="order-alert-image-empty">无图</div></template></el-image><div class="order-alert-main"><div class="order-alert-title"><strong>{{ row.order_number }}</strong><span class="reason-badge" :class="taskReasonTone(row)">{{ row.reason_label }}</span></div><span>{{ row.shop_name || '未标注店铺' }} · {{ Number(row.quantity || 0) }} 件</span><span class="order-alert-time"><Clock3 :size="12" />出单时间：{{ taskOrderTimeText(row) }}</span><p>{{ row.product_names || row.sku_summary || '暂无商品名称' }}</p><div class="order-alert-meta"><small v-if="row.procurement_status">采购状态：{{ row.procurement_status }}</small><small v-if="row.sku_summary">SKU：{{ row.sku_summary }}</small><el-button link type="primary" @click="enterTaskWorkspace(taskForm)">去处理</el-button></div></div></article><el-empty v-if="!taskDetailLoading && !taskDetailFilteredRows.length" :image-size="54" description="当前分类没有待处理订单" /></div><el-pagination v-if="taskDetailFilteredRows.length>taskDetailPageSize" v-model:current-page="taskDetailPage" small background layout="prev, pager, next" :page-size="taskDetailPageSize" :total="taskDetailFilteredRows.length" /></section><div class="task-owner-card"><div><el-avatar :src="personAvatar(taskForm.owner_person_id)" :size="42">{{ personInitial(taskForm.owner_name) }}</el-avatar><div><strong>任务负责人</strong><small>{{ isDailyOperationalTask(taskForm) ? '仅覆盖当前任务，自动刷新不会覆盖；后续每日任务仍使用固定负责人' : '自动刷新进度时不会覆盖人工指定人员' }}</small></div></div><el-select v-model="taskForm.owner_person_id" filterable clearable placeholder="选择负责人"><el-option v-for="person in people" :key="person.id" :label="person.name" :value="person.id" /></el-select></div></template><template v-else><el-form-item label="任务名称" required><el-input v-model="taskForm.title" placeholder="明确写清需要完成的工作" /></el-form-item><div class="form-grid"><el-form-item label="负责人"><el-select v-model="taskForm.owner_person_id" filterable clearable placeholder="选择负责人"><el-option v-for="person in people" :key="person.id" :label="person.name" :value="person.id" /></el-select></el-form-item><el-form-item label="计划完成日期"><el-date-picker v-model="taskForm.due_at" type="date" value-format="YYYY-MM-DD" /></el-form-item></div><el-form-item label="当前进度"><div class="custom-progress-steps"><button type="button" :class="{active:taskProgress(taskForm)===0}" @click="setCustomProgress(0)">未开始 0%</button><button type="button" :class="{active:taskProgress(taskForm)===25}" @click="setCustomProgress(25)">已开始 25%</button><button type="button" :class="{active:taskProgress(taskForm)===50}" @click="setCustomProgress(50)">完成一半 50%</button><button type="button" :class="{active:taskProgress(taskForm)===100}" @click="setCustomProgress(100)">已完成 100%</button></div></el-form-item><el-form-item label="完成标准"><el-input v-model="taskForm.deliverable" type="textarea" :rows="2" placeholder="什么结果才算完成" /></el-form-item><el-form-item label="当前进展 / 结果"><el-input v-model="taskForm.result" type="textarea" :rows="2" /></el-form-item></template></el-form><template #footer><div class="task-dialog-footer"><el-button @click="taskVisible=false">取消</el-button><el-button v-if="taskForm.automation_key && taskForm.type!=='custom'" @click="taskVisible=false;enterTaskWorkspace(taskForm)">进入对应工作台</el-button><el-button type="primary" :loading="taskSaving" @click="saveTask">{{ taskForm.automation_key ? '保存负责人' : '保存任务' }}</el-button></div></template></el-dialog>
@@ -882,6 +920,7 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
 .operational-order-list article{position:relative;min-height:132px;box-sizing:border-box;overflow:visible}.order-alert-main{min-height:108px;padding-bottom:28px;box-sizing:border-box}.order-alert-meta{position:absolute;right:10px;bottom:7px;left:86px;min-height:24px;margin:0;padding-top:3px;box-sizing:border-box;background:#fbfcfe}.order-alert-meta .el-button{position:absolute;right:0;bottom:0}.order-alert-meta small{padding-right:62px}:global(.task-detail-dialog){width:min(1180px,calc(100vw - 32px))!important;max-height:96vh;margin-top:2vh!important}:global(.task-detail-dialog .el-dialog__body){max-height:calc(96vh - 150px);overflow:auto}
 .draft-link-header{display:flex;align-items:center;justify-content:space-between;gap:16px}.draft-link-header h2{margin:0;color:#243247;font-size:20px}.draft-link-header p{margin:5px 0 0;color:#7b8797;font-size:12px}.draft-link-summary,.draft-link-toolbar{display:flex;align-items:center;gap:9px}.draft-link-toolbar{margin-bottom:14px}.draft-link-toolbar>.el-input{flex:1}.draft-link-toolbar>.el-date-editor{flex:0 0 310px}.draft-choice-list{display:grid;grid-template-columns:1fr 1fr;gap:10px;height:590px;padding:2px 5px 2px 2px;overflow:auto}.draft-choice-card{position:relative;display:grid;grid-template-columns:78px minmax(0,1fr) 24px;gap:11px;min-height:108px;padding:10px;border:1px solid #dfe6ef;border-radius:11px;background:#fff;color:inherit;cursor:pointer;text-align:left;transition:border-color .15s,box-shadow .15s,background .15s}.draft-choice-card:hover{border-color:#9bc2f5;box-shadow:0 5px 14px #1f3b6414}.draft-choice-card.selected{border-color:#409eff;background:#f2f8ff;box-shadow:0 0 0 2px #409eff20}.draft-choice-card.linked{border-color:#b7e4c7;background:#f3fbf6;cursor:default;opacity:1}.draft-choice-card>.el-image{width:78px;height:104px;overflow:hidden;border-radius:8px;background:#edf1f6}.draft-choice-empty{display:grid;place-items:center;width:100%;height:100%;color:#98a2b3;font-size:12px}.draft-choice-main{display:grid;align-content:start;gap:6px;min-width:0}.draft-choice-main>strong{display:-webkit-box;overflow:hidden;color:#243247;font-size:13px;line-height:1.45;-webkit-line-clamp:2;-webkit-box-orient:vertical}.draft-choice-main>span{overflow:hidden;color:#3977d5;font-size:11px;white-space:nowrap;text-overflow:ellipsis}.draft-choice-main>div{display:flex;align-items:center;gap:7px;min-width:0}.draft-choice-main>div small{overflow:hidden;color:#667085;white-space:nowrap;text-overflow:ellipsis}.draft-choice-main>small{color:#98a2b3;font-size:10px}.draft-choice-check{align-self:center;color:#cbd5e1}.draft-choice-card.selected .draft-choice-check,.draft-choice-card.linked .draft-choice-check{color:#409eff}.draft-choice-card.linked .draft-choice-check{color:#22a861}.draft-choice-list>.el-empty{grid-column:1/-1;padding:40px 0}.draft-link-dialog .attach-tip{margin:13px 0 0;padding:9px 11px;border-radius:8px;background:#f5f8fc;color:#667085;font-size:12px}:global(.draft-link-dialog){max-width:calc(100vw - 32px)}:global(.draft-link-dialog .el-dialog__body){padding-top:12px}@media(max-width:720px){.draft-choice-list{grid-template-columns:1fr;height:62vh}.draft-link-header,.draft-link-toolbar{align-items:stretch;flex-direction:column}.draft-link-toolbar>.el-date-editor{flex:auto;width:100%}.draft-choice-card{grid-template-columns:68px minmax(0,1fr) 22px}.draft-choice-card>.el-image{width:68px;height:92px}}
 .draft-link-pagination{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:12px}.draft-link-pagination>span{color:#7b8797;font-size:12px}.draft-link-dialog .attach-tip{margin-top:10px}@media(max-width:720px){.draft-link-pagination{align-items:flex-start;flex-direction:column}}
+.task-name-toggle{display:flex;align-items:center;gap:7px;min-width:0;padding:0;border:0;background:transparent;color:inherit;cursor:pointer;text-align:left}.task-name-toggle>span{width:12px;color:#3977d5;font-size:18px;line-height:1}.task-name-cell{display:grid;gap:4px}.task-name-cell small{color:#7b8797;font-size:11px}.task-model-list{display:grid;gap:6px;margin-top:5px;padding:7px 0 2px 19px;border-left:2px solid #dce9fa}.task-model-list article{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 9px;border:1px solid #e5ecf5;border-radius:8px;background:#f9fbfe}.task-model-list article>div:first-child{display:grid;gap:2px;min-width:0}.task-model-list article strong{font-size:12px}.task-model-list article small{font-size:10px}.task-model-list article>div:last-child{display:flex;gap:5px;white-space:nowrap}@media(max-width:720px){.task-model-list article{align-items:flex-start;flex-direction:column}}
 </style>
 
 <style>
