@@ -1,17 +1,19 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Boxes, CalendarDays, CheckCircle2, CircleCheck, ClipboardCheck, Clock3, Edit3, ImagePlus, Lightbulb, LayoutDashboard, Link2, ListTodo, PackagePlus, Plus, RefreshCw, Rocket, Search, ShoppingCart, Trash2, TrendingUp, TriangleAlert, Truck, Upload, Users } from "lucide-vue-next";
 import { apiClient } from "../../utils/api";
 import { useAuthStore } from "../../stores/auth";
 import { uploadListingMedia } from "../../api/tools/imageCropper";
-import { shanghaiDateTimeText } from "../../utils/shanghai-date";
+import { shanghaiDateKey, shanghaiDateTimeText } from "../../utils/shanghai-date";
 import DevelopmentHeatmap from "../../components/team/DevelopmentHeatmap.vue";
 import { loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../utils/inventory-naming-options.js";
 import IdeaDevelopmentScopeDialog from "../../components/team/IdeaDevelopmentScopeDialog.vue";
 import TaskCreationDialog from "../../components/team/TaskCreationDialog.vue";
 import ProductCreateEditDialog from "../../components/inventory/ProductCreateEditDialog.vue";
+import TaskScopeActions from "../../components/team/TaskScopeActions.vue";
+import { developmentTypeLabel } from "../../utils/product-development-meta.js";
 
 const router = useRouter();
 const authStore = useAuthStore();
@@ -135,7 +137,12 @@ const taskModelDraftPickerKeyword = ref("");
 const taskModelDraftPickerOptions = ref([]);
 const taskModelDraftPickerLoading = ref(false);
 const taskModelDraftPickerSaving = ref(false);
-const expandedTaskIds = ref(new Set());
+const taskModelDraftPickerAssignments = ref({});
+const taskModelDraftPickerPage = ref(1);
+const taskModelDraftPickerPageSize = 20;
+const taskModelDraftPickerTotal = ref(0);
+const taskClock = ref(Date.now());
+let taskClockTimer = null;
 const metaForm = reactive({ project_id: null, status: "idea", priority: "medium", planned_listing_at: "", note: "", decision_note: "" });
 
 const filteredProducts = computed(() => products.value.filter((row) => {
@@ -265,14 +272,25 @@ function dayEnd(value) { const date = new Date(value); date.setHours(23, 59, 59,
 function shortDate(value) { const date = new Date(value); return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`; }
 function taskDate(row) { const value = row.due_at || row.start_at || row.created_at; return value ? new Date(String(value).length <= 10 ? `${value}T21:00:00+08:00` : value) : null; }
 function taskProgress(row) { const target = Number(row.target || 0); if (!target) return row.status === "done" ? 100 : 0; return Math.min(row.development_plan && row.status !== "done" ? 99 : 100, Math.round(Number(row.done || 0) / target * 100)); }
-function taskOverdue(row) { const due = taskDate({ due_at: row.due_at }); return row.status !== "done" && Boolean(due && due.getTime() < Date.now()); }
-function taskTone(row) { if (["closed", "cancelled"].includes(row.status)) return "closed"; if (taskOverdue(row) || row.status === "delayed") return "overdue"; if (row.status === "done") return "done"; const due = taskDate({ due_at: row.due_at }); if (due && due.getTime() - Date.now() < 3 * 86400000) return "risk"; return "doing"; }
-function taskToneLabel(row) { return ({ done: "按时完成", doing: row.status === "todo" ? "待开始" : "进行中", risk: "有风险", overdue: "已超时", closed: "已关闭" })[taskTone(row)]; }
+function taskOverdue(row) { const due = taskDate({ due_at: row.due_at }); return row.status !== "done" && Boolean(due && due.getTime() < taskClock.value); }
+function taskOverdueInfo(row) {
+  if (!taskOverdue(row)) return null;
+  const due = taskDate({ due_at: row.due_at });
+  const overdueDays = Math.max(1, Math.floor((taskClock.value - due.getTime()) / 86400000));
+  const weeks = Math.floor(overdueDays / 7);
+  const days = overdueDays % 7;
+  const nextDue = due.getTime() + (weeks + 1) * 7 * 86400000;
+  return { label: `超时 ${weeks ? `${weeks} 周` : ""}${days ? `${weeks ? " " : ""}${days} 天` : weeks ? "" : "1 天"}`, nextDue: shanghaiDateKey(new Date(nextDue)) };
+}
+function taskTone(row) { if (["closed", "cancelled"].includes(row.status)) return "closed"; if (taskOverdue(row) || row.status === "delayed") return "overdue"; if (row.status === "done") return "done"; const due = taskDate({ due_at: row.due_at }); if (due && due.getTime() - taskClock.value < 3 * 86400000) return "risk"; return "doing"; }
+function taskToneLabel(row) { if (taskTone(row) === "overdue") return taskOverdueInfo(row)?.label || "已超时"; return ({ done: "按时完成", doing: row.status === "todo" ? "待开始" : "进行中", risk: "有风险", closed: "已关闭" })[taskTone(row)]; }
+function taskPlanDateLabel(row) { return taskOverdueInfo(row)?.nextDue ? `顺延至 ${taskOverdueInfo(row).nextDue}` : row.due_at || "未设置"; }
 function taskTimelineX(row) { const point = taskDate(row); if (!point) return 2; const [start, end] = taskRangeDates.value; return Math.max(2, Math.min(98, (point - start) / Math.max(1, end - start) * 100)); }
 function taskTypeMeta(row) { return taskTypeOptions.find((item) => item.value === row?.type) || taskTypeOptions[4]; }
 function taskProgressText(row) { return `${taskProgress(row)}%（${Number(row.done || 0)} / ${Number(row.target || 0)} ${row.unit || '项'}）`; }
 function taskPriorityLabel(row) { return ({ urgent_important: "紧急重要 · 10分", urgent_unimportant: "紧急不重要 · 8分", important_not_urgent: "重要不紧急 · 7分", not_urgent_unimportant: "不重要不紧急 · 6分", high: "紧急重要 · 10分", medium: "重要不紧急 · 7分", low: "不重要不紧急 · 6分" })[row?.priority] || "重要不紧急 · 7分"; }
 function taskPriorityType(row) { return ({ urgent_important: "danger", urgent_unimportant: "warning", important_not_urgent: "primary", not_urgent_unimportant: "info", high: "danger", medium: "primary", low: "info" })[row?.priority] || "primary"; }
+function taskListRowClass({ row }) { return row.type === "product_development" ? "" : "task-row-no-expand"; }
 function taskDisplayName(row) {
   if (row?.type !== "product_development") return row?.title || row?.name || "未命名任务";
   const categories = [...new Set(developmentModels(row).map((model) => model.category || row.development_category).filter(Boolean))];
@@ -282,8 +300,6 @@ function taskDisplayName(row) {
 }
 function taskModelRows(row) { return developmentModels(row).map((model, index) => ({ ...model, index, label: [model.brand || row.development_brand, model.model || "未命名车型"].filter(Boolean).join(" · ") })); }
 function taskModelSummary(row) { const models = taskModelRows(row); return `${models.length} 个车型 · 共 ${Number(row.target || 0)} 个 SKU`; }
-function taskExpanded(row) { return expandedTaskIds.value.has(Number(row.id)); }
-function toggleTaskModels(row) { const next = new Set(expandedTaskIds.value); const id = Number(row.id); next.has(id) ? next.delete(id) : next.add(id); expandedTaskIds.value = next; }
 function taskCompletedText(row) { return row?.status === "done" && row?.updated_at ? shanghaiDateTimeText(row.updated_at) : "—"; }
 function taskRelated(row) { try { return JSON.parse(row?.related || "{}"); } catch { return {}; } }
 function isDailyOperationalTask(row) { return ["procurement_daily", "shipping_daily"].includes(row?.type); }
@@ -410,64 +426,140 @@ async function saveTaskModel() {
   } catch (error) { ElMessage.error(error.message || "保存车型目标失败"); }
   finally { taskSkuConfigSaving.value = false; }
 }
-async function saveTaskModelProgress(row, modelIndex, updateModel) {
+async function saveTaskPlan(row, models) {
   const plan = row?.development_plan;
-  if (!row?.id || !plan?.models?.[modelIndex]) return;
+  if (!row?.id || !plan) return false;
   taskSkuConfigSaving.value = true;
   try {
-    const models = plan.models.map((model, index) => index === modelIndex ? updateModel(model) : model);
     await apiClient.put(`/api/team/tasks/${row.id}`, { title: row.title, type: row.type, owner_person_id: row.owner_person_id, period: row.period, priority: row.priority, start_at: row.start_at, due_at: row.due_at, related: { ...plan, models } });
     await loadTaskCenterData();
     return true;
-  } catch (error) { ElMessage.error(error.message || "车型进度保存失败"); return false; }
+  } catch (error) { ElMessage.error(error.message || "任务进度保存失败"); return false; }
   finally { taskSkuConfigSaving.value = false; }
 }
+async function saveTaskModelProgress(row, modelIndex, updateModel) {
+  const plan = row?.development_plan;
+  if (!plan?.models?.[modelIndex]) return false;
+  return saveTaskPlan(row, plan.models.map((model, index) => index === modelIndex ? updateModel(model) : model));
+}
 async function completeTaskModel(row, model) {
-  const current = developmentModels(row)[model.index];
-  if (!current) return;
-  const done = Math.max(Number(current.done || 0), Number(current.target || 0));
-  const saved = await saveTaskModelProgress(row, model.index, (item) => ({ ...item, done, manual_skus: [], completed: true }));
+  if (!developmentModels(row)[model.index]) return;
+  const saved = await saveTaskModelProgress(row, model.index, (item) => ({ ...item, manual_skus: [], completed: true }));
   if (saved) ElMessage.success(`${model.label}已标记完成`);
 }
-async function openTaskModelDraftPicker(row, model) {
+async function completeTask(row) {
+  const plan = row?.development_plan || legacyNonAutomotivePlan(row);
+  if (!plan?.models?.length) return ElMessage.warning("该任务没有可完成的车型明细，请先编辑任务目标");
+  const saved = await saveTaskPlan({ ...row, development_plan: plan }, plan.models.map((model) => ({ ...model, manual_skus: [], completed: true })));
+  if (saved) ElMessage.success("任务已标记完成");
+}
+function guessTaskDraftModelIndex(draft, row) {
+  const models = developmentModels(row);
+  const draftModel = String(draft.vehicle_model || "").trim().toLowerCase();
+  const draftBrand = String(draft.vehicle_brand || "").trim().toLowerCase();
+  if (!draftModel) return 0;
+  const match = models.findIndex((model) => String(model.model || "").trim().toLowerCase() === draftModel
+    && (!draftBrand || String(model.brand || row.development_brand || "").trim().toLowerCase() === draftBrand));
+  return match >= 0 ? match : 0;
+}
+function toggleTaskDraftSelection(draft) {
+  const id = Number(draft.id);
+  const selected = taskModelDraftPickerIds.value.includes(id);
+  taskModelDraftPickerIds.value = selected ? taskModelDraftPickerIds.value.filter((value) => value !== id) : [...taskModelDraftPickerIds.value, id];
+  const assignments = { ...taskModelDraftPickerAssignments.value };
+  if (selected) delete assignments[id];
+  else assignments[id] = taskModelDraftPickerIndex.value === null ? guessTaskDraftModelIndex(draft, taskModelDraftPickerTask.value) : taskModelDraftPickerIndex.value;
+  taskModelDraftPickerAssignments.value = assignments;
+}
+function assignTaskDraftModel(draftId, modelIndex) {
+  taskModelDraftPickerAssignments.value = { ...taskModelDraftPickerAssignments.value, [Number(draftId)]: Number(modelIndex) };
+}
+function taskDraftModelIndex(draft) {
+  const assigned = taskModelDraftPickerAssignments.value[Number(draft.id)];
+  return Number.isInteger(Number(assigned)) ? Number(assigned) : guessTaskDraftModelIndex(draft, taskModelDraftPickerTask.value);
+}
+function taskDraftImage(draft = {}) { return draft.effective_images?.[0] || draft.draft_variant_primary_image || draft.draft_template_primary_image || draft.list_image_url || draft.source_images?.[0] || ""; }
+function taskDraftShopCopies(draft = {}) {
+  if (Array.isArray(draft.shop_copies)) return draft.shop_copies;
+  try { return JSON.parse(draft.shop_copies_json || "[]"); } catch { return []; }
+}
+function taskDraftStatusText(draft = {}) {
+  const publish = String(draft.publish_status || "");
+  if (Number(draft.publish_success_count || 0) > 0) return `已上架 ${Number(draft.publish_success_count)} 店`;
+  if (publish) return ({ submitted: "已提交 Ozon", processing: "Ozon处理中", failed: "上架失败", ozon_status_error: "状态同步失败" })[publish] || publish;
+  if (taskDraftShopCopies(draft).length || Number(draft.shop_copy_count || 0) > 0) return "待上架";
+  return ({ editing: "编辑中", waiting: "待上架", deleted: "已删除" })[draft.status] || draft.status || "编辑中";
+}
+function taskDraftPriceText(draft = {}) {
+  const price = Number(draft.draft_variant_price || draft.draft_template_price || draft.sale_price || draft.list_price || 0);
+  return price > 0 ? `${price} ${draft.currency_code || "CNY"}` : "未填写";
+}
+async function openTaskModelDraftPicker(row, model = null) {
   const personId = Number(row.owner_person_id || row.assignee_person_id || 0);
   if (!personId) return ElMessage.warning("请先为任务指定负责人，草稿列表将默认筛选该人员创建的草稿");
   taskModelDraftPickerTask.value = row;
-  taskModelDraftPickerIndex.value = model.index;
-  taskModelDraftPickerLabel.value = model.label;
-  taskModelDraftPickerIds.value = [...new Set((model.draft_ids || []).map(Number).filter(Boolean))];
-  taskModelDraftPickerUnavailableIds.value = new Set(developmentModels(row).flatMap((entry, index) => index === model.index ? [] : (entry.draft_ids || []).map(Number)));
+  taskModelDraftPickerIndex.value = model ? model.index : null;
+  taskModelDraftPickerLabel.value = model?.label || taskDisplayName(row);
+  const currentModels = developmentModels(row);
+  const assignments = {};
+  currentModels.forEach((entry, index) => (entry.draft_ids || []).forEach((id) => { assignments[Number(id)] = index; }));
+  taskModelDraftPickerAssignments.value = assignments;
+  taskModelDraftPickerIds.value = model
+    ? [...new Set((model.draft_ids || []).map(Number).filter(Boolean))]
+    : [...new Set(currentModels.flatMap((entry) => (entry.draft_ids || []).map(Number).filter(Boolean)))];
+  taskModelDraftPickerUnavailableIds.value = new Set(model ? currentModels.flatMap((entry, index) => index === model.index ? [] : (entry.draft_ids || []).map(Number)) : []);
   taskModelDraftPickerKeyword.value = "";
+  taskModelDraftPickerPage.value = 1;
+  taskModelDraftPickerTotal.value = 0;
   taskModelDraftPickerOptions.value = [];
   taskModelDraftPickerVisible.value = true;
   await reloadTaskModelDraftOptions();
 }
-async function reloadTaskModelDraftOptions() {
+async function reloadTaskModelDraftOptions(resetPage = false) {
   const row = taskModelDraftPickerTask.value;
   const personId = Number(row?.owner_person_id || row?.assignee_person_id || 0);
   if (!personId) return;
+  if (resetPage) taskModelDraftPickerPage.value = 1;
   taskModelDraftPickerLoading.value = true;
   try {
     const query = taskModelDraftPickerKeyword.value.trim();
-    const result = await apiClient.get(`/api/listing/drafts?paged=1&lightweight=1&page=1&pageSize=100&sortBy=created_at&creatorId=${personId}${query ? `&query=${encodeURIComponent(query)}` : ""}`, { noCache: true });
-    const rows = (result?.rows || []).filter((draft) => !taskModelDraftPickerUnavailableIds.value.has(Number(draft.id)));
+    const result = await apiClient.get(`/api/listing/drafts?paged=1&lightweight=1&includeShopDetails=1&page=${taskModelDraftPickerPage.value}&pageSize=${taskModelDraftPickerPageSize}&sortBy=created_at&creatorId=${personId}${query ? `&query=${encodeURIComponent(query)}` : ""}`, { noCache: true });
+    let rows = (result?.rows || []).filter((draft) => !taskModelDraftPickerUnavailableIds.value.has(Number(draft.id)));
     const selectedIds = taskModelDraftPickerIds.value;
     const missingSelected = selectedIds.filter((id) => !rows.some((draft) => Number(draft.id) === id));
-    const selectedDrafts = missingSelected.length ? await Promise.all(missingSelected.map((id) => apiClient.get(`/api/listing/drafts/${id}`, { noCache: true }).catch(() => null))) : [];
-    taskModelDraftPickerOptions.value = [...rows, ...selectedDrafts.filter(Boolean)];
+    const selectedDrafts = missingSelected.length ? await Promise.all(missingSelected.map(async (id) => {
+      const draft = await apiClient.get(`/api/listing/drafts/${id}`, { noCache: true }).catch(() => null);
+      if (!draft) return null;
+      const shopCopies = await apiClient.get(`/api/listing/drafts/${id}/shop-copies`, { noCache: true }).catch(() => []);
+      return { ...draft, shop_copies: shopCopies };
+    })) : [];
+    rows = [...rows, ...selectedDrafts.filter(Boolean)];
+    const nextAssignments = { ...taskModelDraftPickerAssignments.value };
+    if (taskModelDraftPickerIndex.value === null) rows.forEach((draft) => {
+      const id = Number(draft.id);
+      if (selectedIds.includes(id) && !Number.isInteger(Number(nextAssignments[id]))) nextAssignments[id] = guessTaskDraftModelIndex(draft, row);
+    });
+    taskModelDraftPickerAssignments.value = nextAssignments;
+    taskModelDraftPickerOptions.value = rows;
+    taskModelDraftPickerTotal.value = Number(result?.total || 0);
   } catch (error) {
     taskModelDraftPickerOptions.value = [];
+    taskModelDraftPickerTotal.value = 0;
     ElMessage.error(error.message || "草稿列表加载失败");
   } finally { taskModelDraftPickerLoading.value = false; }
 }
 async function saveTaskModelDraftLinks() {
   const row = taskModelDraftPickerTask.value;
   const index = taskModelDraftPickerIndex.value;
-  if (!row || index === null) return;
+  if (!row) return;
   taskModelDraftPickerSaving.value = true;
   try {
     const ids = [...new Set(taskModelDraftPickerIds.value.map(Number).filter(Boolean))];
-    const saved = await saveTaskModelProgress(row, index, (model) => ({ ...model, draft_ids: ids }));
+    const plan = row.development_plan;
+    const models = index === null
+      ? plan.models.map((model, modelIndex) => ({ ...model, draft_ids: ids.filter((id) => Number(taskModelDraftPickerAssignments.value[id]) === modelIndex) }))
+      : plan.models.map((model, modelIndex) => modelIndex === index ? { ...model, draft_ids: ids } : model);
+    const saved = await saveTaskPlan(row, models);
     if (saved) {
       taskModelDraftPickerVisible.value = false;
       ElMessage.success(`已绑定 ${ids.length} 个草稿`);
@@ -839,7 +931,11 @@ async function confirmBind() {
   try { await apiClient.post("/api/listing/inventory-bindings/bind", { record_id: bindRecord.value.record_id, online_product_id: bindRecord.value.online_product_id, product_id: bindProductId.value }); bindVisible.value = false; ElMessage.success("库存产品已绑定，历史订单也已重新归因"); await loadBindings(true); }
   catch (error) { ElMessage.error(error.message || "绑定失败"); }
 }
-onMounted(loadTaskCenterData);
+onMounted(() => {
+  taskClockTimer = setInterval(() => { taskClock.value = Date.now(); }, 60_000);
+  loadTaskCenterData();
+});
+onBeforeUnmount(() => { if (taskClockTimer) clearInterval(taskClockTimer); });
 watch(activeTab, (value) => {
   if (value !== "tasks") loadDevelopmentData();
   if (value === "analytics" && bindingStatus.value !== "all") { bindingStatus.value = "all"; bindingsLoaded.value = false; }
@@ -921,14 +1017,15 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
       </div>
       <div class="panel person-task-panel"><div class="person-task-head"><div><span>按人员归类，SKU 数量决定开发任务进度</span><h2>{{ taskPeopleTitle }}</h2></div><div class="task-audience-tabs"><el-button :type="taskAudience==='mine'?'primary':'default'" @click="taskAudience='mine'">我的任务</el-button><el-button :type="taskAudience==='all'?'primary':'default'" @click="taskAudience='all'">查看全部人员</el-button></div></div><el-collapse accordion><el-collapse-item v-for="group in taskPeopleGroups" :key="group.id || group.name" :name="group.id || group.name"><template #title><div class="person-task-group-title"><div class="person-inline"><el-avatar :src="personAvatar(group.id)" :size="30">{{ personInitial(group.name) }}</el-avatar><strong>{{ group.name }}</strong></div><span>{{ group.rows.length }} 个任务</span><span>{{ group.doneTotal }} / {{ group.skuTotal }} 个 SKU</span></div></template><div class="person-task-rows"><article v-for="row in group.rows" :key="row.id"><div><strong>{{ row.title || row.name || '未命名任务' }}</strong><small>{{ [row.development_category,row.development_brand].filter(Boolean).join(' · ') || row.deliverable || '暂无开发范围' }}</small></div><span>{{ row.done }} / {{ row.target }} {{ row.unit || 'SKU' }}</span><span>{{ row.due_at || '未设置截止时间' }}</span><span class="task-status" :class="taskTone(row)">{{ taskToneLabel(row) }}</span><div class="person-task-actions"><template v-if="row.type==='product_development'"><el-button @click="openTask(row)">编辑任务</el-button><el-button plain @click="openTaskSkuConfig(row)">记录进度</el-button><el-button type="primary" plain @click="createTaskDraft(row,developmentModels(row)[0] || {})">去开发</el-button></template><el-button v-else plain @click="openTask(row)">查看任务</el-button><el-button v-if="row.type!=='product_development'" link @click="openTask(row)">配置</el-button></div></article></div></el-collapse-item></el-collapse><el-empty v-if="!taskPeopleGroups.length" :image-size="54" description="当前筛选下没有分配给人员的任务" /></div>
       <el-dialog v-model="taskListVisible" :title="`${taskPeopleTitle}清单`" width="min(1440px, 94vw)" top="4vh" class="task-list-dialog" destroy-on-close>
-        <el-table :data="paginatedTasks" max-height="calc(100vh - 280px)" empty-text="当前筛选下没有任务">
+        <el-table :data="paginatedTasks" :row-class-name="taskListRowClass" max-height="calc(100vh - 280px)" empty-text="当前筛选下没有任务">
+          <el-table-column v-if="taskType==='product_development' || taskType==='all'" type="expand" width="42"><template #default="{row}"><el-table v-if="row.type==='product_development'" :data="taskModelRows(row)" class="task-model-detail-table" size="small" row-key="index" empty-text="暂未配置车型"><el-table-column label="车型" min-width="200"><template #default="{row:model}"><strong>{{ model.label }}</strong><small class="task-model-subtitle">{{ model.category || model.brand || '车型明细' }} · 目标 {{ model.target }} SKU</small></template></el-table-column><el-table-column label="进度" width="140"><template #default="{row:model}"><strong>{{ Math.min(Number(model.done||0),Number(model.target||0)) }} / {{ model.target }} SKU</strong><el-progress :percentage="Math.min(100,Math.round(Number(model.done||0)/Math.max(1,Number(model.target||0))*100))" :show-text="false" :stroke-width="6" /></template></el-table-column><el-table-column label="绑定草稿 / 对照" min-width="250"><template #default="{row:model}"><div v-if="model.drafts?.length" class="task-model-drafts"><el-link v-for="draft in model.drafts" :key="draft.id" type="primary" @click="router.push({path:'/listing-records',query:{draftId:draft.id}})">{{ draft.title }} · {{ draft.count }} SKU</el-link></div><span v-else class="task-model-empty">未绑定草稿</span></template></el-table-column><el-table-column label="操作" min-width="210" align="right"><template #default="{row:model}"><TaskScopeActions mode="model" :done="Number(model.done||0)" :target="Number(model.target||0)" @complete="completeTaskModel(row,model)" @drafts="openTaskModelDraftPicker(row,model)" @edit="editTaskModel(row,model)" @develop="createTaskDraft(row,model)" /></template></el-table-column></el-table></template></el-table-column>
           <el-table-column label="类型" width="64" align="center"><template #default="{row}"><el-tooltip :content="taskTypeMeta(row).label" placement="top"><span class="task-type-icon" :class="taskTypeMeta(row).value"><component :is="taskTypeMeta(row).icon" :size="17" /></span></el-tooltip></template></el-table-column>
-          <el-table-column label="任务名称" min-width="360"><template #default="{row}"><div class="task-name-cell"><button v-if="row.type==='product_development'" type="button" class="task-name-toggle" @click="toggleTaskModels(row)"><span>{{ taskExpanded(row) ? '⌄' : '›' }}</span><strong>{{ taskDisplayName(row) }}</strong></button><strong v-else>{{ taskDisplayName(row) }}</strong><small v-if="row.type==='product_development'">{{ taskModelSummary(row) }}</small><div v-if="row.type==='product_development' && taskExpanded(row)" class="task-model-list"><article v-for="model in taskModelRows(row)" :key="`${row.id}-${model.index}`"><div><strong>{{ model.label }}</strong><small>目标 {{ model.target }} SKU · 已完成 {{ model.done || 0 }} SKU</small></div><div><el-button size="small" type="success" plain :disabled="Number(model.done||0)>=Number(model.target||0)" @click="completeTaskModel(row,model)"><CircleCheck :size="14" /> 标记完成</el-button><el-button size="small" @click="openTaskModelDraftPicker(row,model)">绑定草稿箱</el-button><el-button size="small" @click="editTaskModel(row,model)">编辑目标</el-button><el-button size="small" plain @click="openTaskSkuConfig(row,model.index)">记录进度</el-button><el-button size="small" type="primary" plain @click="createTaskDraft(row,model)">去开发</el-button></div></article><el-empty v-if="!taskModelRows(row).length" :image-size="36" description="暂未配置车型" /></div></div></template></el-table-column>
+          <el-table-column label="任务名称" min-width="300"><template #default="{row}"><div class="task-name-cell"><strong>{{ taskDisplayName(row) }}</strong><small v-if="row.type==='product_development'">{{ taskModelSummary(row) }}</small></div></template></el-table-column>
           <el-table-column label="优先级" width="152"><template #default="{row}"><el-tag :type="taskPriorityType(row)" effect="light">{{ taskPriorityLabel(row) }}</el-tag></template></el-table-column>
           <el-table-column label="当前进度" width="128"><template #default="{row}"><div class="task-progress-cell"><strong>{{ taskProgress(row) }}%</strong><el-progress :percentage="taskProgress(row)" :show-text="false" :stroke-width="7" :status="taskTone(row)==='overdue'?'exception':taskTone(row)==='done'?'success':undefined" /><small>{{ Number(row.done || 0) }} / {{ Number(row.target || 0) }} {{ row.unit || 'SKU' }}</small></div></template></el-table-column>
-          <el-table-column label="状态" width="105"><template #default="{row}"><span class="task-status" :class="taskTone(row)">{{ taskToneLabel(row) }}</span></template></el-table-column>
-          <el-table-column label="时间" width="205"><template #default="{row}"><div class="task-time-cell"><span><b>开始</b>{{ row.start_at || '未设置' }}</span><span><b>计划</b>{{ row.due_at || '未设置' }}</span><span><b>完成</b>{{ taskCompletedText(row) }}</span></div></template></el-table-column>
-          <el-table-column label="操作" width="178" fixed="right" align="center"><template #default="{row}"><div class="task-row-actions"><template v-if="row.type==='product_development'"><el-tooltip content="编辑任务" placement="top"><el-button circle :icon="Edit3" @click="openTask(row)" /></el-tooltip><el-tooltip content="记录进度" placement="top"><el-button circle :icon="ClipboardCheck" @click="openTaskSkuConfig(row)" /></el-tooltip><el-tooltip content="去开发" placement="top"><el-button circle :icon="Rocket" type="primary" plain @click="createTaskDraft(row,developmentModels(row)[0] || {})" /></el-tooltip></template><el-tooltip v-else content="查看任务" placement="top"><el-button circle :icon="Edit3" @click="openTask(row)" /></el-tooltip><el-tooltip v-if="!row.automation_key" content="删除任务" placement="top"><el-button circle :icon="Trash2" type="danger" plain @click="deleteTask(row)" /></el-tooltip></div></template></el-table-column>
+          <el-table-column label="状态" width="122"><template #default="{row}"><span class="task-status" :class="taskTone(row)"><Clock3 v-if="taskTone(row)==='overdue'" :size="13" />{{ taskToneLabel(row) }}</span></template></el-table-column>
+          <el-table-column label="时间" width="220"><template #default="{row}"><div class="task-time-cell"><span><b>开始</b>{{ row.start_at || '未设置' }}</span><span><b>{{ taskOverdue(row) ? '顺延' : '计划' }}</b>{{ taskPlanDateLabel(row) }}</span><span><b>完成</b>{{ taskCompletedText(row) }}</span></div></template></el-table-column>
+          <el-table-column label="操作" width="220" fixed="right" align="center"><template #default="{row}"><TaskScopeActions v-if="row.type==='product_development'" mode="task" :done="Number(row.done||0)" :target="Number(row.target||0)" :can-delete="!row.automation_key" @complete="completeTask(row)" @drafts="openTaskModelDraftPicker(row)" @edit="openTask(row)" @develop="createTaskDraft(row,developmentModels(row)[0] || {})" @delete="deleteTask(row)" /><TaskScopeActions v-else mode="task" :done="Number(row.done||0)" :target="Number(row.target||0)" :can-complete="false" :can-delete="!row.automation_key" @edit="openTask(row)" @delete="deleteTask(row)" /></template></el-table-column>
         </el-table>
         <div v-if="taskListRows.length" class="task-pagination"><span>共 {{ taskListRows.length }} 项任务</span><el-pagination v-model:current-page="taskPage" :page-size="taskPageSize" background layout="prev, pager, next" :total="taskListRows.length" /></div>
       </el-dialog>
@@ -954,13 +1051,27 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
       <template #footer><el-button @click="taskSkuConfigVisible=false">取消</el-button><el-button type="primary" :loading="taskSkuConfigSaving" @click="saveTaskSkuConfig">保存进度</el-button></template>
     </el-dialog>
     <el-dialog v-model="taskModelEditorVisible" title="编辑车型目标" width="440px" append-to-body destroy-on-close><el-form label-position="top"><el-form-item label="车型"><strong>{{ taskModelEditor.label }}</strong></el-form-item><el-form-item label="目标 SKU 数"><el-input-number v-model="taskModelEditor.target" :min="1" :precision="0" /></el-form-item><el-alert type="info" :closable="false" title="仅修改这个车型的目标，不影响同一核心品名下的其他车型。" /></el-form><template #footer><el-button @click="taskModelEditorVisible=false">取消</el-button><el-button type="primary" :loading="taskSkuConfigSaving" @click="saveTaskModel">保存</el-button></template></el-dialog>
-    <el-dialog v-model="taskModelDraftPickerVisible" :title="`绑定草稿箱 · ${taskModelDraftPickerLabel}`" width="min(760px, 94vw)" append-to-body destroy-on-close>
-      <p class="attach-tip">默认筛选当前任务负责人创建的草稿，可搜索名称、货号、车型或草稿编号；勾选后只绑定到当前车型。</p>
-      <el-input v-model="taskModelDraftPickerKeyword" clearable placeholder="搜索草稿名称、货号、车型或编号" @keyup.enter="reloadTaskModelDraftOptions" @clear="reloadTaskModelDraftOptions"><template #prefix><Search :size="16" /></template><template #append><el-button @click="reloadTaskModelDraftOptions">搜索</el-button></template></el-input>
-      <el-select v-model="taskModelDraftPickerIds" multiple filterable collapse-tags collapse-tags-tooltip clearable placeholder="勾选要绑定的草稿" style="width:100%;margin-top:12px" :loading="taskModelDraftPickerLoading">
-        <el-option v-for="draft in taskModelDraftPickerOptions" :key="draft.id" :value="Number(draft.id)" :label="`${draft.product_name || '未命名草稿'} · ${draft.internal_code || `#${draft.id}`}${[draft.vehicle_brand,draft.vehicle_model].filter(Boolean).length ? ` · ${[draft.vehicle_brand,draft.vehicle_model].filter(Boolean).join(' ')}` : ''}`" />
-      </el-select>
-      <div class="draft-picker-results" v-loading="taskModelDraftPickerLoading"><article v-for="draft in taskModelDraftPickerOptions" :key="draft.id" @click="taskModelDraftPickerIds = taskModelDraftPickerIds.includes(Number(draft.id)) ? taskModelDraftPickerIds.filter(id=>id!==Number(draft.id)) : [...taskModelDraftPickerIds,Number(draft.id)]"><el-checkbox :model-value="taskModelDraftPickerIds.includes(Number(draft.id))" /><div><strong>{{ draft.product_name || '未命名草稿' }}</strong><small>{{ draft.internal_code || `草稿 #${draft.id}` }} · {{ [draft.vehicle_brand,draft.vehicle_model].filter(Boolean).join(' · ') || '未填写车型' }}</small></div><small>{{ shanghaiDateTimeText(draft.created_at) }}</small></article><el-empty v-if="!taskModelDraftPickerLoading && !taskModelDraftPickerOptions.length" :image-size="44" description="当前负责人没有匹配的草稿" /></div>
+    <el-dialog v-model="taskModelDraftPickerVisible" :title="`绑定草稿箱 · ${taskModelDraftPickerLabel}`" width="min(1540px, 96vw)" top="3vh" append-to-body destroy-on-close>
+      <p class="attach-tip">默认筛选当前任务负责人创建的草稿。主图、名称、开发类型、Ozon 类目、创建人员、店铺副本、草稿/上架状态和售价都在一行对照；勾选后可绑定到当前车型或指定车型。</p>
+      <el-input v-model="taskModelDraftPickerKeyword" clearable placeholder="搜索草稿名称、货号、车型、类目或编号" @keyup.enter="reloadTaskModelDraftOptions(true)" @clear="reloadTaskModelDraftOptions(true)"><template #prefix><Search :size="16" /></template><template #append><el-button @click="reloadTaskModelDraftOptions(true)">搜索</el-button></template></el-input>
+      <div v-loading="taskModelDraftPickerLoading" class="task-draft-picker-scroll">
+        <div class="task-draft-picker-grid task-draft-picker-header" :class="{'task-draft-picker-grid-task':taskModelDraftPickerIndex===null}"><span>选</span><span>主图</span><span>商品名称</span><span>类型</span><span>Ozon 类目</span><span>人员</span><span>店铺明细</span><span>草稿状态</span><span>售价</span><span v-if="taskModelDraftPickerIndex===null">绑定车型</span></div>
+        <article v-for="draft in taskModelDraftPickerOptions" :key="draft.id" class="task-draft-picker-grid task-draft-picker-row" :class="{'task-draft-picker-grid-task':taskModelDraftPickerIndex===null}">
+          <el-checkbox :model-value="taskModelDraftPickerIds.includes(Number(draft.id))" @change="toggleTaskDraftSelection(draft)" />
+          <el-image class="task-draft-picker-image" :src="taskDraftImage(draft)" fit="cover" :preview-src-list="taskDraftImage(draft) ? [taskDraftImage(draft)] : []" preview-teleported><template #error><div class="task-draft-image-empty">无图</div></template></el-image>
+          <div class="task-draft-picker-name"><strong>{{ draft.product_name || '未命名草稿' }}</strong><small>{{ draft.internal_code || `草稿 #${draft.id}` }} · {{ [draft.vehicle_brand,draft.vehicle_model].filter(Boolean).join(' · ') || '未填写车型' }}</small></div>
+          <el-tag size="small" effect="plain">{{ developmentTypeLabel(draft.development_type) }}</el-tag>
+          <span class="task-draft-picker-cell" :title="draft.category_name || ''">{{ draft.category_name || '未分类' }}</span>
+          <span class="task-draft-picker-cell">{{ draft.created_by_name || '未知人员' }}</span>
+          <div class="task-draft-shop-list"><span v-for="shop in taskDraftShopCopies(draft)" :key="`${draft.id}-${shop.shop_id}`"><strong>{{ shop.shop_name || `店铺 ${shop.shop_id}` }}</strong><small>{{ shop.status==='prepared' ? '待上架' : shop.status || '已关联' }} · {{ Number(shop.price || 0) }} CNY</small></span><small v-if="!taskDraftShopCopies(draft).length">未绑定店铺</small></div>
+          <div class="task-draft-picker-status"><el-tag size="small" :type="Number(draft.publish_success_count||0)>0?'success':Number(draft.publish_failed_count||0)>0?'danger':'info'">{{ taskDraftStatusText(draft) }}</el-tag><small v-if="Number(draft.publish_record_count||0)">{{ draft.publish_record_count }} 条上架记录</small></div>
+          <strong class="task-draft-picker-price">{{ taskDraftPriceText(draft) }}</strong>
+          <el-select v-if="taskModelDraftPickerIndex===null && taskModelDraftPickerIds.includes(Number(draft.id))" :model-value="taskDraftModelIndex(draft)" size="small" @change="value=>assignTaskDraftModel(draft.id,value)"><el-option v-for="(model,index) in developmentModels(taskModelDraftPickerTask)" :key="`${index}-${model.model_id}`" :label="[model.brand,model.model].filter(Boolean).join(' · ')" :value="index" /></el-select>
+          <span v-else-if="taskModelDraftPickerIndex===null" class="task-draft-unselected">勾选后选择车型</span>
+        </article>
+        <el-empty v-if="!taskModelDraftPickerLoading && !taskModelDraftPickerOptions.length" :image-size="48" description="当前负责人没有匹配的草稿" />
+      </div>
+      <el-pagination v-if="taskModelDraftPickerTotal>taskModelDraftPickerPageSize" class="task-draft-picker-pagination" background layout="prev, pager, next, total" :current-page="taskModelDraftPickerPage" :page-size="taskModelDraftPickerPageSize" :total="taskModelDraftPickerTotal" @current-change="page=>{taskModelDraftPickerPage=page;reloadTaskModelDraftOptions()}" />
       <template #footer><span class="draft-picker-count">已选 {{ taskModelDraftPickerIds.length }} 个草稿</span><el-button @click="taskModelDraftPickerVisible=false">取消</el-button><el-button type="primary" :loading="taskModelDraftPickerSaving" @click="saveTaskModelDraftLinks">保存绑定</el-button></template>
     </el-dialog>
     <TaskCreationDialog v-if="taskCreationVisible" :people="people" :tasks="tasks" :initial-task="taskCreationInitial"
@@ -1003,7 +1114,8 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
 .operational-order-list article{position:relative;min-height:132px;box-sizing:border-box;overflow:visible}.order-alert-main{min-height:108px;padding-bottom:28px;box-sizing:border-box}.order-alert-meta{position:absolute;right:10px;bottom:7px;left:86px;min-height:24px;margin:0;padding-top:3px;box-sizing:border-box;background:#fbfcfe}.order-alert-meta .el-button{position:absolute;right:0;bottom:0}.order-alert-meta small{padding-right:62px}:global(.task-detail-dialog){width:min(1180px,calc(100vw - 32px))!important;max-height:96vh;margin-top:2vh!important}:global(.task-detail-dialog .el-dialog__body){max-height:calc(96vh - 150px);overflow:auto}
 .draft-link-header{display:flex;align-items:center;justify-content:space-between;gap:16px}.draft-link-header h2{margin:0;color:#243247;font-size:20px}.draft-link-header p{margin:5px 0 0;color:#7b8797;font-size:12px}.draft-link-summary,.draft-link-toolbar{display:flex;align-items:center;gap:9px}.draft-link-toolbar{margin-bottom:14px}.draft-link-toolbar>.el-input{flex:1}.draft-link-toolbar>.el-date-editor{flex:0 0 310px}.draft-choice-list{display:grid;grid-template-columns:1fr 1fr;gap:10px;height:590px;padding:2px 5px 2px 2px;overflow:auto}.draft-choice-card{position:relative;display:grid;grid-template-columns:78px minmax(0,1fr) 24px;gap:11px;min-height:108px;padding:10px;border:1px solid #dfe6ef;border-radius:11px;background:#fff;color:inherit;cursor:pointer;text-align:left;transition:border-color .15s,box-shadow .15s,background .15s}.draft-choice-card:hover{border-color:#9bc2f5;box-shadow:0 5px 14px #1f3b6414}.draft-choice-card.selected{border-color:#409eff;background:#f2f8ff;box-shadow:0 0 0 2px #409eff20}.draft-choice-card.linked{border-color:#b7e4c7;background:#f3fbf6;cursor:default;opacity:1}.draft-choice-card>.el-image{width:78px;height:104px;overflow:hidden;border-radius:8px;background:#edf1f6}.draft-choice-empty{display:grid;place-items:center;width:100%;height:100%;color:#98a2b3;font-size:12px}.draft-choice-main{display:grid;align-content:start;gap:6px;min-width:0}.draft-choice-main>strong{display:-webkit-box;overflow:hidden;color:#243247;font-size:13px;line-height:1.45;-webkit-line-clamp:2;-webkit-box-orient:vertical}.draft-choice-main>span{overflow:hidden;color:#3977d5;font-size:11px;white-space:nowrap;text-overflow:ellipsis}.draft-choice-main>div{display:flex;align-items:center;gap:7px;min-width:0}.draft-choice-main>div small{overflow:hidden;color:#667085;white-space:nowrap;text-overflow:ellipsis}.draft-choice-main>small{color:#98a2b3;font-size:10px}.draft-choice-check{align-self:center;color:#cbd5e1}.draft-choice-card.selected .draft-choice-check,.draft-choice-card.linked .draft-choice-check{color:#409eff}.draft-choice-card.linked .draft-choice-check{color:#22a861}.draft-choice-list>.el-empty{grid-column:1/-1;padding:40px 0}.draft-link-dialog .attach-tip{margin:13px 0 0;padding:9px 11px;border-radius:8px;background:#f5f8fc;color:#667085;font-size:12px}:global(.draft-link-dialog){max-width:calc(100vw - 32px)}:global(.draft-link-dialog .el-dialog__body){padding-top:12px}@media(max-width:720px){.draft-choice-list{grid-template-columns:1fr;height:62vh}.draft-link-header,.draft-link-toolbar{align-items:stretch;flex-direction:column}.draft-link-toolbar>.el-date-editor{flex:auto;width:100%}.draft-choice-card{grid-template-columns:68px minmax(0,1fr) 22px}.draft-choice-card>.el-image{width:68px;height:92px}}
 .draft-link-pagination{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:12px}.draft-link-pagination>span{color:#7b8797;font-size:12px}.draft-link-dialog .attach-tip{margin-top:10px}@media(max-width:720px){.draft-link-pagination{align-items:flex-start;flex-direction:column}}
-.task-name-toggle{display:flex;align-items:center;gap:7px;min-width:0;padding:0;border:0;background:transparent;color:inherit;cursor:pointer;text-align:left}.task-name-toggle>span{width:12px;color:#3977d5;font-size:18px;line-height:1}.task-name-cell{display:grid;gap:4px}.task-name-cell small{color:#7b8797;font-size:11px}.task-model-list{display:grid;gap:6px;margin-top:5px;padding:7px 0 2px 19px;border-left:2px solid #dce9fa}.task-model-list article{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 9px;border:1px solid #e5ecf5;border-radius:8px;background:#f9fbfe}.task-model-list article>div:first-child{display:grid;gap:2px;min-width:0}.task-model-list article strong{font-size:12px}.task-model-list article small{font-size:10px}.task-model-list article>div:last-child{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:5px;white-space:normal}@media(max-width:720px){.task-model-list article{align-items:flex-start;flex-direction:column}}.draft-picker-results{display:grid;gap:6px;max-height:360px;overflow:auto;margin-top:12px}.draft-picker-results article{display:flex;align-items:center;gap:10px;padding:9px 11px;border:1px solid #e5ecf5;border-radius:8px;cursor:pointer}.draft-picker-results article:hover{background:#f5f9ff}.draft-picker-results article>div{display:grid;gap:3px;flex:1;min-width:0}.draft-picker-results article strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.draft-picker-results article small,.draft-picker-count{color:#7b8797;font-size:12px}
+:global(.task-list-dialog .task-row-no-expand .el-table__expand-column .el-table__expand-icon){visibility:hidden;pointer-events:none}:global(.task-list-dialog .el-table__expanded-cell){padding:0 16px 14px 50px!important;background:#f7f9fc}.task-model-detail-table{overflow:hidden;border:1px solid #e4ebf4;border-radius:9px}.task-model-subtitle{display:block;margin-top:3px;color:#8491a3;font-size:11px}.task-model-drafts{display:grid;gap:3px}.task-model-empty{color:#98a2b3;font-size:12px}.task-status{align-items:center;gap:4px}.task-draft-picker-scroll{max-height:65vh;overflow:auto;margin-top:12px;border:1px solid #dfe6ef;border-radius:10px}.task-draft-picker-grid{display:grid;grid-template-columns:36px 76px minmax(180px,2fr) 75px minmax(140px,1.2fr) 95px minmax(170px,1.6fr) 105px 85px minmax(150px,1.2fr);align-items:center;gap:9px;min-width:1360px;padding:9px 10px;box-sizing:border-box}.task-draft-picker-header{position:sticky;top:0;z-index:2;background:#f5f8fc;color:#52657e;font-size:11px;font-weight:700}.task-draft-picker-row{border-top:1px solid #edf1f6;background:#fff}.task-draft-picker-row:hover{background:#f7faff}.task-draft-picker-image{width:64px;height:84px;border-radius:7px;background:#f0f3f7}.task-draft-image-empty{display:grid;place-items:center;width:100%;height:100%;color:#98a2b3;font-size:11px}.task-draft-picker-name{display:grid;gap:4px;min-width:0}.task-draft-picker-name strong{display:-webkit-box;overflow:hidden;color:#243247;font-size:12px;line-height:1.4;-webkit-line-clamp:2;-webkit-box-orient:vertical}.task-draft-picker-name small,.task-draft-picker-status small{color:#7b8797;font-size:10px}.task-draft-picker-cell{overflow:hidden;color:#52657e;font-size:11px;text-overflow:ellipsis}.task-draft-shop-list,.task-draft-picker-status{display:grid;gap:4px;min-width:0}.task-draft-shop-list>span{display:grid;gap:2px;padding:4px 6px;border-radius:5px;background:#f5f8fc}.task-draft-shop-list strong{overflow:hidden;color:#344054;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.task-draft-shop-list small,.task-draft-shop-list>small{color:#7b8797;font-size:10px}.task-draft-picker-price{color:#243247;font-size:11px;white-space:nowrap}.task-draft-unselected{color:#a0a9b5;font-size:10px}.task-draft-picker-pagination{justify-content:flex-end;margin-top:12px}.draft-picker-count{margin-right:auto;color:#7b8797;font-size:12px}
+.task-draft-picker-grid:not(.task-draft-picker-grid-task){grid-template-columns:36px 76px minmax(180px,2fr) 75px minmax(140px,1.2fr) 95px minmax(170px,1.6fr) 105px 85px;min-width:1220px}
 </style>
 
 <style>

@@ -10359,6 +10359,7 @@ export async function listingDrafts(query = {}, session) {
   await ensureListingListReadSchema();
   const paged = String(query.paged || "") === "1";
   const lightweight = String(query.lightweight || query.compact || "").trim() === "1";
+  const includeShopDetails = String(query.includeShopDetails || query.include_shop_details || "").trim() === "1";
   const projectOnly = String(query.projectOnly || query.project_only || "").trim() === "1";
   const page = Math.max(1, Number(query.page || 1));
   const pageSize = Math.min(Math.max(1, Number(query.pageSize || query.page_size || 20)), 100);
@@ -10498,7 +10499,10 @@ export async function listingDrafts(query = {}, session) {
       };
     }
     const placeholders = pageIds.map(() => "?").join(", ");
-  const pageRows = await all(`
+    const shopCopiesSelect = includeShopDetails
+      ? `COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('shop_id', c_shop.shop_id, 'shop_name', COALESCE(s_shop.name, CONCAT('店铺 ', c_shop.shop_id)), 'offer_id', c_shop.offer_id, 'status', c_shop.status, 'price', c_shop.price)) FROM listing_shop_copies c_shop LEFT JOIN shops s_shop ON s_shop.id = c_shop.shop_id WHERE c_shop.draft_id = d.id), JSON_ARRAY())`
+      : "JSON_ARRAY()";
+    const pageRows = await all(`
       SELECT
         d.id, d.template_id, d.product_name, d.internal_code,
         '[]' AS source_urls_json,
@@ -10507,6 +10511,7 @@ export async function listingDrafts(query = {}, session) {
         d.color, d.spec, d.quantity, d.status, d.development_type, d.vehicle_brand, d.vehicle_model, d.vehicle_model_key,
         d.created_by_person_id, d.created_at, d.updated_at,
         d.list_price AS draft_variant_price,
+        ${shopCopiesSelect} AS shop_copies_json,
         NULL AS draft_template_price,
         d.list_image_url AS draft_template_primary_image,
         NULL AS draft_variant_primary_image,
@@ -20385,6 +20390,7 @@ function normalizeDraftRow(row) {
     template_payload: templatePayload && Object.keys(templatePayload).length ? templatePayload : null,
     manual_facts: manualFacts,
     ai_payload: parseJson(row.ai_payload_json, {}),
+    shop_copies: parseJson(row.shop_copies_json, []),
     development_type: developmentMeta.development_type,
     vehicle_brand: developmentMeta.vehicle_brand,
     vehicle_model: developmentMeta.vehicle_model,
