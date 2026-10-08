@@ -152,6 +152,8 @@ if ((!skip_build)); then
   DEPLOY_OUTPUT_DIR="$output_dir" \
     OZON_DEPLOY_WORK_DIR="$work_dir" \
     OZON_RELEASE_VERSION="$version" \
+    OZON_RELEASE_BRANCH="$(git branch --show-current)" \
+    OZON_RELEASE_COMMIT="$(git rev-parse HEAD)" \
     npm run package:deploy
 fi
 
