@@ -379,6 +379,8 @@ const manifest = {
   builtAt: new Date().toISOString(),
   version: releaseVersion,
   channel: releaseChannel,
+  branch: process.env.OZON_RELEASE_BRANCH || "",
+  commit: process.env.OZON_RELEASE_COMMIT || "",
   frontendOutput: "public/vue-apps",
   startupCommand: "npm start",
   includedFiles: filesToCopy,
