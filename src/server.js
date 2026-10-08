@@ -83,6 +83,7 @@ import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
 import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
+import { createTenantMysql, listTenantsMysql, tenantMembersMysql, tenantMembershipsMysql, upsertTenantMemberMysql } from "./services/tenants.js";
 
 const services = { ...mysqlRuntimeServices, ...systemNotificationServices };
 const runtimeReadiness = {
@@ -234,6 +235,14 @@ const routes = {
   "GET /api/system/info": () => systemInfo(),
   "GET /api/system/update-status": (req) => globalUpdateStatus(req.query || {}),
   "GET /api/system-monitoring": (req) => systemMonitoringOverview(req.query || {}),
+  "GET /api/tenants": () => listTenantsMysql(),
+  "POST /api/tenants": async (req) => createTenantMysql(await readJson(req)),
+  "GET /api/tenants/mine": (req) => tenantMembershipsMysql(req._session?.personId),
+  "GET /api/tenants/members": (req) => tenantMembersMysql(req.query?.tenant_id || req.query?.tenantId),
+  "PUT /api/tenants/members": async (req) => {
+    const body = await readJson(req);
+    return upsertTenantMemberMysql(body.tenant_id || body.tenantId, body);
+  },
   "POST /api/system/update-status": async (req) => updateGlobalUpdateStatus(await readJson(req)),
   "GET /api/ai-provider/config": () => services.aiProviderConfig(),
   "GET /api/ai-provider/presets": () => services.aiProviderPresets(),

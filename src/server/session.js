@@ -2,6 +2,7 @@ import { getRoles, primaryRole } from "../shared/permissions.js";
 import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { hashPassword, verifyPassword, isLegacyHash, validatePasswordStrength } from "../auth-password.js";
+import { switchSessionTenantMysql, tenantMembershipsMysql } from "../services/tenants.js";
 import {
   cleanExpiredSessionsMysql,
   createSessionMysql,
@@ -68,8 +69,8 @@ export function extractToken(req) {
   return req.headers.authorization?.replace(/^Bearer\s+/, "") || "";
 }
 
-function authUser(row) {
-  return { id: row.id, name: row.name, role: primaryRole(row), roles: getRoles(row), username: row.username, avatar_url: row.avatar_url || "" };
+function authUser(row, session = null) {
+  return { id: row.id, name: row.name, role: primaryRole(row), roles: getRoles(row), username: row.username, avatar_url: row.avatar_url || "", tenant: session?.tenant || null };
 }
 
 export function createAuthHandler(readJson, overrides = {}) {
@@ -83,6 +84,8 @@ export function createAuthHandler(readJson, overrides = {}) {
     updatePersonPassword: updatePersonPasswordMysql,
     updateOwnProfile: updateOwnProfileMysql,
     updatePersonWechatIdentity: updatePersonWechatIdentityMysql,
+    switchSessionTenant: switchSessionTenantMysql,
+    tenantMemberships: tenantMembershipsMysql,
     hashPassword,
     verifyPassword,
     isLegacyHash,
@@ -255,7 +258,18 @@ export function createAuthHandler(readJson, overrides = {}) {
         if (!session) return { error: "未登录", __status: 401 };
         const row = await deps.findPersonById(session.personId);
         if (!row || !row.active) return { error: "未登录", __status: 401 };
-        return authUser(row);
+        return { ...authUser(row, session), tenants: await deps.tenantMemberships(session.personId) };
+      };
+    }
+
+    if (key === "POST /api/auth/switch-tenant") {
+      return async () => {
+        const token = extractToken(req);
+        const session = await deps.getSession(token);
+        if (!session) return { error: "未登录", __status: 401 };
+        const body = await readJson(req);
+        const tenant = await deps.switchSessionTenant(token, session.personId, body.tenant_id || body.tenantId);
+        return { ok: true, tenant };
       };
     }
 

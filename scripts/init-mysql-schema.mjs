@@ -81,6 +81,28 @@ CREATE TABLE IF NOT EXISTS system_notifications (
   UNIQUE KEY uk_system_notifications_dedupe (dedupe_key),
   KEY idx_system_notifications_recipient_status (recipient_person_id, status, created_at),
   KEY idx_system_notifications_created (created_at)
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS tenants (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  slug VARCHAR(80) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_tenants_slug (slug)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS tenant_members (
+  tenant_id BIGINT UNSIGNED NOT NULL,
+  person_id BIGINT UNSIGNED NOT NULL,
+  role VARCHAR(32) NOT NULL DEFAULT 'member',
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (tenant_id, person_id),
+  KEY idx_tenant_members_person (person_id, active),
+  KEY idx_tenant_members_tenant (tenant_id, active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS finance_companies (
@@ -1282,6 +1304,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   name VARCHAR(255) NOT NULL,
   role VARCHAR(64) NOT NULL,
   username VARCHAR(255) NULL,
+  active_tenant_id BIGINT UNSIGNED NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   expires_at DATETIME NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

@@ -17,6 +17,7 @@ export function authorizeApiRequest(req, parts = []) {
   const require = (...permissions) => permissions.some(permission => hasPermission(session, permission)) ? { allowed: true } : deny();
 
   if (["auth", "user-preferences", "system-notifications", "ready", "image-proxy"].includes(resource)) return { allowed: true };
+  if (resource === "tenants") return deny("仅平台管理员可以管理企业和企业成员");
   if (read && ["dashboard", "people", "shops", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules", "order-cancellation-rules", "order-quality-rules"].includes(resource)) return { allowed: true };
   if (read && ["system/info", "system/update-status", "db/seller-analytics/plugin-status"].includes(path)) return { allowed: true };
   if (read && path === "settings/packaging-fee-rule") return require("inventory.read");

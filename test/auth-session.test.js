@@ -9,6 +9,8 @@ function createNoSessionOverrides() {
     findPersonByWechatIdentity: async () => null,
     updatePersonPassword: async () => {},
     updatePersonWechatIdentity: async () => {},
+    tenantMemberships: async () => [],
+    switchSessionTenant: async () => ({ id: 1, name: "默认企业" }),
     createSession: async () => "stub-token",
     destroySession: async () => {},
     clearRateLimit: () => {},
