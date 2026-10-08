@@ -231,7 +231,7 @@ const taskPeopleGroups = computed(() => {
     groups.get(key).rows.push(row);
   }
   return [...groups.values()].map((group) => ({ ...group,
-    rows: group.rows.sort((a, b) => String(a.due_at || "9999-12-31").localeCompare(String(b.due_at || "9999-12-31"))),
+    rows: group.rows.sort(compareTaskPriorityProgress),
     skuTotal: group.rows.reduce((sum, row) => sum + Number(row.target || 0), 0),
     doneTotal: group.rows.reduce((sum, row) => sum + Number(row.done || 0), 0)
   })).sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
@@ -245,7 +245,7 @@ const timelineTasks = computed(() => {
   });
 });
 const timelineGroups = computed(() => timelineTasks.value.map((row) => ({ ...row, rows: [row] })));
-const taskListRows = computed(() => audienceTasks.value);
+const taskListRows = computed(() => [...audienceTasks.value].sort(compareTaskPriorityProgress));
 const taskListSummary = computed(() => ({
   tasks: taskListRows.value.length,
   skuTotal: taskListRows.value.reduce((sum, row) => sum + Number(row.target || 0), 0),
@@ -288,6 +288,8 @@ function taskDate(row) {
 }
 function taskStartDateLabel(row) { return row.start_at || shanghaiDateText(row.created_at, { assumeUtcWhenNaive: true }) || "未设置"; }
 function taskProgress(row) { const target = Number(row.target || 0); if (!target) return row.status === "done" ? 100 : 0; return Math.min(row.development_plan && row.status !== "done" ? 99 : 100, Math.round(Number(row.done || 0) / target * 100)); }
+function taskPriorityScore(row) { return ({ urgent_important: 10, high: 10, urgent_unimportant: 8, important_not_urgent: 7, medium: 7, not_urgent_unimportant: 6, low: 6 })[row?.priority] || 7; }
+function compareTaskPriorityProgress(a, b) { return taskPriorityScore(b) - taskPriorityScore(a) || taskProgress(a) - taskProgress(b); }
 function taskOverdue(row) { const due = taskDate({ ...row, status: "done" }); return row.status !== "done" && !["closed", "cancelled"].includes(row.status) && Boolean(due && due.getTime() < taskClock.value); }
 function taskOverdueInfo(row) {
   if (!taskOverdue(row)) return null;
