@@ -117,6 +117,12 @@ test("product development center covers the inventory-driven management views", 
   assert.match(viewSource, /label="时间"/);
   assert.match(viewSource, /taskCompletedText/);
   assert.match(viewSource, /taskDisplayName/);
+  assert.match(viewSource, /taskModelSummary/);
+  assert.match(viewSource, /taskExpanded/);
+  assert.match(viewSource, /toggleTaskModels/);
+  assert.match(viewSource, /编辑目标/);
+  assert.match(viewSource, /记录车型进度/);
+  assert.match(viewSource, /车型目标已更新，不影响其他车型/);
   assert.doesNotMatch(viewSource, /el-table-column label="开发范围"/);
   assert.match(viewSource, /记录进度/);
   assert.match(viewSource, /编辑任务/);
