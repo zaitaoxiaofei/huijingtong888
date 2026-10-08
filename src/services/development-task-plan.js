@@ -51,6 +51,7 @@ export function normalizeDevelopmentPlan(value, body, { allowUnassigned = false 
       model: rowNonAuto ? "非汽车" : String(row.model || "").trim(),
       target,
       draft_ids: ids,
+      ...(row.completed === true ? { completed: true } : {}),
       ...(manualSkus ? { manual_skus: manualSkus } : {})
     };
   });
@@ -96,7 +97,9 @@ export function developmentPlanProgress(plan, drafts) {
   const models = plan.models.map((row) => {
     const linked = row.draft_ids.map((id) => byId.get(id)).filter(Boolean);
     const group = groupProgress.get(JSON.stringify([row.brand || plan.brand, row.category || plan.category]));
-    const done = group
+    const done = row.completed
+      ? row.target
+      : group
       ? Math.min(row.target, group.remaining)
       : Array.isArray(row.manual_skus) ? row.manual_skus.length : linked.reduce((sum, draft) => sum + Number(draft.sku_count || 0), 0);
     if (group) group.remaining = Math.max(0, group.remaining - done);
