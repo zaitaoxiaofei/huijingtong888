@@ -279,21 +279,25 @@ function taskDate(row) {
     ? `${text}T21:00:00+08:00`
     : /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text : `${text.replace(" ", "T")}Z`;
   const date = new Date(normalized);
-  return Number.isNaN(date.getTime()) ? null : date;
+  if (Number.isNaN(date.getTime())) return null;
+  if (row.due_at && row.status !== "done" && !["closed", "cancelled"].includes(row.status) && date.getTime() < taskClock.value) {
+    const elapsedWeeks = Math.floor((taskClock.value - date.getTime()) / (7 * 86400000)) + 1;
+    date.setTime(date.getTime() + elapsedWeeks * 7 * 86400000);
+  }
+  return date;
 }
 function taskStartDateLabel(row) { return row.start_at || shanghaiDateText(row.created_at, { assumeUtcWhenNaive: true }) || "未设置"; }
 function taskProgress(row) { const target = Number(row.target || 0); if (!target) return row.status === "done" ? 100 : 0; return Math.min(row.development_plan && row.status !== "done" ? 99 : 100, Math.round(Number(row.done || 0) / target * 100)); }
-function taskOverdue(row) { const due = taskDate({ due_at: row.due_at }); return row.status !== "done" && Boolean(due && due.getTime() < taskClock.value); }
+function taskOverdue(row) { const due = taskDate({ ...row, status: "done" }); return row.status !== "done" && !["closed", "cancelled"].includes(row.status) && Boolean(due && due.getTime() < taskClock.value); }
 function taskOverdueInfo(row) {
   if (!taskOverdue(row)) return null;
-  const due = taskDate({ due_at: row.due_at });
+  const due = taskDate({ ...row, status: "done" });
   const overdueDays = Math.max(1, Math.floor((taskClock.value - due.getTime()) / 86400000));
   const weeks = Math.floor(overdueDays / 7);
   const days = overdueDays % 7;
-  const nextDue = due.getTime() + (weeks + 1) * 7 * 86400000;
-  return { label: `超时 ${weeks ? `${weeks} 周` : ""}${days ? `${weeks ? " " : ""}${days} 天` : weeks ? "" : "1 天"}`, nextDue: shanghaiDateKey(new Date(nextDue)) };
+  return { label: `超时 ${weeks ? `${weeks} 周` : ""}${days ? `${weeks ? " " : ""}${days} 天` : weeks ? "" : "1 天"}`, nextDue: shanghaiDateKey(taskDate(row)) };
 }
-function taskTone(row) { if (["closed", "cancelled"].includes(row.status)) return "closed"; if (taskOverdue(row) || row.status === "delayed") return "overdue"; if (row.status === "done") return "done"; const due = taskDate({ due_at: row.due_at }); if (due && due.getTime() - taskClock.value < 3 * 86400000) return "risk"; return "doing"; }
+function taskTone(row) { if (["closed", "cancelled"].includes(row.status)) return "closed"; if (taskOverdue(row) || row.status === "delayed") return "overdue"; if (row.status === "done") return "done"; const due = taskDate(row); if (due && due.getTime() - taskClock.value < 3 * 86400000) return "risk"; return "doing"; }
 function taskToneLabel(row) { if (taskTone(row) === "overdue") return taskOverdueInfo(row)?.label || "已超时"; return ({ done: "按时完成", doing: row.status === "todo" ? "待开始" : "进行中", risk: "有风险", closed: "已关闭" })[taskTone(row)]; }
 function taskPlanDateLabel(row) { return taskOverdueInfo(row)?.nextDue ? `顺延至 ${taskOverdueInfo(row).nextDue}` : row.due_at || "未设置"; }
 function taskTimelineX(row) { const point = taskDate(row); if (!point) return 2; const [start, end] = taskRangeDates.value; return Math.max(2, Math.min(98, (point - start) / Math.max(1, end - start) * 100)); }
