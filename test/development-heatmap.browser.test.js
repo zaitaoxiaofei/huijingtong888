@@ -8,7 +8,7 @@ import vue from '@vitejs/plugin-vue';
 import { chromium } from 'playwright-core';
 
 test('development heatmap supports period-aware planning, saved ordering, metrics, brand aggregation and task details', {skip:process.env.RUN_TASK_BROWSER_TESTS!=='1'}, async()=>{
- const entry=`import {createApp,h} from 'vue';import ElementPlus from 'element-plus';import 'element-plus/dist/index.css';import Heatmap from '/frontend/admin/components/team/DevelopmentHeatmap.vue';createApp({render:()=>h(Heatmap,{onOpenTask:row=>window.openedTask=row.id})}).use(ElementPlus).mount('#app');`;
+ const entry=`import {createApp,h} from 'vue';import ElementPlus from 'element-plus';import 'element-plus/dist/index.css';import Heatmap from '/frontend/admin/components/team/DevelopmentHeatmap.vue';createApp({render:()=>h(Heatmap,{onOpenTask:payload=>{window.openedTask=payload.task.id;window.openedModelIndex=payload.modelIndex;window.openedDimension=payload.dimension}})}).use(ElementPlus).mount('#app');`;
  const output = await fs.mkdtemp(path.join(os.tmpdir(), 'heatmap-browser-'));
  await build({ configFile:false, root:process.cwd(), logLevel:'error', plugins:[vue(), {
    name:'heatmap-fixture', resolveId(id){if(id==='virtual:heatmap')return '\0heatmap';}, load(id){if(id==='\0heatmap')return entry;}
@@ -30,7 +30,7 @@ test('development heatmap supports period-aware planning, saved ordering, metric
   const brands=['TENET','HAVAL','CHERY','GEELY','LADA','CHANGAN','VOLGA','JELAND'];
   const categories=['汽车钥匙保护壳','门槛条','脚垫','方向盘套','后备箱垫','遮阳帘','气嘴帽','座椅保护套'];
   for(let b=0;b<brands.length;b++)for(let c=0;c<categories.length;c++){
-   const id=b*10+c+1;tasks.push({id,type:'product_development',title:`${brands[b]} ${categories[c]}开发`,owner_name:'测试负责人',created_at:today,due_at:'2026-10-31',priority:b===0&&c===0?'urgent_important':'medium',development_plan:{brand:brands[b],category:categories[c],models:[{model_id:b+1,model:['T7','JOLION','TIGGO 7','MONJARO','VESTA','CS55','K50','J6'][b],target:30,drafts:[{id,count:Math.max(0,40-b*4-c*3),created_at:today}]}]}});
+   const id=b*10+c+1;tasks.push({id,type:'product_development',title:`${brands[b]} ${categories[c]}开发`,owner_name:'测试负责人',owner_person_id:b+1,owner_avatar_url:'https://example.test/avatar.png',created_at:today,due_at:'2026-10-31',priority:b===0&&c===0?'urgent_important':'medium',status:b===0&&c===1?'done':'doing',development_plan:{brand:brands[b],category:categories[c],models:[{model_id:b+1,model:['T7','JOLION','TIGGO 7','MONJARO','VESTA','CS55','K50','J6'][b],target:30,drafts:[{id,count:Math.max(0,40-b*4-c*3),created_at:today}]}]}});
   }
   tasks.push({id:200,type:'product_development',title:'收纳袋开发',created_at:today,development_plan:{brand:'非汽车',scope:'non_automotive',category:'收纳袋',models:[{model_id:0,model:'非汽车',target:20,drafts:[{id:200,count:9,created_at:today}]}]}});
   let savedPlans=[];
@@ -38,13 +38,18 @@ test('development heatmap supports period-aware planning, saved ordering, metric
   await page.route('**/api/team/tasks',route=>route.fulfill({status:fail?500:200,contentType:'application/json',body:JSON.stringify(fail?{error:'测试加载失败'}:tasks)}));
   await page.goto('http://localhost:8788/admin.html');
   const cell=page.getByRole('button',{name:'TENET · T7 · 汽车钥匙保护壳：1 个任务',exact:true});await cell.waitFor();
-  await page.getByRole('button',{name:'人工排程'}).click();await cell.click();await page.getByRole('button',{name:'按选择顺序编号'}).click();await page.getByRole('button',{name:'保存排程'}).click();await page.locator('.cell-sequence').filter({hasText:'1'}).waitFor();assert.equal(savedPlans[0].sequence,1);
+  assert.match(await cell.evaluate(node=>getComputedStyle(node).backgroundColor),/rgb\(220, 38, 38\)/);
+  const completedCell=page.getByRole('button',{name:'TENET · T7 · 门槛条：1 个任务',exact:true});assert.match(await completedCell.evaluate(node=>getComputedStyle(node).backgroundColor),/rgb\(220, 252, 231\)/);
+  await cell.hover();await page.getByText('TENET 汽车钥匙保护壳开发',{exact:true}).waitFor();
+  const viewportBox=await page.locator('.heatmap-viewport').boundingBox();await page.mouse.move(viewportBox.x+viewportBox.width/2,viewportBox.y+viewportBox.height/2);await page.mouse.wheel(0,-120);await page.getByText('84%',{exact:true}).waitFor();
+  for(let i=0;i<8;i++)await page.getByRole('button',{name:'放大热力图'}).click();const viewport=page.locator('.heatmap-viewport');const beforePan=await viewport.evaluate(node=>node.scrollLeft);const cellBox=await cell.boundingBox();await page.mouse.move(cellBox.x+cellBox.width/2,cellBox.y+cellBox.height/2);await page.mouse.down();await page.waitForTimeout(220);await page.mouse.move(cellBox.x+cellBox.width/2-100,cellBox.y+cellBox.height/2);await page.mouse.up();assert.ok(await viewport.evaluate(node=>node.scrollLeft)>beforePan);await page.getByRole('button',{name:'重置'}).click();
+  await page.getByRole('button',{name:'人工排程'}).click();await cell.hover();assert.match(await cell.evaluate(node=>getComputedStyle(node).animationName),/planning-focus|selected-pulse/);await cell.click({force:true});await page.getByText(/已选 1 个车型 · 1 个任务/).waitFor();assert.ok((await cell.getAttribute('class')).includes('selected'));await page.getByRole('button',{name:'按选择顺序编号'}).click();await page.getByRole('button',{name:'保存排程'}).click();await page.locator('.cell-sequence').filter({hasText:'1'}).waitFor();assert.equal(savedPlans[0].sequence,1);
   await page.getByRole('button',{name:'退出排程'}).click();
   await page.screenshot({path:'/tmp/development-heatmap.png',fullPage:true});
-  const updatedCell=page.getByRole('button',{name:'TENET · T7 · 汽车钥匙保护壳：1 个任务',exact:true});await updatedCell.click();await page.getByRole('dialog').getByRole('button',{name:'查看任务'}).click();assert.equal(await page.evaluate(()=>window.openedTask),1);
-  await page.getByText('按品牌',{exact:true}).click();await page.getByRole('button',{name:'TENET · 汽车钥匙保护壳：1 个任务',exact:true}).waitFor();
+  const updatedCell=page.getByRole('button',{name:'TENET · T7 · 汽车钥匙保护壳：1 个任务',exact:true});await updatedCell.click();assert.equal(await page.evaluate(()=>window.openedTask),1);assert.equal(await page.evaluate(()=>window.openedModelIndex),0);assert.equal(await page.evaluate(()=>window.openedDimension),'model');
+  await page.getByText('按品牌',{exact:true}).click();const brandCell=page.getByRole('button',{name:'TENET · 汽车钥匙保护壳：1 个任务',exact:true});await brandCell.waitFor();await page.getByRole('button',{name:'人工排程'}).click();await brandCell.click();await page.getByText(/已选 1 个品牌 · 1 个任务/).waitFor();await page.getByRole('button',{name:'退出排程'}).click();
   await page.locator('.el-select').filter({has:page.getByRole('combobox',{name:'开发范围',exact:true})}).click();await page.getByRole('option',{name:'非汽车',exact:true}).click();
-  assert.equal(await page.locator('.heatmap-scroll tbody tr').count(),1);
+  assert.equal(await page.locator('.heatmap-row-head').count(),1);
   await page.getByRole('button',{name:'非汽车 · 收纳袋：1 个任务',exact:true}).waitFor();
   await page.locator('.el-select').filter({has:page.getByRole('combobox',{name:'统计数量'})}).click();await page.getByRole('option',{name:'计划开发 SKU',exact:true}).click();
   await page.getByRole('button',{name:'非汽车 · 收纳袋：20 个 SKU',exact:true}).waitFor();
