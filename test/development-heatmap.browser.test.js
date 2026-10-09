@@ -7,7 +7,7 @@ import path from 'node:path';
 import vue from '@vitejs/plugin-vue';
 import { chromium } from 'playwright-core';
 
-test('development heatmap supports period-aware planning, saved ordering, metrics, brand aggregation and task details', {skip:process.env.RUN_TASK_BROWSER_TESTS!=='1'}, async()=>{
+test('development heatmap uses priority quadrants, granular task points, click-to-order planning and stable pan/zoom', {skip:process.env.RUN_TASK_BROWSER_TESTS!=='1'}, async()=>{
  const entry=`import {createApp,h} from 'vue';import ElementPlus from 'element-plus';import 'element-plus/dist/index.css';import Heatmap from '/frontend/admin/components/team/DevelopmentHeatmap.vue';createApp({render:()=>h(Heatmap,{onOpenTask:payload=>{window.openedTask=payload.task.id;window.openedModelIndex=payload.modelIndex;window.openedDimension=payload.dimension}})}).use(ElementPlus).mount('#app');`;
  const output = await fs.mkdtemp(path.join(os.tmpdir(), 'heatmap-browser-'));
  await build({ configFile:false, root:process.cwd(), logLevel:'error', plugins:[vue(), {
@@ -37,22 +37,27 @@ test('development heatmap supports period-aware planning, saved ordering, metric
   await page.route('**/api/team/development-heatmap-orders**',async route=>{if(route.request().method()==='PUT'){const body=route.request().postDataJSON();savedPlans=[...savedPlans,...body.entries];return route.fulfill({contentType:'application/json',body:JSON.stringify({ok:true,saved:body.entries.length})});}return route.fulfill({contentType:'application/json',body:JSON.stringify(savedPlans)});});
   await page.route('**/api/team/tasks',route=>route.fulfill({status:fail?500:200,contentType:'application/json',body:JSON.stringify(fail?{error:'测试加载失败'}:tasks)}));
   await page.goto('http://localhost:8788/admin.html');
-  const cell=page.getByRole('button',{name:'TENET · T7 · 汽车钥匙保护壳：1 个任务',exact:true});await cell.waitFor();
+  const cell=page.getByRole('button',{name:'汽车钥匙保护壳 · TENET · T7：1 个任务',exact:true});await cell.waitFor();
   assert.match(await cell.evaluate(node=>getComputedStyle(node).backgroundColor),/rgb\(220, 38, 38\)/);
-  const completedCell=page.getByRole('button',{name:'TENET · T7 · 门槛条：1 个任务',exact:true});assert.match(await completedCell.evaluate(node=>getComputedStyle(node).backgroundColor),/rgb\(220, 252, 231\)/);
+  assert.equal(await page.locator('.quadrant-10 .quadrant-point').count(),1);
+  assert.ok(await page.locator('.quadrant-7 .quadrant-point').count()>0);
+  const completedCell=page.getByRole('button',{name:'门槛条 · TENET · T7：1 个任务',exact:true});assert.match(await completedCell.evaluate(node=>getComputedStyle(node).backgroundColor),/rgb\(220, 252, 231\)/);
   await cell.hover();await page.getByText('TENET 汽车钥匙保护壳开发',{exact:true}).waitFor();
-  const viewportBox=await page.locator('.heatmap-viewport').boundingBox();await page.mouse.move(viewportBox.x+viewportBox.width/2,viewportBox.y+viewportBox.height/2);await page.mouse.wheel(0,-120);await page.getByText('84%',{exact:true}).waitFor();
-  for(let i=0;i<8;i++)await page.getByRole('button',{name:'放大热力图'}).click();const viewport=page.locator('.heatmap-viewport');const beforePan=await viewport.evaluate(node=>node.scrollLeft);const cellBox=await cell.boundingBox();await page.mouse.move(cellBox.x+cellBox.width/2,cellBox.y+cellBox.height/2);await page.mouse.down();await page.waitForTimeout(220);await page.mouse.move(cellBox.x+cellBox.width/2-100,cellBox.y+cellBox.height/2);await page.mouse.up();assert.ok(await viewport.evaluate(node=>node.scrollLeft)>beforePan);await page.getByRole('button',{name:'重置'}).click();
-  await page.getByRole('button',{name:'人工排程'}).click();await cell.hover();assert.match(await cell.evaluate(node=>getComputedStyle(node).animationName),/planning-focus|selected-pulse/);await cell.click({force:true});await page.getByText(/已选 1 个车型 · 1 个任务/).waitFor();assert.ok((await cell.getAttribute('class')).includes('selected'));await page.getByRole('button',{name:'按选择顺序编号'}).click();await page.getByRole('button',{name:'保存排程'}).click();await page.locator('.cell-sequence').filter({hasText:'1'}).waitFor();assert.equal(savedPlans[0].sequence,1);
+  const viewportBox=await page.locator('.heatmap-viewport').boundingBox();await page.mouse.move(viewportBox.x+viewportBox.width/2,viewportBox.y+viewportBox.height/2);await page.mouse.wheel(0,-120);await page.getByText('106%',{exact:true}).waitFor();
+  for(let i=0;i<8;i++)await page.getByRole('button',{name:'放大热力图'}).click();const viewport=page.locator('.heatmap-viewport');const beforePan=await viewport.evaluate(node=>node.scrollLeft);const cellBox=await cell.boundingBox();await page.mouse.move(cellBox.x+cellBox.width/2,cellBox.y+cellBox.height/2);await page.mouse.down();await page.mouse.move(cellBox.x+cellBox.width/2-100,cellBox.y+cellBox.height/2);await page.mouse.up();const panState=await viewport.evaluate(node=>({left:node.scrollLeft,top:node.scrollTop,width:node.scrollWidth,clientWidth:node.clientWidth,classes:node.className}));assert.ok(panState.left>beforePan||panState.top>0,JSON.stringify({beforePan,panState}));await page.getByRole('button',{name:'重置'}).click();
+  await page.getByRole('button',{name:'人工排程'}).click();await cell.hover();assert.match(await cell.evaluate(node=>getComputedStyle(node).animationName),/plan-point-pulse/);await cell.click({force:true});await page.getByText(/已选 1 个车型 · 1 个任务/).waitFor();assert.ok((await cell.getAttribute('class')).includes('selected'));assert.equal(await cell.locator('.point-sequence').textContent(),'1');
+  const secondPoint=page.locator('.quadrant-point[aria-label*="门槛条 · TENET · T7"]');await secondPoint.click({force:true});await page.getByText(/已选 1 个车型 · 2 个任务/).waitFor();assert.equal(await page.locator('.quadrant-point.selected .point-sequence').count(),2);
+  await cell.click({button:'right',force:true});await page.getByText(/已选 1 个车型 · 1 个任务/).waitFor();assert.equal(await secondPoint.locator('.point-sequence').textContent(),'1');
+  await cell.click({force:true});assert.equal(await cell.locator('.point-sequence').textContent(),'2');await page.getByRole('button',{name:'保存排程'}).click();await page.locator('.point-sequence').filter({hasText:'1'}).waitFor();assert.deepEqual(savedPlans.map(plan=>plan.sequence),[2,1]);
   await page.getByRole('button',{name:'退出排程'}).click();
   await page.screenshot({path:'/tmp/development-heatmap.png',fullPage:true});
-  const updatedCell=page.getByRole('button',{name:'TENET · T7 · 汽车钥匙保护壳：1 个任务',exact:true});await updatedCell.click();assert.equal(await page.evaluate(()=>window.openedTask),1);assert.equal(await page.evaluate(()=>window.openedModelIndex),0);assert.equal(await page.evaluate(()=>window.openedDimension),'model');
-  await page.getByText('按品牌',{exact:true}).click();const brandCell=page.getByRole('button',{name:'TENET · 汽车钥匙保护壳：1 个任务',exact:true});await brandCell.waitFor();await page.getByRole('button',{name:'人工排程'}).click();await brandCell.click();await page.getByText(/已选 1 个品牌 · 1 个任务/).waitFor();await page.getByRole('button',{name:'退出排程'}).click();
+  const updatedCell=page.getByRole('button',{name:'汽车钥匙保护壳 · TENET · T7：1 个任务',exact:true});await updatedCell.click();assert.equal(await page.evaluate(()=>window.openedTask),1);assert.equal(await page.evaluate(()=>window.openedModelIndex),0);assert.equal(await page.evaluate(()=>window.openedDimension),'model');
+  await page.getByText('按品牌',{exact:true}).click();const brandCell=page.getByRole('button',{name:'汽车钥匙保护壳 · TENET：1 个任务',exact:true});await brandCell.waitFor();await page.getByRole('button',{name:'人工排程'}).click();await brandCell.click();await page.getByText(/已选 1 个品牌 · 1 个任务/).waitFor();await page.getByRole('button',{name:'退出排程'}).click();
   await page.locator('.el-select').filter({has:page.getByRole('combobox',{name:'开发范围',exact:true})}).click();await page.getByRole('option',{name:'非汽车',exact:true}).click();
-  assert.equal(await page.locator('.heatmap-row-head').count(),1);
-  await page.getByRole('button',{name:'非汽车 · 收纳袋：1 个任务',exact:true}).waitFor();
+  assert.equal(await page.locator('.quadrant-point').count(),1);
+  await page.getByRole('button',{name:'收纳袋 · 非汽车：1 个任务',exact:true}).waitFor();
   await page.locator('.el-select').filter({has:page.getByRole('combobox',{name:'统计数量'})}).click();await page.getByRole('option',{name:'计划开发 SKU',exact:true}).click();
-  await page.getByRole('button',{name:'非汽车 · 收纳袋：20 个 SKU',exact:true}).waitFor();
+  await page.getByRole('button',{name:'收纳袋 · 非汽车：20 个 SKU',exact:true}).waitFor();
   await page.getByText('自定义',{exact:true}).click();
   await page.getByPlaceholder('开始日期').fill('2025-01-01');await page.getByPlaceholder('结束日期').fill('2025-01-31');await page.getByPlaceholder('结束日期').press('Enter');
   await page.getByText('当前范围暂无可归类的开发记录，可调整时间或新增开发任务',{exact:true}).waitFor();
