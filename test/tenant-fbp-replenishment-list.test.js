@@ -31,9 +31,11 @@ test("only the FBP replenishment collection route is opened and its tenant comes
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "adjustments"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "adjustments"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "adjustments", "reason"], "POST").allowed, true);
-  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "link"], "POST").allowed, false);
-  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "unlink"], "POST").allowed, false);
-  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-batches", "fill-preview"], "GET").allowed, false);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "link"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "unlink"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-batches", "fill-preview"], "GET").allowed, true);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "merge"], "POST").allowed, false);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-batches", "fill-results"], "POST").allowed, false);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "status"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "inventory-allocation"], "POST").allowed, false);
   const server = read("../src/server.js");

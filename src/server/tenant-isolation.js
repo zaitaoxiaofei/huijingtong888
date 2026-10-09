@@ -37,6 +37,10 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   if (tenantFbpDraftMutation) return { allowed: true };
   const tenantFbpAdjustmentRead = parts[1] === "fbp-replenishment-orders" && parts.length === 4 && parts[2] === "items" && parts[3] === "adjustments" && verb === "GET";
   if (tenantFbpAdjustmentRead) return { allowed: true };
+  const tenantFbpBatchLink = parts[1] === "fbp-replenishment-orders" && parts.length === 3 && parts[2] === "link" && verb === "POST";
+  const tenantFbpBatchUnlink = parts[1] === "fbp-replenishment-orders" && parts.length === 3 && parts[2] === "unlink" && verb === "POST";
+  const tenantFbpBatchPreview = parts[1] === "fbp-replenishment-batches" && parts.length === 3 && parts[2] === "fill-preview" && verb === "GET";
+  if (tenantFbpBatchLink || tenantFbpBatchUnlink || tenantFbpBatchPreview) return { allowed: true };
   const tenantFbpBarcodePrint = parts[1] === "fbp-replenishment-orders" && parts.length === 4 && parts[2] === "items" && parts[3] === "barcode-printed" && verb === "POST";
   if (tenantFbpBarcodePrint) return { allowed: true };
   if (parts[1] === "sku-order-tracking" && parts.length === 2 && ["GET", "POST"].includes(verb)) return { allowed: true };
