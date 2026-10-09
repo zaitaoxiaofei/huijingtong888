@@ -1,3 +1,5 @@
+import { tenantIdFromRequest } from "./sellerAnalytics.js";
+
 const PRODUCT_SAVE_BODY_LIMIT_BYTES = 128 * 1024 * 1024;
 
 function readProductSaveJson(readJson, req) {
@@ -10,7 +12,7 @@ export function createCatalogRoutes({ services, readJson }) {
     "GET /api/products": (req, url) => services.products(Object.fromEntries(url.searchParams.entries())),
     "GET /api/products/selection": (req, url) => services.selectionProducts(Object.fromEntries(url.searchParams.entries())),
     "GET /api/products/hidden": (req, url) => services.hiddenProducts(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/online-products": (req, url) => services.onlineProducts(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/online-products": (req, url) => services.onlineProducts(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/online-products/limits": (req, url) => services.onlineProductLimits(Object.fromEntries(url.searchParams.entries())),
     "GET /api/online-products/warehouses": (req, url) => services.onlineProductWarehouses(Object.fromEntries(url.searchParams.entries())),
     "GET /api/sku-inventory-recipes": (req, url) => services.skuInventoryRecipe(Object.fromEntries(url.searchParams.entries())),

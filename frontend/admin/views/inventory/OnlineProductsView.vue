@@ -3,6 +3,7 @@ import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, react
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { useAuthStore } from "../../stores/auth";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../../utils/ai-variant-lab-window";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
@@ -15,6 +16,7 @@ import { ozonBuyerProductLinkFromRow } from "../../utils/product-links";
 
 const route = useRoute();
 const router = useRouter();
+const authStore = useAuthStore();
 let syncingRoute = false;
 let onlineProductSyncPollTimer = 0;
 let productLimitsLoadedShopId = null;
@@ -94,6 +96,7 @@ const statusOptions = computed(() => statusLabels.map(([value, label]) => ({
 })).filter((item) => item.value === "all" || item.count > 0 || item.value === state.filters.status));
 
 const pagedRows = computed(() => state.onlineProducts);
+const tenantReadOnly = computed(() => authStore.user?.tenant?.slug !== "default");
 const stockDialogShopName = computed(() => {
   const shopId = Number(stockForm.shop_id || 0);
   return state.shops.find((shop) => Number(shop.id) === shopId)?.name || "当前店铺";
@@ -332,7 +335,7 @@ async function loadPageData(options = {}) {
       ? Promise.resolve(batchStockSnapshotRows)
       : apiClient.get(`/api/online-products?${useSnapshot ? snapshotKey : onlineProductsQueryString()}`);
     const requests = [productsRequest, loadShopDictionary()];
-    if (!dictionaryLoaded) requests.push(apiClient.get("/api/people"));
+    if (!dictionaryLoaded && !tenantReadOnly.value) requests.push(apiClient.get("/api/people"));
     const [onlineProducts, shops, people] = await Promise.all(requests);
     if (!listRequestGate.isLatest(requestToken)) return;
     if (useSnapshot) {
@@ -345,10 +348,11 @@ async function loadPageData(options = {}) {
       state.statusCounts = onlineProducts?.statusCounts || {};
     }
     state.shops = Array.isArray(shops) ? shops : [];
-    if (!dictionaryLoaded) {
+    if (!dictionaryLoaded && !tenantReadOnly.value) {
       state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
       dictionaryLoaded = true;
     }
+    if (tenantReadOnly.value) dictionaryLoaded = true;
     if (showProductLimitPanel.value) void loadProductLimits();
   } catch (error) {
     if (!listRequestGate.isLatest(requestToken)) return;
@@ -757,6 +761,7 @@ onDeactivated(stopOnlineProductSyncPolling);
 
 <template>
   <div class="page-stack online-products-page erp-paged-page">
+    <el-alert v-if="tenantReadOnly" title="企业隔离只读模式" description="当前仅展示本企业店铺的在线商品。商品绑定、编辑、库存变更及同步功能待完成租户化后开放。" type="info" :closable="false" show-icon />
     <el-card shadow="never" class="page-card online-products-card erp-paged-card">
       <div class="online-toolbar online-toolbar-sticky">
         <div class="online-toolbar-main">
@@ -777,7 +782,7 @@ onDeactivated(stopOnlineProductSyncPolling);
               <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
               <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
             </el-form-item>
-            <el-form-item>
+            <el-form-item v-if="!tenantReadOnly">
               <el-button class="erp-btn erp-btn-primary" type="primary" :loading="syncLoading" @click="syncOnlineProducts('pending_listing')">
                 拉取待上架商品
               </el-button>
@@ -865,7 +870,7 @@ onDeactivated(stopOnlineProductSyncPolling);
 
       <div class="online-table-wrap erp-table-scroll erp-responsive-table" role="region" aria-label="在线商品表格" tabindex="0">
         <el-table v-loading="loading" :data="pagedRows" stripe border class="erp-data-table" @selection-change="selectionChanged">
-          <el-table-column type="selection" width="48" fixed="left" />
+          <el-table-column v-if="!tenantReadOnly" type="selection" width="48" fixed="left" />
           <el-table-column label="店铺 / 状态" min-width="160" fixed="left">
             <template #default="{ row }">
               <div class="cell-stack">
@@ -938,7 +943,7 @@ onDeactivated(stopOnlineProductSyncPolling);
           <el-table-column label="最后同步时间" min-width="160">
             <template #default="{ row }">{{ dateText(row.synced_at || row.updated_at) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="470" fixed="right">
+          <el-table-column v-if="!tenantReadOnly" label="操作" width="470" fixed="right">
             <template #default="{ row }">
               <div class="erp-inline-actions">
                 <el-button class="erp-btn-link" link type="primary" :loading="openingEditId === Number(row.id)" @click="openOnlineProductEditor(row)">编辑上架</el-button>
@@ -1167,4 +1172,3 @@ onDeactivated(stopOnlineProductSyncPolling);
   .stock-form-grid { grid-template-columns: 1fr; }
 }
 </style>
-

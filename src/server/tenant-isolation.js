@@ -26,6 +26,7 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
     return { allowed: true };
   }
   const verb = String(method || "GET").toUpperCase();
+  if (parts[1] === "online-products" && parts.length === 2 && verb === "GET") return { allowed: true };
   const shopCollection = parts[1] === "shops" && parts.length === 2 && ["GET", "POST"].includes(verb);
   const shopRecord = parts[1] === "shops" && parts.length === 3 && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(verb);
   if (shopCollection || shopRecord) return { allowed: true };

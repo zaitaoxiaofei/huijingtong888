@@ -8659,12 +8659,14 @@ export async function backfillOzonFinanceMysql(body = {}, options = {}) {
   return result;
 }
 
-export async function onlineProductsMysql(query = {}) {
+export async function onlineProductsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureProductNamingSchemaMysql();
   await ensureOnlineProductsPublishedAtSchemaMysql();
   await ensureOzonStockStorageSchemaMysql();
-  await repairMissingOnlineProductSkusMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  if (defaultTenant) await repairMissingOnlineProductSkusMysql();
   const paged = String(query.paged || "") === "1";
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
@@ -8674,8 +8676,8 @@ export async function onlineProductsMysql(query = {}) {
   const offerText = String(query.offer || query.sku || "").trim().toLowerCase();
   const startDate = String(query.startDate || query.start_date || "").trim();
   const endDate = String(query.endDate || query.end_date || "").trim();
-  const where = [];
-  const params = [];
+  const where = [`op.shop_id IN (SELECT tenant_shop.id FROM shops tenant_shop WHERE tenant_shop.status != 'deleted' AND (tenant_shop.tenant_id = ?${defaultTenant ? " OR tenant_shop.tenant_id IS NULL" : ""}))`];
+  const params = [normalizedTenantId];
   if (shopId !== "all") {
     where.push("op.shop_id = ?");
     params.push(Number(shopId));
@@ -8698,6 +8700,8 @@ export async function onlineProductsMysql(query = {}) {
   }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const stockJoinSql = onlineProductStockJoinSqlMysql();
+  const productJoinSql = defaultTenant ? "LEFT JOIN products p ON p.id = op.product_id" : "LEFT JOIN products p ON 1 = 0";
+  const productIdSql = defaultTenant ? "op.product_id" : "NULL AS product_id";
   const selectSql = `
     SELECT
       op.id, op.shop_id, op.ozon_sku, op.offer_id, op.ozon_product_id, op.name, op.image_url, op.primary_image,
@@ -8711,7 +8715,7 @@ export async function onlineProductsMysql(query = {}) {
       stock.stock_synced_at,
       CASE WHEN JSON_VALID(op.images_json) THEN JSON_UNQUOTE(JSON_EXTRACT(op.images_json, '$[0]')) ELSE '' END AS first_image_url,
       CASE WHEN op.raw_json IS NOT NULL AND op.raw_json != '' THEN 1 ELSE 0 END AS has_raw_json,
-      op.published_at, op.ozon_updated_at, op.product_id, op.synced_at, op.updated_at,
+      op.published_at, op.ozon_updated_at, ${productIdSql}, op.synced_at, op.updated_at,
       s.name AS shop_name,
       CASE
         WHEN p.code LIKE 'P-%' THEN p.code
@@ -8721,13 +8725,13 @@ export async function onlineProductsMysql(query = {}) {
       p.name AS product_name
     FROM online_products op
     JOIN shops s ON s.id = op.shop_id
-    LEFT JOIN products p ON p.id = op.product_id
+    ${productJoinSql}
     ${stockJoinSql}
     ${whereSql}
   `;
   if (paged) {
     if (status === "all") {
-      const cacheKey = `online-products:list:${JSON.stringify({ page, pageSize, shopId, status, nameText, offerText, startDate, endDate })}`;
+      const cacheKey = `online-products:list:${normalizedTenantId}:${JSON.stringify({ page, pageSize, shopId, status, nameText, offerText, startDate, endDate })}`;
       return getCachedMasterData(cacheKey, async () => {
       const [totalRow, countRows, pageIdRows] = await Promise.all([
         mysqlQueryOne(`
@@ -8739,7 +8743,7 @@ export async function onlineProductsMysql(query = {}) {
           SELECT ${onlineStatusKeySqlMysql("op", "stock")} AS status_key, COUNT(*) AS count
           FROM online_products op
           JOIN shops s ON s.id = op.shop_id
-          LEFT JOIN products p ON p.id = op.product_id
+          ${productJoinSql}
           ${stockJoinSql}
           ${whereSql}
           GROUP BY status_key
@@ -8794,7 +8798,7 @@ export async function onlineProductsMysql(query = {}) {
       ${stockJoinSql}
       ${whereSql}
     `;
-    const statusIndexCacheKey = `online-products:status-index:${JSON.stringify({ shopId, nameText, offerText, startDate, endDate })}`;
+    const statusIndexCacheKey = `online-products:status-index:${normalizedTenantId}:${JSON.stringify({ shopId, nameText, offerText, startDate, endDate })}`;
     const statusRows = await getCachedMasterData(
       statusIndexCacheKey,
       () => mysqlQuery(statusRowsSql, params),

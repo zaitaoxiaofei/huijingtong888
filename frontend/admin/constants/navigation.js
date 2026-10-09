@@ -36,6 +36,7 @@ export const navigationMenus = [
       { key: "listing-records", label: "草稿箱", route: "/listing-records" },
       { key: "listing-automation", label: "商品上架", route: "/listing-automation" },
       { key: "listing-publish-records", label: "上架记录", route: "/listing-publish-records" },
+      { key: "online-products", label: "在线商品", route: "/online-products" },
       { key: "batch-stock-update", label: "批量改库存", route: "/batch-stock-update" },
       { key: "ozon-actions", label: "Ozon 活动", route: "/ozon-actions" }
     ]
