@@ -50,6 +50,7 @@ const router = useRouter();
 let syncingRoute = false;
 let dictionaryLoaded = false;
 let dictionaryLoading = null;
+let firstActivation = true;
 const listRequestGate = createLatestRequestGate();
 
 const loading = ref(false);
@@ -796,6 +797,20 @@ function procurementSourceText(value) {
     wechat: "微信",
     other: "其他"
   });
+}
+
+function inventoryProductImageUrl(row, thumbnail = false) {
+  if (!row?.image_url) return "";
+  const productId = Number(row.id || 0);
+  if (!productId) return row.image_url;
+  const params = new URLSearchParams();
+  if (thumbnail) {
+    params.set("thumb", "1");
+    params.set("w", "180");
+  }
+  if (row.updated_at) params.set("v", String(row.updated_at));
+  const query = params.toString();
+  return `/api/products/${productId}/image${query ? `?${query}` : ""}`;
 }
 
 function detailImage(row) {
@@ -1870,7 +1885,13 @@ onMounted(async () => {
   }
 });
 
-onActivated(() => void loadPageData({ silent: true }));
+onActivated(() => {
+  if (firstActivation) {
+    firstActivation = false;
+    return;
+  }
+  void loadPageData({ silent: true });
+});
 </script>
 
 <template>
@@ -1944,7 +1965,7 @@ onActivated(() => void loadPageData({ silent: true }));
         <el-table-column label="产品信息" prop="product" min-width="340" fixed="left" sortable="custom">
           <template #default="{ row, $index }">
             <div class="product-cell">
-              <ProductImagePreview :src="row.image_url" :load-delay="Math.min($index, 12) * 120" />
+              <ProductImagePreview :src="inventoryProductImageUrl(row, true)" :preview-list="[inventoryProductImageUrl(row)]" :load-delay="Math.min($index, 12) * 120" />
               <div class="cell-stack">
                 <ProductTitleLink :title="row.name || '-'" :lines="2" />
                 <span class="muted-text">{{ row.inventory_number || row.inventory_id || row.code || "-" }}</span>
