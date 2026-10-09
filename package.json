@@ -62,6 +62,7 @@
     "audit:workspace-cleanup": "node scripts/audit-workspace-cleanup.mjs",
     "sync:ozon-finance-backfill": "node scripts/sync-ozon-finance-backfill.mjs",
     "db:init:mysql": "node scripts/init-mysql-schema.mjs",
+    "db:migrate:tenant-procurement": "node scripts/migrate-tenant-procurement-requests.mjs",
     "db:optimize:mysql": "node scripts/optimize-mysql-indexes.mjs",
     "db:optimize:mysql:drop-redundant": "node scripts/optimize-mysql-indexes.mjs --drop-redundant",
     "db:backfill:order-history": "node scripts/backfill-order-status-history.mjs",

@@ -493,6 +493,7 @@ CREATE TABLE IF NOT EXISTS sku_mappings (
 
 CREATE TABLE IF NOT EXISTS procurement_requests (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   request_group_no VARCHAR(64) NULL,
   product_id BIGINT UNSIGNED NULL,
   raw_name VARCHAR(255) NULL,
@@ -524,6 +525,8 @@ CREATE TABLE IF NOT EXISTS procurement_requests (
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_procurement_status (status, purchase_order_id),
   KEY idx_procurement_status_created (status, created_at),
+  KEY idx_procurement_tenant_status_created (tenant_id, status, created_at, id),
+  KEY idx_procurement_tenant_purchase_status (tenant_id, purchase_order_id, status),
   KEY idx_procurement_product_status (product_id, status),
   KEY idx_procurement_source_order_item (source_order_item_id),
   KEY idx_procurement_source_order (source_order_id),
@@ -1529,6 +1532,7 @@ try {
     "ALTER TABLE products ADD COLUMN listing_tags_prompt TEXT NULL",
     "ALTER TABLE products ADD COLUMN listing_description_prompt TEXT NULL",
     "ALTER TABLE procurement_requests ADD COLUMN cancelled_at DATETIME NULL",
+    "ALTER TABLE procurement_requests ADD COLUMN tenant_id BIGINT UNSIGNED NULL",
     "ALTER TABLE inventory_movements ADD COLUMN movement_type VARCHAR(64) NULL",
     "ALTER TABLE inventory_movements ADD COLUMN operator VARCHAR(255) NULL",
     "ALTER TABLE inventory_movements ADD COLUMN stock_location VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'",
@@ -1555,6 +1559,8 @@ try {
   }
   const indexStatements = [
     "CREATE INDEX idx_shops_tenant_status_id ON shops (tenant_id, status, id)",
+    "CREATE INDEX idx_procurement_tenant_status_created ON procurement_requests (tenant_id, status, created_at, id)",
+    "CREATE INDEX idx_procurement_tenant_purchase_status ON procurement_requests (tenant_id, purchase_order_id, status)",
     "CREATE INDEX idx_order_history_transport ON order_status_history (order_id, status, last_status_changed_at) ALGORITHM=INPLACE LOCK=NONE",
     "CREATE INDEX idx_outbound_shop_created ON outbound_records (shop_id, created_at)",
     "CREATE INDEX idx_outbound_stock_location ON outbound_records (stock_location, status, created_at)",
