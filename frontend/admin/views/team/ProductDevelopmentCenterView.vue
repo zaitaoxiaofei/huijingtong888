@@ -414,6 +414,11 @@ function openTaskSkuConfig(row, modelIndex = null) {
   taskSkuConfigGroups.value = [...groupMap.values()];
   taskSkuConfigVisible.value = true;
 }
+function openHeatmapTask(payload) {
+  const task = payload?.task || payload;
+  if (payload?.dimension === "model" && Number.isInteger(payload.modelIndex)) return openTaskSkuConfig(task, payload.modelIndex);
+  return openTask(task);
+}
 function completeAllTaskGroups() { taskSkuConfigGroups.value.forEach((group) => { group.mode = "completed"; group.expanded = false; }); }
 async function saveTaskSkuConfig() {
   const task = taskSkuConfigTask.value;
@@ -1018,7 +1023,7 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
       <el-select v-model="developmentCategoryFilter" clearable filterable placeholder="全部开发类目" aria-label="筛选开发类目"><el-option v-for="category in developmentCategoryOptions" :key="category" :label="category" :value="category" /></el-select>
     </div>
 
-    <DevelopmentHeatmap ref="heatmapView" v-if="activeTab==='dashboard'" @open-task="openTask" @create="openTask()" />
+    <DevelopmentHeatmap ref="heatmapView" v-if="activeTab==='dashboard'" @open-task="openHeatmapTask" @create="openTask()" />
 
     <section v-else-if="activeTab==='ideas'" class="panel ideas-page">
       <div class="section-title"><div><span>按类目和品牌安排开发，与任务中心同步，可先创建后认领</span><h2>灵感列表</h2></div><el-button type="primary" @click="openIdea()"><Lightbulb :size="16" /> 快速创建灵感</el-button></div>
