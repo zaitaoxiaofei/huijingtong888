@@ -30,6 +30,10 @@ test("only the FBP replenishment collection route is opened and its tenant comes
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "delete"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "adjustments"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "adjustments"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "adjustments", "reason"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "link"], "POST").allowed, false);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "unlink"], "POST").allowed, false);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-batches", "fill-preview"], "GET").allowed, false);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "status"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "inventory-allocation"], "POST").allowed, false);
   const server = read("../src/server.js");
@@ -40,6 +44,32 @@ test("only the FBP replenishment collection route is opened and its tenant comes
   assert.match(server, /services\.updateFbpReplenishmentOrderStatus\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
   assert.match(server, /services\.fbpReplenishmentItemAdjustments\(req\.query \|\| \{\}, tenantIdFromRequest\(req\)\)/);
   assert.match(server, /services\.addFbpReplenishmentItemAdjustment\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
+  assert.match(server, /services\.updateFbpReplenishmentItemAdjustmentReason\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
+  assert.match(server, /services\.linkFbpReplenishmentOrders\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
+  assert.match(server, /services\.unlinkFbpReplenishmentOrder\(await readJson\(req\), tenantIdFromRequest\(req\)\)/);
+  assert.match(server, /services\.fbpReplenishmentBatchFillPreview\(req\.query \|\| \{\}, tenantIdFromRequest\(req\)\)/);
+});
+
+test("FBP batch services scope linked orders and preview through tenant-owned shops", () => {
+  const source = read("../src/services/mysql-cutover.js");
+  const linkStart = source.indexOf("export async function linkFbpReplenishmentOrdersMysql");
+  const unlinkStart = source.indexOf("export async function unlinkFbpReplenishmentOrderMysql", linkStart);
+  const previewStart = source.indexOf("export async function fbpReplenishmentBatchFillPreviewMysql", unlinkStart);
+  const fillStart = source.indexOf("export async function recordFbpReplenishmentBatchFillMysql", previewStart);
+  const link = source.slice(linkStart, unlinkStart);
+  const unlink = source.slice(unlinkStart, previewStart);
+  const preview = source.slice(previewStart, fillStart);
+  for (const method of [link, unlink, preview]) {
+    assert.match(method, /resolveShopTenantIdMysql\(tenantId\)/);
+    assert.match(method, /tenantShopPredicateMysql\("s", defaultTenant\)/);
+    assert.match(method, /s\.status != 'deleted'/);
+  }
+  assert.match(link, /JOIN shops s ON s\.id = o\.shop_id/);
+  assert.match(link, /WHERE o\.id IN \(\$\{placeholders\}\) AND s\.status != 'deleted' AND \$\{shopScope\}/);
+  assert.match(unlink, /JOIN fbp_replenishment_orders o ON o\.id = bm\.order_id/);
+  assert.match(unlink, /JOIN shops s ON s\.id = o\.shop_id/);
+  assert.match(unlink, /FROM fbp_replenishment_batches b[\s\S]*WHERE b\.id = \? AND s\.status != 'deleted' AND \$\{shopScope\}/);
+  assert.match(preview, /WHERE b\.id = \? AND s\.status != 'deleted' AND \$\{shopScope\}/);
 });
 
 test("FBP draft writes lock and validate the parent order through tenant shop ownership", () => {
@@ -72,4 +102,11 @@ test("FBP draft writes lock and validate the parent order through tenant shop ow
   const adjustmentReadStart = source.indexOf("export async function fbpReplenishmentItemAdjustmentsMysql");
   const adjustmentReadEnd = source.indexOf("export async function updateFbpReplenishmentItemAdjustmentReasonMysql", adjustmentReadStart);
   assert.match(source.slice(adjustmentReadStart, adjustmentReadEnd), /JOIN shops s ON s\.id = o\.shop_id/);
+  const reasonStart = source.indexOf("export async function updateFbpReplenishmentItemAdjustmentReasonMysql");
+  const reasonEnd = source.indexOf("export async function fbpShortageProcurementDraftsMysql", reasonStart);
+  const reason = source.slice(reasonStart, reasonEnd);
+  assert.match(reason, /resolveShopTenantIdMysql\(tenantId\)/);
+  assert.match(reason, /JOIN shops s ON s\.id = o\.shop_id/);
+  assert.match(reason, /!defaultTenant && reasonCode === "stock_shortage"/);
+  assert.match(reason, /defaultTenant \? \(Number\(adjustment\.procurement_request_id \|\| 0\) \|\| null\) : null/);
 });

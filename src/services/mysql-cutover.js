@@ -5059,33 +5059,40 @@ export async function fbpReplenishmentItemAdjustmentsMysql(query = {}, tenantId 
   `, [orderId, itemId, normalizedTenantId]);
 }
 
-export async function updateFbpReplenishmentItemAdjustmentReasonMysql(body = {}, userId = null) {
+export async function updateFbpReplenishmentItemAdjustmentReasonMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
-  await ensureProcurementFlexibleRequestSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const adjustmentId = Number(body.adjustment_id || body.adjustmentId || 0);
   const reasonCode = String(body.reason_code || body.reasonCode || "").trim();
   const reasonNote = String(body.reason_note || body.reasonNote || "").trim().slice(0, 500);
   const reason = fbpAdjustmentReasonLabels[reasonCode] || "";
   if (!adjustmentId || !reason) throw new Error("请选择规范的调整原因。");
   if (reasonCode === "other" && !reasonNote) throw new Error("选择其他原因时，请填写补充说明。");
+  if (!defaultTenant && reasonCode === "stock_shortage") {
+    throw new Error("库存短缺原因会生成采购申请，该采购流程尚未完成企业隔离；请选择其他调整原因或联系管理员。");
+  }
+  if (defaultTenant) await ensureProcurementFlexibleRequestSchemaMysql();
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   return await withMysqlTransaction(async (connection) => {
     const [rows] = await connection.execute(`
       SELECT a.*, i.product_id, i.inventory_id, o.order_no
       FROM fbp_replenishment_item_adjustments a
       JOIN fbp_replenishment_order_items i ON i.id = a.item_id
       JOIN fbp_replenishment_orders o ON o.id = a.order_id
-      WHERE a.id = ? FOR UPDATE
-    `, [adjustmentId]);
+      JOIN shops s ON s.id = o.shop_id
+      WHERE a.id = ? AND s.status != 'deleted' AND ${shopScope} FOR UPDATE
+    `, [adjustmentId, normalizedTenantId]);
     const adjustment = rows[0];
-    if (!adjustment) throw new Error("调整记录不存在，请刷新后重试。");
+    if (!adjustment) throw new Error("调整记录不存在或不属于当前企业，请刷新后重试。");
     await connection.execute(`
       UPDATE fbp_replenishment_item_adjustments
       SET reason = ?, reason_code = ?, reason_note = ?
       WHERE id = ?
     `, [reason, reasonCode, reasonNote || null, adjustmentId]);
-    let procurementRequestId = Number(adjustment.procurement_request_id || 0) || null;
-    if (reasonCode === "stock_shortage" && Number(adjustment.adjustment_qty) < 0 && !procurementRequestId) {
+    let procurementRequestId = defaultTenant ? (Number(adjustment.procurement_request_id || 0) || null) : null;
+    if (defaultTenant && reasonCode === "stock_shortage" && Number(adjustment.adjustment_qty) < 0 && !procurementRequestId) {
       if (!adjustment.product_id) throw new Error("该 FBP 商品未关联库存产品，无法生成采购草稿；请先完成库存绑定。");
       const [requestResult] = await connection.execute(`
         INSERT INTO procurement_requests
@@ -5276,9 +5283,12 @@ function fbpReplenishmentBatchNo(id) {
   return `FBP-MERGE-${day}-${String(id).padStart(5, "0")}`;
 }
 
-export async function linkFbpReplenishmentOrdersMysql(body = {}, userId = null) {
+export async function linkFbpReplenishmentOrdersMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   const orderIds = [...new Set((Array.isArray(body.order_ids) ? body.order_ids : []).map(Number).filter(Boolean))];
   if (orderIds.length < 2) throw new Error("请至少选择 2 张备货单进行关联汇总。");
   return withMysqlTransaction(async (connection) => {
@@ -5286,11 +5296,12 @@ export async function linkFbpReplenishmentOrdersMysql(body = {}, userId = null) 
     const [orders] = await connection.execute(`
       SELECT o.id, o.shop_id, bm.batch_id
       FROM fbp_replenishment_orders o
+      JOIN shops s ON s.id = o.shop_id
       LEFT JOIN fbp_replenishment_batch_members bm ON bm.order_id = o.id
-      WHERE o.id IN (${placeholders})
+      WHERE o.id IN (${placeholders}) AND s.status != 'deleted' AND ${shopScope}
       FOR UPDATE
-    `, orderIds);
-    if (orders.length !== orderIds.length) throw new Error("部分备货单不存在，请刷新后重试。");
+    `, [...orderIds, normalizedTenantId]);
+    if (orders.length !== orderIds.length) throw new Error("部分备货单不存在或不属于当前企业，请刷新后重试。");
     if (new Set(orders.map((row) => Number(row.shop_id))).size !== 1) throw new Error("只能关联同一店铺的备货单。");
     const existingBatchIds = [...new Set(orders.map((row) => Number(row.batch_id || 0)).filter(Boolean))];
     if (existingBatchIds.length) throw new Error("所选备货单已有归属批次，请先解除原关联后再操作。");
@@ -5306,15 +5317,33 @@ export async function linkFbpReplenishmentOrdersMysql(body = {}, userId = null) 
   });
 }
 
-export async function unlinkFbpReplenishmentOrderMysql(body = {}) {
+export async function unlinkFbpReplenishmentOrderMysql(body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   const orderId = Number(body.order_id || body.orderId || 0);
   if (!orderId) throw new Error("缺少要解除关联的备货单。");
   return withMysqlTransaction(async (connection) => {
-    const member = await mysqlConnectionQueryOne(connection, "SELECT batch_id FROM fbp_replenishment_batch_members WHERE order_id = ? FOR UPDATE", [orderId]);
+    const member = await mysqlConnectionQueryOne(connection, `
+      SELECT bm.batch_id
+      FROM fbp_replenishment_batch_members bm
+      JOIN fbp_replenishment_orders o ON o.id = bm.order_id
+      JOIN shops s ON s.id = o.shop_id
+      WHERE bm.order_id = ? AND s.status != 'deleted' AND ${shopScope}
+      FOR UPDATE
+    `, [orderId, normalizedTenantId]);
     if (!member?.batch_id) return { ok: true, order_id: orderId, unlinked: false };
     const batchId = Number(member.batch_id);
+    const batch = await mysqlConnectionQueryOne(connection, `
+      SELECT b.id
+      FROM fbp_replenishment_batches b
+      JOIN shops s ON s.id = b.shop_id
+      WHERE b.id = ? AND s.status != 'deleted' AND ${shopScope}
+      FOR UPDATE
+    `, [batchId, normalizedTenantId]);
+    if (!batch) throw new Error("关联批次不存在或不属于当前企业，请刷新后重试。");
     const successFill = await mysqlConnectionQueryOne(connection, "SELECT id FROM fbp_replenishment_fill_executions WHERE batch_id = ? AND status = 'success' LIMIT 1", [batchId]);
     if (successFill) throw new Error("该关联批次已有成功填入 Ozon 的执行记录，不能解除关联。");
     await connection.execute("DELETE FROM fbp_replenishment_batch_members WHERE order_id = ?", [orderId]);
@@ -5327,9 +5356,12 @@ export async function unlinkFbpReplenishmentOrderMysql(body = {}) {
   });
 }
 
-export async function fbpReplenishmentBatchFillPreviewMysql(query = {}) {
+export async function fbpReplenishmentBatchFillPreviewMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   const batchId = Number(query.batchId || query.batch_id || query.id || 0);
   if (!batchId) throw new Error("缺少关联汇总批次。");
   const batch = await mysqlQueryOne(`
@@ -5337,9 +5369,9 @@ export async function fbpReplenishmentBatchFillPreviewMysql(query = {}) {
     FROM fbp_replenishment_batches b
     LEFT JOIN shops s ON s.id = b.shop_id
     LEFT JOIN fbp_replenishment_batch_members bm ON bm.batch_id = b.id
-    WHERE b.id = ?
+    WHERE b.id = ? AND s.status != 'deleted' AND ${shopScope}
     GROUP BY b.id, s.name, s.ozon_client_id
-  `, [batchId]);
+  `, [batchId, normalizedTenantId]);
   if (!batch) throw new Error("关联汇总批次不存在。");
   const rows = await mysqlQuery(`
     SELECT i.ozon_sku, MAX(i.offer_id) AS offer_id,
