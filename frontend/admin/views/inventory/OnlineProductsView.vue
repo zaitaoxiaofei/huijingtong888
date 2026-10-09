@@ -97,6 +97,9 @@ const statusOptions = computed(() => statusLabels.map(([value, label]) => ({
 
 const pagedRows = computed(() => state.onlineProducts);
 const tenantReadOnly = computed(() => authStore.user?.tenant?.slug !== "default");
+const tenantCanUpdateStocks = computed(() => !tenantReadOnly.value
+  || ["owner", "admin"].includes(authStore.user?.tenant?.role)
+  || (Array.isArray(authStore.user?.roles) && authStore.user.roles.includes("admin")));
 const stockDialogShopName = computed(() => {
   const shopId = Number(stockForm.shop_id || 0);
   return state.shops.find((shop) => Number(shop.id) === shopId)?.name || "当前店铺";
@@ -329,11 +332,13 @@ async function loadPageData(options = {}) {
   const requestToken = listRequestGate.next();
   loading.value = true;
   try {
-    const snapshotKey = batchStockSnapshotQueryString();
+    const snapshotQuery = batchStockSnapshotQueryString();
+    const tenantKey = authStore.user?.tenant?.id || authStore.user?.tenant?.slug || "legacy";
+    const snapshotKey = `${tenantKey}:${snapshotQuery}`;
     const useSnapshot = showProductLimitPanel.value;
     const productsRequest = useSnapshot && !options.forceSnapshot && batchStockSnapshotKey === snapshotKey
       ? Promise.resolve(batchStockSnapshotRows)
-      : apiClient.get(`/api/online-products?${useSnapshot ? snapshotKey : onlineProductsQueryString()}`);
+      : apiClient.get(`/api/online-products?${useSnapshot ? snapshotQuery : onlineProductsQueryString()}`);
     const requests = [productsRequest, loadShopDictionary()];
     if (!dictionaryLoaded && !tenantReadOnly.value) requests.push(apiClient.get("/api/people"));
     const [onlineProducts, shops, people] = await Promise.all(requests);
@@ -409,7 +414,8 @@ function selectedShopIdForStock() {
 }
 
 async function loadWarehousesForStock(shopId, force = false) {
-  const normalizedShopId = String(shopId || "");
+  const tenantKey = authStore.user?.tenant?.id || authStore.user?.tenant?.slug || "legacy";
+  const normalizedShopId = `${tenantKey}:${String(shopId || "")}`;
   if (!force && warehouseCacheByShop.has(normalizedShopId)) {
     state.warehouses = warehouseCacheByShop.get(normalizedShopId);
     stockForm.warehouse_id = state.warehouses[0]?.warehouse_id ? String(state.warehouses[0].warehouse_id) : "";
@@ -761,7 +767,7 @@ onDeactivated(stopOnlineProductSyncPolling);
 
 <template>
   <div class="page-stack online-products-page erp-paged-page">
-    <el-alert v-if="tenantReadOnly" title="企业隔离只读模式" description="当前仅展示本企业店铺的在线商品。商品绑定、编辑、库存变更及同步功能待完成租户化后开放。" type="info" :closable="false" show-icon />
+    <el-alert v-if="tenantReadOnly" title="企业安全模式" description="仅展示本企业店铺商品；负责人和管理员可进行批量库存更新。商品绑定、上架编辑、建品及同步功能待完成租户化后开放。" type="info" :closable="false" show-icon />
     <el-card shadow="never" class="page-card online-products-card erp-paged-card">
       <div class="online-toolbar online-toolbar-sticky">
         <div class="online-toolbar-main">
@@ -782,14 +788,14 @@ onDeactivated(stopOnlineProductSyncPolling);
               <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
               <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
             </el-form-item>
-            <el-form-item v-if="!tenantReadOnly">
-              <el-button class="erp-btn erp-btn-primary" type="primary" :loading="syncLoading" @click="syncOnlineProducts('pending_listing')">
+            <el-form-item>
+              <el-button v-if="!tenantReadOnly" class="erp-btn erp-btn-primary" type="primary" :loading="syncLoading" @click="syncOnlineProducts('pending_listing')">
                 拉取待上架商品
               </el-button>
-              <el-button class="erp-btn erp-btn-secondary" :loading="stockSyncLoading" @click="syncOzonStocks">
+              <el-button v-if="!tenantReadOnly" class="erp-btn erp-btn-secondary" :loading="stockSyncLoading" @click="syncOzonStocks">
                 刷新库存数量
               </el-button>
-              <el-button class="erp-btn erp-btn-secondary" :disabled="!state.selectedIds.length" @click="openBatchStockDialog">
+              <el-button v-if="tenantCanUpdateStocks" class="erp-btn erp-btn-secondary" :disabled="!state.selectedIds.length" @click="openBatchStockDialog">
                 批量改库存
               </el-button>
             </el-form-item>
@@ -870,7 +876,7 @@ onDeactivated(stopOnlineProductSyncPolling);
 
       <div class="online-table-wrap erp-table-scroll erp-responsive-table" role="region" aria-label="在线商品表格" tabindex="0">
         <el-table v-loading="loading" :data="pagedRows" stripe border class="erp-data-table" @selection-change="selectionChanged">
-          <el-table-column v-if="!tenantReadOnly" type="selection" width="48" fixed="left" />
+          <el-table-column v-if="tenantCanUpdateStocks" type="selection" width="48" fixed="left" />
           <el-table-column label="店铺 / 状态" min-width="160" fixed="left">
             <template #default="{ row }">
               <div class="cell-stack">

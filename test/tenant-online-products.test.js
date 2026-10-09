@@ -21,6 +21,27 @@ test("online product list API derives the tenant only from the authenticated ses
   assert.equal(calls[0][1], "42");
 });
 
+test("online product stock and shop lookup routes derive scope from the session", async () => {
+  const calls = [];
+  const routes = createCatalogRoutes({
+    readJson: async () => ({ online_product_ids: [10], tenant_id: 99 }),
+    services: {
+      onlineProductLimits: async (...args) => { calls.push(["limits", ...args]); return {}; },
+      onlineProductWarehouses: async (...args) => { calls.push(["warehouses", ...args]); return {}; },
+      batchUpdateOnlineProductStocks: async (...args) => { calls.push(["stock", ...args]); return {}; }
+    }
+  });
+  const req = { headers: { "x-tenant-id": "99" }, _session: { personId: 7, tenant: { id: 42, slug: "company-a" } } };
+  await routes["GET /api/online-products/limits"](req, new URL("http://localhost/api/online-products/limits?shop_id=10"));
+  await routes["GET /api/online-products/warehouses"](req, new URL("http://localhost/api/online-products/warehouses?shop_id=10"));
+  await routes["POST /api/online-products/batch-stock"](req);
+  assert.deepEqual(calls.map(([name, ...args]) => [name, args.at(-1)]), [
+    ["limits", "42"],
+    ["warehouses", "42"],
+    ["stock", "42"]
+  ]);
+});
+
 test("tenant online product access is limited to the exact read-only list route", () => {
   const owner = { roles: ["operations"], tenant: { id: 42, slug: "company-a", role: "owner" } };
   const member = { roles: ["operations"], tenant: { id: 42, slug: "company-a", role: "member" } };
@@ -28,12 +49,18 @@ test("tenant online product access is limited to the exact read-only list route"
   assert.equal(tenantIsolationDecision(owner, ["api", "online-products"], "GET").allowed, true);
   assert.equal(authorizeApiRequest({ method: "GET", _session: owner }, ["api", "online-products"]).allowed, true);
   assert.equal(authorizeApiRequest({ method: "POST", _session: owner }, ["api", "online-products"]).allowed, false);
+  assert.equal(tenantIsolationDecision(owner, ["api", "online-products", "limits"], "GET").allowed, true);
+  assert.equal(tenantIsolationDecision(owner, ["api", "online-products", "warehouses"], "GET").allowed, true);
+  assert.equal(tenantIsolationDecision(owner, ["api", "online-products", "batch-stock"], "POST").allowed, true);
+  assert.equal(authorizeApiRequest({ method: "POST", _session: owner }, ["api", "online-products", "batch-stock"]).allowed, true);
+  assert.equal(authorizeApiRequest({ method: "POST", _session: member }, ["api", "online-products", "batch-stock"]).allowed, false);
+  assert.equal(tenantIsolationDecision(owner, ["api", "online-products", "action"], "POST").allowed, false);
   assert.equal(tenantIsolationDecision(owner, ["api", "online-products", "123", "edit-draft"], "GET").allowed, false);
   assert.equal(tenantIsolationDecision(owner, ["api", "online-products"], "POST").allowed, false);
   assert.equal(canAccessPage(owner, "/online-products"), true);
+  assert.equal(canAccessPage(owner, "/batch-stock-update"), true);
   assert.equal(canAccessPage(platformAdmin, "/online-products"), true);
   assert.equal(canAccessPage(member, "/online-products"), false);
-  assert.equal(canAccessPage(owner, "/batch-stock-update"), false);
 });
 
 test("online-product SQL scopes every list/count query through live tenant shops", () => {
@@ -48,6 +75,19 @@ test("online-product SQL scopes every list/count query through live tenant shops
   assert.match(list, /const productIdSql = defaultTenant \? "op\.product_id" : "NULL AS product_id"/);
 });
 
+test("online product mutations and shop credentials are resolved inside active tenant scope", () => {
+  const service = read("../src/services/mysql-cutover.js");
+  const batch = service.match(/export async function batchUpdateOnlineProductStocksMysql\([\s\S]*?(?=\nexport async function performOnlineProductActionMysql)/)?.[0] || "";
+  const warehouses = service.match(/export async function onlineProductWarehousesMysql\([\s\S]*?(?=\nfunction normalizeOzonLimitBucketMysql)/)?.[0] || "";
+  const limits = service.match(/export async function onlineProductLimitsMysql\([\s\S]*?(?=\nfunction normalizeOzonAttributeValueObjectsMysql)/)?.[0] || "";
+  assert.match(batch, /resolveShopTenantIdMysql\(tenantId\)/);
+  assert.match(batch, /AND \$\{tenantShopPredicateMysql\("s", defaultTenant\)\}/);
+  assert.match(batch, /rows\.length !== onlineProductIds\.length/);
+  assert.match(batch, /activeShopForTenantMysql\(targetShopId, normalizedTenantId\)/);
+  assert.match(warehouses, /activeShopForTenantMysql\(shopId, tenantId\)/);
+  assert.match(limits, /tenantShopPredicateMysql\("shops", defaultTenant\)/);
+});
+
 test("online-product tenant UI stays read-only and avoids the global people endpoint", () => {
   const view = read("../frontend/admin/views/inventory/OnlineProductsView.vue");
   const routes = read("../src/server/routes/catalog.js");
@@ -57,7 +97,10 @@ test("online-product tenant UI stays read-only and avoids the global people endp
   assert.match(view, /const tenantReadOnly = computed\(\(\) => authStore\.user\?\.tenant\?\.slug !== "default"\)/);
   assert.match(view, /if \(!dictionaryLoaded && !tenantReadOnly\.value\) requests\.push\(apiClient\.get\("\/api\/people"\)\)/);
   assert.match(view, /el-button[^\n]+@click="handleSearch"/);
-  assert.match(view, /<el-form-item v-if="!tenantReadOnly">\s*<el-button[^\n]+@click="syncOnlineProducts/);
+  assert.match(view, /<el-button v-if="!tenantReadOnly"[^\n]+@click="syncOnlineProducts/);
+  assert.match(view, /v-if="tenantCanUpdateStocks"[^\n]+@click="openBatchStockDialog"/);
+  assert.match(view, /const snapshotKey = `\$\{tenantKey\}:\$\{snapshotQuery\}`/);
+  assert.match(view, /const normalizedShopId = `\$\{tenantKey\}:\$\{String\(shopId \|\| ""\)\}`/);
   assert.match(view, /v-if="!tenantReadOnly" label="操作"/);
   assert.match(cache, /cacheByTenant\.get\(tenantKey\)/);
   assert.match(api, /__erp_scope=\$\{encodeURIComponent\(currentApiCacheScope\(\)\)\}/);

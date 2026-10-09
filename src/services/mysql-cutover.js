@@ -2569,6 +2569,19 @@ async function resolveShopTenantIdMysql(tenantId = "admin") {
   throw new Error("当前企业上下文无效，无法访问店铺");
 }
 
+function tenantShopPredicateMysql(alias, defaultTenant) {
+  return `(${alias}.tenant_id = ?${defaultTenant ? ` OR ${alias}.tenant_id IS NULL` : ""})`;
+}
+
+async function activeShopForTenantMysql(shopId, tenantId) {
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const statusPredicate = defaultTenant ? "status != 'deleted'" : "status = 'active'";
+  const shop = await mysqlQueryOne(`SELECT * FROM shops WHERE id = ? AND ${statusPredicate} AND ${tenantShopPredicateMysql("shops", defaultTenant)} LIMIT 1`, [Number(shopId), normalizedTenantId]);
+  if (!shop) throw new Error("店铺不存在、已停用或不属于当前企业");
+  return shop;
+}
+
 function invalidateShopCacheMysql() {
   invalidateMasterDataCachePrefix("shops:");
   invalidateMasterDataCache("shops");
@@ -9463,12 +9476,11 @@ async function resolveFreshOzonProductIdForArchiveMysql(shop, online = {}) {
   return productId;
 }
 
-export async function onlineProductWarehousesMysql(query = {}) {
+export async function onlineProductWarehousesMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const shopId = Number(query.shop_id || query.shopId || 0);
   if (!shopId) throw new Error("请选择店铺后再获取 Ozon 仓库");
-  const shop = await mysqlQueryOne("SELECT * FROM shops WHERE id = ? AND status != 'deleted'", [shopId]);
-  if (!shop) throw new Error("店铺不存在");
+  const shop = await activeShopForTenantMysql(shopId, tenantId);
   const warehouses = await fetchOzonWarehouses(shop);
   return {
     shop_id: shopId,
@@ -9509,13 +9521,17 @@ function compactOzonProductLimitMysql(limit = null) {
   };
 }
 
-export async function onlineProductLimitsMysql(query = {}) {
+export async function onlineProductLimitsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const targetShopId = nullableNumber(query.shop_id || query.shopId);
-  const activeShops = await mysqlQuery(
-    "SELECT * FROM shops WHERE status = 'active' AND (? IS NULL OR id = ?) ORDER BY name, id",
-    [targetShopId, targetShopId]
-  );
+  const activeShops = await mysqlQuery(`
+    SELECT * FROM shops
+    WHERE status = 'active' AND (? IS NULL OR id = ?)
+      AND ${tenantShopPredicateMysql("shops", defaultTenant)}
+    ORDER BY name, id
+  `, [targetShopId, targetShopId, normalizedTenantId]);
   const rows = [];
   await mapWithConcurrencyMysql(activeShops, 5, async (shop) => {
     const row = {
@@ -10002,8 +10018,10 @@ export function onlineProductStockUpdateTargetForTest(row = {}, stock = 0, wareh
   return onlineProductStockUpdateTargetMysql(row, stock, warehouseId);
 }
 
-export async function batchUpdateOnlineProductStocksMysql(body = {}, userId = null) {
+export async function batchUpdateOnlineProductStocksMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const onlineProductIds = normalizeBulkStockOnlineProductIdsMysql(body);
   const stock = Math.max(0, Math.round(Number(body.stock ?? body.quantity ?? 888)));
   const warehouseId = String(body.warehouse_id || body.warehouseId || "").trim();
@@ -10016,16 +10034,18 @@ export async function batchUpdateOnlineProductStocksMysql(body = {}, userId = nu
     FROM online_products op
     JOIN shops s ON s.id = op.shop_id
     WHERE op.id IN (${onlineProductIds.map(() => "?").join(",")})
-  `, onlineProductIds);
+      AND ${defaultTenant ? "s.status != 'deleted'" : "s.status = 'active'"}
+      AND ${tenantShopPredicateMysql("s", defaultTenant)}
+  `, [...onlineProductIds, normalizedTenantId]);
   if (!rows.length) throw new Error("没有找到可更新库存的在线商品");
+  if (rows.length !== onlineProductIds.length) throw new Error("所选商品中包含其他企业、已停用店铺或不存在的记录，请刷新列表后重试");
 
   const targetShopIds = [...new Set(rows.map((row) => Number(row.shop_id || 0)).filter(Boolean))];
   if (shopId && targetShopIds.some((id) => id !== shopId)) throw new Error("所选商品不属于当前店铺，请按店铺分批更新库存");
   if (targetShopIds.length !== 1) throw new Error("请先筛选单个店铺，再批量更新库存");
 
   const targetShopId = targetShopIds[0];
-  const shop = await mysqlQueryOne("SELECT * FROM shops WHERE id = ? AND status != 'deleted'", [targetShopId]);
-  if (!shop) throw new Error("店铺不存在");
+  const shop = await activeShopForTenantMysql(targetShopId, normalizedTenantId);
 
   const targets = [];
   const skipped = [];

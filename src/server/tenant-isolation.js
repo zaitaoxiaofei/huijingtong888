@@ -27,6 +27,9 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   }
   const verb = String(method || "GET").toUpperCase();
   if (parts[1] === "online-products" && parts.length === 2 && verb === "GET") return { allowed: true };
+  const tenantOnlineProductRead = parts[1] === "online-products" && parts.length === 3 && ["limits", "warehouses"].includes(parts[2]) && verb === "GET";
+  const tenantOnlineProductStockWrite = parts[1] === "online-products" && parts.length === 3 && parts[2] === "batch-stock" && verb === "POST";
+  if (tenantOnlineProductRead || tenantOnlineProductStockWrite) return { allowed: true };
   const shopCollection = parts[1] === "shops" && parts.length === 2 && ["GET", "POST"].includes(verb);
   const shopRecord = parts[1] === "shops" && parts.length === 3 && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(verb);
   if (shopCollection || shopRecord) return { allowed: true };

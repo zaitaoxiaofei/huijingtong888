@@ -30,6 +30,8 @@ export function authorizeApiRequest(req, parts = []) {
   if (resource === "shops" && session.tenant?.slug !== "default") return deny("仅企业负责人或企业管理员可以管理店铺与店铺密钥");
   if (resource === "people" && session.tenant?.slug !== "default") return deny("企业人员管理尚未完成隔离，请使用企业与授权中的成员管理");
   if (resource === "online-products" && parts.length === 2 && read && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
+  if (resource === "online-products" && parts.length === 3 && ["limits", "warehouses"].includes(parts[2]) && read && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
+  if (resource === "online-products" && parts.length === 3 && parts[2] === "batch-stock" && method === "POST" && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
   if (resource === "online-products" && session.tenant?.slug !== "default") return deny("企业在线商品当前为只读，编辑、绑定、同步和库存操作尚未完成隔离");
   if (read && ["dashboard", "people", "shops", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules", "order-cancellation-rules", "order-quality-rules"].includes(resource)) return { allowed: true };
   if (read && ["system/info", "system/update-status", "db/seller-analytics/plugin-status"].includes(path)) return { allowed: true };
