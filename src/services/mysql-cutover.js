@@ -10207,14 +10207,26 @@ export async function batchUpdateOnlineProductStocksMysql(body = {}, userId = nu
   }
 }
 
-export async function performOnlineProductActionMysql(body = {}, userId = null) {
+export async function performOnlineProductActionMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const onlineProductId = Number(body.online_product_id || body.id || 0);
   const action = String(body.action || "").trim();
   if (!onlineProductId) throw new Error("Missing online product id");
   if (!["archive", "zero_stock", "zero_then_archive"].includes(action)) throw new Error("Unsupported online product action");
-  const online = await mysqlQueryOne("SELECT * FROM online_products WHERE id = ?", [onlineProductId]);
-  if (!online) throw new Error("Online product not found");
+  if (!defaultTenant && action !== "zero_stock") {
+    throw new Error("当前企业仅可调整本企业在线商品库存；归档及异常工作台处理尚未完成企业隔离。");
+  }
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
+  const online = await mysqlQueryOne(`
+    SELECT op.*
+    FROM online_products op
+    JOIN shops s ON s.id = op.shop_id
+    WHERE op.id = ? AND s.status != 'deleted' AND ${shopScope}
+    LIMIT 1
+  `, [onlineProductId, normalizedTenantId]);
+  if (!online) throw new Error("在线商品不存在或不属于当前企业。");
   const alreadyArchived = Number(online.archived || 0) || String(`${online.status || ""} ${online.visibility || ""}`).toLowerCase().includes("archive");
   if ((action === "archive" || action === "zero_then_archive") && alreadyArchived) {
     const result = {
@@ -10234,8 +10246,7 @@ export async function performOnlineProductActionMysql(body = {}, userId = null) 
     invalidateExceptionWorkbenchCache();
     return result;
   }
-  const shop = await mysqlQueryOne("SELECT * FROM shops WHERE id = ?", [online.shop_id]);
-  if (!shop) throw new Error("Shop not found");
+  const shop = await activeShopForTenantMysql(Number(online.shop_id), normalizedTenantId);
   const actionId = await recordOnlineProductActionMysql({ online, action, status: "pending", request: body, userId });
   const result = { ok: true, action, online_product_id: onlineProductId, steps: [] };
   try {

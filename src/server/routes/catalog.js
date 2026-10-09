@@ -55,7 +55,7 @@ export function createCatalogRoutes({ services, readJson }) {
     "POST /api/online-products/bind": async (req) => services.bindOnlineProduct(await readJson(req)) || { ok: true },
     "POST /api/sku-inventory-recipes": async (req) => services.saveSkuInventoryRecipe(await readJson(req)) || { ok: true },
     "POST /api/online-products/batch-stock": async (req) => services.batchUpdateOnlineProductStocks(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
-    "POST /api/online-products/action": async (req) => services.performOnlineProductAction(await readJson(req), req._session?.personId),
+    "POST /api/online-products/action": async (req) => services.performOnlineProductAction(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
     "POST /api/online-products/create-product": async (req) => {
       const body = await readProductSaveJson(readJson, req);
       return (body.structured_naming || body.structuredNaming)

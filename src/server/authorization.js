@@ -32,7 +32,8 @@ export function authorizeApiRequest(req, parts = []) {
   if (resource === "online-products" && parts.length === 2 && read && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
   if (resource === "online-products" && parts.length === 3 && ["limits", "warehouses"].includes(parts[2]) && read && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
   if (resource === "online-products" && parts.length === 3 && parts[2] === "batch-stock" && method === "POST" && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
-  if (resource === "online-products" && session.tenant?.slug !== "default") return deny("当前账号无权操作企业在线商品；仅企业负责人或管理员可批量更新库存，绑定、上架编辑、建品和同步功能仍未开放");
+  if (resource === "online-products" && parts.length === 3 && parts[2] === "action" && method === "POST" && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
+  if (resource === "online-products" && session.tenant?.slug !== "default") return deny("当前账号无权操作企业在线商品；仅企业负责人或管理员可调整库存，归档、绑定、上架编辑、建品和同步功能仍未开放");
   if (read && ["dashboard", "people", "shops", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules", "order-cancellation-rules", "order-quality-rules"].includes(resource)) return { allowed: true };
   if (read && ["system/info", "system/update-status", "db/seller-analytics/plugin-status"].includes(path)) return { allowed: true };
   if (read && path === "settings/packaging-fee-rule") return require("inventory.read");

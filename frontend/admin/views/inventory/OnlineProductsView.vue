@@ -30,6 +30,7 @@ const loading = ref(false);
 const syncLoading = ref(false);
 const stockSyncLoading = ref(false);
 const openingEditId = ref(0);
+const zeroStockLoadingId = ref(0);
 const bindDialogVisible = ref(false);
 const bindSubmitting = ref(false);
 const stockDialogVisible = ref(false);
@@ -635,6 +636,29 @@ async function archiveOnlineProduct(row) {
   }
 }
 
+async function zeroOnlineProductStock(row) {
+  const productName = row.name || row.ozon_sku || row.offer_id || row.id;
+  try {
+    await ElMessageBox.confirm(`确认将本企业店铺的在线商品「${productName}」库存清零吗？此操作会立即提交到 Ozon。`, "确认清零库存", {
+      type: "warning",
+      confirmButtonText: "确认清零",
+      cancelButtonText: "取消"
+    });
+    zeroStockLoadingId.value = Number(row.id);
+    await apiClient.post("/api/online-products/action", {
+      online_product_id: row.id,
+      action: "zero_stock"
+    });
+    ElMessage.success("已向 Ozon 提交库存清零");
+    await loadPageData();
+  } catch (error) {
+    if (error === "cancel" || error === "close" || error?.message === "cancel") return;
+    ElMessage.error(error.message || "在线商品库存清零失败");
+  } finally {
+    zeroStockLoadingId.value = 0;
+  }
+}
+
 async function syncOnlineProducts(mode = "pending_listing") {
   syncLoading.value = true;
   try {
@@ -767,7 +791,7 @@ onDeactivated(stopOnlineProductSyncPolling);
 
 <template>
   <div class="page-stack online-products-page erp-paged-page">
-    <el-alert v-if="tenantReadOnly" title="企业安全模式" description="仅展示本企业店铺商品；负责人和管理员可进行批量库存更新。商品绑定、上架编辑、建品及同步功能待完成租户化后开放。" type="info" :closable="false" show-icon />
+    <el-alert v-if="tenantReadOnly" title="企业安全模式" description="仅展示本企业店铺商品；负责人和管理员可进行批量库存更新或清零单个商品。归档、商品绑定、上架编辑、建品及同步功能待完成租户化后开放。" type="info" :closable="false" show-icon />
     <el-card shadow="never" class="page-card online-products-card erp-paged-card">
       <div class="online-toolbar online-toolbar-sticky">
         <div class="online-toolbar-main">
@@ -949,15 +973,18 @@ onDeactivated(stopOnlineProductSyncPolling);
           <el-table-column label="最后同步时间" min-width="160">
             <template #default="{ row }">{{ dateText(row.synced_at || row.updated_at) }}</template>
           </el-table-column>
-          <el-table-column v-if="!tenantReadOnly" label="操作" width="470" fixed="right">
+          <el-table-column v-if="!tenantReadOnly || (tenantCanUpdateStocks && tenantReadOnly)" label="操作" width="470" fixed="right">
             <template #default="{ row }">
               <div class="erp-inline-actions">
-                <el-button class="erp-btn-link" link type="primary" :loading="openingEditId === Number(row.id)" @click="openOnlineProductEditor(row)">编辑上架</el-button>
-                <el-button class="erp-btn-link" link type="primary" @click="openOnlineProductAiWorkbench(row, 'optimization')">AI优化</el-button>
-                <el-button class="erp-btn-link" link type="primary" @click="openOnlineProductAiWorkbench(row, 'variant')">AI裂变</el-button>
-                <el-button class="erp-btn-link" link type="primary" @click="openBindDialog(row)">去绑定</el-button>
-                <el-button class="erp-btn-link" link @click="createProductFromOnline(row)">创建库存</el-button>
-                <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="archiveOnlineProduct(row)">归档商品</el-button>
+                <template v-if="!tenantReadOnly">
+                  <el-button class="erp-btn-link" link type="primary" :loading="openingEditId === Number(row.id)" @click="openOnlineProductEditor(row)">编辑上架</el-button>
+                  <el-button class="erp-btn-link" link type="primary" @click="openOnlineProductAiWorkbench(row, 'optimization')">AI优化</el-button>
+                  <el-button class="erp-btn-link" link type="primary" @click="openOnlineProductAiWorkbench(row, 'variant')">AI裂变</el-button>
+                  <el-button class="erp-btn-link" link type="primary" @click="openBindDialog(row)">去绑定</el-button>
+                  <el-button class="erp-btn-link" link @click="createProductFromOnline(row)">创建库存</el-button>
+                  <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="archiveOnlineProduct(row)">归档商品</el-button>
+                </template>
+                <el-button v-else-if="tenantCanUpdateStocks" class="erp-btn-link erp-btn-link-danger" link type="danger" :loading="zeroStockLoadingId === Number(row.id)" @click="zeroOnlineProductStock(row)">清零库存</el-button>
               </div>
             </template>
           </el-table-column>
