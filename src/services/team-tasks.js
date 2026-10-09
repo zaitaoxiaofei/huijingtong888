@@ -709,6 +709,21 @@ export async function saveDevelopmentHeatmapOrdersMysql(body = {}, sessionPerson
   return { ok: true, saved: normalized.length };
 }
 
+export async function updateDevelopmentTaskPriorityMysql(body = {}) {
+  ensureMysqlEnabled();
+  await ensureTeamTasksSchema();
+  const ids = [...new Set((Array.isArray(body.task_ids) ? body.task_ids : []).map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
+  const priority = String(body.priority || "").trim();
+  if (!ids.length || ids.length > 100) throw new Error("请提供 1–100 个有效开发任务后再调整优先级。");
+  if (!VALID_PRIORITIES.has(priority)) throw new Error("目标优先级无效，请选择四象限中的一个优先级。");
+  await withMysqlTransaction(async (connection) => {
+    const [rows] = await connection.execute(`SELECT id FROM team_tasks WHERE id IN (${ids.map(() => "?").join(",")}) AND work_type='product_development' AND active=1 FOR UPDATE`, ids);
+    if (rows.length !== ids.length) throw new Error("部分开发任务已不存在或不可调整，请刷新任务总览后重试。");
+    await connection.execute(`UPDATE team_tasks SET priority=?,updated_at=CURRENT_TIMESTAMP WHERE id IN (${ids.map(() => "?").join(",")}) AND work_type='product_development' AND active=1`, [priority, ...ids]);
+  });
+  return { ok: true, updated: ids.length };
+}
+
 export async function teamTaskOperationalDetailsMysql(id) {
   ensureMysqlEnabled();
   await ensureTeamTasksSchema();

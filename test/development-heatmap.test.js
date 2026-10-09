@@ -65,3 +65,11 @@ test('priority quadrants sort heatmap rows and core-product columns before volum
  assert.equal(result.columns[0].label,'方向盘套');
  assert.equal(result.cell(result.rows[0],result.columns[0].label).priorityScore,10);
 });
+
+test('completed development tasks can be excluded from the heatmap without changing the inclusive default', () => {
+ const rows=[task(1,[model(1,4)],{status:'doing'}),task(2,[model(2,8)],{status:'done'}),task(3,[model(3,3)],{status:'cancelled'})];
+ const active=buildDevelopmentHeatmap(rows,{metric:'tasks',time:'created',range,includeCompleted:false});
+ assert.equal(active.taskCount,1);
+ assert.deepEqual(active.rows.map(row=>row.label),['TENET · T1']);
+ assert.equal(buildDevelopmentHeatmap(rows,{metric:'tasks',time:'created',range}).taskCount,3);
+});

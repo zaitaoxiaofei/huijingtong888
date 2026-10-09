@@ -34,12 +34,12 @@ export function effectiveDevelopmentDueDay(task, now = Date.now()) {
 
 // The same draft may be linked from several tasks. Count it once, and do not
 // assign conflicting brand/model/category links to an arbitrary coordinate.
-export function buildDevelopmentHeatmap(tasks, { metric = "actual", time = "draft", range = [], dimension = "model", scope = "all", query = "", now = Date.now() } = {}) {
+export function buildDevelopmentHeatmap(tasks, { metric = "actual", time = "draft", range = [], dimension = "model", scope = "all", query = "", includeCompleted = true, now = Date.now() } = {}) {
   const entries = [];
   const assignments = new Map();
   const legacy = [];
   for (const task of tasks) {
-    if (task.type !== "product_development") continue;
+    if (task.type !== "product_development" || (!includeCompleted && ["done", "closed", "cancelled"].includes(task.status))) continue;
     let plan = task.development_plan;
     if (!plan) {
       const classified = task.development_brand && task.development_category;
