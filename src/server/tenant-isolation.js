@@ -25,6 +25,11 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   if (path.startsWith("db/seller-analytics/") && ["GET", "HEAD", "POST", "DELETE"].includes(String(method || "GET").toUpperCase())) {
     return { allowed: true };
   }
+  const verb = String(method || "GET").toUpperCase();
+  const shopCollection = parts[1] === "shops" && parts.length === 2 && ["GET", "POST"].includes(verb);
+  const shopRecord = parts[1] === "shops" && parts.length === 3 && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(verb);
+  if (shopCollection || shopRecord) return { allowed: true };
+  if (parts[1] === "tenants" && parts[2] === "members" && parts.length === 3 && verb === "GET") return { allowed: true };
   return {
     allowed: false,
     error: "该企业的数据隔离尚未完成，此功能暂不可用；默认企业数据不会开放给新企业",

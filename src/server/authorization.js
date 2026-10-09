@@ -19,8 +19,16 @@ export function authorizeApiRequest(req, parts = []) {
   if (["auth", "user-preferences", "system-notifications", "ready", "image-proxy"].includes(resource)) return { allowed: true };
   if (resource === "tenants") {
     if (parts[2] === "plugin-token" && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
+    if (parts[2] === "members" && method === "GET" && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
     return deny("仅平台管理员可以管理企业和企业成员");
   }
+  if (resource === "shops" && ["owner", "admin"].includes(session.tenant?.role)) {
+    const collection = parts.length === 2 && ["GET", "POST"].includes(method);
+    const record = parts.length === 3 && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(method);
+    if (collection || record) return { allowed: true };
+  }
+  if (resource === "shops" && session.tenant?.slug !== "default") return deny("仅企业负责人或企业管理员可以管理店铺与店铺密钥");
+  if (resource === "people" && session.tenant?.slug !== "default") return deny("企业人员管理尚未完成隔离，请使用企业与授权中的成员管理");
   if (read && ["dashboard", "people", "shops", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules", "order-cancellation-rules", "order-quality-rules"].includes(resource)) return { allowed: true };
   if (read && ["system/info", "system/update-status", "db/seller-analytics/plugin-status"].includes(path)) return { allowed: true };
   if (read && path === "settings/packaging-fee-rule") return require("inventory.read");

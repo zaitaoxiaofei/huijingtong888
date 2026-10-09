@@ -1,4 +1,5 @@
 import { hasPermission } from "../../shared/permissions.js";
+import { tenantIdFromRequest } from "./sellerAnalytics.js";
 export function createOperationsRoutes({ services, readJson }) {
   return {
     "GET /api/settings/packaging-fee-rule": () => services.packagingFeeRule(),
@@ -37,10 +38,10 @@ export function createOperationsRoutes({ services, readJson }) {
     "GET /api/customer-message-customer-orders": (req, url) => services.customerMessageCustomerOrders(Object.fromEntries(url.searchParams.entries())),
     "GET /api/customer-message-settings": () => services.customerMessageSettings(),
     "GET /api/user-preferences": (req, url) => services.userPreference(Object.fromEntries(url.searchParams.entries()), req._session?.personId),
-    "GET /api/shops": () => services.shops(),
+    "GET /api/shops": (req) => services.shops(tenantIdFromRequest(req)),
     "GET /api/people": () => services.people(),
     "POST /api/people": async (req) => services.createPerson(await readJson(req)) || { ok: true },
-    "POST /api/shops": async (req) => services.createShop(await readJson(req)) || { ok: true },
+    "POST /api/shops": async (req) => services.createShop(await readJson(req), tenantIdFromRequest(req)) || { ok: true },
     "POST /api/procurement/requests": async (req) => services.createProcurementRequest(await readJson(req), req._session?.personId) || { ok: true },
     "POST /api/procurement/warehouse-requests": async (req) => services.createWarehouseProcurementRequests(await readJson(req), req._session?.personId),
     "POST /api/procurement/purchases": async (req) => services.recordProcurementPurchase(await readJson(req), req._session?.personId),
@@ -149,12 +150,12 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "shops" && parts[2]) {
-    await services.updateShop(Number(parts[2]), await readJson(req));
+    await services.updateShop(Number(parts[2]), await readJson(req), tenantIdFromRequest(req));
     return json(res, { ok: true });
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "shops" && parts[2]) {
-    await services.deleteShop(Number(parts[2]));
+    await services.deleteShop(Number(parts[2]), tenantIdFromRequest(req));
     return json(res, { ok: true });
   }
 

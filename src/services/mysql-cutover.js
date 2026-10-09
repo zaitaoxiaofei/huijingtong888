@@ -2529,17 +2529,19 @@ function normalizeShopNameForDuplicateCheck(value) {
   return String(value || "").trim();
 }
 
-async function assertUniqueShopNameMysql(name, exceptId = 0) {
+async function assertUniqueShopNameMysql(name, tenantId, exceptId = 0) {
   const normalizedName = normalizeShopNameForDuplicateCheck(name);
   if (!normalizedName) throw new Error("请输入店铺名称");
+  const defaultTenant = await isDefaultShopTenantMysql(tenantId);
   const duplicate = await mysqlQueryOne(`
     SELECT id, name
     FROM shops
-    WHERE status != 'deleted'
+    WHERE (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})
+      AND status != 'deleted'
       AND LOWER(TRIM(name)) = LOWER(TRIM(?))
       AND id <> ?
     LIMIT 1
-  `, [normalizedName, Number(exceptId || 0)]);
+  `, [Number(tenantId), normalizedName, Number(exceptId || 0)]);
   if (duplicate) {
     const error = new Error(`店铺名称「${normalizedName}」已存在，请编辑已有店铺，不要重复新增。`);
     error.status = 409;
@@ -2547,6 +2549,29 @@ async function assertUniqueShopNameMysql(name, exceptId = 0) {
     throw error;
   }
   return normalizedName;
+}
+
+async function isDefaultShopTenantMysql(tenantId) {
+  const rows = await mysqlQuery("SELECT slug FROM tenants WHERE id = ? LIMIT 1", [Number(tenantId)]);
+  return rows[0]?.slug === "default";
+}
+
+async function resolveShopTenantIdMysql(tenantId = "admin") {
+  const value = String(tenantId || "admin").trim();
+  if (value === "admin") {
+    const rows = await mysqlQuery("SELECT id FROM tenants WHERE slug = ? AND status = 'active' LIMIT 1", ["default"]);
+    const id = Number(rows[0]?.id || 0);
+    if (id) return id;
+  } else if (/^\d+$/.test(value) && Number(value) > 0) {
+    const rows = await mysqlQuery("SELECT id FROM tenants WHERE id = ? AND status = 'active' LIMIT 1", [Number(value)]);
+    if (Number(rows[0]?.id || 0)) return Number(value);
+  }
+  throw new Error("当前企业上下文无效，无法访问店铺");
+}
+
+function invalidateShopCacheMysql() {
+  invalidateMasterDataCachePrefix("shops:");
+  invalidateMasterDataCache("shops");
 }
 
 async function mysqlConnectionQueryOne(connection, sql, params = []) {
@@ -3738,19 +3763,22 @@ export async function testOrderCancellationRuleMysql(body = {}) {
   };
 }
 
-export async function shopsMysql() {
+export async function shopsMysql(tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureShopWatermarkSchemaMysql();
   await ensureShopAdvertisingCredentialSchemaMysql();
   await ensureShopUserSchemaMysql();
-  return getCachedMasterData("shops", async () => {
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  return getCachedMasterData(`shops:${normalizedTenantId}`, async () => {
     const rows = await mysqlQuery(`
       SELECT s.*, p.name AS user_name
       FROM shops s
       LEFT JOIN people p ON p.id = s.user_id
-      WHERE s.status != 'deleted'
+      WHERE (s.tenant_id = ?${defaultTenant ? " OR s.tenant_id IS NULL" : ""})
+        AND s.status != 'deleted'
       ORDER BY s.id
-    `);
+    `, [normalizedTenantId]);
     return rows.map((row) => ({
       ...row,
       performance_client_secret: "",
@@ -6060,7 +6088,7 @@ export async function updatePersonMysql(id, body = {}, hashPassword, validatePas
   }
 
   invalidateMasterDataCache("people");
-  invalidateMasterDataCache("shops");
+  invalidateShopCacheMysql();
   return { ok: true };
 }
 
@@ -6072,7 +6100,7 @@ export async function deletePersonMysql(id) {
 
   await destroySessionsByPersonIdMysql(personId);
   invalidateMasterDataCache("people");
-  invalidateMasterDataCache("shops");
+  invalidateShopCacheMysql();
   return { ok: true };
 }
 
@@ -6104,19 +6132,20 @@ export async function hardDeletePersonMysql(id) {
   });
 
   invalidateMasterDataCache("people");
-  invalidateMasterDataCache("shops");
+  invalidateShopCacheMysql();
   return { ok: true };
 }
 
-export async function createShopMysql(body = {}) {
+export async function createShopMysql(body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureShopWatermarkSchemaMysql();
   await ensureShopAdvertisingCredentialSchemaMysql();
   await ensureShopUserSchemaMysql();
   await ensureMysqlColumns("shops", ["ALTER TABLE shops ADD COLUMN ozon_seller_id VARCHAR(128) NULL"]);
   await ensureMysqlColumns("shops", ["ALTER TABLE shops ADD COLUMN ozon_seller_id VARCHAR(128) NULL"]);
-  const shopName = await assertUniqueShopNameMysql(body.name);
-  const userId = await requireShopUserIdMysql(body.user_id);
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const shopName = await assertUniqueShopNameMysql(body.name, normalizedTenantId);
+  const userId = await requireShopUserIdMysql(body.user_id, normalizedTenantId);
   const performanceSecret = String(body.performance_client_secret || "").trim();
   const payload = [
     shopName,
@@ -6139,30 +6168,32 @@ export async function createShopMysql(body = {}) {
 
   const result = await mysqlExecute(`
     INSERT INTO shops (
-      name, legal_entity, user_id, ozon_client_id, ozon_seller_id, api_key_hint, ozon_api_key, performance_client_id, performance_client_secret, performance_client_secret_hint,
+      tenant_id, name, legal_entity, user_id, ozon_client_id, ozon_seller_id, api_key_hint, ozon_api_key, performance_client_id, performance_client_secret, performance_client_secret_hint,
       watermark_position, watermark_x_percent, watermark_y_percent, watermark_scale_percent, watermark_opacity_percent,
       payout_rate
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `, payload);
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [normalizedTenantId, ...payload]);
 
 
 
-  invalidateMasterDataCache("shops");
+  invalidateShopCacheMysql();
   return { ok: true, id: Number(result.insertId) };
 }
 
-export async function updateShopMysql(id, body = {}) {
+export async function updateShopMysql(id, body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureShopWatermarkSchemaMysql();
   await ensureShopAdvertisingCredentialSchemaMysql();
   await ensureShopUserSchemaMysql();
   await ensureMysqlColumns("shops", ["ALTER TABLE shops ADD COLUMN ozon_seller_id VARCHAR(128) NULL"]);
-  const existing = await mysqlQueryOne("SELECT * FROM shops WHERE id = ?", [Number(id)]);
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const existing = await mysqlQueryOne(`SELECT * FROM shops WHERE id = ? AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})`, [Number(id), normalizedTenantId]);
   if (!existing) throw new Error("Shop not found");
   assertFreshRecord(body, existing, "店铺资料已被其他用户保存，请刷新后再继续编辑");
-  const shopName = await assertUniqueShopNameMysql(body.name, Number(id));
-  const userId = await requireShopUserIdMysql(body.user_id);
+  const shopName = await assertUniqueShopNameMysql(body.name, normalizedTenantId, Number(id));
+  const userId = await requireShopUserIdMysql(body.user_id, normalizedTenantId);
   const nextPerformanceSecret = String(body.performance_client_secret || "").trim()
     || String(existing.performance_client_secret || "");
 
@@ -6192,20 +6223,22 @@ export async function updateShopMysql(id, body = {}) {
       name = ?, legal_entity = ?, user_id = ?, ozon_client_id = ?, ozon_seller_id = ?, api_key_hint = ?, ozon_api_key = ?,
       performance_client_id = ?, performance_client_secret = ?, performance_client_secret_hint = ?, status = ?,
       watermark_position = ?, watermark_x_percent = ?, watermark_y_percent = ?, watermark_scale_percent = ?, watermark_opacity_percent = ?,
-      payout_rate = ?
-    WHERE id = ?
-  `, payload);
+      payout_rate = ?, tenant_id = COALESCE(tenant_id, ?)
+    WHERE id = ? AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})
+  `, [...payload.slice(0, -1), normalizedTenantId, Number(id), normalizedTenantId]);
 
 
 
-  invalidateMasterDataCache("shops");
+  invalidateShopCacheMysql();
   return { ok: true };
 }
 
-async function requireShopUserIdMysql(value) {
+async function requireShopUserIdMysql(value, tenantId) {
   const userId = Number(value || 0);
   if (!Number.isInteger(userId) || userId <= 0) throw new Error("请选择店铺绑定的店长（user_id）");
-  const person = await mysqlQueryOne("SELECT id FROM people WHERE id = ? AND active != 0", [userId]);
+  const person = await mysqlQueryOne(`SELECT p.id FROM people p
+    JOIN tenant_members tm ON tm.person_id = p.id AND tm.tenant_id = ? AND tm.active = 1
+    WHERE p.id = ? AND p.active != 0`, [Number(tenantId), userId]);
   if (!person) throw new Error("所选店长不存在或账号已停用，请在人员管理中确认后重新选择");
   return userId;
 }
@@ -6230,12 +6263,14 @@ function clampMysqlNumber(value, minimum, maximum, fallback) {
   return Math.min(maximum, Math.max(minimum, number));
 }
 
-export async function deleteShopMysql(id) {
+export async function deleteShopMysql(id, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
-  const result = await mysqlExecute("UPDATE shops SET status = 'deleted' WHERE id = ? AND status != 'deleted'", [Number(id)]);
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const result = await mysqlExecute(`UPDATE shops SET status = 'deleted' WHERE id = ? AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""}) AND status != 'deleted'`, [Number(id), normalizedTenantId]);
   if (Number(result.affectedRows || 0) !== 1) throw new Error("店铺不存在或已删除，请刷新后再确认");
 
-  invalidateMasterDataCache("shops");
+  invalidateShopCacheMysql();
   return { ok: true };
 }
 

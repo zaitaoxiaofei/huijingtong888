@@ -63,6 +63,7 @@ export function pagePermission(path = "") {
 }
 
 export function canAccessPage(subject, path) {
+  if (path === "/tenant-shops") return hasPermission(subject, "admin") || ["owner", "admin"].includes(subject?.tenant?.role);
   const permission = pagePermission(path);
   return permission === "common" ? getRoles(subject).length > 0 : hasPermission(subject, permission);
 }

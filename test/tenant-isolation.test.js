@@ -15,7 +15,8 @@ test("default tenant retains access while unsupported tenant business routes fai
   assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics", "analysis"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics", "snapshots", "snapshot-1"], "DELETE").allowed, true);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics"], "GET").allowed, false);
-  assert.equal(tenantIsolationDecision(otherSession, ["api", "shops"]).allowed, false);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "shops"], "GET").allowed, true);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "shops"], "DELETE").allowed, false);
   assert.equal(tenantIsolationDecision({}, ["api", "orders"]).code, "TENANT_CONTEXT_REQUIRED");
 });
 

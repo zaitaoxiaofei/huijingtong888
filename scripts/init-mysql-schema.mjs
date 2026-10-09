@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS media_migration_map (
 
 CREATE TABLE IF NOT EXISTS shops (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   name VARCHAR(255) NOT NULL,
   legal_entity VARCHAR(255) NULL,
   user_id BIGINT UNSIGNED NULL,
@@ -49,7 +50,8 @@ CREATE TABLE IF NOT EXISTS shops (
   feature_flags_json JSON NULL,
   payout_rate DECIMAL(8,4) NOT NULL DEFAULT 0.3300,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  KEY idx_shops_user_id (user_id)
+  KEY idx_shops_user_id (user_id),
+  KEY idx_shops_tenant_status_id (tenant_id, status, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS people (
@@ -1505,6 +1507,7 @@ const connection = await createMysqlConnection();
 try {
   await connection.query(mysqlSchemaSql);
   const alterStatements = [
+    "ALTER TABLE shops ADD COLUMN tenant_id BIGINT UNSIGNED NULL",
     "ALTER TABLE shops ADD COLUMN watermark_path TEXT NULL",
     "ALTER TABLE shops ADD COLUMN watermark_name VARCHAR(255) NULL",
     "ALTER TABLE shops ADD COLUMN watermark_position VARCHAR(32) NOT NULL DEFAULT 'bottom-right'",
@@ -1551,6 +1554,7 @@ try {
     await connection.query(sql);
   }
   const indexStatements = [
+    "CREATE INDEX idx_shops_tenant_status_id ON shops (tenant_id, status, id)",
     "CREATE INDEX idx_order_history_transport ON order_status_history (order_id, status, last_status_changed_at) ALGORITHM=INPLACE LOCK=NONE",
     "CREATE INDEX idx_outbound_shop_created ON outbound_records (shop_id, created_at)",
     "CREATE INDEX idx_outbound_stock_location ON outbound_records (stock_location, status, created_at)",
