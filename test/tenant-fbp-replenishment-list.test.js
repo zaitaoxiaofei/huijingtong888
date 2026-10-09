@@ -24,10 +24,12 @@ test("only the FBP replenishment collection route is opened and its tenant comes
   const session = { tenant: { id: 42, slug: "company-a" } };
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders"], "POST").allowed, false);
-  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "adjustments"], "GET").allowed, false);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "adjustments"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "delete"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "delete"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "adjustments"], "GET").allowed, true);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "adjustments"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "status"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "inventory-allocation"], "POST").allowed, false);
   const server = read("../src/server.js");
@@ -36,6 +38,8 @@ test("only the FBP replenishment collection route is opened and its tenant comes
   assert.match(server, /services\.deleteFbpReplenishmentOrder\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
   assert.match(server, /services\.deleteFbpReplenishmentOrderItem\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
   assert.match(server, /services\.updateFbpReplenishmentOrderStatus\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
+  assert.match(server, /services\.fbpReplenishmentItemAdjustments\(req\.query \|\| \{\}, tenantIdFromRequest\(req\)\)/);
+  assert.match(server, /services\.addFbpReplenishmentItemAdjustment\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
 });
 
 test("FBP draft writes lock and validate the parent order through tenant shop ownership", () => {
@@ -58,4 +62,14 @@ test("FBP draft writes lock and validate the parent order through tenant shop ow
   const status = source.slice(source.indexOf("export async function updateFbpReplenishmentOrderStatusMysql"), source.indexOf("const FBP_TRANSFER_STATUSES"));
   assert.match(status, /!defaultTenant && \["approved", "sent", "ozon_created", "completed"\]\.includes\(status\)/);
   assert.match(status, /!defaultTenant && status === "cancelled"/);
+  const adjustmentStart = source.indexOf("export async function addFbpReplenishmentItemAdjustmentMysql");
+  const adjustmentEnd = source.indexOf("const fbpAdjustmentReasonLabels", adjustmentStart);
+  const adjustment = source.slice(adjustmentStart, adjustmentEnd);
+  assert.match(adjustment, /reasonCode === "stock_shortage"/);
+  assert.match(adjustment, /!defaultTenant && reasonCode === "stock_shortage"/);
+  assert.match(adjustment, /JOIN shops s ON s\.id = o\.shop_id/);
+  assert.match(adjustment, /LIMIT 1 FOR UPDATE/);
+  const adjustmentReadStart = source.indexOf("export async function fbpReplenishmentItemAdjustmentsMysql");
+  const adjustmentReadEnd = source.indexOf("export async function updateFbpReplenishmentItemAdjustmentReasonMysql", adjustmentReadStart);
+  assert.match(source.slice(adjustmentReadStart, adjustmentReadEnd), /JOIN shops s ON s\.id = o\.shop_id/);
 });

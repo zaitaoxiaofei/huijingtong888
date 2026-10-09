@@ -4940,9 +4940,11 @@ async function requireSessionPersonIdMysql(personId, connection = null) {
   return resolved;
 }
 
-export async function addFbpReplenishmentItemAdjustmentMysql(body = {}, userId = null) {
+export async function addFbpReplenishmentItemAdjustmentMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const orderId = Number(body.order_id || body.orderId || 0);
   const itemId = Number(body.item_id || body.itemId || 0);
   const adjustmentQty = Math.round(Number(body.adjustment_qty || body.adjustmentQty || 0));
@@ -4961,27 +4963,45 @@ export async function addFbpReplenishmentItemAdjustmentMysql(body = {}, userId =
   if (!adjustmentQty) throw new Error("人工调整数量不能为 0，请填写正数或负数。");
   if (!reason) throw new Error("请选择调整原因，确保数量变更可追溯。");
   if (reasonCode === "other" && !reasonNote) throw new Error("选择其他原因时，请填写补充说明。");
+  if (!defaultTenant && reasonCode === "stock_shortage") {
+    throw new Error("库存短缺原因会生成采购申请，该采购流程尚未完成企业隔离；请选择其他调整原因或联系管理员。");
+  }
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   const item = await mysqlQueryOne(`
     SELECT i.id, i.approved_qty, o.status,
       COALESCE((SELECT SUM(a.adjustment_qty) FROM fbp_replenishment_item_adjustments a WHERE a.item_id = i.id), 0) AS adjustment_qty
     FROM fbp_replenishment_order_items i
     JOIN fbp_replenishment_orders o ON o.id = i.order_id
-    WHERE i.id = ? AND i.order_id = ?
-  `, [itemId, orderId]);
-  if (!item) throw new Error("备货单商品明细不存在。");
+    JOIN shops s ON s.id = o.shop_id
+    WHERE i.id = ? AND i.order_id = ? AND s.status != 'deleted' AND ${shopScope}
+  `, [itemId, orderId, normalizedTenantId]);
+  if (!item) throw new Error("备货单商品明细不存在或不属于当前企业。");
   if (!["approved", "sent", "ozon_created", "completed"].includes(String(item.status || ""))) {
     throw new Error("备货单通过后才能添加人工数量调整；审核前请直接修改申请数量。");
   }
   const finalQty = Number(item.approved_qty || 0) + Number(item.adjustment_qty || 0) + adjustmentQty;
   if (finalQty < 0) throw new Error("调整后的真实备货数量不能小于 0。");
-  await ensureProcurementFlexibleRequestSchemaMysql();
+  if (defaultTenant) await ensureProcurementFlexibleRequestSchemaMysql();
   const result = await withMysqlTransaction(async (connection) => {
+    const order = await mysqlConnectionQueryOne(connection, `SELECT o.id FROM fbp_replenishment_orders o
+      JOIN shops s ON s.id = o.shop_id
+      WHERE o.id = ? AND s.status != 'deleted' AND ${shopScope} LIMIT 1 FOR UPDATE`, [orderId, normalizedTenantId]);
+    if (!order) throw new Error("备货单不存在或不属于当前企业。");
+    const lockedItem = await mysqlConnectionQueryOne(connection, `SELECT i.approved_qty, o.status,
+        COALESCE((SELECT SUM(a.adjustment_qty) FROM fbp_replenishment_item_adjustments a WHERE a.item_id = i.id), 0) AS adjustment_qty
+      FROM fbp_replenishment_order_items i JOIN fbp_replenishment_orders o ON o.id = i.order_id
+      WHERE i.id = ? AND i.order_id = ? FOR UPDATE`, [itemId, orderId]);
+    if (!lockedItem || !["approved", "sent", "ozon_created", "completed"].includes(String(lockedItem.status || ""))) {
+      throw new Error("备货单商品明细状态已变化，请刷新后重试。");
+    }
+    const lockedFinalQty = Number(lockedItem.approved_qty || 0) + Number(lockedItem.adjustment_qty || 0) + adjustmentQty;
+    if (lockedFinalQty < 0) throw new Error("调整后的真实备货数量不能小于 0。");
     const [adjustmentResult] = await connection.execute(`
       INSERT INTO fbp_replenishment_item_adjustments (order_id, item_id, adjustment_qty, reason, reason_code, reason_note, created_by)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `, [orderId, itemId, adjustmentQty, reason, reasonCode, reasonNote || null, userId || null]);
     let procurementRequestId = null;
-    if (reasonCode === "stock_shortage" && adjustmentQty < 0) {
+    if (defaultTenant && reasonCode === "stock_shortage" && adjustmentQty < 0) {
       const [itemRows] = await connection.execute(`
         SELECT i.product_id, i.product_name, i.inventory_id, o.order_no
         FROM fbp_replenishment_order_items i
@@ -5005,9 +5025,9 @@ export async function addFbpReplenishmentItemAdjustmentMysql(body = {}, userId =
       await connection.execute("UPDATE fbp_replenishment_item_adjustments SET procurement_request_id = ? WHERE id = ?", [procurementRequestId, adjustmentResult.insertId]);
     }
     await connection.execute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [orderId]);
-    return { procurementRequestId };
+    return { procurementRequestId, adjustmentQty: Number(lockedItem.adjustment_qty || 0) + adjustmentQty, finalQty: lockedFinalQty };
   });
-  return { ok: true, order_id: orderId, item_id: itemId, adjustment_qty: Number(item.adjustment_qty || 0) + adjustmentQty, final_qty: finalQty, procurement_request_id: result.procurementRequestId };
+  return { ok: true, order_id: orderId, item_id: itemId, adjustment_qty: result.adjustmentQty, final_qty: result.finalQty, procurement_request_id: result.procurementRequestId };
 }
 
 const fbpAdjustmentReasonLabels = {
@@ -5019,18 +5039,24 @@ const fbpAdjustmentReasonLabels = {
   other: "其他"
 };
 
-export async function fbpReplenishmentItemAdjustmentsMysql(query = {}) {
+export async function fbpReplenishmentItemAdjustmentsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const orderId = Number(query.order_id || query.orderId || 0);
   const itemId = Number(query.item_id || query.itemId || 0);
   if (!orderId || !itemId) throw new Error("缺少备货单或商品明细，无法查看调整记录。");
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   return await mysqlQuery(`
-    SELECT id, adjustment_qty, reason, reason_code, reason_note, procurement_request_id, created_at
-    FROM fbp_replenishment_item_adjustments
-    WHERE order_id = ? AND item_id = ?
-    ORDER BY created_at DESC, id DESC
-  `, [orderId, itemId]);
+    SELECT a.id, a.adjustment_qty, a.reason, a.reason_code, a.reason_note,
+      ${defaultTenant ? "a.procurement_request_id" : "NULL AS procurement_request_id"}, a.created_at
+    FROM fbp_replenishment_item_adjustments a
+    JOIN fbp_replenishment_orders o ON o.id = a.order_id
+    JOIN shops s ON s.id = o.shop_id
+    WHERE a.order_id = ? AND a.item_id = ? AND s.status != 'deleted' AND ${shopScope}
+    ORDER BY a.created_at DESC, a.id DESC
+  `, [orderId, itemId, normalizedTenantId]);
 }
 
 export async function updateFbpReplenishmentItemAdjustmentReasonMysql(body = {}, userId = null) {

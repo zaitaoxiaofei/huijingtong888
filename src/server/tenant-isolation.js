@@ -31,9 +31,11 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenantFbpDraftMutation = parts[1] === "fbp-replenishment-orders" && verb === "POST" && (
     (parts.length === 3 && ["delete", "items"].includes(parts[2]))
     || (parts.length === 3 && parts[2] === "status")
-    || (parts.length === 4 && parts[2] === "items" && parts[3] === "delete")
+    || (parts.length === 4 && parts[2] === "items" && ["delete", "adjustments"].includes(parts[3]))
   );
   if (tenantFbpDraftMutation) return { allowed: true };
+  const tenantFbpAdjustmentRead = parts[1] === "fbp-replenishment-orders" && parts.length === 4 && parts[2] === "items" && parts[3] === "adjustments" && verb === "GET";
+  if (tenantFbpAdjustmentRead) return { allowed: true };
   if (parts[1] === "sku-order-tracking" && parts.length === 2 && ["GET", "POST"].includes(verb)) return { allowed: true };
   const tenantOnlineProductRead = parts[1] === "online-products" && parts.length === 3 && ["limits", "warehouses"].includes(parts[2]) && verb === "GET";
   const tenantOnlineProductStockWrite = parts[1] === "online-products" && parts.length === 3 && parts[2] === "batch-stock" && verb === "POST";
