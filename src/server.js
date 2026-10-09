@@ -274,6 +274,7 @@ const routes = {
   "GET /api/exchange-rate/current": () => services.currentExchangeRate(),
   "GET /api/exchange-rates": () => services.exchangeRates(),
   "GET /api/inventory": (req) => services.inventory(req.query || {}),
+  "GET /api/inventory/availability": (req) => services.productInventoryAvailability(req.query || {}),
   "GET /api/stock-alerts": (req) => services.stockAlerts(req.query || {}),
   "GET /api/fbp-opportunities": (req) => services.fbpOpportunities(req.query || {}),
   "GET /api/fbp-replenishment-orders": (req) => services.fbpReplenishmentOrders(req.query || {}),

@@ -11,6 +11,22 @@ test('FBP demand cannot consume local availability; FBS and approved FBP reserva
   ] });
   assert.equal(coverage.get(1).items[0].product_local_available, 3);
   assert.equal(coverage.get(2).items[0].product_local_available, 3);
+  assert.deepEqual(coverage.product_availability.get(10), {
+    product_id: 10, local_stock: 10, local_available: 3,
+    order_reserved_qty: 4, fbp_reserved_qty: 3,
+    pending_procurement_qty: 0, pending_procurement_available_qty: 0,
+    inventory_needs_review: false
+  });
+});
+
+test('only real pending-arrival batches count as incoming, including products without open orders', () => {
+  const coverage = calculateOrderProcurementCoverage({
+    stocks: [{ product_id: 10, ledger: 4 }],
+    requests: [{ id: 1, product_id: 10, status: 'done', quantity: 117 }, { id: 2, product_id: 10, status: 'draft', quantity: 20 }, { id: 3, product_id: 10, status: 'suggested', quantity: 27 }],
+    inbounds: [{ id: 4, product_id: 10, status: 'approved', quantity: 143 }]
+  });
+  assert.equal(coverage.product_availability.get(10).local_available, 4);
+  assert.equal(coverage.product_availability.get(10).pending_procurement_qty, 0);
 });
 
 function fixture() {
