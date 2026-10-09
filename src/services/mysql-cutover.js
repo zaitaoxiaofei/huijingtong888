@@ -4824,29 +4824,36 @@ export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null
   return { ok: true, rows: created };
 }
 
-export async function updateFbpReplenishmentOrderItemsMysql(body = {}) {
+export async function updateFbpReplenishmentOrderItemsMysql(body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const orderId = Number(body.order_id || body.orderId || body.id || 0);
   const items = Array.isArray(body.items) ? body.items : [];
   if (!orderId || !items.length) throw new Error("缺少备货单明细，无法保存数量。");
-  const order = await mysqlQueryOne("SELECT id, status FROM fbp_replenishment_orders WHERE id = ?", [orderId]);
-  if (!order) throw new Error("备货单不存在。");
-  const orderStatus = String(order.status || "").trim();
-  if (["approved", "sent", "ozon_created", "completed", "cancelled"].includes(orderStatus)) {
-    throw new Error("已通过、已发送或已完成的备货单不能再修改数量。");
-  }
-  for (const item of items) {
-    const itemId = Number(item.id || 0);
-    if (!itemId) continue;
-    const requestedQty = Math.max(1, Math.round(Number(item.requested_qty || item.requestedQty || 0)));
-    await mysqlExecute(`
-      UPDATE fbp_replenishment_order_items
-      SET requested_qty = ?, approved_qty = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND order_id = ?
-    `, [requestedQty, requestedQty, itemId, orderId]);
-  }
-  await mysqlExecute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [orderId]);
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
+  await withMysqlTransaction(async (connection) => {
+    const order = await mysqlConnectionQueryOne(connection, `SELECT o.id, o.status FROM fbp_replenishment_orders o
+      JOIN shops s ON s.id = o.shop_id
+      WHERE o.id = ? AND s.status != 'deleted' AND ${shopScope} LIMIT 1 FOR UPDATE`, [orderId, normalizedTenantId]);
+    if (!order) throw new Error("备货单不存在或不属于当前企业。");
+    const orderStatus = String(order.status || "").trim();
+    if (["approved", "sent", "ozon_created", "completed", "cancelled"].includes(orderStatus)) {
+      throw new Error("已通过、已发送或已完成的备货单不能再修改数量。");
+    }
+    for (const item of items) {
+      const itemId = Number(item.id || 0);
+      if (!itemId) continue;
+      const requestedQty = Math.max(1, Math.round(Number(item.requested_qty || item.requestedQty || 0)));
+      await connection.execute(`
+        UPDATE fbp_replenishment_order_items
+        SET requested_qty = ?, approved_qty = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND order_id = ?
+      `, [requestedQty, requestedQty, itemId, orderId]);
+    }
+    await connection.execute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [orderId]);
+  });
   return { ok: true, id: orderId };
 }
 
@@ -5368,51 +5375,61 @@ export async function markFbpReplenishmentItemBarcodePrintedMysql(body = {}, use
   return withMysqlTransaction(connection => appendPrintRecord(connection, body, userId));
 }
 
-export async function deleteFbpReplenishmentOrderMysql(body = {}, userId = null) {
+export async function deleteFbpReplenishmentOrderMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const id = Number(body.id || body.order_id || body.orderId || 0);
   if (!id) throw new Error("缺少备货单，无法删除。");
-  const order = await mysqlQueryOne("SELECT id, status FROM fbp_replenishment_orders WHERE id = ?", [id]);
-  if (!order) return { ok: true, id, deleted: false };
-  const orderStatus = String(order.status || "").trim();
-  if (["approved", "sent", "ozon_created", "completed"].includes(orderStatus)) {
-    throw new Error("已通过、已发送或已完成的备货单不能删除。");
-  }
-  await withMysqlTransaction(async (connection) => {
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
+  const deleted = await withMysqlTransaction(async (connection) => {
+    const order = await mysqlConnectionQueryOne(connection, `SELECT o.id, o.status FROM fbp_replenishment_orders o
+      JOIN shops s ON s.id = o.shop_id
+      WHERE o.id = ? AND s.status != 'deleted' AND ${shopScope} LIMIT 1 FOR UPDATE`, [id, normalizedTenantId]);
+    if (!order) return false;
+    const orderStatus = String(order.status || "").trim();
+    if (["approved", "sent", "ozon_created", "completed"].includes(orderStatus)) {
+      throw new Error("已通过、已发送或已完成的备货单不能删除。");
+    }
     await connection.execute("DELETE FROM fbp_replenishment_order_items WHERE order_id = ?", [id]);
     await connection.execute("DELETE FROM fbp_replenishment_orders WHERE id = ?", [id]);
+    return true;
   });
+  if (!deleted) return { ok: true, id, deleted: false };
   invalidateFbpPlanningCachesMysql();
   return { ok: true, id, deleted: true, deleted_by: userId || null };
 }
 
-export async function deleteFbpReplenishmentOrderItemMysql(body = {}, userId = null) {
+export async function deleteFbpReplenishmentOrderItemMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const orderId = Number(body.order_id || body.orderId || 0);
   const itemId = Number(body.item_id || body.itemId || body.id || 0);
   if (!orderId || !itemId) throw new Error("缺少备货单明细，无法删除。");
-  const order = await mysqlQueryOne("SELECT id, status FROM fbp_replenishment_orders WHERE id = ?", [orderId]);
-  if (!order) return { ok: true, order_id: orderId, item_id: itemId, deleted: false };
-  const orderStatus = String(order.status || "").trim();
-  if (["approved", "sent", "ozon_created", "completed"].includes(orderStatus)) {
-    throw new Error("已通过、已发送或已完成的备货单明细不能删除。");
-  }
-  const item = await mysqlQueryOne("SELECT id FROM fbp_replenishment_order_items WHERE id = ? AND order_id = ?", [itemId, orderId]);
-  if (!item) return { ok: true, order_id: orderId, item_id: itemId, deleted: false };
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   let orderDeleted = false;
-  await withMysqlTransaction(async (connection) => {
+  const deleted = await withMysqlTransaction(async (connection) => {
+    const order = await mysqlConnectionQueryOne(connection, `SELECT o.id, o.status FROM fbp_replenishment_orders o JOIN shops s ON s.id = o.shop_id WHERE o.id = ? AND s.status != 'deleted' AND ${shopScope} LIMIT 1 FOR UPDATE`, [orderId, normalizedTenantId]);
+    if (!order) return false;
+    const orderStatus = String(order.status || "").trim();
+    if (["approved", "sent", "ozon_created", "completed"].includes(orderStatus)) throw new Error("已通过、已发送或已完成的备货单明细不能删除。");
+    const item = await mysqlConnectionQueryOne(connection, "SELECT id FROM fbp_replenishment_order_items WHERE id = ? AND order_id = ?", [itemId, orderId]);
+    if (!item) return false;
     await connection.execute("DELETE FROM fbp_replenishment_order_items WHERE id = ? AND order_id = ?", [itemId, orderId]);
     const [remainingRows] = await connection.execute("SELECT COUNT(*) AS total FROM fbp_replenishment_order_items WHERE order_id = ?", [orderId]);
     const remaining = Number(remainingRows?.[0]?.total || 0);
     if (remaining <= 0) {
       await connection.execute("DELETE FROM fbp_replenishment_orders WHERE id = ?", [orderId]);
       orderDeleted = true;
-      return;
+      return true;
     }
     await connection.execute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [orderId]);
+    return true;
   });
+  if (!deleted) return { ok: true, order_id: orderId, item_id: itemId, deleted: false };
   invalidateFbpPlanningCachesMysql();
   return { ok: true, order_id: orderId, item_id: itemId, deleted: true, order_deleted: orderDeleted, deleted_by: userId || null };
 }

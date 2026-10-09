@@ -25,6 +25,31 @@ test("only the FBP replenishment collection route is opened and its tenant comes
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders"], "POST").allowed, false);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "adjustments"], "GET").allowed, false);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "delete"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "delete"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "status"], "POST").allowed, false);
   const server = read("../src/server.js");
   assert.match(server, /services\.fbpReplenishmentOrders\(req\.query \|\| \{\}, tenantIdFromRequest\(req\)\)/);
+  assert.match(server, /services\.updateFbpReplenishmentOrderItems\(await readJson\(req\), tenantIdFromRequest\(req\)\)/);
+  assert.match(server, /services\.deleteFbpReplenishmentOrder\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
+  assert.match(server, /services\.deleteFbpReplenishmentOrderItem\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
+});
+
+test("FBP draft writes lock and validate the parent order through tenant shop ownership", () => {
+  const source = read("../src/services/mysql-cutover.js");
+  for (const [name, next] of [
+    ["updateFbpReplenishmentOrderItemsMysql", "saveFbpReplenishmentInventoryAllocationMysql"],
+    ["deleteFbpReplenishmentOrderMysql", "deleteFbpReplenishmentOrderItemMysql"],
+    ["deleteFbpReplenishmentOrderItemMysql", "updateFbpReplenishmentOrderStatusMysql"]
+  ]) {
+    const start = source.indexOf(`export async function ${name}`);
+    const end = source.indexOf(`export async function ${next}`, start + 1);
+    assert.notEqual(start, -1, name);
+    const method = source.slice(start, end);
+    assert.match(method, /resolveShopTenantIdMysql\(tenantId\)/, name);
+    assert.match(method, /JOIN shops s ON s\.id = o\.shop_id/, name);
+    assert.match(method, /tenantShopPredicateMysql\("s", defaultTenant\)/, name);
+    assert.match(method, /withMysqlTransaction/, name);
+  }
 });
