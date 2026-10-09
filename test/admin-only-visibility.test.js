@@ -18,6 +18,9 @@ test("finance and system navigation are only visible to admins", () => {
   assert.equal(managerKeys.includes("settings"), false);
   assert.equal(adminKeys.includes("finance"), true);
   assert.equal(adminKeys.includes("settings"), true);
+  const adminRoutes = navigationMenusForRole("admin").flatMap((item) => item.children || [item]).map((item) => item.route);
+  assert.equal(adminRoutes.includes("/settings/tenants"), true);
+  assert.equal(operatorRoutes.includes("/settings/tenants"), false);
   assert.equal(operatorRoutes.includes("/exceptions/profit"), false);
   assert.equal(operatorRoutes.some((route) => String(route || "").startsWith("/profit/")), false);
 });

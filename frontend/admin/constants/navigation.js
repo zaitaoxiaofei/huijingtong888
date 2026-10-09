@@ -124,6 +124,7 @@ export const navigationMenus = [
       { key: "settings", label: "基础资料", route: "/settings" },
       { key: "settings-scheduled-jobs", label: "自动任务", route: "/settings/scheduled-jobs" },
       { key: "settings-system-monitoring", label: "系统监控", route: "/settings/system-monitoring" },
+      { key: "settings-tenants", label: "企业与授权", route: "/settings/tenants" },
       { key: "settings-ai", label: "AI 设置", route: "/settings/ai" },
       { key: "settings-prompts", label: "AI提示词库", route: "/settings/prompts" },
       { key: "asset-variant-center", label: "店铺矩阵裂变配置", route: "/asset-variant-center" },
