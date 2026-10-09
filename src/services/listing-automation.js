@@ -1988,7 +1988,7 @@ export async function collectorBoxProducts(query = {}, session = null) {
   const startDate = String(query.startDate || query.start_date || "").trim();
   const endDate = String(query.endDate || query.end_date || "").trim();
   const status = String(query.status || "all").trim();
-  const tenantId = collectorBoxTenantId(session);
+  const tenantId = listingTenantId(session);
   const where = ["tenant_id = ?", "status <> 'deleted'"];
   const params = [tenantId];
   if (search) {
@@ -2081,7 +2081,7 @@ export async function collectorBoxProducts(query = {}, session = null) {
 
 export async function collectorBoxProductDetail(sku, session = null, tenantId = "admin") {
   await ensureCollectorBoxReadSchema();
-  const normalizedTenantId = collectorBoxTenantId(session, tenantId);
+  const normalizedTenantId = listingTenantId(session, tenantId);
   const detail = await row(`
     SELECT *
     FROM ozon_plugin_collected_products
@@ -2112,8 +2112,8 @@ export async function collectorBoxProductDetail(sku, session = null, tenantId = 
 }
 
 export async function deleteCollectorBoxProducts(body = {}, session = null) {
-  await ensureListingAutomationSchema();
-  const tenantId = collectorBoxTenantId(session);
+  await ensureCollectorBoxReadSchema();
+  const tenantId = listingTenantId(session);
   const skus = normalizeArray(body.skus || body.sku)
     .map((item) => String(item || "").trim())
     .filter(Boolean);
@@ -10733,8 +10733,10 @@ export async function listingAiVariantAssets(query = {}, session = null) {
 export async function listingVariantWorkbenchDrafts(query = {}, session = null) {
   await ensureListingAutomationSchema();
   const limit = Math.min(Math.max(Number(query.limit || 20), 1), 50);
-  const where = ["status <> 'deleted'"];
-  const params = [];
+  const tenantId = listingTenantId(session);
+  const isDefaultTenant = tenantId === "admin";
+  const where = ["status <> 'deleted'", isDefaultTenant ? "(tenant_id = ? OR tenant_id IS NULL)" : "tenant_id = ?"];
+  const params = [tenantId];
   const ownerId = personId(session);
   const workbenchId = cleanText(query.workbenchId || query.workbench_id || "", 128);
   const taskId = cleanText(query.taskId || query.task_id || "", 128);
@@ -10769,22 +10771,25 @@ export async function saveListingVariantWorkbenchDraft(body = {}, session = null
   await ensureListingAutomationSchema();
   const payload = normalizeVariantWorkbenchDraftPayload(body, session);
   if (!payload.workbench_id) throw new Error("Workbench ID is required");
+  const tenantScope = payload.tenant_id === "admin" ? "(tenant_id = ? OR tenant_id IS NULL)" : "tenant_id = ?";
   const existing = await row(`
     SELECT id
     FROM listing_variant_workbench_drafts
-    WHERE workbench_id = ?
+    WHERE ${tenantScope}
+      AND workbench_id = ?
       AND route_name = ?
       AND created_by_person_id <=> ?
       AND status <> 'deleted'
     LIMIT 1
-  `, [payload.workbench_id, payload.route_name, payload.created_by_person_id]);
+  `, [payload.tenant_id, payload.workbench_id, payload.route_name, payload.created_by_person_id]);
   if (existing?.id) {
     await mysqlExecute(`
       UPDATE listing_variant_workbench_drafts
-      SET source_module = ?, task_id = ?, draft_scope = ?, source_batch_id = ?, source_product_id = ?,
+      SET tenant_id = ?, source_module = ?, task_id = ?, draft_scope = ?, source_batch_id = ?, source_product_id = ?,
           product_name = ?, snapshot_version = ?, snapshot_json = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
+      WHERE id = ? AND ${tenantScope} AND created_by_person_id <=> ?
     `, [
+      payload.tenant_id,
       payload.source_module,
       payload.task_id,
       payload.draft_scope,
@@ -10793,16 +10798,19 @@ export async function saveListingVariantWorkbenchDraft(body = {}, session = null
       payload.product_name,
       payload.snapshot_version,
       JSON.stringify(payload.snapshot),
-      existing.id
+      existing.id,
+      payload.tenant_id,
+      payload.created_by_person_id
     ]);
-    return normalizeVariantWorkbenchDraftRow(await row("SELECT * FROM listing_variant_workbench_drafts WHERE id = ?", [existing.id]));
+    return normalizeVariantWorkbenchDraftRow(await row(`SELECT * FROM listing_variant_workbench_drafts WHERE id = ? AND ${tenantScope}`, [existing.id, payload.tenant_id]));
   }
   const id = await insert(`
     INSERT INTO listing_variant_workbench_drafts
-    (source_module, workbench_id, route_name, task_id, draft_scope, source_batch_id, source_product_id,
+    (tenant_id, source_module, workbench_id, route_name, task_id, draft_scope, source_batch_id, source_product_id,
      product_name, snapshot_version, snapshot_json, created_by_person_id, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `, [
+    payload.tenant_id,
     payload.source_module,
     payload.workbench_id,
     payload.route_name,
@@ -10815,22 +10823,25 @@ export async function saveListingVariantWorkbenchDraft(body = {}, session = null
     JSON.stringify(payload.snapshot),
     payload.created_by_person_id
   ]);
-  return normalizeVariantWorkbenchDraftRow(await row("SELECT * FROM listing_variant_workbench_drafts WHERE id = ?", [id]));
+  return normalizeVariantWorkbenchDraftRow(await row("SELECT * FROM listing_variant_workbench_drafts WHERE id = ? AND tenant_id = ?", [id, payload.tenant_id]));
 }
 
 export async function deleteListingVariantWorkbenchDraft(workbenchId, session = null, routeName = "asset-variant-center-wizard") {
   await ensureListingAutomationSchema();
   const cleanWorkbenchId = cleanText(workbenchId, 128);
   if (!cleanWorkbenchId) return { ok: true, deleted: 0 };
+  const tenantId = listingTenantId(session);
+  const tenantScope = tenantId === "admin" ? "(tenant_id = ? OR tenant_id IS NULL)" : "tenant_id = ?";
   const ownerId = personId(session);
   const result = await mysqlExecute(`
     UPDATE listing_variant_workbench_drafts
     SET status = 'deleted', updated_at = CURRENT_TIMESTAMP
     WHERE workbench_id = ?
       AND route_name = ?
+      AND ${tenantScope}
       ${ownerId ? "AND created_by_person_id = ?" : ""}
       AND status <> 'deleted'
-  `, ownerId ? [cleanWorkbenchId, routeName, ownerId] : [cleanWorkbenchId, routeName]);
+  `, ownerId ? [cleanWorkbenchId, routeName, tenantId, ownerId] : [cleanWorkbenchId, routeName, tenantId]);
   return { ok: true, deleted: Number(result.affectedRows || 0) };
 }
 
@@ -13749,6 +13760,7 @@ async function initializeListingAutomationSchema() {
     await mysqlExecute(`
       CREATE TABLE IF NOT EXISTS listing_variant_workbench_drafts (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        tenant_id VARCHAR(80) NULL,
         source_module VARCHAR(64) NOT NULL DEFAULT 'ai_variant_workbench',
         workbench_id VARCHAR(128) NOT NULL DEFAULT '',
         route_name VARCHAR(128) NOT NULL DEFAULT 'asset-variant-center-wizard',
@@ -13763,11 +13775,18 @@ async function initializeListingAutomationSchema() {
         created_by_person_id BIGINT NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        UNIQUE KEY uq_listing_variant_workbench_owner (workbench_id, route_name, created_by_person_id),
-        INDEX idx_listing_variant_workbench_owner_status (created_by_person_id, status, updated_at),
-        INDEX idx_listing_variant_workbench_task (task_id, updated_at)
+        UNIQUE KEY uq_listing_variant_workbench_tenant_owner (tenant_id, workbench_id, route_name, created_by_person_id),
+        INDEX idx_listing_variant_workbench_tenant_status (tenant_id, status, updated_at, id),
+        INDEX idx_listing_variant_workbench_tenant_owner (tenant_id, created_by_person_id, status, updated_at, id),
+        INDEX idx_listing_variant_workbench_tenant_task (tenant_id, task_id, updated_at)
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
+    await ensureMysqlColumn("listing_variant_workbench_drafts", "tenant_id", "VARCHAR(80) NULL");
+    await ensureMysqlUniqueIndex("listing_variant_workbench_drafts", "uq_listing_variant_workbench_tenant_owner", "(tenant_id, workbench_id, route_name, created_by_person_id)");
+    await dropMysqlIndexIfExists("listing_variant_workbench_drafts", "uq_listing_variant_workbench_owner");
+    await ensureMysqlIndex("listing_variant_workbench_drafts", "idx_listing_variant_workbench_tenant_status", "(tenant_id, status, updated_at, id)");
+    await ensureMysqlIndex("listing_variant_workbench_drafts", "idx_listing_variant_workbench_tenant_owner", "(tenant_id, created_by_person_id, status, updated_at, id)");
+    await ensureMysqlIndex("listing_variant_workbench_drafts", "idx_listing_variant_workbench_tenant_task", "(tenant_id, task_id, updated_at)");
     await mysqlExecute(`
       CREATE TABLE IF NOT EXISTS listing_shop_copies (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -17480,6 +17499,7 @@ function draftIdFromPayload(body = {}) {
 
 function normalizeVariantWorkbenchDraftPayload(body = {}, session = null) {
   return {
+    tenant_id: listingTenantId(session, body.tenant_id || body.tenantId || "admin"),
     source_module: cleanText(body.source_module || body.sourceModule || "ai_variant_workbench", 64),
     workbench_id: cleanText(body.workbench_id || body.workbenchId, 128),
     route_name: cleanText(body.route_name || body.routeName || "asset-variant-center-wizard", 128),
@@ -21090,10 +21110,10 @@ function personId(session) {
   return Number(session?.personId || 0);
 }
 
-function collectorBoxTenantId(session, fallback = "admin") {
+function listingTenantId(session, fallback = "admin") {
   const tenant = session?.tenant;
   if (!tenant) return String(fallback || "admin").trim() || "admin";
-  if (!tenant.id || !tenant.slug) throw new Error("当前会话缺少有效企业上下文，无法访问采集箱数据。");
+  if (!tenant.id || !tenant.slug) throw new Error("当前会话缺少有效企业上下文，无法访问企业数据。");
   return tenant.slug === "default" ? "admin" : String(tenant.id);
 }
 
