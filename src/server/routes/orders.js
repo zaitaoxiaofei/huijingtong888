@@ -1,12 +1,13 @@
 import { serverTransformPdfForPaper } from "../../services/server-print.js";
+import { tenantIdFromRequest } from "../tenant-context.js";
 
 export function createOrderRoutes({ services, readJson, notFound, writeHead, json }) {
   return {
     "GET /api/orders": (req, url) => url?.searchParams?.get("paged")
       ? services.ordersPaged(Object.fromEntries(url.searchParams.entries()))
       : services.orders(),
-    "GET /api/sku-order-tracking": (req, url) => services.skuOrderTrackingList(Object.fromEntries(url.searchParams.entries())),
-    "POST /api/sku-order-tracking": async (req) => services.saveSkuOrderTracker(await readJson(req), req._session?.personId),
+    "GET /api/sku-order-tracking": (req, url) => services.skuOrderTrackingList(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "POST /api/sku-order-tracking": async (req) => services.saveSkuOrderTracker(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
     "GET /api/order-car-heatmap/models": (req, url) => services.orderCarHeatmapModels(Object.fromEntries(url.searchParams.entries())),
     "GET /api/order-car-heatmap/products": (req, url) => services.orderCarHeatmapProducts(Object.fromEntries(url.searchParams.entries())),
     "GET /api/order-car-heatmap/skus": (req, url) => services.orderCarHeatmapSkus(Object.fromEntries(url.searchParams.entries())),
