@@ -7,6 +7,16 @@ import { loadOrderProcurementCoverage, invalidateOrderProcurementCoverage } from
 
 const item = (order_id = 1, extra = {}) => ({ order_id, order_item_id: order_id, product_id: 10, quantity: 1, needs_fulfillment: 1, entered_transport: 0, stock_location: 'LOCAL', ...extra });
 const calculate = (demands, extra = {}) => calculateOrderProcurementCoverage({ demands, stocks: [], allocations: [], inbounds: [], requests: [], marks: [], ...extra });
+test('order coverage retains the real order status fields for live procurement details', () => {
+  const result = calculate([item(1, {
+    source_order_status: 'awaiting_packaging',
+    source_order_tracking_stage: 'awaiting_packaging',
+    source_order_logistics_status: 'processing'
+  })]).get(1);
+  assert.equal(result.source_order_status, 'awaiting_packaging');
+  assert.equal(result.source_order_tracking_stage, 'awaiting_packaging');
+  assert.equal(result.source_order_logistics_status, 'processing');
+});
 test('current rows expose the same inventory historical purchase gap without adding it to current procurement', () => {
   const demands = [item(1, { needs_fulfillment: 0, entered_transport: 1, quantity: 5 }), item(2)];
   const result = calculate(demands, { stocks: [{ product_id: 10, ledger: -5 }] });

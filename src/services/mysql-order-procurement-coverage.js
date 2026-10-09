@@ -55,6 +55,8 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
   const work = (async () => {
     const [demands, stocks, allocations, inbounds, requests, marks, deductions, sources, stockSources, fbpReservations, priorities] = await Promise.all([
       loadDemands(query, `SELECT o.id AS order_id, oi.id AS order_item_id, o.ordered_at, o.posting_number,
+        o.status AS source_order_status, o.tracking_stage AS source_order_tracking_stage,
+        o.logistics_status AS source_order_logistics_status,
         COALESCE(${transportAt}, o.delivered_at, o.ordered_at) AS transport_at,
         COALESCE(ri.product_id, pc.component_product_id, p.id, 0) AS product_id,
         cp.name AS product_name, cp.stock_unit,

@@ -230,7 +230,11 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
   }
   for (const detail of details) {
     const id = Number(detail.order_id);
-    if (!result.has(id)) result.set(id, { order_id: id, posting_number: detail.posting_number || String(id), ordered_at: detail.ordered_at || null, transport_at: detail.transport_at || null, shortage_quantity: 0, stock_quantity: 0, incoming_quantity: 0,
+    if (!result.has(id)) result.set(id, { order_id: id, posting_number: detail.posting_number || String(id), ordered_at: detail.ordered_at || null,
+      source_order_status: detail.source_order_status || '',
+      source_order_tracking_stage: detail.source_order_tracking_stage || '',
+      source_order_logistics_status: detail.source_order_logistics_status || '',
+      transport_at: detail.transport_at || null, shortage_quantity: 0, stock_quantity: 0, incoming_quantity: 0,
       missing_record_quantity: 0, missing_purchase_quantity: 0, missing_receipt_quantity: 0, missing_amount: false, quantity_needs_review: false, inventory_needs_review: false,
       stock_location: detail.stock_location, needs_fulfillment: Boolean(Number(detail.needs_fulfillment)), entered_transport: Boolean(Number(detail.entered_transport)), items: [], batches: [] });
     const order = result.get(id);

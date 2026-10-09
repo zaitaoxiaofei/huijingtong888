@@ -14356,6 +14356,7 @@ export async function refreshProcurementDemandMysql() {
   ensureMysqlCutoverEnabled();
   const orders = await ensurePendingOrderProcurementRequestsMysql();
   await ensureInventoryWarningProcurementRequestsMysql();
+  invalidateOrderProcurementCoverage();
   const inventory = { ok: true };
   return { ok: true, orders, inventory };
 }
@@ -14746,6 +14747,7 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
   const sourceType = String(query.sourceType || query.source_type || "all").trim().toLowerCase();
   const inventoryCategory = String(query.inventoryCategory || query.inventory_category || "").trim();
   const productName = String(query.productName || query.product_name || "").trim();
+  const productId = Number(query.productId || query.product_id || 0);
   const vehicleBrand = normalizeVehicleBrand(query.vehicleBrand || query.vehicle_brand, { strict: false });
   const vehicleModels = String(query.vehicleModel || query.vehicle_model || "").split(",").map((item) => item.trim()).filter(Boolean);
   const accessoryName = String(query.accessoryName || query.accessory_name || "").trim();
@@ -14779,6 +14781,10 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
       )
     )`);
     params.push(like, like, like, like, like, like);
+  }
+  if (Number.isSafeInteger(productId) && productId > 0) {
+    where.push("p.id = ?");
+    params.push(productId);
   }
   if (personId !== "all") {
     where.push("pr.person_id = ?");
