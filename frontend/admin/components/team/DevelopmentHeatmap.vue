@@ -7,7 +7,7 @@ import { buildDevelopmentHeatmap, developmentCoordinateKey, developmentPlanPerio
 
 const emit = defineEmits(["open-task", "create"]);
 const tasks = ref([]); const loading = ref(false); const error = ref("");
-const metric = ref("tasks"); const dimension = ref("model"); const scope = ref("all"); const query = ref(""); const includeCompleted = ref(false); const viewMode = ref("quadrant"); const expandedQuadrantScore = ref(null); const draggedPoint = ref(null); const prioritySaving = ref(false);
+const metric = ref("tasks"); const dimension = ref("brand"); const scope = ref("all"); const query = ref(""); const includeCompleted = ref(false); const viewMode = ref("quadrant"); const expandedQuadrantScore = ref(null); const draggedPoint = ref(null); const prioritySaving = ref(false);
 const period = ref("month"); const time = ref("due");
 const range = ref([shanghaiMonthStart(), shanghaiDateKey()]);
 const detail = ref(null); const planningMode = ref(false); const planSaving = ref(false);
@@ -55,7 +55,7 @@ const quadrantCards = computed(() => {
   return cards;
 });
 const priorityRingLayout = computed(() => {
-  const nodeSpacing = 124;
+  const nodeSpacing = expandedQuadrantScore.value == null ? 124 : 82;
   let boundary = 0;
   const bands = quadrantCards.value.map((group, index) => {
     const points = group.points;
@@ -83,13 +83,13 @@ const priorityRingLayout = computed(() => {
       remaining -= laneCount;
       if (remaining > 0) { lane += 1; lastRadius += 112; }
     }
-    const minimumBand = index === 0 ? 150 : 154;
-    const outerRadius = Math.max(boundary + minimumBand, lastRadius + 70);
+    const minimumBand = expandedQuadrantScore.value == null ? (index === 0 ? 150 : 154) : (index === 0 ? 124 : 132);
+    const outerRadius = Math.max(boundary + minimumBand, lastRadius + (expandedQuadrantScore.value == null ? 70 : 52));
     const band = { ...group, innerRadius: boundary, outerRadius, placements };
     boundary = outerRadius;
     return band;
   });
-  const diameter = Math.max(900, Math.ceil((boundary + 100) * 2));
+  const diameter = Math.max(720, Math.ceil((boundary + (expandedQuadrantScore.value == null ? 100 : 64)) * 2));
   const center = diameter / 2;
   return {
     diameter,
@@ -110,7 +110,9 @@ const visibleRingBands = computed(() => priorityRingLayout.value.bands.map((band
 })));
 const boardWidth = computed(() => viewMode.value === "coordinates" ? Math.max(canvasWidth.value, 190 + heatmap.value.columns.length * 158) : viewMode.value === "quadrant" ? Math.max(canvasWidth.value, priorityRingLayout.value.diameter) : canvasWidth.value);
 const boardHeight = computed(() => viewMode.value === "coordinates" ? 58 + heatmap.value.rows.length * 100 : viewMode.value === "quadrant" ? Math.max(696, priorityRingLayout.value.diameter) : 696);
-const boardShellStyle = computed(() => ({ width: `${boardWidth.value * zoom.value}px`, height: `${boardHeight.value * zoom.value}px` }));
+const boardShellStyle = computed(() => viewMode.value === "quadrant"
+  ? { width: "100%", height: "100%" }
+  : { width: `${boardWidth.value * zoom.value}px`, height: `${boardHeight.value * zoom.value}px` });
 const coordinateBoardStyle = computed(() => ({ width: `${boardWidth.value}px`, gridTemplateColumns: `190px repeat(${heatmap.value.columns.length}, minmax(150px, 1fr))`, gridTemplateRows: `58px repeat(${heatmap.value.rows.length}, 100px)`, transform: `scale(${zoom.value})` }));
 const quadrantLabels = [
   { score: 10, label: "紧急重要" },
@@ -281,11 +283,18 @@ function zoomBy(delta, anchor = null) {
   const target = Math.max(0.45, Math.min(1.35, Math.round((zoom.value + delta) * 100) / 100));
   if (target === zoom.value) return;
   const viewportRect = viewport.value?.getBoundingClientRect(); const element = viewport.value;
-  const point = anchor && viewportRect ? { x: anchor.x - viewportRect.left + element.scrollLeft, y: anchor.y - viewportRect.top + element.scrollTop } : null;
   const previous = zoom.value; zoom.value = target;
-  if (point && element) nextTick(() => {
-    element.scrollLeft = point.x * target / previous - (anchor.x - viewportRect.left);
-    element.scrollTop = point.y * target / previous - (anchor.y - viewportRect.top);
+  if (element) nextTick(() => {
+    if (viewMode.value === "quadrant") {
+      element.scrollLeft = 0;
+      element.scrollTop = 0;
+      return;
+    }
+    const point = anchor && viewportRect ? { x: anchor.x - viewportRect.left + element.scrollLeft, y: anchor.y - viewportRect.top + element.scrollTop } : null;
+    if (point) {
+      element.scrollLeft = point.x * target / previous - (anchor.x - viewportRect.left);
+      element.scrollTop = point.y * target / previous - (anchor.y - viewportRect.top);
+    }
   });
 }
 function handleZoomWheel(event) { zoomBy(event.deltaY < 0 ? 0.06 : -0.06, { x: event.clientX, y: event.clientY }); }
@@ -328,9 +337,16 @@ async function fitCanvas() {
   await nextTick();
   if (viewport.value?.clientWidth) canvasWidth.value = Math.max(960, viewport.value.clientWidth - 2);
 }
+async function centerRingCanvas() {
+  await nextTick();
+  if (!viewport.value || viewMode.value !== "quadrant") return;
+  viewport.value.scrollLeft = 0;
+  viewport.value.scrollTop = 0;
+}
 defineExpose({ reload: load });
 watch([periodKey, dimension], () => { selectedCoordinateKeys.value = []; selectedCoordinates.value = new Map(); pendingPlanKeys.value = new Set(); expandedQuadrantScore.value = null; loadPlanOrders(); });
 watch(() => heatmap.value.rows.length, fitCanvas);
+watch([viewMode, expandedQuadrantScore, () => priorityRingLayout.value.diameter], centerRingCanvas);
 watch(viewport, (element) => { if (element) resizeObserver?.observe(element); }, { flush: "post" });
 onMounted(() => { setPeriod("month"); load(); fitCanvas(); resizeObserver = new ResizeObserver(fitCanvas); if (viewport.value) resizeObserver.observe(viewport.value); });
 onBeforeUnmount(() => resizeObserver?.disconnect());
@@ -365,9 +381,9 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
     <template v-else>
       <div class="heatmap-priority-legend priority-filter-bar"><strong>优先级</strong><button v-for="filter in priorityFilters" :key="filter.score ?? 'all'" type="button" class="priority-filter" :class="[filter.score == null ? 'priority-all' : `priority-${filter.score}`, { active: expandedQuadrantScore === filter.score, 'drop-target-active': activeDropScore === filter.score }]" :data-score="filter.score ?? 'all'" :aria-label="`筛选优先级：${filter.label}`" :aria-pressed="expandedQuadrantScore === filter.score" @click="setPriorityFilter(filter.score)" @dragover.prevent="setPriorityDropTarget($event, filter.score)" @dragleave="activeDropScore === filter.score && (activeDropScore = null)" @drop.prevent.stop="filter.score != null && movePointToPriority(filter.score)">{{ filter.label }} <small>{{ filter.count }}</small></button><em>{{ draggedPoint ? '拖到优先级标签或目标环即可调整' : viewMode === 'quadrant' ? '全部显示四层环；拖动圆形任务点到目标环或标签调整优先级' : '横向核心品名 · 纵向' + (dimension === 'model' ? '车型' : '品牌') }}</em></div>
       <div class="heatmap-canvas-toolbar" v-if="heatmap.rows.length && heatmap.columns.length && (viewMode === 'coordinates' || viewMode === 'quadrant' || expandedQuadrantScore !== null)"><span>缩放</span><el-button circle size="small" aria-label="缩小热力图" @click="zoomBy(-0.08)">−</el-button><strong>{{ Math.round(zoom * 100) }}%</strong><el-button circle size="small" aria-label="放大热力图" @click="zoomBy(0.08)">＋</el-button><el-button size="small" @click="resetZoom">重置</el-button><small>滚轮缩放 · 左键拖动画布</small></div>
-      <div v-if="heatmap.rows.length && heatmap.columns.length" ref="viewport" class="heatmap-viewport" :class="{ 'is-panning': isDragging, 'planning-mode': planningMode }" @wheel.prevent="handleZoomWheel" @pointerdown="beginPan" @pointermove="movePan" @pointerup="endPan" @pointercancel="endPan" @lostpointercapture="endPan">
+      <div v-if="heatmap.rows.length && heatmap.columns.length" ref="viewport" class="heatmap-viewport" :class="{ 'is-panning': isDragging, 'planning-mode': planningMode, 'ring-mode': viewMode === 'quadrant' }" @wheel.prevent="handleZoomWheel" @pointerdown="beginPan" @pointermove="movePan" @pointerup="endPan" @pointercancel="endPan" @lostpointercapture="endPan">
         <div v-if="viewMode === 'quadrant'" class="heatmap-board-shell ring-board-shell" :style="boardShellStyle">
-          <div class="priority-rings-canvas" :style="{ width: `${priorityRingLayout.diameter}px`, height: `${priorityRingLayout.diameter}px`, left: `${((boardWidth - priorityRingLayout.diameter) / 2) * zoom}px`, top: `${((boardHeight - priorityRingLayout.diameter) / 2) * zoom}px`, transform: `scale(${zoom})` }" @dragover.prevent="handleRingDragOver" @drop.prevent="dropOnRing">
+          <div class="priority-rings-canvas" :style="{ width: `${priorityRingLayout.diameter}px`, height: `${priorityRingLayout.diameter}px`, left: `${(canvasWidth - priorityRingLayout.diameter * zoom) / (2 * zoom)}px`, top: `${(boardHeight - priorityRingLayout.diameter * zoom) / (2 * zoom)}px`, transform: `scale(${zoom})` }" @dragover.prevent="handleRingDragOver" @drop.prevent="dropOnRing">
             <div v-for="band in [...visibleRingBands].reverse()" :key="`ring-zone-${band.score}`" class="priority-ring-zone" :class="[`priority-${band.score}`, { 'drop-target-active': activeDropScore === band.score }]" :style="{ width: `${band.outerRadius * 2}px`, height: `${band.outerRadius * 2}px`, left: `${priorityRingLayout.center - band.outerRadius}px`, top: `${priorityRingLayout.center - band.outerRadius}px` }" aria-hidden="true"></div>
             <div v-for="band in visibleRingBands" :key="`ring-label-${band.score}`" class="priority-ring-label" :class="`priority-${band.score}`" :style="{ left: `${priorityRingLayout.center}px`, top: `${priorityRingLayout.center - band.outerRadius + 9}px` }"><strong>{{ band.label }}</strong><small>{{ band.placements.length }} 个点位 · {{ ringTaskCount(band) }} 个任务</small></div>
             <template v-for="band in visibleRingBands" :key="`ring-points-${band.score}`"><button v-for="item in band.placements" :key="item.point.coordinate.coordinate_key" :draggable="!planningMode" class="quadrant-point ring-point" :class="[{ selected: selectedCoordinateKeys.includes(item.point.coordinate.coordinate_key), marked: item.point.plan.marked, completed: completedCount(item.point.cell) === item.point.cell.tasks.size }, `priority-${band.score}`]" :style="{ ...pointStyle(item.point), left: `${item.x}px`, top: `${item.y}px` }" :aria-label="`${item.point.title}：${item.point.cell.value} ${unit}`" @click="handleCellClick(item.point.row,item.point.column)" @contextmenu="cancelCoordinate($event,item.point.row,item.point.column)" @dragstart="startPriorityDrag($event,item.point,band.score)" @dragend="endPriorityDrag">
@@ -385,7 +401,6 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
         </div></div>
       </div>
       <el-empty v-else-if="!loading" description="当前范围暂无可归类的开发记录，可调整时间或新增开发任务" />
-      <footer class="heatmap-notes"><span>默认排除已完成任务；全部模式按优先级由中心向外排列同心环，筛选项可聚焦某一优先级；可拖节点到目标环或优先级标签更新关联任务。横纵坐标用于按核心品名 × {{ dimension === 'model' ? '车型' : '品牌' }} 查找。左键拖动画布，滚轮缩放。</span><p>北京时间。{{ metric === 'actual' ? '已开发数量按关联草稿的当前变体数统计，同一草稿去重，店铺副本不重复计数；这不是历史时点快照。' : metric === 'target' ? '计划数量按各车型设置的 SKU 目标汇总。' : '每个点对应一个核心品名与当前品牌/车型颗粒度的任务集合；顶部总任务数去重。' }}</p><p v-if="heatmap.unclassified">当前任务日期范围内有 {{ heatmap.unclassified }} 个旧开发任务缺少品牌／车型／类目；切换“开发任务数”查看“未分类”，不将其自动归入非汽车。</p><p v-if="heatmap.conflicts" class="heatmap-warning">{{ heatmap.conflicts }} 份草稿关联到了多个不同坐标，已排除重复归属；请在任务详情中修正关联。</p></footer>
     </template>
     <el-dialog v-if="detail" :model-value="true" :title="detail.title" width="min(820px, 94vw)" append-to-body @close="detail = null">
       <p>{{ metricLabel }}：<b>{{ detail.value }}</b> {{ unit }} · {{ detail.tasks.length }} 个关联任务 · 最高优先级 {{ detail.priority }}</p>
@@ -461,4 +476,5 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 <style scoped>
 .priority-filter-bar{gap:7px}.priority-filter{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;border:1px solid transparent;border-radius:999px;font:inherit;font-size:11px;font-weight:700;white-space:nowrap;cursor:pointer;transition:transform .15s,box-shadow .15s,outline-color .15s}.priority-filter small{font-size:10px;opacity:.78}.priority-filter.priority-all{background:#f1f5f9;color:#475569}.priority-filter.priority-10{background:#fee2e2;color:#b91c1c}.priority-filter.priority-7{background:#dbeafe;color:#1e40af}.priority-filter.priority-8{background:#fff1f2;color:#be123c}.priority-filter.priority-6{background:#f1f5f9;color:#475569}.priority-filter.active{box-shadow:0 0 0 2px #fff,0 0 0 4px currentColor}.priority-filter:hover{transform:translateY(-1px);filter:saturate(1.08)}.priority-filter.drop-target-active{outline:2px dashed currentColor;outline-offset:3px;transform:scale(1.04)}
 .ring-board-shell{overflow:visible}.priority-rings-canvas{position:absolute;transform-origin:top left;touch-action:none}.priority-ring-zone{position:absolute;z-index:0;box-sizing:border-box;border:1px solid transparent;border-radius:50%;transition:filter .18s,box-shadow .18s,background-color .18s;pointer-events:none}.priority-ring-zone.priority-6{color:#cbd5e1;border-color:#d5dde7;background:radial-gradient(circle at 50% 48%,#fff 0%,#f3f6fa 100%)}.priority-ring-zone.priority-8{color:#fb7185;border-color:#f4c5cc;background:radial-gradient(circle at 50% 48%,#fff9fa 0%,#ffecef 100%)}.priority-ring-zone.priority-7{color:#2563eb;border-color:#b8d0fb;background:radial-gradient(circle at 50% 48%,#f8fbff 0%,#e8f1ff 100%)}.priority-ring-zone.priority-10{color:#dc3545;border-color:#ef9ba3;background:radial-gradient(circle at 50% 48%,#fff7f7 0%,#ffe1e4 100%)}.priority-ring-zone.drop-target-active{filter:saturate(1.35);box-shadow:inset 0 0 0 5px currentColor,0 0 26px currentColor}.priority-ring-label{position:absolute;z-index:2;display:flex;align-items:center;gap:8px;transform:translateX(-50%);padding:6px 11px;border:1px solid #ffffffd9;border-radius:999px;background:#ffffffdf;box-shadow:0 4px 14px #1e293b12;white-space:nowrap;pointer-events:none}.priority-ring-label strong{font-size:11px}.priority-ring-label small{font-size:10px;color:#64748b}.priority-ring-label.priority-10{color:#b42332}.priority-ring-label.priority-7{color:#244c96}.priority-ring-label.priority-8{color:#be4560}.priority-ring-label.priority-6{color:#58677b}.ring-point{position:absolute!important;z-index:4;display:grid!important;grid-template-rows:54px auto;justify-items:center;align-content:start;gap:4px;width:116px!important;min-height:98px!important;padding:2px 3px!important;border:0!important;border-radius:16px!important;background:transparent!important;color:#25344a!important;box-shadow:none;text-align:center!important;transform:translate(-50%,-50%);cursor:grab}.ring-point:active{cursor:grabbing}.ring-point.priority-10 .point-owners{border-color:#f2a0a5}.ring-point.priority-7 .point-owners{border-color:#99baf3}.ring-point.priority-8 .point-owners{border-color:#fac1c9}.ring-point.priority-6 .point-owners{border-color:#d2d9e2}.ring-point.completed .point-owners{border-color:#84d7a0;background:#f0fff4}.ring-point .point-owners{width:52px;height:52px;padding:3px}.ring-point .point-owners>.el-avatar{width:42px!important;height:42px!important}.ring-point .point-copy{display:grid;gap:2px;width:100%;text-align:center}.ring-point .point-copy>strong{max-width:100%;font-size:10px;line-height:1.25;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.ring-point .point-copy>small{font-size:9px;color:#718096}.ring-point.completed .point-copy>strong{color:#167345}.ring-point:hover,.ring-point:focus-visible{z-index:8;transform:translate(-50%,-50%) scale(1.08);outline:0;background:transparent!important;box-shadow:none!important}.ring-point .point-hover-card{left:50%;bottom:calc(100% + 8px)}.ring-point.selected{outline:2px solid #f59e0b!important;outline-offset:0;box-shadow:0 0 0 4px #fff7ed!important}.ring-empty{position:absolute;left:50%;top:50%;z-index:3;transform:translate(-50%,-50%);padding:12px 18px;border-radius:999px;background:#ffffffd9;color:#7b8798;font-size:12px;pointer-events:none}
+.heatmap-viewport.ring-mode{overflow:hidden;border:0;border-radius:0;background:transparent;box-shadow:none}
 </style>
