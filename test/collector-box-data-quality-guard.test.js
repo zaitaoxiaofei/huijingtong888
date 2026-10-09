@@ -22,6 +22,15 @@ test("collector-box template creation blocks incomplete unresolved category data
   assert.match(serviceSource, /fast_add_to_box/);
 });
 
+test("collector-box fast-add quality check reads the passed source object", () => {
+  const fnStart = serviceSource.indexOf("function buildCollectorBoxQualitySummary");
+  const fnEnd = serviceSource.indexOf("function collectedProductHasRealCategory", fnStart);
+  const fnSource = serviceSource.slice(fnStart, fnEnd);
+  assert.ok(fnStart > 0 && fnEnd > fnStart);
+  assert.match(fnSource, /source\.data_source \|\| source\.dataSource/);
+  assert.doesNotMatch(fnSource, /\bpayload\.data_source\b/);
+});
+
 test("collector-box UI flags incomplete collected rows before opening listing editor", () => {
   assert.match(collectorBoxSource, /function collectorDataQualityIssues/);
   assert.match(collectorBoxSource, /采集数据不完整/);
