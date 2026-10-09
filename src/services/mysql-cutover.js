@@ -14541,8 +14541,211 @@ export async function refreshProcurementDemandMysql() {
   return { ok: true, orders, inventory };
 }
 
-export async function procurementRequestsMysql(query = {}) {
+async function requireProcurementTenantSchemaMysql() {
+  const [hasTenantColumn, hasTenantStatusIndex, hasTenantPurchaseIndex] = await Promise.all([
+    mysqlSchemaColumnExists("procurement_requests", "tenant_id"),
+    mysqlSchemaIndexExists("procurement_requests", "idx_procurement_tenant_status_created"),
+    mysqlSchemaIndexExists("procurement_requests", "idx_procurement_tenant_purchase_status")
+  ]);
+  if (!hasTenantColumn || !hasTenantStatusIndex || !hasTenantPurchaseIndex) {
+    throw new Error("采购申请的企业隔离结构尚未迁移，请先完成租户采购申请迁移；当前未回退到共享采购数据。");
+  }
+}
+
+async function tenantProcurementRequestsMysql(query = {}, tenantId) {
+  if (String(query.grouped || "") === "1") {
+    throw new Error("企业采购申请暂不支持依赖全局库存与采购单的分组视图，请切换到申请明细列表。");
+  }
+  const page = Math.max(1, Number(query.page || 1) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(query.pageSize || query.page_size || 20) || 20));
+  const where = [
+    "pr.tenant_id = ?",
+    "pr.purchase_order_id IS NULL",
+    "pr.product_id IS NULL",
+    "pr.source_order_id IS NULL",
+    "pr.source_order_item_id IS NULL",
+    "pr.supplier_id IS NULL"
+  ];
+  const params = [tenantId];
+  const status = String(query.status || "").trim();
+  if (status && status !== "all") {
+    where.push("pr.status = ?");
+    params.push(status);
+  }
+  const demandType = String(query.demandType || query.demand_type || "").trim();
+  if (demandType && demandType !== "all") {
+    where.push("pr.demand_type = ?");
+    params.push(demandType);
+  }
+  const search = String(query.query || query.search || "").trim();
+  if (search) {
+    where.push("(LOWER(COALESCE(pr.raw_name, '')) LIKE ? OR LOWER(COALESCE(pr.raw_spec, '')) LIKE ? OR LOWER(COALESCE(pr.note, '')) LIKE ? OR LOWER(COALESCE(pr.request_group_no, '')) LIKE ?)");
+    const like = `%${search.toLowerCase()}%`;
+    params.push(like, like, like, like);
+  }
+  const whereSql = `WHERE ${where.join(" AND ")}`;
+  const [countRows, rows] = await Promise.all([
+    mysqlQuery(`SELECT COUNT(*) AS total FROM procurement_requests pr ${whereSql}`, params),
+    mysqlQuery(`
+      SELECT pr.id, pr.tenant_id, pr.request_group_no, NULL AS product_id,
+        pr.raw_name, pr.raw_spec, pr.binding_status, pr.quantity, pr.amount, pr.shipping_amount,
+        pr.purchase_url, pr.source_type, pr.approval_status, pr.status, pr.needed_by, pr.note,
+        pr.demand_type, pr.purchase_mode, pr.urgency, pr.created_at, pr.updated_at,
+        COALESCE(NULLIF(pr.raw_name, ''), NULLIF(pr.raw_spec, ''), '采购申请') AS product_name,
+        NULL AS product_code, NULL AS product_image_url
+      FROM procurement_requests pr
+      ${whereSql}
+      ORDER BY pr.created_at DESC, pr.id DESC
+      LIMIT ? OFFSET ?
+    `, [...params, pageSize, (page - 1) * pageSize])
+  ]);
+  return { rows, total: Number(countRows[0]?.total || 0), page, pageSize, mode: "tenant_requests" };
+}
+
+async function createTenantProcurementRequestMysql(body = {}, sessionPersonId = null, tenantId) {
+  await requireProcurementTenantSchemaMysql();
+  const personId = await requireSessionPersonIdMysql(sessionPersonId);
+  const member = await mysqlQueryOne("SELECT person_id FROM tenant_members WHERE tenant_id = ? AND person_id = ? AND active = 1 LIMIT 1", [tenantId, personId]);
+  if (!member) throw new Error("当前账号不是该企业的有效成员，无法创建采购申请。");
+  const items = Array.isArray(body.items) && body.items.length ? body.items : [body];
+  const linkedFields = ["product_id", "productId", "supplier_id", "supplierId", "source_order_id", "sourceOrderId", "source_order_item_id", "sourceOrderItemId", "source_ozon_sku", "sourceOzonSku", "purchase_order_id", "purchaseOrderId"];
+  const groupNo = procurementRequestGroupNoMysql();
+  return withMysqlTransaction(async (connection) => {
+    const ids = [];
+    for (const item of items) {
+      if ([item, body].some((payload) => linkedFields.some((field) => payload[field] !== undefined && payload[field] !== null && String(payload[field]).trim() !== ""))) {
+        throw new Error("当前企业申请暂不支持关联共享库存商品、供应商、订单或采购单；请只提交商品名称与规格。");
+      }
+      const requestedPurchaseMode = item.purchase_mode || item.purchaseMode || body.purchase_mode || body.purchaseMode;
+      if (requestedPurchaseMode && normalizeProcurementPurchaseMode(requestedPurchaseMode) !== "shortage_purchase") {
+        throw new Error("当前企业申请暂不支持共享库存或历史成本采购模式。");
+      }
+      const rawName = String(item.raw_name || item.rawName || item.name || "").trim().slice(0, 255);
+      const rawSpec = String(item.raw_spec || item.rawSpec || "").trim().slice(0, 255);
+      const quantity = Number(item.quantity || 0);
+      const amount = Number(item.amount || 0);
+      const shippingAmount = Number(item.shipping_amount || item.shippingAmount || 0);
+      if (!rawName) throw new Error("企业采购申请必须填写商品名称。");
+      if (!Number.isFinite(quantity) || quantity <= 0) throw new Error("采购数量必须大于 0。");
+      if (!Number.isFinite(amount) || amount < 0 || !Number.isFinite(shippingAmount) || shippingAmount < 0) {
+        throw new Error("采购金额和运费必须为非负数；未知金额可填写 0 后续补充。");
+      }
+      const result = await connection.execute(`
+        INSERT INTO procurement_requests
+          (tenant_id, request_group_no, product_id, raw_name, raw_spec, binding_status,
+            person_id, created_by_person_id, quantity, amount, shipping_amount, purchase_url,
+            source_type, approval_status, status, needed_by, note, demand_type, purchase_mode, urgency)
+        VALUES (?, ?, NULL, ?, ?, 'unbound', ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, 'advance_stock', ?, ?)
+      `, [
+        tenantId, groupNo, rawName, rawSpec || null, personId, personId,
+        Math.max(1, Math.round(quantity)), amount, shippingAmount,
+        String(item.purchase_url || item.purchaseUrl || body.purchase_url || body.purchaseUrl || "").trim(),
+        String(item.source_type || item.sourceType || body.source_type || body.sourceType || "1688").trim(),
+        item.needed_by || item.neededBy || body.needed_by || body.neededBy || null,
+        String(item.note || body.note || "").trim(),
+        "shortage_purchase",
+        String(item.urgency || body.urgency || "normal").trim()
+      ]);
+      ids.push(Number(result[0].insertId));
+    }
+    return { id: ids[0], ids, request_group_no: groupNo };
+  });
+}
+
+async function updateTenantProcurementRequestMysql(id, body = {}, tenantId) {
+  await requireProcurementTenantSchemaMysql();
+  const requestId = Number(id);
+  return withMysqlTransaction(async (connection) => {
+    const existing = await mysqlConnectionQueryOne(connection, `
+      SELECT * FROM procurement_requests
+      WHERE id = ? AND tenant_id = ? AND purchase_order_id IS NULL
+        AND product_id IS NULL AND source_order_id IS NULL
+        AND source_order_item_id IS NULL AND supplier_id IS NULL
+      FOR UPDATE
+    `, [requestId, tenantId]);
+    if (!existing) throw new Error("采购申请不存在、不属于当前企业或已关联共享业务数据。");
+    assertFreshRecord(body, existing, "采购申请已被其他用户保存，请刷新后再继续编辑");
+    const status = String(existing.status || "");
+    if (!["draft", "pending", "suggested", "submitted"].includes(status)) {
+      throw new Error("该申请已进入采购或库存流程，当前企业暂不能修改。");
+    }
+    for (const field of ["status", "approval_status", "product_id", "productId", "supplier_id", "supplierId", "source_order_id", "sourceOrderId", "source_order_item_id", "sourceOrderItemId", "purchase_order_id", "purchaseOrderId"]) {
+      if (body[field] !== undefined && body[field] !== null && String(body[field]).trim() !== "" && String(body[field]) !== String(existing[field] ?? "")) {
+        throw new Error("当前企业仅可编辑申请内容，不能绑定共享库存、改变审批状态或进入采购单流程。");
+      }
+    }
+    const rawName = body.raw_name !== undefined || body.rawName !== undefined
+      ? String(body.raw_name ?? body.rawName ?? "").trim().slice(0, 255)
+      : String(existing.raw_name || "");
+    const rawSpec = body.raw_spec !== undefined || body.rawSpec !== undefined
+      ? String(body.raw_spec ?? body.rawSpec ?? "").trim().slice(0, 255)
+      : String(existing.raw_spec || "");
+    if (!rawName) throw new Error("企业采购申请必须保留商品名称。");
+    const quantity = Number(body.quantity ?? existing.quantity ?? 0);
+    const amount = Number(body.amount ?? existing.amount ?? 0);
+    const shippingAmount = Number(body.shipping_amount ?? body.shippingAmount ?? existing.shipping_amount ?? 0);
+    if (!Number.isFinite(quantity) || quantity <= 0) throw new Error("采购数量必须大于 0。");
+    if (!Number.isFinite(amount) || amount < 0 || !Number.isFinite(shippingAmount) || shippingAmount < 0) {
+      throw new Error("采购金额和运费必须为非负数。");
+    }
+    if (body.purchase_mode !== undefined || body.purchaseMode !== undefined) {
+      if (normalizeProcurementPurchaseMode(body.purchase_mode || body.purchaseMode) !== "shortage_purchase") {
+        throw new Error("当前企业申请暂不支持共享库存或历史成本采购模式。");
+      }
+    }
+    await connection.execute(`
+      UPDATE procurement_requests
+      SET raw_name = ?, raw_spec = ?, quantity = ?, amount = ?, shipping_amount = ?,
+        purchase_url = ?, needed_by = ?, note = ?, urgency = ?, source_type = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND tenant_id = ? AND purchase_order_id IS NULL AND product_id IS NULL
+        AND source_order_id IS NULL AND source_order_item_id IS NULL AND supplier_id IS NULL
+    `, [
+      rawName, rawSpec || null, Math.max(1, Math.round(quantity)), amount, shippingAmount,
+      String(body.purchase_url ?? body.purchaseUrl ?? existing.purchase_url ?? "").trim(),
+      body.needed_by ?? body.neededBy ?? existing.needed_by ?? null,
+      String(body.note ?? existing.note ?? "").trim(),
+      String(body.urgency ?? existing.urgency ?? "normal").trim(),
+      String(body.source_type ?? body.sourceType ?? existing.source_type ?? "1688").trim(),
+      requestId, tenantId
+    ]);
+    return { ok: true, id: requestId };
+  });
+}
+
+async function deleteTenantProcurementRequestMysql(id, tenantId) {
+  await requireProcurementTenantSchemaMysql();
+  const requestId = Number(id);
+  return withMysqlTransaction(async (connection) => {
+    const request = await mysqlConnectionQueryOne(connection, `
+      SELECT id, status, product_id, source_order_id, source_order_item_id, supplier_id, purchase_order_id
+      FROM procurement_requests
+      WHERE id = ? AND tenant_id = ?
+      FOR UPDATE
+    `, [requestId, tenantId]);
+    if (!request) throw new Error("采购申请不存在或不属于当前企业。");
+    if (request.product_id || request.source_order_id || request.source_order_item_id || request.supplier_id || request.purchase_order_id) {
+      throw new Error("该申请已关联共享商品、订单、供应商或采购单，当前企业暂不能删除。");
+    }
+    if (!["draft", "pending", "suggested", "submitted"].includes(String(request.status || ""))) {
+      throw new Error("该申请已进入采购或库存流程，当前企业暂不能删除。");
+    }
+    await connection.execute(`
+      DELETE FROM procurement_requests
+      WHERE id = ? AND tenant_id = ? AND purchase_order_id IS NULL AND product_id IS NULL
+        AND source_order_id IS NULL AND source_order_item_id IS NULL AND supplier_id IS NULL
+    `, [requestId, tenantId]);
+    return { ok: true };
+  });
+}
+
+export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  if (!defaultTenant) {
+    await requireProcurementTenantSchemaMysql();
+    return tenantProcurementRequestsMysql(query, normalizedTenantId);
+  }
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementFlexibleRequestSchemaMysql();
   await ensureStockLocationSchemaMysql();
@@ -19487,8 +19690,11 @@ function procurementRequestGroupNoMysql() {
   return `CG-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}-${pad(now.getMilliseconds(), 3)}`;
 }
 
-export async function createProcurementRequestMysql(body = {}, sessionPersonId = null) {
+export async function createProcurementRequestMysql(body = {}, sessionPersonId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  if (!defaultTenant) return createTenantProcurementRequestMysql(body, sessionPersonId, normalizedTenantId);
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementOrderSourceSchemaMysql();
   await ensureProcurementFlexibleRequestSchemaMysql();
@@ -20914,8 +21120,11 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
   };
 }
 
-export async function updateProcurementRequestMysql(id, body = {}) {
+export async function updateProcurementRequestMysql(id, body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  if (!defaultTenant) return updateTenantProcurementRequestMysql(id, body, normalizedTenantId);
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementInboundLinkSchemaMysql();
   await ensureProcurementFlexibleRequestSchemaMysql();
@@ -21234,8 +21443,11 @@ export async function submitProcurementRequestsMysql(body = {}) {
   return { ok: true, count: ids.length };
 }
 
-export async function deleteProcurementRequestMysql(id) {
+export async function deleteProcurementRequestMysql(id, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  if (!defaultTenant) return deleteTenantProcurementRequestMysql(id, normalizedTenantId);
   await ensureProcurementInboundLinkSchemaMysql();
   const requestId = Number(id);
   return await withMysqlTransaction(async (connection) => {

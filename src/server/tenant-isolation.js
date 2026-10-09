@@ -43,6 +43,9 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   if (tenantFbpBatchLink || tenantFbpBatchUnlink || tenantFbpBatchPreview) return { allowed: true };
   const tenantFbpBarcodePrint = parts[1] === "fbp-replenishment-orders" && parts.length === 4 && parts[2] === "items" && parts[3] === "barcode-printed" && verb === "POST";
   if (tenantFbpBarcodePrint) return { allowed: true };
+  const tenantProcurementRequestCollection = parts[1] === "procurement" && parts[2] === "requests" && parts.length === 3 && ["GET", "POST"].includes(verb);
+  const tenantProcurementRequestRecord = parts[1] === "procurement" && parts[2] === "requests" && parts.length === 4 && /^\d+$/.test(String(parts[3] || "")) && ["PUT", "DELETE"].includes(verb);
+  if (tenantProcurementRequestCollection || tenantProcurementRequestRecord) return { allowed: true };
   if (parts[1] === "sku-order-tracking" && parts.length === 2 && ["GET", "POST"].includes(verb)) return { allowed: true };
   const tenantOnlineProductRead = parts[1] === "online-products" && parts.length === 3 && ["limits", "warehouses"].includes(parts[2]) && verb === "GET";
   const tenantOnlineProductStockWrite = parts[1] === "online-products" && parts.length === 3 && parts[2] === "batch-stock" && verb === "POST";

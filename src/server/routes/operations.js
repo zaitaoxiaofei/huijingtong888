@@ -11,7 +11,7 @@ export function createOperationsRoutes({ services, readJson }) {
     "GET /api/fbp-transfer-records": (req, url) => services.fbpTransferRecords(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/summary": () => services.procurementSummary(),
     "GET /api/procurement/daily-report": (req, url) => services.procurementDailyReport(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/procurement/requests": (req, url) => services.procurementRequests(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/procurement/requests": (req, url) => services.procurementRequests(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/procurement/ledger": (req, url) => services.procurementLedger(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/stock-cost-tasks": (req, url) => services.procurementStockCostTasks(Object.fromEntries(url.searchParams.entries())),
     "POST /api/procurement/ledger/preview": async (req) => services.previewProcurementLedger(await readJson(req)),
@@ -42,7 +42,7 @@ export function createOperationsRoutes({ services, readJson }) {
     "GET /api/people": () => services.people(),
     "POST /api/people": async (req) => services.createPerson(await readJson(req)) || { ok: true },
     "POST /api/shops": async (req) => services.createShop(await readJson(req), tenantIdFromRequest(req)) || { ok: true },
-    "POST /api/procurement/requests": async (req) => services.createProcurementRequest(await readJson(req), req._session?.personId) || { ok: true },
+    "POST /api/procurement/requests": async (req) => services.createProcurementRequest(await readJson(req), req._session?.personId, tenantIdFromRequest(req)) || { ok: true },
     "POST /api/procurement/warehouse-requests": async (req) => services.createWarehouseProcurementRequests(await readJson(req), req._session?.personId),
     "POST /api/procurement/purchases": async (req) => services.recordProcurementPurchase(await readJson(req), req._session?.personId),
     "POST /api/procurement/pdd-logistics/sync": async (req) => services.syncPddProcurementLogistics(await readJson(req)),
@@ -160,7 +160,7 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "requests" && parts[3]) {
-    await services.updateProcurementRequest(Number(parts[3]), await readJson(req));
+    await services.updateProcurementRequest(Number(parts[3]), await readJson(req), tenantIdFromRequest(req));
     return json(res, { ok: true });
   }
 
@@ -173,7 +173,7 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "requests" && parts[3]) {
-    return json(res, await services.deleteProcurementRequest(Number(parts[3])));
+    return json(res, await services.deleteProcurementRequest(Number(parts[3]), tenantIdFromRequest(req)));
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "purchase-orders" && parts[3]) {
