@@ -2,6 +2,8 @@
   "app": "ozon-erp",
   "version": "local",
   "channel": "local",
+  "branch": "",
+  "commit": "",
   "build_stamp": "",
-  "built_at": "2026-10-07T08:43:11.637Z"
+  "built_at": "2026-10-09T07:01:43.224Z"
 }
