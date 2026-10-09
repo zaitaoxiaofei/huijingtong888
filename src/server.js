@@ -83,7 +83,7 @@ import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
 import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
-import { createTenantMysql, listTenantsMysql, setTenantSubscriptionMysql, tenantMembersMysql, tenantMembershipsMysql, upsertTenantMemberMysql } from "./services/tenants.js";
+import { archiveTenantMysql, createTenantMysql, listTenantsMysql, setTenantSubscriptionMysql, tenantMembersMysql, tenantMembershipsMysql, upsertTenantMemberMysql } from "./services/tenants.js";
 
 const services = { ...mysqlRuntimeServices, ...systemNotificationServices };
 const runtimeReadiness = {
@@ -237,6 +237,10 @@ const routes = {
   "GET /api/system-monitoring": (req) => systemMonitoringOverview(req.query || {}),
   "GET /api/tenants": () => listTenantsMysql(),
   "POST /api/tenants": async (req) => createTenantMysql(await readJson(req)),
+  "POST /api/tenants/archive": async (req) => {
+    const body = await readJson(req);
+    return archiveTenantMysql(body.tenant_id || body.tenantId);
+  },
   "GET /api/tenants/mine": (req) => tenantMembershipsMysql(req._session?.personId),
   "GET /api/tenants/members": (req) => tenantMembersMysql(req.query?.tenant_id || req.query?.tenantId),
   "PUT /api/tenants/members": async (req) => {

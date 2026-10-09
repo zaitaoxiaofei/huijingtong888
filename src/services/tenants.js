@@ -128,13 +128,25 @@ export async function setTenantSubscriptionMysql(tenantId, body = {}) {
   return { ok: true, plan_code: plan.code, subscription_status: plan.status, subscription_expires_at: expiresAt };
 }
 
+export async function archiveTenantMysql(tenantId) {
+  await ensureTenantSchemaMysql();
+  const normalizedTenantId = Number(tenantId);
+  if (!normalizedTenantId) throw new Error("请选择企业");
+  const rows = await mysqlQuery("SELECT id, slug FROM tenants WHERE id = ?", [normalizedTenantId]);
+  if (!rows[0]) throw new Error("企业不存在");
+  if (rows[0].slug === DEFAULT_TENANT_SLUG) throw new Error("默认企业不能删除");
+  await mysqlExecute("UPDATE tenants SET status = 'archived', subscription_status = 'suspended', subscription_expires_at = NULL WHERE id = ?", [normalizedTenantId]);
+  await mysqlExecute("UPDATE tenant_members SET active = 0, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ?", [normalizedTenantId]);
+  return { ok: true };
+}
+
 export { SUBSCRIPTION_PLANS };
 
 export async function tenantMembersMysql(tenantId) {
   await ensureTenantSchemaMysql();
   return mysqlQuery(`SELECT tm.tenant_id, tm.person_id, tm.role, tm.active, p.name, p.username
     FROM tenant_members tm JOIN people p ON p.id = tm.person_id
-    WHERE tm.tenant_id = ? ORDER BY tm.active DESC, p.id`, [Number(tenantId)]);
+    WHERE tm.tenant_id = ? AND tm.active = 1 ORDER BY p.id`, [Number(tenantId)]);
 }
 
 export async function upsertTenantMemberMysql(tenantId, body = {}) {

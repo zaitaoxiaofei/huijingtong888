@@ -27,5 +27,8 @@ test("tenant subscriptions support trials, paid plans, and suspended access", ()
   assert.match(tenantService, /monthly/);
   assert.match(tenantService, /yearly/);
   assert.match(tenantService, /subscription_status = 'suspended'/);
+  assert.match(tenantService, /默认企业不能删除/);
+  assert.match(tenantService, /status = 'archived'/);
+  assert.match(serverSource, /POST \/api\/tenants\/archive/);
   assert.match(serverSource, /TENANT_SUBSCRIPTION_REQUIRED/);
 });
