@@ -7,18 +7,18 @@ import { buildDevelopmentHeatmap, developmentCoordinateKey, developmentPlanPerio
 
 const emit = defineEmits(["open-task", "create"]);
 const tasks = ref([]); const loading = ref(false); const error = ref("");
-const metric = ref("tasks"); const dimension = ref("model"); const scope = ref("all"); const query = ref("");
+const metric = ref("tasks"); const dimension = ref("model"); const scope = ref("all"); const query = ref(""); const includeCompleted = ref(false); const viewMode = ref("quadrant"); const expandedQuadrantScore = ref(null); const draggedPoint = ref(null); const prioritySaving = ref(false);
 const period = ref("month"); const time = ref("due");
 const range = ref([shanghaiMonthStart(), shanghaiDateKey()]);
 const detail = ref(null); const planningMode = ref(false); const planSaving = ref(false);
 const planOrders = ref(new Map()); const selectedCoordinateKeys = ref([]); const selectedCoordinates = ref(new Map()); const pendingPlanKeys = ref(new Set());
 const avatarFailures = ref(new Set());
-const zoom = ref(1); const viewport = ref(null); const canvasWidth = ref(1200); const isDragging = ref(false); const dragOrigin = ref(null); const dragged = ref(false);
+const zoom = ref(1); const viewport = ref(null); const canvasWidth = ref(1200); const isDragging = ref(false); const dragOrigin = ref(null); const dragged = ref(false); const activeDropScore = ref(null);
 let resizeObserver;
 const unit = computed(() => metric.value === "tasks" ? "个任务" : "个 SKU");
 const metricLabel = computed(() => ({ actual: "实际已开发", target: "计划开发", tasks: "开发任务" })[metric.value]);
 const periodKey = computed(() => developmentPlanPeriodKey(period.value, range.value || []));
-const heatmap = computed(() => buildDevelopmentHeatmap(tasks.value, { metric: metric.value, dimension: dimension.value, scope: scope.value, query: query.value, time: time.value, range: range.value }));
+const heatmap = computed(() => buildDevelopmentHeatmap(tasks.value, { metric: metric.value, dimension: dimension.value, scope: scope.value, query: query.value, time: time.value, range: range.value, includeCompleted: includeCompleted.value }));
 const maxSequence = computed(() => Math.max(0, ...[...planOrders.value.values()].map((item) => Number(item.sequence || 0))));
 const selectedPlanCells = computed(() => selectedCoordinateKeys.value.map((key) => ({
   key,
@@ -54,8 +54,11 @@ const quadrantCards = computed(() => {
   });
   return cards;
 });
-const boardStyle = computed(() => ({ width: `${canvasWidth.value}px`, gridTemplateRows: "repeat(2, 340px)", transform: `scale(${zoom.value})` }));
-const boardShellStyle = computed(() => ({ width: `${canvasWidth.value * zoom.value}px`, height: `${696 * zoom.value}px` }));
+const boardWidth = computed(() => viewMode.value === "coordinates" ? Math.max(canvasWidth.value, 190 + heatmap.value.columns.length * 158) : canvasWidth.value);
+const boardHeight = computed(() => viewMode.value === "coordinates" ? 58 + heatmap.value.rows.length * 100 : expandedQuadrantScore.value ? 620 : 696);
+const boardStyle = computed(() => ({ width: `${boardWidth.value}px`, minHeight: `${boardHeight.value}px`, gridTemplateRows: expandedQuadrantScore.value ? "minmax(600px, auto)" : "repeat(2, 340px)", transform: `scale(${zoom.value})` }));
+const boardShellStyle = computed(() => ({ width: `${boardWidth.value * zoom.value}px`, height: `${boardHeight.value * zoom.value}px` }));
+const coordinateBoardStyle = computed(() => ({ width: `${boardWidth.value}px`, gridTemplateColumns: `190px repeat(${heatmap.value.columns.length}, minmax(150px, 1fr))`, gridTemplateRows: `58px repeat(${heatmap.value.rows.length}, 100px)`, transform: `scale(${zoom.value})` }));
 const quadrantLabels = [
   { score: 10, label: "紧急重要" },
   { score: 8, label: "紧急不重要" },
@@ -63,6 +66,37 @@ const quadrantLabels = [
   { score: 6, label: "不紧急不重要" }
 ];
 const priorityQuadrants = computed(() => quadrantLabels.map((item) => ({ ...item, count: heatmap.value.quadrants.find((row) => row.score === item.score)?.count || 0 })));
+const visibleQuadrants = computed(() => quadrantCards.value.filter((item) => expandedQuadrantScore.value == null || item.score === expandedQuadrantScore.value));
+const priorityOptions = computed(() => quadrantLabels.filter((item) => item.score !== draggedPoint.value?.score));
+
+function previewNames(quadrant) { return [...new Set(quadrant.points.map((point) => point.title))].slice(0, 4); }
+function quadrantTaskCount(quadrant) { return new Set(quadrant.points.flatMap((point) => [...point.cell.tasks.keys()])).size; }
+function setViewMode(value) { viewMode.value = value; expandedQuadrantScore.value = null; resetZoom(); }
+function expandQuadrant(score) { expandedQuadrantScore.value = score; resetZoom(); }
+function collapseQuadrant() { expandedQuadrantScore.value = null; resetZoom(); }
+function startPriorityDrag(event, point, score) {
+  if (planningMode.value) { event.preventDefault(); return; }
+  draggedPoint.value = { point, score };
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", point.coordinate.coordinate_key);
+}
+function endPriorityDrag() { draggedPoint.value = null; }
+async function movePointToPriority(score) {
+  const drag = draggedPoint.value;
+  if (!drag || score === drag.score || prioritySaving.value) return;
+  const ids = cellTasks(drag.point.cell).filter((task) => !["done", "closed", "cancelled"].includes(task.status)).map((task) => Number(task.id)).filter(Boolean);
+  if (!ids.length) return ElMessage.info("这个坐标没有未完成任务可调整");
+  const priority = ({ 10: "urgent_important", 8: "urgent_unimportant", 7: "important_not_urgent", 6: "not_urgent_unimportant" })[score];
+  prioritySaving.value = true;
+  try {
+    await apiClient.put("/api/team/development-task-priority", { task_ids: ids, priority });
+    ElMessage.success(`已调整 ${ids.length} 个任务的优先级为${priorityLabel(score)}`);
+    draggedPoint.value = null;
+    await load();
+    expandedQuadrantScore.value = score;
+  } catch (err) { ElMessage.error(err.message || "优先级调整失败，请刷新重试"); }
+  finally { prioritySaving.value = false; }
+}
 
 function setMetric() { if (metric.value !== "actual" && time.value === "draft") time.value = "due"; detail.value = null; }
 function togglePlanningMode() {
@@ -186,6 +220,7 @@ function resetZoom() {
 }
 function beginPan(event) {
   if (event.button !== 0) return;
+  if (event.target.closest("button, .el-button, .el-select, .el-radio-button, .el-switch, .el-date-editor, .el-input")) return;
   dragged.value = false;
   dragOrigin.value = { x: event.clientX, y: event.clientY, left: viewport.value.scrollLeft, top: viewport.value.scrollTop, pointerId: event.pointerId };
 }
@@ -217,7 +252,7 @@ async function fitCanvas() {
   if (viewport.value?.clientWidth) canvasWidth.value = Math.max(960, viewport.value.clientWidth - 2);
 }
 defineExpose({ reload: load });
-watch([periodKey, dimension], () => { selectedCoordinateKeys.value = []; selectedCoordinates.value = new Map(); pendingPlanKeys.value = new Set(); loadPlanOrders(); });
+watch([periodKey, dimension], () => { selectedCoordinateKeys.value = []; selectedCoordinates.value = new Map(); pendingPlanKeys.value = new Set(); expandedQuadrantScore.value = null; loadPlanOrders(); });
 watch(() => heatmap.value.rows.length, fitCanvas);
 watch(viewport, (element) => { if (element) resizeObserver?.observe(element); }, { flush: "post" });
 onMounted(() => { setPeriod("month"); load(); fitCanvas(); resizeObserver = new ResizeObserver(fitCanvas); if (viewport.value) resizeObserver.observe(viewport.value); });
@@ -226,18 +261,18 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 
 <template>
   <section class="heatmap-panel" v-loading="loading">
-    <header class="heatmap-heading"><div><h2>开发分布热力图</h2><p>按优先级四象限展示；每个点对应核心品名与当前品牌/车型颗粒度。本周 / 本月统计计划完成日，逾期未完成任务按任务中心规则每周顺延。</p></div><div><el-button @click="load">刷新</el-button><el-button v-if="periodKey" :type="planningMode ? 'warning' : 'default'" @click="togglePlanningMode">{{ planningMode ? '退出排程' : '人工排程' }}</el-button><el-button type="primary" @click="emit('create')">新增开发任务</el-button></div></header>
-    <div class="heatmap-filters">
-      <el-radio-group v-model="period" @change="setPeriod"><el-radio-button value="week">本周</el-radio-button><el-radio-button value="month">本月</el-radio-button><el-radio-button value="quarter">本季度</el-radio-button><el-radio-button value="year">本年</el-radio-button><el-radio-button value="all">全部时间</el-radio-button><el-radio-button value="custom">自定义</el-radio-button></el-radio-group>
+    <header class="heatmap-heading"><div><h2>开发分布热力图</h2><p>四象限看优先级概览，横纵坐标查核心品名与品牌/车型；默认只看未完成任务。</p></div><div><el-button @click="load">刷新</el-button><el-button v-if="periodKey" :type="planningMode ? 'warning' : 'default'" @click="togglePlanningMode">{{ planningMode ? '退出排程' : '人工排程' }}</el-button><el-button type="primary" @click="emit('create')">新增开发任务</el-button></div></header>
+    <div class="heatmap-filterbar">
+      <el-select :model-value="period" aria-label="统计周期" @change="setPeriod"><el-option label="本周" value="week" /><el-option label="本月" value="month" /><el-option label="本季度" value="quarter" /><el-option label="本年" value="year" /><el-option label="全部时间" value="all" /><el-option label="自定义" value="custom" /></el-select>
       <el-date-picker v-if="period !== 'all'" v-model="range" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" :clearable="false" @change="period = 'custom'" />
       <el-select v-model="metric" aria-label="统计数量" @change="setMetric"><el-option label="开发任务数" value="tasks" /><el-option label="计划开发 SKU" value="target" /><el-option label="实际已开发 SKU" value="actual" /></el-select>
-      <el-select v-model="time" aria-label="统计日期"><el-option v-if="metric === 'actual'" label="按草稿创建时间" value="draft" /><el-option label="按计划完成日期（含顺延）" value="due" /><el-option label="按任务创建时间" value="created" /></el-select>
-    </div>
-    <div class="heatmap-filters">
-      <el-radio-group v-model="dimension"><el-radio-button value="model">按车型</el-radio-button><el-radio-button value="brand">按品牌</el-radio-button></el-radio-group>
+      <el-select v-model="time" aria-label="统计日期"><el-option v-if="metric === 'actual'" label="按草稿时间" value="draft" /><el-option label="按计划完成日期" value="due" /><el-option label="按任务创建时间" value="created" /></el-select>
+      <el-radio-group v-model="dimension" aria-label="显示颗粒度"><el-radio-button value="model">车型</el-radio-button><el-radio-button value="brand">品牌</el-radio-button></el-radio-group>
       <el-select v-model="scope" aria-label="开发范围"><el-option label="全部范围" value="all" /><el-option label="汽车" value="automotive" /><el-option label="非汽车" value="non_automotive" /><el-option label="未分类" value="unknown" /></el-select>
-      <el-input v-model="query" clearable placeholder="搜索品牌、车型或核心品名" />
-      <span class="heatmap-summary">{{ metricLabel }} <b>{{ heatmap.total }}</b> {{ unit }} · {{ heatmap.taskCount }} 个任务 · {{ heatmap.rows.length }} 行 × {{ heatmap.columns.length }} 核心品名</span>
+      <el-input v-model="query" aria-label="搜索开发任务" clearable placeholder="搜索核心品名 / 品牌 / 车型" />
+      <label class="completed-filter"><span>含已完成</span><el-switch v-model="includeCompleted" aria-label="包含已完成任务" /></label>
+      <el-radio-group :model-value="viewMode" class="view-mode-switch" aria-label="热力图视图" @change="setViewMode"><el-radio-button value="quadrant">四象限</el-radio-button><el-radio-button value="coordinates">横纵坐标</el-radio-button></el-radio-group>
+      <span class="heatmap-summary"><b>{{ heatmap.taskCount }}</b> 个任务 · {{ heatmap.rows.length }} × {{ heatmap.columns.length }}</span>
     </div>
     <div v-if="planningMode" class="heatmap-plan-toolbar">
       <strong>{{ periodKey }} · 已选 {{ selectedPlanSummary.grainCount }} 个{{ selectedPlanSummary.grainLabel }} · {{ selectedPlanSummary.taskCount }} 个任务</strong>
@@ -251,26 +286,32 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
     </div>
     <el-alert v-if="error" :title="error" type="error" :closable="false"><el-button @click="load">重新加载</el-button></el-alert>
     <template v-else>
-      <div class="heatmap-priority-legend"><strong>优先级</strong><span class="priority-10">紧急重要 <small>{{ priorityQuadrants.find(item => item.score === 10)?.count || 0 }}</small></span><span class="priority-7">重要不紧急 <small>{{ priorityQuadrants.find(item => item.score === 7)?.count || 0 }}</small></span><span class="priority-8">紧急不重要 <small>{{ priorityQuadrants.find(item => item.score === 8)?.count || 0 }}</small></span><span class="priority-6">不重要不紧急 <small>{{ priorityQuadrants.find(item => item.score === 6)?.count || 0 }}</small></span><span class="priority-done">已完成</span><em>四象限 = 优先级 · 点位 = 核心品名 × {{ dimension === 'model' ? '车型' : '品牌' }}</em></div>
-      <div class="heatmap-canvas-toolbar" v-if="heatmap.rows.length && heatmap.columns.length"><span>缩放</span><el-button circle size="small" aria-label="缩小热力图" @click="zoomBy(-0.08)">−</el-button><strong>{{ Math.round(zoom * 100) }}%</strong><el-button circle size="small" aria-label="放大热力图" @click="zoomBy(0.08)">＋</el-button><el-button size="small" @click="resetZoom">重置</el-button><small>滚轮缩放 · 左键拖动</small></div>
+      <div class="heatmap-priority-legend"><strong>优先级概览</strong><span class="priority-10">紧急重要 <small>{{ priorityQuadrants.find(item => item.score === 10)?.count || 0 }}</small></span><span class="priority-7">重要不紧急 <small>{{ priorityQuadrants.find(item => item.score === 7)?.count || 0 }}</small></span><span class="priority-8">紧急不重要 <small>{{ priorityQuadrants.find(item => item.score === 8)?.count || 0 }}</small></span><span class="priority-6">不重要不紧急 <small>{{ priorityQuadrants.find(item => item.score === 6)?.count || 0 }}</small></span><em>{{ viewMode === 'quadrant' ? '点击象限查看圆形任务点；拖入其它优先级可调整任务' : '横向核心品名 · 纵向' + (dimension === 'model' ? '车型' : '品牌') }}</em></div>
+      <div class="heatmap-canvas-toolbar" v-if="heatmap.rows.length && heatmap.columns.length && (viewMode === 'coordinates' || expandedQuadrantScore !== null)"><span>缩放</span><el-button circle size="small" aria-label="缩小热力图" @click="zoomBy(-0.08)">−</el-button><strong>{{ Math.round(zoom * 100) }}%</strong><el-button circle size="small" aria-label="放大热力图" @click="zoomBy(0.08)">＋</el-button><el-button size="small" @click="resetZoom">重置</el-button><small>滚轮缩放 · 左键拖动</small></div>
       <div v-if="heatmap.rows.length && heatmap.columns.length" ref="viewport" class="heatmap-viewport" :class="{ 'is-panning': isDragging, 'planning-mode': planningMode }" @wheel.prevent="handleZoomWheel" @pointerdown="beginPan" @pointermove="movePan" @pointerup="endPan" @pointercancel="endPan" @lostpointercapture="endPan">
-        <div class="heatmap-board-shell" :style="boardShellStyle"><div class="quadrant-board" :style="boardStyle">
-          <section v-for="quadrant in quadrantCards" :key="quadrant.score" class="priority-quadrant" :class="[`quadrant-${quadrant.score}`, { dense: quadrant.points.length > 8 }]">
-            <header><div><strong>{{ quadrant.label }}</strong><small>{{ quadrant.points.length }} 个{{ dimension === 'model' ? '车型' : '品牌' }}点 · {{ quadrant.points.reduce((sum, point) => sum + point.cell.tasks.size, 0) }} 个任务</small></div><b>{{ quadrant.points.length }}</b></header>
-            <div class="quadrant-points">
-              <button v-for="point in quadrant.points" :key="point.coordinate.coordinate_key" class="quadrant-point" :class="[{ selected: selectedCoordinateKeys.includes(point.coordinate.coordinate_key), marked: point.plan.marked, completed: completedCount(point.cell) === point.cell.tasks.size }, `priority-${quadrant.score}`]" :style="pointStyle(point)" :aria-label="`${point.title}：${point.cell.value} ${unit}`" @click="handleCellClick(point.row,point.column)" @contextmenu="cancelCoordinate($event,point.row,point.column)">
+        <div v-if="viewMode === 'quadrant'" class="heatmap-board-shell" :style="boardShellStyle"><div class="quadrant-board" :class="{ 'is-focused': expandedQuadrantScore !== null }" :style="boardStyle">
+          <section v-for="quadrant in visibleQuadrants" :key="quadrant.score" class="priority-quadrant" :class="[`quadrant-${quadrant.score}`, { focused: expandedQuadrantScore === quadrant.score, 'drop-source': draggedPoint?.score === quadrant.score }]" :style="expandedQuadrantScore === quadrant.score ? { gridColumn: '1 / -1' } : {}" @dragover.prevent="draggedPoint && expandedQuadrantScore === quadrant.score ? activeDropScore = quadrant.score : null">
+            <header><div><strong>{{ quadrant.label }}</strong><small>{{ quadrant.points.length }} 个点位 · {{ quadrantTaskCount(quadrant) }} 个未完成任务</small></div><b>{{ quadrant.points.length }}</b><el-button v-if="expandedQuadrantScore !== quadrant.score" text @click="expandQuadrant(quadrant.score)" :aria-label="`展开${quadrant.label}象限`">查看象限 <span aria-hidden="true">↗</span></el-button><el-button v-else text @click="collapseQuadrant">返回总览</el-button></header>
+            <div v-if="expandedQuadrantScore !== quadrant.score" class="quadrant-overview"><span v-for="name in previewNames(quadrant)" :key="name" class="quadrant-name-chip">{{ name }}</span><span v-if="!quadrant.points.length" class="quadrant-empty">暂无未完成任务</span><small v-else-if="quadrant.points.length > 4">还有 {{ quadrant.points.length - 4 }} 个坐标</small></div>
+            <div v-else class="quadrant-points">
+              <div class="priority-drop-targets"><span>拖动节点到目标优先级：</span><button v-for="target in priorityOptions" :key="target.score" :class="[`priority-${target.score}`, { active: activeDropScore === target.score }]" @dragover.prevent="activeDropScore = target.score" @dragleave="activeDropScore = null" @drop.prevent.stop="movePointToPriority(target.score)">{{ target.label }}</button></div>
+              <button v-for="point in quadrant.points" :key="point.coordinate.coordinate_key" :draggable="!planningMode" class="quadrant-point" :class="[{ selected: selectedCoordinateKeys.includes(point.coordinate.coordinate_key), marked: point.plan.marked, completed: completedCount(point.cell) === point.cell.tasks.size }, `priority-${quadrant.score}`]" :style="pointStyle(point)" :aria-label="`${point.title}：${point.cell.value} ${unit}`" @click="handleCellClick(point.row,point.column)" @contextmenu="cancelCoordinate($event,point.row,point.column)" @dragstart="startPriorityDrag($event,point,quadrant.score)" @dragend="endPriorityDrag">
                 <b v-if="point.plan.sequence" class="point-sequence">{{ point.plan.sequence }}</b><i v-if="point.plan.marked" class="point-marker">标记</i>
-                <span class="point-owners"><el-avatar v-for="task in taskOwners(point.cell).slice(0,3)" :key="avatarKey(task)" :src="avatarFailures.has(avatarKey(task)) ? '' : task.owner_avatar_url" :size="34" @error="handleAvatarError(task)">{{ task.owner_name?.slice(0,1) || '?' }}</el-avatar><i v-if="taskOwners(point.cell).length > 3">+{{ taskOwners(point.cell).length - 3 }}</i><el-avatar v-if="!taskOwners(point.cell).length" :size="34">?</el-avatar></span>
-                <span class="point-copy"><strong>{{ point.title }}</strong><small>{{ point.cell.tasks.size }} 个任务 · {{ completedCount(point.cell) }}/{{ point.cell.tasks.size }} 完成</small><small>{{ point.cell.value }} {{ unit }} · {{ priorityLabel(point.cell.priorityScore) }}</small></span>
-                <span class="point-hover-card"><b>{{ point.title }}</b><small>{{ dimension === 'model' ? '车型' : '品牌' }}颗粒度 · {{ point.cell.tasks.size }} 个任务</small><span v-for="task in cellTasks(point.cell).slice(0,4)" :key="task.id"><el-avatar :src="task.owner_avatar_url" :size="22">{{ task.owner_name?.slice(0,1) || '?' }}</el-avatar><strong>{{ task.title }}</strong><i :class="{ done: task.status === 'done' }">{{ taskStatusLabel(task) }}</i></span><em v-if="point.cell.tasks.size > 4">另有 {{ point.cell.tasks.size - 4 }} 个任务</em><small>点击{{ planningMode ? '排入顺序' : dimension === 'model' ? '查看车型任务' : '查看品牌任务' }}{{ planningMode ? ' · 右键取消排程' : '' }}</small></span>
+                <span class="point-owners"><el-avatar v-for="task in taskOwners(point.cell).slice(0,2)" :key="avatarKey(task)" :src="avatarFailures.has(avatarKey(task)) ? '' : task.owner_avatar_url" :size="42" @error="handleAvatarError(task)">{{ task.owner_name?.slice(0,1) || '?' }}</el-avatar><el-avatar v-if="!taskOwners(point.cell).length" :size="42">?</el-avatar></span>
+                <span class="point-copy"><strong>{{ point.title }}</strong><small>{{ point.cell.tasks.size }} 个任务 · {{ point.cell.value }} {{ unit }}</small></span>
+                <span class="point-hover-card"><b>{{ point.title }}</b><small>{{ dimension === 'model' ? '车型' : '品牌' }}颗粒度 · {{ point.cell.tasks.size }} 个未完成任务</small><span v-for="task in cellTasks(point.cell).slice(0,4)" :key="task.id"><el-avatar :src="task.owner_avatar_url" :size="22">{{ task.owner_name?.slice(0,1) || '?' }}</el-avatar><strong>{{ task.title }}</strong><i>{{ taskStatusLabel(task) }}</i></span><em v-if="point.cell.tasks.size > 4">另有 {{ point.cell.tasks.size - 4 }} 个任务</em><small>点击查看明细 · 拖动调整优先级</small></span>
               </button>
-              <p v-if="!quadrant.points.length" class="quadrant-empty">暂无任务</p>
+              <p v-if="!quadrant.points.length" class="quadrant-empty">暂无未完成任务</p>
             </div>
           </section>
         </div></div>
+        <div v-else class="heatmap-board-shell" :style="boardShellStyle"><div class="coordinate-board" :style="coordinateBoardStyle">
+          <div class="axis-corner">{{ dimension === 'model' ? '品牌 / 车型' : '品牌' }} <small>核心品名 →</small></div><div v-for="column in heatmap.columns" :key="column.label" class="axis-column"><strong>{{ column.label }}</strong><small>{{ column.tasks.size }} 个任务</small></div>
+          <template v-for="row in heatmap.rows" :key="row.id"><div class="axis-row"><strong>{{ row.label }}</strong><small>{{ row.tasks.size }} 个任务</small></div><div v-for="column in heatmap.columns" :key="`${row.id}:${column.label}`" class="axis-cell-wrap"><button v-if="heatmap.cell(row,column.label).tasks.size" class="axis-cell" :class="[`priority-${heatmap.cell(row,column.label).priorityScore}`, { selected: selectedCoordinateKeys.includes(coordinateFor(row,column).coordinate_key), marked: cellPlan(row,column).marked }]" :aria-label="`${column.label} · ${row.label}：${heatmap.cell(row,column.label).tasks.size} 个任务`" @click="handleCellClick(row,column)" @contextmenu="cancelCoordinate($event,row,column)"><b v-if="cellPlan(row,column).sequence" class="point-sequence">{{ cellPlan(row,column).sequence }}</b><i v-if="cellPlan(row,column).marked" class="point-marker">标记</i><span class="axis-avatars"><el-avatar v-for="owner in taskOwners(heatmap.cell(row,column.label)).slice(0,2)" :key="avatarKey(owner)" :src="avatarFailures.has(avatarKey(owner)) ? '' : owner.owner_avatar_url" :size="36" @error="handleAvatarError(owner)">{{ owner.owner_name?.slice(0,1) || '?' }}</el-avatar></span><small>{{ heatmap.cell(row,column.label).tasks.size }} 个任务</small><span class="point-hover-card"><b>{{ column.label }} · {{ row.label }}</b><small>{{ heatmap.cell(row,column.label).tasks.size }} 个任务 · {{ heatmap.cell(row,column.label).value }} {{ unit }}</small><span v-for="task in cellTasks(heatmap.cell(row,column.label)).slice(0,4)" :key="task.id"><el-avatar :src="task.owner_avatar_url" :size="22">{{ task.owner_name?.slice(0,1) || '?' }}</el-avatar><strong>{{ task.title }}</strong><i>{{ taskStatusLabel(task) }}</i></span><small>点击查看任务明细</small></span></button><span v-else class="axis-empty">—</span></div></template>
+        </div></div>
       </div>
       <el-empty v-else-if="!loading" description="当前范围暂无可归类的开发记录，可调整时间或新增开发任务" />
-      <footer class="heatmap-notes"><span>四象限按优先级分区；早排程点靠近中心，头像表示负责人，悬浮查看任务概览。左键拖动画布，滚轮缩放。</span><p>北京时间。{{ metric === 'actual' ? '已开发数量按关联草稿的当前变体数统计，同一草稿去重，店铺副本不重复计数；这不是历史时点快照。' : metric === 'target' ? '计划数量按各车型设置的 SKU 目标汇总。' : '每个点对应一个核心品名与当前品牌/车型颗粒度的任务集合；顶部总任务数去重。' }}</p><p v-if="heatmap.unclassified">当前任务日期范围内有 {{ heatmap.unclassified }} 个旧开发任务缺少品牌／车型／类目；切换“开发任务数”查看“未分类”，不将其自动归入非汽车。</p><p v-if="heatmap.conflicts" class="heatmap-warning">{{ heatmap.conflicts }} 份草稿关联到了多个不同坐标，已排除重复归属；请在任务详情中修正关联。</p></footer>
+      <footer class="heatmap-notes"><span>默认排除已完成任务；四象限总览可展开单个象限，拖动圆形节点到目标优先级可更新该节点关联任务。横纵坐标用于按核心品名 × {{ dimension === 'model' ? '车型' : '品牌' }} 查找。左键拖动画布，滚轮缩放。</span><p>北京时间。{{ metric === 'actual' ? '已开发数量按关联草稿的当前变体数统计，同一草稿去重，店铺副本不重复计数；这不是历史时点快照。' : metric === 'target' ? '计划数量按各车型设置的 SKU 目标汇总。' : '每个点对应一个核心品名与当前品牌/车型颗粒度的任务集合；顶部总任务数去重。' }}</p><p v-if="heatmap.unclassified">当前任务日期范围内有 {{ heatmap.unclassified }} 个旧开发任务缺少品牌／车型／类目；切换“开发任务数”查看“未分类”，不将其自动归入非汽车。</p><p v-if="heatmap.conflicts" class="heatmap-warning">{{ heatmap.conflicts }} 份草稿关联到了多个不同坐标，已排除重复归属；请在任务详情中修正关联。</p></footer>
     </template>
     <el-dialog v-if="detail" :model-value="true" :title="detail.title" width="min(820px, 94vw)" append-to-body @close="detail = null">
       <p>{{ metricLabel }}：<b>{{ detail.value }}</b> {{ unit }} · {{ detail.tasks.length }} 个关联任务 · 最高优先级 {{ detail.priority }}</p>
@@ -333,5 +374,13 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 .point-owners>.el-avatar{border:2px solid #fff;box-shadow:0 2px 5px #0f172a20}.point-copy>small{color:#738097;opacity:1}.quadrant-point.completed .point-copy>small{color:#438161}.point-sequence{min-width:25px;height:25px;background:linear-gradient(145deg,#ef4444,#b91c1c);box-shadow:0 3px 10px #7f1d1d50}
 .point-hover-card{width:280px;padding:14px;border-color:#e4eaf2;border-radius:16px;box-shadow:0 18px 44px #1e293b30}.point-hover-card>span{padding-top:7px}
 .planning-mode .quadrant-point:hover{outline:2px solid #fff;box-shadow:0 0 0 4px #ef4444,0 0 24px #ef444480}
-@media(max-width:760px){.heatmap-panel{padding:14px}.heatmap-heading{align-items:flex-start;flex-direction:column}.heatmap-filters{padding:8px}.heatmap-summary{width:100%;margin:0;padding:4px 2px 0}.heatmap-priority-legend em{width:100%;margin-left:0}.quadrant-board{gap:12px;padding:8px}.priority-quadrant,.priority-quadrant:after{border-radius:18px}}
+.heatmap-filterbar{display:flex;align-items:center;gap:7px;min-width:0;overflow-x:auto;flex-wrap:nowrap;padding:8px;margin:0 0 10px;border:1px solid #edf1f7;border-radius:13px;background:#f8faff;scrollbar-width:thin}
+.heatmap-filterbar>*{flex:0 0 auto}.heatmap-filterbar>.el-select{width:122px}.heatmap-filterbar>.el-date-editor{width:232px}.heatmap-filterbar>.el-input{width:205px}.heatmap-filterbar>.el-radio-group{padding:2px;border-radius:9px;background:#edf2f8}.heatmap-filterbar>.el-radio-group :deep(.el-radio-button__inner){padding:8px 10px;font-size:11px}.heatmap-filterbar>.view-mode-switch{margin-left:auto;background:#e8eef8}.heatmap-filterbar>.heatmap-summary{padding:0 7px;white-space:nowrap;font-size:10px}.heatmap-filterbar>.heatmap-summary b{font-size:16px}
+.completed-filter{display:flex;align-items:center;gap:6px;padding:0 4px;color:#64748b;font-size:11px;white-space:nowrap}
+.quadrant-board{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,340px)}.quadrant-board.is-focused{grid-template-columns:minmax(0,1fr)}.priority-quadrant{display:flex;flex-direction:column;min-width:0;min-height:0}.priority-quadrant.focused{grid-column:1/-1}.priority-quadrant>header{display:flex;align-items:center;gap:10px}.priority-quadrant>header>div{margin-right:auto}.priority-quadrant>header .el-button{z-index:2;color:#3568ad;font-size:11px}
+.quadrant-overview{position:relative;z-index:1;display:flex;align-content:flex-start;align-items:center;gap:7px;flex:1;min-height:0;flex-wrap:wrap;padding:4px 16px 15px;cursor:pointer}.quadrant-name-chip{max-width:190px;overflow:hidden;padding:7px 10px;border:1px solid #e5ebf3;border-radius:999px;background:#ffffffd9;color:#44546a;font-size:11px;text-overflow:ellipsis;white-space:nowrap;box-shadow:0 2px 8px #1e293b08}.quadrant-overview>small{width:100%;margin-top:2px;color:#8793a5;font-size:10px}.quadrant-overview:hover .quadrant-name-chip{border-color:#cbd9ee;background:#fff}.quadrant-overview .quadrant-empty{width:100%;text-align:center}
+.quadrant-points{display:grid;grid-template-columns:repeat(auto-fill,minmax(94px,1fr));align-content:start;justify-items:center;gap:14px;overflow:auto;min-height:0;flex:1;padding:8px 14px 15px}.priority-quadrant.focused .quadrant-points{min-height:460px}.quadrant-point{display:grid;grid-template-rows:64px auto;justify-items:center;align-content:start;gap:6px;width:92px;min-height:100px;padding:2px 4px;border:0;border-radius:14px;background:transparent;box-shadow:none;text-align:center;overflow:visible}.quadrant-point.priority-10,.quadrant-point.priority-7,.quadrant-point.priority-8,.quadrant-point.priority-6,.quadrant-point.completed{border:0;background:transparent;color:#25344a}.quadrant-point:hover,.quadrant-point:focus-visible{transform:translateY(-2px);outline:0;background:transparent;box-shadow:none}.point-owners{position:relative;display:grid;place-items:center;width:58px;height:58px;padding:4px;border:2px solid #d7e1ee;border-radius:50%;background:linear-gradient(145deg,#fff,#edf3fa);box-shadow:0 4px 14px #1e293b18}.quadrant-10 .point-owners{border-color:#f2a0a5}.quadrant-7 .point-owners{border-color:#99baf3}.quadrant-8 .point-owners{border-color:#fac1c9}.quadrant-6 .point-owners{border-color:#d2d9e2}.point-owners>.el-avatar{width:44px!important;height:44px!important;border:2px solid #fff;box-shadow:0 2px 6px #1e293b22}.point-owners>.el-avatar+.el-avatar{margin-left:-14px}.quadrant-point.completed .point-owners{border-color:#84d7a0;background:#f0fff4}.point-copy{display:grid;gap:2px;width:100%;text-align:center}.point-copy>strong{max-width:100%;font-size:10px;line-height:1.25;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}.point-copy>small{font-size:9px;color:#748198;opacity:1}.quadrant-point.completed .point-copy>small{color:#438161}.quadrant-point.selected{outline:2px solid #f59e0b;outline-offset:1px;border-radius:18px;box-shadow:0 0 0 4px #fff7ed}.quadrant-point[style*="--schedule-strength"]{border:0}.point-sequence{top:0;left:0;min-width:22px;height:22px;font-size:10px}.point-marker{top:0;right:0}
+.priority-drop-targets{position:sticky;top:0;z-index:5;grid-column:1/-1;display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;padding:9px;border:1px dashed #bdcce0;border-radius:12px;background:#ffffffed;color:#627188;font-size:11px}.priority-drop-targets button{padding:7px 11px;border:1px solid transparent;border-radius:999px;font-size:11px;font-weight:700;cursor:pointer}.priority-drop-targets .priority-10{background:#fee2e2;color:#b91c1c}.priority-drop-targets .priority-7{background:#dbeafe;color:#1e40af}.priority-drop-targets .priority-8{background:#fff1f2;color:#be123c}.priority-drop-targets .priority-6{background:#f1f5f9;color:#475569}.priority-drop-targets button.active,.priority-drop-targets button:hover{outline:2px solid currentColor;outline-offset:2px;transform:translateY(-1px)}
+.coordinate-board{position:absolute;inset:0 auto auto 0;display:grid;gap:1px;padding:1px;transform-origin:0 0;background:#e3e9f2}.axis-corner,.axis-column,.axis-row,.axis-cell-wrap{display:flex;align-items:center;justify-content:center;min-width:0;background:#fff}.axis-corner,.axis-column,.axis-row{position:sticky;z-index:2;flex-direction:column;gap:5px;padding:8px;background:#f2f6fc;color:#31415a;text-align:center}.axis-corner{left:0;z-index:4;align-items:flex-start;padding-left:14px;font-size:11px;font-weight:700}.axis-corner small,.axis-column small,.axis-row small{color:#8b97aa;font-size:9px;font-weight:400}.axis-column{top:0}.axis-column strong,.axis-row strong{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}.axis-row{left:0;align-items:flex-start;text-align:left}.axis-cell-wrap{position:relative;overflow:visible}.axis-cell{position:relative;display:grid;place-items:center;gap:2px;width:66px;height:66px;padding:4px;border:2px solid #d7e1ee;border-radius:50%;background:linear-gradient(145deg,#fff,#edf3fa);color:#5a6880;cursor:pointer;transition:transform .15s,box-shadow .15s}.axis-cell.priority-10{border-color:#f2a0a5}.axis-cell.priority-7{border-color:#99baf3}.axis-cell.priority-8{border-color:#fac1c9}.axis-cell.priority-6{border-color:#d2d9e2}.axis-cell:hover,.axis-cell:focus-visible{z-index:4;transform:scale(1.08);outline:0;box-shadow:0 7px 16px #1e293b26}.axis-avatars{display:flex;justify-content:center}.axis-avatars>.el-avatar{width:34px!important;height:34px!important;border:2px solid #fff;box-shadow:0 2px 5px #0f172a20}.axis-avatars>.el-avatar+.el-avatar{margin-left:-10px}.axis-cell>small{font-size:9px}.axis-cell.selected{outline:3px solid #f59e0b;outline-offset:1px}.axis-cell.marked:not(.selected){box-shadow:inset 0 0 0 3px #f59e0b}.axis-empty{color:#d1d8e2;font-size:15px}
+@media(max-width:900px){.heatmap-heading{align-items:flex-start;flex-direction:column}.heatmap-filterbar>.view-mode-switch{margin-left:0}.heatmap-filterbar>.heatmap-summary{margin-left:0}.quadrant-board{min-width:820px}.quadrant-board.is-focused{min-width:820px}.coordinate-board{min-width:max-content}.priority-quadrant,.priority-quadrant:after{border-radius:18px}}
 </style>

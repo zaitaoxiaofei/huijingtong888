@@ -1500,6 +1500,11 @@ const endpoints = [
       ],
       responses: [response(200, "application/json", arrayOf(ref("TeamTaskRecord"), "Team tasks."))]
     }),
+    endpoint("PUT", "/api/team/development-task-priority", "Change priority for one or more active product-development tasks from the development heatmap.", {
+      auth: "authenticated",
+      requestBody: body(scalar("object", "task_ids: 1–100 development task IDs; priority: urgent_important, important_not_urgent, urgent_unimportant, or not_urgent_unimportant.")),
+      responses: [response(200, "application/json", ref("MutationOk"))]
+    }),
     endpoint("POST", "/api/team/tasks", "Create a team planning task.", {
       auth: "authenticated",
       requestBody: body(ref("TeamTaskMutationRequest")),
