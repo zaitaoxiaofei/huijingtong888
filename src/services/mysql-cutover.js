@@ -5427,10 +5427,25 @@ export async function recordFbpReplenishmentBatchFillMysql(body = {}, userId = n
   return { ok: true, batch_id: batchId, success_count: successCount, total: results.length };
 }
 
-export async function markFbpReplenishmentItemBarcodePrintedMysql(body = {}, userId = null) {
+export async function markFbpReplenishmentItemBarcodePrintedMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
-  return withMysqlTransaction(connection => appendPrintRecord(connection, body, userId));
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
+  const orderId = Number(body.order_id || body.orderId || 0);
+  if (!orderId) throw new Error("缺少备货单，无法登记打印。");
+  return withMysqlTransaction(async (connection) => {
+    const order = await mysqlConnectionQueryOne(connection, `
+      SELECT o.id, o.shop_id
+      FROM fbp_replenishment_orders o
+      JOIN shops s ON s.id = o.shop_id
+      WHERE o.id = ? AND s.status != 'deleted' AND ${shopScope}
+      LIMIT 1 FOR UPDATE
+    `, [orderId, normalizedTenantId]);
+    if (!order) throw new Error("备货单不存在或不属于当前企业，无法登记打印。");
+    return appendPrintRecord(connection, body, userId, Number(order.shop_id));
+  });
 }
 
 export async function deleteFbpReplenishmentOrderMysql(body = {}, userId = null, tenantId = "admin") {
