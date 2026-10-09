@@ -2059,7 +2059,7 @@ const server = http.createServer(async (req, res) => {
       if (!session) return json(res, { error: "未登录，请先登录" }, 401);
       req._session = session;
       req.query = Object.fromEntries(url.searchParams.entries());
-      const isolation = tenantIsolationDecision(session, parts);
+      const isolation = tenantIsolationDecision(session, parts, req.method);
       if (!isolation.allowed) return json(res, { error: isolation.error, code: isolation.code }, 403);
       const authorization = authorizeApiRequest(req, parts);
       if (!authorization.allowed) {

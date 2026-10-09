@@ -1,45 +1,65 @@
-function tenantIdFromRequest(req) {
-  return String(req.headers?.["x-tenant-id"] || req.query?.tenantId || req.query?.tenant_id || "admin").trim() || "admin";
+export function tenantIdFromRequest(req) {
+  const tenant = req._session?.tenant;
+  if (!tenant?.id || !tenant?.slug) {
+    const error = new Error("当前登录会话没有有效企业上下文");
+    error.statusCode = 403;
+    throw error;
+  }
+  return tenant.slug === "default" ? "admin" : String(tenant.id);
+}
+
+function queryFromUrl(url) {
+  const query = Object.fromEntries(url.searchParams.entries());
+  delete query.tenantId;
+  delete query.tenant_id;
+  return query;
+}
+
+async function payloadFromRequest(req, readJson) {
+  const payload = await readJson(req);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
+  const { tenant_id, tenantId, ...scopedPayload } = payload;
+  return scopedPayload;
 }
 
 export function createSellerAnalyticsRoutes({ services, readJson }) {
   return {
     "GET /api/db/seller-analytics/summary": (req) => services.sellerAnalyticsSummary(tenantIdFromRequest(req)),
-    "GET /api/db/seller-analytics/metrics": (req, url) => services.sellerAnalyticsMetrics(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "GET /api/db/seller-analytics/analysis": (req, url) => services.sellerAnalyticsAnalysis(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "GET /api/db/seller-analytics/operation-todos": (req, url) => services.sellerAnalyticsOperationTodos(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "GET /api/db/seller-analytics/plugin-status": (req, url) => services.sellerAnalyticsPluginStatus(tenantIdFromRequest(req), Object.fromEntries(url.searchParams.entries())),
-    "GET /api/db/seller-analytics/auth-binding": (req, url) => services.sellerAnalyticsAuthBindingStatus(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "GET /api/db/seller-analytics/browser-profile": (req, url) => services.sellerAnalyticsBrowserProfileStatus(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "GET /api/db/seller-analytics/plugin-status/validate": (req, url) => services.sellerAnalyticsValidatePluginStatus(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "GET /api/db/seller-analytics/snapshots": (req, url) => services.sellerAnalyticsSnapshots(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "GET /api/db/seller-analytics/collect-runs": (req, url) => services.sellerAnalyticsCollectRuns(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/db/seller-analytics/metrics": (req, url) => services.sellerAnalyticsMetrics(queryFromUrl(url), tenantIdFromRequest(req)),
+    "GET /api/db/seller-analytics/analysis": (req, url) => services.sellerAnalyticsAnalysis(queryFromUrl(url), tenantIdFromRequest(req)),
+    "GET /api/db/seller-analytics/operation-todos": (req, url) => services.sellerAnalyticsOperationTodos(queryFromUrl(url), tenantIdFromRequest(req)),
+    "GET /api/db/seller-analytics/plugin-status": (req, url) => services.sellerAnalyticsPluginStatus(tenantIdFromRequest(req), queryFromUrl(url)),
+    "GET /api/db/seller-analytics/auth-binding": (req, url) => services.sellerAnalyticsAuthBindingStatus(queryFromUrl(url), tenantIdFromRequest(req)),
+    "GET /api/db/seller-analytics/browser-profile": (req, url) => services.sellerAnalyticsBrowserProfileStatus(queryFromUrl(url), tenantIdFromRequest(req)),
+    "GET /api/db/seller-analytics/plugin-status/validate": (req, url) => services.sellerAnalyticsValidatePluginStatus(queryFromUrl(url), tenantIdFromRequest(req)),
+    "GET /api/db/seller-analytics/snapshots": (req, url) => services.sellerAnalyticsSnapshots(queryFromUrl(url), tenantIdFromRequest(req)),
+    "GET /api/db/seller-analytics/collect-runs": (req, url) => services.sellerAnalyticsCollectRuns(queryFromUrl(url), tenantIdFromRequest(req)),
     "POST /api/db/seller-analytics/plugin-prepare": async (req) => ({
       success: true,
-      data: await services.sellerAnalyticsPreparePlugin(await readJson(req), tenantIdFromRequest(req))
+      data: await services.sellerAnalyticsPreparePlugin(await payloadFromRequest(req, readJson), tenantIdFromRequest(req))
     }),
     "POST /api/db/seller-analytics/collect-runs": async (req) => ({
       success: true,
-      data: await services.sellerAnalyticsCreateCollectRun(await readJson(req), tenantIdFromRequest(req))
+      data: await services.sellerAnalyticsCreateCollectRun(await payloadFromRequest(req, readJson), tenantIdFromRequest(req))
     }),
     "POST /api/db/seller-analytics/direct-collect/start": async (req) => ({
       success: true,
-      data: await services.sellerAnalyticsStartDirectCollect(await readJson(req), tenantIdFromRequest(req))
+      data: await services.sellerAnalyticsStartDirectCollect(await payloadFromRequest(req, readJson), tenantIdFromRequest(req))
     }),
     "POST /api/db/seller-analytics/browser-profile/prepare": async (req) => ({
       success: true,
-      data: await services.sellerAnalyticsPrepareBrowserProfile(await readJson(req), tenantIdFromRequest(req))
+      data: await services.sellerAnalyticsPrepareBrowserProfile(await payloadFromRequest(req, readJson), tenantIdFromRequest(req))
     }),
     "POST /api/db/seller-analytics/browser-profile/confirm": async (req) => ({
       success: true,
-      data: await services.sellerAnalyticsConfirmBrowserProfile(await readJson(req), tenantIdFromRequest(req))
+      data: await services.sellerAnalyticsConfirmBrowserProfile(await payloadFromRequest(req, readJson), tenantIdFromRequest(req))
     }),
     "POST /api/db/seller-analytics/operation-todos/refresh": async (req) => ({
       success: true,
-      data: await services.sellerAnalyticsRefreshOperationTodos(await readJson(req), tenantIdFromRequest(req))
+      data: await services.sellerAnalyticsRefreshOperationTodos(await payloadFromRequest(req, readJson), tenantIdFromRequest(req))
     }),
     "POST /api/db/seller-analytics/snapshots/batch-delete": async (req) => {
-      const body = await readJson(req);
+      const body = await payloadFromRequest(req, readJson);
       return services.sellerAnalyticsDeleteSnapshots(Array.isArray(body?.ids) ? body.ids : [], tenantIdFromRequest(req));
     }
   };

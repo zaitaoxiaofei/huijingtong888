@@ -9,7 +9,7 @@ const TENANT_SCOPED_SAFE_PATHS = new Set([
  * Business APIs are migrated incrementally. Until a route is tenant-aware,
  * non-default tenants must not access the legacy shared business dataset.
  */
-export function tenantIsolationDecision(session, parts = []) {
+export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenant = session?.tenant;
   if (tenant?.slug === "default") return { allowed: true };
   if (!tenant?.id || !tenant?.slug) {
@@ -22,6 +22,9 @@ export function tenantIsolationDecision(session, parts = []) {
 
   const path = parts.slice(1).join("/");
   if (TENANT_SCOPED_SAFE_PATHS.has(path)) return { allowed: true };
+  if (path.startsWith("db/seller-analytics/") && ["GET", "HEAD", "POST", "DELETE"].includes(String(method || "GET").toUpperCase())) {
+    return { allowed: true };
+  }
   return {
     allowed: false,
     error: "该企业的数据隔离尚未完成，此功能暂不可用；默认企业数据不会开放给新企业",

@@ -12,6 +12,10 @@ test("default tenant retains access while unsupported tenant business routes fai
   assert.equal(tenantIsolationDecision(otherSession, ["api", "orders"]).code, "TENANT_ISOLATION_PENDING");
   assert.equal(tenantIsolationDecision(otherSession, ["api", "dashboard"]).allowed, false);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "user-preferences"]).allowed, true);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics", "analysis"], "GET").allowed, true);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics", "snapshots", "snapshot-1"], "DELETE").allowed, true);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics"], "GET").allowed, false);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "shops"]).allowed, false);
   assert.equal(tenantIsolationDecision({}, ["api", "orders"]).code, "TENANT_CONTEXT_REQUIRED");
 });
 
@@ -32,7 +36,7 @@ test("cookie parsing handles multiple cookies and malformed encoding", () => {
 
 test("server enforces tenant isolation before dispatching authenticated API routes", () => {
   const source = readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
-  const isolationIndex = source.indexOf("tenantIsolationDecision(session, parts)");
+  const isolationIndex = source.indexOf("tenantIsolationDecision(session, parts, req.method)");
   const authorizationIndex = source.indexOf("authorizeApiRequest(req, parts)", isolationIndex);
   assert.ok(isolationIndex >= 0);
   assert.ok(authorizationIndex > isolationIndex);
