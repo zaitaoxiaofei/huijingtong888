@@ -38,10 +38,10 @@ test('development heatmap uses priority quadrants, granular task points, click-t
   await page.route('**/api/team/tasks',route=>route.fulfill({status:fail?500:200,contentType:'application/json',body:JSON.stringify(fail?{error:'测试加载失败'}:tasks)}));
   await page.goto('http://localhost:8788/admin.html');
   const cell=page.getByRole('button',{name:'汽车钥匙保护壳 · TENET · T7：1 个任务',exact:true});await cell.waitFor();
-  assert.match(await cell.evaluate(node=>getComputedStyle(node).backgroundColor),/rgb\(220, 38, 38\)/);
+  const urgentStyle=await cell.evaluate(node=>({background:getComputedStyle(node).backgroundImage,accent:getComputedStyle(node).borderLeftColor}));assert.match(urgentStyle.background,/linear-gradient/);assert.match(urgentStyle.accent,/rgb\(220, 53, 69\)/);
   assert.equal(await page.locator('.quadrant-10 .quadrant-point').count(),1);
   assert.ok(await page.locator('.quadrant-7 .quadrant-point').count()>0);
-  const completedCell=page.getByRole('button',{name:'门槛条 · TENET · T7：1 个任务',exact:true});assert.match(await completedCell.evaluate(node=>getComputedStyle(node).backgroundColor),/rgb\(220, 252, 231\)/);
+  const completedCell=page.getByRole('button',{name:'门槛条 · TENET · T7：1 个任务',exact:true});const completedStyle=await completedCell.evaluate(node=>({background:getComputedStyle(node).backgroundImage,accent:getComputedStyle(node).borderLeftColor}));assert.match(completedStyle.background,/linear-gradient/);assert.match(completedStyle.accent,/rgb\(34, 160, 107\)/);
   await cell.hover();await page.getByText('TENET 汽车钥匙保护壳开发',{exact:true}).waitFor();
   const viewportBox=await page.locator('.heatmap-viewport').boundingBox();await page.mouse.move(viewportBox.x+viewportBox.width/2,viewportBox.y+viewportBox.height/2);await page.mouse.wheel(0,-120);await page.getByText('106%',{exact:true}).waitFor();
   for(let i=0;i<8;i++)await page.getByRole('button',{name:'放大热力图'}).click();const viewport=page.locator('.heatmap-viewport');const beforePan=await viewport.evaluate(node=>node.scrollLeft);const cellBox=await cell.boundingBox();await page.mouse.move(cellBox.x+cellBox.width/2,cellBox.y+cellBox.height/2);await page.mouse.down();await page.mouse.move(cellBox.x+cellBox.width/2-100,cellBox.y+cellBox.height/2);await page.mouse.up();const panState=await viewport.evaluate(node=>({left:node.scrollLeft,top:node.scrollTop,width:node.scrollWidth,clientWidth:node.clientWidth,classes:node.className}));assert.ok(panState.left>beforePan||panState.top>0,JSON.stringify({beforePan,panState}));await page.getByRole('button',{name:'重置'}).click();
