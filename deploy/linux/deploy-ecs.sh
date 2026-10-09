@@ -161,8 +161,8 @@ fi
 rm -f -- "$archive_path"
 (cd "$output_dir" && zip -q -r "$archive_path" .)
 
-ssh_options=(-p "$ssh_port" -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -i "$identity_file")
-scp_options=(-P "$ssh_port" -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -i "$identity_file")
+ssh_options=(-p "$ssh_port" -o ServerAliveInterval=15 -o ServerAliveCountMax=12 -i "$identity_file")
+scp_options=(-P "$ssh_port" -o ServerAliveInterval=15 -o ServerAliveCountMax=12 -i "$identity_file")
 remote_target="$ssh_user@$host"
 
 printf 'Uploading release artifact...\n'
