@@ -1988,7 +1988,7 @@ export async function collectorBoxProducts(query = {}, session = null) {
   const startDate = String(query.startDate || query.start_date || "").trim();
   const endDate = String(query.endDate || query.end_date || "").trim();
   const status = String(query.status || "all").trim();
-  const tenantId = String(query.tenantId || query.tenant_id || "admin").trim() || "admin";
+  const tenantId = collectorBoxTenantId(session);
   const where = ["tenant_id = ?", "status <> 'deleted'"];
   const params = [tenantId];
   if (search) {
@@ -2051,7 +2051,7 @@ export async function collectorBoxProducts(query = {}, session = null) {
     includeSummary ? all(summarySql, [shanghaiDateKey(), tenantId]) : Promise.resolve([])
   ]);
   const pageSkus = rows.map((item) => String(item.sku || "").trim()).filter(Boolean);
-  const publishStats = pageSkus.length
+  const publishStats = tenantId === "admin" && pageSkus.length
     ? await all(`
         SELECT
           source_collector_sku,
@@ -2069,7 +2069,8 @@ export async function collectorBoxProducts(query = {}, session = null) {
   return {
     rows: rows.map((item) => buildCollectorBoxRow({
       ...item,
-      ...(publishStatsBySku.get(String(item.sku || "")) || {})
+      ...(tenantId === "admin" ? publishStatsBySku.get(String(item.sku || "")) || {} : {}),
+      ...(tenantId === "admin" ? {} : { selection_product_id: null, listing_template_id: null })
     })),
     ...(includeCount ? { total: Number(totalRow?.total || 0) } : {}),
     page,
@@ -2080,7 +2081,7 @@ export async function collectorBoxProducts(query = {}, session = null) {
 
 export async function collectorBoxProductDetail(sku, session = null, tenantId = "admin") {
   await ensureCollectorBoxReadSchema();
-  const normalizedTenantId = String(tenantId || "admin").trim() || "admin";
+  const normalizedTenantId = collectorBoxTenantId(session, tenantId);
   const detail = await row(`
     SELECT *
     FROM ozon_plugin_collected_products
@@ -2095,7 +2096,10 @@ export async function collectorBoxProductDetail(sku, session = null, tenantId = 
     rawPayload: parseCollectedPayloadJson(detail.payload_json),
     editPayload: parseCollectedPayloadJson(detail.edit_payload_json)
   };
-  if (normalized.listing_template_id) {
+  if (normalizedTenantId !== "admin") {
+    normalized.selection_product_id = null;
+    normalized.listing_template_id = null;
+  } else if (normalized.listing_template_id) {
     const template = await listingCategoryTemplate(normalized.listing_template_id, session).catch(() => null);
     if (template) {
       normalized.templateSnapshot = compactTemplateForEditor(template);
@@ -2109,7 +2113,7 @@ export async function collectorBoxProductDetail(sku, session = null, tenantId = 
 
 export async function deleteCollectorBoxProducts(body = {}, session = null) {
   await ensureListingAutomationSchema();
-  const tenantId = String(body.tenantId || body.tenant_id || "admin").trim() || "admin";
+  const tenantId = collectorBoxTenantId(session);
   const skus = normalizeArray(body.skus || body.sku)
     .map((item) => String(item || "").trim())
     .filter(Boolean);
@@ -21084,6 +21088,13 @@ function sanitizeListingMediaFilename(value) {
 
 function personId(session) {
   return Number(session?.personId || 0);
+}
+
+function collectorBoxTenantId(session, fallback = "admin") {
+  const tenant = session?.tenant;
+  if (!tenant) return String(fallback || "admin").trim() || "admin";
+  if (!tenant.id || !tenant.slug) throw new Error("当前会话缺少有效企业上下文，无法访问采集箱数据。");
+  return tenant.slug === "default" ? "admin" : String(tenant.id);
 }
 
 async function all(sql, params = []) {
