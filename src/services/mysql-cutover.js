@@ -8076,14 +8076,14 @@ export async function syncOzonOnlineProductsMysql(body = {}) {
         archivedRefs = currentArchivedRefs;
         shopResult.candidates = refs.length;
         const productIds = refs.map((item) => Number(item.ozon_product_id || item.id || 0)).filter(Boolean);
-        const stockRows = await fetchOzonProductStocks(shop, { productIds });
+        const stockRows = await fetchOzonProductStocks(shop, { productIds, stockConcurrency: 3 });
         await refreshPendingListingStockSnapshotsMysql(shop.id, productIds, stockRows);
         const pendingRefs = filterPendingListingProductsWithoutFbsStock(refs, stockRows, { requireSku: false });
         const visibilityById = new Map(pendingRefs.map((item) => [String(item.ozon_product_id || item.id || ""), item.visibility || ""]));
         const detailedItems = await fetchOzonProductsByIds(
           shop,
           pendingRefs.map((item) => Number(item.ozon_product_id || item.id || 0)).filter(Boolean),
-          { visibilityById }
+          { visibilityById, detailConcurrency: 3 }
         );
         items = filterPendingListingProductsWithoutFbsStock(detailedItems, stockRows);
         shopResult.filtered_out = Math.max(0, shopResult.candidates - items.length);

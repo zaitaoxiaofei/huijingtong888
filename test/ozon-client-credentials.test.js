@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { fetchOzonProductRefs, fetchOzonProducts, filterPendingListingProductsWithoutFbsStock, normalizeOzonProductForTest, pendingListingVisibilityFilters } from "../src/ozonClient.js";
+import { fetchOzonProductRefs, fetchOzonProductStocks, fetchOzonProducts, fetchOzonProductsByIds, filterPendingListingProductsWithoutFbsStock, normalizeOzonProductForTest, pendingListingVisibilityFilters } from "../src/ozonClient.js";
 import fs from "node:fs";
 
 test("fetchOzonProducts uses ozon_api_key even when api_key_hint is empty", async (t) => {
@@ -466,6 +466,40 @@ test("pending listing sync excludes no-SKU products even when they only report F
     filterPendingListingProductsWithoutFbsStock(products, []).map((item) => item.offer_id),
     []
   );
+});
+
+test("pending listing stock and detail chunks run concurrently and keep all results", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const shop = { ozon_client_id: "4174207", ozon_api_key: "real-api-key" };
+  const ids = Array.from({ length: 2001 }, (_, index) => index + 1);
+  let active = 0;
+  let maxActive = 0;
+  globalThis.fetch = async (url, options = {}) => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active -= 1;
+    const chunk = JSON.parse(options.body || "{}").product_id
+      || JSON.parse(options.body || "{}").filter?.product_id || [];
+    if (String(url).endsWith("/v3/product/info/list")) {
+      return jsonResponse({ result: { items: chunk.map((id) => ({ id, sku: id + 10000, offer_id: `offer-${id}` })) } });
+    }
+    if (String(url).endsWith("/v4/product/info/stocks")) {
+      return jsonResponse({ result: { items: chunk.map((id) => ({ product_id: id, sku: id + 10000, stocks: [] })) } });
+    }
+    throw new Error(`unexpected URL: ${url}`);
+  };
+
+  const details = await fetchOzonProductsByIds(shop, ids, { detailConcurrency: 3 });
+  assert.equal(details.length, ids.length);
+  assert.deepEqual(details.map((item) => Number(item.ozon_product_id)), ids);
+  assert.ok(maxActive > 1 && maxActive <= 3);
+
+  maxActive = 0;
+  const stockRows = await fetchOzonProductStocks(shop, { productIds: ids, stockConcurrency: 3 });
+  assert.ok(maxActive > 1 && maxActive <= 3);
+  assert.deepEqual(stockRows.map((row) => Number(row.ozon_product_id)), ids);
 });
 
 function jsonResponse(data) {
