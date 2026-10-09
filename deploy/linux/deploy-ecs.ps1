@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [string]$EcsHost = $(if ($env:OZON_ECS_HOST) { $env:OZON_ECS_HOST } else { "47.113.195.4" }),
+  [string]$EcsHost = $(if ($env:OZON_ECS_HOST) { $env:OZON_ECS_HOST } else { "47.120.47.194" }),
   [string]$SshUser = $(if ($env:OZON_ECS_USER) { $env:OZON_ECS_USER } else { "root" }),
   [int]$SshPort = $(if ($env:OZON_ECS_PORT) { [int]$env:OZON_ECS_PORT } else { 22 }),
   [string]$IdentityFile = $env:OZON_ECS_IDENTITY_FILE,

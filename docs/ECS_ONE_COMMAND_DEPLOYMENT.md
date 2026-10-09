@@ -33,7 +33,7 @@ $env:OZON_ECS_IDENTITY_FILE="C:\安全目录\ozon-ecs-key"
 如果 ECS 地址或 SSH 用户改变，可以设置：
 
 ```powershell
-$env:OZON_ECS_HOST="47.113.195.4"
+$env:OZON_ECS_HOST="47.120.47.194"
 $env:OZON_ECS_USER="root"
 $env:OZON_ECS_PORT="22"
 ```

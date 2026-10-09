@@ -26,13 +26,13 @@ try {
 
   New-Item -ItemType Directory -Path $configRoot -Force | Out-Null
   @{
-    host = "47.113.195.4"
+    host = "47.120.47.194"
     user = "root"
     port = 22
     identityFile = $managedKeyPath
   } | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding UTF8
 
-  & ssh -p 22 -i $managedKeyPath -o BatchMode=yes -o ConnectTimeout=10 "root@47.113.195.4" "true" 2>$null
+  & ssh -p 22 -i $managedKeyPath -o BatchMode=yes -o ConnectTimeout=10 "root@47.120.47.194" "true" 2>$null
   if ($LASTEXITCODE -ne 0) {
     throw "私钥已保存，但连接测试失败。请确认密钥已绑定到华南2（河源）的 ECS，并且绑定后已重启实例。"
   }

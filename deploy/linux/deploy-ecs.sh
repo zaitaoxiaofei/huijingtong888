@@ -104,7 +104,7 @@ if [[ -f "$saved_config" ]]; then
   [[ -n "$identity_file" ]] || identity_file="$(read_saved_value "$saved_config" identityFile)"
 fi
 
-host="${host:-47.113.195.4}"
+host="${host:-47.120.47.194}"
 ssh_user="${ssh_user:-root}"
 ssh_port="${ssh_port:-22}"
 version="${version:-$(date '+%Y.%m.%d-%H%M%S')}"
