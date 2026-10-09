@@ -15,6 +15,7 @@ import { clearCookie, html, json, notFound, setCookie, text, writeHead } from ".
 import { createStaticHandler } from "./http/static.js";
 import { cleanExpiredSessions, createAuthHandler, extractToken, getSession } from "./server/session.js";
 import { authorizeApiRequest } from "./server/authorization.js";
+import { isPrivateImageRead, readCookie, tenantIsolationDecision } from "./server/tenant-isolation.js";
 import { createApiDocumentation, renderApiDocumentationMarkdown } from "./server/api-docs.js";
 import { createCatalogRoutes, handleCatalogRestRoute } from "./server/routes/catalog.js";
 import { createOrderRoutes, handleOrderRestRoute } from "./server/routes/orders.js";
@@ -86,6 +87,7 @@ import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./servic
 import { archiveTenantMysql, createTenantMysql, listTenantsMysql, setTenantSubscriptionMysql, tenantMembersMysql, tenantMembershipsMysql, upsertTenantMemberMysql } from "./services/tenants.js";
 
 const services = { ...mysqlRuntimeServices, ...systemNotificationServices };
+const IMAGE_SESSION_COOKIE = "erp_image_session";
 const runtimeReadiness = {
   ready: false,
   startedAt: new Date().toISOString(),
@@ -2000,6 +2002,24 @@ const server = http.createServer(async (req, res) => {
           }
           delete result.__cookies;
         }
+        if (result?.token) {
+          setCookie(res, IMAGE_SESSION_COOKIE, result.token, {
+            path: "/",
+            httpOnly: true,
+            sameSite: "Strict",
+            secure: config.appBaseUrl.startsWith("https://"),
+            maxAge: Math.max(1, Number(config.appSessionTtlHours || 72)) * 60 * 60
+          });
+        }
+        if (`${req.method} ${url.pathname}` === "POST /api/auth/logout") {
+          setCookie(res, IMAGE_SESSION_COOKIE, "", {
+            path: "/",
+            httpOnly: true,
+            sameSite: "Strict",
+            secure: config.appBaseUrl.startsWith("https://"),
+            maxAge: 0
+          });
+        }
         if (result?.__html) {
           return html(res, result.__html, result.__status || 200);
         }
@@ -2020,39 +2040,8 @@ const server = http.createServer(async (req, res) => {
       return notFound(res);
     }
 
-    if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "image") {
-      return sendProductImage(res, Number(parts[2]), null, {
-        thumbnail: ["1", "true", "yes"].includes(String(url.searchParams.get("thumb") || "").toLowerCase()),
-        width: Number(url.searchParams.get("w") || 0),
-        version: url.searchParams.get("v") || ""
-      });
-    }
-
-    if (req.method === "GET" && parts[0] === "api" && parts[1] === "ai" && parts[2] === "file") {
-      const aiImageRestHandled = await handleAiImageRestRoute({
-        req,
-        res,
-        parts,
-        json,
-        notFound,
-        writeHead
-      });
-      if (aiImageRestHandled !== false) return aiImageRestHandled;
-    }
-
     if (req.method === "GET" && parts[0] === "api" && parts[1] === "image-proxy") {
       return sendRemoteImage(req, res, url);
-    }
-
-    if (req.method === "GET" && parts[0] === "api" && parts[1] === "asset-variant-engine" && parts[2] === "tail-template-files" && parts[3]) {
-      const file = await services.resolveAssetTailTemplateFile(decodeURIComponent(parts[3]));
-      if (!file) return notFound(res);
-      writeHead(res, 200, {
-        "Content-Type": file.mime,
-        "Content-Length": file.buffer.length,
-        "Cache-Control": "private, max-age=3600"
-      });
-      return res.end(file.buffer);
     }
 
     if (req.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
@@ -2063,11 +2052,14 @@ const server = http.createServer(async (req, res) => {
       markRequestTiming(req, "before_session");
       const bearerToken = extractToken(req);
       const queryToken = allowQueryTokenAuth(req, parts, url) ? url.searchParams.get("token") : "";
-      const session = await getSession(bearerToken || queryToken);
+      const imageCookieToken = isPrivateImageRead(req, parts) ? readCookie(req, IMAGE_SESSION_COOKIE) : "";
+      const session = await getSession(bearerToken || queryToken || imageCookieToken);
       markRequestTiming(req, "after_session");
       if (!session) return json(res, { error: "未登录，请先登录" }, 401);
       req._session = session;
       req.query = Object.fromEntries(url.searchParams.entries());
+      const isolation = tenantIsolationDecision(session, parts);
+      if (!isolation.allowed) return json(res, { error: isolation.error, code: isolation.code }, 403);
       const authorization = authorizeApiRequest(req, parts);
       if (!authorization.allowed) {
         console.warn(`[forbidden] ${req.method} ${url.pathname} reason=authorization detail=${authorization.error || "权限不足"}`);
@@ -3300,6 +3292,6 @@ function allowQueryTokenAuth(req, parts = [], url) {
   if (parts[1] === "products" && parts[2] && (parts[3] === "image" || parts[3] === "detail-images")) return true;
   if (parts[1] === "system" && parts[2] === "events") return true;
   if (parts[1] === "tools" && parts[2] === "image-cropper") return true;
-  if (parts[1] === "asset-variant-engine" && parts[2] === "files") return true;
+  if (parts[1] === "asset-variant-engine" && ["files", "tail-template-files"].includes(parts[2])) return true;
   return false;
 }
