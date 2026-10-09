@@ -3,7 +3,7 @@
   const ERP_BASE_URL_STORAGE_KEY = 'ozon-erp-base-url';
   const ERP_TENANT_ID_STORAGE_KEY = 'ozon-erp-tenant-id';
   const LOCAL_PLUGIN_TOKEN_STORAGE_KEY = 'ozon-erp-local-plugin-token';
-  const DEFAULT_LOCAL_PLUGIN_TOKEN = 'ozon-erp-collector-hjt888-default';
+  const DEFAULT_LOCAL_PLUGIN_TOKEN = '';
 
   function trimTrailingSlashes(value) {
     return String(value || '').trim().replace(/\/+$/, '');

@@ -25,7 +25,7 @@ test("pivot analytics plugin defaults to hosted ERP and supports local plugin to
   assert.match(source, /const DEFAULT_ERP_BASE_URL = 'https:\/\/erp\.hjt888\.xyz'/);
   assert.match(source, /const LOCAL_PLUGIN_TOKEN_KEY = 'pivot-erp-local-plugin-token'/);
   assert.match(source, /const LOCAL_MIRROR_BASE_URL_KEY = 'pivot-erp-local-mirror-base-url'/);
-  assert.match(source, /const DEFAULT_LOCAL_PLUGIN_TOKEN = 'ozon-erp-collector-hjt888-default'/);
+  assert.match(source, /const DEFAULT_LOCAL_PLUGIN_TOKEN = ''/);
   assert.match(source, /const DEFAULT_LOCAL_MIRROR_BASE_URL = 'http:\/\/127\.0\.0\.1:8788'/);
   assert.match(source, /function localPluginHeaders/);
   assert.match(source, /async function mirrorSnapshotToLocal/);

@@ -16,6 +16,7 @@ import { createStaticHandler } from "./http/static.js";
 import { cleanExpiredSessions, createAuthHandler, extractToken, getSession } from "./server/session.js";
 import { authorizeApiRequest } from "./server/authorization.js";
 import { isPrivateImageRead, readCookie, tenantIsolationDecision } from "./server/tenant-isolation.js";
+import { tenantPluginApiError } from "./server/local-plugin-tenant.js";
 import { createApiDocumentation, renderApiDocumentationMarkdown } from "./server/api-docs.js";
 import { createCatalogRoutes, handleCatalogRestRoute } from "./server/routes/catalog.js";
 import { createOrderRoutes, handleOrderRestRoute } from "./server/routes/orders.js";
@@ -84,7 +85,7 @@ import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
 import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
-import { archiveTenantMysql, createTenantMysql, listTenantsMysql, setTenantSubscriptionMysql, tenantMembersMysql, tenantMembershipsMysql, upsertTenantMemberMysql } from "./services/tenants.js";
+import { archiveTenantMysql, createTenantMysql, issueTenantPluginTokenMysql, listTenantsMysql, resolveTenantPluginTokenMysql, revokeTenantPluginTokenMysql, setTenantSubscriptionMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, upsertTenantMemberMysql } from "./services/tenants.js";
 
 const services = { ...mysqlRuntimeServices, ...systemNotificationServices };
 const IMAGE_SESSION_COOKIE = "erp_image_session";
@@ -253,6 +254,18 @@ const routes = {
     const body = await readJson(req);
     return setTenantSubscriptionMysql(body.tenant_id || body.tenantId, body);
   },
+  "GET /api/tenants/plugin-token": (req) => tenantPluginTokenStatusMysql(req.query?.tenant_id || req.query?.tenantId, req._session?.personId, {
+    isPlatformAdmin: hasPermission(req._session, "admin")
+  }),
+  "POST /api/tenants/plugin-token": async (req) => {
+    const body = await readJson(req);
+    return issueTenantPluginTokenMysql(body.tenant_id || body.tenantId, req._session?.personId, {
+      isPlatformAdmin: hasPermission(req._session, "admin")
+    });
+  },
+  "DELETE /api/tenants/plugin-token": (req) => revokeTenantPluginTokenMysql(req.query?.tenant_id || req.query?.tenantId, req._session?.personId, {
+    isPlatformAdmin: hasPermission(req._session, "admin")
+  }),
   "POST /api/system/update-status": async (req) => updateGlobalUpdateStatus(await readJson(req)),
   "GET /api/ai-provider/config": () => services.aiProviderConfig(),
   "GET /api/ai-provider/presets": () => services.aiProviderPresets(),
@@ -1371,14 +1384,11 @@ function pluginBearerToken(req) {
   return String(req.headers["x-local-plugin-token"] || bearer || "").trim();
 }
 
-function isAuthorizedLocalPluginRequest(req) {
-  if (isDirectLocalRequest(req)) return true;
-  const token = pluginBearerToken(req);
-  const allowedTokens = [
-    config.localPluginSharedSecret,
-    config.localPluginPublicToken
-  ].map((item) => String(item || "").trim()).filter(Boolean);
-  return allowedTokens.some((allowedToken) => safeEqualText(token, allowedToken));
+async function resolveLocalPluginPrincipal(req) {
+  const host = String(req.headers.host || "").replace(/^\[|\]$/g, "").split(":")[0].toLowerCase();
+  const localHost = ["localhost", "127.0.0.1", "::1"].includes(host);
+  if (isDirectLocalRequest(req) && localHost) return { tenantId: 0, tenantKey: "admin", tenantSlug: "default" };
+  return resolveTenantPluginTokenMysql(pluginBearerToken(req));
 }
 
 async function handleLocalPluginRoute(req, res, parts) {
@@ -1390,10 +1400,6 @@ async function handleLocalPluginRoute(req, res, parts) {
     return true;
   }
 
-  if (!isAuthorizedLocalPluginRequest(req)) {
-    return localPluginJson(req, res, { success: false, error: "local plugin endpoint requires localhost or a valid plugin token" }, 403);
-  }
-
   if (parts[2] === "update-status" && req.method === "GET") {
     const url = new URL(req.url, `http://${req.headers.host}`);
     return localPluginJson(req, res, {
@@ -1402,9 +1408,18 @@ async function handleLocalPluginRoute(req, res, parts) {
     });
   }
 
+  const principal = await resolveLocalPluginPrincipal(req);
+  if (!principal) {
+    return localPluginJson(req, res, { success: false, error: "请在企业管理中生成并配置企业专属插件令牌", code: "TENANT_PLUGIN_AUTH_REQUIRED" }, 403);
+  }
+  const scopeError = tenantPluginApiError(principal, req.method, parts);
+  if (scopeError) {
+    return localPluginJson(req, res, { success: false, error: scopeError.error, code: scopeError.code }, scopeError.status);
+  }
+  const tenantId = principal.tenantKey;
+
   if (parts[2] === "plugin" && parts[3] === "status" && req.method === "GET") {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim() || "admin";
     return localPluginJson(req, res, {
       success: true,
       data: {
@@ -1432,21 +1447,18 @@ async function handleLocalPluginRoute(req, res, parts) {
 
   if (parts[2] === "collected-products" && parts[3] === "sync" && req.method === "POST") {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim();
     const result = await services.syncCollectedProductsFromPlugin(body?.products || [], tenantId);
     return localPluginJson(req, res, { success: true, ...result });
   }
 
   if (parts[2] === "collected-products" && parts[3] === "lookup" && req.method === "GET") {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim();
     const result = await services.lookupCollectedProductFromPlugin(url.searchParams.get("sku") || "", tenantId);
     return localPluginJson(req, res, { success: true, data: result });
   }
 
   if (parts[2] === "collected-products" && parts[3] === "lookup-batch" && req.method === "POST") {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim();
     const skus = [...new Set((Array.isArray(body?.skus) ? body.skus : [])
       .map((sku) => String(sku || "").trim())
       .filter(Boolean))].slice(0, 120);
@@ -1467,15 +1479,12 @@ async function handleLocalPluginRoute(req, res, parts) {
   }
 
   if (parts[2] === "collector-seller-pool" && parts[3] === "status" && req.method === "GET") {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim();
     const result = await collectorSellerPoolStatus(tenantId);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
 
   if (parts[2] === "collector-seller-pool" && parts[3] === "collect" && req.method === "POST") {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim();
     const result = await collectSkusWithSellerPool(body?.skus || [], tenantId);
     return localPluginJson(req, res, { success: result.success !== false, data: result, ...result });
   }
@@ -1484,13 +1493,12 @@ async function handleLocalPluginRoute(req, res, parts) {
     const body = await readJson(req);
     const detail = await services.saveListingCollectedProductDetail({
       ...body,
-      tenant_id: req.headers["x-tenant-id"] || body?.tenant_id || "admin"
+      tenant_id: tenantId
     }, null);
     return localPluginJson(req, res, { success: true, data: detail, id: detail?.id, detail });
   }
 
   if (parts[2] === "collected-product-details" && parts[3] && req.method === "GET") {
-    const tenantId = String(req.headers["x-tenant-id"] || "admin");
     const detail = await services.getListingCollectedProductDetail(parts[3], tenantId);
     if (!detail) return localPluginJson(req, res, { success: false, error: "Collected product detail not found" }, 404);
     return localPluginJson(req, res, { success: true, data: detail, id: detail.id, detail });
@@ -1501,7 +1509,7 @@ async function handleLocalPluginRoute(req, res, parts) {
     const body = await readJson(req);
     const result = await services.createSelectionFromCollectorBox(sku, {
       ...body,
-      tenant_id: req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin"
+      tenant_id: tenantId
     }, null);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
@@ -1511,7 +1519,7 @@ async function handleLocalPluginRoute(req, res, parts) {
     const body = await readJson(req);
     const result = await services.createListingTemplateFromCollectorBox(sku, {
       ...body,
-      tenant_id: req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin"
+      tenant_id: tenantId
     }, null);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
@@ -1533,28 +1541,24 @@ async function handleLocalPluginRoute(req, res, parts) {
 
   if (parts[2] === "seller-analytics" && parts[3] === "snapshots" && req.method === "POST") {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
     const result = await services.sellerAnalyticsSaveSnapshot(body || {}, tenantId);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
 
   if (parts[2] === "seller-analytics" && parts[3] === "plugin-status" && req.method === "POST") {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
     const result = await services.sellerAnalyticsSavePluginStatus(body || {}, tenantId);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
 
   if (parts[2] === "seller-analytics" && parts[3] === "plugin-prepare" && parts[4] === "next" && req.method === "GET") {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim() || "admin";
     const request = await services.sellerAnalyticsClaimPluginPrepare(tenantId, Object.fromEntries(url.searchParams.entries()));
     return localPluginJson(req, res, { success: true, data: request, request });
   }
 
   if (parts[2] === "seller-analytics" && parts[3] === "plugin-prepare" && parts[4] === "result" && req.method === "POST") {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
     const result = await services.sellerAnalyticsFinishPluginPrepare(body || {}, tenantId);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
@@ -1567,14 +1571,12 @@ async function handleLocalPluginRoute(req, res, parts) {
 
   if (parts[2] === "seller-analytics" && parts[3] === "auth-bindings" && req.method === "POST") {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
     const result = await services.sellerAnalyticsBindAuth(body || {}, tenantId);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
 
   if (parts[2] === "seller-analytics" && parts[3] === "collect-runs" && parts[4] === "next" && req.method === "GET") {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim() || "admin";
     const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || 6), 20));
     const requests = await services.sellerAnalyticsNextCollectRequests(tenantId, limit, {
       store_id: url.searchParams.get("store_id") || url.searchParams.get("storeId") || "",
@@ -1593,7 +1595,6 @@ async function handleLocalPluginRoute(req, res, parts) {
     req.method === "POST"
   ) {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
     const result = await services.sellerAnalyticsFinishCollectRequest(decodeURIComponent(parts[4]), decodeURIComponent(parts[6]), body || {}, tenantId);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }

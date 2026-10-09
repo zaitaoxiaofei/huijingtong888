@@ -1,4 +1,5 @@
-import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
+import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
+import { createHash, randomBytes } from "node:crypto";
 
 const DEFAULT_TENANT_SLUG = "default";
 let schemaReady;
@@ -34,6 +35,17 @@ export async function ensureTenantSchemaMysql() {
       PRIMARY KEY (tenant_id, person_id),
       KEY idx_tenant_members_person (person_id, active),
       KEY idx_tenant_members_tenant (tenant_id, active)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+    await mysqlExecute(`CREATE TABLE IF NOT EXISTS tenant_plugin_tokens (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id BIGINT UNSIGNED NOT NULL,
+      token_hash CHAR(64) NOT NULL,
+      label VARCHAR(100) NOT NULL DEFAULT 'Ozon browser plugin',
+      created_by_person_id BIGINT UNSIGNED NOT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      revoked_at DATETIME NULL,
+      UNIQUE KEY uk_tenant_plugin_token_hash (token_hash),
+      KEY idx_tenant_plugin_tokens_tenant_active (tenant_id, revoked_at, created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
     for (const sql of [
       "ALTER TABLE tenants ADD COLUMN plan_code VARCHAR(32) NOT NULL DEFAULT 'trial_7d'",
@@ -173,4 +185,65 @@ export async function switchSessionTenantMysql(token, personId, tenantId) {
   if (!tenant) throw new Error("无权切换到该企业");
   await mysqlExecute("UPDATE sessions SET active_tenant_id = ? WHERE token = ? AND person_id = ?", [tenant.id, token, Number(personId)]);
   return tenant;
+}
+
+function hashTenantPluginToken(token) {
+  return createHash("sha256").update(String(token || "")).digest("hex");
+}
+
+async function requireTenantPluginAdminMysql(tenantId, personId, isPlatformAdmin) {
+  await ensureTenantSchemaMysql();
+  const normalizedTenantId = Number(tenantId);
+  const normalizedPersonId = Number(personId);
+  if (!normalizedTenantId || !normalizedPersonId) throw new Error("请选择企业和当前操作账号");
+  const rows = await mysqlQuery(`SELECT t.id, t.slug, t.status, tm.role AS member_role
+    FROM tenants t
+    LEFT JOIN tenant_members tm ON tm.tenant_id = t.id AND tm.person_id = ? AND tm.active = 1
+    WHERE t.id = ? LIMIT 1`, [normalizedPersonId, normalizedTenantId]);
+  const tenant = rows[0];
+  if (!tenant || tenant.status !== "active") throw new Error("企业不存在或已停用");
+  if (tenant.slug === DEFAULT_TENANT_SLUG && !isPlatformAdmin) throw new Error("默认企业插件令牌仅平台管理员可以管理");
+  if (!isPlatformAdmin && !["owner", "admin"].includes(tenant.member_role)) throw new Error("仅企业负责人或企业管理员可以管理插件令牌");
+  return { ...tenant, id: normalizedTenantId };
+}
+
+export async function issueTenantPluginTokenMysql(tenantId, personId, { isPlatformAdmin = false } = {}) {
+  const tenant = await requireTenantPluginAdminMysql(tenantId, personId, isPlatformAdmin);
+  const token = `ozp_${randomBytes(32).toString("base64url")}`;
+  await withMysqlTransaction(async (connection) => {
+    await connection.execute("SELECT id FROM tenants WHERE id = ? FOR UPDATE", [tenant.id]);
+    await connection.execute("UPDATE tenant_plugin_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND revoked_at IS NULL", [tenant.id]);
+    await connection.execute(`INSERT INTO tenant_plugin_tokens (tenant_id, token_hash, created_by_person_id)
+      VALUES (?, ?, ?)`, [tenant.id, hashTenantPluginToken(token), Number(personId)]);
+  });
+  return { ok: true, tenant_id: tenant.id, token };
+}
+
+export async function tenantPluginTokenStatusMysql(tenantId, personId, options = {}) {
+  const tenant = await requireTenantPluginAdminMysql(tenantId, personId, options.isPlatformAdmin === true);
+  const rows = await mysqlQuery(`SELECT id, label, created_at FROM tenant_plugin_tokens
+    WHERE tenant_id = ? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1`, [tenant.id]);
+  return { configured: Boolean(rows[0]), created_at: rows[0]?.created_at || null, label: rows[0]?.label || "" };
+}
+
+export async function revokeTenantPluginTokenMysql(tenantId, personId, options = {}) {
+  const tenant = await requireTenantPluginAdminMysql(tenantId, personId, options.isPlatformAdmin === true);
+  await mysqlExecute("UPDATE tenant_plugin_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND revoked_at IS NULL", [tenant.id]);
+  return { ok: true };
+}
+
+export async function resolveTenantPluginTokenMysql(token) {
+  const normalizedToken = String(token || "").trim();
+  if (!/^ozp_[A-Za-z0-9_-]{40,80}$/.test(normalizedToken)) return null;
+  await ensureTenantSchemaMysql();
+  const rows = await mysqlQuery(`SELECT t.id, t.slug, t.status, t.plan_code, t.subscription_status, t.subscription_expires_at
+    FROM tenant_plugin_tokens pt JOIN tenants t ON t.id = pt.tenant_id
+    WHERE pt.token_hash = ? AND pt.revoked_at IS NULL AND t.status = 'active' LIMIT 1`, [hashTenantPluginToken(normalizedToken)]);
+  const tenant = rows[0];
+  if (!tenant || !tenantHasAccess(tenant)) return null;
+  return {
+    tenantId: Number(tenant.id),
+    tenantKey: tenant.slug === DEFAULT_TENANT_SLUG ? "admin" : String(tenant.id),
+    tenantSlug: tenant.slug
+  };
 }
