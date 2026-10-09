@@ -203,9 +203,28 @@ async function markAllNotificationsRead() {
 }
 
 async function openNotification(item) {
-  if (item.status === "unread") await apiClient.post(`/api/system-notifications/${item.id}/read`, {});
+  const targetRoute = String(item.route || "").trim();
+  if (!targetRoute) return ElMessage.warning("这条通知没有关联的处理页面");
   notificationDrawerVisible.value = false;
-  if (item.route) router.push(item.route).catch(() => {});
+  const resolvedTarget = router.resolve(targetRoute);
+  try {
+    await router.push(targetRoute);
+  } catch (error) {
+    notificationDrawerVisible.value = true;
+    ElMessage.error(error?.message || "无法打开通知对应页面");
+    return;
+  }
+  if (router.currentRoute.value.path !== resolvedTarget.path) {
+    ElMessage.warning("当前账号无法访问通知对应页面，请联系管理员开通权限");
+    return;
+  }
+  if (item.status === "unread") {
+    try {
+      await apiClient.post(`/api/system-notifications/${item.id}/read`, {});
+    } catch {
+      ElMessage.warning("处理页面已打开，但通知已读状态未能更新");
+    }
+  }
   await loadNotifications({ quiet: true });
 }
 
@@ -216,6 +235,15 @@ async function resolveNotification(item) {
 
 function notificationTypeLabel(type) {
   return ({ daily_procurement: "采购", pending_inbound: "入库", fbp_shortage: "库存" })[type] || "系统";
+}
+
+function notificationActionLabel(item = {}) {
+  const label = ({ daily_procurement: "去采购", pending_inbound: "去入库", fbp_shortage: "查看缺货明细" })[item.notification_type];
+  if (label) return label;
+  if (String(item.route || "").startsWith("/inventory/fbp-shortages")) return "查看缺货明细";
+  if (String(item.route || "").startsWith("/procurement/workspace")) return "去采购";
+  if (String(item.route || "").startsWith("/purchase-list")) return "去入库";
+  return item.route ? "查看处理页面" : "";
 }
 
 function openProfileDialog() {
@@ -902,7 +930,10 @@ onBeforeUnmount(() => {
           <span class="notification-card-content">{{ item.content }}</span>
           <time>{{ shanghaiDateTimeText(item.created_at, { assumeUtcWhenNaive: true }) }}</time>
         </button>
-        <el-button v-if="item.status !== 'resolved'" link type="primary" @click="resolveNotification(item)">标记处理</el-button>
+        <div class="notification-card-actions">
+          <el-button v-if="item.route" link type="primary" @click.stop="openNotification(item)">{{ notificationActionLabel(item) }}</el-button>
+          <el-button v-if="item.status !== 'resolved'" link type="info" @click.stop="resolveNotification(item)">标记已处理</el-button>
+        </div>
       </article>
     </div>
   </el-drawer>
@@ -983,6 +1014,7 @@ onBeforeUnmount(() => {
 .notification-card { display:flex; align-items:flex-end; gap:8px; padding:14px; border:1px solid var(--el-border-color-lighter); border-radius:10px; background:var(--el-fill-color-blank); }
 .notification-card.is-unread { border-color:var(--el-color-primary-light-7); background:var(--el-color-primary-light-9); }
 .notification-card-main { flex:1; min-width:0; padding:0; border:0; background:transparent; color:inherit; text-align:left; cursor:pointer; }
+.notification-card-actions { display:flex; flex-direction:column; align-items:flex-end; gap:4px; flex-shrink:0; }
 .notification-card-heading { display:flex; align-items:center; gap:8px; }
 .notification-card-heading strong { flex:1; font-size:14px; }
 .notification-card-heading i { width:7px; height:7px; border-radius:50%; background:var(--el-color-primary); }

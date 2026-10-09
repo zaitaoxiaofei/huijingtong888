@@ -55,5 +55,14 @@ test("notification center includes persistence, deduplication and operator entry
   assert.match(service, /daily-procurement:\$\{dateKey\}/);
   assert.match(service, /fbp-shortage:\$\{dateKey\}/);
   assert.match(layout, /消息通知/);
-  assert.match(layout, /标记处理/);
+  assert.match(layout, /function notificationActionLabel/);
+  assert.match(layout, /daily_procurement: "去采购"/);
+  assert.match(layout, /pending_inbound: "去入库"/);
+  assert.match(layout, /fbp_shortage: "查看缺货明细"/);
+  assert.match(layout, /startsWith\("\/inventory\/fbp-shortages"\)/);
+  assert.match(layout, /notification-card-actions/);
+  assert.match(layout, /标记已处理/);
+  const openNotification = layout.slice(layout.indexOf("async function openNotification"), layout.indexOf("async function resolveNotification"));
+  assert.ok(openNotification.indexOf("router.push(targetRoute)") < openNotification.indexOf("/read`"), "navigation should not wait for notification read-state persistence");
+  assert.match(openNotification, /处理页面已打开，但通知已读状态未能更新/);
 });
