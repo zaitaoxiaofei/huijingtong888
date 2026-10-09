@@ -10,6 +10,10 @@ export function isTenantScopedPluginRoute(method, parts = []) {
   if (route[0] === "collected-product-details") {
     return (route.length === 1 && verb === "POST") || (route.length === 2 && verb === "GET");
   }
+  if (route[0] === "server-publish" && route[1] === "media-upload-jobs") {
+    return (route.length === 3 && route[2] === "claim" && verb === "POST")
+      || (route.length === 4 && Boolean(route[2]) && route[2] !== "claim" && Boolean(route[3]) && verb === "POST");
+  }
   if (route[0] === "collector-seller-pool") {
     return (route[1] === "status" && verb === "GET") || (route[1] === "collect" && verb === "POST");
   }

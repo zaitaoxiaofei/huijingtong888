@@ -22,7 +22,7 @@ export function createListingAutomationRoutes({ services, readJson }) {
     "GET /api/listing/publish-tasks": (req) => services.listingPublishTasks(req.query || {}, req._session),
     "POST /api/listing/publish-records/batch-delete": async (req) => services.deleteListingPublishRecords(await readJson(req), req._session),
     "GET /api/listing/media/assets": (req) => services.listingMediaAssets(req.query || {}, req._session),
-    "GET /api/listing/media/ozon-upload-jobs": (req) => services.listOzonSellerMediaUploadJobs(req.query || {}),
+    "GET /api/listing/media/ozon-upload-jobs": (req) => services.listOzonSellerMediaUploadJobs(req.query || {}, req._session),
     "POST /api/listing/media/ozon-upload-jobs": async (req) => services.createOzonSellerMediaUploadJobs(await readJson(req), req._session),
     "GET /api/material-packages/search": (req) => services.searchMaterialPackages(req.query || {}, req._session),
     "POST /api/ai/deepseek/generate": async (req) => services.generateDeepSeekListingContent(await readJson(req), req._session),

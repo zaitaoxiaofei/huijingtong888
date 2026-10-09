@@ -1440,13 +1440,13 @@ async function handleLocalPluginRoute(req, res, parts) {
 
   if (parts[2] === "server-publish" && parts[3] === "media-upload-jobs" && parts[4] === "claim" && req.method === "POST") {
     const body = await readJson(req);
-    const result = await services.claimServerPublishMediaUploadJobs(body || {});
+    const result = await services.claimServerPublishMediaUploadJobs(body || {}, tenantId);
     return localPluginJson(req, res, { success: result.success !== false, data: result, ...result });
   }
 
   if (parts[2] === "server-publish" && parts[3] === "media-upload-jobs" && parts[4] && parts[5] && req.method === "POST") {
     const body = await readJson(req);
-    const result = await services.completeServerPublishMediaUploadJob(parts[4], parts[5], body || {});
+    const result = await services.completeServerPublishMediaUploadJob(parts[4], parts[5], body || {}, tenantId);
     return localPluginJson(req, res, { success: result.success !== false, data: result, ...result });
   }
 

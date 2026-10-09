@@ -4324,6 +4324,7 @@ function normalizeOzonSellerMediaJobRow(row = {}) {
 
 export async function createOzonSellerMediaUploadJobs(body = {}, session = null) {
   await ensureListingAutomationSchema();
+  const tenantId = listingTenantId(session);
   const items = normalizeOzonSellerMediaSourceItems(body);
   if (!items.length) {
     const error = new Error("No media URLs supplied for Ozon seller upload");
@@ -4335,13 +4336,13 @@ export async function createOzonSellerMediaUploadJobs(body = {}, session = null)
   const sourceId = cleanText(body.sourceId || body.source_id || "", 128);
   const jobs = [];
   for (const item of items) {
-    const lockName = cleanText(`listing_ozon_seller_media:${item.sourceHash}`, 64);
+    const lockName = crypto.createHash("sha256").update(`${tenantId}:${item.sourceHash}`).digest("hex").slice(0, 64);
     await row("SELECT GET_LOCK(?, 5) AS locked", [lockName]).catch(() => null);
     try {
       const cached = await row(`
         SELECT *
         FROM listing_ozon_seller_media_upload_jobs
-        WHERE (source_hash = ? OR (source_url = ? AND kind = ?))
+        WHERE tenant_id = ? AND (source_hash = ? OR (source_url = ? AND kind = ?))
           AND status IN ('uploaded', 'pending', 'retry', 'processing', 'failed')
         ORDER BY
           CASE status
@@ -4354,7 +4355,7 @@ export async function createOzonSellerMediaUploadJobs(body = {}, session = null)
           updated_at DESC,
           id DESC
         LIMIT 1
-      `, [item.sourceHash, item.sourceUrl, item.kind]).catch(() => null);
+      `, [tenantId, item.sourceHash, item.sourceUrl, item.kind]).catch(() => null);
       if (cached && String(cached.status || "") !== "failed") {
         jobs.push({ ...normalizeOzonSellerMediaJobRow(cached), cached: true });
         continue;
@@ -4364,7 +4365,8 @@ export async function createOzonSellerMediaUploadJobs(body = {}, session = null)
       if (existingFailedId) {
         await run(`
           UPDATE listing_ozon_seller_media_upload_jobs
-          SET job_id = ?,
+          SET tenant_id = ?,
+              job_id = ?,
               media_job_id = ?,
               source_module = ?,
               source_id = ?,
@@ -4381,8 +4383,9 @@ export async function createOzonSellerMediaUploadJobs(body = {}, session = null)
               metadata_json = ?,
               created_by_person_id = ?,
               updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
+          WHERE id = ? AND tenant_id = ?
         `, [
+          tenantId,
           jobId,
           mediaJobId,
           sourceModule,
@@ -4394,15 +4397,17 @@ export async function createOzonSellerMediaUploadJobs(body = {}, session = null)
           item.fileName,
           JSON.stringify(item.metadata || {}),
           personId(session),
-          existingFailedId
+          existingFailedId,
+          tenantId
         ]);
       } else {
         await run(`
           INSERT INTO listing_ozon_seller_media_upload_jobs
-            (job_id, media_job_id, source_module, source_id, source_url, source_hash, kind, mime_type, file_name,
+            (tenant_id, job_id, media_job_id, source_module, source_id, source_url, source_hash, kind, mime_type, file_name,
              status, metadata_json, created_by_person_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
         `, [
+          tenantId,
           jobId,
           mediaJobId,
           sourceModule,
@@ -4419,10 +4424,10 @@ export async function createOzonSellerMediaUploadJobs(body = {}, session = null)
       const created = await row(`
         SELECT *
         FROM listing_ozon_seller_media_upload_jobs
-        WHERE source_hash = ? OR media_job_id = ?
+        WHERE tenant_id = ? AND (source_hash = ? OR media_job_id = ?)
         ORDER BY updated_at DESC, id DESC
         LIMIT 1
-      `, [item.sourceHash, mediaJobId]);
+      `, [tenantId, item.sourceHash, mediaJobId]);
       jobs.push(normalizeOzonSellerMediaJobRow(created));
     } finally {
       await row("SELECT RELEASE_LOCK(?) AS released", [lockName]).catch(() => null);
@@ -4437,19 +4442,20 @@ export async function createOzonSellerMediaUploadJobs(body = {}, session = null)
   };
 }
 
-export async function claimServerPublishMediaUploadJobs(body = {}) {
+export async function claimServerPublishMediaUploadJobs(body = {}, tenantId = "admin") {
   await ensureListingAutomationSchema();
+  const normalizedTenantId = String(tenantId || "admin").trim() || "admin";
   const runnerId = cleanText(body.runnerId || body.runner_id || `runner-${Date.now().toString(36)}`, 128);
   const limit = Math.max(1, Math.min(20, Number(body.limit || 5) || 5));
   const leaseSeconds = Math.max(60, Math.min(3600, Math.ceil(Number(body.leaseMs || body.lease_ms || 10 * 60 * 1000) / 1000)));
   const candidates = await all(`
     SELECT *
     FROM listing_ozon_seller_media_upload_jobs
-    WHERE status IN ('pending', 'retry')
-       OR (status = 'processing' AND (lease_until IS NULL OR lease_until < CURRENT_TIMESTAMP))
+    WHERE tenant_id = ? AND (status IN ('pending', 'retry')
+       OR (status = 'processing' AND (lease_until IS NULL OR lease_until < CURRENT_TIMESTAMP)))
     ORDER BY updated_at ASC, id ASC
     LIMIT ?
-  `, [limit]);
+  `, [normalizedTenantId, limit]);
   if (!candidates.length) return { ok: true, success: true, claimed: 0, jobs: [] };
   const ids = candidates.map((item) => Number(item.id || 0)).filter(Boolean);
   await run(`
@@ -4459,15 +4465,15 @@ export async function claimServerPublishMediaUploadJobs(body = {}) {
         lease_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND),
         attempts = attempts + 1,
         updated_at = CURRENT_TIMESTAMP
-    WHERE id IN (${ids.map(() => "?").join(",")})
+    WHERE tenant_id = ? AND id IN (${ids.map(() => "?").join(",")})
       AND (status IN ('pending', 'retry') OR (status = 'processing' AND (lease_until IS NULL OR lease_until < CURRENT_TIMESTAMP)))
-  `, [runnerId, leaseSeconds, ...ids]);
+  `, [runnerId, leaseSeconds, normalizedTenantId, ...ids]);
   const rows = await all(`
     SELECT *
     FROM listing_ozon_seller_media_upload_jobs
-    WHERE id IN (${ids.map(() => "?").join(",")}) AND status = 'processing' AND runner_id = ?
+    WHERE tenant_id = ? AND id IN (${ids.map(() => "?").join(",")}) AND status = 'processing' AND runner_id = ?
     ORDER BY updated_at ASC, id ASC
-  `, [...ids, runnerId]);
+  `, [normalizedTenantId, ...ids, runnerId]);
   return {
     ok: true,
     success: true,
@@ -4476,8 +4482,9 @@ export async function claimServerPublishMediaUploadJobs(body = {}) {
   };
 }
 
-export async function completeServerPublishMediaUploadJob(jobId = "", mediaJobId = "", body = {}) {
+export async function completeServerPublishMediaUploadJob(jobId = "", mediaJobId = "", body = {}, tenantId = "admin") {
   await ensureListingAutomationSchema();
+  const normalizedTenantId = String(tenantId || "admin").trim() || "admin";
   const normalizedJobId = cleanText(decodeURIComponent(String(jobId || "")), 128);
   const normalizedMediaJobId = cleanText(decodeURIComponent(String(mediaJobId || "")), 128);
   if (!normalizedJobId || !normalizedMediaJobId) {
@@ -4499,22 +4506,23 @@ export async function completeServerPublishMediaUploadJob(jobId = "", mediaJobId
         response_json = ?,
         lease_until = NULL,
         updated_at = CURRENT_TIMESTAMP
-    WHERE job_id = ? AND media_job_id = ?
+    WHERE tenant_id = ? AND job_id = ? AND media_job_id = ?
   `, [
     status,
     uploadedUrl,
     errorMessage,
     message,
     JSON.stringify(body || {}),
+    normalizedTenantId,
     normalizedJobId,
     normalizedMediaJobId
   ]);
   const updated = await row(`
     SELECT *
     FROM listing_ozon_seller_media_upload_jobs
-    WHERE job_id = ? AND media_job_id = ?
+    WHERE tenant_id = ? AND job_id = ? AND media_job_id = ?
     LIMIT 1
-  `, [normalizedJobId, normalizedMediaJobId]);
+  `, [normalizedTenantId, normalizedJobId, normalizedMediaJobId]);
   if (!updated) {
     const error = new Error("Ozon seller media upload job not found");
     error.status = 404;
@@ -4530,12 +4538,13 @@ export async function completeServerPublishMediaUploadJob(jobId = "", mediaJobId
   };
 }
 
-export async function listOzonSellerMediaUploadJobs(query = {}) {
+export async function listOzonSellerMediaUploadJobs(query = {}, session = null) {
   await ensureListingAutomationSchema();
   const limit = Math.max(1, Math.min(200, Number(query.limit || 50) || 50));
   const status = cleanText(query.status || "", 32);
-  const where = ["status <> 'deleted'"];
-  const params = [];
+  const tenantId = listingTenantId(session);
+  const where = ["tenant_id = ?", "status <> 'deleted'"];
+  const params = [tenantId];
   if (status) {
     where.push("status = ?");
     params.push(status);
@@ -7250,12 +7259,13 @@ async function prepareOzonSellerMediaForPublishPayload(payload = {}, options = {
         maxPollIntervalMs: 5000,
         loadJobs: async () => {
           if (!mediaJobIds.length) return [];
+          const tenantId = listingTenantId(options.session || null);
           const rows = await all(`
             SELECT *
             FROM listing_ozon_seller_media_upload_jobs
-            WHERE media_job_id IN (${mediaJobIds.map(() => "?").join(",")})
+            WHERE tenant_id = ? AND media_job_id IN (${mediaJobIds.map(() => "?").join(",")})
             ORDER BY id ASC
-          `, mediaJobIds);
+          `, [tenantId, ...mediaJobIds]);
           return rows.map(normalizeOzonSellerMediaJobRow);
         }
       });
@@ -14049,6 +14059,7 @@ async function initializeListingAutomationSchema() {
     await mysqlExecute(`
       CREATE TABLE IF NOT EXISTS listing_ozon_seller_media_upload_jobs (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        tenant_id VARCHAR(80) NOT NULL DEFAULT 'admin',
         job_id VARCHAR(128) NOT NULL,
         media_job_id VARCHAR(128) NOT NULL,
         source_module VARCHAR(64) NOT NULL DEFAULT 'listing_publish_media',
@@ -14070,15 +14081,25 @@ async function initializeListingAutomationSchema() {
         created_by_person_id BIGINT NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        UNIQUE KEY uq_listing_seller_media_job (media_job_id),
-        INDEX idx_listing_seller_media_status (status, updated_at),
-        INDEX idx_listing_seller_media_job (job_id, status),
-        INDEX idx_listing_seller_media_source_hash (source_hash),
-        INDEX idx_listing_seller_media_source (kind, source_url(180))
+        UNIQUE KEY uq_listing_seller_media_tenant_job (tenant_id, media_job_id),
+        INDEX idx_listing_seller_media_tenant_status (tenant_id, status, updated_at, id),
+        INDEX idx_listing_seller_media_tenant_hash (tenant_id, source_hash, status, updated_at),
+        INDEX idx_listing_seller_media_tenant_job (tenant_id, job_id, media_job_id),
+        INDEX idx_listing_seller_media_tenant_source (tenant_id, kind, source_url(160))
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
+    await ensureMysqlColumn("listing_ozon_seller_media_upload_jobs", "tenant_id", "VARCHAR(80) NOT NULL DEFAULT 'admin'");
     await ensureMysqlColumn("listing_ozon_seller_media_upload_jobs", "source_hash", "VARCHAR(128) NOT NULL DEFAULT ''");
-    await ensureMysqlIndex("listing_ozon_seller_media_upload_jobs", "idx_listing_seller_media_source_hash", "(source_hash)");
+    await ensureMysqlUniqueIndex("listing_ozon_seller_media_upload_jobs", "uq_listing_seller_media_tenant_job", "(tenant_id, media_job_id)");
+    await ensureMysqlIndex("listing_ozon_seller_media_upload_jobs", "idx_listing_seller_media_tenant_status", "(tenant_id, status, updated_at, id)");
+    await ensureMysqlIndex("listing_ozon_seller_media_upload_jobs", "idx_listing_seller_media_tenant_hash", "(tenant_id, source_hash, status, updated_at)");
+    await ensureMysqlIndex("listing_ozon_seller_media_upload_jobs", "idx_listing_seller_media_tenant_job", "(tenant_id, job_id, media_job_id)");
+    await ensureMysqlIndex("listing_ozon_seller_media_upload_jobs", "idx_listing_seller_media_tenant_source", "(tenant_id, kind, source_url(160))");
+    await dropMysqlIndexIfExists("listing_ozon_seller_media_upload_jobs", "uq_listing_seller_media_job");
+    await dropMysqlIndexIfExists("listing_ozon_seller_media_upload_jobs", "idx_listing_seller_media_status");
+    await dropMysqlIndexIfExists("listing_ozon_seller_media_upload_jobs", "idx_listing_seller_media_job");
+    await dropMysqlIndexIfExists("listing_ozon_seller_media_upload_jobs", "idx_listing_seller_media_source_hash");
+    await dropMysqlIndexIfExists("listing_ozon_seller_media_upload_jobs", "idx_listing_seller_media_source");
     await mysqlExecute(`
       UPDATE listing_ozon_seller_media_upload_jobs
       SET source_hash = SHA2(CONCAT(kind, ':', source_url), 256)

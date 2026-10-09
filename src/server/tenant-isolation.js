@@ -52,6 +52,8 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenantVariantWorkbenchCollection = parts[1] === "listing" && parts[2] === "variant-workbench-drafts" && parts.length === 3 && ["GET", "POST"].includes(verb);
   const tenantVariantWorkbenchDelete = parts[1] === "listing" && parts[2] === "variant-workbench-drafts" && parts.length === 4 && verb === "DELETE";
   if (tenantVariantWorkbenchCollection || tenantVariantWorkbenchDelete) return { allowed: true };
+  const tenantSellerMediaJobs = parts[1] === "listing" && parts[2] === "media" && parts[3] === "ozon-upload-jobs" && parts.length === 4 && ["GET", "POST"].includes(verb);
+  if (tenantSellerMediaJobs) return { allowed: true };
   if (parts[1] === "sku-order-tracking" && parts.length === 2 && ["GET", "POST"].includes(verb)) return { allowed: true };
   const tenantOnlineProductRead = parts[1] === "online-products" && parts.length === 3 && ["limits", "warehouses"].includes(parts[2]) && verb === "GET";
   const tenantOnlineProductStockWrite = parts[1] === "online-products" && parts.length === 3 && parts[2] === "batch-stock" && verb === "POST";

@@ -64,6 +64,7 @@
     "db:init:mysql": "node scripts/init-mysql-schema.mjs",
     "db:migrate:tenant-procurement": "node scripts/migrate-tenant-procurement-requests.mjs",
     "db:migrate:tenant-listing-workbench": "node scripts/migrate-tenant-listing-workbench-drafts.mjs",
+    "db:migrate:tenant-ozon-media-jobs": "node scripts/migrate-tenant-ozon-media-jobs.mjs",
     "db:optimize:mysql": "node scripts/optimize-mysql-indexes.mjs",
     "db:optimize:mysql:drop-redundant": "node scripts/optimize-mysql-indexes.mjs --drop-redundant",
     "db:backfill:order-history": "node scripts/backfill-order-status-history.mjs",
