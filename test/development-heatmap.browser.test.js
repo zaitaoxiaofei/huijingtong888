@@ -40,11 +40,13 @@ test('development heatmap uses priority quadrants, granular task points, click-t
   await page.goto('http://localhost:8788/admin.html');
   assert.equal(await page.locator('.quadrant-overview .quadrant-name-chip').count()>0,true);
   assert.equal(await page.locator('.quadrant-point').count(),0,'summary should not flood the overview with task cards');
+  await page.getByRole('button',{name:'筛选优先级：紧急重要'}).click();assert.equal(await page.locator('.priority-quadrant').count(),1);assert.equal(await page.locator('.quadrant-10 .quadrant-point').count(),2);
+  await page.getByRole('button',{name:'筛选优先级：全部'}).click();assert.equal(await page.locator('.priority-quadrant').count(),4);assert.equal(await page.locator('.priority-drop-targets').count(),0,'priority filters replace the in-canvas adjustment box');
   assert.equal(await page.getByRole('button',{name:/门槛条 · TENET · T7/}).count(),0,'completed tasks should be hidden by default');
   await page.locator('.completed-filter .el-switch').click();await page.getByRole('button',{name:'展开重要不紧急象限'}).click();
   const completedCell=page.getByRole('button',{name:'门槛条 · TENET · T7：1 个任务',exact:true});await completedCell.waitFor();assert.match(await completedCell.locator('.point-owners').evaluate(node=>getComputedStyle(node).borderColor),/rgb\(132, 215, 160\)/);
   await page.getByRole('button',{name:'返回总览'}).click();await page.locator('.completed-filter .el-switch').click();
-  await page.locator('.view-mode-switch .el-radio-button').filter({hasText:'横纵坐标'}).click();await page.locator('.coordinate-board').waitFor();assert.ok(await page.locator('.axis-cell').count()>0);await page.locator('.axis-cell').first().click();
+  await page.locator('.view-mode-switch .el-radio-button').filter({hasText:'横纵坐标'}).click();await page.locator('.coordinate-board').waitFor();assert.ok(await page.locator('.axis-cell').count()>0);await page.getByRole('button',{name:'筛选优先级：紧急重要'}).click();assert.ok(await page.locator('.axis-cell').count()>0);assert.equal(await page.locator('.axis-cell:not(.priority-10)').count(),0,'priority filter applies to coordinate mode too');await page.getByRole('button',{name:'筛选优先级：全部'}).click();await page.locator('.axis-cell').first().click();
   assert.ok(await page.evaluate(()=>window.openedTask));await page.locator('.view-mode-switch .el-radio-button').filter({hasText:'四象限'}).click();
   await page.getByRole('button',{name:'展开紧急重要象限'}).click();
   const cell=page.getByRole('button',{name:'汽车钥匙保护壳 · TENET · T7：1 个任务',exact:true});await cell.waitFor();
@@ -59,7 +61,7 @@ test('development heatmap uses priority quadrants, granular task points, click-t
   await cell.click({button:'right',force:true});await page.getByText(/已选 1 个车型 · 1 个任务/).waitFor();assert.equal(await secondPoint.locator('.point-sequence').textContent(),'1');
   await cell.click({force:true});assert.equal(await cell.locator('.point-sequence').textContent(),'2');await page.getByRole('button',{name:'保存排程'}).click();await page.locator('.point-sequence').filter({hasText:'1'}).waitFor();assert.deepEqual(savedPlans.map(plan=>plan.sequence),[2,1]);
   await page.getByRole('button',{name:'退出排程'}).click();
-  await cell.dragTo(page.getByRole('button',{name:'重要不紧急',exact:true}));await page.getByText('已调整 1 个任务的优先级为重要不紧急',{exact:true}).waitFor();assert.deepEqual(priorityChanges,[{task_ids:[1],priority:'important_not_urgent'}]);assert.equal(tasks[0].priority,'important_not_urgent');await page.locator('.quadrant-7 .quadrant-point[aria-label="汽车钥匙保护壳 · TENET · T7：1 个任务"]').waitFor();
+  await cell.dragTo(page.getByRole('button',{name:'筛选优先级：重要不紧急'}));await page.getByText('已调整 1 个任务的优先级为重要不紧急',{exact:true}).waitFor();assert.deepEqual(priorityChanges,[{task_ids:[1],priority:'important_not_urgent'}]);assert.equal(tasks[0].priority,'important_not_urgent');await page.locator('.quadrant-7 .quadrant-point[aria-label="汽车钥匙保护壳 · TENET · T7：1 个任务"]').waitFor();
   await page.screenshot({path:'/tmp/development-heatmap.png',fullPage:true});
   const updatedCell=page.getByRole('button',{name:'汽车钥匙保护壳 · TENET · T7：1 个任务',exact:true});await updatedCell.click();assert.equal(await page.evaluate(()=>window.openedTask),1);assert.equal(await page.evaluate(()=>window.openedModelIndex),0);assert.equal(await page.evaluate(()=>window.openedDimension),'model');
   await page.locator('.heatmap-filterbar .el-radio-group').first().locator('.el-radio-button').filter({hasText:'品牌'}).click();await page.getByRole('button',{name:'展开重要不紧急象限'}).click();const brandCell=page.getByRole('button',{name:'汽车钥匙保护壳 · TENET：1 个任务',exact:true});await brandCell.waitFor();await page.getByRole('button',{name:'人工排程'}).click();await brandCell.click();await page.getByText(/已选 1 个品牌 · 1 个任务/).waitFor();await page.getByRole('button',{name:'退出排程'}).click();
