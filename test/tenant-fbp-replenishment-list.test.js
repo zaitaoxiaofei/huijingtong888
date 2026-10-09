@@ -28,12 +28,14 @@ test("only the FBP replenishment collection route is opened and its tenant comes
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "delete"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "delete"], "POST").allowed, true);
-  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "status"], "POST").allowed, false);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "status"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "inventory-allocation"], "POST").allowed, false);
   const server = read("../src/server.js");
   assert.match(server, /services\.fbpReplenishmentOrders\(req\.query \|\| \{\}, tenantIdFromRequest\(req\)\)/);
   assert.match(server, /services\.updateFbpReplenishmentOrderItems\(await readJson\(req\), tenantIdFromRequest\(req\)\)/);
   assert.match(server, /services\.deleteFbpReplenishmentOrder\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
   assert.match(server, /services\.deleteFbpReplenishmentOrderItem\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
+  assert.match(server, /services\.updateFbpReplenishmentOrderStatus\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
 });
 
 test("FBP draft writes lock and validate the parent order through tenant shop ownership", () => {
@@ -41,7 +43,8 @@ test("FBP draft writes lock and validate the parent order through tenant shop ow
   for (const [name, next] of [
     ["updateFbpReplenishmentOrderItemsMysql", "saveFbpReplenishmentInventoryAllocationMysql"],
     ["deleteFbpReplenishmentOrderMysql", "deleteFbpReplenishmentOrderItemMysql"],
-    ["deleteFbpReplenishmentOrderItemMysql", "updateFbpReplenishmentOrderStatusMysql"]
+    ["deleteFbpReplenishmentOrderItemMysql", "updateFbpReplenishmentOrderStatusMysql"],
+    ["updateFbpReplenishmentOrderStatusMysql", "const FBP_TRANSFER_STATUSES"]
   ]) {
     const start = source.indexOf(`export async function ${name}`);
     const end = source.indexOf(`export async function ${next}`, start + 1);
@@ -52,4 +55,7 @@ test("FBP draft writes lock and validate the parent order through tenant shop ow
     assert.match(method, /tenantShopPredicateMysql\("s", defaultTenant\)/, name);
     assert.match(method, /withMysqlTransaction/, name);
   }
+  const status = source.slice(source.indexOf("export async function updateFbpReplenishmentOrderStatusMysql"), source.indexOf("const FBP_TRANSFER_STATUSES"));
+  assert.match(status, /!defaultTenant && \["approved", "sent", "ozon_created", "completed"\]\.includes\(status\)/);
+  assert.match(status, /!defaultTenant && status === "cancelled"/);
 });

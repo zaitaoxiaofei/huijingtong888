@@ -5434,11 +5434,15 @@ export async function deleteFbpReplenishmentOrderItemMysql(body = {}, userId = n
   return { ok: true, order_id: orderId, item_id: itemId, deleted: true, order_deleted: orderDeleted, deleted_by: userId || null };
 }
 
-export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId = null) {
+export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
-  await ensureFbpTransferRecordsSchemaMysql();
-  await ensureStockLocationSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  if (defaultTenant) {
+    await ensureFbpTransferRecordsSchemaMysql();
+    await ensureStockLocationSchemaMysql();
+  }
   const id = Number(body.id || body.order_id || body.orderId || 0);
   const status = String(body.status || "").trim();
   const allowed = new Set(["draft", "pending_review", "approved", "rejected", "sent", "ozon_created", "completed", "cancelled"]);
@@ -5458,9 +5462,18 @@ export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId =
   if (["completed", "cancelled"].includes(status)) fields.push("closed_at = CURRENT_TIMESTAMP");
   params.push(id);
   let approvalResult = { transferCount: 0, outboundQuantity: 0 };
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   await withMysqlTransaction(async (connection) => {
-    const order = await mysqlConnectionQueryOne(connection, "SELECT * FROM fbp_replenishment_orders WHERE id = ? LIMIT 1 FOR UPDATE", [id]);
-    if (!order) throw new Error("备货单不存在。");
+    const order = await mysqlConnectionQueryOne(connection, `SELECT o.* FROM fbp_replenishment_orders o
+      JOIN shops s ON s.id = o.shop_id
+      WHERE o.id = ? AND s.status != 'deleted' AND ${shopScope} LIMIT 1 FOR UPDATE`, [id, normalizedTenantId]);
+    if (!order) throw new Error("备货单不存在或不属于当前企业。");
+    if (!defaultTenant && ["approved", "sent", "ozon_created", "completed"].includes(status)) {
+      throw new Error("该状态会触发共享库存、发货或外部平台流程，当前企业暂不可操作。");
+    }
+    if (!defaultTenant && status === "cancelled" && String(order.status || "") === "approved") {
+      throw new Error("已审核备货单的库存释放流程尚未完成租户隔离，暂不能取消。");
+    }
     if (String(order.status || "") === "approved" && ["draft", "pending_review", "rejected"].includes(status)) {
       throw new Error("备货单已通过并预留本地库存，不能退回为未审核状态。");
     }
