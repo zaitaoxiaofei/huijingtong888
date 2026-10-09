@@ -8,7 +8,7 @@ test("collector plugin update status defaults to the plugin manifest version", (
   const manifest = JSON.parse(fs.readFileSync("ozon-erp-collector-plugin/manifest.json", "utf8"));
   const status = globalUpdateStatus();
   assert.equal(status.plugin.version, manifest.version);
-  assert.equal(status.plugin.package_name, `ozon-baodan-erp-plugin-${manifest.version}.rar`);
+  assert.equal(status.plugin.package_name, `ozon-baodan-erp-plugin-${manifest.version}.zip`);
 });
 
 test("analytics plugin update status defaults to the analytics manifest version", () => {
@@ -22,4 +22,6 @@ test("plugin download aliases use the server release artifact instead of a brows
   const serverSource = fs.readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
   assert.match(serverSource, /const filename = parts\[1\]/);
   assert.doesNotMatch(serverSource, /filename = status\.plugin\.package_name/);
+  assert.match(serverSource, /application\/zip/);
+  assert.match(serverSource, /Location.*latestPackage/);
 });
