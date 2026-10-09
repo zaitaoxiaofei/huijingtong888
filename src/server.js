@@ -128,13 +128,17 @@ async function resolveDownloadArtifactPath(filename) {
     error.statusCode = 400;
     throw error;
   }
-  const aliasNames = normalized === "ozon-erp-collector-plugin.rar"
-    ? ["ozon-erp-collector-plugin.rar", "ozon-baodan-erp-plugin.rar"]
+  const aliasNames = normalized === "ozon-erp-collector-plugin.zip"
+    ? ["ozon-erp-collector-plugin.zip", "ozon-baodan-erp-plugin.zip"]
+    : normalized === "ozon-erp-collector-plugin.rar"
+      ? ["ozon-erp-collector-plugin.rar", "ozon-baodan-erp-plugin.rar"]
     : [normalized];
-  const versionedNames = normalized === "ozon-erp-collector-plugin.rar" || normalized === "ozon-baodan-erp-plugin.rar"
-    ? ["ozon-baodan-erp-plugin-*.rar"]
-    : normalized === "ozon-seller-analytics-plugin.rar"
-      ? ["ozon-seller-analytics-plugin-*.rar"]
+  const versionedNames = normalized === "ozon-erp-collector-plugin.zip" || normalized === "ozon-baodan-erp-plugin.zip"
+    ? ["ozon-baodan-erp-plugin-*.zip"]
+    : normalized === "ozon-erp-collector-plugin.rar" || normalized === "ozon-baodan-erp-plugin.rar"
+      ? ["ozon-baodan-erp-plugin-*.rar"]
+      : normalized === "ozon-seller-analytics-plugin.rar"
+        ? ["ozon-seller-analytics-plugin-*.rar"]
       : [];
   const candidates = Array.from(new Set([
     ...aliasNames.flatMap((name) => [
@@ -161,7 +165,7 @@ async function resolveDownloadArtifactPath(filename) {
       path.resolve("..", "..", "dist")
     ]));
     const prefix = pattern.replace("*", "");
-    const suffix = ".rar";
+    const suffix = pattern.endsWith(".zip") ? ".zip" : ".rar";
     const matches = [];
     for (const dir of searchDirs) {
       try {
@@ -1048,14 +1052,27 @@ async function handleRestRoute(req, res, url, parts) {
   }
 
   if (req.method === "GET" && parts[0] === "downloads" && (
+    /^ozon-baodan-erp-plugin-[0-9][0-9A-Za-z.-]*\.zip$/.test(parts[1] || "") ||
     /^ozon-baodan-erp-plugin-[0-9][0-9A-Za-z.-]*\.rar$/.test(parts[1] || "") ||
     /^ozon-seller-analytics-plugin-[0-9][0-9A-Za-z.-]*\.rar$/.test(parts[1] || "") ||
     /^pdd-procurement-logistics-plugin-[0-9][0-9A-Za-z.-]*\.zip$/.test(parts[1] || "") ||
+    parts[1] === "ozon-baodan-erp-plugin.zip" ||
+    parts[1] === "ozon-erp-collector-plugin.zip" ||
     parts[1] === "ozon-baodan-erp-plugin.rar" ||
     parts[1] === "ozon-erp-collector-plugin.rar" ||
     parts[1] === "ozon-seller-analytics-plugin.rar"
   )) {
     const filename = parts[1];
+    if (/^(?:ozon-baodan-erp-plugin|ozon-erp-collector-plugin)(?:-[0-9][0-9A-Za-z.-]*)?\.rar$/.test(filename)) {
+      const pluginVersion = globalUpdateStatus().plugin.version;
+      const latestPackage = `ozon-baodan-erp-plugin-${pluginVersion}.zip`;
+      writeHead(res, 302, {
+        "Location": `/downloads/${latestPackage}`,
+        "Cache-Control": "no-store"
+      });
+      res.end();
+      return true;
+    }
     const filePath = await resolveDownloadArtifactPath(filename);
     const buffer = await fs.readFile(filePath);
     writeHead(res, 200, {

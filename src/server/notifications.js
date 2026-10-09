@@ -16,7 +16,7 @@ function readPluginManifestVersion(manifestPath) {
   }
 }
 const defaultPluginVersion = process.env.COLLECTOR_PLUGIN_VERSION || readPluginManifestVersion(collectorPluginManifestPath);
-const defaultPluginPackageName = `ozon-baodan-erp-plugin-${defaultPluginVersion}.rar`;
+const defaultPluginPackageName = `ozon-baodan-erp-plugin-${defaultPluginVersion}.zip`;
 const defaultAnalyticsPluginVersion = process.env.ANALYTICS_PLUGIN_VERSION || readPluginManifestVersion(analyticsPluginManifestPath);
 const defaultAnalyticsPluginPackageName = `ozon-seller-analytics-plugin-${defaultAnalyticsPluginVersion}.rar`;
 const defaultPddProcurementPluginVersion = process.env.PDD_PROCUREMENT_PLUGIN_VERSION || readPluginManifestVersion(pddProcurementPluginManifestPath);
@@ -80,7 +80,7 @@ function normalizeUpdatePayload(input = {}) {
       ...plugin,
       version: String(plugin.version || defaultStatus.plugin.version).trim(),
       download_url: String(plugin.download_url || plugin.downloadUrl || defaultStatus.plugin.download_url).trim(),
-      package_name: String(plugin.package_name || plugin.packageName || `ozon-baodan-erp-plugin-${plugin.version || defaultStatus.plugin.version}.rar`).trim()
+      package_name: String(plugin.package_name || plugin.packageName || `ozon-baodan-erp-plugin-${plugin.version || defaultStatus.plugin.version}.zip`).trim()
     },
     analytics_plugin: {
       ...defaultStatus.analytics_plugin,
