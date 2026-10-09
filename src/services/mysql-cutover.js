@@ -4514,14 +4514,21 @@ function fbpReplenishmentOrderNo(id, dateKey = todayDateKeyMysql()) {
   return `FBP-${day}-${String(id).padStart(5, "0")}`;
 }
 
-export async function fbpReplenishmentOrdersMysql(query = {}) {
+export async function fbpReplenishmentOrdersMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const shopScope = `o.shop_id IN (SELECT scoped_shop.id FROM shops scoped_shop WHERE scoped_shop.status != 'deleted' AND ${tenantShopPredicateMysql("scoped_shop", defaultTenant)})`;
   await ensureProductNamingSchemaMysql();
   await ensureFbpReplenishmentSchemaMysql();
   await ensureFbpTransferRecordsSchemaMysql();
   if (Number(query.print_item_id) > 0) {
-    const records = await mysqlQuery(`SELECT r.*, p.name AS person_name FROM fbp_replenishment_print_records r
-      LEFT JOIN people p ON p.id = r.created_by WHERE r.item_id = ? ORDER BY r.id DESC LIMIT 200`, [Number(query.print_item_id)]);
+    const records = await mysqlQuery(`SELECT r.*, ${defaultTenant ? "p.name" : "NULL"} AS person_name FROM fbp_replenishment_print_records r
+      JOIN fbp_replenishment_order_items i ON i.id = r.item_id
+      JOIN fbp_replenishment_orders o ON o.id = i.order_id
+      JOIN shops scoped_shop ON scoped_shop.id = o.shop_id AND scoped_shop.status != 'deleted' AND ${tenantShopPredicateMysql("scoped_shop", defaultTenant)}
+      ${defaultTenant ? "LEFT JOIN people p ON p.id = r.created_by" : ""}
+      WHERE r.item_id = ? ORDER BY r.id DESC LIMIT 200`, [normalizedTenantId, Number(query.print_item_id)]);
     return { print_records: records };
   }
   const status = String(query.status || "all");
@@ -4530,8 +4537,8 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
   const text = String(query.query || query.search || "").trim();
   const page = Math.max(1, Number(query.page || 1));
   const pageSize = Math.min(100, Math.max(1, Number(query.pageSize || 20)));
-  const where = [];
-  const params = [];
+  const where = [shopScope];
+  const params = [normalizedTenantId];
   if (status === "applying") {
     where.push("o.status IN ('draft', 'pending_review')");
   } else if (status === "replenishment") {
@@ -4557,7 +4564,7 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
     params.push(batchId);
   }
   if (text) {
-    where.push(`(
+    where.push(defaultTenant ? `(
       o.order_no LIKE ?
        OR EXISTS (
          SELECT 1 FROM fbp_replenishment_order_items si
@@ -4576,9 +4583,17 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
         WHERE si.order_id = o.id
           AND requester.name LIKE ?
       )
+    )` : `(
+      o.order_no LIKE ?
+      OR EXISTS (
+        SELECT 1 FROM fbp_replenishment_order_items si
+        WHERE si.order_id = o.id
+          AND (si.ozon_sku LIKE ? OR si.product_name LIKE ? OR si.offer_id LIKE ? OR si.inventory_id = ?)
+      )
     )`);
     const pattern = `%${text}%`;
-    params.push(pattern, pattern, pattern, pattern, pattern, text, text, text, pattern, pattern);
+    if (defaultTenant) params.push(pattern, pattern, pattern, pattern, pattern, text, text, text, pattern, pattern);
+    else params.push(pattern, pattern, pattern, pattern, text);
   }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const countRow = await mysqlQueryOne(`SELECT COUNT(*) AS total FROM fbp_replenishment_orders o ${whereSql}`, params);
@@ -4589,20 +4604,18 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
           AND ftr.source_ref LIKE CONCAT('fbp_replenishment:', o.id, ':%')
           AND ftr.status <> 'cancelled') AS received_quantity,
       DATE_FORMAT(o.order_date, '%Y-%m-%d') AS order_date,
-      batch.id AS batch_id, batch.batch_no,
+      ${defaultTenant ? "batch.id AS batch_id, batch.batch_no" : "NULL AS batch_id, NULL AS batch_no"},
       s.name AS shop_name, s.ozon_client_id AS ozon_company_id,
-      creator.name AS created_by_name, reviewer.name AS reviewed_by_name,
+      ${defaultTenant ? "creator.name" : "NULL"} AS created_by_name, ${defaultTenant ? "reviewer.name" : "NULL"} AS reviewed_by_name,
       COUNT(i.id) AS item_count,
       COALESCE(SUM(i.requested_qty), 0) AS total_requested_qty,
       COALESCE(SUM(i.approved_qty), 0) AS total_approved_qty,
       COALESCE(SUM(i.approved_qty + COALESCE(adj.adjustment_qty, 0)), 0) AS total_final_qty
     FROM fbp_replenishment_orders o
     LEFT JOIN shops s ON s.id = o.shop_id
-    LEFT JOIN people creator ON creator.id = o.created_by
-    LEFT JOIN people reviewer ON reviewer.id = o.reviewed_by
+    ${defaultTenant ? "LEFT JOIN people creator ON creator.id = o.created_by LEFT JOIN people reviewer ON reviewer.id = o.reviewed_by" : ""}
     LEFT JOIN fbp_replenishment_order_items i ON i.order_id = o.id
-    LEFT JOIN fbp_replenishment_batch_members bm ON bm.order_id = o.id
-    LEFT JOIN fbp_replenishment_batches batch ON batch.id = bm.batch_id
+    ${defaultTenant ? "LEFT JOIN fbp_replenishment_batch_members bm ON bm.order_id = o.id LEFT JOIN fbp_replenishment_batches batch ON batch.id = bm.batch_id" : ""}
     LEFT JOIN (
       SELECT item_id, SUM(adjustment_qty) AS adjustment_qty,
         GROUP_CONCAT(CONCAT(DATE_FORMAT(created_at, '%Y-%m-%d %H:%i'), ' ', IF(adjustment_qty > 0, '+', ''), adjustment_qty, '：', reason) ORDER BY created_at SEPARATOR '\n') AS adjustment_summary
@@ -4610,7 +4623,7 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
       GROUP BY item_id
     ) adj ON adj.item_id = i.id
     ${whereSql}
-    GROUP BY o.id, s.name, s.ozon_client_id, creator.name, reviewer.name, batch.id, batch.batch_no
+    GROUP BY o.id, s.name, s.ozon_client_id${defaultTenant ? ", creator.name, reviewer.name, batch.id, batch.batch_no" : ""}
     ORDER BY o.created_at DESC, o.id DESC
     LIMIT ? OFFSET ?
   `, [...params, pageSize, (page - 1) * pageSize]);
@@ -4619,19 +4632,13 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
   if (ids.length) {
     itemRows = await mysqlQuery(`
       SELECT i.*, COALESCE(adj.adjustment_qty, 0) AS adjustment_qty, COALESCE(adj.adjustment_summary, '') AS adjustment_summary,
-        COALESCE(NULLIF(current_product.name, ''), i.product_name) AS product_name,
-        COALESCE(NULLIF(i.image_url, ''), current_product.image_url) AS image_url,
-        CASE
-          WHEN current_product.id IS NULL THEN i.inventory_id
-          WHEN current_product.code LIKE 'P-%' THEN current_product.code
-          ELSE CONCAT('P-', DATE_FORMAT(current_product.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(current_product.id, 3, '0'))
-        END AS inventory_id,
-        current_product.inventory_number,
-        requester.name AS requested_by_name, printer.name AS barcode_printed_by_name
+        ${defaultTenant ? "COALESCE(NULLIF(current_product.name, ''), i.product_name)" : "i.product_name"} AS product_name,
+        ${defaultTenant ? "COALESCE(NULLIF(i.image_url, ''), current_product.image_url)" : "i.image_url"} AS image_url,
+        ${defaultTenant ? "CASE WHEN current_product.id IS NULL THEN i.inventory_id WHEN current_product.code LIKE 'P-%' THEN current_product.code ELSE CONCAT('P-', DATE_FORMAT(current_product.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(current_product.id, 3, '0')) END" : "i.inventory_id"} AS inventory_id,
+        ${defaultTenant ? "current_product.inventory_number" : "NULL"} AS inventory_number,
+        ${defaultTenant ? "requester.name" : "NULL"} AS requested_by_name, ${defaultTenant ? "printer.name" : "NULL"} AS barcode_printed_by_name
       FROM fbp_replenishment_order_items i
-      LEFT JOIN products current_product ON current_product.id = i.product_id
-      LEFT JOIN people requester ON requester.id = i.requested_by
-      LEFT JOIN people printer ON printer.id = i.barcode_printed_by
+      ${defaultTenant ? "LEFT JOIN products current_product ON current_product.id = i.product_id LEFT JOIN people requester ON requester.id = i.requested_by LEFT JOIN people printer ON printer.id = i.barcode_printed_by" : ""}
       LEFT JOIN (
         SELECT item_id, SUM(adjustment_qty) AS adjustment_qty,
           GROUP_CONCAT(CONCAT(DATE_FORMAT(created_at, '%Y-%m-%d %H:%i'), ' ', IF(adjustment_qty > 0, '+', ''), adjustment_qty, '：', reason) ORDER BY created_at SEPARATOR '\n') AS adjustment_summary
@@ -4642,7 +4649,7 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
       ORDER BY i.created_at DESC, i.id DESC
     `, ids);
   }
-  const warehouseFacts = query.inventory === '1'
+  const warehouseFacts = query.inventory === '1' && defaultTenant
     ? await loadWarehouseFacts(mysqlQuery, itemRows.map(row => row.product_id), localStockLocationPredicateMysql())
     : new Map();
   const itemMap = new Map();

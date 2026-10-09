@@ -17,6 +17,7 @@ import { cleanExpiredSessions, createAuthHandler, extractToken, getSession } fro
 import { authorizeApiRequest } from "./server/authorization.js";
 import { isPrivateImageRead, readCookie, tenantIsolationDecision } from "./server/tenant-isolation.js";
 import { tenantPluginApiError } from "./server/local-plugin-tenant.js";
+import { tenantIdFromRequest } from "./server/tenant-context.js";
 import { createApiDocumentation, renderApiDocumentationMarkdown } from "./server/api-docs.js";
 import { createCatalogRoutes, handleCatalogRestRoute } from "./server/routes/catalog.js";
 import { createOrderRoutes, handleOrderRestRoute } from "./server/routes/orders.js";
@@ -295,7 +296,7 @@ const routes = {
   "GET /api/inventory": (req) => services.inventory(req.query || {}),
   "GET /api/stock-alerts": (req) => services.stockAlerts(req.query || {}),
   "GET /api/fbp-opportunities": (req) => services.fbpOpportunities(req.query || {}),
-  "GET /api/fbp-replenishment-orders": (req) => services.fbpReplenishmentOrders(req.query || {}),
+  "GET /api/fbp-replenishment-orders": (req) => services.fbpReplenishmentOrders(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/fbp-transfer-records": (req) => services.fbpTransferRecords(req.query || {}),
   "GET /api/stock-warehouse-rules": () => services.stockWarehouseRules(),
   "GET /api/erp/inventory-current": () => services.inventoryCurrent(),
