@@ -32,6 +32,7 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
     (parts.length === 3 && ["delete", "items"].includes(parts[2]))
     || (parts.length === 3 && parts[2] === "status")
     || (parts.length === 4 && parts[2] === "items" && ["delete", "adjustments"].includes(parts[3]))
+    || (parts.length === 5 && parts[2] === "items" && parts[3] === "adjustments" && parts[4] === "reason")
   );
   if (tenantFbpDraftMutation) return { allowed: true };
   const tenantFbpAdjustmentRead = parts[1] === "fbp-replenishment-orders" && parts.length === 4 && parts[2] === "items" && parts[3] === "adjustments" && verb === "GET";
