@@ -157,13 +157,14 @@ function warehouseText(row) {
   return warehouses.slice(0, 2).map((item) => `${item.name || "仓库"} ${integer(item.available ?? item.present)}`).join(" / ");
 }
 
-function localInventoryTotal(row) {
-  return Number(row.local_stock || 0) + Number(row.pending_procurement_qty || 0);
+function localAvailableQty(row) {
+  return Number(row.local_available || 0);
 }
 
 function transferActionTooltip(row) {
   return [
     `建议发仓：${integer(row.suggested_transfer_qty)} 件`,
+    `等待采购到货：${integer(row.suggested_wait_inbound_qty)} 件`,
     `建议采购：${integer(row.suggested_purchase_qty)} 件`,
     `发仓在途：${integer(row.fbp_transfer_in_transit_qty)} 件`
   ].join("\n");
@@ -171,10 +172,13 @@ function transferActionTooltip(row) {
 
 function inventoryTooltipCn(row) {
   return [
-    `本地：库存 ${integer(row.local_stock)} + 采购在途 ${integer(row.pending_procurement_qty)} = ${integer(localInventoryTotal(row))} 件`,
+    `订单口径本地在库：${integer(row.local_stock)} 件`,
+    `待发订单占用：${integer(row.order_reserved_qty)} 件；FBP备货占用：${integer(row.fbp_reserved_qty)} 件`,
+    `本地可发仓：${integer(localAvailableQty(row))} 件`,
+    `采购在途（实际待到货批次）：${integer(row.pending_procurement_qty)} 件，其中未分配 ${integer(row.pending_procurement_available_qty)} 件；不计入本地现货`,
     `FBP在途：${integer(row.fbp_transfer_in_transit_qty)} 件`,
     `FBP可售：${integer(row.fbp_available)} 件`,
-    `FBS可售：${integer(row.fbs_available)} 件`,
+    `FBS平台可售（虚拟库存）：${integer(row.fbs_available)} 件`,
     `覆盖天数：${coverageText(row)}`,
     `仓库分布：${warehouseText(row)}`
   ].join("\n");
@@ -194,10 +198,12 @@ function trendTooltip(row) {
 
 function inventoryTooltip(row) {
   return [
-    `本地：在库 ${integer(row.local_stock)} + 采购在途 ${integer(row.pending_procurement_qty)} = ${integer(localInventoryTotal(row))} 件`,
+    `订单口径本地在库：${integer(row.local_stock)} 件`,
+    `本地可发仓：${integer(localAvailableQty(row))} 件（待发订单占用 ${integer(row.order_reserved_qty)} / FBP备货占用 ${integer(row.fbp_reserved_qty)}）`,
+    `采购在途（实际待到货批次）：${integer(row.pending_procurement_qty)} 件，未分配 ${integer(row.pending_procurement_available_qty)} 件；不计入现货`,
     `FBP在途：${integer(row.fbp_transfer_in_transit_qty)} 件`,
     `FBP：${integer(row.fbp_available)} 件`,
-    `FBS：${integer(row.fbs_available)} 件`,
+    `FBS平台虚拟可售：${integer(row.fbs_available)} 件`,
     `覆盖：${coverageText(row)}`,
     `仓库分布：${warehouseText(row)}`
   ].join("\n");
@@ -540,7 +546,7 @@ async function handleProcurementCreated() {
 
 function openFbpTransfer(row) {
   fbpTransferRow.value = row;
-  fbpTransferForm.quantity = Math.max(1, Math.round(Number(row?.suggested_transfer_qty || row?.suggested_qty || 1)));
+  fbpTransferForm.quantity = Math.max(1, Math.min(Math.round(Number(row?.local_available || 0)), Math.round(Number(row?.suggested_transfer_qty || row?.suggested_qty || 1))));
   fbpTransferForm.status = "sent";
   fbpTransferForm.tracking_no = "";
   fbpTransferForm.box_no = "";
@@ -558,6 +564,10 @@ async function submitFbpTransfer() {
     return;
   }
   const quantity = Math.max(1, Math.round(Number(fbpTransferForm.quantity || 0)));
+  if (quantity > Number(row.local_available || 0)) {
+    ElMessage.error("发仓数量超过订单口径的本地可发仓库存，请刷新后重试");
+    return;
+  }
   fbpTransferSubmitting.value = true;
   try {
     await apiClient.post("/api/fbp-transfer-records", {
@@ -1238,7 +1248,7 @@ onActivated(() => {
             <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || "-" }}</span>
             <el-tooltip placement="top" effect="light" :content="inventoryTooltipCn(row)" :popper-style="{ whiteSpace: 'pre-line', maxWidth: '280px' }">
               <div class="inventory-summary-cell">
-                <span><strong>本地+采购</strong><em>{{ integer(localInventoryTotal(row)) }}</em></span>
+                <span><strong>本地可发仓</strong><em>{{ integer(localAvailableQty(row)) }}</em></span>
                 <button
                   type="button"
                   class="inventory-summary-action"
@@ -1265,7 +1275,7 @@ onActivated(() => {
                 <el-tag :type="row.suggested_action === 'transfer' ? 'success' : 'warning'" effect="light">
                   {{ row.suggested_action_text || "观察" }}
                 </el-tag>
-                <span class="fbp-cell-meta-line">发仓 {{ integer(row.suggested_transfer_qty) }} / 采购 {{ integer(row.suggested_purchase_qty) }}</span>
+                <span class="fbp-cell-meta-line">发仓 {{ integer(row.suggested_transfer_qty) }} / 待到货 {{ integer(row.suggested_wait_inbound_qty) }} / 采购 {{ integer(row.suggested_purchase_qty) }}</span>
               </div>
             </el-tooltip>
           </template>
@@ -1377,7 +1387,7 @@ onActivated(() => {
               <el-button
                 size="small"
                 class="fbp-inline-button fbp-inline-button-secondary"
-                :disabled="Number(row.suggested_transfer_qty || 0) <= 0 && Number(row.local_stock || 0) <= 0"
+                :disabled="Number(row.local_available || 0) <= 0"
                 @click="openFbpTransfer(row)"
               >
                 创建发仓
@@ -1460,8 +1470,8 @@ onActivated(() => {
           <el-table-column label="库存参考" min-width="240" align="center">
             <template #default="{ row }">
               <div class="fbp-create-stock-grid">
-                <span><em>产品库存</em><strong>{{ integer(localInventoryTotal(row)) }}</strong></span>
-                <span><em>本地现货</em><strong>{{ integer(row.local_stock) }}</strong></span>
+                <span><em>本地可发仓</em><strong>{{ integer(localAvailableQty(row)) }}</strong></span>
+                <span><em>本地在库</em><strong>{{ integer(row.local_stock) }}</strong></span>
                 <span><em>采购在途</em><strong>{{ integer(row.pending_procurement_qty) }}</strong></span>
                 <span><em>FBP</em><strong>{{ integer(row.fbp_available) }}</strong></span>
                 <span><em>FBS</em><strong>{{ integer(row.fbs_available) }}</strong></span>
@@ -1630,7 +1640,7 @@ onActivated(() => {
       <el-form label-width="92px" class="fbp-transfer-form">
         <el-form-item label="发仓数量">
           <el-input-number v-model="fbpTransferForm.quantity" :min="1" :step="1" :precision="0" controls-position="right" style="width: 180px" />
-          <span class="fbp-form-tip">本地可用 {{ integer(fbpTransferRow?.local_stock) }} 件</span>
+          <span class="fbp-form-tip">本地可发仓 {{ integer(fbpTransferRow?.local_available) }} 件</span>
         </el-form-item>
         <el-form-item label="状态">
           <el-select v-model="fbpTransferForm.status" style="width: 180px">
