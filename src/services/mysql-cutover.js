@@ -6866,6 +6866,7 @@ export async function syncOzonStocksMysql(body = {}, options = {}) {
   invalidateMasterDataCache("stock-alerts:base");
   invalidateMasterDataCache("stock-alerts:base:v2");
   invalidateMasterDataCache("stock-alerts:fbp-base:v1");
+  invalidateMasterDataCachePrefix("online-products:");
   const status = errors.length ? "partial_error" : "ok";
   const message = `Fetched ${fetched}, upserted ${upserted}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
   return { status, fetched, upserted, errors, message, auto_fbp_receive: autoFbpReceive, alerts: await stockAlertsMysql() };
@@ -8434,6 +8435,7 @@ export async function syncOzonOnlineProductsMysql(body = {}) {
   );
 
 
+  invalidateMasterDataCachePrefix("online-products:");
   if (errors.length && upserted === 0) throw new Error(errors.join(" | "));
   return { fetched, upserted, errors, concurrency, scope: pendingListingOnly ? "pending_listing" : "all", shops: shopResults };
 }
@@ -8964,16 +8966,18 @@ export async function backfillOzonFinanceMysql(body = {}, options = {}) {
 
 export async function onlineProductsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const batchStock = String(query.batchStock || query.batch_stock || "") === "1";
   await ensureProductNamingSchemaMysql();
   await ensureOnlineProductsPublishedAtSchemaMysql();
   await ensureOzonStockStorageSchemaMysql();
   const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
   const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
-  if (defaultTenant) await repairMissingOnlineProductSkusMysql();
+  if (defaultTenant && !batchStock) await repairMissingOnlineProductSkusMysql();
   const paged = String(query.paged || "") === "1";
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
   const shopId = String(query.shopId || query.shop_id || "all");
+  const stockShopId = /^\d+$/.test(shopId) ? Number(shopId) : 0;
   const status = String(query.status || "all");
   const nameText = String(query.name || query.query || "").trim().toLowerCase();
   const offerText = String(query.offer || query.sku || "").trim().toLowerCase();
@@ -8985,6 +8989,7 @@ export async function onlineProductsMysql(query = {}, tenantId = "admin") {
     where.push("op.shop_id = ?");
     params.push(Number(shopId));
   }
+  if (batchStock) where.push("op.ozon_sku REGEXP '^[0-9]+$' AND op.ozon_sku != '0'");
   if (nameText) {
     where.push("LOWER(COALESCE(op.name, '')) LIKE ?");
     params.push(`%${nameText}%`);
@@ -9002,7 +9007,7 @@ export async function onlineProductsMysql(query = {}, tenantId = "admin") {
     params.push(endDate);
   }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const stockJoinSql = onlineProductStockJoinSqlMysql();
+  const stockJoinSql = onlineProductStockJoinSqlMysql([], stockShopId);
   const productJoinSql = defaultTenant ? "LEFT JOIN products p ON p.id = op.product_id" : "LEFT JOIN products p ON 1 = 0";
   const productIdSql = defaultTenant ? "op.product_id" : "NULL AS product_id";
   const selectSql = `
@@ -9033,7 +9038,7 @@ export async function onlineProductsMysql(query = {}, tenantId = "admin") {
     ${whereSql}
   `;
   if (paged) {
-    if (status === "all") {
+    if (status === "all" && !batchStock) {
       const cacheKey = `online-products:list:${normalizedTenantId}:${JSON.stringify({ page, pageSize, shopId, status, nameText, offerText, startDate, endDate })}`;
       return getCachedMasterData(cacheKey, async () => {
       const [totalRow, countRows, pageIdRows] = await Promise.all([
@@ -9065,7 +9070,7 @@ export async function onlineProductsMysql(query = {}, tenantId = "admin") {
         const placeholders = pageIds.map(() => "?").join(", ");
         const idWhereSql = where.length ? `AND op.id IN (${placeholders})` : `WHERE op.id IN (${placeholders})`;
         const orderSql = pageIds.map((id, index) => `WHEN ${Number(id)} THEN ${index}`).join(" ");
-        const scopedSelectSql = selectSql.replace(stockJoinSql, onlineProductStockJoinSqlMysql(pageIds));
+        const scopedSelectSql = selectSql.replace(stockJoinSql, onlineProductStockJoinSqlMysql(pageIds, stockShopId));
         rows = await mysqlQuery(`
           ${scopedSelectSql}
           ${idWhereSql}
@@ -9097,26 +9102,28 @@ export async function onlineProductsMysql(query = {}, tenantId = "admin") {
         ${statusKeySql} AS status_key
       FROM online_products op
       JOIN shops s ON s.id = op.shop_id
-      LEFT JOIN products p ON p.id = op.product_id
       ${stockJoinSql}
       ${whereSql}
     `;
-    const statusIndexCacheKey = `online-products:status-index:${normalizedTenantId}:${JSON.stringify({ shopId, nameText, offerText, startDate, endDate })}`;
+    const statusIndexCacheKey = `online-products:status-index:${normalizedTenantId}:${JSON.stringify({ batchStock, shopId, nameText, offerText, startDate, endDate })}`;
     const statusRows = await getCachedMasterData(
       statusIndexCacheKey,
       () => mysqlQuery(statusRowsSql, params),
       30_000
     );
     const statusCounts = { all: 0, ready_for_sale: 0, zero_stock: 0, selling: 0, ready: 0, error: 0, moderation: 0, hidden: 0, archived: 0, other: 0 };
-    for (const item of statusRows) {
+    const eligibleStatusRows = batchStock
+      ? statusRows.filter((row) => !["archived", "hidden"].includes(row.status_key))
+      : statusRows;
+    for (const item of eligibleStatusRows) {
       const statusKey = Object.hasOwn(statusCounts, item.status_key) ? item.status_key : "other";
       statusCounts[statusKey] += 1;
       statusCounts.all += 1;
     }
     statusCounts.ready_for_sale = Number(statusCounts.ready || 0) + Number(statusCounts.zero_stock || 0);
-    const acceptedStatusSet = new Set(acceptedStatusKeys);
-    const filteredRows = statusRows
-      .filter((row) => acceptedStatusSet.has(row.status_key))
+    const acceptedStatusSet = status === "all" ? null : new Set(acceptedStatusKeys);
+    const filteredRows = eligibleStatusRows
+      .filter((row) => !acceptedStatusSet || acceptedStatusSet.has(row.status_key))
       .sort((a, b) => {
         const timeDiff = new Date(b.sort_at || 0).getTime() - new Date(a.sort_at || 0).getTime();
         return timeDiff || Number(b.id || 0) - Number(a.id || 0);
@@ -9132,7 +9139,7 @@ export async function onlineProductsMysql(query = {}, tenantId = "admin") {
     const placeholders = pageIds.map(() => "?").join(", ");
     const idWhereSql = where.length ? `AND op.id IN (${placeholders})` : `WHERE op.id IN (${placeholders})`;
     const orderSql = pageIds.map((id, index) => `WHEN ${Number(id)} THEN ${index}`).join(" ");
-    const scopedSelectSql = selectSql.replace(stockJoinSql, onlineProductStockJoinSqlMysql(pageIds));
+    const scopedSelectSql = selectSql.replace(stockJoinSql, onlineProductStockJoinSqlMysql(pageIds, stockShopId));
     const rows = await mysqlQuery(`
       ${scopedSelectSql}
       ${idWhereSql}
@@ -9167,7 +9174,7 @@ export async function onlineProductsMysql(query = {}, tenantId = "admin") {
   return mappedRows;
 }
 
-function onlineProductStockJoinSqlMysql(scopedOnlineProductIds = []) {
+function onlineProductStockJoinSqlMysql(scopedOnlineProductIds = [], shopId = 0) {
   const scopedIds = scopedOnlineProductIds.map(Number).filter(Boolean);
   const scopeJoinSql = scopedIds.length
     ? `JOIN online_products stock_scope
@@ -9188,6 +9195,7 @@ function onlineProductStockJoinSqlMysql(scopedOnlineProductIds = []) {
         MAX(stock_rows.synced_at) AS stock_synced_at
       FROM ozon_stock_snapshots stock_rows
       ${scopeJoinSql}
+      ${shopId ? `WHERE stock_rows.shop_id = ${Number(shopId)}` : ""}
       GROUP BY stock_rows.shop_id, stock_rows.ozon_sku
     ) stock ON stock.shop_id = op.shop_id AND stock.ozon_sku = op.ozon_sku
   `;
