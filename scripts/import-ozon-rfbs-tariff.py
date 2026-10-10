@@ -38,12 +38,30 @@ digest = hashlib.sha256(source.read_bytes()).hexdigest()
 output_dir = Path(__file__).resolve().parents[1] / "data" / "ozon-rfbs-tariffs"
 output_dir.mkdir(parents=True, exist_ok=True)
 output = output_dir / f"{effective_date}-{digest[:12]}.json"
-if output.exists():
+marketplace_output = output_dir / f"{effective_date}-{digest[:12]}-marketplace.json"
+if output.exists() and marketplace_output.exists():
     raise SystemExit(f"Version already exists: {output}")
 payload = {"effectiveDate": effective_date, "importedAt": datetime.now(timezone.utc).isoformat(),
            "sourceFile": source.name, "sourceSha256": digest, "sheet": sheet.title,
            "priceBandsRub": [[0, 1500], [1500.01, 5000], [5000.01, None]],
            "columns": ["typeZh", "categoryZh", "marketplaceZh", "typeRu", "categoryRu", "marketplaceRu", "brand", "rate0", "rate1", "rate2"],
            "rows": rows}
-output.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-print(f"{output}: {len(rows)} rows, sha256={digest}")
+if not output.exists():
+    output.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+marketplace_sheet = workbook["MP Tree Tarifs CN"]
+marketplace_rows = []
+for excel_row, row in enumerate(marketplace_sheet.values, 1):
+    if excel_row < 3 or row[0] is None:
+        continue
+    if any(row[index] is None for index in (0, 2, 3, 5, 6, 7, 8)):
+        raise SystemExit(f"Missing marketplace rFBS data at Excel row {excel_row}")
+    marketplace_rows.append([str(row[index]).strip() for index in (2, 5, 0, 3)] +
+                            [round(float(row[index]) * 100, 4) for index in (6, 7, 8)])
+marketplace_payload = {"effectiveDate": effective_date, "importedAt": payload["importedAt"],
+                       "sourceFile": source.name, "sourceSha256": digest, "sheet": marketplace_sheet.title,
+                       "priceBandsRub": payload["priceBandsRub"],
+                       "columns": ["blockZh", "marketplaceZh", "blockRu", "marketplaceRu", "rate0", "rate1", "rate2"],
+                       "rows": marketplace_rows}
+if not marketplace_output.exists():
+    marketplace_output.write_text(json.dumps(marketplace_payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+print(f"{output}: {len(rows)} detailed rows; {marketplace_output}: {len(marketplace_rows)} marketplace rows; sha256={digest}")

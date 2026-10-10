@@ -1,6 +1,17 @@
 import { currentEffectiveLogisticsRules } from "./effective-logistics-rules.js";
 
 const round = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
+const CHANNEL_ORDER = ["express", "standard", "economy"];
+const CHANNEL_LABELS = { express: "空运", standard: "陆空", economy: "陆运" };
+
+export function channelLabel(channel) { return CHANNEL_LABELS[String(channel || "").toLowerCase()] || String(channel || ""); }
+
+export function threeChannelQuotes(quotes = []) {
+  return CHANNEL_ORDER.flatMap((channel) => {
+    const matches = quotes.filter((quote) => String(quote.channel || "").toLowerCase() === channel);
+    return matches.length ? [matches.reduce((best, quote) => Number(quote.priceCny) < Number(best.priceCny) ? quote : best)] : [];
+  });
+}
 
 function serviceClass(name) {
   return ["Premium Big", "Premium Small", "Extra Small", "Budget", "Big", "Small"]

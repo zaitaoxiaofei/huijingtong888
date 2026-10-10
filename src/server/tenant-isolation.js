@@ -5,6 +5,12 @@ const TENANT_SCOPED_SAFE_PATHS = new Set([
   "system/update-status"
 ]);
 
+const SHARED_PRICING_READ_PATHS = new Set([
+  "tools/pricing/reference-rate",
+  "tools/pricing/rfbs-marketplace",
+  "tools/pricing/logistics-rules"
+]);
+
 const TENANT_SELLER_ANALYTICS_ROUTES = new Set([
   "GET db/seller-analytics/summary",
   "GET db/seller-analytics/metrics",
@@ -51,6 +57,7 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const path = parts.slice(1).join("/");
   if (TENANT_SCOPED_SAFE_PATHS.has(path)) return { allowed: true };
   const verb = String(method || "GET").toUpperCase();
+  if (verb === "GET" && SHARED_PRICING_READ_PATHS.has(path)) return { allowed: true };
   if (isTenantSellerAnalyticsRoute(path, verb)) return { allowed: true };
   const tenantOzonAttributeRead = parts[1] === "listing" && parts.length === 3
     && ["ozon-category-attributes", "ozon-attribute-values"].includes(parts[2]) && verb === "GET";

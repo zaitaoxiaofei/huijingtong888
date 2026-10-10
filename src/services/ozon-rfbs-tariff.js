@@ -39,3 +39,18 @@ export function rfbsCategory(tariff, index) {
   if (!row || !Number.isInteger(Number(index))) return null;
   return { id: Number(index), label: `${row[2]} / ${row[1]} / ${row[0]}${row[6] === "All" ? "" : ` / ${row[6]}`}`, brand: row[6], rates: row.slice(7, 10), version: tariff.effectiveDate, sourceFile: tariff.sourceFile };
 }
+
+export async function latestRfbsMarketplace(now = new Date()) {
+  const tariff = await latestRfbsTariff(now);
+  const filename = `${tariff.effectiveDate}-${tariff.sourceSha256.slice(0, 12)}-marketplace.json`;
+  const marketplace = JSON.parse(await readFile(path.join(directory, filename), "utf8"));
+  if (marketplace.sourceSha256 !== tariff.sourceSha256 || marketplace.effectiveDate !== tariff.effectiveDate) {
+    throw new Error("Ozon rFBS 汇总类目与细分类目版本不一致，请重新导入费率表");
+  }
+  return {
+    version: marketplace.effectiveDate, sourceFile: marketplace.sourceFile,
+    rows: marketplace.rows.map((row, id) => ({
+      id, block: row[0], category: row[1], blockRu: row[2], categoryRu: row[3], rates: row.slice(4, 7)
+    }))
+  };
+}
