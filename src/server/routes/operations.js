@@ -1,12 +1,15 @@
 import { hasPermission } from "../../shared/permissions.js";
 import { tenantIdFromRequest } from "./sellerAnalytics.js";
 import { currentPricingReferenceRate } from "../../services/pricing-reference-rate.js";
-import { latestRfbsTariff, searchRfbsCategories, rfbsCategory } from "../../services/ozon-rfbs-tariff.js";
+import { latestRfbsTariff, latestRfbsMarketplace, searchRfbsCategories, rfbsCategory } from "../../services/ozon-rfbs-tariff.js";
+import { sharedPricingLogisticsRules } from "../../services/pricing-logistics-rules.js";
 export function createOperationsRoutes({ services, readJson }) {
   return {
     "GET /api/tools/pricing/reference-rate": () => currentPricingReferenceRate(),
     "GET /api/tools/pricing/rfbs-categories": async (req, url) => searchRfbsCategories(await latestRfbsTariff(), url.searchParams.get("keyword"), url.searchParams.get("limit")),
     "GET /api/tools/pricing/rfbs-category": async (req, url) => rfbsCategory(await latestRfbsTariff(), url.searchParams.get("id")),
+    "GET /api/tools/pricing/rfbs-marketplace": () => latestRfbsMarketplace(),
+    "GET /api/tools/pricing/logistics-rules": () => sharedPricingLogisticsRules(),
     "GET /api/settings/packaging-fee-rule": () => services.packagingFeeRule(),
     "GET /api/settings/packaging-fee-rule/changes": (req, url) => services.packagingFeeRuleChanges(url?.searchParams?.get("limit") || 20),
     "GET /api/logistics-rules": (req) => services.logisticsRules(tenantIdFromRequest(req)),

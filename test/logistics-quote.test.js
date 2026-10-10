@@ -1,6 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { quoteLogisticsRules } from "../frontend/admin/utils/logistics-quote.js";
+import { quoteLogisticsRules, channelLabel, threeChannelQuotes } from "../frontend/admin/utils/logistics-quote.js";
+
+test("three local channels appear in Express, Standard, Economy order", () => {
+  const quotes = [
+    { id: 1, channel: "economy", priceCny: 9 },
+    { id: 2, channel: "express", priceCny: 15 },
+    { id: 3, channel: "standard", priceCny: 12 },
+    { id: 4, channel: "express", priceCny: 13 }
+  ];
+  assert.deepEqual(threeChannelQuotes(quotes).map((quote) => quote.id), [4, 3, 1]);
+  assert.deepEqual(["express", "standard", "economy"].map(channelLabel), ["空运", "陆空", "陆运"]);
+});
 
 const at = "2026-10-10T00:00:00+08:00";
 const rule = {

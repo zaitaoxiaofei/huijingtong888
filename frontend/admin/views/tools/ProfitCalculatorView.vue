@@ -2,9 +2,10 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { calculateProfit } from "../../utils/pricing-tool.js";
-import { quoteLogisticsRules } from "../../utils/logistics-quote.js";
+import { quoteLogisticsRules, channelLabel, threeChannelQuotes } from "../../utils/logistics-quote.js";
 import { apiClient } from "../../utils/api.js";
-import { commissionRateForRub, commissionBandLabel } from "../../utils/rfbs-commission.js";
+import { commissionRateForRub } from "../../utils/rfbs-commission.js";
+import RfbsCommissionPicker from "./RfbsCommissionPicker.vue";
 
 const form = reactive({
   category: "", saleCny: null, purchaseCost: null, commissionRate: null, carrier: "GUOO",
@@ -16,35 +17,26 @@ const logisticsRules = ref([]);
 const logisticsError = ref("");
 const rateError = ref("");
 const rateSourceDate = ref("");
-const categoryOptions = ref([]);
-const categoryLoading = ref(false);
-const categoryDetail = ref(null);
+const selection = ref(null);
+const categoryDetail = computed(() => selection.value?.category || null);
 const selectedRuleId = ref(null);
-async function searchCategories(keyword = "") {
-  categoryLoading.value = true;
-  try {
-    const params = new URLSearchParams({ keyword, limit: "50" });
-    const data = await apiClient.get(`/api/tools/pricing/rfbs-categories?${params}`);
-    categoryOptions.value = data.rows.map((item) => ({ value: String(item.id), label: item.label }));
-  } catch {
-    categoryOptions.value = [];
-  } finally {
-    categoryLoading.value = false;
-  }
-}
-async function selectCategory(id) {
-  categoryDetail.value = await apiClient.get(`/api/tools/pricing/rfbs-category?id=${encodeURIComponent(id)}`);
+function selectCategory(value) {
+  selection.value = value;
+  form.category = String(value.category.id);
   result.value = null;
 }
-const selectedCommission = computed(() => commissionRateForRub(categoryDetail.value?.rates, Number(form.saleCny) * Number(form.exchangeRate)));
+const saleRub = computed(() => Number(form.saleCny) * Number(form.exchangeRate));
+const actualCommission = computed(() => commissionRateForRub(categoryDetail.value?.rates, saleRub.value));
+const selectedCommission = computed(() => selection.value ? categoryDetail.value.rates[selection.value.band] : null);
+const bandMismatch = computed(() => selection.value && actualCommission.value !== null && selection.value.band !== (saleRub.value <= 1500 ? 0 : saleRub.value <= 5000 ? 1 : 2));
 const quotes = computed(() => quoteLogisticsRules(logisticsRules.value, {
-  carrier: form.carrier, priceRub: Number(form.saleCny) * Number(form.exchangeRate),
+  carrier: form.carrier, priceRub: saleRub.value,
   weightG: form.weight, length: form.length, width: form.width, height: form.height
 }));
+const displayQuotes = computed(() => threeChannelQuotes(quotes.value));
 onMounted(async () => {
-  searchCategories();
   const [rulesResult, rateResult] = await Promise.allSettled([
-    apiClient.get("/api/logistics-rules"),
+    apiClient.get("/api/tools/pricing/logistics-rules", { noCache: true }),
     apiClient.get("/api/tools/pricing/reference-rate", { noCache: true })
   ]);
   if (rulesResult.status === "fulfilled") logisticsRules.value = Array.isArray(rulesResult.value) ? rulesResult.value : [];
@@ -65,13 +57,14 @@ function calculate() {
     ElMessage.warning("请从 rFBS 佣金表选择商品类目，并等待汇率和售价匹配佣金档位");
     return;
   }
+  if (bandMismatch.value) { ElMessage.warning("所选佣金售价档与实际售价不符，请选择高亮的售价档"); return; }
   const selected = quotes.value.find((quote) => quote.id === selectedRuleId.value);
   if (selectedRuleId.value && !selected) {
     ElMessage.warning("原选物流渠道已不符合当前重量、尺寸或售价，请重新选择");
     return;
   }
   if (selected) form.freight = selected.priceCny;
-  else if (quotes.value.length) selectQuote(quotes.value[0]);
+  else if (displayQuotes.value.length) selectQuote(displayQuotes.value[0]);
   else { ElMessage.warning("当前售价、重量和尺寸没有匹配的有效物流渠道"); return; }
   form.commissionRate = selectedCommission.value;
   try {
@@ -85,30 +78,21 @@ function calculate() {
 
 <template>
   <div class="profit-page">
-    <el-alert type="info" :closable="false" show-icon title="使用最新已生效的 Ozon 中国 rFBS 佣金表和本地物流规则；汇率为俄罗斯央行每日参考值，退货损失按退货率分摊。" />
+    <el-alert type="info" :closable="false" show-icon title="佣金按 Ozon 中国 rFBS 费率表匹配；物流按售价、重量和尺寸匹配本地规则，退货损失按退货率分摊。" />
     <div class="profit-grid">
       <el-card shadow="never">
-        <template #header><h2>Ozon 跨境利润计算器</h2></template>
+        <template #header><h2>OZON 跨境利润计算器</h2></template>
         <el-form :model="form" label-width="150px" label-position="left">
           <h3>基础设置</h3>
           <el-form-item label="实际售价" required><el-input-number v-model="form.saleCny" :min="0" :precision="2" /><span class="unit">元</span></el-form-item>
           <el-form-item label="采购成本" required><el-input-number v-model="form.purchaseCost" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
-          <el-form-item label="商品类目" required><el-select v-model="form.category" filterable remote :remote-method="searchCategories" :loading="categoryLoading" placeholder="搜索并选择 rFBS 细分类目" style="width: 100%" @change="selectCategory"><el-option v-for="item in categoryOptions" :key="item.value" :label="item.label" :value="item.value" /></el-select></el-form-item>
-          <el-form-item label="类目佣金" required><div v-if="categoryDetail" class="unit"><span v-for="(rate, index) in categoryDetail.rates" :key="index">{{ commissionBandLabel(index) }}：{{ rate }}%　</span><br>当前适用：{{ selectedCommission ?? '待匹配售价' }}% · rFBS {{ categoryDetail.version }} · {{ categoryDetail.sourceFile }}</div><span v-else class="unit">选择类目后显示三档佣金</span></el-form-item>
+          <el-form-item label="类目佣金" required><div class="category-field"><RfbsCommissionPicker :selection="selection" :price-rub="saleRub" @select="selectCategory" /><small v-if="selection">rFBS {{ selection.version }} · {{ selection.sourceFile }}</small><small v-if="bandMismatch" class="rate-error">实际售价约 ₽{{ money(saleRub) }}，适用佣金 {{ actualCommission }}%；请选择高亮的售价档。</small></div></el-form-item>
           <el-form-item label="包裹重量" required><el-input-number v-model="form.weight" :min="0" :precision="0" /><span class="unit">克</span></el-form-item>
           <el-form-item label="包裹尺寸" required>
             <div class="dimensions"><el-input-number v-model="form.length" :min="0" :precision="1" /><span>×</span><el-input-number v-model="form.width" :min="0" :precision="1" /><span>×</span><el-input-number v-model="form.height" :min="0" :precision="1" /><span>厘米</span></div>
           </el-form-item>
           <el-form-item label="物流服务商"><el-select v-model="form.carrier" @change="selectedRuleId = null"><el-option label="GUOO" value="GUOO" /><el-option label="CEL" value="CEL" /></el-select></el-form-item>
-          <div class="quote-list">
-            <p v-if="logisticsError">{{ logisticsError }}</p>
-            <p v-else-if="!quotes.length">填写售价、汇率、包装重量和尺寸后显示当前有效渠道；无匹配时请人工核对。</p>
-            <button v-for="quote in quotes" :key="quote.id" type="button" class="quote-card" :class="{ active: selectedRuleId === quote.id }" :title="quote.source" @click="selectQuote(quote)">
-              <strong>{{ quote.name }}</strong><span>¥ {{ money(quote.priceCny) }}</span><small>计费重 {{ quote.chargeableWeightG }}g</small><small>本地规则 #{{ quote.id }} · {{ quote.source }}</small>
-            </button>
-          </div>
-          <el-form-item label="跨境物流费" required><el-input-number v-model="form.freight" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
-          <el-form-item label="人民币兑卢布" required><strong v-if="form.exchangeRate">1 元 = {{ form.exchangeRate }} ₽</strong><span v-else class="unit">获取中…</span><span class="unit">俄罗斯央行每日参考汇率 {{ rateSourceDate }}</span><span v-if="rateError" class="rate-error">{{ rateError }}</span></el-form-item>
+          <p class="exchange-note">参考汇率：1 元 ≈ {{ form.exchangeRate || '获取中' }} ₽ · 俄罗斯央行 {{ rateSourceDate }} <span v-if="rateError" class="rate-error">{{ rateError }}</span></p>
           <h3>其他费用</h3>
           <el-form-item label="国内运费及贴单"><el-input-number v-model="form.domesticCost" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
           <el-form-item label="尾程固定费"><el-input-number v-model="form.lastMile" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
@@ -124,6 +108,12 @@ function calculate() {
           <template #header><strong>计算结果</strong></template>
           <div v-if="result" class="headline"><small>预计净利润</small><strong :class="{ negative: result.profit < 0 }">¥ {{ money(result.profit) }}</strong><span>利润率 {{ result.margin }}% · 售价约 ₽ {{ money(result.saleRub) }}</span></div>
           <el-empty v-else description="填写参数后计算利润" :image-size="80" />
+        </el-card>
+        <el-card shadow="never" class="shipping-panel">
+          <template #header><strong>物流费用</strong></template>
+          <p v-if="logisticsError" class="rate-error">{{ logisticsError }}</p>
+          <p v-else-if="!quotes.length" class="hint">填写售价、重量和尺寸后显示有效渠道。</p>
+          <template v-else><p class="shipping-tip">已匹配 {{ form.carrier }} 当前有效物流方案；点击卡片选择计价渠道。</p><div class="shipping-cards"><button v-for="quote in displayQuotes" :key="quote.id" type="button" class="shipping-card" :class="{ active: selectedRuleId === quote.id }" :title="quote.source" @click="selectQuote(quote)"><strong>{{ channelLabel(quote.channel) }} <small>{{ quote.channel }}</small></strong><b>¥ {{ money(quote.priceCny) }}</b><small>{{ quote.name }}</small><small>计费重 {{ quote.chargeableWeightG }}g</small></button></div></template>
         </el-card>
         <el-card v-if="result" shadow="never">
           <template #header><strong>费用明细（人民币 / 件）</strong></template>
@@ -145,21 +135,28 @@ function calculate() {
 
 <style scoped>
 .profit-page { max-width: 1180px; margin: 0 auto; padding: 24px; }
-.profit-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(320px, 1fr); gap: 18px; margin-top: 18px; }
+.profit-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(360px, 1fr); gap: 20px; margin-top: 14px; }
 .results { display: grid; align-content: start; gap: 18px; }
 h2 { margin: 0; text-align: center; color: #6758e9; font-size: 22px; }
 h3 { border-left: 4px solid #7466ef; padding-left: 10px; margin: 26px 0 18px; font-size: 15px; }
 .unit { margin-left: 8px; color: #697386; }
+.category-field { width: 100%; }
+.category-field small { display: block; color: #8b95a7; font-size: 11px; line-height: 1.4; margin-top: 4px; }
+.category-field .rate-error { color: #d85050; }
+.exchange-note { margin: 2px 0 16px 150px; color: #8b95a7; font-size: 12px; }
 .rate-error { display: block; color: #d85050; }
 .dimensions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .dimensions :deep(.el-input-number) { width: 105px; }
 .calculate-button { width: 100%; margin-top: 10px; }
-.quote-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px 150px; }
-.quote-list p { color: #788294; font-size: 12px; }
-.quote-card { display: grid; gap: 5px; min-width: 150px; padding: 12px; text-align: left; border: 1px solid #d9def0; border-radius: 8px; background: #f8f9ff; cursor: pointer; }
-.quote-card.active { border-color: #7466ef; background: #f0eeff; }
-.quote-card span { color: #6758e9; font-weight: 700; }
-.quote-card small { color: #788294; }
+.shipping-tip { margin: 0 0 12px; padding: 10px 12px; border-radius: 7px; color: #5e558e; background: #f2efff; font-size: 12px; }
+.shipping-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.shipping-card { display: grid; align-content: start; gap: 8px; min-height: 130px; padding: 13px; text-align: left; border: 1px solid #cad9fa; border-radius: 8px; background: #edf5ff; cursor: pointer; }
+.shipping-card:nth-child(3n + 2) { border-color: #dacbff; background: #f8f3ff; }
+.shipping-card:nth-child(3n) { border-color: #ffcce4; background: #fff2f8; }
+.shipping-card.active { box-shadow: inset 0 0 0 2px #7466ef; }
+.shipping-card strong { color: #286adf; font-size: 13px; }
+.shipping-card b { color: #eb4d4d; font-size: 19px; }
+.shipping-card small { color: #788294; font-size: 11px; line-height: 1.4; }
 .headline { display: grid; gap: 8px; }
 .headline strong { font-size: 30px; color: #6758e9; }
 .headline strong.negative { color: #d85050; }
@@ -167,5 +164,5 @@ h3 { border-left: 4px solid #7466ef; padding-left: 10px; margin: 26px 0 18px; fo
 .detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid #eef0f4; }
 .detail-row.total { color: #279b60; }
 .hint { font-size: 12px; }
-@media (max-width: 850px) { .profit-grid { grid-template-columns: 1fr; } .profit-page { padding: 12px; } }
+@media (max-width: 850px) { .profit-grid { grid-template-columns: 1fr; } .profit-page { padding: 12px; } .exchange-note { margin-left: 0; } }
 </style>
