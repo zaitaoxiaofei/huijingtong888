@@ -42,6 +42,8 @@ test('receipt dialog supports direct batch registration and wide table review', 
   assert.match(source, /selected: Number\(batch\.id\) === Number\(selectedInboundRecordId\)/);
   assert.match(source, /title="登记实际收货" width="92%"/);
   assert.match(source, /max-height="60vh"/);
+  assert.match(source, /mode: 'normal', counts: \{\}, requestKey:/);
+  assert.doesNotMatch(source, /if \(result\.suggest_historical \|\| result\.requires_confirmation\) procurementReceiptDialog\.mode = 'historical'/);
 });
 
 test('both receipt entry points remain available without stacked dialogs', () => {

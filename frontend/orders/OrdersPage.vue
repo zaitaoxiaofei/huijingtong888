@@ -1129,7 +1129,6 @@ async function handleConfirmProcurementInbound(row, selectedInboundRecordId = 0)
       records: procurementReceiptDialog.batches.map(batch => ({ id: batch.id, receive_quantity: Number(batch.receive_quantity) }))
     });
     procurementReceiptDialog.impacts = result.impacts || [];
-    if (result.suggest_historical || result.requires_confirmation) procurementReceiptDialog.mode = 'historical';
   } catch (error) {
     ElMessage.warning(error.message || '无法读取入库影响，请刷新后重试');
   } finally { procurementReceiptDialog.loadingImpact = false; }

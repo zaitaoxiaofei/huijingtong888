@@ -22165,11 +22165,6 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
   }
   const records = Array.isArray(body.records) ? body.records : [];
   if (!records.length) throw new Error("Please select inbound records to update");
-  const hasQuantityDifference = records.some((record) => {
-    const payload = record.payload && typeof record.payload === "object" ? record.payload : record;
-    return payload.receive_quantity !== undefined && Number(payload.purchase_quantity ?? payload.quantity) !== Number(payload.receive_quantity);
-  });
-  if (hasQuantityDifference && !String(body.receipt_difference_reason || "").trim()) throw new Error("采购数与实收数不一致，请选择差异原因");
   const result = await withMysqlTransaction(async (connection) => {
     const changedPurchaseOrderIds = new Set();
     const ids = [];
@@ -22177,8 +22172,11 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
       const inboundId = Number(record.id ?? record.inbound_record_id);
       if (!inboundId) continue;
       const payload = record.payload && typeof record.payload === "object" ? record.payload : record;
-      if (Number(payload.purchase_quantity ?? payload.quantity) !== Number(payload.receive_quantity)) {
+      const existing = await mysqlConnectionQueryOne(connection, "SELECT quantity FROM inbound_records WHERE id = ? FOR UPDATE", [inboundId]);
+      if (!existing) throw new Error("Inbound record not found");
+      if (payload.receive_quantity !== undefined && Number(existing.quantity) !== Number(payload.receive_quantity)) {
         const reason = String(body.receipt_difference_reason || "").trim();
+        if (!reason) throw new Error("采购数与实收数不一致，请选择差异原因");
         const detail = String(body.receipt_difference_note || "").trim();
         payload.note = `${payload.note || ""}；收货差异：${reason}${detail ? `（${detail}）` : ""}；操作人 #${sessionPersonId || "system"}；${normalizeMysqlDateTime(new Date())}`;
       }
