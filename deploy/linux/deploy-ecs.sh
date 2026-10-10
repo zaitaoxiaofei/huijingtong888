@@ -132,6 +132,7 @@ require_command npm
 require_command ssh
 require_command scp
 require_command zip
+require_command split
 
 if (( !allow_dirty )); then
   node "$project_root/scripts/verify-release-worktree.mjs"
@@ -165,8 +166,15 @@ ssh_options=(-p "$ssh_port" -o ServerAliveInterval=15 -o ServerAliveCountMax=12 
 scp_options=(-P "$ssh_port" -o ServerAliveInterval=15 -o ServerAliveCountMax=12 -i "$identity_file")
 remote_target="$ssh_user@$host"
 
-printf 'Uploading release artifact...\n'
-scp "${scp_options[@]}" "$archive_path" "$remote_target:$remote_archive"
+printf 'Splitting release artifact for upload...\n'
+split -b 16m "$archive_path" "$work_dir/ozon-erp-upload-part-"
+printf 'Uploading release artifact in chunks...\n'
+for chunk_path in "$work_dir"/ozon-erp-upload-part-*; do
+  chunk_suffix="${chunk_path##*-}"
+  scp "${scp_options[@]}" "$chunk_path" "$remote_target:$remote_archive.part-$chunk_suffix"
+done
+ssh "${ssh_options[@]}" "$remote_target" \
+  "set -e; cat '$remote_archive'.part-* > '$remote_archive'; rm -f '$remote_archive'.part-*; unzip -tqq '$remote_archive'"
 scp "${scp_options[@]}" "$script_dir/remote-release.sh" "$remote_target:$remote_script"
 
 db_init_flag=1
