@@ -16,6 +16,12 @@ export function authorizeApiRequest(req, parts = []) {
   const path = parts.slice(1).join("/");
   const require = (...permissions) => permissions.some(permission => hasPermission(session, permission)) ? { allowed: true } : deny();
 
+  if (method === "GET" && [
+    "tools/pricing/reference-rate",
+    "tools/pricing/rfbs-marketplace",
+    "tools/pricing/logistics-rules"
+  ].includes(path)) return { allowed: true };
+
   if (["auth", "user-preferences", "system-notifications", "ready", "image-proxy"].includes(resource)) return { allowed: true };
   if (resource === "tenants") {
     if (parts[2] === "plugin-token" && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { quoteLogisticsRules, channelLabel, threeChannelQuotes } from "../frontend/admin/utils/logistics-quote.js";
+import { quoteLogisticsRules, channelLabel, threeChannelQuotes, defaultLogisticsQuote } from "../frontend/admin/utils/logistics-quote.js";
 
 test("three local channels appear in Express, Standard, Economy order", () => {
   const quotes = [
@@ -10,6 +10,7 @@ test("three local channels appear in Express, Standard, Economy order", () => {
     { id: 4, channel: "express", priceCny: 13 }
   ];
   assert.deepEqual(threeChannelQuotes(quotes).map((quote) => quote.id), [4, 3, 1]);
+  assert.equal(defaultLogisticsQuote(threeChannelQuotes(quotes)).id, 3);
   assert.deepEqual(["express", "standard", "economy"].map(channelLabel), ["空运", "陆空", "陆运"]);
 });
 

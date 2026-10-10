@@ -49,6 +49,7 @@ export function roleLabels(subject) {
 
 export function pagePermission(path = "") {
   if (["/dashboard", "/onboarding", "/login"].includes(path)) return "common";
+  if (["/tools/pricing", "/tools/profit-calculator"].includes(path)) return "common";
   if (path === "/tenant-management") return "admin";
   if (path === "/settings/system-monitoring" || path === "/settings/scheduled-jobs" || path === "/settings/ai" || path === "/settings/prompts") return "technical";
   if (path.startsWith("/settings") || path.startsWith("/asset-variant-center") || path.startsWith("/finance") || path.startsWith("/profit") || path === "/exceptions/profit") return "admin";

@@ -67,6 +67,15 @@ test("technical can manage system tools but cannot assign roles, access finance 
 
 test("menus and direct route access follow the same combined permissions", () => {
   assert.equal(canAccessPage(["packing"], "/orders"), true);
+  for (const path of ["/tools/pricing", "/tools/profit-calculator"]) {
+    assert.equal(canAccessPage(["packing"], path), true);
+    assert.equal(canAccessPage(["technical"], path), true);
+  }
+  for (const path of ["/api/tools/pricing/reference-rate", "/api/tools/pricing/rfbs-marketplace", "/api/tools/pricing/logistics-rules"]) {
+    assert.equal(allowed(["packing"], "GET", path), true);
+    assert.equal(allowed(["technical"], "GET", path), true);
+    assert.equal(allowed(["packing"], "POST", path), false);
+  }
   assert.equal(canAccessPage(["packing"], "/procurement/workspace"), false);
   assert.equal(canAccessPage(["packing", "procurement"], "/procurement/workspace"), true);
   assert.equal(canAccessPage(["technical"], "/settings/system-monitoring"), true);

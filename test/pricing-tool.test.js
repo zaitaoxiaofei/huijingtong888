@@ -11,7 +11,13 @@ const input = {
 
 test("pricing reaches target margin and derives list price", () => {
   const result = calculatePricing(input);
-  assert.equal(result.saleCny, 89.75);
+  assert.equal(result.saleCny, 95.64);
+  assert.equal(result.lastMile, 2.39);
+  assert.equal(result.withdrawalFee, 0.67);
+  const reverse = calculateProfit({ ...input, saleCny: result.saleCny });
+  assert.equal(reverse.withdrawalFee, result.withdrawalFee);
+  assert.equal(reverse.lastMile, result.lastMile);
+  assert.equal(reverse.profit, result.profit);
   assert.equal(result.listRub, Math.round(result.saleRub * 2 * 100) / 100);
   assert.ok(Math.abs(result.margin - 30) < 0.02);
   assert.equal(result.volumeLiters, 4);
@@ -32,6 +38,8 @@ test("expected return loss raises the price and remains visible in the breakdown
 
 test("profit calculator deducts expected return loss from an actual selling price", () => {
   const baseline = calculateProfit({ ...input, saleCny: 128, commissionRate: 12 });
+  assert.equal(baseline.lastMile, 3.2);
+  assert.equal(baseline.withdrawalFee, 0.97);
   const withReturns = calculateProfit({ ...input, saleCny: 128, commissionRate: 12, returnRate: 10, returnLoss: 20 });
   assert.equal(withReturns.expectedReturnLoss, 2);
   assert.equal(withReturns.profit, baseline.profit - 2);
