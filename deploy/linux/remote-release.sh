@@ -176,16 +176,22 @@ if [[ "$run_db_init" == "1" ]]; then
   (cd "$staging_dir" && npm run db:init:mysql)
 fi
 
-# The tenant-aware logistics-rule queries are used by order synchronization.
-# Existing installations need this explicit, idempotent migration because
-# CREATE TABLE IF NOT EXISTS cannot add the ownership column to an old table.
-if [[ -f "$staging_dir/scripts/migrate-tenant-logistics-rules.mjs" ]]; then
+# Tenant-aware order sync and inventory binding require these ownership columns.
+# Existing installations need explicit, idempotent migrations because CREATE TABLE
+# IF NOT EXISTS cannot add ownership columns to legacy tables.
+for tenant_migration in \
+  migrate-tenant-products-ownership.mjs \
+  migrate-tenant-sku-mappings.mjs \
+  migrate-tenant-logistics-rules.mjs; do
+  if [[ ! -f "$staging_dir/scripts/$tenant_migration" ]]; then
+    continue
+  fi
   set -a
   # shellcheck disable=SC1090
   source "$env_file"
   set +a
-  (cd "$staging_dir" && node scripts/migrate-tenant-logistics-rules.mjs --apply --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
-fi
+  (cd "$staging_dir" && node "scripts/$tenant_migration" --apply --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+done
 
 if [[ -f "$staging_dir/scripts/init-inventory-numbering.mjs" ]]; then
   set -a

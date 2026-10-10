@@ -97,7 +97,9 @@ test("ECS release installs inventory triggers as administrator and checks the se
   assert.match(remote, /primary_version" == "\$release_version"/);
 });
 
-test("ECS release migrates legacy logistics rules before starting tenant-aware order sync", () => {
-  assert.match(remote, /node scripts\/migrate-tenant-logistics-rules\.mjs --apply --mysql-admin-socket=\/var\/run\/mysqld\/mysqld\.sock/);
+test("ECS release migrates tenant ownership dependencies before starting order sync", () => {
+  assert.match(remote, /node "scripts\/\$tenant_migration" --apply --mysql-admin-socket=\/var\/run\/mysqld\/mysqld\.sock/);
+  assert.ok(remote.indexOf("migrate-tenant-products-ownership.mjs") < remote.indexOf("migrate-tenant-sku-mappings.mjs"));
+  assert.ok(remote.indexOf("migrate-tenant-sku-mappings.mjs") < remote.indexOf("migrate-tenant-logistics-rules.mjs"));
   assert.ok(remote.indexOf("migrate-tenant-logistics-rules.mjs") < remote.indexOf("\nstart_candidate\n"));
 });

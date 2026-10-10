@@ -36,7 +36,8 @@ async function inspect(query = mysqlQuery) {
         JOIN shops s ON s.id = m.shop_id
         JOIN products p ON p.id = m.product_id
         WHERE COALESCE(s.tenant_id, ?) != COALESCE(p.tenant_id, ?)
-          OR (m.tenant_id IS NOT NULL AND m.tenant_id != COALESCE(s.tenant_id, ?))`, [defaultId, defaultId, defaultId])
+          ${hasTenantColumn ? "OR (m.tenant_id IS NOT NULL AND m.tenant_id != COALESCE(s.tenant_id, ?))" : ""}`,
+        hasTenantColumn ? [defaultId, defaultId, defaultId] : [defaultId, defaultId])
     ]);
     orphanShopCount = Number(shops || 0);
     orphanProductCount = Number(products || 0);
