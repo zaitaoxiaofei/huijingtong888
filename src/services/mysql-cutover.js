@@ -17193,6 +17193,65 @@ const orderHistoryDedupeMetricsMysql = {
   comparisonErrors: 0
 };
 
+let orderHistoryDedupeMetricsSchemaReadyMysql = false;
+let orderHistoryDedupeMetricsSchemaPromiseMysql = null;
+
+async function ensureOrderHistoryDedupeMetricsSchemaMysql() {
+  if (orderHistoryDedupeMetricsSchemaReadyMysql) return;
+  if (!orderHistoryDedupeMetricsSchemaPromiseMysql) {
+    orderHistoryDedupeMetricsSchemaPromiseMysql = mysqlExecute(`
+      CREATE TABLE IF NOT EXISTS order_history_dedupe_daily_metrics (
+        metric_date DATE NOT NULL,
+        snapshot_source VARCHAR(32) NOT NULL,
+        candidate_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        comparison_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        duplicate_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        changed_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        skipped_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        comparison_error_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (metric_date, snapshot_source)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    `).then(() => {
+      orderHistoryDedupeMetricsSchemaReadyMysql = true;
+    }).finally(() => {
+      orderHistoryDedupeMetricsSchemaPromiseMysql = null;
+    });
+  }
+  await orderHistoryDedupeMetricsSchemaPromiseMysql;
+}
+
+async function recordOrderHistoryDedupeMetricMysql(source, metrics = {}) {
+  try {
+    await ensureOrderHistoryDedupeMetricsSchemaMysql();
+    await mysqlExecute(`
+      INSERT INTO order_history_dedupe_daily_metrics (
+        metric_date, snapshot_source, candidate_count, comparison_count, duplicate_count,
+        changed_count, skipped_count, comparison_error_count
+      )
+      VALUES (DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR), ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        candidate_count = candidate_count + VALUES(candidate_count),
+        comparison_count = comparison_count + VALUES(comparison_count),
+        duplicate_count = duplicate_count + VALUES(duplicate_count),
+        changed_count = changed_count + VALUES(changed_count),
+        skipped_count = skipped_count + VALUES(skipped_count),
+        comparison_error_count = comparison_error_count + VALUES(comparison_error_count)
+    `, [
+      String(source || "sync").slice(0, 32),
+      Number(metrics.candidates || 0),
+      Number(metrics.comparisons || 0),
+      Number(metrics.duplicates || 0),
+      Number(metrics.changed || 0),
+      Number(metrics.skipped || 0),
+      Number(metrics.comparisonErrors || 0)
+    ]);
+  } catch (error) {
+    console.warn("[order-history-dedupe] metric persistence failed; preserving history write", error?.message || error);
+  }
+}
+
 function orderHistoryStateMayBeUnchangedMysql(previousOrder = null, payload = {}) {
   if (!previousOrder) return false;
   return String(previousOrder.status || "") === String(payload.status || "")
@@ -17208,6 +17267,7 @@ async function recordOrderStatusHistoryMysql(shop, posting, orderId, lifecycle, 
   if (dedupeMode !== "off" && orderHistoryStateMayBeUnchangedMysql(previousOrder, payload)) {
     orderHistoryDedupeMetricsMysql.candidates += 1;
     orderHistoryDedupeMetricsMysql.comparisons += 1;
+    let comparisonFailed = false;
     const latest = await mysqlQueryOne(`
       SELECT status, substatus, logistics_status, tracking_stage, sync_state, ordered_at, delivered_at,
         customer_id, customer_name, buyer_city, buyer_region, buyer_country, buyer_district, buyer_zip_code,
@@ -17218,13 +17278,24 @@ async function recordOrderStatusHistoryMysql(shop, posting, orderId, lifecycle, 
       ORDER BY observed_at DESC, id DESC
       LIMIT 1
     `, [Number(orderId)]).catch((error) => {
+      comparisonFailed = true;
       orderHistoryDedupeMetricsMysql.comparisonErrors += 1;
+      void recordOrderHistoryDedupeMetricMysql(source, { candidates: 1, comparisons: 1, comparisonErrors: 1 });
       console.warn("[order-history-dedupe] comparison failed; preserving history write", error?.message || error);
       return null;
     });
     const duplicate = latest
       && orderStatusHistoryRowFingerprintMysql(latest) === orderStatusHistoryBusinessFingerprintMysql(payload);
     if (duplicate) orderHistoryDedupeMetricsMysql.duplicates += 1;
+    if (!comparisonFailed) {
+      await recordOrderHistoryDedupeMetricMysql(source, {
+        candidates: 1,
+        comparisons: 1,
+        duplicates: duplicate ? 1 : 0,
+        changed: duplicate ? 0 : 1,
+        skipped: duplicate && dedupeMode === "enabled" ? 1 : 0
+      });
+    }
     if (duplicate && dedupeMode === "enabled") {
       orderHistoryDedupeMetricsMysql.skipped += 1;
       return { inserted: 0, duplicate: true };
@@ -17673,7 +17744,7 @@ async function reconcileTransportedProcurementBacklogMysql() {
   }
 }
 
-async function upsertPostingMysql(shop, posting) {
+async function upsertPostingMysql(shop, posting, historySource = "sync") {
   await saveRawPostingMysql(shop, posting);
   const exists = await mysqlQueryOne("SELECT * FROM orders WHERE shop_id = ? AND posting_number = ?", [shop.id, posting.posting_number]);
   let orderId = exists?.id;
@@ -17749,7 +17820,7 @@ async function upsertPostingMysql(shop, posting) {
     ]);
     updated = 1;
   }
-  await recordOrderStatusHistoryMysql(shop, posting, orderId, lifecycle, "sync", exists);
+  await recordOrderStatusHistoryMysql(shop, posting, orderId, lifecycle, historySource, exists);
   const outboundStockLocation = resolveOrderStockLocationMysql(posting);
 
   let insertedItems = 0;
@@ -17962,6 +18033,10 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
   const statuses = Array.isArray(body.statuses)
     ? body.statuses.map((item) => String(item || "").trim()).filter(Boolean)
     : String(body.status || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const requestedHistorySource = textValueMysql(body.history_source, body.historySource);
+  const historySource = ["incremental", "cancelled_reconciliation", "posting_detail_reconciliation"].includes(requestedHistorySource)
+    ? requestedHistorySource
+    : "sync";
   const from = normalizeSyncDateMysql(rawFromDateTime || rawFrom);
   const to = normalizeSyncDateMysql(rawToDateTime || rawTo);
   const fetchFrom = normalizeSyncDateTimeMysql(rawFromDateTime) || normalizeShanghaiDateBoundaryMysql(rawFrom, "start") || from;
@@ -17996,7 +18071,7 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
       options.onProgress?.({ phase: "saving", message: `正在写入 ${shop.name} 的 ${postings.length} 单...`, completed_shops: completedShops, total_shops: activeShops.length, fetched });
       for (const posting of postings) {
         throwIfAbortedMysql(options.signal);
-        const stats = await upsertPostingMysql(shop, posting);
+        const stats = await upsertPostingMysql(shop, posting, historySource);
         shopStats.inserted += stats.inserted;
         shopStats.updated += stats.updated;
         shopStats.inserted_items += stats.insertedItems;
@@ -18141,11 +18216,13 @@ export async function syncOzonIncrementalOrdersMysql(body = {}, options = {}) {
           shop_id: shop.id,
           from_datetime: start,
           to,
+          history_source: "incremental",
           skip_post_processing: true
         } : {
           shop_id: shop.id,
           from: range.from,
           to: range.to,
+          history_source: "incremental",
           skip_post_processing: true
         }, options);
         mergeSyncAggregateMysql(aggregate, result, range.reason || "open");
@@ -31877,6 +31954,13 @@ export async function orderStatusHistorySummaryMysql() {
     ORDER BY avg_delivery_hours DESC
     LIMIT 20
   `);
+  const dedupeDaily = await mysqlQuery(`
+    SELECT metric_date, snapshot_source, candidate_count, comparison_count, duplicate_count,
+      changed_count, skipped_count, comparison_error_count
+    FROM order_history_dedupe_daily_metrics
+    WHERE metric_date >= DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR) - INTERVAL 2 DAY
+    ORDER BY metric_date DESC, snapshot_source ASC
+  `).catch(() => []);
   return {
     total_history_rows: Number(total?.count || 0),
     open_orders: Number(openOrders?.count || 0),
@@ -31890,7 +31974,8 @@ export async function orderStatusHistorySummaryMysql() {
     slow_regions: slowRegions,
     dedupe: {
       mode: String(config.orderHistoryDedupeMode || "off"),
-      ...orderHistoryDedupeMetricsMysql
+      ...orderHistoryDedupeMetricsMysql,
+      daily: dedupeDaily
     }
   };
 }

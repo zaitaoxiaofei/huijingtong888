@@ -993,6 +993,20 @@ CREATE TABLE IF NOT EXISTS order_status_history (
   KEY idx_order_status_history_delivery_window (delivery_date_begin, delivery_date_end)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE IF NOT EXISTS order_history_dedupe_daily_metrics (
+  metric_date DATE NOT NULL,
+  snapshot_source VARCHAR(32) NOT NULL,
+  candidate_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  comparison_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  duplicate_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  changed_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  skipped_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  comparison_error_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (metric_date, snapshot_source)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS order_profit_items (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   order_item_id BIGINT UNSIGNED NOT NULL,
