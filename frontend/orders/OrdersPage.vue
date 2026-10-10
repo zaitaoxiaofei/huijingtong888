@@ -1111,7 +1111,7 @@ async function handleConfirmProcurementInbound(row, selectedInboundRecordId = 0)
     return;
   }
   const batches = (procurement.procurement_coverage?.batches || []).filter(batch => batch.status === 'pending_arrival');
-  if (!batches.length) { ElMessage.warning('该订单没有关联的待收采购批次；提前采购请到“每日采购与收货台账”登记到货并入库。'); return; }
+  if (!batches.length) { ElMessage.warning('该订单没有关联的待收采购批次；提前采购请到“待入库清单”登记到货并入库。'); return; }
   Object.assign(procurementReceiptDialog, {
     visible: true,
     saving: false,

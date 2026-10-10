@@ -401,18 +401,21 @@ function canSelectRow(row) {
 }
 
 function rowStatusText(row) {
+  if (row.status === "approved") return "已入库";
+  if (row.status === "cancelled") return "已取消";
   return row.overdue ? "超期待入库" : "待入库";
 }
 
 function rowStatusType(row) {
+  if (row.status === "approved") return "success";
+  if (row.status === "cancelled") return "info";
   return row.overdue ? "danger" : "warning";
 }
 
 function flowTimes(row) {
-  return [
-    { label: "最早创建", value: row.earliest_created_at || "" },
-    { label: "最新采购", value: row.latest_created_at || "" }
-  ];
+  return row.status === "approved"
+    ? [{ label: "入库时间", value: row.approved_at || row.received_at || "" }, { label: "采购时间", value: row.purchased_at || row.created_at || "" }]
+    : [{ label: "采购时间", value: row.purchased_at || row.created_at || "" }];
 }
 
 function actionDisabled(row, action) {
@@ -650,7 +653,7 @@ onMounted(async () => {
 <template>
   <div class="page-stack procurement-list-page procurement-workspace-page">
     <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" @saved="loadPageData" />
-    <ErpPageHeader title="每日采购与收货台账" description="按采购日期和核心品名排序，集中核货、登记快递与到货留痕。" />
+    <ErpPageHeader title="待入库清单" description="查看待入库、已入库与全部采购批次，并按对应时间查看最新记录。" />
 
     <el-alert
       v-if="orderProcurementContext"
@@ -666,7 +669,7 @@ onMounted(async () => {
     </el-alert>
 
     <el-card shadow="never" class="page-card procurement-list-card procurement-workspace-card">
-      <div class="procurement-toolbar procurement-toolbar-sticky procurement-workspace-filter">
+      <div class="procurement-toolbar procurement-workspace-filter">
         <div class="procurement-list-summary">
           <strong>采购与收货明细</strong>
           <span>共 {{ totalRows }} 条</span>
@@ -677,47 +680,7 @@ onMounted(async () => {
           <el-radio-button label="approved">已入库</el-radio-button>
           <el-radio-button label="all">全部</el-radio-button>
         </el-radio-group>
-        <ErpFilterBar>
-          <el-form inline>
-            <el-form-item label="关键词">
-              <el-input
-                v-model="state.filters.query"
-                placeholder="商品名称 / 编码 / SKU / 申请人 / 采购链接"
-                clearable
-                style="width: 360px"
-                @keyup.enter="handleSearch"
-              />
-            </el-form-item>
-            <el-form-item label="采购日期">
-              <el-date-picker v-model="state.filters.purchaseDateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" style="width: 250px" />
-            </el-form-item>
-            <el-form-item label="需求类型">
-              <el-select v-model="state.filters.demandType" style="width: 150px">
-                <el-option label="全部需求" value="all" />
-                <el-option label="真实订单需求" value="real_order" />
-                <el-option label="库存预警需求" value="inventory_warning" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="采购负责人">
-              <el-select v-model="state.filters.personId" filterable style="width: 140px">
-                <el-option label="全部" value="all" />
-                <el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="String(person.id)" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="供应商">
-              <el-select v-model="state.filters.supplierId" filterable style="width: 150px">
-                <el-option label="全部供应商" value="all" />
-                <el-option v-for="supplier in state.suppliers" :key="supplier.id" :label="supplier.name" :value="String(supplier.id)" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="采购平台">
-              <el-select v-model="state.filters.sourceType" style="width: 130px">
-                <el-option label="全部平台" value="all" />
-                <el-option v-for="option in sourceTypeOptions" :key="option.value" :label="option.label" :value="option.value" />
-              </el-select>
-            </el-form-item>
-          </el-form>
-          <template #actions>
+        <div class="purchase-toolbar-actions">
             <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
             <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
             <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
@@ -730,9 +693,17 @@ onMounted(async () => {
             <el-button class="erp-btn erp-btn-danger" :disabled="!state.selectedRows.length" :loading="cancelSubmitting" @click="cancelSelectedRows">
               选中取消
             </el-button>
-          </template>
-        </ErpFilterBar>
+        </div>
       </div>
+
+      <ErpFilterBar class="purchase-filter-bar"><el-form class="purchase-primary-filters">
+        <el-form-item label="关键词"><el-input v-model="state.filters.query" placeholder="商品名称 / 编码 / SKU / 申请人 / 采购链接" clearable @keyup.enter="handleSearch" /></el-form-item>
+        <el-form-item label="采购日期"><el-date-picker v-model="state.filters.purchaseDateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" /></el-form-item>
+        <el-form-item label="需求类型"><el-select v-model="state.filters.demandType"><el-option label="全部需求" value="all" /><el-option label="真实订单需求" value="real_order" /><el-option label="库存预警需求" value="inventory_warning" /></el-select></el-form-item>
+        <el-form-item label="采购负责人"><el-select v-model="state.filters.personId" filterable><el-option label="全部" value="all" /><el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="String(person.id)" /></el-select></el-form-item>
+        <el-form-item label="供应商"><el-select v-model="state.filters.supplierId" filterable><el-option label="全部供应商" value="all" /><el-option v-for="supplier in state.suppliers" :key="supplier.id" :label="supplier.name" :value="String(supplier.id)" /></el-select></el-form-item>
+        <el-form-item label="采购平台"><el-select v-model="state.filters.sourceType"><el-option label="全部平台" value="all" /><el-option v-for="option in sourceTypeOptions" :key="option.value" :label="option.label" :value="option.value" /></el-select></el-form-item>
+      </el-form></ErpFilterBar>
 
       <InventoryStructuredSearch
         compact
@@ -1025,11 +996,11 @@ onMounted(async () => {
 }
 
 .procurement-toolbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) auto minmax(0, 2fr);
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 0;
+  gap: 16px;
+  padding: 12px 0;
 }
 
 .procurement-list-summary {
@@ -1051,12 +1022,43 @@ onMounted(async () => {
 }
 
 .purchase-status-filter {
-  flex: 0 0 auto;
+  justify-self: center;
 }
 
-.procurement-structured-search {
-  flex: none;
+.purchase-toolbar-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
+
+.purchase-toolbar-actions :deep(.el-button) {
+  margin-left: 0;
+}
+
+.purchase-primary-filters {
+  display: grid;
+  grid-template-columns: minmax(260px, 2fr) minmax(260px, 1.5fr) repeat(4, minmax(130px, 1fr));
+  gap: 12px;
+  padding: 12px;
+  margin-bottom: 10px;
+  border: 1px solid #e7ebf2;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.purchase-filter-bar { display: block; }
+.purchase-filter-bar:deep(.erp-filter-bar__filters) { display: block; width: 100%; }
+
+.purchase-primary-filters :deep(.el-form-item) { display: block; min-width: 0; margin: 0; }
+.purchase-primary-filters :deep(.el-form-item__label) { display: block; height: auto; margin-bottom: 5px; padding: 0; font-size: 12px; line-height: 18px; }
+.purchase-primary-filters :deep(.el-form-item__content),
+.purchase-primary-filters :deep(.el-input),
+.purchase-primary-filters :deep(.el-select),
+.purchase-primary-filters :deep(.el-date-editor) { width: 100%; min-width: 0; }
+
+.procurement-structured-search { flex: none; margin-bottom: 10px; }
 
 .procurement-shipment-cell {
   display: grid;
@@ -1071,15 +1073,7 @@ onMounted(async () => {
 }
 
 .procurement-structured-search:deep(.inventory-structured-search.is-compact) {
-  grid-template-columns: repeat(7, minmax(110px, 1fr)) minmax(180px, 1.35fr);
-  overflow-x: visible;
-}
-
-.procurement-toolbar-sticky {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  background: var(--erp-surface);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .procurement-footer {
@@ -1191,16 +1185,34 @@ onMounted(async () => {
     flex-wrap: wrap;
     white-space: normal;
   }
+
+  .purchase-primary-filters,
+  .procurement-structured-search:deep(.inventory-structured-search.is-compact) { grid-template-columns: 1fr; }
+
+  .purchase-toolbar-actions { justify-content: flex-start; }
 }
 
 @media (max-width: 1500px) {
   .procurement-toolbar {
-    align-items: flex-start;
-    flex-wrap: wrap;
+    grid-template-columns: 1fr auto;
   }
 
+  .purchase-toolbar-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .purchase-primary-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .procurement-structured-search:deep(.inventory-structured-search.is-compact) {
-    grid-template-columns: repeat(4, minmax(140px, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+}
+
+@media (max-width: 900px) {
+  .procurement-toolbar { grid-template-columns: 1fr; }
+  .purchase-status-filter { justify-self: start; }
+  .purchase-primary-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .procurement-structured-search:deep(.inventory-structured-search.is-compact) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 767px) {
+  .purchase-primary-filters,
+  .procurement-structured-search:deep(.inventory-structured-search.is-compact) { grid-template-columns: 1fr; }
 }
 </style>
