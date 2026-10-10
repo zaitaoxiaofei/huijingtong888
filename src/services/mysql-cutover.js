@@ -14871,6 +14871,9 @@ export async function inboundRecordsMysql(query = {}) {
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
   const { whereSql, params } = inboundRecordsWhereMysql(query);
+  const orderBySql = String(query.status || "all") === "approved"
+    ? "COALESCE(ir.approved_at, ir.received_at) DESC, ir.id DESC"
+    : "COALESCE(po.purchased_at, ir.created_at) DESC, ir.id DESC";
   const selectSql = `
     SELECT ir.*, p.code AS product_code, p.name AS product_name, p.image_url AS product_image_url,
       p.inventory_number, p.inventory_category,
@@ -14920,7 +14923,7 @@ export async function inboundRecordsMysql(query = {}) {
   if (!paged) {
     return await mysqlQuery(`
       ${selectSql}
-      ORDER BY DATE(COALESCE(po.purchased_at, ir.created_at)) DESC, p.inventory_category ASC, COALESCE(po.purchased_at, ir.created_at) DESC, ir.id DESC
+      ORDER BY ${orderBySql}
     `, params);
   }
 
@@ -14936,7 +14939,7 @@ export async function inboundRecordsMysql(query = {}) {
     `, params),
     mysqlQuery(`
       ${selectSql}
-      ORDER BY DATE(COALESCE(po.purchased_at, ir.created_at)) DESC, p.inventory_category ASC, COALESCE(po.purchased_at, ir.created_at) DESC, ir.id DESC
+      ORDER BY ${orderBySql}
       LIMIT ? OFFSET ?
     `, [...params, pageSize, offset])
   ]);

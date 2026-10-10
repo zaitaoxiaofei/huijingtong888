@@ -193,7 +193,7 @@ export const router = createRouter({
         { path: "procurement/workspace", name: "procurement-workspace", component: ProcurementWorkspaceView, meta: { title: "采购工作台", breadcrumb: ["采购", "采购工作台"] } },
         { path: "procurement/platform-orders", name: "procurement-platform-orders", component: ProcurementPlatformOrdersView, meta: { title: "平台订单", breadcrumb: ["采购", "平台订单"] } },
         { path: "procurement/reconciliation", name: "procurement-reconciliation", component: ProcurementReconciliationView, meta: { title: "采购对账", breadcrumb: ["采购", "采购对账"] } },
-        { path: "purchase-list", name: "purchase-list", component: PurchaseListView, meta: { title: "采购清单 / 待入库", breadcrumb: ["库存", "采购清单 / 待入库"] } },
+        { path: "purchase-list", name: "purchase-list", component: PurchaseListView, meta: { title: "待入库清单", breadcrumb: ["库存", "待入库清单"] } },
         { path: "purchase-history", name: "purchase-history", component: PurchaseHistoryView, meta: { title: "入库记录", breadcrumb: ["采购入库", "入库记录"] } },
         { path: "purchase-cost-center", name: "purchase-cost-center", component: PurchaseCostCenterView, meta: { title: "成本与异常", breadcrumb: ["采购入库", "成本与异常"] } },
         { path: "inbound", redirect: "/purchase-list" },
