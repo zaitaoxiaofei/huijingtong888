@@ -112,6 +112,9 @@ export const navigationMenus = [
     label: "工具",
     icon: Tools,
     children: [
+      { key: "tools-profit-calculator", label: "利润计算器", route: "/tools/profit-calculator" },
+      { key: "tools-pricing", label: "定价工具", route: "/tools/pricing" },
+      { key: "tools-17track", label: "17TRACK 全球物流查询", route: "https://www.17track.net/zh-cn" },
       { key: "tools-image-cropper", label: "套图拆分", route: "/tools/ecommerce-image-splitter" },
       { key: "tools-product-video-generator", label: "商品视频", route: "/tools/product-video-generator" }
     ]
