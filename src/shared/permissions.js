@@ -64,6 +64,7 @@ export function pagePermission(path = "") {
 
 export function canAccessPage(subject, path) {
   if (path === "/tenant-shops") return hasPermission(subject, "admin") || ["owner", "admin"].includes(subject?.tenant?.role);
+  if (path === "/finance-center" && subject?.tenant?.slug !== "default") return hasPermission(subject, "admin") || ["owner", "admin"].includes(subject?.tenant?.role);
   if (path === "/online-products" && subject?.tenant?.slug !== "default") return hasPermission(subject, "admin") || ["owner", "admin"].includes(subject?.tenant?.role);
   if (path === "/batch-stock-update" && subject?.tenant?.slug !== "default") return hasPermission(subject, "admin") || ["owner", "admin"].includes(subject?.tenant?.role);
   const permission = pagePermission(path);

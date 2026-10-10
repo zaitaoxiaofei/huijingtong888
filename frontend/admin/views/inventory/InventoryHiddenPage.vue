@@ -1,4 +1,6 @@
 ﻿<script setup>
+import { hasPermission } from "../../../../src/shared/permissions.js";
+import { useAuthStore } from "../../stores/auth";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
@@ -13,6 +15,8 @@ import { applyFilterQuery, dateText, integer } from "./inventory-utils.js";
 
 const route = useRoute();
 const router = useRouter();
+const authStore = useAuthStore();
+const canRestoreProduct = computed(() => hasPermission(authStore.user, "inventory.write"));
 let syncingRoute = false;
 const listRequestGate = createLatestRequestGate();
 
@@ -166,7 +170,7 @@ onMounted(async () => {
         <el-table-column label="创建时间" width="170">
           <template #default="{ row }">{{ dateText(row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="160" fixed="right">
+        <el-table-column v-if="canRestoreProduct" label="操作" width="160" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="restoreProduct(row)">恢复到库存表</el-button>
           </template>
@@ -184,4 +188,3 @@ onMounted(async () => {
     />
   </div>
 </template>
-

@@ -67,7 +67,7 @@ function trendStatus(row) {
   return "stable";
 }
 
-async function notifyDecliningTrackers(rows) {
+async function notifyDecliningTrackers(rows, tenantId) {
   const candidates = rows.filter((row) => {
     if (!Number(row.tracked) || !Number(row.owner_person_id)) return false;
     const current = Number(row.week_1_sales || 0);
@@ -88,11 +88,11 @@ async function notifyDecliningTrackers(rows) {
       ozon_sku: row.ozon_sku,
       route: "/order-tracking"
     }, { personId: Number(row.owner_person_id) });
-    await mysqlExecute("UPDATE sku_order_trackers SET last_notified_at = CURRENT_TIMESTAMP WHERE id = ?", [row.tracker_id]);
+    await mysqlExecute("UPDATE sku_order_trackers SET last_notified_at = CURRENT_TIMESTAMP WHERE id = ? AND tenant_id = ?", [row.tracker_id, tenantId]);
   }
 }
 
-function orderedAggregateSql(where, { isDefaultTenant = false } = {}) {
+function orderedAggregateSql(where, { isDefaultTenant = false, tenantId = 0 } = {}) {
   const orderShopPredicate = isDefaultTenant
     ? "(order_shop.tenant_id = ? OR order_shop.tenant_id IS NULL)"
     : "order_shop.tenant_id = ?";
@@ -100,8 +100,8 @@ function orderedAggregateSql(where, { isDefaultTenant = false } = {}) {
     ? "COALESCE(s.tenant_id, (SELECT tenant_default.id FROM tenants tenant_default WHERE tenant_default.slug = 'default' LIMIT 1))"
     : "s.tenant_id";
   const inventoryJoins = isDefaultTenant
-    ? `LEFT JOIN sku_mappings sm ON sm.shop_id = stats.shop_id AND sm.ozon_sku = stats.ozon_sku AND sm.active = 1
-       LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1`
+    ? `LEFT JOIN sku_mappings sm ON (sm.tenant_id = ${tenantId} OR sm.tenant_id IS NULL) AND sm.shop_id = stats.shop_id AND sm.ozon_sku = stats.ozon_sku AND sm.active = 1
+       LEFT JOIN products p ON (p.tenant_id = ${tenantId} OR p.tenant_id IS NULL) AND p.id = sm.product_id AND p.active = 1`
     : "";
   const inventoryFields = isDefaultTenant
     ? "sm.product_id AS inventory_product_id, p.code AS inventory_code, p.name AS inventory_name"
@@ -143,17 +143,21 @@ function orderedAggregateSql(where, { isDefaultTenant = false } = {}) {
     WHERE ${where.join(" AND ")}`;
 }
 
-async function attachPageDetails(pageRows, tenantKey = "admin") {
+async function attachPageDetails(pageRows, tenant) {
   if (!pageRows.length) return;
   const keys = pageRows.map(() => "(?, ?)").join(",");
   const keyParams = pageRows.flatMap((row) => [row.shop_id, row.ozon_sku]);
   const analyticsSkuPlaceholders = pageRows.map(() => "?").join(",");
   const analyticsParams = pageRows.map((row) => row.ozon_sku);
+  const shopTenantPredicate = tenant.isDefault
+    ? `(tenant_shop.tenant_id = ${tenant.id} OR tenant_shop.tenant_id IS NULL)`
+    : `tenant_shop.tenant_id = ${tenant.id}`;
   const [priceRows, analyticsRows] = await Promise.all([
     mysqlQuery(`
       SELECT o.shop_id, oi.ozon_sku, DATE_FORMAT(DATE_SUB(DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00')), INTERVAL (FLOOR(DATEDIFF(DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+08:00')), DATE(CONVERT_TZ(o.ordered_at, '+00:00', '+08:00'))) / 7) * 7) DAY), '%Y-%m-%d') AS week_start,
         ROUND(SUM(oi.sale_price * oi.quantity) / NULLIF(SUM(oi.quantity), 0), 2) AS avg_price
-      FROM orders o JOIN order_items oi ON oi.order_id = o.id
+      FROM orders o JOIN shops tenant_shop ON tenant_shop.id = o.shop_id AND tenant_shop.status != 'deleted' AND ${shopTenantPredicate}
+      JOIN order_items oi ON oi.order_id = o.id
       WHERE (o.shop_id, oi.ozon_sku) IN (${keys}) AND o.ordered_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 21 DAY)
       GROUP BY o.shop_id, oi.ozon_sku, week_start ORDER BY week_start`, keyParams),
     mysqlQuery(`
@@ -161,7 +165,7 @@ async function attachPageDetails(pageRows, tenantKey = "admin") {
         m.impressions, m.card_views, m.add_to_cart, m.conversion_rate, m.captured_at
       FROM seller_analytics_product_metrics m
       WHERE m.tenant_id = ? AND m.period_key IN ('7d', '28d') AND m.sku IN (${analyticsSkuPlaceholders})
-      ORDER BY m.captured_at DESC LIMIT 1000`, [tenantKey, ...analyticsParams]).catch(() => [])
+      ORDER BY m.captured_at DESC LIMIT 1000`, [tenant.key, ...analyticsParams]).catch(() => [])
   ]);
   const priceMap = new Map();
   for (const item of priceRows) {
@@ -202,7 +206,7 @@ export async function skuOrderTrackingList(query = {}, tenantId = "admin") {
   if (shopId !== "all") { where.push("stats.shop_id = ?"); params.push(Number(shopId)); }
   if (keyword) { where.push("LOWER(CONCAT_WS(' ', stats.ozon_sku, stats.order_product_name, op.name, op.offer_id, s.name)) LIKE ?"); params.push(`%${keyword}%`); }
   if (inventoryKeyword && tenant.isDefault) {
-    where.push("(LOWER(CONCAT_WS(' ', p.name, p.code)) LIKE ? OR EXISTS (SELECT 1 FROM product_name_aliases pna WHERE pna.product_id = p.id AND pna.active = 1 AND LOWER(pna.alias_name) LIKE ?))");
+    where.push(`(LOWER(CONCAT_WS(' ', p.name, p.code)) LIKE ? OR EXISTS (SELECT 1 FROM product_name_aliases pna WHERE (pna.tenant_id = ${tenant.id} OR pna.tenant_id IS NULL) AND pna.product_id = p.id AND pna.active = 1 AND LOWER(pna.alias_name) LIKE ?))`);
     params.push(`%${inventoryKeyword}%`, `%${inventoryKeyword}%`);
   } else if (inventoryKeyword) {
     where.push("1 = 0");
@@ -210,7 +214,7 @@ export async function skuOrderTrackingList(query = {}, tenantId = "admin") {
   if (tracked === "1") where.push("tracker.active = 1");
   if (tracked === "0") where.push("tracker.id IS NULL");
 
-  const aggregateSql = orderedAggregateSql(where, { isDefaultTenant: tenant.isDefault });
+  const aggregateSql = orderedAggregateSql(where, { isDefaultTenant: tenant.isDefault, tenantId: tenant.id });
   const risingSql = "week_1_sales > week_2_sales AND week_2_sales > week_3_sales AND week_1_sales >= 3";
   const decliningSql = "week_1_sales < week_2_sales AND week_2_sales < week_3_sales";
   const sharpSql = `NOT (${decliningSql}) AND week_2_sales > 0 AND week_1_sales <= week_2_sales * 0.6`;
@@ -226,7 +230,7 @@ export async function skuOrderTrackingList(query = {}, tenantId = "admin") {
     if (shopId !== "all") { catalogWhere.push("op.shop_id = ?"); catalogParams.push(Number(shopId)); }
     if (keyword) { catalogWhere.push("LOWER(CONCAT_WS(' ', op.ozon_sku, op.name, op.offer_id, s.name)) LIKE ?"); catalogParams.push(`%${keyword}%`); }
     if (inventoryKeyword && tenant.isDefault) {
-      catalogWhere.push("(LOWER(CONCAT_WS(' ', p.name, p.code)) LIKE ? OR EXISTS (SELECT 1 FROM product_name_aliases pna WHERE pna.product_id = p.id AND pna.active = 1 AND LOWER(pna.alias_name) LIKE ?))");
+      catalogWhere.push(`(LOWER(CONCAT_WS(' ', p.name, p.code)) LIKE ? OR EXISTS (SELECT 1 FROM product_name_aliases pna WHERE (pna.tenant_id = ${tenant.id} OR pna.tenant_id IS NULL) AND pna.product_id = p.id AND pna.active = 1 AND LOWER(pna.alias_name) LIKE ?))`);
       catalogParams.push(`%${inventoryKeyword}%`, `%${inventoryKeyword}%`);
     } else if (inventoryKeyword) {
       catalogWhere.push("1 = 0");
@@ -240,11 +244,11 @@ export async function skuOrderTrackingList(query = {}, tenantId = "admin") {
         ${tenant.isDefault ? "sm.product_id inventory_product_id, p.code inventory_code, p.name inventory_name" : "NULL inventory_product_id, NULL inventory_code, NULL inventory_name"},
         tracker.id tracker_id, tracker.active tracked, tracker.owner_person_id, pe.name owner_name, tracker.decline_weeks, tracker.decline_percent, tracker.last_notified_at
         FROM online_products op JOIN shops s ON s.id=op.shop_id
-        ${tenant.isDefault ? "LEFT JOIN sku_mappings sm ON sm.shop_id=op.shop_id AND sm.ozon_sku=op.ozon_sku AND sm.active=1 LEFT JOIN products p ON p.id=sm.product_id AND p.active=1" : ""}
+        ${tenant.isDefault ? `LEFT JOIN sku_mappings sm ON (sm.tenant_id=${tenant.id} OR sm.tenant_id IS NULL) AND sm.shop_id=op.shop_id AND sm.ozon_sku=op.ozon_sku AND sm.active=1 LEFT JOIN products p ON (p.tenant_id=${tenant.id} OR p.tenant_id IS NULL) AND p.id=sm.product_id AND p.active=1` : ""}
         LEFT JOIN sku_order_trackers tracker ON tracker.tenant_id=${tenant.id} AND tracker.shop_id=op.shop_id AND CONVERT(tracker.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci=CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci
         LEFT JOIN tenant_members tracker_owner ON tracker_owner.tenant_id=tracker.tenant_id AND tracker_owner.person_id=tracker.owner_person_id AND tracker_owner.active=1
         LEFT JOIN people pe ON pe.id=tracker.owner_person_id AND tracker_owner.person_id IS NOT NULL WHERE ${catalogWhere.join(" AND ")}) catalog
-      LEFT JOIN (${orderedAggregateSql(["COALESCE(stats.ozon_sku, '') != ''"], { isDefaultTenant: tenant.isDefault })}) stats ON stats.shop_id=catalog.shop_id AND stats.ozon_sku=catalog.ozon_sku
+      LEFT JOIN (${orderedAggregateSql(["COALESCE(stats.ozon_sku, '') != ''"], { isDefaultTenant: tenant.isDefault, tenantId: tenant.id })}) stats ON stats.shop_id=catalog.shop_id AND stats.ozon_sku=catalog.ozon_sku
       WHERE ${trendWhere}`;
     filteredParams = [...catalogParams, tenant.id];
   }
@@ -254,8 +258,8 @@ export async function skuOrderTrackingList(query = {}, tenantId = "admin") {
     mysqlQuery(`${filteredSql} ORDER BY total_sales DESC, shop_id, ozon_sku LIMIT ? OFFSET ?`, [...filteredParams, pageSize, offset])
   ]);
   const pageRows = pageRowsRaw.map((row) => ({ ...row, trend_status: trendStatus(row) }));
-  await attachPageDetails(pageRows, tenant.key);
-  await notifyDecliningTrackers(pageRows);
+  await attachPageDetails(pageRows, tenant);
+  await notifyDecliningTrackers(pageRows, tenant.id);
   return { rows: pageRows, total: Number(countRows[0]?.total || 0), page, pageSize, skuScope: scope };
 }
 

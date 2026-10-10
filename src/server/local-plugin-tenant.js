@@ -1,3 +1,12 @@
+const TENANT_SELLER_ANALYTICS_PLUGIN_ROUTES = new Set([
+  "POST seller-analytics/snapshots",
+  "POST seller-analytics/plugin-status",
+  "GET seller-analytics/plugin-prepare/next",
+  "POST seller-analytics/plugin-prepare/result",
+  "POST seller-analytics/auth-bindings",
+  "GET seller-analytics/collect-runs/next"
+]);
+
 export function isTenantScopedPluginRoute(method, parts = []) {
   const verb = String(method || "GET").toUpperCase();
   const route = parts.slice(2);
@@ -18,8 +27,9 @@ export function isTenantScopedPluginRoute(method, parts = []) {
     return (route[1] === "status" && verb === "GET") || (route[1] === "collect" && verb === "POST");
   }
   if (route[0] === "seller-analytics") {
-    return ["snapshots", "plugin-status", "plugin-prepare", "auth-bindings", "collect-runs"].includes(route[1])
-      && ["GET", "POST"].includes(verb);
+    const path = route.join("/");
+    return TENANT_SELLER_ANALYTICS_PLUGIN_ROUTES.has(`${verb} ${path}`)
+      || (verb === "POST" && /^seller-analytics\/collect-runs\/[^/]+\/requests\/[^/]+\/result$/.test(path));
   }
   return false;
 }

@@ -41,10 +41,12 @@ function cacheInventoryList(requestUrl, result) {
 }
 
 const authStore = useAuthStore();
-const canWriteInventory = computed(() => hasPermission(authStore.user, "inventory.write"));
-const canProcure = computed(() => hasPermission(authStore.user, "procurement"));
-const canSubmitProcurementRequest = computed(() => hasPermission(authStore.user, "procurement.request.submit"));
-const canOutbound = computed(() => hasPermission(authStore.user, "packing") || canWriteInventory.value);
+const isTenantScoped = computed(() => Boolean(authStore.user?.tenant?.id && authStore.user?.tenant?.slug !== "default"));
+const canWriteInventory = computed(() => !isTenantScoped.value && hasPermission(authStore.user, "inventory.write"));
+const canManageProductComponents = computed(() => hasPermission(authStore.user, "inventory.write"));
+const canProcure = computed(() => !isTenantScoped.value && hasPermission(authStore.user, "procurement"));
+const canSubmitProcurementRequest = computed(() => !isTenantScoped.value && hasPermission(authStore.user, "procurement.request.submit"));
+const canOutbound = computed(() => hasPermission(authStore.user, "packing") || hasPermission(authStore.user, "inventory.write"));
 const route = useRoute();
 const router = useRouter();
 let syncingRoute = false;
@@ -64,6 +66,20 @@ function refreshAfterProductRequest() {
 function loadInventoryDictionaries() {
   if (dictionaryLoaded) return Promise.resolve();
   if (dictionaryLoading) return dictionaryLoading;
+  if (isTenantScoped.value) {
+    dictionaryLoading = loadShopDictionary().then((shops) => {
+      state.shops = Array.isArray(shops) ? shops : [];
+      state.people = [];
+      state.suppliers = [];
+      state.logisticsRules = [];
+      dictionaryLoaded = true;
+    }).catch((error) => {
+      ElMessage.warning(error.message || "企业店铺数据加载失败，请稍后重试");
+    }).finally(() => {
+      dictionaryLoading = null;
+    });
+    return dictionaryLoading;
+  }
   dictionaryLoading = Promise.all([
     loadShopDictionary(),
     apiClient.get("/api/people"),
@@ -1472,7 +1488,8 @@ async function submitManualOutbound() {
       ].filter(Boolean).join(" / ")
     };
     if (manualOutboundEditingId.value) {
-      await apiClient.put(`/api/inventory/movements/${manualOutboundEditingId.value}`, payload);
+      const endpoint = isTenantScoped.value ? "manual-outbound-records" : "movements";
+      await apiClient.put(`/api/inventory/${endpoint}/${manualOutboundEditingId.value}`, payload);
       ElMessage.success("手动出库记录已更新");
     } else {
       await apiClient.post("/api/inventory/movements", payload);
@@ -1510,7 +1527,8 @@ async function deleteManualOutboundRecord(row) {
   }
   manualOutboundDeletingId.value = id;
   try {
-    await apiClient.delete(`/api/inventory/movements/${id}`);
+    const endpoint = isTenantScoped.value ? "manual-outbound-records" : "movements";
+    await apiClient.delete(`/api/inventory/${endpoint}/${id}`);
     ElMessage.success("手动出库记录已删除");
     await loadManualOutboundRecords();
     await loadPageData();
@@ -1540,7 +1558,8 @@ async function loadManualOutboundRecords() {
       productId: String(row.id),
       sourceType: "manual_outbound"
     });
-    const result = await apiClient.get(`/api/inventory?${params.toString()}`);
+    const endpoint = isTenantScoped.value ? "/api/inventory/manual-outbound-records" : "/api/inventory";
+    const result = await apiClient.get(`${endpoint}?${params.toString()}`);
     manualOutboundRecordsRows.value = Array.isArray(result?.rows) ? result.rows : [];
     manualOutboundRecordsTotal.value = Number(result?.total || manualOutboundRecordsRows.value.length);
   } catch (error) {
@@ -1937,11 +1956,11 @@ onActivated(() => void loadPageData({ silent: true }));
         @selection-change="handleSelectionChange"
         @sort-change="handleTableSortChange"
       >
-        <el-table-column type="selection" width="48" fixed="left" />
-        <el-table-column label="库存编号" prop="inventory_number" width="125" sortable="custom">
+        <el-table-column v-if="!isTenantScoped" type="selection" width="48" fixed="left" />
+        <el-table-column label="库存编号" prop="inventory_number" width="125" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }"><strong :title="row.inventory_number ? '库存编号生成后保持不变' : '缺少产品身份中的核心品名（inventory_category），请打开编辑库存补齐，保存后自动生成编号'">{{ row.inventory_number || "待补核心品名" }}</strong></template>
         </el-table-column>
-        <el-table-column label="产品信息" prop="product" min-width="340" fixed="left" sortable="custom">
+        <el-table-column label="产品信息" prop="product" min-width="340" fixed="left" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row, $index }">
             <div class="product-cell">
               <ProductImagePreview :src="row.image_url" :load-delay="Math.min($index, 12) * 120" />
@@ -1958,7 +1977,7 @@ onActivated(() => void loadPageData({ silent: true }));
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="库存" prop="stock" width="180" align="center" sortable="custom">
+        <el-table-column label="库存" prop="stock" width="180" align="center" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
             <div class="inventory-stock-cell">
               <div class="stock-total-line">
@@ -2012,7 +2031,7 @@ onActivated(() => void loadPageData({ silent: true }));
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="采购在途" prop="incoming_stock" width="120" align="center" sortable="custom">
+        <el-table-column label="采购在途" prop="incoming_stock" width="120" align="center" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
             <div class="cell-stack cell-center">
               <strong>{{ integer(row.incoming_stock) }}</strong>
@@ -2020,7 +2039,7 @@ onActivated(() => void loadPageData({ silent: true }));
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="FBP在途" prop="fbp_transfer_in_transit_qty" width="120" align="center" sortable="custom">
+        <el-table-column label="FBP在途" prop="fbp_transfer_in_transit_qty" width="120" align="center" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
             <div class="cell-stack cell-center">
               <strong>{{ integer(fbpTransferStock(row)) }}</strong>
@@ -2028,29 +2047,39 @@ onActivated(() => void loadPageData({ silent: true }));
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="销售表现" prop="total_sales_amount" min-width="190" align="right" sortable="custom">
+        <el-table-column label="销售表现" prop="total_sales_amount" min-width="190" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
-            <el-button class="metric-cell-link" link type="primary" @click.stop="openProductSalesDetails(row)">
+            <el-button v-if="!isTenantScoped" class="metric-cell-link" link type="primary" @click.stop="openProductSalesDetails(row)">
               <div class="metric-cell-content cell-stack cell-align-end">
                 <strong>{{ integer(row.total_sales_quantity) }} 件</strong>
                 <span class="muted-text">销售额 ¥{{ money(row.total_sales_amount) }}</span>
                 <span class="muted-text">订单 {{ integer(row.order_count) }} / 均单 ¥{{ money(averageOrderAmount(row)) }}</span>
               </div>
             </el-button>
+            <div v-else class="metric-cell-content cell-stack cell-align-end">
+              <strong>{{ integer(row.total_sales_quantity) }} 件</strong>
+              <span class="muted-text">销售额 ¥{{ money(row.total_sales_amount) }}</span>
+              <span class="muted-text">订单 {{ integer(row.order_count) }} / 均单 ¥{{ money(averageOrderAmount(row)) }}</span>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="采购成本" prop="total_purchase_amount" min-width="170" align="right" sortable="custom">
+        <el-table-column label="采购成本" prop="total_purchase_amount" min-width="170" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
-            <el-button class="metric-cell-link" link type="primary" @click.stop="openProductProcurementDetails(row)">
+            <el-button v-if="!isTenantScoped" class="metric-cell-link" link type="primary" @click.stop="openProductProcurementDetails(row)">
               <div class="metric-cell-content cell-stack cell-align-end">
                 <strong>总采购 ¥{{ money(row.total_purchase_amount) }}</strong>
                 <span class="muted-text">采购数 {{ integer(row.total_purchase_quantity) }}</span>
                 <span class="muted-text">均成本 ¥{{ money(averagePurchaseCost(row)) }}</span>
               </div>
             </el-button>
+            <div v-else class="metric-cell-content cell-stack cell-align-end">
+              <strong>总采购 ¥{{ money(row.total_purchase_amount) }}</strong>
+              <span class="muted-text">采购数 {{ integer(row.total_purchase_quantity) }}</span>
+              <span class="muted-text">均成本 ¥{{ money(averagePurchaseCost(row)) }}</span>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="手动出库" prop="manual_outbound_quantity" min-width="160" align="right" sortable="custom">
+        <el-table-column label="手动出库" prop="manual_outbound_quantity" min-width="160" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
             <el-button class="metric-cell-link" link type="warning" @click.stop="openManualOutboundRecords(row)">
               <div class="metric-cell-content cell-stack cell-align-end">
@@ -2061,29 +2090,39 @@ onActivated(() => void loadPageData({ silent: true }));
             </el-button>
           </template>
         </el-table-column>
-        <el-table-column label="预估利润" prop="estimated_profit_total" min-width="170" align="right" sortable="custom">
+        <el-table-column label="预估利润" prop="estimated_profit_total" min-width="170" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
-            <el-button class="metric-cell-link" link type="success" @click.stop="openProfitDetailsByMode(row, 'estimated')">
+            <el-button v-if="!isTenantScoped" class="metric-cell-link" link type="success" @click.stop="openProfitDetailsByMode(row, 'estimated')">
               <div class="metric-cell-content cell-stack cell-align-end">
                 <strong :class="profitDetailProfitClass(row.estimated_profit_total)">¥{{ money(row.estimated_profit_total) }}</strong>
                 <span class="muted-text">待入账 ¥{{ money(pendingAccruedProfit(row)) }}</span>
                 <span class="muted-text">利润率 {{ percent(row.profit_rate) }}</span>
               </div>
             </el-button>
+            <div v-else class="metric-cell-content cell-stack cell-align-end">
+              <strong :class="profitDetailProfitClass(row.estimated_profit_total)">¥{{ money(row.estimated_profit_total) }}</strong>
+              <span class="muted-text">待入账 ¥{{ money(pendingAccruedProfit(row)) }}</span>
+              <span class="muted-text">利润率 {{ percent(row.profit_rate) }}</span>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="真实利润" prop="actual_profit_total" min-width="170" align="right" sortable="custom">
+        <el-table-column label="真实利润" prop="actual_profit_total" min-width="170" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
-            <el-button class="metric-cell-link" link type="primary" @click.stop="openProfitDetailsByMode(row, 'actual')">
+            <el-button v-if="!isTenantScoped" class="metric-cell-link" link type="primary" @click.stop="openProfitDetailsByMode(row, 'actual')">
               <div class="metric-cell-content cell-stack cell-align-end">
                 <strong :class="profitDetailProfitClass(row.actual_profit_total)">¥{{ money(row.actual_profit_total) }}</strong>
                 <span class="muted-text">已入账利润</span>
                 <span class="muted-text">参考件利 ¥{{ inventoryProfitMoneyText(row, "profit") }}</span>
               </div>
             </el-button>
+            <div v-else class="metric-cell-content cell-stack cell-align-end">
+              <strong :class="profitDetailProfitClass(row.actual_profit_total)">¥{{ money(row.actual_profit_total) }}</strong>
+              <span class="muted-text">已入账利润</span>
+              <span class="muted-text">参考件利 ¥{{ inventoryProfitMoneyText(row, "profit") }}</span>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="库存占用" prop="inventory_value" min-width="150" align="right" sortable="custom">
+        <el-table-column label="库存占用" prop="inventory_value" min-width="150" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
             <div class="cell-stack cell-align-end">
               <strong>¥{{ money(productInventoryValue(row)) }}</strong>
@@ -2095,7 +2134,7 @@ onActivated(() => void loadPageData({ silent: true }));
           <template #default="{ row }">
             <div class="inventory-actions">
               <el-button v-if="canWriteInventory" class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
-              <el-button v-if="canWriteInventory" class="erp-btn-link" link type="primary" @click="openCompositionDialog(row)">添加子产品</el-button>
+              <el-button v-if="canManageProductComponents" class="erp-btn-link" link type="primary" @click="openCompositionDialog(row)">添加子产品</el-button>
               <el-button v-if="canProcure" class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
               <el-button v-if="canProcure" class="erp-btn-link" link @click="ledgerProductId = Number(row.id); ledgerVisible = true">采购库存对账</el-button>
               <el-button v-if="canOutbound" class="erp-btn-link" link type="warning" @click="openManualOutbound(row)">手动出库</el-button>
@@ -2339,7 +2378,7 @@ onActivated(() => void loadPageData({ silent: true }));
           <strong>{{ manualOutboundRecordsProduct?.name || "-" }}</strong>
           <span>{{ manualOutboundRecordsProduct?.inventory_number || manualOutboundRecordsProduct?.inventory_id || manualOutboundRecordsProduct?.code || "-" }}</span>
         </div>
-        <el-button type="warning" @click="openManualOutbound(manualOutboundRecordsProduct)">新增手动出库</el-button>
+        <el-button v-if="canOutbound" type="warning" @click="openManualOutbound(manualOutboundRecordsProduct)">新增手动出库</el-button>
       </div>
       <el-table
         v-loading="manualOutboundRecordsLoading"
@@ -2384,7 +2423,7 @@ onActivated(() => void loadPageData({ silent: true }));
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="120" fixed="right" align="center">
+        <el-table-column v-if="canOutbound" label="操作" width="120" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEditManualOutboundRecord(row)">编辑</el-button>
             <el-button
@@ -2442,6 +2481,7 @@ onActivated(() => void loadPageData({ silent: true }));
       v-model:visible="compositionDialogVisible"
       :product="compositionDialogProduct"
       :refresh-key="compositionDialogRefreshKey"
+      :allow-quick-create="!isTenantScoped"
       @saved="handleCompositionSaved"
       @quick-create="openQuickCreateFromComposition"
     />

@@ -110,7 +110,7 @@ test("packing may register manual outbound but cannot spoof an arbitrary invento
   const { createOperationsRoutes } = await import("../src/server/routes/operations.js");
   let payload = {source_type:"manual_outbound", product_id:1, quantity:2}; let writes = 0;
   const routes = createOperationsRoutes({readJson:async()=>payload,services:{createInventoryMovement:async()=>{writes++;return {id:1};}}});
-  const req = {_session:{roles:["packing"],personId:7}};
+  const req = {_session:{roles:["packing"],personId:7,tenant:{id:1,slug:"default"}}};
   assert.equal((await routes["POST /api/inventory/movements"](req)).id,1);
   payload={movement_type:"ADJUSTMENT",quantity_delta:999};
   await assert.rejects(routes["POST /api/inventory/movements"](req),/仅可登记手动出库/);

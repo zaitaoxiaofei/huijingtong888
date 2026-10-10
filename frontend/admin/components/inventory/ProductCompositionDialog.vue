@@ -10,7 +10,8 @@ const props = defineProps({
   visible: { type: Boolean, default: false },
   product: { type: Object, default: null },
   refreshKey: { type: Number, default: 0 },
-  readOnly: { type: Boolean, default: false }
+  readOnly: { type: Boolean, default: false },
+  allowQuickCreate: { type: Boolean, default: true }
 });
 
 const emit = defineEmits(["update:visible", "saved", "quick-create"]);
@@ -390,7 +391,7 @@ watch(
               <strong>商品池</strong>
               <span>{{ integer(optionTotal) }} 个</span>
             </div>
-            <el-button type="primary" plain :icon="Plus" @click="openQuickCreate">快速创建库存</el-button>
+            <el-button v-if="allowQuickCreate" type="primary" plain :icon="Plus" @click="openQuickCreate">快速创建库存</el-button>
           </div>
           <el-tabs v-model="activeInventoryType" class="composition-tabs" @tab-change="handleTypeChange">
             <el-tab-pane

@@ -45,6 +45,18 @@ test("online product stock and shop lookup routes derive scope from the session"
   ]);
 });
 
+test("online product binding forwards session tenant and remains closed to non-default tenants", async () => {
+  const calls = [];
+  const routes = createCatalogRoutes({
+    readJson: async () => ({ online_product_id: 10, product_id: 20 }),
+    services: { bindOnlineProduct: async (...args) => { calls.push(args); return { ok: true }; } }
+  });
+  const req = { headers: { "x-tenant-id": "99" }, _session: { tenant: { id: 42, slug: "company-a" } } };
+  await routes["POST /api/online-products/bind"](req);
+  assert.deepEqual(calls[0], [{ online_product_id: 10, product_id: 20 }, "42"]);
+  assert.equal(tenantIsolationDecision(req._session, ["api", "online-products", "bind"], "POST").allowed, false);
+});
+
 test("tenant online product access is limited to exact scoped routes", () => {
   const owner = { roles: ["operations"], tenant: { id: 42, slug: "company-a", role: "owner" } };
   const member = { roles: ["operations"], tenant: { id: 42, slug: "company-a", role: "member" } };
@@ -99,6 +111,13 @@ test("online product mutations and shop credentials are resolved inside active t
   assert.match(routes, /performOnlineProductAction\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
   assert.match(warehouses, /activeShopForTenantMysql\(shopId, tenantId\)/);
   assert.match(limits, /tenantShopPredicateMysql\("shops", defaultTenant\)/);
+  const bind = service.match(/export async function bindOnlineProductMysql\([\s\S]*?(?=\nexport async function createOnlineProductMysql)/)?.[0] || "";
+  assert.match(bind, /resolveShopTenantIdMysql\(tenantId\)/);
+  assert.match(bind, /JOIN shops s ON s\.id = op\.shop_id/);
+  assert.match(bind, /tenantShopPredicateMysql\("s", defaultTenant\)/);
+  assert.match(bind, /tenant_id = \?\$\{defaultTenant \? " OR tenant_id IS NULL" : ""\}/);
+  assert.match(bind, /INSERT INTO sku_mappings[\s\S]*?shop_id, tenant_id, product_id/);
+  assert.match(bind, /SET product_id = \?, person_id = \?, online_product_id = \?, offer_id = \?, display_name = \?, tenant_id = \?/);
 });
 
 test("online-product tenant UI exposes only the scoped stock action and avoids global people data", () => {

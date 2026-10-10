@@ -78,7 +78,7 @@ test("historical AI media repair also sweeps local listing media and localhost d
   assert.match(serviceSource, /template_payload_json LIKE '%localhost%'/);
   assert.match(serviceSource, /template_payload_json LIKE '%127\.0\.0\.1%'/);
   assert.match(serviceSource, /payload = await materializeListingDraftMediaForDraftSafety\(payload, session\)/);
-  assert.match(serviceSource, /payload = sanitizeDraftMediaPayload\(await rewriteDraftPayloadToRegisteredPublicMedia\(payload\)\)/);
+  assert.match(serviceSource, /payload = sanitizeDraftMediaPayload\(await rewriteDraftPayloadToRegisteredPublicMedia\(payload, session\)\)/);
 });
 
 test("AI file URLs are normalized into fetchable sources before media registration", () => {
@@ -160,13 +160,13 @@ test("AI variant draft save rejects temporary AI image URLs that failed to mater
   assert.match(serviceSource, /AI 裂变图片未能保存到永久素材库/);
 });
 
-test("AI variant offer ids override the source SKU and stay globally unique", () => {
+test("AI variant offer ids override the source SKU and are unique within the active tenant", () => {
   const lightweightSource = serviceSource.match(/export async function createAiVariantListingDraftLightweight[\s\S]*?function applyAiVariantDraftPatch/)?.[0] || "";
   assert.match(serviceSource, /function normalizeListingOfferId/);
-  assert.match(serviceSource, /async function listingOfferIdExistsGlobally/);
+  assert.match(serviceSource, /async function listingOfferIdExistsInTenant/);
   assert.match(lightweightSource, /AI 裂变草稿缺少货号 offer_id/);
   assert.match(lightweightSource, /internal_code: offerId/);
-  assert.match(lightweightSource, /listingOfferIdExistsGlobally\(offerId/);
+  assert.match(lightweightSource, /listingOfferIdExistsInTenant\(offerId/);
   assert.match(serviceSource, /next\.offer_id = offerId/);
   assert.match(serviceSource, /offer_id: offerId, offerId/);
 });
@@ -203,7 +203,7 @@ test("AI variant lightweight draft save inherits shop copies from selected or so
   assert.match(serviceSource, /body\.shop_ids \|\| body\.shopIds/);
   assert.match(serviceSource, /body\.source_draft_id \|\| body\.sourceDraftId/);
   assert.match(serviceSource, /FROM listing_shop_copies/);
-  assert.match(lightweightSource, /await resolveAiVariantDraftShopIds\(body\)/);
+  assert.match(lightweightSource, /await resolveAiVariantDraftShopIds\(body, session\)/);
   assert.match(lightweightSource, /await generateListingShopCopies\(draftId, \{ shop_ids: shopIds \}, session, options\)/);
   assert.match(lightweightSource, /detail\.shop_copy_count = shopCopies\.length/);
   assert.match(lightweightSource, /detail\.shop_copy_error = shopCopyError/);

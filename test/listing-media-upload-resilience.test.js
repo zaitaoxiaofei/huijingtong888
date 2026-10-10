@@ -16,7 +16,7 @@ test("listing media upload retries keep one idempotency source id", () => {
   assert.match(uploadClientSource, /upload_request_id: requestId/);
   assert.match(uploadClientSource, /source_id: metadata\?\.source_id \|\| metadata\?\.sourceId \|\| `upload:\$\{requestId\}`/);
   assert.match(listingServiceSource, /String\(sourceId\)\.startsWith\("upload:"\)/);
-  assert.match(listingServiceSource, /WHERE source_module = \? AND source_id = \? AND role = \?/);
+  assert.match(listingServiceSource, /WHERE \$\{tenantId === "admin" \? "\(tenant_id = \? OR tenant_id IS NULL\)" : "tenant_id = \?"\}\s+AND source_module = \? AND source_id = \? AND role = \?/);
   assert.match(listingServiceSource, /listingMediaUploadResult\(existingAsset/);
 });
 

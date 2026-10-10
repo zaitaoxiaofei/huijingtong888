@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createSellerAnalyticsRoutes, handleSellerAnalyticsRestRoute } from "../src/server/routes/sellerAnalytics.js";
+import { tenantIsolationDecision } from "../src/server/tenant-isolation.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -69,6 +70,20 @@ test("seller analytics route maps the default tenant to its legacy storage key a
     () => routes["GET /api/db/seller-analytics/summary"]({ headers: { "x-tenant-id": "admin" } }),
     (error) => error.statusCode === 403
   );
+});
+
+test("seller analytics tenant gate allows only registered methods and paths", () => {
+  const routes = createSellerAnalyticsRoutes({ services: {}, readJson: async () => ({}) });
+  const tenantSession = { tenant: { id: 42, slug: "company-a" } };
+  for (const route of Object.keys(routes)) {
+    const [method, routePath] = route.split(" ");
+    const parts = new URL(routePath, "http://localhost").pathname.split("/").filter(Boolean);
+    assert.equal(tenantIsolationDecision(tenantSession, parts, method).allowed, true, `${method} ${routePath}`);
+  }
+  assert.equal(tenantIsolationDecision(tenantSession, ["api", "db", "seller-analytics", "analysis", "internal-debug"], "GET").allowed, false);
+  assert.equal(tenantIsolationDecision(tenantSession, ["api", "db", "seller-analytics", "plugin-status"], "PUT").allowed, false);
+  assert.equal(tenantIsolationDecision(tenantSession, ["api", "db", "seller-analytics", "collect-runs", "run-a", "retry"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(tenantSession, ["api", "db", "seller-analytics", "snapshots", "snapshot-a"], "DELETE").allowed, true);
 });
 
 test("seller analytics REST mutations use the session tenant rather than client headers", async () => {

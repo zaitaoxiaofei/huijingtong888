@@ -38,7 +38,7 @@ export function createListingAutomationRoutes({ services, readJson }) {
     "POST /api/listing/ozon-attribute-values/sync": async (req) => services.syncListingOzonAttributeValues(await readJson(req), req._session),
     "GET /api/listing/copy-jobs": (req) => services.listingCopyJobs(req._session),
     "POST /api/listing/copy-from-sku": async (req) => services.copyListingTemplateFromOzonSku(await readJson(req), req._session),
-    "POST /api/listing/media/upload": (req) => services.uploadListingMedia(req),
+    "POST /api/listing/media/upload": (req) => services.uploadListingMedia(req, { session: req._session }),
     "POST /api/listing/media/repair": async (req) => services.repairListingEditorMedia(await readJson(req), req._session),
     "POST /api/listing/media/watermark": async (req) => services.watermarkListingMedia(await readJson(req), req._session),
     "GET /api/listing/drafts": (req, url) => services.listingDrafts(Object.fromEntries(url.searchParams.entries()), req._session),

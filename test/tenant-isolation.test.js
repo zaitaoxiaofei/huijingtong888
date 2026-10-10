@@ -14,11 +14,16 @@ test("default tenant retains access while unsupported tenant business routes fai
   assert.equal(tenantIsolationDecision(otherSession, ["api", "user-preferences"]).allowed, true);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics", "analysis"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics", "snapshots", "snapshot-1"], "DELETE").allowed, true);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics", "collect-runs", "run-1", "retry"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics", "analysis", "unlisted"], "GET").allowed, false);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics", "unlisted"], "POST").allowed, false);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics", "analysis"], "PATCH").allowed, false);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics"], "GET").allowed, false);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "shops"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "shops"], "DELETE").allowed, false);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "online-products"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "online-products"], "POST").allowed, false);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "products", "123"], "PUT").allowed, true);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "online-products", "123", "edit-draft"], "GET").allowed, false);
   assert.equal(tenantIsolationDecision({}, ["api", "orders"]).code, "TENANT_CONTEXT_REQUIRED");
 });
@@ -52,6 +57,11 @@ test("tenant plugin credentials are restricted to tenant-keyed collector and ana
   const tenantPrincipal = { tenantId: 42, tenantKey: "42", tenantSlug: "test-company" };
   assert.equal(isTenantScopedPluginRoute("POST", ["api", "local-plugin", "collected-products", "sync"]), true);
   assert.equal(isTenantScopedPluginRoute("POST", ["api", "local-plugin", "seller-analytics", "snapshots"]), true);
+  assert.equal(isTenantScopedPluginRoute("GET", ["api", "local-plugin", "seller-analytics", "collect-runs", "next"]), true);
+  assert.equal(isTenantScopedPluginRoute("POST", ["api", "local-plugin", "seller-analytics", "collect-runs", "run-a", "requests", "request-a", "result"]), true);
+  assert.equal(isTenantScopedPluginRoute("POST", ["api", "local-plugin", "seller-analytics", "snapshots", "internal"]), false);
+  assert.equal(isTenantScopedPluginRoute("PUT", ["api", "local-plugin", "seller-analytics", "snapshots"]), false);
+  assert.equal(isTenantScopedPluginRoute("GET", ["api", "local-plugin", "seller-analytics", "collect-runs", "arbitrary"]), false);
   assert.equal(isTenantScopedPluginRoute("POST", ["api", "local-plugin", "collector-box", "ABC", "create-selection"]), false);
   assert.equal(isTenantScopedPluginRoute("GET", ["api", "local-plugin", "seller-analytics", "auth-probe"]), false);
   assert.equal(tenantPluginApiError(tenantPrincipal, "POST", ["api", "local-plugin", "collector-box"]).code, "TENANT_PLUGIN_SCOPE_PENDING");

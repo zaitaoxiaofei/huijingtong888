@@ -43,7 +43,7 @@ test("collector-box storage reads and deletes use session tenant, never client s
   const detail = service.slice(service.indexOf("export async function collectorBoxProductDetail"), service.indexOf("export async function deleteCollectorBoxProducts"));
   const deletion = service.slice(service.indexOf("export async function deleteCollectorBoxProducts"), service.indexOf("export async function saveCollectorBoxEdit"));
   assert.match(service, /function listingTenantId\(session, fallback = "admin"\)/);
-  assert.match(service, /return tenant\.slug === "default" \? "admin" : String\(tenant\.id\)/);
+  assert.match(service, /listingTenantLookup\(tenant\.slug === "default" \? "admin" : tenant\.id\)\.key/);
   assert.match(list, /const tenantId = listingTenantId\(session\)/);
   assert.doesNotMatch(list, /query\.tenant_?id/);
   assert.match(list, /WHERE \$\{whereSql\}/);

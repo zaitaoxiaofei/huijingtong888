@@ -30,6 +30,11 @@ test("SKU tracker records and owner assignments are tenant-bound", () => {
   assert.match(service, /WHERE m\.tenant_id = \? AND m\.period_key/);
   assert.doesNotMatch(service, /m\.tenant_id = 'admin'/);
   assert.match(service, /tenant\.isDefault \? "sm\.product_id inventory_product_id, p\.code inventory_code, p\.name inventory_name"/);
+  assert.match(service, /sm\.tenant_id = \$\{tenantId\} OR sm\.tenant_id IS NULL/);
+  assert.match(service, /p\.tenant_id = \$\{tenantId\} OR p\.tenant_id IS NULL/);
+  assert.match(service, /pna\.tenant_id = \$\{tenant\.id\} OR pna\.tenant_id IS NULL/);
+  assert.match(service, /tenant_shop\.id = o\.shop_id AND tenant_shop\.status != 'deleted'/);
+  assert.match(service, /UPDATE sku_order_trackers SET last_notified_at = CURRENT_TIMESTAMP WHERE id = \? AND tenant_id = \?/);
 });
 
 test("SKU tracker migration is explicit, dry-run by default, and attributes rows from shops", () => {

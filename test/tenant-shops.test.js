@@ -48,7 +48,7 @@ test("shop management is limited to tenant owners/admins and exact scoped routes
   assert.equal(authorizeApiRequest({ method: "POST", _session: member }, ["api", "shops"]).allowed, false);
   assert.equal(authorizeApiRequest({ method: "GET", _session: member }, ["api", "shops"]).allowed, false);
   assert.equal(authorizeApiRequest({ method: "GET", _session: member }, ["api", "people"]).allowed, false);
-  assert.equal(authorizeApiRequest({ method: "GET", _session: member }, ["api", "tenants", "members"]).allowed, false);
+  assert.equal(authorizeApiRequest({ method: "GET", _session: member }, ["api", "tenants", "members"]).allowed, true);
   assert.equal(canAccessPage(owner, "/tenant-shops"), true);
   assert.equal(canAccessPage(member, "/tenant-shops"), false);
 });

@@ -1612,7 +1612,7 @@ async function sendProductImage(res, productId, imageLoader = null, options = {}
   try {
     const loadImage = () => imageLoader ? imageLoader(productId) : services.productImage(productId);
     let image = await loadImage();
-    if (!image && services.refreshProductImageUrl) {
+    if (!image && options.allowRefresh !== false && services.refreshProductImageUrl) {
       image = await services.refreshProductImageUrl(productId).catch(() => "");
     }
     if (!image) return notFound(res);

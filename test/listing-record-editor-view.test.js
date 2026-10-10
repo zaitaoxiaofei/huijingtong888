@@ -309,7 +309,7 @@ test("draft box can batch publish drafts with multi-shop text variant policy", (
   assert.match(listingAutomationServiceSource, /uq_listing_publish_record_task_item/);
   assert.match(publishRecordsSource, /request_id: batchListing\.requestId/);
   assert.match(listingAutomationServiceSource, /existingListingPublishTaskByRequestId/);
-  assert.match(listingAutomationServiceSource, /uq_listing_publish_tasks_request/);
+  assert.match(listingAutomationServiceSource, /uq_listing_publish_tasks_tenant_request/);
   assert.match(listingAutomationServiceSource, /\["failed", "interrupted"\]/);
   assert.doesNotMatch(listingAutomationServiceSource, /\["failed", "interrupted", "pending", "preparing", "processing"\]/);
   assert.match(listingAutomationServiceSource, /sourceRecordId: Number\(item\.record_id \|\| 0\)/);
@@ -319,7 +319,7 @@ test("draft box can batch publish drafts with multi-shop text variant policy", (
   assert.match(listingAutomationServiceSource, /item_complex_attributes_json/);
   assert.match(listingAutomationServiceSource, /Math\.max\(prioritizedImages\.length, listImageCount\)/);
   assert.match(listingAutomationServiceSource, /async function processListingDraftBatchPublishTask/);
-  assert.match(listingAutomationServiceSource, /runBackgroundListingPublish\(`draft batch publish task \$\{publishTask\.id\}`[\s\S]*processListingDraftBatchPublishTask/);
+  assert.match(listingAutomationServiceSource, /runBackgroundListingPublishBatch\(`draft batch publish task \$\{publishTask\.id\}`[\s\S]*processListingDraftBatchPublishTask/);
   assert.match(listingAutomationServiceSource, /queued: totalItems/);
   assert.match(listingAutomationServiceSource, /backgroundListingPublishTasks/);
   assert.match(listingAutomationServiceSource, /runBackgroundListingPublish/);
@@ -570,9 +570,9 @@ test("draft batch publish blocks local media before Ozon submit", () => {
 });
 
 test("listing draft media prefers registered public URLs over local preview URLs", () => {
-  assert.match(listingAutomationServiceSource, /async function listingMediaRegisteredPublishUrl\(url = ""\)/);
+  assert.match(listingAutomationServiceSource, /async function listingMediaRegisteredPublishUrl\(url = "", session = null\)/);
   assert.match(listingAutomationServiceSource, /WHERE preview_url = \? AND publish_url IS NOT NULL AND publish_url <> ''/);
-  assert.match(listingAutomationServiceSource, /async function rewriteDraftPayloadToRegisteredPublicMedia\(payload = \{\}\)/);
+  assert.match(listingAutomationServiceSource, /async function rewriteDraftPayloadToRegisteredPublicMedia\(payload = \{\}, session = null\)/);
   assert.match(listingAutomationServiceSource, /rewriteDraftPayloadToRegisteredPublicMedia\(\s*await materializeListingDraftMediaForDraftSafety\(\s*await materializeAiOptimizationDraftMedia\(normalizeDraftPayload\(body\), session\)/);
   assert.match(listingAutomationServiceSource, /draft = sanitizeDraftMediaPayload\(await rewriteDraftPayloadToRegisteredPublicMedia\(\s*await materializeListingDraftMediaForDraftSafety\(\s*await materializeAiOptimizationDraftMedia\(draft, session\)/);
   assert.doesNotMatch(listingAutomationServiceSource, /\(\?:https\?:\\\/\\\/\(\?:localhost\|127\\\.0\\\.0\\\.1\|\\\[::1\\\]\)/);
@@ -618,7 +618,7 @@ test("listing media publish path optimizes images and verifies complete download
   assert.match(staticHandlerSource, /const isListingMediaAsset = \/\^\\\/uploads\\\/listing-media\\\/\[\^\/\]\+\$\/i/);
   assert.match(staticHandlerSource, /CDN-Cache-Control"\] = "public, max-age=31536000, immutable"/);
   assert.match(listingAutomationServiceSource, /async function optimizeListingImageForPublish/);
-  assert.match(listingAutomationServiceSource, /const optimizedMedia = await optimizeListingImageForPublish\(file\.buffer/);
+  assert.match(listingAutomationServiceSource, /const optimizedMedia = await optimizeListingImageForPublish\(source\.buffer/);
   assert.match(listingAutomationServiceSource, /const optimizedMedia = await optimizeListingImageForPublish\(sourceBuffer/);
   assert.match(listingAutomationServiceSource, /const optimizedMedia = await optimizeListingImageForPublish\(source\.buffer/);
   assert.match(listingAutomationServiceSource, /const optimizedMedia = await optimizeListingImageForPublish\(output/);
@@ -694,7 +694,7 @@ test("AI variant import from publish records prefers the published request image
 
 test("AI variant asset records are persisted server-side for later recovery", () => {
   assert.match(listingAutomationServiceSource, /CREATE TABLE IF NOT EXISTS listing_ai_variant_assets/);
-  assert.match(listingAutomationServiceSource, /UNIQUE KEY uq_listing_ai_variant_asset_result_field_owner \(result_id, field_key, owner_scope\)/);
+  assert.match(listingAutomationServiceSource, /UNIQUE KEY uq_listing_ai_variant_asset_tenant_result_field_owner \(tenant_id, result_id, field_key, owner_scope\)/);
   assert.match(listingAutomationServiceSource, /where\.push\("created_by_person_id = \?"\)/);
   assert.match(listingAutomationServiceSource, /export async function listingAiVariantAssets/);
   assert.match(listingAutomationServiceSource, /const fieldKey = cleanText\(query\.fieldKey \|\| query\.field_key \|\| "", 64\)/);
