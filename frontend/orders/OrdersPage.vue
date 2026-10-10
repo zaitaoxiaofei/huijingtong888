@@ -1045,6 +1045,7 @@ async function loadOrderProcurementBatches(row) {
 }
 
 const shippedReceiptDialog = reactive({ visible: false, loading: false, saving: false, orderIds: [], records: [], skipped: [], sourceOrderId: null });
+const receiptDifferenceReasons = ['采购记录不准', '商家少发货', '存在残次品', '转化为别的产品', '其他'];
 const procurementReceiptDialog = reactive({ visible: false, saving: false, loadingImpact: false, orderId: null, batches: [], impacts: [], mode: 'normal', counts: {}, requestKey: '' });
 const procurementReceiptSummary = computed(() => {
   const summaries = new Map();
@@ -1118,7 +1119,7 @@ async function handleConfirmProcurementInbound(row, selectedInboundRecordId = 0)
     batches: batches.map(batch => ({
       ...batch,
       selected: Number(batch.id) === Number(selectedInboundRecordId),
-      receive_quantity: Number(batch.quantity || 0)
+      receive_quantity: Number(batch.quantity || 0), difference_reason: '', difference_note: ''
     })),
     impacts: [],
     mode: 'normal', counts: {}, requestKey: crypto.randomUUID()
@@ -1129,7 +1130,6 @@ async function handleConfirmProcurementInbound(row, selectedInboundRecordId = 0)
       records: procurementReceiptDialog.batches.map(batch => ({ id: batch.id, receive_quantity: Number(batch.receive_quantity) }))
     });
     procurementReceiptDialog.impacts = result.impacts || [];
-    if (result.suggest_historical || result.requires_confirmation) procurementReceiptDialog.mode = 'historical';
   } catch (error) {
     ElMessage.warning(error.message || '无法读取入库影响，请刷新后重试');
   } finally { procurementReceiptDialog.loadingImpact = false; }
@@ -1143,6 +1143,10 @@ async function confirmProcurementReceipt() {
     const quantity = Number(batch.receive_quantity);
     if (!Number.isInteger(quantity) || quantity <= 0 || quantity > Number(batch.quantity)) {
       ElMessage.warning(`批次 #${batch.id} 的实收数量应为 1 至 ${batch.quantity} 的整数`);
+      return;
+    }
+    if (quantity !== Number(batch.quantity) && !batch.difference_reason) {
+      ElMessage.warning(`批次 #${batch.id} 的待收数量与本次实收不同，请选择差异原因`);
       return;
     }
   }
@@ -1160,9 +1164,11 @@ async function confirmProcurementReceipt() {
       request_key: procurementReceiptDialog.requestKey,
       historical_receipt_groups: procurementReceiptSummary.value.map(row => ({ product_id: row.product_id, revision: row.revision,
         counted_quantity: procurementReceiptDialog.counts[row.product_id], receipts: records.filter(batch => procurementReceiptDialog.impacts.some(impact => Number(impact.id) === Number(batch.id) && Number(impact.product_id) === row.product_id))
-          .map(batch => ({ id: Number(batch.id), receive_quantity: Number(batch.receive_quantity), expected_remaining_quantity: Number(batch.quantity) })) }))
+          .map(batch => ({ id: Number(batch.id), receive_quantity: Number(batch.receive_quantity), expected_remaining_quantity: Number(batch.quantity),
+            receipt_difference_reason: batch.difference_reason, receipt_difference_note: batch.difference_note })) }))
     } : { records: records.map(batch => ({ id: batch.id, payload: {
       receive_quantity: Number(batch.receive_quantity), expected_remaining_quantity: Number(batch.quantity),
+      receipt_difference_reason: batch.difference_reason, receipt_difference_note: batch.difference_note,
       version_updated_at: batch.updated_at, status: 'approved', qc_status: 'approved',
       receipt_context: `订单 #${procurementReceiptDialog.orderId} 登记实收`
     }})), receipt_impact_confirmed: true });
@@ -2676,6 +2682,17 @@ onBeforeUnmount(() => {
           <template #default="{ row }">
             <el-input-number v-model="row.receive_quantity" :min="1" :max="Number(row.quantity)" :precision="0" :disabled="!row.selected" controls-position="right" style="width: 132px" />
           </template>
+        </el-table-column>
+        <el-table-column label="差异原因" min-width="220">
+          <template #default="{ row }">
+            <el-select v-if="row.selected && Number(row.receive_quantity) !== Number(row.quantity)" v-model="row.difference_reason" placeholder="请选择差异原因" style="width: 100%">
+              <el-option v-for="reason in receiptDifferenceReasons" :key="reason" :label="reason" :value="reason" />
+            </el-select>
+            <span v-else>—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="差异说明" min-width="200">
+          <template #default="{ row }"><el-input v-if="row.selected && Number(row.receive_quantity) !== Number(row.quantity)" v-model="row.difference_note" placeholder="选填具体情况" /></template>
         </el-table-column>
       </el-table>
       <template #footer>

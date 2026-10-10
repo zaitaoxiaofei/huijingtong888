@@ -109,8 +109,11 @@ export function planLedgerAction(snapshot, body) {
       const quantity = integer(row.receive_quantity, '这批实际收到数量');
       if (!batch || ids.has(id) || quantity > Number(batch.quantity)) throw new Error('采购批次重复、已收货或数量已变化，请重新打开补登记');
       if (Number(row.expected_remaining_quantity) !== Number(batch.quantity)) throw new Error('待收数量已变化，请重新打开补登记');
+      const differenceReason = String(row.receipt_difference_reason || '').trim();
+      if (quantity !== Number(batch.quantity) && !differenceReason) throw new Error(`批次 #${id} 的待收数量与本次实收不同，请选择差异原因`);
       ids.add(id);
-      return { id, receive_quantity: quantity, expected_remaining_quantity: Number(batch.quantity) };
+      return { id, receive_quantity: quantity, expected_remaining_quantity: Number(batch.quantity),
+        receipt_difference_reason: differenceReason, receipt_difference_note: String(row.receipt_difference_note || '').trim() };
     });
     result.quantity = result.receipts.reduce((sum, row) => sum + row.receive_quantity, 0);
     result.local_delta = result.stocktake_delta;
@@ -491,7 +494,7 @@ export function createProcurementLedgerService(hooks) {
         [actionId, allocation.order_item_id, productId, allocation.quantity, Number(plan.inbound.id)]);
       } else if (plan.type === 'receive_and_count') {
         for (const receipt of plan.receipts) await receive(connection, receipt.id, {
-          ...receipt, status: 'approved', qc_status: 'approved', receipt_context: `${note}；历史到货补登记并按当前实物校准`
+          ...receipt, status: 'approved', qc_status: 'approved', receipt_context: `${note}；历史到货补登记并按当前实物校准${receipt.receipt_difference_reason ? `；收货差异：${receipt.receipt_difference_reason}${receipt.receipt_difference_note ? `（${receipt.receipt_difference_note}）` : ''}` : ''}`
         }, { sessionPersonId: actor });
         await movement(productId, plan.receipt_count_adjustment, 'reconciliation_stocktake');
       } else if (plan.type === 'set_priority') {
