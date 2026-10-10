@@ -70,7 +70,7 @@ export const navigationMenus = [
     icon: Goods,
     children: [
       { key: "inventory-products", label: "商品库存", route: "/inventory/products" },
-      { key: "purchase-list", label: "采购清单 / 待入库", route: "/purchase-list" },
+      { key: "purchase-list", label: "待入库清单", route: "/purchase-list" },
       { key: "inventory-fbp", label: "FBP库存", route: "/inventory/fbp" },
       { key: "inventory-alerts", label: "库存预警", route: "/inventory/alerts" },
       { key: "inventory-fbp-opportunities", label: "备货建议", route: "/inventory/fbp-opportunities" },
