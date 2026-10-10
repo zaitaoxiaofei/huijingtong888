@@ -2302,6 +2302,7 @@ async function runBackgroundCancelledOrderSync() {
       from: window.from,
       to: window.to,
       statuses: ["cancelled"],
+      history_source: "cancelled_reconciliation",
       skip_post_processing: true
     });
     console.log(`background cancelled order sync ok: ${window.from}~${window.to}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
@@ -2325,6 +2326,7 @@ async function runBackgroundPostingDetailSync() {
     const reconciliation = await services.syncDemoOrders({
       from: reconciliationWindow.from,
       to: reconciliationWindow.to,
+      history_source: "posting_detail_reconciliation",
       skip_post_processing: true
     });
     const result = await services.syncKnownOzonPostingDetails({
