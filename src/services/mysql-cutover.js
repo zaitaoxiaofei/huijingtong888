@@ -21782,7 +21782,7 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
     }
     body = { ...body, product_id: existing.product_id, person_id: existing.person_id, status: 'approved', quantity: receipt.received, amount: receipt.amount,
       shipping_amount: receipt.shippingAmount, purchase_url: existing.purchase_url || '',
-      note: `${existing.note || ''}${body.receipt_context ? `；${body.receipt_context}` : ''}；本次实收 ${receipt.received}，原待收 ${existing.quantity}` };
+      note: `${body.note ?? existing.note ?? ''}${body.receipt_context ? `；${body.receipt_context}` : ''}；本次实收 ${receipt.received}，原待收 ${existing.quantity}` };
   }
   const productId = Number(body.product_id ?? existing.product_id);
   const personId = await resolvePersonIdOrFirstMysql(body.person_id ?? existing.person_id, connection);
@@ -22172,13 +22172,13 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
       const inboundId = Number(record.id ?? record.inbound_record_id);
       if (!inboundId) continue;
       const payload = record.payload && typeof record.payload === "object" ? record.payload : record;
-      const existing = await mysqlConnectionQueryOne(connection, "SELECT quantity FROM inbound_records WHERE id = ? FOR UPDATE", [inboundId]);
+      const existing = await mysqlConnectionQueryOne(connection, "SELECT quantity, note FROM inbound_records WHERE id = ? FOR UPDATE", [inboundId]);
       if (!existing) throw new Error("Inbound record not found");
       if (payload.receive_quantity !== undefined && Number(existing.quantity) !== Number(payload.receive_quantity)) {
-        const reason = String(body.receipt_difference_reason || "").trim();
+        const reason = String(payload.receipt_difference_reason || body.receipt_difference_reason || "").trim();
         if (!reason) throw new Error("采购数与实收数不一致，请选择差异原因");
-        const detail = String(body.receipt_difference_note || "").trim();
-        payload.note = `${payload.note || ""}；收货差异：${reason}${detail ? `（${detail}）` : ""}；操作人 #${sessionPersonId || "system"}；${normalizeMysqlDateTime(new Date())}`;
+        const detail = String(payload.receipt_difference_note || body.receipt_difference_note || "").trim();
+        payload.note = `${existing.note || ""}；收货差异：${reason}${detail ? `（${detail}）` : ""}；操作人 #${sessionPersonId || "system"}；${normalizeMysqlDateTime(new Date())}`;
       }
       await applyInboundRecordUpdateMysql(connection, inboundId, payload, { changedPurchaseOrderIds, sessionPersonId });
       ids.push(inboundId);

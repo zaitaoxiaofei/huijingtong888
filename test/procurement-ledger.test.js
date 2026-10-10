@@ -64,6 +64,9 @@ test('historical receipt counts remaining physical stock instead of adding it tw
   assert.throws(() => planLedgerAction(state, { ...input, counted_quantity: undefined }), /实际盘点数量/);
   assert.throws(() => planLedgerAction(state, { ...input, receipts: [...input.receipts, ...input.receipts] }), /重复/);
   assert.throws(() => planLedgerAction(state, { ...input, receipts: [{ ...input.receipts[0], receive_quantity: 101 }] }), /数量已变化/);
+  const shortReceipt = { ...input.receipts[0], receive_quantity: 80 };
+  assert.throws(() => planLedgerAction(state, { ...input, receipts: [shortReceipt] }), /请选择差异原因/);
+  assert.equal(planLedgerAction(state, { ...input, receipts: [{ ...shortReceipt, receipt_difference_reason: '存在残次品' }] }).receipts[0].receipt_difference_reason, '存在残次品');
 });
 
 test('structured stocktake reasons allow zero and record sample losses without creating purchase costs', () => {

@@ -18,6 +18,9 @@ test('receipt dialog selects batches explicitly and posts only selected actual q
   assert.match(source, /v-model="row\.receive_quantity"/);
   assert.match(source, /const records = procurementReceiptDialog\.batches\.filter\(batch => batch\.selected\)/);
   assert.match(source, /records\.map\(batch => \(\{ id: batch\.id, payload:/);
+  assert.match(source, /v-model="row\.difference_reason"/);
+  assert.match(source, /receipt_difference_reason: batch\.difference_reason/);
+  for (const reason of ['采购记录不准', '商家少发货', '存在残次品', '转化为别的产品', '其他']) assert.match(source, new RegExp(reason));
 });
 
 test('procurement detail preserves every inbound batch and renders each record status', () => {

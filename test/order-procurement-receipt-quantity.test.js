@@ -6,13 +6,13 @@ import vm from 'node:vm';
 const source = await readFile(new URL('../src/services/mysql-cutover.js', import.meta.url), 'utf8');
 const block = source.slice(source.indexOf('export async function batchUpdateInboundRecordsMysql('), source.indexOf('export async function previewInboundReceiptImpactMysql(')).replace('export async function', 'async function');
 
-function receiver(quantity) {
+function receiver(quantity, note = '') {
   const updates = [];
   const receive = vm.runInNewContext(`${block};batchUpdateInboundRecordsMysql`, {
     ensureMysqlCutoverEnabled: () => {}, ensureInboundRecordTimestampSchemaMysql: async () => {},
     ensurePurchaseCostVersionSchemaMysql: async () => {},
     withMysqlTransaction: async callback => callback({}),
-    mysqlConnectionQueryOne: async () => ({ quantity }),
+    mysqlConnectionQueryOne: async () => ({ quantity, note }),
     applyInboundRecordUpdateMysql: async (_connection, _id, payload) => { updates.push(payload); },
     refreshPurchaseOrderStatusMysql: async () => {}, invalidateOrderProcurementCoverage: () => {},
     normalizeMysqlDateTime: () => '2026-10-10 17:00:00', Date
@@ -34,4 +34,10 @@ test('short receipt still requires a difference reason', async () => {
   assert.equal(updates.length, 0);
   await receive({ records: [record], receipt_difference_reason: '少货' });
   assert.match(updates[0].note, /收货差异：少货/);
+});
+
+test('each differing batch records its own selected reason and preserves its note', async () => {
+  const { receive, updates } = receiver(200, '原采购备注');
+  await receive({ records: [{ id: 1456, payload: { receive_quantity: 180, receipt_difference_reason: '商家少发货', receipt_difference_note: '少两箱' } }] });
+  assert.match(updates[0].note, /^原采购备注；收货差异：商家少发货（少两箱）/);
 });
