@@ -286,6 +286,7 @@ async function ensureProfitAnalyticsSchemaMysql() {
 }
 
 const STOCK_ALERT_BASE_CACHE_TTL_MS = 5 * 60_000;
+const FBP_OPPORTUNITY_CACHE_TTL_MS = STOCK_ALERT_BASE_CACHE_TTL_MS;
 function fbpTransferInTransitWhereMysql(alias = "") {
   const prefix = alias ? `${alias}.` : "";
   return `${prefix}status IN ('sent', 'in_transit', 'received')
@@ -2617,6 +2618,25 @@ async function orderProcurementCoverageMysql(options = {}) {
   return await loadOrderProcurementCoverage(mysqlQuery, openSql, options);
 }
 
+export async function productInventoryAvailabilityMysql(query = {}) {
+  ensureMysqlCutoverEnabled();
+  const values = String(query.productIds ?? query.product_ids ?? query.productId ?? "").split(",").map((value) => value.trim());
+  const productIds = [...new Set(values.map(Number))];
+  if (!values[0] || productIds.length > 200 || productIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+    throw new Error("请提供 1 至 200 个有效的库存商品 ID（productIds）");
+  }
+  const coverage = await orderProcurementCoverageMysql({ productIds });
+  return {
+    source: "order_procurement_coverage",
+    rows: productIds.map((productId) => coverage.product_availability?.get(productId) || {
+      product_id: productId, local_stock: 0, local_available: 0,
+      order_reserved_qty: 0, fbp_reserved_qty: 0,
+      pending_procurement_qty: 0, pending_procurement_available_qty: 0,
+      inventory_needs_review: false
+    })
+  };
+}
+
 export async function orderProcurementBatchesMysql(orderId) {
   ensureMysqlCutoverEnabled();
   const id = Number(orderId);
@@ -4167,7 +4187,11 @@ function normalizeFbpOpportunityRow(row) {
   const fbpAvailable = Number(row.fbp_available || 0);
   const fbsAvailable = Number(row.fbs_available || 0);
   const localStock = Number(row.local_stock || 0);
+  const localAvailable = Number(row.local_available || 0);
+  const orderReservedQty = Number(row.order_reserved_qty || 0);
+  const fbpReservedQty = Number(row.fbp_reserved_qty || 0);
   const pendingProcurementQty = Number(row.pending_procurement_qty || 0);
+  const pendingProcurementAvailableQty = Number(row.pending_procurement_available_qty || 0);
   const fbpTransferInTransitQty = Number(row.fbp_transfer_in_transit_qty || 0);
   const effectiveFbpAvailable = fbpAvailable + fbpTransferInTransitQty;
   const dailySales = recent30d > 0 ? recent30d / 30 : 0;
@@ -4190,7 +4214,7 @@ function normalizeFbpOpportunityRow(row) {
   else if (coverageDays !== null && coverageDays < 7) score += 14;
   else if (coverageDays !== null && coverageDays < 14) score += 10;
   if (fbsOpportunity) score += 8;
-  if (localStock > 0) score += 5;
+  if (localAvailable > 0) score += 5;
   score = Math.min(100, score);
 
   const priority = fbpOpportunityPriority(score);
@@ -4204,10 +4228,11 @@ function normalizeFbpOpportunityRow(row) {
     suggestedBaseQty = targetStock - effectiveFbpAvailable;
   }
   const suggestedQty = suggestedBaseQty > 0 ? Math.max(5, Math.ceil(suggestedBaseQty)) : 0;
-  const suggestedTransferQty = Math.min(Math.max(0, localStock), suggestedQty);
-  const suggestedPurchaseQty = Math.max(0, suggestedQty - suggestedTransferQty);
-  const suggestedAction = suggestedQty <= 0 ? "observe" : suggestedTransferQty > 0 ? "transfer" : "purchase";
-  const suggestedActionText = suggestedAction === "transfer" ? "本地发仓" : suggestedAction === "purchase" ? "先采购" : "观察";
+  const suggestedTransferQty = Math.min(Math.max(0, localAvailable), suggestedQty);
+  const suggestedWaitInboundQty = Math.min(Math.max(0, pendingProcurementAvailableQty), Math.max(0, suggestedQty - suggestedTransferQty));
+  const suggestedPurchaseQty = Math.max(0, suggestedQty - suggestedTransferQty - suggestedWaitInboundQty);
+  const suggestedAction = suggestedQty <= 0 ? "observe" : suggestedTransferQty > 0 ? "transfer" : suggestedPurchaseQty > 0 ? "purchase" : "await_inbound";
+  const suggestedActionText = suggestedAction === "transfer" ? "本地发仓" : suggestedAction === "purchase" ? "先采购" : suggestedAction === "await_inbound" ? "等待到货" : "观察";
   const reasons = [];
   if (recent30d > 10) reasons.push(`30天销量 ${recent30d} 件`);
   if (weeklyIncreasing) reasons.push(`三周 ${week3}/${week2}/${week1} 件递增`);
@@ -4216,7 +4241,7 @@ function normalizeFbpOpportunityRow(row) {
   else if (coverageDays !== null && coverageDays < targetCoverageDays) reasons.push(`FBP约覆盖 ${coverageDays.toFixed(1)} 天，低于45天目标`);
   if (fbsOpportunity) reasons.push(`FBS可售 ${fbsAvailable} 件`);
   if (fbpTransferInTransitQty > 0) reasons.push(`已有发仓在途 ${fbpTransferInTransitQty} 件`);
-  if (pendingProcurementQty > 0) reasons.push(`已有采购 ${pendingProcurementQty} 件`);
+  if (pendingProcurementQty > 0) reasons.push(`已采购待到货 ${pendingProcurementQty} 件，其中未分配 ${pendingProcurementAvailableQty} 件`);
 
   return {
     shop_id: row.shop_id,
@@ -4245,13 +4270,19 @@ function normalizeFbpOpportunityRow(row) {
     fbs_present: Number(row.fbs_present || 0),
     fbs_available: fbsAvailable,
     local_stock: localStock,
+    local_available: localAvailable,
+    order_reserved_qty: orderReservedQty,
+    fbp_reserved_qty: fbpReservedQty,
+    inventory_needs_review: Boolean(row.inventory_needs_review),
     pending_procurement_qty: pendingProcurementQty,
+    pending_procurement_available_qty: pendingProcurementAvailableQty,
     daily_sales: Number(dailySales.toFixed(2)),
     coverage_days: coverageDays === null ? null : Number(coverageDays.toFixed(1)),
     target_days: targetDays,
     target_stock: targetDays === 30 ? oneMonthEstimate : targetStock,
     suggested_qty: suggestedQty,
     suggested_transfer_qty: suggestedTransferQty,
+    suggested_wait_inbound_qty: suggestedWaitInboundQty,
     suggested_purchase_qty: suggestedPurchaseQty,
     suggested_action: suggestedAction,
     suggested_action_text: suggestedActionText,
@@ -4326,7 +4357,8 @@ export async function fbpOpportunitiesMysql(query = {}) {
   await ensureProductBarcodeLabelCacheReadyMysql();
   await ensureFbpTransferRecordsSchemaMysql();
   await ensureFbpReplenishmentSchemaMysql();
-  const normalizedRows = await (async () => {
+  const [baseRows, coverage] = await Promise.all([
+    getCachedMasterData("fbp-opportunities:base:v2", async () => {
     const rows = await mysqlQuery(`
     SELECT
       sm.id AS mapping_id, sm.shop_id, sm.ozon_sku, sm.offer_id, sm.display_name,
@@ -4334,7 +4366,6 @@ export async function fbpOpportunitiesMysql(query = {}) {
       p.id AS product_id,
       CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id, p.inventory_number,
       p.name AS product_name, p.image_url AS product_image_url,
-      COALESCE(local_stock.local_stock, 0) AS local_stock,
       COALESCE(op_by_id.id, op_by_sku.id) AS online_product_id,
       COALESCE(op_by_id.ozon_product_id, op_by_sku.ozon_product_id) AS ozon_product_id,
       COALESCE(op_by_id.name, op_by_sku.name) AS online_name,
@@ -4354,18 +4385,10 @@ export async function fbpOpportunitiesMysql(query = {}) {
       COALESCE(sales.week1_qty, 0) AS week1_qty,
       COALESCE(sales.week2_qty, 0) AS week2_qty,
       COALESCE(sales.week3_qty, 0) AS week3_qty,
-      COALESCE(procurement.pending_procurement_qty, 0) AS pending_procurement_qty,
       COALESCE(fbp_transfer.fbp_transfer_in_transit_qty, 0) AS fbp_transfer_in_transit_qty
     FROM sku_mappings sm
     JOIN shops s ON s.id = sm.shop_id
     LEFT JOIN products p ON p.id = sm.product_id
-    LEFT JOIN (
-      SELECT product_id, SUM(quantity_delta) AS local_stock
-      FROM inventory_movements
-      WHERE status = 'posted'
-        AND ${localStockLocationPredicateMysql()}
-      GROUP BY product_id
-    ) local_stock ON local_stock.product_id = p.id
     LEFT JOIN online_products op_by_id ON op_by_id.id = sm.online_product_id
     LEFT JOIN online_products op_by_sku ON op_by_sku.shop_id = sm.shop_id AND op_by_sku.ozon_sku = sm.ozon_sku
     LEFT JOIN product_barcode_label_cache cache ON cache.online_product_id = COALESCE(op_by_id.id, op_by_sku.id)
@@ -4393,12 +4416,6 @@ export async function fbpOpportunitiesMysql(query = {}) {
       GROUP BY o.shop_id, oi.ozon_sku
     ) sales ON sales.shop_id = sm.shop_id AND sales.ozon_sku = sm.ozon_sku
     LEFT JOIN (
-      SELECT product_id, SUM(quantity) AS pending_procurement_qty
-      FROM procurement_requests
-      WHERE status NOT IN ('cancelled', 'purchased')
-      GROUP BY product_id
-    ) procurement ON procurement.product_id = sm.product_id
-    LEFT JOIN (
       SELECT product_id, shop_id, ozon_sku,
         SUM(GREATEST(quantity - listed_quantity, 0)) AS fbp_transfer_in_transit_qty
       FROM fbp_transfer_records
@@ -4423,8 +4440,23 @@ export async function fbpOpportunitiesMysql(query = {}) {
     dateKeyDaysAgoMysql(20),
     dateKeyDaysAgoMysql(13)
     ]);
-    return rows.map(normalizeFbpOpportunityRow);
-  })();
+      return rows;
+    }, FBP_OPPORTUNITY_CACHE_TTL_MS),
+    orderProcurementCoverageMysql()
+  ]);
+  const availability = coverage.product_availability || new Map();
+  const normalizedRows = baseRows.map((row) => normalizeFbpOpportunityRow({
+    ...row,
+    ...(availability.get(Number(row.product_id)) || {
+      local_stock: 0,
+      local_available: 0,
+      order_reserved_qty: 0,
+      fbp_reserved_qty: 0,
+      pending_procurement_qty: 0,
+      pending_procurement_available_qty: 0,
+      inventory_needs_review: false
+    })
+  }));
   return applyFbpOpportunityQuery(normalizedRows, query);
 }
 
@@ -14356,6 +14388,7 @@ export async function refreshProcurementDemandMysql() {
   ensureMysqlCutoverEnabled();
   const orders = await ensurePendingOrderProcurementRequestsMysql();
   await ensureInventoryWarningProcurementRequestsMysql();
+  invalidateOrderProcurementCoverage();
   const inventory = { ok: true };
   return { ok: true, orders, inventory };
 }
@@ -14746,6 +14779,7 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
   const sourceType = String(query.sourceType || query.source_type || "all").trim().toLowerCase();
   const inventoryCategory = String(query.inventoryCategory || query.inventory_category || "").trim();
   const productName = String(query.productName || query.product_name || "").trim();
+  const productId = Number(query.productId || query.product_id || 0);
   const vehicleBrand = normalizeVehicleBrand(query.vehicleBrand || query.vehicle_brand, { strict: false });
   const vehicleModels = String(query.vehicleModel || query.vehicle_model || "").split(",").map((item) => item.trim()).filter(Boolean);
   const accessoryName = String(query.accessoryName || query.accessory_name || "").trim();
@@ -14779,6 +14813,10 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
       )
     )`);
     params.push(like, like, like, like, like, like);
+  }
+  if (Number.isSafeInteger(productId) && productId > 0) {
+    where.push("p.id = ?");
+    params.push(productId);
   }
   if (personId !== "all") {
     where.push("pr.person_id = ?");

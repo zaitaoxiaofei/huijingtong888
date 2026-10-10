@@ -230,7 +230,11 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
   }
   for (const detail of details) {
     const id = Number(detail.order_id);
-    if (!result.has(id)) result.set(id, { order_id: id, posting_number: detail.posting_number || String(id), ordered_at: detail.ordered_at || null, transport_at: detail.transport_at || null, shortage_quantity: 0, stock_quantity: 0, incoming_quantity: 0,
+    if (!result.has(id)) result.set(id, { order_id: id, posting_number: detail.posting_number || String(id), ordered_at: detail.ordered_at || null,
+      source_order_status: detail.source_order_status || '',
+      source_order_tracking_stage: detail.source_order_tracking_stage || '',
+      source_order_logistics_status: detail.source_order_logistics_status || '',
+      transport_at: detail.transport_at || null, shortage_quantity: 0, stock_quantity: 0, incoming_quantity: 0,
       missing_record_quantity: 0, missing_purchase_quantity: 0, missing_receipt_quantity: 0, missing_amount: false, quantity_needs_review: false, inventory_needs_review: false,
       stock_location: detail.stock_location, needs_fulfillment: Boolean(Number(detail.needs_fulfillment)), entered_transport: Boolean(Number(detail.entered_transport)), items: [], batches: [] });
     const order = result.get(id);
@@ -258,8 +262,27 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
   for (const order of result.values()) if (order.needs_fulfillment && order.stock_location !== 'FBP') {
     for (const item of order.items) localReserved.set(item.product_id, (localReserved.get(item.product_id) || 0) + Number(item.stock_quantity || 0));
   }
-  for (const order of result.values()) for (const item of order.items) {
-    item.product_local_available = positive(item.physical_stock_estimate - (localReserved.get(item.product_id) || 0) - item.product_fbp_reserved);
+  const productAvailability = new Map();
+  const productIds = new Set([...stockByProduct.keys(), ...pendingIncomingByProduct.keys(), ...localReserved.keys()]);
+  for (const productId of productIds) {
+    const stock = stockByProduct.get(productId) || {};
+    const localStock = rounded(Number(stock.ledger || 0) + Number(stock.open_deducted || 0));
+    const orderReserved = positive(localReserved.get(productId));
+    const fbpReserved = positive(stock.fbp_reserved);
+    productAvailability.set(productId, {
+      product_id: productId,
+      local_stock: localStock,
+      local_available: positive(localStock - orderReserved - fbpReserved),
+      order_reserved_qty: orderReserved,
+      fbp_reserved_qty: fbpReserved,
+      pending_procurement_qty: positive(pendingIncomingByProduct.get(productId)),
+      pending_procurement_available_qty: positive(availableIncomingByProduct.get(productId)),
+      inventory_needs_review: localStock < 0
+    });
   }
+  for (const order of result.values()) for (const item of order.items) {
+    item.product_local_available = productAvailability.get(item.product_id)?.local_available || 0;
+  }
+  result.product_availability = productAvailability;
   return result;
 }

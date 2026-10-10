@@ -1,7 +1,9 @@
 {
   "app": "ozon-erp",
-  "version": "local",
+  "version": "2026.10.09-tenant-management-c812977",
   "channel": "local",
+  "branch": "release/2026.10.09-tenant-management",
+  "commit": "7b96c1eb0b437e6ba601af3d478f6206df415b5e",
   "build_stamp": "",
-  "built_at": "2026-10-07T08:43:11.637Z"
+  "built_at": "2026-10-09T07:04:14.165Z"
 }

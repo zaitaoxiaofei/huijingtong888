@@ -16,6 +16,7 @@ const types = [
 ];
 const type = ref("product_development");
 const step = ref(props.initialTask ? "matrix" : "type");
+const needsCoordinate = computed(() => Boolean(props.initialTask && !props.initialTask.development_plan));
 const loading = ref(false);
 const loadError = ref("");
 const brands = ref([]);
@@ -44,7 +45,7 @@ const uniformTarget = ref(10);
 const unallocatedDrafts = ref([]);
 const allocationTarget = ref(null);
 const modelKey = row => JSON.stringify([row.brand || selectedBrand.value?.name, row.category || form.category, row.model_id]);
-const form = reactive({ title: "", owner_person_id: null, priority: "medium", start_at: "", due_at: "", category: "", notes: "" });
+const form = reactive({ title: "", owner_person_id: null, priority: "important_not_urgent", start_at: "", due_at: "", category: "", notes: "" });
 const draftModel = ref(null);
 const draftQuery = ref("");
 const draftRows = ref([]);
@@ -120,6 +121,8 @@ const existingCounts = computed(() => {
   return counts;
 });
 const completionText = computed(() => selectedModels.value.map((row) => `${row.brand ? `${row.brand} · ${row.category} · ` : ""}${row.model}：${Number(row.target || 0)} 个 SKU`).join("；"));
+function manualSkuValues(value = "") { return [...new Set(String(value || "").split(/[\n,，;；\s]+/).map((sku) => sku.trim()).filter(Boolean))]; }
+function editablePriority(value) { return ({ high: "urgent_important", medium: "important_not_urgent", low: "not_urgent_unimportant" })[value] || value || "important_not_urgent"; }
 function toggleBrand(name) {
   const next = new Set(expandedBrands.value);
   next.has(name) ? next.delete(name) : next.add(name);
@@ -144,13 +147,13 @@ function configure(brand, category, existing = null) {
   form.category = category;
   form.title = existing?.title || `${brand.name} ${category}开发`;
   form.owner_person_id = existing?.owner_person_id || null;
-  form.priority = existing?.priority || "medium";
+  form.priority = editablePriority(existing?.priority);
   form.start_at = existing?.start_at || "";
   form.due_at = existing?.due_at || "";
   form.notes = existing?.development_plan?.notes || "";
   unallocatedDrafts.value = (existing?.development_plan?.unallocated_drafts || []).map(row => ({ ...row }));
-  if (existing?.development_plan?.models.some(row => row.brand || row.category)) {
-    modelRows.value = existing.development_plan.models.map(row => ({ ...row, selected: true, drafts: (row.drafts || []).map(draft => ({ ...draft })) }));
+  if (existing?.development_plan?.models?.some(row => row.brand || row.category)) {
+    modelRows.value = existing.development_plan.models.map(row => ({ ...row, selected: true, manual_sku_text: (row.manual_skus || []).join("\n"), drafts: (row.drafts || []).map(draft => ({ ...draft })) }));
     configVisible.value = true;
     return;
   }
@@ -159,7 +162,7 @@ function configure(brand, category, existing = null) {
   for (const row of saved.values()) if (!models.some((model) => Number(model.id) === row.model_id)) models.push({ id: row.model_id, name: row.model });
   modelRows.value = models.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name, "en", { numeric: true })).map((model) => {
     const row = saved.get(Number(model.id));
-    return { model_id: Number(model.id), model: model.name, selected: Boolean(row) || scope.value === "non_automotive", target: row?.target || 10, done: row?.done || 0, drafts: (row?.drafts || []).map((draft) => ({ ...draft })), ...(Array.isArray(row?.manual_skus) ? { manual_skus: row.manual_skus } : {}) };
+    return { model_id: Number(model.id), model: model.name, selected: Boolean(row) || scope.value === "non_automotive", target: row?.target || 10, done: row?.done || 0, manual_sku_text: (row?.manual_skus || []).join("\n"), drafts: (row?.drafts || []).map((draft) => ({ ...draft })) };
   });
   configVisible.value = true;
 }
@@ -178,9 +181,12 @@ async function save() {
   if (selectedModels.value.some((row) => !Number.isInteger(row.target) || row.target < 1)) return ElMessage.warning("请为每个勾选车型填写大于 0 的整数 SKU 目标");
   saving.value = true;
   try {
+    const selectedGroupKeys = new Set(selectedModels.value.map((row) => JSON.stringify([row.brand || selectedBrand.value.name, row.category || form.category])));
+    const manualGroups = (props.initialTask?.development_plan?.manual_groups || []).filter((row) => selectedGroupKeys.has(JSON.stringify([row.brand, row.category])));
     const related = { kind: "development_matrix", brand: selectedBrand.value.name, scope: scope.value, category: form.category, notes: form.notes,
       unallocated_draft_ids: [...unallocatedDrafts.value.map(row => row.id), ...modelRows.value.filter(row => !row.selected).flatMap(row => row.drafts.map(draft => draft.id))],
-      models: selectedModels.value.map((row) => ({ ...(row.brand ? { brand: row.brand, category: row.category, scope: row.scope } : {}), model_id: row.model_id, model: row.model, target: row.target, draft_ids: row.drafts.map((draft) => draft.id), ...(Array.isArray(row.manual_skus) ? { manual_skus: row.manual_skus } : {}) })) };
+      models: selectedModels.value.map((row) => ({ ...(row.brand ? { brand: row.brand, category: row.category, scope: row.scope } : {}), model_id: row.model_id, model: row.model, target: row.target, draft_ids: row.drafts.map((draft) => draft.id), ...(needsCoordinate.value ? { manual_skus: manualSkuValues(row.manual_sku_text) } : Array.isArray(row.manual_skus) ? { manual_skus: row.manual_skus } : {}) })),
+      ...(manualGroups.length ? { manual_groups: manualGroups } : {}) };
     const payload = { title: form.title.trim(), type: "product_development", owner_person_id: form.owner_person_id, due_at: form.due_at,
       period: props.initialTask?.period || "week", priority: form.priority, start_at: form.start_at || "", related };
     if (props.initialTask) await apiClient.put(`/api/team/tasks/${props.initialTask.id}`, payload);
@@ -223,6 +229,7 @@ onMounted(async () => {
   await loadCatalog();
   if (loadError.value) return;
   const plan = props.initialTask.development_plan;
+  if (!plan) return;
   scope.value = plan.scope || "automotive";
   const brand = scope.value === "non_automotive" ? nonAutomotiveBrand : brands.value.find((row) => row.name === plan.brand) || { name: plan.brand, models: [] };
   configure(brand, plan.category, props.initialTask);
@@ -231,7 +238,7 @@ onMounted(async () => {
 
 <template>
   <el-dialog :model-value="true" :title="initialTask ? '编辑开发任务' : '新增任务'" :width="step === 'matrix' ? 'min(1320px, 96vw)' : 'min(850px, 94vw)'" align-center append-to-body class="task-create-dialog" :close-on-click-modal="false" :close-on-press-escape="!saving" :show-close="!saving" @close="emit('close')">
-    <template v-if="!initialTask">
+    <template v-if="!initialTask || needsCoordinate">
       <div v-if="step === 'type'" class="type-step">
         <p class="step-copy">选择任务类型</p>
         <el-alert v-if="ownersError" :title="ownersError" type="error" :closable="false"><el-button link @click="loadDailyOwners">重新加载负责人</el-button></el-alert>
@@ -246,13 +253,13 @@ onMounted(async () => {
         </div>
       </div>
       <template v-else-if="step === 'matrix'">
-        <div class="matrix-heading"><div><el-button link :disabled="loading || saving" @click="step = 'type'"><ArrowLeft :size="16" /> 返回任务类型</el-button><h3>从品牌与核心品名开始</h3><p>点击交叉格，选择车型并分配 SKU 目标。推荐顺序来自现有目录优先级。</p></div><el-tag>开发产品</el-tag></div>
+        <div class="matrix-heading"><div><el-button v-if="!initialTask" link :disabled="loading || saving" @click="step = 'type'"><ArrowLeft :size="16" /> 返回任务类型</el-button><h3>{{ needsCoordinate ? '补充品牌、类目与型号' : '从品牌与核心品名开始' }}</h3><p>{{ needsCoordinate ? '选择正确坐标后，可在同一窗口填写实际 SKU。' : '点击交叉格，选择车型并分配 SKU 目标。推荐顺序来自现有目录优先级。' }}</p></div><el-tag>开发产品</el-tag></div>
         <div class="matrix-search"><el-button @click="catalogEntry={kind:'category'}">＋ 新增类目</el-button><el-button @click="catalogEntry={kind:'brand'}">＋ 新增品牌</el-button><el-button @click="catalogEntry={kind:'model'}">＋ 新增车型</el-button><el-select v-model="scope" aria-label="开发范围" style="width:140px" @change="brandQuery = ''"><el-option label="汽车" value="automotive" /><el-option label="非汽车" value="non_automotive" /></el-select><el-input v-model="brandQuery" clearable placeholder="搜索品牌或车型"><template #prefix><Search :size="16" /></template></el-input><el-input v-model="categoryQuery" clearable placeholder="筛选核心品名" /><span>{{ visibleBrands.length }} 个品牌 · {{ visibleCategories.length }} 个核心品名</span></div>
         <el-alert v-if="loadError" :title="loadError" type="error" :closable="false" show-icon><el-button link @click="loadCatalog">重新加载</el-button></el-alert>
         <div v-loading="loading" class="development-matrix">
           <table v-if="visibleBrands.length && visibleCategories.length"><thead><tr><th>{{ scope === 'non_automotive' ? '非汽车 / 核心品名' : '汽车品牌 / 核心品名' }}</th><th v-for="category in visibleCategories" :key="category.value">{{ category.value }}</th></tr></thead><tbody>
             <tr v-for="brand in visibleBrands" :key="brand.name"><th><button type="button" class="brand-toggle" :aria-expanded="expandedBrands.has(brand.name)" @click="toggleBrand(brand.name)"><span>{{ expandedBrands.has(brand.name) ? '▾' : '▸' }}</span><div><strong>{{ brand.name }}</strong><small>{{ scope === 'non_automotive' ? '无需车型' : `${brand.models.length} 个车型` }}</small></div></button><el-button v-if="scope !== 'non_automotive'" link type="primary" @click="catalogEntry={kind:'model',brand:brand.name}">＋ 添加车型</el-button><div v-if="expandedBrands.has(brand.name)" class="brand-models">{{ brand.models.map(model => model.name).join(' · ') || '暂无车型' }}</div></th>
-              <td v-for="category in visibleCategories" :key="category.value"><button type="button" class="matrix-cell" :disabled="!brand.models.length" :aria-label="`${brand.name} · ${category.value}，配置开发任务`" @click="configure(brand, category.value)"><Plus :size="17" /><span>配置任务</span><small v-if="existingCounts.get(`${brand.name}\n${category.value}`)">已有 {{ existingCounts.get(`${brand.name}\n${category.value}`) }} 个任务</small></button></td>
+              <td v-for="category in visibleCategories" :key="category.value"><button type="button" class="matrix-cell" :disabled="!brand.models.length" :aria-label="`${brand.name} · ${category.value}，配置开发任务`" @click="configure(brand, category.value, initialTask || null)"><Plus :size="17" /><span>配置任务</span><small v-if="existingCounts.get(`${brand.name}\n${category.value}`)">已有 {{ existingCounts.get(`${brand.name}\n${category.value}`) }} 个任务</small></button></td>
             </tr>
           </tbody></table>
           <el-empty v-else-if="!loading && !loadError" description="没有匹配的品牌或核心品名，请调整搜索或先维护目录" />
@@ -288,9 +295,9 @@ onMounted(async () => {
       <el-form-item label="任务名称" required><el-input v-model="form.title" maxlength="255" /></el-form-item>
       <el-button v-if="scope !== 'non_automotive' && !initialTask?.source_idea_id" link type="primary" @click="catalogEntry={kind:'model',brand:selectedBrand.name}">目录中没有？新增该品牌车型</el-button>
       <div class="model-actions"><el-checkbox :model-value="allSelected" :indeterminate="selectedModels.length > 0 && !allSelected" @change="setAll">{{ scope === 'non_automotive' ? '非汽车开发' : '全部车型' }}</el-checkbox><div><span>统一目标</span><el-input-number v-model="uniformTarget" :min="1" :max="100000" :precision="0" controls-position="right" /><el-button :disabled="!selectedModels.length" @click="applyTarget">应用到已选</el-button></div></div>
-      <div class="model-table"><table><thead><tr><th>{{ scope === 'non_automotive' ? '开发范围' : '选择车型' }}</th><th>目标 SKU 数</th><th v-if="initialTask">已完成</th><th v-if="initialTask">成果草稿</th></tr></thead><tbody><tr v-for="row in modelRows" :key="modelKey(row)" :class="{ selected: row.selected }"><td><el-checkbox v-model="row.selected">{{ row.brand ? `${row.brand} · ${row.category} · ` : '' }}{{ row.model }}</el-checkbox></td><td><el-input-number v-if="row.selected" v-model="row.target" :min="1" :max="100000" :precision="0" controls-position="right" /><span v-else class="model-placeholder">勾选后设置数量</span></td><td v-if="initialTask">{{ row.done }} / {{ row.target }}</td><td v-if="initialTask"><el-button link type="primary" :disabled="!row.selected" @click="openDrafts(row)">关联草稿（{{ row.drafts.length }}）</el-button></td></tr></tbody></table></div>
+      <div class="model-table"><table><thead><tr><th>{{ scope === 'non_automotive' ? '开发范围' : '选择车型' }}</th><th>目标 SKU 数</th><th v-if="needsCoordinate">实际 SKU</th><th v-if="initialTask && !needsCoordinate">已完成</th><th v-if="initialTask && !needsCoordinate">成果草稿</th></tr></thead><tbody><tr v-for="row in modelRows" :key="modelKey(row)" :class="{ selected: row.selected }"><td><el-checkbox v-model="row.selected">{{ row.brand ? `${row.brand} · ${row.category} · ` : '' }}{{ row.model }}</el-checkbox></td><td><el-input-number v-if="row.selected" v-model="row.target" :min="1" :max="100000" :precision="0" controls-position="right" /><span v-else class="model-placeholder">勾选后设置数量</span></td><td v-if="needsCoordinate"><el-input v-if="row.selected" v-model="row.manual_sku_text" type="textarea" :rows="2" placeholder="每行一个 SKU" /><span v-else class="model-placeholder">勾选后填写</span></td><td v-if="initialTask && !needsCoordinate">{{ row.done }} / {{ row.target }}</td><td v-if="initialTask && !needsCoordinate"><el-button link type="primary" :disabled="!row.selected" @click="openDrafts(row)">关联草稿（{{ row.drafts.length }}）</el-button></td></tr></tbody></table></div>
       <div class="model-summary">已选 <b>{{ selectedModels.length }}</b> {{ scope === 'non_automotive' ? '个开发范围' : '个车型' }}，合计 <b>{{ totalTarget }}</b> 个 SKU</div>
-      <div class="config-fields"><el-form-item label="负责人" required><el-select v-model="form.owner_person_id" filterable placeholder="重新选择负责人"><el-option v-for="person in people" :key="person.id" :label="person.name" :value="person.id" /></el-select></el-form-item><el-form-item label="优先级"><el-select v-model="form.priority"><el-option label="高优先级" value="high" /><el-option label="中优先级" value="medium" /><el-option label="低优先级" value="low" /></el-select></el-form-item><el-form-item label="开始日期（北京时间）"><el-date-picker v-model="form.start_at" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" /></el-form-item><el-form-item label="计划完成日期（北京时间）" required><el-date-picker v-model="form.due_at" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" /></el-form-item></div>
+      <div class="config-fields"><el-form-item label="负责人" required><el-select v-model="form.owner_person_id" filterable placeholder="重新选择负责人"><el-option v-for="person in people" :key="person.id" :label="person.name" :value="person.id" /></el-select></el-form-item><el-form-item label="优先级"><el-select v-model="form.priority"><el-option label="紧急重要 · 10分" value="urgent_important" /><el-option label="紧急不重要 · 8分" value="urgent_unimportant" /><el-option label="重要不紧急 · 7分" value="important_not_urgent" /><el-option label="不重要不紧急 · 6分" value="not_urgent_unimportant" /></el-select></el-form-item><el-form-item label="开始日期（北京时间）"><el-date-picker v-model="form.start_at" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" /></el-form-item><el-form-item label="计划完成日期（北京时间）" required><el-date-picker v-model="form.due_at" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" /></el-form-item></div>
       <div class="completion-rule"><strong>完成标准</strong><p>{{ completionText || '勾选车型后自动生成完成标准' }}</p><small>按每个车型关联草稿中的变体数量计数，店铺副本不重复计数。所有车型分别达标后任务完成。{{ initialTask ? '草稿关联变更将在保存任务后生效。' : '创建后打开任务详情即可按车型关联负责人创建的草稿。' }}</small></div>
       <el-form-item label="补充要求（选填）"><el-input v-model="form.notes" type="textarea" :rows="2" maxlength="2000" placeholder="例如：颜色、材质、款式或验收要求" /></el-form-item>
     </el-form>

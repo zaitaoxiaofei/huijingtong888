@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDevelopmentHeatmap } from '../frontend/admin/utils/development-heatmap.js';
+import { buildDevelopmentHeatmap, developmentPlanPeriodKey, effectiveDevelopmentDueDay } from '../frontend/admin/utils/development-heatmap.js';
 const range = ['2026-09-01', '2026-09-30'];
 const task = (id, models, extra = {}) => ({ id, type:'product_development', created_at:'2026-09-10 00:00:00', due_at:'2026-10-01', development_plan:{brand:'TENET',category:'钥匙壳',models}, ...extra });
 const model = (id, count, date = '2026-09-10 00:00:00', draftId = id) => ({model_id:id,model:`T${id}`,target:10,drafts:[{id:draftId,count,created_at:date}]});
@@ -39,4 +39,37 @@ test('idea tasks with brand metadata and full draft rows participate without inv
  const result=buildDevelopmentHeatmap(rows,{range});
  assert.equal(result.total,8); assert.equal(result.rows[0].label,'TENET · 未指定车型');
  assert.equal(buildDevelopmentHeatmap(rows,{range,metric:'tasks',time:'created'}).total,0);
+});
+
+test('overdue open tasks roll forward by whole weeks using Beijing due dates', () => {
+ const now=Date.parse('2026-10-08T12:00:00+08:00');
+ assert.equal(effectiveDevelopmentDueDay({due_at:'2026-10-01',status:'doing'},now),'2026-10-08');
+ assert.equal(effectiveDevelopmentDueDay({due_at:'2026-09-24',status:'todo'},now),'2026-10-08');
+ assert.equal(effectiveDevelopmentDueDay({due_at:'2026-10-01',status:'done'},now),'2026-10-01');
+ const overdue=task(4,[model(9,0)],{due_at:'2026-10-01',status:'doing'});
+ assert.equal(buildDevelopmentHeatmap([overdue],{metric:'tasks',time:'due',range:['2026-10-05','2026-10-11'],now}).total,1);
+});
+
+test('planning periods use stable week and month keys shared with the task center', () => {
+ assert.equal(developmentPlanPeriodKey('week',['2026-10-05','2026-10-11']),'week:2026-10-05');
+ assert.equal(developmentPlanPeriodKey('month',['2026-10-01','2026-10-31']),'month:2026-10');
+});
+
+test('priority quadrants sort heatmap rows and core-product columns before volume', () => {
+ const rows=[
+  task(1,[{...model(1,40),brand:'LADA',category:'脚垫'}],{priority:'low'}),
+  task(2,[{...model(2,1),brand:'TENET',category:'方向盘套'}],{priority:'urgent_important'})
+ ];
+ const result=buildDevelopmentHeatmap(rows,{metric:'tasks',time:'created',range});
+ assert.equal(result.rows[0].label,'TENET · T2');
+ assert.equal(result.columns[0].label,'方向盘套');
+ assert.equal(result.cell(result.rows[0],result.columns[0].label).priorityScore,10);
+});
+
+test('completed development tasks can be excluded from the heatmap without changing the inclusive default', () => {
+ const rows=[task(1,[model(1,4)],{status:'doing'}),task(2,[model(2,8)],{status:'done'}),task(3,[model(3,3)],{status:'cancelled'})];
+ const active=buildDevelopmentHeatmap(rows,{metric:'tasks',time:'created',range,includeCompleted:false});
+ assert.equal(active.taskCount,1);
+ assert.deepEqual(active.rows.map(row=>row.label),['TENET · T1']);
+ assert.equal(buildDevelopmentHeatmap(rows,{metric:'tasks',time:'created',range}).taskCount,3);
 });

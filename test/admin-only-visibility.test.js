@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { navigationMenusForRole } from "../frontend/admin/constants/navigation.js";
 
 const dashboardSource = fs.readFileSync(new URL("../frontend/admin/views/DashboardView.vue", import.meta.url), "utf8");
+const routerSource = fs.readFileSync(new URL("../frontend/admin/router/index.js", import.meta.url), "utf8");
 const serverSource = fs.readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
 
 test("finance and system navigation are only visible to admins", () => {
@@ -18,6 +19,11 @@ test("finance and system navigation are only visible to admins", () => {
   assert.equal(managerKeys.includes("settings"), false);
   assert.equal(adminKeys.includes("finance"), true);
   assert.equal(adminKeys.includes("settings"), true);
+  const adminRoutes = navigationMenusForRole("admin").flatMap((item) => item.children || [item]).map((item) => item.route);
+  assert.equal(adminRoutes.includes("/tenant-management"), true);
+  assert.equal(operatorRoutes.includes("/tenant-management"), false);
+  assert.match(routerSource, /path: "tenant-management", name: "tenant-management"/);
+  assert.match(routerSource, /path: "settings\/tenants", name: "settings-tenants", redirect/);
   assert.equal(operatorRoutes.includes("/exceptions/profit"), false);
   assert.equal(operatorRoutes.some((route) => String(route || "").startsWith("/profit/")), false);
 });

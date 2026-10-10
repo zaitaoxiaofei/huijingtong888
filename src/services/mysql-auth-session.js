@@ -1,6 +1,7 @@
 import { ensurePeopleRolesSchemaMysql } from "./people-roles.js";
 import { getRoles, primaryRole } from "../shared/permissions.js";
 import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery } from "../mysql-pool.js";
+import { ensureTenantSchemaMysql, resolveActiveTenantMysql, tenantHasAccess } from "./tenants.js";
 
 function ensureMysqlAuthSessionEnabled() {
   if (!isMysqlPrimaryEnabled()) {
@@ -42,12 +43,15 @@ async function ensureWechatAuthColumnsMysql() {
 
 export async function createSessionMysql(session) {
   ensureMysqlAuthSessionEnabled();
+  if (typeof ensureTenantSchemaMysql === "function") await ensureTenantSchemaMysql();
   const expiresAt = normalizeMysqlDateTime(session.expiresAt);
+  const tenant = await resolveActiveTenantMysql(session.personId, session.activeTenantId);
+  if (!tenant) throw new Error("账号未加入任何企业，请联系平台管理员");
 
   await mysqlExecute(`
-    INSERT INTO sessions (token, person_id, name, role, username, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `, [session.token, session.personId, session.name, session.role, session.username || null, expiresAt]);
+    INSERT INTO sessions (token, person_id, name, role, username, active_tenant_id, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `, [session.token, session.personId, session.name, session.role, session.username || null, tenant.id, expiresAt]);
 
   return session.token;
 }
@@ -55,8 +59,12 @@ export async function createSessionMysql(session) {
 export async function getSessionMysql(token) {
   ensureMysqlAuthSessionEnabled();
   await ensurePeopleRolesSchemaMysql();
-  const row = await mysqlQueryOne(`SELECT s.*, p.name AS current_name, p.role AS current_role, p.roles_json
-    FROM sessions s JOIN people p ON p.id = s.person_id AND p.active = 1 WHERE s.token = ?`, [token]);
+  if (typeof ensureTenantSchemaMysql === "function") await ensureTenantSchemaMysql();
+  const row = await mysqlQueryOne(`SELECT s.*, p.name AS current_name, p.role AS current_role, p.roles_json,
+      t.slug AS tenant_slug, t.name AS tenant_name, t.status AS tenant_status, t.plan_code, t.subscription_status, t.subscription_expires_at, tm.role AS tenant_role
+    FROM sessions s JOIN people p ON p.id = s.person_id AND p.active = 1
+    JOIN tenant_members tm ON tm.tenant_id = s.active_tenant_id AND tm.person_id = s.person_id AND tm.active = 1
+    JOIN tenants t ON t.id = tm.tenant_id AND t.status = 'active' WHERE s.token = ?`, [token]);
   if (!row) return null;
 
   if (new Date(row.expires_at) < new Date()) {
@@ -70,6 +78,11 @@ export async function getSessionMysql(token) {
     role: primaryRole({ role: row.current_role, roles_json: row.roles_json }),
     roles: getRoles({ role: row.current_role, roles_json: row.roles_json }),
     username: row.username,
+    tenantId: Number(row.active_tenant_id),
+    tenant: (() => {
+      const tenant = { id: Number(row.active_tenant_id), slug: row.tenant_slug, name: row.tenant_name, status: row.tenant_status, plan_code: row.plan_code, subscription_status: row.subscription_status, subscription_expires_at: row.subscription_expires_at, role: row.tenant_role };
+      return { ...tenant, access_allowed: typeof tenantHasAccess === "function" ? tenantHasAccess(tenant) : true };
+    })(),
     createdAt: new Date(row.created_at).getTime()
   };
 }

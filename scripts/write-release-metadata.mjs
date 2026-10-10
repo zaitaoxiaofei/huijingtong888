@@ -8,11 +8,15 @@ const publicDir = path.resolve(rootDir, "public");
 const version = process.env.OZON_RELEASE_VERSION || process.env.APP_RELEASE_VERSION || "local";
 const channel = process.env.OZON_RELEASE_CHANNEL || "local";
 const buildStamp = process.env.OZON_BUILD_STAMP || "";
+const branch = process.env.OZON_RELEASE_BRANCH || "";
+const commit = process.env.OZON_RELEASE_COMMIT || "";
 
 const release = {
   app: "ozon-erp",
   version,
   channel,
+  branch,
+  commit,
   build_stamp: buildStamp,
   built_at: new Date().toISOString()
 };

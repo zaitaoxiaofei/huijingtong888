@@ -2488,6 +2488,16 @@ Return team planning tasks.
 - Responses:
   - `200` `application/json` -> `array<TeamTaskRecord>`
 
+#### `PUT /api/team/development-task-priority`
+
+Change priority for one or more active product-development tasks from the development heatmap.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `MutationOk`
+
 #### `POST /api/team/tasks`
 
 Create a team planning task.

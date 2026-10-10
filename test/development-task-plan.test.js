@@ -65,6 +65,24 @@ test("manually configured SKUs become the progress source without draft binding"
   assert.equal(progress.models[1].done, 0);
 });
 
+test("group progress supports direct completion and brand-category SKU entry", () => {
+  const completed = plan();
+  completed.manual_groups = [{ brand: "TENET", category: "钥匙壳", mode: "completed" }];
+  const completedProgress = developmentPlanProgress(normalizeDevelopmentPlan(completed, body), []);
+  assert.equal(completedProgress.done, 30);
+  assert.equal(completedProgress.status, "done");
+
+  const recorded = plan();
+  recorded.manual_groups = [{ brand: "TENET", category: "钥匙壳", mode: "skus", manual_skus: ["A", "B", "A"] }];
+  const normalized = normalizeDevelopmentPlan(recorded, body);
+  assert.deepEqual(normalized.manual_groups[0].manual_skus, ["A", "B"]);
+  const progress = developmentPlanProgress(normalized, []);
+  assert.equal(progress.done, 2);
+  assert.equal(progress.models[0].done, 2);
+  assert.equal(progress.models[1].done, 0);
+  assert.equal(progress.status, "doing");
+});
+
 function serviceHarness() {
   const writes = [];
   const state = { stored: [], ideaLinks: [], drafts: [{ id: 101, product_name: "T4", sku_count: 12, created_by_person_id: 7 }, { id: 102, product_name: "T7", sku_count: 5, created_by_person_id: 7 }] };
@@ -90,13 +108,14 @@ function serviceHarness() {
   return { context, state, writes };
 }
 
-test("create endpoint stores complete structured goals in one write and derives trusted progress", async () => {
+test("create endpoint stores complete structured goals, four-quadrant priority and derives trusted progress", async () => {
   const { context, writes } = serviceHarness();
-  const result = await context.createTeamTaskMysql({ ...body, related: plan(), done: 999, target: 999, status: "done" }, 7);
+  const result = await context.createTeamTaskMysql({ ...body, related: plan(), priority: "urgent_important", done: 999, target: 999, status: "done" }, 7);
   assert.equal(result.id, 55);
   assert.equal(writes.length, 1);
   const params = writes[0].params;
   assert.equal(params[5], "doing");
+  assert.equal(params[6], "urgent_important");
   assert.equal(params[7], 30);
   assert.equal(params[8], 15);
   assert.deepEqual(JSON.parse(params[12]), plan());

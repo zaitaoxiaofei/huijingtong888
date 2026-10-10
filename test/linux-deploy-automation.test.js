@@ -8,6 +8,16 @@ const remote = fs.readFileSync(new URL("../deploy/linux/remote-release.sh", impo
 const oneClick = fs.readFileSync(new URL("../deploy/linux/deploy-ecs-one-click.ps1", import.meta.url), "utf8");
 const launcher = fs.readFileSync(new URL("../一键部署到阿里云.vbs", import.meta.url), "utf8");
 const keySetup = fs.readFileSync(new URL("../deploy/linux/configure-ecs-key.ps1", import.meta.url), "utf8");
+const windowsClient = fs.readFileSync(new URL("../deploy/windows-client/连接Ozon ERP.ps1", import.meta.url), "utf8");
+const deploymentDocs = fs.readFileSync(new URL("../docs/ECS_ONE_COMMAND_DEPLOYMENT.md", import.meta.url), "utf8");
+
+test("ECS deployment defaults use the verified production host everywhere", () => {
+  const defaults = [client, unixClient, oneClick, keySetup, windowsClient, deploymentDocs];
+  for (const source of defaults) {
+    assert.match(source, /47\.120\.47\.194/);
+    assert.doesNotMatch(source, /47\.113\.195\.4/);
+  }
+});
 
 test("ECS deployment uploads one artifact and delegates atomic release activation", () => {
   assert.match(client, /npm\.cmd run package:deploy/);

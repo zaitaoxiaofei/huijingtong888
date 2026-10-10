@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS shops (
   watermark_scale_percent DECIMAL(8,4) NOT NULL DEFAULT 22.0000,
   watermark_opacity_percent DECIMAL(8,4) NOT NULL DEFAULT 82.0000,
   status VARCHAR(32) NOT NULL DEFAULT 'active',
+  plan_code VARCHAR(32) NOT NULL DEFAULT 'trial_7d',
+  subscription_status VARCHAR(32) NOT NULL DEFAULT 'trial',
+  subscription_expires_at DATETIME NULL,
+  feature_flags_json JSON NULL,
   payout_rate DECIMAL(8,4) NOT NULL DEFAULT 0.3300,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_shops_user_id (user_id)
@@ -61,6 +65,48 @@ CREATE TABLE IF NOT EXISTS people (
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uk_people_name (name),
   UNIQUE KEY uk_people_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS system_notifications (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  recipient_person_id BIGINT UNSIGNED NOT NULL,
+  notification_type VARCHAR(64) NOT NULL DEFAULT 'system',
+  title VARCHAR(255) NOT NULL,
+  content TEXT NULL,
+  severity VARCHAR(20) NOT NULL DEFAULT 'info',
+  route VARCHAR(500) NOT NULL DEFAULT '',
+  entity_type VARCHAR(64) NOT NULL DEFAULT '',
+  entity_id VARCHAR(128) NULL,
+  dedupe_key VARCHAR(255) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'unread',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  read_at DATETIME NULL,
+  resolved_at DATETIME NULL,
+  UNIQUE KEY uk_system_notifications_dedupe (dedupe_key),
+  KEY idx_system_notifications_recipient_status (recipient_person_id, status, created_at),
+  KEY idx_system_notifications_created (created_at)
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS tenants (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  slug VARCHAR(80) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_tenants_slug (slug)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS tenant_members (
+  tenant_id BIGINT UNSIGNED NOT NULL,
+  person_id BIGINT UNSIGNED NOT NULL,
+  role VARCHAR(32) NOT NULL DEFAULT 'member',
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (tenant_id, person_id),
+  KEY idx_tenant_members_person (person_id, active),
+  KEY idx_tenant_members_tenant (tenant_id, active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS finance_companies (
@@ -1262,6 +1308,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   name VARCHAR(255) NOT NULL,
   role VARCHAR(64) NOT NULL,
   username VARCHAR(255) NULL,
+  active_tenant_id BIGINT UNSIGNED NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   expires_at DATETIME NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

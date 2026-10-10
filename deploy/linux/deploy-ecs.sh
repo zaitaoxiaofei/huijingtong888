@@ -104,7 +104,7 @@ if [[ -f "$saved_config" ]]; then
   [[ -n "$identity_file" ]] || identity_file="$(read_saved_value "$saved_config" identityFile)"
 fi
 
-host="${host:-47.113.195.4}"
+host="${host:-47.120.47.194}"
 ssh_user="${ssh_user:-root}"
 ssh_port="${ssh_port:-22}"
 version="${version:-$(date '+%Y.%m.%d-%H%M%S')}"
@@ -132,6 +132,7 @@ require_command npm
 require_command ssh
 require_command scp
 require_command zip
+require_command split
 
 if (( !allow_dirty )); then
   node "$project_root/scripts/verify-release-worktree.mjs"
@@ -152,6 +153,8 @@ if ((!skip_build)); then
   DEPLOY_OUTPUT_DIR="$output_dir" \
     OZON_DEPLOY_WORK_DIR="$work_dir" \
     OZON_RELEASE_VERSION="$version" \
+    OZON_RELEASE_BRANCH="$(git branch --show-current)" \
+    OZON_RELEASE_COMMIT="$(git rev-parse HEAD)" \
     npm run package:deploy
 fi
 
@@ -159,12 +162,20 @@ fi
 rm -f -- "$archive_path"
 (cd "$output_dir" && zip -q -r "$archive_path" .)
 
-ssh_options=(-p "$ssh_port" -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -i "$identity_file")
-scp_options=(-P "$ssh_port" -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -i "$identity_file")
+ssh_options=(-p "$ssh_port" -o ServerAliveInterval=15 -o ServerAliveCountMax=12 -i "$identity_file")
+scp_options=(-P "$ssh_port" -o ServerAliveInterval=15 -o ServerAliveCountMax=12 -i "$identity_file")
 remote_target="$ssh_user@$host"
 
-printf 'Uploading release artifact...\n'
-scp "${scp_options[@]}" "$archive_path" "$remote_target:$remote_archive"
+printf 'Splitting release artifact for upload...\n'
+split -b 4m "$archive_path" "$work_dir/ozon-erp-upload-part-"
+printf 'Uploading release artifact in chunks...\n'
+for chunk_path in "$work_dir"/ozon-erp-upload-part-*; do
+  chunk_suffix="${chunk_path##*-}"
+  printf 'Uploading artifact chunk %s...\n' "$chunk_suffix"
+  scp "${scp_options[@]}" "$chunk_path" "$remote_target:$remote_archive.part-$chunk_suffix"
+done
+ssh "${ssh_options[@]}" "$remote_target" \
+  "set -e; cat '$remote_archive'.part-* > '$remote_archive'; rm -f '$remote_archive'.part-*; unzip -tqq '$remote_archive'"
 scp "${scp_options[@]}" "$script_dir/remote-release.sh" "$remote_target:$remote_script"
 
 db_init_flag=1

@@ -1,17 +1,20 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Boxes, CalendarDays, CheckCircle2, CircleCheck, ClipboardCheck, Clock3, Edit3, ImagePlus, Lightbulb, LayoutDashboard, Link2, ListTodo, PackagePlus, Plus, RefreshCw, Rocket, Search, ShoppingCart, Trash2, TrendingUp, TriangleAlert, Truck, Upload, Users } from "lucide-vue-next";
 import { apiClient } from "../../utils/api";
 import { useAuthStore } from "../../stores/auth";
 import { uploadListingMedia } from "../../api/tools/imageCropper";
-import { shanghaiDateTimeText } from "../../utils/shanghai-date";
+import { shanghaiDateKey, shanghaiDateText, shanghaiDateTimeText } from "../../utils/shanghai-date";
+import { developmentCoordinateKey, developmentPlanPeriodKey } from "../../utils/development-heatmap.js";
 import DevelopmentHeatmap from "../../components/team/DevelopmentHeatmap.vue";
 import { loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../utils/inventory-naming-options.js";
 import IdeaDevelopmentScopeDialog from "../../components/team/IdeaDevelopmentScopeDialog.vue";
 import TaskCreationDialog from "../../components/team/TaskCreationDialog.vue";
 import ProductCreateEditDialog from "../../components/inventory/ProductCreateEditDialog.vue";
+import TaskScopeActions from "../../components/team/TaskScopeActions.vue";
+import { developmentTypeLabel } from "../../utils/product-development-meta.js";
 
 const router = useRouter();
 const authStore = useAuthStore();
@@ -92,13 +95,13 @@ const bindingsLoaded = ref(false);
 const bindingStatus = ref("all");
 const taskKeyword = ref("");
 const taskStatus = ref("all");
-const taskOwnerFilter = ref("all");
+const taskOwnerFilter = ref("current");
 const taskType = ref("all");
 const taskRange = ref("week");
 const taskAnchor = ref(new Date());
 const taskCustomRange = ref([]);
-const taskAudience = ref("mine");
 const taskListVisible = ref(false);
+const taskPlanOrderByCoordinate = ref(new Map());
 const taskPage = ref(1);
 const taskPageSize = ref(20);
 const taskVisible = ref(false);
@@ -120,8 +123,27 @@ const bindProductId = ref(null);
 const bindProductOptions = ref([]);
 const taskSkuConfigVisible = ref(false);
 const taskSkuConfigTask = ref(null);
-const taskSkuConfigRows = ref([]);
+const taskSkuConfigGroups = ref([]);
+const taskSkuConfigModelIndex = ref(null);
 const taskSkuConfigSaving = ref(false);
+const taskModelEditorVisible = ref(false);
+const taskModelEditor = reactive({ task: null, index: null, label: "", target: 1 });
+const taskModelDraftPickerVisible = ref(false);
+const taskModelDraftPickerTask = ref(null);
+const taskModelDraftPickerIndex = ref(null);
+const taskModelDraftPickerLabel = ref("");
+const taskModelDraftPickerIds = ref([]);
+const taskModelDraftPickerUnavailableIds = ref(new Set());
+const taskModelDraftPickerKeyword = ref("");
+const taskModelDraftPickerOptions = ref([]);
+const taskModelDraftPickerLoading = ref(false);
+const taskModelDraftPickerSaving = ref(false);
+const taskModelDraftPickerAssignments = ref({});
+const taskModelDraftPickerPage = ref(1);
+const taskModelDraftPickerPageSize = 20;
+const taskModelDraftPickerTotal = ref(0);
+const taskClock = ref(Date.now());
+let taskClockTimer = null;
 const metaForm = reactive({ project_id: null, status: "idea", priority: "medium", planned_listing_at: "", note: "", decision_note: "" });
 
 const filteredProducts = computed(() => products.value.filter((row) => {
@@ -165,7 +187,8 @@ const filteredTasks = computed(() => tasks.value.filter((row) => {
   if (taskStatus.value !== "all" && row.status !== taskStatus.value) return false;
   const ownerId = Number(row.owner_person_id || row.assignee_person_id || 0);
   if (taskOwnerFilter.value === "unassigned" && ownerId) return false;
-  if (taskOwnerFilter.value !== "all" && taskOwnerFilter.value !== "unassigned" && ownerId !== Number(taskOwnerFilter.value)) return false;
+  if (taskOwnerFilter.value === "current" && currentPersonId.value && ownerId !== currentPersonId.value) return false;
+  if (taskOwnerFilter.value !== "all" && taskOwnerFilter.value !== "unassigned" && taskOwnerFilter.value !== "current" && ownerId !== Number(taskOwnerFilter.value)) return false;
   if (taskType.value !== "all" && row.type !== taskType.value) return false;
   const query = taskKeyword.value.trim().toLowerCase();
   return !query || [row.title, row.name, row.project_name, row.assignee_name, row.owner_name, row.deliverable]
@@ -178,25 +201,29 @@ const taskTypeOptions = [
 ];
 const taskRangeOptions = [{ value: "week", label: "本周" }, { value: "month", label: "月度" }, { value: "quarter", label: "季度" }, { value: "year", label: "年度" }, { value: "custom", label: "自定义" }];
 const taskRangeDates = computed(() => {
-  if (taskRange.value === "custom" && taskCustomRange.value?.length === 2) return taskCustomRange.value.map((value) => new Date(`${value}T00:00:00+08:00`));
-  const anchor = new Date(taskAnchor.value); const year = anchor.getFullYear(); const month = anchor.getMonth();
-  if (taskRange.value === "week") { const day = anchor.getDay() || 7; const start = new Date(year, month, anchor.getDate() - day + 1); return [start, new Date(year, month, anchor.getDate() - day + 7)]; }
-  if (taskRange.value === "month") return [new Date(year, month, 1), new Date(year, month + 1, 0)];
-  if (taskRange.value === "quarter") { const startMonth = Math.floor(month / 3) * 3; return [new Date(year, startMonth, 1), new Date(year, startMonth + 3, 0)]; }
-  return [new Date(year, 0, 1), new Date(year, 11, 31)];
+  if (taskRange.value === "custom" && taskCustomRange.value?.length === 2) return taskCustomRange.value.map((value) => new Date(`${value}T00:00:00Z`));
+  const [year, month, date] = shanghaiDateKey(taskAnchor.value).split("-").map(Number);
+  const anchor = new Date(Date.UTC(year, month - 1, date));
+  const anchorYear = anchor.getUTCFullYear(); const anchorMonth = anchor.getUTCMonth(); const anchorDate = anchor.getUTCDate();
+  if (taskRange.value === "week") { const day = anchor.getUTCDay() || 7; const start = new Date(Date.UTC(anchorYear, anchorMonth, anchorDate - day + 1)); return [start, new Date(Date.UTC(anchorYear, anchorMonth, anchorDate - day + 7))]; }
+  if (taskRange.value === "month") return [new Date(Date.UTC(anchorYear, anchorMonth, 1)), new Date(Date.UTC(anchorYear, anchorMonth + 1, 0))];
+  if (taskRange.value === "quarter") { const startMonth = Math.floor(anchorMonth / 3) * 3; return [new Date(Date.UTC(anchorYear, startMonth, 1)), new Date(Date.UTC(anchorYear, startMonth + 3, 0))]; }
+  return [new Date(Date.UTC(anchorYear, 0, 1)), new Date(Date.UTC(anchorYear, 11, 31))];
 });
 const taskRangeLabel = computed(() => `${shortDate(taskRangeDates.value[0])} - ${shortDate(taskRangeDates.value[1])}`);
+const taskPlanningPeriodKey = computed(() => developmentPlanPeriodKey(taskRange.value, taskRangeDates.value.map(shanghaiDateKey)));
 const visibleTasks = computed(() => filteredTasks.value.filter((row) => {
   const point = taskDate(row); if (!point) return taskRange.value === "week";
-  return point >= dayStart(taskRangeDates.value[0]) && point <= dayEnd(taskRangeDates.value[1]);
+  const pointDate = shanghaiDateKey(point);
+  return pointDate >= shanghaiDateKey(taskRangeDates.value[0]) && pointDate <= shanghaiDateKey(taskRangeDates.value[1]);
 }));
 const currentPersonId = computed(() => Number(authStore.user?.personId || authStore.user?.id || 0));
-const audienceTasks = computed(() => visibleTasks.value.filter((row) => taskAudience.value === "all" || !currentPersonId.value
-  || taskOwnerFilter.value !== "all" || Number(row.owner_person_id || row.assignee_person_id || 0) === currentPersonId.value));
+const audienceTasks = computed(() => visibleTasks.value);
 const taskPeopleTitle = computed(() => {
   if (taskOwnerFilter.value === "unassigned") return "未分配任务";
+  if (taskOwnerFilter.value === "current") return `${authStore.user?.name || "我的"}的任务`;
   if (taskOwnerFilter.value !== "all") return `${people.value.find((person) => Number(person.id) === Number(taskOwnerFilter.value))?.name || "所选人员"}的任务`;
-  return taskAudience.value === "mine" ? "我的任务" : "全部人员任务";
+  return "全部人员任务";
 });
 const taskPeopleGroups = computed(() => {
   const groups = new Map();
@@ -207,7 +234,7 @@ const taskPeopleGroups = computed(() => {
     groups.get(key).rows.push(row);
   }
   return [...groups.values()].map((group) => ({ ...group,
-    rows: group.rows.sort((a, b) => String(a.due_at || "9999-12-31").localeCompare(String(b.due_at || "9999-12-31"))),
+    rows: group.rows.sort(compareTaskPriorityProgress),
     skuTotal: group.rows.reduce((sum, row) => sum + Number(row.target || 0), 0),
     doneTotal: group.rows.reduce((sum, row) => sum + Number(row.done || 0), 0)
   })).sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
@@ -221,7 +248,7 @@ const timelineTasks = computed(() => {
   });
 });
 const timelineGroups = computed(() => timelineTasks.value.map((row) => ({ ...row, rows: [row] })));
-const taskListRows = computed(() => audienceTasks.value);
+const taskListRows = computed(() => [...audienceTasks.value].sort(compareTaskPriorityProgress));
 const taskListSummary = computed(() => ({
   tasks: taskListRows.value.length,
   skuTotal: taskListRows.value.reduce((sum, row) => sum + Number(row.target || 0), 0),
@@ -234,7 +261,7 @@ const taskDetailFilteredRows = computed(() => (taskOperationalDetails.value.rows
 const taskDetailRows = computed(() => taskDetailFilteredRows.value.slice((taskDetailPage.value - 1) * taskDetailPageSize, taskDetailPage.value * taskDetailPageSize));
 const taskAxisLabels = computed(() => {
   const [start, end] = taskRangeDates.value; const count = taskRange.value === "year" ? 12 : taskRange.value === "quarter" ? 6 : taskRange.value === "month" ? 5 : 7;
-  return Array.from({ length: count }, (_, index) => { const ratio = count === 1 ? 0 : index / (count - 1); const date = new Date(start.getTime() + (end.getTime() - start.getTime()) * ratio); return taskRange.value === "year" ? `${date.getMonth() + 1}月` : `${date.getMonth() + 1}/${date.getDate()}`; });
+  return Array.from({ length: count }, (_, index) => { const ratio = count === 1 ? 0 : index / (count - 1); const date = new Date(start.getTime() + (end.getTime() - start.getTime()) * ratio); const [, month, day] = shanghaiDateKey(date).split("-").map(Number); return taskRange.value === "year" ? `${month}月` : `${month}/${day}`; });
 });
 const sortedIdeas = computed(() => ideas.value.filter(matchesDevelopmentScope).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime() || Number(b.task_id || b.id || 0) - Number(a.task_id || a.id || 0)));
 const developmentIdeas = computed(() => sortedIdeas.value.filter((row) => row.development_started_at
@@ -246,20 +273,78 @@ function stageIndex(value) { return Math.max(0, stages.findIndex((item) => item.
 function productImage(row) { return row.image_url || (row.product_id ? `/api/products/${row.product_id}/image?thumb=1&w=240` : ""); }
 function personAvatar(personId) { return personById.value.get(Number(personId))?.avatar_url || ""; }
 function personInitial(name) { return String(name || "?").trim().slice(0, 1); }
-function dayStart(value) { const date = new Date(value); date.setHours(0, 0, 0, 0); return date; }
-function dayEnd(value) { const date = new Date(value); date.setHours(23, 59, 59, 999); return date; }
-function shortDate(value) { const date = new Date(value); return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`; }
-function taskDate(row) { const value = row.due_at || row.start_at || row.created_at; return value ? new Date(String(value).length <= 10 ? `${value}T21:00:00+08:00` : value) : null; }
+function shortDate(value) { const [year, month, date] = shanghaiDateKey(value).split("-").map(Number); return `${year}年${month}月${date}日`; }
+function taskDate(row) {
+  const value = row.due_at || row.created_at;
+  if (!value) return null;
+  const text = String(value).trim();
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(text)
+    ? `${text}T21:00:00+08:00`
+    : /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text : `${text.replace(" ", "T")}Z`;
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return null;
+  if (row.due_at && row.status !== "done" && !["closed", "cancelled"].includes(row.status) && date.getTime() < taskClock.value) {
+    const elapsedWeeks = Math.floor((taskClock.value - date.getTime()) / (7 * 86400000)) + 1;
+    date.setTime(date.getTime() + elapsedWeeks * 7 * 86400000);
+  }
+  return date;
+}
+function taskStartDateLabel(row) { return row.start_at || shanghaiDateText(row.created_at, { assumeUtcWhenNaive: true }) || "未设置"; }
 function taskProgress(row) { const target = Number(row.target || 0); if (!target) return row.status === "done" ? 100 : 0; return Math.min(row.development_plan && row.status !== "done" ? 99 : 100, Math.round(Number(row.done || 0) / target * 100)); }
-function taskOverdue(row) { const due = taskDate({ due_at: row.due_at }); return row.status !== "done" && Boolean(due && due.getTime() < Date.now()); }
-function taskTone(row) { if (["closed", "cancelled"].includes(row.status)) return "closed"; if (taskOverdue(row) || row.status === "delayed") return "overdue"; if (row.status === "done") return "done"; const due = taskDate({ due_at: row.due_at }); if (due && due.getTime() - Date.now() < 3 * 86400000) return "risk"; return "doing"; }
-function taskToneLabel(row) { return ({ done: "按时完成", doing: row.status === "todo" ? "待开始" : "进行中", risk: "有风险", overdue: "已超时", closed: "已关闭" })[taskTone(row)]; }
+function taskPriorityScore(row) { return ({ urgent_important: 10, high: 10, urgent_unimportant: 8, important_not_urgent: 7, medium: 7, not_urgent_unimportant: 6, low: 6 })[row?.priority] || 7; }
+function taskPlanSequence(row) {
+  const plan = row?.development_plan;
+  const models = plan?.models || [];
+  const sequences = [];
+  for (const model of models) {
+    const scope = model.scope || plan.scope || (model.brand === "非汽车" ? "non_automotive" : "automotive");
+    const brand = scope === "non_automotive" ? "非汽车" : model.brand || plan.brand || "";
+    const category = model.category || plan.category || "";
+    const keys = [developmentCoordinateKey(scope, brand, category, model.model_id || model.model), developmentCoordinateKey(scope, brand, category)];
+    for (const key of keys) {
+      const value = taskPlanOrderByCoordinate.value.get(key)?.sequence;
+      if (Number(value) > 0) sequences.push(Number(value));
+    }
+  }
+  return sequences.length ? Math.min(...sequences) : null;
+}
+function compareTaskPriorityProgress(a, b) {
+  const orderA = taskPlanSequence(a); const orderB = taskPlanSequence(b);
+  if (orderA !== null || orderB !== null) {
+    if (orderA === null) return 1;
+    if (orderB === null) return -1;
+    if (orderA !== orderB) return orderA - orderB;
+  }
+  return taskPriorityScore(b) - taskPriorityScore(a) || taskProgress(a) - taskProgress(b);
+}
+function taskOverdue(row) { const due = taskDate({ ...row, status: "done" }); return row.status !== "done" && !["closed", "cancelled"].includes(row.status) && Boolean(due && due.getTime() < taskClock.value); }
+function taskOverdueInfo(row) {
+  if (!taskOverdue(row)) return null;
+  const due = taskDate({ ...row, status: "done" });
+  const overdueDays = Math.max(1, Math.floor((taskClock.value - due.getTime()) / 86400000));
+  const weeks = Math.floor(overdueDays / 7);
+  const days = overdueDays % 7;
+  return { label: `超时 ${weeks ? `${weeks} 周` : ""}${days ? `${weeks ? " " : ""}${days} 天` : weeks ? "" : "1 天"}`, nextDue: shanghaiDateKey(taskDate(row)) };
+}
+function taskTone(row) { if (["closed", "cancelled"].includes(row.status)) return "closed"; if (taskOverdue(row) || row.status === "delayed") return "overdue"; if (row.status === "done") return "done"; const due = taskDate(row); if (due && due.getTime() - taskClock.value < 3 * 86400000) return "risk"; return "doing"; }
+function taskToneLabel(row) { if (taskTone(row) === "overdue") return taskOverdueInfo(row)?.label || "已超时"; return ({ done: "按时完成", doing: row.status === "todo" ? "待开始" : "进行中", risk: "有风险", closed: "已关闭" })[taskTone(row)]; }
+function taskPlanDateLabel(row) { return taskOverdueInfo(row)?.nextDue ? `顺延至 ${taskOverdueInfo(row).nextDue}` : row.due_at || "未设置"; }
 function taskTimelineX(row) { const point = taskDate(row); if (!point) return 2; const [start, end] = taskRangeDates.value; return Math.max(2, Math.min(98, (point - start) / Math.max(1, end - start) * 100)); }
 function taskTypeMeta(row) { return taskTypeOptions.find((item) => item.value === row?.type) || taskTypeOptions[4]; }
 function taskProgressText(row) { return `${taskProgress(row)}%（${Number(row.done || 0)} / ${Number(row.target || 0)} ${row.unit || '项'}）`; }
-function taskPriorityLabel(row) { return ({ high: "高优先", medium: "中优先", low: "低优先" })[row?.priority] || "中优先"; }
-function taskPriorityType(row) { return ({ high: "danger", medium: "warning", low: "info" })[row?.priority] || "warning"; }
-function taskCreatedText(row) { return row?.created_at ? shanghaiDateTimeText(row.created_at) : "-"; }
+function taskPriorityLabel(row) { return ({ urgent_important: "紧急重要 · 10分", urgent_unimportant: "紧急不重要 · 8分", important_not_urgent: "重要不紧急 · 7分", not_urgent_unimportant: "不重要不紧急 · 6分", high: "紧急重要 · 10分", medium: "重要不紧急 · 7分", low: "不重要不紧急 · 6分" })[row?.priority] || "重要不紧急 · 7分"; }
+function taskPriorityType(row) { return ({ urgent_important: "danger", urgent_unimportant: "warning", important_not_urgent: "primary", not_urgent_unimportant: "info", high: "danger", medium: "primary", low: "info" })[row?.priority] || "primary"; }
+function taskListRowClass({ row }) { return row.type === "product_development" ? "" : "task-row-no-expand"; }
+function taskDisplayName(row) {
+  if (row?.type !== "product_development") return row?.title || row?.name || "未命名任务";
+  const categories = [...new Set(developmentModels(row).map((model) => model.category || row.development_category).filter(Boolean))];
+  if (categories.length === 1) return `${categories[0]}开发任务`;
+  if (categories.length > 1) return `${categories.slice(0, 2).join("、")}等 ${categories.length} 个核心品名开发任务`;
+  return row.development_category ? `${row.development_category}开发任务` : row.title || "未配置核心品名";
+}
+function taskModelRows(row) { return developmentModels(row).map((model, index) => ({ ...model, index, label: [model.brand || row.development_brand, model.model || "未命名车型"].filter(Boolean).join(" · ") })); }
+function taskModelSummary(row) { const models = taskModelRows(row); return `${models.length} 个车型 · 共 ${Number(row.target || 0)} 个 SKU`; }
+function taskCompletedText(row) { return row?.status === "done" && row?.updated_at ? shanghaiDateTimeText(row.updated_at) : "—"; }
 function taskRelated(row) { try { return JSON.parse(row?.related || "{}"); } catch { return {}; } }
 function isDailyOperationalTask(row) { return ["procurement_daily", "shipping_daily"].includes(row?.type); }
 function taskStatisticsDate(row) { return taskRelated(row).statistics_date || "-"; }
@@ -288,22 +373,67 @@ function bindTaskDraft(row) {
 function manualSkuValues(value = "") {
   return [...new Set(String(value || "").split(/[\n,，;；\s]+/).map((sku) => sku.trim()).filter(Boolean))];
 }
-function openTaskSkuConfig(row) {
+function legacyNonAutomotivePlan(row) {
+  const category = String(row.development_category || "").trim();
+  if (row.development_brand !== "非汽车" || !category) return null;
+  return {
+    kind: "development_matrix",
+    scope: "non_automotive",
+    brand: "非汽车",
+    category,
+    models: [{ brand: "非汽车", category, scope: "non_automotive", model_id: 0, model: "非汽车", target: Math.max(1, Number(row.target || 0)), draft_ids: [] }]
+  };
+}
+function openTaskSkuConfig(row, modelIndex = null) {
   if (row.type !== "product_development") return;
+  if (!row.development_plan) {
+    const plan = legacyNonAutomotivePlan(row);
+    if (!plan) {
+      ElMessage.warning("该旧开发任务缺少车型计划，暂时无法记录进度；请先编辑任务补充开发范围。");
+      return;
+    }
+    row = { ...row, development_plan: plan };
+  }
   taskSkuConfigTask.value = row;
-  taskSkuConfigRows.value = developmentModels(row).map((model, index) => ({
-    index,
-    label: [model.brand || row.development_brand, model.category || row.development_category, model.model].filter(Boolean).join(" · "),
-    target: Number(model.target || 0),
-    value: Array.isArray(model.manual_skus) ? model.manual_skus.join("\n") : ""
-  }));
+  taskSkuConfigModelIndex.value = modelIndex;
+  const groupMap = new Map();
+  const overrides = new Map((row.development_plan.manual_groups || []).map((group) => [JSON.stringify([group.brand, group.category]), group]));
+  developmentModels(row).forEach((model, index) => {
+    const brand = model.brand || row.development_brand || row.development_plan.brand;
+    const category = model.category || row.development_category || row.development_plan.category;
+    const key = JSON.stringify([brand, category]);
+    if (!groupMap.has(key)) {
+      const override = overrides.get(key);
+      groupMap.set(key, { key, brand, category, target: 0, mode: override?.mode === "completed" ? "completed" : override ? "group" : "detail", value: (override?.manual_skus || []).join("\n"), expanded: !override, models: [] });
+    }
+    const group = groupMap.get(key);
+    if (modelIndex === index) { group.mode = "detail"; group.expanded = true; }
+    group.target += Number(model.target || 0);
+    group.models.push({ index, label: model.model || "未命名型号", target: Number(model.target || 0), value: Array.isArray(model.manual_skus) ? model.manual_skus.join("\n") : "" });
+  });
+  taskSkuConfigGroups.value = [...groupMap.values()];
   taskSkuConfigVisible.value = true;
 }
+function openHeatmapTask(payload) {
+  const task = payload?.task || payload;
+  if (payload?.dimension === "model" && Number.isInteger(payload.modelIndex)) return openTaskSkuConfig(task, payload.modelIndex);
+  return openTask(task);
+}
+function completeAllTaskGroups() { taskSkuConfigGroups.value.forEach((group) => { group.mode = "completed"; group.expanded = false; }); }
 async function saveTaskSkuConfig() {
   const task = taskSkuConfigTask.value;
   const plan = task?.development_plan;
   if (!task?.id || !plan) return;
-  const models = plan.models.map((model, index) => ({ ...model, manual_skus: manualSkuValues(taskSkuConfigRows.value[index]?.value) }));
+  const focusedModelIndex = taskSkuConfigModelIndex.value;
+  const groupsByModel = new Map(taskSkuConfigGroups.value.flatMap((group) => group.models.map((model) => [model.index, group])));
+  const detailByModel = new Map(taskSkuConfigGroups.value.flatMap((group) => group.models.map((model) => [model.index, model])));
+  const models = plan.models.map((model, index) => {
+    const group = groupsByModel.get(index);
+    if (focusedModelIndex !== null && index !== focusedModelIndex) return model;
+    const { manual_skus: _manualSkus, completed: _completed, ...rest } = model;
+    return group?.mode === "detail" ? { ...rest, manual_skus: manualSkuValues(detailByModel.get(index)?.value) } : rest;
+  });
+  const manualGroups = focusedModelIndex !== null ? (plan.manual_groups || []) : taskSkuConfigGroups.value.filter((group) => group.mode !== "detail").map((group) => ({ brand: group.brand, category: group.category, mode: group.mode === "completed" ? "completed" : "skus", ...(group.mode === "group" ? { manual_skus: manualSkuValues(group.value) } : {}) }));
   taskSkuConfigSaving.value = true;
   try {
     await apiClient.put(`/api/team/tasks/${task.id}`, {
@@ -314,13 +444,176 @@ async function saveTaskSkuConfig() {
       priority: task.priority,
       start_at: task.start_at,
       due_at: task.due_at,
-      related: { ...plan, models }
+      related: { ...plan, models, manual_groups: manualGroups }
     });
     taskSkuConfigVisible.value = false;
-    ElMessage.success("SKU 已手工配置，任务进度已按 SKU 数量更新");
+    ElMessage.success("任务进度已记录");
     await loadTaskCenterData();
   } catch (error) { ElMessage.error(error.message || "保存 SKU 配置失败"); }
   finally { taskSkuConfigSaving.value = false; }
+}
+function editTaskModel(row, model) {
+  taskModelEditor.task = row;
+  taskModelEditor.index = model.index;
+  taskModelEditor.label = model.label;
+  taskModelEditor.target = Number(model.target || 1);
+  taskModelEditorVisible.value = true;
+}
+async function saveTaskModel() {
+  const task = taskModelEditor.task;
+  const plan = task?.development_plan;
+  if (!task?.id || !plan) return;
+  const target = Number(taskModelEditor.target || 0);
+  if (!Number.isInteger(target) || target < 1) return ElMessage.warning("车型目标 SKU 数必须至少为 1");
+  taskSkuConfigSaving.value = true;
+  try {
+    const models = plan.models.map((model, index) => index === taskModelEditor.index ? { ...model, target } : model);
+    await apiClient.put(`/api/team/tasks/${task.id}`, { title: task.title, type: task.type, owner_person_id: task.owner_person_id, period: task.period, priority: task.priority, start_at: task.start_at, due_at: task.due_at, related: { ...plan, models } });
+    taskModelEditorVisible.value = false;
+    ElMessage.success("车型目标已更新，不影响其他车型");
+    await loadTaskCenterData();
+  } catch (error) { ElMessage.error(error.message || "保存车型目标失败"); }
+  finally { taskSkuConfigSaving.value = false; }
+}
+async function saveTaskPlan(row, models) {
+  const plan = row?.development_plan;
+  if (!row?.id || !plan) return false;
+  taskSkuConfigSaving.value = true;
+  try {
+    await apiClient.put(`/api/team/tasks/${row.id}`, { title: row.title, type: row.type, owner_person_id: row.owner_person_id, period: row.period, priority: row.priority, start_at: row.start_at, due_at: row.due_at, related: { ...plan, models } });
+    await loadTaskCenterData();
+    return true;
+  } catch (error) { ElMessage.error(error.message || "任务进度保存失败"); return false; }
+  finally { taskSkuConfigSaving.value = false; }
+}
+async function saveTaskModelProgress(row, modelIndex, updateModel) {
+  const plan = row?.development_plan;
+  if (!plan?.models?.[modelIndex]) return false;
+  return saveTaskPlan(row, plan.models.map((model, index) => index === modelIndex ? updateModel(model) : model));
+}
+async function completeTaskModel(row, model) {
+  if (!developmentModels(row)[model.index]) return;
+  const saved = await saveTaskModelProgress(row, model.index, (item) => ({ ...item, manual_skus: [], completed: true }));
+  if (saved) ElMessage.success(`${model.label}已标记完成`);
+}
+async function completeTask(row) {
+  const plan = row?.development_plan || legacyNonAutomotivePlan(row);
+  if (!plan?.models?.length) return ElMessage.warning("该任务没有可完成的车型明细，请先编辑任务目标");
+  const saved = await saveTaskPlan({ ...row, development_plan: plan }, plan.models.map((model) => ({ ...model, manual_skus: [], completed: true })));
+  if (saved) ElMessage.success("任务已标记完成");
+}
+function guessTaskDraftModelIndex(draft, row) {
+  const models = developmentModels(row);
+  const draftModel = String(draft.vehicle_model || "").trim().toLowerCase();
+  const draftBrand = String(draft.vehicle_brand || "").trim().toLowerCase();
+  if (!draftModel) return 0;
+  const match = models.findIndex((model) => String(model.model || "").trim().toLowerCase() === draftModel
+    && (!draftBrand || String(model.brand || row.development_brand || "").trim().toLowerCase() === draftBrand));
+  return match >= 0 ? match : 0;
+}
+function toggleTaskDraftSelection(draft) {
+  const id = Number(draft.id);
+  const selected = taskModelDraftPickerIds.value.includes(id);
+  taskModelDraftPickerIds.value = selected ? taskModelDraftPickerIds.value.filter((value) => value !== id) : [...taskModelDraftPickerIds.value, id];
+  const assignments = { ...taskModelDraftPickerAssignments.value };
+  if (selected) delete assignments[id];
+  else assignments[id] = taskModelDraftPickerIndex.value === null ? guessTaskDraftModelIndex(draft, taskModelDraftPickerTask.value) : taskModelDraftPickerIndex.value;
+  taskModelDraftPickerAssignments.value = assignments;
+}
+function assignTaskDraftModel(draftId, modelIndex) {
+  taskModelDraftPickerAssignments.value = { ...taskModelDraftPickerAssignments.value, [Number(draftId)]: Number(modelIndex) };
+}
+function taskDraftModelIndex(draft) {
+  const assigned = taskModelDraftPickerAssignments.value[Number(draft.id)];
+  return Number.isInteger(Number(assigned)) ? Number(assigned) : guessTaskDraftModelIndex(draft, taskModelDraftPickerTask.value);
+}
+function taskDraftImage(draft = {}) { return draft.effective_images?.[0] || draft.draft_variant_primary_image || draft.draft_template_primary_image || draft.list_image_url || draft.source_images?.[0] || ""; }
+function taskDraftShopCopies(draft = {}) {
+  if (Array.isArray(draft.shop_copies)) return draft.shop_copies;
+  try { return JSON.parse(draft.shop_copies_json || "[]"); } catch { return []; }
+}
+function taskDraftStatusText(draft = {}) {
+  const publish = String(draft.publish_status || "");
+  if (Number(draft.publish_success_count || 0) > 0) return `已上架 ${Number(draft.publish_success_count)} 店`;
+  if (publish) return ({ submitted: "已提交 Ozon", processing: "Ozon处理中", failed: "上架失败", ozon_status_error: "状态同步失败" })[publish] || publish;
+  if (taskDraftShopCopies(draft).length || Number(draft.shop_copy_count || 0) > 0) return "待上架";
+  return ({ editing: "编辑中", waiting: "待上架", deleted: "已删除" })[draft.status] || draft.status || "编辑中";
+}
+function taskDraftPriceText(draft = {}) {
+  const price = Number(draft.draft_variant_price || draft.draft_template_price || draft.sale_price || draft.list_price || 0);
+  return price > 0 ? `${price} ${draft.currency_code || "CNY"}` : "未填写";
+}
+async function openTaskModelDraftPicker(row, model = null) {
+  const personId = Number(row.owner_person_id || row.assignee_person_id || 0);
+  if (!personId) return ElMessage.warning("请先为任务指定负责人，草稿列表将默认筛选该人员创建的草稿");
+  taskModelDraftPickerTask.value = row;
+  taskModelDraftPickerIndex.value = model ? model.index : null;
+  taskModelDraftPickerLabel.value = model?.label || taskDisplayName(row);
+  const currentModels = developmentModels(row);
+  const assignments = {};
+  currentModels.forEach((entry, index) => (entry.draft_ids || []).forEach((id) => { assignments[Number(id)] = index; }));
+  taskModelDraftPickerAssignments.value = assignments;
+  taskModelDraftPickerIds.value = model
+    ? [...new Set((model.draft_ids || []).map(Number).filter(Boolean))]
+    : [...new Set(currentModels.flatMap((entry) => (entry.draft_ids || []).map(Number).filter(Boolean)))];
+  taskModelDraftPickerUnavailableIds.value = new Set(model ? currentModels.flatMap((entry, index) => index === model.index ? [] : (entry.draft_ids || []).map(Number)) : []);
+  taskModelDraftPickerKeyword.value = "";
+  taskModelDraftPickerPage.value = 1;
+  taskModelDraftPickerTotal.value = 0;
+  taskModelDraftPickerOptions.value = [];
+  taskModelDraftPickerVisible.value = true;
+  await reloadTaskModelDraftOptions();
+}
+async function reloadTaskModelDraftOptions(resetPage = false) {
+  const row = taskModelDraftPickerTask.value;
+  const personId = Number(row?.owner_person_id || row?.assignee_person_id || 0);
+  if (!personId) return;
+  if (resetPage) taskModelDraftPickerPage.value = 1;
+  taskModelDraftPickerLoading.value = true;
+  try {
+    const query = taskModelDraftPickerKeyword.value.trim();
+    const result = await apiClient.get(`/api/listing/drafts?paged=1&lightweight=1&includeShopDetails=1&page=${taskModelDraftPickerPage.value}&pageSize=${taskModelDraftPickerPageSize}&sortBy=created_at&creatorId=${personId}${query ? `&query=${encodeURIComponent(query)}` : ""}`, { noCache: true });
+    let rows = (result?.rows || []).filter((draft) => !taskModelDraftPickerUnavailableIds.value.has(Number(draft.id)));
+    const selectedIds = taskModelDraftPickerIds.value;
+    const missingSelected = selectedIds.filter((id) => !rows.some((draft) => Number(draft.id) === id));
+    const selectedDrafts = missingSelected.length ? await Promise.all(missingSelected.map(async (id) => {
+      const draft = await apiClient.get(`/api/listing/drafts/${id}`, { noCache: true }).catch(() => null);
+      if (!draft) return null;
+      const shopCopies = await apiClient.get(`/api/listing/drafts/${id}/shop-copies`, { noCache: true }).catch(() => []);
+      return { ...draft, shop_copies: shopCopies };
+    })) : [];
+    rows = [...rows, ...selectedDrafts.filter(Boolean)];
+    const nextAssignments = { ...taskModelDraftPickerAssignments.value };
+    if (taskModelDraftPickerIndex.value === null) rows.forEach((draft) => {
+      const id = Number(draft.id);
+      if (selectedIds.includes(id) && !Number.isInteger(Number(nextAssignments[id]))) nextAssignments[id] = guessTaskDraftModelIndex(draft, row);
+    });
+    taskModelDraftPickerAssignments.value = nextAssignments;
+    taskModelDraftPickerOptions.value = rows;
+    taskModelDraftPickerTotal.value = Number(result?.total || 0);
+  } catch (error) {
+    taskModelDraftPickerOptions.value = [];
+    taskModelDraftPickerTotal.value = 0;
+    ElMessage.error(error.message || "草稿列表加载失败");
+  } finally { taskModelDraftPickerLoading.value = false; }
+}
+async function saveTaskModelDraftLinks() {
+  const row = taskModelDraftPickerTask.value;
+  const index = taskModelDraftPickerIndex.value;
+  if (!row) return;
+  taskModelDraftPickerSaving.value = true;
+  try {
+    const ids = [...new Set(taskModelDraftPickerIds.value.map(Number).filter(Boolean))];
+    const plan = row.development_plan;
+    const models = index === null
+      ? plan.models.map((model, modelIndex) => ({ ...model, draft_ids: ids.filter((id) => Number(taskModelDraftPickerAssignments.value[id]) === modelIndex) }))
+      : plan.models.map((model, modelIndex) => modelIndex === index ? { ...model, draft_ids: ids } : model);
+    const saved = await saveTaskPlan(row, models);
+    if (saved) {
+      taskModelDraftPickerVisible.value = false;
+      ElMessage.success(`已绑定 ${ids.length} 个草稿`);
+    }
+  } finally { taskModelDraftPickerSaving.value = false; }
 }
 function setCustomProgress(percent) { taskForm.target = 4; taskForm.done = ({ 0: 0, 25: 1, 50: 2, 100: 4 })[percent]; taskForm.status = percent === 100 ? "done" : percent ? "doing" : "todo"; }
 function moveTaskRange(direction) { const anchor = new Date(taskAnchor.value); const unit = taskRange.value === "year" ? "FullYear" : taskRange.value === "quarter" ? "Month" : taskRange.value === "month" ? "Month" : "Date"; const amount = taskRange.value === "year" ? direction : taskRange.value === "quarter" ? direction * 3 : taskRange.value === "month" ? direction : direction * 7; anchor[`set${unit}`](anchor[`get${unit}`]() + amount); taskAnchor.value = anchor; }
@@ -355,6 +648,14 @@ async function loadTaskCenterData() {
     tasks.value = Array.isArray(taskRows) ? taskRows : [];
   } catch (error) { ElMessage.error(error.message || "任务中心加载失败"); }
   finally { loading.value = false; }
+}
+async function loadTaskPlanOrders() {
+  if (!taskPlanningPeriodKey.value) { taskPlanOrderByCoordinate.value = new Map(); return; }
+  try {
+    const rows = await apiClient.get(`/api/team/development-heatmap-orders?period_key=${encodeURIComponent(taskPlanningPeriodKey.value)}`, { noCache: true });
+    const entries = Array.isArray(rows) ? rows : [];
+    taskPlanOrderByCoordinate.value = new Map(entries.map((row) => [row.coordinate_key, row]));
+  } catch { taskPlanOrderByCoordinate.value = new Map(); }
 }
 async function loadDevelopmentData() {
   if (developmentDataLoaded.value) return;
@@ -687,15 +988,21 @@ async function confirmBind() {
   try { await apiClient.post("/api/listing/inventory-bindings/bind", { record_id: bindRecord.value.record_id, online_product_id: bindRecord.value.online_product_id, product_id: bindProductId.value }); bindVisible.value = false; ElMessage.success("库存产品已绑定，历史订单也已重新归因"); await loadBindings(true); }
   catch (error) { ElMessage.error(error.message || "绑定失败"); }
 }
-onMounted(loadTaskCenterData);
+onMounted(() => {
+  taskClockTimer = setInterval(() => { taskClock.value = Date.now(); }, 60_000);
+  loadTaskCenterData();
+});
+onBeforeUnmount(() => { if (taskClockTimer) clearInterval(taskClockTimer); });
 watch(activeTab, (value) => {
   if (value !== "tasks") loadDevelopmentData();
+  else loadTaskPlanOrders();
   if (value === "analytics" && bindingStatus.value !== "all") { bindingStatus.value = "all"; bindingsLoaded.value = false; }
   if (value === "projects") loadCategories();
   if (value === "analytics") { loadDrafts(); loadBindings(); }
   if (value === "bindings") loadBindings();
 });
 watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, taskType, developmentBrandFilter, developmentCategoryFilter], () => { taskPage.value = 1; }, { deep: true });
+watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
 </script>
 
 <template>
@@ -716,7 +1023,7 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
       <el-select v-model="developmentCategoryFilter" clearable filterable placeholder="全部开发类目" aria-label="筛选开发类目"><el-option v-for="category in developmentCategoryOptions" :key="category" :label="category" :value="category" /></el-select>
     </div>
 
-    <DevelopmentHeatmap ref="heatmapView" v-if="activeTab==='dashboard'" @open-task="openTask" @create="openTask()" />
+    <DevelopmentHeatmap ref="heatmapView" v-if="activeTab==='dashboard'" @open-task="openHeatmapTask" @create="openTask()" />
 
     <section v-else-if="activeTab==='ideas'" class="panel ideas-page">
       <div class="section-title"><div><span>按类目和品牌安排开发，与任务中心同步，可先创建后认领</span><h2>灵感列表</h2></div><el-button type="primary" @click="openIdea()"><Lightbulb :size="16" /> 快速创建灵感</el-button></div>
@@ -755,7 +1062,7 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
         <div class="task-range-tabs"><button v-for="option in taskRangeOptions" :key="option.value" :class="{active:taskRange===option.value}" @click="taskRange=option.value">{{ option.label }}</button></div>
         <div class="task-date-nav"><el-button :disabled="taskRange==='custom'" @click="moveTaskRange(-1)">‹</el-button><strong>{{ taskRangeLabel }}</strong><el-button :disabled="taskRange==='custom'" @click="moveTaskRange(1)">›</el-button><el-button @click="taskAnchor=new Date()">今天</el-button></div>
         <el-date-picker v-if="taskRange==='custom'" v-model="taskCustomRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" />
-        <div class="task-filters"><el-input v-model="taskKeyword" clearable placeholder="搜索任务、项目或负责人"><template #prefix><Search :size="16" /></template></el-input><el-select v-model="taskOwnerFilter" filterable><el-option label="全部人员" value="all" /><el-option label="未分配" value="unassigned" /><el-option v-for="person in people" :key="person.id" :label="person.name" :value="person.id" /></el-select><el-select v-model="taskStatus"><el-option label="全部状态" value="all" /><el-option label="待开始" value="todo" /><el-option label="进行中" value="doing" /><el-option label="待复核" value="review" /><el-option label="已完成" value="done" /><el-option label="已延期" value="delayed" /></el-select><el-tooltip placement="bottom" :show-after="150"><template #content><div class="task-list-tooltip"><strong>{{ taskPeopleTitle }}</strong><span>{{ taskListSummary.tasks }} 个任务</span><span>{{ taskListSummary.skuDone }} / {{ taskListSummary.skuTotal }} 个 SKU</span></div></template><el-button @click="taskPage=1;taskListVisible=true">查看任务清单</el-button></el-tooltip><el-button type="primary" :icon="Plus" @click="openTask()">新增任务</el-button></div>
+        <div class="task-filters"><el-input v-model="taskKeyword" clearable placeholder="搜索任务、项目或负责人"><template #prefix><Search :size="16" /></template></el-input><el-select v-model="taskOwnerFilter" filterable><el-option :label="`登录人员（${authStore.user?.name || '我'}）`" value="current" /><el-option label="全部人员" value="all" /><el-option label="未分配" value="unassigned" /><el-option v-for="person in people" :key="person.id" :label="person.name" :value="person.id" /></el-select><el-select v-model="taskStatus"><el-option label="全部状态" value="all" /><el-option label="待开始" value="todo" /><el-option label="进行中" value="doing" /><el-option label="待复核" value="review" /><el-option label="已完成" value="done" /><el-option label="已延期" value="delayed" /></el-select><el-tooltip placement="bottom" :show-after="150"><template #content><div class="task-list-tooltip"><strong>{{ taskPeopleTitle }}</strong><span>{{ taskListSummary.tasks }} 个任务</span><span>{{ taskListSummary.skuDone }} / {{ taskListSummary.skuTotal }} 个 SKU</span></div></template><el-button @click="taskPage=1;taskListVisible=true">查看任务清单</el-button></el-tooltip><el-button type="primary" :icon="Plus" @click="openTask()">新增任务</el-button></div>
       </div>
       <div class="task-type-tabs"><button v-for="option in taskTypeOptions" :key="option.value" :class="[option.value,{active:taskType===option.value}]" @click="taskType=option.value"><component :is="option.icon" :size="15" />{{ option.label }}</button></div>
       <div class="task-summary-grid"><article class="panel total"><div class="task-metric-icon"><CalendarDays :size="22" /></div><div><span>范围内任务</span><strong>{{ taskMetrics.total }}</strong><small>当前筛选范围</small></div></article><article class="panel done"><div class="task-metric-icon"><CheckCircle2 :size="22" /></div><div><span>按时完成</span><strong>{{ taskMetrics.done }}</strong><small>已完成且未逾期</small></div></article><article class="panel doing"><div class="task-metric-icon"><Clock3 :size="22" /></div><div><span>进行中</span><strong>{{ taskMetrics.doing }}</strong><small>待开始、进行或复核</small></div></article><article class="panel overdue"><div class="task-metric-icon"><TriangleAlert :size="22" /></div><div><span>已超时</span><strong>{{ taskMetrics.overdue }}</strong><small>需要优先处理</small></div></article></div>
@@ -767,20 +1074,18 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
           <div class="timeline-x"><span v-for="label in taskAxisLabels" :key="label">{{ label }}</span></div>
         </div>
       </div>
-      <div class="panel person-task-panel"><div class="person-task-head"><div><span>按人员归类，SKU 数量决定开发任务进度</span><h2>{{ taskPeopleTitle }}</h2></div><div class="task-audience-tabs"><el-button :type="taskAudience==='mine'?'primary':'default'" @click="taskAudience='mine'">我的任务</el-button><el-button :type="taskAudience==='all'?'primary':'default'" @click="taskAudience='all'">查看全部人员</el-button></div></div><el-collapse accordion><el-collapse-item v-for="group in taskPeopleGroups" :key="group.id || group.name" :name="group.id || group.name"><template #title><div class="person-task-group-title"><div class="person-inline"><el-avatar :src="personAvatar(group.id)" :size="30">{{ personInitial(group.name) }}</el-avatar><strong>{{ group.name }}</strong></div><span>{{ group.rows.length }} 个任务</span><span>{{ group.doneTotal }} / {{ group.skuTotal }} 个 SKU</span></div></template><div class="person-task-rows"><article v-for="row in group.rows" :key="row.id"><div><strong>{{ row.title || row.name || '未命名任务' }}</strong><small>{{ [row.development_category,row.development_brand].filter(Boolean).join(' · ') || row.deliverable || '暂无开发范围' }}</small></div><span>{{ row.done }} / {{ row.target }} {{ row.unit || 'SKU' }}</span><span>{{ row.due_at || '未设置截止时间' }}</span><span class="task-status" :class="taskTone(row)">{{ taskToneLabel(row) }}</span><div class="person-task-actions"><template v-if="row.type==='product_development'"><el-button @click="openTask(row)">编辑任务</el-button><el-button plain @click="openTaskSkuConfig(row)">配置 SKU</el-button><el-button type="primary" plain @click="createTaskDraft(row,developmentModels(row)[0] || {})">去开发</el-button></template><el-button v-else plain @click="openTask(row)">查看任务</el-button><el-button v-if="row.type!=='product_development'" link @click="openTask(row)">配置</el-button></div></article></div></el-collapse-item></el-collapse><el-empty v-if="!taskPeopleGroups.length" :image-size="54" description="当前筛选下没有分配给人员的任务" /></div>
+      <div class="panel person-task-panel"><div class="person-task-head"><div><span>按人员归类，SKU 数量决定开发任务进度</span><h2>{{ taskPeopleTitle }}</h2></div><div class="task-audience-tabs"><el-button :type="taskOwnerFilter==='current'?'primary':'default'" @click="taskOwnerFilter='current'">我的任务</el-button><el-button :type="taskOwnerFilter==='all'?'primary':'default'" @click="taskOwnerFilter='all'">查看全部人员</el-button></div></div><el-collapse accordion><el-collapse-item v-for="group in taskPeopleGroups" :key="group.id || group.name" :name="group.id || group.name"><template #title><div class="person-task-group-title"><div class="person-inline"><el-avatar :src="personAvatar(group.id)" :size="30">{{ personInitial(group.name) }}</el-avatar><strong>{{ group.name }}</strong></div><span>{{ group.rows.length }} 个任务</span><span>{{ group.doneTotal }} / {{ group.skuTotal }} 个 SKU</span></div></template><div class="person-task-rows"><article v-for="row in group.rows" :key="row.id"><div><strong>{{ row.title || row.name || '未命名任务' }}</strong><small>{{ [row.development_category,row.development_brand].filter(Boolean).join(' · ') || row.deliverable || '暂无开发范围' }}</small></div><span>{{ row.done }} / {{ row.target }} {{ row.unit || 'SKU' }}</span><span>{{ row.due_at || '未设置截止时间' }}</span><span class="task-status" :class="taskTone(row)">{{ taskToneLabel(row) }}</span><div class="person-task-actions"><template v-if="row.type==='product_development'"><el-button @click="openTask(row)">编辑任务</el-button><el-button plain @click="openTaskSkuConfig(row)">记录进度</el-button><el-button type="primary" plain @click="createTaskDraft(row,developmentModels(row)[0] || {})">去开发</el-button></template><el-button v-else plain @click="openTask(row)">查看任务</el-button><el-button v-if="row.type!=='product_development'" link @click="openTask(row)">配置</el-button></div></article></div></el-collapse-item></el-collapse><el-empty v-if="!taskPeopleGroups.length" :image-size="54" description="当前筛选下没有分配给人员的任务" /></div>
       <el-dialog v-model="taskListVisible" :title="`${taskPeopleTitle}清单`" width="min(1440px, 94vw)" top="4vh" class="task-list-dialog" destroy-on-close>
-        <el-table :data="paginatedTasks" max-height="calc(100vh - 280px)" empty-text="当前筛选下没有任务">
-          <el-table-column label="任务名称" min-width="280"><template #default="{row}"><div class="task-name-cell"><strong>{{ row.title || row.name || '未命名任务' }}</strong><small>{{ row.deliverable || row.result || '暂无交付说明' }}</small></div></template></el-table-column>
-          <el-table-column label="类型" width="130"><template #default="{row}"><span class="task-type-cell" :class="taskTypeMeta(row).value"><component :is="taskTypeMeta(row).icon" :size="14" />{{ taskTypeMeta(row).label }}</span></template></el-table-column>
-          <el-table-column label="开发范围" min-width="180"><template #default="{row}">{{ [row.development_category, row.development_brand].filter(Boolean).join(' · ') || '—' }}</template></el-table-column>
-          <el-table-column label="负责人" width="150"><template #default="{row}"><div class="person-inline"><el-avatar :src="personAvatar(row.owner_person_id || row.assignee_person_id)" :size="26">{{ personInitial(row.assignee_name || row.owner_name) }}</el-avatar>{{ row.assignee_name || row.owner_name || '未分配' }}</div></template></el-table-column>
-          <el-table-column label="优先级" width="100"><template #default="{row}"><el-tag :type="taskPriorityType(row)" effect="light">{{ taskPriorityLabel(row) }}</el-tag></template></el-table-column>
+        <el-table :data="paginatedTasks" :row-class-name="taskListRowClass" max-height="calc(100vh - 280px)" empty-text="当前筛选下没有任务">
+          <el-table-column v-if="taskType==='product_development' || taskType==='all'" type="expand" width="42"><template #default="{row}"><el-table v-if="row.type==='product_development'" :data="taskModelRows(row)" class="task-model-detail-table" size="small" row-key="index" empty-text="暂未配置车型"><el-table-column label="车型" min-width="200"><template #default="{row:model}"><strong>{{ model.label }}</strong><small class="task-model-subtitle">{{ model.category || model.brand || '车型明细' }} · 目标 {{ model.target }} SKU</small></template></el-table-column><el-table-column label="进度" width="140"><template #default="{row:model}"><strong>{{ Math.min(Number(model.done||0),Number(model.target||0)) }} / {{ model.target }} SKU</strong><el-progress :percentage="Math.min(100,Math.round(Number(model.done||0)/Math.max(1,Number(model.target||0))*100))" :show-text="false" :stroke-width="6" /></template></el-table-column><el-table-column label="绑定草稿 / 对照" min-width="250"><template #default="{row:model}"><div v-if="model.drafts?.length" class="task-model-drafts"><el-link v-for="draft in model.drafts" :key="draft.id" type="primary" @click="router.push({path:'/listing-records',query:{draftId:draft.id}})">{{ draft.title }} · {{ draft.count }} SKU</el-link></div><span v-else class="task-model-empty">未绑定草稿</span></template></el-table-column><el-table-column label="操作" min-width="210" align="right"><template #default="{row:model}"><TaskScopeActions mode="model" :done="Number(model.done||0)" :target="Number(model.target||0)" @complete="completeTaskModel(row,model)" @drafts="openTaskModelDraftPicker(row,model)" @edit="editTaskModel(row,model)" @develop="createTaskDraft(row,model)" /></template></el-table-column></el-table></template></el-table-column>
+          <el-table-column label="类型" width="64" align="center"><template #default="{row}"><el-tooltip :content="taskTypeMeta(row).label" placement="top"><span class="task-type-icon" :class="taskTypeMeta(row).value"><component :is="taskTypeMeta(row).icon" :size="17" /></span></el-tooltip></template></el-table-column>
+          <el-table-column label="任务名称" min-width="300"><template #default="{row}"><div class="task-name-cell"><strong>{{ taskDisplayName(row) }}</strong><small v-if="row.type==='product_development'">{{ taskModelSummary(row) }}</small><el-tag v-if="taskPlanSequence(row)" size="small" type="danger" effect="light">开发顺序 {{ taskPlanSequence(row) }}</el-tag></div></template></el-table-column>
+          <el-table-column label="负责人" width="150"><template #default="{row}"><div class="person-inline task-list-owner"><el-avatar :src="row.owner_avatar_url || personAvatar(row.owner_person_id || row.assignee_person_id)" :size="28">{{ personInitial(row.owner_name || row.assignee_name || '未分配') }}</el-avatar><span>{{ row.owner_name || row.assignee_name || '未分配' }}</span></div></template></el-table-column>
+          <el-table-column label="优先级" width="152"><template #default="{row}"><el-tag :type="taskPriorityType(row)" effect="light">{{ taskPriorityLabel(row) }}</el-tag></template></el-table-column>
           <el-table-column label="当前进度" width="128"><template #default="{row}"><div class="task-progress-cell"><strong>{{ taskProgress(row) }}%</strong><el-progress :percentage="taskProgress(row)" :show-text="false" :stroke-width="7" :status="taskTone(row)==='overdue'?'exception':taskTone(row)==='done'?'success':undefined" /><small>{{ Number(row.done || 0) }} / {{ Number(row.target || 0) }} {{ row.unit || 'SKU' }}</small></div></template></el-table-column>
-          <el-table-column label="开始时间" width="130"><template #default="{row}">{{ row.start_at || '未设置' }}</template></el-table-column>
-          <el-table-column label="计划完成" width="130"><template #default="{row}">{{ row.due_at || '未设置' }}</template></el-table-column>
-          <el-table-column label="创建时间" width="172"><template #default="{row}">{{ taskCreatedText(row) }}</template></el-table-column>
-          <el-table-column label="状态" width="105"><template #default="{row}"><span class="task-status" :class="taskTone(row)">{{ taskToneLabel(row) }}</span></template></el-table-column>
-          <el-table-column label="操作" width="252" fixed="right" align="center"><template #default="{row}"><div class="task-row-actions"><template v-if="row.type==='product_development'"><el-button size="small" @click="openTask(row)">编辑任务</el-button><el-button size="small" plain @click="openTaskSkuConfig(row)">配置 SKU</el-button><el-button size="small" type="primary" plain @click="createTaskDraft(row,developmentModels(row)[0] || {})">去开发</el-button></template><el-tooltip v-else content="查看任务" placement="top"><el-button circle :icon="Edit3" @click="openTask(row)" /></el-tooltip><el-tooltip v-if="!row.automation_key" content="删除任务" placement="top"><el-button circle :icon="Trash2" type="danger" plain @click="deleteTask(row)" /></el-tooltip></div></template></el-table-column>
+          <el-table-column label="状态" width="122"><template #default="{row}"><span class="task-status" :class="taskTone(row)"><Clock3 v-if="taskTone(row)==='overdue'" :size="13" />{{ taskToneLabel(row) }}</span></template></el-table-column>
+          <el-table-column label="时间" width="220"><template #default="{row}"><div class="task-time-cell"><span><b>开始</b>{{ taskStartDateLabel(row) }}</span><span><b>{{ taskOverdue(row) ? '顺延' : '计划' }}</b>{{ taskPlanDateLabel(row) }}</span><span><b>完成</b>{{ taskCompletedText(row) }}</span></div></template></el-table-column>
+          <el-table-column label="操作" width="220" fixed="right" align="center"><template #default="{row}"><TaskScopeActions v-if="row.type==='product_development'" mode="task" :done="Number(row.done||0)" :target="Number(row.target||0)" :can-delete="!row.automation_key" @complete="completeTask(row)" @drafts="openTaskModelDraftPicker(row)" @edit="openTask(row)" @develop="createTaskDraft(row,developmentModels(row)[0] || {})" @delete="deleteTask(row)" /><TaskScopeActions v-else mode="task" :done="Number(row.done||0)" :target="Number(row.target||0)" :can-complete="false" :can-delete="!row.automation_key" @edit="openTask(row)" @delete="deleteTask(row)" /></template></el-table-column>
         </el-table>
         <div v-if="taskListRows.length" class="task-pagination"><span>共 {{ taskListRows.length }} 项任务</span><el-pagination v-model:current-page="taskPage" :page-size="taskPageSize" background layout="prev, pager, next" :total="taskListRows.length" /></div>
       </el-dialog>
@@ -792,15 +1097,42 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
     <IdeaDevelopmentScopeDialog v-if="ideaScopeVisible" :brands="ideaBrands" :categories="ideaCategories" :groups="ideaForm.development_tasks" :legacy-brand="ideaForm.development_brand" :legacy-category="ideaForm.development_category" @catalog-updated="catalog => { ideaBrands=catalog.brands; ideaCategories=catalog.categories; }" @close="ideaScopeVisible=false" @selected="groups => { ideaForm.development_tasks=groups; ideaScopeVisible=false; }" />
     <el-dialog v-model="ideaTasksVisible" title="灵感关联的开发任务" width="min(850px, 94vw)" append-to-body><el-table :data="ideaLinkedTasks"><el-table-column prop="title" label="任务" min-width="250" /><el-table-column prop="owner_name" label="负责人" /><el-table-column label="完成 / 目标"><template #default="{row}">{{ row.done }} / {{ row.target }}</template></el-table-column><el-table-column label="操作"><template #default="{row}"><el-button link type="primary" @click="openTask(row)">编辑任务</el-button></template></el-table-column></el-table></el-dialog>
     <el-dialog v-model="developmentTaskVisible" width="min(900px, 94vw)" title="开发任务 · SKU 明细" append-to-body destroy-on-close><div v-if="developmentTask" class="development-sku-dialog"><header><div><strong>{{ developmentTask.title }}</strong><small>负责人：{{ developmentTask.owner_name || '未分配' }} · 截止：{{ developmentTask.due_at || '未设置' }}</small></div><el-tag>{{ developmentTask.done }} / {{ developmentTask.target }} SKU</el-tag></header><article v-for="model in developmentModels()" :key="model.model_id || model.model"><div><strong>{{ [model.brand,model.category,model.model].filter(Boolean).join(' · ') || '未命名 SKU 分组' }}</strong><small>已配置 {{ model.done || 0 }} / 目标 {{ model.target || 0 }} SKU</small></div><el-progress :percentage="Math.min(100,Math.round(Number(model.done||0)/Math.max(1,Number(model.target||0))*100))" :show-text="false" /><div><el-button type="primary" plain @click="createTaskDraft(developmentTask,model)">创建草稿</el-button><el-button plain @click="bindTaskDraft(developmentTask)">关联已有草稿</el-button></div></article><el-empty v-if="!developmentModels().length" description="此开发任务还没有车型和 SKU 目标"><el-button plain @click="bindTaskDraft(developmentTask)">配置车型及 SKU 目标</el-button></el-empty></div><template #footer><el-button @click="developmentTaskVisible=false">关闭</el-button></template></el-dialog>
-    <el-dialog v-model="taskSkuConfigVisible" width="min(760px, 94vw)" title="手工配置任务 SKU" append-to-body destroy-on-close>
-      <p class="attach-tip">每行填写一个 SKU，也可用逗号或空格分隔。保存后，任务完成度按已填写 SKU 数量 / 目标 SKU 数量计算，不依赖自动绑定。</p>
-      <div class="task-sku-config-list">
-        <section v-for="row in taskSkuConfigRows" :key="row.index">
-          <header><strong>{{ row.label || '未命名 SKU 分组' }}</strong><el-tag>{{ manualSkuValues(row.value).length }} / {{ row.target }} SKU</el-tag></header>
-          <el-input v-model="row.value" type="textarea" :rows="4" placeholder="例如：123456789\n987654321" />
+    <el-dialog v-model="taskSkuConfigVisible" width="min(900px, 94vw)" :title="taskSkuConfigModelIndex === null ? '记录任务进度' : '记录车型进度'" append-to-body destroy-on-close>
+      <div class="task-progress-entry-head"><p>默认按“品牌 × 核心品名”记录；需要区分型号时再展开明细。SKU 每行一个，也可用逗号或空格分隔。</p><el-button type="success" plain @click="completeAllTaskGroups">全部标记完成</el-button></div>
+      <div class="task-progress-entry-list">
+        <section v-for="group in taskSkuConfigGroups" :key="group.key">
+          <header><div><strong>{{ group.brand }} × {{ group.category }}</strong><small>目标 {{ group.target }} 个 SKU · {{ group.models.length }} 个型号</small></div><el-tag :type="group.mode==='completed'?'success':'info'">{{ group.mode==='completed' ? '已完成' : group.mode==='group' ? `${manualSkuValues(group.value).length} / ${group.target}` : '按型号记录' }}</el-tag></header>
+          <el-radio-group v-if="taskSkuConfigModelIndex === null" v-model="group.mode" class="progress-entry-modes" @change="value => { if (value === 'detail') group.expanded = true; }"><el-radio-button value="completed">直接完成</el-radio-button><el-radio-button value="group">整组记录 SKU</el-radio-button><el-radio-button value="detail">按型号明细</el-radio-button></el-radio-group>
+          <el-alert v-if="group.mode==='completed'" title="无需填写 SKU，保存后该品牌与核心品名将直接计为完成。" type="success" :closable="false" />
+          <el-input v-else-if="group.mode==='group'" v-model="group.value" type="textarea" :rows="4" placeholder="这里填写该品牌与核心品名下的全部 SKU" />
+          <div v-else class="task-progress-models"><button v-if="taskSkuConfigModelIndex === null" type="button" @click="group.expanded=!group.expanded"><span>{{ group.expanded ? '收起型号明细' : '展开型号明细' }}</span><b>{{ group.models.length }} 个型号</b></button><div v-if="group.expanded"><article v-for="model in group.models.filter(item => taskSkuConfigModelIndex === null || item.index === taskSkuConfigModelIndex)" :key="model.index"><header><strong>{{ model.label }}</strong><el-tag size="small">{{ manualSkuValues(model.value).length }} / {{ model.target }}</el-tag></header><el-input v-model="model.value" type="textarea" :rows="3" placeholder="填写该型号的 SKU" /></article></div></div>
         </section>
       </div>
-      <template #footer><el-button @click="taskSkuConfigVisible=false">取消</el-button><el-button type="primary" :loading="taskSkuConfigSaving" @click="saveTaskSkuConfig">保存 SKU</el-button></template>
+      <template #footer><el-button @click="taskSkuConfigVisible=false">取消</el-button><el-button type="primary" :loading="taskSkuConfigSaving" @click="saveTaskSkuConfig">保存进度</el-button></template>
+    </el-dialog>
+    <el-dialog v-model="taskModelEditorVisible" title="编辑车型目标" width="440px" append-to-body destroy-on-close><el-form label-position="top"><el-form-item label="车型"><strong>{{ taskModelEditor.label }}</strong></el-form-item><el-form-item label="目标 SKU 数"><el-input-number v-model="taskModelEditor.target" :min="1" :precision="0" /></el-form-item><el-alert type="info" :closable="false" title="仅修改这个车型的目标，不影响同一核心品名下的其他车型。" /></el-form><template #footer><el-button @click="taskModelEditorVisible=false">取消</el-button><el-button type="primary" :loading="taskSkuConfigSaving" @click="saveTaskModel">保存</el-button></template></el-dialog>
+    <el-dialog v-model="taskModelDraftPickerVisible" :title="`绑定草稿箱 · ${taskModelDraftPickerLabel}`" width="min(1540px, 96vw)" top="3vh" append-to-body destroy-on-close>
+      <p class="attach-tip">默认筛选当前任务负责人创建的草稿。主图、名称、开发类型、Ozon 类目、创建人员、店铺副本、草稿/上架状态和售价都在一行对照；勾选后可绑定到当前车型或指定车型。</p>
+      <el-input v-model="taskModelDraftPickerKeyword" clearable placeholder="搜索草稿名称、货号、车型、类目或编号" @keyup.enter="reloadTaskModelDraftOptions(true)" @clear="reloadTaskModelDraftOptions(true)"><template #prefix><Search :size="16" /></template><template #append><el-button @click="reloadTaskModelDraftOptions(true)">搜索</el-button></template></el-input>
+      <div v-loading="taskModelDraftPickerLoading" class="task-draft-picker-scroll">
+        <div class="task-draft-picker-grid task-draft-picker-header" :class="{'task-draft-picker-grid-task':taskModelDraftPickerIndex===null}"><span>选</span><span>主图</span><span>商品名称</span><span>类型</span><span>Ozon 类目</span><span>人员</span><span>店铺明细</span><span>草稿状态</span><span>售价</span><span v-if="taskModelDraftPickerIndex===null">绑定车型</span></div>
+        <article v-for="draft in taskModelDraftPickerOptions" :key="draft.id" class="task-draft-picker-grid task-draft-picker-row" :class="{'task-draft-picker-grid-task':taskModelDraftPickerIndex===null}">
+          <el-checkbox :model-value="taskModelDraftPickerIds.includes(Number(draft.id))" @change="toggleTaskDraftSelection(draft)" />
+          <el-image class="task-draft-picker-image" :src="taskDraftImage(draft)" fit="cover" :preview-src-list="taskDraftImage(draft) ? [taskDraftImage(draft)] : []" preview-teleported><template #error><div class="task-draft-image-empty">无图</div></template></el-image>
+          <div class="task-draft-picker-name"><strong>{{ draft.product_name || '未命名草稿' }}</strong><small>{{ draft.internal_code || `草稿 #${draft.id}` }} · {{ [draft.vehicle_brand,draft.vehicle_model].filter(Boolean).join(' · ') || '未填写车型' }}</small></div>
+          <el-tag size="small" effect="plain">{{ developmentTypeLabel(draft.development_type) }}</el-tag>
+          <span class="task-draft-picker-cell" :title="draft.category_name || ''">{{ draft.category_name || '未分类' }}</span>
+          <span class="task-draft-picker-cell">{{ draft.created_by_name || '未知人员' }}</span>
+          <div class="task-draft-shop-list"><span v-for="shop in taskDraftShopCopies(draft)" :key="`${draft.id}-${shop.shop_id}`"><strong>{{ shop.shop_name || `店铺 ${shop.shop_id}` }}</strong><small>{{ shop.status==='prepared' ? '待上架' : shop.status || '已关联' }} · {{ Number(shop.price || 0) }} CNY</small></span><small v-if="!taskDraftShopCopies(draft).length">未绑定店铺</small></div>
+          <div class="task-draft-picker-status"><el-tag size="small" :type="Number(draft.publish_success_count||0)>0?'success':Number(draft.publish_failed_count||0)>0?'danger':'info'">{{ taskDraftStatusText(draft) }}</el-tag><small v-if="Number(draft.publish_record_count||0)">{{ draft.publish_record_count }} 条上架记录</small></div>
+          <strong class="task-draft-picker-price">{{ taskDraftPriceText(draft) }}</strong>
+          <el-select v-if="taskModelDraftPickerIndex===null && taskModelDraftPickerIds.includes(Number(draft.id))" :model-value="taskDraftModelIndex(draft)" size="small" @change="value=>assignTaskDraftModel(draft.id,value)"><el-option v-for="(model,index) in developmentModels(taskModelDraftPickerTask)" :key="`${index}-${model.model_id}`" :label="[model.brand,model.model].filter(Boolean).join(' · ')" :value="index" /></el-select>
+          <span v-else-if="taskModelDraftPickerIndex===null" class="task-draft-unselected">勾选后选择车型</span>
+        </article>
+        <el-empty v-if="!taskModelDraftPickerLoading && !taskModelDraftPickerOptions.length" :image-size="48" description="当前负责人没有匹配的草稿" />
+      </div>
+      <el-pagination v-if="taskModelDraftPickerTotal>taskModelDraftPickerPageSize" class="task-draft-picker-pagination" background layout="prev, pager, next, total" :current-page="taskModelDraftPickerPage" :page-size="taskModelDraftPickerPageSize" :total="taskModelDraftPickerTotal" @current-change="page=>{taskModelDraftPickerPage=page;reloadTaskModelDraftOptions()}" />
+      <template #footer><span class="draft-picker-count">已选 {{ taskModelDraftPickerIds.length }} 个草稿</span><el-button @click="taskModelDraftPickerVisible=false">取消</el-button><el-button type="primary" :loading="taskModelDraftPickerSaving" @click="saveTaskModelDraftLinks">保存绑定</el-button></template>
     </el-dialog>
     <TaskCreationDialog v-if="taskCreationVisible" :people="people" :tasks="tasks" :initial-task="taskCreationInitial"
       @close="taskCreationVisible=false" @saved="taskCreationVisible=false;ideaTasksVisible=false;loadData();heatmapView?.reload()" />
@@ -815,7 +1147,7 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
 .development-scope-filters{display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap}.development-scope-filters .el-select{width:220px}
 .attach-tip{margin-top:0;color:#667085}.bindings-page,.analytics-page{padding:22px}.binding-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:18px 0}.binding-metrics article{display:grid;padding:15px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc}.binding-metrics span{font-size:13px;color:#667085}.binding-metrics strong{font-size:26px}.cell-sub{margin-top:4px;color:#98a2b3;font-size:12px}.method-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:22px 0}.method-grid article{display:grid;padding:24px;border:1px solid #dde5ef;border-radius:16px;background:linear-gradient(145deg,#fff,#f6f9fd)}.method-grid article.ai_fission{background:linear-gradient(145deg,#f3f7ff,#edf3ff);border-color:#ccdcf7}.method-grid article>span{color:#52657e}.method-grid article>strong{font-size:42px;color:#235fb8}.method-grid article>small{color:#7b8797}.method-grid article>div{display:grid;grid-template-columns:auto 1fr auto 1fr auto 1fr;gap:8px;align-items:end;margin-top:20px;padding-top:16px;border-top:1px solid #dfe6ef}.method-grid b{font-size:20px}.method-grid em{font-style:normal;color:#8591a2;font-size:12px}.development-center{min-height:100%;padding:22px;background:#f4f7fb;color:#172033}.hero{display:flex;justify-content:space-between;align-items:center;padding:26px 30px;border-radius:18px;background:linear-gradient(120deg,#12233f,#214c83);color:#fff;box-shadow:0 14px 32px #183d6c2b}.hero span,.section-title span{font-size:12px;letter-spacing:1.5px;opacity:.72}.hero h1{margin:5px 0 8px;font-size:29px}.hero p{margin:0;color:#dbe8f8}.hero-actions{display:flex;gap:10px}.tabs{display:flex;gap:5px;margin:18px 0;padding:5px;border:1px solid #e3e9f2;border-radius:12px;background:#fff;width:max-content}.tabs button{display:flex;align-items:center;gap:7px;padding:9px 16px;border:0;border-radius:9px;background:transparent;color:#667085;cursor:pointer}.tabs button.active{background:#eaf2ff;color:#2463c7;font-weight:700}.panel{border:1px solid #e2e8f0;border-radius:16px;background:#fff;box-shadow:0 4px 18px #1f3b6410}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.metrics article{display:flex;gap:14px;align-items:center;padding:20px;border:1px solid #e2e8f0;border-radius:15px;background:#fff}.metrics svg{padding:10px;width:42px;height:42px;border-radius:12px;background:#edf4ff;color:#2d6fd2}.metrics div{display:grid}.metrics span{font-size:13px;color:#667085}.metrics strong{font-size:28px}.metrics small{color:#98a2b3}.section-title{display:flex;align-items:center;justify-content:space-between}.section-title h2{margin:4px 0 0;font-size:20px}.workflow{margin-top:15px;padding:22px}.workflow-steps{display:flex;align-items:center;gap:15px;margin-top:20px}.workflow-steps>div{flex:1;display:grid;gap:5px;padding:16px;border-radius:12px;background:#f7f9fc}.workflow-steps b{display:grid;place-items:center;width:25px;height:25px;border-radius:50%;background:#2f6ed2;color:#fff}.workflow-steps small{color:#7a8699;line-height:1.5}.workflow-steps i{color:#99a8bc}.focus-list{margin-top:15px;padding:22px}.product-rows{margin-top:14px}.product-rows article{display:grid;grid-template-columns:58px minmax(230px,1fr) 120px 140px auto auto;align-items:center;gap:14px;padding:10px 4px;border-top:1px solid #edf0f5}.product-rows .el-image,.master-card .el-image{width:58px;height:72px;border-radius:8px;background:#f0f3f7}.product-main{display:grid;gap:7px}.product-main small{color:#7a8699}.empty-image{display:grid;place-items:center;width:100%;height:100%;color:#a3adba;font-size:12px}.toolbar{display:flex;justify-content:space-between;padding:14px}.toolbar>div{display:flex;gap:10px}.toolbar .el-input{width:360px}.toolbar .el-select{width:200px}.board{display:grid;grid-template-columns:repeat(6,minmax(220px,1fr));gap:12px;margin-top:14px;overflow-x:auto}.board>section{min-height:560px;padding:10px;border-radius:14px;background:#eaf0f7}.board>section>header{display:flex;justify-content:space-between;padding:7px}.board>section>header b{padding:2px 8px;border-radius:10px;background:#fff;color:#567}.board article{margin-top:9px;padding:11px;border:1px solid #dce3ed;border-radius:12px;background:#fff;cursor:pointer}.card-head{display:flex;justify-content:space-between}.card-head .el-image{width:64px;height:84px;border-radius:8px;background:#f0f3f7}.board h3{margin:10px 0 4px;font-size:14px}.board p{margin:0;color:#8792a3;font-size:12px}.facts{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:11px;color:#657287;font-size:12px}.facts span{display:flex;align-items:center;gap:4px}.board footer{display:flex;justify-content:flex-end;margin-top:7px;border-top:1px solid #eef1f5}.projects-page{padding:22px}.project-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:18px}.project-grid article{padding:18px;border:1px solid #e1e7ef;border-radius:12px}.project-grid p{min-height:38px;color:#718096}.project-grid div{display:flex;gap:18px;color:#4d6684;font-size:13px}.drawer-title h2{margin:4px 0}.drawer-title small{color:#8a96a8}.drawer-body{padding:0 6px}.master-card{display:flex;gap:14px;padding:14px;margin-bottom:18px;border-radius:12px;background:#f4f7fb}.master-card>div{flex:1}.master-card p{color:#6b778a}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.drawer-actions{display:flex;justify-content:flex-end;gap:10px;padding-top:14px;border-top:1px solid #e8edf3}@media(max-width:1200px){.metrics{grid-template-columns:repeat(2,1fr)}.board{grid-template-columns:repeat(6,230px)}.product-rows article{grid-template-columns:58px 1fr 110px auto}.product-rows article>span,.product-rows article>.el-button:first-of-type{display:none}}@media(max-width:720px){.development-center{padding:12px}.hero{align-items:flex-start;flex-direction:column;gap:18px}.metrics,.binding-metrics,.method-grid{grid-template-columns:1fr}.workflow-steps{display:grid}.workflow-steps i{display:none}.toolbar,.toolbar>div{align-items:stretch;flex-direction:column;gap:10px}.toolbar .el-input,.toolbar .el-select{width:100%}.project-grid{grid-template-columns:1fr}}
 .tasks-page{display:grid;gap:14px}.task-overview-toolbar{display:flex;align-items:center;gap:12px;padding:14px 16px;flex-wrap:wrap}.task-range-tabs{display:flex;padding:4px;border-radius:10px;background:#f1f5f9}.task-range-tabs button{min-width:58px;padding:8px 14px;border:0;border-radius:8px;background:transparent;color:#667085;cursor:pointer}.task-range-tabs button.active{background:#fff;color:#2463c7;font-weight:700;box-shadow:0 2px 10px #1f3b641c}.task-date-nav{display:flex;align-items:center;gap:6px}.task-date-nav strong{min-width:210px;text-align:center;font-size:13px}.binding-actions,.task-filters{display:flex;gap:10px;align-items:center}.task-filters{margin-left:auto}.task-filters .el-input{width:250px}.task-filters .el-select{width:125px}.task-summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.task-summary-grid article{position:relative;display:flex;align-items:center;gap:14px;min-height:92px;padding:16px 18px;box-sizing:border-box;overflow:hidden}.task-summary-grid article:after{position:absolute;right:0;bottom:0;left:0;height:3px;background:#64748b;content:""}.task-summary-grid article.done:after{background:#22a861}.task-summary-grid article.doing:after{background:#3f8cff}.task-summary-grid article.overdue:after{background:#ef5350}.task-metric-icon{display:grid;place-items:center;flex:0 0 46px;width:46px;height:46px;border-radius:13px;background:#eef3f9;color:#52657e}.task-summary-grid .done .task-metric-icon{background:#e9f8ef;color:#16864b}.task-summary-grid .doing .task-metric-icon{background:#eaf2ff;color:#2463c7}.task-summary-grid .overdue .task-metric-icon{background:#fff0f0;color:#d94040}.task-summary-grid span{display:block;color:#667085;font-size:13px}.task-summary-grid strong{display:block;margin-top:1px;font-size:28px;line-height:1.05}.task-summary-grid small{display:block;margin-top:4px;color:#98a2b3;font-size:11px}.timeline-panel{padding:20px 22px}.timeline-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px}.timeline-head h2{margin:4px 0 0;font-size:20px}.timeline-head>div>span{color:#7b8797;font-size:12px}.timeline-legend{display:flex;gap:16px;flex-wrap:wrap;padding-top:5px}.timeline-legend span{display:flex;align-items:center;gap:6px;color:#52657e;font-size:12px}.timeline-legend span:before{width:9px;height:9px;border-radius:50%;background:#64748b;content:""}.timeline-legend .done:before{background:#22a861}.timeline-legend .doing:before{background:#3f8cff}.timeline-legend .risk:before{background:#f59e0b}.timeline-legend .overdue:before{background:#ef5350}.timeline-chart{display:grid;grid-template-columns:50px 1fr;grid-template-rows:280px 30px;margin-top:22px}.timeline-y{display:flex;flex-direction:column;justify-content:space-between;padding:0 10px 0 0;color:#7b8797;font-size:11px;text-align:right}.timeline-plot{position:relative;border-left:1px solid #d8e1ec;border-bottom:1px solid #d8e1ec;background:#fbfcfe;overflow:visible}.timeline-grid-line{position:absolute;right:0;left:0;border-top:1px dashed #dce5ef}.timeline-vertical-line{position:absolute;top:0;bottom:0;border-left:1px solid #edf1f6}.timeline-node{position:absolute;display:flex;align-items:center;gap:7px;width:210px;transform:translate(-17px,50%);cursor:pointer;z-index:2}.timeline-node .el-avatar{flex:none;border:3px solid #3f8cff;background:#e8eef8;color:#52637a;box-shadow:0 3px 10px #17203326}.timeline-node>div{display:grid;min-width:0;max-width:158px;padding:6px 9px;border:1px solid #dbe3ed;border-radius:9px;background:#fff;box-shadow:0 5px 14px #17203316}.timeline-node strong{overflow:hidden;color:#243247;font-size:12px;white-space:nowrap;text-overflow:ellipsis}.timeline-node small{overflow:hidden;margin-top:2px;color:#7b8797;font-size:10px;white-space:nowrap;text-overflow:ellipsis}.timeline-node.done .el-avatar{border-color:#22a861}.timeline-node.risk .el-avatar{border-color:#f59e0b}.timeline-node.overdue .el-avatar{border-color:#ef5350}.timeline-node.closed .el-avatar{border-color:#94a3b8;filter:grayscale(1)}.timeline-x{grid-column:2;display:flex;justify-content:space-between;padding-top:9px;color:#7b8797;font-size:11px}.task-list-panel{padding:18px 20px 20px}.task-list-panel .el-table{margin-top:14px}.task-status{display:inline-flex;padding:4px 9px;border-radius:999px;background:#eaf2ff;color:#2463c7;font-size:12px;font-weight:700}.task-status.done{background:#e9f8ef;color:#16864b}.task-status.risk{background:#fff4dc;color:#ad6800}.task-status.overdue{background:#fff0f0;color:#d94040}.task-status.closed{background:#f1f3f5;color:#667085}.binding-note{margin-top:14px;padding:10px 12px;border-radius:8px;background:#f7f9fc;color:#667085;font-size:13px}@media(max-width:1200px){.task-filters{margin-left:0;width:100%}.task-summary-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:1050px){.timeline-node{width:auto}.timeline-node>div{display:none}}@media(max-width:720px){.task-summary-grid{grid-template-columns:1fr 1fr}.task-summary-grid article{min-height:78px;padding:12px}.task-summary-grid small{display:none}.task-date-nav strong{min-width:150px}.task-filters{align-items:stretch;flex-direction:column}.task-filters .el-input,.task-filters .el-select{width:100%}.timeline-chart{grid-template-rows:250px 28px}}
-.person-task-panel{padding:18px 20px}.person-task-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}.person-task-head span,.person-task-head small{color:#7b8797;font-size:12px}.person-task-head h2{margin:3px 0 0;font-size:18px}.task-audience-tabs{display:flex;gap:8px}.person-task-groups{border-top:1px solid #edf1f6}.person-task-group-title{display:grid;grid-template-columns:minmax(220px,1fr) 120px 160px;align-items:center;width:100%;padding-right:16px;color:#52657e;font-size:12px}.person-task-group-title strong{color:#243247;font-size:14px}.person-task-rows{display:grid;gap:8px;padding:4px 4px 12px}.person-task-rows article{display:grid;grid-template-columns:minmax(260px,1fr) 130px 130px 90px auto;align-items:center;gap:12px;padding:11px 12px;border:1px solid #e6edf5;border-radius:10px;background:#fbfcfe}.person-task-rows article>div:first-child{display:grid;gap:3px;min-width:0}.person-task-rows strong{overflow:hidden;color:#243247;font-size:13px;white-space:nowrap;text-overflow:ellipsis}.person-task-rows small{overflow:hidden;color:#7b8797;font-size:11px;white-space:nowrap;text-overflow:ellipsis}.person-task-rows>article>span{color:#667085;font-size:12px}.person-task-actions{display:flex;justify-content:flex-end;gap:6px}.development-sku-dialog{display:grid;gap:10px}.development-sku-dialog>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:4px 0 12px;border-bottom:1px solid #e8edf4}.development-sku-dialog>header>div,.development-sku-dialog article>div:first-child{display:grid;gap:4px}.development-sku-dialog small{color:#7b8797;font-size:12px}.development-sku-dialog article{display:grid;grid-template-columns:minmax(260px,1fr) minmax(120px,.7fr) auto;align-items:center;gap:16px;padding:13px;border:1px solid #e0e8f2;border-radius:11px}.development-sku-dialog article strong{color:#243247;font-size:13px}.task-sku-config-list{display:grid;gap:12px;max-height:60vh;overflow:auto}.task-sku-config-list section{display:grid;gap:8px;padding:12px;border:1px solid #e0e8f2;border-radius:10px;background:#fbfcfe}.task-sku-config-list header{display:flex;align-items:center;justify-content:space-between;gap:12px}.person-inline{display:flex;align-items:center;gap:7px}.person-inline .el-avatar,.idea-people-row .el-avatar{flex:none;background:#e8eef8;color:#52637a}.idea-people-row>span{display:flex;align-items:center;gap:7px}@media(max-width:800px){.person-task-head{align-items:stretch;flex-direction:column}.person-task-group-title{grid-template-columns:1fr auto}.person-task-group-title span:last-child{display:none}.person-task-rows article,.development-sku-dialog article{grid-template-columns:1fr}.person-task-rows article>span{display:none}.person-task-actions{justify-content:flex-start}.development-sku-dialog article>div:last-child{display:flex;gap:8px}}
+.person-task-panel{padding:18px 20px}.person-task-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}.person-task-head span,.person-task-head small{color:#7b8797;font-size:12px}.person-task-head h2{margin:3px 0 0;font-size:18px}.task-audience-tabs{display:flex;gap:8px}.person-task-groups{border-top:1px solid #edf1f6}.person-task-group-title{display:grid;grid-template-columns:minmax(220px,1fr) 120px 160px;align-items:center;width:100%;padding-right:16px;color:#52657e;font-size:12px}.person-task-group-title strong{color:#243247;font-size:14px}.person-task-rows{display:grid;gap:8px;padding:4px 4px 12px}.person-task-rows article{display:grid;grid-template-columns:minmax(260px,1fr) 130px 130px 90px auto;align-items:center;gap:12px;padding:11px 12px;border:1px solid #e6edf5;border-radius:10px;background:#fbfcfe}.person-task-rows article>div:first-child{display:grid;gap:3px;min-width:0}.person-task-rows strong{overflow:hidden;color:#243247;font-size:13px;white-space:nowrap;text-overflow:ellipsis}.person-task-rows small{overflow:hidden;color:#7b8797;font-size:11px;white-space:nowrap;text-overflow:ellipsis}.person-task-rows>article>span{color:#667085;font-size:12px}.person-task-actions{display:flex;justify-content:flex-end;gap:6px}.development-sku-dialog{display:grid;gap:10px}.development-sku-dialog>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:4px 0 12px;border-bottom:1px solid #e8edf4}.development-sku-dialog>header>div,.development-sku-dialog article>div:first-child{display:grid;gap:4px}.development-sku-dialog small{color:#7b8797;font-size:12px}.development-sku-dialog article{display:grid;grid-template-columns:minmax(260px,1fr) minmax(120px,.7fr) auto;align-items:center;gap:16px;padding:13px;border:1px solid #e0e8f2;border-radius:11px}.development-sku-dialog article strong{color:#243247;font-size:13px}.task-progress-entry-head{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:14px}.task-progress-entry-head p{margin:0;color:#667085;font-size:13px}.task-progress-entry-list{display:grid;gap:14px;max-height:64vh;padding-right:3px;overflow:auto}.task-progress-entry-list>section{display:grid;gap:12px;padding:15px;border:1px solid #dfe7f1;border-radius:12px;background:#fbfcfe}.task-progress-entry-list>section>header,.task-progress-models article>header{display:flex;align-items:center;justify-content:space-between;gap:12px}.task-progress-entry-list>section>header>div{display:grid;gap:4px}.task-progress-entry-list small{color:#7b8797;font-size:11px}.progress-entry-modes{justify-self:start}.task-progress-models{display:grid;gap:10px}.task-progress-models>button{display:flex;align-items:center;justify-content:space-between;width:100%;padding:9px 11px;border:1px solid #dce5f0;border-radius:8px;background:#fff;color:#3977d5;cursor:pointer}.task-progress-models>button b{color:#7b8797;font-size:11px}.task-progress-models>div{display:grid;grid-template-columns:1fr 1fr;gap:10px}.task-progress-models article{display:grid;gap:8px;padding:11px;border:1px solid #e2e8f0;border-radius:9px;background:#fff}.person-inline{display:flex;align-items:center;gap:7px}.person-inline .el-avatar,.idea-people-row .el-avatar{flex:none;background:#e8eef8;color:#52637a}.idea-people-row>span{display:flex;align-items:center;gap:7px}@media(max-width:800px){.person-task-head,.task-progress-entry-head{align-items:stretch;flex-direction:column}.person-task-group-title{grid-template-columns:1fr auto}.person-task-group-title span:last-child{display:none}.person-task-rows article,.development-sku-dialog article{grid-template-columns:1fr}.person-task-rows article>span{display:none}.person-task-actions{justify-content:flex-start}.development-sku-dialog article>div:last-child{display:flex;gap:8px}.task-progress-models>div{grid-template-columns:1fr}.progress-entry-modes{display:grid;grid-template-columns:1fr;width:100%}}
 .binding-guide{margin-top:16px}
 .ideas-page{padding:18px}.idea-image{width:64px;height:84px;border-radius:8px;background:#f0f3f7}.idea-grid{display:grid;grid-template-columns:repeat(2,minmax(520px,1fr));gap:12px;margin-top:14px}.idea-card{display:grid;grid-template-columns:132px 1fr;min-height:160px;overflow:hidden;border:1px solid #dfe6ef;border-radius:13px;background:#fff}.idea-card-image{width:132px;height:100%;min-height:160px;background:#f0f3f7}.idea-card-content{display:grid;grid-template-rows:auto auto auto;gap:10px;padding:12px 14px}.idea-card-content header{display:flex;justify-content:space-between;gap:10px}.idea-card h3{margin:1px 0 5px}.idea-card p{display:-webkit-box;overflow:hidden;margin:0;color:#667085;font-size:13px;-webkit-line-clamp:1;-webkit-box-orient:vertical}.idea-card small{color:#98a2b3}.idea-controls{display:grid;grid-template-columns:auto auto minmax(115px,1fr) 88px 142px;gap:7px;align-items:center}.idea-controls .el-input-number,.idea-controls .el-date-editor{width:100%}.idea-card footer{display:flex;align-items:center;justify-content:flex-end;gap:7px;padding-top:8px;border-top:1px solid #edf0f5}.idea-card footer small{margin-right:auto}.development-tasks{margin-bottom:14px;padding:20px}.development-task-list{display:grid;gap:12px;margin-top:16px}.development-task-list>article{display:grid;grid-template-columns:minmax(220px,1.2fr) minmax(200px,1fr) minmax(260px,1.4fr) 100px 100px;gap:16px;align-items:center;padding:14px;border:1px solid #dfe6ef;border-radius:12px}.development-task-list>article.overdue{border-color:#f56c6c;background:#fff5f5}.task-claim{display:flex;gap:12px}.task-claim>div,.task-progress,.task-drafts,.task-orders{display:grid;gap:5px}.task-drafts>div{display:flex;justify-content:space-between;gap:8px}.task-orders{text-align:center}.task-orders>strong{font-size:26px;color:#2463c7}@media(max-width:1400px){.idea-grid{grid-template-columns:1fr}.development-task-list>article{grid-template-columns:1fr 1fr}.task-actions{grid-column:2}}@media(max-width:800px){.idea-grid,.development-task-list>article{grid-template-columns:1fr}.idea-card{grid-template-columns:100px 1fr}.idea-card-image{width:100px}.idea-controls{grid-template-columns:1fr 1fr}.idea-controls .el-select{grid-column:1/-1}.idea-card footer small{display:none}.task-actions{grid-column:auto}}
 .project-product-table{margin-top:18px}
@@ -832,7 +1164,7 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
 .idea-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.idea-card{grid-template-columns:100px minmax(0,1fr);min-height:158px;padding:10px;gap:11px}.idea-card-media{width:98px;height:132px;padding:4px}.replace-image-button{right:7px;bottom:7px;left:7px;width:calc(100% - 14px);min-height:26px;padding:4px 2px;font-size:11px}.idea-card-content{gap:7px}.idea-card-content header{gap:3px 7px;padding-bottom:6px}.idea-title-line{gap:4px;flex-wrap:wrap}.idea-title-line h3{max-width:100%;font-size:15px}.task-count,.priority-badge{padding:2px 5px;font-size:10px}.idea-people-row,.idea-meta-row{gap:6px;padding:6px 7px}.idea-people-row>span,.idea-meta-row>span,.idea-people-row b,.idea-meta-row b{font-size:11px}.idea-meta-row>span{white-space:normal}.idea-card-content>footer{gap:5px;padding-top:5px}.idea-card-content>footer .el-button{min-width:64px;padding-right:9px;padding-left:9px}@media(max-width:1050px){.idea-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:720px){.idea-grid{grid-template-columns:1fr}}
 .task-list-panel{padding:0!important;overflow:hidden}.task-list-toggle{display:flex;align-items:center;justify-content:space-between;width:100%;padding:13px 16px;border:0;background:#fff;color:#243247;cursor:pointer}.task-list-toggle>div{display:flex;align-items:center;gap:8px}.task-list-toggle svg{color:#3977d5;transition:transform .18s}.task-list-toggle svg.collapsed{transform:rotate(-90deg)}.task-list-toggle span{font-size:15px;font-weight:750}.task-list-toggle b{display:grid;place-items:center;min-width:23px;height:23px;padding:0 6px;border-radius:999px;background:#eaf2ff;color:#2868c7;font-size:11px}.task-list-toggle>small{color:#8a96a8}.task-list-body{padding:0 14px 12px;border-top:1px solid #edf1f6}.task-list-body .el-table{margin-top:0}.task-list-body :deep(.el-table__header th){height:38px;background:#f7f9fc;color:#52657e;font-size:12px}.task-list-body :deep(.el-table__row){height:50px}.task-list-body :deep(.el-table__cell){padding:6px 0}.task-name-cell{display:grid;gap:2px}.task-name-cell strong{overflow:hidden;color:#243247;font-size:12px;white-space:nowrap;text-overflow:ellipsis}.task-name-cell small{overflow:hidden;color:#98a2b3;font-size:10px;white-space:nowrap;text-overflow:ellipsis}.task-progress-cell{display:grid;grid-template-columns:1fr 34px;align-items:center;gap:8px}.task-progress-cell span{color:#667085;font-size:11px}.task-row-actions{display:flex;justify-content:center;gap:6px}.task-row-actions .el-button{width:28px;height:28px}.task-pagination{display:flex;align-items:center;justify-content:space-between;padding:11px 4px 0}.task-pagination>span{color:#7b8797;font-size:11px}.timeline-avatar-stack{display:flex;align-items:center}.timeline-avatar-stack .el-avatar+.el-avatar{margin-left:-13px}.timeline-avatar-stack b{display:grid;place-items:center;width:28px;height:28px;margin-left:-10px;border:2px solid #fff;border-radius:50%;background:#e8eef8;color:#52657e;font-size:10px}.timeline-group-popover{display:grid;gap:5px}.timeline-group-popover>strong{padding:3px 4px 8px;color:#243247}.timeline-group-popover button{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;border:0;border-radius:7px;background:#f7f9fc;color:#344054;cursor:pointer;text-align:left}.timeline-group-popover button:hover{background:#eaf2ff}.timeline-group-popover button span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.timeline-group-popover button small{flex:none;color:#7b8797}.timeline-panel{overflow:hidden}.timeline-chart{grid-template-rows:250px 30px}.timeline-node{width:225px}.tasks-page{max-height:calc(100vh - 190px);overflow:auto;padding-right:2px}.tasks-page::-webkit-scrollbar{width:6px}.tasks-page::-webkit-scrollbar-thumb{border-radius:6px;background:#cbd5e1}@media(max-width:720px){.task-list-body{overflow-x:auto}.task-pagination{align-items:flex-start;flex-direction:column;gap:8px}.tasks-page{max-height:none;overflow:visible}}
 .task-type-tabs{display:flex;gap:8px;align-items:center}.task-type-tabs button{display:flex;align-items:center;gap:6px;padding:7px 12px;border:1px solid #dfe6ef;border-radius:8px;background:#fff;color:#52657e;cursor:pointer}.task-type-tabs button.active{border-color:#3f8cff;background:#3f8cff;color:#fff}.task-type-tabs button.product_development:not(.active){color:#7c3aed}.task-type-tabs button.procurement_daily:not(.active){color:#ea7a13}.task-type-tabs button.shipping_daily:not(.active){color:#0891b2}.task-type-cell{display:inline-flex;align-items:center;gap:6px;font-size:12px}.task-type-cell.product_development{color:#7c3aed}.task-type-cell.procurement_daily{color:#ea7a13}.task-type-cell.shipping_daily{color:#0891b2}.task-type-cell.custom{color:#2f6ed2}.task-type-mark{display:grid;place-items:center;flex:none;width:22px;height:22px;border-radius:7px;background:#eaf2ff;color:#2f6ed2}.timeline-node.product_development .task-type-mark{background:#f3e8ff;color:#7c3aed}.timeline-node.procurement_daily .task-type-mark{background:#fff1df;color:#ea7a13}.timeline-node.shipping_daily .task-type-mark{background:#e6f8fb;color:#0891b2}.task-node-detail{display:grid;gap:10px}.task-node-detail header{display:flex;align-items:center;gap:8px;color:#243247}.task-node-detail dl{display:grid;gap:7px;margin:0}.task-node-detail dl>div{display:grid;grid-template-columns:76px 1fr;align-items:center}.task-node-detail dt{color:#7b8797;font-size:12px}.task-node-detail dd{margin:0;color:#344054;font-size:13px}.task-node-detail footer{display:flex;justify-content:flex-end;gap:8px;padding-top:4px}.task-form-type{display:flex;align-items:center;gap:10px;margin-bottom:16px;padding:12px;border-radius:10px;background:#f5f8fc;color:#2f6ed2}.task-form-type>div{display:grid;gap:2px}.task-form-type small{color:#7b8797}.automated-progress{display:grid;grid-template-columns:1fr auto;align-items:center;gap:12px;width:100%}.automated-progress span{color:#52657e;font-size:12px}.custom-progress-steps{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;width:100%}.custom-progress-steps button{padding:10px 7px;border:1px solid #dfe6ef;border-radius:8px;background:#fff;color:#667085;cursor:pointer}.custom-progress-steps button.active{border-color:#3f8cff;background:#eaf2ff;color:#2463c7;font-weight:700}@media(max-width:720px){.task-type-tabs{overflow-x:auto}.task-type-tabs button{flex:none}.custom-progress-steps{grid-template-columns:1fr 1fr}}
-.task-list-panel{padding:0!important;overflow:hidden}.task-list-launch{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:15px 18px}.task-list-launch>div{display:grid;gap:3px}.task-list-launch span{color:#667085;font-size:12px}.task-list-launch strong{color:#243247;font-size:16px}.task-list-launch small{color:#98a2b3;font-size:11px}.task-list-dialog :deep(.el-dialog__body){padding-top:10px}.task-list-dialog :deep(.el-table__header th){height:42px;background:#f7f9fc;color:#52657e;font-size:12px}.task-list-dialog :deep(.el-table__row){height:76px}.task-name-cell{display:grid;gap:2px}.task-name-cell strong{overflow:hidden;color:#243247;font-size:13px;white-space:nowrap;text-overflow:ellipsis}.task-name-cell small{overflow:hidden;color:#98a2b3;font-size:11px;white-space:nowrap;text-overflow:ellipsis}.task-progress-cell{display:grid;gap:5px}.task-progress-cell strong{color:#243247;font-size:13px;line-height:1}.task-progress-cell small{color:#667085;font-size:11px;line-height:1.2}.task-row-actions{display:flex;justify-content:center;gap:6px;white-space:nowrap}.task-row-actions .el-button{height:28px;margin:0}.task-pagination{display:flex;align-items:center;justify-content:space-between;padding:14px 4px 0}.task-pagination>span{color:#7b8797;font-size:12px}@media(max-width:720px){.task-list-launch{align-items:flex-start;flex-direction:column}.task-list-dialog :deep(.el-dialog__body){overflow-x:auto}.task-pagination{align-items:flex-start;flex-direction:column;gap:8px}}
+.task-list-panel{padding:0!important;overflow:hidden}.task-list-launch{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:15px 18px}.task-list-launch>div{display:grid;gap:3px}.task-list-launch span{color:#667085;font-size:12px}.task-list-launch strong{color:#243247;font-size:16px}.task-list-launch small{color:#98a2b3;font-size:11px}.task-list-dialog :deep(.el-dialog__body){padding-top:10px}.task-list-dialog :deep(.el-table__header th){height:42px;background:#f7f9fc;color:#52657e;font-size:12px}.task-list-dialog :deep(.el-table__row){height:82px}.task-name-cell{min-width:0}.task-name-cell strong{display:block;overflow:hidden;color:#243247;font-size:13px;white-space:nowrap;text-overflow:ellipsis}.task-type-icon{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:9px;background:#f0edff;color:#7357d8}.task-progress-cell{display:grid;gap:5px}.task-progress-cell strong{color:#243247;font-size:13px;line-height:1}.task-progress-cell small{color:#667085;font-size:11px;line-height:1.2}.task-time-cell{display:grid;gap:4px;color:#52657e;font-size:11px}.task-time-cell span{display:grid;grid-template-columns:36px 1fr;gap:6px;white-space:nowrap}.task-time-cell b{color:#98a2b3;font-weight:600}.task-row-actions{display:flex;justify-content:center;gap:7px;white-space:nowrap}.task-row-actions .el-button{width:30px;height:30px;margin:0}.task-pagination{display:flex;align-items:center;justify-content:space-between;padding:14px 4px 0}.task-pagination>span{color:#7b8797;font-size:12px}@media(max-width:720px){.task-list-launch{align-items:flex-start;flex-direction:column}.task-list-dialog :deep(.el-dialog__body){overflow-x:auto}.task-pagination{align-items:flex-start;flex-direction:column;gap:8px}}
 .task-list-tooltip{display:grid;gap:4px;min-width:130px}.task-list-tooltip strong{color:#fff;font-size:12px}.task-list-tooltip span{color:#dce8f8;font-size:12px}.timeline-chart{grid-template-rows:390px 30px}.timeline-y{padding-bottom:52px}.timeline-plot{margin-bottom:52px}.timeline-node{z-index:3}.timeline-node:hover{z-index:5}@media(max-width:720px){.timeline-chart{grid-template-rows:310px 28px}.timeline-y{padding-bottom:38px}.timeline-plot{margin-bottom:38px}}
 .task-statistics-scope{display:grid;gap:4px;width:100%;padding:11px 13px;border-radius:9px;background:#f5f8fc}.task-statistics-scope strong{color:#243247}.task-statistics-scope span{color:#52657e}.task-statistics-scope small{color:#7b8797}
 .task-dialog-header{display:grid;grid-template-columns:52px 1fr 34px;align-items:start;gap:14px;padding:2px 2px 15px;border-bottom:1px solid #e8edf4}.task-dialog-header>div{min-width:0}.task-dialog-header small{color:#3977d5;font-size:12px;font-weight:700}.task-dialog-header h2{overflow:hidden;margin:3px 0 4px;color:#1d2939;font-size:21px;white-space:nowrap;text-overflow:ellipsis}.task-dialog-header p{margin:0;color:#7b8797;font-size:12px}.task-dialog-header>button{display:grid;place-items:center;width:32px;height:32px;border:0;border-radius:9px;background:#f2f5f9;color:#667085;font-size:22px;cursor:pointer}.task-dialog-icon{display:grid;place-items:center;width:48px;height:48px;border-radius:14px;background:#eaf2ff;color:#2f6ed2}.task-dialog-icon.procurement_daily{background:#fff1df;color:#ea7a13}.task-dialog-icon.shipping_daily{background:#e6f8fb;color:#0891b2}.task-dialog-icon.product_development{background:#f3e8ff;color:#7c3aed}.task-dialog-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px}.task-dialog-metrics article{display:grid;gap:4px;min-height:92px;padding:14px;border:1px solid #e2e8f0;border-radius:12px;background:#fafcff}.task-dialog-metrics span,.task-dialog-metrics small{color:#7b8797;font-size:11px}.task-dialog-metrics strong{color:#243247;font-size:20px}.task-dialog-metrics i{font-style:normal;font-size:12px}.task-dialog-progress{display:grid;grid-template-columns:1fr auto;align-items:center;gap:14px;margin-bottom:16px;padding:13px 15px;border-radius:11px;background:#f5f8fc}.task-dialog-progress span{color:#52657e;font-size:12px}.task-statistics-scope{grid-template-columns:1fr 1.35fr;gap:12px;margin-bottom:16px;padding:15px}.task-statistics-scope>div{display:grid;gap:4px}.task-statistics-scope>div span{color:#7b8797;font-size:11px}.task-statistics-scope>div strong{font-size:14px}.task-statistics-scope p{grid-column:1/-1;margin:2px 0 0;padding-top:9px;border-top:1px solid #e2e8f0;color:#7b8797;font-size:11px}.task-owner-card{display:grid;grid-template-columns:1fr 220px;align-items:center;gap:20px;padding:15px;border:1px solid #dfe6ef;border-radius:12px}.task-owner-card>div:first-child{display:flex;align-items:center;gap:11px}.task-owner-card>div:first-child>div{display:grid;gap:3px}.task-owner-card small{color:#7b8797;font-size:11px}.task-dialog-footer{display:flex;justify-content:flex-end;gap:8px}.task-detail-form{padding-top:2px}:global(.task-detail-dialog){overflow:hidden;border-radius:16px;box-shadow:0 24px 60px #17203330}:global(.task-detail-dialog .el-dialog__header){margin:0;padding:20px 22px 0}:global(.task-detail-dialog .el-dialog__body){padding:18px 22px 8px}:global(.task-detail-dialog .el-dialog__footer){padding:14px 22px 20px;border-top:1px solid #edf1f6}@media(max-width:720px){.task-dialog-metrics{grid-template-columns:1fr}.task-owner-card{grid-template-columns:1fr}.task-statistics-scope{grid-template-columns:1fr}}
@@ -842,6 +1174,8 @@ watch([taskRange, taskCustomRange, taskKeyword, taskStatus, taskOwnerFilter, tas
 .operational-order-list article{position:relative;min-height:132px;box-sizing:border-box;overflow:visible}.order-alert-main{min-height:108px;padding-bottom:28px;box-sizing:border-box}.order-alert-meta{position:absolute;right:10px;bottom:7px;left:86px;min-height:24px;margin:0;padding-top:3px;box-sizing:border-box;background:#fbfcfe}.order-alert-meta .el-button{position:absolute;right:0;bottom:0}.order-alert-meta small{padding-right:62px}:global(.task-detail-dialog){width:min(1180px,calc(100vw - 32px))!important;max-height:96vh;margin-top:2vh!important}:global(.task-detail-dialog .el-dialog__body){max-height:calc(96vh - 150px);overflow:auto}
 .draft-link-header{display:flex;align-items:center;justify-content:space-between;gap:16px}.draft-link-header h2{margin:0;color:#243247;font-size:20px}.draft-link-header p{margin:5px 0 0;color:#7b8797;font-size:12px}.draft-link-summary,.draft-link-toolbar{display:flex;align-items:center;gap:9px}.draft-link-toolbar{margin-bottom:14px}.draft-link-toolbar>.el-input{flex:1}.draft-link-toolbar>.el-date-editor{flex:0 0 310px}.draft-choice-list{display:grid;grid-template-columns:1fr 1fr;gap:10px;height:590px;padding:2px 5px 2px 2px;overflow:auto}.draft-choice-card{position:relative;display:grid;grid-template-columns:78px minmax(0,1fr) 24px;gap:11px;min-height:108px;padding:10px;border:1px solid #dfe6ef;border-radius:11px;background:#fff;color:inherit;cursor:pointer;text-align:left;transition:border-color .15s,box-shadow .15s,background .15s}.draft-choice-card:hover{border-color:#9bc2f5;box-shadow:0 5px 14px #1f3b6414}.draft-choice-card.selected{border-color:#409eff;background:#f2f8ff;box-shadow:0 0 0 2px #409eff20}.draft-choice-card.linked{border-color:#b7e4c7;background:#f3fbf6;cursor:default;opacity:1}.draft-choice-card>.el-image{width:78px;height:104px;overflow:hidden;border-radius:8px;background:#edf1f6}.draft-choice-empty{display:grid;place-items:center;width:100%;height:100%;color:#98a2b3;font-size:12px}.draft-choice-main{display:grid;align-content:start;gap:6px;min-width:0}.draft-choice-main>strong{display:-webkit-box;overflow:hidden;color:#243247;font-size:13px;line-height:1.45;-webkit-line-clamp:2;-webkit-box-orient:vertical}.draft-choice-main>span{overflow:hidden;color:#3977d5;font-size:11px;white-space:nowrap;text-overflow:ellipsis}.draft-choice-main>div{display:flex;align-items:center;gap:7px;min-width:0}.draft-choice-main>div small{overflow:hidden;color:#667085;white-space:nowrap;text-overflow:ellipsis}.draft-choice-main>small{color:#98a2b3;font-size:10px}.draft-choice-check{align-self:center;color:#cbd5e1}.draft-choice-card.selected .draft-choice-check,.draft-choice-card.linked .draft-choice-check{color:#409eff}.draft-choice-card.linked .draft-choice-check{color:#22a861}.draft-choice-list>.el-empty{grid-column:1/-1;padding:40px 0}.draft-link-dialog .attach-tip{margin:13px 0 0;padding:9px 11px;border-radius:8px;background:#f5f8fc;color:#667085;font-size:12px}:global(.draft-link-dialog){max-width:calc(100vw - 32px)}:global(.draft-link-dialog .el-dialog__body){padding-top:12px}@media(max-width:720px){.draft-choice-list{grid-template-columns:1fr;height:62vh}.draft-link-header,.draft-link-toolbar{align-items:stretch;flex-direction:column}.draft-link-toolbar>.el-date-editor{flex:auto;width:100%}.draft-choice-card{grid-template-columns:68px minmax(0,1fr) 22px}.draft-choice-card>.el-image{width:68px;height:92px}}
 .draft-link-pagination{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:12px}.draft-link-pagination>span{color:#7b8797;font-size:12px}.draft-link-dialog .attach-tip{margin-top:10px}@media(max-width:720px){.draft-link-pagination{align-items:flex-start;flex-direction:column}}
+:global(.task-list-dialog .task-row-no-expand .el-table__expand-column .el-table__expand-icon){visibility:hidden;pointer-events:none}:global(.task-list-dialog .el-table__expanded-cell){padding:0 16px 14px 50px!important;background:#f7f9fc}.task-model-detail-table{overflow:hidden;border:1px solid #e4ebf4;border-radius:9px}.task-model-subtitle{display:block;margin-top:3px;color:#8491a3;font-size:11px}.task-model-drafts{display:grid;gap:3px}.task-model-empty{color:#98a2b3;font-size:12px}.task-status{align-items:center;gap:4px}.task-draft-picker-scroll{max-height:65vh;overflow:auto;margin-top:12px;border:1px solid #dfe6ef;border-radius:10px}.task-draft-picker-grid{display:grid;grid-template-columns:36px 76px minmax(180px,2fr) 75px minmax(140px,1.2fr) 95px minmax(170px,1.6fr) 105px 85px minmax(150px,1.2fr);align-items:center;gap:9px;min-width:1360px;padding:9px 10px;box-sizing:border-box}.task-draft-picker-header{position:sticky;top:0;z-index:2;background:#f5f8fc;color:#52657e;font-size:11px;font-weight:700}.task-draft-picker-row{border-top:1px solid #edf1f6;background:#fff}.task-draft-picker-row:hover{background:#f7faff}.task-draft-picker-image{width:64px;height:84px;border-radius:7px;background:#f0f3f7}.task-draft-image-empty{display:grid;place-items:center;width:100%;height:100%;color:#98a2b3;font-size:11px}.task-draft-picker-name{display:grid;gap:4px;min-width:0}.task-draft-picker-name strong{display:-webkit-box;overflow:hidden;color:#243247;font-size:12px;line-height:1.4;-webkit-line-clamp:2;-webkit-box-orient:vertical}.task-draft-picker-name small,.task-draft-picker-status small{color:#7b8797;font-size:10px}.task-draft-picker-cell{overflow:hidden;color:#52657e;font-size:11px;text-overflow:ellipsis}.task-draft-shop-list,.task-draft-picker-status{display:grid;gap:4px;min-width:0}.task-draft-shop-list>span{display:grid;gap:2px;padding:4px 6px;border-radius:5px;background:#f5f8fc}.task-draft-shop-list strong{overflow:hidden;color:#344054;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.task-draft-shop-list small,.task-draft-shop-list>small{color:#7b8797;font-size:10px}.task-draft-picker-price{color:#243247;font-size:11px;white-space:nowrap}.task-draft-unselected{color:#a0a9b5;font-size:10px}.task-draft-picker-pagination{justify-content:flex-end;margin-top:12px}.draft-picker-count{margin-right:auto;color:#7b8797;font-size:12px}
+.task-draft-picker-grid:not(.task-draft-picker-grid-task){grid-template-columns:36px 76px minmax(180px,2fr) 75px minmax(140px,1.2fr) 95px minmax(170px,1.6fr) 105px 85px;min-width:1220px}
 </style>
 
 <style>

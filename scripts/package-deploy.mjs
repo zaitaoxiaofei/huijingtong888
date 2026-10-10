@@ -60,11 +60,11 @@ const managedDeployPaths = [
 
 const pluginPackageRules = [
   {
-    aliasPattern: /^ozon-baodan-erp-plugin\.rar$/,
-    versionPattern: /^ozon-baodan-erp-plugin-([0-9][0-9A-Za-z.-]*)\.rar$/
+    aliasPattern: /^ozon-baodan-erp-plugin\.zip$/,
+    versionPattern: /^ozon-baodan-erp-plugin-([0-9][0-9A-Za-z.-]*)\.zip$/
   },
   {
-    aliasPattern: /^ozon-erp-collector-plugin\.rar$/
+    aliasPattern: /^ozon-erp-collector-plugin\.zip$/
   },
   {
     aliasPattern: /^ozon-seller-analytics-plugin\.rar$/,
@@ -88,7 +88,8 @@ async function mkdirWithRetry(target, attempts = 6) {
 }
 
 function isPluginPackageName(name) {
-  return /^(ozon-baodan-erp-plugin|ozon-erp-collector-plugin|ozon-seller-analytics-plugin)(-[0-9][0-9A-Za-z.-]*)?\.rar$/.test(String(name || ""));
+  return /^(ozon-baodan-erp-plugin|ozon-erp-collector-plugin)(-[0-9][0-9A-Za-z.-]*)?\.zip$/.test(String(name || "")) ||
+    /^(ozon-baodan-erp-plugin|ozon-erp-collector-plugin|ozon-seller-analytics-plugin)(-[0-9][0-9A-Za-z.-]*)?\.rar$/.test(String(name || ""));
 }
 
 function run(command, args, label) {
@@ -379,6 +380,8 @@ const manifest = {
   builtAt: new Date().toISOString(),
   version: releaseVersion,
   channel: releaseChannel,
+  branch: process.env.OZON_RELEASE_BRANCH || "",
+  commit: process.env.OZON_RELEASE_COMMIT || "",
   frontendOutput: "public/vue-apps",
   startupCommand: "npm start",
   includedFiles: filesToCopy,

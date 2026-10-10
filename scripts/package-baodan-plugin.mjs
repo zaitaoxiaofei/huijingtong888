@@ -14,9 +14,9 @@ const version = String(manifest.version || "").trim();
 if (!/^\d+(?:\.\d+)+$/.test(version)) throw new Error("Collector plugin manifest version is invalid");
 
 const packageNames = [
-  `ozon-baodan-erp-plugin-${version}.rar`,
-  "ozon-baodan-erp-plugin.rar",
-  "ozon-erp-collector-plugin.rar"
+  `ozon-baodan-erp-plugin-${version}.zip`,
+  "ozon-baodan-erp-plugin.zip",
+  "ozon-erp-collector-plugin.zip"
 ];
 
 for (const name of packageNames) {

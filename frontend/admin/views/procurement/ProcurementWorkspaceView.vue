@@ -414,16 +414,22 @@ function stockGapOrderRows(row) {
 }
 
 function orderStatusLabel(item) {
-  const text = [item?.source_order_status || item?.status, item?.source_order_tracking_stage || item?.tracking_stage, item?.source_order_logistics_status || item?.logistics_status]
-    .map((value) => String(value || "").toLowerCase()).join(" ");
-  if (text.includes("return")) return "已退货";
-  if (text.includes("reject") || text.includes("not_accepted") || text.includes("unclaimed")) return "拒收/未领取";
-  if (text.includes("delivered") || text.includes("posting_received")) return "已签收";
-  if (text.includes("cancel")) return "已取消";
-  if (["delivering", "transferring", "carriage", "pickup", "sorting", "customs", "shipped", "sent", "on_way"].some((value) => text.includes(value))) return "运输中";
-  if (["awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service"].some((value) => text.includes(value))) return "等待发货";
-  if (["awaiting_registration", "acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "pending_stock"].some((value) => text.includes(value))) return "等待备货";
-  return item?.source_order_status || item?.status || "状态未知";
+  const hasSourceOrder = Number(item?.source_order_id || 0) > 0 || Number(item?.source_order_item_id || 0) > 0;
+  const raw = String(item?.source_order_status || (!hasSourceOrder ? item?.status : "") || item?.source_order_tracking_stage || item?.tracking_stage || item?.source_order_logistics_status || item?.logistics_status || "").trim();
+  const status = raw.toLowerCase();
+  const labels = {
+    awaiting_packaging: "等待备货", awaiting_approve: "等待备货", acceptance_in_progress: "等待备货",
+    posting_created: "等待备货", posting_acceptance_in_progress: "等待备货", pending_stock: "等待备货",
+    awaiting_deliver: "等待发货", awaiting_registration: "等待发货", posting_awaiting_registration: "等待发货",
+    posting_registration_error: "等待发货", posting_registered: "已登记物流", sent_by_seller: "商家已发货",
+    posting_ready_for_pickup: "已到达取货点", posting_transferred_to_courier_service: "已交给物流商",
+    posting_transferring: "运输中", posting_in_carriage: "干线运输中", posting_transferring_to_delivery: "转配送中",
+    delivering: "运输中", posting_in_transit: "运输中", posting_in_customs: "运输中", posting_sorting: "运输中", posting_on_way: "运输中",
+    delivered: "已签收", posting_received: "已签收", cancelled: "已取消", canceled: "已取消",
+    reject: "拒收/未领取", rejected: "拒收/未领取", unclaimed: "拒收/未领取", not_accepted: "拒收/未领取",
+    returned: "已退货", after_delivery_return: "已退货", return: "已退货"
+  };
+  return labels[status] || raw || "状态未知";
 }
 
 function orderTimeText(item) {
@@ -576,7 +582,7 @@ async function openBulkPurchase() {
     if (liveRows.length) {
       await apiClient.post('/api/procurement/refresh-demand');
       for (const row of liveRows) {
-        const params = new URLSearchParams({ grouped: '1', paged: '1', compact: '1', demandType: 'real_order', query: row.product_code, page: '1', pageSize: '100' });
+        const params = new URLSearchParams({ grouped: '1', paged: '1', compact: '1', demandType: 'real_order', productId: String(row.product_id), page: '1', pageSize: '100' });
         const result = await apiClient.get(`/api/procurement/requests?${params}`, { noCache: true });
         const fresh = result.rows?.find(item => Number(item.product_id) === Number(row.product_id));
         if (!fresh || !(fresh.requests || []).some(item => Number(item.id) > 0)) {

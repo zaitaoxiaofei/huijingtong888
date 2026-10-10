@@ -51,10 +51,27 @@ export function normalizeDevelopmentPlan(value, body, { allowUnassigned = false 
       model: rowNonAuto ? "非汽车" : String(row.model || "").trim(),
       target,
       draft_ids: ids,
+      ...(row.completed === true ? { completed: true } : {}),
       ...(manualSkus ? { manual_skus: manualSkus } : {})
     };
   });
   const result = { kind: "development_matrix", brand, category, models, notes: String(plan.notes || "").trim().slice(0, 2000) };
+  if (Array.isArray(plan.manual_groups) && plan.manual_groups.length) {
+    const modelGroups = new Set(models.map((row) => JSON.stringify([row.brand || brand, row.category || category])));
+    const groupKeys = new Set();
+    result.manual_groups = plan.manual_groups.map((row) => {
+      const rowBrand = String(row?.brand || brand).trim();
+      const rowCategory = String(row?.category || category).trim();
+      const key = JSON.stringify([rowBrand, rowCategory]);
+      if (!rowBrand || !rowCategory || !modelGroups.has(key) || groupKeys.has(key)) fail("整组进度（manual_groups）的品牌或核心品名无效，请重新选择任务范围。");
+      groupKeys.add(key);
+      const mode = row?.mode === "completed" ? "completed" : "skus";
+      const manualSkus = [...new Set((Array.isArray(row?.manual_skus) ? row.manual_skus : [])
+        .map((sku) => String(sku || "").trim()).filter(Boolean))];
+      if (manualSkus.some((sku) => sku.length > 128) || manualSkus.length > 100000) fail("整组记录的 SKU 无效，请检查每条 SKU 不超过 128 个字符。");
+      return { brand: rowBrand, category: rowCategory, mode, ...(mode === "skus" ? { manual_skus: manualSkus } : {}) };
+    });
+  }
   if (plan.source_idea_id) result.source_idea_id = Number(plan.source_idea_id);
   if (plan.group_key) result.group_key = String(plan.group_key);
   if (plan.unallocated_draft_ids?.length) {
@@ -71,11 +88,21 @@ export function normalizeDevelopmentPlan(value, body, { allowUnassigned = false 
 
 export function developmentPlanProgress(plan, drafts) {
   const byId = new Map(drafts.filter((row) => row.status !== "deleted").map((row) => [Number(row.id), row]));
+  const manualGroups = new Map((plan.manual_groups || []).map((row) => [JSON.stringify([row.brand || plan.brand, row.category || plan.category]), row]));
+  const groupProgress = new Map();
+  for (const [key, group] of manualGroups) {
+    const target = plan.models.filter((row) => JSON.stringify([row.brand || plan.brand, row.category || plan.category]) === key).reduce((sum, row) => sum + Number(row.target || 0), 0);
+    groupProgress.set(key, { remaining: group.mode === "completed" ? target : (group.manual_skus || []).length });
+  }
   const models = plan.models.map((row) => {
     const linked = row.draft_ids.map((id) => byId.get(id)).filter(Boolean);
-    const done = Array.isArray(row.manual_skus)
-      ? row.manual_skus.length
-      : linked.reduce((sum, draft) => sum + Number(draft.sku_count || 0), 0);
+    const group = groupProgress.get(JSON.stringify([row.brand || plan.brand, row.category || plan.category]));
+    const done = row.completed
+      ? row.target
+      : group
+      ? Math.min(row.target, group.remaining)
+      : Array.isArray(row.manual_skus) ? row.manual_skus.length : linked.reduce((sum, draft) => sum + Number(draft.sku_count || 0), 0);
+    if (group) group.remaining = Math.max(0, group.remaining - done);
     return { ...row, done, drafts: row.draft_ids.map((id) => {
       const draft = byId.get(id);
       return { id, title: draft?.product_name || `草稿 #${id}（已删除或不可用）`, count: Number(draft?.sku_count || 0), created_at: draft?.created_at || "" };
@@ -91,5 +118,5 @@ export function developmentPlanProgress(plan, drafts) {
 }
 
 export function developmentPlanDeliverable(plan) {
-  return `${plan.brand} · ${plan.category}：${plan.models.map((row) => `${row.brand || row.category ? `${row.brand || plan.brand} · ${row.category || plan.category} · ` : ""}${row.model} ${row.target} 个 SKU`).join('；')}。按手工配置 SKU 或关联草稿的变体数量计算，每个车型分别达标。${plan.notes ? `补充要求：${plan.notes}` : ''}`;
+  return `${plan.brand} · ${plan.category}：${plan.models.map((row) => `${row.brand || row.category ? `${row.brand || plan.brand} · ${row.category || plan.category} · ` : ""}${row.model} ${row.target} 个 SKU`).join('；')}。按直接完成、整组 SKU、型号 SKU 或关联草稿计算进度。${plan.notes ? `补充要求：${plan.notes}` : ''}`;
 }

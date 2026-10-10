@@ -44,6 +44,7 @@ import { createAiVariantLabRoutes, handleAiVariantLabRestRoute } from "./server/
 import { getAiTaskFile } from "./server/services/ai/aiWorkflowService.js";
 import { createImageCropperRoutes, handleImageCropperRestRoute } from "./server/routes/tools/imageCropper.js";
 import { createOnboardingKnowledgeRoutes, handleOnboardingKnowledgeRestRoute } from "./server/routes/onboardingKnowledge.js";
+import { createSystemNotificationRoutes, handleSystemNotificationRestRoute } from "./server/routes/systemNotifications.js";
 import {
   cleanupScheduledJobHistory,
   ScheduledJobScheduler,
@@ -76,13 +77,15 @@ import {
   siteAccessUsesSecureCookie
 } from "./server/access.js";
 import { systemInfo } from "./server/maintenance.js";
-import { checkDailyPurchaseNotification, globalUpdateStatus, subscribeGlobalUpdateEvents, updateGlobalUpdateStatus } from "./server/notifications.js";
+import { globalUpdateStatus, subscribeGlobalUpdateEvents, updateGlobalUpdateStatus } from "./server/notifications.js";
+import * as systemNotificationServices from "./services/system-notifications.js";
 import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
 import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
+import { archiveTenantMysql, createTenantMysql, listTenantsMysql, setTenantSubscriptionMysql, tenantMembersMysql, tenantMembershipsMysql, upsertTenantMemberMysql } from "./services/tenants.js";
 
-const services = mysqlRuntimeServices;
+const services = { ...mysqlRuntimeServices, ...systemNotificationServices };
 const runtimeReadiness = {
   ready: false,
   startedAt: new Date().toISOString(),
@@ -125,13 +128,17 @@ async function resolveDownloadArtifactPath(filename) {
     error.statusCode = 400;
     throw error;
   }
-  const aliasNames = normalized === "ozon-erp-collector-plugin.rar"
-    ? ["ozon-erp-collector-plugin.rar", "ozon-baodan-erp-plugin.rar"]
+  const aliasNames = normalized === "ozon-erp-collector-plugin.zip"
+    ? ["ozon-erp-collector-plugin.zip", "ozon-baodan-erp-plugin.zip"]
+    : normalized === "ozon-erp-collector-plugin.rar"
+      ? ["ozon-erp-collector-plugin.rar", "ozon-baodan-erp-plugin.rar"]
     : [normalized];
-  const versionedNames = normalized === "ozon-erp-collector-plugin.rar" || normalized === "ozon-baodan-erp-plugin.rar"
-    ? ["ozon-baodan-erp-plugin-*.rar"]
-    : normalized === "ozon-seller-analytics-plugin.rar"
-      ? ["ozon-seller-analytics-plugin-*.rar"]
+  const versionedNames = normalized === "ozon-erp-collector-plugin.zip" || normalized === "ozon-baodan-erp-plugin.zip"
+    ? ["ozon-baodan-erp-plugin-*.zip"]
+    : normalized === "ozon-erp-collector-plugin.rar" || normalized === "ozon-baodan-erp-plugin.rar"
+      ? ["ozon-baodan-erp-plugin-*.rar"]
+      : normalized === "ozon-seller-analytics-plugin.rar"
+        ? ["ozon-seller-analytics-plugin-*.rar"]
       : [];
   const candidates = Array.from(new Set([
     ...aliasNames.flatMap((name) => [
@@ -158,7 +165,7 @@ async function resolveDownloadArtifactPath(filename) {
       path.resolve("..", "..", "dist")
     ]));
     const prefix = pattern.replace("*", "");
-    const suffix = ".rar";
+    const suffix = pattern.endsWith(".zip") ? ".zip" : ".rar";
     const matches = [];
     for (const dir of searchDirs) {
       try {
@@ -203,7 +210,8 @@ const routeModules = {
   ...createAiImageRoutes({ readJson }),
   ...createAiVariantLabRoutes({ services, readJson }),
   ...createImageCropperRoutes({ readJson }),
-  ...createOnboardingKnowledgeRoutes({ readJson })
+  ...createOnboardingKnowledgeRoutes({ readJson }),
+  ...createSystemNotificationRoutes({ services })
 };
 
 // 保持现有 API 不变，但把“简单直连型接口”集中成一个表；
@@ -231,6 +239,22 @@ const routes = {
   "GET /api/system/info": () => systemInfo(),
   "GET /api/system/update-status": (req) => globalUpdateStatus(req.query || {}),
   "GET /api/system-monitoring": (req) => systemMonitoringOverview(req.query || {}),
+  "GET /api/tenants": () => listTenantsMysql(),
+  "POST /api/tenants": async (req) => createTenantMysql(await readJson(req)),
+  "POST /api/tenants/archive": async (req) => {
+    const body = await readJson(req);
+    return archiveTenantMysql(body.tenant_id || body.tenantId);
+  },
+  "GET /api/tenants/mine": (req) => tenantMembershipsMysql(req._session?.personId),
+  "GET /api/tenants/members": (req) => tenantMembersMysql(req.query?.tenant_id || req.query?.tenantId),
+  "PUT /api/tenants/members": async (req) => {
+    const body = await readJson(req);
+    return upsertTenantMemberMysql(body.tenant_id || body.tenantId, body);
+  },
+  "POST /api/tenants/subscription": async (req) => {
+    const body = await readJson(req);
+    return setTenantSubscriptionMysql(body.tenant_id || body.tenantId, body);
+  },
   "POST /api/system/update-status": async (req) => updateGlobalUpdateStatus(await readJson(req)),
   "GET /api/ai-provider/config": () => services.aiProviderConfig(),
   "GET /api/ai-provider/presets": () => services.aiProviderPresets(),
@@ -254,6 +278,7 @@ const routes = {
   "GET /api/exchange-rate/current": () => services.currentExchangeRate(),
   "GET /api/exchange-rates": () => services.exchangeRates(),
   "GET /api/inventory": (req) => services.inventory(req.query || {}),
+  "GET /api/inventory/availability": (req) => services.productInventoryAvailability(req.query || {}),
   "GET /api/stock-alerts": (req) => services.stockAlerts(req.query || {}),
   "GET /api/fbp-opportunities": (req) => services.fbpOpportunities(req.query || {}),
   "GET /api/fbp-replenishment-orders": (req) => services.fbpReplenishmentOrders(req.query || {}),
@@ -525,6 +550,16 @@ const BACKGROUND_OZON_STOCK_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.ba
 const OZON_ACTION_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
 const scheduledJobDefinitions = [
+  {
+    key: "operational_notifications",
+    name: "业务通知生成",
+    category: "operations",
+    priority: "high",
+    intervalMinutes: 15,
+    initialDelaySeconds: 90,
+    catchupEnabled: true,
+    maxCatchupRuns: 1
+  },
   {
     key: "order_status_sync",
     name: "Ozon 订单增量同步",
@@ -828,6 +863,7 @@ const scheduledJobDefinitions = [
 ];
 
 const scheduledJobHandlers = {
+  operational_notifications: withForegroundApiDeferral("operational_notifications", () => services.generateOperationalNotifications()),
   order_status_sync: withForegroundApiDeferral("order_status_sync", runBackgroundOrderStatusSync),
   customer_message_dispatch: withForegroundApiDeferral("customer_message_dispatch", runBackgroundCustomerMessageDispatch),
   cancelled_order_sync: withForegroundApiDeferral("cancelled_order_sync", runBackgroundCancelledOrderSync),
@@ -940,6 +976,8 @@ async function handleSiteAccess(req, res, url) {
 }
 
 async function handleRestRoute(req, res, url, parts) {
+  const systemNotificationHandled = await handleSystemNotificationRestRoute({ req, res, parts, services, json });
+  if (systemNotificationHandled !== false) return systemNotificationHandled;
   const onboardingHandled = await handleOnboardingKnowledgeRestRoute({ req, res, parts, json, notFound });
   if (onboardingHandled !== false) return onboardingHandled;
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "ai-provider" && parts[2] === "stream") {
@@ -1015,14 +1053,27 @@ async function handleRestRoute(req, res, url, parts) {
   }
 
   if (req.method === "GET" && parts[0] === "downloads" && (
+    /^ozon-baodan-erp-plugin-[0-9][0-9A-Za-z.-]*\.zip$/.test(parts[1] || "") ||
     /^ozon-baodan-erp-plugin-[0-9][0-9A-Za-z.-]*\.rar$/.test(parts[1] || "") ||
     /^ozon-seller-analytics-plugin-[0-9][0-9A-Za-z.-]*\.rar$/.test(parts[1] || "") ||
     /^pdd-procurement-logistics-plugin-[0-9][0-9A-Za-z.-]*\.zip$/.test(parts[1] || "") ||
+    parts[1] === "ozon-baodan-erp-plugin.zip" ||
+    parts[1] === "ozon-erp-collector-plugin.zip" ||
     parts[1] === "ozon-baodan-erp-plugin.rar" ||
     parts[1] === "ozon-erp-collector-plugin.rar" ||
     parts[1] === "ozon-seller-analytics-plugin.rar"
   )) {
     const filename = parts[1];
+    if (/^(?:ozon-baodan-erp-plugin|ozon-erp-collector-plugin)(?:-[0-9][0-9A-Za-z.-]*)?\.rar$/.test(filename)) {
+      const pluginVersion = globalUpdateStatus().plugin.version;
+      const latestPackage = `ozon-baodan-erp-plugin-${pluginVersion}.zip`;
+      writeHead(res, 302, {
+        "Location": `/downloads/${latestPackage}`,
+        "Cache-Control": "no-store"
+      });
+      res.end();
+      return true;
+    }
     const filePath = await resolveDownloadArtifactPath(filename);
     const buffer = await fs.readFile(filePath);
     writeHead(res, 200, {
@@ -2040,6 +2091,9 @@ const server = http.createServer(async (req, res) => {
         console.warn(`[forbidden] ${req.method} ${url.pathname} reason=authorization detail=${authorization.error || "权限不足"}`);
         return json(res, { error: authorization.error || "权限不足" }, authorization.status || 403);
       }
+      if (!hasPermission(session, "admin") && parts[1] !== "auth" && !session.tenant?.access_allowed) {
+        return json(res, { error: "企业套餐已到期或已停用，请联系平台管理员开通或续费", code: "TENANT_SUBSCRIPTION_REQUIRED" }, 402);
+      }
     }
 
     markRequestTiming(req, "before_rest");
@@ -2088,7 +2142,6 @@ server.listen(config.port, config.host || undefined, () => {
   const bindHost = config.host || "0.0.0.0";
   console.log(`ozon ERP running at ${config.appBaseUrl} (bind ${bindHost}:${config.port})`);
   const deploymentCandidate = process.env.DEPLOYMENT_CANDIDATE === "1";
-  if (!deploymentCandidate) setInterval(() => checkDailyPurchaseNotification(services.all), 60000);
   void (async () => {
     if (config.scheduledJobsEnabled) {
       registerScheduledJobs(scheduledJobDefinitions)

@@ -14,7 +14,11 @@ export function supplementLiveProcurementRows(rows, coverage) {
       extra.push({ ...product, id: 0, product_id: productId, status: 'suggested', demand_type: 'real_order',
         purchase_order_id: null, purchase_order_status: '', person_id: null, person_name: '',
         source_order_id: order.order_id, source_order_item_id: item.order_item_id,
-        source_posting_number: order.posting_number, operational_needs_fulfillment: true,
+        source_posting_number: order.posting_number,
+        source_order_status: order.source_order_status,
+        source_order_tracking_stage: order.source_order_tracking_stage,
+        source_order_logistics_status: order.source_order_logistics_status,
+        operational_needs_fulfillment: true,
         quantity: item.shortage_quantity, amount: 0, shipping_amount: 0,
         created_at: order.transport_at, updated_at: order.transport_at, live_order_demand: true });
     }

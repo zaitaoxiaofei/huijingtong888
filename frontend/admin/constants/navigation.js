@@ -116,6 +116,13 @@ export const navigationMenus = [
     ]
   },
   {
+    key: "tenant-management",
+    label: "企业与授权",
+    route: "/tenant-management",
+    icon: Setting,
+    adminOnly: true
+  },
+  {
     key: "settings",
     label: "系统",
     icon: Setting,

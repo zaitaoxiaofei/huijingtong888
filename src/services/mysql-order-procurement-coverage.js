@@ -55,6 +55,8 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
   const work = (async () => {
     const [demands, stocks, allocations, inbounds, requests, marks, deductions, sources, stockSources, fbpReservations, priorities] = await Promise.all([
       loadDemands(query, `SELECT o.id AS order_id, oi.id AS order_item_id, o.ordered_at, o.posting_number,
+        o.status AS source_order_status, o.tracking_stage AS source_order_tracking_stage,
+        o.logistics_status AS source_order_logistics_status,
         COALESCE(${transportAt}, o.delivered_at, o.ordered_at) AS transport_at,
         COALESCE(ri.product_id, pc.component_product_id, p.id, 0) AS product_id,
         cp.name AS product_name, cp.stock_unit,
@@ -91,8 +93,12 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
             AND status = 'posted' AND source_type = 'order_outbound'))` : ''}
 `, fresh),
       // Match the order/inventory display: legacy UNKNOWN movements belong to the non-FBP ledger.
-      query(`SELECT product_id, SUM(quantity_delta) AS ledger,
-        MAX(CASE WHEN source_type = 'reconciliation_stocktake' THEN id ELSE NULL END) AS stocktake_id FROM inventory_movements
+      query(`SELECT product_id,
+        SUM(CASE WHEN movement_type IN ('ORDER_RESERVED', 'CANCEL_RESTORE') THEN 0 ELSE quantity_delta END) AS ledger,
+        MAX(CASE WHEN source_type = 'reconciliation_stocktake' THEN id ELSE NULL END) AS stocktake_id,
+        SUM(CASE WHEN movement_type = 'ORDER_RESERVED' THEN ABS(quantity_delta)
+          WHEN movement_type = 'CANCEL_RESTORE' THEN -ABS(quantity_delta) ELSE 0 END) AS fbp_reserved
+        FROM inventory_movements
         WHERE status = 'posted' AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'
           AND (source_type IS NULL OR source_type NOT IN ('fbp_replenishment_reserve', 'fbp_replenishment_reserve_release'))${scope()} GROUP BY product_id`),
       query(`SELECT a.order_item_id, a.product_id, a.procurement_request_id, a.allocated_quantity
@@ -133,7 +139,10 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
     for (const row of fbpReservations) {
       const id = Number(row.product_id);
       if (!byProduct.has(id)) byProduct.set(id, { product_id: id, ledger: 0, open_deducted: 0 });
-      byProduct.get(id).fbp_reserved = Math.max(0, Number(row.quantity || 0));
+      byProduct.get(id).fbp_reserved = Math.max(
+        Number(byProduct.get(id).fbp_reserved || 0),
+        Number(row.quantity || 0)
+      );
     }
     for (const movement of deductions) {
       if (!liveItems.has(Number(movement.order_item_id))) continue;
