@@ -8,7 +8,7 @@ test('procurement uses the displayed non-FBP ledger, including legacy warehouse 
   db.exec(`CREATE TABLE products (id INTEGER, name TEXT, stock_unit TEXT);
     INSERT INTO products VALUES (5, 'TENET', 'unit');
     CREATE TABLE inventory_movements (id INTEGER PRIMARY KEY, created_at TEXT DEFAULT CURRENT_TIMESTAMP, source_ref TEXT, product_id INTEGER, quantity_delta INTEGER, status TEXT,
-      stock_location TEXT, source_type TEXT, related_order_item_id INTEGER);
+      stock_location TEXT, source_type TEXT, movement_type TEXT, related_order_item_id INTEGER);
     INSERT INTO inventory_movements (product_id, quantity_delta, status, stock_location, source_type, related_order_item_id) VALUES
       (5, 500, 'posted', 'UNKNOWN', 'purchase_inbound', NULL),
       (5, 3, 'posted', 'UNKNOWN', 'return_in', NULL),
