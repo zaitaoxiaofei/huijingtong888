@@ -154,6 +154,38 @@ test("pending listing sync reconciles Ozon archived products into local status",
   assert.match(source, /fetchOzonProductRefs\(shop, \{ visibilityFilters: \["ARCHIVED"\]/);
   assert.match(source, /reconcileArchivedOnlineProductsMysql\(shop\.id, archivedRefs\)/);
   assert.match(source, /SET archived = 1,[\s\S]*status = 'archived',[\s\S]*visibility = 'ARCHIVED'/);
+  assert.match(source, /ozon_sku IN \(\$\{skus\.map/);
+  assert.match(source, /offer_id IN \(\$\{offerIds\.map/);
+});
+
+test("archived refs keep Ozon SKU and offer ID when product ID differs", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => jsonResponse({ result: {
+    items: [{ product_id: 3519207875, sku: 3458204550, offer_id: "mz-20260127-JLYH-001" }],
+    last_id: ""
+  } });
+  const refs = await fetchOzonProductRefs({
+    ozon_client_id: "4174207",
+    ozon_api_key: "real-api-key"
+  }, { visibilityFilters: ["ARCHIVED"] });
+  assert.deepEqual(refs, [{
+    id: 3519207875,
+    ozon_product_id: "3519207875",
+    offer_id: "mz-20260127-JLYH-001",
+    ozon_sku: "3458204550",
+    visibility: "ARCHIVED"
+  }]);
+});
+
+test("archived list errors fail the sync instead of leaving stale products", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => ({ ...jsonResponse({ message: "archived list unavailable" }), ok: false, status: 400 });
+  await assert.rejects(fetchOzonProductRefs({
+    ozon_client_id: "4174207",
+    ozon_api_key: "real-api-key"
+  }, { visibilityFilters: ["ARCHIVED"] }));
 });
 
 test("pending listing refs do not fetch full product details", async (t) => {

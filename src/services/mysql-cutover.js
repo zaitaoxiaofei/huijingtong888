@@ -8441,12 +8441,17 @@ export async function syncOzonOnlineProductsMysql(body = {}) {
 }
 
 async function reconcileArchivedOnlineProductsMysql(shopId, archivedRefs = []) {
-  const productIds = [...new Set((archivedRefs || [])
-    .map((item) => String(item.ozon_product_id || item.product_id || item.id || "").trim())
-    .filter(Boolean))];
   let updated = 0;
-  for (let index = 0; index < productIds.length; index += 500) {
-    const chunk = productIds.slice(index, index + 500);
+  for (let index = 0; index < archivedRefs.length; index += 500) {
+    const chunk = archivedRefs.slice(index, index + 500);
+    const productIds = [...new Set(chunk.map((item) => String(item.ozon_product_id || item.product_id || item.id || "").trim()).filter(Boolean))];
+    const skus = [...new Set(chunk.map((item) => String(item.ozon_sku || item.sku || "").trim()).filter((sku) => /^\d+$/.test(sku) && sku !== "0"))];
+    const offerIds = [...new Set(chunk.map((item) => String(item.offer_id || "").trim()).filter(Boolean))];
+    const matches = [];
+    if (productIds.length) matches.push(`ozon_product_id IN (${productIds.map(() => "?").join(",")})`);
+    if (skus.length) matches.push(`ozon_sku IN (${skus.map(() => "?").join(",")})`);
+    if (offerIds.length) matches.push(`offer_id IN (${offerIds.map(() => "?").join(",")})`);
+    if (!matches.length) continue;
     const result = await mysqlExecute(`
       UPDATE online_products
       SET archived = 1,
@@ -8455,13 +8460,13 @@ async function reconcileArchivedOnlineProductsMysql(shopId, archivedRefs = []) {
           synced_at = CURRENT_TIMESTAMP,
           updated_at = CURRENT_TIMESTAMP
       WHERE shop_id = ?
-        AND ozon_product_id IN (${chunk.map(() => "?").join(",")})
+        AND (${matches.join(" OR ")})
         AND (
           COALESCE(archived, 0) <> 1
           OR LOWER(COALESCE(status, '')) <> 'archived'
           OR UPPER(COALESCE(visibility, '')) <> 'ARCHIVED'
         )
-    `, [Number(shopId), ...chunk]);
+    `, [Number(shopId), ...productIds, ...skus, ...offerIds]);
     updated += Number(result?.affectedRows || 0);
   }
   return updated;

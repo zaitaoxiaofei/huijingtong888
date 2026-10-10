@@ -115,6 +115,8 @@ export async function fetchOzonProductRefs(shop, options = {}) {
   return (await fetchOzonProductIds(shop, options)).map((item) => ({
     id: Number(item.id || 0),
     ozon_product_id: String(item.id || ""),
+    offer_id: String(item.offer_id || ""),
+    ozon_sku: String(item.ozon_sku || ""),
     visibility: String(item.visibility || "")
   })).filter((item) => item.id);
 }
@@ -1195,16 +1197,16 @@ async function fetchOzonProductIds(shop, options = {}) {
 
   await mapOzonConcurrency(visibilityFilters, visibilityConcurrency, async (visibility) => {
     try {
-      const ids = await fetchOzonProductIdsByVisibility(shop, visibility);
-      for (const id of ids) {
-        const key = String(id);
+      const refs = await fetchOzonProductIdsByVisibility(shop, visibility);
+      for (const ref of refs) {
+        const key = String(ref.id);
         const current = productIds.get(key);
         if (!current || ozonProductVisibilityRank(visibility) > ozonProductVisibilityRank(current.visibility)) {
-          productIds.set(key, { id, visibility });
+          productIds.set(key, { ...ref, visibility });
         }
       }
     } catch (error) {
-      if (visibility === "ALL") throw error;
+      if (visibility === "ALL" || visibility === "ARCHIVED") throw error;
     }
   });
 
@@ -1243,7 +1245,7 @@ function ozonProductVisibilityRank(value = "") {
 }
 
 async function fetchOzonProductIdsByVisibility(shop, visibility) {
-  const productIds = [];
+  const productRefs = [];
   let lastId = "";
 
   do {
@@ -1257,12 +1259,12 @@ async function fetchOzonProductIdsByVisibility(shop, visibility) {
     const items = result.items || [];
     for (const item of items) {
       const id = item.product_id || item.id;
-      if (id) productIds.push(Number(id));
+      if (id) productRefs.push({ id: Number(id), offer_id: item.offer_id, ozon_sku: item.sku });
     }
     lastId = result.last_id || "";
   } while (lastId);
 
-  return productIds;
+  return productRefs;
 }
 
 async function ozonRequest(shop, path, payload, options = {}) {
