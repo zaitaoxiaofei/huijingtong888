@@ -252,7 +252,7 @@ const routes = {
   "GET /api/tenants/mine": (req) => tenantMembershipsMysql(req._session?.personId),
   "GET /api/tenants/members": (req) => tenantMembersMysql(
     hasPermission(req._session, "admin")
-      ? (req.query?.tenant_id || req.query?.tenantId)
+      ? (req.query?.tenant_id || req.query?.tenantId || req._session?.tenant?.id)
       : req._session?.tenant?.id
   ),
   "PUT /api/tenants/members": async (req) => {
