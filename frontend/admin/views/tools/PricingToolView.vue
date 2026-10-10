@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { calculatePricing } from "../../utils/pricing-tool.js";
-import { quoteLogisticsRules, channelLabel, threeChannelQuotes } from "../../utils/logistics-quote.js";
+import { quoteLogisticsRules, channelLabel, threeChannelQuotes, defaultLogisticsQuote } from "../../utils/logistics-quote.js";
 import { currentEffectiveLogisticsRules } from "../../utils/effective-logistics-rules.js";
 import { apiClient } from "../../utils/api.js";
 import { commissionRateForRub } from "../../utils/rfbs-commission.js";
@@ -10,7 +10,7 @@ import RfbsCommissionPicker from "./RfbsCommissionPicker.vue";
 
 const form = reactive({
   category: "", purchaseCost: null, weight: null, length: null, width: null, height: null, carrier: "GUOO",
-  commissionRate: null, freight: null, exchangeRate: null, domesticCost: 0, lastMile: 0,
+  commissionRate: null, freight: null, exchangeRate: null, domesticCost: 0,
   adRate: 0, otherRate: 0, returnRate: 0, returnLoss: 0, targetMargin: 20, discountRate: 0
 });
 const result = ref(null);
@@ -55,6 +55,7 @@ const candidates = computed(() => {
     .sort((a, b) => a.saleRub - b.saleRub);
 });
 const displayCandidates = computed(() => threeChannelQuotes(candidates.value));
+const defaultQuote = computed(() => defaultLogisticsQuote(displayCandidates.value));
 onMounted(async () => {
   const [rulesResult, rateResult] = await Promise.allSettled([
     apiClient.get("/api/tools/pricing/logistics-rules", { noCache: true }),
@@ -84,7 +85,7 @@ function calculate() {
     return;
   }
   if (selected) form.freight = selected.priceCny;
-  else if (displayCandidates.value.length) selectQuote(displayCandidates.value[0]);
+  else if (defaultQuote.value) selectQuote(defaultQuote.value);
   else { ElMessage.warning("当前类目、重量、尺寸和预估售价没有匹配的有效物流渠道及佣金档位"); return; }
   try {
     result.value = calculatePricing(form);
@@ -116,11 +117,10 @@ const money = (value) => Number(value || 0).toFixed(2);
           <p class="exchange-note">参考汇率：1 元 ≈ {{ form.exchangeRate || '获取中' }} ₽ · 俄罗斯央行 {{ rateSourceDate }} <span v-if="rateError" class="rate-error">{{ rateError }}</span></p>
           <h3>其他费用</h3>
           <el-form-item label="国内运费及贴单"><el-input-number v-model="form.domesticCost" :min="0" :precision="2" /> <span class="unit">元/件</span></el-form-item>
-          <el-form-item label="尾程固定费"><el-input-number v-model="form.lastMile" :min="0" :precision="2" /> <span class="unit">元/件</span></el-form-item>
           <el-form-item label="广告费占比"><el-input-number v-model="form.adRate" :min="0" :max="99" :precision="1" /> <span class="unit">%</span></el-form-item>
           <el-form-item label="退货率"><el-input-number v-model="form.returnRate" :min="0" :max="100" :precision="1" /> <span class="unit">% 的订单预计退货</span></el-form-item>
           <el-form-item label="单次退货损失"><el-input-number v-model="form.returnLoss" :min="0" :precision="2" /> <span class="unit">元；填退回运费、货损及不可退费用合计</span></el-form-item>
-          <el-form-item label="其他费占比"><el-input-number v-model="form.otherRate" :min="0" :max="99" :precision="1" /> <span class="unit">%，可计入提现等费用，避免重复计入退货损失</span></el-form-item>
+          <el-form-item label="其他费占比"><el-input-number v-model="form.otherRate" :min="0" :max="99" :precision="1" /> <span class="unit">%，提现与尾程已自动计入，避免重复计算</span></el-form-item>
           <el-button type="primary" class="calculate-button" @click="calculate">开始计算</el-button>
         </el-form>
       </el-card>
@@ -134,7 +134,7 @@ const money = (value) => Number(value || 0).toFixed(2);
           <template #header><strong>物流费用</strong></template>
           <p v-if="logisticsError" class="rate-error">{{ logisticsError }}</p>
           <p v-else-if="!candidates.length" class="hint">选好类目并填写成本、重量和尺寸后显示有效渠道。</p>
-          <template v-else><p class="shipping-tip">已匹配 {{ form.carrier }} 当前有效物流方案；点击卡片选择计价渠道。</p><div class="shipping-cards"><button v-for="quote in displayCandidates" :key="quote.id" type="button" class="shipping-card" :class="{ active: selectedRuleId === quote.id }" :title="quote.source" @click="selectQuote(quote)"><strong>{{ channelLabel(quote.channel) }} <small>{{ quote.channel }}</small></strong><b>¥ {{ money(quote.priceCny) }}</b><small>{{ quote.name }}</small><small>计费重 {{ quote.chargeableWeightG }}g · 预估售价 ₽{{ money(quote.saleRub) }}</small></button></div></template>
+          <template v-else><p class="shipping-tip">已匹配 {{ form.carrier }} 当前有效物流方案；默认陆空 Standard，点击卡片可切换。</p><div class="shipping-cards"><button v-for="quote in displayCandidates" :key="quote.id" type="button" class="shipping-card" :class="{ active: (selectedRuleId ?? defaultQuote?.id) === quote.id }" :title="quote.source" @click="selectQuote(quote)"><strong>{{ channelLabel(quote.channel) }} <small>{{ quote.channel }}</small></strong><b>¥ {{ money(quote.priceCny) }}</b><small>{{ quote.name }}</small><small>计费重 {{ quote.chargeableWeightG }}g · 预估售价 ₽{{ money(quote.saleRub) }}</small></button></div></template>
         </el-card>
         <el-card v-if="result" shadow="never">
           <template #header><strong>费用明细（人民币 / 件）</strong></template>
@@ -142,7 +142,8 @@ const money = (value) => Number(value || 0).toFixed(2);
           <div class="detail-row"><span>平台佣金</span><b>¥ {{ money(result.commission) }}</b></div>
           <div class="detail-row"><span>跨境物流费</span><b>¥ {{ money(form.freight) }}</b></div>
           <div class="detail-row"><span>国内运费及贴单</span><b>¥ {{ money(form.domesticCost) }}</b></div>
-          <div class="detail-row"><span>尾程固定费</span><b>¥ {{ money(form.lastMile) }}</b></div>
+          <div class="detail-row"><span>尾程费（售价 2.5%）</span><b>¥ {{ money(result.lastMile) }}</b></div>
+          <div class="detail-row"><span>提现费（系统现有公式）</span><b>¥ {{ money(result.withdrawalFee) }}</b></div>
           <div class="detail-row"><span>广告费</span><b>¥ {{ money(result.advertising) }}</b></div>
           <div class="detail-row"><span>预期退货损失（{{ form.returnRate }}% × ¥{{ money(form.returnLoss) }}）</span><b>¥ {{ money(result.expectedReturnLoss) }}</b></div>
           <div class="detail-row"><span>其他费</span><b>¥ {{ money(result.other) }}</b></div>

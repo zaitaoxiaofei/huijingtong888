@@ -13,6 +13,10 @@ export function threeChannelQuotes(quotes = []) {
   });
 }
 
+export function defaultLogisticsQuote(quotes = []) {
+  return quotes.find((quote) => String(quote.channel || "").toLowerCase() === "standard") || quotes[0] || null;
+}
+
 function serviceClass(name) {
   return ["Premium Big", "Premium Small", "Extra Small", "Budget", "Big", "Small"]
     .find((item) => new RegExp(item.replace(" ", "\\s+"), "i").test(String(name || ""))) || "";
