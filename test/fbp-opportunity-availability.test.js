@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { calculateOrderProcurementCoverage } from '../src/services/order-procurement-coverage.js';
 
 const service = readFileSync(new URL('../src/services/mysql-cutover.js', import.meta.url), 'utf8');
 const page = readFileSync(new URL('../frontend/admin/views/inventory/InventoryFbpOpportunitiesPage.vue', import.meta.url), 'utf8');
 const server = readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
+const coverageLoader = readFileSync(new URL('../src/services/mysql-order-procurement-coverage.js', import.meta.url), 'utf8');
 const normalizeSource = service.slice(service.indexOf('function fbpOpportunityPriority('), service.indexOf('function applyFbpOpportunityQuery('));
 const normalize = new Function('parseWarehouseBreakdown', `${normalizeSource}; return normalizeFbpOpportunityRow;`)(() => []);
 
@@ -21,6 +23,24 @@ test('FBP suggestion transfers only unreserved local stock and does not re-buy u
     pending_procurement_qty: 50, pending_procurement_available_qty: 50 });
   assert.equal(arriving.suggested_purchase_qty, 0);
   assert.equal(arriving.suggested_action, 'await_inbound');
+});
+
+test('global product availability subtracts current order reservations and FBP reservations', () => {
+  const coverage = calculateOrderProcurementCoverage({
+    stocks: [{ product_id: 605, ledger: 10, fbp_reserved: 2 }],
+    demands: [{ order_id: 1, order_item_id: 1, product_id: 605, quantity: 5, needs_fulfillment: 1, stock_location: 'LOCAL' }]
+  });
+  assert.deepEqual(coverage.product_availability.get(605), {
+    product_id: 605, local_stock: 10, local_available: 3,
+    order_reserved_qty: 5, fbp_reserved_qty: 2,
+    pending_procurement_qty: 0, pending_procurement_available_qty: 0,
+    inventory_needs_review: false
+  });
+});
+
+test('global ledger projection does not count FBP reservation movements as new stock', () => {
+  assert.match(coverageLoader, /SUM\(CASE WHEN movement_type IN \('ORDER_RESERVED', 'CANCEL_RESTORE'\) THEN 0 ELSE quantity_delta END\) AS ledger/);
+  assert.match(coverageLoader, /AS fbp_reserved/);
 });
 
 test('FBP opportunities and future inventory pages share the order coverage availability interface', () => {

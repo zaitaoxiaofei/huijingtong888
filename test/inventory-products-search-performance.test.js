@@ -5,7 +5,6 @@ import test from "node:test";
 const serviceSource = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 const viewSource = readFileSync(new URL("../frontend/admin/views/inventory/InventoryProductsPage.vue", import.meta.url), "utf8");
 const productsSource = serviceSource.match(/export async function productsMysql[\s\S]*?export async function hiddenProductsMysql/)?.[0] || "";
-const compositionSummarySource = serviceSource.match(/async function productCompositionSummariesMysql[\s\S]*?async function assertProductCompositionAcyclicMysql/)?.[0] || "";
 
 test("inventory search runs count and page lookup concurrently", () => {
   assert.match(productsSource, /const \[totalRow, pageRows\] = await Promise\.all\(\[/);
@@ -45,10 +44,4 @@ test("inventory list loads a small product thumbnail but previews the original",
 test("inventory first mount does not issue a second activation fetch", () => {
   assert.match(viewSource, /let firstActivation = true;/);
   assert.match(viewSource, /onActivated\(\(\) => \{\s*if \(firstActivation\) \{\s*firstActivation = false;\s*return;\s*\}/);
-});
-
-test("component availability only aggregates movement rows for the current page", () => {
-  assert.match(compositionSummarySource, /const componentIds = \[\.\.\.new Set\(components\.map/);
-  assert.match(compositionSummarySource, /AND product_id IN/);
-  assert.match(compositionSummarySource, /componentPlaceholders/);
 });
