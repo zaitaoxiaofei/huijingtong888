@@ -85,7 +85,7 @@ test("online-product SQL scopes every list/count query through live tenant shops
   const service = read("../src/services/mysql-cutover.js");
   const list = service.match(/export async function onlineProductsMysql\([\s\S]*?(?=\nfunction onlineProductStockJoinSqlMysql)/)?.[0] || "";
   assert.match(list, /resolveShopTenantIdMysql\(tenantId\)/);
-  assert.match(list, /if \(defaultTenant\) await repairMissingOnlineProductSkusMysql\(\)/);
+  assert.match(list, /if \(defaultTenant && !batchStock\) await repairMissingOnlineProductSkusMysql\(\)/);
   assert.match(list, /tenant_shop\.status != 'deleted' AND \(tenant_shop\.tenant_id = \?/);
   assert.match(list, /const cacheKey = `online-products:list:\$\{normalizedTenantId\}:/);
   assert.match(list, /const statusIndexCacheKey = `online-products:status-index:\$\{normalizedTenantId\}:/);
@@ -127,11 +127,11 @@ test("online-product tenant UI exposes only the scoped stock action and avoids g
   const api = read("../frontend/admin/utils/api.js");
   assert.match(routes, /services\.onlineProducts\(Object\.fromEntries\(url\.searchParams\.entries\(\)\), tenantIdFromRequest\(req\)\)/);
   assert.match(view, /const tenantReadOnly = computed\(\(\) => authStore\.user\?\.tenant\?\.slug !== "default"\)/);
-  assert.match(view, /if \(!dictionaryLoaded && !tenantReadOnly\.value\) requests\.push\(apiClient\.get\("\/api\/people"\)\)/);
+  assert.match(view, /!dictionaryLoaded && !tenantReadOnly\.value && !showProductLimitPanel\.value/);
   assert.match(view, /el-button[^\n]+@click="handleSearch"/);
   assert.match(view, /<el-button v-if="!tenantReadOnly"[^\n]+@click="syncOnlineProducts/);
   assert.match(view, /v-if="tenantCanUpdateStocks"[^\n]+@click="openBatchStockDialog"/);
-  assert.match(view, /const snapshotKey = `\$\{tenantKey\}:\$\{snapshotQuery\}`/);
+  assert.match(view, /if \(showProductLimitPanel\.value\) params\.set\("batchStock", "1"\)/);
   assert.match(view, /const normalizedShopId = `\$\{tenantKey\}:\$\{String\(shopId \|\| ""\)\}`/);
   assert.match(view, /v-if="!tenantReadOnly \|\| \(tenantCanUpdateStocks && tenantReadOnly\)" label="操作"/);
   assert.match(view, /v-else-if="tenantCanUpdateStocks"[^\n]+@click="zeroOnlineProductStock\(row\)"/);

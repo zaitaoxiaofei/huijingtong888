@@ -13,12 +13,15 @@ const onlineProductList = onlineProductsMysql;
 const onlineProductsViewSource = readFileSync(new URL("../frontend/admin/views/inventory/OnlineProductsView.vue", import.meta.url), "utf8");
 const mysqlCutoverSource = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 
-test("batch stock results use one in-memory snapshot for local pagination", () => {
-  assert.match(onlineProductsViewSource, /let batchStockSnapshotRows = \[\]/);
-  assert.match(onlineProductsViewSource, /filteredRows\.slice\(start, start \+ state\.filters\.pageSize\)/);
-  assert.match(onlineProductsViewSource, /Boolean\(displayedOzonSku\(row\)\) && !\["archived", "hidden"\]\.includes/);
-  assert.match(onlineProductsViewSource, /showProductLimitPanel\.value && batchStockSnapshotKey\) applyBatchStockSnapshotPage\(\)/);
-  assert.match(onlineProductsViewSource, /invalidateBatchStockSnapshot\(\);\s*await loadPageData\(\{ forceSnapshot: true \}\)/);
+test("batch stock opens on the first configured shop with server pagination", () => {
+  assert.match(onlineProductsViewSource, /state\.filters\.shopId = shops\[0\]\?\.id \? String\(shops\[0\]\.id\) : "all"/);
+  assert.match(onlineProductsViewSource, /if \(showProductLimitPanel\.value\) params\.set\("batchStock", "1"\)/);
+  assert.match(onlineProductsViewSource, /status: state\.filters\.status !== "all" \|\| showProductLimitPanel\.value \? state\.filters\.status : undefined/);
+  assert.match(onlineProductsViewSource, /apiClient\.get\(`\/api\/online-products\?\$\{onlineProductsQueryString\(\)\}`\)/);
+  assert.match(onlineProductsViewSource, /@show="loadProductLimits\(\)"/);
+  assert.doesNotMatch(onlineProductsViewSource, /batchStockSnapshotRows/);
+  assert.match(mysqlCutoverSource, /if \(defaultTenant && !batchStock\) await repairMissingOnlineProductSkusMysql\(\)/);
+  assert.match(mysqlCutoverSource, /batchStock\s*\? statusRows\.filter\(\(row\) => !\["archived", "hidden"\]\.includes\(row\.status_key\)\)/);
 });
 
 test("pending listing pull uses bounded parallel detail reads and writes", () => {

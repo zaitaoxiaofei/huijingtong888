@@ -23,8 +23,6 @@ let productLimitsLoadedShopId = null;
 const listRequestGate = createLatestRequestGate();
 const warehouseCacheByShop = new Map();
 let dictionaryLoaded = false;
-let batchStockSnapshotKey = "";
-let batchStockSnapshotRows = [];
 
 const loading = ref(false);
 const syncLoading = ref(false);
@@ -113,6 +111,7 @@ const stockDialogWarehouseName = computed(() => {
 const stockPresetValues = [888, 500, 100, 0];
 const showProductLimitPanel = computed(() => route.name === "batch-stock-update");
 const productLimitSummary = computed(() => {
+  if (productLimitsLoadedShopId !== String(state.filters.shopId || "all")) return null;
   const rows = Array.isArray(state.productLimits) ? state.productLimits.filter((item) => item?.ok) : [];
   if (!rows.length) return null;
   if (state.filters.shopId !== "all") {
@@ -275,6 +274,7 @@ function onlineProductsQueryString() {
     shopId: String(state.filters.shopId || "all"),
     status: String(state.filters.status || "all")
   });
+  if (showProductLimitPanel.value) params.set("batchStock", "1");
   const name = String(state.filters.name || "").trim();
   const offer = String(state.filters.offer || "").trim();
   if (name) params.set("name", name);
@@ -282,84 +282,41 @@ function onlineProductsQueryString() {
   return params.toString();
 }
 
-function batchStockSnapshotQueryString() {
-  const params = new URLSearchParams({ shopId: String(state.filters.shopId || "all") });
-  const name = String(state.filters.name || "").trim();
-  const offer = String(state.filters.offer || "").trim();
-  if (name) params.set("name", name);
-  if (offer) params.set("offer", offer);
-  return params.toString();
-}
-
-function batchStockFilteredRows() {
-  const eligibleRows = batchStockSnapshotRows.filter((row) => {
-    const status = onlineStatusKey(row);
-    return Boolean(displayedOzonSku(row)) && !["archived", "hidden"].includes(status);
-  });
-  const status = String(state.filters.status || "all");
-  if (status === "all") return eligibleRows;
-  if (status === "ready_for_sale") return eligibleRows.filter((row) => ["ready", "zero_stock"].includes(onlineStatusKey(row)));
-  return eligibleRows.filter((row) => onlineStatusKey(row) === status);
-}
-
-function batchStockStatusCounts(rows = []) {
-  const counts = { all: rows.length, ready_for_sale: 0, zero_stock: 0, selling: 0, ready: 0, error: 0, moderation: 0, hidden: 0, archived: 0, other: 0 };
-  for (const row of rows) {
-    const status = onlineStatusKey(row);
-    counts[Object.hasOwn(counts, status) ? status : "other"] += 1;
-  }
-  counts.ready_for_sale = Number(counts.ready || 0) + Number(counts.zero_stock || 0);
-  return counts;
-}
-
-function applyBatchStockSnapshotPage() {
-  const filteredRows = batchStockFilteredRows();
-  const start = (state.filters.page - 1) * state.filters.pageSize;
-  state.onlineProducts = filteredRows.slice(start, start + state.filters.pageSize);
-  state.total = filteredRows.length;
-  state.statusCounts = batchStockStatusCounts(batchStockSnapshotRows.filter((row) => (
-    Boolean(displayedOzonSku(row)) && !["archived", "hidden"].includes(onlineStatusKey(row))
-  )));
-  state.selectedIds = [];
-  state.selectedRows = [];
-}
-
-function invalidateBatchStockSnapshot() {
-  batchStockSnapshotKey = "";
-  batchStockSnapshotRows = [];
-}
-
-async function loadPageData(options = {}) {
+async function loadPageData() {
   const requestToken = listRequestGate.next();
   loading.value = true;
+  state.selectedIds = [];
+  state.selectedRows = [];
   try {
-    const snapshotQuery = batchStockSnapshotQueryString();
-    const tenantKey = authStore.user?.tenant?.id || authStore.user?.tenant?.slug || "legacy";
-    const snapshotKey = `${tenantKey}:${snapshotQuery}`;
-    const useSnapshot = showProductLimitPanel.value;
-    const productsRequest = useSnapshot && !options.forceSnapshot && batchStockSnapshotKey === snapshotKey
-      ? Promise.resolve(batchStockSnapshotRows)
-      : apiClient.get(`/api/online-products?${useSnapshot ? snapshotQuery : onlineProductsQueryString()}`);
-    const requests = [productsRequest, loadShopDictionary()];
-    if (!dictionaryLoaded && !tenantReadOnly.value) requests.push(apiClient.get("/api/people"));
-    const [onlineProducts, shops, people] = await Promise.all(requests);
-    if (!listRequestGate.isLatest(requestToken)) return;
-    if (useSnapshot) {
-      batchStockSnapshotRows = Array.isArray(onlineProducts) ? onlineProducts : [];
-      batchStockSnapshotKey = snapshotKey;
-      applyBatchStockSnapshotPage();
-    } else {
-      state.onlineProducts = Array.isArray(onlineProducts?.rows) ? onlineProducts.rows : [];
-      state.total = Number(onlineProducts?.total || 0);
-      state.statusCounts = onlineProducts?.statusCounts || {};
+    const shopsRequest = loadShopDictionary().then((shops) => {
+      if (listRequestGate.isLatest(requestToken)) state.shops = Array.isArray(shops) ? shops : [];
+      return shops;
+    });
+    if (showProductLimitPanel.value && !route.query.shopId && state.filters.shopId === "all") {
+      const shops = await shopsRequest;
+      if (!listRequestGate.isLatest(requestToken)) return;
+      state.filters.shopId = shops[0]?.id ? String(shops[0].id) : "all";
+      syncRouteQuery("manual");
     }
+    const peopleRequest = !dictionaryLoaded && !tenantReadOnly.value && !showProductLimitPanel.value
+      ? apiClient.get("/api/people")
+      : Promise.resolve(null);
+    const [onlineProducts, shops, people] = await Promise.all([
+      apiClient.get(`/api/online-products?${onlineProductsQueryString()}`),
+      shopsRequest,
+      peopleRequest
+    ]);
+    if (!listRequestGate.isLatest(requestToken)) return;
+    state.onlineProducts = Array.isArray(onlineProducts?.rows) ? onlineProducts.rows : [];
+    state.total = Number(onlineProducts?.total || 0);
+    state.statusCounts = onlineProducts?.statusCounts || {};
+    state.selectedIds = [];
+    state.selectedRows = [];
     state.shops = Array.isArray(shops) ? shops : [];
-    if (!dictionaryLoaded && !tenantReadOnly.value) {
+    if (people) {
       state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
       dictionaryLoaded = true;
     }
-    if (tenantReadOnly.value) dictionaryLoaded = true;
-    if (showProductLimitPanel.value) void loadProductLimits();
   } catch (error) {
     if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "在线商品加载失败");
@@ -375,7 +332,7 @@ function handleSearch() {
 }
 
 function handleReset() {
-  state.filters.shopId = "all";
+  state.filters.shopId = showProductLimitPanel.value && state.shops[0]?.id ? String(state.shops[0].id) : "all";
   state.filters.status = defaultStatusFilter();
   state.filters.name = "";
   state.filters.offer = "";
@@ -386,15 +343,13 @@ function handleReset() {
 
 function handlePageChange(page) {
   state.filters.page = page;
-  if (showProductLimitPanel.value && batchStockSnapshotKey) applyBatchStockSnapshotPage();
-  else loadPageData();
+  loadPageData();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
-  if (showProductLimitPanel.value && batchStockSnapshotKey) applyBatchStockSnapshotPage();
-  else loadPageData();
+  loadPageData();
 }
 
 function setStatus(value) {
@@ -497,8 +452,7 @@ async function submitBatchStock() {
     });
     ElMessage.success(`已更新 ${result?.target_count || 0} 个商品库存为 ${stock}`);
     stockDialogVisible.value = false;
-    invalidateBatchStockSnapshot();
-    await loadPageData({ forceSnapshot: true });
+    await loadPageData();
   } catch (error) {
     ElMessage.error(error.message || "批量改库存失败");
   } finally {
@@ -522,11 +476,22 @@ async function ensureProductOptions(row = null) {
   }
 }
 
+async function ensurePeople() {
+  if (dictionaryLoaded || tenantReadOnly.value) return;
+  try {
+    const people = await apiClient.get("/api/people");
+    state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
+    dictionaryLoaded = true;
+  } catch (error) {
+    ElMessage.error(error.message || "人员列表加载失败");
+  }
+}
+
 async function openBindDialog(row) {
   bindForm.online_product_id = Number(row.id);
   bindForm.product_id = row.product_id ? String(row.product_id) : "";
   bindForm.person_id = "";
-  await ensureProductOptions(row);
+  await Promise.all([ensureProductOptions(row), ensurePeople()]);
   bindDialogVisible.value = true;
 }
 
@@ -551,8 +516,8 @@ const syncRouteQuery = createRouteQuerySync({
   buildQuery(mode) {
     const includeTextFilters = mode === "manual";
     return {
-      shopId: state.filters.shopId !== "all" ? state.filters.shopId : undefined,
-      status: state.filters.status !== "all" ? state.filters.status : undefined,
+      shopId: state.filters.shopId !== "all" || showProductLimitPanel.value ? state.filters.shopId : undefined,
+      status: state.filters.status !== "all" || showProductLimitPanel.value ? state.filters.status : undefined,
       name: includeTextFilters ? state.filters.name || undefined : undefined,
       offer: includeTextFilters ? state.filters.offer || undefined : undefined,
       page: state.filters.page > 1 ? String(state.filters.page) : undefined,
@@ -585,6 +550,7 @@ async function submitBind() {
 
 async function createProductFromOnline(row) {
   try {
+    await ensurePeople();
     await apiClient.post("/api/online-products/create-product", {
       online_product_id: row.id,
       person_id: state.people[0]?.id || null
@@ -691,8 +657,7 @@ async function syncOzonStocks() {
     } else {
       ElMessage.success(`库存同步完成，拉取 ${fetched} 条，更新 ${upserted} 条`);
     }
-    invalidateBatchStockSnapshot();
-    await loadPageData({ forceSnapshot: true });
+    await loadPageData();
   } catch (error) {
     ElMessage.error(error.message || "同步 Ozon 库存失败");
   } finally {
@@ -731,8 +696,7 @@ async function pollOnlineProductSyncStatus() {
     } else {
       ElMessage.success(`${taskName}完成，更新 ${Number(syncResult.upserted || 0)} 条${detail}`);
     }
-    invalidateBatchStockSnapshot();
-    await loadPageData({ forceSnapshot: true });
+    await loadPageData();
   } catch (error) {
     stopOnlineProductSyncPolling();
     syncLoading.value = false;
@@ -825,7 +789,7 @@ onDeactivated(stopOnlineProductSyncPolling);
             </el-form-item>
           </el-form>
 
-          <el-popover v-if="showProductLimitPanel" placement="bottom-end" trigger="click" width="760">
+          <el-popover v-if="showProductLimitPanel" placement="bottom-end" trigger="click" width="760" @show="loadProductLimits()">
             <template #reference>
               <el-button class="shop-limit-trigger" :loading="productLimitLoading">
                 <span>链接空间</span>
