@@ -23002,7 +23002,9 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
   if (body.receive_quantity !== undefined) {
     const purchaseQuantity = Number(body.purchase_quantity ?? existing.quantity);
     if (!Number.isInteger(purchaseQuantity) || purchaseQuantity < 1) throw new Error("采购数必须为正整数");
-    const receipt = planPartialReceipt({ ...existing, quantity: Math.max(purchaseQuantity, Number(body.receive_quantity || 0)) }, body.receive_quantity, body.expected_remaining_quantity);
+    const overReceipt = Number(body.receive_quantity) > Number(existing.quantity);
+    if (overReceipt && !String(body.receipt_difference_reason || '').trim()) throw new Error('采购数与实收数不一致，请选择差异原因');
+    const receipt = planPartialReceipt(overReceipt ? existing : { ...existing, quantity: Math.max(purchaseQuantity, Number(body.receive_quantity || 0)) }, body.receive_quantity, body.expected_remaining_quantity, overReceipt);
     if (receipt.remaining > 0) {
       await connection.execute(`INSERT INTO inbound_records
         (product_id, person_id, quantity, amount, unit_cost, shipping_amount, purchase_url, status, note,
@@ -23016,6 +23018,7 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
     }
     body = { ...body, product_id: existing.product_id, person_id: existing.person_id, status: 'approved', quantity: receipt.received, amount: receipt.amount,
       shipping_amount: receipt.shippingAmount, purchase_url: existing.purchase_url || '',
+      received_at: body.received_at ?? existing.received_at ?? normalizeMysqlDateTime(new Date()),
       note: `${body.note ?? existing.note ?? ''}${body.receipt_context ? `；${body.receipt_context}` : ''}；本次实收 ${receipt.received}，原待收 ${existing.quantity}` };
   }
   const productId = Number(body.product_id ?? existing.product_id);
@@ -23408,9 +23411,12 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
       const payload = record.payload && typeof record.payload === "object" ? record.payload : record;
       const existing = await mysqlConnectionQueryOne(connection, "SELECT quantity, note FROM inbound_records WHERE id = ? FOR UPDATE", [inboundId]);
       if (!existing) throw new Error("Inbound record not found");
-      if (payload.receive_quantity !== undefined && Number(existing.quantity) !== Number(payload.receive_quantity)) {
+      const receivedQuantity = Number(payload.receive_quantity);
+      const purchaseQuantity = Number(payload.purchase_quantity ?? existing.quantity);
+      if (payload.receive_quantity !== undefined && (receivedQuantity !== Number(existing.quantity) || receivedQuantity !== purchaseQuantity || purchaseQuantity !== Number(existing.quantity))) {
         const reason = String(payload.receipt_difference_reason || body.receipt_difference_reason || "").trim();
         if (!reason) throw new Error("采购数与实收数不一致，请选择差异原因");
+        payload.receipt_difference_reason = reason;
         const detail = String(payload.receipt_difference_note || body.receipt_difference_note || "").trim();
         payload.note = `${existing.note || ""}；收货差异：${reason}${detail ? `（${detail}）` : ""}；操作人 #${sessionPersonId || "system"}；${normalizeMysqlDateTime(new Date())}`;
       }

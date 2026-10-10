@@ -36,6 +36,16 @@ test('short receipt still requires a difference reason', async () => {
   assert.match(updates[0].note, /收货差异：少货/);
 });
 
+test('over receipt requires a reason and keeps the entered quantity', async () => {
+  const { receive, updates } = receiver(200);
+  const record = { id: 1456, payload: { receive_quantity: 201, expected_remaining_quantity: 200 } };
+  await assert.rejects(receive({ records: [record] }), /采购数与实收数不一致，请选择差异原因/);
+  await receive({ records: [record], receipt_difference_reason: '采购记录不准' });
+  assert.equal(updates[0].receive_quantity, 201);
+  assert.equal(updates[0].receipt_difference_reason, '采购记录不准');
+  assert.match(updates[0].note, /收货差异：采购记录不准/);
+});
+
 test('each differing batch records its own selected reason and preserves its note', async () => {
   const { receive, updates } = receiver(200, '原采购备注');
   await receive({ records: [{ id: 1456, payload: { receive_quantity: 180, receipt_difference_reason: '商家少发货', receipt_difference_note: '少两箱' } }] });

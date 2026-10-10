@@ -127,6 +127,7 @@ test('partial receipt conserves quantity and amount, and rejects stale/double re
   const record = { id: 5, status: 'pending_arrival', quantity: 10, amount: 100, shipping_amount: 10 };
   assert.deepEqual(planPartialReceipt(record, 6, 10), { received: 6, remaining: 4, amount: 60, shippingAmount: 6, remainingAmount: 40, remainingShipping: 4 });
   assert.throws(() => planPartialReceipt(record, 11, 10), /实收数量/);
+  assert.deepEqual(planPartialReceipt(record, 11, 10, true), { received: 11, remaining: 0, amount: 100, shippingAmount: 10, remainingAmount: 0, remainingShipping: 0 });
   assert.throws(() => planPartialReceipt(record, 6, 9), /变化/);
   assert.throws(() => planPartialReceipt({ ...record, status: 'approved' }, 6, 10), /入库/);
 });
@@ -155,6 +156,29 @@ test('actual receipt transaction keeps a pending remainder and cannot receive th
   assert.equal(movements[0].quantity_delta, 6);
   await assert.rejects(() => apply(connection, 5, { receive_quantity: 6, expected_remaining_quantity: 10 }), /已入库/);
   assert.equal(movements.length, 1);
+});
+
+test('over receipt posts the entered quantity, requires a reason, and records arrival time', async () => {
+  const source = readFileSync(new URL('../src/services/mysql-cutover.js', import.meta.url), 'utf8');
+  const block = source.slice(source.indexOf('async function applyInboundRecordUpdateMysql'), source.indexOf('export async function updateInboundRecordMysql'));
+  const row = { id: 5, product_id: 10, person_id: 1, quantity: 200, amount: 100, shipping_amount: 10, status: 'pending_arrival' };
+  const statements = [], movements = [];
+  const connection = { execute: async (sql, values) => { statements.push({ sql, values }); return [{ affectedRows: 1 }]; } };
+  const apply = vm.runInNewContext(block + ';applyInboundRecordUpdateMysql', {
+    planPartialReceipt, mysqlConnectionQueryOne: async () => ({ ...row }), assertFreshRecord: () => {},
+    resolvePersonIdOrFirstMysql: async () => 1, normalizeMysqlDateTime: () => '2026-10-10 17:00:00',
+    postInventoryMysql: async (_, movement) => movements.push(movement), recordInboundCostVersionMysql: async () => {},
+    refreshPurchaseOrderStatusMysql: async () => {}, Date
+  });
+  const receipt = { receive_quantity: 201, expected_remaining_quantity: 200 };
+  await assert.rejects(() => apply(connection, 5, receipt), /请选择差异原因/);
+  assert.equal(statements.length, 0);
+  await apply(connection, 5, { ...receipt, receipt_difference_reason: '采购记录不准' });
+  const update = statements.find(statement => statement.sql.includes('UPDATE inbound_records SET'));
+  assert.equal(update.values[2], 201);
+  assert.equal(update.values[13], '2026-10-10 17:00:00');
+  assert.equal(movements[0].quantity_delta, 201);
+  assert.equal(statements.some(statement => statement.sql.includes('INSERT INTO inbound_records')), false);
 });
 
 test('FBP fulfillment has a warehouse source and does not require a fictitious per-order purchase', () => {

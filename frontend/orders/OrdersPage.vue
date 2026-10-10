@@ -1141,8 +1141,8 @@ async function confirmProcurementReceipt() {
   if (!records.length) { ElMessage.warning('请至少勾选一个实际到货批次'); return; }
   for (const batch of records) {
     const quantity = Number(batch.receive_quantity);
-    if (!Number.isInteger(quantity) || quantity <= 0 || quantity > Number(batch.quantity)) {
-      ElMessage.warning(`批次 #${batch.id} 的实收数量应为 1 至 ${batch.quantity} 的整数`);
+    if (!Number.isInteger(quantity) || quantity <= 0 || (procurementReceiptDialog.mode === 'historical' && quantity > Number(batch.quantity))) {
+      ElMessage.warning(`批次 #${batch.id} 的实收数量应为正整数${procurementReceiptDialog.mode === 'historical' ? `，且不超过 ${batch.quantity}` : ''}`);
       return;
     }
     if (quantity !== Number(batch.quantity) && !batch.difference_reason) {
@@ -2680,7 +2680,7 @@ onBeforeUnmount(() => {
         </el-table-column>
         <el-table-column label="本次实收" width="160">
           <template #default="{ row }">
-            <el-input-number v-model="row.receive_quantity" :min="1" :max="Number(row.quantity)" :precision="0" :disabled="!row.selected" controls-position="right" style="width: 132px" />
+            <el-input-number v-model="row.receive_quantity" :min="1" :max="procurementReceiptDialog.mode === 'historical' ? Number(row.quantity) : undefined" :precision="0" :disabled="!row.selected" controls-position="right" style="width: 132px" />
           </template>
         </el-table-column>
         <el-table-column label="差异原因" min-width="220">
