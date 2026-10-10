@@ -28,9 +28,9 @@ test("batch repairs can defer expensive per-order snapshot refreshes", () => {
 });
 
 test("order logistics filters keep carriers separate even when weight bands overlap", () => {
-  assert.match(serviceSource, /SELECT id, version_group_id, name, filter_keywords, carrier, channel/);
+  assert.match(serviceSource, /SELECT l\.id, l\.version_group_id, l\.name, l\.filter_keywords, l\.carrier, l\.channel/);
   assert.match(serviceSource, /const value = `logistics_rule_\$\{Number\(row\.version_group_id \|\| row\.id\)\}`/);
-  assert.match(serviceSource, /orders:logistics-summary:v4:/);
+  assert.match(serviceSource, /orders:logistics-summary:v6:/);
   assert.match(serviceSource, /orders:logistics-options:v4:/);
   assert.match(serviceSource, /explicitValue\.startsWith\("logistics_rule_"\)/);
 });
@@ -84,8 +84,8 @@ test("GUOO V7.24 migration adds 15 realFBS rules with a Beijing effective time",
 });
 
 test("logistics rule deletion is separate and reference protected", () => {
-  assert.match(serviceSource, /SELECT COUNT\(\*\) FROM products WHERE logistics_rule_id = \?/);
-  assert.match(serviceSource, /SELECT COUNT\(\*\) FROM order_items WHERE frozen_logistics_rule_id = \?/);
-  assert.match(serviceSource, /DELETE FROM logistics_fee_rules WHERE id = \?/);
+  assert.match(serviceSource, /SELECT COUNT\(\*\) FROM products p WHERE p\.logistics_rule_id = \? AND \$\{productScope\}/);
+  assert.match(serviceSource, /SELECT COUNT\(\*\) FROM order_items oi JOIN orders o ON o\.id = oi\.order_id JOIN shops shop ON shop\.id = o\.shop_id/);
+  assert.match(serviceSource, /DELETE FROM logistics_fee_rules l WHERE l\.id = \? AND \$\{scope\.sql\}/);
   assert.match(settingsSource, /deleteLogisticsRule\(row\)/);
 });

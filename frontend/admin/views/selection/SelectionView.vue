@@ -37,6 +37,7 @@ const catalogDictionaryLoading = ref(false);
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
+const isTenantScoped = computed(() => Boolean(authStore.user?.tenant?.id && authStore.user?.tenant?.slug !== "default"));
 let listingJobPoller = null;
 const routeEditOpenedKey = ref("");
 const routeEditDraftRow = ref(null);
@@ -1846,11 +1847,11 @@ async function loadSelectionMetaData(options = {}) {
   if (!force && state.people.length && state.suppliers.length && state.logisticsRules.length) return true;
   try {
     const [people, suppliers, logisticsRules] = await Promise.all([
-      apiClient.get("/api/people"),
+      isTenantScoped.value ? apiClient.get("/api/tenants/members") : apiClient.get("/api/people"),
       apiClient.get("/api/suppliers?paged=1&page=1&pageSize=100"),
       apiClient.get("/api/logistics-rules")
     ]);
-    state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
+    state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0).map((item) => ({ ...item, id: item.id || item.person_id })) : [];
     state.suppliers = normalizePagedRows(suppliers);
     state.logisticsRules = Array.isArray(logisticsRules) ? logisticsRules.filter((item) => Number(item.enabled) !== 0) : [];
     return true;
@@ -1878,7 +1879,7 @@ async function loadPageData(options = {}) {
   try {
     const shouldLoadMeta = !deferMeta && (!silent || !state.people.length || !state.suppliers.length || !state.logisticsRules.length);
     const metaPromise = Promise.all([
-      shouldLoadMeta ? apiClient.get("/api/people") : Promise.resolve(state.people),
+      shouldLoadMeta ? (isTenantScoped.value ? apiClient.get("/api/tenants/members") : apiClient.get("/api/people")) : Promise.resolve(state.people),
       shouldLoadMeta ? apiClient.get("/api/suppliers?paged=1&page=1&pageSize=100") : Promise.resolve(state.suppliers),
       shouldLoadMeta ? apiClient.get("/api/logistics-rules") : Promise.resolve(state.logisticsRules)
     ]).then((values) => ({ values }), (error) => ({ error }));
@@ -1907,7 +1908,7 @@ async function loadPageData(options = {}) {
         return;
       }
       const [people, suppliers, logisticsRules] = metaResult.values;
-      state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
+      state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0).map((item) => ({ ...item, id: item.id || item.person_id })) : [];
       state.suppliers = normalizePagedRows(suppliers);
       state.logisticsRules = Array.isArray(logisticsRules) ? logisticsRules.filter((item) => Number(item.enabled) !== 0) : [];
     }
@@ -2501,7 +2502,7 @@ onBeforeUnmount(() => {
         <h2>选品计价表</h2>
       </div>
       <div class="page-card-actions">
-        <el-button class="erp-btn erp-btn-secondary" @click="openImportDialog">批量导入</el-button>
+        <el-button v-if="!isTenantScoped" class="erp-btn erp-btn-secondary" @click="openImportDialog">批量导入</el-button>
         <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新增选品</el-button>
       </div>
     </section>
@@ -2525,7 +2526,7 @@ onBeforeUnmount(() => {
               <el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="String(person.id)" />
             </el-select>
           </el-form-item>
-          <el-form-item label="状态">
+          <el-form-item v-if="!isTenantScoped" label="状态">
             <el-select v-model="state.filters.businessStatus" style="width: 150px" @change="handleSearch">
               <el-option
                 v-for="item in businessStatusOptions"
@@ -2539,16 +2540,16 @@ onBeforeUnmount(() => {
             <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
             <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
             <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新增选品</el-button>
-            <el-button class="erp-btn erp-btn-secondary" @click="openImportDialog">批量导入</el-button>
-            <el-button class="erp-btn erp-btn-secondary" :icon="MagicStick" :disabled="!selectedRows.length" @click="startBatchVariant">
+            <el-button v-if="!isTenantScoped" class="erp-btn erp-btn-secondary" @click="openImportDialog">批量导入</el-button>
+            <el-button v-if="!isTenantScoped" class="erp-btn erp-btn-secondary" :icon="MagicStick" :disabled="!selectedRows.length" @click="startBatchVariant">
               批量AI优化
             </el-button>
-            <el-button class="erp-btn erp-btn-secondary" :disabled="!selectedRows.length" @click="handleBatchAction">
+            <el-button v-if="!isTenantScoped" class="erp-btn erp-btn-secondary" :disabled="!selectedRows.length" @click="handleBatchAction">
               批量操作
             </el-button>
           </el-form-item>
           <el-form-item class="selection-filter-refresh">
-            <span class="muted-text">&#24050;&#36873; {{ selectedRows.length }} &#39033;</span>
+            <span v-if="!isTenantScoped" class="muted-text">&#24050;&#36873; {{ selectedRows.length }} &#39033;</span>
             <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">&#21047;&#26032;</el-button>
           </el-form-item>
         </el-form>
@@ -2564,7 +2565,7 @@ onBeforeUnmount(() => {
           row-key="id"
           @selection-change="handleSelectionChange"
         >
-          <el-table-column type="selection" width="46" fixed="left" />
+          <el-table-column v-if="!isTenantScoped" type="selection" width="46" fixed="left" />
           <el-table-column label="商品信息" min-width="300" fixed="left">
             <template #default="{ row }">
               <div class="product-cell">
@@ -2607,7 +2608,7 @@ onBeforeUnmount(() => {
             </template>
           </el-table-column>
 
-          <el-table-column label="上架任务" min-width="220">
+          <el-table-column v-if="!isTenantScoped" label="上架任务" min-width="220">
             <template #default="{ row }">
               <div class="listing-job-cell">
                 <span class="listing-job-dot" :class="[`is-${listingJobStatus(row) || 'idle'}`, { spinning: isListingJobActive(row) }]"></span>
@@ -2726,7 +2727,7 @@ onBeforeUnmount(() => {
             </template>
           </el-table-column>
 
-          <el-table-column label="流转操作" width="92" fixed="right" align="center">
+          <el-table-column v-if="!isTenantScoped" label="流转操作" width="92" fixed="right" align="center">
             <template #default="{ row }">
               <div class="table-actions is-vertical">
                 <el-button
@@ -2746,8 +2747,8 @@ onBeforeUnmount(() => {
           <el-table-column label="维护操作" width="72" fixed="right" align="center">
             <template #default="{ row }">
               <div class="table-actions is-vertical">
-                <el-button class="erp-btn-link" link type="primary" @click="openSelectionEditPage(row)">编辑</el-button>
-                <el-button class="erp-btn-link-danger" link type="danger" @click="handleDelete(row)">删除</el-button>
+                <el-button class="erp-btn-link" link type="primary" @click="isTenantScoped ? openEditDialog(row) : openSelectionEditPage(row)">编辑</el-button>
+                <el-button v-if="!isTenantScoped" class="erp-btn-link-danger" link type="danger" @click="handleDelete(row)">删除</el-button>
               </div>
             </template>
           </el-table-column>

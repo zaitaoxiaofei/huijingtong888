@@ -6,8 +6,11 @@ import { authorizeApiRequest } from "../src/server/authorization.js";
 test("tenant management remains limited to platform administrators", () => {
   const operator = { roles: ["operations"] };
   const administrator = { roles: ["admin"] };
+  const tenantOwner = { roles: ["operations"], tenant: { role: "owner" } };
   assert.equal(authorizeApiRequest({ method: "GET", _session: operator }, ["api", "tenants"]).allowed, false);
   assert.equal(authorizeApiRequest({ method: "PUT", _session: administrator }, ["api", "tenants", "members"]).allowed, true);
+  assert.equal(authorizeApiRequest({ method: "POST", _session: tenantOwner }, ["api", "tenants", "plugin-token"]).allowed, true);
+  assert.equal(authorizeApiRequest({ method: "GET", _session: tenantOwner }, ["api", "tenants"]).allowed, false);
 });
 
 test("tenant foundation binds the active tenant to the server session", () => {

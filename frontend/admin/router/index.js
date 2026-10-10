@@ -60,6 +60,7 @@ const AiPromptLibraryView = () => import("../views/settings/AiPromptLibraryView.
 const ScheduledJobsView = () => import("../views/settings/ScheduledJobsView.vue");
 const SystemMonitoringView = () => import("../views/settings/SystemMonitoringView.vue");
 const TenantSubscriptionView = () => import("../views/settings/TenantSubscriptionView.vue");
+const TenantShopsView = () => import("../views/settings/TenantShopsView.vue");
 const ImageCropperView = () => import("../views/tools/ImageCropper.vue");
 const EcommerceImageSplitterView = () => import("../views/tools/EcommerceImageSplitterV3.vue");
 const ProductVideoGeneratorView = () => import("../views/tools/ProductVideoGenerator.vue");
@@ -200,6 +201,7 @@ export const router = createRouter({
         { path: "settings/ai", name: "settings-ai", component: AiProviderSettingsView, meta: { title: "AI 设置", breadcrumb: ["系统管理", "AI 设置"] } },
         { path: "settings/materials", name: "settings-materials", component: MaterialCenterView, meta: { title: "素材库", breadcrumb: ["系统管理", "素材库"] } },
         { path: "tenant-management", name: "tenant-management", component: TenantSubscriptionView, meta: { title: "企业与授权", breadcrumb: ["企业与授权"] } },
+        { path: "tenant-shops", name: "tenant-shops", component: TenantShopsView, meta: { title: "企业店铺", breadcrumb: ["企业管理", "店铺管理"] } },
         { path: "settings/tenants", name: "settings-tenants", redirect: (to) => ({ path: "/tenant-management", query: to.query }) },
         { path: "settings/prompts", name: "settings-prompts", component: AiPromptLibraryView, meta: { title: "AI提示词库", breadcrumb: ["系统管理", "AI提示词库"] } },
         { path: "tools/product-video-generator", name: "tools-product-video-generator", component: ProductVideoGeneratorView, meta: { title: "商品视频", breadcrumb: ["实用工具", "商品视频"] } },

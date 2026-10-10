@@ -15,6 +15,9 @@ import { clearCookie, html, json, notFound, setCookie, text, writeHead } from ".
 import { createStaticHandler } from "./http/static.js";
 import { cleanExpiredSessions, createAuthHandler, extractToken, getSession } from "./server/session.js";
 import { authorizeApiRequest } from "./server/authorization.js";
+import { isPrivateImageRead, readCookie, tenantIsolationDecision } from "./server/tenant-isolation.js";
+import { tenantPluginApiError } from "./server/local-plugin-tenant.js";
+import { tenantIdFromRequest } from "./server/tenant-context.js";
 import { createApiDocumentation, renderApiDocumentationMarkdown } from "./server/api-docs.js";
 import { createCatalogRoutes, handleCatalogRestRoute } from "./server/routes/catalog.js";
 import { createOrderRoutes, handleOrderRestRoute } from "./server/routes/orders.js";
@@ -83,9 +86,10 @@ import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
 import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
-import { archiveTenantMysql, createTenantMysql, listTenantsMysql, setTenantSubscriptionMysql, tenantMembersMysql, tenantMembershipsMysql, upsertTenantMemberMysql } from "./services/tenants.js";
+import { archiveTenantMysql, createTenantMysql, issueTenantPluginTokenMysql, listTenantsMysql, resolveTenantPluginTokenMysql, revokeTenantPluginTokenMysql, setTenantSubscriptionMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, upsertTenantMemberMysql } from "./services/tenants.js";
 
 const services = { ...mysqlRuntimeServices, ...systemNotificationServices };
+const IMAGE_SESSION_COOKIE = "erp_image_session";
 const runtimeReadiness = {
   ready: false,
   startedAt: new Date().toISOString(),
@@ -246,7 +250,11 @@ const routes = {
     return archiveTenantMysql(body.tenant_id || body.tenantId);
   },
   "GET /api/tenants/mine": (req) => tenantMembershipsMysql(req._session?.personId),
-  "GET /api/tenants/members": (req) => tenantMembersMysql(req.query?.tenant_id || req.query?.tenantId),
+  "GET /api/tenants/members": (req) => tenantMembersMysql(
+    hasPermission(req._session, "admin")
+      ? (req.query?.tenant_id || req.query?.tenantId)
+      : req._session?.tenant?.id
+  ),
   "PUT /api/tenants/members": async (req) => {
     const body = await readJson(req);
     return upsertTenantMemberMysql(body.tenant_id || body.tenantId, body);
@@ -255,6 +263,18 @@ const routes = {
     const body = await readJson(req);
     return setTenantSubscriptionMysql(body.tenant_id || body.tenantId, body);
   },
+  "GET /api/tenants/plugin-token": (req) => tenantPluginTokenStatusMysql(req.query?.tenant_id || req.query?.tenantId, req._session?.personId, {
+    isPlatformAdmin: hasPermission(req._session, "admin")
+  }),
+  "POST /api/tenants/plugin-token": async (req) => {
+    const body = await readJson(req);
+    return issueTenantPluginTokenMysql(body.tenant_id || body.tenantId, req._session?.personId, {
+      isPlatformAdmin: hasPermission(req._session, "admin")
+    });
+  },
+  "DELETE /api/tenants/plugin-token": (req) => revokeTenantPluginTokenMysql(req.query?.tenant_id || req.query?.tenantId, req._session?.personId, {
+    isPlatformAdmin: hasPermission(req._session, "admin")
+  }),
   "POST /api/system/update-status": async (req) => updateGlobalUpdateStatus(await readJson(req)),
   "GET /api/ai-provider/config": () => services.aiProviderConfig(),
   "GET /api/ai-provider/presets": () => services.aiProviderPresets(),
@@ -281,7 +301,7 @@ const routes = {
   "GET /api/inventory/availability": (req) => services.productInventoryAvailability(req.query || {}),
   "GET /api/stock-alerts": (req) => services.stockAlerts(req.query || {}),
   "GET /api/fbp-opportunities": (req) => services.fbpOpportunities(req.query || {}),
-  "GET /api/fbp-replenishment-orders": (req) => services.fbpReplenishmentOrders(req.query || {}),
+  "GET /api/fbp-replenishment-orders": (req) => services.fbpReplenishmentOrders(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/fbp-transfer-records": (req) => services.fbpTransferRecords(req.query || {}),
   "GET /api/stock-warehouse-rules": () => services.stockWarehouseRules(),
   "GET /api/erp/inventory-current": () => services.inventoryCurrent(),
@@ -293,22 +313,22 @@ const routes = {
   "POST /api/fbp-replenishment-restore": async (req) => services.restoreFbpReplenishment(await readJson(req)),
   "POST /api/fbp-replenishment-orders": async (req) => services.createFbpReplenishmentOrders(await readJson(req), req._session?.personId),
   "POST /api/fbp-replenishment-orders/merge": async (req) => services.mergeFbpReplenishmentOrders(await readJson(req), req._session?.personId),
-  "POST /api/fbp-replenishment-orders/link": async (req) => services.linkFbpReplenishmentOrders(await readJson(req), req._session?.personId),
-  "POST /api/fbp-replenishment-orders/unlink": async (req) => services.unlinkFbpReplenishmentOrder(await readJson(req), req._session?.personId),
-  "GET /api/fbp-replenishment-batches/fill-preview": (req) => services.fbpReplenishmentBatchFillPreview(req.query || {}),
+  "POST /api/fbp-replenishment-orders/link": async (req) => services.linkFbpReplenishmentOrders(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+  "POST /api/fbp-replenishment-orders/unlink": async (req) => services.unlinkFbpReplenishmentOrder(await readJson(req), tenantIdFromRequest(req)),
+  "GET /api/fbp-replenishment-batches/fill-preview": (req) => services.fbpReplenishmentBatchFillPreview(req.query || {}, tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-batches/fill-results": async (req) => services.recordFbpReplenishmentBatchFill(await readJson(req), req._session?.personId),
-  "POST /api/fbp-replenishment-orders/items/adjustments": async (req) => services.addFbpReplenishmentItemAdjustment(await readJson(req), req._session?.personId),
-  "GET /api/fbp-replenishment-orders/items/adjustments": (req) => services.fbpReplenishmentItemAdjustments(req.query || {}),
-  "POST /api/fbp-replenishment-orders/items/adjustments/reason": async (req) => services.updateFbpReplenishmentItemAdjustmentReason(await readJson(req), req._session?.personId),
+  "POST /api/fbp-replenishment-orders/items/adjustments": async (req) => services.addFbpReplenishmentItemAdjustment(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+  "GET /api/fbp-replenishment-orders/items/adjustments": (req) => services.fbpReplenishmentItemAdjustments(req.query || {}, tenantIdFromRequest(req)),
+  "POST /api/fbp-replenishment-orders/items/adjustments/reason": async (req) => services.updateFbpReplenishmentItemAdjustmentReason(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "GET /api/fbp-replenishment-orders/procurement-drafts": () => services.fbpShortageProcurementDrafts(),
   "POST /api/fbp-replenishment-orders/procurement-drafts/submit": async (req) => services.submitFbpShortageProcurementDrafts(await readJson(req), req._session?.personId),
-  "POST /api/fbp-replenishment-orders/delete": async (req) => services.deleteFbpReplenishmentOrder(await readJson(req), req._session?.personId),
-  "POST /api/fbp-replenishment-orders/items": async (req) => services.updateFbpReplenishmentOrderItems(await readJson(req)),
+  "POST /api/fbp-replenishment-orders/delete": async (req) => services.deleteFbpReplenishmentOrder(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+  "POST /api/fbp-replenishment-orders/items": async (req) => services.updateFbpReplenishmentOrderItems(await readJson(req), tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/inventory-procurement": async (req) => services.createWarehouseProcurementRequests({ items: [await readJson(req)] }, req._session?.personId),
   "POST /api/fbp-replenishment-orders/inventory-allocation": async (req) => services.saveFbpReplenishmentInventoryAllocation(await readJson(req), req._session?.personId),
-  "POST /api/fbp-replenishment-orders/items/barcode-printed": async (req) => services.markFbpReplenishmentItemBarcodePrinted(await readJson(req), req._session?.personId),
-  "POST /api/fbp-replenishment-orders/items/delete": async (req) => services.deleteFbpReplenishmentOrderItem(await readJson(req), req._session?.personId),
-  "POST /api/fbp-replenishment-orders/status": async (req) => services.updateFbpReplenishmentOrderStatus(await readJson(req), req._session?.personId),
+  "POST /api/fbp-replenishment-orders/items/barcode-printed": async (req) => services.markFbpReplenishmentItemBarcodePrinted(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+  "POST /api/fbp-replenishment-orders/items/delete": async (req) => services.deleteFbpReplenishmentOrderItem(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+  "POST /api/fbp-replenishment-orders/status": async (req) => services.updateFbpReplenishmentOrderStatus(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-transfer-records": async (req) => services.createFbpTransferRecord(await readJson(req), req._session?.personId),
   "POST /api/fbp-transfer-records/confirm-received": async (req) => services.confirmFbpTransferReceived(await readJson(req), req._session?.personId),
   "POST /api/fbp-transfer-records/pdf-preview": async (req) => services.previewFbpSupplyPdf(await readJson(req)),
@@ -1387,14 +1407,11 @@ function pluginBearerToken(req) {
   return String(req.headers["x-local-plugin-token"] || bearer || "").trim();
 }
 
-function isAuthorizedLocalPluginRequest(req) {
-  if (isDirectLocalRequest(req)) return true;
-  const token = pluginBearerToken(req);
-  const allowedTokens = [
-    config.localPluginSharedSecret,
-    config.localPluginPublicToken
-  ].map((item) => String(item || "").trim()).filter(Boolean);
-  return allowedTokens.some((allowedToken) => safeEqualText(token, allowedToken));
+async function resolveLocalPluginPrincipal(req) {
+  const host = String(req.headers.host || "").replace(/^\[|\]$/g, "").split(":")[0].toLowerCase();
+  const localHost = ["localhost", "127.0.0.1", "::1"].includes(host);
+  if (isDirectLocalRequest(req) && localHost) return { tenantId: 0, tenantKey: "admin", tenantSlug: "default" };
+  return resolveTenantPluginTokenMysql(pluginBearerToken(req));
 }
 
 async function handleLocalPluginRoute(req, res, parts) {
@@ -1406,10 +1423,6 @@ async function handleLocalPluginRoute(req, res, parts) {
     return true;
   }
 
-  if (!isAuthorizedLocalPluginRequest(req)) {
-    return localPluginJson(req, res, { success: false, error: "local plugin endpoint requires localhost or a valid plugin token" }, 403);
-  }
-
   if (parts[2] === "update-status" && req.method === "GET") {
     const url = new URL(req.url, `http://${req.headers.host}`);
     return localPluginJson(req, res, {
@@ -1418,9 +1431,18 @@ async function handleLocalPluginRoute(req, res, parts) {
     });
   }
 
+  const principal = await resolveLocalPluginPrincipal(req);
+  if (!principal) {
+    return localPluginJson(req, res, { success: false, error: "请在企业管理中生成并配置企业专属插件令牌", code: "TENANT_PLUGIN_AUTH_REQUIRED" }, 403);
+  }
+  const scopeError = tenantPluginApiError(principal, req.method, parts);
+  if (scopeError) {
+    return localPluginJson(req, res, { success: false, error: scopeError.error, code: scopeError.code }, scopeError.status);
+  }
+  const tenantId = principal.tenantKey;
+
   if (parts[2] === "plugin" && parts[3] === "status" && req.method === "GET") {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim() || "admin";
     return localPluginJson(req, res, {
       success: true,
       data: {
@@ -1436,33 +1458,30 @@ async function handleLocalPluginRoute(req, res, parts) {
 
   if (parts[2] === "server-publish" && parts[3] === "media-upload-jobs" && parts[4] === "claim" && req.method === "POST") {
     const body = await readJson(req);
-    const result = await services.claimServerPublishMediaUploadJobs(body || {});
+    const result = await services.claimServerPublishMediaUploadJobs(body || {}, tenantId);
     return localPluginJson(req, res, { success: result.success !== false, data: result, ...result });
   }
 
   if (parts[2] === "server-publish" && parts[3] === "media-upload-jobs" && parts[4] && parts[5] && req.method === "POST") {
     const body = await readJson(req);
-    const result = await services.completeServerPublishMediaUploadJob(parts[4], parts[5], body || {});
+    const result = await services.completeServerPublishMediaUploadJob(parts[4], parts[5], body || {}, tenantId);
     return localPluginJson(req, res, { success: result.success !== false, data: result, ...result });
   }
 
   if (parts[2] === "collected-products" && parts[3] === "sync" && req.method === "POST") {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim();
     const result = await services.syncCollectedProductsFromPlugin(body?.products || [], tenantId);
     return localPluginJson(req, res, { success: true, ...result });
   }
 
   if (parts[2] === "collected-products" && parts[3] === "lookup" && req.method === "GET") {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim();
     const result = await services.lookupCollectedProductFromPlugin(url.searchParams.get("sku") || "", tenantId);
     return localPluginJson(req, res, { success: true, data: result });
   }
 
   if (parts[2] === "collected-products" && parts[3] === "lookup-batch" && req.method === "POST") {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim();
     const skus = [...new Set((Array.isArray(body?.skus) ? body.skus : [])
       .map((sku) => String(sku || "").trim())
       .filter(Boolean))].slice(0, 120);
@@ -1483,15 +1502,12 @@ async function handleLocalPluginRoute(req, res, parts) {
   }
 
   if (parts[2] === "collector-seller-pool" && parts[3] === "status" && req.method === "GET") {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim();
     const result = await collectorSellerPoolStatus(tenantId);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
 
   if (parts[2] === "collector-seller-pool" && parts[3] === "collect" && req.method === "POST") {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim();
     const result = await collectSkusWithSellerPool(body?.skus || [], tenantId);
     return localPluginJson(req, res, { success: result.success !== false, data: result, ...result });
   }
@@ -1500,13 +1516,12 @@ async function handleLocalPluginRoute(req, res, parts) {
     const body = await readJson(req);
     const detail = await services.saveListingCollectedProductDetail({
       ...body,
-      tenant_id: req.headers["x-tenant-id"] || body?.tenant_id || "admin"
+      tenant_id: tenantId
     }, null);
     return localPluginJson(req, res, { success: true, data: detail, id: detail?.id, detail });
   }
 
   if (parts[2] === "collected-product-details" && parts[3] && req.method === "GET") {
-    const tenantId = String(req.headers["x-tenant-id"] || "admin");
     const detail = await services.getListingCollectedProductDetail(parts[3], tenantId);
     if (!detail) return localPluginJson(req, res, { success: false, error: "Collected product detail not found" }, 404);
     return localPluginJson(req, res, { success: true, data: detail, id: detail.id, detail });
@@ -1517,7 +1532,7 @@ async function handleLocalPluginRoute(req, res, parts) {
     const body = await readJson(req);
     const result = await services.createSelectionFromCollectorBox(sku, {
       ...body,
-      tenant_id: req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin"
+      tenant_id: tenantId
     }, null);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
@@ -1527,7 +1542,7 @@ async function handleLocalPluginRoute(req, res, parts) {
     const body = await readJson(req);
     const result = await services.createListingTemplateFromCollectorBox(sku, {
       ...body,
-      tenant_id: req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin"
+      tenant_id: tenantId
     }, null);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
@@ -1549,28 +1564,24 @@ async function handleLocalPluginRoute(req, res, parts) {
 
   if (parts[2] === "seller-analytics" && parts[3] === "snapshots" && req.method === "POST") {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
     const result = await services.sellerAnalyticsSaveSnapshot(body || {}, tenantId);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
 
   if (parts[2] === "seller-analytics" && parts[3] === "plugin-status" && req.method === "POST") {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
     const result = await services.sellerAnalyticsSavePluginStatus(body || {}, tenantId);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
 
   if (parts[2] === "seller-analytics" && parts[3] === "plugin-prepare" && parts[4] === "next" && req.method === "GET") {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim() || "admin";
     const request = await services.sellerAnalyticsClaimPluginPrepare(tenantId, Object.fromEntries(url.searchParams.entries()));
     return localPluginJson(req, res, { success: true, data: request, request });
   }
 
   if (parts[2] === "seller-analytics" && parts[3] === "plugin-prepare" && parts[4] === "result" && req.method === "POST") {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
     const result = await services.sellerAnalyticsFinishPluginPrepare(body || {}, tenantId);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
@@ -1583,14 +1594,12 @@ async function handleLocalPluginRoute(req, res, parts) {
 
   if (parts[2] === "seller-analytics" && parts[3] === "auth-bindings" && req.method === "POST") {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
     const result = await services.sellerAnalyticsBindAuth(body || {}, tenantId);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
 
   if (parts[2] === "seller-analytics" && parts[3] === "collect-runs" && parts[4] === "next" && req.method === "GET") {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const tenantId = String(req.headers["x-tenant-id"] || url.searchParams.get("tenantId") || "admin").trim() || "admin";
     const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || 6), 20));
     const requests = await services.sellerAnalyticsNextCollectRequests(tenantId, limit, {
       store_id: url.searchParams.get("store_id") || url.searchParams.get("storeId") || "",
@@ -1609,7 +1618,6 @@ async function handleLocalPluginRoute(req, res, parts) {
     req.method === "POST"
   ) {
     const body = await readJson(req);
-    const tenantId = String(req.headers["x-tenant-id"] || body?.tenant_id || body?.tenantId || "admin").trim() || "admin";
     const result = await services.sellerAnalyticsFinishCollectRequest(decodeURIComponent(parts[4]), decodeURIComponent(parts[6]), body || {}, tenantId);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
@@ -1622,7 +1630,7 @@ async function sendProductImage(res, productId, imageLoader = null, options = {}
   try {
     const loadImage = () => imageLoader ? imageLoader(productId) : services.productImage(productId);
     let image = await loadImage();
-    if (!image && services.refreshProductImageUrl) {
+    if (!image && options.allowRefresh !== false && services.refreshProductImageUrl) {
       image = await services.refreshProductImageUrl(productId).catch(() => "");
     }
     if (!image) return notFound(res);
@@ -2018,6 +2026,24 @@ const server = http.createServer(async (req, res) => {
           }
           delete result.__cookies;
         }
+        if (result?.token) {
+          setCookie(res, IMAGE_SESSION_COOKIE, result.token, {
+            path: "/",
+            httpOnly: true,
+            sameSite: "Strict",
+            secure: config.appBaseUrl.startsWith("https://"),
+            maxAge: Math.max(1, Number(config.appSessionTtlHours || 72)) * 60 * 60
+          });
+        }
+        if (`${req.method} ${url.pathname}` === "POST /api/auth/logout") {
+          setCookie(res, IMAGE_SESSION_COOKIE, "", {
+            path: "/",
+            httpOnly: true,
+            sameSite: "Strict",
+            secure: config.appBaseUrl.startsWith("https://"),
+            maxAge: 0
+          });
+        }
         if (result?.__html) {
           return html(res, result.__html, result.__status || 200);
         }
@@ -2038,39 +2064,8 @@ const server = http.createServer(async (req, res) => {
       return notFound(res);
     }
 
-    if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "image") {
-      return sendProductImage(res, Number(parts[2]), null, {
-        thumbnail: ["1", "true", "yes"].includes(String(url.searchParams.get("thumb") || "").toLowerCase()),
-        width: Number(url.searchParams.get("w") || 0),
-        version: url.searchParams.get("v") || ""
-      });
-    }
-
-    if (req.method === "GET" && parts[0] === "api" && parts[1] === "ai" && parts[2] === "file") {
-      const aiImageRestHandled = await handleAiImageRestRoute({
-        req,
-        res,
-        parts,
-        json,
-        notFound,
-        writeHead
-      });
-      if (aiImageRestHandled !== false) return aiImageRestHandled;
-    }
-
     if (req.method === "GET" && parts[0] === "api" && parts[1] === "image-proxy") {
       return sendRemoteImage(req, res, url);
-    }
-
-    if (req.method === "GET" && parts[0] === "api" && parts[1] === "asset-variant-engine" && parts[2] === "tail-template-files" && parts[3]) {
-      const file = await services.resolveAssetTailTemplateFile(decodeURIComponent(parts[3]));
-      if (!file) return notFound(res);
-      writeHead(res, 200, {
-        "Content-Type": file.mime,
-        "Content-Length": file.buffer.length,
-        "Cache-Control": "private, max-age=3600"
-      });
-      return res.end(file.buffer);
     }
 
     if (req.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
@@ -2081,11 +2076,14 @@ const server = http.createServer(async (req, res) => {
       markRequestTiming(req, "before_session");
       const bearerToken = extractToken(req);
       const queryToken = allowQueryTokenAuth(req, parts, url) ? url.searchParams.get("token") : "";
-      const session = await getSession(bearerToken || queryToken);
+      const imageCookieToken = isPrivateImageRead(req, parts) ? readCookie(req, IMAGE_SESSION_COOKIE) : "";
+      const session = await getSession(bearerToken || queryToken || imageCookieToken);
       markRequestTiming(req, "after_session");
       if (!session) return json(res, { error: "未登录，请先登录" }, 401);
       req._session = session;
       req.query = Object.fromEntries(url.searchParams.entries());
+      const isolation = tenantIsolationDecision(session, parts, req.method);
+      if (!isolation.allowed) return json(res, { error: isolation.error, code: isolation.code }, 403);
       const authorization = authorizeApiRequest(req, parts);
       if (!authorization.allowed) {
         console.warn(`[forbidden] ${req.method} ${url.pathname} reason=authorization detail=${authorization.error || "权限不足"}`);
@@ -3318,6 +3316,6 @@ function allowQueryTokenAuth(req, parts = [], url) {
   if (parts[1] === "products" && parts[2] && (parts[3] === "image" || parts[3] === "detail-images")) return true;
   if (parts[1] === "system" && parts[2] === "events") return true;
   if (parts[1] === "tools" && parts[2] === "image-cropper") return true;
-  if (parts[1] === "asset-variant-engine" && parts[2] === "files") return true;
+  if (parts[1] === "asset-variant-engine" && ["files", "tail-template-files"].includes(parts[2])) return true;
   return false;
 }

@@ -114,3 +114,18 @@ test('printing accumulates and retries are idempotent; changed confirmation is r
   await assert.rejects(appendPrintRecord(connection, { ...body, quantity: 8 }, 1), /同一打印/);
   for (const change of [{ quantity: 0 }, { quantity: 1000 }, { quantity: 1.2 }, { request_key: '' }, { preparation_quantity: 0 }]) assert.throws(() => validatePrintRecord({ ...body, ...change }));
 });
+
+test('tenant-scoped barcode printing requires the item shop to match its tenant-owned order', async () => {
+  const calls = [];
+  const connection = { execute: async (sql, args) => {
+    calls.push({ sql, args });
+    if (sql.includes('FOR UPDATE')) return [[{ id: 1, shop_id: 9, ozon_sku: 'SKU', barcode_printed_qty: 0 }]];
+    if (sql.startsWith('SELECT * FROM fbp_replenishment_print_records')) return [[]];
+    return [{}];
+  } };
+  const body = { order_id: 2, item_id: 1, quantity: 1, preparation_quantity: 1, request_key: 'print-request-12345678' };
+  await appendPrintRecord(connection, body, 1, 9);
+  const itemLock = calls.find(call => call.sql.includes('FOR UPDATE'));
+  assert.match(itemLock.sql, /id = \? AND order_id = \? AND shop_id = \? FOR UPDATE/);
+  assert.deepEqual(itemLock.args, [1, 2, 9]);
+});

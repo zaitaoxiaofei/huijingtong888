@@ -4372,7 +4372,9 @@ async function computeAnalysis(db, query = {}, tenantId = 'admin') {
   const focusProducts = matchedProducts.slice(0, focusLimit).map(cloneForRequest)
   const enrichmentTargets = Array.from(new Set([...pagedProducts, ...focusProducts]))
   let onlineProductRows = []
-  if (enrichmentTargets.length > 0) {
+  // online_products is still shared legacy data without tenant_id. Keep the
+  // enrichment only for the default tenant until shops/products are migrated.
+  if (tenantId === 'admin' && enrichmentTargets.length > 0) {
     try {
       onlineProductRows = await findOnlineProductsForAnalyticsProducts(
         enrichmentTargets,

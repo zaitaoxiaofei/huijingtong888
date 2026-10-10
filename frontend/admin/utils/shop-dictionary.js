@@ -9,7 +9,8 @@ const state = reactive({
   loadedAt: 0
 });
 
-let inflight = null;
+const cacheByTenant = new Map();
+const inflightByTenant = new Map();
 let listenerInstalled = false;
 
 function normalizeShop(row = {}) {
@@ -21,8 +22,14 @@ function normalizeShop(row = {}) {
   };
 }
 
-function isFresh() {
-  return state.rows.length > 0 && Date.now() - state.loadedAt < SHOP_DICTIONARY_TTL_MS;
+function activeTenantCacheKey() {
+  try {
+    const user = JSON.parse(window.localStorage?.getItem("baodanAuthUser") || "null");
+    const tenant = user?.tenant || {};
+    return `${tenant.id || ""}:${tenant.slug || "legacy"}`;
+  } catch {
+    return "unknown";
+  }
 }
 
 function installShopChangeListener() {
@@ -30,7 +37,8 @@ function installShopChangeListener() {
   listenerInstalled = true;
   const markStale = () => {
     state.loadedAt = 0;
-    inflight = null;
+    cacheByTenant.clear();
+    inflightByTenant.clear();
   };
   window.addEventListener("erp:shops-changed", markStale);
   window.addEventListener("storage", (event) => {
@@ -41,23 +49,34 @@ function installShopChangeListener() {
 export async function loadShopDictionary(options = {}) {
   installShopChangeListener();
   const force = Boolean(options.force);
-  if (!force && isFresh()) return state.rows;
-  if (!force && inflight) return inflight;
+  const tenantKey = activeTenantCacheKey();
+  const cached = cacheByTenant.get(tenantKey);
+  if (!force && cached && cached.rows.length > 0 && Date.now() - cached.loadedAt < SHOP_DICTIONARY_TTL_MS) {
+    state.rows = cached.rows;
+    state.loadedAt = cached.loadedAt;
+    return cached.rows;
+  }
+  if (!force && inflightByTenant.has(tenantKey)) return inflightByTenant.get(tenantKey);
   state.loading = true;
-  inflight = apiClient.get("/api/shops", force ? { noCache: true, cache: "no-store" } : {}).then((rows) => {
-    state.rows = Array.isArray(rows) ? rows.map(normalizeShop) : [];
-    state.loadedAt = Date.now();
-    return state.rows;
+  const inflight = apiClient.get("/api/shops", { noCache: true, cache: "no-store" }).then((rows) => {
+    const normalizedRows = Array.isArray(rows) ? rows.map(normalizeShop) : [];
+    const loadedAt = Date.now();
+    cacheByTenant.set(tenantKey, { rows: normalizedRows, loadedAt });
+    state.rows = normalizedRows;
+    state.loadedAt = loadedAt;
+    return normalizedRows;
   }).finally(() => {
     state.loading = false;
-    inflight = null;
+    inflightByTenant.delete(tenantKey);
   });
+  inflightByTenant.set(tenantKey, inflight);
   return inflight;
 }
 
 export function invalidateShopDictionary() {
   state.loadedAt = 0;
-  inflight = null;
+  cacheByTenant.clear();
+  inflightByTenant.clear();
 }
 
 export function useShopDictionary() {
