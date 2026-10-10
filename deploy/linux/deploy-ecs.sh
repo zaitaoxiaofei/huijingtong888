@@ -167,10 +167,11 @@ scp_options=(-P "$ssh_port" -o ServerAliveInterval=15 -o ServerAliveCountMax=12 
 remote_target="$ssh_user@$host"
 
 printf 'Splitting release artifact for upload...\n'
-split -b 16m "$archive_path" "$work_dir/ozon-erp-upload-part-"
+split -b 4m "$archive_path" "$work_dir/ozon-erp-upload-part-"
 printf 'Uploading release artifact in chunks...\n'
 for chunk_path in "$work_dir"/ozon-erp-upload-part-*; do
   chunk_suffix="${chunk_path##*-}"
+  printf 'Uploading artifact chunk %s...\n' "$chunk_suffix"
   scp "${scp_options[@]}" "$chunk_path" "$remote_target:$remote_archive.part-$chunk_suffix"
 done
 ssh "${ssh_options[@]}" "$remote_target" \
