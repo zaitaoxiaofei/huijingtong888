@@ -12,6 +12,8 @@ test("three local channels appear in Express, Standard, Economy order", () => {
   assert.deepEqual(threeChannelQuotes(quotes).map((quote) => quote.id), [4, 3, 1]);
   assert.equal(defaultLogisticsQuote(threeChannelQuotes(quotes)).id, 3);
   assert.deepEqual(["express", "standard", "economy"].map(channelLabel), ["空运", "陆空", "陆运"]);
+  const tiered = [{ id: 5, channel: "standard", band: 0, priceCny: 9 }, { id: 6, channel: "standard", band: 1, priceCny: 9 }];
+  assert.equal(threeChannelQuotes(tiered, 1)[0].id, 6);
 });
 
 const at = "2026-10-10T00:00:00+08:00";
