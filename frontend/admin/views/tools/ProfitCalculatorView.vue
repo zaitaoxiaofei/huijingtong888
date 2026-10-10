@@ -83,23 +83,23 @@ function calculate() {
     <div class="profit-grid">
       <el-card shadow="never">
         <template #header><h2>OZON 跨境利润计算器</h2></template>
-        <el-form :model="form" label-width="150px" label-position="left">
+        <el-form :model="form" label-width="150px" label-position="right">
           <h3>基础设置</h3>
-          <el-form-item label="实际售价" required><el-input-number v-model="form.saleCny" :min="0" :precision="2" /><span class="unit">元</span></el-form-item>
-          <el-form-item label="采购成本" required><el-input-number v-model="form.purchaseCost" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
+          <el-form-item label="实际售价" required><el-input-number :controls="false" v-model="form.saleCny" :min="0" :precision="2" /><span class="unit">元</span></el-form-item>
+          <el-form-item label="采购成本" required><el-input-number :controls="false" v-model="form.purchaseCost" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
           <el-form-item label="类目佣金" required><div class="category-field"><RfbsCommissionPicker :selection="selection" :price-rub="saleRub" @select="selectCategory" /><small v-if="selection">rFBS {{ selection.version }} · {{ selection.sourceFile }}</small><small v-if="bandMismatch" class="rate-error">实际售价约 ₽{{ money(saleRub) }}，适用佣金 {{ actualCommission }}%；请选择高亮的售价档。</small></div></el-form-item>
-          <el-form-item label="包裹重量" required><el-input-number v-model="form.weight" :min="0" :precision="0" /><span class="unit">克</span></el-form-item>
+          <el-form-item label="包裹重量" required><el-input-number :controls="false" v-model="form.weight" :min="0" :precision="0" /><span class="unit">克</span></el-form-item>
           <el-form-item label="包裹尺寸" required>
-            <div class="dimensions"><el-input-number v-model="form.length" :min="0" :precision="1" /><span>×</span><el-input-number v-model="form.width" :min="0" :precision="1" /><span>×</span><el-input-number v-model="form.height" :min="0" :precision="1" /><span>厘米</span></div>
+            <div class="dimensions"><el-input-number :controls="false" v-model="form.length" :min="0" :precision="1" /><span>×</span><el-input-number :controls="false" v-model="form.width" :min="0" :precision="1" /><span>×</span><el-input-number :controls="false" v-model="form.height" :min="0" :precision="1" /><span>厘米</span></div>
           </el-form-item>
           <el-form-item label="物流服务商"><el-select v-model="form.carrier" @change="selectedRuleId = null"><el-option label="GUOO" value="GUOO" /><el-option label="CEL" value="CEL" /></el-select></el-form-item>
           <p class="exchange-note">参考汇率：1 元 ≈ {{ form.exchangeRate || '获取中' }} ₽ · 俄罗斯央行 {{ rateSourceDate }} <span v-if="rateError" class="rate-error">{{ rateError }}</span></p>
           <h3>其他费用</h3>
-          <el-form-item label="国内运费及贴单"><el-input-number v-model="form.domesticCost" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
-          <el-form-item label="广告费占比"><el-input-number v-model="form.adRate" :min="0" :max="100" :precision="1" /><span class="unit">%</span></el-form-item>
-          <el-form-item label="退货率"><el-input-number v-model="form.returnRate" :min="0" :max="100" :precision="1" /><span class="unit">% 的订单预计退货</span></el-form-item>
-          <el-form-item label="单次退货损失"><el-input-number v-model="form.returnLoss" :min="0" :precision="2" /><span class="unit">元；退回运费、货损及不可退费用合计</span></el-form-item>
-          <el-form-item label="其他费占比"><el-input-number v-model="form.otherRate" :min="0" :max="100" :precision="1" /><span class="unit">%，提现与尾程已自动计入，避免重复计算</span></el-form-item>
+          <el-form-item label="国内运费及贴单"><el-input-number :controls="false" v-model="form.domesticCost" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
+          <el-form-item label="广告费占比"><el-input-number :controls="false" v-model="form.adRate" :min="0" :max="100" :precision="1" /><span class="unit">%</span></el-form-item>
+          <el-form-item label="退货率"><el-input-number :controls="false" v-model="form.returnRate" :min="0" :max="100" :precision="1" /><span class="unit">% 的订单预计退货</span></el-form-item>
+          <el-form-item label="单次退货损失"><el-input-number :controls="false" v-model="form.returnLoss" :min="0" :precision="2" /><span class="unit">元；退回运费、货损及不可退费用合计</span></el-form-item>
+          <el-form-item label="其他费占比"><el-input-number :controls="false" v-model="form.otherRate" :min="0" :max="100" :precision="1" /><span class="unit">%，提现与尾程已自动计入，避免重复计算</span></el-form-item>
           <el-button type="primary" class="calculate-button" @click="calculate">开始计算</el-button>
         </el-form>
       </el-card>
@@ -138,17 +138,22 @@ function calculate() {
 .profit-page { max-width: 1180px; margin: 0 auto; padding: 24px; }
 .profit-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(360px, 1fr); gap: 20px; margin-top: 14px; }
 .results { display: grid; align-content: start; gap: 18px; }
+.results > :first-child { background: #f4f8ff; border-color: #d7e2ff; }
 h2 { margin: 0; text-align: center; color: #6758e9; font-size: 22px; }
 h3 { border-left: 4px solid #7466ef; padding-left: 10px; margin: 26px 0 18px; font-size: 15px; }
+.profit-page :deep(.el-form-item__label) { color: #545b69; font-size: 13px; }
 .unit { margin-left: 8px; color: #697386; }
+.profit-page :deep(.el-input-number) { width: 220px; max-width: 100%; }
+.profit-page :deep(.el-input-number .el-input__inner) { text-align: left; color: #303744; font-variant-numeric: tabular-nums; }
 .category-field { width: 100%; }
 .category-field small { display: block; color: #8b95a7; font-size: 11px; line-height: 1.4; margin-top: 4px; }
 .category-field .rate-error { color: #d85050; }
 .exchange-note { margin: 2px 0 16px 150px; color: #8b95a7; font-size: 12px; }
 .rate-error { display: block; color: #d85050; }
-.dimensions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.dimensions :deep(.el-input-number) { width: 105px; }
-.calculate-button { width: 100%; margin-top: 10px; }
+.dimensions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.dimensions :deep(.el-input-number) { width: 118px; }
+.calculate-button { width: 100%; margin-top: 10px; background: #7060ed; border-color: #7060ed; }
+.calculate-button:hover { background: #5f50d9; border-color: #5f50d9; }
 .shipping-tip { margin: 0 0 12px; padding: 10px 12px; border-radius: 7px; color: #5e558e; background: #f2efff; font-size: 12px; }
 .shipping-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .shipping-card { display: grid; align-content: start; gap: 8px; min-height: 130px; padding: 13px; text-align: left; border: 1px solid #cad9fa; border-radius: 8px; background: #edf5ff; cursor: pointer; }

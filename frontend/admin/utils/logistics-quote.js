@@ -6,10 +6,12 @@ const CHANNEL_LABELS = { express: "空运", standard: "陆空", economy: "陆运
 
 export function channelLabel(channel) { return CHANNEL_LABELS[String(channel || "").toLowerCase()] || String(channel || ""); }
 
-export function threeChannelQuotes(quotes = []) {
+export function threeChannelQuotes(quotes = [], preferredBand = null) {
   return CHANNEL_ORDER.flatMap((channel) => {
     const matches = quotes.filter((quote) => String(quote.channel || "").toLowerCase() === channel);
-    return matches.length ? [matches.reduce((best, quote) => Number(quote.priceCny) < Number(best.priceCny) ? quote : best)] : [];
+    const preferred = preferredBand === null ? [] : matches.filter((quote) => quote.band === preferredBand);
+    const eligible = preferred.length ? preferred : matches;
+    return eligible.length ? [eligible.reduce((best, quote) => Number(quote.priceCny) < Number(best.priceCny) ? quote : best)] : [];
   });
 }
 
