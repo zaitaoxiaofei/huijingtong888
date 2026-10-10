@@ -52,9 +52,11 @@ export function validatePrintRecord(body) {
   return { quantity, itemId, orderId, key, preparationQuantity };
 }
 
-export async function appendPrintRecord(connection, body, userId) {
+export async function appendPrintRecord(connection, body, userId, expectedShopId = null) {
   const { quantity, itemId, orderId, key, preparationQuantity } = validatePrintRecord(body);
-  const [rows] = await connection.execute('SELECT * FROM fbp_replenishment_order_items WHERE id = ? AND order_id = ? FOR UPDATE', [itemId, orderId]);
+  const shopCondition = expectedShopId == null ? "" : " AND shop_id = ?";
+  const params = expectedShopId == null ? [itemId, orderId] : [itemId, orderId, Number(expectedShopId)];
+  const [rows] = await connection.execute(`SELECT * FROM fbp_replenishment_order_items WHERE id = ? AND order_id = ?${shopCondition} FOR UPDATE`, params);
   if (!rows.length) throw new Error('备货明细已删除，无法登记打印，请联系操作人核对已打印标签。');
   const [previous] = await connection.execute('SELECT * FROM fbp_replenishment_print_records WHERE request_key = ?', [key]);
   if (previous.length) {

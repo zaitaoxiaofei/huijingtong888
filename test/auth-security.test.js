@@ -26,7 +26,7 @@ test("operator cannot mutate people or system configuration", () => {
 });
 
 test("manager cannot access finance or system resources", () => {
-  const session = { role: "manager" };
+  const session = { role: "manager", tenant: { id: 1, slug: "default" } };
   assert.equal(authorizeApiRequest({ method: "GET", _session: session }, ["api", "dashboard"]).allowed, true);
   assert.equal(authorizeApiRequest({ method: "GET", _session: session }, ["api", "profit-ranking"]).allowed, true);
   assert.equal(authorizeApiRequest({ method: "GET", _session: session }, ["api", "finance-center", "report"]).allowed, false);

@@ -130,7 +130,7 @@ function describeCancellation(row = {}) {
 function invalidateOrderCancellationRuleCache() {}
 
 function invalidateOrderLogisticsRuleCachesMysql() {
-  logisticsRuleFilterCacheMysql = null;
+  logisticsRuleFilterCacheMysql.clear();
   orderLogisticsRuleMatchCacheMysql.clear();
   invalidateMasterDataCachePrefix("orders:logistics-");
 }
@@ -143,6 +143,7 @@ function ensureMysqlCutoverEnabled() {
 
 const mysqlSchemaColumnExistsCache = new Set();
 const mysqlSchemaIndexExistsCache = new Set();
+let inventoryMovementTenantColumnExistsCache;
 
 function safeMysqlIdentifier(value) {
   const text = String(value || "").replace(/`/g, "").trim();
@@ -176,6 +177,13 @@ async function mysqlSchemaColumnExists(table, column) {
   `, [tableName, columnName]);
   if (row) mysqlSchemaColumnExistsCache.add(key);
   return Boolean(row);
+}
+
+async function inventoryMovementTenantColumnExistsMysql() {
+  if (inventoryMovementTenantColumnExistsCache === undefined) {
+    inventoryMovementTenantColumnExistsCache = await mysqlSchemaColumnExists("inventory_movements", "tenant_id");
+  }
+  return inventoryMovementTenantColumnExistsCache;
 }
 
 async function mysqlSchemaIndexExists(table, indexName) {
@@ -314,7 +322,7 @@ let dashboardSnapshotSchemaReady = false;
 let profitAnalyticsSchemaReadyMysql = false;
 let stockLocationSchemaReadyMysql = false;
 let peopleTimestampSchemaReadyMysql = false;
-let logisticsRuleFilterCacheMysql = null;
+const logisticsRuleFilterCacheMysql = new Map();
 const orderLogisticsRuleMatchCacheMysql = new Map();
 let shopWatermarkSchemaReadyMysql = false;
 let shopAdvertisingCredentialSchemaReadyMysql = false;
@@ -777,6 +785,7 @@ async function ensureProductCompositionSchemaMysql() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS product_components (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id BIGINT UNSIGNED NULL,
       product_id BIGINT UNSIGNED NOT NULL,
       component_product_id BIGINT UNSIGNED NOT NULL,
       quantity DECIMAL(18,4) NOT NULL DEFAULT 1,
@@ -784,6 +793,7 @@ async function ensureProductCompositionSchemaMysql() {
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       UNIQUE KEY uk_product_component_product (product_id, component_product_id),
+      KEY idx_product_components_tenant_parent (tenant_id, product_id, component_product_id),
       KEY idx_product_component_child (component_product_id),
       KEY idx_product_component_parent (product_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
@@ -1227,12 +1237,22 @@ async function ensureLogisticsRuleFilterSchemaMysql() {
   await ensureMysqlColumns("order_items", [
     "ALTER TABLE order_items ADD COLUMN frozen_logistics_rule_id BIGINT UNSIGNED NULL"
   ]);
-  await mysqlExecute(`
-    UPDATE logistics_fee_rules
-    SET version_group_id = id,
-      effective_from = COALESCE(effective_from, '1970-01-01 00:00:00')
-    WHERE version_group_id IS NULL OR effective_from IS NULL
-  `);
+  if (await mysqlSchemaColumnExists("logistics_fee_rules", "tenant_id")) {
+    await mysqlExecute(`
+      UPDATE logistics_fee_rules
+      SET version_group_id = id,
+        effective_from = COALESCE(effective_from, '1970-01-01 00:00:00')
+      WHERE (version_group_id IS NULL OR effective_from IS NULL)
+        AND tenant_id IS NULL
+    `);
+  } else {
+    await mysqlExecute(`
+      UPDATE logistics_fee_rules
+      SET version_group_id = id,
+        effective_from = COALESCE(effective_from, '1970-01-01 00:00:00')
+      WHERE version_group_id IS NULL OR effective_from IS NULL
+    `);
+  }
   logisticsRuleVersionSchemaReadyMysql = true;
 }
 
@@ -1623,9 +1643,40 @@ function normalizeProductComponentItemsMysql(items = []) {
   return [...merged.values()];
 }
 
-async function productComponentRowsMysql(productId) {
+async function productComponentRowsMysql(productId, tenantId = "admin") {
   await ensureProductCompositionSchemaMysql();
   await ensureStockLocationSchemaMysql();
+  const tenantScoped = String(tenantId) !== "admin";
+  const tenantPk = tenantScoped ? Number(tenantId) : 0;
+  if (tenantScoped) {
+    if (!Number.isSafeInteger(tenantPk) || tenantPk <= 0) {
+      throw Object.assign(new Error("当前企业上下文无效，无法读取子产品库存。"), { statusCode: 403 });
+    }
+    const requiredColumns = ["products", "product_components", "inventory_movements", "shops", "procurement_requests"];
+    const columnAvailability = await Promise.all(requiredColumns.map(async (table) => ({
+      table,
+      exists: await mysqlSchemaColumnExists(table, "tenant_id")
+    })));
+    const missingColumns = columnAvailability.filter((column) => !column.exists).map((column) => `${column.table}.tenant_id`);
+    if (missingColumns.length) {
+      throw Object.assign(new Error(`企业子产品库存详情暂不可用：以下租户归属字段尚未迁移：${missingColumns.join("、")}。请管理员先完成对应数据迁移。`), { statusCode: 503 });
+    }
+  }
+  const parentJoinSql = tenantScoped
+    ? `JOIN products parent_product ON parent_product.id = pc.product_id AND parent_product.tenant_id = ${tenantPk}`
+    : "";
+  const childTenantSql = tenantScoped ? `AND p.tenant_id = ${tenantPk}` : "";
+  const movementTenantSql = tenantScoped ? `AND tenant_id = ${tenantPk}` : "";
+  const fbpTenantJoinSql = tenantScoped
+    ? `JOIN shops stock_shop ON stock_shop.id = ozon_stock_snapshots.shop_id AND stock_shop.tenant_id = ${tenantPk}`
+    : "";
+  const procurementTenantJoinSql = tenantScoped
+    ? `LEFT JOIN procurement_requests pr ON pr.id = inbound_records.procurement_request_id`
+    : "";
+  const inboundTenantSql = tenantScoped
+    ? `AND (inbound_records.procurement_request_id IS NULL OR pr.tenant_id = ${tenantPk})`
+    : "";
+  const componentTenantSql = tenantScoped ? `AND pc.tenant_id = ${tenantPk}` : "";
   const rows = await mysqlQuery(`
     SELECT pc.id, pc.product_id, pc.component_product_id, pc.quantity, pc.component_role,
       p.name AS component_name,
@@ -1651,27 +1702,32 @@ async function productComponentRowsMysql(productId) {
       COALESCE(fbp.fbp_stock, 0) AS fbp_stock,
       COALESCE(incoming.incoming_stock, 0) AS incoming_stock
     FROM product_components pc
-    JOIN products p ON p.id = pc.component_product_id AND p.active = 1
+    ${parentJoinSql}
+    JOIN products p ON p.id = pc.component_product_id AND p.active = 1 ${childTenantSql}
     LEFT JOIN (
       SELECT inventory_movements.product_id, SUM(inventory_movements.quantity_delta) AS local_stock
       FROM inventory_movements
       WHERE status = 'posted'
         AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'
+        ${movementTenantSql}
       GROUP BY inventory_movements.product_id
     ) stock ON stock.product_id = pc.component_product_id
     LEFT JOIN (
-      SELECT product_id, SUM(present) AS fbp_stock
+      SELECT ozon_stock_snapshots.product_id, SUM(ozon_stock_snapshots.present) AS fbp_stock
       FROM ozon_stock_snapshots
+      ${fbpTenantJoinSql}
       WHERE stock_type = 'fbp_real'
-      GROUP BY product_id
+      GROUP BY ozon_stock_snapshots.product_id
     ) fbp ON fbp.product_id = pc.component_product_id
     LEFT JOIN (
-      SELECT product_id, SUM(quantity) AS incoming_stock
+      SELECT inbound_records.product_id, SUM(inbound_records.quantity) AS incoming_stock
       FROM inbound_records
+      ${procurementTenantJoinSql}
       WHERE status = 'pending_arrival'
-      GROUP BY product_id
+        ${inboundTenantSql}
+      GROUP BY inbound_records.product_id
     ) incoming ON incoming.product_id = pc.component_product_id
-    WHERE pc.product_id = ?
+    WHERE pc.product_id = ? ${componentTenantSql}
     ORDER BY pc.id
   `, [Number(productId)]);
   return rows.map((row) => {
@@ -1711,9 +1767,11 @@ async function productComponentRowsMysql(productId) {
   });
 }
 
-async function productCompositionSummariesMysql(productIds = []) {
+async function productCompositionSummariesMysql(productIds = [], tenantId = "admin") {
   await ensureProductCompositionSchemaMysql();
   await ensureStockLocationSchemaMysql();
+  const tenantScoped = String(tenantId) !== "admin";
+  const tenantPk = tenantScoped ? Number(tenantId) : 0;
   const ids = [...new Set(productIds.map(Number).filter(Boolean))];
   if (!ids.length) return new Map();
   const placeholders = ids.map(() => "?").join(",");
@@ -1723,6 +1781,7 @@ async function productCompositionSummariesMysql(productIds = []) {
     FROM product_components pc
     JOIN products p ON p.id = pc.component_product_id AND p.active = 1
     WHERE pc.product_id IN (${placeholders})
+      ${tenantScoped ? `AND pc.tenant_id = ${tenantPk} AND p.tenant_id = ${tenantPk}` : ""}
     ORDER BY pc.product_id, pc.id
   `, ids);
   const componentIds = [...new Set(components.map((row) => Number(row.component_product_id || 0)).filter(Boolean))];
@@ -1734,6 +1793,7 @@ async function productCompositionSummariesMysql(productIds = []) {
       FROM inventory_movements
       WHERE status = 'posted'
         AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'
+        ${tenantScoped ? `AND tenant_id = ${tenantPk}` : ""}
         AND product_id IN (${componentPlaceholders})
       GROUP BY product_id
     `, componentIds);
@@ -1758,7 +1818,9 @@ async function productCompositionSummariesMysql(productIds = []) {
   return summaries;
 }
 
-async function assertProductCompositionAcyclicMysql(productId, items = []) {
+async function assertProductCompositionAcyclicMysql(productId, items = [], tenantId = "admin", connection = null) {
+  const tenantScoped = String(tenantId) !== "admin";
+  const tenantPk = tenantScoped ? Number(tenantId) : 0;
   const targetId = Number(productId);
   const directIds = items.map((item) => Number(item.component_product_id)).filter(Boolean);
   if (directIds.includes(targetId)) throw new Error("组成部分不能选择当前商品自己");
@@ -1767,10 +1829,11 @@ async function assertProductCompositionAcyclicMysql(productId, items = []) {
   while (queue.length) {
     const currentLevel = queue.splice(0, queue.length);
     const placeholders = currentLevel.map(() => "?").join(", ");
-    const children = await mysqlQuery(
-      `SELECT component_product_id FROM product_components WHERE product_id IN (${placeholders})`,
-      currentLevel
-    );
+    const sql =
+      `SELECT component_product_id FROM product_components WHERE product_id IN (${placeholders})${tenantScoped ? ` AND tenant_id = ${tenantPk}` : ""}`;
+    const children = connection
+      ? await mysqlConnectionQuery(connection, sql, currentLevel)
+      : await mysqlQuery(sql, currentLevel);
     for (const child of children) {
       const childId = Number(child.component_product_id || 0);
       if (!childId) continue;
@@ -1783,33 +1846,57 @@ async function assertProductCompositionAcyclicMysql(productId, items = []) {
   }
 }
 
-async function saveProductComponentsTxMysql(connection, productId, items = []) {
+async function saveProductComponentsTxMysql(connection, productId, items = [], tenantId = "admin") {
+  const tenantScoped = String(tenantId) !== "admin";
+  const tenantPk = tenantScoped ? Number(tenantId) : 0;
+  if (tenantScoped) {
+    if (!Number.isSafeInteger(tenantPk) || tenantPk <= 0) {
+      throw Object.assign(new Error("当前企业上下文无效，无法保存子产品组成。"), { statusCode: 403 });
+    }
+    const requiredColumns = ["products", "product_components"];
+    const columns = await Promise.all(requiredColumns.map(async (table) => ({
+      table,
+      exists: await mysqlSchemaColumnExists(table, "tenant_id")
+    })));
+    const missing = columns.filter((column) => !column.exists).map((column) => `${column.table}.tenant_id`);
+    if (missing.length) {
+      throw Object.assign(new Error(`企业子产品保存暂不可用：以下租户归属字段尚未迁移：${missing.join("、")}。请管理员先完成对应数据迁移。`), { statusCode: 503 });
+    }
+    const [parentRows] = await connection.execute(
+      "SELECT id FROM products WHERE id = ? AND tenant_id = ? AND active = 1 FOR UPDATE",
+      [Number(productId), tenantPk]
+    );
+    if (!parentRows.length) throw Object.assign(new Error("库存产品不存在或不属于当前企业。"), { statusCode: 404 });
+  }
   const normalized = normalizeProductComponentItemsMysql(items);
-  await assertProductCompositionAcyclicMysql(productId, normalized);
+  await assertProductCompositionAcyclicMysql(productId, normalized, tenantScoped ? String(tenantPk) : "admin", connection);
   const componentIds = normalized.map((item) => item.component_product_id);
   if (componentIds.length) {
     const placeholders = componentIds.map(() => "?").join(", ");
     const [products] = await connection.execute(
-      `SELECT id FROM products WHERE id IN (${placeholders}) AND active = 1`,
-      componentIds
+      `SELECT id FROM products WHERE id IN (${placeholders}) AND active = 1${tenantScoped ? " AND tenant_id = ?" : ""}`,
+      tenantScoped ? [...componentIds, tenantPk] : componentIds
     );
     const activeIds = new Set(products.map((item) => Number(item.id)));
     const missingId = componentIds.find((id) => !activeIds.has(Number(id)));
     if (missingId) throw new Error(`组件商品不存在或已删除: ${missingId}`);
     const [nestedRows] = await connection.execute(
-      `SELECT product_id FROM product_components WHERE product_id IN (${placeholders}) LIMIT 1`,
-      componentIds
+      `SELECT product_id FROM product_components WHERE product_id IN (${placeholders})${tenantScoped ? " AND tenant_id = ?" : ""} LIMIT 1`,
+      tenantScoped ? [...componentIds, tenantPk] : componentIds
     );
     if (nestedRows.length) throw new Error("套装组成品必须是单品，暂不支持嵌套套装");
   }
-  await connection.execute("DELETE FROM product_components WHERE product_id = ?", [Number(productId)]);
+  await connection.execute(
+    `DELETE FROM product_components WHERE product_id = ?${tenantScoped ? " AND tenant_id = ?" : ""}`,
+    tenantScoped ? [Number(productId), tenantPk] : [Number(productId)]
+  );
   if (normalized.length) {
-    const valuesSql = normalized.map(() => "(?, ?, ?, ?)").join(", ");
+    const valuesSql = normalized.map(() => (tenantScoped ? "(?, ?, ?, ?, ?)" : "(?, ?, ?, ?)")).join(", ");
     const values = normalized.flatMap((item) => [
-      Number(productId), item.component_product_id, item.quantity, item.component_role
+      ...(tenantScoped ? [tenantPk] : []), Number(productId), item.component_product_id, item.quantity, item.component_role
     ]);
     await connection.execute(`
-      INSERT INTO product_components (product_id, component_product_id, quantity, component_role)
+      INSERT INTO product_components (${tenantScoped ? "tenant_id, " : ""}product_id, component_product_id, quantity, component_role)
       VALUES ${valuesSql}
     `, values);
   }
@@ -2433,7 +2520,7 @@ function financeRowsForOperationMysql(operation) {
   return rows;
 }
 
-async function resolveOrderLogisticsRuleMysql(row = {}) {
+async function resolveOrderLogisticsRuleMysql(row = {}, tenantId = "admin") {
   const payload = parseJsonOrNull(row.raw_json) || {};
   const raw = payload.raw || payload;
   const deliveryMethod = raw.delivery_method || {};
@@ -2443,13 +2530,13 @@ async function resolveOrderLogisticsRuleMysql(row = {}) {
   const logisticsChannel = deliveryMethod.tpl_provider || analytics.tpl_provider || row.tracking_number || "";
   const logisticsText = `${deliveryMethodName} ${logisticsChannel} ${warehouseName} ${row.raw_json || ""}`;
   const logisticsRule = normalizeResolvedLogisticsRuleMysql(
-    await matchOrderLogisticsRuleMysql(logisticsText)
+    await matchOrderLogisticsRuleMysql(logisticsText, tenantId)
   ) || normalizeResolvedLogisticsRuleMysql(
     await detectOrderLogisticsLabelMysql(logisticsText, {
       delivery_method_name: deliveryMethodName,
       logistics_channel: logisticsChannel,
       warehouse_name: warehouseName
-    })
+    }, tenantId)
   );
   return {
     rule: logisticsRule,
@@ -2461,8 +2548,8 @@ async function resolveOrderLogisticsRuleMysql(row = {}) {
   };
 }
 
-async function enrichOrderLogisticsMysql(row) {
-  const resolved = await resolveOrderLogisticsRuleMysql(row);
+async function enrichOrderLogisticsMysql(row, tenantId = "admin") {
+  const resolved = await resolveOrderLogisticsRuleMysql(row, tenantId);
   const { rule: logisticsRule, warehouseName, deliveryMethodName, logisticsChannel, raw, analytics } = resolved;
   const fallbackFbp = /hunchun|hun chun|fbp|珲春|混春|混川|风船|風船/i.test(`${warehouseName} ${deliveryMethodName} ${logisticsChannel}`);
   const fulfillmentTypeKey = (
@@ -2530,17 +2617,19 @@ function normalizeShopNameForDuplicateCheck(value) {
   return String(value || "").trim();
 }
 
-async function assertUniqueShopNameMysql(name, exceptId = 0) {
+async function assertUniqueShopNameMysql(name, tenantId, exceptId = 0) {
   const normalizedName = normalizeShopNameForDuplicateCheck(name);
   if (!normalizedName) throw new Error("请输入店铺名称");
+  const defaultTenant = await isDefaultShopTenantMysql(tenantId);
   const duplicate = await mysqlQueryOne(`
     SELECT id, name
     FROM shops
-    WHERE status != 'deleted'
+    WHERE (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})
+      AND status != 'deleted'
       AND LOWER(TRIM(name)) = LOWER(TRIM(?))
       AND id <> ?
     LIMIT 1
-  `, [normalizedName, Number(exceptId || 0)]);
+  `, [Number(tenantId), normalizedName, Number(exceptId || 0)]);
   if (duplicate) {
     const error = new Error(`店铺名称「${normalizedName}」已存在，请编辑已有店铺，不要重复新增。`);
     error.status = 409;
@@ -2548,6 +2637,42 @@ async function assertUniqueShopNameMysql(name, exceptId = 0) {
     throw error;
   }
   return normalizedName;
+}
+
+async function isDefaultShopTenantMysql(tenantId) {
+  const rows = await mysqlQuery("SELECT slug FROM tenants WHERE id = ? LIMIT 1", [Number(tenantId)]);
+  return rows[0]?.slug === "default";
+}
+
+async function resolveShopTenantIdMysql(tenantId = "admin") {
+  const value = String(tenantId || "admin").trim();
+  if (value === "admin") {
+    const rows = await mysqlQuery("SELECT id FROM tenants WHERE slug = ? AND status = 'active' LIMIT 1", ["default"]);
+    const id = Number(rows[0]?.id || 0);
+    if (id) return id;
+  } else if (/^\d+$/.test(value) && Number(value) > 0) {
+    const rows = await mysqlQuery("SELECT id FROM tenants WHERE id = ? AND status = 'active' LIMIT 1", [Number(value)]);
+    if (Number(rows[0]?.id || 0)) return Number(value);
+  }
+  throw new Error("当前企业上下文无效，无法访问店铺");
+}
+
+function tenantShopPredicateMysql(alias, defaultTenant) {
+  return `(${alias}.tenant_id = ?${defaultTenant ? ` OR ${alias}.tenant_id IS NULL` : ""})`;
+}
+
+async function activeShopForTenantMysql(shopId, tenantId) {
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const statusPredicate = defaultTenant ? "status != 'deleted'" : "status = 'active'";
+  const shop = await mysqlQueryOne(`SELECT * FROM shops WHERE id = ? AND ${statusPredicate} AND ${tenantShopPredicateMysql("shops", defaultTenant)} LIMIT 1`, [Number(shopId), normalizedTenantId]);
+  if (!shop) throw new Error("店铺不存在、已停用或不属于当前企业");
+  return shop;
+}
+
+function invalidateShopCacheMysql() {
+  invalidateMasterDataCachePrefix("shops:");
+  invalidateMasterDataCache("shops");
 }
 
 async function mysqlConnectionQueryOne(connection, sql, params = []) {
@@ -2709,14 +2834,14 @@ export async function orderProcurementBatchesMysql(orderId) {
   };
 }
 
-async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefined) {
+async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefined, tenantScoped = false, tenantId = "admin") {
   // Procurement coverage reconciles the full order and inventory ledger. Do
   // not let a cold reconciliation block the ordinary order-list first paint.
   const orderIds = [...new Set(rows.map((row) => Number(row.id)).filter(Boolean))];
   const [coverage, qualityPrefixes, pickingByOrderId, billingRows, , fbpStocks] = await Promise.all([
-    coveragePromise === null ? (cachedOrderProcurementCoverage() || new Map()) : (coveragePromise || orderProcurementCoverageMysql()),
+    tenantScoped ? new Map() : coveragePromise === null ? (cachedOrderProcurementCoverage() || new Map()) : (coveragePromise || orderProcurementCoverageMysql()),
     orderQualityPrefixesMysql(),
-    orderInventoryPickingMysql(orderIds),
+    orderInventoryPickingMysql(orderIds, tenantScoped ? tenantId : "admin"),
     orderIds.length ? mysqlQuery(`
     SELECT oi.order_id,
       GROUP_CONCAT(DISTINCT rule.name ORDER BY rule.name SEPARATOR ' / ') AS billing_logistics_rule_name,
@@ -2724,16 +2849,16 @@ async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefine
       GROUP_CONCAT(DISTINCT rule.id ORDER BY rule.id) AS billing_logistics_rule_ids
     FROM order_items oi
     JOIN logistics_fee_rules rule ON rule.id = oi.frozen_logistics_rule_id
-    WHERE oi.order_id IN (${orderIds.map(() => "?").join(",")})
+    WHERE oi.order_id IN (${orderIds.map(() => "?").join(",")}) ${tenantScoped ? `AND rule.tenant_id = ${Number(tenantId)}` : ""}
     GROUP BY oi.order_id
     `, orderIds) : [],
-    rows.length ? activeOrderLogisticsFilterMethodsMysql() : undefined,
+    rows.length ? activeOrderLogisticsFilterMethodsMysql(tenantScoped ? tenantId : "admin") : undefined,
     loadOrderFbpStocks(mysqlQuery, orderIds)
   ]);
   const billingByOrderId = new Map(billingRows.map((row) => [Number(row.order_id), row]));
   return await mapWithConcurrencyMysql(rows, 3, async (row) => {
     const billing = billingByOrderId.get(Number(row.id)) || {};
-    const enriched = await enrichOrderLogisticsMysql({ ...row, ...billing, fbp_inventory: fbpStocks.get(Number(row.id)) || [], inventory_picking_items: pickingByOrderId.get(Number(row.id)) || [], procurement_coverage: coverage.get(Number(row.id)) || null });
+    const enriched = await enrichOrderLogisticsMysql({ ...row, ...billing, fbp_inventory: fbpStocks.get(Number(row.id)) || [], inventory_picking_items: pickingByOrderId.get(Number(row.id)) || [], procurement_coverage: coverage.get(Number(row.id)) || null }, tenantScoped ? tenantId : "admin");
     const accounting = classifyOrderAccounting(enriched, { qualityPrefixes });
     const cancellation = cancellationDisplay({
       ...enriched,
@@ -3221,9 +3346,37 @@ export async function updatePackagingFeeRuleMysql(body = {}, personId = null) {
   return await packagingFeeRuleMysql();
 }
 
-export async function logisticsRulesMysql() {
+async function logisticsTenantScopeMysql(tenantId = "admin", alias = "l") {
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const hasTenantColumn = await mysqlSchemaColumnExists("logistics_fee_rules", "tenant_id");
+  if (!hasTenantColumn && !defaultTenant) {
+    throw Object.assign(new Error("物流规则企业隔离暂不可用：logistics_fee_rules.tenant_id 尚未迁移，请管理员先完成物流规则租户迁移。"), { statusCode: 503 });
+  }
+  return {
+    tenantId: normalizedTenantId,
+    defaultTenant,
+    hasTenantColumn,
+    sql: !hasTenantColumn ? "1 = 1" : `(${alias}.tenant_id = ?${defaultTenant ? ` OR ${alias}.tenant_id IS NULL` : ""})`,
+    params: hasTenantColumn ? [normalizedTenantId] : []
+  };
+}
+
+function logisticsProductTenantPredicateMysql(alias, scope) {
+  if (!scope.hasTenantColumn) return "1 = 1";
+  return `(${alias}.tenant_id = ?${scope.defaultTenant ? ` OR ${alias}.tenant_id IS NULL` : ""})`;
+}
+
+function logisticsTenantScopeSqlForJoinedRuleMysql(scope, alias) {
+  return logisticsProductTenantPredicateMysql(alias, scope);
+}
+
+export async function logisticsRulesMysql(tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureLogisticsRuleFilterSchemaMysql();
+  const scope = await logisticsTenantScopeMysql(tenantId);
+  const productScope = logisticsProductTenantPredicateMysql("p", scope);
+  const mappingScope = logisticsProductTenantPredicateMysql("sm", scope);
   return await mysqlQuery(`
     SELECT l.*,
       COALESCE((
@@ -3231,10 +3384,12 @@ export async function logisticsRulesMysql() {
         FROM sku_mappings sm
         JOIN products p ON p.id = sm.product_id
         WHERE sm.active = 1 AND p.active = 1 AND p.logistics_rule_id = l.id
+          AND ${productScope} AND ${mappingScope}
       ), 0) AS usage_count
     FROM logistics_fee_rules l
+    WHERE ${scope.sql}
     ORDER BY l.enabled DESC, l.version_group_id, l.effective_from DESC, usage_count DESC, l.id
-  `);
+  `, [...scope.params, ...scope.params, ...scope.params]);
 }
 
 function logisticsRuleVersionDateMysql(value, fieldName) {
@@ -3246,13 +3401,14 @@ function logisticsRuleVersionDateMysql(value, fieldName) {
   return normalizeMysqlDateTime(date);
 }
 
-export async function createLogisticsRuleMysql(body = {}) {
+export async function createLogisticsRuleMysql(body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureLogisticsRuleFilterSchemaMysql();
+  const scope = await logisticsTenantScopeMysql(tenantId);
   const name = requiredText(body.name, "Rule name is required");
   const sourceRuleId = Number(body.source_rule_id || 0);
   const sourceRule = sourceRuleId
-    ? await mysqlQueryOne("SELECT * FROM logistics_fee_rules WHERE id = ?", [sourceRuleId])
+    ? await mysqlQueryOne(`SELECT l.* FROM logistics_fee_rules l WHERE l.id = ? AND ${scope.sql}`, [sourceRuleId, ...scope.params])
     : null;
   if (sourceRuleId && !sourceRule) throw new Error("Source logistics rule not found");
   const effectiveFrom = body.effective_from
@@ -3286,34 +3442,40 @@ export async function createLogisticsRuleMysql(body = {}) {
     const versionGroupId = sourceRule ? Number(sourceRule.version_group_id || sourceRule.id) : null;
     if (sourceRule) {
       const conflict = await mysqlConnectionQueryOne(connection, `
-        SELECT id FROM logistics_fee_rules
-        WHERE version_group_id = ? AND id != ?
+        SELECT l.id FROM logistics_fee_rules l
+        WHERE version_group_id = ? AND id != ? AND ${scope.sql}
           AND effective_from < ?
           AND (effective_to IS NULL OR effective_to > ?)
         LIMIT 1 FOR UPDATE
-      `, [versionGroupId, sourceRuleId, effectiveFrom, effectiveFrom]);
+      `, [versionGroupId, sourceRuleId, ...scope.params, effectiveFrom, effectiveFrom]);
       if (conflict) throw new Error("生效时间与同一物流规则的其他版本重叠");
       await connection.execute(`
-        UPDATE logistics_fee_rules
+        UPDATE logistics_fee_rules l
         SET effective_to = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE version_group_id = ? AND effective_from < ?
+        WHERE version_group_id = ? AND ${scope.sql} AND effective_from < ?
           AND (effective_to IS NULL OR effective_to > ?)
-      `, [effectiveFrom, versionGroupId, effectiveFrom, effectiveFrom]);
+      `, [effectiveFrom, versionGroupId, ...scope.params, effectiveFrom, effectiveFrom]);
     }
-    const [insertResult] = await connection.execute(`
+    const [insertResult] = await connection.execute(scope.hasTenantColumn ? `
+      INSERT INTO logistics_fee_rules
+      (tenant_id, name, carrier, channel, mode, min_weight_g, max_weight_g, min_price_rub, max_price_rub, base_fee_cny, per_gram_cny, per_ticket_cny, enabled, filter_keywords, usage_count, note, version_group_id, effective_from)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ` : `
       INSERT INTO logistics_fee_rules
       (name, carrier, channel, mode, min_weight_g, max_weight_g, min_price_rub, max_price_rub, base_fee_cny, per_gram_cny, per_ticket_cny, enabled, filter_keywords, usage_count, note, version_group_id, effective_from)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, payload);
+    `, scope.hasTenantColumn ? [scope.tenantId, ...payload] : payload);
     if (!sourceRule) {
-      await connection.execute("UPDATE logistics_fee_rules SET version_group_id = id WHERE id = ?", [Number(insertResult.insertId)]);
+      await connection.execute(`UPDATE logistics_fee_rules l SET version_group_id = id WHERE id = ? AND ${scope.sql}`, [Number(insertResult.insertId), ...scope.params]);
     } else {
+      const productScope = logisticsProductTenantPredicateMysql("p", scope);
+      const currentRuleScope = logisticsTenantScopeSqlForJoinedRuleMysql(scope, "current_rule");
       await connection.execute(`
         UPDATE products p
         JOIN logistics_fee_rules current_rule ON current_rule.id = p.logistics_rule_id
         SET p.logistics_rule_id = ?
-        WHERE current_rule.version_group_id = ?
-      `, [Number(insertResult.insertId), versionGroupId]);
+        WHERE current_rule.version_group_id = ? AND ${currentRuleScope} AND ${productScope}
+      `, [Number(insertResult.insertId), versionGroupId, ...scope.params, ...scope.params]);
     }
     return insertResult;
   });
@@ -3325,10 +3487,11 @@ export async function createLogisticsRuleMysql(body = {}) {
   return { id: Number(result.insertId), version_group_id: sourceRule ? Number(sourceRule.version_group_id || sourceRule.id) : Number(result.insertId) };
 }
 
-export async function updateLogisticsRuleMysql(id, body = {}) {
+export async function updateLogisticsRuleMysql(id, body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureLogisticsRuleFilterSchemaMysql();
-  const existing = await mysqlQueryOne("SELECT * FROM logistics_fee_rules WHERE id = ?", [Number(id)]);
+  const scope = await logisticsTenantScopeMysql(tenantId);
+  const existing = await mysqlQueryOne(`SELECT l.* FROM logistics_fee_rules l WHERE l.id = ? AND ${scope.sql}`, [Number(id), ...scope.params]);
   if (!existing) throw new Error("Logistics rule not found");
   assertFreshRecord(body, existing, "物流规则已被其他用户保存，请刷新后再继续编辑");
   const numericVersionedFields = ["base_fee_cny", "per_gram_cny", "per_ticket_cny", "min_weight_g", "max_weight_g", "min_price_rub", "max_price_rub"];
@@ -3355,15 +3518,16 @@ export async function updateLogisticsRuleMysql(id, body = {}) {
     body.filter_keywords ?? existing.filter_keywords ?? "",
     Number(body.usage_count ?? existing.usage_count ?? 0),
     body.note ?? existing.note,
-    Number(id)
+    Number(id),
+    ...scope.params
   ];
 
   await mysqlExecute(`
-    UPDATE logistics_fee_rules
+    UPDATE logistics_fee_rules l
     SET name = ?, carrier = ?, channel = ?, mode = ?, min_weight_g = ?, max_weight_g = ?,
       min_price_rub = ?, max_price_rub = ?, base_fee_cny = ?, per_gram_cny = ?, per_ticket_cny = ?,
       enabled = ?, filter_keywords = ?, usage_count = ?, note = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
+    WHERE l.id = ? AND ${scope.sql}
   `, payload);
 
 
@@ -3373,58 +3537,70 @@ export async function updateLogisticsRuleMysql(id, body = {}) {
   return { ok: true };
 }
 
-export async function deleteLogisticsRuleMysql(id) {
+export async function deleteLogisticsRuleMysql(id, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureLogisticsRuleFilterSchemaMysql();
+  const scope = await logisticsTenantScopeMysql(tenantId);
   const ruleId = Number(id);
-  const rule = await mysqlQueryOne("SELECT id, name FROM logistics_fee_rules WHERE id = ?", [ruleId]);
+  const rule = await mysqlQueryOne(`SELECT l.id, l.name FROM logistics_fee_rules l WHERE l.id = ? AND ${scope.sql}`, [ruleId, ...scope.params]);
   if (!rule) return { ok: true, deleted: false };
+  const productScope = logisticsProductTenantPredicateMysql("p", scope);
+  const orderScope = scope.defaultTenant ? "(shop.tenant_id = ? OR shop.tenant_id IS NULL)" : "shop.tenant_id = ?";
   const references = await mysqlQueryOne(`
     SELECT
-      (SELECT COUNT(*) FROM products WHERE logistics_rule_id = ?) AS product_count,
-      (SELECT COUNT(*) FROM order_items WHERE frozen_logistics_rule_id = ?) AS order_count
-  `, [ruleId, ruleId]);
+      (SELECT COUNT(*) FROM products p WHERE p.logistics_rule_id = ? AND ${productScope}) AS product_count,
+      (SELECT COUNT(*) FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN shops shop ON shop.id = o.shop_id
+        WHERE oi.frozen_logistics_rule_id = ? AND ${orderScope}) AS order_count
+  `, [ruleId, ...scope.params, ruleId, scope.tenantId]);
   const productCount = Number(references?.product_count || 0);
   const orderCount = Number(references?.order_count || 0);
   if (productCount || orderCount) {
     throw new Error(`物流规则「${rule.name || ruleId}」不能删除：${productCount} 个商品正在使用，${orderCount} 条订单保留了该运费快照。请先解除商品绑定；订单历史版本必须保留。`);
   }
-  await mysqlExecute("DELETE FROM logistics_fee_rules WHERE id = ?", [ruleId]);
+  await mysqlExecute(`DELETE FROM logistics_fee_rules l WHERE l.id = ? AND ${scope.sql}`, [ruleId, ...scope.params]);
 
   invalidateOrderLogisticsRuleCachesMysql();
   invalidateMasterDataCache();
   return { ok: true, deleted: true };
 }
 
-export async function incrementLogisticsRuleUsageMysql(id) {
+export async function incrementLogisticsRuleUsageMysql(id, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const scope = await logisticsTenantScopeMysql(tenantId);
   const ruleId = Number(id);
   if (!ruleId) return { ok: false };
   await mysqlExecute(`
-    UPDATE logistics_fee_rules
+    UPDATE logistics_fee_rules l
     SET usage_count = COALESCE(usage_count, 0) + 1,
       last_used_at = CURRENT_TIMESTAMP,
       updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `, [ruleId]);
+    WHERE l.id = ? AND ${scope.sql}
+  `, [ruleId, ...scope.params]);
 
   invalidateOrderLogisticsRuleCachesMysql();
   invalidateMasterDataCache();
   return { ok: true };
 }
 
-async function activeOrderLogisticsFilterMethodsMysql() {
+async function activeOrderLogisticsFilterMethodsMysql(tenantId = "admin") {
   ensureMysqlCutoverEnabled();
-  if (logisticsRuleFilterCacheMysql) return logisticsRuleFilterCacheMysql;
+  const cacheKey = String(tenantId || "admin");
+  if (logisticsRuleFilterCacheMysql.has(cacheKey)) {
+    const cached = logisticsRuleFilterCacheMysql.get(cacheKey);
+    logisticsRuleFilterCacheMysql.delete(cacheKey);
+    logisticsRuleFilterCacheMysql.set(cacheKey, cached);
+    return cached;
+  }
   await ensureLogisticsRuleFilterSchemaMysql();
+  const tenantScope = await logisticsTenantScopeMysql(tenantId, "l");
   const [configuredRow, rows] = await Promise.all([
-    mysqlQueryOne("SELECT COUNT(*) AS count FROM logistics_fee_rules"),
+    mysqlQueryOne(`SELECT COUNT(*) AS count FROM logistics_fee_rules l WHERE ${tenantScope.sql}`, tenantScope.params),
     mysqlQuery(`
-      SELECT id, version_group_id, name, filter_keywords, carrier, channel, min_weight_g, usage_count
-      FROM logistics_fee_rules
-      WHERE enabled != 0
-      ORDER BY usage_count DESC, carrier ASC, channel ASC, min_weight_g ASC, id ASC
-    `)
+      SELECT l.id, l.version_group_id, l.name, l.filter_keywords, l.carrier, l.channel, l.min_weight_g, l.usage_count
+      FROM logistics_fee_rules l
+      WHERE l.enabled != 0 AND ${tenantScope.sql}
+      ORDER BY l.usage_count DESC, l.carrier ASC, l.channel ASC, l.min_weight_g ASC, l.id ASC
+    `, tenantScope.params)
   ]);
   const rules = rows
     .map((row) => {
@@ -3446,8 +3622,10 @@ async function activeOrderLogisticsFilterMethodsMysql() {
     })
     .filter((rule) => rule.label);
   if (!rules.length) {
-    logisticsRuleFilterCacheMysql = Number(configuredRow?.count || 0) > 0 ? [] : FALLBACK_ORDER_LOGISTICS_METHODS_MYSQL;
-    return logisticsRuleFilterCacheMysql;
+    const fallback = Number(configuredRow?.count || 0) > 0 ? [] : FALLBACK_ORDER_LOGISTICS_METHODS_MYSQL;
+    logisticsRuleFilterCacheMysql.set(cacheKey, fallback);
+    if (logisticsRuleFilterCacheMysql.size > 128) logisticsRuleFilterCacheMysql.delete(logisticsRuleFilterCacheMysql.keys().next().value);
+    return fallback;
   }
   const mergedByValue = new Map();
   for (const rule of rules) {
@@ -3464,14 +3642,16 @@ async function activeOrderLogisticsFilterMethodsMysql() {
       warehousePatterns: [...new Set([...(current.warehousePatterns || []), ...(rule.warehousePatterns || [])])]
     });
   }
-  logisticsRuleFilterCacheMysql = [...mergedByValue.values()];
-  return logisticsRuleFilterCacheMysql;
+  const methods = [...mergedByValue.values()];
+  logisticsRuleFilterCacheMysql.set(cacheKey, methods);
+  if (logisticsRuleFilterCacheMysql.size > 128) logisticsRuleFilterCacheMysql.delete(logisticsRuleFilterCacheMysql.keys().next().value);
+  return methods;
 }
 
-async function activeOrderLogisticsRuleByLabelMysql(label) {
+async function activeOrderLogisticsRuleByLabelMysql(label, tenantId = "admin") {
   const normalized = String(label || "").trim().toLowerCase();
   if (!normalized) return null;
-  const rules = await activeOrderLogisticsFilterMethodsMysql();
+  const rules = await activeOrderLogisticsFilterMethodsMysql(tenantId);
   const exact = rules.find((rule) => String(rule.label || "").trim().toLowerCase() === normalized);
   if (exact) return exact;
   const fallbackValue = resolveOrderLogisticsRuleValue({ label });
@@ -3479,44 +3659,44 @@ async function activeOrderLogisticsRuleByLabelMysql(label) {
   return rules.find((rule) => String(rule.value || "").trim() === fallbackValue) || null;
 }
 
-async function matchOrderLogisticsRuleMysql(text) {
+async function matchOrderLogisticsRuleMysql(text, tenantId = "admin") {
   const normalized = String(text || "").toLowerCase();
   if (!normalized) return null;
   if (normalized.includes("guoo economy budget")) {
-    return await activeOrderLogisticsRuleByLabelMysql("GUOO 低客单轻小件");
+    return await activeOrderLogisticsRuleByLabelMysql("GUOO 低客单轻小件", tenantId);
   }
   if (normalized.includes("guoo economy small")) {
-    return await activeOrderLogisticsRuleByLabelMysql("GUOO 轻小件");
+    return await activeOrderLogisticsRuleByLabelMysql("GUOO 轻小件", tenantId);
   }
   if (normalized.includes("guoo economy extra small")) {
-    return await activeOrderLogisticsRuleByLabelMysql("GUOO 超级轻小件");
+    return await activeOrderLogisticsRuleByLabelMysql("GUOO 超级轻小件", tenantId);
   }
   if (normalized.includes("guoo")) return null;
   if (normalized.includes("hunchun") || normalized.includes("hch-pd") || normalized.includes("hch-cr") || normalized.includes("cel fbp")) {
-    return await activeOrderLogisticsRuleByLabelMysql("CEL Hunchun 2");
+    return await activeOrderLogisticsRuleByLabelMysql("CEL Hunchun 2", tenantId);
   }
   if (normalized.includes("china post") || normalized.includes("邮政")) {
-    return await activeOrderLogisticsRuleByLabelMysql("中国邮政 500g 以下");
+    return await activeOrderLogisticsRuleByLabelMysql("中国邮政 500g 以下", tenantId);
   }
   if (normalized.includes("0.5-30kg")) {
-    return await activeOrderLogisticsRuleByLabelMysql("CEL 陆运 0.5-30kg");
+    return await activeOrderLogisticsRuleByLabelMysql("CEL 陆运 0.5-30kg", tenantId);
   }
   if (normalized.includes("500-25000g")) {
-    return await activeOrderLogisticsRuleByLabelMysql("CEL 陆运经济 Budget");
+    return await activeOrderLogisticsRuleByLabelMysql("CEL 陆运经济 Budget", tenantId);
   }
   if (normalized.includes("cel economy big") || normalized.includes("2-30kg")) {
-    return await activeOrderLogisticsRuleByLabelMysql("CEL 陆运经济 Big");
+    return await activeOrderLogisticsRuleByLabelMysql("CEL 陆运经济 Big", tenantId);
   }
   if (normalized.includes("cel economy small")) {
-    return await activeOrderLogisticsRuleByLabelMysql("CEL 陆运经济 Small");
+    return await activeOrderLogisticsRuleByLabelMysql("CEL 陆运经济 Small", tenantId);
   }
   if (normalized.includes("cel economy extra small") || normalized.includes("extra small economy")) {
-    return await activeOrderLogisticsRuleByLabelMysql("CEL 陆运经济 Extra Small");
+    return await activeOrderLogisticsRuleByLabelMysql("CEL 陆运经济 Extra Small", tenantId);
   }
   if (normalized.includes("cel standard extra small") || normalized.includes("extra small standard")) {
-    return await activeOrderLogisticsRuleByLabelMysql("CEL 陆空标准 Extra Small");
+    return await activeOrderLogisticsRuleByLabelMysql("CEL 陆空标准 Extra Small", tenantId);
   }
-  const rules = await activeOrderLogisticsFilterMethodsMysql();
+  const rules = await activeOrderLogisticsFilterMethodsMysql(tenantId);
   for (const rule of rules) {
     const patterns = Array.isArray(rule.warehousePatterns) ? rule.warehousePatterns : [];
     if (patterns.some((pattern) => normalized.includes(String(pattern || "").toLowerCase()))) {
@@ -3758,19 +3938,22 @@ export async function testOrderCancellationRuleMysql(body = {}) {
   };
 }
 
-export async function shopsMysql() {
+export async function shopsMysql(tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureShopWatermarkSchemaMysql();
   await ensureShopAdvertisingCredentialSchemaMysql();
   await ensureShopUserSchemaMysql();
-  return getCachedMasterData("shops", async () => {
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  return getCachedMasterData(`shops:${normalizedTenantId}`, async () => {
     const rows = await mysqlQuery(`
       SELECT s.*, p.name AS user_name
       FROM shops s
       LEFT JOIN people p ON p.id = s.user_id
-      WHERE s.status != 'deleted'
+      WHERE (s.tenant_id = ?${defaultTenant ? " OR s.tenant_id IS NULL" : ""})
+        AND s.status != 'deleted'
       ORDER BY s.id
-    `);
+    `, [normalizedTenantId]);
     return rows.map((row) => ({
       ...row,
       performance_client_secret: "",
@@ -4505,14 +4688,21 @@ function fbpReplenishmentOrderNo(id, dateKey = todayDateKeyMysql()) {
   return `FBP-${day}-${String(id).padStart(5, "0")}`;
 }
 
-export async function fbpReplenishmentOrdersMysql(query = {}) {
+export async function fbpReplenishmentOrdersMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const shopScope = `o.shop_id IN (SELECT scoped_shop.id FROM shops scoped_shop WHERE scoped_shop.status != 'deleted' AND ${tenantShopPredicateMysql("scoped_shop", defaultTenant)})`;
   await ensureProductNamingSchemaMysql();
   await ensureFbpReplenishmentSchemaMysql();
   await ensureFbpTransferRecordsSchemaMysql();
   if (Number(query.print_item_id) > 0) {
-    const records = await mysqlQuery(`SELECT r.*, p.name AS person_name FROM fbp_replenishment_print_records r
-      LEFT JOIN people p ON p.id = r.created_by WHERE r.item_id = ? ORDER BY r.id DESC LIMIT 200`, [Number(query.print_item_id)]);
+    const records = await mysqlQuery(`SELECT r.*, ${defaultTenant ? "p.name" : "NULL"} AS person_name FROM fbp_replenishment_print_records r
+      JOIN fbp_replenishment_order_items i ON i.id = r.item_id
+      JOIN fbp_replenishment_orders o ON o.id = i.order_id
+      JOIN shops scoped_shop ON scoped_shop.id = o.shop_id AND scoped_shop.status != 'deleted' AND ${tenantShopPredicateMysql("scoped_shop", defaultTenant)}
+      ${defaultTenant ? "LEFT JOIN people p ON p.id = r.created_by" : ""}
+      WHERE r.item_id = ? ORDER BY r.id DESC LIMIT 200`, [normalizedTenantId, Number(query.print_item_id)]);
     return { print_records: records };
   }
   const status = String(query.status || "all");
@@ -4521,8 +4711,8 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
   const text = String(query.query || query.search || "").trim();
   const page = Math.max(1, Number(query.page || 1));
   const pageSize = Math.min(100, Math.max(1, Number(query.pageSize || 20)));
-  const where = [];
-  const params = [];
+  const where = [shopScope];
+  const params = [normalizedTenantId];
   if (status === "applying") {
     where.push("o.status IN ('draft', 'pending_review')");
   } else if (status === "replenishment") {
@@ -4548,7 +4738,7 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
     params.push(batchId);
   }
   if (text) {
-    where.push(`(
+    where.push(defaultTenant ? `(
       o.order_no LIKE ?
        OR EXISTS (
          SELECT 1 FROM fbp_replenishment_order_items si
@@ -4567,9 +4757,17 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
         WHERE si.order_id = o.id
           AND requester.name LIKE ?
       )
+    )` : `(
+      o.order_no LIKE ?
+      OR EXISTS (
+        SELECT 1 FROM fbp_replenishment_order_items si
+        WHERE si.order_id = o.id
+          AND (si.ozon_sku LIKE ? OR si.product_name LIKE ? OR si.offer_id LIKE ? OR si.inventory_id = ?)
+      )
     )`);
     const pattern = `%${text}%`;
-    params.push(pattern, pattern, pattern, pattern, pattern, text, text, text, pattern, pattern);
+    if (defaultTenant) params.push(pattern, pattern, pattern, pattern, pattern, text, text, text, pattern, pattern);
+    else params.push(pattern, pattern, pattern, pattern, text);
   }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const countRow = await mysqlQueryOne(`SELECT COUNT(*) AS total FROM fbp_replenishment_orders o ${whereSql}`, params);
@@ -4580,20 +4778,18 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
           AND ftr.source_ref LIKE CONCAT('fbp_replenishment:', o.id, ':%')
           AND ftr.status <> 'cancelled') AS received_quantity,
       DATE_FORMAT(o.order_date, '%Y-%m-%d') AS order_date,
-      batch.id AS batch_id, batch.batch_no,
+      ${defaultTenant ? "batch.id AS batch_id, batch.batch_no" : "NULL AS batch_id, NULL AS batch_no"},
       s.name AS shop_name, s.ozon_client_id AS ozon_company_id,
-      creator.name AS created_by_name, reviewer.name AS reviewed_by_name,
+      ${defaultTenant ? "creator.name" : "NULL"} AS created_by_name, ${defaultTenant ? "reviewer.name" : "NULL"} AS reviewed_by_name,
       COUNT(i.id) AS item_count,
       COALESCE(SUM(i.requested_qty), 0) AS total_requested_qty,
       COALESCE(SUM(i.approved_qty), 0) AS total_approved_qty,
       COALESCE(SUM(i.approved_qty + COALESCE(adj.adjustment_qty, 0)), 0) AS total_final_qty
     FROM fbp_replenishment_orders o
     LEFT JOIN shops s ON s.id = o.shop_id
-    LEFT JOIN people creator ON creator.id = o.created_by
-    LEFT JOIN people reviewer ON reviewer.id = o.reviewed_by
+    ${defaultTenant ? "LEFT JOIN people creator ON creator.id = o.created_by LEFT JOIN people reviewer ON reviewer.id = o.reviewed_by" : ""}
     LEFT JOIN fbp_replenishment_order_items i ON i.order_id = o.id
-    LEFT JOIN fbp_replenishment_batch_members bm ON bm.order_id = o.id
-    LEFT JOIN fbp_replenishment_batches batch ON batch.id = bm.batch_id
+    ${defaultTenant ? "LEFT JOIN fbp_replenishment_batch_members bm ON bm.order_id = o.id LEFT JOIN fbp_replenishment_batches batch ON batch.id = bm.batch_id" : ""}
     LEFT JOIN (
       SELECT item_id, SUM(adjustment_qty) AS adjustment_qty,
         GROUP_CONCAT(CONCAT(DATE_FORMAT(created_at, '%Y-%m-%d %H:%i'), ' ', IF(adjustment_qty > 0, '+', ''), adjustment_qty, '：', reason) ORDER BY created_at SEPARATOR '\n') AS adjustment_summary
@@ -4601,7 +4797,7 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
       GROUP BY item_id
     ) adj ON adj.item_id = i.id
     ${whereSql}
-    GROUP BY o.id, s.name, s.ozon_client_id, creator.name, reviewer.name, batch.id, batch.batch_no
+    GROUP BY o.id, s.name, s.ozon_client_id${defaultTenant ? ", creator.name, reviewer.name, batch.id, batch.batch_no" : ""}
     ORDER BY o.created_at DESC, o.id DESC
     LIMIT ? OFFSET ?
   `, [...params, pageSize, (page - 1) * pageSize]);
@@ -4610,19 +4806,13 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
   if (ids.length) {
     itemRows = await mysqlQuery(`
       SELECT i.*, COALESCE(adj.adjustment_qty, 0) AS adjustment_qty, COALESCE(adj.adjustment_summary, '') AS adjustment_summary,
-        COALESCE(NULLIF(current_product.name, ''), i.product_name) AS product_name,
-        COALESCE(NULLIF(i.image_url, ''), current_product.image_url) AS image_url,
-        CASE
-          WHEN current_product.id IS NULL THEN i.inventory_id
-          WHEN current_product.code LIKE 'P-%' THEN current_product.code
-          ELSE CONCAT('P-', DATE_FORMAT(current_product.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(current_product.id, 3, '0'))
-        END AS inventory_id,
-        current_product.inventory_number,
-        requester.name AS requested_by_name, printer.name AS barcode_printed_by_name
+        ${defaultTenant ? "COALESCE(NULLIF(current_product.name, ''), i.product_name)" : "i.product_name"} AS product_name,
+        ${defaultTenant ? "COALESCE(NULLIF(i.image_url, ''), current_product.image_url)" : "i.image_url"} AS image_url,
+        ${defaultTenant ? "CASE WHEN current_product.id IS NULL THEN i.inventory_id WHEN current_product.code LIKE 'P-%' THEN current_product.code ELSE CONCAT('P-', DATE_FORMAT(current_product.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(current_product.id, 3, '0')) END" : "i.inventory_id"} AS inventory_id,
+        ${defaultTenant ? "current_product.inventory_number" : "NULL"} AS inventory_number,
+        ${defaultTenant ? "requester.name" : "NULL"} AS requested_by_name, ${defaultTenant ? "printer.name" : "NULL"} AS barcode_printed_by_name
       FROM fbp_replenishment_order_items i
-      LEFT JOIN products current_product ON current_product.id = i.product_id
-      LEFT JOIN people requester ON requester.id = i.requested_by
-      LEFT JOIN people printer ON printer.id = i.barcode_printed_by
+      ${defaultTenant ? "LEFT JOIN products current_product ON current_product.id = i.product_id LEFT JOIN people requester ON requester.id = i.requested_by LEFT JOIN people printer ON printer.id = i.barcode_printed_by" : ""}
       LEFT JOIN (
         SELECT item_id, SUM(adjustment_qty) AS adjustment_qty,
           GROUP_CONCAT(CONCAT(DATE_FORMAT(created_at, '%Y-%m-%d %H:%i'), ' ', IF(adjustment_qty > 0, '+', ''), adjustment_qty, '：', reason) ORDER BY created_at SEPARATOR '\n') AS adjustment_summary
@@ -4633,7 +4823,7 @@ export async function fbpReplenishmentOrdersMysql(query = {}) {
       ORDER BY i.created_at DESC, i.id DESC
     `, ids);
   }
-  const warehouseFacts = query.inventory === '1'
+  const warehouseFacts = query.inventory === '1' && defaultTenant
     ? await loadWarehouseFacts(mysqlQuery, itemRows.map(row => row.product_id), localStockLocationPredicateMysql())
     : new Map();
   const itemMap = new Map();
@@ -4808,29 +4998,36 @@ export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null
   return { ok: true, rows: created };
 }
 
-export async function updateFbpReplenishmentOrderItemsMysql(body = {}) {
+export async function updateFbpReplenishmentOrderItemsMysql(body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const orderId = Number(body.order_id || body.orderId || body.id || 0);
   const items = Array.isArray(body.items) ? body.items : [];
   if (!orderId || !items.length) throw new Error("缺少备货单明细，无法保存数量。");
-  const order = await mysqlQueryOne("SELECT id, status FROM fbp_replenishment_orders WHERE id = ?", [orderId]);
-  if (!order) throw new Error("备货单不存在。");
-  const orderStatus = String(order.status || "").trim();
-  if (["approved", "sent", "ozon_created", "completed", "cancelled"].includes(orderStatus)) {
-    throw new Error("已通过、已发送或已完成的备货单不能再修改数量。");
-  }
-  for (const item of items) {
-    const itemId = Number(item.id || 0);
-    if (!itemId) continue;
-    const requestedQty = Math.max(1, Math.round(Number(item.requested_qty || item.requestedQty || 0)));
-    await mysqlExecute(`
-      UPDATE fbp_replenishment_order_items
-      SET requested_qty = ?, approved_qty = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND order_id = ?
-    `, [requestedQty, requestedQty, itemId, orderId]);
-  }
-  await mysqlExecute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [orderId]);
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
+  await withMysqlTransaction(async (connection) => {
+    const order = await mysqlConnectionQueryOne(connection, `SELECT o.id, o.status FROM fbp_replenishment_orders o
+      JOIN shops s ON s.id = o.shop_id
+      WHERE o.id = ? AND s.status != 'deleted' AND ${shopScope} LIMIT 1 FOR UPDATE`, [orderId, normalizedTenantId]);
+    if (!order) throw new Error("备货单不存在或不属于当前企业。");
+    const orderStatus = String(order.status || "").trim();
+    if (["approved", "sent", "ozon_created", "completed", "cancelled"].includes(orderStatus)) {
+      throw new Error("已通过、已发送或已完成的备货单不能再修改数量。");
+    }
+    for (const item of items) {
+      const itemId = Number(item.id || 0);
+      if (!itemId) continue;
+      const requestedQty = Math.max(1, Math.round(Number(item.requested_qty || item.requestedQty || 0)));
+      await connection.execute(`
+        UPDATE fbp_replenishment_order_items
+        SET requested_qty = ?, approved_qty = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND order_id = ?
+      `, [requestedQty, requestedQty, itemId, orderId]);
+    }
+    await connection.execute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [orderId]);
+  });
   return { ok: true, id: orderId };
 }
 
@@ -4917,9 +5114,11 @@ async function requireSessionPersonIdMysql(personId, connection = null) {
   return resolved;
 }
 
-export async function addFbpReplenishmentItemAdjustmentMysql(body = {}, userId = null) {
+export async function addFbpReplenishmentItemAdjustmentMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const orderId = Number(body.order_id || body.orderId || 0);
   const itemId = Number(body.item_id || body.itemId || 0);
   const adjustmentQty = Math.round(Number(body.adjustment_qty || body.adjustmentQty || 0));
@@ -4938,27 +5137,45 @@ export async function addFbpReplenishmentItemAdjustmentMysql(body = {}, userId =
   if (!adjustmentQty) throw new Error("人工调整数量不能为 0，请填写正数或负数。");
   if (!reason) throw new Error("请选择调整原因，确保数量变更可追溯。");
   if (reasonCode === "other" && !reasonNote) throw new Error("选择其他原因时，请填写补充说明。");
+  if (!defaultTenant && reasonCode === "stock_shortage") {
+    throw new Error("库存短缺原因会生成采购申请，该采购流程尚未完成企业隔离；请选择其他调整原因或联系管理员。");
+  }
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   const item = await mysqlQueryOne(`
     SELECT i.id, i.approved_qty, o.status,
       COALESCE((SELECT SUM(a.adjustment_qty) FROM fbp_replenishment_item_adjustments a WHERE a.item_id = i.id), 0) AS adjustment_qty
     FROM fbp_replenishment_order_items i
     JOIN fbp_replenishment_orders o ON o.id = i.order_id
-    WHERE i.id = ? AND i.order_id = ?
-  `, [itemId, orderId]);
-  if (!item) throw new Error("备货单商品明细不存在。");
+    JOIN shops s ON s.id = o.shop_id
+    WHERE i.id = ? AND i.order_id = ? AND s.status != 'deleted' AND ${shopScope}
+  `, [itemId, orderId, normalizedTenantId]);
+  if (!item) throw new Error("备货单商品明细不存在或不属于当前企业。");
   if (!["approved", "sent", "ozon_created", "completed"].includes(String(item.status || ""))) {
     throw new Error("备货单通过后才能添加人工数量调整；审核前请直接修改申请数量。");
   }
   const finalQty = Number(item.approved_qty || 0) + Number(item.adjustment_qty || 0) + adjustmentQty;
   if (finalQty < 0) throw new Error("调整后的真实备货数量不能小于 0。");
-  await ensureProcurementFlexibleRequestSchemaMysql();
+  if (defaultTenant) await ensureProcurementFlexibleRequestSchemaMysql();
   const result = await withMysqlTransaction(async (connection) => {
+    const order = await mysqlConnectionQueryOne(connection, `SELECT o.id FROM fbp_replenishment_orders o
+      JOIN shops s ON s.id = o.shop_id
+      WHERE o.id = ? AND s.status != 'deleted' AND ${shopScope} LIMIT 1 FOR UPDATE`, [orderId, normalizedTenantId]);
+    if (!order) throw new Error("备货单不存在或不属于当前企业。");
+    const lockedItem = await mysqlConnectionQueryOne(connection, `SELECT i.approved_qty, o.status,
+        COALESCE((SELECT SUM(a.adjustment_qty) FROM fbp_replenishment_item_adjustments a WHERE a.item_id = i.id), 0) AS adjustment_qty
+      FROM fbp_replenishment_order_items i JOIN fbp_replenishment_orders o ON o.id = i.order_id
+      WHERE i.id = ? AND i.order_id = ? FOR UPDATE`, [itemId, orderId]);
+    if (!lockedItem || !["approved", "sent", "ozon_created", "completed"].includes(String(lockedItem.status || ""))) {
+      throw new Error("备货单商品明细状态已变化，请刷新后重试。");
+    }
+    const lockedFinalQty = Number(lockedItem.approved_qty || 0) + Number(lockedItem.adjustment_qty || 0) + adjustmentQty;
+    if (lockedFinalQty < 0) throw new Error("调整后的真实备货数量不能小于 0。");
     const [adjustmentResult] = await connection.execute(`
       INSERT INTO fbp_replenishment_item_adjustments (order_id, item_id, adjustment_qty, reason, reason_code, reason_note, created_by)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `, [orderId, itemId, adjustmentQty, reason, reasonCode, reasonNote || null, userId || null]);
     let procurementRequestId = null;
-    if (reasonCode === "stock_shortage" && adjustmentQty < 0) {
+    if (defaultTenant && reasonCode === "stock_shortage" && adjustmentQty < 0) {
       const [itemRows] = await connection.execute(`
         SELECT i.product_id, i.product_name, i.inventory_id, o.order_no
         FROM fbp_replenishment_order_items i
@@ -4982,9 +5199,9 @@ export async function addFbpReplenishmentItemAdjustmentMysql(body = {}, userId =
       await connection.execute("UPDATE fbp_replenishment_item_adjustments SET procurement_request_id = ? WHERE id = ?", [procurementRequestId, adjustmentResult.insertId]);
     }
     await connection.execute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [orderId]);
-    return { procurementRequestId };
+    return { procurementRequestId, adjustmentQty: Number(lockedItem.adjustment_qty || 0) + adjustmentQty, finalQty: lockedFinalQty };
   });
-  return { ok: true, order_id: orderId, item_id: itemId, adjustment_qty: Number(item.adjustment_qty || 0) + adjustmentQty, final_qty: finalQty, procurement_request_id: result.procurementRequestId };
+  return { ok: true, order_id: orderId, item_id: itemId, adjustment_qty: result.adjustmentQty, final_qty: result.finalQty, procurement_request_id: result.procurementRequestId };
 }
 
 const fbpAdjustmentReasonLabels = {
@@ -4996,47 +5213,60 @@ const fbpAdjustmentReasonLabels = {
   other: "其他"
 };
 
-export async function fbpReplenishmentItemAdjustmentsMysql(query = {}) {
+export async function fbpReplenishmentItemAdjustmentsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const orderId = Number(query.order_id || query.orderId || 0);
   const itemId = Number(query.item_id || query.itemId || 0);
   if (!orderId || !itemId) throw new Error("缺少备货单或商品明细，无法查看调整记录。");
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   return await mysqlQuery(`
-    SELECT id, adjustment_qty, reason, reason_code, reason_note, procurement_request_id, created_at
-    FROM fbp_replenishment_item_adjustments
-    WHERE order_id = ? AND item_id = ?
-    ORDER BY created_at DESC, id DESC
-  `, [orderId, itemId]);
+    SELECT a.id, a.adjustment_qty, a.reason, a.reason_code, a.reason_note,
+      ${defaultTenant ? "a.procurement_request_id" : "NULL AS procurement_request_id"}, a.created_at
+    FROM fbp_replenishment_item_adjustments a
+    JOIN fbp_replenishment_orders o ON o.id = a.order_id
+    JOIN shops s ON s.id = o.shop_id
+    WHERE a.order_id = ? AND a.item_id = ? AND s.status != 'deleted' AND ${shopScope}
+    ORDER BY a.created_at DESC, a.id DESC
+  `, [orderId, itemId, normalizedTenantId]);
 }
 
-export async function updateFbpReplenishmentItemAdjustmentReasonMysql(body = {}, userId = null) {
+export async function updateFbpReplenishmentItemAdjustmentReasonMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
-  await ensureProcurementFlexibleRequestSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const adjustmentId = Number(body.adjustment_id || body.adjustmentId || 0);
   const reasonCode = String(body.reason_code || body.reasonCode || "").trim();
   const reasonNote = String(body.reason_note || body.reasonNote || "").trim().slice(0, 500);
   const reason = fbpAdjustmentReasonLabels[reasonCode] || "";
   if (!adjustmentId || !reason) throw new Error("请选择规范的调整原因。");
   if (reasonCode === "other" && !reasonNote) throw new Error("选择其他原因时，请填写补充说明。");
+  if (!defaultTenant && reasonCode === "stock_shortage") {
+    throw new Error("库存短缺原因会生成采购申请，该采购流程尚未完成企业隔离；请选择其他调整原因或联系管理员。");
+  }
+  if (defaultTenant) await ensureProcurementFlexibleRequestSchemaMysql();
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   return await withMysqlTransaction(async (connection) => {
     const [rows] = await connection.execute(`
       SELECT a.*, i.product_id, i.inventory_id, o.order_no
       FROM fbp_replenishment_item_adjustments a
       JOIN fbp_replenishment_order_items i ON i.id = a.item_id
       JOIN fbp_replenishment_orders o ON o.id = a.order_id
-      WHERE a.id = ? FOR UPDATE
-    `, [adjustmentId]);
+      JOIN shops s ON s.id = o.shop_id
+      WHERE a.id = ? AND s.status != 'deleted' AND ${shopScope} FOR UPDATE
+    `, [adjustmentId, normalizedTenantId]);
     const adjustment = rows[0];
-    if (!adjustment) throw new Error("调整记录不存在，请刷新后重试。");
+    if (!adjustment) throw new Error("调整记录不存在或不属于当前企业，请刷新后重试。");
     await connection.execute(`
       UPDATE fbp_replenishment_item_adjustments
       SET reason = ?, reason_code = ?, reason_note = ?
       WHERE id = ?
     `, [reason, reasonCode, reasonNote || null, adjustmentId]);
-    let procurementRequestId = Number(adjustment.procurement_request_id || 0) || null;
-    if (reasonCode === "stock_shortage" && Number(adjustment.adjustment_qty) < 0 && !procurementRequestId) {
+    let procurementRequestId = defaultTenant ? (Number(adjustment.procurement_request_id || 0) || null) : null;
+    if (defaultTenant && reasonCode === "stock_shortage" && Number(adjustment.adjustment_qty) < 0 && !procurementRequestId) {
       if (!adjustment.product_id) throw new Error("该 FBP 商品未关联库存产品，无法生成采购草稿；请先完成库存绑定。");
       const [requestResult] = await connection.execute(`
         INSERT INTO procurement_requests
@@ -5227,9 +5457,12 @@ function fbpReplenishmentBatchNo(id) {
   return `FBP-MERGE-${day}-${String(id).padStart(5, "0")}`;
 }
 
-export async function linkFbpReplenishmentOrdersMysql(body = {}, userId = null) {
+export async function linkFbpReplenishmentOrdersMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   const orderIds = [...new Set((Array.isArray(body.order_ids) ? body.order_ids : []).map(Number).filter(Boolean))];
   if (orderIds.length < 2) throw new Error("请至少选择 2 张备货单进行关联汇总。");
   return withMysqlTransaction(async (connection) => {
@@ -5237,11 +5470,12 @@ export async function linkFbpReplenishmentOrdersMysql(body = {}, userId = null) 
     const [orders] = await connection.execute(`
       SELECT o.id, o.shop_id, bm.batch_id
       FROM fbp_replenishment_orders o
+      JOIN shops s ON s.id = o.shop_id
       LEFT JOIN fbp_replenishment_batch_members bm ON bm.order_id = o.id
-      WHERE o.id IN (${placeholders})
+      WHERE o.id IN (${placeholders}) AND s.status != 'deleted' AND ${shopScope}
       FOR UPDATE
-    `, orderIds);
-    if (orders.length !== orderIds.length) throw new Error("部分备货单不存在，请刷新后重试。");
+    `, [...orderIds, normalizedTenantId]);
+    if (orders.length !== orderIds.length) throw new Error("部分备货单不存在或不属于当前企业，请刷新后重试。");
     if (new Set(orders.map((row) => Number(row.shop_id))).size !== 1) throw new Error("只能关联同一店铺的备货单。");
     const existingBatchIds = [...new Set(orders.map((row) => Number(row.batch_id || 0)).filter(Boolean))];
     if (existingBatchIds.length) throw new Error("所选备货单已有归属批次，请先解除原关联后再操作。");
@@ -5257,15 +5491,33 @@ export async function linkFbpReplenishmentOrdersMysql(body = {}, userId = null) 
   });
 }
 
-export async function unlinkFbpReplenishmentOrderMysql(body = {}) {
+export async function unlinkFbpReplenishmentOrderMysql(body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   const orderId = Number(body.order_id || body.orderId || 0);
   if (!orderId) throw new Error("缺少要解除关联的备货单。");
   return withMysqlTransaction(async (connection) => {
-    const member = await mysqlConnectionQueryOne(connection, "SELECT batch_id FROM fbp_replenishment_batch_members WHERE order_id = ? FOR UPDATE", [orderId]);
+    const member = await mysqlConnectionQueryOne(connection, `
+      SELECT bm.batch_id
+      FROM fbp_replenishment_batch_members bm
+      JOIN fbp_replenishment_orders o ON o.id = bm.order_id
+      JOIN shops s ON s.id = o.shop_id
+      WHERE bm.order_id = ? AND s.status != 'deleted' AND ${shopScope}
+      FOR UPDATE
+    `, [orderId, normalizedTenantId]);
     if (!member?.batch_id) return { ok: true, order_id: orderId, unlinked: false };
     const batchId = Number(member.batch_id);
+    const batch = await mysqlConnectionQueryOne(connection, `
+      SELECT b.id
+      FROM fbp_replenishment_batches b
+      JOIN shops s ON s.id = b.shop_id
+      WHERE b.id = ? AND s.status != 'deleted' AND ${shopScope}
+      FOR UPDATE
+    `, [batchId, normalizedTenantId]);
+    if (!batch) throw new Error("关联批次不存在或不属于当前企业，请刷新后重试。");
     const successFill = await mysqlConnectionQueryOne(connection, "SELECT id FROM fbp_replenishment_fill_executions WHERE batch_id = ? AND status = 'success' LIMIT 1", [batchId]);
     if (successFill) throw new Error("该关联批次已有成功填入 Ozon 的执行记录，不能解除关联。");
     await connection.execute("DELETE FROM fbp_replenishment_batch_members WHERE order_id = ?", [orderId]);
@@ -5278,9 +5530,12 @@ export async function unlinkFbpReplenishmentOrderMysql(body = {}) {
   });
 }
 
-export async function fbpReplenishmentBatchFillPreviewMysql(query = {}) {
+export async function fbpReplenishmentBatchFillPreviewMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   const batchId = Number(query.batchId || query.batch_id || query.id || 0);
   if (!batchId) throw new Error("缺少关联汇总批次。");
   const batch = await mysqlQueryOne(`
@@ -5288,9 +5543,9 @@ export async function fbpReplenishmentBatchFillPreviewMysql(query = {}) {
     FROM fbp_replenishment_batches b
     LEFT JOIN shops s ON s.id = b.shop_id
     LEFT JOIN fbp_replenishment_batch_members bm ON bm.batch_id = b.id
-    WHERE b.id = ?
+    WHERE b.id = ? AND s.status != 'deleted' AND ${shopScope}
     GROUP BY b.id, s.name, s.ozon_client_id
-  `, [batchId]);
+  `, [batchId, normalizedTenantId]);
   if (!batch) throw new Error("关联汇总批次不存在。");
   const rows = await mysqlQuery(`
     SELECT i.ozon_sku, MAX(i.offer_id) AS offer_id,
@@ -5346,66 +5601,95 @@ export async function recordFbpReplenishmentBatchFillMysql(body = {}, userId = n
   return { ok: true, batch_id: batchId, success_count: successCount, total: results.length };
 }
 
-export async function markFbpReplenishmentItemBarcodePrintedMysql(body = {}, userId = null) {
+export async function markFbpReplenishmentItemBarcodePrintedMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
-  return withMysqlTransaction(connection => appendPrintRecord(connection, body, userId));
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
+  const orderId = Number(body.order_id || body.orderId || 0);
+  if (!orderId) throw new Error("缺少备货单，无法登记打印。");
+  return withMysqlTransaction(async (connection) => {
+    const order = await mysqlConnectionQueryOne(connection, `
+      SELECT o.id, o.shop_id
+      FROM fbp_replenishment_orders o
+      JOIN shops s ON s.id = o.shop_id
+      WHERE o.id = ? AND s.status != 'deleted' AND ${shopScope}
+      LIMIT 1 FOR UPDATE
+    `, [orderId, normalizedTenantId]);
+    if (!order) throw new Error("备货单不存在或不属于当前企业，无法登记打印。");
+    return appendPrintRecord(connection, body, userId, Number(order.shop_id));
+  });
 }
 
-export async function deleteFbpReplenishmentOrderMysql(body = {}, userId = null) {
+export async function deleteFbpReplenishmentOrderMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const id = Number(body.id || body.order_id || body.orderId || 0);
   if (!id) throw new Error("缺少备货单，无法删除。");
-  const order = await mysqlQueryOne("SELECT id, status FROM fbp_replenishment_orders WHERE id = ?", [id]);
-  if (!order) return { ok: true, id, deleted: false };
-  const orderStatus = String(order.status || "").trim();
-  if (["approved", "sent", "ozon_created", "completed"].includes(orderStatus)) {
-    throw new Error("已通过、已发送或已完成的备货单不能删除。");
-  }
-  await withMysqlTransaction(async (connection) => {
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
+  const deleted = await withMysqlTransaction(async (connection) => {
+    const order = await mysqlConnectionQueryOne(connection, `SELECT o.id, o.status FROM fbp_replenishment_orders o
+      JOIN shops s ON s.id = o.shop_id
+      WHERE o.id = ? AND s.status != 'deleted' AND ${shopScope} LIMIT 1 FOR UPDATE`, [id, normalizedTenantId]);
+    if (!order) return false;
+    const orderStatus = String(order.status || "").trim();
+    if (["approved", "sent", "ozon_created", "completed"].includes(orderStatus)) {
+      throw new Error("已通过、已发送或已完成的备货单不能删除。");
+    }
     await connection.execute("DELETE FROM fbp_replenishment_order_items WHERE order_id = ?", [id]);
     await connection.execute("DELETE FROM fbp_replenishment_orders WHERE id = ?", [id]);
+    return true;
   });
+  if (!deleted) return { ok: true, id, deleted: false };
   invalidateFbpPlanningCachesMysql();
   return { ok: true, id, deleted: true, deleted_by: userId || null };
 }
 
-export async function deleteFbpReplenishmentOrderItemMysql(body = {}, userId = null) {
+export async function deleteFbpReplenishmentOrderItemMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const orderId = Number(body.order_id || body.orderId || 0);
   const itemId = Number(body.item_id || body.itemId || body.id || 0);
   if (!orderId || !itemId) throw new Error("缺少备货单明细，无法删除。");
-  const order = await mysqlQueryOne("SELECT id, status FROM fbp_replenishment_orders WHERE id = ?", [orderId]);
-  if (!order) return { ok: true, order_id: orderId, item_id: itemId, deleted: false };
-  const orderStatus = String(order.status || "").trim();
-  if (["approved", "sent", "ozon_created", "completed"].includes(orderStatus)) {
-    throw new Error("已通过、已发送或已完成的备货单明细不能删除。");
-  }
-  const item = await mysqlQueryOne("SELECT id FROM fbp_replenishment_order_items WHERE id = ? AND order_id = ?", [itemId, orderId]);
-  if (!item) return { ok: true, order_id: orderId, item_id: itemId, deleted: false };
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   let orderDeleted = false;
-  await withMysqlTransaction(async (connection) => {
+  const deleted = await withMysqlTransaction(async (connection) => {
+    const order = await mysqlConnectionQueryOne(connection, `SELECT o.id, o.status FROM fbp_replenishment_orders o JOIN shops s ON s.id = o.shop_id WHERE o.id = ? AND s.status != 'deleted' AND ${shopScope} LIMIT 1 FOR UPDATE`, [orderId, normalizedTenantId]);
+    if (!order) return false;
+    const orderStatus = String(order.status || "").trim();
+    if (["approved", "sent", "ozon_created", "completed"].includes(orderStatus)) throw new Error("已通过、已发送或已完成的备货单明细不能删除。");
+    const item = await mysqlConnectionQueryOne(connection, "SELECT id FROM fbp_replenishment_order_items WHERE id = ? AND order_id = ?", [itemId, orderId]);
+    if (!item) return false;
     await connection.execute("DELETE FROM fbp_replenishment_order_items WHERE id = ? AND order_id = ?", [itemId, orderId]);
     const [remainingRows] = await connection.execute("SELECT COUNT(*) AS total FROM fbp_replenishment_order_items WHERE order_id = ?", [orderId]);
     const remaining = Number(remainingRows?.[0]?.total || 0);
     if (remaining <= 0) {
       await connection.execute("DELETE FROM fbp_replenishment_orders WHERE id = ?", [orderId]);
       orderDeleted = true;
-      return;
+      return true;
     }
     await connection.execute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [orderId]);
+    return true;
   });
+  if (!deleted) return { ok: true, order_id: orderId, item_id: itemId, deleted: false };
   invalidateFbpPlanningCachesMysql();
   return { ok: true, order_id: orderId, item_id: itemId, deleted: true, order_deleted: orderDeleted, deleted_by: userId || null };
 }
 
-export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId = null) {
+export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
-  await ensureFbpTransferRecordsSchemaMysql();
-  await ensureStockLocationSchemaMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  if (defaultTenant) {
+    await ensureFbpTransferRecordsSchemaMysql();
+    await ensureStockLocationSchemaMysql();
+  }
   const id = Number(body.id || body.order_id || body.orderId || 0);
   const status = String(body.status || "").trim();
   const allowed = new Set(["draft", "pending_review", "approved", "rejected", "sent", "ozon_created", "completed", "cancelled"]);
@@ -5425,9 +5709,18 @@ export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId =
   if (["completed", "cancelled"].includes(status)) fields.push("closed_at = CURRENT_TIMESTAMP");
   params.push(id);
   let approvalResult = { transferCount: 0, outboundQuantity: 0 };
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   await withMysqlTransaction(async (connection) => {
-    const order = await mysqlConnectionQueryOne(connection, "SELECT * FROM fbp_replenishment_orders WHERE id = ? LIMIT 1 FOR UPDATE", [id]);
-    if (!order) throw new Error("备货单不存在。");
+    const order = await mysqlConnectionQueryOne(connection, `SELECT o.* FROM fbp_replenishment_orders o
+      JOIN shops s ON s.id = o.shop_id
+      WHERE o.id = ? AND s.status != 'deleted' AND ${shopScope} LIMIT 1 FOR UPDATE`, [id, normalizedTenantId]);
+    if (!order) throw new Error("备货单不存在或不属于当前企业。");
+    if (!defaultTenant && ["approved", "sent", "ozon_created", "completed"].includes(status)) {
+      throw new Error("该状态会触发共享库存、发货或外部平台流程，当前企业暂不可操作。");
+    }
+    if (!defaultTenant && status === "cancelled" && String(order.status || "") === "approved") {
+      throw new Error("已审核备货单的库存释放流程尚未完成租户隔离，暂不能取消。");
+    }
     if (String(order.status || "") === "approved" && ["draft", "pending_review", "rejected"].includes(status)) {
       throw new Error("备货单已通过并预留本地库存，不能退回为未审核状态。");
     }
@@ -6092,7 +6385,7 @@ export async function updatePersonMysql(id, body = {}, hashPassword, validatePas
   }
 
   invalidateMasterDataCache("people");
-  invalidateMasterDataCache("shops");
+  invalidateShopCacheMysql();
   return { ok: true };
 }
 
@@ -6104,7 +6397,7 @@ export async function deletePersonMysql(id) {
 
   await destroySessionsByPersonIdMysql(personId);
   invalidateMasterDataCache("people");
-  invalidateMasterDataCache("shops");
+  invalidateShopCacheMysql();
   return { ok: true };
 }
 
@@ -6136,19 +6429,20 @@ export async function hardDeletePersonMysql(id) {
   });
 
   invalidateMasterDataCache("people");
-  invalidateMasterDataCache("shops");
+  invalidateShopCacheMysql();
   return { ok: true };
 }
 
-export async function createShopMysql(body = {}) {
+export async function createShopMysql(body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureShopWatermarkSchemaMysql();
   await ensureShopAdvertisingCredentialSchemaMysql();
   await ensureShopUserSchemaMysql();
   await ensureMysqlColumns("shops", ["ALTER TABLE shops ADD COLUMN ozon_seller_id VARCHAR(128) NULL"]);
   await ensureMysqlColumns("shops", ["ALTER TABLE shops ADD COLUMN ozon_seller_id VARCHAR(128) NULL"]);
-  const shopName = await assertUniqueShopNameMysql(body.name);
-  const userId = await requireShopUserIdMysql(body.user_id);
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const shopName = await assertUniqueShopNameMysql(body.name, normalizedTenantId);
+  const userId = await requireShopUserIdMysql(body.user_id, normalizedTenantId);
   const performanceSecret = String(body.performance_client_secret || "").trim();
   const payload = [
     shopName,
@@ -6171,30 +6465,32 @@ export async function createShopMysql(body = {}) {
 
   const result = await mysqlExecute(`
     INSERT INTO shops (
-      name, legal_entity, user_id, ozon_client_id, ozon_seller_id, api_key_hint, ozon_api_key, performance_client_id, performance_client_secret, performance_client_secret_hint,
+      tenant_id, name, legal_entity, user_id, ozon_client_id, ozon_seller_id, api_key_hint, ozon_api_key, performance_client_id, performance_client_secret, performance_client_secret_hint,
       watermark_position, watermark_x_percent, watermark_y_percent, watermark_scale_percent, watermark_opacity_percent,
       payout_rate
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `, payload);
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [normalizedTenantId, ...payload]);
 
 
 
-  invalidateMasterDataCache("shops");
+  invalidateShopCacheMysql();
   return { ok: true, id: Number(result.insertId) };
 }
 
-export async function updateShopMysql(id, body = {}) {
+export async function updateShopMysql(id, body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureShopWatermarkSchemaMysql();
   await ensureShopAdvertisingCredentialSchemaMysql();
   await ensureShopUserSchemaMysql();
   await ensureMysqlColumns("shops", ["ALTER TABLE shops ADD COLUMN ozon_seller_id VARCHAR(128) NULL"]);
-  const existing = await mysqlQueryOne("SELECT * FROM shops WHERE id = ?", [Number(id)]);
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const existing = await mysqlQueryOne(`SELECT * FROM shops WHERE id = ? AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})`, [Number(id), normalizedTenantId]);
   if (!existing) throw new Error("Shop not found");
   assertFreshRecord(body, existing, "店铺资料已被其他用户保存，请刷新后再继续编辑");
-  const shopName = await assertUniqueShopNameMysql(body.name, Number(id));
-  const userId = await requireShopUserIdMysql(body.user_id);
+  const shopName = await assertUniqueShopNameMysql(body.name, normalizedTenantId, Number(id));
+  const userId = await requireShopUserIdMysql(body.user_id, normalizedTenantId);
   const nextPerformanceSecret = String(body.performance_client_secret || "").trim()
     || String(existing.performance_client_secret || "");
 
@@ -6224,20 +6520,22 @@ export async function updateShopMysql(id, body = {}) {
       name = ?, legal_entity = ?, user_id = ?, ozon_client_id = ?, ozon_seller_id = ?, api_key_hint = ?, ozon_api_key = ?,
       performance_client_id = ?, performance_client_secret = ?, performance_client_secret_hint = ?, status = ?,
       watermark_position = ?, watermark_x_percent = ?, watermark_y_percent = ?, watermark_scale_percent = ?, watermark_opacity_percent = ?,
-      payout_rate = ?
-    WHERE id = ?
-  `, payload);
+      payout_rate = ?, tenant_id = COALESCE(tenant_id, ?)
+    WHERE id = ? AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})
+  `, [...payload.slice(0, -1), normalizedTenantId, Number(id), normalizedTenantId]);
 
 
 
-  invalidateMasterDataCache("shops");
+  invalidateShopCacheMysql();
   return { ok: true };
 }
 
-async function requireShopUserIdMysql(value) {
+async function requireShopUserIdMysql(value, tenantId) {
   const userId = Number(value || 0);
   if (!Number.isInteger(userId) || userId <= 0) throw new Error("请选择店铺绑定的店长（user_id）");
-  const person = await mysqlQueryOne("SELECT id FROM people WHERE id = ? AND active != 0", [userId]);
+  const person = await mysqlQueryOne(`SELECT p.id FROM people p
+    JOIN tenant_members tm ON tm.person_id = p.id AND tm.tenant_id = ? AND tm.active = 1
+    WHERE p.id = ? AND p.active != 0`, [Number(tenantId), userId]);
   if (!person) throw new Error("所选店长不存在或账号已停用，请在人员管理中确认后重新选择");
   return userId;
 }
@@ -6262,12 +6560,14 @@ function clampMysqlNumber(value, minimum, maximum, fallback) {
   return Math.min(maximum, Math.max(minimum, number));
 }
 
-export async function deleteShopMysql(id) {
+export async function deleteShopMysql(id, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
-  const result = await mysqlExecute("UPDATE shops SET status = 'deleted' WHERE id = ? AND status != 'deleted'", [Number(id)]);
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const result = await mysqlExecute(`UPDATE shops SET status = 'deleted' WHERE id = ? AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""}) AND status != 'deleted'`, [Number(id), normalizedTenantId]);
   if (Number(result.affectedRows || 0) !== 1) throw new Error("店铺不存在或已删除，请刷新后再确认");
 
-  invalidateMasterDataCache("shops");
+  invalidateShopCacheMysql();
   return { ok: true };
 }
 
@@ -6566,6 +6866,7 @@ export async function syncOzonStocksMysql(body = {}, options = {}) {
   invalidateMasterDataCache("stock-alerts:base");
   invalidateMasterDataCache("stock-alerts:base:v2");
   invalidateMasterDataCache("stock-alerts:fbp-base:v1");
+  invalidateMasterDataCachePrefix("online-products:");
   const status = errors.length ? "partial_error" : "ok";
   const message = `Fetched ${fetched}, upserted ${upserted}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
   return { status, fetched, upserted, errors, message, auto_fbp_receive: autoFbpReceive, alerts: await stockAlertsMysql() };
@@ -6604,10 +6905,16 @@ export async function saveOrderQualityRulesMysql(body = {}) {
   return { ok: true, rules: await orderQualityRulesMysql() };
 }
 
-export async function updateOrderMarkMysql(orderId, body = {}, userId = null) {
+export async function updateOrderMarkMysql(orderId, body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const id = Number(orderId);
-  const order = await mysqlQueryOne("SELECT id FROM orders WHERE id = ?", [id]);
+  const tenantScope = await orderOwnershipTenantScopeMysql(tenantId);
+  const order = await mysqlQueryOne(`
+    SELECT o.id
+    FROM orders o
+    ${tenantScope ? "JOIN shops s ON s.id = o.shop_id" : ""}
+    WHERE o.id = ? ${tenantScope ? `AND s.tenant_id = ${tenantScope.id} AND s.status = 'active'` : ""}
+  `, [id]);
   if (!order) throw new Error("Order not found");
   const auditPersonId = await resolveAuditPersonId(userId);
 
@@ -8076,14 +8383,14 @@ export async function syncOzonOnlineProductsMysql(body = {}) {
         archivedRefs = currentArchivedRefs;
         shopResult.candidates = refs.length;
         const productIds = refs.map((item) => Number(item.ozon_product_id || item.id || 0)).filter(Boolean);
-        const stockRows = await fetchOzonProductStocks(shop, { productIds });
+        const stockRows = await fetchOzonProductStocks(shop, { productIds, stockConcurrency: 3 });
         await refreshPendingListingStockSnapshotsMysql(shop.id, productIds, stockRows);
         const pendingRefs = filterPendingListingProductsWithoutFbsStock(refs, stockRows, { requireSku: false });
         const visibilityById = new Map(pendingRefs.map((item) => [String(item.ozon_product_id || item.id || ""), item.visibility || ""]));
         const detailedItems = await fetchOzonProductsByIds(
           shop,
           pendingRefs.map((item) => Number(item.ozon_product_id || item.id || 0)).filter(Boolean),
-          { visibilityById }
+          { visibilityById, detailConcurrency: 3 }
         );
         items = filterPendingListingProductsWithoutFbsStock(detailedItems, stockRows);
         shopResult.filtered_out = Math.max(0, shopResult.candidates - items.length);
@@ -8128,17 +8435,23 @@ export async function syncOzonOnlineProductsMysql(body = {}) {
   );
 
 
+  invalidateMasterDataCachePrefix("online-products:");
   if (errors.length && upserted === 0) throw new Error(errors.join(" | "));
   return { fetched, upserted, errors, concurrency, scope: pendingListingOnly ? "pending_listing" : "all", shops: shopResults };
 }
 
 async function reconcileArchivedOnlineProductsMysql(shopId, archivedRefs = []) {
-  const productIds = [...new Set((archivedRefs || [])
-    .map((item) => String(item.ozon_product_id || item.product_id || item.id || "").trim())
-    .filter(Boolean))];
   let updated = 0;
-  for (let index = 0; index < productIds.length; index += 500) {
-    const chunk = productIds.slice(index, index + 500);
+  for (let index = 0; index < archivedRefs.length; index += 500) {
+    const chunk = archivedRefs.slice(index, index + 500);
+    const productIds = [...new Set(chunk.map((item) => String(item.ozon_product_id || item.product_id || item.id || "").trim()).filter(Boolean))];
+    const skus = [...new Set(chunk.map((item) => String(item.ozon_sku || item.sku || "").trim()).filter((sku) => /^\d+$/.test(sku) && sku !== "0"))];
+    const offerIds = [...new Set(chunk.map((item) => String(item.offer_id || "").trim()).filter(Boolean))];
+    const matches = [];
+    if (productIds.length) matches.push(`ozon_product_id IN (${productIds.map(() => "?").join(",")})`);
+    if (skus.length) matches.push(`ozon_sku IN (${skus.map(() => "?").join(",")})`);
+    if (offerIds.length) matches.push(`offer_id IN (${offerIds.map(() => "?").join(",")})`);
+    if (!matches.length) continue;
     const result = await mysqlExecute(`
       UPDATE online_products
       SET archived = 1,
@@ -8147,13 +8460,13 @@ async function reconcileArchivedOnlineProductsMysql(shopId, archivedRefs = []) {
           synced_at = CURRENT_TIMESTAMP,
           updated_at = CURRENT_TIMESTAMP
       WHERE shop_id = ?
-        AND ozon_product_id IN (${chunk.map(() => "?").join(",")})
+        AND (${matches.join(" OR ")})
         AND (
           COALESCE(archived, 0) <> 1
           OR LOWER(COALESCE(status, '')) <> 'archived'
           OR UPPER(COALESCE(visibility, '')) <> 'ARCHIVED'
         )
-    `, [Number(shopId), ...chunk]);
+    `, [Number(shopId), ...productIds, ...skus, ...offerIds]);
     updated += Number(result?.affectedRows || 0);
   }
   return updated;
@@ -8656,27 +8969,32 @@ export async function backfillOzonFinanceMysql(body = {}, options = {}) {
   return result;
 }
 
-export async function onlineProductsMysql(query = {}) {
+export async function onlineProductsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const batchStock = String(query.batchStock || query.batch_stock || "") === "1";
   await ensureProductNamingSchemaMysql();
   await ensureOnlineProductsPublishedAtSchemaMysql();
   await ensureOzonStockStorageSchemaMysql();
-  await repairMissingOnlineProductSkusMysql();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  if (defaultTenant && !batchStock) await repairMissingOnlineProductSkusMysql();
   const paged = String(query.paged || "") === "1";
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
   const shopId = String(query.shopId || query.shop_id || "all");
+  const stockShopId = /^\d+$/.test(shopId) ? Number(shopId) : 0;
   const status = String(query.status || "all");
   const nameText = String(query.name || query.query || "").trim().toLowerCase();
   const offerText = String(query.offer || query.sku || "").trim().toLowerCase();
   const startDate = String(query.startDate || query.start_date || "").trim();
   const endDate = String(query.endDate || query.end_date || "").trim();
-  const where = [];
-  const params = [];
+  const where = [`op.shop_id IN (SELECT tenant_shop.id FROM shops tenant_shop WHERE tenant_shop.status != 'deleted' AND (tenant_shop.tenant_id = ?${defaultTenant ? " OR tenant_shop.tenant_id IS NULL" : ""}))`];
+  const params = [normalizedTenantId];
   if (shopId !== "all") {
     where.push("op.shop_id = ?");
     params.push(Number(shopId));
   }
+  if (batchStock) where.push("op.ozon_sku REGEXP '^[0-9]+$' AND op.ozon_sku != '0'");
   if (nameText) {
     where.push("LOWER(COALESCE(op.name, '')) LIKE ?");
     params.push(`%${nameText}%`);
@@ -8694,7 +9012,9 @@ export async function onlineProductsMysql(query = {}) {
     params.push(endDate);
   }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const stockJoinSql = onlineProductStockJoinSqlMysql();
+  const stockJoinSql = onlineProductStockJoinSqlMysql([], stockShopId);
+  const productJoinSql = defaultTenant ? "LEFT JOIN products p ON p.id = op.product_id" : "LEFT JOIN products p ON 1 = 0";
+  const productIdSql = defaultTenant ? "op.product_id" : "NULL AS product_id";
   const selectSql = `
     SELECT
       op.id, op.shop_id, op.ozon_sku, op.offer_id, op.ozon_product_id, op.name, op.image_url, op.primary_image,
@@ -8708,7 +9028,7 @@ export async function onlineProductsMysql(query = {}) {
       stock.stock_synced_at,
       CASE WHEN JSON_VALID(op.images_json) THEN JSON_UNQUOTE(JSON_EXTRACT(op.images_json, '$[0]')) ELSE '' END AS first_image_url,
       CASE WHEN op.raw_json IS NOT NULL AND op.raw_json != '' THEN 1 ELSE 0 END AS has_raw_json,
-      op.published_at, op.ozon_updated_at, op.product_id, op.synced_at, op.updated_at,
+      op.published_at, op.ozon_updated_at, ${productIdSql}, op.synced_at, op.updated_at,
       s.name AS shop_name,
       CASE
         WHEN p.code LIKE 'P-%' THEN p.code
@@ -8718,13 +9038,13 @@ export async function onlineProductsMysql(query = {}) {
       p.name AS product_name
     FROM online_products op
     JOIN shops s ON s.id = op.shop_id
-    LEFT JOIN products p ON p.id = op.product_id
+    ${productJoinSql}
     ${stockJoinSql}
     ${whereSql}
   `;
   if (paged) {
-    if (status === "all") {
-      const cacheKey = `online-products:list:${JSON.stringify({ page, pageSize, shopId, status, nameText, offerText, startDate, endDate })}`;
+    if (status === "all" && !batchStock) {
+      const cacheKey = `online-products:list:${normalizedTenantId}:${JSON.stringify({ page, pageSize, shopId, status, nameText, offerText, startDate, endDate })}`;
       return getCachedMasterData(cacheKey, async () => {
       const [totalRow, countRows, pageIdRows] = await Promise.all([
         mysqlQueryOne(`
@@ -8736,7 +9056,7 @@ export async function onlineProductsMysql(query = {}) {
           SELECT ${onlineStatusKeySqlMysql("op", "stock")} AS status_key, COUNT(*) AS count
           FROM online_products op
           JOIN shops s ON s.id = op.shop_id
-          LEFT JOIN products p ON p.id = op.product_id
+          ${productJoinSql}
           ${stockJoinSql}
           ${whereSql}
           GROUP BY status_key
@@ -8755,7 +9075,7 @@ export async function onlineProductsMysql(query = {}) {
         const placeholders = pageIds.map(() => "?").join(", ");
         const idWhereSql = where.length ? `AND op.id IN (${placeholders})` : `WHERE op.id IN (${placeholders})`;
         const orderSql = pageIds.map((id, index) => `WHEN ${Number(id)} THEN ${index}`).join(" ");
-        const scopedSelectSql = selectSql.replace(stockJoinSql, onlineProductStockJoinSqlMysql(pageIds));
+        const scopedSelectSql = selectSql.replace(stockJoinSql, onlineProductStockJoinSqlMysql(pageIds, stockShopId));
         rows = await mysqlQuery(`
           ${scopedSelectSql}
           ${idWhereSql}
@@ -8787,26 +9107,28 @@ export async function onlineProductsMysql(query = {}) {
         ${statusKeySql} AS status_key
       FROM online_products op
       JOIN shops s ON s.id = op.shop_id
-      LEFT JOIN products p ON p.id = op.product_id
       ${stockJoinSql}
       ${whereSql}
     `;
-    const statusIndexCacheKey = `online-products:status-index:${JSON.stringify({ shopId, nameText, offerText, startDate, endDate })}`;
+    const statusIndexCacheKey = `online-products:status-index:${normalizedTenantId}:${JSON.stringify({ batchStock, shopId, nameText, offerText, startDate, endDate })}`;
     const statusRows = await getCachedMasterData(
       statusIndexCacheKey,
       () => mysqlQuery(statusRowsSql, params),
       30_000
     );
     const statusCounts = { all: 0, ready_for_sale: 0, zero_stock: 0, selling: 0, ready: 0, error: 0, moderation: 0, hidden: 0, archived: 0, other: 0 };
-    for (const item of statusRows) {
+    const eligibleStatusRows = batchStock
+      ? statusRows.filter((row) => !["archived", "hidden"].includes(row.status_key))
+      : statusRows;
+    for (const item of eligibleStatusRows) {
       const statusKey = Object.hasOwn(statusCounts, item.status_key) ? item.status_key : "other";
       statusCounts[statusKey] += 1;
       statusCounts.all += 1;
     }
     statusCounts.ready_for_sale = Number(statusCounts.ready || 0) + Number(statusCounts.zero_stock || 0);
-    const acceptedStatusSet = new Set(acceptedStatusKeys);
-    const filteredRows = statusRows
-      .filter((row) => acceptedStatusSet.has(row.status_key))
+    const acceptedStatusSet = status === "all" ? null : new Set(acceptedStatusKeys);
+    const filteredRows = eligibleStatusRows
+      .filter((row) => !acceptedStatusSet || acceptedStatusSet.has(row.status_key))
       .sort((a, b) => {
         const timeDiff = new Date(b.sort_at || 0).getTime() - new Date(a.sort_at || 0).getTime();
         return timeDiff || Number(b.id || 0) - Number(a.id || 0);
@@ -8822,7 +9144,7 @@ export async function onlineProductsMysql(query = {}) {
     const placeholders = pageIds.map(() => "?").join(", ");
     const idWhereSql = where.length ? `AND op.id IN (${placeholders})` : `WHERE op.id IN (${placeholders})`;
     const orderSql = pageIds.map((id, index) => `WHEN ${Number(id)} THEN ${index}`).join(" ");
-    const scopedSelectSql = selectSql.replace(stockJoinSql, onlineProductStockJoinSqlMysql(pageIds));
+    const scopedSelectSql = selectSql.replace(stockJoinSql, onlineProductStockJoinSqlMysql(pageIds, stockShopId));
     const rows = await mysqlQuery(`
       ${scopedSelectSql}
       ${idWhereSql}
@@ -8857,7 +9179,7 @@ export async function onlineProductsMysql(query = {}) {
   return mappedRows;
 }
 
-function onlineProductStockJoinSqlMysql(scopedOnlineProductIds = []) {
+function onlineProductStockJoinSqlMysql(scopedOnlineProductIds = [], shopId = 0) {
   const scopedIds = scopedOnlineProductIds.map(Number).filter(Boolean);
   const scopeJoinSql = scopedIds.length
     ? `JOIN online_products stock_scope
@@ -8878,6 +9200,7 @@ function onlineProductStockJoinSqlMysql(scopedOnlineProductIds = []) {
         MAX(stock_rows.synced_at) AS stock_synced_at
       FROM ozon_stock_snapshots stock_rows
       ${scopeJoinSql}
+      ${shopId ? `WHERE stock_rows.shop_id = ${Number(shopId)}` : ""}
       GROUP BY stock_rows.shop_id, stock_rows.ozon_sku
     ) stock ON stock.shop_id = op.shop_id AND stock.ozon_sku = op.ozon_sku
   `;
@@ -8964,19 +9287,31 @@ export function onlineProductMatchesStatusForTest(row = {}, status = "all") {
   return onlineProductMatchesStatusMysql(row, status);
 }
 
-export async function bindOnlineProductMysql(body = {}) {
+export async function bindOnlineProductMysql(body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const onlineProductId = Number(body.online_product_id);
   const productId = body.product_id === null || body.product_id === undefined || body.product_id === ""
     ? null
     : Number(body.product_id);
   if (!onlineProductId) throw new Error("online_product_id is required");
 
-  const online = await mysqlQueryOne("SELECT * FROM online_products WHERE id = ?", [onlineProductId]);
+  const online = await mysqlQueryOne(`
+    SELECT op.*
+    FROM online_products op
+    JOIN shops s ON s.id = op.shop_id
+    WHERE op.id = ?
+      AND s.status != 'deleted'
+      AND ${tenantShopPredicateMysql("s", defaultTenant)}
+    LIMIT 1
+  `, [onlineProductId, normalizedTenantId]);
   if (!online) throw new Error("Online product not found");
 
   if (productId) {
-    const product = await mysqlQueryOne("SELECT id FROM products WHERE id = ? AND active = 1", [productId]);
+    const product = await mysqlQueryOne(`SELECT id FROM products
+      WHERE id = ? AND active = 1
+        AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})`, [productId, normalizedTenantId]);
     if (!product) throw new Error(`Product not found: ${productId}`);
   }
 
@@ -8985,26 +9320,28 @@ export async function bindOnlineProductMysql(body = {}) {
   if (!bindSku) throw new Error("ozon_sku is required");
   const orderItemId = Number(body.order_item_id || body.orderItemId || 0);
   const existingMapping = await mysqlQueryOne(
-    "SELECT * FROM sku_mappings WHERE shop_id = ? AND ozon_sku = ?",
-    [Number(online.shop_id), bindSku]
+    `SELECT * FROM sku_mappings WHERE shop_id = ? AND ozon_sku = ?
+      AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})`,
+    [Number(online.shop_id), bindSku, normalizedTenantId]
   );
 
-  await mysqlExecute("UPDATE online_products SET product_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [productId, onlineProductId]);
+  await mysqlExecute("UPDATE online_products SET product_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND shop_id = ?", [productId, onlineProductId, Number(online.shop_id)]);
 
 
   let mappingId = null;
   if (existingMapping) {
     mappingId = Number(existingMapping.id);
-    const payload = [productId, personId, onlineProductId, online.offer_id || "", online.name || "", mappingId];
+    const payload = [productId, personId, onlineProductId, online.offer_id || "", online.name || "", normalizedTenantId, mappingId, Number(online.shop_id)];
     await mysqlExecute(`
       UPDATE sku_mappings
-      SET product_id = ?, person_id = ?, online_product_id = ?, offer_id = ?, display_name = ?, active = 1, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
+      SET product_id = ?, person_id = ?, online_product_id = ?, offer_id = ?, display_name = ?, tenant_id = ?, active = 1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND shop_id = ?
     `, payload);
 
   } else {
     const payload = [
       Number(online.shop_id),
+      normalizedTenantId,
       productId,
       personId,
       onlineProductId,
@@ -9014,8 +9351,8 @@ export async function bindOnlineProductMysql(body = {}) {
     ];
     const result = await mysqlExecute(`
       INSERT INTO sku_mappings
-      (shop_id, product_id, person_id, online_product_id, ozon_sku, offer_id, display_name)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      (shop_id, tenant_id, product_id, person_id, online_product_id, ozon_sku, offer_id, display_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `, payload);
     mappingId = Number(result.insertId);
   }
@@ -9034,9 +9371,10 @@ export async function bindOnlineProductMysql(body = {}) {
       UPDATE procurement_requests
       SET product_id = ?, binding_status = ?, updated_at = CURRENT_TIMESTAMP
       WHERE source_order_item_id = ?
+        AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})
         AND status IN ('pending', 'suggested', 'submitted')
         AND COALESCE(purchase_order_id, 0) = 0
-    `, [productId, productId ? "bound" : "unbound", orderItemId]);
+    `, [productId, productId ? "bound" : "unbound", orderItemId, normalizedTenantId]);
   }
 
   const inventoryRecipe = body.inventory_recipe || body.inventoryRecipe;
@@ -9334,22 +9672,26 @@ async function resolveOnlineProductZeroStockTargetsMysql(online = {}, body = {})
   }));
 }
 
-async function recordOnlineProductActionMysql({ online, action, status, request, userId }) {
+async function recordOnlineProductActionMysql({ online, action, status, request, userId, tenantId = "admin" }) {
+  await ensureMysqlColumns("online_product_actions", [
+    "ALTER TABLE online_product_actions ADD COLUMN tenant_id VARCHAR(80) NULL",
+    "ALTER TABLE online_product_actions ADD KEY idx_online_product_actions_tenant_shop_created (tenant_id, shop_id, created_at, id)"
+  ]);
   const result = await mysqlExecute(`
     INSERT INTO online_product_actions
-    (online_product_id, shop_id, action_type, status, request_json, created_by_person_id)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `, [online.id, online.shop_id, action, status, JSON.stringify(request || {}), await resolveExistingPersonId(userId)]);
+    (tenant_id, online_product_id, shop_id, action_type, status, request_json, created_by_person_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `, [tenantId, online.id, online.shop_id, action, status, JSON.stringify(request || {}), await resolveExistingPersonId(userId)]);
   return Number(result.insertId || 0);
 }
 
-async function finishOnlineProductActionMysql(actionId, status, response, errorMessage) {
+async function finishOnlineProductActionMysql(actionId, status, response, errorMessage, tenantId = "admin") {
   if (!actionId) return;
   await mysqlExecute(`
     UPDATE online_product_actions
     SET status = ?, response_json = ?, error_message = ?
-    WHERE id = ?
-  `, [status, JSON.stringify(response || {}), errorMessage || "", Number(actionId)]);
+    WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
+  `, [status, JSON.stringify(response || {}), errorMessage || "", Number(actionId), tenantId]);
 }
 
 function isOzonItemNotFoundError(error) {
@@ -9456,12 +9798,11 @@ async function resolveFreshOzonProductIdForArchiveMysql(shop, online = {}) {
   return productId;
 }
 
-export async function onlineProductWarehousesMysql(query = {}) {
+export async function onlineProductWarehousesMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const shopId = Number(query.shop_id || query.shopId || 0);
   if (!shopId) throw new Error("请选择店铺后再获取 Ozon 仓库");
-  const shop = await mysqlQueryOne("SELECT * FROM shops WHERE id = ? AND status != 'deleted'", [shopId]);
-  if (!shop) throw new Error("店铺不存在");
+  const shop = await activeShopForTenantMysql(shopId, tenantId);
   const warehouses = await fetchOzonWarehouses(shop);
   return {
     shop_id: shopId,
@@ -9502,13 +9843,17 @@ function compactOzonProductLimitMysql(limit = null) {
   };
 }
 
-export async function onlineProductLimitsMysql(query = {}) {
+export async function onlineProductLimitsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const targetShopId = nullableNumber(query.shop_id || query.shopId);
-  const activeShops = await mysqlQuery(
-    "SELECT * FROM shops WHERE status = 'active' AND (? IS NULL OR id = ?) ORDER BY name, id",
-    [targetShopId, targetShopId]
-  );
+  const activeShops = await mysqlQuery(`
+    SELECT * FROM shops
+    WHERE status = 'active' AND (? IS NULL OR id = ?)
+      AND ${tenantShopPredicateMysql("shops", defaultTenant)}
+    ORDER BY name, id
+  `, [targetShopId, targetShopId, normalizedTenantId]);
   const rows = [];
   await mapWithConcurrencyMysql(activeShops, 5, async (shop) => {
     const row = {
@@ -9995,8 +10340,10 @@ export function onlineProductStockUpdateTargetForTest(row = {}, stock = 0, wareh
   return onlineProductStockUpdateTargetMysql(row, stock, warehouseId);
 }
 
-export async function batchUpdateOnlineProductStocksMysql(body = {}, userId = null) {
+export async function batchUpdateOnlineProductStocksMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const onlineProductIds = normalizeBulkStockOnlineProductIdsMysql(body);
   const stock = Math.max(0, Math.round(Number(body.stock ?? body.quantity ?? 888)));
   const warehouseId = String(body.warehouse_id || body.warehouseId || "").trim();
@@ -10009,16 +10356,18 @@ export async function batchUpdateOnlineProductStocksMysql(body = {}, userId = nu
     FROM online_products op
     JOIN shops s ON s.id = op.shop_id
     WHERE op.id IN (${onlineProductIds.map(() => "?").join(",")})
-  `, onlineProductIds);
+      AND ${defaultTenant ? "s.status != 'deleted'" : "s.status = 'active'"}
+      AND ${tenantShopPredicateMysql("s", defaultTenant)}
+  `, [...onlineProductIds, normalizedTenantId]);
   if (!rows.length) throw new Error("没有找到可更新库存的在线商品");
+  if (rows.length !== onlineProductIds.length) throw new Error("所选商品中包含其他企业、已停用店铺或不存在的记录，请刷新列表后重试");
 
   const targetShopIds = [...new Set(rows.map((row) => Number(row.shop_id || 0)).filter(Boolean))];
   if (shopId && targetShopIds.some((id) => id !== shopId)) throw new Error("所选商品不属于当前店铺，请按店铺分批更新库存");
   if (targetShopIds.length !== 1) throw new Error("请先筛选单个店铺，再批量更新库存");
 
   const targetShopId = targetShopIds[0];
-  const shop = await mysqlQueryOne("SELECT * FROM shops WHERE id = ? AND status != 'deleted'", [targetShopId]);
-  if (!shop) throw new Error("店铺不存在");
+  const shop = await activeShopForTenantMysql(targetShopId, normalizedTenantId);
 
   const targets = [];
   const skipped = [];
@@ -10041,7 +10390,8 @@ export async function batchUpdateOnlineProductStocksMysql(body = {}, userId = nu
       action: "batch_update_stock",
       status: "pending",
       request: { stock, warehouse_id: warehouseId },
-      userId
+      userId,
+      tenantId: normalizedTenantId
     })
   );
 
@@ -10059,25 +10409,37 @@ export async function batchUpdateOnlineProductStocksMysql(body = {}, userId = nu
 
   try {
     result.response = await updateOzonProductStocks(shop, targets);
-    await mapWithConcurrencyMysql(actionIds, 1, (actionId) => finishOnlineProductActionMysql(actionId, "success", result, ""));
+    await mapWithConcurrencyMysql(actionIds, 1, (actionId) => finishOnlineProductActionMysql(actionId, "success", result, "", normalizedTenantId));
     invalidateMasterDataCachePrefix("online-products:");
     return result;
   } catch (error) {
     result.ok = false;
     result.error = error.message || String(error);
-    await mapWithConcurrencyMysql(actionIds, 1, (actionId) => finishOnlineProductActionMysql(actionId, "failed", result, result.error));
+    await mapWithConcurrencyMysql(actionIds, 1, (actionId) => finishOnlineProductActionMysql(actionId, "failed", result, result.error, normalizedTenantId));
     throw new Error(`批量更新 Ozon 库存失败：${result.error}`);
   }
 }
 
-export async function performOnlineProductActionMysql(body = {}, userId = null) {
+export async function performOnlineProductActionMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const onlineProductId = Number(body.online_product_id || body.id || 0);
   const action = String(body.action || "").trim();
   if (!onlineProductId) throw new Error("Missing online product id");
   if (!["archive", "zero_stock", "zero_then_archive"].includes(action)) throw new Error("Unsupported online product action");
-  const online = await mysqlQueryOne("SELECT * FROM online_products WHERE id = ?", [onlineProductId]);
-  if (!online) throw new Error("Online product not found");
+  if (!defaultTenant && action !== "zero_stock") {
+    throw new Error("当前企业仅可调整本企业在线商品库存；归档及异常工作台处理尚未完成企业隔离。");
+  }
+  const shopScope = tenantShopPredicateMysql("s", defaultTenant);
+  const online = await mysqlQueryOne(`
+    SELECT op.*
+    FROM online_products op
+    JOIN shops s ON s.id = op.shop_id
+    WHERE op.id = ? AND s.status != 'deleted' AND ${shopScope}
+    LIMIT 1
+  `, [onlineProductId, normalizedTenantId]);
+  if (!online) throw new Error("在线商品不存在或不属于当前企业。");
   const alreadyArchived = Number(online.archived || 0) || String(`${online.status || ""} ${online.visibility || ""}`).toLowerCase().includes("archive");
   if ((action === "archive" || action === "zero_then_archive") && alreadyArchived) {
     const result = {
@@ -10097,9 +10459,8 @@ export async function performOnlineProductActionMysql(body = {}, userId = null) 
     invalidateExceptionWorkbenchCache();
     return result;
   }
-  const shop = await mysqlQueryOne("SELECT * FROM shops WHERE id = ?", [online.shop_id]);
-  if (!shop) throw new Error("Shop not found");
-  const actionId = await recordOnlineProductActionMysql({ online, action, status: "pending", request: body, userId });
+  const shop = await activeShopForTenantMysql(Number(online.shop_id), normalizedTenantId);
+  const actionId = await recordOnlineProductActionMysql({ online, action, status: "pending", request: body, userId, tenantId: normalizedTenantId });
   const result = { ok: true, action, online_product_id: onlineProductId, steps: [] };
   try {
     if (action === "zero_stock" || action === "zero_then_archive") {
@@ -10142,14 +10503,14 @@ export async function performOnlineProductActionMysql(body = {}, userId = null) 
       result.handled_exception_task_ids = handledResult.task_ids;
       result.steps.push({ action: "archive", ok: true, result: archiveResult });
     }
-    await finishOnlineProductActionMysql(actionId, "success", result, "");
+    await finishOnlineProductActionMysql(actionId, "success", result, "", normalizedTenantId);
     invalidateMasterDataCachePrefix("online-products:");
     invalidateExceptionWorkbenchCache();
     return result;
   } catch (error) {
     result.ok = false;
     result.error = `归档在线商品「${online.name || online.ozon_sku || onlineProductId}」失败：${error.message || String(error)}`;
-    await finishOnlineProductActionMysql(actionId, "failed", result, result.error);
+    await finishOnlineProductActionMysql(actionId, "failed", result, result.error, normalizedTenantId);
     throw new Error(result.error);
   }
 }
@@ -10264,6 +10625,7 @@ async function ensureInventoryProductSearchSchemaMysql() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS product_name_aliases (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id BIGINT UNSIGNED NULL,
       product_id BIGINT UNSIGNED NOT NULL,
       alias_name VARCHAR(500) NOT NULL,
       alias_type VARCHAR(32) NOT NULL DEFAULT 'previous_name',
@@ -10271,6 +10633,7 @@ async function ensureInventoryProductSearchSchemaMysql() {
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       UNIQUE KEY uk_product_name_alias (product_id, alias_name),
+      KEY idx_product_name_alias_tenant_search (tenant_id, product_id, active, alias_name(191)),
       KEY idx_product_name_alias_search (product_id, active, alias_name(191)),
       CONSTRAINT fk_product_name_alias_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
@@ -10323,11 +10686,263 @@ async function structuredInventoryProductSearchIdsMysql(terms = []) {
   };
 }
 
-export async function productsMysql(query = {}) {
+async function tenantProductsMysql(query = {}, tenantId) {
+  const tenantPk = Number(tenantId);
+  if (!Number.isSafeInteger(tenantPk) || tenantPk <= 0) {
+    throw Object.assign(new Error("当前企业上下文无效，无法读取库存产品。"), { statusCode: 403 });
+  }
+  const requiredColumns = [
+    ["products", "tenant_id"],
+    ["inventory_movements", "tenant_id"],
+    ["procurement_requests", "tenant_id"],
+    ["sku_mappings", "tenant_id"],
+    ["shops", "tenant_id"],
+    ["product_components", "tenant_id"],
+    ["product_name_aliases", "tenant_id"]
+  ];
+  const columnAvailability = await Promise.all(requiredColumns.map(async ([table, column]) => ({
+    name: `${table}.${column}`,
+    exists: await mysqlSchemaColumnExists(table, column)
+  })));
+  const missingColumns = columnAvailability.filter((column) => !column.exists).map((column) => column.name);
+  if (missingColumns.length) {
+    throw Object.assign(new Error(`企业库存产品列表暂不可用：以下租户归属字段尚未迁移，无法安全汇总数据：${missingColumns.join("、")}。请管理员先完成对应企业数据迁移。`), { statusCode: 503 });
+  }
+
+  const paged = String(query.paged || "") === "1";
+  const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
+  const page = Math.max(Number(query.page || 1), 1);
+  const searchText = String(query.query || query.search || "").trim().toLowerCase();
+  const searchMode = ["inventory_id", "name", "sku"].includes(query.searchMode) ? query.searchMode : "auto";
+  const categoryText = String(query.category || query.category_name || "").trim().toLowerCase();
+  const shopId = String(query.shopId || query.shop_id || "all");
+  const inventoryType = String(query.inventoryType || query.inventory_type || "all").trim().toLowerCase();
+  const dateFrom = String(query.dateFrom || query.date_from || "").slice(0, 10);
+  const dateTo = String(query.dateTo || query.date_to || "").slice(0, 10);
+  const tenantInventoryProductPredicate = `(
+    COALESCE(p.product_type, 'main') != 'selection'
+    OR COALESCE(p.selection_status, 'draft') = 'listed'
+    OR EXISTS (SELECT 1 FROM sku_mappings inventory_sm WHERE inventory_sm.tenant_id = ${tenantPk} AND inventory_sm.product_id = p.id AND inventory_sm.active = 1)
+    OR EXISTS (SELECT 1 FROM inventory_movements inventory_im WHERE inventory_im.tenant_id = ${tenantPk} AND inventory_im.product_id = p.id)
+  )`;
+  const where = ["p.tenant_id = ?", "p.active = 1", tenantInventoryProductPredicate];
+  const params = [tenantPk];
+  const ownerJoinSql = `LEFT JOIN people pe ON pe.id = p.owner_person_id
+    AND EXISTS (SELECT 1 FROM tenant_members owner_member WHERE owner_member.tenant_id = ${tenantPk} AND owner_member.person_id = p.owner_person_id AND owner_member.active = 1)`;
+
+  if (dateFrom) { where.push("DATE(p.created_at) >= ?"); params.push(dateFrom); }
+  if (dateTo) { where.push("DATE(p.created_at) <= ?"); params.push(dateTo); }
+  if (shopId !== "all") {
+    where.push(`EXISTS (SELECT 1 FROM sku_mappings sm_filter
+      JOIN shops sh_filter ON sh_filter.id = sm_filter.shop_id AND sh_filter.tenant_id = ?
+      WHERE sm_filter.tenant_id = ? AND sm_filter.product_id = p.id AND sm_filter.active = 1 AND sm_filter.shop_id = ?)`);
+    params.push(tenantPk, tenantPk, Number(shopId));
+  }
+  if (inventoryType === "normal" || inventoryType === "single" || inventoryType === "combo") {
+    where.push("COALESCE(p.is_accessory, 0) = 0");
+    if (inventoryType === "single") where.push(`NOT EXISTS (SELECT 1 FROM product_components pc_filter
+      JOIN products component_filter ON component_filter.id = pc_filter.component_product_id AND component_filter.tenant_id = ${tenantPk}
+      WHERE pc_filter.tenant_id = ${tenantPk} AND pc_filter.product_id = p.id)`);
+    if (inventoryType === "combo") where.push(`EXISTS (SELECT 1 FROM product_components pc_filter
+      JOIN products component_filter ON component_filter.id = pc_filter.component_product_id AND component_filter.tenant_id = ${tenantPk}
+      WHERE pc_filter.tenant_id = ${tenantPk} AND pc_filter.product_id = p.id)`);
+  } else if (inventoryType === "accessory") where.push("p.is_accessory = 1");
+
+  const structuredFilters = [
+    [String(query.inventoryCategory || query.inventory_category || "").trim(), "p.inventory_category = ?"],
+    [String(query.productName || query.product_name || "").trim(), "p.name LIKE ?"],
+    [normalizeVehicleBrand(query.vehicleBrand || query.vehicle_brand, { strict: false }), "p.vehicle_brand = ?"],
+    [String(query.fitmentType || query.fitment_type || "").trim(), "p.fitment_type = ?"],
+    [String(query.accessoryName || query.accessory_name || "").trim(), "p.accessory_name = ?"],
+    [String(query.process || query.surface_process || "").trim(), "p.surface_process = ?"]
+  ];
+  for (const [value, clause] of structuredFilters) {
+    if (!value || (clause.includes("fitment_type") && !["universal", "specific"].includes(value))) continue;
+    where.push(clause);
+    params.push(clause.includes("LIKE") ? `%${value}%` : value);
+  }
+  const vehicleModels = String(query.vehicleModel || query.vehicle_model || "").split(",").map((item) => item.trim()).filter(Boolean);
+  if (vehicleModels.length) {
+    where.push(`(${vehicleModels.map(() => "CONCAT('/', COALESCE(p.vehicle_model, ''), '/') LIKE ?").join(" OR ")})`);
+    params.push(...vehicleModels.map((model) => `%/${model}/%`));
+  }
+  const color = String(query.color || "").trim();
+  if (color) { where.push("CONCAT(',', REPLACE(REPLACE(COALESCE(p.color, ''), '，', ','), '/', ','), ',') LIKE ?"); params.push(`%,${color},%`); }
+  const materials = String(query.material || "").split(",").map((item) => item.trim()).filter(Boolean);
+  if (materials.length) {
+    where.push(`(${materials.map(() => "CONCAT('/', COALESCE(p.material, ''), '/') LIKE ?").join(" OR ")})`);
+    params.push(...materials.map((material) => `%/${material}/%`));
+  }
+
+  if (searchText) {
+    const like = `%${searchText}%`;
+    const skuSearch = `EXISTS (SELECT 1 FROM sku_mappings sm_search
+      JOIN shops s_search ON s_search.id = sm_search.shop_id AND s_search.tenant_id = ${tenantPk}
+      LEFT JOIN online_products op_search ON op_search.id = sm_search.online_product_id AND op_search.shop_id = sm_search.shop_id
+      WHERE sm_search.tenant_id = ${tenantPk} AND sm_search.product_id = p.id AND sm_search.active = 1
+        AND (LOWER(COALESCE(sm_search.ozon_sku, '')) LIKE ? OR LOWER(COALESCE(sm_search.offer_id, '')) LIKE ?
+          OR LOWER(COALESCE(op_search.name, '')) LIKE ? OR LOWER(COALESCE(s_search.name, '')) LIKE ?))`;
+    if (searchMode === "inventory_id") {
+      where.push("(LOWER(COALESCE(p.inventory_number, '')) LIKE ? OR LOWER(COALESCE(p.code, '')) LIKE ?)");
+      params.push(like, like);
+    } else if (searchMode === "sku") {
+      where.push(skuSearch);
+      params.push(like, like, like, like);
+    } else if (searchMode === "auto" && isInventoryIdentifier(searchText)) {
+      where.push(`(LOWER(COALESCE(p.inventory_number, '')) LIKE ? OR LOWER(COALESCE(p.code, '')) LIKE ? OR ${skuSearch})`);
+      params.push(like, like, like, like, like, like);
+    } else if (searchMode === "name") {
+      where.push(`(LOWER(COALESCE(p.name, '')) LIKE ? OR EXISTS (SELECT 1 FROM product_name_aliases alias_search
+        WHERE alias_search.tenant_id = ${tenantPk} AND alias_search.product_id = p.id AND alias_search.active = 1
+          AND LOWER(alias_search.alias_name) LIKE ?))`);
+      params.push(like, like);
+    } else {
+      where.push(`(LOWER(COALESCE(p.name, '')) LIKE ? OR LOWER(COALESCE(p.code, '')) LIKE ?
+        OR LOWER(COALESCE(p.inventory_number, '')) LIKE ? OR LOWER(COALESCE(pe.name, '')) LIKE ?
+        OR LOWER(COALESCE(p.inventory_category, '')) LIKE ? OR ${skuSearch}
+        OR EXISTS (SELECT 1 FROM product_name_aliases alias_search WHERE alias_search.tenant_id = ${tenantPk}
+          AND alias_search.product_id = p.id AND alias_search.active = 1 AND LOWER(alias_search.alias_name) LIKE ?))`);
+      params.push(like, like, like, like, like, like, like, like, like, like);
+    }
+  }
+  if (categoryText) {
+    const categories = categoryText.split(/[\s,，;；]+/).map((item) => item.trim()).filter(Boolean).slice(0, 8);
+    where.push(`(${categories.map(() => `(LOWER(COALESCE(p.ozon_category_name, '')) LIKE ? OR LOWER(COALESCE(p.ozon_category_id, '')) LIKE ?
+      OR EXISTS (SELECT 1 FROM sku_mappings sm_category JOIN shops sh_category
+        ON sh_category.id = sm_category.shop_id AND sh_category.tenant_id = ${tenantPk}
+        JOIN online_products op_category ON op_category.id = sm_category.online_product_id AND op_category.shop_id = sm_category.shop_id
+        WHERE sm_category.tenant_id = ${tenantPk} AND sm_category.product_id = p.id AND sm_category.active = 1
+          AND LOWER(COALESCE(op_category.raw_json, '')) LIKE ?))`).join(" OR ")})`);
+    for (const category of categories) { const like = `%${category}%`; params.push(like, like, like); }
+  }
+
+  const whereSql = `WHERE ${where.join(" AND ")}`;
+  const sortDir = String(query.sortDir || query.sort_dir || "desc").toLowerCase() === "asc" ? "ASC" : "DESC";
+  const sortKey = String(query.sortKey || query.sort_key || "").trim();
+  const orderSql = sortKey === "product" ? `p.name ${sortDir}, p.id DESC`
+    : sortKey === "inventory_number" ? `p.inventory_number IS NULL ASC, p.inventory_number_category ${sortDir}, p.inventory_number_sequence ${sortDir}, p.id DESC`
+      : "p.updated_at DESC, p.id DESC";
+  const fieldsSql = `p.id, p.selection_id, p.code, p.inventory_number, p.name, p.image_url,
+    CASE WHEN owner_member.person_id IS NULL THEN NULL ELSE p.owner_person_id END AS owner_person_id,
+    CASE WHEN creator_member.person_id IS NULL THEN NULL ELSE p.created_by_person_id END AS created_by_person_id,
+    NULL AS supplier_id, p.purchase_url, p.source_platform, p.shipping_method,
+    p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
+    p.package_weight_g, p.length_cm, p.width_cm, p.height_cm, p.listing_price_rub, p.air_sale_price_rmb, p.exchange_rate,
+    p.desired_profit_mode, p.desired_profit_value, p.return_rate, p.stock_unit, p.is_accessory,
+    p.inventory_category, p.vehicle_brand, p.fitment_type, p.vehicle_model, p.vehicle_models_json,
+    p.accessory_name, p.color, p.material, p.surface_process, p.product_quantity, p.package_mode, p.package_contents,
+    p.product_type, p.selection_status, p.parent_product_id, p.active, p.created_at, p.updated_at,
+    CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id,
+    pe.name AS owner_name, creator.name AS creator_name`;
+  const ownerJoins = `${ownerJoinSql}
+    LEFT JOIN people creator ON creator.id = p.created_by_person_id
+      AND EXISTS (SELECT 1 FROM tenant_members creator_member_check WHERE creator_member_check.tenant_id = ${tenantPk} AND creator_member_check.person_id = p.created_by_person_id AND creator_member_check.active = 1)
+    LEFT JOIN tenant_members owner_member ON owner_member.tenant_id = ${tenantPk} AND owner_member.person_id = p.owner_person_id AND owner_member.active = 1
+    LEFT JOIN tenant_members creator_member ON creator_member.tenant_id = ${tenantPk} AND creator_member.person_id = p.created_by_person_id AND creator_member.active = 1`;
+  const offset = (page - 1) * pageSize;
+  const [totalRow, rows] = paged
+    ? await Promise.all([
+      mysqlQueryOne(`SELECT COUNT(*) AS total FROM products p ${ownerJoinSql} ${whereSql}`, params),
+      mysqlQuery(`SELECT ${fieldsSql} FROM products p ${ownerJoins} ${whereSql} ORDER BY ${orderSql} LIMIT ? OFFSET ?`, [...params, pageSize, offset])
+    ])
+    : [null, await mysqlQuery(`SELECT ${fieldsSql} FROM products p ${ownerJoins} ${whereSql} ORDER BY ${orderSql}`, params)];
+  const productIds = rows.map((row) => Number(row.id || 0)).filter(Boolean);
+  if (!productIds.length) return paged ? { rows: [], total: Number(totalRow?.total || 0), page, pageSize, mode: "paged" } : [];
+
+  const placeholders = productIds.map(() => "?").join(", ");
+  const [movementRows, procurementRows, inboundRows, transferRows, salesRows, mappingSummaries, componentSummaries] = await Promise.all([
+    mysqlQuery(`SELECT product_id,
+        SUM(quantity_delta) AS stock,
+        CASE WHEN SUM(CASE WHEN quantity_delta > 0 THEN quantity_delta ELSE 0 END) > 0
+          THEN SUM(CASE WHEN quantity_delta > 0 THEN amount ELSE 0 END) / SUM(CASE WHEN quantity_delta > 0 THEN quantity_delta ELSE 0 END) END AS avg_unit_cost,
+        SUM(CASE WHEN quantity_delta > 0 THEN amount ELSE 0 END) AS movement_purchase_amount,
+        SUM(CASE WHEN source_type = 'manual_outbound' THEN ABS(quantity_delta) ELSE 0 END) AS manual_outbound_quantity,
+        SUM(CASE WHEN source_type = 'manual_outbound' THEN amount ELSE 0 END) AS manual_outbound_amount
+      FROM inventory_movements WHERE tenant_id = ? AND status = 'posted' AND product_id IN (${placeholders}) GROUP BY product_id`, [tenantPk, ...productIds]),
+    mysqlQuery(`SELECT product_id, SUM(quantity) AS total_purchase_quantity,
+        SUM(amount + COALESCE(shipping_amount, 0)) AS total_purchase_amount,
+        CASE WHEN SUM(quantity) > 0 THEN SUM(amount + COALESCE(shipping_amount, 0)) / SUM(quantity) END AS avg_unit_cost,
+        SUM(CASE WHEN status IN ('submitted', 'merged') THEN quantity ELSE 0 END) AS submitted_quantity
+      FROM procurement_requests WHERE tenant_id = ? AND status != 'cancelled' AND product_id IN (${placeholders}) GROUP BY product_id`, [tenantPk, ...productIds]),
+    mysqlQuery(`SELECT ir.product_id, SUM(ir.quantity) AS incoming_stock
+      FROM inbound_records ir LEFT JOIN procurement_requests pr ON pr.id = ir.procurement_request_id
+      WHERE ir.status = 'pending_arrival' AND ir.product_id IN (${placeholders})
+        AND (ir.procurement_request_id IS NULL OR pr.tenant_id = ?)
+      GROUP BY ir.product_id`, [...productIds, tenantPk]),
+    mysqlQuery(`SELECT ftr.product_id, SUM(GREATEST(ftr.quantity - COALESCE(ftr.listed_quantity, 0), 0)) AS fbp_transfer_in_transit_qty
+      FROM fbp_transfer_records ftr LEFT JOIN shops transfer_shop ON transfer_shop.id = ftr.shop_id
+      WHERE ${fbpTransferInTransitWhereMysql("ftr")} AND ftr.product_id IN (${placeholders})
+        AND (ftr.shop_id IS NULL OR transfer_shop.tenant_id = ?)
+        AND (ftr.mapping_id IS NULL OR EXISTS (SELECT 1 FROM sku_mappings transfer_mapping
+          WHERE transfer_mapping.id = ftr.mapping_id AND transfer_mapping.product_id = ftr.product_id AND transfer_mapping.tenant_id = ?))
+      GROUP BY ftr.product_id`, [...productIds, tenantPk, tenantPk]),
+    mysqlQuery(`SELECT obr.product_id,
+        SUM(CASE WHEN obr.status = 'deducted' THEN COALESCE(oi.sale_price, 0) * obr.quantity ELSE 0 END) AS total_sales_amount,
+        SUM(CASE WHEN obr.status = 'deducted' THEN obr.quantity ELSE 0 END) AS total_sales_quantity,
+        SUM(CASE WHEN obr.status = 'deducted' THEN COALESCE(oi.estimated_profit, 0) ELSE 0 END) AS estimated_profit_total,
+        SUM(CASE WHEN obr.status = 'deducted' THEN COALESCE(NULLIF(oi.actual_profit, 0), 0) ELSE 0 END) AS actual_profit_total,
+        COUNT(DISTINCT CASE WHEN obr.status = 'deducted' THEN obr.order_ref END) AS order_count
+      FROM outbound_records obr
+      JOIN shops sales_shop ON sales_shop.id = obr.shop_id AND sales_shop.tenant_id = ?
+      LEFT JOIN order_items oi ON oi.id = obr.order_item_id
+      LEFT JOIN orders sales_order ON sales_order.id = oi.order_id AND sales_order.shop_id = obr.shop_id
+      WHERE obr.product_id IN (${placeholders}) AND sales_order.id IS NOT NULL GROUP BY obr.product_id`, [tenantPk, ...productIds]),
+    productMappingSummariesMysql(productIds, String(tenantPk)),
+    productCompositionSummariesMysql(productIds, String(tenantPk))
+  ]);
+  const byProduct = (items) => new Map(items.map((item) => [Number(item.product_id), item]));
+  const movementByProduct = byProduct(movementRows);
+  const procurementByProduct = byProduct(procurementRows);
+  const inboundByProduct = byProduct(inboundRows);
+  const transferByProduct = byProduct(transferRows);
+  const salesByProduct = byProduct(salesRows);
+  const enriched = rows.map((row) => {
+    const id = Number(row.id);
+    const movement = movementByProduct.get(id) || {};
+    const procurement = procurementByProduct.get(id) || {};
+    const mapping = mappingSummaries.get(id) || {};
+    const sales = salesByProduct.get(id) || {};
+    const stock = Number(movement.stock || 0);
+    const avgUnitCost = Number(procurement.avg_unit_cost || movement.avg_unit_cost || row.purchase_cost || 0);
+    return compactProductListRowMysql({
+      ...row,
+      supplier_id: null,
+      stock,
+      total_stock: stock,
+      avg_unit_cost: avgUnitCost,
+      total_purchase_amount: Number(procurement.total_purchase_amount || movement.movement_purchase_amount || 0),
+      total_purchase_quantity: Number(procurement.total_purchase_quantity || 0),
+      manual_outbound_quantity: Number(movement.manual_outbound_quantity || 0),
+      manual_outbound_amount: Number(movement.manual_outbound_amount || 0),
+      incoming_stock: Number(inboundByProduct.get(id)?.incoming_stock || 0) + Number(procurement.submitted_quantity || 0),
+      fbp_transfer_in_transit_qty: Number(transferByProduct.get(id)?.fbp_transfer_in_transit_qty || 0),
+      fbp_stock: Number(mapping.fbp_stock || 0),
+      fbs_stock: Number(mapping.fbs_stock || 0),
+      inventory_value: stock * avgUnitCost,
+      sku_count: Number(mapping.bound_sku_count || 0),
+      mapped_skus: (mapping.bound_mappings || []).map((item) => item.ozon_sku).filter(Boolean).join(", "),
+      origin_skus: (mapping.bound_mappings || []).map((item) => `${item.shop_name || ""} / ${item.ozon_sku || ""}`).join("||"),
+      total_sales_quantity: Number(sales.total_sales_quantity || 0),
+      total_sales_amount: Number(sales.total_sales_amount || 0),
+      avg_sale_price: Number(sales.total_sales_quantity || 0) ? Number(sales.total_sales_amount || 0) / Number(sales.total_sales_quantity) : 0,
+      estimated_profit_total: Number(sales.estimated_profit_total || 0),
+      actual_profit_total: Number(sales.actual_profit_total || 0),
+      order_count: Number(sales.order_count || 0),
+      profit_rate: Number(sales.total_sales_amount || 0) ? Number(sales.estimated_profit_total || 0) / Number(sales.total_sales_amount) : 0,
+      ...mapping,
+      ...(componentSummaries.get(id) || { component_count: 0, component_summary: "", component_available: null }),
+      pricing: null
+    });
+  });
+  return paged ? { rows: enriched, total: Number(totalRow?.total || 0), page, pageSize, mode: "paged" } : enriched;
+}
+
+export async function productsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureProductCompositionSchemaMysql();
   await ensureProductNamingSchemaMysql();
   await ensureStockLocationSchemaMysql();
+  if (String(tenantId) !== "admin") return await tenantProductsMysql(query, tenantId);
   const paged = String(query.paged || "") === "1";
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
@@ -11176,9 +11791,23 @@ export async function productsMysql(query = {}) {
   };
 }
 
-export async function hiddenProductsMysql(query = {}) {
+export async function hiddenProductsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureProductNamingSchemaMysql();
+  const tenantScoped = String(tenantId) !== "admin";
+  const tenantPk = Number(tenantId);
+  if (tenantScoped) {
+    if (!Number.isSafeInteger(tenantPk) || tenantPk <= 0) {
+      throw Object.assign(new Error("当前企业上下文无效，无法读取隐藏产品。"), { statusCode: 403 });
+    }
+    const requiredTenantColumns = await Promise.all(["products", "sku_mappings", "shops"].map(async (table) => {
+      try { return await mysqlSchemaColumnExists(table, "tenant_id"); }
+      catch { return false; }
+    }));
+    if (requiredTenantColumns.some((exists) => !exists)) {
+      throw Object.assign(new Error("企业隐藏产品列表暂不可用：产品归属（products.tenant_id）、SKU 映射与店铺归属（sku_mappings.tenant_id、shops.tenant_id）尚未完成迁移，无法验证数据归属；请管理员先完成产品、店铺和 SKU 映射租户迁移后重试。"), { statusCode: 503 });
+    }
+  }
   const paged = String(query.paged || "") === "1";
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
@@ -11188,6 +11817,10 @@ export async function hiddenProductsMysql(query = {}) {
   const dateTo = String(query.dateTo || query.date_to || "").slice(0, 10);
   const where = ["p.active = 0"];
   const params = [];
+  if (tenantScoped) {
+    where.push("p.tenant_id = ?");
+    params.push(tenantPk);
+  }
   if (dateFrom) {
     where.push("DATE(COALESCE(p.updated_at, p.created_at)) >= ?");
     params.push(dateFrom);
@@ -11197,7 +11830,10 @@ export async function hiddenProductsMysql(query = {}) {
     params.push(dateTo);
   }
   if (shopId !== "all") {
-    where.push("EXISTS (SELECT 1 FROM sku_mappings sm_filter WHERE sm_filter.product_id = p.id AND sm_filter.active = 1 AND sm_filter.shop_id = ?)");
+    where.push(tenantScoped
+      ? "EXISTS (SELECT 1 FROM sku_mappings sm_filter JOIN shops sh_filter ON sh_filter.id = sm_filter.shop_id AND sh_filter.tenant_id = ? WHERE sm_filter.tenant_id = ? AND sm_filter.product_id = p.id AND sm_filter.active = 1 AND sm_filter.shop_id = ?)"
+      : "EXISTS (SELECT 1 FROM sku_mappings sm_filter WHERE sm_filter.product_id = p.id AND sm_filter.active = 1 AND sm_filter.shop_id = ?)");
+    if (tenantScoped) params.push(tenantPk, tenantPk);
     params.push(Number(shopId));
   }
   if (searchText && isInventoryIdentifier(searchText)) {
@@ -11215,9 +11851,10 @@ export async function hiddenProductsMysql(query = {}) {
       OR EXISTS (
         SELECT 1
         FROM sku_mappings sm_search
-        LEFT JOIN shops sh_search ON sh_search.id = sm_search.shop_id
+        ${tenantScoped ? `JOIN shops sh_search ON sh_search.id = sm_search.shop_id AND sh_search.tenant_id = ${tenantPk}` : "LEFT JOIN shops sh_search ON sh_search.id = sm_search.shop_id"}
         WHERE sm_search.product_id = p.id
           AND sm_search.active = 1
+          ${tenantScoped ? `AND sm_search.tenant_id = ${tenantPk}` : ""}
           AND (
             LOWER(COALESCE(sm_search.ozon_sku, '')) LIKE ?
             OR LOWER(COALESCE(sm_search.offer_id, '')) LIKE ?
@@ -11228,6 +11865,13 @@ export async function hiddenProductsMysql(query = {}) {
     )`);
     params.push(like, like, like, like, like, like, like, like, like);
   }
+  const productPeopleJoins = tenantScoped
+    ? `LEFT JOIN people pe ON pe.id = p.owner_person_id AND EXISTS (SELECT 1 FROM tenant_members owner_member WHERE owner_member.tenant_id = ${tenantPk} AND owner_member.person_id = p.owner_person_id AND owner_member.active = 1)
+       LEFT JOIN people creator ON creator.id = p.created_by_person_id AND EXISTS (SELECT 1 FROM tenant_members creator_member WHERE creator_member.tenant_id = ${tenantPk} AND creator_member.person_id = p.created_by_person_id AND creator_member.active = 1)`
+    : "LEFT JOIN people pe ON pe.id = p.owner_person_id LEFT JOIN people creator ON creator.id = p.created_by_person_id";
+  const supplierJoin = tenantScoped ? "" : "LEFT JOIN suppliers supplier ON supplier.id = p.supplier_id";
+  const supplierIdField = tenantScoped ? "NULL AS supplier_id" : "p.supplier_id";
+  const supplierNameField = tenantScoped ? "NULL AS supplier_name" : "supplier.name AS supplier_name";
   const whereSql = `WHERE ${where.join(" AND ")}`;
   const selectSql = `
     SELECT p.id, p.selection_id, p.code,
@@ -11236,18 +11880,19 @@ export async function hiddenProductsMysql(query = {}) {
         ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
       END AS inventory_id, p.inventory_number,
       CASE WHEN p.active = 0 THEN 'deleted' ELSE 'removed_from_inventory' END AS hidden_reason,
-      p.name, p.image_url, p.purchase_url, p.supplier_note, p.source_platform, p.supplier_id, p.shipping_method,
+      p.name, p.image_url, p.purchase_url, p.supplier_note, p.source_platform, ${supplierIdField}, p.shipping_method,
       p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
       p.package_weight_g, p.length_cm, p.width_cm, p.height_cm,
       p.listing_price_rub, p.air_sale_price_rmb, p.exchange_rate,
       p.target_margin, p.desired_profit_mode, p.desired_profit_value, p.return_rate, p.product_type, p.selection_status,
-      p.owner_person_id, p.created_by_person_id, p.created_at, p.updated_at,
+      ${tenantScoped ? "CASE WHEN pe.id IS NOT NULL THEN p.owner_person_id ELSE NULL END" : "p.owner_person_id"} AS owner_person_id,
+      ${tenantScoped ? "CASE WHEN creator.id IS NOT NULL THEN p.created_by_person_id ELSE NULL END" : "p.created_by_person_id"} AS created_by_person_id,
+      p.created_at, p.updated_at,
       pe.name AS owner_name, creator.name AS creator_name,
-      supplier.name AS supplier_name
+      ${supplierNameField}
     FROM products p
-    LEFT JOIN people pe ON pe.id = p.owner_person_id
-    LEFT JOIN people creator ON creator.id = p.created_by_person_id
-    LEFT JOIN suppliers supplier ON supplier.id = p.supplier_id
+    ${productPeopleJoins}
+    ${supplierJoin}
     ${whereSql}
   `;
   if (!paged) {
@@ -11268,8 +11913,82 @@ export async function hiddenProductsMysql(query = {}) {
   };
 }
 
-export async function selectionProductsMysql(query = {}) {
+async function tenantSelectionProductsMysql(query = {}, tenantId) {
+  const tenantPk = Number(tenantId);
+  if (!Number.isSafeInteger(tenantPk) || tenantPk <= 0) {
+    throw Object.assign(new Error("当前企业上下文无效，无法读取选品。"), { statusCode: 403 });
+  }
+  const requiredTables = ["products", "suppliers"];
+  const missing = (await Promise.all(requiredTables.map(async (table) => ({ table, exists: await mysqlSchemaColumnExists(table, "tenant_id") }))))
+    .filter((item) => !item.exists).map((item) => `${item.table}.tenant_id`);
+  if (missing.length) throw Object.assign(new Error(`企业选品列表暂不可用：缺少租户归属字段 ${missing.join("、")}，请管理员先完成对应迁移。`), { statusCode: 503 });
+
+  const paged = String(query.paged || "") === "1";
+  const summaryOnly = String(query.summaryOnly || query.summary_only || "") === "1";
+  const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
+  const page = Math.max(Number(query.page || 1), 1);
+  const search = String(query.query || query.search || "").trim().toLowerCase();
+  const ownerId = String(query.ownerPersonId || query.owner_person_id || "all");
+  const where = ["p.tenant_id = ?", "p.active = 1", selectionProductPredicateMysql("p")];
+  const params = [tenantPk];
+  if (ownerId !== "all") { where.push("p.owner_person_id = ?"); params.push(Number(ownerId)); }
+  if (search) {
+    const like = `%${search}%`;
+    where.push(`(LOWER(COALESCE(p.name, '')) LIKE ? OR LOWER(COALESCE(p.code, '')) LIKE ?
+      OR LOWER(COALESCE(p.selection_id, '')) LIKE ? OR LOWER(COALESCE(p.purchase_url, '')) LIKE ?
+      OR LOWER(COALESCE(p.supplier_note, '')) LIKE ? OR LOWER(COALESCE(owner.name, '')) LIKE ?
+      OR LOWER(COALESCE(creator.name, '')) LIKE ? OR LOWER(COALESCE(supplier.name, '')) LIKE ?)`);
+    params.push(...Array(8).fill(like));
+  }
+  const fromSql = `FROM products p
+    LEFT JOIN tenant_members owner_member ON owner_member.tenant_id = p.tenant_id AND owner_member.person_id = p.owner_person_id AND owner_member.active = 1
+    LEFT JOIN people owner ON owner.id = owner_member.person_id AND owner.active != 0
+    LEFT JOIN tenant_members creator_member ON creator_member.tenant_id = p.tenant_id AND creator_member.person_id = p.created_by_person_id AND creator_member.active = 1
+    LEFT JOIN people creator ON creator.id = creator_member.person_id AND creator.active != 0
+    LEFT JOIN suppliers supplier ON supplier.id = p.supplier_id AND supplier.tenant_id = p.tenant_id
+    WHERE ${where.join(" AND ")}`;
+  const selectSql = `SELECT p.id, p.selection_id, p.code,
+      CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id,
+      p.name, p.ozon_category_id, p.ozon_description_category_id, p.ozon_type_id, p.ozon_category_name,
+      p.image_url, p.detail_image_urls, p.material, p.color, p.development_type, p.vehicle_brand, p.vehicle_model, p.vehicle_model_key,
+      p.selling_points, p.inventory_category, p.fitment_type, p.accessory_name, p.product_quantity, p.package_mode,
+      p.package_contents, p.included_accessories, p.gift_contents, p.listing_title_ru, p.listing_tags_ru, p.listing_description_ru,
+      p.listing_title_prompt, p.listing_tags_prompt, p.listing_description_prompt, p.supplier_note,
+      p.purchase_url, p.source_platform, p.supplier_id, p.shipping_method, p.logistics_rule_id,
+      p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity, p.package_weight_g, p.length_cm, p.width_cm, p.height_cm,
+      p.listing_price_rub, p.air_sale_price_rmb, p.exchange_rate, p.target_margin, p.desired_profit_mode, p.desired_profit_value,
+      p.advertising_rate, p.return_rate, 'selection' AS product_type, p.selection_status,
+      p.source_selection_id, p.variant_task_id, p.variant_result_id, p.variant_type, p.is_variant_generated, p.material_asset_status,
+      '' AS listing_job_status, NULL AS listing_job_id, NULL AS listing_job_no, NULL AS listing_job_current_stage,
+      0 AS listing_job_elapsed_ms, '' AS listing_job_error_message, '' AS listing_job_error_fix_tip, '' AS listing_job_raw_error_message,
+      NULL AS listing_job_batch_id, NULL AS listing_job_total_count, NULL AS listing_job_success_count, NULL AS listing_job_failed_count,
+      NULL AS listing_job_result_json, NULL AS listing_job_progress_json, NULL AS listing_job_error_json,
+      NULL AS listing_job_created_at, NULL AS listing_job_started_at, NULL AS listing_job_finished_at, NULL AS listing_job_updated_at,
+      NULL AS listing_job_queue_ahead, p.owner_person_id, p.created_by_person_id, p.created_at, p.updated_at,
+      owner.name AS owner_name, creator.name AS creator_name, supplier.name AS supplier_name`;
+  const mapRows = (rows) => rows.map((row) => ({
+    ...withProductImageEndpointMysql(row, { thumbnail: true }),
+    pricing: calculateSelectionPricing(row),
+    business_status: selectionBusinessStatusMysql(row)
+  }));
+  const totalRow = await mysqlQueryOne(`SELECT COUNT(DISTINCT p.id) AS total ${fromSql}`, params);
+  const total = Number(totalRow?.total || 0);
+  if (summaryOnly && paged) {
+    const summaryRows = await mysqlQuery(`SELECT p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
+      p.package_weight_g, p.length_cm, p.width_cm, p.height_cm, p.listing_price_rub, p.air_sale_price_rmb, p.exchange_rate,
+      p.desired_profit_mode, p.desired_profit_value, p.target_margin, p.advertising_rate, p.return_rate ${fromSql}`, params);
+    return { rows: [], total, page, pageSize, mode: "summary_only", summary: { ...selectionSummaryFromPricingRowsMysql(summaryRows), products: total, status_counts: { all: total } } };
+  }
+  const rows = await mysqlQuery(`${selectSql} ${fromSql} ORDER BY p.updated_at DESC, p.id DESC${paged ? " LIMIT ? OFFSET ?" : ""}`,
+    paged ? [...params, pageSize, (page - 1) * pageSize] : params);
+  const enriched = mapRows(rows);
+  if (!paged) return enriched;
+  return { rows: enriched, total, page, pageSize, mode: "paged", summary: selectionSummaryMysql(enriched) };
+}
+
+export async function selectionProductsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  if (String(tenantId) !== "admin") return await tenantSelectionProductsMysql(query, tenantId);
   await ensureSelectionCreativeSchemaMysql();
   await ensureProductMergeSchemaMysql();
   await ensureAssetVariantJobsTableMysql();
@@ -11568,8 +12287,73 @@ export async function selectionProductsMysql(query = {}) {
   };
 }
 
-export async function selectionProductMysql(id, query = {}) {
+async function tenantInventoryProductDetailMysql(id, query = {}, tenantId) {
+  const tenantPk = Number(tenantId);
+  if (!Number.isSafeInteger(tenantPk) || tenantPk <= 0) {
+    throw Object.assign(new Error("当前企业上下文无效，无法读取库存产品详情。"), { statusCode: 403 });
+  }
+  await ensureProductCompositionSchemaMysql();
+  await ensureStockLocationSchemaMysql();
+  const detailOwnershipColumns = await Promise.all(["products", "suppliers", "logistics_fee_rules"].map(async (table) => ({
+    table,
+    exists: await mysqlSchemaColumnExists(table, "tenant_id")
+  })));
+  const missingDetailOwnership = detailOwnershipColumns.filter((item) => !item.exists).map((item) => `${item.table}.tenant_id`);
+  if (missingDetailOwnership.length) {
+    throw Object.assign(new Error(`企业选品详情暂不可用：缺少租户归属字段 ${missingDetailOwnership.join("、")}，请管理员先完成对应迁移。`), { statusCode: 503 });
+  }
+  const row = await mysqlQueryOne(`
+    SELECT p.*,
+      CASE
+        WHEN p.code LIKE 'P-%' THEN p.code
+        ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
+      END AS inventory_id,
+      owner.name AS owner_name, creator.name AS creator_name,
+      supplier.name AS supplier_name, logistics.name AS logistics_rule_name,
+      logistics.carrier AS logistics_rule_carrier, logistics.channel AS logistics_rule_channel
+    FROM products p
+    LEFT JOIN tenant_members owner_member ON owner_member.tenant_id = p.tenant_id AND owner_member.person_id = p.owner_person_id AND owner_member.active = 1
+    LEFT JOIN people owner ON owner.id = owner_member.person_id AND owner.active != 0
+    LEFT JOIN tenant_members creator_member ON creator_member.tenant_id = p.tenant_id AND creator_member.person_id = p.created_by_person_id AND creator_member.active = 1
+    LEFT JOIN people creator ON creator.id = creator_member.person_id AND creator.active != 0
+    LEFT JOIN suppliers supplier ON supplier.id = p.supplier_id AND supplier.tenant_id = p.tenant_id
+    LEFT JOIN logistics_fee_rules logistics ON logistics.id = p.logistics_rule_id AND logistics.tenant_id = p.tenant_id
+    WHERE p.id = ? AND p.tenant_id = ? AND p.active = 1
+  `, [Number(id), tenantPk]);
+  if (!row) return null;
+  const includeOperations = String(query.includeOperations ?? query.include_operations ?? "1") !== "0";
+  const compositionItems = includeOperations ? await productComponentRowsMysql(Number(id), String(tenantPk)) : [];
+  return {
+    ...withProductImageEndpointMysql(row, { thumbnail: true }),
+    structured_naming: {
+      category: row.inventory_category || "",
+      vehicle_brand: String(row.vehicle_brand || "").replace(/^无品牌$/u, ""),
+      fitment_type: row.fitment_type === "specific" ? "specific" : "universal",
+      vehicle_model: row.vehicle_model || "",
+      vehicle_models: Array.isArray(row.vehicle_models_json) ? row.vehicle_models_json : (() => { try { return JSON.parse(row.vehicle_models_json || "[]"); } catch { return []; } })(),
+      accessory: row.accessory_name || "",
+      colors: String(row.color || "").split(",").map((item) => item.trim()).filter(Boolean),
+      material: row.material || "",
+      materials: String(row.material || "").split("/").map((item) => item.trim()).filter(Boolean),
+      process: row.surface_process || "",
+      quantity: Math.max(1, Number(row.product_quantity || 1)),
+      stock_unit: row.stock_unit || "个",
+      package_mode: row.package_mode === "set" ? "set" : "single",
+      package_contents: row.package_contents || "",
+      included_accessories: row.included_accessories || "",
+      gift_contents: row.gift_contents || ""
+    },
+    composition_items: compositionItems,
+    component_count: compositionItems.length,
+    component_summary: compositionItems.map((item) => `${item.component_name || item.inventory_id} x ${item.quantity}${item.stock_unit || "个"}`).join("；"),
+    component_available: compositionItems.length ? Math.min(...compositionItems.map((item) => Number(item.available_quantity || 0))) : null,
+    pricing: calculateSelectionPricing(row)
+  };
+}
+
+export async function selectionProductMysql(id, query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  if (String(tenantId) !== "admin") return await tenantInventoryProductDetailMysql(id, query, tenantId);
   await ensureSelectionCreativeSchemaMysql();
   await ensureAssetVariantJobsTableMysql();
   await ensureProductCompositionSchemaMysql();
@@ -11675,9 +12459,18 @@ export async function selectionProductMysql(id, query = {}) {
   };
 }
 
-export async function productImageMysql(id) {
+export async function productImageMysql(id, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
-  const row = await mysqlQueryOne("SELECT image_url FROM products WHERE id = ? AND active = 1", [Number(id)]);
+  const tenantScoped = String(tenantId) !== "admin";
+  let row;
+  if (tenantScoped) {
+    const tenantPk = Number(tenantId);
+    if (!Number.isSafeInteger(tenantPk) || tenantPk <= 0) throw Object.assign(new Error("当前企业上下文无效，无法读取产品图片。"), { statusCode: 403 });
+    if (!await mysqlSchemaColumnExists("products", "tenant_id")) throw Object.assign(new Error("企业产品图片暂不可用：产品归属字段 products.tenant_id 尚未迁移，请管理员完成产品租户迁移后重试。"), { statusCode: 503 });
+    row = await mysqlQueryOne("SELECT image_url FROM products WHERE id = ? AND tenant_id = ?", [Number(id), tenantPk]);
+  } else {
+    row = await mysqlQueryOne("SELECT image_url FROM products WHERE id = ? AND active = 1", [Number(id)]);
+  }
   const image = String(row?.image_url || "").trim();
   if (/^\/api\/products\/\d+\/image$/i.test(image)) return "";
   return image;
@@ -11763,9 +12556,18 @@ export async function refreshProductImageUrlMysql(id) {
   return await refreshPromise;
 }
 
-export async function productDetailImageMysql(id, index = 0) {
+export async function productDetailImageMysql(id, index = 0, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
-  const row = await mysqlQueryOne("SELECT detail_image_urls FROM products WHERE id = ? AND active = 1", [Number(id)]);
+  const tenantScoped = String(tenantId) !== "admin";
+  let row;
+  if (tenantScoped) {
+    const tenantPk = Number(tenantId);
+    if (!Number.isSafeInteger(tenantPk) || tenantPk <= 0) throw Object.assign(new Error("当前企业上下文无效，无法读取产品详情图片。"), { statusCode: 403 });
+    if (!await mysqlSchemaColumnExists("products", "tenant_id")) throw Object.assign(new Error("企业产品图片暂不可用：产品归属字段 products.tenant_id 尚未迁移，请管理员完成产品租户迁移后重试。"), { statusCode: 503 });
+    row = await mysqlQueryOne("SELECT detail_image_urls FROM products WHERE id = ? AND tenant_id = ?", [Number(id), tenantPk]);
+  } else {
+    row = await mysqlQueryOne("SELECT detail_image_urls FROM products WHERE id = ? AND active = 1", [Number(id)]);
+  }
   const images = productDetailImageListMysql(row?.detail_image_urls);
   return images[Number(index)] || "";
 }
@@ -12271,16 +13073,20 @@ async function maybeCreateProcurementForProductMysql(connection, productId, body
   return { id: Number(result.insertId), ...plan };
 }
 
-async function incrementLogisticsRuleUsageMysqlTx(connection, ruleId) {
+async function incrementLogisticsRuleUsageMysqlTx(connection, ruleId, tenantId = "admin") {
   const logisticsRuleId = Number(ruleId || 0);
   if (!logisticsRuleId) return;
-  await connection.execute(`
-    UPDATE logistics_fee_rules
+  const scope = await logisticsTenantScopeMysql(tenantId);
+  const [result] = await connection.execute(`
+    UPDATE logistics_fee_rules l
     SET usage_count = COALESCE(usage_count, 0) + 1,
       last_used_at = CURRENT_TIMESTAMP,
       updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `, [logisticsRuleId]);
+    WHERE l.id = ? AND ${scope.sql}
+  `, [logisticsRuleId, ...scope.params]);
+  if (Number(result.affectedRows || 0) !== 1) {
+    throw Object.assign(new Error("所选物流规则不存在或不属于当前企业，不能用于该产品。"), { statusCode: 400 });
+  }
 
 }
 
@@ -12291,19 +13097,55 @@ export async function prepareInventoryProductCreationMysql() {
   await ensureProductNamingSchemaMysql();
 }
 
-export async function createProductMysql(body = {}, transactionConnection = null) {
+export async function createProductMysql(body = {}, transactionConnection = null, tenantId = "admin") {
   await prepareInventoryProductCreationMysql();
   const structuredNaming = normalizeStructuredNamingMysql(body);
   const name = structuredNaming?.name || String(body.name || "").trim();
   if (!name) throw new Error("Product name is required");
+  const tenantScoped = String(tenantId) !== "admin";
+  const tenantPk = tenantScoped ? await resolveShopTenantIdMysql(tenantId) : null;
+  if (tenantScoped) {
+    if (String(body.product_type || "") !== "selection" || structuredNaming) {
+      throw Object.assign(new Error("企业选品建品目前仅支持选品产品；库存建品请等待企业建品审批数据完成隔离。"), { statusCode: 403 });
+    }
+    const requiredColumns = ["products", "suppliers", "logistics_fee_rules"].map((table) => mysqlSchemaColumnExists(table, "tenant_id").then((exists) => ({ table, exists })));
+    const missingColumns = (await Promise.all(requiredColumns)).filter((item) => !item.exists).map((item) => `${item.table}.tenant_id`);
+    if (missingColumns.length) {
+      throw Object.assign(new Error(`企业选品创建暂不可用：以下归属字段尚未迁移：${missingColumns.join("、")}。请管理员先完成对应租户迁移。`), { statusCode: 503 });
+    }
+    if (["1", "true", "yes"].includes(String(body.create_procurement_request || "").toLowerCase())) {
+      throw Object.assign(new Error("企业选品创建暂不支持同时创建采购申请；采购申请隔离完成后再开放此操作。"), { statusCode: 403 });
+    }
+  }
   const exchangeRate = Number(body.exchange_rate || await currentExchangeRateValueMysql() || 11.32);
   const create = async (connection) => {
     const shouldCreateProcurement = ["1", "true", "yes"].includes(String(body.create_procurement_request || "").toLowerCase());
     const purchasePlan = shouldCreateProcurement ? normalizePurchasePlanMysql(body) : null;
     const selectionId = body.selection_id || await nextSelectionCodeMysql(connection, "SEL");
     const code = body.code || await nextProductCodeMysql(connection);
-    const ownerPersonId = await resolvePersonIdOrFirstMysql(body.owner_person_id || body.created_by_person_id, connection);
-    const createdByPersonId = await resolvePersonIdOrFirstMysql(body.created_by_person_id || ownerPersonId, connection);
+    let ownerPersonId;
+    let createdByPersonId;
+    if (tenantScoped) {
+      ownerPersonId = nullableInteger(body.owner_person_id || body.created_by_person_id);
+      createdByPersonId = nullableInteger(body.created_by_person_id || ownerPersonId);
+      for (const personId of new Set([ownerPersonId, createdByPersonId])) {
+        if (!personId) throw Object.assign(new Error("企业选品产品必须指定本企业成员作为负责人和创建人。"), { statusCode: 400 });
+        const member = await mysqlConnectionQueryOne(connection, `
+          SELECT p.id FROM people p
+          JOIN tenant_members tm ON tm.person_id = p.id AND tm.tenant_id = ? AND tm.active = 1
+          WHERE p.id = ? AND p.active != 0 LIMIT 1
+        `, [tenantPk, personId]);
+        if (!member) throw Object.assign(new Error("负责人或创建人不属于当前企业，请选择当前企业的有效成员。"), { statusCode: 400 });
+      }
+      const supplierId = nullableInteger(body.supplier_id);
+      if (supplierId) {
+        const supplier = await mysqlConnectionQueryOne(connection, "SELECT id FROM suppliers WHERE id = ? AND tenant_id = ? AND status = 'active' LIMIT 1", [supplierId, tenantPk]);
+        if (!supplier) throw Object.assign(new Error("所选供应商不存在或不属于当前企业，请选择本企业供应商。"), { statusCode: 400 });
+      }
+    } else {
+      ownerPersonId = await resolvePersonIdOrFirstMysql(body.owner_person_id || body.created_by_person_id, connection);
+      createdByPersonId = await resolvePersonIdOrFirstMysql(body.created_by_person_id || ownerPersonId, connection);
+    }
     const logisticsRuleId = nullableInteger(body.logistics_rule_id);
     const shippingMethod = body.shipping_method || recommendShippingMysql(body);
     const desiredProfitValue = Number(body.desired_profit_value || 20);
@@ -12311,18 +13153,19 @@ export async function createProductMysql(body = {}, transactionConnection = null
     const ozonDescriptionCategoryId = nullableInteger(body.ozon_description_category_id || body.description_category_id) || 0;
     const ozonTypeId = nullableInteger(body.ozon_type_id || body.type_id) || 0;
     const developmentMeta = resolveDevelopmentMeta(body, "new");
-    const [result] = await connection.execute(`
-      INSERT INTO products
-      (selection_id, code, name, ozon_category_id, ozon_description_category_id, ozon_type_id, ozon_category_name,
-       image_url, detail_image_urls, material, color, development_type, vehicle_brand, vehicle_model, vehicle_model_key, selling_points,
-       listing_title_ru, listing_tags_ru, listing_description_ru, listing_title_prompt, listing_tags_prompt, listing_description_prompt,
-       purchase_url, supplier_note, source_platform, supplier_id, shipping_method,
-       logistics_rule_id, recommended_shipping_method, purchase_cost, domestic_shipping, handling_fee, purchase_quantity,
-       package_weight_g, length_cm, width_cm, height_cm, listing_price_rub, air_sale_price_rmb, exchange_rate,
-       target_margin, desired_profit_mode, desired_profit_value, advertising_rate, return_rate, stock_unit, is_accessory, owner_person_id, created_by_person_id, product_type, selection_status,
-       source_selection_id, variant_task_id, variant_result_id, variant_type, is_variant_generated, material_asset_status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
+    const productColumns = [
+      ...(tenantScoped ? ["tenant_id"] : []),
+      "selection_id", "code", "name", "ozon_category_id", "ozon_description_category_id", "ozon_type_id", "ozon_category_name",
+      "image_url", "detail_image_urls", "material", "color", "development_type", "vehicle_brand", "vehicle_model", "vehicle_model_key", "selling_points",
+      "listing_title_ru", "listing_tags_ru", "listing_description_ru", "listing_title_prompt", "listing_tags_prompt", "listing_description_prompt",
+      "purchase_url", "supplier_note", "source_platform", "supplier_id", "shipping_method", "logistics_rule_id", "recommended_shipping_method",
+      "purchase_cost", "domestic_shipping", "handling_fee", "purchase_quantity", "package_weight_g", "length_cm", "width_cm", "height_cm",
+      "listing_price_rub", "air_sale_price_rmb", "exchange_rate", "target_margin", "desired_profit_mode", "desired_profit_value",
+      "advertising_rate", "return_rate", "stock_unit", "is_accessory", "owner_person_id", "created_by_person_id", "product_type", "selection_status",
+      "source_selection_id", "variant_task_id", "variant_result_id", "variant_type", "is_variant_generated", "material_asset_status"
+    ];
+    const productValues = [
+      ...(tenantScoped ? [tenantPk] : []),
       selectionId,
       code,
       name,
@@ -12380,11 +13223,16 @@ export async function createProductMysql(body = {}, transactionConnection = null
       String(body.variant_type || ""),
       Number(body.is_variant_generated || 0) ? 1 : 0,
       String(body.material_asset_status || "")
-    ]);
+    ];
+    if (productColumns.length !== productValues.length) throw new Error("Product insert column/value count mismatch");
+    const [result] = await connection.execute(`
+      INSERT INTO products (${productColumns.join(", ")})
+      VALUES (${productColumns.map(() => "?").join(", ")})
+    `, productValues);
     const productId = Number(result.insertId);
     if (structuredNaming) await saveStructuredNamingMysql(productId, body, connection);
-    await saveProductComponentsTxMysql(connection, productId, body.composition_items || body.components || []);
-    if (logisticsRuleId) await incrementLogisticsRuleUsageMysqlTx(connection, logisticsRuleId);
+    await saveProductComponentsTxMysql(connection, productId, body.composition_items || body.components || [], tenantScoped ? String(tenantPk) : "admin");
+    if (logisticsRuleId) await incrementLogisticsRuleUsageMysqlTx(connection, logisticsRuleId, tenantScoped ? String(tenantPk) : "admin");
     const procurement = await maybeCreateProcurementForProductMysql(connection, productId, body, purchasePlan || normalizePurchasePlanMysql(body));
     return { id: productId, code, procurement_request_id: procurement?.id || null };
   };
@@ -12588,23 +13436,70 @@ export async function commitProductCsvImportMysql(body = {}) {
   return result;
 }
 
-export async function updateProductMysql(id, body = {}) {
+export async function updateProductMysql(id, body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureSelectionCreativeSchemaMysql();
   await ensureProductCompositionSchemaMysql();
   await ensureProductNamingSchemaMysql();
   const productId = Number(id);
+  const tenantScoped = String(tenantId) !== "admin";
+  const tenantPk = tenantScoped ? await resolveShopTenantIdMysql(tenantId) : null;
+  if (tenantScoped) {
+    const ownershipTables = ["products", "suppliers", "logistics_fee_rules"];
+    const missing = (await Promise.all(ownershipTables.map(async (table) => ({ table, exists: await mysqlSchemaColumnExists(table, "tenant_id") }))))
+      .filter((item) => !item.exists).map((item) => `${item.table}.tenant_id`);
+    if (missing.length) throw Object.assign(new Error(`企业选品编辑暂不可用：缺少租户归属字段 ${missing.join("、")}，请管理员先完成对应迁移。`), { statusCode: 503 });
+    if (body.structured_naming || body.structuredNaming) {
+      throw Object.assign(new Error("企业选品暂不支持修改库存规范命名；相关字典归属隔离完成后再开放。"), { statusCode: 403 });
+    }
+    if (body.product_type && String(body.product_type) !== "selection") {
+      throw Object.assign(new Error("企业选品不能通过编辑直接转换为库存产品，请使用已隔离的库存流程。"), { statusCode: 403 });
+    }
+  }
   let shouldSyncOutbound = false;
   await withMysqlTransaction(async (connection) => {
   const existing = await mysqlConnectionQueryOne(connection, `
     SELECT id, updated_at, image_url, detail_image_urls, material_asset_status, product_type, selection_status,
       development_type, vehicle_brand, vehicle_model, vehicle_model_key, created_by_person_id
     FROM products
-    WHERE id = ? AND active = 1
+    WHERE id = ? AND active = 1 ${tenantScoped ? "AND tenant_id = ?" : ""}
     FOR UPDATE
-  `, [productId]);
+  `, tenantScoped ? [productId, tenantPk] : [productId]);
   if (!existing) throw new Error("Product not found or archived");
+  if (tenantScoped && String(existing.product_type || "") !== "selection") {
+    throw Object.assign(new Error("当前企业只能编辑本企业选品，库存产品编辑流程尚未开放。"), { statusCode: 403 });
+  }
   assertFreshRecord(body, existing, "商品已被其他用户保存，请刷新后再继续编辑");
+  if (tenantScoped) {
+    const ownerPersonId = nullableInteger(body.owner_person_id);
+    if (!ownerPersonId) throw Object.assign(new Error("请为选品指定本企业负责人。"), { statusCode: 400 });
+    const owner = await mysqlConnectionQueryOne(connection, `
+      SELECT p.id FROM people p
+      JOIN tenant_members tm ON tm.person_id = p.id AND tm.tenant_id = ? AND tm.active = 1
+      WHERE p.id = ? AND p.active != 0 LIMIT 1
+    `, [tenantPk, ownerPersonId]);
+    if (!owner) throw Object.assign(new Error("负责人不属于当前企业，请选择本企业有效成员。"), { statusCode: 400 });
+    const creatorPersonId = nullableInteger(existing.created_by_person_id);
+    const creator = creatorPersonId ? await mysqlConnectionQueryOne(connection, `
+      SELECT p.id FROM people p
+      JOIN tenant_members tm ON tm.person_id = p.id AND tm.tenant_id = ? AND tm.active = 1
+      WHERE p.id = ? AND p.active != 0 LIMIT 1
+    `, [tenantPk, creatorPersonId]) : null;
+    const supplierId = nullableInteger(body.supplier_id);
+    if (supplierId) {
+      const supplier = await mysqlConnectionQueryOne(connection, "SELECT id FROM suppliers WHERE id = ? AND tenant_id = ? AND status = 'active' LIMIT 1", [supplierId, tenantPk]);
+      if (!supplier) throw Object.assign(new Error("所选供应商不存在或不属于当前企业，请选择本企业供应商。"), { statusCode: 400 });
+    }
+    const logisticsRuleId = nullableInteger(body.logistics_rule_id);
+    if (logisticsRuleId) {
+      const ruleScope = await logisticsTenantScopeMysql(String(tenantPk));
+      const rule = await mysqlConnectionQueryOne(connection, `SELECT id FROM logistics_fee_rules WHERE id = ? AND ${ruleScope.sql} LIMIT 1`, [logisticsRuleId, ...ruleScope.params]);
+      if (!rule) throw Object.assign(new Error("所选物流规则不存在或不属于当前企业，请选择本企业物流规则。"), { statusCode: 400 });
+    }
+    if (body.selection_status !== undefined && String(body.selection_status) !== String(existing.selection_status || "draft")) {
+      throw Object.assign(new Error("企业选品状态不能通过编辑直接变更，请使用对应的隔离业务流程。"), { statusCode: 403 });
+    }
+  }
   const exchangeRate = Number(body.exchange_rate || await currentExchangeRateValueMysql() || 11.32);
   const desiredProfitValue = Number(body.desired_profit_value || 20);
   const targetMargin = Number(body.desired_profit_mode === "margin" ? (desiredProfitValue > 1 ? desiredProfitValue / 100 : desiredProfitValue) : 0.2);
@@ -12646,7 +13541,7 @@ export async function updateProductMysql(id, body = {}) {
       listing_price_rub = ?, air_sale_price_rmb = ?, exchange_rate = ?, target_margin = ?,
       desired_profit_mode = ?, desired_profit_value = ?, advertising_rate = ?, return_rate = ?, stock_unit = ?, is_accessory = ?, owner_person_id = ?, created_by_person_id = ?,
       product_type = ?, selection_status = ?, material_asset_status = COALESCE(?, material_asset_status), updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
+    WHERE id = ? ${tenantScoped ? "AND tenant_id = ?" : ""}
   `, [
     body.name,
     nextImageUrl,
@@ -12694,18 +13589,19 @@ export async function updateProductMysql(id, body = {}) {
     Number(body.return_rate || 0.05),
     normalizeStockUnitMysql(body.stock_unit),
     Number(body.is_accessory || 0) ? 1 : 0,
-    nullableInteger(body.owner_person_id) || await firstActivePersonIdMysql(),
-    nullableInteger(body.created_by_person_id) || nullableInteger(existing.created_by_person_id) || nullableInteger(body.owner_person_id) || await firstActivePersonIdMysql(),
+    tenantScoped ? nullableInteger(body.owner_person_id) : nullableInteger(body.owner_person_id) || await firstActivePersonIdMysql(),
+    tenantScoped ? (creator ? Number(existing.created_by_person_id) : nullableInteger(body.owner_person_id)) : nullableInteger(body.created_by_person_id) || nullableInteger(existing.created_by_person_id) || nullableInteger(body.owner_person_id) || await firstActivePersonIdMysql(),
     nextProductType,
     nextSelectionStatus,
     body.material_asset_status === undefined ? null : String(body.material_asset_status || ""),
-    productId
+    productId,
+    ...(tenantScoped ? [tenantPk] : [])
   ]);
   if (body.composition_items !== undefined || body.components !== undefined) {
-    await saveProductComponentsTxMysql(connection, productId, body.composition_items || body.components || []);
-    shouldSyncOutbound = true;
+    await saveProductComponentsTxMysql(connection, productId, body.composition_items || body.components || [], tenantScoped ? String(tenantPk) : "admin");
+    shouldSyncOutbound = !tenantScoped;
   }
-  if (body.structured_naming || body.structuredNaming) await saveStructuredNamingMysql(productId, body, connection);
+  if (!tenantScoped && (body.structured_naming || body.structuredNaming)) await saveStructuredNamingMysql(productId, body, connection);
   });
 
   let outboundSync = null;
@@ -12721,16 +13617,25 @@ export async function updateProductMysql(id, body = {}) {
   return { ok: true, outbound_sync: outboundSync, outbound_sync_warning: outboundSyncWarning };
 }
 
-export async function updateProductComponentsMysql(id, body = {}) {
+export async function updateProductComponentsMysql(id, body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureProductCompositionSchemaMysql();
   const productId = Number(id);
-  const existing = await mysqlQueryOne("SELECT id FROM products WHERE id = ? AND active = 1", [productId]);
-  if (!existing) throw new Error("Product not found or archived");
+  const tenantScoped = String(tenantId) !== "admin";
+  if (tenantScoped && (!Number.isSafeInteger(Number(tenantId)) || Number(tenantId) <= 0)) {
+    throw Object.assign(new Error("当前企业上下文无效，无法保存子产品组成。"), { statusCode: 403 });
+  }
+  if (tenantScoped && !await mysqlSchemaColumnExists("products", "tenant_id")) {
+    throw Object.assign(new Error("企业子产品保存暂不可用：产品归属字段 products.tenant_id 尚未迁移，请管理员先完成产品租户迁移。"), { statusCode: 503 });
+  }
+  if (!tenantScoped) {
+    const existing = await mysqlQueryOne("SELECT id FROM products WHERE id = ? AND active = 1", [productId]);
+    if (!existing) throw new Error("Product not found or archived");
+  }
   await withMysqlTransaction(async (connection) => {
-    await saveProductComponentsTxMysql(connection, productId, body.composition_items || body.components || []);
+    await saveProductComponentsTxMysql(connection, productId, body.composition_items || body.components || [], tenantScoped ? String(tenantId) : "admin");
   });
-  const outboundSync = await syncOutboundForOpenOrdersMysql({ product_id: productId, open_only: true });
+  const outboundSync = tenantScoped ? null : await syncOutboundForOpenOrdersMysql({ product_id: productId, open_only: true });
   return { ok: true, outbound_sync: outboundSync };
 }
 
@@ -13730,16 +14635,25 @@ export async function removeProductFromInventoryMysql(id) {
   return { ok: true, id: productId };
 }
 
-export async function restoreProductMysql(id) {
+export async function restoreProductMysql(id, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
-  await mysqlExecute(`
+  const tenantScoped = String(tenantId) !== "admin";
+  const whereTenantSql = tenantScoped ? " AND tenant_id = ?" : "";
+  const params = tenantScoped ? [Number(id), Number(tenantId)] : [Number(id)];
+  if (tenantScoped) {
+    const tenantPk = Number(tenantId);
+    if (!Number.isSafeInteger(tenantPk) || tenantPk <= 0) throw Object.assign(new Error("当前企业上下文无效，无法恢复产品。"), { statusCode: 403 });
+    if (!await mysqlSchemaColumnExists("products", "tenant_id")) throw Object.assign(new Error("企业产品恢复暂不可用：产品归属字段 products.tenant_id 尚未迁移，请管理员完成产品租户迁移后重试。"), { statusCode: 503 });
+  }
+  const result = await mysqlExecute(`
     UPDATE products
     SET active = 1,
         product_type = 'main',
         selection_status = 'listed',
         updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `, [Number(id)]);
+    WHERE id = ?${whereTenantSql}
+  `, params);
+  if (tenantScoped && !Number(result.affectedRows || 0)) throw Object.assign(new Error("该隐藏产品不存在或不属于当前企业。"), { statusCode: 404 });
   invalidateMasterDataCache();
   return { ok: true };
 }
@@ -13850,9 +14764,11 @@ export async function createProductFromOnlineProductMysql(body = {}) {
   return product;
 }
 
-async function productMappingSummariesMysql(productIds = []) {
+async function productMappingSummariesMysql(productIds = [], tenantId = "admin") {
   const ids = [...new Set(productIds.map((id) => Number(id || 0)).filter(Boolean))];
   if (!ids.length) return new Map();
+  const tenantScoped = String(tenantId) !== "admin";
+  const tenantPk = tenantScoped ? Number(tenantId) : 0;
   const placeholders = ids.map(() => "?").join(", ");
   const rows = await mysqlQuery(`
     WITH relevant_mappings AS (
@@ -13861,9 +14777,10 @@ async function productMappingSummariesMysql(productIds = []) {
         COALESCE(sm.display_name, op.name, '') AS online_name,
         COALESCE(NULLIF(op.primary_image, ''), NULLIF(op.image_url, ''), '') AS online_image_url
       FROM sku_mappings sm
-      LEFT JOIN shops s ON s.id = sm.shop_id
-      LEFT JOIN online_products op ON op.id = sm.online_product_id
+      ${tenantScoped ? `JOIN shops s ON s.id = sm.shop_id AND s.tenant_id = ${tenantPk}` : "LEFT JOIN shops s ON s.id = sm.shop_id"}
+      LEFT JOIN online_products op ON op.id = sm.online_product_id ${tenantScoped ? "AND op.shop_id = sm.shop_id" : ""}
       WHERE sm.active = 1 AND sm.product_id IN (${placeholders})
+        ${tenantScoped ? `AND sm.tenant_id = ${tenantPk}` : ""}
     )
     SELECT rm.id, rm.product_id, rm.shop_id, rm.shop_name,
       rm.ozon_sku, rm.offer_id, rm.online_name, rm.online_image_url,
@@ -14172,7 +15089,7 @@ function procurementInventoryWarningJoinsMysql() {
           - MIN(FLOOR(GREATEST(COALESCE(component_stock.stock, 0), 0) / NULLIF(pc.quantity, 0)))
         ) AS incoming_stock
       FROM product_components pc
-      JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.active = 1
+      JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.active = 1 ${tenantScope ? `AND component_product.tenant_id = ${tenantScope.id} AND pc.tenant_id = ${tenantScope.id}` : ""}
       LEFT JOIN (
         SELECT product_id, SUM(quantity_delta) AS stock
         FROM inventory_movements
@@ -14393,8 +15310,211 @@ export async function refreshProcurementDemandMysql() {
   return { ok: true, orders, inventory };
 }
 
-export async function procurementRequestsMysql(query = {}) {
+async function requireProcurementTenantSchemaMysql() {
+  const [hasTenantColumn, hasTenantStatusIndex, hasTenantPurchaseIndex] = await Promise.all([
+    mysqlSchemaColumnExists("procurement_requests", "tenant_id"),
+    mysqlSchemaIndexExists("procurement_requests", "idx_procurement_tenant_status_created"),
+    mysqlSchemaIndexExists("procurement_requests", "idx_procurement_tenant_purchase_status")
+  ]);
+  if (!hasTenantColumn || !hasTenantStatusIndex || !hasTenantPurchaseIndex) {
+    throw new Error("采购申请的企业隔离结构尚未迁移，请先完成租户采购申请迁移；当前未回退到共享采购数据。");
+  }
+}
+
+async function tenantProcurementRequestsMysql(query = {}, tenantId) {
+  if (String(query.grouped || "") === "1") {
+    throw new Error("企业采购申请暂不支持依赖全局库存与采购单的分组视图，请切换到申请明细列表。");
+  }
+  const page = Math.max(1, Number(query.page || 1) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(query.pageSize || query.page_size || 20) || 20));
+  const where = [
+    "pr.tenant_id = ?",
+    "pr.purchase_order_id IS NULL",
+    "pr.product_id IS NULL",
+    "pr.source_order_id IS NULL",
+    "pr.source_order_item_id IS NULL",
+    "pr.supplier_id IS NULL"
+  ];
+  const params = [tenantId];
+  const status = String(query.status || "").trim();
+  if (status && status !== "all") {
+    where.push("pr.status = ?");
+    params.push(status);
+  }
+  const demandType = String(query.demandType || query.demand_type || "").trim();
+  if (demandType && demandType !== "all") {
+    where.push("pr.demand_type = ?");
+    params.push(demandType);
+  }
+  const search = String(query.query || query.search || "").trim();
+  if (search) {
+    where.push("(LOWER(COALESCE(pr.raw_name, '')) LIKE ? OR LOWER(COALESCE(pr.raw_spec, '')) LIKE ? OR LOWER(COALESCE(pr.note, '')) LIKE ? OR LOWER(COALESCE(pr.request_group_no, '')) LIKE ?)");
+    const like = `%${search.toLowerCase()}%`;
+    params.push(like, like, like, like);
+  }
+  const whereSql = `WHERE ${where.join(" AND ")}`;
+  const [countRows, rows] = await Promise.all([
+    mysqlQuery(`SELECT COUNT(*) AS total FROM procurement_requests pr ${whereSql}`, params),
+    mysqlQuery(`
+      SELECT pr.id, pr.tenant_id, pr.request_group_no, NULL AS product_id,
+        pr.raw_name, pr.raw_spec, pr.binding_status, pr.quantity, pr.amount, pr.shipping_amount,
+        pr.purchase_url, pr.source_type, pr.approval_status, pr.status, pr.needed_by, pr.note,
+        pr.demand_type, pr.purchase_mode, pr.urgency, pr.created_at, pr.updated_at,
+        COALESCE(NULLIF(pr.raw_name, ''), NULLIF(pr.raw_spec, ''), '采购申请') AS product_name,
+        NULL AS product_code, NULL AS product_image_url
+      FROM procurement_requests pr
+      ${whereSql}
+      ORDER BY pr.created_at DESC, pr.id DESC
+      LIMIT ? OFFSET ?
+    `, [...params, pageSize, (page - 1) * pageSize])
+  ]);
+  return { rows, total: Number(countRows[0]?.total || 0), page, pageSize, mode: "tenant_requests" };
+}
+
+async function createTenantProcurementRequestMysql(body = {}, sessionPersonId = null, tenantId) {
+  await requireProcurementTenantSchemaMysql();
+  const personId = await requireSessionPersonIdMysql(sessionPersonId);
+  const member = await mysqlQueryOne("SELECT person_id FROM tenant_members WHERE tenant_id = ? AND person_id = ? AND active = 1 LIMIT 1", [tenantId, personId]);
+  if (!member) throw new Error("当前账号不是该企业的有效成员，无法创建采购申请。");
+  const items = Array.isArray(body.items) && body.items.length ? body.items : [body];
+  const linkedFields = ["product_id", "productId", "supplier_id", "supplierId", "source_order_id", "sourceOrderId", "source_order_item_id", "sourceOrderItemId", "source_ozon_sku", "sourceOzonSku", "purchase_order_id", "purchaseOrderId"];
+  const groupNo = procurementRequestGroupNoMysql();
+  return withMysqlTransaction(async (connection) => {
+    const ids = [];
+    for (const item of items) {
+      if ([item, body].some((payload) => linkedFields.some((field) => payload[field] !== undefined && payload[field] !== null && String(payload[field]).trim() !== ""))) {
+        throw new Error("当前企业申请暂不支持关联共享库存商品、供应商、订单或采购单；请只提交商品名称与规格。");
+      }
+      const requestedPurchaseMode = item.purchase_mode || item.purchaseMode || body.purchase_mode || body.purchaseMode;
+      if (requestedPurchaseMode && normalizeProcurementPurchaseMode(requestedPurchaseMode) !== "shortage_purchase") {
+        throw new Error("当前企业申请暂不支持共享库存或历史成本采购模式。");
+      }
+      const rawName = String(item.raw_name || item.rawName || item.name || "").trim().slice(0, 255);
+      const rawSpec = String(item.raw_spec || item.rawSpec || "").trim().slice(0, 255);
+      const quantity = Number(item.quantity || 0);
+      const amount = Number(item.amount || 0);
+      const shippingAmount = Number(item.shipping_amount || item.shippingAmount || 0);
+      if (!rawName) throw new Error("企业采购申请必须填写商品名称。");
+      if (!Number.isFinite(quantity) || quantity <= 0) throw new Error("采购数量必须大于 0。");
+      if (!Number.isFinite(amount) || amount < 0 || !Number.isFinite(shippingAmount) || shippingAmount < 0) {
+        throw new Error("采购金额和运费必须为非负数；未知金额可填写 0 后续补充。");
+      }
+      const result = await connection.execute(`
+        INSERT INTO procurement_requests
+          (tenant_id, request_group_no, product_id, raw_name, raw_spec, binding_status,
+            person_id, created_by_person_id, quantity, amount, shipping_amount, purchase_url,
+            source_type, approval_status, status, needed_by, note, demand_type, purchase_mode, urgency)
+        VALUES (?, ?, NULL, ?, ?, 'unbound', ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, 'advance_stock', ?, ?)
+      `, [
+        tenantId, groupNo, rawName, rawSpec || null, personId, personId,
+        Math.max(1, Math.round(quantity)), amount, shippingAmount,
+        String(item.purchase_url || item.purchaseUrl || body.purchase_url || body.purchaseUrl || "").trim(),
+        String(item.source_type || item.sourceType || body.source_type || body.sourceType || "1688").trim(),
+        item.needed_by || item.neededBy || body.needed_by || body.neededBy || null,
+        String(item.note || body.note || "").trim(),
+        "shortage_purchase",
+        String(item.urgency || body.urgency || "normal").trim()
+      ]);
+      ids.push(Number(result[0].insertId));
+    }
+    return { id: ids[0], ids, request_group_no: groupNo };
+  });
+}
+
+async function updateTenantProcurementRequestMysql(id, body = {}, tenantId) {
+  await requireProcurementTenantSchemaMysql();
+  const requestId = Number(id);
+  return withMysqlTransaction(async (connection) => {
+    const existing = await mysqlConnectionQueryOne(connection, `
+      SELECT * FROM procurement_requests
+      WHERE id = ? AND tenant_id = ? AND purchase_order_id IS NULL
+        AND product_id IS NULL AND source_order_id IS NULL
+        AND source_order_item_id IS NULL AND supplier_id IS NULL
+      FOR UPDATE
+    `, [requestId, tenantId]);
+    if (!existing) throw new Error("采购申请不存在、不属于当前企业或已关联共享业务数据。");
+    assertFreshRecord(body, existing, "采购申请已被其他用户保存，请刷新后再继续编辑");
+    const status = String(existing.status || "");
+    if (!["draft", "pending", "suggested", "submitted"].includes(status)) {
+      throw new Error("该申请已进入采购或库存流程，当前企业暂不能修改。");
+    }
+    for (const field of ["status", "approval_status", "product_id", "productId", "supplier_id", "supplierId", "source_order_id", "sourceOrderId", "source_order_item_id", "sourceOrderItemId", "purchase_order_id", "purchaseOrderId"]) {
+      if (body[field] !== undefined && body[field] !== null && String(body[field]).trim() !== "" && String(body[field]) !== String(existing[field] ?? "")) {
+        throw new Error("当前企业仅可编辑申请内容，不能绑定共享库存、改变审批状态或进入采购单流程。");
+      }
+    }
+    const rawName = body.raw_name !== undefined || body.rawName !== undefined
+      ? String(body.raw_name ?? body.rawName ?? "").trim().slice(0, 255)
+      : String(existing.raw_name || "");
+    const rawSpec = body.raw_spec !== undefined || body.rawSpec !== undefined
+      ? String(body.raw_spec ?? body.rawSpec ?? "").trim().slice(0, 255)
+      : String(existing.raw_spec || "");
+    if (!rawName) throw new Error("企业采购申请必须保留商品名称。");
+    const quantity = Number(body.quantity ?? existing.quantity ?? 0);
+    const amount = Number(body.amount ?? existing.amount ?? 0);
+    const shippingAmount = Number(body.shipping_amount ?? body.shippingAmount ?? existing.shipping_amount ?? 0);
+    if (!Number.isFinite(quantity) || quantity <= 0) throw new Error("采购数量必须大于 0。");
+    if (!Number.isFinite(amount) || amount < 0 || !Number.isFinite(shippingAmount) || shippingAmount < 0) {
+      throw new Error("采购金额和运费必须为非负数。");
+    }
+    if (body.purchase_mode !== undefined || body.purchaseMode !== undefined) {
+      if (normalizeProcurementPurchaseMode(body.purchase_mode || body.purchaseMode) !== "shortage_purchase") {
+        throw new Error("当前企业申请暂不支持共享库存或历史成本采购模式。");
+      }
+    }
+    await connection.execute(`
+      UPDATE procurement_requests
+      SET raw_name = ?, raw_spec = ?, quantity = ?, amount = ?, shipping_amount = ?,
+        purchase_url = ?, needed_by = ?, note = ?, urgency = ?, source_type = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND tenant_id = ? AND purchase_order_id IS NULL AND product_id IS NULL
+        AND source_order_id IS NULL AND source_order_item_id IS NULL AND supplier_id IS NULL
+    `, [
+      rawName, rawSpec || null, Math.max(1, Math.round(quantity)), amount, shippingAmount,
+      String(body.purchase_url ?? body.purchaseUrl ?? existing.purchase_url ?? "").trim(),
+      body.needed_by ?? body.neededBy ?? existing.needed_by ?? null,
+      String(body.note ?? existing.note ?? "").trim(),
+      String(body.urgency ?? existing.urgency ?? "normal").trim(),
+      String(body.source_type ?? body.sourceType ?? existing.source_type ?? "1688").trim(),
+      requestId, tenantId
+    ]);
+    return { ok: true, id: requestId };
+  });
+}
+
+async function deleteTenantProcurementRequestMysql(id, tenantId) {
+  await requireProcurementTenantSchemaMysql();
+  const requestId = Number(id);
+  return withMysqlTransaction(async (connection) => {
+    const request = await mysqlConnectionQueryOne(connection, `
+      SELECT id, status, product_id, source_order_id, source_order_item_id, supplier_id, purchase_order_id
+      FROM procurement_requests
+      WHERE id = ? AND tenant_id = ?
+      FOR UPDATE
+    `, [requestId, tenantId]);
+    if (!request) throw new Error("采购申请不存在或不属于当前企业。");
+    if (request.product_id || request.source_order_id || request.source_order_item_id || request.supplier_id || request.purchase_order_id) {
+      throw new Error("该申请已关联共享商品、订单、供应商或采购单，当前企业暂不能删除。");
+    }
+    if (!["draft", "pending", "suggested", "submitted"].includes(String(request.status || ""))) {
+      throw new Error("该申请已进入采购或库存流程，当前企业暂不能删除。");
+    }
+    await connection.execute(`
+      DELETE FROM procurement_requests
+      WHERE id = ? AND tenant_id = ? AND purchase_order_id IS NULL AND product_id IS NULL
+        AND source_order_id IS NULL AND source_order_item_id IS NULL AND supplier_id IS NULL
+    `, [requestId, tenantId]);
+    return { ok: true };
+  });
+}
+
+export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  if (!defaultTenant) {
+    await requireProcurementTenantSchemaMysql();
+    return tenantProcurementRequestsMysql(query, normalizedTenantId);
+  }
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementFlexibleRequestSchemaMysql();
   await ensureStockLocationSchemaMysql();
@@ -15023,12 +16143,7 @@ async function postInventoryMysql(connection, body = {}) {
   const movementType = body.movement_type || movementTypeFromSourceMysql(body.source_type, quantityDelta);
   const stockLocation = normalizeStockLocationMysql(body.stock_location);
   const stockLocationSource = String(body.stock_location_source || (stockLocation === "UNKNOWN" ? "legacy_unknown" : "explicit")).slice(0, 64);
-  const [result] = await connection.execute(`
-    INSERT INTO inventory_movements
-    (product_id, shop_id, sku_mapping_id, owner_person_id, source_type, source_ref, quantity_delta, stock_location, stock_location_source,
-     unit_cost, amount, status, note, movement_type, related_posting_number, related_order_item_id, operator)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `, [
+  const movementValues = [
     Number(body.product_id),
     nullableInteger(body.shop_id),
     nullableInteger(body.sku_mapping_id),
@@ -15046,18 +16161,38 @@ async function postInventoryMysql(connection, body = {}) {
     body.related_posting_number || body.source_ref || null,
     nullableInteger(body.related_order_item_id),
     body.operator || null
-  ]);
+  ];
+  let result;
+  if (await inventoryMovementTenantColumnExistsMysql()) {
+    [result] = await connection.execute(`
+      INSERT INTO inventory_movements
+      (tenant_id, product_id, shop_id, sku_mapping_id, owner_person_id, source_type, source_ref, quantity_delta, stock_location, stock_location_source,
+       unit_cost, amount, status, note, movement_type, related_posting_number, related_order_item_id, operator)
+      SELECT COALESCE(p.tenant_id, tenant_default.id), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      FROM products p
+      JOIN tenants tenant_default ON tenant_default.slug = 'default' AND tenant_default.status = 'active'
+      WHERE p.id = ?
+    `, [...movementValues, Number(body.product_id)]);
+    if (!Number(result.affectedRows || 0)) throw new Error("Inventory movement could not be written: product or active default tenant is missing");
+  } else {
+    [result] = await connection.execute(`
+      INSERT INTO inventory_movements
+      (product_id, shop_id, sku_mapping_id, owner_person_id, source_type, source_ref, quantity_delta, stock_location, stock_location_source,
+       unit_cost, amount, status, note, movement_type, related_posting_number, related_order_item_id, operator)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, movementValues);
+  }
   if ((body.status || "posted") === "posted") {
     await applyInventoryCurrentMysql(connection, Number(body.product_id), movementType, quantityDelta);
   }
   return Number(result.insertId);
 }
 
-async function postProductInventoryWithComponentsMysql(connection, body = {}) {
+async function postProductInventoryWithComponentsMysql(connection, body = {}, tenantId = "admin") {
   const productId = Number(body.product_id || 0);
   const quantityDelta = Number(body.quantity_delta || 0);
   if (!productId || !quantityDelta) return [];
-  const components = await productComponentRowsMysql(productId);
+  const components = await productComponentRowsMysql(productId, tenantId);
   if (!components.length) {
     const movementId = await postInventoryMysql(connection, body);
     return [{ movement_id: movementId, product_id: productId, quantity_delta: quantityDelta, parent_product_id: productId }];
@@ -15450,13 +16585,15 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
         WHERE source_type = 'return_in' AND source_ref = ?
         LIMIT 1
       `, [returnSourceRef]);
-      if (existingReturn) {
+    if (existingReturn) {
+        const hasTenantColumn = await inventoryMovementTenantColumnExistsMysql();
         await mysqlExecute(`
           UPDATE inventory_movements
-          SET product_id = ?, shop_id = ?, sku_mapping_id = ?, owner_person_id = ?,
+          SET ${hasTenantColumn ? "tenant_id = COALESCE((SELECT p.tenant_id FROM products p WHERE p.id = ?), (SELECT id FROM tenants WHERE slug = 'default' AND status = 'active' LIMIT 1)), " : ""}product_id = ?, shop_id = ?, sku_mapping_id = ?, owner_person_id = ?,
             quantity_delta = ?, stock_location = ?, stock_location_source = ?, unit_cost = ?, amount = ?, status = 'posted', note = 'Order cancelled, inventory restored'
           WHERE id = ?
         `, [
+          ...(hasTenantColumn ? [restoreProductId] : []),
           restoreProductId,
           restoreShopId,
           restoreMappingId,
@@ -16069,6 +17206,65 @@ const orderHistoryDedupeMetricsMysql = {
   comparisonErrors: 0
 };
 
+let orderHistoryDedupeMetricsSchemaReadyMysql = false;
+let orderHistoryDedupeMetricsSchemaPromiseMysql = null;
+
+async function ensureOrderHistoryDedupeMetricsSchemaMysql() {
+  if (orderHistoryDedupeMetricsSchemaReadyMysql) return;
+  if (!orderHistoryDedupeMetricsSchemaPromiseMysql) {
+    orderHistoryDedupeMetricsSchemaPromiseMysql = mysqlExecute(`
+      CREATE TABLE IF NOT EXISTS order_history_dedupe_daily_metrics (
+        metric_date DATE NOT NULL,
+        snapshot_source VARCHAR(32) NOT NULL,
+        candidate_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        comparison_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        duplicate_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        changed_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        skipped_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        comparison_error_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (metric_date, snapshot_source)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    `).then(() => {
+      orderHistoryDedupeMetricsSchemaReadyMysql = true;
+    }).finally(() => {
+      orderHistoryDedupeMetricsSchemaPromiseMysql = null;
+    });
+  }
+  await orderHistoryDedupeMetricsSchemaPromiseMysql;
+}
+
+async function recordOrderHistoryDedupeMetricMysql(source, metrics = {}) {
+  try {
+    await ensureOrderHistoryDedupeMetricsSchemaMysql();
+    await mysqlExecute(`
+      INSERT INTO order_history_dedupe_daily_metrics (
+        metric_date, snapshot_source, candidate_count, comparison_count, duplicate_count,
+        changed_count, skipped_count, comparison_error_count
+      )
+      VALUES (DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR), ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        candidate_count = candidate_count + VALUES(candidate_count),
+        comparison_count = comparison_count + VALUES(comparison_count),
+        duplicate_count = duplicate_count + VALUES(duplicate_count),
+        changed_count = changed_count + VALUES(changed_count),
+        skipped_count = skipped_count + VALUES(skipped_count),
+        comparison_error_count = comparison_error_count + VALUES(comparison_error_count)
+    `, [
+      String(source || "sync").slice(0, 32),
+      Number(metrics.candidates || 0),
+      Number(metrics.comparisons || 0),
+      Number(metrics.duplicates || 0),
+      Number(metrics.changed || 0),
+      Number(metrics.skipped || 0),
+      Number(metrics.comparisonErrors || 0)
+    ]);
+  } catch (error) {
+    console.warn("[order-history-dedupe] metric persistence failed; preserving history write", error?.message || error);
+  }
+}
+
 function orderHistoryStateMayBeUnchangedMysql(previousOrder = null, payload = {}) {
   if (!previousOrder) return false;
   return String(previousOrder.status || "") === String(payload.status || "")
@@ -16084,6 +17280,7 @@ async function recordOrderStatusHistoryMysql(shop, posting, orderId, lifecycle, 
   if (dedupeMode !== "off" && orderHistoryStateMayBeUnchangedMysql(previousOrder, payload)) {
     orderHistoryDedupeMetricsMysql.candidates += 1;
     orderHistoryDedupeMetricsMysql.comparisons += 1;
+    let comparisonFailed = false;
     const latest = await mysqlQueryOne(`
       SELECT status, substatus, logistics_status, tracking_stage, sync_state, ordered_at, delivered_at,
         customer_id, customer_name, buyer_city, buyer_region, buyer_country, buyer_district, buyer_zip_code,
@@ -16094,13 +17291,24 @@ async function recordOrderStatusHistoryMysql(shop, posting, orderId, lifecycle, 
       ORDER BY observed_at DESC, id DESC
       LIMIT 1
     `, [Number(orderId)]).catch((error) => {
+      comparisonFailed = true;
       orderHistoryDedupeMetricsMysql.comparisonErrors += 1;
+      void recordOrderHistoryDedupeMetricMysql(source, { candidates: 1, comparisons: 1, comparisonErrors: 1 });
       console.warn("[order-history-dedupe] comparison failed; preserving history write", error?.message || error);
       return null;
     });
     const duplicate = latest
       && orderStatusHistoryRowFingerprintMysql(latest) === orderStatusHistoryBusinessFingerprintMysql(payload);
     if (duplicate) orderHistoryDedupeMetricsMysql.duplicates += 1;
+    if (!comparisonFailed) {
+      await recordOrderHistoryDedupeMetricMysql(source, {
+        candidates: 1,
+        comparisons: 1,
+        duplicates: duplicate ? 1 : 0,
+        changed: duplicate ? 0 : 1,
+        skipped: duplicate && dedupeMode === "enabled" ? 1 : 0
+      });
+    }
     if (duplicate && dedupeMode === "enabled") {
       orderHistoryDedupeMetricsMysql.skipped += 1;
       return { inserted: 0, duplicate: true };
@@ -16298,10 +17506,15 @@ async function actualOrderLogisticsRuleMysql(posting, orderedAt) {
   const descriptor = resolveOrderFreightDescriptor(posting);
   const effectiveAt = normalizeMysqlDateTime(orderedAt);
   if (!descriptor || !effectiveAt) return null;
+  const hasTenantColumn = await mysqlSchemaColumnExists("logistics_fee_rules", "tenant_id");
+  const defaultScope = hasTenantColumn
+    ? await logisticsTenantScopeMysql("admin", "candidate")
+    : { sql: "1 = 1", params: [] };
   return mysqlQueryOne(`
     SELECT candidate.*
     FROM logistics_fee_rules candidate
-    WHERE UPPER(candidate.carrier) = ?
+    WHERE ${defaultScope.sql}
+      AND UPPER(candidate.carrier) = ?
       AND candidate.channel = ?
       AND CASE
         WHEN candidate.name LIKE '% Premium Big' THEN 'Premium Big'
@@ -16316,7 +17529,7 @@ async function actualOrderLogisticsRuleMysql(posting, orderedAt) {
       AND (candidate.effective_to IS NULL OR candidate.effective_to > ?)
     ORDER BY candidate.effective_from DESC, candidate.id DESC
     LIMIT 1
-  `, [descriptor.carrier, descriptor.channel, descriptor.serviceClass, effectiveAt, effectiveAt]);
+  `, [...defaultScope.params, descriptor.carrier, descriptor.channel, descriptor.serviceClass, effectiveAt, effectiveAt]);
 }
 
 async function productForProfitEstimateMysql(productId, orderedAt = null, posting = null) {
@@ -16330,7 +17543,7 @@ async function productForProfitEstimateMysql(productId, orderedAt = null, postin
       rule.per_gram_cny AS logistics_rule_per_gram_cny,
       rule.per_ticket_cny AS logistics_rule_per_ticket_cny
     FROM products p
-    LEFT JOIN logistics_fee_rules rule ON rule.id = p.logistics_rule_id
+    LEFT JOIN logistics_fee_rules rule ON rule.id = p.logistics_rule_id AND rule.tenant_id <=> p.tenant_id
     WHERE p.id = ? AND p.active = 1
   `, [Number(productId)]);
   if (product && orderedAt) product.pricing_effective_at = orderedAt;
@@ -16345,12 +17558,14 @@ async function productForProfitEstimateMysql(productId, orderedAt = null, postin
     FROM logistics_fee_rules selected
     JOIN logistics_fee_rules candidate
       ON candidate.version_group_id = COALESCE(selected.version_group_id, selected.id)
+      AND candidate.tenant_id <=> selected.tenant_id
     WHERE selected.id = ?
+      AND selected.tenant_id <=> ?
       AND candidate.effective_from <= ?
       AND (candidate.effective_to IS NULL OR candidate.effective_to > ?)
     ORDER BY candidate.effective_from DESC, candidate.id DESC
     LIMIT 1
-  `, [Number(product.logistics_rule_id), effectiveAt, effectiveAt]);
+  `, [Number(product.logistics_rule_id), product.tenant_id ?? null, effectiveAt, effectiveAt]);
   if (!version) return productWithoutLogisticsRuleMysql(product);
   return productWithLogisticsRuleMysql(product, version);
 }
@@ -16542,10 +17757,9 @@ async function reconcileTransportedProcurementBacklogMysql() {
   }
 }
 
-async function upsertPostingMysql(shop, posting) {
+async function upsertPostingMysql(shop, posting, historySource = "sync") {
   await saveRawPostingMysql(shop, posting);
-  const exists = await mysqlQueryOne("SELECT * FROM orders WHERE shop_id = ? AND posting_number = ?", [shop.id, posting.posting_number])
-    || await mysqlQueryOne("SELECT * FROM orders WHERE posting_number = ?", [posting.posting_number]);
+  const exists = await mysqlQueryOne("SELECT * FROM orders WHERE shop_id = ? AND posting_number = ?", [shop.id, posting.posting_number]);
   let orderId = exists?.id;
   const lifecycle = orderLifecycleMysql(posting);
   const cancelLossApplies = await orderCancelLossAppliesMysql(posting);
@@ -16619,7 +17833,7 @@ async function upsertPostingMysql(shop, posting) {
     ]);
     updated = 1;
   }
-  await recordOrderStatusHistoryMysql(shop, posting, orderId, lifecycle, "sync", exists);
+  await recordOrderStatusHistoryMysql(shop, posting, orderId, lifecycle, historySource, exists);
   const outboundStockLocation = resolveOrderStockLocationMysql(posting);
 
   let insertedItems = 0;
@@ -16832,6 +18046,10 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
   const statuses = Array.isArray(body.statuses)
     ? body.statuses.map((item) => String(item || "").trim()).filter(Boolean)
     : String(body.status || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const requestedHistorySource = textValueMysql(body.history_source, body.historySource);
+  const historySource = ["incremental", "cancelled_reconciliation", "posting_detail_reconciliation"].includes(requestedHistorySource)
+    ? requestedHistorySource
+    : "sync";
   const from = normalizeSyncDateMysql(rawFromDateTime || rawFrom);
   const to = normalizeSyncDateMysql(rawToDateTime || rawTo);
   const fetchFrom = normalizeSyncDateTimeMysql(rawFromDateTime) || normalizeShanghaiDateBoundaryMysql(rawFrom, "start") || from;
@@ -16866,7 +18084,7 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
       options.onProgress?.({ phase: "saving", message: `正在写入 ${shop.name} 的 ${postings.length} 单...`, completed_shops: completedShops, total_shops: activeShops.length, fetched });
       for (const posting of postings) {
         throwIfAbortedMysql(options.signal);
-        const stats = await upsertPostingMysql(shop, posting);
+        const stats = await upsertPostingMysql(shop, posting, historySource);
         shopStats.inserted += stats.inserted;
         shopStats.updated += stats.updated;
         shopStats.inserted_items += stats.insertedItems;
@@ -17011,11 +18229,13 @@ export async function syncOzonIncrementalOrdersMysql(body = {}, options = {}) {
           shop_id: shop.id,
           from_datetime: start,
           to,
+          history_source: "incremental",
           skip_post_processing: true
         } : {
           shop_id: shop.id,
           from: range.from,
           to: range.to,
+          history_source: "incremental",
           skip_post_processing: true
         }, options);
         mergeSyncAggregateMysql(aggregate, result, range.reason || "open");
@@ -18708,11 +19928,13 @@ async function upsertInboundInventoryMovementMysql(connection, inboundId, body =
     LIMIT 1
   `, [sourceRef]);
   if (existingMovement) {
+    const hasTenantColumn = await inventoryMovementTenantColumnExistsMysql();
     await connection.execute(`
       UPDATE inventory_movements
-      SET product_id = ?, owner_person_id = ?, quantity_delta = ?, unit_cost = ?, amount = ?, note = ?, status = 'posted'
+      SET ${hasTenantColumn ? "tenant_id = COALESCE((SELECT p.tenant_id FROM products p WHERE p.id = ?), (SELECT id FROM tenants WHERE slug = 'default' AND status = 'active' LIMIT 1)), " : ""}product_id = ?, owner_person_id = ?, quantity_delta = ?, unit_cost = ?, amount = ?, note = ?, status = 'posted'
       WHERE id = ?
     `, [
+      ...(hasTenantColumn ? [Number(body.product_id)] : []),
       Number(body.product_id),
       nullableInteger(body.owner_person_id),
       Number(body.quantity || 0),
@@ -19339,8 +20561,11 @@ function procurementRequestGroupNoMysql() {
   return `CG-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}-${pad(now.getMilliseconds(), 3)}`;
 }
 
-export async function createProcurementRequestMysql(body = {}, sessionPersonId = null) {
+export async function createProcurementRequestMysql(body = {}, sessionPersonId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  if (!defaultTenant) return createTenantProcurementRequestMysql(body, sessionPersonId, normalizedTenantId);
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementOrderSourceSchemaMysql();
   await ensureProcurementFlexibleRequestSchemaMysql();
@@ -20508,8 +21733,11 @@ async function orderUsesFbpStockMysql(orderId) {
   return row?.stock_location === 'FBP';
 }
 
-export async function previewOrderProcurementMysql(orderId) {
+export async function previewOrderProcurementMysql(orderId, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  if (String(tenantId || "admin") !== "admin") {
+    throw Object.assign(new Error("企业订单采购预览暂不可用：采购、入库与库存关联数据尚未完成租户隔离。"), { statusCode: 503 });
+  }
   if (await orderUsesFbpStockMysql(orderId)) {
     throw new Error('FBP 订单由官方仓库存直接履约，无需按订单采购；官方仓补货请使用 FBP 补货功能');
   }
@@ -20766,8 +21994,11 @@ export async function createOrderProcurementRequestsMysql(orderId, body = {}, us
   };
 }
 
-export async function updateProcurementRequestMysql(id, body = {}) {
+export async function updateProcurementRequestMysql(id, body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  if (!defaultTenant) return updateTenantProcurementRequestMysql(id, body, normalizedTenantId);
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementInboundLinkSchemaMysql();
   await ensureProcurementFlexibleRequestSchemaMysql();
@@ -21086,8 +22317,11 @@ export async function submitProcurementRequestsMysql(body = {}) {
   return { ok: true, count: ids.length };
 }
 
-export async function deleteProcurementRequestMysql(id) {
+export async function deleteProcurementRequestMysql(id, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  if (!defaultTenant) return deleteTenantProcurementRequestMysql(id, normalizedTenantId);
   await ensureProcurementInboundLinkSchemaMysql();
   const requestId = Number(id);
   return await withMysqlTransaction(async (connection) => {
@@ -21768,7 +23002,9 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
   if (body.receive_quantity !== undefined) {
     const purchaseQuantity = Number(body.purchase_quantity ?? existing.quantity);
     if (!Number.isInteger(purchaseQuantity) || purchaseQuantity < 1) throw new Error("采购数必须为正整数");
-    const receipt = planPartialReceipt({ ...existing, quantity: Math.max(purchaseQuantity, Number(body.receive_quantity || 0)) }, body.receive_quantity, body.expected_remaining_quantity);
+    const overReceipt = Number(body.receive_quantity) > Number(existing.quantity);
+    if (overReceipt && !String(body.receipt_difference_reason || '').trim()) throw new Error('采购数与实收数不一致，请选择差异原因');
+    const receipt = planPartialReceipt(overReceipt ? existing : { ...existing, quantity: Math.max(purchaseQuantity, Number(body.receive_quantity || 0)) }, body.receive_quantity, body.expected_remaining_quantity, overReceipt);
     if (receipt.remaining > 0) {
       await connection.execute(`INSERT INTO inbound_records
         (product_id, person_id, quantity, amount, unit_cost, shipping_amount, purchase_url, status, note,
@@ -21782,7 +23018,8 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
     }
     body = { ...body, product_id: existing.product_id, person_id: existing.person_id, status: 'approved', quantity: receipt.received, amount: receipt.amount,
       shipping_amount: receipt.shippingAmount, purchase_url: existing.purchase_url || '',
-      note: `${existing.note || ''}${body.receipt_context ? `；${body.receipt_context}` : ''}；本次实收 ${receipt.received}，原待收 ${existing.quantity}` };
+      received_at: body.received_at ?? existing.received_at ?? normalizeMysqlDateTime(new Date()),
+      note: `${body.note ?? existing.note ?? ''}${body.receipt_context ? `；${body.receipt_context}` : ''}；本次实收 ${receipt.received}，原待收 ${existing.quantity}` };
   }
   const productId = Number(body.product_id ?? existing.product_id);
   const personId = await resolvePersonIdOrFirstMysql(body.person_id ?? existing.person_id, connection);
@@ -22165,11 +23402,6 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
   }
   const records = Array.isArray(body.records) ? body.records : [];
   if (!records.length) throw new Error("Please select inbound records to update");
-  const hasQuantityDifference = records.some((record) => {
-    const payload = record.payload && typeof record.payload === "object" ? record.payload : record;
-    return payload.receive_quantity !== undefined && Number(payload.purchase_quantity ?? payload.quantity) !== Number(payload.receive_quantity);
-  });
-  if (hasQuantityDifference && !String(body.receipt_difference_reason || "").trim()) throw new Error("采购数与实收数不一致，请选择差异原因");
   const result = await withMysqlTransaction(async (connection) => {
     const changedPurchaseOrderIds = new Set();
     const ids = [];
@@ -22177,10 +23409,16 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
       const inboundId = Number(record.id ?? record.inbound_record_id);
       if (!inboundId) continue;
       const payload = record.payload && typeof record.payload === "object" ? record.payload : record;
-      if (Number(payload.purchase_quantity ?? payload.quantity) !== Number(payload.receive_quantity)) {
-        const reason = String(body.receipt_difference_reason || "").trim();
-        const detail = String(body.receipt_difference_note || "").trim();
-        payload.note = `${payload.note || ""}；收货差异：${reason}${detail ? `（${detail}）` : ""}；操作人 #${sessionPersonId || "system"}；${normalizeMysqlDateTime(new Date())}`;
+      const existing = await mysqlConnectionQueryOne(connection, "SELECT quantity, note FROM inbound_records WHERE id = ? FOR UPDATE", [inboundId]);
+      if (!existing) throw new Error("Inbound record not found");
+      const receivedQuantity = Number(payload.receive_quantity);
+      const purchaseQuantity = Number(payload.purchase_quantity ?? existing.quantity);
+      if (payload.receive_quantity !== undefined && (receivedQuantity !== Number(existing.quantity) || receivedQuantity !== purchaseQuantity || purchaseQuantity !== Number(existing.quantity))) {
+        const reason = String(payload.receipt_difference_reason || body.receipt_difference_reason || "").trim();
+        if (!reason) throw new Error("采购数与实收数不一致，请选择差异原因");
+        payload.receipt_difference_reason = reason;
+        const detail = String(payload.receipt_difference_note || body.receipt_difference_note || "").trim();
+        payload.note = `${existing.note || ""}；收货差异：${reason}${detail ? `（${detail}）` : ""}；操作人 #${sessionPersonId || "system"}；${normalizeMysqlDateTime(new Date())}`;
       }
       await applyInboundRecordUpdateMysql(connection, inboundId, payload, { changedPurchaseOrderIds, sessionPersonId });
       ids.push(inboundId);
@@ -22276,7 +23514,7 @@ export async function deleteInboundRecordMysql(id) {
   });
 }
 
-export async function createInventoryMovementMysql(body = {}, userId = null) {
+export async function createInventoryMovementMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   return await withMysqlTransaction(async (connection) => {
     const sourceType = String(body.source_type || body.sourceType || "").trim();
@@ -22285,6 +23523,36 @@ export async function createInventoryMovementMysql(body = {}, userId = null) {
     const productId = Number(body.product_id || body.productId || 0);
     if (isManualOutbound && (!productId || quantity <= 0)) {
       throw new Error("手动出库需要选择库存产品并填写大于 0 的出库数量");
+    }
+    const tenantScoped = String(tenantId || "admin") !== "admin";
+    const tenantPk = tenantScoped ? await resolveShopTenantIdMysql(tenantId) : 0;
+    if (tenantScoped) {
+      const requiredColumns = await Promise.all(["products", "inventory_movements"].map(async (table) => ({
+        table,
+        exists: await mysqlSchemaColumnExists(table, "tenant_id")
+      })));
+      const missingColumns = requiredColumns.filter((item) => !item.exists).map((item) => `${item.table}.tenant_id`);
+      if (missingColumns.length) {
+        throw Object.assign(new Error(`企业库存流水暂不可用：租户归属字段尚未迁移（${missingColumns.join("、")}），请管理员先完成对应迁移。`), { statusCode: 503 });
+      }
+      const product = await mysqlConnectionQueryOne(connection,
+        "SELECT id FROM products WHERE id = ? AND tenant_id = ? AND active = 1 FOR UPDATE",
+        [productId, tenantPk]);
+      if (!product) throw Object.assign(new Error("库存产品不存在或不属于当前企业，未创建库存流水。"), { statusCode: 404 });
+      const shopId = Number(body.shop_id || body.shopId || 0);
+      if (shopId) {
+        const shop = await mysqlConnectionQueryOne(connection,
+          "SELECT id FROM shops WHERE id = ? AND tenant_id = ? AND status = 'active' FOR UPDATE",
+          [shopId, tenantPk]);
+        if (!shop) throw Object.assign(new Error("所选店铺不存在或不属于当前企业，未创建库存流水。"), { statusCode: 404 });
+      }
+      const skuMappingId = Number(body.sku_mapping_id || body.skuMappingId || 0);
+      if (skuMappingId) {
+        const mapping = await mysqlConnectionQueryOne(connection,
+          "SELECT id FROM sku_mappings WHERE id = ? AND tenant_id = ? AND active = 1 FOR UPDATE",
+          [skuMappingId, tenantPk]);
+        if (!mapping) throw Object.assign(new Error("所选 SKU 映射不存在或不属于当前企业，未创建库存流水。"), { statusCode: 404 });
+      }
     }
     const payload = isManualOutbound ? {
       ...body,
@@ -22300,7 +23568,7 @@ export async function createInventoryMovementMysql(body = {}, userId = null) {
       operator: userId ? String(userId) : (body.operator || "manual_outbound")
     } : body;
     if (isManualOutbound) {
-      const rows = await postProductInventoryWithComponentsMysql(connection, payload);
+      const rows = await postProductInventoryWithComponentsMysql(connection, payload, tenantScoped ? String(tenantPk) : "admin");
       return { id: rows[0]?.movement_id || 0, movement_ids: rows.map((row) => row.movement_id).filter(Boolean) };
     }
     const id = await postInventoryMysql(connection, payload);
@@ -22308,30 +23576,52 @@ export async function createInventoryMovementMysql(body = {}, userId = null) {
   });
 }
 
-export async function updateInventoryMovementMysql(id, body = {}, userId = null) {
+export async function updateInventoryMovementMysql(id, body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const movementId = Number(id || 0);
   if (!movementId) throw new Error("缺少库存流水 ID");
   return await withMysqlTransaction(async (connection) => {
-    const existing = await mysqlConnectionQueryOne(connection, "SELECT * FROM inventory_movements WHERE id = ? FOR UPDATE", [movementId]);
+    const tenantScoped = String(tenantId || "admin") !== "admin";
+    const tenantPk = tenantScoped ? await resolveShopTenantIdMysql(tenantId) : 0;
+    if (tenantScoped) {
+      const missing = (await Promise.all(["inventory_movements", "products", "product_components"].map(async (table) => ({
+        table,
+        exists: await mysqlSchemaColumnExists(table, "tenant_id")
+      }))).then((items) => items.filter((item) => !item.exists).map((item) => `${item.table}.tenant_id`)));
+      if (missing.length) throw Object.assign(new Error(`企业手动出库暂不可编辑：租户归属字段尚未迁移（${missing.join("、")}），请管理员完成对应迁移。`), { statusCode: 503 });
+    }
+    const existing = await mysqlConnectionQueryOne(connection,
+      `SELECT * FROM inventory_movements WHERE id = ? ${tenantScoped ? "AND tenant_id = ? AND source_type = 'manual_outbound'" : ""} FOR UPDATE`,
+      tenantScoped ? [movementId, tenantPk] : [movementId]);
     if (!existing) throw new Error("库存流水不存在");
     if (String(existing.source_type || "") !== "manual_outbound") throw new Error("只能编辑手动出库记录");
     const quantity = Math.round(Number(body.quantity ?? body.quantity_delta ?? Math.abs(Number(existing.quantity_delta || 0))));
     if (quantity <= 0) throw new Error("请输入大于 0 的出库数量");
     const productId = Number(body.product_id || body.productId || existing.product_id || 0);
     if (!productId) throw new Error("缺少库存产品 ID");
+    if (tenantScoped) {
+      const product = await mysqlConnectionQueryOne(connection,
+        "SELECT id FROM products WHERE id = ? AND tenant_id = ? AND active = 1 FOR UPDATE",
+        [productId, tenantPk]);
+      if (!product) throw Object.assign(new Error("库存产品不存在或不属于当前企业，未更新手动出库记录。"), { statusCode: 404 });
+    }
     const stockLocation = normalizeStockLocationMysql(body.stock_location || existing.stock_location || "LOCAL");
     const amount = Number(body.amount ?? body.loss_amount ?? existing.amount ?? 0);
     const operator = userId ? String(userId) : String(body.operator || existing.operator || "manual_outbound");
     const sourceRef = existing.source_ref || `manual_outbound_${productId}_${Date.now()}`;
     const siblingRows = existing.source_ref
-      ? await mysqlConnectionQuery(connection, "SELECT id, product_id FROM inventory_movements WHERE source_type = 'manual_outbound' AND source_ref = ? FOR UPDATE", [existing.source_ref])
+      ? await mysqlConnectionQuery(connection,
+        `SELECT id, product_id FROM inventory_movements WHERE source_type = 'manual_outbound' AND source_ref = ? ${tenantScoped ? "AND tenant_id = ?" : ""} FOR UPDATE`,
+        tenantScoped ? [existing.source_ref, tenantPk] : [existing.source_ref])
       : [existing];
     const affectedProductIds = new Set(siblingRows.map((row) => Number(row.product_id || 0)).filter(Boolean));
     if (existing.source_ref) {
-      await connection.execute("DELETE FROM inventory_movements WHERE source_type = 'manual_outbound' AND source_ref = ?", [existing.source_ref]);
+      await connection.execute(
+        `DELETE FROM inventory_movements WHERE source_type = 'manual_outbound' AND source_ref = ? ${tenantScoped ? "AND tenant_id = ?" : ""}`,
+        tenantScoped ? [existing.source_ref, tenantPk] : [existing.source_ref]);
     } else {
-      await connection.execute("DELETE FROM inventory_movements WHERE id = ?", [movementId]);
+      await connection.execute(`DELETE FROM inventory_movements WHERE id = ? ${tenantScoped ? "AND tenant_id = ? AND source_type = 'manual_outbound'" : ""}`,
+        tenantScoped ? [movementId, tenantPk] : [movementId]);
     }
     const createdRows = await postProductInventoryWithComponentsMysql(connection, {
       ...body,
@@ -22345,7 +23635,7 @@ export async function updateInventoryMovementMysql(id, body = {}, userId = null)
       stock_location_source: "manual",
       note: body.note || existing.note || "手动出库",
       operator
-    });
+    }, tenantScoped ? String(tenantPk) : "admin");
     for (const row of createdRows) affectedProductIds.add(Number(row.product_id || 0));
     for (const productIdToRebuild of affectedProductIds) {
       if (productIdToRebuild) await rebuildInventoryCurrentForProductMysql(connection, productIdToRebuild);
@@ -22354,28 +23644,82 @@ export async function updateInventoryMovementMysql(id, body = {}, userId = null)
   });
 }
 
-export async function deleteInventoryMovementMysql(id, userId = null) {
+export async function deleteInventoryMovementMysql(id, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const movementId = Number(id || 0);
   if (!movementId) throw new Error("缺少库存流水 ID");
   return await withMysqlTransaction(async (connection) => {
-    const existing = await mysqlConnectionQueryOne(connection, "SELECT * FROM inventory_movements WHERE id = ? FOR UPDATE", [movementId]);
+    const tenantScoped = String(tenantId || "admin") !== "admin";
+    const tenantPk = tenantScoped ? await resolveShopTenantIdMysql(tenantId) : 0;
+    if (tenantScoped && !await inventoryMovementTenantColumnExistsMysql()) {
+      throw Object.assign(new Error("企业手动出库暂不可删除：inventory_movements.tenant_id 尚未迁移，请管理员完成库存流水租户迁移。"), { statusCode: 503 });
+    }
+    const existing = await mysqlConnectionQueryOne(connection,
+      `SELECT * FROM inventory_movements WHERE id = ? ${tenantScoped ? "AND tenant_id = ? AND source_type = 'manual_outbound'" : ""} FOR UPDATE`,
+      tenantScoped ? [movementId, tenantPk] : [movementId]);
     if (!existing) return { ok: true, deleted: false };
     if (String(existing.source_type || "") !== "manual_outbound") throw new Error("只能删除手动出库记录");
     const siblingRows = existing.source_ref
-      ? await mysqlConnectionQuery(connection, "SELECT id, product_id FROM inventory_movements WHERE source_type = 'manual_outbound' AND source_ref = ? FOR UPDATE", [existing.source_ref])
+      ? await mysqlConnectionQuery(connection,
+        `SELECT id, product_id FROM inventory_movements WHERE source_type = 'manual_outbound' AND source_ref = ? ${tenantScoped ? "AND tenant_id = ?" : ""} FOR UPDATE`,
+        tenantScoped ? [existing.source_ref, tenantPk] : [existing.source_ref])
       : [existing];
     const affectedProductIds = new Set(siblingRows.map((row) => Number(row.product_id || 0)).filter(Boolean));
     if (existing.source_ref) {
-      await connection.execute("DELETE FROM inventory_movements WHERE source_type = 'manual_outbound' AND source_ref = ?", [existing.source_ref]);
+      await connection.execute(
+        `DELETE FROM inventory_movements WHERE source_type = 'manual_outbound' AND source_ref = ? ${tenantScoped ? "AND tenant_id = ?" : ""}`,
+        tenantScoped ? [existing.source_ref, tenantPk] : [existing.source_ref]);
     } else {
-      await connection.execute("DELETE FROM inventory_movements WHERE id = ?", [movementId]);
+      await connection.execute(`DELETE FROM inventory_movements WHERE id = ? ${tenantScoped ? "AND tenant_id = ? AND source_type = 'manual_outbound'" : ""}`,
+        tenantScoped ? [movementId, tenantPk] : [movementId]);
     }
     for (const productIdToRebuild of affectedProductIds) {
       if (productIdToRebuild) await rebuildInventoryCurrentForProductMysql(connection, productIdToRebuild);
     }
     return { ok: true, deleted: true, operator: userId ? String(userId) : "" };
   });
+}
+
+export async function inventoryManualOutboundRecordsMysql(query = {}, tenantId = "admin") {
+  ensureMysqlCutoverEnabled();
+  const tenantPk = await resolveShopTenantIdMysql(tenantId);
+  const requiredTables = ["inventory_movements", "products", "product_components"];
+  const missing = (await Promise.all(requiredTables.map(async (table) => ({
+    table,
+    exists: await mysqlSchemaColumnExists(table, "tenant_id")
+  }))).then((items) => items.filter((item) => !item.exists).map((item) => `${item.table}.tenant_id`)));
+  if (missing.length) throw Object.assign(new Error(`企业手动出库记录暂不可用：租户归属字段尚未迁移（${missing.join("、")}），请管理员完成对应迁移。`), { statusCode: 503 });
+  const productId = Number(query.productId || query.product_id || 0);
+  if (!productId) throw Object.assign(new Error("请指定要查看的库存产品。"), { statusCode: 400 });
+  const product = await mysqlQueryOne("SELECT id FROM products WHERE id = ? AND tenant_id = ? AND active = 1", [productId, tenantPk]);
+  if (!product) throw Object.assign(new Error("库存产品不存在或不属于当前企业。"), { statusCode: 404 });
+  const page = Math.max(Number(query.page || 1), 1);
+  const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
+  const whereSql = `im.tenant_id = ? AND p.tenant_id = ? AND p.active = 1
+    AND im.source_type = 'manual_outbound' AND (im.product_id = ? OR im.source_ref LIKE ?)`;
+  const whereParams = [tenantPk, tenantPk, productId, `manual_outbound_${productId}_%`];
+  const [totalRow, rows] = await Promise.all([
+    mysqlQueryOne(`
+      SELECT COUNT(*) AS total
+      FROM inventory_movements im
+      JOIN products p ON p.id = im.product_id
+      WHERE ${whereSql}
+    `, whereParams),
+    mysqlQuery(`
+      SELECT im.*, p.code AS product_code, p.name AS product_name, p.image_url AS product_image_url,
+        parent_pc.product_id AS parent_product_id, parent_pc.quantity AS parent_component_quantity,
+        s.name AS shop_name, NULL AS owner_name, COALESCE(im.operator, '') AS operator_name
+      FROM inventory_movements im
+      JOIN products p ON p.id = im.product_id
+      LEFT JOIN product_components parent_pc
+        ON parent_pc.tenant_id = ? AND parent_pc.product_id = ? AND parent_pc.component_product_id = im.product_id
+      LEFT JOIN shops s ON s.id = im.shop_id AND s.tenant_id = ?
+      WHERE ${whereSql}
+      ORDER BY im.created_at DESC, im.id DESC
+      LIMIT ? OFFSET ?
+    `, [tenantPk, productId, tenantPk, ...whereParams, pageSize, (page - 1) * pageSize])
+  ]);
+  return { rows, total: Number(totalRow?.total || 0), page, pageSize, mode: "paged" };
 }
 
 export async function inventoryStockDebtsMysql(query = {}) {
@@ -26305,9 +27649,10 @@ export async function ordersMysql() {
   return await enrichOrderRowsForListMysql(rows);
 }
 
-async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined) {
+async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined, tenantId = "admin") {
   const cleanIds = [...new Set(ids.map(Number).filter(Boolean))];
   if (!cleanIds.length) return [];
+  const tenantScope = await orderListTenantScopeMysql(tenantId);
   await ensureProcurementOrderSourceSchemaMysql();
   await ensureSkuInventoryRecipeSchemaMysql();
   await ensureProductCompositionSchemaMysql();
@@ -26325,8 +27670,10 @@ async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined) {
       LEFT JOIN sku_mappings sm ON (
         (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
         AND sm.active = 1
+        ${tenantScope ? `AND sm.tenant_id = ${tenantScope.id}` : ""}
       )
       WHERE oi.order_id IN (${cleanIds.map(() => "?").join(",")})
+        ${tenantScope ? `AND o.shop_id IN (SELECT tenant_shop.id FROM shops tenant_shop WHERE tenant_shop.tenant_id = ${tenantScope.id} AND tenant_shop.status = 'active')` : ""}
     ),
     scoped_product_ids AS (
       SELECT DISTINCT product_id FROM scoped_order_items WHERE product_id IS NOT NULL
@@ -26337,12 +27684,15 @@ async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined) {
       JOIN scoped_order_items scoped_item
         ON scoped_item.shop_id = recipe.shop_id AND scoped_item.ozon_sku = recipe.ozon_sku
       JOIN sku_inventory_recipe_items ri ON ri.recipe_id = recipe.id
+      ${tenantScope ? `JOIN products recipe_product ON recipe_product.id = ri.product_id AND recipe_product.tenant_id = ${tenantScope.id}` : ""}
       WHERE recipe.active = 1
     ),
     scoped_component_product_ids AS (
       SELECT DISTINCT pc.component_product_id AS product_id
       FROM product_components pc
       JOIN scoped_product_ids scoped_product ON scoped_product.product_id = pc.product_id
+      ${tenantScope ? `JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.tenant_id = ${tenantScope.id}
+      WHERE pc.tenant_id = ${tenantScope.id}` : ""}
       UNION
       SELECT product_id FROM scoped_recipe_product_ids
     ),
@@ -26483,8 +27833,9 @@ async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined) {
     LEFT JOIN sku_mappings sm ON (
       (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
       AND sm.active = 1
+      ${tenantScope ? `AND sm.tenant_id = ${tenantScope.id}` : ""}
     )
-    LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1
+    LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1 ${tenantScope ? `AND p.tenant_id = ${tenantScope.id}` : ""}
     LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku
     LEFT JOIN (
       SELECT snapshot.shop_id, snapshot.ozon_sku,
@@ -26500,6 +27851,7 @@ async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined) {
       FROM inventory_movements
       JOIN scoped_product_ids scoped_product ON scoped_product.product_id = inventory_movements.product_id
       WHERE status = 'posted'
+        ${tenantScope ? `AND inventory_movements.tenant_id = ${tenantScope.id}` : ""}
         AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'
       GROUP BY inventory_movements.product_id
     ) local_stock ON local_stock.product_id = p.id
@@ -26515,6 +27867,7 @@ async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined) {
         SELECT product_id, SUM(quantity_delta) AS local_stock
         FROM inventory_movements
         WHERE status = 'posted'
+          ${tenantScope ? `AND tenant_id = ${tenantScope.id}` : ""}
           AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'
         GROUP BY product_id
       ) stock ON stock.product_id = ri.product_id
@@ -26538,12 +27891,13 @@ async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined) {
         MAX(incoming.shipping_amount) AS shipping_amount
       FROM product_components pc
       JOIN scoped_product_ids scoped_product ON scoped_product.product_id = pc.product_id
-      JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.active = 1
+      JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.active = 1 ${tenantScope ? `AND component_product.tenant_id = ${tenantScope.id} AND pc.tenant_id = ${tenantScope.id}` : ""}
       LEFT JOIN (
         SELECT inventory_movements.product_id, SUM(inventory_movements.quantity_delta) AS local_stock
         FROM inventory_movements
         JOIN scoped_component_product_ids scoped_component ON scoped_component.product_id = inventory_movements.product_id
         WHERE status = 'posted'
+          ${tenantScope ? `AND inventory_movements.tenant_id = ${tenantScope.id}` : ""}
           AND ${localStockLocationPredicateMysql()}
         GROUP BY inventory_movements.product_id
       ) stock ON stock.product_id = pc.component_product_id
@@ -26560,8 +27914,8 @@ async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined) {
         FROM inbound_records ir
         JOIN scoped_component_product_ids scoped_component ON scoped_component.product_id = ir.product_id
         LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
-        LEFT JOIN people pe ON pe.id = ir.person_id
-        LEFT JOIN people creator ON creator.id = po.created_by_person_id
+        LEFT JOIN people pe ON pe.id = ir.person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE member.tenant_id = ${tenantScope.id} AND member.person_id = pe.id AND member.active = 1)` : ""}
+        LEFT JOIN people creator ON creator.id = po.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE member.tenant_id = ${tenantScope.id} AND member.person_id = creator.id AND member.active = 1)` : ""}
         LEFT JOIN products product ON product.id = ir.product_id
         WHERE ir.status = 'pending_arrival'
         GROUP BY ir.product_id
@@ -26584,8 +27938,8 @@ async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined) {
       FROM inbound_records ir
       JOIN scoped_product_ids scoped_product ON scoped_product.product_id = ir.product_id
       LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
-      LEFT JOIN people pe ON pe.id = ir.person_id
-      LEFT JOIN people creator ON creator.id = po.created_by_person_id
+      LEFT JOIN people pe ON pe.id = ir.person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE member.tenant_id = ${tenantScope.id} AND member.person_id = pe.id AND member.active = 1)` : ""}
+      LEFT JOIN people creator ON creator.id = po.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE member.tenant_id = ${tenantScope.id} AND member.person_id = creator.id AND member.active = 1)` : ""}
       LEFT JOIN products product ON product.id = ir.product_id
       WHERE ir.purchase_order_id IS NOT NULL
       GROUP BY ir.product_id
@@ -26614,10 +27968,11 @@ async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined) {
       JOIN scoped_order_items scoped_item ON scoped_item.order_item_id = allocation.order_item_id
       JOIN procurement_requests request ON request.id = allocation.procurement_request_id
         AND request.status != 'cancelled'
-      LEFT JOIN people request_person ON request_person.id = request.person_id
-      LEFT JOIN people request_creator ON request_creator.id = request.created_by_person_id
+        ${tenantScope ? `AND request.tenant_id = ${tenantScope.id}` : ""}
+      LEFT JOIN people request_person ON request_person.id = request.person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE member.tenant_id = ${tenantScope.id} AND member.person_id = request_person.id AND member.active = 1)` : ""}
+      LEFT JOIN people request_creator ON request_creator.id = request.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE member.tenant_id = ${tenantScope.id} AND member.person_id = request_creator.id AND member.active = 1)` : ""}
       LEFT JOIN purchase_orders allocation_purchase ON allocation_purchase.id = request.purchase_order_id
-      LEFT JOIN products allocation_product ON allocation_product.id = request.product_id
+      LEFT JOIN products allocation_product ON allocation_product.id = request.product_id ${tenantScope ? `AND allocation_product.tenant_id = ${tenantScope.id}` : ""}
       LEFT JOIN inbound_records allocation_inbound ON allocation_inbound.purchase_order_id = request.purchase_order_id
         AND allocation_inbound.product_id = request.product_id
         AND allocation_inbound.status = 'pending_arrival'
@@ -26635,25 +27990,27 @@ async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined) {
       WHERE allocation.status = 'allocated'
       GROUP BY allocation.order_item_id
     ) procurement_allocation ON procurement_allocation.order_item_id = oi.id
-    LEFT JOIN procurement_requests pr_source ON pr_source.source_order_item_id = oi.id AND pr_source.status NOT IN ('cancelled', 'pending', 'suggested')
+    LEFT JOIN procurement_requests pr_source ON pr_source.source_order_item_id = oi.id AND pr_source.status NOT IN ('cancelled', 'pending', 'suggested') ${tenantScope ? `AND pr_source.tenant_id = ${tenantScope.id}` : ""}
     LEFT JOIN order_item_procurement_marks oipm ON oipm.order_item_id = oi.id AND oipm.status = 'handled'
-    LEFT JOIN people pr_person ON pr_person.id = pr_source.person_id
-    LEFT JOIN people pr_creator ON pr_creator.id = pr_source.created_by_person_id
-    LEFT JOIN people mark_creator ON mark_creator.id = oipm.created_by_person_id
+    LEFT JOIN people pr_person ON pr_person.id = pr_source.person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE member.tenant_id = ${tenantScope.id} AND member.person_id = pr_person.id AND member.active = 1)` : ""}
+    LEFT JOIN people pr_creator ON pr_creator.id = pr_source.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE member.tenant_id = ${tenantScope.id} AND member.person_id = pr_creator.id AND member.active = 1)` : ""}
+    LEFT JOIN people mark_creator ON mark_creator.id = oipm.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE member.tenant_id = ${tenantScope.id} AND member.person_id = mark_creator.id AND member.active = 1)` : ""}
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
     LEFT JOIN order_marks om ON om.order_id = o.id
     LEFT JOIN order_label_prints olp ON olp.order_id = o.id
     LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
     WHERE o.id IN (${cleanIds.map(() => "?").join(",")})
+      ${tenantScope ? `AND s.tenant_id = ${tenantScope.id} AND s.status = 'active'` : ""}
     GROUP BY o.id
   `, [...cleanIds, ...cleanIds]);
   const ordering = new Map(cleanIds.map((value, index) => [String(value), index]));
-  return (await enrichOrderRowsForListMysql(rows, coveragePromise)).sort((a, b) => (ordering.get(String(a.id)) ?? 0) - (ordering.get(String(b.id)) ?? 0));
+  return (await enrichOrderRowsForListMysql(rows, coveragePromise, Boolean(tenantScope), tenantId)).sort((a, b) => (ordering.get(String(a.id)) ?? 0) - (ordering.get(String(b.id)) ?? 0));
 }
 
-async function orderInventorySortRowsMysql(ids = []) {
+async function orderInventorySortRowsMysql(ids = [], tenantId = "admin") {
   const cleanIds = [...new Set(ids.map(Number).filter(Boolean))];
   if (!cleanIds.length) return [];
+  const tenantScope = await orderListTenantScopeMysql(tenantId);
   // Only fields consumed by sortPagedOrdersMysql. Keep the same mapping and
   // fallback semantics as the detail query, without its inventory/profit joins.
   const rows = await mysqlQuery(`
@@ -26677,13 +28034,15 @@ async function orderInventorySortRowsMysql(ids = []) {
     LEFT JOIN order_items oi ON oi.order_id = o.id
     LEFT JOIN sku_mappings sm ON (
       (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku)) AND sm.active = 1
+      ${tenantScope ? `AND sm.tenant_id = ${tenantScope.id}` : ""}
     )
-    LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1
+    LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1 ${tenantScope ? `AND p.tenant_id = ${tenantScope.id}` : ""}
     LEFT JOIN sku_inventory_recipes sku_recipe ON sku_recipe.shop_id = o.shop_id
       AND sku_recipe.ozon_sku = oi.ozon_sku AND sku_recipe.active = 1
     LEFT JOIN order_label_prints olp ON olp.order_id = o.id
     LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
     WHERE o.id IN (${cleanIds.map(() => "?").join(",")})
+      ${tenantScope ? `AND s.tenant_id = ${tenantScope.id} AND s.status = 'active'` : ""}
     GROUP BY o.id
   `, cleanIds);
   const ordering = new Map(cleanIds.map((id, index) => [Number(id), index]));
@@ -26702,9 +28061,49 @@ async function orderInventorySortRowsMysql(ids = []) {
   }).sort((a, b) => ordering.get(Number(a.id)) - ordering.get(Number(b.id)));
 }
 
-async function orderBaseSqlMysql(query = {}) {
+async function orderListTenantScopeMysql(tenantId = "admin") {
+  if (String(tenantId || "admin") === "admin") return null;
+  const id = await resolveShopTenantIdMysql(tenantId);
+  if (await isDefaultShopTenantMysql(id)) return null;
+  for (const table of ["shops", "sku_mappings", "products", "procurement_requests", "inventory_movements", "product_components", "logistics_fee_rules"]) {
+    if (!await mysqlSchemaColumnExists(table, "tenant_id")) {
+      throw Object.assign(new Error(`企业订单列表暂不可用：${table}.tenant_id 尚未迁移，无法安全隔离订单及关联数据。`), { statusCode: 503 });
+    }
+  }
+  return { id };
+}
+
+async function orderOwnershipTenantScopeMysql(tenantId = "admin") {
+  if (String(tenantId || "admin") === "admin") return null;
+  const id = await resolveShopTenantIdMysql(tenantId);
+  if (!await mysqlSchemaColumnExists("shops", "tenant_id")) {
+    throw Object.assign(new Error("企业订单暂不可用：shops.tenant_id 尚未迁移，无法验证订单所属企业。"), { statusCode: 503 });
+  }
+  return { id };
+}
+
+function assertTenantOrderListFiltersMysql(query = {}, tenantScope = null) {
+  if (!tenantScope) return;
+  const status = String(query.status || "all");
+  const tenantSafeStatuses = new Set(["all", "awaiting_packaging", "awaiting_deliver", "delivering", "dispute", "cancelled", "delivered", "unbound"]);
+  if (!tenantSafeStatuses.has(status)) {
+    throw Object.assign(new Error("企业订单列表暂不支持该状态筛选：关联库存或采购数据租户隔离尚未完成。"), { statusCode: 503 });
+  }
+  const searchText = String(query.searchQuery || query.search_query || "").trim();
+  const searchType = String(query.searchType || query.search_type || "order");
+  if (searchText && !["order", "tracking", "sku", "offer", "product"].includes(searchType)) {
+    throw Object.assign(new Error("企业订单列表暂不支持该搜索方式：相关映射或采购数据租户隔离尚未完成。"), { statusCode: 503 });
+  }
+  if (String(query.procurementTransitOverdue || query.procurement_transit_overdue || "") === "1") {
+    throw Object.assign(new Error("企业订单列表暂不支持采购在途超期筛选：入库与采购数据隔离尚未完成。"), { statusCode: 503 });
+  }
+}
+
+async function orderBaseSqlMysql(query = {}, tenantId = "admin") {
   const where = ["1 = 1"];
   const params = [];
+  const tenantScope = await orderListTenantScopeMysql(tenantId);
+  if (tenantScope) where.push(`EXISTS (SELECT 1 FROM shops tenant_shop WHERE tenant_shop.id = o.shop_id AND tenant_shop.tenant_id = ${tenantScope.id} AND tenant_shop.status = 'active')`);
   const shopId = String(query.shopId || query.shop_id || "all");
   if (shopId !== "all") {
     where.push("o.shop_id = ?");
@@ -26723,11 +28122,11 @@ async function orderBaseSqlMysql(query = {}) {
   return { where: where.join(" AND "), params };
 }
 
-async function orderFilteredSqlMysql(query, base, coverage = null) {
+async function orderFilteredSqlMysql(query, base, coverage = null, tenantScope = null) {
   const where = [base.where];
   const params = [...base.params];
-  addOrderSearchSqlMysql(where, params, query);
-  where.push(orderStatusSqlMysql(String(query.status || "all"), coverage));
+  addOrderSearchSqlMysql(where, params, query, tenantScope);
+  where.push(orderStatusSqlMysql(String(query.status || "all"), coverage, tenantScope));
 
   const mark = String(query.markFilter || query.mark_filter || "all");
   if (mark === "quality") {
@@ -26859,10 +28258,10 @@ function resolveOrderLogisticsValueFromRowMysql(row = {}) {
   });
 }
 
-async function detectOrderLogisticsLabelMysql(text, row = {}) {
+async function detectOrderLogisticsLabelMysql(text, row = {}, tenantId = "admin") {
   const normalized = normalizeOrderLogisticsTextMysql(`${text || ""} ${row.delivery_method_name || ""} ${row.logistics_channel || ""} ${row.warehouse_name || ""}`);
   if (!normalized) return null;
-  const methods = await activeOrderLogisticsFilterMethodsMysql();
+  const methods = await activeOrderLogisticsFilterMethodsMysql(tenantId);
   for (const method of methods) {
     if ((method.warehousePatterns || []).some((pattern) => normalized.includes(normalizeOrderLogisticsTextMysql(pattern)))) {
       return { value: method.value, label: method.label };
@@ -26871,8 +28270,8 @@ async function detectOrderLogisticsLabelMysql(text, row = {}) {
   return null;
 }
 
-async function orderLogisticsMethodClauseMysql(method, params) {
-  const methods = await activeOrderLogisticsFilterMethodsMysql();
+async function orderLogisticsMethodClauseMysql(method, params, tenantId = "admin") {
+  const methods = await activeOrderLogisticsFilterMethodsMysql(tenantId);
   const selectedMethods = methods.filter((item) => item.value === method);
   const selected = selectedMethods[0];
   const label = String(selected?.label || "").trim();
@@ -26906,8 +28305,9 @@ async function loadOrderRowsForBaseMysql(base) {
   return await orderRowsByIdsMysql(idRows.map((row) => row.id));
 }
 
-async function loadOrderLogisticsSummaryForBaseMysql(base) {
-  const cacheKey = `orders:logistics-summary:v5:${base.where}:${JSON.stringify(base.params)}`;
+async function loadOrderLogisticsSummaryForBaseMysql(base, tenantId = "admin") {
+  const tenantCacheKey = String(tenantId || "admin");
+  const cacheKey = `orders:logistics-summary:v6:${tenantCacheKey}:${base.where}:${JSON.stringify(base.params)}`;
   return getCachedMasterData(cacheKey, async () => {
     if (!orderLogisticsSnapshotSchemaReady) {
       await mysqlExecute(`
@@ -26927,7 +28327,7 @@ async function loadOrderLogisticsSummaryForBaseMysql(base) {
     `, [snapshotKey]);
     const persisted = parseJsonFallback(snapshot?.payload_json, null);
     if (Array.isArray(persisted)) return persisted;
-    const methods = await activeOrderLogisticsFilterMethodsMysql();
+    const methods = await activeOrderLogisticsFilterMethodsMysql(tenantId);
     const rows = await mysqlQuery(`
       SELECT o.id, o.posting_number, o.tracking_number, raw.raw_json
       FROM orders o
@@ -26969,15 +28369,15 @@ function buildOrderLogisticsCountsMysql(rows = [], labelByValue = new Map()) {
   return counts;
 }
 
-async function orderLogisticsMethodOptionsMysql(base, rows = null) {
+async function orderLogisticsMethodOptionsMysql(base, rows = null, tenantId = "admin") {
   const cacheKey = `orders:logistics-options:v4:${base.where}:${JSON.stringify(base.params)}`;
   return getCachedMasterData(cacheKey, async () => {
     const options = [{ value: "all", label: "全部物流" }];
-    const methods = await activeOrderLogisticsFilterMethodsMysql();
+    const methods = await activeOrderLogisticsFilterMethodsMysql(tenantId);
     const labelByValue = new Map(
       methods.map((item) => [String(item.value || "").trim(), String(item.label || "").trim()]).filter(([value, label]) => value && label)
     );
-    const counts = buildOrderLogisticsCountsMysql(rows || await loadOrderLogisticsSummaryForBaseMysql(base), labelByValue);
+    const counts = buildOrderLogisticsCountsMysql(rows || await loadOrderLogisticsSummaryForBaseMysql(base, tenantId), labelByValue);
     for (const item of [...counts.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "zh-Hans"))) {
       options.push({
         value: item.value,
@@ -27308,8 +28708,10 @@ async function orderPagedSqlCountsMysql(base, coverage) {
   };
 }
 
-export async function ordersPagedMysql(query = {}) {
+export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const tenantScope = await orderListTenantScopeMysql(tenantId);
+  assertTenantOrderListFiltersMysql(query, tenantScope);
   await Promise.all([
     ensureOrderLabelPrintSchemaMysql(),
     ensureSkuInventoryRecipeSchemaMysql(),
@@ -27319,29 +28721,35 @@ export async function ordersPagedMysql(query = {}) {
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
   const includeRows = String(query.includeRows ?? query.include_rows ?? "1") !== "0";
-  const includeCounts = String(query.includeCounts ?? query.include_counts ?? "1") !== "0";
+  const includeCounts = !tenantScope && String(query.includeCounts ?? query.include_counts ?? "1") !== "0";
   const includeLogisticsOptions = String(query.includeLogisticsOptions ?? query.include_logistics_options ?? "1") !== "0";
   const [rawBase, optionsBase] = await Promise.all([
-    orderBaseSqlMysql(query),
+    orderBaseSqlMysql(query, tenantId),
     includeLogisticsOptions
-      ? orderBaseSqlMysql({ ...query, logisticsMethod: "all", logistics_method: "all" })
+      ? orderBaseSqlMysql({ ...query, logisticsMethod: "all", logistics_method: "all" }, tenantId)
       : null
   ]);
   const logisticsMethod = String(query.logisticsMethod || query.logistics_method || "all");
   const logisticsCarrier = String(query.logisticsCarrier || query.logistics_carrier || "all");
   const reuseLogisticsSummary = includeLogisticsOptions || logisticsMethod !== "all" || logisticsCarrier !== "all";
-  const logisticsSummaryRows = reuseLogisticsSummary ? await loadOrderLogisticsSummaryForBaseMysql(rawBase) : null;
+  const logisticsSummaryRows = reuseLogisticsSummary ? await loadOrderLogisticsSummaryForBaseMysql(rawBase, tenantId) : null;
   const logisticsIds = filterOrderIdsByLogisticsMethodMysql(logisticsSummaryRows || [], logisticsMethod);
   const carrierIds = filterOrderIdsByLogisticsCarrierMysql(logisticsSummaryRows || [], logisticsCarrier);
   const base = withRestrictedOrderIdsMysql(withRestrictedOrderIdsMysql(rawBase, logisticsIds), carrierIds);
   const logisticsMethodOptionsPromise = includeLogisticsOptions && optionsBase
-    ? orderLogisticsMethodOptionsMysql(optionsBase, logisticsSummaryRows)
+    ? orderLogisticsMethodOptionsMysql(optionsBase, logisticsSummaryRows, tenantId)
     : Promise.resolve([]);
-  const needsCoverageForFilter = ["pending_purchase", "purchase_in_transit", "purchase_records_missing"]
+  const requestedCoverageFilter = ["pending_purchase", "purchase_in_transit", "purchase_records_missing"]
     .includes(String(query.status || "all"));
-  const coverage = includeCounts || needsCoverageForFilter ? await orderProcurementCoverageMysql() : null;
+  if (tenantScope && requestedCoverageFilter) {
+    throw Object.assign(new Error("企业订单列表暂不支持采购状态筛选：采购关联数据租户隔离尚未完成，请先切换到全部状态。"), { statusCode: 503 });
+  }
+  // Procurement coverage is still a process-global cache. Tenant requests do
+  // not read or count it until the coverage source can be tenant-keyed.
+  const needsCoverageForFilter = requestedCoverageFilter && !tenantScope;
+  const coverage = !tenantScope && (includeCounts || needsCoverageForFilter) ? await orderProcurementCoverageMysql() : null;
   const countsPromise = includeCounts ? orderPagedSqlCountsMysql(base, coverage) : Promise.resolve({});
-  const filtered = await orderFilteredSqlMysql(query, base, coverage);
+  const filtered = await orderFilteredSqlMysql(query, base, coverage, tenantScope);
   const sortMode = String(query.sortMode || query.sort_mode || "ordered");
   // Pagination must use the active filter, not the all-status tab count.
   // Status counts deliberately omit filters such as the selected status,
@@ -27366,9 +28774,9 @@ export async function ordersPagedMysql(query = {}) {
         ORDER BY ${orderQuickFilterOrderSqlMysql(query)}
       `, filtered.params);
       inventoryTotal = idRows.length;
-      const sortRows = await orderInventorySortRowsMysql(idRows.map((row) => row.id));
+      const sortRows = await orderInventorySortRowsMysql(idRows.map((row) => row.id), tenantId);
       const pageIds = sortPagedOrdersMysql(sortRows, query).slice(start, start + pageSize).map((row) => row.id);
-      rows = await orderRowsByIdsMysql(pageIds, needsCoverageForFilter || includeCounts ? coverage : null);
+      rows = await orderRowsByIdsMysql(pageIds, needsCoverageForFilter || includeCounts ? coverage : null, tenantId);
     } else {
       const idRows = await mysqlQuery(`
         SELECT o.id
@@ -27381,7 +28789,8 @@ export async function ordersPagedMysql(query = {}) {
       `, [...filtered.params, pageSize, start]);
       rows = sortPagedOrdersMysql(await orderRowsByIdsMysql(
         idRows.map((row) => row.id),
-        needsCoverageForFilter || includeCounts ? coverage : null
+        needsCoverageForFilter || includeCounts ? coverage : null,
+        tenantId
       ), query);
     }
   }
@@ -27399,11 +28808,12 @@ export async function ordersPagedMysql(query = {}) {
     counts,
     logisticsMethodOptions,
     logisticsCarrierOptions: orderLogisticsCarrierOptionsMysql(logisticsSummaryRows || []),
+    ...(tenantScope ? { tenant_counts_unavailable: true, tenant_procurement_coverage_unavailable: true } : {}),
     mode: "paged"
   };
 }
 
-function addOrderSearchSqlMysql(where, params, query) {
+function addOrderSearchSqlMysql(where, params, query, tenantScope = null) {
   const text = String(query.searchQuery || query.search_query || "").trim();
   if (!text) return;
   const like = `%${text.toLowerCase()}%`;
@@ -27424,7 +28834,7 @@ function addOrderSearchSqlMysql(where, params, query) {
     return;
   }
   if (type === "offer") {
-    where.push("EXISTS (SELECT 1 FROM order_items oi LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id WHERE oi.order_id = o.id AND LOWER(CONCAT(COALESCE(sm.offer_id, ''), ' ', oi.ozon_sku)) LIKE ?)");
+    where.push(`EXISTS (SELECT 1 FROM order_items oi LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id ${tenantScope ? `AND sm.tenant_id = ${tenantScope.id}` : ""} WHERE oi.order_id = o.id AND LOWER(CONCAT(COALESCE(sm.offer_id, ''), ' ', oi.ozon_sku)) LIKE ?)`);
     params.push(like);
     return;
   }
@@ -27433,10 +28843,10 @@ function addOrderSearchSqlMysql(where, params, query) {
     // Separate equality joins use the primary and shop/SKU unique indexes.
     where.push(`EXISTS (
       SELECT 1 FROM order_items oi
-      LEFT JOIN sku_mappings direct_sm ON direct_sm.id = oi.sku_mapping_id AND direct_sm.active = 1
-      LEFT JOIN sku_mappings fallback_sm ON fallback_sm.shop_id = o.shop_id AND fallback_sm.ozon_sku = oi.ozon_sku AND fallback_sm.active = 1
-      LEFT JOIN products direct_p ON direct_p.id = direct_sm.product_id AND direct_p.active = 1
-      LEFT JOIN products fallback_p ON fallback_p.id = fallback_sm.product_id AND fallback_p.active = 1
+      LEFT JOIN sku_mappings direct_sm ON direct_sm.id = oi.sku_mapping_id AND direct_sm.active = 1 ${tenantScope ? `AND direct_sm.tenant_id = ${tenantScope.id}` : ""}
+      LEFT JOIN sku_mappings fallback_sm ON fallback_sm.shop_id = o.shop_id AND fallback_sm.ozon_sku = oi.ozon_sku AND fallback_sm.active = 1 ${tenantScope ? `AND fallback_sm.tenant_id = ${tenantScope.id}` : ""}
+      LEFT JOIN products direct_p ON direct_p.id = direct_sm.product_id AND direct_p.active = 1 ${tenantScope ? `AND direct_p.tenant_id = ${tenantScope.id}` : ""}
+      LEFT JOIN products fallback_p ON fallback_p.id = fallback_sm.product_id AND fallback_p.active = 1 ${tenantScope ? `AND fallback_p.tenant_id = ${tenantScope.id}` : ""}
       WHERE oi.order_id = o.id AND (
         (direct_sm.id IS NOT NULL AND LOWER(CONCAT(COALESCE(direct_p.name, ''), ' ', COALESCE(direct_p.code, ''), ' ', COALESCE(direct_p.inventory_number, ''), ' ', COALESCE(direct_p.selection_id, ''), ' ', oi.ozon_sku)) LIKE ?)
         OR (fallback_sm.id IS NOT NULL AND LOWER(CONCAT(COALESCE(fallback_p.name, ''), ' ', COALESCE(fallback_p.code, ''), ' ', COALESCE(fallback_p.inventory_number, ''), ' ', COALESCE(fallback_p.selection_id, ''), ' ', oi.ozon_sku)) LIKE ?)
@@ -27461,14 +28871,14 @@ function addOrderSearchSqlMysql(where, params, query) {
   }
 }
 
-async function addOrderLogisticsMethodSqlMysql(where, params, query) {
+async function addOrderLogisticsMethodSqlMysql(where, params, query, tenantId = "admin") {
   const method = String(query.logisticsMethod || query.logistics_method || "all");
   if (method === "all") return;
-  const clause = await orderLogisticsMethodClauseMysql(method, params);
+  const clause = await orderLogisticsMethodClauseMysql(method, params, tenantId);
   if (clause) where.push(clause);
 }
 
-function orderStatusSqlMysql(status, coverage = null) {
+function orderStatusSqlMysql(status, coverage = null, tenantScope = null) {
   if (coverage && ["pending_purchase", "purchase_in_transit", "purchase_records_missing"].includes(status)) return procurementQueueSql(coverage, status);
   if (status === "all") return "1 = 1";
   if (status === "pending_purchase") {
@@ -27572,6 +28982,7 @@ function orderStatusSqlMysql(status, coverage = null) {
             FROM sku_mappings sm_by_id
             JOIN products p_by_id ON p_by_id.id = sm_by_id.product_id AND p_by_id.active = 1
             WHERE sm_by_id.id = oi.sku_mapping_id AND sm_by_id.active = 1
+              ${tenantScope ? `AND sm_by_id.tenant_id = ${tenantScope.id} AND p_by_id.tenant_id = ${tenantScope.id}` : ""}
           ))
           OR EXISTS (
             SELECT 1
@@ -27580,6 +28991,7 @@ function orderStatusSqlMysql(status, coverage = null) {
             WHERE sm_by_sku.shop_id = o.shop_id
               AND sm_by_sku.ozon_sku = oi.ozon_sku
               AND sm_by_sku.active = 1
+              ${tenantScope ? `AND sm_by_sku.tenant_id = ${tenantScope.id} AND p_by_sku.tenant_id = ${tenantScope.id}` : ""}
           )
         )
     )`;
@@ -27590,11 +29002,11 @@ function orderStatusSqlMysql(status, coverage = null) {
   if (status === "awaiting_packaging") {
     return `((${state} IN ('acceptance_in_progress','awaiting_approve','awaiting_packaging','posting_created','posting_acceptance_in_progress')
       OR ${stage} IN ('acceptance_in_progress','awaiting_approve','awaiting_packaging','posting_created','posting_acceptance_in_progress'))
-      AND NOT (${orderStatusSqlMysql("awaiting_deliver")})
-      AND NOT (${orderStatusSqlMysql("delivering")})
-      AND NOT (${orderStatusSqlMysql("delivered")})
-      AND NOT (${orderStatusSqlMysql("cancelled")})
-      AND NOT (${orderStatusSqlMysql("dispute")}))`;
+      AND NOT (${orderStatusSqlMysql("awaiting_deliver", null, tenantScope)})
+      AND NOT (${orderStatusSqlMysql("delivering", null, tenantScope)})
+      AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope)})
+      AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope)})
+      AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope)}))`;
   }
   if (status === "awaiting_deliver") {
     return `(${state} IN ('awaiting_registration','posting_awaiting_registration','posting_registration_error','awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery')
@@ -27726,19 +29138,39 @@ export async function refreshOrderProfitDetailSnapshotsMysql(body = {}) {
   }, body);
 }
 
-export async function orderDetailMysql(id) {
+export async function orderDetailMysql(id, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const tenantScoped = String(tenantId) !== "admin";
+  const normalizedTenantId = tenantScoped ? await resolveShopTenantIdMysql(tenantId) : null;
+  if (tenantScoped) {
+    const requiredTenantColumns = await Promise.all(["shops", "sku_mappings", "products", "logistics_fee_rules"].map(async (table) => ({
+      table,
+      exists: await mysqlSchemaColumnExists(table, "tenant_id")
+    })));
+    const missing = requiredTenantColumns.filter((item) => !item.exists).map((item) => `${item.table}.tenant_id`);
+    if (missing.length) {
+      throw Object.assign(new Error(`企业订单详情暂不可用：店铺、SKU 映射或产品归属字段尚未迁移（${missing.join("、")}），请管理员先完成对应租户迁移。`), { statusCode: 503 });
+    }
+  }
+  const shopScope = tenantScoped ? `AND ${tenantShopPredicateMysql("s", false)}` : "";
   let order = await mysqlQueryOne(
     `SELECT o.*, s.name AS shop_name, raw.raw_json
      FROM orders o
      JOIN shops s ON s.id = o.shop_id
      LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
-     WHERE o.id = ?`,
-    [Number(id)]
+     WHERE o.id = ? ${shopScope}`,
+    tenantScoped ? [Number(id), normalizedTenantId] : [Number(id)]
   );
   if (!order) return null;
-  order = await enrichOrderLogisticsMysql(order);
+  order = await enrichOrderLogisticsMysql(order, tenantScoped ? String(normalizedTenantId) : "admin");
 
+  const itemTenantJoinSql = tenantScoped
+    ? `LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id AND sm.shop_id = ? AND sm.tenant_id = ?
+       LEFT JOIN products p ON p.id = sm.product_id AND p.tenant_id = ?`
+    : `LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id
+       LEFT JOIN products p ON p.id = sm.product_id`;
+  const peopleJoinSql = tenantScoped ? "LEFT JOIN people pe ON 1 = 0" : "LEFT JOIN people pe ON pe.id = sm.person_id";
+  const itemTenantParams = tenantScoped ? [Number(order.shop_id), normalizedTenantId, normalizedTenantId] : [];
   const items = await mysqlQuery(`
     SELECT oi.*, sm.ozon_sku AS mapped_ozon_sku, sm.offer_id,
       CASE
@@ -27776,14 +29208,13 @@ export async function orderDetailMysql(id) {
       frozen_rule.name AS billing_logistics_rule_name,
       frozen_rule.channel AS billing_logistics_rule_channel
     FROM order_items oi
-    LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id
-    LEFT JOIN products p ON p.id = sm.product_id
+    ${itemTenantJoinSql}
     LEFT JOIN online_products op ON op.shop_id = ? AND op.ozon_sku = oi.ozon_sku
-    LEFT JOIN people pe ON pe.id = sm.person_id
+    ${peopleJoinSql}
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
-    LEFT JOIN logistics_fee_rules frozen_rule ON frozen_rule.id = oi.frozen_logistics_rule_id
+    LEFT JOIN logistics_fee_rules frozen_rule ON frozen_rule.id = oi.frozen_logistics_rule_id ${tenantScoped ? "AND frozen_rule.tenant_id = ?" : ""}
     WHERE oi.order_id = ?
-  `, [Number(order.shop_id), Number(id)]);
+  `, [...itemTenantParams, Number(order.shop_id), ...(tenantScoped ? [normalizedTenantId] : []), Number(id)]);
 
   const billingRuleNames = [...new Set(items.map((item) => String(item.billing_logistics_rule_name || "").trim()).filter(Boolean))];
   const billingRuleChannels = [...new Set(items.map((item) => String(item.billing_logistics_rule_channel || "").trim()).filter(Boolean))];
@@ -30485,8 +31916,17 @@ export async function translateCustomerMessageRuMysql(body = {}) {
   };
 }
 
-export async function orderStatusHistoryMysql(orderId, query = {}) {
+export async function orderStatusHistoryMysql(orderId, query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const tenantScope = await orderOwnershipTenantScopeMysql(tenantId);
+  const order = await mysqlQueryOne(`
+    SELECT o.id
+    FROM orders o
+    ${tenantScope ? "JOIN shops s ON s.id = o.shop_id" : ""}
+    WHERE o.id = ? ${tenantScope ? `AND s.tenant_id = ${tenantScope.id} AND s.status = 'active'` : ""}
+    LIMIT 1
+  `, [Number(orderId)]);
+  if (!order) return [];
   const limit = Math.min(Math.max(Number(query.limit || 200), 1), 1000);
   const rows = await mysqlQuery(`
     SELECT *
@@ -30531,6 +31971,13 @@ export async function orderStatusHistorySummaryMysql() {
     ORDER BY avg_delivery_hours DESC
     LIMIT 20
   `);
+  const dedupeDaily = await mysqlQuery(`
+    SELECT metric_date, snapshot_source, candidate_count, comparison_count, duplicate_count,
+      changed_count, skipped_count, comparison_error_count
+    FROM order_history_dedupe_daily_metrics
+    WHERE metric_date >= DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR) - INTERVAL 2 DAY
+    ORDER BY metric_date DESC, snapshot_source ASC
+  `).catch(() => []);
   return {
     total_history_rows: Number(total?.count || 0),
     open_orders: Number(openOrders?.count || 0),
@@ -30544,7 +31991,8 @@ export async function orderStatusHistorySummaryMysql() {
     slow_regions: slowRegions,
     dedupe: {
       mode: String(config.orderHistoryDedupeMode || "off"),
-      ...orderHistoryDedupeMetricsMysql
+      ...orderHistoryDedupeMetricsMysql,
+      daily: dedupeDaily
     }
   };
 }

@@ -49,6 +49,7 @@ export function roleLabels(subject) {
 
 export function pagePermission(path = "") {
   if (["/dashboard", "/onboarding", "/login"].includes(path)) return "common";
+  if (["/tools/pricing", "/tools/profit-calculator"].includes(path)) return "common";
   if (path === "/tenant-management") return "admin";
   if (path === "/settings/system-monitoring" || path === "/settings/scheduled-jobs" || path === "/settings/ai" || path === "/settings/prompts") return "technical";
   if (path.startsWith("/settings") || path.startsWith("/asset-variant-center") || path.startsWith("/finance") || path.startsWith("/profit") || path === "/exceptions/profit") return "admin";
@@ -63,6 +64,10 @@ export function pagePermission(path = "") {
 }
 
 export function canAccessPage(subject, path) {
+  if (path === "/tenant-shops") return hasPermission(subject, "admin") || ["owner", "admin"].includes(subject?.tenant?.role);
+  if (path === "/finance-center" && subject?.tenant?.slug !== "default") return hasPermission(subject, "admin") || ["owner", "admin"].includes(subject?.tenant?.role);
+  if (path === "/online-products" && subject?.tenant?.slug !== "default") return hasPermission(subject, "admin") || ["owner", "admin"].includes(subject?.tenant?.role);
+  if (path === "/batch-stock-update" && subject?.tenant?.slug !== "default") return hasPermission(subject, "admin") || ["owner", "admin"].includes(subject?.tenant?.role);
   const permission = pagePermission(path);
   return permission === "common" ? getRoles(subject).length > 0 : hasPermission(subject, permission);
 }

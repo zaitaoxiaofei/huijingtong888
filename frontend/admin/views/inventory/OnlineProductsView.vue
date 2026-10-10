@@ -3,6 +3,7 @@ import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, react
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { useAuthStore } from "../../stores/auth";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../../utils/ai-variant-lab-window";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
@@ -15,19 +16,19 @@ import { ozonBuyerProductLinkFromRow } from "../../utils/product-links";
 
 const route = useRoute();
 const router = useRouter();
+const authStore = useAuthStore();
 let syncingRoute = false;
 let onlineProductSyncPollTimer = 0;
 let productLimitsLoadedShopId = null;
 const listRequestGate = createLatestRequestGate();
 const warehouseCacheByShop = new Map();
 let dictionaryLoaded = false;
-let batchStockSnapshotKey = "";
-let batchStockSnapshotRows = [];
 
 const loading = ref(false);
 const syncLoading = ref(false);
 const stockSyncLoading = ref(false);
 const openingEditId = ref(0);
+const zeroStockLoadingId = ref(0);
 const bindDialogVisible = ref(false);
 const bindSubmitting = ref(false);
 const stockDialogVisible = ref(false);
@@ -94,6 +95,10 @@ const statusOptions = computed(() => statusLabels.map(([value, label]) => ({
 })).filter((item) => item.value === "all" || item.count > 0 || item.value === state.filters.status));
 
 const pagedRows = computed(() => state.onlineProducts);
+const tenantReadOnly = computed(() => authStore.user?.tenant?.slug !== "default");
+const tenantCanUpdateStocks = computed(() => !tenantReadOnly.value
+  || ["owner", "admin"].includes(authStore.user?.tenant?.role)
+  || (Array.isArray(authStore.user?.roles) && authStore.user.roles.includes("admin")));
 const stockDialogShopName = computed(() => {
   const shopId = Number(stockForm.shop_id || 0);
   return state.shops.find((shop) => Number(shop.id) === shopId)?.name || "当前店铺";
@@ -106,6 +111,7 @@ const stockDialogWarehouseName = computed(() => {
 const stockPresetValues = [888, 500, 100, 0];
 const showProductLimitPanel = computed(() => route.name === "batch-stock-update");
 const productLimitSummary = computed(() => {
+  if (productLimitsLoadedShopId !== String(state.filters.shopId || "all")) return null;
   const rows = Array.isArray(state.productLimits) ? state.productLimits.filter((item) => item?.ok) : [];
   if (!rows.length) return null;
   if (state.filters.shopId !== "all") {
@@ -268,6 +274,7 @@ function onlineProductsQueryString() {
     shopId: String(state.filters.shopId || "all"),
     status: String(state.filters.status || "all")
   });
+  if (showProductLimitPanel.value) params.set("batchStock", "1");
   const name = String(state.filters.name || "").trim();
   const offer = String(state.filters.offer || "").trim();
   if (name) params.set("name", name);
@@ -275,81 +282,41 @@ function onlineProductsQueryString() {
   return params.toString();
 }
 
-function batchStockSnapshotQueryString() {
-  const params = new URLSearchParams({ shopId: String(state.filters.shopId || "all") });
-  const name = String(state.filters.name || "").trim();
-  const offer = String(state.filters.offer || "").trim();
-  if (name) params.set("name", name);
-  if (offer) params.set("offer", offer);
-  return params.toString();
-}
-
-function batchStockFilteredRows() {
-  const eligibleRows = batchStockSnapshotRows.filter((row) => {
-    const status = onlineStatusKey(row);
-    return Boolean(displayedOzonSku(row)) && !["archived", "hidden"].includes(status);
-  });
-  const status = String(state.filters.status || "all");
-  if (status === "all") return eligibleRows;
-  if (status === "ready_for_sale") return eligibleRows.filter((row) => ["ready", "zero_stock"].includes(onlineStatusKey(row)));
-  return eligibleRows.filter((row) => onlineStatusKey(row) === status);
-}
-
-function batchStockStatusCounts(rows = []) {
-  const counts = { all: rows.length, ready_for_sale: 0, zero_stock: 0, selling: 0, ready: 0, error: 0, moderation: 0, hidden: 0, archived: 0, other: 0 };
-  for (const row of rows) {
-    const status = onlineStatusKey(row);
-    counts[Object.hasOwn(counts, status) ? status : "other"] += 1;
-  }
-  counts.ready_for_sale = Number(counts.ready || 0) + Number(counts.zero_stock || 0);
-  return counts;
-}
-
-function applyBatchStockSnapshotPage() {
-  const filteredRows = batchStockFilteredRows();
-  const start = (state.filters.page - 1) * state.filters.pageSize;
-  state.onlineProducts = filteredRows.slice(start, start + state.filters.pageSize);
-  state.total = filteredRows.length;
-  state.statusCounts = batchStockStatusCounts(batchStockSnapshotRows.filter((row) => (
-    Boolean(displayedOzonSku(row)) && !["archived", "hidden"].includes(onlineStatusKey(row))
-  )));
-  state.selectedIds = [];
-  state.selectedRows = [];
-}
-
-function invalidateBatchStockSnapshot() {
-  batchStockSnapshotKey = "";
-  batchStockSnapshotRows = [];
-}
-
-async function loadPageData(options = {}) {
+async function loadPageData() {
   const requestToken = listRequestGate.next();
   loading.value = true;
+  state.selectedIds = [];
+  state.selectedRows = [];
   try {
-    const snapshotKey = batchStockSnapshotQueryString();
-    const useSnapshot = showProductLimitPanel.value;
-    const productsRequest = useSnapshot && !options.forceSnapshot && batchStockSnapshotKey === snapshotKey
-      ? Promise.resolve(batchStockSnapshotRows)
-      : apiClient.get(`/api/online-products?${useSnapshot ? snapshotKey : onlineProductsQueryString()}`);
-    const requests = [productsRequest, loadShopDictionary()];
-    if (!dictionaryLoaded) requests.push(apiClient.get("/api/people"));
-    const [onlineProducts, shops, people] = await Promise.all(requests);
-    if (!listRequestGate.isLatest(requestToken)) return;
-    if (useSnapshot) {
-      batchStockSnapshotRows = Array.isArray(onlineProducts) ? onlineProducts : [];
-      batchStockSnapshotKey = snapshotKey;
-      applyBatchStockSnapshotPage();
-    } else {
-      state.onlineProducts = Array.isArray(onlineProducts?.rows) ? onlineProducts.rows : [];
-      state.total = Number(onlineProducts?.total || 0);
-      state.statusCounts = onlineProducts?.statusCounts || {};
+    const shopsRequest = loadShopDictionary().then((shops) => {
+      if (listRequestGate.isLatest(requestToken)) state.shops = Array.isArray(shops) ? shops : [];
+      return shops;
+    });
+    if (showProductLimitPanel.value && !route.query.shopId && state.filters.shopId === "all") {
+      const shops = await shopsRequest;
+      if (!listRequestGate.isLatest(requestToken)) return;
+      state.filters.shopId = shops[0]?.id ? String(shops[0].id) : "all";
+      syncRouteQuery("manual");
     }
+    const peopleRequest = !dictionaryLoaded && !tenantReadOnly.value && !showProductLimitPanel.value
+      ? apiClient.get("/api/people")
+      : Promise.resolve(null);
+    const [onlineProducts, shops, people] = await Promise.all([
+      apiClient.get(`/api/online-products?${onlineProductsQueryString()}`),
+      shopsRequest,
+      peopleRequest
+    ]);
+    if (!listRequestGate.isLatest(requestToken)) return;
+    state.onlineProducts = Array.isArray(onlineProducts?.rows) ? onlineProducts.rows : [];
+    state.total = Number(onlineProducts?.total || 0);
+    state.statusCounts = onlineProducts?.statusCounts || {};
+    state.selectedIds = [];
+    state.selectedRows = [];
     state.shops = Array.isArray(shops) ? shops : [];
-    if (!dictionaryLoaded) {
+    if (people) {
       state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
       dictionaryLoaded = true;
     }
-    if (showProductLimitPanel.value) void loadProductLimits();
   } catch (error) {
     if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "在线商品加载失败");
@@ -365,7 +332,7 @@ function handleSearch() {
 }
 
 function handleReset() {
-  state.filters.shopId = "all";
+  state.filters.shopId = showProductLimitPanel.value && state.shops[0]?.id ? String(state.shops[0].id) : "all";
   state.filters.status = defaultStatusFilter();
   state.filters.name = "";
   state.filters.offer = "";
@@ -376,15 +343,13 @@ function handleReset() {
 
 function handlePageChange(page) {
   state.filters.page = page;
-  if (showProductLimitPanel.value && batchStockSnapshotKey) applyBatchStockSnapshotPage();
-  else loadPageData();
+  loadPageData();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
-  if (showProductLimitPanel.value && batchStockSnapshotKey) applyBatchStockSnapshotPage();
-  else loadPageData();
+  loadPageData();
 }
 
 function setStatus(value) {
@@ -405,7 +370,8 @@ function selectedShopIdForStock() {
 }
 
 async function loadWarehousesForStock(shopId, force = false) {
-  const normalizedShopId = String(shopId || "");
+  const tenantKey = authStore.user?.tenant?.id || authStore.user?.tenant?.slug || "legacy";
+  const normalizedShopId = `${tenantKey}:${String(shopId || "")}`;
   if (!force && warehouseCacheByShop.has(normalizedShopId)) {
     state.warehouses = warehouseCacheByShop.get(normalizedShopId);
     stockForm.warehouse_id = state.warehouses[0]?.warehouse_id ? String(state.warehouses[0].warehouse_id) : "";
@@ -486,8 +452,7 @@ async function submitBatchStock() {
     });
     ElMessage.success(`已更新 ${result?.target_count || 0} 个商品库存为 ${stock}`);
     stockDialogVisible.value = false;
-    invalidateBatchStockSnapshot();
-    await loadPageData({ forceSnapshot: true });
+    await loadPageData();
   } catch (error) {
     ElMessage.error(error.message || "批量改库存失败");
   } finally {
@@ -511,11 +476,22 @@ async function ensureProductOptions(row = null) {
   }
 }
 
+async function ensurePeople() {
+  if (dictionaryLoaded || tenantReadOnly.value) return;
+  try {
+    const people = await apiClient.get("/api/people");
+    state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
+    dictionaryLoaded = true;
+  } catch (error) {
+    ElMessage.error(error.message || "人员列表加载失败");
+  }
+}
+
 async function openBindDialog(row) {
   bindForm.online_product_id = Number(row.id);
   bindForm.product_id = row.product_id ? String(row.product_id) : "";
   bindForm.person_id = "";
-  await ensureProductOptions(row);
+  await Promise.all([ensureProductOptions(row), ensurePeople()]);
   bindDialogVisible.value = true;
 }
 
@@ -540,8 +516,8 @@ const syncRouteQuery = createRouteQuerySync({
   buildQuery(mode) {
     const includeTextFilters = mode === "manual";
     return {
-      shopId: state.filters.shopId !== "all" ? state.filters.shopId : undefined,
-      status: state.filters.status !== "all" ? state.filters.status : undefined,
+      shopId: state.filters.shopId !== "all" || showProductLimitPanel.value ? state.filters.shopId : undefined,
+      status: state.filters.status !== "all" || showProductLimitPanel.value ? state.filters.status : undefined,
       name: includeTextFilters ? state.filters.name || undefined : undefined,
       offer: includeTextFilters ? state.filters.offer || undefined : undefined,
       page: state.filters.page > 1 ? String(state.filters.page) : undefined,
@@ -574,6 +550,7 @@ async function submitBind() {
 
 async function createProductFromOnline(row) {
   try {
+    await ensurePeople();
     await apiClient.post("/api/online-products/create-product", {
       online_product_id: row.id,
       person_id: state.people[0]?.id || null
@@ -625,6 +602,29 @@ async function archiveOnlineProduct(row) {
   }
 }
 
+async function zeroOnlineProductStock(row) {
+  const productName = row.name || row.ozon_sku || row.offer_id || row.id;
+  try {
+    await ElMessageBox.confirm(`确认将本企业店铺的在线商品「${productName}」库存清零吗？此操作会立即提交到 Ozon。`, "确认清零库存", {
+      type: "warning",
+      confirmButtonText: "确认清零",
+      cancelButtonText: "取消"
+    });
+    zeroStockLoadingId.value = Number(row.id);
+    await apiClient.post("/api/online-products/action", {
+      online_product_id: row.id,
+      action: "zero_stock"
+    });
+    ElMessage.success("已向 Ozon 提交库存清零");
+    await loadPageData();
+  } catch (error) {
+    if (error === "cancel" || error === "close" || error?.message === "cancel") return;
+    ElMessage.error(error.message || "在线商品库存清零失败");
+  } finally {
+    zeroStockLoadingId.value = 0;
+  }
+}
+
 async function syncOnlineProducts(mode = "pending_listing") {
   syncLoading.value = true;
   try {
@@ -657,8 +657,7 @@ async function syncOzonStocks() {
     } else {
       ElMessage.success(`库存同步完成，拉取 ${fetched} 条，更新 ${upserted} 条`);
     }
-    invalidateBatchStockSnapshot();
-    await loadPageData({ forceSnapshot: true });
+    await loadPageData();
   } catch (error) {
     ElMessage.error(error.message || "同步 Ozon 库存失败");
   } finally {
@@ -697,8 +696,7 @@ async function pollOnlineProductSyncStatus() {
     } else {
       ElMessage.success(`${taskName}完成，更新 ${Number(syncResult.upserted || 0)} 条${detail}`);
     }
-    invalidateBatchStockSnapshot();
-    await loadPageData({ forceSnapshot: true });
+    await loadPageData();
   } catch (error) {
     stopOnlineProductSyncPolling();
     syncLoading.value = false;
@@ -757,6 +755,7 @@ onDeactivated(stopOnlineProductSyncPolling);
 
 <template>
   <div class="page-stack online-products-page erp-paged-page">
+    <el-alert v-if="tenantReadOnly" title="企业安全模式" description="仅展示本企业店铺商品；负责人和管理员可进行批量库存更新或清零单个商品。归档、商品绑定、上架编辑、建品及同步功能待完成租户化后开放。" type="info" :closable="false" show-icon />
     <el-card shadow="never" class="page-card online-products-card erp-paged-card">
       <div class="online-toolbar online-toolbar-sticky">
         <div class="online-toolbar-main">
@@ -778,19 +777,19 @@ onDeactivated(stopOnlineProductSyncPolling);
               <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
             </el-form-item>
             <el-form-item>
-              <el-button class="erp-btn erp-btn-primary" type="primary" :loading="syncLoading" @click="syncOnlineProducts('pending_listing')">
+              <el-button v-if="!tenantReadOnly" class="erp-btn erp-btn-primary" type="primary" :loading="syncLoading" @click="syncOnlineProducts('pending_listing')">
                 拉取待上架商品
               </el-button>
-              <el-button class="erp-btn erp-btn-secondary" :loading="stockSyncLoading" @click="syncOzonStocks">
+              <el-button v-if="!tenantReadOnly" class="erp-btn erp-btn-secondary" :loading="stockSyncLoading" @click="syncOzonStocks">
                 刷新库存数量
               </el-button>
-              <el-button class="erp-btn erp-btn-secondary" :disabled="!state.selectedIds.length" @click="openBatchStockDialog">
+              <el-button v-if="tenantCanUpdateStocks" class="erp-btn erp-btn-secondary" :disabled="!state.selectedIds.length" @click="openBatchStockDialog">
                 批量改库存
               </el-button>
             </el-form-item>
           </el-form>
 
-          <el-popover v-if="showProductLimitPanel" placement="bottom-end" trigger="click" width="760">
+          <el-popover v-if="showProductLimitPanel" placement="bottom-end" trigger="click" width="760" @show="loadProductLimits()">
             <template #reference>
               <el-button class="shop-limit-trigger" :loading="productLimitLoading">
                 <span>链接空间</span>
@@ -865,7 +864,7 @@ onDeactivated(stopOnlineProductSyncPolling);
 
       <div class="online-table-wrap erp-table-scroll erp-responsive-table" role="region" aria-label="在线商品表格" tabindex="0">
         <el-table v-loading="loading" :data="pagedRows" stripe border class="erp-data-table" @selection-change="selectionChanged">
-          <el-table-column type="selection" width="48" fixed="left" />
+          <el-table-column v-if="tenantCanUpdateStocks" type="selection" width="48" fixed="left" />
           <el-table-column label="店铺 / 状态" min-width="160" fixed="left">
             <template #default="{ row }">
               <div class="cell-stack">
@@ -938,15 +937,18 @@ onDeactivated(stopOnlineProductSyncPolling);
           <el-table-column label="最后同步时间" min-width="160">
             <template #default="{ row }">{{ dateText(row.synced_at || row.updated_at) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="470" fixed="right">
+          <el-table-column v-if="!tenantReadOnly || (tenantCanUpdateStocks && tenantReadOnly)" label="操作" width="470" fixed="right">
             <template #default="{ row }">
               <div class="erp-inline-actions">
-                <el-button class="erp-btn-link" link type="primary" :loading="openingEditId === Number(row.id)" @click="openOnlineProductEditor(row)">编辑上架</el-button>
-                <el-button class="erp-btn-link" link type="primary" @click="openOnlineProductAiWorkbench(row, 'optimization')">AI优化</el-button>
-                <el-button class="erp-btn-link" link type="primary" @click="openOnlineProductAiWorkbench(row, 'variant')">AI裂变</el-button>
-                <el-button class="erp-btn-link" link type="primary" @click="openBindDialog(row)">去绑定</el-button>
-                <el-button class="erp-btn-link" link @click="createProductFromOnline(row)">创建库存</el-button>
-                <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="archiveOnlineProduct(row)">归档商品</el-button>
+                <template v-if="!tenantReadOnly">
+                  <el-button class="erp-btn-link" link type="primary" :loading="openingEditId === Number(row.id)" @click="openOnlineProductEditor(row)">编辑上架</el-button>
+                  <el-button class="erp-btn-link" link type="primary" @click="openOnlineProductAiWorkbench(row, 'optimization')">AI优化</el-button>
+                  <el-button class="erp-btn-link" link type="primary" @click="openOnlineProductAiWorkbench(row, 'variant')">AI裂变</el-button>
+                  <el-button class="erp-btn-link" link type="primary" @click="openBindDialog(row)">去绑定</el-button>
+                  <el-button class="erp-btn-link" link @click="createProductFromOnline(row)">创建库存</el-button>
+                  <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="archiveOnlineProduct(row)">归档商品</el-button>
+                </template>
+                <el-button v-else-if="tenantCanUpdateStocks" class="erp-btn-link erp-btn-link-danger" link type="danger" :loading="zeroStockLoadingId === Number(row.id)" @click="zeroOnlineProductStock(row)">清零库存</el-button>
               </div>
             </template>
           </el-table-column>
@@ -1167,4 +1169,3 @@ onDeactivated(stopOnlineProductSyncPolling);
   .stock-form-grid { grid-template-columns: 1fr; }
 }
 </style>
-

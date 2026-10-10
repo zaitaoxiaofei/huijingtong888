@@ -36,6 +36,7 @@ export const navigationMenus = [
       { key: "listing-records", label: "草稿箱", route: "/listing-records" },
       { key: "listing-automation", label: "商品上架", route: "/listing-automation" },
       { key: "listing-publish-records", label: "上架记录", route: "/listing-publish-records" },
+      { key: "online-products", label: "在线商品", route: "/online-products" },
       { key: "batch-stock-update", label: "批量改库存", route: "/batch-stock-update" },
       { key: "ozon-actions", label: "Ozon 活动", route: "/ozon-actions" }
     ]
@@ -111,9 +112,18 @@ export const navigationMenus = [
     label: "工具",
     icon: Tools,
     children: [
+      { key: "tools-profit-calculator", label: "利润计算器", route: "/tools/profit-calculator" },
+      { key: "tools-pricing", label: "定价工具", route: "/tools/pricing" },
+      { key: "tools-17track", label: "17TRACK 全球物流查询", route: "https://www.17track.net/zh-cn" },
       { key: "tools-image-cropper", label: "套图拆分", route: "/tools/ecommerce-image-splitter" },
       { key: "tools-product-video-generator", label: "商品视频", route: "/tools/product-video-generator" }
     ]
+  },
+  {
+    key: "tenant-shops",
+    label: "企业店铺",
+    route: "/tenant-shops",
+    icon: Setting
   },
   {
     key: "tenant-management",

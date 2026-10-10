@@ -82,6 +82,17 @@ function isCacheableGet(url, options = {}) {
   return cachedGetPrefixes.some((prefix) => path === prefix);
 }
 
+function currentApiCacheScope() {
+  try {
+    const user = JSON.parse(window.localStorage?.getItem("baodanAuthUser") || "null");
+    const tenant = user?.tenant || {};
+    const person = user?.personId || user?.person_id || user?.id || user?.username || "unknown";
+    return `${tenant.id || ""}:${tenant.slug || "legacy"}:${person}`;
+  } catch {
+    return "unknown";
+  }
+}
+
 function readPersistedGetCache(key) {
   try {
     const cached = JSON.parse(window.sessionStorage?.getItem(`${PERSISTED_GET_CACHE_PREFIX}${key}`) || "null");
@@ -298,7 +309,9 @@ export async function streamApiResponse(url, body, options = {}) {
 export const apiClient = {
   get(url, options = {}) {
     if (!isCacheableGet(url, options)) return routeScopedGet(url, options);
-    const key = String(url);
+    const normalizedUrl = String(url);
+    const cacheDelimiter = normalizedUrl.includes("?") ? "&" : "?";
+    const key = `${normalizedUrl}${cacheDelimiter}__erp_scope=${encodeURIComponent(currentApiCacheScope())}`;
     const cached = getCache.get(key);
     if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.data);
     const persisted = readPersistedGetCache(key);

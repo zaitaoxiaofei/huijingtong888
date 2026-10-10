@@ -16,8 +16,47 @@ export function authorizeApiRequest(req, parts = []) {
   const path = parts.slice(1).join("/");
   const require = (...permissions) => permissions.some(permission => hasPermission(session, permission)) ? { allowed: true } : deny();
 
+  if (method === "GET" && [
+    "tools/pricing/reference-rate",
+    "tools/pricing/rfbs-marketplace",
+    "tools/pricing/logistics-rules"
+  ].includes(path)) return { allowed: true };
+
   if (["auth", "user-preferences", "system-notifications", "ready", "image-proxy"].includes(resource)) return { allowed: true };
-  if (resource === "tenants") return deny("仅平台管理员可以管理企业和企业成员");
+  if (resource === "tenants") {
+    if (parts[2] === "plugin-token" && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
+    if (parts[2] === "members" && method === "GET" && (
+      (session.tenant?.id && session.tenant?.slug !== "default")
+      || (session.tenant?.slug === "default" && ["owner", "admin"].includes(session.tenant?.role))
+    )) return { allowed: true };
+    return deny("仅平台管理员可以管理企业和企业成员");
+  }
+  if (resource === "shops" && ["owner", "admin"].includes(session.tenant?.role)) {
+    const collection = parts.length === 2 && ["GET", "POST"].includes(method);
+    const record = parts.length === 3 && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(method);
+    if (collection || record) return { allowed: true };
+  }
+  if (resource === "logistics-rules" && ["owner", "admin"].includes(session.tenant?.role)) {
+    const collection = parts.length === 2 && ["GET", "POST"].includes(method);
+    const record = parts.length === 3 && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(method);
+    if (collection || record) return { allowed: true };
+  }
+  if (resource === "finance-center" && session.tenant?.slug !== "default" && ["owner", "admin"].includes(session.tenant?.role)) {
+    const route = parts.slice(2);
+    const companyRead = route.length === 1 && route[0] === "companies" && read;
+    const reportRead = route.length === 1 && ["report", "expenses", "vouchers", "platform-items"].includes(route[0]) && read;
+    const exportRead = route.length === 1 && route[0] === "export" && read;
+    const collectionWrite = route.length === 1 && ["companies", "shop-assignments", "expenses", "vouchers", "close"].includes(route[0]) && method === "POST";
+    const expenseDelete = route.length === 2 && route[0] === "expenses" && /^\d+$/.test(String(route[1] || "")) && method === "DELETE";
+    if (companyRead || reportRead || exportRead || collectionWrite || expenseDelete) return { allowed: true };
+  }
+  if (resource === "shops" && session.tenant?.slug !== "default") return deny("仅企业负责人或企业管理员可以管理店铺与店铺密钥");
+  if (resource === "people" && session.tenant?.slug !== "default") return deny("企业人员管理尚未完成隔离，请使用企业与授权中的成员管理");
+  if (resource === "online-products" && parts.length === 2 && read && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
+  if (resource === "online-products" && parts.length === 3 && ["limits", "warehouses"].includes(parts[2]) && read && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
+  if (resource === "online-products" && parts.length === 3 && parts[2] === "batch-stock" && method === "POST" && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
+  if (resource === "online-products" && parts.length === 3 && parts[2] === "action" && method === "POST" && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
+  if (resource === "online-products" && session.tenant?.slug !== "default") return deny("当前账号无权操作企业在线商品；仅企业负责人或管理员可调整库存，归档、绑定、上架编辑、建品和同步功能仍未开放");
   if (read && ["dashboard", "people", "shops", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules", "order-cancellation-rules", "order-quality-rules"].includes(resource)) return { allowed: true };
   if (read && ["system/info", "system/update-status", "db/seller-analytics/plugin-status"].includes(path)) return { allowed: true };
   if (read && path === "settings/packaging-fee-rule") return require("inventory.read");
@@ -38,6 +77,7 @@ export function authorizeApiRequest(req, parts = []) {
   if (resource === "print" || resource === "outbound-records") return require("packing");
   if (["procurement", "inbound-records"].includes(resource)) return require("procurement");
   if (resource === "suppliers") return read ? require("inventory.read") : require("procurement");
+  if (resource === "inventory" && parts[2] === "manual-outbound-records") return read ? require("inventory.read") : require("packing", "inventory.write");
   if (resource === "inventory" && parts[2] === "movements") return require("packing", "inventory.write");
   if (["products", "mappings", "sku-inventory-recipes", "inventory", "stock-alerts"].includes(resource)) return require(read ? "inventory.read" : "inventory.write");
   if (resource.startsWith("fbp-")) return read ? require("inventory.read") : require("procurement");

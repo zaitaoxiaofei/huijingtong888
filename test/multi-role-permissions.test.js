@@ -67,6 +67,15 @@ test("technical can manage system tools but cannot assign roles, access finance 
 
 test("menus and direct route access follow the same combined permissions", () => {
   assert.equal(canAccessPage(["packing"], "/orders"), true);
+  for (const path of ["/tools/pricing", "/tools/profit-calculator"]) {
+    assert.equal(canAccessPage(["packing"], path), true);
+    assert.equal(canAccessPage(["technical"], path), true);
+  }
+  for (const path of ["/api/tools/pricing/reference-rate", "/api/tools/pricing/rfbs-marketplace", "/api/tools/pricing/logistics-rules"]) {
+    assert.equal(allowed(["packing"], "GET", path), true);
+    assert.equal(allowed(["technical"], "GET", path), true);
+    assert.equal(allowed(["packing"], "POST", path), false);
+  }
   assert.equal(canAccessPage(["packing"], "/procurement/workspace"), false);
   assert.equal(canAccessPage(["packing", "procurement"], "/procurement/workspace"), true);
   assert.equal(canAccessPage(["technical"], "/settings/system-monitoring"), true);
@@ -110,7 +119,7 @@ test("packing may register manual outbound but cannot spoof an arbitrary invento
   const { createOperationsRoutes } = await import("../src/server/routes/operations.js");
   let payload = {source_type:"manual_outbound", product_id:1, quantity:2}; let writes = 0;
   const routes = createOperationsRoutes({readJson:async()=>payload,services:{createInventoryMovement:async()=>{writes++;return {id:1};}}});
-  const req = {_session:{roles:["packing"],personId:7}};
+  const req = {_session:{roles:["packing"],personId:7,tenant:{id:1,slug:"default"}}};
   assert.equal((await routes["POST /api/inventory/movements"](req)).id,1);
   payload={movement_type:"ADJUSTMENT",quantity_delta:999};
   await assert.rejects(routes["POST /api/inventory/movements"](req),/仅可登记手动出库/);
@@ -123,7 +132,7 @@ test("person create and update SQL preserve the selected role combination", asyn
   const roleContext = vm.createContext({getRoles,primaryRole,validateRoles}); vm.runInContext(roleSource,roleContext);
   const writes=[];
   const context=vm.createContext({ensureMysqlCutoverEnabled(){},ensurePeopleTimestampSchemaMysql:async()=>{},ensurePeopleRolesSchemaMysql:async()=>{},personRoleFields:roleContext.personRoleFields,
-    mysqlExecute:async(sql,params)=>{writes.push({sql,params});return {insertId:7};},mysqlQueryOne:async()=>({id:7,role:"operator",updated_at:"v1"}),assertFreshRecord(){},invalidateMasterDataCache(){},destroySessionsByPersonIdMysql:async()=>{}});
+    mysqlExecute:async(sql,params)=>{writes.push({sql,params});return {insertId:7};},mysqlQueryOne:async()=>({id:7,role:"operator",updated_at:"v1"}),assertFreshRecord(){},invalidateMasterDataCache(){},invalidateShopCacheMysql(){},destroySessionsByPersonIdMysql:async()=>{}});
   const start=cutover.indexOf("export async function createPersonMysql"),end=cutover.indexOf("export async function deletePersonMysql",start);
   vm.runInContext(cutover.slice(start,end).replaceAll("export ",""),context);
   await context.createPersonMysql({name:"岗位人员",roles:["packing","procurement"],password:"Valid-Password"},()=>"hashed",()=>{});

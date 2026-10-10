@@ -1,12 +1,13 @@
 const positive = (value) => Math.max(0, Number(value) || 0);
 const rounded = (value) => Math.round(value * 10000) / 10000;
 
-export function planPartialReceipt(record, quantity, expectedQuantity) {
+export function planPartialReceipt(record, quantity, expectedQuantity, allowOverReceipt = false) {
   if (record.status !== 'pending_arrival') throw new Error('该批次已入库或已取消，请刷新后核对');
   const total = Number(record.quantity);
   if (Number(expectedQuantity) !== total) throw new Error('批次剩余数量已变化，请刷新后重新确认');
   const received = Number(quantity);
-  if (!Number.isInteger(received) || received <= 0 || received > total) throw new Error(`本次实收数量必须为 1 至 ${total} 的整数`);
+  if (!Number.isInteger(received) || received <= 0 || (received > total && !allowOverReceipt)) throw new Error(`本次实收数量必须为 1 至 ${total} 的整数`);
+  if (received > total) return { received, remaining: 0, amount: Number(record.amount || 0), shippingAmount: Number(record.shipping_amount || 0), remainingAmount: 0, remainingShipping: 0 };
   const amount = rounded(Number(record.amount || 0) * received / total);
   const shippingAmount = rounded(Number(record.shipping_amount || 0) * received / total);
   return { received, remaining: total - received, amount, shippingAmount,

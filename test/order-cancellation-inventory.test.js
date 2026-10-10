@@ -116,6 +116,7 @@ test('pre-shipping cancellation restores only the deducted units and repeat sync
       : [{ product_id: 94, quantity_delta: -2, stock_location: 'LOCAL', unit_cost: 55 }],
     mysqlQueryOne: async () => existingReturn,
     mysqlExecute: async () => {},
+    inventoryMovementTenantColumnExistsMysql: async () => false,
     resolveOrderStockLocationMysql: () => ({ stockLocation: 'LOCAL', stockLocationSource: 'order' }),
     normalizeStockLocationMysql: value => value,
     mysqlPoolConnectionAdapter: {},

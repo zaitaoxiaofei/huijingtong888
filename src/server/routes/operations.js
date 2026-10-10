@@ -1,16 +1,26 @@
 import { hasPermission } from "../../shared/permissions.js";
+import { tenantIdFromRequest } from "./sellerAnalytics.js";
+import { currentPricingReferenceRate } from "../../services/pricing-reference-rate.js";
+import { latestRfbsTariff, latestRfbsMarketplace, searchRfbsCategories, rfbsCategory } from "../../services/ozon-rfbs-tariff.js";
+import { sharedPricingLogisticsRules } from "../../services/pricing-logistics-rules.js";
 export function createOperationsRoutes({ services, readJson }) {
   return {
+    "GET /api/tools/pricing/reference-rate": () => currentPricingReferenceRate(),
+    "GET /api/tools/pricing/rfbs-categories": async (req, url) => searchRfbsCategories(await latestRfbsTariff(), url.searchParams.get("keyword"), url.searchParams.get("limit")),
+    "GET /api/tools/pricing/rfbs-category": async (req, url) => rfbsCategory(await latestRfbsTariff(), url.searchParams.get("id")),
+    "GET /api/tools/pricing/rfbs-marketplace": () => latestRfbsMarketplace(),
+    "GET /api/tools/pricing/logistics-rules": () => sharedPricingLogisticsRules(),
     "GET /api/settings/packaging-fee-rule": () => services.packagingFeeRule(),
     "GET /api/settings/packaging-fee-rule/changes": (req, url) => services.packagingFeeRuleChanges(url?.searchParams?.get("limit") || 20),
-    "GET /api/logistics-rules": () => services.logisticsRules(),
+    "GET /api/logistics-rules": (req) => services.logisticsRules(tenantIdFromRequest(req)),
     "GET /api/order-cancellation-rules": () => services.orderCancellationRules(),
     "GET /api/inbound-records": (req, url) => services.inboundRecords(Object.fromEntries(url.searchParams.entries())),
     "GET /api/outbound-records": (req, url) => services.outboundRecords(Object.fromEntries(url.searchParams.entries())),
     "GET /api/fbp-transfer-records": (req, url) => services.fbpTransferRecords(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/inventory/manual-outbound-records": (req, url) => services.inventoryManualOutboundRecords(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/procurement/summary": () => services.procurementSummary(),
     "GET /api/procurement/daily-report": (req, url) => services.procurementDailyReport(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/procurement/requests": (req, url) => services.procurementRequests(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/procurement/requests": (req, url) => services.procurementRequests(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/procurement/ledger": (req, url) => services.procurementLedger(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/stock-cost-tasks": (req, url) => services.procurementStockCostTasks(Object.fromEntries(url.searchParams.entries())),
     "POST /api/procurement/ledger/preview": async (req) => services.previewProcurementLedger(await readJson(req)),
@@ -37,11 +47,11 @@ export function createOperationsRoutes({ services, readJson }) {
     "GET /api/customer-message-customer-orders": (req, url) => services.customerMessageCustomerOrders(Object.fromEntries(url.searchParams.entries())),
     "GET /api/customer-message-settings": () => services.customerMessageSettings(),
     "GET /api/user-preferences": (req, url) => services.userPreference(Object.fromEntries(url.searchParams.entries()), req._session?.personId),
-    "GET /api/shops": () => services.shops(),
+    "GET /api/shops": (req) => services.shops(tenantIdFromRequest(req)),
     "GET /api/people": () => services.people(),
     "POST /api/people": async (req) => services.createPerson(await readJson(req)) || { ok: true },
-    "POST /api/shops": async (req) => services.createShop(await readJson(req)) || { ok: true },
-    "POST /api/procurement/requests": async (req) => services.createProcurementRequest(await readJson(req), req._session?.personId) || { ok: true },
+    "POST /api/shops": async (req) => services.createShop(await readJson(req), tenantIdFromRequest(req)) || { ok: true },
+    "POST /api/procurement/requests": async (req) => services.createProcurementRequest(await readJson(req), req._session?.personId, tenantIdFromRequest(req)) || { ok: true },
     "POST /api/procurement/warehouse-requests": async (req) => services.createWarehouseProcurementRequests(await readJson(req), req._session?.personId),
     "POST /api/procurement/purchases": async (req) => services.recordProcurementPurchase(await readJson(req), req._session?.personId),
     "POST /api/procurement/pdd-logistics/sync": async (req) => services.syncPddProcurementLogistics(await readJson(req)),
@@ -69,7 +79,7 @@ export function createOperationsRoutes({ services, readJson }) {
         error.status = 403;
         throw error;
       }
-      return services.createInventoryMovement(body, req._session?.personId) || { ok: true };
+      return services.createInventoryMovement(body, req._session?.personId, tenantIdFromRequest(req)) || { ok: true };
     },
     "GET /api/inventory/stock-debts": (req, url) => services.inventoryStockDebts(Object.fromEntries(url.searchParams.entries())),
     "POST /api/inventory/stock-debts/adjust": async (req) => services.adjustInventoryStockDebt(await readJson(req), req._session?.personId),
@@ -86,7 +96,7 @@ export function createOperationsRoutes({ services, readJson }) {
     "POST /api/customer-message-settings/template": async (req) => services.updateCustomerMessageTemplate(await readJson(req)),
     "POST /api/customer-message-settings/template/translate-zh": async (req) => services.translateCustomerMessageTemplateZh(await readJson(req)),
     "POST /api/user-preferences": async (req) => services.updateUserPreference(await readJson(req), req._session?.personId),
-    "POST /api/logistics-rules": async (req) => services.createLogisticsRule(await readJson(req)),
+    "POST /api/logistics-rules": async (req) => services.createLogisticsRule(await readJson(req), tenantIdFromRequest(req)),
     "POST /api/order-cancellation-rules": async (req) => services.createOrderCancellationRule(await readJson(req)),
     "POST /api/order-cancellation-rules/test": async (req) => services.testOrderCancellationRule(await readJson(req)),
     "POST /api/settings/packaging-fee-rule": async (req) => services.updatePackagingFeeRule(await readJson(req), req._session?.personId),
@@ -95,6 +105,14 @@ export function createOperationsRoutes({ services, readJson }) {
 }
 
 export async function handleOperationsRestRoute({ req, res, url, parts, services, readJson, json, notFound }) {
+  if (req.method === "PUT" && parts[0] === "api" && parts[1] === "inventory" && parts[2] === "manual-outbound-records" && /^\d+$/.test(parts[3] || "")) {
+    return json(res, await services.updateInventoryMovement(Number(parts[3]), await readJson(req), req._session?.personId, tenantIdFromRequest(req)));
+  }
+
+  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "inventory" && parts[2] === "manual-outbound-records" && /^\d+$/.test(parts[3] || "")) {
+    return json(res, await services.deleteInventoryMovement(Number(parts[3]), req._session?.personId, tenantIdFromRequest(req)));
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "reconciliation" && parts[3] && parts[4] === "confirm") {
     return json(res, await services.confirmProcurementPaymentMatch(Number(parts[3]), await readJson(req), req._session?.personId));
   }
@@ -149,17 +167,17 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "shops" && parts[2]) {
-    await services.updateShop(Number(parts[2]), await readJson(req));
+    await services.updateShop(Number(parts[2]), await readJson(req), tenantIdFromRequest(req));
     return json(res, { ok: true });
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "shops" && parts[2]) {
-    await services.deleteShop(Number(parts[2]));
+    await services.deleteShop(Number(parts[2]), tenantIdFromRequest(req));
     return json(res, { ok: true });
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "requests" && parts[3]) {
-    await services.updateProcurementRequest(Number(parts[3]), await readJson(req));
+    await services.updateProcurementRequest(Number(parts[3]), await readJson(req), tenantIdFromRequest(req));
     return json(res, { ok: true });
   }
 
@@ -172,7 +190,7 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "requests" && parts[3]) {
-    return json(res, await services.deleteProcurementRequest(Number(parts[3])));
+    return json(res, await services.deleteProcurementRequest(Number(parts[3]), tenantIdFromRequest(req)));
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "purchase-orders" && parts[3]) {
@@ -215,28 +233,31 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "suppliers" && !parts[2]) {
-    return json(res, await services.suppliers(Object.fromEntries(url.searchParams.entries())));
+    const query = Object.fromEntries(url.searchParams.entries());
+    delete query.tenant_id;
+    delete query.tenantId;
+    return json(res, await services.suppliers(query, tenantIdFromRequest(req)));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "suppliers" && !parts[2]) {
-    return json(res, await services.createSupplier(await readJson(req)));
+    return json(res, await services.createSupplier(await readJson(req), tenantIdFromRequest(req)));
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "suppliers" && parts[2]) {
-    await services.updateSupplier(Number(parts[2]), await readJson(req));
+    await services.updateSupplier(Number(parts[2]), await readJson(req), tenantIdFromRequest(req));
     return json(res, { ok: true });
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "suppliers" && parts[2]) {
-    return json(res, await services.deleteSupplier(Number(parts[2])));
+    return json(res, await services.deleteSupplier(Number(parts[2]), tenantIdFromRequest(req)));
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "logistics-rules" && parts[2]) {
-    return json(res, await services.updateLogisticsRule(Number(parts[2]), await readJson(req)));
+    return json(res, await services.updateLogisticsRule(Number(parts[2]), await readJson(req), tenantIdFromRequest(req)));
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "logistics-rules" && parts[2]) {
-    return json(res, await services.deleteLogisticsRule(Number(parts[2])));
+    return json(res, await services.deleteLogisticsRule(Number(parts[2]), tenantIdFromRequest(req)));
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "stock-warehouse-rules" && parts[2]) {

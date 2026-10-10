@@ -15,6 +15,7 @@ const memoryTuningSource = fs.readFileSync(new URL("../deploy/linux/apply-ecs-me
 const listingPublishCleanupSource = fs.readFileSync(new URL("../src/services/listing-publish-history-cleanup.js", import.meta.url), "utf8");
 const mysqlPoolSource = fs.readFileSync(new URL("../src/mysql-pool.js", import.meta.url), "utf8");
 const orderLabelCleanupSource = fs.readFileSync(new URL("../src/services/order-label-cache-cleanup.js", import.meta.url), "utf8");
+const initMysqlSchemaSource = fs.readFileSync(new URL("../scripts/init-mysql-schema.mjs", import.meta.url), "utf8");
 
 test("listing persistence blocks embedded image and video base64 after OSS materialization", () => {
   assert.match(listingSource, /function assertNoEmbeddedMediaForPersistence/);
@@ -195,16 +196,24 @@ test("order history exposes an exact business fingerprint before any dedupe is e
   assert.match(mysqlCutoverSource, /function orderStatusHistoryRowFingerprintMysql/);
   assert.match(mysqlCutoverSource, /payload\.delivery_date_begin \|\| null/);
   assert.match(mysqlCutoverSource, /payload\.warehouse_name \|\| ""/);
-  assert.match(mysqlCutoverSource, /await recordOrderStatusHistoryMysql\(shop, posting, orderId, lifecycle, "sync", exists\)/);
+  assert.match(mysqlCutoverSource, /await recordOrderStatusHistoryMysql\(shop, posting, orderId, lifecycle, historySource, exists\)/);
   assert.match(configSource, /ORDER_HISTORY_DEDUPE_MODE/);
   assert.match(configSource, /\["off", "shadow", "enabled"\], "off"/);
   assert.match(mysqlCutoverSource, /dedupeMode !== "off"/);
   assert.match(mysqlCutoverSource, /dedupeMode === "enabled"/);
   assert.match(mysqlCutoverSource, /comparison failed; preserving history write/);
+  assert.match(mysqlCutoverSource, /CREATE TABLE IF NOT EXISTS order_history_dedupe_daily_metrics/);
+  assert.match(mysqlCutoverSource, /recordOrderHistoryDedupeMetricMysql/);
+  assert.match(mysqlCutoverSource, /DATE\(UTC_TIMESTAMP\(\) \+ INTERVAL 8 HOUR\)/);
+  assert.match(mysqlCutoverSource, /daily: dedupeDaily/);
+  assert.match(mysqlCutoverSource, /history_source: "incremental"/);
+  assert.match(serverSource, /history_source: "cancelled_reconciliation"/);
+  assert.match(serverSource, /history_source: "posting_detail_reconciliation"/);
+  assert.match(initMysqlSchemaSource, /CREATE TABLE IF NOT EXISTS order_history_dedupe_daily_metrics/);
   assert.match(mysqlCutoverSource, /FORCE INDEX \(idx_order_status_history_order_time\)/);
   assert.match(mysqlCutoverSource, /function orderHistoryStateMayBeUnchangedMysql/);
   assert.match(mysqlCutoverSource, /orderHistoryStateMayBeUnchangedMysql\(previousOrder, payload\)/);
-  assert.match(mysqlCutoverSource, /recordOrderStatusHistoryMysql\(shop, posting, orderId, lifecycle, "sync", exists\)/);
+  assert.match(mysqlCutoverSource, /recordOrderStatusHistoryMysql\(shop, posting, orderId, lifecycle, historySource, exists\)/);
   assert.match(mysqlCutoverSource, /dedupe: \{[\s\S]{0,160}orderHistoryDedupeMetricsMysql/);
 });
 

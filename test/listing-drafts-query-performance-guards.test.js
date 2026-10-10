@@ -11,9 +11,9 @@ test("draft inbox starts shop options and records in parallel", () => {
 });
 
 test("listing drafts use index-friendly updated_at range filters", () => {
-  assert.match(listingDraftsSource, /where\.push\("d\.updated_at >= \?"\)/);
+  assert.match(listingDraftsSource, /where\.push\(`\$\{dateFilterColumn\} >= \?`\)/);
   assert.match(listingDraftsSource, /params\.push\(`\$\{startDate\} 00:00:00`\)/);
-  assert.match(listingDraftsSource, /where\.push\("d\.updated_at < DATE_ADD\(\?, INTERVAL 1 DAY\)"\)/);
+  assert.match(listingDraftsSource, /where\.push\(`\$\{dateFilterColumn\} < DATE_ADD\(\?, INTERVAL 1 DAY\)`\)/);
   assert.doesNotMatch(listingDraftsSource, /DATE\(d\.updated_at\) >= \?/);
   assert.doesNotMatch(listingDraftsSource, /DATE\(d\.updated_at\) <= \?/);
 });
@@ -27,12 +27,13 @@ test("draft inbox can explicitly sort by creation time without changing other ca
 });
 
 test("listing drafts avoid unnecessary joins for paged lightweight queries", () => {
-  assert.match(listingDraftsSource, /const fromSqlJoins = \[\s*"LEFT JOIN listing_category_templates t ON t\.id = d\.template_id"\s*\]/);
-  assert.match(listingDraftsSource, /if \(!paged \|\| !lightweight\) \{\s*fromSqlJoins\.push\("LEFT JOIN people p ON p\.id = d\.created_by_person_id"\);/s);
+  assert.match(listingDraftsSource, /const fromSqlJoins = \[\s*"LEFT JOIN listing_category_templates t ON t\.id = d\.template_id/);
+  assert.match(listingDraftsSource, /if \(!paged \|\| !lightweight\) \{\s*fromSqlJoins\.push\(`LEFT JOIN tenant_members creator_members/);
+  assert.match(listingDraftsSource, /fromSqlJoins\.push\("LEFT JOIN people p ON p\.id = d\.created_by_person_id AND creator_members\.person_id = p\.id"\)/);
   assert.doesNotMatch(listingDraftsSource, /GROUP BY draft_id/);
   assert.match(listingDraftsSource, /if \(projectOnly && \(!status \|\| status === "all"\)\)/);
-  assert.match(listingDraftsSource, /NOT EXISTS \(SELECT 1 FROM listing_shop_copies c_project_any WHERE c_project_any\.draft_id = d\.id\)/);
-  assert.match(listingDraftsSource, /EXISTS \(SELECT 1 FROM listing_shop_copies c_project_visible WHERE c_project_visible\.draft_id = d\.id AND c_project_visible\.status IN \('prepared', 'blocked'\)\)/);
+  assert.match(listingDraftsSource, /NOT EXISTS \(SELECT 1 FROM listing_shop_copies c_project_any WHERE c_project_any\.draft_id = d\.id AND \$\{relatedTenantScope\("c_project_any"\)\}/);
+  assert.match(listingDraftsSource, /EXISTS \(SELECT 1 FROM listing_shop_copies c_project_visible WHERE c_project_visible\.draft_id = d\.id AND \$\{relatedTenantScope\("c_project_visible"\)\} AND c_project_visible\.status IN \('prepared', 'blocked'\)\)/);
 });
 
 test("listing drafts keep status predicates index friendly", () => {

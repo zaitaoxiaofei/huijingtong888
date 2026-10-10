@@ -43,7 +43,7 @@
   const dataAggregator = window.OzonErpDataAggregator || {};
   const ERP_BASE_URL_STORAGE_KEY = erpConfig.ERP_BASE_URL_STORAGE_KEY || 'ozon-erp-base-url';
   const LOCAL_PLUGIN_TOKEN_STORAGE_KEY = erpConfig.LOCAL_PLUGIN_TOKEN_STORAGE_KEY || 'ozon-erp-local-plugin-token';
-  const DEFAULT_LOCAL_PLUGIN_TOKEN = erpConfig.DEFAULT_LOCAL_PLUGIN_TOKEN || 'ozon-erp-collector-hjt888-default';
+  const DEFAULT_LOCAL_PLUGIN_TOKEN = erpConfig.DEFAULT_LOCAL_PLUGIN_TOKEN || '';
   const DEFAULT_ERP_BASE_URL = erpConfig.DEFAULT_ERP_BASE_URL || 'https://erp.hjt888.xyz';
   const FIELD_VISIBILITY_STORAGE_KEY = 'ozon-erp-detail-visible-fields';
   const WATCHED_SKUS_STORAGE_KEY = 'ozon-erp-local-watched-skus';

@@ -22,6 +22,7 @@ if (includeEnv) filesToCopy.unshift(".env");
 
 const directoriesToCopy = [
   "public",
+  "data",
   "ozon-erp-collector-plugin",
   "pdd-procurement-logistics-plugin",
   "pivot-table-master",
@@ -52,6 +53,7 @@ const managedDeployPaths = [
   "uploads",
   "backups",
   "logs",
+  "data",
   "src",
   "scripts",
   "deploy",

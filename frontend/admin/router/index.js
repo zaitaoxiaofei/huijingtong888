@@ -60,9 +60,12 @@ const AiPromptLibraryView = () => import("../views/settings/AiPromptLibraryView.
 const ScheduledJobsView = () => import("../views/settings/ScheduledJobsView.vue");
 const SystemMonitoringView = () => import("../views/settings/SystemMonitoringView.vue");
 const TenantSubscriptionView = () => import("../views/settings/TenantSubscriptionView.vue");
+const TenantShopsView = () => import("../views/settings/TenantShopsView.vue");
 const ImageCropperView = () => import("../views/tools/ImageCropper.vue");
 const EcommerceImageSplitterView = () => import("../views/tools/EcommerceImageSplitterV3.vue");
 const ProductVideoGeneratorView = () => import("../views/tools/ProductVideoGenerator.vue");
+const PricingToolView = () => import("../views/tools/PricingToolView.vue");
+const ProfitCalculatorView = () => import("../views/tools/ProfitCalculatorView.vue");
 const MobileHomeView = () => import("../views/mobile/MobileHomeView.vue");
 const MobileOrdersView = () => import("../views/mobile/MobileOrdersView.vue");
 const MobileOrderDetailView = () => import("../views/mobile/MobileOrderDetailView.vue");
@@ -200,9 +203,12 @@ export const router = createRouter({
         { path: "settings/ai", name: "settings-ai", component: AiProviderSettingsView, meta: { title: "AI 设置", breadcrumb: ["系统管理", "AI 设置"] } },
         { path: "settings/materials", name: "settings-materials", component: MaterialCenterView, meta: { title: "素材库", breadcrumb: ["系统管理", "素材库"] } },
         { path: "tenant-management", name: "tenant-management", component: TenantSubscriptionView, meta: { title: "企业与授权", breadcrumb: ["企业与授权"] } },
+        { path: "tenant-shops", name: "tenant-shops", component: TenantShopsView, meta: { title: "企业店铺", breadcrumb: ["企业管理", "店铺管理"] } },
         { path: "settings/tenants", name: "settings-tenants", redirect: (to) => ({ path: "/tenant-management", query: to.query }) },
         { path: "settings/prompts", name: "settings-prompts", component: AiPromptLibraryView, meta: { title: "AI提示词库", breadcrumb: ["系统管理", "AI提示词库"] } },
         { path: "tools/product-video-generator", name: "tools-product-video-generator", component: ProductVideoGeneratorView, meta: { title: "商品视频", breadcrumb: ["实用工具", "商品视频"] } },
+        { path: "tools/pricing", name: "tools-pricing", component: PricingToolView, meta: { title: "定价工具", breadcrumb: ["实用工具", "定价工具"] } },
+        { path: "tools/profit-calculator", name: "tools-profit-calculator", component: ProfitCalculatorView, meta: { title: "利润计算器", breadcrumb: ["实用工具", "利润计算器"] } },
         { path: "tools/image-cropper", name: "tools-image-cropper", component: EcommerceImageSplitterView, meta: { title: "图片自动裁切工具", breadcrumb: ["实用工具", "图片自动裁切工具"] } },
         { path: "tools/ecommerce-image-splitter", name: "tools-ecommerce-image-splitter", component: EcommerceImageSplitterView, meta: { title: "套图拆分", breadcrumb: ["实用工具", "套图拆分"] } },
         { path: ":pathMatch(.*)*", redirect: "/dashboard" }

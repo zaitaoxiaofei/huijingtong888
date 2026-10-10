@@ -1,14 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { tenantIsolationDecision } from "../src/server/tenant-isolation.js";
 
 const pageUrl = new URL("../frontend/admin/views/inventory/InventoryFbpReplenishmentPage.vue", import.meta.url);
 const serviceUrl = new URL("../src/services/mysql-cutover.js", import.meta.url);
 
 test("FBP barcode print confirms quantity, calls Windows print, and records only after result confirmation", async () => {
-  const [pageSource, serviceSource] = await Promise.all([
+  const [pageSource, serviceSource, serverSource] = await Promise.all([
     readFile(pageUrl, "utf8"),
-    readFile(serviceUrl, "utf8")
+    readFile(serviceUrl, "utf8"),
+    readFile(new URL("../src/server.js", import.meta.url), "utf8")
   ]);
 
   assert.match(pageSource, /async function markBarcodePrinted\(row, quantity\)/);
@@ -25,7 +27,11 @@ test("FBP barcode print confirms quantity, calls Windows print, and records only
   assert.doesNotMatch(pageSource, /条码 PDF 预览|previewBarcodeLabel|directPrintBarcodePreview/);
   assert.match(pageSource, /row\.barcode_printed_at = payload\?\.barcode_printed_at/);
   assert.match(pageSource, /已确认 \$\{integer\(row\.barcode_printed_qty\)\}/);
-  assert.match(serviceSource, /appendPrintRecord\(connection, body, userId\)/);
+  assert.match(serviceSource, /appendPrintRecord\(connection, body, userId, Number\(order\.shop_id\)\)/);
+  assert.match(serviceSource, /markFbpReplenishmentItemBarcodePrintedMysql\(body = \{\}, userId = null, tenantId = "admin"\)/);
+  assert.match(serviceSource, /WHERE o\.id = \? AND s\.status != 'deleted' AND \$\{shopScope\}[\s\S]*appendPrintRecord\(connection, body, userId, Number\(order\.shop_id\)\)/);
+  assert.match(serverSource, /services\.markFbpReplenishmentItemBarcodePrinted\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
+  assert.equal(tenantIsolationDecision({ tenant: { id: 42, slug: "company-a" } }, ["api", "fbp-replenishment-orders", "items", "barcode-printed"], "POST").allowed, true);
   assert.match(pageSource, /request_key: barcodePrintResultDialog.request_key/);
 });
 
@@ -68,7 +74,7 @@ test("FBP replenishment history displays the current inventory product name and 
   const serviceSource = await readFile(serviceUrl, "utf8");
 
   assert.match(serviceSource, /LEFT JOIN products current_product ON current_product\.id = i\.product_id/);
-  assert.match(serviceSource, /COALESCE\(NULLIF\(current_product\.name, ''\), i\.product_name\) AS product_name/);
-  assert.match(serviceSource, /COALESCE\(NULLIF\(i\.image_url, ''\), current_product\.image_url\) AS image_url/);
+  assert.match(serviceSource, /\$\{defaultTenant \? "COALESCE\(NULLIF\(current_product\.name, ''\), i\.product_name\)" : "i\.product_name"\} AS product_name/);
+  assert.match(serviceSource, /\$\{defaultTenant \? "COALESCE\(NULLIF\(i\.image_url, ''\), current_product\.image_url\)" : "i\.image_url"\} AS image_url/);
   assert.match(serviceSource, /current_product\.name LIKE \?/);
 });

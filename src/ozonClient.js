@@ -115,6 +115,8 @@ export async function fetchOzonProductRefs(shop, options = {}) {
   return (await fetchOzonProductIds(shop, options)).map((item) => ({
     id: Number(item.id || 0),
     ozon_product_id: String(item.id || ""),
+    offer_id: String(item.offer_id || ""),
+    ozon_sku: String(item.ozon_sku || ""),
     visibility: String(item.visibility || "")
   })).filter((item) => item.id);
 }
@@ -126,20 +128,19 @@ export async function fetchOzonProductsByIds(shop, productIds = [], options = {}
     return demoOnlineProducts(shop).filter((item) => ids.includes(Number(item.ozon_product_id || 0)));
   }
 
-  const products = [];
   const visibilityById = options.visibilityById instanceof Map
     ? options.visibilityById
     : new Map(Object.entries(options.visibilityById || {}).map(([id, visibility]) => [String(id), visibility]));
-  for (let index = 0; index < ids.length; index += 1000) {
-    const chunk = ids.slice(index, index + 1000);
+  const chunks = chunkOzonFilterValues(ids);
+  const chunkProducts = await mapOzonConcurrencyResults(chunks, options.detailConcurrency || 1, async (chunk) => {
     const data = await ozonRequest(shop, "/v3/product/info/list", { product_id: chunk });
     const items = data.result?.items || data.items || [];
-    for (const item of items) {
+    return items.map((item) => {
       const id = String(item.id || item.product_id || "");
-      products.push(normalizeOzonProduct(item, visibilityById.get(id) || ""));
-    }
-  }
-  return products;
+      return normalizeOzonProduct(item, visibilityById.get(id) || "");
+    });
+  });
+  return chunkProducts.flat();
 }
 
 export function pendingListingVisibilityFilters() {
@@ -302,8 +303,8 @@ export async function fetchOzonProductStocks(shop, options = {}) {
   const offerIds = [...new Set((options.offerIds || []).map(String).filter(Boolean))];
   const productIds = [...new Set((options.productIds || []).map(Number).filter(Boolean))];
   const filterChunks = ozonStockFilterChunks({ offerIds, productIds });
-  const rows = [];
-  for (const filter of filterChunks) {
+  const chunkRows = await mapOzonConcurrencyResults(filterChunks, options.stockConcurrency || 1, async (filter) => {
+    const rows = [];
     let cursor = "";
     do {
       throwIfAborted(options.signal);
@@ -317,9 +318,10 @@ export async function fetchOzonProductStocks(shop, options = {}) {
       for (const item of items) rows.push(...normalizeOzonStockItem(item));
       cursor = result.cursor || result.last_id || "";
     } while (cursor);
-  }
+    return rows;
+  });
 
-  return rows;
+  return chunkRows.flat();
 }
 
 export async function fetchOzonFbsStocksByWarehouse(shop, options = {}) {
@@ -1195,16 +1197,16 @@ async function fetchOzonProductIds(shop, options = {}) {
 
   await mapOzonConcurrency(visibilityFilters, visibilityConcurrency, async (visibility) => {
     try {
-      const ids = await fetchOzonProductIdsByVisibility(shop, visibility);
-      for (const id of ids) {
-        const key = String(id);
+      const refs = await fetchOzonProductIdsByVisibility(shop, visibility);
+      for (const ref of refs) {
+        const key = String(ref.id);
         const current = productIds.get(key);
         if (!current || ozonProductVisibilityRank(visibility) > ozonProductVisibilityRank(current.visibility)) {
-          productIds.set(key, { id, visibility });
+          productIds.set(key, { ...ref, visibility });
         }
       }
     } catch (error) {
-      if (visibility === "ALL") throw error;
+      if (visibility === "ALL" || visibility === "ARCHIVED") throw error;
     }
   });
 
@@ -1243,7 +1245,7 @@ function ozonProductVisibilityRank(value = "") {
 }
 
 async function fetchOzonProductIdsByVisibility(shop, visibility) {
-  const productIds = [];
+  const productRefs = [];
   let lastId = "";
 
   do {
@@ -1257,12 +1259,12 @@ async function fetchOzonProductIdsByVisibility(shop, visibility) {
     const items = result.items || [];
     for (const item of items) {
       const id = item.product_id || item.id;
-      if (id) productIds.push(Number(id));
+      if (id) productRefs.push({ id: Number(id), offer_id: item.offer_id, ozon_sku: item.sku });
     }
     lastId = result.last_id || "";
   } while (lastId);
 
-  return productIds;
+  return productRefs;
 }
 
 async function ozonRequest(shop, path, payload, options = {}) {

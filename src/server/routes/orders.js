@@ -1,12 +1,13 @@
 import { serverTransformPdfForPaper } from "../../services/server-print.js";
+import { tenantIdFromRequest } from "../tenant-context.js";
 
 export function createOrderRoutes({ services, readJson, notFound, writeHead, json }) {
   return {
     "GET /api/orders": (req, url) => url?.searchParams?.get("paged")
-      ? services.ordersPaged(Object.fromEntries(url.searchParams.entries()))
+      ? services.ordersPaged(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req))
       : services.orders(),
-    "GET /api/sku-order-tracking": (req, url) => services.skuOrderTrackingList(Object.fromEntries(url.searchParams.entries())),
-    "POST /api/sku-order-tracking": async (req) => services.saveSkuOrderTracker(await readJson(req), req._session?.personId),
+    "GET /api/sku-order-tracking": (req, url) => services.skuOrderTrackingList(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "POST /api/sku-order-tracking": async (req) => services.saveSkuOrderTracker(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
     "GET /api/order-car-heatmap/models": (req, url) => services.orderCarHeatmapModels(Object.fromEntries(url.searchParams.entries())),
     "GET /api/order-car-heatmap/products": (req, url) => services.orderCarHeatmapProducts(Object.fromEntries(url.searchParams.entries())),
     "GET /api/order-car-heatmap/skus": (req, url) => services.orderCarHeatmapSkus(Object.fromEntries(url.searchParams.entries())),
@@ -27,11 +28,15 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "status-history") {
     return json(res, services.orderStatusHistory
-      ? await services.orderStatusHistory(Number(parts[2]), Object.fromEntries(url.searchParams.entries()))
+      ? await services.orderStatusHistory(Number(parts[2]), Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req))
       : []);
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "procurement-preview") {
+    const tenantId = tenantIdFromRequest(req);
+    if (tenantId !== "admin") {
+      throw Object.assign(new Error("企业订单采购预览暂不可用：采购、入库与库存关联数据尚未完成租户隔离。"), { statusCode: 503 });
+    }
     return json(res, services.previewOrderProcurement
       ? await services.previewOrderProcurement(Number(parts[2]))
       : { ok: true, purchasable_count: 0, total_quantity: 0, product_count: 0, missing_count: 0, products: [], missing_items: [] });
@@ -44,7 +49,7 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2]) {
-    const detail = await services.orderDetail(Number(parts[2]));
+    const detail = await services.orderDetail(Number(parts[2]), tenantIdFromRequest(req));
     if (detail && !detail.profit_detail_snapshot) {
       if (typeof services.orderProfitDetailSnapshot === "function") {
         detail.profit_detail_snapshot = await services.orderProfitDetailSnapshot(Number(parts[2]));
@@ -54,7 +59,7 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "mark") {
-    return json(res, services.updateOrderMark(Number(parts[2]), await readJson(req), req._session?.personId));
+    return json(res, services.updateOrderMark(Number(parts[2]), await readJson(req), req._session?.personId, tenantIdFromRequest(req)));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "package-label") {

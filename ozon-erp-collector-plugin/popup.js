@@ -15,7 +15,7 @@ const fields = {
 const erpConfig = window.OzonErpCollectorConfig || {};
 const ERP_BASE_URL_STORAGE_KEY = erpConfig.ERP_BASE_URL_STORAGE_KEY || 'ozon-erp-base-url';
 const LOCAL_PLUGIN_TOKEN_STORAGE_KEY = erpConfig.LOCAL_PLUGIN_TOKEN_STORAGE_KEY || 'ozon-erp-local-plugin-token';
-const DEFAULT_LOCAL_PLUGIN_TOKEN = erpConfig.DEFAULT_LOCAL_PLUGIN_TOKEN || 'ozon-erp-collector-hjt888-default';
+const DEFAULT_LOCAL_PLUGIN_TOKEN = erpConfig.DEFAULT_LOCAL_PLUGIN_TOKEN || '';
 const DEFAULT_ERP_BASE_URL = erpConfig.DEFAULT_ERP_BASE_URL || 'https://erp.hjt888.xyz';
 const SEND_MESSAGE_TIMEOUT_MS = 8000;
 const MANUAL_PROGRESS_STORAGE_KEY = 'ozon-erp-manual-progress';
@@ -63,7 +63,7 @@ function renderTokenWarning() {
   const usesDefaultToken = !token || token === DEFAULT_LOCAL_PLUGIN_TOKEN;
   fields.tokenWarning.classList.toggle('is-visible', usesDefaultToken);
   fields.tokenWarning.textContent = usesDefaultToken
-    ? '当前会使用默认回传令牌，适合本机测试。正式环境建议在 ERP 后台和插件中配置一致的专用密钥。'
+    ? '正式环境请在 ERP「企业管理」中为当前企业生成专属插件令牌，并粘贴到此处；不同企业不能共用令牌。'
     : '';
 }
 

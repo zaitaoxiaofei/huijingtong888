@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS media_migration_map (
 
 CREATE TABLE IF NOT EXISTS shops (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   name VARCHAR(255) NOT NULL,
   legal_entity VARCHAR(255) NULL,
   user_id BIGINT UNSIGNED NULL,
@@ -49,7 +50,8 @@ CREATE TABLE IF NOT EXISTS shops (
   feature_flags_json JSON NULL,
   payout_rate DECIMAL(8,4) NOT NULL DEFAULT 0.3300,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  KEY idx_shops_user_id (user_id)
+  KEY idx_shops_user_id (user_id),
+  KEY idx_shops_tenant_status_id (tenant_id, status, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS people (
@@ -109,8 +111,21 @@ CREATE TABLE IF NOT EXISTS tenant_members (
   KEY idx_tenant_members_tenant (tenant_id, active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE IF NOT EXISTS tenant_plugin_tokens (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NOT NULL,
+  token_hash CHAR(64) NOT NULL,
+  label VARCHAR(100) NOT NULL DEFAULT 'Ozon browser plugin',
+  created_by_person_id BIGINT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  revoked_at DATETIME NULL,
+  UNIQUE KEY uk_tenant_plugin_token_hash (token_hash),
+  KEY idx_tenant_plugin_tokens_tenant_active (tenant_id, revoked_at, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS finance_companies (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   name VARCHAR(255) NOT NULL,
   tax_number VARCHAR(64) NULL,
   taxpayer_type VARCHAR(32) NOT NULL DEFAULT 'unknown',
@@ -119,22 +134,26 @@ CREATE TABLE IF NOT EXISTS finance_companies (
   status VARCHAR(32) NOT NULL DEFAULT 'active',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_finance_company_name (name)
+  UNIQUE KEY uk_finance_company_tenant_name (tenant_id, name),
+  KEY idx_finance_company_tenant_status (tenant_id, status, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS finance_shop_company_assignments (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   shop_id BIGINT UNSIGNED NOT NULL,
   company_id BIGINT UNSIGNED NOT NULL,
   effective_from DATE NOT NULL,
   effective_to DATE NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_finance_shop_company_period (shop_id, effective_from),
-  KEY idx_finance_assignment_company_period (company_id, effective_from, effective_to)
+  KEY idx_finance_assignment_company_period (company_id, effective_from, effective_to),
+  KEY idx_finance_assignment_tenant_shop_period (tenant_id, shop_id, effective_from, effective_to)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS finance_expenses (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   company_id BIGINT UNSIGNED NOT NULL,
   shop_id BIGINT UNSIGNED NULL,
   expense_date DATE NOT NULL,
@@ -153,6 +172,7 @@ CREATE TABLE IF NOT EXISTS finance_expenses (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_finance_expense_company_date (company_id, expense_date),
+  KEY idx_finance_expense_tenant_company_date (tenant_id, company_id, expense_date, id),
   UNIQUE KEY uk_finance_expense_source (source_type, source_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
@@ -249,6 +269,7 @@ CREATE TABLE IF NOT EXISTS payroll_statements (
 
 CREATE TABLE IF NOT EXISTS finance_vouchers (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   company_id BIGINT UNSIGNED NOT NULL,
   expense_id BIGINT UNSIGNED NULL,
   finance_item_id BIGINT UNSIGNED NULL,
@@ -270,12 +291,14 @@ CREATE TABLE IF NOT EXISTS finance_vouchers (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_finance_voucher_company_date (company_id, issue_date),
+  KEY idx_finance_voucher_tenant_company_date (tenant_id, company_id, issue_date, id),
   KEY idx_finance_voucher_expense (expense_id),
   KEY idx_finance_voucher_item (finance_item_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS finance_periods (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   company_id BIGINT UNSIGNED NOT NULL,
   month_key CHAR(7) NOT NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'preparing',
@@ -283,18 +306,21 @@ CREATE TABLE IF NOT EXISTS finance_periods (
   closed_by BIGINT UNSIGNED NULL,
   closed_at DATETIME NULL,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_finance_period (company_id, month_key)
+  UNIQUE KEY uk_finance_period (company_id, month_key),
+  KEY idx_finance_period_tenant_company_month (tenant_id, company_id, month_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS suppliers (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   name VARCHAR(255) NOT NULL,
   contact_person VARCHAR(255) NULL,
   contact_phone VARCHAR(255) NULL,
   wechat_id VARCHAR(255) NULL,
   business_note TEXT NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'active',
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_suppliers_tenant_status_id (tenant_id, status, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS system_settings (
@@ -364,6 +390,7 @@ CREATE TABLE IF NOT EXISTS exchange_rates (
 
 CREATE TABLE IF NOT EXISTS products (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   selection_id VARCHAR(128) NULL,
   code VARCHAR(128) NULL,
   name VARCHAR(255) NOT NULL,
@@ -416,6 +443,8 @@ CREATE TABLE IF NOT EXISTS products (
   supplier_id BIGINT UNSIGNED NULL,
   UNIQUE KEY uk_products_selection_id (selection_id),
   UNIQUE KEY uk_products_code (code),
+  KEY idx_products_tenant_active_updated (tenant_id, active, updated_at, id),
+  KEY idx_products_tenant_owner_active (tenant_id, owner_person_id, active, id),
   KEY idx_products_owner (owner_person_id),
   KEY idx_products_parent (parent_product_id),
   KEY idx_products_active_id (active, id),
@@ -460,6 +489,7 @@ CREATE TABLE IF NOT EXISTS online_products (
 
 CREATE TABLE IF NOT EXISTS sku_mappings (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   shop_id BIGINT UNSIGNED NOT NULL,
   product_id BIGINT UNSIGNED NOT NULL,
   online_product_id BIGINT UNSIGNED NULL,
@@ -472,6 +502,8 @@ CREATE TABLE IF NOT EXISTS sku_mappings (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_sku_mappings_shop_sku (shop_id, ozon_sku),
+  KEY idx_sku_mappings_tenant_shop_active (tenant_id, shop_id, active, ozon_sku),
+  KEY idx_sku_mappings_tenant_product_shop (tenant_id, product_id, shop_id),
   KEY idx_sku_mappings_product_shop (product_id, shop_id),
   KEY idx_sku_mappings_shop_sku_active (shop_id, ozon_sku, active),
   KEY idx_sku_mappings_shop_offer_active (shop_id, offer_id, active)
@@ -479,6 +511,7 @@ CREATE TABLE IF NOT EXISTS sku_mappings (
 
 CREATE TABLE IF NOT EXISTS procurement_requests (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   request_group_no VARCHAR(64) NULL,
   product_id BIGINT UNSIGNED NULL,
   raw_name VARCHAR(255) NULL,
@@ -510,6 +543,8 @@ CREATE TABLE IF NOT EXISTS procurement_requests (
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_procurement_status (status, purchase_order_id),
   KEY idx_procurement_status_created (status, created_at),
+  KEY idx_procurement_tenant_status_created (tenant_id, status, created_at, id),
+  KEY idx_procurement_tenant_purchase_status (tenant_id, purchase_order_id, status),
   KEY idx_procurement_product_status (product_id, status),
   KEY idx_procurement_source_order_item (source_order_item_id),
   KEY idx_procurement_source_order (source_order_id),
@@ -814,6 +849,7 @@ CREATE TABLE IF NOT EXISTS outbound_records (
 
 CREATE TABLE IF NOT EXISTS inventory_movements (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   product_id BIGINT UNSIGNED NOT NULL,
   shop_id BIGINT UNSIGNED NULL,
   sku_mapping_id BIGINT UNSIGNED NULL,
@@ -832,6 +868,7 @@ CREATE TABLE IF NOT EXISTS inventory_movements (
   status VARCHAR(32) NOT NULL DEFAULT 'posted',
   note TEXT NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_inventory_tenant_product_status_created (tenant_id, product_id, status, created_at, id),
   KEY idx_inventory_product_status (product_id, status),
   KEY idx_inventory_related_order_item (related_order_item_id),
   KEY idx_inventory_stock_location (stock_location, status, created_at),
@@ -876,10 +913,11 @@ CREATE TABLE IF NOT EXISTS orders (
   sync_note TEXT NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_orders_posting_number (posting_number),
+  UNIQUE KEY uk_orders_shop_posting_number (shop_id, posting_number),
   KEY idx_orders_shop_stage (shop_id, tracking_stage),
   KEY idx_orders_sync_state_ordered_at (sync_state, ordered_at),
   KEY idx_orders_shop_status_ordered_at (shop_id, status, ordered_at),
+  KEY idx_orders_shop_ordered_id (shop_id, ordered_at, id),
   KEY idx_orders_ordered_at (ordered_at, id),
   KEY idx_orders_stage_ordered_at (tracking_stage, ordered_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -906,6 +944,7 @@ CREATE TABLE IF NOT EXISTS order_items (
   settlement_state VARCHAR(32) NOT NULL DEFAULT 'pending',
   KEY idx_order_items_order (order_id),
   KEY idx_order_items_order_sku (order_id, ozon_sku),
+  KEY idx_order_items_order_mapping_sku (order_id, sku_mapping_id, ozon_sku),
   KEY idx_order_items_sku_order (ozon_sku, order_id),
   KEY idx_order_items_mapping (sku_mapping_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -952,6 +991,20 @@ CREATE TABLE IF NOT EXISTS order_status_history (
   KEY idx_order_status_history_status_time (status, observed_at DESC),
   KEY idx_order_status_history_region_time (buyer_region, buyer_city, observed_at DESC),
   KEY idx_order_status_history_delivery_window (delivery_date_begin, delivery_date_end)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS order_history_dedupe_daily_metrics (
+  metric_date DATE NOT NULL,
+  snapshot_source VARCHAR(32) NOT NULL,
+  candidate_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  comparison_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  duplicate_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  changed_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  skipped_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  comparison_error_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (metric_date, snapshot_source)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS order_profit_items (
@@ -1179,6 +1232,7 @@ CREATE TABLE IF NOT EXISTS historical_profit_reviews (
 
 CREATE TABLE IF NOT EXISTS online_product_actions (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id VARCHAR(80) NULL,
   online_product_id BIGINT UNSIGNED NULL,
   shop_id BIGINT UNSIGNED NULL,
   action_type VARCHAR(64) NOT NULL,
@@ -1188,7 +1242,8 @@ CREATE TABLE IF NOT EXISTS online_product_actions (
   error_message TEXT NULL,
   created_by_person_id BIGINT UNSIGNED NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  KEY idx_online_product_actions_product (online_product_id, created_at)
+  KEY idx_online_product_actions_product (online_product_id, created_at),
+  KEY idx_online_product_actions_tenant_shop_created (tenant_id, shop_id, created_at, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS order_marks (
@@ -1315,6 +1370,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS logistics_fee_rules (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   name VARCHAR(255) NOT NULL,
   carrier VARCHAR(64) NOT NULL DEFAULT 'CEL',
   channel VARCHAR(64) NOT NULL DEFAULT 'standard',
@@ -1328,9 +1384,15 @@ CREATE TABLE IF NOT EXISTS logistics_fee_rules (
   per_ticket_cny DECIMAL(18,4) NOT NULL DEFAULT 0,
   enabled TINYINT(1) NOT NULL DEFAULT 1,
   filter_keywords TEXT NULL,
+  usage_count INT NOT NULL DEFAULT 0,
+  last_used_at DATETIME NULL,
+  version_group_id BIGINT UNSIGNED NULL,
+  effective_from DATETIME NULL,
+  effective_to DATETIME NULL,
   note TEXT NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_logistics_rules_tenant_enabled_version (tenant_id, enabled, version_group_id, effective_from, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS ozon_stock_snapshots (
@@ -1493,6 +1555,7 @@ const connection = await createMysqlConnection();
 try {
   await connection.query(mysqlSchemaSql);
   const alterStatements = [
+    "ALTER TABLE shops ADD COLUMN tenant_id BIGINT UNSIGNED NULL",
     "ALTER TABLE shops ADD COLUMN watermark_path TEXT NULL",
     "ALTER TABLE shops ADD COLUMN watermark_name VARCHAR(255) NULL",
     "ALTER TABLE shops ADD COLUMN watermark_position VARCHAR(32) NOT NULL DEFAULT 'bottom-right'",
@@ -1514,10 +1577,12 @@ try {
     "ALTER TABLE products ADD COLUMN listing_tags_prompt TEXT NULL",
     "ALTER TABLE products ADD COLUMN listing_description_prompt TEXT NULL",
     "ALTER TABLE procurement_requests ADD COLUMN cancelled_at DATETIME NULL",
+    "ALTER TABLE procurement_requests ADD COLUMN tenant_id BIGINT UNSIGNED NULL",
     "ALTER TABLE inventory_movements ADD COLUMN movement_type VARCHAR(64) NULL",
     "ALTER TABLE inventory_movements ADD COLUMN operator VARCHAR(255) NULL",
     "ALTER TABLE inventory_movements ADD COLUMN stock_location VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'",
     "ALTER TABLE inventory_movements ADD COLUMN stock_location_source VARCHAR(64) NOT NULL DEFAULT 'legacy_unknown'",
+    "ALTER TABLE inventory_movements ADD COLUMN tenant_id BIGINT UNSIGNED NULL",
     "ALTER TABLE outbound_records ADD COLUMN stock_location VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'",
     "ALTER TABLE outbound_records ADD COLUMN stock_location_source VARCHAR(64) NOT NULL DEFAULT 'legacy_unknown'",
     "ALTER TABLE order_label_prints ADD COLUMN print_batch_id VARCHAR(64) NULL",
@@ -1539,10 +1604,14 @@ try {
     await connection.query(sql);
   }
   const indexStatements = [
+    "CREATE INDEX idx_shops_tenant_status_id ON shops (tenant_id, status, id)",
+    "CREATE INDEX idx_procurement_tenant_status_created ON procurement_requests (tenant_id, status, created_at, id)",
+    "CREATE INDEX idx_procurement_tenant_purchase_status ON procurement_requests (tenant_id, purchase_order_id, status)",
     "CREATE INDEX idx_order_history_transport ON order_status_history (order_id, status, last_status_changed_at) ALGORITHM=INPLACE LOCK=NONE",
     "CREATE INDEX idx_outbound_shop_created ON outbound_records (shop_id, created_at)",
     "CREATE INDEX idx_outbound_stock_location ON outbound_records (stock_location, status, created_at)",
     "CREATE INDEX idx_inventory_stock_location ON inventory_movements (stock_location, status, created_at)",
+    "CREATE INDEX idx_inventory_tenant_product_status_created ON inventory_movements (tenant_id, product_id, status, created_at, id)",
     "CREATE INDEX idx_sku_mappings_sku_active_product ON sku_mappings (ozon_sku, active, product_id)",
     "CREATE INDEX idx_sku_mappings_offer_active_product ON sku_mappings (offer_id, active, product_id)",
     "CREATE INDEX idx_outbound_product_status_item ON outbound_records (product_id, status, order_item_id)",
