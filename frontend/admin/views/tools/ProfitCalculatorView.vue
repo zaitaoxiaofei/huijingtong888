@@ -4,6 +4,7 @@ import { ElMessage } from "element-plus";
 import { calculateProfit } from "../../utils/pricing-tool.js";
 import { quoteLogisticsRules } from "../../utils/logistics-quote.js";
 import { apiClient } from "../../utils/api.js";
+import { commissionRateForRub, commissionBandLabel } from "../../utils/rfbs-commission.js";
 
 const form = reactive({
   category: "", saleCny: null, purchaseCost: null, commissionRate: null, carrier: "GUOO",
@@ -13,18 +14,45 @@ const form = reactive({
 const result = ref(null);
 const logisticsRules = ref([]);
 const logisticsError = ref("");
+const rateError = ref("");
+const rateSourceDate = ref("");
+const categoryOptions = ref([]);
+const categoryLoading = ref(false);
+const categoryDetail = ref(null);
 const selectedRuleId = ref(null);
+async function searchCategories(keyword = "") {
+  categoryLoading.value = true;
+  try {
+    const params = new URLSearchParams({ keyword, limit: "50" });
+    const data = await apiClient.get(`/api/tools/pricing/rfbs-categories?${params}`);
+    categoryOptions.value = data.rows.map((item) => ({ value: String(item.id), label: item.label }));
+  } catch {
+    categoryOptions.value = [];
+  } finally {
+    categoryLoading.value = false;
+  }
+}
+async function selectCategory(id) {
+  categoryDetail.value = await apiClient.get(`/api/tools/pricing/rfbs-category?id=${encodeURIComponent(id)}`);
+  result.value = null;
+}
+const selectedCommission = computed(() => commissionRateForRub(categoryDetail.value?.rates, Number(form.saleCny) * Number(form.exchangeRate)));
 const quotes = computed(() => quoteLogisticsRules(logisticsRules.value, {
   carrier: form.carrier, priceRub: Number(form.saleCny) * Number(form.exchangeRate),
   weightG: form.weight, length: form.length, width: form.width, height: form.height
 }));
 onMounted(async () => {
-  try {
-    const rows = await apiClient.get("/api/logistics-rules");
-    logisticsRules.value = Array.isArray(rows) ? rows : [];
-  } catch {
-    logisticsError.value = "物流规则加载失败，请刷新后重试";
-  }
+  searchCategories();
+  const [rulesResult, rateResult] = await Promise.allSettled([
+    apiClient.get("/api/logistics-rules"),
+    apiClient.get("/api/tools/pricing/reference-rate", { noCache: true })
+  ]);
+  if (rulesResult.status === "fulfilled") logisticsRules.value = Array.isArray(rulesResult.value) ? rulesResult.value : [];
+  else logisticsError.value = "物流规则加载失败，请刷新后重试";
+  if (rateResult.status === "fulfilled" && Number(rateResult.value?.rate) > 0) {
+    form.exchangeRate = Number(rateResult.value.rate);
+    rateSourceDate.value = String(rateResult.value.source_date || "");
+  } else rateError.value = "俄罗斯央行汇率获取失败，暂不能计算，请稍后刷新";
 });
 function selectQuote(quote) {
   selectedRuleId.value = quote.id;
@@ -33,8 +61,8 @@ function selectQuote(quote) {
 }
 const money = (value) => Number(value || 0).toFixed(2);
 function calculate() {
-  if (!form.category.trim() || form.commissionRate === null) {
-    ElMessage.warning("请填写商品类目及该类目的 Ozon 佣金费率");
+  if (!categoryDetail.value || selectedCommission.value === null) {
+    ElMessage.warning("请从 rFBS 佣金表选择商品类目，并等待汇率和售价匹配佣金档位");
     return;
   }
   const selected = quotes.value.find((quote) => quote.id === selectedRuleId.value);
@@ -44,6 +72,8 @@ function calculate() {
   }
   if (selected) form.freight = selected.priceCny;
   else if (quotes.value.length) selectQuote(quotes.value[0]);
+  else { ElMessage.warning("当前售价、重量和尺寸没有匹配的有效物流渠道"); return; }
+  form.commissionRate = selectedCommission.value;
   try {
     result.value = calculateProfit(form);
   } catch (error) {
@@ -55,7 +85,7 @@ function calculate() {
 
 <template>
   <div class="profit-page">
-    <el-alert type="info" :closable="false" show-icon title="按当前店铺实际佣金、物流报价和汇率填写。退货损失按退货率分摊，结果为经营测算。" />
+    <el-alert type="info" :closable="false" show-icon title="使用最新已生效的 Ozon 中国 rFBS 佣金表和本地物流规则；汇率为俄罗斯央行每日参考值，退货损失按退货率分摊。" />
     <div class="profit-grid">
       <el-card shadow="never">
         <template #header><h2>Ozon 跨境利润计算器</h2></template>
@@ -63,8 +93,8 @@ function calculate() {
           <h3>基础设置</h3>
           <el-form-item label="实际售价" required><el-input-number v-model="form.saleCny" :min="0" :precision="2" /><span class="unit">元</span></el-form-item>
           <el-form-item label="采购成本" required><el-input-number v-model="form.purchaseCost" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
-          <el-form-item label="商品类目" required><el-input v-model="form.category" placeholder="填写 Ozon 商品类目" /></el-form-item>
-          <el-form-item label="类目佣金" required><el-input-number v-model="form.commissionRate" :min="0" :max="100" :precision="2" /><span class="unit">%</span></el-form-item>
+          <el-form-item label="商品类目" required><el-select v-model="form.category" filterable remote :remote-method="searchCategories" :loading="categoryLoading" placeholder="搜索并选择 rFBS 细分类目" style="width: 100%" @change="selectCategory"><el-option v-for="item in categoryOptions" :key="item.value" :label="item.label" :value="item.value" /></el-select></el-form-item>
+          <el-form-item label="类目佣金" required><div v-if="categoryDetail" class="unit"><span v-for="(rate, index) in categoryDetail.rates" :key="index">{{ commissionBandLabel(index) }}：{{ rate }}%　</span><br>当前适用：{{ selectedCommission ?? '待匹配售价' }}% · rFBS {{ categoryDetail.version }} · {{ categoryDetail.sourceFile }}</div><span v-else class="unit">选择类目后显示三档佣金</span></el-form-item>
           <el-form-item label="包裹重量" required><el-input-number v-model="form.weight" :min="0" :precision="0" /><span class="unit">克</span></el-form-item>
           <el-form-item label="包裹尺寸" required>
             <div class="dimensions"><el-input-number v-model="form.length" :min="0" :precision="1" /><span>×</span><el-input-number v-model="form.width" :min="0" :precision="1" /><span>×</span><el-input-number v-model="form.height" :min="0" :precision="1" /><span>厘米</span></div>
@@ -78,7 +108,7 @@ function calculate() {
             </button>
           </div>
           <el-form-item label="跨境物流费" required><el-input-number v-model="form.freight" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
-          <el-form-item label="人民币兑卢布" required><el-input-number v-model="form.exchangeRate" :min="0" :precision="4" /><span class="unit">1 元 = ? ₽</span></el-form-item>
+          <el-form-item label="人民币兑卢布" required><strong v-if="form.exchangeRate">1 元 = {{ form.exchangeRate }} ₽</strong><span v-else class="unit">获取中…</span><span class="unit">俄罗斯央行每日参考汇率 {{ rateSourceDate }}</span><span v-if="rateError" class="rate-error">{{ rateError }}</span></el-form-item>
           <h3>其他费用</h3>
           <el-form-item label="国内运费及贴单"><el-input-number v-model="form.domesticCost" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
           <el-form-item label="尾程固定费"><el-input-number v-model="form.lastMile" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
@@ -120,6 +150,7 @@ function calculate() {
 h2 { margin: 0; text-align: center; color: #6758e9; font-size: 22px; }
 h3 { border-left: 4px solid #7466ef; padding-left: 10px; margin: 26px 0 18px; font-size: 15px; }
 .unit { margin-left: 8px; color: #697386; }
+.rate-error { display: block; color: #d85050; }
 .dimensions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .dimensions :deep(.el-input-number) { width: 105px; }
 .calculate-button { width: 100%; margin-top: 10px; }
