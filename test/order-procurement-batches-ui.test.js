@@ -16,6 +16,8 @@ test('receipt dialog selects batches explicitly and posts only selected actual q
   assert.match(source, /v-model="procurementReceiptDialog\.visible" title="登记实际收货"/);
   assert.match(source, /<el-checkbox v-model="row\.selected"/);
   assert.match(source, /v-model="row\.receive_quantity"/);
+  assert.match(source, /:max="procurementReceiptDialog\.mode === 'historical' \? Number\(row\.quantity\) : undefined"/);
+  assert.match(source, /quantity !== Number\(batch\.quantity\) && !batch\.difference_reason/);
   assert.match(source, /const records = procurementReceiptDialog\.batches\.filter\(batch => batch\.selected\)/);
   assert.match(source, /records\.map\(batch => \(\{ id: batch\.id, payload:/);
   assert.match(source, /v-model="row\.difference_reason"/);
