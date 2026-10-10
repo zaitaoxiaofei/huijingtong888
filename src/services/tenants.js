@@ -156,9 +156,15 @@ export { SUBSCRIPTION_PLANS };
 
 export async function tenantMembersMysql(tenantId) {
   await ensureTenantSchemaMysql();
+  const normalizedTenantId = Number(tenantId);
+  if (!Number.isSafeInteger(normalizedTenantId) || normalizedTenantId <= 0) {
+    const error = new Error("请选择有效企业后重试");
+    error.statusCode = 400;
+    throw error;
+  }
   return mysqlQuery(`SELECT tm.tenant_id, tm.person_id, tm.role, tm.active, p.name, p.username
     FROM tenant_members tm JOIN people p ON p.id = tm.person_id
-    WHERE tm.tenant_id = ? AND tm.active = 1 ORDER BY p.id`, [Number(tenantId)]);
+    WHERE tm.tenant_id = ? AND tm.active = 1 ORDER BY p.id`, [normalizedTenantId]);
 }
 
 export async function upsertTenantMemberMysql(tenantId, body = {}) {

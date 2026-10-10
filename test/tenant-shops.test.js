@@ -67,9 +67,11 @@ test("shop storage adds a tenant index without bulk-reassigning legacy rows", ()
 
 test("tenant member lookup ignores another tenant selector for non-platform accounts", () => {
   const source = read("../src/server.js");
+  const tenantService = read("../src/services/tenants.js");
   const router = read("../frontend/admin/router/index.js");
   const navigation = read("../frontend/admin/constants/navigation.js");
-  assert.match(source, /hasPermission\(req\._session, "admin"\)[\s\S]*\? \(req\.query\?\.tenant_id \|\| req\.query\?\.tenantId\)[\s\S]*: req\._session\?\.tenant\?\.id/);
+  assert.match(source, /hasPermission\(req\._session, "admin"\)[\s\S]*\? \(req\.query\?\.tenant_id \|\| req\.query\?\.tenantId \|\| req\._session\?\.tenant\?\.id\)[\s\S]*: req\._session\?\.tenant\?\.id/);
+  assert.match(tenantService, /const normalizedTenantId = Number\(tenantId\);[\s\S]*?Number\.isSafeInteger\(normalizedTenantId\)[\s\S]*?WHERE tm\.tenant_id = \? AND tm\.active = 1 ORDER BY p\.id`, \[normalizedTenantId\]\)/);
   assert.match(router, /path: "tenant-shops"[\s\S]*component: TenantShopsView/);
   assert.match(navigation, /route: "\/tenant-shops"/);
 });
