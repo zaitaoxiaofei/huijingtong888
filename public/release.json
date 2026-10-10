@@ -1,9 +1,9 @@
 {
   "app": "ozon-erp",
-  "version": "2026.10.10-tenant-isolation-faeca9a",
+  "version": "2026.10.10-tenant-isolation-2b1a8e4",
   "channel": "local",
   "branch": "release/2026.10.10-tenant-isolation",
-  "commit": "faeca9a4008e7cc47afc489937b82ffabdd5c0b7",
+  "commit": "2b1a8e42b5637c3bd322722590fd16c068c660e8",
   "build_stamp": "",
-  "built_at": "2026-10-10T06:23:39.928Z"
+  "built_at": "2026-10-10T06:24:33.184Z"
 }
