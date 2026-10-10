@@ -12,6 +12,10 @@ test("default tenant retains access while unsupported tenant business routes fai
   assert.equal(tenantIsolationDecision(otherSession, ["api", "orders"]).code, "TENANT_ISOLATION_PENDING");
   assert.equal(tenantIsolationDecision(otherSession, ["api", "dashboard"]).allowed, false);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "user-preferences"]).allowed, true);
+  for (const route of ["reference-rate", "rfbs-marketplace", "logistics-rules"]) {
+    assert.equal(tenantIsolationDecision(otherSession, ["api", "tools", "pricing", route], "GET").allowed, true);
+    assert.equal(tenantIsolationDecision(otherSession, ["api", "tools", "pricing", route], "POST").allowed, false);
+  }
   assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics", "analysis"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics", "snapshots", "snapshot-1"], "DELETE").allowed, true);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "db", "seller-analytics", "collect-runs", "run-1", "retry"], "POST").allowed, true);
