@@ -1,7 +1,12 @@
 import { hasPermission } from "../../shared/permissions.js";
 import { tenantIdFromRequest } from "./sellerAnalytics.js";
+import { currentPricingReferenceRate } from "../../services/pricing-reference-rate.js";
+import { latestRfbsTariff, searchRfbsCategories, rfbsCategory } from "../../services/ozon-rfbs-tariff.js";
 export function createOperationsRoutes({ services, readJson }) {
   return {
+    "GET /api/tools/pricing/reference-rate": () => currentPricingReferenceRate(),
+    "GET /api/tools/pricing/rfbs-categories": async (req, url) => searchRfbsCategories(await latestRfbsTariff(), url.searchParams.get("keyword"), url.searchParams.get("limit")),
+    "GET /api/tools/pricing/rfbs-category": async (req, url) => rfbsCategory(await latestRfbsTariff(), url.searchParams.get("id")),
     "GET /api/settings/packaging-fee-rule": () => services.packagingFeeRule(),
     "GET /api/settings/packaging-fee-rule/changes": (req, url) => services.packagingFeeRuleChanges(url?.searchParams?.get("limit") || 20),
     "GET /api/logistics-rules": (req) => services.logisticsRules(tenantIdFromRequest(req)),
