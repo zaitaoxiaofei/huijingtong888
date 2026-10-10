@@ -97,6 +97,11 @@ function rememberIntendedRoute(target) {
 
 function handleMenuSelect(index) {
   const target = String(index || "").trim();
+  if (target === "https://www.17track.net/zh-cn") {
+    mobileNavigationOpen.value = false;
+    window.open(target, "_blank", "noopener,noreferrer");
+    return;
+  }
   if (!target.startsWith("/")) return;
   mobileNavigationOpen.value = false;
   if (target === AI_VARIANT_LAB_ROUTE) {
