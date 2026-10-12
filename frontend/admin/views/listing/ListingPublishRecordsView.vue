@@ -910,7 +910,6 @@ function taskDisplayName(row = {}) {
 
 async function loadPublishRecordDetail(row) {
   if (row?.row_type === "draft") return row;
-  if (row?.request?.items) return row;
   detailLoadingId.value = row.id;
   try {
     const detail = await apiClient.get(`/api/listing/publish-records/${row.id}`, { noCache: true });
@@ -1311,10 +1310,20 @@ async function batchRefreshRecords() {
 }
 
 function viewOnlineSku(link) {
-  if (!link?.ozon_sku || !drawer.row?.shop_id) return;
+  if (!link?.ozon_sku || !(link.shop_id || drawer.row?.shop_id)) return;
   router.push({ path: "/online-products", query: {
-    shopId: String(drawer.row.shop_id), offer: String(link.ozon_sku), status: "all"
+    shopId: String(link.shop_id || drawer.row.shop_id), offer: String(link.ozon_sku), status: "all"
   } });
+}
+
+function unlinkedPublishItems(record) {
+  const items = Array.isArray(record?.request?.items) ? record.request.items : [];
+  return items.map((item, index) => ({
+    item_index: index,
+    offer_id: item.offer_id || "",
+    ozon_sku: index === 0 && String(item.offer_id || "") === String(record.offer_id || "")
+      ? record.ozon_sku || "" : ""
+  }));
 }
 
 async function deleteRecord(row) {
@@ -1905,7 +1914,7 @@ watch(() => route.query.taskId, () => {
       </el-table-column>
       <el-table-column v-if="isPublishMode" label="线上 SKU" min-width="150">
         <template #default="{ row }">
-          <el-button link type="primary" @click="openDrawer(row)">{{ row.variant_count ? `已同步 ${row.sku_count || 0}/${row.variant_count} 个 SKU` : row.ozon_sku ? '查看线上 SKU' : '待同步 SKU' }}</el-button>
+          <el-button link type="primary" @click="openDrawer(row)">{{ row.variant_count ? `查看变体对应 (${row.sku_count || 0}/${row.variant_count})` : row.ozon_sku ? '查看 SKU · 变体待确认' : '查看变体 / SKU' }}</el-button>
         </template>
       </el-table-column>
       <el-table-column label="售价" min-width="132">
@@ -2045,8 +2054,17 @@ watch(() => route.query.taskId, () => {
           </div>
         </section>
 
-        <el-table v-if="drawer.row.variant_links?.length" :data="drawer.row.variant_links" border size="small">
-          <el-table-column prop="variant_id" label="草稿变体 ID" min-width="160" show-overflow-tooltip />
+        <section class="section-line">
+          <strong>草稿变体 ↔ 各店铺线上 SKU</strong>
+          <span>草稿 ID：{{ drawer.row.draft_id || "未关联" }} · 当前记录：{{ drawer.row.id }}</span>
+        </section>
+        <el-table v-if="(drawer.row.draft_variant_links || drawer.row.variant_links)?.length" :data="drawer.row.draft_variant_links || drawer.row.variant_links" border size="small">
+          <el-table-column label="草稿变体" min-width="190" show-overflow-tooltip>
+            <template #default="{ row }">草稿 {{ drawer.row.draft_id }} / 变体 {{ row.variant_id }}</template>
+          </el-table-column>
+          <el-table-column label="店铺 / 记录" min-width="140">
+            <template #default="{ row }">{{ row.shop_name || drawer.row.shop_name || row.shop_id || "-" }} · #{{ row.record_id || drawer.row.id }}</template>
+          </el-table-column>
           <el-table-column prop="offer_id" label="Offer ID" min-width="130" show-overflow-tooltip />
           <el-table-column label="线上 SKU" min-width="130" show-overflow-tooltip>
             <template #default="{ row }">
@@ -2063,6 +2081,18 @@ watch(() => route.query.taskId, () => {
           </el-table-column>
           <el-table-column label="本地库存 ID" min-width="120">
             <template #default="{ row }">{{ row.inventory_id || row.source_product_id || "未绑定" }}</template>
+          </el-table-column>
+        </el-table>
+        <div v-if="!drawer.row.variant_links?.length && unlinkedPublishItems(drawer.row).length" class="section-line">
+          <strong>当前记录的发布时商品编号（变体关系未确认）</strong>
+        </div>
+        <el-table v-if="!drawer.row.variant_links?.length && unlinkedPublishItems(drawer.row).length" :data="unlinkedPublishItems(drawer.row)" border size="small">
+          <el-table-column label="草稿变体" min-width="160">
+            <template #default>未确认对应变体</template>
+          </el-table-column>
+          <el-table-column prop="offer_id" label="发布时 Offer ID" min-width="200" show-overflow-tooltip />
+          <el-table-column label="已知线上 SKU" min-width="150">
+            <template #default="{ row }">{{ row.ozon_sku || "未确认" }}</template>
           </el-table-column>
         </el-table>
         <el-alert v-if="drawer.row.variant_link_warning" type="warning" :title="drawer.row.variant_link_warning" :closable="false" show-icon />
