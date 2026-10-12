@@ -9363,18 +9363,18 @@ export async function listingPublishRecords(query = {}, session = null) {
   const shopQuery = cleanText(query.shopQuery || query.shop || "", 120).toLowerCase();
   const shopId = Number(query.shopId || query.shop_id || 0);
   const keyword = cleanText(query.query || query.keyword || "", 160).toLowerCase();
+  const categoryPath = cleanText(query.categoryPath || query.category_path || "", 500);
+  const startUpdatedDate = cleanText(query.startUpdatedDate || query.start_updated_date || "", 10);
+  const endUpdatedDate = cleanText(query.endUpdatedDate || query.end_updated_date || "", 10);
   const status = cleanText(query.status || "all", 40);
   const quality = cleanText(query.quality || "all", 40);
   const creatorId = cleanText(query.creatorId || query.creator_id || "", 40);
-  const categoryJoinSql = keyword ? `
+  const categoryJoinSql = `
     LEFT JOIN ozon_category_mappings m
-      ON m.description_category_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].description_category_id')), JSON_UNQUOTE(JSON_EXTRACT(r.list_summary_json, '$.description_category_id')), ''), ':', 1), '') AS UNSIGNED)
-     AND m.type_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].type_id')), JSON_UNQUOTE(JSON_EXTRACT(r.list_summary_json, '$.type_id')), ''), ':', 1), '') AS UNSIGNED)
-     AND m.status = 'active'
-  ` : "";
-  const categoryNameSelect = keyword
-    ? "COALESCE(NULLIF(m.path_zh, ''), NULLIF(m.name_zh, ''), NULLIF(m.path_ru, ''), NULLIF(m.name_ru, ''))"
-    : "''";
+      ON m.description_category_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.list_summary_json, '$.description_category_id')), JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].description_category_id')), ''), ':', 1), '') AS UNSIGNED)
+     AND m.type_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.list_summary_json, '$.type_id')), JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].type_id')), ''), ':', 1), '') AS UNSIGNED)
+  `;
+  const categoryNameSelect = "COALESCE(NULLIF(m.path_zh, ''), NULLIF(m.name_zh, ''), NULLIF(m.path_ru, ''), NULLIF(m.name_ru, ''), '')";
 
   if (status === "success") where.push("r.status IN ('imported', 'published', 'success')");
   else if (status === "processing") where.push("r.status IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending')");
@@ -9402,6 +9402,22 @@ export async function listingPublishRecords(query = {}, session = null) {
     where.push("r.created_by_person_id = ?");
     params.push(Number(creatorId));
   }
+  if (categoryPath) {
+    where.push(`(${categoryNameSelect} = ? OR ${categoryNameSelect} LIKE ?)`);
+    params.push(categoryPath, `${categoryPath} / %`);
+  }
+  if (startUpdatedDate) {
+    where.push("r.updated_at >= ?");
+    params.push(query.dateTimeZone === "Asia/Shanghai"
+      ? new Date(`${startUpdatedDate}T00:00:00+08:00`).toISOString().slice(0, 19).replace("T", " ")
+      : `${startUpdatedDate} 00:00:00`);
+  }
+  if (endUpdatedDate) {
+    where.push("r.updated_at < DATE_ADD(?, INTERVAL 1 DAY)");
+    params.push(query.dateTimeZone === "Asia/Shanghai"
+      ? new Date(`${endUpdatedDate}T00:00:00+08:00`).toISOString().slice(0, 19).replace("T", " ")
+      : endUpdatedDate);
+  }
   if (keyword) {
     where.push(`(
       LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].name')), JSON_UNQUOTE(JSON_EXTRACT(r.list_summary_json, '$.name')), '')) LIKE ? OR
@@ -9421,7 +9437,7 @@ export async function listingPublishRecords(query = {}, session = null) {
     params.push(...Array(12).fill(`%${keyword}%`));
   }
 
-  const fromSql = `
+  const fromSql = (includeCategory) => `
     FROM listing_publish_records r
     LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(s.tenant_id, 'admin') = COALESCE(r.tenant_id, 'admin')
     LEFT JOIN tenant_members creator_members
@@ -9430,7 +9446,7 @@ export async function listingPublishRecords(query = {}, session = null) {
      AND creator_members.active = 1
     LEFT JOIN people creator ON creator.id = r.created_by_person_id
       AND creator_members.person_id = creator.id
-    ${categoryJoinSql}
+    ${includeCategory ? categoryJoinSql : ""}
     WHERE ${where.join(" AND ")}
   `;
   const fullRecordSelectSql = `
@@ -9445,6 +9461,10 @@ export async function listingPublishRecords(query = {}, session = null) {
         r.quality_checked_at, r.error_json, r.source_product_id, r.offer_source, r.created_by_person_id,
         r.publish_task_id, r.published_at, r.created_at, r.updated_at, r.list_summary_json,
         (r.request_json IS NULL) AS payload_compacted,
+        (SELECT COUNT(*) FROM listing_publish_variant_links l_count
+          WHERE l_count.record_id = r.id AND l_count.tenant_id = COALESCE(r.tenant_id, 'admin')) AS variant_count,
+        (SELECT COUNT(*) FROM listing_publish_variant_links l_sku
+          WHERE l_sku.record_id = r.id AND l_sku.tenant_id = COALESCE(r.tenant_id, 'admin') AND l_sku.ozon_sku <> '') AS sku_count,
         s.name AS shop_name, creator.name AS created_by_name,
         '' AS online_primary_image,
         ${categoryNameSelect} AS category_name,
@@ -9463,10 +9483,10 @@ export async function listingPublishRecords(query = {}, session = null) {
   `;
   if (paged) {
     const [countRow, rows] = await Promise.all([
-      row(`SELECT COUNT(*) AS total ${fromSql}`, params),
+      row(`SELECT COUNT(*) AS total ${fromSql(Boolean(keyword || categoryPath))}`, params),
       all(`
         ${includePayload ? fullRecordSelectSql : listRecordSelectSql}
-        ${fromSql}
+        ${fromSql(true)}
         ORDER BY r.created_at DESC, r.id DESC
         LIMIT ? OFFSET ?
       `, [...params, pageSize, (page - 1) * pageSize])
@@ -9484,7 +9504,7 @@ export async function listingPublishRecords(query = {}, session = null) {
   }
   const rows = await all(`
     ${includePayload ? fullRecordSelectSql : listRecordSelectSql}
-    ${fromSql}
+    ${fromSql(true)}
     ORDER BY r.created_at DESC, r.id DESC
     LIMIT ?
   `, [...params, limit]);
@@ -19215,6 +19235,8 @@ function normalizePublishRecordRow(row = {}, options = {}) {
     id: Number(row.id || 0),
     draft_id: Number(row.draft_id || 0),
     shop_id: Number(row.shop_id || 0),
+    variant_count: Number(row.variant_count || 0),
+    sku_count: Number(row.sku_count || 0),
     row_key: `record-${row.id}`,
     row_type: "publish_record",
     payload_compacted: Boolean(row.payload_compacted || row.request_json === null),
