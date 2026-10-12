@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Boxes, CalendarDays, CheckCircle2, CircleCheck, ClipboardCheck, Clock3, Edit3, ImagePlus, Lightbulb, LayoutDashboard, Link2, ListTodo, PackagePlus, Plus, RefreshCw, Rocket, Search, ShoppingCart, Trash2, TrendingUp, TriangleAlert, Truck, Upload, Users } from "lucide-vue-next";
+import { Boxes, CalendarDays, CheckCircle2, CircleCheck, ClipboardCheck, Clock3, Edit3, ImagePlus, Lightbulb, LayoutDashboard, Link2, ListTodo, PackagePlus, Plus, RefreshCw, Rocket, Search, ShoppingCart, SlidersHorizontal, Trash2, TrendingUp, TriangleAlert, Truck, Upload, Users } from "lucide-vue-next";
 import { apiClient } from "../../utils/api";
 import { useAuthStore } from "../../stores/auth";
 import { uploadListingMedia } from "../../api/tools/imageCropper";
@@ -70,6 +70,9 @@ const ideaBrands = ref([]);
 const ideaCategories = ref([]);
 const developmentBrandFilter = ref("");
 const developmentCategoryFilter = ref("");
+const developmentScopeFiltersVisible = ref(false);
+const developmentScopeFilterCount = computed(() => Number(Boolean(developmentBrandFilter.value)) + Number(Boolean(developmentCategoryFilter.value)));
+watch(activeTab, () => { developmentScopeFiltersVisible.value = false; });
 function developmentScopes(row) { return row.development_scopes?.length ? row.development_scopes : [{ brand: row.development_brand, category: row.development_category }]; }
 const developmentBrandOptions = computed(() => [...new Set([...ideas.value, ...tasks.value].flatMap(row => developmentScopes(row).map(scope => scope.brand)).filter(Boolean))].sort());
 const developmentCategoryOptions = computed(() => [...new Set([...ideas.value, ...tasks.value].flatMap(row => developmentScopes(row).map(scope => scope.category)).filter(Boolean))].sort());
@@ -1018,15 +1021,10 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
       </div>
     </header>
 
-    <div v-if="['ideas', 'tasks'].includes(activeTab)" class="development-scope-filters">
-      <el-select v-model="developmentBrandFilter" clearable filterable placeholder="全部品牌 / 非汽车" aria-label="筛选开发品牌"><el-option v-for="brand in developmentBrandOptions" :key="brand" :label="brand" :value="brand" /></el-select>
-      <el-select v-model="developmentCategoryFilter" clearable filterable placeholder="全部开发类目" aria-label="筛选开发类目"><el-option v-for="category in developmentCategoryOptions" :key="category" :label="category" :value="category" /></el-select>
-    </div>
-
     <DevelopmentHeatmap ref="heatmapView" v-if="activeTab==='dashboard'" @open-task="openHeatmapTask" @create="openTask()" />
 
     <section v-else-if="activeTab==='ideas'" class="panel ideas-page">
-      <div class="section-title"><div><span>按类目和品牌安排开发，与任务中心同步，可先创建后认领</span><h2>灵感列表</h2></div><el-button type="primary" @click="openIdea()"><Lightbulb :size="16" /> 快速创建灵感</el-button></div>
+      <div class="section-title"><div><span>按类目和品牌安排开发，与任务中心同步，可先创建后认领</span><h2>灵感列表</h2></div><div class="idea-header-actions"><el-popover placement="bottom-end" :width="250" trigger="manual" :visible="developmentScopeFiltersVisible"><template #reference><el-button :icon="SlidersHorizontal" @click="developmentScopeFiltersVisible=!developmentScopeFiltersVisible">范围筛选{{ developmentScopeFilterCount ? ` · ${developmentScopeFilterCount}` : '' }}</el-button></template><div class="development-scope-filters"><el-select v-model="developmentBrandFilter" :teleported="false" clearable filterable placeholder="全部品牌 / 非汽车" aria-label="筛选开发品牌"><el-option v-for="brand in developmentBrandOptions" :key="brand" :label="brand" :value="brand" /></el-select><el-select v-model="developmentCategoryFilter" :teleported="false" clearable filterable placeholder="全部开发类目" aria-label="筛选开发类目"><el-option v-for="category in developmentCategoryOptions" :key="category" :label="category" :value="category" /></el-select></div></el-popover><el-button type="primary" @click="openIdea()"><Lightbulb :size="16" /> 快速创建灵感</el-button></div></div>
       <div class="idea-grid"><article v-for="row in sortedIdeas" :key="row.id" class="idea-card">
         <div class="idea-card-media"><el-image :src="row.image_url" fit="cover" :preview-src-list="row.image_url?[row.image_url]:[]" preview-teleported><template #error><div class="empty-image">暂无主图</div></template></el-image><el-button v-if="!row.task_id" class="replace-image-button" size="small" :icon="ImagePlus" @click="openIdea(row)">替换图片</el-button></div>
         <div class="idea-card-content"><header><div class="idea-title-line"><h3>{{ row.title }}</h3><span class="task-count">任务 {{ row.target_product_count || 0 }}</span><span class="priority-badge urgent">紧急 {{ row.urgency }}</span><span class="priority-badge important">重要 {{ row.importance }}</span></div><p>{{ row.note || '暂无备注' }}</p><el-link v-if="row.source_url" :href="row.source_url" target="_blank" type="primary" :underline="false">查看参考链接</el-link></header>
@@ -1062,7 +1060,7 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
         <div class="task-range-tabs"><button v-for="option in taskRangeOptions" :key="option.value" :class="{active:taskRange===option.value}" @click="taskRange=option.value">{{ option.label }}</button></div>
         <div class="task-date-nav"><el-button :disabled="taskRange==='custom'" @click="moveTaskRange(-1)">‹</el-button><strong>{{ taskRangeLabel }}</strong><el-button :disabled="taskRange==='custom'" @click="moveTaskRange(1)">›</el-button><el-button @click="taskAnchor=new Date()">今天</el-button></div>
         <el-date-picker v-if="taskRange==='custom'" v-model="taskCustomRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" />
-        <div class="task-filters"><el-input v-model="taskKeyword" clearable placeholder="搜索任务、项目或负责人"><template #prefix><Search :size="16" /></template></el-input><el-select v-model="taskOwnerFilter" filterable><el-option :label="`登录人员（${authStore.user?.name || '我'}）`" value="current" /><el-option label="全部人员" value="all" /><el-option label="未分配" value="unassigned" /><el-option v-for="person in people" :key="person.id" :label="person.name" :value="person.id" /></el-select><el-select v-model="taskStatus"><el-option label="全部状态" value="all" /><el-option label="待开始" value="todo" /><el-option label="进行中" value="doing" /><el-option label="待复核" value="review" /><el-option label="已完成" value="done" /><el-option label="已延期" value="delayed" /></el-select><el-tooltip placement="bottom" :show-after="150"><template #content><div class="task-list-tooltip"><strong>{{ taskPeopleTitle }}</strong><span>{{ taskListSummary.tasks }} 个任务</span><span>{{ taskListSummary.skuDone }} / {{ taskListSummary.skuTotal }} 个 SKU</span></div></template><el-button @click="taskPage=1;taskListVisible=true">查看任务清单</el-button></el-tooltip><el-button type="primary" :icon="Plus" @click="openTask()">新增任务</el-button></div>
+        <div class="task-filters"><el-input v-model="taskKeyword" clearable placeholder="搜索任务、项目或负责人"><template #prefix><Search :size="16" /></template></el-input><el-select v-model="taskOwnerFilter" filterable><el-option :label="`登录人员（${authStore.user?.name || '我'}）`" value="current" /><el-option label="全部人员" value="all" /><el-option label="未分配" value="unassigned" /><el-option v-for="person in people" :key="person.id" :label="person.name" :value="person.id" /></el-select><el-select v-model="taskStatus"><el-option label="全部状态" value="all" /><el-option label="待开始" value="todo" /><el-option label="进行中" value="doing" /><el-option label="待复核" value="review" /><el-option label="已完成" value="done" /><el-option label="已延期" value="delayed" /></el-select><el-popover placement="bottom-end" :width="250" trigger="manual" :visible="developmentScopeFiltersVisible"><template #reference><el-button :icon="SlidersHorizontal" @click="developmentScopeFiltersVisible=!developmentScopeFiltersVisible">范围{{ developmentScopeFilterCount ? ` · ${developmentScopeFilterCount}` : '' }}</el-button></template><div class="development-scope-filters"><el-select v-model="developmentBrandFilter" :teleported="false" clearable filterable placeholder="全部品牌 / 非汽车" aria-label="筛选开发品牌"><el-option v-for="brand in developmentBrandOptions" :key="brand" :label="brand" :value="brand" /></el-select><el-select v-model="developmentCategoryFilter" :teleported="false" clearable filterable placeholder="全部开发类目" aria-label="筛选开发类目"><el-option v-for="category in developmentCategoryOptions" :key="category" :label="category" :value="category" /></el-select></div></el-popover><el-tooltip placement="bottom" :show-after="150"><template #content><div class="task-list-tooltip"><strong>{{ taskPeopleTitle }}</strong><span>{{ taskListSummary.tasks }} 个任务</span><span>{{ taskListSummary.skuDone }} / {{ taskListSummary.skuTotal }} 个 SKU</span></div></template><el-button @click="taskPage=1;taskListVisible=true">查看任务清单</el-button></el-tooltip><el-button type="primary" :icon="Plus" @click="openTask()">新增任务</el-button></div>
       </div>
       <div class="task-type-tabs"><button v-for="option in taskTypeOptions" :key="option.value" :class="[option.value,{active:taskType===option.value}]" @click="taskType=option.value"><component :is="option.icon" :size="15" />{{ option.label }}</button></div>
       <div class="task-summary-grid"><article class="panel total"><div class="task-metric-icon"><CalendarDays :size="22" /></div><div><span>范围内任务</span><strong>{{ taskMetrics.total }}</strong><small>当前筛选范围</small></div></article><article class="panel done"><div class="task-metric-icon"><CheckCircle2 :size="22" /></div><div><span>按时完成</span><strong>{{ taskMetrics.done }}</strong><small>已完成且未逾期</small></div></article><article class="panel doing"><div class="task-metric-icon"><Clock3 :size="22" /></div><div><span>进行中</span><strong>{{ taskMetrics.doing }}</strong><small>待开始、进行或复核</small></div></article><article class="panel overdue"><div class="task-metric-icon"><TriangleAlert :size="22" /></div><div><span>已超时</span><strong>{{ taskMetrics.overdue }}</strong><small>需要优先处理</small></div></article></div>
@@ -1181,4 +1179,26 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
 
 <style>
 .idea-edit-dialog .el-dialog__body { max-height: 72vh; overflow-y: auto; }
+</style>
+
+<style scoped>
+.development-center .hero{gap:12px;padding:10px 16px}
+.development-center .hero h1{flex:none;font-size:19px}
+.development-center .hero-nav{min-width:0;flex:1;justify-content:flex-end}
+.development-center .tabs{min-width:0;overflow-x:auto;flex-wrap:nowrap;scrollbar-width:thin}
+.development-center .tabs button{flex:none;white-space:nowrap;padding:7px 11px}
+.development-center .quick-development{flex:none}
+.development-scope-filters{display:grid;gap:10px;margin:0}
+.development-scope-filters .el-select{width:100%}
+.idea-header-actions{display:flex;align-items:center;gap:8px}
+.task-overview-toolbar{gap:8px;padding:9px 12px}
+.task-range-tabs button{min-width:0;padding:7px 10px}
+.task-date-nav strong{min-width:174px}
+.task-filters{gap:7px}
+.task-filters .el-input{width:220px}
+.task-filters .el-select{width:118px}
+.task-type-tabs{margin-top:-5px}
+.task-summary-grid article{min-height:76px;padding:10px 14px}
+@media(max-width:1100px){.development-center .hero{align-items:stretch;flex-direction:column}.development-center .hero-nav{justify-content:flex-start}.development-center .tabs{flex:1}.task-filters{width:100%;margin-left:0}}
+@media(max-width:720px){.task-filters{flex-direction:row;flex-wrap:wrap}.task-filters .el-input{width:100%}.task-filters .el-select{width:calc(50% - 4px)}.idea-header-actions{flex-wrap:wrap;justify-content:flex-end}}
 </style>
