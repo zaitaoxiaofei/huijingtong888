@@ -10526,8 +10526,12 @@ export async function listingDrafts(query = {}, session) {
   const developmentType = String(query.developmentType || query.development_type || "").trim().toLowerCase();
   const category = String(query.category || query.categoryName || query.category_name || "").trim().toLowerCase();
   const requestedIds = [...new Set(String(query.ids || query.draft_ids || "").split(",").map((value) => Number(value.trim())).filter((value) => Number.isSafeInteger(value) && value > 0))].slice(0, 500);
+  const categoryPath = String(query.categoryPath || "").trim();
   const vehicleBrand = String(query.vehicleBrand || query.vehicle_brand || "").trim().toLowerCase();
   const vehicleModel = String(query.vehicleModel || query.vehicle_model || "").trim().toLowerCase();
+  const publishStatus = String(query.publishStatus || "all").trim().toLowerCase();
+  const minPrice = query.minPrice === undefined || query.minPrice === "" ? null : Number(query.minPrice);
+  const maxPrice = query.maxPrice === undefined || query.maxPrice === "" ? null : Number(query.maxPrice);
   const sortBy = String(query.sortBy || query.sort_by || "updated_at").trim().toLowerCase() === "created_at"
     ? "created_at"
     : "updated_at";
@@ -10612,25 +10616,51 @@ export async function listingDrafts(query = {}, session) {
     params.push(`%${category}%`);
     countParams.push(`%${category}%`);
   }
+  if (categoryPath) {
+    where.push("(t.category_name = ? OR t.category_name LIKE ?)");
+    params.push(categoryPath, `${categoryPath} / %`);
+    countParams.push(categoryPath, `${categoryPath} / %`);
+  }
   if (vehicleBrand) {
     where.push("LOWER(COALESCE(d.vehicle_brand, '')) LIKE ?");
     params.push(`%${vehicleBrand}%`);
     countParams.push(`%${vehicleBrand}%`);
   }
   if (vehicleModel) {
-    where.push("LOWER(COALESCE(d.vehicle_model, '')) LIKE ?");
-    params.push(`%${vehicleModel}%`);
-    countParams.push(`%${vehicleModel}%`);
+    where.push("(LOWER(COALESCE(d.vehicle_model, '')) LIKE ? OR LOWER(COALESCE(d.vehicle_model_key, '')) LIKE ?)");
+    params.push(`%${vehicleModel}%`, `%${vehicleModel}%`);
+    countParams.push(`%${vehicleModel}%`, `%${vehicleModel}%`);
   }
+  if (minPrice !== null && Number.isFinite(minPrice) && minPrice >= 0) {
+    where.push("CAST(NULLIF(d.list_price, '') AS DECIMAL(12, 2)) >= ?");
+    params.push(minPrice);
+    countParams.push(minPrice);
+  }
+  if (maxPrice !== null && Number.isFinite(maxPrice) && maxPrice >= 0) {
+    where.push("CAST(NULLIF(d.list_price, '') AS DECIMAL(12, 2)) <= ?");
+    params.push(maxPrice);
+    countParams.push(maxPrice);
+  }
+  const publishScope = (condition) => `EXISTS (SELECT 1 FROM listing_publish_records r_filter WHERE r_filter.draft_id = d.id AND ${relatedTenantScope("r_filter")} AND r_filter.status <> 'deleted' AND ${condition})`;
+  const published = publishScope("r_filter.status IN ('imported', 'published', 'success')");
+  const failed = publishScope("r_filter.status IN ('failed', 'ozon_status_error')");
+  const notSuccessful = publishScope("r_filter.status NOT IN ('imported', 'published', 'success')");
+  if (publishStatus === "not_published") where.push(`NOT ${publishScope("1 = 1")}`);
+  if (publishStatus === "success") where.push(`${published} AND NOT ${notSuccessful}`);
+  if (publishStatus === "partial") where.push(`${published} AND ${notSuccessful}`);
+  if (publishStatus === "failed") where.push(`${failed} AND NOT ${published}`);
+  if (publishStatus === "processing") where.push(publishScope("r_filter.status IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending')"));
   if (startDate) {
     where.push(`${dateFilterColumn} >= ?`);
-    params.push(`${startDate} 00:00:00`);
-    countParams.push(`${startDate} 00:00:00`);
+    const startBoundary = query.dateTimeZone === "Asia/Shanghai" ? new Date(`${startDate}T00:00:00+08:00`).toISOString().slice(0, 19).replace("T", " ") : `${startDate} 00:00:00`;
+    params.push(startBoundary);
+    countParams.push(startBoundary);
   }
   if (endDate) {
     where.push(`${dateFilterColumn} < DATE_ADD(?, INTERVAL 1 DAY)`);
-    params.push(endDate);
-    countParams.push(endDate);
+    const endBoundary = query.dateTimeZone === "Asia/Shanghai" ? new Date(`${endDate}T00:00:00+08:00`).toISOString().slice(0, 19).replace("T", " ") : endDate;
+    params.push(endBoundary);
+    countParams.push(endBoundary);
   }
   if (projectOnly && (!status || status === "all")) {
     where.push(`(

@@ -12,6 +12,7 @@ import { withImageToken } from "../../api/tools/imageCropper";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
+import OzonCategoryFilter from "../../components/listing/OzonCategoryFilter.vue";
 import { ozonBuyerProductLinkFromRow } from "../../utils/product-links";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date";
 import {
@@ -84,6 +85,10 @@ const state = reactive({
   category: "",
   vehicleBrand: "",
   vehicleModel: "",
+  publishStatus: "all",
+  minPrice: "",
+  maxPrice: "",
+  createdRange: [],
   status: "all",
   quality: "all",
   page: 1,
@@ -265,9 +270,17 @@ async function loadRecords() {
     if (creatorId) params.set("creatorId", creatorId);
   }
   if (isDraftMode.value && state.developmentType !== "all") params.set("developmentType", String(state.developmentType));
-  if (isDraftMode.value && state.category.trim()) params.set("category", state.category.trim());
+  if (isDraftMode.value && state.category.trim()) params.set("categoryPath", state.category.trim());
   if (isDraftMode.value && state.vehicleBrand.trim()) params.set("vehicleBrand", state.vehicleBrand.trim());
   if (isDraftMode.value && state.vehicleModel.trim()) params.set("vehicleModel", state.vehicleModel.trim());
+  if (isDraftMode.value && state.publishStatus !== "all") params.set("publishStatus", state.publishStatus);
+  if (isDraftMode.value && state.minPrice !== "") params.set("minPrice", String(state.minPrice));
+  if (isDraftMode.value && state.maxPrice !== "") params.set("maxPrice", String(state.maxPrice));
+  if (isDraftMode.value && state.createdRange?.length === 2) {
+    params.set("startDate", state.createdRange[0]);
+    params.set("endDate", state.createdRange[1]);
+    params.set("dateTimeZone", "Asia/Shanghai");
+  }
   const requestUrl = `${endpoint}?${params.toString()}`;
   const cacheKey = requestUrl;
   const cached = cacheKey ? draftListCache.get(cacheKey) : null;
@@ -573,6 +586,10 @@ function resetFilters() {
   state.category = "";
   state.vehicleBrand = "";
   state.vehicleModel = "";
+  state.publishStatus = "all";
+  state.minPrice = "";
+  state.maxPrice = "";
+  state.createdRange = [];
   state.status = "all";
   state.quality = "all";
   state.developmentType = "all";
@@ -588,6 +605,10 @@ function resetModeFilters() {
   state.category = "";
   state.vehicleBrand = "";
   state.vehicleModel = "";
+  state.publishStatus = "all";
+  state.minPrice = "";
+  state.maxPrice = "";
+  state.createdRange = [];
   state.page = 1;
   selectedRows.value = [];
   loadRecords();
@@ -601,6 +622,10 @@ function resetModeFiltersFromRoute() {
   state.category = "";
   state.vehicleBrand = "";
   state.vehicleModel = "";
+  state.publishStatus = "all";
+  state.minPrice = "";
+  state.maxPrice = "";
+  state.createdRange = [];
   state.page = 1;
   selectedRows.value = [];
   applyRouteStatusFilter();
@@ -1677,26 +1702,36 @@ watch(() => route.query.taskId, () => {
     <template v-if="!isTaskMode">
     <section class="toolbar-panel">
       <div class="toolbar-filters">
-        <el-input v-model="state.nameQuery" :prefix-icon="Search" clearable placeholder="名称 / offer_id" @keyup.enter="searchRecords" @clear="searchRecords" />
+        <el-select v-if="isDraftMode" v-model="state.developmentType" placeholder="开发类型" @change="searchRecords">
+          <el-option label="全部开发类型" value="all" />
+          <el-option v-for="option in developmentTypeOptions" :key="option.value" :label="option.label" :value="option.value" />
+        </el-select>
+        <OzonCategoryFilter v-if="isDraftMode" v-model="state.category" @change="searchRecords" />
+        <el-input v-model="state.nameQuery" :prefix-icon="Search" clearable :placeholder="isDraftMode ? '草稿 ID / 俄语商品名 / offer_id' : '名称 / offer_id'" @keyup.enter="searchRecords" @clear="searchRecords" />
         <el-select v-model="state.shopId" filterable placeholder="店铺" @change="searchRecords">
           <el-option label="全部店铺" value="all" />
           <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="shop.id" />
         </el-select>
-        <el-select v-model="state.creatorId" filterable placeholder="人员" @change="searchRecords">
+        <el-select v-model="state.creatorId" filterable placeholder="人员 / ID" @change="searchRecords">
           <el-option label="全部人员" value="all" />
-          <el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="person.id" />
+          <el-option v-for="person in state.people" :key="person.id" :label="`${person.name} (ID ${person.id})`" :value="person.id" />
         </el-select>
-        <el-select v-if="isDraftMode" v-model="state.developmentType" placeholder="类型" @change="searchRecords">
-          <el-option label="全部类型" value="all" />
-          <el-option v-for="option in developmentTypeOptions" :key="option.value" :label="option.label" :value="option.value" />
-        </el-select>
-        <el-input v-if="isDraftMode" v-model="state.category" clearable placeholder="Ozon 类目" @keyup.enter="searchRecords" @clear="searchRecords" />
-        <el-input v-if="isDraftMode" v-model="state.vehicleBrand" clearable placeholder="车型品牌" @keyup.enter="searchRecords" @clear="searchRecords" />
-        <el-input v-if="isDraftMode" v-model="state.vehicleModel" clearable placeholder="车型 / 产品信息" @keyup.enter="searchRecords" @clear="searchRecords" />
-        <el-input v-model="state.query" clearable placeholder="offer / product id / 类目" @keyup.enter="searchRecords" @clear="searchRecords" />
+        <el-input v-if="isDraftMode" v-model="state.vehicleModel" clearable placeholder="裂变车型 / 型号 ID" @keyup.enter="searchRecords" @clear="searchRecords" />
+        <el-input v-else v-model="state.query" clearable placeholder="offer / product id / 类目" @keyup.enter="searchRecords" @clear="searchRecords" />
         <el-select v-model="state.status" placeholder="状态" @change="searchRecords">
           <el-option v-for="option in statusOptions" :key="option.value" :label="option.label" :value="option.value" />
         </el-select>
+        <el-select v-if="isDraftMode" v-model="state.publishStatus" placeholder="上架状态" @change="searchRecords">
+          <el-option label="全部上架状态" value="all" />
+          <el-option label="未上架" value="not_published" />
+          <el-option label="上架成功" value="success" />
+          <el-option label="部分上架" value="partial" />
+          <el-option label="上架失败" value="failed" />
+          <el-option label="处理中" value="processing" />
+        </el-select>
+        <el-input-number v-if="isDraftMode" v-model="state.minPrice" :min="0" :controls="false" placeholder="最低售价" @change="searchRecords" />
+        <el-input-number v-if="isDraftMode" v-model="state.maxPrice" :min="0" :controls="false" placeholder="最高售价" @change="searchRecords" />
+        <el-date-picker v-if="isDraftMode" v-model="state.createdRange" class="created-date-filter" type="daterange" value-format="YYYY-MM-DD" start-placeholder="创建开始" end-placeholder="创建结束" @change="searchRecords" />
         <el-select v-if="isPublishMode" v-model="state.quality" placeholder="评分" @change="searchRecords">
           <el-option label="全部评分" value="all" />
           <el-option label="85分以下" value="lt85" />
@@ -1745,11 +1780,14 @@ watch(() => route.query.taskId, () => {
             <div>
               <ProductTitleLink :title="publishRecordProductTitle(row)" :href="publishRecordBuyerLink(row)" :lines="2" />
               <span>{{ row.offer_id }}</span>
-              <span v-if="vehicleModelText(row)" class="muted-text">{{ vehicleModelText(row) }}</span>
+              <span v-if="isPublishMode && vehicleModelText(row)" class="muted-text">{{ vehicleModelText(row) }}</span>
               <em>{{ row.image_count || 0 }} 图 / {{ row.video_urls?.length || 0 }} 视频</em>
             </div>
           </div>
         </template>
+      </el-table-column>
+      <el-table-column v-if="isDraftMode" label="车型 / 型号 ID" min-width="165" show-overflow-tooltip>
+        <template #default="{ row }">{{ vehicleModelText(row) || "-" }}<span v-if="row.vehicle_model_key" class="muted-text"> · {{ row.vehicle_model_key }}</span></template>
       </el-table-column>
       <el-table-column v-if="isDraftMode" label="开发类型" width="116" align="center">
         <template #default="{ row }">
@@ -1819,7 +1857,7 @@ watch(() => route.query.taskId, () => {
           <span class="price-cell">{{ recordPriceText(row) }}</span>
         </template>
       </el-table-column>
-      <el-table-column :label="isDraftMode ? '生成时间' : '更新时间'" min-width="152">
+      <el-table-column :label="isDraftMode ? '创建时间' : '更新时间'" min-width="152">
         <template #default="{ row }">
           <span class="record-text nowrap">{{ compactDateTime(isDraftMode ? row.created_at : (row.updated_at || row.created_at)) }}</span>
         </template>
@@ -2270,12 +2308,13 @@ watch(() => route.query.taskId, () => {
 }
 .toolbar-filters {
   display: grid;
-  grid-template-columns: 190px 140px 140px 120px minmax(180px, 1fr) 120px;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
   gap: 10px;
   flex: 1;
   min-width: 0;
 }
 .toolbar-filters > * { width: 100%; min-width: 0; }
+.toolbar-filters > .created-date-filter { grid-column: span 2; }
 .task-toolbar-filters {
   grid-template-columns: minmax(260px, 420px) 160px 140px;
   flex: 0 1 620px;

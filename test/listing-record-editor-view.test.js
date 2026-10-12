@@ -95,8 +95,8 @@ test("listing draft box supports structured category and vehicle filters", () =>
   assert.match(publishRecordsSource, /category:\s*""/);
   assert.match(publishRecordsSource, /vehicleBrand:\s*""/);
   assert.match(publishRecordsSource, /vehicleModel:\s*""/);
-  assert.match(publishRecordsSource, /params\.set\("category", state\.category\.trim\(\)\)/);
-  assert.match(publishRecordsSource, /placeholder="Ozon 类目"/);
+  assert.match(publishRecordsSource, /params\.set\("categoryPath", state\.category\.trim\(\)\)/);
+  assert.match(publishRecordsSource, /<OzonCategoryFilter/);
   assert.match(publishRecordsSource, /label="Ozon 类目"/);
   assert.match(listingAutomationServiceSource, /const nameQuery = String\(query\.nameQuery \|\| query\.name_query \|\| ""\)/);
   assert.match(listingAutomationServiceSource, /LOWER\(COALESCE\(t\.category_name, ''\)\) LIKE \?/);
