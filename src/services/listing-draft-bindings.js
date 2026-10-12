@@ -17,6 +17,14 @@ async function ensureSchema() {
     KEY idx_listing_draft_bindings_task (task_id),
     KEY idx_listing_draft_bindings_vehicle (vehicle_catalog_id)
   ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+  await mysqlExecute(`CREATE TABLE IF NOT EXISTS listing_draft_vehicle_links (
+    tenant_id VARCHAR(80) NOT NULL,
+    draft_id BIGINT UNSIGNED NOT NULL,
+    vehicle_catalog_id BIGINT UNSIGNED NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, draft_id, vehicle_catalog_id),
+    KEY idx_listing_draft_vehicle_links_vehicle (tenant_id, vehicle_catalog_id, draft_id)
+  ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
   schemaReady = true;
 }
 
@@ -65,10 +73,15 @@ export async function listingDraftBindings(query = {}, session = null) {
   await ensureSchema();
   const ids = [...new Set(String(query.ids || "").split(",").map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))].slice(0, 100);
   if (!ids.length) return [];
-  return mysqlQuery(`SELECT draft.id AS draft_id,
+  const tenant = tenantId(session);
+  const placeholders = ids.map(() => "?").join(",");
+  const [rows, vehicleLinks, taskPlanLinks] = await Promise.all([
+    mysqlQuery(`SELECT draft.id AS draft_id,
       CASE WHEN vehicle.brand_name = draft.vehicle_brand AND vehicle.model_name = draft.vehicle_model THEN binding.vehicle_catalog_id ELSE NULL END AS vehicle_catalog_id,
+      draft.vehicle_brand AS primary_vehicle_brand, draft.vehicle_model AS primary_vehicle_model,
       task.id AS task_id, task.title AS task_title,
       CASE WHEN JSON_VALID(task.related_object) THEN NULLIF(JSON_UNQUOTE(JSON_EXTRACT(task.related_object, '$.category')), '') ELSE NULL END AS task_core_name,
+      CASE WHEN JSON_VALID(task.related_object) THEN JSON_UNQUOTE(JSON_EXTRACT(task.related_object, '$.kind')) ELSE NULL END AS task_plan_kind,
       owner.name AS task_owner_name,
       owner.avatar_url AS task_owner_avatar_url, inventory.inventory_category AS draft_core_name,
       (SELECT GROUP_CONCAT(DISTINCT COALESCE(NULLIF(shop.name, ''), CONCAT('店铺 ', copy.shop_id)) ORDER BY copy.shop_id SEPARATOR '、')
@@ -82,15 +95,80 @@ export async function listingDraftBindings(query = {}, session = null) {
     LEFT JOIN products inventory ON inventory.id = draft.source_product_id AND inventory.active = 1
       AND inventory.tenant_id = CASE WHEN COALESCE(draft.tenant_id, 'admin') = 'admin'
         THEN (SELECT id FROM tenants WHERE slug = 'default' LIMIT 1) ELSE CAST(draft.tenant_id AS UNSIGNED) END
-    WHERE COALESCE(draft.tenant_id, 'admin') = ? AND draft.status <> 'deleted' AND draft.id IN (${ids.map(() => "?").join(",")})`, [tenantId(session), ...ids]);
+    WHERE COALESCE(draft.tenant_id, 'admin') = ? AND draft.status <> 'deleted' AND draft.id IN (${placeholders})`, [tenant, ...ids]),
+    mysqlQuery(`SELECT link.draft_id, link.vehicle_catalog_id AS id, vehicle.brand_name, vehicle.model_name
+      FROM listing_draft_vehicle_links link
+      JOIN ai_vehicle_catalog vehicle ON vehicle.id = link.vehicle_catalog_id AND vehicle.enabled = 1
+      WHERE link.tenant_id = ? AND link.draft_id IN (${placeholders})
+      ORDER BY link.created_at, link.vehicle_catalog_id`, [tenant, ...ids]),
+    mysqlQuery(`SELECT task.id AS task_id, task.title AS task_title, owner.name AS task_owner_name,
+        owner.avatar_url AS task_owner_avatar_url,
+        CASE WHEN JSON_VALID(task.related_object) THEN JSON_UNQUOTE(JSON_EXTRACT(task.related_object, '$.category')) ELSE NULL END AS task_core_name,
+        linked.draft_id, task.updated_at AS task_updated_at
+      FROM team_tasks task
+      JOIN JSON_TABLE(CASE WHEN JSON_VALID(task.related_object) THEN task.related_object ELSE '{}' END,
+        '$.models[*].draft_ids[*]' COLUMNS (draft_id BIGINT PATH '$')) linked
+      LEFT JOIN people owner ON owner.id = task.owner_person_id
+      WHERE task.active = 1 AND task.work_type = 'product_development' AND linked.draft_id IN (${placeholders})
+      UNION ALL
+      SELECT task.id, task.title, owner.name, owner.avatar_url,
+        CASE WHEN JSON_VALID(task.related_object) THEN JSON_UNQUOTE(JSON_EXTRACT(task.related_object, '$.category')) ELSE NULL END, linked.draft_id, task.updated_at
+      FROM team_tasks task
+      JOIN JSON_TABLE(CASE WHEN JSON_VALID(task.related_object) THEN task.related_object ELSE '{}' END,
+        '$.unallocated_draft_ids[*]' COLUMNS (draft_id BIGINT PATH '$')) linked
+      LEFT JOIN people owner ON owner.id = task.owner_person_id
+      WHERE task.active = 1 AND task.work_type = 'product_development' AND linked.draft_id IN (${placeholders})
+      UNION ALL
+      SELECT task.id, task.title, owner.name, owner.avatar_url,
+        CASE WHEN JSON_VALID(task.related_object) THEN JSON_UNQUOTE(JSON_EXTRACT(task.related_object, '$.category')) ELSE NULL END, idea_draft.draft_id, task.updated_at
+      FROM team_tasks task
+      JOIN product_development_idea_drafts idea_draft
+        ON idea_draft.idea_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(
+          CASE WHEN JSON_VALID(task.related_object) THEN task.related_object ELSE '{}' END, '$.idea_id')) AS UNSIGNED)
+      LEFT JOIN people owner ON owner.id = task.owner_person_id
+      WHERE task.active = 1 AND task.work_type = 'product_development'
+        AND JSON_VALID(task.related_object) AND idea_draft.draft_id IN (${placeholders})`, [...ids, ...ids, ...ids])
+  ]);
+  const vehiclesByDraft = new Map();
+  for (const link of vehicleLinks) {
+    const draftId = Number(link.draft_id);
+    if (!vehiclesByDraft.has(draftId)) vehiclesByDraft.set(draftId, []);
+    vehiclesByDraft.get(draftId).push(link);
+  }
+  const tasksByDraft = new Map();
+  for (const link of taskPlanLinks) {
+    const draftId = Number(link.draft_id);
+    if (!tasksByDraft.has(draftId)) tasksByDraft.set(draftId, []);
+    tasksByDraft.get(draftId).push(link);
+  }
+  for (const links of tasksByDraft.values()) links.sort((a, b) =>
+    String(b.task_updated_at || "").localeCompare(String(a.task_updated_at || "")) || Number(b.task_id) - Number(a.task_id));
+  return rows.map((row) => {
+    const planLinks = tasksByDraft.get(Number(row.draft_id)) || [];
+    const planLink = planLinks.find((link) => Number(link.task_id) === Number(row.task_id)) || planLinks[0];
+    const task = planLink || (row.task_plan_kind === "development_matrix" ? null : row);
+    const vehicle_bindings = vehiclesByDraft.get(Number(row.draft_id)) || [];
+    return {
+      ...row,
+      task_id: task?.task_id || null,
+      task_title: task?.task_title || "",
+      task_core_name: task?.task_core_name || "",
+      task_owner_name: task?.task_owner_name || "",
+      task_owner_avatar_url: task?.task_owner_avatar_url || "",
+      vehicle_bindings: vehicle_bindings.length ? vehicle_bindings : (row.vehicle_catalog_id ? [{
+        id: row.vehicle_catalog_id, brand_name: row.primary_vehicle_brand, model_name: row.primary_vehicle_model
+      }] : [])
+    };
+  });
 }
 
 function matchingModelIndex(plan, draft, hints = {}) {
-  const brand = String(hints.brand || draft.vehicle_brand || "").trim().toLocaleLowerCase();
-  const model = String(hints.model || draft.vehicle_model || "").trim().toLocaleLowerCase();
-  if (!brand || !model) return -1;
-  return plan.models.findIndex((item) => String(item.brand || plan.brand || "").trim().toLocaleLowerCase() === brand
-    && String(item.model || "").trim().toLocaleLowerCase() === model);
+  const candidates = hints.brand && hints.model
+    ? [{ brand_name: hints.brand, model_name: hints.model }]
+    : [...(draft.vehicle_bindings || []), { brand_name: draft.vehicle_brand, model_name: draft.vehicle_model }];
+  return plan.models.findIndex((item) => candidates.some((candidate) =>
+    String(item.brand || plan.brand || "").trim().toLocaleLowerCase() === String(candidate.brand_name || "").trim().toLocaleLowerCase()
+    && String(item.model || "").trim().toLocaleLowerCase() === String(candidate.model_name || "").trim().toLocaleLowerCase()));
 }
 
 async function syncTaskPlan(connection, taskId, ids, drafts, hints = {}) {
@@ -122,12 +200,21 @@ export async function bindListingDrafts(body = {}, session = null) {
   const mode = String(body.mode || "");
   if (mode !== "vehicle" && mode !== "task") throw new Error("请选择车型或任务绑定方式。");
   let vehicle;
+  let vehicles = [];
   let task;
   if (mode === "vehicle") {
-    const vehicleId = Number(body.vehicle_id || body.vehicleId);
-    if (!Number.isSafeInteger(vehicleId) || vehicleId <= 0) throw new Error("请选择车型目录中的品牌和车型。");
-    [vehicle] = await mysqlQuery("SELECT id, brand_name, model_name FROM ai_vehicle_catalog WHERE id = ? AND enabled = 1 AND model_name <> ''", [vehicleId]);
-    if (!vehicle) throw new Error("车型不存在或已停用，请重新选择。");
+    const raw = body.vehicle_ids || body.vehicleIds || [body.vehicle_id || body.vehicleId];
+    if (!Array.isArray(raw)) throw new Error("请选择车型目录中的品牌和车型。");
+    const vehicleIds = [...new Set(raw.map(Number))];
+    if (!vehicleIds.length || vehicleIds.length > 50 || vehicleIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+      throw new Error("请选择 1 至 50 个有效车型。");
+    }
+    const found = await mysqlQuery(`SELECT id, brand_name, model_name FROM ai_vehicle_catalog
+      WHERE id IN (${vehicleIds.map(() => "?").join(",")}) AND enabled = 1 AND model_name <> ''`, vehicleIds);
+    if (found.length !== vehicleIds.length) throw new Error("部分车型不存在或已停用，请重新选择。");
+    const byId = new Map(found.map((item) => [Number(item.id), item]));
+    vehicles = vehicleIds.map((id) => byId.get(id));
+    vehicle = vehicles[0];
   } else {
     const taskId = Number(body.task_id || body.taskId);
     if (!Number.isSafeInteger(taskId) || taskId <= 0) throw new Error("请选择任务系统中的有效任务。");
@@ -139,6 +226,10 @@ export async function bindListingDrafts(body = {}, session = null) {
       AND COALESCE(tenant_id, 'admin') = ? AND status <> 'deleted' FOR UPDATE`, [...ids, tenant]);
     if (owned.length !== ids.length) throw new Error("部分草稿不存在或不属于当前企业，请刷新草稿箱后重试。");
     if (mode === "task") {
+      const [vehicleRows] = await connection.execute(`SELECT link.draft_id, vehicle.brand_name, vehicle.model_name
+        FROM listing_draft_vehicle_links link JOIN ai_vehicle_catalog vehicle ON vehicle.id = link.vehicle_catalog_id AND vehicle.enabled = 1
+        WHERE link.tenant_id = ? AND link.draft_id IN (${ids.map(() => "?").join(",")})`, [tenant, ...ids]);
+      for (const draft of owned) draft.vehicle_bindings = vehicleRows.filter((link) => Number(link.draft_id) === Number(draft.id));
       const [previous] = await connection.execute(`SELECT DISTINCT task_id FROM listing_draft_bindings WHERE tenant_id = ?
         AND draft_id IN (${ids.map(() => "?").join(",")}) AND task_id IS NOT NULL`, [tenant, ...ids]);
       for (const row of previous) {
@@ -166,6 +257,9 @@ export async function bindListingDrafts(body = {}, session = null) {
           normalizeVehicleModelKey(vehicle.brand_name, vehicle.model_name), id, tenant]);
         await connection.execute(`INSERT INTO listing_draft_bindings (tenant_id, draft_id, vehicle_catalog_id) VALUES (?, ?, ?)
           ON DUPLICATE KEY UPDATE vehicle_catalog_id = VALUES(vehicle_catalog_id), updated_at = CURRENT_TIMESTAMP`, [tenant, id, vehicle.id]);
+        await connection.execute("DELETE FROM listing_draft_vehicle_links WHERE tenant_id = ? AND draft_id = ?", [tenant, id]);
+        await connection.execute(`INSERT INTO listing_draft_vehicle_links (tenant_id, draft_id, vehicle_catalog_id) VALUES ${vehicles.map(() => "(?, ?, ?)").join(",")}`,
+          vehicles.flatMap((item) => [tenant, id, item.id]));
       } else {
         await connection.execute(`INSERT INTO listing_draft_bindings (tenant_id, draft_id, task_id) VALUES (?, ?, ?)
           ON DUPLICATE KEY UPDATE task_id = VALUES(task_id), updated_at = CURRENT_TIMESTAMP`, [tenant, id, task.id]);
@@ -173,5 +267,6 @@ export async function bindListingDrafts(body = {}, session = null) {
     }
   });
   return { count: ids.length, mode, vehicle: vehicle ? `${vehicle.brand_name} ${vehicle.model_name}` : undefined,
+    vehicles: vehicles.map((item) => ({ id: Number(item.id), brand: item.brand_name, model: item.model_name })),
     task: task ? { id: Number(task.id), title: task.title } : undefined };
 }
