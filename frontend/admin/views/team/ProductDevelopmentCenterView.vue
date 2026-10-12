@@ -70,12 +70,17 @@ const ideas = ref([]);
 const ideasLoaded = ref(false);
 const reviewDrafts = ref(new Map());
 const reviewSalesByTask = ref(new Map());
+const reviewDetailLoadingIds = ref(new Set());
+const reviewCategoryOptions = ref([]);
+const reviewVehicleCatalog = ref([]);
+const reviewCatalogPromise = ref(null);
 const reviewDraftsLoading = ref(false);
 const reviewDraftsKey = ref("");
 const reviewDetailsVisible = ref(false);
 const reviewDetailsKind = ref("drafts");
 const reviewDetailsTask = ref(null);
 const reviewCategoryFilter = ref("");
+const reviewBrandFilter = ref("");
 const reviewVehicleFilter = ref("");
 const reviewOwnerFilter = ref("all");
 const reviewCreatorFilter = ref("all");
@@ -310,6 +315,8 @@ const completedDevelopmentTasks = computed(() => reviewTasks.value
 const filteredReviewTasks = computed(() => completedDevelopmentTasks.value.filter((task) => {
   const category = String(task.development_category || task.development_plan?.category || "").toLowerCase();
   if (reviewCategoryFilter.value.trim() && !category.includes(reviewCategoryFilter.value.trim().toLowerCase())) return false;
+  const brands = (task.development_plan?.models || []).map((item) => item.brand || task.development_brand || "").join(" ").toLowerCase();
+  if (reviewBrandFilter.value && !brands.includes(reviewBrandFilter.value.toLowerCase())) return false;
   const models = (task.development_plan?.models || []).map((item) => item.model || "").join(" ").toLowerCase();
   if (reviewVehicleFilter.value.trim() && !models.includes(reviewVehicleFilter.value.trim().toLowerCase())) return false;
   if (reviewOwnerFilter.value !== "all" && Number(task.owner_person_id || 0) !== Number(reviewOwnerFilter.value)) return false;
@@ -426,7 +433,57 @@ function reviewTaskPublishState(task) {
   return { label: "尚未上架", type: "info", published, total: drafts.length };
 }
 
-function reviewTaskCreator(task) { return personById.value.get(Number(task.created_by_person_id))?.name || "未知"; }
+function reviewPersonName(task, kind) {
+  if (kind === "owner") return task.owner_name || "未分配";
+  return task.created_by_name || personById.value.get(Number(task.created_by_person_id))?.name || "未知";
+}
+function reviewPersonAvatar(task, kind) {
+  const person = personById.value.get(Number(kind === "owner" ? task.owner_person_id : task.created_by_person_id));
+  return kind === "owner" ? task.owner_avatar_url || person?.avatar_url || "" : task.created_by_avatar_url || person?.avatar_url || "";
+}
+const reviewVehicleBrands = computed(() => reviewVehicleCatalog.value.map((item) => item.name).filter(Boolean));
+const reviewVehicleModels = computed(() => reviewVehicleCatalog.value.flatMap((brand) => (brand.models || []).map((model) => ({ brand: brand.name, name: model.name })))
+  .filter((item) => !reviewBrandFilter.value || item.brand === reviewBrandFilter.value));
+async function loadReviewCatalogs() {
+  if (reviewCatalogPromise.value) return reviewCatalogPromise.value;
+  reviewCatalogPromise.value = Promise.all([
+    loadInventoryNamingOptions({ type: "category" }),
+    loadInventoryVehicleCatalog()
+  ]).then(([categories, catalog]) => {
+    reviewCategoryOptions.value = categories.map((item) => item.value || item.label).filter(Boolean);
+    reviewVehicleCatalog.value = catalog;
+  }).catch((error) => { console.warn("复盘筛选目录加载失败", error); }).finally(() => { reviewCatalogPromise.value = null; });
+  return reviewCatalogPromise.value;
+}
+function reviewTaskDetailRows(task) {
+  return reviewTaskDraftRows(task).flatMap((draft) => {
+    const skus = draft.published_skus || [];
+    const shops = draft.published_shops || [];
+    const variants = draft.variants || [];
+    if (!variants.length) return (skus.length ? skus : shops.length ? shops : [null]).map((sku) => ({ draft, variant: null, sku, detail_key: `${draft.id}|${sku?.shop_id || 0}|${sku?.ozon_sku || "none"}` }));
+    return variants.flatMap((variant) => {
+      const offer = String(variant.offer_id || variant.sku || "").trim().toLowerCase();
+      const matching = offer ? skus.filter((sku) => String(sku.offer_id || "").trim().toLowerCase() === offer) : variants.length === 1 ? skus : [];
+      const matchingShops = offer ? shops.filter((shop) => String(shop.offer_id || "").trim().toLowerCase() === offer) : variants.length === 1 ? shops : [];
+      const rows = matching.length ? matching : matchingShops.length ? matchingShops : [null];
+      return rows.map((sku) => ({ draft, variant, sku, detail_key: `${draft.id}|${variant.variant_id}|${sku?.shop_id || 0}|${sku?.ozon_sku || "none"}` }));
+    });
+  });
+}
+async function loadReviewTaskDetails(task, expanded) {
+  const id = Number(task?.id || 0);
+  if (!expanded) return;
+  if (reviewTaskDraftRows(task).every((draft) => Array.isArray(draft.variants))) return;
+  if (!reviewTaskDraftIds(task).length) return;
+  const loading = new Set(reviewDetailLoadingIds.value); loading.add(id); reviewDetailLoadingIds.value = loading;
+  try {
+    const result = await apiClient.post("/api/listing/development-review", { include_variants: true, tasks: [{ task_id: id, draft_ids: reviewTaskDraftIds(task) }] });
+    const drafts = new Map(reviewDrafts.value);
+    for (const draft of result?.drafts || []) drafts.set(Number(draft.id), draft);
+    reviewDrafts.value = drafts;
+  } catch (error) { ElMessage.error(error.message || "开发任务明细加载失败"); }
+  finally { const current = new Set(reviewDetailLoadingIds.value); current.delete(id); reviewDetailLoadingIds.value = current; }
+}
 function reviewTaskCompletionTime(task) {
   const value = task.completed_at || task.updated_at;
   return value ? shanghaiDateTimeText(value, { assumeUtcWhenNaive: true }) : "暂无记录";
@@ -571,10 +628,14 @@ function createTaskDraft(row, model) {
   developmentTaskVisible.value = false;
   router.push({ path: "/listing-automation", query: { workbenchId: `development-${row.id}-${Date.now()}`, quickCreate: "1", from: "development-task", taskId: String(row.id), modelId: String(model.model_id || ""), model: model.model || "" } });
 }
-function bindTaskDraft(row) {
+function bindTaskDraft(row, model = null) {
   developmentTaskVisible.value = false;
-  taskCreationInitial.value = row;
-  taskCreationVisible.value = true;
+  if (!model && !developmentModels(row).length) {
+    taskCreationInitial.value = row;
+    taskCreationVisible.value = true;
+    return;
+  }
+  void openTaskModelDraftPicker(row, model);
 }
 function manualSkuValues(value = "") {
   return [...new Set(String(value || "").split(/[\n,，;；\s]+/).map((sku) => sku.trim()).filter(Boolean))];
@@ -894,6 +955,7 @@ function mergeIdeaRowsWithTasks(ideaRows) {
 }
 
 async function loadReviewDrafts(force = false) {
+  void loadReviewCatalogs();
   reviewDraftsLoading.value = true;
   try {
     const [taskRows, personRows] = await Promise.all([
@@ -1304,8 +1366,9 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
     <section v-else-if="activeTab==='products'" v-loading="reviewDraftsLoading" class="panel development-review-page">
       <div class="section-title"><div><span>按已完成的开发任务汇总关联草稿、车型、SKU 与发布状态</span><h2>开发数据复盘</h2></div><div class="review-header-actions"><el-tag type="success" effect="light">{{ filteredReviewTasks.length }} / {{ completedDevelopmentTasks.length }} 个已完成任务</el-tag><el-button @click="refreshReviewData"><RefreshCw :size="15" /> 刷新</el-button></div></div>
       <div class="review-filters">
-        <el-input v-model="reviewCategoryFilter" clearable placeholder="核心品名" aria-label="按核心品名筛选" @input="reviewPage=1" />
-        <el-input v-model="reviewVehicleFilter" clearable placeholder="车型" aria-label="按车型筛选" @input="reviewPage=1" />
+        <el-select v-model="reviewCategoryFilter" filterable clearable placeholder="核心品名" aria-label="按核心品名筛选" @change="reviewPage=1"><el-option v-for="name in reviewCategoryOptions" :key="name" :label="name" :value="name" /></el-select>
+        <el-select v-model="reviewBrandFilter" filterable clearable placeholder="品牌" aria-label="按品牌筛选" @change="reviewPage=1;reviewVehicleFilter=''" ><el-option v-for="brand in reviewVehicleBrands" :key="brand" :label="brand" :value="brand" /></el-select>
+        <el-select v-model="reviewVehicleFilter" filterable clearable placeholder="车型" aria-label="按车型筛选" @change="reviewPage=1"><el-option v-for="model in reviewVehicleModels" :key="`${model.brand}-${model.name}`" :label="`${model.brand} · ${model.name}`" :value="model.name" /></el-select>
         <el-select v-model="reviewOwnerFilter" placeholder="负责人" @change="reviewPage=1"><el-option label="全部负责人" value="all" /><el-option v-for="person in people" :key="`review-owner-${person.id}`" :label="person.name" :value="String(person.id)" /></el-select>
         <el-select v-model="reviewCreatorFilter" placeholder="创建人" @change="reviewPage=1"><el-option label="全部创建人" value="all" /><el-option v-for="person in people" :key="`review-creator-${person.id}`" :label="person.name" :value="String(person.id)" /></el-select>
         <el-date-picker v-model="reviewCreatedRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="创建开始" end-placeholder="创建结束" @change="reviewPage=1" />
@@ -1313,21 +1376,22 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
         <el-select v-model="reviewPublishFilter" placeholder="上架状态" @change="reviewPage=1"><el-option label="全部上架状态" value="all" /><el-option label="已全部上架" value="published" /><el-option label="未全部上架" value="unpublished" /></el-select>
         <el-select v-model="reviewOrderSort" placeholder="排序" @change="reviewPage=1"><el-option label="按完成时间" value="latest" /><el-option label="出单量从高到低" value="orders" /></el-select>
       </div>
-      <el-table :data="pagedReviewTasks" row-key="id" max-height="calc(100vh - 425px)" empty-text="没有符合筛选条件的已完成任务">
-        <el-table-column label="任务信息" min-width="500">
+      <el-table :data="pagedReviewTasks" row-key="id" max-height="calc(100vh - 425px)" empty-text="没有符合筛选条件的已完成任务" @expand-change="(row, expandedRows) => loadReviewTaskDetails(row, expandedRows.some((item) => Number(item.id) === Number(row.id)))">
+        <el-table-column type="expand" width="42"><template #default="{row}"><div v-loading="reviewDetailLoadingIds.has(Number(row.id))" class="review-detail-expand"><div class="review-detail-heading"><strong>草稿箱 → 变体 → 在线 SKU</strong><span>明细按上架记录和在线商品匹配；未生成 SKU 的记录会保留在对应草稿下。</span></div><el-table :data="reviewTaskDetailRows(row)" row-key="detail_key" size="small" max-height="420" empty-text="该任务还没有关联草稿箱"><el-table-column label="车型" min-width="150"><template #default="{row:detail}">{{ detail.draft.model_name || [detail.draft.vehicle_brand,detail.draft.vehicle_model].filter(Boolean).join(" · ") || "未关联车型" }}</template></el-table-column><el-table-column label="草稿箱" min-width="230"><template #default="{row:detail}"><div class="review-detail-draft"><el-image v-if="detail.draft.effective_images?.[0]" :src="detail.draft.effective_images[0]" fit="cover" :preview-src-list="detail.draft.effective_images" preview-teleported /><span v-else class="review-detail-image-empty">无图</span><div><el-button link type="primary" @click="router.push({path:'/listing-records',query:{draftIds:String(detail.draft.id),source:'development-review'}})">{{ detail.draft.product_name || `草稿 #${detail.draft.id}` }}</el-button><small>草稿 #{{ detail.draft.id }}</small></div></div></template></el-table-column><el-table-column label="变体 / 变体 ID" min-width="180"><template #default="{row:detail}"><span>{{ detail.variant?.name || '未读取到变体' }}</span><small v-if="detail.variant" class="review-detail-sub">ID: {{ detail.variant.variant_id }} · Offer: {{ detail.variant.offer_id || '—' }}</small></template></el-table-column><el-table-column label="在线 SKU / 店铺" min-width="210"><template #default="{row:detail}"><span>{{ detail.sku?.ozon_sku || '等待在线 SKU' }}</span><small class="review-detail-sub">{{ detail.sku?.shop_name || '尚无匹配店铺' }}<template v-if="detail.sku?.status && !detail.sku?.ozon_sku"> · {{ detail.sku.status }}</template></small></template></el-table-column><el-table-column label="库存绑定" min-width="210"><template #default="{row:detail}"><template v-if="detail.sku?.inventory_product_id"><span>{{ detail.sku.inventory_product_name || '已绑定库存' }}</span><small class="review-detail-sub">库存 ID {{ detail.sku.inventory_product_id }} · {{ detail.sku.inventory_product_code || '无编码' }}</small></template><el-tag v-else type="info" effect="plain">未绑定</el-tag></template></el-table-column><el-table-column label="出单" width="145" align="center"><template #default="{row:detail}">{{ detail.sku ? `${detail.sku.order_count || 0} 单 · ${detail.sku.unit_count || 0} 件` : '0 单 · 0 件' }}</template></el-table-column></el-table></div></template></el-table-column>
+        <el-table-column label="任务信息" min-width="360">
           <template #default="{row}">
             <div class="review-task-cell">
               <el-image v-if="reviewTaskDraftRows(row)[0]?.effective_images?.[0]" class="review-task-image" :src="reviewTaskDraftRows(row)[0].effective_images[0]" fit="cover" :preview-src-list="[reviewTaskDraftRows(row)[0].effective_images[0]]" preview-teleported />
               <div v-else class="review-task-image-empty">无图</div>
               <div class="review-task-main">
                 <el-link type="primary" :underline="false" class="review-task-link" @click="openDevelopmentTask(row)">{{ taskDisplayName(row) }}</el-link>
-                <div class="review-task-people"><span>负责人：{{ row.owner_name || '未分配' }}</span><span>创建人：{{ reviewTaskCreator(row) }}</span></div>
+                <div class="review-task-people"><span><el-avatar :src="reviewPersonAvatar(row,'owner')" :size="20">{{ personInitial(reviewPersonName(row,'owner')) }}</el-avatar>负责人：{{ reviewPersonName(row,'owner') }}</span><span><el-avatar :src="reviewPersonAvatar(row,'creator')" :size="20">{{ personInitial(reviewPersonName(row,'creator')) }}</el-avatar>创建人：{{ reviewPersonName(row,'creator') }}</span></div>
                 <div class="review-task-times"><span>创建 {{ shanghaiDateTimeText(row.created_at, { assumeUtcWhenNaive: true }) }}</span><span>完成 {{ reviewTaskCompletionTime(row) }}</span></div>
               </div>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="开发产出" min-width="410">
+        <el-table-column label="开发产出" min-width="280">
           <template #default="{row}">
             <div class="review-metrics">
               <el-button class="review-metric-button" link @click="openReviewDetails(row,'vehicles')"><b>{{ reviewTaskMetrics(row).vehicles }}</b><span>车型</span></el-button>
@@ -1336,10 +1400,10 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="上架情况" width="190" align="center">
+        <el-table-column label="上架情况" width="180" align="center">
           <template #default="{row}"><div class="review-publish-cell"><el-tag :type="reviewTaskPublishState(row).type" effect="light">{{ reviewTaskPublishState(row).label }}</el-tag><small v-if="reviewTaskPublishState(row).total">{{ reviewTaskPublishState(row).published }} / {{ reviewTaskPublishState(row).total }} 个草稿有成功上架记录</small></div></template>
         </el-table-column>
-        <el-table-column label="出单" width="160" align="center"><template #default="{row}"><span class="review-sales-summary"><strong>{{ reviewTaskMetrics(row).orders }}</strong> 单 · <strong>{{ reviewTaskMetrics(row).units }}</strong> 件</span></template></el-table-column>
+        <el-table-column label="出单" width="140" align="center"><template #default="{row}"><span class="review-sales-summary"><strong>{{ reviewTaskMetrics(row).orders }}</strong> 单 · <strong>{{ reviewTaskMetrics(row).units }}</strong> 件</span></template></el-table-column>
       </el-table>
       <div class="review-pagination"><el-pagination v-model:current-page="reviewPage" :page-size="reviewPageSize" :total="filteredReviewTasks.length" layout="total, prev, pager, next" /></div>
       <el-dialog v-model="reviewDetailsVisible" :title="reviewDetailsTitle()" width="min(1000px, 94vw)" append-to-body destroy-on-close>
@@ -1417,7 +1481,7 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
     <el-dialog v-model="ideaVisible" class="idea-edit-dialog" :title="ideaForm.id ? '编辑灵感' : '快速创建灵感'" width="min(720px, 94vw)" align-center @paste="handleIdeaImagePaste"><el-form label-position="top"><el-form-item label="标题" required><el-input v-model="ideaForm.title" placeholder="一句话记录这个产品灵感" /></el-form-item><el-form-item label="开发范围与任务分组" required><div style="width:100%"><el-button type="primary" plain @click="ideaScopeVisible=true">打开开发坐标表 · 多选类目和车型</el-button><p v-if="!ideaForm.development_tasks.length">{{ [ideaForm.development_brand, ideaForm.development_category].filter(Boolean).join(' · ') || '尚未选择开发范围' }} · 请在坐标表中选择车型</p><div v-for="(group,index) in ideaForm.development_tasks" :key="group.key" style="padding:10px 0;border-bottom:1px solid #edf1f7"><el-tag>任务 {{ index+1 }}</el-tag> {{ [...new Set(group.models.map(row => `${row.brand} · ${row.category}`))].join(' / ') }}<small style="display:block;color:#64748b;margin-top:6px">{{ group.models.map(row => `${row.model} × ${row.target}`).join('；') }}</small></div><p>共 {{ ideaForm.development_tasks.length }} 个任务 · {{ ideaForm.development_tasks.flatMap(group => group.models).reduce((sum,row) => sum+Number(row.target||0),0) }} 个 SKU</p></div></el-form-item><el-form-item label="主图"><div class="idea-image-editor"><button type="button" class="idea-image-dropzone" :class="{ uploading: ideaImageUploading }" @click="chooseIdeaImage" @dragover.prevent @drop.prevent="handleIdeaImageDrop"><el-image v-if="ideaForm.image_url" :src="ideaForm.image_url" fit="cover"><template #error><div class="empty-image">图片无法预览</div></template></el-image><div v-else class="idea-image-placeholder"><ImagePlus :size="30" /><strong>{{ ideaImageUploading ? '正在上传…' : '点击、拖拽或粘贴图片' }}</strong><span>支持 Ctrl+V 粘贴，建议使用 3:4 图片</span></div><div v-if="ideaForm.image_url" class="idea-image-change"><Upload :size="15" /> 更换图片</div></button><div class="idea-image-link"><span>也可以添加图片链接</span><el-input v-model="ideaForm.image_url" clearable placeholder="https://..." /></div><input ref="ideaFileInput" class="hidden-file-input" type="file" accept="image/*" @change="handleIdeaFileChange" /></div></el-form-item><el-form-item label="参考链接"><el-input v-model="ideaForm.source_url" placeholder="1688、Ozon、WB 或其他链接" /></el-form-item><el-form-item label="备注"><el-input v-model="ideaForm.note" type="textarea" :rows="3" placeholder="补充卖点、成本判断或需要验证的问题" /></el-form-item><div class="form-grid"><el-form-item label="紧急度（1-10）"><el-slider v-model="ideaForm.urgency" :min="1" :max="10" show-input /></el-form-item><el-form-item label="重要度（1-10）"><el-slider v-model="ideaForm.importance" :min="1" :max="10" show-input /></el-form-item><el-form-item label="指定人员"><el-select v-model="ideaForm.assignee_person_id" filterable clearable placeholder="选择负责人"><el-option v-for="person in people" :key="person.id" :label="person.name" :value="person.id" /></el-select></el-form-item><el-form-item label="截止时间"><el-date-picker v-model="ideaForm.development_due_at" type="date" value-format="YYYY-MM-DD" placeholder="选择截止日期" /></el-form-item></div></el-form><template #footer><el-button @click="ideaVisible=false">取消</el-button><el-button type="primary" :loading="ideaSaving" :disabled="ideaImageUploading" @click="saveIdea">保存灵感</el-button></template></el-dialog>
     <IdeaDevelopmentScopeDialog v-if="ideaScopeVisible" :brands="ideaBrands" :categories="ideaCategories" :groups="ideaForm.development_tasks" :legacy-brand="ideaForm.development_brand" :legacy-category="ideaForm.development_category" @catalog-updated="catalog => { ideaBrands=catalog.brands; ideaCategories=catalog.categories; }" @close="ideaScopeVisible=false" @selected="groups => { ideaForm.development_tasks=groups; ideaScopeVisible=false; }" />
     <el-dialog v-model="ideaTasksVisible" title="灵感关联的开发任务" width="min(850px, 94vw)" append-to-body><el-table :data="ideaLinkedTasks"><el-table-column prop="title" label="任务" min-width="250" /><el-table-column prop="owner_name" label="负责人" /><el-table-column label="完成 / 目标"><template #default="{row}">{{ row.done }} / {{ row.target }}</template></el-table-column><el-table-column label="操作"><template #default="{row}"><el-button link type="primary" @click="openTask(row)">编辑任务</el-button></template></el-table-column></el-table></el-dialog>
-    <el-dialog v-model="developmentTaskVisible" width="min(900px, 94vw)" title="开发任务 · SKU 明细" append-to-body destroy-on-close><div v-if="developmentTask" class="development-sku-dialog"><header><div><strong>{{ developmentTask.title }}</strong><small>负责人：{{ developmentTask.owner_name || '未分配' }} · 截止：{{ developmentTask.due_at || '未设置' }}</small></div><el-tag>{{ developmentTask.done }} / {{ developmentTask.target }} SKU</el-tag></header><article v-for="model in developmentModels()" :key="model.model_id || model.model"><div><strong>{{ [model.brand,model.category,model.model].filter(Boolean).join(' · ') || '未命名 SKU 分组' }}</strong><small>已配置 {{ model.done || 0 }} / 目标 {{ model.target || 0 }} SKU</small></div><el-progress :percentage="Math.min(100,Math.round(Number(model.done||0)/Math.max(1,Number(model.target||0))*100))" :show-text="false" /><div><el-button type="primary" plain @click="createTaskDraft(developmentTask,model)">创建草稿</el-button><el-button plain @click="bindTaskDraft(developmentTask)">关联已有草稿</el-button></div></article><el-empty v-if="!developmentModels().length" description="此开发任务还没有车型和 SKU 目标"><el-button plain @click="bindTaskDraft(developmentTask)">配置车型及 SKU 目标</el-button></el-empty></div><template #footer><el-button @click="developmentTaskVisible=false">关闭</el-button></template></el-dialog>
+    <el-dialog v-model="developmentTaskVisible" width="min(900px, 94vw)" title="开发任务 · SKU 明细" append-to-body destroy-on-close><div v-if="developmentTask" class="development-sku-dialog"><header><div><strong>{{ developmentTask.title }}</strong><small>负责人：{{ developmentTask.owner_name || '未分配' }} · 截止：{{ developmentTask.due_at || '未设置' }}</small></div><el-tag>{{ developmentTask.done }} / {{ developmentTask.target }} SKU</el-tag></header><article v-for="model in taskModelRows(developmentTask)" :key="model.model_id || model.model"><div><strong>{{ [model.brand,model.category,model.model].filter(Boolean).join(' · ') || '未命名 SKU 分组' }}</strong><small>已配置 {{ model.done || 0 }} / 目标 {{ model.target || 0 }} SKU</small></div><el-progress :percentage="Math.min(100,Math.round(Number(model.done||0)/Math.max(1,Number(model.target||0))*100))" :show-text="false" /><div><el-button type="primary" plain @click="createTaskDraft(developmentTask,model)">创建草稿</el-button><el-button plain @click="bindTaskDraft(developmentTask,model)">关联已有草稿</el-button></div></article><el-empty v-if="!taskModelRows(developmentTask).length" description="此开发任务还没有车型和 SKU 目标"><el-button plain @click="bindTaskDraft(developmentTask)">配置车型及 SKU 目标</el-button></el-empty></div><template #footer><el-button @click="developmentTaskVisible=false">关闭</el-button></template></el-dialog>
     <el-dialog v-model="taskSkuConfigVisible" width="min(900px, 94vw)" :title="taskSkuConfigModelIndex === null ? '记录任务进度' : '记录车型进度'" append-to-body destroy-on-close>
       <div class="task-progress-entry-head"><p>默认按“品牌 × 核心品名”记录；需要区分型号时再展开明细。SKU 每行一个，也可用逗号或空格分隔。</p><el-button type="success" plain @click="completeAllTaskGroups">全部标记完成</el-button></div>
       <div class="task-progress-entry-list">
@@ -1501,16 +1565,17 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
 .development-review-page{padding:16px;min-height:300px}
 .review-header-actions{display:flex;align-items:center;gap:10px}
 .review-task-cell{display:flex;align-items:center;gap:12px;min-width:0;padding:4px 0}
-.review-task-image,.review-task-image-empty{flex:none;width:58px;height:76px;border-radius:8px;background:#f0f3f7}
+.review-task-image,.review-task-image-empty{flex:none;width:64px;height:84px;border-radius:8px;background:#f0f3f7}
 .review-task-image-empty,.review-draft-image-empty{display:grid;place-items:center;color:#98a2b3;font-size:11px}
 .review-task-main{display:grid;gap:7px;min-width:0}
 .review-task-main>strong{overflow:hidden;color:#243247;font-size:14px;text-overflow:ellipsis;white-space:nowrap}
-.review-task-people,.review-task-times{display:flex;flex-wrap:wrap;gap:6px 16px;color:#667085;font-size:12px}
+.review-task-people,.review-task-times{display:flex;flex-wrap:wrap;gap:6px 12px;color:#667085;font-size:12px}.review-task-people>span{display:inline-flex;align-items:center;gap:5px}
 .review-task-times{color:#8491a3;font-size:11px}
 .review-metrics{display:flex;flex-wrap:wrap;gap:8px}
 .review-metrics .review-metric-button{display:flex;align-items:center;gap:5px;height:auto;margin:0;padding:7px 10px;border:1px solid #e6edf5;border-radius:8px;background:#f8fafc;color:#667085;font-size:12px;white-space:nowrap}
 .review-metrics .review-metric-button:hover{border-color:#9ec5ff;background:#eff6ff}
-.review-filters{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:16px 0;padding:12px;border:1px solid #e7edf5;border-radius:12px;background:#f8fafc}.review-filters>.el-input{width:170px}.review-filters>.el-select{width:150px}.review-filters>.el-date-editor{width:270px}.review-task-link{justify-content:flex-start;font-weight:700}.review-pagination{display:flex;justify-content:flex-end;padding:14px 4px 2px}.review-sync-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 0 12px;color:#718096;font-size:13px}.review-pending-records{margin-top:14px}
+.review-filters{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:16px 0;padding:12px;border:1px solid #e7edf5;border-radius:12px;background:#f8fafc}.review-filters>.el-input,.review-filters>.el-select{width:160px}.review-filters>.el-date-editor{width:270px}.review-task-link{justify-content:flex-start;font-weight:700}.review-pagination{display:flex;justify-content:flex-end;padding:14px 4px 2px}.review-sync-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 0 12px;color:#718096;font-size:13px}.review-pending-records{margin-top:14px}
+.review-detail-expand{padding:4px 10px 10px 22px}.review-detail-heading{display:flex;align-items:center;gap:12px;padding:0 0 9px;color:#344054;font-size:13px}.review-detail-heading span,.review-detail-sub{color:#8491a3;font-size:11px}.review-detail-draft{display:flex;align-items:center;gap:9px;min-width:0}.review-detail-draft .el-image,.review-detail-image-empty{width:38px;height:50px;flex:none;border-radius:5px;background:#f0f3f7}.review-detail-draft>div{display:grid;justify-items:start;gap:3px;min-width:0}.review-detail-draft .el-button{max-width:100%;font-weight:600}.review-detail-draft .el-button span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.review-detail-image-empty{display:grid;place-items:center;color:#98a2b3;font-size:10px}.review-detail-sub{display:block;margin-top:3px}
 .review-metrics b{color:#243247;font-size:15px}
 .review-sales-summary{color:#667085;font-size:12px}.review-sales-summary strong{color:#243247}
 .review-publish-cell{display:grid;justify-items:center;gap:5px}

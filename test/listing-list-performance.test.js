@@ -5,6 +5,7 @@ import test from "node:test";
 const source = readFileSync(new URL("../src/services/listing-automation.js", import.meta.url), "utf8");
 const routeSource = readFileSync(new URL("../src/server/routes/listingAutomation.js", import.meta.url), "utf8");
 const viewSource = readFileSync(new URL("../frontend/admin/views/listing/ListingPublishRecordsView.vue", import.meta.url), "utf8");
+const developmentReviewViewSource = readFileSync(new URL("../frontend/admin/views/team/ProductDevelopmentCenterView.vue", import.meta.url), "utf8");
 
 test("collector box batches publish statistics for the visible page", () => {
   const section = source.match(/export async function collectorBoxProducts[\s\S]*?export async function collectorBoxProductDetail/)?.[0] || "";
@@ -73,14 +74,35 @@ test("development review returns published shop SKUs and order and unit counts",
   assert.match(review, /draft\.published_shops = stores/);
   assert.match(review, /draft\.publish_records = stores\.filter/);
   assert.doesNotMatch(review, /AND r\.status IN \('imported', 'published', 'success'\)\s+AND TRIM\(COALESCE\(r\.ozon_sku/);
-  assert.match(review, /op\.offer_id = r\.offer_id/);
+  assert.match(review, /CONVERT\(op\.offer_id USING utf8mb4\) COLLATE utf8mb4_unicode_ci = CONVERT\(r\.offer_id USING utf8mb4\) COLLATE utf8mb4_unicode_ci/);
+  assert.match(review, /CONVERT\(COALESCE\(r\.tenant_id, 'admin'\) USING utf8mb4\) COLLATE utf8mb4_unicode_ci/);
+  assert.match(review, /inventory\.name AS inventory_product_name/);
   const reviewEndpoint = source.match(/export async function listingDevelopmentReview\([\s\S]*?async function attachDevelopmentReviewSkus/)?.[0] || "";
-  assert.match(reviewEndpoint, /paged: "1", page: "1", pageSize: "100", lightweight: "1", includeReviewSkus: "1"/);
+  assert.match(reviewEndpoint, /paged: "1", page: "1", pageSize: "100", lightweight: includeVariants \? "0" : "1", includeReviewSkus: "1"/);
   assert.match(reviewEndpoint, /COUNT\(DISTINCT o\.id\)/);
   assert.match(reviewEndpoint, /SUM\(oi\.quantity\)/);
   assert.match(reviewEndpoint, /sales_by_task/);
   assert.match(routeSource, /POST \/api\/listing\/development-review/);
   assert.match(viewSource, /reviewDraftIds\) params\.set\("ids", reviewDraftIds\)/);
+});
+
+test("development review loads effective draft images, people, and variant details on demand", () => {
+  const review = source.match(/export async function listingDevelopmentReview\([\s\S]*?async function attachDevelopmentReviewSkus/)?.[0] || "";
+  const lightweightDrafts = source.match(/if \(paged && lightweight\)[\s\S]*?const rowsSql = lightweight/)?.[0] || "";
+  assert.match(review, /include_variants/);
+  assert.match(review, /lightweight: includeVariants \? "0" : "1"/);
+  assert.match(review, /draft\.variants = normalizeArray/);
+  assert.match(lightweightDrafts, /JSON_EXTRACT\(d\.template_payload_json, '\$\.editable_payload\.variants\[0\]\.images'\)/);
+  assert.match(lightweightDrafts, /pageRows\.map\(\(item\) => normalizeDraftRow\(item\)\)/);
+  assert.match(source, /effective_images: effectiveMedia\.images/);
+  assert.match(developmentReviewViewSource, /loadReviewCatalogs/);
+  assert.match(developmentReviewViewSource, /<el-table-column type="expand"/);
+  assert.match(developmentReviewViewSource, /reviewTaskDetailRows\(row\)/);
+  assert.match(developmentReviewViewSource, /reviewPersonAvatar\(row,'creator'\)/);
+  assert.match(developmentReviewViewSource, /openTaskModelDraftPicker\(row, model\)/);
+  const taskRows = readFileSync(new URL("../src/services/team-tasks.js", import.meta.url), "utf8");
+  assert.match(taskRows, /creator\.name AS created_by_name/);
+  assert.match(taskRows, /created_by_avatar_url: row\.created_by_avatar_url/);
 });
 
 test("manual online listing sync narrows database writes to the selected offers", () => {
