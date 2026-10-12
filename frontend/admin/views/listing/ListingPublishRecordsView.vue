@@ -491,6 +491,19 @@ function openTaskRecord(recordId) {
   router.push({ name: "listing-publish-records", query: { recordId: String(recordId) } });
 }
 
+async function syncTaskRecord(row) {
+  if (!row?.record_id) return;
+  refreshingId.value = row.record_id;
+  try {
+    const updated = await apiClient.post(`/api/listing/publish-records/${row.record_id}/refresh`, {});
+    await Promise.all([openTaskDrawer({ id: taskDrawer.task.id }), loadPublishTasks()]);
+    const count = updated.variant_links?.filter((link) => link.ozon_sku).length || 0;
+    ElMessage.success(count ? `已同步 ${count} 个线上 SKU` : "状态已刷新，Ozon 暂未返回线上 SKU");
+  } finally {
+    refreshingId.value = null;
+  }
+}
+
 function taskStatusType(status) {
   const value = String(status || "");
   if (value === "completed" || value === "success") return "success";
@@ -1139,10 +1152,10 @@ async function openDrawer(row) {
   drawer.payloadText = "";
   drawer.responseText = "";
   drawer.form = {
-    name: item.name || "",
-    offer_id: item.offer_id || "",
-    price: item.price || "",
-    old_price: item.old_price || "",
+    name: item.name || detail.product_name || "",
+    offer_id: item.offer_id || detail.offer_id || "",
+    price: item.price || detail.price || "",
+    old_price: item.old_price || detail.old_price || "",
     primary_image: item.primary_image || "",
     imagesText: (item.images || []).join("\n"),
     videoUrlsText: extractVideoUrls(item).join("\n")
@@ -1218,7 +1231,8 @@ async function refreshRecord(row) {
     const updated = await apiClient.post(`/api/listing/publish-records/${row.id}/refresh`, {});
     const index = state.rows.findIndex((item) => Number(item.id) === Number(updated.id));
     if (index >= 0) state.rows[index] = updated;
-    ElMessage.success("状态已刷新");
+    const skuCount = updated.variant_links?.filter((link) => link.ozon_sku).length || 0;
+    ElMessage.success(skuCount > 1 ? `已同步 ${skuCount} 个线上 SKU` : updated.ozon_sku ? `已同步线上 SKU：${updated.ozon_sku}` : "状态已刷新，Ozon 暂未返回线上 SKU");
   } finally {
     refreshingId.value = null;
   }
@@ -1804,6 +1818,7 @@ watch(() => route.query.taskId, () => {
           </div>
         </template>
       </el-table-column>
+      <el-table-column v-if="isPublishMode" label="首个线上 SKU" min-width="150" prop="ozon_sku" show-overflow-tooltip />
       <el-table-column label="售价" min-width="132">
         <template #default="{ row }">
           <span class="price-cell">{{ recordPriceText(row) }}</span>
@@ -1817,7 +1832,8 @@ watch(() => route.query.taskId, () => {
       <el-table-column label="操作" min-width="360" class-name="record-actions-column">
         <template #default="{ row }">
           <div class="row-actions">
-            <el-button class="erp-btn-link" link type="primary" :icon="Edit" :disabled="detailLoadingId === row.id" @click="editInListingAutomation(row)">编辑</el-button>
+            <el-button v-if="isPublishMode" class="erp-btn-link" link type="primary" :icon="Refresh" :loading="refreshingId === row.id" @click="refreshRecord(row)">同步状态 / SKU</el-button>
+            <el-button class="erp-btn-link" link type="primary" :icon="Edit" :disabled="detailLoadingId === row.id || (isPublishMode && row.payload_compacted)" @click="editInListingAutomation(row)">编辑</el-button>
             <el-button class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiWorkbench(row, 'optimization')">AI优化</el-button>
             <el-button class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiWorkbench(row, 'variant')">AI裂变</el-button>
             <el-button class="erp-btn-link-danger" link type="danger" :icon="Delete" :disabled="deletingId === row.id" @click="deleteRecord(row)">删除</el-button>
@@ -1939,6 +1955,23 @@ watch(() => route.query.taskId, () => {
             <span>{{ drawer.row.shop_name }} / {{ drawer.row.offer_id }}</span>
           </div>
         </section>
+
+        <el-table v-if="drawer.row.variant_links?.length" :data="drawer.row.variant_links" border size="small">
+          <el-table-column prop="variant_id" label="草稿变体 ID" min-width="160" show-overflow-tooltip />
+          <el-table-column prop="offer_id" label="Offer ID" min-width="130" show-overflow-tooltip />
+          <el-table-column prop="ozon_sku" label="线上 SKU" min-width="130" show-overflow-tooltip />
+          <el-table-column prop="ozon_status" label="Ozon 状态" min-width="110" show-overflow-tooltip />
+          <el-table-column label="售价" min-width="100">
+            <template #default="{ row }">{{ row.price == null ? "-" : `${row.price} ${row.currency_code || ""}` }}</template>
+          </el-table-column>
+          <el-table-column label="评分" width="76">
+            <template #default="{ row }">{{ row.quality_score == null ? "-" : row.quality_score }}</template>
+          </el-table-column>
+          <el-table-column label="本地库存 ID" min-width="120">
+            <template #default="{ row }">{{ row.inventory_id || row.source_product_id || "未绑定" }}</template>
+          </el-table-column>
+        </el-table>
+        <el-alert v-if="drawer.row.variant_link_warning" type="warning" :title="drawer.row.variant_link_warning" :closable="false" show-icon />
 
         <el-alert
           v-if="publishFailureReason(drawer.row)"
@@ -2079,6 +2112,7 @@ watch(() => route.query.taskId, () => {
                 <el-button v-if="row.record_id" class="erp-btn-link" link type="primary" @click="openTaskRecord(row.record_id)">
                   记录 #{{ row.record_id }}
                 </el-button>
+                <el-button v-if="row.record_id" class="erp-btn-link" link type="primary" :loading="refreshingId === row.record_id" @click="syncTaskRecord(row)">同步状态 / SKU</el-button>
                 <span v-else class="muted-text">未生成</span>
               </template>
             </el-table-column>

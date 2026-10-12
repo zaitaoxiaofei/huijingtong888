@@ -985,7 +985,7 @@ async function openBind(row) {
 }
 async function confirmBind() {
   if (!bindProductId.value) return ElMessage.warning("请选择库存产品");
-  try { await apiClient.post("/api/listing/inventory-bindings/bind", { record_id: bindRecord.value.record_id, online_product_id: bindRecord.value.online_product_id, product_id: bindProductId.value }); bindVisible.value = false; ElMessage.success("库存产品已绑定，历史订单也已重新归因"); await loadBindings(true); }
+  try { const result = await apiClient.post("/api/listing/inventory-bindings/bind", { record_id: bindRecord.value.record_id, online_product_id: bindRecord.value.online_product_id, product_id: bindProductId.value }); bindVisible.value = false; result?.variant_binding?.conflicts ? ElMessage.warning("当前 SKU 已绑定库存，但同一草稿变体中存在其他库存绑定，请检查冲突") : ElMessage.success("库存产品已绑定，历史订单也已重新归因"); await loadBindings(true); }
   catch (error) { ElMessage.error(error.message || "绑定失败"); }
 }
 onMounted(() => {
