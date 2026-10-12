@@ -20,6 +20,10 @@ const accountVisible = ref(false);
 const pluginTokenStatus = ref({ configured: false });
 const pluginTokenDialog = ref(false);
 const pluginTokenValue = ref("");
+const activationCodeStatus = ref({ configured: false });
+const activationCodeValue = ref("");
+const activationCodeDialog = ref(false);
+const activationCodeLoading = ref(false);
 const selectedPlanCode = ref("");
 const filters = reactive({ keyword: "", status: "all", plan: "all" });
 
@@ -93,7 +97,7 @@ async function load() {
       selected.value = rows.value.find(row => row.id === selected.value.id) || null;
       if (selected.value) {
         selectedPlanCode.value = selected.value.plan_code || "";
-        await Promise.all([loadMembers(), loadPluginTokenStatus()]);
+        await Promise.all([loadMembers(), loadPluginTokenStatus(), loadActivationCodeStatus()]);
       } else {
         detailVisible.value = false;
         members.value = [];
@@ -116,14 +120,20 @@ async function loadPluginTokenStatus() {
   pluginTokenStatus.value = await apiClient.get(`/api/tenants/plugin-token?tenant_id=${selected.value.id}`);
 }
 
+async function loadActivationCodeStatus() {
+  if (!selected.value) return;
+  activationCodeStatus.value = await apiClient.get(`/api/tenants/activation-code?tenant_id=${selected.value.id}`);
+}
+
 async function openTenant(row) {
   selected.value = row;
   selectedPlanCode.value = row.plan_code || "";
   Object.assign(quotaForm, { member_limit: row.member_limit, shop_limit: row.shop_limit });
   pluginTokenValue.value = "";
+  activationCodeValue.value = "";
   detailVisible.value = true;
   try {
-    await Promise.all([loadMembers(), loadPluginTokenStatus()]);
+    await Promise.all([loadMembers(), loadPluginTokenStatus(), loadActivationCodeStatus()]);
   } catch (error) {
     ElMessage.error(error.message || "客户空间详情加载失败");
   }
@@ -136,10 +146,14 @@ function openCreateTenant() {
 
 async function createTenant() {
   try {
-    await apiClient.post("/api/tenants", tenantForm);
+    const result = await apiClient.post("/api/tenants", tenantForm);
     ElMessage.success(`客户空间已创建并按「${planName(tenantForm.plan_code)}」开通`);
     createVisible.value = false;
     await load();
+    const created = rows.value.find(row => Number(row.id) === Number(result.id));
+    if (created) await openTenant(created);
+    activationCodeValue.value = result.activation_code || "";
+    activationCodeDialog.value = Boolean(result.activation_code);
   } catch (error) {
     ElMessage.error(error.message || "创建客户空间失败");
   }
@@ -325,6 +339,44 @@ async function revokePluginToken() {
   }
 }
 
+async function issueActivationCode() {
+  if (activationCodeLoading.value) return;
+  activationCodeLoading.value = true;
+  try {
+    if (activationCodeStatus.value.configured && activationCodeStatus.value.status === "active") {
+      await ElMessageBox.confirm("生成新激活码会立即作废旧码；已复制旧码但尚未注册的客户需要使用新码。", "重发客户激活码", { type: "warning", confirmButtonText: "作废旧码并重发" });
+    }
+    const result = await apiClient.post("/api/tenants/activation-code", { tenant_id: selected.value.id });
+    activationCodeValue.value = result.activation_code;
+    activationCodeDialog.value = true;
+    await loadActivationCodeStatus();
+  } catch (error) {
+    if (error !== "cancel") ElMessage.error(error.message || "生成激活码失败");
+  } finally {
+    activationCodeLoading.value = false;
+  }
+}
+
+async function revokeActivationCode() {
+  try {
+    await ElMessageBox.confirm("作废后，此激活码将不能再用于注册。", "作废客户激活码", { type: "warning", confirmButtonText: "确认作废" });
+    await apiClient.delete(`/api/tenants/activation-code?tenant_id=${selected.value.id}`);
+    await loadActivationCodeStatus();
+    ElMessage.success("客户激活码已作废");
+  } catch (error) {
+    if (error !== "cancel") ElMessage.error(error.message || "作废激活码失败");
+  }
+}
+
+async function copyActivationCode() {
+  try {
+    await navigator.clipboard.writeText(activationCodeValue.value);
+    ElMessage.success("客户激活码已复制，请妥善发送给客户");
+  } catch {
+    ElMessage.error("复制失败，请手动选择并复制激活码");
+  }
+}
+
 async function copyPluginToken() {
   try {
     await navigator.clipboard.writeText(pluginTokenValue.value);
@@ -343,7 +395,7 @@ onMounted(load);
       <div>
         <div class="eyebrow">订阅运营 / 客户管理</div>
         <h1>客户与套餐</h1>
-        <p>先管理客户空间和服务期限，再维护可售套餐。激活码自助注册尚未接入。</p>
+        <p>管理客户空间、订阅套餐与客户激活码；客户自助注册兑换正在分步接入。</p>
       </div>
       <div class="header-actions">
         <el-button @click="load">刷新</el-button>
@@ -393,8 +445,8 @@ onMounted(load);
             <el-table-column label="操作" width="110" fixed="right"><template #default="{ row }"><el-button type="primary" link @click="openTenant(row)">管理<el-icon class="el-icon--right"><ArrowRight /></el-icon></el-button></template></el-table-column>
           </el-table>
           <el-alert class="activation-note" type="info" :closable="false" show-icon>
-            <template #title>激活码注册还未接入</template>
-            当前“套餐授权”由管理员直接为客户空间开通；浏览器插件接入令牌只用于插件连接，不能作为客户激活码使用。
+            <template #title>每个新客户空间会自动生成客户激活码</template>
+            激活码由套餐期限约束，完整码仅在创建或重发时展示；客户自助注册和兑换流程将在下一步接入。浏览器插件令牌与客户激活码用途不同。
           </el-alert>
         </section>
       </el-tab-pane>
@@ -442,7 +494,14 @@ onMounted(load);
           <div class="section-heading"><div><h3>当前授权</h3><p>{{ planName(selected.plan_code, selected) }}</p></div><el-tag :type="statusType(selected)" effect="light">{{ statusText(selected) }}</el-tag></div>
           <div class="subscription-facts"><div><span>服务到期</span><strong>{{ formatDateTime(selected.subscription_expires_at) }}</strong></div><div><span>账号用量</span><strong>{{ selected.member_count }} / {{ selected.member_limit == null ? '不限' : Number(selected.member_limit) + 1 }} 个</strong></div><div><span>店铺用量</span><strong>{{ selected.shop_count }} / {{ selected.shop_limit == null ? '不限' : selected.shop_limit }} 个</strong></div></div>
           <div class="plan-assign"><el-select v-model="selectedPlanCode" placeholder="选择要开通的套餐" class="assign-select"><el-option v-for="plan in activePlans" :key="plan.id" :label="`${plan.name} · ${plan.duration_days} 天 · ${quotaText(plan.account_limit, '账号')} · ${quotaText(plan.shop_limit, '店铺')}`" :value="plan.code" /></el-select><el-button type="primary" :disabled="!selectedPlanCode" @click="applyPlan">重新开通 / 调整套餐</el-button></div>
-          <p class="inline-hint">重新授权会从现在重新计算有效期，并按套餐更新额度；此操作不会生成激活码。</p>
+          <p class="inline-hint">重新授权会从现在重新计算有效期，并按套餐更新额度；已有激活码不会自动重发，请在下方按需重发。</p>
+        </section>
+
+        <section class="drawer-section">
+          <div class="section-heading"><div><h3>客户激活码</h3><p>客户注册认领用；完整激活码仅在创建或重发后显示一次。</p></div><div class="member-actions"><el-button type="primary" plain :loading="activationCodeLoading" @click="issueActivationCode">{{ activationCodeStatus.configured ? '作废并重发' : '生成激活码' }}</el-button><el-button type="danger" plain :disabled="activationCodeStatus.status !== 'active'" @click="revokeActivationCode">作废</el-button></div></div>
+          <div v-if="activationCodeStatus.configured" class="activation-code-status"><span>••••••{{ activationCodeStatus.code_hint }}</span><el-tag size="small" :type="activationCodeStatus.status === 'active' ? 'success' : activationCodeStatus.status === 'expired' ? 'warning' : 'info'">{{ activationCodeStatus.status === 'active' ? '可用' : activationCodeStatus.status === 'expired' ? '已过期' : activationCodeStatus.status === 'unavailable' ? '空间不可用' : '已作废' }}</el-tag><span v-if="activationCodeStatus.expires_at">有效至 {{ formatDateTime(activationCodeStatus.expires_at) }}</span></div>
+          <el-empty v-else description="尚未生成客户激活码" :image-size="54" />
+          <p class="inline-hint">目前本版本已完成后台发码与作废；邮箱/手机号注册并兑换激活码尚未开放，不能把此码当成已可自助登录。</p>
         </section>
 
         <section class="drawer-section">
@@ -471,7 +530,7 @@ onMounted(load);
     </el-drawer>
 
     <el-dialog v-model="createVisible" title="创建客户空间" width="560px" destroy-on-close>
-      <p class="dialog-lead">创建后会立即按所选套餐开通服务。客户邮箱注册和激活码认领流程尚未接入。</p>
+      <p class="dialog-lead">创建后会立即按所选套餐开通服务，并生成一枚与套餐期限一致的客户激活码。客户自助注册兑换将在下一步接入。</p>
       <el-form label-position="top" class="dialog-form">
         <div class="form-row"><el-form-item label="空间名称" required><el-input v-model="tenantForm.name" placeholder="例如：星河贸易团队" /></el-form-item><el-form-item label="空间标识" required><el-input v-model="tenantForm.slug" placeholder="例如 xinghe-team" /></el-form-item></div>
         <el-form-item label="开通套餐" required><el-select v-model="tenantForm.plan_code" class="full-width"><el-option v-for="plan in activePlans" :key="plan.id" :value="plan.code" :label="`${plan.name} · ${plan.duration_days} 天 · ${quotaText(plan.account_limit, '账号')} · ${quotaText(plan.shop_limit, '店铺')}`" /></el-select></el-form-item>
@@ -500,12 +559,14 @@ onMounted(load);
       <template #footer><el-button @click="accountVisible = false">取消</el-button><el-button type="primary" :disabled="!accountForm.name || !accountForm.username || !accountForm.password" @click="createAccount">创建账号并加入空间</el-button></template>
     </el-dialog>
 
+    <el-dialog v-model="activationCodeDialog" title="客户激活码已生成" width="620px"><el-alert type="warning" :closable="false" title="请立即复制并安全发送给客户；完整码只显示这一次。" /><p class="dialog-lead">此码当前尚不能用于自助注册；兑换功能完成后客户才能用它创建主账号并认领此工作空间。</p><el-input v-model="activationCodeValue" readonly /><template #footer><el-button @click="activationCodeDialog = false">关闭</el-button><el-button type="primary" @click="copyActivationCode">复制激活码</el-button></template></el-dialog>
     <el-dialog v-model="pluginTokenDialog" title="浏览器插件接入令牌" width="620px"><el-alert type="warning" :closable="false" title="这是插件连接令牌，不是客户购买或注册用的激活码。" /><p class="dialog-lead">此令牌仅显示一次，请复制到该客户空间的 Ozon 浏览器插件设置中。</p><el-input v-model="pluginTokenValue" readonly /><template #footer><el-button @click="pluginTokenDialog = false">关闭</el-button><el-button type="primary" @click="copyPluginToken">复制令牌</el-button></template></el-dialog>
   </main>
 </template>
 
 <style scoped>
 .tenant-page{max-width:1600px;margin:0 auto;padding:28px 32px 40px;color:#182230}.page-header,.panel-heading,.section-heading,.archive-section,.plan-card-top{display:flex;align-items:center;justify-content:space-between;gap:18px}.page-header{margin-bottom:22px}.eyebrow{margin-bottom:8px;color:#64748b;font-size:12px;font-weight:600;letter-spacing:.04em}.page-header h1{margin:0;font-size:26px;line-height:1.25;font-weight:700}.page-header p,.panel-heading p,.section-heading p,.dialog-lead{margin:7px 0 0;color:#667085;font-size:13px;line-height:1.6}.header-actions{display:flex;gap:10px;flex:none}.summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:18px}.summary-card{display:grid;gap:7px;padding:17px 19px;border:1px solid #e7ebf0;border-radius:12px;background:#fff}.summary-card span{color:#667085;font-size:13px}.summary-card strong{font-size:27px;line-height:1.1;font-weight:700;color:#182230}.summary-card small{color:#98a2b3;font-size:12px}.summary-card.attention strong{color:#d97706}.tenant-tabs{background:#fff;border:1px solid #e7ebf0;border-radius:12px;padding:0 20px 18px}.tenant-tabs :deep(.el-tabs__header){margin:0 0 4px}.tenant-tabs :deep(.el-tabs__nav-wrap::after){height:1px;background:#edf0f3}.tenant-tabs :deep(.el-tabs__item){height:54px;font-weight:600}.customer-panel,.plan-panel{padding:21px 2px 0}.panel-heading{margin-bottom:19px}.panel-heading h2{margin:0;font-size:18px}.result-count{flex:none;color:#667085;font-size:13px}.filters{display:flex;gap:10px;margin-bottom:14px}.search-input{max-width:410px}.filter-select{width:160px}.customer-table{width:100%}.customer-table :deep(th.el-table__cell){height:45px;background:#f8fafc;color:#667085;font-size:12px;font-weight:600}.customer-table :deep(td.el-table__cell){height:64px;color:#344054}.space-cell{display:grid;gap:4px}.space-cell strong{color:#1d2939;font-size:14px;font-weight:600}.space-cell span,.usage-sub{color:#98a2b3;font-size:12px}.usage-sub{display:block;margin-top:3px}.plan-cell{font-weight:500}.activation-note{margin-top:18px}.activation-note :deep(.el-alert__title){font-size:13px;font-weight:600}.activation-note :deep(.el-alert__description){line-height:1.6}.plan-group+.plan-group{margin-top:28px}.plan-group>h3{display:flex;align-items:center;gap:9px;margin:0 0 14px;font-size:15px}.plan-group>h3 small{color:#98a2b3;font-size:12px;font-weight:400}.group-dot{width:8px;height:8px;border-radius:50%}.trial-dot{background:#7c6ee6}.paid-dot{background:#3370e8}.plan-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.plan-card{display:flex;flex-direction:column;min-height:203px;padding:17px 18px 12px;border:1px solid #e6eaf0;border-radius:12px;background:#fff;transition:border-color .15s,box-shadow .15s}.plan-card:hover{border-color:#bfd3ff;box-shadow:0 5px 18px #1d29390c}.plan-card.inactive{background:#fafbfc;opacity:.76}.plan-card-top{align-items:flex-start}.plan-card-top h4{margin:8px 0 0;font-size:15px}.plan-kind{display:inline-flex;padding:3px 7px;border-radius:5px;font-size:11px;font-weight:600}.trial-kind{background:#f1efff;color:#6554c0}.paid-kind{background:#edf4ff;color:#2362c7}.plan-duration{display:flex;align-items:baseline;gap:5px;margin:17px 0 15px}.plan-duration strong{font-size:28px;line-height:1;font-weight:700}.plan-duration>span{color:#667085;font-size:13px}.plan-duration .el-tag{align-self:center;margin-left:auto}.plan-quotas{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:12px 0;border-top:1px solid #eff1f4;border-bottom:1px solid #eff1f4}.plan-quotas>span{display:grid;grid-template-columns:17px 1fr;align-items:center;column-gap:5px;color:#344054;font-size:12px}.plan-quotas :deep(.el-icon){color:#667085}.plan-quotas small{grid-column:2;color:#98a2b3;font-size:11px}.plan-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:auto;padding-top:10px}.drawer-intro{display:flex;align-items:center;justify-content:space-between;padding:0 0 20px;border-bottom:1px solid #edf0f3}.drawer-slug{color:#475467;font-size:13px;font-weight:600}.drawer-intro p{margin:6px 0 0;color:#98a2b3;font-size:12px}.drawer-section{padding:21px 0;border-bottom:1px solid #edf0f3}.section-heading{align-items:flex-start;margin-bottom:15px}.section-heading h3{margin:0;font-size:15px}.section-heading p{font-size:12px}.subscription-card{padding-top:17px}.subscription-facts{display:grid;grid-template-columns:1.5fr 1fr 1fr;gap:10px;margin:16px 0;padding:14px;border-radius:9px;background:#f8fafc}.subscription-facts>div{display:grid;gap:7px}.subscription-facts span{color:#667085;font-size:11px}.subscription-facts strong{font-size:13px;font-weight:600;line-height:1.5}.plan-assign{display:flex;gap:9px}.assign-select{min-width:0;flex:1}.inline-hint{margin:9px 0 0;color:#98a2b3;font-size:11px;line-height:1.5}.quota-form{display:flex;align-items:flex-end;gap:8px}.quota-form :deep(.el-form-item){margin:0 4px 0 0}.quota-form :deep(.el-input-number){width:130px}.member-actions{display:flex;gap:8px}.member-table :deep(th.el-table__cell){background:#f8fafc;color:#667085;font-size:12px}.advanced-section{margin-top:4px;border-bottom:1px solid #edf0f3}.advanced-section :deep(.el-collapse-item__header){height:53px;border-bottom:0;font-size:13px}.advanced-section :deep(.el-collapse-item__wrap){border-bottom:0}.advanced-title{color:#475467;font-weight:600}.plugin-box{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:0 0 17px}.plugin-box strong{font-size:13px}.plugin-box p{max-width:480px;margin:6px 0 0;color:#667085;font-size:12px;line-height:1.6}.plugin-actions{display:flex;flex:none;gap:6px}.archive-section{margin-top:20px;padding:15px 16px;border:1px solid #f1d0d0;border-radius:9px;background:#fffafa}.archive-section strong{color:#a63838;font-size:13px}.archive-section p{margin:5px 0 0;color:#8b6e6e;font-size:11px}.dialog-lead{margin:0 0 18px}.dialog-form :deep(.el-form-item){margin-bottom:17px}.dialog-form :deep(.el-form-item__label){padding-bottom:6px;color:#475467;font-weight:600}.form-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}.full-width{width:100%}.quota-input{display:flex;align-items:center;gap:12px}.quota-input :deep(.el-input-number){width:150px}
+.activation-code-status{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid #e7ebf0;border-radius:8px;background:#f8fafc;color:#475467;font-size:13px}.activation-code-status span:first-child{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:.04em}
 @media(max-width:1000px){.tenant-page{padding:22px 20px}.plan-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.customer-table{min-width:980px}.customer-panel{overflow-x:auto}.tenant-tabs{padding-right:14px;padding-left:14px}}
 @media(max-width:680px){.tenant-page{padding:18px 12px}.page-header{align-items:flex-start;flex-direction:column}.header-actions{width:100%}.header-actions .el-button{flex:1}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.summary-card{padding:13px}.summary-card strong{font-size:23px}.tenant-tabs{padding:0 10px 12px}.filters{flex-wrap:wrap}.search-input{max-width:none;width:100%}.filter-select{flex:1;width:auto;min-width:120px}.plan-grid{grid-template-columns:1fr}.plan-card{min-height:190px}.subscription-facts{grid-template-columns:1fr;gap:12px}.plan-assign{align-items:stretch;flex-direction:column}.quota-form{flex-wrap:wrap}.section-heading{align-items:flex-start;flex-direction:column}.member-actions{width:100%}.member-actions .el-button{flex:1}.plugin-box{align-items:flex-start;flex-direction:column}.form-row{grid-template-columns:1fr;gap:0}}
 </style>

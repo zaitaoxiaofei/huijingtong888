@@ -86,7 +86,7 @@ import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
 import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
-import { archiveTenantMysql, createTenantMysql, createTenantPlanMysql, issueTenantPluginTokenMysql, listTenantPlansMysql, listTenantsMysql, resolveTenantPluginTokenMysql, revokeTenantPluginTokenMysql, setTenantQuotasMysql, setTenantSubscriptionMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, updateTenantPlanMysql, upsertTenantMemberMysql } from "./services/tenants.js";
+import { archiveTenantMysql, createTenantMysql, createTenantPlanMysql, issueTenantActivationCodeMysql, issueTenantPluginTokenMysql, listTenantPlansMysql, listTenantsMysql, resolveTenantPluginTokenMysql, revokeTenantActivationCodeMysql, revokeTenantPluginTokenMysql, setTenantQuotasMysql, setTenantSubscriptionMysql, tenantActivationCodeStatusMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, updateTenantPlanMysql, upsertTenantMemberMysql } from "./services/tenants.js";
 
 const services = { ...mysqlRuntimeServices, ...systemNotificationServices };
 const IMAGE_SESSION_COOKIE = "erp_image_session";
@@ -250,7 +250,13 @@ const routes = {
     const body = await readJson(req);
     return updateTenantPlanMysql(body.id || body.plan_id || body.planId, body);
   },
-  "POST /api/tenants": async (req) => createTenantMysql(await readJson(req)),
+  "POST /api/tenants": async (req) => createTenantMysql({ ...(await readJson(req)), created_by_person_id: req._session?.personId }),
+  "GET /api/tenants/activation-code": (req) => tenantActivationCodeStatusMysql(req.query?.tenant_id || req.query?.tenantId),
+  "POST /api/tenants/activation-code": async (req) => {
+    const body = await readJson(req);
+    return issueTenantActivationCodeMysql(body.tenant_id || body.tenantId, req._session?.personId);
+  },
+  "DELETE /api/tenants/activation-code": (req) => revokeTenantActivationCodeMysql(req.query?.tenant_id || req.query?.tenantId),
   "POST /api/tenants/archive": async (req) => {
     const body = await readJson(req);
     return archiveTenantMysql(body.tenant_id || body.tenantId);
