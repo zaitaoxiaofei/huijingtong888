@@ -18,6 +18,7 @@ import { archiveOzonProducts, fetchOzonCategoryAttributes, fetchOzonChatHistory,
 import { buildOrderOutcomeSql, classifyOrderAccounting, classifyOrderOutcome, estimateOutcomeReturnLoss, resolveOrderLossProfile, resolveReturnLossCostPolicy } from "./order-outcome.js";
 import { cancellationDisplay } from "./order-cancellation-display.js";
 import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
+import { assertTenantQuotaAvailable } from "./tenant-quotas.js";
 import { loadWarehouseFacts, appendPrintRecord } from "./fbp-warehouse.js";
 import { buildOrderProfitDetailSnapshotPayload } from "./order-profit-detail-snapshots.js";
 import { calculateSelectionPricing } from "../celRates.js";
@@ -6463,14 +6464,21 @@ export async function createShopMysql(body = {}, tenantId = "admin") {
     Number(body.payout_rate || 0.33)
   ];
 
-  const result = await mysqlExecute(`
-    INSERT INTO shops (
-      tenant_id, name, legal_entity, user_id, ozon_client_id, ozon_seller_id, api_key_hint, ozon_api_key, performance_client_id, performance_client_secret, performance_client_secret_hint,
-      watermark_position, watermark_x_percent, watermark_y_percent, watermark_scale_percent, watermark_opacity_percent,
-      payout_rate
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `, [normalizedTenantId, ...payload]);
+  const result = await withMysqlTransaction(async connection => {
+    const [tenantRows] = await connection.execute("SELECT id, slug, shop_limit FROM tenants WHERE id = ? FOR UPDATE", [normalizedTenantId]);
+    if (!tenantRows[0]) throw new Error("当前企业不存在，无法创建店铺");
+    const includeLegacyDefaultShops = tenantRows[0].slug === "default" ? 1 : 0;
+    const [countRows] = await connection.execute("SELECT COUNT(*) AS used FROM shops WHERE (tenant_id = ? OR (? = 1 AND tenant_id IS NULL)) AND status != 'deleted'", [normalizedTenantId, includeLegacyDefaultShops]);
+    assertTenantQuotaAvailable({ label: "店铺", current: countRows[0]?.used || 0, limit: tenantRows[0].shop_limit });
+    return connection.execute(`
+      INSERT INTO shops (
+        tenant_id, name, legal_entity, user_id, ozon_client_id, ozon_seller_id, api_key_hint, ozon_api_key, performance_client_id, performance_client_secret, performance_client_secret_hint,
+        watermark_position, watermark_x_percent, watermark_y_percent, watermark_scale_percent, watermark_opacity_percent,
+        payout_rate
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [normalizedTenantId, ...payload]);
+  }).then(([insertResult]) => insertResult);
 
 
 

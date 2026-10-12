@@ -86,7 +86,7 @@ import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
 import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
-import { archiveTenantMysql, createTenantMysql, issueTenantPluginTokenMysql, listTenantsMysql, resolveTenantPluginTokenMysql, revokeTenantPluginTokenMysql, setTenantSubscriptionMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, upsertTenantMemberMysql } from "./services/tenants.js";
+import { archiveTenantMysql, createTenantMysql, issueTenantPluginTokenMysql, listTenantsMysql, resolveTenantPluginTokenMysql, revokeTenantPluginTokenMysql, setTenantQuotasMysql, setTenantSubscriptionMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, upsertTenantMemberMysql } from "./services/tenants.js";
 
 const services = { ...mysqlRuntimeServices, ...systemNotificationServices };
 const IMAGE_SESSION_COOKIE = "erp_image_session";
@@ -262,6 +262,10 @@ const routes = {
   "POST /api/tenants/subscription": async (req) => {
     const body = await readJson(req);
     return setTenantSubscriptionMysql(body.tenant_id || body.tenantId, body);
+  },
+  "POST /api/tenants/quotas": async (req) => {
+    const body = await readJson(req);
+    return setTenantQuotasMysql(body.tenant_id || body.tenantId, body);
   },
   "GET /api/tenants/plugin-token": (req) => tenantPluginTokenStatusMysql(req.query?.tenant_id || req.query?.tenantId, req._session?.personId, {
     isPlatformAdmin: hasPermission(req._session, "admin")
