@@ -56,3 +56,16 @@ test("tenant plan catalog persists presets and is wired into enterprise create a
   assert.match(view, /tenantForm\.plan_code/);
   assert.match(view, /savePlan/);
 });
+
+test("tenant operations separate customer-space work from plan-catalog work", () => {
+  const view = read("../frontend/admin/views/settings/TenantSubscriptionView.vue");
+  assert.match(view, /el-tab-pane label="客户空间" name="customers"/);
+  assert.match(view, /el-tab-pane label="套餐目录" name="plans"/);
+  assert.match(view, /filteredRows/);
+  assert.match(view, /el-drawer v-model="detailVisible"/);
+  assert.match(view, /子账号用量/);
+  assert.match(view, /店铺用量/);
+  assert.match(view, /激活码注册还未接入/);
+  assert.match(view, /不能作为客户激活码使用/);
+  assert.match(view, /高级接入：浏览器插件令牌/);
+});
