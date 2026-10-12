@@ -571,6 +571,10 @@ function scheduleOperationalTeamTaskRefresh() {
 export async function warmTeamTasksRuntimeMysql() {
   ensureMysqlEnabled();
   await ensureTeamTasksSchema();
+  scheduleOperationalTeamTaskRefresh();
+  if (operationalTasksRefreshPromise) await operationalTasksRefreshPromise;
+  try { await teamTasksMysql(); }
+  catch (error) { console.warn("team task data warmup failed", error?.message || "unknown error"); }
   return { ok: true };
 }
 

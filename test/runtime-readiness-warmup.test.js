@@ -16,6 +16,8 @@ test("server finishes database warmup before listening", () => {
   assert.match(serverSource, /await services\.warmTeamTasksRuntime\?\.\(\)/);
   assert.ok(serverSource.indexOf("await services.warmTeamTasksRuntime?.()") < serverSource.indexOf("server.listen("));
   assert.match(runtimeSource, /warmTeamTasksRuntime: warmTeamTasksRuntimeMysql/);
+  const taskService = fs.readFileSync(new URL("../src/services/team-tasks.js", import.meta.url), "utf8");
+  assert.match(taskService, /scheduleOperationalTeamTaskRefresh\(\);\s*if \(operationalTasksRefreshPromise\) await operationalTasksRefreshPromise;\s*try \{ await teamTasksMysql\(\); \}/);
   assert.match(serverSource, /url\.pathname === "\/api\/ready"/);
   assert.match(poolSource, /export async function warmMysqlPool\(\)/);
 });
