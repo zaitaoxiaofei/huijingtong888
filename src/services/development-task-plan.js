@@ -105,14 +105,14 @@ export function developmentPlanProgress(plan, drafts) {
     if (group) group.remaining = Math.max(0, group.remaining - done);
     return { ...row, done, drafts: row.draft_ids.map((id) => {
       const draft = byId.get(id);
-      return { id, title: draft?.product_name || `草稿 #${id}（已删除或不可用）`, count: Number(draft?.sku_count || 0), created_at: draft?.created_at || "" };
+      return { id, title: draft?.product_name || `草稿 #${id}（已删除或不可用）`, count: Number(draft?.sku_count || 0), created_at: draft?.created_at || "", available: Boolean(draft) };
     }) };
   });
   const target = models.reduce((sum, row) => sum + row.target, 0);
   const done = models.reduce((sum, row) => sum + Math.min(row.target, row.done), 0);
   const unallocated_drafts = (plan.unallocated_draft_ids || []).map(id => {
     const draft = byId.get(id);
-    return { id, title: draft?.product_name || `草稿 #${id}（已删除或不可用）`, count: Number(draft?.sku_count || 0), created_at: draft?.created_at || "" };
+    return { id, title: draft?.product_name || `草稿 #${id}（已删除或不可用）`, count: Number(draft?.sku_count || 0), created_at: draft?.created_at || "", available: Boolean(draft) };
   });
   return { models, unallocated_drafts, target, done, status: models.every((row) => row.done >= row.target) ? "done" : done > 0 ? "doing" : "todo" };
 }

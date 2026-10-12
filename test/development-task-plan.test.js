@@ -62,6 +62,7 @@ test("overproduction in T4 cannot fill the T7 shortfall; removed drafts stop con
   assert.equal(progress.done, 10);
   assert.equal(progress.status, "doing");
   assert.match(progress.models[1].drafts[0].title, /已删除/);
+  assert.equal(progress.models[1].drafts[0].available, false);
   assert.equal(developmentPlanProgress(input, []).status, "todo");
 });
 
@@ -155,7 +156,7 @@ test("task read recalculates progress before status filtering and editing preser
   const edited = plan(); edited.models[1].target = 25;
   await context.updateTeamTaskMysql(55, { ...body, related: edited });
   assert.equal(writes.length, 1);
-  assert.equal(JSON.parse(writes[0].params[12]).models[1].target, 25);
+  assert.equal(JSON.parse(writes[0].params[13]).models[1].target, 25);
 });
 
 
@@ -166,7 +167,9 @@ test("non-car development uses an explicit scope and a single unambiguous target
   assert.throws(() => normalizeDevelopmentPlan({ ...input, scope: "automotive" }, body), /车型/);
   const { context, writes } = serviceHarness();
   await context.createTeamTaskMysql({ ...body, related: input });
-  assert.equal(JSON.parse(writes[0].params[12]).scope, "non_automotive");
+  assert.equal(writes[0].params.map((value) => {
+    try { return JSON.parse(value); } catch { return null; }
+  }).find((value) => value?.scope === "non_automotive")?.scope, "non_automotive");
 });
 
 

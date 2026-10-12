@@ -26,7 +26,7 @@ const stages = [
 ];
 const tabs = [
   { value: "tasks", label: "任务中心", icon: ListTodo }, { value: "ideas", label: "灵感列表", icon: Lightbulb },
-  { value: "products", label: "开发产品", icon: Boxes }, { value: "dashboard", label: "开发总览", icon: LayoutDashboard },
+  { value: "products", label: "开发数据复盘", icon: Boxes }, { value: "dashboard", label: "开发总览", icon: LayoutDashboard },
   { value: "analytics", label: "裂变效果", icon: TrendingUp }, { value: "bindings", label: "SKU库存关联", icon: Link2 }
 ];
 const activeTab = ref("tasks");
@@ -67,6 +67,12 @@ const categoriesLoaded = ref(false);
 const draftsLoaded = ref(false);
 const creationResourcesLoaded = ref(false);
 const ideas = ref([]);
+const ideasLoaded = ref(false);
+const reviewDrafts = ref(new Map());
+const reviewDraftsLoading = ref(false);
+const reviewDraftsKey = ref("");
+const reviewDraftVisible = ref(false);
+const reviewDraftTask = ref(null);
 const ideaBrands = ref([]);
 const ideaCategories = ref([]);
 const developmentBrandFilter = ref("");
@@ -92,6 +98,7 @@ const developingIdea = ref(null);
 const ideaForm = reactive({ id: null, title: "", image_url: "", source_url: "", note: "", urgency: 5, importance: 5,
   assignee_person_id: null, target_product_count: 1, development_due_at: "", development_brand: "", development_category: "", development_tasks: [] });
 const tasks = ref([]);
+let taskCenterPromise = null;
 const bindings = ref([]);
 const bindingSummary = ref({});
 const bindingLoading = ref(false);
@@ -283,6 +290,63 @@ const sortedIdeas = computed(() => ideas.value.filter(matchesDevelopmentScope).s
 const developmentIdeas = computed(() => sortedIdeas.value.filter((row) => row.development_started_at
   && row.assignee_person_id && Number(row.target_product_count || 0) > 0 && row.development_due_at));
 const personById = computed(() => new Map(people.value.map((person) => [Number(person.id), person])));
+const completedDevelopmentTasks = computed(() => tasks.value
+  .filter((row) => row.type === "product_development" && row.status === "done")
+  .sort((a, b) => new Date(b.completed_at || b.updated_at || 0) - new Date(a.completed_at || a.updated_at || 0)));
+
+function reviewTaskDraftIds(task) {
+  const activeIds = (draftRows, fallbackIds = []) => Array.isArray(draftRows)
+    ? draftRows.filter((draft) => draft.available !== false).map((draft) => draft.id)
+    : fallbackIds;
+  const modelDraftIds = (task.development_plan?.models || []).flatMap((model) => activeIds(model.drafts, model.draft_ids || []));
+  const ids = [
+    ...modelDraftIds,
+    ...activeIds(task.development_plan?.unallocated_drafts, task.development_plan?.unallocated_draft_ids || []),
+    ...(task.development_drafts || []).map((draft) => draft.id)
+  ];
+  return [...new Set(ids.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
+}
+
+function reviewTaskDraftRows(task) {
+  const linkedRows = [
+    ...(task.development_plan?.models || []).flatMap((model) => model.drafts || []),
+    ...(task.development_plan?.unallocated_drafts || []),
+    ...(task.development_drafts || [])
+  ];
+  const fallbackSkuCounts = new Map(linkedRows.map((draft) => [Number(draft.id), Number(draft.count || 0)]));
+  return reviewTaskDraftIds(task).map((id) => ({ id, ...(reviewDrafts.value.get(id) || {}), sku_count: Number(reviewDrafts.value.get(id)?.sku_count ?? fallbackSkuCounts.get(id) ?? 0) }));
+}
+
+function reviewTaskMetrics(task) {
+  const drafts = reviewTaskDraftRows(task);
+  const productIds = drafts.map((draft) => Number(draft.source_product_id || 0)).filter(Boolean);
+  const models = task.development_plan?.models || [];
+  const modelKeys = new Set(models.filter((model) => model.scope !== "non_automotive" && model.model !== "非汽车")
+    .map((model) => `${model.brand || task.development_brand || ""}\n${model.model_id || model.model || ""}`).filter((key) => key !== "\n"));
+  return {
+    draftBoxes: drafts.length,
+    vehicles: modelKeys.size,
+    draftProducts: productIds.length ? new Set(productIds).size : drafts.length,
+    skus: drafts.reduce((sum, draft) => sum + Number(draft.sku_count || 0), 0)
+  };
+}
+
+function reviewTaskPublishState(task) {
+  const drafts = reviewTaskDraftRows(task);
+  const published = drafts.filter((draft) => Number(draft.publish_success_count || 0) > 0).length;
+  if (!drafts.length) return { label: "未关联草稿", type: "info", published: 0, total: 0 };
+  if (published === drafts.length) return { label: "全部草稿已上架", type: "success", published, total: drafts.length };
+  if (published) return { label: "部分上架", type: "warning", published, total: drafts.length };
+  return { label: "尚未上架", type: "info", published, total: drafts.length };
+}
+
+function reviewTaskCreator(task) { return personById.value.get(Number(task.created_by_person_id))?.name || "未知"; }
+function reviewTaskCompletionTime(task) {
+  const value = task.completed_at || task.updated_at;
+  return value ? shanghaiDateTimeText(value, { assumeUtcWhenNaive: true }) : "暂无记录";
+}
+function openReviewDrafts(task) { reviewDraftTask.value = task; reviewDraftVisible.value = true; }
+async function refreshReviewData() { await loadTaskCenterData(); reviewDraftsKey.value = ""; await loadReviewDrafts(); }
 
 function stageLabel(value) { return stages.find((item) => item.value === value)?.label || value || "待完善"; }
 function stageIndex(value) { return Math.max(0, stages.findIndex((item) => item.value === value)); }
@@ -644,12 +708,16 @@ async function loadData() {
     products.value = Array.isArray(productRows) ? productRows : [];
     tasks.value = Array.isArray(taskRows) ? taskRows : [];
     ideas.value = Array.isArray(ideaRows) ? ideaRows : [];
+    ideasLoaded.value = true;
     tasksLoaded.value = true;
     developmentDataLoaded.value = true;
   } catch (error) { ElMessage.error(error.message || "产品开发数据加载失败"); }
   finally { loading.value = false; }
 }
-async function loadTaskCenterData() {
+async function loadTaskCenterData(force = true) {
+  if (!force && tasksLoaded.value) return;
+  if (taskCenterPromise) return taskCenterPromise;
+  taskCenterPromise = (async () => {
   loading.value = true;
   try {
     const [personRows, taskRows] = await Promise.all([
@@ -661,6 +729,9 @@ async function loadTaskCenterData() {
     tasksLoaded.value = true;
   } catch (error) { ElMessage.error(error.message || "任务中心加载失败"); }
   finally { loading.value = false; }
+  })();
+  try { await taskCenterPromise; }
+  finally { taskCenterPromise = null; }
 }
 async function loadTaskPlanOrders() {
   if (!taskPlanningPeriodKey.value) { taskPlanOrderByCoordinate.value = new Map(); return; }
@@ -670,7 +741,63 @@ async function loadTaskPlanOrders() {
     taskPlanOrderByCoordinate.value = new Map(entries.map((row) => [row.coordinate_key, row]));
   } catch { taskPlanOrderByCoordinate.value = new Map(); }
 }
-async function loadDevelopmentData() {
+function mergeIdeaRowsWithTasks(ideaRows) {
+  const rows = ideaRows.map((row) => ({ ...row }));
+  const taskRows = tasks.value.filter((task) => task.type === "product_development");
+  for (const idea of rows) {
+    const children = taskRows.filter((task) => Number(task.source_idea_id || task.idea_id) === Number(idea.id));
+    if (!children.length) continue;
+    idea.development_tasks = children.map((task) => ({ key: task.development_plan?.group_key, task_id: task.id, models: task.development_plan?.models || [] }));
+    idea.tasks = children;
+    idea.development_scopes = children.flatMap((task) => task.development_scopes || []);
+    idea.development_brand = [...new Set(idea.development_scopes.map((scope) => scope.brand).filter(Boolean))].join("、");
+    idea.development_category = [...new Set(idea.development_scopes.map((scope) => scope.category).filter(Boolean))].join("、");
+    idea.target_product_count = children.reduce((sum, task) => sum + Number(task.target || 0), 0);
+    idea.output_count = children.reduce((sum, task) => sum + Number(task.done || 0), 0);
+  }
+  const taskIdeas = taskRows.filter((task) => task.development_plan && !task.source_idea_id && !task.idea_id).map((task) => ({
+    id: `task:${task.id}`, task_id: task.id, task, title: task.title, note: task.development_plan.notes,
+    development_scopes: task.development_scopes, development_brand: task.development_plan.brand, development_category: task.development_plan.category,
+    assignee_person_id: task.owner_person_id, assignee_name: task.owner_name,
+    target_product_count: task.target, output_count: task.done, development_due_at: task.due_at,
+    development_started_at: task.start_at || task.created_at,
+    created_at: task.created_at, status: task.status, urgency: 5, importance: 5
+  }));
+  return [...rows, ...taskIdeas].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)
+    || Number(b.task_id || b.id) - Number(a.task_id || a.id));
+}
+
+async function loadReviewDrafts() {
+  await loadTaskCenterData(false);
+  const ids = [...new Set(completedDevelopmentTasks.value.flatMap(reviewTaskDraftIds))];
+  const key = completedDevelopmentTasks.value.map((task) => `${task.id}:${task.updated_at || ""}`).join(",") + `|${ids.join(",")}`;
+  if (key === reviewDraftsKey.value) return;
+  reviewDraftsLoading.value = true;
+  try {
+    const rows = [];
+    for (let index = 0; index < ids.length; index += 100) {
+      const batch = ids.slice(index, index + 100);
+      const result = await apiClient.get(`/api/listing/drafts?paged=1&page=1&pageSize=100&ids=${batch.join(",")}`, { noCache: true });
+      rows.push(...(result?.rows || []));
+    }
+    reviewDrafts.value = new Map(rows.map((draft) => [Number(draft.id), draft]));
+    reviewDraftsKey.value = key;
+  } catch (error) { ElMessage.error(error.message || "开发复盘草稿信息加载失败"); }
+  finally { reviewDraftsLoading.value = false; }
+}
+
+async function loadDevelopmentData(tab = activeTab.value) {
+  if (tab === "ideas") {
+    await loadTaskCenterData(false);
+    if (ideasLoaded.value) return;
+    try {
+      const ideaRows = await apiClient.get("/api/team/development-ideas?include_tasks=0", { noCache: true });
+      ideas.value = mergeIdeaRowsWithTasks(Array.isArray(ideaRows) ? ideaRows : []);
+      ideasLoaded.value = true;
+    } catch (error) { ElMessage.error(error.message || "灵感列表加载失败"); }
+    return;
+  }
+  if (tab === "products") return loadReviewDrafts();
   if (developmentDataLoaded.value) return;
   if (!developmentDataPromise) developmentDataPromise = loadData().finally(() => { developmentDataPromise = null; });
   await developmentDataPromise;
@@ -1008,7 +1135,7 @@ onMounted(() => {
 onBeforeUnmount(() => { if (taskClockTimer) clearInterval(taskClockTimer); });
 watch(activeTab, (value) => {
   if (value === "tasks") loadTaskPlanOrders();
-  else if (value !== "dashboard") loadDevelopmentData();
+  else if (value !== "dashboard") loadDevelopmentData(value);
   if (value === "analytics" && bindingStatus.value !== "all") { bindingStatus.value = "all"; bindingsLoaded.value = false; }
   if (value === "projects") loadCategories();
   if (value === "analytics") { loadDrafts(); loadBindings(); }
@@ -1045,23 +1172,42 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
       </article><el-empty v-if="!sortedIdeas.length" description="还没有灵感，先记录第一条吧" /></div>
     </section>
 
-    <section v-else-if="activeTab==='products'" class="products-page task-workflow-page">
-      <div class="panel task-workflow-panel">
-        <div class="section-title"><div><span>只有完成负责人、目标数量、截止时间配置并点击“去开发”的灵感才会进入</span><h2>产品开发任务流程</h2></div><el-button @click="activeTab='ideas'">返回灵感列表</el-button></div>
-        <div class="workflow-column-head"><span>第一阶段 · 任务认领</span><span>第二阶段 · 产品进度</span><span>第三阶段 · 草稿箱记录</span><span>第四阶段 · 出单数</span></div>
-        <div class="task-workflow-list">
-          <article v-for="row in developmentIdeas" :key="row.id" :class="{ overdue: ideaOverdue(row) }">
-            <section class="workflow-claim"><div class="workflow-title"><el-image class="idea-image" :src="row.image_url" fit="cover"><template #error><div class="empty-image">无图</div></template></el-image><div><strong>{{ row.title }}</strong><small class="person-inline"><el-avatar :src="personAvatar(row.assignee_person_id)" :size="24">{{ personInitial(row.assignee_name) }}</el-avatar>指定负责人：{{ row.assignee_name }}</small><small>截止时间：{{ row.development_due_at }}</small></div></div><el-button v-if="row.status==='assigned'" type="primary" plain @click="claimIdea(row)">认领任务</el-button><el-tag v-else type="success">已认领</el-tag></section>
-            <section class="workflow-progress"><div><strong>{{ row.output_count }}</strong><span>/ {{ row.target_product_count }} 个产品</span></div><el-progress :percentage="ideaProgress(row)" :status="ideaOverdue(row)?'exception':undefined" /><small v-if="ideaOverdue(row)" class="overdue-text">已超过截止时间，任务尚未完成</small><small v-else>{{ row.draft_count }} 个草稿，按草稿内变体统计；店铺副本不重复计数</small><el-button v-if="row.status==='developing'" type="primary" @click="createIdeaProduct(row)">新增产品并创建草稿</el-button><el-button v-if="row.status==='developing'" plain @click="openDraftLink(row)">关联草稿</el-button><span v-else class="claim-tip">负责人认领后才能开始开发</span></section>
-            <section class="workflow-drafts"><div v-for="draft in row.drafts" :key="draft.id" class="workflow-draft"><div><strong>{{ draft.product_name || `草稿 #${draft.id}` }}</strong><small>{{ draft.development_type==='fission' ? '裂变草稿' : '普通草稿' }}<template v-if="draft.parent_draft_id"> · 来源 #{{ draft.parent_draft_id }}</template></small></div><el-button link type="primary" @click="router.push({path:'/listing-records',query:{draftId:draft.id}})">查看</el-button></div><el-empty v-if="!row.drafts?.length" :image-size="42" description="暂未创建草稿" /></section>
-            <section class="workflow-orders"><strong>{{ row.order_count || 0 }}</strong><span>订单</span><small>订单模块关联后自动统计</small></section>
-          </article>
-          <el-empty v-if="!developmentIdeas.length" description="暂无符合条件的开发任务，请先填写指定人员、产品数量和截止时间，再点击“去开发”"><el-button type="primary" @click="activeTab='ideas'">去配置灵感任务</el-button></el-empty>
-        </div>
-      </div>
+    <section v-else-if="activeTab==='products'" v-loading="reviewDraftsLoading" class="panel development-review-page">
+      <div class="section-title"><div><span>按已完成的开发任务汇总关联草稿、车型、SKU 与发布状态</span><h2>开发数据复盘</h2></div><div class="review-header-actions"><el-tag type="success" effect="light">{{ completedDevelopmentTasks.length }} 个已完成任务</el-tag><el-button @click="refreshReviewData"><RefreshCw :size="15" /> 刷新</el-button></div></div>
+      <el-table :data="completedDevelopmentTasks" row-key="id" max-height="calc(100vh - 340px)" empty-text="还没有已完成的开发任务">
+        <el-table-column label="任务信息" min-width="500">
+          <template #default="{row}">
+            <div class="review-task-cell">
+              <el-image v-if="reviewTaskDraftRows(row)[0]?.effective_images?.[0]" class="review-task-image" :src="reviewTaskDraftRows(row)[0].effective_images[0]" fit="cover" :preview-src-list="[reviewTaskDraftRows(row)[0].effective_images[0]]" preview-teleported />
+              <div v-else class="review-task-image-empty">无图</div>
+              <div class="review-task-main">
+                <strong>{{ taskDisplayName(row) }}</strong>
+                <div class="review-task-people"><span>负责人：{{ row.owner_name || '未分配' }}</span><span>创建人：{{ reviewTaskCreator(row) }}</span></div>
+                <div class="review-task-times"><span>创建 {{ shanghaiDateTimeText(row.created_at, { assumeUtcWhenNaive: true }) }}</span><span>完成 {{ reviewTaskCompletionTime(row) }}</span></div>
+              </div>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="开发产出" min-width="410">
+          <template #default="{row}">
+            <div class="review-metrics"><span><b>{{ reviewTaskMetrics(row).draftBoxes }}</b>草稿箱</span><span><b>{{ reviewTaskMetrics(row).vehicles }}</b>车型</span><span><b>{{ reviewTaskMetrics(row).draftProducts }}</b>草稿商品</span><span><b>{{ reviewTaskMetrics(row).skus }}</b>SKU</span></div>
+          </template>
+        </el-table-column>
+        <el-table-column label="上架情况" width="190" align="center">
+          <template #default="{row}"><div class="review-publish-cell"><el-tag :type="reviewTaskPublishState(row).type" effect="light">{{ reviewTaskPublishState(row).label }}</el-tag><small v-if="reviewTaskPublishState(row).total">{{ reviewTaskPublishState(row).published }} / {{ reviewTaskPublishState(row).total }} 个草稿有成功上架记录</small></div></template>
+        </el-table-column>
+        <el-table-column label="草稿" width="100" align="center"><template #default="{row}"><el-button v-if="reviewTaskDraftIds(row).length" link type="primary" @click="openReviewDrafts(row)">查看草稿</el-button><span v-else class="review-muted">未关联</span></template></el-table-column>
+      </el-table>
+      <el-dialog v-model="reviewDraftVisible" title="任务关联草稿" width="min(900px, 92vw)" append-to-body destroy-on-close>
+        <el-table :data="reviewTaskDraftRows(reviewDraftTask || {})" max-height="60vh" row-key="id" empty-text="没有关联草稿">
+          <el-table-column label="草稿" min-width="300"><template #default="{row}"><div class="review-draft-cell"><el-image v-if="row.effective_images?.[0]" :src="row.effective_images[0]" fit="cover" :preview-src-list="[row.effective_images[0]]" preview-teleported /><span v-else class="review-draft-image-empty">无图</span><div><strong>{{ row.product_name || `草稿 #${row.id}` }}</strong><small>{{ row.internal_code || `草稿 #${row.id}` }}</small></div></div></template></el-table-column>
+          <el-table-column prop="vehicle_model" label="车型" min-width="150" />
+          <el-table-column label="SKU" width="90" align="center"><template #default="{row}">{{ row.sku_count || 0 }}</template></el-table-column>
+          <el-table-column label="上架记录" width="150" align="center"><template #default="{row}"><el-tag :type="Number(row.publish_success_count||0)>0?'success':'info'">{{ Number(row.publish_success_count||0)>0 ? `成功 ${row.publish_success_count} 条` : Number(row.publish_record_count||0)>0 ? '未成功' : '无记录' }}</el-tag></template></el-table-column>
+          <el-table-column label="操作" width="110" align="center"><template #default="{row}"><el-button link type="primary" @click="router.push({path:'/listing-records',query:{draftId:row.id}})">打开草稿</el-button></template></el-table-column>
+        </el-table>
+      </el-dialog>
     </section>
-
-    <section v-else-if="activeTab==='products'" class="products-page"><div v-if="developmentIdeas.length" class="development-tasks panel"><div class="section-title"><div><span>任务认领 → 产品进度 → 关联草稿 → 出单验证</span><h2>产品开发任务</h2></div></div><div class="development-task-list"><article v-for="row in developmentIdeas" :key="row.id" :class="{ overdue: ideaOverdue(row) }"><section class="task-claim"><el-image class="idea-image" :src="row.image_url" fit="cover"><template #error><div class="empty-image">无图</div></template></el-image><div><strong>{{ row.title }}</strong><small>负责人：{{ row.assignee_name || '待认领' }}</small><small>截止：{{ row.development_due_at }}</small><el-button v-if="row.status==='assigned'" size="small" type="primary" plain @click="claimIdea(row)">认领任务</el-button></div></section><section class="task-progress"><strong>{{ row.output_count }} / {{ row.target_product_count }}</strong><span>变体产品进度（可超额）</span><el-progress :percentage="ideaProgress(row)" :status="ideaOverdue(row)?'exception':undefined" /><small>{{ row.draft_count }} 个草稿，店铺副本不重复计数</small></section><section class="task-drafts"><strong>草稿箱记录</strong><div v-for="draft in row.drafts" :key="draft.id"><el-link type="primary" @click="router.push({path:'/listing-records',query:{draftId:draft.id}})">{{ draft.product_name || `草稿 #${draft.id}` }}</el-link><small>{{ draft.development_type==='fission'?'裂变草稿':'普通草稿' }}</small></div><span v-if="!row.drafts?.length">还没有关联草稿</span></section><section class="task-orders"><strong>{{ row.order_count || 0 }}</strong><span>出单数</span><small>订单模块待打通</small></section><section class="task-actions"><el-button type="primary" @click="createIdeaProduct(row)">新增产品</el-button><el-button plain @click="openDraftLink(row)">关联草稿</el-button></section></article></div></div><div class="toolbar panel"><div><el-input v-model="keyword" clearable placeholder="搜索产品、编号、类目、品牌、负责人"><template #prefix><Search :size="16" /></template></el-input><el-select v-model="projectFilter"><el-option label="全部项目" value="all" /><el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" /></el-select></div><el-button type="primary" @click="createProduct"><PackagePlus :size="17" /> 新建开发产品</el-button></div><div class="board"><section v-for="stage in stages" :key="stage.value"><header><strong>{{ stage.short }}</strong><b>{{ filteredProducts.filter(row=>row.status===stage.value).length }}</b></header><article v-for="row in filteredProducts.filter(item=>item.status===stage.value)" :key="row.id" @click="openMeta(row)"><div class="card-head"><el-image :src="productImage(row)" fit="cover"><template #error><div class="empty-image">无图</div></template></el-image><el-tag size="small" :type="row.priority==='high'?'danger':'info'">{{ row.priority==='high'?'高优先':'常规' }}</el-tag></div><h3>{{ row.title }}</h3><p>{{ row.product_code || `产品 #${row.product_id}` }}</p><div class="facts"><span>{{ row.category || '未分类' }}</span><span><Users :size="13" />{{ row.owner_name || '未分配' }}</span><span>库存 {{ row.stock }}</span><span>SKU {{ row.sku_count }}</span></div><footer @click.stop><el-button link @click="editInventoryProduct(row)">产品资料</el-button><el-button v-if="row.status!=='listed'" link type="primary" @click="moveStage(row)">下一阶段</el-button><el-button v-if="['content','listing'].includes(row.status)" link type="success" @click="createListingDraft(row)">创建草稿</el-button></footer></article></section></div></section>
     <section v-else-if="activeTab==='projects'" class="panel projects-page"><div class="section-title"><div><span>完全按照库存中心类目归组 · 产品数量从高到低</span><h2>{{ selectedProject ? selectedProject.name : '库存类目项目' }}</h2></div><el-button v-if="selectedProject" @click="selectedProject=null">返回类目总览</el-button></div><template v-if="!selectedProject"><div class="category-summary"><span>共 {{ displayedProjects.length }} 个类目</span><b>{{ displayedProjects.reduce((sum,item)=>sum+Number(item.product_count||0),0) }} 个库存产品</b></div><div class="project-grid"><article v-for="(project,index) in displayedProjects" :key="project.id" class="project-card" @click="openProject(project)"><div class="category-card-head"><b>#{{ index + 1 }}</b><strong>{{ project.name }}</strong><em>{{ project.product_count }}</em></div><p>{{ project.brand_count || 0 }} 个品牌 · {{ project.listed_count || 0 }} 个产品已关联 SKU</p><el-progress :percentage="Math.round(Number(project.product_count||0)/Math.max(1,Number(displayedProjects[0]?.product_count||1))*100)" :show-text="false" :stroke-width="6" /><el-button link type="primary">查看该类目产品 →</el-button></article></div><el-empty v-if="!displayedProjects.length" description="库存中心尚未填写库存类目，请先完善产品主档的类目字段" /></template><template v-else><el-table v-loading="categoryProductsLoading" :data="projectDetailProducts" class="project-product-table" empty-text="该类目还没有产品"><el-table-column label="主图" width="90"><template #default="{row}"><el-image class="idea-image" :src="productImage(row)" fit="cover" preview-teleported /></template></el-table-column><el-table-column prop="brand" label="品牌" width="150"><template #default="{row}"><strong>{{ row.brand || '未填品牌' }}</strong></template></el-table-column><el-table-column prop="title" label="产品" min-width="220" /><el-table-column prop="vehicle_model" label="车型/款式" min-width="160" /><el-table-column label="库存 / SKU" width="130"><template #default="{row}">{{ row.stock }} / {{ row.sku_count }}</template></el-table-column><el-table-column label="操作" width="180"><template #default="{row}"><el-button plain @click="editInventoryProduct(row)">产品表单</el-button><el-button link type="success" @click="createListingDraft(row)">创建草稿</el-button></template></el-table-column></el-table></template></section>
     <section v-else-if="activeTab==='bindings'" v-loading="bindingLoading" class="panel bindings-page"><div class="section-title"><div><span>把 Ozon 店铺 SKU 对应到真实库存产品，订单、销量和利润才能正确归集</span><h2>SKU 库存关联</h2></div><div class="binding-actions"><el-select :model-value="bindingStatus" style="width:150px" @change="changeBindingStatus"><el-option label="全部状态" value="all" /><el-option label="已绑定" value="bound" /><el-option label="缺少库存" value="unbound" /><el-option label="等待 Ozon" value="waiting_online" /><el-option label="绑定冲突" value="conflict" /></el-select><el-button @click="loadBindings(true)"><RefreshCw :size="16" /> 刷新</el-button><el-button type="primary" @click="retryBindings()">自动匹配库存</el-button></div></div><el-alert class="binding-guide" type="info" :closable="false" show-icon title="这个页面有什么用？"><template #default>每个线上 Ozon SKU 必须关联一个库存产品。系统会先自动匹配；“待人工绑定”的记录需要点击右侧“选择库存产品”。绑定后，订单销量、库存扣减、利润和裂变效果才能归到正确产品。</template></el-alert><div class="binding-note">当前显示最近 50 条；“已绑定”包含草稿自动绑定和历史 SKU 关系反推。</div><div class="binding-metrics"><article><span>当前列表 · 已绑定</span><strong>{{ bindingSummary.bound || 0 }}</strong></article><article><span>当前列表 · 待人工绑定</span><strong>{{ bindingSummary.unbound || 0 }}</strong></article><article><span>当前列表 · 等待同步</span><strong>{{ bindingSummary.waiting || 0 }}</strong></article><article><span>当前列表 · 冲突</span><strong>{{ bindingSummary.conflict || 0 }}</strong></article></div><el-table :data="bindings" :row-key="bindingRowKey" height="560" empty-text="当前筛选下没有 SKU 关联记录"><el-table-column label="商品 / 店铺" min-width="280"><template #default="{row}"><strong>{{ row.draft_name || row.offer_id || '-' }}</strong><div class="cell-sub">{{ row.shop_name }} · {{ row.offer_id }}</div></template></el-table-column><el-table-column prop="online_ozon_sku" label="Ozon SKU" width="145"><template #default="{row}">{{ row.online_ozon_sku || row.ozon_sku || '等待生成' }}</template></el-table-column><el-table-column label="库存产品" min-width="210"><template #default="{row}">{{ row.inventory_product_name || '尚未绑定' }}<div v-if="row.inventory_product_code" class="cell-sub">{{ row.inventory_product_code }}</div></template></el-table-column><el-table-column label="关系" width="135"><template #default="{row}"><el-tag :type="bindingStatusType(row.binding_status)">{{ bindingStatusLabel(row.binding_status) }}</el-tag><div v-if="row.binding_source" class="cell-sub">{{ row.binding_source.includes('draft') ? '开发草稿' : '历史关系反推' }}</div></template></el-table-column><el-table-column label="销量" width="120"><template #default="{row}">{{ row.sales_quantity || 0 }} 件 · {{ row.order_count || 0 }} 单</template></el-table-column><el-table-column label="操作" width="145" fixed="right"><template #default="{row}"><el-button v-if="row.binding_status!=='bound'" type="warning" plain @click="openBind(row)">选择库存产品</el-button><el-tag v-else type="success">关联完成</el-tag></template></el-table-column></el-table></section>
     <section v-else-if="activeTab==='analytics'" class="panel analytics-page"><div class="section-title"><div><span>草稿规模结合发布 SKU 与订单归因</span><h2>人工草稿与 AI 裂变效果</h2></div></div><div class="method-grid"><article v-for="item in methodStats" :key="item.method" :class="item.method"><span>{{ item.label }}</span><strong>{{ item.orderRate }}%</strong><small>已绑定 SKU 出单率</small><div><b>{{ item.drafts }}</b><em>现有草稿</em><b>{{ item.published }}</b><em>已上架</em><b>{{ item.quantity }}</b><em>销售件数</em></div></article></div><el-alert type="info" :closable="false" show-icon title="统计口径"><template #default>草稿数直接来自现有草稿箱；上架与销售数据来自已完成的 SKU 绑定。没有出单数据时仍会展示当前人工草稿和 AI 裂变草稿规模。</template></el-alert></section>
@@ -1088,8 +1234,8 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
           <el-table-column label="开发顺序" width="100" align="center" fixed="left"><template #default="{row}"><el-tag v-if="taskListSequenceById.has(row.id)" size="small" type="danger" effect="light" class="task-sequence-tag">{{ taskListSequenceById.get(row.id) }}</el-tag><el-tooltip v-else content="该任务尚未加入人工排程" placement="top"><el-tag size="small" type="info" effect="plain">未排程</el-tag></el-tooltip></template></el-table-column>
           <el-table-column v-if="taskType==='product_development' || taskType==='all'" type="expand" width="42"><template #default="{row}">
             <div v-if="row.type==='product_development'" class="task-model-detail-list">
-              <div class="task-shared-drafts"><strong>共享草稿 {{ row.development_plan?.unallocated_drafts?.length || 0 }} 个</strong><el-popover v-if="row.development_plan?.unallocated_drafts?.length" placement="bottom" :width="300" trigger="click"><template #reference><el-button link type="primary">查看</el-button></template><div class="task-draft-popover"><el-link v-for="draft in row.development_plan.unallocated_drafts" :key="draft.id" type="primary" @click="router.push({path:'/listing-records',query:{draftId:draft.id}})">{{ draft.title }} · {{ draft.count }} SKU</el-link></div></el-popover><el-button link type="primary" @click="openTaskModelDraftPicker(row)">{{ row.development_plan?.unallocated_drafts?.length ? '管理共享草稿' : '关联共享草稿' }}</el-button></div>
-              <article v-for="model in taskModelRows(row)" :key="model.index" class="task-model-detail-row"><div class="task-model-identity"><strong>{{ model.label }}</strong><small>{{ model.category || model.brand || '车型明细' }} · 目标 {{ model.target }} SKU</small></div><div class="task-model-progress"><strong>{{ Math.min(Number(model.done||0),Number(model.target||0)) }} / {{ model.target }} SKU</strong><el-progress :percentage="Math.min(100,Math.round(Number(model.done||0)/Math.max(1,Number(model.target||0))*100))" :show-text="false" :stroke-width="6" /></div><div class="task-model-draft-count"><span>草稿 {{ model.drafts?.length || 0 }} 个</span><el-popover v-if="model.drafts?.length" placement="bottom" :width="300" trigger="click"><template #reference><el-button link type="primary">查看</el-button></template><div class="task-draft-popover"><el-link v-for="draft in model.drafts" :key="draft.id" type="primary" @click="router.push({path:'/listing-records',query:{draftId:draft.id}})">{{ draft.title }} · {{ draft.count }} SKU</el-link></div></el-popover><el-button link type="primary" @click="openTaskModelDraftPicker(row,model)">修改</el-button></div><TaskScopeActions mode="model" :done="Number(model.done||0)" :target="Number(model.target||0)" @complete="completeTaskModel(row,model)" @drafts="openTaskModelDraftPicker(row,model)" @edit="editTaskModel(row,model)" @develop="createTaskDraft(row,model)" /></article>
+              <div class="task-shared-drafts"><strong>共享草稿 {{ row.development_plan?.unallocated_drafts?.length || 0 }} 个</strong><el-popover v-if="row.development_plan?.unallocated_drafts?.length" placement="right-start" :width="380" trigger="click"><template #reference><el-button link type="primary">查看</el-button></template><div class="task-draft-popover"><el-link v-for="draft in row.development_plan.unallocated_drafts" :key="draft.id" type="primary" @click="router.push({path:'/listing-records',query:{draftId:draft.id}})">{{ draft.title }} · {{ draft.count }} SKU</el-link></div></el-popover><el-button link type="primary" @click="openTaskModelDraftPicker(row)">{{ row.development_plan?.unallocated_drafts?.length ? '管理共享草稿' : '关联共享草稿' }}</el-button></div>
+              <article v-for="model in taskModelRows(row)" :key="model.index" class="task-model-detail-row"><div class="task-model-identity"><strong>{{ model.label }}</strong><small>{{ model.category || model.brand || '车型明细' }} · 目标 {{ model.target }} SKU</small></div><div class="task-model-progress"><strong>{{ Math.min(Number(model.done||0),Number(model.target||0)) }} / {{ model.target }} SKU</strong><el-progress :percentage="Math.min(100,Math.round(Number(model.done||0)/Math.max(1,Number(model.target||0))*100))" :show-text="false" :stroke-width="6" /></div><div class="task-model-draft-count"><span>草稿 {{ model.drafts?.length || 0 }} 个</span><el-popover v-if="model.drafts?.length" placement="right-start" :width="380" trigger="click"><template #reference><el-button link type="primary">查看</el-button></template><div class="task-draft-popover"><el-link v-for="draft in model.drafts" :key="draft.id" type="primary" @click="router.push({path:'/listing-records',query:{draftId:draft.id}})">{{ draft.title }} · {{ draft.count }} SKU</el-link></div></el-popover><el-button link type="primary" @click="openTaskModelDraftPicker(row,model)">修改</el-button></div><TaskScopeActions mode="model" :done="Number(model.done||0)" :target="Number(model.target||0)" @complete="completeTaskModel(row,model)" @drafts="openTaskModelDraftPicker(row,model)" @edit="editTaskModel(row,model)" @develop="createTaskDraft(row,model)" /></article>
               <el-empty v-if="!taskModelRows(row).length" :image-size="40" description="暂未配置车型" />
             </div>
           </template></el-table-column>
@@ -1189,8 +1335,31 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
 .operational-order-list article{position:relative;min-height:132px;box-sizing:border-box;overflow:visible}.order-alert-main{min-height:108px;padding-bottom:28px;box-sizing:border-box}.order-alert-meta{position:absolute;right:10px;bottom:7px;left:86px;min-height:24px;margin:0;padding-top:3px;box-sizing:border-box;background:#fbfcfe}.order-alert-meta .el-button{position:absolute;right:0;bottom:0}.order-alert-meta small{padding-right:62px}:global(.task-detail-dialog){width:min(1180px,calc(100vw - 32px))!important;max-height:96vh;margin-top:2vh!important}:global(.task-detail-dialog .el-dialog__body){max-height:calc(96vh - 150px);overflow:auto}
 .draft-link-header{display:flex;align-items:center;justify-content:space-between;gap:16px}.draft-link-header h2{margin:0;color:#243247;font-size:20px}.draft-link-header p{margin:5px 0 0;color:#7b8797;font-size:12px}.draft-link-summary,.draft-link-toolbar{display:flex;align-items:center;gap:9px}.draft-link-toolbar{margin-bottom:14px}.draft-link-toolbar>.el-input{flex:1}.draft-link-toolbar>.el-date-editor{flex:0 0 310px}.draft-choice-list{display:grid;grid-template-columns:1fr 1fr;gap:10px;height:590px;padding:2px 5px 2px 2px;overflow:auto}.draft-choice-card{position:relative;display:grid;grid-template-columns:78px minmax(0,1fr) 24px;gap:11px;min-height:108px;padding:10px;border:1px solid #dfe6ef;border-radius:11px;background:#fff;color:inherit;cursor:pointer;text-align:left;transition:border-color .15s,box-shadow .15s,background .15s}.draft-choice-card:hover{border-color:#9bc2f5;box-shadow:0 5px 14px #1f3b6414}.draft-choice-card.selected{border-color:#409eff;background:#f2f8ff;box-shadow:0 0 0 2px #409eff20}.draft-choice-card.linked{border-color:#b7e4c7;background:#f3fbf6;cursor:default;opacity:1}.draft-choice-card>.el-image{width:78px;height:104px;overflow:hidden;border-radius:8px;background:#edf1f6}.draft-choice-empty{display:grid;place-items:center;width:100%;height:100%;color:#98a2b3;font-size:12px}.draft-choice-main{display:grid;align-content:start;gap:6px;min-width:0}.draft-choice-main>strong{display:-webkit-box;overflow:hidden;color:#243247;font-size:13px;line-height:1.45;-webkit-line-clamp:2;-webkit-box-orient:vertical}.draft-choice-main>span{overflow:hidden;color:#3977d5;font-size:11px;white-space:nowrap;text-overflow:ellipsis}.draft-choice-main>div{display:flex;align-items:center;gap:7px;min-width:0}.draft-choice-main>div small{overflow:hidden;color:#667085;white-space:nowrap;text-overflow:ellipsis}.draft-choice-main>small{color:#98a2b3;font-size:10px}.draft-choice-check{align-self:center;color:#cbd5e1}.draft-choice-card.selected .draft-choice-check,.draft-choice-card.linked .draft-choice-check{color:#409eff}.draft-choice-card.linked .draft-choice-check{color:#22a861}.draft-choice-list>.el-empty{grid-column:1/-1;padding:40px 0}.draft-link-dialog .attach-tip{margin:13px 0 0;padding:9px 11px;border-radius:8px;background:#f5f8fc;color:#667085;font-size:12px}:global(.draft-link-dialog){max-width:calc(100vw - 32px)}:global(.draft-link-dialog .el-dialog__body){padding-top:12px}@media(max-width:720px){.draft-choice-list{grid-template-columns:1fr;height:62vh}.draft-link-header,.draft-link-toolbar{align-items:stretch;flex-direction:column}.draft-link-toolbar>.el-date-editor{flex:auto;width:100%}.draft-choice-card{grid-template-columns:68px minmax(0,1fr) 22px}.draft-choice-card>.el-image{width:68px;height:92px}}
 .draft-link-pagination{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:12px}.draft-link-pagination>span{color:#7b8797;font-size:12px}.draft-link-dialog .attach-tip{margin-top:10px}@media(max-width:720px){.draft-link-pagination{align-items:flex-start;flex-direction:column}}
-:global(.task-list-dialog .task-row-no-expand .el-table__expand-column .el-table__expand-icon){visibility:hidden;pointer-events:none}:global(.task-list-dialog .el-table__expanded-cell){box-sizing:border-box;padding:0 236px 14px 50px!important;background:#f7f9fc}.task-model-detail-list{display:grid;gap:6px;width:100%;max-width:100%;min-width:0;max-height:340px;overflow:auto;border:1px solid #e4ebf4;border-radius:9px;background:#fff}.task-shared-drafts{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-height:36px;padding:4px 12px;background:#f1f6fd;color:#334155;font-size:12px}.task-model-detail-row{display:grid;grid-template-columns:minmax(150px,1.25fr) minmax(130px,1fr) minmax(110px,auto) 150px;align-items:center;gap:10px;min-width:0;padding:9px 14px;border-top:1px solid #edf1f6}.task-model-identity{display:grid;min-width:0}.task-model-identity strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.task-model-identity small{color:#8491a3}.task-model-progress{min-width:100px}.task-model-progress .el-progress{margin-top:4px}.task-model-draft-count{display:flex;align-items:center;gap:5px;white-space:nowrap;font-size:12px}.task-draft-popover{display:grid;gap:7px;max-height:260px;overflow:auto}.task-draft-popover .el-link{justify-content:flex-start;text-align:left}@media(max-width:1250px){.task-model-detail-row{grid-template-columns:minmax(140px,1fr) minmax(120px,1fr) auto}.task-model-draft-count{grid-column:1 / 3}.task-model-detail-row :deep(.task-scope-actions){grid-column:3;grid-row:1 / 3}}@media(max-width:760px){:global(.task-list-dialog .el-table__expanded-cell){padding-right:16px!important;padding-left:16px!important}.task-model-detail-row{grid-template-columns:minmax(0,1fr) minmax(110px,1fr)}.task-model-draft-count{grid-column:1 / -1}.task-model-detail-row :deep(.task-scope-actions){grid-column:1 / -1;grid-row:auto;justify-content:flex-start}}.task-model-subtitle{display:block;margin-top:3px;color:#8491a3;font-size:11px}.task-model-drafts{display:grid;gap:3px}.task-model-empty{color:#98a2b3;font-size:12px}.task-status{align-items:center;gap:4px}.task-draft-picker-scroll{max-height:65vh;overflow:auto;margin-top:12px;border:1px solid #dfe6ef;border-radius:10px}.task-draft-picker-grid{display:grid;grid-template-columns:36px 76px minmax(180px,2fr) 75px minmax(140px,1.2fr) 95px minmax(170px,1.6fr) 105px 85px minmax(150px,1.2fr);align-items:center;gap:9px;min-width:1360px;padding:9px 10px;box-sizing:border-box}.task-draft-picker-header{position:sticky;top:0;z-index:2;background:#f5f8fc;color:#52657e;font-size:11px;font-weight:700}.task-draft-picker-row{border-top:1px solid #edf1f6;background:#fff}.task-draft-picker-row:hover{background:#f7faff}.task-draft-picker-image{width:64px;height:84px;border-radius:7px;background:#f0f3f7}.task-draft-image-empty{display:grid;place-items:center;width:100%;height:100%;color:#98a2b3;font-size:11px}.task-draft-picker-name{display:grid;gap:4px;min-width:0}.task-draft-picker-name strong{display:-webkit-box;overflow:hidden;color:#243247;font-size:12px;line-height:1.4;-webkit-line-clamp:2;-webkit-box-orient:vertical}.task-draft-picker-name small,.task-draft-picker-status small{color:#7b8797;font-size:10px}.task-draft-picker-cell{overflow:hidden;color:#52657e;font-size:11px;text-overflow:ellipsis}.task-draft-shop-list,.task-draft-picker-status{display:grid;gap:4px;min-width:0}.task-draft-shop-list>span{display:grid;gap:2px;padding:4px 6px;border-radius:5px;background:#f5f8fc}.task-draft-shop-list strong{overflow:hidden;color:#344054;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.task-draft-shop-list small,.task-draft-shop-list>small{color:#7b8797;font-size:10px}.task-draft-picker-price{color:#243247;font-size:11px;white-space:nowrap}.task-draft-unselected{color:#a0a9b5;font-size:10px}.task-draft-picker-pagination{justify-content:flex-end;margin-top:12px}.draft-picker-count{margin-right:auto;color:#7b8797;font-size:12px}
+:global(.task-list-dialog .task-row-no-expand .el-table__expand-column .el-table__expand-icon){visibility:hidden;pointer-events:none}:global(.task-list-dialog .el-table__expanded-cell){box-sizing:border-box;padding:0 14px 14px!important;background:#f7f9fc}.task-model-detail-list{display:grid;gap:6px;width:100%;max-width:100%;min-width:0;max-height:340px;overflow:auto;border:1px solid #e4ebf4;border-radius:9px;background:#fff}.task-shared-drafts{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-height:36px;padding:4px 12px;background:#f1f6fd;color:#334155;font-size:12px}.task-model-detail-row{display:grid;grid-template-columns:minmax(150px,1.25fr) minmax(130px,1fr) minmax(110px,auto) 150px;align-items:center;gap:10px;min-width:0;padding:9px 14px;border-top:1px solid #edf1f6}.task-model-identity{display:grid;min-width:0}.task-model-identity strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.task-model-identity small{color:#8491a3}.task-model-progress{min-width:100px}.task-model-progress .el-progress{margin-top:4px}.task-model-draft-count{display:flex;align-items:center;gap:5px;white-space:nowrap;font-size:12px}.task-draft-popover{display:grid;gap:5px;max-height:190px;overflow:auto}.task-draft-popover .el-link{justify-content:flex-start;min-width:0;overflow:hidden;text-align:left;text-overflow:ellipsis;white-space:nowrap}@media(max-width:1250px){.task-model-detail-row{grid-template-columns:minmax(140px,1fr) minmax(120px,1fr) auto}.task-model-draft-count{grid-column:1 / 3}.task-model-detail-row :deep(.task-scope-actions){grid-column:3;grid-row:1 / 3}}@media(max-width:760px){:global(.task-list-dialog .el-table__expanded-cell){padding-right:16px!important;padding-left:16px!important}.task-model-detail-row{grid-template-columns:minmax(0,1fr) minmax(110px,1fr)}.task-model-draft-count{grid-column:1 / -1}.task-model-detail-row :deep(.task-scope-actions){grid-column:1 / -1;grid-row:auto;justify-content:flex-start}}.task-model-subtitle{display:block;margin-top:3px;color:#8491a3;font-size:11px}.task-model-drafts{display:grid;gap:3px}.task-model-empty{color:#98a2b3;font-size:12px}.task-status{align-items:center;gap:4px}.task-draft-picker-scroll{max-height:65vh;overflow:auto;margin-top:12px;border:1px solid #dfe6ef;border-radius:10px}.task-draft-picker-grid{display:grid;grid-template-columns:36px 76px minmax(180px,2fr) 75px minmax(140px,1.2fr) 95px minmax(170px,1.6fr) 105px 85px minmax(150px,1.2fr);align-items:center;gap:9px;min-width:1360px;padding:9px 10px;box-sizing:border-box}.task-draft-picker-header{position:sticky;top:0;z-index:2;background:#f5f8fc;color:#52657e;font-size:11px;font-weight:700}.task-draft-picker-row{border-top:1px solid #edf1f6;background:#fff}.task-draft-picker-row:hover{background:#f7faff}.task-draft-picker-image{width:64px;height:84px;border-radius:7px;background:#f0f3f7}.task-draft-image-empty{display:grid;place-items:center;width:100%;height:100%;color:#98a2b3;font-size:11px}.task-draft-picker-name{display:grid;gap:4px;min-width:0}.task-draft-picker-name strong{display:-webkit-box;overflow:hidden;color:#243247;font-size:12px;line-height:1.4;-webkit-line-clamp:2;-webkit-box-orient:vertical}.task-draft-picker-name small,.task-draft-picker-status small{color:#7b8797;font-size:10px}.task-draft-picker-cell{overflow:hidden;color:#52657e;font-size:11px;text-overflow:ellipsis}.task-draft-shop-list,.task-draft-picker-status{display:grid;gap:4px;min-width:0}.task-draft-shop-list>span{display:grid;gap:2px;padding:4px 6px;border-radius:5px;background:#f5f8fc}.task-draft-shop-list strong{overflow:hidden;color:#344054;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.task-draft-shop-list small,.task-draft-shop-list>small{color:#7b8797;font-size:10px}.task-draft-picker-price{color:#243247;font-size:11px;white-space:nowrap}.task-draft-unselected{color:#a0a9b5;font-size:10px}.task-draft-picker-pagination{justify-content:flex-end;margin-top:12px}.draft-picker-count{margin-right:auto;color:#7b8797;font-size:12px}
 .task-draft-picker-grid:not(.task-draft-picker-grid-task){grid-template-columns:36px 76px minmax(180px,2fr) 75px minmax(140px,1.2fr) 95px minmax(170px,1.6fr) 105px 85px;min-width:1220px}
+
+.development-review-page{padding:16px;min-height:300px}
+.review-header-actions{display:flex;align-items:center;gap:10px}
+.review-task-cell{display:flex;align-items:center;gap:12px;min-width:0;padding:4px 0}
+.review-task-image,.review-task-image-empty{flex:none;width:58px;height:76px;border-radius:8px;background:#f0f3f7}
+.review-task-image-empty,.review-draft-image-empty{display:grid;place-items:center;color:#98a2b3;font-size:11px}
+.review-task-main{display:grid;gap:7px;min-width:0}
+.review-task-main>strong{overflow:hidden;color:#243247;font-size:14px;text-overflow:ellipsis;white-space:nowrap}
+.review-task-people,.review-task-times{display:flex;flex-wrap:wrap;gap:6px 16px;color:#667085;font-size:12px}
+.review-task-times{color:#8491a3;font-size:11px}
+.review-metrics{display:flex;flex-wrap:wrap;gap:8px}
+.review-metrics>span{display:flex;align-items:center;gap:5px;padding:7px 10px;border:1px solid #e6edf5;border-radius:8px;background:#f8fafc;color:#667085;font-size:12px;white-space:nowrap}
+.review-metrics b{color:#243247;font-size:15px}
+.review-publish-cell{display:grid;justify-items:center;gap:5px}
+.review-publish-cell small,.review-muted{color:#8995a7;font-size:11px}
+.review-draft-cell{display:flex;align-items:center;gap:10px;min-width:0}
+.review-draft-cell .el-image,.review-draft-image-empty{flex:none;width:42px;height:54px;border-radius:6px;background:#f0f3f7}
+.review-draft-cell>div:last-child{display:grid;gap:4px;min-width:0}
+.review-draft-cell strong,.review-draft-cell small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.review-draft-cell strong{color:#344054;font-size:12px}
+.review-draft-cell small{color:#8995a7;font-size:11px}
+@media(max-width:1050px){.review-task-people,.review-task-times{gap:5px 10px}.review-metrics{gap:5px}.review-metrics>span{padding:5px 7px}}
+
 </style>
 
 <style>

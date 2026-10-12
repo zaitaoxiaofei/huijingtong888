@@ -48,6 +48,17 @@ test("draft and publish record lists avoid full schema warmup", () => {
   assert.match(records, /await ensureListingListReadSchema\(\)/);
 });
 
+test("development review can fetch linked drafts with authoritative image and publish summaries", () => {
+  const drafts = source.match(/export async function listingDrafts\(query = \{\}, session\)[\s\S]*?export async function listingDraftDetail/)?.[0] || "";
+  assert.match(drafts, /requestedIds/);
+  assert.match(drafts, /d\.id IN \(\$\{placeholders\}\)/);
+  assert.match(drafts, /AS source_product_id/);
+  assert.match(drafts, /AS sku_count/);
+  assert.match(drafts, /AS publish_success_count/);
+  assert.match(drafts, /resolveMappedMediaInValue\(normalizeDraftRow\(item\)\)/);
+  assert.match(source, /effective_images: effectiveMedia\.images/);
+});
+
 test("publish record table reads lightweight list summaries instead of request payloads", () => {
   const records = source.match(/export async function listingPublishRecords[\s\S]*?export async function listingDraftProjects/)?.[0] || "";
   const listSelect = records.match(/const listRecordSelectSql = `[\s\S]*?`;/)?.[0] || "";

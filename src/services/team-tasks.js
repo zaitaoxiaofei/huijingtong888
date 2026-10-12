@@ -69,6 +69,7 @@ async function ensureTeamTasksSchema() {
       quality_score DECIMAL(8,2) NOT NULL DEFAULT 0,
       automation_key VARCHAR(128) NULL,
       created_by_person_id BIGINT UNSIGNED NULL,
+      completed_at DATETIME NULL,
       active TINYINT(1) NOT NULL DEFAULT 1,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -87,6 +88,7 @@ async function ensureTeamTasksSchema() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
   await mysqlExecute("INSERT IGNORE INTO team_operational_owners (work_type) VALUES ('procurement_daily'), ('shipping_daily')");
   for (const sql of [
+    "ALTER TABLE team_tasks ADD COLUMN completed_at DATETIME NULL AFTER created_by_person_id",
     "ALTER TABLE team_operational_owners ADD COLUMN term_until DATE NULL",
     "ALTER TABLE team_tasks ADD COLUMN owner_manually_assigned TINYINT(1) NOT NULL DEFAULT 0",
     "ALTER TABLE team_tasks ADD COLUMN automation_key VARCHAR(128) NULL AFTER quality_score",
@@ -94,6 +96,7 @@ async function ensureTeamTasksSchema() {
   ]) {
     try { await mysqlExecute(sql); } catch (error) { if (!/Duplicate column|Duplicate key name/i.test(String(error?.message || error))) throw error; }
   }
+  await mysqlExecute("UPDATE team_tasks SET completed_at=updated_at WHERE work_type='product_development' AND status='done' AND completed_at IS NULL");
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS product_development_projects (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -340,7 +343,9 @@ function normalizeTeamTaskRow(row = {}) {
     deliverable: readDevelopmentPlan(row.related_object) ? developmentPlanDeliverable(readDevelopmentPlan(row.related_object)) : row.deliverable || "",
     reviewer_person_id: row.reviewer_person_id ? Number(row.reviewer_person_id) : null,
     created_at: row.created_at || "",
-    updated_at: row.updated_at || ""
+    updated_at: row.updated_at || "",
+    created_by_person_id: row.created_by_person_id ? Number(row.created_by_person_id) : null,
+    completed_at: row.completed_at || ""
   };
 }
 
@@ -513,8 +518,12 @@ async function syncDevelopmentIdeaTasks() {
     GROUP BY idea.id
     ON DUPLICATE KEY UPDATE title=VALUES(title), owner_person_id=VALUES(owner_person_id), status=VALUES(status),
       target_count=VALUES(target_count), done_count=VALUES(done_count), start_at=VALUES(start_at), due_at=VALUES(due_at),
-      related_object=VALUES(related_object), active=1, updated_at=CURRENT_TIMESTAMP
+      related_object=VALUES(related_object),
+      completed_at=CASE WHEN VALUES(status)='done' THEN COALESCE(completed_at,CURRENT_TIMESTAMP) ELSE NULL END,
+      active=1, updated_at=CURRENT_TIMESTAMP
   `);
+  await mysqlExecute(`UPDATE team_tasks SET completed_at=updated_at
+    WHERE work_type='product_development' AND automation_key LIKE 'development_idea:%' AND status='done' AND completed_at IS NULL`);
   await mysqlExecute(`UPDATE team_tasks task JOIN product_development_ideas idea
     ON task.automation_key=CONCAT('development_idea:',idea.id)
     SET task.active=0 WHERE (idea.active=0 OR idea.development_matrix_enabled=1) AND task.active=1`);
@@ -601,7 +610,7 @@ export async function teamTasksMysql(query = {}) {
     params.push(ownerId);
   }
   const rows = await mysqlQuery(`
-    SELECT t.*, p.name AS owner_name, p.avatar_url AS owner_avatar_url,
+      SELECT t.*, p.name AS owner_name, p.avatar_url AS owner_avatar_url,
       link.project_id, project.name AS project_name, link.candidate_id, candidate.title AS candidate_title,
       link.stage AS development_stage, link.deliverable, link.reviewer_person_id
     FROM team_tasks t
@@ -829,7 +838,7 @@ export async function teamTaskOperationalDetailsMysql(id) {
     const actionableRows = [...actionableByOrder.values()];
     const done = Math.max(0, Number(task.target_count || 0) - actionableRows.length);
     const status = done >= Number(task.target_count || 0) ? "done" : "doing";
-    await mysqlExecute("UPDATE team_tasks SET done_count=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND active=1", [done, status, taskId]);
+    await mysqlExecute("UPDATE team_tasks SET done_count=?,status=?,completed_at=CASE WHEN ?='done' THEN COALESCE(completed_at,CURRENT_TIMESTAMP) ELSE NULL END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND active=1", [done, status, status, taskId]);
     return { rows: actionableRows.map((row) => ({ ...row, reason: "not_procured", reason_label: "尚未采购", warning: true })),
       summary: { total: actionableRows.length, not_procured: actionableRows.length }, progress: { done, status } };
   }
@@ -869,7 +878,7 @@ export async function teamTaskOperationalDetailsMysql(id) {
   const summary = normalized.reduce((result, row) => { result.total += 1; result[row.reason] = (result[row.reason] || 0) + 1; if (row.warning) result.warning += 1; return result; }, { total: 0, warning: 0 });
   const done = Math.max(0, Number(task.target_count || 0) - normalized.length);
   const status = done >= Number(task.target_count || 0) ? "done" : "doing";
-  await mysqlExecute("UPDATE team_tasks SET done_count=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND active=1", [done, status, taskId]);
+  await mysqlExecute("UPDATE team_tasks SET done_count=?,status=?,completed_at=CASE WHEN ?='done' THEN COALESCE(completed_at,CURRENT_TIMESTAMP) ELSE NULL END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND active=1", [done, status, status, taskId]);
   return { rows: normalized, summary, progress: { done, status } };
 }
 
@@ -884,8 +893,8 @@ export async function createTeamTaskMysql(body = {}, sessionPersonId = null) {
     INSERT INTO team_tasks (
       title, work_type, owner_person_id, collaborator_person_ids_json, period,
       status, priority, target_count, done_count, unit, start_at, due_at,
-      related_object, result_note, quality_score, created_by_person_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      related_object, result_note, quality_score, created_by_person_id, completed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ?='done' THEN CURRENT_TIMESTAMP ELSE NULL END)
   `, [
     payload.title,
     payload.workType,
@@ -902,7 +911,8 @@ export async function createTeamTaskMysql(body = {}, sessionPersonId = null) {
     payload.related,
     payload.result,
     payload.quality,
-    payload.createdByPersonId
+    payload.createdByPersonId,
+    payload.status
   ]);
   if (!isDevelopmentPlan) await saveTaskLink(Number(result.insertId), payload);
   return { ok: true, id: Number(result.insertId) };
@@ -953,6 +963,7 @@ export async function updateTeamTaskMysql(id, body = {}) {
       collaborator_person_ids_json = ?,
       period = ?,
       status = ?,
+      completed_at = CASE WHEN ? = 'done' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END,
       priority = ?,
       target_count = ?,
       done_count = ?,
@@ -970,6 +981,7 @@ export async function updateTeamTaskMysql(id, body = {}) {
     payload.ownerPersonId,
     JSON.stringify(payload.collaboratorIds),
     payload.period,
+    payload.status,
     payload.status,
     payload.priority,
     payload.target,
@@ -1047,7 +1059,7 @@ export async function developmentProjectsMysql() {
   return rows.map(normalizeProjectRow);
 }
 
-export async function developmentIdeasMysql() {
+export async function developmentIdeasMysql(query = {}) {
   ensureMysqlEnabled(); await ensureTeamTasksSchema();
   const rows = await mysqlQuery(`SELECT idea.*,
       COALESCE(idea.development_started_at,
@@ -1096,6 +1108,7 @@ export async function developmentIdeasMysql() {
     target_product_count: Number(row.target_product_count || 0), linked_product_count: Number(row.linked_product_count || 0),
     development_started_at: row.effective_development_started_at || row.development_started_at || null,
     draft_count: Number(row.draft_count || 0), output_count: Number(row.output_count || 0), drafts: draftsByIdea.get(Number(row.id)) || [], order_count: 0 }));
+  if (String(query.includeTasks ?? query.include_tasks ?? "1") === "0") return ideaRows;
   const tasks = await teamTasksMysql({ type: "product_development" });
   for (const idea of ideaRows) {
     const children = tasks.filter(task => task.source_idea_id === idea.id);
@@ -1236,11 +1249,11 @@ async function saveDevelopmentIdeaMatrix(ideaId, body, sessionPersonId = null) {
       const title = normalizeText(`${values[0]} · ${scopes.join(' / ')}`, 255);
       const params = [title, taskOwner, payload.target, payload.done, payload.status, taskDue, payload.related, payload.deliverable, key];
       if (previous) {
-        await connection.execute(`UPDATE team_tasks SET title=?,owner_person_id=?,target_count=?,done_count=?,status=?,due_at=?,related_object=?,result_note=?,automation_key=?,unit='SKU',active=1,updated_at=CURRENT_TIMESTAMP WHERE id=?`, [...params, previous.id]);
+        await connection.execute(`UPDATE team_tasks SET title=?,owner_person_id=?,target_count=?,done_count=?,status=?,completed_at=CASE WHEN ?='done' THEN COALESCE(completed_at,CURRENT_TIMESTAMP) ELSE NULL END,due_at=?,related_object=?,result_note=?,automation_key=?,unit='SKU',active=1,updated_at=CURRENT_TIMESTAMP WHERE id=?`, [params[0], params[1], params[2], params[3], params[4], params[4], ...params.slice(5), previous.id]);
         retained.add(Number(previous.id));
       } else {
-        const [result] = await connection.execute(`INSERT INTO team_tasks (title,owner_person_id,target_count,done_count,status,due_at,related_object,result_note,automation_key,work_type,unit,period,created_by_person_id)
-          VALUES (?,?,?,?,?,?,?,?,?,'product_development','SKU','week',?)`, [...params, normalizePersonId(previousIdea?.created_by_person_id || sessionPersonId)]);
+        const [result] = await connection.execute(`INSERT INTO team_tasks (title,owner_person_id,target_count,done_count,status,due_at,related_object,result_note,automation_key,work_type,unit,period,created_by_person_id,completed_at)
+          VALUES (?,?,?,?,?,?,?,?,?,'product_development','SKU','week',?,CASE WHEN ?='done' THEN CURRENT_TIMESTAMP ELSE NULL END)`, [...params, normalizePersonId(previousIdea?.created_by_person_id || sessionPersonId), payload.status]);
         retained.add(Number(result.insertId));
       }
     }
