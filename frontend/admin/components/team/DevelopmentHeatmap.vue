@@ -54,62 +54,19 @@ const quadrantCards = computed(() => {
   });
   return cards;
 });
-const priorityRingLayout = computed(() => {
-  const nodeSpacing = expandedQuadrantScore.value == null ? 124 : 82;
-  let boundary = 0;
-  const bands = quadrantCards.value.map((group, index) => {
-    const points = group.points;
-    const placements = [];
-    let remaining = points.length;
-    let lastRadius = 0;
-    let lane = 0;
-    if (index === 0 && remaining) {
-      if (remaining === 1) {
-        placements.push({ point: points[0], radius: 0, angle: 0 });
-        remaining = 0;
-      } else {
-        lastRadius = 78;
-      }
-    } else if (index > 0 && remaining) {
-      lastRadius = boundary + 84;
-    }
-    while (remaining > 0) {
-      const capacity = Math.max(2, Math.floor((Math.PI * 2 * lastRadius) / nodeSpacing));
-      const laneCount = Math.min(remaining, capacity);
-      for (let offset = 0; offset < laneCount; offset += 1) {
-        const angle = -Math.PI / 2 + (Math.PI / laneCount) + (offset * Math.PI * 2) / laneCount + (lane % 2 ? Math.PI / capacity : 0);
-        placements.push({ point: points[points.length - remaining + offset], radius: lastRadius, angle });
-      }
-      remaining -= laneCount;
-      if (remaining > 0) { lane += 1; lastRadius += 112; }
-    }
-    const minimumBand = expandedQuadrantScore.value == null ? (index === 0 ? 150 : 154) : (index === 0 ? 124 : 132);
-    const outerRadius = Math.max(boundary + minimumBand, lastRadius + (expandedQuadrantScore.value == null ? 70 : 52));
-    const band = { ...group, innerRadius: boundary, outerRadius, placements };
-    boundary = outerRadius;
-    return band;
-  });
-  const diameter = Math.max(720, Math.ceil((boundary + (expandedQuadrantScore.value == null ? 100 : 64)) * 2));
-  const center = diameter / 2;
+const quadrantBoardStyle = computed(() => {
+  const counts = Object.fromEntries(quadrantCards.value.map((group) => [group.score, group.points.length]));
+  const share = (first, second) => Math.max(0.18, Math.min(0.82, (first + 1) / (first + second + 2)));
+  const left = share(counts[10] + counts[8], counts[7] + counts[6]);
+  const top = share(counts[10] + counts[7], counts[8] + counts[6]);
   return {
-    diameter,
-    center,
-    bands: bands.map((band) => ({
-      ...band,
-      placements: band.placements.map((item) => ({
-        ...item,
-        x: center + Math.cos(item.angle) * item.radius,
-        y: center + Math.sin(item.angle) * item.radius
-      }))
-    }))
+    gridTemplateColumns: `${left}fr ${1 - left}fr`,
+    gridTemplateRows: `${top}fr ${1 - top}fr`,
+    transform: `scale(${zoom.value})`
   };
 });
-const visibleRingBands = computed(() => priorityRingLayout.value.bands.map((band) => ({
-  ...band,
-  placements: band.score === expandedQuadrantScore.value || expandedQuadrantScore.value == null ? band.placements : []
-})));
-const boardWidth = computed(() => viewMode.value === "coordinates" ? Math.max(canvasWidth.value, 190 + heatmap.value.columns.length * 158) : viewMode.value === "quadrant" ? Math.max(canvasWidth.value, priorityRingLayout.value.diameter) : canvasWidth.value);
-const boardHeight = computed(() => viewMode.value === "coordinates" ? 58 + heatmap.value.rows.length * 100 : viewMode.value === "quadrant" ? Math.max(696, priorityRingLayout.value.diameter) : 696);
+const boardWidth = computed(() => viewMode.value === "coordinates" ? Math.max(canvasWidth.value, 190 + heatmap.value.columns.length * 158) : canvasWidth.value);
+const boardHeight = computed(() => viewMode.value === "coordinates" ? 58 + heatmap.value.rows.length * 100 : 696);
 const boardShellStyle = computed(() => viewMode.value === "quadrant"
   ? { width: "100%", height: "100%" }
   : { width: `${boardWidth.value * zoom.value}px`, height: `${boardHeight.value * zoom.value}px` });
@@ -123,7 +80,7 @@ const quadrantLabels = [
 const priorityQuadrants = computed(() => quadrantLabels.map((item) => ({ ...item, count: heatmap.value.quadrants.find((row) => row.score === item.score)?.count || 0 })));
 const priorityFilters = computed(() => [{ score: null, label: "全部", count: heatmap.value.taskCount }, ...priorityQuadrants.value]);
 
-function ringTaskCount(band) { return new Set(band.placements.flatMap((item) => [...item.point.cell.tasks.keys()])).size; }
+
 function setViewMode(value) { viewMode.value = value; expandedQuadrantScore.value = null; resetZoom(); }
 function setPriorityFilter(score) { expandedQuadrantScore.value = score; resetZoom(); }
 function startPriorityDrag(event, point, score) {
@@ -150,30 +107,16 @@ async function movePointToPriority(score) {
     ElMessage.success(`已调整 ${ids.length} 个任务的优先级为${priorityLabel(score)}`);
     draggedPoint.value = null;
     await load();
-    setPriorityFilter(score);
+    expandedQuadrantScore.value = null;
+    activeDropScore.value = null;
   } catch (err) { ElMessage.error(err.message || "优先级调整失败，请刷新重试"); }
   finally { prioritySaving.value = false; }
 }
-function ringScoreAtPointer(event) {
-  const rect = event.currentTarget.getBoundingClientRect();
-  const layout = priorityRingLayout.value;
-  const scaleX = rect.width / layout.diameter;
-  const scaleY = rect.height / layout.diameter;
-  const x = (event.clientX - rect.left) / scaleX;
-  const y = (event.clientY - rect.top) / scaleY;
-  const radius = Math.hypot(x - layout.center, y - layout.center);
-  return layout.bands.find((band) => radius <= band.outerRadius)?.score ?? null;
+function handleQuadrantDragOver(event, score) {
+  setPriorityDropTarget(event, score);
 }
-function handleRingDragOver(event) {
-  if (!draggedPoint.value) return;
-  const score = ringScoreAtPointer(event);
-  activeDropScore.value = score != null && score !== draggedPoint.value.score ? score : null;
-  if (activeDropScore.value && event.dataTransfer) event.dataTransfer.dropEffect = "move";
-}
-async function dropOnRing(event) {
-  if (!draggedPoint.value) return;
-  const score = activeDropScore.value ?? ringScoreAtPointer(event);
-  if (score != null && score !== draggedPoint.value.score) await movePointToPriority(score);
+async function dropOnQuadrant(score) {
+  await movePointToPriority(score);
   activeDropScore.value = null;
 }
 
@@ -346,7 +289,7 @@ async function centerRingCanvas() {
 defineExpose({ reload: load });
 watch([periodKey, dimension], () => { selectedCoordinateKeys.value = []; selectedCoordinates.value = new Map(); pendingPlanKeys.value = new Set(); expandedQuadrantScore.value = null; loadPlanOrders(); });
 watch(() => heatmap.value.rows.length, fitCanvas);
-watch([viewMode, expandedQuadrantScore, () => priorityRingLayout.value.diameter], centerRingCanvas);
+watch([viewMode, expandedQuadrantScore], centerRingCanvas);
 watch(viewport, (element) => { if (element) resizeObserver?.observe(element); }, { flush: "post" });
 onMounted(() => { setPeriod("month"); load(); fitCanvas(); resizeObserver = new ResizeObserver(fitCanvas); if (viewport.value) resizeObserver.observe(viewport.value); });
 onBeforeUnmount(() => resizeObserver?.disconnect());
@@ -379,20 +322,23 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
     </div>
     <el-alert v-if="error" :title="error" type="error" :closable="false"><el-button @click="load">重新加载</el-button></el-alert>
     <template v-else>
-      <div class="heatmap-priority-legend priority-filter-bar"><strong>优先级</strong><button v-for="filter in priorityFilters" :key="filter.score ?? 'all'" type="button" class="priority-filter" :class="[filter.score == null ? 'priority-all' : `priority-${filter.score}`, { active: expandedQuadrantScore === filter.score, 'drop-target-active': activeDropScore === filter.score }]" :data-score="filter.score ?? 'all'" :aria-label="`筛选优先级：${filter.label}`" :aria-pressed="expandedQuadrantScore === filter.score" @click="setPriorityFilter(filter.score)" @dragover.prevent="setPriorityDropTarget($event, filter.score)" @dragleave="activeDropScore === filter.score && (activeDropScore = null)" @drop.prevent.stop="filter.score != null && movePointToPriority(filter.score)">{{ filter.label }} <small>{{ filter.count }}</small></button><em>{{ draggedPoint ? '拖到优先级标签或目标环即可调整' : viewMode === 'quadrant' ? '全部显示四层环；拖动圆形任务点到目标环或标签调整优先级' : '横向核心品名 · 纵向' + (dimension === 'model' ? '车型' : '品牌') }}</em></div>
+      <div class="heatmap-priority-legend priority-filter-bar"><strong>优先级</strong><button v-for="filter in priorityFilters" :key="filter.score ?? 'all'" type="button" class="priority-filter" :class="[filter.score == null ? 'priority-all' : `priority-${filter.score}`, { active: expandedQuadrantScore === filter.score, 'drop-target-active': activeDropScore === filter.score }]" :data-score="filter.score ?? 'all'" :aria-label="`筛选优先级：${filter.label}`" :aria-pressed="expandedQuadrantScore === filter.score" @click="setPriorityFilter(filter.score)" @dragover.prevent="setPriorityDropTarget($event, filter.score)" @dragleave="activeDropScore === filter.score && (activeDropScore = null)" @drop.prevent.stop="filter.score != null && movePointToPriority(filter.score)">{{ filter.label }} <small>{{ filter.count }}</small></button><em>{{ draggedPoint ? '拖到优先级标签或目标象限即可调整' : viewMode === 'quadrant' ? '全部显示四象限；拖动任务点到目标象限或标签调整优先级' : '横向核心品名 · 纵向' + (dimension === 'model' ? '车型' : '品牌') }}</em></div>
       <div class="heatmap-canvas-toolbar" v-if="heatmap.rows.length && heatmap.columns.length && (viewMode === 'coordinates' || viewMode === 'quadrant' || expandedQuadrantScore !== null)"><span>缩放</span><el-button circle size="small" aria-label="缩小热力图" @click="zoomBy(-0.08)">−</el-button><strong>{{ Math.round(zoom * 100) }}%</strong><el-button circle size="small" aria-label="放大热力图" @click="zoomBy(0.08)">＋</el-button><el-button size="small" @click="resetZoom">重置</el-button><small>滚轮缩放 · 左键拖动画布</small></div>
-      <div v-if="heatmap.rows.length && heatmap.columns.length" ref="viewport" class="heatmap-viewport" :class="{ 'is-panning': isDragging, 'planning-mode': planningMode, 'ring-mode': viewMode === 'quadrant' }" @wheel.prevent="handleZoomWheel" @pointerdown="beginPan" @pointermove="movePan" @pointerup="endPan" @pointercancel="endPan" @lostpointercapture="endPan">
-        <div v-if="viewMode === 'quadrant'" class="heatmap-board-shell ring-board-shell" :style="boardShellStyle">
-          <div class="priority-rings-canvas" :style="{ width: `${priorityRingLayout.diameter}px`, height: `${priorityRingLayout.diameter}px`, left: `${(canvasWidth - priorityRingLayout.diameter * zoom) / (2 * zoom)}px`, top: `${(boardHeight - priorityRingLayout.diameter * zoom) / (2 * zoom)}px`, transform: `scale(${zoom})` }" @dragover.prevent="handleRingDragOver" @drop.prevent="dropOnRing">
-            <div v-for="band in [...visibleRingBands].reverse()" :key="`ring-zone-${band.score}`" class="priority-ring-zone" :class="[`priority-${band.score}`, { 'drop-target-active': activeDropScore === band.score }]" :style="{ width: `${band.outerRadius * 2}px`, height: `${band.outerRadius * 2}px`, left: `${priorityRingLayout.center - band.outerRadius}px`, top: `${priorityRingLayout.center - band.outerRadius}px` }" aria-hidden="true"></div>
-            <div v-for="band in visibleRingBands" :key="`ring-label-${band.score}`" class="priority-ring-label" :class="`priority-${band.score}`" :style="{ left: `${priorityRingLayout.center}px`, top: `${priorityRingLayout.center - band.outerRadius + 9}px` }"><strong>{{ band.label }}</strong><small>{{ band.placements.length }} 个点位 · {{ ringTaskCount(band) }} 个任务</small></div>
-            <template v-for="band in visibleRingBands" :key="`ring-points-${band.score}`"><button v-for="item in band.placements" :key="item.point.coordinate.coordinate_key" :draggable="!planningMode" class="quadrant-point ring-point" :class="[{ selected: selectedCoordinateKeys.includes(item.point.coordinate.coordinate_key), marked: item.point.plan.marked, completed: completedCount(item.point.cell) === item.point.cell.tasks.size }, `priority-${band.score}`]" :style="{ ...pointStyle(item.point), left: `${item.x}px`, top: `${item.y}px` }" :aria-label="`${item.point.title}：${item.point.cell.value} ${unit}`" @click="handleCellClick(item.point.row,item.point.column)" @contextmenu="cancelCoordinate($event,item.point.row,item.point.column)" @dragstart="startPriorityDrag($event,item.point,band.score)" @dragend="endPriorityDrag">
-              <b v-if="item.point.plan.sequence" class="point-sequence">{{ item.point.plan.sequence }}</b><i v-if="item.point.plan.marked" class="point-marker">标记</i>
-              <span class="point-owners"><el-avatar v-for="task in taskOwners(item.point.cell).slice(0,2)" :key="avatarKey(task)" :src="avatarFailures.has(avatarKey(task)) ? '' : task.owner_avatar_url" :size="42" @error="handleAvatarError(task)">{{ task.owner_name?.slice(0,1) || '?' }}</el-avatar><el-avatar v-if="!taskOwners(item.point.cell).length" :size="42">?</el-avatar></span>
-              <span class="point-copy"><strong>{{ item.point.title }}</strong><small>{{ item.point.cell.tasks.size }} 个任务 · {{ item.point.cell.value }} {{ unit }}</small></span>
-              <span class="point-hover-card"><b>{{ item.point.title }}</b><small>{{ dimension === 'model' ? '车型' : '品牌' }}颗粒度 · {{ item.point.cell.tasks.size }} 个未完成任务</small><span v-for="task in cellTasks(item.point.cell).slice(0,4)" :key="task.id"><el-avatar :src="task.owner_avatar_url" :size="22">{{ task.owner_name?.slice(0,1) || '?' }}</el-avatar><strong>{{ task.title }}</strong><i>{{ taskStatusLabel(task) }}</i></span><em v-if="item.point.cell.tasks.size > 4">另有 {{ item.point.cell.tasks.size - 4 }} 个任务</em><small>点击查看明细 · 拖动调整优先级</small></span>
-            </button></template>
-            <div v-if="!visibleRingBands.some((band) => band.placements.length)" class="ring-empty">当前筛选范围暂无未完成任务</div>
+      <div v-if="heatmap.rows.length && heatmap.columns.length" ref="viewport" class="heatmap-viewport" :class="{ 'is-panning': isDragging, 'planning-mode': planningMode, 'square-mode': viewMode === 'quadrant' }" @wheel.prevent="handleZoomWheel" @pointerdown="beginPan" @pointermove="movePan" @pointerup="endPan" @pointercancel="endPan" @lostpointercapture="endPan">
+        <div v-if="viewMode === 'quadrant'" class="heatmap-board-shell square-board-shell" :style="boardShellStyle">
+          <div class="quadrant-board square-quadrant-board" :style="quadrantBoardStyle">
+            <section v-for="group in quadrantCards" :key="group.score" class="priority-quadrant" :class="[`quadrant-${group.score}`, { 'drop-target-active': activeDropScore === group.score, dimmed: expandedQuadrantScore != null && expandedQuadrantScore !== group.score }]" @dragover.prevent="handleQuadrantDragOver($event, group.score)" @dragleave="activeDropScore === group.score && (activeDropScore = null)" @drop.prevent.stop="dropOnQuadrant(group.score)">
+              <header><div><strong>{{ group.label }}</strong><small>{{ group.points.length }} 个点位</small></div><b>{{ group.points.length }}</b></header>
+              <div class="quadrant-points">
+                <button v-for="item in group.points" :key="item.coordinate.coordinate_key" :draggable="!planningMode" class="quadrant-point " :class="[{ selected: selectedCoordinateKeys.includes(item.coordinate.coordinate_key), marked: item.plan.marked, completed: completedCount(item.cell) === item.cell.tasks.size }, `priority-${group.score}`]" :style="pointStyle(item)" :aria-label="`${item.title}：${item.cell.value} ${unit}`" @click="handleCellClick(item.row,item.column)" @contextmenu="cancelCoordinate($event,item.row,item.column)" @dragstart="startPriorityDrag($event,item,group.score)" @dragend="endPriorityDrag">
+              <b v-if="item.plan.sequence" class="point-sequence">{{ item.plan.sequence }}</b><i v-if="item.plan.marked" class="point-marker">标记</i>
+              <span class="point-owners"><el-avatar v-for="task in taskOwners(item.cell).slice(0,2)" :key="avatarKey(task)" :src="avatarFailures.has(avatarKey(task)) ? '' : task.owner_avatar_url" :size="42" @error="handleAvatarError(task)">{{ task.owner_name?.slice(0,1) || '?' }}</el-avatar><el-avatar v-if="!taskOwners(item.cell).length" :size="42">?</el-avatar></span>
+              <span class="point-copy"><strong>{{ item.title }}</strong><small>{{ item.cell.tasks.size }} 个任务 · {{ item.cell.value }} {{ unit }}</small></span>
+              <span class="point-hover-card"><b>{{ item.title }}</b><small>{{ dimension === 'model' ? '车型' : '品牌' }}颗粒度 · {{ item.cell.tasks.size }} 个未完成任务</small><span v-for="task in cellTasks(item.cell).slice(0,4)" :key="task.id"><el-avatar :src="task.owner_avatar_url" :size="22">{{ task.owner_name?.slice(0,1) || '?' }}</el-avatar><strong>{{ task.title }}</strong><i>{{ taskStatusLabel(task) }}</i></span><em v-if="item.cell.tasks.size > 4">另有 {{ item.cell.tasks.size - 4 }} 个任务</em><small>点击查看明细 · 拖动调整优先级</small></span>
+            </button>
+                <span v-if="!group.points.length" class="quadrant-empty">暂无任务</span>
+              </div>
+            </section>
           </div>
         </div>
         <div v-else class="heatmap-board-shell" :style="boardShellStyle"><div class="coordinate-board" :style="coordinateBoardStyle">
@@ -474,7 +420,6 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 </style>
 
 <style scoped>
-.priority-filter-bar{gap:7px}.priority-filter{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;border:1px solid transparent;border-radius:999px;font:inherit;font-size:11px;font-weight:700;white-space:nowrap;cursor:pointer;transition:transform .15s,box-shadow .15s,outline-color .15s}.priority-filter small{font-size:10px;opacity:.78}.priority-filter.priority-all{background:#f1f5f9;color:#475569}.priority-filter.priority-10{background:#fee2e2;color:#b91c1c}.priority-filter.priority-7{background:#dbeafe;color:#1e40af}.priority-filter.priority-8{background:#fff1f2;color:#be123c}.priority-filter.priority-6{background:#f1f5f9;color:#475569}.priority-filter.active{box-shadow:0 0 0 2px #fff,0 0 0 4px currentColor}.priority-filter:hover{transform:translateY(-1px);filter:saturate(1.08)}.priority-filter.drop-target-active{outline:2px dashed currentColor;outline-offset:3px;transform:scale(1.04)}
-.ring-board-shell{overflow:visible}.priority-rings-canvas{position:absolute;transform-origin:top left;touch-action:none}.priority-ring-zone{position:absolute;z-index:0;box-sizing:border-box;border:1px solid transparent;border-radius:50%;transition:filter .18s,box-shadow .18s,background-color .18s;pointer-events:none}.priority-ring-zone.priority-6{color:#cbd5e1;border-color:#d5dde7;background:radial-gradient(circle at 50% 48%,#fff 0%,#f3f6fa 100%)}.priority-ring-zone.priority-8{color:#fb7185;border-color:#f4c5cc;background:radial-gradient(circle at 50% 48%,#fff9fa 0%,#ffecef 100%)}.priority-ring-zone.priority-7{color:#2563eb;border-color:#b8d0fb;background:radial-gradient(circle at 50% 48%,#f8fbff 0%,#e8f1ff 100%)}.priority-ring-zone.priority-10{color:#dc3545;border-color:#ef9ba3;background:radial-gradient(circle at 50% 48%,#fff7f7 0%,#ffe1e4 100%)}.priority-ring-zone.drop-target-active{filter:saturate(1.35);box-shadow:inset 0 0 0 5px currentColor,0 0 26px currentColor}.priority-ring-label{position:absolute;z-index:2;display:flex;align-items:center;gap:8px;transform:translateX(-50%);padding:6px 11px;border:1px solid #ffffffd9;border-radius:999px;background:#ffffffdf;box-shadow:0 4px 14px #1e293b12;white-space:nowrap;pointer-events:none}.priority-ring-label strong{font-size:11px}.priority-ring-label small{font-size:10px;color:#64748b}.priority-ring-label.priority-10{color:#b42332}.priority-ring-label.priority-7{color:#244c96}.priority-ring-label.priority-8{color:#be4560}.priority-ring-label.priority-6{color:#58677b}.ring-point{position:absolute!important;z-index:4;display:grid!important;grid-template-rows:54px auto;justify-items:center;align-content:start;gap:4px;width:116px!important;min-height:98px!important;padding:2px 3px!important;border:0!important;border-radius:16px!important;background:transparent!important;color:#25344a!important;box-shadow:none;text-align:center!important;transform:translate(-50%,-50%);cursor:grab}.ring-point:active{cursor:grabbing}.ring-point.priority-10 .point-owners{border-color:#f2a0a5}.ring-point.priority-7 .point-owners{border-color:#99baf3}.ring-point.priority-8 .point-owners{border-color:#fac1c9}.ring-point.priority-6 .point-owners{border-color:#d2d9e2}.ring-point.completed .point-owners{border-color:#84d7a0;background:#f0fff4}.ring-point .point-owners{width:52px;height:52px;padding:3px}.ring-point .point-owners>.el-avatar{width:42px!important;height:42px!important}.ring-point .point-copy{display:grid;gap:2px;width:100%;text-align:center}.ring-point .point-copy>strong{max-width:100%;font-size:10px;line-height:1.25;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.ring-point .point-copy>small{font-size:9px;color:#718096}.ring-point.completed .point-copy>strong{color:#167345}.ring-point:hover,.ring-point:focus-visible{z-index:8;transform:translate(-50%,-50%) scale(1.08);outline:0;background:transparent!important;box-shadow:none!important}.ring-point .point-hover-card{left:50%;bottom:calc(100% + 8px)}.ring-point.selected{outline:2px solid #f59e0b!important;outline-offset:0;box-shadow:0 0 0 4px #fff7ed!important}.ring-empty{position:absolute;left:50%;top:50%;z-index:3;transform:translate(-50%,-50%);padding:12px 18px;border-radius:999px;background:#ffffffd9;color:#7b8798;font-size:12px;pointer-events:none}
-.heatmap-viewport.ring-mode{overflow:hidden;border:0;border-radius:0;background:transparent;box-shadow:none}
+.priority-filter-bar{gap:7px}.priority-filter{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;border:1px solid transparent;border-radius:999px;font:inherit;font-size:11px;font-weight:700;white-space:nowrap;cursor:pointer}.priority-filter small{font-size:10px;opacity:.78}.priority-filter.priority-all{background:#f1f5f9;color:#475569}.priority-filter.priority-10{background:#fee2e2;color:#b91c1c}.priority-filter.priority-7{background:#dbeafe;color:#1e40af}.priority-filter.priority-8{background:#fff1f2;color:#be123c}.priority-filter.priority-6{background:#f1f5f9;color:#475569}.priority-filter.active{box-shadow:0 0 0 2px #fff,0 0 0 4px currentColor}.priority-filter:hover{filter:saturate(1.08)}.priority-filter.drop-target-active{outline:2px dashed currentColor;outline-offset:3px}
+.heatmap-viewport.square-mode{height:clamp(520px,68vh,900px);overflow:auto;background:#f5f7fb}.square-board-shell{min-width:900px;min-height:520px;height:100%}.square-quadrant-board{width:100%;height:100%;gap:12px;padding:8px}.square-quadrant-board .priority-quadrant{overflow:hidden;border:1px solid #dbe4ef;border-radius:16px;background:#fff}.square-quadrant-board .priority-quadrant.drop-target-active{outline:3px solid currentColor;outline-offset:-3px}.square-quadrant-board .priority-quadrant.dimmed{opacity:.62}.square-quadrant-board .quadrant-points{align-content:start;justify-content:start;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));padding:12px;gap:10px}.square-quadrant-board .quadrant-point{cursor:grab}.square-quadrant-board .quadrant-point:active{cursor:grabbing}.square-quadrant-board .quadrant-empty{align-self:center;justify-self:center;color:#94a3b8;font-size:12px}
 </style>
