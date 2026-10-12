@@ -1,4 +1,5 @@
 import { submitInventoryProductRequest, inventoryProductRequests, inventoryProductRequestDetail, reviewInventoryProductRequest } from "./inventory-product-requests.js";
+import { bindListingDrafts, listingDraftBindingOptions, listingDraftBindings } from "./listing-draft-bindings.js";
 import { procurementDailyReport } from "./procurement-daily-report.js";
 import {
   updateListingDraftsBatch,
@@ -595,6 +596,9 @@ function notMigrated(name) {
 }
 
 export const mysqlRuntimeServices = {
+  bindListingDrafts,
+  listingDraftBindingOptions,
+  listingDraftBindings,
   procurementDailyReport,
   applyProcurementActualCosts,
   autoMatchProcurementPayments,

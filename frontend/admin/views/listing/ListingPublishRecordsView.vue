@@ -32,6 +32,8 @@ const batchDeleting = ref(false);
 const selectedRows = ref([]);
 const activeRepairTarget = ref("");
 const developmentSavingDraftId = ref(null);
+const draftBinding = reactive({ visible: false, mode: "vehicle", draftIds: [], selectedId: null, saving: false });
+const bindingOptions = reactive({ vehicles: [], tasks: [], loaded: false });
 const advancedFiltersVisible = ref(false);
 const publishAdvancedFiltersVisible = ref(false);
 const router = useRouter();
@@ -309,6 +311,20 @@ async function loadRecords() {
     if (requestSeq !== recordsRequestSeq) return;
     setBoundedListCache(draftListCache, cacheKey, result);
     applyDraftListResult(result);
+    if (isDraftMode.value && state.rows.length) {
+      const ids = state.rows.filter((row) => row.row_type === "draft").map((row) => row.id);
+      if (ids.length) {
+        const bindings = await apiClient.get(`/api/listing/draft-bindings?ids=${ids.join(",")}`, { noCache: true });
+        if (requestSeq !== recordsRequestSeq) return;
+        const byDraft = new Map(bindings.map((item) => [Number(item.draft_id), item]));
+        for (const row of state.rows) {
+          const binding = byDraft.get(Number(row.id));
+          row.vehicle_catalog_id = binding?.vehicle_catalog_id || null;
+          row.team_task_id = binding?.task_id || null;
+          row.team_task_title = binding?.task_title || "";
+        }
+      }
+    }
   } finally {
     if (requestSeq === recordsRequestSeq) loading.value = false;
   }
@@ -340,6 +356,44 @@ async function updateDraftDevelopmentType(row, value) {
     ElMessage.error(error.message || "开发类型保存失败");
   } finally {
     developmentSavingDraftId.value = null;
+  }
+}
+
+async function openDraftBinding(mode, rows) {
+  const ids = rows.filter((row) => row?.row_type === "draft" && row.id).map((row) => Number(row.id));
+  if (!ids.length) return;
+  draftBinding.mode = mode;
+  draftBinding.draftIds = ids;
+  draftBinding.selectedId = rows.length === 1 ? (mode === "task" ? rows[0].team_task_id : rows[0].vehicle_catalog_id) : null;
+  draftBinding.visible = true;
+  if (bindingOptions.loaded) return;
+  try {
+    const options = await apiClient.get("/api/listing/draft-binding-options", { noCache: true });
+    bindingOptions.vehicles = options.vehicles || [];
+    bindingOptions.tasks = options.tasks || [];
+    bindingOptions.loaded = true;
+  } catch (error) {
+    ElMessage.error(error.message || "绑定选项加载失败");
+  }
+}
+
+async function saveDraftBinding() {
+  if (!draftBinding.selectedId) return ElMessage.warning(draftBinding.mode === "vehicle" ? "请先选择车型" : "请先选择任务");
+  draftBinding.saving = true;
+  try {
+    const result = await apiClient.post("/api/listing/drafts/bind", {
+      mode: draftBinding.mode,
+      draft_ids: draftBinding.draftIds,
+      [draftBinding.mode === "vehicle" ? "vehicle_id" : "task_id"]: draftBinding.selectedId
+    });
+    draftBinding.visible = false;
+    draftListCache.clear();
+    await loadRecords();
+    ElMessage.success(`已为 ${result.count} 条草稿绑定${draftBinding.mode === "vehicle" ? "车型" : "任务"}`);
+  } catch (error) {
+    ElMessage.error(error.message || "绑定失败");
+  } finally {
+    draftBinding.saving = false;
   }
 }
 
@@ -1812,6 +1866,8 @@ watch(() => route.query.taskId, () => {
           {{ isPublishMode && selectedPublishRows.length ? "批量同步状态 / SKU" : "刷新列表" }}
         </el-button>
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-primary" type="primary" :disabled="!selectedDraftRows.length" @click="openBatchListingDialog">批量去上架</el-button>
+        <el-button v-if="isDraftMode" :disabled="!selectedDraftRows.length" @click="openDraftBinding('vehicle', selectedDraftRows)">批量绑定车型</el-button>
+        <el-button v-if="isDraftMode" :disabled="!selectedDraftRows.length" @click="openDraftBinding('task', selectedDraftRows)">批量绑定任务</el-button>
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-secondary" type="primary" plain :icon="Edit" :disabled="selectedDraftRows.length < 2" @click="batchOpenDraftsForListing">批量编辑</el-button>
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-secondary" type="primary" plain :icon="MagicStick" :disabled="!selectedDraftRows.length" @click="openBatchMaterialOptimization">批量优化</el-button>
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-secondary" type="primary" plain :icon="MagicStick" :disabled="!selectedDraftRows.length" @click="batchOpenAiVariantWorkbench">AI裂变</el-button>
@@ -1851,8 +1907,17 @@ watch(() => route.query.taskId, () => {
           </div>
         </template>
       </el-table-column>
-      <el-table-column v-if="isDraftMode" label="车型 / 型号 ID" min-width="165" show-overflow-tooltip>
-        <template #default="{ row }">{{ vehicleModelText(row) || "-" }}<span v-if="row.vehicle_model_key" class="muted-text"> · {{ row.vehicle_model_key }}</span></template>
+      <el-table-column v-if="isDraftMode" label="车型 / 型号 ID" min-width="190" show-overflow-tooltip>
+        <template #default="{ row }">
+          {{ vehicleModelText(row) || "-" }}<span v-if="row.vehicle_catalog_id || row.vehicle_model_key" class="muted-text"> · {{ row.vehicle_catalog_id ? `ID ${row.vehicle_catalog_id}` : row.vehicle_model_key }}</span>
+          <el-button link type="primary" size="small" @click="openDraftBinding('vehicle', [row])">绑定</el-button>
+        </template>
+      </el-table-column>
+      <el-table-column v-if="isDraftMode" label="关联任务" min-width="180" show-overflow-tooltip>
+        <template #default="{ row }">
+          <span>{{ row.team_task_title ? `${row.team_task_title} (#${row.team_task_id})` : "未绑定" }}</span>
+          <el-button link type="primary" size="small" @click="openDraftBinding('task', [row])">绑定</el-button>
+        </template>
       </el-table-column>
       <el-table-column v-if="isDraftMode" label="开发类型" width="116" align="center">
         <template #default="{ row }">
@@ -2361,6 +2426,17 @@ watch(() => route.query.taskId, () => {
       </template>
     </el-dialog>
 
+    <el-dialog v-model="draftBinding.visible" :title="`${draftBinding.draftIds.length > 1 ? '批量' : ''}绑定${draftBinding.mode === 'vehicle' ? '车型' : '任务'}`" width="480px">
+      <p>已选择 {{ draftBinding.draftIds.length }} 条草稿</p>
+      <el-select v-model="draftBinding.selectedId" filterable clearable style="width: 100%" :placeholder="draftBinding.mode === 'vehicle' ? '搜索品牌或车型' : '搜索任务名称或 ID'">
+        <el-option v-for="vehicle in (draftBinding.mode === 'vehicle' ? bindingOptions.vehicles : [])" :key="vehicle.id" :value="vehicle.id" :label="`${vehicle.brand_name} ${vehicle.model_name}`" />
+        <el-option v-for="task in (draftBinding.mode === 'task' ? bindingOptions.tasks : [])" :key="task.id" :value="task.id" :label="`${task.title} (#${task.id})`" />
+      </el-select>
+      <template #footer>
+        <el-button @click="draftBinding.visible = false">取消</el-button>
+        <el-button type="primary" :loading="draftBinding.saving" @click="saveDraftBinding">确认绑定</el-button>
+      </template>
+    </el-dialog>
     <el-dialog v-model="batchMaterialOptimization.visible" title="批量优化草稿" width="960px">
       <el-form label-width="92px">
         <el-form-item label="草稿数量">
