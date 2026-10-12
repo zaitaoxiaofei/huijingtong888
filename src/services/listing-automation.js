@@ -9797,17 +9797,30 @@ export async function listingPublishRecordDetail(id, session = null) {
     ozon_detail_error: error.message
   }));
   const variantLinks = await publishVariantLinksForRecord(record.id, tenantId);
+  const draftVariantLinks = Number(record.draft_id)
+    ? await all(`SELECT l.variant_id, l.record_id, l.shop_id, s.name AS shop_name,
+        l.offer_id, l.ozon_product_id, l.ozon_sku, l.ozon_status, l.price,
+        l.currency_code, l.quality_score, l.source_product_id, p.id AS inventory_id
+      FROM listing_publish_variant_links l
+      JOIN listing_publish_records r ON r.id = l.record_id AND r.status <> 'deleted'
+        AND COALESCE(r.tenant_id, 'admin') = l.tenant_id
+      LEFT JOIN shops s ON s.id = l.shop_id AND COALESCE(s.tenant_id, 'admin') = l.tenant_id
+      LEFT JOIN products p ON p.id = l.source_product_id
+      WHERE l.draft_id = ? AND l.tenant_id = ?
+      ORDER BY l.variant_id, l.shop_id, l.record_id`, [Number(record.draft_id), tenantId])
+    : variantLinks;
   return { ...normalizePublishRecordRow(enriched, { includePayload: true }),
     variant_links: variantLinks,
+    draft_variant_links: draftVariantLinks,
     variant_link_warning: !variantLinks.length && Number(record.draft_id) && normalizeArray(parseJson(record.request_json, {}).items).length > 1
-      ? "这条历史记录的多个 Offer ID 无法安全对应草稿变体 ID（editable_payload.variants[].id），因此未写入变体关联 listing_publish_variant_links.variant_id；请在库存绑定页逐个核对线上 SKU 并绑定本地库存。"
+      ? "这条历史上架记录没有保存发布时的草稿变体 ID。当前草稿可能已修改，系统无法安全判断每个 Offer ID 对应哪个变体；请核对发布时的 Offer ID 与线上 SKU，再到库存绑定页逐个确认，系统不会自动绑定这些变体。"
       : "" };
 }
 
 async function publishVariantLinksForRecord(recordId, tenantId) {
   return all(`SELECT l.variant_id, l.item_index, l.offer_id, l.ozon_product_id, l.ozon_sku,
       l.ozon_status, l.price, l.currency_code, l.quality_score,
-      l.source_product_id, p.inventory_id
+      l.source_product_id, p.id AS inventory_id
     FROM listing_publish_variant_links l
     LEFT JOIN products p ON p.id = l.source_product_id
     WHERE l.record_id = ? AND l.tenant_id = ? ORDER BY l.item_index, l.id`, [Number(recordId), tenantId]);
