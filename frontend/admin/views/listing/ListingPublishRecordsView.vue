@@ -34,10 +34,21 @@ const batchDeleting = ref(false);
 const selectedRows = ref([]);
 const activeRepairTarget = ref("");
 const developmentSavingDraftId = ref(null);
-const draftBinding = reactive({ visible: false, mode: "vehicle", draftIds: [], brand: "", selectedId: null, saving: false, loading: false });
-const bindingOptions = reactive({ brands: [], tasks: [], tasksLoaded: false });
+const draftBinding = reactive({ visible: false, mode: "vehicle", draftIds: [], brand: "", selectedId: null, taskScope: "mine", taskQuery: "", taskStatus: "all", saving: false, loading: false });
+const bindingOptions = reactive({ brands: [], tasks: [] });
 const catalogEntry = ref(null);
 const selectedBrandModels = computed(() => bindingOptions.brands.find((brand) => brand.name === draftBinding.brand)?.models || []);
+const filteredBindingTasks = computed(() => {
+  const personId = Number(currentPersonId.value || 0);
+  const query = draftBinding.taskQuery.trim().toLocaleLowerCase();
+  return bindingOptions.tasks.filter((task) => {
+    if (draftBinding.taskScope === "mine" && (personId <= 0 || (Number(task.owner_person_id) !== personId
+      && Number(task.created_by_person_id) !== personId)) && Number(task.id) !== Number(draftBinding.selectedId)) return false;
+    if (draftBinding.taskStatus !== "all" && task.status !== draftBinding.taskStatus) return false;
+    return !query || String(task.title || "").toLocaleLowerCase().includes(query) || String(task.id).includes(query);
+  });
+});
+const taskStatusLabels = { todo: "待办", doing: "进行中", review: "待验收", done: "已完成", delayed: "已延期" };
 const advancedFiltersVisible = ref(false);
 const publishAdvancedFiltersVisible = ref(false);
 const router = useRouter();
@@ -381,14 +392,16 @@ async function openDraftBinding(mode, rows) {
   draftBinding.draftIds = ids;
   draftBinding.brand = mode === "vehicle" && rows.length === 1 ? rows[0].vehicle_brand || "" : "";
   draftBinding.selectedId = rows.length === 1 ? (mode === "task" ? rows[0].team_task_id : rows[0].vehicle_catalog_id) : null;
+  draftBinding.taskScope = "mine";
+  draftBinding.taskQuery = "";
+  draftBinding.taskStatus = "all";
   draftBinding.visible = true;
   draftBinding.loading = true;
   try {
     if (mode === "vehicle") bindingOptions.brands = await loadInventoryVehicleCatalog();
-    else if (!bindingOptions.tasksLoaded) {
+    else {
       const options = await apiClient.get("/api/listing/draft-binding-options", { noCache: true });
       bindingOptions.tasks = options.tasks || [];
-      bindingOptions.tasksLoaded = true;
     }
   } catch (error) {
     ElMessage.error(error.message || "绑定选项加载失败");
@@ -2538,9 +2551,25 @@ watch(() => route.query.taskId, () => {
           </el-select>
         </div>
       </template>
-      <el-select v-else v-model="draftBinding.selectedId" filterable clearable style="width: 100%" placeholder="搜索任务名称或 ID">
-        <el-option v-for="task in bindingOptions.tasks" :key="task.id" :value="task.id" :label="`${task.title} (#${task.id})`" />
-      </el-select>
+      <div v-else class="draft-task-binding-picker">
+        <div class="draft-task-binding-filters">
+          <el-segmented v-model="draftBinding.taskScope" :options="[{ label: '我的任务', value: 'mine' }, { label: '全部任务', value: 'all' }]" />
+          <el-select v-model="draftBinding.taskStatus" aria-label="筛选任务状态" style="width: 124px">
+            <el-option label="全部状态" value="all" />
+            <el-option v-for="(label, status) in taskStatusLabels" :key="status" :label="label" :value="status" />
+          </el-select>
+        </div>
+        <el-input v-model="draftBinding.taskQuery" clearable placeholder="搜索任务名称或 ID" :prefix-icon="Search" />
+        <div v-loading="draftBinding.loading" class="draft-task-binding-list">
+          <el-radio-group v-model="draftBinding.selectedId" class="draft-task-binding-radios">
+            <el-radio v-for="task in filteredBindingTasks" :key="task.id" :value="task.id" class="draft-task-binding-option">
+              <span class="draft-task-binding-title">{{ task.title }}</span>
+              <span class="draft-task-binding-meta">#{{ task.id }} · {{ taskStatusLabels[task.status] || task.status }} · {{ task.owner_name || '未指定负责人' }}</span>
+            </el-radio>
+          </el-radio-group>
+          <el-empty v-if="!draftBinding.loading && !filteredBindingTasks.length" :description="draftBinding.taskScope === 'mine' ? '没有符合条件的我的任务，可切换“全部任务”' : '没有符合条件的任务'" :image-size="72" />
+        </div>
+      </div>
       <template #footer>
         <el-button @click="draftBinding.visible = false">取消</el-button>
         <el-button type="primary" :loading="draftBinding.saving" :disabled="draftBinding.loading" @click="saveDraftBinding">确认绑定</el-button>
@@ -2588,6 +2617,15 @@ watch(() => route.query.taskId, () => {
 <style scoped>
 .draft-vehicle-binding-fields { display: grid; gap: 8px; }
 .draft-vehicle-binding-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+.draft-task-binding-picker { display: grid; gap: 10px; }
+.draft-task-binding-filters { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.draft-task-binding-list { max-height: 320px; overflow-y: auto; border: 1px solid #e5eaf3; border-radius: 8px; }
+.draft-task-binding-radios { display: flex; flex-direction: column; align-items: stretch; width: 100%; }
+.draft-task-binding-option { display: flex; align-items: center; width: 100%; height: auto; margin: 0; padding: 10px 12px; border-bottom: 1px solid #edf1f7; white-space: normal; }
+.draft-task-binding-option:last-child { border-bottom: 0; }
+.draft-task-binding-option :deep(.el-radio__label) { display: grid; min-width: 0; gap: 3px; }
+.draft-task-binding-title { overflow: hidden; color: #243247; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.draft-task-binding-meta { color: #7b8797; font-size: 12px; }
 .publish-records-page { gap: 12px; min-height: 0; }
 .batch-material-facts { width: 100%; max-height: 520px; overflow: auto; display: grid; gap: 10px; }
 .batch-material-fact-row { display: grid; grid-template-columns: 100px 1.1fr 1fr 1.3fr 1.3fr; gap: 8px; align-items: start; padding: 10px; border: 1px solid #e5eaf3; border-radius: 8px; }

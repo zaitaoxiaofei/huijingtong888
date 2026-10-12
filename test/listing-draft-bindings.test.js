@@ -16,10 +16,10 @@ function service(ownedIds = [11, 12]) {
     }
   };
   const factory = new Function("mysqlExecute", "mysqlQuery", "withMysqlTransaction", "listingTenantLookup", "normalizeVehicleModelKey",
-    `${source}\nreturn { bindListingDrafts };`);
+    `${source}\nreturn { bindListingDrafts, listingDraftBindingOptions };`);
   const api = factory(async () => ({}), async (sql) => {
     if (sql.includes("ai_vehicle_catalog")) return [{ id: 7, brand_name: "TENET", model_name: "T7" }];
-    if (sql.includes("team_tasks")) return [{ id: 9, title: "新品任务" }];
+    if (sql.includes("team_tasks")) return [{ id: 9, title: "新品任务", status: "doing", owner_person_id: 12, created_by_person_id: 14, owner_name: "小李" }];
     return [];
   }, async (callback) => callback(connection), (value) => ({ key: String(value) }), (brand, model) => `${brand}-${model}`);
   return { ...api, writes };
@@ -47,4 +47,11 @@ test("task binding stores the selected task without changing vehicle metadata", 
   assert.equal(writes.length, 1);
   assert.match(writes[0].sql, /INSERT INTO listing_draft_bindings/);
   assert.deepEqual(writes[0].params, ["admin", 11, 9]);
+});
+
+test("task choices expose ownership and status for the default personal task list", async () => {
+  const { listingDraftBindingOptions } = service();
+  const { tasks } = await listingDraftBindingOptions();
+  assert.deepEqual(tasks[0], { id: 9, title: "新品任务", status: "doing", owner_person_id: 12,
+    created_by_person_id: 14, owner_name: "小李" });
 });
