@@ -3,6 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 
 const serverSource = fs.readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
+const runtimeSource = fs.readFileSync(new URL("../src/services/mysql-runtime-services.js", import.meta.url), "utf8");
 const poolSource = fs.readFileSync(new URL("../src/mysql-pool.js", import.meta.url), "utf8");
 const apiSource = fs.readFileSync(new URL("../frontend/admin/utils/api.js", import.meta.url), "utf8");
 const authSource = fs.readFileSync(new URL("../frontend/admin/stores/auth.js", import.meta.url), "utf8");
@@ -12,6 +13,9 @@ test("server finishes database warmup before listening", () => {
   assert.ok(serverSource.indexOf("await prepareRuntimeBeforeListen()") < serverSource.indexOf("server.listen("));
   assert.match(serverSource, /await warmMysqlPool\(\)/);
   assert.match(serverSource, /await services\.warmCoreInventoryRuntime\?\.\(\)/);
+  assert.match(serverSource, /await services\.warmTeamTasksRuntime\?\.\(\)/);
+  assert.ok(serverSource.indexOf("await services.warmTeamTasksRuntime?.()") < serverSource.indexOf("server.listen("));
+  assert.match(runtimeSource, /warmTeamTasksRuntime: warmTeamTasksRuntimeMysql/);
   assert.match(serverSource, /url\.pathname === "\/api\/ready"/);
   assert.match(poolSource, /export async function warmMysqlPool\(\)/);
 });
