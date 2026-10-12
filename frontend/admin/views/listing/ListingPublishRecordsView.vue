@@ -174,11 +174,8 @@ const filteredRows = computed(() => state.rows);
 const selectedDraftRows = computed(() => isDraftMode.value ? selectedRows.value.filter((row) => row.row_type === "draft") : []);
 const selectedPublishRows = computed(() => selectedRows.value.filter((row) => row?.id && row.row_type !== "draft"));
 const advancedFilterCount = computed(() => [
-  state.vehicleModel.trim(),
-  state.publishStatus !== "all",
   state.minPrice !== "" && state.minPrice !== null,
-  state.maxPrice !== "" && state.maxPrice !== null,
-  state.createdRange?.length === 2
+  state.maxPrice !== "" && state.maxPrice !== null
 ].filter(Boolean).length);
 const batchPublishFailedResults = computed(() => Array.isArray(batchListing.result?.results)
   ? batchListing.result.results.filter((item) => item && item.ok === false)
@@ -270,6 +267,11 @@ async function loadRecords() {
     const reviewDraftIds = String(route.query.draftIds || "").trim();
     if (reviewDraftIds) params.set("ids", reviewDraftIds);
     else params.set("projectOnly", "1");
+    if (state.nameQuery.trim() || state.category.trim() || state.vehicleBrand.trim() || state.vehicleModel.trim()
+      || state.shopId !== "all" || state.developmentType !== "all" || state.publishStatus !== "all"
+      || state.minPrice !== "" || state.maxPrice !== "" || state.createdRange?.length === 2) {
+      params.set("includePublished", "1");
+    }
     params.set("sortBy", "created_at");
   }
   if (state.query.trim()) params.set("query", state.query.trim());
@@ -864,6 +866,7 @@ function normalizeDraftProjectFallback(row = {}) {
   const normalized = {
     ...row,
     row_type: rowType,
+    created_at: row.created_at || row.createdAt || row.updated_at || row.updatedAt || "",
     row_key: row.row_key || `${rowType === "draft" ? "draft" : "record"}-${row.id}`,
     status: draftStatus,
     source_label: row.source_label || (rowType === "draft" ? "商品上架" : "上架记录"),
@@ -1735,37 +1738,37 @@ watch(() => route.query.taskId, () => {
     <section class="toolbar-panel" :class="{ 'draft-toolbar-panel': isDraftMode, 'publish-record-toolbar-panel': isPublishMode }">
       <div class="toolbar-filters" :class="{ 'draft-toolbar-filters': isDraftMode, 'publish-record-toolbar-filters': isPublishMode }">
         <el-input v-if="isPublishMode" v-model="state.query" class="publish-record-search" :prefix-icon="Search" clearable placeholder="标题关键词 / offer_id / 线上 SKU / 店铺 / 类目" aria-label="搜索上架记录" @keyup.enter="searchRecords" @clear="searchRecords" />
-        <OzonCategoryFilter v-if="isPublishMode" v-model="state.category" @change="searchRecords" />
+        <OzonCategoryFilter v-model="state.category" @change="searchRecords" />
         <el-select v-if="isDraftMode" v-model="state.developmentType" placeholder="开发类型" @change="searchRecords">
           <el-option label="全部开发类型" value="all" />
           <el-option v-for="option in developmentTypeOptions" :key="option.value" :label="option.label" :value="option.value" />
         </el-select>
-        <OzonCategoryFilter v-if="isDraftMode" v-model="state.category" @change="searchRecords" />
+        <el-select v-if="isDraftMode" v-model="state.status" placeholder="草稿状态" @change="searchRecords">
+          <el-option v-for="option in statusOptions" :key="option.value" :label="option.label === '全部状态' ? '全部草稿状态' : option.label" :value="option.value" />
+        </el-select>
+        <el-select v-if="isDraftMode" v-model="state.publishStatus" placeholder="上架状态" @change="searchRecords">
+          <el-option label="全部上架状态" value="all" />
+          <el-option label="未上架" value="not_published" />
+          <el-option label="上架成功" value="success" />
+          <el-option label="部分上架" value="partial" />
+          <el-option label="上架失败" value="failed" />
+          <el-option label="处理中" value="processing" />
+        </el-select>
         <el-select v-model="state.shopId" filterable placeholder="店铺" @change="searchRecords">
           <el-option label="全部店铺" value="all" />
           <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="shop.id" />
         </el-select>
         <el-select v-model="state.creatorId" filterable placeholder="人员 / ID" @change="searchRecords">
-          <el-option label="全部人员" value="all" />
+          <el-option label="全部人员 / ID" value="all" />
           <el-option v-for="person in state.people" :key="person.id" :label="`${person.name} (ID ${person.id})`" :value="person.id" />
         </el-select>
         <el-input v-if="isDraftMode" v-model="state.nameQuery" :prefix-icon="Search" clearable placeholder="草稿 ID / 俄语商品名 / offer_id" @keyup.enter="searchRecords" @clear="searchRecords" />
-        <el-select v-model="state.status" placeholder="状态" @change="searchRecords">
+        <el-select v-if="isPublishMode" v-model="state.status" placeholder="状态" @change="searchRecords">
           <el-option v-for="option in statusOptions" :key="option.value" :label="option.label" :value="option.value" />
         </el-select>
         <div v-if="isDraftMode && advancedFiltersVisible" class="draft-advanced-filters">
-          <el-input v-model="state.vehicleModel" clearable placeholder="裂变车型 / 型号 ID" @keyup.enter="searchRecords" @clear="searchRecords" />
-          <el-select v-model="state.publishStatus" placeholder="上架状态" @change="searchRecords">
-            <el-option label="全部上架状态" value="all" />
-            <el-option label="未上架" value="not_published" />
-            <el-option label="上架成功" value="success" />
-            <el-option label="部分上架" value="partial" />
-            <el-option label="上架失败" value="failed" />
-            <el-option label="处理中" value="processing" />
-          </el-select>
           <el-input-number v-model="state.minPrice" :min="0" :controls="false" placeholder="最低售价" @change="searchRecords" />
           <el-input-number v-model="state.maxPrice" :min="0" :controls="false" placeholder="最高售价" @change="searchRecords" />
-          <el-date-picker v-model="state.createdRange" class="created-date-filter" type="daterange" value-format="YYYY-MM-DD" start-placeholder="创建开始" end-placeholder="创建结束" @change="searchRecords" />
         </div>
         <el-select v-if="isPublishMode && publishAdvancedFiltersVisible" v-model="state.quality" placeholder="评分" @change="searchRecords">
           <el-option label="全部评分" value="all" />
@@ -1776,6 +1779,8 @@ watch(() => route.query.taskId, () => {
         <el-date-picker v-if="isPublishMode && publishAdvancedFiltersVisible" v-model="state.updatedRange" class="updated-date-filter" type="daterange" value-format="YYYY-MM-DD" start-placeholder="更新开始" end-placeholder="更新结束" @change="searchRecords" />
       </div>
       <div class="toolbar-actions" :class="{ 'draft-toolbar-actions': isDraftMode }">
+        <el-date-picker v-if="isDraftMode" v-model="state.createdRange" class="created-date-filter" type="daterange" value-format="YYYY-MM-DD" start-placeholder="创建开始" end-placeholder="创建结束" @change="searchRecords" />
+        <el-input v-if="isDraftMode" v-model="state.vehicleModel" class="vehicle-filter" clearable placeholder="品牌 / 车型关键词" @keyup.enter="searchRecords" @clear="searchRecords" />
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-primary" type="primary" :icon="Plus" @click="quickCreateDraft">快速创建草稿</el-button>
         <el-button v-if="isDraftMode" link type="primary" @click="advancedFiltersVisible = !advancedFiltersVisible">{{ advancedFiltersVisible ? "收起筛选" : "更多筛选" }}{{ advancedFilterCount ? ` (${advancedFilterCount})` : "" }}</el-button>
         <el-button v-if="isPublishMode" link type="primary" @click="publishAdvancedFiltersVisible = !publishAdvancedFiltersVisible">{{ publishAdvancedFiltersVisible ? "收起筛选" : "更多筛选" }}{{ state.quality !== 'all' || state.updatedRange?.length === 2 ? ' · 已设置' : '' }}</el-button>
@@ -2395,10 +2400,12 @@ watch(() => route.query.taskId, () => {
   white-space: nowrap;
 }
 .draft-toolbar-panel { display: block; padding: 8px 10px; }
-.draft-toolbar-filters { grid-template-columns: 130px minmax(190px, 1.25fr) 140px 160px minmax(220px, 1.5fr) 130px; gap: 8px; }
-.draft-advanced-filters { display: grid; grid-column: 1 / -1; grid-template-columns: minmax(160px, 1fr) 150px 120px 120px minmax(260px, 1.6fr); gap: 8px; padding-top: 2px; }
+.draft-toolbar-filters { grid-template-columns: minmax(190px, 1.5fr) 125px 125px 125px 140px 155px minmax(220px, 1.6fr); gap: 8px; }
+.draft-advanced-filters { display: grid; grid-column: 1 / -1; grid-template-columns: 120px 120px; gap: 8px; padding-top: 2px; }
 .draft-advanced-filters > * { min-width: 0; width: 100%; }
 .draft-toolbar-actions { justify-content: flex-start; gap: 6px; margin-top: 6px; overflow-x: auto; scrollbar-width: thin; }
+.draft-toolbar-actions > .created-date-filter { flex: 0 0 250px; width: 250px; }
+.draft-toolbar-actions > .vehicle-filter { flex: 0 0 190px; width: 190px; }
 .draft-toolbar-actions :deep(.el-button) { flex: 0 0 auto; margin-left: 0; padding-left: 9px; padding-right: 9px; }
 .draft-toolbar-actions .selection-count { margin-left: 4px; }
 .batch-text-variant-panel { width: 100%; display: flex; flex-direction: column; gap: 10px; }
@@ -2562,8 +2569,8 @@ watch(() => route.query.taskId, () => {
     flex-wrap: wrap;
   }
   .toolbar-actions :deep(.el-button) { margin-left: 0; }
-  .draft-toolbar-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .draft-advanced-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .draft-toolbar-filters { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .draft-advanced-filters { grid-template-columns: 120px 120px; }
   .draft-toolbar-actions { flex-wrap: nowrap; }
 }
 @media (max-width: 760px) {

@@ -104,6 +104,26 @@ test("listing draft box supports structured category and vehicle filters", () =>
   assert.match(listingAutomationServiceSource, /LOWER\(COALESCE\(d\.vehicle_model, ''\)\) LIKE \?/);
 });
 
+test("draft inbox keeps primary filters in operator order and exposes creation date", () => {
+  const filters = publishRecordsSource.split('<div class="toolbar-filters"')[1].split('<div v-if="isDraftMode && advancedFiltersVisible"')[0];
+  const markers = [
+    "<OzonCategoryFilter",
+    'v-model="state.developmentType"',
+    'v-model="state.status"',
+    'v-model="state.publishStatus"',
+    'v-model="state.shopId"',
+    'v-model="state.creatorId"',
+    'v-model="state.nameQuery"'
+  ];
+  const positions = markers.map((marker) => filters.indexOf(marker));
+  assert.ok(positions.every((position) => position >= 0));
+  assert.deepEqual(positions, [...positions].sort((left, right) => left - right));
+  assert.match(publishRecordsSource, /v-model="state.createdRange"[\s\S]*start-placeholder="创建开始"/);
+  assert.match(publishRecordsSource, /v-model="state.vehicleModel"[\s\S]*placeholder="品牌 \/ 车型关键词"/);
+  assert.match(publishRecordsSource, /params\.set\("includePublished", "1"\)/);
+  assert.match(listingAutomationServiceSource, /LOWER\(COALESCE\(d\.product_name, ''\)\) LIKE \?\)"\)/);
+});
+
 test("quick listing imports a draft as a new draft instead of editing its source", () => {
   assert.match(listingAutomationSource, /import AiProductImportDialog/);
   assert.match(listingAutomationSource, /快速导入草稿/);

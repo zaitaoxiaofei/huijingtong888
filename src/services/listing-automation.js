@@ -48,6 +48,7 @@ import { getAiTaskFile } from "../server/services/ai/aiWorkflowService.js";
 import {
   normalizeDevelopmentType,
   normalizeVehicleModelKey,
+  resolveDraftDevelopmentMeta,
   resolveDevelopmentMeta
 } from "./product-development-meta.js";
 
@@ -10684,6 +10685,7 @@ export async function listingDrafts(query = {}, session) {
   const includeReviewSkus = String(query.includeReviewSkus || query.include_review_skus || "").trim() === "1";
   const includeShopDetails = String(query.includeShopDetails || query.include_shop_details || "").trim() === "1";
   const projectOnly = String(query.projectOnly || query.project_only || "").trim() === "1";
+  const includePublished = String(query.includePublished || "").trim() === "1";
   const page = Math.max(1, Number(query.page || 1));
   const pageSize = Math.min(Math.max(1, Number(query.pageSize || query.page_size || 20)), 100);
   const offset = (page - 1) * pageSize;
@@ -10796,9 +10798,9 @@ export async function listingDrafts(query = {}, session) {
     countParams.push(`%${vehicleBrand}%`);
   }
   if (vehicleModel) {
-    where.push("(LOWER(COALESCE(d.vehicle_model, '')) LIKE ? OR LOWER(COALESCE(d.vehicle_model_key, '')) LIKE ?)");
-    params.push(`%${vehicleModel}%`, `%${vehicleModel}%`);
-    countParams.push(`%${vehicleModel}%`, `%${vehicleModel}%`);
+    where.push("(LOWER(COALESCE(d.vehicle_brand, '')) LIKE ? OR LOWER(COALESCE(d.vehicle_model, '')) LIKE ? OR LOWER(COALESCE(d.vehicle_model_key, '')) LIKE ? OR LOWER(COALESCE(d.product_name, '')) LIKE ?)");
+    params.push(...Array(4).fill(`%${vehicleModel}%`));
+    countParams.push(...Array(4).fill(`%${vehicleModel}%`));
   }
   if (minPrice !== null && Number.isFinite(minPrice) && minPrice >= 0) {
     where.push("CAST(NULLIF(d.list_price, '') AS DECIMAL(12, 2)) >= ?");
@@ -10831,7 +10833,7 @@ export async function listingDrafts(query = {}, session) {
     params.push(endBoundary);
     countParams.push(endBoundary);
   }
-  if (projectOnly && (!status || status === "all")) {
+  if (projectOnly && !includePublished && (!status || status === "all")) {
     where.push(`(
       NOT EXISTS (SELECT 1 FROM listing_shop_copies c_project_any WHERE c_project_any.draft_id = d.id AND ${relatedTenantScope("c_project_any")}) OR
       EXISTS (SELECT 1 FROM listing_shop_copies c_project_visible WHERE c_project_visible.draft_id = d.id AND ${relatedTenantScope("c_project_visible")} AND c_project_visible.status IN ('prepared', 'blocked'))
@@ -11603,7 +11605,7 @@ export async function createListingDraft(body, session) {
   });
   if (!payload.template_id) throw new Error("请先选择类目模板");
   if (!payload.product_name) throw new Error("商品名称不能为空");
-  const developmentMeta = resolveDevelopmentMeta(payload, "new");
+  const developmentMeta = resolveDraftDevelopmentMeta(payload, { body, fallbackType: "new" });
   const sourceProductId = draftSourceProductId(body, payload);
   const parentDraftId = draftParentDraftId(body, payload);
   const creationMethod = draftCreationMethod(body, payload, developmentMeta.development_type);
@@ -12377,12 +12379,7 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
     : optimizationSource === "ai_product_material_optimizer"
       ? "copy"
       : cloneSourceDraft ? String(sourceDraftRow?.development_type || "fission") : "fission";
-  const developmentMeta = resolveDevelopmentMeta({
-    ...payload,
-    vehicle_brand: sourceDraftRow?.vehicle_brand,
-    vehicle_model: sourceDraftRow?.vehicle_model,
-    vehicle_model_key: sourceDraftRow?.vehicle_model_key
-  }, developmentType);
+  const developmentMeta = resolveDraftDevelopmentMeta(payload, { body, sourceDraft: sourceDraftRow || {}, fallbackType: developmentType });
   // An explicit material-optimizer type must win over the generic AI-* code heuristic.
   if (optimizationSource === "ai_product_material_optimizer") developmentMeta.development_type = "copy";
   if (optimizationSource === "ai_ecommerce_suite_workbench") developmentMeta.development_type = "new";
@@ -18138,6 +18135,10 @@ function normalizeDraftPayload(body = {}) {
     color: normalizeSafeColorText(body.color),
     spec: String(body.spec || "").trim(),
     quantity: Number(body.quantity || 0),
+    development_type: String(body.development_type || body.developmentType || "").trim(),
+    vehicle_brand: String(body.vehicle_brand || body.vehicleBrand || "").trim(),
+    vehicle_model: String(body.vehicle_model || body.vehicleModel || "").trim(),
+    vehicle_model_key: String(body.vehicle_model_key || body.vehicleModelKey || "").trim(),
     template_payload: objectValue(body.template_payload || body.templatePayload || body.template || body.canonical_payload || body.canonicalPayload),
     manual_facts: objectValue(body.manual_facts || body.manualFacts),
     ai_payload: objectValue(body.ai_payload || body.aiPayload)

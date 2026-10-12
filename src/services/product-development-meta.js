@@ -1,4 +1,4 @@
-import { normalizeVehicleBrand } from "../shared/vehicle-brand.js";
+import { normalizeVehicleBrand, VEHICLE_BRAND_CHINESE } from "../shared/vehicle-brand.js";
 export const DEVELOPMENT_TYPES = ["new", "copy", "fission"];
 
 const TYPE_ALIASES = new Map([
@@ -44,6 +44,27 @@ export function normalizeVehicleModelKey(brand = "", model = "") {
   const brandKey = compactKeyPart(brand);
   const modelKey = compactKeyPart(model);
   return [brandKey, modelKey].filter(Boolean).join("-");
+}
+
+export function vehicleMetaFromTarget(value = "", extraBrands = []) {
+  const target = cleanText(value).replace(/\s+/g, " ");
+  if (!target) return null;
+  const candidates = [
+    ...Object.entries(VEHICLE_BRAND_CHINESE).flatMap(([brand, chinese]) => [[brand, brand], [chinese, brand]]),
+    ...["JELAND", "VOLGA", "ESTEO", "EXLANTIX", "JETTA", "ICAR", "ICAUR"].map((brand) => [brand, brand]),
+    ...extraBrands.map((brand) => [brand, brand])
+  ].sort((left, right) => right[0].length - left[0].length);
+  const upperTarget = target.toUpperCase();
+  for (const [prefix, brand] of candidates) {
+    if (!upperTarget.startsWith(String(prefix).toUpperCase())) continue;
+    const remaining = target.slice(String(prefix).length);
+    if (!/^[\s/|:：-]/.test(remaining)) continue;
+    const vehicle_model = remaining.replace(/^[\s/|:：-]+/, "").trim();
+    if (!vehicle_model) continue;
+    const vehicle_brand = normalizeVehicleBrand(brand, { strict: false });
+    return { vehicle_brand, vehicle_model, vehicle_model_key: normalizeVehicleModelKey(vehicle_brand, vehicle_model) };
+  }
+  return null;
 }
 
 export function parseVehicleModelFromCode(value = "") {
@@ -103,4 +124,18 @@ export function resolveDevelopmentMeta(source = {}, fallbackType = "new") {
     vehicle_model,
     vehicle_model_key
   };
+}
+
+export function resolveDraftDevelopmentMeta(payload = {}, { body = payload, sourceDraft = {}, fallbackType = "new" } = {}) {
+  const type = normalizeDevelopmentType(payload.development_type || body.development_type, fallbackType);
+  const target = body.ai_optimization?.target_variant_value || body.aiOptimization?.target_variant_value
+    || body.manual_facts?.target_variant_value || payload.manual_facts?.target_variant_value
+    || payload.ai_payload?.ai_optimization?.target_variant_value;
+  const targetMeta = type === "fission" ? vehicleMetaFromTarget(target) : null;
+  return resolveDevelopmentMeta({
+    ...payload,
+    vehicle_brand: body.vehicle_brand || body.vehicleBrand || payload.vehicle_brand || targetMeta?.vehicle_brand || sourceDraft.vehicle_brand,
+    vehicle_model: body.vehicle_model || body.vehicleModel || payload.vehicle_model || targetMeta?.vehicle_model || sourceDraft.vehicle_model,
+    vehicle_model_key: body.vehicle_model_key || body.vehicleModelKey || payload.vehicle_model_key || targetMeta?.vehicle_model_key || sourceDraft.vehicle_model_key
+  }, type);
 }

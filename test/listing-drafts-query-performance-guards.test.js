@@ -32,7 +32,7 @@ test("listing drafts avoid unnecessary joins for paged lightweight queries", () 
   assert.match(listingDraftsSource, /if \(!paged \|\| !lightweight\) \{\s*fromSqlJoins\.push\(`LEFT JOIN tenant_members creator_members/);
   assert.match(listingDraftsSource, /fromSqlJoins\.push\("LEFT JOIN people p ON p\.id = d\.created_by_person_id AND creator_members\.person_id = p\.id"\)/);
   assert.doesNotMatch(listingDraftsSource, /GROUP BY draft_id/);
-  assert.match(listingDraftsSource, /if \(projectOnly && \(!status \|\| status === "all"\)\)/);
+  assert.match(listingDraftsSource, /if \(projectOnly && !includePublished && \(!status \|\| status === "all"\)\)/);
   assert.match(listingDraftsSource, /NOT EXISTS \(SELECT 1 FROM listing_shop_copies c_project_any WHERE c_project_any\.draft_id = d\.id AND \$\{relatedTenantScope\("c_project_any"\)\}/);
   assert.match(listingDraftsSource, /EXISTS \(SELECT 1 FROM listing_shop_copies c_project_visible WHERE c_project_visible\.draft_id = d\.id AND \$\{relatedTenantScope\("c_project_visible"\)\} AND c_project_visible\.status IN \('prepared', 'blocked'\)\)/);
 });
