@@ -1,3 +1,29 @@
+export function listingVariantInventoryCandidates(rows = [], limit = 20) {
+  const groups = new Map();
+  for (const row of rows) {
+    const key = JSON.stringify([row.tenant_id, row.draft_id, row.variant_id]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  const candidates = [];
+  for (const links of groups.values()) {
+    if (links.length < 2) continue;
+    const ids = new Set(links.flatMap((link) => [link.source_product_id, link.online_inventory_id, link.mapped_inventory_id]
+      .map(Number).filter(Boolean)));
+    if (ids.size !== 1) continue;
+    const needsBinding = links.some((link) => !Number(link.source_product_id)
+      || (Number(link.online_row_id) && (!Number(link.online_inventory_id) || !Number(link.mapped_inventory_id))));
+    if (!needsBinding) continue;
+    const source = links.find((link) => link.ozon_sku && (link.online_inventory_id || link.mapped_inventory_id || link.source_product_id));
+    if (!source) continue;
+    candidates.push({ tenantKey: String(source.tenant_id), draftId: Number(source.draft_id),
+      variantId: String(source.variant_id), shopId: Number(source.shop_id), ozonSku: String(source.ozon_sku),
+      offerId: String(source.offer_id || ""), productId: [...ids][0] });
+    if (candidates.length >= limit) break;
+  }
+  return candidates;
+}
+
 export async function propagateListingVariantInventory(
   { tenantKey, tenantPk, shopId, ozonSku, offerId = "", productId },
   dependencies = {}
@@ -46,8 +72,8 @@ export async function propagateListingVariantInventory(
       }
       const targetLinks = links.filter((link) => String(link.ozon_sku || "").trim());
       const [conflicts] = await connection.execute(`SELECT l.id FROM listing_publish_variant_links l
-        JOIN online_products op ON op.shop_id = l.shop_id AND op.ozon_sku = l.ozon_sku
-        LEFT JOIN sku_mappings sm ON sm.shop_id = l.shop_id AND sm.ozon_sku = l.ozon_sku
+        JOIN online_products op ON op.shop_id = l.shop_id AND op.ozon_sku = l.ozon_sku COLLATE utf8mb4_0900_ai_ci
+        LEFT JOIN sku_mappings sm ON sm.shop_id = l.shop_id AND sm.ozon_sku = l.ozon_sku COLLATE utf8mb4_0900_ai_ci
           AND sm.active = 1 AND sm.tenant_id = ?
         WHERE l.tenant_id = ? AND l.draft_id = ? AND l.variant_id = ? AND l.ozon_sku <> ''
           AND ((op.product_id IS NOT NULL AND op.product_id <> ?)

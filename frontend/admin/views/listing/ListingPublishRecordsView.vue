@@ -116,6 +116,17 @@ const drawer = reactive({
   }
 });
 
+const skuReview = reactive({ visible: false, loading: false, record: null });
+const skuReviewGroups = computed(() => {
+  const groups = new Map();
+  for (const link of skuReview.record?.links || []) {
+    const variantId = String(link.variant_id || "未确认变体");
+    if (!groups.has(variantId)) groups.set(variantId, []);
+    groups.get(variantId).push(link);
+  }
+  return [...groups].map(([variantId, links]) => ({ variantId, links }));
+});
+
 const batchListing = reactive({
   visible: false,
   publishing: false,
@@ -922,6 +933,28 @@ async function loadPublishRecordDetail(row) {
   } finally {
     detailLoadingId.value = null;
   }
+}
+
+async function openSkuReview(row) {
+  if (row?.row_type === "draft") return openDrawer(row);
+  skuReview.visible = true;
+  skuReview.loading = true;
+  skuReview.record = null;
+  try {
+    skuReview.record = await apiClient.get(`/api/listing/publish-records/${row.id}?view=sku`, { noCache: true });
+  } catch (error) {
+    ElMessage.error(error.message || "SKU 对应关系加载失败");
+  } finally {
+    skuReview.loading = false;
+  }
+}
+
+function skuInventoryLabel(link) {
+  if (link.inventory_status === "conflict") return "库存冲突，需人工核对";
+  if (link.inventory_status === "bound") return `已绑定库存 #${link.inventory_id}`;
+  if (link.inventory_id) return `库存 #${link.inventory_id} · 等待在线商品绑定`;
+  if (link.inventory_status === "waiting_online") return "在线商品未同步，暂不能绑定库存";
+  return "未绑定库存";
 }
 
 async function editInListingAutomation(row) {
@@ -1919,7 +1952,7 @@ watch(() => route.query.taskId, () => {
       </el-table-column>
       <el-table-column v-if="isPublishMode" label="线上 SKU" min-width="150">
         <template #default="{ row }">
-          <el-button link type="primary" @click="openDrawer(row)">{{ row.variant_count ? `查看变体对应 (${row.sku_count || 0}/${row.variant_count})` : row.ozon_sku ? '查看 SKU · 变体待确认' : '查看变体 / SKU' }}</el-button>
+          <el-button link type="primary" @click="openSkuReview(row)">{{ row.variant_count ? `查看变体对应 (${row.sku_count || 0}/${row.variant_count})` : row.ozon_sku ? '查看 SKU · 变体待确认' : '查看变体 / SKU' }}</el-button>
         </template>
       </el-table-column>
       <el-table-column label="售价" min-width="132">
@@ -2041,6 +2074,51 @@ watch(() => route.query.taskId, () => {
         @update:pageSize="handleTaskPageSizeChange"
       />
     </template>
+
+    <el-drawer v-model="skuReview.visible" title="草稿变体与线上 SKU" size="820px" destroy-on-close>
+      <el-skeleton v-if="skuReview.loading" :rows="8" animated />
+      <div v-else-if="skuReview.record" class="sku-review">
+        <section class="sku-review-header">
+          <ProductImagePreview :src="skuReview.record.image || recordImagePlaceholder" size="portrait" fit="cover" proxy-remote />
+          <div>
+            <strong>{{ skuReview.record.title || `上架记录 #${skuReview.record.id}` }}</strong>
+            <span>草稿 #{{ skuReview.record.draft_id || "未关联" }} · 当前记录 #{{ skuReview.record.id }}</span>
+            <span>同一个草稿变体在不同店铺对应不同线上 SKU；下方按变体汇总。</span>
+          </div>
+        </section>
+        <section v-for="group in skuReviewGroups" :key="group.variantId" class="sku-variant-card">
+          <div class="sku-variant-head">
+            <div><span>草稿变体 ID</span><strong>{{ group.variantId }}</strong></div>
+            <el-tag effect="plain">{{ group.links.length }} 条线上 SKU</el-tag>
+          </div>
+          <div class="sku-shop-grid">
+            <el-form v-for="link in group.links" :key="`${link.record_id}-${link.shop_id}-${link.offer_id}`" class="sku-shop-form" label-position="left" label-width="68px" size="small">
+              <div class="sku-shop-head">
+                <strong>{{ link.shop_name || `店铺 #${link.shop_id}` }}</strong>
+                <span>记录 #{{ link.record_id }}</span>
+              </div>
+              <el-form-item label="线上 SKU">
+                <el-button v-if="link.ozon_sku" link type="primary" @click="viewOnlineSku(link)">{{ link.ozon_sku }}</el-button>
+                <span v-else class="muted-text">等待 Ozon 返回</span>
+              </el-form-item>
+              <el-form-item label="Offer ID"><span class="sku-review-value" :title="link.offer_id">{{ link.offer_id || "-" }}</span></el-form-item>
+              <el-form-item label="售价"><span>{{ link.price == null ? "-" : `${link.price} ${link.currency_code || ""}` }}</span></el-form-item>
+              <el-form-item label="库存">
+                <el-tag :type="link.inventory_status === 'bound' ? 'success' : link.inventory_status === 'conflict' ? 'danger' : 'warning'" effect="plain">{{ skuInventoryLabel(link) }}</el-tag>
+              </el-form-item>
+              <div v-if="link.inventory_id && (link.inventory_name || link.inventory_code)" class="sku-inventory-name">{{ link.inventory_name || link.inventory_code }}</div>
+            </el-form>
+          </div>
+        </section>
+        <el-alert v-if="skuReview.record.unlinked_offers?.length" type="warning" :closable="false" show-icon
+          title="当前记录没有可确认的草稿变体关联；请按发布时 Offer ID 核对，不会按顺序自动绑定库存。" />
+        <el-form v-for="item in skuReview.record.unlinked_offers || []" :key="item.offer_id" class="sku-shop-form" label-position="left" label-width="78px" size="small">
+          <el-form-item label="Offer ID">{{ item.offer_id }}</el-form-item>
+          <el-form-item label="线上 SKU">{{ item.ozon_sku || "未返回" }}</el-form-item>
+        </el-form>
+        <el-empty v-if="!skuReviewGroups.length && !skuReview.record.unlinked_offers?.length" description="暂无变体与线上 SKU 的关联" />
+      </div>
+    </el-drawer>
 
     <el-drawer v-model="drawer.visible" :title="drawerTitle" size="760px">
       <div v-if="drawer.row" class="record-drawer">
@@ -2584,6 +2662,26 @@ watch(() => route.query.taskId, () => {
 }
 .row-actions :deep(.el-button) { margin-left: 0; }
 .record-drawer { display: flex; flex-direction: column; gap: 16px; }
+.sku-review { display: flex; flex-direction: column; gap: 18px; }
+.sku-review-header { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 14px; align-items: center; padding: 14px; border: 1px solid #e5eaf3; border-radius: 10px; background: #f8fafc; }
+.sku-review-header > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.sku-review-header strong { font-size: 15px; line-height: 1.5; }
+.sku-review-header span, .sku-variant-head span, .sku-shop-head span { color: #697386; font-size: 12px; }
+.sku-variant-card { padding: 16px; border: 1px solid #e5eaf3; border-radius: 10px; background: #fff; }
+.sku-variant-head, .sku-shop-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.sku-variant-head { margin-bottom: 14px; }
+.sku-variant-head > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.sku-variant-head strong { overflow-wrap: anywhere; }
+.sku-shop-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.sku-shop-form { min-width: 0; margin: 0; padding: 12px; border: 1px solid #e9edf4; border-radius: 8px; background: #fbfcff; }
+.sku-shop-head { margin-bottom: 10px; }
+.sku-shop-form .el-form-item { margin-bottom: 5px; }
+.sku-shop-form .el-form-item__content { min-width: 0; }
+.sku-shop-form .el-button { max-width: 100%; height: auto; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.sku-shop-form .el-tag { max-width: 100%; height: auto; white-space: normal; line-height: 1.5; }
+.sku-review-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sku-inventory-name { padding-left: 68px; color: #697386; font-size: 12px; }
+@media (max-width: 760px) { .sku-shop-grid { grid-template-columns: 1fr; } }
 .drawer-hero { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; align-items: center; padding: 12px; border: 1px solid #e5eaf3; border-radius: 8px; background: #f8fafc; }
 .drawer-hero strong { font-size: 16px; overflow-wrap: anywhere; }
 .repair-panel { display: flex; flex-direction: column; gap: 10px; padding: 12px; border: 1px solid #f0d28a; border-radius: 8px; background: #fffaf0; }
