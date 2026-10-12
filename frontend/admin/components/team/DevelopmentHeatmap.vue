@@ -17,6 +17,8 @@ const zoom = ref(1); const viewport = ref(null); const canvasWidth = ref(1200); 
 let resizeObserver;
 const unit = computed(() => metric.value === "tasks" ? "个任务" : "个 SKU");
 const metricLabel = computed(() => ({ actual: "实际已开发", target: "计划开发", tasks: "开发任务" })[metric.value]);
+const advancedFiltersVisible = ref(false);
+const advancedFilterCount = computed(() => Number(metric.value !== "tasks") + Number(time.value !== "due") + Number(dimension.value !== "brand") + Number(scope.value !== "all") + Number(includeCompleted.value));
 const periodKey = computed(() => developmentPlanPeriodKey(period.value, range.value || []));
 const heatmap = computed(() => buildDevelopmentHeatmap(tasks.value, { metric: metric.value, dimension: dimension.value, scope: scope.value, query: query.value, time: time.value, range: range.value, includeCompleted: includeCompleted.value }));
 const maxSequence = computed(() => Math.max(0, ...[...planOrders.value.values()].map((item) => Number(item.sequence || 0))));
@@ -297,16 +299,12 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 
 <template>
   <section class="heatmap-panel" v-loading="loading">
-    <header class="heatmap-heading"><div><h2>开发分布热力图</h2><p>同心优先级环由中心向外展示紧急重要、重要不紧急、紧急不重要、不重要不紧急；顶部筛选可聚焦，拖到目标环或优先级标签即可调整。</p></div><div><el-button @click="load">刷新</el-button><el-button v-if="periodKey" :type="planningMode ? 'warning' : 'default'" @click="togglePlanningMode">{{ planningMode ? '退出排程' : '人工排程' }}</el-button><el-button type="primary" @click="emit('create')">新增开发任务</el-button></div></header>
+    <header class="heatmap-heading"><div><h2>开发分布热力图</h2></div><div><el-tooltip content="四象限按优先级展示任务；拖到目标象限或优先级标签可调整优先级。" placement="bottom"><el-button circle aria-label="热力图使用说明">?</el-button></el-tooltip><el-button @click="load">刷新</el-button><el-button v-if="periodKey" :type="planningMode ? 'warning' : 'default'" @click="togglePlanningMode">{{ planningMode ? '退出排程' : '人工排程' }}</el-button><el-button type="primary" @click="emit('create')">新增开发任务</el-button></div></header>
     <div class="heatmap-filterbar">
       <el-select :model-value="period" aria-label="统计周期" @change="setPeriod"><el-option label="本周" value="week" /><el-option label="本月" value="month" /><el-option label="本季度" value="quarter" /><el-option label="本年" value="year" /><el-option label="全部时间" value="all" /><el-option label="自定义" value="custom" /></el-select>
       <el-date-picker v-if="period !== 'all'" v-model="range" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" :clearable="false" @change="period = 'custom'" />
-      <el-select v-model="metric" aria-label="统计数量" @change="setMetric"><el-option label="开发任务数" value="tasks" /><el-option label="计划开发 SKU" value="target" /><el-option label="实际已开发 SKU" value="actual" /></el-select>
-      <el-select v-model="time" aria-label="统计日期"><el-option v-if="metric === 'actual'" label="按草稿时间" value="draft" /><el-option label="按计划完成日期" value="due" /><el-option label="按任务创建时间" value="created" /></el-select>
-      <el-radio-group v-model="dimension" aria-label="显示颗粒度"><el-radio-button value="model">车型</el-radio-button><el-radio-button value="brand">品牌</el-radio-button></el-radio-group>
-      <el-select v-model="scope" aria-label="开发范围"><el-option label="全部范围" value="all" /><el-option label="汽车" value="automotive" /><el-option label="非汽车" value="non_automotive" /><el-option label="未分类" value="unknown" /></el-select>
       <el-input v-model="query" aria-label="搜索开发任务" clearable placeholder="搜索核心品名 / 品牌 / 车型" />
-      <label class="completed-filter"><span>含已完成</span><el-switch v-model="includeCompleted" aria-label="包含已完成任务" /></label>
+      <el-popover placement="bottom-end" :width="280" trigger="manual" :visible="advancedFiltersVisible"><template #reference><el-button class="heatmap-more-filters" @click="advancedFiltersVisible=!advancedFiltersVisible">更多筛选{{ advancedFilterCount ? ` · ${advancedFilterCount}` : '' }}</el-button></template><div class="heatmap-advanced-filters"><label>统计数量<el-select v-model="metric" :teleported="false" aria-label="统计数量" @change="setMetric"><el-option label="开发任务数" value="tasks" /><el-option label="计划开发 SKU" value="target" /><el-option label="实际已开发 SKU" value="actual" /></el-select></label><label>统计日期<el-select v-model="time" :teleported="false" aria-label="统计日期"><el-option v-if="metric === 'actual'" label="按草稿时间" value="draft" /><el-option label="按计划完成日期" value="due" /><el-option label="按任务创建时间" value="created" /></el-select></label><label>显示颗粒度<el-radio-group v-model="dimension" aria-label="显示颗粒度"><el-radio-button value="model">车型</el-radio-button><el-radio-button value="brand">品牌</el-radio-button></el-radio-group></label><label>开发范围<el-select v-model="scope" :teleported="false" aria-label="开发范围"><el-option label="全部范围" value="all" /><el-option label="汽车" value="automotive" /><el-option label="非汽车" value="non_automotive" /><el-option label="未分类" value="unknown" /></el-select></label><label class="completed-filter"><span>含已完成</span><el-switch v-model="includeCompleted" aria-label="包含已完成任务" /></label></div></el-popover>
       <el-radio-group :model-value="viewMode" class="view-mode-switch" aria-label="热力图视图" @change="setViewMode"><el-radio-button value="quadrant">四象限</el-radio-button><el-radio-button value="coordinates">横纵坐标</el-radio-button></el-radio-group>
       <span class="heatmap-summary"><b>{{ heatmap.taskCount }}</b> 个任务 · {{ heatmap.rows.length }} × {{ heatmap.columns.length }}</span>
     </div>
@@ -422,4 +420,20 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 <style scoped>
 .priority-filter-bar{gap:7px}.priority-filter{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;border:1px solid transparent;border-radius:999px;font:inherit;font-size:11px;font-weight:700;white-space:nowrap;cursor:pointer}.priority-filter small{font-size:10px;opacity:.78}.priority-filter.priority-all{background:#f1f5f9;color:#475569}.priority-filter.priority-10{background:#fee2e2;color:#b91c1c}.priority-filter.priority-7{background:#dbeafe;color:#1e40af}.priority-filter.priority-8{background:#fff1f2;color:#be123c}.priority-filter.priority-6{background:#f1f5f9;color:#475569}.priority-filter.active{box-shadow:0 0 0 2px #fff,0 0 0 4px currentColor}.priority-filter:hover{filter:saturate(1.08)}.priority-filter.drop-target-active{outline:2px dashed currentColor;outline-offset:3px}
 .heatmap-viewport.square-mode{height:clamp(520px,68vh,900px);overflow:auto;background:#f5f7fb}.square-board-shell{min-width:900px;min-height:520px;height:100%}.square-quadrant-board{width:100%;height:100%;gap:12px;padding:8px}.square-quadrant-board .priority-quadrant{overflow:hidden;border:1px solid #dbe4ef;border-radius:16px;background:#fff}.square-quadrant-board .priority-quadrant.drop-target-active{outline:3px solid currentColor;outline-offset:-3px}.square-quadrant-board .priority-quadrant.dimmed{opacity:.62}.square-quadrant-board .quadrant-points{align-content:start;justify-content:start;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));padding:12px;gap:10px}.square-quadrant-board .quadrant-point{cursor:grab}.square-quadrant-board .quadrant-point:active{cursor:grabbing}.square-quadrant-board .quadrant-empty{align-self:center;justify-self:center;color:#94a3b8;font-size:12px}
+</style>
+
+<style scoped>
+.heatmap-panel{padding:14px 16px}
+.heatmap-heading{margin-bottom:10px}
+.heatmap-heading h2{margin:0;font-size:19px}
+.heatmap-filterbar{margin-bottom:6px;padding:6px}
+.heatmap-filterbar>.el-input{width:240px}
+.heatmap-filterbar>.heatmap-more-filters{flex:none}
+.heatmap-advanced-filters{display:grid;gap:12px}
+.heatmap-advanced-filters>label{display:grid;gap:5px;color:#64748b;font-size:12px}
+.heatmap-advanced-filters .el-select,.heatmap-advanced-filters .el-radio-group{width:100%}
+.heatmap-advanced-filters .completed-filter{display:flex;align-items:center;justify-content:space-between}
+.heatmap-priority-legend{margin:6px 0 4px;padding:6px 8px}
+.heatmap-canvas-toolbar{margin:4px 2px 7px}
+@media(max-width:900px){.heatmap-heading{gap:8px}.heatmap-heading>div:last-child{flex-wrap:wrap}.heatmap-filterbar>.el-input{width:205px}}
 </style>
