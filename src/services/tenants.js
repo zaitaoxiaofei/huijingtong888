@@ -1,15 +1,10 @@
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { createHash, randomBytes } from "node:crypto";
 import { assertTenantQuotaAvailable, normalizeTenantQuotaLimit } from "./tenant-quotas.js";
+import { DEFAULT_TENANT_PLAN_PRESETS, normalizeTenantPlanInput, tenantPlanMemberLimit } from "./tenant-plans.js";
 
 const DEFAULT_TENANT_SLUG = "default";
 let schemaReady;
-const SUBSCRIPTION_PLANS = Object.freeze({
-  trial_1d: { code: "trial_1d", label: "1 天体验", days: 1, status: "trial" },
-  trial_7d: { code: "trial_7d", label: "7 天体验", days: 7, status: "trial" },
-  monthly: { code: "monthly", label: "月租", days: 30, status: "active" },
-  yearly: { code: "yearly", label: "年租", days: 365, status: "active" }
-});
 
 function text(value, max = 255) {
   return String(value || "").trim().slice(0, max);
@@ -48,6 +43,26 @@ export async function ensureTenantSchemaMysql() {
       UNIQUE KEY uk_tenant_plugin_token_hash (token_hash),
       KEY idx_tenant_plugin_tokens_tenant_active (tenant_id, revoked_at, created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+    await mysqlExecute(`CREATE TABLE IF NOT EXISTS tenant_plans (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      code VARCHAR(32) NOT NULL,
+      name VARCHAR(80) NOT NULL,
+      duration_days INT UNSIGNED NOT NULL,
+      subscription_status VARCHAR(16) NOT NULL DEFAULT 'active',
+      account_limit INT UNSIGNED NULL,
+      shop_limit INT UNSIGNED NULL,
+      active TINYINT(1) NOT NULL DEFAULT 1,
+      is_builtin TINYINT(1) NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_tenant_plans_code (code),
+      KEY idx_tenant_plans_active (active, id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+    for (const plan of DEFAULT_TENANT_PLAN_PRESETS) {
+      await mysqlExecute(`INSERT IGNORE INTO tenant_plans
+        (code, name, duration_days, subscription_status, account_limit, shop_limit, active, is_builtin)
+        VALUES (?, ?, ?, ?, ?, ?, 1, 1)`, [plan.code, plan.name, plan.duration_days, plan.subscription_status, plan.account_limit, plan.shop_limit]);
+    }
     for (const sql of [
       "ALTER TABLE tenants ADD COLUMN plan_code VARCHAR(32) NOT NULL DEFAULT 'trial_7d'",
       "ALTER TABLE tenants ADD COLUMN subscription_status VARCHAR(32) NOT NULL DEFAULT 'trial'",
@@ -109,7 +124,8 @@ export async function listTenantsMysql() {
   await ensureTenantSchemaMysql();
   const rows = await mysqlQuery(`SELECT t.*,
       (SELECT COUNT(*) FROM tenant_members tm WHERE tm.tenant_id = t.id AND tm.active = 1) AS member_count,
-      (SELECT COUNT(*) FROM tenant_members tm WHERE tm.tenant_id = t.id AND tm.active = 1 AND tm.role = 'member') AS sub_account_count,
+      (SELECT COUNT(*) FROM tenant_members tm WHERE tm.tenant_id = t.id AND tm.active = 1 AND tm.person_id <> COALESCE(
+        (SELECT MIN(owner.person_id) FROM tenant_members owner WHERE owner.tenant_id = t.id AND owner.active = 1 AND owner.role = 'owner'), 0)) AS sub_account_count,
       (SELECT COUNT(*) FROM shops s WHERE (s.tenant_id = t.id OR (t.slug = 'default' AND s.tenant_id IS NULL)) AND s.status != 'deleted') AS shop_count
     FROM tenants t ORDER BY t.status = 'active' DESC, t.id`);
   return rows.map(subscriptionState);
@@ -119,12 +135,15 @@ export async function createTenantMysql(body = {}) {
   await ensureTenantSchemaMysql();
   const name = text(body.name);
   const slug = text(body.slug, 80).toLowerCase();
-  const memberLimit = normalizeTenantQuotaLimit(body.member_limit, 1, "子账号额度");
-  const shopLimit = normalizeTenantQuotaLimit(body.shop_limit, 1, "店铺额度");
   if (!name) throw new Error("企业名称不能为空");
   if (!/^[a-z0-9][a-z0-9-]{0,79}$/.test(slug)) throw new Error("企业标识只能使用小写字母、数字和连字符");
+  const planCode = text(body.plan_code || body.planCode, 32) || "trial_7d";
+  const plans = await mysqlQuery("SELECT * FROM tenant_plans WHERE code = ? AND active = 1 LIMIT 1", [planCode]);
+  const plan = plans[0];
+  if (!plan) throw new Error("请选择一个有效套餐；套餐可在企业管理的套餐目录中启用或编辑");
+  const memberLimit = tenantPlanMemberLimit(plan);
   const result = await mysqlExecute(`INSERT INTO tenants (slug, name, status, plan_code, subscription_status, subscription_expires_at, member_limit, shop_limit)
-    VALUES (?, ?, 'active', 'trial_7d', 'trial', DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 7 DAY), ?, ?)`, [slug, name, memberLimit, shopLimit]);
+    VALUES (?, ?, 'active', ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? DAY), ?, ?)`, [slug, name, plan.code, plan.subscription_status, Number(plan.duration_days), memberLimit, plan.shop_limit]);
   const ownerPersonId = Number(body.owner_person_id || body.ownerPersonId || 0);
   if (ownerPersonId) await mysqlExecute("INSERT INTO tenant_members (tenant_id, person_id, role) VALUES (?, ?, 'owner')", [result.insertId, ownerPersonId]);
   return { ok: true, id: Number(result.insertId) };
@@ -148,19 +167,55 @@ export async function setTenantQuotasMysql(tenantId, body = {}) {
 
 export async function setTenantSubscriptionMysql(tenantId, body = {}) {
   await ensureTenantSchemaMysql();
-  const plan = SUBSCRIPTION_PLANS[text(body.plan_code || body.planCode, 32)];
+  const planCode = text(body.plan_code || body.planCode, 32);
   const normalizedTenantId = Number(tenantId);
   if (!normalizedTenantId) throw new Error("请选择企业");
-  if (!plan && text(body.subscription_status || body.subscriptionStatus) !== "suspended") throw new Error("不支持的套餐");
+  const plans = planCode ? await mysqlQuery("SELECT * FROM tenant_plans WHERE code = ? AND active = 1 LIMIT 1", [planCode]) : [];
+  const plan = plans[0];
+  if (!plan && text(body.subscription_status || body.subscriptionStatus) !== "suspended") throw new Error("不支持的套餐或套餐已停用");
   const tenantRows = await mysqlQuery("SELECT id FROM tenants WHERE id = ?", [normalizedTenantId]);
   if (!tenantRows[0]) throw new Error("企业不存在");
   if (!plan) {
     await mysqlExecute("UPDATE tenants SET subscription_status = 'suspended', subscription_expires_at = NULL WHERE id = ?", [normalizedTenantId]);
     return { ok: true, subscription_status: "suspended" };
   }
-  const expiresAt = new Date(Date.now() + plan.days * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
-  await mysqlExecute("UPDATE tenants SET plan_code = ?, subscription_status = ?, subscription_expires_at = ? WHERE id = ?", [plan.code, plan.status, expiresAt, normalizedTenantId]);
-  return { ok: true, plan_code: plan.code, subscription_status: plan.status, subscription_expires_at: expiresAt };
+  const durationDays = Number(plan.duration_days);
+  const expiresAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
+  const memberLimit = tenantPlanMemberLimit(plan);
+  await mysqlExecute("UPDATE tenants SET plan_code = ?, subscription_status = ?, subscription_expires_at = ?, member_limit = ?, shop_limit = ? WHERE id = ?", [plan.code, plan.subscription_status, expiresAt, memberLimit, plan.shop_limit, normalizedTenantId]);
+  return { ok: true, plan_code: plan.code, subscription_status: plan.subscription_status, subscription_expires_at: expiresAt, member_limit: memberLimit, shop_limit: plan.shop_limit };
+}
+
+export async function listTenantPlansMysql() {
+  await ensureTenantSchemaMysql();
+  return mysqlQuery("SELECT id, code, name, duration_days, subscription_status, account_limit, shop_limit, active, is_builtin, created_at, updated_at FROM tenant_plans ORDER BY active DESC, is_builtin DESC, duration_days, id");
+}
+
+export async function createTenantPlanMysql(body = {}) {
+  await ensureTenantSchemaMysql();
+  const plan = normalizeTenantPlanInput(body);
+  const code = `plan_${randomBytes(8).toString("hex")}`;
+  const result = await mysqlExecute(`INSERT INTO tenant_plans
+    (code, name, duration_days, subscription_status, account_limit, shop_limit, active, is_builtin)
+    VALUES (?, ?, ?, ?, ?, ?, 1, 0)`, [code, plan.name, plan.duration_days, plan.subscription_status, plan.account_limit, plan.shop_limit]);
+  return { ok: true, id: Number(result.insertId), code, ...plan, active: 1, is_builtin: 0 };
+}
+
+export async function updateTenantPlanMysql(planId, body = {}) {
+  await ensureTenantSchemaMysql();
+  const normalizedPlanId = Number(planId);
+  if (!Number.isSafeInteger(normalizedPlanId) || normalizedPlanId <= 0) {
+    const error = new Error("请选择有效套餐");
+    error.statusCode = 400;
+    throw error;
+  }
+  const plan = normalizeTenantPlanInput(body);
+  const currentRows = await mysqlQuery("SELECT id, active FROM tenant_plans WHERE id = ? LIMIT 1", [normalizedPlanId]);
+  if (!currentRows[0]) throw new Error("套餐不存在");
+  const active = body.active === undefined ? Number(currentRows[0].active) : Number(body.active) ? 1 : 0;
+  await mysqlExecute(`UPDATE tenant_plans SET name = ?, duration_days = ?, subscription_status = ?, account_limit = ?, shop_limit = ?, active = ?
+    WHERE id = ?`, [plan.name, plan.duration_days, plan.subscription_status, plan.account_limit, plan.shop_limit, active, normalizedPlanId]);
+  return { ok: true, id: normalizedPlanId, ...plan, active };
 }
 
 export async function archiveTenantMysql(tenantId) {
@@ -174,8 +229,6 @@ export async function archiveTenantMysql(tenantId) {
   await mysqlExecute("UPDATE tenant_members SET active = 0, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ?", [normalizedTenantId]);
   return { ok: true };
 }
-
-export { SUBSCRIPTION_PLANS };
 
 export async function tenantMembersMysql(tenantId) {
   await ensureTenantSchemaMysql();
@@ -205,9 +258,13 @@ export async function upsertTenantMemberMysql(tenantId, body = {}) {
     if (!tenantRows[0]) throw new Error("企业不存在或已停用");
     const [existingRows] = await connection.execute("SELECT role, active FROM tenant_members WHERE tenant_id = ? AND person_id = ? FOR UPDATE", [normalizedTenantId, personId]);
     const existing = existingRows[0];
-    const becomesSubAccount = active && role === "member" && !(existing?.active && existing?.role === "member");
+    const [ownerRows] = await connection.execute("SELECT MIN(person_id) AS primary_owner_id FROM tenant_members WHERE tenant_id = ? AND active = 1 AND role = 'owner'", [normalizedTenantId]);
+    const primaryOwnerId = Number(ownerRows[0]?.primary_owner_id || 0);
+    const currentConsumesQuota = Boolean(existing?.active && Number(personId) !== primaryOwnerId);
+    const targetConsumesQuota = Boolean(active && !(role === "owner" && (!primaryOwnerId || Number(personId) === primaryOwnerId)));
+    const becomesSubAccount = targetConsumesQuota && !currentConsumesQuota;
     if (becomesSubAccount) {
-      const [countRows] = await connection.execute("SELECT COUNT(*) AS used FROM tenant_members WHERE tenant_id = ? AND active = 1 AND role = 'member'", [normalizedTenantId]);
+      const [countRows] = await connection.execute("SELECT COUNT(*) AS used FROM tenant_members WHERE tenant_id = ? AND active = 1 AND person_id <> ?", [normalizedTenantId, primaryOwnerId]);
       assertTenantQuotaAvailable({ label: "子账号", current: countRows[0]?.used || 0, limit: tenantRows[0].member_limit });
     }
     await connection.execute(`INSERT INTO tenant_members (tenant_id, person_id, role, active) VALUES (?, ?, ?, ?)

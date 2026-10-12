@@ -24,11 +24,12 @@ test("tenant foundation binds the active tenant to the server session", () => {
 
 test("tenant subscriptions support trials, paid plans, and suspended access", () => {
   const tenantService = readFileSync(new URL("../src/services/tenants.js", import.meta.url), "utf8");
+  const tenantPlans = readFileSync(new URL("../src/services/tenant-plans.js", import.meta.url), "utf8");
   const serverSource = readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
-  assert.match(tenantService, /trial_1d/);
-  assert.match(tenantService, /trial_7d/);
-  assert.match(tenantService, /monthly/);
-  assert.match(tenantService, /yearly/);
+  assert.match(tenantPlans, /trial_1d/);
+  assert.match(tenantPlans, /trial_7d/);
+  assert.match(tenantPlans, /monthly/);
+  assert.match(tenantPlans, /yearly/);
   assert.match(tenantService, /subscription_status = 'suspended'/);
   assert.match(tenantService, /默认企业不能删除/);
   assert.match(tenantService, /status = 'archived'/);

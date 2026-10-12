@@ -86,7 +86,7 @@ import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
 import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
-import { archiveTenantMysql, createTenantMysql, issueTenantPluginTokenMysql, listTenantsMysql, resolveTenantPluginTokenMysql, revokeTenantPluginTokenMysql, setTenantQuotasMysql, setTenantSubscriptionMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, upsertTenantMemberMysql } from "./services/tenants.js";
+import { archiveTenantMysql, createTenantMysql, createTenantPlanMysql, issueTenantPluginTokenMysql, listTenantPlansMysql, listTenantsMysql, resolveTenantPluginTokenMysql, revokeTenantPluginTokenMysql, setTenantQuotasMysql, setTenantSubscriptionMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, updateTenantPlanMysql, upsertTenantMemberMysql } from "./services/tenants.js";
 
 const services = { ...mysqlRuntimeServices, ...systemNotificationServices };
 const IMAGE_SESSION_COOKIE = "erp_image_session";
@@ -244,6 +244,12 @@ const routes = {
   "GET /api/system/update-status": (req) => globalUpdateStatus(req.query || {}),
   "GET /api/system-monitoring": (req) => systemMonitoringOverview(req.query || {}),
   "GET /api/tenants": () => listTenantsMysql(),
+  "GET /api/tenants/plans": () => listTenantPlansMysql(),
+  "POST /api/tenants/plans": async (req) => createTenantPlanMysql(await readJson(req)),
+  "PUT /api/tenants/plans": async (req) => {
+    const body = await readJson(req);
+    return updateTenantPlanMysql(body.id || body.plan_id || body.planId, body);
+  },
   "POST /api/tenants": async (req) => createTenantMysql(await readJson(req)),
   "POST /api/tenants/archive": async (req) => {
     const body = await readJson(req);
