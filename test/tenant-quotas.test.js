@@ -36,9 +36,10 @@ test("tenant quota configuration is persisted and enforced for members and shops
   const view = read("../frontend/admin/views/settings/TenantSubscriptionView.vue");
   assert.match(tenantService, /ADD COLUMN member_limit INT UNSIGNED NULL/);
   assert.match(tenantService, /ADD COLUMN shop_limit INT UNSIGNED NULL/);
-  assert.match(tenantService, /VALUES \(\?, \?, 'active', 'trial_7d', 'trial', DATE_ADD\(CURRENT_TIMESTAMP, INTERVAL 7 DAY\), \?, \?\)/);
+  assert.match(tenantService, /DATE_ADD\(CURRENT_TIMESTAMP, INTERVAL \? DAY\)/);
+  assert.match(tenantService, /SELECT \* FROM tenant_plans WHERE code = \? AND active = 1 LIMIT 1/);
   assert.match(tenantService, /SELECT id, member_limit FROM tenants WHERE id = \? AND status = 'active' FOR UPDATE/);
-  assert.match(tenantService, /role = 'member'/);
+  assert.match(tenantService, /person_id <> \?/);
   assert.match(shopService, /SELECT id, slug, shop_limit FROM tenants WHERE id = \? FOR UPDATE/);
   assert.match(shopService, /SELECT COUNT\(\*\) AS used FROM shops WHERE \(tenant_id = \? OR \(\? = 1 AND tenant_id IS NULL\)\) AND status != 'deleted'/);
   assert.match(server, /POST \/api\/tenants\/quotas/);
