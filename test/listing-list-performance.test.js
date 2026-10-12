@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const source = readFileSync(new URL("../src/services/listing-automation.js", import.meta.url), "utf8");
+const routeSource = readFileSync(new URL("../src/server/routes/listingAutomation.js", import.meta.url), "utf8");
 const viewSource = readFileSync(new URL("../frontend/admin/views/listing/ListingPublishRecordsView.vue", import.meta.url), "utf8");
 
 test("collector box batches publish statistics for the visible page", () => {
@@ -57,6 +58,22 @@ test("development review can fetch linked drafts with authoritative image and pu
   assert.match(drafts, /AS publish_success_count/);
   assert.match(drafts, /resolveMappedMediaInValue\(normalizeDraftRow\(item\)\)/);
   assert.match(source, /effective_images: effectiveMedia\.images/);
+});
+
+test("development review returns published shop SKUs and order and unit counts", () => {
+  const review = source.match(/async function attachDevelopmentReviewSkus\([\s\S]*?export async function listingDraftDetail/)?.[0] || "";
+  assert.match(review, /r\.status IN \('imported', 'published', 'success'\)/);
+  assert.match(review, /op\.product_id AS inventory_product_id/);
+  assert.match(review, /COUNT\(DISTINCT o\.id\) AS order_count/);
+  assert.match(review, /SUM\(oi\.quantity\)/);
+  assert.match(review, /LOWER\(o\.status\) NOT IN \('cancelled'/);
+  assert.match(review, /COLLATE utf8mb4_unicode_ci/);
+  assert.match(review, /draft\.published_skus = skusByDraft/);
+  const reviewEndpoint = source.match(/export async function listingDevelopmentReview\([\s\S]*?async function attachDevelopmentReviewSkus/)?.[0] || "";
+  assert.match(reviewEndpoint, /COUNT\(DISTINCT o\.id\)/);
+  assert.match(reviewEndpoint, /SUM\(oi\.quantity\)/);
+  assert.match(reviewEndpoint, /sales_by_task/);
+  assert.match(routeSource, /POST \/api\/listing\/development-review/);
 });
 
 test("publish record table reads lightweight list summaries instead of request payloads", () => {

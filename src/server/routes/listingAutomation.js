@@ -42,6 +42,7 @@ export function createListingAutomationRoutes({ services, readJson }) {
     "POST /api/listing/media/repair": async (req) => services.repairListingEditorMedia(await readJson(req), req._session),
     "POST /api/listing/media/watermark": async (req) => services.watermarkListingMedia(await readJson(req), req._session),
     "GET /api/listing/drafts": (req, url) => services.listingDrafts(Object.fromEntries(url.searchParams.entries()), req._session),
+    "POST /api/listing/development-review": async (req) => services.listingDevelopmentReview(await readJson(req), req._session),
     "POST /api/listing/drafts/batch-update": async (req) => services.updateListingDraftsBatch(await readJson(req), req._session),
     "POST /api/listing/drafts/batch-publish": async (req) => services.publishListingDraftsToOzon(await readJson(req), req._session),
     "POST /api/listing/drafts/repair-media-contamination": async (req) => services.repairListingDraftMediaContamination(await readJson(req), req._session),
