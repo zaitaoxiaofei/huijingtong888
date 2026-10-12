@@ -12,9 +12,11 @@ import { withImageToken } from "../../api/tools/imageCropper";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
+import DevelopmentCatalogEntryDialog from "../../components/team/DevelopmentCatalogEntryDialog.vue";
 import OzonCategoryFilter from "../../components/listing/OzonCategoryFilter.vue";
 import { ozonBuyerProductLinkFromRow } from "../../utils/product-links";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date";
+import { loadInventoryVehicleCatalog } from "../../utils/inventory-naming-options.js";
 import {
   developmentTypeOptions,
   developmentTypeTagType,
@@ -32,8 +34,10 @@ const batchDeleting = ref(false);
 const selectedRows = ref([]);
 const activeRepairTarget = ref("");
 const developmentSavingDraftId = ref(null);
-const draftBinding = reactive({ visible: false, mode: "vehicle", draftIds: [], selectedId: null, saving: false });
-const bindingOptions = reactive({ vehicles: [], tasks: [], loaded: false });
+const draftBinding = reactive({ visible: false, mode: "vehicle", draftIds: [], brand: "", selectedId: null, saving: false, loading: false });
+const bindingOptions = reactive({ brands: [], tasks: [], tasksLoaded: false });
+const catalogEntry = ref(null);
+const selectedBrandModels = computed(() => bindingOptions.brands.find((brand) => brand.name === draftBinding.brand)?.models || []);
 const advancedFiltersVisible = ref(false);
 const publishAdvancedFiltersVisible = ref(false);
 const router = useRouter();
@@ -375,16 +379,32 @@ async function openDraftBinding(mode, rows) {
   if (!ids.length) return;
   draftBinding.mode = mode;
   draftBinding.draftIds = ids;
+  draftBinding.brand = mode === "vehicle" && rows.length === 1 ? rows[0].vehicle_brand || "" : "";
   draftBinding.selectedId = rows.length === 1 ? (mode === "task" ? rows[0].team_task_id : rows[0].vehicle_catalog_id) : null;
   draftBinding.visible = true;
-  if (bindingOptions.loaded) return;
+  draftBinding.loading = true;
   try {
-    const options = await apiClient.get("/api/listing/draft-binding-options", { noCache: true });
-    bindingOptions.vehicles = options.vehicles || [];
-    bindingOptions.tasks = options.tasks || [];
-    bindingOptions.loaded = true;
+    if (mode === "vehicle") bindingOptions.brands = await loadInventoryVehicleCatalog();
+    else if (!bindingOptions.tasksLoaded) {
+      const options = await apiClient.get("/api/listing/draft-binding-options", { noCache: true });
+      bindingOptions.tasks = options.tasks || [];
+      bindingOptions.tasksLoaded = true;
+    }
   } catch (error) {
     ElMessage.error(error.message || "绑定选项加载失败");
+  } finally {
+    draftBinding.loading = false;
+  }
+}
+
+async function onCatalogEntrySaved(item) {
+  catalogEntry.value = null;
+  try {
+    bindingOptions.brands = await loadInventoryVehicleCatalog({ force: true });
+    draftBinding.brand = item.brand || "";
+    draftBinding.selectedId = selectedBrandModels.value.find((model) => model.name === item.model)?.id || null;
+  } catch (error) {
+    ElMessage.error(error.message || "车型目录刷新失败");
   }
 }
 
@@ -2506,15 +2526,27 @@ watch(() => route.query.taskId, () => {
 
     <el-dialog v-model="draftBinding.visible" :title="`${draftBinding.draftIds.length > 1 ? '批量' : ''}绑定${draftBinding.mode === 'vehicle' ? '车型' : '任务'}`" width="480px">
       <p>已选择 {{ draftBinding.draftIds.length }} 条草稿</p>
-      <el-select v-model="draftBinding.selectedId" filterable clearable style="width: 100%" :placeholder="draftBinding.mode === 'vehicle' ? '搜索品牌或车型' : '搜索任务名称或 ID'">
-        <el-option v-for="vehicle in (draftBinding.mode === 'vehicle' ? bindingOptions.vehicles : [])" :key="vehicle.id" :value="vehicle.id" :label="`${vehicle.brand_name} ${vehicle.model_name}`" />
-        <el-option v-for="task in (draftBinding.mode === 'task' ? bindingOptions.tasks : [])" :key="task.id" :value="task.id" :label="`${task.title} (#${task.id})`" />
+      <template v-if="draftBinding.mode === 'vehicle'">
+        <div class="draft-vehicle-binding-fields">
+          <div class="draft-vehicle-binding-heading"><strong>一级品牌</strong><el-button link type="primary" @click="catalogEntry = { kind: 'brand' }">＋ 新增品牌</el-button></div>
+          <el-select v-model="draftBinding.brand" filterable clearable :loading="draftBinding.loading" placeholder="搜索或下拉选择品牌" style="width: 100%" @change="draftBinding.selectedId = null">
+            <el-option v-for="brand in bindingOptions.brands" :key="brand.name" :label="brand.nameZh ? `${brand.name} · ${brand.nameZh}` : brand.name" :value="brand.name" />
+          </el-select>
+          <div class="draft-vehicle-binding-heading"><strong>二级车型</strong><el-button link type="primary" @click="catalogEntry = { kind: 'model', brand: draftBinding.brand }">＋ 新增车型</el-button></div>
+          <el-select v-model="draftBinding.selectedId" filterable clearable :disabled="!draftBinding.brand" :loading="draftBinding.loading" placeholder="搜索或下拉选择车型" style="width: 100%">
+            <el-option v-for="model in selectedBrandModels" :key="model.id" :label="model.label || model.name" :value="model.id" />
+          </el-select>
+        </div>
+      </template>
+      <el-select v-else v-model="draftBinding.selectedId" filterable clearable style="width: 100%" placeholder="搜索任务名称或 ID">
+        <el-option v-for="task in bindingOptions.tasks" :key="task.id" :value="task.id" :label="`${task.title} (#${task.id})`" />
       </el-select>
       <template #footer>
         <el-button @click="draftBinding.visible = false">取消</el-button>
-        <el-button type="primary" :loading="draftBinding.saving" @click="saveDraftBinding">确认绑定</el-button>
+        <el-button type="primary" :loading="draftBinding.saving" :disabled="draftBinding.loading" @click="saveDraftBinding">确认绑定</el-button>
       </template>
     </el-dialog>
+    <DevelopmentCatalogEntryDialog v-if="catalogEntry" :kind="catalogEntry.kind" :brand="catalogEntry.brand || ''" :brands="bindingOptions.brands" @close="catalogEntry = null" @saved="onCatalogEntrySaved" />
     <el-dialog v-model="batchMaterialOptimization.visible" title="批量优化草稿" width="960px">
       <el-form label-width="92px">
         <el-form-item label="草稿数量">
@@ -2554,6 +2586,8 @@ watch(() => route.query.taskId, () => {
 </template>
 
 <style scoped>
+.draft-vehicle-binding-fields { display: grid; gap: 8px; }
+.draft-vehicle-binding-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
 .publish-records-page { gap: 12px; min-height: 0; }
 .batch-material-facts { width: 100%; max-height: 520px; overflow: auto; display: grid; gap: 10px; }
 .batch-material-fact-row { display: grid; grid-template-columns: 100px 1.1fr 1fr 1.3fr 1.3fr; gap: 8px; align-items: start; padding: 10px; border: 1px solid #e5eaf3; border-radius: 8px; }
